@@ -58,6 +58,21 @@ def validate_fixture(fixture: str | None) -> str | None:
     return str(path.resolve())
 
 
+def fixture_data_root(fixture: str | Path | None) -> Path | None:
+    """Return the least local source root needed to admit ``fixture``.
+
+    The production server fails closed when no ``--data-dir`` is configured.
+    Tryout fixtures are explicitly user-selected, read-only local sources, so
+    the harness grants only that directory (or a file fixture's parent) instead
+    of weakening the source policy process-wide.
+    """
+
+    if fixture is None:
+        return None
+    path = Path(fixture).resolve()
+    return path if path.is_dir() else path.parent
+
+
 def bring_up(
     *,
     out_dir: Path,
@@ -126,6 +141,7 @@ def bring_up(
     server = ServerProcess(
         out_dir=out_dir,
         binary=server_binary,
+        data_dir=fixture_data_root(fixture_path),
         health_timeout_s=health_timeout_s,
         log=log,
     )

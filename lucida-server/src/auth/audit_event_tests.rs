@@ -279,6 +279,7 @@ async fn cleanup_emits_auth_session_cleanup_event_with_counts() {
     pending
         .insert(PendingAuth {
             state_token: "old".into(),
+            browser_binding_hash: "binding-hash".into(),
             intended_path: "/".into(),
             intended_hash: "".into(),
             created_at: Utc::now() - ChronoDuration::hours(1),
@@ -474,13 +475,16 @@ fn signin_success_event_fires_at_info_with_email_field() {
     let (events, _) = capture(|| {
         tracing::info!(
             email = %"alice@calicolabs.com",
-            session_id = %"uuid-123",
-            target = %"/",
             "auth.signin.success",
         );
     });
     let evt = require_event(&events, "auth.signin.success", Level::INFO);
     assert_eq!(evt.field("email"), Some("alice@calicolabs.com"));
+    assert_eq!(
+        evt.field("session_id"),
+        None,
+        "session secrets must not be logged"
+    );
 }
 
 // auth.signin.rejected.hd_mismatch — emitted in callback handler

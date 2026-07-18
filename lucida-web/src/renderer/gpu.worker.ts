@@ -3,10 +3,17 @@ import type { MainToWorkerMessage, WorkerToMainMessage } from "./workerProtocol.
 import type { WorkerCtx } from "./workerContext.ts";
 import { bootstrapWorker } from "./worker/bootstrap.ts";
 import { dispatchMessage } from "./worker/dispatch.ts";
-import { installDevtools } from "./worker/devtools.ts";
 import { handleDestroy } from "./worker/lifecycle.ts";
+import {
+  GpuDeviceFailure,
+  observeGpuDeviceFailure,
+} from "./worker/deviceLifecycle.ts";
+import type { RenderWorkerErrorCode } from "./workerProtocol.ts";
+import { getDeviceLimits } from "./gpuContext.ts";
 
 let ctx: WorkerCtx | null = null;
+let terminating = false;
+let stopObservingDevice: (() => void) | null = null;
 
 // `self` is typed as `Window` here (the app tsconfig's lib has DOM but not
 // WebWorker), whose `postMessage` overloads don't include the
@@ -24,23 +31,67 @@ function post(msg: WorkerToMainMessage, transfer?: Transferable[]): void {
   }
 }
 
+/** Fatal worker/device boundary: notify once, reclaim, and close the worker. */
+function failTerminal(error: unknown): void {
+  if (terminating) return;
+  terminating = true;
+  stopObservingDevice?.();
+  stopObservingDevice = null;
+  const message = error instanceof Error ? error.message : String(error);
+  let code: RenderWorkerErrorCode | undefined;
+  if (error instanceof GpuDeviceFailure) {
+    code = error.kind === "out-of-memory"
+      ? "gpu-out-of-memory"
+      : error.kind === "device-lost"
+        ? "gpu-device-lost"
+        : "gpu-uncaptured-error";
+  }
+  post({ type: "error", message, ...(code ? { code } : {}) });
+  const current = ctx;
+  ctx = null;
+  if (current) {
+    try {
+      handleDestroy(current);
+      return;
+    } catch {
+      // A lost device may reject individual destroy calls. The allocator's
+      // bookkeeping has still been invalidated by device loss; close below.
+    }
+  }
+  self.close();
+}
+
 self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
   const msg = e.data;
   try {
     if (msg.type === "init") {
-      ctx = await bootstrapWorker(msg.canvas, post);
-      installDevtools(ctx.state);
-      post({ type: "ready" });
+      const initialized = await bootstrapWorker(msg.canvas, post);
+      ctx = initialized;
+      // Device loss is asynchronous and otherwise bypasses the message
+      // dispatch try/catch. Route it through the same terminal policy.
+      stopObservingDevice = observeGpuDeviceFailure(initialized.device, failTerminal);
+      post({
+        type: "ready",
+        maxTextureDimension2D: getDeviceLimits(initialized.device).maxTextureDimension2D,
+      });
       return;
     }
     if (!ctx) return; // ignore messages before init completes
     if (msg.type === "destroy") {
-      handleDestroy(ctx);
+      const current = ctx;
       ctx = null;
+      terminating = true;
+      stopObservingDevice?.();
+      stopObservingDevice = null;
+      handleDestroy(current);
       return;
     }
     await dispatchMessage(ctx, msg);
   } catch (err) {
-    post({ type: "error", message: err instanceof Error ? err.message : String(err) });
+    failTerminal(err);
   }
+};
+
+self.onmessageerror = () => {
+  failTerminal(new Error("Render worker input could not be deserialized"));
 };

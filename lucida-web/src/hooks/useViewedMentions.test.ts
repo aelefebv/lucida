@@ -76,13 +76,15 @@ describe("useViewedMentions", () => {
     expect(result.current.viewedCommentIds).toEqual(["c-1"]);
   });
 
-  it("a null dataset (no selection) persists under a stable sentinel key", () => {
+  it("keeps a null dataset in memory without creating a cross-dataset sentinel", () => {
     const { result } = renderHook(() => useViewedMentions(null));
     act(() => result.current.markViewed("c-1"));
     expect(result.current.viewedCommentIds).toEqual(["c-1"]);
-    // Survives a fresh mount with the same null selection.
+    expect(localStorage.length).toBe(0);
+    // A fresh unresolved scope is empty; the host resolves a real id before
+    // persistent mention state is used in production.
     const second = renderHook(() => useViewedMentions(null));
-    expect(second.result.current.viewedCommentIds).toEqual(["c-1"]);
+    expect(second.result.current.viewedCommentIds).toEqual([]);
   });
 
   it("degrades to empty (never throws) when reading malformed storage", () => {

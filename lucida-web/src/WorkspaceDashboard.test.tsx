@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { WorkspaceDashboard } from "./WorkspaceDashboard.tsx";
 import { sortWorkspaceDashboardRows } from "./workspaceDashboardOrder.ts";
 import {
@@ -87,6 +87,16 @@ function openWorkspaceLabels(): string[] {
     .filter((label): label is string => Boolean(label?.startsWith("Open workspace ")));
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 afterEach(() => {
   cleanup();
   vi.resetAllMocks();
@@ -153,6 +163,42 @@ describe("WorkspaceDashboard", () => {
       ]);
     });
     expect(screen.getByRole("button", { name: "Unpin Alpha" })).toBeTruthy();
+  });
+
+  it("keeps concurrent row pending state isolated and preserves the newest announcement", async () => {
+    listWorkspacesMock.mockResolvedValue([
+      workspace({ id: "alpha", name: "Alpha" }),
+      workspace({ id: "beta", name: "Beta" }),
+    ]);
+    const alpha = deferred<Awaited<ReturnType<typeof updateWorkspacePin>>>();
+    const beta = deferred<Awaited<ReturnType<typeof updateWorkspacePin>>>();
+    updateWorkspacePinMock
+      .mockReturnValueOnce(alpha.promise)
+      .mockReturnValueOnce(beta.promise);
+    render(<WorkspaceDashboard onOpenWorkspace={() => {}} />);
+    await screen.findByRole("button", { name: "Pin Alpha" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Pin Alpha" }));
+    fireEvent.click(screen.getByRole("button", { name: "Pin Beta" }));
+    expect(screen.getByRole("button", { name: "Pin Alpha" })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: "Pin Beta" })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("status").textContent).toContain("Pinning Beta");
+
+    await act(async () => alpha.resolve({
+      workspace_id: "alpha",
+      last_opened_at: null,
+      pinned_at: "2026-07-16T01:00:00Z",
+    }));
+    expect(screen.getByRole("button", { name: "Unpin Alpha" })).toHaveProperty("disabled", false);
+    expect(screen.getByRole("button", { name: "Pin Beta" })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("status").textContent).toContain("Pinning Beta");
+
+    await act(async () => beta.resolve({
+      workspace_id: "beta",
+      last_opened_at: null,
+      pinned_at: "2026-07-16T02:00:00Z",
+    }));
+    expect(screen.getByRole("status").textContent).toContain("Pinned Beta.");
   });
 
   it("creates a workspace and opens it", async () => {
@@ -233,6 +279,73 @@ describe("WorkspaceDashboard", () => {
       expect(screen.getByText("boom")).toBeTruthy();
     });
     expect(onOpenWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("serializes create-and-open mutations so two copies cannot race navigation", async () => {
+    listWorkspacesMock.mockResolvedValue([
+      workspace({ id: "alpha", name: "Alpha", role: "viewer" }),
+      workspace({ id: "beta", name: "Beta", role: "viewer" }),
+    ]);
+    const alpha = deferred<Awaited<ReturnType<typeof duplicateWorkspace>>>();
+    duplicateWorkspaceMock.mockReturnValueOnce(alpha.promise);
+    const onOpenWorkspace = vi.fn();
+    render(<WorkspaceDashboard onOpenWorkspace={onOpenWorkspace} />);
+    await screen.findByRole("button", { name: "Duplicate Alpha" });
+    fireEvent.click(screen.getByRole("button", { name: "Duplicate Alpha" }));
+    expect(screen.getByRole("button", { name: "Duplicate Beta" })).toHaveProperty(
+      "disabled",
+      true,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Duplicate Beta" }));
+
+    expect(duplicateWorkspaceMock).toHaveBeenCalledExactlyOnceWith("alpha");
+    await act(async () => alpha.resolve(workspace({ id: "copy-alpha", name: "Copy Alpha" })));
+    expect(onOpenWorkspace).toHaveBeenCalledExactlyOnceWith("copy-alpha");
+  });
+
+  it("still opens a created copy when an unrelated row mutation finishes later", async () => {
+    listWorkspacesMock.mockResolvedValue([
+      workspace({ id: "alpha", name: "Alpha", role: "viewer" }),
+      workspace({ id: "beta", name: "Beta", role: "owner" }),
+    ]);
+    const duplicate = deferred<Awaited<ReturnType<typeof duplicateWorkspace>>>();
+    const pin = deferred<Awaited<ReturnType<typeof updateWorkspacePin>>>();
+    duplicateWorkspaceMock.mockReturnValueOnce(duplicate.promise);
+    updateWorkspacePinMock.mockReturnValueOnce(pin.promise);
+    const onOpenWorkspace = vi.fn();
+    render(<WorkspaceDashboard onOpenWorkspace={onOpenWorkspace} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Duplicate Alpha" }));
+    fireEvent.click(screen.getByRole("button", { name: "Pin Beta" }));
+
+    await act(async () => pin.resolve({
+      workspace_id: "beta",
+      last_opened_at: null,
+      pinned_at: "2026-07-16T02:00:00Z",
+    }));
+    await act(async () => duplicate.resolve(
+      workspace({ id: "copy-alpha", name: "Copy Alpha" }),
+    ));
+
+    expect(onOpenWorkspace).toHaveBeenCalledExactlyOnceWith("copy-alpha");
+  });
+
+  it("retries the latest failed row action through the accessible error surface", async () => {
+    listWorkspacesMock.mockResolvedValue([
+      workspace({ id: "alpha", name: "Alpha", role: "viewer" }),
+    ]);
+    duplicateWorkspaceMock
+      .mockRejectedValueOnce(new Error("temporary transport failure"))
+      .mockResolvedValueOnce(workspace({ id: "copy-alpha", name: "Copy Alpha" }));
+    const onOpenWorkspace = vi.fn();
+    render(<WorkspaceDashboard onOpenWorkspace={onOpenWorkspace} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Duplicate Alpha" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain("Could not duplicate Alpha.");
+    expect(screen.getByText("temporary transport failure")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+    await waitFor(() => expect(duplicateWorkspaceMock).toHaveBeenCalledTimes(2));
+    expect(onOpenWorkspace).toHaveBeenCalledExactlyOnceWith("copy-alpha");
   });
 
   it("creates a workspace FROM A DATASET URL named from the basename and opens it with the seed", async () => {

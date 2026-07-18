@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
 
 (globalThis as Record<string, unknown>).GPUBufferUsage = { STORAGE: 0x80, COPY_DST: 0x08 };
 (globalThis as Record<string, unknown>).GPUTextureUsage = { TEXTURE_BINDING: 0x04, COPY_DST: 0x02 };
@@ -7,10 +7,13 @@ import type { WorkerCtx } from "../workerContext.ts";
 import type { LabelVolumeChunkDataMessage } from "../workerProtocol.ts";
 import type { Chunk } from "../workerProtocol.ts";
 import { createInitialState } from "../worker/state.ts";
-import { VOLUME_ATLAS_BUDGET } from "../workerProtocol.ts";
+import { GPU_SESSION_BUDGET } from "../workerProtocol.ts";
 import { handleLabelVolumeChunkData } from "./upload.ts";
-import { computeLabelVolumeSizing, labelPaddedVolumeBytes } from "./atlas.ts";
+import { acquireLabelSlot, resetLabelVolumeAllocWarnings } from "./atlas.ts";
+import { computeLabelVolumeSizing, labelPaddedVolumeBytes } from "../atlasSizing.ts";
 import { destroyAllVolumeResources, removeVolumeResources } from "./index.ts";
+import { GpuResourceBudget } from "../gpuResourceBudget.ts";
+import { makeChunkContract } from "../../test/fixtures.ts";
 
 const SENTINEL = 0xffffffff;
 
@@ -63,7 +66,11 @@ function makeCtx(
       submit: vi.fn(),
     },
   } as unknown as GPUDevice;
-  return { device, state: createInitialState() } as unknown as WorkerCtx;
+  return {
+    device,
+    gpuResources: new GpuResourceBudget(GPU_SESSION_BUDGET),
+    state: createInitialState(),
+  } as unknown as WorkerCtx;
 }
 
 interface Dims {
@@ -74,17 +81,23 @@ interface Dims {
 function mkChunk(ids: Uint32Array, x: number, y: number, z: number): Chunk {
   return {
     data: ids.buffer as ArrayBuffer,
-    dataType: "Uint32",
+    contract: makeChunkContract({
+      datasetId: "ds-0",
+      imageId: "img-0:label:region-b",
+      role: "label",
+      sourceDtype: "uint32",
+      shape: [2, 2, 2],
+    }),
     x, y, z,
     key: `0/0/0/${z}/${y}/${x}`,
-  } as Chunk;
+  };
 }
 
 /** A message with one or more WHOLE 3D chunks for one label overlay member. */
 function labelVolumeMsg(chunks: Chunk[], dims: Dims): LabelVolumeChunkDataMessage {
   return {
     type: "labelVolumeChunkData",
-    epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+    epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
     memberId: "img-0:label:region-b",
     datasetId: "ds-0",
     chunks,
@@ -98,7 +111,27 @@ function labelVolumeMsg(chunks: Chunk[], dims: Dims): LabelVolumeChunkDataMessag
 const DIMS_2 = { levelWidth: 2, levelHeight: 2, levelDepth: 2, chunkX: 2, chunkY: 2, chunkZ: 2 };
 const DIMS_4 = { levelWidth: 4, levelHeight: 4, levelDepth: 4, chunkX: 2, chunkY: 2, chunkZ: 2 };
 
+beforeEach(() => {
+  resetLabelVolumeAllocWarnings();
+});
+
 describe("handleLabelVolumeChunkData", () => {
+  it("fails closed instead of evicting a resident label cell when the pool is full", () => {
+    const writes: WriteTextureCall[] = [];
+    const ctx = makeCtx(writes);
+    handleLabelVolumeChunkData(
+      ctx,
+      labelVolumeMsg([mkChunk(new Uint32Array(8), 0, 0, 0)], DIMS_2),
+    );
+    const pool = ctx.state.labelVolumePools.get("img-0:label:region-b")!;
+    const resident = new Map(pool.slots);
+    pool.freeSlots.length = 0;
+
+    expect(acquireLabelSlot(pool, 1)).toBeNull();
+    expect(pool.slots).toEqual(resident);
+    expect(pool.indirectionData[0]).toBe(0);
+  });
+
   it("writes a WHOLE uint32 3D chunk to a bricked pool without truncating ids", () => {
     const writes: WriteTextureCall[] = [];
     const ctx = makeCtx(writes);
@@ -249,7 +282,7 @@ describe("handleLabelVolumeChunkData", () => {
     const writes: WriteTextureCall[] = [];
     const ctx = makeCtx(writes);
     // Worker has advanced to selection epoch 5; the delivery is from epoch 1.
-    ctx.state.currentEpochs = { content: 1, layout: 1, view: 1, selection: 5, asset: 0, request: 1 };
+    ctx.state.currentEpochs = { content: 1, layout: 1, view: 1, selection: 5, request: 1 };
     handleLabelVolumeChunkData(ctx, labelVolumeMsg([mkChunk(new Uint32Array([1, 2, 3, 4, 5, 6, 7, 8]), 0, 0, 0)], DIMS_2));
     expect(writes).toHaveLength(0);
     expect(ctx.state.labelVolumePools.has("img-0:label:region-b")).toBe(false);
@@ -306,7 +339,7 @@ describe("computeLabelVolumeSizing", () => {
   it("sizes the atlas to the WHOLE grid for an eligible level whose PADDED bricks bust the byte budget", () => {
     // A real downsampled level: the chunk shape does not evenly divide the
     // extent (the norm), so padding the boundary bricks pushes the PADDED total
-    // (gridCellCount * paddedChunkBytes) over the 512 MB budget while the TRUE
+    // (gridCellCount * paddedChunkBytes) over the 512 MiB session budget while the TRUE
     // (unpadded) volume still fits it. Sizing the atlas on padded bytes would
     // leave fewer slots than grid cells, evicting delivered bricks and punching
     // transparent holes where real data exists — the atlas must hold the whole
@@ -315,11 +348,11 @@ describe("computeLabelVolumeSizing", () => {
     const s = computeLabelVolumeSizing(w, h, d, chunk, chunk, chunk, maxDim);
 
     // The TRUE volume fits the budget (this is why the level is eligible)...
-    expect(w * h * d * 4).toBeLessThanOrEqual(VOLUME_ATLAS_BUDGET);
+    expect(w * h * d * 4).toBeLessThanOrEqual(GPU_SESSION_BUDGET);
     // ...but the PADDED bricks would exceed it — so a byte-budget clamp on the
     // padded total would under-provision the atlas.
     const paddedBytes = s.gridCellCount * s.chunkX * s.chunkY * s.chunkZ * 4;
-    expect(paddedBytes).toBeGreaterThan(VOLUME_ATLAS_BUDGET);
+    expect(paddedBytes).toBeGreaterThan(GPU_SESSION_BUDGET);
 
     // Residency invariant: capacity is the whole grid, never clamped to bytes.
     expect(s.capacity).toBe(s.gridCellCount);

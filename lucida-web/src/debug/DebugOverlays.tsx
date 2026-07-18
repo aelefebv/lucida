@@ -65,8 +65,6 @@ const POLL_MS = 100;
 const MAX_CHUNK_RECTS = 600;
 
 const MODE_COLOR: Record<string, string> = {
-  "group-as-proxy": "#88f",
-  "tiles-with-proxy-fallback": "#fb4",
   "tiles-with-detail": "#4f4",
   "render-detail": "#4f4",
   "render-coarse": "#6cf",
@@ -74,8 +72,6 @@ const MODE_COLOR: Record<string, string> = {
 };
 
 const MODE_LABEL: Record<string, string> = {
-  "group-as-proxy": "WP",
-  "tiles-with-proxy-fallback": "FP",
   "tiles-with-detail": "FD",
 };
 
@@ -220,7 +216,7 @@ function emptyGroupTierCoverage(): GroupTierCoverage {
 
 function overlayTierForRequest(req: ChunkRequest): OverlayTier | null {
   if (req.lane === "detail") return "detail";
-  if (req.lane === "coarse" || req.lane === "overview") return "coarse";
+  if (req.lane === "coarse") return "coarse";
   return null;
 }
 
@@ -596,6 +592,9 @@ export function DebugOverlays({
 
       const dpr = devicePixelRatio;
       const is3D = viewMode === "3d";
+      // WASM 2D projection now returns CSS-logical pixels; 3D projection still
+      // returns physical viewport pixels and therefore needs DPR normalization.
+      const projectionScale = is3D ? dpr : 1;
 
       const coord = renderLoopRef.current?.getTickCoordinator();
       const plans = coord?.getLastPlans();
@@ -711,7 +710,7 @@ export function DebugOverlays({
                   centerLocal,
                   radiusVox,
                   plane,
-                  dpr,
+                  projectionScale,
                 );
                 for (let i = 0; i < paths.length; i++) {
                   out.push({
@@ -792,17 +791,7 @@ export function DebugOverlays({
           };
 
           for (const entry of plan.activeSet) {
-            if (entry.kind === "group-as-proxy") {
-              for (const ent of ds.manifest.entities) {
-                if (ent.parent === entry.entityId && ent.kind === "Tile") {
-                  const img = ds.manifest.images.find(i => i.image_id === ent.id)
-                    ?? ds.manifest.images[0];
-                  // group-as-proxy entries have no LOD bookkeeping —
-                  // surface `null` so the badge skips the LOD label.
-                  if (img) addTile(entry.entityId, ent.id, img.image_id, "group-as-proxy", null);
-                }
-              }
-            } else if (entry.kind === "tile") {
+            if (entry.kind === "tile") {
               const groupId = parentByEntity.get(entry.entityId) ?? entry.entityId;
               addTile(groupId, entry.entityId, entry.imageId, entry.mode, entry.targetLod);
             }
@@ -821,7 +810,7 @@ export function DebugOverlays({
               sumZ += c[2];
             }
             const n = agg.worldCentroids.length;
-            const screen = projectWorld(ws, sumX / n, sumY / n, sumZ / n, dpr);
+            const screen = projectWorld(ws, sumX / n, sumY / n, sumZ / n, projectionScale);
             if (!screen) continue;
             if (screen.x < xMin || screen.y < yMin || screen.x > xMax || screen.y > yMax) {
               continue;
@@ -850,8 +839,6 @@ export function DebugOverlays({
       }
 
       // Chunk grid for every visible tile-mode entry.
-      // (group-as-proxy entries don't iterate chunks — they're served by
-      // a single proxy asset.)
       if (enabled.chunkGrid && plans && cpuCache) {
         const out: ChunkRect[] = [];
         const t = ws.t();
@@ -867,14 +854,6 @@ export function DebugOverlays({
           const r = pending[i];
           rankByKey.set(`${r.entityId}/${r.chunkKey}`, i);
         }
-        // Same idea for proxies, used by the WP-group rendering path.
-        const pendingProxies = cpuCache.getPendingProxySnapshot();
-        const proxyRankByKey = new Map<string, number>();
-        for (let i = 0; i < pendingProxies.length; i++) {
-          const r = pendingProxies[i];
-          proxyRankByKey.set(`${r.datasetId}|${r.entityId}|${r.kind}|${r.t}|${r.c}`, i);
-        }
-
         outer: for (const [dsId, plan] of plans) {
           if (out.length >= MAX_CHUNK_RECTS) break;
           const ds = datasets.get(dsId);
@@ -891,85 +870,8 @@ export function DebugOverlays({
           for (const entry of plan.activeSet) {
             if (out.length >= MAX_CHUNK_RECTS) break outer;
 
-            // Invisible entries don't contribute chunks or proxies —
-            // skip them entirely. They live in their own variant;
-            // reading mode/imageId/targetLod here would otherwise be
-            // a type error.
+            // Invisible entries don't contribute chunks.
             if (entry.kind === "invisible") continue;
-
-            // Group-as-proxy: there's no chunk grid because the group is
-            // served by a single proxy asset. Render one rect per group
-            // colored by proxy status, so collections at WP zoom still
-            // surface load progress.
-            if (entry.kind === "group-as-proxy") {
-              const cached = cpuCache.getCachedProxy(dsId, entry.entityId, "GroupProxy3D", t, c);
-              const inFlight = cpuCache.isProxyInFlight(dsId, entry.entityId, "GroupProxy3D", t, c);
-              let status: ChunkRect["status"] = "planned";
-              let priorityRank: number | undefined;
-              if (cached) {
-                status = "cached";
-              } else if (inFlight) {
-                status = "in-flight";
-              } else if (enabled.plannedRank) {
-                priorityRank = proxyRankByKey.get(`${dsId}|${entry.entityId}|GroupProxy3D|${t}|${c}`);
-              }
-
-              // Union of constituent tiles' world AABBs gives the
-              // group's world AABB in either mode (in 3D each tile has
-              // its own model matrix, so we union after voxelToWorld).
-              let minX = Infinity, minY = Infinity, minZ = Infinity;
-              let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-              let any = false;
-              for (const ent of ds.manifest.entities) {
-                if (ent.parent !== entry.entityId || ent.kind !== "Tile") continue;
-                const tileImg = ds.manifest.images.find(i => i.image_id === ent.id)
-                  ?? ds.manifest.images[0];
-                if (!tileImg) continue;
-                const fpos = positions[ent.id];
-                if (!fpos) continue;
-                const flvl0 = tileImg.multiscale.levels[0];
-                if (!flvl0) continue;
-                const fframe = getFrame(dsId, ent.id, flvl0.shape);
-                fframe.pos = fpos;
-                for (let i = 0; i < 8; i++) {
-                  const vx = i & 1 ? fframe.fullVoxel[0] : 0;
-                  const vy = (i >> 1) & 1 ? fframe.fullVoxel[1] : 0;
-                  const vz = (i >> 2) & 1 ? fframe.fullVoxel[2] : 0;
-                  const [wx, wy, wz] = voxelToWorld(fframe, vx, vy, vz);
-                  if (wx < minX) minX = wx; if (wx > maxX) maxX = wx;
-                  if (wy < minY) minY = wy; if (wy > maxY) maxY = wy;
-                  if (wz < minZ) minZ = wz; if (wz > maxZ) maxZ = wz;
-                  any = true;
-                }
-              }
-              if (!any) continue;
-              let sxMin = Infinity, syMin = Infinity, sxMax = -Infinity, syMax = -Infinity;
-              let projected = false;
-              for (let i = 0; i < 8; i++) {
-                const wx = i & 1 ? maxX : minX;
-                const wy = (i >> 1) & 1 ? maxY : minY;
-                const wz = (i >> 2) & 1 ? maxZ : minZ;
-                const p = projectWorld(ws, wx, wy, wz, dpr);
-                if (!p) continue;
-                projected = true;
-                if (p.x < sxMin) sxMin = p.x;
-                if (p.y < syMin) syMin = p.y;
-                if (p.x > sxMax) sxMax = p.x;
-                if (p.y > syMax) syMax = p.y;
-              }
-              if (!projected) continue;
-              if (sxMax < xMin || syMax < yMin || sxMin > xMax || syMin > yMax) continue;
-              out.push({
-                key: `${dsId}/${entry.entityId}/group-proxy`,
-                x: sxMin,
-                y: syMin,
-                w: sxMax - sxMin,
-                h: syMax - syMin,
-                status,
-                priorityRank,
-              });
-              continue;
-            }
             if (!visibleRegion) continue;
             const pos = positions[entry.entityId];
             const img = imgById.get(entry.imageId);
@@ -1085,7 +987,7 @@ export function DebugOverlays({
                       frame,
                       [col * chunkWorldX, row * chunkWorldY, iz * chunkWorldZ],
                       [(col + 1) * chunkWorldX, (row + 1) * chunkWorldY, (iz + 1) * chunkWorldZ],
-                      dpr,
+                      projectionScale,
                     );
                     if (!rect) continue;
                     if (rect.x + rect.w < xMin || rect.y + rect.h < yMin || rect.x > xMax || rect.y > yMax) {

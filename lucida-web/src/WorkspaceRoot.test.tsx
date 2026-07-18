@@ -133,6 +133,34 @@ describe("WorkspaceRoot — denied/not-found deep-link UX (slice 3, never-leak)"
     expect(screen.queryByText(/request access/i)).toBeNull();
   });
 
+  it("offers a same-route retry and ignores the failed attempt once recovery succeeds", async () => {
+    const recovered: WorkspaceRecord = {
+      id: "ws-secret",
+      name: "Recovered",
+      role: "owner",
+      created_by: "me@example.com",
+      created_at: "2026-06-23T00:00:00Z",
+      updated_at: "2026-06-23T00:00:00Z",
+      archived_at: null,
+      seq: 1,
+      default_saved_view_id: null,
+      last_opened_at: null,
+      pinned_at: null,
+    };
+    openWorkspaceMock
+      .mockRejectedValueOnce(new Error("503 unavailable"))
+      .mockResolvedValueOnce(recovered);
+    render(<WorkspaceRoot />);
+
+    await screen.findByTestId("workspace-access-message");
+    fireEvent.click(screen.getByRole("button", { name: "Retry workspace" }));
+
+    await screen.findByTestId("app-mounted");
+    expect(openWorkspaceMock).toHaveBeenCalledTimes(2);
+    expect(lastAppProps.current?.workspaceId).toBe("ws-secret");
+    expect(screen.queryByTestId("workspace-access-message")).toBeNull();
+  });
+
   it("NEVER-LEAK at the STATUS level: a non-member open is a uniform 404, indistinguishable from missing", async () => {
     // After the server-side never-leak fix, any non-member open (exists-but-
     // restricted, archived, or genuinely missing) is the SAME 404 the recipient

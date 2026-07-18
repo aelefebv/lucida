@@ -88,7 +88,7 @@ function makeDeps(
 function full(rows: ViewQueryEntityJson[]): ViewQueryDeltaJson {
   return {
     Full: {
-      epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 1, request: 0 },
+      epochs: { content: 1, layout: 1, view: 1, selection: 1, annotation: 0 },
       visible_entities: rows,
     },
   };
@@ -101,7 +101,7 @@ function delta(
 ): ViewQueryDeltaJson {
   return {
     Delta: {
-      epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 1, request: 0 },
+      epochs: { content: 1, layout: 1, view: 1, selection: 1, annotation: 0 },
       entered,
       left,
       changed,

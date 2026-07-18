@@ -8,7 +8,7 @@
 import { describe, it, expect } from "vitest";
 import type { DatasetManifest, ImageSpec } from "../../../manifestTypes.ts";
 import type { DatasetEntry } from "../../../renderLoopTypes.ts";
-import { buildManifestByImage } from "./manifestIndex.ts";
+import { buildManifestByImage, manifestEntryKey } from "./manifestIndex.ts";
 
 function makeImage(imageId: string): ImageSpec {
   return {
@@ -60,7 +60,7 @@ describe("buildManifestByImage", () => {
     const out = buildManifestByImage(datasets);
 
     expect(out.size).toBe(1);
-    const entry = out.get("img-0");
+    const entry = out.get(manifestEntryKey("ds1", "img-0"));
     expect(entry).toBeDefined();
     expect(entry!.manifest.dataset_id).toBe("ds1");
     expect(entry!.image).toBe(img);
@@ -68,7 +68,7 @@ describe("buildManifestByImage", () => {
     expect(entry!.levels[0].shape).toEqual([1, 1, 1, 1024, 1024]);
   });
 
-  it("multi-dataset / multi-image — index keyed by image_id, every image present", () => {
+  it("multi-dataset / multi-image — index keyed by dataset+image, every image present", () => {
     const imgA = makeImage("img-a");
     const imgB = makeImage("img-b");
     const imgC = makeImage("img-c");
@@ -80,9 +80,9 @@ describe("buildManifestByImage", () => {
     const out = buildManifestByImage(datasets);
 
     expect(out.size).toBe(3);
-    expect(out.get("img-a")!.manifest.dataset_id).toBe("ds1");
-    expect(out.get("img-b")!.manifest.dataset_id).toBe("ds1");
-    expect(out.get("img-c")!.manifest.dataset_id).toBe("ds2");
+    expect(out.get(manifestEntryKey("ds1", "img-a"))!.manifest.dataset_id).toBe("ds1");
+    expect(out.get(manifestEntryKey("ds1", "img-b"))!.manifest.dataset_id).toBe("ds1");
+    expect(out.get(manifestEntryKey("ds2", "img-c"))!.manifest.dataset_id).toBe("ds2");
   });
 
   it("image not in any dataset — no entry, get() returns undefined", () => {
@@ -93,7 +93,18 @@ describe("buildManifestByImage", () => {
 
     const out = buildManifestByImage(datasets);
 
-    expect(out.has("img-ghost")).toBe(false);
-    expect(out.get("img-ghost")).toBeUndefined();
+    expect(out.has(manifestEntryKey("ds1", "img-ghost"))).toBe(false);
+    expect(out.get(manifestEntryKey("ds1", "img-ghost"))).toBeUndefined();
+  });
+
+  it("keeps identical image ids from different datasets distinct", () => {
+    const datasets = new Map<string, DatasetEntry>([
+      ["ds1", { manifest: makeManifest("ds1", [makeImage("shared")]) }],
+      ["ds2", { manifest: makeManifest("ds2", [makeImage("shared")]) }],
+    ]);
+    const out = buildManifestByImage(datasets);
+    expect(out.size).toBe(2);
+    expect(out.get(manifestEntryKey("ds1", "shared"))!.datasetId).toBe("ds1");
+    expect(out.get(manifestEntryKey("ds2", "shared"))!.datasetId).toBe("ds2");
   });
 });

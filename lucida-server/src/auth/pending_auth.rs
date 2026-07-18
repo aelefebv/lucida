@@ -19,6 +19,8 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingAuth {
     pub state_token: String,
+    /// BLAKE3 hash of the short-lived HttpOnly browser-binding cookie.
+    pub browser_binding_hash: String,
     pub intended_path: String,
     pub intended_hash: String,
     pub created_at: DateTime<Utc>,
@@ -55,6 +57,8 @@ pub trait PendingAuthStore: Send + Sync + 'static {
     async fn consume(
         &self,
         state_token: &str,
+        browser_binding_hash: &str,
+        created_at_or_after: DateTime<Utc>,
     ) -> Result<Option<PendingAuth>, PendingAuthStoreError>;
 
     /// Bulk-delete every row whose `created_at` is `< older_than`.

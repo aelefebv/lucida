@@ -1,9 +1,8 @@
 /**
  * Delivery state for CPU-cache-backed worker uploads.
  *
- * Tracks optimistic "sent" facts: a chunk/proxy is considered sent
- * once posted to the worker, and worker feedback clears that fact when
- * the worker later reports eviction or a missing proxy.
+ * Tracks optimistic "sent" facts: a chunk is considered sent once posted
+ * to the worker, and worker feedback clears that fact after eviction.
  *
  * Pure collaborator: no I/O, no clocks, no worker-member-id knowledge.
  */
@@ -20,7 +19,6 @@ function sentKeyFor(chunkKey: string, tier?: ResidencyTier): string {
 
 export class DeliveryState {
   private chunkSent = new Map<string, Set<string>>();
-  private proxySent = new Set<string>();
 
   markChunkSent(
     imageId: string,
@@ -72,35 +70,12 @@ export class DeliveryState {
     }
   }
 
-  markProxySent(key: string): void {
-    this.proxySent.add(key);
-  }
-
-  wasProxySent(key: string): boolean {
-    return this.proxySent.has(key);
-  }
-
-  clearProxySent(key: string): void {
-    this.proxySent.delete(key);
-  }
-
-  clearProxySentForDataset(datasetId: string): void {
-    const prefix = `${datasetId}|`;
-    for (const key of this.proxySent) {
-      if (key.startsWith(prefix)) this.proxySent.delete(key);
-    }
-  }
-
-  /**
-   * Cold-state rebuilds clear chunk delivery because chunk atlases are
-   * rebuilt. Proxy sent state survives because worker proxy pools persist.
-   */
+  /** Cold-state rebuilds clear delivery because chunk atlases are rebuilt. */
   onPlanRebuildStart(): void {
     this.chunkSent.clear();
   }
 
   reset(): void {
     this.chunkSent.clear();
-    this.proxySent.clear();
   }
 }

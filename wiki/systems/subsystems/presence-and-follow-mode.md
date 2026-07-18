@@ -47,7 +47,7 @@ When a client disconnects, anyone following them is reset to `following: None` a
 - **Server**: stores `PresenceState` in `Session::clients`. Validates follow targets. Filters self-presence on the outbound side. Recomputes transitive chains on `set_follow`.
 - **Consumer**: peers receive `PresenceUpdate`/`CursorUpdate`/`FollowChanged`/`DatasetPresenceUpdate` and apply locally. The web client's `useBridge` hook handles each.
 - **Local follow path**: when a client is following peer X, every `PresenceUpdate { client_id: X, ... }` triggers a local viewport update (acting as if the user moved). Following can be **broken** by any local viewport command, which sends a `Follow { target: None }` and clears the local follow state.
-- **Discrete-snapshot counterpart**: [Saved Views](saved-views.md) is conceptually "one-shot follow against a frozen snapshot." `PresenceState` is what the saved-view capture record mirrors on the per-client surface (camera, view, display, dataset_order, dataset_settings); the difference is durability — saved views are inline-encoded URL hashes or server-stored bookmarks, presence is ephemeral. Opening a saved-view link breaks an active follow via the same viewport-command rule above.
+- **Discrete-snapshot counterpart**: [Saved Views](saved-views.md) is conceptually "one-shot follow against a frozen snapshot." `PresenceState` is what the saved-view capture record mirrors on the per-client surface (camera, view, display, dataset_order, dataset_settings); the difference is durability — saved views are inline-encoded URL hashes or workspace-scoped stored rows, presence is ephemeral. Opening a saved-view link breaks an active follow via the same viewport-command rule above.
 
 ## Invariants
 

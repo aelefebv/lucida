@@ -2,7 +2,7 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { StrictMode } from "react";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 
 // Double for the generated wasm bindings, faithful to their init contract:
 // a COMPLETED initialization is deduped (the module-level handle is set at
@@ -13,10 +13,14 @@ import { renderHook, waitFor } from "@testing-library/react";
 // of *instantiations*, not the number of `init()` calls.
 const glue = vi.hoisted(() => ({
   instantiations: 0,
+  sceneConstructions: 0,
+  sceneFrees: 0,
   finalized: undefined as object | undefined,
   pending: [] as Array<{ finalize: () => void; fail: (err: Error) => void }>,
   reset() {
     this.instantiations = 0;
+    this.sceneConstructions = 0;
+    this.sceneFrees = 0;
     this.finalized = undefined;
     this.pending = [];
   },
@@ -47,7 +51,12 @@ vi.mock("lucida-core", () => ({
     });
   },
   WasmScene: class {
-    constructor(_w?: number, _h?: number) {}
+    constructor(_w?: number, _h?: number) {
+      glue.sceneConstructions += 1;
+    }
+    free() {
+      glue.sceneFrees += 1;
+    }
   },
   set_debug_categories: vi.fn(),
 }));
@@ -89,6 +98,20 @@ describe("useWasmScene wasm boot", () => {
     expect(glue.instantiations).toBe(1);
   });
 
+  it("frees each hook-owned scene exactly once on unmount", async () => {
+    const { useWasmScene } = await loadHook();
+    const hook = renderHook(() => useWasmScene(), { wrapper: StrictMode });
+    glue.finalizeAll();
+    await waitFor(() => expect(hook.result.current.wasmReady).toBe(true));
+
+    hook.result.current.ensureScene();
+    expect(glue.sceneConstructions).toBe(1);
+    expect(glue.sceneFrees).toBe(0);
+
+    hook.unmount();
+    expect(glue.sceneFrees).toBe(1);
+  });
+
   it("two hosts booting concurrently share one instantiation and both become ready", async () => {
     const { useWasmScene } = await loadHook();
 
@@ -102,7 +125,7 @@ describe("useWasmScene wasm boot", () => {
     expect(glue.instantiations).toBe(1);
   });
 
-  it("an initialization failure surfaces as a visible boot error, not just a console line", async () => {
+  it("surfaces an initialization failure and retries the failed boot in place", async () => {
     const { useWasmScene } = await loadHook();
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
@@ -112,8 +135,15 @@ describe("useWasmScene wasm boot", () => {
       await waitFor(() =>
         expect(result.current.wasmError).toContain("wasm instantiation refused"),
       );
-      expect(result.current.wasmError).toContain("Reload the page");
       expect(result.current.wasmReady).toBe(false);
+
+      act(() => result.current.retryWasm());
+      expect(result.current.wasmError).toBeNull();
+      expect(glue.instantiations).toBe(2);
+
+      glue.finalizeAll();
+      await waitFor(() => expect(result.current.wasmReady).toBe(true));
+      expect(result.current.wasmError).toBeNull();
     } finally {
       errorSpy.mockRestore();
     }

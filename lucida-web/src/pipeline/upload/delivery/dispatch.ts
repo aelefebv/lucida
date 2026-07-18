@@ -1,15 +1,17 @@
 /**
- * Free-function chunk and proxy dispatch helpers. Wrap
- * `client.sliceChunkData` / `client.volumeChunkData` / `client.proxyAssetData`
+ * Free-function chunk dispatch helpers. Wrap
+ * `client.sliceChunkData` / `client.volumeChunkData`
  * with structured args derived from a delivery + level meta.
  */
 
-import type { ReadyChunkDelivery, ReadyProxyDelivery } from "../../fetch/index.ts";
+import type { ReadyChunkDelivery } from "../../fetch/index.ts";
 import type { UploadClient } from "../uploadClient.ts";
 import type { SceneEpochs } from "../../epochs.ts";
 import type { ManifestEntry } from "./manifestIndex.ts";
 import { Axis } from "../../../axes.ts";
 import { labelDepthZ } from "../../../renderer/labelLayout.ts";
+import { decodedChunkContract } from "../decodedChunkContract.ts";
+import { chunkContractWithShape } from "../../../chunkContract.ts";
 
 export function workerMemberIdForChunk(
   delivery: ReadyChunkDelivery,
@@ -51,9 +53,10 @@ export function dispatchChunk(
   if (!levelMeta) return;
   const [, , levelDepth, levelHeight, levelWidth] = levelMeta.shape;
   const [, , chunkZ, chunkY, chunkX] = levelMeta.chunk_shape;
+  const decoded = decodedChunkContract(delivery, meta);
   const chunkData = {
-    data: delivery.data,
-    dataType: delivery.dataType,
+    data: decoded.bytes,
+    contract: delivery.contract,
     x: delivery.x,
     y: delivery.y,
     z: delivery.z,
@@ -141,6 +144,7 @@ export function dispatchLabelChunkDelivery(
   }
   const [, , levelDepth, levelHeight, levelWidth] = levelMeta.shape;
   const [, , chunkZ, chunkY, chunkX] = levelMeta.chunk_shape;
+  const decoded = decodedChunkContract(delivery, meta);
   const label0Depth = meta.labelLevel0.shape[Axis.Z];
 
   // Which Z-plane the current view wants, in this level's coords.
@@ -157,11 +161,12 @@ export function dispatchLabelChunkDelivery(
   const localZ = levelZ - targetChunkZ * cz;
 
   const planeLen = chunkY * chunkX;
-  const full = new Uint32Array(delivery.data);
+  const full = new Uint32Array(decoded.bytes);
   const sliceOffset = localZ * planeLen;
   if (sliceOffset + planeLen > full.length) return null; // malformed / short chunk
   // Copy the plane out of the cache-owned buffer (never detach the cache's copy).
   const plane = full.slice(sliceOffset, sliceOffset + planeLen);
+  const planeContract = chunkContractWithShape(decoded, [1, chunkY, chunkX]);
   const memberId = delivery.imageId;
 
   client.labelSliceChunkData(
@@ -169,7 +174,7 @@ export function dispatchLabelChunkDelivery(
     meta.datasetId,
     [{
       data: plane.buffer,
-      dataType: delivery.dataType,
+      contract: planeContract,
       x: delivery.x,
       y: delivery.y,
       z: 0,
@@ -211,13 +216,14 @@ export function dispatchLabelVolumeChunkDelivery(
   const [, , levelDepth, levelHeight, levelWidth] = levelMeta.shape;
   const [, , chunkZ, chunkY, chunkX] = levelMeta.chunk_shape;
   const memberId = delivery.imageId;
+  const decoded = decodedChunkContract(delivery, meta);
 
   client.labelVolumeChunkData(
     memberId,
     meta.datasetId,
     [{
-      data: delivery.data,
-      dataType: delivery.dataType,
+      data: decoded.bytes,
+      contract: delivery.contract,
       x: delivery.x,
       y: delivery.y,
       z: delivery.z,
@@ -234,23 +240,5 @@ export function dispatchLabelVolumeChunkDelivery(
     chunkZ,
     epochs,
   );
-  return { memberId, bytes: delivery.data.byteLength };
-}
-
-export function dispatchProxy(
-  client: UploadClient,
-  delivery: ReadyProxyDelivery,
-  epochs: SceneEpochs,
-): void {
-  client.proxyAssetData(
-    delivery.datasetId,
-    delivery.entityId,
-    delivery.imageId,
-    delivery.proxyKind,
-    delivery.t,
-    delivery.c,
-    delivery.header.dims,
-    delivery.data,
-    epochs,
-  );
+  return { memberId, bytes: decoded.bytes.byteLength };
 }

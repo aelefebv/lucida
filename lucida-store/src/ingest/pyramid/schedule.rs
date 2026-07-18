@@ -16,6 +16,34 @@ impl Default for VoxelSize {
     }
 }
 
+impl VoxelSize {
+    pub fn validate(self) -> Result<Self, String> {
+        for (axis, value) in [("x", self.x), ("y", self.y), ("z", self.z)] {
+            if !value.is_finite() || value <= 0.0 {
+                return Err(format!(
+                    "voxel_size.{axis} must be finite and positive, got {value}"
+                ));
+            }
+        }
+        Ok(self)
+    }
+
+    /// Convert relative pyramid downsample factors into physical micrometer
+    /// scales written to OME-Zarr metadata.
+    pub fn physical_scale(self, relative: [f64; 3]) -> Result<[f64; 3], String> {
+        self.validate()?;
+        let scale = [
+            relative[0] * self.x,
+            relative[1] * self.y,
+            relative[2] * self.z,
+        ];
+        if !scale.iter().all(|value| value.is_finite() && *value > 0.0) {
+            return Err("physical pyramid scale overflowed or became non-positive".to_string());
+        }
+        Ok(scale)
+    }
+}
+
 /// Describes the dimensions and downsampling decisions for one pyramid level.
 #[derive(Debug, Clone)]
 pub struct LevelSpec {
@@ -133,6 +161,28 @@ pub fn compute_downsample_schedule(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn physical_scale_preserves_source_calibration() {
+        let voxel = VoxelSize {
+            x: 0.25,
+            y: 0.5,
+            z: 2.0,
+        };
+        assert_eq!(
+            voxel.physical_scale([2.0, 4.0, 1.0]).unwrap(),
+            [0.5, 2.0, 2.0]
+        );
+        assert!(
+            VoxelSize {
+                x: f64::NAN,
+                ..voxel
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(VoxelSize { z: 0.0, ..voxel }.validate().is_err());
+    }
 
     #[test]
     fn schedule_isotropic() {

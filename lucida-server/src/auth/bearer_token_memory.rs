@@ -75,17 +75,21 @@ impl BearerTokenStore for MemoryBearerTokenStore {
         let Some(row) = rows.values_mut().find(|row| row.token_hash == token_hash) else {
             return Ok(None);
         };
-        if row.revoked_at.is_none() {
-            row.revoked_at = Some(now);
+        if row.revoked_at.is_some() {
+            return Ok(None);
         }
+        row.revoked_at = Some(now);
         Ok(Some(row.clone()))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::auth::bearer_token::hash_bearer_token;
+    use tokio::sync::Barrier;
 
     fn sample(id: &str) -> BearerToken {
         let now = Utc::now();
@@ -121,5 +125,77 @@ mod tests {
         let revoked = Utc::now();
         let row = store.revoke_by_hash(&hash, revoked).await.unwrap().unwrap();
         assert_eq!(row.revoked_at, Some(revoked));
+    }
+
+    #[tokio::test]
+    async fn revoke_returns_the_principal_exactly_once() {
+        let store = MemoryBearerTokenStore::new();
+        let token = sample("tok-once");
+        let hash = token.token_hash.clone();
+        store.create(token).await.unwrap();
+
+        let first_at = Utc::now();
+        let first = store
+            .revoke_by_hash(&hash, first_at)
+            .await
+            .unwrap()
+            .unwrap();
+        let second_at = first_at + chrono::Duration::seconds(1);
+        assert!(
+            store
+                .revoke_by_hash(&hash, second_at)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        assert_eq!(first.email, "dev@local");
+        assert_eq!(first.revoked_at, Some(first_at));
+        assert_eq!(
+            store.get_by_hash(&hash).await.unwrap().unwrap().revoked_at,
+            Some(first_at)
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_revoke_has_one_transition_owner() {
+        let store = Arc::new(MemoryBearerTokenStore::new());
+        let token = sample("tok-concurrent");
+        let hash = token.token_hash.clone();
+        store.create(token).await.unwrap();
+
+        const CALLERS: usize = 8;
+        let start = Arc::new(Barrier::new(CALLERS + 1));
+        let baseline = Utc::now();
+        let mut tasks = Vec::with_capacity(CALLERS);
+        for offset in 0..CALLERS {
+            let store = Arc::clone(&store);
+            let hash = hash.clone();
+            let start = Arc::clone(&start);
+            tasks.push(tokio::spawn(async move {
+                start.wait().await;
+                store
+                    .revoke_by_hash(&hash, baseline + chrono::Duration::seconds(offset as i64))
+                    .await
+                    .unwrap()
+            }));
+        }
+        start.wait().await;
+
+        let mut owners = Vec::new();
+        for task in tasks {
+            if let Some(row) = task.await.unwrap() {
+                owners.push(row);
+            }
+        }
+
+        assert_eq!(owners.len(), 1);
+        let owner = &owners[0];
+        assert_eq!(owner.email, "dev@local");
+        let owner_revoked_at = owner.revoked_at.expect("owner must be revoked");
+        assert_eq!(
+            store.get_by_hash(&hash).await.unwrap().unwrap().revoked_at,
+            Some(owner_revoked_at)
+        );
     }
 }

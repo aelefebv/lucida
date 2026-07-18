@@ -63,13 +63,13 @@ This page is a curated index. Articles live in their canonical homes (`systems/`
 ## Cross-cutting flows
 
 - [Flow: Chunk Lifecycle](../flows/chunk-lifecycle.md) — planner decides "wanted" → CPU cache fetch+decode → GPU upload → atlas write → indirection → shader render
-- [Flow: Proxy Generation (S5)](../flows/proxy-generation.md) — opt-in/non-default proxy bridge (still compiled and wired); the default fallback is chunk-only coarse/detail
+- [Flow: Proxy Generation (S5, historical)](../flows/proxy-generation.md) — deleted fallback path retained for archaeology
 
 ## Gotchas hit while working in this area
 
 - [Upload Budgets Are Per-Frame and Per-Path](../gotchas/upload-budgets-per-frame.md) — 16 MB main view, 2 MB minimap; non-linear behavior at limits
 - [Worker Eviction Reporting Is Async](../gotchas/worker-eviction-async-reporting.md) — worker posts `chunksEvicted` async; main-thread send-tracking must reconcile
 - [Minimap Skip-When-Stationary via Render Key](../gotchas/minimap-render-key.md) — minimap skips render when key matches; new visual inputs must extend the key
-- [Proxy Generator Priority Is Not Honored Yet](../gotchas/proxy-priority-not-honored.md) — opt-in/non-default proxy bridge gotcha
+- [Proxy Generator Priority Is Not Honored Yet (closed)](../gotchas/proxy-priority-not-honored.md) — historical gotcha resolved by deletion
 - [App.tsx Hook Order and Callback Refs](../gotchas/app-tsx-hook-order.md) — App.tsx hook order is load-bearing; callback refs break circular deps
 - [WASM Rebuild After Rust Changes](../gotchas/wasm-rebuild-after-rust-changes.md) — `npm run build:wasm` is the second half of every Rust change that touches Scene

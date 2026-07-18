@@ -102,27 +102,33 @@ impl BearerTokenStore for SqliteBearerTokenStore {
         token_hash: &str,
         now: DateTime<Utc>,
     ) -> Result<Option<BearerToken>, BearerTokenStoreError> {
-        sqlx::query(
+        let row = sqlx::query(
             r#"
             UPDATE bearer_tokens
-            SET revoked_at = COALESCE(revoked_at, ?)
-            WHERE token_hash = ?
+            SET revoked_at = ?
+            WHERE token_hash = ? AND revoked_at IS NULL
+            RETURNING id, token_hash, name, email, display_name, picture_url,
+                      created_at, last_used_at, expires_at, revoked_at
             "#,
         )
         .bind(now)
         .bind(token_hash)
-        .execute(&self.pool)
+        .fetch_optional(&self.pool)
         .await
         .map_err(map_err)?;
-        self.get_by_hash(token_hash).await
+
+        Ok(row.map(row_to_token))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::auth::bearer_token::hash_bearer_token;
     use crate::auth::session_store_sqlite::SqliteSessionStore;
+    use tokio::sync::Barrier;
 
     fn sample(id: &str) -> BearerToken {
         let now = Utc::now();
@@ -164,5 +170,82 @@ mod tests {
         let revoked = Utc::now();
         let row = store.revoke_by_hash(&hash, revoked).await.unwrap().unwrap();
         assert!((row.revoked_at.unwrap() - revoked).num_milliseconds().abs() < 1);
+    }
+
+    #[tokio::test]
+    async fn sqlite_revoke_returns_the_principal_exactly_once() {
+        let session_store = SqliteSessionStore::open_in_memory().await.unwrap();
+        let store = SqliteBearerTokenStore::new(session_store.pool().clone());
+        let token = sample("tok-once");
+        let hash = token.token_hash.clone();
+        store.create(token).await.unwrap();
+
+        let first_at = Utc::now();
+        let first = store
+            .revoke_by_hash(&hash, first_at)
+            .await
+            .unwrap()
+            .unwrap();
+        let second_at = first_at + chrono::Duration::seconds(1);
+        assert!(
+            store
+                .revoke_by_hash(&hash, second_at)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        assert_eq!(first.email, "dev@local");
+        assert_eq!(first.revoked_at, Some(first_at));
+        assert_eq!(
+            store.get_by_hash(&hash).await.unwrap().unwrap().revoked_at,
+            Some(first_at)
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_sqlite_revoke_has_one_transition_owner() {
+        let directory = tempfile::tempdir().unwrap();
+        let session_store = SqliteSessionStore::open(&directory.path().join("auth.sqlite"))
+            .await
+            .unwrap();
+        let store = Arc::new(SqliteBearerTokenStore::new(session_store.pool().clone()));
+        let token = sample("tok-concurrent");
+        let hash = token.token_hash.clone();
+        store.create(token).await.unwrap();
+
+        const CALLERS: usize = 8;
+        let start = Arc::new(Barrier::new(CALLERS + 1));
+        let baseline = Utc::now();
+        let mut tasks = Vec::with_capacity(CALLERS);
+        for offset in 0..CALLERS {
+            let store = Arc::clone(&store);
+            let hash = hash.clone();
+            let start = Arc::clone(&start);
+            tasks.push(tokio::spawn(async move {
+                start.wait().await;
+                store
+                    .revoke_by_hash(&hash, baseline + chrono::Duration::seconds(offset as i64))
+                    .await
+                    .unwrap()
+            }));
+        }
+        start.wait().await;
+
+        let mut owners = Vec::new();
+        for task in tasks {
+            if let Some(row) = task.await.unwrap() {
+                owners.push(row);
+            }
+        }
+
+        assert_eq!(owners.len(), 1);
+        let owner = &owners[0];
+        assert_eq!(owner.email, "dev@local");
+        let owner_revoked_at = owner.revoked_at.expect("owner must be revoked");
+        assert_eq!(
+            store.get_by_hash(&hash).await.unwrap().unwrap().revoked_at,
+            Some(owner_revoked_at)
+        );
     }
 }

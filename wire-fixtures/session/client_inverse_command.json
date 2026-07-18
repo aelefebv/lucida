@@ -1,0 +1,6 @@
+{
+  "type": "inverse_command",
+  "request_id": "req-golden",
+  "target_operation_id": 41,
+  "expected_revision": 41
+}

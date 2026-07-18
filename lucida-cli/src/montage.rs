@@ -29,18 +29,33 @@ pub enum MontageAxis {
 }
 
 /// One montage cell: the view it renders + a short human label.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MontageCell {
     pub z: u32,
     pub t: u32,
     pub c: u32,
     /// Tile index (0 for a single-image dataset).
     pub tile: usize,
+    /// Exact collection member selected for this cell.
+    pub image_id: Option<String>,
+    /// Top-left member position in the active layout, in full-res voxels.
+    pub position: [f64; 2],
+    /// Member extent `[Y, X]` used to frame its camera.
+    pub extent: [u64; 2],
     pub label: String,
 }
 
+/// Authoritative collection membership supplied by `dataset info`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MontageMember {
+    pub image_id: String,
+    pub name: Option<String>,
+    pub position: [f64; 2],
+    pub dimensions: [u64; 5],
+}
+
 /// The full montage plan: the sampled cells and the grid they tile into.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MontagePlan {
     pub axis: MontageAxis,
     pub cells: Vec<MontageCell>,
@@ -73,36 +88,63 @@ fn grid_cols(n: usize, max_cols: u32) -> u32 {
     sqrt_ceil.clamp(1, max_cols.max(1))
 }
 
-/// Plan a montage for a dataset of shape `dims = [T, C, Z, Y, X]` with
-/// `image_count` members (tiles), sampling at most `max_cells` positions.
+/// Plan a montage for a dataset of shape `dims = [T, C, Z, Y, X]` with an
+/// authoritative active-layout member roster, sampling at most `max_cells`.
 ///
 /// Axis priority: a multi-tile collection samples tiles; else a Z>1 stack samples
 /// Z; else a T>1 series samples T; else a single cell. The mid Z (and t=0,
 /// c=0) anchor the non-Z axes. `max_cols` caps the grid width.
 pub fn plan_montage(
     dims: [u64; 5],
-    image_count: usize,
+    members: &[MontageMember],
     max_cells: usize,
     max_cols: u32,
 ) -> MontagePlan {
     let [t_n, _c_n, z_n, _y, _x] = dims;
     let max_cells = max_cells.max(1);
-    let mid_z = (z_n.saturating_sub(1) / 2) as u32;
+    let fallback_extent = [dims[3].max(1), dims[4].max(1)];
+    let first = members.first();
+    let single_identity = || {
+        (
+            first.map(|member| member.image_id.clone()),
+            first.map(|member| member.position).unwrap_or([0.0, 0.0]),
+            first
+                .map(|member| [member.dimensions[3].max(1), member.dimensions[4].max(1)])
+                .unwrap_or(fallback_extent),
+        )
+    };
 
-    let (axis, cells) = if image_count > 1 {
-        // Collection / multi-tile: one cell per tile (capped), at mid-Z.
-        let n = image_count.min(max_cells);
-        let cells = (0..n)
-            .map(|f| MontageCell {
-                z: mid_z,
-                t: 0,
-                c: 0,
-                tile: f,
-                label: format!("tile {f}"),
+    let (axis, cells) = if members.len() > 1 {
+        // Collection: sample the authoritative roster across its full extent,
+        // not a fabricated 0..image_count list. Each cell carries the active
+        // layout position and member dimensions used by its camera.
+        let indices = even_samples(members.len() as u64, max_cells);
+        let cells = indices
+            .into_iter()
+            .map(|index| {
+                let tile = index as usize;
+                let member = &members[tile];
+                let z = member.dimensions[2].saturating_sub(1) / 2;
+                let base = member
+                    .name
+                    .as_deref()
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or(&member.image_id);
+                MontageCell {
+                    z: z as u32,
+                    t: 0,
+                    c: 0,
+                    tile,
+                    image_id: Some(member.image_id.clone()),
+                    position: member.position,
+                    extent: [member.dimensions[3].max(1), member.dimensions[4].max(1)],
+                    label: format!("tile {tile}: {base}"),
+                }
             })
             .collect();
         (MontageAxis::Tile, cells)
     } else if z_n > 1 {
+        let (image_id, position, extent) = single_identity();
         let cells = even_samples(z_n, max_cells)
             .into_iter()
             .map(|z| MontageCell {
@@ -110,11 +152,15 @@ pub fn plan_montage(
                 t: 0,
                 c: 0,
                 tile: 0,
+                image_id: image_id.clone(),
+                position,
+                extent,
                 label: format!("z={z}"),
             })
             .collect();
         (MontageAxis::Z, cells)
     } else if t_n > 1 {
+        let (image_id, position, extent) = single_identity();
         let cells = even_samples(t_n, max_cells)
             .into_iter()
             .map(|t| MontageCell {
@@ -122,11 +168,15 @@ pub fn plan_montage(
                 t,
                 c: 0,
                 tile: 0,
+                image_id: image_id.clone(),
+                position,
+                extent,
                 label: format!("t={t}"),
             })
             .collect();
         (MontageAxis::T, cells)
     } else {
+        let (image_id, position, extent) = single_identity();
         (
             MontageAxis::Single,
             vec![MontageCell {
@@ -134,6 +184,9 @@ pub fn plan_montage(
                 t: 0,
                 c: 0,
                 tile: 0,
+                image_id,
+                position,
+                extent,
                 label: "z=0".into(),
             }],
         )
@@ -152,14 +205,14 @@ pub fn plan_montage(
 /// A 2D slice camera framing the full `full_x × full_y` voxel extent inside
 /// `viewport` pixels (centered, zoomed so the whole image fits). zoom = 1.0 is
 /// native (1 px/voxel); fit picks the smaller per-axis ratio so nothing clips.
-fn fit_slice_camera(full_x: u64, full_y: u64, viewport: [u32; 2]) -> Slice {
+fn fit_slice_camera(position: [f64; 2], full_x: u64, full_y: u64, viewport: [u32; 2]) -> Slice {
     let x = full_x.max(1) as f64;
     let y = full_y.max(1) as f64;
     let zoom = (viewport[0] as f64 / x)
         .min(viewport[1] as f64 / y)
         .max(f64::MIN_POSITIVE);
     Slice {
-        center: [x / 2.0, y / 2.0],
+        center: [position[0] + x / 2.0, position[1] + y / 2.0],
         zoom,
         viewport,
     }
@@ -179,13 +232,16 @@ fn fit_slice_camera(full_x: u64, full_y: u64, viewport: [u32; 2]) -> Slice {
 pub fn build_cell_view(
     ds_id: &str,
     cell: &MontageCell,
-    full_x: u64,
-    full_y: u64,
     viewport: [u32; 2],
     contrast: Option<[f64; 2]>,
 ) -> SavedView {
     let mut view = SavedView::empty(viewport);
-    view.camera = Camera::Slice(fit_slice_camera(full_x, full_y, viewport));
+    view.camera = Camera::Slice(fit_slice_camera(
+        cell.position,
+        cell.extent[1],
+        cell.extent[0],
+        viewport,
+    ));
     view.view = ViewState {
         z_range: cell.z..cell.z + 1,
         t: cell.t,
@@ -376,12 +432,15 @@ mod tests {
             t: 3,
             c: 1,
             tile: 0,
+            image_id: Some("image-0".into()),
+            position: [100.0, 50.0],
+            extent: [200, 400],
             label: "z=42".into(),
         };
-        let view = build_cell_view("wds-abc", &cell, 400, 200, [256, 256], None);
+        let view = build_cell_view("wds-abc", &cell, [256, 256], None);
         match view.camera {
             Camera::Slice(s) => {
-                assert_eq!(s.center, [200.0, 100.0]);
+                assert_eq!(s.center, [300.0, 150.0]);
                 // fit: min(256/400, 256/200) = 0.64
                 assert!((s.zoom - 0.64).abs() < 1e-9, "zoom {}", s.zoom);
             }
@@ -400,15 +459,53 @@ mod tests {
     }
 
     #[test]
+    fn backing_pixel_viewport_keeps_member_framing_dpr_invariant() {
+        let cell = MontageCell {
+            z: 0,
+            t: 0,
+            c: 0,
+            tile: 7,
+            image_id: Some("image-7".into()),
+            position: [120.0, 340.0],
+            extent: [900, 1200],
+            label: "tile 7".into(),
+        };
+        let dpr1 = build_cell_view("wds", &cell, [320, 320], None);
+        let dpr2 = build_cell_view("wds", &cell, [640, 640], None);
+        let (Camera::Slice(dpr1), Camera::Slice(dpr2)) = (dpr1.camera, dpr2.camera) else {
+            panic!("montage cells must use slice cameras");
+        };
+
+        assert_eq!(dpr1.center, dpr2.center);
+        assert_eq!(dpr2.viewport, [640, 640]);
+        assert!((dpr2.zoom - 2.0 * dpr1.zoom).abs() < 1e-12);
+        // Physical viewport / physical-pixel zoom is the world field of view;
+        // it must be identical at DPR 1 and DPR 2.
+        assert!(
+            (f64::from(dpr1.viewport[0]) / dpr1.zoom - f64::from(dpr2.viewport[0]) / dpr2.zoom)
+                .abs()
+                < 1e-9
+        );
+        assert!(
+            (f64::from(dpr1.viewport[1]) / dpr1.zoom - f64::from(dpr2.viewport[1]) / dpr2.zoom)
+                .abs()
+                < 1e-9
+        );
+    }
+
+    #[test]
     fn shared_contrast_pins_window_and_keeps_colormap() {
         let cell = MontageCell {
             z: 10,
             t: 0,
             c: 1,
             tile: 0,
+            image_id: Some("image-0".into()),
+            position: [0.0, 0.0],
+            extent: [256, 256],
             label: "z=10".into(),
         };
-        let view = build_cell_view("wds-x", &cell, 256, 256, [256, 256], Some([60.0, 196.0]));
+        let view = build_cell_view("wds-x", &cell, [256, 256], Some([60.0, 196.0]));
         let id = DatasetId("wds-x".into());
         // Auto OFF so the window is shared across all cells, not per-slice.
         assert_eq!(view.auto_contrast.get(&id), Some(&false));
@@ -458,7 +555,7 @@ mod tests {
     #[test]
     fn samples_z_for_a_3d_volume() {
         // [T,C,Z,Y,X] = 1 timepoint, 1 channel, 340 z, single image.
-        let plan = plan_montage([1, 1, 340, 512, 512], 1, 16, 4);
+        let plan = plan_montage([1, 1, 340, 512, 512], &[], 16, 4);
         assert_eq!(plan.axis, MontageAxis::Z);
         assert_eq!(plan.cells.len(), 16);
         // Evenly spaced, inclusive of both ends.
@@ -470,20 +567,38 @@ mod tests {
 
     #[test]
     fn samples_tiles_for_a_collection() {
-        // 64-tile collection (image_count 64); tiles win over Z.
-        let plan = plan_montage([1, 4, 9, 256, 256], 64, 16, 4);
+        // A 64-tile authoritative roster; tiles win over Z and are sampled
+        // across the whole collection, not just the first 16 entries.
+        let members: Vec<MontageMember> = (0..64)
+            .map(|index| MontageMember {
+                image_id: format!("image-{index}"),
+                name: Some(format!("item-{index}")),
+                position: [(index % 8) as f64 * 256.0, (index / 8) as f64 * 128.0],
+                dimensions: [1, 4, 9, 128, 256],
+            })
+            .collect();
+        let plan = plan_montage([1, 4, 9, 128, 256], &members, 16, 4);
         assert_eq!(plan.axis, MontageAxis::Tile);
         assert_eq!(plan.cells.len(), 16);
         assert_eq!(plan.cells[0].tile, 0);
-        assert_eq!(plan.cells[15].tile, 15);
+        assert_eq!(plan.cells[15].tile, 63);
+        assert_eq!(plan.cells[15].image_id.as_deref(), Some("image-63"));
+        assert_eq!(plan.cells[15].position, members[63].position);
+        assert_eq!(plan.cells[15].extent, [128, 256]);
+        assert!(plan.cells[15].label.contains("item-63"));
         // Collection cells anchor at mid-Z.
         assert_eq!(plan.cells[0].z, 4);
+
+        // The saved views frame distinct active-layout members.
+        let first_view = build_cell_view("wds", &plan.cells[0], [320, 320], None);
+        let last_view = build_cell_view("wds", &plan.cells[15], [320, 320], None);
+        assert_ne!(first_view.camera, last_view.camera);
     }
 
     #[test]
     fn samples_t_for_a_timeseries() {
         // 30 timepoints, flat (Z=1), single image → sample T.
-        let plan = plan_montage([30, 2, 1, 256, 256], 1, 16, 4);
+        let plan = plan_montage([30, 2, 1, 256, 256], &[], 16, 4);
         assert_eq!(plan.axis, MontageAxis::T);
         assert_eq!(plan.cells.len(), 16);
         assert_eq!(plan.cells.first().unwrap().t, 0);
@@ -492,7 +607,7 @@ mod tests {
 
     #[test]
     fn single_cell_for_a_flat_2d_image() {
-        let plan = plan_montage([1, 1, 1, 1024, 1024], 1, 16, 4);
+        let plan = plan_montage([1, 1, 1, 1024, 1024], &[], 16, 4);
         assert_eq!(plan.axis, MontageAxis::Single);
         assert_eq!(plan.cells.len(), 1);
         assert_eq!(plan.cols, 1);
@@ -502,7 +617,7 @@ mod tests {
     #[test]
     fn clamps_samples_to_extent() {
         // Only 5 z-slices but asked for 16 → 5 cells, no out-of-range index.
-        let plan = plan_montage([1, 1, 5, 64, 64], 1, 16, 4);
+        let plan = plan_montage([1, 1, 5, 64, 64], &[], 16, 4);
         assert_eq!(plan.cells.len(), 5);
         assert!(plan.cells.iter().all(|cell| cell.z < 5));
         assert_eq!(plan.cells.last().unwrap().z, 4);

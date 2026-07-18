@@ -1,5 +1,6 @@
 mod admin;
 mod auth;
+mod capture;
 mod config;
 mod credentials;
 mod dataset;
@@ -9,31 +10,26 @@ mod layout;
 mod montage;
 mod output;
 mod saved_view;
+mod secure_file;
 mod session;
 mod status;
+mod transport;
 mod view;
 mod workspace;
 
 use std::io::Write;
 use std::path::Path;
-use std::process::Stdio;
 use std::time::Duration;
 
 use base64::Engine as _;
 use clap::{Parser, Subcommand, ValueEnum};
 use flate2::Compression;
 use flate2::write::GzEncoder;
-use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use lucida_core::command::ViewportCommand;
+use lucida_core::protocol::ClientId;
 use lucida_core::saved_view::SavedView;
 use lucida_core::scene::{BlendMode, Colormap, RenderMode};
 use lucida_core::view_transform::{ExplorationSidecar, ViewExtent, default_view};
-use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command as TokioCommand;
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::Error as WebSocketError;
-use tokio_tungstenite::tungstenite::protocol::Message;
 
 use crate::admin::{
     AdminClearProxyCacheOutput, AdminClient, AdminWorkspaceDetailsOutput,
@@ -44,6 +40,7 @@ use crate::admin::{
 use crate::auth::{
     AuthClient, LoginResult, PollOutcome, generate_raw_token, open_browser, poll_interval,
 };
+use crate::capture::{CaptureOptions, DEFAULT_DEVICE_SCALE_FACTOR};
 use crate::config::{CliConfig, ConfigStore, normalize_server_base_url, resolve_server};
 use crate::credentials::{EffectiveToken, clear_local_token, resolve_token, store_local_token};
 use crate::dataset::{
@@ -61,11 +58,12 @@ use crate::layout::{
 use crate::output::Output;
 use crate::saved_view::{
     SavedViewApplyOutput, SavedViewCaptureOutput, SavedViewDefaultOutput, SavedViewDeleteOutput,
-    SavedViewLinkOutput, SavedViewListOutput, SavedViewOutput, SavedViewVisibility,
-    WorkspaceSavedViewClient, format_saved_view_apply_human, format_saved_view_capture_human,
-    format_saved_view_default_human, format_saved_view_delete_human, format_saved_view_human,
-    format_saved_view_link_human, format_saved_view_list_human, resolve_saved_view_record,
-    saved_view_link, saved_view_summaries, saved_view_summary,
+    SavedViewDurableProfile, SavedViewLinkOutput, SavedViewListOutput, SavedViewOutput,
+    SavedViewVisibility, WorkspaceSavedViewClient, format_saved_view_apply_human,
+    format_saved_view_capture_human, format_saved_view_default_human,
+    format_saved_view_delete_human, format_saved_view_human, format_saved_view_link_human,
+    format_saved_view_list_human, resolve_saved_view_record, saved_view_link, saved_view_summaries,
+    saved_view_summary,
 };
 use crate::status::{ServerClient, StatusReport, format_status_human};
 use crate::view::{
@@ -85,8 +83,6 @@ use crate::workspace::{
     format_workspace_member_human, format_workspace_pin_human, format_workspace_sharing_human,
     resolve_workspace_record, target_for,
 };
-
-const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 
 #[derive(Parser, Debug)]
 #[command(name = "lucida", about = "Command line client for Lucida", version)]
@@ -142,7 +138,7 @@ enum Command {
         viewer_profile: String,
         /// Start from an explicit peer's presence instead of this CLI session
         #[arg(long, value_name = "CLIENT_ID")]
-        from_peer: Option<u64>,
+        from_peer: Option<ClientId>,
         /// Seconds to wait for the workspace snapshot
         #[arg(long, default_value_t = 30)]
         timeout_seconds: u64,
@@ -156,7 +152,7 @@ enum Command {
         viewer_profile: String,
         /// Start from an explicit peer's presence instead of this CLI session
         #[arg(long, value_name = "CLIENT_ID")]
-        from_peer: Option<u64>,
+        from_peer: Option<ClientId>,
         /// Seconds to wait for the workspace snapshot
         #[arg(long, default_value_t = 30)]
         timeout_seconds: u64,
@@ -170,7 +166,7 @@ enum Command {
         viewer_profile: String,
         /// Start from an explicit peer's dataset presence instead of this CLI session
         #[arg(long, value_name = "CLIENT_ID")]
-        from_peer: Option<u64>,
+        from_peer: Option<ClientId>,
         /// Seconds to wait for the workspace snapshot
         #[arg(long, default_value_t = 30)]
         timeout_seconds: u64,
@@ -184,7 +180,7 @@ enum Command {
         viewer_profile: String,
         /// Start from an explicit peer's dataset presence instead of this CLI session
         #[arg(long, value_name = "CLIENT_ID")]
-        from_peer: Option<u64>,
+        from_peer: Option<ClientId>,
         /// Seconds to wait for the workspace snapshot
         #[arg(long, default_value_t = 30)]
         timeout_seconds: u64,
@@ -217,7 +213,7 @@ enum Command {
         viewer_profile: String,
         /// Inspect an explicit live peer's presence instead of the viewer profile
         #[arg(long, value_name = "CLIENT_ID")]
-        from_peer: Option<u64>,
+        from_peer: Option<ClientId>,
         /// Seconds to wait for workspace state
         #[arg(long, default_value_t = 30)]
         timeout_seconds: u64,
@@ -231,7 +227,7 @@ enum Command {
         viewer_profile: String,
         /// Inspect an explicit live peer's presence instead of the viewer profile
         #[arg(long, value_name = "CLIENT_ID")]
-        from_peer: Option<u64>,
+        from_peer: Option<ClientId>,
         /// Seconds to wait for workspace state
         #[arg(long, default_value_t = 30)]
         timeout_seconds: u64,
@@ -248,6 +244,9 @@ enum Command {
     },
     /// Manage workspace saved views
     SavedView {
+        /// Durable private viewer profile targeted by `saved-view apply`
+        #[arg(long, default_value = "default", value_name = "NAME")]
+        viewer_profile: String,
         /// Seconds to wait for workspace capture/apply state
         #[arg(long, default_value_t = 30)]
         timeout_seconds: u64,
@@ -567,7 +566,7 @@ enum DatasetCommand {
     },
     /// Render an agent overview: a contact-sheet montage sampling the dataset
     /// (Z / T / tiles), each cell a re-openable view. Writes a labeled PNG and,
-    /// with --json, a sidecar mapping each cell to its z/t/c + a `#view=` URL.
+    /// with --write-sidecar, a JSON mapping each cell to z/t/c + a `#view=` URL.
     Montage {
         /// Workspace-local dataset id or unambiguous dataset name
         dataset: String,
@@ -584,9 +583,12 @@ enum DatasetCommand {
         /// fine/sparse structure that downsampling would otherwise average away.
         #[arg(long, default_value_t = 320)]
         cell_px: u32,
-        /// Also write a JSON sidecar at <out>.json
+        /// Browser device scale factor used for each rendered cell
+        #[arg(long, default_value_t = DEFAULT_DEVICE_SCALE_FACTOR)]
+        device_scale_factor: f64,
+        /// Also write a JSON sidecar at <out>.json (independent of --json output mode)
         #[arg(long)]
-        json: bool,
+        write_sidecar: bool,
         /// Seconds to wait for the workspace snapshot and each render
         #[arg(long, default_value_t = 30)]
         timeout_seconds: u64,
@@ -621,9 +623,12 @@ enum DatasetCommand {
         /// Per-cell thumbnail size in pixels (square)
         #[arg(long, default_value_t = 320)]
         cell_px: u32,
-        /// Also write the JSON sidecar at <out>.json (or <dataset>.json)
+        /// Browser device scale factor used for each rendered cell
+        #[arg(long, default_value_t = DEFAULT_DEVICE_SCALE_FACTOR)]
+        device_scale_factor: f64,
+        /// Also write the JSON sidecar at <out>.json (or <dataset>.json), independent of --json
         #[arg(long)]
-        json: bool,
+        write_sidecar: bool,
         /// Seconds to wait for the workspace snapshot and each render
         #[arg(long, default_value_t = 30)]
         timeout_seconds: u64,
@@ -1065,7 +1070,7 @@ enum ViewerCommand {
     State {
         /// Inspect an explicit live peer's current view instead of the viewer profile
         #[arg(long, value_name = "CLIENT_ID")]
-        from_peer: Option<u64>,
+        from_peer: Option<ClientId>,
     },
     /// Print a browser URL that opens this viewer profile
     Link,
@@ -1073,7 +1078,7 @@ enum ViewerCommand {
     Adopt {
         /// Live peer client id to copy into the viewer profile
         #[arg(long, value_name = "CLIENT_ID")]
-        from_peer: u64,
+        from_peer: ClientId,
     },
     /// Capture a browser screenshot of this viewer profile or an explicit live peer
     Screenshot {
@@ -1081,13 +1086,16 @@ enum ViewerCommand {
         output: String,
         /// Capture an explicit live peer's current view instead of the viewer profile
         #[arg(long, value_name = "CLIENT_ID")]
-        from_peer: Option<u64>,
+        from_peer: Option<ClientId>,
         /// Browser viewport width in pixels
         #[arg(long, default_value_t = 1200)]
         width: u32,
         /// Browser viewport height in pixels
         #[arg(long, default_value_t = 800)]
         height: u32,
+        /// Browser device scale factor used for the rendered image
+        #[arg(long, default_value_t = DEFAULT_DEVICE_SCALE_FACTOR)]
+        device_scale_factor: f64,
         /// Seconds to wait for workspace state and browser render
         #[arg(long)]
         timeout_seconds: Option<u64>,
@@ -1098,13 +1106,16 @@ enum ViewerCommand {
         output: String,
         /// Capture an explicit live peer's current view instead of the viewer profile
         #[arg(long, value_name = "CLIENT_ID")]
-        from_peer: Option<u64>,
+        from_peer: Option<ClientId>,
         /// Browser viewport width in pixels
         #[arg(long, default_value_t = 1200)]
         width: u32,
         /// Browser viewport height in pixels
         #[arg(long, default_value_t = 800)]
         height: u32,
+        /// Browser device scale factor used for the rendered image
+        #[arg(long, default_value_t = DEFAULT_DEVICE_SCALE_FACTOR)]
+        device_scale_factor: f64,
         /// Seconds to wait for workspace state and browser render
         #[arg(long)]
         timeout_seconds: Option<u64>,
@@ -1118,7 +1129,7 @@ enum PeerCommand {
     /// Follow another live client
     Follow {
         /// Live client id to follow
-        client_id: u64,
+        client_id: ClientId,
         /// Seconds to wait for follow and cleanup confirmations
         #[arg(long)]
         timeout_seconds: Option<u64>,
@@ -1205,7 +1216,7 @@ enum SavedViewCommand {
         name: String,
         /// Capture from an explicit peer's presence instead of this CLI session
         #[arg(long, value_name = "CLIENT_ID")]
-        from_peer: Option<u64>,
+        from_peer: Option<ClientId>,
         /// Sharing layer for the new saved view
         #[arg(long, value_enum, default_value_t = SavedViewVisibility::Shared)]
         visibility: SavedViewVisibility,
@@ -1226,7 +1237,7 @@ enum SavedViewCommand {
         from_current: bool,
         /// Capture from an explicit peer's presence instead of this CLI session
         #[arg(long, value_name = "CLIENT_ID")]
-        from_peer: Option<u64>,
+        from_peer: Option<ClientId>,
     },
     /// Delete a saved view
     Delete {
@@ -1393,40 +1404,77 @@ enum ConfigGetCommand {
 
 #[tokio::main]
 async fn main() {
-    let cli = Cli::parse();
-    let json_errors = cli.json;
-    if let Err(error) = run(cli).await {
-        if json_errors {
-            eprintln!(
-                "{}",
-                serde_json::to_string_pretty(&error.to_json())
-                    .unwrap_or_else(|_| error.to_string())
-            );
-        } else {
-            eprintln!("error[{}]: {}", error.kind.as_str(), error.message);
+    let args = std::env::args_os().collect::<Vec<_>>();
+    let json_errors = args.iter().any(|argument| argument == "--json");
+    let cli = match Cli::try_parse_from(args) {
+        Ok(cli) => cli,
+        Err(error) if !error.use_stderr() => {
+            let _ = error.print();
+            std::process::exit(0);
         }
-        std::process::exit(error.exit_code());
+        Err(error) => {
+            if json_errors {
+                let cli_error = CliError::new(ErrorKind::Usage, error.to_string())
+                    .with_context("clap_kind", format!("{:?}", error.kind()))
+                    .with_context("exit_code", error.exit_code());
+                eprintln!(
+                    "{}",
+                    serde_json::to_string_pretty(&cli_error.to_json())
+                        .unwrap_or_else(|_| cli_error.to_string())
+                );
+            } else {
+                let _ = error.print();
+            }
+            std::process::exit(error.exit_code());
+        }
+    };
+    let json_errors = cli.json;
+    match run(cli).await {
+        Ok(exit_code) if exit_code != 0 => std::process::exit(exit_code),
+        Ok(_) => {}
+        Err(error) => {
+            if json_errors {
+                eprintln!(
+                    "{}",
+                    serde_json::to_string_pretty(&error.to_json())
+                        .unwrap_or_else(|_| error.to_string())
+                );
+            } else {
+                eprintln!("error[{}]: {}", error.kind.as_str(), error.message);
+            }
+            std::process::exit(error.exit_code());
+        }
     }
 }
 
-async fn run(cli: Cli) -> Result<(), CliError> {
+async fn run(cli: Cli) -> Result<i32, CliError> {
     let output = Output::new(cli.json, cli.quiet);
     let store = ConfigStore::default()?;
     let mut config = store.load()?;
+    let mut outcome_exit_code = 0;
 
     match &cli.command {
         Command::Status => {
             let report = load_status(cli.server.as_deref(), &config).await?;
             output.print_either(&report, || format_status_human(&report))?;
+            if !report.is_healthy() {
+                outcome_exit_code = 1;
+            }
         }
         Command::Server { command } => match command {
             ServerCommand::Status => {
                 let report = load_status(cli.server.as_deref(), &config).await?;
                 output.print_either(&report, || format_status_human(&report))?;
+                if !report.is_healthy() {
+                    outcome_exit_code = 1;
+                }
             }
             ServerCommand::Version => {
                 let report = load_status(cli.server.as_deref(), &config).await?;
                 output.print_either(&report, || format_version_human(&report))?;
+                if !report.checks.version.ok {
+                    outcome_exit_code = 1;
+                }
             }
         },
         Command::Auth { command } => match command {
@@ -1456,7 +1504,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             }
             AuthCommand::Whoami => {
                 let server = resolve_server(cli.server.as_deref(), &config)?;
-                let token = resolve_token(&server.url, &config);
+                let token = resolve_token(&server.url, &config)?;
                 let client = AuthClient::new(server.url);
                 let principal = client
                     .whoami(token.as_ref().map(|effective| effective.token.as_str()))
@@ -1471,7 +1519,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             }
             AuthCommand::Logout { local_only } => {
                 let server = resolve_server(cli.server.as_deref(), &config)?;
-                let token = resolve_token(&server.url, &config);
+                let token = resolve_token(&server.url, &config)?;
                 let mut revoked = false;
                 if !*local_only {
                     let effective = token.as_ref().ok_or_else(|| {
@@ -1480,7 +1528,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     let client = AuthClient::new(server.url.clone());
                     revoked = client.revoke_current(&effective.token).await?;
                 }
-                let local_removed = clear_local_token(&server.url, &mut config);
+                let local_removed = clear_local_token(&server.url, &mut config)?;
                 store.save(&config)?;
                 let payload = serde_json::json!({
                     "local_removed": local_removed,
@@ -1511,7 +1559,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Command::Workspace { command } => match command {
             WorkspaceCommand::List { archived } => {
                 let server = resolve_server(cli.server.as_deref(), &config)?;
-                let token = resolve_token(&server.url, &config);
+                let token = resolve_token(&server.url, &config)?;
                 let client = WorkspaceClient::new(server.url.clone(), token);
                 let workspaces = client.list(*archived).await?;
                 let output_payload = WorkspaceListOutput {
@@ -1525,7 +1573,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             }
             WorkspaceCommand::Create { name } => {
                 let server = resolve_server(cli.server.as_deref(), &config)?;
-                let token = resolve_token(&server.url, &config);
+                let token = resolve_token(&server.url, &config)?;
                 let client = WorkspaceClient::new(server.url.clone(), token);
                 let workspace = client.create(name.as_deref()).await?;
                 let target = target_for(&server.url, &workspace)?;
@@ -1540,7 +1588,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             }
             WorkspaceCommand::Info { selector, archived } => {
                 let server = resolve_server(cli.server.as_deref(), &config)?;
-                let token = resolve_token(&server.url, &config);
+                let token = resolve_token(&server.url, &config)?;
                 let client = WorkspaceClient::new(server.url.clone(), token);
                 let workspace = resolve_workspace_record(
                     &client,
@@ -1566,7 +1614,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             }
             WorkspaceCommand::Use { selector } => {
                 let server = resolve_server(cli.server.as_deref(), &config)?;
-                let token = resolve_token(&server.url, &config);
+                let token = resolve_token(&server.url, &config)?;
                 let client = WorkspaceClient::new(server.url.clone(), token);
                 let workspace = resolve_workspace_record(
                     &client,
@@ -1599,7 +1647,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 no_browser,
             } => {
                 let server = resolve_server(cli.server.as_deref(), &config)?;
-                let token = resolve_token(&server.url, &config);
+                let token = resolve_token(&server.url, &config)?;
                 let client = WorkspaceClient::new(server.url.clone(), token);
                 let workspace = resolve_workspace_record(
                     &client,
@@ -1631,7 +1679,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             }
             WorkspaceCommand::Pin { selector } => {
                 let server = resolve_server(cli.server.as_deref(), &config)?;
-                let token = resolve_token(&server.url, &config);
+                let token = resolve_token(&server.url, &config)?;
                 let client = WorkspaceClient::new(server.url.clone(), token);
                 let mut workspace = resolve_workspace_record(
                     &client,
@@ -1657,7 +1705,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             }
             WorkspaceCommand::Unpin { selector } => {
                 let server = resolve_server(cli.server.as_deref(), &config)?;
-                let token = resolve_token(&server.url, &config);
+                let token = resolve_token(&server.url, &config)?;
                 let client = WorkspaceClient::new(server.url.clone(), token);
                 let mut workspace = resolve_workspace_record(
                     &client,
@@ -1683,7 +1731,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             }
             WorkspaceCommand::Archive { selector } => {
                 let server = resolve_server(cli.server.as_deref(), &config)?;
-                let token = resolve_token(&server.url, &config);
+                let token = resolve_token(&server.url, &config)?;
                 let client = WorkspaceClient::new(server.url.clone(), token);
                 let workspace = resolve_workspace_record(
                     &client,
@@ -1707,7 +1755,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             }
             WorkspaceCommand::Restore { selector } => {
                 let server = resolve_server(cli.server.as_deref(), &config)?;
-                let token = resolve_token(&server.url, &config);
+                let token = resolve_token(&server.url, &config)?;
                 let client = WorkspaceClient::new(server.url.clone(), token);
                 let workspace = resolve_workspace_record(
                     &client,
@@ -1732,7 +1780,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             WorkspaceCommand::Share { command } => match command {
                 WorkspaceShareCommand::Show { selector } => {
                     let server = resolve_server(cli.server.as_deref(), &config)?;
-                    let token = resolve_token(&server.url, &config);
+                    let token = resolve_token(&server.url, &config)?;
                     let client = WorkspaceClient::new(server.url.clone(), token);
                     let workspace = resolve_workspace_record(
                         &client,
@@ -1756,7 +1804,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 }
                 WorkspaceShareCommand::Link { mode, selector } => {
                     let server = resolve_server(cli.server.as_deref(), &config)?;
-                    let token = resolve_token(&server.url, &config);
+                    let token = resolve_token(&server.url, &config)?;
                     let client = WorkspaceClient::new(server.url.clone(), token);
                     let workspace = resolve_workspace_record(
                         &client,
@@ -1785,7 +1833,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             WorkspaceCommand::Member { command } => match command {
                 WorkspaceMemberCommand::List { selector } => {
                     let server = resolve_server(cli.server.as_deref(), &config)?;
-                    let token = resolve_token(&server.url, &config);
+                    let token = resolve_token(&server.url, &config)?;
                     let client = WorkspaceClient::new(server.url.clone(), token);
                     let workspace = resolve_workspace_record(
                         &client,
@@ -1814,7 +1862,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     display_name,
                 } => {
                     let server = resolve_server(cli.server.as_deref(), &config)?;
-                    let token = resolve_token(&server.url, &config);
+                    let token = resolve_token(&server.url, &config)?;
                     let client = WorkspaceClient::new(server.url.clone(), token);
                     let workspace = resolve_workspace_record(
                         &client,
@@ -1846,7 +1894,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     selector,
                 } => {
                     let server = resolve_server(cli.server.as_deref(), &config)?;
-                    let token = resolve_token(&server.url, &config);
+                    let token = resolve_token(&server.url, &config)?;
                     let client = WorkspaceClient::new(server.url.clone(), token);
                     let workspace = resolve_workspace_record(
                         &client,
@@ -1874,7 +1922,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 }
                 WorkspaceMemberCommand::Remove { email, selector } => {
                     let server = resolve_server(cli.server.as_deref(), &config)?;
-                    let token = resolve_token(&server.url, &config);
+                    let token = resolve_token(&server.url, &config)?;
                     let client = WorkspaceClient::new(server.url.clone(), token);
                     let workspace = resolve_workspace_record(
                         &client,
@@ -1903,7 +1951,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Command::Dataset { command } => match command {
             DatasetCommand::Browse { path } => {
                 let server = resolve_server(cli.server.as_deref(), &config)?;
-                let token = resolve_token(&server.url, &config);
+                let token = resolve_token(&server.url, &config)?;
                 let client = DatasetHttpClient::new(server.url.clone(), token);
                 let browse = client.browse(path.as_deref()).await?;
                 let output_payload = DatasetBrowseOutput {
@@ -1920,7 +1968,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 timeout_seconds,
             } => {
                 let server = resolve_server(cli.server.as_deref(), &config)?;
-                let token = resolve_token(&server.url, &config);
+                let token = resolve_token(&server.url, &config)?;
                 let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
                 let workspace = resolve_workspace_record(
                     &workspace_client,
@@ -1947,7 +1995,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             }
             DatasetCommand::List { timeout_seconds } => {
                 let server = resolve_server(cli.server.as_deref(), &config)?;
-                let token = resolve_token(&server.url, &config);
+                let token = resolve_token(&server.url, &config)?;
                 let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
                 let workspace = resolve_workspace_record(
                     &workspace_client,
@@ -1978,7 +2026,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 timeout_seconds,
             } => {
                 let server = resolve_server(cli.server.as_deref(), &config)?;
-                let token = resolve_token(&server.url, &config);
+                let token = resolve_token(&server.url, &config)?;
                 let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
                 let workspace = resolve_workspace_record(
                     &workspace_client,
@@ -2009,7 +2057,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 timeout_seconds,
             } => {
                 let server = resolve_server(cli.server.as_deref(), &config)?;
-                let token = resolve_token(&server.url, &config);
+                let token = resolve_token(&server.url, &config)?;
                 let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
                 let workspace = resolve_workspace_record(
                     &workspace_client,
@@ -2040,7 +2088,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 timeout_seconds,
             } => {
                 let server = resolve_server(cli.server.as_deref(), &config)?;
-                let token = resolve_token(&server.url, &config);
+                let token = resolve_token(&server.url, &config)?;
                 let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
                 let workspace = resolve_workspace_record(
                     &workspace_client,
@@ -2074,7 +2122,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 timeout_seconds,
             } => {
                 let server = resolve_server(cli.server.as_deref(), &config)?;
-                let token = resolve_token(&server.url, &config);
+                let token = resolve_token(&server.url, &config)?;
                 let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
                 let workspace = resolve_workspace_record(
                     &workspace_client,
@@ -2106,11 +2154,12 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 cells,
                 cols,
                 cell_px,
-                json,
+                device_scale_factor,
+                write_sidecar,
                 timeout_seconds,
             } => {
                 let server = resolve_server(cli.server.as_deref(), &config)?;
-                let token = resolve_token(&server.url, &config);
+                let token = resolve_token(&server.url, &config)?;
                 let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
                 let workspace = resolve_workspace_record(
                     &workspace_client,
@@ -2129,13 +2178,27 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     CliError::new(ErrorKind::Protocol, "dataset has no dimensions to montage")
                 })?;
                 let ds_id = info.summary.workspace_dataset_id.clone();
-                let full_x = dims[4];
-                let full_y = dims[3];
-                // MVP samples the Z / T / single axis with a whole-image fit.
-                // Per-tile collection montage (which needs member positions) is a
-                // follow-up slice, so plan as a single image here.
-                let plan = montage::plan_montage(dims, 1, *cells, *cols);
-                let viewport = [*cell_px, *cell_px];
+                let montage_members: Vec<montage::MontageMember> = info
+                    .images
+                    .iter()
+                    .filter_map(|image| {
+                        image.dimensions.map(|dimensions| montage::MontageMember {
+                            image_id: image.image_id.clone(),
+                            name: image.name.clone(),
+                            position: image.position,
+                            dimensions,
+                        })
+                    })
+                    .collect();
+                let plan = montage::plan_montage(dims, &montage_members, *cells, *cols);
+                let capture_options =
+                    CaptureOptions::new(*cell_px, *cell_px, *device_scale_factor, wait)
+                        .with_bearer_token(token.as_ref().map(|token| token.token.as_str()));
+                // SavedView camera math uses physical backing pixels, while
+                // CaptureOptions' width/height are CSS pixels. Keep that
+                // logical→physical conversion owned by CaptureOptions so DPR 2
+                // frames the same member as DPR 1 instead of zooming out 2×.
+                let viewport = capture_options.scene_viewport()?;
 
                 // Pre-pass: read the dataset's auto-contrast window from a
                 // representative (middle) cell, then pin ONE shared,
@@ -2147,43 +2210,23 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 // and through-stack variation show. Best-effort: if the probe can't
                 // read a window, fall back to per-cell auto.
                 let mid = plan.cells.len() / 2;
-                let probe_saved = montage::build_cell_view(
-                    &ds_id,
-                    &plan.cells[mid],
-                    full_x,
-                    full_y,
-                    viewport,
-                    None,
-                );
+                let probe_saved =
+                    montage::build_cell_view(&ds_id, &plan.cells[mid], viewport, None);
                 let probe_url =
                     montage::with_render_param(&viewer_inline_view_web_url(&target, &probe_saved)?);
                 const BG_CLIP: f64 = 0.3;
-                let shared_contrast = match probe_montage_auto_contrast(
-                    &probe_url,
-                    token.as_ref(),
-                    *cell_px,
-                    *cell_px,
-                    wait,
-                )
-                .await
-                {
-                    Ok(Some([lo, hi])) if hi > lo => Some([lo + BG_CLIP * (hi - lo), hi]),
-                    _ => None,
-                };
+                let shared_contrast =
+                    match capture::probe_auto_contrast(&probe_url, capture_options).await {
+                        Ok(Some([lo, hi])) if hi > lo => Some([lo + BG_CLIP * (hi - lo), hi]),
+                        _ => None,
+                    };
 
                 let mut urls: Vec<String> = Vec::with_capacity(plan.cells.len());
                 let mut cell_json: Vec<serde_json::Value> = Vec::with_capacity(plan.cells.len());
                 for (index, cell) in plan.cells.iter().enumerate() {
                     // Same shared window for the sidecar drill-in URL and the
                     // captured thumbnail, so drilling in matches the montage.
-                    let saved = montage::build_cell_view(
-                        &ds_id,
-                        cell,
-                        full_x,
-                        full_y,
-                        viewport,
-                        shared_contrast,
-                    );
+                    let saved = montage::build_cell_view(&ds_id, cell, viewport, shared_contrast);
                     let url = viewer_inline_view_web_url(&target, &saved)?;
                     cell_json.push(serde_json::json!({
                         "index": index,
@@ -2193,6 +2236,9 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                         "row": index as u32 / plan.cols.max(1),
                         "col": index as u32 % plan.cols.max(1),
                         "z": cell.z, "t": cell.t, "c": cell.c, "tile": cell.tile,
+                        "image_id": cell.image_id,
+                        "position": cell.position,
+                        "extent_yx": cell.extent,
                         "label": cell.label,
                         "url": url,
                     }));
@@ -2203,8 +2249,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
 
                 let labels: Vec<String> =
                     plan.cells.iter().map(|cell| cell.label.clone()).collect();
-                let pngs =
-                    capture_montage_pngs(&urls, token.as_ref(), *cell_px, *cell_px, wait).await?;
+                let pngs = capture::capture_many(&urls, capture_options).await?;
                 let montage_png = montage::stitch_grid(&pngs, &labels, plan.cols)
                     .map_err(|message| CliError::new(ErrorKind::Protocol, message))?;
                 if let Some(parent) = Path::new(out).parent()
@@ -2224,16 +2269,17 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     // Cells fill the grid left-to-right, top-to-bottom.
                     "order": "row-major",
                     "cell_px": cell_px,
+                    "device_scale_factor": device_scale_factor,
                     // The shared contrast window applied to every cell (null when
                     // the probe fell back to per-cell auto-contrast).
                     "contrast": shared_contrast,
                     "cells": cell_json,
                 });
-                if *json {
+                if *write_sidecar {
                     tokio::fs::write(&json_path, serde_json::to_vec_pretty(&sidecar)?).await?;
                 }
                 let n = plan.cells.len();
-                let (cols_n, rows_n, json_written) = (plan.cols, plan.rows, *json);
+                let (cols_n, rows_n, json_written) = (plan.cols, plan.rows, *write_sidecar);
                 output.print_either(&sidecar, || {
                     let mut human =
                         format!("Wrote montage: {out} ({n} cells, {cols_n}x{rows_n}, axis {axis})");
@@ -2250,11 +2296,12 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 breadcrumb,
                 out,
                 cell_px,
-                json,
+                device_scale_factor,
+                write_sidecar,
                 timeout_seconds,
             } => {
                 let server = resolve_server(cli.server.as_deref(), &config)?;
-                let token = resolve_token(&server.url, &config);
+                let token = resolve_token(&server.url, &config)?;
                 let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
                 let workspace = resolve_workspace_record(
                     &workspace_client,
@@ -2275,8 +2322,6 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 let ds_id = info.summary.workspace_dataset_id.clone();
 
                 let extent = ViewExtent::from_dims(dims);
-                let viewport = [*cell_px, *cell_px];
-
                 // Current view: parse the caller's `--view` (the "descend" path,
                 // accepting inline JSON / stdin `-` / `@file` so the loop closes
                 // hands-free), else synthesize the dataset's Home view (a 3D
@@ -2284,7 +2329,16 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 // flat image).
                 let current = match view {
                     Some(raw) => read_view_arg(raw)?,
-                    None => default_view(&ds_id, dims, viewport),
+                    // Preserve an explicit caller view byte-for-byte. Only the
+                    // CLI-synthesized Home view needs to cross from the
+                    // logical capture size into Lucida's physical-pixel camera
+                    // convention.
+                    None => {
+                        let viewport =
+                            CaptureOptions::new(*cell_px, *cell_px, *device_scale_factor, wait)
+                                .scene_viewport()?;
+                        default_view(&ds_id, dims, viewport)
+                    }
                 };
 
                 // depth/breadcrumb are agent-supplied passthrough: the command is
@@ -2305,7 +2359,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     cell.url = Some(viewer_inline_view_web_url(&target, &cell.view)?);
                 }
 
-                // The PNG (when --out) and the sidecar JSON (when --json) share
+                // The PNG (when --out) and sidecar (when --write-sidecar) share
                 // the same output directory, so create it up front. Doing it here
                 // — not inside the render's Ok arm — means a best-effort render
                 // failure can't take the `<out>.json` write down with it (ENOENT).
@@ -2325,6 +2379,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                         &sidecar,
                         token.as_ref(),
                         *cell_px,
+                        *device_scale_factor,
                         wait,
                     )
                     .await
@@ -2351,7 +2406,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     Some(out) => format!("{out}.json"),
                     None => format!("{dataset}.json"),
                 };
-                if *json {
+                if *write_sidecar {
                     tokio::fs::write(&json_path, serde_json::to_vec_pretty(&output_value)?).await?;
                 }
 
@@ -2359,7 +2414,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 let depth = sidecar.current.depth;
                 let handle = sidecar.current.handle.clone();
                 let labels: Vec<String> = sidecar.cells.iter().map(|c| c.label.clone()).collect();
-                let (out_written, json_written) = (out.clone(), *json);
+                let (out_written, json_written) = (out.clone(), *write_sidecar);
                 output.print_either(&output_value, || {
                     let mut human = format!(
                         "Exploration from {handle} (depth {depth}): {cell_count} next step(s)"
@@ -2513,10 +2568,19 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             emit_layout_command(&cli, &config, output, command, *timeout_seconds).await?;
         }
         Command::SavedView {
+            viewer_profile,
             timeout_seconds,
             command,
         } => {
-            emit_saved_view_command(&cli, &config, output, command, *timeout_seconds).await?;
+            emit_saved_view_command(
+                &cli,
+                &config,
+                output,
+                command,
+                viewer_profile,
+                *timeout_seconds,
+            )
+            .await?;
         }
         Command::Admin { command } => {
             emit_admin_command(&cli, &config, output, command).await?;
@@ -2569,7 +2633,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         },
     }
 
-    Ok(())
+    Ok(outcome_exit_code)
 }
 
 async fn emit_admin_command(
@@ -2579,7 +2643,7 @@ async fn emit_admin_command(
     command: &AdminCommand,
 ) -> Result<(), CliError> {
     let server = resolve_server(cli.server.as_deref(), config)?;
-    let token = resolve_token(&server.url, config);
+    let token = resolve_token(&server.url, config)?;
     let client = AdminClient::new(server.url.clone(), token);
 
     match command {
@@ -2691,10 +2755,11 @@ async fn emit_saved_view_command(
     config: &CliConfig,
     output: Output,
     command: &SavedViewCommand,
+    viewer_profile: &str,
     timeout_seconds: u64,
 ) -> Result<(), CliError> {
     let server = resolve_server(cli.server.as_deref(), config)?;
-    let token = resolve_token(&server.url, config);
+    let token = resolve_token(&server.url, config)?;
     let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
     let workspace = resolve_workspace_record(
         &workspace_client,
@@ -2706,7 +2771,9 @@ async fn emit_saved_view_command(
     .await?;
     let target = target_for(&server.url, &workspace)?;
     let saved_view_client =
-        WorkspaceSavedViewClient::new(server.url.clone(), target.ws_url.clone(), token);
+        WorkspaceSavedViewClient::new(server.url.clone(), target.ws_url.clone(), token.clone());
+    let viewer_profile_client =
+        ViewerProfileClient::new(server.url.clone(), target.ws_url.clone(), token);
     let wait = Duration::from_secs(timeout_seconds);
 
     match command {
@@ -2741,9 +2808,34 @@ async fn emit_saved_view_command(
             let saved_view = saved_view_client.get(&workspace, &resolved.id).await?;
             let default_saved_view_id = workspace.default_saved_view_id.clone();
             let summary = saved_view_summary(&saved_view, default_saved_view_id.as_deref());
-            let result = saved_view_client
+            let mut result = saved_view_client
                 .apply(&workspace, &saved_view.view, wait)
                 .await?;
+            let seed_source = format!("saved_view:{}", saved_view.id);
+            let profile_result = viewer_profile_client
+                .replace_with_saved_view(
+                    &workspace,
+                    viewer_profile,
+                    &seed_source,
+                    &saved_view.view,
+                    wait,
+                )
+                .await
+                .map_err(|error| {
+                    error
+                        .with_message_suffix(format!(
+                            "; shared layout phase acknowledged {} change(s), but durable viewer profile was not updated",
+                            result.layout_command_count
+                        ))
+                        .with_context("batch_semantics", result.batch_semantics)
+                        .with_context("acknowledged_partial_result", &result)
+                        .with_context("failure_phase", "durable_viewer_profile")
+                })?;
+            result.durable_profile = Some(SavedViewDurableProfile {
+                profile: profile_result.profile,
+                revision: profile_result.revision,
+                lifetime: "durable_private_viewer_profile",
+            });
             let output_payload = SavedViewApplyOutput {
                 server,
                 workspace,
@@ -2928,11 +3020,11 @@ async fn emit_viewport_command(
     output: Output,
     command: ViewportCommand,
     viewer_profile: &str,
-    from_peer: Option<u64>,
+    from_peer: Option<ClientId>,
     timeout_seconds: u64,
 ) -> Result<(), CliError> {
     let server = resolve_server(cli.server.as_deref(), config)?;
-    let token = resolve_token(&server.url, config);
+    let token = resolve_token(&server.url, config)?;
     let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
     let workspace = resolve_workspace_record(
         &workspace_client,
@@ -2989,11 +3081,11 @@ async fn emit_dataset_presence_command(
     output: Output,
     command: Option<DatasetDisplayCommand>,
     viewer_profile: &str,
-    from_peer: Option<u64>,
+    from_peer: Option<ClientId>,
     timeout_seconds: u64,
 ) -> Result<(), CliError> {
     let server = resolve_server(cli.server.as_deref(), config)?;
-    let token = resolve_token(&server.url, config);
+    let token = resolve_token(&server.url, config)?;
     let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
     let workspace = resolve_workspace_record(
         &workspace_client,
@@ -3067,7 +3159,7 @@ async fn emit_viewer_command(
     timeout_seconds: u64,
 ) -> Result<(), CliError> {
     let server = resolve_server(cli.server.as_deref(), config)?;
-    let token = resolve_token(&server.url, config);
+    let token = resolve_token(&server.url, config)?;
     let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
     let workspace = resolve_workspace_record(
         &workspace_client,
@@ -3143,16 +3235,18 @@ async fn emit_viewer_command(
             from_peer,
             width,
             height,
+            device_scale_factor,
             timeout_seconds: screenshot_timeout_seconds,
         } => {
             let wait = Duration::from_secs(screenshot_timeout_seconds.unwrap_or(timeout_seconds));
+            let capture_options = CaptureOptions::new(*width, *height, *device_scale_factor, wait)
+                .with_bearer_token(token.as_ref().map(|token| token.token.as_str()));
             if from_peer.is_some() {
                 let result = view_client
                     .source_state(&workspace, profile, *from_peer, None, wait)
                     .await?;
                 let url = viewer_inline_view_web_url(&target, &result.saved_view)?;
-                capture_viewer_screenshot(&url, token.as_ref(), output_path, *width, *height, wait)
-                    .await?;
+                capture::screenshot_to_path(&url, Path::new(output_path), capture_options).await?;
                 let source = result.source.clone();
                 let payload = serde_json::json!({
                     "server": server,
@@ -3163,6 +3257,7 @@ async fn emit_viewer_command(
                     "output": output_path,
                     "width": width,
                     "height": height,
+                    "device_scale_factor": device_scale_factor,
                 });
                 output.print_either(&payload, || {
                     format!(
@@ -3173,8 +3268,7 @@ async fn emit_viewer_command(
             } else {
                 let result = view_client.state(&workspace, profile, wait).await?;
                 let url = viewer_profile_web_url(&target, profile)?;
-                capture_viewer_screenshot(&url, token.as_ref(), output_path, *width, *height, wait)
-                    .await?;
+                capture::screenshot_to_path(&url, Path::new(output_path), capture_options).await?;
                 let payload = serde_json::json!({
                     "server": server,
                     "workspace": workspace,
@@ -3184,6 +3278,7 @@ async fn emit_viewer_command(
                     "output": output_path,
                     "width": width,
                     "height": height,
+                    "device_scale_factor": device_scale_factor,
                 });
                 output.print_either(&payload, || {
                     format!("Captured viewer screenshot: {output_path}\nURL: {url}")
@@ -3195,9 +3290,12 @@ async fn emit_viewer_command(
             from_peer,
             width,
             height,
+            device_scale_factor,
             timeout_seconds: screenshot_timeout_seconds,
         } => {
             let wait = Duration::from_secs(screenshot_timeout_seconds.unwrap_or(timeout_seconds));
+            let capture_options = CaptureOptions::new(*width, *height, *device_scale_factor, wait)
+                .with_bearer_token(token.as_ref().map(|token| token.token.as_str()));
             if from_peer.is_some() {
                 let result = view_client
                     .source_state(
@@ -3209,8 +3307,7 @@ async fn emit_viewer_command(
                     )
                     .await?;
                 let url = viewer_inline_view_web_url(&target, &result.saved_view)?;
-                capture_viewer_screenshot(&url, token.as_ref(), output_path, *width, *height, wait)
-                    .await?;
+                capture::screenshot_to_path(&url, Path::new(output_path), capture_options).await?;
                 let source = result.source.clone();
                 let payload = serde_json::json!({
                     "server": server,
@@ -3221,6 +3318,7 @@ async fn emit_viewer_command(
                     "output": output_path,
                     "width": width,
                     "height": height,
+                    "device_scale_factor": device_scale_factor,
                 });
                 output.print_either(&payload, || {
                     format!(
@@ -3233,8 +3331,7 @@ async fn emit_viewer_command(
                     .overview(&workspace, profile, [*width, *height], wait)
                     .await?;
                 let url = viewer_profile_web_url(&target, profile)?;
-                capture_viewer_screenshot(&url, token.as_ref(), output_path, *width, *height, wait)
-                    .await?;
+                capture::screenshot_to_path(&url, Path::new(output_path), capture_options).await?;
                 let payload = serde_json::json!({
                     "server": server,
                     "workspace": workspace,
@@ -3244,6 +3341,7 @@ async fn emit_viewer_command(
                     "output": output_path,
                     "width": width,
                     "height": height,
+                    "device_scale_factor": device_scale_factor,
                 });
                 output.print_either(&payload, || {
                     format!("Captured viewer overview: {output_path}\nURL: {url}")
@@ -3263,7 +3361,7 @@ async fn emit_peer_command(
     timeout_seconds: u64,
 ) -> Result<(), CliError> {
     let server = resolve_server(cli.server.as_deref(), config)?;
-    let token = resolve_token(&server.url, config);
+    let token = resolve_token(&server.url, config)?;
     let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
     let workspace = resolve_workspace_record(
         &workspace_client,
@@ -3349,11 +3447,11 @@ async fn emit_plan_command(
     output: Output,
     command: &PlanCommand,
     viewer_profile: &str,
-    from_peer: Option<u64>,
+    from_peer: Option<ClientId>,
     timeout_seconds: u64,
 ) -> Result<(), CliError> {
     let server = resolve_server(cli.server.as_deref(), config)?;
-    let token = resolve_token(&server.url, config);
+    let token = resolve_token(&server.url, config)?;
     let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
     let workspace = resolve_workspace_record(
         &workspace_client,
@@ -3399,11 +3497,11 @@ async fn emit_debug_command(
     output: Output,
     command: &DebugCommand,
     viewer_profile: &str,
-    from_peer: Option<u64>,
+    from_peer: Option<ClientId>,
     timeout_seconds: u64,
 ) -> Result<(), CliError> {
     let server = resolve_server(cli.server.as_deref(), config)?;
-    let token = resolve_token(&server.url, config);
+    let token = resolve_token(&server.url, config)?;
     let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
     let workspace = resolve_workspace_record(
         &workspace_client,
@@ -3492,6 +3590,7 @@ async fn render_explore_contact_sheet(
     sidecar: &ExplorationSidecar,
     token: Option<&EffectiveToken>,
     cell_px: u32,
+    device_scale_factor: f64,
     wait: Duration,
 ) -> Result<Vec<u8>, CliError> {
     let mut urls: Vec<String> = Vec::with_capacity(sidecar.cells.len());
@@ -3502,7 +3601,9 @@ async fn render_explore_contact_sheet(
     }
     let labels: Vec<String> = sidecar.cells.iter().map(|c| c.label.clone()).collect();
     let cols = ((sidecar.cells.len() as f64).sqrt().ceil() as u32).clamp(1, 4);
-    let pngs = capture_montage_pngs(&urls, token, cell_px, cell_px, wait).await?;
+    let options = CaptureOptions::new(cell_px, cell_px, device_scale_factor, wait)
+        .with_bearer_token(token.map(|token| token.token.as_str()));
+    let pngs = capture::capture_many(&urls, options).await?;
     montage::stitch_grid(&pngs, &labels, cols)
         .map_err(|message| CliError::new(ErrorKind::Protocol, message))
 }
@@ -3526,811 +3627,6 @@ fn encode_saved_view_url_payload(saved_view: &SavedView) -> Result<String, CliEr
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(gz))
 }
 
-async fn capture_viewer_screenshot(
-    url: &str,
-    token: Option<&EffectiveToken>,
-    output_path: &str,
-    width: u32,
-    height: u32,
-    wait: Duration,
-) -> Result<(), CliError> {
-    if width == 0 || height == 0 {
-        return Err(CliError::config(
-            "viewer screenshot width and height must be positive",
-        ));
-    }
-
-    let browser = find_browser_binary()?;
-    let user_data_dir = chrome_user_data_dir();
-    tokio::fs::create_dir_all(&user_data_dir).await?;
-    let mut child = TokioCommand::new(&browser)
-        .arg("--headless=new")
-        .arg("--enable-unsafe-webgpu")
-        .arg("--ignore-gpu-blocklist")
-        .arg("--no-first-run")
-        .arg("--no-default-browser-check")
-        .arg("--remote-debugging-port=0")
-        .arg(format!("--user-data-dir={}", user_data_dir.display()))
-        .arg(format!("--window-size={width},{height}"))
-        .arg("about:blank")
-        .stderr(Stdio::piped())
-        .stdout(Stdio::null())
-        .stdin(Stdio::null())
-        .spawn()
-        .map_err(|error| {
-            CliError::new(
-                ErrorKind::Config,
-                format!("failed to launch browser {browser:?}: {error}"),
-            )
-        })?;
-
-    let result = async {
-        let stderr = child.stderr.take().ok_or_else(|| {
-            CliError::new(
-                ErrorKind::Protocol,
-                "browser stderr was not available for DevTools discovery",
-            )
-        })?;
-        let endpoint = wait_for_devtools_endpoint(stderr, wait).await?;
-        let png = capture_cdp_png(&endpoint, url, token, width, height, wait).await?;
-        if let Some(parent) = Path::new(output_path).parent()
-            && !parent.as_os_str().is_empty()
-        {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        tokio::fs::write(output_path, png).await?;
-        Ok::<(), CliError>(())
-    }
-    .await;
-
-    let _ = child.kill().await;
-    let _ = child.wait().await;
-    let _ = tokio::fs::remove_dir_all(&user_data_dir).await;
-    result
-}
-
-/// Render many view URLs in ONE headless browser session and return a PNG per
-/// URL (in order). Reuses the single-shot screenshot spawn + DevTools discovery,
-/// then drives `capture_cdp_png` once per URL (it creates a fresh target each
-/// time) — much cheaper than relaunching the browser per montage cell.
-async fn capture_montage_pngs(
-    urls: &[String],
-    token: Option<&EffectiveToken>,
-    width: u32,
-    height: u32,
-    wait: Duration,
-) -> Result<Vec<Vec<u8>>, CliError> {
-    if urls.is_empty() {
-        return Err(CliError::config("montage has no cells to render"));
-    }
-    let browser = find_browser_binary()?;
-    let user_data_dir = chrome_user_data_dir();
-    tokio::fs::create_dir_all(&user_data_dir).await?;
-    let mut child = TokioCommand::new(&browser)
-        .arg("--headless=new")
-        .arg("--enable-unsafe-webgpu")
-        .arg("--ignore-gpu-blocklist")
-        .arg("--no-first-run")
-        .arg("--no-default-browser-check")
-        .arg("--remote-debugging-port=0")
-        .arg(format!("--user-data-dir={}", user_data_dir.display()))
-        .arg(format!("--window-size={width},{height}"))
-        .arg("about:blank")
-        .stderr(Stdio::piped())
-        .stdout(Stdio::null())
-        .stdin(Stdio::null())
-        .spawn()
-        .map_err(|error| {
-            CliError::new(
-                ErrorKind::Config,
-                format!("failed to launch browser {browser:?}: {error}"),
-            )
-        })?;
-
-    let result = async {
-        let stderr = child.stderr.take().ok_or_else(|| {
-            CliError::new(
-                ErrorKind::Protocol,
-                "browser stderr was not available for DevTools discovery",
-            )
-        })?;
-        let endpoint = wait_for_devtools_endpoint(stderr, wait).await?;
-        let mut pngs = Vec::with_capacity(urls.len());
-        for url in urls {
-            pngs.push(capture_cdp_png(&endpoint, url, token, width, height, wait).await?);
-        }
-        Ok::<Vec<Vec<u8>>, CliError>(pngs)
-    }
-    .await;
-
-    let _ = child.kill().await;
-    let _ = child.wait().await;
-    let _ = tokio::fs::remove_dir_all(&user_data_dir).await;
-    result
-}
-
-/// Load a viewer URL in a fresh CDP target and read back the dataset's
-/// auto-contrast data window, which the web app publishes as
-/// `window.__lucidaAutoContrast` once it has computed the slice's range.
-/// Returns `None` if the page never published one. `dataset montage` uses this
-/// to derive a single shared, background-clipped window for every cell.
-async fn capture_cdp_auto_contrast(
-    browser_ws_url: &str,
-    url: &str,
-    token: Option<&EffectiveToken>,
-    width: u32,
-    height: u32,
-    wait: Duration,
-) -> Result<Option<[f64; 2]>, CliError> {
-    let (socket, _response) = connect_async(browser_ws_url)
-        .await
-        .map_err(|error| CliError::new(ErrorKind::SessionDisconnect, error.to_string()))?;
-    let (mut write, mut read) = socket.split();
-    let mut id = 1_u64;
-
-    let created = cdp_call(
-        &mut write,
-        &mut read,
-        &mut id,
-        None,
-        "Target.createTarget",
-        json!({ "url": "about:blank" }),
-        wait,
-    )
-    .await?;
-    let target_id = created
-        .get("targetId")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| CliError::new(ErrorKind::Protocol, "CDP targetId was missing"))?
-        .to_string();
-    let attached = cdp_call(
-        &mut write,
-        &mut read,
-        &mut id,
-        None,
-        "Target.attachToTarget",
-        json!({ "targetId": target_id, "flatten": true }),
-        wait,
-    )
-    .await?;
-    let session_id = attached
-        .get("sessionId")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| CliError::new(ErrorKind::Protocol, "CDP sessionId was missing"))?
-        .to_string();
-
-    cdp_call(
-        &mut write,
-        &mut read,
-        &mut id,
-        Some(&session_id),
-        "Network.enable",
-        json!({}),
-        wait,
-    )
-    .await?;
-    if let Some(token) = token {
-        cdp_call(
-            &mut write,
-            &mut read,
-            &mut id,
-            Some(&session_id),
-            "Network.setExtraHTTPHeaders",
-            json!({ "headers": { "Authorization": format!("Bearer {}", token.token) } }),
-            wait,
-        )
-        .await?;
-    }
-    cdp_call(
-        &mut write,
-        &mut read,
-        &mut id,
-        Some(&session_id),
-        "Emulation.setDeviceMetricsOverride",
-        json!({ "width": width, "height": height, "deviceScaleFactor": 1, "mobile": false }),
-        wait,
-    )
-    .await?;
-    cdp_call(
-        &mut write,
-        &mut read,
-        &mut id,
-        Some(&session_id),
-        "Page.enable",
-        json!({}),
-        wait,
-    )
-    .await?;
-    cdp_call(
-        &mut write,
-        &mut read,
-        &mut id,
-        Some(&session_id),
-        "Page.navigate",
-        json!({ "url": url }),
-        wait,
-    )
-    .await?;
-    wait_for_page_ready(&mut write, &mut read, &mut id, &session_id, wait).await?;
-    wait_for_lucida_capture_ready(&mut write, &mut read, &mut id, &session_id, wait).await?;
-    let evaluated = cdp_call(
-        &mut write,
-        &mut read,
-        &mut id,
-        Some(&session_id),
-        "Runtime.evaluate",
-        json!({
-            "expression": "(() => { const a = window.__lucidaAutoContrast; return (a && Number.isFinite(a.min) && Number.isFinite(a.max)) ? [a.min, a.max] : null; })()",
-            "returnByValue": true
-        }),
-        wait,
-    )
-    .await?;
-    let window = evaluated
-        .get("result")
-        .and_then(|value| value.get("value"))
-        .and_then(|value| value.as_array())
-        .and_then(|arr| {
-            let lo = arr.first()?.as_f64()?;
-            let hi = arr.get(1)?.as_f64()?;
-            Some([lo, hi])
-        });
-    Ok(window)
-}
-
-/// Spawn one headless browser, load `url`, and return the dataset's
-/// auto-contrast window (`None` if unavailable). A small pre-pass for
-/// `dataset montage` so all cells can share one background-clipped window.
-async fn probe_montage_auto_contrast(
-    url: &str,
-    token: Option<&EffectiveToken>,
-    width: u32,
-    height: u32,
-    wait: Duration,
-) -> Result<Option<[f64; 2]>, CliError> {
-    let browser = find_browser_binary()?;
-    let user_data_dir = chrome_user_data_dir();
-    tokio::fs::create_dir_all(&user_data_dir).await?;
-    let mut child = TokioCommand::new(&browser)
-        .arg("--headless=new")
-        .arg("--enable-unsafe-webgpu")
-        .arg("--ignore-gpu-blocklist")
-        .arg("--no-first-run")
-        .arg("--no-default-browser-check")
-        .arg("--remote-debugging-port=0")
-        .arg(format!("--user-data-dir={}", user_data_dir.display()))
-        .arg(format!("--window-size={width},{height}"))
-        .arg("about:blank")
-        .stderr(Stdio::piped())
-        .stdout(Stdio::null())
-        .stdin(Stdio::null())
-        .spawn()
-        .map_err(|error| {
-            CliError::new(
-                ErrorKind::Config,
-                format!("failed to launch browser {browser:?}: {error}"),
-            )
-        })?;
-
-    let result = async {
-        let stderr = child.stderr.take().ok_or_else(|| {
-            CliError::new(
-                ErrorKind::Protocol,
-                "browser stderr was not available for DevTools discovery",
-            )
-        })?;
-        let endpoint = wait_for_devtools_endpoint(stderr, wait).await?;
-        capture_cdp_auto_contrast(&endpoint, url, token, width, height, wait).await
-    }
-    .await;
-
-    let _ = child.kill().await;
-    let _ = child.wait().await;
-    let _ = tokio::fs::remove_dir_all(&user_data_dir).await;
-    result
-}
-
-fn find_browser_binary() -> Result<String, CliError> {
-    if let Some(path) = std::env::var_os("LUCIDA_BROWSER") {
-        let path = path.to_string_lossy().to_string();
-        if Path::new(&path).exists() {
-            return Ok(path);
-        }
-        return Err(CliError::new(
-            ErrorKind::Config,
-            format!("LUCIDA_BROWSER points to a missing executable: {path}"),
-        ));
-    }
-
-    let absolute_candidates = [
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        "/Applications/Chromium.app/Contents/MacOS/Chromium",
-        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-    ];
-    for candidate in absolute_candidates {
-        if Path::new(candidate).exists() {
-            return Ok(candidate.to_string());
-        }
-    }
-
-    let path_candidates = [
-        "google-chrome",
-        "google-chrome-stable",
-        "chromium",
-        "chromium-browser",
-        "microsoft-edge",
-        "msedge",
-    ];
-    if let Some(paths) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&paths) {
-            for candidate in path_candidates {
-                let executable = dir.join(candidate);
-                if executable.is_file() {
-                    return Ok(executable.to_string_lossy().to_string());
-                }
-            }
-        }
-    }
-
-    Err(CliError::new(
-        ErrorKind::Config,
-        "could not find Chrome/Chromium; set LUCIDA_BROWSER to a browser executable",
-    ))
-}
-
-fn chrome_user_data_dir() -> std::path::PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    std::env::temp_dir().join(format!("lucida-cli-chrome-{}-{nanos}", std::process::id()))
-}
-
-async fn wait_for_devtools_endpoint<R>(stderr: R, wait: Duration) -> Result<String, CliError>
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    let mut lines = BufReader::new(stderr).lines();
-    tokio::time::timeout(wait, async {
-        while let Some(line) = lines.next_line().await? {
-            if let Some(endpoint) = line
-                .strip_prefix("DevTools listening on ")
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                return Ok(endpoint.to_string());
-            }
-        }
-        Err(CliError::new(
-            ErrorKind::Protocol,
-            "browser exited before printing a DevTools endpoint",
-        ))
-    })
-    .await
-    .map_err(|_| {
-        CliError::new(
-            ErrorKind::SessionDisconnect,
-            format!(
-                "timed out waiting for browser DevTools endpoint after {}s",
-                wait.as_secs()
-            ),
-        )
-    })?
-}
-
-async fn capture_cdp_png(
-    browser_ws_url: &str,
-    url: &str,
-    token: Option<&EffectiveToken>,
-    width: u32,
-    height: u32,
-    wait: Duration,
-) -> Result<Vec<u8>, CliError> {
-    let (socket, _response) = connect_async(browser_ws_url)
-        .await
-        .map_err(|error| CliError::new(ErrorKind::SessionDisconnect, error.to_string()))?;
-    let (mut write, mut read) = socket.split();
-    let mut id = 1_u64;
-
-    let created = cdp_call(
-        &mut write,
-        &mut read,
-        &mut id,
-        None,
-        "Target.createTarget",
-        json!({ "url": "about:blank" }),
-        wait,
-    )
-    .await?;
-    let target_id = created
-        .get("targetId")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| CliError::new(ErrorKind::Protocol, "CDP targetId was missing"))?
-        .to_string();
-    let attached = cdp_call(
-        &mut write,
-        &mut read,
-        &mut id,
-        None,
-        "Target.attachToTarget",
-        json!({ "targetId": target_id, "flatten": true }),
-        wait,
-    )
-    .await?;
-    let session_id = attached
-        .get("sessionId")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| CliError::new(ErrorKind::Protocol, "CDP sessionId was missing"))?
-        .to_string();
-
-    cdp_call(
-        &mut write,
-        &mut read,
-        &mut id,
-        Some(&session_id),
-        "Network.enable",
-        json!({}),
-        wait,
-    )
-    .await?;
-    if let Some(token) = token {
-        cdp_call(
-            &mut write,
-            &mut read,
-            &mut id,
-            Some(&session_id),
-            "Network.setExtraHTTPHeaders",
-            json!({ "headers": { "Authorization": format!("Bearer {}", token.token) } }),
-            wait,
-        )
-        .await?;
-    }
-    cdp_call(
-        &mut write,
-        &mut read,
-        &mut id,
-        Some(&session_id),
-        "Emulation.setDeviceMetricsOverride",
-        json!({
-            "width": width,
-            "height": height,
-            "deviceScaleFactor": 1,
-            "mobile": false
-        }),
-        wait,
-    )
-    .await?;
-    cdp_call(
-        &mut write,
-        &mut read,
-        &mut id,
-        Some(&session_id),
-        "Page.enable",
-        json!({}),
-        wait,
-    )
-    .await?;
-    cdp_call(
-        &mut write,
-        &mut read,
-        &mut id,
-        Some(&session_id),
-        "Page.navigate",
-        json!({ "url": url }),
-        wait,
-    )
-    .await?;
-    wait_for_page_ready(&mut write, &mut read, &mut id, &session_id, wait).await?;
-    wait_for_lucida_capture_ready(&mut write, &mut read, &mut id, &session_id, wait).await?;
-    let captured = cdp_call(
-        &mut write,
-        &mut read,
-        &mut id,
-        Some(&session_id),
-        "Page.captureScreenshot",
-        json!({ "format": "png", "fromSurface": true }),
-        wait,
-    )
-    .await?;
-    let data = captured
-        .get("data")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| CliError::new(ErrorKind::Protocol, "CDP screenshot data was missing"))?;
-    let png = base64::engine::general_purpose::STANDARD
-        .decode(data)
-        .map_err(|error| {
-            CliError::new(ErrorKind::Protocol, format!("invalid PNG data: {error}"))
-        })?;
-    ensure_png_signature(&png)?;
-    Ok(png)
-}
-
-async fn wait_for_page_ready<W, S>(
-    write: &mut W,
-    read: &mut S,
-    id: &mut u64,
-    session_id: &str,
-    wait: Duration,
-) -> Result<(), CliError>
-where
-    W: Sink<Message, Error = WebSocketError> + Unpin,
-    S: Stream<Item = Result<Message, WebSocketError>> + Unpin,
-{
-    let deadline = tokio::time::Instant::now() + wait;
-    loop {
-        let ready = cdp_call(
-            write,
-            read,
-            id,
-            Some(session_id),
-            "Runtime.evaluate",
-            json!({
-                "expression": "document.readyState === 'complete' && !!document.querySelector('canvas')",
-                "returnByValue": true
-            }),
-            wait,
-        )
-        .await?;
-        if ready
-            .get("result")
-            .and_then(|value| value.get("value"))
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false)
-        {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            return Ok(());
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Err(CliError::new(
-                ErrorKind::SessionDisconnect,
-                format!(
-                    "timed out waiting for viewer canvas after {}s",
-                    wait.as_secs()
-                ),
-            ));
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-}
-
-const LUCIDA_CAPTURE_READY_PROBE: &str = r#"(() => {
-  const canvas = document.querySelector('canvas');
-  if (!canvas) {
-    return {
-      ready: false,
-      reason: 'missing_canvas',
-      frame_count: 0,
-      dataset_count: 0,
-      canvas_width: 0,
-      canvas_height: 0,
-      mode: null
-    };
-  }
-  const canvasWidth = canvas.width || Math.floor(canvas.clientWidth);
-  const canvasHeight = canvas.height || Math.floor(canvas.clientHeight);
-  if (!canvasWidth || !canvasHeight) {
-    return {
-      ready: false,
-      reason: 'zero_size_canvas',
-      frame_count: 0,
-      dataset_count: 0,
-      canvas_width: canvasWidth || 0,
-      canvas_height: canvasHeight || 0,
-      mode: null
-    };
-  }
-  const state = window.__lucidaCaptureReady;
-  if (!state) {
-    return {
-      ready: false,
-      reason: 'missing_lucida_capture_ready',
-      frame_count: 0,
-      dataset_count: 0,
-      canvas_width: canvasWidth,
-      canvas_height: canvasHeight,
-      mode: null
-    };
-  }
-  const frameCount = Number(state.frameCount || 0);
-  const datasetCount = Number(state.datasetCount || 0);
-  const ready = Boolean(state.ready) && frameCount > 0 && datasetCount > 0;
-  return {
-    ready,
-    reason: ready ? 'rendered' : String(state.reason || 'not_ready'),
-    frame_count: frameCount,
-    dataset_count: datasetCount,
-    canvas_width: canvasWidth,
-    canvas_height: canvasHeight,
-    mode: state.mode || null
-  };
-})()"#;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CaptureReadyProbe {
-    ready: bool,
-    reason: String,
-    frame_count: u64,
-    dataset_count: u64,
-    canvas_width: u64,
-    canvas_height: u64,
-    mode: Option<String>,
-}
-
-async fn wait_for_lucida_capture_ready<W, S>(
-    write: &mut W,
-    read: &mut S,
-    id: &mut u64,
-    session_id: &str,
-    wait: Duration,
-) -> Result<(), CliError>
-where
-    W: Sink<Message, Error = WebSocketError> + Unpin,
-    S: Stream<Item = Result<Message, WebSocketError>> + Unpin,
-{
-    let deadline = tokio::time::Instant::now() + wait;
-    loop {
-        let result = cdp_call(
-            write,
-            read,
-            id,
-            Some(session_id),
-            "Runtime.evaluate",
-            json!({
-                "expression": LUCIDA_CAPTURE_READY_PROBE,
-                "returnByValue": true
-            }),
-            wait,
-        )
-        .await?;
-        let probe = capture_ready_probe_from_cdp_result(&result)?;
-        if probe.ready {
-            return Ok(());
-        }
-        if tokio::time::Instant::now() >= deadline {
-            let reason = capture_ready_probe_summary(&probe);
-            return Err(CliError::new(
-                ErrorKind::SessionDisconnect,
-                format!(
-                    "timed out waiting for Lucida viewer render after {}s ({reason})",
-                    wait.as_secs()
-                ),
-            ));
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-}
-
-fn capture_ready_probe_from_cdp_result(value: &Value) -> Result<CaptureReadyProbe, CliError> {
-    let probe = value
-        .get("result")
-        .and_then(|value| value.get("value"))
-        .ok_or_else(|| {
-            CliError::new(
-                ErrorKind::Protocol,
-                "capture-ready probe result was missing",
-            )
-        })?;
-    Ok(CaptureReadyProbe {
-        ready: probe
-            .get("ready")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false),
-        reason: probe
-            .get("reason")
-            .and_then(|value| value.as_str())
-            .unwrap_or("unknown")
-            .to_string(),
-        frame_count: probe
-            .get("frame_count")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(0),
-        dataset_count: probe
-            .get("dataset_count")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(0),
-        canvas_width: probe
-            .get("canvas_width")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(0),
-        canvas_height: probe
-            .get("canvas_height")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(0),
-        mode: probe
-            .get("mode")
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
-    })
-}
-
-fn capture_ready_probe_summary(probe: &CaptureReadyProbe) -> String {
-    format!(
-        "last probe: reason={}, frame_count={}, dataset_count={}, canvas={}x{}, mode={}",
-        probe.reason,
-        probe.frame_count,
-        probe.dataset_count,
-        probe.canvas_width,
-        probe.canvas_height,
-        probe.mode.as_deref().unwrap_or("unknown"),
-    )
-}
-
-fn ensure_png_signature(bytes: &[u8]) -> Result<(), CliError> {
-    if bytes.starts_with(PNG_SIGNATURE) {
-        return Ok(());
-    }
-    Err(CliError::new(
-        ErrorKind::Protocol,
-        "CDP screenshot did not return a PNG",
-    ))
-}
-
-async fn cdp_call<W, S>(
-    write: &mut W,
-    read: &mut S,
-    id: &mut u64,
-    session_id: Option<&str>,
-    method: &str,
-    params: Value,
-    wait: Duration,
-) -> Result<Value, CliError>
-where
-    W: Sink<Message, Error = WebSocketError> + Unpin,
-    S: Stream<Item = Result<Message, WebSocketError>> + Unpin,
-{
-    let request_id = *id;
-    *id += 1;
-    let mut message = json!({
-        "id": request_id,
-        "method": method,
-        "params": params,
-    });
-    if let Some(session_id) = session_id {
-        message["sessionId"] = json!(session_id);
-    }
-    write
-        .send(Message::Text(message.to_string().into()))
-        .await
-        .map_err(|error| CliError::new(ErrorKind::SessionDisconnect, error.to_string()))?;
-
-    tokio::time::timeout(wait, async {
-        while let Some(message) = read.next().await {
-            let Message::Text(text) = message
-                .map_err(|error| CliError::new(ErrorKind::SessionDisconnect, error.to_string()))?
-            else {
-                continue;
-            };
-            let value: Value = serde_json::from_str(&text).map_err(|error| {
-                CliError::new(ErrorKind::Protocol, format!("invalid CDP message: {error}"))
-            })?;
-            if value.get("id").and_then(|value| value.as_u64()) != Some(request_id) {
-                continue;
-            }
-            if let Some(error) = value.get("error") {
-                return Err(CliError::new(
-                    ErrorKind::Protocol,
-                    format!("CDP {method} failed: {error}"),
-                ));
-            }
-            return Ok(value.get("result").cloned().unwrap_or_else(|| json!({})));
-        }
-        Err(CliError::new(
-            ErrorKind::SessionDisconnect,
-            "browser DevTools connection closed",
-        ))
-    })
-    .await
-    .map_err(|_| {
-        CliError::new(
-            ErrorKind::SessionDisconnect,
-            format!(
-                "timed out waiting for CDP {method} after {}s",
-                wait.as_secs()
-            ),
-        )
-    })?
-}
-
 async fn emit_layout_command(
     cli: &Cli,
     config: &CliConfig,
@@ -4339,7 +3635,7 @@ async fn emit_layout_command(
     timeout_seconds: u64,
 ) -> Result<(), CliError> {
     let server = resolve_server(cli.server.as_deref(), config)?;
-    let token = resolve_token(&server.url, config);
+    let token = resolve_token(&server.url, config)?;
     let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
     let workspace = resolve_workspace_record(
         &workspace_client,
@@ -4411,7 +3707,7 @@ async fn load_status(
     config: &CliConfig,
 ) -> Result<StatusReport, CliError> {
     let server = resolve_server(server_override, config)?;
-    let token = resolve_token(&server.url, config).map(|effective| effective.token);
+    let token = resolve_token(&server.url, config)?.map(|effective| effective.token);
     let client = ServerClient::new(server.url.clone(), token);
     Ok(client.status_report(server).await)
 }
@@ -5084,7 +4380,7 @@ mod tests {
             "kids.png",
             "--cell-px",
             "256",
-            "--json",
+            "--write-sidecar",
             "--timeout-seconds",
             "15",
         ]);
@@ -5099,7 +4395,8 @@ mod tests {
                         breadcrumb,
                         out,
                         cell_px,
-                        json,
+                        device_scale_factor,
+                        write_sidecar,
                         timeout_seconds,
                     },
             } => {
@@ -5109,7 +4406,8 @@ mod tests {
                 assert_eq!(breadcrumb, "Home (fit dataset),Rotate right 45°");
                 assert_eq!(out.as_deref(), Some("kids.png"));
                 assert_eq!(cell_px, 256);
-                assert!(json);
+                assert_eq!(device_scale_factor, DEFAULT_DEVICE_SCALE_FACTOR);
+                assert!(write_sidecar);
                 assert_eq!(timeout_seconds, 15);
             }
             _ => panic!("expected dataset explore"),
@@ -5130,7 +4428,8 @@ mod tests {
                         breadcrumb,
                         out,
                         cell_px,
-                        json,
+                        device_scale_factor,
+                        write_sidecar,
                         timeout_seconds,
                     },
             } => {
@@ -5140,9 +4439,31 @@ mod tests {
                 assert!(breadcrumb.is_empty());
                 assert!(out.is_none());
                 assert_eq!(cell_px, 320);
-                assert!(!json);
+                assert_eq!(device_scale_factor, DEFAULT_DEVICE_SCALE_FACTOR);
+                assert!(!write_sidecar);
                 assert_eq!(timeout_seconds, 30);
             }
+            _ => panic!("expected dataset explore"),
+        }
+    }
+
+    #[test]
+    fn machine_output_and_sidecar_write_flags_are_independent() {
+        let machine_only = parse(&["dataset", "explore", "wds-2", "--json"]);
+        assert!(machine_only.json);
+        match machine_only.command {
+            Command::Dataset {
+                command: DatasetCommand::Explore { write_sidecar, .. },
+            } => assert!(!write_sidecar),
+            _ => panic!("expected dataset explore"),
+        }
+
+        let sidecar_only = parse(&["dataset", "explore", "wds-2", "--write-sidecar"]);
+        assert!(!sidecar_only.json);
+        match sidecar_only.command {
+            Command::Dataset {
+                command: DatasetCommand::Explore { write_sidecar, .. },
+            } => assert!(write_sidecar),
             _ => panic!("expected dataset explore"),
         }
     }
@@ -5174,6 +4495,34 @@ mod tests {
         let bad = read_view_arg("{not json");
         assert!(bad.is_err());
         assert_eq!(bad.unwrap_err().kind, ErrorKind::Config);
+    }
+
+    #[test]
+    fn read_view_arg_rejects_missing_legacy_and_future_saved_view_versions() {
+        let current = serde_json::to_value(SavedView::empty([800, 600])).unwrap();
+        for replacement in [
+            None,
+            Some(0),
+            Some(lucida_core::saved_view::SAVED_VIEW_VERSION + 1),
+        ] {
+            let mut candidate = current.clone();
+            let object = candidate.as_object_mut().unwrap();
+            match replacement {
+                Some(version) => {
+                    object.insert("v".into(), serde_json::json!(version));
+                }
+                None => {
+                    object.remove("v");
+                }
+            }
+            let error = parse_saved_view_json(&candidate.to_string()).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::Config);
+            assert!(
+                error.message.contains("version") || error.message.contains("missing field"),
+                "unexpected error for version {replacement:?}: {}",
+                error.message
+            );
+        }
     }
 
     #[test]
@@ -5536,6 +4885,7 @@ mod tests {
             Command::SavedView {
                 timeout_seconds,
                 command: SavedViewCommand::List,
+                ..
             } => assert_eq!(timeout_seconds, 9),
             _ => panic!("expected saved-view list"),
         }
@@ -5549,12 +4899,22 @@ mod tests {
             _ => panic!("expected saved-view show"),
         }
 
-        let apply = parse(&["saved-view", "apply", "Nice view"]);
+        let apply = parse(&[
+            "saved-view",
+            "--viewer-profile",
+            "analysis",
+            "apply",
+            "Nice view",
+        ]);
         match apply.command {
             Command::SavedView {
                 command: SavedViewCommand::Apply { saved_view },
+                viewer_profile,
                 ..
-            } => assert_eq!(saved_view, "Nice view"),
+            } => {
+                assert_eq!(saved_view, "Nice view");
+                assert_eq!(viewer_profile, "analysis");
+            }
             _ => panic!("expected saved-view apply"),
         }
 
@@ -5762,6 +5122,7 @@ mod tests {
                         from_peer,
                         width,
                         height,
+                        device_scale_factor,
                         timeout_seconds,
                     },
                 ..
@@ -5770,6 +5131,7 @@ mod tests {
                 assert_eq!(from_peer, Some(9));
                 assert_eq!(width, 900);
                 assert_eq!(height, 700);
+                assert_eq!(device_scale_factor, DEFAULT_DEVICE_SCALE_FACTOR);
                 assert_eq!(timeout_seconds, Some(60));
             }
             _ => panic!("expected viewer screenshot"),
@@ -5809,59 +5171,9 @@ mod tests {
         let mut decoder = flate2::read::GzDecoder::new(bytes.as_slice());
         let mut json = String::new();
         decoder.read_to_string(&mut json).unwrap();
-        let parsed: Value = serde_json::from_str(&json).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["v"].as_u64(), Some(view.v as u64));
         assert!(parsed["camera"].is_object());
-    }
-
-    #[test]
-    fn capture_ready_probe_parser_distinguishes_ready_and_waiting_results() {
-        let ready = capture_ready_probe_from_cdp_result(&json!({
-            "result": {
-                "value": {
-                    "ready": true,
-                    "reason": "rendered",
-                    "frame_count": 2,
-                    "dataset_count": 1,
-                    "canvas_width": 900,
-                    "canvas_height": 700,
-                    "mode": "slice"
-                }
-            }
-        }))
-        .unwrap();
-
-        assert!(ready.ready);
-        assert_eq!(ready.frame_count, 2);
-        assert_eq!(ready.mode.as_deref(), Some("slice"));
-
-        let waiting = capture_ready_probe_from_cdp_result(&json!({
-            "result": {
-                "value": {
-                    "ready": false,
-                    "reason": "dataset_added_waiting_for_render",
-                    "frame_count": 0,
-                    "dataset_count": 1,
-                    "canvas_width": 900,
-                    "canvas_height": 700,
-                    "mode": "slice"
-                }
-            }
-        }))
-        .unwrap();
-
-        assert!(!waiting.ready);
-        assert!(capture_ready_probe_summary(&waiting).contains("dataset_added_waiting_for_render"));
-    }
-
-    #[test]
-    fn screenshot_png_signature_is_validated() {
-        let mut png = Vec::from(PNG_SIGNATURE.as_slice());
-        png.extend_from_slice(b"rest of fake png");
-        ensure_png_signature(&png).unwrap();
-
-        let error = ensure_png_signature(b"not a png").unwrap_err();
-        assert_eq!(error.kind, ErrorKind::Protocol);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 {
   "type": "command",
+  "request_id": "req-golden",
   "command": {
     "type": "remove_comment",
     "dataset_id": "wds-0f3a",

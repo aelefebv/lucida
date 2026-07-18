@@ -9,6 +9,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { act, render, cleanup, screen } from "@testing-library/react";
 import { useAuthState } from "./useAuthState.ts";
 import type { AuthPrincipal } from "./types.ts";
+import { LogoutRequestError } from "./whoami.ts";
 
 // Mock the network layer so we control whoami / logout responses.
 const fetchAuthState = vi.fn();
@@ -31,7 +32,7 @@ const PRINCIPAL: AuthPrincipal = {
 };
 
 function Probe() {
-  const { state, signOut } = useAuthState();
+  const { state, logoutFailure, signOut } = useAuthState();
   const label = (() => {
     if ("status" in state && state.status === "loading") return "loading";
     if ("authenticated" in state && state.authenticated) {
@@ -43,6 +44,7 @@ function Probe() {
   return (
     <div>
       <span data-testid="state">{label}</span>
+      <span data-testid="logout-failure">{logoutFailure?.kind ?? "none"}</span>
       <button data-testid="signout" onClick={() => void signOut()}>signout</button>
     </div>
   );
@@ -90,5 +92,33 @@ describe("useAuthState", () => {
     // Two whoami calls total: mount + post-signOut refresh.
     expect(fetchAuthState).toHaveBeenCalledTimes(2);
     expect(screen.getByTestId("state").textContent).toBe("signed-out");
+  });
+
+  it("preserves a partial-signout error across the whoami refresh", async () => {
+    fetchAuthState
+      .mockResolvedValueOnce({ authenticated: true, principal: PRINCIPAL })
+      .mockResolvedValueOnce({ authenticated: false, signedOut: true });
+    postLogout.mockRejectedValueOnce(
+      new LogoutRequestError({
+        kind: "partial_signout",
+        message: "Stored session deletion failed.",
+        retryable: true,
+        localSession: "cleared",
+        status: 503,
+      }),
+    );
+
+    await act(async () => {
+      render(<Probe />);
+    });
+    await act(async () => {
+      screen.getByTestId("signout").click();
+    });
+
+    expect(fetchAuthState).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("state").textContent).toBe("signed-out");
+    expect(screen.getByTestId("logout-failure").textContent).toBe(
+      "partial_signout",
+    );
   });
 });

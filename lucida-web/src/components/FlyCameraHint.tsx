@@ -60,7 +60,7 @@ export function FlyCameraHint({ visible, onDismiss }: Props) {
         left: "50%",
         top: "60%",
         transform: "translateX(-50%)",
-        background: "rgba(0, 0, 0, 0.7)",
+        background: "var(--overlay-panel)",
         color: "white",
         fontSize: 14,
         padding: "8px 16px",

@@ -4,12 +4,14 @@ name: Release image
 # release-please PR (see .github/workflows/release-please.yml). End-to-
 # end: Conventional Commit on main -> release-please opens release PR ->
 # maintainer merges -> tag is pushed -> this workflow builds the multi-
-# arch image, generates SBOM + provenance, scans with Trivy, and pushes
-# to ghcr.io/aelefebv/lucida:<tag> (and :latest).
+# arch image, generates SBOM + provenance, scans every platform child of the
+# assembled candidate by immutable digest, and only then promotes that same
+# index digest to the version and latest tags. A failed scan cannot move either
+# public tag.
 #
 # Architecture: per-arch jobs build on NATIVE runners (no QEMU), push
-# the built image by digest, then a merge job assembles the multi-arch
-# manifest list pointing at both digests. This is the docker/build-push-
+# the built image by digest, then a candidate job assembles the multi-arch
+# manifest list under a non-release candidate tag. This is the docker/build-push-
 # action canonical pattern for multi-arch + native runners. QEMU emul-
 # ation of arm64 on amd64 hosts is 5-10x slower for Rust compilation
 # (the dominant cost in lucida's Dockerfile); v0.2.0 timed out at the
@@ -19,13 +21,8 @@ on:
   push:
     tags: ['v*']
 
-# packages:write is required to push to ghcr.io.
-# id-token:write is required for SBOM provenance attestation through buildx.
-# contents:read is the default-floor scope for actions/checkout.
-permissions:
-  contents: read
-  packages: write
-  id-token: write
+# Every job declares only the authority it needs.
+permissions: {}
 
 jobs:
   build:
@@ -35,55 +32,59 @@ jobs:
       matrix:
         include:
           - platform: linux/amd64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             artifact: amd64
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
             artifact: arm64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # Per-arch metadata; only labels are used at this stage. The full
-      # tag list (vX.Y.Z + latest) lands on the multi-arch manifest in
-      # the merge job below.
+      # tag list (vX.Y.Z + latest) lands on the multi-arch manifest only
+      # after the assembled candidate digest passes its scan.
       - name: Extract image metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ghcr.io/${{ github.repository }}
 
-      # Push by digest only — no human-readable tags yet. The merge job
-      # collects both digests and creates the multi-arch manifest list
-      # carrying the actual tags. push-by-digest=true means each per-arch
-      # build publishes a manifest reachable only by sha256:... — the
-      # merge step is what makes them addressable as :vX.Y.Z + :latest.
+      # Push by digest only — no human-readable tags yet. The candidate job
+      # collects both digests and creates an unpromoted multi-arch index.
+      # push-by-digest=true means each per-arch build is reachable only by
+      # sha256:... until the scan succeeds and promotion runs.
       - name: Build and push by digest
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           platforms: ${{ matrix.platform }}
+          build-args: LUCIDA_BUILD_VERSION=${{ github.ref_name }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true
-          # provenance requires id-token:write + omitting tags (handled by merge job)
+          # provenance requires id-token:write; release tags are added only by promote
           provenance: true
           sbom: true
 
-      # The merge job needs to know which digest each per-arch build
+      # The candidate job needs to know which digest each per-arch build
       # produced. Write the digest to a tiny file in a known location
-      # then upload as an artifact for the merge job to download.
+      # then upload as an artifact for the candidate job to download.
       - name: Export digest
         run: |
           mkdir -p ${{ runner.temp }}/digests
@@ -91,80 +92,177 @@ jobs:
           touch "${{ runner.temp }}/digests/${digest#sha256:}"
 
       - name: Upload digest
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: digest-${{ matrix.artifact }}
           path: ${{ runner.temp }}/digests/*
           if-no-files-found: error
           retention-days: 1
 
-  merge:
-    name: Merge per-arch manifests
+  candidate:
+    name: Assemble unpromoted candidate digest
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      packages: write
+    outputs:
+      image: ${{ steps.candidate.outputs.image }}
+      digest: ${{ steps.candidate.outputs.digest }}
     steps:
       - name: Download digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: ${{ runner.temp }}/digests
           pattern: digest-*
           merge-multiple: true
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Tag list resolved here, applied to the multi-arch manifest list
-      # produced below. type=ref,event=tag uses the pushed tag name
-      # (e.g. v0.2.0); type=raw,value=latest moves :latest to this tag.
-      - name: Extract manifest metadata
+      # The candidate tag is intentionally not a release/promotion tag. It
+      # gives the registry a name for the multi-arch index so Trivy can scan
+      # its immutable digest before vX.Y.Z or latest are touched.
+      - name: Create candidate index and export its digest
+        id: candidate
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+          CANDIDATE_TAG: candidate-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --tag "${IMAGE}:${CANDIDATE_TAG}" \
+            $(printf 'ghcr.io/${{ github.repository }}@sha256:%s ' *)
+          digest="$(docker buildx imagetools inspect \
+            "${IMAGE}:${CANDIDATE_TAG}" --format '{{json .Manifest}}' | jq -r '.digest')"
+          test -n "$digest"
+          test "$digest" != "null"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          docker buildx imagetools inspect "${IMAGE}@${digest}"
+
+  scan:
+    name: Trivy scan ${{ matrix.platform }} (block on CRITICAL)
+    needs: candidate
+    strategy:
+      # Report every architecture's result even when another child fails.
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+          - platform: linux/arm64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR for private forks
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Select one child manifest from the exact candidate index that promote
+      # consumes. Requiring one match makes a missing or duplicate architecture
+      # fail closed instead of letting Trivy choose the runner's default child.
+      - name: Resolve immutable ${{ matrix.platform }} child digest
+        id: child
+        env:
+          IMAGE: ${{ needs.candidate.outputs.image }}
+          CANDIDATE_DIGEST: ${{ needs.candidate.outputs.digest }}
+          EXPECTED_PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          os="${EXPECTED_PLATFORM%/*}"
+          architecture="${EXPECTED_PLATFORM#*/}"
+          index="$(docker buildx imagetools inspect \
+            "${IMAGE}@${CANDIDATE_DIGEST}" --raw)"
+          descriptor_count="$(jq --arg os "$os" --arg architecture "$architecture" \
+            '[.manifests[] | select(.platform.os == $os and .platform.architecture == $architecture)] | length' \
+            <<< "$index")"
+          if [[ "$descriptor_count" != 1 ]]; then
+            echo "::error::Candidate ${CANDIDATE_DIGEST} has ${descriptor_count} descriptors for ${EXPECTED_PLATFORM}; expected exactly one"
+            exit 1
+          fi
+          digest="$(jq -r --arg os "$os" --arg architecture "$architecture" \
+            '.manifests[] | select(.platform.os == $os and .platform.architecture == $architecture) | .digest' \
+            <<< "$index")"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Invalid ${EXPECTED_PLATFORM} child digest: ${digest}"
+            exit 1
+          fi
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      # Initially permissive: only fail on CRITICAL severity, ignore
+      # unfixed CVEs. Adopters / maintainers can tighten over time
+      # (HIGH, MEDIUM) once the upstream image's CVE baseline is known.
+      # ignore-unfixed avoids blocking on CVEs whose only "fix" is
+      # waiting for an upstream package update we don't control.
+      - name: Trivy scan ${{ matrix.platform }} child
+        uses: aquasecurity/trivy-action@c07df6fec6fa692e6fd1200d50aaa1fdd66f03c8 # master 2026-07-16
+        with:
+          image-ref: ${{ needs.candidate.outputs.image }}@${{ steps.child.outputs.digest }}
+          version: v0.72.0
+          format: table
+          exit-code: '1'
+          severity: CRITICAL
+          ignore-unfixed: true
+
+  promote:
+    name: Promote scanned digest to release tags
+    needs: [candidate, scan]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve release tags
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=ref,event=tag
             type=raw,value=latest
 
-      # Assemble the manifest list from the per-arch digests and push
-      # under all the resolved tags. `docker buildx imagetools create`
-      # is registry-side: no image pull/push of the actual layers, just
-      # a manifest write. Sub-second.
-      - name: Create and push manifest list
-        working-directory: ${{ runner.temp }}/digests
+      - name: Promote the scanned digest
+        env:
+          IMAGE: ${{ needs.candidate.outputs.image }}
+          DIGEST: ${{ needs.candidate.outputs.digest }}
         run: |
+          set -euo pipefail
           docker buildx imagetools create \
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf 'ghcr.io/${{ github.repository }}@sha256:%s ' *)
+            "${IMAGE}@${DIGEST}"
 
-      - name: Inspect manifest
-        run: |
-          docker buildx imagetools inspect \
-            ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.version }}
-
-  scan:
-    name: Trivy scan (block on CRITICAL)
-    needs: merge
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      # Initially permissive: only fail on CRITICAL severity, ignore
-      # unfixed CVEs. Adopters / maintainers can tighten over time
-      # (HIGH, MEDIUM) once the upstream image's CVE baseline is known.
-      # ignore-unfixed avoids blocking on CVEs whose only "fix" is
-      # waiting for an upstream package update we don't control.
-      - name: Trivy scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ghcr.io/${{ github.repository }}:${{ github.ref_name }}
-          format: table
-          exit-code: '1'
-          severity: CRITICAL
-          ignore-unfixed: true
+          while IFS= read -r tag; do
+            actual="$(docker buildx imagetools inspect "$tag" \
+              --format '{{json .Manifest}}' | jq -r '.digest')"
+            if [[ "$actual" != "$DIGEST" ]]; then
+              echo "::error::Promoted tag $tag points to $actual, expected $DIGEST"
+              exit 1
+            fi
+          done < <(jq -r '.tags[]' <<< "$DOCKER_METADATA_OUTPUT_JSON")

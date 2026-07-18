@@ -1,13 +1,15 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use indexmap::IndexMap;
 use lucida_content::{DatasetId, DatasetKind, DatasetManifest, EntityId, LayoutId, LayoutSpec};
-use lucida_protocol::AssetCatalog;
 
 use crate::chunk::ChunkCoord;
 use crate::command::DocumentCommand;
+use crate::quota::{MAX_COMMAND_JSON_BYTES, MAX_DOCUMENT_JSON_BYTES, to_json_vec_bounded};
+use crate::saved_view::{SAVED_VIEW_VERSION, SavedView};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -110,6 +112,11 @@ fn default_channel_blend_mode() -> BlendMode {
 /// existed), leaving the intensity data visible underneath. This hidden default
 /// is what a label with no explicit per-mask setting resolves to; an explicit
 /// on/off recorded by the user is honored verbatim and never overridden.
+pub const DEFAULT_LABEL_VISIBLE: bool = false;
+
+/// Default label overlay strength, mirrored by `lucida-web/src/labelSettings.ts`.
+pub const DEFAULT_LABEL_OPACITY: f32 = 0.5;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LabelSettings {
     pub visible: bool,
@@ -119,8 +126,8 @@ pub struct LabelSettings {
 impl Default for LabelSettings {
     fn default() -> Self {
         Self {
-            visible: false,
-            opacity: 0.5,
+            visible: DEFAULT_LABEL_VISIBLE,
+            opacity: DEFAULT_LABEL_OPACITY,
         }
     }
 }
@@ -256,8 +263,8 @@ impl DatasetDisplaySettings {
                 // the ones they want. All at 0.5 (the opacity a mask composites
                 // at once turned on).
                 .map(|_| LabelSettings {
-                    visible: false,
-                    opacity: 0.5,
+                    visible: DEFAULT_LABEL_VISIBLE,
+                    opacity: DEFAULT_LABEL_OPACITY,
                 })
                 .collect(),
             // Stamp the current label names alongside the per-label settings so
@@ -702,13 +709,8 @@ pub struct DocumentState {
     pub registered_layouts: HashMap<DatasetId, Vec<LayoutSpec>>,
     #[serde(default)]
     pub active_layout_ids: HashMap<DatasetId, LayoutId>,
-    /// Per-dataset asset catalog (proxy availability). Populated via
-    /// `DatasetOpened.catalog` on open and incrementally via
-    /// `DocumentCommand::ApplyAssetCatalogDelta`.
-    #[serde(default)]
-    pub asset_catalogs: IndexMap<DatasetId, AssetCatalog>,
-    /// Per-dataset collaborative annotations, keyed by dataset id (mirrors
-    /// `asset_catalogs`). Populated via `DocumentCommand::AddAnnotation` /
+    /// Per-dataset collaborative annotations, keyed by dataset id. Populated via
+    /// `DocumentCommand::AddAnnotation` /
     /// `RemoveAnnotation`. `#[serde(default)]` so this persists and restores
     /// for free through the existing `document_json` blob and older snapshots
     /// (without the field) still deserialize.
@@ -716,7 +718,628 @@ pub struct DocumentState {
     pub annotations: IndexMap<DatasetId, Vec<Annotation>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandValidationCategory {
+    MissingReference,
+    Duplicate,
+    InvalidValue,
+    OutOfBounds,
+    InconsistentState,
+    ResourceLimit,
+    Serialization,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandValidationError {
+    pub category: CommandValidationCategory,
+    pub path: String,
+    pub message: String,
+}
+
+impl CommandValidationError {
+    fn new(
+        category: CommandValidationCategory,
+        path: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            category,
+            path: path.into(),
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for CommandValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {} ({:?})", self.path, self.message, self.category)
+    }
+}
+
+impl std::error::Error for CommandValidationError {}
+
+const MAX_COMMAND_TEXT_BYTES: usize = 256 * 1024;
+const MAX_COMMAND_ID_BYTES: usize = 1024;
+const MAX_ANNOTATIONS_PER_DATASET: usize = 100_000;
+const MAX_COMMENTS_PER_ANNOTATION: usize = 4096;
+
+fn serialization_error(error: serde_json::Error) -> CommandValidationError {
+    CommandValidationError::new(
+        CommandValidationCategory::Serialization,
+        "document_json",
+        error.to_string(),
+    )
+}
+
+fn validate_text(path: &str, value: &str, allow_empty: bool) -> Result<(), CommandValidationError> {
+    if !allow_empty && value.is_empty() {
+        return Err(CommandValidationError::new(
+            CommandValidationCategory::InvalidValue,
+            path,
+            "value must not be empty",
+        ));
+    }
+    let limit = if allow_empty {
+        MAX_COMMAND_TEXT_BYTES
+    } else {
+        MAX_COMMAND_ID_BYTES
+    };
+    if value.len() > limit {
+        return Err(CommandValidationError::new(
+            CommandValidationCategory::ResourceLimit,
+            path,
+            format!("value is {} bytes; limit is {limit}", value.len()),
+        ));
+    }
+    if value.contains('\0') {
+        return Err(CommandValidationError::new(
+            CommandValidationCategory::InvalidValue,
+            path,
+            "value contains a NUL byte",
+        ));
+    }
+    Ok(())
+}
+
+fn missing_dataset(path: &str, dataset_id: &DatasetId) -> CommandValidationError {
+    CommandValidationError::new(
+        CommandValidationCategory::MissingReference,
+        path,
+        format!("unknown dataset '{}'", dataset_id.0),
+    )
+}
+
+fn require_dataset<'a>(
+    state: &'a DocumentState,
+    path: &str,
+    dataset_id: &DatasetId,
+) -> Result<&'a DatasetManifest, CommandValidationError> {
+    state
+        .manifests
+        .get(dataset_id)
+        .ok_or_else(|| missing_dataset(path, dataset_id))
+}
+
+fn validate_layout(
+    layout: &LayoutSpec,
+    manifest: &DatasetManifest,
+    path: &str,
+) -> Result<(), CommandValidationError> {
+    validate_text(&format!("{path}.id"), &layout.id.0, false)?;
+    validate_text(&format!("{path}.name"), &layout.name, true)?;
+    if layout.placements.len() > manifest.entities().len() {
+        return Err(CommandValidationError::new(
+            CommandValidationCategory::ResourceLimit,
+            format!("{path}.placements"),
+            "layout has more placements than manifest entities",
+        ));
+    }
+    let mut placed = HashSet::with_capacity(layout.placements.len());
+    for (index, placement) in layout.placements.iter().enumerate() {
+        if !manifest
+            .entities()
+            .iter()
+            .any(|entity| entity.id == placement.entity_id)
+        {
+            return Err(CommandValidationError::new(
+                CommandValidationCategory::MissingReference,
+                format!("{path}.placements[{index}].entity_id"),
+                format!("unknown entity '{}'", placement.entity_id.0),
+            ));
+        }
+        if !placed.insert(&placement.entity_id) {
+            return Err(CommandValidationError::new(
+                CommandValidationCategory::Duplicate,
+                format!("{path}.placements[{index}].entity_id"),
+                "entity is placed more than once",
+            ));
+        }
+        if !placement.position.iter().all(|value| value.is_finite()) {
+            return Err(CommandValidationError::new(
+                CommandValidationCategory::InvalidValue,
+                format!("{path}.placements[{index}].position"),
+                "layout position must be finite",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_geometry(
+    path: &str,
+    position: [f64; 2],
+    end: Option<[f64; 2]>,
+    z: f64,
+) -> Result<(), CommandValidationError> {
+    if !position.iter().all(|value| value.is_finite())
+        || !z.is_finite()
+        || end.is_some_and(|vertex| !vertex.iter().all(|value| value.is_finite()))
+    {
+        return Err(CommandValidationError::new(
+            CommandValidationCategory::InvalidValue,
+            format!("{path}.geometry"),
+            "annotation geometry must be finite",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_embedded_view(
+    state: &DocumentState,
+    view: &SavedView,
+) -> Result<(), CommandValidationError> {
+    if view.v != SAVED_VIEW_VERSION {
+        return Err(CommandValidationError::new(
+            CommandValidationCategory::InvalidValue,
+            "add_annotation.view.v",
+            format!(
+                "saved view version {} is unsupported; expected {SAVED_VIEW_VERSION}",
+                view.v
+            ),
+        ));
+    }
+    let referenced_count = view
+        .active_layouts
+        .len()
+        .saturating_add(view.dataset_order.len())
+        .saturating_add(view.dataset_settings.len())
+        .saturating_add(view.auto_contrast.len());
+    if referenced_count > 4096 {
+        return Err(CommandValidationError::new(
+            CommandValidationCategory::ResourceLimit,
+            "add_annotation.view",
+            "saved view contains too many dataset references",
+        ));
+    }
+    let mut ordered = HashSet::with_capacity(view.dataset_order.len());
+    for dataset_id in &view.dataset_order {
+        validate_text("add_annotation.view.dataset_id", &dataset_id.0, false)?;
+        require_dataset(state, "add_annotation.view.dataset_id", dataset_id)?;
+        if !ordered.insert(dataset_id) {
+            return Err(CommandValidationError::new(
+                CommandValidationCategory::Duplicate,
+                "add_annotation.view.dataset_order",
+                format!("dataset '{}' appears more than once", dataset_id.0),
+            ));
+        }
+    }
+    for (dataset_id, layout_id) in &view.active_layouts {
+        validate_text("add_annotation.view.dataset_id", &dataset_id.0, false)?;
+        validate_text("add_annotation.view.layout_id", &layout_id.0, false)?;
+        require_dataset(state, "add_annotation.view.dataset_id", dataset_id)?;
+    }
+    for dataset_id in view
+        .dataset_settings
+        .keys()
+        .chain(view.auto_contrast.keys())
+    {
+        validate_text("add_annotation.view.dataset_id", &dataset_id.0, false)?;
+        require_dataset(state, "add_annotation.view.dataset_id", dataset_id)?;
+    }
+    Ok(())
+}
+
+fn validate_tc(
+    manifest: &DatasetManifest,
+    t: i64,
+    c: i64,
+    path: &str,
+) -> Result<(), CommandValidationError> {
+    let (max_t, max_c) = manifest
+        .images()
+        .iter()
+        .filter_map(|image| image.multiscale.levels.first())
+        .fold((1u64, 1u64), |(max_t, max_c), level| {
+            (max_t.max(level.shape[0]), max_c.max(level.shape[1]))
+        });
+    let valid_t = u64::try_from(t).is_ok_and(|value| value < max_t);
+    let valid_c = u64::try_from(c).is_ok_and(|value| value < max_c);
+    if !valid_t || !valid_c {
+        return Err(CommandValidationError::new(
+            CommandValidationCategory::OutOfBounds,
+            format!("{path}.t_c"),
+            format!("t={t}, c={c} outside dataset bounds t<{max_t}, c<{max_c}"),
+        ));
+    }
+    Ok(())
+}
+
 impl DocumentState {
+    /// Check a command against the current document without mutating it.
+    pub fn validate_command(
+        &self,
+        command: &DocumentCommand,
+    ) -> Result<(), CommandValidationError> {
+        to_json_vec_bounded(command, MAX_COMMAND_JSON_BYTES).map_err(|error| {
+            CommandValidationError::new(
+                CommandValidationCategory::ResourceLimit,
+                "command_json",
+                error.to_string(),
+            )
+        })?;
+        let target_dataset_id = match command {
+            DocumentCommand::DatasetOpened(_) => None,
+            DocumentCommand::RemoveDataset { id } | DocumentCommand::RenameDataset { id, .. } => {
+                Some(id)
+            }
+            DocumentCommand::RegisterLayout { dataset_id, .. }
+            | DocumentCommand::SetActiveLayout { dataset_id, .. }
+            | DocumentCommand::AddAnnotation { dataset_id, .. }
+            | DocumentCommand::RemoveAnnotation { dataset_id, .. }
+            | DocumentCommand::MoveAnnotation { dataset_id, .. }
+            | DocumentCommand::AddComment { dataset_id, .. }
+            | DocumentCommand::RemoveComment { dataset_id, .. }
+            | DocumentCommand::EditComment { dataset_id, .. } => Some(dataset_id),
+        };
+        if let Some(dataset_id) = target_dataset_id {
+            validate_text("command.dataset_id", &dataset_id.0, false)?;
+        }
+        match command {
+            DocumentCommand::DatasetOpened(event) => {
+                event.validate().map_err(|error| {
+                    CommandValidationError::new(
+                        CommandValidationCategory::InconsistentState,
+                        format!("dataset_opened.{}", error.path),
+                        error.message,
+                    )
+                })?;
+            }
+            DocumentCommand::RemoveDataset { .. } => {}
+            DocumentCommand::RenameDataset { name, .. } => {
+                validate_text("rename_dataset.name", name, true)?;
+            }
+            DocumentCommand::RegisterLayout { dataset_id, layout } => {
+                let manifest = self
+                    .manifests
+                    .get(dataset_id)
+                    .ok_or_else(|| missing_dataset("register_layout.dataset_id", dataset_id))?;
+                validate_layout(layout, manifest, "register_layout.layout")?;
+                if let Some(existing) = self
+                    .registered_layouts
+                    .get(dataset_id)
+                    .and_then(|layouts| layouts.iter().find(|candidate| candidate.id == layout.id))
+                {
+                    let existing = serde_json::to_value(existing).map_err(serialization_error)?;
+                    let incoming = serde_json::to_value(layout).map_err(serialization_error)?;
+                    if existing != incoming {
+                        return Err(CommandValidationError::new(
+                            CommandValidationCategory::Duplicate,
+                            "register_layout.layout.id",
+                            "layout id is already registered with different content",
+                        ));
+                    }
+                }
+            }
+            DocumentCommand::SetActiveLayout {
+                dataset_id,
+                layout_id,
+            } => {
+                validate_text("set_active_layout.layout_id", &layout_id.0, false)?;
+                let manifest = self
+                    .manifests
+                    .get(dataset_id)
+                    .ok_or_else(|| missing_dataset("set_active_layout.dataset_id", dataset_id))?;
+                let exists = manifest
+                    .source_layouts()
+                    .iter()
+                    .any(|layout| layout.id == *layout_id)
+                    || self
+                        .registered_layouts
+                        .get(dataset_id)
+                        .is_some_and(|layouts| {
+                            layouts.iter().any(|layout| layout.id == *layout_id)
+                        });
+                if !exists {
+                    return Err(CommandValidationError::new(
+                        CommandValidationCategory::MissingReference,
+                        "set_active_layout.layout_id",
+                        format!("unknown layout '{}'", layout_id.0),
+                    ));
+                }
+            }
+            DocumentCommand::AddAnnotation {
+                dataset_id,
+                id,
+                position,
+                end,
+                z,
+                t,
+                c,
+                author,
+                kind,
+                view,
+                ..
+            } => {
+                let manifest = require_dataset(self, "add_annotation.dataset_id", dataset_id)?;
+                validate_text("add_annotation.id", id, false)?;
+                validate_text("add_annotation.author", author, true)?;
+                validate_geometry("add_annotation", *position, *end, *z)?;
+                match (kind, end) {
+                    (AnnotationKind::Point, Some(_)) => {
+                        return Err(CommandValidationError::new(
+                            CommandValidationCategory::InconsistentState,
+                            "add_annotation.end",
+                            "point annotations cannot have a second vertex",
+                        ));
+                    }
+                    (AnnotationKind::Line | AnnotationKind::Box, None) => {
+                        return Err(CommandValidationError::new(
+                            CommandValidationCategory::InconsistentState,
+                            "add_annotation.end",
+                            "line and box annotations require a second vertex",
+                        ));
+                    }
+                    _ => {}
+                }
+                validate_tc(manifest, *t, *c, "add_annotation")?;
+                if let Some(view) = view {
+                    validate_embedded_view(self, view)?;
+                }
+                let count = self.annotations.get(dataset_id).map_or(0, Vec::len);
+                let replaces_existing = self
+                    .annotations
+                    .get(dataset_id)
+                    .is_some_and(|items| items.iter().any(|item| item.id == *id));
+                if count >= MAX_ANNOTATIONS_PER_DATASET && !replaces_existing {
+                    return Err(CommandValidationError::new(
+                        CommandValidationCategory::ResourceLimit,
+                        "add_annotation",
+                        "annotation count exceeds admission limit",
+                    ));
+                }
+            }
+            DocumentCommand::RemoveAnnotation { id, .. } => {
+                validate_text("remove_annotation.id", id, false)?;
+            }
+            DocumentCommand::MoveAnnotation {
+                dataset_id,
+                id,
+                position,
+                end,
+                z,
+            } => {
+                require_dataset(self, "move_annotation.dataset_id", dataset_id)?;
+                validate_text("move_annotation.id", id, false)?;
+                validate_geometry("move_annotation", *position, *end, *z)?;
+                if end.is_none()
+                    && let Some(annotation) = self
+                        .annotations
+                        .get(dataset_id)
+                        .and_then(|items| items.iter().find(|item| item.id == *id))
+                    && let Some(old_end) = annotation.end
+                {
+                    let dx = position[0] - annotation.position[0];
+                    let dy = position[1] - annotation.position[1];
+                    if !dx.is_finite()
+                        || !dy.is_finite()
+                        || !(old_end[0] + dx).is_finite()
+                        || !(old_end[1] + dy).is_finite()
+                    {
+                        return Err(CommandValidationError::new(
+                            CommandValidationCategory::OutOfBounds,
+                            "move_annotation.position",
+                            "rigid translation would produce non-finite geometry",
+                        ));
+                    }
+                }
+            }
+            DocumentCommand::AddComment {
+                dataset_id,
+                annotation_id,
+                id,
+                author,
+                text,
+            } => {
+                require_dataset(self, "add_comment.dataset_id", dataset_id)?;
+                validate_text("add_comment.annotation_id", annotation_id, false)?;
+                validate_text("add_comment.id", id, false)?;
+                validate_text("add_comment.author", author, true)?;
+                validate_text("add_comment.text", text, true)?;
+                if let Some(annotation) = self
+                    .annotations
+                    .get(dataset_id)
+                    .and_then(|items| items.iter().find(|item| item.id == *annotation_id))
+                    && annotation.comments.len() >= MAX_COMMENTS_PER_ANNOTATION
+                    && !annotation.comments.iter().any(|comment| comment.id == *id)
+                {
+                    return Err(CommandValidationError::new(
+                        CommandValidationCategory::ResourceLimit,
+                        "add_comment",
+                        "comment count exceeds admission limit",
+                    ));
+                }
+            }
+            DocumentCommand::RemoveComment {
+                annotation_id, id, ..
+            }
+            | DocumentCommand::EditComment {
+                annotation_id, id, ..
+            } => {
+                validate_text("comment.annotation_id", annotation_id, false)?;
+                validate_text("comment.id", id, false)?;
+                if let DocumentCommand::EditComment { text, .. } = command {
+                    validate_text("edit_comment.text", text, true)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Atomically validate, apply, validate the resulting graph, and prove it
+    /// still round-trips through the persisted JSON representation.
+    pub fn try_apply(&mut self, command: DocumentCommand) -> Result<(), CommandValidationError> {
+        self.validate_command(&command)?;
+        let mut candidate = self.clone();
+        candidate.apply(command);
+        candidate.validate_state()?;
+        *self = candidate;
+        Ok(())
+    }
+
+    fn validate_structure(&self) -> Result<(), CommandValidationError> {
+        for (dataset_id, manifest) in &self.manifests {
+            if dataset_id != &manifest.dataset_id {
+                return Err(CommandValidationError::new(
+                    CommandValidationCategory::InconsistentState,
+                    "manifests",
+                    "manifest map key differs from embedded dataset id",
+                ));
+            }
+            manifest.validate().map_err(|errors| {
+                CommandValidationError::new(
+                    CommandValidationCategory::InconsistentState,
+                    format!("manifests[{}]", dataset_id.0),
+                    errors.to_string(),
+                )
+            })?;
+        }
+        for (dataset_id, layouts) in &self.registered_layouts {
+            let manifest = require_dataset(self, "registered_layouts", dataset_id)?;
+            let mut ids = HashSet::with_capacity(layouts.len());
+            for (index, layout) in layouts.iter().enumerate() {
+                validate_layout(
+                    layout,
+                    manifest,
+                    &format!("registered_layouts[{}][{index}]", dataset_id.0),
+                )?;
+                if !ids.insert(&layout.id) {
+                    return Err(CommandValidationError::new(
+                        CommandValidationCategory::Duplicate,
+                        "registered_layouts",
+                        "duplicate layout id",
+                    ));
+                }
+            }
+        }
+        for (dataset_id, active) in &self.active_layout_ids {
+            let manifest = require_dataset(self, "active_layout_ids", dataset_id)?;
+            let exists = manifest
+                .source_layouts()
+                .iter()
+                .any(|layout| layout.id == *active)
+                || self
+                    .registered_layouts
+                    .get(dataset_id)
+                    .is_some_and(|layouts| layouts.iter().any(|layout| layout.id == *active));
+            if !exists {
+                return Err(CommandValidationError::new(
+                    CommandValidationCategory::MissingReference,
+                    "active_layout_ids",
+                    format!("unknown active layout '{}'", active.0),
+                ));
+            }
+        }
+        for (dataset_id, annotations) in &self.annotations {
+            let manifest = require_dataset(self, "annotations", dataset_id)?;
+            if annotations.len() > MAX_ANNOTATIONS_PER_DATASET {
+                return Err(CommandValidationError::new(
+                    CommandValidationCategory::ResourceLimit,
+                    "annotations",
+                    "annotation count exceeds admission limit",
+                ));
+            }
+            let mut ids = HashSet::with_capacity(annotations.len());
+            for (index, annotation) in annotations.iter().enumerate() {
+                let path = format!("annotations[{}][{index}]", dataset_id.0);
+                validate_text(&format!("{path}.id"), &annotation.id, false)?;
+                if !ids.insert(&annotation.id) {
+                    return Err(CommandValidationError::new(
+                        CommandValidationCategory::Duplicate,
+                        format!("{path}.id"),
+                        "duplicate annotation id",
+                    ));
+                }
+                validate_geometry(&path, annotation.position, annotation.end, annotation.z)?;
+                validate_tc(manifest, annotation.t, annotation.c, &path)?;
+                if let Some(anchor) = &annotation.anchor
+                    && !manifest
+                        .entities()
+                        .iter()
+                        .any(|entity| entity.id == *anchor)
+                {
+                    return Err(CommandValidationError::new(
+                        CommandValidationCategory::MissingReference,
+                        format!("{path}.anchor"),
+                        "annotation anchor is not a manifest entity",
+                    ));
+                }
+                if annotation.comments.len() > MAX_COMMENTS_PER_ANNOTATION {
+                    return Err(CommandValidationError::new(
+                        CommandValidationCategory::ResourceLimit,
+                        format!("{path}.comments"),
+                        "comment count exceeds admission limit",
+                    ));
+                }
+                let mut comment_ids = HashSet::with_capacity(annotation.comments.len());
+                for (comment_index, comment) in annotation.comments.iter().enumerate() {
+                    validate_text(
+                        &format!("{path}.comments[{comment_index}].id"),
+                        &comment.id,
+                        false,
+                    )?;
+                    validate_text(
+                        &format!("{path}.comments[{comment_index}].author"),
+                        &comment.author,
+                        true,
+                    )?;
+                    validate_text(
+                        &format!("{path}.comments[{comment_index}].text"),
+                        &comment.text,
+                        true,
+                    )?;
+                    if !comment_ids.insert(&comment.id) {
+                        return Err(CommandValidationError::new(
+                            CommandValidationCategory::Duplicate,
+                            format!("{path}.comments[{comment_index}].id"),
+                            "duplicate comment id",
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate the graph and produce the exact bounded representation used by
+    /// persistence. Callers that need bytes should use this instead of
+    /// validating and serializing the document twice.
+    pub fn to_validated_json(&self) -> Result<Vec<u8>, CommandValidationError> {
+        self.validate_structure()?;
+        let encoded = to_json_vec_bounded(self, MAX_DOCUMENT_JSON_BYTES).map_err(|error| {
+            CommandValidationError::new(
+                CommandValidationCategory::ResourceLimit,
+                "document_json",
+                error.to_string(),
+            )
+        })?;
+        let _: DocumentState = serde_json::from_slice(&encoded).map_err(serialization_error)?;
+        Ok(encoded)
+    }
+
+    pub fn validate_state(&self) -> Result<(), CommandValidationError> {
+        self.to_validated_json().map(|_| ())
+    }
     /// Register (or replace) a dataset manifest by dataset id.
     pub fn register_dataset(&mut self, manifest: lucida_content::DatasetManifest) {
         self.manifests.insert(manifest.dataset_id.clone(), manifest);
@@ -733,7 +1356,7 @@ impl DocumentState {
     /// - `None` → **drops** the entry entirely.
     ///
     /// The id-keyed maps it covers are `manifests`, `registered_layouts`,
-    /// `active_layout_ids`, `asset_catalogs`, and `annotations`. It also keeps
+    /// `active_layout_ids`, and `annotations`. It also keeps
     /// the two *embedded* ids consistent on kept entries: a manifest's own
     /// `manifest.dataset_id` is rewritten to its entry's new key, and each kept
     /// annotation list is handed (with its new key) to `on_kept_annotations`
@@ -782,7 +1405,6 @@ impl DocumentState {
         });
         rekey(&mut self.registered_layouts, &fate, |_, _| {});
         rekey(&mut self.active_layout_ids, &fate, |_, _| {});
-        rekey(&mut self.asset_catalogs, &fate, |_, _| {});
         rekey(&mut self.annotations, &fate, |new_id, anns| {
             on_kept_annotations(new_id, anns);
         });
@@ -792,8 +1414,8 @@ impl DocumentState {
     /// `remap` (old id → new id), preserving insertion order.
     ///
     /// Every map in the document is keyed by the workspace-local dataset id
-    /// (`manifests`, `registered_layouts`, `active_layout_ids`,
-    /// `asset_catalogs`, `annotations`), and each manifest *also* carries its
+    /// (`manifests`, `registered_layouts`, `active_layout_ids`, `annotations`),
+    /// and each manifest *also* carries its
     /// own id in `manifest.dataset_id`. When a workspace is duplicated the copy
     /// mints fresh ids for its datasets, so the source document copied verbatim
     /// would reference the source's (now-foreign) ids. This remaps both the
@@ -876,7 +1498,7 @@ impl DocumentState {
 
     /// Rename a dataset's display label in place by id. Overwrites only the
     /// manifest's `name`; the manifest's `dataset_id`, images, transforms,
-    /// and the dataset's asset catalog / annotations are untouched. No-op if
+    /// and the dataset's annotations are untouched. No-op if
     /// `id` is unknown, so a rename racing a removal is harmless and never
     /// mints a phantom manifest. The viewer reads this `name` via
     /// `scene.dataset_name(id)`, so an in-place edit here is what the layer
@@ -1025,54 +1647,6 @@ impl DocumentState {
         }
     }
 
-    /// Merge an [`AssetCatalogDelta`] into the catalog for `dataset_id`.
-    ///
-    /// Idempotent: re-applying the same delta is a no-op. Existing
-    /// `ProxyAvailability` entries for an entity are merged by union of
-    /// their `kinds` lists (preserving original order; new kinds appended
-    /// at the end).
-    pub fn apply_asset_catalog_delta(
-        &mut self,
-        dataset_id: DatasetId,
-        delta: lucida_protocol::AssetCatalogDelta,
-    ) {
-        let catalog = self.asset_catalogs.entry(dataset_id).or_default();
-        for mut incoming in delta.added {
-            for footprint in &incoming.footprints {
-                if !incoming.kinds.contains(&footprint.kind) {
-                    incoming.kinds.push(footprint.kind);
-                }
-            }
-            if let Some(existing) = catalog
-                .entries
-                .iter_mut()
-                .find(|e| e.entity_id == incoming.entity_id)
-            {
-                for kind in incoming.kinds {
-                    if !existing.kinds.contains(&kind) {
-                        existing.kinds.push(kind);
-                    }
-                }
-                for footprint in incoming.footprints {
-                    if !existing.kinds.contains(&footprint.kind) {
-                        existing.kinds.push(footprint.kind);
-                    }
-                    if let Some(existing_footprint) = existing
-                        .footprints
-                        .iter_mut()
-                        .find(|candidate| candidate.kind == footprint.kind)
-                    {
-                        *existing_footprint = footprint;
-                    } else {
-                        existing.footprints.push(footprint);
-                    }
-                }
-            } else {
-                catalog.entries.push(incoming);
-            }
-        }
-    }
-
     /// Pick the collection entity a freshly-dropped pin should be glued to: the entity
     /// **nearest** to `position` (Euclidean) in `dataset_id`'s currently-resolved
     /// active layout (issue #780).
@@ -1081,8 +1655,9 @@ impl DocumentState {
     /// collection, is unknown, or has no entity with a resolvable position in the active
     /// layout. Only entities that are actually placed (directly, or as a tile via
     /// a placed parent) are candidates; an unplaceable entity is never treated as
-    /// if it sat at the origin (that is the whole point of using
-    /// [`resolve_entity_position`] rather than the render-path fallback).
+    /// if it sat at the origin. One [`crate::scene::LayoutPositionIndex`] resolves
+    /// every candidate in O(1), keeping a drop O(layout + entities + transforms)
+    /// instead of rebuilding those linear lookups once per entity.
     ///
     /// Determinism: ties (equal distance) are broken by **manifest entity order** —
     /// the iteration walks `entities()` in order and only adopts a strictly-closer
@@ -1102,15 +1677,15 @@ impl DocumentState {
             self.registered_layouts.get(dataset_id),
             self.active_layout_ids.get(dataset_id),
         );
+        let positions = crate::scene::LayoutPositionIndex::new(
+            &layout,
+            manifest.entities(),
+            manifest.transforms(),
+        );
 
         let mut best: Option<(EntityId, f64)> = None;
         for entity in manifest.entities() {
-            let Some(pos) = crate::scene::resolve_entity_position(
-                &entity.id,
-                &layout,
-                manifest.entities(),
-                manifest.transforms(),
-            ) else {
+            let Some(pos) = positions.resolve(&entity.id) else {
                 continue;
             };
             let dx = pos[0] - position[0];
@@ -1164,6 +1739,21 @@ impl DocumentState {
         let registered = self.registered_layouts.get(dataset_id);
         let from_layout = crate::scene::resolve_layout(manifest, registered, from_id);
         let to_layout = crate::scene::resolve_layout(manifest, registered, Some(to_id));
+        // Build each bulk index once per layout switch. A workspace may carry
+        // thousands of pins on a 16k-member collection; resolving each anchor
+        // through the old linear layout/entity/transform scans multiplied those
+        // two dimensions. These indexes make the switch O(layout + entities +
+        // transforms + pins) while preserving the exact first-match semantics.
+        let from_positions = crate::scene::LayoutPositionIndex::new(
+            &from_layout,
+            manifest.entities(),
+            manifest.transforms(),
+        );
+        let to_positions = crate::scene::LayoutPositionIndex::new(
+            &to_layout,
+            manifest.entities(),
+            manifest.transforms(),
+        );
 
         for pin in pins.iter_mut() {
             let Some(anchor) = pin.anchor.as_ref() else {
@@ -1171,20 +1761,9 @@ impl DocumentState {
             };
             // Skip a pin whose anchor isn't placed in BOTH layouts — translating
             // it would otherwise drag it toward a fallback origin in one of them.
-            let (Some(from_pos), Some(to_pos)) = (
-                crate::scene::resolve_entity_position(
-                    anchor,
-                    &from_layout,
-                    manifest.entities(),
-                    manifest.transforms(),
-                ),
-                crate::scene::resolve_entity_position(
-                    anchor,
-                    &to_layout,
-                    manifest.entities(),
-                    manifest.transforms(),
-                ),
-            ) else {
+            let (Some(from_pos), Some(to_pos)) =
+                (from_positions.resolve(anchor), to_positions.resolve(anchor))
+            else {
                 continue;
             };
             let delta = [to_pos[0] - from_pos[0], to_pos[1] - from_pos[1]];
@@ -1204,10 +1783,7 @@ impl DocumentState {
     pub fn apply(&mut self, cmd: DocumentCommand) {
         match cmd {
             DocumentCommand::DatasetOpened(event) => {
-                let dataset_id = event.manifest.dataset_id.clone();
                 self.register_dataset(event.manifest);
-                // Seed the catalog from the open event.
-                self.asset_catalogs.insert(dataset_id, event.catalog);
             }
             DocumentCommand::RemoveDataset { id } => {
                 self.remove_dataset(&id);
@@ -1234,9 +1810,6 @@ impl DocumentState {
                 // the canonical apply path so it persists and reaches every peer.
                 self.reanchor_for_layout(&dataset_id, from_id.as_ref(), &layout_id);
                 self.active_layout_ids.insert(dataset_id, layout_id);
-            }
-            DocumentCommand::ApplyAssetCatalogDelta { dataset_id, delta } => {
-                self.apply_asset_catalog_delta(dataset_id, delta);
             }
             DocumentCommand::AddAnnotation {
                 dataset_id,
@@ -1613,8 +2186,6 @@ mod annotation_view_tests {
         );
         doc.active_layout_ids
             .insert(old.clone(), LayoutId("img".into()));
-        doc.asset_catalogs
-            .insert(old.clone(), AssetCatalog::empty());
         doc.add_annotation(old.clone(), pin_with_view(None));
 
         let mut remap = HashMap::new();
@@ -1628,8 +2199,6 @@ mod annotation_view_tests {
         assert!(!doc.registered_layouts.contains_key(&old));
         assert!(doc.active_layout_ids.contains_key(&new));
         assert!(!doc.active_layout_ids.contains_key(&old));
-        assert!(doc.asset_catalogs.contains_key(&new));
-        assert!(!doc.asset_catalogs.contains_key(&old));
         assert!(doc.annotations.contains_key(&new));
         assert!(!doc.annotations.contains_key(&old));
         // The embedded id inside the manifest moved too (not just the map key).
@@ -1700,7 +2269,7 @@ mod annotation_view_tests {
     }
 
     /// Build a `DocumentState` with `id` present in EVERY dataset-id-keyed
-    /// field — the five id-keyed maps plus the manifest's embedded
+    /// field — the four id-keyed maps plus the manifest's embedded
     /// `dataset_id`. Used by the `remove_dataset` coverage tests so a future
     /// id-keyed field that isn't wired into the single-source walk surfaces as
     /// a leftover.
@@ -1729,7 +2298,6 @@ mod annotation_view_tests {
         );
         doc.active_layout_ids
             .insert(id.clone(), LayoutId("img".into()));
-        doc.asset_catalogs.insert(id.clone(), AssetCatalog::empty());
         doc.add_annotation(id.clone(), pin_with_view(None));
         doc
     }
@@ -1768,8 +2336,6 @@ mod annotation_view_tests {
         );
         doc.active_layout_ids
             .insert(kept.clone(), LayoutId("img".into()));
-        doc.asset_catalogs
-            .insert(kept.clone(), AssetCatalog::empty());
         doc.add_annotation(kept.clone(), pin_with_view(None));
 
         doc.remove_dataset(&gone);
@@ -1787,14 +2353,12 @@ mod annotation_view_tests {
             !doc.active_layout_ids.contains_key(&gone),
             "remove_dataset must clear active_layout_ids (was orphaned)"
         );
-        assert!(!doc.asset_catalogs.contains_key(&gone));
         assert!(!doc.annotations.contains_key(&gone));
 
         // The unrelated dataset is fully intact across every field.
         assert!(doc.manifests.contains_key(&kept));
         assert!(doc.registered_layouts.contains_key(&kept));
         assert!(doc.active_layout_ids.contains_key(&kept));
-        assert!(doc.asset_catalogs.contains_key(&kept));
         assert!(doc.annotations.contains_key(&kept));
     }
 
@@ -1814,13 +2378,12 @@ mod annotation_view_tests {
         assert!(doc.manifests.is_empty());
         assert!(doc.registered_layouts.is_empty());
         assert!(doc.active_layout_ids.is_empty());
-        assert!(doc.asset_catalogs.is_empty());
         assert!(doc.annotations.is_empty());
     }
 
     /// DETERMINISM GUARD: a remap (middle rename) and a removal (middle drop)
     /// must preserve the **iteration order** of the id-keyed `IndexMap` fields
-    /// (`manifests`, `asset_catalogs`, `annotations`) — not merely their
+    /// (`manifests`, `annotations`) — not merely their
     /// membership. These maps are `IndexMap` *specifically* to guarantee
     /// byte-identical serialization order on the collaborative-document wire (a
     /// determinism invariant); the sibling `remap`/`remove` tests above assert
@@ -1841,7 +2404,7 @@ mod annotation_view_tests {
         let c = DatasetId("wds-c".into());
         let b_prime = DatasetId("wds-b-prime".into());
 
-        // Seed a doc with A, B, C inserted in that exact order across the three
+        // Seed a doc with A, B, C inserted in that exact order across the two
         // order-bearing IndexMap fields.
         fn seed(ids: &[&DatasetId]) -> DocumentState {
             let mut doc = DocumentState::default();
@@ -1856,8 +2419,6 @@ mod annotation_view_tests {
                     Vec::new(),
                     None,
                 ));
-                doc.asset_catalogs
-                    .insert((*id).clone(), AssetCatalog::empty());
                 doc.add_annotation((*id).clone(), pin_with_view(None));
             }
             doc
@@ -1876,10 +2437,6 @@ mod annotation_view_tests {
         let expected = vec![a.clone(), b_prime.clone(), c.clone()];
         assert_eq!(doc.manifests.keys().cloned().collect::<Vec<_>>(), expected);
         assert_eq!(
-            doc.asset_catalogs.keys().cloned().collect::<Vec<_>>(),
-            expected
-        );
-        assert_eq!(
             doc.annotations.keys().cloned().collect::<Vec<_>>(),
             expected,
         );
@@ -1895,10 +2452,6 @@ mod annotation_view_tests {
         // not.
         let expected = vec![a.clone(), c.clone()];
         assert_eq!(doc.manifests.keys().cloned().collect::<Vec<_>>(), expected);
-        assert_eq!(
-            doc.asset_catalogs.keys().cloned().collect::<Vec<_>>(),
-            expected
-        );
         assert_eq!(
             doc.annotations.keys().cloned().collect::<Vec<_>>(),
             expected
@@ -1981,7 +2534,7 @@ mod ensure_label_tests {
 mod reconcile_label_settings_tests {
     //! Name-keyed, occurrence-aware remap of saved per-label settings onto a
     //! recipient's current label order. These lock the contract that a saved
-    //! view / bookmark / peer restore matches per-label visibility+opacity to
+    //! view / saved-view / peer restore matches per-label visibility+opacity to
     //! the RIGHT current label after the label list changed, and that a legacy
     //! blob (no captured names) still applies positionally.
 

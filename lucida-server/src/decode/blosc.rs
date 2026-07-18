@@ -22,8 +22,10 @@
 //! the decoder must pass them through verbatim rather than (mis)unshuffling them.
 
 use std::borrow::Cow;
+use std::io::Read;
 
 use lucida_store::codec::{BloscConfig, BloscShuffle};
+use lucida_store::layout::MAX_DECODED_CHUNK_BYTES;
 
 /// Errors decoding a Blosc-compressed buffer.
 #[derive(thiserror::Error, Debug)]
@@ -54,6 +56,12 @@ pub enum BloscError {
     },
     #[error("blosc: nbytes {nbytes} is not a multiple of typesize {typesize}")]
     NotElementAligned { nbytes: usize, typesize: usize },
+    #[error("blosc: decoded size {nbytes} exceeds limit {limit}")]
+    OutputLimit { nbytes: usize, limit: usize },
+    #[error("blosc: header cbytes {declared} does not match input length {actual}")]
+    CompressedSizeMismatch { declared: usize, actual: usize },
+    #[error("blosc: header arithmetic overflow while reading {0}")]
+    ArithmeticOverflow(&'static str),
 }
 
 const FLAG_BYTE_SHUFFLE: u8 = 0x01;
@@ -80,7 +88,27 @@ pub fn decode_blosc(input: &[u8], config: &BloscConfig) -> Result<Vec<u8>, Blosc
     let typesize = input[3];
     let nbytes = u32::from_le_bytes([input[4], input[5], input[6], input[7]]) as usize;
     let blocksize = u32::from_le_bytes([input[8], input[9], input[10], input[11]]) as usize;
-    let _cbytes = u32::from_le_bytes([input[12], input[13], input[14], input[15]]) as usize;
+    let cbytes = u32::from_le_bytes([input[12], input[13], input[14], input[15]]) as usize;
+
+    if nbytes > MAX_DECODED_CHUNK_BYTES {
+        return Err(BloscError::OutputLimit {
+            nbytes,
+            limit: MAX_DECODED_CHUNK_BYTES,
+        });
+    }
+    if input.len() < cbytes {
+        return Err(BloscError::InputTruncated {
+            what: "complete compressed buffer",
+            need: cbytes,
+            have: input.len(),
+        });
+    }
+    if input.len() > cbytes {
+        return Err(BloscError::CompressedSizeMismatch {
+            declared: cbytes,
+            actual: input.len(),
+        });
+    }
 
     if typesize != config.typesize {
         return Err(BloscError::TypesizeMismatch {
@@ -118,7 +146,9 @@ pub fn decode_blosc(input: &[u8], config: &BloscConfig) -> Result<Vec<u8>, Blosc
     let memcpyed = (flags & FLAG_MEMCPYED) != 0;
 
     if memcpyed {
-        let need = 16 + nbytes;
+        let need = 16usize
+            .checked_add(nbytes)
+            .ok_or(BloscError::ArithmeticOverflow("memcpy payload"))?;
         if input.len() < need {
             return Err(BloscError::InputTruncated {
                 what: "memcpy payload",
@@ -140,7 +170,10 @@ pub fn decode_blosc(input: &[u8], config: &BloscConfig) -> Result<Vec<u8>, Blosc
     }
 
     let nblocks = nbytes.div_ceil(blocksize);
-    let offsets_end = 16 + nblocks * 4;
+    let offsets_end = nblocks
+        .checked_mul(4)
+        .and_then(|bytes| 16usize.checked_add(bytes))
+        .ok_or(BloscError::ArithmeticOverflow("offset table"))?;
     if input.len() < offsets_end {
         return Err(BloscError::InputTruncated {
             what: "offsets table",
@@ -162,18 +195,23 @@ pub fn decode_blosc(input: &[u8], config: &BloscConfig) -> Result<Vec<u8>, Blosc
         let block_offset =
             u32::from_le_bytes(input[off_start..off_start + 4].try_into().unwrap()) as usize;
 
-        if input.len() < block_offset + 4 {
+        let compressed_length_end = block_offset
+            .checked_add(4)
+            .ok_or(BloscError::ArithmeticOverflow("block compressed length"))?;
+        if input.len() < compressed_length_end {
             return Err(BloscError::InputTruncated {
                 what: "block compressed-length",
-                need: block_offset + 4,
+                need: compressed_length_end,
                 have: input.len(),
             });
         }
         let compressed_len =
             u32::from_le_bytes(input[block_offset..block_offset + 4].try_into().unwrap()) as usize;
 
-        let payload_start = block_offset + 4;
-        let payload_end = payload_start + compressed_len;
+        let payload_start = compressed_length_end;
+        let payload_end = payload_start
+            .checked_add(compressed_len)
+            .ok_or(BloscError::ArithmeticOverflow("block payload"))?;
         if input.len() < payload_end {
             return Err(BloscError::InputTruncated {
                 what: "block payload",
@@ -198,11 +236,22 @@ pub fn decode_blosc(input: &[u8], config: &BloscConfig) -> Result<Vec<u8>, Blosc
         let block_bytes = if compressed_len == block_uncompressed_size {
             input[payload_start..payload_end].to_vec()
         } else {
-            zstd::stream::decode_all(std::io::Cursor::new(&input[payload_start..payload_end]))
+            let decoder = zstd::stream::read::Decoder::new(std::io::Cursor::new(
+                &input[payload_start..payload_end],
+            ))
+            .map_err(|e| BloscError::ZstdDecode {
+                block: b,
+                msg: e.to_string(),
+            })?;
+            let mut decoded = Vec::with_capacity(block_uncompressed_size.min(1024 * 1024));
+            decoder
+                .take((block_uncompressed_size as u64).saturating_add(1))
+                .read_to_end(&mut decoded)
                 .map_err(|e| BloscError::ZstdDecode {
                     block: b,
                     msg: e.to_string(),
-                })?
+                })?;
+            decoded
         };
         if block_bytes.len() != block_uncompressed_size {
             return Err(BloscError::BlockSizeMismatch {
@@ -520,6 +569,16 @@ mod tests {
     fn rejects_short_header() {
         let err = decode_blosc(&[0u8; 8], &cfg(2, BloscShuffle::Bit)).unwrap_err();
         assert!(matches!(err, BloscError::HeaderTruncated(8)));
+    }
+
+    #[test]
+    fn rejects_header_declared_output_above_limit_before_payload_allocation() {
+        let mut header = [0u8; 16];
+        header[0] = 2;
+        header[3] = 2;
+        header[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        let err = decode_blosc(&header, &cfg(2, BloscShuffle::None)).unwrap_err();
+        assert!(matches!(err, BloscError::OutputLimit { .. }));
     }
 
     #[test]

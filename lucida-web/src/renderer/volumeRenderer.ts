@@ -3,6 +3,7 @@ import shaderSource from "./volume.wgsl?raw";
 import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
 import { DESCRIPTOR_ENTRY_SIZE } from "./descriptorBuffer.ts";
 import { serializeTransientDescriptor } from "./descriptor/transient.ts";
+import type { GpuResourceBudget, TrackedGpuResource } from "./gpuResourceBudget.ts";
 
 import type { LodIndirectionMeta } from "./volume/atlas.ts";
 
@@ -38,6 +39,7 @@ export class VolumeRenderer {
   /** Single-entity descriptor used by minimap + other call sites that
    *  aren't backed by cold-state. Lazily allocated. */
   private transientDescriptorBuffer: GPUBuffer | null = null;
+  private transientDescriptorAllocation: TrackedGpuResource<GPUBuffer> | null = null;
   private volumeDims = [1, 1, 1];
   private renderMode = 0;
   private invViewProj: Float32Array<ArrayBufferLike> = new Float32Array(16);
@@ -49,18 +51,18 @@ export class VolumeRenderer {
   private clipDistance = 0;
   private clipMode = 0; // 0=plane, 1=sphere
   private singleSlotIndirectionBuf: GPUBuffer | null = null;
+  private singleSlotIndirectionAllocation: TrackedGpuResource<GPUBuffer> | null = null;
   private lutTexture: GPUTexture;
   private lutSampler: GPUSampler;
-  // Proxy textures for binding. The descriptor carries pool/slot
-  // indices + dims; the texture handle stays CPU-side because WebGPU
-  // bind groups can't index into a texture array without a texture-
-  // array binding (future optimization).
-  private tileProxyTexture: GPUTexture | null = null;
-  private groupProxyTexture: GPUTexture | null = null;
-  private dummyProxyTexture: GPUTexture | null = null;
+  private uniformAllocation!: TrackedGpuResource<GPUBuffer>;
+  private entityRefAllocation!: TrackedGpuResource<GPUBuffer>;
+  private dummyLabelColorAllocation!: TrackedGpuResource<GPUBuffer>;
+  private lutAllocation!: TrackedGpuResource<GPUTexture>;
+  private readonly resources: GpuResourceBudget;
 
-  constructor(device: GPUDevice) {
+  constructor(device: GPUDevice, resources: GpuResourceBudget) {
     this.device = device;
+    this.resources = resources;
 
     const shaderModule = device.createShaderModule({ code: shaderSource });
 
@@ -100,17 +102,6 @@ export class VolumeRenderer {
           binding: 6,
           visibility: GPUShaderStage.FRAGMENT,
           buffer: { type: "read-only-storage" },
-        },
-        // Proxy textures (tileProxy + groupProxy)
-        {
-          binding: 7,
-          visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: "uint", viewDimension: "3d" },
-        },
-        {
-          binding: 8,
-          visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: "uint", viewDimension: "3d" },
         },
       ],
     });
@@ -158,30 +149,43 @@ export class VolumeRenderer {
       },
     });
 
-    this.uniformBuffer = device.createBuffer({
-      size: UNIFORM_SIZE,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
+    try {
+      this.uniformAllocation = resources.createBuffer(
+        device,
+        { key: "renderer:volume:uniform", kind: "buffer" },
+        { size: UNIFORM_SIZE, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST },
+      );
+      this.uniformBuffer = this.uniformAllocation.resource;
 
-    this.entityRefBuffer = device.createBuffer({
-      size: ENTITY_REF_SIZE,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
+      this.entityRefAllocation = resources.createBuffer(
+        device,
+        { key: "renderer:volume:entity-ref", kind: "buffer" },
+        { size: ENTITY_REF_SIZE, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST },
+      );
+      this.entityRefBuffer = this.entityRefAllocation.resource;
 
-    // Dummy declared-palette buffer (one u32) for non-categorical draws;
-    // the shader scans 0 pairs (count comes from the entity ref).
-    this.dummyLabelColorBuffer = device.createBuffer({
-      size: 4,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    device.queue.writeBuffer(this.dummyLabelColorBuffer, 0, new Uint32Array([0]));
+      this.dummyLabelColorAllocation = resources.createBuffer(
+        device,
+        { key: "renderer:volume:dummy-label-color", kind: "buffer" },
+        { size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST },
+      );
+      this.dummyLabelColorBuffer = this.dummyLabelColorAllocation.resource;
+      device.queue.writeBuffer(this.dummyLabelColorBuffer, 0, new Uint32Array([0]));
 
-    // Default 1x1 white LUT (renders grayscale when no colormap is set)
-    this.lutTexture = device.createTexture({
-      size: [1, 1],
-      format: "rgba8unorm",
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-    });
+      this.lutAllocation = resources.createTexture(
+        device,
+        { key: "renderer:volume:default-lut", kind: "lookup" },
+        {
+          size: [1, 1],
+          format: "rgba8unorm",
+          usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+        },
+      );
+      this.lutTexture = this.lutAllocation.resource;
+    } catch (error) {
+      resources.destroyOwnerPrefix("renderer:volume:");
+      throw error;
+    }
     device.queue.writeTexture(
       { texture: this.lutTexture },
       new Uint8Array([255, 255, 255, 255]),
@@ -198,34 +202,6 @@ export class VolumeRenderer {
   setColormapTexture(texture: GPUTexture) {
     this.lutTexture = texture;
     // Bind group will be rebuilt on the next setAtlas call
-  }
-
-  /** Lazily allocate the 1×1×1 dummy proxy texture used when no real
-   *  proxy is bound. Same r16uint format as the real proxy atlases so
-   *  the bind-group layout is satisfied. */
-  private getDummyProxyTexture(): GPUTexture {
-    if (!this.dummyProxyTexture) {
-      this.dummyProxyTexture = this.device.createTexture({
-        size: [1, 1, 1],
-        format: "r16uint",
-        dimension: "3d",
-        usage: GPUTextureUsage.TEXTURE_BINDING,
-      });
-    }
-    return this.dummyProxyTexture;
-  }
-
-  /**
-   * Configure proxy textures for the next draw. Slot indices and dims
-   * live in the per-entity descriptor; the shader's unified fallback
-   * chain decides per-fragment whether to consult them.
-   */
-  setProxyTextures(
-    tileTexture: GPUTexture | null,
-    groupTexture: GPUTexture | null,
-  ) {
-    this.tileProxyTexture = tileTexture;
-    this.groupProxyTexture = groupTexture;
   }
 
   setAtlas(
@@ -258,9 +234,6 @@ export class VolumeRenderer {
     this.volumeDims = volumeDims;
     this.detailAtlasSlotDims = detailAtlasSlotDims;
     this.coarseAtlasSlotDims = coarseTexture && coarseIndirectionBuf ? coarseAtlasSlotDims : [0, 0, 0];
-    const dummyProxy = this.getDummyProxyTexture();
-    const tileProxyView = (this.tileProxyTexture ?? dummyProxy).createView();
-    const groupProxyView = (this.groupProxyTexture ?? dummyProxy).createView();
     const coarseBindingTexture = coarseTexture ?? detailTexture;
     const coarseBindingIndirection = coarseIndirectionBuf ?? detailIndirectionBuf;
     this.bindGroup = this.device.createBindGroup({
@@ -273,8 +246,6 @@ export class VolumeRenderer {
         { binding: 4, resource: this.lutSampler },
         { binding: 5, resource: coarseBindingTexture.createView() },
         { binding: 6, resource: { buffer: coarseBindingIndirection } },
-        { binding: 7, resource: tileProxyView },
-        { binding: 8, resource: groupProxyView },
       ],
     });
   }
@@ -337,10 +308,12 @@ export class VolumeRenderer {
     opacity: number,
   ) {
     if (!this.transientDescriptorBuffer) {
-      this.transientDescriptorBuffer = this.device.createBuffer({
-        size: DESCRIPTOR_ENTRY_SIZE,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-      });
+      this.transientDescriptorAllocation = this.resources.createBuffer(
+        this.device,
+        { key: "renderer:volume:transient-descriptor", kind: "descriptor" },
+        { size: DESCRIPTOR_ENTRY_SIZE, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST },
+      );
+      this.transientDescriptorBuffer = this.transientDescriptorAllocation.resource;
     }
     const cpu = new ArrayBuffer(DESCRIPTOR_ENTRY_SIZE);
     serializeTransientDescriptor(cpu, {
@@ -363,10 +336,12 @@ export class VolumeRenderer {
   setVolume(texture: GPUTexture, width: number, height: number, depth: number) {
     if (!this.singleSlotIndirectionBuf) {
       const data = new Uint32Array([0]);
-      this.singleSlotIndirectionBuf = this.device.createBuffer({
-        size: 4,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-      });
+      this.singleSlotIndirectionAllocation = this.resources.createBuffer(
+        this.device,
+        { key: "renderer:volume:single-slot-indirection", kind: "buffer" },
+        { size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST },
+      );
+      this.singleSlotIndirectionBuf = this.singleSlotIndirectionAllocation.resource;
       this.device.queue.writeBuffer(this.singleSlotIndirectionBuf, 0, data);
     }
     this.setAtlas(texture, this.singleSlotIndirectionBuf,
@@ -402,6 +377,7 @@ export class VolumeRenderer {
   }
 
   private transientDepthTex: GPUTexture | null = null;
+  private transientDepthAllocation: TrackedGpuResource<GPUTexture> | null = null;
   private transientDepthW = 0;
   private transientDepthH = 0;
 
@@ -409,11 +385,16 @@ export class VolumeRenderer {
     if (this.transientDepthTex && this.transientDepthW === w && this.transientDepthH === h) {
       return this.transientDepthTex.createView();
     }
-    this.transientDepthTex?.destroy();
-    this.transientDepthTex = this.device.createTexture({
-      size: [w, h], format: "depth24plus",
-      usage: GPUTextureUsage.RENDER_ATTACHMENT,
-    });
+    this.transientDepthAllocation?.destroy();
+    this.transientDepthAllocation = this.resources.createTexture(
+      this.device,
+      { key: "renderer:volume:transient-depth", kind: "depth" },
+      {
+        size: [w, h], format: "depth24plus",
+        usage: GPUTextureUsage.RENDER_ATTACHMENT,
+      },
+    );
+    this.transientDepthTex = this.transientDepthAllocation.resource;
     this.transientDepthW = w;
     this.transientDepthH = h;
     return this.transientDepthTex.createView();
@@ -485,5 +466,15 @@ export class VolumeRenderer {
     pass.setBindGroup(1, this.descriptorBindGroup);
     pass.draw(3); // full-screen triangle
     pass.end();
+  }
+
+  destroy(): void {
+    this.resources.destroyOwnerPrefix("renderer:volume:");
+    this.transientDescriptorAllocation = null;
+    this.transientDescriptorBuffer = null;
+    this.singleSlotIndirectionAllocation = null;
+    this.singleSlotIndirectionBuf = null;
+    this.transientDepthAllocation = null;
+    this.transientDepthTex = null;
   }
 }

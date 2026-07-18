@@ -20,9 +20,11 @@ Invariants (mirroring slice 1):
     plus a defensive ``stop()`` in ``finally`` guarantee it.
   * ``drive.json`` is written on success *and* failure, so the human verifier
     always has an artifact.
-  * A per-command / per-step failure inside a surface is captured, not fatal.
-  * Exit is non-zero only if bring-up failed or a *requested* surface could not
-    be exercised at all (e.g. CLI binary missing, Python driver unrunnable).
+  * A per-command / per-step failure inside a surface is captured without
+    aborting the remaining tour, so all available evidence is retained.
+  * Exit is non-zero if bring-up fails, a requested surface cannot run, or any
+    required command/step in a requested surface fails. A green drive therefore
+    means every requested public surface actually satisfied its contract.
 """
 
 from __future__ import annotations
@@ -33,7 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from . import capture
-from .bringup import validate_fixture
+from .bringup import fixture_data_root, validate_fixture
 from .errors import TryoutError
 from .server import ServerProcess
 from .surfaces import REGISTRY, SurfaceResult, create_workspace_and_open, registered_names
@@ -75,6 +77,7 @@ class SurfaceContext:
     py_config_path: Path
     cli_config_path: Path
     open_timeout_s: float
+    fixture_path: Path | None = None
     web_dist: WebDist | None = None
     web_dist_error: TryoutError | None = None
     log: Any = print
@@ -171,6 +174,7 @@ def drive(
     server = ServerProcess(
         out_dir=out_dir,
         binary=server_binary,
+        data_dir=fixture_data_root(fixture_path),
         web_dist=(web_dist.path if web_dist is not None else None),
         health_timeout_s=health_timeout_s,
         log=log,
@@ -252,6 +256,7 @@ def drive(
                 py_config_path=py_config_path,
                 cli_config_path=cli_config_path,
                 open_timeout_s=open_timeout_s,
+                fixture_path=fixture_path,
                 web_dist=web_dist,
                 web_dist_error=web_dist_error,
                 log=log,
@@ -260,9 +265,12 @@ def drive(
                 surface = REGISTRY[name]
                 result: SurfaceResult = surface.run(ctx)
                 surface_results[name] = result.to_dict()
-                # A surface that could not be exercised at all (ran=False) flips
-                # the run not-ok; per-command/per-step failures do not.
-                if not result.ran:
+                # Keep running after a failed command/step so the report retains
+                # every other surface's evidence, but make the aggregate verdict
+                # strict. `ok` already excludes each surface's explicitly
+                # optional operations, so there is no second policy to mirror
+                # here at the orchestrator boundary.
+                if not result.ran or not result.ok:
                     any_surface_failed = True
     finally:
         # Defensive: guarantee the server is down even on an unexpected escape.
@@ -276,10 +284,9 @@ def drive(
         "elapsed_s": round(time.monotonic() - started, 3),
     }
 
-    # ok iff bring-up succeeded (we got here) AND every requested surface ran
-    # without a harness-level error. Per-command/per-step failures inside a
-    # surface are captured and do NOT flip ok to false — but they ARE visible in
-    # each surface's passed/total and ok fields.
+    # ok iff bring-up succeeded (we got here) AND every requested surface met its
+    # contract. Failures are still captured rather than raised, which lets the
+    # tour finish and produce a complete diagnostic record before returning 1.
     ok = not any_surface_failed
     record = _build_record(
         ok=ok,

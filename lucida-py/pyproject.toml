@@ -5,14 +5,16 @@ build-backend = "maturin"
 [project]
 name = "lucida"
 version = "0.1.0"
+license = "MIT"
 requires-python = ">=3.10"
-dependencies = [
-    "websockets",
-    "numpy",
-    "lz4",
-    "zstandard",
-    "maturin>=1.12.6",
-]
+dependencies = []
+
+[project.optional-dependencies]
+client = ["websockets>=14,<17"]
+analysis = ["numpy>=1.26"]
+# The native extension has no additional Python runtime dependency. Maturin
+# stays in build-system/dev metadata and must not leak into installed wheels.
+native = []
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
@@ -21,6 +23,9 @@ python-source = "python"
 [dependency-groups]
 dev = [
     "ipykernel>=6.31.0",
+    "maturin>=1.12.6,<2",
+    "pip-audit==2.9.0",
     "pytest>=8.4.2",
     "scipy>=1.13.1",
+    "websockets>=14,<17",
 ]

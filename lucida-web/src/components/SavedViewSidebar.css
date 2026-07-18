@@ -1,0 +1,537 @@
+.saved-view-sidebar {
+  background: var(--surface-1);
+  border-left: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.saved-view-sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.saved-view-sidebar-header h3 {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.saved-view-sidebar-header button.primary {
+  padding: 0.25rem 0.55rem;
+  font-size: 0.75rem;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.saved-view-sidebar-header button.primary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.saved-view-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.saved-view-search {
+  flex: 1;
+  background: var(--surface-2);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 0.25rem 0.4rem;
+  font-size: 0.8rem;
+}
+
+.saved-view-mine-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.saved-view-list {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.saved-view-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.saved-view-row:hover {
+  background: var(--surface-2);
+}
+
+.saved-view-row-top {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.saved-view-name {
+  flex: 1;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.saved-view-open-button {
+  min-width: 0;
+  min-height: 1.5rem;
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  background: transparent;
+  text-align: start;
+}
+
+.saved-view-name-input {
+  flex: 1;
+  background: var(--surface-2);
+  color: var(--text-primary);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 0.15rem 0.35rem;
+  font-size: 0.85rem;
+}
+
+.saved-view-row-meta {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.saved-view-visibility-chip {
+  flex-shrink: 0;
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--personal-text);
+  background: var(--personal-surface);
+  border: 1px solid var(--personal-border);
+  border-radius: 999px;
+  padding: 0.05rem 0.4rem;
+  line-height: 1.3;
+}
+
+.saved-view-row[data-visibility="personal"] {
+  border-left: 2px solid var(--personal-border);
+}
+
+/* A pending proposal reads as "awaiting review" — a warm amber, distinct from
+   the cool personal/shared palette. */
+.saved-view-visibility-chip-proposed {
+  color: var(--proposal-text);
+  background: var(--proposal-surface);
+  border-color: var(--proposal-border);
+}
+
+.saved-view-row[data-visibility="proposed"] {
+  border-left: 2px solid var(--proposal-border);
+}
+
+/* The saved view currently applied to the viewer — a steady highlight (no
+   hover dependency) so the user can see at a glance which view is open. */
+.saved-view-row[data-active="true"] {
+  background: var(--surface-raised);
+  border-left: 2px solid var(--accent);
+}
+
+.saved-view-review-section {
+  margin-bottom: 0.5rem;
+}
+
+.saved-view-section-header {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--proposal-text);
+  padding: 0.3rem 0.5rem 0.2rem;
+}
+
+.saved-view-review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.4rem;
+}
+
+.saved-view-review-self-note {
+  flex: 1 0 100%;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
+
+.saved-view-review-actions button {
+  flex: 1;
+  font-size: 0.75rem;
+  padding: 0.2rem 0.4rem;
+}
+
+.saved-view-menu-btn {
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  font-size: 0.95rem;
+  line-height: 1;
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.saved-view-menu-btn:hover {
+  background: var(--surface-3);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.saved-view-menu {
+  position: absolute;
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 0.25rem;
+  display: flex;
+  flex-direction: column;
+  z-index: 100;
+  min-width: 160px;
+  box-shadow: var(--shadow-popover);
+}
+
+.saved-view-menu button {
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  text-align: left;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.saved-view-menu button:hover {
+  background: var(--surface-3);
+}
+
+.saved-view-menu button.danger {
+  color: var(--danger-text);
+}
+
+.saved-view-empty {
+  padding: 1.25rem 1rem;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.saved-view-error {
+  padding: 0.5rem 0.75rem;
+  background: var(--warning-surface);
+  color: var(--warning-text);
+  border-bottom: 1px solid var(--warning-border);
+  font-size: 0.75rem;
+}
+
+.saved-view-loading {
+  padding: 0.5rem 0.75rem;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-style: italic;
+}
+
+.saved-view-save-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--modal-backdrop);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+
+.saved-view-save-modal {
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  min-width: min(320px, calc(100vw - 2rem));
+  max-width: 480px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.saved-view-save-modal h4 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.saved-view-save-modal input[type="text"] {
+  background: var(--surface-1);
+  color: var(--text-primary);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.85rem;
+}
+
+.saved-view-save-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.saved-view-save-field-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.saved-view-visibility-fieldset {
+  margin: 0;
+  padding: 0;
+  border: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.saved-view-visibility-fieldset legend {
+  padding: 0;
+  margin-bottom: 0.1rem;
+}
+
+.saved-view-visibility-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.saved-view-visibility-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.saved-view-visibility-option:hover {
+  border-color: var(--border-strong);
+}
+
+.saved-view-visibility-option.selected {
+  border-color: var(--accent);
+  background: var(--accent-selection);
+}
+
+.saved-view-visibility-option.disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.saved-view-visibility-option input[type="radio"] {
+  margin-top: 0.15rem;
+  accent-color: var(--accent);
+  cursor: inherit;
+}
+
+.saved-view-visibility-option-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.saved-view-visibility-option-title {
+  font-size: 0.82rem;
+  color: var(--text-primary);
+}
+
+.saved-view-visibility-option-hint {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+
+.saved-view-save-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.4rem;
+}
+
+.saved-view-save-modal-actions button {
+  padding: 0.3rem 0.7rem;
+  font-size: 0.8rem;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-3);
+  color: var(--text-primary);
+}
+
+.saved-view-save-modal-actions button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.saved-view-save-modal-actions button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.saved-view-confirm-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--modal-backdrop);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 250;
+}
+
+.saved-view-confirm-modal {
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  min-width: 300px;
+  max-width: 460px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+/* The accent border echoes the confirm button: warm red for a destructive
+   action, brand blue for a deliberate-but-benign one (propose). */
+.saved-view-confirm-modal-danger {
+  border-color: var(--danger-border);
+}
+
+.saved-view-confirm-modal-primary {
+  border-color: var(--accent);
+}
+
+.saved-view-confirm-modal h4 {
+  margin: 0;
+  font-size: 0.95rem;
+  color: var(--text-primary);
+}
+
+.saved-view-confirm-modal p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+
+.saved-view-confirm-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.4rem;
+}
+
+.saved-view-confirm-modal-actions button {
+  padding: 0.3rem 0.7rem;
+  font-size: 0.8rem;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-3);
+  color: var(--text-primary);
+}
+
+.saved-view-confirm-modal-actions button.danger {
+  background: var(--danger-border);
+  border-color: var(--danger-border);
+  color: var(--text-primary);
+}
+
+.saved-view-confirm-modal-actions button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+}
+
+/* Toasts now stack: the fixed-positioned column lives in the corner and each
+   toast flows inside it, so several pending-reject "Undo" toasts can coexist
+   without overlapping (#818). Newest is appended last → nearest the corner. */
+.saved-view-toast-stack {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  z-index: 9999;
+  pointer-events: none;
+}
+
+.saved-view-toast {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: var(--surface-2);
+  color: var(--text-primary);
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  font-size: 0.8rem;
+  box-shadow: var(--shadow-popover);
+  /* Re-enable interaction (the stack disables it so empty gaps don't eat clicks). */
+  pointer-events: auto;
+}
+
+.saved-view-toast.warn {
+  background: var(--warning-surface);
+  border-color: var(--warning-border);
+}
+
+.saved-view-toast-text {
+  flex: 1;
+}
+
+/* The toast's inline action (e.g. Undo): a quiet button that reads as a link
+   so it doesn't compete with the message, but is plainly clickable. */
+.saved-view-toast-action {
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 0;
+}
+
+.saved-view-toast-action:hover {
+  color: var(--focus-ring);
+}

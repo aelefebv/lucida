@@ -1,26 +1,25 @@
 ---
 type: Subsystem
 title: "Saved Views"
-description: "Cross-cutting subsystem spanning lucida-core (the SavedView schema), lucida-web (encoder, applier, URL sync, sidebar UI), and lucida-server (SQLite-backed bookmark/workspace saved-view stores, REST API, broadcast)."
+description: "Cross-cutting subsystem spanning lucida-core (the SavedView schema), lucida-web (encoder, applier, URL sync, sidebar UI), and lucida-server (the workspace-scoped SQLite saved-view store and REST API)."
 tags: [lucida, subsystem]
 source_path: wiki/systems/subsystems/saved-views.md
 created: 2026-05-08
-modified: 2026-07-03
+modified: 2026-07-17
 ---
 
 # Saved Views
 
-Cross-cutting subsystem spanning [lucida-core](../crates/lucida-core.md) (the `SavedView` schema), [lucida-web](../crates/lucida-web.md) (encoder, applier, URL sync, sidebar UI), and [lucida-server](../crates/lucida-server.md) (SQLite-backed bookmark/workspace saved-view stores, REST API, broadcast). Provides three surfaces over one capture record:
+Cross-cutting subsystem spanning [lucida-core](../crates/lucida-core.md) (the `SavedView` schema), [lucida-web](../crates/lucida-web.md) (encoder, applier, URL sync, sidebar UI), and [lucida-server](../crates/lucida-server.md) (the SQLite-backed workspace saved-view store and REST API). It provides two link forms over one capture record:
 
 1. **Live URL** (`#view=…`) — debounced `window.history.replaceState` keeps the URL hash a current snapshot of the view. Sharing = copy URL. Refresh preserves view. No server involvement.
-2. **Named bookmarks** (`#b=<id>`) — server-stored entries with name + creator + timestamp; visible in a sidebar filtered to bookmarks for currently-loaded datasets; live cross-peer updates via `BookmarkChanged` broadcast.
-3. **Workspace saved views** — workspace-scoped named entries under `/api/workspaces/:workspace_id/saved-views`, each carrying a **visibility** (`Shared` / `Personal` / `Proposed`; see below). Editors create/update/rename/delete shared views and set/clear the workspace default; any member (viewer included) can keep `Personal` views and *propose* one for sharing; viewers can list/open/copy. Payloads use workspace-local dataset ids and intentionally omit source URLs.
+2. **Workspace saved-view link** (`#b=<id>`) — an address for a named row under `/api/workspaces/:workspace_id/saved-views`. Each row carries creator metadata and a **visibility** (`Shared` / `Personal` / `Proposed`; see below). Editors create/update/rename/delete shared views and set/clear the workspace default; any member (viewer included) can keep `Personal` views and *propose* one for sharing; viewers can list/open/copy. Payloads use workspace-local dataset ids and intentionally omit source URLs.
 
 ## Why two surfaces, one record
 
-The capture record (`SavedView`) is the same shape both ways. A `#b=<id>` opens by fetching the row, handing `view` to the same applier the `#view=…` path uses, then `replaceState`-ing the URL to `#view=…` so further pans don't drift back to the snapshot. Adding the bookmark side didn't fragment the design — it added an addressable artifact whose payload is a `SavedView`, identical to what the inline-encoded URL carries.
+The capture record (`SavedView`) is the same shape both ways. A `#b=<id>` resolves the id inside the workspace named by `/w/:workspace_id`, hands the row's `view` to the same applier as `#view=…`, then uses `replaceState` to collapse the URL to `#view=…` so later pans advance from the applied snapshot. The server-stored form adds naming, ownership, visibility, and a stable id without creating a second view schema.
 
-Full design rationale in [URL-as-App-State for Saved Views](../../decisions/0013-url-as-app-state-for-saved-views.md) (the Y-model choice over encode-on-demand) and [Server-Stored Bookmarks and the AuthPrincipal Seam](../../decisions/0015-server-stored-bookmarks-and-auth-seam.md) (why server-stored, why SQLite, why the `AuthPrincipal` seam).
+Full design rationale starts in [URL-as-App-State for Saved Views](../../decisions/0013-url-as-app-state-for-saved-views.md) (the Y-model choice over encode-on-demand). [Server-Stored Bookmarks and the AuthPrincipal Seam](../../decisions/0015-server-stored-bookmarks-and-auth-seam.md) records the historical predecessor and the reusable auth seam; [ADR-0043](../../decisions/0043-superseded-server-surfaces-sunset.md) makes workspace saved views the sole active server store.
 
 ## The capture record
 
@@ -33,27 +32,35 @@ Full design rationale in [URL-as-App-State for Saved Views](../../decisions/0013
 
 Notable exclusions per [URL-as-App-State for Saved Views](../../decisions/0013-url-as-app-state-for-saved-views.md): `selectedDatasetId` (UI focus only — but see "selectedDatasetId wrinkle" below), `following` (sender's follow target irrelevant to recipient), `cursor` (mouse position is noise), `client_id` (not portable).
 
-Beyond the three surfaces above, `SavedView` is also embedded as `Annotation::view: Option<SavedView>` (`saved_view.rs`): an annotation captures its author's view so jump-to-annotation can restore it. This makes `SavedView`'s `PartialEq` derive load-bearing (`Annotation` derives `PartialEq`).
+Beyond the two link forms above, `SavedView` is also embedded as `Annotation::view: Option<SavedView>` (`saved_view.rs`): an annotation captures its author's view so jump-to-annotation can restore it. This makes `SavedView`'s `PartialEq` derive load-bearing (`Annotation` derives `PartialEq`).
 
 ## Three deep modules on the web side
 
 All under `lucida-web/src/savedView/`:
 
 - **`encoder.ts`** — pure `encode(SavedView) → string` and `decode(string) → SavedView`. Default-stripping on encode (don't emit `gamma: 1.0`, `visible: true`, etc.); restore on decode. `CompressionStream` for gzip; base64url for the URL-safe wrapper. The encoder owns the `v: 1` discipline.
-- **`applier.ts`** — async orchestrator. Diffs current vs target datasets, opens missing via `bridge.sendOpenRemoteDataset`, awaits `DatasetOpened` broadcasts, then applies in fixed order: layouts → dataset_order → per-dataset settings → global display → view dimensions → camera last. Manages `applyInProgress` flag (urlSync reads to suppress writes). Surfaces `OpenDatasetFailed` to the loading-banner state. Out-of-range z/t/c clamps silently; missing layout falls back to dataset's default.
-- **`urlSync.ts`** — bootstraps from `window.location.hash` on initial load (handles both `#view=…` and `#b=<id>`), subscribes to viewport/scene change events, debounces 250-500 ms idle, encodes + `replaceState`. Listens for `popstate`. Reads `applyInProgress` to break the apply/sync feedback loop.
+- **`applier.ts`** — async orchestrator. Diffs current vs target datasets, opens missing via `bridge.sendOpenRemoteDataset`, awaits dataset-open results, then applies in fixed order: layouts → dataset_order → per-dataset settings → global display → view dimensions → camera last. Manages `applyInProgress` flag (urlSync reads to suppress writes). Surfaces `OpenDatasetFailed` to the loading-banner state. Out-of-range z/t/c values clamp with a non-blocking notice; a missing layout falls back to the dataset's default.
+- **`urlSync.ts`** — bootstraps from `window.location.hash` on initial load (handles both `#view=…` and `#b=<id>`), subscribes to viewport/scene change events, debounces 250-500 ms idle, encodes + `replaceState`. Listens for `popstate`. Reads `applyInProgress` to break the apply/sync feedback loop. Initial framing has one ordered policy: explicit hash → viewer profile → remembered last view → workspace default → host fallback. The fallback fits the first ordered snapshot dataset only when none of the persisted sources applied, so refresh joins are framed without competing with a user's saved camera.
 
 The `subscribeApplyResult` channel on the applier is the seam for UI-state that doesn't live in the WASM scene (currently just the `selectedDatasetId` auto-select). Future capture-record fields needing similar after-apply effects should subscribe here.
 
-## Server side: bookmarks subsystem
+## Historical bookmark-store rows
 
-`lucida-server/src/bookmarks/`:
+[ADR-0043](../../decisions/0043-superseded-server-surfaces-sunset.md) retired the organization-global bookmark implementation: `lucida-server/src/bookmarks/`, `/api/bookmarks`, the `BookmarkChanged` wire notification, and the unused web hook/API are gone. The original `bookmarks` and `bookmark_datasets` migrations remain in the immutable migration ledger, and existing rows are deliberately left untouched. They are inert unless an operator runs the explicit offline recovery command below; there is no runtime compatibility route.
 
-- **`store.rs`** (deep) — `BookmarkStore` trait + `SqliteBookmarkStore` + `MemoryBookmarkStore`. Two-table schema: `bookmarks` for the row + `bookmark_datasets(bookmark_id, dataset_url)` indexed for the any-overlap query. Picked side-table over JSON1 to work on every SQLite build and make `EXPLAIN QUERY PLAN` regression-guardable.
-- **`handlers.rs`** — REST endpoints under `/api/bookmarks`. Permission checks at handler level: PATCH/DELETE require `bookmark.created_by == principal.email || principal.is_admin`. POST overwrites `created_by` from `AuthPrincipal` (request body cannot spoof creator).
-- **`broadcast.rs`** — best-effort `BookmarkChanged` dispatch after successful CUD. Affected-client computation: check whether any session binding's `source_url` appears in the bookmark's `dataset_urls`, by URL-string equality — deliberately NOT via `dataset_id_for_url`/BLAKE3, since both ends are already the canonical source-URL string. Empty `dataset_urls` falls through as broadcast-to-all (e.g., a bookmark made before any dataset is opened).
+## Recovering a retired bookmark
 
-Bookmarks are the second persistent state added to [lucida-server](../crates/lucida-server.md) (after auth's `login_sessions` and `pending_auth`). Same SQLite file, same connection pool.
+Use `lucida-server recover-legacy-bookmark` against a fully migrated SQLite database. Stop the server and take the normal SQLite backup first. The command refuses to create a missing database and is a read-only dry run unless `--apply` is present.
+
+Dry-run and inspect the plan:
+
+`lucida-server recover-legacy-bookmark --db-path /var/lib/lucida/lucida.db --bookmark <bookmark-id> --workspace <workspace-id> --json`
+
+Then rerun the same command with `--apply` to commit. Personal visibility is the safe default. `--visibility shared` is available only when the selected creator is an editor or owner; `--creator <member-email>` explicitly reattributes a row whose historical creator is no longer a member.
+
+Recovery matches every legacy dataset URL to the chosen workspace's canonical dataset memberships, recognizes both historical short/raw-URL and current full/canonical `ds-*` identities, rewrites `active_layouts`, `dataset_order`, `dataset_settings`, and `auto_contrast` onto `wds-*` ids, then clears `SavedView.datasets`. The printed/JSON mapping exposes a credential-and-path-free source hint plus the canonical source hash—not the raw URL—so a dry-run plan is safe to retain in operator logs. Missing mappings, ambiguous mappings, stale dataset-id references, invalid creators, and id collisions all fail before the transaction writes. The original bookmark id is retained as the workspace saved-view id, so an exact rerun is idempotent and the old `#b=<id>` becomes meaningful again only under that chosen workspace URL.
+
+Failure output is also a stable operator interface. With `--json`, failure exits nonzero, writes exactly one compact `{ "ok": false, "error": { "code", "message", "source"? } }` document to stdout, and leaves stderr empty. Without `--json`, failure exits nonzero and writes one safe human-readable line to stderr while leaving stdout empty. Source diagnostics contain only a path/credential-free hint plus an opaque full fingerprint; unvalidated bookmark, workspace, dataset, creator, and role values are bounded and validated before display or replaced by a fingerprint. Raw locators, userinfo, object paths, query strings, parse errors, and SQL errors never cross either output boundary.
 
 ## Server side: workspace saved views
 
@@ -81,15 +88,13 @@ The manager enforces viewer-or-better for list/get and editor-or-better for crea
 
 `/w/:workspace_id#b=<saved_view_id>` resolves through the workspace-scoped API and collapses to `/w/:workspace_id#view=...` after a successful apply. Bare `/w/:workspace_id` applies `default_saved_view_id` when one is configured and no explicit hash is present.
 
-## `BookmarkChanged` is unsequenced
+## Saved-view changes are REST-local, not session messages
 
-`ServerMessage::BookmarkChanged { id, action, dataset_urls }` (in `lucida-core/src/protocol.rs`) is **unsequenced, like the presence variants** — it's a session-scoped notification, not a sequenced document command. Per [Document vs Viewport Command Split](../../decisions/0001-document-vs-viewport-split.md) and [Server-Stored Bookmarks and the AuthPrincipal Seam](../../decisions/0015-server-stored-bookmarks-and-auth-seam.md): bookmark mutations are durable on the server (in SQLite) but the live-update broadcast that informs other tabs is closer to presence than to a document command — there's no need for ordering, no replay-on-reconnect, and a missed broadcast just means the next dataset-loaded refetch picks up the canonical state.
-
-The web bridge dispatcher handles it via a per-bridge `subscribeBookmarkChanged` fan-out, not the snapshot/command/ack path.
+Workspace saved-view CRUD does not enter the sequenced document stream and has no separate WebSocket notification. The mutation response is the canonical row; `useWorkspaceSavedViews` updates its local list from that response and exposes `refresh()` for reconciliation. Opening `#b=<id>` always resolves the canonical row from the workspace REST API before applying it. Concurrent tabs therefore reconcile on their next refresh rather than through session broadcast traffic.
 
 ## Local-file dataset sharp edge
 
-URLs classified as local by `lucida_content::url::is_local_dataset_url` (canonical Unix `/foo`, drive-letter `c:/foo`, UNC `//server/share/foo` — see [Canonical dataset URL form](../../decisions/0042-canonical-dataset-url-form.md); everything routes through `lucida-store::backend::open` to `LocalFileSystem`) are embedded in saved views in canonical form. `dataset_id_for_url` is BLAKE3 of the *canonical* URL string — content-derived from the string after normalization, not the file bytes. Two consequences:
+URLs classified as local by `lucida_content::url::is_local_dataset_url` (canonical Unix `/foo`, drive-letter `c:/foo`, UNC `//server/share/foo` — see [Canonical dataset URL form](../../decisions/0042-canonical-dataset-url-form.md)) are embedded in saved views in canonical form. Trusted library/Python opens use `LocalFileSystem`; server opens retain a separately admitted descriptor-confined capability. `dataset_id_for_url` is BLAKE3 of the *canonical* URL string — content-derived from the string after normalization, not the file bytes. Two consequences:
 
 - For the **sender on their own server**: refresh-preserves works as for cloud datasets (same path → same file → same `DatasetId`).
 - For a **recipient on a different server**: same path may not exist, may be outside `data_dir`, or worst case may resolve to a *different* file with the same path on a different machine — silently loading the wrong dataset and applying viewport state meaningful for the original.
@@ -104,26 +109,24 @@ Resolution (option c per [Queue — Open Questions](../../queue.md)): the applie
 
 ## Interactions
 
-- **Producer (web)**: every viewport-mutating action triggers urlSync's debounce. The toolbar `ShareToolbarButton` reads the current URL and copies to clipboard with size + local-file warnings. The live sidebar is `WorkspaceSavedViewsSidebar` ("Save current view" → `captureBuilder` → POST `/api/workspaces/:workspace_id/saved-views`); the old standalone `BookmarkSidebar.tsx` was removed when workspaces landed, though an orphaned `BookmarkSidebar.css` and the `showBookmarkSidebar` toggle state name in `App.tsx` still carry the old name.
-- **Producer (server)**: REST handlers under `/api/bookmarks` mutate the store; `broadcast.rs` dispatches `BookmarkChanged` after success.
-- **Consumer (web)**: `urlSync` bootstrap recognizes `#view=…` and `#b=<id>` on load and `popstate`. `useBookmarks` lists by current dataset URLs and subscribes to `BookmarkChanged` for live updates. `LoadingViewBanner` subscribes to applier state for recipient-apply progress.
-- **Auth gate**: every `/api/bookmarks/*` route runs through `AuthPrincipal` middleware (the existing `SessionCookieExtractor`). Unauthed `#b=<id>` URLs go through `UnauthLanding`, which preserves the hash through the OAuth flow, so the bookmark loads after sign-in transparently.
+- **Producer (web)**: every viewport-mutating action triggers urlSync's debounce. The toolbar `ShareToolbarButton` reads the current URL and copies it with size + local-file warnings. `WorkspaceSavedViewsSidebar` captures the current view and calls the workspace-scoped REST API; `useWorkspaceSavedViews` owns list/filter/mutation state.
+- **Producer (server)**: workspace REST handlers validate membership and visibility, strip source URLs, and persist the canonical row in `workspace_saved_views`.
+- **Consumer (web)**: `urlSync` recognizes `#view=…` and `#b=<id>` on load and `popstate`. The production resolver in `App.tsx` calls `getWorkspaceSavedView(workspaceId, id)`; `LoadingViewBanner` subscribes to applier state for recipient-apply progress.
+- **Auth gate**: workspace membership and saved-view visibility are enforced by `WorkspaceManager`. An unauthenticated workspace URL goes through `UnauthLanding`, which preserves the path and hash across OAuth so resolution resumes after sign-in.
 
 ## Invariants
 
-- **The URL always reflects the user's current view, inline-encoded.** Bookmarks are addressable artifacts; `#b=<id>` is an explicit alternate share path. The applier's URL-collapse-to-`#view=…` after `#b=<id>` apply maintains this.
-- **Self-broadcast is intentional.** The originating client receives the same `BookmarkChanged` as everyone else. Optimistic local state from `useBookmarks` reconciles cleanly because the broadcast-driven refetch returns the same canonical row.
-- **Bookmark CUD broadcast scope = overlapping loaded datasets.** Empty `dataset_urls` → broadcast-to-all (bookmarks made before any dataset is loaded reach every connected client; intentional).
+- **The URL always reflects the user's current view, inline-encoded.** A workspace saved view is an addressable artifact; `#b=<id>` is the stable entry path. Collapsing it to `#view=…` after apply keeps subsequent navigation live.
+- **`#b` ids are workspace-relative.** Resolution always includes the current `workspace_id`; an id copied under one workspace cannot escape that workspace's authorization boundary.
+- **Saved-view mutations are not document commands.** They persist through workspace REST and do not consume sequence numbers or appear in session snapshots.
 - **Schema versioning is additive-by-default.** `SavedView` fields all carry `#[serde(default)]`, so an older server's `view_json` deserializes against a newer schema without migration. Breaking changes (rename, semantic shift) require bumping `v` and a migration story.
-- **`BookmarkStore::delete` returns `Result<Option<Bookmark>, _>`** — the deleted row's `dataset_urls` are needed for broadcast scope. Future store backends must match.
 
 ## Gotchas
 
-- **`WasmScene.dataset_volume_shape` returns `[Z, Y, X]` only** — `t`/`c` not surfaced through that API. The applier conservatively only clamps `z`; t/c pass through unmodified (the WASM `set_t`/`set_c` accept any u32). If a stored bookmark references a dataset that has shrunk in t/c since capture, the user sees the WASM-side behavior (no clamp), not a friendly bound-check.
-- **Web-side URL → DatasetId map is populated only on local opens.** Datasets opened by *other peers* won't have an entry, so they're omitted from any `SavedView` this client emits. Correct behavior (you can't share what you don't know the URL of) but worth knowing when debugging "why isn't my colleague's dataset in the share link."
-- **URL collapse after `#b=<id>` apply is intentional.** The URL is rewritten to `#view=…` after applying a bookmark so further pans don't drift back to the snapshot. `BookmarkChanged` Updated/Deleted broadcasts must NOT re-rewrite the URL hash — the user has moved on from that bookmark.
-- **`captureBuilder` excludes a dataset from a `SavedView` when its URL is unknown** — i.e. opened by a peer, so it's absent from this client's URL→DatasetId map (you can't share a dataset whose URL you don't have). The exclusion is silent.
-- **Pre-auth `dev@local` bookmarks** created during the auth design phase carry `created_by: "dev@local"`. Cutover policy at production rollout is recorded in [Queue — Open Questions](../../queue.md).
+- **`WasmScene.dataset_volume_shape` returns `[Z, Y, X]` only.** The applier combines that shape with the current manifest dimensions when clamping the saved view and reports moved axes through a non-blocking notice. Keep those sources aligned if the WASM shape grows.
+- **Source-URL capture is a separate mode.** `captureBuilder` can build source-URL records for non-workspace callers, but the product workspace path uses `workspace-dataset-id`, leaves `SavedView.datasets` empty, and keys settings/layouts by `wds-*` ids.
+- **URL collapse after `#b=<id>` apply is intentional.** The URL is rewritten to `#view=…` after applying the saved view so further pans do not drift back to the snapshot. Later changes to the stored row do not rebind an already-open tab.
+- **Legacy bookmark rows do not resolve through `#b`.** The hash now means a workspace saved-view id only. Recover an old row with the offline `lucida-server recover-legacy-bookmark` workflow before trying to share it.
 - **Dataset URLs in saved views are visible to anyone with the link.** Presigned URLs and similar credentialed URLs are exposed via clipboard, browser history, screenshots, copy-paste. See [Saved-View URLs Expose Dataset URLs (and Anything in Them)](../../gotchas/saved-view-credentials-in-urls.md).
 - **Workspace saved views are not source-open recipes.** In workspace mode, `SavedView.datasets` is empty and the applier never opens source URLs. Missing `workspace_dataset_id` references partially apply with warnings.
 - **`UrlSync` is one-shot-by-default in dev.** React Strict-Mode double-invokes mount effects; without re-arming `start()` after `destroy()`, the URL silently never updates. Bit us in PR #483 hours after shipping. See [React Strict-Mode Kills One-Shot `destroy()` Classes](../../gotchas/strict-mode-destroyable-classes.md).
@@ -133,8 +136,9 @@ Resolution (option c per [Queue — Open Questions](../../queue.md)): the applie
 
 - [URL-as-App-State for Saved Views](../../decisions/0013-url-as-app-state-for-saved-views.md) — Y-model choice
 - [Local-File Datasets Are Personal-Only in Saved Views](../../decisions/0014-local-file-datasets-personal-only-in-saved-views.md) — local-file warn-and-embed
-- [Server-Stored Bookmarks and the AuthPrincipal Seam](../../decisions/0015-server-stored-bookmarks-and-auth-seam.md) — SQLite + AuthPrincipal seam
-- [Document vs Viewport Command Split](../../decisions/0001-document-vs-viewport-split.md) — why `BookmarkChanged` is unsequenced
+- [Server-Stored Bookmarks and the AuthPrincipal Seam](../../decisions/0015-server-stored-bookmarks-and-auth-seam.md) — historical predecessor + the surviving `AuthPrincipal` seam
+- [Sunset dispositions for the three superseded server surfaces](../../decisions/0043-superseded-server-surfaces-sunset.md) — workspace saved views absorb the former bookmark surface
+- [Document vs Viewport Command Split](../../decisions/0001-document-vs-viewport-split.md) — why saved-view REST mutations stay outside the document stream
 - [Flow: Saved-View Recipient Apply](../../flows/saved-view-recipient-apply.md) — end-to-end recipient trace
 - [Saved-View URLs Expose Dataset URLs (and Anything in Them)](../../gotchas/saved-view-credentials-in-urls.md) — URL-exposure footgun
 - [Axum's Default Query Extractor Drops Repeated Keys](../../gotchas/axum-query-multivalue.md) — repeated `?dataset=` parsing wrinkle

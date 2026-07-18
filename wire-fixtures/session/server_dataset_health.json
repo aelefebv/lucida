@@ -35,6 +35,9 @@
           "current_bytes": 73400320,
           "max_bytes": 1073741824,
           "used_percent": 6,
+          "entry_count": 4096,
+          "max_entries": 100000,
+          "entry_used_percent": 4,
           "evictions": 4,
           "root": "/var/cache/lucida/generated"
         },
@@ -44,6 +47,11 @@
             "level_index": 2,
             "key": "2/1/0/1/0/0",
             "status": "failed_transient",
+            "failure": {
+              "category": "source",
+              "code": "storage_backend",
+              "retryable": true
+            },
             "message": "source read timed out"
           }
         ]

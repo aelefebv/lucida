@@ -8,9 +8,12 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use lucida_content::DatasetId;
+use lucida_content::url::{SourceIdentity, SourceVersion};
 use lucida_core::auth_principal::AuthPrincipal;
+use lucida_core::quota::MAX_DOCUMENT_JSON_BYTES;
 use lucida_core::saved_view::SavedView;
 use lucida_core::scene::DocumentState;
+use serde::Deserialize;
 use thiserror::Error;
 
 use super::types::{
@@ -29,6 +32,10 @@ pub enum StoreError {
     Backend(String),
     #[error("workspace document json failed to parse: {0}")]
     InvalidDocument(String),
+    #[error(
+        "workspace document format version {found} is not supported; current version is {supported}"
+    )]
+    UnsupportedDocumentVersion { found: u64, supported: u32 },
     #[error("workspace saved-view json failed to parse: {0}")]
     InvalidSavedView(String),
     #[error("workspace role is invalid: {0}")]
@@ -37,6 +44,21 @@ pub enum StoreError {
     InvalidLinkAccess(String),
     #[error("workspace saved-view visibility is invalid: {0}")]
     InvalidSavedViewVisibility(String),
+    #[error("workspace must retain at least one owner")]
+    LastOwner,
+    #[error("workspace sequence {attempted} is stale or out of order")]
+    SequenceConflict { attempted: u64 },
+    #[error("workspace sequence {0} exceeds the persistence range")]
+    SequenceOutOfRange(u64),
+    #[error("viewer profile revision {0} exceeds the persistence range")]
+    ViewerProfileRevisionOutOfRange(u64),
+    #[error("viewer profile revision conflict (expected {expected:?}, actual {actual:?})")]
+    ViewerProfileConflict {
+        expected: Option<u64>,
+        actual: Option<u64>,
+    },
+    #[error("invalid persisted source identity: {0}")]
+    InvalidSourceIdentity(String),
 }
 
 fn map_sql(e: sqlx::Error) -> StoreError {
@@ -47,8 +69,71 @@ fn map_json_in(e: serde_json::Error) -> StoreError {
     StoreError::InvalidDocument(e.to_string())
 }
 
-fn map_json_out(e: serde_json::Error) -> StoreError {
-    StoreError::Backend(format!("document_json serialize: {e}"))
+pub(crate) const WORKSPACE_DOCUMENT_FORMAT_VERSION: u32 = 1;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkspaceDocumentEnvelope {
+    format_version: u32,
+    document: DocumentState,
+}
+
+fn serialize_document(document: &DocumentState) -> Result<String, StoreError> {
+    let document_bytes = document
+        .to_validated_json()
+        .map_err(|error| StoreError::InvalidDocument(error.to_string()))?;
+    let prefix = format!("{{\"format_version\":{WORKSPACE_DOCUMENT_FORMAT_VERSION},\"document\":");
+    let encoded_len = prefix
+        .len()
+        .checked_add(document_bytes.len())
+        .and_then(|length| length.checked_add(1))
+        .ok_or_else(|| StoreError::InvalidDocument("document length overflow".to_string()))?;
+    if encoded_len > MAX_DOCUMENT_JSON_BYTES {
+        return Err(StoreError::InvalidDocument(format!(
+            "versioned document is {encoded_len} bytes; limit is {MAX_DOCUMENT_JSON_BYTES}"
+        )));
+    }
+    let mut bytes = Vec::with_capacity(encoded_len);
+    bytes.extend_from_slice(prefix.as_bytes());
+    bytes.extend_from_slice(&document_bytes);
+    bytes.push(b'}');
+    Ok(String::from_utf8(bytes).expect("serde_json always emits UTF-8"))
+}
+
+fn parse_document(json: &str) -> Result<DocumentState, StoreError> {
+    if json.len() > MAX_DOCUMENT_JSON_BYTES {
+        return Err(StoreError::InvalidDocument(format!(
+            "document is {} bytes; limit is {MAX_DOCUMENT_JSON_BYTES}",
+            json.len()
+        )));
+    }
+    let value: serde_json::Value = serde_json::from_str(json).map_err(map_json_in)?;
+    let document = if let Some(raw_version) = value.get("format_version") {
+        let version = raw_version.as_u64().ok_or_else(|| {
+            StoreError::InvalidDocument("format_version must be an unsigned integer".to_string())
+        })?;
+        let version_u32 = u32::try_from(version).map_err(|_| {
+            StoreError::InvalidDocument("format_version exceeds the u32 range".to_string())
+        })?;
+        if version_u32 != WORKSPACE_DOCUMENT_FORMAT_VERSION {
+            return Err(StoreError::UnsupportedDocumentVersion {
+                found: version,
+                supported: WORKSPACE_DOCUMENT_FORMAT_VERSION,
+            });
+        }
+        let envelope: WorkspaceDocumentEnvelope =
+            serde_json::from_value(value).map_err(map_json_in)?;
+        debug_assert_eq!(envelope.format_version, WORKSPACE_DOCUMENT_FORMAT_VERSION);
+        envelope.document
+    } else {
+        // Implicit version 0: the historical bare DocumentState. It remains
+        // readable, but its next successful persistence writes the v1 envelope.
+        serde_json::from_value(value).map_err(map_json_in)?
+    };
+    document
+        .validate_state()
+        .map_err(|error| StoreError::InvalidDocument(error.to_string()))?;
+    Ok(document)
 }
 
 fn map_saved_view_json_in(e: serde_json::Error) -> StoreError {
@@ -57,6 +142,17 @@ fn map_saved_view_json_in(e: serde_json::Error) -> StoreError {
 
 fn map_saved_view_json_out(e: serde_json::Error) -> StoreError {
     StoreError::Backend(format!("view_json serialize: {e}"))
+}
+
+fn stored_seq(seq: u64) -> Result<i64, StoreError> {
+    i64::try_from(seq).map_err(|_| StoreError::SequenceOutOfRange(seq))
+}
+
+fn previous_stored_seq(seq: u64) -> Result<i64, StoreError> {
+    let previous = seq
+        .checked_sub(1)
+        .ok_or(StoreError::SequenceConflict { attempted: seq })?;
+    stored_seq(previous)
 }
 
 fn parse_dt(raw: String) -> Result<DateTime<Utc>, StoreError> {
@@ -198,10 +294,21 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         &self,
         workspace_id: &str,
         workspace_dataset_id: &DatasetId,
-        dataset_source_id: &str,
-        canonical_url: &str,
+        source: &SourceVersion,
         display_name: &str,
         added_by: &str,
+        seq: u64,
+        document: &DocumentState,
+    ) -> Result<(), StoreError>;
+
+    /// Atomically replace the observed generation and the document manifest
+    /// for an existing workspace membership during wake-time restore.
+    async fn persist_dataset_refreshed(
+        &self,
+        workspace_id: &str,
+        workspace_dataset_id: &DatasetId,
+        source: &SourceVersion,
+        display_name: &str,
         seq: u64,
         document: &DocumentState,
     ) -> Result<(), StoreError>;
@@ -236,7 +343,7 @@ pub trait WorkspaceStore: Send + Sync + 'static {
     async fn dataset_by_source(
         &self,
         workspace_id: &str,
-        dataset_source_id: &str,
+        identity: &SourceIdentity,
     ) -> Result<Option<WorkspaceDatasetSource>, StoreError>;
 
     async fn dataset_by_workspace_dataset(
@@ -349,6 +456,7 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         workspace_id: &str,
         principal: &AuthPrincipal,
         profile: &str,
+        expected_revision: Option<u64>,
         seed_source: Option<&str>,
         view: SavedView,
     ) -> Result<Option<WorkspaceViewerProfile>, StoreError>;
@@ -386,4 +494,65 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         workspace_id: &str,
         principal: &AuthPrincipal,
     ) -> Result<WorkspaceUserState, StoreError>;
+}
+
+#[cfg(test)]
+mod persistence_format_tests {
+    use super::*;
+
+    const LEGACY_V0: &str = include_str!("../../../testdata/workspace_document/v0_legacy.json");
+    const CURRENT_V1: &str = include_str!("../../../testdata/workspace_document/v1_current.json");
+    const FUTURE_V2: &str = include_str!("../../../testdata/workspace_document/v2_future.json");
+
+    #[test]
+    fn legacy_document_reads_and_migrates_on_next_write() {
+        let document = parse_document(LEGACY_V0).unwrap();
+        let migrated = serialize_document(&document).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&migrated).unwrap();
+        assert_eq!(
+            value["format_version"],
+            serde_json::json!(WORKSPACE_DOCUMENT_FORMAT_VERSION)
+        );
+        assert_eq!(value["document"]["manifests"], serde_json::json!({}));
+        parse_document(&migrated).unwrap();
+    }
+
+    #[test]
+    fn current_document_fixture_round_trips_in_the_canonical_envelope() {
+        let document = parse_document(CURRENT_V1).unwrap();
+        let encoded = serialize_document(&document).unwrap();
+        let actual: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        let expected: serde_json::Value = serde_json::from_str(CURRENT_V1).unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn future_document_is_rejected_without_reinterpreting_or_rewriting_it() {
+        let original = FUTURE_V2.to_string();
+        let error = parse_document(&original).unwrap_err();
+        assert!(matches!(
+            error,
+            StoreError::UnsupportedDocumentVersion {
+                found: 2,
+                supported: WORKSPACE_DOCUMENT_FORMAT_VERSION,
+            }
+        ));
+        assert_eq!(
+            original, FUTURE_V2,
+            "parse failure must not alter source bytes"
+        );
+    }
+
+    #[test]
+    fn malformed_version_cannot_fall_back_to_the_legacy_shape() {
+        for malformed in [
+            r#"{"format_version":"1","document":{"manifests":{}}}"#,
+            r#"{"format_version":1.5,"document":{"manifests":{}}}"#,
+            r#"{"format_version":-1,"document":{"manifests":{}}}"#,
+            r#"{"format_version":4294967296,"document":{"manifests":{}}}"#,
+        ] {
+            let error = parse_document(malformed).unwrap_err();
+            assert!(matches!(error, StoreError::InvalidDocument(_)));
+        }
+    }
 }

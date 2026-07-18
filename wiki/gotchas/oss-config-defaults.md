@@ -5,7 +5,7 @@ description: "Lucida is open-source and keeps zero deployment-specific literals 
 tags: [lucida, gotcha]
 source_path: wiki/gotchas/oss-config-defaults.md
 created: 2026-05-08
-modified: 2026-06-25
+modified: 2026-07-17
 ---
 
 # OSS Config Defaults and the LUCIDA_* Env Var Contract
@@ -27,9 +27,19 @@ The full set is documented in PRD #455 §"Configuration surface". Common ones:
 - `LUCIDA_DB_PATH` — SQLite file path. Default `./lucida.db` (CWD-relative).
 - `LUCIDA_COOKIE_{NAME,SECURE}` — cookie configuration overrides.
 - `LUCIDA_DATA_DIR` — root for `/api/browse`. Mirrors `--data-dir`; CLI flag wins.
-- `LUCIDA_PROXY_CACHE_DIR` — proxy on-disk cache root. Mirrors `--proxy-cache-dir`; CLI flag wins.
-- `LUCIDA_PROXY_CONCURRENCY` — per-generator concurrency cap. Mirrors `--proxy-concurrency`; CLI flag wins.
+- `LUCIDA_GENERATED_COARSE_CACHE_DIR` — generated-coarse cache root. Mirrors `--generated-coarse-cache-dir`; CLI flag wins.
+- `LUCIDA_GENERATED_COARSE_DISK_BUDGET_BYTES` — finite root-wide generated-cache ceiling. Default `8589934592` bytes (8 GiB); zero is rejected at startup.
+- `LUCIDA_PROXY_CACHE_DIR` — deprecated proxy-era root used only by `clear-proxy-cache` during upgrade cleanup. New generated data is never written there.
+- `LUCIDA_GENERATED_COARSE_CONCURRENCY` — generated-coarse worker concurrency. Mirrors `--generated-coarse-concurrency`; CLI flag wins.
+- `LUCIDA_SOURCE_HTTP_{HOSTS,CIDRS}` — exact hostname allowlist plus an explicit opt-in for intentional private/LAN ranges.
+- `LUCIDA_SOURCE_HTTP_IPV6_TRANSLATION_CIDRS` — deployment-specific RFC 6052 IPv6 translation prefixes to deny. Standard NAT64 and transition forms are always rejected without configuration.
 - `LUCIDA_LOG_FORMAT` — `text` (default) or `json`. Switches the tracing subscriber between the dev-friendly pretty formatter and the production JSON formatter that log aggregators consume natively. Unknown values fall back to `text` (mirrors `SecureCookieMode::parse`).
+- `LUCIDA_SHUTDOWN_QUIET_PERIOD_SECS` — delay after readiness flips to
+  `draining` before the HTTP server stops accepting work. Default `2`; capped
+  below the total timeout.
+- `LUCIDA_SHUTDOWN_TIMEOUT_SECS` — hard upper bound for connection drain and
+  process shutdown. Default `30`; values below one second are raised to one.
+
 ## Common misconfigurations
 
 ### "Auth disabled but I bound to 0.0.0.0"
@@ -72,7 +82,11 @@ You can't, today. `LUCIDA_ADMIN_EMAILS` is read once at startup. Promotion = con
 
 ### "I set LUCIDA_DATA_DIR but my browse handler still serves arbitrary paths"
 
-`--data-dir`, `--proxy-cache-dir`, and `--proxy-concurrency` accept env-var fallbacks via `LUCIDA_DATA_DIR` / `LUCIDA_PROXY_CACHE_DIR` / `LUCIDA_PROXY_CONCURRENCY`. **CLI flags override env vars** — clap's default behavior. So a systemd unit with both `Environment=LUCIDA_DATA_DIR=/var/lib/lucida/data` and `ExecStart=lucida-server --data-dir /tmp` will use `/tmp`, not `/var/lib/lucida/data`. Drop the CLI flag (or remove the env var) when you want the other to win. Verified by the in-tree CLI tests in `lucida-server/src/main.rs`.
+`--data-dir` and generated-coarse options accept their matching `LUCIDA_*` env fallbacks. **CLI flags override env vars** — clap's default behavior. So a systemd unit with both `Environment=LUCIDA_DATA_DIR=/var/lib/lucida/data` and `ExecStart=lucida-server --data-dir /tmp` uses `/tmp`. Drop one source when you want the other to win; the in-tree CLI tests lock this behavior.
+
+### "My NAT64 deployment uses a custom prefix"
+
+The server recognizes and rejects the standardized `64:ff9b::/96` and `64:ff9b:1::/48` forms, plus mapped/compatible, Teredo, 6to4, and ISATAP addresses. RFC 6052 network-specific prefixes have no self-identifying bit pattern, so configure every such operator-owned prefix in `LUCIDA_SOURCE_HTTP_IPV6_TRANSLATION_CIDRS`. Resolved addresses in that list are denied before transport pinning even if their hostname or a broad source CIDR is otherwise allowed.
 
 ## Database location
 

@@ -48,7 +48,6 @@ function makeScheduler(opts?: {
   maxConcurrentFetches?: number;
   maxBytesInFlight?: number;
   burstLogger?: BurstLogger;
-  siblingInFlight?: () => { count: number; bytes: number };
 }) {
   const startCalls: StartCall[] = [];
   const startFn = (
@@ -64,7 +63,6 @@ function makeScheduler(opts?: {
       maxConcurrentFetches: opts?.maxConcurrentFetches ?? 4,
       maxBytesInFlight: opts?.maxBytesInFlight ?? 1_000_000,
       burstLogger: opts?.burstLogger,
-      siblingInFlight: opts?.siblingInFlight,
     },
     keyOf,
     startFn,
@@ -139,6 +137,59 @@ describe("Scheduler.enqueue + drain", () => {
     scheduler.drain(() => 0);
     expect(startCalls[0].key).toBe(keyOf(r));
     expect(scheduler.hasInFlight(keyOf(r))).toBe(true);
+  });
+});
+
+describe("Scheduler dataset ownership + fairness", () => {
+  it("replacing one dataset cannot erase another dataset's pending work", () => {
+    const { scheduler } = makeScheduler({ maxConcurrentFetches: 0 });
+    scheduler.replaceDataset("ds-a", [
+      req({ datasetId: "ds-a", entityId: "a", chunkKey: "a-1" }),
+      req({ datasetId: "ds-a", entityId: "a", chunkKey: "a-2" }),
+    ]);
+    scheduler.replaceDataset("ds-b", [
+      req({ datasetId: "ds-b", entityId: "b", chunkKey: "b-1" }),
+    ]);
+
+    scheduler.replaceDataset("ds-a", [
+      req({ datasetId: "ds-a", entityId: "a", chunkKey: "a-2" }),
+    ]);
+
+    expect(scheduler.pendingSnapshot().map((item) => item.chunkKey).sort())
+      .toEqual(["a-2", "b-1"]);
+  });
+
+  it("round-robins datasets under one fetch slot", () => {
+    const { scheduler, startCalls } = makeScheduler({ maxConcurrentFetches: 1 });
+    scheduler.replaceDataset("ds-a", [
+      req({ datasetId: "ds-a", entityId: "a", chunkKey: "a-1" }),
+      req({ datasetId: "ds-a", entityId: "a", chunkKey: "a-2" }),
+    ]);
+    scheduler.replaceDataset("ds-b", [
+      req({ datasetId: "ds-b", entityId: "b", chunkKey: "b-1" }),
+      req({ datasetId: "ds-b", entityId: "b", chunkKey: "b-2" }),
+    ]);
+
+    for (let i = 0; i < 4; i++) {
+      scheduler.drain(() => 0);
+      const started = startCalls.at(-1);
+      if (started) scheduler.markInFlightDone(started.key);
+    }
+
+    expect(startCalls.map((call) => call.req.datasetId))
+      .toEqual(["ds-a", "ds-b", "ds-a", "ds-b"]);
+  });
+
+  it("validates owner replacements before mutating the live queue", () => {
+    const { scheduler } = makeScheduler({ maxConcurrentFetches: 0 });
+    scheduler.replaceDataset("ds-a", [
+      req({ datasetId: "ds-a", entityId: "a", chunkKey: "kept" }),
+    ]);
+
+    expect(() => scheduler.replaceDataset("ds-a", [
+      req({ datasetId: "ds-b", entityId: "b", chunkKey: "wrong-owner" }),
+    ])).toThrow(/received item owned by ds-b/);
+    expect(scheduler.pendingSnapshot().map((item) => item.chunkKey)).toEqual(["kept"]);
   });
 });
 
@@ -604,47 +655,6 @@ describe("Scheduler backpressure log", () => {
     } finally {
       vi.useRealTimers();
     }
-  });
-});
-
-// ---------------------------------------------------------------------------
-// siblingInFlight (proxy <-> chunk shared caps)
-// ---------------------------------------------------------------------------
-
-describe("Scheduler.siblingInFlight", () => {
-  it("counts sibling in-flight against the concurrency cap", () => {
-    const sibling = { count: 2, bytes: 0 };
-    const { scheduler, startCalls } = makeScheduler({
-      maxConcurrentFetches: 3,
-      siblingInFlight: () => sibling,
-    });
-    scheduler.enqueue([
-      req({ chunkKey: "a" }),
-      req({ chunkKey: "b" }),
-    ]);
-    scheduler.drain(() => 0);
-    // 2 sibling + cap 3 = room for 1; second one stays pending.
-    expect(startCalls).toHaveLength(1);
-    expect(scheduler.pendingSize).toBe(1);
-  });
-
-  it("counts sibling bytes against the bytes cap", () => {
-    const sibling = { count: 0, bytes: 100 };
-    const { scheduler, startCalls } = makeScheduler({
-      maxConcurrentFetches: 10,
-      maxBytesInFlight: 200,
-      siblingInFlight: () => sibling,
-    });
-    scheduler.enqueue([
-      req({ chunkKey: "a" }),
-      req({ chunkKey: "b" }),
-      req({ chunkKey: "c" }),
-    ]);
-    scheduler.drain(() => 80);
-    // sibling already at 100; cap 200 → room for one 80B start (180 < 200),
-    // a second 80B start (260 > 200) is blocked.
-    expect(startCalls).toHaveLength(2);
-    expect(scheduler.pendingSize).toBe(1);
   });
 });
 

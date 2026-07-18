@@ -105,9 +105,9 @@ async fn duplicate_copies_datasets_with_display_names() {
     // workspace-local ids (independent membership).
     let src = store.list_dataset_sources(&source_id).await.unwrap();
     let src_source_ids: std::collections::HashSet<_> =
-        src.iter().map(|d| d.dataset_source_id.clone()).collect();
+        src.iter().map(|d| d.identity.clone()).collect();
     let copy_source_ids: std::collections::HashSet<_> =
-        copied.iter().map(|d| d.dataset_source_id.clone()).collect();
+        copied.iter().map(|d| d.identity.clone()).collect();
     assert_eq!(src_source_ids, copy_source_ids, "global source ids reused");
     for d in &copied {
         assert!(

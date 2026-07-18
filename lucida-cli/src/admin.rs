@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::EffectiveServer;
 use crate::credentials::EffectiveToken;
 use crate::error::{CliError, ErrorKind};
-use crate::http::api_url;
+use crate::http::{api_url, bounded_json, bounded_text, http_client};
 use crate::workspace::WorkspaceRole;
 
 pub const REMOTE_ADMIN_SCOPE: &str = "remote_admin";
@@ -110,7 +110,7 @@ impl AdminClient {
         Self {
             base_url: base_url.into(),
             token: token.map(|effective| effective.token),
-            http: reqwest::Client::new(),
+            http: http_client(),
         }
     }
 
@@ -253,7 +253,7 @@ impl AdminClient {
         let response = request.send().await?;
         let status = response.status();
         if status.is_success() {
-            return response.json::<T>().await.map_err(|error| {
+            return bounded_json::<T>(response).await.map_err(|error| {
                 CliError::new(
                     ErrorKind::Protocol,
                     format!("{action} returned invalid JSON: {error}"),
@@ -261,7 +261,7 @@ impl AdminClient {
             });
         }
 
-        let body = response.text().await.unwrap_or_default();
+        let body = bounded_text(response).await?;
         Err(map_admin_error(status, &body, action))
     }
 

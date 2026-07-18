@@ -175,6 +175,7 @@ mod tests {
         let now = Utc::now();
         PendingAuth {
             state_token: token.into(),
+            browser_binding_hash: "binding-hash".into(),
             intended_path: "/".into(),
             intended_hash: "".into(),
             created_at: now - ChronoDuration::minutes(age_minutes),
@@ -212,8 +213,21 @@ mod tests {
         pending.insert(pending_with_age("fresh", 5)).await.unwrap();
 
         sweep_once(&cleanup_state(sessions, Arc::clone(&pending))).await;
-        assert!(pending.consume("expired").await.unwrap().is_none());
-        assert!(pending.consume("fresh").await.unwrap().is_some());
+        let cutoff = Utc::now() - ChronoDuration::minutes(10);
+        assert!(
+            pending
+                .consume("expired", "binding-hash", cutoff)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            pending
+                .consume("fresh", "binding-hash", cutoff)
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     /// Mock store that returns `Backend` for every call. The cleanup
@@ -237,7 +251,7 @@ mod tests {
         ) -> Result<(), SessionStoreError> {
             unimplemented!()
         }
-        async fn delete(&self, _: &str) -> Result<(), SessionStoreError> {
+        async fn delete(&self, _: &str) -> Result<Option<LoginSession>, SessionStoreError> {
             unimplemented!()
         }
         async fn delete_expired(&self, _: DateTime<Utc>) -> Result<u64, SessionStoreError> {

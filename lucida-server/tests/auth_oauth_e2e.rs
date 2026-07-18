@@ -357,6 +357,7 @@ async fn full_oauth_flow_lands_user_at_intended_path_with_hash() {
     assert!(location.starts_with(&format!("{mock_base}/oauth2/v2/auth?")));
     assert!(location.contains("state="));
     let state_token = extract_state_param(&location);
+    let binding_cookie = extract_oauth_binding_cookie(&start_res);
     assert!(!state_token.is_empty(), "state token must be in redirect");
     assert_eq!(app.pending_store.len(), 1);
 
@@ -372,7 +373,11 @@ async fn full_oauth_flow_lands_user_at_intended_path_with_hash() {
     *mock_state.queued_id_token.lock().unwrap() = Some(id_token);
 
     let cb_uri = format!("/auth/callback?code=fake-code-abc&state={state_token}");
-    let cb_req = Request::builder().uri(&cb_uri).body(Body::empty()).unwrap();
+    let cb_req = Request::builder()
+        .uri(&cb_uri)
+        .header("cookie", &binding_cookie)
+        .body(Body::empty())
+        .unwrap();
     let cb_res = app.router.clone().oneshot(cb_req).await.unwrap();
     assert_eq!(cb_res.status(), StatusCode::FOUND, "callback must 302");
 
@@ -450,6 +455,40 @@ async fn callback_with_unknown_state_redirects_to_auth_failed() {
 }
 
 #[tokio::test]
+async fn callback_from_another_browser_cannot_consume_oauth_state() {
+    let keys = build_test_keys();
+    let (mock_base, _mock_state) = spawn_mock_google(keys.jwks_json.clone()).await;
+    let app = build_lucida_app(&mock_base).await;
+
+    let start_req = Request::builder()
+        .method("POST")
+        .uri("/auth/start")
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({"path": "/", "hash": ""}).to_string()))
+        .unwrap();
+    let start_res = app.router.clone().oneshot(start_req).await.unwrap();
+    let state_token =
+        extract_state_param(start_res.headers().get(LOCATION).unwrap().to_str().unwrap());
+
+    let foreign_callback = Request::builder()
+        .uri(format!("/auth/callback?code=c&state={state_token}"))
+        .header("cookie", "lucida_oauth_binding=foreign-browser")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.router.oneshot(foreign_callback).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FOUND);
+    assert_eq!(
+        response.headers().get(LOCATION).unwrap(),
+        "/auth/error?code=auth_failed"
+    );
+    assert_eq!(
+        app.pending_store.len(),
+        1,
+        "foreign browser cannot consume state"
+    );
+}
+
+#[tokio::test]
 async fn callback_replay_of_consumed_state_returns_400() {
     let keys = build_test_keys();
     let (mock_base, mock_state) = spawn_mock_google(keys.jwks_json.clone()).await;
@@ -465,6 +504,7 @@ async fn callback_replay_of_consumed_state_returns_400() {
     let start_res = app.router.clone().oneshot(start_req).await.unwrap();
     let state_token =
         extract_state_param(start_res.headers().get(LOCATION).unwrap().to_str().unwrap());
+    let binding_cookie = extract_oauth_binding_cookie(&start_res);
 
     let id_token = mint_id_token(
         &keys.private_pem,
@@ -476,6 +516,7 @@ async fn callback_replay_of_consumed_state_returns_400() {
     *mock_state.queued_id_token.lock().unwrap() = Some(id_token);
     let cb_req = Request::builder()
         .uri(format!("/auth/callback?code=c&state={state_token}"))
+        .header("cookie", &binding_cookie)
         .body(Body::empty())
         .unwrap();
     let cb_res = app.router.clone().oneshot(cb_req).await.unwrap();
@@ -484,6 +525,7 @@ async fn callback_replay_of_consumed_state_returns_400() {
     // Replay the same state token — 302 to /auth/error?code=auth_failed.
     let replay = Request::builder()
         .uri(format!("/auth/callback?code=c&state={state_token}"))
+        .header("cookie", &binding_cookie)
         .body(Body::empty())
         .unwrap();
     let res = app.router.oneshot(replay).await.unwrap();
@@ -512,6 +554,7 @@ async fn callback_with_invalid_jwt_signature_redirects_to_auth_failed() {
     let start_res = app.router.clone().oneshot(start_req).await.unwrap();
     let state_token =
         extract_state_param(start_res.headers().get(LOCATION).unwrap().to_str().unwrap());
+    let binding_cookie = extract_oauth_binding_cookie(&start_res);
 
     // Sign with a different key — JWKS + signing key disagree, so
     // jsonwebtoken's validate must reject.
@@ -527,6 +570,7 @@ async fn callback_with_invalid_jwt_signature_redirects_to_auth_failed() {
 
     let cb_req = Request::builder()
         .uri(format!("/auth/callback?code=c&state={state_token}"))
+        .header("cookie", &binding_cookie)
         .body(Body::empty())
         .unwrap();
     let res = app.router.oneshot(cb_req).await.unwrap();
@@ -595,10 +639,12 @@ async fn auth_start_with_marker_cookie_adds_prompt_but_does_not_clear_marker() {
         .get_all(axum::http::header::SET_COOKIE)
         .iter()
         .collect();
+    assert_eq!(set_cookies.len(), 1, "only the OAuth binding cookie is set");
     assert!(
-        set_cookies.is_empty(),
-        "/auth/start must not clear the marker; got {} Set-Cookie header(s)",
-        set_cookies.len(),
+        set_cookies[0]
+            .to_str()
+            .unwrap()
+            .starts_with("lucida_oauth_binding=")
     );
 }
 
@@ -627,7 +673,13 @@ async fn auth_start_without_marker_cookie_omits_prompt() {
         .get_all(axum::http::header::SET_COOKIE)
         .iter()
         .collect();
-    assert!(set_cookies.is_empty());
+    assert_eq!(set_cookies.len(), 1);
+    assert!(
+        set_cookies[0]
+            .to_str()
+            .unwrap()
+            .starts_with("lucida_oauth_binding=")
+    );
 }
 
 // -- hosted-domain + email_verified -----------------------------------
@@ -653,6 +705,7 @@ async fn callback_with_disallowed_hd_redirects_to_error_no_session() {
     let start_res = app.router.clone().oneshot(start_req).await.unwrap();
     let state_token =
         extract_state_param(start_res.headers().get(LOCATION).unwrap().to_str().unwrap());
+    let binding_cookie = extract_oauth_binding_cookie(&start_res);
 
     // Forge JWT with disallowed hd.
     let bad = mint_id_token(
@@ -666,6 +719,7 @@ async fn callback_with_disallowed_hd_redirects_to_error_no_session() {
 
     let cb_req = Request::builder()
         .uri(format!("/auth/callback?code=c&state={state_token}"))
+        .header("cookie", &binding_cookie)
         .body(Body::empty())
         .unwrap();
     let res = app.router.clone().oneshot(cb_req).await.unwrap();
@@ -733,6 +787,7 @@ async fn callback_with_allowed_hd_succeeds_and_mints_session() {
     let start_res = app.router.clone().oneshot(start_req).await.unwrap();
     let state_token =
         extract_state_param(start_res.headers().get(LOCATION).unwrap().to_str().unwrap());
+    let binding_cookie = extract_oauth_binding_cookie(&start_res);
 
     let good = mint_id_token(
         &keys.private_pem,
@@ -745,6 +800,7 @@ async fn callback_with_allowed_hd_succeeds_and_mints_session() {
 
     let cb_req = Request::builder()
         .uri(format!("/auth/callback?code=c&state={state_token}"))
+        .header("cookie", &binding_cookie)
         .body(Body::empty())
         .unwrap();
     let res = app.router.oneshot(cb_req).await.unwrap();
@@ -775,6 +831,7 @@ async fn callback_with_unverified_email_redirects_to_unverified() {
     let start_res = app.router.clone().oneshot(start_req).await.unwrap();
     let state_token =
         extract_state_param(start_res.headers().get(LOCATION).unwrap().to_str().unwrap());
+    let binding_cookie = extract_oauth_binding_cookie(&start_res);
 
     let token = mint_id_token_full(
         &keys.private_pem,
@@ -788,6 +845,7 @@ async fn callback_with_unverified_email_redirects_to_unverified() {
 
     let cb_req = Request::builder()
         .uri(format!("/auth/callback?code=c&state={state_token}"))
+        .header("cookie", &binding_cookie)
         .body(Body::empty())
         .unwrap();
     let res = app.router.oneshot(cb_req).await.unwrap();
@@ -822,6 +880,7 @@ async fn empty_allowlist_accepts_any_verified_email() {
     let start_res = app.router.clone().oneshot(start_req).await.unwrap();
     let state_token =
         extract_state_param(start_res.headers().get(LOCATION).unwrap().to_str().unwrap());
+    let binding_cookie = extract_oauth_binding_cookie(&start_res);
 
     // Personal Gmail (no hd): must succeed under the OSS-permissive default.
     let token = mint_id_token(
@@ -835,6 +894,7 @@ async fn empty_allowlist_accepts_any_verified_email() {
 
     let cb_req = Request::builder()
         .uri(format!("/auth/callback?code=c&state={state_token}"))
+        .header("cookie", &binding_cookie)
         .body(Body::empty())
         .unwrap();
     let res = app.router.oneshot(cb_req).await.unwrap();
@@ -853,4 +913,16 @@ fn extract_state_param(location: &str) -> String {
         }
     }
     String::new()
+}
+
+fn extract_oauth_binding_cookie<B>(response: &axum::http::Response<B>) -> String {
+    response
+        .headers()
+        .get_all(SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .find(|value| value.starts_with("lucida_oauth_binding="))
+        .and_then(|value| value.split(';').next())
+        .expect("/auth/start must set the OAuth browser binding")
+        .to_string()
 }

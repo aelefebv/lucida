@@ -16,10 +16,6 @@ pub struct SceneEpochs {
     /// Selection-like state changed (SetT, SetC, SetZ, SetMultiChannel,
     /// channel visibility/settings, render mode, contrast, gamma)
     pub selection: u64,
-    /// Asset catalog changed (proxy availability published or revoked).
-    /// Bumped by `DocumentCommand::ApplyAssetCatalogDelta`.
-    #[serde(default)]
-    pub asset: u64,
     /// Collaborative annotations changed (a pin added, removed, or moved; a
     /// comment added, removed, or edited).
     /// Bumped by `DocumentCommand::AddAnnotation` / `RemoveAnnotation` /

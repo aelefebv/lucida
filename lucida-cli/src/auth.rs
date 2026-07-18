@@ -15,6 +15,7 @@ use lucida_core::auth_principal::AuthPrincipal;
 
 use crate::credentials::CredentialStorage;
 use crate::error::{CliError, ErrorKind};
+use crate::http::{api_url, bounded_json, http_client};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -28,12 +29,12 @@ impl AuthClient {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
-            http: reqwest::Client::new(),
+            http: http_client(),
         }
     }
 
     pub async fn whoami(&self, token: Option<&str>) -> Result<AuthPrincipal, CliError> {
-        let url = format!("{}/auth/whoami", self.base_url);
+        let url = api_url(&self.base_url, &["auth", "whoami"])?;
         let mut request = self
             .http
             .get(url)
@@ -43,7 +44,7 @@ impl AuthClient {
         }
         let response = request.send().await?;
         match response.status() {
-            status if status.is_success() => Ok(response.json::<AuthPrincipal>().await?),
+            status if status.is_success() => bounded_json::<AuthPrincipal>(response).await,
             StatusCode::UNAUTHORIZED => Err(CliError::new(
                 ErrorKind::Unauthenticated,
                 "not authenticated; run `lucida auth login`",
@@ -61,7 +62,7 @@ impl AuthClient {
         raw_token: &str,
         expires_in_seconds: Option<u64>,
     ) -> Result<CliAuthStartResponse, CliError> {
-        let url = format!("{}/auth/cli/start", self.base_url);
+        let url = api_url(&self.base_url, &["auth", "cli", "start"])?;
         let body = CliAuthStartRequest {
             name,
             token_hash: &hash_token(raw_token),
@@ -69,7 +70,7 @@ impl AuthClient {
         };
         let response = self.http.post(url).json(&body).send().await?;
         match response.status() {
-            status if status.is_success() => Ok(response.json::<CliAuthStartResponse>().await?),
+            status if status.is_success() => bounded_json::<CliAuthStartResponse>(response).await,
             status => Err(CliError::new(
                 ErrorKind::Protocol,
                 format!(
@@ -85,12 +86,17 @@ impl AuthClient {
         poll_path: &str,
         poll_token: &str,
     ) -> Result<PollOutcome, CliError> {
-        let url = format!("{}{}", self.base_url, poll_path);
+        let segments = poll_path
+            .trim_start_matches('/')
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>();
+        let url = api_url(&self.base_url, &segments)?;
         let response = self.http.get(url).bearer_auth(poll_token).send().await?;
         match response.status() {
             StatusCode::ACCEPTED => Ok(PollOutcome::Pending),
             status if status.is_success() => {
-                let body = response.json::<CliAuthPollResponse>().await?;
+                let body = bounded_json::<CliAuthPollResponse>(response).await?;
                 Ok(PollOutcome::Approved(body))
             }
             StatusCode::GONE => Ok(PollOutcome::Expired),
@@ -109,7 +115,7 @@ impl AuthClient {
     }
 
     pub async fn revoke_current(&self, raw_token: &str) -> Result<bool, CliError> {
-        let url = format!("{}/auth/tokens/revoke-current", self.base_url);
+        let url = api_url(&self.base_url, &["auth", "tokens", "revoke-current"])?;
         let response = self.http.post(url).bearer_auth(raw_token).send().await?;
         match response.status() {
             status if status.is_success() => Ok(true),

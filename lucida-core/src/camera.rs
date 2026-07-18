@@ -321,6 +321,18 @@ impl Camera {
         }
     }
 
+    /// Camera-only world-to-view rotation as a row-major 3×3 matrix:
+    /// `[right; up; backward]`. This is the authoritative orientation shared
+    /// by view-projection math and orientation UI. Unlike arcball angles it
+    /// represents fly yaw, pitch, and roll without a lossy conversion.
+    pub fn view_rotation(&self) -> [f32; 9] {
+        match self {
+            Camera::Slice(_) => [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            Camera::Arcball(v) => v.perspective_projection().view_rotation(),
+            Camera::Fly(v) => v.perspective_projection().view_rotation(),
+        }
+    }
+
     /// GPU view matrices for an off-screen volume render at `viewport`:
     /// `(inv_view_proj, eye, view_proj)` in the exact layout the volume
     /// renderer's uniform buffer wants (the same triple
@@ -343,14 +355,12 @@ impl Camera {
     pub fn gpu_view_matrices(&self, viewport: [u32; 2]) -> ([f32; 16], [f32; 3], [f32; 16]) {
         let (vp_f64, eye) = match self {
             Camera::Arcball(a) => {
-                let mut a = a.clone();
-                a.viewport = viewport;
-                (a.view_proj_f64(), a.eye_position())
+                let projection = a.perspective_projection().with_viewport(viewport);
+                (projection.view_proj_f64(), projection.eye)
             }
             Camera::Fly(f) => {
-                let mut f = f.clone();
-                f.viewport = viewport;
-                (f.view_proj_f64(), f.eye_position())
+                let projection = f.perspective_projection().with_viewport(viewport);
+                (projection.view_proj_f64(), projection.eye)
             }
             // A 2D slice can't render a perspective volume; frame the unit cube
             // head-on so the thumbnail shows the same overview the minimap does.
@@ -367,7 +377,8 @@ impl Camera {
                     clip_distance: 0.0,
                     clip_mode: ClipMode::default(),
                 };
-                (a.view_proj_f64(), a.eye_position())
+                let projection = a.perspective_projection();
+                (projection.view_proj_f64(), projection.eye)
             }
         };
         let inv = invert4_f32(vp_f64);
@@ -668,6 +679,249 @@ impl Slice {
     }
 }
 
+const IDENTITY_F64: [f64; 16] = [
+    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+];
+
+/// Complete perspective projection state, independent of how a camera stores
+/// its pose. Arcball contributes a spherical pose and Fly contributes a
+/// quaternion pose; every derived matrix, ray, frustum, culling plane, and LOD
+/// calculation lives here so the two modes cannot drift.
+#[derive(Debug, Clone, Copy)]
+struct PerspectiveProjection {
+    eye: [f64; 3],
+    target: [f64; 3],
+    up: [f64; 3],
+    forward: [f64; 3],
+    fov: f64,
+    viewport: [u32; 2],
+    near: f64,
+    far: f64,
+}
+
+impl PerspectiveProjection {
+    fn with_viewport(mut self, viewport: [u32; 2]) -> Self {
+        self.viewport = viewport;
+        self
+    }
+
+    fn base_zoom(&self) -> f64 {
+        self.viewport[1] as f64 / (2.0 * (self.fov / 2.0).tan())
+    }
+
+    fn zoom_at_distance(&self, distance: f64) -> f64 {
+        self.base_zoom() / distance
+    }
+
+    fn view_proj_f64(&self) -> [f64; 16] {
+        let aspect = self.viewport[0] as f64 / self.viewport[1] as f64;
+        let projection = perspective(self.fov, aspect, self.near, self.far);
+        let view = look_at(self.eye, self.target, self.up);
+        mul4(projection, view)
+    }
+
+    fn view_proj(&self) -> [f32; 16] {
+        self.view_proj_f64().map(|value| value as f32)
+    }
+
+    fn inv_view_proj(&self) -> [f32; 16] {
+        invert4_f32(self.view_proj_f64())
+    }
+
+    fn view_rotation(&self) -> [f32; 9] {
+        // `forward` and `up` come from the exact pose that `look_at` consumes.
+        // Re-orthogonalize once so imported near-unit quaternions cannot skew
+        // an orientation gizmo even though the rendered camera stays valid.
+        let right = normalize3(cross3(self.forward, self.up));
+        let up = normalize3(cross3(right, self.forward));
+        [
+            right[0] as f32,
+            right[1] as f32,
+            right[2] as f32,
+            up[0] as f32,
+            up[1] as f32,
+            up[2] as f32,
+            -self.forward[0] as f32,
+            -self.forward[1] as f32,
+            -self.forward[2] as f32,
+        ]
+    }
+
+    fn ray_hit_local(&self, inv_model: &[f64; 16]) -> [f64; 3] {
+        let eye_unit = transform_point(self.eye, inv_model);
+        let target_unit = transform_point(self.target, inv_model);
+        let direction = [
+            target_unit[0] - eye_unit[0],
+            target_unit[1] - eye_unit[1],
+            target_unit[2] - eye_unit[2],
+        ];
+        ray_aabb_hit(eye_unit, direction, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]).unwrap_or_else(|| {
+            closest_point_on_aabb_to_ray(eye_unit, direction, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+        })
+    }
+
+    fn frustum_visible_region(
+        &self,
+        volume_transform: Option<&VolumeTransform>,
+        volume_shape: Option<&[u32; 3]>,
+    ) -> VisibleRegion {
+        let shape = volume_shape.copied().unwrap_or([1, 1, 1]);
+        let shape_x = shape[2] as f64;
+        let shape_y = shape[1] as f64;
+        let shape_z = shape[0] as f64;
+        let view_proj = self.view_proj_f64();
+        let inv_view_proj = invert4_f64(view_proj);
+        let inv_model = volume_transform
+            .map(|transform| transform.inv_model.map(f64::from))
+            .unwrap_or(IDENTITY_F64);
+
+        const NDC_CORNERS: [[f64; 3]; 8] = [
+            [-1.0, -1.0, -1.0],
+            [1.0, -1.0, -1.0],
+            [-1.0, 1.0, -1.0],
+            [1.0, 1.0, -1.0],
+            [-1.0, -1.0, 1.0],
+            [1.0, -1.0, 1.0],
+            [-1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0],
+        ];
+        let mut voxel_min = [f64::MAX; 3];
+        let mut voxel_max = [f64::MIN; 3];
+        for corner in NDC_CORNERS {
+            let world = unproject(&corner, &inv_view_proj);
+            let unit = transform_point(world, &inv_model);
+            let voxel = [
+                unit[0] * shape_x,
+                (1.0 - unit[1]) * shape_y,
+                unit[2] * shape_z,
+            ];
+            for axis in 0..3 {
+                voxel_min[axis] = voxel_min[axis].min(voxel[axis]);
+                voxel_max[axis] = voxel_max[axis].max(voxel[axis]);
+            }
+        }
+
+        // Members may be offset arbitrarily in XY, so only Z is clamped to
+        // the volume. Member-level AABB tests and chunk-grid bounds own XY.
+        voxel_min[2] = voxel_min[2].max(0.0);
+        voxel_max[2] = voxel_max[2].min(shape_z);
+        let z_start = voxel_min[2].floor().max(0.0) as u32;
+        let z_end = voxel_max[2].ceil().max(0.0) as u32;
+
+        let model = volume_transform
+            .map(|transform| transform.model.map(f64::from))
+            .unwrap_or(IDENTITY_F64);
+        let mut voxel_to_clip = mul4(view_proj, model);
+        // Convert image-convention voxel coordinates to unit coordinates. Y
+        // is flipped because row zero maps to unit Y=1.
+        for row in 0..4 {
+            let original_y = voxel_to_clip[4 + row];
+            voxel_to_clip[row] /= shape_x;
+            voxel_to_clip[4 + row] /= -shape_y;
+            voxel_to_clip[8 + row] /= shape_z;
+            voxel_to_clip[12 + row] += original_y;
+        }
+        let m = voxel_to_clip;
+        let frustum_planes = [
+            [m[3] + m[0], m[7] + m[4], m[11] + m[8], m[15] + m[12]],
+            [m[3] - m[0], m[7] - m[4], m[11] - m[8], m[15] - m[12]],
+            [m[3] + m[1], m[7] + m[5], m[11] + m[9], m[15] + m[13]],
+            [m[3] - m[1], m[7] - m[5], m[11] - m[9], m[15] - m[13]],
+            [m[3] + m[2], m[7] + m[6], m[11] + m[10], m[15] + m[14]],
+            [m[3] - m[2], m[7] - m[6], m[11] - m[10], m[15] - m[14]],
+        ];
+
+        let (scale_x, scale_y, scale_z) = volume_transform
+            .map(|transform| {
+                (
+                    f64::from(transform.model[0]),
+                    f64::from(transform.model[5]),
+                    f64::from(transform.model[10]),
+                )
+            })
+            .unwrap_or((1.0, 1.0, 1.0));
+        let max_voxels_per_world = (shape_x / scale_x.abs().max(1e-12))
+            .max(shape_y / scale_y.abs().max(1e-12))
+            .max(shape_z / scale_z.abs().max(1e-12));
+
+        let hit_unit = self.ray_hit_local(&inv_model);
+        let hit_world = transform_point(hit_unit, &model);
+        let dx = hit_world[0] - self.eye[0];
+        let dy = hit_world[1] - self.eye[1];
+        let dz = hit_world[2] - self.eye[2];
+        let distance_to_surface = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-6);
+        let zoom_per_voxel = self.zoom_at_distance(distance_to_surface) / max_voxels_per_world;
+        let sort_center = Some([
+            hit_unit[0] * shape_x,
+            (1.0 - hit_unit[1]) * shape_y,
+            hit_unit[2] * shape_z,
+        ]);
+
+        VisibleRegion {
+            xy_bounds: [voxel_min[0], voxel_min[1], voxel_max[0], voxel_max[1]],
+            z_range: z_start..z_end.max(z_start),
+            effective_zoom: zoom_per_voxel,
+            radius_basis_vox: focal_plane_radius_basis(self.viewport, zoom_per_voxel),
+            sort_center,
+            frustum_planes: Some(frustum_planes),
+        }
+    }
+}
+
+/// Supplies only the pose needed by the shared perspective engine.
+trait PerspectiveCamera {
+    fn perspective_projection(&self) -> PerspectiveProjection;
+}
+
+impl PerspectiveCamera for Arcball {
+    fn perspective_projection(&self) -> PerspectiveProjection {
+        let sin_phi = self.phi.sin();
+        let eye = [
+            self.target[0] + self.distance * sin_phi * self.theta.sin(),
+            self.target[1] + self.distance * self.phi.cos(),
+            self.target[2] + self.distance * sin_phi * self.theta.cos(),
+        ];
+        PerspectiveProjection {
+            eye,
+            target: self.target,
+            up: [
+                -self.phi.cos() * self.theta.sin(),
+                self.phi.sin(),
+                -self.phi.cos() * self.theta.cos(),
+            ],
+            forward: normalize3([
+                self.target[0] - eye[0],
+                self.target[1] - eye[1],
+                self.target[2] - eye[2],
+            ]),
+            fov: self.fov,
+            viewport: self.viewport,
+            near: self.near,
+            far: self.far,
+        }
+    }
+}
+
+impl PerspectiveCamera for Fly {
+    fn perspective_projection(&self) -> PerspectiveProjection {
+        let forward = quat_rotate_vector(self.orientation, [0.0, 0.0, -1.0]);
+        PerspectiveProjection {
+            eye: self.position,
+            target: [
+                self.position[0] + forward[0],
+                self.position[1] + forward[1],
+                self.position[2] + forward[2],
+            ],
+            up: quat_rotate_vector(self.orientation, [0.0, 1.0, 0.0]),
+            forward,
+            fov: self.fov,
+            viewport: self.viewport,
+            near: self.near,
+            far: self.far,
+        }
+    }
+}
+
 // --- Arcball implementation ---
 
 impl Arcball {
@@ -728,12 +982,7 @@ impl Arcball {
 
     /// Camera forward direction (normalized), pointing from eye toward target.
     pub fn forward_direction(&self) -> [f64; 3] {
-        let eye = self.eye_position();
-        normalize3([
-            self.target[0] - eye[0],
-            self.target[1] - eye[1],
-            self.target[2] - eye[2],
-        ])
+        self.perspective_projection().forward
     }
 
     pub fn rotate(&mut self, d_theta: f64, d_phi: f64) {
@@ -776,22 +1025,13 @@ impl Arcball {
     }
 
     pub fn eye_position(&self) -> [f64; 3] {
-        let sin_phi = self.phi.sin();
-        [
-            self.target[0] + self.distance * sin_phi * self.theta.sin(),
-            self.target[1] + self.distance * self.phi.cos(),
-            self.target[2] + self.distance * sin_phi * self.theta.cos(),
-        ]
+        self.perspective_projection().eye
     }
 
     /// Up vector derived from spherical coordinates (tangent along phi meridian).
     /// Always perpendicular to the view direction at any phi value.
     pub fn up_vector(&self) -> [f64; 3] {
-        [
-            -self.phi.cos() * self.theta.sin(),
-            self.phi.sin(),
-            -self.phi.cos() * self.theta.cos(),
-        ]
+        self.perspective_projection().up
     }
 
     /// Compute where the center-screen ray hits the unit [0,1]^3 volume box.
@@ -799,46 +1039,28 @@ impl Arcball {
     /// box to the view ray if the ray misses (so distance calculations remain
     /// aligned with where the user is looking).
     pub fn ray_hit_local(&self, inv_model: &[f64; 16]) -> [f64; 3] {
-        let eye_unit = transform_point(self.eye_position(), inv_model);
-        let target_unit = transform_point(self.target, inv_model);
-        let dir = [
-            target_unit[0] - eye_unit[0],
-            target_unit[1] - eye_unit[1],
-            target_unit[2] - eye_unit[2],
-        ];
-        ray_aabb_hit(eye_unit, dir, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]).unwrap_or_else(|| {
-            closest_point_on_aabb_to_ray(eye_unit, dir, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
-        })
+        self.perspective_projection().ray_hit_local(inv_model)
     }
 
     /// Effective zoom: screen pixels per world unit at the target plane.
     pub fn effective_zoom(&self) -> f64 {
-        self.viewport[1] as f64 / (2.0 * self.distance * (self.fov / 2.0).tan())
+        self.perspective_projection()
+            .zoom_at_distance(self.distance)
     }
 
     /// Inverse view-projection matrix as f32 for the GPU.
     pub fn inv_view_proj(&self) -> [f32; 16] {
-        let vp = self.view_proj_f64();
-        invert4_f32(vp)
+        self.perspective_projection().inv_view_proj()
     }
 
     /// View-projection matrix as f32 for the GPU.
     pub fn view_proj(&self) -> [f32; 16] {
-        let vp = self.view_proj_f64();
-        let mut out = [0.0f32; 16];
-        for i in 0..16 {
-            out[i] = vp[i] as f32;
-        }
-        out
+        self.perspective_projection().view_proj()
     }
 
     /// View-projection matrix in f64.
     pub(crate) fn view_proj_f64(&self) -> [f64; 16] {
-        let aspect = self.viewport[0] as f64 / self.viewport[1] as f64;
-        let proj = perspective(self.fov, aspect, self.near, self.far);
-        let eye = self.eye_position();
-        let view = look_at(eye, self.target, self.up_vector());
-        mul4(proj, view)
+        self.perspective_projection().view_proj_f64()
     }
 
     /// Compute the visible region in voxel coordinates by unprojecting the frustum.
@@ -847,143 +1069,8 @@ impl Arcball {
         volume_transform: Option<&VolumeTransform>,
         volume_shape: Option<&[u32; 3]>,
     ) -> VisibleRegion {
-        let shape = volume_shape.copied().unwrap_or([1, 1, 1]);
-        // shape is [Z, Y, X]
-        let shape_x = shape[2] as f64;
-        let shape_y = shape[1] as f64;
-        let shape_z = shape[0] as f64;
-
-        let inv_vp = invert4_f64(self.view_proj_f64());
-
-        let inv_model: [f64; 16] = match volume_transform {
-            Some(t) => t.inv_model.map(|v| v as f64),
-            None => [
-                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-            ],
-        };
-
-        // Unproject 8 NDC corners → world → inv_model → voxel directly (single AABB step).
-        // This avoids the double-AABB expansion that occurs when computing an intermediate
-        // world-space AABB then transforming its corners to voxel space.
-        let ndc_corners: [[f64; 3]; 8] = [
-            [-1.0, -1.0, -1.0],
-            [1.0, -1.0, -1.0],
-            [-1.0, 1.0, -1.0],
-            [1.0, 1.0, -1.0],
-            [-1.0, -1.0, 1.0],
-            [1.0, -1.0, 1.0],
-            [-1.0, 1.0, 1.0],
-            [1.0, 1.0, 1.0],
-        ];
-
-        let mut voxel_min = [f64::MAX; 3];
-        let mut voxel_max = [f64::MIN; 3];
-
-        for corner in &ndc_corners {
-            let world = unproject(corner, &inv_vp);
-            let unit = transform_point(world, &inv_model);
-            // unit is in [0,1]^3; scale to voxel coords
-            let vx = unit[0] * shape_x;
-            let vy = (1.0 - unit[1]) * shape_y;
-            let vz = unit[2] * shape_z;
-            voxel_min[0] = voxel_min[0].min(vx);
-            voxel_min[1] = voxel_min[1].min(vy);
-            voxel_min[2] = voxel_min[2].min(vz);
-            voxel_max[0] = voxel_max[0].max(vx);
-            voxel_max[1] = voxel_max[1].max(vy);
-            voxel_max[2] = voxel_max[2].max(vz);
-        }
-
-        // Clamp Z to volume bounds (members don't have Z offsets).
-        // XY bounds are NOT clamped to [0, shape] — for collections, the camera
-        // may be looking at a group at a large XY offset. The per-member AABB
-        // test in chunk_plan_for handles member-level visibility, and the
-        // chunk grid iteration in visible_chunks clamps to valid grid indices.
-        voxel_min[2] = voxel_min[2].max(0.0);
-        voxel_max[2] = voxel_max[2].min(shape_z);
-
-        let z_start = voxel_min[2].floor().max(0.0) as u32;
-        let z_end = voxel_max[2].ceil().max(0.0) as u32;
-
-        // Extract frustum planes in full-resolution voxel space using Gribb-Hartmann method.
-        // Build voxel-to-clip matrix: view_proj * model * Scale(1/shape_x, 1/shape_y, 1/shape_z)
-        let model_f64: [f64; 16] = match volume_transform {
-            Some(t) => t.model.map(|v| v as f64),
-            None => [
-                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-            ],
-        };
-        let vp_model = mul4(self.view_proj_f64(), model_f64);
-        // Scale columns to convert from image-convention voxel coords to unit [0,1]^3,
-        // with Y flipped (image row 0 = top = unit Y 1.0).
-        let mut m = vp_model;
-        for i in 0..4 {
-            let c1 = m[4 + i]; // save col 1 before modification
-            m[i] /= shape_x; // col 0 (X voxels)
-            m[4 + i] /= -shape_y; // col 1 (Y voxels, negated for flip)
-            m[8 + i] /= shape_z; // col 2 (Z voxels)
-            m[12 + i] += c1; // col 3 (translation from Y flip)
-        }
-
-        // Extract 6 frustum planes from column-major MVP matrix.
-        // Plane [a, b, c, d] where a*vx + b*vy + c*vz + d >= 0 means inside.
-        let frustum_planes = [
-            // Left:   row3 + row0
-            [m[3] + m[0], m[7] + m[4], m[11] + m[8], m[15] + m[12]],
-            // Right:  row3 - row0
-            [m[3] - m[0], m[7] - m[4], m[11] - m[8], m[15] - m[12]],
-            // Bottom: row3 + row1
-            [m[3] + m[1], m[7] + m[5], m[11] + m[9], m[15] + m[13]],
-            // Top:    row3 - row1
-            [m[3] - m[1], m[7] - m[5], m[11] - m[9], m[15] - m[13]],
-            // Near:   row3 + row2
-            [m[3] + m[2], m[7] + m[6], m[11] + m[10], m[15] + m[14]],
-            // Far:    row3 - row2
-            [m[3] - m[2], m[7] - m[6], m[11] - m[10], m[15] - m[14]],
-        ];
-
-        // Convert effective_zoom from pixels-per-world-unit to pixels-per-voxel.
-        // The model matrix scales each axis: model[0]=sx, model[5]=sy, model[10]=sz.
-        // Voxels per world unit in each axis = shape[i] / model_scale[i].
-        // Use the max to get the most conservative (coarsest) LOD selection.
-        let (sx, sy, sz) = match volume_transform {
-            Some(t) => (t.model[0] as f64, t.model[5] as f64, t.model[10] as f64),
-            None => (1.0, 1.0, 1.0),
-        };
-        let vpw_x = shape_x / sx.abs().max(1e-12);
-        let vpw_y = shape_y / sy.abs().max(1e-12);
-        let vpw_z = shape_z / sz.abs().max(1e-12);
-        let max_vpw = vpw_x.max(vpw_y).max(vpw_z);
-
-        // Cast a ray from the eye toward the target to find where it hits the
-        // volume surface. Use distance to this hit point (not self.distance to
-        // the orbit target) for LOD — the surface is what we're resolving.
-        let hit_unit = self.ray_hit_local(&inv_model);
-        let hit_world = transform_point(hit_unit, &model_f64);
-        let eye = self.eye_position();
-        let dx = hit_world[0] - eye[0];
-        let dy = hit_world[1] - eye[1];
-        let dz = hit_world[2] - eye[2];
-        let dist_to_surface = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-6);
-
-        // pixels-per-world-unit at the surface, then convert to pixels-per-voxel
-        let base_zoom = self.viewport[1] as f64 / (2.0 * (self.fov / 2.0).tan());
-        let zoom_per_voxel = (base_zoom / dist_to_surface) / max_vpw;
-
-        let sort_center = Some([
-            hit_unit[0] * shape_x,
-            (1.0 - hit_unit[1]) * shape_y,
-            hit_unit[2] * shape_z,
-        ]);
-
-        VisibleRegion {
-            xy_bounds: [voxel_min[0], voxel_min[1], voxel_max[0], voxel_max[1]],
-            z_range: z_start..z_end.max(z_start),
-            effective_zoom: zoom_per_voxel,
-            radius_basis_vox: focal_plane_radius_basis(self.viewport, zoom_per_voxel),
-            sort_center,
-            frustum_planes: Some(frustum_planes),
-        }
+        self.perspective_projection()
+            .frustum_visible_region(volume_transform, volume_shape)
     }
 }
 
@@ -1180,79 +1267,47 @@ impl Fly {
     }
 
     pub fn eye_position(&self) -> [f64; 3] {
-        self.position
+        self.perspective_projection().eye
     }
 
     pub fn up_vector(&self) -> [f64; 3] {
-        quat_rotate_vector(self.orientation, [0.0, 1.0, 0.0])
+        self.perspective_projection().up
     }
 
     /// Forward direction (negative Z in camera space).
     pub fn forward_vector(&self) -> [f64; 3] {
-        quat_rotate_vector(self.orientation, [0.0, 0.0, -1.0])
+        self.perspective_projection().forward
     }
 
     /// Camera forward direction (normalized), pointing from eye toward target.
     pub fn forward_direction(&self) -> [f64; 3] {
-        self.forward_vector()
-    }
-
-    /// Target point for look-at-style computations.
-    fn target(&self) -> [f64; 3] {
-        let fwd = self.forward_vector();
-        [
-            self.position[0] + fwd[0],
-            self.position[1] + fwd[1],
-            self.position[2] + fwd[2],
-        ]
+        self.perspective_projection().forward
     }
 
     /// Effective zoom: screen pixels per world unit at distance=1.
     pub fn effective_zoom(&self) -> f64 {
-        self.viewport[1] as f64 / (2.0 * (self.fov / 2.0).tan())
+        self.perspective_projection().base_zoom()
     }
 
     /// View-projection matrix in f64.
     pub(crate) fn view_proj_f64(&self) -> [f64; 16] {
-        let aspect = self.viewport[0] as f64 / self.viewport[1] as f64;
-        let proj = perspective(self.fov, aspect, self.near, self.far);
-        let eye = self.position;
-        let target = self.target();
-        let up = self.up_vector();
-        let view = look_at(eye, target, up);
-        mul4(proj, view)
+        self.perspective_projection().view_proj_f64()
     }
 
     /// View-projection matrix as f32 for the GPU.
     pub fn view_proj(&self) -> [f32; 16] {
-        let vp = self.view_proj_f64();
-        let mut out = [0.0f32; 16];
-        for i in 0..16 {
-            out[i] = vp[i] as f32;
-        }
-        out
+        self.perspective_projection().view_proj()
     }
 
     /// Inverse view-projection matrix as f32 for the GPU.
     pub fn inv_view_proj(&self) -> [f32; 16] {
-        let vp = self.view_proj_f64();
-        invert4_f32(vp)
+        self.perspective_projection().inv_view_proj()
     }
 
     /// Compute where the center-screen ray hits the unit [0,1]^3 volume box.
     /// Returns the closest point on the box to the view ray if the ray misses.
     pub fn ray_hit_local(&self, inv_model: &[f64; 16]) -> [f64; 3] {
-        let eye_unit = transform_point(self.position, inv_model);
-        let target = self.target();
-        let target_unit = transform_point(target, inv_model);
-        let dir = [
-            target_unit[0] - eye_unit[0],
-            target_unit[1] - eye_unit[1],
-            target_unit[2] - eye_unit[2],
-        ];
-        ray_aabb_hit(eye_unit, dir, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]).unwrap_or_else(|| {
-            closest_point_on_aabb_to_ray(eye_unit, dir, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
-        })
+        self.perspective_projection().ray_hit_local(inv_model)
     }
 
     /// Compute the visible region in voxel coordinates by unprojecting the frustum.
@@ -1262,123 +1317,8 @@ impl Fly {
         volume_transform: Option<&VolumeTransform>,
         volume_shape: Option<&[u32; 3]>,
     ) -> VisibleRegion {
-        let shape = volume_shape.copied().unwrap_or([1, 1, 1]);
-        let shape_x = shape[2] as f64;
-        let shape_y = shape[1] as f64;
-        let shape_z = shape[0] as f64;
-
-        let inv_vp = invert4_f64(self.view_proj_f64());
-
-        let inv_model: [f64; 16] = match volume_transform {
-            Some(t) => t.inv_model.map(|v| v as f64),
-            None => [
-                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-            ],
-        };
-
-        let ndc_corners: [[f64; 3]; 8] = [
-            [-1.0, -1.0, -1.0],
-            [1.0, -1.0, -1.0],
-            [-1.0, 1.0, -1.0],
-            [1.0, 1.0, -1.0],
-            [-1.0, -1.0, 1.0],
-            [1.0, -1.0, 1.0],
-            [-1.0, 1.0, 1.0],
-            [1.0, 1.0, 1.0],
-        ];
-
-        let mut voxel_min = [f64::MAX; 3];
-        let mut voxel_max = [f64::MIN; 3];
-
-        for corner in &ndc_corners {
-            let world = unproject(corner, &inv_vp);
-            let unit = transform_point(world, &inv_model);
-            let vx = unit[0] * shape_x;
-            let vy = (1.0 - unit[1]) * shape_y;
-            let vz = unit[2] * shape_z;
-            voxel_min[0] = voxel_min[0].min(vx);
-            voxel_min[1] = voxel_min[1].min(vy);
-            voxel_min[2] = voxel_min[2].min(vz);
-            voxel_max[0] = voxel_max[0].max(vx);
-            voxel_max[1] = voxel_max[1].max(vy);
-            voxel_max[2] = voxel_max[2].max(vz);
-        }
-
-        // Clamp Z only — see Arcball::frustum_visible_region for rationale.
-        voxel_min[2] = voxel_min[2].max(0.0);
-        voxel_max[2] = voxel_max[2].min(shape_z);
-
-        let z_start = voxel_min[2].floor().max(0.0) as u32;
-        let z_end = voxel_max[2].ceil().max(0.0) as u32;
-
-        let model_f64: [f64; 16] = match volume_transform {
-            Some(t) => t.model.map(|v| v as f64),
-            None => [
-                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-            ],
-        };
-        let vp_model = mul4(self.view_proj_f64(), model_f64);
-        let mut m = vp_model;
-        for i in 0..4 {
-            let c1 = m[4 + i];
-            m[i] /= shape_x;
-            m[4 + i] /= -shape_y;
-            m[8 + i] /= shape_z;
-            m[12 + i] += c1;
-        }
-
-        let frustum_planes = [
-            [m[3] + m[0], m[7] + m[4], m[11] + m[8], m[15] + m[12]],
-            [m[3] - m[0], m[7] - m[4], m[11] - m[8], m[15] - m[12]],
-            [m[3] + m[1], m[7] + m[5], m[11] + m[9], m[15] + m[13]],
-            [m[3] - m[1], m[7] - m[5], m[11] - m[9], m[15] - m[13]],
-            [m[3] + m[2], m[7] + m[6], m[11] + m[10], m[15] + m[14]],
-            [m[3] - m[2], m[7] - m[6], m[11] - m[10], m[15] - m[14]],
-        ];
-
-        let (sx, sy, sz) = match volume_transform {
-            Some(t) => (t.model[0] as f64, t.model[5] as f64, t.model[10] as f64),
-            None => (1.0, 1.0, 1.0),
-        };
-        let vpw_x = shape_x / sx.abs().max(1e-12);
-        let vpw_y = shape_y / sy.abs().max(1e-12);
-        let vpw_z = shape_z / sz.abs().max(1e-12);
-        let max_vpw = vpw_x.max(vpw_y).max(vpw_z);
-
-        // For the fly camera, effective_zoom() is a constant (no distance term).
-        // Compute the actual distance to the volume surface and factor it in,
-        // mirroring how the arcball divides by its target distance.
-        let hit_unit = self.ray_hit_local(&inv_model);
-
-        let model_f64_for_hit: [f64; 16] = match volume_transform {
-            Some(t) => t.model.map(|v| v as f64),
-            None => [
-                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-            ],
-        };
-        let hit_world = transform_point(hit_unit, &model_f64_for_hit);
-        let dx = hit_world[0] - self.position[0];
-        let dy = hit_world[1] - self.position[1];
-        let dz = hit_world[2] - self.position[2];
-        let dist_to_surface = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-6);
-
-        // effective_zoom at distance d = base_zoom / d
-        let zoom_per_voxel = (self.effective_zoom() / dist_to_surface) / max_vpw;
-
-        let sort_center = Some([
-            hit_unit[0] * shape_x,
-            (1.0 - hit_unit[1]) * shape_y,
-            hit_unit[2] * shape_z,
-        ]);
-
-        VisibleRegion {
-            xy_bounds: [voxel_min[0], voxel_min[1], voxel_max[0], voxel_max[1]],
-            z_range: z_start..z_end.max(z_start),
-            effective_zoom: zoom_per_voxel,
-            radius_basis_vox: focal_plane_radius_basis(self.viewport, zoom_per_voxel),
-            sort_center,
-            frustum_planes: Some(frustum_planes),
-        }
+        self.perspective_projection()
+            .frustum_visible_region(volume_transform, volume_shape)
     }
 }
 
@@ -1701,6 +1641,74 @@ pub(crate) fn ray_aabb_hit(
 mod tests {
     use super::*;
 
+    fn assert_close(left: f64, right: f64, tolerance: f64, label: &str) {
+        let scale = left.abs().max(right.abs()).max(1.0);
+        assert!(
+            (left - right).abs() <= tolerance * scale,
+            "{label}: {left} != {right} (tolerance {tolerance})"
+        );
+    }
+
+    fn assert_array_close<const N: usize>(
+        left: &[f64; N],
+        right: &[f64; N],
+        tolerance: f64,
+        label: &str,
+    ) {
+        for (index, (left, right)) in left.iter().zip(right).enumerate() {
+            assert_close(*left, *right, tolerance, &format!("{label}[{index}]"));
+        }
+    }
+
+    fn assert_f32_array_close<const N: usize>(
+        left: &[f32; N],
+        right: &[f32; N],
+        tolerance: f64,
+        label: &str,
+    ) {
+        for (index, (left, right)) in left.iter().zip(right).enumerate() {
+            assert_close(
+                f64::from(*left),
+                f64::from(*right),
+                tolerance,
+                &format!("{label}[{index}]"),
+            );
+        }
+    }
+
+    fn assert_visible_region_close(left: &VisibleRegion, right: &VisibleRegion) {
+        assert_array_close(&left.xy_bounds, &right.xy_bounds, 1e-10, "xy bounds");
+        assert_eq!(left.z_range, right.z_range);
+        assert_close(
+            left.effective_zoom,
+            right.effective_zoom,
+            1e-10,
+            "effective zoom",
+        );
+        assert_close(
+            left.radius_basis_vox,
+            right.radius_basis_vox,
+            1e-10,
+            "radius basis",
+        );
+        match (&left.sort_center, &right.sort_center) {
+            (Some(left), Some(right)) => {
+                assert_array_close(left, right, 1e-10, "sort center");
+            }
+            (None, None) => {}
+            pair => panic!("sort-center presence differs: {pair:?}"),
+        }
+        match (&left.frustum_planes, &right.frustum_planes) {
+            (Some(left), Some(right)) => {
+                for (index, (left, right)) in left.iter().zip(right).enumerate() {
+                    assert_array_close(left, right, 1e-10, &format!("frustum plane {index}"));
+                }
+            }
+            (None, None) => {}
+            pair => panic!("frustum-plane presence differs: {pair:?}"),
+        }
+    }
+
     // --- Slice tests (preserved from original Camera tests) ---
 
     #[test]
@@ -1823,6 +1831,127 @@ mod tests {
         let cam = Arcball::new([800, 600]);
         let expected = 600.0 / (2.0 * 1.8 * (std::f64::consts::FRAC_PI_4 / 2.0).tan());
         assert!((cam.effective_zoom() - expected).abs() < 1e-10);
+    }
+
+    #[test]
+    fn equivalent_arcball_and_fly_share_every_perspective_output() {
+        let arcball = Arcball {
+            target: [0.31, 0.47, 0.29],
+            theta: 0.73,
+            phi: 1.08,
+            distance: 2.35,
+            fov: 0.91,
+            viewport: [1237, 811],
+            near: 0.025,
+            far: 73.0,
+            clip_distance: 0.12,
+            clip_mode: ClipMode::Sphere,
+        };
+        let fly = arcball.to_fly();
+        let arcball_projection = arcball.perspective_projection();
+        let fly_projection = fly.perspective_projection();
+
+        assert_array_close(&arcball_projection.eye, &fly_projection.eye, 1e-12, "eye");
+        assert_array_close(
+            &arcball_projection.forward,
+            &fly_projection.forward,
+            1e-12,
+            "forward",
+        );
+        assert_array_close(&arcball_projection.up, &fly_projection.up, 1e-12, "up");
+        assert_array_close(
+            &arcball.view_proj_f64(),
+            &fly.view_proj_f64(),
+            1e-12,
+            "view projection f64",
+        );
+        assert_f32_array_close(
+            &arcball.view_proj(),
+            &fly.view_proj(),
+            1e-6,
+            "view projection f32",
+        );
+        assert_f32_array_close(
+            &arcball.inv_view_proj(),
+            &fly.inv_view_proj(),
+            1e-6,
+            "inverse view projection",
+        );
+
+        let transform = crate::transform::compute_volume_transform([57, 123, 211], [1.7, 0.8, 0.3]);
+        assert_array_close(
+            &arcball.ray_hit_local(&transform.inv_model.map(f64::from)),
+            &fly.ray_hit_local(&transform.inv_model.map(f64::from)),
+            1e-10,
+            "ray hit",
+        );
+
+        let arcball_camera = Camera::Arcball(arcball.clone());
+        let fly_camera = Camera::Fly(fly.clone());
+        assert_f32_array_close(
+            &arcball_camera.view_rotation(),
+            &fly_camera.view_rotation(),
+            1e-6,
+            "view rotation",
+        );
+        let arcball_region =
+            arcball_camera.visible_region(&(4..33), Some(&transform), Some(&[57, 123, 211]));
+        let fly_region =
+            fly_camera.visible_region(&(4..33), Some(&transform), Some(&[57, 123, 211]));
+        assert_visible_region_close(&arcball_region, &fly_region);
+
+        let world_point = [0.22, 0.41, 0.17];
+        let arcball_screen = arcball_camera
+            .project_to_screen(world_point)
+            .expect("point should be in front of the arcball camera");
+        let fly_screen = fly_camera
+            .project_to_screen(world_point)
+            .expect("point should be in front of the fly camera");
+        assert_array_close(&arcball_screen, &fly_screen, 1e-10, "projected point");
+
+        let arcball_ray = arcball_camera.unproject_ray(417.25, 288.75);
+        let fly_ray = fly_camera.unproject_ray(417.25, 288.75);
+        assert_array_close(&arcball_ray.origin, &fly_ray.origin, 1e-10, "ray origin");
+        assert_array_close(
+            &arcball_ray.direction,
+            &fly_ray.direction,
+            1e-10,
+            "ray direction",
+        );
+
+        let arcball_gpu = arcball_camera.gpu_view_matrices([640, 360]);
+        let fly_gpu = fly_camera.gpu_view_matrices([640, 360]);
+        assert_f32_array_close(&arcball_gpu.0, &fly_gpu.0, 1e-6, "gpu inverse");
+        assert_f32_array_close(&arcball_gpu.1, &fly_gpu.1, 1e-6, "gpu eye");
+        assert_f32_array_close(&arcball_gpu.2, &fly_gpu.2, 1e-6, "gpu view projection");
+    }
+
+    #[test]
+    fn view_rotation_tracks_fly_roll_without_changing_forward() {
+        let mut fly = Fly::new([800, 600]);
+        fly.fly_tick(0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0);
+        let rotation = Camera::Fly(fly).view_rotation();
+        let angle = 0.1_f32;
+        let expected = [
+            angle.cos(),
+            -angle.sin(),
+            0.0,
+            angle.sin(),
+            angle.cos(),
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        ];
+        assert_f32_array_close(&rotation, &expected, 1e-6, "rolled view rotation");
+    }
+
+    #[test]
+    fn slice_view_rotation_is_identity() {
+        assert_eq!(
+            Camera::new_2d([800, 600]).view_rotation(),
+            [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        );
     }
 
     #[test]

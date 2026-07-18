@@ -6,7 +6,7 @@ async fn workspace_saved_views_are_scoped_and_strip_source_urls() {
     let owner = principal("owner@example.com", false);
     let a = store.create_workspace(&owner, Some("A")).await.unwrap();
     let b = store.create_workspace(&owner, Some("B")).await.unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
 
     let mut view = SavedView::empty([800, 600]);
     view.datasets.push("gs://bucket/source-url.zarr".into());
@@ -64,7 +64,7 @@ async fn workspace_saved_view_viewers_can_read_but_not_mutate() {
         .create_workspace(&owner, Some("Shared saved views"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
     manager
         .upsert_member(
             &workspace.id,
@@ -138,7 +138,7 @@ async fn workspace_personal_saved_view_mutations_are_creator_only() {
         .create_workspace(&owner, Some("Personal saved views"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
     manager
         .upsert_member(
             &workspace.id,
@@ -247,7 +247,7 @@ async fn promote_personal_view_to_shared_enforces_creator_editor_and_never_leak(
         .create_workspace(&owner, Some("Promote saved views"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
     manager
         .upsert_member(
             &workspace.id,
@@ -470,7 +470,7 @@ async fn set_saved_view_visibility_rest_promotes_and_preserves_attribution() {
         .unwrap();
     let manager = Arc::new(WorkspaceManager::new(
         Arc::new(store.clone()),
-        ProxyConfig::defaults(),
+        DatasetRuntimeConfig::defaults(),
     ));
     let personal = manager
         .create_saved_view(
@@ -548,7 +548,7 @@ async fn set_saved_view_visibility_enforces_transition_allow_list() {
         .create_workspace(&owner, Some("Transition gate"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
     for (p, role) in [
         (&editor, WorkspaceRole::Editor),
         (&viewer, WorkspaceRole::Viewer),
@@ -797,7 +797,7 @@ async fn viewer_can_propose_and_only_creator_or_editor_sees_it() {
         .create_workspace(&owner, Some("Propose visibility"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
     for (p, role) in [
         (&editor, WorkspaceRole::Editor),
         (&viewer, WorkspaceRole::Viewer),
@@ -875,7 +875,7 @@ async fn approve_proposal_shares_it_preserving_attribution_and_is_editor_only() 
         .create_workspace(&owner, Some("Approve proposal"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
     for (p, role) in [
         (&editor, WorkspaceRole::Editor),
         (&viewer, WorkspaceRole::Viewer),
@@ -981,7 +981,7 @@ async fn reject_proposal_reverts_to_proposer_personal_non_destructively() {
         .create_workspace(&owner, Some("Reject proposal"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
     for (p, role) in [
         (&editor, WorkspaceRole::Editor),
         (&viewer, WorkspaceRole::Viewer),
@@ -1058,7 +1058,7 @@ async fn approve_reject_rest_endpoints_are_editor_only_and_return_updated_view()
         .unwrap();
     let manager = Arc::new(WorkspaceManager::new(
         Arc::new(store.clone()),
-        ProxyConfig::defaults(),
+        DatasetRuntimeConfig::defaults(),
     ));
     manager
         .upsert_member(
@@ -1151,7 +1151,7 @@ async fn workspace_viewer_profiles_are_private_and_strip_source_urls() {
         .create_workspace(&owner, Some("Headless viewer state"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
     manager
         .upsert_member(
             &workspace.id,
@@ -1172,6 +1172,7 @@ async fn workspace_viewer_profiles_are_private_and_strip_source_urls() {
             &workspace.id,
             &viewer,
             "default",
+            None,
             Some("document_defaults"),
             view,
         )
@@ -1181,6 +1182,7 @@ async fn workspace_viewer_profiles_are_private_and_strip_source_urls() {
     assert_eq!(saved.workspace_id, workspace.id);
     assert_eq!(saved.user_email, viewer.email);
     assert_eq!(saved.profile, "default");
+    assert_eq!(saved.revision, 1);
     assert_eq!(saved.seed_source.as_deref(), Some("document_defaults"));
     assert!(saved.view.datasets.is_empty());
     assert_eq!(
@@ -1204,6 +1206,191 @@ async fn workspace_viewer_profiles_are_private_and_strip_source_urls() {
         viewer_profile.view.dataset_order,
         vec![DatasetId("wds_headless".into())]
     );
+
+    let updated = manager
+        .upsert_viewer_profile(
+            &workspace.id,
+            &viewer,
+            "default",
+            Some(saved.revision),
+            None,
+            SavedView::empty([1024, 768]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.revision, 2);
+
+    let stale = manager
+        .upsert_viewer_profile(
+            &workspace.id,
+            &viewer,
+            "default",
+            Some(saved.revision),
+            None,
+            SavedView::empty([640, 480]),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        stale,
+        WorkspaceError::ViewerProfileConflict {
+            expected: Some(1),
+            actual: Some(2)
+        }
+    ));
+}
+
+#[tokio::test]
+async fn two_http_clients_compose_durable_profile_edits_without_lost_updates() {
+    let store = fresh_store().await;
+    let viewer = principal("viewer@example.com", false);
+    let workspace = store
+        .create_workspace(&viewer, Some("Two profile clients"))
+        .await
+        .unwrap();
+    let manager = Arc::new(WorkspaceManager::new(
+        Arc::new(store),
+        DatasetRuntimeConfig::defaults(),
+    ));
+    let client_a = workspace_router_with_principal(Arc::clone(&manager), viewer.clone());
+    let client_b = workspace_router_with_principal(manager, viewer.clone());
+    let uri = format!("/api/workspaces/{}/viewer-profiles/default", workspace.id);
+
+    let create = client_a
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(&uri)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "expected_revision": null,
+                        "view": SavedView::empty([800, 600]),
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::OK);
+    assert_eq!(response_json(create).await["revision"], 1);
+
+    let a_read = client_a
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(&uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let a_record = response_json(a_read).await;
+    let b_read = client_b
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(&uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let b_record = response_json(b_read).await;
+    assert_eq!(a_record["revision"], 1);
+    assert_eq!(b_record["revision"], 1);
+
+    let dataset_id = DatasetId("wds-compose".to_string());
+    let mut b_view: SavedView = serde_json::from_value(b_record["view"].clone()).unwrap();
+    b_view.auto_contrast.insert(dataset_id.clone(), false);
+    let b_update = client_b
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(&uri)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "expected_revision": 1,
+                        "view": b_view,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(b_update.status(), StatusCode::OK);
+    assert_eq!(response_json(b_update).await["revision"], 2);
+
+    let mut stale_a_view: SavedView = serde_json::from_value(a_record["view"].clone()).unwrap();
+    stale_a_view.dataset_order.push(dataset_id.clone());
+    let stale_update = client_a
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(&uri)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "expected_revision": 1,
+                        "view": stale_a_view,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stale_update.status(), StatusCode::CONFLICT);
+    let conflict = response_json(stale_update).await;
+    assert_eq!(conflict["error"], "viewer_profile_conflict");
+    assert_eq!(conflict["expected_revision"], 1);
+    assert_eq!(conflict["actual_revision"], 2);
+    assert_eq!(conflict["retryable"], true);
+
+    let reread = client_a
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(&uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let reread = response_json(reread).await;
+    let mut reapplied: SavedView = serde_json::from_value(reread["view"].clone()).unwrap();
+    reapplied.dataset_order.push(dataset_id.clone());
+    let retry = client_a
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(&uri)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "expected_revision": 2,
+                        "view": reapplied,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retry.status(), StatusCode::OK);
+    let converged = response_json(retry).await;
+    assert_eq!(converged["revision"], 3);
+    assert_eq!(converged["view"]["dataset_order"][0], "wds-compose");
+    assert_eq!(converged["view"]["auto_contrast"]["wds-compose"], false);
 }
 
 #[tokio::test]
@@ -1214,13 +1401,14 @@ async fn workspace_viewer_profiles_reject_invalid_profile_names() {
         .create_workspace(&owner, Some("Headless viewer profile names"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
 
     let err = manager
         .upsert_viewer_profile(
             &workspace.id,
             &owner,
             "../escape",
+            None,
             None,
             SavedView::empty([800, 600]),
         )
@@ -1240,7 +1428,7 @@ async fn workspace_default_saved_view_is_editor_controlled_and_scoped() {
         .await
         .unwrap();
     let other_workspace = store.create_workspace(&owner, Some("Other")).await.unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
     manager
         .upsert_member(
             &workspace.id,
@@ -1322,7 +1510,7 @@ async fn workspace_last_view_round_trips_per_user_and_never_touches_default() {
         .create_workspace(&owner, Some("Remember my last view"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
     manager
         .upsert_member(
             &workspace.id,
@@ -1404,7 +1592,7 @@ async fn workspace_last_view_does_not_disturb_pin_and_recents() {
         .create_workspace(&owner, Some("Last view coexists"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
 
     // Establish pin + recents on the owner's row.
     manager
@@ -1444,7 +1632,7 @@ async fn workspace_last_view_requires_membership() {
         .create_workspace(&owner, Some("Members only"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
 
     let set_err = manager
         .set_user_workspace_last_view(&workspace.id, &stranger, SavedView::empty([800, 600]))
@@ -1470,7 +1658,7 @@ async fn workspace_last_view_absent_on_legacy_rows() {
         .create_workspace(&owner, Some("Legacy"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
 
     store
         .record_workspace_open(&workspace.id, &owner)
@@ -1505,7 +1693,7 @@ async fn redteam_editor_self_approves_own_proposal_proposed_to_shared() {
         .create_workspace(&owner, Some("self approve"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
     manager
         .upsert_member(
             &workspace.id,
@@ -1579,7 +1767,7 @@ async fn redteam_single_owner_self_approves_in_solo_workspace() {
     let store = fresh_store().await;
     let owner = principal("solo@example.com", false);
     let workspace = store.create_workspace(&owner, Some("solo")).await.unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
 
     let personal = manager
         .create_saved_view(
@@ -1639,7 +1827,7 @@ async fn redteam_visibility_endpoint_rejects_illegal_transitions_for_owner() {
         .create_workspace(&owner, Some("owner gate"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
 
     // Proposed -> Shared (self-approve) via /visibility must be BadRequest.
     let personal = manager
@@ -1724,7 +1912,7 @@ async fn redteam_illegal_transition_does_not_leak_hidden_proposed_view() {
         .create_workspace(&owner, Some("leak gate"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
     for p in [&editor, &other_editor] {
         manager
             .upsert_member(&workspace.id, &owner, &p.email, None, WorkspaceRole::Editor)
@@ -1794,7 +1982,7 @@ async fn redteam_approve_preserves_created_by_not_reviewer() {
     let editor = principal("editor@example.com", false);
     let viewer = principal("viewer@example.com", false);
     let workspace = store.create_workspace(&owner, Some("attr")).await.unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
     for (p, role) in [
         (&editor, WorkspaceRole::Editor),
         (&viewer, WorkspaceRole::Viewer),
@@ -1840,7 +2028,7 @@ async fn different_editor_can_approve_an_editor_creators_proposal() {
         .create_workspace(&owner, Some("two editors"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
     for p in [&editor, &reviewer] {
         manager
             .upsert_member(&workspace.id, &owner, &p.email, None, WorkspaceRole::Editor)
@@ -1900,7 +2088,7 @@ async fn creator_can_self_reject_to_withdraw_own_proposal() {
         .create_workspace(&owner, Some("withdraw"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
 
     let personal = manager
         .create_saved_view(

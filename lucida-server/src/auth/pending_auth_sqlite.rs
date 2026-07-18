@@ -36,11 +36,14 @@ impl PendingAuthStore for SqlitePendingAuthStore {
     async fn insert(&self, row: PendingAuth) -> Result<(), PendingAuthStoreError> {
         sqlx::query(
             r#"
-            INSERT INTO pending_auth (state_token, intended_path, intended_hash, created_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO pending_auth (
+                state_token, browser_binding_hash, intended_path, intended_hash, created_at
+            )
+            VALUES (?, ?, ?, ?, ?)
             "#,
         )
         .bind(&row.state_token)
+        .bind(&row.browser_binding_hash)
         .bind(&row.intended_path)
         .bind(&row.intended_hash)
         .bind(row.created_at)
@@ -53,6 +56,8 @@ impl PendingAuthStore for SqlitePendingAuthStore {
     async fn consume(
         &self,
         state_token: &str,
+        browser_binding_hash: &str,
+        created_at_or_after: DateTime<Utc>,
     ) -> Result<Option<PendingAuth>, PendingAuthStoreError> {
         // SQLite supports DELETE ... RETURNING since 3.35; sqlx ships
         // with a recent-enough libsqlite. Fetch_optional returns the
@@ -62,16 +67,21 @@ impl PendingAuthStore for SqlitePendingAuthStore {
             r#"
             DELETE FROM pending_auth
             WHERE state_token = ?
-            RETURNING state_token, intended_path, intended_hash, created_at
+              AND browser_binding_hash = ?
+              AND created_at >= ?
+            RETURNING state_token, browser_binding_hash, intended_path, intended_hash, created_at
             "#,
         )
         .bind(state_token)
+        .bind(browser_binding_hash)
+        .bind(created_at_or_after)
         .fetch_optional(&self.pool)
         .await
         .map_err(map_err)?;
 
         Ok(row.map(|r| PendingAuth {
             state_token: r.get("state_token"),
+            browser_binding_hash: r.get("browser_binding_hash"),
             intended_path: r.get("intended_path"),
             intended_hash: r.get("intended_hash"),
             created_at: r.get("created_at"),
@@ -110,6 +120,7 @@ mod tests {
     fn sample(token: &str, path: &str, hash: &str, now: DateTime<Utc>) -> PendingAuth {
         PendingAuth {
             state_token: token.to_string(),
+            browser_binding_hash: "binding-hash".to_string(),
             intended_path: path.to_string(),
             intended_hash: hash.to_string(),
             created_at: now,
@@ -125,7 +136,11 @@ mod tests {
             .await
             .unwrap();
 
-        let got = store.consume("tok1").await.unwrap().unwrap();
+        let got = store
+            .consume("tok1", "binding-hash", now)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(got.state_token, "tok1");
         assert_eq!(got.intended_path, "/foo");
         assert_eq!(got.intended_hash, "#bar");
@@ -136,14 +151,32 @@ mod tests {
         let (_session, store) = fresh_store().await;
         let now = Utc::now();
         store.insert(sample("once", "/", "", now)).await.unwrap();
-        assert!(store.consume("once").await.unwrap().is_some());
-        assert!(store.consume("once").await.unwrap().is_none());
+        assert!(
+            store
+                .consume("once", "binding-hash", now)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .consume("once", "binding-hash", now)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
     async fn consume_unknown_token_returns_none() {
         let (_session, store) = fresh_store().await;
-        assert!(store.consume("ghost").await.unwrap().is_none());
+        assert!(
+            store
+                .consume("ghost", "binding-hash", Utc::now())
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -153,6 +186,35 @@ mod tests {
         store.insert(sample("dupe", "/", "", now)).await.unwrap();
         let res = store.insert(sample("dupe", "/x", "", now)).await;
         assert!(res.is_err(), "PRIMARY KEY collision should error");
+    }
+
+    #[tokio::test]
+    async fn consume_requires_matching_browser_and_fresh_row_atomically() {
+        let (_session, store) = fresh_store().await;
+        let now = Utc::now();
+        store.insert(sample("bound", "/", "", now)).await.unwrap();
+
+        assert!(
+            store
+                .consume("bound", "wrong", now - ChronoDuration::minutes(1))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .consume("bound", "binding-hash", now + ChronoDuration::seconds(1))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .consume("bound", "binding-hash", now)
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -173,7 +235,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(removed, 1);
-        assert!(store.consume("old").await.unwrap().is_none());
-        assert!(store.consume("new").await.unwrap().is_some());
+        assert!(
+            store
+                .consume("old", "binding-hash", now - ChronoDuration::minutes(10))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .consume("new", "binding-hash", now - ChronoDuration::minutes(10))
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 }

@@ -8,7 +8,7 @@ Three commands, all real and end-to-end against a live `lucida-server` brought u
 - **`drive`** — bring up a live server, then **exercise lucida's surfaces the way
   an agent would** — the `lucida` CLI, the `LucidaClient` Python client, and the
   **web** surface (a non-blank screenshot of the real rendered viewer, plus a
-  best-effort real-SPA full-page capture + browser console) — capturing every
+  required DPR1/2 real-SPA canvas/page captures + browser consoles) — capturing every
   step's output, then tear it down.
 - **`report`** — the capstone: run **every** surface (it reuses `drive --surface
   all`) and emit a single, **self-contained `report.html`** (plus a `report.md`
@@ -85,14 +85,18 @@ everything, then always tears the server down.
 - **CLI surface** — a broad tour of the actual `lucida` binary
   (`LUCIDA_TRYOUT_CLI`, else `cargo run -p lucida-cli --`): status/identity,
   workspace list + info, dataset list + info + health, viewer state, a real view
-  mutation (`view set-zoom`) and a layer mutation, in **both** human and `--json`
-  form. Each command is captured to `DIR/cli/NN-<name>.log` (argv + exit code +
-  stdout + stderr).
+  mutation (`view set-zoom`), a deterministic channel-contrast mutation, and a
+  layer mutation, in **both** human and `--json` form. The sharing tour also
+  asserts that an author cannot approve their own proposed saved view: the exact
+  structured `unauthorized` diagnostic and exit code are required, while an
+  unexpected success fails the run. Each command is captured to
+  `DIR/cli/NN-<name>.log` (argv + exit code + stdout + stderr).
 - **Python surface** — a broad `LucidaClient` session (`from lucida import
   LucidaClient`, driven against the working-tree `lucida-py` source via `uv` — no
   native build): connect, status, select the workspace, list datasets, dataset
-  info + health, layer/debug reads, a view mutation and a layer mutation. The
-  transcript is captured to `DIR/python/session.log`.
+  info + health, layer/debug reads, view/layer/channel mutations, and the same
+  exact self-approval denial assertion. The transcript is captured to
+  `DIR/python/session.log`.
 - **Web surface** — captures what lucida *looks like*, in two layers:
   - **Floor (required):** boots the server with `LUCIDA_WEB_DIST` set to a real
     SPA bundle (reuses `LUCIDA_TRYOUT_WEB_DIST` if it has `index.html`, else
@@ -100,25 +104,68 @@ everything, then always tears the server down.
     (`lucida viewer screenshot DIR/web/viewer.png`, and `viewer overview`) which
     renders the real viewer in headless Chrome and writes a **non-blank** PNG.
     The captured workspace **URL** is recorded so a human can re-open the view.
-  - **Ceiling (best-effort):** drives the real SPA itself in a browser via
-    **Playwright** (provisioned through `npm` into a harness cache, pointed at the
-    same system Chrome — no browser download), waits for the same render-readiness
-    signal the product uses, then captures a full-page `DIR/web/spa.png` and the
-    browser `DIR/web/console.log`. If Playwright or a browser can't be
-    provisioned this is recorded as `{captured: false, reason}` and the floor
-    still stands.
+  - **Browser matrix (required):** drives the production SPA itself via
+    pinned **Playwright + axe-core** (provisioned through `npm` into a harness
+    cache, pointed at the same system Chrome — no browser download) in isolated
+    DPR1 and DPR2 arms.
+    Each arm waits for the product's GPU-complete readiness signal, forces a
+    resize and requires the presented-frame counter to advance, captures both
+    the full page and the canvas, and pixel-checks the canvas itself. Device
+    loss/GPU-fatal console diagnostics fail the arm. Capture metadata reports
+    each rendered dataset/channel layer with the effective contrast and gamma
+    sent to the renderer, so the matrix verifies the durable channel mutation
+    rather than a global default. Each arm also gates the 1280×720 and 390×844
+    viewer and dashboard responsive baselines, vertical control reachability,
+    error placement, fresh initially-0×0 2D/3D mounts plus later
+    collapse-and-restore, simultaneous Explore/Mentions surfaces at normal,
+    real page-scale zoom 1.25 at DPR1 and DPR2 / 1024×576, edge, and mobile
+    positions. The generated fixture is a real populated 1×12 OME collection,
+    and every arm requires its selector to be present, collision-free with the
+    minimap, keyboard-focus-visible, hit-testable, and clickable through the
+    rightmost position. Pairwise
+    collision checks, and primary-safe-region checks clipped through each
+    control's visible scroll container, plus bounded logical focus,
+    keyboard resizers, full forward/backward modal focus cycles, visible focus,
+    reduced motion, and state-specific WCAG A/AA axe results for settled,
+    dashboard, overlay, error, and sharing states. The geometry and idle gates
+    consume the product's version-1 render-contract snapshot: an initial 0×0
+    surface—both at initial mount and after a live collapse—must be suppressed
+    before worker forwarding; positive restoration must post and present a
+    frame. A settled one-second idle window must produce exactly zero RAFs,
+    posted/presented frames, worker messages, pending work, and long tasks while
+    remaining under a CDP-measured main-thread CPU budget. A real keyboard
+    resize must then wake the worker, present a new frame, and settle again.
+    Modal initial-focus waits target the actual Close control, not merely any
+    node inside the dialog; initial focus, visible focus, complete focus cycles,
+    and post-Escape invoker restoration each have bounded receipts. Failures
+    retain an open-dialog screenshot and active-element evidence.
+    DPR2 additionally runs the mobile first-run create/open/navigate/share flow;
+    the three-channel CI fixture must expose an enabled Next C action and advance
+    both UI and rendered-layer channel metadata by exactly one in a frame posted
+    after the click (the pre-click frame is retained as the ordering baseline),
+    with a changed canvas-pixel digest. It also persists a real link-access
+    sharing action before checking Escape restoration. A first-run
+    readiness or control failure returns a stage-labelled UI/readiness receipt
+    and screenshot instead of timing out the entire DPR arm. Its scoped console
+    and WebSocket receipt correlates the seed request to its authoritative
+    `open_dataset_succeeded` response (socket, request, sequence, and dataset),
+    distinguishing a lost seed from a bad snapshot or an optimistic local open.
+    Any page exception or common WebGPU validation/device-loss diagnostic is
+    fatal. CI runs the receipt-mutation unit suite before the live browser lane.
+    Logs, browser-contract details, and screenshots are retained per DPR
+    under `DIR/web/*-dpr1.*` and `DIR/web/*-dpr2.*`.
 - The full result is written to `DIR/drive.json` and printed (one JSON object
   under `--json`). `DIR/server.log` is captured too.
 
-A single CLI command (or Python step) returning non-zero is **captured, not
-fatal** — the tour continues and records it, because an agent wants to see *what*
-failed. The run exits non-zero only if bring-up failed or a *requested surface
-could not be exercised at all* (e.g. the CLI binary is missing).
+A single CLI command, Python step, or browser arm failing is **captured without
+aborting the tour** — the remaining surfaces still run so an agent sees the full
+failure picture. The final run exits non-zero if bring-up fails, a requested
+surface cannot run, or any required operation in a requested surface fails.
 
 ### Result object (`drive`)
 
 One JSON object with at least: `ok` (true iff bring-up succeeded and each
-requested surface ran without a harness-level error), `out_dir`, `workspace_id`,
+requested surface satisfied all of its required operations), `out_dir`, `workspace_id`,
 `dataset_id`, `teardown`, and `surfaces`:
 
 ```jsonc
@@ -144,20 +191,40 @@ requested surface ran without a harness-level error), `out_dir`, `workspace_id`,
         { "name": "overview", "png": "DIR/web/overview.png", "nonblank": true, "ok": true }
       ],
       "real_spa": {
-        "captured": true, "reason": "rendered",
-        "spa_png": "DIR/web/spa.png", "spa_png_nonblank": true,
-        "console_log": "DIR/web/console.log",
-        "render": { "ready": true, "frame_count": 2, "dataset_count": 1 }
+        "captured": true, "ok": true,
+        "reason": "rendered at DPR1 and DPR2",
+        "required_device_scale_factors": [1, 2],
+        "spa_png": "DIR/web/spa-dpr2.png", "spa_png_nonblank": true,
+        "console_log": "DIR/web/console-dpr2.log",
+        "arms": [
+          {
+            "device_scale_factor": 1, "ok": true,
+            "rendered": true, "frame_advanced": true,
+            "canvas_png": "DIR/web/canvas-dpr1.png",
+            "canvas_png_nonblank": true, "gpu_failures": [],
+            "contract_failures": [], "browser_contract": { "axe": [], "idle": {} }
+          },
+          {
+            "device_scale_factor": 2, "ok": true,
+            "rendered": true, "frame_advanced": true,
+            "canvas_png": "DIR/web/canvas-dpr2.png",
+            "canvas_png_nonblank": true, "gpu_failures": [],
+            "contract_failures": [], "browser_contract": { "first_run": { "ok": true } }
+          }
+        ],
+        "render": { "ready": true, "frame_count": 2, "dataset_count": 1,
+                    "device_pixel_ratio": 2 }
       }
     }
   }
 }
 ```
 
-The web surface's `ok` requires a **non-blank** `viewer.png` (the required
-floor); a failed `overview` or a skipped real-SPA ceiling is captured but never
-flips `ok`. `real_spa.captured: false` carries a `reason` (e.g. Playwright/Chrome
-not provisionable) — the floor still stands.
+The web surface's `ok` requires both a **non-blank** CLI `viewer.png` and a
+passing DPR1+DPR2 production-SPA matrix. A failed optional `overview` remains
+diagnostic-only. `real_spa.captured: false` carries the exact provisioning or
+browser reason and fails the requested web surface instead of silently turning
+the retina-sensitive gate into DPR1-only coverage.
 
 ## `report`: one run, one portable verification report
 
@@ -168,7 +235,7 @@ python3 extras/tryout/tryout.py report [--json] [--out DIR] [--fixture PATH] \
 
 The capstone. It runs the **full cross-surface session** (it *reuses* `drive
 --surface all` — CLI + Python + web, same hermetic spine, same raw artifacts:
-`server.log`, `cli/*.log`, `python/session.log`, `web/viewer.png` (+ `spa.png`),
+`server.log`, `cli/*.log`, `python/session.log`, `web/viewer.png` plus the DPR1/2 canvas/page captures,
 `drive.json`) and then consolidates that one run into two artifacts a human opens
 to verify lucida works **without re-running**:
 
@@ -244,6 +311,12 @@ One repeatable command instead of a bespoke script each time.
   via `scripts/assert_png_nonblank.py` (the same checker the web surface uses).
   `DIR/<scenario>/scenario.json` holds the scenario result and the top-level
   `drive.json` carries it under `scenario`.
+- **Every scenario has a read-only DPR1+DPR2 render preflight.** Both arms must
+  present advancing, nonblank canvas content before the feature program starts.
+  The mutating testid-driven program then runs once at DPR2, so a scenario
+  cannot pass through a retina-blind DPR1 default and is not replayed in a way
+  that duplicates comments, saved views, or other collaborative writes. The
+  preflight artifacts live under `DIR/<scenario>/render-matrix/`.
 - **`--email` bundles the shots + a summary and hands them to
   [courier](../../). DRY-RUN BY DEFAULT** — it builds and previews the message and
   lists the attachments but **sends nothing**; only `--email-send` actually sends.
@@ -328,8 +401,13 @@ fixture → report → teardown.**
 | `LUCIDA_TRYOUT_UV` | `uv` binary used to drive the `lucida-py` client. |
 | `LUCIDA_TRYOUT_PY` | Override the whole interpreter prefix for the client driver (e.g. `"uv run --project lucida-py python"`). |
 | `LUCIDA_TRYOUT_WEB_DIST` | Reuse this prebuilt `lucida-web/dist` (must contain `index.html`) for the web surface; else it is built from the working tree. |
-| `LUCIDA_TRYOUT_PLAYWRIGHT_DIR` | A `node_modules`-parent dir where Playwright is provisioned/cached for the real-SPA ceiling (default: `~/.cache/lucida-tryout/playwright`). |
-| `LUCIDA_BROWSER` | Browser executable used by both the floor (product CLI) and the real-SPA ceiling; defaults to the platform's Chrome/Chromium/Edge. |
+| `LUCIDA_TRYOUT_PLAYWRIGHT_DIR` | A `node_modules`-parent dir where the exact Playwright and axe-core pins are provisioned/cached for the production-SPA acceptance matrix (default: `~/.cache/lucida-tryout/playwright`). |
+| `LUCIDA_BROWSER` | Browser executable used by both the floor (product CLI) and the DPR1/2 matrix; defaults to the platform's Chrome/Chromium/Edge. |
+| `LUCIDA_TRYOUT_REQUIRE_NON_U16` | Set to `1` in fixture gates that must prove a non-u16 intensity path. The browser reads dtype from the product capture contract, not a filename convention. |
+| `LUCIDA_TRYOUT_MIN_CHANNELS` | Require at least this many intensity channels in the rendered fixture (default `1`). |
+| `LUCIDA_TRYOUT_EXPECT_CHANNEL` | Optional exact selected channel index required in both DPR arms. |
+| `LUCIDA_TRYOUT_EXPECT_CONTRAST_MIN`, `LUCIDA_TRYOUT_EXPECT_CONTRAST_MAX` | Optional exact renderer contrast window; set both together. |
+| `LUCIDA_TRYOUT_REQUIRE_FIRST_RUN` | Set to `1` for acceptance profiles that must fail unless the DPR2 create/open/navigate/share receipt was requested and passed (CI sets this alongside its real fixture). |
 | `LUCIDA_TRYOUT_COURIER` | Path to courier's `courier.py` for `drive --scenario --email`; else a `courier` on `PATH` is used, else email is recorded as skipped (never fatal). |
 
 ## Layout
@@ -350,7 +428,7 @@ extras/tryout/
       python_client.py # workspace create + dataset open via LucidaClient (bring-up)
       cli_surface.py   # drive the real `lucida` CLI tour, capture each command
       python_surface.py# broad LucidaClient read/mutate tour, capture transcript
-      web_surface.py   # non-blank viewer screenshot (CLI) + real-SPA Playwright capture
+      web_surface.py   # CLI screenshot + GPU-complete DPR1/2 Playwright canvas gate
     scenarios/
       __init__.py      # the ScenarioResult contract + the Scenario REGISTRY
       _runner.py       # the framework: boot -> seed -> drive UI -> capture -> (email) -> reap
@@ -387,8 +465,9 @@ load, and an `ok` verdict. The framework (`_runner.py`) owns boot (the same
 `server.py` spine + `python_client.py` bring-up, with the SPA bundle served), the
 WS seed transport (`_ws.py`, riding the same `websockets` stack the client uses),
 the Playwright launch/teardown (`_browser.py`, the same system-Chrome + WebGPU
-launch config as `web_surface.py`, running one generic UI driver so the browser is
-owned in one place and reaped via `_subproc.run_group`), the `shot` capture, and
+launch config and DPR1/2 preflight as `web_surface.py`, followed by one DPR2
+generic UI driver so the browser is owned in one place and reaped via
+`_subproc.run_group`), the `shot` capture, and
 the `--email` step (`_courier.py`, dry-run by default). Adding a scenario is a
 small module, not edits across the harness.
 
@@ -436,7 +515,7 @@ For `up`: expect exit 0, a JSON object on stdout with a `127.0.0.1:PORT` base UR
 For `drive`: expect exit 0, `surfaces.cli` with several captured commands (each
 with an `exit_code`), `surfaces.python.ran` true, and `surfaces.web.ok` true with
 a **non-blank** `/tmp/tryout-drive/web/viewer.png` and a recorded `viewer_url`
-(plus `web/spa.png` + `web/console.log` when the real-SPA ceiling is available);
+(plus the required `web/canvas-dpr{1,2}.png`, `web/spa-dpr{1,2}.png`, and per-DPR console logs);
 non-empty `/tmp/tryout-drive/cli/*.log` and `/tmp/tryout-drive/python/session.log`,
 `/tmp/tryout-drive/drive.json`, `teardown: "clean"`, and no orphaned
 `lucida-server` (or headless browser).

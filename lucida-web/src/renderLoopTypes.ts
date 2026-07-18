@@ -3,7 +3,6 @@ import type { WasmScene } from "lucida-core";
 import type { DatasetManifest } from "./manifestTypes.ts";
 import type { RenderClient } from "./renderer/renderClient.ts";
 import type { CpuCache } from "./pipeline/fetch/index.ts";
-import type { AssetCatalog } from "./pipeline/assetCatalog.ts";
 import type { Session } from "./session.ts";
 
 export interface DatasetEntry {
@@ -35,8 +34,8 @@ export interface MinimapOverlayData {
     depth: number;
   }[];
   mode: "slice" | "volume";
-  theta: number;
-  phi: number;
+  /** Authoritative world-to-view camera rotation `[right; up; backward]`. */
+  cameraViewRotation: Float32Array;
   canvasW: number;
   canvasH: number;
   currentZ: number;
@@ -83,10 +82,4 @@ export interface TickContext {
   renderScale: number;
   cpuCache: CpuCache;
   sendViewerInterest?: (interest: unknown) => void;
-  /**
-   * Local mirror of per-entity proxy availability. Populated by
-   * `bridge` from `DatasetOpened.catalog` and any subsequent
-   * `AssetCatalogUpdate` server messages.
-   */
-  assetCatalog: AssetCatalog;
 }

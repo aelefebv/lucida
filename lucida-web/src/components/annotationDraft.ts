@@ -13,6 +13,25 @@ export interface AnnotationDraft {
   y1: number;
 }
 
+/** Event-driven channel shared by canvas gestures and the isolated overlay. */
+export class AnnotationDraftStore {
+  private draft: AnnotationDraft | null = null;
+  private readonly listeners = new Set<() => void>();
+
+  getSnapshot = (): AnnotationDraft | null => this.draft;
+
+  subscribe = (listener: () => void): (() => void) => {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  };
+
+  set(draft: AnnotationDraft | null): void {
+    if (Object.is(this.draft, draft)) return;
+    this.draft = draft;
+    for (const listener of this.listeners) listener();
+  }
+}
+
 /** Normalize a press→cursor box to a non-negative SVG rect, so dragging in any
  * direction (up/left as well as down/right) yields a valid rectangle. */
 export function draftBoxRect(

@@ -1,11 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import type { WasmScene } from "lucida-core";
 import { Axis } from "../axes.ts";
-import { applyViewportCommand } from "../applyAndSend.ts";
-import { invalidateDisplaySettings } from "../invalidation.ts";
-import type { RenderLoop } from "../renderLoop.ts";
+import type { ViewportCommand } from "../commands.ts";
 import type { DatasetState, ViewMode } from "../types.ts";
-import type { BridgeCallbacks } from "./useDatasetSettings.ts";
+import type { SceneMutationCallbacks } from "./useDatasetSettings.ts";
 
 interface Params {
   wasmSceneRef: React.RefObject<WasmScene | null>;
@@ -13,8 +11,7 @@ interface Params {
   selectedDatasetId: string | null;
   datasetsRef: React.RefObject<Map<string, DatasetState>>;
   datasetsVersion: number;
-  bridgeCallbacksRef: React.RefObject<BridgeCallbacks>;
-  loopRef: React.RefObject<RenderLoop | null>;
+  bridgeCallbacksRef: React.RefObject<SceneMutationCallbacks>;
 }
 
 export function useDimensions({
@@ -24,7 +21,6 @@ export function useDimensions({
   datasetsRef,
   datasetsVersion,
   bridgeCallbacksRef,
-  loopRef,
 }: Params) {
   const [z, setZ] = useState(0);
   const [c, setC] = useState(0);
@@ -82,28 +78,36 @@ export function useDimensions({
   // dataset's bounds. setState here IS the intended effect.
   useEffect(() => {
     const scene = wasmSceneRef.current;
-    let clamped = false;
+    const commands: ViewportCommand[] = [];
+    let nextZ: number | null = null;
+    let nextC: number | null = null;
+    let nextT: number | null = null;
     if (z >= dimZ) {
-      const newZ = dimZ - 1;
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setZ(newZ);
-      if (scene) applyViewportCommand(scene, { type: "set_z", z: newZ });
-      clamped = true;
+      nextZ = dimZ - 1;
+      commands.push({ type: "set_z", z: nextZ });
     }
     if (c >= dimC) {
-      const newC = dimC - 1;
-      setC(newC);
-      if (scene) applyViewportCommand(scene, { type: "set_c", c: newC });
-      clamped = true;
+      nextC = dimC - 1;
+      commands.push({ type: "set_c", c: nextC });
     }
     if (t >= dimT) {
-      const newT = dimT - 1;
-      setT(newT);
-      if (scene) applyViewportCommand(scene, { type: "set_t", t: newT });
-      clamped = true;
+      nextT = dimT - 1;
+      commands.push({ type: "set_t", t: nextT });
     }
-    if (clamped) {
-      bridgeCallbacksRef.current.emitPresence();
+    if (commands.length > 0) {
+      // With no scene there is nothing to synchronize yet, but React still must
+      // respect the manifest bounds. Otherwise update the mirror only after the
+      // canonical scene batch commits.
+      const applied = !scene || bridgeCallbacksRef.current.mutateViewport(commands, {
+          source: "dimension_clamp",
+          history: { skip: true },
+        });
+      if (applied) {
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        if (nextZ !== null) setZ(nextZ);
+        if (nextC !== null) setC(nextC);
+        if (nextT !== null) setT(nextT);
+      }
     }
     // Deliberately omit z/c/t/wasmSceneRef/bridgeCallbacksRef: the clamp
     // is a one-shot reaction to dim shrinkage, not a continuous sync.
@@ -111,63 +115,91 @@ export function useDimensions({
 
   const handleViewModeToggle = useCallback(() => {
     const next = viewMode === "2d" ? "3d" : "2d";
-    setViewMode(next);
-    bridgeCallbacksRef.current.breakFollow();
-    if (wasmScene) {
-      applyViewportCommand(wasmScene, { type: next === "3d" ? "set_mode_arcball" : "set_mode_slice" });
-      if (next === "2d" && selectedDatasetId) {
-        const dsManifest = datasetsRef.current.get(selectedDatasetId)?.manifest;
-        if (dsManifest) {
-          const shapeX = dsManifest.images[0].multiscale.levels[0].shape[Axis.X];
-          const shapeY = dsManifest.images[0].multiscale.levels[0].shape[Axis.Y];
-          applyViewportCommand(wasmScene, { type: "set_center", x: shapeX / 2, y: shapeY / 2 });
-        }
+    if (!wasmScene) {
+      setViewMode(next);
+      return;
+    }
+    const commands: ViewportCommand[] = [
+      { type: next === "3d" ? "set_mode_arcball" : "set_mode_slice" },
+    ];
+    if (next === "2d" && selectedDatasetId) {
+      const dsManifest = datasetsRef.current.get(selectedDatasetId)?.manifest;
+      if (dsManifest) {
+        const shapeX = dsManifest.images[0].multiscale.levels[0].shape[Axis.X];
+        const shapeY = dsManifest.images[0].multiscale.levels[0].shape[Axis.Y];
+        commands.push({ type: "set_center", x: shapeX / 2, y: shapeY / 2 });
       }
-      bridgeCallbacksRef.current.emitPresence();
+    }
+    if (bridgeCallbacksRef.current.mutateViewport(commands, { source: "view_mode_toggle" })) {
+      setViewMode(next);
     }
   }, [viewMode, wasmScene, selectedDatasetId, datasetsRef, bridgeCallbacksRef]);
 
   const handleZChange = useCallback((v: number) => {
-    setZ(v);
-    bridgeCallbacksRef.current.breakFollow();
     const scene = wasmSceneRef.current;
-    if (scene) {
-      applyViewportCommand(scene, { type: "set_z", z: v });
-      bridgeCallbacksRef.current.emitPresence();
+    if (!scene) {
+      setZ(v);
+      return;
+    }
+    if (bridgeCallbacksRef.current.mutateViewport(
+        { type: "set_z", z: v },
+        {
+          source: "dimension_z",
+          history: { label: "Z position", coalesceKey: "dimension_z", coalesceWindowMs: 250 },
+        },
+      )) {
+      setZ(v);
     }
   }, [wasmSceneRef, bridgeCallbacksRef]);
 
   const handleCChange = useCallback((v: number) => {
-    setC(v);
-    bridgeCallbacksRef.current.breakFollow();
     const scene = wasmSceneRef.current;
-    if (scene) {
-      applyViewportCommand(scene, { type: "set_c", c: v });
-      bridgeCallbacksRef.current.emitPresence();
+    if (!scene) {
+      setC(v);
+      return;
+    }
+    if (bridgeCallbacksRef.current.mutateViewport(
+        { type: "set_c", c: v },
+        {
+          source: "dimension_c",
+          history: { label: "channel", coalesceKey: "dimension_c", coalesceWindowMs: 250 },
+        },
+      )) {
+      setC(v);
     }
   }, [wasmSceneRef, bridgeCallbacksRef]);
 
   const handleTChange = useCallback((v: number) => {
-    setT(v);
-    bridgeCallbacksRef.current.breakFollow();
     const scene = wasmSceneRef.current;
-    if (scene) {
-      applyViewportCommand(scene, { type: "set_t", t: v });
-      bridgeCallbacksRef.current.emitPresence();
+    if (!scene) {
+      setT(v);
+      return;
+    }
+    if (bridgeCallbacksRef.current.mutateViewport(
+        { type: "set_t", t: v },
+        {
+          source: "dimension_t",
+          history: { label: "timepoint", coalesceKey: "dimension_t", coalesceWindowMs: 250 },
+        },
+      )) {
+      setT(v);
     }
   }, [wasmSceneRef, bridgeCallbacksRef]);
 
   const handleMultiChannelToggle = useCallback(() => {
     const next = !multiChannel;
-    setMultiChannel(next);
-    bridgeCallbacksRef.current.breakFollow();
     const scene = wasmSceneRef.current;
-    if (scene) {
-      applyViewportCommand(scene, { type: "set_multi_channel", enabled: next });
-      invalidateDisplaySettings(loopRef.current, "multi_channel_toggle");
-      bridgeCallbacksRef.current.emitPresence();
+    if (!scene) {
+      setMultiChannel(next);
+      return;
     }
-  }, [multiChannel, wasmSceneRef, bridgeCallbacksRef, loopRef]);
+    if (bridgeCallbacksRef.current.mutateViewport(
+        { type: "set_multi_channel", enabled: next },
+        { source: "multi_channel_toggle", invalidation: "display" },
+      )) {
+      setMultiChannel(next);
+    }
+  }, [multiChannel, wasmSceneRef, bridgeCallbacksRef]);
 
   return {
     z, c, t, setZ, setC, setT,

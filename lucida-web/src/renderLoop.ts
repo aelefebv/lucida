@@ -14,20 +14,26 @@ import type { CpuCache } from "./pipeline/fetch/index.ts";
 import { identityMatrix } from "./pipeline/upload/coldState/identity.ts";
 import type { Session } from "./session.ts";
 import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap, markMinimapOverviewSeeded, clearMinimapForDataset } from "./minimapPath.ts";
+import {
+  captureCameraSummary,
+  captureDatasetSummaries,
+  captureViewSummary,
+  type LucidaCaptureReadyState,
+} from "./captureContract.ts";
+import {
+  isDiscreteViewportTransition,
+  ViewportLoadingTracker,
+} from "./viewportLoadingState.ts";
+import {
+  MainThreadLongTaskMonitor,
+  type LucidaRenderContract,
+  type LucidaRenderRuntimeSnapshot,
+} from "./renderRuntimeContract.ts";
 
 // Re-export types so downstream imports stay unchanged
 export type { DatasetEntry, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
 
-export interface LucidaCaptureReadyState {
-  ready: boolean;
-  reason: string;
-  frameCount: number;
-  at: number;
-  mode: "slice" | "volume";
-  datasetCount: number;
-  canvasWidth: number;
-  canvasHeight: number;
-}
+export type { LucidaCaptureReadyState } from "./captureContract.ts";
 
 declare global {
   interface Window {
@@ -65,6 +71,13 @@ export class RenderLoop {
   private frameSamples: Array<{ t: number; frame: number; plan: number; upload: number; passes: number; rendered: boolean }> = [];
   private static readonly SAMPLE_BUFFER_LIMIT = 120;
   private renderedFrameCount = 0;
+  private presentedFrameTimes: number[] = [];
+  private presentedFrameListeners = new Set<() => void>();
+  private framePresentedUnsub: (() => void) | null = null;
+  private viewportLoading = new ViewportLoadingTracker();
+  private canvasResizeObserver: ResizeObserver | null = null;
+  private longTaskMonitor: MainThreadLongTaskMonitor | null = null;
+  private runtimeContract: LucidaRenderContract | null = null;
   // Last-set timestamps for each dirty flag. Lets the panel show a brief
   // "afterglow" so transient flips (e.g. an interactive flag that gets
   // cleared within one RAF) are visible at the 200ms polling rate.
@@ -118,6 +131,7 @@ export class RenderLoop {
   }
 
   start(): void {
+    this.installRuntimeContract();
     // When the worker evicts or skips chunks, update the uploader's
     // delivery tracking so they can be re-sent. Evictions trigger a new
     // tick.
@@ -130,12 +144,42 @@ export class RenderLoop {
 
     // When the worker reports its wanted-set, update the uploader and
     // schedule a tick so wanted chunks can be delivered from CpuCache.
-    this.client.onWantedSetDelta = (datasetId, _epochs, missing) => {
+    this.client.onWantedSetDelta = (datasetId, epochs, missing) => {
       this.uploader.handleWantedSetDelta(datasetId, missing, this.session.cpuCache);
+      this.viewportLoading.wantedSet(datasetId, epochs, missing.length);
       if (missing.length > 0) {
         this.setDirty("residency", "wanted_set_delta");
       }
     };
+
+    // A recoverable worker cache miss means this attempt was deliberately not
+    // presented. The client has forgotten the stale key; the next tick sends
+    // the canonical aggregate bytes again.
+    this.client.onAggregateCacheMiss = () => {
+      this.setDirty("interactive", "aggregate_cache_miss");
+    };
+
+    // The worker acknowledges a frame only after its submitted GPU work has
+    // completed. Capture readiness, FPS, and DOM overlays all subscribe to this
+    // lifecycle instead of counting main-thread RAF callbacks.
+    this.framePresentedUnsub = this.client.subscribeFramePresented?.((frame) => {
+      this.viewportLoading.framePresented(frame.frameId);
+      if (debugStats.enabled) {
+        this.presentedFrameTimes.push(frame.receivedAt);
+        if (this.presentedFrameTimes.length > RenderLoop.SAMPLE_BUFFER_LIMIT) {
+          this.presentedFrameTimes.shift();
+        }
+      }
+      this.publishRenderedCaptureReady();
+      for (const listener of this.presentedFrameListeners) listener();
+    }) ?? null;
+
+    if (typeof ResizeObserver !== "undefined") {
+      this.canvasResizeObserver = new ResizeObserver(() => {
+        if (this.hasUsableCanvas()) this.setDirty("interactive", "canvas_resized");
+      });
+      this.canvasResizeObserver.observe(this.canvas);
+    }
 
     this.setDirty("interactive", "loop_start");
   }
@@ -147,6 +191,15 @@ export class RenderLoop {
     }
     this.client.onChunksEvicted = null;
     this.client.onWantedSetDelta = null;
+    this.client.onAggregateCacheMiss = null;
+    this.framePresentedUnsub?.();
+    this.framePresentedUnsub = null;
+    this.presentedFrameListeners.clear();
+    this.canvasResizeObserver?.disconnect();
+    this.canvasResizeObserver = null;
+    this.removeRuntimeContract();
+    this.client.cancelUnsubmittedFrameExpectations();
+    this.viewportLoading.reset();
     this.cpuCacheUnsub();
     this.configStoreUnsub();
     for (const unsub of this.unsubs.values()) {
@@ -155,12 +208,18 @@ export class RenderLoop {
     this.unsubs.clear();
   }
 
+  subscribePresentedFrame(listener: () => void): () => void {
+    this.presentedFrameListeners.add(listener);
+    return () => this.presentedFrameListeners.delete(listener);
+  }
+
+  getViewportLoadingState = this.viewportLoading.getViewportLoadingState;
+
+  subscribeViewportLoading = this.viewportLoading.subscribeViewportLoading;
+
   /**
    * Expose the tickCoordinator + cpuCache for HITL debugging via
-   * `window.__lucidaOrch`. The full chain is needed because
-   * `TickCoordinator.requestTestProxy(...)` submits through CpuCache and
-   * the normal subscribe → tick → `deliverToWorker` path forwards the
-   * result to the GPU worker.
+   * `window.__lucidaOrch`.
    */
   getTickCoordinator(): TickCoordinator {
     return this.tickCoordinator;
@@ -202,6 +261,7 @@ export class RenderLoop {
     const manifest = this.datasets.get(id)?.manifest;
     const imageIds = manifest ? manifest.images.map(img => img.image_id) : [];
     this.datasets.delete(id);
+    this.viewportLoading.removeDataset(id);
 
     // Collect member IDs that were keyed under this dataset.
     // For single datasets image_id === dataset_id, but for collections
@@ -232,15 +292,18 @@ export class RenderLoop {
 
     // If no datasets remain, clear the canvas by rendering empty layers
     if (this.datasets.size === 0) {
-      const w = this.canvas.clientWidth;
-      const h = this.canvas.clientHeight;
-      const zeroEpochs: SceneEpochs = { content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0 };
-      this.client.resize(w, h);
-      if (this.mode === "slice") {
-        this.client.sliceRenderMultiPass([], 1, 0, 0, w, h, zeroEpochs);
-      } else {
-        const identity = identityMatrix();
-        this.client.volumeRenderMultiPass([], identity, new Float32Array([0, 0, 1]), w, h, w, h, zeroEpochs, identity, new Float32Array([0, 0, -1]), 0, 0);
+      const deviceSurface = this.devicePixelCanvasSize();
+      const w = Math.round(deviceSurface.width);
+      const h = Math.round(deviceSurface.height);
+      const zeroEpochs: SceneEpochs = { content: 0, layout: 0, view: 0, selection: 0, request: 0 };
+      if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
+        this.client.resize(w, h, this.mode);
+        if (this.mode === "slice") {
+          this.client.sliceRenderMultiPass([], 1, 0, 0, w, h, zeroEpochs);
+        } else {
+          const identity = identityMatrix();
+          this.client.volumeRenderMultiPass([], identity, new Float32Array([0, 0, 1]), w, h, w, h, zeroEpochs, identity, new Float32Array([0, 0, -1]), 0, 0);
+        }
       }
       this.publishCaptureReady(false, "no_datasets");
     }
@@ -259,6 +322,55 @@ export class RenderLoop {
       datasetCount: this.datasets.size,
       canvasWidth: this.canvas.width || Math.round(this.canvas.clientWidth),
       canvasHeight: this.canvas.height || Math.round(this.canvas.clientHeight),
+      datasets: captureDatasetSummaries(this.datasets),
+      view: captureViewSummary(this.session.scene, this.datasets.keys()),
+      camera: captureCameraSummary(this.session.scene),
+    };
+  }
+
+  private installRuntimeContract(): void {
+    if (typeof window === "undefined" || this.runtimeContract !== null) return;
+    this.longTaskMonitor = new MainThreadLongTaskMonitor();
+    const contract: LucidaRenderContract = {
+      version: 1,
+      getSnapshot: () => this.getRuntimeSnapshot(),
+    };
+    this.runtimeContract = contract;
+    window.__lucidaRenderContract = contract;
+  }
+
+  private removeRuntimeContract(): void {
+    if (
+      typeof window !== "undefined" &&
+      this.runtimeContract !== null &&
+      window.__lucidaRenderContract === this.runtimeContract
+    ) {
+      delete window.__lucidaRenderContract;
+    }
+    this.runtimeContract = null;
+    this.longTaskMonitor?.disconnect();
+    this.longTaskMonitor = null;
+  }
+
+  /** Current, bounded renderer state used by the global pull contract. */
+  getRuntimeSnapshot(): LucidaRenderRuntimeSnapshot {
+    return {
+      version: 1,
+      at: performance.now(),
+      mode: this.mode,
+      loop: {
+        animationFramePending: this.rafId !== null,
+        interactiveDirty: this.interactiveDirty,
+        residencyDirty: this.residencyDirty,
+      },
+      client: this.client.getRuntimeSnapshot(),
+      mainThread: this.longTaskMonitor?.snapshot() ?? {
+        longTaskObserverSupported: false,
+        longTaskCount: 0,
+        longTaskDurationMs: 0,
+        longestLongTaskMs: 0,
+        lastLongTaskAt: null,
+      },
     };
   }
 
@@ -362,6 +474,24 @@ export class RenderLoop {
     }
   }
 
+  private hasUsableCanvas(): boolean {
+    const width = this.canvas.clientWidth;
+    const height = this.canvas.clientHeight;
+    return Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0;
+  }
+
+  private devicePixelCanvasSize(): { width: number; height: number } {
+    const dpr = typeof devicePixelRatio === "number"
+      && Number.isFinite(devicePixelRatio)
+      && devicePixelRatio > 0
+      ? devicePixelRatio
+      : 1;
+    return {
+      width: this.canvas.clientWidth * dpr,
+      height: this.canvas.clientHeight * dpr,
+    };
+  }
+
   private recordFrameSample(t: number, frame: number, plan: number, upload: number, passes: number, rendered: boolean): void {
     this.frameSamples.push({ t, frame, plan, upload, passes, rendered });
     if (this.frameSamples.length > RenderLoop.SAMPLE_BUFFER_LIMIT) {
@@ -396,24 +526,24 @@ export class RenderLoop {
     const FPS_WINDOW_MS = 2000;
     const windowCutoff = now - FPS_WINDOW_MS;
     const recent = samples.filter(s => s.t >= windowCutoff);
-    const rendered = recent.filter(s => s.rendered);
+    const presented = this.presentedFrameTimes.filter((time) => time >= windowCutoff);
 
     let fps: number | null = null;
     let sampleWindowMs: number | null = null;
-    if (rendered.length >= 2) {
-      const first = rendered[0].t;
-      const last = rendered[rendered.length - 1].t;
+    if (presented.length >= 2) {
+      const first = presented[0];
+      const last = presented[presented.length - 1];
       const span = last - first;
       if (span > 0) {
-        fps = +((rendered.length - 1) / (span / 1000)).toFixed(1);
+        fps = +((presented.length - 1) / (span / 1000)).toFixed(1);
         sampleWindowMs = Math.round(span);
       }
     }
 
     // For "last render age" use the full buffer (not windowed) so a 5s
     // idle period still tells you how long it's been.
-    const lastRenderedFull = samples.filter(s => s.rendered).pop();
-    const msSinceLastRender = lastRenderedFull ? Math.round(now - lastRenderedFull.t) : null;
+    const lastPresented = this.presentedFrameTimes[this.presentedFrameTimes.length - 1];
+    const msSinceLastRender = lastPresented === undefined ? null : Math.round(now - lastPresented);
 
     // If we couldn't compute fps from the window AND it's been >1s since
     // the last render, the loop is genuinely idle — report 0 instead of
@@ -468,6 +598,33 @@ export class RenderLoop {
       this.residencyDirty = true;
       this.lastResidencyDirtyAt = tNow;
     }
+    // Start the liveness clock before requestAnimationFrame. RenderClient
+    // coalesces repeated dirties onto the next frame id, then carries the same
+    // obligation through worker submission and GPU completion.
+    if (this.datasets.size > 0 && this.hasUsableCanvas()) {
+      const targetFrameId = this.client.expectNextMainFrame();
+      const minimumEpochs = this.currentSceneEpochs();
+      if (isDiscreteViewportTransition(source)) {
+        this.viewportLoading.begin({
+          source,
+          targetFrameId,
+          minimumEpochs,
+          datasetIds: this.datasets.keys(),
+        });
+      } else if (kind === "interactive") {
+        if (source === "savedview_apply") {
+          // SavedViewApplier has its own richer progress banner. Do not leave a
+          // loop-start/group chip competing with that completed restore.
+          this.viewportLoading.reset();
+        } else {
+          this.viewportLoading.advance({
+            targetFrameId,
+            minimumEpochs,
+            datasetIds: this.datasets.keys(),
+          });
+        }
+      }
+    }
     this.scheduleIfNeeded();
 
     const key = `${kind}:${source}`;
@@ -491,6 +648,23 @@ export class RenderLoop {
     }
   }
 
+  private currentSceneEpochs(): SceneEpochs {
+    try {
+      const raw = JSON.parse(this.session.scene?.epochs() ?? "{}") as Partial<SceneEpochs>;
+      const finite = (value: unknown) =>
+        typeof value === "number" && Number.isFinite(value) ? value : 0;
+      return {
+        content: finite(raw.content),
+        layout: finite(raw.layout),
+        view: finite(raw.view),
+        selection: finite(raw.selection),
+        request: finite(raw.request),
+      };
+    } catch {
+      return { content: 0, layout: 0, view: 0, selection: 0, request: 0 };
+    }
+  }
+
   private buildContext(): TickContext {
     return {
       scene: this.session.scene!,
@@ -501,7 +675,6 @@ export class RenderLoop {
       renderScale: this._renderScale,
       cpuCache: this.session.cpuCache,
       sendViewerInterest: (interest) => this.session.bridge.sendViewerInterest(interest),
-      assetCatalog: this.session.assetCatalog!,
     };
   }
 
@@ -510,11 +683,19 @@ export class RenderLoop {
 
     if (!this.interactiveDirty && !this.residencyDirty) return;
 
-    // AssetCatalog not yet wired (brief window before the first server
-    // snapshot lazily constructs it on Session). Reschedule — once the
-    // catalog appears, the next markInteractiveDirty/markResidencyDirty triggers a tick.
-    if (!this.session.assetCatalog) {
-      this.scheduleIfNeeded();
+    // A hidden/collapsed canvas can legitimately report 0×0. Do not feed that
+    // geometry into WebGPU or camera math and do not self-schedule an idle RAF
+    // loop. ResizeObserver wakes the loop exactly once when it becomes usable.
+    if (!this.hasUsableCanvas()) {
+      const surface = this.devicePixelCanvasSize();
+      // Deliberately cross the authoritative client admission boundary once.
+      // This makes an initial 0×0 mount observable as a suppressed attempt,
+      // while ResizeObserver remains the sole wake-up when layout recovers.
+      this.client.resize(surface.width, surface.height, this.mode);
+      this.interactiveDirty = false;
+      this.residencyDirty = false;
+      this.client.cancelUnsubmittedFrameExpectations();
+      this.publishCaptureReady(false, "canvas_unavailable");
       return;
     }
 
@@ -567,7 +748,17 @@ export class RenderLoop {
 
     // Tick always runs (drives chunk uploads). shouldRender gates the expensive render pass.
     if (this.mode === "slice") {
-      if (tickSlice(ctx, this.tickCoordinator, this.uploader, this.sliceZ, this.sliceT, this.sliceC, this.minimapState.pendingFetch, shouldRender)) {
+      if (tickSlice(
+        ctx,
+        this.tickCoordinator,
+        this.uploader,
+        this.sliceZ,
+        this.sliceT,
+        this.sliceC,
+        this.minimapState.pendingFetch,
+        shouldRender,
+        this.sliceState,
+      )) {
         this.setDirty("residency", "tick_slice_continuation");
       }
     } else {
@@ -589,10 +780,6 @@ export class RenderLoop {
     if (debugStats.enabled) {
       debugStats.frameTimeMs = performance.now() - now;
       this.recordFrameSample(now, debugStats.frameTimeMs, debugStats.planTimeMs, debugStats.uploadTimeMs, debugStats.renderPasses.total, shouldRender);
-    }
-
-    if (shouldRender) {
-      this.publishRenderedCaptureReady();
     }
 
     if (tickMinimapOverview(ctx, this.minimapState, now)) this.setDirty("residency", "minimap_overview_continuation");

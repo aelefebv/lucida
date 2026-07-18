@@ -33,6 +33,7 @@ pub fn default_dev_principal() -> AuthPrincipal {
         display_name: "Local Dev".to_string(),
         picture_url: None,
         is_admin: true,
+        auth_epoch: 0,
     }
 }
 
@@ -57,6 +58,7 @@ pub fn normalize_dev_principal(
         display_name,
         picture_url: None,
         is_admin,
+        auth_epoch: 0,
     })
 }
 

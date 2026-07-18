@@ -25,7 +25,6 @@ import type {
   WireGeneratedAvailabilitySnapshot,
 } from "./pipeline/generatedAvailability.ts";
 import { derivedBuildersFor } from "./pipeline/layoutBuilders.ts";
-import type { WireAssetCatalog } from "./pipeline/assetCatalog.ts";
 import { Session } from "./session.ts";
 import type { RenderLoop } from "./renderLoop.ts";
 import { bumpSettingsGeneration } from "./tickCommon.ts";
@@ -33,6 +32,7 @@ import { invalidateDisplaySettings } from "./invalidation.ts";
 import { syncSceneViewState, type SceneViewStateSetters } from "./hooks/sceneViewState.ts";
 import { shouldAutoFitOnOpen, isOpenerOf } from "./hooks/autoFit.ts";
 import { classifySceneError, guardedSceneCall, observeSceneCalls } from "./sceneGuard.ts";
+import { validateDatasetChunkAdmission } from "./chunkContract.ts";
 
 /** Consecutive scene-mutation failures (local, remote, or snapshot — every
  *  mutation reports through the scene-call guard) before the scene is
@@ -52,6 +52,81 @@ const SCENE_APPLY_FAILURE_LIMIT = 3;
  *  stays bounded while the FACT that more warnings occurred is never lost. */
 export const MAX_OPEN_WARNINGS = 50;
 
+/** Hard bounds for warning bookkeeping beyond the visible list. Once either
+ * index saturates, the controller keeps a conservative occurrence count
+ * without retaining another source or message identity. */
+export const MAX_TRACKED_OPEN_WARNING_SOURCES = 128;
+export const MAX_OPEN_WARNING_FINGERPRINTS = 4096;
+export const MAX_OPEN_WARNING_MESSAGE_CHARS = 2048;
+
+/** Maximum dataset-open lifecycle entries retained, including one slot reserved
+ * for a local admission/transport failure. Server admission stops before this
+ * boundary instead of evicting an unresolved sibling: every accepted request
+ * therefore remains retryable/dismissible until its own terminal callback or
+ * user action. */
+export const MAX_TRACKED_OPEN_REQUESTS = 128;
+const LOCAL_OPEN_CAPACITY_REQUEST_PREFIX = "local-open-capacity:";
+const LOCAL_OPEN_TRANSPORT_REQUEST_PREFIX = "local-open-transport:";
+
+interface PendingOpenRequest {
+  status: "pending";
+  requestId: string;
+  url: string;
+  sentAt: number | null;
+  progress: string | null;
+  progressOrder: number;
+}
+
+interface FailedOpenRequest {
+  status: "failed";
+  requestId: string;
+  url: string;
+  error: string;
+  failureOrder: number;
+}
+
+type TrackedOpenRequest = PendingOpenRequest | FailedOpenRequest;
+
+function boundedWarningMessage(message: string): string {
+  if (message.length <= MAX_OPEN_WARNING_MESSAGE_CHARS) return message;
+  return `${message.slice(0, MAX_OPEN_WARNING_MESSAGE_CHARS - 1)}…`;
+}
+
+function boundedWarningIdentity(value: string): string {
+  // Warning text and request ids are untrusted. Hash a bounded head/tail
+  // sample plus the original length so identity remains distinct when long
+  // values share a display prefix, without retaining or scanning an
+  // arbitrarily large string.
+  const half = MAX_OPEN_WARNING_MESSAGE_CHARS / 2;
+  const bounded = value.length <= MAX_OPEN_WARNING_MESSAGE_CHARS
+    ? value
+    : `${value.slice(0, half)}:${value.length}:${value.slice(-half)}`;
+  return warningFingerprint(bounded);
+}
+
+interface RetainedOpenWarning {
+  identity: string;
+  display: string;
+}
+
+/**
+ * Fixed-size identity for overflow deduplication. Warning text is untrusted
+ * source metadata and can be arbitrarily large, so retaining every over-cap
+ * string would defeat the display cap's memory-safety purpose. Two independent
+ * 32-bit FNV-1a lanes plus length make accidental collisions negligible while
+ * keeping each seen entry bounded. Callers pass bounded text.
+ */
+function warningFingerprint(message: string): string {
+  let first = 0x811c9dc5;
+  let second = 0x9e3779b9;
+  for (let i = 0; i < message.length; i++) {
+    const code = message.charCodeAt(i);
+    first = Math.imul(first ^ code, 0x01000193);
+    second = Math.imul(second ^ code, 0x85ebca6b);
+  }
+  return `${message.length}:${first >>> 0}:${second >>> 0}`;
+}
+
 /**
  * The kinds of user-visible errors competing for the single
  * [`RemoteDatasetActivity`]`.error` slot. There is one banner, so
@@ -64,15 +139,19 @@ export const MAX_OPEN_WARNINGS = 50;
  *   everything and is never cleared — only a reload recovers.
  * - `engine`: scene mutations keep failing (non-fatal streak). Cleared by
  *   the next successful mutation, which disproves persistent apply death.
- * - `open`: a dataset open failed. Cleared when a new open attempt (or its
- *   progress) supersedes it.
+ * - `open`: one or more dataset opens failed. The visible newest failure is
+ *   retired only by its own retry/dismiss (or a deliberate manual retry of the
+ *   same URL); unrelated progress/success leaves the failure backlog intact.
  * - `data`: chunk delivery keeps failing. Cleared by the next delivered
  *   (fetched AND decoded) chunk.
+ * - `command`: the server rejected an optimistic document mutation. Cleared
+ *   by the next accepted command; the Bridge independently requests an
+ *   authoritative snapshot to roll the rejected local state back.
  * - `incompatible`: inbound commands were refused at the parse boundary
  *   (e.g. version skew with a peer) while the scene stays healthy.
  *   Advisory only; cleared by the next successful mutation.
  *
- * `open`, `data`, and `incompatible` share the lowest rank and resolve by
+ * `open`, `data`, `command`, and `incompatible` share the lowest rank and resolve by
  * last-writer-wins. Ranking any of them above the others would let a stale
  * one-shot banner mask a live, ongoing condition — e.g. a standing open
  * failure hiding a delivery-failure streak that began afterwards, leaving
@@ -81,13 +160,22 @@ export const MAX_OPEN_WARNINGS = 50;
  * persists, so the newest actionable signal wins the slot without losing
  * anything durable.
  */
-type SurfacedErrorKind = "engine-fatal" | "engine" | "open" | "data" | "incompatible";
+export type RemoteDatasetErrorKind =
+  | "engine-fatal"
+  | "engine"
+  | "open"
+  | "data"
+  | "command"
+  | "incompatible";
+
+type SurfacedErrorKind = RemoteDatasetErrorKind;
 
 const SURFACED_ERROR_RANK: Record<SurfacedErrorKind, number> = {
   "engine-fatal": 3,
   "engine": 2,
   "open": 1,
   "data": 1,
+  "command": 1,
   "incompatible": 1,
 };
 
@@ -97,10 +185,10 @@ const SURFACED_ERROR_RANK: Record<SurfacedErrorKind, number> = {
 export interface SavedViewBridgeHooks {
   onDatasetOpened: (datasetId: string) => void;
   onOpenDatasetFailed: (url: string, error: string) => void;
-  /** `true` while a saved/last view is mid-restore (start of apply through its
-   * camera step). The controller consults this to suppress auto-fit-on-open so
-   * a restore's camera wins (#700). Optional so older callers stay compatible. */
-  isInProgress?: () => boolean;
+  /** Correlates an arriving dataset with the active saved-view generation. The
+   * controller suppresses auto-fit only for an open the restore actually owns,
+   * never because an unrelated global "busy" flag happened to be true. */
+  ownsDatasetOpen?: (datasetId: string) => boolean;
 }
 
 /** Aggregate open-remote-dataset UI state (spinner / error banner / progress
@@ -108,6 +196,10 @@ export interface SavedViewBridgeHooks {
 export interface RemoteDatasetActivity {
   loading: boolean;
   error: string | null;
+  /** Typed owner of the visible error slot. UI actions branch on this instead
+   *  of parsing user-facing text (an `open` error can be retried/dismissed;
+   *  engine/data/command failures have different recovery signals). */
+  errorKind: RemoteDatasetErrorKind | null;
   progress: string | null;
   /** Non-fatal import warnings collected across the session, kept durably
    *  after each open completes (unlike `progress`, which is transient). This
@@ -119,11 +211,11 @@ export interface RemoteDatasetActivity {
    *  clears only its own. Capped at [`MAX_OPEN_WARNINGS`] distinct messages —
    *  see `warningsOverflow` for what the cap elides. */
   warnings: readonly string[];
-  /** How many further distinct warnings occurred beyond the ones retained in
-   *  `warnings` (the [`MAX_OPEN_WARNINGS`] cap). Zero unless a flood exceeded
-   *  the cap; lets a banner render a "+N more" affordance so a bounded display
-   *  never hides that more warnings happened. Retired by the same signals as
-   *  `warnings`. */
+  /** How many further warnings occurred beyond the ones retained in
+   *  `warnings` (the [`MAX_OPEN_WARNINGS`] cap). This is an exact distinct
+   *  count while the bounded fingerprint/source indexes have capacity; after
+   *  either saturates it conservatively counts reports. That trade keeps the
+   *  signal and memory both bounded. */
   warningsOverflow: number;
 }
 
@@ -253,42 +345,67 @@ export class SessionController {
   private remoteActivity: RemoteDatasetActivity = {
     loading: false,
     error: null,
+    errorKind: null,
     progress: null,
     warnings: [],
     warningsOverflow: 0,
   };
-  /** Last `open_remote_dataset` send timestamp (performance.now() ms). Used
-   *  to derive a round-trip on receipt. Approximate when concurrent opens
-   *  are in flight — overwritten by each send. */
-  private lastOpenSendTime: number | null = null;
-  /** Non-fatal import warnings grouped by the source url that produced them
-   *  (the `url` every `onDatasetOpenProgress` frame carries). Collection is
+  /** Request-correlated open lifecycle. The map contains only pending opens
+   *  and unresolved failures; success, retry, and dismiss remove exactly their
+   *  own entry. It is admission-bounded by [`MAX_TRACKED_OPEN_REQUESTS`], so we
+   *  never trade memory safety for silently evicting an accepted sibling.
+   *
+   *  `remoteActivity` is merely the projection: loading is ANY pending request,
+   *  progress is the most recently updated pending request, and the one banner
+   *  shows the most recently failed unresolved request. */
+  private readonly openRequests = new Map<string, TrackedOpenRequest>();
+  private openActivityOrder = 0;
+  private localOpenCapacityFailureId = 0;
+  /** Non-fatal import warnings grouped by the request that produced them.
+   *  Collection is
    *  session-level and never reset per open, so datasets opened together in
    *  one synchronous pass (multi-seed workspace creation, source-url view
    *  restores) each contribute their warnings instead of the last open's reset
-   *  erasing the rest. Grouping by source lets a failed open retire only its
-   *  own warnings while sibling opens' warnings stand. The observable
+   *  erasing the rest. Grouping by request lets a failed open retire only its
+   *  own warnings while sibling opens — including the same URL opened twice —
+   *  stand. The observable
    *  [`RemoteDatasetActivity.warnings`] is the flattened, deduplicated
    *  projection of this map (see [`publishWarnings`]). Bounded: no more than
-   *  [`MAX_OPEN_WARNINGS`] distinct messages are retained across all sources —
-   *  further distinct ones are counted into [`overflowByUrl`] instead. */
-  private readonly warningsByUrl = new Map<string, string[]>();
-  /** The distinct messages currently retained in [`warningsByUrl`] (its
+   *  [`MAX_OPEN_WARNINGS`] distinct messages are retained across all sources.
+   *  Source keys, displayed text, and overflow identities all have independent
+   *  hard caps; after those caps the observable counter becomes a conservative
+   *  occurrence count rather than an exact distinct count. */
+  private readonly warningsByUrl = new Map<string, RetainedOpenWarning[]>();
+  /** The distinct warning identities currently retained in [`warningsByUrl`] (its
    *  cross-source dedup, materialized). Consulted on collect for O(1)
    *  membership and size so the cap decision does not rescan the store, and so
    *  a message already shown via one source is never miscounted as overflow
    *  when a second source reports it. Kept in lock-step with the store. */
   private readonly retainedMessages = new Set<string>();
-  /** Per-source count of distinct warnings dropped once the retention cap was
-   *  reached (the source produced them but they are not stored). Keyed by
-   *  source url so a failed open retires exactly its own overflow alongside its
-   *  retained warnings, leaving siblings' counts intact. Summed into
-   *  [`overflowWarnings`]. */
-  private readonly overflowByUrl = new Map<string, number>();
-  /** Running total of [`overflowByUrl`] — how many distinct warnings occurred
-   *  beyond the retained cap. Surfaced as
-   *  [`RemoteDatasetActivity.warningsOverflow`] so the cap bounds the DISPLAY
-   *  without ever dropping the fact that more warnings happened. */
+  /** Bounded display lines currently visible. Two long warnings may have the
+   * same truncated display but different identities; the later one becomes an
+   * overflow fact instead of rendering a duplicate-looking line. */
+  private readonly retainedWarningDisplays = new Set<string>();
+  /**
+   * Per-source holds on fixed-size fingerprints for messages dropped once the
+   * retention cap was reached. The sets make replay idempotent and let a failed
+   * source retire only its own hold without retaining unbounded warning text.
+   */
+  private readonly overflowMessagesByUrl = new Map<string, Set<string>>();
+  /**
+   * Cross-source reference count for each overflow fingerprint. This mirrors the
+   * retained-message dedup contract: the same warning reported by two sources
+   * is one observable warning, but either source can fail without erasing the
+   * other's hold.
+   */
+  private readonly overflowMessageRefCounts = new Map<string, number>();
+  /** Bounded source identity index. Keys are fixed-size URL fingerprints. */
+  private readonly trackedWarningSources = new Set<string>();
+  /** Per-tracked-source overflow occurrences after the fingerprint index
+   * saturates. Scalars preserve source cleanup without retaining identities. */
+  private readonly saturatedOverflowByUrl = new Map<string, number>();
+  /** Exact distinct overflow count until a safety index saturates, then a
+   * conservative report count. Surfaced through `warningsOverflow`. */
   private overflowWarnings = 0;
   /** True while a coalesced `onRemoteDocumentChanged` emission is scheduled
    *  for the current snapshot burst (see the event's doc). Commands applied
@@ -310,6 +427,14 @@ export class SessionController {
   constructor(deps: SessionControllerDeps) {
     this.deps = deps;
     const decodePool = new DecodePool();
+    decodePool.onFailure = (error, terminal) => {
+      if (this.destroyed || !terminal) return;
+      this.surfaceError(
+        "data",
+        `Data decoding stopped after worker recovery was exhausted: ${error.message}. ` +
+          "Reload the viewer to retry.",
+      );
+    };
     this.contentSource = new ProxiedContentSource(
       (json) => this.session?.bridge.send(json),
     );
@@ -385,10 +510,14 @@ export class SessionController {
     this.stopObservingSceneCalls();
     this.session.destroy();
     this.deps.datasets.clear();
-    this.lastOpenSendTime = null;
+    this.openRequests.clear();
     this.warningsByUrl.clear();
     this.retainedMessages.clear();
-    this.overflowByUrl.clear();
+    this.retainedWarningDisplays.clear();
+    this.overflowMessagesByUrl.clear();
+    this.overflowMessageRefCounts.clear();
+    this.trackedWarningSources.clear();
+    this.saturatedOverflowByUrl.clear();
     this.overflowWarnings = 0;
   }
 
@@ -400,8 +529,8 @@ export class SessionController {
     this.session.bridge.sendCommand(json);
   }
 
-  sendCursor(position: [number, number] | null): void {
-    this.session.bridge.sendCursor(position);
+  sendCursor(position: [number, number] | null, datasetId: string | null): void {
+    this.session.bridge.sendCursor(position, datasetId);
   }
 
   emitPresence(): void {
@@ -417,23 +546,89 @@ export class SessionController {
   }
 
   openRemoteDataset(url: string): void {
-    this.lastOpenSendTime = performance.now();
-    bridgeLog("open_remote_dataset.loading_start", { url });
-    // A new open attempt supersedes a previous open's failure. Other error
-    // kinds keep their own retirement signals (delivery recovery, apply
-    // recovery, never for fatal) — an unrelated open must not mask them.
-    this.clearSurfacedError(["open"]);
+    // A deliberate new attempt for the same source supersedes that source's
+    // old failures, but never retires failures belonging to sibling URLs.
+    this.removeFailedOpenRequestsForUrl(url);
+    this.refreshVisibleOpenFailure();
+    this.beginOpenRequest(url);
+  }
+
+  private beginOpenRequest(url: string): void {
+    // The final slot is reserved for an actionable local admission failure.
+    // Replace an older capacity notice with the user's latest attempt; it was
+    // never sent, so this does not discard an in-flight server request.
+    for (const requestId of this.openRequests.keys()) {
+      if (requestId.startsWith(LOCAL_OPEN_CAPACITY_REQUEST_PREFIX)) {
+        this.openRequests.delete(requestId);
+      }
+    }
+    // Preserve every ACCEPTED request until its own terminal signal. Refusing
+    // admission at the hard cap is safer than evicting an unresolved request,
+    // which would make loading and retry state lie about work still in flight.
+    if (this.openRequests.size >= MAX_TRACKED_OPEN_REQUESTS - 1) {
+      const requestId =
+        `${LOCAL_OPEN_CAPACITY_REQUEST_PREFIX}${++this.localOpenCapacityFailureId}`;
+      const error =
+        `Too many dataset opens are waiting (limit ${MAX_TRACKED_OPEN_REQUESTS - 1}). ` +
+        "Retry after another open finishes, or dismiss an earlier failure.";
+      this.openRequests.set(requestId, {
+        status: "failed",
+        requestId,
+        url,
+        error,
+        failureOrder: ++this.openActivityOrder,
+      });
+      bridgeLog("open_remote_dataset.tracking_limit", {
+        requestId,
+        url,
+        limit: MAX_TRACKED_OPEN_REQUESTS - 1,
+      });
+      this.surfaceError("open", error);
+      this.deps.getSavedViewHooks()?.onOpenDatasetFailed(url, error);
+      return;
+    }
+
+    const sentAt = performance.now();
+    // Bridge's admission contract is nullable: an id means the OPEN socket
+    // accepted the frame; null means it was not transmitted. Never create a
+    // pending request for a dropped send, or reconnect races leave a permanent
+    // spinner with no callback capable of retiring it.
+    const requestId: string | null = this.session.bridge.sendOpenRemoteDataset(url);
+    if (requestId === null) {
+      const failureId =
+        `${LOCAL_OPEN_TRANSPORT_REQUEST_PREFIX}${++this.localOpenCapacityFailureId}`;
+      const error =
+        "The dataset open was not sent because the workspace connection is not ready. " +
+        "Retry after the connection is restored.";
+      this.openRequests.set(failureId, {
+        status: "failed",
+        requestId: failureId,
+        url,
+        error,
+        failureOrder: ++this.openActivityOrder,
+      });
+      bridgeLog("open_remote_dataset.transport_not_ready", { url });
+      this.surfaceError("open", error);
+      this.deps.getSavedViewHooks()?.onOpenDatasetFailed(url, error);
+      return;
+    }
+    const progressOrder = ++this.openActivityOrder;
+    this.openRequests.set(requestId, {
+      status: "pending",
+      requestId,
+      url,
+      sentAt,
+      progress: "dataset open request sent",
+      progressOrder,
+    });
+    bridgeLog("open_remote_dataset.loading_start", { requestId, url });
     // Collected warnings are NOT reset here: several opens can be issued in one
     // synchronous pass (multi-seed workspace creation, source-url view
     // restores), and resetting per open would erase every earlier open's
     // warnings before its progress frames arrived. Each source's warnings are
     // retired by their own signal instead — that open failing, or a dismiss /
     // connection loss.
-    this.updateRemoteActivity({
-      loading: true,
-      progress: "dataset open request sent",
-    });
-    this.session.bridge.sendOpenRemoteDataset(url);
+    this.publishOpenRequestActivity();
   }
 
   /** Clear the durable import warnings (the user dismissed the surface). Emits
@@ -441,6 +636,30 @@ export class SessionController {
    *  A no-op when nothing is collected. */
   dismissOpenWarnings(): void {
     this.clearAllOpenWarnings();
+  }
+
+  /** Retry the exact source URL owned by the visible dataset-open failure.
+   *  Reading/removal stay atomic inside the controller; only that request is
+   *  retired before the replacement is sent. */
+  retryFailedOpen(): void {
+    if (this.surfacedErrorKind !== "open") return;
+    const failed = this.latestFailedOpenRequest();
+    if (!failed) return;
+    this.openRequests.delete(failed.requestId);
+    this.refreshVisibleOpenFailure();
+    // A retry retires ONLY the visible failed request. Unlike a fresh manual
+    // open, it must not erase an older same-URL sibling that is now revealed.
+    this.beginOpenRequest(failed.url);
+  }
+
+  /** Dismiss only a dataset-open failure. Other error kinds have independent
+   *  recovery signals and must never be hidden by this UI action. */
+  dismissFailedOpen(): void {
+    if (this.surfacedErrorKind !== "open") return;
+    const failed = this.latestFailedOpenRequest();
+    if (!failed) return;
+    this.openRequests.delete(failed.requestId);
+    this.refreshVisibleOpenFailure();
   }
 
   breakFollow(): void {
@@ -513,6 +732,95 @@ export class SessionController {
     this.deps.events.onRemoteDatasetActivity(this.remoteActivity);
   }
 
+  /** Publish the bounded request map's aggregate spinner/progress projection.
+   * A sibling terminal event cannot clear loading while another request is
+   * pending, and progress is deterministic even when callbacks interleave. */
+  private publishOpenRequestActivity(): void {
+    let latest: PendingOpenRequest | null = null;
+    for (const request of this.openRequests.values()) {
+      if (request.status !== "pending" || request.progress === null) continue;
+      if (latest === null || request.progressOrder > latest.progressOrder) {
+        latest = request;
+      }
+    }
+    const loading = Array.from(this.openRequests.values()).some(
+      (request) => request.status === "pending",
+    );
+    const progress = latest?.progress ?? null;
+    if (
+      this.remoteActivity.loading === loading &&
+      this.remoteActivity.progress === progress
+    ) return;
+    this.updateRemoteActivity({ loading, progress });
+  }
+
+  private latestFailedOpenRequest(): FailedOpenRequest | null {
+    let latest: FailedOpenRequest | null = null;
+    for (const request of this.openRequests.values()) {
+      if (request.status !== "failed") continue;
+      if (latest === null || request.failureOrder > latest.failureOrder) {
+        latest = request;
+      }
+    }
+    return latest;
+  }
+
+  private removeFailedOpenRequestsForUrl(url: string): void {
+    for (const [requestId, request] of this.openRequests) {
+      if (request.status === "failed" && request.url === url) {
+        this.openRequests.delete(requestId);
+      }
+    }
+  }
+
+  /** Keep the single banner aligned with the newest unresolved open failure
+   * after retry/dismiss/manual supersession. A different active error kind is
+   * left alone; if it later recovers, [`clearSurfacedError`] reveals the newest
+   * retained open failure rather than losing it. */
+  private refreshVisibleOpenFailure(): void {
+    if (this.surfacedErrorKind !== "open") return;
+    const latest = this.latestFailedOpenRequest();
+    if (latest) {
+      this.surfaceError("open", latest.error);
+    } else {
+      this.clearSurfacedError(["open"]);
+    }
+  }
+
+  private ensurePendingOpenRequest(
+    requestId: string,
+    url: string,
+  ): PendingOpenRequest | null {
+    const existing = this.openRequests.get(requestId);
+    if (existing) return existing.status === "pending" ? existing : null;
+    // Progress frames normally correlate to an outbound request registered in
+    // `beginOpenRequest`. Tolerate a reconnect/legacy caller that reaches the
+    // handler first, but subject it to the same hard cardinality bound.
+    if (this.openRequests.size >= MAX_TRACKED_OPEN_REQUESTS - 1) return null;
+    const pending: PendingOpenRequest = {
+      status: "pending",
+      requestId,
+      url,
+      sentAt: null,
+      progress: null,
+      progressOrder: ++this.openActivityOrder,
+    };
+    this.openRequests.set(requestId, pending);
+    return pending;
+  }
+
+  private roundTripMs(request: PendingOpenRequest | undefined): number | null {
+    if (!request || request.sentAt === null) return null;
+    return +(performance.now() - request.sentAt).toFixed(1);
+  }
+
+  private resetOpenRequests(): void {
+    if (this.openRequests.size === 0) return;
+    this.openRequests.clear();
+    this.publishOpenRequestActivity();
+    this.refreshVisibleOpenFailure();
+  }
+
   /** Record one import warning under the source url that produced it,
    *  preserving every warning already collected (for this source and for
    *  others). An empty/whitespace-only message is ignored (no blank bullet),
@@ -522,50 +830,126 @@ export class SessionController {
    *
    *  Retention is capped at [`MAX_OPEN_WARNINGS`] distinct messages: once the
    *  cap is reached, a further NEW distinct message is not stored but is
-   *  counted into [`overflowByUrl`], so a flood (one distinct notice per
-   *  malformed member of a large collection) leaves the store bounded and the
-   *  observable list capped while the overflow count preserves the fact that
-   *  more warnings occurred. A message already shown (via this or another
-   *  source) is never counted as overflow — it collapses as before. Both the
-   *  store growth and the cap decision are O(1) here, so collecting N warnings
-   *  is O(N), never O(N²). Republishes only when something observable changed. */
-  private collectOpenWarning(url: string, message: string): void {
-    if (message.trim() === "") return;
-    const existing = this.warningsByUrl.get(url);
-    if (existing?.includes(message)) return;
-    if (this.retainedMessages.has(message)) {
+   *  counted into [`overflowMessagesByUrl`]. Both source cardinality and exact
+   *  overflow identities are capped too. Beyond either safety cap, each report
+   *  increments a scalar occurrence count; this deliberately relaxes exact
+   *  deduplication rather than allowing hostile metadata to grow memory without
+   *  bound. Republishes only when something observable changed. */
+  private collectOpenWarning(requestId: string, message: string): void {
+    const boundedMessage = boundedWarningMessage(message);
+    if (boundedMessage.trim() === "") return;
+    const sourceKey = boundedWarningIdentity(requestId);
+    if (!this.trackedWarningSources.has(sourceKey)) {
+      if (
+        this.trackedWarningSources.size >=
+        MAX_TRACKED_OPEN_WARNING_SOURCES
+      ) {
+        // The source itself cannot be retained safely. Preserve a conservative
+        // signal, unattributed until the next wholesale dismiss/session reset.
+        this.overflowWarnings = Math.min(
+          Number.MAX_SAFE_INTEGER,
+          this.overflowWarnings + 1,
+        );
+        this.publishWarnings();
+        return;
+      }
+      this.trackedWarningSources.add(sourceKey);
+    }
+
+    const existing = this.warningsByUrl.get(sourceKey);
+    const fingerprint = boundedWarningIdentity(message);
+    if (existing?.some((warning) => warning.identity === fingerprint)) return;
+    let sourceOverflow = this.overflowMessagesByUrl.get(sourceKey);
+    if (sourceOverflow?.has(fingerprint)) return;
+    if (this.retainedMessages.has(fingerprint)) {
       // Already displayed via another source. Keep a per-source copy so a
       // failed open retires only its own hold on the shared notice, but do not
       // grow the distinct set or the overflow count.
-      if (existing) existing.push(message);
-      else this.warningsByUrl.set(url, [message]);
+      const retained = { identity: fingerprint, display: boundedMessage };
+      if (existing) existing.push(retained);
+      else this.warningsByUrl.set(sourceKey, [retained]);
       return;
     }
-    if (this.retainedMessages.size >= MAX_OPEN_WARNINGS) {
+    const overflowRefs = this.overflowMessageRefCounts.get(fingerprint);
+    if (overflowRefs !== undefined) {
+      // The text is already counted as overflow via another source. Record
+      // this source's hold for correct failure cleanup, without inflating the
+      // user-visible distinct-warning total.
+      sourceOverflow ??= new Set();
+      sourceOverflow.add(fingerprint);
+      this.overflowMessagesByUrl.set(sourceKey, sourceOverflow);
+      this.overflowMessageRefCounts.set(fingerprint, overflowRefs + 1);
+      return;
+    }
+    if (
+      this.retainedMessages.size >= MAX_OPEN_WARNINGS ||
+      this.retainedWarningDisplays.has(boundedMessage)
+    ) {
+      if (
+        this.overflowMessageRefCounts.size >=
+        MAX_OPEN_WARNING_FINGERPRINTS
+      ) {
+        // Exact unbounded-stream dedup and a hard memory bound are mutually
+        // exclusive. Once the bounded identity index is full, count reports
+        // per tracked source without retaining another fingerprint.
+        const previous = this.saturatedOverflowByUrl.get(sourceKey) ?? 0;
+        const next = Math.min(Number.MAX_SAFE_INTEGER, previous + 1);
+        this.saturatedOverflowByUrl.set(sourceKey, next);
+        this.overflowWarnings = Math.min(
+          Number.MAX_SAFE_INTEGER,
+          this.overflowWarnings + (next > previous ? 1 : 0),
+        );
+        this.publishWarnings();
+        return;
+      }
       // The display is full of distinct notices; retain the FACT, not the text.
-      this.overflowByUrl.set(url, (this.overflowByUrl.get(url) ?? 0) + 1);
+      sourceOverflow ??= new Set();
+      sourceOverflow.add(fingerprint);
+      this.overflowMessagesByUrl.set(sourceKey, sourceOverflow);
+      this.overflowMessageRefCounts.set(fingerprint, 1);
       this.overflowWarnings += 1;
       this.publishWarnings();
       return;
     }
-    if (existing) existing.push(message);
-    else this.warningsByUrl.set(url, [message]);
-    this.retainedMessages.add(message);
+    const retained = { identity: fingerprint, display: boundedMessage };
+    if (existing) existing.push(retained);
+    else this.warningsByUrl.set(sourceKey, [retained]);
+    this.retainedMessages.add(fingerprint);
+    this.retainedWarningDisplays.add(boundedMessage);
     this.publishWarnings();
   }
 
-  /** Drop every warning recorded for `url` — used when that specific open
+  /** Drop every warning recorded for `requestId` — used when that specific open
    *  fails, so its own notice does not sit beside its error, WITHOUT touching
    *  warnings collected for other sources opened in the same batch. Retires the
    *  source's overflow count too. Republishes only when something was removed. */
-  private clearOpenWarningsForUrl(url: string): void {
-    const removedWarnings = this.warningsByUrl.delete(url);
-    const removedOverflow = this.overflowByUrl.get(url);
-    if (removedOverflow !== undefined) {
-      this.overflowWarnings -= removedOverflow;
-      this.overflowByUrl.delete(url);
+  private clearOpenWarningsForRequest(requestId: string): void {
+    const sourceKey = boundedWarningIdentity(requestId);
+    const removedWarnings = this.warningsByUrl.delete(sourceKey);
+    const removedOverflow = this.overflowMessagesByUrl.get(sourceKey);
+    if (removedOverflow) {
+      for (const fingerprint of removedOverflow) {
+        const refs = this.overflowMessageRefCounts.get(fingerprint);
+        if (refs === undefined) continue;
+        if (refs <= 1) {
+          this.overflowMessageRefCounts.delete(fingerprint);
+          this.overflowWarnings -= 1;
+        } else {
+          this.overflowMessageRefCounts.set(fingerprint, refs - 1);
+        }
+      }
+      this.overflowMessagesByUrl.delete(sourceKey);
     }
-    if (!removedWarnings && removedOverflow === undefined) return;
+    const removedSaturated = this.saturatedOverflowByUrl.get(sourceKey) ?? 0;
+    if (removedSaturated > 0) {
+      this.saturatedOverflowByUrl.delete(sourceKey);
+      this.overflowWarnings = Math.max(
+        0,
+        this.overflowWarnings - removedSaturated,
+      );
+    }
+    const removedSource = this.trackedWarningSources.delete(sourceKey);
+    if (!removedWarnings && !removedOverflow && !removedSaturated && !removedSource) return;
     if (removedWarnings) this.rebuildRetainedMessages();
     this.publishWarnings();
   }
@@ -577,37 +961,45 @@ export class SessionController {
     if (this.warningsByUrl.size === 0 && this.overflowWarnings === 0) return;
     this.warningsByUrl.clear();
     this.retainedMessages.clear();
-    this.overflowByUrl.clear();
+    this.retainedWarningDisplays.clear();
+    this.overflowMessagesByUrl.clear();
+    this.overflowMessageRefCounts.clear();
+    this.trackedWarningSources.clear();
+    this.saturatedOverflowByUrl.clear();
     this.overflowWarnings = 0;
     this.publishWarnings();
   }
 
-  /** Recompute [`retainedMessages`] as the distinct messages currently in
+  /** Recompute [`retainedMessages`] as the distinct identities currently in
    *  [`warningsByUrl`]. Called after a per-source removal, whose dropped
    *  messages may or may not still be held by another source. Bounded work:
    *  the store never holds more than [`MAX_OPEN_WARNINGS`] distinct messages. */
   private rebuildRetainedMessages(): void {
     this.retainedMessages.clear();
-    for (const messages of this.warningsByUrl.values()) {
-      for (const message of messages) this.retainedMessages.add(message);
+    this.retainedWarningDisplays.clear();
+    for (const warnings of this.warningsByUrl.values()) {
+      for (const warning of warnings) {
+        this.retainedMessages.add(warning.identity);
+        this.retainedWarningDisplays.add(warning.display);
+      }
     }
   }
 
   /** Rebuild [`RemoteDatasetActivity.warnings`] from [`warningsByUrl`]: every
    *  source's messages in insertion order, deduplicated across sources so a
    *  notice reported by two opens shows once. The store is bounded to
-   *  [`MAX_OPEN_WARNINGS`] distinct messages, so this projection is bounded
+   *  [`MAX_OPEN_WARNINGS`] distinct display lines, so this projection is bounded
    *  work per call rather than growing with the number of warnings seen. Emits
    *  only when the flattened list OR the overflow count actually changed, so a
    *  duplicate collect or a no-op clear stays silent. */
   private publishWarnings(): void {
     const flattened: string[] = [];
     const seen = new Set<string>();
-    for (const messages of this.warningsByUrl.values()) {
-      for (const message of messages) {
-        if (seen.has(message)) continue;
-        seen.add(message);
-        flattened.push(message);
+    for (const warnings of this.warningsByUrl.values()) {
+      for (const warning of warnings) {
+        if (seen.has(warning.identity)) continue;
+        seen.add(warning.identity);
+        flattened.push(warning.display);
       }
     }
     const current = this.remoteActivity.warnings;
@@ -636,7 +1028,6 @@ export class SessionController {
   private surfaceError(
     kind: SurfacedErrorKind,
     message: string,
-    extra?: Partial<Omit<RemoteDatasetActivity, "error">>,
   ): void {
     if (
       this.surfacedErrorKind !== null &&
@@ -644,9 +1035,12 @@ export class SessionController {
     ) {
       return;
     }
-    if (this.surfacedErrorKind === kind && this.remoteActivity.error === message) return;
+    if (
+      this.surfacedErrorKind === kind &&
+      this.remoteActivity.error === message
+    ) return;
     this.surfacedErrorKind = kind;
-    this.updateRemoteActivity({ ...extra, error: message });
+    this.updateRemoteActivity({ error: message, errorKind: kind });
   }
 
   /** Retire the visible error if (and only if) its kind is one of `kinds`.
@@ -656,8 +1050,14 @@ export class SessionController {
   private clearSurfacedError(kinds: readonly SurfacedErrorKind[]): void {
     if (this.surfacedErrorKind === null) return;
     if (!kinds.includes(this.surfacedErrorKind)) return;
+    const fallback = this.latestFailedOpenRequest();
+    if (fallback) {
+      this.surfacedErrorKind = "open";
+      this.updateRemoteActivity({ error: fallback.error, errorKind: "open" });
+      return;
+    }
     this.surfacedErrorKind = null;
-    this.updateRemoteActivity({ error: null });
+    this.updateRemoteActivity({ error: null, errorKind: null });
   }
 
   /** Any successful scene mutation (local, remote, or snapshot) disproves
@@ -703,7 +1103,6 @@ export class SessionController {
       cls === "fatal" ? "engine-fatal" : "engine",
       `Viewer engine failure: scene updates are no longer being applied ` +
         `(${message}). Reload the page to recover.`,
-      { loading: false, progress: null },
     );
   }
 
@@ -747,9 +1146,6 @@ export class SessionController {
   private ensureDatasetRegistered(reg: {
     manifest: DatasetManifest;
     fetch: FetchSource;
-    /** Initial asset catalog for the JS-side mirror (WASM already holds it
-     *  via `load_document` / `apply_command`). */
-    catalog: WireAssetCatalog | null | undefined;
     /**
      * How to activate a layout after registering the browser-authored
      * derived builders (registration itself is idempotent via lucida-core's
@@ -766,15 +1162,12 @@ export class SessionController {
   }): void {
     const manifest = reg.manifest;
     const datasetId = manifest.dataset_id;
+    validateDatasetChunkAdmission(manifest, reg.fetch);
     if (!this.deps.datasets.has(datasetId)) {
       this.setupFetchPipeline(manifest, reg.fetch);
     } else {
       bridgeLog("setup_fetch_pipeline.skipped_existing", { datasetId });
     }
-    // Mirror the initial catalog into the JS-side AssetCatalog so Planning's
-    // snapshot view stays consistent with WASM.
-    this.session.ensureAssetCatalog()?.applyInitial(datasetId, reg.catalog ?? { entries: [] });
-
     const registry = this.session.ensureLayoutRegistry();
     if (!registry) return;
     const sendCmd = (json: string) => this.session.bridge.sendCommand(json);
@@ -793,7 +1186,6 @@ export class SessionController {
 
   private removeDataset(datasetId: string): void {
     this.deps.removeDatasetLocal(datasetId);
-    this.session.ensureAssetCatalog()?.removeDataset(datasetId);
     this.session.generatedAvailability.removeDataset(datasetId);
     this.session.ensureLayoutRegistry()?.removeDataset(datasetId);
     // Warnings are collected by source url, not by workspace dataset id, and
@@ -810,7 +1202,7 @@ export class SessionController {
     const datasetId = manifest.dataset_id;
     const firstImage = manifest.images[0];
     const channelCount = firstImage?.multiscale.levels[0]?.shape[Axis.C] ?? 1; // [T, C, Z, Y, X]
-    const fetchVariant = Object.keys(fetchDesc as object)[0] ?? "unknown";
+    const fetchVariant = "Proxied";
 
     // Shape summary — mirrors the WASM-side `analyze_manifest_shape`
     // counts so a JS-only debugger can spot Collection vs. Single anomalies
@@ -843,27 +1235,9 @@ export class SessionController {
     const t0 = performance.now();
 
     let registeredImages = 0;
-    if ("Proxied" in fetchDesc) {
-      for (const spec of fetchDesc.Proxied.images) {
-        this.contentSource.registerImage(spec.image_id, spec.wire_format);
-        registeredImages++;
-      }
-      // Labels carry their OWN image (distinct id + integer dtype) and are
-      // kept out of `images`, so register them separately so their chunks
-      // are fetchable when a label overlay requests them. The server serves
-      // a label image by its own id; wire format is derived from the
-      // label's declared dtype (e.g. Uint32).
-      for (const label of manifest.labels ?? []) {
-        this.contentSource.registerImage(label.image.image_id, {
-          Raw: { data_type: label.image.multiscale.data_type },
-        });
-        registeredImages++;
-      }
-    } else {
-      bridgeLog("setup_fetch_pipeline.fetch_variant_unsupported", {
-        datasetId,
-        fetchVariant,
-      });
+    for (const spec of fetchDesc.Proxied.images) {
+      this.contentSource.registerImage(spec.image_id, spec.wire_format);
+      registeredImages++;
     }
     const t1 = performance.now();
 
@@ -951,7 +1325,14 @@ export class SessionController {
     delta: WireGeneratedAvailabilityDelta,
   ): void {
     this.session.generatedAvailability.applyDelta(datasetId, delta);
-    this.refreshRuntimeGeneratedManifest(datasetId);
+    // Per-chunk readiness lives in the generated-availability catalog and the
+    // content source. It does not alter dataset geometry. Rebuilding/cloning
+    // the full manifest, notifying React, and invalidating renderer residency
+    // for every completion made N generated chunks cost O(N * manifest size).
+    // Only a level-metadata delta can change the runtime manifest.
+    if ((delta.levels?.length ?? 0) > 0) {
+      this.refreshRuntimeGeneratedManifest(datasetId);
+    }
   }
 
   private refreshRuntimeGeneratedManifest(datasetId: string): void {
@@ -1017,7 +1398,6 @@ export class SessionController {
               this.ensureDatasetRegistered({
                 manifest,
                 fetch: fetchDesc,
-                catalog: doc.asset_catalogs?.[dsId] ?? { entries: [] },
                 layoutActivation: {
                   kind: "local",
                   activeId:
@@ -1116,7 +1496,16 @@ export class SessionController {
           });
         }
       },
-      onAck: () => {},
+      onAck: () => {
+        this.clearSurfacedError(["command"]);
+      },
+      onNack: ({ code, message, retryable }) => {
+        bridgeLog("command.nack", { code, message, retryable });
+        this.surfaceError(
+          "command",
+          `Change was not saved (${code}): ${message}${retryable ? " Try again." : ""}`,
+        );
+      },
       onBinary: (key, data) => {
         this.contentSource.handleBinary(key, data);
       },
@@ -1155,11 +1544,15 @@ export class SessionController {
           }
         }
       },
-      onCursorUpdate: (clientId, position) => {
+      onCursorUpdate: (clientId, position, datasetId) => {
         const existing = this.peers.get(clientId);
         if (!existing) return;
         const next = new Map(this.peers);
-        next.set(clientId, { ...existing, cursor: position });
+        next.set(clientId, {
+          ...existing,
+          cursor: position,
+          cursor_dataset_id: position === null ? null : datasetId,
+        });
         this.setPeersMap(next);
       },
       onFollowChanged: (clientId, target) => {
@@ -1219,17 +1612,46 @@ export class SessionController {
           }
         }
       },
-      onOpenDatasetFailed: (url, error) => {
-        bridgeLog("open_remote_dataset.failed", { url, error });
-        // Spinner/progress always stop; the error surfaces through the ranked
-        // slot (a fatal engine banner outranks an open failure). Only THIS
-        // source's warnings clear — a failed open must not leave its own
+      onOpenDatasetFailed: (requestId, url, error, diagnostic) => {
+        const existing = this.openRequests.get(requestId);
+        const pending = existing?.status === "pending" ? existing : undefined;
+        const roundTripMs = this.roundTripMs(pending);
+        bridgeLog("open_remote_dataset.failed", {
+          requestId,
+          url,
+          error,
+          roundTripMs,
+          category: diagnostic?.category ?? null,
+          code: diagnostic?.code ?? null,
+          retryable: diagnostic?.retryable ?? null,
+        });
+        // This request stops contributing to the aggregate spinner/progress;
+        // pending siblings keep it active. The error surfaces through the
+        // ranked slot (a fatal engine banner outranks an open failure). Only
+        // THIS request's warnings clear — a failed open must not leave its own
         // "opened with a warning" notice beside its error, but a sibling open
         // from the same batch keeps its warnings.
-        this.clearOpenWarningsForUrl(url);
-        this.updateRemoteActivity({ loading: false, progress: null });
+        this.clearOpenWarningsForRequest(requestId);
+        if (existing?.status === "failed") return;
+        if (
+          !existing &&
+          this.openRequests.size >= MAX_TRACKED_OPEN_REQUESTS - 1
+        ) {
+          return;
+        }
+        const failed: FailedOpenRequest = {
+          status: "failed",
+          requestId,
+          url: pending?.url ?? url,
+          error,
+          failureOrder: ++this.openActivityOrder,
+        };
+        this.openRequests.set(requestId, failed);
+        this.publishOpenRequestActivity();
+        // A newly arrived failure competes for the ranked banner, but sibling
+        // success/progress never calls the error retirement path.
         this.surfaceError("open", error);
-        this.deps.getSavedViewHooks()?.onOpenDatasetFailed(url, error);
+        this.deps.getSavedViewHooks()?.onOpenDatasetFailed(failed.url, error);
       },
       onDatasetOpenProgress: (requestId: string, url: string, diagnostic: DatasetOpenProgressDiagnostic) => {
         bridgeLog("open_remote_dataset.progress_state", {
@@ -1239,37 +1661,61 @@ export class SessionController {
           message: diagnostic.message,
           warning: diagnostic.warning === true,
         });
+        const existing = this.openRequests.get(requestId);
+        // A terminal failure wins over any delayed progress frame for the same
+        // request. In particular, it must not be resurrected as pending.
+        if (existing?.status === "failed") return;
         if (diagnostic.warning === true) {
           // A non-fatal import concern (e.g. the sampled-label-discovery
           // notice) must outlive the transient progress line, so record it in
-          // the durable list keyed by its source url. EVERY warning frame is
+          // the durable list keyed by its request id. EVERY warning frame is
           // collected regardless of which open it belongs to — datasets opened
           // together in one pass must each surface their warnings, and a frame
           // arriving after a later open began must not be dropped.
-          this.collectOpenWarning(url, diagnostic.message);
+          this.collectOpenWarning(requestId, diagnostic.message);
         }
         if (diagnostic.stage === "complete") {
-          // Clear the transient spinner/progress only; the durable warnings
-          // survive completion — that is the whole point of collecting them.
-          this.updateRemoteActivity({ loading: false, progress: null });
+          // Complete is request-correlated and immediately precedes the
+          // success envelope on the ordered socket. Retire only THIS pending
+          // request; durable warnings survive completion.
+          const pending = existing?.status === "pending" ? existing : undefined;
+          if (pending) this.openRequests.delete(requestId);
+          bridgeLog("open_remote_dataset.completed", {
+            requestId,
+            url: pending?.url ?? url,
+            roundTripMs: this.roundTripMs(pending),
+          });
+          this.publishOpenRequestActivity();
           return;
         }
-        // Progress of a fresh open retires only a previous open's failure.
-        // Engine/data banners have their own recovery signals — and a
-        // fatal banner in particular must never be wiped by an unrelated
-        // open making progress.
-        this.clearSurfacedError(["open"]);
-        this.updateRemoteActivity({
-          loading: true,
-          progress: diagnostic.message,
-        });
+        const pending = this.ensurePendingOpenRequest(requestId, url);
+        if (!pending) return;
+        pending.progress = diagnostic.message;
+        pending.progressOrder = ++this.openActivityOrder;
+        this.publishOpenRequestActivity();
       },
-      onAssetCatalogUpdate: (datasetId, deltaJson) => {
-        try {
-          const delta = JSON.parse(deltaJson);
-          this.session.ensureAssetCatalog()?.applyDelta(datasetId, delta);
-        } catch (e) {
-          console.warn("[Bridge] bad asset_catalog_update:", e);
+      onOpenDatasetSucceeded: (requestId, url, seq, summary) => {
+        // Bridge has already normalized this requester's compatibility
+        // `opened` payload into the sequenced DatasetOpened handler above.
+        // This callback owns only request completion/status, so registration
+        // remains a single path and the large payload is never applied twice.
+        const existing = this.openRequests.get(requestId);
+        const pending = existing?.status === "pending" ? existing : undefined;
+        bridgeLog("open_remote_dataset.succeeded", {
+          requestId,
+          url,
+          seq,
+          roundTripMs: this.roundTripMs(pending),
+          datasetId: summary.workspace_dataset_id,
+          imageCount: summary.image_count,
+          entityCount: summary.entity_count,
+        });
+        // First terminal callback wins. A stale success must not erase a
+        // failure already recorded for this request, and success for one open
+        // never touches any sibling failure.
+        if (pending) {
+          this.openRequests.delete(requestId);
+          this.publishOpenRequestActivity();
         }
       },
       onGeneratedAvailabilityUpdate: (datasetId, deltaJson) => {
@@ -1280,11 +1726,18 @@ export class SessionController {
           console.warn("[Bridge] bad generated_availability_update:", e);
         }
       },
-      onGeneratedChunkStatus: (datasetId, imageId, key, status, message) => {
-        this.contentSource.handleChunkStatus(datasetId, imageId, key, status, message);
+      onGeneratedChunkStatus: (datasetId, imageId, key, status, failure, message) => {
+        this.contentSource.handleChunkStatus(datasetId, imageId, key, status, failure, message);
       },
-      onSourceChunkStatus: (datasetId, imageId, key, status, message) => {
-        this.contentSource.handleSourceChunkStatus(datasetId, imageId, key, status, message);
+      onSourceChunkStatus: (datasetId, imageId, key, status, failure, message) => {
+        this.contentSource.handleSourceChunkStatus(
+          datasetId,
+          imageId,
+          key,
+          status,
+          failure,
+          message,
+        );
       },
       onConnected: () => {
         // Chunk failures accumulated against a dropped transport (or its
@@ -1298,7 +1751,7 @@ export class SessionController {
         // The workspace is gone: drop every collected warning with the spinner
         // so no notice about the archived workspace's opens lingers.
         this.clearAllOpenWarnings();
-        this.updateRemoteActivity({ loading: false, progress: null });
+        this.resetOpenRequests();
         this.contentSource.rejectAll();
         this.deps.events.onWorkspaceArchived();
       },
@@ -1311,43 +1764,36 @@ export class SessionController {
         this.deps.events.onConnectedChanged(false);
         this.deps.events.onSessionReadyChanged(false);
         this.clearAllOpenWarnings();
-        this.updateRemoteActivity({ loading: false, progress: null });
+        this.resetOpenRequests();
         this.contentSource.rejectAll();
       },
     };
   }
 
-  /** The `dataset_opened` broadcast arm: registration via the shared path,
-   *  then the open-reaction policies (loading clear, auto-fit, applier
-   *  notification) that only a LIVE open triggers — a snapshot registration
-   *  deliberately skips these (a join/repair is not a user-initiated open). */
+  /** The `dataset_opened` document arm: registration via the shared path,
+   *  then the auto-fit/applier policies that only a LIVE open triggers — a
+   *  snapshot registration deliberately skips these (a join/repair is not a
+   *  user-initiated open). Request completion is intentionally absent here:
+   *  the requester and peers share this path, while only requester callbacks
+   *  carry the request id needed to retire pending state. */
   private handleDatasetOpened(
     cmd: {
       type: string;
       manifest: DatasetManifestWire;
       fetch: FetchSourceWire;
-      catalog?: WireAssetCatalog | null;
       opener_client_id?: number | null;
     },
     scene: WasmScene,
   ): void {
-    const fetchVariant = typeof cmd.fetch === "string"
-      ? cmd.fetch
-      : Object.keys(cmd.fetch ?? {})[0] ?? "unknown";
+    const fetchVariant = "Proxied";
     const kind = typeof cmd.manifest?.kind === "string"
       ? cmd.manifest.kind
       : Object.keys(cmd.manifest?.kind ?? {})[0] ?? "unknown";
-    const sendTime = this.lastOpenSendTime;
-    const roundTripMs = sendTime !== null
-      ? +(performance.now() - sendTime).toFixed(1)
-      : null;
-    this.lastOpenSendTime = null;
     bridgeLog("open_remote_dataset.received", {
       datasetId: cmd.manifest?.dataset_id,
       kind,
       fetchVariant,
       nImages: cmd.manifest?.images?.length ?? 0,
-      roundTripMs,
     });
     this.session.setScene(scene);
     // Resolve the wire encoding (shared multiscale/wire-format tables) up
@@ -1358,15 +1804,12 @@ export class SessionController {
     this.ensureDatasetRegistered({
       manifest,
       fetch,
-      catalog: cmd.catalog ?? { entries: [] },
       layoutActivation: { kind: "broadcast" },
     });
 
-    this.updateRemoteActivity({ loading: false, progress: null });
-    bridgeLog("open_remote_dataset.loading_clear", {
-      datasetId,
-      reason: "success",
-    });
+    // DatasetOpened is shared document traffic: peers receive it without
+    // owning the request, and the requester receives it before the correlated
+    // success callback. It must never mutate local pending/failure state.
     this.deps.events.onSceneChanged(scene);
     // Auto-fit the camera to the freshly-opened dataset so it lands
     // centered and fully in view (2D + 3D). `dataset_opened` is a
@@ -1375,8 +1818,8 @@ export class SessionController {
     // `opener_client_id` and we fit only when it matches our own id.
     // (See `shouldAutoFitOnOpen` for the full gate.) We additionally
     // suppress the two camera-owning cases:
-    //   - !restoreInProgress: a saved/last view restoring its camera
-    //     wins (#700);
+    //   - !restoreOwnsDatasetOpen: a saved/last view that requested THIS dataset
+    //     owns the camera (#700);
     //   - !following: a follower stays glued to the leader's camera.
     // The server sends the `your_id` snapshot as a client's FIRST message,
     // before any CommandBroadcast, so by the time a `dataset_opened` is
@@ -1387,10 +1830,10 @@ export class SessionController {
     // reframe. The fit itself is best-effort and wrapped so a failure
     // (e.g. a dataset with no bounds yet) can never break the open.
     const isOpener = isOpenerOf(cmd.opener_client_id, this.myId);
-    const restoreInProgress =
-      this.deps.getSavedViewHooks()?.isInProgress?.() ?? false;
+    const restoreOwnsDatasetOpen =
+      this.deps.getSavedViewHooks()?.ownsDatasetOpen?.(datasetId) ?? false;
     const following = this.followTarget !== null;
-    if (shouldAutoFitOnOpen(cmd.type, { isOpener, restoreInProgress, following })) {
+    if (shouldAutoFitOnOpen(cmd.type, { isOpener, restoreOwnsDatasetOpen, following })) {
       try {
         // Untyped call: the wasm export may predate the regenerated
         // bindings, so reach it structurally rather than via the type.
@@ -1411,7 +1854,7 @@ export class SessionController {
       bridgeLog("auto_fit_on_open.suppressed", {
         datasetId,
         isOpener,
-        restoreInProgress,
+        restoreOwnsDatasetOpen,
         following,
       });
     }

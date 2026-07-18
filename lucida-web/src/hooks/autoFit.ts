@@ -18,8 +18,8 @@
  *    broadcast routed through the same handler;
  *  - this client is the one that opened the dataset (`isOpener`) — a co-present
  *    peer is NOT reframed when someone else opens a dataset;
- *  - no saved/last view is mid-restore (`restoreInProgress`) — a restore owns
- *    the camera (#700);
+ *  - this open does not belong to a saved/last-view restore
+ *    (`restoreOwnsDatasetOpen`) — that generation owns the camera (#700);
  *  - this client is not following another's camera (`following`) — an auto-fit
  *    would yank a follower off the leader's view.
  *
@@ -31,8 +31,8 @@
 export interface AutoFitContext {
   /** This client is the one that opened the dataset (opener_client_id === self). */
   isOpener: boolean;
-  /** A saved/last view is mid-restore and owns the camera. */
-  restoreInProgress: boolean;
+  /** This dataset open belongs to a saved/last-view generation that owns camera. */
+  restoreOwnsDatasetOpen: boolean;
   /** This client is following another peer's camera. */
   following: boolean;
 }
@@ -44,7 +44,7 @@ export function shouldAutoFitOnOpen(
   return (
     commandType === "dataset_opened" &&
     ctx.isOpener &&
-    !ctx.restoreInProgress &&
+    !ctx.restoreOwnsDatasetOpen &&
     !ctx.following
   );
 }

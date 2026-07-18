@@ -5,7 +5,7 @@ description: "lucida-web/src/renderer/workerProtocol.ts — the discriminated-un
 tags: [lucida, subsystem]
 source_path: wiki/systems/subsystems/worker-protocol.md
 created: 2026-04-18
-modified: 2026-07-06
+modified: 2026-07-16
 ---
 
 # Worker Protocol
@@ -26,17 +26,35 @@ modified: 2026-07-06
 - `viewHotState` — view-only fast path; carries ray-pick coords used for GPU eviction distance. Sent only when `view` epoch bumps.
 - `sliceChunkData { epochs, memberId, tier, chunks[], level, z, t, c, ... }` — typed array transfer of decoded chunks for the slice path. The owner key is **memberId** and the residency route is **tier** (`detail` or `coarse`).
 - `volumeChunkData { epochs, memberId, tier, chunks[], level, t, c, ... }` — same for volume.
-- `proxyAssetData` — proxy asset (`[Z, Y, X]` u16 voxel buffer + identifying metadata). Stays `datasetId`-keyed because proxies are routed per dataset, not per member. A live fallback (still wired); coarse/detail is the default.
 - **render + minimap messages** (also Main → worker): `resize`, `volumeRenderMultiPass`, `sliceRenderMultiPass`, `minimapInit` / `minimapRender` / `minimapDestroy` / `minimapUploadOverviewChunksForLayer`, `removeLayerResources`, `updateCursorData`, `destroy`. These drive draws and minimap residency, distinct from the cold/hot/chunk state push above.
 - A `sliceRenderMultiPass` layer is either a normal per-member layer (one offscreen pass each) or an **aggregate layer** (`SliceAggregateParams`): members whose on-screen diagonal falls below the member-pass budget in `slicePath.ts` are batched into one layer whose quad records (rect in layer UV + entity descriptor index, 32 B each, transferred) render in a single instanced pass via the slice shader's `vsAggregate`/`fsAggregate` entry points. This keeps per-frame pass count bounded by screen size, not member count, on wide collections. Labels never batch.
 
 The full `MainToWorker` union is in `MainToWorkerMessage` (workerProtocol.ts).
 
-**Worker → main** (state pull). The complete `WorkerToMainMessage` union is exactly five variants: `ready`, `error`, `intensityRange`, `chunksEvicted`, `wantedSetDelta`.
+**Worker → main** (state pull). The complete `WorkerToMainMessage` union is
+seven variants: `ready`, `error`, `framePresented`, `intensityRange`,
+`thumbnailResult`, `chunksEvicted`, and `wantedSetDelta`. Treat the union in
+`workerProtocol.ts` as the source of truth; this list is descriptive and must
+move with it.
 
-- `wantedSetDelta` — what the worker wants but doesn't have. `MissingChunk` carries the missing chunk and tier; `MissingProxy` is the proxy-fallback case. Drives the next `submit`.
+- `wantedSetDelta` — the tier-labeled chunks the worker wants but does not have. Drives the next `submit`.
 - `chunksEvicted { memberId, keys, skipped? }` — keys evicted (+ keys it skipped because they were never actually present). The main thread clears delivery tracking so the next drain re-uploads.
 - `intensityRange { datasetId, min, max }` — running min/max from `sampleIntensityRange` after a chunk upload, batched on the main side via `useIntensityBatcher`.
+- `framePresented { frameId }` — GPU-complete presentation acknowledgement;
+  capture readiness and frame telemetry consume this instead of equating a
+  browser animation callback with completed GPU work. `RenderClient` also
+  starts a presentation obligation when dirty view/residency work is scheduled,
+  before the browser's animation callback. A successfully posted main-view
+  render adopts the same obligation. If the oldest outstanding frame remains
+  unacknowledged for 10 seconds while the page is visible, it raises a typed
+  `frame_starvation` terminal failure through the normal UI recovery path
+  (`Restart renderer`). New submissions cannot postpone that deadline;
+  hidden-tab time is excluded, intentional loop stops/collapsed canvases cancel
+  work that was never submitted, and direct non-empty renders also arm the
+  watchdog.
+- `thumbnailResult { id, bitmap }` — correlated minimap/collection-thumbnail
+  response. The bitmap is transferred, and `null` means no resident overview
+  could be drawn yet.
 - `ready` / `error` — handshake / failure after `init`/`resize`.
 
 ## Cold state, hot state, deltas
@@ -45,37 +63,37 @@ Three different update cadences, by design:
 
 - **Cold state** is the worker's worldview — everything it needs to plan its own work without round-tripping. Rebuilt rarely (epoch-gated).
 - **Hot state** is the per-frame view-only data (ray-pick coords for eviction distance). Rebuilt only when `view` epoch bumps.
-- **Chunk data** are deltas — typed array transfers, one slice/volume upload at a time, carrying tier labels and planning epochs so the worker can ignore stale uploads. Proxy data (`proxyAssetData`) follow the same stale-rejected pattern.
+- **Chunk data** are deltas — typed array transfers, one slice/volume upload at a time, carrying tier labels and planning epochs so the worker can ignore stale uploads.
 
 ## Stale-rejection asymmetry
 
-Render messages (`volumeRenderMultiPass` / `sliceRenderMultiPass`) carry `epochs` but are **stale-tolerant**: they do NOT run through `isStaleDelivery`, so the worker draws with whatever residency it has at draw time (re-issuing a render is cheap, and the next `view` epoch fires one anyway). By contrast, chunk and `proxyAssetData` *data* messages ARE stale-rejected — `isStaleDelivery` drops a delivery older than the worker's current epochs, so wrong-epoch voxels never get written into the atlas.
+Render messages carry epochs but are **stale-tolerant**: the worker draws with current residency and a later render repairs it. Chunk data are stale-rejected, so wrong-epoch voxels never enter an atlas.
 
 ## `ColdStateActiveEntry`
 
-A discriminated union on `kind`, NOT a flat field set:
-
-- `kind: "tile"` — an image member with a real `imageId`; `mode` is `tiles-with-detail` or `tiles-with-proxy-fallback`, plus `parentGroupId`.
-- `kind: "group-as-proxy"` — a synthesised group-level entry with no backing image (`imageId?: never`); the worker renders the group's proxy directly. A live fallback (still wired); coarse/detail is the default, so the planner usually emits `tile` entries.
-
-Both share `ColdStateActiveEntryBase`: `entityId`, `targetLod`, `detailLevel`/`coarseLevel`, `wantedLodLevels`, per-`levels` geometry, `proxyKind`/`proxyAvailable`, `modelMatrix`/`invModelMatrix`, `displayStateByChannel`.
+Each active entry is image-backed and carries its real `imageId`, explicit
+detail/coarse levels and geometry, transforms, and per-channel display state.
+There is no synthesized group-proxy entry or proxy availability branch.
 
 The canonical way to derive a memberId from an entry is `memberIdForColdEntry(entry, channel, multiCh)` in `renderer/descriptorBuffer.ts`. The canonical way to route a tier to a pool is `memberTierKey(memberId, tier)` from `renderer/poolKeys.ts`.
 
 ## Interactions
 
-- **Main side**: the [Uploader](upload-pipeline.md) is the only sender, via `client` (a thin `UploadClient` facet of `RenderClient`). It owns `coldState`, `viewHotState`, tier-labeled `sliceChunkData` / `volumeChunkData`, `proxyAssetData` emission, and the worker → main feedback callbacks.
-- **Worker side**: the ~34-LOC entry point `renderer/gpu.worker.ts` delegates to `worker/dispatch.ts`, which routes each typed message to its handler under `coldState/`, `proxy/`, `volume/`, `slice/`, `worker/`. See [GPU Residency](gpu-residency.md) for the module layout.
+- **Main side**: the [Uploader](upload-pipeline.md) is the only sender. It owns cold/hot state, tier-labeled chunk delivery, and worker feedback callbacks.
+- **Worker side**: `renderer/gpu.worker.ts` delegates to `worker/dispatch.ts`, which routes messages to `coldState/`, `volume/`, `slice/`, or `worker/` handlers.
 - **`renderer/workerContext.ts`** holds the worker's running state; per-session Maps live on `WorkerCtx.state: RendererState`. Renderer-class singletons and persistent GPU resources stay at module scope in `worker/resources.ts`.
 
 ## Invariants
 
-- **Every chunk/proxy data message carries the planning epochs and is stale-rejected.** The worker compares against its current epochs and drops stale uploads via `isStaleDelivery`. Don't strip the epochs as an "optimization" — the staleness check is what keeps the worker from writing wrong-epoch voxels after a viewport change. (Render messages carry epochs too but are deliberately stale-tolerant — see above.)
+- **Every chunk data message carries planning epochs and is stale-rejected.** Do not strip them: they keep wrong-epoch voxels out after viewport changes.
 - **Every default chunk upload carries a tier.** Missing or omitted tier is treated as legacy detail compatibility; new code must send `detail` or `coarse` explicitly.
 - **`coldState` is the full active-set worldview, not a delta.** Sending a partial cold state would let stale entries linger in the worker. The worker rebuilds atlases / descriptor buffer / wanted-set from each cold-state on receipt.
 - **`OffscreenCanvas` is transferred once, on `init`.** It cannot be transferred back; closing the worker means losing the canvas. Re-init requires a new canvas.
 - **`wantedSetDelta` is a delta, not a full set.** Adds and removes are both expressed.
-- **`memberId` is the owner key on every member-routed message** (`chunksEvicted`, `volumeChunkData`, `sliceChunkData`). The remaining `datasetId` fields (on `coldState`, `viewHotState`, `proxyAssetData`, `intensityRange`, `MissingProxy`) are correctly per-dataset.
+- **`memberId` is the owner key on every member-routed message** (`chunksEvicted`, `volumeChunkData`, `sliceChunkData`). Dataset-wide state and intensity feedback remain `datasetId`-keyed.
+- **A non-empty main-view render must eventually produce `framePresented`.**
+  Presentation liveness is measured from the oldest outstanding frame, not the
+  newest request, so a busy producer cannot conceal a stalled GPU worker.
 
 ## Gotchas
 

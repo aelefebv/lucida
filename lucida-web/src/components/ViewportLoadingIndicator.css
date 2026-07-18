@@ -1,0 +1,33 @@
+.viewport-loading-indicator {
+  position: absolute;
+  /* Leave the first overlay row for saved-view/import notices. */
+  inset-block-start: calc(var(--overlay-safe-block) + 3rem);
+  inset-inline-start: 50%;
+  z-index: var(--z-overlay);
+  display: flex;
+  max-inline-size: min(28rem, calc(100% - 2 * var(--overlay-safe-inline)));
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: center;
+  gap: 0.25rem 0.65rem;
+  padding: 0.45rem 0.75rem;
+  translate: -50% 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--surface-raised) 92%, transparent);
+  box-shadow: var(--shadow-popover);
+  pointer-events: none;
+  backdrop-filter: blur(8px);
+}
+
+.viewport-loading-indicator-title {
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.viewport-loading-indicator-detail {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}

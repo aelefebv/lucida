@@ -20,10 +20,10 @@ concurrency:
 jobs:
   release-please:
     name: Open or update the Release vX.Y.Z PR
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
         with:
           # Manifest mode: action reads ./release-please-config.json and
           # ./.release-please-manifest.json from the repo root for the

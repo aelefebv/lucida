@@ -2,12 +2,13 @@
  * Eviction policies for the CPU cache.
  *
  * Two policies share one {@link EvictionPolicy} interface:
- *  - {@link LRUPolicy} — pure insertion-order LRU. Used by the overview
- *    cache and the proxy cache (entries are sacrificial; oldest goes first).
+ *  - {@link LRUPolicy} — pure insertion-order LRU. Used by the coarse
+ *    cache (entries are sacrificial; oldest goes first).
  *  - {@link TieredPolicy} — tier-walked LRU with an active-detail
  *    tiebreaker. Used by the main (detail) cache. Walks tiers in
  *    {@link getTierOrder} for the current interaction mode; within
- *    active-detail it uses the `(lastSeenTick ↑, priority ↓, insertedAt ↑)`
+ *    active-detail it uses the `(wanted false first, priority ↓,
+ *    lastSeenTick ↑, insertedAt ↑)`
  *    rule documented in `wiki/systems/subsystems/cpu-cache.md` so focal
  *    chunks aren't swept out by their own freshness.
  *
@@ -24,8 +25,6 @@ import type { InteractionMode } from "./interactionMode.ts";
  * Minimal shape every eviction-eligible entry must expose: when it was
  * inserted (for LRU ordering) and how many bytes it claims (so the
  * caller can compute "freed enough"). {@link CacheEntry} satisfies this;
- * the proxy cache wraps its entries into the same shape at the call
- * site so {@link LRUPolicy} can serve both.
  */
 export interface EvictableEntry {
   insertedAt: number;
@@ -37,9 +36,8 @@ export interface EvictableEntry {
  * bytes are freed. Pure: must not mutate `entries` or hold state across
  * calls beyond the policy's own configuration.
  *
- * Generic in the entry shape so the same interface fits both the
- * detail/overview caches ({@link CacheEntry}) and the proxy cache
- * (a thin adapter — see `cpuCache.ts:evictProxyIfNeeded`).
+ * Generic in the entry shape so the same interface can serve cache
+ * collaborators without coupling policy to their full record shape.
  */
 export interface EvictionPolicy<T extends EvictableEntry = CacheEntry> {
   selectVictims(entries: readonly T[], bytesNeeded: number): T[];
@@ -71,9 +69,10 @@ export class LRUPolicy<T extends EvictableEntry = CacheEntry> implements Evictio
  *
  * Within each tier the order is pure LRU (`insertedAt` ascending),
  * EXCEPT for active-detail, which uses the
- * `(lastSeenTick ↑, priority ↓, insertedAt ↑)` tiebreaker so:
- *  - chunks absent from the most recent plan are picked first;
- *  - among present-this-tick entries, the highest priority *number*
+ * `(wanted false first, priority ↓, lastSeenTick ↑, insertedAt ↑)`
+ * tiebreaker so:
+ *  - chunks absent from the persistent wanted set are picked first;
+ *  - among equally-live entries, the highest priority *number*
  *    (= farthest from focal, lowest importance) goes first;
  *  - insertion order is the deterministic final tiebreaker.
  *
@@ -98,8 +97,9 @@ export class TieredPolicy implements EvictionPolicy {
       const tierEntries = entries.filter(e => e.tier === tier);
       if (tier === "active-detail") {
         tierEntries.sort((a, b) =>
-          a.lastSeenTick - b.lastSeenTick      // oldest plan tick first
+          Number(a.wanted) - Number(b.wanted)  // unwanted before persistently wanted
           || b.priority - a.priority           // then highest priority number (= farthest from focal) first
+          || a.lastSeenTick - b.lastSeenTick   // then oldest publication touch
           || a.insertedAt - b.insertedAt,      // then oldest insertion as deterministic tiebreaker
         );
       } else {

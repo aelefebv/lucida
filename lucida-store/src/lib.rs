@@ -1,15 +1,197 @@
 pub mod backend;
+pub mod budget;
 pub mod cache;
 pub(crate) mod coarse;
 pub mod codec;
 pub mod import;
 pub mod import_types;
 pub mod ingest;
+mod label_discovery;
 pub mod layout;
+mod metadata;
 pub(crate) mod parse;
+
+use std::{fmt, str::FromStr};
 
 /// The canonical 5D axis names in order.
 const ALL_DIMS: [&str; 5] = ["t", "c", "z", "y", "x"];
+
+/// Stable reason a client-provided chunk key was rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChunkKeyErrorCategory {
+    Shape,
+    Syntax,
+    Bounds,
+}
+
+/// Path-addressed chunk-key failure.  The original key is deliberately not
+/// retained or displayed: it may contain credentials or path-like attacker
+/// input and is never needed to derive a storage object path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkKeyError {
+    pub category: ChunkKeyErrorCategory,
+    pub path: &'static str,
+    pub message: String,
+}
+
+impl ChunkKeyError {
+    fn new(
+        category: ChunkKeyErrorCategory,
+        path: &'static str,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            category,
+            path,
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for ChunkKeyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {} ({:?})", self.path, self.message, self.category)
+    }
+}
+
+impl std::error::Error for ChunkKeyError {}
+
+/// The only accepted wire chunk-key representation.
+///
+/// Coordinates are parsed before any storage lookup.  Keeping them numeric
+/// makes it impossible for traversal text or an extra path segment to reach
+/// object-store path construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChunkKey {
+    pub level: u32,
+    pub t: u64,
+    pub c: u64,
+    pub z: u64,
+    pub y: u64,
+    pub x: u64,
+}
+
+impl ChunkKey {
+    pub const COMPONENT_COUNT: usize = 6;
+
+    pub fn canonical_coords(self) -> [u64; 5] {
+        [self.t, self.c, self.z, self.y, self.x]
+    }
+
+    /// Derive a Zarr object path using only validated numeric coordinates and
+    /// import-owned axis metadata.
+    pub fn to_store_path(
+        self,
+        axes: &[String],
+        chunk_shape: &[u64],
+    ) -> Result<String, ChunkKeyError> {
+        if axes.is_empty() || axes.len() != chunk_shape.len() {
+            return Err(ChunkKeyError::new(
+                ChunkKeyErrorCategory::Shape,
+                "binding.axes",
+                format!(
+                    "axes/chunk_shape rank mismatch: {} axes, {} chunk dimensions",
+                    axes.len(),
+                    chunk_shape.len()
+                ),
+            ));
+        }
+        if axes.len() > 32 {
+            return Err(ChunkKeyError::new(
+                ChunkKeyErrorCategory::Bounds,
+                "binding.axes",
+                "axis rank exceeds 32",
+            ));
+        }
+        if chunk_shape.contains(&0) {
+            return Err(ChunkKeyError::new(
+                ChunkKeyErrorCategory::Bounds,
+                "binding.chunk_shape",
+                "chunk dimensions must be positive",
+            ));
+        }
+
+        let canonical = self.canonical_coords();
+        let mut coordinates = Vec::with_capacity(axes.len());
+        for (axis_index, name) in axes.iter().enumerate() {
+            if name.is_empty() || name.contains('/') || matches!(name.as_str(), "." | "..") {
+                return Err(ChunkKeyError::new(
+                    ChunkKeyErrorCategory::Syntax,
+                    "binding.axes",
+                    "axis names must be nonempty path-safe components",
+                ));
+            }
+            let coordinate = ALL_DIMS
+                .iter()
+                .position(|dimension| dimension.eq_ignore_ascii_case(name))
+                .map(|canonical_index| {
+                    let value = canonical[canonical_index];
+                    if canonical_index < 2 {
+                        value / chunk_shape[axis_index]
+                    } else {
+                        value
+                    }
+                })
+                .unwrap_or(0);
+            coordinates.push(coordinate.to_string());
+        }
+        Ok(format!("{}/c/{}", self.level, coordinates.join("/")))
+    }
+}
+
+impl FromStr for ChunkKey {
+    type Err = ChunkKeyError;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        let parts: Vec<&str> = raw.split('/').collect();
+        if parts.len() != Self::COMPONENT_COUNT {
+            return Err(ChunkKeyError::new(
+                ChunkKeyErrorCategory::Shape,
+                "chunk_key",
+                format!(
+                    "expected {} numeric components; found {}",
+                    Self::COMPONENT_COUNT,
+                    parts.len()
+                ),
+            ));
+        }
+        if parts
+            .iter()
+            .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+        {
+            return Err(ChunkKeyError::new(
+                ChunkKeyErrorCategory::Syntax,
+                "chunk_key",
+                "every component must be a nonempty unsigned decimal integer",
+            ));
+        }
+        let parse_u64 = |index: usize| {
+            parts[index].parse::<u64>().map_err(|_| {
+                ChunkKeyError::new(
+                    ChunkKeyErrorCategory::Bounds,
+                    "chunk_key",
+                    format!("component {index} exceeds u64"),
+                )
+            })
+        };
+        let level_value = parse_u64(0)?;
+        let level = u32::try_from(level_value).map_err(|_| {
+            ChunkKeyError::new(
+                ChunkKeyErrorCategory::Bounds,
+                "chunk_key.level",
+                "level exceeds u32",
+            )
+        })?;
+        Ok(Self {
+            level,
+            t: parse_u64(1)?,
+            c: parse_u64(2)?,
+            z: parse_u64(3)?,
+            y: parse_u64(4)?,
+            x: parse_u64(5)?,
+        })
+    }
+}
 
 /// Convert a logical chunk key `"level/t/c/z/y/x"` to the on-disk Zarr v3
 /// store path. The on-disk path always follows the dataset's raw axes order,
@@ -33,40 +215,17 @@ const ALL_DIMS: [&str; 5] = ["t", "c", "z", "y", "x"];
 ///   (a `"0"` is injected for each non-canonical axis — these axes are pinned
 ///   to index 0; see `lucida-content::normalize` for the canonical set)
 pub fn chunk_key_to_store_path(key: &str, axes: &[String], chunk_shape: &[u64]) -> String {
-    let parts: Vec<&str> = key.splitn(6, '/').collect();
-    if parts.len() != 6 {
-        return key.to_string();
-    }
-    // parts[0] = level, parts[1..6] = canonical 5D coords in t,c,z,y,x order.
-    let coords: Vec<String> = axes
-        .iter()
-        .enumerate()
-        .map(|(axis_idx, name)| {
-            let canonical_pos = ALL_DIMS.iter().position(|d| d.eq_ignore_ascii_case(name));
-            match canonical_pos {
-                None => "0".to_string(),
-                Some(canon_idx) => {
-                    let wire_value = parts[canon_idx + 1];
-                    // For t (canon_idx 0) and c (canon_idx 1), wire is voxel
-                    // coord — divide by chunk_shape on this axis to get the
-                    // disk-grid coord. For z, y, x the wire is already a
-                    // disk-grid coord; chunk_shape divisor is 1 (no-op).
-                    if (canon_idx == 0 || canon_idx == 1)
-                        && axis_idx < chunk_shape.len()
-                        && chunk_shape[axis_idx] > 1
-                    {
-                        match wire_value.parse::<u64>() {
-                            Ok(v) => (v / chunk_shape[axis_idx]).to_string(),
-                            Err(_) => wire_value.to_string(),
-                        }
-                    } else {
-                        wire_value.to_string()
-                    }
-                }
-            }
-        })
-        .collect();
-    format!("{}/c/{}", parts[0], coords.join("/"))
+    chunk_key_to_store_path_checked(key, axes, chunk_shape).unwrap_or_default()
+}
+
+/// Strict variant used at request boundaries.  Invalid input never becomes a
+/// store-relative path and callers receive a stable typed failure.
+pub fn chunk_key_to_store_path_checked(
+    key: &str,
+    axes: &[String],
+    chunk_shape: &[u64],
+) -> Result<String, ChunkKeyError> {
+    key.parse::<ChunkKey>()?.to_store_path(axes, chunk_shape)
 }
 
 /// Legacy 5D convenience wrapper — assumes all 5 axes are present and
@@ -104,14 +263,32 @@ mod tests {
 
     #[test]
     fn chunk_key_short_fallback() {
+        let error = chunk_key_to_store_path_checked(
+            "foo/bar",
+            &axes(&["t", "c", "z", "y", "x"]),
+            &[1, 1, 1, 1, 1],
+        )
+        .unwrap_err();
+        assert_eq!(error.category, ChunkKeyErrorCategory::Shape);
         assert_eq!(
             chunk_key_to_store_path(
                 "foo/bar",
                 &axes(&["t", "c", "z", "y", "x"]),
                 &[1, 1, 1, 1, 1]
             ),
-            "foo/bar"
+            ""
         );
+    }
+
+    #[test]
+    fn typed_chunk_key_rejects_traversal_extra_segments_and_overflow() {
+        for key in [
+            "0/0/0/0/../0",
+            "0/0/0/0/0/0/secret",
+            "0/0/0/0/0/18446744073709551616",
+        ] {
+            assert!(key.parse::<ChunkKey>().is_err(), "accepted {key}");
+        }
     }
 
     #[test]

@@ -1,11 +1,11 @@
 .debug-panel {
   width: 300px;
   flex-shrink: 0;
-  background: #1a1a1a;
-  border-left: 1px solid #333;
+  background: var(--surface-1);
+  border-left: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
-  color: #ccc;
+  color: var(--text-secondary);
   font-family: "SF Mono", "Menlo", "Monaco", monospace;
   font-size: 11px;
   line-height: 1.4;
@@ -15,7 +15,7 @@
 .debug-tab-bar {
   display: flex;
   flex-direction: row;
-  border-bottom: 1px solid #333;
+  border-bottom: 1px solid var(--border-subtle);
   flex-shrink: 0;
   overflow-x: auto;
   scrollbar-width: thin;
@@ -26,14 +26,14 @@
 }
 
 .debug-tab-bar::-webkit-scrollbar-thumb {
-  background: #444;
+  background: var(--border-strong);
 }
 
 .debug-tab {
   flex: 0 0 auto;
   padding: 6px 8px;
   background: transparent;
-  color: #888;
+  color: var(--text-muted);
   border: none;
   font-family: inherit;
   font-size: 10px;
@@ -45,13 +45,13 @@
 }
 
 .debug-tab:hover {
-  color: #ccc;
-  background: #252525;
+  color: var(--text-secondary);
+  background: var(--surface-raised);
 }
 
 .debug-tab.active {
-  color: #fff;
-  background: #333;
+  color: var(--text-primary);
+  background: var(--surface-3);
 }
 
 .debug-tab-content {
@@ -64,7 +64,7 @@
 .debug-section {
   margin-bottom: 4px;
   padding-bottom: 4px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  border-bottom: 1px solid var(--border-translucent);
 }
 
 .debug-section:last-child {
@@ -74,7 +74,7 @@
 }
 
 .debug-title {
-  color: #4a9eff;
+  color: var(--info-text);
   font-weight: 600;
   font-size: 10px;
   text-transform: uppercase;
@@ -83,7 +83,7 @@
 }
 
 .debug-warn {
-  color: #f44;
+  color: var(--danger-text);
   font-weight: 600;
 }
 
@@ -98,7 +98,7 @@
 }
 
 .debug-member-id {
-  color: #999;
+  color: var(--text-muted);
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -112,13 +112,13 @@
 }
 
 .debug-more {
-  color: #666;
+  color: var(--text-muted);
   font-style: italic;
 }
 
 .debug-bar-track {
   height: 8px;
-  background: #333;
+  background: var(--surface-3);
   border-radius: 4px;
   overflow: hidden;
   margin: 2px 0;
@@ -140,10 +140,10 @@
 .debug-config-input {
   width: 64px;
   padding: 1px 4px;
-  background: #2a2a2a;
-  border: 1px solid #444;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
   border-radius: 3px;
-  color: #ccc;
+  color: var(--text-secondary);
   font-family: inherit;
   font-size: 10px;
   text-align: right;
@@ -151,7 +151,7 @@
 
 .debug-config-input:focus {
   outline: none;
-  border-color: #4a9eff;
+  border-color: var(--focus-ring);
 }
 
 /* ConfigTab: per-tunable row (label + slider + number + reset arrow). */
@@ -161,7 +161,7 @@
 
 .debug-config-tunable-label {
   display: block;
-  color: #ccc;
+  color: var(--text-secondary);
   font-size: 11px;
   margin-bottom: 2px;
 }
@@ -176,13 +176,13 @@
   flex: 1;
   min-width: 0;
   margin: 0;
-  accent-color: #4a9eff;
+  accent-color: var(--accent);
 }
 
 .debug-config-reset {
   background: transparent;
-  border: 1px solid #444;
-  color: #ccc;
+  border: 1px solid var(--border-strong);
+  color: var(--text-secondary);
   border-radius: 3px;
   width: 22px;
   height: 22px;
@@ -194,8 +194,8 @@
 }
 
 .debug-config-reset:hover {
-  border-color: #4a9eff;
-  color: #fff;
+  border-color: var(--accent);
+  color: var(--text-primary);
 }
 
 .debug-config-reset-placeholder {
@@ -206,15 +206,15 @@
 }
 
 .debug-config-warn {
-  color: #fb4;
+  color: var(--warning-text);
   font-size: 10px;
   margin-top: 2px;
 }
 
 .debug-config-reset-all {
-  background: #2a2a2a;
-  border: 1px solid #444;
-  color: #ccc;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  color: var(--text-secondary);
   padding: 4px 8px;
   border-radius: 3px;
   font-family: inherit;
@@ -223,8 +223,8 @@
 }
 
 .debug-config-reset-all:hover:not(:disabled) {
-  border-color: #4a9eff;
-  color: #fff;
+  border-color: var(--accent);
+  color: var(--text-primary);
 }
 
 .debug-config-reset-all:disabled {
@@ -234,8 +234,8 @@
 
 .debug-config-toggle {
   background: transparent;
-  border: 1px solid #444;
-  color: #ccc;
+  border: 1px solid var(--border-strong);
+  color: var(--text-secondary);
   padding: 1px 6px;
   border-radius: 3px;
   font-family: inherit;
@@ -244,8 +244,8 @@
 }
 
 .debug-config-toggle:hover {
-  border-color: #4a9eff;
-  color: #fff;
+  border-color: var(--accent);
+  color: var(--text-primary);
 }
 
 .debug-config-toggle:disabled {

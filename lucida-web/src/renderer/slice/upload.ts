@@ -22,6 +22,7 @@ import { postChunksRejected, postChunksRequeued } from "../chunkUploadFeedback.t
 import { chunkAllowedByCurrentRenderRadius } from "../chunkRadius.ts";
 import { cameraUVForMember, chunkDistSq2D, findFarthestSlot2D } from "./eviction.ts";
 import { getOrCreateLabelSlicePool } from "./atlas.ts";
+import { assertChunkBufferLength } from "../../chunkContract.ts";
 
 /**
  * Write pre-sliced uint32 label planes into the member's r32uint label
@@ -51,6 +52,13 @@ export function handleLabelSliceChunkData(
   if (!pool) return;
 
   for (const chunk of msg.chunks) {
+    assertChunkBufferLength(chunk.data, chunk.contract, "worker");
+    if (chunk.contract.role !== "label" || chunk.contract.dtype !== "uint32") {
+      throw new Error(`label slice chunk ${chunk.key} has a non-label contract`);
+    }
+    if (chunk.contract.datasetId !== datasetId || chunk.contract.channel !== msg.c) {
+      throw new Error(`label slice chunk ${chunk.key} contract identity mismatch`);
+    }
     const xOff = chunk.x * chunkX;
     const yOff = chunk.y * chunkY;
     // Clamp to the resident texture (dims may be device-limited below the
@@ -131,6 +139,13 @@ export function handleSliceChunkData(
   const radiusFilteredKeySet = new Set<string>();
 
   for (const chunk of msg.chunks) {
+    assertChunkBufferLength(chunk.data, chunk.contract, "worker");
+    if (chunk.contract.role !== "intensity" || chunk.contract.dtype !== "uint16") {
+      throw new Error(`slice chunk ${chunk.key} has a non-intensity contract`);
+    }
+    if (chunk.contract.channel !== msg.c) {
+      throw new Error(`slice chunk ${chunk.key} channel contract mismatch`);
+    }
     if (chunk.z !== targetChunkZ) {
       if (!requeueKeySet.has(chunk.key)) {
         requeueKeySet.add(chunk.key);
@@ -158,14 +173,7 @@ export function handleSliceChunkData(
       atlas.staleSliceKeys.delete(compositeKey);
     }
 
-    const isU8 = chunk.dataType === "uint8" || chunk.dataType === "Uint8";
-    if (!isU8 && chunk.data.byteLength % 2 !== 0) {
-      throw new Error(
-        `slice chunk ${chunk.key}: byteLength ${chunk.data.byteLength} is not a multiple of 2 ` +
-        `(server likely returned a compressed or wrong-shape chunk)`,
-      );
-    }
-    const rawView = isU8 ? new Uint8Array(chunk.data) : new Uint16Array(chunk.data);
+    const rawView = new Uint16Array(chunk.data);
     const r = sampleIntensityRange(rawView, perChunkSamples);
     if (r.min < atlas.intensityMin) { atlas.intensityMin = r.min; intensityChanged = true; }
     if (r.max > atlas.intensityMax) { atlas.intensityMax = r.max; intensityChanged = true; }
@@ -197,7 +205,12 @@ export function handleSliceChunkData(
     const chunkW = Math.min(chunkX, levelWidth - chunk.x * chunkX);
     const chunkH = Math.min(chunkY, levelHeight - chunk.y * chunkY);
     const sliceOffset = localZ * chunkY * chunkX;
-    const sliceData = asUint16Slice(chunk.data, chunk.dataType, sliceOffset, chunkY * chunkX);
+    const sliceData = asUint16Slice(
+      chunk.data,
+      chunk.contract.dtype,
+      sliceOffset,
+      chunkY * chunkX,
+    );
 
     const xOff = sx * chunkX;
     const yOff = sy * chunkY;
@@ -264,6 +277,15 @@ export function handleSliceChunkData(
   }
 
   if (intensityChanged) {
-    ctx.post({ type: "intensityRange", datasetId: memberId, min: atlas.intensityMin, max: atlas.intensityMax });
+    const contract = msg.chunks[0]?.contract;
+    if (contract) {
+      ctx.post({
+        type: "intensityRange",
+        datasetId: contract.datasetId,
+        channel: contract.channel,
+        min: atlas.intensityMin,
+        max: atlas.intensityMax,
+      });
+    }
   }
 }

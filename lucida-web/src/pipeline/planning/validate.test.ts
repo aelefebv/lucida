@@ -14,10 +14,7 @@ import {
   createSyntheticSnapshot,
   createSyntheticState,
 } from "./synthetic.ts";
-import type {
-  PlanningSnapshot,
-  PlanningState,
-} from "./types.ts";
+import type { ActiveSetEntry, PlanningSnapshot, PlanningState } from "./types.ts";
 import {
   checkTileParentRefs,
   checkLevelShapeArity,
@@ -67,6 +64,21 @@ function makeValidSnapshot(): PlanningSnapshot {
     levels: [makeLevel([1, 1, 1, 1, 1], [1, 1, 1, 1, 1])],
   });
   return createSyntheticSnapshot({ entities: [group, tile] });
+}
+
+function tileEntry(entityId: string, imageId: string): ActiveSetEntry {
+  return {
+    kind: "tile",
+    entityId,
+    imageId,
+    mode: "tiles-with-detail",
+    targetLod: 0,
+    coarsestDetailLod: 0,
+    detailOwnedLodRange: [0, 0],
+    detailLevel: 0,
+    coarseLevel: null,
+    wantedLodLevels: [0],
+  };
 }
 
 // ===========================================================================
@@ -245,17 +257,7 @@ describe("checkVisibleRegionBounds", () => {
 });
 
 // ===========================================================================
-// Check 6 — withdrawn (assetCatalog refs)
-// ===========================================================================
-//
-// The original "every assetCatalog key must be a known entityId" check
-// was withdrawn. The catalog is flattened across all datasets the
-// catalog has ever seen; the snapshot is for one dataset's current
-// tick. They legitimately diverge. See validate.ts for the full
-// rationale.
-
-// ===========================================================================
-// Check 7 — withdrawn (minimapPending keys)
+// Check 6 — withdrawn (minimapPending keys)
 // ===========================================================================
 //
 // The original "every minimapPending key must be a known imageId" check
@@ -278,8 +280,8 @@ describe("checkPrevActiveSetUnique", () => {
   it("passes when every entry has a unique entityId", () => {
     const state: PlanningState = {
       previousActiveSet: [
-        { kind: "group-as-proxy", entityId: "group-A" },
-        { kind: "group-as-proxy", entityId: "group-B" },
+        { kind: "invisible", entityId: "group-A", imageId: "", coarsestLod: 0 },
+        { kind: "invisible", entityId: "group-B", imageId: "", coarsestLod: 0 },
       ],
     };
     expect(() => checkPrevActiveSetUnique(state)).not.toThrow();
@@ -288,8 +290,8 @@ describe("checkPrevActiveSetUnique", () => {
   it("throws on duplicate entityId in previousActiveSet", () => {
     const state: PlanningState = {
       previousActiveSet: [
-        { kind: "group-as-proxy", entityId: "group-A" },
-        { kind: "group-as-proxy", entityId: "group-A" }, // duplicate
+        { kind: "invisible", entityId: "group-A", imageId: "", coarsestLod: 0 },
+        { kind: "invisible", entityId: "group-A", imageId: "", coarsestLod: 0 }, // duplicate
       ],
     };
     expect(() => checkPrevActiveSetUnique(state)).toThrow(
@@ -307,18 +309,8 @@ describe("checkPrevActiveSetKindAgreement", () => {
     const snap = makeValidSnapshot();
     const state: PlanningState = {
       previousActiveSet: [
-        { kind: "group-as-proxy", entityId: "group-A" },
-        {
-          kind: "tile",
-          entityId: "tile-A1",
-          imageId: "img-tile-A1",
-          mode: "tiles-with-detail",
-          targetLod: 0,
-          coarsestDetailLod: 0,
-          detailOwnedLodRange: [0, 0],
-          proxyAvailable: false,
-          groupProxyAvailable: false,
-        },
+        { kind: "invisible", entityId: "group-A", imageId: "", coarsestLod: 0 },
+        tileEntry("tile-A1", "img-tile-A1"),
       ],
     };
     expect(() => checkPrevActiveSetKindAgreement(snap, state)).not.toThrow();
@@ -342,41 +334,16 @@ describe("checkPrevActiveSetKindAgreement", () => {
     const state: PlanningState = {
       previousActiveSet: [
         // entityId not present in snapshot — disappeared, NOT a violation.
-        { kind: "group-as-proxy", entityId: "group-gone-last-tick" },
+        { kind: "invisible", entityId: "group-gone-last-tick", imageId: "", coarsestLod: 0 },
       ],
     };
     expect(() => checkPrevActiveSetKindAgreement(snap, state)).not.toThrow();
   });
 
-  it("throws when a group-as-proxy entry references a non-Group entity", () => {
-    const snap = makeValidSnapshot();
-    const state: PlanningState = {
-      previousActiveSet: [
-        // tile-A1 is a Tile but the entry says it was a group-as-proxy.
-        { kind: "group-as-proxy", entityId: "tile-A1" },
-      ],
-    };
-    expect(() => checkPrevActiveSetKindAgreement(snap, state)).toThrow(
-      /disagrees with entity kind Tile \(expected Group\)/,
-    );
-  });
-
   it("throws when a tile entry references a Group entity (only Tile/Image allowed)", () => {
     const snap = makeValidSnapshot();
     const state: PlanningState = {
-      previousActiveSet: [
-        {
-          kind: "tile",
-          entityId: "group-A", // Group, not Tile/Image
-          imageId: "img-group-A",
-          mode: "tiles-with-detail",
-          targetLod: 0,
-          coarsestDetailLod: 0,
-          detailOwnedLodRange: [0, 0],
-          proxyAvailable: false,
-          groupProxyAvailable: false,
-        },
-      ],
+      previousActiveSet: [tileEntry("group-A", "img-group-A")],
     };
     expect(() => checkPrevActiveSetKindAgreement(snap, state)).toThrow(
       /disagrees with entity kind Group \(expected Tile or Image\)/,
@@ -398,19 +365,7 @@ describe("checkPrevActiveSetKindAgreement", () => {
       ],
     });
     const state: PlanningState = {
-      previousActiveSet: [
-        {
-          kind: "tile",
-          entityId: "img-only",
-          imageId: "img-only-image",
-          mode: "tiles-with-detail",
-          targetLod: 0,
-          coarsestDetailLod: 0,
-          detailOwnedLodRange: [0, 0],
-          proxyAvailable: false,
-          groupProxyAvailable: false,
-        },
-      ],
+      previousActiveSet: [tileEntry("img-only", "img-only-image")],
     };
     expect(() => checkPrevActiveSetKindAgreement(snap, state)).not.toThrow();
   });
@@ -446,8 +401,8 @@ describe("validatePlanningInputs (composing)", () => {
   it("propagates a state-side violation (smoke)", () => {
     const state: PlanningState = {
       previousActiveSet: [
-        { kind: "group-as-proxy", entityId: "group-X" },
-        { kind: "group-as-proxy", entityId: "group-X" },
+        { kind: "invisible", entityId: "group-X", imageId: "", coarsestLod: 0 },
+        { kind: "invisible", entityId: "group-X", imageId: "", coarsestLod: 0 },
       ],
     };
     expect(() => validatePlanningInputs(makeValidSnapshot(), state)).toThrow(
@@ -455,4 +410,3 @@ describe("validatePlanningInputs (composing)", () => {
     );
   });
 });
-

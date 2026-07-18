@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use futures_util::{Stream, StreamExt};
@@ -10,7 +10,7 @@ use lucida_core::protocol::{ClientId, ClientMessage, PresenceState, ServerMessag
 use lucida_core::saved_view::{SAVED_VIEW_VERSION, SavedView};
 use lucida_core::scene::{
     BlendMode, ChannelSettings, Colormap, DatasetDisplaySettings, DisplayState, DocumentState,
-    RenderMode, Scene,
+    RenderMode, Scene, SceneHydration,
 };
 use lucida_core::view::ViewState;
 use lucida_protocol::{GeneratedAvailabilitySnapshot, GeneratedChunkStatus, GeneratedLevelSummary};
@@ -20,10 +20,11 @@ use serde::{Deserialize, Serialize};
 use crate::config::EffectiveServer;
 use crate::credentials::EffectiveToken;
 use crate::error::{CliError, ErrorKind};
-use crate::http::{api_url, response_detail, send_json};
+use crate::http::{api_url, bounded_json, http_client, response_detail, send_json};
 use crate::session::{
-    IncomingSessionMessage, SessionWait, WorkspaceSnapshot, connect_workspace_socket,
-    incoming_messages, observe_until, send_client_message, wait_for_workspace_snapshot,
+    IncomingSessionMessage, SessionDeadline, SessionWait, WorkspaceSnapshot,
+    connect_workspace_socket, incoming_messages, observe_until, send_client_message,
+    wait_for_workspace_snapshot,
 };
 use crate::workspace::{WorkspaceRecord, WorkspaceTarget};
 
@@ -126,6 +127,7 @@ pub struct ViewerProfileResult {
     pub snapshot_seq: u64,
     pub own_client_id: ClientId,
     pub profile: String,
+    pub revision: u64,
     pub user_email: String,
     pub created_at: String,
     pub updated_at: String,
@@ -472,6 +474,7 @@ pub struct WorkspaceViewerProfileRecord {
     pub workspace_id: String,
     pub user_email: String,
     pub profile: String,
+    pub revision: u64,
     pub created_at: String,
     pub updated_at: String,
     pub seed_source: Option<String>,
@@ -486,6 +489,8 @@ struct WorkspaceSavedViewSeedRecord {
 #[derive(Debug, Serialize)]
 struct UpsertViewerProfileBody<'a> {
     view: &'a SavedView,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected_revision: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     seed_source: Option<&'a str>,
 }
@@ -516,16 +521,23 @@ impl ViewWorkspaceClient {
         from_peer: Option<ClientId>,
         wait: Duration,
     ) -> Result<ViewApplyResult, CliError> {
-        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
+        let deadline = SessionDeadline::new(wait, "workspace WebSocket operation");
+        let socket =
+            connect_workspace_socket(&self.ws_url, self.token.as_deref(), &deadline).await?;
         let (mut write, read) = socket.split();
         let mut incoming = incoming_messages(read);
-        let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
+        let snapshot = wait_for_workspace_snapshot(&mut incoming, &deadline).await?;
         let result = apply_presence_command(&snapshot, command, from_peer)?;
 
         if result.break_follow {
-            send_client_message(&mut write, &ClientMessage::Follow { target: None }).await?;
+            send_client_message(
+                &mut write,
+                &ClientMessage::Follow { target: None },
+                &deadline,
+            )
+            .await?;
         }
-        send_client_message(&mut write, &presence_message(&result)).await?;
+        send_client_message(&mut write, &presence_message(&result), &deadline).await?;
         Ok(result)
     }
 
@@ -534,10 +546,12 @@ impl ViewWorkspaceClient {
         from_peer: Option<ClientId>,
         wait: Duration,
     ) -> Result<DatasetPresenceResult, CliError> {
-        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
+        let deadline = SessionDeadline::new(wait, "workspace WebSocket operation");
+        let socket =
+            connect_workspace_socket(&self.ws_url, self.token.as_deref(), &deadline).await?;
         let (_write, read) = socket.split();
         let mut incoming = incoming_messages(read);
-        let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
+        let snapshot = wait_for_workspace_snapshot(&mut incoming, &deadline).await?;
         dataset_presence_state(&snapshot, from_peer)
     }
 
@@ -547,16 +561,23 @@ impl ViewWorkspaceClient {
         from_peer: Option<ClientId>,
         wait: Duration,
     ) -> Result<DatasetPresenceResult, CliError> {
-        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
+        let deadline = SessionDeadline::new(wait, "workspace WebSocket operation");
+        let socket =
+            connect_workspace_socket(&self.ws_url, self.token.as_deref(), &deadline).await?;
         let (mut write, read) = socket.split();
         let mut incoming = incoming_messages(read);
-        let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
+        let snapshot = wait_for_workspace_snapshot(&mut incoming, &deadline).await?;
         let result = apply_dataset_presence_command(&snapshot, command, from_peer)?;
 
         if result.break_follow {
-            send_client_message(&mut write, &ClientMessage::Follow { target: None }).await?;
+            send_client_message(
+                &mut write,
+                &ClientMessage::Follow { target: None },
+                &deadline,
+            )
+            .await?;
         }
-        send_client_message(&mut write, &dataset_presence_message(&result)).await?;
+        send_client_message(&mut write, &dataset_presence_message(&result), &deadline).await?;
         Ok(result)
     }
 }
@@ -575,10 +596,12 @@ impl PeerWorkspaceClient {
     }
 
     pub async fn list(&self, wait: Duration) -> Result<PeerListResult, CliError> {
-        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
+        let deadline = SessionDeadline::new(wait, "workspace WebSocket operation");
+        let socket =
+            connect_workspace_socket(&self.ws_url, self.token.as_deref(), &deadline).await?;
         let (_write, read) = socket.split();
         let mut incoming = incoming_messages(read);
-        let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
+        let snapshot = wait_for_workspace_snapshot(&mut incoming, &deadline).await?;
         Ok(peer_list_result(&snapshot))
     }
 
@@ -591,16 +614,19 @@ impl PeerWorkspaceClient {
     where
         F: FnOnce(PeerFollowResult) -> Result<(), CliError>,
     {
-        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
+        let deadline = SessionDeadline::new(wait, "workspace WebSocket operation");
+        let socket =
+            connect_workspace_socket(&self.ws_url, self.token.as_deref(), &deadline).await?;
         let (mut write, read) = socket.split();
         let mut incoming = incoming_messages(read);
-        let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
+        let snapshot = wait_for_workspace_snapshot(&mut incoming, &deadline).await?;
         validate_follow_request(&snapshot, target)?;
 
         let before = own_presence(&snapshot)?.following;
-        send_client_message(&mut write, &follow_message(Some(target))).await?;
+        send_client_message(&mut write, &follow_message(Some(target)), &deadline).await?;
         let changes =
-            wait_for_follow_change(&mut incoming, snapshot.your_id, Some(target), wait).await?;
+            wait_for_follow_change(&mut incoming, snapshot.your_id, Some(target), &deadline)
+                .await?;
         let followed = PeerFollowResult {
             snapshot_seq: snapshot.seq,
             own_client_id: snapshot.your_id,
@@ -613,8 +639,11 @@ impl PeerWorkspaceClient {
         on_followed(followed)?;
 
         tokio::signal::ctrl_c().await.map_err(CliError::from)?;
-        send_client_message(&mut write, &follow_message(None)).await?;
-        let changes = wait_for_follow_change(&mut incoming, snapshot.your_id, None, wait).await?;
+        let cleanup_deadline = SessionDeadline::new(wait, "workspace follow cleanup");
+        send_client_message(&mut write, &follow_message(None), &cleanup_deadline).await?;
+        let changes =
+            wait_for_follow_change(&mut incoming, snapshot.your_id, None, &cleanup_deadline)
+                .await?;
         Ok(PeerFollowResult {
             snapshot_seq: snapshot.seq,
             own_client_id: snapshot.your_id,
@@ -637,11 +666,13 @@ impl PeerWorkspaceClient {
             return Err(CliError::config("peer cursor coordinates must be finite"));
         }
 
-        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
+        let deadline = SessionDeadline::new(wait, "workspace WebSocket operation");
+        let socket =
+            connect_workspace_socket(&self.ws_url, self.token.as_deref(), &deadline).await?;
         let (mut write, read) = socket.split();
         let mut incoming = incoming_messages(read);
-        let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
-        send_client_message(&mut write, &cursor_message(position)).await?;
+        let snapshot = wait_for_workspace_snapshot(&mut incoming, &deadline).await?;
+        send_client_message(&mut write, &cursor_message(position), &deadline).await?;
         Ok(PeerCursorResult {
             snapshot_seq: snapshot.seq,
             own_client_id: snapshot.your_id,
@@ -667,7 +698,7 @@ impl ViewerProfileClient {
             base_url: base_url.into(),
             ws_url: ws_url.into(),
             token: token.map(|effective| effective.token),
-            http: reqwest::Client::new(),
+            http: http_client(),
         }
     }
 
@@ -677,11 +708,43 @@ impl ViewerProfileClient {
         profile: &str,
         wait: Duration,
     ) -> Result<ViewerProfileResult, CliError> {
-        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
+        let deadline = SessionDeadline::new(wait, "workspace WebSocket operation");
+        let socket =
+            connect_workspace_socket(&self.ws_url, self.token.as_deref(), &deadline).await?;
         let (_write, read) = socket.split();
         let mut incoming = incoming_messages(read);
-        let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
+        let snapshot = wait_for_workspace_snapshot(&mut incoming, &deadline).await?;
         let record = self.ensure_profile(workspace, profile, &snapshot).await?;
+        Ok(viewer_profile_result(&snapshot, record, None))
+    }
+
+    /// Replace a durable private viewer profile with a saved-view payload.
+    /// Shared layout changes, if any, are acknowledged separately by the
+    /// saved-view client before this compare-and-swap profile commit.
+    pub async fn replace_with_saved_view(
+        &self,
+        workspace: &WorkspaceRecord,
+        profile: &str,
+        seed_source: &str,
+        view: &SavedView,
+        wait: Duration,
+    ) -> Result<ViewerProfileResult, CliError> {
+        let deadline = SessionDeadline::new(wait, "workspace WebSocket operation");
+        let socket =
+            connect_workspace_socket(&self.ws_url, self.token.as_deref(), &deadline).await?;
+        let (_write, read) = socket.split();
+        let mut incoming = incoming_messages(read);
+        let snapshot = wait_for_workspace_snapshot(&mut incoming, &deadline).await?;
+        let current = self.ensure_profile(workspace, profile, &snapshot).await?;
+        let record = self
+            .upsert_profile(
+                workspace,
+                profile,
+                Some(current.revision),
+                Some(seed_source),
+                view,
+            )
+            .await?;
         Ok(viewer_profile_result(&snapshot, record, None))
     }
 
@@ -692,31 +755,41 @@ impl ViewerProfileClient {
         command: ViewportCommand,
         wait: Duration,
     ) -> Result<ViewerProfileResult, CliError> {
-        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
+        let deadline = SessionDeadline::new(wait, "workspace WebSocket operation");
+        let socket =
+            connect_workspace_socket(&self.ws_url, self.token.as_deref(), &deadline).await?;
         let (mut write, read) = socket.split();
         let mut incoming = incoming_messages(read);
-        let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
+        let snapshot = wait_for_workspace_snapshot(&mut incoming, &deadline).await?;
         let break_follow = own_presence(&snapshot)?.following.is_some();
         let record = self.ensure_profile(workspace, profile, &snapshot).await?;
 
         let mut scene = scene_from_saved_view(&snapshot.document, &record.view);
         validate_viewport_indices(&scene, &command)?;
-        apply_viewport_command(&mut scene, &command);
-        let next_view = saved_view_from_scene(&snapshot.document, scene.clone());
+        apply_viewport_command(&mut scene, &command)?;
+        let mut next_view =
+            saved_view_from_scene(&snapshot.document, scene.clone(), Some(&record.view));
+        disable_auto_contrast_for_manual_command(&mut next_view, &command);
         let record = self
-            .upsert_profile(workspace, profile, None, &next_view)
+            .upsert_profile(workspace, profile, Some(record.revision), None, &next_view)
             .await?;
 
         if break_follow {
-            send_client_message(&mut write, &ClientMessage::Follow { target: None }).await?;
+            send_client_message(
+                &mut write,
+                &ClientMessage::Follow { target: None },
+                &deadline,
+            )
+            .await?;
         }
         send_client_message(
             &mut write,
             &ClientMessage::Presence {
-                camera: scene.camera,
-                view: scene.view,
-                display: scene.display,
+                camera: scene.camera().clone(),
+                view: scene.view().clone(),
+                display: scene.display().clone(),
             },
+            &deadline,
         )
         .await?;
 
@@ -729,10 +802,12 @@ impl ViewerProfileClient {
         profile: &str,
         wait: Duration,
     ) -> Result<ViewerProfileResult, CliError> {
-        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
+        let deadline = SessionDeadline::new(wait, "workspace WebSocket operation");
+        let socket =
+            connect_workspace_socket(&self.ws_url, self.token.as_deref(), &deadline).await?;
         let (_write, read) = socket.split();
         let mut incoming = incoming_messages(read);
-        let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
+        let snapshot = wait_for_workspace_snapshot(&mut incoming, &deadline).await?;
         let record = self.ensure_profile(workspace, profile, &snapshot).await?;
         Ok(viewer_profile_result(&snapshot, record, None))
     }
@@ -744,26 +819,31 @@ impl ViewerProfileClient {
         command: DatasetDisplayCommand,
         wait: Duration,
     ) -> Result<ViewerProfileResult, CliError> {
-        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
+        let deadline = SessionDeadline::new(wait, "workspace WebSocket operation");
+        let socket =
+            connect_workspace_socket(&self.ws_url, self.token.as_deref(), &deadline).await?;
         let (mut write, read) = socket.split();
         let mut incoming = incoming_messages(read);
-        let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
+        let snapshot = wait_for_workspace_snapshot(&mut incoming, &deadline).await?;
         let record = self.ensure_profile(workspace, profile, &snapshot).await?;
 
         let mut scene = scene_from_saved_view(&snapshot.document, &record.view);
         let viewport_command = display_viewport_command(&scene, command)?;
-        scene.apply(CoreCommand::Viewport(viewport_command.clone()));
-        let next_view = saved_view_from_scene(&snapshot.document, scene.clone());
+        apply_scene_command(&mut scene, CoreCommand::Viewport(viewport_command.clone()))?;
+        let mut next_view =
+            saved_view_from_scene(&snapshot.document, scene.clone(), Some(&record.view));
+        disable_auto_contrast_for_manual_command(&mut next_view, &viewport_command);
         let record = self
-            .upsert_profile(workspace, profile, None, &next_view)
+            .upsert_profile(workspace, profile, Some(record.revision), None, &next_view)
             .await?;
 
         send_client_message(
             &mut write,
             &ClientMessage::DatasetPresence {
-                dataset_order: scene.dataset_order,
-                dataset_settings: scene.dataset_settings,
+                dataset_order: scene.dataset_order().to_vec(),
+                dataset_settings: scene.dataset_settings().clone(),
             },
+            &deadline,
         )
         .await?;
 
@@ -781,26 +861,30 @@ impl ViewerProfileClient {
         viewport: [u32; 2],
         wait: Duration,
     ) -> Result<ViewerProfileResult, CliError> {
-        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
+        let deadline = SessionDeadline::new(wait, "workspace WebSocket operation");
+        let socket =
+            connect_workspace_socket(&self.ws_url, self.token.as_deref(), &deadline).await?;
         let (mut write, read) = socket.split();
         let mut incoming = incoming_messages(read);
-        let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
+        let snapshot = wait_for_workspace_snapshot(&mut incoming, &deadline).await?;
         let record = self.ensure_profile(workspace, profile, &snapshot).await?;
 
         let mut scene = scene_from_saved_view(&snapshot.document, &record.view);
         apply_overview_to_scene(&mut scene, viewport)?;
-        let next_view = saved_view_from_scene(&snapshot.document, scene.clone());
+        let next_view =
+            saved_view_from_scene(&snapshot.document, scene.clone(), Some(&record.view));
         let record = self
-            .upsert_profile(workspace, profile, None, &next_view)
+            .upsert_profile(workspace, profile, Some(record.revision), None, &next_view)
             .await?;
 
         send_client_message(
             &mut write,
             &ClientMessage::Presence {
-                camera: scene.camera,
-                view: scene.view,
-                display: scene.display,
+                camera: scene.camera().clone(),
+                view: scene.view().clone(),
+                display: scene.display().clone(),
             },
+            &deadline,
         )
         .await?;
 
@@ -838,10 +922,20 @@ impl ViewerProfileClient {
         let diagnostic = self
             .diagnostic_scene(workspace, profile, Some(client_id), wait)
             .await?;
-        let next_view = saved_view_from_scene(&diagnostic.snapshot.document, diagnostic.scene);
+        let next_view =
+            saved_view_from_scene(&diagnostic.snapshot.document, diagnostic.scene, None);
         let seed_source = format!("peer:{client_id}");
+        let current = self
+            .ensure_profile(workspace, profile, &diagnostic.snapshot)
+            .await?;
         let record = self
-            .upsert_profile(workspace, profile, Some(seed_source.as_str()), &next_view)
+            .upsert_profile(
+                workspace,
+                profile,
+                Some(current.revision),
+                Some(seed_source.as_str()),
+                &next_view,
+            )
             .await?;
         Ok(viewer_profile_result(&diagnostic.snapshot, record, None))
     }
@@ -889,10 +983,12 @@ impl ViewerProfileClient {
         from_peer: Option<ClientId>,
         wait: Duration,
     ) -> Result<DiagnosticScene, CliError> {
-        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
+        let deadline = SessionDeadline::new(wait, "workspace WebSocket operation");
+        let socket =
+            connect_workspace_socket(&self.ws_url, self.token.as_deref(), &deadline).await?;
         let (_write, read) = socket.split();
         let mut incoming = incoming_messages(read);
-        let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
+        let snapshot = wait_for_workspace_snapshot(&mut incoming, &deadline).await?;
 
         if let Some(client_id) = from_peer {
             let presence = find_presence(&snapshot, client_id).ok_or_else(|| {
@@ -941,8 +1037,18 @@ impl ViewerProfileClient {
         }
 
         let (view, seed_source) = self.seed_view(workspace, snapshot).await?;
-        self.upsert_profile(workspace, profile, Some(seed_source.as_str()), &view)
+        match self
+            .upsert_profile(workspace, profile, None, Some(seed_source.as_str()), &view)
             .await
+        {
+            Ok(record) => Ok(record),
+            // Two first-time clients may seed concurrently. The create-only
+            // write makes one the winner; the other adopts that durable row.
+            Err(error) if error.kind == ErrorKind::RejectedCommand => {
+                self.get_profile(workspace, profile).await?.ok_or(error)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn seed_view(
@@ -963,7 +1069,7 @@ impl ViewerProfileClient {
         let own_presence = own_presence(snapshot)?;
         let scene = scene_from_presence(&snapshot.document, own_presence);
         Ok((
-            saved_view_from_scene(&snapshot.document, scene),
+            saved_view_from_scene(&snapshot.document, scene, None),
             "workspace_snapshot".to_string(),
         ))
     }
@@ -991,10 +1097,15 @@ impl ViewerProfileClient {
         &self,
         workspace: &WorkspaceRecord,
         profile: &str,
+        expected_revision: Option<u64>,
         seed_source: Option<&str>,
         view: &SavedView,
     ) -> Result<WorkspaceViewerProfileRecord, CliError> {
-        let body = UpsertViewerProfileBody { view, seed_source };
+        let body = UpsertViewerProfileBody {
+            view,
+            expected_revision,
+            seed_source,
+        };
         let response = self
             .send(
                 self.http
@@ -1417,7 +1528,7 @@ fn apply_presence_command(
 
     let mut scene = scene_from_presence(&snapshot.document, source_presence);
     validate_viewport_indices(&scene, &command)?;
-    apply_viewport_command(&mut scene, &command);
+    apply_viewport_command(&mut scene, &command)?;
 
     Ok(ViewApplyResult {
         snapshot_seq: snapshot.seq,
@@ -1431,9 +1542,9 @@ fn apply_presence_command(
             },
         },
         command,
-        camera: scene.camera,
-        view: scene.view,
-        display: scene.display,
+        camera: scene.camera().clone(),
+        view: scene.view().clone(),
+        display: scene.display().clone(),
         break_follow: own_presence.following.is_some(),
     })
 }
@@ -1486,7 +1597,7 @@ fn apply_dataset_presence_command(
 
     let mut scene = scene_from_presence(&snapshot.document, source_presence);
     let viewport_command = display_viewport_command(&scene, command)?;
-    scene.apply(CoreCommand::Viewport(viewport_command.clone()));
+    apply_scene_command(&mut scene, CoreCommand::Viewport(viewport_command.clone()))?;
 
     Ok(dataset_presence_result(
         snapshot,
@@ -1517,59 +1628,70 @@ fn dataset_presence_result(
         own_client_id: snapshot.your_id,
         source,
         command,
-        multi_channel: scene.view.multi_channel,
+        multi_channel: scene.view().multi_channel,
         layers: layer_states(&scene),
-        dataset_order: scene.dataset_order,
-        dataset_settings: scene.dataset_settings,
+        dataset_order: scene.dataset_order().to_vec(),
+        dataset_settings: scene.dataset_settings().clone(),
         break_follow: own_presence.following.is_some(),
     }
 }
 
 fn scene_from_presence(document: &DocumentState, presence: &PresenceState) -> Scene {
-    let mut scene = Scene::new(presence.camera.viewport());
-    scene.document = document.clone();
-    scene.camera = presence.camera.clone();
-    // Peer-sourced camera: clamp into the ranges the interactive mutators
-    // enforce (same rule as `Scene::import_presence`).
-    scene.camera.sanitize();
-    scene.view = presence.view.clone();
-    scene.display = presence.display.clone();
-    scene.dataset_order = presence.dataset_order.clone();
-    scene.dataset_settings = presence.dataset_settings.clone();
-    hydrate_scene_document_defaults(&mut scene);
-    scene
+    Scene::from_hydration(
+        SceneHydration::new(
+            document.clone(),
+            presence.camera.clone(),
+            presence.view.clone(),
+            presence.display.clone(),
+        )
+        .with_dataset_presence(
+            presence.dataset_order.clone(),
+            presence.dataset_settings.clone(),
+        ),
+    )
 }
 
 fn scene_from_saved_view(document: &DocumentState, view: &SavedView) -> Scene {
-    let mut scene = Scene::new(view.camera.viewport());
-    scene.document = document.clone();
-    scene.camera = view.camera.clone();
-    // Stored camera: clamp into the ranges the interactive mutators enforce
-    // (same rule as `Scene::import_presence`).
-    scene.camera.sanitize();
-    scene.view = view.view.clone();
-    scene.display = view.display.clone();
-    scene.dataset_order = view.dataset_order.clone();
     // `SavedView.dataset_settings` is an `IndexMap` (deterministic wire order);
     // the CLI `Scene` mirror keeps a plain `HashMap`, so convert at the boundary.
-    scene.dataset_settings = view.dataset_settings.clone().into_iter().collect();
-    hydrate_scene_document_defaults(&mut scene);
-    scene
+    let dataset_settings = view.dataset_settings.clone().into_iter().collect();
+    Scene::from_hydration(
+        SceneHydration::new(
+            document.clone(),
+            view.camera.clone(),
+            view.view.clone(),
+            view.display.clone(),
+        )
+        .with_dataset_presence(view.dataset_order.clone(), dataset_settings),
+    )
 }
 
-fn saved_view_from_scene(document: &DocumentState, scene: Scene) -> SavedView {
+fn saved_view_from_scene(
+    document: &DocumentState,
+    scene: Scene,
+    previous: Option<&SavedView>,
+) -> SavedView {
     SavedView {
         v: SAVED_VIEW_VERSION,
         datasets: Vec::new(),
         // The CLI helpers/`Scene` mirror use `HashMap`; collect into
         // `SavedView`'s `IndexMap` fields at the boundary.
         active_layouts: active_layouts_from_document(document).into_iter().collect(),
-        camera: scene.camera,
-        view: scene.view,
-        display: scene.display,
-        dataset_order: scene.dataset_order,
-        dataset_settings: scene.dataset_settings.into_iter().collect(),
-        auto_contrast: Default::default(),
+        camera: scene.camera().clone(),
+        view: scene.view().clone(),
+        display: scene.display().clone(),
+        dataset_order: scene.dataset_order().to_vec(),
+        dataset_settings: scene.dataset_settings().clone().into_iter().collect(),
+        auto_contrast: previous
+            .map(|view| view.auto_contrast.clone())
+            .unwrap_or_default(),
+    }
+}
+
+fn disable_auto_contrast_for_manual_command(view: &mut SavedView, command: &ViewportCommand) {
+    if let ViewportCommand::SetChannelContrast { dataset_id, .. } = command {
+        view.auto_contrast
+            .insert(DatasetId(dataset_id.clone()), false);
     }
 }
 
@@ -1595,24 +1717,24 @@ fn apply_overview_to_scene(scene: &mut Scene, viewport: [u32; 2]) -> Result<(), 
     let zoom_x = viewport[0] as f64 / width;
     let zoom_y = viewport[1] as f64 / height;
     let zoom = zoom_x.min(zoom_y).max(f64::EPSILON) * 0.9;
-    apply_viewport_command(scene, &ViewportCommand::SetMode2D);
+    apply_viewport_command(scene, &ViewportCommand::SetMode2D)?;
     apply_viewport_command(
         scene,
         &ViewportCommand::SetViewport {
             width: viewport[0],
             height: viewport[1],
         },
-    );
+    )?;
     apply_viewport_command(
         scene,
         &ViewportCommand::SetCenter {
             x: bounds.center_x(),
             y: bounds.center_y(),
         },
-    );
-    apply_viewport_command(scene, &ViewportCommand::SetZoom { value: zoom });
+    )?;
+    apply_viewport_command(scene, &ViewportCommand::SetZoom { value: zoom })?;
     let z = bounds.max_depth.saturating_sub(1) / 2;
-    apply_viewport_command(scene, &ViewportCommand::SetZ { z });
+    apply_viewport_command(scene, &ViewportCommand::SetZ { z })?;
     Ok(())
 }
 
@@ -1633,39 +1755,27 @@ fn active_layouts_from_document(
         .collect()
 }
 
-fn hydrate_scene_document_defaults(scene: &mut Scene) {
-    for id in scene.document.manifests.keys() {
-        if !scene.dataset_order.contains(id) {
-            scene.dataset_order.push(id.clone());
-        }
-        scene.dataset_settings.entry(id.clone()).or_default();
-    }
-    let dataset_ids = scene
-        .document
-        .manifests
-        .keys()
-        .cloned()
-        .collect::<HashSet<_>>();
-    scene.dataset_order.retain(|id| dataset_ids.contains(id));
-    scene
-        .dataset_settings
-        .retain(|id, _| dataset_ids.contains(id));
-    scene.rebuild_derived();
-}
-
-fn apply_viewport_command(scene: &mut Scene, command: &ViewportCommand) {
+fn apply_viewport_command(scene: &mut Scene, command: &ViewportCommand) -> Result<(), CliError> {
     match command {
         ViewportCommand::Rotate3D { .. }
         | ViewportCommand::Zoom3D { .. }
         | ViewportCommand::Pan3D { .. } => {
-            scene.apply(CoreCommand::Viewport(ViewportCommand::SetMode3D))
+            apply_scene_command(scene, CoreCommand::Viewport(ViewportCommand::SetMode3D))?
         }
         ViewportCommand::FlyTick { .. } => {
-            scene.apply(CoreCommand::Viewport(ViewportCommand::SetModeFly))
+            apply_scene_command(scene, CoreCommand::Viewport(ViewportCommand::SetModeFly))?
         }
         _ => {}
     }
-    scene.apply(CoreCommand::Viewport(command.clone()));
+    apply_scene_command(scene, CoreCommand::Viewport(command.clone()))
+}
+
+fn apply_scene_command(scene: &mut Scene, command: CoreCommand) -> Result<(), CliError> {
+    scene.try_apply(command).map_err(|error| {
+        CliError::new(ErrorKind::RejectedCommand, error.message)
+            .with_context("command_validation_category", error.category)
+            .with_context("command_validation_path", error.path)
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1705,12 +1815,16 @@ fn view_index_error(axis: &str, requested: u32, count: u32) -> CliError {
 
 fn visible_view_index_bounds(scene: &Scene) -> Option<ViewIndexBounds> {
     let mut bounds: Option<ViewIndexBounds> = None;
-    for id in &scene.dataset_order {
-        let settings = scene.dataset_settings.get(id).cloned().unwrap_or_default();
+    for id in scene.dataset_order() {
+        let settings = scene
+            .dataset_settings()
+            .get(id)
+            .cloned()
+            .unwrap_or_default();
         if !settings.visible {
             continue;
         }
-        let Some(manifest) = scene.document.manifests.get(id) else {
+        let Some(manifest) = scene.document().manifests.get(id) else {
             continue;
         };
         let Some(level) = manifest
@@ -1748,8 +1862,8 @@ fn display_viewport_command(
 ) -> Result<ViewportCommand, CliError> {
     Ok(match command {
         DatasetDisplayCommand::SetOrder { selectors } => {
-            let mut order = resolve_dataset_ids(&scene.document, &selectors)?;
-            for id in &scene.dataset_order {
+            let mut order = resolve_dataset_ids(scene.document(), &selectors)?;
+            for id in scene.dataset_order() {
                 if !order.contains(id) {
                     order.push(id.clone());
                 }
@@ -1759,14 +1873,14 @@ fn display_viewport_command(
             }
         }
         DatasetDisplayCommand::SetDatasetVisible { selector, visible } => {
-            let dataset_id = resolve_dataset_id(&scene.document, &selector)?;
+            let dataset_id = resolve_dataset_id(scene.document(), &selector)?;
             ViewportCommand::SetDatasetVisible {
                 dataset_id: dataset_id.0,
                 visible,
             }
         }
         DatasetDisplayCommand::SetDatasetOpacity { selector, opacity } => {
-            let dataset_id = resolve_dataset_id(&scene.document, &selector)?;
+            let dataset_id = resolve_dataset_id(scene.document(), &selector)?;
             ViewportCommand::SetDatasetOpacity {
                 dataset_id: dataset_id.0,
                 opacity,
@@ -1778,11 +1892,11 @@ fn display_viewport_command(
             min,
             max,
         } => {
-            let dataset_id = resolve_dataset_id(&scene.document, &selector)?;
+            let dataset_id = resolve_dataset_id(scene.document(), &selector)?;
             let channel = resolve_channel(
-                &scene.document,
+                scene.document(),
                 &dataset_id,
-                channel.unwrap_or(scene.view.c),
+                channel.unwrap_or(scene.view().c),
             )?;
             ViewportCommand::SetChannelContrast {
                 dataset_id: dataset_id.0,
@@ -1796,11 +1910,11 @@ fn display_viewport_command(
             channel,
             gamma,
         } => {
-            let dataset_id = resolve_dataset_id(&scene.document, &selector)?;
+            let dataset_id = resolve_dataset_id(scene.document(), &selector)?;
             let channel = resolve_channel(
-                &scene.document,
+                scene.document(),
                 &dataset_id,
-                channel.unwrap_or(scene.view.c),
+                channel.unwrap_or(scene.view().c),
             )?;
             ViewportCommand::SetChannelGamma {
                 dataset_id: dataset_id.0,
@@ -1813,11 +1927,11 @@ fn display_viewport_command(
             channel,
             colormap,
         } => {
-            let dataset_id = resolve_dataset_id(&scene.document, &selector)?;
+            let dataset_id = resolve_dataset_id(scene.document(), &selector)?;
             let channel = resolve_channel(
-                &scene.document,
+                scene.document(),
                 &dataset_id,
-                channel.unwrap_or(scene.view.c),
+                channel.unwrap_or(scene.view().c),
             )?;
             ViewportCommand::SetChannelColormap {
                 dataset_id: dataset_id.0,
@@ -1829,7 +1943,7 @@ fn display_viewport_command(
             selector,
             blend_mode,
         } => {
-            let dataset_id = resolve_dataset_id(&scene.document, &selector)?;
+            let dataset_id = resolve_dataset_id(scene.document(), &selector)?;
             ViewportCommand::SetDatasetBlendMode {
                 dataset_id: dataset_id.0,
                 blend_mode,
@@ -1839,14 +1953,14 @@ fn display_viewport_command(
             selector,
             render_mode,
         } => {
-            let dataset_id = resolve_dataset_id(&scene.document, &selector)?;
+            let dataset_id = resolve_dataset_id(scene.document(), &selector)?;
             ViewportCommand::SetDatasetRenderMode {
                 dataset_id: dataset_id.0,
                 render_mode,
             }
         }
         DatasetDisplayCommand::SetDatasetDetailLevelOverride { selector, level } => {
-            let dataset_id = resolve_dataset_id(&scene.document, &selector)?;
+            let dataset_id = resolve_dataset_id(scene.document(), &selector)?;
             ViewportCommand::SetDatasetDetailLevelOverride {
                 dataset_id: dataset_id.0,
                 level,
@@ -1857,8 +1971,8 @@ fn display_viewport_command(
             channel,
             visible,
         } => {
-            let dataset_id = resolve_dataset_id(&scene.document, &selector)?;
-            let channel = resolve_channel(&scene.document, &dataset_id, channel)?;
+            let dataset_id = resolve_dataset_id(scene.document(), &selector)?;
+            let channel = resolve_channel(scene.document(), &dataset_id, channel)?;
             ViewportCommand::SetChannelVisible {
                 dataset_id: dataset_id.0,
                 channel,
@@ -1870,8 +1984,8 @@ fn display_viewport_command(
             channel,
             colormap,
         } => {
-            let dataset_id = resolve_dataset_id(&scene.document, &selector)?;
-            let channel = resolve_channel(&scene.document, &dataset_id, channel)?;
+            let dataset_id = resolve_dataset_id(scene.document(), &selector)?;
+            let channel = resolve_channel(scene.document(), &dataset_id, channel)?;
             ViewportCommand::SetChannelColormap {
                 dataset_id: dataset_id.0,
                 channel,
@@ -1884,8 +1998,8 @@ fn display_viewport_command(
             min,
             max,
         } => {
-            let dataset_id = resolve_dataset_id(&scene.document, &selector)?;
-            let channel = resolve_channel(&scene.document, &dataset_id, channel)?;
+            let dataset_id = resolve_dataset_id(scene.document(), &selector)?;
+            let channel = resolve_channel(scene.document(), &dataset_id, channel)?;
             ViewportCommand::SetChannelContrast {
                 dataset_id: dataset_id.0,
                 channel,
@@ -1898,8 +2012,8 @@ fn display_viewport_command(
             channel,
             gamma,
         } => {
-            let dataset_id = resolve_dataset_id(&scene.document, &selector)?;
-            let channel = resolve_channel(&scene.document, &dataset_id, channel)?;
+            let dataset_id = resolve_dataset_id(scene.document(), &selector)?;
+            let channel = resolve_channel(scene.document(), &dataset_id, channel)?;
             ViewportCommand::SetChannelGamma {
                 dataset_id: dataset_id.0,
                 channel,
@@ -1910,7 +2024,7 @@ fn display_viewport_command(
             selector,
             blend_mode,
         } => {
-            let dataset_id = resolve_dataset_id(&scene.document, &selector)?;
+            let dataset_id = resolve_dataset_id(scene.document(), &selector)?;
             ViewportCommand::SetChannelBlendMode {
                 dataset_id: dataset_id.0,
                 blend_mode,
@@ -2001,18 +2115,18 @@ fn channel_count(document: &DocumentState, dataset_id: &DatasetId) -> Option<u32
 
 fn layer_states(scene: &Scene) -> Vec<LayerState> {
     scene
-        .dataset_order
+        .dataset_order()
         .iter()
         .filter_map(|id| {
-            let manifest = scene.document.manifests.get(id)?;
+            let manifest = scene.document().manifests.get(id)?;
             let default_settings;
-            let settings = if let Some(settings) = scene.dataset_settings.get(id) {
+            let settings = if let Some(settings) = scene.dataset_settings().get(id) {
                 settings
             } else {
                 default_settings = DatasetDisplaySettings::default();
                 &default_settings
             };
-            let channel_count = channel_count(&scene.document, id).unwrap_or(0);
+            let channel_count = channel_count(scene.document(), id).unwrap_or(0);
             let channels = (0..channel_count)
                 .map(|channel| channel_state(settings, channel))
                 .collect();
@@ -2145,7 +2259,7 @@ fn plan_visible_chunks_result(
     scene: &Scene,
     dataset: Option<&str>,
 ) -> Result<PlanVisibleChunksResult, CliError> {
-    let dataset_ids = diagnostic_dataset_ids(&scene.document, &scene.dataset_order, dataset)?;
+    let dataset_ids = diagnostic_dataset_ids(scene.document(), scene.dataset_order(), dataset)?;
     let datasets = dataset_ids
         .iter()
         .filter_map(|dataset_id| plan_dataset_diagnostic(snapshot, scene, dataset_id))
@@ -2166,9 +2280,9 @@ fn plan_dataset_diagnostic(
     scene: &Scene,
     dataset_id: &DatasetId,
 ) -> Option<PlanDatasetDiagnostic> {
-    let manifest = scene.document.manifests.get(dataset_id)?;
+    let manifest = scene.document().manifests.get(dataset_id)?;
     let settings = scene
-        .dataset_settings
+        .dataset_settings()
         .get(dataset_id)
         .cloned()
         .unwrap_or_default();
@@ -2186,10 +2300,10 @@ fn plan_dataset_diagnostic(
         dataset_id: dataset_id.0.clone(),
         name: manifest.name.clone(),
         visible: settings.visible,
-        multi_channel: scene.view.multi_channel,
-        display: scene.display.clone(),
+        multi_channel: scene.view().multi_channel,
+        display: scene.display().clone(),
         active_layout_id: scene
-            .document
+            .document()
             .active_layout_ids
             .get(dataset_id)
             .map(|layout_id| layout_id.0.clone()),
@@ -2214,12 +2328,12 @@ fn debug_state_result(
         diagnostic_kind: "workspace_scene_state",
         planner_parity: false,
         viewer: DebugViewerState {
-            camera: scene.camera.clone(),
-            view: scene.view.clone(),
-            display: scene.display.clone(),
-            multi_channel: scene.view.multi_channel,
+            camera: scene.camera().clone(),
+            view: scene.view().clone(),
+            display: scene.display().clone(),
+            multi_channel: scene.view().multi_channel,
             dataset_order: scene
-                .dataset_order
+                .dataset_order()
                 .iter()
                 .map(|dataset_id| dataset_id.0.clone())
                 .collect(),
@@ -2250,13 +2364,13 @@ fn diagnostic_dataset_ids(
 }
 
 fn debug_dataset_states(snapshot: &WorkspaceSnapshot, scene: &Scene) -> Vec<DebugDatasetState> {
-    diagnostic_dataset_ids(&scene.document, &scene.dataset_order, None)
+    diagnostic_dataset_ids(scene.document(), scene.dataset_order(), None)
         .unwrap_or_default()
         .into_iter()
         .filter_map(|dataset_id| {
-            let manifest = scene.document.manifests.get(&dataset_id)?;
+            let manifest = scene.document().manifests.get(&dataset_id)?;
             let settings = scene
-                .dataset_settings
+                .dataset_settings()
                 .get(&dataset_id)
                 .cloned()
                 .unwrap_or_default();
@@ -2266,12 +2380,12 @@ fn debug_dataset_states(snapshot: &WorkspaceSnapshot, scene: &Scene) -> Vec<Debu
                 name: manifest.name.clone(),
                 visible: settings.visible,
                 member_count: scene
-                    .derived
+                    .derived()
                     .get(&dataset_id)
                     .map(|derived| derived.members.len())
                     .unwrap_or(0),
                 active_layout_id: scene
-                    .document
+                    .document()
                     .active_layout_ids
                     .get(&dataset_id)
                     .map(|layout_id| layout_id.0.clone()),
@@ -2284,7 +2398,7 @@ fn debug_dataset_states(snapshot: &WorkspaceSnapshot, scene: &Scene) -> Vec<Debu
 
 fn active_member_diagnostics(scene: &Scene, dataset_id: &DatasetId) -> Vec<ActiveMemberDiagnostic> {
     scene
-        .derived
+        .derived()
         .get(dataset_id)
         .map(|derived| {
             derived
@@ -2417,19 +2531,20 @@ fn viewer_profile_result(
 ) -> ViewerProfileResult {
     let scene = scene_from_saved_view(&snapshot.document, &record.view);
     let layers = layer_states(&scene);
-    let multi_channel = scene.view.multi_channel;
+    let multi_channel = scene.view().multi_channel;
     ViewerProfileResult {
         snapshot_seq: snapshot.seq,
         own_client_id: snapshot.your_id,
         profile: record.profile,
+        revision: record.revision,
         user_email: record.user_email,
         created_at: record.created_at,
         updated_at: record.updated_at,
         seed_source: record.seed_source,
         command,
-        camera: scene.camera,
-        view: scene.view,
-        display: scene.display,
+        camera: scene.camera().clone(),
+        view: scene.view().clone(),
+        display: scene.display().clone(),
         multi_channel,
         layers,
     }
@@ -2440,16 +2555,16 @@ fn viewer_source_result(
     source: DiagnosticViewSource,
     scene: Scene,
 ) -> ViewerSourceResult {
-    let saved_view = saved_view_from_scene(&snapshot.document, scene.clone());
+    let saved_view = saved_view_from_scene(&snapshot.document, scene.clone(), None);
     let layers = layer_states(&scene);
-    let multi_channel = scene.view.multi_channel;
+    let multi_channel = scene.view().multi_channel;
     ViewerSourceResult {
         snapshot_seq: snapshot.seq,
         own_client_id: snapshot.your_id,
         source,
-        camera: scene.camera,
-        view: scene.view,
-        display: scene.display,
+        camera: scene.camera().clone(),
+        view: scene.view().clone(),
+        display: scene.display().clone(),
         multi_channel,
         layers,
         saved_view,
@@ -2476,14 +2591,17 @@ fn follow_message(target: Option<ClientId>) -> ClientMessage {
 }
 
 fn cursor_message(position: Option<[f64; 2]>) -> ClientMessage {
-    ClientMessage::Cursor { position }
+    ClientMessage::Cursor {
+        position,
+        dataset_id: None,
+    }
 }
 
 async fn wait_for_follow_change<S>(
     messages: &mut S,
     client_id: ClientId,
     target: Option<ClientId>,
-    wait: Duration,
+    deadline: &SessionDeadline,
 ) -> Result<Vec<PeerFollowChange>, CliError>
 where
     S: Stream<Item = Result<IncomingSessionMessage, CliError>> + Unpin,
@@ -2495,7 +2613,7 @@ where
         timeout_kind: ErrorKind::RejectedCommand,
     };
     let mut changes = Vec::new();
-    observe_until(messages, wait, &FOLLOW_WAIT, |message| {
+    observe_until(messages, deadline, &FOLLOW_WAIT, |message| {
         if let ServerMessage::FollowChanged {
             client_id: changed_client_id,
             target: changed_target,
@@ -2564,7 +2682,7 @@ async fn decode_viewer_profile_json<T: DeserializeOwned>(
             format!("{context} returned {content_type}; expected application/json"),
         ));
     }
-    response.json::<T>().await.map_err(|error| {
+    bounded_json::<T>(response).await.map_err(|error| {
         CliError::new(
             ErrorKind::Protocol,
             format!("{context} response was not valid JSON: {error}"),
@@ -2591,6 +2709,14 @@ fn map_viewer_profile_http_error(status: reqwest::StatusCode, body: &str) -> Cli
             ErrorKind::Config,
             detail.unwrap_or_else(|| "viewer profile request was invalid".to_string()),
         ),
+        reqwest::StatusCode::CONFLICT if body.contains("viewer_profile_conflict") => CliError::new(
+            ErrorKind::RejectedCommand,
+            detail.unwrap_or_else(|| {
+                "viewer profile changed; read the latest revision and retry".to_string()
+            }),
+        )
+        .with_context("retryable", true)
+        .with_context("failure_code", "viewer_profile_conflict"),
         reqwest::StatusCode::CONFLICT | reqwest::StatusCode::GONE => CliError::new(
             ErrorKind::ArchivedWorkspace,
             detail.unwrap_or_else(|| "workspace is archived".to_string()),
@@ -2791,6 +2917,7 @@ mod tests {
             display: DisplayState::default(),
             following: None,
             cursor: None,
+            cursor_dataset_id: None,
             dataset_order: Vec::new(),
             dataset_settings: HashMap::new(),
             identity: None,
@@ -2888,8 +3015,7 @@ mod tests {
                 }
             },
             "registered_layouts": {},
-            "active_layout_ids": {},
-            "asset_catalogs": {}
+            "active_layout_ids": {}
         }))
         .unwrap()
     }
@@ -2937,6 +3063,7 @@ mod tests {
                     level_index: 3,
                     key: "3/0/0/0/0/0".to_string(),
                     status: GeneratedChunkStatus::Ready,
+                    failure: None,
                     message: None,
                 },
                 GeneratedChunkStatusUpdate {
@@ -2944,6 +3071,7 @@ mod tests {
                     level_index: 3,
                     key: "3/0/0/1/0/0".to_string(),
                     status: GeneratedChunkStatus::Pending,
+                    failure: None,
                     message: Some("queued".to_string()),
                 },
             ],
@@ -2983,6 +3111,7 @@ mod tests {
                 snapshot_seq: 12,
                 own_client_id: 7,
                 profile: "default".to_string(),
+                revision: 2,
                 user_email: "dev@local".to_string(),
                 created_at: "2026-06-07T00:00:00Z".to_string(),
                 updated_at: "2026-06-07T00:01:00Z".to_string(),
@@ -3352,14 +3481,18 @@ mod tests {
     fn overview_fits_first_visible_image_into_requested_viewport() {
         let snapshot = display_snapshot();
         let mut scene = scene_from_presence(&snapshot.document, &snapshot.peers[0]);
-        scene.dataset_order = vec![
-            DatasetId("wds-test".to_string()),
-            DatasetId("wds-other".to_string()),
-        ];
+        scene
+            .try_apply(
+                ViewportCommand::SetDatasetOrder {
+                    order: vec!["wds-test".to_string(), "wds-other".to_string()],
+                }
+                .into(),
+            )
+            .unwrap();
 
         apply_overview_to_scene(&mut scene, [320, 320]).unwrap();
 
-        match scene.camera {
+        match scene.camera() {
             Camera::Slice(slice) => {
                 assert_eq!(slice.viewport, [320, 320]);
                 assert_eq!(slice.center, [16.0, 32.0]);
@@ -3367,8 +3500,53 @@ mod tests {
             }
             _ => panic!("expected slice camera"),
         }
-        assert_eq!(scene.view.z_range.start, 2);
-        assert_eq!(scene.view.z_range.end, 3);
+        assert_eq!(scene.view().z_range.start, 2);
+        assert_eq!(scene.view().z_range.end, 3);
+    }
+
+    #[test]
+    fn saved_view_preserves_auto_contrast_and_manual_contrast_disables_target_only() {
+        let snapshot = display_snapshot();
+        let base_scene = scene_from_presence(&snapshot.document, &snapshot.peers[0]);
+        let mut previous = saved_view_from_scene(&snapshot.document, base_scene, None);
+        let target = DatasetId("wds-test".to_string());
+        let other = DatasetId("wds-other".to_string());
+        previous.auto_contrast.insert(target.clone(), true);
+        previous.auto_contrast.insert(other.clone(), true);
+
+        let mut scene = scene_from_saved_view(&snapshot.document, &previous);
+        let command = display_viewport_command(
+            &scene,
+            DatasetDisplayCommand::SetChannelContrast {
+                selector: "demo.zarr".to_string(),
+                channel: 0,
+                min: 0.0,
+                max: 255.0,
+            },
+        )
+        .unwrap();
+        apply_scene_command(&mut scene, CoreCommand::Viewport(command.clone())).unwrap();
+
+        let mut next = saved_view_from_scene(&snapshot.document, scene, Some(&previous));
+        assert_eq!(next.auto_contrast, previous.auto_contrast);
+        disable_auto_contrast_for_manual_command(&mut next, &command);
+
+        assert_eq!(next.auto_contrast.get(&target), Some(&false));
+        assert_eq!(next.auto_contrast.get(&other), Some(&true));
+        let channel = &next.dataset_settings[&target].channel_settings[0];
+        assert_eq!(channel.contrast_min, 0.0);
+        assert_eq!(channel.contrast_max, 255.0);
+
+        let after_contrast = next.auto_contrast.clone();
+        disable_auto_contrast_for_manual_command(
+            &mut next,
+            &ViewportCommand::SetChannelGamma {
+                dataset_id: target.0,
+                channel: 0,
+                gamma: 1.5,
+            },
+        );
+        assert_eq!(next.auto_contrast, after_contrast);
     }
 
     #[test]

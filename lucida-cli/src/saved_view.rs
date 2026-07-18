@@ -5,9 +5,10 @@ use futures_util::{Sink, Stream, StreamExt};
 use lucida_content::LayoutId;
 use lucida_core::DatasetId;
 use lucida_core::command::DocumentCommand;
-use lucida_core::protocol::{ClientId, ClientMessage, PresenceState, ServerMessage};
+use lucida_core::protocol::{ClientId, ClientMessage, PresenceState};
 use lucida_core::saved_view::SavedView;
 use lucida_core::scene::{DatasetDisplaySettings, DocumentState};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio_tungstenite::tungstenite::error::Error as WebSocketError;
 use tokio_tungstenite::tungstenite::protocol::Message;
@@ -15,10 +16,11 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 use crate::config::EffectiveServer;
 use crate::credentials::EffectiveToken;
 use crate::error::{CliError, ErrorKind};
-use crate::http::{api_url, response_detail, send_json};
+use crate::http::{api_url, bounded_json, http_client, response_detail, send_json};
 use crate::session::{
-    IncomingSessionMessage, SessionWait, WorkspaceSnapshot, connect_workspace_socket,
-    incoming_messages, observe_until, send_client_message, wait_for_workspace_snapshot,
+    IncomingSessionMessage, PendingCommand, SessionDeadline, SessionWait, WorkspaceSnapshot,
+    connect_workspace_socket, incoming_messages, send_client_message, wait_for_command_result,
+    wait_for_workspace_snapshot,
 };
 use crate::workspace::{WorkspaceRecord, WorkspaceRole, WorkspaceTarget};
 
@@ -144,11 +146,32 @@ pub struct SavedViewApplyOutput {
 #[derive(Debug, Clone, Serialize)]
 pub struct SavedViewApplyResult {
     pub own_client_id: ClientId,
-    pub snapshot_seq: u64,
+    pub initial_snapshot_seq: u64,
+    /// Saved-view layout changes are intentionally sequential, not atomic.
+    /// On failure, the error envelope includes this same acknowledged prefix.
+    pub batch_semantics: &'static str,
     pub layout_command_count: usize,
-    pub dataset_presence_sent: bool,
-    pub presence_sent: bool,
+    pub layout_acknowledgements: Vec<SavedViewLayoutAcknowledgement>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub final_acknowledged_seq: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub durable_profile: Option<SavedViewDurableProfile>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SavedViewLayoutAcknowledgement {
+    pub dataset_id: String,
+    pub layout_id: String,
+    pub request_id: String,
+    pub acknowledged_seq: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SavedViewDurableProfile {
+    pub profile: String,
+    pub revision: u64,
+    pub lifetime: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -206,7 +229,7 @@ impl WorkspaceSavedViewClient {
             base_url: base_url.into(),
             ws_url: ws_url.into(),
             token: token.map(|effective| effective.token),
-            http: reqwest::Client::new(),
+            http: http_client(),
         }
     }
 
@@ -214,14 +237,11 @@ impl WorkspaceSavedViewClient {
         &self,
         workspace: &WorkspaceRecord,
     ) -> Result<Vec<WorkspaceSavedViewRecord>, CliError> {
-        self.send(
+        self.send_decode(
             self.http
                 .get(saved_view_collection_url(&self.base_url, &workspace.id)?),
         )
-        .await?
-        .json::<Vec<WorkspaceSavedViewRecord>>()
         .await
-        .map_err(CliError::from)
     }
 
     pub async fn get(
@@ -229,15 +249,12 @@ impl WorkspaceSavedViewClient {
         workspace: &WorkspaceRecord,
         saved_view_id: &str,
     ) -> Result<WorkspaceSavedViewRecord, CliError> {
-        self.send(self.http.get(saved_view_item_url(
+        self.send_decode(self.http.get(saved_view_item_url(
             &self.base_url,
             &workspace.id,
             saved_view_id,
         )?))
-        .await?
-        .json::<WorkspaceSavedViewRecord>()
         .await
-        .map_err(CliError::from)
     }
 
     pub async fn create(
@@ -253,15 +270,12 @@ impl WorkspaceSavedViewClient {
             view,
             visibility: visibility.as_str(),
         };
-        self.send(
+        self.send_decode(
             self.http
                 .post(saved_view_collection_url(&self.base_url, &workspace.id)?)
                 .json(&body),
         )
-        .await?
-        .json::<WorkspaceSavedViewRecord>()
         .await
-        .map_err(CliError::from)
     }
 
     /// Re-scope a saved view's visibility (PATCH .../visibility). "Promote" in
@@ -276,7 +290,7 @@ impl WorkspaceSavedViewClient {
         let body = SetWorkspaceSavedViewVisibilityBody {
             visibility: visibility.as_str(),
         };
-        self.send(
+        self.send_decode(
             self.http
                 .patch(saved_view_visibility_url(
                     &self.base_url,
@@ -285,10 +299,7 @@ impl WorkspaceSavedViewClient {
                 )?)
                 .json(&body),
         )
-        .await?
-        .json::<WorkspaceSavedViewRecord>()
         .await
-        .map_err(CliError::from)
     }
 
     /// Approve a proposed view (POST .../approve) — an editor action that
@@ -298,15 +309,12 @@ impl WorkspaceSavedViewClient {
         workspace: &WorkspaceRecord,
         saved_view_id: &str,
     ) -> Result<WorkspaceSavedViewRecord, CliError> {
-        self.send(self.http.post(saved_view_approve_url(
+        self.send_decode(self.http.post(saved_view_approve_url(
             &self.base_url,
             &workspace.id,
             saved_view_id,
         )?))
-        .await?
-        .json::<WorkspaceSavedViewRecord>()
         .await
-        .map_err(CliError::from)
     }
 
     /// Reject a proposed view (POST .../reject) — an editor action that returns
@@ -316,15 +324,12 @@ impl WorkspaceSavedViewClient {
         workspace: &WorkspaceRecord,
         saved_view_id: &str,
     ) -> Result<WorkspaceSavedViewRecord, CliError> {
-        self.send(self.http.post(saved_view_reject_url(
+        self.send_decode(self.http.post(saved_view_reject_url(
             &self.base_url,
             &workspace.id,
             saved_view_id,
         )?))
-        .await?
-        .json::<WorkspaceSavedViewRecord>()
         .await
-        .map_err(CliError::from)
     }
 
     pub async fn rename(
@@ -377,15 +382,12 @@ impl WorkspaceSavedViewClient {
     ) -> Result<WorkspaceRecord, CliError> {
         ensure_saved_view_mutation_allowed(workspace)?;
         let body = UpdateWorkspaceDefaultSavedViewBody { saved_view_id };
-        self.send(
+        self.send_decode(
             self.http
                 .patch(default_saved_view_url(&self.base_url, &workspace.id)?)
                 .json(&body),
         )
-        .await?
-        .json::<WorkspaceRecord>()
         .await
-        .map_err(CliError::from)
     }
 
     pub async fn capture(
@@ -393,10 +395,12 @@ impl WorkspaceSavedViewClient {
         from_peer: Option<ClientId>,
         wait: Duration,
     ) -> Result<(SavedViewPresenceSource, SavedView), CliError> {
-        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
+        let deadline = SessionDeadline::new(wait, "workspace WebSocket operation");
+        let socket =
+            connect_workspace_socket(&self.ws_url, self.token.as_deref(), &deadline).await?;
         let (_write, read) = socket.split();
         let mut incoming = incoming_messages(read);
-        let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
+        let snapshot = wait_for_workspace_snapshot(&mut incoming, &deadline).await?;
         capture_saved_view_from_snapshot(&snapshot, from_peer)
     }
 
@@ -406,12 +410,21 @@ impl WorkspaceSavedViewClient {
         view: &SavedView,
         wait: Duration,
     ) -> Result<SavedViewApplyResult, CliError> {
-        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
+        let deadline = SessionDeadline::new(wait, "workspace WebSocket operation");
+        let socket =
+            connect_workspace_socket(&self.ws_url, self.token.as_deref(), &deadline).await?;
         let (mut write, read) = socket.split();
         let mut incoming = incoming_messages(read);
-        let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
-        apply_saved_view_to_workspace(&mut write, &mut incoming, &snapshot, workspace, view, wait)
-            .await
+        let snapshot = wait_for_workspace_snapshot(&mut incoming, &deadline).await?;
+        apply_saved_view_to_workspace(
+            &mut write,
+            &mut incoming,
+            &snapshot,
+            workspace,
+            view,
+            &deadline,
+        )
+        .await
     }
 
     async fn patch_saved_view(
@@ -420,7 +433,7 @@ impl WorkspaceSavedViewClient {
         saved_view_id: &str,
         body: &UpdateWorkspaceSavedViewBody<'_>,
     ) -> Result<WorkspaceSavedViewRecord, CliError> {
-        self.send(
+        self.send_decode(
             self.http
                 .patch(saved_view_item_url(
                     &self.base_url,
@@ -429,14 +442,18 @@ impl WorkspaceSavedViewClient {
                 )?)
                 .json(body),
         )
-        .await?
-        .json::<WorkspaceSavedViewRecord>()
         .await
-        .map_err(CliError::from)
     }
 
     async fn send(&self, request: reqwest::RequestBuilder) -> Result<reqwest::Response, CliError> {
         send_json(request, self.token.as_deref(), map_saved_view_http_error).await
+    }
+
+    async fn send_decode<T: DeserializeOwned>(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<T, CliError> {
+        bounded_json(self.send(request).await?).await
     }
 }
 
@@ -531,22 +548,20 @@ pub fn format_saved_view_apply_human(output: &SavedViewApplyOutput) -> String {
         format!("Client: {}", output.result.own_client_id),
         format!("Layout commands: {}", output.result.layout_command_count),
         format!(
-            "Dataset presence: {}",
-            if output.result.dataset_presence_sent {
-                "sent"
-            } else {
-                "not sent"
-            }
-        ),
-        format!(
-            "Presence: {}",
-            if output.result.presence_sent {
-                "sent"
-            } else {
-                "not sent"
-            }
+            "Final acknowledged sequence: {}",
+            output
+                .result
+                .final_acknowledged_seq
+                .map(|seq| seq.to_string())
+                .unwrap_or_else(|| "none (no shared layout mutation)".to_string())
         ),
     ];
+    if let Some(profile) = &output.result.durable_profile {
+        lines.push(format!(
+            "Durable viewer profile: {} (revision {})",
+            profile.profile, profile.revision
+        ));
+    }
     lines.extend(
         output
             .result
@@ -685,7 +700,7 @@ async fn apply_saved_view_to_workspace<W, S>(
     snapshot: &WorkspaceSnapshot,
     workspace: &WorkspaceRecord,
     view: &SavedView,
-    wait: Duration,
+    deadline: &SessionDeadline,
 ) -> Result<SavedViewApplyResult, CliError>
 where
     W: Sink<Message, Error = WebSocketError> + Unpin,
@@ -702,7 +717,7 @@ where
             )
         })?;
     if own_presence.following.is_some() {
-        send_client_message(write, &ClientMessage::Follow { target: None }).await?;
+        send_client_message(write, &ClientMessage::Follow { target: None }, deadline).await?;
     }
 
     let loaded_ids = snapshot
@@ -712,12 +727,21 @@ where
         .cloned()
         .collect::<HashSet<_>>();
     let requested_ids = requested_dataset_ids(view);
-    let mut warnings = missing_dataset_warnings(&loaded_ids, &requested_ids);
-    let mut layout_command_count = 0;
+    let warnings = missing_dataset_warnings(&loaded_ids, &requested_ids);
+    let mut result = SavedViewApplyResult {
+        own_client_id: snapshot.your_id,
+        initial_snapshot_seq: snapshot.seq,
+        batch_semantics: "sequential_acknowledged_prefix",
+        layout_command_count: 0,
+        layout_acknowledgements: Vec::new(),
+        final_acknowledged_seq: None,
+        durable_profile: None,
+        warnings,
+    };
 
     if !view.active_layouts.is_empty() {
         if workspace.role == WorkspaceRole::Viewer {
-            warnings.push(
+            result.warnings.push(
                 "workspace role cannot change active layouts; applied local saved-view state only"
                     .to_string(),
             );
@@ -727,58 +751,64 @@ where
                     continue;
                 }
                 if !layout_exists(&snapshot.document, dataset_id, layout_id) {
-                    warnings.push(format!(
+                    result.warnings.push(format!(
                         "dataset {:?} has no layout {:?}; leaving shared layout unchanged",
                         dataset_id.0, layout_id.0
                     ));
                     continue;
                 }
-                let message = ClientMessage::Command {
-                    command: DocumentCommand::SetActiveLayout {
-                        dataset_id: dataset_id.clone(),
-                        layout_id: layout_id.clone(),
-                    },
-                };
-                send_client_message(write, &message).await?;
-                wait_for_document_ack(incoming, dataset_id, layout_id, wait).await?;
-                layout_command_count += 1;
+                let pending = PendingCommand::new(DocumentCommand::SetActiveLayout {
+                    dataset_id: dataset_id.clone(),
+                    layout_id: layout_id.clone(),
+                });
+                send_client_message(write, &pending.message, deadline)
+                    .await
+                    .map_err(|error| {
+                        saved_view_partial_error(error, &result, &pending.request_id, "send")
+                    })?;
+                let acknowledged_seq =
+                    wait_for_document_ack(incoming, &pending.request_id, deadline)
+                        .await
+                        .map_err(|error| {
+                            saved_view_partial_error(
+                                error,
+                                &result,
+                                &pending.request_id,
+                                "acknowledgement",
+                            )
+                        })?;
+                result
+                    .layout_acknowledgements
+                    .push(SavedViewLayoutAcknowledgement {
+                        dataset_id: dataset_id.0.clone(),
+                        layout_id: layout_id.0.clone(),
+                        request_id: pending.request_id,
+                        acknowledged_seq,
+                    });
+                result.layout_command_count = result.layout_acknowledgements.len();
+                result.final_acknowledged_seq = Some(acknowledged_seq);
             }
         }
     }
 
-    let dataset_presence = dataset_presence_for_saved_view(&snapshot.document, own_presence, view);
-    let dataset_presence_sent = if let Some((dataset_order, dataset_settings)) = dataset_presence {
-        send_client_message(
-            write,
-            &ClientMessage::DatasetPresence {
-                dataset_order,
-                dataset_settings,
-            },
-        )
-        .await?;
-        true
-    } else {
-        false
-    };
+    Ok(result)
+}
 
-    send_client_message(
-        write,
-        &ClientMessage::Presence {
-            camera: view.camera.clone(),
-            view: view.view.clone(),
-            display: view.display.clone(),
-        },
-    )
-    .await?;
-
-    Ok(SavedViewApplyResult {
-        own_client_id: snapshot.your_id,
-        snapshot_seq: snapshot.seq,
-        layout_command_count,
-        dataset_presence_sent,
-        presence_sent: true,
-        warnings,
-    })
+fn saved_view_partial_error(
+    error: CliError,
+    result: &SavedViewApplyResult,
+    request_id: &str,
+    phase: &str,
+) -> CliError {
+    error
+        .with_message_suffix(format!(
+            "; saved-view apply stopped after {} acknowledged layout change(s)",
+            result.layout_command_count
+        ))
+        .with_context("batch_semantics", result.batch_semantics)
+        .with_context("acknowledged_partial_result", result)
+        .with_context("unconfirmed_request_id", request_id)
+        .with_context("failure_phase", phase)
 }
 
 fn requested_dataset_ids(view: &SavedView) -> HashSet<DatasetId> {
@@ -799,51 +829,6 @@ fn missing_dataset_warnings(
         .filter(|id| !loaded_ids.contains(*id))
         .map(|id| format!("saved view references missing workspace dataset {:?}", id.0))
         .collect()
-}
-
-fn dataset_presence_for_saved_view(
-    document: &DocumentState,
-    own_presence: &PresenceState,
-    view: &SavedView,
-) -> Option<(Vec<DatasetId>, HashMap<DatasetId, DatasetDisplaySettings>)> {
-    let loaded_ids = document.manifests.keys().cloned().collect::<HashSet<_>>();
-    let requested_ids = requested_dataset_ids(view);
-    let mut order = view
-        .dataset_order
-        .iter()
-        .filter(|id| loaded_ids.contains(*id))
-        .cloned()
-        .collect::<Vec<_>>();
-    if order.is_empty() && requested_ids.is_empty() {
-        order = own_presence.dataset_order.clone();
-    }
-    for id in &own_presence.dataset_order {
-        if loaded_ids.contains(id) && !order.contains(id) {
-            order.push(id.clone());
-        }
-    }
-    for id in document.manifests.keys() {
-        if !order.contains(id) {
-            order.push(id.clone());
-        }
-    }
-
-    let mut settings = own_presence.dataset_settings.clone();
-    for id in &loaded_ids {
-        settings.entry(id.clone()).or_default();
-    }
-    for (id, saved_settings) in &view.dataset_settings {
-        if loaded_ids.contains(id) {
-            settings.insert(id.clone(), saved_settings.clone());
-        }
-    }
-    if !requested_ids.is_empty() {
-        for id in loaded_ids.difference(&requested_ids) {
-            settings.entry(id.clone()).or_default().visible = false;
-        }
-    }
-    settings.retain(|id, _| loaded_ids.contains(id));
-    Some((order, settings))
 }
 
 fn hydrated_dataset_presence(
@@ -899,9 +884,8 @@ fn layout_exists(document: &DocumentState, dataset_id: &DatasetId, layout_id: &L
 
 async fn wait_for_document_ack<S>(
     messages: &mut S,
-    dataset_id: &DatasetId,
-    layout_id: &LayoutId,
-    wait: Duration,
+    request_id: &str,
+    deadline: &SessionDeadline,
 ) -> Result<u64, CliError>
 where
     S: Stream<Item = Result<IncomingSessionMessage, CliError>> + Unpin,
@@ -912,21 +896,7 @@ where
         timeout_subject: "saved-view layout confirmation",
         timeout_kind: ErrorKind::RejectedCommand,
     };
-    observe_until(messages, wait, &APPLY_WAIT, |message| match message {
-        ServerMessage::Ack { seq } => Ok(Some(seq)),
-        ServerMessage::CommandBroadcast {
-            seq,
-            command:
-                DocumentCommand::SetActiveLayout {
-                    dataset_id: observed_dataset_id,
-                    layout_id: observed_layout_id,
-                },
-        } if &observed_dataset_id == dataset_id && &observed_layout_id == layout_id => {
-            Ok(Some(seq))
-        }
-        _ => Ok(None),
-    })
-    .await
+    wait_for_command_result(messages, request_id, deadline, &APPLY_WAIT).await
 }
 
 fn saved_view_collection_url(
@@ -1080,6 +1050,7 @@ mod tests {
             display: DisplayState::default(),
             following: None,
             cursor: None,
+            cursor_dataset_id: None,
             dataset_order: Vec::new(),
             dataset_settings: HashMap::new(),
             identity: None,
@@ -1116,8 +1087,7 @@ mod tests {
                 }
             },
             "registered_layouts": {},
-            "active_layout_ids": {},
-            "asset_catalogs": {}
+            "active_layout_ids": {}
         }))
         .unwrap()
     }
@@ -1210,7 +1180,7 @@ mod tests {
     }
 
     #[test]
-    fn saved_view_link_uses_workspace_bookmark_hash() {
+    fn saved_view_link_uses_compact_workspace_hash() {
         assert_eq!(
             saved_view_link(&target(), "sv-1").unwrap(),
             "http://127.0.0.1:9988/w/w#b=sv-1"
@@ -1307,14 +1277,14 @@ mod tests {
     async fn document_ack_wait_accepts_ack() {
         let mut messages = text_messages(vec![
             serde_json::json!({ "type": "peer_left", "client_id": 99 }).to_string(),
-            serde_json::json!({ "type": "ack", "seq": 23 }).to_string(),
+            serde_json::json!({ "type": "ack", "request_id": "saved-view-1", "seq": 23 })
+                .to_string(),
         ]);
 
         let seq = wait_for_document_ack(
             &mut messages,
-            &DatasetId("wds-test".to_string()),
-            &LayoutId("layout-source".to_string()),
-            Duration::from_secs(1),
+            "saved-view-1",
+            &SessionDeadline::new(Duration::from_secs(1), "test saved-view apply"),
         )
         .await
         .unwrap();
@@ -1328,13 +1298,50 @@ mod tests {
 
         let error = wait_for_document_ack(
             &mut messages,
-            &DatasetId("wds-test".to_string()),
-            &LayoutId("layout-source".to_string()),
-            Duration::from_millis(1),
+            "saved-view-timeout",
+            &SessionDeadline::new(Duration::from_millis(1), "test saved-view apply timeout"),
         )
         .await
         .unwrap_err();
 
         assert_eq!(error.kind, ErrorKind::RejectedCommand);
+    }
+
+    #[test]
+    fn partial_failure_envelope_preserves_acknowledged_prefix_and_pending_request() {
+        let result = SavedViewApplyResult {
+            own_client_id: 7,
+            initial_snapshot_seq: 10,
+            batch_semantics: "sequential_acknowledged_prefix",
+            layout_command_count: 1,
+            layout_acknowledgements: vec![SavedViewLayoutAcknowledgement {
+                dataset_id: "wds-one".to_string(),
+                layout_id: "layout-one".to_string(),
+                request_id: "request-one".to_string(),
+                acknowledged_seq: 11,
+            }],
+            final_acknowledged_seq: Some(11),
+            durable_profile: None,
+            warnings: Vec::new(),
+        };
+
+        let error = saved_view_partial_error(
+            CliError::new(ErrorKind::RejectedCommand, "second layout was rejected"),
+            &result,
+            "request-two",
+            "acknowledgement",
+        )
+        .to_json();
+
+        assert_eq!(error["error"]["unconfirmed_request_id"], "request-two");
+        assert_eq!(error["error"]["failure_phase"], "acknowledgement");
+        assert_eq!(
+            error["error"]["acknowledged_partial_result"]["layout_acknowledgements"][0]["request_id"],
+            "request-one"
+        );
+        assert_eq!(
+            error["error"]["acknowledged_partial_result"]["final_acknowledged_seq"],
+            11
+        );
     }
 }

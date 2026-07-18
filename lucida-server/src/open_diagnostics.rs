@@ -12,8 +12,11 @@ use lucida_content::DatasetId;
 use lucida_content::url::is_local_dataset_url;
 use lucida_protocol::{
     DatasetOpenFailureDiagnostic, DatasetOpenFailureKind, DatasetOpenProgressDiagnostic,
-    DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened, SourceChunkStatus,
+    DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened, DatasetOpenedValidationCategory,
+    DatasetOpenedValidationError, FailureDescriptor,
 };
+
+use crate::source_policy::{SourcePolicyCategory, SourcePolicyError};
 
 pub(crate) fn open_failure(
     stage: DatasetOpenStage,
@@ -24,8 +27,7 @@ pub(crate) fn open_failure(
 ) -> DatasetOpenFailureDiagnostic {
     DatasetOpenFailureDiagnostic {
         stage,
-        kind,
-        retryable,
+        failure: FailureDescriptor::new(kind, retryable),
         message: message.into(),
         detail,
     }
@@ -73,94 +75,85 @@ pub(crate) fn open_warning(
 pub(crate) fn backend_open_failure(
     error: &lucida_store::backend::StoreError,
 ) -> DatasetOpenFailureDiagnostic {
-    match error {
-        lucida_store::backend::StoreError::UnsupportedScheme(_) => open_failure(
-            DatasetOpenStage::BackendOpen,
-            DatasetOpenFailureKind::UnsupportedScheme,
-            false,
-            error.to_string(),
-            None,
-        ),
-        lucida_store::backend::StoreError::Metadata(message) => {
-            let lower = message.to_ascii_lowercase();
-            let kind = if lower.contains("bucket") || lower.contains("credential") {
-                DatasetOpenFailureKind::CloudConfiguration
-            } else {
-                DatasetOpenFailureKind::MissingMetadata
-            };
-            open_failure(
-                DatasetOpenStage::BackendOpen,
-                kind,
-                false,
-                error.to_string(),
-                None,
-            )
-        }
-        lucida_store::backend::StoreError::ObjectStore(inner) => {
-            let message = inner.to_string();
-            let lower = message.to_ascii_lowercase();
-            let (kind, retryable) = if is_not_found(inner) {
-                (DatasetOpenFailureKind::MissingObject, false)
-            } else if lower.contains("canonical")
-                || lower.contains("no such file")
-                || lower.contains("not a directory")
-            {
-                (DatasetOpenFailureKind::LocalPath, false)
-            } else if lower.contains("permission")
-                || lower.contains("forbidden")
-                || lower.contains("unauthorized")
-                || lower.contains("denied")
-            {
-                (DatasetOpenFailureKind::Permission, false)
-            } else if lower.contains("credential")
-                || lower.contains("token")
-                || lower.contains("region")
-                || lower.contains("bucket")
-            {
-                (DatasetOpenFailureKind::CloudConfiguration, false)
-            } else if lower.contains("http") || lower.contains("status") {
-                (DatasetOpenFailureKind::Http, true)
-            } else {
-                (DatasetOpenFailureKind::StorageBackend, true)
-            };
-            open_failure(
-                DatasetOpenStage::BackendOpen,
-                kind,
-                retryable,
-                format!("storage error: {message}"),
-                None,
-            )
-        }
+    DatasetOpenFailureDiagnostic {
+        stage: DatasetOpenStage::BackendOpen,
+        failure: error.failure(),
+        message: error.public_message(),
+        detail: None,
     }
 }
 
-pub(crate) fn import_failure(error: &dyn std::fmt::Display) -> DatasetOpenFailureDiagnostic {
-    let message = error.to_string();
-    let lower = message.to_ascii_lowercase();
-    let kind = if lower.contains("codec")
-        || lower.contains("blosc")
-        || lower.contains("cname")
-        || lower.contains("compressor")
-    {
-        DatasetOpenFailureKind::UnsupportedCodec
-    } else if lower.contains("chunk")
-        || lower.contains("axis")
-        || lower.contains("non-prefix")
-        || lower.contains("layout")
-    {
-        DatasetOpenFailureKind::UnsupportedLayout
-    } else if lower.contains("missing") || lower.contains("not found") {
-        DatasetOpenFailureKind::MissingMetadata
-    } else if lower.contains("json")
-        || lower.contains("metadata")
-        || lower.contains("multiscale")
-        || lower.contains("malformed")
-    {
-        DatasetOpenFailureKind::MalformedMetadata
-    } else {
-        DatasetOpenFailureKind::Import
+/// Map source admission failures into the same stable diagnostic vocabulary
+/// used by both interactive opens and workspace restore. Policy messages are
+/// intentionally locator-free, so they are safe to surface to clients.
+pub(crate) fn source_policy_failure(error: &SourcePolicyError) -> DatasetOpenFailureDiagnostic {
+    let (stage, kind, retryable) = match error.category {
+        SourcePolicyCategory::SchemeDenied => (
+            DatasetOpenStage::BackendOpen,
+            DatasetOpenFailureKind::UnsupportedScheme,
+            false,
+        ),
+        SourcePolicyCategory::InvalidLocator => (
+            DatasetOpenStage::BackendOpen,
+            DatasetOpenFailureKind::InvalidLocator,
+            false,
+        ),
+        SourcePolicyCategory::LocalRootDenied | SourcePolicyCategory::NetworkTargetDenied => (
+            DatasetOpenStage::Authorization,
+            DatasetOpenFailureKind::Permission,
+            false,
+        ),
+        SourcePolicyCategory::CloudScopeDenied => (
+            DatasetOpenStage::Authorization,
+            DatasetOpenFailureKind::CloudConfiguration,
+            false,
+        ),
+        SourcePolicyCategory::ResolutionFailed => (
+            DatasetOpenStage::BackendOpen,
+            DatasetOpenFailureKind::Http,
+            true,
+        ),
     };
-    open_failure(DatasetOpenStage::MetadataImport, kind, false, message, None)
+    open_failure(
+        stage,
+        kind,
+        retryable,
+        "dataset source was rejected by server policy",
+        Some(error.to_string()),
+    )
+}
+
+pub(crate) fn import_failure(
+    error: &lucida_store::backend::StoreError,
+) -> DatasetOpenFailureDiagnostic {
+    DatasetOpenFailureDiagnostic {
+        stage: DatasetOpenStage::MetadataImport,
+        failure: error.failure(),
+        message: error.public_message(),
+        detail: None,
+    }
+}
+
+pub(crate) fn dataset_opened_validation_failure(
+    error: &DatasetOpenedValidationError,
+) -> DatasetOpenFailureDiagnostic {
+    let kind = match error.category {
+        DatasetOpenedValidationCategory::UnsafePath => DatasetOpenFailureKind::InvalidLocator,
+        DatasetOpenedValidationCategory::ResourceLimit => DatasetOpenFailureKind::ResourceLimit,
+        DatasetOpenedValidationCategory::Manifest
+        | DatasetOpenedValidationCategory::Duplicate
+        | DatasetOpenedValidationCategory::Missing
+        | DatasetOpenedValidationCategory::Unexpected
+        | DatasetOpenedValidationCategory::Inconsistent
+        | DatasetOpenedValidationCategory::Unsupported => DatasetOpenFailureKind::MalformedMetadata,
+    };
+    open_failure(
+        DatasetOpenStage::BindingBuild,
+        kind,
+        false,
+        "dataset binding failed admission validation",
+        Some(format!("{}: {}", error.path, error.message)),
+    )
 }
 
 pub(crate) fn open_success(
@@ -193,22 +186,6 @@ pub(crate) fn backend_kind_for_url(url: &str) -> String {
 
 pub(crate) fn is_not_found(error: &object_store::Error) -> bool {
     matches!(error, object_store::Error::NotFound { .. })
-        || error.to_string().contains("not found")
-        || error.to_string().contains("No such file or directory")
-}
-
-/// Triage a non-not-found store error from a source-chunk read into the
-/// wire status vocabulary. Permission/credential rejections are permanent
-/// (the store answered; retrying without operator action cannot succeed);
-/// everything else — backend faults, unreachable services — reports the
-/// source as unavailable. Callers must handle not-found before calling
-/// this: a missing chunk is legitimate sparse data, not a failure.
-pub(crate) fn store_error_status(error: &object_store::Error) -> SourceChunkStatus {
-    match error {
-        object_store::Error::PermissionDenied { .. }
-        | object_store::Error::Unauthenticated { .. } => SourceChunkStatus::FailedPermanent,
-        _ => SourceChunkStatus::Unavailable,
-    }
 }
 
 #[cfg(test)]
@@ -229,14 +206,11 @@ mod tests {
             path: "chunk".into(),
             source: boxed("credentials expired"),
         };
-        assert_eq!(
-            store_error_status(&denied),
-            SourceChunkStatus::FailedPermanent
-        );
-        assert_eq!(
-            store_error_status(&unauthenticated),
-            SourceChunkStatus::FailedPermanent
-        );
+        for error in [&denied, &unauthenticated] {
+            let failure = lucida_store::backend::object_store_failure(error);
+            assert_eq!(failure.kind, lucida_protocol::FailureCode::Permission);
+            assert!(!failure.retryable);
+        }
     }
 
     #[test]
@@ -245,7 +219,9 @@ mod tests {
             store: "test",
             source: boxed("503 Service Unavailable"),
         };
-        assert_eq!(store_error_status(&generic), SourceChunkStatus::Unavailable);
+        let failure = lucida_store::backend::object_store_failure(&generic);
+        assert_eq!(failure.kind, lucida_protocol::FailureCode::StorageBackend);
+        assert!(failure.retryable);
     }
 
     #[test]
@@ -268,16 +244,18 @@ mod tests {
             source: boxed("403 Forbidden"),
         };
         assert!(!is_not_found(&denied));
+        let denied_failure = lucida_store::backend::object_store_failure(&denied);
         assert_eq!(
-            store_error_status(&denied),
-            SourceChunkStatus::FailedPermanent
+            denied_failure.kind,
+            lucida_protocol::FailureCode::Permission
         );
+        assert!(!denied_failure.retryable);
 
         let other = object_store::Error::Generic {
             store: "source",
             source: boxed("503 Service Unavailable"),
         };
         assert!(!is_not_found(&other));
-        assert_eq!(store_error_status(&other), SourceChunkStatus::Unavailable);
+        assert!(lucida_store::backend::object_store_failure(&other).retryable);
     }
 }

@@ -11,9 +11,17 @@ import {
 } from "./workspaceApi.ts";
 import { createWorkspaceFromDatasets } from "./workspaceFromDataset.ts";
 import { FileBrowser } from "./components/FileBrowser.tsx";
+import { OperationStatus } from "./components/OperationStatus.tsx";
 import { ProfileMenu } from "./auth/ProfileMenu.tsx";
+import { useLatestOperation } from "./hooks/useLatestOperation.ts";
 import { sortWorkspaceDashboardRows } from "./workspaceDashboardOrder.ts";
 import "./WorkspaceDashboard.css";
+
+// Every mutation in this lane creates a workspace and immediately navigates
+// into it. Only one may be in flight: otherwise two successful creates race
+// to decide which workspace the user sees. Other row mutations keep their own
+// keys and can proceed independently without suppressing this navigation.
+const CREATE_AND_OPEN_OPERATION_KEY = "create-and-open:workspace";
 
 interface Props {
   /** Open a workspace. When `datasetUrls` is given (create-from-dataset flow,
@@ -24,37 +32,49 @@ interface Props {
 export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [loading, setLoading] = useState(true);
-  const [creating, setCreating] = useState(false);
-  const [pinningId, setPinningId] = useState<string | null>(null);
-  const [archivingId, setArchivingId] = useState<string | null>(null);
-  const [duplicatingId, setDuplicatingId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   // "New workspace from dataset" composer (#697): the typed URL/path and a
   // shared in-flight flag (covers both the typed-URL create and the file-browser
   // create) so the buttons disable while a workspace is being spun up.
   const [datasetUrlInput, setDatasetUrlInput] = useState("");
-  const [creatingFromDataset, setCreatingFromDataset] = useState(false);
   const [showFileBrowser, setShowFileBrowser] = useState(false);
+  const {
+    state: operationState,
+    begin: beginOperation,
+    dismiss: dismissOperation,
+    isPending: isOperationPending,
+  } = useLatestOperation();
+  const creatingAndOpening = isOperationPending(CREATE_AND_OPEN_OPERATION_KEY);
 
   useEffect(() => {
-    let cancelled = false;
+    const label = showArchived ? "archived" : "active";
     const load = showArchived ? listArchivedWorkspaces : listWorkspaces;
+    setLoading(true);
+    setWorkspaces([]);
+    const attempt = beginOperation({
+      key: "load:workspaces",
+      pendingMessage: `Loading ${label} workspaces…`,
+      successMessage: `${showArchived ? "Archived" : "Active"} workspaces loaded.`,
+      failureMessage: `Could not load ${label} workspaces.`,
+      retry: () => setReloadKey((key) => key + 1),
+      replaceActive: true,
+    });
+    if (!attempt) return;
     void load()
       .then((rows) => {
-        if (!cancelled) setWorkspaces(rows);
+        if (attempt.isCurrent()) {
+          setWorkspaces(rows);
+          setLoading(false);
+        }
+        attempt.succeed();
       })
       .catch((e) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (attempt.isCurrent()) setLoading(false);
+        attempt.fail(e);
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [showArchived]);
+  }, [beginOperation, reloadKey, showArchived]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLocaleLowerCase();
@@ -63,18 +83,23 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
     return ordered.filter((w) => w.name.toLocaleLowerCase().includes(q));
   }, [query, workspaces]);
 
-  const handleCreate = useCallback(async () => {
-    setCreating(true);
-    setError(null);
+  const handleCreate = useCallback(async function createBlankWorkspace() {
+    const attempt = beginOperation({
+      key: CREATE_AND_OPEN_OPERATION_KEY,
+      pendingMessage: "Creating workspace…",
+      successMessage: "Workspace created.",
+      failureMessage: "Could not create the workspace.",
+      retry: () => { void createBlankWorkspace(); },
+    });
+    if (!attempt) return;
     try {
       const workspace = await createWorkspace();
-      onOpenWorkspace(workspace.id);
+      if (attempt.isCurrent()) onOpenWorkspace(workspace.id);
+      attempt.succeed();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setCreating(false);
+      attempt.fail(e);
     }
-  }, [onOpenWorkspace]);
+  }, [onOpenWorkspace, beginOperation]);
 
   // Create a NEW workspace around the given dataset URL(s)/path(s) and open it
   // (#697). The workspace is created with the server's default sharing
@@ -84,73 +109,107 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
   // Only the workspace-creation step can fail here; if it does, we surface it on
   // the dashboard and no navigation happens.
   const handleCreateFromDatasets = useCallback(
-    async (urls: readonly string[]) => {
+    async function createFromDatasets(urls: readonly string[]) {
       const cleaned = urls.map((u) => u.trim()).filter((u) => u.length > 0);
       if (cleaned.length === 0) return;
-      setCreatingFromDataset(true);
-      setError(null);
+      const attempt = beginOperation({
+        key: CREATE_AND_OPEN_OPERATION_KEY,
+        pendingMessage: "Creating workspace from selected data…",
+        successMessage: "Workspace created from selected data.",
+        failureMessage: "Could not create a workspace from the selected data.",
+        retry: () => { void createFromDatasets(cleaned); },
+      });
+      if (!attempt) return;
       try {
         const workspace = await createWorkspaceFromDatasets(cleaned);
-        onOpenWorkspace(workspace.id, cleaned);
+        if (attempt.isCurrent()) onOpenWorkspace(workspace.id, cleaned);
+        attempt.succeed();
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-      } finally {
-        setCreatingFromDataset(false);
+        attempt.fail(e);
       }
     },
-    [onOpenWorkspace],
+    [onOpenWorkspace, beginOperation],
   );
 
-  const handlePin = useCallback(async (workspace: WorkspaceSummary, pinned: boolean) => {
-    setPinningId(workspace.id);
-    setError(null);
+  const handlePin = useCallback(async function setWorkspacePinned(
+    workspace: WorkspaceSummary,
+    pinned: boolean,
+  ) {
+    const verb = pinned ? "Pin" : "Unpin";
+    const attempt = beginOperation({
+      key: `pin:${workspace.id}`,
+      pendingMessage: `${verb}ning ${workspace.name}…`,
+      successMessage: `${pinned ? "Pinned" : "Unpinned"} ${workspace.name}.`,
+      failureMessage: `Could not ${verb.toLocaleLowerCase()} ${workspace.name}.`,
+      retry: () => { void setWorkspacePinned(workspace, pinned); },
+    });
+    if (!attempt) return;
     try {
       const state = await updateWorkspacePin(workspace.id, pinned);
-      setWorkspaces((rows) =>
-        sortWorkspaceDashboardRows(
-          rows.map((row) =>
-            row.id === workspace.id
-              ? {
-                ...row,
-                last_opened_at: state.last_opened_at ?? row.last_opened_at,
-                pinned_at: state.pinned_at,
-              }
-              : row
-          ),
-        )
-      );
+      if (attempt.isCurrent()) {
+        setWorkspaces((rows) =>
+          sortWorkspaceDashboardRows(
+            rows.map((row) =>
+              row.id === workspace.id
+                ? {
+                  ...row,
+                  last_opened_at: state.last_opened_at ?? row.last_opened_at,
+                  pinned_at: state.pinned_at,
+                }
+                : row
+            ),
+          )
+        );
+      }
+      attempt.succeed();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setPinningId(null);
+      attempt.fail(e);
     }
-  }, []);
+  }, [beginOperation]);
 
-  const handleArchive = useCallback(async (workspace: WorkspaceSummary) => {
-    setArchivingId(workspace.id);
-    setError(null);
+  const handleArchive = useCallback(async function archiveDashboardWorkspace(
+    workspace: WorkspaceSummary,
+  ) {
+    const attempt = beginOperation({
+      key: `archive:${workspace.id}`,
+      pendingMessage: `Archiving ${workspace.name}…`,
+      successMessage: `Archived ${workspace.name}.`,
+      failureMessage: `Could not archive ${workspace.name}.`,
+      retry: () => { void archiveDashboardWorkspace(workspace); },
+    });
+    if (!attempt) return;
     try {
       await archiveWorkspace(workspace.id);
-      setWorkspaces((rows) => rows.filter((row) => row.id !== workspace.id));
+      if (attempt.isCurrent()) {
+        setWorkspaces((rows) => rows.filter((row) => row.id !== workspace.id));
+      }
+      attempt.succeed();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setArchivingId(null);
+      attempt.fail(e);
     }
-  }, []);
+  }, [beginOperation]);
 
-  const handleRestore = useCallback(async (workspace: WorkspaceSummary) => {
-    setArchivingId(workspace.id);
-    setError(null);
+  const handleRestore = useCallback(async function restoreDashboardWorkspace(
+    workspace: WorkspaceSummary,
+  ) {
+    const attempt = beginOperation({
+      key: `restore:${workspace.id}`,
+      pendingMessage: `Restoring ${workspace.name}…`,
+      successMessage: `Restored ${workspace.name}.`,
+      failureMessage: `Could not restore ${workspace.name}.`,
+      retry: () => { void restoreDashboardWorkspace(workspace); },
+    });
+    if (!attempt) return;
     try {
       await restoreWorkspace(workspace.id);
-      setWorkspaces((rows) => rows.filter((row) => row.id !== workspace.id));
+      if (attempt.isCurrent()) {
+        setWorkspaces((rows) => rows.filter((row) => row.id !== workspace.id));
+      }
+      attempt.succeed();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setArchivingId(null);
+      attempt.fail(e);
     }
-  }, []);
+  }, [beginOperation]);
 
   // Make a private copy of any workspace the user can access (#698) and open
   // it. The copy is owned by the user with default sharing (restricted,
@@ -158,19 +217,24 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
   // navigate straight into the copy; on failure the error surfaces here and
   // the user stays on the dashboard.
   const handleDuplicate = useCallback(
-    async (workspace: WorkspaceSummary) => {
-      setDuplicatingId(workspace.id);
-      setError(null);
+    async function duplicateDashboardWorkspace(workspace: WorkspaceSummary) {
+      const attempt = beginOperation({
+        key: CREATE_AND_OPEN_OPERATION_KEY,
+        pendingMessage: `Duplicating ${workspace.name}…`,
+        successMessage: `Duplicated ${workspace.name}.`,
+        failureMessage: `Could not duplicate ${workspace.name}.`,
+        retry: () => { void duplicateDashboardWorkspace(workspace); },
+      });
+      if (!attempt) return;
       try {
         const copy = await duplicateWorkspace(workspace.id);
-        onOpenWorkspace(copy.id);
+        if (attempt.isCurrent()) onOpenWorkspace(copy.id);
+        attempt.succeed();
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-      } finally {
-        setDuplicatingId(null);
+        attempt.fail(e);
       }
     },
-    [onOpenWorkspace],
+    [onOpenWorkspace, beginOperation],
   );
 
   return (
@@ -184,8 +248,6 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
               type="button"
               className="workspace-dashboard-secondary"
               onClick={() => {
-                setLoading(true);
-                setWorkspaces([]);
                 setShowArchived((value) => !value);
               }}
             >
@@ -193,9 +255,9 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
             </button>
             <button
               onClick={handleCreate}
-              disabled={creating || creatingFromDataset || showArchived}
+              disabled={creatingAndOpening || showArchived}
             >
-              {creating ? "Creating..." : "New Workspace"}
+              {creatingAndOpening ? "Creating..." : "New Workspace"}
             </button>
           </div>
         </div>
@@ -214,19 +276,19 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
               onChange={(e) => setDatasetUrlInput(e.target.value)}
               placeholder="New workspace from dataset — file path or remote URL"
               aria-label="New workspace from dataset URL or path"
-              disabled={creatingFromDataset}
+              disabled={creatingAndOpening}
             />
             <button
               type="submit"
-              disabled={creatingFromDataset || !datasetUrlInput.trim()}
+              disabled={creatingAndOpening || !datasetUrlInput.trim()}
             >
-              {creatingFromDataset ? "Creating..." : "Create from URL"}
+              {creatingAndOpening ? "Creating..." : "Create from URL"}
             </button>
             <button
               type="button"
               className="workspace-dashboard-secondary"
               onClick={() => setShowFileBrowser(true)}
-              disabled={creatingFromDataset}
+              disabled={creatingAndOpening}
             >
               Browse files…
             </button>
@@ -239,16 +301,22 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
           placeholder="Search visible workspaces"
           aria-label="Search workspaces"
         />
-        {error && <div className="workspace-dashboard-error">{error}</div>}
+        <OperationStatus
+          state={operationState}
+          onDismiss={dismissOperation}
+          className="workspace-dashboard-operation"
+        />
         {loading ? (
-          <div className="workspace-dashboard-empty">Loading workspaces...</div>
+          <div className="workspace-dashboard-empty" role="status" aria-live="polite">
+            Loading workspaces...
+          </div>
         ) : filtered.length === 0 ? (
           <div className="workspace-dashboard-empty">
             {query.trim()
               ? "No matching workspaces."
               : showArchived
                 ? "No archived workspaces."
-                : "No workspaces yet."}
+                : "No workspaces yet. Create a blank workspace, or start from a dataset above."}
           </div>
         ) : (
           <div className="workspace-list">
@@ -277,7 +345,7 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
                   {!showArchived && (
                     <button
                       className="workspace-pin-button"
-                      disabled={pinningId === workspace.id}
+                      disabled={isOperationPending(`pin:${workspace.id}`)}
                       aria-pressed={Boolean(workspace.pinned_at)}
                       aria-label={`${workspace.pinned_at ? "Unpin" : "Pin"} ${workspace.name}`}
                       onClick={() => {
@@ -292,19 +360,19 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
                   {!showArchived && (
                     <button
                       className="workspace-duplicate-button"
-                      disabled={duplicatingId === workspace.id}
+                      disabled={creatingAndOpening}
                       aria-label={`Duplicate ${workspace.name}`}
                       onClick={() => {
                         void handleDuplicate(workspace);
                       }}
                     >
-                      {duplicatingId === workspace.id ? "Duplicating..." : "Duplicate"}
+                      {creatingAndOpening ? "Duplicating…" : "Duplicate"}
                     </button>
                   )}
                   {workspace.role === "owner" && (
                     <button
                       className="workspace-archive-button"
-                      disabled={archivingId === workspace.id}
+                      disabled={isOperationPending(`${showArchived ? "restore" : "archive"}:${workspace.id}`)}
                       aria-label={`${showArchived ? "Restore" : "Archive"} ${workspace.name}`}
                       onClick={() => {
                         void (showArchived
@@ -312,7 +380,9 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
                           : handleArchive(workspace));
                       }}
                     >
-                      {showArchived ? "Restore" : "Archive"}
+                      {isOperationPending(`${showArchived ? "restore" : "archive"}:${workspace.id}`)
+                        ? `${showArchived ? "Restoring" : "Archiving"}…`
+                        : showArchived ? "Restore" : "Archive"}
                     </button>
                   )}
                 </div>

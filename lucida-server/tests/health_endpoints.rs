@@ -49,7 +49,9 @@ async fn build_app() -> Router {
         .route("/protected", get(protected_stub))
         .layer(from_fn_with_state(extractor, auth_middleware));
 
-    let public = health::router();
+    let lifecycle = health::RuntimeLifecycle::new();
+    assert!(lifecycle.mark_ready());
+    let public = health::router(lifecycle);
 
     protected.merge(public)
 }

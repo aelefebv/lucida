@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from ..bringup import fixture_data_root
 from ..errors import TryoutError
 from ..server import ServerProcess
 from ..surfaces import create_workspace_and_open
@@ -277,6 +278,7 @@ def drive_scenario(
     server = ServerProcess(
         out_dir=out_dir,
         binary=server_binary,
+        data_dir=fixture_data_root(fixture_path),
         web_dist=web_dist.path if web_dist is not None else None,
         health_timeout_s=health_timeout_s,
         log=log,

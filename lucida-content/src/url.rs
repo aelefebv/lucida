@@ -9,7 +9,7 @@
 //!   2. A boolean classification ([`is_local_dataset_url`]) of whether a
 //!      *normalized* URL refers to a filesystem path (Unix, drive-letter,
 //!      or UNC) versus a remote scheme (`gs://`, `s3://`, `http(s)://`).
-//!   3. A stable content-derived id ([`dataset_id_for_url`]) and a
+//!   3. A stable locator-derived id ([`dataset_id_for_url`]) and a
 //!      16-byte URL hash ([`dataset_url_hash16`]) used by the proxy
 //!      cache to name per-dataset directories. Both derive from the same
 //!      BLAKE3 digest (see [`blake3_url`]) so they cannot drift.
@@ -27,6 +27,190 @@
 //! explicitly hosts pure (no-I/O, no-async) computation alongside the
 //! identity types (`DatasetId` lives in `lucida-content::id`), and
 //! `lucida-protocol` stays computation-free per its own systems article.
+
+use std::fmt;
+
+use serde::{Deserialize, Serialize};
+
+/// Maximum accepted locator length at the parsed identity boundary.
+pub const MAX_DATASET_URL_BYTES: usize = 16 * 1024;
+
+/// A syntactically valid, normalized dataset locator.
+///
+/// Keeping the canonical value in a distinct type prevents callers from
+/// accidentally using user spelling as a persistent id or cache key.  This is
+/// deliberately string-level: it does not touch a filesystem or network.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CanonicalDatasetUrl(String);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DatasetUrlError {
+    Empty,
+    TooLong { bytes: usize, limit: usize },
+    ContainsNul,
+    Relative(String),
+    IdentityMismatch { persisted: String, expected: String },
+}
+
+impl fmt::Display for DatasetUrlError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => f.write_str("dataset URL is empty"),
+            Self::TooLong { bytes, limit } => {
+                write!(f, "dataset URL is {bytes} bytes; limit is {limit}")
+            }
+            Self::ContainsNul => f.write_str("dataset URL contains a NUL byte"),
+            Self::Relative(value) => write!(f, "dataset URL is not absolute: {value}"),
+            Self::IdentityMismatch {
+                persisted,
+                expected,
+            } => write!(
+                f,
+                "persisted source identity {persisted} does not match canonical locator identity {expected}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DatasetUrlError {}
+
+impl CanonicalDatasetUrl {
+    pub fn parse(raw: &str) -> Result<Self, DatasetUrlError> {
+        let canonical = normalize_dataset_url(raw);
+        if canonical.is_empty() {
+            return Err(DatasetUrlError::Empty);
+        }
+        if canonical.len() > MAX_DATASET_URL_BYTES {
+            return Err(DatasetUrlError::TooLong {
+                bytes: canonical.len(),
+                limit: MAX_DATASET_URL_BYTES,
+            });
+        }
+        if canonical.contains('\0') {
+            return Err(DatasetUrlError::ContainsNul);
+        }
+        if !is_local_dataset_url(&canonical) && !canonical.contains("://") {
+            return Err(DatasetUrlError::Relative(canonical));
+        }
+        Ok(Self(canonical))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl AsRef<str> for CanonicalDatasetUrl {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for CanonicalDatasetUrl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Collision-resistant locator identity.  Locator identity is intentionally
+/// separate from a source-content revision: the same locator may publish new
+/// bytes over time without becoming a different locator.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SourceIdentity {
+    pub locator: CanonicalDatasetUrl,
+    digest: [u8; 32],
+}
+
+impl SourceIdentity {
+    pub fn parse(raw: &str) -> Result<Self, DatasetUrlError> {
+        let locator = CanonicalDatasetUrl::parse(raw)?;
+        let digest = blake3_url(locator.as_str());
+        Ok(Self { locator, digest })
+    }
+
+    pub fn digest(&self) -> &[u8; 32] {
+        &self.digest
+    }
+
+    /// Rebuild a typed identity from persisted fields and prove that the
+    /// locator still hashes to the stored id. A mismatch is corruption (or a
+    /// collision attempt), never a signal to overwrite either value.
+    pub fn from_persisted(raw_locator: &str, persisted_id: &str) -> Result<Self, DatasetUrlError> {
+        let identity = Self::parse(raw_locator)?;
+        let expected = identity.dataset_id();
+        if persisted_id != expected {
+            return Err(DatasetUrlError::IdentityMismatch {
+                persisted: persisted_id.to_string(),
+                expected,
+            });
+        }
+        Ok(identity)
+    }
+
+    pub fn digest_hex(&self) -> String {
+        hex_digest(&self.digest)
+    }
+
+    pub fn dataset_id(&self) -> String {
+        format!("ds-{}", hex_digest(&self.digest))
+    }
+}
+
+/// A revision of the bytes/metadata reachable through a source locator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SourceRevision([u8; 32]);
+
+impl SourceRevision {
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self(*blake3::hash(bytes).as_bytes())
+    }
+
+    pub fn as_hex(&self) -> String {
+        hex_digest(&self.0)
+    }
+
+    pub fn digest(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    pub fn from_hex(raw: &str) -> Option<Self> {
+        if raw.len() != 64 {
+            return None;
+        }
+        let mut digest = [0_u8; 32];
+        for (index, pair) in raw.as_bytes().chunks_exact(2).enumerate() {
+            let high = hex_nibble(pair[0])?;
+            let low = hex_nibble(pair[1])?;
+            digest[index] = (high << 4) | low;
+        }
+        Some(Self(digest))
+    }
+}
+
+/// A locator together with the exact source generation imported from it.
+///
+/// This is the only safe production cache namespace: locator identity alone
+/// deliberately survives in-place source mutation, while a revision alone
+/// is not globally unique to a locator.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SourceVersion {
+    pub identity: SourceIdentity,
+    pub revision: SourceRevision,
+}
+
+impl SourceVersion {
+    pub fn new(identity: SourceIdentity, revision: SourceRevision) -> Self {
+        Self { identity, revision }
+    }
+
+    pub fn cache_namespace(&self) -> String {
+        format!("{}:{}", self.identity.dataset_id(), self.revision.as_hex())
+    }
+}
 
 /// Strip a leading `file://` or `file:///`+ prefix, lowercase the drive
 /// letter on Windows-style paths, forward-slashify backslashes, and
@@ -124,29 +308,35 @@ pub fn is_local_dataset_url(canonical: &str) -> bool {
     canonical.starts_with('/')
 }
 
-/// Stable, content-derived `DatasetId` for a dataset URL. Format:
-/// `ds-{first_8_bytes_of_blake3(url)_as_le_u64_hex}`.
+/// Stable, collision-resistant `DatasetId` for a dataset URL. Format:
+/// `ds-{full_blake3_digest_as_hex}`.
 ///
-/// Two opens of the same URL within a session produce the same id —
+/// Two opens of the same locator within a session produce the same id —
 /// that's the dedup-on-reopen primitive lucida-server relies on. See
 /// `wiki/decisions/0014-local-file-datasets-personal-only-in-saved-views.md`
 /// for the BLAKE3-collision sharp edge on local-file paths.
 ///
-/// Callers that want cross-machine equivalence on Windows / UNC should
-/// pass a [`normalize_dataset_url`]-canonicalized URL.
-pub fn dataset_id_for_url(canonical: &str) -> String {
-    let digest = blake3_url(canonical);
-    let prefix: [u8; 8] = digest[..8].try_into().expect("blake3 always >= 8 bytes");
-    format!("ds-{:016x}", u64::from_le_bytes(prefix))
+/// This compatibility helper normalizes internally. Admission boundaries
+/// should prefer [`SourceIdentity::parse`] so invalid/relative locators are
+/// rejected instead of assigned an id.
+pub fn dataset_id_for_url(url: &str) -> String {
+    match SourceIdentity::parse(url) {
+        Ok(identity) => identity.dataset_id(),
+        // Keep this infallible compatibility helper deterministic for legacy
+        // callers. Admission boundaries should use `SourceIdentity::parse`.
+        Err(_) => format!(
+            "ds-{}",
+            hex_digest(&blake3_url(&normalize_dataset_url(url)))
+        ),
+    }
 }
 
 /// 16-byte URL hash used by the proxy cache for its per-dataset
 /// directory name. Shares the underlying BLAKE3 digest with
-/// [`dataset_id_for_url`] so the two stay in lockstep — the cache
-/// directory's first 8 bytes (in BLAKE3 order) match the bytes from
-/// which the `ds-...` ID is built.
-pub fn dataset_url_hash16(canonical: &str) -> [u8; 16] {
-    let digest = blake3_url(canonical);
+/// [`dataset_id_for_url`] so the cache key is a prefix of the persistent
+/// locator identity.
+pub fn dataset_url_hash16(url: &str) -> [u8; 16] {
+    let digest = blake3_url(&normalize_dataset_url(url));
     let mut out = [0u8; 16];
     out.copy_from_slice(&digest[..16]);
     out
@@ -159,6 +349,24 @@ pub fn dataset_url_hash16(canonical: &str) -> [u8; 16] {
 /// this module collected the URL helpers.
 fn blake3_url(url: &str) -> [u8; 32] {
     *blake3::hash(url.as_bytes()).as_bytes()
+}
+
+fn hex_digest(digest: &[u8; 32]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        write!(&mut out, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    out
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 // ---------- private helpers ----------
@@ -232,11 +440,24 @@ fn strip_file_uri(raw: &str) -> std::borrow::Cow<'_, str> {
         let trimmed = after_scheme.trim_start_matches('/');
         return std::borrow::Cow::Owned(format!("\\\\{trimmed}"));
     }
-    // Browser-form `file:///C:/foo` — three slashes, the third
-    // belongs to the absolute-path remainder. Eat the leading
-    // slashes that are part of the URI scheme, not the path.
-    let trimmed = after_scheme.trim_start_matches('/');
-    std::borrow::Cow::Owned(trimmed.to_string())
+    // Browser-form Windows URI: the slash separates the empty authority
+    // from `C:/...` and is not part of the drive path.
+    if let Some(without_root) = after_scheme.strip_prefix('/')
+        && canonicalize_drive_letter(without_root).is_some()
+    {
+        return std::borrow::Cow::Borrowed(without_root);
+    }
+    // For Unix, the slash after `file://` IS the absolute path root.  The old
+    // implementation trimmed it and silently turned `file:///tmp/data` into
+    // the relative path `tmp/data`.
+    if after_scheme.starts_with('/') {
+        return std::borrow::Cow::Borrowed(after_scheme);
+    }
+    // A non-drive authority (`file://server/share`) denotes UNC.
+    if !after_scheme.is_empty() && canonicalize_drive_letter(after_scheme).is_none() {
+        return std::borrow::Cow::Owned(format!("\\\\{after_scheme}"));
+    }
+    std::borrow::Cow::Borrowed(after_scheme)
 }
 
 /// If `s` is `[A-Za-z]:` optionally followed by a separator and a
@@ -321,6 +542,7 @@ mod tests {
             // file:// forms (browser-produced and shell-produced).
             ("file:///C:/foo", "c:/foo"),
             ("file://C:\\foo", "c:/foo"),
+            ("file:///tmp/data.zarr", "/tmp/data.zarr"),
             // Mixed separators inside a drive-letter path.
             ("C:\\foo/bar\\baz", "c:/foo/bar/baz"),
             // Deeper drive-letter path with spaces.
@@ -337,6 +559,7 @@ mod tests {
             // file:// UNC form (rare, but `file:////host/share/…` is
             // the URI form for UNC).
             ("file:////server/share/foo", "//server/share/foo"),
+            ("file://server/share/foo", "//server/share/foo"),
             // Edge cases.
             ("C:", "c:"),
             ("/", "/"),
@@ -453,8 +676,8 @@ mod tests {
     fn dataset_id_for_url_format() {
         let id = dataset_id_for_url("gs://bucket/a.zarr");
         assert!(id.starts_with("ds-"));
-        // 3 ("ds-") + 16 hex chars
-        assert_eq!(id.len(), 19);
+        // 3 ("ds-") + the full 32-byte BLAKE3 digest as hex.
+        assert_eq!(id.len(), 67);
     }
 
     #[test]
@@ -467,19 +690,62 @@ mod tests {
     // ---- dataset_url_hash16 ↔ dataset_id_for_url lockstep ----
 
     #[test]
-    fn dataset_url_hash16_first_8_bytes_match_dataset_id() {
-        // The id is `ds-{first_8_bytes_le_u64_hex}`; the hash16 is the
-        // first 16 bytes of the same digest. So the id's hex (after
-        // little-endian decoding) must equal the first 8 bytes of the
-        // hash16 in raw byte order.
+    fn dataset_url_hash16_prefix_matches_dataset_id() {
+        // The compatibility cache hash is the first 16 bytes of the full
+        // digest carried by the collision-resistant source id.
         let url = "gs://bucket/a.zarr";
         let id = dataset_id_for_url(url);
         let hash = dataset_url_hash16(url);
 
         let id_hex = id.strip_prefix("ds-").expect("ds- prefix");
-        let id_le_u64 = u64::from_str_radix(id_hex, 16).expect("hex");
-        let id_bytes_le = id_le_u64.to_le_bytes();
+        let hash_hex = hex_digest(&blake3_url(url));
+        assert_eq!(id_hex, hash_hex);
+        assert_eq!(&id_hex[..32], &hex_digest(&blake3_url(url))[..32]);
+        assert_eq!(hash.as_slice(), &blake3_url(url)[..16]);
+    }
 
-        assert_eq!(id_bytes_le.as_slice(), &hash[..8]);
+    #[test]
+    fn canonical_type_rejects_relative_and_preserves_absolute_unix_file_uri() {
+        let url = CanonicalDatasetUrl::parse("file:///tmp/data.zarr").unwrap();
+        assert_eq!(url.as_str(), "/tmp/data.zarr");
+        assert!(matches!(
+            CanonicalDatasetUrl::parse("tmp/data.zarr"),
+            Err(DatasetUrlError::Relative(_))
+        ));
+    }
+
+    #[test]
+    fn source_revision_is_distinct_from_locator_identity() {
+        let identity = SourceIdentity::parse("gs://bucket/data.zarr").unwrap();
+        let a = SourceRevision::from_bytes(b"revision-a");
+        let b = SourceRevision::from_bytes(b"revision-b");
+        assert_ne!(a, b);
+        assert_eq!(
+            identity.dataset_id(),
+            dataset_id_for_url(identity.locator.as_str())
+        );
+    }
+
+    #[test]
+    fn persisted_identity_rejects_locator_mismatch() {
+        let a = SourceIdentity::parse("gs://bucket/a.zarr").unwrap();
+        let error = SourceIdentity::from_persisted("gs://bucket/b.zarr", &a.dataset_id())
+            .expect_err("mismatched locator must not reuse a persisted id");
+        assert!(matches!(error, DatasetUrlError::IdentityMismatch { .. }));
+    }
+
+    #[test]
+    fn equivalent_spelling_produces_the_same_version_namespace() {
+        let revision = SourceRevision::from_bytes(b"same generation");
+        let a = SourceVersion::new(
+            SourceIdentity::parse("FILE:///C:/data/example.zarr").unwrap(),
+            revision,
+        );
+        let b = SourceVersion::new(
+            SourceIdentity::parse("c:\\data\\example.zarr").unwrap(),
+            revision,
+        );
+        assert_eq!(a.cache_namespace(), b.cache_namespace());
+        assert_eq!(a.identity.digest_hex(), b.identity.digest_hex());
     }
 }

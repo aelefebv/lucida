@@ -21,9 +21,11 @@
 //      recipient's datasets, with a non-blocking "adjusted to fit" notice.
 //  10. Camera last (via import_presence so it goes through one mutator).
 //
-// `applyInProgress` is exposed so urlSync can suppress writes; the
-// per-step status is broadcast to subscribers (the loading banner) so
-// users see "loading 2 of 4 datasets…".
+// Every apply owns a monotonically increasing epoch. Completion is observable
+// through `subscribeApplySettled` / `waitForSettlement`; consumers sequence
+// follow-up work from that event instead of inferring completion from timers.
+// Per-step status is broadcast to subscribers (the loading banner) so users
+// see "loading 2 of 4 datasets…".
 
 import type { WasmScene } from "lucida-core";
 import type { DocumentCommand, ViewportCommand } from "../commands.ts";
@@ -38,6 +40,7 @@ import type {
   ChannelSettings,
   LabelSettings,
 } from "./types.ts";
+import { validateSavedView } from "./encoder.ts";
 
 // Public types
 
@@ -70,6 +73,10 @@ export interface ApplierState {
   /** Non-fatal apply warnings, such as missing workspace dataset ids or
    * skipped shared layout changes for viewer-role applies. */
   warnings: readonly string[];
+  /** Epoch currently mutating the scene, or null while settled. */
+  activeEpoch: number | null;
+  /** Most recently settled epoch (success, unavailable, or failure). */
+  settledEpoch: number;
 }
 
 export type StateListener = (s: ApplierState) => void;
@@ -97,13 +104,27 @@ export interface ApplyResult {
 
 export type ApplyResultListener = (r: ApplyResult) => void;
 
-/** Fires once at the end of every `apply()` (success or partial-failure),
- *  inside the `try` block before the inProgress flag flips back to false.
+/** Fires once after every successfully applied `apply()`, after the
+ *  inProgress flag flips back to false.
  *  Subscribers can read post-apply scene state via the live `getScene()`
  *  passed to the applier. Used in `useSavedViewSync` to mark the render
  *  loop dirty + bump the dataset-settings generation + push post-apply
  *  C/T/Z back to React state (since the applier writes to WASM only). */
 export type ApplyCompleteListener = (view: SavedView) => void;
+
+export type ApplySettlementStatus = "applied" | "unavailable" | "failed";
+
+/** One immutable completion record per apply generation. */
+export interface ApplySettlement {
+  epoch: number;
+  status: ApplySettlementStatus;
+  /** The validated, default-restored view. Absent only when validation failed. */
+  view?: SavedView;
+  result?: ApplyResult;
+  error?: unknown;
+}
+
+export type ApplySettledListener = (event: ApplySettlement) => void;
 
 // Implementation
 
@@ -114,7 +135,35 @@ const IDLE_STATE: ApplierState = {
   okOpened: 0,
   anyOpenFailed: false,
   warnings: [],
+  activeEpoch: null,
+  settledEpoch: 0,
 };
+
+interface PendingOpen {
+  url: string;
+  finish: (state: "ok" | "error", error?: string) => void;
+}
+
+interface DatasetWaiter {
+  check: () => void;
+  cancel: () => void;
+}
+
+interface ApplyContext {
+  epoch: number;
+  /** Dataset ids whose arrival is part of this apply generation. Session-side
+   * auto-fit correlation consults this set instead of a global busy flag. */
+  ownedDatasetIds: Set<string>;
+  pendingByDatasetId: Map<string, PendingOpen>;
+  pendingByUrl: Map<string, string>;
+  datasetWaiters: Set<DatasetWaiter>;
+  timers: Set<ReturnType<typeof setTimeout>>;
+}
+
+interface ViewportCheckpoint {
+  presence: string;
+  datasetPresence: string;
+}
 
 function workspaceDatasetIdsForView(view: SavedView): string[] {
   const out: string[] = [];
@@ -149,16 +198,11 @@ export class SavedViewApplier {
   private listeners = new Set<StateListener>();
   private applyResultListeners = new Set<ApplyResultListener>();
   private applyCompleteListeners = new Set<ApplyCompleteListener>();
-  // Pending source-url opens keyed by computed dataset id (we don't get
-  // the URL back in the DatasetOpened broadcast — only the manifest,
-  // which carries the server-assigned id). The applier resolves each
-  // entry via `notifyDatasetOpened(datasetId)`.
-  private pendingByDatasetId = new Map<string, {
-    url: string;
-    resolve: () => void;
-    reject: (e: Error) => void;
-  }>();
-  private pendingByUrl = new Map<string, string>(); // url → datasetId
+  private applySettledListeners = new Set<ApplySettledListener>();
+  private activeContext: ApplyContext | null = null;
+  private nextEpoch = 1;
+  private settlements = new Map<number, ApplySettlement>();
+  private settlementWaiters = new Map<number, Set<(event: ApplySettlement) => void>>();
   private readonly bridge: ApplierBridge;
   private readonly getScene: () => WasmScene | null;
   private readonly datasetIdForUrl: (url: string) => string;
@@ -221,9 +265,8 @@ export class SavedViewApplier {
     return () => { this.applyResultListeners.delete(fn); };
   }
 
-  /** Subscribe to a one-shot "apply done" event fired once at the end of
-   *  every `apply()` (success or partial-failure), AFTER WASM mutations
-   *  but BEFORE the `inProgress` flag flips back to false. Subscribers
+  /** Subscribe to a compatibility "apply done" event fired once after every
+   *  successful apply, after WASM mutations and settlement. Subscribers
    *  read post-apply scene state via the same `getScene()` the applier
    *  uses; the render-loop and React-side dim mirrors get refreshed
    *  through this channel (see useSavedViewSync). Distinct from
@@ -233,37 +276,65 @@ export class SavedViewApplier {
     return () => { this.applyCompleteListeners.delete(fn); };
   }
 
+  /** Subscribe to the authoritative end of an apply generation. The event is
+   * emitted after `inProgress` becomes false, on success, unavailable scene,
+   * and failure alike. */
+  subscribeApplySettled(fn: ApplySettledListener): () => void {
+    this.applySettledListeners.add(fn);
+    return () => { this.applySettledListeners.delete(fn); };
+  }
+
+  getActiveEpoch(): number | null {
+    return this.activeContext?.epoch ?? null;
+  }
+
+  /** Resolve from the epoch's settlement event. Safe to call before or after
+   * the event; a small bounded cache makes late subscribers deterministic. */
+  waitForSettlement(epoch: number): Promise<ApplySettlement> {
+    const settled = this.settlements.get(epoch);
+    if (settled) return Promise.resolve(settled);
+    return new Promise((resolve) => {
+      let waiters = this.settlementWaiters.get(epoch);
+      if (!waiters) {
+        waiters = new Set();
+        this.settlementWaiters.set(epoch, waiters);
+      }
+      waiters.add(resolve);
+    });
+  }
+
   getState(): ApplierState {
     return this.state;
   }
 
-  isInProgress(): boolean {
-    return this.state.inProgress;
+  /** Whether a `dataset_opened` event for `datasetId` belongs to the active
+   * apply generation. This is an ownership relationship, not a timing guess:
+   * unrelated user opens during a restore remain eligible for their normal
+   * auto-fit policy. */
+  ownsDatasetOpen(datasetId: string): boolean {
+    return this.activeContext?.ownedDatasetIds.has(datasetId) ?? false;
   }
 
   /** Bridge-side hook: call this from the bridge's `onCommand` handler when
    * a DatasetOpened broadcast arrives. */
   notifyDatasetOpened(datasetId: string): void {
-    const entry = this.pendingByDatasetId.get(datasetId);
-    if (!entry) return;
-    this.pendingByDatasetId.delete(datasetId);
-    this.pendingByUrl.delete(entry.url);
-    this.updateOpenStatus(entry.url, "ok");
-    entry.resolve();
+    const context = this.activeContext;
+    if (!context) return;
+    const entry = context.pendingByDatasetId.get(datasetId);
+    entry?.finish("ok");
+    for (const waiter of [...context.datasetWaiters]) waiter.check();
   }
 
   /** Bridge-side hook: call this from the bridge's `onOpenDatasetFailed`
    * handler when a per-URL failure arrives. */
   notifyOpenFailed(url: string, error: string): void {
-    const datasetId = this.pendingByUrl.get(url);
+    const context = this.activeContext;
+    if (!context) return;
+    const datasetId = context.pendingByUrl.get(url);
     if (!datasetId) return;
-    const entry = this.pendingByDatasetId.get(datasetId);
+    const entry = context.pendingByDatasetId.get(datasetId);
     if (!entry) return;
-    this.pendingByDatasetId.delete(datasetId);
-    this.pendingByUrl.delete(url);
-    this.updateOpenStatus(url, "error", error);
-    // Reject so apply() can continue to "skip and keep going".
-    entry.reject(new Error(error));
+    entry.finish("error", error);
   }
 
   // Main entry point
@@ -274,12 +345,34 @@ export class SavedViewApplier {
    * even on partial dataset-open failure (the loading banner shows the
    * indicator).
    */
-  async apply(view: SavedView): Promise<void> {
-    if (this.state.inProgress) {
+  async apply(untrustedView: SavedView): Promise<ApplySettlement> {
+    if (this.activeContext) {
       throw new Error("SavedViewApplier.apply: another apply already in progress");
     }
-    this.setState({ ...IDLE_STATE, inProgress: true });
+    const context: ApplyContext = {
+      epoch: this.nextEpoch++,
+      ownedDatasetIds: new Set(),
+      pendingByDatasetId: new Map(),
+      pendingByUrl: new Map(),
+      datasetWaiters: new Set(),
+      timers: new Set(),
+    };
+    this.activeContext = context;
+    this.setState({
+      ...IDLE_STATE,
+      inProgress: true,
+      activeEpoch: context.epoch,
+      settledEpoch: this.state.settledEpoch,
+    });
+    let view: SavedView | undefined;
+    let result: ApplyResult | undefined;
+    let status: ApplySettlementStatus = "failed";
+    let failure: unknown;
     try {
+      // Runtime preflight is deliberately first. API responses and direct
+      // callers can violate the static type; no dataset open or scene mutation
+      // happens until every nested optional field and the major version pass.
+      view = validateSavedView(untrustedView);
       // Compute requested dataset ids. Global saved views identify
       // datasets by source URL and may open missing datasets. Workspace
       // inline views identify already-loaded workspace datasets by their
@@ -290,13 +383,15 @@ export class SavedViewApplier {
           id: this.datasetIdForUrl(url),
         }))
         : workspaceDatasetIdsForView(view).map((id) => ({ url: "", id }));
+      context.ownedDatasetIds = new Set(requestedIds.map((entry) => entry.id));
 
       // Snapshot of currently-loaded ids.
       const scene = this.getScene();
       if (!scene) {
         // No scene yet — skip everything that needs it. Caller should
         // re-invoke after the scene is available.
-        return;
+        status = "unavailable";
+        return this.finishApply(context, { status, view });
       }
       const loadedIds = new Set<string>(
         JSON.parse(scene.dataset_ids()) as string[],
@@ -312,24 +407,34 @@ export class SavedViewApplier {
         totalToOpen: toOpen.length,
         openStatuses: toOpen.map((r) => ({ url: r.url, state: "pending" })),
       });
-      await this.openMissing(toOpen);
+      await this.openMissing(context, toOpen);
 
       if (this.datasetReferenceMode === "workspace-dataset-id" && requestedSet.size > 0) {
-        await this.waitForWorkspaceDatasets(requestedSet);
+        await this.waitForWorkspaceDatasets(context, requestedSet);
       }
 
       // Re-read scene after opens (best-effort: if opens raced or some
       // failed, we proceed with whatever's loaded).
       const sceneAfter = this.getScene();
-      if (!sceneAfter) return;
-      const loadedAfter = new Set<string>(
+      if (!sceneAfter) {
+        status = "unavailable";
+        return this.finishApply(context, { status, view });
+      }
+
+      // Local viewport state is rollback-capable. Validation above prevents
+      // malformed-input failures; this checkpoint also protects against an
+      // unexpected scene rejection so a restore never leaves half of its local
+      // camera/display/dataset-presence writes behind.
+      const localCheckpoint = this.captureLocalCheckpoint(sceneAfter);
+      try {
+        const loadedAfter = new Set<string>(
         JSON.parse(sceneAfter.dataset_ids()) as string[],
       );
-      if (this.datasetReferenceMode === "workspace-dataset-id") {
-        for (const warning of workspaceMissingDatasetWarnings(loadedAfter, requestedSet)) {
-          this.addWarning(warning);
+        if (this.datasetReferenceMode === "workspace-dataset-id") {
+          for (const warning of workspaceMissingDatasetWarnings(loadedAfter, requestedSet)) {
+            this.addWarning(warning);
+          }
         }
-      }
 
       // Step 5: hide datasets that are loaded but not in the link
       // (recipient-only, ViewportCommand).
@@ -443,24 +548,92 @@ export class SavedViewApplier {
       // Selected-dataset wrinkle resolution (option c, [[wiki/queue]]
       // 2026-05-07): emit the post-apply visibility set so consumers
       // can re-target UI focus at something the recipient can see.
-      this.emitApplyResult(sceneAfter, view);
+      result = this.emitApplyResult(sceneAfter, view);
 
       // Fires inside the try (before the inProgress flag flips back) so
       // subscribers can read post-apply scene state and trigger render
       // refresh + React-state sync. The applied view is passed so
       // listeners can restore client-only state (e.g. autoContrastMap).
       // See `useSavedViewSync` for usage.
-      for (const fn of this.applyCompleteListeners) fn(view);
-    } finally {
-      // Ratchet the inProgress flag down regardless of any throw.
-      this.setState({ ...this.state, inProgress: false });
+      } catch (error) {
+        this.restoreLocalCheckpoint(sceneAfter, localCheckpoint);
+        throw error;
+      }
+      status = "applied";
+    } catch (error) {
+      failure = error;
+    }
+
+    const settlement = this.finishApply(context, {
+      status,
+      ...(view ? { view } : {}),
+      ...(result ? { result } : {}),
+      ...(failure !== undefined ? { error: failure } : {}),
+    });
+    if (failure !== undefined) throw failure;
+    return settlement;
+  }
+
+  private finishApply(
+    context: ApplyContext,
+    event: Omit<ApplySettlement, "epoch">,
+  ): ApplySettlement {
+    if (this.activeContext === context) this.activeContext = null;
+    for (const timer of context.timers) clearTimeout(timer);
+    context.timers.clear();
+    for (const waiter of [...context.datasetWaiters]) waiter.cancel();
+    context.datasetWaiters.clear();
+    context.pendingByDatasetId.clear();
+    context.pendingByUrl.clear();
+
+    const settlement: ApplySettlement = { epoch: context.epoch, ...event };
+    this.setState({
+      ...this.state,
+      inProgress: false,
+      activeEpoch: null,
+      settledEpoch: context.epoch,
+    });
+    if (settlement.status === "applied" && settlement.view) {
+      for (const fn of this.applyCompleteListeners) fn(settlement.view);
+    }
+    this.settlements.set(context.epoch, settlement);
+    while (this.settlements.size > 16) {
+      const oldest = this.settlements.keys().next().value as number | undefined;
+      if (oldest === undefined) break;
+      this.settlements.delete(oldest);
+    }
+    for (const resolve of this.settlementWaiters.get(context.epoch) ?? []) resolve(settlement);
+    this.settlementWaiters.delete(context.epoch);
+    for (const fn of this.applySettledListeners) fn(settlement);
+    return settlement;
+  }
+
+  private captureLocalCheckpoint(scene: WasmScene): ViewportCheckpoint | null {
+    try {
+      return {
+        presence: scene.export_presence(),
+        datasetPresence: scene.export_dataset_presence(),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private restoreLocalCheckpoint(scene: WasmScene, checkpoint: ViewportCheckpoint | null): void {
+    if (!checkpoint) return;
+    try {
+      guardedSceneCall("import_presence", scene, () => scene.import_presence(checkpoint.presence));
+      guardedSceneCall("import_dataset_presence", scene, () =>
+        scene.import_dataset_presence(checkpoint.datasetPresence));
+    } catch (rollbackError) {
+      console.warn("[SavedViewApplier] local rollback failed:", rollbackError);
     }
   }
 
   /** Read post-apply visibility from the live scene + the just-applied
    *  view's `dataset_order`, then notify subscribers so they can pick a
    *  new selectedDatasetId. */
-  private emitApplyResult(scene: WasmScene, view: SavedView): void {
+  private emitApplyResult(scene: WasmScene, view: SavedView): ApplyResult {
     const loaded = new Set<string>(JSON.parse(scene.dataset_ids()) as string[]);
     // Walk dataset_order first so the "first visible" is well-defined
     // (matches the order the recipient will see in the layer panel).
@@ -492,62 +665,83 @@ export class SavedViewApplier {
       firstVisibleDatasetId: visible[0] ?? null,
     };
     for (const fn of this.applyResultListeners) fn(result);
+    return result;
   }
 
   // Helpers
 
-  private async openMissing(toOpen: { url: string; id: string }[]): Promise<void> {
+  private async openMissing(
+    context: ApplyContext,
+    toOpen: { url: string; id: string }[],
+  ): Promise<void> {
     if (toOpen.length === 0) return;
 
     const promises = toOpen.map((r) => {
-      const p = new Promise<void>((resolve, reject) => {
-        this.pendingByDatasetId.set(r.id, { url: r.url, resolve, reject });
-        this.pendingByUrl.set(r.url, r.id);
+      const p = new Promise<void>((resolve) => {
+        let settled = false;
+        const finish: PendingOpen["finish"] = (state, error) => {
+          if (settled || this.activeContext !== context) return;
+          settled = true;
+          clearTimeout(timer);
+          context.timers.delete(timer);
+          context.pendingByDatasetId.delete(r.id);
+          context.pendingByUrl.delete(r.url);
+          this.updateOpenStatus(r.url, state, error);
+          if (state === "ok") {
+            this.setState({ ...this.state, okOpened: this.state.okOpened + 1 });
+          } else {
+            this.setState({ ...this.state, anyOpenFailed: true });
+            console.warn(`[SavedViewApplier] open failed: ${r.url}: ${error ?? "unknown"}`);
+          }
+          resolve();
+        };
+        const timer = setTimeout(() => finish("error", "timeout"), this.openTimeoutMs);
+        context.timers.add(timer);
+        context.pendingByDatasetId.set(r.id, { url: r.url, finish });
+        context.pendingByUrl.set(r.url, r.id);
       });
-      this.bridge.sendOpenRemoteDataset(r.url);
-      return p
-        .then(() => {
-          this.setState({ ...this.state, okOpened: this.state.okOpened + 1 });
-        })
-        .catch((e) => {
-          this.setState({ ...this.state, anyOpenFailed: true });
-          // Swallow — the per-URL state already records the error.
-          console.warn(`[SavedViewApplier] open failed: ${r.url}: ${(e as Error).message}`);
-        });
+      try {
+        this.bridge.sendOpenRemoteDataset(r.url);
+      } catch (error) {
+        context.pendingByDatasetId.get(r.id)?.finish("error", String(error));
+      }
+      return p;
     });
-
-    // Watchdog timeout per pending entry.
-    const watchdog = new Promise<void>((resolve) => {
-      setTimeout(() => {
-        for (const entry of this.pendingByDatasetId.values()) {
-          this.updateOpenStatus(entry.url, "error", "timeout");
-          entry.reject(new Error("timeout"));
-        }
-        this.pendingByDatasetId.clear();
-        this.pendingByUrl.clear();
-        resolve();
-      }, this.openTimeoutMs);
-    });
-
-    await Promise.race([Promise.all(promises), watchdog]);
+    await Promise.all(promises);
   }
 
-  private async waitForWorkspaceDatasets(requestedSet: Set<string>): Promise<void> {
-    const deadline = performance.now() + Math.min(this.openTimeoutMs, 5_000);
-    while (performance.now() < deadline) {
+  private async waitForWorkspaceDatasets(
+    context: ApplyContext,
+    requestedSet: Set<string>,
+  ): Promise<void> {
+    const allLoaded = () => {
       const scene = this.getScene();
-      if (!scene) return;
+      if (!scene) return true;
       const loaded = new Set<string>(JSON.parse(scene.dataset_ids()) as string[]);
-      let missing = false;
-      for (const id of requestedSet) {
-        if (!loaded.has(id)) {
-          missing = true;
-          break;
-        }
-      }
-      if (!missing) return;
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
+      return [...requestedSet].every((id) => loaded.has(id));
+    };
+    if (allLoaded()) return;
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      const cleanup = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        context.timers.delete(timer);
+        context.datasetWaiters.delete(waiter);
+        resolve();
+      };
+      const waiter: DatasetWaiter = {
+        check: () => {
+          if (this.activeContext !== context || allLoaded()) cleanup();
+        },
+        cancel: cleanup,
+      };
+      const timer = setTimeout(cleanup, Math.min(this.openTimeoutMs, 5_000));
+      context.timers.add(timer);
+      context.datasetWaiters.add(waiter);
+      waiter.check();
+    });
   }
 
   private applyDocument(cmd: DocumentCommand): void {

@@ -2,6 +2,7 @@
 import shaderSource from "./slice.wgsl?raw";
 import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
 import type { BlendMode } from "./layerCompositor.ts";
+import type { GpuResourceBudget, TrackedGpuResource } from "./gpuResourceBudget.ts";
 
 // Uniform buffer layout (128 bytes):
 //   offset 0:   transform           mat4x4f (64B)
@@ -22,15 +23,13 @@ export interface AggregateTierBinding {
 
 /**
  * One aggregate sub-batch: a contiguous run of quad records that share
- * the same pool bindings (detail atlas, coarse atlas, tile/group proxy
- * pools), drawn with exactly those resources bound. `firstInstance` /
+ * the same detail and coarse atlas bindings, drawn with exactly those
+ * resources bound. `firstInstance` /
  * `count` address the run inside the layer's quad storage buffer.
  */
 export interface AggregateBatch {
   detail: AggregateTierBinding | null;
   coarse: AggregateTierBinding | null;
-  tileProxyTexture: GPUTexture | null;
-  groupProxyTexture: GPUTexture | null;
   firstInstance: number;
   count: number;
 }
@@ -120,8 +119,10 @@ export class SliceRenderer {
   // must bind whatever is current at draw time, exactly like the
   // per-member path.
   private aggregateQuadBuffer: GPUBuffer | null = null;
+  private aggregateQuadAllocation: TrackedGpuResource<GPUBuffer> | null = null;
   private aggregateQuadCapacity = 0;
   private aggregateUniformBuffers: GPUBuffer[] = [];
+  private aggregateUniformAllocations: TrackedGpuResource<GPUBuffer>[] = [];
 
   private detailAtlasTexture: GPUTexture | null = null;
   private detailIndirectionBuffer: GPUBuffer | null = null;
@@ -132,17 +133,20 @@ export class SliceRenderer {
   private dummyLabelColorBuffer: GPUBuffer;
   private lutTexture: GPUTexture;
   private lutSampler: GPUSampler;
+  private uniformAllocation!: TrackedGpuResource<GPUBuffer>;
+  private entityRefAllocation!: TrackedGpuResource<GPUBuffer>;
+  private dummyTextureAllocation!: TrackedGpuResource<GPUTexture>;
+  private dummyIndirectionAllocation!: TrackedGpuResource<GPUBuffer>;
+  private dummyLabelColorAllocation!: TrackedGpuResource<GPUBuffer>;
+  private lutAllocation!: TrackedGpuResource<GPUTexture>;
+  private readonly resources: GpuResourceBudget;
 
   private detailAtlasSlotDims: [number, number] = [0, 0];
   private coarseAtlasSlotDims: [number, number] = [0, 0];
-  // Proxy textures still bound CPU-side (slot indices and dims come
-  // from the descriptor).
-  private tileProxyTexture: GPUTexture | null = null;
-  private groupProxyTexture: GPUTexture | null = null;
-  private dummyProxyTexture: GPUTexture | null = null;
 
-  constructor(device: GPUDevice) {
+  constructor(device: GPUDevice, resources: GpuResourceBudget) {
     this.device = device;
+    this.resources = resources;
 
     const shaderModule = device.createShaderModule({ code: shaderSource });
 
@@ -182,18 +186,6 @@ export class SliceRenderer {
           binding: 6,
           visibility: GPUShaderStage.FRAGMENT,
           buffer: { type: "read-only-storage" },
-        },
-        // Proxy textures (tileProxy + groupProxy). 3D r16uint, same as
-        // volume.wgsl — slice mode reads at the slot's Z midpoint.
-        {
-          binding: 7,
-          visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: "uint", viewDimension: "3d" },
-        },
-        {
-          binding: 8,
-          visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: "uint", viewDimension: "3d" },
         },
       ],
     });
@@ -299,44 +291,61 @@ export class SliceRenderer {
       }),
     };
 
-    this.uniformBuffer = device.createBuffer({
-      size: UNIFORM_SIZE,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-    this.entityRefBuffer = device.createBuffer({
-      size: ENTITY_REF_SIZE,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
+    try {
+      this.uniformAllocation = resources.createBuffer(
+        device,
+        { key: "renderer:slice:uniform", kind: "buffer" },
+        { size: UNIFORM_SIZE, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST },
+      );
+      this.uniformBuffer = this.uniformAllocation.resource;
+      this.entityRefAllocation = resources.createBuffer(
+        device,
+        { key: "renderer:slice:entity-ref", kind: "buffer" },
+        { size: ENTITY_REF_SIZE, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST },
+      );
+      this.entityRefBuffer = this.entityRefAllocation.resource;
 
-    // 1x1 dummy texture for unset bindings
-    this.dummyTexture = device.createTexture({
-      size: [1, 1],
-      format: "r16uint",
-      usage: GPUTextureUsage.TEXTURE_BINDING,
-    });
+      // 1x1 dummy texture for unset bindings
+      this.dummyTextureAllocation = resources.createTexture(
+        device,
+        { key: "renderer:slice:dummy-texture", kind: "lookup" },
+        { size: [1, 1], format: "r16uint", usage: GPUTextureUsage.TEXTURE_BINDING },
+      );
+      this.dummyTexture = this.dummyTextureAllocation.resource;
 
-    // Dummy indirection buffer (single sentinel entry)
-    const dummyData = new Uint32Array([0xFFFFFFFF]);
-    this.dummyIndirectionBuffer = device.createBuffer({
-      size: 4,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    device.queue.writeBuffer(this.dummyIndirectionBuffer, 0, dummyData);
+      // Dummy indirection buffer (single sentinel entry)
+      const dummyData = new Uint32Array([0xFFFFFFFF]);
+      this.dummyIndirectionAllocation = resources.createBuffer(
+        device,
+        { key: "renderer:slice:dummy-indirection", kind: "buffer" },
+        { size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST },
+      );
+      this.dummyIndirectionBuffer = this.dummyIndirectionAllocation.resource;
+      device.queue.writeBuffer(this.dummyIndirectionBuffer, 0, dummyData);
 
-    // Dummy declared-palette buffer (one u32) for non-categorical draws;
-    // the shader scans 0 pairs (count comes from the entity ref).
-    this.dummyLabelColorBuffer = device.createBuffer({
-      size: 4,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    device.queue.writeBuffer(this.dummyLabelColorBuffer, 0, new Uint32Array([0]));
+      this.dummyLabelColorAllocation = resources.createBuffer(
+        device,
+        { key: "renderer:slice:dummy-label-color", kind: "buffer" },
+        { size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST },
+      );
+      this.dummyLabelColorBuffer = this.dummyLabelColorAllocation.resource;
+      device.queue.writeBuffer(this.dummyLabelColorBuffer, 0, new Uint32Array([0]));
 
-    // Default 1x1 white LUT (renders grayscale when no colormap is set)
-    this.lutTexture = device.createTexture({
-      size: [1, 1],
-      format: "rgba8unorm",
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-    });
+      // Default 1x1 white LUT (renders grayscale when no colormap is set)
+      this.lutAllocation = resources.createTexture(
+        device,
+        { key: "renderer:slice:default-lut", kind: "lookup" },
+        {
+          size: [1, 1],
+          format: "rgba8unorm",
+          usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+        },
+      );
+      this.lutTexture = this.lutAllocation.resource;
+    } catch (error) {
+      resources.destroyOwnerPrefix("renderer:slice:");
+      throw error;
+    }
     device.queue.writeTexture(
       { texture: this.lutTexture },
       new Uint8Array([255, 255, 255, 255]),
@@ -385,33 +394,6 @@ export class SliceRenderer {
     this.rebuildBindGroup();
   }
 
-  /** Lazily allocate the 1×1×1 dummy proxy texture. */
-  private getDummyProxyTexture(): GPUTexture {
-    if (!this.dummyProxyTexture) {
-      this.dummyProxyTexture = this.device.createTexture({
-        size: [1, 1, 1],
-        format: "r16uint",
-        dimension: "3d",
-        usage: GPUTextureUsage.TEXTURE_BINDING,
-      });
-    }
-    return this.dummyProxyTexture;
-  }
-
-  /**
-   * Configure proxy textures for the next draw. Slot indices and dims
-   * live in the per-entity descriptor; the shader's unified fallback
-   * chain decides per-fragment whether to consult them.
-   */
-  setProxyTextures(
-    tileTexture: GPUTexture | null,
-    groupTexture: GPUTexture | null,
-  ) {
-    this.tileProxyTexture = tileTexture;
-    this.groupProxyTexture = groupTexture;
-    this.rebuildBindGroup();
-  }
-
   /**
    * Set the declared-label-palette storage buffer for the next categorical
    * draw ([id, packedRgba] pairs). Pass `null` (or omit) for intensity
@@ -453,9 +435,6 @@ export class SliceRenderer {
     const detailIndirection = this.detailIndirectionBuffer ?? this.dummyIndirectionBuffer;
     const coarseAtlas = this.coarseAtlasTexture ?? this.dummyTexture;
     const coarseIndirection = this.coarseIndirectionBuffer ?? this.dummyIndirectionBuffer;
-    const dummyProxy = this.getDummyProxyTexture();
-    const tileProxyView = (this.tileProxyTexture ?? dummyProxy).createView();
-    const groupProxyView = (this.groupProxyTexture ?? dummyProxy).createView();
     this.bindGroup = this.device.createBindGroup({
       layout: this.bindGroupLayout,
       entries: [
@@ -466,8 +445,6 @@ export class SliceRenderer {
         { binding: 4, resource: this.lutSampler },
         { binding: 5, resource: coarseAtlas.createView() },
         { binding: 6, resource: { buffer: coarseIndirection } },
-        { binding: 7, resource: tileProxyView },
-        { binding: 8, resource: groupProxyView },
       ],
     });
   }
@@ -504,8 +481,8 @@ export class SliceRenderer {
   /**
    * Draw an aggregate layer's member quads in ONE render pass, one
    * instanced draw per pool-binding sub-batch. Each batch binds its
-   * members' OWN detail/coarse atlases and tile/group proxy pool
-   * textures, so every quad samples the same resources the per-member
+   * members' OWN detail/coarse atlases, so every quad samples the same
+   * resources the per-member
    * pass would have bound for it; slot indices, dims, and display state
    * (contrast/gamma/opacity) come from `descriptorBuffer`, which is
    * re-bound fresh on every call so the draw always reflects the
@@ -527,11 +504,13 @@ export class SliceRenderer {
     if (batches.length === 0 || quadData.byteLength === 0) return;
 
     if (!this.aggregateQuadBuffer || this.aggregateQuadCapacity < quadData.byteLength) {
-      this.aggregateQuadBuffer?.destroy();
-      this.aggregateQuadBuffer = this.device.createBuffer({
-        size: quadData.byteLength,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-      });
+      this.aggregateQuadAllocation?.destroy();
+      this.aggregateQuadAllocation = this.resources.createBuffer(
+        this.device,
+        { key: "renderer:slice:aggregate-quads", kind: "buffer" },
+        { size: quadData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST },
+      );
+      this.aggregateQuadBuffer = this.aggregateQuadAllocation.resource;
       this.aggregateQuadCapacity = quadData.byteLength;
     }
     this.device.queue.writeBuffer(this.aggregateQuadBuffer, 0, quadData);
@@ -551,13 +530,16 @@ export class SliceRenderer {
     // atlas slot dims. Buffers are pooled by index across frames; the
     // contents are rewritten before every submit.
     while (this.aggregateUniformBuffers.length < batches.length) {
-      this.aggregateUniformBuffers.push(this.device.createBuffer({
-        size: UNIFORM_SIZE,
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-      }));
+      const index = this.aggregateUniformBuffers.length;
+      const allocation = this.resources.createBuffer(
+        this.device,
+        { key: `renderer:slice:aggregate-uniform:${index}`, kind: "buffer" },
+        { size: UNIFORM_SIZE, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST },
+      );
+      this.aggregateUniformAllocations.push(allocation);
+      this.aggregateUniformBuffers.push(allocation.resource);
     }
 
-    const dummyProxy = this.getDummyProxyTexture();
     const batchBindGroups = batches.map((batch, i) => {
       const uniformData = buildSliceUniformData(
         params.zoom, params.cx, params.cy,
@@ -577,8 +559,6 @@ export class SliceRenderer {
           { binding: 4, resource: this.lutSampler },
           { binding: 5, resource: (batch.coarse?.texture ?? this.dummyTexture).createView() },
           { binding: 6, resource: { buffer: batch.coarse?.indirectionBuf ?? this.dummyIndirectionBuffer } },
-          { binding: 7, resource: (batch.tileProxyTexture ?? dummyProxy).createView() },
-          { binding: 8, resource: (batch.groupProxyTexture ?? dummyProxy).createView() },
         ],
       });
     });
@@ -603,5 +583,14 @@ export class SliceRenderer {
       pass.draw(6, batch.count, 0, batch.firstInstance);
     });
     pass.end();
+  }
+
+  /** Release every renderer-owned destroyable handle exactly once. */
+  destroy(): void {
+    this.resources.destroyOwnerPrefix("renderer:slice:");
+    this.aggregateQuadAllocation = null;
+    this.aggregateQuadBuffer = null;
+    this.aggregateUniformAllocations = [];
+    this.aggregateUniformBuffers = [];
   }
 }

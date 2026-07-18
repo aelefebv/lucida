@@ -4,6 +4,7 @@ import type {
   CacheStateSnapshot,
   ChunkRequest,
 } from "../pipeline/planning/index.ts";
+import { makeChunkContract } from "../test/fixtures.ts";
 import {
   buildGroupTierCoverage,
   formatTierCoverageLabel,
@@ -29,6 +30,7 @@ function req(overrides: Partial<ChunkRequest>): ChunkRequest {
     tier: "detail",
     priority: 0,
     chunkKey: "0/0/0/0/0/0",
+    contract: makeChunkContract(),
     ...overrides,
   };
 }

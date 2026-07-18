@@ -9,10 +9,10 @@
 //! by an opaque ID.
 //!
 //! The schema is a wire format: every field that doesn't always serialize is
-//! marked `#[serde(default)]` so a recipient on an older `v: 1` codepath can
-//! tolerate later additive evolution. The `v` field is the version gate —
-//! `v: 1` is the only spec; the encoder rejects unknown major versions;
-//! future bumps (`v: 2`+) require an explicit migration story.
+//! marked `#[serde(default)]` so all additive evolution remains inside v1. The
+//! `v` field is the strict major-version gate: v1 is the only current spec;
+//! missing, zero/legacy, and future majors are rejected before a value reaches
+//! any apply path. Future bumps require an explicit migration story.
 //!
 //! Tests at the bottom of this file lock the wire format. Don't touch them
 //! casually — see [[gotchas/scene-document-state-json-compat]].
@@ -27,7 +27,7 @@
 // available under the same import.
 
 use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use lucida_content::{DatasetId, LayoutId};
 
@@ -38,11 +38,23 @@ use crate::camera::Camera;
 use crate::scene::{DatasetDisplaySettings, DisplayState};
 use crate::view::ViewState;
 
-/// Schema version of the [`SavedView`] wire format. Encoders emit and
-/// accept only this version. Recipients that see a higher version should
-/// best-effort apply known fields and surface a warning; recipients that
-/// see a missing/zero version should reject.
+/// Schema version of the [`SavedView`] wire format. Encoders and decoders emit
+/// and accept only this major. Additive changes retain v1 defaults; breaking
+/// evolution requires a migration before deserialization.
 pub const SAVED_VIEW_VERSION: u32 = 1;
+
+fn deserialize_saved_view_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let version = u32::deserialize(deserializer)?;
+    if version != SAVED_VIEW_VERSION {
+        return Err(serde::de::Error::custom(format!(
+            "saved view version {version} is unsupported; expected {SAVED_VIEW_VERSION}"
+        )));
+    }
+    Ok(version)
+}
 
 /// Capture record for a "saved view" — the user's complete view of one or
 /// more datasets at a moment in time. Encoded into the URL hash by
@@ -77,13 +89,15 @@ pub const SAVED_VIEW_VERSION: u32 = 1;
 /// round-trips that order verbatim, so the rebroadcast is byte-identical. This
 /// matches the existing wire-borne document collections on
 /// [`DocumentState`](crate::scene::DocumentState) — its `manifests`,
-/// `asset_catalogs`, and `annotations` are `IndexMap` for exactly this reason
+/// `manifests`, `active_layout_ids`, and `annotations` are `IndexMap` for
+/// exactly this reason
 /// ([[scene-state-and-epochs]]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SavedView {
     /// Schema version. Always [`SAVED_VIEW_VERSION`] (currently `1`) in
     /// the on-the-wire payload. The decoder rejects payloads where this
     /// field is missing or zero.
+    #[serde(deserialize_with = "deserialize_saved_view_version")]
     pub v: u32,
 
     /// Origin URLs of datasets this view depends on, in the order they
@@ -351,6 +365,29 @@ mod tests {
     }
 
     #[test]
+    fn version_gate_accepts_only_current_major() {
+        let current = serde_json::to_value(SavedView::empty([800, 600])).unwrap();
+        assert!(serde_json::from_value::<SavedView>(current.clone()).is_ok());
+
+        for replacement in [None, Some(0), Some(SAVED_VIEW_VERSION + 1)] {
+            let mut candidate = current.clone();
+            let object = candidate.as_object_mut().unwrap();
+            match replacement {
+                Some(version) => {
+                    object.insert("v".into(), serde_json::json!(version));
+                }
+                None => {
+                    object.remove("v");
+                }
+            }
+            assert!(
+                serde_json::from_value::<SavedView>(candidate).is_err(),
+                "version {replacement:?} must be rejected before apply"
+            );
+        }
+    }
+
+    #[test]
     fn missing_optional_fields_default_on_decode() {
         // Minimum-payload SavedView: only v + camera + view + display.
         let json = r#"{
@@ -416,7 +453,7 @@ mod tests {
 
     #[test]
     fn dataset_id_for_url_matches_server_format() {
-        // Format: ds-{16 hex chars}. Two opens of the same URL produce
+        // Format: ds-{full BLAKE3 hex}. Two opens of the same URL produce
         // the same id; different URLs produce different ids.
         let id1 = dataset_id_for_url("gs://bucket/a.zarr");
         let id2 = dataset_id_for_url("gs://bucket/a.zarr");
@@ -424,21 +461,21 @@ mod tests {
         assert_eq!(id1, id2);
         assert_ne!(id1, id3);
         assert!(id1.starts_with("ds-"));
-        assert_eq!(id1.len(), 3 + 16);
+        assert_eq!(id1.len(), 3 + 64);
     }
 
     #[test]
     fn dataset_id_for_url_local_file_path() {
         let id = dataset_id_for_url("/data/scans/foo.zarr");
         assert!(id.starts_with("ds-"));
-        assert_eq!(id.len(), 19);
+        assert_eq!(id.len(), 67);
     }
 
     #[test]
     fn dataset_id_for_url_empty_string() {
         // Edge case — should still produce a well-formed id.
         let id = dataset_id_for_url("");
-        assert_eq!(id.len(), 19);
+        assert_eq!(id.len(), 67);
         assert!(id.starts_with("ds-"));
     }
 

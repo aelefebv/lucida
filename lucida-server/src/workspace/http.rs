@@ -7,18 +7,20 @@ use std::sync::Arc;
 
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
-use axum::http::header::LOCATION;
+use axum::http::header::{LOCATION, ORIGIN};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, patch, post};
 use axum::{Extension, Router};
 use chrono::{DateTime, Utc};
 use lucida_core::auth_principal::AuthPrincipal;
+use lucida_core::quota::MAX_CLIENT_MESSAGE_BYTES;
 use lucida_core::saved_view::SavedView;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::AdminRequired;
 use crate::handler;
+use crate::origin::OriginPolicy;
 
 use super::manager::WorkspaceManager;
 use super::types::{
@@ -190,6 +192,10 @@ pub struct UpdateWorkspaceDefaultSavedViewRequest {
 #[derive(Debug, Deserialize)]
 pub struct UpsertWorkspaceViewerProfileRequest {
     pub view: SavedView,
+    /// Omit only when creating a new profile. Updates must compare against the
+    /// revision returned by GET/PUT so concurrent writers cannot silently win.
+    #[serde(default)]
+    pub expected_revision: Option<u64>,
     #[serde(default)]
     pub seed_source: Option<String>,
 }
@@ -699,6 +705,7 @@ async fn upsert_workspace_viewer_profile(
             &workspace_id,
             &principal,
             &profile,
+            body.expected_revision,
             body.seed_source.as_deref(),
             body.view,
         )
@@ -832,22 +839,60 @@ async fn remove_member(
 async fn workspace_ws(
     State(state): State<WorkspacesState>,
     Extension(principal): Extension<AuthPrincipal>,
+    origin_policy: Option<Extension<OriginPolicy>>,
+    lifecycle: Option<Extension<crate::health::RuntimeLifecycle>>,
     Path(workspace_id): Path<String>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let live = match state
+    // CORS middleware does not protect WebSocket upgrades. Apply the same
+    // authoritative policy here before restoring or attaching a workspace.
+    // Originless requests are the documented non-browser client contract. A
+    // browser Origin without an installed policy fails closed so a test or
+    // alternate router cannot accidentally bypass production admission.
+    let browser_origin_allowed = match origin_policy {
+        Some(Extension(policy)) => policy.allows_headers(&headers),
+        None => !headers.contains_key(ORIGIN),
+    };
+    if !browser_origin_allowed {
+        tracing::warn!(workspace_id, "ws.origin_denied");
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
+    let attachment = match state
         .manager
-        .live_workspace(&workspace_id, &principal)
+        .attach_workspace(&workspace_id, &principal)
         .await
     {
-        Ok(live) => live,
+        Ok(attachment) => attachment,
         Err(e) => return e.into_response(),
     };
+    let lifecycle = lifecycle
+        .map(|Extension(lifecycle)| lifecycle)
+        .unwrap_or_default();
     let manager = Arc::clone(&state.manager);
-    ws.on_upgrade(move |socket| async move {
-        let client_id = live.next_client_id();
-        tracing::info!(client_id, workspace_id = %live.workspace_id, "ws.workspace_client_connected");
-        handler::handle_workspace_client(client_id, socket, live, manager, principal).await;
-    })
+    let Some(client_id) = attachment.next_client_id() else {
+        tracing::error!(
+            workspace_id = %attachment.workspace_id,
+            "ws.workspace_client_id_exhausted"
+        );
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    ws.max_message_size(MAX_CLIENT_MESSAGE_BYTES)
+        .max_frame_size(MAX_CLIENT_MESSAGE_BYTES)
+        .write_buffer_size(0)
+        .max_write_buffer_size(crate::outbox::MAX_SOCKET_WRITE_FRAME_BYTES)
+        .on_upgrade(move |socket| async move {
+            tracing::info!(client_id, workspace_id = %attachment.workspace_id, "ws.workspace_client_connected");
+            handler::handle_workspace_client(
+                client_id,
+                socket,
+                attachment,
+                manager,
+                principal,
+                lifecycle,
+            )
+            .await;
+        })
     .into_response()
 }

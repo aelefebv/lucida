@@ -1,6 +1,12 @@
-import { describe, it, expect } from "vitest";
-import { extractCollectionData } from "./CollectionSelector.tsx";
+// @vitest-environment happy-dom
+
+import { cleanup, render, screen } from "@testing-library/react";
+import { createElement } from "react";
+import { afterEach, describe, it, expect } from "vitest";
+import { CollectionSelector, extractCollectionData } from "./CollectionSelector.tsx";
 import type { DatasetManifest, ImageSpec } from "../manifestTypes.ts";
+
+afterEach(() => cleanup());
 
 function makeImage(image_id: string, owner: string): ImageSpec {
   return {
@@ -111,5 +117,25 @@ describe("extractCollectionData", () => {
     const e0 = data!.members.find((m) => m.id === "e0")!;
     expect(e0.rowIndex).toBe(0);
     expect(e0.columnIndex).toBe(0);
+  });
+});
+
+describe("CollectionSelector geometry", () => {
+  it("owns padding and borders inside its declared overlay width", () => {
+    render(createElement(CollectionSelector, {
+      collectionKind: {
+          rows: ["A"],
+          columns: Array.from({ length: 12 }, (_, index) => String(index + 1)),
+          positioning_mode: "Derived",
+          has_explicit_positions: false,
+      },
+      members: [],
+      collectionName: "Twelve positions",
+      onGroupClick: () => {},
+    }));
+
+    const selector = screen.getByTestId("collection-selector");
+    expect(selector.style.boxSizing).toBe("border-box");
+    expect(selector.style.width).toBe("354px");
   });
 });

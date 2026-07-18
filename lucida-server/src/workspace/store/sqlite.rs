@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 use lucida_content::DatasetId;
+use lucida_content::url::{SourceIdentity, SourceRevision, SourceVersion};
 use lucida_core::auth_principal::AuthPrincipal;
 use lucida_core::saved_view::SavedView;
 use lucida_core::scene::DocumentState;
@@ -18,9 +19,9 @@ use crate::workspace::types::{
 };
 
 use super::{
-    StoreError, WorkspaceStore, default_member_display_name, default_workspace_name, map_json_in,
-    map_json_out, map_saved_view_json_in, map_saved_view_json_out, map_sql, normalize_email,
-    parse_dt, parse_opt_dt,
+    StoreError, WorkspaceStore, default_member_display_name, default_workspace_name,
+    map_saved_view_json_in, map_saved_view_json_out, map_sql, normalize_email, parse_document,
+    parse_dt, parse_opt_dt, previous_stored_seq, serialize_document, stored_seq,
 };
 
 use async_trait::async_trait;
@@ -66,27 +67,6 @@ impl SqliteWorkspaceStore {
         .map_err(map_sql)?;
 
         rows.into_iter().map(row_to_member).collect()
-    }
-
-    async fn member(
-        &self,
-        workspace_id: &str,
-        email: &str,
-    ) -> Result<Option<WorkspaceMember>, StoreError> {
-        let row = sqlx::query(
-            r#"
-            SELECT email, role, display_name, added_at
-            FROM workspace_members
-            WHERE workspace_id = ? AND email = ?
-            "#,
-        )
-        .bind(workspace_id)
-        .bind(normalize_email(email))
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(map_sql)?;
-
-        row.map(row_to_member).transpose()
     }
 
     async fn get_user_workspace_state(
@@ -209,7 +189,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         let owner_email = normalize_email(&owner.email);
         let name = default_workspace_name(name);
         let document = DocumentState::default();
-        let document_json = serde_json::to_string(&document).map_err(map_json_out)?;
+        let document_json = serialize_document(&document)?;
 
         let mut tx = self.pool.begin().await.map_err(map_sql)?;
         insert_blank_owned_workspace(
@@ -274,7 +254,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         // consistent against the copy's datasets (the id-consistency trap). ---
         let dataset_rows = sqlx::query(
             r#"
-            SELECT id, dataset_source_id, display_name, sort_order
+            SELECT id, dataset_source_id, source_revision, display_name, sort_order
             FROM workspace_datasets
             WHERE workspace_id = ?
             ORDER BY sort_order ASC, added_at ASC
@@ -289,6 +269,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         struct CopiedDataset {
             new_id: String,
             dataset_source_id: String,
+            source_revision: Option<String>,
             display_name: String,
             sort_order: i64,
         }
@@ -300,6 +281,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             copied_datasets.push(CopiedDataset {
                 new_id: new_dataset_id,
                 dataset_source_id: row.get("dataset_source_id"),
+                source_revision: row.get("source_revision"),
                 display_name: row.get("display_name"),
                 sort_order: row.get("sort_order"),
             });
@@ -307,10 +289,9 @@ impl WorkspaceStore for SqliteWorkspaceStore {
 
         // --- Document: remap every dataset-id reference onto the copy's ids. ---
         let source_document_json: String = source_row.get("document_json");
-        let mut document: DocumentState =
-            serde_json::from_str(&source_document_json).map_err(map_json_in)?;
+        let mut document = parse_document(&source_document_json)?;
         document.remap_dataset_ids(&remap);
-        let document_json = serde_json::to_string(&document).map_err(map_json_out)?;
+        let document_json = serialize_document(&document)?;
 
         // New workspace row + owner-only membership. Shared with
         // `create_workspace` via `insert_blank_owned_workspace`, which also owns
@@ -334,13 +315,14 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             sqlx::query(
                 r#"
                 INSERT INTO workspace_datasets
-                    (id, workspace_id, dataset_source_id, display_name, added_by, added_at, sort_order)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (id, workspace_id, dataset_source_id, source_revision, display_name, added_by, added_at, sort_order)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
             )
             .bind(&ds.new_id)
             .bind(&new_id)
             .bind(&ds.dataset_source_id)
+            .bind(&ds.source_revision)
             .bind(&ds.display_name)
             .bind(&owner_email)
             .bind(&now_s)
@@ -864,23 +846,34 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         workspace_id: &str,
     ) -> Result<Option<WorkspaceRecord>, StoreError> {
         let now = Utc::now().to_rfc3339();
-        let result = sqlx::query(
+        let mut tx = self.pool.begin().await.map_err(map_sql)?;
+        let row = sqlx::query(
             r#"
             UPDATE workspaces
             SET archived_at = ?, updated_at = ?
             WHERE id = ? AND archived_at IS NULL
+            RETURNING
+                id, name, created_by, created_at, updated_at, archived_at,
+                seq, default_saved_view_id, document_json
             "#,
         )
         .bind(&now)
         .bind(&now)
         .bind(workspace_id)
-        .execute(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(map_sql)?;
-        if result.rows_affected() == 0 {
+        let Some(row) = row else {
+            tx.rollback().await.map_err(map_sql)?;
             return Ok(None);
-        }
-        self.get_workspace(workspace_id).await
+        };
+
+        // Decode every fallible field while rollback is still possible. Once
+        // commit succeeds, the manager can safely treat this as the durable
+        // side of its commit -> local-revocation sequence.
+        let record = row_to_record(row)?;
+        tx.commit().await.map_err(map_sql)?;
+        Ok(Some(record))
     }
 
     async fn restore_workspace(
@@ -912,22 +905,28 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         seq: u64,
         document: &DocumentState,
     ) -> Result<(), StoreError> {
-        let document_json = serde_json::to_string(document).map_err(map_json_out)?;
+        let stored_seq = stored_seq(seq)?;
+        let previous_seq = previous_stored_seq(seq)?;
+        let document_json = serialize_document(document)?;
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             UPDATE workspaces
             SET seq = ?, document_json = ?, updated_at = ?
-            WHERE id = ?
+            WHERE id = ? AND seq = ?
             "#,
         )
-        .bind(seq as i64)
+        .bind(stored_seq)
         .bind(document_json)
         .bind(now)
         .bind(workspace_id)
+        .bind(previous_seq)
         .execute(&self.pool)
         .await
         .map_err(map_sql)?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::SequenceConflict { attempted: seq });
+        }
         Ok(())
     }
 
@@ -936,27 +935,31 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         &self,
         workspace_id: &str,
         workspace_dataset_id: &DatasetId,
-        dataset_source_id: &str,
-        canonical_url: &str,
+        source: &SourceVersion,
         display_name: &str,
         added_by: &str,
         seq: u64,
         document: &DocumentState,
     ) -> Result<(), StoreError> {
+        let stored_seq = stored_seq(seq)?;
+        let previous_seq = previous_stored_seq(seq)?;
         let now = Utc::now().to_rfc3339();
-        let document_json = serde_json::to_string(document).map_err(map_json_out)?;
+        let document_json = serialize_document(document)?;
+        let dataset_source_id = source.identity.dataset_id();
+        let canonical_url = source.identity.locator.as_str();
+        let source_revision = source.revision.as_hex();
         let mut tx = self.pool.begin().await.map_err(map_sql)?;
-        sqlx::query(
+        let source_write = sqlx::query(
             r#"
             INSERT INTO dataset_sources (id, canonical_url, default_name, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
-                canonical_url = excluded.canonical_url,
                 default_name = excluded.default_name,
                 updated_at = excluded.updated_at
+            WHERE dataset_sources.canonical_url = excluded.canonical_url
             "#,
         )
-        .bind(dataset_source_id)
+        .bind(&dataset_source_id)
         .bind(canonical_url)
         .bind(display_name)
         .bind(&now)
@@ -964,22 +967,32 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         .execute(&mut *tx)
         .await
         .map_err(map_sql)?;
+        if source_write.rows_affected() == 0 {
+            tx.rollback().await.map_err(map_sql)?;
+            return Err(StoreError::InvalidSourceIdentity(format!(
+                "{} is already bound to a different canonical locator",
+                dataset_source_id
+            )));
+        }
 
         sqlx::query(
             r#"
             INSERT INTO workspace_datasets
-                (id, workspace_id, dataset_source_id, display_name, added_by, added_at, sort_order)
-            VALUES (?, ?, ?, ?, ?, ?, (
+                (id, workspace_id, dataset_source_id, source_revision, display_name, added_by, added_at, sort_order)
+            VALUES (?, ?, ?, ?, ?, ?, ?, (
                 SELECT COALESCE(MAX(sort_order), -1) + 1
                 FROM workspace_datasets
                 WHERE workspace_id = ?
             ))
-            ON CONFLICT(workspace_id, dataset_source_id) DO NOTHING
+            ON CONFLICT(workspace_id, dataset_source_id) DO UPDATE SET
+                source_revision = excluded.source_revision,
+                display_name = excluded.display_name
             "#,
         )
         .bind(workspace_dataset_id.as_ref())
         .bind(workspace_id)
-        .bind(dataset_source_id)
+        .bind(&dataset_source_id)
+        .bind(&source_revision)
         .bind(display_name)
         .bind(normalize_email(added_by))
         .bind(&now)
@@ -988,20 +1001,116 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         .await
         .map_err(map_sql)?;
 
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             UPDATE workspaces
             SET seq = ?, document_json = ?, updated_at = ?
-            WHERE id = ?
+            WHERE id = ? AND seq = ?
             "#,
         )
-        .bind(seq as i64)
+        .bind(stored_seq)
         .bind(document_json)
         .bind(&now)
         .bind(workspace_id)
+        .bind(previous_seq)
         .execute(&mut *tx)
         .await
         .map_err(map_sql)?;
+
+        if result.rows_affected() == 0 {
+            tx.rollback().await.map_err(map_sql)?;
+            return Err(StoreError::SequenceConflict { attempted: seq });
+        }
+
+        tx.commit().await.map_err(map_sql)?;
+        Ok(())
+    }
+
+    async fn persist_dataset_refreshed(
+        &self,
+        workspace_id: &str,
+        workspace_dataset_id: &DatasetId,
+        source: &SourceVersion,
+        display_name: &str,
+        seq: u64,
+        document: &DocumentState,
+    ) -> Result<(), StoreError> {
+        let stored_seq = stored_seq(seq)?;
+        let previous_seq = previous_stored_seq(seq)?;
+        let now = Utc::now().to_rfc3339();
+        let document_json = serialize_document(document)?;
+        let dataset_source_id = source.identity.dataset_id();
+        let source_revision = source.revision.as_hex();
+        let mut tx = self.pool.begin().await.map_err(map_sql)?;
+
+        let source_write = sqlx::query(
+            r#"
+            INSERT INTO dataset_sources (id, canonical_url, default_name, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                default_name = excluded.default_name,
+                updated_at = excluded.updated_at
+            WHERE dataset_sources.canonical_url = excluded.canonical_url
+            "#,
+        )
+        .bind(&dataset_source_id)
+        .bind(source.identity.locator.as_str())
+        .bind(display_name)
+        .bind(&now)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sql)?;
+        if source_write.rows_affected() == 0 {
+            tx.rollback().await.map_err(map_sql)?;
+            return Err(StoreError::InvalidSourceIdentity(format!(
+                "{} is already bound to a different canonical locator",
+                dataset_source_id
+            )));
+        }
+
+        let membership = sqlx::query(
+            r#"
+            UPDATE workspace_datasets
+            SET source_revision = ?, display_name = ?
+            WHERE workspace_id = ? AND id = ? AND dataset_source_id = ?
+            "#,
+        )
+        .bind(&source_revision)
+        .bind(display_name)
+        .bind(workspace_id)
+        .bind(workspace_dataset_id.as_ref())
+        .bind(&dataset_source_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sql)?;
+        if membership.rows_affected() != 1 {
+            tx.rollback().await.map_err(map_sql)?;
+            return Err(StoreError::InvalidSourceIdentity(format!(
+                "workspace dataset {} is not bound to source {}",
+                workspace_dataset_id, dataset_source_id
+            )));
+        }
+
+        let workspace = sqlx::query(
+            r#"
+            UPDATE workspaces
+            SET seq = ?, document_json = ?, updated_at = ?
+            WHERE id = ? AND seq = ?
+            "#,
+        )
+        .bind(stored_seq)
+        .bind(document_json)
+        .bind(&now)
+        .bind(workspace_id)
+        .bind(previous_seq)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sql)?;
+        if workspace.rows_affected() == 0 {
+            tx.rollback().await.map_err(map_sql)?;
+            return Err(StoreError::SequenceConflict { attempted: seq });
+        }
 
         tx.commit().await.map_err(map_sql)?;
         Ok(())
@@ -1014,8 +1123,10 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         seq: u64,
         document: &DocumentState,
     ) -> Result<(), StoreError> {
+        let stored_seq = stored_seq(seq)?;
+        let previous_seq = previous_stored_seq(seq)?;
         let now = Utc::now().to_rfc3339();
-        let document_json = serde_json::to_string(document).map_err(map_json_out)?;
+        let document_json = serialize_document(document)?;
         let mut tx = self.pool.begin().await.map_err(map_sql)?;
         sqlx::query("DELETE FROM workspace_datasets WHERE workspace_id = ? AND id = ?")
             .bind(workspace_id)
@@ -1023,20 +1134,25 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             .execute(&mut *tx)
             .await
             .map_err(map_sql)?;
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             UPDATE workspaces
             SET seq = ?, document_json = ?, updated_at = ?
-            WHERE id = ?
+            WHERE id = ? AND seq = ?
             "#,
         )
-        .bind(seq as i64)
+        .bind(stored_seq)
         .bind(document_json)
         .bind(now)
         .bind(workspace_id)
+        .bind(previous_seq)
         .execute(&mut *tx)
         .await
         .map_err(map_sql)?;
+        if result.rows_affected() == 0 {
+            tx.rollback().await.map_err(map_sql)?;
+            return Err(StoreError::SequenceConflict { attempted: seq });
+        }
         tx.commit().await.map_err(map_sql)?;
         Ok(())
     }
@@ -1049,8 +1165,10 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         seq: u64,
         document: &DocumentState,
     ) -> Result<(), StoreError> {
+        let stored_seq = stored_seq(seq)?;
+        let previous_seq = previous_stored_seq(seq)?;
         let now = Utc::now().to_rfc3339();
-        let document_json = serde_json::to_string(document).map_err(map_json_out)?;
+        let document_json = serialize_document(document)?;
         let mut tx = self.pool.begin().await.map_err(map_sql)?;
         // Update only the workspace-scoped display name. The shared
         // dataset_sources.default_name (the source's import-time name) is left
@@ -1064,20 +1182,25 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         .execute(&mut *tx)
         .await
         .map_err(map_sql)?;
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             UPDATE workspaces
             SET seq = ?, document_json = ?, updated_at = ?
-            WHERE id = ?
+            WHERE id = ? AND seq = ?
             "#,
         )
-        .bind(seq as i64)
+        .bind(stored_seq)
         .bind(document_json)
         .bind(now)
         .bind(workspace_id)
+        .bind(previous_seq)
         .execute(&mut *tx)
         .await
         .map_err(map_sql)?;
+        if result.rows_affected() == 0 {
+            tx.rollback().await.map_err(map_sql)?;
+            return Err(StoreError::SequenceConflict { attempted: seq });
+        }
         tx.commit().await.map_err(map_sql)?;
         Ok(())
     }
@@ -1091,6 +1214,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             SELECT
                 wd.id AS workspace_dataset_id,
                 wd.dataset_source_id,
+                wd.source_revision,
                 ds.canonical_url,
                 wd.display_name
             FROM workspace_datasets wd
@@ -1104,19 +1228,20 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         .await
         .map_err(map_sql)?;
 
-        Ok(rows.into_iter().map(row_to_dataset_source).collect())
+        rows.into_iter().map(row_to_dataset_source).collect()
     }
 
     async fn dataset_by_source(
         &self,
         workspace_id: &str,
-        dataset_source_id: &str,
+        identity: &SourceIdentity,
     ) -> Result<Option<WorkspaceDatasetSource>, StoreError> {
         let row = sqlx::query(
             r#"
             SELECT
                 wd.id AS workspace_dataset_id,
                 wd.dataset_source_id,
+                wd.source_revision,
                 ds.canonical_url,
                 wd.display_name
             FROM workspace_datasets wd
@@ -1125,12 +1250,12 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             "#,
         )
         .bind(workspace_id)
-        .bind(dataset_source_id)
+        .bind(identity.dataset_id())
         .fetch_optional(&self.pool)
         .await
         .map_err(map_sql)?;
 
-        Ok(row.map(row_to_dataset_source))
+        row.map(row_to_dataset_source).transpose()
     }
 
     async fn dataset_by_workspace_dataset(
@@ -1143,6 +1268,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             SELECT
                 wd.id AS workspace_dataset_id,
                 wd.dataset_source_id,
+                wd.source_revision,
                 ds.canonical_url,
                 wd.display_name
             FROM workspace_datasets wd
@@ -1156,7 +1282,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         .await
         .map_err(map_sql)?;
 
-        Ok(row.map(row_to_dataset_source))
+        row.map(row_to_dataset_source).transpose()
     }
 
     async fn sharing_settings(
@@ -1204,7 +1330,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
 
         let now = Utc::now().to_rfc3339();
         let mut tx = self.pool.begin().await.map_err(map_sql)?;
-        sqlx::query(
+        let row = sqlx::query(
             r#"
             INSERT INTO workspace_members
                 (workspace_id, email, role, display_name, added_at)
@@ -1212,6 +1338,15 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             ON CONFLICT(workspace_id, email) DO UPDATE SET
                 role = excluded.role,
                 display_name = excluded.display_name
+            WHERE excluded.role = 'owner'
+               OR workspace_members.role <> 'owner'
+               OR (
+                    SELECT COUNT(*)
+                    FROM workspace_members AS owners
+                    WHERE owners.workspace_id = excluded.workspace_id
+                      AND owners.role = 'owner'
+               ) > 1
+            RETURNING email, role, display_name, added_at
             "#,
         )
         .bind(workspace_id)
@@ -1219,14 +1354,42 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         .bind(role.as_str())
         .bind(display_name)
         .bind(&now)
-        .execute(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(map_sql)?;
 
+        let Some(row) = row else {
+            let retained_owner: Option<(String,)> = sqlx::query_as(
+                "SELECT role FROM workspace_members WHERE workspace_id = ? AND email = ?",
+            )
+            .bind(workspace_id)
+            .bind(&email)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(map_sql)?;
+            let owner_count: (i64,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM workspace_members WHERE workspace_id = ? AND role = 'owner'",
+            )
+            .bind(workspace_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(map_sql)?;
+            tx.rollback().await.map_err(map_sql)?;
+            if role != WorkspaceRole::Owner
+                && retained_owner
+                    .as_ref()
+                    .is_some_and(|(role,)| role == "owner")
+                && owner_count.0 == 1
+            {
+                return Err(StoreError::LastOwner);
+            }
+            return Ok(None);
+        };
+        let member = row_to_member(row)?;
+
         touch_workspace(&mut tx, workspace_id, &now).await?;
         tx.commit().await.map_err(map_sql)?;
-
-        self.member(workspace_id, &email).await
+        Ok(Some(member))
     }
 
     async fn admin_upsert_owner(
@@ -1235,20 +1398,21 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         email: &str,
         display_name: &str,
     ) -> Result<Option<WorkspaceMember>, StoreError> {
+        let mut tx = self.pool.begin().await.map_err(map_sql)?;
         let exists: Option<(String,)> = sqlx::query_as("SELECT id FROM workspaces WHERE id = ?")
             .bind(workspace_id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *tx)
             .await
             .map_err(map_sql)?;
         if exists.is_none() {
+            tx.rollback().await.map_err(map_sql)?;
             return Ok(None);
         }
 
         let email = normalize_email(email);
         let display_name = default_member_display_name(&email, display_name);
         let now = Utc::now().to_rfc3339();
-        let mut tx = self.pool.begin().await.map_err(map_sql)?;
-        sqlx::query(
+        let row = sqlx::query(
             r#"
             INSERT INTO workspace_members
                 (workspace_id, email, role, display_name, added_at)
@@ -1256,20 +1420,21 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             ON CONFLICT(workspace_id, email) DO UPDATE SET
                 role = 'owner',
                 display_name = excluded.display_name
+            RETURNING email, role, display_name, added_at
             "#,
         )
         .bind(workspace_id)
         .bind(&email)
         .bind(display_name)
         .bind(&now)
-        .execute(&mut *tx)
+        .fetch_one(&mut *tx)
         .await
         .map_err(map_sql)?;
+        let member = row_to_member(row)?;
 
         touch_workspace(&mut tx, workspace_id, &now).await?;
         tx.commit().await.map_err(map_sql)?;
-
-        self.member(workspace_id, &email).await
+        Ok(Some(member))
     }
 
     async fn update_member_role(
@@ -1281,14 +1446,77 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         let email = normalize_email(email);
         let now = Utc::now().to_rfc3339();
         let mut tx = self.pool.begin().await.map_err(map_sql)?;
-        let result = sqlx::query(
+        let row = sqlx::query(
             r#"
             UPDATE workspace_members
             SET role = ?
             WHERE workspace_id = ? AND email = ?
+              AND (
+                    ? = 'owner'
+                 OR role <> 'owner'
+                 OR (
+                        SELECT COUNT(*)
+                        FROM workspace_members AS owners
+                        WHERE owners.workspace_id = workspace_members.workspace_id
+                          AND owners.role = 'owner'
+                    ) > 1
+              )
+            RETURNING email, role, display_name, added_at
             "#,
         )
         .bind(role.as_str())
+        .bind(workspace_id)
+        .bind(&email)
+        .bind(role.as_str())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sql)?;
+
+        let Some(row) = row else {
+            let retained_role: Option<(String,)> = sqlx::query_as(
+                "SELECT role FROM workspace_members WHERE workspace_id = ? AND email = ?",
+            )
+            .bind(workspace_id)
+            .bind(&email)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(map_sql)?;
+            tx.rollback().await.map_err(map_sql)?;
+            if retained_role
+                .as_ref()
+                .is_some_and(|(role,)| role == "owner")
+                && role != WorkspaceRole::Owner
+            {
+                return Err(StoreError::LastOwner);
+            }
+            return Ok(None);
+        };
+        let member = row_to_member(row)?;
+
+        touch_workspace(&mut tx, workspace_id, &now).await?;
+        tx.commit().await.map_err(map_sql)?;
+        Ok(Some(member))
+    }
+
+    async fn remove_member(&self, workspace_id: &str, email: &str) -> Result<bool, StoreError> {
+        let email = normalize_email(email);
+        let now = Utc::now().to_rfc3339();
+        let mut tx = self.pool.begin().await.map_err(map_sql)?;
+        let result = sqlx::query(
+            r#"
+            DELETE FROM workspace_members
+            WHERE workspace_id = ? AND email = ?
+              AND (
+                    role <> 'owner'
+                 OR (
+                        SELECT COUNT(*)
+                        FROM workspace_members AS owners
+                        WHERE owners.workspace_id = workspace_members.workspace_id
+                          AND owners.role = 'owner'
+                    ) > 1
+              )
+            "#,
+        )
         .bind(workspace_id)
         .bind(&email)
         .execute(&mut *tx)
@@ -1296,30 +1524,21 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         .map_err(map_sql)?;
 
         if result.rows_affected() == 0 {
+            let retained_role: Option<(String,)> = sqlx::query_as(
+                "SELECT role FROM workspace_members WHERE workspace_id = ? AND email = ?",
+            )
+            .bind(workspace_id)
+            .bind(&email)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(map_sql)?;
             tx.rollback().await.map_err(map_sql)?;
-            return Ok(None);
-        }
-
-        touch_workspace(&mut tx, workspace_id, &now).await?;
-        tx.commit().await.map_err(map_sql)?;
-
-        self.member(workspace_id, &email).await
-    }
-
-    async fn remove_member(&self, workspace_id: &str, email: &str) -> Result<bool, StoreError> {
-        let email = normalize_email(email);
-        let now = Utc::now().to_rfc3339();
-        let mut tx = self.pool.begin().await.map_err(map_sql)?;
-        let result =
-            sqlx::query("DELETE FROM workspace_members WHERE workspace_id = ? AND email = ?")
-                .bind(workspace_id)
-                .bind(&email)
-                .execute(&mut *tx)
-                .await
-                .map_err(map_sql)?;
-
-        if result.rows_affected() == 0 {
-            tx.rollback().await.map_err(map_sql)?;
+            if retained_role
+                .as_ref()
+                .is_some_and(|(role,)| role == "owner")
+            {
+                return Err(StoreError::LastOwner);
+            }
             return Ok(false);
         }
 
@@ -1335,26 +1554,60 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         link_role: WorkspaceRole,
     ) -> Result<Option<WorkspaceSharingSettings>, StoreError> {
         let now = Utc::now().to_rfc3339();
-        let result = sqlx::query(
+        let mut tx = self.pool.begin().await.map_err(map_sql)?;
+        let row = sqlx::query(
             r#"
             UPDATE workspaces
             SET link_access = ?, link_role = ?, updated_at = ?
             WHERE id = ? AND archived_at IS NULL
+            RETURNING link_access, link_role
             "#,
         )
         .bind(link_access.as_str())
         .bind(link_role.as_str())
-        .bind(now)
+        .bind(&now)
         .bind(workspace_id)
-        .execute(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(map_sql)?;
 
-        if result.rows_affected() == 0 {
+        let Some(row) = row else {
+            tx.rollback().await.map_err(map_sql)?;
             return Ok(None);
-        }
+        };
+        let link_access =
+            WorkspaceLinkAccess::try_from(row.get::<String, _>("link_access").as_str())?;
+        let link_role = WorkspaceRole::try_from(row.get::<String, _>("link_role").as_str())?;
 
-        self.sharing_settings(workspace_id).await
+        let member_rows = sqlx::query(
+            r#"
+            SELECT email, role, display_name, added_at
+            FROM workspace_members
+            WHERE workspace_id = ?
+            ORDER BY
+                CASE role
+                    WHEN 'owner' THEN 0
+                    WHEN 'editor' THEN 1
+                    ELSE 2
+                END,
+                email ASC
+            "#,
+        )
+        .bind(workspace_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(map_sql)?;
+        let members = member_rows
+            .into_iter()
+            .map(row_to_member)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        tx.commit().await.map_err(map_sql)?;
+        Ok(Some(WorkspaceSharingSettings {
+            link_access,
+            link_role,
+            members,
+        }))
     }
 
     async fn list_saved_views(
@@ -1639,7 +1892,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             r#"
             SELECT
                 workspace_id, user_email, profile, created_at, updated_at,
-                seed_source, view_json
+                seed_source, view_json, revision
             FROM workspace_viewer_profiles
             WHERE workspace_id = ? AND user_email = ? AND profile = ?
             "#,
@@ -1659,6 +1912,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         workspace_id: &str,
         principal: &AuthPrincipal,
         profile: &str,
+        expected_revision: Option<u64>,
         seed_source: Option<&str>,
         view: SavedView,
     ) -> Result<Option<WorkspaceViewerProfile>, StoreError> {
@@ -1669,27 +1923,81 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         let email = normalize_email(&principal.email);
         let now = Utc::now().to_rfc3339();
         let view_json = serde_json::to_string(&view).map_err(map_saved_view_json_out)?;
-        sqlx::query(
-            r#"
-            INSERT INTO workspace_viewer_profiles
-                (workspace_id, user_email, profile, created_at, updated_at, seed_source, view_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(workspace_id, user_email, profile) DO UPDATE SET
-                updated_at = excluded.updated_at,
-                seed_source = COALESCE(excluded.seed_source, workspace_viewer_profiles.seed_source),
-                view_json = excluded.view_json
-            "#,
-        )
-        .bind(workspace_id)
-        .bind(&email)
-        .bind(profile)
-        .bind(&now)
-        .bind(&now)
-        .bind(seed_source)
-        .bind(&view_json)
-        .execute(&self.pool)
-        .await
-        .map_err(map_sql)?;
+        let result = if let Some(expected_revision) = expected_revision {
+            let expected_revision = i64::try_from(expected_revision)
+                .map_err(|_| StoreError::ViewerProfileRevisionOutOfRange(expected_revision))?;
+            if expected_revision == i64::MAX {
+                return Err(StoreError::ViewerProfileRevisionOutOfRange(
+                    expected_revision as u64,
+                ));
+            }
+            sqlx::query(
+                r#"
+                UPDATE workspace_viewer_profiles
+                SET updated_at = ?,
+                    seed_source = COALESCE(?, seed_source),
+                    view_json = ?,
+                    revision = revision + 1
+                WHERE workspace_id = ? AND user_email = ? AND profile = ? AND revision = ?
+                "#,
+            )
+            .bind(&now)
+            .bind(seed_source)
+            .bind(&view_json)
+            .bind(workspace_id)
+            .bind(&email)
+            .bind(profile)
+            .bind(expected_revision)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sql)?
+        } else {
+            sqlx::query(
+                r#"
+                INSERT INTO workspace_viewer_profiles
+                    (workspace_id, user_email, profile, created_at, updated_at,
+                     seed_source, view_json, revision)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                ON CONFLICT(workspace_id, user_email, profile) DO NOTHING
+                "#,
+            )
+            .bind(workspace_id)
+            .bind(&email)
+            .bind(profile)
+            .bind(&now)
+            .bind(&now)
+            .bind(seed_source)
+            .bind(&view_json)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sql)?
+        };
+
+        if result.rows_affected() == 0 {
+            let actual = sqlx::query_scalar::<_, i64>(
+                r#"
+                SELECT revision
+                FROM workspace_viewer_profiles
+                WHERE workspace_id = ? AND user_email = ? AND profile = ?
+                "#,
+            )
+            .bind(workspace_id)
+            .bind(&email)
+            .bind(profile)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sql)?
+            .map(|revision| {
+                u64::try_from(revision).map_err(|_| {
+                    StoreError::Backend(format!("viewer profile revision is negative: {revision}"))
+                })
+            })
+            .transpose()?;
+            return Err(StoreError::ViewerProfileConflict {
+                expected: expected_revision,
+                actual,
+            });
+        }
 
         self.get_viewer_profile(workspace_id, &email, profile).await
     }
@@ -1834,13 +2142,29 @@ impl WorkspaceStore for SqliteWorkspaceStore {
     }
 }
 
-fn row_to_dataset_source(row: sqlx::sqlite::SqliteRow) -> WorkspaceDatasetSource {
-    WorkspaceDatasetSource {
+fn row_to_dataset_source(
+    row: sqlx::sqlite::SqliteRow,
+) -> Result<WorkspaceDatasetSource, StoreError> {
+    let dataset_source_id: String = row.get("dataset_source_id");
+    let canonical_url: String = row.get("canonical_url");
+    let identity = SourceIdentity::from_persisted(&canonical_url, &dataset_source_id)
+        .map_err(|error| StoreError::InvalidSourceIdentity(error.to_string()))?;
+    let revision = row
+        .get::<Option<String>, _>("source_revision")
+        .map(|raw| {
+            SourceRevision::from_hex(&raw).ok_or_else(|| {
+                StoreError::InvalidSourceIdentity(format!(
+                    "persisted source revision is not a 32-byte hex digest: {raw}"
+                ))
+            })
+        })
+        .transpose()?;
+    Ok(WorkspaceDatasetSource {
         workspace_dataset_id: DatasetId(row.get::<String, _>("workspace_dataset_id")),
-        dataset_source_id: row.get("dataset_source_id"),
-        canonical_url: row.get("canonical_url"),
+        identity,
+        revision,
         display_name: row.get("display_name"),
-    }
+    })
 }
 
 fn row_to_summary(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceSummary, StoreError> {
@@ -1892,7 +2216,7 @@ fn row_to_record(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceRecord, StoreE
         archived_at: parse_opt_dt(row.get("archived_at"))?,
         seq: seq.max(0) as u64,
         default_saved_view_id: row.get("default_saved_view_id"),
-        document: serde_json::from_str(&document_json).map_err(map_json_in)?,
+        document: parse_document(&document_json)?,
     })
 }
 
@@ -1928,6 +2252,8 @@ fn row_to_viewer_profile(
         workspace_id: row.get("workspace_id"),
         user_email: row.get("user_email"),
         profile: row.get("profile"),
+        revision: u64::try_from(row.get::<i64, _>("revision"))
+            .map_err(|_| StoreError::Backend("viewer profile revision is negative".to_string()))?,
         created_at: parse_dt(row.get("created_at"))?,
         updated_at: parse_dt(row.get("updated_at"))?,
         seed_source: row.get("seed_source"),

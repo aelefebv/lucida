@@ -64,10 +64,9 @@ impl LoginSessionStore for MemorySessionStore {
         Ok(())
     }
 
-    async fn delete(&self, id: &str) -> Result<(), SessionStoreError> {
+    async fn delete(&self, id: &str) -> Result<Option<LoginSession>, SessionStoreError> {
         let mut rows = self.rows.lock().expect("memory store mutex poisoned");
-        rows.remove(id);
-        Ok(())
+        Ok(rows.remove(id))
     }
 
     async fn delete_expired(&self, now: DateTime<Utc>) -> Result<u64, SessionStoreError> {

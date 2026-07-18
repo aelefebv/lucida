@@ -1,0 +1,244 @@
+.file-browser-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: var(--modal-backdrop);
+  backdrop-filter: blur(4px);
+}
+
+.file-browser-dialog {
+  width: min(32.5rem, 100%);
+  max-height: min(70vh, calc(100dvh - 2rem));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-raised);
+  font-size: 0.8125rem;
+}
+
+.file-browser-header,
+.file-browser-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+}
+
+.file-browser-header {
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.file-browser-title {
+  font-weight: 650;
+}
+
+.file-browser-icon-button,
+.file-browser-breadcrumb-button,
+.file-browser-entry,
+.file-browser-selection-remove {
+  min-height: 0;
+  border: 0;
+  background: transparent;
+}
+
+.file-browser-icon-button {
+  padding: 0 0.25rem;
+  color: var(--text-secondary);
+  font-size: 1.125rem;
+  line-height: 1;
+}
+
+.file-browser-breadcrumbs {
+  display: flex;
+  align-items: center;
+  gap: 0.125rem;
+  min-height: 2.25rem;
+  padding: 0.5rem 1rem;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 0.75rem;
+}
+
+.file-browser-breadcrumb-segment {
+  display: inline-flex;
+  align-items: center;
+}
+
+.file-browser-breadcrumb-separator {
+  margin-inline: 0.125rem;
+  color: var(--text-muted);
+}
+
+.file-browser-breadcrumb-button {
+  padding: 0.125rem 0.25rem;
+  color: var(--text-secondary);
+  font-size: inherit;
+  white-space: nowrap;
+}
+
+.file-browser-breadcrumb-button.current {
+  color: var(--text-primary);
+}
+
+.file-browser-list {
+  flex: 1;
+  min-height: 12.5rem;
+  overflow-y: auto;
+  padding-block: 0.25rem;
+}
+
+.file-browser-status,
+.file-browser-empty,
+.file-browser-error {
+  padding: 1rem;
+  text-align: center;
+}
+
+.file-browser-status,
+.file-browser-empty {
+  color: var(--text-muted);
+}
+
+.file-browser-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  color: var(--danger-text);
+}
+
+.file-browser-entry {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.375rem 1rem;
+  border-radius: 0;
+  color: var(--text-primary);
+  font-size: inherit;
+  text-align: start;
+}
+
+.file-browser-entry:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--surface-2);
+}
+
+.file-browser-entry:disabled {
+  color: var(--text-muted);
+  cursor: default;
+  opacity: 0.58;
+}
+
+.file-browser-entry-icon {
+  width: 1rem;
+  color: var(--text-secondary);
+  font-size: 0.6875rem;
+}
+
+.file-browser-selection {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+  padding: 0.5rem 1rem;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.file-browser-selection-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  max-width: 100%;
+  padding: 0.125rem 0.5rem;
+  border-radius: 999px;
+  background: var(--accent-surface);
+  font-size: 0.75rem;
+}
+
+.file-browser-selection-path {
+  max-width: 22.5rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-browser-selection-remove {
+  padding: 0;
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  line-height: 1;
+}
+
+.file-browser-footer {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.file-browser-detection {
+  color: var(--text-muted);
+  font-size: 0.6875rem;
+}
+
+.file-browser-detection.detected {
+  color: var(--success-text);
+}
+
+.file-browser-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.file-browser-action {
+  min-height: 2rem;
+  padding: 0.375rem 1rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: inherit;
+}
+
+.file-browser-action.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-weight: 650;
+}
+
+.file-browser-action:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+@media (max-width: 36rem) {
+  .file-browser-backdrop {
+    padding: 0.5rem;
+  }
+
+  .file-browser-dialog {
+    max-height: calc(100dvh - 1rem);
+  }
+
+  .file-browser-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .file-browser-actions {
+    justify-content: stretch;
+  }
+
+  .file-browser-action {
+    flex: 1 1 auto;
+  }
+}

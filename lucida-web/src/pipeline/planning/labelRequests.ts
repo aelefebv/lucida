@@ -14,9 +14,15 @@
  */
 
 import { Axis } from "../../axes.ts";
+import {
+  resolveLabelSettings,
+  type LabelSettings,
+} from "../../labelSettings.ts";
 import { labelDepthZ, labelFootprint, labelTimeIndex } from "../../renderer/labelLayout.ts";
-import { labelPaddedVolumeBytes } from "../../renderer/volume/atlas.ts";
-import { isUint32 } from "../../renderer/dataTypeUtil.ts";
+import {
+  WEBGPU_MIN_MAX_TEXTURE_DIMENSION_3D,
+  labelPaddedVolumeBytes,
+} from "../../renderer/atlasSizing.ts";
 import type {
   DatasetManifest,
   ImageSpec,
@@ -24,6 +30,11 @@ import type {
   LevelGeometry,
 } from "../../manifestTypes.ts";
 import type { ChunkRequest } from "./types.ts";
+import {
+  chunkContractForLevel,
+  chunkFormatFor,
+  parseChunkSourceDType,
+} from "../../chunkContract.ts";
 
 /** Cap on the chosen level's per-plane chunk count in SLICE mode. */
 const DEFAULT_MAX_CHUNKS_PER_PLANE = 64;
@@ -54,7 +65,7 @@ const DEFAULT_MAX_CHUNKS_PER_VOLUME = 512;
  * the floor never over-admits — a device with a higher limit packs the same
  * brick at least as tightly. This bounds the BRICK, not the level extent.
  */
-const DEFAULT_MAX_BRICK_DIM_3D = 2048;
+const DEFAULT_MAX_BRICK_DIM_3D = WEBGPU_MIN_MAX_TEXTURE_DIMENSION_3D;
 /**
  * Byte budget for a single label's bricked volume atlas in VOLUME mode
  * (r32uint, 4 B/voxel), mirroring the intensity volume atlas budget (512 MB).
@@ -93,17 +104,8 @@ const DEFAULT_MAX_TOTAL_VOLUME_BYTES = 512 * 1024 * 1024;
  * per-label controls. Matches the Rust `LabelSettings` default so fetch, render,
  * and the layer panel agree on the same starting opacity.
  */
-export const DEFAULT_LABEL_OPACITY = 0.5;
-
 function grid1D(dim: number, chunk: number): number {
   return chunk > 0 ? Math.ceil(dim / chunk) : 1;
-}
-
-/** Clamp a per-label opacity into `[0, 1]`, falling back to the default for a
- *  missing / non-finite value (a defensive guard on settings from the wire). */
-function normalizeLabelOpacity(opacity: number | undefined): number {
-  if (opacity === undefined || !Number.isFinite(opacity)) return DEFAULT_LABEL_OPACITY;
-  return Math.min(1, Math.max(0, opacity));
 }
 
 /**
@@ -175,19 +177,19 @@ function chooseLabelLevel(levels: LevelGeometry[], caps: ResolvedLabelCaps): num
   return -1;
 }
 
-/** Warn once per non-uint32 label so the console isn't spammed each tick. */
-const warnedNonUint32 = new Set<string>();
+/** Warn once per unsupported label dtype so the console isn't spammed each tick. */
+const warnedUnsupportedDtype = new Set<string>();
 
 /** Warn once per label whose volume is dropped by the 3D total-memory budget,
  *  so the console isn't spammed each tick. */
 const warnedVolumeBudgetSkipped = new Set<string>();
 
 /**
- * Clear the module-scoped warn-once sets (non-uint32 skips AND 3D memory-budget
+ * Clear the module-scoped warn-once sets (unsupported dtype skips AND 3D memory-budget
  * skips) so tests can assert warning behavior deterministically. Test-only.
  */
 export function __resetLabelWarningsForTest(): void {
-  warnedNonUint32.clear();
+  warnedUnsupportedDtype.clear();
   warnedVolumeBudgetSkipped.clear();
 }
 
@@ -275,19 +277,12 @@ export interface ResolvedVisibleLabel extends ResolvedLabel {
   opacity: number;
 }
 
-/** Per-label visibility + opacity, mirroring `lucida_core::scene::LabelSettings`
- *  (the `dataset_settings.label_settings` entries surfaced from the scene). */
-export interface LabelViewSetting {
-  visible: boolean;
-  opacity: number;
-}
-
 /**
  * Whether a label is drawable and, if so, its resolved source + chosen level.
  *
- * A label is eligible only if it: is a uint32 mask (the only dtype the label
- * pool handles today — uint8/uint16 are skipped with a one-time warning until a
- * widening path exists), has a resolvable source image, has a positive
+ * A label is eligible only if it: uses an unsigned integer source dtype that
+ * the decode boundary can widen into the canonical uint32 label representation,
+ * has a resolvable source image, has a positive
  * footprint, AND has at least one multiscale level within the mode's
  * device/budget caps (see {@link chooseLabelLevel} — the volume caps are
  * stricter than slice, so a label can be slice-eligible but volume-ineligible).
@@ -298,12 +293,22 @@ function eligibleLabel(
   label: LabelSpec,
   caps: ResolvedLabelCaps,
 ): { source: ImageSpec; levelIdx: number } | null {
-  if (!isUint32(label.image.multiscale.data_type)) {
-    if (!warnedNonUint32.has(label.image.image_id)) {
-      warnedNonUint32.add(label.image.image_id);
+  let dtypeSupported = false;
+  try {
+    const sourceDtype = parseChunkSourceDType(label.image.multiscale.data_type);
+    chunkFormatFor("label", sourceDtype);
+    dtypeSupported = true;
+  } catch {
+    // Dataset admission reports the detailed error. Keep this boundary
+    // defensive for direct planner callers and legacy snapshots.
+  }
+  if (!dtypeSupported) {
+    if (!warnedUnsupportedDtype.has(label.image.image_id)) {
+      warnedUnsupportedDtype.add(label.image.image_id);
       console.warn(
         `[labels] skipping "${label.name}" (${label.image.image_id}): ` +
-        `dtype ${label.image.multiscale.data_type} not yet supported (uint32 only)`,
+        `dtype ${label.image.multiscale.data_type} is unsupported ` +
+        `(labels require Uint8, Uint16, or Uint32)`,
       );
     }
     return null;
@@ -404,14 +409,12 @@ export function volumeBudgetPrefix(
  */
 export function resolveVisibleLabels(
   manifest: DatasetManifest,
-  labelSettings: LabelViewSetting[] | undefined,
+  labelSettings: LabelSettings[] | undefined,
   caps?: LabelSelectionCaps,
 ): ResolvedVisibleLabel[] {
   const labels = manifest.labels;
   if (!labels || labels.length === 0) return [];
   const resolvedCaps = resolveLabelCaps(caps);
-
-  const hasSettings = labelSettings !== undefined && labelSettings.length > 0;
 
   // Visible + eligible labels in manifest order, each tagged with its manifest
   // index so the volume-memory budget can be applied by position.
@@ -421,20 +424,8 @@ export function resolveVisibleLabels(
     const elig = eligibleLabel(manifest, label, resolvedCaps);
     if (!elig) continue;
 
-    let visible: boolean;
-    let opacity: number;
-    if (hasSettings) {
-      const setting = labelSettings[i];
-      // Masks are opt-in: a label with no explicit setting (absent/short-snapshot
-      // slot) defaults to HIDDEN; an explicit `true` shows it, `false` hides it.
-      visible = setting?.visible ?? false;
-      opacity = normalizeLabelOpacity(setting?.opacity);
-    } else {
-      // No settings at all: nothing shown by default (masks are opt-in).
-      visible = false;
-      opacity = DEFAULT_LABEL_OPACITY;
-    }
-    if (!visible) continue;
+    const setting = resolveLabelSettings(labelSettings, i);
+    if (!setting.visible) continue;
     candidates.push({
       index: i,
       resolved: {
@@ -443,7 +434,7 @@ export function resolveVisibleLabels(
         levelIdx: elig.levelIdx,
         name: label.name,
         sourceImageId: label.source_image_id,
-        opacity,
+        opacity: setting.opacity,
       },
     });
   }
@@ -523,20 +514,6 @@ export function eligibleLabelInfos(
  * return nothing on a fresh open — but "the first drawable mask" is still a
  * meaningful, default-agnostic notion. Returns `null` when none qualifies.
  */
-export function resolveDefaultLabel(
-  manifest: DatasetManifest,
-  caps?: LabelSelectionCaps,
-): ResolvedLabel | null {
-  const labels = manifest.labels;
-  if (!labels || labels.length === 0) return null;
-  const resolvedCaps = resolveLabelCaps(caps);
-  for (const label of labels) {
-    const elig = eligibleLabel(manifest, label, resolvedCaps);
-    if (elig) return { label, source: elig.source, levelIdx: elig.levelIdx };
-  }
-  return null;
-}
-
 export interface LabelRequestArgs {
   datasetId: string;
   manifest: DatasetManifest;
@@ -551,7 +528,7 @@ export interface LabelRequestArgs {
    * open fetches no overlays until the user turns a mask on — fetch keeps pace
    * with what render draws, and a hidden label is neither fetched nor drawn.
    */
-  labelSettings?: LabelViewSetting[];
+  labelSettings?: LabelSettings[];
   maxLevelDim?: number;
   maxChunksPerPlane?: number;
   /**
@@ -641,6 +618,13 @@ function appendLabelChunkRequests(
       tier: "detail",
       priority: 0,
       chunkKey: `${levelIdx}/${targetChunkT}/${c}/${z}/${y}/${x}`,
+      contract: chunkContractForLevel({
+        datasetId: args.datasetId,
+        image: label.image,
+        level: lvl,
+        channel: c,
+        role: "label",
+      }),
     });
   };
 

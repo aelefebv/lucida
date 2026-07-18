@@ -8,25 +8,15 @@
  * `volume/eviction.ts` (which owns the per-entity ray-pick state).
  */
 
-import { Axis } from "../../axes.ts";
 import type { WorkerCtx } from "../workerContext.ts";
 import { VOLUME_ATLAS_BUDGET } from "../workerProtocol.ts";
-import { createEmptyVolumeTexture, getDeviceLimits } from "../gpuContext.ts";
-import { computeAtlasGeometry } from "../atlasSizing.ts";
-import { computeProxyAtlasLayout } from "../proxyAtlas.ts";
-
-/** Bytes one label voxel occupies in the `r32uint` atlas. */
-const LABEL_VOLUME_BYTES_PER_VOXEL = 4;
-
-/**
- * The WebGPU guaranteed floor for `maxTextureDimension3D`. Byte accounting
- * ({@link labelPaddedVolumeBytes}) packs at this floor rather than the live
- * device limit: a real device with a higher limit packs the same bricks at
- * least as tightly (relaxing the per-axis slot bound never increases the slot
- * count), so the floor yields an UPPER BOUND on the actual allocation — the
- * accounting can only over-estimate, never under-count what the atlas reserves.
- */
-const GUARANTEED_MAX_TEXTURE_DIM_3D = 2048;
+import { getDeviceLimits } from "../gpuContext.ts";
+import {
+  computeAtlasGeometry,
+  computeLabelVolumeSizing,
+  type LabelVolumeSizing,
+} from "../atlasSizing.ts";
+import type { TrackedGpuResource } from "../gpuResourceBudget.ts";
 
 /** Per-LOD indirection section metadata. */
 export interface LodIndirectionMeta {
@@ -38,8 +28,13 @@ export interface LodIndirectionMeta {
 }
 
 export interface AtlasState {
+  /** Explicit owner used for dataset-wide reconciliation (never inferred from a key). */
+  datasetId?: string;
+  poolKey?: string;
   texture: GPUTexture;
+  textureAllocation?: TrackedGpuResource<GPUTexture>;
   indirectionBuf: GPUBuffer;
+  indirectionAllocation?: TrackedGpuResource<GPUBuffer>;
   indirectionData: Uint32Array<ArrayBuffer>;
   /** Composite keys "memberId:chunkKey" → slotIndex (insertion-order = LRU). */
   slots: Map<string, number>;
@@ -62,7 +57,7 @@ export interface AtlasState {
  * A label overlay's volume pool: a bricked slot-grid `r32uint` 3D atlas
  * holding the label mask's chosen level as fixed-size chunks, plus a
  * per-cell indirection buffer mapping each level chunk to its resident
- * slot. Mirrors the intensity proxy-atlas layout so the categorical shader
+ * slot. Uses the shared 3-D texture-atlas layout so the categorical shader
  * path walks the same brick indirection instead of a single monolithic
  * tile — a level whose full extent would exceed the monolithic texture
  * limit still renders because its chunks repack into a compact slot grid.
@@ -77,18 +72,21 @@ export interface AtlasState {
  * mid-scrub — the previous volume stays visible until the new one lands.
  */
 export interface LabelVolumePool {
+  memberId?: string;
   /**
    * r32uint 3D slot-grid atlas, size
    * `[slotsX*chunkX, slotsY*chunkY, slotsZ*chunkZ]`. Each axis is
    * `<= device.maxTextureDimension3D`.
    */
   texture: GPUTexture;
+  textureAllocation?: TrackedGpuResource<GPUTexture>;
   /**
    * Per level-chunk-cell indirection: one entry per `[z][y][x]` cell at flat
    * `gridIdx = z*gridY*gridX + y*gridX + x`. A resident chunk's entry is its
    * slot index; an absent chunk's entry is the sentinel `0xFFFFFFFF`.
    */
   indirectionBuf: GPUBuffer;
+  indirectionAllocation?: TrackedGpuResource<GPUBuffer>;
   /** CPU mirror of {@link indirectionBuf} (uploaded after each delivery). */
   indirectionData: Uint32Array<ArrayBuffer>;
   /** Level chunk-grid dims (cells per axis). */
@@ -128,11 +126,13 @@ export interface LabelVolumePool {
    * per frame rather than cached. Populated by the render path.
    */
   descBuffer?: GPUBuffer;
+  descAllocation?: TrackedGpuResource<GPUBuffer>;
   /**
    * Cached declared-palette storage buffer ([id, packedRgba] pairs) + its
    * pair count, built once from the label's `image-label.colors`.
    */
   labelColorBuffer?: GPUBuffer;
+  labelColorAllocation?: TrackedGpuResource<GPUBuffer>;
   labelColorCount?: number;
 }
 
@@ -140,166 +140,9 @@ export interface LabelVolumePool {
  *  so a failing device doesn't spam the console each delivery. */
 const warnedLabelVolumeAlloc = new Set<string>();
 
-/** Ceil-divide a level extent into its chunk-grid cell count (>= 1). */
-function gridCells(extent: number, chunk: number): number {
-  return chunk > 0 ? Math.max(1, Math.ceil(extent / chunk)) : 1;
-}
-
-/**
- * The bricked geometry a label level packs into: the per-slot brick dims
- * (clamped so a brick never exceeds the level extent) and the chunk grid the
- * level covers. The single source of both the atlas allocation
- * ({@link computeLabelVolumeSizing}) and its byte accounting
- * ({@link labelPaddedVolumeBytes}), so the two can never disagree on the padded
- * footprint a level occupies.
- */
-interface LabelBrickGrid {
-  /** Brick dims clamped to the level extent (a brick never exceeds the level). */
-  chunkX: number; chunkY: number; chunkZ: number;
-  /** Level chunk-grid dims (cells per axis). */
-  gridX: number; gridY: number; gridZ: number;
-  /** Total chunk-grid cells (`gridX*gridY*gridZ`). */
-  gridCellCount: number;
-}
-
-function labelBrickGrid(
-  width: number, height: number, depth: number,
-  chunkX: number, chunkY: number, chunkZ: number,
-): LabelBrickGrid {
-  const w = Math.max(1, Math.floor(width));
-  const h = Math.max(1, Math.floor(height));
-  const d = Math.max(1, Math.floor(depth));
-  // A brick never needs to exceed the level extent: a `chunk_shape` larger than
-  // the level (a small level with a coarse declared chunk) collapses to a
-  // single cell, so the slot only ever holds the in-bounds region. Clamping
-  // keeps a slot within the level extent (and thus the device limit) instead of
-  // allocating an oversized brick that a monolithic texture never would.
-  const cx = Math.max(1, Math.min(Math.floor(chunkX), w));
-  const cy = Math.max(1, Math.min(Math.floor(chunkY), h));
-  const cz = Math.max(1, Math.min(Math.floor(chunkZ), d));
-  const gridX = gridCells(w, cx);
-  const gridY = gridCells(h, cy);
-  const gridZ = gridCells(d, cz);
-  return { chunkX: cx, chunkY: cy, chunkZ: cz, gridX, gridY, gridZ, gridCellCount: gridX * gridY * gridZ };
-}
-
-/**
- * The bytes the bricked atlas ACTUALLY ALLOCATES to hold a label level: the
- * `textureSize` voxel product the atlas texture reserves times 4 B/voxel
- * (`r32uint`) — NOT the true voxel count `w*h*d*4`, and NOT merely the padded
- * grid footprint. The slot grid is rectangular (`slotsX*slotsY*slotsZ` slots),
- * so when the chunk-grid cell count does not factor cleanly the atlas OVERSHOOTS
- * the grid by up to a full row/plane of slots — the texture reserves
- * `totalSlots * brick`, which can exceed `gridCellCount * brick`. Eligibility
- * ({@link chooseLabelLevel}) and the total-mask memory failsafe must be measured
- * against this actual allocation so admitting a mask (or a stack of masks) can
- * never under-count what the atlas then reserves, which would defeat the budget
- * and OOM on constrained VRAM.
- *
- * Computed from the SAME {@link computeLabelVolumeSizing} packing the atlas uses,
- * at the WebGPU {@link GUARANTEED_MAX_TEXTURE_DIM_3D} floor — so this figure is
- * the single source of truth for the footprint, an upper bound on any real
- * device's allocation, and can never drift from what the atlas reserves.
- *
- * `levelShape`/`chunkShape` are canonical TCZYX arrays (a level's
- * `shape`/`chunk_shape`); only the spatial axes are read. Callers must have
- * already passed the per-brick cap (see `chooseLabelLevel`): a brick larger than
- * the floor cannot be packed and {@link computeLabelVolumeSizing} throws, so this
- * is only ever called on a level whose brick fits.
- */
-export function labelPaddedVolumeBytes(
-  levelShape: readonly number[],
-  chunkShape: readonly number[],
-): number {
-  const sizing = computeLabelVolumeSizing(
-    levelShape[Axis.X], levelShape[Axis.Y], levelShape[Axis.Z],
-    chunkShape[Axis.X], chunkShape[Axis.Y], chunkShape[Axis.Z],
-    GUARANTEED_MAX_TEXTURE_DIM_3D,
-  );
-  const [texW, texH, texD] = sizing.textureSize;
-  return texW * texH * texD * LABEL_VOLUME_BYTES_PER_VOXEL;
-}
-
-/**
- * The slot-grid sizing for a label volume atlas: the chunk grid the level
- * covers and the slot grid the atlas packs it into. Pure geometry — no GPU
- * allocation — so the residency invariant (the whole grid stays resident) is
- * unit-testable without a device.
- */
-export interface LabelVolumeSizing {
-  /** Brick dims clamped to the level extent (a brick never exceeds the level). */
-  chunkX: number; chunkY: number; chunkZ: number;
-  /** Level chunk-grid dims (cells per axis). */
-  gridX: number; gridY: number; gridZ: number;
-  /** Total chunk-grid cells (`gridX*gridY*gridZ`) — the WHOLE eligible grid. */
-  gridCellCount: number;
-  /** Atlas slot-grid dims. */
-  slotsX: number; slotsY: number; slotsZ: number;
-  /**
-   * Slot capacity requested for the atlas, clamped ONLY by the device 3D
-   * texture limit (never by a byte budget). Equals {@link gridCellCount} for
-   * any grid the device limit can hold — i.e. the whole eligible grid — which
-   * is the residency invariant the atlas depends on. It is smaller only for a
-   * pathological grid whose packing would overflow the device limit, which the
-   * eligibility caps preclude.
-   */
-  capacity: number;
-  /** Total atlas slots (`slotsX*slotsY*slotsZ`), always `>= capacity`. */
-  totalSlots: number;
-  /** Atlas texture dims `[x, y, z]`, each `<= maxTextureDimension3D`. */
-  textureSize: [number, number, number];
-}
-
-/**
- * Size a label volume atlas to hold a level's WHOLE chunk grid.
- *
- * The atlas capacity is the full grid, clamped ONLY by the device's max 3D
- * texture dimension (via {@link computeProxyAtlasLayout}) — never by a byte
- * budget. A byte-budget clamp would be wrong here: a level's chunk shape rarely
- * divides its extent evenly (the norm for real downsampled levels), so the
- * PADDED brick total (`gridCellCount * paddedChunkBytes`) can exceed the budget
- * while the TRUE volume fits it. Clamping capacity on the padded total would
- * leave fewer slots than grid cells, so delivered bricks would be evicted and
- * the mask would render with transparent holes where real data exists.
- *
- * Eligibility (`chooseLabelLevel`) already bounds the grid to
- * `maxChunksPerVolume` cells and the true bytes to the per-mask budget, so the
- * whole grid is a bounded, packable allocation whose natural grid-shaped
- * packing keeps each atlas axis ~= the level extent and thus within the device
- * limit. The byte-budget accounting + eviction that a streaming residency path
- * would add belong to that later capability, not here.
- *
- * Throws (via {@link computeProxyAtlasLayout}) only when a single brick exceeds
- * the device limit — the caller treats that as an allocation failure and skips
- * the label rather than truncating it.
- */
-export function computeLabelVolumeSizing(
-  width: number,
-  height: number,
-  depth: number,
-  chunkX: number,
-  chunkY: number,
-  chunkZ: number,
-  maxTextureDimension3D: number,
-): LabelVolumeSizing {
-  const { chunkX: cx, chunkY: cy, chunkZ: cz, gridX, gridY, gridZ, gridCellCount } =
-    labelBrickGrid(width, height, depth, chunkX, chunkY, chunkZ);
-
-  // Request the whole grid; computeProxyAtlasLayout clamps only to the device
-  // limit and packs the slots so no atlas axis exceeds it.
-  const layout = computeProxyAtlasLayout([cz, cy, cx], gridCellCount, maxTextureDimension3D);
-
-  return {
-    chunkX: cx, chunkY: cy, chunkZ: cz,
-    gridX, gridY, gridZ,
-    gridCellCount,
-    slotsX: layout.slotsX,
-    slotsY: layout.slotsY,
-    slotsZ: layout.slotsZ,
-    capacity: layout.capacity,
-    totalSlots: layout.slotsX * layout.slotsY * layout.slotsZ,
-    textureSize: layout.textureSize,
-  };
+/** Clear allocation warn-once state between deterministic tests. */
+export function resetLabelVolumeAllocWarnings(): void {
+  warnedLabelVolumeAlloc.clear();
 }
 
 /**
@@ -322,8 +165,8 @@ export function computeLabelVolumeSizing(
  * this is defense in depth.
  *
  * A brick that exceeds the device dimension limit is caught synchronously:
- * {@link computeLabelVolumeSizing} (via `computeProxyAtlasLayout`) throws, and
- * `createEmptyVolumeTexture` throws on a descriptor overflow — both are wrapped
+ * {@link computeLabelVolumeSizing} (via `computeTextureAtlasLayout`) throws, and
+ * the budgeted texture owner throws on a descriptor overflow — both are wrapped
  * in one `try/catch` that returns `null` and warns once, so a bad size skips the
  * label instead of throwing through the upload path.
  */
@@ -353,9 +196,9 @@ export function getOrCreateLabelVolumePool(
   if (
     existing &&
     existing.width === w && existing.height === h && existing.depth === d &&
-    existing.chunkX === cx && existing.chunkY === cy && existing.chunkZ === cz
+    existing.chunkX === cx && existing.chunkY === cy && existing.chunkZ === cz &&
+    existing.datasetId === datasetId
   ) {
-    existing.datasetId = datasetId;
     return existing;
   }
   if (existing) destroyLabelVolumePool(existing);
@@ -363,14 +206,42 @@ export function getOrCreateLabelVolumePool(
   const limit = getDeviceLimits(ctx.device).maxTextureDimension3D;
 
   let sizing: LabelVolumeSizing;
-  let texture: GPUTexture;
+  let texture: GPUTexture | undefined;
+  let textureAllocation: TrackedGpuResource<GPUTexture> | undefined;
+  let indirectionBuf: GPUBuffer | undefined;
+  let indirectionAllocation: TrackedGpuResource<GPUBuffer> | undefined;
   try {
     // Size the atlas to the WHOLE chunk grid (no byte-budget clamp) and pack
     // the slots under the device limit; throws if a single brick exceeds it.
     sizing = computeLabelVolumeSizing(w, h, d, cx, cy, cz, limit);
     const [texW, texH, texD] = sizing.textureSize;
-    texture = createEmptyVolumeTexture(ctx.device, texW, texH, texD, "r32uint");
+    textureAllocation = ctx.gpuResources.createTexture(
+      ctx.device,
+      { key: `label-volume:${memberId}:texture`, kind: "label-volume", datasetId },
+      {
+        size: [texW, texH, texD],
+        format: "r32uint",
+        dimension: "3d",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+      },
+    );
+    texture = textureAllocation.resource;
+
+    const indirectionBytes = Math.max(sizing.gridCellCount * 4, 4);
+    indirectionAllocation = ctx.gpuResources.createBuffer(
+      ctx.device,
+      { key: `label-volume:${memberId}:indirection`, kind: "buffer", datasetId },
+      {
+        size: indirectionBytes,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      },
+    );
+    indirectionBuf = indirectionAllocation.resource;
   } catch (err) {
+    indirectionAllocation?.destroy();
+    if (!indirectionAllocation) indirectionBuf?.destroy();
+    textureAllocation?.destroy();
+    if (!textureAllocation) texture?.destroy();
     if (!warnedLabelVolumeAlloc.has(memberId)) {
       warnedLabelVolumeAlloc.add(memberId);
       console.warn(
@@ -384,10 +255,6 @@ export function getOrCreateLabelVolumePool(
 
   const indirectionData = new Uint32Array(sizing.gridCellCount);
   indirectionData.fill(0xFFFFFFFF);
-  const indirectionBuf = ctx.device.createBuffer({
-    size: Math.max(sizing.gridCellCount * 4, 4),
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-  });
   ctx.device.queue.writeBuffer(indirectionBuf, 0, indirectionData);
 
   const freeSlots: number[] = [];
@@ -396,8 +263,11 @@ export function getOrCreateLabelVolumePool(
   slotGridIdx.fill(-1);
 
   const pool: LabelVolumePool = {
+    memberId,
     texture,
+    textureAllocation,
     indirectionBuf,
+    indirectionAllocation,
     indirectionData,
     gridX: sizing.gridX, gridY: sizing.gridY, gridZ: sizing.gridZ,
     chunkX: cx, chunkY: cy, chunkZ: cz,
@@ -416,11 +286,10 @@ export function getOrCreateLabelVolumePool(
 /**
  * Resolve the atlas slot for a level chunk cell, allocating one on first
  * arrival and reusing it on a T scrub (so a re-delivered cell overwrites its
- * own brick in place). An eligible level never evicts — the atlas is sized to
- * the whole grid, so every cell has its own slot; the LRU fallback is inert
- * defense in depth for a pathological over-limit grid the eligibility caps
- * preclude. Returns the slot index and its origin, or `null` when no slot is
- * available.
+ * own brick in place). An eligible level never evicts: the atlas is sized to
+ * the whole grid, so every cell has its own slot. If that invariant is broken,
+ * fail closed with `null` instead of evicting a resident cell and rendering a
+ * transparent hole elsewhere in the label.
  */
 export function acquireLabelSlot(
   pool: LabelVolumePool,
@@ -431,25 +300,10 @@ export function acquireLabelSlot(
     if (pool.freeSlots.length > 0) {
       slot = pool.freeSlots.pop()!;
     } else {
-      // Inert fallback: an eligible level's atlas holds the whole grid, so
-      // this never fires. It stays as defense in depth for a pathological
-      // over-limit grid — evict the oldest resident cell (LRU head).
-      const victim = pool.slots.keys().next();
-      if (victim.done) return null;
-      slot = pool.slots.get(victim.value)!;
-      pool.slots.delete(victim.value);
-      const oldGrid = pool.slotGridIdx[slot];
-      if (oldGrid >= 0 && oldGrid < pool.indirectionData.length) {
-        pool.indirectionData[oldGrid] = 0xFFFFFFFF;
-      }
+      return null;
     }
     pool.slots.set(gridIdx, slot);
     pool.slotGridIdx[slot] = gridIdx;
-  } else {
-    // Refresh LRU recency: re-insert so a re-delivered cell isn't the next
-    // eviction victim if the inert fallback ever runs.
-    pool.slots.delete(gridIdx);
-    pool.slots.set(gridIdx, slot);
   }
   const sx = slot % pool.slotsX;
   const sy = Math.floor(slot / pool.slotsX) % pool.slotsY;
@@ -461,10 +315,14 @@ export function acquireLabelSlot(
 }
 
 export function destroyLabelVolumePool(pool: LabelVolumePool): void {
-  pool.texture.destroy();
-  pool.indirectionBuf.destroy();
-  pool.descBuffer?.destroy();
-  pool.labelColorBuffer?.destroy();
+  pool.textureAllocation?.destroy();
+  if (!pool.textureAllocation) pool.texture.destroy();
+  pool.indirectionAllocation?.destroy();
+  if (!pool.indirectionAllocation) pool.indirectionBuf.destroy();
+  pool.descAllocation?.destroy();
+  if (!pool.descAllocation) pool.descBuffer?.destroy();
+  pool.labelColorAllocation?.destroy();
+  if (!pool.labelColorAllocation) pool.labelColorBuffer?.destroy();
 }
 
 /** Remove a member's label volume pool (no-op if absent). */
@@ -503,31 +361,23 @@ export function destroyAllLabelVolumePools(ctx: WorkerCtx): void {
 // Stays at module scope: it's a per-canvas resource (not per-session) that
 // `ensureDepthTexture` resizes when canvas dims change.
 let depthTexture: GPUTexture | null = null;
+let depthAllocation: TrackedGpuResource<GPUTexture> | null = null;
 let depthW = 0;
 let depthH = 0;
 
-// Shared dummy indirection buffer for `group-as-proxy` chunk bindings.
-// Same reasoning as `depthTexture`: not per-session state.
-let dummyIndirectionBuf: GPUBuffer | null = null;
-export function getDummyIndirection(device: GPUDevice): GPUBuffer {
-  if (!dummyIndirectionBuf) {
-    dummyIndirectionBuf = device.createBuffer({
-      size: 4,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    device.queue.writeBuffer(dummyIndirectionBuf, 0, new Uint32Array([0xFFFFFFFF]));
-  }
-  return dummyIndirectionBuf;
-}
-
-export function ensureDepthTexture(device: GPUDevice, w: number, h: number): GPUTexture {
+export function ensureDepthTexture(ctx: WorkerCtx, w: number, h: number): GPUTexture {
   if (depthTexture && depthW === w && depthH === h) return depthTexture;
-  depthTexture?.destroy();
-  depthTexture = device.createTexture({
+  depthAllocation?.destroy();
+  depthAllocation = ctx.gpuResources.createTexture(
+    ctx.device,
+    { key: "session:volume-depth", kind: "depth" },
+    {
     size: [w, h],
     format: "depth24plus",
     usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-  });
+    },
+  );
+  depthTexture = depthAllocation.resource;
   depthW = w;
   depthH = h;
   return depthTexture;
@@ -540,35 +390,67 @@ export function getDepthTexture(): GPUTexture | null {
 
 /** Create a shared atlas pool. Indirection is sized later from entityMetas. */
 function createVolumeAtlas(
-  device: GPUDevice,
+  ctx: WorkerCtx,
+  poolKey: string,
+  datasetId: string,
   chunkX: number, chunkY: number, chunkZ: number,
   t: number, c: number,
 ): AtlasState {
+  const device = ctx.device;
   const limits = getDeviceLimits(device);
+  const geometryBudget = ctx.gpuResources.availableUpTo(VOLUME_ATLAS_BUDGET);
+  const slotBytes = chunkX * chunkY * chunkZ * 2;
+  if (geometryBudget < slotBytes) {
+    throw new Error(
+      `WebGPU budget cannot fit one volume chunk for ${poolKey} ` +
+        `(need ${slotBytes}, available ${geometryBudget})`,
+    );
+  }
   const geom = computeAtlasGeometry(
     limits,
     [chunkX, chunkY, chunkZ],
-    VOLUME_ATLAS_BUDGET,
+    geometryBudget,
     "3d",
   );
   const { slotsX, slotsY, totalSlots, atlasW, atlasH } = geom;
   const slotsZ = geom.slotsZ!;
   const atlasD = geom.atlasD!;
+  if (totalSlots < 1) {
+    throw new Error(`volume atlas ${poolKey} has zero slots`);
+  }
 
-  const texture = device.createTexture({
-    size: [atlasW, atlasH, atlasD],
-    format: "r16uint",
-    dimension: "3d",
-    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-  });
+  const textureAllocation = ctx.gpuResources.createTexture(
+    device,
+    { key: `volume:${poolKey}:texture`, kind: "volume-atlas", datasetId },
+    {
+      size: [atlasW, atlasH, atlasD],
+      format: "r16uint",
+      dimension: "3d",
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    },
+  );
+  const texture = textureAllocation.resource;
 
   // Indirection starts at minimum size; cold state handler resizes after computing entityMetas.
   const indirectionData = new Uint32Array(1);
   indirectionData[0] = 0xFFFFFFFF;
-  const indirectionBuf = device.createBuffer({
-    size: 4,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-  });
+  let indirectionAllocation: TrackedGpuResource<GPUBuffer> | undefined;
+  let indirectionBuf: GPUBuffer;
+  try {
+    indirectionAllocation = ctx.gpuResources.createBuffer(
+      device,
+      { key: `volume:${poolKey}:indirection:1`, kind: "buffer", datasetId },
+      {
+        size: 4,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      },
+    );
+    indirectionBuf = indirectionAllocation.resource;
+  } catch (err) {
+    textureAllocation?.destroy();
+    if (!textureAllocation) texture.destroy();
+    throw err;
+  }
   device.queue.writeBuffer(indirectionBuf, 0, indirectionData);
 
   const freeSlots: number[] = [];
@@ -578,7 +460,9 @@ function createVolumeAtlas(
   slotGridIdx.fill(-1);
 
   return {
-    texture, indirectionBuf, indirectionData,
+    datasetId, poolKey,
+    texture, textureAllocation,
+    indirectionBuf, indirectionAllocation, indirectionData,
     slots: new Map(), slotGridIdx, freeSlots, totalSlots,
     chunkX, chunkY, chunkZ,
     slotsX, slotsY, slotsZ,
@@ -590,8 +474,10 @@ function createVolumeAtlas(
 }
 
 export function destroyAtlas(atlas: AtlasState): void {
-  atlas.texture.destroy();
-  atlas.indirectionBuf.destroy();
+  atlas.textureAllocation?.destroy();
+  if (!atlas.textureAllocation) atlas.texture.destroy();
+  atlas.indirectionAllocation?.destroy();
+  if (!atlas.indirectionAllocation) atlas.indirectionBuf.destroy();
 }
 
 /**
@@ -604,16 +490,20 @@ export function getOrCreateVolumePool(
   poolKey: string,
   chunkX: number, chunkY: number, chunkZ: number,
   t: number, c: number,
+  datasetId: string = poolKey,
 ): AtlasState {
   const atlases = ctx.state.volumeAtlases;
   const existing = atlases.get(poolKey);
-  if (existing && existing.chunkX === chunkX && existing.chunkY === chunkY && existing.chunkZ === chunkZ) {
+  if (
+    existing && existing.datasetId === datasetId &&
+    existing.chunkX === chunkX && existing.chunkY === chunkY && existing.chunkZ === chunkZ
+  ) {
     existing.t = t;
     existing.c = c;
     return existing;
   }
   if (existing) destroyAtlas(existing);
-  const newAtlas = createVolumeAtlas(ctx.device, chunkX, chunkY, chunkZ, t, c);
+  const newAtlas = createVolumeAtlas(ctx, poolKey, datasetId, chunkX, chunkY, chunkZ, t, c);
   atlases.set(poolKey, newAtlas);
   return newAtlas;
 }
@@ -624,12 +514,25 @@ export function getOrCreateVolumePool(
  */
 export function resizeIndirection(ctx: WorkerCtx, atlas: AtlasState, totalEntries: number): void {
   if (totalEntries === atlas.indirectionData.length) return;
+  const size = Math.max(totalEntries * 4, 4);
+  const nextAllocation = ctx.gpuResources.createBuffer(
+    ctx.device,
+    {
+      key: `volume:${atlas.poolKey ?? "legacy"}:indirection:${totalEntries}`,
+      kind: "buffer",
+      datasetId: atlas.datasetId,
+    },
+    {
+      size,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    },
+  );
+  const nextBuffer = nextAllocation.resource;
+  atlas.indirectionAllocation?.destroy();
+  if (!atlas.indirectionAllocation) atlas.indirectionBuf.destroy();
   atlas.indirectionData = new Uint32Array(totalEntries);
-  atlas.indirectionBuf.destroy();
-  atlas.indirectionBuf = ctx.device.createBuffer({
-    size: Math.max(totalEntries * 4, 4),
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-  });
+  atlas.indirectionBuf = nextBuffer;
+  atlas.indirectionAllocation = nextAllocation;
 }
 
 /**
@@ -639,24 +542,24 @@ export function resizeIndirection(ctx: WorkerCtx, atlas: AtlasState, totalEntrie
  */
 export function removeVolumeAtlas(ctx: WorkerCtx, idOrMember: string): void {
   const atlases = ctx.state.volumeAtlases;
-  const atlas = atlases.get(idOrMember);
-  if (atlas) {
-    destroyAtlas(atlas);
-    atlases.delete(idOrMember);
+  for (const [poolKey, atlas] of atlases) {
+    if (poolKey === idOrMember || atlas.datasetId === idOrMember) {
+      destroyAtlas(atlas);
+      atlases.delete(poolKey);
+    }
   }
 }
 
 /**
- * Destroy all atlas pools + the depth texture + the dummy indirection
- * buffer. Composed cleanup that also clears per-entity ray-pick state
+ * Destroy all atlas pools and the depth texture. Composed cleanup that
+ * also clears per-entity ray-pick state
  * lives in `volume/index.ts` as `destroyAllVolumeResources`.
  */
 export function destroyAllVolumeAtlasResources(ctx: WorkerCtx): void {
   const atlases = ctx.state.volumeAtlases;
   for (const atlas of atlases.values()) destroyAtlas(atlas);
   atlases.clear();
-  depthTexture?.destroy();
+  depthAllocation?.destroy();
+  depthAllocation = null;
   depthTexture = null;
-  dummyIndirectionBuf?.destroy();
-  dummyIndirectionBuf = null;
 }

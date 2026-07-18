@@ -109,6 +109,7 @@ mod tests {
             display_name: email.into(),
             picture_url: None,
             is_admin,
+            auth_epoch: 0,
         }
     }
 

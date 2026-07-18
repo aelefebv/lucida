@@ -134,6 +134,7 @@ function WorkspaceViewerRoute({
 }: WorkspaceViewerRouteProps) {
   const [workspace, setWorkspace] = useState<WorkspaceRecord | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [openAttempt, setOpenAttempt] = useState(0);
   // Error from the in-viewer "create workspace from selection" create-step
   // (#697). Surfaced to the user (not just logged) so a failed create isn't
   // silent — mirrors how the dashboard's create-from-dataset path shows its
@@ -164,7 +165,7 @@ function WorkspaceViewerRoute({
     return () => {
       cancelled = true;
     };
-  }, [workspaceId]);
+  }, [openAttempt, workspaceId]);
 
   const handleRename = useCallback(async (name: string) => {
     const updated = await renameWorkspace(workspaceId, name);
@@ -193,6 +194,16 @@ function WorkspaceViewerRoute({
           You don&rsquo;t have access to this workspace, or it doesn&rsquo;t
           exist — ask the person who shared it for an invite.
         </p>
+        <button
+          type="button"
+          onClick={() => {
+            setError(null);
+            setWorkspace(null);
+            setOpenAttempt((attempt) => attempt + 1);
+          }}
+        >
+          Retry workspace
+        </button>
       </div>
     );
   }

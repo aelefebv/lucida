@@ -19,45 +19,42 @@
 use std::sync::Arc;
 
 use lucida_content::DatasetId;
-use lucida_content::url::{dataset_id_for_url, dataset_url_hash16, normalize_dataset_url};
+use lucida_content::url::SourceVersion;
 use lucida_core::auth_principal::AuthPrincipal;
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ClientId, ServerMessage};
 use lucida_protocol::{
-    AssetCatalog, DatasetOpenFailureDiagnostic, DatasetOpenFailureKind,
-    DatasetOpenProgressDiagnostic, DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened,
-    GeneratedAvailabilityDelta,
+    DatasetOpenFailureDiagnostic, DatasetOpenFailureKind, DatasetOpenProgressDiagnostic,
+    DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened, GeneratedAvailabilityDelta,
+    OpenedDatasetSummary,
 };
-use lucida_proxy::ProxySpec;
 use lucida_store::cache::CachedStore;
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::{Mutex, OwnedRwLockReadGuard, mpsc};
 
 use crate::binding::{ChunkResolver, ServerBinding};
-use crate::generated::{
+use crate::generated_coarse::{
     DerivedChunkCache, GeneratedCoarseConfig, GeneratedCoarseService, GeneratedSchedulingConfig,
-    plan_generated_coarse_for_manifest,
+    plan_generated_coarse_for_source,
 };
 use crate::open_diagnostics::{
-    backend_kind_for_url, backend_open_failure, import_failure, open_failure, open_progress,
-    open_success, open_warning,
+    backend_kind_for_url, backend_open_failure, dataset_opened_validation_failure, import_failure,
+    open_failure, open_progress, open_success, open_warning, source_policy_failure,
 };
-use crate::proxy::{
-    PROXY_TARGET_LONG_AXIS, ProxyCache, ProxyGenerator, proxy_catalog_entries_for_manifest,
+use crate::outbox::{
+    DEFAULT_OUTBOX_BYTES, PreparedJsonError, PreparedUnicast, ReservedUnicastSlot, UnicastSender,
 };
 use crate::session::Session;
 use crate::workspace::{LiveWorkspace, WorkspaceManager};
-use crate::{BroadcastItem, ProxyConfig};
+use crate::{BroadcastEvent, BroadcastSender, DatasetRuntimeConfig};
 
-// `dataset_id_for_url` and `dataset_url_hash16` live in
-// `lucida_content::url` so the SPA (via the `lucida-core` wasm shim),
-// the storage layer, and this orchestration share one implementation. See
-// `wiki/decisions/0042-canonical-dataset-url-form.md`.
+// Source identity is derived by the admission policy's typed
+// `SourceIdentity`. Imports additionally derive a `SourceRevision`; the pair
+// is the generation boundary for bindings, documents, and caches. See
+// ADR-0042 and the dataset-opening flow.
 
 /// The workspace scope a connection acts under: the live runtime handles,
 /// the [`WorkspaceManager`] that owns authorization and persistence, and
-/// the authenticated principal. `None` wherever it is optional means the
-/// legacy non-workspace `/ws` session, which has no workspace
-/// authorization at all — none is applied there.
+/// the authenticated principal.
 #[derive(Clone)]
 pub struct WorkspaceScope {
     pub live: Arc<LiveWorkspace>,
@@ -67,23 +64,160 @@ pub struct WorkspaceScope {
 
 /// Everything a dataset open runs against: the shared session + broadcast
 /// hub it mutates, the proxy/generated configuration for the binding it
-/// builds, and the (optional) workspace scope that authorizes and
-/// persists the open.
+/// builds, and the workspace scope that authorizes and persists the open.
 #[derive(Clone)]
 pub struct DatasetOpenContext {
     pub session: Arc<Mutex<Session>>,
-    pub tx: broadcast::Sender<BroadcastItem>,
-    pub proxy_config: ProxyConfig,
-    pub workspace: Option<WorkspaceScope>,
+    pub tx: BroadcastSender,
+    pub dataset_runtime: DatasetRuntimeConfig,
+    pub workspace: WorkspaceScope,
+    /// Optional requester-only terminal lane. WebSocket opens provide this so
+    /// the full success envelope is reserved before persistence and published
+    /// atomically with the live command; headless callers leave it absent.
+    pub(crate) terminal: Option<DatasetOpenTerminal>,
+    #[cfg(test)]
+    pub(crate) publication_barrier: Option<DatasetOpenPublicationBarrier>,
+    /// Test-only pause after the durable write returns but before the
+    /// synchronous live commit/publish region. The work is already owned by
+    /// a detached child at this point, so aborting its requester must not
+    /// split durable state from the live session.
+    #[cfg(test)]
+    pub(crate) post_persist_barrier: Option<DatasetOpenPostPersistBarrier>,
+    /// Test-only panic injection after both publications are prepared but
+    /// before persistence starts. This exercises JoinError cleanup of the
+    /// shared terminal-slot lease.
+    #[cfg(test)]
+    pub(crate) panic_commit_task: bool,
 }
 
-/// Ordered sink for the per-stage progress diagnostics an open emits.
-/// The orchestration only emits; the caller decides delivery (the
-/// websocket adapter forwards each one to the requesting client, tests
-/// collect them directly). Send failures are ignored — a caller that has
-/// gone away stops observing progress, exactly like a disconnected
-/// client, without aborting the open.
-pub type ProgressSink = mpsc::UnboundedSender<DatasetOpenProgressDiagnostic>;
+#[derive(Clone)]
+pub(crate) struct DatasetOpenTerminal {
+    pub(crate) request_id: String,
+    pub(crate) sender: UnicastSender,
+    slot: ReservedUnicastSlot,
+}
+
+impl DatasetOpenTerminal {
+    pub(crate) fn new(
+        request_id: String,
+        sender: UnicastSender,
+        slot: ReservedUnicastSlot,
+    ) -> Self {
+        Self {
+            request_id,
+            sender,
+            slot,
+        }
+    }
+
+    pub(crate) fn prepare_json<T>(
+        &self,
+        value: &T,
+        limit: usize,
+    ) -> Result<PreparedUnicast, PreparedJsonError>
+    where
+        T: serde::Serialize + ?Sized,
+    {
+        self.sender.prepare_json_in_slot(&self.slot, value, limit)
+    }
+
+    pub(crate) fn publish_json<T>(&self, value: &T, limit: usize) -> Result<(), PreparedJsonError>
+    where
+        T: serde::Serialize + ?Sized,
+    {
+        match self.prepare_json(value, limit) {
+            Ok(prepared) => prepared.publish().map_err(PreparedJsonError::from),
+            Err(error) => {
+                // An authoritative result may never disappear behind process
+                // pressure. If the exact reserved-slot terminal cannot be
+                // prepared, force this requester down the bounded overload
+                // close/hard-drop path instead of returning it to an open
+                // socket with no terminal.
+                self.sender.force_overload_close();
+                Err(error)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct DatasetOpenPublicationBarrier {
+    entered: Arc<tokio::sync::Semaphore>,
+    release: Arc<tokio::sync::Semaphore>,
+    service: Arc<std::sync::Mutex<Option<Arc<GeneratedCoarseService>>>>,
+}
+
+#[cfg(test)]
+impl DatasetOpenPublicationBarrier {
+    fn new() -> Self {
+        Self {
+            entered: Arc::new(tokio::sync::Semaphore::new(0)),
+            release: Arc::new(tokio::sync::Semaphore::new(0)),
+            service: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct DatasetOpenPostPersistBarrier {
+    entered: Arc<tokio::sync::Semaphore>,
+    release: Arc<tokio::sync::Semaphore>,
+}
+
+#[cfg(test)]
+impl DatasetOpenPostPersistBarrier {
+    fn new() -> Self {
+        Self {
+            entered: Arc::new(tokio::sync::Semaphore::new(0)),
+            release: Arc::new(tokio::sync::Semaphore::new(0)),
+        }
+    }
+}
+
+/// Ordered sink for per-stage diagnostics. WebSocket callers synchronously
+/// enqueue progress onto the same priority lane as their terminal result, so
+/// success cannot overtake queued progress and no late progress can resurrect
+/// a completed request. Headless/tests can keep using an unbounded channel.
+pub trait ProgressSink: Send + Sync {
+    fn emit(&self, diagnostic: DatasetOpenProgressDiagnostic);
+}
+
+impl ProgressSink for mpsc::UnboundedSender<DatasetOpenProgressDiagnostic> {
+    fn emit(&self, diagnostic: DatasetOpenProgressDiagnostic) {
+        let _ = self.send(diagnostic);
+    }
+}
+
+pub(crate) struct DatasetOpenProgressSender {
+    request_id: String,
+    url: String,
+    sender: UnicastSender,
+}
+
+impl DatasetOpenProgressSender {
+    pub(crate) fn new(request_id: String, url: String, sender: UnicastSender) -> Self {
+        Self {
+            request_id,
+            url,
+            sender,
+        }
+    }
+}
+
+impl ProgressSink for DatasetOpenProgressSender {
+    fn emit(&self, diagnostic: DatasetOpenProgressDiagnostic) {
+        let message = ServerMessage::DatasetOpenProgress {
+            request_id: self.request_id.clone(),
+            url: self.url.clone(),
+            diagnostic,
+        };
+        let _ = self
+            .sender
+            .send_json_best_effort(&message, DEFAULT_OUTBOX_BYTES);
+    }
+}
 
 /// Terminal result of an open that did not fail with a diagnostic.
 #[derive(Debug)]
@@ -94,78 +228,92 @@ pub enum DatasetOpenOutcome {
         seq: u64,
         opened: Box<DatasetOpened>,
         diagnostic: DatasetOpenSuccessDiagnostic,
+        /// True when the requester terminal was already published from the
+        /// prepared priority-lane capability at the durable commit boundary.
+        terminal_precommitted: bool,
     },
     /// The workspace runtime shut down after the import completed; the
     /// open is abandoned with no further caller-visible outcome.
     Cancelled,
 }
 
-fn emit(progress: &ProgressSink, diagnostic: DatasetOpenProgressDiagnostic) {
-    let _ = progress.send(diagnostic);
+fn emit(progress: &dyn ProgressSink, diagnostic: DatasetOpenProgressDiagnostic) {
+    progress.emit(diagnostic);
 }
 
 /// Open a dataset URL into the session: probe the storage backend, import
 /// the OME-Zarr metadata, build the server binding, apply + broadcast
 /// `DatasetOpened`, and (in a workspace) persist the membership.
 ///
-/// The incoming `url` is normalized once at entry via
-/// [`lucida_content::url::normalize_dataset_url`]; every downstream
-/// derivation (`dataset_id_for_url` for source identity,
-/// `dataset_url_hash16` for cache identity, `backend::open`, the
-/// binding's `source_url`, and the name extraction) uses the canonical
+/// The incoming `url` is admitted once by the process-wide source policy;
+/// every downstream derivation (source identity, cache identity, backend,
+/// binding source, and display-name extraction) uses that canonical admitted
 /// form. Workspace clients receive an opaque workspace-local
 /// `DatasetId`; the source-derived id is retained only for membership
 /// dedupe and shared source/cache routing. This makes spelling variants
 /// of the same path dedup to one source — see
 /// `wiki/decisions/0042-canonical-dataset-url-form.md` for the rationale.
 ///
-/// Concurrent opens of the same URL are safe: a fast pre-check reuses an
-/// existing binding, and the apply step re-checks under the session lock
-/// so a lost race drops its duplicate binding and rebroadcasts the
-/// canonical `DatasetOpened` instead.
+/// Concurrent opens of the same source generation are safe: metadata is
+/// imported before reuse is decided, then the apply step re-checks under the
+/// session lock so a lost race drops its duplicate binding. Import-before-
+/// reuse is intentional: a locator may mutate in place.
 #[tracing::instrument(
     name = "dataset_open",
-    skip(ctx, progress),
-    fields(url = %url, client_id = %opener)
+    skip(url, ctx, progress),
+    fields(source = tracing::field::Empty, client_id = %opener)
 )]
 pub async fn open_dataset(
     opener: ClientId,
     url: &str,
     ctx: &DatasetOpenContext,
-    progress: &ProgressSink,
+    progress: &dyn ProgressSink,
 ) -> Result<DatasetOpenOutcome, DatasetOpenFailureDiagnostic> {
-    // Normalize at the input boundary. Drive-letter case, slash
-    // direction, `file://` prefix, UNC backslashes — see ADR-0042.
-    // Idempotent (safe even though `backend::open` will also normalize),
-    // and required *here* because `dataset_id_for_url` /
-    // `dataset_url_hash16` must hash the canonical form for the dedup
-    // short-circuit to fire across spelling variants.
-    let canonical_url = normalize_dataset_url(url);
+    open_dataset_inner(opener, url, ctx, progress, None).await
+}
 
-    // Stable, content-derived source ID. This is intentionally not the
-    // client-facing dataset ID inside a workspace: workspace document
-    // state uses an opaque workspace-local ID so the same source can be
-    // opened independently in different workspaces while sharing the
-    // source/cache identity below.
-    let dataset_source_id = dataset_id_for_url(&canonical_url);
+/// Connection-scoped entry point that transfers an already-admitted access
+/// lease into the cancellation-shielded commit child. The permit is acquired
+/// before request work starts; it must never be reacquired after revocation.
+pub(crate) async fn open_dataset_with_operation_permit(
+    opener: ClientId,
+    url: &str,
+    ctx: &DatasetOpenContext,
+    progress: &dyn ProgressSink,
+    operation_permit: OwnedRwLockReadGuard<()>,
+) -> Result<DatasetOpenOutcome, DatasetOpenFailureDiagnostic> {
+    open_dataset_inner(opener, url, ctx, progress, Some(operation_permit)).await
+}
+
+async fn open_dataset_inner(
+    opener: ClientId,
+    url: &str,
+    ctx: &DatasetOpenContext,
+    progress: &dyn ProgressSink,
+    operation_permit: Option<OwnedRwLockReadGuard<()>>,
+) -> Result<DatasetOpenOutcome, DatasetOpenFailureDiagnostic> {
+    // Do not attach a caller-controlled locator to traces. This pre-admission
+    // form is deliberately lossy and is replaced with the admitted source's
+    // equally safe representation once DNS/path checks complete.
+    let mut redacted_source = ctx.dataset_runtime.source_policy.redact_untrusted(url);
+    tracing::Span::current().record("source", redacted_source.as_str());
     emit(
         progress,
         open_progress(
             DatasetOpenStage::RequestReceived,
             "dataset open request received",
             None,
-            Some(dataset_source_id.clone()),
-            Some(format!("normalized source: {canonical_url}")),
+            None,
+            Some(format!("source: {redacted_source}")),
         ),
     );
 
-    if let Some(scope) = ctx.workspace.as_ref()
-        && scope.live.background_cancelled()
-    {
+    let scope = &ctx.workspace;
+    if scope.live.background_cancelled() {
         tracing::info!(
             client_id = %opener,
             workspace_id = %scope.live.workspace_id,
-            url = %canonical_url,
+            source = %redacted_source,
             "open_remote_dataset.cancelled_workspace_runtime"
         );
         return Err(open_failure(
@@ -183,23 +331,20 @@ pub async fn open_dataset(
             DatasetOpenStage::Authorization,
             "checking workspace permission",
             None,
-            Some(dataset_source_id.clone()),
-            ctx.workspace
-                .as_ref()
-                .map(|scope| format!("workspace: {}", scope.live.workspace_id)),
+            None,
+            Some(format!("workspace: {}", scope.live.workspace_id)),
         ),
     );
 
-    if let Some(scope) = ctx.workspace.as_ref()
-        && let Err(e) = scope
-            .manager
-            .require_editor(&scope.live.workspace_id, &scope.principal)
-            .await
+    if let Err(e) = scope
+        .manager
+        .require_editor(&scope.live.workspace_id, &scope.principal)
+        .await
     {
         tracing::warn!(
             client_id = %opener,
             workspace_id = %scope.live.workspace_id,
-            url = %canonical_url,
+            source = %redacted_source,
             error = %e,
             "open_remote_dataset.forbidden"
         );
@@ -218,64 +363,69 @@ pub async fn open_dataset(
             DatasetOpenStage::Authorization,
             "workspace permission accepted",
             None,
-            Some(dataset_source_id.clone()),
-            ctx.workspace
-                .as_ref()
-                .map(|scope| format!("workspace: {}", scope.live.workspace_id)),
+            None,
+            Some(format!("workspace: {}", scope.live.workspace_id)),
         ),
     );
 
-    let existing_workspace_source = if let Some(scope) = ctx.workspace.as_ref() {
-        emit(
-            progress,
-            open_progress(
+    // This is the single I/O admission boundary. Local roots are resolved and
+    // contained; HTTP DNS is validated and pinned; cloud scopes require an
+    // explicit bucket plus explicit ambient-credential opt-in.
+    let admitted = ctx
+        .dataset_runtime
+        .source_policy
+        .admit(url)
+        .await
+        .map_err(|error| source_policy_failure(&error))?;
+    let canonical_url = admitted.canonical_url().to_string();
+    redacted_source = admitted.redacted().to_string();
+    tracing::Span::current().record("source", redacted_source.as_str());
+
+    // Stable, collision-resistant source identity derives from the admitted
+    // canonical locator, not from caller spelling. Workspace document state
+    // still receives its independent opaque workspace-local ID.
+    let dataset_source_id = admitted.identity.dataset_id();
+
+    emit(
+        progress,
+        open_progress(
+            DatasetOpenStage::SourceLookup,
+            "checking persisted workspace dataset source",
+            None,
+            Some(dataset_source_id.clone()),
+            Some(format!("workspace: {}", scope.live.workspace_id)),
+        ),
+    );
+    let existing_workspace_source = match scope
+        .manager
+        .dataset_by_source(&scope.live.workspace_id, &admitted.identity)
+        .await
+    {
+        Ok(source) => source,
+        Err(e) => {
+            tracing::error!(
+                client_id = %opener,
+                workspace_id = %scope.live.workspace_id,
+                dataset_source_id = %dataset_source_id,
+                source = %redacted_source,
+                error = %e,
+                "open_remote_dataset.source_lookup_failed"
+            );
+            return Err(open_failure(
                 DatasetOpenStage::SourceLookup,
-                "checking persisted workspace dataset source",
-                None,
-                Some(dataset_source_id.clone()),
-                Some(format!("workspace: {}", scope.live.workspace_id)),
-            ),
-        );
-        match scope
-            .manager
-            .dataset_by_source(&scope.live.workspace_id, &dataset_source_id)
-            .await
-        {
-            Ok(source) => source,
-            Err(e) => {
-                tracing::error!(
-                    client_id = %opener,
-                    workspace_id = %scope.live.workspace_id,
-                    dataset_source_id = %dataset_source_id,
-                    url = %canonical_url,
-                    error = %e,
-                    "open_remote_dataset.source_lookup_failed"
-                );
-                return Err(open_failure(
-                    DatasetOpenStage::SourceLookup,
-                    DatasetOpenFailureKind::WorkspaceLookup,
-                    true,
-                    "workspace dataset lookup failed",
-                    Some(e.to_string()),
-                ));
-            }
+                DatasetOpenFailureKind::WorkspaceLookup,
+                true,
+                "workspace dataset lookup failed",
+                Some(e.to_string()),
+            ));
         }
-    } else {
-        None
     };
 
     let dataset_id_key = existing_workspace_source
         .as_ref()
         .map(|source| source.workspace_dataset_id.clone())
-        .unwrap_or_else(|| {
-            if ctx.workspace.is_some() {
-                new_workspace_dataset_id()
-            } else {
-                DatasetId(dataset_source_id.clone())
-            }
-        });
+        .unwrap_or_else(new_workspace_dataset_id);
     let dataset_id = dataset_id_key.0.clone();
-    let workspace_scoped = ctx.workspace.is_some();
     emit(
         progress,
         open_progress(
@@ -289,80 +439,9 @@ pub async fn open_dataset(
         ),
     );
 
-    // If we've already imported this URL in this session, reuse the binding.
-    // Re-broadcast the existing DatasetOpened (held on the binding) so the
-    // requesting client receives the same content graph + fetch descriptor
-    // without re-importing.
-    {
-        let sess = ctx.session.lock().await;
-        if let Some((existing_dataset_id, mut existing)) =
-            find_loaded_binding(&sess, &dataset_id_key, &canonical_url, workspace_scoped)
-        {
-            // Re-broadcast the CURRENT document manifest, not the stale
-            // import-time one cached on the binding: a `DatasetOpened` apply
-            // does a full manifest replace, so reusing the cached manifest
-            // here would clobber a since-applied rename (the document is the
-            // source of truth for the display name). Other manifest fields
-            // (images/transforms/source layouts) are immutable post-import, so
-            // adopting the document copy is otherwise a no-op.
-            if let Some(doc_manifest) = sess.document.manifests.get(&existing_dataset_id) {
-                existing.manifest = doc_manifest.clone();
-            }
-            // Re-stamp the opener with the CURRENT requester. This is the
-            // everyday multi-user path (someone opens a URL already loaded in
-            // the session); the binding's cached copy holds whoever first
-            // opened it (or None for a server-side restore), but the client
-            // that just requested this open is the one whose camera should
-            // auto-fit when the rebroadcast reaches it. Mirrors the lost-race
-            // re-stamp below.
-            existing.opener_client_id = Some(opener);
-            let opened = existing.clone();
-            let command = DocumentCommand::DatasetOpened(existing);
-            let seq = sess.seq;
-            drop(sess);
-            emit(
-                progress,
-                open_progress(
-                    DatasetOpenStage::BindingBuild,
-                    "reusing existing server binding",
-                    Some(existing_dataset_id.clone()),
-                    Some(dataset_source_id.clone()),
-                    None,
-                ),
-            );
-            emit(
-                progress,
-                open_progress(
-                    DatasetOpenStage::Broadcast,
-                    "broadcasting existing dataset to workspace clients",
-                    Some(existing_dataset_id.clone()),
-                    Some(dataset_source_id.clone()),
-                    Some(format!("seq: {seq}")),
-                ),
-            );
-            let broadcast_msg = ServerMessage::CommandBroadcast { seq, command };
-            let _ = ctx.tx.send(BroadcastItem::CommandBroadcast {
-                sender: u64::MAX,
-                broadcast_json: serde_json::to_string(&broadcast_msg).unwrap(),
-                ack_json: String::new(),
-            });
-            tracing::info!(
-                dataset_id = %existing_dataset_id,
-                dataset_source_id = %dataset_source_id,
-                url = %canonical_url,
-                "open_remote_dataset.dedup_reuse"
-            );
-            let diagnostic = open_success(&canonical_url, &opened, Some(dataset_source_id.clone()));
-            return Ok(DatasetOpenOutcome::Opened {
-                seq,
-                opened: Box::new(opened),
-                diagnostic,
-            });
-        }
-    }
-
-    // Open storage backend. `backend::open` re-normalizes (idempotent)
-    // and dispatches via `is_local_dataset_url`.
+    // Open through the admitted capability. HTTP uses the exact DNS answers
+    // checked above and has redirects/proxies disabled, so there is no second
+    // URL interpretation or post-check target pivot.
     emit(
         progress,
         open_progress(
@@ -373,7 +452,7 @@ pub async fn open_dataset(
             Some(format!("backend: {}", backend_kind_for_url(&canonical_url))),
         ),
     );
-    let store = match lucida_store::backend::open(&canonical_url) {
+    let store = match admitted.open_backend() {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = %e, "open_remote_dataset.backend_open_failed");
@@ -407,13 +486,20 @@ pub async fn open_dataset(
         ),
     );
     tracing::info!(
-        url = %canonical_url,
+        source = %redacted_source,
         id = %dataset_id,
         dataset_source_id = %dataset_source_id,
         name = %name,
         "importing dataset"
     );
-    let result = match lucida_store::import::import_dataset(&store, &dataset_id, &name).await {
+    let result = match lucida_store::import::import_dataset_with_shared_cache(
+        &store,
+        &dataset_id,
+        &name,
+        Arc::clone(&ctx.dataset_runtime.source_cache),
+    )
+    .await
+    {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, "open_remote_dataset.import_failed");
@@ -421,9 +507,7 @@ pub async fn open_dataset(
         }
     };
 
-    if let Some(scope) = ctx.workspace.as_ref()
-        && scope.live.background_cancelled()
-    {
+    if scope.live.background_cancelled() {
         tracing::info!(
             client_id = %opener,
             workspace_id = %scope.live.workspace_id,
@@ -432,6 +516,53 @@ pub async fn open_dataset(
             "open_remote_dataset.cancelled_after_import"
         );
         return Ok(DatasetOpenOutcome::Cancelled);
+    }
+
+    let source = SourceVersion::new(admitted.identity.clone(), result.source_revision);
+
+    // Reuse is safe only after a fresh metadata import proves that the
+    // locator still exposes the same generation. This preserves idempotent
+    // opens without turning a mutable locator into a stale-content alias.
+    {
+        let sess = ctx.session.lock().await;
+        if let Some((existing_dataset_id, mut existing)) =
+            find_loaded_binding(&sess, &dataset_id_key, &source)
+        {
+            if let Some(doc_manifest) = sess.document.manifests.get(&existing_dataset_id) {
+                existing.manifest = doc_manifest.clone();
+            }
+            existing.opener_client_id = Some(opener);
+            let seq = sess.seq;
+            drop(sess);
+            let command = DocumentCommand::DatasetOpened(existing.clone());
+            let broadcast_msg = ServerMessage::CommandBroadcast { seq, command };
+            let _ = ctx.tx.send(BroadcastEvent::command(
+                // The requester receives the compatibility success envelope
+                // carrying this full payload exactly once. Peers receive the
+                // authoritative sequenced command.
+                Some(opener),
+                broadcast_msg,
+                None,
+            ));
+            emit(
+                progress,
+                open_progress(
+                    DatasetOpenStage::BindingBuild,
+                    "reusing existing server binding",
+                    Some(existing_dataset_id.clone()),
+                    Some(dataset_source_id.clone()),
+                    Some(format!("seq: {seq}")),
+                ),
+            );
+            let diagnostic =
+                open_success(&canonical_url, &existing, Some(dataset_source_id.clone()));
+            return Ok(DatasetOpenOutcome::Opened {
+                seq,
+                opened: Box::new(existing),
+                diagnostic,
+                terminal_precommitted: false,
+            });
+        }
     }
 
     // Log import result summary.
@@ -502,19 +633,23 @@ pub async fn open_dataset(
             )),
         ),
     );
-    let proxy_config = &ctx.proxy_config;
-    let cached = Arc::new(CachedStore::new(store.clone(), 512 * 1024 * 1024));
+    let dataset_runtime = &ctx.dataset_runtime;
+    let cached = Arc::new(CachedStore::with_source_version(
+        store.clone(),
+        &source,
+        Arc::clone(&dataset_runtime.source_cache),
+    ));
     let resolver = Arc::new(ChunkResolver::new(&result.binding_seed));
     let generated_config = GeneratedCoarseConfig {
-        target_long_axis: proxy_config.generated_target_long_axis,
-        chunk_long_axis: proxy_config.generated_chunk_long_axis,
-        max_chunk_bytes: proxy_config.generated_max_chunk_bytes,
+        target_long_axis: dataset_runtime.generated_target_long_axis,
+        chunk_long_axis: dataset_runtime.generated_chunk_long_axis,
+        max_chunk_bytes: dataset_runtime.generated_max_chunk_bytes,
     };
     emit(
         progress,
         open_progress(
             DatasetOpenStage::GeneratedCoarsePlanning,
-            if proxy_config.generated_enabled {
+            if dataset_runtime.generated_enabled {
                 "planning generated coarse levels"
             } else {
                 "generated coarse planning disabled"
@@ -524,8 +659,8 @@ pub async fn open_dataset(
             None,
         ),
     );
-    let generated_plans = if proxy_config.generated_enabled {
-        plan_generated_coarse_for_manifest(&result.manifest, generated_config)
+    let generated_plans = if dataset_runtime.generated_enabled {
+        plan_generated_coarse_for_source(&result.manifest, result.source_revision, generated_config)
     } else {
         vec![]
     };
@@ -540,33 +675,31 @@ pub async fn open_dataset(
         ),
     );
 
-    // Legacy proxy fallback is opt-in after the coarse/detail default
-    // flip. The default DatasetOpened catalog is empty so fallback
-    // availability comes from chunk tier metadata instead of proxies.
-    let catalog_entries =
-        proxy_catalog_entries_for_manifest(&result.manifest, proxy_config.legacy_proxy_enabled);
-
     let dataset_opened = DatasetOpened {
         manifest: result.manifest.clone(),
         fetch: result.fetch,
-        catalog: AssetCatalog {
-            entries: catalog_entries.clone(),
-        },
         // Stamp the requesting client so the broadcast's recipients can tell
         // whether they are the opener; only the opener auto-fits its camera.
         opener_client_id: Some(opener),
     };
+    // Treat the manifest plus its fetch contract as one admission unit before
+    // any binding, persistence, generated-cache registration, or broadcast.
+    dataset_opened
+        .validate()
+        .map_err(|error| dataset_opened_validation_failure(&error))?;
 
-    // Per-dataset proxy infrastructure. Cache root is keyed by the
-    // 16-byte URL hash so a single shared `cache_dir` can host many
-    // datasets without collision. The generator owns its own bounded
-    // semaphore + in-flight dedup map.
-    let url_hash16 = dataset_url_hash16(&canonical_url);
-    let derived_chunks = Arc::new(DerivedChunkCache::new_on_disk_with_budget(
-        proxy_config.generated_cache_dir.clone(),
-        url_hash16,
-        proxy_config.generated_disk_budget_bytes,
-    ));
+    // Disk caches share the same full locator + revision scope as source
+    // memory. Old generations may coexist on disk, but can never be addressed
+    // by a binding for the current generation.
+    let derived_chunks = Arc::new(
+        DerivedChunkCache::new_on_disk_for_source_with_status_budget(
+            dataset_runtime.generated_cache_dir.clone(),
+            &source,
+            dataset_runtime.generated_disk_budget_bytes,
+            Arc::clone(&dataset_runtime.source_cache),
+            ctx.workspace.manager.generated_status_budget(),
+        ),
+    );
     let mut generated_initial_delta = GeneratedAvailabilityDelta::default();
     for plan in &generated_plans {
         match derived_chunks.register_generated_plan(plan) {
@@ -581,14 +714,11 @@ pub async fn open_dataset(
                     error = %e,
                     "generated coarse derived-cache registration failed"
                 );
-                derived_chunks.upsert_level(plan.availability.clone());
-                generated_initial_delta
-                    .levels
-                    .push(plan.availability.clone());
+                let retained = derived_chunks.upsert_level(plan.availability.clone());
+                generated_initial_delta.levels.extend(retained.levels);
             }
         }
     }
-    let proxy_cache = Arc::new(ProxyCache::new(proxy_config.cache_dir.clone(), url_hash16));
     let generated_manifest = Arc::new(result.manifest.clone());
     let generated_store = cached.clone();
     let generated_resolver = resolver.clone();
@@ -601,48 +731,56 @@ pub async fn open_dataset(
         ctx.session.clone(),
         ctx.tx.clone(),
         GeneratedSchedulingConfig {
-            concurrency: proxy_config.generated_concurrency,
-            background_chunk_limit: proxy_config.generated_background_chunk_limit,
+            concurrency: dataset_runtime.generated_concurrency,
+            background_chunk_limit: dataset_runtime.generated_background_chunk_limit,
             ..GeneratedSchedulingConfig::default()
         },
     ));
-    generated_service.start();
-    let proxy_generator = Arc::new(ProxyGenerator::new(
-        proxy_cache.clone(),
-        cached.clone(),
-        resolver.clone(),
-        Arc::new(result.manifest),
-        proxy_config.concurrency,
-    ));
-
-    // Clone for the (T=0, C=0) pre-generation task spawned below.
-    let prefetch_generator = proxy_generator.clone();
-    let prefetch_entries = catalog_entries.clone();
-    let prefetch_live = ctx.workspace.as_ref().map(|scope| scope.live.clone());
-
     let binding = ServerBinding {
-        source_url: canonical_url.clone(),
+        source: source.clone(),
         store: store.clone(),
         resolver,
         cache: cached,
         dataset_opened: dataset_opened.clone(),
         derived_chunks: derived_chunks.clone(),
         generated_service: generated_service.clone(),
-        legacy_proxy_enabled: proxy_config.legacy_proxy_enabled,
-        proxy_cache,
-        proxy_generator,
         import_warnings,
     };
+
+    #[cfg(test)]
+    if let Some(barrier) = &ctx.publication_barrier {
+        *barrier.service.lock().expect("publication barrier service") =
+            Some(Arc::clone(&generated_service));
+        barrier.entered.add_permits(1);
+        let _ = barrier.release.acquire().await;
+    }
 
     // Build DatasetOpened command (manifest + fetch, no server-private state).
     let command = DocumentCommand::DatasetOpened(dataset_opened);
 
     // Apply command and register server binding. Re-check the binding
     // presence under the lock in case a concurrent open raced ahead.
-    let (seq, document) = {
-        let mut sess = ctx.session.lock().await;
+    emit(
+        progress,
+        open_progress(
+            DatasetOpenStage::WorkspacePersist,
+            "persisting workspace dataset membership",
+            Some(dataset_id_key.clone()),
+            Some(dataset_source_id.clone()),
+            None,
+        ),
+    );
+
+    let seq = {
+        let mut sess = Arc::clone(&ctx.session).lock_owned().await;
+        if scope.live.background_cancelled() {
+            generated_service
+                .shutdown("workspace runtime closed during dataset open")
+                .await;
+            return Ok(DatasetOpenOutcome::Cancelled);
+        }
         if let Some((existing_dataset_id, mut existing)) =
-            find_loaded_binding(&sess, &dataset_id_key, &canonical_url, workspace_scoped)
+            find_loaded_binding(&sess, &dataset_id_key, &source)
         {
             // Lost the race: another open completed the import. Drop our
             // duplicate binding/command and rebroadcast the canonical one.
@@ -685,11 +823,9 @@ pub async fn open_dataset(
                     Some(format!("seq: {seq}")),
                 ),
             );
-            let _ = ctx.tx.send(BroadcastItem::CommandBroadcast {
-                sender: u64::MAX,
-                broadcast_json: serde_json::to_string(&broadcast_msg).unwrap(),
-                ack_json: String::new(),
-            });
+            let _ = ctx
+                .tx
+                .send(BroadcastEvent::command(Some(opener), broadcast_msg, None));
             tracing::info!(
                 dataset_id = %existing_dataset_id,
                 dataset_source_id = %dataset_source_id,
@@ -700,73 +836,274 @@ pub async fn open_dataset(
                 seq,
                 opened: Box::new(opened),
                 diagnostic,
+                terminal_precommitted: false,
             });
         }
-        let seq = sess.apply(command.clone());
-        if !generated_initial_delta.levels.is_empty() {
-            sess.apply_generated_availability_delta(
-                dataset_id_key.clone(),
-                generated_initial_delta.clone(),
+
+        let author = scope.principal.email.as_str();
+        let staged = sess
+            .stage_durable_document_as(command.clone(), author, None)
+            .map_err(|error| {
+                open_failure(
+                    DatasetOpenStage::WorkspacePersist,
+                    DatasetOpenFailureKind::Import,
+                    false,
+                    "dataset exceeds collaborative document limits",
+                    Some(error.to_string()),
+                )
+            })?;
+        let seq = staged.seq();
+        // Reserve the shared broadcast before consuming the requester's
+        // admission-time terminal slot. If broadcast admission fails, the
+        // slot remains available for the smaller failure terminal.
+        let publish = ctx
+            .tx
+            .prepare(BroadcastEvent::command(
+                Some(opener),
+                ServerMessage::CommandBroadcast {
+                    seq,
+                    command: command.clone(),
+                },
+                None,
+            ))
+            .map_err(|error| {
+                open_failure(
+                    DatasetOpenStage::Broadcast,
+                    DatasetOpenFailureKind::ResourceLimit,
+                    true,
+                    "outbound process capacity is temporarily full",
+                    Some(error.to_string()),
+                )
+            })?;
+        let terminal = if let Some(terminal) = &ctx.terminal {
+            let opened = match &command {
+                DocumentCommand::DatasetOpened(opened) => opened.clone(),
+                _ => unreachable!("dataset open command must be DatasetOpened"),
+            };
+            let diagnostic = open_success(&canonical_url, &opened, Some(dataset_source_id.clone()));
+            let summary = OpenedDatasetSummary {
+                workspace_dataset_id: opened.manifest.dataset_id.clone(),
+                name: opened.manifest.name.clone(),
+                image_count: opened.manifest.images().len(),
+                entity_count: opened.manifest.entities().len(),
+            };
+            let message = ServerMessage::OpenDatasetSucceeded {
+                request_id: terminal.request_id.clone(),
+                url: canonical_url.clone(),
+                seq,
+                summary: Some(summary),
+                opened: Some(opened),
+                diagnostic: Some(diagnostic),
+            };
+            Some(
+                terminal
+                    .prepare_json(&message, DEFAULT_OUTBOX_BYTES)
+                    .map_err(|error| {
+                        open_failure(
+                            DatasetOpenStage::Broadcast,
+                            DatasetOpenFailureKind::ResourceLimit,
+                            true,
+                            "requester outcome exceeds outbound capacity",
+                            Some(error.to_string()),
+                        )
+                    })?,
+            )
+        } else {
+            None
+        };
+
+        // The caller owns the import work up to this point. Once persistence
+        // begins, an owned child owns the session guard and both outbound
+        // capabilities through the synchronous live commit/publication
+        // boundary. Dropping the JoinHandle detaches this work, so a socket
+        // disconnect cannot cancel it after SQL reports a committed write.
+        let manager = Arc::clone(&scope.manager);
+        let live = Arc::clone(&scope.live);
+        let principal = scope.principal.clone();
+        let persist_dataset_id = dataset_id_key.clone();
+        let persist_source = source.clone();
+        let persist_name = name.clone();
+        let publish_dataset_id = dataset_id_key.clone();
+        let publish_dataset_source_id = dataset_source_id.clone();
+        let publish_canonical_url = canonical_url.clone();
+        let publish_dataset_name = name.clone();
+        let source_cache = Arc::clone(&dataset_runtime.source_cache);
+        let tx = ctx.tx.clone();
+        let logged_dataset_id = dataset_id.clone();
+        #[cfg(test)]
+        let post_persist_barrier = ctx.post_persist_barrier.clone();
+        #[cfg(test)]
+        let panic_commit_task = ctx.panic_commit_task;
+
+        let commit_task = tokio::spawn(async move {
+            #[cfg(test)]
+            assert!(
+                !panic_commit_task,
+                "injected dataset-open commit task panic"
             );
-        }
-        sess.record_binding_source(
-            dataset_id_key.clone(),
-            canonical_url.clone(),
-            Some(dataset_source_id.clone()),
-            name.clone(),
-        );
-        sess.clear_binding_restore_failure(&dataset_id_key);
-        sess.server_bindings.insert(dataset_id_key.clone(), binding);
-        let document = sess.document.clone();
-        (seq, document)
+
+            // Transfer the exact read guard admitted before this request
+            // started. Revocation marks the lease and waits on its write
+            // side, so it cannot return while this accepted durable/live
+            // mutation or its required derived publication is unfinished.
+            let _operation_permit = operation_permit;
+            if let Err(error) = manager
+                .persist_dataset_opened(
+                    &live,
+                    &persist_dataset_id,
+                    &persist_source,
+                    &persist_name,
+                    &principal,
+                    seq,
+                    staged.document(),
+                )
+                .await
+            {
+                tracing::error!(
+                    client_id = %opener,
+                    workspace_id = %live.workspace_id,
+                    dataset_id = %logged_dataset_id,
+                    dataset_source_id = %publish_dataset_source_id,
+                    error = %error,
+                    "open_remote_dataset.persist_failed"
+                );
+                return Err(open_failure(
+                    DatasetOpenStage::WorkspacePersist,
+                    DatasetOpenFailureKind::Persistence,
+                    true,
+                    "workspace persistence failed",
+                    Some(error.to_string()),
+                ));
+            }
+
+            #[cfg(test)]
+            if let Some(barrier) = post_persist_barrier {
+                barrier.entered.add_permits(1);
+                let _ = barrier.release.acquire().await;
+            }
+
+            // From the instant the durable write reports success until the
+            // live mutation and both prepared publications are consumed,
+            // this region is synchronous and infallible.
+            let replacing_generation = sess.server_bindings.contains_key(&publish_dataset_id);
+            if replacing_generation {
+                // Release the old generation's aggregate status permits
+                // before retrying admission for the replacement. The session
+                // lock is the publication fence for stale workers.
+                sess.server_bindings[&publish_dataset_id]
+                    .derived_chunks
+                    .clear_runtime_statuses();
+                for plan in &generated_plans {
+                    if derived_chunks.register_generated_plan(plan).is_err() {
+                        derived_chunks.upsert_level(plan.availability.clone());
+                    }
+                }
+                let refreshed = derived_chunks.snapshot();
+                generated_initial_delta = GeneratedAvailabilityDelta {
+                    levels: refreshed.levels,
+                    chunks: refreshed.chunks,
+                };
+            }
+            sess.commit_staged_document(staged);
+            if replacing_generation {
+                sess.generated_availability.remove(&publish_dataset_id);
+            }
+            if !generated_initial_delta.levels.is_empty() {
+                sess.apply_generated_availability_delta(
+                    publish_dataset_id.clone(),
+                    generated_initial_delta.clone(),
+                );
+            }
+            sess.record_binding_source(
+                publish_dataset_id.clone(),
+                publish_canonical_url,
+                Some(publish_dataset_source_id.clone()),
+                publish_dataset_name,
+            );
+            sess.clear_binding_restore_failure(&publish_dataset_id);
+            let replaced = sess.server_bindings.insert(publish_dataset_id, binding);
+            publish.publish();
+            if let Some(terminal) = terminal {
+                let _ = terminal.publish();
+            }
+            drop(sess);
+
+            // Derived availability is subordinate to the durable command but
+            // still belongs to the shielded child so a requester disconnect
+            // cannot suppress post-commit operational state.
+            if !generated_initial_delta.levels.is_empty() {
+                let msg = ServerMessage::GeneratedAvailabilityUpdate {
+                    dataset_id: DatasetId(logged_dataset_id.clone()),
+                    delta: generated_initial_delta,
+                };
+                let _ = tx.send(BroadcastEvent::generated_availability(msg));
+            }
+
+            // Quiescing a superseded generator is cleanup, not part of the
+            // durable boundary. Generation identity already fences stale
+            // session updates after the binding swap.
+            let replacement_cleanup = replaced.map(|binding| {
+                tokio::spawn(async move {
+                    binding
+                        .generated_service
+                        .shutdown("source revision replaced")
+                        .await;
+                    binding.derived_chunks.clear_runtime_statuses();
+                })
+            });
+
+            if live.background_cancelled() {
+                generated_service
+                    .shutdown("workspace runtime closed during dataset open")
+                    .await;
+            } else {
+                generated_service.start();
+            }
+            if replacement_cleanup.is_some() {
+                source_cache.invalidate_source(&persist_source.identity);
+            }
+            if let Some(cleanup) = replacement_cleanup {
+                let _ = cleanup.await;
+            }
+
+            tracing::info!(
+                dataset_id = %logged_dataset_id,
+                seq,
+                "open_remote_dataset.broadcast_sent"
+            );
+
+            if !generated_plans.is_empty() {
+                tokio::spawn(async move {
+                    generated_service.enqueue_background_fill().await;
+                });
+            }
+
+            Ok(seq)
+        });
+
+        commit_task.await.map_err(|error| {
+            tracing::error!(
+                client_id = %opener,
+                workspace_id = %scope.live.workspace_id,
+                dataset_id = %dataset_id,
+                dataset_source_id = %dataset_source_id,
+                error = %error,
+                "open_remote_dataset.commit_task_failed"
+            );
+            open_failure(
+                DatasetOpenStage::WorkspacePersist,
+                DatasetOpenFailureKind::Persistence,
+                true,
+                "workspace commit task failed",
+                Some(error.to_string()),
+            )
+        })??
     };
 
-    if ctx.workspace.is_some() {
-        emit(
-            progress,
-            open_progress(
-                DatasetOpenStage::WorkspacePersist,
-                "persisting workspace dataset membership",
-                Some(dataset_id_key.clone()),
-                Some(dataset_source_id.clone()),
-                Some(format!("seq: {seq}")),
-            ),
-        );
-    }
-
-    if let Some(scope) = ctx.workspace.as_ref()
-        && let Err(e) = scope
-            .manager
-            .persist_dataset_opened(
-                &scope.live,
-                &dataset_id_key,
-                &dataset_source_id,
-                &canonical_url,
-                &name,
-                &scope.principal,
-                seq,
-                &document,
-            )
-            .await
-    {
-        tracing::error!(
-            client_id = %opener,
-            workspace_id = %scope.live.workspace_id,
-            dataset_id = %dataset_id,
-            dataset_source_id = %dataset_source_id,
-            error = %e,
-            "open_remote_dataset.persist_failed"
-        );
-        return Err(open_failure(
-            DatasetOpenStage::WorkspacePersist,
-            DatasetOpenFailureKind::Persistence,
-            true,
-            "workspace persistence failed",
-            Some(e.to_string()),
-        ));
-    }
-
-    if ctx.workspace.is_some() {
+    // WebSocket progress shares the terminal's priority FIFO and must have no
+    // producer after the precommitted terminal. Headless callers still get
+    // these observational post-commit stages through their channel sink.
+    if ctx.terminal.is_none() {
         emit(
             progress,
             open_progress(
@@ -779,97 +1116,24 @@ pub async fn open_dataset(
         );
     }
 
-    // Broadcast to ALL clients including the requester.
-    // Use u64::MAX as sender so no client matches — everyone gets the
-    // CommandBroadcast (not an Ack), since the requester hasn't applied
-    // the DatasetOpened locally.
+    // Broadcast the authoritative command to peers. The requester receives
+    // the compatibility OpenDatasetSucceeded payload from the handler, so it
+    // is excluded here to avoid sending the same large DatasetOpened twice.
     let opened = match &command {
         DocumentCommand::DatasetOpened(opened) => opened.clone(),
         _ => unreachable!("dataset open command must be DatasetOpened"),
     };
-    let broadcast_msg = ServerMessage::CommandBroadcast { seq, command };
-
-    emit(
-        progress,
-        open_progress(
-            DatasetOpenStage::Broadcast,
-            "broadcasting dataset to workspace clients",
-            Some(dataset_id_key.clone()),
-            Some(dataset_source_id.clone()),
-            Some(format!("seq: {seq}")),
-        ),
-    );
-
-    let _ = ctx.tx.send(BroadcastItem::CommandBroadcast {
-        sender: u64::MAX,
-        broadcast_json: serde_json::to_string(&broadcast_msg).unwrap(),
-        ack_json: String::new(), // unused — no client will match
-    });
-
-    if !generated_initial_delta.levels.is_empty() {
-        let msg = ServerMessage::GeneratedAvailabilityUpdate {
-            dataset_id: DatasetId(dataset_id.clone()),
-            delta: generated_initial_delta.clone(),
-        };
-        let _ = ctx.tx.send(BroadcastItem::GeneratedAvailabilityUpdate {
-            json: serde_json::to_string(&msg).unwrap(),
-        });
-    }
-
-    tracing::info!(
-        dataset_id = %dataset_id,
-        seq,
-        "open_remote_dataset.broadcast_sent"
-    );
-
-    // Background warm-up is deliberately decoupled from the returned
-    // result: the caller can deliver success while coarse fill and proxy
-    // pre-generation proceed on their own tasks.
-    if !generated_plans.is_empty() {
-        let fill_service = generated_service.clone();
-        tokio::spawn(async move {
-            fill_service.enqueue_background_fill().await;
-        });
-    }
-
-    // Kick off background generation for the initial (T=0, C=0) view
-    // of every advertised entity at the lowest priority. Errors are logged
-    // but do not propagate — the open succeeds either way, and downstream
-    // requests will surface the failure with their own error path.
-    if !prefetch_entries.is_empty() {
-        let dataset_id_for_log = dataset_id.clone();
-        tokio::spawn(async move {
-            for availability in prefetch_entries {
-                for kind in availability.kinds {
-                    if prefetch_live
-                        .as_ref()
-                        .is_some_and(|live| live.background_cancelled())
-                    {
-                        tracing::info!(
-                            dataset = %dataset_id_for_log,
-                            "background proxy pre-generation cancelled"
-                        );
-                        return;
-                    }
-                    let spec = ProxySpec {
-                        entity_id: availability.entity_id.clone(),
-                        kind,
-                        t: 0,
-                        c: 0,
-                        target_long_axis: PROXY_TARGET_LONG_AXIS,
-                    };
-                    if let Err(e) = prefetch_generator.request(spec, 0).await {
-                        tracing::warn!(
-                            dataset = %dataset_id_for_log,
-                            entity = %availability.entity_id.0,
-                            kind = ?kind,
-                            error = %e,
-                            "background proxy pre-generation failed"
-                        );
-                    }
-                }
-            }
-        });
+    if ctx.terminal.is_none() {
+        emit(
+            progress,
+            open_progress(
+                DatasetOpenStage::Broadcast,
+                "broadcasting dataset to workspace clients",
+                Some(dataset_id_key.clone()),
+                Some(dataset_source_id.clone()),
+                Some(format!("seq: {seq}")),
+            ),
+        );
     }
 
     let diagnostic = open_success(&canonical_url, &opened, Some(dataset_source_id));
@@ -877,6 +1141,7 @@ pub async fn open_dataset(
         seq,
         opened: Box::new(opened),
         diagnostic,
+        terminal_precommitted: ctx.terminal.is_some(),
     })
 }
 
@@ -887,22 +1152,18 @@ fn new_workspace_dataset_id() -> DatasetId {
 fn find_loaded_binding(
     sess: &Session,
     dataset_id: &DatasetId,
-    canonical_url: &str,
-    allow_source_url_match: bool,
+    source: &SourceVersion,
 ) -> Option<(DatasetId, DatasetOpened)> {
     if sess.document.manifests.contains_key(dataset_id)
         && let Some(binding) = sess.server_bindings.get(dataset_id)
+        && binding.source == *source
     {
         return Some((dataset_id.clone(), binding.dataset_opened.clone()));
     }
 
-    if allow_source_url_match {
-        for (existing_id, binding) in &sess.server_bindings {
-            if binding.source_url == canonical_url
-                && sess.document.manifests.contains_key(existing_id)
-            {
-                return Some((existing_id.clone(), binding.dataset_opened.clone()));
-            }
+    for (existing_id, binding) in &sess.server_bindings {
+        if binding.source == *source && sess.document.manifests.contains_key(existing_id) {
+            return Some((existing_id.clone(), binding.dataset_opened.clone()));
         }
     }
 
@@ -912,10 +1173,55 @@ fn find_loaded_binding(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::outbox::{BroadcastKind, UnicastReceiver, unicast_channel_with_process_budget};
     use crate::test_fixtures::single_image_manifest;
     use lucida_content::DataType;
     use std::fs;
     use std::path::Path;
+
+    async fn terminal_lane(
+        request_id: &str,
+    ) -> (DatasetOpenTerminal, UnicastReceiver, UnicastSender) {
+        let (sender, receiver) =
+            unicast_channel_with_process_budget(1, DEFAULT_OUTBOX_BYTES, 4 * 1024 * 1024);
+        let slot = sender
+            .reserve_terminal_slot()
+            .await
+            .expect("dataset-open terminal slot");
+        (
+            DatasetOpenTerminal::new(request_id.into(), sender.clone(), slot),
+            receiver,
+            sender,
+        )
+    }
+
+    async fn receive_terminal(receiver: &mut UnicastReceiver) -> ServerMessage {
+        let axum::extract::ws::Message::Text(text) = receiver
+            .recv()
+            .await
+            .expect("dataset-open terminal message")
+        else {
+            panic!("dataset-open terminal must be JSON")
+        };
+        serde_json::from_str(text.as_str()).expect("valid dataset-open terminal JSON")
+    }
+
+    fn publish_failure_after_open_error(
+        terminal: &DatasetOpenTerminal,
+        request_id: &str,
+        url: &str,
+        diagnostic: DatasetOpenFailureDiagnostic,
+    ) {
+        let message = ServerMessage::OpenDatasetFailed {
+            request_id: request_id.into(),
+            url: url.into(),
+            error: diagnostic.message.clone(),
+            diagnostic: Some(diagnostic),
+        };
+        terminal
+            .publish_json(&message, DEFAULT_OUTBOX_BYTES)
+            .expect("prepared success drop must leave the terminal slot reusable");
+    }
 
     /// Build a `DatasetOpened` whose manifest carries `name`, wired to the
     /// shared `single_image_manifest` shape but renamed. Used to seed both the
@@ -934,14 +1240,13 @@ mod tests {
                     },
                 }],
             }),
-            catalog: lucida_protocol::AssetCatalog::default(),
             opener_client_id: None,
         }
     }
 
     /// Construct a `ServerBinding` carrying `opened` as its cached, import-time
-    /// `dataset_opened`, with inert/stub proxy + generated infrastructure (none
-    /// of it is exercised here). Mirrors the helper in
+    /// `dataset_opened`, with inert generated infrastructure (none of it is
+    /// exercised here). Mirrors the helper in
     /// `tests/dataset_id_stable.rs`.
     fn make_test_binding(source_url: &str, opened: &DatasetOpened) -> ServerBinding {
         let store =
@@ -950,29 +1255,18 @@ mod tests {
         let resolver = Arc::new(ChunkResolver::new(
             &lucida_store::import_types::ServerBindingSeed { images: vec![] },
         ));
-        let url_hash = lucida_content::url::dataset_url_hash16(source_url);
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let proxy_cache = Arc::new(ProxyCache::new(tmp.path().to_path_buf(), url_hash));
-        std::mem::forget(tmp); // keep the dir alive for the test process
-        let proxy_generator = Arc::new(ProxyGenerator::new(
-            proxy_cache.clone(),
-            cache.clone(),
-            resolver.clone(),
-            Arc::new(opened.manifest.clone()),
-            1,
-        ));
         let derived_chunks = Arc::new(DerivedChunkCache::default());
         ServerBinding {
-            source_url: source_url.to_string(),
+            source: SourceVersion::new(
+                lucida_content::url::SourceIdentity::parse(source_url).unwrap(),
+                lucida_content::url::SourceRevision::from_bytes(b"dataset-open-test"),
+            ),
             store,
             resolver,
             cache,
             dataset_opened: opened.clone(),
             derived_chunks: derived_chunks.clone(),
             generated_service: Arc::new(GeneratedCoarseService::inert(derived_chunks)),
-            legacy_proxy_enabled: false,
-            proxy_cache,
-            proxy_generator,
             import_warnings: Vec::new(),
         }
     }
@@ -1056,8 +1350,9 @@ mod tests {
         // the manifest adoption + opener re-stamp immediately below are the
         // exact fixes under test (mirroring `open_dataset`'s dedup-reuse path).
         let client_id: ClientId = SECOND_REQUESTER;
+        let source = session.server_bindings[&dataset_id].source.clone();
         let (existing_dataset_id, mut existing) =
-            find_loaded_binding(&session, &dataset_id, URL, true)
+            find_loaded_binding(&session, &dataset_id, &source)
                 .expect("re-open must find the existing binding (dedup short-circuit)");
         if let Some(doc_manifest) = session.document.manifests.get(&existing_dataset_id) {
             existing.manifest = doc_manifest.clone();
@@ -1151,29 +1446,85 @@ mod tests {
         .unwrap();
     }
 
-    /// A non-workspace open context whose proxy/generated caches live
-    /// under `root` and whose generated planning is disabled, so nothing
-    /// writes outside the test sandbox.
-    fn test_context(root: &Path) -> DatasetOpenContext {
-        let (tx, _rx) = broadcast::channel(64);
-        DatasetOpenContext {
-            session: Arc::new(Mutex::new(Session::new())),
-            tx,
-            proxy_config: ProxyConfig {
-                cache_dir: root.join("proxies"),
-                legacy_proxy_enabled: false,
-                concurrency: 1,
-                generated_enabled: false,
-                generated_cache_dir: root.join("generated"),
-                generated_concurrency: 1,
-                generated_background_chunk_limit: 4,
-                generated_target_long_axis: 64,
-                generated_chunk_long_axis: 32,
-                generated_max_chunk_bytes: 1024 * 1024,
-                generated_disk_budget_bytes: None,
+    /// A real workspace context whose generated caches live under `root` and
+    /// whose generated planning is disabled, so nothing writes outside the
+    /// test sandbox.
+    async fn test_context(root: &Path) -> DatasetOpenContext {
+        test_context_with_pool(root).await.0
+    }
+
+    async fn test_context_with_pool(root: &Path) -> (DatasetOpenContext, sqlx::SqlitePool) {
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+        let runtime = DatasetRuntimeConfig {
+            source_policy: Arc::new(
+                crate::source_policy::SourceTrustPolicy::from_config(
+                    crate::source_policy::SourceTrustConfig {
+                        local_roots: vec![root.to_path_buf()],
+                        ..crate::source_policy::SourceTrustConfig::default()
+                    },
+                )
+                .unwrap(),
+            ),
+            source_cache: lucida_store::cache::SharedObjectCache::new(
+                16 * 1024 * 1024,
+                8 * 1024 * 1024,
+            ),
+            generated_enabled: false,
+            generated_cache_dir: root.join("generated"),
+            legacy_proxy_cache_dir: root.join("proxies"),
+            generated_concurrency: 1,
+            generated_background_chunk_limit: 4,
+            generated_target_long_axis: 64,
+            generated_chunk_long_axis: 32,
+            generated_max_chunk_bytes: 1024 * 1024,
+            generated_disk_budget_bytes: crate::DEFAULT_GENERATED_DISK_BUDGET_BYTES,
+        };
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(":memory:")
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let store: Arc<dyn crate::workspace::WorkspaceStore> =
+            Arc::new(crate::workspace::SqliteWorkspaceStore::new(pool.clone()));
+        let manager = Arc::new(WorkspaceManager::new(store, runtime.clone()));
+        let principal = AuthPrincipal {
+            email: "dataset-open@example.test".into(),
+            display_name: "Dataset Open".into(),
+            picture_url: None,
+            is_admin: false,
+            auth_epoch: 0,
+        };
+        let record = manager
+            .create_workspace(&principal, Some("Dataset open tests"))
+            .await
+            .unwrap();
+        let live = manager
+            .live_workspace(&record.id, &principal)
+            .await
+            .unwrap();
+        (
+            DatasetOpenContext {
+                session: Arc::clone(&live.session),
+                tx: live.tx.clone(),
+                dataset_runtime: runtime,
+                workspace: WorkspaceScope {
+                    live,
+                    manager,
+                    principal,
+                },
+                terminal: None,
+                publication_barrier: None,
+                post_persist_barrier: None,
+                panic_commit_task: false,
             },
-            workspace: None,
-        }
+            pool,
+        )
     }
 
     fn stages_of(
@@ -1189,7 +1540,7 @@ mod tests {
     #[tokio::test]
     async fn unsupported_scheme_fails_at_backend_open_with_staged_progress() {
         let tmp = tempfile::tempdir().unwrap();
-        let ctx = test_context(tmp.path());
+        let ctx = test_context(tmp.path()).await;
         let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
 
         let err = open_dataset(7, "ftp://example.com/data.zarr", &ctx, &progress_tx)
@@ -1207,10 +1558,8 @@ mod tests {
                 DatasetOpenStage::RequestReceived,
                 DatasetOpenStage::Authorization,
                 DatasetOpenStage::Authorization,
-                DatasetOpenStage::SourceLookup,
-                DatasetOpenStage::BackendOpen,
             ],
-            "failure must arrive after the exact per-stage progress sequence"
+            "policy rejection happens before source lookup or backend construction"
         );
 
         // Nothing was applied or bound.
@@ -1224,7 +1573,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path().join("empty.zarr");
         fs::create_dir_all(&data_dir).unwrap();
-        let ctx = test_context(tmp.path());
+        let ctx = test_context(tmp.path()).await;
         let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
 
         let err = open_dataset(7, data_dir.to_str().unwrap(), &ctx, &progress_tx)
@@ -1241,6 +1590,7 @@ mod tests {
                 DatasetOpenStage::RequestReceived,
                 DatasetOpenStage::Authorization,
                 DatasetOpenStage::Authorization,
+                DatasetOpenStage::SourceLookup,
                 DatasetOpenStage::SourceLookup,
                 DatasetOpenStage::BackendOpen,
                 DatasetOpenStage::MetadataImport,
@@ -1260,7 +1610,7 @@ mod tests {
         write_minimal_zarr(&data_dir);
         let url = data_dir.to_str().unwrap().to_string();
 
-        let ctx = test_context(tmp.path());
+        let ctx = test_context(tmp.path()).await;
         let mut broadcast_rx = ctx.tx.subscribe();
 
         let (p1, _r1) = mpsc::unbounded_channel();
@@ -1310,20 +1660,594 @@ mod tests {
         }
         assert!(reused, "second open must take the binding-reuse path");
 
-        // Both opens broadcast a server-originated (u64::MAX) DatasetOpened.
-        let mut broadcasts = 0;
+        // Each requester is excluded from its own full DatasetOpened
+        // broadcast; its success envelope carries the compatibility payload.
+        let mut senders = Vec::new();
         while let Ok(item) = broadcast_rx.try_recv() {
-            if let BroadcastItem::CommandBroadcast { sender, .. } = item {
-                assert_eq!(sender, u64::MAX);
-                broadcasts += 1;
+            if let BroadcastKind::CommandBroadcast { sender } = item.kind() {
+                senders.push(sender);
             }
         }
-        assert_eq!(broadcasts, 2);
+        assert_eq!(senders, vec![Some(1), Some(2)]);
+    }
+
+    #[tokio::test]
+    async fn late_workspace_drain_rejects_and_shuts_down_unpublished_generated_service() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("late-drain.zarr");
+        fs::create_dir_all(&data_dir).unwrap();
+        write_minimal_zarr(&data_dir);
+        let url = data_dir.to_str().unwrap().to_string();
+
+        let mut ctx = test_context(tmp.path()).await;
+        let barrier = DatasetOpenPublicationBarrier::new();
+        ctx.publication_barrier = Some(barrier.clone());
+        let open_ctx = ctx.clone();
+        let (progress, _progress_rx) = mpsc::unbounded_channel();
+        let opening =
+            tokio::spawn(async move { open_dataset(7, &url, &open_ctx, &progress).await });
+
+        let entered =
+            tokio::time::timeout(std::time::Duration::from_secs(5), barrier.entered.acquire())
+                .await
+                .expect("dataset open did not reach the pre-publication barrier")
+                .expect("pre-publication barrier closed");
+        entered.forget();
+        let unpublished_service = barrier
+            .service
+            .lock()
+            .expect("publication barrier service")
+            .clone()
+            .expect("constructed generated service");
+
+        // The drain snapshots no binding because the open has constructed its
+        // service but has not yet published it. Its cancellation marker must
+        // nevertheless make the late publisher reject and clean up that
+        // otherwise-invisible service.
+        let drained = ctx
+            .workspace
+            .manager
+            .shutdown_all_live_background("test late drain")
+            .await;
+        assert_eq!(drained, 0);
+        assert!(ctx.workspace.live.background_cancelled());
+
+        barrier.release.add_permits(1);
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), opening)
+            .await
+            .expect("dataset open did not observe workspace drain")
+            .expect("dataset open task panicked")
+            .expect("workspace drain is a cancellation, not an open failure");
+        assert!(matches!(outcome, DatasetOpenOutcome::Cancelled));
+        assert!(unpublished_service.is_shutdown().await);
+
+        let sess = ctx.session.lock().await;
+        assert!(sess.server_bindings.is_empty());
+        assert!(sess.document.manifests.is_empty());
+        assert!(sess.generated_availability.is_empty());
+    }
+
+    #[tokio::test]
+    async fn requester_abort_after_sql_commit_cannot_split_live_publication() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("post-persist-abort.zarr");
+        fs::create_dir_all(&data_dir).unwrap();
+        write_minimal_zarr(&data_dir);
+        let url = data_dir.to_str().unwrap().to_string();
+
+        let (mut ctx, pool) = test_context_with_pool(tmp.path()).await;
+        let barrier = DatasetOpenPostPersistBarrier::new();
+        ctx.post_persist_barrier = Some(barrier.clone());
+        let mut broadcast_rx = ctx.tx.subscribe();
+        let open_ctx = ctx.clone();
+        let (progress, _progress_rx) = mpsc::unbounded_channel();
+        let opening =
+            tokio::spawn(async move { open_dataset(7, &url, &open_ctx, &progress).await });
+
+        let entered =
+            tokio::time::timeout(std::time::Duration::from_secs(5), barrier.entered.acquire())
+                .await
+                .expect("dataset open did not reach the post-persist barrier")
+                .expect("post-persist barrier closed");
+        entered.forget();
+        let persisted: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workspace_datasets")
+            .fetch_one(&pool)
+            .await
+            .expect("durable membership query");
+        assert_eq!(persisted, 1, "SQL commit must precede the injected pause");
+        assert!(
+            ctx.session.try_lock().is_err(),
+            "shielded child owns the live publication fence"
+        );
+        assert!(matches!(
+            broadcast_rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+
+        opening.abort();
+        assert!(opening.await.unwrap_err().is_cancelled());
+        barrier.release.add_permits(1);
+
+        let sess = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            Arc::clone(&ctx.session).lock_owned(),
+        )
+        .await
+        .expect("detached commit child did not finish");
+        assert_eq!(sess.seq, 1);
+        assert_eq!(sess.document.manifests.len(), 1);
+        assert_eq!(sess.server_bindings.len(), 1);
+        drop(sess);
+
+        let item = tokio::time::timeout(std::time::Duration::from_secs(1), broadcast_rx.recv())
+            .await
+            .expect("detached child omitted command publication")
+            .expect("broadcast ring remained open");
+        assert!(matches!(
+            item.kind(),
+            BroadcastKind::CommandBroadcast { sender: Some(7) }
+        ));
+    }
+
+    #[tokio::test]
+    async fn revoked_connection_waits_for_transferred_dataset_commit_permit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("revoke-commit-race.zarr");
+        fs::create_dir_all(&data_dir).unwrap();
+        write_minimal_zarr(&data_dir);
+        let url = data_dir.to_str().unwrap().to_string();
+
+        let mut ctx = test_context(tmp.path()).await;
+        let barrier = DatasetOpenPostPersistBarrier::new();
+        ctx.post_persist_barrier = Some(barrier.clone());
+        let lease = ctx
+            .workspace
+            .live
+            .register_connection_for_test(7, &ctx.workspace.principal.email)
+            .await;
+        let operation_permit = lease.begin_operation().await.expect("admitted operation");
+        let mut broadcast_rx = ctx.tx.subscribe();
+        let open_ctx = ctx.clone();
+        let (progress, _progress_rx) = mpsc::unbounded_channel();
+        let opening = tokio::spawn(async move {
+            open_dataset_with_operation_permit(7, &url, &open_ctx, &progress, operation_permit)
+                .await
+        });
+
+        let entered =
+            tokio::time::timeout(std::time::Duration::from_secs(5), barrier.entered.acquire())
+                .await
+                .expect("dataset open did not reach the post-persist barrier")
+                .expect("post-persist barrier closed");
+        entered.forget();
+        opening.abort();
+        assert!(opening.await.unwrap_err().is_cancelled());
+
+        let live = Arc::clone(&ctx.workspace.live);
+        let email = ctx.workspace.principal.email.clone();
+        let mut revocation = tokio::spawn(async move {
+            live.revoke_principal_and_quiesce_for_test(&email).await;
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !lease.is_revoked() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("revocation did not mark the lease");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut revocation)
+                .await
+                .is_err(),
+            "revocation returned while the transferred commit permit was active"
+        );
+
+        barrier.release.add_permits(1);
+        tokio::time::timeout(std::time::Duration::from_secs(5), &mut revocation)
+            .await
+            .expect("revocation did not finish after publication")
+            .expect("revocation task panicked");
+
+        let sess = ctx.session.lock().await;
+        assert_eq!(sess.seq, 1);
+        assert_eq!(sess.document.manifests.len(), 1);
+        drop(sess);
+        assert!(matches!(
+            broadcast_rx.recv().await.expect("command published").kind(),
+            BroadcastKind::CommandBroadcast { sender: Some(7) }
+        ));
+        assert!(lease.begin_operation().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn same_locator_metadata_mutation_replaces_document_binding_and_cache_generation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("mutable.zarr");
+        fs::create_dir_all(&data_dir).unwrap();
+        write_minimal_zarr(&data_dir);
+        let url = data_dir.to_str().unwrap().to_string();
+        let ctx = test_context(tmp.path()).await;
+
+        let (first_progress, _first_rx) = mpsc::unbounded_channel();
+        let first = open_dataset(1, &url, &ctx, &first_progress)
+            .await
+            .expect("first open");
+        let DatasetOpenOutcome::Opened {
+            seq: first_seq,
+            opened: first_opened,
+            ..
+        } = first
+        else {
+            panic!("first open must complete");
+        };
+        let dataset_id = first_opened.manifest.dataset_id.clone();
+        let first_revision = ctx.session.lock().await.server_bindings[&dataset_id]
+            .source
+            .revision;
+
+        let level_path = data_dir.join("0/zarr.json");
+        let mut level: serde_json::Value =
+            serde_json::from_slice(&fs::read(&level_path).unwrap()).unwrap();
+        level["shape"] = serde_json::json!([1, 1, 1, 8, 4]);
+        fs::write(&level_path, serde_json::to_vec_pretty(&level).unwrap()).unwrap();
+
+        let (second_progress, _second_rx) = mpsc::unbounded_channel();
+        let second = open_dataset(2, &url, &ctx, &second_progress)
+            .await
+            .expect("mutated reopen");
+        let DatasetOpenOutcome::Opened {
+            seq: second_seq,
+            opened: second_opened,
+            ..
+        } = second
+        else {
+            panic!("mutated reopen must complete");
+        };
+
+        let sess = ctx.session.lock().await;
+        let binding = &sess.server_bindings[&dataset_id];
+        assert_eq!(first_seq, 1);
+        assert_eq!(second_seq, 2);
+        assert_eq!(sess.server_bindings.len(), 1);
+        assert_eq!(sess.document.manifests.len(), 1);
+        assert_ne!(binding.source.revision, first_revision);
+        assert_eq!(
+            second_opened.manifest.images()[0].multiscale.levels[0].shape,
+            [1, 1, 1, 8, 4]
+        );
+        assert_eq!(
+            sess.document.manifests[&dataset_id].images()[0]
+                .multiscale
+                .levels[0]
+                .shape,
+            [1, 1, 1, 8, 4]
+        );
+    }
+
+    #[tokio::test]
+    async fn replacement_quiesces_old_worker_before_reset_and_fences_stale_ready() {
+        use lucida_core::protocol::{
+            ViewerInteractionMode, ViewerInterestChunkKey, ViewerInterestHint, ViewerInterestLane,
+            ViewerInterestMode,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("replacement-race.zarr");
+        fs::create_dir_all(&data_dir).unwrap();
+        write_minimal_zarr(&data_dir);
+        let level_path = data_dir.join("0/zarr.json");
+        let mut level: serde_json::Value =
+            serde_json::from_slice(&fs::read(&level_path).unwrap()).unwrap();
+        level["shape"] = serde_json::json!([1, 1, 1, 4096, 4096]);
+        fs::write(&level_path, serde_json::to_vec_pretty(&level).unwrap()).unwrap();
+        let url = data_dir.to_str().unwrap().to_string();
+        let mut ctx = test_context(tmp.path()).await;
+        ctx.dataset_runtime.generated_enabled = true;
+        ctx.dataset_runtime.generated_background_chunk_limit = 0;
+        ctx.dataset_runtime.generated_target_long_axis = 2;
+        ctx.dataset_runtime.generated_chunk_long_axis = 2;
+
+        let (first_progress, _first_rx) = mpsc::unbounded_channel();
+        let first = open_dataset(1, &url, &ctx, &first_progress)
+            .await
+            .expect("first open");
+        let DatasetOpenOutcome::Opened { opened, .. } = first else {
+            panic!("first open must complete");
+        };
+        let dataset_id = opened.manifest.dataset_id.clone();
+        let (old_source, old_service, old_cache) = {
+            let sess = ctx.session.lock().await;
+            let binding = &sess.server_bindings[&dataset_id];
+            (
+                binding.source.clone(),
+                Arc::clone(&binding.generated_service),
+                Arc::clone(&binding.derived_chunks),
+            )
+        };
+        let plan = plan_generated_coarse_for_source(
+            &opened.manifest,
+            old_source.revision,
+            GeneratedCoarseConfig {
+                target_long_axis: ctx.dataset_runtime.generated_target_long_axis,
+                chunk_long_axis: ctx.dataset_runtime.generated_chunk_long_axis,
+                max_chunk_bytes: ctx.dataset_runtime.generated_max_chunk_bytes,
+            },
+        )
+        .pop()
+        .expect("generated plan");
+        let key = plan.chunk_keys_for_tc(0, 0).next().expect("generated key");
+
+        let (worker_entered, worker_release) = old_service.install_worker_barrier();
+        let (shutdown_entered, shutdown_release) = old_service.install_shutdown_barrier();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        old_service
+            .apply_viewer_interest(
+                99,
+                ViewerInterestHint {
+                    client_id: None,
+                    dataset_id: dataset_id.clone(),
+                    generation: 1,
+                    t: 0,
+                    z: 0,
+                    channels: vec![0],
+                    mode: ViewerInterestMode::Slice,
+                    viewport: None,
+                    desired_keys: vec![ViewerInterestChunkKey {
+                        image_id: plan.image_id.clone(),
+                        key: key.clone(),
+                        lane: ViewerInterestLane::Visible,
+                    }],
+                    predicted_keys: vec![],
+                    interaction: ViewerInteractionMode::Idle,
+                    timestamp_ms: now_ms,
+                    ttl_ms: 60_000,
+                },
+            )
+            .await;
+        let worker_permit =
+            tokio::time::timeout(std::time::Duration::from_secs(1), worker_entered.acquire())
+                .await
+                .expect("old worker entered deterministic barrier")
+                .expect("worker barrier remains open");
+        worker_permit.forget();
+
+        // Change source semantics without changing geometry, so an unfenced
+        // old Ready update would still fit the new availability grid.
+        let mut level: serde_json::Value =
+            serde_json::from_slice(&fs::read(&level_path).unwrap()).unwrap();
+        level["fill_value"] = serde_json::json!(1);
+        level["chunk_grid"]["configuration"]["chunk_shape"] = serde_json::json!([1, 1, 1, 8, 8]);
+        fs::write(&level_path, serde_json::to_vec_pretty(&level).unwrap()).unwrap();
+
+        let replacement_ctx = ctx.clone();
+        let replacement_url = url.clone();
+        let (replacement_progress, _replacement_rx) = mpsc::unbounded_channel();
+        let replacement = tokio::spawn(async move {
+            open_dataset(2, &replacement_url, &replacement_ctx, &replacement_progress).await
+        });
+        let shutdown_permit = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            shutdown_entered.acquire(),
+        )
+        .await
+        .expect("replacement reached old-service withdrawal")
+        .expect("shutdown barrier remains open");
+        shutdown_permit.forget();
+        {
+            let sess = ctx
+                .session
+                .try_lock()
+                .expect("old-service cleanup must run after the publication fence");
+            assert_ne!(
+                sess.server_bindings[&dataset_id].source.revision, old_source.revision,
+                "replacement must already be live before asynchronous cleanup"
+            );
+        }
+
+        shutdown_release.add_permits(1);
+        let replacement = replacement
+            .await
+            .expect("replacement task joined")
+            .expect("replacement open succeeded");
+        let DatasetOpenOutcome::Opened {
+            opened: replacement_opened,
+            ..
+        } = replacement
+        else {
+            panic!("replacement open must complete");
+        };
+        worker_release.add_permits(1);
+        assert!(old_service.is_shutdown().await);
+
+        {
+            let sess = ctx.session.lock().await;
+            let binding = &sess.server_bindings[&dataset_id];
+            assert_ne!(binding.source.revision, old_source.revision);
+            assert!(!Arc::ptr_eq(&binding.derived_chunks, &old_cache));
+            assert!(
+                sess.generated_availability
+                    .get(&dataset_id)
+                    .and_then(|index| index.chunk(&plan.image_id, plan.level_index, &key))
+                    .is_none(),
+                "the blocked old worker cannot publish Ready into reset state"
+            );
+        }
+        assert_eq!(
+            replacement_opened.manifest.images()[0].multiscale.levels[0].shape,
+            opened.manifest.images()[0].multiscale.levels[0].shape,
+            "the replacement stays geometrically compatible"
+        );
+
+        // Defense in depth: even a late publisher that somehow outlives the
+        // withdrawal barrier is rejected by cache-generation identity.
+        let mut stale_rx = ctx.tx.subscribe();
+        crate::generated_coarse::publish_generated_delta_for_test(
+            dataset_id.clone(),
+            GeneratedAvailabilityDelta {
+                levels: vec![],
+                chunks: vec![lucida_protocol::GeneratedChunkStatusUpdate {
+                    image_id: plan.image_id.clone(),
+                    level_index: plan.level_index,
+                    key: key.clone(),
+                    status: lucida_protocol::GeneratedChunkStatus::Ready,
+                    failure: None,
+                    message: Some("stale old generation".into()),
+                }],
+            },
+            Arc::clone(&old_cache),
+            Arc::clone(&ctx.session),
+            ctx.tx.clone(),
+        )
+        .await;
+        assert!(
+            ctx.session
+                .lock()
+                .await
+                .generated_availability
+                .get(&dataset_id)
+                .and_then(|index| index.chunk(&plan.image_id, plan.level_index, &key))
+                .is_none()
+        );
+        assert!(matches!(
+            stale_rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn replacement_persistence_failure_leaves_old_generated_service_live() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("persist-failure.zarr");
+        fs::create_dir_all(&data_dir).unwrap();
+        write_minimal_zarr(&data_dir);
+        let url = data_dir.to_str().unwrap().to_string();
+        let (mut ctx, pool) = test_context_with_pool(tmp.path()).await;
+
+        let (first_progress, _first_rx) = mpsc::unbounded_channel();
+        let first = open_dataset(1, &url, &ctx, &first_progress)
+            .await
+            .expect("first open");
+        let DatasetOpenOutcome::Opened { opened, .. } = first else {
+            panic!("first open must complete");
+        };
+        let dataset_id = opened.manifest.dataset_id.clone();
+        let (old_source, old_service) = {
+            let sess = ctx.session.lock().await;
+            let binding = &sess.server_bindings[&dataset_id];
+            (
+                binding.source.clone(),
+                Arc::clone(&binding.generated_service),
+            )
+        };
+
+        let level_path = data_dir.join("0/zarr.json");
+        let mut level: serde_json::Value =
+            serde_json::from_slice(&fs::read(&level_path).unwrap()).unwrap();
+        level["shape"] = serde_json::json!([1, 1, 1, 8, 4]);
+        fs::write(&level_path, serde_json::to_vec_pretty(&level).unwrap()).unwrap();
+        sqlx::query(
+            r#"
+            CREATE TRIGGER fail_replacement_persist
+            BEFORE UPDATE ON workspace_datasets
+            BEGIN
+                SELECT RAISE(ABORT, 'injected replacement persistence failure');
+            END
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (terminal, mut terminal_rx, terminal_sender) = terminal_lane("persist-failure").await;
+        ctx.terminal = Some(terminal.clone());
+        let (second_progress, _second_rx) = mpsc::unbounded_channel();
+        let error = open_dataset(2, &url, &ctx, &second_progress)
+            .await
+            .expect_err("replacement persistence must fail at the injected trigger");
+        assert_eq!(error.kind, DatasetOpenFailureKind::Persistence);
+        publish_failure_after_open_error(&terminal, "persist-failure", &url, error);
+        assert!(matches!(
+            receive_terminal(&mut terminal_rx).await,
+            ServerMessage::OpenDatasetFailed { request_id, .. }
+                if request_id == "persist-failure"
+        ));
+        assert!(
+            terminal_rx.try_recv().is_err(),
+            "the preflighted success must be dropped, not published"
+        );
+        let restored = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            terminal_sender.reserve_terminal_slot(),
+        )
+        .await
+        .expect("persistence failure leaked the shared slot")
+        .expect("terminal lane remains open");
+        drop(restored);
+        assert!(
+            !old_service.is_shutdown().await,
+            "fallible persistence must complete before the old service is withdrawn"
+        );
+        let sess = ctx.session.lock().await;
+        let binding = &sess.server_bindings[&dataset_id];
+        assert_eq!(binding.source, old_source);
+        assert!(Arc::ptr_eq(&binding.generated_service, &old_service));
+        assert_eq!(sess.seq, 1);
+    }
+
+    #[tokio::test]
+    async fn commit_task_join_failure_reuses_prepared_success_slot_for_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("commit-join-failure.zarr");
+        fs::create_dir_all(&data_dir).unwrap();
+        write_minimal_zarr(&data_dir);
+        let url = data_dir.to_str().unwrap().to_string();
+        let (mut ctx, pool) = test_context_with_pool(tmp.path()).await;
+        let (terminal, mut terminal_rx, terminal_sender) = terminal_lane("join-failure").await;
+        ctx.terminal = Some(terminal.clone());
+        ctx.panic_commit_task = true;
+        let (progress, _progress_rx) = mpsc::unbounded_channel();
+
+        let error = open_dataset(7, &url, &ctx, &progress)
+            .await
+            .expect_err("injected commit-task panic must surface as a Join failure");
+        assert_eq!(error.kind, DatasetOpenFailureKind::Persistence);
+        assert_eq!(error.message, "workspace commit task failed");
+        publish_failure_after_open_error(&terminal, "join-failure", &url, error);
+        assert!(matches!(
+            receive_terminal(&mut terminal_rx).await,
+            ServerMessage::OpenDatasetFailed { request_id, .. }
+                if request_id == "join-failure"
+        ));
+        assert!(
+            terminal_rx.try_recv().is_err(),
+            "unwinding the prepared success must not publish it"
+        );
+        let restored = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            terminal_sender.reserve_terminal_slot(),
+        )
+        .await
+        .expect("Join failure leaked the shared slot")
+        .expect("terminal lane remains open");
+        drop(restored);
+
+        let persisted: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workspace_datasets")
+            .fetch_one(&pool)
+            .await
+            .expect("durable membership query");
+        assert_eq!(persisted, 0);
+        let sess = ctx.session.lock().await;
+        assert_eq!(sess.seq, 0);
+        assert!(sess.document.manifests.is_empty());
+        assert!(sess.server_bindings.is_empty());
     }
 
     /// Concurrent opens of the same URL must converge on one binding and
     /// one document manifest, whichever open wins the import race — the
-    /// loser rejoins via the pre-check or the under-lock re-check.
+    /// loser rejoins via the post-import, under-lock generation re-check.
     #[tokio::test]
     async fn concurrent_opens_of_same_url_converge_to_one_binding() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1332,7 +2256,7 @@ mod tests {
         write_minimal_zarr(&data_dir);
         let url = data_dir.to_str().unwrap().to_string();
 
-        let ctx = test_context(tmp.path());
+        let ctx = test_context(tmp.path()).await;
         let (p1, _r1) = mpsc::unbounded_channel();
         let (p2, _r2) = mpsc::unbounded_channel();
         let (a, b) = tokio::join!(
@@ -1372,7 +2296,7 @@ mod tests {
         write_minimal_zarr(&data_dir);
         let url = data_dir.to_str().unwrap().to_string();
 
-        let ctx = test_context(tmp.path());
+        let ctx = test_context(tmp.path()).await;
         let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
         let outcome = open_dataset(9, &url, &ctx, &progress_tx)
             .await
@@ -1381,6 +2305,7 @@ mod tests {
             seq,
             opened,
             diagnostic,
+            ..
         } = outcome
         else {
             panic!("open must complete");
@@ -1389,15 +2314,27 @@ mod tests {
         assert_eq!(seq, 1);
         assert_eq!(diagnostic.stage, DatasetOpenStage::Complete);
         assert_eq!(diagnostic.workspace_dataset_id, opened.manifest.dataset_id);
+        let admitted_path = std::fs::canonicalize(&data_dir).unwrap();
+        let admitted_url = admitted_path.to_string_lossy().to_string();
         assert_eq!(
-            diagnostic.source_url,
-            normalize_dataset_url(&url),
-            "the diagnostic reports the canonical source URL"
+            diagnostic.source_url, admitted_url,
+            "the diagnostic reports the filesystem-resolved admitted source URL"
         );
-        // Non-workspace opens use the URL-derived source id as dataset id.
+        let source_dataset_id = lucida_content::url::SourceIdentity::parse(&admitted_url)
+            .unwrap()
+            .dataset_id();
+        assert!(
+            opened.manifest.dataset_id.0.starts_with("wds-"),
+            "workspace document ids stay opaque and workspace-local"
+        );
+        assert_ne!(
+            opened.manifest.dataset_id.0, source_dataset_id,
+            "workspace identity must not leak the dedup/cache source identity"
+        );
         assert_eq!(
-            opened.manifest.dataset_id.0,
-            dataset_id_for_url(&normalize_dataset_url(&url))
+            diagnostic.dataset_source_id.as_deref(),
+            Some(source_dataset_id.as_str()),
+            "diagnostics retain the independently-derived source identity"
         );
         assert_eq!(opened.opener_client_id, Some(9));
 
@@ -1410,12 +2347,15 @@ mod tests {
                 DatasetOpenStage::Authorization,
                 DatasetOpenStage::Authorization,
                 DatasetOpenStage::SourceLookup,
+                DatasetOpenStage::SourceLookup,
                 DatasetOpenStage::BackendOpen,
                 DatasetOpenStage::MetadataImport,
                 DatasetOpenStage::MetadataImport,
                 DatasetOpenStage::BindingBuild,
                 DatasetOpenStage::GeneratedCoarsePlanning,
                 DatasetOpenStage::GeneratedCoarsePlanning,
+                DatasetOpenStage::WorkspacePersist,
+                DatasetOpenStage::WorkspacePersist,
                 DatasetOpenStage::Broadcast,
             ],
         );

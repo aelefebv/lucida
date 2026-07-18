@@ -2,7 +2,7 @@
  * Shared types for the fetch/decode subsystem.
  *
  * Lives separately from `cpuCache.ts` so the per-cache stores
- * (`chunkStore.ts`, `proxyStore.ts`), the eviction policies
+ * (`chunkStore.ts`), the eviction policies
  * (`eviction.ts`), and the telemetry counters (`telemetry.ts`) can
  * import the cache-shape types without back-pointing to the
  * coordinator. The barrel (`index.ts`) re-exports the public-surface
@@ -13,18 +13,12 @@
  */
 
 import type { SceneEpochs } from "../epochs.ts";
-import type { ProxyHeaderJs } from "./contentSource.ts";
 import type { InteractionMode } from "./interactionMode.ts";
+import type { ChunkContract } from "../../chunkContract.ts";
 
 export interface CpuCacheConfig {
   mainBudgetBytes: number;
   overviewBudgetBytes: number;
-  /**
-   * Budget for the proxy tier in bytes. Proxies are a small middle layer
-   * (between detail and overview). Eviction tier order: detail > proxy
-   * > overview.
-   */
-  proxyBudgetBytes: number;
   maxConcurrentFetches: number;
   maxBytesInFlight: number;
   /**
@@ -67,7 +61,7 @@ export interface CpuCacheConfig {
  */
 export type ResidencyTier = "detail" | "coarse";
 
-export type Lane = "minimap" | "detail" | "coarse" | "prefetch" | "overview";
+export type Lane = "minimap" | "detail" | "coarse" | "prefetch";
 
 /**
  * Eviction tier label stamped on each main-store entry. Drives the
@@ -78,16 +72,14 @@ export type Lane = "minimap" | "detail" | "coarse" | "prefetch" | "overview";
 export type EvictionTier = "prefetch" | "demoted-detail" | "active-detail";
 
 /**
- * A delivery from the CPU cache that the orchestrator routes to the GPU
- * worker. The discriminated union covers both regular chunks
- * (`kind: "chunk"`) and proxy deliveries (`kind: "proxy"`); both
- * variants stamp the discriminator explicitly so consumers narrow
- * unambiguously.
+ * A chunk delivery from the CPU cache that the orchestrator routes to the GPU
+ * worker.
  */
-export type ReadyDelivery = ReadyChunkDelivery | ReadyProxyDelivery;
+export type ReadyDelivery = ReadyChunkDelivery;
 
 export interface ReadyChunkDelivery {
   kind: "chunk";
+  datasetId: string;
   entityId: string;
   imageId: string;
   level: number;
@@ -98,30 +90,10 @@ export interface ReadyChunkDelivery {
   x: number;
   chunkKey: string;
   data: ArrayBuffer;
-  dataType: string;
+  contract: ChunkContract;
   epochs: SceneEpochs;
   lane: Lane;
   residencyTier?: ResidencyTier;
-  /** Lower numbers are delivered first when present on CpuCache output. */
-  priority?: number;
-}
-
-/**
- * A delivered proxy asset. Carries the parsed header + raw u16 voxel
- * bytes. The orchestrator forwards this to the worker via
- * `client.proxyAssetData(...)`.
- */
-export interface ReadyProxyDelivery {
-  kind: "proxy";
-  datasetId: string;
-  entityId: string;
-  imageId: string;
-  proxyKind: "GroupProxy3D" | "TileProxy3D";
-  t: number;
-  c: number;
-  header: ProxyHeaderJs;
-  data: ArrayBuffer;
-  epochs: SceneEpochs;
   /** Lower numbers are delivered first when present on CpuCache output. */
   priority?: number;
 }
@@ -133,10 +105,12 @@ export interface ReadyProxyDelivery {
  */
 export interface CacheEntry {
   data: ArrayBuffer;
+  contract: ChunkContract;
   sizeBytes: number;
   lane: Lane;
   residencyTier?: ResidencyTier;
   tier: EvictionTier;
+  datasetId: string;
   entityId: string;
   imageId: string;
   level: number;
@@ -148,7 +122,14 @@ export interface CacheEntry {
   chunkKey: string;
   insertedAt: number;
   epochs: SceneEpochs;
-  dataType: string;
+  /**
+   * Whether the entry is owned by the persistent workspace wanted set.
+   *
+   * This is deliberately independent of `lastSeenTick`: delta publications
+   * do not revisit unchanged requests, so recency is no longer a sound proxy
+   * for liveness. Eviction always prefers an unwanted active-detail entry.
+   */
+  wanted: boolean;
   /**
    * Priority recorded the last time this chunk appeared in a plan
    * (lower = more urgent; mirrors `ChunkRequest.priority`). Used as the
@@ -159,9 +140,9 @@ export interface CacheEntry {
    */
   priority: number;
   /**
-   * Submit-tick counter from the last `submit()` that planned this
-   * chunk. Primary sort key for active-detail eviction: chunks not
-   * present in the current plan get evicted before chunks that are.
+   * Submit-tick counter from the last publication that touched this chunk.
+   * Used only as a recency tiebreaker among entries with equal wanted state;
+   * persistent liveness is represented by `wanted` above.
    */
   lastSeenTick: number;
 }
@@ -197,7 +178,6 @@ export interface TierCounters {
   demotedDetail: number;
   prefetch: number;
   overview: number;
-  proxy: number;
 }
 
 export interface CacheTelemetry {
@@ -205,18 +185,11 @@ export interface CacheTelemetry {
   mainBudget: number;
   overviewBytes: number;
   overviewBudget: number;
-  /** Proxy tier bytes / budget. */
-  proxyBytes: number;
-  proxyBudget: number;
   maxConcurrentFetches: number;
   maxBytesInFlight: number;
   inFlightCount: number;
   inFlightBytes: number;
-  /** In-flight proxy fetches (count, estimated bytes). */
-  inFlightProxyCount: number;
-  inFlightProxyBytes: number;
   pendingCount: number;
-  pendingProxyCount: number;
   /** Age (ms) of the longest-waiting entry in the chunk scheduler's
    *  pending queue; 0 if empty. */
   pendingOldestAgeMs: number;
@@ -242,7 +215,6 @@ export interface CacheTelemetry {
     demotedDetail: TierResidencyEntry;
     prefetch: TierResidencyEntry;
     overview: TierResidencyEntry;
-    proxy: TierResidencyEntry;
   };
   /** Current-plan wanted vs CPU-resident chunk coverage by coarse/detail tier. */
   tierDemand: TierDemandTelemetry;

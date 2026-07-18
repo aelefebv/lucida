@@ -38,7 +38,8 @@ pub use http::{
     UpsertWorkspaceViewerProfileRequest, WorkspaceResponse, WorkspacesState, router,
 };
 pub use manager::{
-    CommandApplyError, LiveWorkspace, WorkspaceError, WorkspaceManager, WorkspaceRuntimeConfig,
+    CommandApplyError, ConnectionAdmissionError, LiveWorkspace, WorkspaceAttachment,
+    WorkspaceConnectionLease, WorkspaceError, WorkspaceManager, WorkspaceRuntimeConfig,
 };
 pub use store::{SqliteWorkspaceStore, StoreError, WorkspaceStore};
 pub use types::{

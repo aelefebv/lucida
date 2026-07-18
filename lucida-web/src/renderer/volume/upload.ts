@@ -21,6 +21,7 @@ import { postChunksRejected, postChunksRequeued } from "../chunkUploadFeedback.t
 import { chunkAllowedByCurrentRenderRadius } from "../chunkRadius.ts";
 import { chunkDistSq, findFarthestSlot, rayHitForMember } from "./eviction.ts";
 import { acquireLabelSlot, getOrCreateLabelVolumePool } from "./atlas.ts";
+import { assertChunkBufferLength } from "../../chunkContract.ts";
 
 /**
  * Write WHOLE uint32 label chunks into the member's bricked r32uint label
@@ -55,6 +56,13 @@ export function handleLabelVolumeChunkData(
 
   let wrote = false;
   for (const chunk of msg.chunks) {
+    assertChunkBufferLength(chunk.data, chunk.contract, "worker");
+    if (chunk.contract.role !== "label" || chunk.contract.dtype !== "uint32") {
+      throw new Error(`label volume chunk ${chunk.key} has a non-label contract`);
+    }
+    if (chunk.contract.datasetId !== datasetId || chunk.contract.channel !== msg.c) {
+      throw new Error(`label volume chunk ${chunk.key} contract identity mismatch`);
+    }
     // Skip a cell outside this level's chunk grid (defensive — a mismatched
     // delivery can't index past the indirection buffer).
     if (
@@ -150,6 +158,13 @@ export function handleVolumeChunkData(
   const radiusFilteredKeySet = new Set<string>();
 
   for (const chunk of msg.chunks) {
+    assertChunkBufferLength(chunk.data, chunk.contract, "worker");
+    if (chunk.contract.role !== "intensity" || chunk.contract.dtype !== "uint16") {
+      throw new Error(`volume chunk ${chunk.key} has a non-intensity contract`);
+    }
+    if (chunk.contract.channel !== msg.c) {
+      throw new Error(`volume chunk ${chunk.key} channel contract mismatch`);
+    }
     if (
       !chunkAllowedByCurrentRenderRadius(
         ctx.state,
@@ -189,7 +204,7 @@ export function handleVolumeChunkData(
     const sy = Math.floor(slotIndex / atlas.slotsX) % atlas.slotsY;
     const sz = Math.floor(slotIndex / (atlas.slotsX * atlas.slotsY));
 
-    const data = asUint16(chunk.data, chunk.dataType);
+    const data = asUint16(chunk.data, chunk.contract.dtype);
     const xOff = sx * chunkX;
     const yOff = sy * chunkY;
     const zOff = sz * chunkZ;
@@ -262,6 +277,15 @@ export function handleVolumeChunkData(
   }
 
   if (intensityChanged) {
-    ctx.post({ type: "intensityRange", datasetId: memberId, min: atlas.intensityMin, max: atlas.intensityMax });
+    const contract = msg.chunks[0]?.contract;
+    if (contract) {
+      ctx.post({
+        type: "intensityRange",
+        datasetId: contract.datasetId,
+        channel: contract.channel,
+        min: atlas.intensityMin,
+        max: atlas.intensityMax,
+      });
+    }
   }
 }

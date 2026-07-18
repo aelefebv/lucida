@@ -50,17 +50,6 @@ struct EntityDescriptor {
   modelMatrix: mat4x4<f32>,
   invModelMatrix: mat4x4<f32>,
   channelMask: u32,
-  tileProxyPoolIndex: u32,
-  tileProxySlotIndex: u32,
-  groupProxyPoolIndex: u32,
-  groupProxySlotIndex: u32,
-  _pad_proxy0: u32,
-  _pad_proxy1: u32,
-  _pad_proxy2: u32,
-  tileProxyDims: vec3<u32>,
-  _pad_tile: u32,
-  groupProxyDims: vec3<u32>,
-  _pad_group: u32,
   contrastMin: f32,
   contrastMax: f32,
   gamma: f32,
@@ -69,6 +58,9 @@ struct EntityDescriptor {
   lodCount: u32,
   colormapMode: u32,
   labelOpacity: f32,
+  _pad0: u32,
+  _pad1: u32,
+  _pad2: u32,
   lods: array<LodInfo, 8>,
   detailSource: ChunkTierSource,
   coarseSource: ChunkTierSource,
@@ -81,12 +73,6 @@ struct EntityDescriptor {
 @group(0) @binding(4) var lutSampler: sampler;
 @group(0) @binding(5) var coarseTex: texture_3d<u32>;
 @group(0) @binding(6) var<storage, read> coarseIndirection: array<u32>;
-// Proxy textures. Same r16uint format as the chunk atlas. Slots occupy
-// a 3-D grid in the texture; the grid shape is derived from
-// textureDimensions(tex) / slot dims, matching `proxySlotOrigin()` in
-// proxyAtlas.ts.
-@group(0) @binding(7) var tileProxyTex: texture_3d<u32>;
-@group(0) @binding(8) var groupProxyTex: texture_3d<u32>;
 
 @group(1) @binding(0) var<storage, read> entityDescriptors: array<EntityDescriptor>;
 @group(1) @binding(1) var<uniform> currentEntity: EntityRef;
@@ -127,38 +113,6 @@ fn intersectAABB(ro: vec3f, rd: vec3f) -> vec2f {
   let tNear = max(max(tmin.x, tmin.y), tmin.z);
   let tFar = min(min(tmax.x, tmax.y), tmax.z);
   return vec2f(tNear, tFar);
-}
-
-// Sample one voxel from a proxy atlas slot.
-//   - `dims.x` = slot Z, `dims.y` = slot Y, `dims.z` = slot X (matches
-//     `proxyAtlas.ts` `slotDims: [Z, Y, X]`).
-//   - Slot origin is derived from slot index over a 3-D atlas grid.
-//   - `frac` is in [0,1]³ over the slot's voxel cube; Y is flipped to
-//     match the chunk path's image-convention sampling.
-// Returns 0xFFFFFFFFu if the slot index is the sentinel.
-fn sampleProxy(tex: texture_3d<u32>, slotIdx: u32, dims: vec3<u32>, frac: vec3f) -> u32 {
-  if (slotIdx == 0xFFFFFFFFu) {
-    return 0xFFFFFFFFu;
-  }
-  let slotZ = dims.x;
-  let slotY = dims.y;
-  let slotX = dims.z;
-  let atlasDims = textureDimensions(tex);
-  let slotsX = max(1u, atlasDims.x / slotX);
-  let slotsY = max(1u, atlasDims.y / slotY);
-  let tileX = slotIdx % slotsX;
-  let tileY = (slotIdx / slotsX) % slotsY;
-  let tileZ = slotIdx / (slotsX * slotsY);
-  let origin = vec3u(tileX * slotX, tileY * slotY, tileZ * slotZ);
-  let voxX = clamp(u32(frac.x * f32(slotX)), 0u, slotX - 1u);
-  let voxY = clamp(u32((1.0 - frac.y) * f32(slotY)), 0u, slotY - 1u);
-  let voxZ = clamp(u32(frac.z * f32(slotZ)), 0u, slotZ - 1u);
-  let coord = vec3i(
-    i32(origin.x + voxX),
-    i32(origin.y + voxY),
-    i32(origin.z + voxZ),
-  );
-  return textureLoad(tex, coord, 0).r;
 }
 
 fn sampleDetailVolume(source: ChunkTierSource, pos: vec3f) -> u32 {
@@ -261,89 +215,13 @@ fn sampleCoarseVolume(source: ChunkTierSource, pos: vec3f) -> u32 {
   return textureLoad(coarseTex, atlasCoord, 0).r;
 }
 
-// Source-backed fallback chain:
-//   selected detail → configured coarse → empty
-//
-// Legacy fallback chain when no tier sources are present:
-//   target detail LOD → coarser detail LODs → tile proxy → group proxy → empty
-//
-// Group-proxy sample uses the tile's local `pos` (no tile-to-group
-// transform yet). The group-proxy fallback in tile entries displays
-// proxy voxels at tile-local coordinates — spatially incorrect but
-// produces a non-blank result while detail chunks load. Group-as-proxy
-// entries don't need the transform — `lodCount == 0` makes the detail
-// loop a no-op, the tile proxy step is also a no-op (no tile handle),
-// and the group-proxy step samples the group's own proxy at group-local
-// coords.
+// Source-backed fallback chain: selected detail → configured coarse → empty.
 fn sampleWithFallback(pos: vec3f) -> u32 {
-  let hasTierSources = activeEntity.detailSource.valid != 0u || activeEntity.coarseSource.valid != 0u;
-  if (hasTierSources) {
-    let detail = sampleDetailVolume(activeEntity.detailSource, pos);
-    if (detail != 0xFFFFFFFFu) {
-      return detail;
-    }
-    return sampleCoarseVolume(activeEntity.coarseSource, pos);
+  let detail = sampleDetailVolume(activeEntity.detailSource, pos);
+  if (detail != 0xFFFFFFFFu) {
+    return detail;
   }
-
-  let numLods = activeEntity.lodCount;
-  let targetIdx = u.lodParams.x;
-
-  for (var i = targetIdx; i < numLods; i++) {
-    let lod = activeEntity.lods[i];
-    let levelDims = vec3f(f32(lod.levelDims.x), f32(lod.levelDims.y), f32(lod.levelDims.z));
-    let chunkDims = lod.chunkDims;
-    let gridDims = lod.gridDims;
-    let offset = lod.indirectionOffset;
-
-    // Scale [0,1] position to this LOD's voxel space (Y-flipped for image convention)
-    let texCoord = vec3i(
-      clamp(i32(pos.x * levelDims.x), 0, i32(levelDims.x) - 1),
-      clamp(i32((1.0 - pos.y) * levelDims.y), 0, i32(levelDims.y) - 1),
-      clamp(i32(pos.z * levelDims.z), 0, i32(levelDims.z) - 1),
-    );
-
-    let chunkCoord = vec3u(
-      u32(texCoord.x) / chunkDims.x,
-      u32(texCoord.y) / chunkDims.y,
-      u32(texCoord.z) / chunkDims.z,
-    );
-    let gridIdx = offset + chunkCoord.z * gridDims.y * gridDims.x
-                + chunkCoord.y * gridDims.x
-                + chunkCoord.x;
-    let slot = detailIndirection[gridIdx];
-
-    if (slot != 0xFFFFFFFFu) {
-      let slotCoord = vec3u(
-        slot % u.detailAtlasSlotDims.x,
-        (slot / u.detailAtlasSlotDims.x) % u.detailAtlasSlotDims.y,
-        slot / (u.detailAtlasSlotDims.x * u.detailAtlasSlotDims.y),
-      );
-      let localTexel = vec3u(
-        u32(texCoord.x) % chunkDims.x,
-        u32(texCoord.y) % chunkDims.y,
-        u32(texCoord.z) % chunkDims.z,
-      );
-      let atlasCoord = vec3i(
-        i32(slotCoord.x * chunkDims.x + localTexel.x),
-        i32(slotCoord.y * chunkDims.y + localTexel.y),
-        i32(slotCoord.z * chunkDims.z + localTexel.z),
-      );
-      return textureLoad(detailTex, atlasCoord, 0).r;
-    }
-  }
-
-  let tileSlot = activeEntity.tileProxySlotIndex;
-  if (tileSlot != 0xFFFFFFFFu) {
-    let v = sampleProxy(tileProxyTex, tileSlot, activeEntity.tileProxyDims, pos);
-    if (v != 0xFFFFFFFFu) { return v; }
-  }
-  let groupSlot = activeEntity.groupProxySlotIndex;
-  if (groupSlot != 0xFFFFFFFFu) {
-    let v = sampleProxy(groupProxyTex, groupSlot, activeEntity.groupProxyDims, pos);
-    if (v != 0xFFFFFFFFu) { return v; }
-  }
-
-  return 0xFFFFFFFFu;
+  return sampleCoarseVolume(activeEntity.coarseSource, pos);
 }
 
 // Integer avalanche (MurmurHash3 finalizer). Native u32 wrap matches the

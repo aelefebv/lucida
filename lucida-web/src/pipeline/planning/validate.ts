@@ -83,8 +83,7 @@ export function checkUniqueEntityIds(snapshot: PlanningSnapshot): void {
  * image-keyed downstream lookup (cache keys, residency tables).
  *
  * Empty-string `imageId` is the conventional placeholder for `Group`
- * entities (the group IS the proxy — there is no image to key against);
- * a multi-group collection snapshot legitimately carries multiple
+ * entities, which do not own an image; a multi-group collection snapshot legitimately carries multiple
  * `imageId: ""` entries. The check only flags duplicates among the
  * non-empty image ids that actually drive image-keyed downstream
  * lookups.
@@ -158,18 +157,10 @@ export function checkVisibleRegionBounds(snapshot: PlanningSnapshot): void {
   }
 }
 
-// Check 6 (assetCatalog → entityId referential integrity) withdrawn:
-// `assetCatalog.byEntity` is flattened across ALL datasets ever seen,
-// while `snapshot.entities` is for ONE dataset's current tick. They
-// legitimately diverge; dangling catalog entries are harmless because
-// lookups go snapshot-entity → catalog (per-id `get()`).
-//
-// Check 7 (minimapPending → imageId referential integrity) withdrawn for
-// the same producer-scope mismatch: minimapPath enumerates all
+// Check 6 (minimapPending → imageId referential integrity) is intentionally
+// absent because producer scopes differ: minimapPath enumerates all
 // `dataset_images()`, snapshot.entities is `view_query` output, and
 // `emitMinimapLane` only walks images in the active set.
-//
-// Numbers preserved so cross-references in ADR 0031 stay stable.
 
 /**
  * Check 8 — previousActiveSet has no duplicate entityIds.
@@ -197,7 +188,6 @@ export function checkPrevActiveSetUnique(state: PlanningState): void {
  * `snapshot.entities`, the entry's `kind` must agree with the entity's
  * `kind`:
  *
- *   - `kind: "group-as-proxy"` ⇒ entity must be `kind: "Group"`.
  *   - `kind: "tile"`         ⇒ entity must be `kind: "Tile"` OR
  *     `kind: "Image"`. The planner's `groupMembers` synthesizes an
  *     `__image__${entityId}` group for `Image` entities (singletons,
@@ -248,8 +238,6 @@ function allowedEntityKindsFor(
   entry: ActiveSetEntry,
 ): EntitySnapshot["kind"][] | null {
   switch (entry.kind) {
-    case "group-as-proxy":
-      return ["Group"];
     case "tile":
       return ["Tile", "Image"];
     case "invisible":
@@ -276,8 +264,7 @@ export function validatePlanningInputs(
   checkUniqueImageIds(snapshot);
   checkLevelShapeArity(snapshot);
   checkVisibleRegionBounds(snapshot);
-  // Check 6 withdrawn — see comment above the block.
-  // Check 7 withdrawn — see comment above the block.
+  // Minimap referential check intentionally absent — see comment above.
   checkPrevActiveSetUnique(state);
   checkPrevActiveSetKindAgreement(snapshot, state);
 }

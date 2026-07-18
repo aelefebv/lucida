@@ -5,21 +5,12 @@
  *   - `memberToDataset` / `memberToPool` — routing registries used by
  *     chunk + render handlers to look up which dataset / pool a
  *     memberId belongs to.
- *   - `groupToTiles` — group → child-tile set, used so a `GroupProxy3D`
- *     upload can fan out to its child tiles' descriptors.
- *   - `groupsByDataset` — dataset → groups currently referenced in
- *     groupToTiles; tracked so `removeLayerResources` can drop a
- *     dataset's entries without scanning every group.
  *   - `currentEntityMetasByDataset` — per-dataset entity-metas snapshot
  *     for the most recent cold state. The descriptor buffer build pulls
  *     from this so it doesn't pick up stale offsets from pools that
  *     belonged to earlier cold states with different target LODs.
  *   - `descriptorBuffersByDataset` — per-dataset descriptor buffer
  *     (rebuilt fresh each cold state).
- *
- * `proxyDescriptorsByEntity` + `proxyPoolsByDataset` are reconciled
- * against `desiredProxyKeys` when present, then read by the descriptor
- * build so evicted proxies do not leave stale handles behind.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
@@ -40,13 +31,12 @@ import {
   resizeSliceIndirection,
   remapSliceIndirection,
 } from "../slice/index.ts";
-import { reconcileProxyResidency } from "../proxy/residency.ts";
 import { groupEntriesByPool } from "./groupEntries.ts";
 import { computeEntityTierMeta } from "./entityMetas.ts";
 import { memberTierKey } from "../poolKeys.ts";
 
 /**
- * Apply a cold-state message: refresh group→tiles, register
+ * Apply a cold-state message: register
  * member→dataset mappings, build pool groups, allocate atlases, compute
  * + write entityMetas, resize + remap indirection, capture per-dataset
  * entity-metas snapshot, rebuild the descriptor buffer.
@@ -57,39 +47,6 @@ import { memberTierKey } from "../poolKeys.ts";
 export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
   const state = ctx.state;
 
-  // 1. Refresh group→tiles map so group-proxy uploads can fan out to
-  // child tiles' descriptors. Cold state is the source of truth for
-  // active set membership; we rebuild this dataset's contribution
-  // fully each tick. Other datasets' entries stay untouched so the
-  // worker can hold multiple datasets concurrently.
-  const prevGroups = state.groupsByDataset.get(msg.datasetId);
-  if (prevGroups) {
-    for (const groupId of prevGroups) state.groupToTiles.delete(groupId);
-  }
-  const groupsForDataset = new Set<string>();
-  for (const entry of msg.activeSet) {
-    if (entry.parentGroupId) {
-      let set = state.groupToTiles.get(entry.parentGroupId);
-      if (!set) {
-        set = new Set();
-        state.groupToTiles.set(entry.parentGroupId, set);
-      }
-      set.add(entry.entityId);
-      groupsForDataset.add(entry.parentGroupId);
-    }
-  }
-  if (groupsForDataset.size > 0) {
-    state.groupsByDataset.set(msg.datasetId, groupsForDataset);
-  } else {
-    state.groupsByDataset.delete(msg.datasetId);
-  }
-
-  if (msg.desiredProxyKeys !== undefined) {
-    const evicted = reconcileProxyResidency(state, msg.datasetId, msg.desiredProxyKeys);
-    state.proxyStats.evicted += evicted;
-    state.proxyStats.evictedPolicy += evicted;
-  }
-
   for (const [memberId, datasetId] of state.memberToDataset) {
     if (datasetId !== msg.datasetId) continue;
     state.memberToPool.delete(memberId);
@@ -99,16 +56,13 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
 
   // 2. Register member→dataset mappings for every (entry, channel)
   // combo. Canonical iteration walks activeSet × visibleChannels and
-  // produces the same memberId scheme used elsewhere in the pipeline
-  // (imageId for tiles, entityId for group-as-proxy).
+  // produces the same imageId-based member scheme used elsewhere.
   for (const { memberId } of iterateColdMembers(msg)) {
     state.memberToDataset.set(memberId, msg.datasetId);
   }
 
   // 3. Build pool groups (volume or slice) — partitions activeSet by
-  // (channel, chunkDims). Entries without a targetLevel (e.g.
-  // group-as-proxy with empty `levels[]`) are skipped here; they're
-  // still in memberToDataset from step 2.
+  // (channel, chunkDims).
   const mode: "volume" | "slice" = msg.viewMode;
   const dimArity: 2 | 3 = mode === "volume" ? 3 : 2;
   const groups = groupEntriesByPool(msg, mode);
@@ -158,7 +112,7 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
 
     if (mode === "volume") {
       const atlas = getOrCreateVolumePool(
-        ctx, group.poolKey, pcX, pcY, pcZ, msg.currentT, group.channel,
+        ctx, group.poolKey, pcX, pcY, pcZ, msg.currentT, group.channel, msg.datasetId,
       );
       atlas.entityMetas = newEntityMetas;
       resizeIndirection(ctx, atlas, offset);
@@ -169,7 +123,7 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
       });
     } else {
       const atlas = getOrCreateSlicePool(
-        ctx, group.poolKey, pcX, pcY, msg.currentZ, msg.currentT, group.channel,
+        ctx, group.poolKey, pcX, pcY, msg.currentZ, msg.currentT, group.channel, msg.datasetId,
       );
       atlas.entityMetas = newEntityMetas;
       resizeSliceIndirection(ctx, atlas, offset);
@@ -188,8 +142,7 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
   state.currentEntityMetasByDataset.set(msg.datasetId, currentEntityMetas);
 
   // 6. Rebuild per-dataset descriptor buffer. Replaces any previous
-  // buffer for the same dataset (proxy pool index churn is acceptable —
-  // descriptors are rebuilt fresh each cold state, same as entityMetas).
+  // buffer for the same dataset.
   const oldDesc = state.descriptorBuffersByDataset.get(msg.datasetId);
   if (oldDesc) destroyDescriptorBuffer(oldDesc);
   state.descriptorBuffersByDataset.set(
@@ -197,9 +150,8 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
     buildDescriptorBuffer(
       ctx.device,
       msg,
-      state.proxyDescriptorsByEntity,
-      state.proxyPoolsByDataset,
       currentEntityMetas,
+      ctx.gpuResources,
     ),
   );
 }

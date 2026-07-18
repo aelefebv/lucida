@@ -224,15 +224,29 @@ export interface ProxiedFetchDescriptorWire {
   wire_formats?: WireFormat[];
 }
 
-export type FetchSourceWire =
-  | { Proxied: ProxiedFetchDescriptorWire }
-  | { Direct: DirectFetchDescriptor }
-  | { Local: LocalFetchDescriptor };
+export type FetchSourceWire = { Proxied: ProxiedFetchDescriptorWire };
 
 /** The column-major 4x4 matrix `VoxelTransform::from_voxel_translation_2d`
  *  builds — the expansion of a wire `translation: [tx, ty]`. */
 function translationMatrix(tx: number, ty: number): number[] {
   return [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, tx, ty, 0, 1];
+}
+
+const U32_MAX = 0xffff_ffff;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function requireU32(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > U32_MAX) {
+    throw new Error(`${field} must be an unsigned 32-bit integer`);
+  }
+  return value;
+}
+
+function validateFormatMarker(value: unknown, field: string): void {
+  if (value !== undefined) requireU32(value, field);
 }
 
 /**
@@ -244,22 +258,43 @@ function translationMatrix(tx: number, ty: number): number[] {
  * own decoder.
  */
 export function resolveDatasetManifest(wire: DatasetManifestWire): DatasetManifest {
+  validateFormatMarker(wire.format_version, "manifest format_version");
+  if (wire.multiscales !== undefined && !Array.isArray(wire.multiscales)) {
+    throw new Error("manifest multiscales must be an array");
+  }
   const table = wire.multiscales ?? [];
   const images: ImageSpec[] = wire.images.map((image) => {
-    let multiscale = image.multiscale;
-    if (multiscale === undefined && image.multiscale_ref !== undefined) {
-      multiscale = table[image.multiscale_ref];
+    const hasInline = image.multiscale !== undefined;
+    const hasReference = image.multiscale_ref !== undefined;
+    if (hasInline === hasReference) {
+      throw new Error(
+        hasInline
+          ? `manifest image ${image.image_id} carries both a multiscale and a multiscale_ref`
+          : `manifest image ${image.image_id} carries neither a multiscale nor a multiscale_ref`,
+      );
+    }
+
+    let multiscale: MultiscaleInfo;
+    if (hasInline) {
+      if (!isRecord(image.multiscale)) {
+        throw new Error(`manifest image ${image.image_id} multiscale must be an object`);
+      }
+      multiscale = image.multiscale as unknown as MultiscaleInfo;
+    } else {
+      const reference = requireU32(
+        image.multiscale_ref,
+        `manifest image ${image.image_id} multiscale_ref`,
+      );
+      multiscale = table[reference];
       if (multiscale === undefined) {
         throw new Error(
           `manifest image ${image.image_id} references shared multiscale ` +
-            `${image.multiscale_ref}, but the manifest declares ${table.length}`,
+            `${reference}, but the manifest declares ${table.length}`,
         );
       }
-    }
-    if (multiscale === undefined) {
-      throw new Error(
-        `manifest image ${image.image_id} carries neither a multiscale nor a multiscale_ref`,
-      );
+      if (!isRecord(multiscale)) {
+        throw new Error(`manifest multiscales[${reference}] must be an object`);
+      }
     }
     return { image_id: image.image_id, owner: image.owner, multiscale };
   });
@@ -289,25 +324,45 @@ export function resolveDatasetManifest(wire: DatasetManifestWire): DatasetManife
   return resolved;
 }
 
-/** Resolve a wire fetch source; only the Proxied variant has a compact form. */
+/** Resolve the compact proxied fetch source into its in-memory form. */
 export function resolveFetchSource(wire: FetchSourceWire): FetchSource {
-  if (!("Proxied" in wire)) return wire;
+  validateFormatMarker(wire.Proxied.format_version, "fetch descriptor format_version");
+  if (wire.Proxied.wire_formats !== undefined && !Array.isArray(wire.Proxied.wire_formats)) {
+    throw new Error("proxied descriptor wire_formats must be an array");
+  }
   const table = wire.Proxied.wire_formats ?? [];
   const images: ProxiedImageSpec[] = wire.Proxied.images.map((image) => {
-    let wireFormat = image.wire_format;
-    if (wireFormat === undefined && image.wire_format_ref !== undefined) {
-      wireFormat = table[image.wire_format_ref];
+    const hasInline = image.wire_format !== undefined;
+    const hasReference = image.wire_format_ref !== undefined;
+    if (hasInline === hasReference) {
+      throw new Error(
+        hasInline
+          ? `proxied image ${image.image_id} carries both a wire format and a wire_format_ref`
+          : `proxied image ${image.image_id} carries neither a wire format nor a wire_format_ref`,
+      );
+    }
+
+    let wireFormat: WireFormat;
+    if (hasInline) {
+      if (!isRecord(image.wire_format)) {
+        throw new Error(`proxied image ${image.image_id} wire_format must be an object`);
+      }
+      wireFormat = image.wire_format as unknown as WireFormat;
+    } else {
+      const reference = requireU32(
+        image.wire_format_ref,
+        `proxied image ${image.image_id} wire_format_ref`,
+      );
+      wireFormat = table[reference];
       if (wireFormat === undefined) {
         throw new Error(
           `proxied image ${image.image_id} references shared wire format ` +
-            `${image.wire_format_ref}, but the descriptor declares ${table.length}`,
+            `${reference}, but the descriptor declares ${table.length}`,
         );
       }
-    }
-    if (wireFormat === undefined) {
-      throw new Error(
-        `proxied image ${image.image_id} carries neither a wire format nor a wire_format_ref`,
-      );
+      if (!isRecord(wireFormat)) {
+        throw new Error(`proxied descriptor wire_formats[${reference}] must be an object`);
+      }
     }
     return { image_id: image.image_id, wire_format: wireFormat };
   });
@@ -315,10 +370,7 @@ export function resolveFetchSource(wire: FetchSourceWire): FetchSource {
 }
 
 /** Externally tagged enum: { "Proxied": { images: [...] } } */
-export type FetchSource =
-  | { Proxied: ProxiedFetchDescriptor }
-  | { Direct: DirectFetchDescriptor }
-  | { Local: LocalFetchDescriptor };
+export type FetchSource = { Proxied: ProxiedFetchDescriptor };
 
 export interface ProxiedFetchDescriptor {
   images: ProxiedImageSpec[];
@@ -339,19 +391,4 @@ export function extractDataType(wf: WireFormat): string {
   if ("Lz4" in wf) return wf.Lz4.data_type;
   if ("Zstd" in wf) return wf.Zstd.data_type;
   return "uint16";
-}
-
-export interface DirectFetchDescriptor {
-  images: DirectImageSpec[];
-}
-
-export interface LocalFetchDescriptor {
-  images: DirectImageSpec[];
-}
-
-export interface DirectImageSpec {
-  image_id: string;
-  wire_format: WireFormat;
-  levels: { level_index: number; path: string }[];
-  store_prefix: string | null;
 }

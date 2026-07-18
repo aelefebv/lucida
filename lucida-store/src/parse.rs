@@ -3,16 +3,17 @@
 //! Low-level functions for reading and parsing Zarr v3 / OME-Zarr metadata
 //! from an object store. Consumed by [`crate::import`].
 
-use std::sync::Arc;
+use std::fmt;
+use std::marker::PhantomData;
 
-use object_store::ObjectStore;
-use object_store::path::Path;
-use serde::Deserialize;
+use serde::de::{Error as _, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 
 use lucida_content::normalize::{normalize_f64_to_5d, normalize_to_5d};
 use lucida_content::{ChannelInfo, LabelColor};
 
 use crate::backend::StoreError;
+use crate::metadata::{MetadataReader, ParsedJson, ParsedJsonValue};
 
 /// Upper bound on label groups parsed from one `labels` list. Guards against
 /// oversized/untrusted metadata; far above any realistic label count.
@@ -21,6 +22,11 @@ const MAX_LABEL_GROUPS: usize = 4096;
 /// Upper bound on color-table entries kept per label. A display palette, not a
 /// per-object table, so this is generous while still bounding memory.
 const MAX_LABEL_COLORS: usize = 1 << 16;
+const MAX_MULTISCALE_AXES: usize = 32;
+const MAX_MULTISCALE_LEVELS: usize = 1024;
+const MAX_LEVEL_PATH_BYTES: usize = 4096;
+const MAX_ARRAY_CODECS: usize = 32;
+const MAX_CHANNEL_INFOS: usize = 4096;
 
 /// Intermediate per-level metadata parsed from OME multiscales.
 #[derive(Debug, Clone)]
@@ -32,12 +38,21 @@ pub struct LevelEntry {
 /// Deserialized from a level's zarr.json.
 #[derive(Debug, Deserialize)]
 pub struct ArrayMeta {
+    #[serde(deserialize_with = "deserialize_array_dimensions")]
     pub shape: Vec<u64>, // N-dimensional (matches axes count)
     pub data_type: String,
     pub chunk_grid: ChunkGrid,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_array_codecs")]
     pub codecs: Vec<serde_json::Value>,
 }
+
+impl AsRef<ArrayMeta> for ArrayMeta {
+    fn as_ref(&self) -> &ArrayMeta {
+        self
+    }
+}
+
+pub(crate) type ParsedArrayMeta = ParsedJson<ArrayMeta>;
 
 #[derive(Debug, Deserialize)]
 pub struct ChunkGrid {
@@ -46,17 +61,83 @@ pub struct ChunkGrid {
 
 #[derive(Debug, Deserialize)]
 pub struct ChunkGridConfig {
+    #[serde(deserialize_with = "deserialize_array_dimensions")]
     pub chunk_shape: Vec<u64>, // N-dimensional (matches axes count)
+}
+
+struct BoundedVecVisitor<T, const MAX: usize> {
+    field: &'static str,
+    marker: PhantomData<T>,
+}
+
+impl<'de, T, const MAX: usize> Visitor<'de> for BoundedVecVisitor<T, MAX>
+where
+    T: Deserialize<'de>,
+{
+    type Value = Vec<T>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "an array with at most {MAX} entries")
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        if sequence.size_hint().is_some_and(|size| size > MAX) {
+            return Err(A::Error::custom(format!(
+                "{} has more than {MAX} entries",
+                self.field
+            )));
+        }
+        let mut values = Vec::with_capacity(sequence.size_hint().unwrap_or(0).min(MAX));
+        while let Some(value) = sequence.next_element()? {
+            if values.len() == MAX {
+                return Err(A::Error::custom(format!(
+                    "{} has more than {MAX} entries",
+                    self.field
+                )));
+            }
+            values.push(value);
+        }
+        Ok(values)
+    }
+}
+
+fn deserialize_bounded_vec<'de, D, T, const MAX: usize>(
+    deserializer: D,
+    field: &'static str,
+) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    deserializer.deserialize_seq(BoundedVecVisitor::<T, MAX> {
+        field,
+        marker: PhantomData,
+    })
+}
+
+fn deserialize_array_dimensions<'de, D>(deserializer: D) -> Result<Vec<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, u64, MAX_MULTISCALE_AXES>(deserializer, "array dimensions")
+}
+
+fn deserialize_array_codecs<'de, D>(deserializer: D) -> Result<Vec<serde_json::Value>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, serde_json::Value, MAX_ARRAY_CODECS>(deserializer, "array codecs")
 }
 
 /// Read and parse a zarr.json file from the object store.
 pub(crate) async fn read_zarr_json(
-    store: &Arc<dyn ObjectStore>,
+    metadata: &MetadataReader,
     path: &str,
-) -> Result<serde_json::Value, StoreError> {
-    let bytes = store.get(&Path::from(path)).await?.bytes().await?;
-    serde_json::from_slice(&bytes)
-        .map_err(|e| StoreError::Metadata(format!("invalid JSON in {path}: {e}")))
+) -> Result<ParsedJsonValue, StoreError> {
+    metadata.read_json_value(path).await
 }
 
 /// Parsed OME multiscales metadata.
@@ -76,56 +157,159 @@ pub(crate) fn parse_multiscales(
         .pointer("/attributes/ome/multiscales")
         .and_then(|v| v.as_array())
         .ok_or_else(|| {
-            StoreError::Metadata(format!(
+            StoreError::Schema(format!(
                 "{error_prefix}no ome.multiscales in root zarr.json"
             ))
         })?;
 
+    if multiscales.len() != 1 {
+        return Err(StoreError::Schema(format!(
+            "{error_prefix}expected exactly one multiscale series, found {}",
+            multiscales.len()
+        )));
+    }
     let ms = multiscales
         .first()
-        .ok_or_else(|| StoreError::Metadata(format!("{error_prefix}multiscales array is empty")))?;
+        .ok_or_else(|| StoreError::Schema(format!("{error_prefix}multiscales array is empty")))?;
 
-    let axes_json: Vec<serde_json::Value> = ms
+    let axes_json = ms
         .get("axes")
         .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    let axes_names: Vec<String> = axes_json
-        .iter()
-        .filter_map(|a| {
-            a.get("name")
-                .and_then(|n| n.as_str())
-                .map(|s| s.to_string())
-        })
-        .collect();
+        .ok_or_else(|| StoreError::Schema(format!("{error_prefix}axes must be an array")))?;
+    if axes_json.is_empty() || axes_json.len() > MAX_MULTISCALE_AXES {
+        return Err(StoreError::Schema(format!(
+            "{error_prefix}axes count {} is outside 1..={MAX_MULTISCALE_AXES}",
+            axes_json.len()
+        )));
+    }
+    let mut axes_names = Vec::with_capacity(axes_json.len());
+    let mut seen_axes = std::collections::HashSet::with_capacity(axes_json.len());
+    for (index, axis) in axes_json.iter().enumerate() {
+        let name = axis
+            .get("name")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| {
+                StoreError::Schema(format!("{error_prefix}axes[{index}].name must be a string"))
+            })?;
+        if name.trim().is_empty() || name.len() > 256 || name.contains(['/', '\\', '\0']) {
+            return Err(StoreError::Schema(format!(
+                "{error_prefix}axes[{index}].name is not a valid axis component"
+            )));
+        }
+        let folded = name.to_ascii_lowercase();
+        if !seen_axes.insert(folded) {
+            return Err(StoreError::Schema(format!(
+                "{error_prefix}axes[{index}].name duplicates an earlier axis"
+            )));
+        }
+        axes_names.push(name.to_string());
+    }
 
     let datasets_arr = ms
         .get("datasets")
         .and_then(|v| v.as_array())
-        .ok_or_else(|| StoreError::Metadata(format!("{error_prefix}no datasets in multiscales")))?;
+        .ok_or_else(|| StoreError::Schema(format!("{error_prefix}no datasets in multiscales")))?;
+    if datasets_arr.is_empty() || datasets_arr.len() > MAX_MULTISCALE_LEVELS {
+        return Err(StoreError::Schema(format!(
+            "{error_prefix}datasets count {} is outside 1..={MAX_MULTISCALE_LEVELS}",
+            datasets_arr.len()
+        )));
+    }
 
     let mut level_entries: Vec<LevelEntry> = Vec::new();
-    for ds in datasets_arr {
+    let mut seen_paths = std::collections::HashSet::with_capacity(datasets_arr.len());
+    for (dataset_index, ds) in datasets_arr.iter().enumerate() {
         let path = ds
             .get("path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                StoreError::Metadata(format!("{error_prefix}dataset entry missing path"))
+                StoreError::Schema(format!(
+                    "{error_prefix}datasets[{dataset_index}].path must be a string"
+                ))
             })?
             .to_string();
+        if path.is_empty()
+            || path.len() > MAX_LEVEL_PATH_BYTES
+            || path.starts_with('/')
+            || path.contains('\\')
+            || path
+                .split('/')
+                .any(|component| component.is_empty() || matches!(component, "." | ".."))
+        {
+            return Err(StoreError::Schema(format!(
+                "{error_prefix}datasets[{dataset_index}].path is not a safe relative path"
+            )));
+        }
+        if !seen_paths.insert(path.clone()) {
+            return Err(StoreError::Schema(format!(
+                "{error_prefix}datasets[{dataset_index}].path duplicates an earlier level"
+            )));
+        }
 
         let mut scale = [1.0_f64; 5]; // [T, C, Z, Y, X]
         if let Some(transforms) = ds
             .get("coordinateTransformations")
             .and_then(|v| v.as_array())
         {
-            for ct in transforms {
-                if ct.get("type").and_then(|v| v.as_str()) == Some("scale")
-                    && let Some(s) = ct.get("scale").and_then(|v| v.as_array())
-                {
-                    let raw: Vec<f64> = s.iter().filter_map(|v| v.as_f64()).collect();
+            let mut saw_scale = false;
+            for (transform_index, ct) in transforms.iter().enumerate() {
+                let transform_type = ct.get("type").and_then(|v| v.as_str()).ok_or_else(|| {
+                    StoreError::Schema(format!(
+                        "{error_prefix}datasets[{dataset_index}].coordinateTransformations[{transform_index}].type must be a string"
+                    ))
+                })?;
+                let field = match transform_type {
+                    "scale" => "scale",
+                    "translation" => "translation",
+                    other => {
+                        return Err(StoreError::Schema(format!(
+                            "{error_prefix}datasets[{dataset_index}].coordinateTransformations[{transform_index}] has unsupported type '{other}'"
+                        )));
+                    }
+                };
+                let values = ct.get(field).and_then(|v| v.as_array()).ok_or_else(|| {
+                    StoreError::Schema(format!(
+                        "{error_prefix}datasets[{dataset_index}].coordinateTransformations[{transform_index}].{field} must be an array"
+                    ))
+                })?;
+                if values.len() != axes_names.len() {
+                    return Err(StoreError::Schema(format!(
+                        "{error_prefix}datasets[{dataset_index}].coordinateTransformations[{transform_index}].{field} has rank {}; expected {}",
+                        values.len(),
+                        axes_names.len()
+                    )));
+                }
+                let mut raw = Vec::with_capacity(values.len());
+                for (value_index, value) in values.iter().enumerate() {
+                    let numeric = value.as_f64().ok_or_else(|| {
+                        StoreError::Schema(format!(
+                            "{error_prefix}datasets[{dataset_index}].coordinateTransformations[{transform_index}].{field}[{value_index}] must be a number"
+                        ))
+                    })?;
+                    if !numeric.is_finite() || (field == "scale" && numeric <= 0.0) {
+                        return Err(StoreError::Schema(format!(
+                            "{error_prefix}datasets[{dataset_index}].coordinateTransformations[{transform_index}].{field}[{value_index}] must be finite{}",
+                            if field == "scale" {
+                                " and positive"
+                            } else {
+                                ""
+                            }
+                        )));
+                    }
+                    raw.push(numeric);
+                }
+                if field == "scale" {
+                    if saw_scale {
+                        return Err(StoreError::Schema(format!(
+                            "{error_prefix}datasets[{dataset_index}] has multiple scale transformations"
+                        )));
+                    }
+                    saw_scale = true;
                     scale = normalize_f64_to_5d(&raw, &axes_names, 1.0);
+                } else if raw.iter().any(|value| *value != 0.0) {
+                    return Err(StoreError::Schema(format!(
+                        "{error_prefix}datasets[{dataset_index}] has a nonzero translation that this importer cannot preserve"
+                    )));
                 }
             }
         }
@@ -134,9 +318,7 @@ pub(crate) fn parse_multiscales(
     }
 
     if level_entries.is_empty() {
-        return Err(StoreError::Metadata(format!(
-            "{error_prefix}no levels found"
-        )));
+        return Err(StoreError::Schema(format!("{error_prefix}no levels found")));
     }
 
     Ok(ParsedMultiscales {
@@ -184,6 +366,7 @@ pub(crate) fn parse_omero_channels(root_json: &serde_json::Value) -> Vec<Channel
     // First pass: best-effort label per position (None == no usable label).
     let parsed: Vec<Option<ChannelInfo>> = channels
         .iter()
+        .take(MAX_CHANNEL_INFOS)
         .map(|entry| {
             let label = entry
                 .get("label")
@@ -234,7 +417,7 @@ pub(crate) enum OptionalZarrJson {
     /// The object does not exist (a clean NotFound).
     Absent,
     /// The object was read and parsed.
-    Parsed(serde_json::Value),
+    Parsed(ParsedJsonValue),
     /// The object could not be used: the read failed with an error other
     /// than NotFound, or the bytes were not valid JSON. Logged, never fatal.
     Unusable,
@@ -250,24 +433,15 @@ pub(crate) enum OptionalZarrJson {
 /// must never fail the whole import — the caller proceeds either way, but can
 /// tell a definitive miss from an anomaly.
 pub(crate) async fn read_optional_zarr_json(
-    store: &Arc<dyn ObjectStore>,
+    metadata: &MetadataReader,
     path: &str,
 ) -> OptionalZarrJson {
-    match store.get(&Path::from(path)).await {
-        Ok(response) => match response.bytes().await {
-            Ok(bytes) => match serde_json::from_slice(&bytes) {
-                Ok(value) => OptionalZarrJson::Parsed(value),
-                Err(e) => {
-                    eprintln!("[lucida-store] ignoring malformed optional metadata {path}: {e}");
-                    OptionalZarrJson::Unusable
-                }
-            },
-            Err(e) => {
-                eprintln!("[lucida-store] ignoring unreadable optional metadata {path}: {e}");
-                OptionalZarrJson::Unusable
-            }
-        },
-        Err(object_store::Error::NotFound { .. }) => OptionalZarrJson::Absent,
+    match metadata.read_json_value(path).await {
+        Ok(value) => OptionalZarrJson::Parsed(value),
+        Err(StoreError::ObjectStore {
+            source: object_store::Error::NotFound { .. },
+            ..
+        }) => OptionalZarrJson::Absent,
         Err(e) => {
             eprintln!("[lucida-store] ignoring optional metadata {path}: {e}");
             OptionalZarrJson::Unusable
@@ -358,7 +532,9 @@ pub(crate) fn parse_image_label(label_group_json: &serde_json::Value) -> ImageLa
             arr.iter()
                 .filter_map(parse_label_color)
                 .take(MAX_LABEL_COLORS)
-                .collect()
+                .collect::<Vec<_>>()
+                .into_boxed_slice()
+                .into_vec()
         })
         .unwrap_or_default();
 
@@ -391,25 +567,32 @@ fn parse_label_color(entry: &serde_json::Value) -> Option<LabelColor> {
 /// Read ArrayMeta for each level in the multiscale pyramid.
 /// `base_prefix` is prepended to level paths (empty for root, "A/1/0" for collection tiles).
 pub(crate) async fn read_level_metas(
-    store: &Arc<dyn ObjectStore>,
+    metadata: &MetadataReader,
     base_prefix: &str,
     level_entries: &[LevelEntry],
-) -> Result<Vec<ArrayMeta>, StoreError> {
-    let mut level_metas: Vec<ArrayMeta> = Vec::new();
+) -> Result<Vec<ParsedArrayMeta>, StoreError> {
+    let mut level_metas: Vec<ParsedArrayMeta> = Vec::new();
     for entry in level_entries {
         let level_path = if base_prefix.is_empty() {
-            Path::from(format!("{}/zarr.json", entry.path))
+            format!("{}/zarr.json", entry.path)
         } else {
-            Path::from(format!("{base_prefix}/{}/zarr.json", entry.path))
+            format!("{base_prefix}/{}/zarr.json", entry.path)
         };
-        let level_bytes = store.get(&level_path).await?.bytes().await?;
         let error_ctx = if base_prefix.is_empty() {
             entry.path.clone()
         } else {
             format!("{base_prefix}/{}", entry.path)
         };
-        let meta: ArrayMeta = serde_json::from_slice(&level_bytes)
-            .map_err(|e| StoreError::Metadata(format!("{error_ctx}: {e}")))?;
+        let meta: ParsedArrayMeta =
+            metadata
+                .read_json(&level_path)
+                .await
+                .map_err(|error| match error {
+                    StoreError::Schema(message) => {
+                        StoreError::Schema(format!("{error_ctx}: {message}"))
+                    }
+                    other => other,
+                })?;
         level_metas.push(meta);
     }
     Ok(level_metas)
@@ -417,11 +600,11 @@ pub(crate) async fn read_level_metas(
 
 /// Extract and normalize the full-resolution (level 0) shape and chunk shape to 5D.
 /// Returns `(shape_5d, chunk_5d)`.
-pub(crate) fn extract_full_res(
-    level_metas: &[ArrayMeta],
-    axes_names: &[String],
-) -> ([u64; 5], [u64; 5]) {
-    let full_res = &level_metas[0];
+pub(crate) fn extract_full_res<M>(level_metas: &[M], axes_names: &[String]) -> ([u64; 5], [u64; 5])
+where
+    M: AsRef<ArrayMeta>,
+{
+    let full_res = level_metas[0].as_ref();
     let full_shape_5d = normalize_to_5d(&full_res.shape, axes_names, 1);
     let full_chunk_5d = normalize_to_5d(
         &full_res.chunk_grid.configuration.chunk_shape,
@@ -434,6 +617,90 @@ pub(crate) fn extract_full_res(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use object_store::ObjectStoreExt;
+    use object_store::memory::InMemory;
+    use object_store::path::Path;
+
+    use crate::cache::SharedObjectCache;
+
+    #[test]
+    fn array_metadata_rejects_dimension_and_codec_fanout_during_deserialization() {
+        let too_many_dimensions = serde_json::json!({
+            "shape": vec![1u64; MAX_MULTISCALE_AXES + 1],
+            "data_type": "uint8",
+            "chunk_grid": {"configuration": {"chunk_shape": [1]}},
+            "codecs": []
+        });
+        let error = serde_json::from_value::<ArrayMeta>(too_many_dimensions).unwrap_err();
+        assert!(error.to_string().contains("array dimensions"));
+
+        let too_many_codecs = serde_json::json!({
+            "shape": [1],
+            "data_type": "uint8",
+            "chunk_grid": {"configuration": {"chunk_shape": [1]}},
+            "codecs": vec![serde_json::json!({}); MAX_ARRAY_CODECS + 1]
+        });
+        let error = serde_json::from_value::<ArrayMeta>(too_many_codecs).unwrap_err();
+        assert!(error.to_string().contains("array codecs"));
+    }
+
+    #[tokio::test]
+    async fn every_retained_level_codec_tree_keeps_its_structural_claim() {
+        const LEVELS: usize = 32;
+        let store = Arc::new(InMemory::new());
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "shape": [1, 1],
+            "data_type": "uint8",
+            "chunk_grid": {"configuration": {"chunk_shape": [1, 1]}},
+            "codecs": [
+                {"name": "bytes", "configuration": {"endian": "little"}},
+                {"name": "nested", "configuration": {"tables": [[0], [0], [0]]}}
+            ]
+        }))
+        .unwrap();
+        let mut entries = Vec::new();
+        for level in 0..LEVELS {
+            let path = level.to_string();
+            store
+                .put(
+                    &Path::from(format!("{path}/zarr.json")),
+                    payload.clone().into(),
+                )
+                .await
+                .unwrap();
+            entries.push(LevelEntry {
+                path,
+                scale: [1.0; 5],
+            });
+        }
+        let shared = SharedObjectCache::new(64 * 1024 * 1024, 1024 * 1024);
+        let reader = MetadataReader::with_shared_cache(store, Arc::clone(&shared));
+
+        let metas = read_level_metas(&reader, "", &entries).await.unwrap();
+        assert_eq!(metas.len(), LEVELS);
+        assert_eq!(metas[0].codecs.len(), 2);
+        let held = shared.memory_snapshot().metadata_parsed_bytes;
+        assert!(held > 0);
+
+        drop(metas);
+        assert_eq!(shared.memory_snapshot().metadata_parsed_bytes, 0);
+        drop(reader);
+        assert_eq!(shared.memory_snapshot().total_bytes, 0);
+    }
+
+    #[test]
+    fn optional_channel_metadata_is_capped_before_result_allocation_fanout() {
+        let channels = (0..(MAX_CHANNEL_INFOS + 100))
+            .map(|index| serde_json::json!({"label": format!("Channel {index}")}))
+            .collect::<Vec<_>>();
+        let root = root_with_omero(serde_json::json!({"channels": channels}));
+
+        let parsed = parse_omero_channels(&root);
+        assert_eq!(parsed.len(), MAX_CHANNEL_INFOS);
+        assert_eq!(parsed.last().unwrap().label, "Channel 4095");
+    }
 
     #[test]
     fn parse_multiscales_extracts_axes_and_levels() {
@@ -871,6 +1138,8 @@ mod tests {
             .map(|i| serde_json::json!({"label-value": i, "rgba": [1, 2, 3, 4]}))
             .collect();
         let json = image_label_group(serde_json::json!({"colors": many}));
-        assert_eq!(parse_image_label(&json).colors.len(), MAX_LABEL_COLORS);
+        let colors = parse_image_label(&json).colors;
+        assert_eq!(colors.len(), MAX_LABEL_COLORS);
+        assert_eq!(colors.capacity(), colors.len());
     }
 }

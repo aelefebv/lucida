@@ -1,4 +1,12 @@
 [workspace]
-members = ["lucida-core", "lucida-server", "lucida-store", "lucida-cli", "lucida-content", "lucida-protocol", "lucida-proxy"]
+members = ["lucida-core", "lucida-server", "lucida-store", "lucida-cli", "lucida-content", "lucida-protocol"]
 exclude = ["lucida-py"]
 resolver = "3"
+
+# Member manifests cannot define workspace profiles. Keep the two intentional
+# overrides here so Cargo applies them in local, CI, WASM, and container builds.
+[profile.release.package.lucida-core]
+opt-level = "s"
+
+[profile.dev.package.lucida-store]
+opt-level = 2

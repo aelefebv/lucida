@@ -6,7 +6,6 @@ import { describe, it, expect } from "vitest";
 import {
   decompressLz4,
   decompressZstd,
-  normalize,
 } from "./decode.worker.ts";
 
 // ---------------------------------------------------------------------------
@@ -66,57 +65,5 @@ describe("decompressZstd", () => {
     expect(Array.from(out)).toEqual([
       1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
     ]);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// normalize — uint8 / bool / uint16 dispatch
-// ---------------------------------------------------------------------------
-
-describe("normalize", () => {
-  it("uint8: returns input unchanged (conversion happens at GPU upload)", () => {
-    const src = new Uint8Array([10, 20, 30, 40]).buffer;
-    const out = normalize(src, "uint8");
-    expect(out).toBe(src);
-  });
-
-  it("bool: expands each byte to a u16 (0 → 0, non-zero → 255)", () => {
-    const src = new Uint8Array([0, 1, 0, 200, 255, 0]).buffer;
-    const out = new Uint16Array(normalize(src, "bool"));
-    expect(Array.from(out)).toEqual([0, 255, 0, 255, 255, 0]);
-  });
-
-  it("uint16: returns input unchanged", () => {
-    const src = new Uint16Array([1000, 2000, 3000]).buffer;
-    const out = normalize(src, "uint16");
-    expect(out).toBe(src);
-  });
-
-  it("uint32: passes label bytes through without narrowing to u16", () => {
-    // 92801 and 92801+65536 must survive as distinct 32-bit ids.
-    const src = new Uint32Array([0, 92801, 92801 + 65536, 4_294_967_295]).buffer;
-    const out = normalize(src, "uint32");
-    expect(out).toBe(src);
-    expect(Array.from(new Uint32Array(out))).toEqual([
-      0, 92801, 92801 + 65536, 4_294_967_295,
-    ]);
-  });
-
-  it("Uint32 (PascalCase, as serialized by the Rust DataType enum): passthrough", () => {
-    const src = new Uint32Array([70000, 200000]).buffer;
-    const out = normalize(src, "Uint32");
-    expect(out).toBe(src);
-  });
-
-  it("float32: normalizes unit-range samples to u16", () => {
-    const src = new Float32Array([-1, 0, 0.5, 1, 2, Number.NaN]).buffer;
-    const out = new Uint16Array(normalize(src, "float32"));
-    expect(Array.from(out)).toEqual([0, 0, 32768, 65535, 65535, 0]);
-  });
-
-  it("default (unrecognized dataType): returns input unchanged", () => {
-    const src = new Uint8Array([1, 2, 3]).buffer;
-    const out = normalize(src, "float64");
-    expect(out).toBe(src);
   });
 });

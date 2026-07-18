@@ -1,59 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { Bridge, type BridgeHandlers } from "./bridge.ts";
-
-/**
- * Stand-in transport: records constructed sockets so the tests can count
- * (re)connect attempts, and exposes the event handlers for manual firing.
- */
-class FakeWebSocket {
-  static instances: FakeWebSocket[] = [];
-  static OPEN = 1;
-  static CONNECTING = 0;
-  static CLOSED = 3;
-
-  url: string;
-  binaryType = "blob";
-  readyState = FakeWebSocket.CONNECTING;
-  onopen: (() => void) | null = null;
-  onmessage: ((e: { data: unknown }) => void) | null = null;
-  onclose: (() => void) | null = null;
-  onerror: (() => void) | null = null;
-  sent: string[] = [];
-  closed = false;
-
-  constructor(url: string) {
-    this.url = url;
-    FakeWebSocket.instances.push(this);
-  }
-
-  send(data: string): void {
-    this.sent.push(data);
-  }
-
-  close(): void {
-    this.closed = true;
-    this.readyState = FakeWebSocket.CLOSED;
-  }
-
-  open(): void {
-    this.readyState = FakeWebSocket.OPEN;
-    this.onopen?.();
-  }
-}
-
-function makeHandlers(overrides: Partial<BridgeHandlers> = {}): BridgeHandlers {
-  return {
-    onSnapshot: vi.fn(),
-    onCommand: vi.fn(),
-    onAck: vi.fn(),
-    ...overrides,
-  };
-}
+import { Bridge } from "./bridge.ts";
+import {
+  FakeWebSocket,
+  installFakeWebSocket,
+  makeBridgeHandlers,
+} from "./test/fakeWebSocket.ts";
 
 describe("Bridge.destroy", () => {
   beforeEach(() => {
-    FakeWebSocket.instances = [];
-    vi.stubGlobal("WebSocket", FakeWebSocket);
+    installFakeWebSocket();
     vi.useFakeTimers();
   });
 
@@ -63,7 +18,7 @@ describe("Bridge.destroy", () => {
   });
 
   it("reconnects after a transport drop while alive (baseline)", () => {
-    new Bridge(makeHandlers(), "ws://test/ws/workspaces/w1");
+    new Bridge(makeBridgeHandlers(), "ws://test/ws/workspaces/w1");
     expect(FakeWebSocket.instances).toHaveLength(1);
 
     FakeWebSocket.instances[0].onclose?.();
@@ -73,7 +28,7 @@ describe("Bridge.destroy", () => {
   });
 
   it("closes the socket and never reconnects after destroy", () => {
-    const bridge = new Bridge(makeHandlers(), "ws://test/ws/workspaces/w1");
+    const bridge = new Bridge(makeBridgeHandlers(), "ws://test/ws/workspaces/w1");
     const ws = FakeWebSocket.instances[0];
 
     bridge.destroy();
@@ -87,7 +42,7 @@ describe("Bridge.destroy", () => {
   });
 
   it("cancels an already-scheduled reconnect", () => {
-    const bridge = new Bridge(makeHandlers(), "ws://test/ws/workspaces/w1");
+    const bridge = new Bridge(makeBridgeHandlers(), "ws://test/ws/workspaces/w1");
 
     FakeWebSocket.instances[0].onclose?.(); // arms the ~2s reconnect timer
     bridge.destroy();
@@ -97,14 +52,14 @@ describe("Bridge.destroy", () => {
   });
 
   it("is idempotent — double destroy is safe", () => {
-    const bridge = new Bridge(makeHandlers(), "ws://test/ws/workspaces/w1");
+    const bridge = new Bridge(makeBridgeHandlers(), "ws://test/ws/workspaces/w1");
     bridge.destroy();
     expect(() => bridge.destroy()).not.toThrow();
     expect(FakeWebSocket.instances).toHaveLength(1);
   });
 
   it("rejects pending dataset-health requests so callers settle", async () => {
-    const bridge = new Bridge(makeHandlers(), "ws://test/ws/workspaces/w1");
+    const bridge = new Bridge(makeBridgeHandlers(), "ws://test/ws/workspaces/w1");
     FakeWebSocket.instances[0].open();
 
     const pending = bridge.requestDatasetHealth();
@@ -114,7 +69,7 @@ describe("Bridge.destroy", () => {
   });
 
   it("detaches the socket's event handlers on destroy", () => {
-    const bridge = new Bridge(makeHandlers(), "ws://test/ws/workspaces/w1");
+    const bridge = new Bridge(makeBridgeHandlers(), "ws://test/ws/workspaces/w1");
     const ws = FakeWebSocket.instances[0];
     ws.open();
 
@@ -127,7 +82,7 @@ describe("Bridge.destroy", () => {
   });
 
   it("drops event tasks already in flight when destroy runs — no handler fires", () => {
-    const handlers = makeHandlers({
+    const handlers = makeBridgeHandlers({
       onConnected: vi.fn(),
       onDisconnect: vi.fn(),
       onWorkspaceArchived: vi.fn(),
@@ -164,7 +119,7 @@ describe("Bridge.destroy", () => {
   });
 
   it("a CONNECTING socket completing after destroy does not report connected", () => {
-    const handlers = makeHandlers({ onConnected: vi.fn() });
+    const handlers = makeBridgeHandlers({ onConnected: vi.fn() });
     const bridge = new Bridge(handlers, "ws://test/ws/workspaces/w1");
     const ws = FakeWebSocket.instances[0];
     const onopen = ws.onopen!;
@@ -176,7 +131,7 @@ describe("Bridge.destroy", () => {
   });
 
   it("never transmits after destroy", () => {
-    const bridge = new Bridge(makeHandlers(), "ws://test/ws/workspaces/w1");
+    const bridge = new Bridge(makeBridgeHandlers(), "ws://test/ws/workspaces/w1");
     const ws = FakeWebSocket.instances[0];
     ws.open();
     bridge.sendFollow(3);
@@ -187,7 +142,20 @@ describe("Bridge.destroy", () => {
     bridge.send(JSON.stringify({ type: "cursor", position: null }));
     bridge.sendCommand(JSON.stringify({ kind: "noop" }));
     bridge.sendFollow(null);
+    expect(bridge.sendOpenRemoteDataset("/not-sent.zarr")).toBeNull();
 
+    expect(ws.sent).toHaveLength(1);
+  });
+
+  it("rejects a dataset open until the socket is OPEN", () => {
+    const bridge = new Bridge(makeBridgeHandlers(), "ws://test/ws/workspaces/w1");
+    const ws = FakeWebSocket.instances[0];
+
+    expect(bridge.sendOpenRemoteDataset("/too-early.zarr")).toBeNull();
+    expect(ws.sent).toHaveLength(0);
+
+    ws.open();
+    expect(bridge.sendOpenRemoteDataset("/ready.zarr")).toMatch(/^web-/);
     expect(ws.sent).toHaveLength(1);
   });
 });

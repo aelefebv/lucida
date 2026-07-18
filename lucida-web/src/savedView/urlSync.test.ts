@@ -2,13 +2,13 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   UrlSync,
   parseViewHash,
-  parseBookmarkHash,
+  parseSavedViewIdHash,
   parseAnnotationHash,
   buildAnnotationLink,
   parseViewerProfileSearch,
   type ResolvedSavedView,
 } from "./urlSync.ts";
-import { encode } from "./encoder.ts";
+import { decode, encode } from "./encoder.ts";
 import { SavedViewApplier } from "./applier.ts";
 import { SAVED_VIEW_VERSION, type SavedView } from "./types.ts";
 
@@ -26,15 +26,41 @@ function emptyView(): SavedView {
 }
 
 class FakeApplier {
-  inProgress = false;
+  private activeEpoch: number | null = null;
+  private nextEpoch = 1;
+  private waiters = new Map<number, Array<() => void>>();
+  private settled = new Set<number>();
   applied: SavedView[] = [];
   apply = vi.fn(async (v: SavedView) => {
-    this.inProgress = true;
+    const epoch = this.beginApply();
     this.applied.push(v);
     await Promise.resolve();
-    this.inProgress = false;
+    this.finishApply(epoch);
+    return { epoch, status: "applied" as const, view: v };
   });
-  isInProgress() { return this.inProgress; }
+  getActiveEpoch() { return this.activeEpoch; }
+  beginApply() {
+    const epoch = this.nextEpoch++;
+    this.activeEpoch = epoch;
+    return epoch;
+  }
+  finishApply(epoch = this.activeEpoch) {
+    if (epoch === null) return;
+    if (this.activeEpoch === epoch) this.activeEpoch = null;
+    this.settled.add(epoch);
+    for (const resolve of this.waiters.get(epoch) ?? []) resolve();
+    this.waiters.delete(epoch);
+  }
+  async waitForSettlement(epoch: number) {
+    if (!this.settled.has(epoch)) {
+      await new Promise<void>((resolve) => {
+        const waiters = this.waiters.get(epoch) ?? [];
+        waiters.push(resolve);
+        this.waiters.set(epoch, waiters);
+      });
+    }
+    return { epoch, status: "applied" as const };
+  }
 }
 
 function makeFakeWindow(initialHash = "", pathname = "/", search = ""): Window {
@@ -159,7 +185,7 @@ describe("UrlSync", () => {
       debounceMs: 20,
       window: win,
     });
-    applier.inProgress = true;
+    applier.beginApply();
     sync.notifyChange();
     await new Promise((r) => setTimeout(r, 60));
     expect(win.location.hash).toBe("");
@@ -227,7 +253,7 @@ describe("UrlSync", () => {
     sync.destroy();
   });
 
-  it("popstate is suppressed during apply", async () => {
+  it("popstate waits for the active apply generation, then re-applies", async () => {
     const v = emptyView();
     const payload = await encode(v);
     win = makeFakeWindow(`#view=${payload}`);
@@ -235,10 +261,12 @@ describe("UrlSync", () => {
       window: win,
     });
     sync.start();
-    applier.inProgress = true;
+    const activeEpoch = applier.beginApply();
     (win as unknown as { _popstate: (s: unknown) => void })._popstate(null);
     await Promise.resolve();
     expect(applier.apply).not.toHaveBeenCalled();
+    applier.finishApply(activeEpoch);
+    await vi.waitFor(() => expect(applier.apply).toHaveBeenCalledOnce());
     sync.destroy();
   });
 
@@ -248,6 +276,117 @@ describe("UrlSync", () => {
     });
     await sync.flush();
     expect(win.location.hash.startsWith("#view=")).toBe(true);
+    sync.destroy();
+  });
+
+  it("commits and returns one canonical capture for explicit sharing", async () => {
+    const capture = vi.fn(() => view);
+    const sync = new UrlSync(capture, applier as unknown as SavedViewApplier, {
+      window: win,
+    });
+    const replace = vi.spyOn(win.history, "replaceState");
+
+    const committed = await sync.commitShareLink();
+
+    expect(capture).toHaveBeenCalledOnce();
+    expect(committed.view).toBe(view);
+    expect(replace).toHaveBeenCalledOnce();
+    expect(committed.url).toBe(win.location.href);
+    expect(committed.url).toContain("#view=");
+    sync.destroy();
+  });
+
+  it("queues an immediate focused-view share behind an older delayed URL write", async () => {
+    let releaseOld!: () => void;
+    const oldGate = new Promise<void>((resolve) => {
+      releaseOld = resolve;
+    });
+    const encodeView = vi.fn(async (captured: SavedView) => {
+      if (captured.view.t === 1) await oldGate;
+      return encode(captured);
+    });
+    view = emptyView();
+    view.view.t = 1;
+    const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
+      debounceMs: 1,
+      window: win,
+      encodeView,
+    });
+
+    // A normal viewport notification has already captured and begun encoding
+    // the old view when an annotation-like focus mutation happens.
+    sync.notifyChange();
+    await vi.waitFor(() => expect(encodeView).toHaveBeenCalledTimes(1));
+    const focused = emptyView();
+    focused.view.t = 2;
+    focused.view.z_range = { start: 7, end: 8 };
+    focused.camera = {
+      mode: "slice",
+      center: [42, 84],
+      zoom: 3,
+      viewport: [800, 600],
+    };
+    view = focused;
+    const share = sync.commitShareLink();
+
+    // The explicit share waits behind the old encode instead of racing it.
+    await Promise.resolve();
+    expect(encodeView).toHaveBeenCalledTimes(1);
+    releaseOld();
+    const committed = await share;
+
+    expect(encodeView).toHaveBeenCalledTimes(2);
+    expect(committed.view).toBe(focused);
+    const payload = parseViewHash(new URL(committed.url).hash)!;
+    const decoded = await decode(payload);
+    expect(decoded.view.t).toBe(2);
+    expect(decoded.view.z_range).toEqual({ start: 7, end: 8 });
+    expect(decoded.camera).toMatchObject({ center: [42, 84], zoom: 3 });
+    // The final browser URL is the exact focused capture, not the delayed old
+    // capture that happened to begin encoding first.
+    expect(win.location.href).toBe(committed.url);
+    sync.destroy();
+  });
+
+  it("waits for an active apply before sharing and rejects when no view exists", async () => {
+    const busy = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
+      window: win,
+    });
+    const activeEpoch = applier.beginApply();
+    const pendingShare = busy.commitShareLink();
+    await Promise.resolve();
+    expect(win.location.hash).toBe("");
+    applier.finishApply(activeEpoch);
+    await expect(pendingShare).resolves.toMatchObject({ view });
+    busy.destroy();
+
+    const empty = new UrlSync(() => null, applier as unknown as SavedViewApplier, {
+      window: win,
+    });
+    await expect(empty.commitShareLink()).rejects.toThrow("no active view");
+    empty.destroy();
+  });
+
+  it("waits through consecutive apply generations before capturing a share", async () => {
+    const capture = vi.fn(() => view);
+    const sync = new UrlSync(capture, applier as unknown as SavedViewApplier, {
+      window: win,
+    });
+    const first = applier.beginApply();
+    const pendingShare = sync.commitShareLink();
+    await Promise.resolve();
+    expect(capture).not.toHaveBeenCalled();
+
+    // A queued navigation begins synchronously as the first generation settles,
+    // before the share await continuation gets a turn.
+    applier.finishApply(first);
+    const second = applier.beginApply();
+    await Promise.resolve();
+    expect(capture).not.toHaveBeenCalled();
+
+    applier.finishApply(second);
+    await expect(pendingShare).resolves.toMatchObject({ view });
+    expect(capture).toHaveBeenCalledOnce();
     sync.destroy();
   });
 
@@ -298,35 +437,35 @@ describe("UrlSync", () => {
   });
 });
 
-describe("parseBookmarkHash", () => {
+describe("parseSavedViewIdHash", () => {
   it("returns null for empty hash", () => {
-    expect(parseBookmarkHash("")).toBeNull();
-    expect(parseBookmarkHash("#")).toBeNull();
+    expect(parseSavedViewIdHash("")).toBeNull();
+    expect(parseSavedViewIdHash("#")).toBeNull();
   });
 
-  it("extracts the bookmark id from #b=<id>", () => {
-    expect(parseBookmarkHash("#b=abc-123")).toBe("abc-123");
-    expect(parseBookmarkHash("b=abc-123")).toBe("abc-123");
+  it("extracts the workspace saved-view id from #b=<id>", () => {
+    expect(parseSavedViewIdHash("#b=abc-123")).toBe("abc-123");
+    expect(parseSavedViewIdHash("b=abc-123")).toBe("abc-123");
   });
 
   it("returns null for non-b keys", () => {
-    expect(parseBookmarkHash("#view=xxx")).toBeNull();
-    expect(parseBookmarkHash("#foo=bar")).toBeNull();
+    expect(parseSavedViewIdHash("#view=xxx")).toBeNull();
+    expect(parseSavedViewIdHash("#foo=bar")).toBeNull();
   });
 
   it("rejects ids with special characters (defense against junk URLs)", () => {
-    expect(parseBookmarkHash("#b=abc/def")).toBeNull();
-    expect(parseBookmarkHash("#b=abc def")).toBeNull();
-    expect(parseBookmarkHash("#b=")).toBeNull();
+    expect(parseSavedViewIdHash("#b=abc/def")).toBeNull();
+    expect(parseSavedViewIdHash("#b=abc def")).toBeNull();
+    expect(parseSavedViewIdHash("#b=")).toBeNull();
   });
 
   it("accepts UUID-like ids", () => {
-    expect(parseBookmarkHash("#b=550e8400-e29b-41d4-a716-446655440000"))
+    expect(parseSavedViewIdHash("#b=550e8400-e29b-41d4-a716-446655440000"))
       .toBe("550e8400-e29b-41d4-a716-446655440000");
   });
 
   it("decodes URI-encoded ids before validating", () => {
-    expect(parseBookmarkHash("#b=550e8400-e29b")).toBe("550e8400-e29b");
+    expect(parseSavedViewIdHash("#b=550e8400-e29b")).toBe("550e8400-e29b");
   });
 });
 
@@ -356,7 +495,7 @@ describe("UrlSync — #b=<id> bootstrap", () => {
     });
     const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
       window: win,
-      fetchBookmark: stub,
+      fetchSavedViewById: stub,
     });
     await sync.bootstrap();
 
@@ -374,7 +513,7 @@ describe("UrlSync — #b=<id> bootstrap", () => {
     const stub = vi.fn(async (): Promise<ResolvedSavedView | null> => null);
     const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
       window: win,
-      fetchBookmark: stub,
+      fetchSavedViewById: stub,
     });
     await sync.bootstrap();
     expect(stub).toHaveBeenCalled();
@@ -389,7 +528,7 @@ describe("UrlSync — #b=<id> bootstrap", () => {
     });
     const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
       window: win,
-      fetchBookmark: stub,
+      fetchSavedViewById: stub,
     });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     await sync.bootstrap();
@@ -408,11 +547,11 @@ describe("UrlSync — #b=<id> bootstrap", () => {
     }));
     const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
       window: win,
-      fetchBookmark: stub,
+      fetchSavedViewById: stub,
     });
     sync.start();
     (win as unknown as { _popstate: (s: unknown) => void })._popstate(null);
-    // Poll for the bookmark fetch + apply to land instead of guessing a fixed
+    // Poll for the saved-view fetch + apply to land instead of guessing a fixed
     // wall-clock delay, which races a slow CI runner (lucida-80g).
     await vi.waitFor(() => expect(applier.apply).toHaveBeenCalledOnce());
     expect(applier.applied[0].view.t).toBe(99);
@@ -454,6 +593,52 @@ describe("UrlSync — default saved view bootstrap", () => {
     sync.destroy();
   });
 
+  it("runs the framing fallback when a bare workspace has no saved source", async () => {
+    win = makeFakeWindow("");
+    const fallback = vi.fn();
+    const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
+      window: win,
+      onInitialViewFallback: fallback,
+    });
+
+    await sync.bootstrap();
+
+    expect(applier.apply).not.toHaveBeenCalled();
+    expect(fallback).toHaveBeenCalledOnce();
+    sync.destroy();
+  });
+
+  it("runs the framing fallback when the configured default resolves empty", async () => {
+    win = makeFakeWindow("");
+    const fallback = vi.fn();
+    const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
+      window: win,
+      fetchDefaultSavedView: async () => null,
+      onInitialViewFallback: fallback,
+    });
+
+    await sync.bootstrap();
+
+    expect(fallback).toHaveBeenCalledOnce();
+    sync.destroy();
+  });
+
+  it("does not compete with an applicable default view", async () => {
+    win = makeFakeWindow("");
+    const fallback = vi.fn();
+    const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
+      window: win,
+      fetchDefaultSavedView: async () => ({ id: "default", view: emptyView() }),
+      onInitialViewFallback: fallback,
+    });
+
+    await sync.bootstrap();
+
+    expect(applier.apply).toHaveBeenCalledOnce();
+    expect(fallback).not.toHaveBeenCalled();
+    sync.destroy();
+  });
+
   it("does not apply the default when #view is explicit", async () => {
     const explicit = emptyView();
     explicit.view.t = 3;
@@ -463,15 +648,18 @@ describe("UrlSync — default saved view bootstrap", () => {
       id: "default",
       view: emptyView(),
     }));
+    const fallback = vi.fn();
     const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
       window: win,
       fetchDefaultSavedView: fetchDefault,
+      onInitialViewFallback: fallback,
     });
 
     await sync.bootstrap();
 
     expect(fetchDefault).not.toHaveBeenCalled();
     expect(applier.applied[0].view.t).toBe(3);
+    expect(fallback).not.toHaveBeenCalled();
     sync.destroy();
   });
 
@@ -734,7 +922,7 @@ describe("UrlSync — #a=<id> bootstrap (deferred to host; no apply here)", () =
   it("recognizes #a= and applies NOTHING at bootstrap (resolve is the host's post-doc-load job)", async () => {
     const win = makeFakeWindow("#a=pin-123", "/w/ws-1");
     const applier = new FakeApplier();
-    // Wire a default + last view + bookmark fetcher: NONE must fire — a #a=
+    // Wire a default + last view + saved-view fetcher: NONE must fire — a #a=
     // link must not be mistaken for a bare workspace open (which would apply the
     // default/last view over the link's target).
     const fetchDefault = vi.fn(async (): Promise<ResolvedSavedView | null> => ({
@@ -745,12 +933,12 @@ describe("UrlSync — #a=<id> bootstrap (deferred to host; no apply here)", () =
       id: "last-view",
       view: emptyView(),
     }));
-    const fetchBookmark = vi.fn(async (): Promise<ResolvedSavedView | null> => null);
+    const fetchSavedViewById = vi.fn(async (): Promise<ResolvedSavedView | null> => null);
     const sync = new UrlSync(() => emptyView(), applier as unknown as SavedViewApplier, {
       window: win,
       fetchDefaultSavedView: fetchDefault,
       fetchLastView,
-      fetchBookmark,
+      fetchSavedViewById,
       restoreLastViewEnabled: () => true,
     });
 
@@ -759,7 +947,7 @@ describe("UrlSync — #a=<id> bootstrap (deferred to host; no apply here)", () =
     expect(applier.apply).not.toHaveBeenCalled();
     expect(fetchDefault).not.toHaveBeenCalled();
     expect(fetchLastView).not.toHaveBeenCalled();
-    expect(fetchBookmark).not.toHaveBeenCalled();
+    expect(fetchSavedViewById).not.toHaveBeenCalled();
     // The hash is left intact for the host to resolve post-doc-load.
     expect(win.location.hash).toBe("#a=pin-123");
     sync.destroy();

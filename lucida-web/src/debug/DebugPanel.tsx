@@ -24,6 +24,10 @@ import type { CacheTelemetry } from "../pipeline/fetch/index.ts";
 import type { GeneratedStatusCountsByDataset } from "../pipeline/generatedAvailability.ts";
 import type { Session } from "../session.ts";
 import type { DatasetHealthStatus, DatasetSourceHealth } from "../bridge.ts";
+import {
+  decodeViewQuery,
+  type ViewQueryBinaryResult,
+} from "../pipeline/planning/viewQueryBinary.ts";
 import { ConfigTab } from "./ConfigTab.tsx";
 import "./DebugPanel.css";
 
@@ -40,10 +44,6 @@ const CACHE_CONFIG_EDITABLE: boolean = import.meta.env.DEV;
 /** Short label for an EntityMode in the active-set rendering. */
 function modeLabel(mode: string): string {
   switch (mode) {
-    case "group-as-proxy":
-      return "WP";
-    case "tiles-with-proxy-fallback":
-      return "FP";
     case "tiles-with-detail":
       return "FD";
     default:
@@ -54,18 +54,14 @@ function modeLabel(mode: string): string {
 /** Color for an EntityMode in the active-set rendering. */
 function modeColor(mode: string): string {
   switch (mode) {
-    case "group-as-proxy":
-      return "#88f";
-    case "tiles-with-proxy-fallback":
-      return "#fb4";
     case "tiles-with-detail":
-      return "#4f4";
+      return "var(--success-text)";
     default:
-      return "#aaa";
+      return "var(--text-muted)";
   }
 }
 
-type TabId = "render" | "scene" | "pick" | "planning" | "cache" | "health" | "orch" | "catalog" | "config" | "logging";
+type TabId = "render" | "scene" | "pick" | "planning" | "cache" | "health" | "orch" | "config" | "logging";
 
 const LOGGING_CATEGORY_DESCRIPTIONS: Record<DebugCategory, string> = {
   bridge: "WebSocket send/receive and dataset-open lifecycle",
@@ -84,38 +80,9 @@ const OVERLAY_DESCRIPTIONS: Record<DebugOverlay, string> = {
   plannedRank: "Sub-color planned chunks by queue rank (top of queue = bright orange, bottom = dim red, gray = not in pending). Requires chunkGrid.",
 };
 
-interface CatalogSnap {
-  assetEpoch: number;
-  perDataset: Array<{
-    datasetId: string;
-    name: string;
-    groupsWithProxy: number;
-    tilesWithProxy: number;
-    totalEntries: number;
-    sampleEntries: Array<{ entityId: string; kinds: string[] }>;
-  }>;
-  proxyBytes: number;
-  proxyBudget: number;
-  inFlightProxyCount: number;
-  pendingProxyCount: number;
-}
-
 interface SceneQuerySnap {
   epochs: { content: number; layout: number; view: number; selection: number } | null;
-  viewQuery: {
-    epochs: { content: number; layout: number; view: number; selection: number };
-    visible_entities: Array<{
-      entity_id: string;
-      image_id: string;
-      kind: string;
-      visible: boolean;
-      projected_diagonal_px: number;
-      projected_area_px2: number;
-      centroid_world: [number, number, number];
-      ideal_target_lod: number;
-      importance: number;
-    }>;
-  } | null;
+  viewQuery: ViewQueryBinaryResult | null;
   lastRayPick: {
     entity_id: string;
     image_id: string;
@@ -149,13 +116,13 @@ function fmtBytes(bytes: number): string {
 function statusColor(status: DatasetHealthStatus | string | null | undefined): string {
   switch (status) {
     case "healthy":
-      return "#4f4";
+      return "var(--success-text)";
     case "degraded":
-      return "#fb4";
+      return "var(--warning-text)";
     case "unavailable":
-      return "#f66";
+      return "var(--danger-text)";
     default:
-      return "#888";
+      return "var(--text-muted)";
   }
 }
 
@@ -172,8 +139,7 @@ function dumpCache(cache: import("../pipeline/fetch/index.ts").CpuCache | undefi
     return;
   }
   const entries = cache.getCacheDump();
-  const proxies = cache.getProxyCacheDump();
-  console.group(`[DebugPanel] cpuCache contents (${entries.length} chunks, ${proxies.length} proxies)`);
+  console.group(`[DebugPanel] cpuCache contents (${entries.length} chunks)`);
   // Group chunks by entity, then dump as a single table per entity for
   // easy scanning. console.table at the entity level keeps output dense.
   const byEntity = new Map<string, typeof entries>();
@@ -192,11 +158,6 @@ function dumpCache(cache: import("../pipeline/fetch/index.ts").CpuCache | undefi
       tier: e.tier,
       bytes: e.bytes,
     })));
-    console.groupEnd();
-  }
-  if (proxies.length > 0) {
-    console.groupCollapsed(`proxies: ${proxies.length}`);
-    console.table(proxies);
     console.groupEnd();
   }
   console.groupEnd();
@@ -234,7 +195,7 @@ function PlanningTabBody({
   if (entries.length === 0) {
     return (
       <div className="debug-section">
-        <div style={{ color: "#666" }}>
+        <div style={{ color: "var(--text-muted)" }}>
           No planning data yet. Open a dataset to populate.
         </div>
       </div>
@@ -254,15 +215,13 @@ function PlanningTabBody({
         minimap: [],
         detail: [],
         coarse: [],
-        proxy: [],
         prefetch: [],
-        overview: [],
       };
       for (const r of plan.requests) lanes[r.lane].push(r);
       console.group(
-        `${dsId}: ${plan.requests.length} chunks (${lanes.minimap.length} M / ${lanes.detail.length} D / ${lanes.coarse.length} C / ${lanes.prefetch.length} P / ${lanes.overview.length} O), ${plan.proxyRequests.length} proxies`,
+        `${dsId}: ${plan.requests.length} chunks (${lanes.minimap.length} M / ${lanes.detail.length} D / ${lanes.coarse.length} C / ${lanes.prefetch.length} P)`,
       );
-      for (const lane of ["minimap", "detail", "coarse", "proxy", "prefetch", "overview"] as const) {
+      for (const lane of ["minimap", "detail", "coarse", "prefetch"] as const) {
         if (lanes[lane].length === 0) continue;
         console.groupCollapsed(`${lane}: ${lanes[lane].length}`);
         console.table(
@@ -276,11 +235,6 @@ function PlanningTabBody({
         if (lanes[lane].length > 50) {
           console.log(`(+${lanes[lane].length - 50} more)`);
         }
-        console.groupEnd();
-      }
-      if (plan.proxyRequests.length > 0) {
-        console.groupCollapsed(`proxies: ${plan.proxyRequests.length}`);
-        console.table(plan.proxyRequests.slice(0, 50));
         console.groupEnd();
       }
       console.groupEnd();
@@ -303,18 +257,6 @@ function PlanningTabBody({
       console.groupCollapsed(`${dsId}: ${plan.activeSet.length} entries`);
       console.table(
         plan.activeSet.map(e => {
-          if (e.kind === "group-as-proxy") {
-            return {
-              entityId: e.entityId,
-              kind: e.kind,
-              mode: "group-as-proxy",
-              targetLod: "",
-              range: "",
-              proxyKind: "GroupProxy3D",
-              proxyAvailable: true,
-              groupProxyAvailable: true,
-            };
-          }
           if (e.kind === "invisible") {
             return {
               entityId: e.entityId,
@@ -322,9 +264,6 @@ function PlanningTabBody({
               mode: "",
               targetLod: e.coarsestLod,
               range: `${e.coarsestLod}-${e.coarsestLod}`,
-              proxyKind: "",
-              proxyAvailable: false,
-              groupProxyAvailable: false,
             };
           }
           return {
@@ -333,9 +272,6 @@ function PlanningTabBody({
             mode: e.mode,
             targetLod: e.targetLod,
             range: `${e.detailOwnedLodRange[0]}-${e.detailOwnedLodRange[1]}`,
-            proxyKind: e.proxyKind ?? "",
-            proxyAvailable: e.proxyAvailable,
-            groupProxyAvailable: e.groupProxyAvailable,
           };
         }),
       );
@@ -371,9 +307,7 @@ function PlanningDatasetSection({
   name: string;
 }) {
   const groupsTotal =
-    p.groupsByMode.groupAsProxy +
-    p.groupsByMode.tilesWithProxyFallback +
-    p.groupsByMode.tilesWithDetail;
+    p.groupsByMode.tilesWithDetail + p.groupsByMode.invisible;
   const cull = p.culling;
   // Avoid divide-by-zero when no cells were considered (no visible
   // entities at all). Show the percentage retained at each stage so
@@ -388,36 +322,22 @@ function PlanningDatasetSection({
           {name}
         </div>
         <div>
-          <span style={{ color: "#fa4" }}>M:{p.lanes.minimap}</span>{" "}
-          <span style={{ color: "#4f4" }}>D:{p.lanes.detail}</span>{" "}
-          <span style={{ color: "#6cf" }}>C:{p.lanes.coarse}</span>{" "}
-          <span style={{ color: "#ff4" }}>P:{p.lanes.prefetch}</span>{" "}
-          <span style={{ color: "#88f" }}>O:{p.lanes.overview}</span>{" "}
-          <span style={{ color: "#aaa" }}>· proxies:{p.proxyCount}</span>{" "}
-          <span style={{ color: "#aaa" }}>· total chunks:{p.totalChunks}</span>
+          <span style={{ color: "var(--warning-text)" }}>M:{p.lanes.minimap}</span>{" "}
+          <span style={{ color: "var(--success-text)" }}>D:{p.lanes.detail}</span>{" "}
+          <span style={{ color: "var(--info-text)" }}>C:{p.lanes.coarse}</span>{" "}
+          <span style={{ color: "var(--warning-text)" }}>P:{p.lanes.prefetch}</span>{" "}
+          <span style={{ color: "var(--text-muted)" }}>· total chunks:{p.totalChunks}</span>
         </div>
-        {p.catalogDegradations > 0 && (
-          <div style={{ color: "#fb4", marginTop: 4 }}>
-            ⚠ catalog degradations this plan: {p.catalogDegradations}
-          </div>
-        )}
       </div>
 
       {groupsTotal > 0 && (
         <div className="debug-section">
           <div className="debug-title">Groups by mode ({groupsTotal} groups)</div>
           <div>
-            <span style={{ color: modeColor("group-as-proxy") }}>
-              group-proxy: {p.groupsByMode.groupAsProxy}
-            </span>{" "}
-            ·{" "}
-            <span style={{ color: modeColor("tiles-with-proxy-fallback") }}>
-              fallback: {p.groupsByMode.tilesWithProxyFallback}
-            </span>{" "}
-            ·{" "}
             <span style={{ color: modeColor("tiles-with-detail") }}>
               detail: {p.groupsByMode.tilesWithDetail}
             </span>
+            {" "}· invisible: {p.groupsByMode.invisible}
           </div>
         </div>
       )}
@@ -429,11 +349,11 @@ function PlanningDatasetSection({
             {p.lodBreakdown.map(row => (
               <div key={row.level} className="debug-member-row">
                 <span className="debug-member-id">L{row.level}</span>
-                <span style={{ color: row.planned > 0 ? "#4f4" : "#666" }}>
+                <span style={{ color: row.planned > 0 ? "var(--success-text)" : "var(--text-muted)" }}>
                   {row.planned}
                 </span>
-                <span style={{ color: "#88f" }}>{row.cached}</span>
-                <span style={{ color: row.inFlight > 0 ? "#ff4" : "#666" }}>
+                <span style={{ color: "var(--accent)" }}>{row.cached}</span>
+                <span style={{ color: row.inFlight > 0 ? "var(--warning-text)" : "var(--text-muted)" }}>
                   {row.inFlight}
                 </span>
               </div>
@@ -460,7 +380,7 @@ function PlanningDatasetSection({
           <div className="debug-title">Focal entity</div>
           <div title={p.focalEntity.entityId}>
             <span className="debug-member-id">{shortId(p.focalEntity.entityId, 24)}</span>{" "}
-            <span style={{ color: "#888" }}>
+            <span style={{ color: "var(--text-muted)" }}>
               ({p.focalEntity.kind}
               {p.focalEntity.parentGroupId && (
                 <>
@@ -478,7 +398,7 @@ function PlanningDatasetSection({
             <span style={{ color: modeColor(p.focalEntity.mode) }}>
               {modeLabel(p.focalEntity.mode)}
             </span>{" "}
-            <span style={{ color: "#888", fontSize: 10 }}>
+            <span style={{ color: "var(--text-muted)", fontSize: 10 }}>
               ({p.focalEntity.modeReason})
             </span>
           </div>
@@ -515,9 +435,6 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
   // Cache tab state
   const [cacheTelemetry, setCacheTelemetry] = useState<CacheTelemetry | null>(null);
   const [generatedStatusSnap, setGeneratedStatusSnap] = useState<GeneratedStatusCountsByDataset[]>([]);
-
-  // Catalog tab state
-  const [catalogSnap, setCatalogSnap] = useState<CatalogSnap | null>(null);
 
   // Server-authored dataset health tab state
   const [datasetHealthSnap, setDatasetHealthSnap] = useState<DatasetSourceHealth[]>([]);
@@ -570,62 +487,13 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
         sessionRef?.current?.generatedAvailability.statusCountsByDataset() ?? [],
       );
 
-      // Poll asset catalog (per-dataset proxy availability + cache stats)
-      {
-        const ws = wasmSceneRef?.current;
-        if (ws) {
-          try {
-            const tel = cache?.telemetry();
-            const perDataset: CatalogSnap["perDataset"] = [];
-            for (const [dsId, dsEntry] of datasets.entries()) {
-              try {
-                const json = ws.get_asset_catalog(dsId);
-                const cat = json ? JSON.parse(json) : { entries: [] };
-                const entries: Array<{ entity_id: string; kinds: string[] }> =
-                  Array.isArray(cat.entries) ? cat.entries : [];
-                let groups = 0;
-                let tiles = 0;
-                for (const e of entries) {
-                  if (e.kinds?.includes("GroupProxy3D")) groups++;
-                  if (e.kinds?.includes("TileProxy3D")) tiles++;
-                }
-                perDataset.push({
-                  datasetId: dsId,
-                  name: dsEntry.manifest?.name ?? dsId,
-                  groupsWithProxy: groups,
-                  tilesWithProxy: tiles,
-                  totalEntries: entries.length,
-                  sampleEntries: entries.slice(0, 5).map(e => ({
-                    entityId: e.entity_id,
-                    kinds: e.kinds ?? [],
-                  })),
-                });
-              } catch {
-                // dataset not yet registered in scene state
-              }
-            }
-            setCatalogSnap({
-              assetEpoch: typeof ws.asset_epoch === "function" ? Number(ws.asset_epoch()) : 0,
-              perDataset,
-              proxyBytes: tel?.proxyBytes ?? 0,
-              proxyBudget: tel?.proxyBudget ?? 0,
-              inFlightProxyCount: tel?.inFlightProxyCount ?? 0,
-              pendingProxyCount: tel?.pendingProxyCount ?? 0,
-            });
-          } catch {
-            // ignore
-          }
-        }
-      }
-
       // Poll scene query data if available
       const ws = wasmSceneRef?.current;
       if (ws && datasetId) {
         try {
           const epochsJson = ws.epochs();
           const epochs = epochsJson ? JSON.parse(epochsJson) : null;
-          const vqJson = ws.view_query(datasetId);
-          const viewQuery = vqJson && vqJson !== "null" ? JSON.parse(vqJson) : null;
+          const viewQuery = decodeViewQuery(ws.view_query(datasetId));
           setSceneSnap({ epochs, viewQuery, lastRayPick: lastRayPickRef.current });
         } catch {
           // WASM not ready or dataset removed
@@ -674,7 +542,6 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
     { id: "cache", label: "Cache" },
     { id: "health", label: "Health" },
     { id: "orch", label: "Orch" },
-    { id: "catalog", label: "Catalog" },
     { id: "config", label: "Config" },
     { id: "logging", label: "Logging" },
   ];
@@ -696,12 +563,12 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
   // is just a derived view of state recency, not a fresh signal source.
   const coldStatePulse = (() => {
     const at = snap.orch?.coldState?.lastRebuildAt ?? 0;
-    if (at === 0) return { color: "#444", glyph: "○" };
+    if (at === 0) return { color: "var(--border-strong)", glyph: "○" };
     // eslint-disable-next-line react-hooks/purity
     const ms = performance.now() - at;
-    if (ms < 200) return { color: "#fb4", glyph: "●" };
-    if (ms < 500) return { color: "#963", glyph: "◐" };
-    return { color: "#444", glyph: "○" };
+    if (ms < 200) return { color: "var(--warning-text)", glyph: "●" };
+    if (ms < 500) return { color: "var(--warning-text)", glyph: "◐" };
+    return { color: "var(--border-strong)", glyph: "○" };
   })();
 
   const datasetHealthCounts = datasetHealthSnap.reduce(
@@ -734,20 +601,20 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
               <div>
                 FPS: {loopSnap?.fps ?? "—"}
                 {loopSnap?.msSinceLastRender !== null && loopSnap?.msSinceLastRender !== undefined && (
-                  <span style={{ color: "#888" }}> (last render {loopSnap.msSinceLastRender}ms ago)</span>
+                  <span style={{ color: "var(--text-muted)" }}> (last render {loopSnap.msSinceLastRender}ms ago)</span>
                 )}
               </div>
               <div>
                 Frame: {fmt(snap.frameTimeMs, 1)}ms
-                {loopSnap && <span style={{ color: "#888" }}> (max {fmt(loopSnap.maxFrameMs, 1)})</span>}
+                {loopSnap && <span style={{ color: "var(--text-muted)" }}> (max {fmt(loopSnap.maxFrameMs, 1)})</span>}
               </div>
               <div>
                 Plan: {fmt(snap.planTimeMs, 1)}ms
-                {loopSnap && <span style={{ color: "#888" }}> (max {fmt(loopSnap.maxPlanMs, 1)})</span>}
+                {loopSnap && <span style={{ color: "var(--text-muted)" }}> (max {fmt(loopSnap.maxPlanMs, 1)})</span>}
               </div>
               <div>
                 Upload: {fmt(snap.uploadTimeMs, 1)}ms
-                {loopSnap && <span style={{ color: "#888" }}> (max {fmt(loopSnap.maxUploadMs, 1)})</span>}
+                {loopSnap && <span style={{ color: "var(--text-muted)" }}> (max {fmt(loopSnap.maxUploadMs, 1)})</span>}
               </div>
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                 <span>Dirty:</span>
@@ -765,11 +632,11 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                     && loopSnap?.msSinceResidencyDirty !== undefined
                     && loopSnap.msSinceResidencyDirty < AFTERGLOW_MS;
                   const interactiveColor = loopSnap?.interactiveDirty
-                    ? "#4f4"
-                    : interactiveRecent ? "#283" : "#444";
+                    ? "var(--success-text)"
+                    : interactiveRecent ? "var(--success-surface)" : "var(--border-strong)";
                   const residencyColor = loopSnap?.residencyDirty
-                    ? "#fb4"
-                    : residencyRecent ? "#963" : "#444";
+                    ? "var(--warning-text)"
+                    : residencyRecent ? "var(--warning-text)" : "var(--border-strong)";
                   return (
                     <>
                       <span style={{ color: interactiveColor }}>
@@ -783,7 +650,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                 })()}
               </div>
               {loopSnap && loopSnap.residencyDirty && loopSnap.throttleSkipsPending > 0 && (
-                <div style={{ color: "#fb4" }}>
+                <div style={{ color: "var(--warning-text)" }}>
                   Throttled: {loopSnap.throttleSkipsPending} skip{loopSnap.throttleSkipsPending === 1 ? "" : "s"} pending
                 </div>
               )}
@@ -794,7 +661,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
               <div>
                 Total: {snap.renderPasses.total}
                 {loopSnap && loopSnap.maxPasses > snap.renderPasses.total && (
-                  <span style={{ color: "#888" }}> (max {loopSnap.maxPasses})</span>
+                  <span style={{ color: "var(--text-muted)" }}> (max {loopSnap.maxPasses})</span>
                 )}
               </div>
               {Object.entries(snap.renderPasses.byDataset).length > 0 && (
@@ -852,7 +719,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                       <div
                         key={m.id}
                         className="debug-member-row"
-                        style={i === 0 && worstGap > 0 ? { color: "#fb4" } : undefined}
+                        style={i === 0 && worstGap > 0 ? { color: "var(--warning-text)" } : undefined}
                       >
                         <span className="debug-member-id" title={m.id}>
                           {m.id.length > 16 ? "..." + m.id.slice(-14) : m.id}
@@ -911,7 +778,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
 
             {!sceneSnap.epochs && !sceneSnap.viewQuery && (
               <div className="debug-section">
-                <div style={{ color: "#666" }}>No scene data available</div>
+                <div style={{ color: "var(--text-muted)" }}>No scene data available</div>
               </div>
             )}
           </>
@@ -930,7 +797,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
               </div>
             ) : (
               <div className="debug-section">
-                <div style={{ color: "#666" }}>Click viewport to pick</div>
+                <div style={{ color: "var(--text-muted)" }}>Click viewport to pick</div>
               </div>
             )}
           </>
@@ -954,11 +821,11 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                       <>
                         <div>Main: {fmtBytes(cacheTelemetry.mainBytes)} / {fmtBytes(cacheTelemetry.mainBudget)} ({mainPct}%)</div>
                         <div className="debug-bar-track">
-                          <div className="debug-bar-fill" style={{ width: `${mainPct}%`, background: "#4f4" }} />
+                          <div className="debug-bar-fill" style={{ width: `${mainPct}%`, background: "var(--success-text)" }} />
                         </div>
                         <div>Overview: {fmtBytes(cacheTelemetry.overviewBytes)} / {fmtBytes(cacheTelemetry.overviewBudget)} ({overviewPct}%)</div>
                         <div className="debug-bar-track">
-                          <div className="debug-bar-fill" style={{ width: `${overviewPct}%`, background: "#88f" }} />
+                          <div className="debug-bar-fill" style={{ width: `${overviewPct}%`, background: "var(--accent)" }} />
                         </div>
                       </>
                     );
@@ -981,7 +848,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                 <div className="debug-section">
                   <div className="debug-title">Residency by tier</div>
                   <div className="debug-member-list">
-                    {(["activeDetail", "demotedDetail", "prefetch", "overview", "proxy"] as const).map(t => {
+                    {(["activeDetail", "demotedDetail", "prefetch", "overview"] as const).map(t => {
                       const r = cacheTelemetry.tierResidency[t];
                       const evicted = cacheTelemetry.evictionsByTier[t];
                       return (
@@ -990,7 +857,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                           <span>{r.count}</span>
                           <span>{fmtBytes(r.bytes)}</span>
                           {evicted > 0 && (
-                            <span style={{ color: "#fb4" }} title="evicted in last window">
+                            <span style={{ color: "var(--warning-text)" }} title="evicted in last window">
                               -{evicted}
                             </span>
                           )}
@@ -1008,7 +875,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                     Queue: {cacheTelemetry.pendingCount}
                     {cacheTelemetry.pendingOldestAgeMs > 0 && (
                       <span style={{
-                        color: cacheTelemetry.pendingOldestAgeMs > 5000 ? "#fb4" : "#888",
+                        color: cacheTelemetry.pendingOldestAgeMs > 5000 ? "var(--warning-text)" : "var(--text-muted)",
                         marginLeft: 6,
                       }}>
                         (oldest {fmt(cacheTelemetry.pendingOldestAgeMs / 1000, 1)}s)
@@ -1018,7 +885,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                   <div>
                     Deliverable: {cacheTelemetry.readyCount}
                     {cacheTelemetry.readyCount > 32 && (
-                      <span style={{ color: "#fb4", marginLeft: 6 }}>
+                      <span style={{ color: "var(--warning-text)", marginLeft: 6 }}>
                         (upload backlog)
                       </span>
                     )}
@@ -1027,13 +894,13 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                     Detail coverage: {cacheTelemetry.tierDemand.resident.detailChunks}/
                     {cacheTelemetry.tierDemand.desired.detailChunks}
                     {cacheTelemetry.tierDemand.sparseDetail && (
-                      <span style={{ color: "#fb4", marginLeft: 6 }}>
+                      <span style={{ color: "var(--warning-text)", marginLeft: 6 }}>
                         (sparse)
                       </span>
                     )}
                   </div>
                   {cacheTelemetry.tierDemand.sparseDetail && (
-                    <div style={{ color: "#fb4" }}>
+                    <div style={{ color: "var(--warning-text)" }}>
                       Detail coverage is budget-limited; lower the detail LOD explicitly for broader coverage.
                     </div>
                   )}
@@ -1079,9 +946,9 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                   <div>
                     Mode:{" "}
                     <span style={{
-                      color: cacheTelemetry.interactionMode === "panning" ? "#4f4"
-                        : cacheTelemetry.interactionMode === "scrubbing" ? "#ff4"
-                        : "#888",
+                      color: cacheTelemetry.interactionMode === "panning" ? "var(--success-text)"
+                        : cacheTelemetry.interactionMode === "scrubbing" ? "var(--warning-text)"
+                        : "var(--text-muted)",
                     }}>
                       {cacheTelemetry.interactionMode}
                     </span>
@@ -1092,7 +959,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
 
                 {/* Errors */}
                 <div className="debug-section" style={{
-                  background: (cacheTelemetry.failedChunks.transient > 0 || cacheTelemetry.failedChunks.permanent > 0) ? "#4a1111" : undefined,
+                  background: (cacheTelemetry.failedChunks.transient > 0 || cacheTelemetry.failedChunks.permanent > 0) ? "var(--danger-surface)" : undefined,
                 }}>
                   <div className="debug-title">Errors</div>
                   <div>
@@ -1100,7 +967,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                     Permanent: {cacheTelemetry.failedChunks.permanent}
                   </div>
                   {cacheTelemetry.lastError && (
-                    <div style={{ color: "#f88", fontSize: 10, wordBreak: "break-all" }}>
+                    <div style={{ color: "var(--danger-text)", fontSize: 10, wordBreak: "break-all" }}>
                       {cacheTelemetry.lastError}
                     </div>
                   )}
@@ -1123,7 +990,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                 <div className="debug-section">
                   <div className="debug-title">Config</div>
                   {!CACHE_CONFIG_EDITABLE && (
-                    <div style={{ color: "#888", fontSize: "0.75rem", marginBottom: 6 }} role="note">
+                    <div style={{ color: "var(--text-muted)", fontSize: "0.75rem", marginBottom: 6 }} role="note">
                       Read-only in this build: live cache budgets shown for
                       inspection; editing is a dev-build capability.
                     </div>
@@ -1188,7 +1055,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
               </>
             ) : (
               <div className="debug-section">
-                <div style={{ color: "#666" }}>Cache data not available</div>
+                <div style={{ color: "var(--text-muted)" }}>Cache data not available</div>
               </div>
             )}
           </>
@@ -1200,11 +1067,11 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
               <>
                 {/* Mixed levels warning */}
                 {snap.orch.hasMixedLevels && (
-                  <div className="debug-section" style={{ background: "#4a1111" }}>
+                  <div className="debug-section" style={{ background: "var(--danger-surface)" }}>
                     <div className="debug-warn" style={{ fontSize: 12 }}>
                       MIXED LEVELS IN needed[]
                     </div>
-                    <div style={{ fontSize: 10, color: "#f88" }}>
+                    <div style={{ fontSize: 10, color: "var(--danger-text)" }}>
                       Upload path uses needed[0].level for atlas config.
                       Chunks at other levels will render at wrong scale or be dropped.
                     </div>
@@ -1235,15 +1102,15 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                   </div>
                   <div>
                     {snap.orch.epochCacheHit ? (
-                      <span style={{ color: "#4f4" }}>HIT (plan skipped)</span>
+                      <span style={{ color: "var(--success-text)" }}>HIT (plan skipped)</span>
                     ) : (
-                      <span style={{ color: "#fb4" }}>MISS (re-planned)</span>
+                      <span style={{ color: "var(--warning-text)" }}>MISS (re-planned)</span>
                     )}
                   </div>
                   {(() => {
                     const cs = snap.orch.coldState;
                     if (!cs || cs.rebuilds + cs.cacheHits === 0) {
-                      return <div style={{ color: "#666", marginTop: 4 }}>no events yet</div>;
+                      return <div style={{ color: "var(--text-muted)", marginTop: 4 }}>no events yet</div>;
                     }
                     const total = cs.rebuilds + cs.cacheHits;
                     const cumPct = (cs.cacheHits / total) * 100;
@@ -1256,12 +1123,12 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                         <div>
                           Last 1s: {cs.rebuildsLastSecond} rebuilds · {cs.hitsLastSecond} hits
                           {winPct !== null && (
-                            <span style={{ color: "#888" }}> ({fmt(winPct, 0)}% hits)</span>
+                            <span style={{ color: "var(--text-muted)" }}> ({fmt(winPct, 0)}% hits)</span>
                           )}
                         </div>
                         {cs.rebuildsLastSecond > 0 && (
                           <div style={{ marginTop: 4 }}>
-                            <span style={{ color: "#888" }}>Causes (1s): </span>
+                            <span style={{ color: "var(--text-muted)" }}>Causes (1s): </span>
                             {(() => {
                               const entries = (Object.entries(cs.causeLastSecond) as [
                                 keyof typeof cs.causeLastSecond, number,
@@ -1269,12 +1136,12 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                                 .filter(([, n]) => n > 0)
                                 .sort((a, b) => b[1] - a[1]);
                               if (entries.length === 0) {
-                                return <span style={{ color: "#666" }}>—</span>;
+                                return <span style={{ color: "var(--text-muted)" }}>—</span>;
                               }
                               return entries.map(([k, n], i) => (
                                 <span key={k} style={{ marginRight: 6 }}>
                                   <span style={{
-                                    color: k === "view" ? "#888" : "#fb4",
+                                    color: k === "view" ? "var(--text-muted)" : "var(--warning-text)",
                                   }}>
                                     {k}:{n}
                                   </span>
@@ -1288,7 +1155,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                           <div style={{ marginTop: 4 }}>
                             Build: {fmt(cs.lastRebuildMs, 1)}ms
                             {cs.rebuildP50Ms !== null && (
-                              <span style={{ color: "#888" }}>
+                              <span style={{ color: "var(--text-muted)" }}>
                                 {" "}· p50 {fmt(cs.rebuildP50Ms, 1)}ms · p95{" "}
                                 {fmt(cs.rebuildP95Ms ?? 0, 1)}ms
                               </span>
@@ -1307,100 +1174,58 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                     decoded chunks aren't wanted by the GPU. */}
                 {snap.upload.tick && (
                   <div className="debug-section" style={{
-                    background: snap.upload.tick.budgetExhausted ? "#4a3311" : undefined,
+                    background: snap.upload.tick.budgetExhausted ? "var(--warning-surface)" : undefined,
                   }}>
                     <div className="debug-title">Upload (CPU → GPU)</div>
                     {(() => {
                       const t = snap.upload.tick;
-                      const considered = t.drainedChunks + t.drainedProxies;
-                      const uploaded = t.uploadedChunks + t.uploadedProxies;
+                      const considered = t.drainedChunks;
+                      const uploaded = t.uploadedChunks;
                       const skipBits = [
                         t.skippedPrefetch > 0 && `prefetch:${t.skippedPrefetch}`,
-                        t.skippedOverview > 0 && `overview:${t.skippedOverview}`,
                         t.skippedWrongLod > 0 && `wrongLod:${t.skippedWrongLod}`,
                         t.skippedAlreadySent > 0 && `alreadySent:${t.skippedAlreadySent}`,
                         t.skippedNoMeta > 0 && `noMeta:${t.skippedNoMeta}`,
                       ].filter(Boolean) as string[];
-                      const resendUploads = t.resendChunkUploads + t.resendProxyUploads;
+                      const resendUploads = t.resendChunkUploads;
                       const bytePct = t.bytesBudget > 0
                         ? Math.min(100, Math.round((t.bytesUploaded / t.bytesBudget) * 100))
                         : 0;
                       return (
                         <>
                           <div>
-                            Considered: {considered}{" "}
-                            <span style={{ color: "#888" }}>
-                              ({t.drainedChunks}c / {t.drainedProxies}p)
-                            </span>
+                            Considered: {considered}
                           </div>
                           <div>
-                            <span style={{ color: "#4f4" }}>Uploaded: {uploaded}</span>{" "}
-                            <span style={{ color: "#888" }}>
-                              ({t.uploadedChunks}c / {t.uploadedProxies}p)
-                            </span>
+                            <span style={{ color: "var(--success-text)" }}>Uploaded: {uploaded}</span>
                           </div>
                           {skipBits.length > 0 && (
-                            <div style={{ color: "#fb4", fontSize: 11 }}>
+                            <div style={{ color: "var(--warning-text)", fontSize: 11 }}>
                               skipped: {skipBits.join(" · ")}
                             </div>
                           )}
                           <div style={{ marginTop: 4 }}>
                             Bytes: {fmtBytes(t.bytesUploaded)} / {fmtBytes(t.bytesBudget)} ({bytePct}%)
                             {t.budgetExhausted && (
-                              <span style={{ color: "#f44", marginLeft: 6 }}>EXHAUSTED</span>
+                              <span style={{ color: "var(--danger-text)", marginLeft: 6 }}>EXHAUSTED</span>
                             )}
                           </div>
                           <div className="debug-bar-track">
                             <div className="debug-bar-fill" style={{
                               width: `${bytePct}%`,
-                              background: t.budgetExhausted ? "#f44" : "#4f4",
+                              background: t.budgetExhausted ? "var(--danger-text)" : "var(--success-text)",
                             }} />
                           </div>
                           {(resendUploads > 0
-                            || t.resendChunksConsidered > 0
-                            || t.resendProxiesConsidered > 0) && (
+                            || t.resendChunksConsidered > 0) && (
                             <div style={{ marginTop: 4, fontSize: 11 }}>
-                              <span style={{ color: "#888" }}>resend: </span>
-                              <span style={{ color: resendUploads > 0 ? "#fb4" : "#666" }}>
+                              <span style={{ color: "var(--text-muted)" }}>resend: </span>
+                              <span style={{ color: resendUploads > 0 ? "var(--warning-text)" : "var(--text-muted)" }}>
                                 {resendUploads} uploaded
                               </span>{" "}
-                              <span style={{ color: "#888" }}>
-                                ({t.resendChunkUploads}c / {t.resendProxyUploads}p,{" "}
-                                {t.resendChunksConsidered + t.resendProxiesConsidered} considered)
+                              <span style={{ color: "var(--text-muted)" }}>
+                                ({t.resendChunksConsidered} considered)
                               </span>
-                            </div>
-                          )}
-                        </>
-                      );
-                    })()}
-                  </div>
-                )}
-
-                {snap.orch?.proxyResidency && (
-                  <div className="debug-section">
-                    <div className="debug-title">Proxy Residency</div>
-                    {(() => {
-                      const p = snap.orch.proxyResidency!;
-                      const pct = p.budgetBytes > 0
-                        ? Math.min(100, Math.round((p.admittedBytes / p.budgetBytes) * 100))
-                        : 0;
-                      return (
-                        <>
-                          <div>
-                            Desired: {p.desiredProxyCount} proxies ·{" "}
-                            {fmtBytes(p.admittedBytes)} / {fmtBytes(p.budgetBytes)} ({pct}%)
-                          </div>
-                          <div style={{ color: "#888", fontSize: 11 }}>
-                            bundles: {p.admittedBundleCount}/{p.candidateBundleCount} admitted
-                            {p.skippedBundleCount > 0 && (
-                              <span style={{ color: "#fb4" }}>
-                                {" "}· skipped {p.skippedBundleCount} ({p.skippedProxyCount} proxies)
-                              </span>
-                            )}
-                          </div>
-                          {p.missingFootprintCount > 0 && (
-                            <div style={{ color: "#fb4", fontSize: 11 }}>
-                              missing footprints: {p.missingFootprintCount}
                             </div>
                           )}
                         </>
@@ -1424,31 +1249,31 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                           <div>
                             {fmtBytes(r.bytesPerSec)}/s · {r.uploadsPerSec} uploads/s
                           </div>
-                          <div style={{ color: "#888", fontSize: 11 }}>
-                            {r.chunkUploadsPerSec} chunks/s · {r.proxyUploadsPerSec} proxies/s
+                          <div style={{ color: "var(--text-muted)", fontSize: 11 }}>
+                            {r.chunkUploadsPerSec} chunks/s
                           </div>
                           <div>
-                            <span style={{ color: resendBad ? "#fb4" : "#888" }}>
+                            <span style={{ color: resendBad ? "var(--warning-text)" : "var(--text-muted)" }}>
                               resend: {fmtRatio(r.resendRatio)}
                             </span>
                             {" · "}
-                            <span style={{ color: filterBad ? "#fb4" : "#888" }}>
+                            <span style={{ color: filterBad ? "var(--warning-text)" : "var(--text-muted)" }}>
                               filtered: {fmtRatio(r.filterRatio)}
                             </span>
                           </div>
                           {r.uploadSizeP50 !== null && (
-                            <div style={{ color: "#888", fontSize: 11 }}>
+                            <div style={{ color: "var(--text-muted)", fontSize: 11 }}>
                               size p50: {fmtBytes(r.uploadSizeP50)}
                               {" · "}
                               p95: {fmtBytes(r.uploadSizeP95 ?? 0)}
                             </div>
                           )}
                           {r.budgetExhaustedTicksLastSecond > 0 && (
-                            <div style={{ color: "#fb4", fontSize: 11 }}>
+                            <div style={{ color: "var(--warning-text)", fontSize: 11 }}>
                               budget exhausted: {r.budgetExhaustedTicksLastSecond} tick(s) in last 1s
                             </div>
                           )}
-                          <div style={{ color: "#888", fontSize: 11, marginTop: 4 }}>
+                          <div style={{ color: "var(--text-muted)", fontSize: 11, marginTop: 4 }}>
                             total: {fmtBytes(r.totalBytes)} ·{" "}
                             {r.totalUploads.toLocaleString()} uploads
                           </div>
@@ -1471,7 +1296,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                 {snap.orch.entityDiag.length > 0 && (
                   <div className="debug-section">
                     <div className="debug-title">Entity Coords (overlap check)</div>
-                    <div style={{ fontSize: 10, color: "#aaa", marginBottom: 4 }}>
+                    <div style={{ fontSize: 10, color: "var(--text-muted)", marginBottom: 4 }}>
                       Overlap needs: region.xy offset by pos falls within [0, fullShape]
                     </div>
                     <div className="debug-member-list">
@@ -1489,17 +1314,17 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                         }
                         return (
                           <div key={e.entityId} className="debug-member-row" style={{
-                            background: overlapStatus === "NONE" ? "#4a1111" : undefined,
+                            background: overlapStatus === "NONE" ? "var(--danger-surface)" : undefined,
                           }}>
                             <span className="debug-member-id" title={e.entityId}>
                               {e.entityId.length > 12 ? "..." + e.entityId.slice(-10) : e.entityId}
                             </span>
                             <span>pos:[{e.position[0]},{e.position[1]}]</span>
                             <span>full:[{e.fullShape ? e.fullShape.join(",") : "?"}]</span>
-                            <span style={{ color: e.cachedKeys > 0 ? "#ff4" : "#888" }}>
+                            <span style={{ color: e.cachedKeys > 0 ? "var(--warning-text)" : "var(--text-muted)" }}>
                               cache:{e.cachedKeys}
                             </span>
-                            <span style={{ color: overlapStatus === "NONE" ? "#f44" : "#4f4" }}>
+                            <span style={{ color: overlapStatus === "NONE" ? "var(--danger-text)" : "var(--success-text)" }}>
                               {overlapStatus}
                             </span>
                           </div>
@@ -1515,9 +1340,8 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                   <div className="debug-section">
                     <div className="debug-title">
                       Active Set (
-                      {snap.orch.activeSetModeCounts.groupAsProxy} group-proxy /
-                      {" "}{snap.orch.activeSetModeCounts.tilesProxyFallback} tiles+proxy /
-                      {" "}{snap.orch.activeSetModeCounts.tilesDetail} tiles-detail)
+                      {snap.orch.activeSetModeCounts.tilesDetail} tiles-detail /
+                      {" "}{snap.orch.activeSetModeCounts.invisible} invisible)
                     </div>
                     <div className="debug-member-list">
                       {snap.orch.activeSet.slice(0, 10).map((e) => (
@@ -1541,16 +1365,16 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                 <div className="debug-section">
                   <div className="debug-title">Requests</div>
                   <div>
-                    <span style={{ color: "#4f4" }}>detail: {snap.orch.laneCount.detail}</span>
+                    <span style={{ color: "var(--success-text)" }}>detail: {snap.orch.laneCount.detail}</span>
                     {" "}
-                    <span style={{ color: "#6cf" }}>coarse: {snap.orch.laneCount.coarse}</span>
+                    <span style={{ color: "var(--info-text)" }}>coarse: {snap.orch.laneCount.coarse}</span>
                     {" "}
-                    <span style={{ color: "#ff4" }}>prefetch: {snap.orch.laneCount.prefetch}</span>
+                    <span style={{ color: "var(--warning-text)" }}>prefetch: {snap.orch.laneCount.prefetch}</span>
                     {" "}
-                    <span style={{ color: "#88f" }}>overview: {snap.orch.laneCount.overview}</span>
+                    <span style={{ color: "var(--warning-text)" }}>minimap: {snap.orch.laneCount.minimap}</span>
                   </div>
                   <div style={{ marginTop: 4 }}>
-                    <span style={{ color: "#aaa" }}>By level: </span>
+                    <span style={{ color: "var(--text-muted)" }}>By level: </span>
                     {Object.entries(snap.orch.chunksByLevel)
                       .sort(([a], [b]) => Number(a) - Number(b))
                       .map(([lvl, count]) => (
@@ -1566,7 +1390,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                     <div className="debug-member-list">
                       {snap.orch.members.slice(0, 10).map((m, i) => (
                         <div key={`${m.imageId}-${i}`} className="debug-member-row" style={{
-                          background: m.mixedLevels ? "#4a1111" : undefined,
+                          background: m.mixedLevels ? "var(--danger-surface)" : undefined,
                         }}>
                           <span className="debug-member-id" title={m.imageId}>
                             {m.imageId.length > 14 ? "..." + m.imageId.slice(-12) : m.imageId}
@@ -1576,7 +1400,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                           <span title={`Levels: ${JSON.stringify(m.chunksByLevel)}`}>
                             {Object.entries(m.chunksByLevel).map(([l, c]) => `L${l}:${c}`).join(" ")}
                           </span>
-                          {m.mixedLevels && <span style={{ color: "#f44" }}>MIX</span>}
+                          {m.mixedLevels && <span style={{ color: "var(--danger-text)" }}>MIX</span>}
                         </div>
                       ))}
                       {snap.orch.membersTotal > 10 && (
@@ -1594,7 +1418,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                       {snap.orch.topRequests.map((r, i) => (
                         <div key={`${r.chunkKey}-${i}`} className="debug-member-row">
                           <span style={{
-                            color: r.lane === "detail" ? "#4f4" : r.lane === "coarse" ? "#6cf" : r.lane === "prefetch" ? "#ff4" : "#88f",
+                            color: r.lane === "detail" ? "var(--success-text)" : r.lane === "coarse" ? "var(--info-text)" : r.lane === "prefetch" ? "var(--warning-text)" : "var(--accent)",
                             width: 14,
                           }}>
                             {r.lane === "detail" ? "D" : r.lane === "coarse" ? "C" : r.lane === "prefetch" ? "P" : "O"}
@@ -1612,7 +1436,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
               </>
             ) : (
               <div className="debug-section">
-                <div style={{ color: "#666" }}>Enable debug (D key) and load a dataset</div>
+                <div style={{ color: "var(--text-muted)" }}>Enable debug (D key) and load a dataset</div>
               </div>
             )}
           </>
@@ -1635,7 +1459,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                 </button>
               </div>
               {datasetHealthUpdatedAt !== null && (
-                <div style={{ color: "#888", fontSize: 10 }}>
+                <div style={{ color: "var(--text-muted)", fontSize: 10 }}>
                   updated {new Date(datasetHealthUpdatedAt).toLocaleTimeString()}
                 </div>
               )}
@@ -1655,12 +1479,12 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                 </div>
               )}
               {datasetHealthError && (
-                <div style={{ color: "#f88", marginTop: 4 }}>
+                <div style={{ color: "var(--danger-text)", marginTop: 4 }}>
                   {datasetHealthError}
                 </div>
               )}
               {!datasetHealthLoading && !datasetHealthError && datasetHealthSnap.length === 0 && (
-                <div style={{ color: "#666", marginTop: 4 }}>
+                <div style={{ color: "var(--text-muted)", marginTop: 4 }}>
                   No dataset health rows yet.
                 </div>
               )}
@@ -1675,14 +1499,14 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                   className="debug-section"
                   style={{
                     background: health.status === "unavailable"
-                      ? "#4a1111"
-                      : health.status === "degraded" ? "#3a2d12" : undefined,
+                      ? "var(--danger-surface)"
+                      : health.status === "degraded" ? "var(--warning-surface)" : undefined,
                   }}
                 >
                   <div className="debug-title" style={{ color: statusColor(health.status) }}>
                     {health.name}
                   </div>
-                  <div style={{ color: "#888", fontSize: 10 }} title={health.workspace_dataset_id}>
+                  <div style={{ color: "var(--text-muted)", fontSize: 10 }} title={health.workspace_dataset_id}>
                     {shortId(health.workspace_dataset_id, 28)}
                   </div>
                   <div>
@@ -1713,7 +1537,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                       {health.binding.status}
                     </span>
                     {health.binding.message && (
-                      <span style={{ color: "#888" }}> ({health.binding.message})</span>
+                      <span style={{ color: "var(--text-muted)" }}> ({health.binding.message})</span>
                     )}
                   </div>
 
@@ -1723,15 +1547,15 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                         source cache: {fmtBytes(cache.current_bytes)} / {fmtBytes(cache.max_bytes)}
                         {" "}· {cache.used_percent}% · entries {cache.entry_count}
                       </div>
-                      <div style={{ color: "#888" }}>
+                      <div style={{ color: "var(--text-muted)" }}>
                         hits {cache.hits} · misses {cache.misses} · evictions {cache.evictions}
                         {cache.backend_errors > 0 && (
-                          <span style={{ color: "#f88" }}> · backend errors {cache.backend_errors}</span>
+                          <span style={{ color: "var(--danger-text)" }}> · backend errors {cache.backend_errors}</span>
                         )}
                       </div>
                     </div>
                   ) : (
-                    <div style={{ color: "#888", marginTop: 5 }}>
+                    <div style={{ color: "var(--text-muted)", marginTop: 5 }}>
                       source cache: unavailable
                     </div>
                   )}
@@ -1743,23 +1567,33 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                     </span>
                     {" "}· levels {generated.level_count}
                   </div>
-                  <div style={{ color: "#888" }}>
+                  <div style={{ color: "var(--text-muted)" }}>
                     chunks {generated.ready_chunks} ready · {generated.pending_chunks} pending ·{" "}
                     {generated.failed_chunks} failed · {generated.unavailable_chunks} unavailable
                   </div>
                   {generated.message && (
-                    <div style={{ color: "#888" }}>{generated.message}</div>
+                    <div style={{ color: "var(--text-muted)" }}>{generated.message}</div>
                   )}
                   {generated.cache && (
-                    <div style={{ color: "#888", marginTop: 3 }}>
-                      generated cache: {generated.cache.storage} · {fmtBytes(generated.cache.current_bytes)}
+                    <div style={{ color: "var(--text-muted)", marginTop: 3 }}>
+                      generated cache: {generated.cache.storage} · {fmtBytes(generated.cache.current_bytes)} charged
                       {generated.cache.max_bytes !== undefined && generated.cache.max_bytes !== null && (
                         <> / {fmtBytes(generated.cache.max_bytes)}</>
                       )}
                       {generated.cache.used_percent !== undefined && generated.cache.used_percent !== null && (
                         <> · {generated.cache.used_percent}%</>
                       )}
+                      {generated.cache.max_entries !== undefined && generated.cache.max_entries !== null && (
+                        <> · entries {generated.cache.entry_count ?? 0} / {generated.cache.max_entries}
+                          {generated.cache.entry_used_percent !== undefined && generated.cache.entry_used_percent !== null && (
+                            <> ({generated.cache.entry_used_percent}%)</>
+                          )}
+                        </>
+                      )}
                       {" "}· evictions {generated.cache.evictions}
+                      {generated.cache.accounting_healthy === false && (
+                        <span style={{ color: "var(--danger-text)" }}> · accounting unavailable; writes disabled</span>
+                      )}
                       {generated.cache.root && (
                         <div className="debug-break-anywhere" title={generated.cache.root}>
                           root: {generated.cache.root}
@@ -1770,7 +1604,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                   {(generated.recent_failures ?? []).length > 0 && (
                     <div style={{ marginTop: 3 }}>
                       {(generated.recent_failures ?? []).map((failure, index) => (
-                        <div key={index} style={{ color: "#f88" }} title={`${failure.image_id} ${failure.key}`}>
+                        <div key={index} style={{ color: "var(--danger-text)" }} title={`${failure.image_id} ${failure.key}`}>
                           generated failure: {failure.status} L{failure.level_index} {shortId(failure.image_id, 18)}
                           {failure.message && <> · {failure.message}</>}
                         </div>
@@ -1781,7 +1615,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                   {(health.messages ?? []).length > 0 && (
                     <div style={{ marginTop: 5 }}>
                       {(health.messages ?? []).map((message, index) => (
-                        <div key={index} style={{ color: "#fb4" }}>
+                        <div key={index} style={{ color: "var(--warning-text)" }}>
                           {message}
                         </div>
                       ))}
@@ -1800,86 +1634,13 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
             renderLoopRef={renderLoopRef}
           />
         )}
-        {activeTab === "catalog" && (
-          <>
-            <div className="debug-section">
-              <div className="debug-title">Asset Catalog</div>
-              {catalogSnap ? (
-                <>
-                  <div>assetEpoch: {catalogSnap.assetEpoch}</div>
-                  <div style={{ marginTop: 6 }}>
-                    Proxy cache: {fmtBytes(catalogSnap.proxyBytes)} /{" "}
-                    {fmtBytes(catalogSnap.proxyBudget)}
-                  </div>
-                  <div>
-                    In-flight: {catalogSnap.inFlightProxyCount} (queue:{" "}
-                    {catalogSnap.pendingProxyCount})
-                  </div>
-                </>
-              ) : (
-                <div style={{ color: "#666" }}>Waiting for catalog…</div>
-              )}
-            </div>
-            {catalogSnap?.perDataset.map(ds => (
-              <div key={ds.datasetId} className="debug-section">
-                <div className="debug-title">{ds.name}</div>
-                <div style={{ color: "#888", fontSize: 11 }}>
-                  {ds.datasetId}
-                </div>
-                <div style={{ marginTop: 4 }}>
-                  GroupProxy3D:{" "}
-                  <span style={{ color: ds.groupsWithProxy > 0 ? "#6f6" : "#666" }}>
-                    {ds.groupsWithProxy}
-                  </span>{" "}
-                  · TileProxy3D:{" "}
-                  <span style={{ color: ds.tilesWithProxy > 0 ? "#6f6" : "#666" }}>
-                    {ds.tilesWithProxy}
-                  </span>{" "}
-                  · total entries: {ds.totalEntries}
-                </div>
-                {ds.sampleEntries.length > 0 && (
-                  <div style={{ marginTop: 6, fontSize: 11, color: "#aaa" }}>
-                    <div style={{ color: "#888" }}>sample entries:</div>
-                    {ds.sampleEntries.map((e, i) => (
-                      <div
-                        key={i}
-                        style={{
-                          fontFamily: "monospace",
-                          paddingLeft: 8,
-                          whiteSpace: "nowrap",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                        }}
-                      >
-                        {e.entityId}: [{e.kinds.join(", ")}]
-                      </div>
-                    ))}
-                    {ds.totalEntries > ds.sampleEntries.length && (
-                      <div style={{ color: "#666", paddingLeft: 8 }}>
-                        … {ds.totalEntries - ds.sampleEntries.length} more
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            ))}
-            {catalogSnap && catalogSnap.perDataset.length === 0 && (
-              <div className="debug-section">
-                <div style={{ color: "#666" }}>
-                  No datasets registered yet.
-                </div>
-              </div>
-            )}
-          </>
-        )}
-
         {activeTab === "config" && <ConfigTab />}
 
         {activeTab === "logging" && (
           <>
             <div className="debug-section" key={`cats-${loggingTick}`}>
               <div className="debug-title">Categories</div>
-              <div style={{ color: "#888", fontSize: "0.75rem", marginBottom: 6 }}>
+              <div style={{ color: "var(--text-muted)", fontSize: "0.75rem", marginBottom: 6 }}>
                 Toggles persist in localStorage.debug. Most events fire after the
                 page boots; for startup events, enable then reload.
               </div>
@@ -1888,6 +1649,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                 return (
                   <label
                     key={cat}
+                    aria-label={`Toggle ${cat} logging`}
                     style={{
                       display: "flex",
                       alignItems: "flex-start",
@@ -1904,7 +1666,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                     />
                     <div>
                       <div style={{ fontFamily: "monospace" }}>{cat}</div>
-                      <div style={{ color: "#888", fontSize: "0.75rem" }}>
+                      <div style={{ color: "var(--text-muted)", fontSize: "0.75rem" }}>
                         {LOGGING_CATEGORY_DESCRIPTIONS[cat]}
                       </div>
                     </div>
@@ -1914,7 +1676,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
             </div>
             <div className="debug-section" key={`ovs-${loggingTick}`}>
               <div className="debug-title">Overlays</div>
-              <div style={{ color: "#888", fontSize: "0.75rem", marginBottom: 6 }}>
+              <div style={{ color: "var(--text-muted)", fontSize: "0.75rem", marginBottom: 6 }}>
                 Visual layers drawn over the canvas. Slice + volume modes both work.
               </div>
               {DEBUG_OVERLAYS.map(name => {
@@ -1922,6 +1684,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                 return (
                   <label
                     key={name}
+                    aria-label={`Toggle ${name} overlay`}
                     style={{
                       display: "flex",
                       alignItems: "flex-start",
@@ -1938,7 +1701,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                     />
                     <div>
                       <div style={{ fontFamily: "monospace" }}>{name}</div>
-                      <div style={{ color: "#888", fontSize: "0.75rem" }}>
+                      <div style={{ color: "var(--text-muted)", fontSize: "0.75rem" }}>
                         {OVERLAY_DESCRIPTIONS[name]}
                       </div>
                     </div>

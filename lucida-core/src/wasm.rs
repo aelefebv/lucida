@@ -64,6 +64,10 @@ pub struct WasmScene {
     inner: Scene,
 }
 
+fn validation_js_error(error: crate::scene::CommandValidationError) -> JsError {
+    JsError::new(&serde_json::to_string(&error).unwrap_or_else(|_| error.to_string()))
+}
+
 #[wasm_bindgen]
 impl WasmScene {
     #[wasm_bindgen(constructor)]
@@ -88,8 +92,9 @@ impl WasmScene {
     pub fn load_document(&mut self, json: &str) -> Result<(), JsError> {
         let doc: DocumentState =
             serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
-        self.inner.load_document(doc);
-        Ok(())
+        self.inner
+            .try_load_document(doc)
+            .map_err(validation_js_error)
     }
 
     /// Export camera + view + display as JSON for presence updates.
@@ -124,8 +129,7 @@ impl WasmScene {
 
     pub fn apply_command(&mut self, json: &str) -> Result<(), JsError> {
         let cmd: Command = serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
-        self.inner.apply(cmd);
-        Ok(())
+        self.inner.try_apply(cmd).map_err(validation_js_error)
     }
 
     /// Frame the named dataset's full world extent in the main viewport,
@@ -148,12 +152,16 @@ impl WasmScene {
 
     // --- Mode switching ---
 
-    pub fn set_mode_arcball(&mut self) {
-        self.inner.apply(ViewportCommand::SetMode3D.into());
+    pub fn set_mode_arcball(&mut self) -> Result<(), JsError> {
+        self.inner
+            .try_apply(ViewportCommand::SetMode3D.into())
+            .map_err(validation_js_error)
     }
 
-    pub fn set_mode_fly(&mut self) {
-        self.inner.apply(ViewportCommand::SetModeFly.into());
+    pub fn set_mode_fly(&mut self) -> Result<(), JsError> {
+        self.inner
+            .try_apply(ViewportCommand::SetModeFly.into())
+            .map_err(validation_js_error)
     }
 
     pub fn camera_mode(&self) -> String {
@@ -168,9 +176,10 @@ impl WasmScene {
 
     /// Assert the canvas size. Called every render tick, so it relies on
     /// `Scene::apply`'s no-change guard: a same-size re-assert bumps nothing.
-    pub fn set_viewport(&mut self, width: u32, height: u32) {
+    pub fn set_viewport(&mut self, width: u32, height: u32) -> Result<(), JsError> {
         self.inner
-            .apply(ViewportCommand::SetViewport { width, height }.into());
+            .try_apply(ViewportCommand::SetViewport { width, height }.into())
+            .map_err(validation_js_error)
     }
 
     // --- 2D camera queries ---
@@ -188,16 +197,22 @@ impl WasmScene {
     // `set_z`/`set_t`/`set_c` are also re-asserted every render tick, so they
     // too lean on the apply-side no-change guard.
 
-    pub fn set_z(&mut self, z: u32) {
-        self.inner.apply(ViewportCommand::SetZ { z }.into());
+    pub fn set_z(&mut self, z: u32) -> Result<(), JsError> {
+        self.inner
+            .try_apply(ViewportCommand::SetZ { z }.into())
+            .map_err(validation_js_error)
     }
 
-    pub fn set_t(&mut self, t: u32) {
-        self.inner.apply(ViewportCommand::SetT { t }.into());
+    pub fn set_t(&mut self, t: u32) -> Result<(), JsError> {
+        self.inner
+            .try_apply(ViewportCommand::SetT { t }.into())
+            .map_err(validation_js_error)
     }
 
-    pub fn set_c(&mut self, c: u32) {
-        self.inner.apply(ViewportCommand::SetC { c }.into());
+    pub fn set_c(&mut self, c: u32) -> Result<(), JsError> {
+        self.inner
+            .try_apply(ViewportCommand::SetC { c }.into())
+            .map_err(validation_js_error)
     }
 
     // --- Multi-channel ---
@@ -242,9 +257,11 @@ impl WasmScene {
 
     /// Project a world-space point to screen-space pixel coordinates,
     /// using whichever camera mode is active. Returns a 2-element
-    /// `Vec<f64>` `[x, y]` in physical pixels (pre-DPR-divide), or an
-    /// empty `Vec` if the point is behind the camera in 3D modes
-    /// (slice mode never returns empty).
+    /// `Vec<f64>` `[x, y]` in the active camera viewport units, or an empty
+    /// `Vec` if the point is behind the camera in 3D modes (slice mode never
+    /// returns empty). The web slice path supplies a CSS-logical viewport so
+    /// persisted/shared 2D camera geometry is DPR-independent; volume supplies
+    /// its physical render viewport and callers normalize it for DOM overlays.
     ///
     /// Empty-vec is the wasm-bindgen-friendly stand-in for `Option`:
     /// JS callers should treat `result.length === 0` as "behind the
@@ -275,13 +292,16 @@ impl WasmScene {
         }
     }
 
-    /// Query the scene for geometric information about all entities in a dataset.
-    pub fn view_query(&self, dataset_id: &str) -> String {
+    /// Query the scene for geometric information about every entity in a
+    /// dataset. The versioned binary full-set encoding crosses the WASM
+    /// boundary as a JavaScript `Uint8Array`; see `view_query_binary.rs` for
+    /// the format. An unknown dataset is represented by a valid header whose
+    /// presence bit is clear, distinct from a known empty set.
+    pub fn view_query(&self, dataset_id: &str) -> Result<Vec<u8>, JsError> {
         let id = DatasetId(dataset_id.into());
-        match self.inner.view_query(&id) {
-            Some(result) => serde_json::to_string(&result).unwrap_or_default(),
-            None => "null".to_string(),
-        }
+        let result = self.inner.view_query(&id);
+        crate::view_query_binary::encode(result.as_ref())
+            .map_err(|error| JsError::new(&error.to_string()))
     }
 
     /// Incremental counterpart to [`Self::view_query`]: reports only what
@@ -290,19 +310,18 @@ impl WasmScene {
     /// The scene holds a per-dataset cursor of the last-reported quantized set;
     /// the first call after the scene is (re)constructed — the cursor is
     /// `#[serde(skip)]`, so a fresh scene starts empty — yields a `Full`
-    /// snapshot, and subsequent calls yield a `Delta`. Serialized as an
-    /// externally-tagged enum: `{"Full": {...}}` or `{"Delta": {...}}` (see
-    /// [`crate::query::ViewQueryDelta`]). Returns the JSON string `"null"` for
-    /// an unknown dataset, matching [`Self::view_query`]'s missing-dataset
-    /// convention.
+    /// snapshot, and subsequent calls yield a `Delta`. Both variants use the
+    /// versioned typed-array framing in `view_query_binary.rs`; a `Full` reuses
+    /// the exact `LVQ1` frame returned by [`Self::view_query`], while a delta
+    /// uses `LVD1`. An unknown dataset is an `LVD1` header with its presence
+    /// bit clear.
     ///
     /// Takes `&mut self` because answering advances the cursor.
-    pub fn view_query_delta(&mut self, dataset_id: &str) -> String {
+    pub fn view_query_delta(&mut self, dataset_id: &str) -> Result<Vec<u8>, JsError> {
         let id = DatasetId(dataset_id.into());
-        match self.inner.view_query_delta(&id) {
-            Some(delta) => serde_json::to_string(&delta).unwrap_or_default(),
-            None => "null".to_string(),
-        }
+        let delta = self.inner.view_query_delta(&id);
+        crate::view_query_binary::encode_delta(delta.as_ref())
+            .map_err(|error| JsError::new(&error.to_string()))
     }
 
     /// Debug helper: returns [effective_zoom, zoom_per_voxel] for a dataset.
@@ -390,6 +409,13 @@ impl WasmScene {
             .unwrap_or_else(|| vec![1, 1, 1])
     }
 
+    /// Corrected world-space diagonal for an explicit dataset. Returns the
+    /// same safe `1.0` fallback as the scene query when the id is unknown.
+    pub fn dataset_volume_diagonal(&self, dataset_id: &str) -> f64 {
+        self.inner
+            .volume_diagonal_for(&DatasetId(dataset_id.to_string()))
+    }
+
     /// Returns the model matrix for a specific member of a dataset,
     /// with the member's position offset baked into the translation.
     ///
@@ -465,32 +491,36 @@ impl WasmScene {
         yaw: f64,
         pitch: f64,
         roll: f64,
-    ) {
-        self.inner.apply(
-            ViewportCommand::FlyTick {
-                dt,
-                forward,
-                right,
-                up,
-                yaw,
-                pitch,
-                roll,
-            }
-            .into(),
-        );
+    ) -> Result<(), JsError> {
+        self.inner
+            .try_apply(
+                ViewportCommand::FlyTick {
+                    dt,
+                    forward,
+                    right,
+                    up,
+                    yaw,
+                    pitch,
+                    roll,
+                }
+                .into(),
+            )
+            .map_err(validation_js_error)
     }
 
     /// Set the base movement speed for the fly camera (world units per second).
-    pub fn fly_set_base_speed(&mut self, speed: f64) {
+    pub fn fly_set_base_speed(&mut self, speed: f64) -> Result<(), JsError> {
         self.inner
-            .apply(ViewportCommand::FlySetBaseSpeed { speed }.into());
+            .try_apply(ViewportCommand::FlySetBaseSpeed { speed }.into())
+            .map_err(validation_js_error)
     }
 
     /// Multiply the fly camera's speed_multiplier by the given factor.
     /// Used for scroll-wheel speed adjustment.
-    pub fn fly_adjust_speed(&mut self, factor: f64) {
+    pub fn fly_adjust_speed(&mut self, factor: f64) -> Result<(), JsError> {
         self.inner
-            .apply(ViewportCommand::FlyAdjustSpeed { factor }.into());
+            .try_apply(ViewportCommand::FlyAdjustSpeed { factor }.into())
+            .map_err(validation_js_error)
     }
 
     /// Return the fly camera's current speed multiplier.
@@ -533,9 +563,10 @@ impl WasmScene {
         }
     }
 
-    pub fn adjust_clip_distance(&mut self, delta: f64) {
+    pub fn adjust_clip_distance(&mut self, delta: f64) -> Result<(), JsError> {
         self.inner
-            .apply(ViewportCommand::AdjustClipDistance { delta }.into());
+            .try_apply(ViewportCommand::AdjustClipDistance { delta }.into())
+            .map_err(validation_js_error)
     }
 
     /// Camera forward direction in world space (normalized). Returns [fx, fy, fz].
@@ -551,6 +582,13 @@ impl WasmScene {
             }
             Camera::Slice(_) => vec![0.0, 0.0, -1.0],
         }
+    }
+
+    /// Authoritative camera-only world-to-view rotation, row-major as
+    /// `[right; up; backward]`. This preserves fly-camera roll and lets UI
+    /// orientation cues use the same pose as the renderer.
+    pub fn camera_view_rotation(&self) -> Vec<f32> {
+        self.inner.camera.view_rotation().to_vec()
     }
 
     pub fn view_proj(&self) -> Vec<f32> {
@@ -733,46 +771,6 @@ impl WasmScene {
         serde_json::to_string(&self.inner.epochs).unwrap_or_default()
     }
 
-    /// Return the current `epochs.asset` value. Convenience accessor for
-    /// the orchestrator so it doesn't have to JSON-decode `epochs()` just
-    /// to read one number.
-    pub fn asset_epoch(&self) -> u64 {
-        self.inner.epochs.asset
-    }
-
-    /// Apply an asset catalog delta. The JSON shape mirrors the
-    /// `ApplyAssetCatalogDelta` document command body (snake_case):
-    /// `{"dataset_id": "...", "delta": {"added": [...]}}`.
-    ///
-    /// Bumps `epochs.asset` exactly once per call. Idempotent on repeat
-    /// applies of the same delta.
-    pub fn apply_asset_catalog_delta(&mut self, json: &str) -> Result<(), JsError> {
-        #[derive(serde::Deserialize)]
-        struct Body {
-            dataset_id: String,
-            delta: lucida_protocol::AssetCatalogDelta,
-        }
-        let body: Body = serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
-        let cmd = Command::Document(crate::command::DocumentCommand::ApplyAssetCatalogDelta {
-            dataset_id: DatasetId(body.dataset_id),
-            delta: body.delta,
-        });
-        self.inner.apply(cmd);
-        Ok(())
-    }
-
-    /// Return the asset catalog for `dataset_id` as JSON. If the dataset
-    /// has no catalog (e.g. not yet registered), returns the JSON for an
-    /// empty catalog.
-    pub fn get_asset_catalog(&self, dataset_id: &str) -> String {
-        let id = DatasetId(dataset_id.to_string());
-        match self.inner.document.asset_catalogs.get(&id) {
-            Some(cat) => serde_json::to_string(cat).unwrap_or_else(|_| "{}".to_string()),
-            None => serde_json::to_string(&lucida_protocol::AssetCatalog::empty())
-                .unwrap_or_else(|_| "{}".to_string()),
-        }
-    }
-
     pub fn dataset_ids(&self) -> String {
         let ids: Vec<&str> = self
             .inner
@@ -876,6 +874,7 @@ impl WasmScene {
     /// Compute peer cursor geometry for GPU rendering + screen positions for labels.
     pub fn compute_peer_cursors(
         &self,
+        reference_dataset_id: &str,
         peers_json: &str,
         my_id: u32,
         screen_w: f64,
@@ -883,10 +882,12 @@ impl WasmScene {
     ) -> String {
         let peers: Vec<crate::cursor::PeerInput> =
             serde_json::from_str(peers_json).unwrap_or_default();
-        let output = crate::cursor::compute_peer_cursors(
+        let reference_dataset_id = DatasetId(reference_dataset_id.to_string());
+        let output = crate::cursor::compute_peer_cursors_for_dataset(
             &self.inner,
+            &reference_dataset_id,
             &peers,
-            my_id as u64,
+            my_id,
             screen_w,
             screen_h,
         );

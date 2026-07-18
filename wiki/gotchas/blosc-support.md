@@ -5,7 +5,7 @@ description: "CZI-derived OME-Zarrs (and many older Bioformats exports) compress
 tags: [lucida, gotcha]
 source_path: wiki/gotchas/blosc-support.md
 created: 2026-04-23
-modified: 2026-07-06
+modified: 2026-07-16
 ---
 
 # Blosc support is a deliberately narrow subset
@@ -27,7 +27,12 @@ Anything outside the table — `blosclz`, `lz4`, `lz4hc`, `zlib`, `snappy` cname
 
 ## Where it lives
 
-- Decoder: `lucida-server::decode::blosc` (~200 LOC, no FFI). 16-byte header parse, cross-check against the `BloscConfig` recorded at import, dispatch to `zstd::decode_all` then `unshuffle` (byte/bit). MEMCPYED frames short-circuit decompression.
+- Decoder: `lucida-server::decode::blosc` (in-tree, no FFI). It parses the
+  16-byte header, cross-checks it against the `BloscConfig` recorded at
+  import, dispatches to zstd plus byte/bit unshuffle, and short-circuits
+  MEMCPYED frames. The module also contains the conformance and adversarial
+  fixture suite, so a source-line count is not a useful description of the
+  implementation anymore.
 - Codec types: `lucida-store::codec` defines `StorageCompression`, `BloscConfig`, `BloscCompressor`, `BloscShuffle`. Used by both the import-time validator and the decoder. See [lucida-store](../systems/crates/lucida-store.md).
 - Validation: runs at import per level; per-level errors so a partially broken pyramid surfaces the bad level rather than failing opaquely on first chunk fetch.
 

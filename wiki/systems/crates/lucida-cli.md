@@ -5,7 +5,7 @@ description: "The Rust crate that builds Lucida's product CLI binary, lucida."
 tags: [lucida, crate]
 source_path: wiki/systems/crates/lucida-cli.md
 created: 2026-04-18
-modified: 2026-07-06
+modified: 2026-07-17
 ---
 
 # lucida-cli
@@ -28,7 +28,7 @@ The CLI should remain a reference client for the HTTP control plane and WebSocke
 
 One `src/` module per noun plus shared foundations; `main.rs` holds the clap derive tree and dispatch.
 
-- **Foundations**: `config.rs` (server/workspace config file), `credentials.rs` (token sourcing), `error.rs` (`CliError` + stable categories), `output.rs` (`--json`/human/quiet), `http.rs` (API URL building + authed JSON requests; each noun keeps its own status→error vocabulary), `session.rs` (workspace WebSocket plumbing: connect/auth, the snapshot handshake, `send_client_message`, and the `observe_until` reply loop), `workspace.rs` (workspace client plus target resolution and the `workspace_ws_url`/`workspace_web_url` builders every session-based command derives URLs from).
+- **Foundations**: `config.rs` (server/workspace config file), `credentials.rs` (token sourcing), `error.rs` (`CliError` + stable categories), `output.rs` (`--json`/human/quiet), `http.rs` (the shared prefix-preserving HTTP/browser/WebSocket endpoint builder plus authed JSON requests; each noun keeps its own status→error vocabulary), `session.rs` (workspace WebSocket plumbing: connect/auth, the snapshot handshake, `send_client_message`, and the `observe_until` reply loop), `workspace.rs` (workspace client plus target resolution; every collection, workspace, and browser target delegates to `http.rs`), `capture.rs` (the typed headless-browser boundary and sole owner of browser processes, temporary profiles, CDP sockets, contexts, targets, and sessions).
 - **Nouns**: `status.rs`, `auth.rs`, `workspace.rs`, `dataset.rs`, `view.rs` (also camera/layer/channel/viewer/peer/plan/debug), `layout.rs`, `saved_view.rs`, `montage.rs`, `admin.rs`.
 
 `session.rs` also owns the unsolicited-snapshot contract: the server pushes fresh `Snapshot`s outside the request/reply rhythm (after broadcast lag, and in answer to `request_snapshot` — see [document-command-application](../../flows/document-command-application.md)). The shared reply loop consumes a mid-exchange snapshot as a state refresh instead of handing it to the reply observer, so one-shot commands cannot misread a resync push as their ack.
@@ -53,7 +53,7 @@ Global flags: `--server`, `--workspace` (one-shot overrides), `--json` (stable m
 
 ### `dataset montage`
 
-`lucida dataset montage <dataset> --out <png> [--cells 16] [--cols 4] [--cell-px 320] [--json] [--timeout-seconds 30]` renders a labeled contact-sheet PNG that samples the dataset's primary axis (Z / T / tile / single), filling cells row-major with a text label per cell. With `--json` it also writes a sidecar at `<out>.json` describing the grid (axis, cols/rows, `cell_px`, shared `contrast` window) and, per cell, its `z`/`t`/`c`/`tile`/`label`/grid position plus a re-openable `#view=`-encoded saved-view URL for drilling into that exact cell. Implemented in `montage.rs` (the `Montage` variant + `mod montage` in `main.rs`).
+`lucida dataset montage <dataset> --out <png> [--cells 16] [--cols 4] [--cell-px 320] [--device-scale-factor 2] [--write-sidecar] [--json] [--timeout-seconds 30]` renders a labeled contact-sheet PNG that samples the dataset's primary axis (Z / T / tile / single), filling cells row-major with a text label per cell. `--json` selects machine output; the independent `--write-sidecar` flag writes `<out>.json` with the grid (axis, cols/rows, `cell_px`, `device_scale_factor`, shared `contrast` window) and, per cell, its `z`/`t`/`c`/`tile`/`label`/grid position plus a re-openable `#view=`-encoded saved-view URL for drilling into that exact cell. `montage.rs` owns planning and stitching; `capture.rs` owns browser rendering.
 
 ### Saved-view workflow
 
@@ -61,7 +61,7 @@ Global flags: `--server`, `--workspace` (one-shot overrides), `--json` (stable m
 
 ## Browser verification flow
 
-The durable verification fact: the CLI targets the same `/ws/workspaces/:id` session the browser uses and waits on request-correlated dataset-open progress, so a `dataset open` shows up in an open browser tab without hand-constructing WebSocket URLs (the same holds for shared mutations like layout changes and saved-view apply). `viewer screenshot`/`overview` render through headless Chrome/Chromium and wait for the web app's render-ready signal; `--from-peer <client-id>` captures a live peer instead of the durable profile.
+The durable verification fact: the CLI targets the same `/ws/workspaces/:id` session the browser uses and waits on request-correlated dataset-open progress, so a `dataset open` shows up in an open browser tab without hand-constructing WebSocket URLs (the same holds for shared mutations like layout changes and saved-view apply). `viewer screenshot`/`overview` render through headless Chrome/Chromium and wait for the web app's render-ready signal; `--from-peer <client-id>` captures a live peer instead of the durable profile. Capture defaults to device scale factor 2 and always passes the chosen factor explicitly to CDP, keeping the durable render gate representative of retina clients rather than Chromium's implicit DPR 1.
 
 ## Smoke workflows
 
@@ -80,12 +80,15 @@ Smoke scripts live in `scripts/` and run against an already-running `lucida-serv
 
 - **The product command is `lucida`.** `lucida-cli` is the crate/package implementation detail.
 - **The old flat command taxonomy is not a compatibility contract.** Flat `open`, root `visible-chunks`, `--steer`, `--peer`, and `config set workspace` are intentionally rejected in parser tests.
-- **Server input is a base HTTP URL.** Commands that need a session derive WebSocket URLs internally from the base server target.
+- **Server input is a base HTTP URL, including any deployment path prefix.** REST collections, workspace resources, browser links, and WebSocket sessions all append encoded segments to that same base; `https://host/tools/lucida` must never fall back to the origin root.
 - **Workspace defaults are server-scoped.** Switching `--server` must not silently reuse another server's selected workspace or config-file token.
 - **Every scriptable command needs `--json`.** Human output can be concise, but automation should not parse tables.
 - **Errors are categorized.** The foundation defines stable categories such as `unreachable_server`, `unauthenticated`, `unauthorized`, `missing_resource`, `ambiguous_name`, `archived_workspace`, `dataset_open_failure`, `session_disconnect`, and `rejected_command`.
 - **Most commands are one-shot.** `peer follow` is intentionally long-lived because follow state is tied to a live WebSocket client. Other commands should remain one-shot unless a later slice explicitly designs another long-lived mode.
+- **Capture resources have one owner.** Dispatch may only call the narrow `capture.rs` API. Browser child + temporary profile and CDP context + target + session lifetimes stay inside that module; normal completion closes them explicitly, while cancellation drops the socket, disposes its `disposeOnDetach` context, kills the child, and removes the profile.
 - **Presence is ephemeral.** `peer` diagnostics operate on live WebSocket clients; durable headless viewer profiles store view state, not client id, cursor, follow target, or peer liveness. `peer follow` stays connected precisely because a disconnected CLI client cannot keep following anyone. Copying live peer state into a durable profile is explicit via `viewer adopt --from-peer`; screenshot/overview can render a peer directly via `--from-peer` without persisting it.
+- **Scene mirrors hydrate atomically.** `view.rs` reconstructs snapshot/presence/saved-view state through `SceneHydration`; it never assigns Scene fields and manually calls a repair helper. The core boundary seeds missing dataset settings, rebuilds geometry, sanitizes cameras, and owns epoch/cursor invalidation.
+- **Manual contrast disables auto-contrast durably.** Viewer-profile rewrites preserve the prior saved view's `auto_contrast` map. A resolved `SetChannelContrast` marks only its target dataset `false`, so the SPA cannot overwrite the CLI's explicit window with a later intensity batch.
 - **Plan diagnostics are labeled by parity.** `plan visible-chunks` is a lower-level scene diagnostic, not a web-planner-equivalent dump of lanes, carry-forward state, CPU-cache filtering, minimap, or generated-coarse tier selection.
 
 ## Gotchas

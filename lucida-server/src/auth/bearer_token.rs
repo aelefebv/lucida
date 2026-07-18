@@ -37,6 +37,7 @@ impl BearerToken {
             is_admin: config
                 .admin_emails
                 .contains(&self.email.to_ascii_lowercase()),
+            auth_epoch: 0,
         }
     }
 
@@ -75,6 +76,10 @@ pub trait BearerTokenStore: Send + Sync + 'static {
         now: DateTime<Utc>,
     ) -> Result<(), BearerTokenStoreError>;
 
+    /// Atomically revoke a not-yet-revoked credential and return the row that
+    /// won the transition. Missing and already-revoked credentials both
+    /// return `None`, so concurrent callers cannot each act as the revocation
+    /// owner.
     async fn revoke_by_hash(
         &self,
         token_hash: &str,

@@ -126,7 +126,11 @@ export function Minimap({ client, activeLoop }: Props) {
   }, []);
 
   return (
-    <div className="minimap-panel" style={{ width: MINIMAP_SIZE, height: MINIMAP_SIZE }}>
+    <div
+      className="minimap-panel"
+      data-floating-safe-region
+      style={{ width: MINIMAP_SIZE, height: MINIMAP_SIZE }}
+    >
       <canvas
         ref={gpuCanvasRef}
         style={{ width: MINIMAP_SIZE, height: MINIMAP_SIZE }}

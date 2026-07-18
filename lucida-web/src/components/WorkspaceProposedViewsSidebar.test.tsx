@@ -173,9 +173,9 @@ describe("WorkspaceSavedViewsSidebar — editor review queue", () => {
     await screen.findByTestId("saved-view-reject-sv-prop");
     await userEvent.click(screen.getByTestId("saved-view-reject-sv-prop"));
     // Slice 3: reject is a deferred, cancelable send — not fired immediately;
-    // an Undo cancels it entirely (no API call).
+    // cancellation stops it entirely (no API call).
     expect(rejectMock).not.toHaveBeenCalled();
-    await userEvent.click(await screen.findByText(/undo/i));
+    await userEvent.click(await screen.findByText(/cancel rejection/i));
     expect(rejectMock).not.toHaveBeenCalled();
   });
 

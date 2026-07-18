@@ -134,7 +134,9 @@ def build_parser() -> argparse.ArgumentParser:
             "DIR/cli/NN-<name>.log, the Python session to DIR/python/session.log, "
             "and the web images to DIR/web/. The full result is written to "
             "DIR/drive.json and printed. A failing command or browser hiccup is "
-            "captured, not fatal. The server is always reaped."
+            "captured without aborting the remaining tour; any required "
+            "command, client step, or render failure makes the final verdict "
+            "non-zero. The server is always reaped."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -513,7 +515,7 @@ def _emit_drive_human(record: dict[str, Any], log: _Stderr) -> None:
     web = surfaces.get("web")
     if web is not None:
         if web.get("ran"):
-            verdict = "ok (non-blank viewer)" if web.get("ok") else "NO non-blank viewer"
+            verdict = "ok (viewer + DPR1/2 canvas)" if web.get("ok") else "FAILED render gate"
             lines.append(f"  web         : {verdict}")
             lines.append(f"      viewer    : {web.get('viewer_png')}")
             lines.append(f"      url       : {web.get('viewer_url')}")
@@ -524,15 +526,23 @@ def _emit_drive_human(record: dict[str, Any], log: _Stderr) -> None:
                     mark = (capture.get("detail") or {}).get("reason") or "failed"
                 lines.append(f"      - {capture.get('name'):<18} {mark}")
             real_spa = web.get("real_spa") or {}
-            if real_spa.get("captured"):
+            if real_spa.get("arms"):
+                lines.append(
+                    f"      browser   : {'passed' if real_spa.get('ok') else 'FAILED'} DPR1/2 matrix"
+                )
+                for arm in real_spa.get("arms", []):
+                    dpr = arm.get("device_scale_factor")
+                    mark = "ok" if arm.get("ok") else arm.get("reason") or "failed"
+                    lines.append(
+                        f"      - DPR{dpr:<13} {mark} -> {arm.get('canvas_png')}"
+                    )
+                    lines.append(f"        console       -> {arm.get('console_log')}")
+            elif real_spa.get("captured"):
                 nb = real_spa.get("spa_png_nonblank")
                 tag = "non-blank" if nb else ("blank" if nb is False else "")
-                lines.append(
-                    f"      real-SPA  : captured {tag} -> {real_spa.get('spa_png')}"
-                )
-                lines.append(f"                  console -> {real_spa.get('console_log')}")
+                lines.append(f"      real-SPA  : captured {tag} -> {real_spa.get('spa_png')}")
             else:
-                lines.append(f"      real-SPA  : skipped ({real_spa.get('reason')})")
+                lines.append(f"      browser   : FAILED ({real_spa.get('reason')})")
         else:
             err = (web.get("error") or {}).get("message")
             lines.append(f"  web         : DID NOT RUN ({err})")

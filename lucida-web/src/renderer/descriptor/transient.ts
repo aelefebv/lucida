@@ -3,8 +3,7 @@
  *
  * Used by callers that don't have a cold-state-backed descriptor buffer
  * (currently just the minimap path — see `volumeRenderer.setTransientDescriptor`).
- * Writes `modelMatrix` + `invModelMatrix`, sentinel proxy handles, unit
- * proxy dims, display state, and a single LOD slot covering the full
+ * Writes `modelMatrix` + `invModelMatrix`, display state, and a single LOD slot covering the full
  * volume (single-slot atlas).
  *
  * Reads byte offsets from `./layout.ts` — the same source of truth used
@@ -17,7 +16,6 @@ import {
   DESCRIPTOR_LOD_INFO_SIZE,
   DESCRIPTOR_LODS_OFFSET,
   DESCRIPTOR_MAX_LODS,
-  DESCRIPTOR_SENTINEL_INDEX,
   LOD_OFFSET_CHUNK_DIMS,
   LOD_OFFSET_GRID_DIMS,
   LOD_OFFSET_INDIRECTION_OFFSET,
@@ -25,9 +23,6 @@ import {
   LOD_OFFSET_LEVEL_DIMS,
   OFFSET_CONTRAST_MAX,
   OFFSET_CONTRAST_MIN,
-  OFFSET_TILE_PROXY_DIMS,
-  OFFSET_TILE_PROXY_POOL_INDEX,
-  OFFSET_TILE_PROXY_SLOT_INDEX,
   OFFSET_COLORMAP_MODE,
   OFFSET_GAMMA,
   OFFSET_INV_MODEL_MATRIX,
@@ -35,9 +30,6 @@ import {
   OFFSET_LOD_COUNT,
   OFFSET_MODEL_MATRIX,
   OFFSET_OPACITY,
-  OFFSET_GROUP_PROXY_DIMS,
-  OFFSET_GROUP_PROXY_POOL_INDEX,
-  OFFSET_GROUP_PROXY_SLOT_INDEX,
 } from "./layout.ts";
 
 export interface TransientDescriptorParams {
@@ -79,8 +71,6 @@ export interface TransientDescriptorParams {
  * should pass a subarray.
  *
  * The descriptor:
- *   - sets sentinel pool / slot indices (no proxy fallback)
- *   - sets unit (1×1×1) proxy dims (defensive; ignored when slot is sentinel)
  *   - encodes one LOD covering the full volume with `chunkDims == levelDims`
  *     and `gridDims = [1, 1, 1]`, matching the single-slot atlas layout
  *     used by `volumeRenderer.setVolume`
@@ -95,23 +85,6 @@ export function serializeTransientDescriptor(
 
   if (params.modelMatrix.length === 16) f32.set(params.modelMatrix, OFFSET_MODEL_MATRIX / 4);
   if (params.invModelMatrix.length === 16) f32.set(params.invModelMatrix, OFFSET_INV_MODEL_MATRIX / 4);
-
-  // Sentinel proxy handles — the unified fallback chain in the shader
-  // short-circuits the proxy steps when the slot index is sentinel.
-  u32[OFFSET_TILE_PROXY_POOL_INDEX / 4] = DESCRIPTOR_SENTINEL_INDEX;
-  u32[OFFSET_TILE_PROXY_SLOT_INDEX / 4] = DESCRIPTOR_SENTINEL_INDEX;
-  u32[OFFSET_GROUP_PROXY_POOL_INDEX / 4]  = DESCRIPTOR_SENTINEL_INDEX;
-  u32[OFFSET_GROUP_PROXY_SLOT_INDEX / 4]  = DESCRIPTOR_SENTINEL_INDEX;
-
-  // Unit proxy dims (defensive — proxy slot is sentinel, so dims are unread).
-  const tileDimsBase = OFFSET_TILE_PROXY_DIMS / 4;
-  u32[tileDimsBase + 0] = 1;
-  u32[tileDimsBase + 1] = 1;
-  u32[tileDimsBase + 2] = 1;
-  const groupDimsBase = OFFSET_GROUP_PROXY_DIMS / 4;
-  u32[groupDimsBase + 0] = 1;
-  u32[groupDimsBase + 1] = 1;
-  u32[groupDimsBase + 2] = 1;
 
   f32[OFFSET_CONTRAST_MIN / 4] = params.contrastMin;
   f32[OFFSET_CONTRAST_MAX / 4] = params.contrastMax;

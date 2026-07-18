@@ -1,12 +1,49 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useState } from "react";
 
 const INPUT_TAGS = new Set(["INPUT", "TEXTAREA", "SELECT"]);
 
+export interface KeyState {
+  readonly pressed: ReadonlySet<string>;
+  subscribe(listener: () => void): () => void;
+}
+
+class ObservableKeyState implements KeyState {
+  readonly pressed = new Set<string>();
+  private readonly listeners = new Set<() => void>();
+
+  subscribe = (listener: () => void): (() => void) => {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  };
+
+  press(key: string): void {
+    if (this.pressed.has(key)) return;
+    this.pressed.add(key);
+    this.publish();
+  }
+
+  release(key: string): void {
+    if (!this.pressed.delete(key)) return;
+    this.publish();
+  }
+
+  clear(): void {
+    if (this.pressed.size === 0) return;
+    this.pressed.clear();
+    this.publish();
+  }
+
+  private publish(): void {
+    for (const listener of this.listeners) listener();
+  }
+}
+
 /**
- * Tracks which keys are currently pressed on a container element.
+ * Tracks keys on a container without forcing React re-renders.
  *
- * Returns a stable Set ref (updated in-place) suitable for reading in RAF loops
- * without causing React re-renders.
+ * The returned signal is stable. Consumers subscribe to actual state changes,
+ * so continuous input may request frames while a held key is active and idle
+ * input owns no polling callback.
  *
  * @param containerRef Ref to the DOM element that should receive key events
  * @param boundKeys    Set of key values for which keydown should be preventDefault'd
@@ -14,14 +51,12 @@ const INPUT_TAGS = new Set(["INPUT", "TEXTAREA", "SELECT"]);
 export function useKeyState(
   containerRef: React.RefObject<HTMLElement | null>,
   boundKeys: Set<string>,
-): Set<string> {
-  const pressedRef = useRef(new Set<string>());
+): KeyState {
+  const [state] = useState(() => new ObservableKeyState());
 
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-
-    const pressed = pressedRef.current;
 
     function isInputFocused(): boolean {
       const active = document.activeElement;
@@ -33,16 +68,16 @@ export function useKeyState(
       if (boundKeys.has(e.key)) {
         e.preventDefault();
       }
-      pressed.add(e.key);
+      state.press(e.key);
     }
 
     function onKeyUp(e: KeyboardEvent) {
       if (isInputFocused()) return;
-      pressed.delete(e.key);
+      state.release(e.key);
     }
 
     function onBlur() {
-      pressed.clear();
+      state.clear();
     }
 
     el.addEventListener("keydown", onKeyDown);
@@ -53,13 +88,9 @@ export function useKeyState(
       el.removeEventListener("keydown", onKeyDown);
       el.removeEventListener("keyup", onKeyUp);
       el.removeEventListener("blur", onBlur);
-      pressed.clear();
+      state.clear();
     };
-  }, [containerRef, boundKeys]);
+  }, [containerRef, boundKeys, state]);
 
-  // The hook intentionally returns a stable Set that callers (e.g.
-  // VolumeViewer's RAF-driven fly-camera input loop) read each frame
-  // without triggering a re-render — the JSDoc above is the contract.
-  // eslint-disable-next-line react-hooks/refs
-  return pressedRef.current;
+  return state;
 }

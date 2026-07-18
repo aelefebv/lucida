@@ -5,7 +5,7 @@ description: "The conceptual reference for \"how does lucida deploy work?\" The 
 tags: [lucida, subsystem]
 source_path: wiki/systems/subsystems/deployment.md
 created: 2026-05-13
-modified: 2026-06-25
+modified: 2026-07-17
 ---
 
 # Deployment
@@ -16,7 +16,7 @@ The conceptual reference for "how does lucida deploy work?" The procedural count
 
 The deploy unit is one container image carrying both the API binary (`lucida-server`) and the SPA dist (`lucida-web`). The same image runs in production via Kubernetes, in a developer's `docker run` for local use, and in a `cargo run --release`-based prod-like rehearsal.
 
-This shape is forced by the auth design. [Backend-Mediated OAuth with Session Cookies](../../decisions/0016-backend-mediated-oauth-with-session-cookies.md) uses `HttpOnly` + `SameSite=Lax` session cookies, which block cross-origin POST/PATCH/DELETE — so the SPA and the API must share a hostname. Some single-origin shape is required. Three alternatives could deliver it (reverse-proxy sidecar, two images with Ingress path-routing, or one image serving both); [Single-Image Container with `ServeDir` is the Canonical Deploy Unit](../../decisions/0020-single-image-with-servedir.md) picks the single-image route because the SPA and the API are already version-coupled at the source level (`lucida-web/package.json` depends on `file:../lucida-core/pkg`), so splitting them at the container boundary would create a gap that cannot exist in the source.
+This shape is forced by the auth design. [Backend-Mediated OAuth with Session Cookies](../../decisions/0016-backend-mediated-oauth-with-session-cookies.md) uses `HttpOnly` + `SameSite=Lax` session cookies, which block cross-origin POST/PATCH/DELETE — so the SPA and the API must share a hostname. Some single-origin shape is required. Three alternatives could deliver it (reverse-proxy sidecar, two images with Ingress path-routing, or one image serving both); [Single-Image Container with `ServeDir` is the Canonical Deploy Unit](../../decisions/0020-single-image-with-servedir.md) picks the single-image route because the SPA and the API are already version-coupled at the source level (`lucida-web/package.json` depends on `link:../lucida-core/pkg`), so splitting them at the container boundary would create a gap that cannot exist in the source.
 
 The single-image decision also collapses three localhost personas onto one substrate:
 
@@ -31,7 +31,7 @@ The static-serve route is implemented in `lucida-server/src/static_serve.rs` and
 Every deployment-specific value lives in a `LUCIDA_*` environment variable. Renaming or repurposing one is a breaking change for self-hosters — these are part of the public configuration surface. The full reference, with defaults and common misconfigurations, lives in [OSS Config Defaults and the LUCIDA_* Env Var Contract](../../gotchas/oss-config-defaults.md); this article does not duplicate it. Categories:
 
 - **Auth** — `LUCIDA_AUTH`, `LUCIDA_GOOGLE_*`, `LUCIDA_ALLOWED_HOSTED_DOMAINS`, `LUCIDA_ADMIN_EMAILS`, `LUCIDA_COOKIE_*`, `LUCIDA_INSECURE`.
-- **Persistence** — `LUCIDA_DB_PATH`, `LUCIDA_DATA_DIR`, `LUCIDA_PROXY_CACHE_DIR`.
+- **Persistence** — `LUCIDA_DB_PATH`, `LUCIDA_DATA_DIR`, `LUCIDA_GENERATED_COARSE_CACHE_DIR`, `LUCIDA_GENERATED_COARSE_DISK_BUDGET_BYTES`, and deprecated/clear-only `LUCIDA_PROXY_CACHE_DIR`.
 - **Network** — `LUCIDA_BIND`, `LUCIDA_OAUTH_REDIRECT_URI`.
 - **Observability** — `LUCIDA_LOG_FORMAT`.
 - **Web-serving** — `LUCIDA_WEB_DIST`.
@@ -41,15 +41,20 @@ A specific safety mechanism worth surfacing here: `LUCIDA_AUTH` auto-detects fro
 
 ## Persistence model
 
-A single `ReadWriteOnce` PVC at `/var/lib/lucida` holds both the SQLite database and the proxy cache:
+A single `ReadWriteOnce` PVC at `/var/lib/lucida` holds SQLite and generated coarse data:
 
-- **`/var/lib/lucida/lucida.db{,-wal,-shm}`** — sessions, bookmarks, and any future server-stored state. Small (typically megabytes, not gigabytes).
-- **`/var/lib/lucida/proxy-cache/`** — on-disk proxy chunks. Recomputable from upstream sources; the variable that dominates sizing.
+- **`/var/lib/lucida/lucida.db{,-wal,-shm}`** — auth sessions, workspaces, membership, dataset records, saved views, and other durable application state. Legacy bookmark tables may remain from the migration ledger but are inactive. Small (typically megabytes, not gigabytes).
+- **`/var/lib/lucida/generated-coarse/`** — revision-scoped derived chunks. Recomputable from upstream sources and capped at 8 GiB of conservatively charged physical allocation plus 100,000 filesystem entries. The 50 GiB PVC therefore keeps 42 GiB of nominal byte headroom for SQLite/WAL and optional operator datasets while the independent entry cap protects inode capacity.
+- **`/var/lib/lucida/proxy-cache/`** — retired proxy-era artifacts only. New releases never write here; `clear-proxy-cache` includes it during upgrade cleanup through deprecated `LUCIDA_PROXY_CACHE_DIR`.
 - **`/var/lib/lucida/data/`** — optional dataset directory, when `LUCIDA_DATA_DIR` is set. Read-only from lucida's perspective.
 
-Single-replica only. SQLite + WAL is single-writer, and the proxy cache is also single-writer; running two pods against the same PVC double-books the writer slot. The reference Deployment uses `strategy: Recreate` so the new pod waits for the old pod to release the volume during rollouts. Multi-replica would require migrating to a real RDBMS first — explicitly out of scope for v1.
+Single-replica only. SQLite + WAL is single-writer, and the generated cache shares its PVC; running two pods double-books the writer slot. The reference Deployment uses `strategy: Recreate`. Multi-replica requires a real RDBMS and cache coordination.
+
+HTTP source admission rejects standardized IPv6 translation and transition forms (including NAT64 well-known/local-use, mapped/compatible, Teredo, 6to4, and ISATAP) before resolved addresses are pinned. RFC 6052 also permits deployment-selected network-specific prefixes that are indistinguishable from ordinary global IPv6 addresses; operators using them must list those prefixes in `LUCIDA_SOURCE_HTTP_IPV6_TRANSLATION_CIDRS`. That denylist wins over hostname and CIDR allowlists.
 
 **SQLite-WAL backup gotcha.** The WAL file is part of the authoritative state. A naive file-copy of `lucida.db` while writes are in flight gives a torn snapshot. The two safe paths are `sqlite3 lucida.db ".backup '...'"` (consistent regardless of WAL state) or quiesce-then-snapshot (scale to 0 replicas, snapshot the volume, scale back). The runbook §"Backup considerations" enumerates tooling pointers (Velero, k8up, cloud-native VolumeSnapshot APIs); this article deliberately does not pick one.
+
+**Upgrade/rollback boundary.** The first full-digest source-ID release rewrites released v0.10 short IDs when the new binary first opens SQLite. Operators must quiesce and verify a WAL-safe pre-upgrade backup before that startup. The old binary is not compatible with the rewritten identity/uniqueness contract, so rollback means previous image **and** restoring the pre-upgrade database/volume; binary-only `kubectl rollout undo` is unsafe. Compose deployments also run the profile-gated, minimally capable `lucida-volume-migrate` helper once for root-owned legacy volumes before starting the non-root UID/GID `10001:10001` runtime. The exact Kubernetes and Compose order is in the deployment runbook §10.
 
 ## OAuth provider setup
 
@@ -95,7 +100,9 @@ The actual annotation snippets per class live in `extras/deploy/k8s/ingress.yaml
 
 ## Operations
 
-**Probes.** `/healthz` answers liveness ("is this process alive?") — the kubelet uses it to decide "kill and restart this pod." `/readyz` answers readiness ("should I send traffic here?") — the Service/LB uses it to decide routing. Both return `200 OK` with body `"ok"` today. The split is intentional even though they behave identically: future drain-on-shutdown semantics will flip readiness to 503 while liveness stays 200, so the LB stops routing while the kubelet doesn't restart the pod mid-drain. Both probes land on the public router half (no auth wrap) so the kubelet — which never presents a session cookie — can hit them. See `lucida-server/src/health.rs`.
+**Probes and lifecycle.** `/healthz` answers liveness ("is this process alive?") and remains `200 OK` throughout startup and shutdown drain. `/readyz` answers readiness ("should I send traffic here?"): it is `503 starting` until configuration, auth, SQLite-backed stores, background workers, and the listener are initialized; `200 ok` only after startup completes; and `503 draining` as soon as SIGTERM or Ctrl-C begins shutdown. Both probes are public because kubelets and container runtimes do not present a session cookie. See `lucida-server/src/health.rs` and `main.rs`.
+
+Shutdown is deliberately two-stage. Readiness flips before the configurable quiet period (`LUCIDA_SHUTDOWN_QUIET_PERIOD_SECS`, default 2 seconds), giving routers time to stop new traffic. Application requests are rejected during drain, open WebSockets receive the shared drain signal, and background tasks are cancelled. Axum then drains connections until `LUCIDA_SHUTDOWN_TIMEOUT_SECS` (default 30 seconds); the container grace period is 35 seconds so the process deadline, not SIGKILL, owns the final boundary. The runtime-native `lucida-server healthcheck` command probes `/readyz` with a hard deadline, so the minimal image does not need curl or wget.
 
 **Log format.** `LUCIDA_LOG_FORMAT=text` (default) emits the dev-friendly pretty formatter; `LUCIDA_LOG_FORMAT=json` emits one JSON object per event, which Cloud Logging, Loki, Datadog, and similar aggregators consume natively. Production deployments set `json`; the reference manifest does this unconditionally. Auth subsystem audit events use the `dot.scope` event-name convention from [Logging Conventions](../../decisions/0012-logging-conventions.md) (e.g., `auth.signin.success`, `auth.session.expired.idle`); structured fields where applicable; cookie/JWT/state values are never logged.
 
@@ -103,9 +110,9 @@ The actual annotation snippets per class live in `extras/deploy/k8s/ingress.yaml
 
 ## Release process
 
-Releases are produced trunk-based via [release-please](https://github.com/googleapis/release-please). The maintainer merges Conventional Commits to `main`; release-please reads them, decides the semver bump (`feat:` → minor, `fix:`/`perf:` → patch, `BREAKING CHANGE:` → major; `docs:`/`chore:`/`style:`/`test:`/`ci:`/`refactor:` → no release), and opens or updates a "Release vX.Y.Z" PR with a generated `CHANGELOG.md` entry. **Auto-merge is OFF.** The maintainer manually merges that PR when a release is desired — this lets related changes batch into one release with one PR-click, per [Trunk-Based Releases via Manual-Merge `release-please` on `main`](../../decisions/0022-manual-merge-release-please-on-main.md). Merging the release PR pushes a tag (`vX.Y.Z`), which triggers the image-publishing workflow that builds and pushes a multi-arch image to `ghcr.io/<org>/lucida:vX.Y.Z`.
+Releases are produced trunk-based via [release-please](https://github.com/googleapis/release-please). The maintainer merges Conventional Commits to `main`; release-please reads them, decides the semver bump (`feat:` → minor, `fix:`/`perf:` → patch, `BREAKING CHANGE:` → major; `docs:`/`chore:`/`style:`/`test:`/`ci:`/`refactor:` → no release), and opens or updates a "Release vX.Y.Z" PR with a generated `CHANGELOG.md` entry. **Auto-merge is OFF.** The maintainer manually merges that PR when a release is desired — this lets related changes batch into one release with one PR-click, per [Trunk-Based Releases via Manual-Merge `release-please` on `main`](../../decisions/0022-manual-merge-release-please-on-main.md). Merging the release PR pushes a tag (`vX.Y.Z`), which triggers the image-publishing workflow. Per-architecture builds are pushed by digest and assembled into an unpromoted multi-architecture candidate index. Trivy resolves and scans the `linux/amd64` and `linux/arm64` child manifests by their immutable digests; only both successful scans permit the unchanged candidate index digest to be promoted to `vX.Y.Z` and `latest`. A failed or missing architecture scan leaves both public tags untouched.
 
-Adopters consume releases by **pinning image tags** in their manifests, not by tracking branches. The dev cluster pulls `:latest` (or `:main`); the prod cluster pins a specific release (e.g., `:v0.5.3`); promoting a release to prod is a `kubectl set image` (or manifest edit), not a `git merge`. Environment-branches as a promotion model (`dev` / `staging` / `prod` git branches) is a known anti-pattern lucida explicitly does not adopt — see [Branching and Releases](../../gotchas/branching-and-releases.md) for the full operational shape.
+Adopters consume releases by pinning a readable tag **and its immutable digest** (`:v0.5.3@sha256:...`) in manifests, not by tracking branches. A disposable dev cluster may follow `:latest`; production resolves a reviewed release digest, and promotion is a manifest edit, not a `git merge`. Environment-branches as a promotion model (`dev` / `staging` / `prod` git branches) is a known anti-pattern lucida explicitly does not adopt — see [Branching and Releases](../../gotchas/branching-and-releases.md) for the full operational shape.
 
 **`ghcr.io` package-visibility caveat.** When the source repository is public, the published package starts public — no action needed. When the source repository is private (a fork, a vendored copy in an internal monorepo), the published package starts **private by default**, even though it lives on `ghcr.io`. Anyone trying to `docker pull` it from outside the org gets `denied`. Flip to public via the GitHub UI: Package → Settings → Change visibility. This bites OSS adopters who fork to their own org and forget the visibility flip; the runbook §11 covers branch-protection prerequisites and mentions the package-visibility caveat for fork operators.
 

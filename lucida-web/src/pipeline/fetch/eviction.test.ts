@@ -9,13 +9,14 @@ import {
 import type { CacheEntry, EvictionTier } from "./types.ts";
 import type { InteractionMode } from "./interactionMode.ts";
 import type { SceneEpochs } from "../epochs.ts";
+import { makeChunkContract } from "../../test/fixtures.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 const ZERO_EPOCHS: SceneEpochs = {
-  content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0,
+  content: 0, layout: 0, view: 0, selection: 0, request: 0,
 };
 
 function makeEntry(overrides: Partial<CacheEntry> & {
@@ -25,6 +26,7 @@ function makeEntry(overrides: Partial<CacheEntry> & {
 }): CacheEntry {
   return {
     data: new ArrayBuffer(0),
+    contract: makeChunkContract({ datasetId: "ds-1", imageId: "img-1" }),
     lane: "detail",
     entityId: "e-1",
     imageId: "img-1",
@@ -36,10 +38,11 @@ function makeEntry(overrides: Partial<CacheEntry> & {
     x: 0,
     chunkKey: `key-${overrides.insertedAt}`,
     epochs: ZERO_EPOCHS,
-    dataType: "u8",
+    wanted: true,
     priority: 0,
     lastSeenTick: 0,
     ...overrides,
+    datasetId: overrides.datasetId ?? "ds-1",
   };
 }
 
@@ -85,12 +88,12 @@ describe("LRUPolicy", () => {
     expect(policy.selectVictims(entries, 250).map(v => v.chunkKey)).toEqual(["a", "b", "c"]);
   });
 
-  it("works with the generic EvictableEntry shape (proxy adapter)", () => {
-    interface ProxyShim extends EvictableEntry {
+  it("works with a generic keyed EvictableEntry adapter", () => {
+    interface KeyedEntry extends EvictableEntry {
       key: string;
     }
-    const policy = new LRUPolicy<ProxyShim>();
-    const entries: ProxyShim[] = [
+    const policy = new LRUPolicy<KeyedEntry>();
+    const entries: KeyedEntry[] = [
       { insertedAt: 2, sizeBytes: 50, key: "c" },
       { insertedAt: 0, sizeBytes: 50, key: "a" },
       { insertedAt: 1, sizeBytes: 50, key: "b" },
@@ -234,7 +237,7 @@ describe("TieredPolicy", () => {
     expect(victims.map(v => v.chunkKey)).toEqual(["older"]);
   });
 
-  describe("active-detail tiebreaker (lastSeenTick ↑, priority ↓, insertedAt ↑)", () => {
+  describe("active-detail tiebreaker (unwanted, priority ↓, touch age, insertion age)", () => {
     // Scrubbing puts active-detail second; with no prefetch entries to
     // exhaust first this isolates the active-tier sort logic. Use
     // scrubbing so the tier reaches active-detail without skipping it.
@@ -242,7 +245,21 @@ describe("TieredPolicy", () => {
       return makePolicy(mode);
     }
 
-    it("oldest lastSeenTick goes first (key #1)", () => {
+    it("unwanted entries go before wanted entries regardless of plan metadata", () => {
+      const policy = activeOnly();
+      const wanted = makeEntry({
+        insertedAt: 0, sizeBytes: 50, tier: "active-detail",
+        chunkKey: "wanted", wanted: true, lastSeenTick: 1, priority: 100,
+      });
+      const unwanted = makeEntry({
+        insertedAt: 5, sizeBytes: 50, tier: "active-detail",
+        chunkKey: "unwanted", wanted: false, lastSeenTick: 10, priority: 0,
+      });
+      expect(policy.selectVictims([wanted, unwanted], 50).map(v => v.chunkKey))
+        .toEqual(["unwanted"]);
+    });
+
+    it("oldest lastSeenTick goes first when wanted state and priority tie", () => {
       const policy = activeOnly();
       const recent = makeEntry({
         insertedAt: 0, sizeBytes: 50, tier: "active-detail",
@@ -256,22 +273,22 @@ describe("TieredPolicy", () => {
       expect(victims.map(v => v.chunkKey)).toEqual(["stale"]);
     });
 
-    it("on lastSeenTick tie, highest priority NUMBER goes first (key #2)", () => {
+    it("highest priority NUMBER goes first even when it was touched more recently", () => {
       // priority descending = farthest-from-focal (highest number) first.
       const policy = activeOnly();
       const focal = makeEntry({
         insertedAt: 0, sizeBytes: 50, tier: "active-detail",
-        chunkKey: "focal", lastSeenTick: 5, priority: 0,
+        chunkKey: "focal", lastSeenTick: 1, priority: 0,
       });
       const distant = makeEntry({
         insertedAt: 5, sizeBytes: 50, tier: "active-detail",
-        chunkKey: "distant", lastSeenTick: 5, priority: 100,
+        chunkKey: "distant", lastSeenTick: 10, priority: 100,
       });
       const victims = policy.selectVictims([focal, distant], 50);
       expect(victims.map(v => v.chunkKey)).toEqual(["distant"]);
     });
 
-    it("on (lastSeenTick, priority) tie, oldest insertedAt goes first (key #3)", () => {
+    it("on (wanted, priority, lastSeenTick) tie, oldest insertedAt goes first", () => {
       const policy = activeOnly();
       const newer = makeEntry({
         insertedAt: 99, sizeBytes: 50, tier: "active-detail",
@@ -287,7 +304,7 @@ describe("TieredPolicy", () => {
 
     it("full ordering: stale + distant + focal + freshly-planned", () => {
       const policy = activeOnly();
-      // Four active-detail entries crafted to exercise all three keys.
+      // Four active-detail entries crafted to exercise all keys.
       const focalFresh = makeEntry({
         insertedAt: 0, sizeBytes: 10, tier: "active-detail",
         chunkKey: "focalFresh", lastSeenTick: 10, priority: 0,
@@ -305,18 +322,18 @@ describe("TieredPolicy", () => {
         chunkKey: "focalStaleOld", lastSeenTick: 1, priority: 0,
       });
       // Need all 40 bytes; expected eviction order:
-      //   focalStaleOld (lastSeenTick 1, prio 0, insertedAt 0)
-      //   focalStale    (lastSeenTick 1, prio 0, insertedAt 2)
-      //   distantFresh  (lastSeenTick 10, prio 50)
+      //   distantFresh  (prio 50)
+      //   focalStaleOld (prio 0, lastSeenTick 1, insertedAt 0)
+      //   focalStale    (prio 0, lastSeenTick 1, insertedAt 2)
       //   focalFresh    (lastSeenTick 10, prio 0)
       const victims = policy.selectVictims(
         [focalFresh, distantFresh, focalStale, focalStaleOld],
         40,
       );
       expect(victims.map(v => v.chunkKey)).toEqual([
+        "distantFresh",
         "focalStaleOld",
         "focalStale",
-        "distantFresh",
         "focalFresh",
       ]);
     });

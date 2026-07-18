@@ -10,7 +10,7 @@ import { AnnotationOverlay } from "./components/AnnotationOverlay.tsx";
 import type { Annotation, AnnotationOverlayHandle } from "./components/annotationDocument.ts";
 import { AnnotationOverlay3D } from "./components/AnnotationOverlay3D.tsx";
 import { AnnotationDraftOverlay } from "./components/AnnotationDraftOverlay.tsx";
-import type { AnnotationDraft } from "./components/annotationDraft.ts";
+import { AnnotationDraftStore } from "./components/annotationDraft.ts";
 import { MentionsOfMe } from "./components/MentionsOfMe.tsx";
 import {
   currentDatasetAnnotations,
@@ -19,17 +19,21 @@ import {
 import { FpsCounter } from "./components/FpsCounter.tsx";
 import { FileBrowser } from "./components/FileBrowser.tsx";
 import { CollectionSelector, extractCollectionData } from "./components/CollectionSelector.tsx";
+import { PersistentViewerOverlays } from "./components/PersistentViewerOverlays.tsx";
 import { ShareToolbarButton } from "./components/ShareToolbarButton.tsx";
+import { ViewportHistoryControls } from "./components/ViewportHistoryControls.tsx";
 import { LoadingViewBanner } from "./components/LoadingViewBanner.tsx";
+import { ViewportLoadingIndicator } from "./components/ViewportLoadingIndicator.tsx";
 import { ImportWarningBanner } from "./components/ImportWarningBanner.tsx";
+import { OperationStatus } from "./components/OperationStatus.tsx";
 import { WorkspaceSavedViewsSidebar } from "./components/WorkspaceSavedViewsSidebar.tsx";
 import { ExplorationPanel, type Dims } from "./components/ExplorationPanel.tsx";
 import { makeThumbnailRequester } from "./exploreThumbnails.ts";
 import { WorkspaceSharingDialog } from "./WorkspaceSharingDialog.tsx";
-import { applyViewportCommand } from "./applyAndSend.ts";
+import { createViewportCoordinator, createViewportHistory } from "./viewportCoordinator.ts";
+import type { ViewportCommand } from "./commands.ts";
 import {
   invalidateDisplaySettings,
-  invalidateAfterViewRestore,
   requestRender,
 } from "./invalidation.ts";
 import { annotationAuthorId } from "./annotationIdentity.ts";
@@ -42,14 +46,17 @@ import type { DatasetState } from "./types.ts";
 import { useWasmScene } from "./hooks/useWasmScene.ts";
 import { useRenderClient } from "./hooks/useRenderClient.ts";
 import { useLayout } from "./hooks/useLayout.ts";
-import { useDatasetSettings, type BridgeCallbacks, type DatasetCallbacks } from "./hooks/useDatasetSettings.ts";
+import { useModalDialog } from "./hooks/useModalDialog.ts";
+import { useDatasetSettings, type SceneMutationCallbacks, type DatasetCallbacks } from "./hooks/useDatasetSettings.ts";
 import { useDimensions } from "./hooks/useDimensions.ts";
+import { syncSceneViewState } from "./hooks/sceneViewState.ts";
 import { useBridge } from "./hooks/useBridge.ts";
 import { useDatasets } from "./hooks/useDatasets.ts";
 import { useSeedDatasetOpens } from "./hooks/useSeedDatasetOpens.ts";
 import { useIntensityBatcher } from "./hooks/useIntensityBatcher.ts";
 import { useSavedViewSync } from "./hooks/useSavedViewSync.ts";
 import { useViewedMentions } from "./hooks/useViewedMentions.ts";
+import { useLatestOperation } from "./hooks/useLatestOperation.ts";
 import type { SavedView } from "./savedView/types.ts";
 import { restoreAnnotationView } from "./savedView/restoreAnnotationView.ts";
 import { useAnnotationDeepLink } from "./hooks/useAnnotationDeepLink.ts";
@@ -118,6 +125,7 @@ function App({
   // accessed unauthenticated. We forward the email to saved-view UI for
   // the "Mine only" filter.
   const authSession = useAuthSession();
+  const [viewportHistory] = useState(() => createViewportHistory(workspaceId));
 
   // Stable, browser-persisted annotation author identity (issue #777). This is
   // the identity used ONLY for the annotation `author:` field and the
@@ -164,10 +172,17 @@ function App({
   // and view-specific without leaking overlay internals into App.
   const overlay2dRef = useRef<AnnotationOverlayHandle | null>(null);
   const overlay3dRef = useRef<AnnotationOverlayHandle | null>(null);
+  const nextAnnotationFocusIdRef = useRef(1);
+  const annotationFocusCompletionsRef = useRef(new Map<number, () => void>());
+  const [pendingAnnotationFocus, setPendingAnnotationFocus] = useState<{
+    requestId: number;
+    pinId: string;
+    mode: "2d" | "3d";
+  } | null>(null);
   // Shared channel for the live box/line draw preview (issue: shapes only
   // appeared on release). The canvas gesture handlers (SliceViewer/VolumeViewer)
   // write the in-progress shape here; AnnotationDraftOverlay renders it.
-  const annotationDraftRef = useRef<AnnotationDraft | null>(null);
+  const [annotationDraft] = useState(() => new AnnotationDraftStore());
   const [datasetsVersion, setDatasetsVersion] = useState(0);
   const [remoteDocumentVersion, setRemoteDocumentVersion] = useState(0);
   // Workspace member roster for @-mention candidates (issue #526). Best-effort:
@@ -198,6 +213,8 @@ function App({
     source: workspaceName,
     value: workspaceName,
   });
+  const workspaceRenameOperation = useLatestOperation();
+  const workspaceRenameOperationKey = `rename:workspace:${workspaceId}`;
   const bumpDatasetsVersion = useCallback(() => setDatasetsVersion(v => v + 1), []);
   const bumpRemoteDocumentVersion = useCallback(() => setRemoteDocumentVersion(v => v + 1), []);
   const workspaceNameDraft = workspaceNameEdit.source === workspaceName
@@ -207,11 +224,9 @@ function App({
 
   // Callback refs to break circular dependencies.
   // Populated after all hooks return but before effects run on first render.
-  const bridgeCallbacksRef = useRef<BridgeCallbacks>({
+  const bridgeCallbacksRef = useRef<SceneMutationCallbacks>({
     sendCommand: () => {},
-    emitPresence: () => {},
-    emitDatasetPresence: () => {},
-    breakFollow: () => {},
+    mutateViewport: () => false,
   });
   const datasetCallbacksRef = useRef<DatasetCallbacks>({
     removeDataset: () => {},
@@ -221,7 +236,7 @@ function App({
   const savedViewHooksRef = useRef<{
     onDatasetOpened: (id: string) => void;
     onOpenDatasetFailed: (url: string, err: string) => void;
-    isInProgress: () => boolean;
+    ownsDatasetOpen: (id: string) => boolean;
   } | null>(null);
 
   // Domain hooks (order matters: earlier hooks use refs for later hooks' values).
@@ -233,7 +248,6 @@ function App({
     datasetsRef,
     datasetsVersion,
     bridgeCallbacksRef,
-    loopRef: render.loopRef,
   });
 
   const layers = useDatasetSettings({
@@ -396,9 +410,9 @@ function App({
   savedViewHooksRef.current = {
     onDatasetOpened: (id) => savedViewSync.applier.notifyDatasetOpened(id),
     onOpenDatasetFailed: (url, err) => savedViewSync.applier.notifyOpenFailed(url, err),
-    // So the bridge can suppress auto-fit-on-open while a saved/last view is
-    // restoring its own camera (#700).
-    isInProgress: () => savedViewSync.applier.isInProgress(),
+    // Explicit ownership correlation replaces the old global timing check: only
+    // a dataset open belonging to this apply generation suppresses auto-fit.
+    ownsDatasetOpen: (id) => savedViewSync.applier.ownsDatasetOpen(id),
   };
 
   const datasets = useDatasets({
@@ -442,31 +456,72 @@ function App({
   // Id of the saved view currently applied to the viewer, if any. The sidebar
   // highlights the matching row so the user sees which view they're looking at.
   // Set on a successful open (below); CLEARED the moment the live view diverges
-  // from it — see `emitPresenceWithUrl`, the single signal every viewport
-  // mutation funnels through — so the highlight means "the view on screen",
+  // from it — see `recordLiveViewport`, emitted only by the viewport coordinator
+  // after a successful mutation — so the highlight means "the view on screen",
   // not "the last row I clicked" (#818).
   const [currentOpenSavedViewId, setCurrentOpenSavedViewId] = useState<string | null>(null);
 
-  // Wrapped emitPresence/emitDatasetPresence — every viewport mutation
-  // co-taps urlSync.notifyChange() so the URL stays in sync (Bug #1 fix:
-  // changeTick alone doesn't bump on viewport-only mutations like
-  // pan/zoom/T/C/Z/contrast). Used here AND threaded into SliceViewer /
-  // VolumeViewer / CollectionSelector / handleCameraModeToggle
-  // — anywhere a viewport mutation already calls bridge.emitPresence.
-  const emitPresenceWithUrl = useCallback(() => {
-    bridge.emitPresence();
-    savedViewSync.notifyChange();
+  // The coordinator's live-view effect: every successful local viewport
+  // mutation co-taps URL/last-view capture and invalidates any active saved-view
+  // highlight. Components never receive raw presence/repaint callbacks, so they
+  // cannot assemble only part of the effect contract.
+  const notifySavedViewChange = savedViewSync.notifyChange;
+  const recordLiveViewport = useCallback(() => {
+    notifySavedViewChange();
     // A viewport mutation (pan / zoom / Z / T / C / mode / multi-channel) means
     // the live view no longer equals the opened saved view, so drop the active
     // -row highlight (#818). Functional + guarded so it's a no-op (no re-render)
     // when nothing is highlighted — this fires on every pan frame.
     setCurrentOpenSavedViewId((prev) => (prev === null ? prev : null));
-  }, [bridge, savedViewSync]);
-  const emitDatasetPresenceWithUrl = useCallback(() => {
-    bridge.emitDatasetPresence();
-    savedViewSync.notifyChange();
-  }, [bridge, savedViewSync]);
+  }, [notifySavedViewChange]);
+  const sendCursor = bridge.sendCursor;
+  const sendCursorForSelectedDataset = useCallback(
+    (position: [number, number] | null) => sendCursor(position, selectedDatasetId),
+    [selectedDatasetId, sendCursor],
+  );
 
+  const bumpLayerSettingsVersionAfterRestore = layers.bumpLayerSettingsVersion;
+  const {
+    setC: setHistoryC,
+    setT: setHistoryT,
+    setZ: setHistoryZ,
+    setViewMode: setHistoryViewMode,
+    setMultiChannel: setHistoryMultiChannel,
+  } = dims;
+  const afterHistoryRestore = useCallback((restoredScene: import("lucida-core").WasmScene) => {
+    syncSceneViewState(restoredScene, {
+      setZ: setHistoryZ,
+      setT: setHistoryT,
+      setC: setHistoryC,
+      setViewMode: setHistoryViewMode,
+      setMultiChannel: setHistoryMultiChannel,
+    });
+    bumpLayerSettingsVersionAfterRestore();
+  }, [
+    bumpLayerSettingsVersionAfterRestore,
+    setHistoryC,
+    setHistoryMultiChannel,
+    setHistoryT,
+    setHistoryViewMode,
+    setHistoryZ,
+  ]);
+
+  const viewport = useMemo(
+    () => createViewportCoordinator({
+      sceneRef: scene.wasmSceneRef,
+      loopRef: render.loopRef,
+      breakFollow: bridge.breakFollow,
+      emitPresence: bridge.emitPresence,
+      emitDatasetPresence: bridge.emitDatasetPresence,
+      recordLiveView: recordLiveViewport,
+      history: viewportHistory,
+      afterHistoryRestore,
+    }),
+    [afterHistoryRestore, bridge.breakFollow, bridge.emitDatasetPresence, bridge.emitPresence, recordLiveViewport, render.loopRef, scene.wasmSceneRef, viewportHistory],
+  );
+  useEffect(() => {
+    viewport.setHistoryScope(workspaceId);
+  }, [viewport, workspaceId]);
   // Fetch the workspace member roster for @-mention handles (issue #526) once per
   // workspace. Best-effort: `getWorkspaceSharing` is owner-only and unavailable
   // offline, so any failure just leaves `workspaceMembers` empty and the picker
@@ -521,7 +576,13 @@ function App({
   // datasets. Personal state only — never synced, no command, no Rust. The
   // <MentionsOfMe> badge counts only ids NOT in this set, and a click on an item
   // marks it viewed (composed with the navigate below).
-  const { viewedCommentIds, markViewed } = useViewedMentions(selectedDatasetId);
+  const mentionDatasetId = useMemo(
+    () => resolveAnnotationDatasetId(scene.wasmSceneRef.current, selectedDatasetId),
+    // Re-resolve when either selection or the annotation document changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [scene.wasmSceneRef, selectedDatasetId, remoteDocumentVersion],
+  );
+  const { viewedCommentIds, markViewed } = useViewedMentions(mentionDatasetId);
 
   const mentionCandidates = useMemo(() => {
     return deriveMentionCandidates({
@@ -554,40 +615,72 @@ function App({
   // handled internally). Reused by both the no-view fallback AND the passive
   // canvas pin-select (which stays gentle by design).
   const gentleOnContext = useCallback((pin: Annotation) => {
-    const ws = scene.wasmSceneRef.current;
     const targetZ = pin.z ?? 0;
     const targetT = pin.t ?? 0;
     const targetC = pin.c ?? 0;
-    let contextChanged = false;
+    const commands: ViewportCommand[] = [];
     if (targetZ !== dims.z) {
-      dims.setZ(targetZ);
-      if (ws) applyViewportCommand(ws, { type: "set_z", z: targetZ });
-      contextChanged = true;
+      commands.push({ type: "set_z", z: targetZ });
     }
     if (targetT !== dims.t) {
-      dims.setT(targetT);
-      if (ws) applyViewportCommand(ws, { type: "set_t", t: targetT });
-      contextChanged = true;
+      commands.push({ type: "set_t", t: targetT });
     }
     if (targetC !== dims.c) {
-      dims.setC(targetC);
-      if (ws) applyViewportCommand(ws, { type: "set_c", c: targetC });
-      contextChanged = true;
+      commands.push({ type: "set_c", c: targetC });
     }
-    if (contextChanged) {
-      bridge.breakFollow();
-      emitPresenceWithUrl();
+    if (
+      commands.length > 0 &&
+      viewport.apply(commands, { source: "annotation_context" })
+    ) {
+      // React is a mirror, not a second authority: update it only after the
+      // canonical scene batch committed successfully.
+      if (targetZ !== dims.z) dims.setZ(targetZ);
+      if (targetT !== dims.t) dims.setT(targetT);
+      if (targetC !== dims.c) dims.setC(targetC);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- stable setters/bridge/emit/scene ref; see note above.
-  }, [dims.z, dims.t, dims.c]);
+  }, [dims.z, dims.t, dims.c, dims.setZ, dims.setT, dims.setC, viewport]);
 
-  // Focus a pin in whichever overlay is mounted for a GIVEN view mode (2D vs
-  // 3D). Pass the mode explicitly because a just-restored 3D camera may have
-  // flipped the view mode out from under the live `dims.viewMode` this render.
-  const focusPinForMode = useCallback((pinId: string, mode: "2d" | "3d") => {
-    const handle = mode === "3d" ? overlay3dRef.current : overlay2dRef.current;
-    handle?.focusPin(pinId);
+  // Queue focus against the overlay implied by the RESTORED mode. The overlay
+  // handle returns a promise that resolves only when its authoritative pin set
+  // contains the target and the coordinator-backed camera mutation has
+  // completed. This is the observable mount/mutation boundary: mode switches,
+  // dataset selection, and hidden-overlay reveals no longer rely on a same-frame
+  // requestAnimationFrame guess.
+  const queuePinFocus = useCallback((
+    pinId: string,
+    mode: "2d" | "3d",
+    onFocused?: () => void,
+  ) => {
+    const requestId = nextAnnotationFocusIdRef.current++;
+    if (onFocused) annotationFocusCompletionsRef.current.set(requestId, onFocused);
+    setPendingAnnotationFocus({ requestId, pinId, mode });
   }, []);
+
+  useEffect(() => {
+    if (!pendingAnnotationFocus) return;
+    const { requestId, pinId, mode } = pendingAnnotationFocus;
+    const handle = mode === "3d" ? overlay3dRef.current : overlay2dRef.current;
+    if (!handle) return;
+    let cancelled = false;
+    void handle.focusPin(pinId).then((focused) => {
+      if (cancelled) return;
+      const completion = annotationFocusCompletionsRef.current.get(requestId);
+      annotationFocusCompletionsRef.current.delete(requestId);
+      setPendingAnnotationFocus((current) =>
+        current?.requestId === requestId ? null : current);
+      if (focused) completion?.();
+    }).catch((error) => {
+      if (cancelled) return;
+      annotationFocusCompletionsRef.current.delete(requestId);
+      setPendingAnnotationFocus((current) =>
+        current?.requestId === requestId ? null : current);
+      console.warn("[Annotation] focus failed:", error);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [pendingAnnotationFocus]);
 
   // The FULL (light) restore of an annotation's captured view — the
   // explicit-navigation tier. Restores the author's camera (incl. switching the
@@ -600,19 +693,18 @@ function App({
   // ends up on-context; an out-of-extent capture clamps gracefully with a
   // non-blocking notice. An annotation with NO captured view falls back to the
   // gentle recenter (today's behavior — no regression).
-  const restoreCapturedView = useCallback((pin: Annotation, datasetIdOverride?: string) => {
+  const restoreCapturedView = useCallback((
+    pin: Annotation,
+    datasetIdOverride?: string,
+    onFocused?: () => void,
+  ) => {
     const ws = scene.wasmSceneRef.current;
     if (!ws || !pin.view) {
       // No view (older pin) or no scene: degrade to exactly today's gentle path,
       // then focus in the current mode.
       gentleOnContext(pin);
-      const focus = () => focusPinForMode(pin.id, dims.viewMode);
-      if (!annotationsVisible) {
-        setAnnotationsVisible(true);
-        requestAnimationFrame(focus);
-      } else {
-        focus();
-      }
+      if (!annotationsVisible) setAnnotationsVisible(true);
+      queuePinFocus(pin.id, dims.viewMode, onFocused);
       return;
     }
 
@@ -632,13 +724,16 @@ function App({
     // way the pin set was read.
     const pinDatasetId =
       datasetIdOverride ?? resolveAnnotationDatasetId(ws, selectedDatasetId) ?? undefined;
-    const result = restoreAnnotationView({
-      scene: ws,
-      view: pin.view,
-      datasetId: pinDatasetId,
-      dimensionExtentsFor: dims.dimensionExtentsFor,
-      labelNamesFor: dims.labelNamesFor,
-    });
+    let result!: ReturnType<typeof restoreAnnotationView>;
+    viewport.commit(() => {
+      result = restoreAnnotationView({
+        scene: ws,
+        view: pin.view!,
+        datasetId: pinDatasetId,
+        dimensionExtentsFor: dims.dimensionExtentsFor,
+        labelNamesFor: dims.labelNamesFor,
+      });
+    }, { source: "annotation_view_restore", invalidation: "restore" });
 
     // Mirror the restored scene state into React (the restore wrote to WASM
     // only — without this the Z/T/C sliders + mode toggles stay stale). Push the
@@ -657,49 +752,30 @@ function App({
         // best-effort mirror; the scene command already switched the mode.
       }
     }
-    bridge.breakFollow();
-    emitPresenceWithUrl();
-    invalidateAfterViewRestore(render.loopRef.current, "annotation_view_restore");
-
     // Surface the graceful-degrade notice (auto-clears below).
     setRestoreNotice(result.notice);
 
-    // Focus the pin AFTER the restore. If the camera MODE flipped (a different
-    // overlay must mount) OR annotations were hidden, defer one frame so the
-    // correct overlay's imperative ref exists before we call into it. Focus uses
-    // the RESTORED mode, not the (possibly stale) live `dims.viewMode`.
-    const focus = () => focusPinForMode(pin.id, result.viewMode);
-    const needsRemount = result.cameraModeChanged || !annotationsVisible;
+    // Focus the pin AFTER the restore through the overlay's observable
+    // availability promise. A mode flip/hidden overlay may mount later; focus
+    // waits for that actual boundary and uses the RESTORED mode.
     if (!annotationsVisible) setAnnotationsVisible(true);
-    if (needsRemount) {
-      requestAnimationFrame(focus);
-    } else {
-      focus();
-    }
+    queuePinFocus(pin.id, result.viewMode, onFocused);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- stable setters/bridge/emit/render refs/scene ref; reactive deps listed.
-  }, [dims.viewMode, dims.dimensionExtentsFor, dims.labelNamesFor, annotationsVisible, selectedDatasetId, gentleOnContext, focusPinForMode]);
+  }, [dims.viewMode, dims.dimensionExtentsFor, dims.labelNamesFor, dims.setZ, dims.setT, dims.setC, dims.setMultiChannel, dims.setViewMode, annotationsVisible, selectedDatasetId, gentleOnContext, queuePinFocus, viewport, scene.wasmSceneRef]);
 
   // Explicit navigation to a mentioning comment (issue #526) now performs the
   // FULL restore when the pin carries the author's captured view, and falls back
   // to today's gentle recenter when it doesn't (older pins). This is the user's
   // core intent for an explicit jump: "go to the view the author had."
-  // eslint-disable-next-line react-hooks/preserve-manual-memoization -- the compiler infers the stable `setAnnotationsVisible` setter as a dep; the manual deps are the reactive values actually read.
   const handleNavigateToMention = useCallback((pinId: string) => {
     const pin = currentAnnotations.find((p) => p.id === pinId);
     if (!pin) {
-      // Unknown pin: keep the old safe focus attempt (no-op if the overlay lacks
-      // it) so a stale id never wedges navigation.
-      const focus = () => focusPinForMode(pinId, dims.viewMode);
-      if (!annotationsVisible) {
-        setAnnotationsVisible(true);
-        requestAnimationFrame(focus);
-      } else {
-        focus();
-      }
+      // Unknown/stale pin ids are a safe no-op; queuing one would leave an
+      // impossible request waiting forever for an annotation that was deleted.
       return;
     }
     restoreCapturedView(pin);
-  }, [currentAnnotations, restoreCapturedView, focusPinForMode, dims.viewMode, annotationsVisible]);
+  }, [currentAnnotations, restoreCapturedView]);
 
   // The pin thread/popover's "Go to author's view" affordance (slice 2): the
   // EXPLICIT, on-demand full restore for a pin selected passively on the canvas.
@@ -721,25 +797,18 @@ function App({
   //
   // The pin may live on a dataset that isn't currently selected; selecting it
   // first mounts that dataset's overlay so `focusPin` (inside restoreCapturedView)
-  // can actually open the thread. When selection changes we defer the restore one
-  // frame so the overlay's imperative ref exists before we focus.
+  // can actually open the thread. Restore happens immediately; the queued focus
+  // waits for the selected overlay's real availability signal.
   const restoreAnnotationDeepLinkPin = useCallback(
     (pin: Annotation, datasetId: string, onRestored: () => void) => {
       // Collapse `#a=`→`#view=` only AFTER the restore has applied, so the URL
-      // captures the restored camera, not the pre-restore one. When the pin is
-      // on a not-yet-selected dataset the restore is deferred a frame (the
-      // overlay must mount first); the collapse must ride the SAME frame, else a
-      // copy/refresh in that window grabs the stale view.
-      const run = () => {
-        restoreCapturedView(pin, datasetId);
-        onRestored();
-      };
+      // captures the restored + pin-centered camera, not the pre-restore one.
+      // The completion callback is driven by the focus promise, so a refresh or
+      // copy cannot land in a guessed animation-frame ordering window.
       if (selectedDatasetId !== datasetId) {
         setSelectedDatasetId(datasetId);
-        requestAnimationFrame(run);
-      } else {
-        run();
       }
+      restoreCapturedView(pin, datasetId, onRestored);
     },
     [restoreCapturedView, selectedDatasetId],
   );
@@ -770,9 +839,7 @@ function App({
   // eslint-disable-next-line react-hooks/refs
   bridgeCallbacksRef.current = {
     sendCommand: bridge.sendCommand,
-    emitPresence: emitPresenceWithUrl,
-    emitDatasetPresence: emitDatasetPresenceWithUrl,
-    breakFollow: bridge.breakFollow,
+    mutateViewport: viewport.apply,
   };
   // eslint-disable-next-line react-hooks/refs
   datasetCallbacksRef.current = {
@@ -795,10 +862,7 @@ function App({
   // Side-effect hooks.
 
   // Expose the tickCoordinator + cpuCache on `window.__orch` (also
-  // aliased as `__lucidaOrch`) so the dev console can call
-  // `requestTestProxy(datasetId, entityId, imageId, kind, t, c)` to
-  // verify the proxy fetch wire flow. Dev builds only: requestTestProxy
-  // issues real fetches, so production gets no such hook. (The
+  // aliased as `__lucidaOrch`) for development inspection. (The
   // load-bearing capture globals — `__lucidaCaptureReady` published by
   // renderLoop.ts, `__lucidaAutoContrast` by useIntensityBatcher.ts —
   // are a separate contract and stay present in every build; the CLI
@@ -812,14 +876,6 @@ function App({
     const debug = {
       tickCoordinator: coord,
       cpuCache: cache,
-      requestTestProxy: (
-        datasetId: string,
-        entityId: string,
-        imageId: string,
-        kind: "GroupProxy3D" | "TileProxy3D",
-        t = 0,
-        c = 0,
-      ) => coord.requestTestProxy(cache, datasetId, entityId, imageId, kind, t, c),
     };
     const w = window as unknown as { __orch?: typeof debug; __lucidaOrch?: typeof debug };
     w.__orch = debug;
@@ -835,9 +891,7 @@ function App({
     clientRef: render.clientRef,
     autoContrastMapRef: layers.autoContrastMapRef,
     wasmSceneRef: scene.wasmSceneRef,
-    loopRef: render.loopRef,
-    sessionRef: bridge.sessionRef,
-    datasetsRef,
+    viewport,
     setDataRangeMap: layers.setDataRangeMap,
   });
 
@@ -850,10 +904,15 @@ function App({
     if (!client || !ws) {
       return;
     }
+    if (!selectedDatasetId) {
+      client.updateCursorData(new Float32Array(0), 0);
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setCursorLabels([]);
+      return;
+    }
     if (bridge.peers.size === 0) {
       client.updateCursorData(new Float32Array(0), 0);
       // Reset on no-peers — the peers Map IS the external state we sync to.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setCursorLabels([]);
       return;
     }
@@ -870,15 +929,24 @@ function App({
           const center = mode === "slice"
             ? (p.camera as { center?: [number, number] })?.center ?? [0, 0]
             : [0.5, 0.5];
-          return { id: p.client_id, cursor: center, mode, camera: p.camera, view_z: p.view?.z_range?.start, label_only: true };
+          return { id: p.client_id, cursor: center, dataset_id: p.cursor_dataset_id ?? null, mode, camera: p.camera, view_z: p.view?.z_range?.start, label_only: true };
         }
-        return { id: p.client_id, cursor: p.cursor, mode, camera: p.camera, view_z: p.view?.z_range?.start, label_only: false };
+        return { id: p.client_id, cursor: p.cursor, dataset_id: p.cursor_dataset_id ?? null, mode, camera: p.camera, view_z: p.view?.z_range?.start, label_only: false };
       });
     const canvasEl = render.canvasRef.current;
     const dpr = window.devicePixelRatio || 1;
-    const screenW = Math.round((canvasEl?.clientWidth ?? 800) * dpr);
-    const screenH = Math.round((canvasEl?.clientHeight ?? 600) * dpr);
-    const resultJson = ws.compute_peer_cursors(JSON.stringify(peersArr), bridge.myId, screenW, screenH);
+    // Slice peer labels share the persisted CSS-logical camera. Volume camera
+    // projection/picking remains physical-pixel based.
+    const screenScale = dims.viewMode === "3d" ? dpr : 1;
+    const screenW = Math.round((canvasEl?.clientWidth ?? 800) * screenScale);
+    const screenH = Math.round((canvasEl?.clientHeight ?? 600) * screenScale);
+    const resultJson = ws.compute_peer_cursors(
+      selectedDatasetId,
+      JSON.stringify(peersArr),
+      bridge.myId,
+      screenW,
+      screenH,
+    );
     const result = JSON.parse(resultJson) as {
       gpu: number[][];
       labels: { id: number; sx: number; sy: number }[];
@@ -896,7 +964,7 @@ function App({
 
     setCursorLabels(result.labels);
     requestRender(render.loopRef.current, "peer_cursors");
-  }, [bridge.peers, bridge.myId, bridge.followTarget, dims.viewMode, render.clientReady, scene.wasmReady, render.clientRef, scene.wasmSceneRef, render.loopRef, render.canvasRef]);
+  }, [bridge.peers, bridge.myId, bridge.followTarget, dims.viewMode, selectedDatasetId, render.clientReady, scene.wasmReady, render.clientRef, scene.wasmSceneRef, render.loopRef, render.canvasRef]);
 
   // Auto-clear the light-restore graceful-degrade notice a few seconds after it
   // appears, so it reads as a transient "FYI we adjusted to fit" rather than a
@@ -912,6 +980,28 @@ function App({
     setCameraMode(mode);
   }, []);
 
+  const handleViewerCanvasKeyDown = useCallback((e: React.KeyboardEvent<HTMLCanvasElement>) => {
+    if (dims.viewMode !== "2d") return;
+    const step = e.shiftKey ? 128 : 32;
+    let command: ViewportCommand | null = null;
+    if (e.key === "ArrowLeft") command = { type: "pan", dx: -step, dy: 0 };
+    else if (e.key === "ArrowRight") command = { type: "pan", dx: step, dy: 0 };
+    else if (e.key === "ArrowUp") command = { type: "pan", dx: 0, dy: -step };
+    else if (e.key === "ArrowDown") command = { type: "pan", dx: 0, dy: step };
+    else if (e.key === "+" || e.key === "=") command = { type: "zoom_by", factor: 1.1 };
+    else if (e.key === "-" || e.key === "_") command = { type: "zoom_by", factor: 0.9 };
+    if (!command) return;
+    e.preventDefault();
+    viewport.apply(command, {
+      source: "slice_keyboard_navigation",
+      history: {
+        label: command.type === "pan" ? "keyboard pan" : "keyboard zoom",
+        coalesceKey: `slice_keyboard_${command.type}`,
+        coalesceWindowMs: 250,
+      },
+    });
+  }, [dims.viewMode, viewport]);
+
   // The three useCallbacks below trip react-hooks/preserve-manual-memoization
   // because the deps array references refs (e.g. scene.wasmSceneRef) while
   // the body reads .current — React Compiler infers the .current as the real
@@ -923,22 +1013,21 @@ function App({
   const handleCameraModeToggle = useCallback(() => {
     const ws = scene.wasmSceneRef.current;
     if (!ws) return;
-    const currentMode = ws.camera_mode();
-    if (currentMode === "fly") {
-      ws.set_mode_arcball();
-    } else if (currentMode === "arcball") {
-      ws.set_mode_fly();
-      const BASE_SPEED_FACTOR = 0.3;
-      const diagonal = ws.volume_diagonal();
-      ws.fly_set_base_speed(diagonal * BASE_SPEED_FACTOR);
-    }
+    viewport.commit(() => {
+      const currentMode = ws.camera_mode();
+      if (currentMode === "fly") {
+        ws.set_mode_arcball();
+      } else if (currentMode === "arcball") {
+        ws.set_mode_fly();
+        const BASE_SPEED_FACTOR = 0.3;
+        const diagonal = ws.dataset_volume_diagonal(selectedDatasetId ?? "");
+        ws.fly_set_base_speed(diagonal * BASE_SPEED_FACTOR);
+      }
+    }, { source: "camera_mode_toggle" });
     const newMode = ws.camera_mode();
     setCameraMode(newMode);
-    bridge.breakFollow();
-    emitPresenceWithUrl();
-    requestRender(render.loopRef.current, "camera_mode_toggle");
     render.canvasRef.current?.focus();
-  }, [scene.wasmSceneRef, bridge, emitPresenceWithUrl, render.loopRef, render.canvasRef]);
+  }, [scene.wasmSceneRef, viewport, render.canvasRef, selectedDatasetId]);
 
   const [urlInput, setUrlInput] = useState("");
   // eslint-disable-next-line react-hooks/preserve-manual-memoization
@@ -951,6 +1040,21 @@ function App({
 
   const [showFileBrowser, setShowFileBrowser] = useState(false);
   const [showDebug, setShowDebug] = useState(false);
+  const [mobileLayersOpen, setMobileLayersOpen] = useState(false);
+  const hasMobileLayersDrawer = !renderMode && !layout.sidebarVisible;
+  const mobileLayersModalOpen = hasMobileLayersDrawer && mobileLayersOpen;
+  const closeMobileLayers = useCallback(() => setMobileLayersOpen(false), []);
+  const mobileLayersTriggerRef = useRef<HTMLButtonElement>(null);
+  const mobileLayersCloseRef = useRef<HTMLButtonElement>(null);
+  const {
+    dialogRef: mobileLayersDialogRef,
+    onKeyDown: handleMobileLayersKeyDown,
+  } = useModalDialog({
+    open: mobileLayersModalOpen,
+    onClose: closeMobileLayers,
+    initialFocusRef: mobileLayersCloseRef,
+    returnFocusRef: mobileLayersTriggerRef,
+  });
   // Whether any on-canvas debug overlay is toggled on (persisted in
   // localStorage `debug.overlays`, independent of the panel). Drives the
   // mount of the code-split DebugOverlays layer: with every overlay off
@@ -962,10 +1066,16 @@ function App({
     () => DEBUG_OVERLAYS.some((o) => isOverlayEnabled(o)),
     () => false,
   );
-  const [showBookmarkSidebar, setShowBookmarkSidebar] = useState(true);
-  // Default the Explore panel CLOSED; it remains a user toggle. (It previously
-  // opened on a fresh dataset open to surface the guided-exploration affordance.)
-  const [showExplorePanel, setShowExplorePanel] = useState(false);
+  // One inspector slot prevents Saved Views and Explore from competing for
+  // horizontal space or stacking on top of each other at narrow widths. The
+  // chrome-free capture surface is authoritative over this UI state: Saved
+  // Views is the normal default, but neither inspector may mount for
+  // `?render=1` (a fixed inspector otherwise covers the entire small capture
+  // viewport and the readiness probe can still report a successfully rendered
+  // canvas underneath it).
+  const [inspector, setInspector] = useState<"saved" | "explore" | null>("saved");
+  const showSavedViewsSidebar = !renderMode && inspector === "saved";
+  const showExplorePanel = !renderMode && inspector === "explore";
   const [showWorkspaceSharing, setShowWorkspaceSharing] = useState(false);
 
   const loadedDatasetNames = layers.layerInfos.map((layerInfo) => layerInfo.name);
@@ -1035,10 +1145,10 @@ function App({
     };
   }, [showExplorePanel, render.loopRef, render.activeLoop, datasetsVersion]);
 
-  // Bookmark from the Explore panel: an ephemeral PERSONAL workspace saved view
+  // Save from the Explore panel: turn an ephemeral view into a PERSONAL workspace saved view
   // (guided exploration never auto-shares). Thin wrapper over the workspace API
   // so the panel doesn't need to mount the full saved-views list hook.
-  const handleExploreBookmark = useCallback(
+  const handleExploreSaveView = useCallback(
     (name: string, view: SavedView, visibility: "personal") =>
       createWorkspaceSavedView(workspaceId, name, view, visibility),
     [workspaceId],
@@ -1063,26 +1173,31 @@ function App({
     });
     requestRender(render.loopRef.current, "debug_toggle");
   }, [render.loopRef]);
-  const handleDebugClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+  const handleDebugClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!showDebug) return;
     const rect = e.currentTarget.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
-    setLastClickScreen([(e.clientX - rect.left) * dpr, (e.clientY - rect.top) * dpr]);
-  }, [showDebug]);
+    const scale = dims.viewMode === "3d" ? (window.devicePixelRatio || 1) : 1;
+    setLastClickScreen([(e.clientX - rect.left) * scale, (e.clientY - rect.top) * scale]);
+  }, [showDebug, dims.viewMode]);
 
   const handleFileBrowserSelect = useCallback((path: string) => {
     datasets.handleUrlSubmit(path);
   }, [datasets]);
 
   const savedViewApplier = savedViewSync.applier;
-  const notifySavedViewChange = savedViewSync.notifyChange;
   const handleOpenWorkspaceSavedView = useCallback(async (view: SavedView, savedViewId: string) => {
-    await savedViewApplier.apply(view);
-    notifySavedViewChange();
+    const before = viewport.checkpoint();
+    const settlement = await savedViewApplier.apply(view);
+    if (settlement.status !== "applied") return;
+    const committed = viewport.commitExternal(before, {
+      source: "saved_view_open",
+      history: { label: "saved view" },
+    });
+    if (!committed) return;
     // Remember which saved view is now applied so the sidebar can flag the
     // active row. Set it only after a successful apply.
     setCurrentOpenSavedViewId(savedViewId);
-  }, [savedViewApplier, notifySavedViewChange]);
+  }, [savedViewApplier, viewport]);
 
   // The sidebar tells us when the open saved view stops existing as the user
   // acts on it (deleted / withdrawn / its deferred reject committed); drop the
@@ -1096,26 +1211,80 @@ function App({
   // panel: this is a deliberate navigation, so break peer-follow first, then
   // apply the view and co-tap the URL/last-view sync. Distinct from
   // handleOpenWorkspaceSavedView because there is no saved-view id to flag as
-  // the active row (an explored view is ephemeral until bookmarked).
+  // the active row (an explored view is ephemeral until saved).
   const applyExploreView = useCallback(
     async (view: SavedView) => {
-      bridge.breakFollow();
-      await savedViewApplier.apply(view);
-      notifySavedViewChange();
+      const before = viewport.checkpoint();
+      const settlement = await savedViewApplier.apply(view);
+      if (settlement.status !== "applied") return;
+      // Commit collaboration/history side effects only after the view applied.
+      // A failed transition therefore leaves follow state and navigation intact.
+      viewport.commitExternal(before, {
+        source: "explore_navigation",
+        history: { label: "Explore navigation" },
+      });
     },
-    [bridge, savedViewApplier, notifySavedViewChange],
+    [savedViewApplier, viewport],
   );
 
-  const commitWorkspaceName = useCallback(() => {
-    const next = workspaceNameDraft.trim();
+  const commitWorkspaceName = useCallback(async function renameWorkspace(retryValue?: string) {
+    const next = (retryValue ?? workspaceNameDraft).trim();
     if (!next || next === workspaceName) {
       setWorkspaceNameEdit({ source: workspaceName, value: workspaceName });
+      workspaceRenameOperation.dismiss();
       return;
     }
-    void onRenameWorkspace(next).catch(() => {
-      setWorkspaceNameEdit({ source: workspaceName, value: workspaceName });
+    const attempt = workspaceRenameOperation.begin({
+      key: workspaceRenameOperationKey,
+      pendingMessage: `Renaming workspace to ${next}…`,
+      successMessage: `Workspace renamed to ${next}.`,
+      failureMessage: "Workspace name was not saved.",
+      retry: () => { void renameWorkspace(next); },
     });
-  }, [workspaceNameDraft, workspaceName, onRenameWorkspace]);
+    if (!attempt) return;
+    try {
+      await onRenameWorkspace(next);
+      attempt.succeed();
+    } catch (error) {
+      attempt.fail(error);
+    }
+  }, [
+    workspaceNameDraft,
+    workspaceName,
+    onRenameWorkspace,
+    workspaceRenameOperation,
+    workspaceRenameOperationKey,
+  ]);
+
+  const debugPanelWidth = showDebug ? Math.min(300, Math.max(0, layout.canvasWidth - 1)) : 0;
+  const visibleCanvasWidth = Math.max(1, layout.canvasWidth - debugPanelWidth);
+
+  /* eslint-disable react-hooks/refs */
+  const collectionSelector = (() => {
+    if (datasetsVersion <= 0 || dims.viewMode !== "2d") return null;
+    const ds = selectedDatasetId ? datasetsRef.current.get(selectedDatasetId) : undefined;
+    if (!ds) return null;
+    const activeId = layoutRegistry?.activeId(ds.id) ?? ds.manifest.default_layout_id;
+    const activePlacements =
+      (activeId ? layoutRegistry?.getSpec(ds.id, activeId)?.placements : null)
+      ?? (activeId ? ds.manifest.source_layouts.find((candidate) => candidate.id === activeId)?.placements : null)
+      ?? null;
+    const collectionData = extractCollectionData(ds.manifest, activePlacements);
+    if (!collectionData) return null;
+    return (
+      <CollectionSelector
+        collectionKind={collectionData.collectionKind}
+        members={collectionData.members}
+        collectionName={ds.name}
+        onGroupClick={(cx, cy) => {
+          viewport.apply(
+            { type: "set_center", x: cx, y: cy },
+            { source: "collection_group_click" },
+          );
+        }}
+      />
+    );
+  })();
 
   // The JSX block below reads `.current` from refs returned by useRenderClient,
   // useWasmScene, useBridge, useLayout, etc. — passing them as props to
@@ -1129,7 +1298,6 @@ function App({
   // re-render that surfaces ref updates downstream. The new
   // eslint-plugin-react-hooks@7 "rules of react" treat all such reads as
   // suspicious; they are intentional and load-bearing here.
-  /* eslint-disable react-hooks/refs */
   return (
     <div className={renderMode ? "app render-mode" : "app"}>
       {/* ProfileMenu floats over the bottom-left corner of the app
@@ -1168,7 +1336,11 @@ function App({
         onLabelSetVisible={layers.handleLabelSetVisible}
         onLabelSetOpacity={layers.handleLabelSetOpacity}
         onAddLayer={() => setShowFileBrowser(true)}
-        viewModeToggle={datasetsVersion > 0 ? { label: dims.viewMode === "2d" ? "3D" : "2D", onClick: dims.handleViewModeToggle } : null}
+        viewModeToggle={datasetsVersion > 0 ? {
+          current: dims.viewMode === "2d" ? "2D" : "3D",
+          next: dims.viewMode === "2d" ? "3D" : "2D",
+          onClick: dims.handleViewModeToggle,
+        } : null}
         cameraModeToggle={dims.viewMode === "3d" ? { label: cameraMode === "fly" ? "Arcball" : "Fly", onClick: handleCameraModeToggle } : null}
         debugToggle={{ label: "Debug", active: showDebug, onClick: handleDebugToggle }}
         layoutRegistry={layoutRegistry}
@@ -1190,23 +1362,63 @@ function App({
           // exactly as it does after any other document change.
           bumpRemoteDocumentVersion();
         }}
-        style={{ width: layout.sidebarWidth, minWidth: layout.sidebarWidth }}
+        className={mobileLayersModalOpen ? "mobile-open" : undefined}
+        style={{ width: layout.sidebarWidth, minWidth: 0 }}
+        drawerCloseButtonRef={mobileLayersCloseRef}
+        drawer={hasMobileLayersDrawer ? {
+          open: mobileLayersModalOpen,
+          panelRef: mobileLayersDialogRef,
+          onKeyDown: handleMobileLayersKeyDown,
+          onClose: closeMobileLayers,
+        } : undefined}
       />
-      <div className="sidebar-resize-handle" onPointerDown={layout.handleSidebarResizeDown} />
+      {mobileLayersModalOpen && (
+        <button
+          type="button"
+          className="mobile-layer-scrim"
+          aria-hidden="true"
+          tabIndex={-1}
+          onClick={closeMobileLayers}
+        />
+      )}
+      {/* ARIA's window-splitter pattern uses a focusable separator with value
+          metadata; there is no equivalent native HTML element. */}
+      {/* eslint-disable jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/no-noninteractive-tabindex -- ARIA window splitter */}
+      <div
+        className="sidebar-resize-handle"
+        role="separator"
+        tabIndex={0}
+        aria-label="Resize layers panel"
+        aria-orientation="vertical"
+        aria-valuemin={180}
+        aria-valuemax={layout.sidebarMaxWidth}
+        aria-valuenow={Math.round(layout.sidebarWidth)}
+        onPointerDown={layout.handleSidebarResizeDown}
+        onKeyDown={layout.handleSidebarResizeKeyDown}
+      />
+      {/* eslint-enable jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/no-noninteractive-tabindex */}
       <div className="main-content">
-        <div className="workspace-chrome">
-          <button className="workspace-back-button" onClick={onBackToDashboard}>
+        <div className="workspace-chrome" data-floating-safe-region>
+          <button
+            className="workspace-back-button"
+            data-floating-safe-region
+            onClick={onBackToDashboard}
+          >
             Workspaces
           </button>
           {canRenameWorkspace ? (
             <input
               className="workspace-name-input"
               value={workspaceNameDraft}
-              onChange={(e) => setWorkspaceNameEdit({
-                source: workspaceName,
-                value: e.target.value,
-              })}
-              onBlur={commitWorkspaceName}
+              disabled={workspaceRenameOperation.isPending(workspaceRenameOperationKey)}
+              onChange={(e) => {
+                workspaceRenameOperation.dismiss();
+                setWorkspaceNameEdit({
+                  source: workspaceName,
+                  value: e.target.value,
+                });
+              }}
+              onBlur={() => void commitWorkspaceName()}
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
                   e.currentTarget.blur();
@@ -1223,17 +1435,72 @@ function App({
               {workspaceName}
             </div>
           )}
-          <div className="workspace-chrome-actions">
+            <div className="workspace-chrome-actions">
+            <button
+              ref={mobileLayersTriggerRef}
+              type="button"
+              className="mobile-layers-button"
+              aria-controls="layers-panel"
+              aria-expanded={mobileLayersModalOpen}
+              aria-haspopup="dialog"
+              onClick={() => setMobileLayersOpen((open) => !open)}
+            >
+              Layers
+            </button>
             {canRenameWorkspace && (
-              <button type="button" onClick={() => setShowWorkspaceSharing(true)}>
+              <button
+                type="button"
+                data-floating-safe-region
+                onClick={() => setShowWorkspaceSharing(true)}
+              >
                 Share Workspace
               </button>
             )}
-            <div className="workspace-id-label" title={workspaceId}>
-              {workspaceId}
-            </div>
+            <span className="workspace-role-label">{workspaceRole}</span>
           </div>
         </div>
+        <OperationStatus
+          state={workspaceRenameOperation.state}
+          onDismiss={() => {
+            setWorkspaceNameEdit({ source: workspaceName, value: workspaceName });
+            workspaceRenameOperation.dismiss();
+          }}
+          className="workspace-rename-operation"
+        />
+        {(scene.wasmError || render.renderError || bridge.remoteDatasetError) && (
+          <div
+            className="viewer-error"
+            role="alert"
+            data-floating-safe-region
+            data-render-error-code={render.renderErrorCode ?? undefined}
+            data-dataset-error-kind={bridge.remoteDatasetErrorKind ?? undefined}
+          >
+            <span>{scene.wasmError || render.renderError || bridge.remoteDatasetError}</span>
+            {scene.wasmError ? (
+              <button type="button" onClick={scene.retryWasm}>Retry viewer</button>
+            ) : render.renderError ? (
+              <button type="button" onClick={render.retryRender}>Restart renderer</button>
+            ) : bridge.remoteDatasetErrorKind === "open" ? (
+              <>
+                <button type="button" onClick={bridge.retryRemoteDatasetOpen}>
+                  Retry dataset
+                </button>
+                <button type="button" onClick={bridge.dismissRemoteDatasetError}>
+                  Dismiss
+                </button>
+              </>
+            ) : bridge.remoteDatasetErrorKind === "engine-fatal" ||
+                bridge.remoteDatasetErrorKind === "engine" ? (
+              <button type="button" onClick={() => window.location.reload()}>
+                Reload viewer
+              </button>
+            ) : bridge.remoteDatasetErrorKind === "data" ? (
+              <button type="button" onClick={() => window.location.reload()}>
+                Reload viewer
+              </button>
+            ) : null}
+          </div>
+        )}
         {bridge.peers.size > 0 && (
           <div className="peer-list" style={{ fontSize: "0.85em", margin: "8px 0" }}>
             <strong>Peers ({bridge.peers.size}):</strong>
@@ -1257,13 +1524,19 @@ function App({
             </ul>
           </div>
         )}
-        <div style={{ display: "flex", flexDirection: "row", width: layout.canvasWidth }}>
+        {datasetsVersion === 0 && (
+          <section className="viewer-empty-state" aria-labelledby="viewer-empty-title">
+            <h2 id="viewer-empty-title">Open a dataset to begin</h2>
+            <p>Paste a remote dataset URL below, or browse files available to this Lucida server.</p>
+          </section>
+        )}
+        <div className="viewer-stage" style={{ width: layout.canvasWidth, maxWidth: "100%" }}>
           <div className="viewer-canvas-wrap" style={{
             position: "relative",
             display: datasetsVersion > 0 ? "block" : "none",
             flex: 1,
             minWidth: 0,
-          }} onClick={handleDebugClick}>
+          }}>
             <canvas
               // Keyed per RenderClient generation: `transferControlToOffscreen`
               // is one-shot per element, so after a client teardown (dev
@@ -1271,8 +1544,12 @@ function App({
               key={render.canvasKey}
               ref={render.canvasRef}
               tabIndex={0}
+              aria-label={`${dims.viewMode === "3d" ? "3D volume" : "2D slice"} viewer`}
+              aria-describedby="viewer-canvas-instructions"
+              onKeyDown={handleViewerCanvasKeyDown}
+              onClick={handleDebugClick}
               style={{
-                width: showDebug ? layout.canvasWidth - 300 : layout.canvasWidth,
+                width: visibleCanvasWidth,
                 height: layout.canvasHeight,
                 imageRendering: dims.viewMode === "2d" ? "pixelated" : "auto",
                 borderRadius: 8,
@@ -1280,6 +1557,11 @@ function App({
                 display: "block",
               }}
             />
+            <span id="viewer-canvas-instructions" className="sr-only">
+              {dims.viewMode === "2d"
+                ? "Use arrow keys to pan and plus or minus to zoom. Hold Shift while drawing to add an annotation."
+                : "Press F for fly mode, then use W A S D and Q E to move. Use brackets to adjust clipping."}
+            </span>
             {datasetsVersion > 0 && dims.viewMode === "2d" && scene.wasmScene && render.client && bridge.sessionRef.current && (
               <SliceViewer
                 z={dims.z}
@@ -1291,9 +1573,8 @@ function App({
                 client={render.client}
                 canvas={render.canvasRef.current!}
                 remoteDocumentVersion={remoteDocumentVersion}
-                emitPresence={emitPresenceWithUrl}
-                breakFollow={bridge.breakFollow}
-                sendCursor={bridge.sendCursor}
+                viewport={viewport}
+                sendCursor={sendCursorForSelectedDataset}
                 loopRef={render.loopRef}
                 onLoopChange={render.setActiveLoop}
                 annotationDatasetId={selectedDatasetId}
@@ -1301,11 +1582,11 @@ function App({
                 myId={annotationAuthor}
                 sendCommand={bridge.sendCommand}
                 onDocumentChanged={bumpRemoteDocumentVersion}
-                annotationDraftRef={annotationDraftRef}
+                annotationDraft={annotationDraft}
               />
             )}
             {datasetsVersion > 0 && dims.viewMode === "2d" && selectedDatasetId && scene.wasmScene && render.canvasRef.current && (
-              <AnnotationDraftOverlay draftRef={annotationDraftRef} visible={annotationsVisible} />
+              <AnnotationDraftOverlay draft={annotationDraft} visible={annotationsVisible} />
             )}
             {datasetsVersion > 0 && dims.viewMode === "2d" && selectedDatasetId && scene.wasmScene && render.canvasRef.current && (
               <AnnotationOverlay
@@ -1318,39 +1599,13 @@ function App({
                 myId={annotationAuthor}
                 sendCommand={bridge.sendCommand}
                 onDocumentChanged={bumpRemoteDocumentVersion}
-                onViewportChanged={() => requestRender(render.loopRef.current, "annotation_viewport")}
+                viewport={viewport}
+                frameSignal={render.activeLoop}
                 visible={annotationsVisible}
                 mentionCandidates={mentionCandidates}
                 onGoToAuthorView={handleGoToAuthorView}
               />
             )}
-            {datasetsVersion > 0 && dims.viewMode === "2d" && (() => {
-              const ds = selectedDatasetId ? datasetsRef.current.get(selectedDatasetId) : undefined;
-              if (!ds) return null;
-              // Resolve the active layout's placements: derived layouts
-              // come from the registry, source layouts from the content graph.
-              const activeId = layoutRegistry?.activeId(ds.id) ?? ds.manifest.default_layout_id;
-              const activePlacements =
-                (activeId ? layoutRegistry?.getSpec(ds.id, activeId)?.placements : null)
-                ?? (activeId ? ds.manifest.source_layouts.find((l) => l.id === activeId)?.placements : null)
-                ?? null;
-              const collectionData = extractCollectionData(ds.manifest, activePlacements);
-              if (!collectionData) return null;
-              return (
-                <CollectionSelector
-                  collectionKind={collectionData.collectionKind}
-                  members={collectionData.members}
-                  collectionName={ds.name}
-                  onGroupClick={(cx, cy) => {
-                    const ws = scene.wasmSceneRef.current;
-                    if (!ws) return;
-                    applyViewportCommand(ws, { type: "set_center", x: cx, y: cy });
-                    emitPresenceWithUrl();
-                    requestRender(render.loopRef.current, "collection_group_click");
-                  }}
-                />
-              );
-            })()}
             {datasetsVersion > 0 && dims.viewMode === "3d" && scene.wasmScene && render.client && bridge.sessionRef.current && (
               <VolumeViewer
                 session={bridge.sessionRef.current}
@@ -1359,9 +1614,8 @@ function App({
                 client={render.client}
                 canvas={render.canvasRef.current!}
                 remoteDocumentVersion={remoteDocumentVersion}
-                emitPresence={emitPresenceWithUrl}
-                breakFollow={bridge.breakFollow}
-                sendCursor={bridge.sendCursor}
+                viewport={viewport}
+                sendCursor={sendCursorForSelectedDataset}
                 t={dims.t}
                 c={dims.c}
                 loopRef={render.loopRef}
@@ -1372,11 +1626,11 @@ function App({
                 myId={annotationAuthor}
                 sendCommand={bridge.sendCommand}
                 onDocumentChanged={bumpRemoteDocumentVersion}
-                annotationDraftRef={annotationDraftRef}
+                annotationDraft={annotationDraft}
               />
             )}
             {datasetsVersion > 0 && dims.viewMode === "3d" && selectedDatasetId && scene.wasmScene && render.canvasRef.current && (
-              <AnnotationDraftOverlay draftRef={annotationDraftRef} visible={annotationsVisible} />
+              <AnnotationDraftOverlay draft={annotationDraft} visible={annotationsVisible} />
             )}
             {datasetsVersion > 0 && dims.viewMode === "3d" && selectedDatasetId && scene.wasmScene && render.canvasRef.current && (
               <AnnotationOverlay3D
@@ -1389,7 +1643,8 @@ function App({
                 myId={annotationAuthor}
                 sendCommand={bridge.sendCommand}
                 onDocumentChanged={bumpRemoteDocumentVersion}
-                onViewportChanged={() => requestRender(render.loopRef.current, "annotation_viewport")}
+                viewport={viewport}
+                frameSignal={render.activeLoop}
                 visible={annotationsVisible}
                 mentionCandidates={mentionCandidates}
                 onGoToAuthorView={handleGoToAuthorView}
@@ -1407,11 +1662,17 @@ function App({
                 t={dims.t}
                 c={dims.c}
                 cursorLabels={cursorLabels}
+                frameSignal={render.activeLoop}
               />
             )}
-            {render.clientReady && render.clientRef.current && (
-              <Minimap client={render.clientRef.current} activeLoop={render.activeLoop} />
-            )}
+            <PersistentViewerOverlays
+              collection={collectionSelector}
+              viewerFocusRef={render.canvasRef}
+              minimap={render.clientReady && render.clientRef.current ? (
+                <Minimap client={render.clientRef.current} activeLoop={render.activeLoop} />
+              ) : null}
+            />
+            <ViewportLoadingIndicator store={render.activeLoop} />
             {(showDebug || anyOverlayEnabled) && (
               <Suspense fallback={null}>
                 <DebugOverlays
@@ -1424,7 +1685,7 @@ function App({
                 />
               </Suspense>
             )}
-            <FpsCounter />
+            {showDebug && <FpsCounter loop={render.activeLoop} />}
             <LoadingViewBanner applier={savedViewSync.applier} />
             {/* Durable, dismissible surface for non-fatal import warnings from
                 a dataset open (e.g. the sampled-label-discovery notice). Stays
@@ -1444,17 +1705,18 @@ function App({
               <div
                 role="status"
                 data-testid="annotation-restore-notice"
+                data-floating-safe-region
                 style={{
                   position: "absolute",
                   top: 12,
                   left: "50%",
                   transform: "translateX(-50%)",
-                  background: "rgba(31,111,235,0.95)",
-                  color: "#fff",
+                  background: "var(--accent-strong)",
+                  color: "var(--accent-contrast)",
                   padding: "6px 12px",
                   borderRadius: 6,
                   fontSize: "0.8rem",
-                  boxShadow: "0 2px 8px rgba(0,0,0,0.4)",
+                  boxShadow: "var(--shadow-popover)",
                   zIndex: 40,
                   pointerEvents: "none",
                 }}
@@ -1473,6 +1735,7 @@ function App({
               <div
                 role="status"
                 data-testid="annotation-deeplink-notfound"
+                data-floating-safe-region
                 style={{
                   position: "absolute",
                   top: 12,
@@ -1481,12 +1744,12 @@ function App({
                   display: "flex",
                   alignItems: "center",
                   gap: 10,
-                  background: "rgba(48,54,61,0.97)",
-                  color: "#e6edf3",
+                  background: "var(--surface-raised)",
+                  color: "var(--text-primary)",
                   padding: "8px 12px",
                   borderRadius: 6,
                   fontSize: "0.85rem",
-                  boxShadow: "0 2px 8px rgba(0,0,0,0.5)",
+                  boxShadow: "var(--shadow-popover)",
                   zIndex: 41,
                   maxWidth: 420,
                 }}
@@ -1502,7 +1765,7 @@ function App({
                   style={{
                     background: "none",
                     border: "none",
-                    color: "#8b949e",
+                    color: "var(--text-muted)",
                     cursor: "pointer",
                     fontSize: 16,
                     lineHeight: 1,
@@ -1513,7 +1776,23 @@ function App({
                 </button>
               </div>
             )}
-            <div className="canvas-resize-handle" onPointerDown={layout.handleCanvasResizeDown} />
+            {/* ARIA's window-splitter pattern uses a focusable separator with
+                pointer and keyboard resizing; HTML has no native splitter. */}
+            {/* eslint-disable jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/no-noninteractive-tabindex -- ARIA window splitter */}
+            <div
+              className="canvas-resize-handle"
+              role="separator"
+              tabIndex={0}
+              aria-label="Resize viewer"
+              aria-orientation="horizontal"
+              aria-valuemin={1}
+              aria-valuemax={Math.max(1, Math.round(layout.canvasMaxHeight))}
+              aria-valuenow={Math.round(layout.canvasHeight)}
+              aria-valuetext={`${Math.round(visibleCanvasWidth)} by ${Math.round(layout.canvasHeight)} pixels`}
+              onPointerDown={layout.handleCanvasResizeDown}
+              onKeyDown={layout.handleCanvasResizeKeyDown}
+            />
+            {/* eslint-enable jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/no-noninteractive-tabindex */}
           </div>
           {showDebug && (
             <Suspense fallback={null}>
@@ -1530,13 +1809,17 @@ function App({
           )}
         </div>
         {datasetsVersion > 0 && (
-          <div className="dimension-controls" style={{ maxWidth: layout.canvasWidth }}>
+          <div
+            className="dimension-controls"
+            data-floating-safe-region
+            style={{ maxWidth: layout.canvasWidth }}
+          >
             <DimensionControls label="Z" value={dims.z} max={dims.dimZ} onChange={dims.handleZChange} disabled={dims.viewMode === "3d"} />
             {dims.multiChannel ? (
               dims.dimC > 1 && (
                 <div className="dim-control">
                   <span className="dim-label">C</span>
-                  <button className="dim-btn" style={{ background: "#4a9eff", color: "#fff" }} onClick={dims.handleMultiChannelToggle} title="Switch to single-channel mode">Multi</button>
+                  <button className="dim-btn" style={{ background: "var(--accent)", color: "var(--accent-contrast)" }} onClick={dims.handleMultiChannelToggle} title="Switch to single-channel mode">Multi</button>
                 </div>
               )
             ) : (
@@ -1558,10 +1841,16 @@ function App({
             {dims.viewMode === "3d" && <FocalDepthControl />}
           </div>
         )}
-        <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", width: "100%", maxWidth: layout.canvasWidth }}>
+        <div
+          className="viewer-toolbar"
+          data-floating-safe-region
+          style={{ maxWidth: layout.canvasWidth }}
+        >
           <input
             type="text"
-            placeholder="Enter dataset path or gs:// URL"
+            placeholder="Paste a dataset URL or path"
+            aria-label="Dataset URL or path"
+            data-floating-safe-region
             value={urlInput}
             onChange={e => setUrlInput(e.target.value)}
             onKeyDown={handleUrlKeyDown}
@@ -1569,6 +1858,7 @@ function App({
             style={{ flex: 1, padding: "0.375rem 0.5rem", fontSize: "0.875rem" }}
           />
           <button
+            data-floating-safe-region
             onClick={() => { datasets.handleUrlSubmit(urlInput); setUrlInput(""); }}
             disabled={bridge.remoteDatasetLoading || !urlInput.trim()}
             style={{ padding: "0.375rem 0.75rem", fontSize: "0.875rem" }}
@@ -1576,13 +1866,15 @@ function App({
             {bridge.remoteDatasetLoading ? "Loading..." : "Open"}
           </button>
           <button
+            data-floating-safe-region
             onClick={() => setShowFileBrowser(true)}
             disabled={bridge.remoteDatasetLoading}
             style={{ padding: "0.375rem 0.75rem", fontSize: "0.875rem", whiteSpace: "nowrap" }}
           >
-            Browse Local
+            Browse files
           </button>
-          <ShareToolbarButton getCurrentSavedView={savedViewSync.captureBuilder} />
+          <ViewportHistoryControls viewport={viewport} viewerRef={render.canvasRef} />
+          <ShareToolbarButton prepareShareLink={savedViewSync.prepareShareLink} />
           <label
             title="Shape drawn by shift-drag on the canvas (point = click, line/box = drag)"
             style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.875rem", whiteSpace: "nowrap" }}
@@ -1637,35 +1929,37 @@ function App({
               // Reflect the hidden state with the same accent the other toolbar
               // toggles use, so "annotations are currently hidden" reads at a
               // glance.
-              background: !annotationsVisible ? "#646cff" : undefined,
-              color: !annotationsVisible ? "#fff" : undefined,
+              background: !annotationsVisible ? "var(--accent)" : undefined,
+              color: !annotationsVisible ? "var(--accent-contrast)" : undefined,
             }}
           >
             {annotationsVisible ? "Hide Annotations" : "Show Annotations"}
           </button>
           <button
-            onClick={() => setShowBookmarkSidebar((v) => !v)}
-            title={showBookmarkSidebar ? "Hide saved views" : "Show saved views"}
+            onClick={() => setInspector((current) => current === "saved" ? null : "saved")}
+            aria-pressed={showSavedViewsSidebar}
+            title={showSavedViewsSidebar ? "Hide saved views" : "Show saved views"}
             style={{
               padding: "0.375rem 0.75rem",
               fontSize: "0.875rem",
               whiteSpace: "nowrap",
-              background: showBookmarkSidebar ? "#646cff" : undefined,
-              color: showBookmarkSidebar ? "#fff" : undefined,
+              background: showSavedViewsSidebar ? "var(--accent)" : undefined,
+              color: showSavedViewsSidebar ? "var(--accent-contrast)" : undefined,
             }}
           >
             Saved Views
           </button>
           <button
-            onClick={() => setShowExplorePanel((v) => !v)}
+            onClick={() => setInspector((current) => current === "explore" ? null : "explore")}
+            aria-pressed={showExplorePanel}
             title={showExplorePanel ? "Hide the Explore panel" : "Suggest next views to explore"}
             data-testid="explore-toggle"
             style={{
               padding: "0.375rem 0.75rem",
               fontSize: "0.875rem",
               whiteSpace: "nowrap",
-              background: showExplorePanel ? "#646cff" : undefined,
-              color: showExplorePanel ? "#fff" : undefined,
+              background: showExplorePanel ? "var(--accent)" : undefined,
+              color: showExplorePanel ? "var(--accent-contrast)" : undefined,
             }}
           >
             Explore
@@ -1686,11 +1980,8 @@ function App({
           />
         )}
         {bridge.remoteDatasetLoading && (
-          <p className="secondary">{bridge.remoteDatasetProgress ?? "Loading volume..."}</p>
-        )}
-        {(scene.wasmError || render.renderError || bridge.remoteDatasetError) && (
-          <p style={{ color: "#f44" }}>
-            {scene.wasmError || render.renderError || bridge.remoteDatasetError}
+          <p className="secondary" role="status" aria-live="polite">
+            {bridge.remoteDatasetProgress ?? "Loading volume..."}
           </p>
         )}
       </div>
@@ -1706,14 +1997,14 @@ function App({
         onSetDefaultSavedView={onSetDefaultSavedView}
         currentOpenSavedViewId={currentOpenSavedViewId}
         onActiveSavedViewInvalidated={handleActiveSavedViewInvalidated}
-        visible={showBookmarkSidebar}
-        style={{ width: 280, minWidth: 280, height: "100vh" }}
+        visible={showSavedViewsSidebar}
+        style={{ width: 300, minWidth: 0, height: "100dvh" }}
       />
       <ExplorationPanel
         visible={showExplorePanel}
         captureBuilder={savedViewSync.captureBuilder}
         applyView={applyExploreView}
-        createSavedView={handleExploreBookmark}
+        createSavedView={handleExploreSaveView}
         datasetId={exploreTarget.id}
         datasetName={exploreTarget.name}
         dims={exploreTarget.dims}
@@ -1722,7 +2013,7 @@ function App({
           render.canvasRef.current?.clientHeight ?? 600,
         ]}
         requestThumbnail={requestThumbnail}
-        style={{ width: 280, minWidth: 280, height: "100vh" }}
+        style={{ width: 300, minWidth: 0, height: "100dvh" }}
       />
       <WorkspaceSharingDialog
         workspaceId={workspaceId}

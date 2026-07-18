@@ -3,6 +3,7 @@ import { pushLabelLayers } from "./slicePath.ts";
 import type { SliceLayerParams } from "./renderer/workerProtocol.ts";
 import type { MemberRosterEntry } from "./pipeline/tickCoordinator.ts";
 import type { DatasetManifest, ImageSpec, LabelSpec } from "./manifestTypes.ts";
+import { createMemberPlacementAccessor } from "./memberPlacement.ts";
 
 function image(id: string, yx: [number, number], scaleYX: [number, number], dtype = "Uint32", owner = "ent-0"): ImageSpec {
   return {
@@ -40,6 +41,13 @@ function manifest(labels: LabelSpec[]): DatasetManifest {
 
 const members: MemberRosterEntry[] = [{ imageId: "img-0", position: [0, 0] }];
 
+function placement(
+  roster: MemberRosterEntry[] = members,
+  positions?: Record<string, [number, number]>,
+) {
+  return createMemberPlacementAccessor({ members: roster, positions });
+}
+
 /** Explicit all-visible settings of length `n`. Masks are opt-in (hidden by
  *  default), so a test that renders every eligible overlay must turn them on. */
 function allOn(n: number): { visible: boolean; opacity: number }[] {
@@ -56,7 +64,7 @@ describe("pushLabelLayers", () => {
         labelSpec("foreground", "img-0:label:fg"),
         labelSpec("region-a", "img-0:label:region-a"),
       ]),
-      members,
+      placement(),
       allOn(3),
     );
     expect(layers).toHaveLength(3);
@@ -71,7 +79,7 @@ describe("pushLabelLayers", () => {
 
   it("aligns the overlay to the source footprint (4x-coarse label → source extent)", () => {
     const layers: SliceLayerParams[] = [];
-    pushLabelLayers(layers, manifest([labelSpec("region-b", "img-0:label:region-b")]), members, allOn(1));
+    pushLabelLayers(layers, manifest([labelSpec("region-b", "img-0:label:region-b")]), placement(), allOn(1));
     expect(layers[0].dataW).toBeCloseTo(348, 3); // 87 * 4 / 1
     expect(layers[0].dataH).toBeCloseTo(340, 3);
     expect(layers[0].offsetX).toBe(0);
@@ -81,17 +89,17 @@ describe("pushLabelLayers", () => {
   it("forwards declared image-label.colors to the layer", () => {
     const colors: LabelSpec["colors"] = [{ value: 2, rgba: [230, 25, 75, 255] }];
     const layers: SliceLayerParams[] = [];
-    pushLabelLayers(layers, manifest([labelSpec("region-b", "img-0:label:region-b", colors)]), members, allOn(1));
+    pushLabelLayers(layers, manifest([labelSpec("region-b", "img-0:label:region-b", colors)]), placement(), allOn(1));
     expect(layers[0].labelColors).toEqual(colors);
   });
 
   it("emits nothing for a label-less manifest", () => {
     const layers: SliceLayerParams[] = [];
-    pushLabelLayers(layers, manifest([]), members);
+    pushLabelLayers(layers, manifest([]), placement());
     expect(layers).toHaveLength(0);
   });
 
-  it("MAJOR: skips a non-uint32 (uint8) label and renders the uint32 sibling instead", () => {
+  it("renders uint8 and uint32 labels through the shared canonical label pool", () => {
     const layers: SliceLayerParams[] = [];
     pushLabelLayers(
       layers,
@@ -99,16 +107,18 @@ describe("pushLabelLayers", () => {
         labelSpec("mask8", "img-0:label:mask8", undefined, "Uint8"),
         labelSpec("seg32", "img-0:label:seg32"),
       ]),
-      members,
+      placement(),
       allOn(2),
     );
-    expect(layers).toHaveLength(1);
-    expect(layers[0].datasetId).toBe("img-0:label:seg32");
+    expect(layers.map((layer) => layer.datasetId)).toEqual([
+      "img-0:label:mask8",
+      "img-0:label:seg32",
+    ]);
   });
 
-  it("MAJOR: renders nothing for a uint8-only label (matches the fetch skip)", () => {
+  it("renders nothing for an unsupported float label (matches admission)", () => {
     const layers: SliceLayerParams[] = [];
-    pushLabelLayers(layers, manifest([labelSpec("mask8", "img-0:label:mask8", undefined, "Uint8")]), members, allOn(1));
+    pushLabelLayers(layers, manifest([labelSpec("mask-float", "img-0:label:mask-float", undefined, "Float32")]), placement(), allOn(1));
     expect(layers).toHaveLength(0);
   });
 
@@ -139,9 +149,8 @@ describe("pushLabelLayers", () => {
     pushLabelLayers(
       layers,
       dsm,
-      roster,
+      placement(roster, memberPositions),
       [{ visible: true, opacity: 0.5 }, { visible: true, opacity: 0.5 }],
-      memberPositions,
     );
     expect(layers).toHaveLength(2);
     const d3 = layers.find((l) => l.datasetId === "collection:image:D/3/0:label:region-c");

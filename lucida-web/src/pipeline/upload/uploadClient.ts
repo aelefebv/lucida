@@ -11,7 +11,7 @@ import type {
   ColdStateDeltaMessage,
   ViewHotStateMessage,
   MissingChunk,
-  MissingProxy,
+  Chunk,
 } from "../../renderer/workerProtocol.ts";
 import type { SceneEpochs } from "../epochs.ts";
 import type { ResidencyTier } from "../fetch/types.ts";
@@ -30,7 +30,7 @@ export type ChunksEvictedHandler = (
 export type WantedSetHandler = (
   datasetId: string,
   epochs: SceneEpochs,
-  missing: Array<MissingChunk | MissingProxy>,
+  missing: MissingChunk[],
 ) => void;
 
 export interface UploadClient {
@@ -71,14 +71,7 @@ export interface UploadClient {
 
   sliceChunkData(
     memberId: string,
-    chunks: {
-      data: ArrayBuffer;
-      dataType: string;
-      x: number;
-      y: number;
-      z: number;
-      key: string;
-    }[],
+    chunks: Chunk[],
     level: number,
     z: number,
     t: number,
@@ -106,14 +99,7 @@ export interface UploadClient {
   labelSliceChunkData(
     memberId: string,
     datasetId: string,
-    chunks: {
-      data: ArrayBuffer;
-      dataType: string;
-      x: number;
-      y: number;
-      z: number;
-      key: string;
-    }[],
+    chunks: Chunk[],
     level: number,
     t: number,
     c: number,
@@ -126,14 +112,7 @@ export interface UploadClient {
 
   volumeChunkData(
     memberId: string,
-    chunks: {
-      data: ArrayBuffer;
-      dataType: string;
-      x: number;
-      y: number;
-      z: number;
-      key: string;
-    }[],
+    chunks: Chunk[],
     level: number,
     t: number,
     c: number,
@@ -158,14 +137,7 @@ export interface UploadClient {
   labelVolumeChunkData(
     memberId: string,
     datasetId: string,
-    chunks: {
-      data: ArrayBuffer;
-      dataType: string;
-      x: number;
-      y: number;
-      z: number;
-      key: string;
-    }[],
+    chunks: Chunk[],
     level: number,
     t: number,
     c: number,
@@ -175,18 +147,6 @@ export interface UploadClient {
     chunkX: number,
     chunkY: number,
     chunkZ: number,
-    epochs: SceneEpochs,
-  ): void;
-
-  proxyAssetData(
-    datasetId: string,
-    entityId: string,
-    imageId: string,
-    kind: "GroupProxy3D" | "TileProxy3D",
-    t: number,
-    c: number,
-    dims: [number, number, number],
-    data: ArrayBuffer,
     epochs: SceneEpochs,
   ): void;
 

@@ -69,8 +69,7 @@ function makeData(mode: "slice" | "volume", overrides: Partial<MinimapOverlayDat
       },
     ],
     mode,
-    theta: 0.5,
-    phi: 1.2,
+    cameraViewRotation: new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]),
     canvasW: 400,
     canvasH: 400,
     currentZ: 3,
@@ -100,7 +99,7 @@ describe("dynamic overlay split", () => {
 
       expect(split).toEqual(combined);
       // The split must actually exercise draw ops, not trivially match by both
-      // being empty (the orientation cube alone guarantees a non-trivial program).
+      // being empty (slice viewport geometry / the volume cube is non-trivial).
       expect(combined.length).toBeGreaterThan(0);
     });
   }
@@ -124,7 +123,7 @@ describe("dynamic overlay split", () => {
     expect(log).toEqual([]);
   });
 
-  it("drawViewportOverlays draws viewport rects + cube in slice mode without clearing", () => {
+  it("drawViewportOverlays draws only 2D viewport rects in slice mode", () => {
     const log: Op[] = [];
     drawViewportOverlays(recordingCtx(log), makeData("slice"));
 
@@ -132,8 +131,8 @@ describe("dynamic overlay split", () => {
     // Viewport rect fill present, slice-plane fill absent.
     expect(log.some((op) => op.type === "set" && op.name === "fillStyle" && op.value === "rgba(100,180,255,0.3)")).toBe(true);
     expect(log.some((op) => op.type === "set" && op.name === "fillStyle" && op.value === "rgba(255,200,50,0.25)")).toBe(false);
-    // Orientation cube always drawn (its background circle uses arc()).
-    expect(log.some((op) => op.type === "call" && op.name === "arc")).toBe(true);
+    // A 3D orientation cube would contradict the current 2D mode.
+    expect(log.some((op) => op.type === "call" && op.name === "arc")).toBe(false);
   });
 
   it("drawViewportOverlays draws only the orientation cube in volume mode", () => {
@@ -143,6 +142,18 @@ describe("dynamic overlay split", () => {
     // No viewport rects in volume mode, but the cube is still present.
     expect(log.some((op) => op.type === "set" && op.name === "fillStyle" && op.value === "rgba(100,180,255,0.3)")).toBe(false);
     expect(log.some((op) => op.type === "call" && op.name === "arc")).toBe(true);
+  });
+
+  it("drives the volume cube from the supplied camera basis", () => {
+    const identityLog: Op[] = [];
+    drawViewportOverlays(recordingCtx(identityLog), makeData("volume"));
+
+    const rolledLog: Op[] = [];
+    drawViewportOverlays(recordingCtx(rolledLog), makeData("volume", {
+      cameraViewRotation: new Float32Array([0, -1, 0, 1, 0, 0, 0, 0, 1]),
+    }));
+
+    expect(rolledLog).not.toEqual(identityLog);
   });
 });
 

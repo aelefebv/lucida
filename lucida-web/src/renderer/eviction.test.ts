@@ -23,7 +23,7 @@
  *    (Z-slice retargeting), not residency rejections.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 
 (globalThis as Record<string, unknown>).GPUTextureUsage = {
   COPY_SRC: 0x01,
@@ -57,31 +57,13 @@ import type {
   WorkerToMainMessage,
 } from "./workerProtocol.ts";
 import type { SceneEpochs } from "../pipeline/epochs.ts";
+import { makeMockGpuDevice } from "./testFixtures.ts";
+import { GpuResourceBudget } from "./gpuResourceBudget.ts";
+import { makeChunkContract } from "../test/fixtures.ts";
 
 // ---------------------------------------------------------------------------
 // Mock device + ctx
 // ---------------------------------------------------------------------------
-
-function makeMockDevice(): GPUDevice {
-  const createBuffer = vi.fn((desc: GPUBufferDescriptor) => ({
-    size: desc.size,
-    usage: desc.usage,
-    destroyed: false,
-    destroy() { this.destroyed = true; },
-  }));
-  const createTexture = vi.fn((_desc: GPUTextureDescriptor) => ({
-    destroyed: false,
-    destroy() { this.destroyed = true; },
-    createView: vi.fn(() => ({})),
-  }));
-  const writeBuffer = vi.fn();
-  const writeTexture = vi.fn();
-  return {
-    createBuffer,
-    createTexture,
-    queue: { writeBuffer, writeTexture } as unknown as GPUQueue,
-  } as unknown as GPUDevice;
-}
 
 interface TestCtx {
   ctx: WorkerCtx;
@@ -92,8 +74,10 @@ interface TestCtx {
 function makeMockCtx(): TestCtx {
   const posts: WorkerToMainMessage[] = [];
   let postWantedSetCalls = 0;
+  const device = makeMockGpuDevice();
   const ctx = {
-    device: makeMockDevice(),
+    device,
+    gpuResources: new GpuResourceBudget(512 * 1024 * 1024),
     state: createInitialState(),
     post(msg: WorkerToMainMessage) { posts.push(msg); },
     postWantedSet() { postWantedSetCalls++; },
@@ -106,7 +90,7 @@ function makeMockCtx(): TestCtx {
 }
 
 function epochs(): SceneEpochs {
-  return { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 0 };
+  return { content: 1, layout: 1, view: 1, selection: 1, request: 0 };
 }
 
 function chunkKey(level: number, t: number, c: number, z: number, y: number, x: number): string {
@@ -119,7 +103,7 @@ function makeChunk(level: number, t: number, c: number, z: number, y: number, x:
   data.fill(100);
   return {
     data: data.buffer,
-    dataType: "uint16",
+    contract: makeChunkContract({ channel: c, shape: [chunkZ, chunkY, chunkX] }),
     x, y, z,
     key: chunkKey(level, t, c, z, y, x),
   };
@@ -132,7 +116,7 @@ function makeSliceChunk(level: number, t: number, c: number, z: number, y: numbe
   data.fill(100);
   return {
     data: data.buffer,
-    dataType: "uint16",
+    contract: makeChunkContract({ channel: c, shape: [chunkZ, chunkY, chunkX] }),
     x, y, z,
     key: chunkKey(level, t, c, z, y, x),
   };
@@ -202,12 +186,6 @@ function makeSliceMeta(gridY: number, gridX: number): LodIndirectionMeta {
     offset: 0,
   };
 }
-
-// Every atlas / eviction Map lives on `ctx.state` via `RendererState`.
-// Each test creates its own ctx via `makeMockCtx`, so no cross-test
-// cleanup is required. `beforeEach` is retained as a hook surface in
-// case future tests need to re-spy mocks.
-beforeEach(() => {});
 
 // ---------------------------------------------------------------------------
 // Volume eviction
@@ -381,8 +359,8 @@ describe("handleVolumeChunkData — eviction policy", () => {
     atlas.indirectionData = new Uint32Array(2 * 4 * 4).fill(0xFFFFFFFF);
 
     // Current epoch.content is 5; the batch carries content=1 → stale.
-    const currentEpochs: SceneEpochs = { content: 5, layout: 1, view: 1, selection: 1, asset: 0, request: 0 };
-    const batchEpochs: SceneEpochs = { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 0 };
+    const currentEpochs: SceneEpochs = { content: 5, layout: 1, view: 1, selection: 1, request: 0 };
+    const batchEpochs: SceneEpochs = { content: 1, layout: 1, view: 1, selection: 1, request: 0 };
     const chunks = [makeChunk(0, 0, 0, 0, 0, 0), makeChunk(0, 0, 0, 0, 0, 1)];
 
     handleVolumeChunkData(ctx, makeVolumeMsg(memberA, chunks, { epochs: batchEpochs }), currentEpochs, poolKey, memberA);

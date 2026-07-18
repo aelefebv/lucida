@@ -1,10 +1,11 @@
 use clap::ValueEnum;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{CliConfig, EffectiveServer};
 use crate::credentials::EffectiveToken;
 use crate::error::{CliError, ErrorKind};
-use crate::http::send_json;
+use crate::http::{api_url, bounded_json, http_client, send_json, websocket_url};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
@@ -177,54 +178,42 @@ impl WorkspaceClient {
         Self {
             base_url: base_url.into(),
             token: token.map(|effective| effective.token),
-            http: reqwest::Client::new(),
+            http: http_client(),
         }
     }
 
     pub async fn list(&self, archived: bool) -> Result<Vec<WorkspaceSummary>, CliError> {
-        self.send(
+        self.send_decode(
             self.http
                 .get(workspace_collection_url(&self.base_url, archived)?),
         )
-        .await?
-        .json::<Vec<WorkspaceSummary>>()
         .await
-        .map_err(CliError::from)
     }
 
     pub async fn create(&self, name: Option<&str>) -> Result<WorkspaceRecord, CliError> {
         let body = serde_json::json!({ "name": name });
-        self.send(
+        self.send_decode(
             self.http
                 .post(workspace_collection_url(&self.base_url, false)?)
                 .json(&body),
         )
-        .await?
-        .json::<WorkspaceRecord>()
         .await
-        .map_err(CliError::from)
     }
 
     pub async fn get(&self, workspace_id: &str) -> Result<WorkspaceRecord, CliError> {
-        self.send(
+        self.send_decode(
             self.http
                 .get(workspace_api_url(&self.base_url, workspace_id)?),
         )
-        .await?
-        .json::<WorkspaceRecord>()
         .await
-        .map_err(CliError::from)
     }
 
     pub async fn open(&self, workspace_id: &str) -> Result<WorkspaceRecord, CliError> {
-        self.send(
+        self.send_decode(
             self.http
                 .post(workspace_api_url(&self.base_url, workspace_id)?),
         )
-        .await?
-        .json::<WorkspaceRecord>()
         .await
-        .map_err(CliError::from)
     }
 
     pub async fn set_pinned(
@@ -233,7 +222,7 @@ impl WorkspaceClient {
         pinned: bool,
     ) -> Result<WorkspaceUserState, CliError> {
         let body = serde_json::json!({ "pinned": pinned });
-        self.send(
+        self.send_decode(
             self.http
                 .patch(workspace_api_url_with_suffix(
                     &self.base_url,
@@ -242,46 +231,34 @@ impl WorkspaceClient {
                 )?)
                 .json(&body),
         )
-        .await?
-        .json::<WorkspaceUserState>()
         .await
-        .map_err(CliError::from)
     }
 
     pub async fn archive(&self, workspace_id: &str) -> Result<WorkspaceRecord, CliError> {
-        self.send(self.http.post(workspace_api_url_with_suffix(
+        self.send_decode(self.http.post(workspace_api_url_with_suffix(
             &self.base_url,
             workspace_id,
             &["archive"],
         )?))
-        .await?
-        .json::<WorkspaceRecord>()
         .await
-        .map_err(CliError::from)
     }
 
     pub async fn restore(&self, workspace_id: &str) -> Result<WorkspaceRecord, CliError> {
-        self.send(self.http.post(workspace_api_url_with_suffix(
+        self.send_decode(self.http.post(workspace_api_url_with_suffix(
             &self.base_url,
             workspace_id,
             &["restore"],
         )?))
-        .await?
-        .json::<WorkspaceRecord>()
         .await
-        .map_err(CliError::from)
     }
 
     pub async fn sharing(&self, workspace_id: &str) -> Result<WorkspaceSharingSettings, CliError> {
-        self.send(self.http.get(workspace_api_url_with_suffix(
+        self.send_decode(self.http.get(workspace_api_url_with_suffix(
             &self.base_url,
             workspace_id,
             &["sharing"],
         )?))
-        .await?
-        .json::<WorkspaceSharingSettings>()
         .await
-        .map_err(CliError::from)
     }
 
     pub async fn update_link_access(
@@ -294,7 +271,7 @@ impl WorkspaceClient {
             "link_access": link_access,
             "link_role": link_role,
         });
-        self.send(
+        self.send_decode(
             self.http
                 .patch(workspace_api_url_with_suffix(
                     &self.base_url,
@@ -303,10 +280,7 @@ impl WorkspaceClient {
                 )?)
                 .json(&body),
         )
-        .await?
-        .json::<WorkspaceSharingSettings>()
         .await
-        .map_err(CliError::from)
     }
 
     pub async fn upsert_member(
@@ -321,7 +295,7 @@ impl WorkspaceClient {
             "role": role,
             "display_name": display_name,
         });
-        self.send(
+        self.send_decode(
             self.http
                 .post(workspace_api_url_with_suffix(
                     &self.base_url,
@@ -330,10 +304,7 @@ impl WorkspaceClient {
                 )?)
                 .json(&body),
         )
-        .await?
-        .json::<WorkspaceMember>()
         .await
-        .map_err(CliError::from)
     }
 
     pub async fn update_member_role(
@@ -343,7 +314,7 @@ impl WorkspaceClient {
         role: WorkspaceRole,
     ) -> Result<WorkspaceMember, CliError> {
         let body = serde_json::json!({ "role": role });
-        self.send(
+        self.send_decode(
             self.http
                 .patch(workspace_api_url_with_suffix(
                     &self.base_url,
@@ -352,10 +323,7 @@ impl WorkspaceClient {
                 )?)
                 .json(&body),
         )
-        .await?
-        .json::<WorkspaceMember>()
         .await
-        .map_err(CliError::from)
     }
 
     pub async fn remove_member(&self, workspace_id: &str, email: &str) -> Result<(), CliError> {
@@ -370,6 +338,13 @@ impl WorkspaceClient {
 
     async fn send(&self, request: reqwest::RequestBuilder) -> Result<reqwest::Response, CliError> {
         send_json(request, self.token.as_deref(), map_workspace_http_error).await
+    }
+
+    async fn send_decode<T: DeserializeOwned>(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<T, CliError> {
+        bounded_json(self.send(request).await?).await
     }
 }
 
@@ -401,8 +376,7 @@ fn workspace_collection_url(server_url: &str, archived: bool) -> Result<reqwest:
     } else {
         &["api", "workspaces"][..]
     };
-    reqwest::Url::parse(&url_with_segments(server_url, None, segments)?)
-        .map_err(|error| CliError::invalid_server(format!("invalid workspace API URL: {error}")))
+    api_url(server_url, segments)
 }
 
 pub async fn resolve_workspace_record(
@@ -550,26 +524,11 @@ pub fn target_for(
 }
 
 pub fn workspace_web_url(server_url: &str, workspace_id: &str) -> Result<String, CliError> {
-    url_with_segments(server_url, None, &["w", workspace_id])
+    Ok(api_url(server_url, &["w", workspace_id])?.to_string())
 }
 
 pub fn workspace_ws_url(server_url: &str, workspace_id: &str) -> Result<String, CliError> {
-    let url = reqwest::Url::parse(server_url)
-        .map_err(|error| CliError::invalid_server(format!("invalid server URL: {error}")))?;
-    let scheme = match url.scheme() {
-        "http" => "ws",
-        "https" => "wss",
-        other => {
-            return Err(CliError::invalid_server(format!(
-                "unsupported server URL scheme: {other}"
-            )));
-        }
-    };
-    url_with_segments(
-        server_url,
-        Some(scheme),
-        &["ws", "workspaces", workspace_id],
-    )
+    Ok(websocket_url(server_url, &["ws", "workspaces", workspace_id])?.to_string())
 }
 
 fn workspace_api_url(server_url: &str, workspace_id: &str) -> Result<reqwest::Url, CliError> {
@@ -583,41 +542,7 @@ fn workspace_api_url_with_suffix(
 ) -> Result<reqwest::Url, CliError> {
     let mut segments = vec!["api", "workspaces", workspace_id];
     segments.extend_from_slice(suffix);
-    reqwest::Url::parse(&url_with_segments(server_url, None, &segments)?)
-        .map_err(|error| CliError::invalid_server(format!("invalid workspace API URL: {error}")))
-}
-
-fn url_with_segments(
-    server_url: &str,
-    scheme: Option<&str>,
-    segments: &[&str],
-) -> Result<String, CliError> {
-    let mut url = reqwest::Url::parse(server_url)
-        .map_err(|error| CliError::invalid_server(format!("invalid server URL: {error}")))?;
-    if let Some(scheme) = scheme {
-        match url.scheme() {
-            "http" | "https" => {}
-            other => {
-                return Err(CliError::invalid_server(format!(
-                    "unsupported server URL scheme: {other}"
-                )));
-            }
-        }
-        url.set_scheme(scheme)
-            .map_err(|_| CliError::invalid_server("failed to construct workspace URL"))?;
-    }
-    {
-        let mut path = url
-            .path_segments_mut()
-            .map_err(|_| CliError::invalid_server("server URL cannot be used as a base URL"))?;
-        path.clear();
-        for segment in segments {
-            path.push(segment);
-        }
-    }
-    url.set_query(None);
-    url.set_fragment(None);
-    Ok(url.to_string())
+    api_url(server_url, &segments)
 }
 
 pub fn format_workspace_list_human(workspaces: &[WorkspaceSummary]) -> String {
@@ -831,6 +756,54 @@ mod tests {
         assert_eq!(
             workspace_ws_url("https://lucida.example", "w1").unwrap(),
             "wss://lucida.example/ws/workspaces/w1"
+        );
+    }
+
+    #[test]
+    fn all_workspace_url_surfaces_preserve_reverse_proxy_prefix() {
+        let base = "https://lucida.example/tools/lucida?stale=1#frag";
+        assert_eq!(
+            workspace_collection_url(base, false).unwrap().as_str(),
+            "https://lucida.example/tools/lucida/api/workspaces"
+        );
+        assert_eq!(
+            workspace_collection_url(base, true).unwrap().as_str(),
+            "https://lucida.example/tools/lucida/api/workspaces/archived"
+        );
+        assert_eq!(
+            workspace_api_url_with_suffix(base, "w 1", &["datasets"])
+                .unwrap()
+                .as_str(),
+            "https://lucida.example/tools/lucida/api/workspaces/w%201/datasets"
+        );
+        assert_eq!(
+            workspace_web_url(base, "w 1").unwrap(),
+            "https://lucida.example/tools/lucida/w/w%201"
+        );
+        assert_eq!(
+            workspace_ws_url(base, "w 1").unwrap(),
+            "wss://lucida.example/tools/lucida/ws/workspaces/w%201"
+        );
+    }
+
+    #[test]
+    fn all_workspace_url_surfaces_keep_unprefixed_contract() {
+        let base = "http://127.0.0.1:9876";
+        assert_eq!(
+            workspace_collection_url(base, false).unwrap().as_str(),
+            "http://127.0.0.1:9876/api/workspaces"
+        );
+        assert_eq!(
+            workspace_api_url(base, "w1").unwrap().as_str(),
+            "http://127.0.0.1:9876/api/workspaces/w1"
+        );
+        assert_eq!(
+            workspace_web_url(base, "w1").unwrap(),
+            "http://127.0.0.1:9876/w/w1"
+        );
+        assert_eq!(
+            workspace_ws_url(base, "w1").unwrap(),
+            "ws://127.0.0.1:9876/ws/workspaces/w1"
         );
     }
 

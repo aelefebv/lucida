@@ -1,1 +1,2 @@
-pkg/
+# wasm-pack output may be either a generated directory or a provisioned link.
+pkg

@@ -14,15 +14,18 @@
 //! [`GoogleJwtPrincipalExtractor`] remains available for tests and
 //! integrations that validate Google ID tokens directly.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::http::{StatusCode, request::Parts};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use tracing::{debug, error};
 
 use lucida_core::auth_principal::AuthPrincipal;
 
+use super::access_epoch::AuthEpochRegistry;
 use super::bearer_token::{BearerTokenStore, hash_bearer_token};
 use super::config::AuthConfig;
 use super::cookie::read_session_cookie;
@@ -118,11 +121,26 @@ pub(crate) fn read_bearer_token(req: &Parts) -> Option<&str> {
 pub struct SessionCookieExtractor {
     config: Arc<AuthConfig>,
     store: Arc<dyn LoginSessionStore>,
+    auth_epochs: Arc<AuthEpochRegistry>,
+    touches: TouchLimiter,
 }
 
 impl SessionCookieExtractor {
     pub fn new(config: Arc<AuthConfig>, store: Arc<dyn LoginSessionStore>) -> Self {
-        Self { config, store }
+        Self::new_with_auth_epochs(config, store, Arc::new(AuthEpochRegistry::default()))
+    }
+
+    pub fn new_with_auth_epochs(
+        config: Arc<AuthConfig>,
+        store: Arc<dyn LoginSessionStore>,
+        auth_epochs: Arc<AuthEpochRegistry>,
+    ) -> Self {
+        Self {
+            config,
+            store,
+            auth_epochs,
+            touches: TouchLimiter::default(),
+        }
     }
 
     /// Why a row failed activeness, for slice-8 audit-logging branching.
@@ -213,16 +231,44 @@ impl PrincipalExtractor for SessionCookieExtractor {
             }
         }
 
-        // Race-and-tolerate touch. Spawn a task so the response isn't
-        // blocked on the SQLite write. We don't await; the work runs
-        // even if the request handler returns first.
-        let store = Arc::clone(&self.store);
-        let id = row.id.clone();
-        tokio::spawn(async move {
-            if let Err(e) = store.touch_last_used(&id, now).await {
-                debug!(session_id = %id, error = %e, "session_extractor.touch.failed");
-            }
-        });
+        // Capture the capability between two validations of the credential.
+        // Logout deletes the row before bumping this epoch. Therefore either
+        // the confirmation observes the deletion, or the returned principal
+        // carries the old epoch and WebSocket admission rejects it after the
+        // bump. This closes the middleware -> handler scheduling window.
+        let auth_epoch = self.auth_epochs.current(&row.email).await;
+        let confirmed = self.store.get(&session_id).await.map_err(|e| {
+            error!(error = %e, "session_store.confirm.failed");
+            AuthError::Internal(e.to_string())
+        })?;
+        let Some(confirmed) = confirmed else {
+            return Err(AuthError::Unauthenticated);
+        };
+        if !confirmed.email.eq_ignore_ascii_case(&row.email)
+            || self.classify_session(&confirmed, Utc::now()) != SessionStatus::Active
+        {
+            return Err(AuthError::Unauthenticated);
+        }
+
+        // Reserve at most one touch per activity window before spawning. This
+        // coalesces concurrent requests for the same cookie and avoids turning
+        // every authenticated asset/API request into a SQLite write.
+        let quarter_idle = self.config.idle_timeout.div_f64(4.0);
+        let touch_interval = quarter_idle
+            .min(Duration::from_secs(5 * 60))
+            .max(Duration::from_secs(1));
+        if self
+            .touches
+            .reserve(&row.id, Some(row.last_used_at), now, touch_interval)
+        {
+            let store = Arc::clone(&self.store);
+            let id = row.id.clone();
+            tokio::spawn(async move {
+                if let Err(e) = store.touch_last_used(&id, now).await {
+                    debug!(error = %e, "session_extractor.touch.failed");
+                }
+            });
+        }
 
         // Derive is_admin per-request from the configured allowlist.
         // Admin status is *not* persisted on the LoginSession row —
@@ -238,6 +284,7 @@ impl PrincipalExtractor for SessionCookieExtractor {
             display_name: row.display_name,
             picture_url: row.picture_url,
             is_admin,
+            auth_epoch,
         })
     }
 }
@@ -246,11 +293,26 @@ impl PrincipalExtractor for SessionCookieExtractor {
 pub struct BearerTokenExtractor {
     config: Arc<AuthConfig>,
     store: Arc<dyn BearerTokenStore>,
+    auth_epochs: Arc<AuthEpochRegistry>,
+    touches: TouchLimiter,
 }
 
 impl BearerTokenExtractor {
     pub fn new(config: Arc<AuthConfig>, store: Arc<dyn BearerTokenStore>) -> Self {
-        Self { config, store }
+        Self::new_with_auth_epochs(config, store, Arc::new(AuthEpochRegistry::default()))
+    }
+
+    pub fn new_with_auth_epochs(
+        config: Arc<AuthConfig>,
+        store: Arc<dyn BearerTokenStore>,
+        auth_epochs: Arc<AuthEpochRegistry>,
+    ) -> Self {
+        Self {
+            config,
+            store,
+            auth_epochs,
+            touches: TouchLimiter::default(),
+        }
     }
 }
 
@@ -304,15 +366,78 @@ impl PrincipalExtractor for BearerTokenExtractor {
             return Err(AuthError::Unauthenticated);
         }
 
-        let store = Arc::clone(&self.store);
-        let id = row.id.clone();
-        tokio::spawn(async move {
-            if let Err(e) = store.touch_last_used(&id, now).await {
-                debug!(token_id = %id, error = %e, "bearer_extractor.touch.failed");
-            }
-        });
+        // As with cookie sessions, capture the epoch between two backing-store
+        // validations so a token revoked concurrently cannot inherit the new
+        // generation merely because its request was delayed in middleware.
+        let auth_epoch = self.auth_epochs.current(&row.email).await;
+        let confirmed = self.store.get_by_hash(&token_hash).await.map_err(|e| {
+            error!(error = %e, "bearer_token_store.confirm.failed");
+            AuthError::Internal(e.to_string())
+        })?;
+        let Some(confirmed) = confirmed else {
+            return Err(AuthError::Unauthenticated);
+        };
+        if !confirmed.email.eq_ignore_ascii_case(&row.email) || !confirmed.is_active_at(Utc::now())
+        {
+            return Err(AuthError::Unauthenticated);
+        }
 
-        Ok(row.principal(&self.config))
+        if self
+            .touches
+            .reserve(&row.id, row.last_used_at, now, Duration::from_secs(5 * 60))
+        {
+            let store = Arc::clone(&self.store);
+            let id = row.id.clone();
+            tokio::spawn(async move {
+                if let Err(e) = store.touch_last_used(&id, now).await {
+                    debug!(error = %e, "bearer_extractor.touch.failed");
+                }
+            });
+        }
+
+        let mut principal = row.principal(&self.config);
+        principal.auth_epoch = auth_epoch;
+        Ok(principal)
+    }
+}
+
+/// Small process-local admission cache for last-used writes. Persisted
+/// timestamps suppress steady-state writes; this map closes the concurrent
+/// stale-read race before tasks are spawned.
+#[derive(Default)]
+struct TouchLimiter {
+    reservations: Mutex<HashMap<String, DateTime<Utc>>>,
+}
+
+impl TouchLimiter {
+    fn reserve(
+        &self,
+        id: &str,
+        persisted: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
+        interval: Duration,
+    ) -> bool {
+        let interval =
+            chrono::Duration::from_std(interval).unwrap_or_else(|_| chrono::Duration::minutes(5));
+        if persisted.is_some_and(|last| now.signed_duration_since(last) < interval) {
+            return false;
+        }
+        let mut reservations = self
+            .reservations
+            .lock()
+            .expect("auth touch limiter mutex poisoned");
+        if reservations
+            .get(id)
+            .is_some_and(|last| now.signed_duration_since(*last) < interval)
+        {
+            return false;
+        }
+        if reservations.len() >= 4_096 {
+            let cutoff = now - chrono::Duration::hours(1);
+            reservations.retain(|_, reserved| *reserved >= cutoff);
+        }
+        reservations.insert(id.to_string(), now);
+        true
     }
 }
 
@@ -332,9 +457,27 @@ impl DualCredentialExtractor {
         session_store: Arc<dyn LoginSessionStore>,
         token_store: Arc<dyn BearerTokenStore>,
     ) -> Self {
+        Self::new_with_auth_epochs(
+            config,
+            session_store,
+            token_store,
+            Arc::new(AuthEpochRegistry::default()),
+        )
+    }
+
+    pub fn new_with_auth_epochs(
+        config: Arc<AuthConfig>,
+        session_store: Arc<dyn LoginSessionStore>,
+        token_store: Arc<dyn BearerTokenStore>,
+        auth_epochs: Arc<AuthEpochRegistry>,
+    ) -> Self {
         Self {
-            cookie: SessionCookieExtractor::new(Arc::clone(&config), session_store),
-            bearer: BearerTokenExtractor::new(config, token_store),
+            cookie: SessionCookieExtractor::new_with_auth_epochs(
+                Arc::clone(&config),
+                session_store,
+                Arc::clone(&auth_epochs),
+            ),
+            bearer: BearerTokenExtractor::new_with_auth_epochs(config, token_store, auth_epochs),
         }
     }
 }
@@ -378,6 +521,7 @@ pub fn principal_from_claims(claims: &VerifiedClaims) -> AuthPrincipal {
         display_name,
         picture_url: claims.picture.clone(),
         is_admin: false,
+        auth_epoch: 0,
     }
 }
 
@@ -525,12 +669,22 @@ impl PrincipalExtractor for GoogleJwtPrincipalExtractor {
 /// The fallback `dev@local` has `is_admin: true`: "no auth" means no
 /// gating unless the developer intentionally switches this browser to
 /// a non-admin dev principal for role/manual-testing.
-pub struct StubPrincipalExtractor;
+pub struct StubPrincipalExtractor {
+    auth_epochs: Arc<AuthEpochRegistry>,
+}
+
+impl StubPrincipalExtractor {
+    pub fn new(auth_epochs: Arc<AuthEpochRegistry>) -> Self {
+        Self { auth_epochs }
+    }
+}
 
 #[async_trait]
 impl PrincipalExtractor for StubPrincipalExtractor {
     async fn extract(&self, req: &Parts) -> Result<AuthPrincipal, AuthError> {
-        Ok(read_dev_principal_cookie(req).unwrap_or_else(default_dev_principal))
+        let mut principal = read_dev_principal_cookie(req).unwrap_or_else(default_dev_principal);
+        principal.auth_epoch = self.auth_epochs.current(&principal.email).await;
+        Ok(principal)
     }
 }
 
@@ -877,7 +1031,8 @@ mod tests {
     #[tokio::test]
     async fn successful_extract_bumps_last_used_in_background() {
         let store = Arc::new(MemorySessionStore::new());
-        let s = fresh_session("bump-me");
+        let mut s = fresh_session("bump-me");
+        s.last_used_at -= ChronoDuration::minutes(10);
         let original = s.last_used_at;
         store.create(s).await.unwrap();
 
@@ -892,6 +1047,15 @@ mod tests {
 
         let row = store.get("bump-me").await.unwrap().unwrap();
         assert!(row.last_used_at > original, "last_used_at should advance");
+
+        let first_touch = row.last_used_at;
+        let _ = ext.extract(&parts).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(
+            store.get("bump-me").await.unwrap().unwrap().last_used_at,
+            first_touch,
+            "touches inside the coalescing window must not write again"
+        );
     }
 
     #[test]
@@ -1108,7 +1272,7 @@ mod tests {
 
     #[tokio::test]
     async fn stub_extractor_returns_canned_principal_with_no_cookie() {
-        let p = StubPrincipalExtractor
+        let p = StubPrincipalExtractor::new(Arc::new(AuthEpochRegistry::default()))
             .extract(&parts_with_cookie(None))
             .await
             .unwrap();
@@ -1122,7 +1286,7 @@ mod tests {
     async fn stub_extractor_returns_canned_principal_with_arbitrary_cookie() {
         // Session-cookie garbage is ignored — disabled mode never
         // touches the session store.
-        let p = StubPrincipalExtractor
+        let p = StubPrincipalExtractor::new(Arc::new(AuthEpochRegistry::default()))
             .extract(&parts_with_cookie(Some("garbage-no-row-exists")))
             .await
             .unwrap();
@@ -1139,7 +1303,7 @@ mod tests {
         let set_cookie = build_dev_principal_cookie(&config, &dev, false);
         let inbound_cookie = set_cookie.split(';').next().unwrap();
 
-        let p = StubPrincipalExtractor
+        let p = StubPrincipalExtractor::new(Arc::new(AuthEpochRegistry::default()))
             .extract(&parts_with_raw_cookie(inbound_cookie))
             .await
             .unwrap();

@@ -72,8 +72,10 @@ export interface Annotation {
 export interface AnnotationOverlayHandle {
   /** Open `pinId`'s comment thread and recenter the view on it. A no-op (but
    * safe) if the pin isn't in the current set, the overlay is hidden, or the
-   * scene isn't ready — so a stale id can never throw or wedge the UI. */
-  focusPin: (pinId: string) => void;
+   * scene isn't ready — so a stale id can never throw or wedge the UI. Resolves
+   * only after the pin is available and its scene mutation completes; `false`
+   * means the overlay unmounted or a newer request superseded it. */
+  focusPin: (pinId: string) => Promise<boolean>;
 }
 
 /**

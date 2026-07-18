@@ -7,7 +7,6 @@ function makeCpuCache(): CpuCache {
   return {
     markChunkEvicted: vi.fn(),
     markChunkMissing: vi.fn(),
-    markProxyMissing: vi.fn(),
   } as unknown as CpuCache;
 }
 
@@ -32,27 +31,5 @@ describe("WorkerFeedback residency reconciliation", () => {
       2,
       "0/0/2/0/0/0",
     );
-    expect(cpuCache.markProxyMissing).not.toHaveBeenCalled();
-  });
-
-  it("keeps proxy missing feedback on the proxy sent-state path", () => {
-    const feedback = new WorkerFeedback();
-    const cpuCache = makeCpuCache();
-
-    feedback.handleWantedSetDelta("ds-0", [
-      {
-        kind: "proxy",
-        datasetId: "ds-0",
-        entityId: "tile-0",
-        proxyKind: "TileProxy3D",
-        t: 1,
-        c: 3,
-      },
-    ], cpuCache);
-
-    expect(cpuCache.markProxyMissing).toHaveBeenCalledWith(
-      "ds-0|tile-0|TileProxy3D|1|3",
-    );
-    expect(cpuCache.markChunkMissing).not.toHaveBeenCalled();
   });
 });

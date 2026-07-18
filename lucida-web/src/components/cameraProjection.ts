@@ -3,13 +3,14 @@
  * the coordinate math every canvas-adjacent surface shares (SliceViewer,
  * VolumeViewer, PeerCursors, and both annotation overlays).
  *
- * 2D (slice camera): the camera is `zoom` + `center`, in PHYSICAL pixels
- * against the canvas midpoint. {@link eventToWorld} is the inverse projection
+ * 2D (slice camera): the persisted/shared camera is `zoom` + `center`, in
+ * logical CSS pixels against the canvas midpoint. {@link eventToWorld} is the inverse projection
  * (pointer event → in-plane world point) and {@link makeWorldToScreen} the
  * forward one (world point → CSS px), snapshotting the camera once so a RAF
  * tick can project many vertices per frame against a consistent camera. The
- * two are exact inverses: `world = (screenPhysPx − half)/zoom + center` vs
- * `cssPx = ((world − center)·zoom + half)/dpr`.
+ * two are exact inverses: `world = (screenCssPx − halfCss)/zoom + center`
+ * vs `cssPx = (world − center)·zoom + halfCss`. Device-pixel ratio is a
+ * render-boundary concern and must not change shared camera geometry.
  *
  * 3D (volume camera): the world→screen lift lives in WASM —
  * `scene.project_annotation` raises a stored in-plane-voxel + voxel-depth
@@ -50,13 +51,30 @@ export function eventToWorld(
   canvas: HTMLCanvasElement,
   e: ClientPoint,
 ): [number, number] {
-  const dpr = devicePixelRatio;
-  const [cursorX, cursorY] = eventToScreenPx(canvas, e);
+  const rect = canvas.getBoundingClientRect();
+  const cursorX = e.clientX - rect.left;
+  const cursorY = e.clientY - rect.top;
   const zoom = scene.zoom();
   const center = scene.center();
-  const halfW = (canvas.clientWidth * dpr) / 2;
-  const halfH = (canvas.clientHeight * dpr) / 2;
+  const halfW = canvas.clientWidth / 2;
+  const halfH = canvas.clientHeight / 2;
   return [(cursorX - halfW) / zoom + center[0], (cursorY - halfH) / zoom + center[1]];
+}
+
+/** Center a 2D camera after zoom so a world point remains under one CSS pointer. */
+export function centerForWorldAnchor(
+  canvas: HTMLCanvasElement,
+  e: ClientPoint,
+  worldAnchor: ScreenPoint,
+  newZoom: number,
+): ScreenPoint {
+  const rect = canvas.getBoundingClientRect();
+  const cursorX = e.clientX - rect.left;
+  const cursorY = e.clientY - rect.top;
+  return [
+    worldAnchor[0] - (cursorX - canvas.clientWidth / 2) / newZoom,
+    worldAnchor[1] - (cursorY - canvas.clientHeight / 2) / newZoom,
+  ];
 }
 
 /**
@@ -70,16 +88,15 @@ export function makeWorldToScreen(
   scene: WasmScene,
   canvas: HTMLCanvasElement,
 ): (v: ScreenPoint) => ScreenPoint {
-  const dpr = devicePixelRatio;
-  const physW = Math.round(canvas.clientWidth * dpr);
-  const physH = Math.round(canvas.clientHeight * dpr);
+  const cssW = canvas.clientWidth;
+  const cssH = canvas.clientHeight;
   const zoom = scene.zoom();
   const center = scene.center();
   const centerX = center[0];
   const centerY = center[1];
   return (v: ScreenPoint): ScreenPoint => [
-    ((v[0] - centerX) * zoom + physW / 2) / dpr,
-    ((v[1] - centerY) * zoom + physH / 2) / dpr,
+    (v[0] - centerX) * zoom + cssW / 2,
+    (v[1] - centerY) * zoom + cssH / 2,
   ];
 }
 

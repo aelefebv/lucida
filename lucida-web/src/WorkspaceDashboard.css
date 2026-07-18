@@ -2,14 +2,15 @@
   position: relative;
   min-height: 100vh;
   width: 100%;
-  background: #242424;
-  color: rgba(255, 255, 255, 0.87);
+  background: var(--surface-canvas);
+  color: var(--text-primary);
+  overflow-x: clip;
 }
 
 .workspace-dashboard-inner {
   width: min(960px, calc(100% - 2rem));
   margin: 0 auto;
-  padding: 2rem 0;
+  padding: clamp(1rem, 4vw, 2rem) 0;
 }
 
 .workspace-dashboard-toolbar {
@@ -31,11 +32,12 @@
   display: flex;
   align-items: center;
   gap: 0.5rem;
+  flex-wrap: wrap;
 }
 
 .workspace-dashboard-secondary {
-  border-color: #4a4a4a;
-  background: #2b2b2b;
+  border-color: var(--border-strong);
+  background: var(--surface-2);
 }
 
 .workspace-from-dataset {
@@ -43,6 +45,7 @@
   align-items: center;
   gap: 0.5rem;
   margin-bottom: 1rem;
+  flex-wrap: wrap;
 }
 
 .workspace-from-dataset-input {
@@ -50,9 +53,9 @@
   min-width: 0;
   box-sizing: border-box;
   padding: 0.625rem 0.75rem;
-  border: 1px solid #3a3a3a;
+  border: 1px solid var(--border-strong);
   border-radius: 6px;
-  background: #1a1a1a;
+  background: var(--surface-1);
   color: inherit;
   font: inherit;
 }
@@ -62,25 +65,42 @@
   box-sizing: border-box;
   margin-bottom: 1rem;
   padding: 0.625rem 0.75rem;
-  border: 1px solid #3a3a3a;
+  border: 1px solid var(--border-strong);
   border-radius: 6px;
-  background: #1a1a1a;
+  background: var(--surface-1);
   color: inherit;
   font: inherit;
 }
 
-.workspace-dashboard-error {
+.workspace-dashboard-operation {
   margin-bottom: 1rem;
   padding: 0.75rem;
-  border: 1px solid #7a2b2b;
+  border: 1px solid var(--border-strong);
   border-radius: 6px;
-  background: #341818;
-  color: #ffb4b4;
+  background: var(--surface-2);
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.workspace-dashboard-operation[data-operation-phase="success"] {
+  border-color: var(--success-border);
+  background: var(--success-surface);
+  color: var(--success-text);
+}
+
+.workspace-dashboard-operation[data-operation-phase="error"] {
+  border-color: var(--danger-border);
+  background: var(--danger-surface);
+  color: var(--danger-text);
 }
 
 .workspace-dashboard-empty {
   padding: 2rem 0;
-  color: #aaa;
+  color: var(--text-secondary);
 }
 
 .workspace-list {
@@ -96,19 +116,19 @@
   gap: 1rem;
   width: 100%;
   padding: 0.75rem 0.875rem;
-  border: 1px solid #3a3a3a;
+  border: 1px solid var(--border-subtle);
   border-radius: 6px;
-  background: #1f1f1f;
+  background: var(--surface-1);
   color: inherit;
   text-align: left;
 }
 
 .workspace-list-row:hover {
-  border-color: #646cff;
+  border-color: var(--accent);
 }
 
 .workspace-list-row:focus-within {
-  border-color: #9aa0ff;
+  border-color: var(--focus-ring);
 }
 
 .workspace-list-open {
@@ -134,9 +154,9 @@
 .workspace-duplicate-button {
   min-width: 4.75rem;
   padding: 0.45rem 0.65rem;
-  border: 1px solid #4a4a4a;
+  border: 1px solid var(--border-strong);
   border-radius: 6px;
-  background: #2b2b2b;
+  background: var(--surface-2);
   color: inherit;
   font: inherit;
 }
@@ -147,15 +167,15 @@
 }
 
 .workspace-pin-button[aria-pressed="true"] {
-  border-color: #8f9560;
-  background: #3a3a24;
-  color: #f0f3bc;
+  border-color: var(--warning-border);
+  background: var(--warning-surface);
+  color: var(--warning-text);
 }
 
 .workspace-pin-button:hover:not(:disabled),
 .workspace-archive-button:hover:not(:disabled),
 .workspace-duplicate-button:hover:not(:disabled) {
-  border-color: #9aa0ff;
+  border-color: var(--accent);
 }
 
 .workspace-pin-button:disabled,
@@ -179,7 +199,7 @@
 
 .workspace-list-meta,
 .workspace-list-updated {
-  color: #aaa;
+  color: var(--text-secondary);
   font-size: 0.875rem;
 }
 
@@ -188,6 +208,19 @@
 }
 
 @media (max-width: 720px) {
+  .workspace-dashboard-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .workspace-dashboard-actions {
+    width: 100%;
+  }
+
+  .workspace-from-dataset-input {
+    flex-basis: 100%;
+  }
+
   .workspace-list-row {
     grid-template-columns: minmax(0, 1fr);
     gap: 0.25rem;
@@ -200,9 +233,18 @@
 
   .workspace-row-actions {
     justify-self: start;
+    width: 100%;
   }
 
   .workspace-list-updated {
     text-align: left;
+  }
+}
+
+@media (max-width: 420px) {
+  .workspace-dashboard-actions > button,
+  .workspace-from-dataset > button,
+  .workspace-row-actions > button {
+    flex: 1 1 auto;
   }
 }

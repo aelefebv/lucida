@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { SAVED_VIEW_VERSION, type SavedView } from "../savedView/types.ts";
 
@@ -146,6 +146,14 @@ async function renderPanel(over: Partial<ExplorationPanelProps> = {}) {
   return props;
 }
 
+describe("ExplorationPanel empty-state semantics", () => {
+  it("does not present the no-dataset message as a list child", async () => {
+    await renderPanel({ datasetId: null, datasetName: null });
+    const empty = screen.getByText("Open a dataset to start exploring.");
+    expect(empty.closest("[role='list']")).toBeNull();
+  });
+});
+
 /** The candidate row whose label matches — disambiguates now that the panel
  *  renders several cells. */
 function cellByLabel(label: string): HTMLElement {
@@ -153,7 +161,9 @@ function cellByLabel(label: string): HTMLElement {
     .getAllByTestId("explore-cell")
     .find((el) => within(el).queryByText(label));
   if (!cell) throw new Error(`no explore-cell labelled ${label}`);
-  return cell;
+  return within(cell).getByRole("button", {
+    name: `Open suggested view: ${label}`,
+  });
 }
 
 /** A manual nudge BUTTON by its text. Targets the role so it doesn't collide
@@ -163,12 +173,11 @@ function nudgeButton(text: string): HTMLButtonElement {
 }
 
 describe("ExplorationPanel — candidates", () => {
-  it("renders the plain-language label and its transform tag for each candidate", async () => {
+  it("renders the plain-language label without exposing an internal transform id", async () => {
     await renderPanel();
     const cell = cellByLabel("Rotate right 45°");
     expect(within(cell).getByText("Rotate right 45°")).toBeTruthy();
-    // The muted machine id is shown as a small tag.
-    expect(within(cell).getByText("azimuth:+45")).toBeTruthy();
+    expect(within(cell).queryByText("azimuth:+45")).toBeNull();
   });
 
   it("calls explore_view when it becomes visible (refresh on open)", async () => {
@@ -261,9 +270,10 @@ describe("ExplorationPanel — manual controls (shortcuts to generator moves)", 
     expect(nudgeButton("Zoom in").disabled).toBe(false);
   });
 
-  it("Back is disabled until a descend happens, then enabled, and applies the previous view", async () => {
+  it("Previous view is disabled until a descend happens, then restores the previous view", async () => {
     const props = await renderPanel();
     const back = () => screen.getByTestId("explore-back") as HTMLButtonElement;
+    expect(back().textContent).toBe("Previous view");
     expect(back().disabled).toBe(true);
     // Descend into the rotated child; the current (theta 0) view is pushed.
     await act(async () => {
@@ -308,6 +318,57 @@ describe("ExplorationPanel — manual controls (shortcuts to generator moves)", 
     expect((applyCalls[1][0] as SavedView).camera).toMatchObject({ theta: 0 });
     // Stack drained → Back disabled again.
     expect(back().disabled).toBe(true);
+  });
+
+  it("keeps Back history and breadcrumb intact when restoring the previous view fails", async () => {
+    const props = await renderPanel();
+    await act(async () => {
+      await userEvent.click(cellByLabel("Rotate right 45°"));
+    });
+    const back = screen.getByTestId("explore-back") as HTMLButtonElement;
+    expect(back.disabled).toBe(false);
+    expect(screen.getByTestId("explore-breadcrumb").textContent).toBe(
+      "Home › Rotate right 45°",
+    );
+
+    vi.mocked(props.applyView).mockRejectedValueOnce(new Error("restore failed"));
+    await act(async () => {
+      await userEvent.click(back);
+    });
+
+    expect(screen.getByTestId("explore-error").textContent).toContain("restore failed");
+    expect(back.disabled).toBe(false);
+    expect(screen.getByTestId("explore-breadcrumb").textContent).toBe(
+      "Home › Rotate right 45°",
+    );
+
+    await act(async () => {
+      await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+    });
+    expect(back.disabled).toBe(true);
+    expect(screen.getByTestId("explore-breadcrumb").textContent).toBe("Home");
+  });
+
+  it("coalesces concurrent navigation attempts behind one in-flight transition", async () => {
+    let resolveApply!: () => void;
+    const applyView = vi.fn(() => new Promise<void>((resolve) => {
+      resolveApply = resolve;
+    }));
+    await renderPanel({ applyView });
+    const row = cellByLabel("Rotate right 45°");
+
+    act(() => {
+      fireEvent.click(row);
+      fireEvent.click(row);
+    });
+    expect(applyView).toHaveBeenCalledOnce();
+    expect((screen.getByTestId("explore-back") as HTMLButtonElement).disabled).toBe(true);
+
+    await act(async () => {
+      resolveApply();
+      await Promise.resolve();
+    });
+    expect((screen.getByTestId("explore-back") as HTMLButtonElement).disabled).toBe(false);
   });
 });
 
@@ -387,7 +448,7 @@ describe("ExplorationPanel — you-are-here readout reveals the axes", () => {
   });
 });
 
-describe("ExplorationPanel — bookmark", () => {
+describe("ExplorationPanel — save view", () => {
   // happy-dom doesn't implement window.prompt, so install a stub directly
   // (vi.spyOn can't spy on an undefined property).
   function stubPrompt(value: string | null) {
@@ -400,7 +461,7 @@ describe("ExplorationPanel — bookmark", () => {
     const promptStub = stubPrompt("My spot");
     const props = await renderPanel();
     await act(async () => {
-      await userEvent.click(screen.getByTestId("explore-bookmark"));
+      await userEvent.click(screen.getByTestId("explore-save-view"));
     });
     expect(promptStub).toHaveBeenCalled();
     expect(props.createSavedView).toHaveBeenCalledTimes(1);
@@ -414,7 +475,7 @@ describe("ExplorationPanel — bookmark", () => {
     stubPrompt(null);
     const props = await renderPanel();
     await act(async () => {
-      await userEvent.click(screen.getByTestId("explore-bookmark"));
+      await userEvent.click(screen.getByTestId("explore-save-view"));
     });
     expect(props.createSavedView).not.toHaveBeenCalled();
   });
@@ -523,6 +584,62 @@ describe("ExplorationPanel — preview thumbnails", () => {
     // Row still renders by label; no thumbnail box, no error surfaced.
     expect(cellByLabel("Rotate right 45°")).toBeTruthy();
     expect(screen.queryByTestId("explore-error")).toBeNull();
+  });
+
+  it("does not let an obsolete thumbnail completion overwrite a refreshed candidate", async () => {
+    const first = defaultSidecar();
+    first.cells = [first.cells[0]];
+    exploreView.mockReturnValue(JSON.stringify(first));
+    const oldBitmap = fakeBitmap();
+    const newBitmap = fakeBitmap();
+    let resolveOld!: (bitmap: ImageBitmap) => void;
+    let resolveNew!: (bitmap: ImageBitmap) => void;
+    const requestThumbnail = vi.fn((view: SavedView) =>
+      new Promise<ImageBitmap>((resolve) => {
+        const theta = (view.camera as { theta: number }).theta;
+        if (theta === 0.785) resolveOld = resolve;
+        else resolveNew = resolve;
+      }));
+    await renderPanel({ requestThumbnail });
+    const firstObservers = observed.length;
+    act(() => {
+      const entry = observed[0];
+      entry.cb([{ isIntersecting: true, target: entry.el } as IntersectionObserverEntry], entry.obs);
+    });
+
+    const refreshed = defaultSidecar();
+    refreshed.cells = [{
+      ...refreshed.cells[0],
+      // Keep the same logical handle to prove the `view` dependency, rather
+      // than a React remount, cancels the stale completion.
+      view: viewWithTheta(1.57),
+    }];
+    exploreView.mockReturnValue(JSON.stringify(refreshed));
+    await act(async () => {
+      await userEvent.click(screen.getByTestId("explore-suggest"));
+    });
+    const nextEntry = observed.slice(firstObservers).at(-1)!;
+    act(() => {
+      nextEntry.cb(
+        [{ isIntersecting: true, target: nextEntry.el } as IntersectionObserverEntry],
+        nextEntry.obs,
+      );
+    });
+
+    await act(async () => {
+      resolveOld(oldBitmap);
+      await Promise.resolve();
+    });
+    expect(oldBitmap.close).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("explore-thumb").getAttribute("data-thumb-status"))
+      .toBe("pending");
+
+    await act(async () => {
+      resolveNew(newBitmap);
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId("explore-thumb").getAttribute("data-thumb-status"))
+      .toBe("ready");
   });
 
   it("hides previews (and stops requesting) when 'Show previews' is unchecked", async () => {

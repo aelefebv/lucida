@@ -9,6 +9,7 @@ pub mod layout;
 pub mod normalize;
 pub mod transform;
 pub mod url;
+pub mod validation;
 
 pub use collection::CollectionLayoutError;
 pub use entity::*;
@@ -20,3 +21,4 @@ pub use label::*;
 pub use layout::*;
 pub use normalize::*;
 pub use transform::*;
+pub use validation::*;

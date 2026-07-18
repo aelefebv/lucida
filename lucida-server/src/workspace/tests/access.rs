@@ -15,6 +15,100 @@ async fn create_lists_owner_workspace() {
 }
 
 #[tokio::test]
+async fn annotation_identity_is_server_stamped_and_editor_ownership_is_enforced() {
+    let store = fresh_store().await;
+    let owner = principal("owner@example.com", false);
+    let alice = principal("alice@example.com", false);
+    let bob = principal("bob@example.com", false);
+    let workspace = store
+        .create_workspace(&owner, Some("Annotation policy"))
+        .await
+        .unwrap();
+    let dataset_id = open_dataset_into(
+        &store,
+        &workspace.id,
+        &owner,
+        "annotation-policy-source",
+        "file:///data/annotation-policy.zarr",
+        "Annotation policy dataset",
+        1,
+    )
+    .await;
+    let manager = WorkspaceManager::new(Arc::new(store), DatasetRuntimeConfig::defaults());
+    for member in [&alice, &bob] {
+        manager
+            .upsert_member(
+                &workspace.id,
+                &owner,
+                &member.email,
+                None,
+                WorkspaceRole::Editor,
+            )
+            .await
+            .unwrap();
+    }
+    let live = manager.live_workspace(&workspace.id, &owner).await.unwrap();
+
+    let (_, applied) = manager
+        .apply_document_command(
+            &live,
+            &alice,
+            DocumentCommand::AddAnnotation {
+                dataset_id: dataset_id.clone(),
+                id: "pin".into(),
+                position: [1.0, 2.0],
+                end: None,
+                z: 0.0,
+                t: 0,
+                c: 0,
+                author: owner.email.clone(),
+                kind: lucida_core::scene::AnnotationKind::Point,
+                view: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        applied,
+        DocumentCommand::AddAnnotation { author, .. } if author == alice.email
+    ));
+
+    let denied = manager
+        .apply_document_command(
+            &live,
+            &bob,
+            DocumentCommand::MoveAnnotation {
+                dataset_id: dataset_id.clone(),
+                id: "pin".into(),
+                position: [9.0, 9.0],
+                end: None,
+                z: 0.0,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(denied, CommandApplyError::Forbidden));
+    assert_eq!(
+        live.session.lock().await.document.annotations[&dataset_id][0].position,
+        [1.0, 2.0]
+    );
+
+    // Workspace owners retain explicit moderation authority.
+    manager
+        .apply_document_command(
+            &live,
+            &owner,
+            DocumentCommand::RemoveAnnotation {
+                dataset_id,
+                id: "pin".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(live.session.lock().await.document.annotations.is_empty());
+}
+
+#[tokio::test]
 async fn duplicate_route_returns_201_for_member_and_404_for_non_member() {
     let store = fresh_store().await;
     let owner = principal("owner@example.com", false);
@@ -24,7 +118,7 @@ async fn duplicate_route_returns_201_for_member_and_404_for_non_member() {
         .unwrap();
     let manager = Arc::new(WorkspaceManager::new(
         Arc::new(store.clone()),
-        ProxyConfig::defaults(),
+        DatasetRuntimeConfig::defaults(),
     ));
 
     // Owner POSTs /duplicate → 201 Created, owns the copy named "Copy of …".
@@ -62,8 +156,33 @@ async fn duplicate_route_returns_201_for_member_and_404_for_non_member() {
     assert_eq!(res2.status(), StatusCode::NOT_FOUND);
 }
 
+async fn websocket_handshake_status(request: Request<()>) -> StatusCode {
+    match tokio_tungstenite::connect_async(request).await {
+        Ok((socket, response)) => {
+            drop(socket);
+            response.status()
+        }
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => response.status(),
+        Err(error) => panic!("unexpected WebSocket handshake failure: {error}"),
+    }
+}
+
+fn bearer_websocket_request(url: &str, raw_token: &str, origin: Option<&str>) -> Request<()> {
+    let mut request = url.into_client_request().unwrap();
+    request.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {raw_token}").parse().unwrap(),
+    );
+    if let Some(origin) = origin {
+        request
+            .headers_mut()
+            .insert("Origin", origin.parse().unwrap());
+    }
+    request
+}
+
 #[tokio::test]
-async fn bearer_authenticates_workspace_websocket_upgrade() {
+async fn workspace_websocket_enforces_origin_policy_before_attachment() {
     let store = fresh_store().await;
     let owner = principal("cli@example.com", false);
     let workspace = store
@@ -72,7 +191,7 @@ async fn bearer_authenticates_workspace_websocket_upgrade() {
         .unwrap();
     let manager = Arc::new(WorkspaceManager::new(
         Arc::new(store),
-        ProxyConfig::defaults(),
+        DatasetRuntimeConfig::defaults(),
     ));
 
     let raw_token = "lucida_pat_ws_test";
@@ -100,33 +219,101 @@ async fn bearer_authenticates_workspace_websocket_upgrade() {
         Arc::new(MemorySessionStore::new()) as Arc<dyn LoginSessionStore>,
         Arc::clone(&bearer_store) as Arc<dyn BearerTokenStore>,
     ));
-    let app = router(manager).layer(axum::middleware::from_fn_with_state(
-        extractor,
-        crate::auth::middleware::auth_middleware,
-    ));
+    // A browser request through a router that forgot to install the origin
+    // policy must fail closed before lazy workspace restoration.
+    let app_without_policy =
+        router(Arc::clone(&manager)).layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&extractor),
+            crate::auth::middleware::auth_middleware,
+        ));
 
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app_without_policy).await.unwrap();
+    });
+    let url = format!(
+        "ws://{addr}/ws/workspaces/{}",
+        urlencoding::encode(&workspace.id)
+    );
+    assert_eq!(
+        websocket_handshake_status(bearer_websocket_request(
+            &url,
+            raw_token,
+            Some(&format!("http://{addr}")),
+        ))
+        .await,
+        StatusCode::FORBIDDEN,
+    );
+    assert_eq!(manager.live_workspace_count().await, 0);
+    server.abort();
+
+    let policy =
+        crate::origin::OriginPolicy::new(vec!["https://ui.example.test".to_string()], false)
+            .unwrap();
+    let app = router(Arc::clone(&manager))
+        .layer(axum::middleware::from_fn_with_state(
+            extractor,
+            crate::auth::middleware::auth_middleware,
+        ))
+        .layer(axum::Extension(policy));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-
     let url = format!(
         "ws://{addr}/ws/workspaces/{}",
         urlencoding::encode(&workspace.id)
     );
-    let mut request = url.into_client_request().unwrap();
-    request.headers_mut().insert(
-        "Authorization",
-        format!("Bearer {raw_token}").parse().unwrap(),
-    );
 
-    let (socket, response) = tokio_tungstenite::connect_async(request).await.unwrap();
+    for denied_origin in [
+        "https://sibling.example.test",
+        "https://ui.example.test/path",
+        "null",
+    ] {
+        assert_eq!(
+            websocket_handshake_status(bearer_websocket_request(
+                &url,
+                raw_token,
+                Some(denied_origin),
+            ))
+            .await,
+            StatusCode::FORBIDDEN,
+            "origin {denied_origin:?} must be denied",
+        );
+        assert_eq!(
+            manager.live_workspace_count().await,
+            0,
+            "origin denial must happen before workspace attachment",
+        );
+    }
+
+    // Originless CLI/automation clients, the exact same Host browser origin,
+    // and an explicitly configured cross-origin UI are the three supported
+    // admission paths.
     assert_eq!(
-        response.status(),
-        axum::http::StatusCode::SWITCHING_PROTOCOLS
+        websocket_handshake_status(bearer_websocket_request(&url, raw_token, None)).await,
+        StatusCode::SWITCHING_PROTOCOLS,
     );
-    drop(socket);
+    assert_eq!(
+        websocket_handshake_status(bearer_websocket_request(
+            &url,
+            raw_token,
+            Some(&format!("http://{addr}")),
+        ))
+        .await,
+        StatusCode::SWITCHING_PROTOCOLS,
+    );
+    assert_eq!(
+        websocket_handshake_status(bearer_websocket_request(
+            &url,
+            raw_token,
+            Some("https://ui.example.test"),
+        ))
+        .await,
+        StatusCode::SWITCHING_PROTOCOLS,
+    );
     server.abort();
 }
 
@@ -135,7 +322,7 @@ async fn workspace_router_builds_with_archived_static_route() {
     let store = fresh_store().await;
     let manager = Arc::new(WorkspaceManager::new(
         Arc::new(store),
-        ProxyConfig::defaults(),
+        DatasetRuntimeConfig::defaults(),
     ));
     let _router = router(manager);
 }
@@ -150,7 +337,7 @@ async fn admin_support_routes_require_admin_even_for_workspace_owner() {
         .unwrap();
     let manager = Arc::new(WorkspaceManager::new(
         Arc::new(store),
-        ProxyConfig::defaults(),
+        DatasetRuntimeConfig::defaults(),
     ));
     let app = workspace_router_with_principal(Arc::clone(&manager), owner.clone());
 
@@ -201,7 +388,7 @@ async fn admin_support_route_returns_details_without_membership() {
         .unwrap();
     let manager = Arc::new(WorkspaceManager::new(
         Arc::new(store),
-        ProxyConfig::defaults(),
+        DatasetRuntimeConfig::defaults(),
     ));
     manager
         .upsert_member(
@@ -244,7 +431,7 @@ async fn last_view_rest_round_trips_and_preserves_default() {
         .unwrap();
     let manager = Arc::new(WorkspaceManager::new(
         Arc::new(store.clone()),
-        ProxyConfig::defaults(),
+        DatasetRuntimeConfig::defaults(),
     ));
 
     // Pin a shared default so we can prove the last-view PATCH leaves it.
@@ -333,7 +520,7 @@ async fn admin_support_search_and_lifecycle_override_without_membership() {
         .create_workspace(&owner, Some("Support lifecycle"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
     manager
         .upsert_member(
             &workspace.id,
@@ -364,7 +551,7 @@ async fn admin_support_search_and_lifecycle_override_without_membership() {
     assert!(archived.workspace.archived_at.is_some());
     assert!(!manager.live.lock().await.contains_key(&workspace.id));
     let item = rx.recv().await.unwrap();
-    assert!(matches!(item, BroadcastItem::WorkspaceArchived { .. }));
+    assert_eq!(item.kind(), BroadcastKind::WorkspaceArchived);
     assert!(store.list_workspaces(&owner).await.unwrap().is_empty());
 
     assert!(
@@ -391,21 +578,25 @@ async fn admin_support_search_and_lifecycle_override_without_membership() {
 
 #[tokio::test]
 async fn admin_can_recover_orphaned_workspace_owner() {
-    let store = fresh_store().await;
+    let (store, pool) = fresh_store_with_pool().await;
     let owner = principal("owner@example.com", false);
     let recovered = principal("Recovered@Example.com", false);
     let workspace = store
         .create_workspace(&owner, Some("Orphaned"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
 
-    assert!(
-        store
-            .remove_member(&workspace.id, &owner.email)
-            .await
-            .unwrap()
-    );
+    // Simulate a legacy/corrupt orphan directly. The supported store API now
+    // enforces last-owner retention transactionally, so it cannot create the
+    // recovery condition this admin-only path exists to repair.
+    let deleted = sqlx::query("DELETE FROM workspace_members WHERE workspace_id = ? AND email = ?")
+        .bind(&workspace.id)
+        .bind(&owner.email)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(deleted.rows_affected(), 1);
     let details = manager
         .admin_workspace_details(&workspace.id)
         .await
@@ -467,7 +658,7 @@ async fn owner_can_add_explicit_member_role() {
         .create_workspace(&owner, Some("Shared"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
 
     let member = manager
         .upsert_member(
@@ -499,7 +690,7 @@ async fn anyone_with_link_grants_configured_non_owner_role() {
         .create_workspace(&owner, Some("Linked"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
 
     assert_eq!(store.role_for(&workspace.id, &other).await.unwrap(), None);
 
@@ -552,7 +743,7 @@ async fn explicit_membership_overrides_link_role() {
         .create_workspace(&owner, Some("Linked member"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
 
     manager
         .update_link_access(
@@ -589,7 +780,7 @@ async fn link_workspace_enters_recents_only_after_successful_open() {
         .create_workspace(&owner, Some("Linked recent"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
 
     manager
         .update_link_access(
@@ -629,7 +820,7 @@ async fn link_recents_do_not_make_workspaces_globally_discoverable() {
         .create_workspace(&owner, Some("Private link"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
 
     manager
         .update_link_access(
@@ -659,7 +850,7 @@ async fn pins_are_personal_and_sort_before_recents() {
         .create_workspace(&owner, Some("Second"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
     manager
         .upsert_member(
             &first.id,
@@ -712,7 +903,7 @@ async fn link_only_recent_disappears_when_link_access_is_disabled() {
         .create_workspace(&owner, Some("Disable link"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
     manager
         .update_link_access(
             &workspace.id,
@@ -755,7 +946,7 @@ async fn unpin_without_existing_state_does_not_create_link_recent() {
         .create_workspace(&owner, Some("No accidental recent"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
     manager
         .update_link_access(
             &workspace.id,
@@ -785,7 +976,7 @@ async fn archive_restore_is_owner_only_and_controls_dashboard_visibility() {
         .create_workspace(&owner, Some("Lifecycle"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
     manager
         .upsert_member(
             &workspace.id,
@@ -869,7 +1060,7 @@ async fn archived_workspace_blocks_new_access_until_restored() {
         .create_workspace(&owner, Some("Archived access"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
 
     manager
         .archive_workspace(&workspace.id, &owner)
@@ -897,6 +1088,7 @@ async fn archived_workspace_blocks_new_access_until_restored() {
             .await
             .is_ok()
     );
+    assert!(manager.live_workspace(&workspace.id, &owner).await.is_ok());
 }
 
 #[tokio::test]
@@ -923,7 +1115,7 @@ async fn workspace_open_never_leaks_existence_to_non_member() {
         .create_workspace(&alice, Some("Archived"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
     manager
         .archive_workspace(&archived.id, &alice)
         .await
@@ -973,7 +1165,7 @@ async fn workspace_open_anyone_with_link_still_grants_access() {
         .create_workspace(&alice, Some("Linked"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
 
     // Before enabling the link, bob is a non-member → never-leak 404.
     let before = open_status_body(&manager, &workspace.id, &bob).await;
@@ -1005,9 +1197,23 @@ async fn archiving_revokes_live_workspace_and_denies_new_mutations() {
         .create_workspace(&owner, Some("Live archive"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
-    let live = manager.live_workspace(&workspace.id, &owner).await.unwrap();
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
+    let attachment = manager
+        .attach_workspace(&workspace.id, &owner)
+        .await
+        .unwrap();
+    let pending_attachment = manager
+        .attach_workspace(&workspace.id, &owner)
+        .await
+        .unwrap();
+    let live = Arc::clone(attachment.live());
     let mut rx = live.tx.subscribe();
+    let (route_tx, mut route_rx) = crate::outbox::unicast_channel(4, 1024);
+    live.unicast_routes.lock().await.insert(90, route_tx);
+    let lease = manager
+        .register_attachment_connection(&attachment, 90, &owner)
+        .await
+        .unwrap();
 
     manager
         .archive_workspace(&workspace.id, &owner)
@@ -1015,12 +1221,22 @@ async fn archiving_revokes_live_workspace_and_denies_new_mutations() {
         .unwrap();
 
     assert!(live.background_cancelled());
+    assert!(lease.is_revoked());
+    assert!(matches!(
+        route_rx.recv().await,
+        Some(axum::extract::ws::Message::Close(_))
+    ));
+    assert_eq!(
+        manager
+            .register_attachment_connection(&pending_attachment, 91, &owner)
+            .await
+            .unwrap_err(),
+        ConnectionAdmissionError::AccessRevoked
+    );
     assert!(!manager.live.lock().await.contains_key(&workspace.id));
     let item = rx.recv().await.unwrap();
-    let BroadcastItem::WorkspaceArchived { json } = item else {
-        panic!("expected workspace archived broadcast");
-    };
-    let msg: ServerMessage = serde_json::from_str(&json).unwrap();
+    assert_eq!(item.kind(), BroadcastKind::WorkspaceArchived);
+    let msg: ServerMessage = serde_json::from_str(item.primary_json()).unwrap();
     match msg {
         ServerMessage::WorkspaceArchived { workspace_id } => {
             assert_eq!(workspace_id, workspace.id);
@@ -1045,15 +1261,17 @@ async fn idle_eviction_drops_empty_live_workspace_and_reopen_restores_document()
         .unwrap();
     let manager = WorkspaceManager::new_with_runtime_config(
         Arc::new(store.clone()),
-        ProxyConfig::defaults(),
+        DatasetRuntimeConfig::defaults(),
         idle_eviction_config(),
     );
     let live = manager.live_workspace(&workspace.id, &owner).await.unwrap();
 
-    store
-        .persist_document(&workspace.id, 7, &DocumentState::default())
-        .await
-        .unwrap();
+    for seq in 1..=7 {
+        store
+            .persist_document(&workspace.id, seq, &DocumentState::default())
+            .await
+            .unwrap();
+    }
 
     let evicted = manager.evict_idle_workspaces().await;
     assert_eq!(evicted, 1);
@@ -1063,6 +1281,57 @@ async fn idle_eviction_drops_empty_live_workspace_and_reopen_restores_document()
     let reopened = manager.live_workspace(&workspace.id, &owner).await.unwrap();
     assert!(!Arc::ptr_eq(&live, &reopened));
     assert_eq!(reopened.session.lock().await.seq, 7);
+}
+
+#[tokio::test]
+async fn concurrent_cold_workspace_joins_share_one_live_session() {
+    let store = fresh_store().await;
+    let owner = principal("owner@example.com", false);
+    let workspace = store
+        .create_workspace(&owner, Some("Single flight"))
+        .await
+        .unwrap();
+    let manager = Arc::new(WorkspaceManager::new(
+        Arc::new(store),
+        DatasetRuntimeConfig::defaults(),
+    ));
+
+    let (first, second) = tokio::join!(
+        manager.live_workspace(&workspace.id, &owner),
+        manager.live_workspace(&workspace.id, &owner),
+    );
+    let first = first.unwrap();
+    let second = second.unwrap();
+
+    assert!(Arc::ptr_eq(&first, &second));
+    assert_eq!(manager.live_workspace_count().await, 1);
+}
+
+#[tokio::test]
+async fn pending_workspace_attachment_is_atomic_with_idle_eviction() {
+    let store = fresh_store().await;
+    let owner = principal("owner@example.com", false);
+    let workspace = store
+        .create_workspace(&owner, Some("Upgrade lease"))
+        .await
+        .unwrap();
+    let manager = WorkspaceManager::new_with_runtime_config(
+        Arc::new(store),
+        DatasetRuntimeConfig::defaults(),
+        idle_eviction_config(),
+    );
+
+    // No Session client exists yet: this models the gap between accepting the
+    // HTTP upgrade and registering WebSocket presence.
+    let attachment = manager
+        .attach_workspace(&workspace.id, &owner)
+        .await
+        .unwrap();
+    assert!(attachment.session.lock().await.clients.is_empty());
+    assert_eq!(manager.evict_idle_workspaces().await, 0);
+
+    drop(attachment);
+    assert_eq!(manager.evict_idle_workspaces().await, 1);
 }
 
 #[tokio::test]
@@ -1080,9 +1349,19 @@ async fn presence_identity_is_never_persisted_into_document_json() {
         .create_workspace(&owner, Some("Presence privacy"))
         .await
         .unwrap();
+    let dataset_id = open_dataset_into(
+        &store,
+        &workspace.id,
+        &owner,
+        "presence-privacy-source",
+        "file:///data/presence-privacy.zarr",
+        "Presence privacy dataset",
+        1,
+    )
+    .await;
     let manager = WorkspaceManager::new_with_runtime_config(
         Arc::new(store.clone()),
-        ProxyConfig::defaults(),
+        DatasetRuntimeConfig::defaults(),
         idle_eviction_config(),
     );
     let live = manager.live_workspace(&workspace.id, &owner).await.unwrap();
@@ -1105,7 +1384,7 @@ async fn presence_identity_is_never_persisted_into_document_json() {
             "presence carries identity on the live session"
         );
         sess.apply(DocumentCommand::AddAnnotation {
-            dataset_id: DatasetId("wds-1".into()),
+            dataset_id,
             id: "pin-1".into(),
             position: [1.0, 2.0],
             end: None,
@@ -1183,7 +1462,7 @@ async fn active_live_workspace_is_not_idle_evicted() {
         .unwrap();
     let manager = WorkspaceManager::new_with_runtime_config(
         Arc::new(store),
-        ProxyConfig::defaults(),
+        DatasetRuntimeConfig::defaults(),
         idle_eviction_config(),
     );
     let live = manager.live_workspace(&workspace.id, &owner).await.unwrap();
@@ -1205,7 +1484,7 @@ async fn idle_eviction_preserves_dataset_source_membership_for_reuse() {
         .unwrap();
     let manager = WorkspaceManager::new_with_runtime_config(
         Arc::new(store.clone()),
-        ProxyConfig::defaults(),
+        DatasetRuntimeConfig::defaults(),
         idle_eviction_config(),
     );
     let workspace_dataset_id = DatasetId("wds-reusable".into());
@@ -1215,8 +1494,7 @@ async fn idle_eviction_preserves_dataset_source_membership_for_reuse() {
         .persist_dataset_opened(
             &workspace.id,
             &workspace_dataset_id,
-            "ds_reusable_source",
-            "file:///tmp/reusable.zarr",
+            &test_source("file:///tmp/reusable.zarr"),
             "reusable.zarr",
             &owner.email,
             1,
@@ -1229,7 +1507,10 @@ async fn idle_eviction_preserves_dataset_source_membership_for_reuse() {
     let sources = store.list_dataset_sources(&workspace.id).await.unwrap();
     assert_eq!(sources.len(), 1);
     assert_eq!(sources[0].workspace_dataset_id, workspace_dataset_id);
-    assert_eq!(sources[0].dataset_source_id, "ds_reusable_source");
+    assert_eq!(
+        sources[0].identity,
+        SourceIdentity::parse("file:///tmp/reusable.zarr").unwrap()
+    );
 }
 
 #[tokio::test]
@@ -1241,7 +1522,7 @@ async fn last_owner_cannot_be_removed_or_demoted() {
         .create_workspace(&owner, Some("Owners"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
 
     let err = manager
         .update_member_role(&workspace.id, &owner, &owner.email, WorkspaceRole::Viewer)
@@ -1277,5 +1558,1433 @@ async fn last_owner_cannot_be_removed_or_demoted() {
     assert_eq!(
         store.role_for(&workspace.id, &other_owner).await.unwrap(),
         Some(WorkspaceRole::Owner)
+    );
+}
+
+#[tokio::test]
+async fn concurrent_owner_mutations_retain_exactly_one_owner() {
+    async fn seeded_pair(
+        name: &str,
+    ) -> (
+        SqliteWorkspaceStore,
+        Arc<WorkspaceManager>,
+        WorkspaceRecord,
+        AuthPrincipal,
+        AuthPrincipal,
+    ) {
+        let store = fresh_store().await;
+        let first = principal("first-owner@example.com", false);
+        let second = principal("second-owner@example.com", false);
+        let workspace = store.create_workspace(&first, Some(name)).await.unwrap();
+        let manager = Arc::new(WorkspaceManager::new(
+            Arc::new(store.clone()),
+            DatasetRuntimeConfig::defaults(),
+        ));
+        manager
+            .upsert_member(
+                &workspace.id,
+                &first,
+                &second.email,
+                None,
+                WorkspaceRole::Owner,
+            )
+            .await
+            .unwrap();
+        (store, manager, workspace, first, second)
+    }
+
+    async fn assert_one_owner(store: &SqliteWorkspaceStore, workspace_id: &str) {
+        let settings = store.sharing_settings(workspace_id).await.unwrap().unwrap();
+        assert_eq!(
+            settings
+                .members
+                .iter()
+                .filter(|member| member.role == WorkspaceRole::Owner)
+                .count(),
+            1
+        );
+    }
+
+    let (store, manager, workspace, first, second) = seeded_pair("Remove race").await;
+    let (a, b) = tokio::join!(
+        manager.remove_member(&workspace.id, &first, &first.email),
+        manager.remove_member(&workspace.id, &second, &second.email),
+    );
+    assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+    assert_one_owner(&store, &workspace.id).await;
+
+    let (store, manager, workspace, first, second) = seeded_pair("Demote race").await;
+    let (a, b) = tokio::join!(
+        manager.update_member_role(&workspace.id, &first, &first.email, WorkspaceRole::Viewer,),
+        manager.update_member_role(&workspace.id, &second, &second.email, WorkspaceRole::Viewer,),
+    );
+    assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+    assert_one_owner(&store, &workspace.id).await;
+
+    let (store, manager, workspace, first, second) = seeded_pair("Mixed race").await;
+    let (a, b) = tokio::join!(
+        manager.remove_member(&workspace.id, &first, &first.email),
+        manager.update_member_role(&workspace.id, &second, &second.email, WorkspaceRole::Editor,),
+    );
+    assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+    assert_one_owner(&store, &workspace.id).await;
+}
+
+#[tokio::test]
+async fn membership_removal_and_downgrade_close_live_connections() {
+    let store = fresh_store().await;
+    let owner = principal("owner@example.com", false);
+    let member = principal("member@example.com", false);
+    let workspace = store
+        .create_workspace(&owner, Some("Revocation"))
+        .await
+        .unwrap();
+    let manager = WorkspaceManager::new(Arc::new(store), DatasetRuntimeConfig::defaults());
+    manager
+        .upsert_member(
+            &workspace.id,
+            &owner,
+            &member.email,
+            None,
+            WorkspaceRole::Editor,
+        )
+        .await
+        .unwrap();
+    let first_attachment = manager
+        .attach_workspace(&workspace.id, &member)
+        .await
+        .unwrap();
+    let second_attachment = manager
+        .attach_workspace(&workspace.id, &member)
+        .await
+        .unwrap();
+    let live = Arc::clone(first_attachment.live());
+
+    let (first_tx, mut first_rx) = crate::outbox::unicast_channel(4, 1024);
+    let (second_tx, mut second_rx) = crate::outbox::unicast_channel(4, 1024);
+    live.unicast_routes.lock().await.insert(10, first_tx);
+    live.unicast_routes.lock().await.insert(11, second_tx);
+    manager
+        .register_attachment_connection(&first_attachment, 10, &member)
+        .await
+        .unwrap();
+    manager
+        .register_attachment_connection(&second_attachment, 11, &member)
+        .await
+        .unwrap();
+
+    let dataset_id = DatasetId("revocation-interest".into());
+    let manifest = DatasetManifest::new(
+        dataset_id.clone(),
+        "revocation interest".into(),
+        lucida_content::DatasetKind::Single,
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+        None,
+    );
+    let generated_service = {
+        let mut session = live.session.lock().await;
+        let binding = inert_server_binding("file:///data/revocation-interest.zarr", manifest);
+        let service = Arc::clone(&binding.generated_service);
+        session.server_bindings.insert(dataset_id.clone(), binding);
+        service
+    };
+    generated_service
+        .install_test_client_interest(
+            10,
+            lucida_core::protocol::ViewerInterestHint {
+                client_id: None,
+                dataset_id,
+                generation: 1,
+                t: 0,
+                z: 0,
+                channels: vec![],
+                mode: lucida_core::protocol::ViewerInterestMode::Slice,
+                viewport: None,
+                desired_keys: vec![],
+                predicted_keys: vec![],
+                interaction: lucida_core::protocol::ViewerInteractionMode::Idle,
+                timestamp_ms: 0,
+                ttl_ms: u64::MAX,
+            },
+        )
+        .await;
+    assert!(generated_service.has_client_interest(10).await);
+
+    manager
+        .remove_member(&workspace.id, &owner, &member.email)
+        .await
+        .unwrap();
+    assert!(
+        !generated_service.has_client_interest(10).await,
+        "revocation must synchronously discard generated-work interest"
+    );
+    assert!(matches!(
+        first_rx.recv().await,
+        Some(axum::extract::ws::Message::Close(_))
+    ));
+    assert!(matches!(
+        second_rx.recv().await,
+        Some(axum::extract::ws::Message::Close(_))
+    ));
+
+    manager
+        .upsert_member(
+            &workspace.id,
+            &owner,
+            &member.email,
+            None,
+            WorkspaceRole::Editor,
+        )
+        .await
+        .unwrap();
+    let third_attachment = manager
+        .attach_workspace(&workspace.id, &member)
+        .await
+        .unwrap();
+    let (third_tx, mut third_rx) = crate::outbox::unicast_channel(4, 1024);
+    live.unicast_routes.lock().await.insert(12, third_tx);
+    manager
+        .register_attachment_connection(&third_attachment, 12, &member)
+        .await
+        .unwrap();
+    manager
+        .update_member_role(&workspace.id, &owner, &member.email, WorkspaceRole::Viewer)
+        .await
+        .unwrap();
+    assert!(matches!(
+        third_rx.recv().await,
+        Some(axum::extract::ws::Message::Close(_))
+    ));
+}
+
+#[tokio::test]
+async fn disabling_link_access_revokes_only_link_derived_connections() {
+    let store = fresh_store().await;
+    let owner = principal("owner@example.com", false);
+    let link_viewer = principal("link-viewer@example.com", false);
+    let workspace = store
+        .create_workspace(&owner, Some("Link revocation"))
+        .await
+        .unwrap();
+    let manager = WorkspaceManager::new(Arc::new(store), DatasetRuntimeConfig::defaults());
+    manager
+        .update_link_access(
+            &workspace.id,
+            &owner,
+            WorkspaceLinkAccess::AnyoneWithLink,
+            WorkspaceRole::Viewer,
+        )
+        .await
+        .unwrap();
+
+    let owner_attachment = manager
+        .attach_workspace(&workspace.id, &owner)
+        .await
+        .unwrap();
+    let link_attachment = manager
+        .attach_workspace(&workspace.id, &link_viewer)
+        .await
+        .unwrap();
+    let pending_link_attachment = manager
+        .attach_workspace(&workspace.id, &link_viewer)
+        .await
+        .unwrap();
+    let live = Arc::clone(owner_attachment.live());
+    let (owner_tx, mut owner_rx) = crate::outbox::unicast_channel(4, 1024);
+    let (link_tx, mut link_rx) = crate::outbox::unicast_channel(4, 1024);
+    live.unicast_routes.lock().await.insert(20, owner_tx);
+    live.unicast_routes.lock().await.insert(21, link_tx);
+    let owner_access = manager
+        .register_attachment_connection(&owner_attachment, 20, &owner)
+        .await
+        .unwrap();
+    let link_access = manager
+        .register_attachment_connection(&link_attachment, 21, &link_viewer)
+        .await
+        .unwrap();
+
+    manager
+        .update_link_access(
+            &workspace.id,
+            &owner,
+            WorkspaceLinkAccess::Restricted,
+            WorkspaceRole::Viewer,
+        )
+        .await
+        .unwrap();
+
+    assert!(link_access.is_revoked());
+    assert!(matches!(
+        link_rx.recv().await,
+        Some(axum::extract::ws::Message::Close(_))
+    ));
+    assert!(!owner_access.is_revoked());
+    assert_eq!(
+        manager
+            .register_attachment_connection(&pending_link_attachment, 22, &link_viewer)
+            .await
+            .unwrap_err(),
+        ConnectionAdmissionError::AccessRevoked
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), owner_rx.recv())
+            .await
+            .is_err(),
+        "an explicit member must not be disconnected by a link-policy change"
+    );
+}
+
+#[tokio::test]
+async fn membership_and_auth_revocation_reject_pending_upgrade_attachments() {
+    let store = fresh_store().await;
+    let owner = principal("owner@example.com", false);
+    let removed_member = principal("removed@example.com", false);
+    let logged_out_member = principal("logged-out@example.com", false);
+    let workspace = store
+        .create_workspace(&owner, Some("Pending upgrade revocation"))
+        .await
+        .unwrap();
+    let manager = WorkspaceManager::new(Arc::new(store), DatasetRuntimeConfig::defaults());
+    for member in [&removed_member, &logged_out_member] {
+        manager
+            .upsert_member(
+                &workspace.id,
+                &owner,
+                &member.email,
+                None,
+                WorkspaceRole::Viewer,
+            )
+            .await
+            .unwrap();
+    }
+
+    // These attachments model the period after HTTP authentication and
+    // workspace authorization but before the WebSocket callback registers.
+    let membership_attachment = manager
+        .attach_workspace(&workspace.id, &removed_member)
+        .await
+        .unwrap();
+    manager
+        .remove_member(&workspace.id, &owner, &removed_member.email)
+        .await
+        .unwrap();
+    assert_eq!(
+        manager
+            .register_attachment_connection(&membership_attachment, 30, &removed_member)
+            .await
+            .unwrap_err(),
+        ConnectionAdmissionError::AccessRevoked
+    );
+
+    let auth_attachment = manager
+        .attach_workspace(&workspace.id, &logged_out_member)
+        .await
+        .unwrap();
+    assert_eq!(
+        manager
+            .revoke_principal_connections(&logged_out_member.email)
+            .await,
+        0
+    );
+    assert_eq!(
+        manager
+            .register_attachment_connection(&auth_attachment, 31, &logged_out_member)
+            .await
+            .unwrap_err(),
+        ConnectionAdmissionError::AccessRevoked
+    );
+}
+
+#[tokio::test]
+async fn access_policy_changes_never_launder_pending_attachments_into_new_grants() {
+    let store = fresh_store().await;
+    let owner = principal("owner@example.com", false);
+    let member = principal("member@example.com", false);
+    let link_viewer = principal("link-viewer@example.com", false);
+    let workspace = store
+        .create_workspace(&owner, Some("Pending policy changes"))
+        .await
+        .unwrap();
+    let manager = WorkspaceManager::new(Arc::new(store), DatasetRuntimeConfig::defaults());
+    manager
+        .update_link_access(
+            &workspace.id,
+            &owner,
+            WorkspaceLinkAccess::AnyoneWithLink,
+            WorkspaceRole::Viewer,
+        )
+        .await
+        .unwrap();
+    manager
+        .upsert_member(
+            &workspace.id,
+            &owner,
+            &member.email,
+            None,
+            WorkspaceRole::Editor,
+        )
+        .await
+        .unwrap();
+
+    // Removing an explicit member must not let their old member attachment
+    // register under the still-enabled link grant.
+    let removed_member_attachment = manager
+        .attach_workspace(&workspace.id, &member)
+        .await
+        .unwrap();
+    manager
+        .remove_member(&workspace.id, &owner, &member.email)
+        .await
+        .unwrap();
+    assert_eq!(
+        manager
+            .register_attachment_connection(&removed_member_attachment, 32, &member)
+            .await
+            .unwrap_err(),
+        ConnectionAdmissionError::AccessRevoked
+    );
+
+    // A link-role change is a new policy even while sharing stays enabled.
+    let old_link_role_attachment = manager
+        .attach_workspace(&workspace.id, &link_viewer)
+        .await
+        .unwrap();
+    manager
+        .update_link_access(
+            &workspace.id,
+            &owner,
+            WorkspaceLinkAccess::AnyoneWithLink,
+            WorkspaceRole::Editor,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        manager
+            .register_attachment_connection(&old_link_role_attachment, 33, &link_viewer)
+            .await
+            .unwrap_err(),
+        ConnectionAdmissionError::AccessRevoked
+    );
+
+    // Likewise, a member downgrade requires a fresh HTTP authorization pass.
+    manager
+        .upsert_member(
+            &workspace.id,
+            &owner,
+            &member.email,
+            None,
+            WorkspaceRole::Editor,
+        )
+        .await
+        .unwrap();
+    let old_member_role_attachment = manager
+        .attach_workspace(&workspace.id, &member)
+        .await
+        .unwrap();
+    manager
+        .update_member_role(&workspace.id, &owner, &member.email, WorkspaceRole::Viewer)
+        .await
+        .unwrap();
+    assert_eq!(
+        manager
+            .register_attachment_connection(&old_member_role_attachment, 34, &member)
+            .await
+            .unwrap_err(),
+        ConnectionAdmissionError::AccessRevoked
+    );
+}
+
+#[tokio::test]
+async fn slow_cold_init_cannot_replace_a_removed_member_grant_with_link_access() {
+    let store = fresh_store().await;
+    let owner = principal("owner@example.com", false);
+    let member = principal("member@example.com", false);
+    let workspace = store
+        .create_workspace(&owner, Some("Cold policy generation"))
+        .await
+        .unwrap();
+    let manager = Arc::new(WorkspaceManager::new(
+        Arc::new(store),
+        DatasetRuntimeConfig::defaults(),
+    ));
+    manager
+        .update_link_access(
+            &workspace.id,
+            &owner,
+            WorkspaceLinkAccess::AnyoneWithLink,
+            WorkspaceRole::Viewer,
+        )
+        .await
+        .unwrap();
+    manager
+        .upsert_member(
+            &workspace.id,
+            &owner,
+            &member.email,
+            None,
+            WorkspaceRole::Editor,
+        )
+        .await
+        .unwrap();
+
+    let cold_init = manager.pause_next_cold_init();
+    let pending = {
+        let manager = Arc::clone(&manager);
+        let workspace_id = workspace.id.clone();
+        let member = member.clone();
+        tokio::spawn(async move { manager.attach_workspace(&workspace_id, &member).await })
+    };
+    tokio::time::timeout(Duration::from_secs(1), cold_init.wait_until_paused())
+        .await
+        .expect("attachment should pause after capturing its member grant");
+
+    manager
+        .remove_member(&workspace.id, &owner, &member.email)
+        .await
+        .unwrap();
+    cold_init.resume();
+    let error = match tokio::time::timeout(Duration::from_secs(1), pending)
+        .await
+        .expect("cold initialization should resume")
+        .unwrap()
+    {
+        Ok(_) => panic!("removed member attachment used the replacement link grant"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, WorkspaceError::Forbidden));
+
+    // Fresh requests under the current policy still admit both the link user
+    // and an unaffected explicit member.
+    let link_attachment = manager
+        .attach_workspace(&workspace.id, &member)
+        .await
+        .unwrap();
+    manager
+        .register_attachment_connection(&link_attachment, 60, &member)
+        .await
+        .unwrap();
+    let owner_attachment = manager
+        .attach_workspace(&workspace.id, &owner)
+        .await
+        .unwrap();
+    manager
+        .register_attachment_connection(&owner_attachment, 61, &owner)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn credential_revoked_after_authentication_is_rejected_before_workspace_attach() {
+    let store = fresh_store().await;
+    let owner = principal("owner@example.com", false);
+    let workspace = store
+        .create_workspace(&owner, Some("Pre-attach credential revocation"))
+        .await
+        .unwrap();
+    let manager = WorkspaceManager::new(Arc::new(store), DatasetRuntimeConfig::defaults());
+
+    let session_store = Arc::new(crate::auth::MemorySessionStore::new());
+    let now = chrono::Utc::now();
+    crate::auth::LoginSessionStore::create(
+        &*session_store,
+        crate::auth::LoginSession {
+            id: "authenticated-before-revoke".into(),
+            email: "delayed@example.com".into(),
+            display_name: "Delayed User".into(),
+            picture_url: None,
+            created_at: now,
+            last_used_at: now,
+            expires_at: now + chrono::Duration::hours(1),
+        },
+    )
+    .await
+    .unwrap();
+    let extractor = crate::auth::SessionCookieExtractor::new_with_auth_epochs(
+        Arc::new(crate::auth::AuthConfig::for_tests()),
+        session_store as Arc<dyn crate::auth::LoginSessionStore>,
+        manager.auth_epoch_registry(),
+    );
+    let request_parts = axum::http::Request::builder()
+        .uri("/api/workspaces/ws")
+        .header("cookie", "lucida_session=authenticated-before-revoke")
+        .body(())
+        .unwrap()
+        .into_parts()
+        .0;
+    let authenticated = crate::auth::PrincipalExtractor::extract(&extractor, &request_parts)
+        .await
+        .unwrap();
+    manager
+        .upsert_member(
+            &workspace.id,
+            &owner,
+            &authenticated.email,
+            None,
+            WorkspaceRole::Viewer,
+        )
+        .await
+        .unwrap();
+
+    // The request has already passed credential validation but has not reached
+    // workspace authorization yet. Revocation must make that captured
+    // capability unusable even though the authenticated request is queued.
+    manager
+        .revoke_principal_connections(&authenticated.email)
+        .await;
+    assert!(matches!(
+        manager
+            .attach_workspace(&workspace.id, &authenticated)
+            .await,
+        Err(WorkspaceError::Forbidden)
+    ));
+}
+
+#[tokio::test]
+async fn auth_revocation_return_waits_for_admitted_connection_work() {
+    let store = fresh_store().await;
+    let owner = principal("owner@example.com", false);
+    let workspace = store
+        .create_workspace(&owner, Some("Revocation operation barrier"))
+        .await
+        .unwrap();
+    let manager = Arc::new(WorkspaceManager::new(
+        Arc::new(store),
+        DatasetRuntimeConfig::defaults(),
+    ));
+    let attachment = manager
+        .attach_workspace(&workspace.id, &owner)
+        .await
+        .unwrap();
+    let lease = manager
+        .register_attachment_connection(&attachment, 40, &owner)
+        .await
+        .unwrap();
+    let operation = lease.begin_operation().await.unwrap();
+
+    let revoking_manager = Arc::clone(&manager);
+    let email = owner.email.clone();
+    let revocation =
+        tokio::spawn(async move { revoking_manager.revoke_principal_connections(&email).await });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !lease.is_revoked() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("revocation should mark the lease promptly");
+    assert!(
+        !revocation.is_finished(),
+        "revocation must wait for admitted connection work"
+    );
+
+    drop(operation);
+    tokio::time::timeout(Duration::from_secs(1), revocation)
+        .await
+        .expect("revocation should finish after work drains")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_logout_finishes_epoch_revocation_and_operation_quiescence() {
+    let store = fresh_store().await;
+    let owner = principal("logout-cancel@example.com", false);
+    let workspace = store
+        .create_workspace(&owner, Some("Cancellation-safe logout"))
+        .await
+        .unwrap();
+    let manager = Arc::new(WorkspaceManager::new(
+        Arc::new(store),
+        DatasetRuntimeConfig::defaults(),
+    ));
+    let (lease, operation, mut route_rx) =
+        register_blocked_connection(&manager, &workspace.id, &owner, 41).await;
+
+    let sessions = Arc::new(MemorySessionStore::new());
+    let now = Utc::now();
+    sessions
+        .create(crate::auth::LoginSession {
+            id: "cancelled-logout".into(),
+            email: owner.email.clone(),
+            display_name: owner.display_name.clone(),
+            picture_url: None,
+            created_at: now,
+            last_used_at: now,
+            expires_at: now + chrono::Duration::hours(1),
+        })
+        .await
+        .unwrap();
+    let state = crate::auth::handlers::LogoutState {
+        config: Arc::new(AuthConfig::for_tests()),
+        store: Arc::clone(&sessions) as Arc<dyn LoginSessionStore>,
+        workspace_manager: Some(Arc::clone(&manager)),
+    };
+    let hook = manager.pause_next_credential_mutation_after_commit();
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/auth/logout")
+        .header("cookie", "lucida_session=cancelled-logout")
+        .body(Body::empty())
+        .unwrap();
+    request.extensions_mut().insert(owner.clone());
+    let caller = tokio::spawn(crate::auth::handlers::logout(
+        axum::extract::State(state),
+        request,
+    ));
+
+    hook.wait_until_committed().await;
+    assert!(sessions.get("cancelled-logout").await.unwrap().is_none());
+    assert!(!lease.is_revoked());
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    hook.resume();
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !lease.is_revoked() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("detached logout must revoke the registered lease");
+    assert_eq!(manager.auth_epoch_registry().current(&owner.email).await, 1);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), route_rx.recv())
+            .await
+            .is_err(),
+        "credential revocation must wait for admitted work"
+    );
+    drop(operation);
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), route_rx.recv())
+            .await
+            .expect("detached logout should close after work drains"),
+        Some(axum::extract::ws::Message::Close(_))
+    ));
+    assert!(lease.begin_operation().await.is_none());
+}
+
+#[tokio::test]
+async fn cancelled_bearer_revoke_finishes_epoch_revocation_and_operation_quiescence() {
+    let store = fresh_store().await;
+    let owner = principal("bearer-cancel@example.com", false);
+    let workspace = store
+        .create_workspace(&owner, Some("Cancellation-safe bearer revoke"))
+        .await
+        .unwrap();
+    let manager = Arc::new(WorkspaceManager::new(
+        Arc::new(store),
+        DatasetRuntimeConfig::defaults(),
+    ));
+    let (lease, operation, mut route_rx) =
+        register_blocked_connection(&manager, &workspace.id, &owner, 42).await;
+
+    let raw_token = "lucida_pat_cancelled_revoke";
+    let token_hash = hash_bearer_token(raw_token);
+    let tokens = Arc::new(MemoryBearerTokenStore::new());
+    let now = Utc::now();
+    tokens
+        .create(BearerToken {
+            id: "cancelled-token".into(),
+            token_hash: token_hash.clone(),
+            name: "cancelled request".into(),
+            email: owner.email.clone(),
+            display_name: owner.display_name.clone(),
+            picture_url: None,
+            created_at: now,
+            last_used_at: None,
+            expires_at: now + chrono::Duration::hours(1),
+            revoked_at: None,
+        })
+        .await
+        .unwrap();
+    let state = crate::auth::handlers::CliAuthState {
+        config: Arc::new(AuthConfig::for_tests()),
+        token_store: Arc::clone(&tokens) as Arc<dyn BearerTokenStore>,
+        cli_store: Arc::new(crate::auth::MemoryCliTokenAuthorizationStore::new()),
+        workspace_manager: Some(Arc::clone(&manager)),
+    };
+    let hook = manager.pause_next_credential_mutation_after_commit();
+    let request = Request::builder()
+        .method("POST")
+        .uri("/auth/tokens/revoke-current")
+        .header("authorization", format!("Bearer {raw_token}"))
+        .body(Body::empty())
+        .unwrap();
+    let caller = tokio::spawn(crate::auth::handlers::revoke_current_bearer_token(
+        axum::extract::State(state),
+        request,
+    ));
+
+    hook.wait_until_committed().await;
+    assert!(
+        tokens
+            .get_by_hash(&token_hash)
+            .await
+            .unwrap()
+            .unwrap()
+            .revoked_at
+            .is_some()
+    );
+    assert!(!lease.is_revoked());
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    hook.resume();
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !lease.is_revoked() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("detached bearer revoke must revoke the registered lease");
+    assert_eq!(manager.auth_epoch_registry().current(&owner.email).await, 1);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), route_rx.recv())
+            .await
+            .is_err(),
+        "credential revocation must wait for admitted work"
+    );
+    drop(operation);
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), route_rx.recv())
+            .await
+            .expect("detached bearer revoke should close after work drains"),
+        Some(axum::extract::ws::Message::Close(_))
+    ));
+    assert!(lease.begin_operation().await.is_none());
+}
+
+struct DeleteFailingCredentialStore {
+    inner: Arc<MemorySessionStore>,
+}
+
+#[async_trait::async_trait]
+impl LoginSessionStore for DeleteFailingCredentialStore {
+    async fn create(
+        &self,
+        session: crate::auth::LoginSession,
+    ) -> Result<(), crate::auth::SessionStoreError> {
+        self.inner.create(session).await
+    }
+
+    async fn get(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::auth::LoginSession>, crate::auth::SessionStoreError> {
+        self.inner.get(id).await
+    }
+
+    async fn touch_last_used(
+        &self,
+        id: &str,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<(), crate::auth::SessionStoreError> {
+        self.inner.touch_last_used(id, now).await
+    }
+
+    async fn delete(
+        &self,
+        _id: &str,
+    ) -> Result<Option<crate::auth::LoginSession>, crate::auth::SessionStoreError> {
+        Err(crate::auth::SessionStoreError::Backend(
+            "simulated delete failure".into(),
+        ))
+    }
+
+    async fn delete_expired(
+        &self,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<u64, crate::auth::SessionStoreError> {
+        self.inner.delete_expired(now).await
+    }
+}
+
+#[tokio::test]
+async fn failed_logout_delete_does_not_advance_epoch_or_revoke_live_lease() {
+    let store = fresh_store().await;
+    let owner = principal("logout-failure@example.com", false);
+    let workspace = store
+        .create_workspace(&owner, Some("Failed logout stays authorized"))
+        .await
+        .unwrap();
+    let manager = Arc::new(WorkspaceManager::new(
+        Arc::new(store),
+        DatasetRuntimeConfig::defaults(),
+    ));
+    let attachment = manager
+        .attach_workspace(&workspace.id, &owner)
+        .await
+        .unwrap();
+    let lease = manager
+        .register_attachment_connection(&attachment, 43, &owner)
+        .await
+        .unwrap();
+    let sessions = Arc::new(MemorySessionStore::new());
+    let now = Utc::now();
+    sessions
+        .create(crate::auth::LoginSession {
+            id: "cannot-delete".into(),
+            email: owner.email.clone(),
+            display_name: owner.display_name.clone(),
+            picture_url: None,
+            created_at: now,
+            last_used_at: now,
+            expires_at: now + chrono::Duration::hours(1),
+        })
+        .await
+        .unwrap();
+    let state = crate::auth::handlers::LogoutState {
+        config: Arc::new(AuthConfig::for_tests()),
+        store: Arc::new(DeleteFailingCredentialStore {
+            inner: Arc::clone(&sessions),
+        }),
+        workspace_manager: Some(Arc::clone(&manager)),
+    };
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/auth/logout")
+        .header("cookie", "lucida_session=cannot-delete")
+        .body(Body::empty())
+        .unwrap();
+    request.extensions_mut().insert(owner.clone());
+    let response = crate::auth::handlers::logout(axum::extract::State(state), request).await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(sessions.get("cannot-delete").await.unwrap().is_some());
+    assert_eq!(manager.auth_epoch_registry().current(&owner.email).await, 0);
+    assert!(!lease.is_revoked());
+    assert!(lease.begin_operation().await.is_some());
+}
+
+async fn register_blocked_connection(
+    manager: &WorkspaceManager,
+    workspace_id: &str,
+    principal: &AuthPrincipal,
+    client_id: lucida_core::protocol::ClientId,
+) -> (
+    WorkspaceConnectionLease,
+    tokio::sync::OwnedRwLockReadGuard<()>,
+    crate::outbox::UnicastReceiver,
+) {
+    let attachment = manager
+        .attach_workspace(workspace_id, principal)
+        .await
+        .unwrap();
+    let (route_tx, route_rx) = crate::outbox::unicast_channel(4, 1024);
+    attachment
+        .live()
+        .unicast_routes
+        .lock()
+        .await
+        .insert(client_id, route_tx);
+    let lease = manager
+        .register_attachment_connection(&attachment, client_id, principal)
+        .await
+        .unwrap();
+    let operation = lease.begin_operation().await.unwrap();
+    (lease, operation, route_rx)
+}
+
+async fn finish_cancelled_access_mutation(
+    hook: &AccessMutationTestHook,
+    lease: &WorkspaceConnectionLease,
+    operation: tokio::sync::OwnedRwLockReadGuard<()>,
+    mut route_rx: crate::outbox::UnicastReceiver,
+) {
+    hook.resume();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !lease.is_revoked() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("detached access mutation must mark the lease revoked");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), route_rx.recv())
+            .await
+            .is_err(),
+        "revocation completion must wait for admitted connection work"
+    );
+    drop(operation);
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), route_rx.recv())
+            .await
+            .expect("detached revocation should close after work drains"),
+        Some(axum::extract::ws::Message::Close(_))
+    ));
+    assert!(lease.begin_operation().await.is_none());
+}
+
+#[tokio::test]
+async fn committed_membership_mutations_revoke_even_when_the_caller_is_cancelled() {
+    let (store, pool) = fresh_store_with_pool().await;
+    let owner = principal("owner@example.com", false);
+    let member = principal("member@example.com", false);
+    let workspace = store
+        .create_workspace(&owner, Some("Cancellation-safe members"))
+        .await
+        .unwrap();
+    let manager = Arc::new(WorkspaceManager::new(
+        Arc::new(store),
+        DatasetRuntimeConfig::defaults(),
+    ));
+    manager
+        .upsert_member(
+            &workspace.id,
+            &owner,
+            &member.email,
+            None,
+            WorkspaceRole::Editor,
+        )
+        .await
+        .unwrap();
+
+    // Owner-driven upsert downgrade.
+    let (lease, operation, route_rx) =
+        register_blocked_connection(&manager, &workspace.id, &member, 101).await;
+    let hook = manager.pause_next_access_mutation_after_commit();
+    let task_manager = Arc::clone(&manager);
+    let workspace_id = workspace.id.clone();
+    let owner_for_task = owner.clone();
+    let member_email = member.email.clone();
+    let caller = tokio::spawn(async move {
+        task_manager
+            .upsert_member(
+                &workspace_id,
+                &owner_for_task,
+                &member_email,
+                None,
+                WorkspaceRole::Viewer,
+            )
+            .await
+    });
+    hook.wait_until_committed().await;
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT role FROM workspace_members WHERE workspace_id = ? AND email = ?",
+        )
+        .bind(&workspace.id)
+        .bind(&member.email)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        "viewer"
+    );
+    assert!(!lease.is_revoked());
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    finish_cancelled_access_mutation(&hook, &lease, operation, route_rx).await;
+
+    manager
+        .update_member_role(&workspace.id, &owner, &member.email, WorkspaceRole::Editor)
+        .await
+        .unwrap();
+
+    // Direct role downgrade.
+    let (lease, operation, route_rx) =
+        register_blocked_connection(&manager, &workspace.id, &member, 102).await;
+    let hook = manager.pause_next_access_mutation_after_commit();
+    let task_manager = Arc::clone(&manager);
+    let workspace_id = workspace.id.clone();
+    let owner_for_task = owner.clone();
+    let member_email = member.email.clone();
+    let caller = tokio::spawn(async move {
+        task_manager
+            .update_member_role(
+                &workspace_id,
+                &owner_for_task,
+                &member_email,
+                WorkspaceRole::Viewer,
+            )
+            .await
+    });
+    hook.wait_until_committed().await;
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT role FROM workspace_members WHERE workspace_id = ? AND email = ?",
+        )
+        .bind(&workspace.id)
+        .bind(&member.email)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        "viewer"
+    );
+    assert!(!lease.is_revoked());
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    finish_cancelled_access_mutation(&hook, &lease, operation, route_rx).await;
+
+    manager
+        .update_member_role(&workspace.id, &owner, &member.email, WorkspaceRole::Editor)
+        .await
+        .unwrap();
+
+    // Removal.
+    let (lease, operation, route_rx) =
+        register_blocked_connection(&manager, &workspace.id, &member, 103).await;
+    let hook = manager.pause_next_access_mutation_after_commit();
+    let task_manager = Arc::clone(&manager);
+    let workspace_id = workspace.id.clone();
+    let owner_for_task = owner.clone();
+    let member_email = member.email.clone();
+    let caller = tokio::spawn(async move {
+        task_manager
+            .remove_member(&workspace_id, &owner_for_task, &member_email)
+            .await
+    });
+    hook.wait_until_committed().await;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM workspace_members WHERE workspace_id = ? AND email = ?",
+        )
+        .bind(&workspace.id)
+        .bind(&member.email)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
+    );
+    assert!(!lease.is_revoked());
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    finish_cancelled_access_mutation(&hook, &lease, operation, route_rx).await;
+
+    manager
+        .upsert_member(
+            &workspace.id,
+            &owner,
+            &member.email,
+            None,
+            WorkspaceRole::Viewer,
+        )
+        .await
+        .unwrap();
+
+    // Admin owner promotion also invalidates capabilities captured under the
+    // prior role, and therefore has the same completion contract.
+    let (lease, operation, route_rx) =
+        register_blocked_connection(&manager, &workspace.id, &member, 104).await;
+    let hook = manager.pause_next_access_mutation_after_commit();
+    let task_manager = Arc::clone(&manager);
+    let workspace_id = workspace.id.clone();
+    let member_email = member.email.clone();
+    let caller = tokio::spawn(async move {
+        task_manager
+            .admin_upsert_owner(&workspace_id, &member_email, None)
+            .await
+    });
+    hook.wait_until_committed().await;
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT role FROM workspace_members WHERE workspace_id = ? AND email = ?",
+        )
+        .bind(&workspace.id)
+        .bind(&member.email)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        "owner"
+    );
+    assert!(!lease.is_revoked());
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    finish_cancelled_access_mutation(&hook, &lease, operation, route_rx).await;
+}
+
+#[tokio::test]
+async fn committed_archive_and_link_policy_revoke_after_caller_cancellation() {
+    let (store, pool) = fresh_store_with_pool().await;
+    let owner = principal("owner@example.com", false);
+    let link_viewer = principal("link@example.com", false);
+    let manager = Arc::new(WorkspaceManager::new(
+        Arc::new(store.clone()),
+        DatasetRuntimeConfig::defaults(),
+    ));
+
+    // Owner archive.
+    let owner_workspace = store
+        .create_workspace(&owner, Some("Owner archive cancellation"))
+        .await
+        .unwrap();
+    let (lease, operation, route_rx) =
+        register_blocked_connection(&manager, &owner_workspace.id, &owner, 111).await;
+    let hook = manager.pause_next_access_mutation_after_commit();
+    let task_manager = Arc::clone(&manager);
+    let workspace_id = owner_workspace.id.clone();
+    let owner_for_task = owner.clone();
+    let caller = tokio::spawn(async move {
+        task_manager
+            .archive_workspace(&workspace_id, &owner_for_task)
+            .await
+    });
+    hook.wait_until_committed().await;
+    assert!(
+        sqlx::query_scalar::<_, Option<String>>("SELECT archived_at FROM workspaces WHERE id = ?")
+            .bind(&owner_workspace.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(!lease.is_revoked());
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    finish_cancelled_access_mutation(&hook, &lease, operation, route_rx).await;
+
+    // Admin archive.
+    let admin_workspace = store
+        .create_workspace(&owner, Some("Admin archive cancellation"))
+        .await
+        .unwrap();
+    let (lease, operation, route_rx) =
+        register_blocked_connection(&manager, &admin_workspace.id, &owner, 112).await;
+    let hook = manager.pause_next_access_mutation_after_commit();
+    let task_manager = Arc::clone(&manager);
+    let workspace_id = admin_workspace.id.clone();
+    let caller =
+        tokio::spawn(async move { task_manager.admin_archive_workspace(&workspace_id).await });
+    hook.wait_until_committed().await;
+    assert!(
+        sqlx::query_scalar::<_, Option<String>>("SELECT archived_at FROM workspaces WHERE id = ?")
+            .bind(&admin_workspace.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(!lease.is_revoked());
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    finish_cancelled_access_mutation(&hook, &lease, operation, route_rx).await;
+
+    // Link-policy mutation.
+    let link_workspace = store
+        .create_workspace(&owner, Some("Link policy cancellation"))
+        .await
+        .unwrap();
+    manager
+        .update_link_access(
+            &link_workspace.id,
+            &owner,
+            WorkspaceLinkAccess::AnyoneWithLink,
+            WorkspaceRole::Viewer,
+        )
+        .await
+        .unwrap();
+    let (lease, operation, route_rx) =
+        register_blocked_connection(&manager, &link_workspace.id, &link_viewer, 113).await;
+    let hook = manager.pause_next_access_mutation_after_commit();
+    let task_manager = Arc::clone(&manager);
+    let workspace_id = link_workspace.id.clone();
+    let owner_for_task = owner.clone();
+    let caller = tokio::spawn(async move {
+        task_manager
+            .update_link_access(
+                &workspace_id,
+                &owner_for_task,
+                WorkspaceLinkAccess::Restricted,
+                WorkspaceRole::Viewer,
+            )
+            .await
+    });
+    hook.wait_until_committed().await;
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT link_access FROM workspaces WHERE id = ?")
+            .bind(&link_workspace.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        "restricted"
+    );
+    assert!(!lease.is_revoked());
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    finish_cancelled_access_mutation(&hook, &lease, operation, route_rx).await;
+}
+
+#[tokio::test]
+async fn fallible_access_mutation_readback_rolls_back_before_revocation() {
+    let (store, pool) = fresh_store_with_pool().await;
+    let owner = principal("owner@example.com", false);
+    let member = principal("member@example.com", false);
+    let link_viewer = principal("link@example.com", false);
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
+
+    let archive_workspace = store
+        .create_workspace(&owner, Some("Malformed archive row"))
+        .await
+        .unwrap();
+    let (archive_lease, archive_operation, _archive_rx) =
+        register_blocked_connection(&manager, &archive_workspace.id, &owner, 121).await;
+    sqlx::query("UPDATE workspaces SET document_json = 'not-json' WHERE id = ?")
+        .bind(&archive_workspace.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        manager
+            .archive_workspace(&archive_workspace.id, &owner)
+            .await,
+        Err(WorkspaceError::Store(_))
+    ));
+    assert!(
+        sqlx::query_scalar::<_, Option<String>>("SELECT archived_at FROM workspaces WHERE id = ?")
+            .bind(&archive_workspace.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(!archive_lease.is_revoked());
+    drop(archive_operation);
+
+    let member_workspace = store
+        .create_workspace(&owner, Some("Malformed member row"))
+        .await
+        .unwrap();
+    manager
+        .upsert_member(
+            &member_workspace.id,
+            &owner,
+            &member.email,
+            None,
+            WorkspaceRole::Editor,
+        )
+        .await
+        .unwrap();
+    let (member_lease, member_operation, _member_rx) =
+        register_blocked_connection(&manager, &member_workspace.id, &member, 122).await;
+    sqlx::query(
+        "UPDATE workspace_members SET added_at = 'not-a-date' WHERE workspace_id = ? AND email = ?",
+    )
+    .bind(&member_workspace.id)
+    .bind(&member.email)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(matches!(
+        manager
+            .update_member_role(
+                &member_workspace.id,
+                &owner,
+                &member.email,
+                WorkspaceRole::Viewer,
+            )
+            .await,
+        Err(WorkspaceError::Store(_))
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT role FROM workspace_members WHERE workspace_id = ? AND email = ?",
+        )
+        .bind(&member_workspace.id)
+        .bind(&member.email)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        "editor"
+    );
+    assert!(!member_lease.is_revoked());
+    drop(member_operation);
+
+    let link_workspace = store
+        .create_workspace(&owner, Some("Malformed sharing row"))
+        .await
+        .unwrap();
+    manager
+        .update_link_access(
+            &link_workspace.id,
+            &owner,
+            WorkspaceLinkAccess::AnyoneWithLink,
+            WorkspaceRole::Viewer,
+        )
+        .await
+        .unwrap();
+    let (link_lease, link_operation, _link_rx) =
+        register_blocked_connection(&manager, &link_workspace.id, &link_viewer, 123).await;
+    sqlx::query(
+        "UPDATE workspace_members SET added_at = 'not-a-date' WHERE workspace_id = ? AND email = ?",
+    )
+    .bind(&link_workspace.id)
+    .bind(&owner.email)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(matches!(
+        manager
+            .update_link_access(
+                &link_workspace.id,
+                &owner,
+                WorkspaceLinkAccess::Restricted,
+                WorkspaceRole::Viewer,
+            )
+            .await,
+        Err(WorkspaceError::Store(_))
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT link_access FROM workspaces WHERE id = ?")
+            .bind(&link_workspace.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        "anyone_with_link"
+    );
+    assert!(!link_lease.is_revoked());
+    drop(link_operation);
+}
+
+#[tokio::test]
+async fn persisted_workspace_sequence_requires_the_exact_predecessor() {
+    let store = fresh_store().await;
+    let owner = principal("owner@example.com", false);
+    let workspace = store
+        .create_workspace(&owner, Some("Monotonic sequence"))
+        .await
+        .unwrap();
+    let newer = DocumentState::default();
+
+    let skipped = store
+        .persist_document(&workspace.id, 2, &newer)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        skipped,
+        StoreError::SequenceConflict { attempted: 2 }
+    ));
+
+    store
+        .persist_document(&workspace.id, 1, &DocumentState::default())
+        .await
+        .unwrap();
+    let replayed = store
+        .persist_document(&workspace.id, 1, &newer)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        replayed,
+        StoreError::SequenceConflict { attempted: 1 }
+    ));
+
+    store
+        .persist_document(&workspace.id, 2, &newer)
+        .await
+        .unwrap();
+    let stale = store
+        .persist_document(&workspace.id, 1, &DocumentState::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        stale,
+        StoreError::SequenceConflict { attempted: 1 }
+    ));
+
+    let persisted = store.get_workspace(&workspace.id).await.unwrap().unwrap();
+    assert_eq!(persisted.seq, 2);
+    assert_eq!(
+        serde_json::to_value(persisted.document).unwrap(),
+        serde_json::to_value(newer).unwrap()
     );
 }

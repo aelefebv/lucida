@@ -1,5 +1,3 @@
-import { useCallback, useRef } from "react";
-
 interface Props {
   dataMin: number;
   dataMax: number;
@@ -33,34 +31,6 @@ export function ContrastControls({
   fullRangeMax,
   labelPrefix = "",
 }: Props) {
-  const pressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const wasLongPress = useRef(false);
-
-  const handlePointerDown = useCallback(() => {
-    wasLongPress.current = false;
-    pressTimer.current = setTimeout(() => {
-      wasLongPress.current = true;
-      onAutoContrastToggle();
-    }, 400);
-  }, [onAutoContrastToggle]);
-
-  const handlePointerUp = useCallback(() => {
-    if (pressTimer.current) {
-      clearTimeout(pressTimer.current);
-      pressTimer.current = null;
-    }
-    if (!wasLongPress.current) {
-      onAutoContrast();
-    }
-  }, [onAutoContrast]);
-
-  const handlePointerLeave = useCallback(() => {
-    if (pressTimer.current) {
-      clearTimeout(pressTimer.current);
-      pressTimer.current = null;
-    }
-  }, []);
-
   const effectiveMin = fullRange ? 0 : dataMin;
   const effectiveMax = fullRange ? fullRangeMax : dataMax;
   const range = effectiveMax - effectiveMin;
@@ -122,14 +92,21 @@ export function ContrastControls({
 
       <div className="dim-control">
         <button
-          className={`auto-btn${autoContrast ? " auto-btn-active" : ""}`}
-          aria-label={`${prefix}auto contrast`}
-          aria-pressed={autoContrast}
-          onPointerDown={handlePointerDown}
-          onPointerUp={handlePointerUp}
-          onPointerLeave={handlePointerLeave}
+          className="auto-btn"
+          aria-label={`${prefix}apply automatic contrast once`}
+          onClick={onAutoContrast}
+          title="Recalculate contrast from the currently visible data"
         >
-          Auto
+          Apply auto
+        </button>
+        <button
+          className={`auto-btn${autoContrast ? " auto-btn-active" : ""}`}
+          aria-label={`${prefix}keep contrast automatic`}
+          aria-pressed={autoContrast}
+          onClick={onAutoContrastToggle}
+          title="Keep recalculating contrast as the data changes"
+        >
+          Keep auto
         </button>
         <button
           className={`auto-btn${fullRange ? " auto-btn-active" : ""}`}

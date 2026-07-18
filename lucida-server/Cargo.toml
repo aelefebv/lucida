@@ -9,12 +9,11 @@ name = "lucida-server"
 path = "src/main.rs"
 
 [dependencies]
-lucida-content = { path = "../lucida-content" }
-lucida-core = { path = "../lucida-core" }
-lucida-protocol = { path = "../lucida-protocol" }
-lucida-proxy = { path = "../lucida-proxy" }
-lucida-store = { path = "../lucida-store" }
-object_store = "0.12"
+lucida-content = { version = "0.2.0", path = "../lucida-content" }
+lucida-core = { version = "0.2.0", path = "../lucida-core" }
+lucida-protocol = { version = "0.2.0", path = "../lucida-protocol" }
+lucida-store = { version = "0.2.0", path = "../lucida-store" }
+object_store = "0.14.1"
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws"] }
 tower = { version = "0.5", features = ["util"] }
@@ -29,7 +28,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "registry", "j
 blake3 = "1"
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "5"
-num_cpus = "1"
 rand = "0.8"
 thiserror = "1"
 bytemuck = "1"
@@ -49,7 +47,7 @@ cookie = "0.18"
 # Google ID-token signatures and standard claims. `base64` +
 # `urlencoding` are pulled in directly so the state-token + redirect-URL
 # builders don't depend on `reqwest`'s private re-exports.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "charset"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json", "charset", "form"] }
 # jsonwebtoken 10 dropped the `ring` backend (used elsewhere via rustls) and makes
 # the crypto backend explicit. We pick `aws_lc_rs` over `rust_crypto`: the latter
 # pulls the `rsa` crate (RUSTSEC-2023-0071 "Marvin", unpatched), which would add a

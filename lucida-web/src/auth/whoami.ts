@@ -3,10 +3,9 @@
 // code (e.g. a manual "refresh auth" button) can call them without
 // driving the hook.
 //
-// Both helpers swallow network errors deliberately — every non-200
-// from `/auth/whoami` is treated as "not authenticated", and
-// logout's user-visible promise is "you're signed out now," with the
-// next whoami refresh revealing the truth.
+// `/auth/whoami` degrades to unauthenticated on transport failure. Logout is
+// intentionally stricter: a 503 means this browser's cookie was cleared but
+// durable credential deletion failed, which must remain visible to the user.
 
 import type { AuthPrincipal, AuthState } from "./types.ts";
 
@@ -34,6 +33,38 @@ export type FetchLike = (
   input: string,
   init?: RequestInit,
 ) => Promise<Response>;
+
+export type LogoutFailureKind = "partial_signout" | "request_failed";
+
+/** Stable UI-facing description of a failed sign-out attempt. */
+export interface LogoutFailure {
+  kind: LogoutFailureKind;
+  message: string;
+  retryable: boolean;
+  localSession: "cleared" | "unknown";
+  status?: number;
+}
+
+/** Typed transport error thrown by `postLogout` and preserved by the hook. */
+export class LogoutRequestError extends Error {
+  readonly failure: LogoutFailure;
+
+  constructor(failure: LogoutFailure, options?: ErrorOptions) {
+    super(failure.message, options);
+    this.name = "LogoutRequestError";
+    this.failure = failure;
+  }
+}
+
+export function logoutFailureFrom(error: unknown): LogoutFailure {
+  if (error instanceof LogoutRequestError) return error.failure;
+  return {
+    kind: "request_failed",
+    message: "Lucida could not confirm sign-out. Your session may still be active.",
+    retryable: true,
+    localSession: "unknown",
+  };
+}
 
 /** Fetch the current principal. Resolves to an `AuthState` and never throws. */
 export async function fetchAuthState(fetchImpl: FetchLike = fetch): Promise<AuthState> {
@@ -76,22 +107,60 @@ export async function fetchAuthState(fetchImpl: FetchLike = fetch): Promise<Auth
  * SPA — the hook calls `fetchAuthState` after this resolves, which
  * flips us into the unauth branch without a full page reload.
  *
- * Resolves once the server has acknowledged. Swallows network
- * errors: even a network blip shouldn't leave the user stuck logged
- * in client-side. The follow-up whoami refresh will then either
- * surface "still authenticated" (server didn't get the message) or
- * "unauthenticated" (server did).
+ * Resolves only when the server acknowledges successful durable revocation.
+ * A 503 is a partial sign-out: Set-Cookie has cleared this browser's local
+ * session, but the stored credential may remain usable if it was copied.
+ * Transport and other HTTP failures are typed so the hook can refresh the
+ * observed auth state without discarding the failure.
  */
 export async function postLogout(fetchImpl: FetchLike = fetch): Promise<void> {
+  let response: Response;
   try {
-    await fetchImpl(LOGOUT_URL, {
+    response = await fetchImpl(LOGOUT_URL, {
       method: "POST",
       credentials: "include",
       redirect: "manual",
     });
-  } catch {
-    // Intentionally swallowed — see doc comment.
+  } catch (cause) {
+    throw new LogoutRequestError(
+      {
+        kind: "request_failed",
+        message: "Lucida could not reach the server to confirm sign-out. Try again.",
+        retryable: true,
+        localSession: "unknown",
+      },
+      { cause },
+    );
   }
+
+  // Manual redirects appear as either their 3xx status or an opaque redirect,
+  // depending on the browser. Both are the successful logout contract.
+  if (
+    response.ok ||
+    (response.status >= 300 && response.status < 400) ||
+    response.type === "opaqueredirect"
+  ) {
+    return;
+  }
+
+  if (response.status === 503) {
+    throw new LogoutRequestError({
+      kind: "partial_signout",
+      message:
+        "This browser's local session was cleared, but lucida could not remove the stored session. A copied session credential may still work.",
+      retryable: true,
+      localSession: "cleared",
+      status: response.status,
+    });
+  }
+
+  throw new LogoutRequestError({
+    kind: "request_failed",
+    message: "Lucida could not complete sign-out. Your session may still be active.",
+    retryable: response.status >= 500,
+    localSession: "unknown",
+    status: response.status,
+  });
 }
 
 export async function fetchDevAuthStatus(fetchImpl: FetchLike = fetch): Promise<DevAuthStatus> {

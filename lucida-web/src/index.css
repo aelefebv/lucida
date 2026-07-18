@@ -1,11 +1,74 @@
 :root {
-  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   line-height: 1.5;
   font-weight: 400;
 
-  color-scheme: light dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
+  /* Lucida intentionally ships one complete theme. Declaring dark only keeps
+     native controls aligned with the application instead of producing the old
+     half-light/half-dark combination under the OS light preference. */
+  color-scheme: dark;
+  color: #f3f5f7;
+  background-color: #101318;
+
+  --surface-canvas: #101318;
+  --surface-1: #171b22;
+  --surface-2: #202630;
+  --surface-3: #2a313d;
+  --surface-raised: #252b35;
+  --surface-glass: #1b2028;
+  --border-subtle: #343c49;
+  --border-strong: #526071;
+  --border-translucent: rgb(243 245 247 / 0.15);
+  --text-primary: #f3f5f7;
+  --text-secondary: #c0c8d2;
+  --text-muted: #a0aab7;
+  --text-link: #aeb2ff;
+  --text-link-hover: #d2d4ff;
+  --accent: #8c92ff;
+  --accent-strong: #7279f5;
+  --accent-contrast: #0d1020;
+  --accent-surface: #2b2e63;
+  --accent-selection: rgb(140 146 255 / 0.16);
+  --accent-border-translucent: rgb(140 146 255 / 0.55);
+  --resize-grip: rgb(140 146 255 / 0.5);
+  --resize-grip-hover: rgb(140 146 255 / 0.82);
+  --focus-ring: #b8bcff;
+  --info-text: #79b8ff;
+  --info-surface: #193a59;
+  --info-border: #4d8bc8;
+  --success-text: #9be9aa;
+  --success-surface: #183321;
+  --success-border: #579a68;
+  --danger-surface: #3a1b20;
+  --danger-border: #9f4854;
+  --danger-text: #ffc4ca;
+  --warning-surface: #4a330d;
+  --warning-border: #b98222;
+  --warning-text: #ffe0a8;
+  --personal-text: #c9b6ff;
+  --personal-surface: rgb(140 146 255 / 0.16);
+  --personal-border: rgb(140 146 255 / 0.55);
+  --proposal-text: #ffd79a;
+  --proposal-surface: rgb(240 173 78 / 0.16);
+  --proposal-border: rgb(240 173 78 / 0.6);
+  --control-thumb: #f3f5f7;
+  --badge-danger: #b84343;
+  --overlay-panel: rgb(16 19 24 / 0.78);
+  --overlay-panel-strong: rgb(27 32 40 / 0.98);
+  --overlay-fill-subtle: rgb(243 245 247 / 0.08);
+  --overlay-fill-hover: rgb(243 245 247 / 0.12);
+  --shadow-raised: 0 12px 40px rgb(0 0 0 / 0.48);
+  --shadow-popover: 0 4px 12px rgb(0 0 0 / 0.6);
+  --shadow-dock: -10px 0 30px rgb(0 0 0 / 0.35);
+  --shadow-dock-bottom: 0 -10px 30px rgb(0 0 0 / 0.25);
+  --modal-backdrop: rgb(0 0 0 / 0.58);
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --overlay-safe-block: 0.75rem;
+  --overlay-safe-inline: 0.75rem;
+  --z-overlay: 40;
+  --z-popover: 80;
+  --z-modal: 1000;
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -15,11 +78,11 @@
 
 a {
   font-weight: 500;
-  color: #646cff;
+  color: var(--text-link);
   text-decoration: inherit;
 }
 a:hover {
-  color: #535bf2;
+  color: var(--text-link-hover);
 }
 
 body {
@@ -27,11 +90,19 @@ body {
   display: flex;
   min-width: 320px;
   min-height: 100vh;
+  min-height: 100dvh;
+  background: var(--surface-canvas);
+  color: var(--text-primary);
+}
+
+#root {
+  width: 100%;
+  min-width: 0;
 }
 
 .workspace-route-message {
   padding: 2rem;
-  color: #888;
+  color: var(--text-secondary);
 }
 
 /* In-viewer "create workspace from selection" failure notice (#697). A
@@ -48,15 +119,15 @@ body {
   gap: 0.75rem;
   max-width: 90vw;
   padding: 0.75rem 1rem;
-  border: 1px solid #7a2b2b;
+  border: 1px solid var(--danger-border);
   border-radius: 6px;
-  background: #341818;
-  color: #ffb4b4;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  background: var(--danger-surface);
+  color: var(--danger-text);
+  box-shadow: var(--shadow-popover);
 }
 
 h1 {
-  font-size: 3.2em;
+  font-size: clamp(1.75rem, 4vw, 3.2rem);
   line-height: 1.1;
 }
 
@@ -67,27 +138,35 @@ button {
   font-size: 1em;
   font-weight: 500;
   font-family: inherit;
-  background-color: #1a1a1a;
+  min-height: 1.5rem;
+  background-color: var(--surface-2);
+  color: var(--text-primary);
   cursor: pointer;
   transition: border-color 0.25s;
 }
 button:hover {
-  border-color: #646cff;
-}
-button:focus,
-button:focus-visible {
-  outline: 4px auto -webkit-focus-ring-color;
+  border-color: var(--accent);
 }
 
-@media (prefers-color-scheme: light) {
-  :root {
-    color: #213547;
-    background-color: #ffffff;
-  }
-  a:hover {
-    color: #747bff;
-  }
-  button {
-    background-color: #f9f9f9;
+.operation-status-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-inline-start: auto;
+}
+
+:where(button, input, select, textarea, a, [tabindex]):focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }

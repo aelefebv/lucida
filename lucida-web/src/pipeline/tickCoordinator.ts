@@ -22,8 +22,9 @@ import { computeMemberIndexMap } from "../renderer/descriptorBuffer.ts";
 import {
   plan,
   emitPlanRequests,
+  applyWorkspaceMinimapPriority,
+  assignChunkModes,
   emptyPlanStats,
-  planProxyResidencyForInputs,
   type PlanningConfig,
 } from "./planning/index.ts";
 import { configStore } from "./planning/configStore.ts";
@@ -32,9 +33,11 @@ import {
   applyViewQueryDelta,
   makeEntitySnapshot,
   type SnapshotEntityDeps,
-  type ViewQueryDeltaJson,
-  type ViewQueryEntityJson,
 } from "./planning/snapshotDelta.ts";
+import {
+  decodeViewQuery,
+  decodeViewQueryDelta,
+} from "./planning/viewQueryBinary.ts";
 import type { WasmScene } from "lucida-core";
 import { buildPlanningDatasetDebug } from "./planning/debug.ts";
 import { computeLabelChunkRequests } from "./planning/labelRequests.ts";
@@ -54,8 +57,6 @@ import type { VisibleRegion } from "./viewport.ts";
 
 // Re-export: canonical declaration lives in `pipeline/planning/index.ts`.
 export type { MinimapChunkCoord } from "./planning/index.ts";
-import type { CpuCache } from "./fetch/index.ts";
-import type { ProxyRequest } from "./planning/index.ts";
 import {
   DEBUG_MEMBER_ROW_CAP,
   debugStats,
@@ -67,6 +68,7 @@ import { buildRoster } from "./upload/coldState/roster.ts";
 import {
   computeActiveSetIndexMap,
   iterateActiveSetMembers,
+  type ColdStateEntityDeltaHint,
 } from "./upload/coldState/build.ts";
 import type { Uploader } from "./upload/uploader.ts";
 
@@ -76,22 +78,14 @@ export interface MemberRosterEntry {
   position: [number, number];
   /**
    * Entity id from the planning active set entry that produced this
-   * roster member. Forwarded to the GPU worker per-layer so it can look
-   * up the proxy descriptor for shader binding.
+   * roster member. Used to attach the precomputed model matrices to
+   * cold state.
    */
   entityId?: string;
   /**
-   * Promotion mode from the planning active set entry. Drives the
-   * shader's `renderMode` branch (group-as-proxy direct sample vs
-   * detail+proxy fallback). Optional for backward compat.
-   */
-  mode?: "group-as-proxy" | "tiles-with-proxy-fallback" | "tiles-with-detail";
-  /**
    * Optional precomputed world-space model matrix for the `[0,1]^3` unit
    * cube that bounds this member. When present, the render path uses it
-   * instead of querying `scene.member_model_matrix`. Used by
-   * `group-as-proxy` entries because groups aren't in `derived.members`
-   * and therefore have no native model matrix. Column-major 4×4.
+   * instead of querying `scene.member_model_matrix`. Column-major 4×4.
    * `invModelMatrix` is the matching inverse.
    */
   modelMatrix?: Float32Array;
@@ -100,8 +94,7 @@ export interface MemberRosterEntry {
    * Optional 2D world-space footprint of the member (in voxel units, the
    * same coordinate frame as `position`). When present, the slice path
    * uses these instead of the dataset's per-image dataW/dataH for layer
-   * sizing — necessary for synthesized `group-as-proxy` entries whose
-   * footprint spans multiple tile images.
+   * sizing.
    */
   dataW?: number;
   dataH?: number;
@@ -110,6 +103,12 @@ export interface MemberRosterEntry {
 export interface TickCoordinatorResult {
   /** Per-dataset roster of members that need render layers, keyed by dsId. */
   memberRoster: Map<string, MemberRosterEntry[]>;
+  /**
+   * Per-dataset entity placement parsed once with the planning snapshot.
+   * Render paths reuse this map instead of repeating `member_positions`
+   * serialization and parsing while assembling label layers.
+   */
+  memberPositionsByDataset: Map<string, Record<string, [number, number]>>;
   settings: SceneSettings;
   multiChannel: boolean;
   epochs: SceneEpochs;
@@ -137,6 +136,27 @@ interface PlannedDataset {
    * The view-move delta diffs `result.activeSet` against this.
    */
   previousActiveSet: ActiveSetEntry[];
+  entityDelta?: FoldedEntityDelta;
+}
+
+interface FoldedEntityDelta {
+  upsertEntities: EntitySnapshot[];
+  removedEntityIds: string[];
+  appendedEntityIds: string[];
+}
+
+interface FoldedEntities {
+  entities: EntitySnapshot[];
+  entityDelta?: FoldedEntityDelta;
+}
+
+interface PreparedDataset extends PlannedDataset {
+  rosterEntries: MemberRosterEntry[];
+  matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
+  matrixCacheEntry: {
+    epochKey: string;
+    matrices: Map<string, { model: Float32Array; inv: Float32Array }>;
+  };
 }
 
 const VIEWER_INTEREST_TTL_MS = 2_000;
@@ -307,7 +327,7 @@ function readZRangeVox(
  * display. The three omitted fields above are safe only because they cannot
  * change on this path today.
  */
-function displayStatesEqual(
+export function displayStatesEqual(
   a: Record<number, ColdStateDisplayState>,
   b: Record<number, ColdStateDisplayState>,
 ): boolean {
@@ -343,7 +363,7 @@ function emitViewerInterestHint(
   const desired = [];
   const predicted = [];
   for (const req of requests.slice(0, VIEWER_INTEREST_KEY_CAP)) {
-    const lane = req.lane === "prefetch" || req.lane === "overview"
+    const lane = req.lane === "prefetch"
       ? "predicted"
       : req.lane === "coarse" || req.lane === "detail" || req.lane === "minimap"
         ? "visible"
@@ -377,7 +397,6 @@ function emitViewerInterestHint(
 }
 
 // Re-export: canonical home is `pipeline/upload/coldState/roster.ts`.
-export { synthesizeGroupRosterEntry } from "./upload/coldState/roster.ts";
 
 export class TickCoordinator {
   private readonly uploader: Uploader;
@@ -423,6 +442,7 @@ export class TickCoordinator {
    */
   private lastRebuildScalars: {
     t: number;
+    z: number;
     c: number;
     mode: "slice" | "volume";
     multiChannel: boolean;
@@ -439,10 +459,8 @@ export class TickCoordinator {
    * `scene.member_model_matrix` (a pure function of layout, no camera input), so
    * a view move — which advances only the view epoch — leaves them byte-
    * identical; only tiles new to a rebuild's roster are recomputed. Keyed by an
-   * epoch fingerprint so a content/layout/asset change (a reflow or add/remove
-   * that moves placement) discards the stale matrices. `group-as-proxy` matrices
-   * are never cached (they are synthesized from the visible child-tile set, which
-   * a view move changes).
+   * epoch fingerprint so a content/layout change (a reflow or add/remove that
+   * moves placement) discards the stale matrices.
    */
   private readonly matrixCacheByDataset = new Map<string, {
     epochKey: string;
@@ -495,12 +513,13 @@ export class TickCoordinator {
    *
    * A delta reports only the *quantized* projection
    * (`{ membership, visible, ideal_target_lod, kind }`) of each record. The
-   * fold is safe to feed the planner ONLY under coarseDetail, where the
+   * fold is safe to feed the shipping coarse/detail-only planner, where the
    * active-set mode/LOD derives from the view-independent
    * `detailLevel`/`coarseLevel` + `visible` — the quantized set the delta
-   * tracks. On the legacy path the mode is chosen from the continuous
-   * `projected_diagonal_px`, which the delta does NOT track, so that path
-   * uses the full `view_query` (see the gate in `planAndFetch`).
+   * tracks. The executable guard in `planning/modes.test.ts` proves output is
+   * invariant across the retired 80/150 px mode bands. A future resolver that
+   * chooses mode from continuous `projected_diagonal_px` MUST first add an
+   * explicit mode band to the Rust delta contract.
    *
    * # Cursor lifecycle (silent-wrong-data guard)
    *
@@ -622,12 +641,6 @@ export class TickCoordinator {
       layout: rawEpochs.layout,
       view: rawEpochs.view,
       selection: rawEpochs.selection,
-      // `asset_epoch()` is the authoritative source. Older WASM builds
-      // without the binding fall back to 0 (functional no-op).
-      asset:
-        typeof ctx.scene.asset_epoch === "function"
-          ? ctx.scene.asset_epoch()
-          : (rawEpochs.asset ?? 0),
       request: this.requestEpoch,
     };
 
@@ -642,7 +655,6 @@ export class TickCoordinator {
       if (currentEpochs.layout !== last.layout) causes.push("layout");
       if (currentEpochs.view !== last.view) causes.push("view");
       if (currentEpochs.selection !== last.selection) causes.push("selection");
-      if (currentEpochs.asset !== last.asset) causes.push("asset");
       isHit = causes.length === 0;
     }
 
@@ -660,15 +672,14 @@ export class TickCoordinator {
     //     leading change rebuilds promptly, then further changes within
     //     the window coalesce so a continuous scrub doesn't rebuild
     //     every frame.
-    // Structural changes (content/layout/asset) are never coalesced —
-    // a newly-added dataset, layout change, or catalog change must
+    // Structural changes (content/layout) are never coalesced —
+    // a newly-added dataset or layout change must
     // render immediately.
     let coalescedSkip = false;
     if (!isHit && hasPrior) {
       const structural =
         causes.includes("content") ||
-        causes.includes("layout") ||
-        causes.includes("asset");
+        causes.includes("layout");
       if (!structural) {
         const interval = causes.includes("selection")
           ? SELECTION_COALESCE_INTERVAL_MS
@@ -709,8 +720,7 @@ export class TickCoordinator {
 
     const structural =
       causes.includes("content") ||
-      causes.includes("layout") ||
-      causes.includes("asset");
+      causes.includes("layout");
     const selectionOnly =
       !structural && causes.length === 1 && causes[0] === "selection";
     // A pure view move (pan / zoom / orbit): only the camera moved, so T/Z/C,
@@ -769,20 +779,19 @@ export class TickCoordinator {
     // duration against it.
     this.pendingDeferredRebuild = false;
 
-    // CpuCache owns wanted-generation and delivery/rejection state, so the
-    // rebuild lifecycle advances there exactly once before the per-dataset
-    // loop.
-    ctx.cpuCache.onPlanRebuildStart();
-
     // One CPU-cache snapshot per rebuild, taken only when a debug surface
     // will read it. `snapshot()` walks every resident entity in the chunk
-    // and overview stores, so it must never run per-entity or per-dataset
+    // stores, so it must never run per-entity or per-dataset
     // — with tens of thousands of visible entities that walk would
     // dominate the rebuild. Every debug consumer below (planning panel,
     // entityDiag) shares this single copy.
     const cacheSnapshot = debugStats.enabled ? ctx.cpuCache.snapshot() : null;
 
     const memberRoster = new Map<string, MemberRosterEntry[]>();
+    const memberPositionsByDataset = new Map<
+      string,
+      Record<string, [number, number]>
+    >();
     const entityIndexByDataset = new Map<string, Map<string, number>>();
     const plannedDatasets: PlannedDataset[] = [];
     // Index-aligned with the rows pushed to `debugStats.memberStats`
@@ -808,7 +817,7 @@ export class TickCoordinator {
       // manifest-only swap is harmless — the scene reports it consistently
       // within the tick). Mirrors `matrixCacheByDataset` below.
       const snapshotInputEpochKey =
-        `${currentEpochs.content}|${currentEpochs.layout}|${currentEpochs.asset}`;
+        `${currentEpochs.content}|${currentEpochs.layout}`;
       let snapshotInputs = this.snapshotInputCacheByDataset.get(dsId);
       if (
         !snapshotInputs ||
@@ -835,32 +844,23 @@ export class TickCoordinator {
         };
         this.snapshotInputCacheByDataset.set(dsId, snapshotInputs);
       }
+      memberPositionsByDataset.set(dsId, snapshotInputs.positions);
 
-      // Reconstruct `entities` incrementally when it is safe. Under
-      // coarseDetail (the shipping default) the active-set mode/LOD derives
-      // from the view-independent `detailLevel`/`coarseLevel` + `visible` —
-      // exactly the quantized set `view_query_delta` tracks — so folding the
-      // delta yields the same render-affecting projection as a full parse at
-      // O(delta) instead of O(N-members) on a camera move. On the legacy path
-      // the mode is chosen from the continuous `projected_diagonal_px`, which
-      // the delta does NOT track, so the full `view_query` (below, via
-      // `buildPlanningSnapshot` with no override) is used — falling back to
-      // the full query is always correct. `visible_region` and `selection`
-      // are computed FRESH inside the builder regardless.
-      let entitiesOverride: EntitySnapshot[] | undefined;
-      if (planningConfig.coarseDetailEnabled) {
-        const deps: SnapshotEntityDeps = {
-          imageSpecById: snapshotInputs.imageSpecById,
-          parentByEntityId: snapshotInputs.parentByEntityId,
-          positions: snapshotInputs.positions,
-          dsSettings,
-        };
-        const folded = this.foldViewDeltaEntities(
-          ctx.scene, dsId, deps, snapshotInputs,
-        );
-        if (folded === "skip") continue;
-        entitiesOverride = folded;
-      }
+      // Reconstruct `entities` incrementally. The single chunk-residency
+      // policy derives from the quantized detail/coarse fields carried by
+      // `view_query_delta`, so this is equivalent to a full parse at O(delta)
+      // on camera moves. `visible_region` and selection remain fresh below.
+      const deps: SnapshotEntityDeps = {
+        imageSpecById: snapshotInputs.imageSpecById,
+        parentByEntityId: snapshotInputs.parentByEntityId,
+        positions: snapshotInputs.positions,
+        dsSettings,
+      };
+      const folded = this.foldViewDeltaEntities(
+        ctx.scene, dsId, deps, snapshotInputs,
+      );
+      if (folded === "skip") continue;
+      const entitiesOverride = folded.entities;
 
       // Build the planning snapshot from live WASM state. Returns null
       // when `view_query` produces no visible entities (dataset not yet
@@ -875,7 +875,6 @@ export class TickCoordinator {
         datasetId: dsId,
         dataset: ds,
         dsSettings,
-        assetCatalog: ctx.assetCatalog.snapshot(),
         minimapPending: minimapPendingFetch,
         mode: ctx.mode as "slice" | "volume",
         multiChannel,
@@ -900,20 +899,14 @@ export class TickCoordinator {
       // — the view-move delta diffs the fresh active set against this.
       const previousActiveSet = planningStateForDataset.previousActiveSet;
       const result = this.planFn(snapshot, planningStateForDataset, planningConfig);
-      this.planningState.set(dsId, result.nextState);
-      this.requestEpoch = result.epochs.request;
-      this._lastRequests = result.requests;
-      this._lastVisibleRegion.set(dsId, visibleRegion);
-      this._lastEntities.set(dsId, entities);
-      emitViewerInterestHint(ctx, dsId, selection, visibleRegion, result.requests, this.requestEpoch);
 
-      // Built before downstream side-effects so the panel reflects what
-      // `plan()` produced, not the post-LOD-filter upload-path view.
+      // Built while the cycle is still staged so a later dataset failure
+      // cannot advance planner state or publish partial cold/fetch work.
+      // `debugStats` is per-frame scratch, not coordinator carry-forward.
       if (cacheSnapshot !== null) {
         const entityById = new Map(entities.map(e => [e.entityId, e]));
         debugStats.planning.byDataset[dsId] = buildPlanningDatasetDebug(
           dsId, result, entities, entityById, visibleRegion, cacheSnapshot,
-          planningConfig,
         );
       }
 
@@ -926,57 +919,35 @@ export class TickCoordinator {
         selection,
         result,
         previousActiveSet,
+        entityDelta: folded.entityDelta,
       });
     }
 
-    // Rebuild the display-only fast-path signatures from scratch: datasets
-    // that no longer plan (turned invisible / scrolled fully out) drop out.
-    this.lastRebuildByDataset.clear();
-
-    const proxyResidency = planProxyResidencyForInputs({
-      inputs: plannedDatasets.map((planned) => ({
-        snapshot: planned.snapshot,
-        activeSet: planned.result.activeSet,
-        proxyRequests: planned.result.proxyRequests,
-      })),
-      config: planningConfig,
-    });
-
-    const proxyRequestsByDataset = new Map<string, ProxyRequest[]>();
-    for (const req of proxyResidency.admittedProxyRequests) {
-      const list = proxyRequestsByDataset.get(req.datasetId) ?? [];
-      list.push(req);
-      proxyRequestsByDataset.set(req.datasetId, list);
-    }
-
-    const desiredProxyKeysByDataset = new Map<string, Set<string>>();
-    for (const key of proxyResidency.desiredProxyKeys) {
-      const datasetId = key.split("|", 1)[0];
-      const set = desiredProxyKeysByDataset.get(datasetId) ?? new Set<string>();
-      set.add(key);
-      desiredProxyKeysByDataset.set(datasetId, set);
-    }
-
+    const nextRequestEpoch = plannedDatasets[0]?.result.epochs.request
+      ?? this.requestEpoch;
     for (const planned of plannedDatasets) {
-      const { dsId, dsSettings, entities, visibleRegion, selection } = planned;
-      const result = planned.result;
-      const budgetedProxyRequests = proxyRequestsByDataset.get(dsId) ?? [];
-      const budgetedResult: RequestPlan = {
-        ...result,
-        proxyRequests: budgetedProxyRequests,
-      };
-      this._lastPlanByDataset.set(dsId, budgetedResult);
-
-      // 3d. Build member roster + per-entity matrix map in one walk. Reuse
-      // layout-derived tile matrices across a view move via a per-dataset cache
-      // invalidated whenever placement changes (content/layout/asset epoch).
-      const matrixEpochKey =
-        `${currentEpochs.content}|${currentEpochs.layout}|${currentEpochs.asset}`;
-      let matrixCacheEntry = this.matrixCacheByDataset.get(dsId);
-      if (!matrixCacheEntry || matrixCacheEntry.epochKey !== matrixEpochKey) {
-        matrixCacheEntry = { epochKey: matrixEpochKey, matrices: new Map() };
-        this.matrixCacheByDataset.set(dsId, matrixCacheEntry);
+      if (planned.result.epochs.request !== nextRequestEpoch) {
+        throw new Error(
+          `Planning cycle produced mixed request epochs: ${nextRequestEpoch} and ` +
+          `${planned.result.epochs.request}`,
+        );
       }
+    }
+
+    // Finish every fallible roster/matrix computation before publishing any
+    // wanted state or worker message. Matrix caches are cloned for staging and
+    // installed only after the complete workspace plan is accepted.
+    const preparedDatasets: PreparedDataset[] = plannedDatasets.map((planned) => {
+      const { dsId, entities, result } = planned;
+      const matrixEpochKey =
+        `${currentEpochs.content}|${currentEpochs.layout}`;
+      const priorMatrixCache = this.matrixCacheByDataset.get(dsId);
+      const matrixCacheEntry = {
+        epochKey: matrixEpochKey,
+        matrices: priorMatrixCache?.epochKey === matrixEpochKey
+          ? new Map(priorMatrixCache.matrices)
+          : new Map<string, { model: Float32Array; inv: Float32Array }>(),
+      };
       const { entries: rosterEntries, matricesByEntity } = buildRoster({
         activeSet: result.activeSet,
         entities,
@@ -984,6 +955,62 @@ export class TickCoordinator {
         datasetId: dsId,
         tileMatrixCache: matrixCacheEntry.matrices,
       });
+      return { ...planned, rosterEntries, matricesByEntity, matrixCacheEntry };
+    });
+
+    // One shared transaction boundary for full rebuilds and scrub rebuilds.
+    // It computes labels, reconciles workspace minimap priority, validates the
+    // complete owner set, and then publishes once so a later dataset failure
+    // cannot strand earlier wanted/cold state.
+    this.planAndSubmit({
+      ctx,
+      planned: preparedDatasets.map((prepared) => ({
+        datasetId: prepared.dsId,
+        dsSettings: prepared.dsSettings,
+        selection: prepared.selection,
+        plan: prepared.result,
+      })),
+      minimapPendingFetch,
+      planningConfig,
+      mode: ctx.mode as "slice" | "volume",
+    });
+
+    // Commit coordinator carry-forward only after the cache accepted the whole
+    // workspace publication. Until this point a thrown plan/roster/label step
+    // leaves the previous generation intact.
+    this.requestEpoch = nextRequestEpoch;
+    for (const prepared of preparedDatasets) {
+      this.planningState.set(prepared.dsId, prepared.result.nextState);
+      this._lastRequests = prepared.result.requests;
+      this._lastVisibleRegion.set(prepared.dsId, prepared.visibleRegion);
+      this._lastEntities.set(prepared.dsId, prepared.entities);
+      this._lastPlanByDataset.set(prepared.dsId, prepared.result);
+      this.matrixCacheByDataset.set(prepared.dsId, prepared.matrixCacheEntry);
+      emitViewerInterestHint(
+        ctx,
+        prepared.dsId,
+        prepared.selection,
+        prepared.visibleRegion,
+        prepared.result.requests,
+        this.requestEpoch,
+      );
+    }
+
+    // Rebuild the display-only fast-path signatures from scratch: datasets
+    // that no longer plan (turned invisible / scrolled fully out) drop out.
+    this.lastRebuildByDataset.clear();
+
+    for (const planned of preparedDatasets) {
+      const {
+        dsId,
+        dsSettings,
+        entities,
+        visibleRegion,
+        selection,
+        rosterEntries,
+        matricesByEntity,
+      } = planned;
+      const result = planned.result;
       memberRoster.set(dsId, rosterEntries);
 
       // View-move fast path: the active set genuinely changed (tiles scroll
@@ -998,6 +1025,14 @@ export class TickCoordinator {
         planned.previousActiveSet.length > 0;
 
       if (canDelta) {
+        const entityDeltaHint: ColdStateEntityDeltaHint | undefined = planned.entityDelta
+          ? {
+              upsertEntities: planned.entityDelta.upsertEntities,
+              upsertEntries: assignChunkModes(planned.entityDelta.upsertEntities),
+              removedEntityIds: planned.entityDelta.removedEntityIds,
+              appendedEntityIds: planned.entityDelta.appendedEntityIds,
+            }
+          : undefined;
         this.uploader.sendColdStateDelta({
           ctx,
           datasetId: dsId,
@@ -1011,9 +1046,9 @@ export class TickCoordinator {
             coarse: planningConfig.coarseRenderRadiusView,
           },
           epochs: result.epochs,
-          desiredProxyKeys: desiredProxyKeysByDataset.get(dsId) ?? new Set(),
           matricesByEntity,
           dsSettings,
+          entityDeltaHint,
         });
         // The worker rebuilds its descriptor buffer from the reordered active
         // set in the SAME canonical order this walks, so the indices agree.
@@ -1047,7 +1082,6 @@ export class TickCoordinator {
             coarse: planningConfig.coarseRenderRadiusView,
           },
           epochs: result.epochs,
-          desiredProxyKeys: desiredProxyKeysByDataset.get(dsId) ?? new Set(),
           matricesByEntity,
           dsSettings,
         });
@@ -1065,42 +1099,6 @@ export class TickCoordinator {
         });
         this.coldStateSyncedDatasets.add(dsId);
       }
-
-      // Categorical label overlays are invisible to the WASM planner
-      // (labels live outside `manifest.images`/`entities`), so their chunk
-      // requests are synthesized here from the label's own geometry and
-      // merged into the fetch plan. In `slice` mode the label's mapped
-      // Z-plane is fetched; in `volume` mode the whole label volume (every
-      // z-chunk) is fetched for the 3D first-hit surface. Scoped under each
-      // label's own image id, so they never perturb intensity-chunk eviction.
-      const labelRequests = computeLabelChunkRequests({
-        datasetId: dsId,
-        manifest: ctx.datasets.get(dsId)!.manifest,
-        t: selection.t,
-        z: selection.z,
-        // Fetch only the labels the render path will draw (visible +
-        // eligible), so a hidden label is neither fetched nor drawn.
-        labelSettings: dsSettings?.label_settings,
-        mode: ctx.mode as "slice" | "volume",
-      });
-      const requestsWithLabels =
-        labelRequests.length > 0
-          ? [...result.requests, ...labelRequests]
-          : result.requests;
-
-      // Submit chunks + proxies in a single call so they don't cancel
-      // each other. Cancellation contract: a request omitted by the
-      // next plan has its in-flight fetch aborted.
-      ctx.cpuCache.submit({
-        requests: requestsWithLabels,
-        activeSet: result.activeSet,
-        proxyRequests: budgetedProxyRequests,
-        epochs: result.epochs,
-        stats: result.stats,
-        // `nextState` is required on RequestPlan but unused by submit();
-        // forward the planner's pointer so the shape stays honest.
-        nextState: result.nextState,
-      });
 
       // Debug stats. Everything here must stay O(entities + requests):
       // a wide collection has tens of thousands of visible entities, and
@@ -1123,8 +1121,7 @@ export class TickCoordinator {
           debugStats.totalMembers++;
           debugStats.visibleMembers++;
           const activeEntry = activeByEntity.get(entity.entityId);
-          // Only tile entries carry `targetLod`; group-as-proxy has
-          // no LOD bookkeeping (-1 sentinel), invisibles report coarsest.
+          // Only tile entries carry `targetLod`; invisibles report coarsest.
           const tl =
             activeEntry?.kind === "tile"
               ? activeEntry.targetLod
@@ -1183,29 +1180,16 @@ export class TickCoordinator {
         activeSet: [],
         activeSetTotal: 0,
         activeSetModeCounts: {
-          groupAsProxy: 0,
-          tilesProxyFallback: 0,
           tilesDetail: 0,
           invisible: 0,
         },
-        laneCount: { detail: 0, coarse: 0, prefetch: 0, overview: 0 },
+        laneCount: { minimap: 0, detail: 0, coarse: 0, prefetch: 0 },
         chunksByLevel: {},
         topRequests: [],
         members: [],
         membersTotal: 0,
         hasMixedLevels: false,
         epochCacheHit: false,
-        proxyResidency: {
-          ...proxyResidency.stats,
-          topDecisions: proxyResidency.decisions.slice(0, 20).map((decision) => ({
-            datasetId: decision.datasetId,
-            groupId: decision.groupId,
-            representation: decision.representation,
-            proxyCount: decision.proxyKeys.length,
-            bytes: decision.bytes,
-            reason: decision.reason,
-          })),
-        },
         // Replaced after `coldStateTelemetry.recordRebuild` below.
         coldState: this.uploader.coldStateTelemetry.publish(),
         visibleRegion: null,
@@ -1234,32 +1218,20 @@ export class TickCoordinator {
       // Aggregate per-dataset active sets from `previousActiveSet`
       // (the active set produced by the most recent `plan()` call).
       // ActiveSetEntry is a discriminated union; per-variant LOD columns
-      // are derived from `kind` (group-as-proxy = 0, tile reads from entry,
-      // invisible reports coarsest). Mode COUNTS run over the full set;
+      // are derived from `kind` (tile reads from entry, invisible reports
+      // coarsest). Mode COUNTS run over the full set;
       // row emission is capped like the other per-member arrays.
       const modeCounts = orchDebug.activeSetModeCounts;
       for (const [, state] of this.planningState) {
         for (const entry of state.previousActiveSet) {
           orchDebug.activeSetTotal++;
-          if (entry.kind === "group-as-proxy") {
-            modeCounts.groupAsProxy++;
-          } else if (entry.kind === "invisible") {
+          if (entry.kind === "invisible") {
             modeCounts.invisible++;
-          } else if (entry.mode === "tiles-with-proxy-fallback") {
-            modeCounts.tilesProxyFallback++;
           } else {
             modeCounts.tilesDetail++;
           }
           if (orchDebug.activeSet.length >= DEBUG_MEMBER_ROW_CAP) continue;
-          if (entry.kind === "group-as-proxy") {
-            orchDebug.activeSet.push({
-              entityId: entry.entityId,
-              mode: "group-as-proxy",
-              targetLod: 0,
-              coarsestDetailLod: 0,
-              detailOwnedLodRange: [0, 0],
-            });
-          } else if (entry.kind === "tile") {
+          if (entry.kind === "tile") {
             orchDebug.activeSet.push({
               entityId: entry.entityId,
               mode: entry.mode,
@@ -1286,7 +1258,7 @@ export class TickCoordinator {
           if (r.lane === "detail") orchDebug.laneCount.detail++;
           else if (r.lane === "coarse") orchDebug.laneCount.coarse++;
           else if (r.lane === "prefetch") orchDebug.laneCount.prefetch++;
-          else orchDebug.laneCount.overview++;
+          else orchDebug.laneCount.minimap++;
           orchDebug.chunksByLevel[r.level] = (orchDebug.chunksByLevel[r.level] ?? 0) + 1;
         }
         orchDebug.topRequests = this._lastRequests.slice(0, 20).map(r => ({
@@ -1338,7 +1310,14 @@ export class TickCoordinator {
     // Step 5 — Cache and return
     const outputEpochs: SceneEpochs = { ...currentEpochs, request: this.requestEpoch };
     this.lastEpochs = outputEpochs;
-    this.cachedResult = { memberRoster, settings, multiChannel, epochs: outputEpochs, entityIndexByDataset };
+    this.cachedResult = {
+      memberRoster,
+      memberPositionsByDataset,
+      settings,
+      multiChannel,
+      epochs: outputEpochs,
+      entityIndexByDataset,
+    };
 
     // Capture the scene scalars, layer order, and visible-dataset set this
     // rebuild planned against, so the display-only fast path has a baseline
@@ -1346,6 +1325,7 @@ export class TickCoordinator {
     // above (each carries its own z-range).
     this.lastRebuildScalars = {
       t: ctx.scene.t(),
+      z: ctx.scene.z(),
       c: ctx.scene.c(),
       mode: ctx.mode as "slice" | "volume",
       multiChannel,
@@ -1389,6 +1369,57 @@ export class TickCoordinator {
     }
 
     return this.cachedResult;
+  }
+
+  /**
+   * Shared fetch-publication boundary for full plans and scrub plans.
+   * Everything fallible (workspace priority reconciliation and label request
+   * synthesis) completes before the single CpuCache commit.
+   */
+  private planAndSubmit(args: {
+    ctx: TickContext;
+    planned: readonly {
+      datasetId: string;
+      dsSettings: DatasetSettings | undefined;
+      selection: SelectionState;
+      plan: RequestPlan;
+    }[];
+    minimapPendingFetch: Map<string, MinimapChunkCoord[]>;
+    planningConfig: PlanningConfig;
+    mode: "slice" | "volume";
+  }): void {
+    const {
+      ctx,
+      planned,
+      minimapPendingFetch,
+      planningConfig,
+      mode,
+    } = args;
+
+    applyWorkspaceMinimapPriority(
+      planned.map((entry) => entry.plan.requests),
+      minimapPendingFetch,
+      planningConfig,
+    );
+
+    const publications = planned.map((entry) => {
+      const labelRequests = computeLabelChunkRequests({
+        datasetId: entry.datasetId,
+        manifest: ctx.datasets.get(entry.datasetId)!.manifest,
+        t: entry.selection.t,
+        z: entry.selection.z,
+        labelSettings: entry.dsSettings?.label_settings,
+        mode,
+      });
+      return {
+        datasetId: entry.datasetId,
+        plan: labelRequests.length === 0
+          ? entry.plan
+          : { ...entry.plan, requests: [...entry.plan.requests, ...labelRequests] },
+      };
+    });
+
+    ctx.cpuCache.publishPlanningCycle(publications);
   }
 
   /**
@@ -1446,8 +1477,7 @@ export class TickCoordinator {
    * z-slab extension, a channel-visibility flip, blend mode, layer order, a
    * field added later, …) fails the proof and the caller falls through to a
    * full rebuild. When it fires it pushes a small descriptor patch to the
-   * worker and reuses the cached roster — no plan(), roster, submit, or
-   * proxy residency.
+   * worker and reuses the cached roster — no plan(), roster, or submit.
    *
    * Returns `true` when it fully handled the tick (caller serves the cached
    * result); `false` when the change is not provably display-only, or when
@@ -1562,9 +1592,10 @@ export class TickCoordinator {
 
   /**
    * The selection-scrub fast path. Fires only when it can PROVE the sole
-   * change since the last rebuild is a pure T-scrub and/or Z-plane move in the
-   * 2D slice view — the visible set, per-entity geometry/LOD, matrices, and
-   * per-channel display state are all unchanged. `currentT`/`currentZ` are
+   * change since the last rebuild is a pure T-scrub in either view, or a
+   * Z-plane move in the 2D slice view — the visible set, per-entity
+   * geometry/LOD, matrices, and per-channel display state are all unchanged.
+   * `currentT`/`currentZ` are
    * top-level cold-state scalars (never part of a per-entity descriptor), so on
    * a pure scrub the whole descriptor array is byte-identical; only the top
    * scalars (and, on a Z move, the visible region) differ.
@@ -1577,12 +1608,12 @@ export class TickCoordinator {
    * cached roster.
    *
    * Correctness rests on the caller's `selectionOnly` gate: only the selection
-   * epoch moved, so the view/content/layout/asset inputs the active set is a
+   * epoch moved, so the view/content/layout inputs the active set is a
    * pure function of are byte-identical — the roster and residency shape are
    * provably unchanged, which is why the cached roster can be reused.
    *
-   * Conservative by construction: it is scoped to slice mode, requires an
-   * actual T or Z move, and any other difference (a display edit, a bundled
+   * Conservative by construction: volume mode admits T-only changes; slice
+   * mode admits T and/or Z, and any other difference (a display edit, a bundled
    * label/blend/visibility change, a channel change, a z-range WIDTH change such
    * as a slab extension, a new/dropped dataset, a layer reorder, or a field
    * added later) fails the proof and the caller falls through to a full rebuild.
@@ -1609,13 +1640,9 @@ export class TickCoordinator {
       return false;
     }
 
-    // Scoped to the 2D slice view: a Z-plane move is a slice-view concept, and
-    // the volume path's proxy residency keys on T in ways this compact patch is
-    // deliberately not trying to cover. Volume T changes fall through to the
-    // full rebuild.
     const scalars = this.lastRebuildScalars;
     const mode = ctx.mode as "slice" | "volume";
-    if (mode !== "slice" || scalars.mode !== "slice") return false;
+    if (mode !== scalars.mode) return false;
 
     // C, multi-channel, layer order, and the visible-dataset set must be
     // unchanged — each changes the member shape or roster and needs a real
@@ -1635,7 +1662,12 @@ export class TickCoordinator {
 
     const newT = ctx.scene.t();
     const newZ = ctx.scene.z();
-    let anyScrub = newT !== scalars.t;
+    const tChanged = newT !== scalars.t;
+    const zScalarChanged = newZ !== scalars.z;
+    // In volume mode a Z move changes the 3D sampling geometry. The retained
+    // descriptor/roster proof is valid only for a timepoint-only scrub.
+    if (mode === "volume" && (!tChanged || zScalarChanged)) return false;
+    let anyScrub = tChanged || (mode === "slice" && zScalarChanged);
 
     // Per-dataset precheck (no side effects). Prove for every planned dataset:
     // still visible; non-display settings fingerprint unchanged (label state,
@@ -1668,8 +1700,13 @@ export class TickCoordinator {
       const zRange = readZRangeVox(ctx.scene, dsId);
       const oldWidth = sig.zRangeVox[1] - sig.zRangeVox[0];
       const newWidth = zRange[1] - zRange[0];
-      if (newWidth !== oldWidth) return false;
-      if (zRange[0] !== sig.zRangeVox[0] || zRange[1] !== sig.zRangeVox[1]) {
+      const widthTolerance = 1e-9 * Math.max(1, Math.abs(oldWidth), Math.abs(newWidth));
+      if (Math.abs(newWidth - oldWidth) > widthTolerance) return false;
+      const rangeMoved =
+        Math.abs(zRange[0] - sig.zRangeVox[0]) > widthTolerance ||
+        Math.abs(zRange[1] - sig.zRangeVox[1]) > widthTolerance;
+      if (mode === "volume" && rangeMoved) return false;
+      if (mode === "slice" && rangeMoved) {
         anyScrub = true;
       }
 
@@ -1693,13 +1730,11 @@ export class TickCoordinator {
     // requests are re-emitted from the cached active set + a snapshot whose only
     // difference is the new selection (and, on a Z move, the new z-range read
     // via one cheap `visible_region` call). This skips the O(N)
-    // `view_query`/`member_positions` serde AND `assignModes` — the dominant
-    // remaining boundary cost — while producing exactly the requests a full
-    // `plan()` would for the new T/Z. `assetCatalog.snapshot()` is dataset-
-    // agnostic, so one shared snapshot serves every dataset's proxy budgeting.
+    // `view_query` decoding / `member_positions` serde AND mode assignment —
+    // the dominant remaining boundary work — while producing exactly the
+    // requests a full `plan()` would for the new T/Z.
     const scrubRequestEpoch = currentEpochs.request + 1;
     const scrubEpochs: SceneEpochs = { ...currentEpochs, request: scrubRequestEpoch };
-    const assetCatalog = ctx.assetCatalog.snapshot();
     interface ScrubPlanned {
       dsId: string;
       dsSettings: DatasetSettings | undefined;
@@ -1708,20 +1743,26 @@ export class TickCoordinator {
       selection: SelectionState;
       activeSet: ActiveSetEntry[];
       requests: ChunkRequest[];
-      proxyRequests: ProxyRequest[];
       stats: PlanStats;
     }
     const planned: ScrubPlanned[] = perDataset.map((pd) => {
       const visibleRegion: VisibleRegion = {
         ...pd.cachedRegion,
         zRangeVox: pd.newZRange,
+        sortCenterVox: pd.cachedRegion.sortCenterVox === null
+          ? null
+          : [
+              pd.cachedRegion.sortCenterVox[0],
+              pd.cachedRegion.sortCenterVox[1],
+              (pd.newZRange[0] + pd.newZRange[1]) / 2,
+            ],
       };
       const selection: SelectionState = {
         t: newT,
         c: sceneC,
         z: newZ,
         visibleChannels: pd.visibleChannels,
-        renderMode: "slice",
+        renderMode: mode,
         interactionState: "idle",
       };
       const snapshot: PlanningSnapshot = {
@@ -1730,11 +1771,10 @@ export class TickCoordinator {
         entities: pd.entities,
         visibleRegion,
         selection,
-        assetCatalog,
         minimapPending: minimapPendingFetch,
       };
       const stats = emptyPlanStats();
-      const { requests, proxyRequests } = emitPlanRequests(
+      const { requests } = emitPlanRequests(
         pd.activeSet, snapshot, stats, planningConfig,
       );
       return {
@@ -1745,41 +1785,51 @@ export class TickCoordinator {
         selection,
         activeSet: pd.activeSet,
         requests,
-        proxyRequests,
         stats,
       };
     });
 
-    // Budget proxy residency once (fresh keys for the new selection).
-    const proxyResidency = planProxyResidencyForInputs({
-      inputs: planned.map((p) => ({
-        snapshot: p.snapshot,
+    const scrubPlans = planned.map((p) => ({
+      datasetId: p.dsId,
+      dsSettings: p.dsSettings,
+      selection: p.selection,
+      plan: {
+        requests: p.requests,
         activeSet: p.activeSet,
-        proxyRequests: p.proxyRequests,
-      })),
-      config: planningConfig,
+        epochs: scrubEpochs,
+        stats: p.stats,
+        nextState: { previousActiveSet: p.activeSet },
+      },
+    }));
+    if (import.meta.env.DEV) {
+      if (mode !== scalars.mode || multiChannel !== scalars.multiChannel) {
+        throw new Error(
+          "Selection patch would change retained cold-state mode/member shape; full cold state required",
+        );
+      }
+      for (const p of planned) {
+        const signature = this.lastRebuildByDataset.get(p.dsId);
+        if (
+          !signature ||
+          !numberArraysEqual(signature.visibleChannels, p.selection.visibleChannels)
+        ) {
+          throw new Error(
+            `Selection patch for ${p.dsId} would change visible channels; full cold state required`,
+          );
+        }
+      }
+    }
+    this.planAndSubmit({
+      ctx,
+      planned: scrubPlans,
+      minimapPendingFetch,
+      planningConfig,
+      mode,
     });
-    const proxyRequestsByDataset = new Map<string, ProxyRequest[]>();
-    for (const req of proxyResidency.admittedProxyRequests) {
-      const list = proxyRequestsByDataset.get(req.datasetId) ?? [];
-      list.push(req);
-      proxyRequestsByDataset.set(req.datasetId, list);
-    }
-    const desiredProxyKeysByDataset = new Map<string, Set<string>>();
-    for (const key of proxyResidency.desiredProxyKeys) {
-      const datasetId = key.split("|", 1)[0];
-      const set = desiredProxyKeysByDataset.get(datasetId) ?? new Set<string>();
-      set.add(key);
-      desiredProxyKeysByDataset.set(datasetId, set);
-    }
 
-    // Commit. Advance the fetch lifecycle exactly once (the delivery ledger is
-    // cleared because the worker repacks its atlas indirection for the new T/Z,
-    // so the new plane/timepoint's chunks must be re-delivered), then per
-    // dataset: submit the new fetch, push the compact selection patch, and
-    // refresh carry-forward state so a later full rebuild is coherent. The
-    // active set is unchanged, so `planningState` is deliberately left as-is.
-    ctx.cpuCache.onPlanRebuildStart();
+    // Commit per-dataset selection messages and carry-forward only after the
+    // complete workspace fetch plan was accepted. The active set is unchanged,
+    // so `planningState` is deliberately left as-is.
     for (const p of planned) {
       this.requestEpoch = scrubRequestEpoch;
       this._lastRequests = p.requests;
@@ -1789,35 +1839,9 @@ export class TickCoordinator {
         ctx, p.dsId, p.selection, p.visibleRegion, p.requests, this.requestEpoch,
       );
 
-      const budgetedProxyRequests = proxyRequestsByDataset.get(p.dsId) ?? [];
       this._lastPlanByDataset.set(p.dsId, {
         requests: p.requests,
         activeSet: p.activeSet,
-        epochs: scrubEpochs,
-        proxyRequests: budgetedProxyRequests,
-        stats: p.stats,
-        nextState: { previousActiveSet: p.activeSet },
-      });
-
-      // Categorical label overlays follow the plane/timepoint too — merge their
-      // synthesized requests exactly as the full rebuild does.
-      const labelRequests = computeLabelChunkRequests({
-        datasetId: p.dsId,
-        manifest: ctx.datasets.get(p.dsId)!.manifest,
-        t: p.selection.t,
-        z: p.selection.z,
-        labelSettings: p.dsSettings?.label_settings,
-        mode,
-      });
-      const requestsWithLabels =
-        labelRequests.length > 0
-          ? [...p.requests, ...labelRequests]
-          : p.requests;
-
-      ctx.cpuCache.submit({
-        requests: requestsWithLabels,
-        activeSet: p.activeSet,
-        proxyRequests: budgetedProxyRequests,
         epochs: scrubEpochs,
         stats: p.stats,
         nextState: { previousActiveSet: p.activeSet },
@@ -1829,7 +1853,6 @@ export class TickCoordinator {
         currentT: p.selection.t,
         currentZ: p.selection.z,
         visibleRegion: p.visibleRegion,
-        desiredProxyKeys: desiredProxyKeysByDataset.get(p.dsId) ?? new Set(),
         epochs: scrubEpochs,
       });
 
@@ -1847,7 +1870,7 @@ export class TickCoordinator {
     const outputEpochs: SceneEpochs = { ...currentEpochs, request: this.requestEpoch };
     this.lastEpochs = outputEpochs;
     this.cachedResult = { ...this.cachedResult, settings, epochs: outputEpochs };
-    this.lastRebuildScalars = { ...scalars, t: newT };
+    this.lastRebuildScalars = { ...scalars, t: newT, z: newZ };
     this.lastRebuildAt = performance.now();
     this.pendingDeferredRebuild = false;
     return true;
@@ -1860,8 +1883,8 @@ export class TickCoordinator {
    * dataset is not registered (the scene reports `null`, exactly as the full
    * `view_query` path skips it).
    *
-   * Called only from the full-rebuild path and only when coarseDetail is
-   * enabled (the caller's gate). `deps` is the same manifest/placement join
+   * Called only from the full-rebuild path. `deps` is the same
+   * manifest/placement join
    * the full builder uses; `inputsRef` is the identity of the cached
    * snapshot-inputs entry `deps` came from (the cursor's manifest/placement
    * basis).
@@ -1876,14 +1899,15 @@ export class TickCoordinator {
    * manifest-derived fields match a fresh build. Continuous fields
    * (`importance` / `projectedDiagonalPx` / `projectedAreaPx2` /
    * `centroidWorld`) may be stale on a carried-over record — intended, and
-   * never a mode/LOD input under coarseDetail.
+   * never a mode/LOD input in the coarse/detail-only planner (locked by the
+   * projected-size band invariance test in `planning/modes.test.ts`).
    */
   private foldViewDeltaEntities(
     scene: TickContext["scene"],
     datasetId: string,
     deps: SnapshotEntityDeps,
     inputsRef: object,
-  ): EntitySnapshot[] | "skip" {
+  ): FoldedEntities | "skip" {
     // Scene-identity guard. A reconstructed scene starts with an empty Rust
     // cursor, so any cursor held here belongs to a scene that no longer
     // exists; drop all of them before folding against the new scene.
@@ -1892,15 +1916,14 @@ export class TickCoordinator {
       this.viewDeltaScene = scene;
     }
 
-    const deltaJson = scene.view_query_delta(datasetId);
+    const delta = decodeViewQueryDelta(scene.view_query_delta(datasetId));
     // Advancing the Rust cursor and skipping are mutually exclusive: a `null`
     // means the dataset is unknown and the Rust cursor was NOT advanced, so
     // dropping our cursor keeps the two consistent for a later re-add.
-    if (!deltaJson || deltaJson === "null") {
+    if (delta === null) {
       this.viewDeltaCursor.delete(datasetId);
       return "skip";
     }
-    const delta = JSON.parse(deltaJson) as ViewQueryDeltaJson;
 
     const detailOverride = deps.dsSettings?.detail_level_override ?? null;
     const existing = this.viewDeltaCursor.get(datasetId);
@@ -1952,7 +1975,42 @@ export class TickCoordinator {
         basisDetailOverride: detailOverride,
         map: next,
       });
-      return [...next.values()];
+      let entityDelta: FoldedEntityDelta | undefined;
+      if (prev !== null && "Delta" in delta) {
+        // Retain/remove plus descriptor upserts is order-preserving when no
+        // entity entered and every changed row stays in the same active-set
+        // partition. Entered rows can be inserted inside an existing tile
+        // group (not necessarily appended globally), and a visible/invisible
+        // transition moves between planner partitions; those ambiguous cases
+        // deliberately fall back to buildColdStateDelta's full rediff/order.
+        const orderClass = (entity: EntitySnapshot): "tile" | "invisible" | "none" =>
+          !entity.visible
+            ? "invisible"
+            : entity.kind === "Group"
+              ? "none"
+              : "tile";
+        const safeChanged = delta.Delta.changed.every((row) => {
+          const before = prev.get(row.image_id);
+          const after = next.get(row.image_id);
+          return before !== undefined && after !== undefined &&
+            orderClass(before) === orderClass(after);
+        });
+        if (delta.Delta.entered.length === 0 && safeChanged) {
+          const unique = (ids: Iterable<string>): string[] => [...new Set(ids)];
+          entityDelta = {
+            upsertEntities: delta.Delta.changed
+              .map((row) => next.get(row.image_id))
+              .filter((entity): entity is EntitySnapshot => entity !== undefined),
+            removedEntityIds: unique(
+              delta.Delta.left
+                .map((imageId) => prev.get(imageId)?.entityId)
+                .filter((id): id is string => id !== undefined),
+            ),
+            appendedEntityIds: [],
+          };
+        }
+      }
+      return { entities: [...next.values()], entityDelta };
     } catch (e) {
       this.viewDeltaCursor.delete(datasetId);
       throw e;
@@ -1971,11 +2029,8 @@ export class TickCoordinator {
     datasetId: string,
     deps: SnapshotEntityDeps,
   ): Map<string, EntitySnapshot> | null {
-    const vqJson = scene.view_query(datasetId);
-    const vq = JSON.parse(vqJson) as
-      | { visible_entities?: ViewQueryEntityJson[] }
-      | null;
-    if (!vq || !vq.visible_entities) return null;
+    const vq = decodeViewQuery(scene.view_query(datasetId));
+    if (!vq) return null;
     const map = new Map<string, EntitySnapshot>();
     for (const row of vq.visible_entities) {
       map.set(row.image_id, makeEntitySnapshot(row, deps));
@@ -2031,46 +2086,4 @@ export class TickCoordinator {
     return this.pendingDeferredRebuild;
   }
 
-  /**
-   * Debug helper: synthesize a single-proxy `RequestPlan` and submit it
-   * to CpuCache. Exposed on `window.__orch.tickCoordinator` by App.tsx
-   * for dev-console invocation.
-   */
-  requestTestProxy(
-    cpuCache: CpuCache,
-    datasetId: string,
-    entityId: string,
-    imageId: string,
-    kind: "GroupProxy3D" | "TileProxy3D",
-    t: number,
-    c: number,
-  ): void {
-    const proxyRequest: ProxyRequest = {
-      datasetId,
-      entityId,
-      imageId,
-      kind,
-      t,
-      c,
-      priority: 0,
-    };
-    const epochs: SceneEpochs = this.lastEpochs ?? {
-      content: 0,
-      layout: 0,
-      view: 0,
-      selection: 0,
-      asset: 0,
-      request: 0,
-    };
-    cpuCache.submit({
-      requests: [],
-      activeSet: [],
-      proxyRequests: [proxyRequest],
-      epochs,
-      stats: emptyPlanStats(),
-      // submit() doesn't read nextState; placeholder so the literal
-      // satisfies RequestPlan's contract.
-      nextState: { previousActiveSet: [] },
-    });
-  }
 }

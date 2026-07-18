@@ -57,16 +57,18 @@ You will need:
       `ManagedCertificate`, AKS Application Gateway listener certs.
 - **A container image** for lucida. Either:
     - Pull a published release image (recommended once releases are tagged):
-      `<YOUR-REGISTRY>/lucida:<YOUR-TAG>`. Adopters generally re-tag into
-      their own registry for promotion control.
+      `<YOUR-REGISTRY>/lucida:<YOUR-TAG>@sha256:<YOUR-DIGEST>`. Adopters
+      generally re-tag into their own registry for promotion control, then pin
+      the resulting digest so a later tag move cannot change a rollout.
     - Build your own from a checkout: `docker build -t my-registry/lucida:v0 .`
       then push. The Dockerfile is at the repo root.
 
 You do NOT need:
 
-- A relational database (lucida uses SQLite on a PVC; see
-  [ADR-0015](../../wiki/decisions/0015-server-stored-bookmarks-and-auth-seam.md)).
-- A Redis or other cache (the proxy cache is on the same PVC).
+- A relational database service (lucida keeps sessions, workspaces, and saved
+  views in one SQLite database on a PVC; see
+  [Workspaces](../../wiki/systems/subsystems/workspaces.md)).
+- A Redis or other cache (generated coarse data uses the same PVC).
 - A separate static-asset host (lucida-server serves the SPA itself; see
   [ADR-0020](../../wiki/decisions/0020-single-image-with-servedir.md)).
 
@@ -131,8 +133,9 @@ every `<UPPERCASE-WITH-DASHES>` placeholder. Checklist:
 
 - [ ] `<YOUR-NAMESPACE>` — the namespace from step 3. Appears in every
       manifest's `metadata.namespace`.
-- [ ] `<YOUR-REGISTRY>/lucida:<YOUR-TAG>` — the image to deploy. Pin a
-      specific version tag (`v0.1.0`), not `latest`. In `deployment.yaml`.
+- [ ] `<YOUR-REGISTRY>/lucida:<YOUR-TAG>@sha256:<YOUR-DIGEST>` — the image to
+      deploy. Use a specific version tag (`v0.1.0`) plus the digest published
+      for that release, never `latest`. In `deployment.yaml`.
 - [ ] `<YOUR-OAUTH-CLIENT-ID>` — the Client ID from step 2. In
       `deployment.yaml`.
 - [ ] `<YOUR-EXTERNAL-HOSTNAME>` — your DNS hostname. Appears in
@@ -174,6 +177,9 @@ etc.). Pick the snippet matching your cluster and apply it in your fork
 1. Create or pick a Google Service Account (GSA). Grant it the IAM roles
    your deployment needs (e.g., `roles/storage.objectViewer` for GCS dataset
    reads).
+   Also set `LUCIDA_SOURCE_GCS_BUCKETS` to the exact permitted buckets and
+   `LUCIDA_SOURCE_ALLOW_AMBIENT_CLOUD_CREDENTIALS=true` in your Deployment;
+   IAM alone does not opt a source into Lucida's deny-by-default trust policy.
 2. Allow the KSA to impersonate the GSA:
 
        gcloud iam service-accounts add-iam-policy-binding <GSA-EMAIL> \
@@ -271,11 +277,11 @@ fail-fast startup errors:
 - `LUCIDA_GOOGLE_CLIENT_ID is required` — Secret not found / wrong key /
   wrong Secret name. Verify with
   `kubectl -n <YOUR-NAMESPACE> get secret lucida-google-oauth -o yaml`.
-- File-permission errors on `/var/lib/lucida/lucida.db` — your PodSecurity
-  profile + the runtime image's user are mismatched. The
-  `debian:bookworm-slim` runtime runs as root by default; if your cluster
-  enforces `restricted`, add `securityContext` with a non-root user to the
-  pod template (and ensure the volume's filesystem permissions match).
+- File-permission errors on `/var/lib/lucida/lucida.db` — the image and reference
+  manifest run as UID/GID `10001` with `runAsNonRoot`, a read-only root
+  filesystem, and PVC ownership supplied through `fsGroup: 10001`. Confirm your
+  storage driver honors `fsGroup`, or pre-provision the volume with matching
+  ownership. Do not solve this by restoring root or privilege escalation.
 
 **Sign-in flow.** Visit `https://<YOUR-EXTERNAL-HOSTNAME>` in a browser.
 Click sign-in. You should be redirected to Google, complete the consent
@@ -285,10 +291,18 @@ TLS-termination cookie gotcha — verify `LUCIDA_COOKIE_SECURE=always` is set
 in the manifest (it is, in the upstream template) and that the redirect
 URI registered with Google exactly matches what lucida posts.
 
-**Open a dataset.** The simplest smoke test is to open a known-good public
-URL (your team's standard dataset; or any OME-Zarr you have read access to).
-If `LUCIDA_DATA_DIR` is set, you can also browse that directory via the UI's
-file picker.
+**Open a dataset.** If `LUCIDA_DATA_DIR` is set, browse a known-good dataset
+under that directory with the UI's file picker. For an HTTP(S) smoke source,
+first put its exact hostname in `LUCIDA_SOURCE_HTTP_HOSTS`; private/LAN
+destinations additionally need an admitted `LUCIDA_SOURCE_HTTP_CIDRS` range.
+Standard IPv6 translation/transition addresses are always rejected. If your
+network uses an RFC 6052 network-specific translation prefix, add it to the
+denylist `LUCIDA_SOURCE_HTTP_IPV6_TRANSLATION_CIDRS`; arbitrary prefixes cannot
+be inferred from an IPv6 address itself.
+For `gs://` or `s3://`, configure the exact bucket allowlist plus
+`LUCIDA_SOURCE_ALLOW_AMBIENT_CLOUD_CREDENTIALS=true`. A public URL or a valid
+cloud identity is not sufficient on its own: source trust remains
+deny-by-default.
 
 ## 8. First-time admin bootstrap
 
@@ -318,10 +332,15 @@ admin changes around restarts.
 Two pieces of state live on the PVC:
 
 - **SQLite database** at `/var/lib/lucida/lucida.db` (plus `lucida.db-wal`
-  and `lucida.db-shm` from WAL journal mode). Sessions, bookmarks, and
-  any future server-stored state. Small (typically MB, not GB).
-- **Proxy on-disk cache** at `/var/lib/lucida/proxy-cache/`. Recomputable
-  from upstream sources; backing it up is convenience, not necessity.
+  and `lucida.db-shm` from WAL journal mode). Sessions, workspaces, saved views,
+  and any future server-stored state. Small (typically MB, not GB).
+- **Generated-coarse cache** at `/var/lib/lucida/generated-coarse/`. Recomputable
+  from upstream sources; backing it up is convenience, not necessity. The
+  reference deployment caps it at 8 GiB, preserving nominal headroom on the
+  shared 50 GiB PVC for authoritative SQLite/WAL state.
+- **Retired proxy cache** at `/var/lib/lucida/proxy-cache/`. New releases do not
+  write here. It remains named by deprecated `LUCIDA_PROXY_CACHE_DIR` only so
+  upgrade cleanup can remove artifacts left by older releases.
 
 **SQLite-WAL gotcha.** The WAL file (`lucida.db-wal`) is part of the
 authoritative state — copying only `lucida.db` while writes are in flight
@@ -348,25 +367,104 @@ data. Lucida treats it as read-only.
 
 ## 10. Updating to a new release
 
-Pin the image tag, not `latest`. Promotion is a manifest edit:
+Pin a readable release tag and its immutable digest, not `latest`. Promotion is
+a manifest edit, but an upgrade is also a data operation.
 
-1. Identify the new release tag (e.g., `v0.2.0`) from the upstream
-   release-please flow.
-2. Re-tag into your registry (recommended) and update
-   `deployment.yaml` accordingly.
-3. `kubectl apply -f k8s/deployment.yaml`. The Deployment uses the
-   `Recreate` strategy (single replica + RWO PVC), so the old pod is
-   terminated before the new one starts. Brief downtime is expected during
-   image pull + readiness convergence (typically tens of seconds).
-4. Verify post-rollout: `/readyz` returns 200, sign-in still works.
+**Mandatory migration checkpoint.** The upgrade from the released v0.10
+short source IDs performs a one-way short-ID -> full-digest rewrite the first
+time the new server opens SQLite. The v0.10 binary cannot safely use that
+rewritten database: its short-ID lookup can collide with the new
+`canonical_url` uniqueness contract. Before *any* new-image pod or container
+starts, quiesce the old server, take a WAL-safe backup/snapshot described in
+§9, and verify that backup can be read (preferably by restoring it to a
+disposable volume and running `PRAGMA integrity_check`). Record the previous
+image digest and backup/snapshot identifier together. This checkpoint is
+required even when the release notes describe the application rollout as
+otherwise routine.
 
-If a release ships breaking config changes, the release notes call them
-out. Read before applying.
+### Kubernetes upgrade order
 
-If you need to roll back: `kubectl rollout undo deployment/lucida -n
-<YOUR-NAMESPACE>` reverts to the previous ReplicaSet. SQLite migrations,
-when they exist, are forward-only — a rollback past a migration is not
-supported and may corrupt state.
+1. Identify the new release tag and digest. Record the currently running image
+   from `kubectl -n <YOUR-NAMESPACE> get deploy lucida -o
+   jsonpath='{.spec.template.spec.containers[0].image}'`.
+2. Quiesce the old writer and wait until its pod is gone:
+
+       kubectl -n <YOUR-NAMESPACE> scale deploy/lucida --replicas=0
+       kubectl -n <YOUR-NAMESPACE> wait --for=delete pod \
+         -l app.kubernetes.io/name=lucida --timeout=120s
+
+3. Create a full PVC snapshot (or an equivalent offline copy containing
+   `lucida.db`, `lucida.db-wal`, and `lucida.db-shm`) and wait for the storage
+   backend to report it ready. Verify a restored disposable copy before
+   proceeding. **Do not start the new image without this checkpoint.**
+4. Re-tag into your registry if desired, update `deployment.yaml` to the new
+   `tag@sha256:digest`, restore `replicas: 1`, and apply it. `Recreate` keeps the
+   RWO writer slot single-owned:
+
+       kubectl apply -f k8s/deployment.yaml
+       kubectl -n <YOUR-NAMESPACE> rollout status deploy/lucida --timeout=180s
+
+5. Clear recomputable active and legacy cache roots with the new binary. This
+   leaves `lucida.db{,-wal,-shm}` untouched:
+
+       kubectl -n <YOUR-NAMESPACE> exec deploy/lucida -- \
+         lucida-server clear-proxy-cache
+
+6. Verify `/readyz`, sign-in, dataset reopen, and the running image digest.
+
+### Compose upgrade and UID 10001 volume migration
+
+The current runtime remains non-root (`10001:10001`). Volumes written by an
+older root-running image need a one-time ownership migration; the profile-gated
+`lucida-volume-migrate` service has only `CHOWN` and `DAC_OVERRIDE`, no network,
+a read-only root filesystem, and the data volume as its sole writable mount.
+It deliberately excludes the operator-managed `/var/lib/lucida/data` tree,
+refuses symlinked application roots, and verifies that every existing
+application path has the same device ID as `/var/lib/lucida` before changing
+any ownership. A separately mounted database or cache path is rejected rather
+than treated as a new `find -xdev` traversal root. Once validation succeeds,
+the helper stays on the volume filesystem and changes descendant symlink
+ownership without following symlink targets.
+
+1. Record the previous image digest, stop the old writer, and confirm it is not
+   running:
+
+       docker compose stop lucida
+       docker compose ps lucida
+
+2. Snapshot/archive the named volume (or bind mount) while it is quiescent,
+   including all three `lucida.db{,-wal,-shm}` files, and verify a disposable
+   restore with SQLite `PRAGMA integrity_check`. Do not continue on a missing
+   or unverified backup.
+3. Update the Compose image to the new tag+digest. Run only the one-shot
+   ownership helper, explicitly acknowledging that steps 1-2 completed:
+
+       LUCIDA_VOLUME_MIGRATION_ACK=backup-complete-and-lucida-stopped \
+         docker compose --profile volume-migration run --rm --no-deps \
+         lucida-volume-migrate
+
+   Bind-mount adopters must give the helper's `10001:10001` ownership to the
+   same application paths or perform the equivalent host-side migration. The
+   helper intentionally refuses a separate-device application child; migrate
+   such a child independently while Lucida is stopped, then
+   verify every application root is writable by `10001:10001` before restart.
+4. Start the non-root runtime (its first SQLite open may perform the source-ID
+   rewrite), wait for health, then clear recomputable cache roots:
+
+       docker compose up -d lucida
+       docker compose exec lucida lucida-server clear-proxy-cache
+       docker compose ps lucida
+
+### Rollback past the source-ID migration
+
+Never use binary-only `kubectl rollout undo` or merely put the previous image
+back after the new server has opened the database. To roll back across this
+migration: quiesce the new server, restore the verified **pre-upgrade**
+PVC/volume (or its WAL-safe SQLite backup), select the recorded previous image
+digest, and only then restart. A rollback that keeps the migrated database is
+unsupported: it requires the previous image **and** restoring the pre-upgrade database/volume.
+Forward-only releases after this boundary follow the same rule
+whenever their release notes identify a data migration.
 
 ## 11. Branch protection and Actions setup (forks)
 

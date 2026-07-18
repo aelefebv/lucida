@@ -3,6 +3,7 @@
 // block boundary that promotes/wraps non-FetchError throws.
 
 import { debugLog } from "../../debug/logging.ts";
+import type { FailureDescriptor } from "../../failureContract.ts";
 
 /**
  * - `permanent`: same failure on retry — record + surface, no retry.
@@ -24,22 +25,29 @@ export class FetchError extends Error {
    * cannot masquerade as a dead source. Independent of retry classification.
    */
   readonly serverReported: boolean;
+  /** Stable protocol cause when the server supplied one. */
+  readonly failure: FailureDescriptor | null;
 
   constructor(
     message: string,
-    opts: { kind: FetchErrorKind; serverReported?: boolean; cause?: unknown },
+    opts: {
+      kind: FetchErrorKind;
+      serverReported?: boolean;
+      failure?: FailureDescriptor | null;
+      cause?: unknown;
+    },
   ) {
     super(message, opts.cause !== undefined ? { cause: opts.cause } : undefined);
     this.kind = opts.kind;
     this.serverReported = opts.serverReported ?? false;
+    this.failure = opts.failure ? { ...opts.failure } : null;
     this.name = "FetchError";
   }
 }
 
 /**
- * Map an arbitrary throw into a `FetchError`. Untyped `Error`s are
- * classified by message substring (`404`/`malformed` → permanent;
- * else transient) and logged so they can be migrated to typed throws.
+ * Map an arbitrary throw into a `FetchError`. Untyped errors are conservatively
+ * retryable and logged for migration; display text never determines category.
  */
 export function classifyFetchError(err: unknown): FetchError {
   if (err instanceof FetchError) {
@@ -49,13 +57,11 @@ export function classifyFetchError(err: unknown): FetchError {
     return new FetchError(err.message || "Aborted", { kind: "abort", cause: err });
   }
   if (err instanceof Error) {
-    const isPermanent = err.message.includes("404") || err.message.includes("malformed");
-    const kind: FetchErrorKind = isPermanent ? "permanent" : "transient";
     debugLog("cache", "cache.untyped_fetch_error", {
       message: err.message,
-      classifiedAs: kind,
+      classifiedAs: "transient",
     });
-    return new FetchError(err.message, { kind, cause: err });
+    return new FetchError(err.message, { kind: "transient", cause: err });
   }
   return new FetchError(String(err), { kind: "transient", cause: err });
 }

@@ -10,6 +10,9 @@ import {
   type WorkspaceRole,
   type WorkspaceSharingSettings,
 } from "./workspaceApi.ts";
+import { useModalDialog } from "./hooks/useModalDialog.ts";
+import { useLatestOperation } from "./hooks/useLatestOperation.ts";
+import { OperationStatus } from "./components/OperationStatus.tsx";
 
 interface Props {
   workspaceId: string;
@@ -21,118 +24,210 @@ const memberRoles: WorkspaceRole[] = ["viewer", "editor", "owner"];
 const linkRoles: Array<Exclude<WorkspaceRole, "owner">> = ["viewer", "editor"];
 
 export function WorkspaceSharingDialog({ workspaceId, open, onClose }: Props) {
+  const [reloadKey, setReloadKey] = useState(0);
+  if (!open) return null;
+  return (
+    <WorkspaceSharingDialogContent
+      key={`${workspaceId}:${reloadKey}`}
+      workspaceId={workspaceId}
+      onClose={onClose}
+      onRetry={() => setReloadKey((key) => key + 1)}
+    />
+  );
+}
+
+interface ContentProps {
+  workspaceId: string;
+  onClose: () => void;
+  onRetry: () => void;
+}
+
+/**
+ * A load attempt is a fresh component instance. Re-keying on Retry (and
+ * naturally unmounting while closed) gives loading/error/settings state a
+ * single lifecycle instead of synchronously resetting several state cells in
+ * an effect whenever the dialog reopens.
+ */
+function WorkspaceSharingDialogContent({ workspaceId, onClose, onRetry }: ContentProps) {
   const [settings, setSettings] = useState<WorkspaceSharingSettings | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<WorkspaceRole>("viewer");
+  const { dialogRef, onKeyDown } = useModalDialog({ open: true, onClose });
+  const {
+    state: operationState,
+    begin: beginOperation,
+    dismiss: dismissOperation,
+    isPending: isOperationPending,
+    hasPending,
+  } = useLatestOperation();
+  const loading = settings === null && operationState.phase !== "error";
+  const saving = hasPending && !isOperationPending("load:sharing");
 
   useEffect(() => {
-    if (!open) return;
-    let cancelled = false;
+    const attempt = beginOperation({
+      key: "load:sharing",
+      pendingMessage: "Loading sharing settings…",
+      successMessage: "Sharing settings loaded.",
+      failureMessage: "Could not load sharing settings.",
+      retry: onRetry,
+      replaceActive: true,
+    });
+    if (!attempt) return;
     void getWorkspaceSharing(workspaceId)
       .then((nextSettings) => {
-        if (!cancelled) setSettings(nextSettings);
+        if (attempt.isCurrent()) setSettings(nextSettings);
+        attempt.succeed();
       })
       .catch((e) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
+        attempt.fail(e);
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [open, workspaceId]);
+  }, [onRetry, beginOperation, workspaceId]);
 
   const sortedMembers = useMemo(() => settings?.members ?? [], [settings]);
 
-  const handleAdd = useCallback(async () => {
+  const handleAdd = useCallback(async function addMember() {
     const trimmed = email.trim();
     if (!trimmed) return;
-    setSaving(true);
-    setError(null);
+    const attempt = beginOperation({
+      key: `add:${trimmed.toLocaleLowerCase()}`,
+      pendingMessage: `Adding ${trimmed}…`,
+      successMessage: `Added ${trimmed}.`,
+      failureMessage: `Could not add ${trimmed}.`,
+      retry: () => { void addMember(); },
+    });
+    if (!attempt) return;
     try {
       const member = await addWorkspaceMember(workspaceId, trimmed, role);
-      setSettings((prev) => upsertLocalMember(prev, member));
-      setEmail("");
-      setRole("viewer");
+      if (attempt.isCurrent()) {
+        setSettings((prev) => upsertLocalMember(prev, member));
+        setEmail("");
+        setRole("viewer");
+      }
+      attempt.succeed();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSaving(false);
+      attempt.fail(e);
     }
-  }, [email, role, workspaceId]);
+  }, [email, beginOperation, role, workspaceId]);
 
-  const handleLinkChange = useCallback(async (
+  const handleLinkChange = useCallback(async function changeLinkAccess(
     linkAccess: WorkspaceLinkAccess,
     linkRole: Exclude<WorkspaceRole, "owner">,
-  ) => {
-    setSaving(true);
-    setError(null);
+  ) {
+    const attempt = beginOperation({
+      key: "update:link",
+      pendingMessage: "Updating link access…",
+      successMessage: "Link access updated.",
+      failureMessage: "Could not update link access.",
+      retry: () => { void changeLinkAccess(linkAccess, linkRole); },
+    });
+    if (!attempt) return;
     try {
-      setSettings(await updateWorkspaceLinkAccess(workspaceId, linkAccess, linkRole));
+      const nextSettings = await updateWorkspaceLinkAccess(
+        workspaceId,
+        linkAccess,
+        linkRole,
+      );
+      if (attempt.isCurrent()) {
+        // This endpoint returns the full sharing document, but another
+        // disjoint member mutation may have completed while it was in flight.
+        // Commit only the fields this operation owns so both authoritative
+        // successes remain visible regardless of completion order.
+        setSettings((prev) => prev ? {
+          ...prev,
+          link_access: nextSettings.link_access,
+          link_role: nextSettings.link_role,
+        } : nextSettings);
+      }
+      attempt.succeed();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSaving(false);
+      attempt.fail(e);
     }
-  }, [workspaceId]);
+  }, [beginOperation, workspaceId]);
 
-  const handleMemberRoleChange = useCallback(async (member: WorkspaceMember, nextRole: WorkspaceRole) => {
-    setSaving(true);
-    setError(null);
+  const handleMemberRoleChange = useCallback(async function changeMemberRole(
+    member: WorkspaceMember,
+    nextRole: WorkspaceRole,
+  ) {
+    const attempt = beginOperation({
+      key: `update:member:${member.email.toLocaleLowerCase()}`,
+      pendingMessage: `Updating ${member.email}…`,
+      successMessage: `Updated ${member.email}.`,
+      failureMessage: `Could not update ${member.email}.`,
+      retry: () => { void changeMemberRole(member, nextRole); },
+    });
+    if (!attempt) return;
     try {
       const updated = await updateWorkspaceMemberRole(workspaceId, member.email, nextRole);
-      setSettings((prev) => upsertLocalMember(prev, updated));
+      if (attempt.isCurrent()) {
+        setSettings((prev) => upsertLocalMember(prev, updated));
+      }
+      attempt.succeed();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSaving(false);
+      attempt.fail(e);
     }
-  }, [workspaceId]);
+  }, [beginOperation, workspaceId]);
 
-  const handleRemove = useCallback(async (member: WorkspaceMember) => {
-    setSaving(true);
-    setError(null);
+  const handleRemove = useCallback(async function removeMember(member: WorkspaceMember) {
+    const attempt = beginOperation({
+      key: `remove:${member.email.toLocaleLowerCase()}`,
+      pendingMessage: `Removing ${member.email}…`,
+      successMessage: `Removed ${member.email}.`,
+      failureMessage: `Could not remove ${member.email}.`,
+      retry: () => { void removeMember(member); },
+    });
+    if (!attempt) return;
     try {
       await removeWorkspaceMember(workspaceId, member.email);
-      setSettings((prev) => {
-        if (!prev) return prev;
-        return {
-          ...prev,
-          members: prev.members.filter((m) => m.email !== member.email),
-        };
-      });
+      if (attempt.isCurrent()) {
+        setSettings((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            members: prev.members.filter((m) => m.email !== member.email),
+          };
+        });
+      }
+      attempt.succeed();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSaving(false);
+      attempt.fail(e);
     }
-  }, [workspaceId]);
-
-  if (!open) return null;
+  }, [beginOperation, workspaceId]);
 
   const linkAccess = settings?.link_access ?? "restricted";
   const linkRole = settings?.link_role ?? "viewer";
 
   return (
-    <div className="workspace-share-backdrop" role="presentation" onMouseDown={onClose}>
+    <div className="workspace-share-backdrop" role="presentation">
+      <button
+        type="button"
+        className="workspace-share-backdrop-dismiss"
+        aria-label="Close share dialog"
+        tabIndex={-1}
+        onClick={onClose}
+      />
+      {/* A focus-managed ARIA dialog has no native HTML equivalent; key events
+          own Escape and focus wrapping inside useModalDialog. */}
+      {/* eslint-disable jsx-a11y/no-noninteractive-element-interactions -- focus-managed ARIA dialog */}
       <div
+        ref={dialogRef}
         className="workspace-share-dialog"
         role="dialog"
         aria-modal="true"
-        aria-label="Workspace sharing"
-        onMouseDown={(e) => e.stopPropagation()}
+        aria-labelledby="workspace-share-title"
+        aria-busy={hasPending}
+        tabIndex={-1}
+        onKeyDown={onKeyDown}
       >
         <div className="workspace-share-header">
-          <h2>Share Workspace</h2>
+          <h2 id="workspace-share-title">Share Workspace</h2>
           <button type="button" onClick={onClose}>Close</button>
         </div>
 
-        {error && <div className="workspace-share-error">{error}</div>}
-        {loading && <div className="workspace-share-muted">Loading...</div>}
+        <OperationStatus
+          state={operationState}
+          onDismiss={settings ? dismissOperation : onClose}
+          className="workspace-share-operation"
+        />
 
         {!loading && settings && (
           <>
@@ -176,12 +271,14 @@ export function WorkspaceSharingDialog({ workspaceId, open, onClose }: Props) {
               >
                 <input
                   type="email"
+                  aria-label="Member email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="person@example.com"
                   disabled={saving}
                 />
                 <select
+                  aria-label="Role for new member"
                   value={role}
                   disabled={saving}
                   onChange={(e) => setRole(e.target.value as WorkspaceRole)}
@@ -204,6 +301,7 @@ export function WorkspaceSharingDialog({ workspaceId, open, onClose }: Props) {
                     <span>{member.email}</span>
                   </div>
                   <select
+                    aria-label={`Role for ${member.email}`}
                     value={member.role}
                     disabled={saving}
                     onChange={(e) => {
@@ -229,6 +327,7 @@ export function WorkspaceSharingDialog({ workspaceId, open, onClose }: Props) {
           </>
         )}
       </div>
+      {/* eslint-enable jsx-a11y/no-noninteractive-element-interactions */}
     </div>
   );
 }

@@ -9,11 +9,14 @@ pub(crate) mod mat4;
 pub mod minimap;
 pub mod protocol;
 pub mod query;
+pub mod quota;
 pub mod ray;
 pub mod saved_view;
 pub mod scene;
 pub mod transform;
 pub mod view;
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) mod view_query_binary;
 pub mod view_transform;
 pub mod wasm_log;
 

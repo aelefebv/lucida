@@ -238,6 +238,10 @@ def _summary_web(web: dict[str, Any]) -> dict[str, Any]:
         "ok": bool(web.get("ok")),
         "viewer_png_nonblank": web.get("viewer_png_nonblank"),
         "real_spa_captured": bool(real_spa.get("captured")),
+        "real_spa_ok": bool(real_spa.get("ok")),
+        "device_scale_factors": [
+            arm.get("device_scale_factor") for arm in (real_spa.get("arms") or [])
+        ],
         "error": _error_message(web),
     }
 
@@ -667,15 +671,29 @@ def _render_web_html(web: dict[str, Any] | None, *, out_dir: Path) -> str:
                               title="Overview — fit-to-dataset", required=False,
                               nonblank=overview.get("nonblank")))
     real_spa = web.get("real_spa") or {}
-    if real_spa.get("captured") and real_spa.get("spa_png"):
+    arms = real_spa.get("arms") or []
+    if arms:
+        for arm in arms:
+            dpr = arm.get("device_scale_factor")
+            out.append(_shot_html(
+                arm.get("canvas_png"), out_dir=out_dir,
+                title=f"Required canvas content — DPR{dpr}", required=True,
+                nonblank=arm.get("canvas_png_nonblank"),
+            ))
+            out.append(_shot_html(
+                arm.get("spa_png"), out_dir=out_dir,
+                title=f"Diagnostic full page — DPR{dpr}", required=False,
+                nonblank=arm.get("spa_png_nonblank"),
+            ))
+    elif real_spa.get("captured") and real_spa.get("spa_png"):
         out.append(_shot_html(real_spa.get("spa_png"), out_dir=out_dir,
-                              title="Ceiling — real SPA (Playwright)", required=False,
+                              title="Legacy real SPA (Playwright)", required=False,
                               nonblank=real_spa.get("spa_png_nonblank")))
     out.append("</div>")
 
     if not real_spa.get("captured"):
         out.append(
-            "<p class='count'>Real-SPA ceiling skipped (floor still verified): "
+            "<p class='count'>Required DPR1/2 browser matrix failed: "
             f"{_esc(str(real_spa.get('reason') or 'not attempted'))}</p>"
         )
     out.append("</div></section>")
@@ -877,13 +895,27 @@ def render_markdown(
                 lines.append(_md_shot(overview.get("png"), out_dir, "Overview — fit-to-dataset",
                                       overview.get("nonblank")))
             real_spa = web.get("real_spa") or {}
-            if real_spa.get("captured") and real_spa.get("spa_png"):
-                lines.append(_md_shot(real_spa.get("spa_png"), out_dir, "Ceiling — real SPA (Playwright)",
+            arms = real_spa.get("arms") or []
+            if arms:
+                for arm in arms:
+                    dpr = arm.get("device_scale_factor")
+                    lines.append(_md_shot(
+                        arm.get("canvas_png"), out_dir,
+                        f"Required canvas content — DPR{dpr}",
+                        arm.get("canvas_png_nonblank"),
+                    ))
+                    lines.append(_md_shot(
+                        arm.get("spa_png"), out_dir,
+                        f"Diagnostic full page — DPR{dpr}",
+                        arm.get("spa_png_nonblank"),
+                    ))
+            elif real_spa.get("captured") and real_spa.get("spa_png"):
+                lines.append(_md_shot(real_spa.get("spa_png"), out_dir, "Legacy real SPA (Playwright)",
                                       real_spa.get("spa_png_nonblank")))
             elif not real_spa.get("captured"):
                 lines.append("")
                 lines.append(
-                    f"_Real-SPA ceiling skipped (floor still verified): "
+                    f"_Required DPR1/2 browser matrix failed: "
                     f"{real_spa.get('reason') or 'not attempted'}_"
                 )
         lines.append("")

@@ -32,7 +32,7 @@
  * positioned child of the pin's marker wrapper in each overlay); this component
  * is purely the thread UI and is presentation-position-agnostic.
  */
-import { useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
 import { applyDocumentCommand } from "../applyAndSend.ts";
 import type { Annotation, Comment } from "./annotationDocument.ts";
@@ -43,6 +43,9 @@ import {
 import { useMentionAutocomplete } from "./useMentionAutocomplete.ts";
 import { deriveHandle } from "./annotationParticipants.ts";
 import { buildAnnotationLink } from "../savedView/urlSync.ts";
+import type { RenderLoop } from "../renderLoop.ts";
+import { useFloatingSurfacePlacement } from "./useFloatingSurfacePlacement.ts";
+import "./ThreadPopover.css";
 
 interface Props {
   /** The pin whose thread this is, with its nested `comments`. */
@@ -81,6 +84,10 @@ interface Props {
    * stays a gentle recenter) opts into the author's framing on demand. Optional
    * + defaulted to a no-op so the thread works unwired (e.g. a test harness). */
   onGoToAuthorView?: (pinId: string) => void;
+  frameSignal?: Pick<RenderLoop, "subscribePresentedFrame"> | null;
+  /** Stable focus fallback when the projected marker is clipped, deleted, or
+   * removed with its overlay. Both 2D and 3D hosts already own this canvas. */
+  canvas: HTMLCanvasElement;
 }
 
 /** Stable client-supplied id so the local apply and peers' broadcast converge. */
@@ -100,6 +107,8 @@ export function ThreadPopover({
   onClose,
   mentionCandidates = [],
   onGoToAuthorView,
+  frameSignal,
+  canvas,
 }: Props) {
   // Draft text for a NEW comment in this thread.
   const [draft, setDraft] = useState("");
@@ -116,6 +125,11 @@ export function ThreadPopover({
   // (one comment edits at a time), so a single shared ref always points at the
   // live edit input.
   const editInputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (editingCommentId === null) return;
+    editInputRef.current?.focus();
+    editInputRef.current?.select();
+  }, [editingCommentId]);
   // Whether this pin's delete is armed (two-step confirm). A small piece of
   // local UI state — NOT a modal — that turns the Delete trigger into a
   // Confirm/Cancel. Nothing is emitted until Confirm, so a pin and its whole
@@ -126,6 +140,33 @@ export function ThreadPopover({
   // "Copy failed" if the clipboard write rejects). A tiny per-thread UI signal —
   // not a command, not synced.
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const subscribeToAnchorMotion = useCallback(
+    (listener: () => void) => frameSignal?.subscribePresentedFrame(listener) ?? (() => {}),
+    [frameSignal],
+  );
+  const {
+    surfaceRef: popoverRef,
+    placement,
+    anchorHidden,
+    anchorSeenVisible,
+    maxSize,
+  } = useFloatingSurfacePlacement({
+    parentAnchor: true,
+    coordinateSpace: "anchor",
+    fallbackSize: { width: 240, height: 280 },
+    subscribe: subscribeToAnchorMotion,
+    focusFallbackElement: canvas,
+    restoreFocusOnUnmount: true,
+  });
+
+  // The projected marker can leave the canvas while the thread is open (pan,
+  // zoom, or a 3D camera move). Once the shared placement owner says the
+  // marker's *painted button* is wholly clipped, close the declarative thread
+  // state as well as hiding/inerting this frame. That clears aria-expanded on
+  // the trigger and prevents an edge-clamped ghost dialog from staying active.
+  useEffect(() => {
+    if (anchorHidden && anchorSeenVisible) onClose();
+  }, [anchorHidden, anchorSeenVisible, onClose]);
 
   const mine = pin.author === String(myId);
   const comments = pin.comments ?? [];
@@ -279,38 +320,35 @@ export function ThreadPopover({
   };
 
   return (
+    // Escape is observed on the dialog container as it bubbles from the active
+    // child control; the dialog itself is deliberately not a tab stop.
+    // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
     <div
+      ref={popoverRef}
+      id={`annot-thread-${pin.id}`}
       data-testid={`annot-thread-${pin.id}`}
+      role="dialog"
+      aria-label="Annotation discussion"
+      className="thread-popover"
+      data-floating-surface=""
+      data-floating-safe-region
+      data-anchor-hidden={anchorHidden ? "true" : undefined}
+      hidden={anchorHidden}
+      aria-hidden={anchorHidden || undefined}
+      inert={anchorHidden || undefined}
+      onKeyDown={(event) => {
+        if (event.key === "Escape" && editingCommentId === null && !confirmingDelete) onClose();
+      }}
       style={{
-        position: "absolute",
-        top: 10,
-        left: 10,
-        width: 240,
-        maxHeight: 280,
-        display: "flex",
-        flexDirection: "column",
-        background: "rgba(22,27,34,0.97)",
-        color: "#e6edf3",
-        border: "1px solid #30363d",
-        borderRadius: 8,
-        boxShadow: "0 4px 12px rgba(0,0,0,0.6)",
-        fontSize: 12,
-        pointerEvents: "auto",
-        overflow: "hidden",
+        top: placement.top,
+        left: placement.left,
+        maxWidth: maxSize?.width,
+        maxHeight: maxSize ? `min(17.5rem, ${maxSize.height}px)` : undefined,
       }}
     >
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          padding: "6px 8px",
-          borderBottom: "1px solid #30363d",
-          fontWeight: 600,
-        }}
-      >
+      <div className="thread-popover-header">
         <span>Thread{comments.length > 0 ? ` (${comments.length})` : ""}</span>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div className="thread-popover-actions">
           {/* "Copy link" — a shareable annotation DEEP-LINK
               (`<workspace-url>#a=<pinId>`) to the clipboard (annotation-views
               slice 3). Always present (any pin can be linked) and available to
@@ -322,16 +360,7 @@ export function ThreadPopover({
             onClick={copyLink}
             title="Copy a shareable link to this annotation"
             aria-label="Copy link to this annotation"
-            style={{
-              background: "none",
-              border: "none",
-              color: copyState === "failed" ? "#f85149" : "#58a6ff",
-              cursor: "pointer",
-              fontSize: 12,
-              lineHeight: 1,
-              padding: 0,
-              fontWeight: 600,
-            }}
+            className={`thread-action ${copyState === "failed" ? "danger" : "accent"}`}
           >
             {copyState === "copied"
               ? "Copied!"
@@ -354,16 +383,7 @@ export function ThreadPopover({
               onClick={() => onGoToAuthorView?.(pin.id)}
               title="Go to the view the author had when they placed this pin"
               aria-label="Go to author's view"
-              style={{
-                background: "none",
-                border: "none",
-                color: "#58a6ff",
-                cursor: "pointer",
-                fontSize: 12,
-                lineHeight: 1,
-                padding: 0,
-                fontWeight: 600,
-              }}
+              className="thread-action accent"
             >
               Go to author&rsquo;s view
             </button>
@@ -377,16 +397,7 @@ export function ThreadPopover({
               onClick={requestDeletePin}
               title="Delete pin"
               aria-label="Delete pin"
-              style={{
-                background: "none",
-                border: "none",
-                color: "#f85149",
-                cursor: "pointer",
-                fontSize: 12,
-                lineHeight: 1,
-                padding: 0,
-                fontWeight: 600,
-              }}
+              className="thread-action danger"
             >
               Delete
             </button>
@@ -394,15 +405,7 @@ export function ThreadPopover({
           <button
             onClick={onClose}
             aria-label="Close thread"
-            style={{
-              background: "none",
-              border: "none",
-              color: "#8b949e",
-              cursor: "pointer",
-              fontSize: 14,
-              lineHeight: 1,
-              padding: 0,
-            }}
+            className="thread-action close"
           >
             ×
           </button>
@@ -415,35 +418,18 @@ export function ThreadPopover({
         <div
           role="alertdialog"
           aria-label={`Delete this pin and its ${comments.length} comment${comments.length === 1 ? "" : "s"}?`}
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            gap: 6,
-            padding: "8px",
-            borderBottom: "1px solid #30363d",
-            background: "rgba(248,81,73,0.08)",
-          }}
+          className="thread-delete-confirm"
         >
-          <span style={{ color: "#e6edf3" }}>
+          <span className="thread-delete-message">
             Delete this pin and its {comments.length} comment
             {comments.length === 1 ? "" : "s"}? This can&rsquo;t be undone.
           </span>
-          <div style={{ display: "flex", gap: 6 }}>
+          <div className="thread-delete-actions">
             <button
               data-testid={`pin-delete-confirm-${pin.id}`}
               onClick={confirmDeletePin}
               aria-label={`Confirm delete pin and ${comments.length} comment${comments.length === 1 ? "" : "s"}`}
-              style={{
-                flex: 1,
-                padding: "4px 8px",
-                fontSize: 12,
-                fontWeight: 600,
-                cursor: "pointer",
-                color: "white",
-                background: "#da3633",
-                border: "1px solid #f85149",
-                borderRadius: 4,
-              }}
+              className="thread-delete-button danger"
             >
               Delete {comments.length} comment{comments.length === 1 ? "" : "s"}
             </button>
@@ -451,25 +437,16 @@ export function ThreadPopover({
               data-testid={`pin-delete-cancel-${pin.id}`}
               onClick={cancelDeletePin}
               aria-label="Cancel delete"
-              style={{
-                flex: 1,
-                padding: "4px 8px",
-                fontSize: 12,
-                cursor: "pointer",
-                color: "#e6edf3",
-                background: "transparent",
-                border: "1px solid #30363d",
-                borderRadius: 4,
-              }}
+              className="thread-delete-button"
             >
               Cancel
             </button>
           </div>
         </div>
       )}
-      <div style={{ overflowY: "auto", padding: "4px 0", flex: 1 }}>
+      <div className="thread-comment-list">
         {comments.length === 0 ? (
-          <div style={{ padding: "8px", color: "#8b949e" }}>
+          <div className="thread-comment-empty">
             No comments yet. Start the discussion.
           </div>
         ) : (
@@ -479,12 +456,7 @@ export function ThreadPopover({
             return (
               <div
                 key={c.id}
-                style={{
-                  padding: "4px 8px",
-                  display: "flex",
-                  gap: 6,
-                  alignItems: "baseline",
-                }}
+                className="thread-comment-row"
               >
                 {/* gh #801: a comment author is an opaque per-browser id (#777). Show
                     the SAME short, readable handle they're @-mentioned by
@@ -493,14 +465,7 @@ export function ThreadPopover({
                     stays "you". `title` keeps the full handle on hover. */}
                 <span
                   title={mineComment ? "you" : deriveHandle(c.author)}
-                  style={{
-                    color: "#58a6ff",
-                    fontWeight: 600,
-                    whiteSpace: "nowrap",
-                    maxWidth: 120,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                  }}
+                  className="thread-comment-author"
                 >
                   {mineComment ? "you" : deriveHandle(c.author)}
                 </span>
@@ -514,7 +479,7 @@ export function ThreadPopover({
                         positioned wrapper so the picker floats just above the
                         field (mirroring the add composer). It flexes to fill the
                         comment row where the bare input used to. */}
-                    <div style={{ position: "relative", flex: 1, minWidth: 0 }}>
+                    <div className="thread-edit-field">
                       {/* Edit mention picker (issue #526): only ever open while
                           THIS comment is the one being edited AND a mention is in
                           progress with matches, so only one picker shows at a
@@ -523,29 +488,19 @@ export function ThreadPopover({
                           edit_comment. */}
                       {editMention.open && (
                         <div
+                          id={`mention-picker-edit-${c.id}`}
                           data-testid={`mention-picker-edit-${c.id}`}
                           role="listbox"
                           aria-label="Mention a collaborator"
-                          style={{
-                            position: "absolute",
-                            left: 0,
-                            right: 0,
-                            bottom: "100%",
-                            marginBottom: 4,
-                            maxHeight: 132,
-                            overflowY: "auto",
-                            background: "#161b22",
-                            border: "1px solid #30363d",
-                            borderRadius: 6,
-                            boxShadow: "0 4px 12px rgba(0,0,0,0.6)",
-                            zIndex: 1,
-                          }}
+                          className="thread-mention-picker"
                         >
                           {editMention.matches.map((candidate) => (
                             <button
+                              id={`mention-option-edit-${c.id}-${candidate.id}`}
                               key={candidate.id}
                               type="button"
                               role="option"
+                              aria-selected={candidate.id === editMention.matches[0]?.id}
                               data-testid={`mention-option-${candidate.id}`}
                               // preventDefault on mousedown keeps focus on the
                               // edit input through the click, so its onBlur cancel
@@ -554,19 +509,9 @@ export function ThreadPopover({
                               // mention.
                               onMouseDown={(e) => e.preventDefault()}
                               onClick={() => editMention.pick(candidate.label)}
-                              style={{
-                                display: "block",
-                                width: "100%",
-                                textAlign: "left",
-                                padding: "5px 8px",
-                                fontSize: 12,
-                                background: "none",
-                                border: "none",
-                                color: "#e6edf3",
-                                cursor: "pointer",
-                              }}
+                              className="thread-mention-option"
                             >
-                              <span style={{ color: "#58a6ff", fontWeight: 600 }}>
+                              <span className="thread-mention-mark">
                                 @
                               </span>
                               {candidate.label}
@@ -579,7 +524,13 @@ export function ThreadPopover({
                         type="text"
                         data-testid={`comment-edit-input-${c.id}`}
                         value={editDraft}
-                        autoFocus
+                        role="combobox"
+                        aria-autocomplete="list"
+                        aria-expanded={editMention.open}
+                        aria-controls={editMention.open ? `mention-picker-edit-${c.id}` : undefined}
+                        aria-activedescendant={editMention.open
+                          ? `mention-option-edit-${c.id}-${editMention.matches[0]?.id}`
+                          : undefined}
                         aria-label="Edit comment"
                         onChange={(e) => setEditDraft(e.target.value)}
                         onKeyDown={(e) => {
@@ -620,17 +571,7 @@ export function ThreadPopover({
                           }
                           cancelEdit();
                         }}
-                        style={{
-                          width: "100%",
-                          minWidth: 0,
-                          padding: "2px 4px",
-                          fontSize: 12,
-                          background: "#0d1117",
-                          color: "#e6edf3",
-                          border: "1px solid #30363d",
-                          borderRadius: 4,
-                          boxSizing: "border-box",
-                        }}
+                        className="thread-edit-input"
                       />
                     </div>
                     <button
@@ -643,15 +584,7 @@ export function ThreadPopover({
                       onClick={() => saveEdit(c.id)}
                       title="Save comment"
                       aria-label="Save comment"
-                      style={{
-                        background: "none",
-                        border: "none",
-                        color: "#3fb950",
-                        cursor: "pointer",
-                        fontSize: 12,
-                        lineHeight: 1,
-                        padding: 0,
-                      }}
+                      className="thread-action success"
                     >
                       ✓
                     </button>
@@ -666,19 +599,13 @@ export function ThreadPopover({
                         TEXT (React escapes it), never injected as HTML. A comment
                         with no mention yields a single text segment, so it renders
                         no mention-chip at all. */}
-                    <span style={{ wordBreak: "break-word", flex: 1 }}>
+                    <span className="thread-comment-text">
                       {splitMentionTokens(c.text).map((seg, i) =>
                         seg.kind === "mention" ? (
                           <span
                             key={i}
                             data-testid="mention-chip"
-                            style={{
-                              color: "#58a6ff",
-                              backgroundColor: "rgba(56,139,253,0.15)",
-                              borderRadius: 4,
-                              padding: "0 3px",
-                              fontWeight: 600,
-                            }}
+                            className="thread-mention-chip"
                           >
                             {seg.text}
                           </span>
@@ -694,15 +621,7 @@ export function ThreadPopover({
                           onClick={() => startEdit(c)}
                           title="Edit comment"
                           aria-label="Edit comment"
-                          style={{
-                            background: "none",
-                            border: "none",
-                            color: "#8b949e",
-                            cursor: "pointer",
-                            fontSize: 12,
-                            lineHeight: 1,
-                            padding: 0,
-                          }}
+                          className="thread-action"
                         >
                           ✎
                         </button>
@@ -710,15 +629,7 @@ export function ThreadPopover({
                           onClick={() => removeComment(c.id)}
                           title="Remove comment"
                           aria-label="Remove comment"
-                          style={{
-                            background: "none",
-                            border: "none",
-                            color: "#8b949e",
-                            cursor: "pointer",
-                            fontSize: 12,
-                            lineHeight: 1,
-                            padding: 0,
-                          }}
+                          className="thread-action"
                         >
                           ×
                         </button>
@@ -731,15 +642,7 @@ export function ThreadPopover({
           })
         )}
       </div>
-      <div
-        style={{
-          position: "relative",
-          display: "flex",
-          gap: 4,
-          padding: 6,
-          borderTop: "1px solid #30363d",
-        }}
-      >
+      <div className="thread-composer">
         {/* @-mention picker (issue #526): rendered ONLY while a mention is being
             typed AND at least one candidate matches (an empty/no-match query
             renders nothing — the user can still send the raw text). It floats
@@ -749,29 +652,19 @@ export function ThreadPopover({
             unchanged `add_comment`. */}
         {addMention.open && (
           <div
+            id={`mention-picker-${pin.id}`}
             data-testid={`mention-picker-${pin.id}`}
             role="listbox"
             aria-label="Mention a collaborator"
-            style={{
-              position: "absolute",
-              left: 6,
-              right: 6,
-              bottom: "100%",
-              marginBottom: 4,
-              maxHeight: 132,
-              overflowY: "auto",
-              background: "#161b22",
-              border: "1px solid #30363d",
-              borderRadius: 6,
-              boxShadow: "0 4px 12px rgba(0,0,0,0.6)",
-              zIndex: 1,
-            }}
+            className="thread-mention-picker"
           >
             {addMention.matches.map((candidate) => (
               <button
+                id={`mention-option-add-${pin.id}-${candidate.id}`}
                 key={candidate.id}
                 type="button"
                 role="option"
+                aria-selected={candidate.id === addMention.matches[0]?.id}
                 data-testid={`mention-option-${candidate.id}`}
                 // Keep focus on the input through the click: preventing the
                 // mousedown default stops the input's blur, so `pick`'s refocus
@@ -779,19 +672,9 @@ export function ThreadPopover({
                 // for the next mention.
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => addMention.pick(candidate.label)}
-                style={{
-                  display: "block",
-                  width: "100%",
-                  textAlign: "left",
-                  padding: "5px 8px",
-                  fontSize: 12,
-                  background: "none",
-                  border: "none",
-                  color: "#e6edf3",
-                  cursor: "pointer",
-                }}
+                className="thread-mention-option"
               >
-                <span style={{ color: "#58a6ff", fontWeight: 600 }}>@</span>
+                <span className="thread-mention-mark">@</span>
                 {candidate.label}
               </button>
             ))}
@@ -803,6 +686,13 @@ export function ThreadPopover({
           data-testid={`comment-add-input-${pin.id}`}
           value={draft}
           placeholder="Add a comment…"
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded={addMention.open}
+          aria-controls={addMention.open ? `mention-picker-${pin.id}` : undefined}
+          aria-activedescendant={addMention.open
+            ? `mention-option-add-${pin.id}-${addMention.matches[0]?.id}`
+            : undefined}
           aria-label="Add a comment"
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
@@ -825,26 +715,13 @@ export function ThreadPopover({
               setDraft((cur) => `${cur} `);
             }
           }}
-          style={{
-            flex: 1,
-            minWidth: 0,
-            padding: "4px 6px",
-            fontSize: 12,
-            background: "#0d1117",
-            color: "#e6edf3",
-            border: "1px solid #30363d",
-            borderRadius: 4,
-          }}
+          className="thread-add-input"
         />
         <button
           data-testid={`comment-add-send-${pin.id}`}
           onClick={addComment}
           disabled={!draft.trim()}
-          style={{
-            padding: "4px 8px",
-            fontSize: 12,
-            cursor: draft.trim() ? "pointer" : "default",
-          }}
+          className="thread-send-button"
         >
           Send
         </button>

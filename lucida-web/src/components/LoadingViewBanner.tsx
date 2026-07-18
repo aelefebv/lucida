@@ -54,20 +54,22 @@ export function LoadingViewBanner({ applier }: Props) {
   return (
     <div
       role="status"
+      data-testid="loading-view-banner"
+      data-floating-safe-region
       style={{
         position: "absolute",
         top: 12,
         left: "50%",
         transform: "translateX(-50%)",
-        background: state.anyOpenFailed || hasWarnings ? "#5a3a00" : "#1a3a5a",
-        color: "#fff",
+        background: state.anyOpenFailed || hasWarnings ? "var(--warning-surface)" : "var(--info-surface)",
+        color: "var(--text-primary)",
         padding: "0.5rem 0.875rem",
         borderRadius: 6,
-        border: state.anyOpenFailed || hasWarnings ? "1px solid #b88500" : "1px solid #4080c0",
+        border: state.anyOpenFailed || hasWarnings ? "1px solid var(--warning-border)" : "1px solid var(--info-border)",
         fontSize: "0.85rem",
         zIndex: 50,
         maxWidth: 480,
-        boxShadow: "0 2px 8px rgba(0,0,0,0.35)",
+        boxShadow: "var(--shadow-popover)",
       }}
     >
       <div>
@@ -111,8 +113,8 @@ export function LoadingViewBanner({ applier }: Props) {
             padding: "0.2rem 0.5rem",
             fontSize: "0.75rem",
             background: "transparent",
-            color: "#fff",
-            border: "1px solid #888",
+            color: "var(--text-primary)",
+            border: "1px solid var(--border-strong)",
             borderRadius: 4,
             cursor: "pointer",
           }}

@@ -9,7 +9,6 @@ export {
   CpuCache,
   DEFAULT_MAIN_BUDGET,
   DEFAULT_OVERVIEW_BUDGET,
-  DEFAULT_PROXY_BUDGET,
   DEFAULT_MAX_BYTES_IN_FLIGHT,
   FETCH_CONCURRENCY_MULTIPLIER,
   TRANSIENT_RETRY_DELAY_MS,
@@ -17,11 +16,14 @@ export {
   INTERACTION_MODE_WINDOW,
 } from "./cpuCache.ts";
 export type {
+  DatasetPlanPublication,
+  DatasetPlanDeltaPublication,
+} from "./cpuCache.ts";
+export type {
   CpuCacheConfig,
   EvictionTier,
   ReadyDelivery,
   ReadyChunkDelivery,
-  ReadyProxyDelivery,
   ResidencyTier,
   CacheTelemetry,
   TierResidencyEntry,
@@ -33,15 +35,7 @@ export type {
   ContentSource,
   FetchRequest,
   FetchResult,
-  FetchProxyRequest,
-  FetchProxyResult,
 } from "./contentSource.ts";
-
-export {
-  parseProxyHeader,
-  proxyResponseKey,
-} from "./wireProtocol.ts";
-export type { ProxyHeaderJs } from "./wireProtocol.ts";
 
 export {
   DecodePool,

@@ -5,7 +5,7 @@ description: "From \"the planner decides this chunk is wanted\" to \"this chunk'
 tags: [lucida, flow]
 source_path: wiki/flows/chunk-lifecycle.md
 created: 2026-04-18
-modified: 2026-07-06
+modified: 2026-07-16
 ---
 
 # Flow: Chunk Lifecycle
@@ -16,7 +16,7 @@ From "the planner decides this chunk is wanted" to "this chunk's voxels become p
 
 ### 1. Planning decides "wanted"
 
-[Planning Domain](../systems/subsystems/planning-domain.md) resolves each visible tile/image to an explicit `detail` level and optional `coarse` level. For each visible entity in the active set, it iterates grid cells inside `xyBounds ∩ zRange ∩ frustumPlanes`. Each candidate becomes a tier-labeled `ChunkRequest`. For the detail/proxy/prefetch/overview lanes the priority is `laneOffset + (1-importance)*500 + distance*10` (`computePriority` in `emit.ts`), so the lane offset separates lanes and importance/distance order within a lane. The minimap lane is the exception: it emits each request at bare `minimapLaneOffset` with no importance/distance terms, because minimap chunks are per-dataset rather than per-entity-importance.
+[Planning Domain](../systems/subsystems/planning-domain.md) resolves each visible tile/image to an explicit `detail` level and optional source/generated-ready `coarse` level. For each visible entity in the active set, it iterates grid cells inside `xyBounds ∩ zRange ∩ frustumPlanes`. Each candidate becomes a tier-labeled `ChunkRequest` in one of four lanes: `detail`, `coarse`, `prefetch`, or `minimap`. Detail, coarse, and prefetch priorities are `laneOffset + (1-importance)*importanceWeight + distance*distanceWeight` (`computePriority` in `emit.ts`), so the lane offset separates kinds of work and importance/distance order within a lane. The minimap lane has a bounded fast-seed mode with no entity importance/distance terms and a bulk mode that is placed behind all view-serving requests when whole-dataset demand is large.
 
 ### 2. CPU cache submits + schedules
 
@@ -24,9 +24,9 @@ From "the planner decides this chunk is wanted" to "this chunk's voxels become p
 
 ### 3. Network fetch
 
-`contentSource.ts::fetch(req)` → `bridge.ts` sends a `chunk_request` JSON over WebSocket. Source chunks route to `serve_chunk_from_store`; generated coarse chunks route to `serve_generated_chunk_request`.
+`contentSource.ts::fetch(req)` asks `bridge.ts` to send a `chunk_request` JSON over the workspace WebSocket. `FetchSource::Proxied` names this ordinary server relay: source chunks route through `serve_chunk_from_store` and its bounded `CachedStore` object-store reader, while generated coarse chunks route through `serve_generated_chunk_request` and the derived-chunk cache.
 
-Ready source and generated chunks both use the normal chunk frame layout: `[client_id u32 LE][key_len u16 LE][key bytes][payload bytes]`. `bridge.ts::handleBinary` only splits the frame and forwards the `(key, payload)` pair (it doesn't know the chunk-vs-proxy taxonomy); the composite-key dispatch lives in `contentSource.handleBinary`, which sniffs the `proxy/` prefix and otherwise resolves the pending fetch by composite key (`{datasetId}/{imageId}/{chunkKey}`). If a generated chunk is not ready, the server sends `GeneratedChunkStatus`; `pending` clears in-flight state without entering failure tracking.
+Ready source and generated chunks use the same checked frame owned by `lucida-protocol`: `[client_id u32 LE][key_len u16 LE][UTF-8 key bytes][payload bytes]`. The key is `{datasetId}/{imageId}/{chunkKey}`. `bridge.ts::handleBinary` uses the canonical web decoder and forwards the validated `(key, payload)` pair; `contentSource.handleBinary` resolves the exact composite key in the pending-fetch table. If a generated chunk is not ready, the server sends `GeneratedChunkStatus`; `pending` clears in-flight state without entering failure tracking. Client-originated binary frames and retired asset/proxy frame shapes fail closed.
 
 ### 4. Decode
 
@@ -38,7 +38,7 @@ Decoded chunk inserted into the appropriate [CPU Cache](../systems/subsystems/cp
 
 ### 6. Deliverability
 
-`CpuCache.getDeliverable()` yields cached, currently-wanted, not-rejected, not-sent chunks in priority order. The [Uploader](../systems/subsystems/upload-pipeline.md) consumes that iterable within the upload budget (8 MB main view, 2 MB minimap). Legacy proxy deliveries participate only when the proxy bridge is enabled.
+`CpuCache.getDeliverable()` yields cached, currently-wanted, not-rejected, not-sent chunks in priority order. The [Uploader](../systems/subsystems/upload-pipeline.md) consumes that iterable within the upload budget (8 MB main view, 2 MB minimap). Detail and coarse bytes use the same delivery contract and remain distinct through their tier label.
 
 ### 7. Post to worker
 
@@ -55,7 +55,7 @@ Slice or volume shader runs:
 2. Project fragment to entity-local voxel coords.
 3. Compute cell within the chosen LOD.
 4. `indirection[lod.indirectionOffset + cellIndex]` → atlas slot.
-5. **Fallback chain**: explicit detail tier → explicit coarse tier → legacy tile/group proxy if bridge-enabled and resident → blank.
+5. **Fallback chain**: selected detail tier → configured coarse tier → empty.
 6. Apply contrast → gamma → LUT sample → opacity.
 
 ### 10. Composite

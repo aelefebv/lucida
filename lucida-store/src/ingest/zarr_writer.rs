@@ -6,8 +6,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use rayon::prelude::*;
 use serde_json::json;
 
+use super::AtomicOutput;
 use super::ome_metadata;
 use super::pyramid::LevelData;
+
+const MAX_ZARR_CHUNKS_PER_LEVEL: usize = 10_000_000;
 
 /// Write a complete OME-Zarr v0.5 (Zarr v3) store to disk.
 ///
@@ -18,20 +21,30 @@ pub fn write_zarr(
     levels: &[LevelData],
     chunk_size: &[u32; 3],
 ) -> Result<(), String> {
+    if levels.is_empty() || levels.len() > 64 {
+        return Err("Zarr pyramid must contain between 1 and 64 levels".to_string());
+    }
+    let publication = AtomicOutput::begin(output)?;
+    let output = publication.path();
     // Default: assume each level is 2x in XY only (legacy behavior)
     let scales: Vec<[f64; 3]> = (0..levels.len())
         .map(|i| {
-            let f = (1u32 << i) as f64;
-            [f, f, 1.0]
+            let exponent = i32::try_from(i)
+                .map_err(|_| "Zarr pyramid level exponent exceeds i32".to_string())?;
+            let f = 2_f64.powi(exponent);
+            if !f.is_finite() {
+                return Err("Zarr pyramid scale overflow".to_string());
+            }
+            Ok([f, f, 1.0])
         })
-        .collect();
+        .collect::<Result<_, String>>()?;
     write_root_metadata(output, levels, &scales)?;
 
     for (i, level) in levels.iter().enumerate() {
         write_zarr_level(output, i, level, chunk_size)?;
     }
 
-    Ok(())
+    publication.commit()
 }
 
 /// Write root group zarr.json with OME multiscales attributes.
@@ -43,6 +56,16 @@ pub fn write_root_metadata(
     levels: &[LevelData],
     level_scales: &[[f64; 3]],
 ) -> Result<(), String> {
+    if levels.is_empty() || levels.len() != level_scales.len() {
+        return Err("Zarr root metadata requires one scale per non-empty level".to_string());
+    }
+    if level_scales
+        .iter()
+        .flatten()
+        .any(|value| !value.is_finite() || *value <= 0.0)
+    {
+        return Err("Zarr root metadata scales must be finite and positive".to_string());
+    }
     fs::create_dir_all(output).map_err(|e| format!("failed to create output dir: {e}"))?;
 
     let ome_attrs = ome_metadata::build_multiscales_attrs(levels, level_scales);
@@ -61,6 +84,7 @@ pub fn write_zarr_level(
     level: &LevelData,
     chunk_size: &[u32; 3],
 ) -> Result<(), String> {
+    validate_level(level, chunk_size)?;
     let level_dir = output.join(level_index.to_string());
     fs::create_dir_all(&level_dir).map_err(|e| format!("failed to create level dir: {e}"))?;
 
@@ -87,9 +111,23 @@ fn write_chunks(
     let nx = level.width.div_ceil(cx);
     let ny = level.height.div_ceil(cy);
     let nz = level.depth.div_ceil(cz);
+    let total = [level.timepoints, level.channels, nz, ny, nx]
+        .into_iter()
+        .try_fold(1usize, |product, dimension| {
+            product.checked_mul(dimension as usize)
+        })
+        .ok_or_else(|| "Zarr chunk-count arithmetic overflow".to_string())?;
+    if total > MAX_ZARR_CHUNKS_PER_LEVEL {
+        return Err(format!(
+            "Zarr level requires {total} chunks; limit is {MAX_ZARR_CHUNKS_PER_LEVEL}"
+        ));
+    }
 
     // Collect all chunk indices
     let mut indices = Vec::new();
+    indices
+        .try_reserve_exact(total)
+        .map_err(|error| format!("failed to reserve Zarr chunk index: {error}"))?;
     for ti in 0..level.timepoints {
         for ci in 0..level.channels {
             for zi in 0..nz {
@@ -102,7 +140,7 @@ fn write_chunks(
         }
     }
 
-    let total = indices.len();
+    debug_assert_eq!(indices.len(), total);
     if total == 0 {
         return Ok(());
     }
@@ -135,7 +173,7 @@ fn write_chunks(
             .join(yi.to_string())
             .join(xi.to_string());
 
-        let raw = extract_chunk(level, cx, cy, cz, xi, yi, zi, ti, ci);
+        let raw = extract_chunk(level, cx, cy, cz, xi, yi, zi, ti, ci)?;
         let compressed = lz4_flex::compress_prepend_size(&raw);
 
         fs::write(&chunk_path, &compressed).map_err(|e| format!("failed to write chunk: {e}"))?;
@@ -166,15 +204,44 @@ fn extract_chunk(
     zi: u32,
     ti: u32,
     ci: u32,
-) -> Vec<u8> {
-    let mut buf = vec![0u8; (cx * cy * cz * 2) as usize];
+) -> Result<Vec<u8>, String> {
+    if cx == 0 || cy == 0 || cz == 0 {
+        return Err("Zarr chunk dimensions must be positive".to_string());
+    }
+    if ti >= level.timepoints || ci >= level.channels {
+        return Err("Zarr chunk T/C coordinate is outside level bounds".to_string());
+    }
+    let chunk_bytes = usize::try_from(cx)
+        .ok()
+        .and_then(|value| value.checked_mul(cy as usize))
+        .and_then(|value| value.checked_mul(cz as usize))
+        .and_then(|value| value.checked_mul(std::mem::size_of::<u16>()))
+        .ok_or_else(|| "Zarr chunk-byte arithmetic overflow".to_string())?;
+    let mut buf = vec![0u8; chunk_bytes];
 
-    let x_start = xi * cx;
-    let y_start = yi * cy;
-    let z_start = zi * cz;
+    let x_start = xi
+        .checked_mul(cx)
+        .ok_or_else(|| "Zarr X chunk offset overflow".to_string())?;
+    let y_start = yi
+        .checked_mul(cy)
+        .ok_or_else(|| "Zarr Y chunk offset overflow".to_string())?;
+    let z_start = zi
+        .checked_mul(cz)
+        .ok_or_else(|| "Zarr Z chunk offset overflow".to_string())?;
 
-    let plane_size = (level.width * level.height) as usize;
-    let tc_offset = (ti * level.channels * level.depth + ci * level.depth) as usize * plane_size;
+    let plane_size = usize::try_from(level.width)
+        .ok()
+        .and_then(|value| value.checked_mul(level.height as usize))
+        .ok_or_else(|| "Zarr plane-size arithmetic overflow".to_string())?;
+    let tc_plane = usize::try_from(ti)
+        .ok()
+        .and_then(|value| value.checked_mul(level.channels as usize))
+        .and_then(|value| value.checked_add(ci as usize))
+        .and_then(|value| value.checked_mul(level.depth as usize))
+        .ok_or_else(|| "Zarr T/C offset arithmetic overflow".to_string())?;
+    let tc_offset = tc_plane
+        .checked_mul(plane_size)
+        .ok_or_else(|| "Zarr T/C pixel offset overflow".to_string())?;
 
     for lz in 0..cz {
         let gz = z_start + lz;
@@ -188,20 +255,80 @@ fn extract_chunk(
             }
 
             let row_len = cx.min(level.width.saturating_sub(x_start));
-            let src_offset =
-                tc_offset + (gz * level.width * level.height + gy * level.width + x_start) as usize;
-            let dst_offset = (lz * cy * cx + ly * cx) as usize * 2;
+            let src_offset = usize::try_from(gz)
+                .ok()
+                .and_then(|value| value.checked_mul(plane_size))
+                .and_then(|value| {
+                    usize::try_from(gy)
+                        .ok()
+                        .and_then(|gy| gy.checked_mul(level.width as usize))
+                        .and_then(|row| value.checked_add(row))
+                })
+                .and_then(|value| value.checked_add(x_start as usize))
+                .and_then(|value| tc_offset.checked_add(value))
+                .ok_or_else(|| "Zarr source offset arithmetic overflow".to_string())?;
+            let dst_offset = usize::try_from(lz)
+                .ok()
+                .and_then(|value| value.checked_mul(cy as usize))
+                .and_then(|value| value.checked_add(ly as usize))
+                .and_then(|value| value.checked_mul(cx as usize))
+                .and_then(|value| value.checked_mul(std::mem::size_of::<u16>()))
+                .ok_or_else(|| "Zarr destination offset arithmetic overflow".to_string())?;
 
             for lx in 0..row_len {
-                let val = level.data[src_offset + lx as usize];
-                let d = dst_offset + (lx as usize) * 2;
+                let source = src_offset
+                    .checked_add(lx as usize)
+                    .ok_or_else(|| "Zarr source index overflow".to_string())?;
+                let val = *level
+                    .data
+                    .get(source)
+                    .ok_or_else(|| "Zarr source index escaped validated level data".to_string())?;
+                let d = dst_offset
+                    .checked_add((lx as usize) * 2)
+                    .ok_or_else(|| "Zarr destination index overflow".to_string())?;
+                if d + 1 >= buf.len() {
+                    return Err("Zarr destination index escaped chunk buffer".to_string());
+                }
                 buf[d] = val as u8;
                 buf[d + 1] = (val >> 8) as u8;
             }
         }
     }
 
-    buf
+    Ok(buf)
+}
+
+fn validate_level(level: &LevelData, chunk_size: &[u32; 3]) -> Result<(), String> {
+    if level.width == 0
+        || level.height == 0
+        || level.depth == 0
+        || level.channels == 0
+        || level.timepoints == 0
+    {
+        return Err("Zarr level dimensions must be positive".to_string());
+    }
+    if chunk_size.contains(&0) {
+        return Err("Zarr chunk dimensions must be positive".to_string());
+    }
+    let expected = [
+        level.timepoints,
+        level.channels,
+        level.depth,
+        level.height,
+        level.width,
+    ]
+    .into_iter()
+    .try_fold(1usize, |product, dimension| {
+        product.checked_mul(dimension as usize)
+    })
+    .ok_or_else(|| "Zarr level-size arithmetic overflow".to_string())?;
+    if level.data.len() != expected {
+        return Err(format!(
+            "Zarr level data has {} pixels; dimensions require {expected}",
+            level.data.len()
+        ));
+    }
+    Ok(())
 }
 
 fn write_json(dir: &Path, name: &str, value: &serde_json::Value) -> Result<(), String> {
@@ -234,7 +361,7 @@ mod tests {
             channels: 1,
             timepoints: 1,
         };
-        let bytes = extract_chunk(&level, 4, 4, 1, 0, 0, 0, 0, 0);
+        let bytes = extract_chunk(&level, 4, 4, 1, 0, 0, 0, 0, 0).unwrap();
         assert_eq!(bytes.len(), 32);
         assert_eq!(u16::from_le_bytes([bytes[0], bytes[1]]), 1);
         assert_eq!(u16::from_le_bytes([bytes[6], bytes[7]]), 0);
@@ -252,10 +379,10 @@ mod tests {
             channels: 2,
             timepoints: 1,
         };
-        let bytes_c0 = extract_chunk(&level, 2, 2, 1, 0, 0, 0, 0, 0);
+        let bytes_c0 = extract_chunk(&level, 2, 2, 1, 0, 0, 0, 0, 0).unwrap();
         assert_eq!(u16::from_le_bytes([bytes_c0[0], bytes_c0[1]]), 1);
 
-        let bytes_c1 = extract_chunk(&level, 2, 2, 1, 0, 0, 0, 0, 1);
+        let bytes_c1 = extract_chunk(&level, 2, 2, 1, 0, 0, 0, 0, 1).unwrap();
         assert_eq!(u16::from_le_bytes([bytes_c1[0], bytes_c1[1]]), 10);
     }
 

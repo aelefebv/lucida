@@ -2,22 +2,83 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import ipaddress
 import json
+import math
 import os
-import platform
 import stat
-import subprocess
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse, urlunparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
 DEFAULT_SERVER = "http://localhost:9876"
-KEYCHAIN_SERVICE = "lucida-cli"
+MAX_HTTP_RESPONSE_BYTES = 16 * 1024 * 1024
+MAX_WEBSOCKET_MESSAGE_BYTES = 64 * 1024 * 1024
+SUPPORTED_COLORMAPS = frozenset(
+    {
+        "gray",
+        "magenta",
+        "green",
+        "cyan",
+        "red",
+        "blue",
+        "yellow",
+        "viridis",
+        "inferno",
+        "plasma",
+        "magma",
+        "turbo",
+        "hot",
+        "cool",
+        "jet",
+    }
+)
+
+try:
+    from lucida.lucida import read_keychain_token as _native_read_keychain_token
+except (ImportError, ModuleNotFoundError):
+    # Pure-Python source checkouts remain usable without the optional native
+    # extension. Credential resolution then falls through to config; it never
+    # shells out to a command that returns the token through stdout.
+    _native_read_keychain_token = None
+
+# Mirrors lucida_protocol::FailureCode exhaustively. This mapping is only from
+# a typed server code to the Python client's broad operational error kind;
+# display messages never participate.
+DATASET_OPEN_CODE_TO_ERROR_KIND = {
+    "authorization": "unauthorized",
+    "session_closed": "session_disconnect",
+    "workspace_lookup": "network",
+    "unsupported_scheme": "config",
+    "invalid_locator": "config",
+    "local_path": "missing_resource",
+    "missing_object": "missing_resource",
+    "permission": "unauthorized",
+    "cloud_configuration": "config",
+    "http": "network",
+    "storage_backend": "network",
+    "unsupported_codec": "dataset_open_failure",
+    "decode_failure": "dataset_open_failure",
+    "unsupported_layout": "dataset_open_failure",
+    "chunk_out_of_bounds": "dataset_open_failure",
+    "resource_limit": "dataset_open_failure",
+    "malformed_metadata": "dataset_open_failure",
+    "missing_metadata": "missing_resource",
+    "import": "dataset_open_failure",
+    "unknown_dataset": "missing_resource",
+    "unknown_image": "missing_resource",
+    "missing_chunk_metadata": "dataset_open_failure",
+    "invalid_chunk_key": "protocol",
+    "protocol": "protocol",
+    "persistence": "network",
+    "internal": "unexpected",
+}
 
 
 class LucidaError(RuntimeError):
@@ -38,6 +99,17 @@ class LucidaError(RuntimeError):
         self.status = status
         self.body = body
         self.diagnostic = diagnostic
+        self.failure_category = (
+            diagnostic.get("category") if isinstance(diagnostic, dict) else None
+        )
+        self.failure_code = (
+            diagnostic.get("code", diagnostic.get("kind"))
+            if isinstance(diagnostic, dict)
+            else None
+        )
+        self.retryable = (
+            diagnostic.get("retryable") if isinstance(diagnostic, dict) else None
+        )
 
     def to_dict(self) -> dict[str, Any]:
         error: dict[str, Any] = {
@@ -76,8 +148,34 @@ class HttpResponse:
         return json.loads(self.text())
 
 
+class _NoRedirectHandler(HTTPRedirectHandler):
+    """Expose redirects to callers instead of replaying credentialed requests."""
+
+    def redirect_request(
+        self,
+        request: Request,
+        file_pointer: Any,
+        code: int,
+        message: str,
+        headers: Any,
+        new_url: str,
+    ) -> None:
+        del request, file_pointer, code, message, headers, new_url
+        return None
+
+
 class UrllibTransport:
     """Small stdlib transport used so the server client stays dependency-light."""
+
+    def __init__(self, *, max_response_bytes: int = MAX_HTTP_RESPONSE_BYTES):
+        if max_response_bytes <= 0:
+            raise ValueError("max_response_bytes must be positive")
+        self.max_response_bytes = max_response_bytes
+        # urllib's default redirect handler forwards caller-supplied headers,
+        # including Authorization, to a new origin. Redirects are therefore a
+        # response for the product client to interpret, never an implicit
+        # second credentialed request.
+        self._opener = build_opener(_NoRedirectHandler())
 
     def request(
         self,
@@ -90,20 +188,40 @@ class UrllibTransport:
     ) -> HttpResponse:
         request = Request(url, data=body, headers=headers or {}, method=method)
         try:
-            with urlopen(request, timeout=timeout) as response:
+            with self._opener.open(request, timeout=timeout) as response:
                 return HttpResponse(
                     status=response.status,
-                    body=response.read(),
+                    body=self._read_bounded(response),
                     headers=dict(response.headers.items()),
                 )
         except HTTPError as error:
             return HttpResponse(
                 status=error.code,
-                body=error.read(),
+                body=self._read_bounded(error),
                 headers=dict(error.headers.items()),
             )
         except URLError as error:
             raise LucidaError("unreachable_server", str(error)) from error
+
+    def _read_bounded(self, response: Any) -> bytes:
+        raw_length = response.headers.get("Content-Length")
+        if raw_length is not None:
+            try:
+                length = int(raw_length)
+            except ValueError:
+                length = None
+            if length is not None and length > self.max_response_bytes:
+                raise LucidaError(
+                    "resource_limit",
+                    f"HTTP response exceeds {self.max_response_bytes} bytes",
+                )
+        body = response.read(self.max_response_bytes + 1)
+        if len(body) > self.max_response_bytes:
+            raise LucidaError(
+                "resource_limit",
+                f"HTTP response exceeds {self.max_response_bytes} bytes",
+            )
+        return body
 
 
 class ConfigStore:
@@ -122,14 +240,50 @@ class ConfigStore:
 
     def save(self, config: dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps(config, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
+        payload = (json.dumps(config, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        temp_path = self.path.with_name(
+            f".{self.path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
         )
+        descriptor: int | None = None
         try:
-            self.path.chmod(stat.S_IRUSR | stat.S_IWUSR)
-        except OSError:
-            pass
+            descriptor = os.open(
+                temp_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                stat.S_IRUSR | stat.S_IWUSR,
+            )
+            with os.fdopen(descriptor, "wb") as file:
+                descriptor = None
+                file.write(payload)
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(temp_path, self.path)
+            _sync_directory(self.path.parent)
+        except OSError as error:
+            raise LucidaError(
+                "config",
+                f"failed to atomically write private config {self.path}: {error}",
+            ) from error
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _sync_directory(path: Path) -> None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def default_config_path() -> Path:
@@ -199,6 +353,28 @@ def resolve_token(
     return None
 
 
+def token_transport_is_allowed(server_url: str) -> bool:
+    parsed = urlparse(server_url)
+    if parsed.scheme == "https":
+        return True
+    if parsed.scheme != "http" or parsed.hostname is None:
+        return False
+    if parsed.hostname.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(parsed.hostname).is_loopback
+    except ValueError:
+        return False
+
+
+def allow_insecure_token_transport() -> bool:
+    return os.environ.get("LUCIDA_ALLOW_INSECURE_TOKEN", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
 def server_config(config: dict[str, Any] | None, server_url: str) -> dict[str, Any]:
     servers = (config or {}).get("servers")
     if not isinstance(servers, dict):
@@ -220,29 +396,18 @@ def server_config_mut(config: dict[str, Any], server_url: str) -> dict[str, Any]
 
 
 def read_keychain_token(server_url: str) -> str | None:
-    if platform.system() != "Darwin":
+    reader = _native_read_keychain_token
+    if reader is None:
         return None
     try:
-        result = subprocess.run(
-            [
-                "security",
-                "find-generic-password",
-                "-a",
-                server_url,
-                "-s",
-                KEYCHAIN_SERVICE,
-                "-w",
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
+        token = reader(server_url)
+    except Exception:
+        # Keychain denial/lock and native loading failures preserve the same
+        # env > keychain > config precedence by falling through to config.
         return None
-    if result.returncode != 0:
+    if not isinstance(token, str):
         return None
-    token = result.stdout.strip()
+    token = token.strip()
     return token or None
 
 
@@ -258,6 +423,7 @@ class LucidaClient:
         transport: Any | None = None,
         ws_connect: Any | None = None,
         timeout: float = 30.0,
+        max_ws_message_bytes: int = MAX_WEBSOCKET_MESSAGE_BYTES,
     ):
         self.config_store = ConfigStore(config_path)
         self.config = self.config_store.load()
@@ -267,8 +433,21 @@ class LucidaClient:
             if token is not None
             else resolve_token(self.server.url, config=self.config)
         )
+        if (
+            self.effective_token is not None
+            and not token_transport_is_allowed(self.server.url)
+            and not allow_insecure_token_transport()
+        ):
+            raise LucidaError(
+                "insecure_transport",
+                "refusing to send a bearer token over non-loopback HTTP; use HTTPS or "
+                "set LUCIDA_ALLOW_INSECURE_TOKEN=1 for an explicitly trusted test network",
+            )
         self.transport = transport or UrllibTransport()
         self.ws_connect = ws_connect
+        if max_ws_message_bytes <= 0:
+            raise ValueError("max_ws_message_bytes must be positive")
+        self.max_ws_message_bytes = max_ws_message_bytes
         self.timeout = timeout
         self.auth = AuthResource(self)
         self.workspaces = WorkspacesResource(self)
@@ -281,11 +460,20 @@ class LucidaClient:
     def status(self) -> dict[str, Any]:
         return self.server_api.status()
 
+    async def async_status(self) -> dict[str, Any]:
+        return await self.server_api.async_status()
+
     def whoami(self) -> dict[str, Any]:
         return self.auth.whoami()
 
+    async def async_whoami(self) -> dict[str, Any]:
+        return await self.auth.async_whoami()
+
     def workspace(self, selector: str | None = None) -> "WorkspaceResource":
         return self.workspaces.resolve(selector)
+
+    async def async_workspace(self, selector: str | None = None) -> "WorkspaceResource":
+        return await self.workspaces.async_resolve(selector)
 
     def _request_json(
         self,
@@ -336,7 +524,13 @@ class LucidaClient:
         payload = None
         if body is not None:
             headers["Content-Type"] = "application/json"
-            payload = json.dumps(body).encode("utf-8")
+            try:
+                payload = json.dumps(body, allow_nan=False).encode("utf-8")
+            except (TypeError, ValueError) as error:
+                raise LucidaError(
+                    "config",
+                    f"request body is not valid finite JSON: {error}",
+                ) from error
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         return self.transport.request(
@@ -377,6 +571,9 @@ class ServerResource:
             "auth": auth,
         }
 
+    async def async_status(self) -> dict[str, Any]:
+        return await asyncio.to_thread(self.status)
+
     def _check_text(self, segments: list[str]) -> dict[str, Any]:
         try:
             response = self._client._request_text("GET", segments)
@@ -400,6 +597,9 @@ class AuthResource:
     def whoami(self) -> dict[str, Any]:
         return self._client._request_json("GET", ["auth", "whoami"])
 
+    async def async_whoami(self) -> dict[str, Any]:
+        return await asyncio.to_thread(self.whoami)
+
 
 class WorkspacesResource:
     def __init__(self, client: LucidaClient):
@@ -409,17 +609,29 @@ class WorkspacesResource:
         segments = ["api", "workspaces", "archived"] if archived else ["api", "workspaces"]
         return self._client._request_json("GET", segments)
 
+    async def async_list(self, *, archived: bool = False) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self.list, archived=archived)
+
     def create(self, name: str | None = None) -> "WorkspaceResource":
         record = self._client._request_json("POST", ["api", "workspaces"], body={"name": name})
         return WorkspaceResource(self._client, record)
+
+    async def async_create(self, name: str | None = None) -> "WorkspaceResource":
+        return await asyncio.to_thread(self.create, name)
 
     def get(self, workspace_id: str) -> "WorkspaceResource":
         record = self._client._request_json("GET", ["api", "workspaces", workspace_id])
         return WorkspaceResource(self._client, record)
 
+    async def async_get(self, workspace_id: str) -> "WorkspaceResource":
+        return await asyncio.to_thread(self.get, workspace_id)
+
     def open(self, workspace_id: str) -> "WorkspaceResource":
         record = self._client._request_json("POST", ["api", "workspaces", workspace_id])
         return WorkspaceResource(self._client, record)
+
+    async def async_open(self, workspace_id: str) -> "WorkspaceResource":
+        return await asyncio.to_thread(self.open, workspace_id)
 
     def resolve(
         self,
@@ -446,12 +658,27 @@ class WorkspacesResource:
             return WorkspaceResource(self._client, record)
         return self.get(record["id"])
 
+    async def async_resolve(
+        self,
+        selector: str | None = None,
+        *,
+        include_archived: bool = False,
+    ) -> "WorkspaceResource":
+        return await asyncio.to_thread(
+            self.resolve,
+            selector,
+            include_archived=include_archived,
+        )
+
     def use(self, selector: str) -> "WorkspaceResource":
         workspace = self.resolve(selector)
         entry = server_config_mut(self._client.config, self._client.server.url)
         entry["workspace"] = workspace.id
         self._client.config_store.save(self._client.config)
         return workspace
+
+    async def async_use(self, selector: str) -> "WorkspaceResource":
+        return await asyncio.to_thread(self.use, selector)
 
 
 class WorkspaceResource:
@@ -463,6 +690,7 @@ class WorkspaceResource:
         self.layer = LayerResource(self)
         self.channel = ChannelResource(self)
         self.saved_views = SavedViewsResource(self)
+        self.viewer_profiles = ViewerProfilesResource(self)
         self.debug = DebugResource(self)
 
     @property
@@ -481,31 +709,225 @@ class WorkspaceResource:
     def ws_url(self) -> str:
         parsed = urlparse(self._client.server.url)
         scheme = "wss" if parsed.scheme == "https" else "ws"
-        base = urlunparse((scheme, parsed.netloc, "", "", "", ""))
+        base = urlunparse((scheme, parsed.netloc, parsed.path, "", "", ""))
         return build_url(base, ["ws", "workspaces", self.id])
 
     def refresh(self) -> "WorkspaceResource":
         self.record = self._client._request_json("GET", ["api", "workspaces", self.id])
         return self
 
+    async def async_refresh(self) -> "WorkspaceResource":
+        return await asyncio.to_thread(self.refresh)
+
     def open(self) -> "WorkspaceResource":
         self.record = self._client._request_json("POST", ["api", "workspaces", self.id])
         return self
+
+    async def async_open(self) -> "WorkspaceResource":
+        return await asyncio.to_thread(self.open)
 
     def snapshot(self, *, timeout: float = 30.0) -> dict[str, Any]:
         return run_sync(self.async_snapshot(timeout=timeout))
 
     async def async_snapshot(self, *, timeout: float = 30.0) -> dict[str, Any]:
-        async with self._connect_ws() as ws:
-            return await recv_snapshot(ws, timeout)
+        deadline = Deadline(timeout, operation="workspace snapshot")
+        async with self._connect_ws(deadline.remaining()) as ws:
+            return await recv_snapshot(ws, deadline)
 
-    def _connect_ws(self) -> Any:
+    def _connect_ws(self, open_timeout: float | None = None) -> Any:
         headers = {}
         if self._client.token:
             headers["Authorization"] = f"Bearer {self._client.token}"
         if self._client.ws_connect is not None:
             return self._client.ws_connect(self.ws_url, headers)
-        return default_ws_connect(self.ws_url, headers)
+        return default_ws_connect(
+            self.ws_url,
+            headers,
+            open_timeout=open_timeout,
+            max_size=self._client.max_ws_message_bytes,
+        )
+
+
+class SyncDeadline:
+    def __init__(self, timeout: float, *, operation: str):
+        if timeout <= 0:
+            raise LucidaError("config", "timeout must be positive")
+        self.timeout = timeout
+        self.operation = operation
+        self.expires_at = time.monotonic() + timeout
+
+    def remaining(self) -> float:
+        remaining = self.expires_at - time.monotonic()
+        if remaining <= 0:
+            raise LucidaError(
+                "deadline_exceeded",
+                f"{self.operation} exceeded its {self.timeout:g}s deadline",
+            )
+        return remaining
+
+
+class ViewerProfilesResource:
+    """Durable private viewer state with revision-based compare-and-swap."""
+
+    def __init__(self, workspace: WorkspaceResource):
+        self._workspace = workspace
+
+    def _segments(self, profile: str) -> list[str]:
+        return [
+            "api",
+            "workspaces",
+            self._workspace.id,
+            "viewer-profiles",
+            profile,
+        ]
+
+    def get(
+        self,
+        profile: str = "default",
+        *,
+        timeout: float | None = None,
+    ) -> dict[str, Any] | None:
+        return self._workspace._client._request_json(
+            "GET",
+            self._segments(profile),
+            timeout=timeout,
+        )
+
+    async def async_get(
+        self,
+        profile: str = "default",
+        *,
+        timeout: float | None = None,
+    ) -> dict[str, Any] | None:
+        return await asyncio.to_thread(self.get, profile, timeout=timeout)
+
+    def put(
+        self,
+        view: dict[str, Any],
+        *,
+        expected_revision: int | None,
+        profile: str = "default",
+        seed_source: str | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        return self._workspace._client._request_json(
+            "PUT",
+            self._segments(profile),
+            body={
+                "view": view,
+                "expected_revision": expected_revision,
+                "seed_source": seed_source,
+            },
+            timeout=timeout,
+        )
+
+    async def async_put(
+        self,
+        view: dict[str, Any],
+        *,
+        expected_revision: int | None,
+        profile: str = "default",
+        seed_source: str | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self.put,
+            view,
+            expected_revision=expected_revision,
+            profile=profile,
+            seed_source=seed_source,
+            timeout=timeout,
+        )
+
+    def get_or_seed(
+        self,
+        snapshot: dict[str, Any],
+        *,
+        profile: str = "default",
+        deadline: SyncDeadline,
+    ) -> dict[str, Any]:
+        record = self.get(profile, timeout=deadline.remaining())
+        if record is not None:
+            return record
+        seed = saved_view_from_snapshot(snapshot)
+        try:
+            return self.put(
+                seed,
+                expected_revision=None,
+                profile=profile,
+                seed_source="workspace_snapshot",
+                timeout=deadline.remaining(),
+            )
+        except LucidaError as error:
+            if error.kind != "viewer_profile_conflict":
+                raise
+            # A concurrent first writer created the row. Adopt its version.
+            record = self.get(profile, timeout=deadline.remaining())
+            if record is None:
+                raise LucidaError(
+                    "protocol",
+                    "viewer profile create conflicted but no profile exists",
+                ) from error
+            return record
+
+    def mutate(
+        self,
+        mutator: Any,
+        *,
+        profile: str = "default",
+        timeout: float = 30.0,
+        needs_snapshot: bool = False,
+    ) -> dict[str, Any]:
+        deadline = SyncDeadline(timeout, operation="viewer profile update")
+        snapshot = (
+            self._workspace.snapshot(timeout=deadline.remaining())
+            if needs_snapshot
+            else None
+        )
+        for attempt in range(3):
+            record = self.get(profile, timeout=deadline.remaining())
+            if record is None:
+                if snapshot is None:
+                    snapshot = self._workspace.snapshot(timeout=deadline.remaining())
+                view = saved_view_from_snapshot(snapshot)
+                expected_revision = None
+                seed_source = "workspace_snapshot"
+            else:
+                view = copy.deepcopy(record["view"])
+                expected_revision = int(record["revision"])
+                seed_source = None
+            mutator(view, snapshot)
+            try:
+                updated = self.put(
+                    view,
+                    expected_revision=expected_revision,
+                    profile=profile,
+                    seed_source=seed_source,
+                    timeout=deadline.remaining(),
+                )
+                return viewer_profile_mutation_result(updated)
+            except LucidaError as error:
+                if error.kind != "viewer_profile_conflict" or attempt == 2:
+                    raise
+                # Re-read and reapply the operation to the newest record. This
+                # preserves disjoint edits while the server prevents lost writes.
+        raise AssertionError("viewer profile retry loop exhausted")
+
+    async def async_mutate(
+        self,
+        mutator: Any,
+        *,
+        profile: str = "default",
+        timeout: float = 30.0,
+        needs_snapshot: bool = False,
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self.mutate,
+            mutator,
+            profile=profile,
+            timeout=timeout,
+            needs_snapshot=needs_snapshot,
+        )
 
 
 class DatasetsResource:
@@ -516,8 +938,21 @@ class DatasetsResource:
         snapshot = self._workspace.snapshot(timeout=timeout)
         return dataset_summaries_from_document(snapshot.get("document", {}))
 
+    async def async_list(self, *, timeout: float = 30.0) -> list[dict[str, Any]]:
+        snapshot = await self._workspace.async_snapshot(timeout=timeout)
+        return dataset_summaries_from_document(snapshot.get("document", {}))
+
     def info(self, dataset: str, *, timeout: float = 30.0) -> dict[str, Any]:
         snapshot = self._workspace.snapshot(timeout=timeout)
+        return dataset_info_from_document(snapshot.get("document", {}), dataset)
+
+    async def async_info(
+        self,
+        dataset: str,
+        *,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        snapshot = await self._workspace.async_snapshot(timeout=timeout)
         return dataset_info_from_document(snapshot.get("document", {}), dataset)
 
     def explore(
@@ -575,12 +1010,33 @@ class DatasetsResource:
         )
         return json.loads(result)
 
+    async def async_explore(
+        self,
+        dataset: str,
+        *,
+        view: dict[str, Any] | None = None,
+        viewport: tuple[int, int] = (960, 720),
+        depth: int = 0,
+        breadcrumb: list[str] | None = None,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self.explore,
+            dataset,
+            viewport=viewport,
+            view=view,
+            depth=depth,
+            breadcrumb=breadcrumb,
+            timeout=timeout,
+        )
+
     def open(self, source: str, *, timeout: float = 300.0) -> dict[str, Any]:
         return run_sync(self.async_open(source, timeout=timeout))
 
     async def async_open(self, source: str, *, timeout: float = 300.0) -> dict[str, Any]:
-        async with self._workspace._connect_ws() as ws:
-            snapshot = await recv_snapshot(ws, timeout)
+        deadline = Deadline(timeout, operation="dataset open")
+        async with self._workspace._connect_ws(deadline.remaining()) as ws:
+            snapshot = await recv_snapshot(ws, deadline)
             request_id = f"py-{uuid.uuid4().hex}"
             await send_json(
                 ws,
@@ -589,17 +1045,11 @@ class DatasetsResource:
                     "request_id": request_id,
                     "url": source,
                 },
+                deadline,
             )
-            deadline = asyncio.get_running_loop().time() + timeout
             progress: list[dict[str, Any]] = []
             while True:
-                remaining = max(0.0, deadline - asyncio.get_running_loop().time())
-                if remaining == 0.0:
-                    raise LucidaError(
-                        "rejected_command",
-                        f"timed out waiting for dataset open after {timeout:g}s",
-                    )
-                message = await recv_json(ws, remaining)
+                message = await recv_json(ws, deadline)
                 message_type = message.get("type")
                 if message_type == "dataset_open_progress":
                     if message.get("request_id") != request_id:
@@ -621,10 +1071,9 @@ class DatasetsResource:
                     continue
                 if message.get("request_id") != request_id:
                     continue
-                opened = message.get("opened") or {}
-                manifest = opened.get("manifest") or {}
+                summary = message.get("summary") or {}
                 return dataset_open_summary(
-                    manifest,
+                    summary,
                     source=str(message.get("url") or source),
                     seq=message.get("seq", snapshot.get("seq", 0)),
                     workspace_id=self._workspace.id,
@@ -640,8 +1089,9 @@ class DatasetsResource:
     async def async_health(
         self, dataset: str | None = None, *, timeout: float = 30.0
     ) -> list[dict[str, Any]]:
-        async with self._workspace._connect_ws() as ws:
-            snapshot = await recv_snapshot(ws, timeout)
+        deadline = Deadline(timeout, operation="dataset health")
+        async with self._workspace._connect_ws(deadline.remaining()) as ws:
+            snapshot = await recv_snapshot(ws, deadline)
             dataset_id = None
             if dataset is not None:
                 summaries = dataset_summaries_from_document(snapshot.get("document", {}))
@@ -654,17 +1104,10 @@ class DatasetsResource:
                     "request_id": request_id,
                     "dataset_id": dataset_id,
                 },
+                deadline,
             )
-            deadline = asyncio.get_running_loop().time() + timeout
-            progress: list[dict[str, Any]] = []
             while True:
-                remaining = max(0.0, deadline - asyncio.get_running_loop().time())
-                if remaining == 0.0:
-                    raise LucidaError(
-                        "rejected_command",
-                        f"timed out waiting for dataset health after {timeout:g}s",
-                    )
-                message = await recv_json(ws, remaining)
+                message = await recv_json(ws, deadline)
                 if (
                     message.get("type") == "dataset_health"
                     and message.get("request_id") == request_id
@@ -676,8 +1119,9 @@ class DatasetsResource:
         return run_sync(self.async_retry(dataset, timeout=timeout))
 
     async def async_retry(self, dataset: str, *, timeout: float = 300.0) -> dict[str, Any]:
-        async with self._workspace._connect_ws() as ws:
-            snapshot = await recv_snapshot(ws, timeout)
+        deadline = Deadline(timeout, operation="dataset retry")
+        async with self._workspace._connect_ws(deadline.remaining()) as ws:
+            snapshot = await recv_snapshot(ws, deadline)
             summaries = dataset_summaries_from_document(snapshot.get("document", {}))
             dataset_id = resolve_dataset_id(dataset, summaries)
             request_id = f"py-retry-{uuid.uuid4().hex}"
@@ -688,17 +1132,11 @@ class DatasetsResource:
                     "request_id": request_id,
                     "dataset_id": dataset_id,
                 },
+                deadline,
             )
-            deadline = asyncio.get_running_loop().time() + timeout
             progress: list[dict[str, Any]] = []
             while True:
-                remaining = max(0.0, deadline - asyncio.get_running_loop().time())
-                if remaining == 0.0:
-                    raise LucidaError(
-                        "rejected_command",
-                        f"timed out waiting for dataset retry after {timeout:g}s",
-                    )
-                message = await recv_json(ws, remaining)
+                message = await recv_json(ws, deadline)
                 message_type = message.get("type")
                 if message_type == "dataset_open_progress":
                     if message.get("request_id") != request_id:
@@ -720,10 +1158,9 @@ class DatasetsResource:
                     continue
                 if message.get("request_id") != request_id:
                     continue
-                opened = message.get("opened") or {}
-                manifest = opened.get("manifest") or {}
+                summary = message.get("summary") or {}
                 return dataset_open_summary(
-                    manifest,
+                    summary,
                     source=str(message.get("url") or dataset),
                     seq=message.get("seq", snapshot.get("seq", 0)),
                     workspace_id=self._workspace.id,
@@ -737,6 +1174,9 @@ class ViewResource:
         self._workspace = workspace
 
     def pan(self, dx: float, dy: float, *, timeout: float = 30.0) -> dict[str, Any]:
+        require_finite("view.pan dx", dx)
+        require_finite("view.pan dy", dy)
+
         def mutate(presence: dict[str, Any]) -> None:
             camera = ensure_slice_camera(presence["camera"])
             zoom = float(camera.get("zoom") or 1.0)
@@ -746,6 +1186,7 @@ class ViewResource:
         return self._apply(mutate, timeout=timeout)
 
     def zoom(self, factor: float, *, timeout: float = 30.0) -> dict[str, Any]:
+        require_finite("view.zoom factor", factor)
         if factor <= 0:
             raise LucidaError("config", "view.zoom factor must be positive")
 
@@ -756,6 +1197,7 @@ class ViewResource:
         return self._apply(mutate, timeout=timeout)
 
     def set_zoom(self, value: float, *, timeout: float = 30.0) -> dict[str, Any]:
+        require_finite("view.set_zoom value", value)
         if value <= 0:
             raise LucidaError("config", "view.set_zoom value must be positive")
 
@@ -765,6 +1207,9 @@ class ViewResource:
         return self._apply(mutate, timeout=timeout)
 
     def center(self, x: float, y: float, *, timeout: float = 30.0) -> dict[str, Any]:
+        require_finite("view.center x", x)
+        require_finite("view.center y", y)
+
         def mutate(presence: dict[str, Any]) -> None:
             ensure_slice_camera(presence["camera"])["center"] = [x, y]
 
@@ -774,6 +1219,8 @@ class ViewResource:
         axis = axis.lower()
         if axis not in {"z", "t", "c"}:
             raise LucidaError("config", f"unknown slice axis: {axis}")
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+            raise LucidaError("config", "view.slice index must be a non-negative integer")
 
         def mutate(presence: dict[str, Any]) -> None:
             view = presence["view"]
@@ -785,7 +1232,9 @@ class ViewResource:
         return self._apply(mutate, timeout=timeout)
 
     def z_range(self, start: int, end: int, *, timeout: float = 30.0) -> dict[str, Any]:
-        if end <= start:
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in (start, end)):
+            raise LucidaError("config", "view.z_range bounds must be integers")
+        if start < 0 or end <= start:
             raise LucidaError("config", "view.z_range end must be greater than start")
 
         def mutate(presence: dict[str, Any]) -> None:
@@ -803,31 +1252,51 @@ class ViewResource:
         return self._apply(mutate, timeout=timeout)
 
     def _apply(self, mutator: Any, *, timeout: float) -> dict[str, Any]:
-        return run_sync(self.async_apply(mutator, timeout=timeout))
+        def mutate(view: dict[str, Any], _snapshot: dict[str, Any] | None) -> None:
+            mutator(saved_view_presence(view))
+
+        return self._workspace.viewer_profiles.mutate(mutate, timeout=timeout)
 
     async def async_apply(self, mutator: Any, *, timeout: float = 30.0) -> dict[str, Any]:
-        async with self._workspace._connect_ws() as ws:
-            snapshot = await recv_snapshot(ws, timeout)
-            presence = copy.deepcopy(own_presence(snapshot))
-            messages = break_follow_messages(presence)
-            mutator(presence)
-            messages.append(
-                {
-                    "type": "presence",
-                    "camera": presence["camera"],
-                    "view": presence["view"],
-                    "display": presence["display"],
-                }
-            )
-            for message in messages:
-                await send_json(ws, message)
-            return {
-                "snapshot_seq": snapshot.get("seq", 0),
-                "own_client_id": snapshot.get("your_id"),
-                "camera": presence["camera"],
-                "view": presence["view"],
-                "display": presence["display"],
-            }
+        return await asyncio.to_thread(self._apply, mutator, timeout=timeout)
+
+    async def async_pan(
+        self, dx: float, dy: float, *, timeout: float = 30.0
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(self.pan, dx, dy, timeout=timeout)
+
+    async def async_zoom(self, factor: float, *, timeout: float = 30.0) -> dict[str, Any]:
+        return await asyncio.to_thread(self.zoom, factor, timeout=timeout)
+
+    async def async_set_zoom(
+        self, value: float, *, timeout: float = 30.0
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(self.set_zoom, value, timeout=timeout)
+
+    async def async_center(
+        self, x: float, y: float, *, timeout: float = 30.0
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(self.center, x, y, timeout=timeout)
+
+    async def async_slice(
+        self, axis: str, index: int, *, timeout: float = 30.0
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(self.slice, axis, index, timeout=timeout)
+
+    async def async_z_range(
+        self, start: int, end: int, *, timeout: float = 30.0
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(self.z_range, start, end, timeout=timeout)
+
+    async def async_viewport_size(
+        self, width: int, height: int, *, timeout: float = 30.0
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self.viewport_size,
+            width,
+            height,
+            timeout=timeout,
+        )
 
 
 class LayerResource:
@@ -835,8 +1304,13 @@ class LayerResource:
         self._workspace = workspace
 
     def list(self, *, timeout: float = 30.0) -> list[dict[str, Any]]:
-        snapshot = self._workspace.snapshot(timeout=timeout)
-        presence = own_presence(snapshot)
+        deadline = SyncDeadline(timeout, operation="layer listing")
+        snapshot = self._workspace.snapshot(timeout=deadline.remaining())
+        record = self._workspace.viewer_profiles.get_or_seed(
+            snapshot,
+            deadline=deadline,
+        )
+        presence = saved_view_presence(record["view"])
         summaries = dataset_summaries_from_document(snapshot.get("document", {}))
         settings = presence.get("dataset_settings") or {}
         order = presence.get("dataset_order") or [item["workspace_dataset_id"] for item in summaries]
@@ -866,6 +1340,7 @@ class LayerResource:
         return self._apply(mutate, timeout=timeout)
 
     def opacity(self, dataset: str, opacity: float, *, timeout: float = 30.0) -> dict[str, Any]:
+        require_finite("layer.opacity", opacity)
         if opacity < 0 or opacity > 1:
             raise LucidaError("config", "layer.opacity must be between 0 and 1")
 
@@ -883,45 +1358,118 @@ class LayerResource:
         *,
         timeout: float = 30.0,
     ) -> dict[str, Any]:
+        require_finite("layer.contrast min", min)
+        require_finite("layer.contrast max", max)
         if max <= min:
             raise LucidaError("config", "layer.contrast max must be greater than min")
 
         def mutate(snapshot: dict[str, Any], presence: dict[str, Any]) -> None:
-            settings = ensure_dataset_settings(snapshot, presence, dataset)
+            channel = int(presence.get("view", {}).get("c", 0))
+            settings = ensure_channel_settings(snapshot, presence, dataset, channel)
             settings["contrast_min"] = min
             settings["contrast_max"] = max
+            dataset_id = resolve_dataset_id_or_name(
+                dataset,
+                dataset_summaries_from_document(snapshot.get("document", {})),
+            )["workspace_dataset_id"]
+            presence.setdefault("auto_contrast", {})[dataset_id] = False
 
         return self._apply(mutate, timeout=timeout)
 
     def gamma(self, dataset: str, gamma: float, *, timeout: float = 30.0) -> dict[str, Any]:
+        require_finite("layer.gamma", gamma)
         if gamma <= 0:
             raise LucidaError("config", "layer.gamma must be positive")
 
         def mutate(snapshot: dict[str, Any], presence: dict[str, Any]) -> None:
-            ensure_dataset_settings(snapshot, presence, dataset)["gamma"] = gamma
+            channel = int(presence.get("view", {}).get("c", 0))
+            ensure_channel_settings(snapshot, presence, dataset, channel)["gamma"] = gamma
 
         return self._apply(mutate, timeout=timeout)
 
     def _apply(self, mutator: Any, *, timeout: float) -> dict[str, Any]:
-        return run_sync(self.async_apply(mutator, timeout=timeout))
+        def mutate(
+            view: dict[str, Any],
+            snapshot: dict[str, Any] | None,
+        ) -> None:
+            if snapshot is None:
+                raise LucidaError("protocol", "dataset mutation requires a snapshot")
+            mutator(snapshot, saved_view_presence(view))
+
+        return self._workspace.viewer_profiles.mutate(
+            mutate,
+            timeout=timeout,
+            needs_snapshot=True,
+        )
 
     async def async_apply(self, mutator: Any, *, timeout: float = 30.0) -> dict[str, Any]:
-        async with self._workspace._connect_ws() as ws:
-            snapshot = await recv_snapshot(ws, timeout)
-            presence = copy.deepcopy(own_presence(snapshot))
-            mutator(snapshot, presence)
-            message = {
-                "type": "dataset_presence",
-                "dataset_order": presence.get("dataset_order") or [],
-                "dataset_settings": presence.get("dataset_settings") or {},
-            }
-            await send_json(ws, message)
-            return {
-                "snapshot_seq": snapshot.get("seq", 0),
-                "own_client_id": snapshot.get("your_id"),
-                "dataset_order": message["dataset_order"],
-                "dataset_settings": message["dataset_settings"],
-            }
+        return await asyncio.to_thread(self._apply, mutator, timeout=timeout)
+
+    async def async_list(self, *, timeout: float = 30.0) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self.list, timeout=timeout)
+
+    async def async_order(
+        self, datasets: list[str], *, timeout: float = 30.0
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(self.order, datasets, timeout=timeout)
+
+    async def async_visible(
+        self,
+        dataset: str,
+        visible: bool,
+        *,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self.visible,
+            dataset,
+            visible,
+            timeout=timeout,
+        )
+
+    async def async_opacity(
+        self,
+        dataset: str,
+        opacity: float,
+        *,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self.opacity,
+            dataset,
+            opacity,
+            timeout=timeout,
+        )
+
+    async def async_contrast(
+        self,
+        dataset: str,
+        min: float,
+        max: float,
+        *,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self.contrast,
+            dataset,
+            min,
+            max,
+            timeout=timeout,
+        )
+
+    async def async_gamma(
+        self,
+        dataset: str,
+        gamma: float,
+        *,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self.gamma,
+            dataset,
+            gamma,
+            timeout=timeout,
+        )
 
 
 class ChannelResource:
@@ -959,6 +1507,14 @@ class ChannelResource:
         *,
         timeout: float = 30.0,
     ) -> dict[str, Any]:
+        colormap = colormap.lower()
+        if colormap not in SUPPORTED_COLORMAPS:
+            supported = ", ".join(sorted(SUPPORTED_COLORMAPS))
+            raise LucidaError(
+                "config",
+                f"unknown channel colormap {colormap!r}; expected one of: {supported}",
+            )
+
         def mutate(snapshot: dict[str, Any], presence: dict[str, Any]) -> None:
             ensure_channel_settings(snapshot, presence, dataset, channel)["colormap"] = colormap
 
@@ -973,6 +1529,8 @@ class ChannelResource:
         *,
         timeout: float = 30.0,
     ) -> dict[str, Any]:
+        require_finite("channel.contrast min", min)
+        require_finite("channel.contrast max", max)
         if max <= min:
             raise LucidaError("config", "channel.contrast max must be greater than min")
 
@@ -980,6 +1538,15 @@ class ChannelResource:
             settings = ensure_channel_settings(snapshot, presence, dataset, channel)
             settings["contrast_min"] = min
             settings["contrast_max"] = max
+            # Manual contrast and auto-contrast are mutually exclusive. Persist
+            # the client-only preference in the same viewer profile so opening
+            # the SPA cannot immediately overwrite this durable command with a
+            # newly observed intensity range.
+            dataset_id = resolve_dataset_id_or_name(
+                dataset,
+                dataset_summaries_from_document(snapshot.get("document", {})),
+            )["workspace_dataset_id"]
+            presence.setdefault("auto_contrast", {})[dataset_id] = False
 
         return self._workspace.layer._apply(mutate, timeout=timeout)
 
@@ -991,6 +1558,7 @@ class ChannelResource:
         *,
         timeout: float = 30.0,
     ) -> dict[str, Any]:
+        require_finite("channel.gamma", gamma)
         if gamma <= 0:
             raise LucidaError("config", "channel.gamma must be positive")
 
@@ -999,6 +1567,75 @@ class ChannelResource:
 
         return self._workspace.layer._apply(mutate, timeout=timeout)
 
+    async def async_mode(self, mode: str, *, timeout: float = 30.0) -> dict[str, Any]:
+        return await asyncio.to_thread(self.mode, mode, timeout=timeout)
+
+    async def async_visible(
+        self,
+        dataset: str,
+        channel: int,
+        visible: bool,
+        *,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self.visible,
+            dataset,
+            channel,
+            visible,
+            timeout=timeout,
+        )
+
+    async def async_colormap(
+        self,
+        dataset: str,
+        channel: int,
+        colormap: str,
+        *,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self.colormap,
+            dataset,
+            channel,
+            colormap,
+            timeout=timeout,
+        )
+
+    async def async_contrast(
+        self,
+        dataset: str,
+        channel: int,
+        min: float,
+        max: float,
+        *,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self.contrast,
+            dataset,
+            channel,
+            min,
+            max,
+            timeout=timeout,
+        )
+
+    async def async_gamma(
+        self,
+        dataset: str,
+        channel: int,
+        gamma: float,
+        *,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self.gamma,
+            dataset,
+            channel,
+            gamma,
+            timeout=timeout,
+        )
+
 
 class DebugResource:
     def __init__(self, workspace: WorkspaceResource):
@@ -1006,6 +1643,18 @@ class DebugResource:
 
     def state(self, *, timeout: float = 30.0) -> dict[str, Any]:
         snapshot = self._workspace.snapshot(timeout=timeout)
+        return {
+            "workspace": self._workspace.record,
+            "snapshot_seq": snapshot.get("seq", 0),
+            "own_client_id": snapshot.get("your_id"),
+            "datasets": dataset_summaries_from_document(snapshot.get("document", {})),
+            "peers": snapshot.get("peers", []),
+            "generated_availability": snapshot.get("generated_availability", {}),
+            "document": snapshot.get("document", {}),
+        }
+
+    async def async_state(self, *, timeout: float = 30.0) -> dict[str, Any]:
+        snapshot = await self._workspace.async_snapshot(timeout=timeout)
         return {
             "workspace": self._workspace.record,
             "snapshot_seq": snapshot.get("seq", 0),
@@ -1040,8 +1689,14 @@ class SavedViewsResource:
     def list(self) -> list[dict[str, Any]]:
         return self._client._request_json("GET", self._segments())
 
+    async def async_list(self) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self.list)
+
     def get(self, saved_view_id: str) -> dict[str, Any]:
         return self._client._request_json("GET", self._segments(saved_view_id))
+
+    async def async_get(self, saved_view_id: str) -> dict[str, Any]:
+        return await asyncio.to_thread(self.get, saved_view_id)
 
     def create(
         self,
@@ -1055,11 +1710,30 @@ class SavedViewsResource:
             body={"name": name, "view": view, "visibility": visibility},
         )
 
+    async def async_create(
+        self,
+        name: str,
+        view: dict[str, Any],
+        visibility: str = "shared",
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(self.create, name, view, visibility)
+
     def set_visibility(self, saved_view_id: str, visibility: str) -> dict[str, Any]:
         return self._client._request_json(
             "PATCH",
             self._segments(saved_view_id, "visibility"),
             body={"visibility": visibility},
+        )
+
+    async def async_set_visibility(
+        self,
+        saved_view_id: str,
+        visibility: str,
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self.set_visibility,
+            saved_view_id,
+            visibility,
         )
 
     def approve(self, saved_view_id: str) -> dict[str, Any]:
@@ -1068,11 +1742,17 @@ class SavedViewsResource:
             self._segments(saved_view_id, "approve"),
         )
 
+    async def async_approve(self, saved_view_id: str) -> dict[str, Any]:
+        return await asyncio.to_thread(self.approve, saved_view_id)
+
     def reject(self, saved_view_id: str) -> dict[str, Any]:
         return self._client._request_json(
             "POST",
             self._segments(saved_view_id, "reject"),
         )
+
+    async def async_reject(self, saved_view_id: str) -> dict[str, Any]:
+        return await asyncio.to_thread(self.reject, saved_view_id)
 
 
 def build_url(
@@ -1081,7 +1761,9 @@ def build_url(
     query: dict[str, Any] | None = None,
 ) -> str:
     parsed = urlparse(base_url)
-    path = "/" + "/".join(quote(str(segment), safe="") for segment in segments)
+    prefix = parsed.path.rstrip("/")
+    suffix = "/".join(quote(str(segment), safe="") for segment in segments)
+    path = f"{prefix}/{suffix}" if suffix else prefix or "/"
     encoded_query = ""
     if query:
         clean_query = {
@@ -1094,7 +1776,12 @@ def build_url(
 
 
 def map_http_error(response: HttpResponse) -> LucidaError:
-    message = error_detail(response.text())
+    body = response.text()
+    message = error_detail(body)
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        payload = None
     if response.status == 401:
         return LucidaError(
             "unauthenticated",
@@ -1116,7 +1803,26 @@ def map_http_error(response: HttpResponse) -> LucidaError:
             status=response.status,
             body=response.text(),
         )
-    if response.status in {409, 410}:
+    if (
+        response.status == 409
+        and isinstance(payload, dict)
+        and payload.get("error") == "viewer_profile_conflict"
+    ):
+        return LucidaError(
+            "viewer_profile_conflict",
+            message or "viewer profile changed; read the latest revision and retry",
+            status=response.status,
+            body=body,
+            diagnostic=payload,
+        )
+    if response.status == 409:
+        return LucidaError(
+            "rejected_command",
+            message or "request conflicted with current server state",
+            status=response.status,
+            body=body,
+        )
+    if response.status == 410:
         return LucidaError(
             "archived_workspace",
             message or "workspace is archived",
@@ -1151,6 +1857,11 @@ def error_detail(body: str) -> str | None:
         if isinstance(detail, str) and detail.strip():
             return detail
     return text
+
+
+def require_finite(name: str, value: float) -> None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
+        raise LucidaError("config", f"{name} must be finite")
 
 
 def looks_like_workspace_id(selector: str) -> bool:
@@ -1197,16 +1908,72 @@ def effective_multiscale(manifest: dict[str, Any], image: dict[str, Any]) -> dic
     holding a ``multiscale_ref`` index; images with a unique multiscale (and
     all payloads from before the compact encoding) inline it instead.
     """
+    format_version = manifest.get("format_version")
+    if format_version is not None and (
+        isinstance(format_version, bool)
+        or not isinstance(format_version, int)
+        or not 0 <= format_version <= 0xFFFF_FFFF
+    ):
+        raise LucidaError(
+            "protocol",
+            "manifest field format_version must be an unsigned 32-bit integer",
+            diagnostic={"field": "format_version"},
+        )
+
     inline = image.get("multiscale")
-    if isinstance(inline, dict):
-        return inline
     ref = image.get("multiscale_ref")
-    table = manifest.get("multiscales") or []
-    if isinstance(ref, int) and 0 <= ref < len(table):
-        shared = table[ref]
-        if isinstance(shared, dict):
-            return shared
-    return {}
+    has_inline = inline is not None
+    has_ref = ref is not None
+    image_id = str(image.get("image_id") or "<unknown>")
+
+    if has_inline == has_ref:
+        detail = (
+            "both an inline multiscale and a multiscale_ref"
+            if has_inline
+            else "neither a multiscale nor a multiscale_ref"
+        )
+        raise LucidaError(
+            "protocol",
+            f"image {image_id} carries {detail}",
+            diagnostic={"field": "images[].multiscale", "image_id": image_id},
+        )
+    if has_inline:
+        if not isinstance(inline, dict):
+            raise LucidaError(
+                "protocol",
+                f"image {image_id} field multiscale must be an object",
+                diagnostic={"field": "images[].multiscale", "image_id": image_id},
+            )
+        return inline
+
+    if isinstance(ref, bool) or not isinstance(ref, int) or ref < 0:
+        raise LucidaError(
+            "protocol",
+            f"image {image_id} field multiscale_ref must be a non-negative integer",
+            diagnostic={"field": "images[].multiscale_ref", "image_id": image_id},
+        )
+    table = manifest.get("multiscales")
+    if not isinstance(table, list):
+        raise LucidaError(
+            "protocol",
+            "manifest field multiscales must be an array when multiscale_ref is used",
+            diagnostic={"field": "multiscales", "image_id": image_id},
+        )
+    if ref >= len(table):
+        raise LucidaError(
+            "protocol",
+            f"image {image_id} references shared multiscale {ref}, but the manifest declares "
+            f"{len(table)} shared multiscale(s)",
+            diagnostic={"field": "images[].multiscale_ref", "image_id": image_id},
+        )
+    shared = table[ref]
+    if not isinstance(shared, dict):
+        raise LucidaError(
+            "protocol",
+            f"manifest multiscales[{ref}] must be an object",
+            diagnostic={"field": f"multiscales[{ref}]", "image_id": image_id},
+        )
+    return shared
 
 
 def dataset_summary(document: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
@@ -1247,6 +2014,7 @@ def dataset_info_from_document(document: dict[str, Any], selector: str) -> dict[
                 "image_id": image.get("image_id"),
                 "owner": image.get("owner"),
                 "data_type": multiscale.get("data_type"),
+                "channel_infos": copy.deepcopy(multiscale.get("channel_infos") or []),
                 "level_count": len(levels),
                 "level_indices": [level.get("level_index") for level in levels],
                 "dimensions": first_level.get("shape") if first_level else None,
@@ -1258,13 +2026,64 @@ def dataset_info_from_document(document: dict[str, Any], selector: str) -> dict[
     dataset_id = summary["workspace_dataset_id"]
     return {
         **summary,
+        "label_count": len(manifest.get("labels") or []),
         "default_layout_id": manifest.get("default_layout_id"),
         "source_layout_count": len(manifest.get("source_layouts") or []),
         "registered_layout_count": len(
             (document.get("registered_layouts") or {}).get(dataset_id) or []
         ),
+        "entities": copy.deepcopy(manifest.get("entities") or []),
+        "labels": label_summaries(manifest),
         "images": images,
     }
+
+
+def label_summaries(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for index, label in enumerate(manifest.get("labels") or []):
+        if not isinstance(label, dict):
+            raise LucidaError(
+                "protocol",
+                f"manifest labels[{index}] must be an object",
+                diagnostic={"field": f"labels[{index}]"},
+            )
+        image = label.get("image")
+        if not isinstance(image, dict):
+            raise LucidaError(
+                "protocol",
+                f"manifest labels[{index}].image must be an object",
+                diagnostic={"field": f"labels[{index}].image"},
+            )
+        multiscale = image.get("multiscale")
+        if not isinstance(multiscale, dict):
+            raise LucidaError(
+                "protocol",
+                f"manifest labels[{index}].image.multiscale must be an object",
+                diagnostic={"field": f"labels[{index}].image.multiscale"},
+            )
+        axes = multiscale.get("axes") or []
+        axis_names = [
+            str(axis.get("name") or "") if isinstance(axis, dict) else str(axis)
+            for axis in axes
+        ]
+        levels = multiscale.get("levels") or []
+        level0 = levels[0] if levels and isinstance(levels[0], dict) else {}
+        scale = level0.get("scale")
+        level0_scale = list(scale) if isinstance(scale, list) and len(scale) == 5 else [1.0] * 5
+        summaries.append(
+            {
+                "name": label.get("name"),
+                "source_image_id": label.get("source_image_id"),
+                "source_entity_id": image.get("owner"),
+                "label_image_id": image.get("image_id"),
+                "data_type": multiscale.get("data_type"),
+                "axis_names": axis_names,
+                "level0_scale": level0_scale,
+                "colors": copy.deepcopy(label.get("colors") or []),
+                "source_declared": bool(label.get("source_declared", False)),
+            }
+        )
+    return summaries
 
 
 def active_layout_id(document: dict[str, Any], manifest: dict[str, Any]) -> str | None:
@@ -1298,7 +2117,7 @@ def resolve_dataset_id(selector: str, summaries: list[dict[str, Any]]) -> str:
 
 
 def dataset_open_summary(
-    manifest: dict[str, Any],
+    summary: dict[str, Any],
     *,
     source: str,
     seq: int,
@@ -1306,14 +2125,12 @@ def dataset_open_summary(
     diagnostic: Any = None,
     progress: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    images = manifest.get("images") or []
-    entities = manifest.get("entities") or []
     result = {
         "workspace_id": workspace_id,
-        "workspace_dataset_id": manifest.get("dataset_id"),
-        "name": manifest.get("name"),
-        "image_count": len(images),
-        "entity_count": len(entities),
+        "workspace_dataset_id": summary.get("workspace_dataset_id"),
+        "name": summary.get("name"),
+        "image_count": int(summary.get("image_count") or 0),
+        "entity_count": int(summary.get("entity_count") or 0),
         "seq": seq,
         "source": source,
     }
@@ -1327,16 +2144,8 @@ def dataset_open_summary(
 def dataset_open_error_kind(diagnostic: Any) -> str:
     if not isinstance(diagnostic, dict):
         return "dataset_open_failure"
-    kind = diagnostic.get("kind")
-    if kind == "authorization":
-        return "unauthorized"
-    if kind == "session_closed":
-        return "session_disconnect"
-    if kind in {"local_path", "missing_object", "missing_metadata"}:
-        return "missing_resource"
-    if kind in {"cloud_configuration", "unsupported_scheme"}:
-        return "config"
-    return "dataset_open_failure"
+    code = diagnostic.get("code", diagnostic.get("kind"))
+    return DATASET_OPEN_CODE_TO_ERROR_KIND.get(code, "dataset_open_failure")
 
 
 def own_presence(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -1345,6 +2154,61 @@ def own_presence(snapshot: dict[str, Any]) -> dict[str, Any]:
         if peer.get("client_id") == own_id:
             return peer
     raise LucidaError("protocol", "workspace snapshot did not include this client presence")
+
+
+def saved_view_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    presence = own_presence(snapshot)
+    document = snapshot.get("document") or {}
+    active_layouts: dict[str, str] = {}
+    for manifest in (document.get("manifests") or {}).values():
+        dataset_id = manifest.get("dataset_id")
+        layout_id = active_layout_id(document, manifest)
+        if dataset_id and layout_id:
+            active_layouts[str(dataset_id)] = str(layout_id)
+    return {
+        "v": 1,
+        "datasets": [],
+        "active_layouts": active_layouts,
+        "camera": copy.deepcopy(presence["camera"]),
+        "view": copy.deepcopy(presence["view"]),
+        "display": copy.deepcopy(presence["display"]),
+        "dataset_order": copy.deepcopy(presence.get("dataset_order") or []),
+        "dataset_settings": copy.deepcopy(presence.get("dataset_settings") or {}),
+        "auto_contrast": {},
+    }
+
+
+def saved_view_presence(view: dict[str, Any]) -> dict[str, Any]:
+    """Return a presence-shaped facade backed by a saved-view dictionary."""
+
+    view.setdefault("dataset_order", [])
+    view.setdefault("dataset_settings", {})
+    view.setdefault("auto_contrast", {})
+    return {
+        "camera": view["camera"],
+        "view": view["view"],
+        "display": view["display"],
+        "following": None,
+        "dataset_order": view["dataset_order"],
+        "dataset_settings": view["dataset_settings"],
+        "auto_contrast": view["auto_contrast"],
+    }
+
+
+def viewer_profile_mutation_result(record: dict[str, Any]) -> dict[str, Any]:
+    view = record["view"]
+    return {
+        "durable": True,
+        "profile": record.get("profile"),
+        "revision": record.get("revision"),
+        "updated_at": record.get("updated_at"),
+        "camera": view["camera"],
+        "view": view["view"],
+        "display": view["display"],
+        "dataset_order": view.get("dataset_order") or [],
+        "dataset_settings": view.get("dataset_settings") or {},
+        "auto_contrast": view.get("auto_contrast") or {},
+    }
 
 
 def break_follow_messages(presence: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1433,9 +2297,29 @@ def ensure_channel_settings(
     return channels[channel]
 
 
-async def recv_snapshot(ws: Any, timeout: float) -> dict[str, Any]:
+class Deadline:
+    """A single monotonic budget shared by every phase of one operation."""
+
+    def __init__(self, timeout: float, *, operation: str):
+        if timeout <= 0:
+            raise LucidaError("config", "timeout must be positive")
+        self.timeout = timeout
+        self.operation = operation
+        self.expires_at = asyncio.get_running_loop().time() + timeout
+
+    def remaining(self) -> float:
+        remaining = self.expires_at - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise LucidaError(
+                "deadline_exceeded",
+                f"{self.operation} exceeded its {self.timeout:g}s deadline",
+            )
+        return remaining
+
+
+async def recv_snapshot(ws: Any, deadline: Deadline) -> dict[str, Any]:
     while True:
-        message = await recv_json(ws, timeout)
+        message = await recv_json(ws, deadline)
         message_type = message.get("type")
         if message_type == "snapshot":
             return message
@@ -1443,21 +2327,58 @@ async def recv_snapshot(ws: Any, timeout: float) -> dict[str, Any]:
             raise LucidaError("archived_workspace", "workspace is archived")
 
 
-async def recv_json(ws: Any, timeout: float) -> dict[str, Any]:
-    raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+async def recv_json(ws: Any, deadline: Deadline) -> dict[str, Any]:
+    try:
+        raw = await asyncio.wait_for(ws.recv(), timeout=deadline.remaining())
+    except asyncio.TimeoutError as error:
+        raise LucidaError(
+            "deadline_exceeded",
+            f"{deadline.operation} exceeded its {deadline.timeout:g}s deadline",
+        ) from error
     if isinstance(raw, bytes):
         raise LucidaError("protocol", "unexpected binary WebSocket message")
     try:
-        return json.loads(raw)
+        message = json.loads(raw)
     except json.JSONDecodeError as error:
         raise LucidaError("protocol", f"invalid workspace server message: {error}") from error
+    if not isinstance(message, dict):
+        raise LucidaError("protocol", "workspace server message must be a JSON object")
+    message_type = message.get("type")
+    if not isinstance(message_type, str) or not message_type:
+        raise LucidaError(
+            "protocol",
+            "workspace server message requires a non-empty string field 'type'",
+        )
+    if message_type == "workspace_archived":
+        raise LucidaError("archived_workspace", "workspace is archived")
+    return message
 
 
-async def send_json(ws: Any, message: dict[str, Any]) -> None:
-    await ws.send(json.dumps(message, separators=(",", ":")))
+async def send_json(
+    ws: Any,
+    message: dict[str, Any],
+    deadline: Deadline | None = None,
+) -> None:
+    payload = json.dumps(message, separators=(",", ":"))
+    if deadline is None:
+        await ws.send(payload)
+        return
+    try:
+        await asyncio.wait_for(ws.send(payload), timeout=deadline.remaining())
+    except asyncio.TimeoutError as error:
+        raise LucidaError(
+            "deadline_exceeded",
+            f"{deadline.operation} exceeded its {deadline.timeout:g}s deadline",
+        ) from error
 
 
-def default_ws_connect(url: str, headers: dict[str, str]) -> Any:
+def default_ws_connect(
+    url: str,
+    headers: dict[str, str],
+    *,
+    open_timeout: float | None = 30.0,
+    max_size: int = MAX_WEBSOCKET_MESSAGE_BYTES,
+) -> Any:
     try:
         import websockets
     except ImportError as error:
@@ -1466,7 +2387,12 @@ def default_ws_connect(url: str, headers: dict[str, str]) -> Any:
             "websockets is required for workspace session operations; in a source checkout run from lucida-py with `uv run python ...` or install dependencies with `uv sync`",
         ) from error
 
-    kwargs: dict[str, Any] = {"max_size": None}
+    if max_size <= 0:
+        raise ValueError("max_size must be positive")
+    kwargs: dict[str, Any] = {
+        "max_size": max_size,
+        "open_timeout": open_timeout,
+    }
     if headers:
         kwargs["additional_headers"] = headers
     try:
@@ -1488,6 +2414,7 @@ def run_sync(coro: Any) -> Any:
 
 __all__ = [
     "AuthResource",
+    "ChannelResource",
     "ConfigStore",
     "DatasetsResource",
     "DebugResource",
@@ -1501,6 +2428,7 @@ __all__ = [
     "ServerResource",
     "UrllibTransport",
     "ViewResource",
+    "ViewerProfilesResource",
     "WorkspaceResource",
     "WorkspacesResource",
     "normalize_server_base_url",

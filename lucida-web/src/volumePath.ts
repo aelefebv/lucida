@@ -5,7 +5,8 @@ import type { TickContext } from "./renderLoopTypes.ts";
 import type { DatasetManifest } from "./manifestTypes.ts";
 import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./pipeline/upload/constants.ts";
 import { computeScissorRect } from "./pipeline/upload/scissor.ts";
-import { resolveVisibleLabels, type LabelViewSetting } from "./pipeline/planning/labelRequests.ts";
+import { resolveVisibleLabels } from "./pipeline/planning/labelRequests.ts";
+import type { LabelSettings } from "./labelSettings.ts";
 import { labelModelMatrices } from "./renderer/labelLayout.ts";
 import { getActiveChannels, compositeKey } from "./tickCommon.ts";
 import type { DatasetSettings } from "./tickCommon.ts";
@@ -13,17 +14,17 @@ import { debugStats } from "./debug/debugStats.ts";
 import type { TickCoordinator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/tickCoordinator.ts";
 import type { Uploader } from "./pipeline/upload/uploader.ts";
 import type { SceneEpochs } from "./pipeline/epochs.ts";
+import {
+  createMemberPlacementAccessor,
+  type MemberPlacementAccessor,
+  type MemberPlacementMatrixScene,
+} from "./memberPlacement.ts";
 
 /**
- * The scene bindings {@link pushLabelVolumeLayers} needs to place a label at
- * its source image's world position: the source member's model matrix and
- * inverse. A narrow structural facet of the WASM scene so the function stays
- * unit-testable.
+ * Narrow scene facet used by the shared placement accessor when a source is
+ * outside the active roster.
  */
-export interface LabelVolumeScene {
-  member_model_matrix(datasetId: string, memberId: string): Float32Array;
-  inv_member_model_matrix(datasetId: string, memberId: string): Float32Array;
-}
+export type LabelVolumeScene = MemberPlacementMatrixScene;
 
 /**
  * Append a first-hit categorical overlay layer for each of the dataset's
@@ -37,20 +38,20 @@ export interface LabelVolumeScene {
  * {@link resolveVisibleLabels}. A label overlays its source image's physical
  * extent, so it renders in the SOURCE member's world placement (its model
  * matrix + inverse) — a coarser label still covers the same region of the view,
- * aligned by its own scale in the shader. Declared `image-label.colors` are
+ * aligned by its own scale in the shader. Both render modes resolve source
+ * placement through the shared {@link MemberPlacementAccessor}. Declared
+ * `image-label.colors` are
  * forwarded so authored palettes render exactly. Labels never change the
  * camera or bounds.
  */
 export function pushLabelVolumeLayers(
   layers: VolumeLayerParams[],
-  scene: LabelVolumeScene,
-  datasetId: string,
+  placement: MemberPlacementAccessor,
   manifest: DatasetManifest,
-  members: MemberRosterEntry[],
   viewProj: Float32Array,
   canvasW: number,
   canvasH: number,
-  labelSettings?: LabelViewSetting[],
+  labelSettings?: LabelSettings[],
 ): void {
   // `mode: "volume"` so the render path resolves the SAME eligible set the
   // volume fetch did — a label too large for a 3D texture is skipped by both
@@ -59,12 +60,9 @@ export function pushLabelVolumeLayers(
     const { label, source, opacity } = resolved;
     const sourceImageId = label.source_image_id;
     // Anchor to the source member's world placement so the overlay lands on
-    // the image it annotates (group-as-proxy entries carry their own matrices).
-    const sourceMember = members.find((m) => m.imageId === sourceImageId);
-    const sourceModel = sourceMember?.modelMatrix
-      ?? new Float32Array(scene.member_model_matrix(datasetId, sourceImageId));
-    const sourceInv = sourceMember?.invModelMatrix
-      ?? new Float32Array(scene.inv_member_model_matrix(datasetId, sourceImageId));
+    // the image it annotates.
+    const { modelMatrix: sourceModel, invModelMatrix: sourceInv } =
+      placement.matrices3d(sourceImageId);
     // Scale the source placement to the LABEL's own physical extent, so a
     // coarser/differently-scaled label stays aligned by its own scale (the
     // 3D analog of the 2D `labelFootprint`). Identity for a same-extent label.
@@ -100,6 +98,7 @@ export function createVolumeState(): VolumeState { return {}; }
 /** Data passed from the plan+fetch phase to the upload+render phase. */
 interface PlanResult {
   memberRoster: Map<string, MemberRosterEntry[]>;
+  memberPositionsByDataset: Map<string, Record<string, [number, number]>>;
   settings: { layerOrder: string[]; allSettings: Record<string, DatasetSettings> };
   eye: Float32Array;
   canvasW: number;
@@ -167,7 +166,7 @@ function uploadAndRenderVolume(
           const compKey = compositeKey(m.imageId, ch);
           // Model matrix is in the descriptor; CPU side still needs it
           // for the scissor rect projection. Same source as cold state
-          // (synthesised for group-as-proxy, scene query for tiles).
+          // (precomputed when available, otherwise queried from the scene).
           const model = m.modelMatrix
             ?? new Float32Array(scene.member_model_matrix(dsId, m.imageId));
 
@@ -216,10 +215,12 @@ function uploadAndRenderVolume(
     // never affects camera/bounds.
     pushLabelVolumeLayers(
       layers,
-      scene,
-      dsId,
+      createMemberPlacementAccessor({
+        members,
+        positions: plan.memberPositionsByDataset.get(dsId),
+        matrixSource: { datasetId: dsId, scene },
+      }),
       dsVol.manifest,
-      members,
       viewProj,
       canvasW,
       canvasH,
@@ -288,6 +289,7 @@ export function tickVolume(
 
   const planResult: PlanResult = {
     memberRoster: orchResult.memberRoster,
+    memberPositionsByDataset: orchResult.memberPositionsByDataset,
     settings: orchResult.settings,
     eye, canvasW, canvasH, fullW, fullH, viewT, viewC,
     multiChannel: orchResult.multiChannel,

@@ -10,14 +10,13 @@
  * Renderer-thin cases (`updateCursorData`, `viewHotState`) stay inline
  * here — they're small enough that extracting them into individual files
  * would obscure rather than clarify. The bigger cases delegate to their
- * existing per-mode files (`coldState/apply.ts`, `proxy/upload.ts`,
- * `slice/upload.ts`, `slice/render.ts`, `volume/upload.ts`,
+ * existing per-mode files (`coldState/apply.ts`, `slice/upload.ts`,
+ * `slice/render.ts`, `volume/upload.ts`,
  * `volume/render.ts`, `minimapHandlers.ts`).
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
 import type { MainToWorkerMessage } from "../workerProtocol.ts";
-import { destroyProxyAtlas } from "../proxyAtlas.ts";
 import { destroyDescriptorBuffer } from "../descriptorBuffer.ts";
 import {
   applyColdState,
@@ -25,7 +24,6 @@ import {
   applyColdStateSelection,
   applyColdStateDelta,
 } from "../coldState/index.ts";
-import { handleProxyUpload } from "../proxy/index.ts";
 import {
   handleLabelSliceChunkData,
   handleSliceChunkData,
@@ -47,9 +45,25 @@ import {
   handleThumbnailRender,
   removeMinimapResources,
 } from "../minimapHandlers.ts";
-import { rebuildDescriptorIfMatching } from "./bootstrap.ts";
 import { postChunksRequeued } from "../chunkUploadFeedback.ts";
 import { memberTierKey } from "../poolKeys.ts";
+import { invalidateAggregateTopologyForDataset } from "./state.ts";
+import { admitWorkerRenderSurface } from "./surface.ts";
+
+/**
+ * A render submission is only observable as presented after WebGPU confirms
+ * every command already submitted to this queue has completed. Keeping this
+ * handshake in one helper prevents slice and volume paths from drifting and
+ * gives capture/FPS/overlay consumers a truthful lifecycle boundary.
+ */
+export function reportFramePresentedAfterGpuCompletion(ctx: WorkerCtx, frameId: number): void {
+  void ctx.device.queue.onSubmittedWorkDone()
+    .then(() => ctx.post({ type: "framePresented", frameId }))
+    .catch((error) => ctx.post({
+      type: "error",
+      message: error instanceof Error ? error.message : String(error),
+    }));
+}
 
 /**
  * Dispatch one main-thread message. The caller is responsible for
@@ -63,9 +77,11 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       return;
 
     case "resize": {
+      const surface = admitWorkerRenderSurface(ctx, msg.width, msg.height);
+      if (!surface) return;
       const canvas = ctx.context.canvas as OffscreenCanvas;
-      canvas.width = msg.width;
-      canvas.height = msg.height;
+      canvas.width = surface.width;
+      canvas.height = surface.height;
       return;
     }
 
@@ -80,13 +96,15 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
         return;
       }
       handleSliceChunkData(ctx, msg, ctx.state.currentEpochs, poolKey, memberId);
+      const datasetId = ctx.state.memberToDataset.get(memberId);
+      if (datasetId) invalidateAggregateTopologyForDataset(ctx.state, datasetId);
       return;
     }
     case "labelSliceChunkData":
       handleLabelSliceChunkData(ctx, msg);
       return;
-    case "sliceRenderMultiPass":
-      handleSliceRenderMultiPass(ctx, msg, (memberId) => {
+    case "sliceRenderMultiPass": {
+      const complete = handleSliceRenderMultiPass(ctx, msg, (memberId) => {
         const detailPoolKey =
           ctx.state.memberTierToPool.get(memberTierKey(memberId, "detail")) ??
           ctx.state.memberToPool.get(memberId) ??
@@ -95,14 +113,13 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
           ctx.state.memberTierToPool.get(memberTierKey(memberId, "coarse")) ?? null;
         const datasetId = ctx.state.memberToDataset.get(memberId) ?? null;
         if (!detailPoolKey && !coarsePoolKey) {
-          // No chunk pool — still report dataset so the handler can
-          // bind a dummy chunk atlas and proceed with proxy-only render
-          // (e.g. group-as-proxy entries).
-          return datasetId ? { detailPoolKey: null, coarsePoolKey: null, datasetId } : null;
+          return null;
         }
         return { detailPoolKey, coarsePoolKey, datasetId };
       });
+      if (complete) reportFramePresentedAfterGpuCompletion(ctx, msg.frameId);
       return;
+    }
 
     case "volumeChunkData": {
       const memberId = msg.memberId;
@@ -121,8 +138,8 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
     case "labelVolumeChunkData":
       handleLabelVolumeChunkData(ctx, msg);
       return;
-    case "volumeRenderMultiPass":
-      handleVolumeRenderMultiPass(ctx, msg, (memberId) => {
+    case "volumeRenderMultiPass": {
+      const complete = handleVolumeRenderMultiPass(ctx, msg, (memberId) => {
         const detailPoolKey =
           ctx.state.memberTierToPool.get(memberTierKey(memberId, "detail")) ??
           ctx.state.memberToPool.get(memberId) ??
@@ -131,19 +148,11 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
           ctx.state.memberTierToPool.get(memberTierKey(memberId, "coarse")) ?? null;
         const datasetId = ctx.state.memberToDataset.get(memberId) ?? null;
         if (!detailPoolKey && !coarsePoolKey) {
-          // No chunk pool — still report datasetId so the handler can
-          // bind a dummy chunk atlas and proceed with a proxy-only
-          // render (group-as-proxy entries take this path).
-          return datasetId ? { detailPoolKey: null, coarsePoolKey: null, datasetId } : null;
+          return null;
         }
         return { detailPoolKey, coarsePoolKey, datasetId };
       });
-      return;
-
-    case "proxyAssetData": {
-      const outcome = handleProxyUpload(ctx, msg);
-      if (outcome.rebuildDescriptor) rebuildDescriptorIfMatching(ctx, msg.datasetId);
-      if (outcome.wantedSetChanged) ctx.postWantedSet();
+      if (complete) reportFramePresentedAfterGpuCompletion(ctx, msg.frameId);
       return;
     }
 
@@ -178,6 +187,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       ctx.state.currentEpochs = msg.epochs;
       ctx.state.coldStateByDataset.set(msg.datasetId, msg);
       applyColdState(ctx, msg);
+      invalidateAggregateTopologyForDataset(ctx.state, msg.datasetId);
       ctx.postWantedSet();
       return;
 
@@ -186,6 +196,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       // resident descriptor buffer without re-ingesting cold state. No
       // residency changed, so no wanted-set is posted.
       applyColdStateDisplay(ctx, msg);
+      invalidateAggregateTopologyForDataset(ctx.state, msg.datasetId);
       return;
 
     case "coldStateSelection":
@@ -194,6 +205,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       // for the new plane/timepoint. The freshly-wanted chunks changed, so the
       // wanted-set is posted (as with a full cold state).
       applyColdStateSelection(ctx, msg);
+      invalidateAggregateTopologyForDataset(ctx.state, msg.datasetId);
       ctx.postWantedSet();
       return;
 
@@ -204,19 +216,17 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       // consistency with the full / selection paths — even when the delta was a
       // no-op (dataset not yet ingested), matching how those paths always post.
       applyColdStateDelta(ctx, msg);
+      invalidateAggregateTopologyForDataset(ctx.state, msg.datasetId);
       ctx.postWantedSet();
       return;
 
     case "removeLayerResources": {
+      const aggregateDatasetId =
+        ctx.state.memberToDataset.get(msg.datasetId) ?? msg.datasetId;
+      invalidateAggregateTopologyForDataset(ctx.state, aggregateDatasetId);
       removeSliceResources(ctx, msg.datasetId);
       removeVolumeResources(ctx, msg.datasetId);
       removeMinimapResources(msg.datasetId);
-      // Destroy proxy pools for this dataset.
-      const dsPools = ctx.state.proxyPoolsByDataset.get(msg.datasetId);
-      if (dsPools) {
-        for (const pool of dsPools.values()) destroyProxyAtlas(pool);
-        ctx.state.proxyPoolsByDataset.delete(msg.datasetId);
-      }
       // Drop the per-dataset descriptor buffer.
       const desc = ctx.state.descriptorBuffersByDataset.get(msg.datasetId);
       if (desc) {
@@ -238,19 +248,15 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
           ctx.state.memberTierToPool.delete(memberTierKey(memberId, "coarse"));
         }
       }
-      // Drop group→tiles entries owned by this dataset. Tracked via
-      // groupsByDataset so we don't have to scan every group's child set.
-      const groups = ctx.state.groupsByDataset.get(msg.datasetId);
-      if (groups) {
-        for (const groupId of groups) ctx.state.groupToTiles.delete(groupId);
-        ctx.state.groupsByDataset.delete(msg.datasetId);
-      }
       // If the dataset being dropped is the one whose cold state is
       // active, clear that pointer too — no more renders/uploads will
       // arrive against this state.
       if (ctx.state.currentColdState?.datasetId === msg.datasetId) {
         ctx.state.currentColdState = null;
       }
+      // Explicit dataset ownership is the final reconciliation boundary for
+      // any tracked resource a domain-specific registry missed.
+      ctx.gpuResources.destroyDataset(msg.datasetId);
       return;
     }
 

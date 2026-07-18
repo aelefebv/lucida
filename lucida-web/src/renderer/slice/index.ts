@@ -14,7 +14,6 @@ export {
   destroyAllSliceAtlasResources,
   destroyAllLabelSlicePools,
   destroySliceAtlas,
-  getDummySliceIndirection,
   getOrCreateSlicePool,
   getOrCreateLabelSlicePool,
   removeLabelSlicePool,
@@ -37,7 +36,11 @@ export { remapSliceIndirection } from "./remap.ts";
 
 export { handleSliceChunkData, handleLabelSliceChunkData } from "./upload.ts";
 
-export { handleSliceRenderMultiPass } from "./render.ts";
+export {
+  clearAggregateQuadCache,
+  handleSliceRenderMultiPass,
+  removeAggregateQuadCacheForDataset,
+} from "./render.ts";
 
 export { computeTargetChunkZ } from "./zRetarget.ts";
 
@@ -48,6 +51,10 @@ import {
   removeSliceAtlas,
 } from "./atlas.ts";
 import { clearAllCameraUVs, clearCameraUVForMember } from "./eviction.ts";
+import {
+  clearAggregateQuadCache,
+  removeAggregateQuadCacheForDataset,
+} from "./render.ts";
 import type { WorkerCtx } from "../workerContext.ts";
 
 /**
@@ -63,6 +70,7 @@ import type { WorkerCtx } from "../workerContext.ts";
 export function removeSliceResources(ctx: WorkerCtx, idOrMember: string): void {
   removeSliceAtlas(ctx, idOrMember);
   removeLabelSlicePoolsForDataset(ctx, idOrMember);
+  removeAggregateQuadCacheForDataset(ctx, idOrMember);
   clearCameraUVForMember(ctx.state, idOrMember);
 }
 
@@ -70,5 +78,6 @@ export function removeSliceResources(ctx: WorkerCtx, idOrMember: string): void {
 export function destroyAllSliceResources(ctx: WorkerCtx): void {
   destroyAllSliceAtlasResources(ctx);
   destroyAllLabelSlicePools(ctx);
+  clearAggregateQuadCache(ctx);
   clearAllCameraUVs(ctx.state);
 }

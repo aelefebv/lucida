@@ -1,27 +1,23 @@
-use std::collections::HashMap;
+#![deny(clippy::print_stderr)]
+
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use axum::Router;
-use axum::extract::State;
-use axum::extract::ws::WebSocketUpgrade;
-use axum::response::IntoResponse;
+use axum::http::Method;
+use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HOST};
 use axum::routing::{get, post};
+use axum::{Extension, Router};
 use clap::{Args, Parser, Subcommand};
-use tokio::sync::{Mutex, broadcast};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use lucida_server::admin::{self, admin_clear_proxy_cache};
 use lucida_server::auth;
-use lucida_server::bookmarks;
 use lucida_server::health;
-use lucida_server::session::Session;
+use lucida_server::legacy_bookmark_recovery::{self, RecoveryRequest, RecoveryVisibility};
 use lucida_server::static_serve;
-use lucida_server::{
-    AppState, BroadcastItem, ProxyConfig, UnicastRoutes, browse, handler, workspace,
-};
+use lucida_server::{AppState, DatasetRuntimeConfig, browse, workspace};
 
 // CLI supports legacy `lucida-server --data-dir /path` (no subcommand,
 // treated as `serve`) alongside explicit `serve` / `clear-proxy-cache`
@@ -29,7 +25,7 @@ use lucida_server::{
 // unambiguous.
 #[derive(Parser, Debug)]
 #[command(name = "lucida-server", about = "Lucida collaborative imaging server")]
-#[command(version)] // pulls from Cargo.toml's [package].version at build time
+#[command(version = health::BUILD_VERSION)]
 #[command(args_conflicts_with_subcommands = true)]
 struct Cli {
     #[command(subcommand)]
@@ -44,9 +40,13 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Run the WebSocket server (default if no subcommand is given).
-    Serve(ServeArgs),
+    Serve(Box<ServeArgs>),
     /// Clear the on-disk proxy cache for one dataset URL or all datasets.
     ClearProxyCache(ClearArgs),
+    /// Probe this server's readiness (used by the container healthcheck).
+    Healthcheck(HealthcheckArgs),
+    /// Validate or apply recovery of one retired bookmark into a workspace.
+    RecoverLegacyBookmark(RecoverLegacyBookmarkArgs),
 }
 
 #[derive(Args, Debug, Default)]
@@ -57,25 +57,65 @@ struct ServeArgs {
     /// var when both are set (clap's default behavior).
     #[arg(long, env = "LUCIDA_DATA_DIR")]
     data_dir: Option<PathBuf>,
-    /// Override the proxy cache root (default: platform user cache dir).
-    ///
-    /// Also readable from `LUCIDA_PROXY_CACHE_DIR`. CLI flag wins.
-    #[arg(long, env = "LUCIDA_PROXY_CACHE_DIR")]
-    proxy_cache_dir: Option<PathBuf>,
-    /// Override the per-generator concurrency cap (default: NCPU/2).
-    ///
-    /// Also readable from `LUCIDA_PROXY_CONCURRENCY`. CLI flag wins.
-    #[arg(long, env = "LUCIDA_PROXY_CONCURRENCY")]
-    proxy_concurrency: Option<usize>,
-    /// Re-enable retired proxy fallback catalogs and asset generation.
-    #[arg(long, env = "LUCIDA_LEGACY_PROXY_ENABLED", default_value_t = false)]
-    legacy_proxy_enabled: bool,
+    /// HTTP(S) dataset hosts allowed for server-side reads. DNS answers must
+    /// also be public unless covered by an allowed CIDR.
+    #[arg(long, env = "LUCIDA_SOURCE_HTTP_HOSTS", value_delimiter = ',')]
+    source_http_hosts: Vec<String>,
+    /// Network ranges allowed for HTTP(S) dataset reads. This is the explicit
+    /// opt-in for intentional private/LAN sources.
+    #[arg(long, env = "LUCIDA_SOURCE_HTTP_CIDRS", value_delimiter = ',')]
+    source_http_cidrs: Vec<String>,
+    /// Deployment-specific IPv6 translation/transition prefixes to reject.
+    /// Use this for RFC 6052 network-specific prefixes, which cannot be
+    /// recognized from the address alone. Built-in standard prefixes are
+    /// always rejected.
+    #[arg(
+        long,
+        env = "LUCIDA_SOURCE_HTTP_IPV6_TRANSLATION_CIDRS",
+        value_delimiter = ','
+    )]
+    source_http_ipv6_translation_cidrs: Vec<String>,
+    /// S3 buckets an editor may open through server credentials.
+    #[arg(long, env = "LUCIDA_SOURCE_S3_BUCKETS", value_delimiter = ',')]
+    source_s3_buckets: Vec<String>,
+    /// GCS buckets an editor may open through server credentials.
+    #[arg(long, env = "LUCIDA_SOURCE_GCS_BUCKETS", value_delimiter = ',')]
+    source_gcs_buckets: Vec<String>,
+    /// Permit the process ambient cloud identity, restricted to the explicit
+    /// bucket allowlists above.
+    #[arg(
+        long,
+        env = "LUCIDA_SOURCE_ALLOW_AMBIENT_CLOUD_CREDENTIALS",
+        default_value_t = false
+    )]
+    source_allow_ambient_cloud_credentials: bool,
+    /// Hard process-resident budget shared by source cache bodies, in-flight
+    /// reads, decode work, and generated ready chunks.
+    #[arg(
+        long,
+        env = "LUCIDA_MEMORY_BUDGET_BYTES",
+        default_value_t = 512 * 1024 * 1024
+    )]
+    memory_budget_bytes: usize,
+    /// Reject any one source object larger than this before collecting its
+    /// response body.
+    #[arg(
+        long,
+        env = "LUCIDA_MAX_SOURCE_OBJECT_BYTES",
+        default_value_t = 64 * 1024 * 1024
+    )]
+    max_source_object_bytes: usize,
     /// Enable server-generated coarse chunks.
     #[arg(long, env = "LUCIDA_GENERATED_COARSE_ENABLED", default_value_t = true)]
     generated_coarse_enabled: bool,
     /// Override the generated coarse derived-cache root.
     #[arg(long, env = "LUCIDA_GENERATED_COARSE_CACHE_DIR")]
     generated_coarse_cache_dir: Option<PathBuf>,
+    /// Retired proxy-cache root, used only by cache-clear upgrade cleanup.
+    /// `LUCIDA_PROXY_CACHE_DIR` is preserved as an explicit deprecated
+    /// compatibility input; generated-coarse writes never target this root.
+    #[arg(long, env = "LUCIDA_PROXY_CACHE_DIR")]
+    legacy_proxy_cache_dir: Option<PathBuf>,
     #[arg(long, env = "LUCIDA_GENERATED_COARSE_CONCURRENCY")]
     generated_coarse_concurrency: Option<usize>,
     #[arg(long, env = "LUCIDA_GENERATED_COARSE_BACKGROUND_CHUNKS")]
@@ -86,14 +126,39 @@ struct ServeArgs {
     generated_coarse_chunk_long_axis: Option<u64>,
     #[arg(long, env = "LUCIDA_GENERATED_COARSE_MAX_CHUNK_BYTES")]
     generated_coarse_max_chunk_bytes: Option<u64>,
-    #[arg(long, env = "LUCIDA_GENERATED_COARSE_DISK_BUDGET_BYTES")]
-    generated_coarse_disk_budget_bytes: Option<u64>,
+    #[arg(
+        long,
+        env = "LUCIDA_GENERATED_COARSE_DISK_BUDGET_BYTES",
+        default_value_t = lucida_server::DEFAULT_GENERATED_DISK_BUDGET_BYTES
+    )]
+    generated_coarse_disk_budget_bytes: u64,
     /// How long a live workspace with no connected clients remains in memory.
     #[arg(long, env = "LUCIDA_WORKSPACE_IDLE_TTL_SECS", default_value_t = 3600)]
     workspace_idle_ttl_secs: u64,
     /// How often the server checks for idle live workspaces.
     #[arg(long, env = "LUCIDA_WORKSPACE_IDLE_SWEEP_SECS", default_value_t = 60)]
     workspace_idle_sweep_secs: u64,
+    /// Hard process-wide byte budget shared by every WebSocket outbound queue.
+    #[arg(
+        long,
+        env = "LUCIDA_WEBSOCKET_OUTBOX_BUDGET_BYTES",
+        default_value_t = lucida_server::outbox::DEFAULT_PROCESS_OUTBOX_BYTES
+    )]
+    websocket_outbox_budget_bytes: usize,
+    /// Additional browser origins allowed to make credentialed requests.
+    /// Same-host requests are always allowed. Comma-delimited in the env var.
+    #[arg(long, env = "LUCIDA_CORS_ALLOWED_ORIGINS", value_delimiter = ',')]
+    cors_allowed_origins: Vec<String>,
+    /// Explicit development escape hatch that reflects any browser Origin.
+    #[arg(long, env = "LUCIDA_CORS_PERMISSIVE", default_value_t = false)]
+    cors_permissive: bool,
+    /// Total time allowed for connection/background-work drain after a
+    /// termination signal. Includes the readiness propagation quiet period.
+    #[arg(long, env = "LUCIDA_SHUTDOWN_TIMEOUT_SECS", default_value_t = 30)]
+    shutdown_timeout_secs: u64,
+    /// Time between flipping readiness false and stopping HTTP acceptance.
+    #[arg(long, env = "LUCIDA_SHUTDOWN_QUIET_PERIOD_SECS", default_value_t = 2)]
+    shutdown_quiet_period_secs: u64,
 }
 
 #[derive(Args, Debug)]
@@ -102,9 +167,53 @@ struct ClearArgs {
     /// subdirectory under the cache root.
     #[arg(long)]
     dataset: Option<String>,
-    /// Override the cache directory (default: platform user cache dir).
-    #[arg(long)]
+    /// Override the active generated-coarse cache directory.
+    #[arg(long, env = "LUCIDA_GENERATED_COARSE_CACHE_DIR")]
     cache_dir: Option<PathBuf>,
+    /// Override the retired proxy-cache directory cleaned during upgrades.
+    #[arg(long, env = "LUCIDA_PROXY_CACHE_DIR")]
+    legacy_cache_dir: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+struct HealthcheckArgs {
+    /// Readiness URL served by this container.
+    #[arg(
+        long,
+        env = "LUCIDA_HEALTHCHECK_URL",
+        default_value = "http://127.0.0.1:9876/readyz"
+    )]
+    url: String,
+    /// Hard deadline for the probe request.
+    #[arg(long, default_value_t = 2_000)]
+    timeout_ms: u64,
+}
+
+#[derive(Args, Debug)]
+struct RecoverLegacyBookmarkArgs {
+    /// Existing Lucida SQLite database. A missing path is never created.
+    #[arg(long, env = "LUCIDA_DB_PATH", default_value = "lucida.db")]
+    db_path: PathBuf,
+    /// UUID/id from the retired `bookmarks` table.
+    #[arg(long)]
+    bookmark: String,
+    /// Chosen target workspace UUID/id.
+    #[arg(long)]
+    workspace: String,
+    /// Current target-workspace member to own the saved view. Defaults to the
+    /// legacy creator, who must still be a member.
+    #[arg(long)]
+    creator: Option<String>,
+    /// Personal is the safe default. Shared requires an editor or owner.
+    #[arg(long, value_enum, default_value_t = RecoveryVisibility::Personal)]
+    visibility: RecoveryVisibility,
+    /// Commit the validated recovery. Without this flag, the command is a
+    /// read-only dry run.
+    #[arg(long)]
+    apply: bool,
+    /// Emit the recovery plan/result as JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 // LUCIDA_LOG_FORMAT={text,json} (default text) switches between
@@ -127,22 +236,6 @@ impl LogFormat {
             _ => Self::Text,
         }
     }
-}
-
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    let id = state.next_id.fetch_add(1, Ordering::Relaxed);
-    ws.on_upgrade(move |socket| async move {
-        tracing::info!(client_id = id, "ws.client_connected");
-        handler::handle_client(
-            id,
-            socket,
-            state.session,
-            state.tx,
-            state.unicast_routes,
-            state.proxy_config,
-        )
-        .await;
-    })
 }
 
 #[tokio::main]
@@ -178,31 +271,88 @@ async fn main() -> std::io::Result<()> {
 
     let cli = Cli::parse();
     // Treat "no subcommand" as `serve` with the top-level flags.
-    let command = cli.command.unwrap_or(Commands::Serve(cli.serve_args));
+    let command = cli
+        .command
+        .unwrap_or_else(|| Commands::Serve(Box::new(cli.serve_args)));
 
     match command {
-        Commands::Serve(args) => run_serve(args).await,
+        Commands::Serve(args) => run_serve(*args).await,
         Commands::ClearProxyCache(args) => run_clear(args),
+        Commands::Healthcheck(args) => run_healthcheck(args).await,
+        Commands::RecoverLegacyBookmark(args) => {
+            let json = args.json;
+            match run_recover_legacy_bookmark(args).await {
+                Ok(()) => Ok(()),
+                Err(error) => exit_legacy_bookmark_recovery_error(&error, json),
+            }
+        }
     }
 }
 
 async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
+    // Created before any fallible startup dependency. No request can observe
+    // `Ready` until every store/router is initialized and the listener binds.
+    let lifecycle = health::RuntimeLifecycle::new();
+    lucida_server::outbox::configure_process_outbox_budget(args.websocket_outbox_budget_bytes)
+        .map_err(std::io::Error::other)?;
+    tracing::info!(
+        budget_bytes = args.websocket_outbox_budget_bytes,
+        per_connection_bytes = lucida_server::outbox::DEFAULT_OUTBOX_BYTES,
+        "websocket.outbox_budget.config"
+    );
+    let origin_policy = lucida_server::origin::OriginPolicy::new(
+        args.cors_allowed_origins.clone(),
+        args.cors_permissive,
+    )
+    .map_err(std::io::Error::other)?;
+    if origin_policy.permissive() {
+        tracing::warn!("http.origin_policy.permissive");
+    }
     let data_dir = args.data_dir;
-    let proxy_cache_dir = args
-        .proxy_cache_dir
-        .unwrap_or_else(ProxyConfig::default_cache_dir);
-    let proxy_concurrency = args
-        .proxy_concurrency
-        .map(|n| n.max(1))
-        .unwrap_or_else(ProxyConfig::default_concurrency);
+    let source_policy = Arc::new(
+        lucida_server::source_policy::SourceTrustPolicy::from_config(
+            lucida_server::source_policy::SourceTrustConfig {
+                local_roots: data_dir.iter().cloned().collect(),
+                http_hosts: args.source_http_hosts,
+                http_cidrs: args.source_http_cidrs,
+                http_ipv6_translation_cidrs: args.source_http_ipv6_translation_cidrs,
+                s3_buckets: args.source_s3_buckets,
+                gcs_buckets: args.source_gcs_buckets,
+                allow_ambient_cloud_credentials: args.source_allow_ambient_cloud_credentials,
+            },
+        )
+        .map_err(std::io::Error::other)?,
+    );
+    if args.memory_budget_bytes == 0 {
+        return Err(std::io::Error::other(
+            "memory budget must be greater than zero",
+        ));
+    }
+    if args.generated_coarse_disk_budget_bytes == 0 {
+        return Err(std::io::Error::other(
+            "generated coarse disk budget must be greater than zero",
+        ));
+    }
+    if args.max_source_object_bytes == 0 || args.max_source_object_bytes > args.memory_budget_bytes
+    {
+        return Err(std::io::Error::other(
+            "maximum source object bytes must be positive and no larger than the memory budget",
+        ));
+    }
+    let source_cache = lucida_store::cache::SharedObjectCache::new(
+        args.memory_budget_bytes,
+        args.max_source_object_bytes,
+    );
 
-    let proxy_config = ProxyConfig {
+    let dataset_runtime = DatasetRuntimeConfig {
+        source_policy: Arc::clone(&source_policy),
+        source_cache: Arc::clone(&source_cache),
         generated_cache_dir: args
             .generated_coarse_cache_dir
-            .unwrap_or_else(|| proxy_cache_dir.join("generated-coarse")),
-        cache_dir: proxy_cache_dir,
-        concurrency: proxy_concurrency,
-        legacy_proxy_enabled: args.legacy_proxy_enabled,
+            .unwrap_or_else(DatasetRuntimeConfig::default_generated_cache_dir),
+        legacy_proxy_cache_dir: args
+            .legacy_proxy_cache_dir
+            .unwrap_or_else(DatasetRuntimeConfig::default_legacy_proxy_cache_dir),
         generated_enabled: args.generated_coarse_enabled,
         generated_concurrency: args
             .generated_coarse_concurrency
@@ -219,35 +369,31 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     // Operational logs go through the configured tracing subscriber
     // so RUST_LOG filtering applies (ADR 0012).
     tracing::info!(
-        cache_dir = %proxy_config.cache_dir.display(),
-        concurrency = proxy_config.concurrency,
-        legacy_enabled = proxy_config.legacy_proxy_enabled,
-        "proxy.config",
+        local_roots = source_policy.local_roots().len(),
+        "source_policy.config",
     );
     tracing::info!(
-        enabled = proxy_config.generated_enabled,
-        cache_dir = %proxy_config.generated_cache_dir.display(),
-        concurrency = proxy_config.generated_concurrency,
-        background_chunk_limit = proxy_config.generated_background_chunk_limit,
-        target_long_axis = proxy_config.generated_target_long_axis,
-        chunk_long_axis = proxy_config.generated_chunk_long_axis,
-        max_chunk_bytes = proxy_config.generated_max_chunk_bytes,
-        disk_budget_bytes = ?proxy_config.generated_disk_budget_bytes,
+        memory_budget_bytes = source_cache.memory_snapshot().max_bytes,
+        max_source_object_bytes = args.max_source_object_bytes,
+        "memory_budget.config",
+    );
+    tracing::info!(
+        enabled = dataset_runtime.generated_enabled,
+        cache_dir = %dataset_runtime.generated_cache_dir.display(),
+        legacy_proxy_cache_dir = %dataset_runtime.legacy_proxy_cache_dir.display(),
+        concurrency = dataset_runtime.generated_concurrency,
+        background_chunk_limit = dataset_runtime.generated_background_chunk_limit,
+        target_long_axis = dataset_runtime.generated_target_long_axis,
+        chunk_long_axis = dataset_runtime.generated_chunk_long_axis,
+        max_chunk_bytes = dataset_runtime.generated_max_chunk_bytes,
+        disk_budget_bytes = dataset_runtime.generated_disk_budget_bytes,
+        disk_entry_budget = lucida_server::DEFAULT_GENERATED_DISK_ENTRY_BUDGET,
         "generated_coarse.config",
     );
 
-    let session = Arc::new(Mutex::new(Session::new()));
-    let (tx, _) = broadcast::channel::<BroadcastItem>(256);
-    let next_id = Arc::new(AtomicU64::new(0));
-    let unicast_routes: UnicastRoutes = Arc::new(Mutex::new(HashMap::new()));
-
     let state = AppState {
-        session,
-        tx,
-        next_id,
-        unicast_routes,
         data_dir,
-        proxy_config: proxy_config.clone(),
+        dataset_runtime: dataset_runtime.clone(),
     };
 
     // Env-var validation lives in `AuthConfig::from_env`: `LUCIDA_BIND`,
@@ -287,25 +433,14 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     // Audit signal: explicit acknowledgment that we're running with
     // auth disabled on a non-loopback bind. This combination should
     // raise eyebrows in code review (ADR-0018 §"Consequences"); the
-    // banner is multi-line on purpose so it survives log truncation
-    // and stands out in `journalctl` / k8s logs.
+    // Keep this as one structured warning so RUST_LOG filtering, span context,
+    // and JSON log collectors all observe the same event.
     if auth_config.insecure_acknowledged {
-        // Structured audit event so the signal lands in the audit log
-        // pipeline alongside the other `auth.*` events, not just the
-        // operator-eyeballed stderr banner.
         tracing::warn!(
             bind = %auth_config.bind_addr,
             mode = %mode_str,
             "auth.startup.insecure_mode",
         );
-        eprintln!("============================================================");
-        eprintln!("WARNING: LUCIDA_INSECURE=1 is set");
-        eprintln!(
-            "AUTH DISABLED on bind {} — server is exposed",
-            auth_config.bind_addr
-        );
-        eprintln!("without authentication. Do not use in production.");
-        eprintln!("============================================================");
     }
     if let Some(g) = auth_config.google.as_ref() {
         tracing::info!(
@@ -336,20 +471,44 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         auth::SqlitePendingAuthStore::new(session_store.pool().clone()),
     );
 
-    let extractor = auth::middleware::build_extractor(
+    // Construct the workspace runtime before auth routes so credential
+    // revocation can synchronously disconnect every live socket belonging to
+    // that principal, rather than waiting for its next request to fail.
+    let workspace_store = Arc::new(workspace::SqliteWorkspaceStore::new(
+        session_store.pool().clone(),
+    ));
+    let workspace_runtime_config = workspace::WorkspaceRuntimeConfig {
+        idle_ttl: Duration::from_secs(args.workspace_idle_ttl_secs),
+        idle_sweep_interval: Duration::from_secs(args.workspace_idle_sweep_secs.max(1)),
+    };
+    tracing::info!(
+        idle_ttl_secs = workspace_runtime_config.idle_ttl.as_secs(),
+        idle_sweep_secs = workspace_runtime_config.idle_sweep_interval.as_secs(),
+        "workspace.runtime.config"
+    );
+    let workspace_manager = Arc::new(workspace::WorkspaceManager::new_with_runtime_config(
+        workspace_store as Arc<dyn workspace::WorkspaceStore>,
+        dataset_runtime.clone(),
+        workspace_runtime_config,
+    ));
+
+    let extractor = auth::middleware::build_extractor_with_auth_epochs(
         Arc::clone(&auth_config),
         Arc::clone(&session_store_dyn),
         Arc::clone(&bearer_token_store),
+        workspace_manager.auth_epoch_registry(),
     );
 
     let logout_state = auth::handlers::LogoutState {
         config: Arc::clone(&auth_config),
         store: Arc::clone(&session_store_dyn),
+        workspace_manager: Some(Arc::clone(&workspace_manager)),
     };
     let cli_auth_state = auth::handlers::CliAuthState {
         config: Arc::clone(&auth_config),
         token_store: Arc::clone(&bearer_token_store),
         cli_store: Arc::clone(&cli_authorization_store),
+        workspace_manager: Some(Arc::clone(&workspace_manager)),
     };
 
     // Two auth-route flavors so the OAuth flow doesn't bounce itself:
@@ -378,41 +537,8 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
             post(auth::handlers::logout).with_state(logout_state),
         );
 
-    // Server-stored bookmarks share the same SQLite pool as the auth
-    // stores; the bookmarks router lands on the protected half so every
-    // handler sees an `AuthPrincipal` in extensions.
-    let bookmark_store = std::sync::Arc::new(bookmarks::SqliteBookmarkStore::new(
-        session_store.pool().clone(),
-    ));
-    let bookmarks_state = bookmarks::handlers::BookmarksState {
-        store: bookmark_store as std::sync::Arc<dyn bookmarks::BookmarkStore>,
-        // Plumb the live session + unicast routes so handlers can
-        // broadcast `BookmarkChanged` to clients with overlapping
-        // loaded datasets after every successful CUD operation.
-        session: Some(Arc::clone(&state.session)),
-        unicast_routes: Some(Arc::clone(&state.unicast_routes)),
-    };
-    let bookmarks_router: Router<()> = bookmarks::routes::router(bookmarks_state);
-
-    let workspace_store = Arc::new(workspace::SqliteWorkspaceStore::new(
-        session_store.pool().clone(),
-    ));
-    let workspace_runtime_config = workspace::WorkspaceRuntimeConfig {
-        idle_ttl: Duration::from_secs(args.workspace_idle_ttl_secs),
-        idle_sweep_interval: Duration::from_secs(args.workspace_idle_sweep_secs.max(1)),
-    };
-    tracing::info!(
-        idle_ttl_secs = workspace_runtime_config.idle_ttl.as_secs(),
-        idle_sweep_secs = workspace_runtime_config.idle_sweep_interval.as_secs(),
-        "workspace.runtime.config"
-    );
-    let workspace_manager = Arc::new(workspace::WorkspaceManager::new_with_runtime_config(
-        workspace_store as Arc<dyn workspace::WorkspaceStore>,
-        proxy_config.clone(),
-        workspace_runtime_config,
-    ));
-    let _workspace_idle_eviction_handle = workspace_manager.spawn_idle_eviction_loop();
-    let workspaces_router: Router<()> = workspace::router(workspace_manager);
+    let workspace_idle_eviction_handle = workspace_manager.spawn_idle_eviction_loop();
+    let workspaces_router: Router<()> = workspace::router(Arc::clone(&workspace_manager));
 
     // /auth/error is available regardless of auth mode — if the user
     // somehow reaches it (a stale link, a misconfigured deployment),
@@ -472,19 +598,19 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     }
     // Liveness/readiness probes mounted on the public router half so
     // the kubelet (which presents no session cookie) can hit them
-    // without being 401'd. Always-200 today; the split between
-    // `/healthz` and `/readyz` exists so future drain-on-shutdown can
-    // flip readiness to 503 while liveness stays 200, letting the LB
-    // stop routing without the kubelet restarting the pod mid-drain.
+    // without being 401'd. Readiness follows the startup/drain lifecycle;
+    // liveness remains 200 while an instance drains.
     // See `lucida-server/src/health.rs`.
-    public_auth_router = public_auth_router.merge(health::router());
+    public_auth_router = public_auth_router
+        .merge(health::router(lifecycle.clone()))
+        .merge(health::resource_router(Arc::clone(source_cache.budget())));
 
     // ADR-0020: serve the SPA bundle from `LUCIDA_WEB_DIST` (default
     // `./lucida-web/dist`) via `tower-http::ServeDir`. Lands on the
     // public router half so HTML/JS/CSS aren't 401'd by the auth
     // middleware — auth gates remain on `/auth/whoami` polling and
     // `/api/*` calls. Merged LAST below so route-specific handlers
-    // (`/auth/*`, `/api/*`, `/admin/*`, `/ws`) take precedence and the
+    // (`/auth/*`, `/api/*`, `/admin/*`, `/ws/workspaces/*`) take precedence and the
     // SPA fallback only fires for truly unknown paths. The dist
     // directory is re-stat'd on every request, so a dev who builds the
     // SPA mid-session sees fresh content without restarting the server.
@@ -499,32 +625,50 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
 
     // App routes carry the auth middleware; public auth routes don't.
     //
-    // ADR-0020: `/` no longer routes to the WebSocket handler — it now
-    // falls through to the SPA `static_serve` fallback below so a browser
-    // hitting `:9876` directly sees the app instead of a 401 / unauth
-    // landing. WebSocket clients use `/ws` (already the canonical path
-    // used by `lucida-web/src/bridge.ts`); `lucida-cli` callers that
-    // relied on the legacy `ws://localhost:9876` default URL must now
-    // pass `--server ws://localhost:9876/ws` explicitly.
+    // ADR-0020: `/` falls through to the SPA `static_serve` fallback below.
+    // Collaborative clients connect only through the authorized
+    // `/ws/workspaces/{workspace_id}` route merged from `workspaces_router`.
     let app_state_router = Router::new()
-        .route("/ws", get(ws_handler))
         .route("/api/browse", get(browse::browse_handler))
         .route("/admin/clear-proxy-cache", post(admin_clear_proxy_cache))
         .with_state(state)
         .merge(authed_auth_router)
-        .merge(bookmarks_router)
         .merge(workspaces_router)
         .layer(axum::middleware::from_fn_with_state(
             extractor,
             auth::middleware::auth_middleware,
         ));
 
+    let cors_policy = origin_policy.clone();
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(move |origin, request| {
+            cors_policy.allows(origin, request.headers.get(HOST))
+        }))
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([AUTHORIZATION, CONTENT_TYPE, ACCEPT])
+        .allow_credentials(true);
+
     let app = app_state_router
         .merge(public_auth_router)
         // ADR-0020: SPA static-serve catch-all. Merged last so the
         // fallback only fires for paths no other route claimed.
         .merge(static_serve_router)
-        .layer(CorsLayer::permissive());
+        .layer(cors)
+        // Existing WebSocket handlers can extract this extension and await
+        // `wait_for_draining`; request admission itself uses explicit state so
+        // it cannot depend on extension-layer ordering.
+        .layer(Extension(lifecycle.clone()))
+        .layer(Extension(origin_policy))
+        .layer(axum::middleware::from_fn_with_state(
+            lifecycle.clone(),
+            health::reject_while_draining,
+        ));
 
     // Hourly background sweep of expired session + pending-auth rows.
     // Spawned here (after stores are open, before the listener accepts
@@ -533,7 +677,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     // handle would abort the spawned future. Operational logs only
     // (no PII per row); per-user audit lives in `auth.signin.success`
     // and `auth.logout`.
-    let _cleanup_handle = auth::spawn_cleanup(auth::CleanupState {
+    let cleanup_handle = auth::spawn_cleanup(auth::CleanupState {
         config: Arc::clone(&auth_config),
         session_store: Arc::clone(&session_store_dyn),
         pending_store: Arc::clone(&pending_store),
@@ -556,29 +700,234 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         .unwrap_or_else(|e| panic!("failed to bind to {bind_addr}: {e}"));
     tracing::info!(bind = %bind_addr, "server.listening");
 
-    axum::serve(listener, app).await.expect("server error");
+    let shutdown_timeout = Duration::from_secs(args.shutdown_timeout_secs.max(1));
+    let quiet_period = Duration::from_secs(
+        args.shutdown_quiet_period_secs
+            .min(shutdown_timeout.as_secs().saturating_sub(1)),
+    );
+    tracing::info!(
+        timeout_s = shutdown_timeout.as_secs(),
+        quiet_period_s = quiet_period.as_secs(),
+        "server.shutdown.config"
+    );
+
+    if !lifecycle.mark_ready() {
+        return Err(std::io::Error::other(
+            "server entered drain before startup completed",
+        ));
+    }
+    tracing::info!("server.ready");
+
+    // Axum's graceful server implements `IntoFuture` rather than `Future`
+    // directly. Convert it explicitly so one pinned future can participate in
+    // both the drain-start race and the bounded completion wait below.
+    let graceful = std::future::IntoFuture::into_future(
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal(lifecycle.clone(), quiet_period)),
+    );
+    tokio::pin!(graceful);
+
+    let server_result = tokio::select! {
+        result = &mut graceful => {
+            let shutdown = workspace_manager
+                .shutdown_all_live_background("server_stopped");
+            let _ = tokio::time::timeout(shutdown_timeout, shutdown).await;
+            result
+        },
+        () = lifecycle.wait_for_draining() => {
+            tracing::info!(timeout_s = shutdown_timeout.as_secs(), "server.shutdown.drain_started");
+            let background_shutdown = workspace_manager
+                .shutdown_all_live_background("process_shutdown");
+            let bounded_drain = async {
+                let (result, generated_services) =
+                    tokio::join!(&mut graceful, background_shutdown);
+                tracing::info!(
+                    generated_services,
+                    "server.shutdown.background_checkpoint_complete"
+                );
+                result
+            };
+            match tokio::time::timeout(shutdown_timeout, bounded_drain).await {
+                Ok(result) => result,
+                Err(_) => {
+                    // Dropping the server future cancels connections that did
+                    // not finish within the operator-defined grace period.
+                    tracing::warn!(
+                        timeout_s = shutdown_timeout.as_secs(),
+                        "server.shutdown.forced_timeout"
+                    );
+                    Ok(())
+                }
+            }
+        }
+    };
+
+    // These loops are best-effort maintenance, not request work. Abort them
+    // after graceful drain (or its hard deadline) so process exit is bounded.
+    cleanup_handle.abort();
+    workspace_idle_eviction_handle.abort();
+    server_result
+}
+
+async fn shutdown_signal(lifecycle: health::RuntimeLifecycle, quiet_period: Duration) {
+    let reason = wait_for_termination_signal().await;
+    lifecycle.begin_draining();
+    tracing::info!(reason, "server.shutdown.signal_received");
+    if !quiet_period.is_zero() {
+        tokio::time::sleep(quiet_period).await;
+    }
+    tracing::info!(reason, "server.shutdown.acceptance_stopped");
+}
+
+async fn wait_for_termination_signal() -> &'static str {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("install SIGTERM handler");
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                if let Err(error) = result {
+                    tracing::error!(%error, "server.shutdown.ctrl_c_handler_failed");
+                }
+                "ctrl_c"
+            }
+            _ = terminate.recv() => "sigterm",
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::error!(%error, "server.shutdown.ctrl_c_handler_failed");
+        }
+        "ctrl_c"
+    }
+}
+
+async fn run_healthcheck(args: HealthcheckArgs) -> std::io::Result<()> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(args.timeout_ms.max(1)))
+        .build()
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let response = client
+        .get(&args.url)
+        .send()
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    if !response.status().is_success() {
+        return Err(std::io::Error::other(format!(
+            "readiness probe returned {}",
+            response.status()
+        )));
+    }
     Ok(())
+}
+
+async fn run_recover_legacy_bookmark(
+    args: RecoverLegacyBookmarkArgs,
+) -> Result<(), legacy_bookmark_recovery::RecoveryError> {
+    let pool = legacy_bookmark_recovery::open_existing_database(&args.db_path).await?;
+    let outcome = legacy_bookmark_recovery::recover_legacy_bookmark(
+        &pool,
+        RecoveryRequest {
+            bookmark_id: &args.bookmark,
+            workspace_id: &args.workspace,
+            creator_email: args.creator.as_deref(),
+            visibility: args.visibility,
+            apply: args.apply,
+        },
+    )
+    .await;
+    pool.close().await;
+    let outcome = outcome?;
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&outcome)
+                .expect("recovery outcome contains only JSON-serializable values")
+        );
+    } else if outcome.already_present {
+        println!(
+            "legacy bookmark {} is already recovered as saved view {} in workspace {}",
+            outcome.bookmark_id, outcome.saved_view_id, outcome.workspace_id
+        );
+    } else if outcome.applied {
+        println!(
+            "recovered legacy bookmark {} as {} saved view {} in workspace {} ({} datasets)",
+            outcome.bookmark_id,
+            outcome.visibility.as_str(),
+            outcome.saved_view_id,
+            outcome.workspace_id,
+            outcome.dataset_mappings.len()
+        );
+    } else {
+        println!(
+            "dry run validated legacy bookmark {} for workspace {} ({} datasets); rerun with --apply to commit",
+            outcome.bookmark_id,
+            outcome.workspace_id,
+            outcome.dataset_mappings.len()
+        );
+    }
+    Ok(())
+}
+
+fn exit_legacy_bookmark_recovery_error(
+    error: &legacy_bookmark_recovery::RecoveryError,
+    json: bool,
+) -> ! {
+    let write_result = if json {
+        let mut document = serde_json::to_string(&error.envelope())
+            .unwrap_or_else(|_| {
+                r#"{"ok":false,"error":{"code":"serialization_error","message":"recovery error could not be serialized"}}"#
+                    .to_string()
+            })
+            .into_bytes();
+        document.push(b'\n');
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(&document).and_then(|()| stdout.flush())
+    } else {
+        let line = format!("legacy bookmark recovery failed: {error}\n");
+        let mut stderr = std::io::stderr().lock();
+        stderr
+            .write_all(line.as_bytes())
+            .and_then(|()| stderr.flush())
+    };
+    std::process::exit(if write_result.is_ok() { 1 } else { 2 });
 }
 
 fn run_clear(args: ClearArgs) -> std::io::Result<()> {
     let cache_dir = args.cache_dir.unwrap_or_else(admin::default_cache_dir);
-    let outcome = admin::clear_proxy_cache(&cache_dir, args.dataset.as_deref())?;
-    match args.dataset {
-        Some(url) => {
-            eprintln!(
-                "cleared {} dataset for {} ({} files) under {}",
+    let legacy_cache_dir = args
+        .legacy_cache_dir
+        .unwrap_or_else(admin::default_legacy_proxy_cache_dir);
+    let cache_roots = admin::DerivedCacheRoots::new(cache_dir.clone(), legacy_cache_dir.clone());
+    let identity = args
+        .dataset
+        .as_deref()
+        .map(lucida_content::url::SourceIdentity::parse)
+        .transpose()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    let outcome = admin::clear_derived_cache_roots(&cache_roots, identity.as_ref())?;
+    match identity {
+        Some(identity) => {
+            println!(
+                "cleared {} dataset roots for {} ({} files) under {} and {}",
                 outcome.datasets,
-                url,
+                identity.dataset_id(),
                 outcome.files,
-                cache_dir.display()
+                cache_dir.display(),
+                legacy_cache_dir.display()
             );
         }
         None => {
-            eprintln!(
-                "cleared {} datasets ({} files) under {}",
+            println!(
+                "cleared {} dataset roots ({} files) under {} and {}",
                 outcome.datasets,
                 outcome.files,
-                cache_dir.display()
+                cache_dir.display(),
+                legacy_cache_dir.display()
             );
         }
     }
@@ -598,8 +947,20 @@ mod cli_tests {
         let cli = parse(&[]);
         assert!(cli.command.is_none(), "bare invocation has no subcommand");
         assert!(cli.serve_args.data_dir.is_none());
-        assert!(cli.serve_args.proxy_cache_dir.is_none());
-        assert!(!cli.serve_args.legacy_proxy_enabled);
+        assert_eq!(
+            cli.serve_args.generated_coarse_disk_budget_bytes,
+            lucida_server::DEFAULT_GENERATED_DISK_BUDGET_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_generated_disk_budget_fails_before_server_startup() {
+        let cli = parse(&["--generated-coarse-disk-budget-bytes", "0"]);
+        let error = run_serve(cli.serve_args).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "generated coarse disk budget must be greater than zero"
+        );
     }
 
     #[test]
@@ -627,13 +988,14 @@ mod cli_tests {
     }
 
     #[test]
-    fn legacy_proxy_flag_parses() {
-        let cli = parse(&["serve", "--legacy-proxy-enabled"]);
-        match cli.command.expect("serve subcommand") {
-            Commands::Serve(args) => {
-                assert!(args.legacy_proxy_enabled);
+    fn healthcheck_defaults_to_container_readiness_url() {
+        let cli = parse(&["healthcheck"]);
+        match cli.command.expect("healthcheck subcommand") {
+            Commands::Healthcheck(args) => {
+                assert_eq!(args.url, "http://127.0.0.1:9876/readyz");
+                assert_eq!(args.timeout_ms, 2_000);
             }
-            _ => panic!("expected Serve"),
+            _ => panic!("expected healthcheck"),
         }
     }
 
@@ -643,6 +1005,8 @@ mod cli_tests {
             "clear-proxy-cache",
             "--cache-dir",
             "/tmp/cache",
+            "--legacy-cache-dir",
+            "/tmp/legacy-cache",
             "--dataset",
             "http://example.com/x",
         ]);
@@ -653,6 +1017,10 @@ mod cli_tests {
                     Some(std::path::Path::new("/tmp/cache"))
                 );
                 assert_eq!(args.dataset.as_deref(), Some("http://example.com/x"));
+                assert_eq!(
+                    args.legacy_cache_dir.as_deref(),
+                    Some(std::path::Path::new("/tmp/legacy-cache"))
+                );
             }
             _ => panic!("expected ClearProxyCache"),
         }
@@ -665,8 +1033,33 @@ mod cli_tests {
             Commands::ClearProxyCache(args) => {
                 assert!(args.dataset.is_none());
                 assert!(args.cache_dir.is_none());
+                assert!(args.legacy_cache_dir.is_none());
             }
             _ => panic!("expected ClearProxyCache"),
+        }
+    }
+
+    #[test]
+    fn recover_legacy_bookmark_defaults_to_safe_dry_run() {
+        let cli = parse(&[
+            "recover-legacy-bookmark",
+            "--db-path",
+            "/tmp/lucida.db",
+            "--bookmark",
+            "bookmark-1",
+            "--workspace",
+            "workspace-1",
+        ]);
+        match cli.command.expect("recover subcommand") {
+            Commands::RecoverLegacyBookmark(args) => {
+                assert_eq!(args.db_path, std::path::Path::new("/tmp/lucida.db"));
+                assert_eq!(args.bookmark, "bookmark-1");
+                assert_eq!(args.workspace, "workspace-1");
+                assert_eq!(args.visibility, RecoveryVisibility::Personal);
+                assert!(!args.apply);
+                assert!(!args.json);
+            }
+            _ => panic!("expected RecoverLegacyBookmark"),
         }
     }
 }

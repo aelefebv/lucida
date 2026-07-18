@@ -5,7 +5,7 @@ description: "Manifests/fetch descriptors using the shared-once compact wire for
 tags: [lucida, gotcha]
 source_path: wiki/gotchas/compact-manifest-decoder-one-way-door.md
 created: 2026-07-07
-modified: 2026-07-07
+modified: 2026-07-16
 ---
 
 # Compact Manifest Encoding Is a Decoder One-Way Door
@@ -45,10 +45,11 @@ byte-identical to the fully-inline form.
   talking to an upgraded server fails visibly on collection payloads (decode
   error on the broadcast/snapshot). Hard refresh the web client / upgrade the
   CLI.
-- **Version-skew window, silent**: an older Python client does not crash — it
-  reads per-image fields defensively and simply finds no `multiscale`, so
-  dataset summaries come back **empty/degraded with no error**. This is the
-  sneakiest mode; there is nothing to alert on client-side.
+- **Version-skew window, Python**: current Python resolves the exact-one-of
+  inline/reference form and raises a typed protocol error for missing,
+  duplicated, wrong-type, negative, or out-of-range references. Older Python
+  releases pre-dating that resolver could return an empty/degraded summary;
+  upgrade them rather than relying on that historical behavior.
 
 This skew exposure is deliberate and bounded: lucida ships as a single
 container image in which server, web bundle, and WASM are versioned together
@@ -72,10 +73,14 @@ descriptor lead with `"format_version": 2`
 (`COMPACT_MANIFEST_FORMAT_VERSION` in `lucida-content/src/graph.rs`,
 `COMPACT_FETCH_FORMAT_VERSION` in `lucida-protocol/src/fetch.rs`). Absence
 means the document is fully-inline and readable by every decoder generation.
-Consumers today ignore the marker — it carries no reference-resolution
-semantics — but future readers can use it to recognize a document's format
-generation up front instead of probing for compact fields. Keep it that way:
-the marker is a label, not a dispatch mechanism.
+Consumers today ignore the marker's **numeric value** — it carries no
+reference-resolution semantics — but the Rust wire structs still require an
+unsigned 32-bit JSON integer when the field is present. A string, float,
+negative integer, or wider value is malformed input, not an ignorable
+extension. Future readers can use a valid marker to recognize a document's
+format generation up front instead of probing for compact fields. Keep the
+marker a label rather than a dispatch mechanism until a versioned policy is
+designed.
 
 ## What to do when touching this encoding
 
@@ -88,6 +93,11 @@ the marker is a label, not a dispatch mechanism.
   (`lucida-server/tests/wire_goldens.rs`, `dataset_opened_collection.json`);
   a change that regenerates fixtures is a compatibility event — say so in the
   commit body so it reaches the release notes.
+- Rust, TypeScript, and Python must all pass
+  `wire-fixtures/manifest/compact_multiscale_cases.json`. It is the shared
+  accept/reject corpus for exact-one-of inline/reference fields, reference
+  types and bounds, shared-table shape, and the unsigned `format_version`
+  marker. Add malformed cases there instead of inventing client-local policy.
 
 ## Related
 

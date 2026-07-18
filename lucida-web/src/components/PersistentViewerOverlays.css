@@ -1,0 +1,31 @@
+.persistent-viewer-overlays {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-overlay);
+  pointer-events: none;
+}
+
+.persistent-viewer-overlay-slot {
+  position: absolute;
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: 0;
+  pointer-events: auto;
+  overflow: hidden;
+}
+
+/* Safe pre-measurement anchors. useLayoutEffect replaces these before paint. */
+.persistent-viewer-overlay-collection {
+  inset-inline-start: var(--overlay-safe-inline);
+  inset-block-end: var(--overlay-safe-block);
+}
+
+.persistent-viewer-overlay-minimap {
+  inset-inline-end: var(--overlay-safe-inline);
+  inset-block-end: var(--overlay-safe-block);
+}
+
+.persistent-viewer-overlay-collection > .collection-selector-panel {
+  max-width: 100%;
+  max-height: 100%;
+}

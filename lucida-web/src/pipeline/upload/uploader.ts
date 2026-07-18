@@ -6,7 +6,7 @@
  * handles worker-feedback parsing.
  */
 
-import type { CpuCache, ReadyDelivery, ResidencyTier } from "../fetch/index.ts";
+import type { CpuCache, ReadyDelivery } from "../fetch/index.ts";
 import type {
   ActiveSetEntry,
   EntitySnapshot,
@@ -22,14 +22,17 @@ import type {
   ColdStateDisplayState,
   ColdStateMessage,
   MissingChunk,
-  MissingProxy,
 } from "../../renderer/workerProtocol.ts";
 import {
   debugStats,
   emptyUploadTickStats,
   type UploadTickStats,
 } from "../../debug/debugStats.ts";
-import { buildColdState, buildColdStateDelta } from "./coldState/build.ts";
+import {
+  buildColdState,
+  buildColdStateDelta,
+  type ColdStateEntityDeltaHint,
+} from "./coldState/build.ts";
 import {
   buildViewHotState,
   buildViewHotStateFromMembers,
@@ -37,13 +40,13 @@ import {
 import { WorkerFeedback } from "./delivery/feedback.ts";
 import {
   buildManifestByImage,
+  manifestEntryKey,
   type ManifestEntry,
 } from "./delivery/manifestIndex.ts";
 import {
   dispatchChunkDelivery,
   dispatchLabelChunkDelivery,
   dispatchLabelVolumeChunkDelivery,
-  dispatchProxy,
 } from "./delivery/dispatch.ts";
 import { WorkerResourceTracker } from "./delivery/resources.ts";
 import { UploadTelemetry } from "./telemetry/upload.ts";
@@ -83,7 +86,6 @@ export class Uploader {
     multiChannel: boolean;
     visibleRegion: VisibleRegion;
     renderRadiusView?: { detail: number; coarse: number };
-    desiredProxyKeys?: Iterable<string>;
     epochs: SceneEpochs;
     matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
     dsSettings: DatasetSettings | undefined;
@@ -96,7 +98,6 @@ export class Uploader {
       multiChannel: args.multiChannel,
       visibleRegion: args.visibleRegion,
       renderRadiusView: args.renderRadiusView,
-      desiredProxyKeys: args.desiredProxyKeys,
       epochs: args.epochs,
       matricesByEntity: args.matricesByEntity,
       dsSettings: args.dsSettings,
@@ -144,7 +145,6 @@ export class Uploader {
     currentT: number;
     currentZ: number;
     visibleRegion: VisibleRegion;
-    desiredProxyKeys: Iterable<string>;
     epochs: SceneEpochs;
   }): void {
     args.ctx.client.coldStateSelection({
@@ -153,7 +153,6 @@ export class Uploader {
       currentT: args.currentT,
       currentZ: args.currentZ,
       visibleRegion: args.visibleRegion,
-      desiredProxyKeys: Array.from(args.desiredProxyKeys).sort(),
       epochs: args.epochs,
     });
     this.lastEpochs = args.epochs;
@@ -174,10 +173,10 @@ export class Uploader {
     selection: SelectionState;
     visibleRegion: VisibleRegion;
     renderRadiusView?: { detail: number; coarse: number };
-    desiredProxyKeys?: Iterable<string>;
     epochs: SceneEpochs;
     matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
     dsSettings: DatasetSettings | undefined;
+    entityDeltaHint?: ColdStateEntityDeltaHint;
   }): ColdStateDeltaMessage {
     const msg = buildColdStateDelta({
       datasetId: args.datasetId,
@@ -187,10 +186,10 @@ export class Uploader {
       selection: args.selection,
       visibleRegion: args.visibleRegion,
       renderRadiusView: args.renderRadiusView,
-      desiredProxyKeys: args.desiredProxyKeys,
       epochs: args.epochs,
       matricesByEntity: args.matricesByEntity,
       dsSettings: args.dsSettings,
+      entityDeltaHint: args.entityDeltaHint,
     });
     args.ctx.client.coldStateDelta(msg);
     this.lastEpochs = args.epochs;
@@ -276,7 +275,7 @@ export class Uploader {
 
     const multiChannel = ctx.scene.multi_channel();
     const epochs = this.lastEpochs ?? {
-      content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0,
+      content: 0, layout: 0, view: 0, selection: 0, request: 0,
     };
     const manifestByImage = buildManifestByImage(ctx.datasets);
 
@@ -285,13 +284,15 @@ export class Uploader {
     // is unaffected either way. Sampled once per tick so recordEvent and
     // publish agree within the tick.
     const telemetryActive = orchTelemetryActive();
-    const recordUpload = (bytes: number, kind: "chunk" | "proxy"): void => {
+    const recordUpload = (bytes: number): void => {
       if (!telemetryActive) return;
-      this.uploadTelemetry.recordEvent(tickStart, bytes, false, kind);
+      this.uploadTelemetry.recordEvent(tickStart, bytes, false);
     };
 
-    const deliverables = Array.from(ctx.cpuCache.getDeliverable());
-    const tierDemand = this.computeChunkTierDemand(deliverables);
+    // CpuCache maintains both the fair ready queue and these counters
+    // incrementally. Do not rematerialize and rescan the complete ready set on
+    // every frame: pull only as many items as this upload budget can consume.
+    const tierDemand = ctx.cpuCache.getDeliverableTierDemand();
     const splitTierBudget = tierDemand.detail && tierDemand.coarse;
     let detailRemaining = splitTierBudget ? Math.ceil(budget / 2) : budget;
     let coarseRemaining = splitTierBudget ? Math.floor(budget / 2) : budget;
@@ -299,43 +300,46 @@ export class Uploader {
     let budgetExhausted = false;
     let sentAny = false;
 
-    for (const delivery of deliverables) {
-      if (remaining <= 0) {
-        budgetExhausted = true;
-        break;
+    const iterator = ctx.cpuCache.getDeliverable()[Symbol.iterator]();
+    try {
+      while (remaining > 0) {
+        const next = iterator.next();
+        if (next.done) break;
+        const delivery = next.value;
+
+        const chunkTier = this.deliveryResidencyTier(delivery);
+        if (splitTierBudget && chunkTier === "detail" && detailRemaining <= 0) {
+          budgetExhausted = true;
+          continue;
+        }
+        if (splitTierBudget && chunkTier === "coarse" && coarseRemaining <= 0) {
+          budgetExhausted = true;
+          continue;
+        }
+
+        this.currentUploadStats.drainedChunks++;
+
+        const sent = this.tryDispatchDelivery({
+          delivery,
+          ctx,
+          manifestByImage,
+          multiChannel,
+          sliceZ,
+          epochs,
+        });
+        if (sent === 0) continue;
+
+        ctx.cpuCache.markSent(delivery);
+        sentAny = true;
+        this.currentUploadStats.bytesUploaded += sent;
+        recordUpload(sent);
+        remaining -= sent;
+        if (splitTierBudget && chunkTier === "detail") detailRemaining -= sent;
+        if (splitTierBudget && chunkTier === "coarse") coarseRemaining -= sent;
+        if (remaining <= 0) budgetExhausted = true;
       }
-
-      const chunkTier = this.deliveryResidencyTier(delivery);
-      if (splitTierBudget && chunkTier === "detail" && detailRemaining <= 0) {
-        budgetExhausted = true;
-        continue;
-      }
-      if (splitTierBudget && chunkTier === "coarse" && coarseRemaining <= 0) {
-        budgetExhausted = true;
-        continue;
-      }
-
-      if (delivery.kind === "proxy") this.currentUploadStats.drainedProxies++;
-      else this.currentUploadStats.drainedChunks++;
-
-      const sent = this.tryDispatchDelivery({
-        delivery,
-        ctx,
-        manifestByImage,
-        multiChannel,
-        sliceZ,
-        epochs,
-      });
-      if (sent === 0) continue;
-
-      ctx.cpuCache.markSent(delivery);
-      sentAny = true;
-      this.currentUploadStats.bytesUploaded += sent;
-      recordUpload(sent, delivery.kind);
-      remaining -= sent;
-      if (splitTierBudget && chunkTier === "detail") detailRemaining -= sent;
-      if (splitTierBudget && chunkTier === "coarse") coarseRemaining -= sent;
-      if (remaining <= 0) budgetExhausted = true;
+    } finally {
+      iterator.return?.();
     }
 
     this.currentUploadStats.budgetExhausted = budgetExhausted;
@@ -364,13 +368,7 @@ export class Uploader {
   }): number {
     const { delivery, ctx, manifestByImage, multiChannel, sliceZ, epochs } = args;
 
-    if (delivery.kind === "proxy") {
-      dispatchProxy(ctx.client, delivery, epochs);
-      this.currentUploadStats.uploadedProxies++;
-      return delivery.data.byteLength;
-    }
-
-    const meta = manifestByImage.get(delivery.imageId);
+    const meta = manifestByImage.get(manifestEntryKey(delivery.datasetId, delivery.imageId));
     if (!meta || !meta.levels[delivery.level]) {
       this.currentUploadStats.skippedNoMeta++;
       return 0;
@@ -410,17 +408,9 @@ export class Uploader {
     return delivery.data.byteLength;
   }
 
-  private computeChunkTierDemand(deliveries: ReadyDelivery[]): Record<ResidencyTier, boolean> {
-    return {
-      detail: deliveries.some((d) => this.deliveryResidencyTier(d) === "detail"),
-      coarse: deliveries.some((d) => this.deliveryResidencyTier(d) === "coarse"),
-    };
-  }
-
-  private deliveryResidencyTier(delivery: ReadyDelivery): ResidencyTier | null {
-    if (delivery.kind !== "chunk") return null;
+  private deliveryResidencyTier(delivery: ReadyDelivery): "detail" | "coarse" | null {
     return delivery.residencyTier ??
-      (delivery.lane === "coarse" || delivery.lane === "overview" || delivery.lane === "minimap"
+      (delivery.lane === "coarse" || delivery.lane === "minimap"
         ? "coarse"
         : "detail");
   }
@@ -441,7 +431,7 @@ export class Uploader {
 
   handleWantedSetDelta(
     datasetId: string,
-    missing: Array<MissingChunk | MissingProxy>,
+    missing: MissingChunk[],
     cpuCache: CpuCache,
   ): void {
     this.workerFeedback.handleWantedSetDelta(datasetId, missing, cpuCache);

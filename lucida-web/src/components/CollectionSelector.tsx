@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import type { DatasetManifest, DatasetKind, Entity, LayoutSpec } from "../manifestTypes.ts";
+import "./CollectionSelector.css";
 
 export interface CollectionKind {
   rows: string[];
@@ -88,6 +89,7 @@ export function extractCollectionData(
 const CELL_SIZE = 24;
 const CELL_GAP = 2;
 const PADDING = 8;
+const BORDER_WIDTH = 1;
 const HEADER_HEIGHT = 20;
 const TOGGLE_HEIGHT = 24;
 
@@ -147,18 +149,24 @@ export function CollectionSelector({
     CELL_GAP +
     collectionKind.columns.length * (CELL_SIZE + CELL_GAP) -
     CELL_GAP;
-  const panelWidth = Math.max(gridWidth + PADDING * 2, 100);
+  // This is a border-box width: keep the unconstrained grid free of a
+  // two-pixel incidental scrollbar while still letting the owner cap it.
+  const panelWidth = Math.max(
+    gridWidth + PADDING * 2 + BORDER_WIDTH * 2,
+    100,
+  );
   const showToggle =
     collectionKind.has_explicit_positions && onPositioningModeToggle != null;
 
   return (
     <div
+      className="collection-selector-panel"
+      data-floating-safe-region
+      data-testid="collection-selector"
+      role="region"
+      aria-label={`${collectionName} collection navigation`}
       style={{
-        position: "absolute",
-        bottom: 16,
-        left: 16,
-        zIndex: 10,
-        background: "rgba(0, 0, 0, 0.7)",
+        background: "var(--overlay-panel)",
         borderRadius: 6,
         padding: PADDING,
         color: "white",
@@ -166,8 +174,14 @@ export function CollectionSelector({
         fontFamily: "system-ui, -apple-system, sans-serif",
         userSelect: "none",
         backdropFilter: "blur(4px)",
-        border: "1px solid rgba(255, 255, 255, 0.1)",
+        border: `${BORDER_WIDTH}px solid var(--border-translucent)`,
+        boxSizing: "border-box",
         width: panelWidth,
+        maxWidth: "100%",
+        maxHeight: "100%",
+        display: "flex",
+        flexDirection: "column",
+        overflow: "hidden",
       }}
     >
       {/* Collection name */}
@@ -186,55 +200,65 @@ export function CollectionSelector({
         {collectionName}
       </div>
 
-      {/* Column headers */}
       <div
-        style={{
-          display: "flex",
-          marginLeft: CELL_SIZE + CELL_GAP,
-          marginBottom: 1,
-        }}
+        className="collection-selector-grid-scroll"
+        data-testid="collection-selector-grid-scroll"
+        data-overlay-scrollport
+        role="group"
+        aria-label="Collection positions"
+        style={{ overflow: "auto", minWidth: 0, minHeight: 0 }}
       >
-        {collectionKind.columns.map((col) => (
-          <div
-            key={col}
-            style={{
-              width: CELL_SIZE,
-              marginRight: CELL_GAP,
-              textAlign: "center",
-              fontSize: 9,
-              opacity: 0.5,
-            }}
-          >
-            {col}
-          </div>
-        ))}
-      </div>
-
-      {/* Grid rows */}
-      {collectionKind.rows.map((rowName, rowIdx) => (
+        {/* Column headers */}
         <div
-          key={rowName}
           style={{
             display: "flex",
-            alignItems: "center",
-            marginBottom: CELL_GAP,
+            marginLeft: CELL_SIZE + CELL_GAP,
+            marginBottom: 1,
+            width: gridWidth - CELL_SIZE - CELL_GAP,
           }}
         >
-          {/* Row label */}
+          {collectionKind.columns.map((col, colIdx) => (
+            <div
+              key={col}
+              style={{
+                flex: `0 0 ${CELL_SIZE}px`,
+                marginRight: colIdx === collectionKind.columns.length - 1 ? 0 : CELL_GAP,
+                textAlign: "center",
+                fontSize: 9,
+                opacity: 0.5,
+              }}
+            >
+              {col}
+            </div>
+          ))}
+        </div>
+
+        {/* Grid rows */}
+        {collectionKind.rows.map((rowName, rowIdx) => (
           <div
+            key={rowName}
             style={{
-              width: CELL_SIZE,
-              marginRight: CELL_GAP,
-              textAlign: "center",
-              fontSize: 9,
-              opacity: 0.5,
+              display: "flex",
+              alignItems: "center",
+              marginBottom: CELL_GAP,
+              width: gridWidth,
             }}
           >
-            {rowName}
-          </div>
+            {/* Row label */}
+            <div
+              style={{
+                flex: `0 0 ${CELL_SIZE}px`,
+                marginRight: CELL_GAP,
+                textAlign: "center",
+                fontSize: 9,
+                opacity: 0.5,
+              }}
+            >
+              {rowName}
+            </div>
 
-          {/* Group cells */}
-          {collectionKind.columns.map((_colName, colIdx) => {
+            {/* Group cells */}
+            {collectionKind.columns.map((_colName, colIdx) => {
             const key = `${rowIdx},${colIdx}`;
             const populated = groupMemberMap.has(key);
             const groupExists = groupPathMap.has(key);
@@ -244,19 +268,21 @@ export function CollectionSelector({
                 key={colIdx}
                 disabled={!populated}
                 onClick={() => populated && handleGroupClick(rowIdx, colIdx)}
+                aria-label={`Go to ${collectionKind.rows[rowIdx]}${collectionKind.columns[colIdx]}`}
+                data-testid={`collection-cell-${rowIdx}-${colIdx}`}
                 style={{
-                  width: CELL_SIZE,
+                  flex: `0 0 ${CELL_SIZE}px`,
                   height: CELL_SIZE,
-                  marginRight: CELL_GAP,
+                  marginRight: colIdx === collectionKind.columns.length - 1 ? 0 : CELL_GAP,
                   padding: 0,
-                  border: "1px solid rgba(255, 255, 255, 0.15)",
+                  border: "1px solid var(--border-translucent)",
                   borderRadius: 3,
                   background: populated
-                    ? "rgba(255, 255, 255, 0.12)"
-                    : "rgba(255, 255, 255, 0.03)",
+                    ? "var(--overlay-fill-hover)"
+                    : "var(--surface-1)",
                   color: populated
-                    ? "rgba(255, 255, 255, 0.8)"
-                    : "rgba(255, 255, 255, 0.2)",
+                    ? "var(--focus-ring)"
+                    : "var(--border-strong)",
                   fontSize: 8,
                   cursor: populated ? "pointer" : "default",
                   display: "flex",
@@ -271,13 +297,13 @@ export function CollectionSelector({
                 onMouseEnter={(e) => {
                   if (populated) {
                     (e.currentTarget as HTMLButtonElement).style.background =
-                      "rgba(100, 108, 255, 0.35)";
+                      "var(--accent-surface)";
                   }
                 }}
                 onMouseLeave={(e) => {
                   if (populated) {
                     (e.currentTarget as HTMLButtonElement).style.background =
-                      "rgba(255, 255, 255, 0.12)";
+                      "var(--overlay-fill-hover)";
                   }
                 }}
               >
@@ -286,9 +312,10 @@ export function CollectionSelector({
                   : ""}
               </button>
             );
-          })}
-        </div>
-      ))}
+            })}
+          </div>
+        ))}
+      </div>
 
       {/* Positioning toggle */}
       {showToggle && (
@@ -299,10 +326,10 @@ export function CollectionSelector({
             width: "100%",
             height: TOGGLE_HEIGHT,
             padding: "0 8px",
-            border: "1px solid rgba(255, 255, 255, 0.15)",
+            border: "1px solid var(--border-translucent)",
             borderRadius: 3,
-            background: "rgba(255, 255, 255, 0.08)",
-            color: "rgba(255, 255, 255, 0.7)",
+            background: "var(--overlay-fill-subtle)",
+            color: "var(--text-secondary)",
             fontSize: 10,
             cursor: "pointer",
             display: "flex",
@@ -312,11 +339,11 @@ export function CollectionSelector({
           }}
           onMouseEnter={(e) => {
             (e.currentTarget as HTMLButtonElement).style.background =
-              "rgba(100, 108, 255, 0.25)";
+              "var(--accent-selection)";
           }}
           onMouseLeave={(e) => {
             (e.currentTarget as HTMLButtonElement).style.background =
-              "rgba(255, 255, 255, 0.08)";
+              "var(--overlay-fill-subtle)";
           }}
         >
           {collectionKind.positioning_mode === "Explicit" ? "Explicit positions" : "Grid layout"}

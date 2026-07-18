@@ -31,9 +31,7 @@ import { createWorkspace, type WorkspaceRecord } from "./workspaceApi.ts";
  * `C:\Users\me\foo.zarr` that the viewer canonicalizes later), so it accepts
  * BOTH separators — naming only, never used to derive the dataset id. Remote
  * schemes (`gs://bucket/foo.zarr`), `file://` URLs, and plain paths all reduce
- * to their last segment. Mirrors the `urlBasename` used for default saved-view
- * names in `savedView/useBookmarks.ts`, kept as its own exported helper so the
- * create-from-dataset flow doesn't reach into the bookmarks module.
+ * to their last segment.
  */
 export function datasetBasename(url: string): string {
   const noQuery = url.split("?")[0].split("#")[0];

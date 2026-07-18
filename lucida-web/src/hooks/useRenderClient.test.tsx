@@ -2,7 +2,7 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { StrictMode } from "react";
-import { render, cleanup } from "@testing-library/react";
+import { render, cleanup, fireEvent, waitFor } from "@testing-library/react";
 
 // Instance-recording double for the GPU worker wrapper: the real
 // RenderClient transfers canvas control to a worker in its constructor,
@@ -12,13 +12,18 @@ import { render, cleanup } from "@testing-library/react";
 vi.mock("../renderer/renderClient.ts", () => {
   class MockRenderClient {
     static instances: MockRenderClient[] = [];
+    static constructionError: Error | null = null;
     canvas: HTMLCanvasElement;
     private readyPromise: Promise<void>;
     private readyReject!: (err: Error) => void;
+    onFailure: ((error: Error) => void) | null = null;
     destroy = vi.fn(() => {
       this.readyReject(new Error("RenderClient destroyed"));
     });
     constructor(canvas: HTMLCanvasElement) {
+      const constructionError = MockRenderClient.constructionError;
+      MockRenderClient.constructionError = null;
+      if (constructionError) throw constructionError;
       this.canvas = canvas;
       this.readyPromise = new Promise<void>((_resolve, reject) => {
         this.readyReject = reject;
@@ -28,6 +33,9 @@ vi.mock("../renderer/renderClient.ts", () => {
     ready(): Promise<void> {
       return this.readyPromise;
     }
+    fail(message: string, code?: string): void {
+      this.onFailure?.(Object.assign(new Error(message), { code }));
+    }
   }
   return { RenderClient: MockRenderClient };
 });
@@ -36,20 +44,33 @@ import { useRenderClient } from "./useRenderClient.ts";
 import { RenderClient } from "../renderer/renderClient.ts";
 
 const MockedRenderClient = RenderClient as unknown as {
-  instances: Array<{ canvas: HTMLCanvasElement; destroy: ReturnType<typeof vi.fn> }>;
+  constructionError: Error | null;
+  instances: Array<{
+    canvas: HTMLCanvasElement;
+    destroy: ReturnType<typeof vi.fn>;
+    fail(message: string, code?: string): void;
+  }>;
 };
 
 /** Minimal host mirroring App's usage: a keyed canvas carrying the ref. */
 function Host() {
-  const renderClient = useRenderClient();
-  // canvasKey is plain state and canvasRef is only ATTACHED here (not read);
-  // the rule can't see through the hook's return object.
-  // eslint-disable-next-line react-hooks/refs
-  return <canvas key={renderClient.canvasKey} ref={renderClient.canvasRef} />;
+  const {
+    canvasKey,
+    canvasRef,
+    retryRender,
+    renderError,
+    renderErrorCode,
+  } = useRenderClient();
+  return <>
+    <canvas key={canvasKey} ref={canvasRef} />
+    <button type="button" onClick={retryRender}>retry</button>
+    {renderError && <p role="alert" data-error-code={renderErrorCode}>{renderError}</p>}
+  </>;
 }
 
 beforeEach(() => {
   MockedRenderClient.instances.length = 0;
+  MockedRenderClient.constructionError = null;
   cleanup();
 });
 
@@ -106,5 +127,45 @@ describe("useRenderClient teardown", () => {
     } finally {
       errorSpy.mockRestore();
     }
+  });
+
+  it("surfaces a terminal runtime failure and retries on a fresh canvas", async () => {
+    const view = render(<Host />);
+    const first = MockedRenderClient.instances[0];
+    first.fail("device lost");
+
+    expect((await view.findByRole("alert")).textContent).toContain("device lost");
+    fireEvent.click(view.getByRole("button", { name: "retry" }));
+
+    await waitFor(() => expect(MockedRenderClient.instances).toHaveLength(2));
+    const second = MockedRenderClient.instances[1];
+    expect(first.destroy).toHaveBeenCalledTimes(1);
+    expect(second.canvas).not.toBe(first.canvas);
+  });
+
+  it("surfaces synchronous worker construction failure and retries on a fresh canvas", async () => {
+    MockedRenderClient.constructionError = new Error("GPU worker construction blocked");
+    const view = render(<Host />);
+    const failedCanvas = view.container.querySelector("canvas");
+
+    expect((await view.findByRole("alert")).textContent)
+      .toContain("GPU worker construction blocked");
+    expect(MockedRenderClient.instances).toHaveLength(0);
+
+    fireEvent.click(view.getByRole("button", { name: "retry" }));
+
+    await waitFor(() => expect(MockedRenderClient.instances).toHaveLength(1));
+    expect(MockedRenderClient.instances[0].canvas).not.toBe(failedCanvas);
+  });
+
+  it("exposes the stable GPU classification to the UI", async () => {
+    const view = render(<Host />);
+    MockedRenderClient.instances[0].fail(
+      "WebGPU ran out of memory",
+      "gpu-out-of-memory",
+    );
+
+    expect((await view.findByRole("alert")).dataset.errorCode)
+      .toBe("gpu-out-of-memory");
   });
 });

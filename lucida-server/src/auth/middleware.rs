@@ -30,6 +30,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
+use crate::auth::access_epoch::AuthEpochRegistry;
 use crate::auth::bearer_token::BearerTokenStore;
 use crate::auth::config::{AuthConfig, AuthMode};
 use crate::auth::cookie::read_signed_out_marker;
@@ -160,9 +161,29 @@ pub fn build_extractor(
     store: Arc<dyn LoginSessionStore>,
     token_store: Arc<dyn BearerTokenStore>,
 ) -> SharedExtractor {
+    build_extractor_with_auth_epochs(
+        config,
+        store,
+        token_store,
+        Arc::new(AuthEpochRegistry::default()),
+    )
+}
+
+/// Build an extractor wired to the workspace admission epoch registry.
+pub fn build_extractor_with_auth_epochs(
+    config: Arc<AuthConfig>,
+    store: Arc<dyn LoginSessionStore>,
+    token_store: Arc<dyn BearerTokenStore>,
+    auth_epochs: Arc<AuthEpochRegistry>,
+) -> SharedExtractor {
     match config.mode {
-        AuthMode::Disabled => Arc::new(StubPrincipalExtractor),
-        AuthMode::Google => Arc::new(DualCredentialExtractor::new(config, store, token_store)),
+        AuthMode::Disabled => Arc::new(StubPrincipalExtractor::new(auth_epochs)),
+        AuthMode::Google => Arc::new(DualCredentialExtractor::new_with_auth_epochs(
+            config,
+            store,
+            token_store,
+            auth_epochs,
+        )),
     }
 }
 

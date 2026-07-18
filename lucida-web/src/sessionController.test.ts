@@ -20,8 +20,9 @@ vi.mock("./bridge.ts", () => {
     sendDatasetPresence = vi.fn();
     sendCursor = vi.fn();
     sendFollow = vi.fn();
-    sendOpenRemoteDataset = vi.fn(() => `mock-open-req-${++openRequestCounter}`);
-    subscribeBookmarkChanged = vi.fn(() => () => {});
+    sendOpenRemoteDataset = vi.fn<(_url: string) => string | null>(
+      () => `mock-open-req-${++openRequestCounter}`,
+    );
     constructor(handlers: unknown, _url?: string, workspaceId?: string) {
       this.handlers = handlers;
       this.workspaceId = workspaceId;
@@ -34,10 +35,21 @@ vi.mock("./bridge.ts", () => {
 vi.mock("./pipeline/fetch/index.ts", () => {
   class MockDecodePool {
     static instances: MockDecodePool[] = [];
+    static initialFailure: Error | null = null;
     size = 2;
+    private failureListener: ((error: Error, terminal: boolean) => void) | null = null;
     terminate = vi.fn();
     constructor() {
       MockDecodePool.instances.push(this);
+    }
+    get onFailure(): ((error: Error, terminal: boolean) => void) | null {
+      return this.failureListener;
+    }
+    set onFailure(listener: ((error: Error, terminal: boolean) => void) | null) {
+      this.failureListener = listener;
+      if (listener && MockDecodePool.initialFailure) {
+        listener(MockDecodePool.initialFailure, true);
+      }
     }
   }
   class MockProxiedContentSource {
@@ -72,6 +84,10 @@ vi.mock("./pipeline/fetch/index.ts", () => {
 import {
   SessionController,
   MAX_OPEN_WARNINGS,
+  MAX_OPEN_WARNING_FINGERPRINTS,
+  MAX_OPEN_WARNING_MESSAGE_CHARS,
+  MAX_TRACKED_OPEN_REQUESTS,
+  MAX_TRACKED_OPEN_WARNING_SOURCES,
   type RemoteDatasetActivity,
   type SessionControllerDeps,
   type SessionControllerEvents,
@@ -99,7 +115,11 @@ const MockedContentSource = ProxiedContentSource as unknown as {
   }>;
 };
 const MockedDecodePool = DecodePool as unknown as {
-  instances: Array<{ terminate: ReturnType<typeof vi.fn> }>;
+  initialFailure: Error | null;
+  instances: Array<{
+    terminate: ReturnType<typeof vi.fn>;
+    onFailure: ((error: Error, retryable: boolean) => void) | null;
+  }>;
 };
 const MockedCpuCache = CpuCache as unknown as {
   instances: Array<{
@@ -117,7 +137,6 @@ function makeFakeScene() {
   return {
     load_document: vi.fn(),
     apply_command: vi.fn(),
-    apply_asset_catalog_delta: vi.fn(),
     available_layouts: vi.fn(() => "[]"),
     export_presence: vi.fn(() => "{}"),
     import_presence: vi.fn(),
@@ -233,7 +252,7 @@ function makeHarness() {
   const savedViewHooks = {
     onDatasetOpened: vi.fn(),
     onOpenDatasetFailed: vi.fn(),
-    isInProgress: vi.fn(() => false),
+    ownsDatasetOpen: vi.fn((_id: string) => false),
   };
   const deps = {
     workspaceId: "ws-1",
@@ -269,6 +288,7 @@ beforeEach(() => {
   MockedBridge.instances.length = 0;
   MockedContentSource.instances.length = 0;
   MockedDecodePool.instances.length = 0;
+  MockedDecodePool.initialFailure = null;
   MockedCpuCache.instances.length = 0;
 });
 
@@ -283,7 +303,7 @@ afterEach(() => {
 
 describe("SessionController dataset registration", () => {
   it("a live open for a dataset the snapshot already registered reuses its pipeline but still fires the open reactions", () => {
-    const { handlers, scene, savedViewHooks, events } = makeHarness();
+    const { controller, handlers, bridge, scene, savedViewHooks, events } = makeHarness();
     const contentSource = MockedContentSource.instances[0];
 
     handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 4, {});
@@ -292,16 +312,42 @@ describe("SessionController dataset registration", () => {
     expect(savedViewHooks.onDatasetOpened).not.toHaveBeenCalled();
     expect(scene.fit_camera_to_dataset_bounds).not.toHaveBeenCalled();
 
+    const requestId = beginOpen(controller, bridge, "gs://wds-1.zarr");
     // The dedup rebroadcast case: the same dataset arrives as a live
-    // `dataset_opened` (opened by us). Registration is idempotent; the
-    // open reactions (applier notify, loading clear, auto-fit) still run.
+    // `dataset_opened` (opened by us). Registration and open reactions are
+    // idempotent, but shared document traffic does not complete local request
+    // state; only the correlated requester callback below owns that.
     handlers.onCommand(2, datasetOpenedJson("wds-1", 4));
     expect(contentSource.registerImage).toHaveBeenCalledTimes(1);
     expect(savedViewHooks.onDatasetOpened).toHaveBeenCalledWith("wds-1");
     expect(scene.fit_camera_to_dataset_bounds).toHaveBeenCalledWith("wds-1");
-    expect(events.onRemoteDatasetActivity).toHaveBeenLastCalledWith(
-      expect.objectContaining({ loading: false, progress: null }),
-    );
+    expect(lastActivity(events)).toMatchObject({ loading: true });
+
+    handlers.onOpenDatasetSucceeded?.(requestId, "gs://wds-1.zarr", 2, {
+      workspace_dataset_id: "wds-1",
+      name: "wds-1.zarr",
+      image_count: 1,
+      entity_count: 0,
+    });
+    expect(lastActivity(events)).toMatchObject({ loading: false, progress: null });
+  });
+
+  it("suppresses auto-fit only when the active restore owns that dataset open", () => {
+    const { handlers, scene, savedViewHooks } = makeHarness();
+    savedViewHooks.ownsDatasetOpen.mockImplementation((id) => id === "wds-owned");
+    handlers.onSnapshot(1, snapshotJson([]), [], 4, {});
+
+    handlers.onCommand(2, datasetOpenedJson("wds-owned", 4));
+    expect(scene.fit_camera_to_dataset_bounds).not.toHaveBeenCalled();
+
+    // An unrelated user open can arrive while the same restore generation is
+    // active. Ownership correlation lets its normal opener policy run; a global
+    // `isInProgress` flag incorrectly suppressed this case.
+    handlers.onCommand(3, datasetOpenedJson("wds-user", 4));
+    expect(scene.fit_camera_to_dataset_bounds).toHaveBeenCalledOnce();
+    expect(scene.fit_camera_to_dataset_bounds).toHaveBeenCalledWith("wds-user");
+    expect(savedViewHooks.ownsDatasetOpen).toHaveBeenNthCalledWith(1, "wds-owned");
+    expect(savedViewHooks.ownsDatasetOpen).toHaveBeenNthCalledWith(2, "wds-user");
   });
 
   it("registers a brand-new dataset exactly once from a live open", () => {
@@ -415,6 +461,19 @@ function lastActivity(events: SessionControllerEvents): RemoteDatasetActivity {
   const calls = (events.onRemoteDatasetActivity as ReturnType<typeof vi.fn>).mock.calls;
   expect(calls.length).toBeGreaterThan(0);
   return calls[calls.length - 1][0] as RemoteDatasetActivity;
+}
+
+/** Initiate through the production controller surface and return the exact
+ * request id the Bridge stamped, so lifecycle tests exercise real correlation. */
+function beginOpen(
+  controller: SessionController,
+  bridge: { sendOpenRemoteDataset: ReturnType<typeof vi.fn> },
+  url: string,
+): string {
+  controller.openRemoteDataset(url);
+  const requestId = bridge.sendOpenRemoteDataset.mock.results.at(-1)?.value;
+  expect(requestId).toEqual(expect.any(String));
+  return requestId as string;
 }
 
 describe("SessionController scene failure surfacing", () => {
@@ -593,6 +652,23 @@ describe("SessionController error recovery and precedence", () => {
     visible: false,
   });
 
+  it("surfaces a correlated command Nack and retires it after a later Ack", () => {
+    const { handlers, events } = makeHarness();
+    handlers.onNack?.({
+      requestId: "command-1",
+      code: "conflict",
+      message: "the document changed while this edit was pending",
+      retryable: true,
+    });
+
+    expect(lastActivity(events).error).toBe(
+      "Change was not saved (conflict): the document changed while this edit was pending Try again.",
+    );
+
+    handlers.onAck(8, "command-2");
+    expect(lastActivity(events).error).toBeNull();
+  });
+
   it("a successful apply clears a standing non-fatal engine banner", () => {
     const { handlers, events, scene } = makeHarness();
     handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 4, {});
@@ -687,16 +763,177 @@ describe("SessionController error recovery and precedence", () => {
     expect(lastActivity(events).error).toContain("Viewer engine failure");
   });
 
-  it("dataset-open progress still supersedes a previous open failure", () => {
-    const { handlers, events } = makeHarness();
-    handlers.onOpenDatasetFailed?.("http://example/a.zarr", "permission denied");
-    expect(lastActivity(events).error).toBe("permission denied");
+  it("sibling progress and success preserve a failed open while loading aggregates", () => {
+    const { controller, handlers, bridge, events } = makeHarness();
+    const requestA = beginOpen(controller, bridge, "http://example/a.zarr");
+    const requestB = beginOpen(controller, bridge, "http://example/b.zarr");
 
-    handlers.onDatasetOpenProgress?.("req-1", "http://example/b.zarr", {
-      stage: "metadata_import",
-      message: "reading metadata",
+    handlers.onOpenDatasetFailed?.(
+      requestA,
+      "http://example/a.zarr",
+      "permission denied for A",
+    );
+    expect(lastActivity(events)).toMatchObject({
+      loading: true,
+      error: "permission denied for A",
+      errorKind: "open",
     });
-    expect(lastActivity(events).error).toBeNull();
+
+    handlers.onDatasetOpenProgress?.(requestB, "http://example/b.zarr", {
+      stage: "metadata_import",
+      message: "reading B metadata",
+    });
+    expect(lastActivity(events)).toMatchObject({
+      loading: true,
+      progress: "reading B metadata",
+      error: "permission denied for A",
+    });
+
+    handlers.onOpenDatasetSucceeded?.(requestB, "http://example/b.zarr", 2, {
+      workspace_dataset_id: "wds-b",
+      name: "b.zarr",
+      image_count: 1,
+      entity_count: 0,
+    });
+    expect(lastActivity(events)).toMatchObject({
+      loading: false,
+      progress: null,
+      error: "permission denied for A",
+      errorKind: "open",
+    });
+  });
+
+  it("retry removes only the visible failure and reveals its failed sibling", () => {
+    const { controller, handlers, bridge, events } = makeHarness();
+    const requestA = beginOpen(controller, bridge, "gs://bucket/a.zarr");
+    const requestB = beginOpen(controller, bridge, "gs://bucket/b.zarr");
+    handlers.onOpenDatasetFailed?.(
+      requestA,
+      "gs://bucket/a.zarr",
+      "permission denied for A",
+    );
+    handlers.onOpenDatasetFailed?.(
+      requestB,
+      "gs://bucket/b.zarr",
+      "permission denied for B",
+    );
+
+    expect(lastActivity(events)).toMatchObject({
+      error: "permission denied for B",
+      errorKind: "open",
+    });
+
+    controller.retryFailedOpen();
+    expect(bridge.sendOpenRemoteDataset).toHaveBeenLastCalledWith(
+      "gs://bucket/b.zarr",
+    );
+    const retryRequestId = bridge.sendOpenRemoteDataset.mock.results.at(-1)?.value as string;
+    expect(lastActivity(events)).toMatchObject({
+      loading: true,
+      error: "permission denied for A",
+      errorKind: "open",
+      progress: "dataset open request sent",
+    });
+
+    handlers.onOpenDatasetSucceeded?.(retryRequestId, "gs://bucket/b.zarr", 3, {
+      workspace_dataset_id: "wds-b",
+      name: "b.zarr",
+      image_count: 1,
+      entity_count: 0,
+    });
+    expect(lastActivity(events)).toMatchObject({
+      loading: false,
+      error: "permission denied for A",
+    });
+  });
+
+  it("dismiss removes one visible failure at a time without sending", () => {
+    const { controller, handlers, bridge, events } = makeHarness();
+    const requestA = beginOpen(controller, bridge, "gs://bucket/a.zarr");
+    const requestB = beginOpen(controller, bridge, "gs://bucket/b.zarr");
+    handlers.onOpenDatasetFailed?.(requestA, "gs://bucket/a.zarr", "failed A");
+    handlers.onOpenDatasetFailed?.(requestB, "gs://bucket/b.zarr", "failed B");
+    const sendsBeforeDismiss = bridge.sendOpenRemoteDataset.mock.calls.length;
+
+    controller.dismissFailedOpen();
+    expect(lastActivity(events)).toMatchObject({ error: "failed A", errorKind: "open" });
+
+    controller.dismissFailedOpen();
+    expect(lastActivity(events)).toMatchObject({ error: null, errorKind: null });
+    expect(bridge.sendOpenRemoteDataset).toHaveBeenCalledTimes(sendsBeforeDismiss);
+  });
+
+  it("a fresh manual open retires only prior failures for the same URL", () => {
+    const { controller, handlers, bridge, events } = makeHarness();
+    const requestA = beginOpen(controller, bridge, "gs://bucket/a.zarr");
+    const requestB = beginOpen(controller, bridge, "gs://bucket/b.zarr");
+    handlers.onOpenDatasetFailed?.(requestA, "gs://bucket/a.zarr", "failed A");
+    handlers.onOpenDatasetFailed?.(requestB, "gs://bucket/b.zarr", "failed B");
+
+    beginOpen(controller, bridge, "gs://bucket/b.zarr");
+
+    expect(lastActivity(events)).toMatchObject({
+      loading: true,
+      error: "failed A",
+      errorKind: "open",
+    });
+  });
+
+  it("does not track a transport-rejected send as permanently pending", () => {
+    const { controller, bridge, events, savedViewHooks } = makeHarness();
+    bridge.sendOpenRemoteDataset.mockReturnValueOnce(null);
+
+    controller.openRemoteDataset("gs://bucket/offline.zarr");
+    expect(lastActivity(events)).toMatchObject({
+      loading: false,
+      errorKind: "open",
+      error: expect.stringContaining("connection is not ready"),
+    });
+    expect(savedViewHooks.onOpenDatasetFailed).toHaveBeenCalledWith(
+      "gs://bucket/offline.zarr",
+      expect.stringContaining("connection is not ready"),
+    );
+
+    controller.retryFailedOpen();
+    expect(bridge.sendOpenRemoteDataset).toHaveBeenCalledTimes(2);
+    expect(lastActivity(events)).toMatchObject({
+      loading: true,
+      error: null,
+      errorKind: null,
+    });
+  });
+
+  it("bounds accepted request tracking and makes capacity rejection retryable", () => {
+    const { controller, handlers, bridge, events, savedViewHooks } = makeHarness();
+    const requestIds: string[] = [];
+    for (let i = 0; i < MAX_TRACKED_OPEN_REQUESTS - 1; i++) {
+      requestIds.push(beginOpen(controller, bridge, `gs://bucket/${i}.zarr`));
+    }
+    const acceptedSends = bridge.sendOpenRemoteDataset.mock.calls.length;
+
+    controller.openRemoteDataset("gs://bucket/at-capacity.zarr");
+    expect(bridge.sendOpenRemoteDataset).toHaveBeenCalledTimes(acceptedSends);
+    expect(lastActivity(events)).toMatchObject({
+      loading: true,
+      errorKind: "open",
+      error: expect.stringContaining("Too many dataset opens"),
+    });
+    expect(savedViewHooks.onOpenDatasetFailed).toHaveBeenCalledWith(
+      "gs://bucket/at-capacity.zarr",
+      expect.stringContaining("Too many dataset opens"),
+    );
+
+    handlers.onOpenDatasetSucceeded?.(requestIds[0], "gs://bucket/0.zarr", 1, {
+      workspace_dataset_id: "wds-0",
+      name: "0.zarr",
+      image_count: 1,
+      entity_count: 0,
+    });
+    controller.retryFailedOpen();
+    expect(bridge.sendOpenRemoteDataset).toHaveBeenCalledTimes(acceptedSends + 1);
+    expect(bridge.sendOpenRemoteDataset).toHaveBeenLastCalledWith(
+      "gs://bucket/at-capacity.zarr",
+    );
   });
 
   it("a delivery streak beginning after an open failure takes the slot (last-writer)", () => {
@@ -704,7 +941,7 @@ describe("SessionController error recovery and precedence", () => {
     // problem — the stalling canvas would otherwise be attributed to the
     // wrong (already-final) cause. open/data resolve by last-writer.
     const { handlers, events } = makeHarness();
-    handlers.onOpenDatasetFailed?.("http://example/a.zarr", "permission denied");
+    handlers.onOpenDatasetFailed?.("req-a", "http://example/a.zarr", "permission denied");
     expect(lastActivity(events).error).toBe("permission denied");
 
     MockedCpuCache.instances[0].config!.onChunkFailureStreak!(12, "403 rejected");
@@ -715,8 +952,37 @@ describe("SessionController error recovery and precedence", () => {
     const { handlers, events } = makeHarness();
     MockedCpuCache.instances[0].config!.onChunkFailureStreak!(12, "403 rejected");
 
-    handlers.onOpenDatasetFailed?.("http://example/a.zarr", "permission denied");
+    handlers.onOpenDatasetFailed?.("req-a", "http://example/a.zarr", "permission denied");
     expect(lastActivity(events).error).toBe("permission denied");
+  });
+
+  it("surfaces terminal decoder exhaustion immediately but keeps automatic restarts quiet", () => {
+    const { events } = makeHarness();
+    const pool = MockedDecodePool.instances[0];
+
+    pool.onFailure?.(new Error("decode worker crashed"), false);
+    expect(
+      (events.onRemoteDatasetActivity as ReturnType<typeof vi.fn>).mock.calls,
+    ).toHaveLength(0);
+
+    pool.onFailure?.(new Error("replacement startup failed"), true);
+    expect(lastActivity(events)).toMatchObject({
+      errorKind: "data",
+      error: expect.stringContaining("Data decoding stopped after worker recovery was exhausted"),
+    });
+    expect(lastActivity(events).error).toContain("Reload the viewer to retry");
+  });
+
+  it("surfaces a decoder that failed synchronously before its listener was installed", () => {
+    MockedDecodePool.initialFailure = new Error("module worker construction blocked");
+
+    const { events } = makeHarness();
+
+    expect(lastActivity(events)).toMatchObject({
+      errorKind: "data",
+      error: expect.stringContaining("module worker construction blocked"),
+    });
+    expect(lastActivity(events).error).toContain("Reload the viewer to retry");
   });
 
   it("reconnect resets the cache chunk-failure streak", () => {
@@ -948,7 +1214,7 @@ describe("SessionController durable import warnings", () => {
     });
     expect(lastActivity(events).warnings).toStrictEqual(["warn-a", "warn-b"]);
 
-    handlers.onOpenDatasetFailed?.("gs://a.zarr", "object not found");
+    handlers.onOpenDatasetFailed?.("req-a", "gs://a.zarr", "object not found");
     expect(lastActivity(events).warnings).toStrictEqual(["warn-b"]);
   });
 
@@ -967,8 +1233,29 @@ describe("SessionController durable import warnings", () => {
       message: sampledLabelNotice,
       warning: true,
     });
-    handlers.onOpenDatasetFailed?.("gs://a.zarr", "object not found");
+    handlers.onOpenDatasetFailed?.("req-a", "gs://a.zarr", "object not found");
     expect(lastActivity(events).warnings).toStrictEqual([sampledLabelNotice]);
+  });
+
+  it("scopes warning cleanup by request when the same URL is opened twice", () => {
+    const { handlers, events } = makeHarness();
+    const url = "gs://shared.zarr";
+    handlers.onDatasetOpenProgress?.("req-a", url, {
+      stage: "metadata_import",
+      message: "warning from request a",
+      warning: true,
+    });
+    handlers.onDatasetOpenProgress?.("req-b", url, {
+      stage: "metadata_import",
+      message: "warning from request b",
+      warning: true,
+    });
+
+    handlers.onOpenDatasetFailed?.("req-a", url, "request a failed");
+
+    expect(lastActivity(events).warnings).toStrictEqual([
+      "warning from request b",
+    ]);
   });
 
   it("a disconnect clears every collected warning", () => {
@@ -1016,6 +1303,8 @@ describe("SessionController durable import warnings", () => {
 });
 
 describe("SessionController import-warning cap", () => {
+  const requestIdFor = (url: string) => `req:${url}`;
+
   /** Feed `count` distinct warning frames from one source, as the server does
    *  for a collection with many malformed members (one unique notice each). */
   function floodWarnings(
@@ -1025,7 +1314,7 @@ describe("SessionController import-warning cap", () => {
     label = "warn",
   ): void {
     for (let i = 0; i < count; i++) {
-      handlers.onDatasetOpenProgress?.("req-flood", url, {
+      handlers.onDatasetOpenProgress?.(requestIdFor(url), url, {
         stage: "metadata_import",
         message: `${label}-${i}`,
         warning: true,
@@ -1107,7 +1396,11 @@ describe("SessionController import-warning cap", () => {
     floodWarnings(handlers, "gs://b.zarr", 7, "b");
     expect(lastActivity(events).warningsOverflow).toBe(5 + 7);
 
-    handlers.onOpenDatasetFailed?.("gs://b.zarr", "object not found");
+    handlers.onOpenDatasetFailed?.(
+      requestIdFor("gs://b.zarr"),
+      "gs://b.zarr",
+      "object not found",
+    );
     // b contributed no retained warnings (display was already full), so the
     // list is unchanged; only b's 7 overflow are retired.
     const activity = lastActivity(events);
@@ -1125,7 +1418,11 @@ describe("SessionController import-warning cap", () => {
     floodWarnings(handlers, "gs://b.zarr", 3, "b");
     expect(lastActivity(events).warningsOverflow).toBe(5 + 3);
 
-    handlers.onOpenDatasetFailed?.("gs://a.zarr", "object not found");
+    handlers.onOpenDatasetFailed?.(
+      requestIdFor("gs://a.zarr"),
+      "gs://a.zarr",
+      "object not found",
+    );
     const activity = lastActivity(events);
     // The detailed list emptied with A, but the fact of B's warnings survives.
     expect(activity.warnings).toStrictEqual([]);
@@ -1148,6 +1445,107 @@ describe("SessionController import-warning cap", () => {
     expect(lastActivity(events).warningsOverflow).toBe(0);
     expect(lastActivity(events).warnings).toHaveLength(MAX_OPEN_WARNINGS);
   });
+
+  it("counts a replayed over-cap message once for the same source", () => {
+    const { handlers, events } = makeHarness();
+    floodWarnings(handlers, "gs://retained.zarr", MAX_OPEN_WARNINGS);
+
+    for (let i = 0; i < 5; i++) {
+      handlers.onDatasetOpenProgress?.("req-overflow", "gs://overflow.zarr", {
+        stage: "metadata_import",
+        message: "the same skipped member",
+        warning: true,
+      });
+    }
+
+    expect(lastActivity(events).warningsOverflow).toBe(1);
+  });
+
+  it("deduplicates overflow across sources while preserving source-scoped cleanup", () => {
+    const { handlers, events } = makeHarness();
+    floodWarnings(handlers, "gs://retained.zarr", MAX_OPEN_WARNINGS);
+    const report = (requestId: string, url: string) => handlers.onDatasetOpenProgress?.(
+      requestId,
+      url,
+      {
+        stage: "metadata_import",
+        message: "shared overflow notice",
+        warning: true,
+      },
+    );
+
+    report("req-a", "gs://same.zarr");
+    report("req-b", "gs://same.zarr");
+    expect(lastActivity(events).warningsOverflow).toBe(1);
+
+    handlers.onOpenDatasetFailed?.("req-a", "gs://same.zarr", "failed a");
+    expect(lastActivity(events).warningsOverflow).toBe(1);
+    handlers.onOpenDatasetFailed?.("req-b", "gs://same.zarr", "failed b");
+    expect(lastActivity(events).warningsOverflow).toBe(0);
+  });
+
+  it("keeps long-warning identity distinct from its bounded display prefix", () => {
+    const { handlers, events } = makeHarness();
+    const prefix = "x".repeat(MAX_OPEN_WARNING_MESSAGE_CHARS);
+    handlers.onDatasetOpenProgress?.("req-long", "gs://long.zarr", {
+      stage: "metadata_import",
+      message: `${prefix}-tail-a`,
+      warning: true,
+    });
+    handlers.onDatasetOpenProgress?.("req-long", "gs://long.zarr", {
+      stage: "metadata_import",
+      message: `${prefix}-tail-b`,
+      warning: true,
+    });
+
+    const activity = lastActivity(events);
+    expect(activity.warnings).toHaveLength(1);
+    expect(activity.warnings[0]).toHaveLength(MAX_OPEN_WARNING_MESSAGE_CHARS);
+    expect(activity.warningsOverflow).toBe(1);
+  });
+
+  it("switches to bounded occurrence accounting after the fingerprint index fills", () => {
+    const { handlers, events } = makeHarness();
+    const url = "gs://saturated.zarr";
+    const requestId = "req-saturated";
+    const total = MAX_OPEN_WARNINGS + MAX_OPEN_WARNING_FINGERPRINTS + 3;
+    for (let i = 0; i < total; i++) {
+      handlers.onDatasetOpenProgress?.(requestId, url, {
+        stage: "metadata_import",
+        message: `saturated-${i}`,
+        warning: true,
+      });
+    }
+    // This identity arrived after saturation and was deliberately not stored;
+    // replay is conservatively another report, not an unbounded dedup entry.
+    for (let i = 0; i < 2; i++) {
+      handlers.onDatasetOpenProgress?.(requestId, url, {
+        stage: "metadata_import",
+        message: `saturated-${total - 1}`,
+        warning: true,
+      });
+    }
+    expect(lastActivity(events).warningsOverflow).toBe(
+      MAX_OPEN_WARNING_FINGERPRINTS + 5,
+    );
+
+    handlers.onOpenDatasetFailed?.(requestId, url, "failed");
+    expect(lastActivity(events).warningsOverflow).toBe(0);
+  });
+
+  it("bounds request ownership and conservatively counts untracked sources", () => {
+    const { handlers, events } = makeHarness();
+    for (let i = 0; i < MAX_TRACKED_OPEN_WARNING_SOURCES + 3; i++) {
+      handlers.onDatasetOpenProgress?.(`req-${i}`, `gs://source-${i}.zarr`, {
+        stage: "metadata_import",
+        message: `source-warning-${i}`,
+        warning: true,
+      });
+    }
+    expect(lastActivity(events).warningsOverflow).toBe(
+      MAX_TRACKED_OPEN_WARNING_SOURCES - MAX_OPEN_WARNINGS + 3,
+    );
+  });
 });
 
 describe("SessionController source-chunk status routing", () => {
@@ -1159,6 +1557,11 @@ describe("SessionController source-chunk status routing", () => {
       "wds-1-img",
       "0/0/0/0/0/0",
       "failed_permanent",
+      {
+        category: "authorization",
+        code: "permission",
+        retryable: false,
+      },
       "access denied",
     );
 
@@ -1169,8 +1572,57 @@ describe("SessionController source-chunk status routing", () => {
       "wds-1-img",
       "0/0/0/0/0/0",
       "failed_permanent",
+      {
+        category: "authorization",
+        code: "permission",
+        retryable: false,
+      },
       "access denied",
     );
+  });
+});
+
+describe("SessionController generated-availability invalidation", () => {
+  it("keeps chunk-only deltas off the manifest/render invalidation path", () => {
+    const { controller, handlers } = makeHarness();
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 4, {});
+    const refresh = vi.spyOn(
+      controller as unknown as {
+        refreshRuntimeGeneratedManifest: (datasetId: string) => void;
+      },
+      "refreshRuntimeGeneratedManifest",
+    );
+
+    handlers.onGeneratedAvailabilityUpdate?.("wds-1", JSON.stringify({
+      chunks: [{
+        image_id: "wds-1-img",
+        level_index: 1,
+        key: "1/0/0/0/0/0",
+        status: "ready",
+      }],
+    }));
+
+    expect(refresh).not.toHaveBeenCalled();
+
+    handlers.onGeneratedAvailabilityUpdate?.("wds-1", JSON.stringify({
+      levels: [{
+        image_id: "wds-1-img",
+        info: {
+          level_index: 1,
+          role: "coarse",
+          provenance: { generator: "test", config_id: "cfg", source_content_id: "source" },
+        },
+        level: {
+          level_index: 1,
+          shape: [1, 1, 1, 2, 2],
+          chunk_shape: [1, 1, 1, 2, 2],
+          grid_shape: [1, 1, 1, 1, 1],
+          scale: [1, 1, 1, 2, 2],
+        },
+      }],
+    }));
+
+    expect(refresh).toHaveBeenCalledExactlyOnceWith("wds-1");
   });
 });
 

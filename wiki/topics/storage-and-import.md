@@ -23,8 +23,8 @@ This page is a curated index. Articles live in their canonical homes; follow the
 
 - [lucida-store](../systems/crates/lucida-store.md) — import pipeline, codec abstraction, server-side chunk serving, storage backend routing, and server-private binding seeds
 - [Generated Coarse](../systems/subsystems/generated-coarse.md) — server-managed derived coarse pyramid levels cached outside source storage
-- [lucida-proxy](../systems/crates/lucida-proxy.md) — opt-in/non-default pure-compute proxy generation (still compiled and wired); no I/O, no async
-- [lucida-protocol](../systems/crates/lucida-protocol.md) — wire types: `DatasetOpened`, `FetchSource`, `AssetCatalog`, `AssetMessage`
+- [lucida-proxy (retired)](../systems/crates/lucida-proxy.md) — historical proxy-generation design deleted under ADR-0043
+- [lucida-protocol](../systems/crates/lucida-protocol.md) — `DatasetOpened`, the live chunk fetch descriptor, session JSON, and the canonical binary chunk codec
 - [lucida-content](../systems/crates/lucida-content.md) — pure data model for `DatasetManifest` (entities, transforms, images, layouts)
 
 ## Why decisions were made

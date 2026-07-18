@@ -11,29 +11,6 @@ import type {
   RequestPlan,
 } from "./index.ts";
 import type { VisibleRegion } from "../viewport.ts";
-import type { PlanningConfig } from "./config.ts";
-
-/**
- * Translate a focal entity's projected diagonal into a human-readable
- * mode-band classification. Mirrors {@link chooseEntityMode}; both
- * read the same {@link PlanningConfig} so they cannot drift.
- */
-export function modeReason(diagPx: number, config: PlanningConfig): string {
-  const farUpper = config.farThresholdPx + config.hysteresisPx;
-  const farLower = config.farThresholdPx - config.hysteresisPx;
-  const medUpper = config.detailThresholdPx + config.hysteresisPx;
-  const medLower = config.detailThresholdPx - config.hysteresisPx;
-
-  if (diagPx < farLower) return `${diagPx.toFixed(0)}px < ${farLower} → clearly proxy`;
-  if (diagPx > medUpper) return `${diagPx.toFixed(0)}px > ${medUpper} → clearly detail`;
-  if (diagPx >= farUpper && diagPx <= medLower) {
-    return `${diagPx.toFixed(0)}px ∈ [${farUpper}, ${medLower}] → clearly fallback`;
-  }
-  if (diagPx < farUpper) {
-    return `${diagPx.toFixed(0)}px ∈ [${farLower}, ${farUpper}] hysteresis band`;
-  }
-  return `${diagPx.toFixed(0)}px ∈ [${medLower}, ${medUpper}] hysteresis band`;
-}
 
 /**
  * Build the per-dataset planning debug snapshot. Pure function —
@@ -50,9 +27,6 @@ export function modeReason(diagPx: number, config: PlanningConfig): string {
  * once per rebuild and shares it across every dataset rather than
  * letting this function re-snapshot per call.
  *
- * `config` is forwarded to {@link modeReason} so the focal-entity
- * explanation matches whatever thresholds {@link plan} was running
- * with this tick.
  */
 export function buildPlanningDatasetDebug(
   dsId: string,
@@ -61,9 +35,8 @@ export function buildPlanningDatasetDebug(
   entityById: Map<string, EntitySnapshot>,
   visibleRegion: VisibleRegion,
   cacheSnap: CacheStateSnapshot,
-  config: PlanningConfig,
 ): PlanningDatasetDebug {
-  const lanes = { minimap: 0, detail: 0, coarse: 0, proxy: 0, prefetch: 0, overview: 0 };
+  const lanes = { minimap: 0, detail: 0, coarse: 0, prefetch: 0 };
   const chunksByLevel: Record<number, number> = {};
   for (const r of result.requests) {
     lanes[r.lane]++;
@@ -116,26 +89,20 @@ export function buildPlanningDatasetDebug(
   // `ent.kind === "Tile"` before reading `parentId` (Image and Group
   // entities have no parent and fall back to their own entityId as
   // the groupId).
-  const groupsByMode = {
-    groupAsProxy: 0,
-    tilesWithProxyFallback: 0,
-    tilesWithDetail: 0,
-  };
+  const groupsByMode = { tilesWithDetail: 0, invisible: 0 };
   const groupsSeen = new Set<string>();
   for (const e of result.activeSet) {
-    if (e.kind === "group-as-proxy") {
-      groupsByMode.groupAsProxy++;
+    if (e.kind === "invisible") {
+      groupsByMode.invisible++;
       continue;
     }
-    if (e.kind === "invisible") continue;
     // Narrowed: e is TileEntry.
     const ent = entityById.get(e.entityId);
     const groupId =
       ent !== undefined && ent.kind === "Tile" ? ent.parentId : e.entityId;
     if (groupsSeen.has(groupId)) continue;
     groupsSeen.add(groupId);
-    if (e.mode === "tiles-with-proxy-fallback") groupsByMode.tilesWithProxyFallback++;
-    else if (e.mode === "tiles-with-detail") groupsByMode.tilesWithDetail++;
+    groupsByMode.tilesWithDetail++;
   }
 
   // Focal entity: visible entity with centroid nearest viewport-center
@@ -167,16 +134,11 @@ export function buildPlanningDatasetDebug(
       if (topPriority === null || r.priority < topPriority) topPriority = r.priority;
     }
     // Derive `mode` and `detailOwnedRange` per variant: only tile
-    // entries carry a real LOD range. Group-as-proxy and invisibles
-    // synthesise a defensible placeholder so the panel doesn't render
-    // `unknown`.
+    // entries carry a real LOD range.
     let displayMode: string;
     let detailOwnedRange: [number, number];
     if (entry === undefined) {
       displayMode = "unknown";
-      detailOwnedRange = [0, 0];
-    } else if (entry.kind === "group-as-proxy") {
-      displayMode = "group-as-proxy";
       detailOwnedRange = [0, 0];
     } else if (entry.kind === "invisible") {
       displayMode = "invisible";
@@ -199,7 +161,10 @@ export function buildPlanningDatasetDebug(
       idealTargetLod: focal.idealTargetLod,
       detailOwnedRange,
       mode: displayMode,
-      modeReason: modeReason(focal.projectedDiagonalPx, config),
+      modeReason:
+        entry?.kind === "tile"
+          ? `detail L${entry.detailLevel}${entry.coarseLevel === null ? "" : ` → coarse L${entry.coarseLevel}`}`
+          : "outside the active chunk set",
       topPriority,
       chunkCount,
     };
@@ -208,12 +173,10 @@ export function buildPlanningDatasetDebug(
   return {
     datasetId: dsId,
     lanes,
-    proxyCount: result.proxyRequests.length,
     totalChunks: result.requests.length,
     chunksByLevel,
     lodBreakdown,
     culling: result.stats.culling,
-    catalogDegradations: result.stats.catalogDegradations,
     groupsByMode,
     focalEntity,
   };

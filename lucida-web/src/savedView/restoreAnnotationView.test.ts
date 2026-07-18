@@ -624,3 +624,26 @@ describe("restoreAnnotationView — hardening (Fix 3): a bad captured camera deg
     expect(result.applied).toMatchObject({ zStart: 5, zEnd: 6, t: 1 });
   });
 });
+
+describe("restoreAnnotationView — untrusted capture preflight", () => {
+  it("rejects a malformed optional display field before the first scene command", () => {
+    const { scene, calls, getMode } = makeScene({
+      cameraMode: "slice",
+      volumeShapes: { [DS]: new Uint32Array([100, 512, 512]) },
+    });
+    const malformed = viewWith({
+      camera: arcballCamera(),
+      dataset_settings: {
+        [DS]: {
+          ...datasetSettings(),
+          opacity: "opaque",
+        } as unknown as DatasetDisplaySettings,
+      },
+    });
+
+    expect(() => restoreAnnotationView({ scene, view: malformed, datasetId: DS }))
+      .toThrow(/opacity/);
+    expect(calls).toEqual([]);
+    expect(getMode()).toBe("slice");
+  });
+});

@@ -43,7 +43,6 @@ describe("TelemetryCounters", () => {
     expect(snap.evictionsByTier.prefetch).toBe(1);
     expect(snap.evictionsByTier.overview).toBe(1);
     expect(snap.evictionsByTier.demotedDetail).toBe(0);
-    expect(snap.evictionsByTier.proxy).toBe(0);
     expect(snap.permanentFailures).toBe(1);
     expect(snap.transientFailures).toBe(1);
     expect(snap.lastError).toBe("transient blip");

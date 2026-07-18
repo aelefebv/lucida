@@ -29,6 +29,6 @@ export function getBoundKeys(): Set<string> {
   return new Set(Object.values(keyBindings));
 }
 
-export function isActionPressed(pressedKeys: Set<string>, action: ActionName): boolean {
+export function isActionPressed(pressedKeys: ReadonlySet<string>, action: ActionName): boolean {
   return pressedKeys.has(keyBindings[action]);
 }

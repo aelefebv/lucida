@@ -5,7 +5,7 @@ description: "Saved-view URLs (#view=…) embed dataset URLs verbatim inside the
 tags: [lucida, gotcha]
 source_path: wiki/gotchas/saved-view-credentials-in-urls.md
 created: 2026-05-08
-modified: 2026-05-08
+modified: 2026-07-16
 ---
 
 # Saved-View URLs Expose Dataset URLs (and Anything in Them)
@@ -40,7 +40,10 @@ None of these is good. The current contract: the encoder embeds whatever URL the
 
 - **Local-file paths** (`/data/...` or `file://...`) get an explicit warning in the share toast — a different sharp edge (see [Non-canonical axes are pinned to index 0](non-canonical-axes.md) adjacency: the `DatasetId`-collision problem in [Local-File Datasets Are Personal-Only in Saved Views](../decisions/0014-local-file-datasets-personal-only-in-saved-views.md)).
 - **Soft 4 KB threshold** warning hints at "large link, may not survive chat apps" — orthogonal to the credential leak but secondary nudge to consider `#b=<id>` instead.
-- **`#b=<id>` URLs** are tiny opaque strings; dataset URLs live server-side in the bookmark row. Sharing a bookmark link does NOT expose dataset URLs to anyone who can see the link (only to anyone authenticated who can fetch `/api/bookmarks/:id`).
+- **`#b=<id>` URLs** are tiny opaque strings; dataset URLs live in the workspace
+  saved-view row. Sharing the link does NOT expose dataset URLs to someone who
+  can only see the URL. Fetching the row still requires access to the workspace
+  at `/api/workspaces/:workspace_id/saved-views/:id`.
 
 ## What's NOT mitigated
 
@@ -49,7 +52,9 @@ None of these is good. The current contract: the encoder embeds whatever URL the
 
 ## What to do
 
-1. **For presigned URLs**: prefer `#b=<id>` bookmarks for sharing. Better: open the dataset via a non-presigned URL (configure long-lived bucket access on the server) before saving.
+1. **For presigned URLs**: prefer a workspace saved view and its compact
+   `#b=<id>` link. Better: open the dataset via a non-presigned URL (configure
+   long-lived bucket access on the server) before saving.
 2. **For credentialed URLs**: don't share `#view=…` outside the trust boundary that's already authorized for the underlying storage.
 3. **For internal-path leakage** (e.g. URLs that name customers/projects): same — `#b=<id>` keeps the URL server-side.
 
@@ -58,4 +63,4 @@ None of these is good. The current contract: the encoder embeds whatever URL the
 - [Saved Views](../systems/subsystems/saved-views.md) — subsystem overview
 - [URL-as-App-State for Saved Views](../decisions/0013-url-as-app-state-for-saved-views.md) — why the URL is the encoded state
 - [Local-File Datasets Are Personal-Only in Saved Views](../decisions/0014-local-file-datasets-personal-only-in-saved-views.md) — adjacent footgun for local paths
-- [Server-Stored Bookmarks and the AuthPrincipal Seam](../decisions/0015-server-stored-bookmarks-and-auth-seam.md) — `#b=<id>` as the shareable alternative
+- [Sunset dispositions for superseded server surfaces](../decisions/0043-superseded-server-surfaces-sunset.md) — why the stable `#b=<id>` syntax now resolves a workspace saved view

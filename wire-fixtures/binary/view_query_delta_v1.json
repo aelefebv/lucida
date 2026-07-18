@@ -1,0 +1,42 @@
+{
+  "format_version": 1,
+  "frame_hex": "4c564431010001000100000002000000010000004000000015000000000000001600000000000000170000000000000018000000000000001900000000000000060000000900000001000000000100000000000000005440000000000000b9400000000000001040000000000000144000000000000018400000000000001e406e65772dceb16e65772d696d616765090000006f6c642d696d61676503000000e5bdb1070000000a00000004000000020000000000000000b062400000000090d3d54000000000000000c0000000000000d03f0000000000002240000000000000e03f74696c652dceb274696c652d696d616765",
+  "value": {
+    "Delta": {
+      "epochs": {
+        "content": 21,
+        "layout": 22,
+        "view": 23,
+        "selection": 24,
+        "annotation": 25
+      },
+      "entered": [
+        {
+          "entity_id": "new-α",
+          "image_id": "new-image",
+          "kind": "Image",
+          "visible": true,
+          "projected_diagonal_px": 80.0,
+          "projected_area_px2": 6400.0,
+          "centroid_world": [4.0, 5.0, 6.0],
+          "ideal_target_lod": 1,
+          "importance": 7.5
+        }
+      ],
+      "left": ["old-image", "影"],
+      "changed": [
+        {
+          "entity_id": "tile-β",
+          "image_id": "tile-image",
+          "kind": "Tile",
+          "visible": false,
+          "projected_diagonal_px": 149.5,
+          "projected_area_px2": 22350.25,
+          "centroid_world": [-2.0, 0.25, 9.0],
+          "ideal_target_lod": 4,
+          "importance": 0.5
+        }
+      ]
+    }
+  }
+}

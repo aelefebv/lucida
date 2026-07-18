@@ -19,7 +19,7 @@ import {
 } from "../lastViewPreference.ts";
 
 export function ProfileMenu() {
-  const { principal, refresh, signOut } = useAuthSession();
+  const { principal, refresh, signOut, logoutFailure } = useAuthSession();
   const [open, setOpen] = useState(false);
   const [hovered, setHovered] = useState(false);
   const [pending, setPending] = useState(false);
@@ -69,10 +69,10 @@ export function ProfileMenu() {
     if (pending) return;
     setPending(true);
     try {
-      await signOut();
+      const completed = await signOut();
       // setOpen happens before unmount; AuthGate will re-render to
       // the unauth branch once the refresh completes.
-      setOpen(false);
+      if (completed) setOpen(false);
     } finally {
       setPending(false);
     }
@@ -137,9 +137,9 @@ export function ProfileMenu() {
           alignItems: "center",
           gap: nameVisible ? 8 : 0,
           padding: nameVisible ? "4px 8px" : 4,
-          background: "rgba(20, 20, 24, 0.85)",
-          color: "#eee",
-          border: "1px solid #444",
+          background: "var(--surface-glass)",
+          color: "var(--text-primary)",
+          border: "1px solid var(--border-strong)",
           borderRadius: 999,
           cursor: "pointer",
           font: "inherit",
@@ -172,26 +172,26 @@ export function ProfileMenu() {
             left: 0,
             minWidth: 220,
             padding: "8px 0",
-            background: "#1a1a1f",
-            color: "#eee",
-            border: "1px solid #444",
+            background: "var(--surface-1)",
+            color: "var(--text-primary)",
+            border: "1px solid var(--border-strong)",
             borderRadius: 8,
-            boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
+            boxShadow: "var(--shadow-raised)",
           }}
         >
-          <div style={{ padding: "4px 12px 8px", borderBottom: "1px solid #333" }}>
+          <div style={{ padding: "4px 12px 8px", borderBottom: "1px solid var(--border-subtle)" }}>
             <div style={{ fontWeight: 600 }}>{principal.display_name}</div>
-            <div style={{ color: "#aaa", fontSize: "0.8125rem", overflow: "hidden", textOverflow: "ellipsis" }}>
+            <div style={{ color: "var(--text-muted)", fontSize: "0.8125rem", overflow: "hidden", textOverflow: "ellipsis" }}>
               {principal.email}
             </div>
           </div>
-          <div style={{ padding: "8px 12px", borderBottom: "1px solid #333" }}>
+          <div style={{ padding: "8px 12px", borderBottom: "1px solid var(--border-subtle)" }}>
             <label
               style={{
                 display: "flex",
                 alignItems: "center",
                 gap: 8,
-                color: "#ccc",
+                color: "var(--text-secondary)",
                 fontSize: "0.8125rem",
                 cursor: "pointer",
               }}
@@ -203,7 +203,7 @@ export function ProfileMenu() {
               />
               Restore my last view
             </label>
-            <div style={{ color: "#888", fontSize: "0.75rem", marginTop: 4 }}>
+            <div style={{ color: "var(--text-muted)", fontSize: "0.75rem", marginTop: 4 }}>
               Reopen each workspace where you left off (a link with a view
               always wins).
             </div>
@@ -216,7 +216,7 @@ export function ProfileMenu() {
               }}
               style={{
                 padding: "8px 12px",
-                borderBottom: "1px solid #333",
+                borderBottom: "1px solid var(--border-subtle)",
                 display: "grid",
                 gap: 6,
               }}
@@ -245,7 +245,7 @@ export function ProfileMenu() {
                   display: "flex",
                   alignItems: "center",
                   gap: 6,
-                  color: "#ccc",
+                  color: "var(--text-secondary)",
                   fontSize: "0.8125rem",
                 }}
               >
@@ -258,7 +258,7 @@ export function ProfileMenu() {
                 Admin override
               </label>
               {devError && (
-                <div style={{ color: "#ffb4b4", fontSize: "0.8125rem" }}>
+                <div style={{ color: "var(--danger-text)", fontSize: "0.8125rem" }}>
                   {devError}
                 </div>
               )}
@@ -267,13 +267,26 @@ export function ProfileMenu() {
                 disabled={devPending || !devEmail.trim()}
                 style={{
                   ...menuButtonStyle,
-                  color: devPending || !devEmail.trim() ? "#888" : "#eee",
+                  color: devPending || !devEmail.trim() ? "var(--text-muted)" : "var(--text-primary)",
                   cursor: devPending || !devEmail.trim() ? "default" : "pointer",
                 }}
               >
                 {devPending ? "Switching..." : "Switch dev user"}
               </button>
             </form>
+          )}
+          {logoutFailure && (
+            <div
+              role="alert"
+              style={{
+                padding: "8px 12px",
+                color: "var(--danger-text)",
+                fontSize: "0.8125rem",
+              }}
+            >
+              {logoutFailure.message}
+              {logoutFailure.retryable && " Try again."}
+            </div>
           )}
           <button
             type="button"
@@ -282,7 +295,7 @@ export function ProfileMenu() {
             disabled={pending}
             style={{
               ...menuButtonStyle,
-              color: pending ? "#888" : "#eee",
+              color: pending ? "var(--text-muted)" : "var(--text-primary)",
               cursor: pending ? "default" : "pointer",
             }}
           >
@@ -307,10 +320,10 @@ const menuButtonStyle = {
 const devInputStyle = {
   minWidth: 0,
   padding: "6px 8px",
-  border: "1px solid #444",
+  border: "1px solid var(--border-strong)",
   borderRadius: 6,
-  background: "#111",
-  color: "#eee",
+  background: "var(--surface-canvas)",
+  color: "var(--text-primary)",
   font: "inherit",
 };
 
@@ -347,8 +360,8 @@ function Avatar({
         width: size,
         height: size,
         borderRadius: "50%",
-        background: "#646cff",
-        color: "#fff",
+        background: "var(--accent-strong)",
+        color: "var(--accent-contrast)",
         fontWeight: 600,
         fontSize: "0.8125rem",
       }}

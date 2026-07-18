@@ -29,7 +29,7 @@
  * gestures (pan vs orbit), `focusPin`'s recenter mechanics, and the 2D-only
  * hover-revealed shape handles.
  */
-import { useEffect, useRef, useState, type Dispatch, type RefObject, type SetStateAction } from "react";
+import { useCallback, useEffect, useRef, useState, type Dispatch, type RefObject, type SetStateAction } from "react";
 import type { WasmScene } from "lucida-core";
 import { readAnnotations, type Annotation } from "./annotationDocument.ts";
 
@@ -41,6 +41,13 @@ export interface AnnotationOverlayState {
   /** Which pin's thread popover is open (by pin id), or null when none. */
   openPinId: string | null;
   setOpenPinId: Dispatch<SetStateAction<string | null>>;
+  /** Run an external focus exactly when `pinId` exists in this overlay's
+   * authoritative set. The promise resolves after the supplied scene mutation
+   * completes; a newer request supersedes an older queued one. */
+  focusPinWhenAvailable: (
+    pinId: string,
+    focus: (pin: Annotation) => boolean | Promise<boolean>,
+  ) => Promise<boolean>;
 }
 
 export function useAnnotationOverlay(opts: {
@@ -102,5 +109,57 @@ export function useAnnotationOverlay(opts: {
   // eslint-disable-next-line react-hooks/refs
   annotationsRef.current = annotations;
 
-  return { annotations, annotationsRef, openPinId, setOpenPinId };
+  const pendingFocusRef = useRef<{
+    pinId: string;
+    focus: (pin: Annotation) => boolean | Promise<boolean>;
+    resolve: (focused: boolean) => void;
+    reject: (error: unknown) => void;
+  } | null>(null);
+  const [focusRequestVersion, setFocusRequestVersion] = useState(0);
+
+  const runFocus = useCallback((
+    pin: Annotation,
+    focus: (pin: Annotation) => boolean | Promise<boolean>,
+  ): Promise<boolean> => {
+    try {
+      return Promise.resolve(focus(pin));
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }, []);
+
+  const focusPinWhenAvailable = useCallback((
+    pinId: string,
+    focus: (pin: Annotation) => boolean | Promise<boolean>,
+  ): Promise<boolean> => {
+    const pin = annotationsRef.current.find((candidate) => candidate.id === pinId);
+    if (pin) return runFocus(pin, focus);
+    return new Promise<boolean>((resolve, reject) => {
+      pendingFocusRef.current?.resolve(false);
+      pendingFocusRef.current = { pinId, focus, resolve, reject };
+      setFocusRequestVersion((version) => version + 1);
+    });
+  }, [annotationsRef, runFocus]);
+
+  useEffect(() => {
+    const pending = pendingFocusRef.current;
+    if (!pending) return;
+    const pin = annotations.find((candidate) => candidate.id === pending.pinId);
+    if (!pin) return;
+    pendingFocusRef.current = null;
+    void runFocus(pin, pending.focus).then(pending.resolve, pending.reject);
+  }, [annotations, focusRequestVersion, runFocus]);
+
+  useEffect(() => () => {
+    pendingFocusRef.current?.resolve(false);
+    pendingFocusRef.current = null;
+  }, []);
+
+  return {
+    annotations,
+    annotationsRef,
+    openPinId,
+    setOpenPinId,
+    focusPinWhenAvailable,
+  };
 }

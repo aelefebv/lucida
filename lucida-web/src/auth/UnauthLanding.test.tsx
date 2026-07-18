@@ -87,6 +87,36 @@ describe("UnauthLanding", () => {
     expect(screen.getByRole("button", { name: /Sign in again/i })).toBeTruthy();
   });
 
+  it("shows the partial-signout warning instead of claiming success", async () => {
+    const navigate = vi.fn();
+    await act(async () => {
+      render(
+        <UnauthLanding
+          navigate={navigate}
+          location={{ pathname: "/x", search: "", hash: "" }}
+          signedOut
+          logoutFailure={{
+            kind: "partial_signout",
+            message:
+              "This browser's local session was cleared, but the stored session remains.",
+            retryable: true,
+            localSession: "cleared",
+            status: 503,
+          }}
+        />,
+      );
+    });
+
+    expect(navigate).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("heading", { name: /Sign-out incomplete/i }),
+    ).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toMatch(
+      /every copy of the session credential/i,
+    );
+    expect(screen.queryByText("You've been signed out of lucida.")).toBeNull();
+  });
+
   it("signed-out card's button initiates the sign-in bounce on click", async () => {
     const navigate = vi.fn();
     await act(async () => {

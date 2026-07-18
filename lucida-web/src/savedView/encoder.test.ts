@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { encode, decode, SavedViewDecodeError } from "./encoder.ts";
+import { encode, decode, SavedViewDecodeError, validateSavedView } from "./encoder.ts";
 import {
   SAVED_VIEW_VERSION,
   type SavedView,
@@ -244,6 +244,25 @@ describe("SavedView encoder", () => {
       expect(back.dataset_settings["ds-x"].channel_settings![0].name).toBe("Region D");
     });
 
+    it("per-label settings and names survive defaults stripping", async () => {
+      const v = emptySliceView();
+      v.dataset_settings = {
+        "ds-x": {
+          ...defaultDatasetSettings(0),
+          label_settings: [
+            { visible: false, opacity: 0.25 },
+            { visible: true, opacity: 0.8 },
+          ],
+          label_names: ["region", "boundary"],
+        },
+      };
+      const back = await decode(await encode(v));
+      expect(back.dataset_settings["ds-x"].label_settings).toEqual(
+        v.dataset_settings["ds-x"].label_settings,
+      );
+      expect(back.dataset_settings["ds-x"].label_names).toEqual(["region", "boundary"]);
+    });
+
     it("auto_contrast: false entries round-trip; true entries are stripped (default)", async () => {
       const v = emptySliceView();
       v.auto_contrast = { "ds-a": false, "ds-b": true, "ds-c": false };
@@ -275,17 +294,14 @@ describe("SavedView encoder", () => {
       await expect(decode(base64UrlEncodeForTest(gz))).rejects.toBeInstanceOf(SavedViewDecodeError);
     });
 
-    it("warns and proceeds for v > 1", async () => {
+    it("rejects a future major version before apply", async () => {
       const v = emptySliceView();
       const futureView: SavedView = { ...v, v: 99 };
-      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-      try {
-        const back = await decode(await encode(futureView));
-        expect(warn).toHaveBeenCalled();
-        expect(back.v).toBe(99);
-      } finally {
-        warn.mockRestore();
-      }
+      const gz = await gzipForTest(new TextEncoder().encode(JSON.stringify(futureView)));
+      await expect(decode(base64UrlEncodeForTest(gz))).rejects.toBeInstanceOf(
+        SavedViewDecodeError,
+      );
+      await expect(encode(futureView)).rejects.toBeInstanceOf(SavedViewDecodeError);
     });
 
     it("rejects an empty string payload", async () => {
@@ -294,6 +310,48 @@ describe("SavedView encoder", () => {
 
     it("rejects a non-base64url string", async () => {
       await expect(decode("not!!@@valid$$")).rejects.toBeInstanceOf(SavedViewDecodeError);
+    });
+  });
+
+  describe("runtime field validation", () => {
+    it.each([
+      ["dataset visibility", (v: Record<string, unknown>) => {
+        v.dataset_settings = { "ds-a": { visible: 5 } };
+      }],
+      ["blend mode", (v: Record<string, unknown>) => {
+        v.dataset_settings = { "ds-a": { blend_mode: "screen" } };
+      }],
+      ["channel colormap", (v: Record<string, unknown>) => {
+        v.dataset_settings = { "ds-a": { channel_settings: [{ colormap: 5 }] } };
+      }],
+      ["camera tuple", (v: Record<string, unknown>) => {
+        (v.camera as Record<string, unknown>).center = [1];
+      }],
+      ["z range", (v: Record<string, unknown>) => {
+        (v.view as Record<string, unknown>).z_range = { start: 4, end: 4 };
+      }],
+      ["auto contrast", (v: Record<string, unknown>) => {
+        v.auto_contrast = { "ds-a": "false" };
+      }],
+    ])("rejects malformed %s before a SavedView is returned", (_label, mutate) => {
+      const candidate = structuredClone(emptySliceView()) as unknown as Record<string, unknown>;
+      mutate(candidate);
+      expect(() => validateSavedView(candidate)).toThrow(SavedViewDecodeError);
+    });
+
+    it("defaults a valid sparse v1 payload only after validation", () => {
+      const sparse = {
+        v: SAVED_VIEW_VERSION,
+        camera: { mode: "slice", center: [0, 0], zoom: 1, viewport: [800, 600] },
+        dataset_settings: { "ds-a": { visible: false } },
+      };
+      expect(validateSavedView(sparse)).toMatchObject({
+        view: { z_range: { start: 0, end: 1 }, t: 0, c: 0 },
+        display: { contrast_min: 0, contrast_max: 65535, gamma: 1 },
+        dataset_settings: {
+          "ds-a": { visible: false, opacity: 1, blend_mode: "alpha" },
+        },
+      });
     });
   });
 

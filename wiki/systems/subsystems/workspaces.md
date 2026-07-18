@@ -5,7 +5,7 @@ description: "A workspace is the durable, server-stored container users return t
 tags: [lucida, subsystem]
 source_path: wiki/systems/subsystems/workspaces.md
 created: 2026-06-25
-modified: 2026-07-03
+modified: 2026-07-17
 ---
 
 # Workspaces
@@ -16,7 +16,7 @@ Implemented in `lucida-server/src/workspace/` (layout in [lucida-server](../crat
 
 ## Two dataset identities — the central distinction
 
-- **`dataset_source`** — global source identity, keyed by `dataset_source_id` = `ds-{016x}` where the 16 hex chars are the **first 8 bytes of BLAKE3** of the canonicalized URL read as a little-endian `u64` (`dataset_id_for_url`, `lucida-content/src/url.rs`) — not 16 hash bytes. (A separate full 16-*byte* `dataset_url_hash16` of the same digest exists for the proxy cache.) This deduplicates import / cache / generated-coarse work *across* workspaces. Multiple memberships, in one or many workspaces, can point at the same source and reuse its cache.
+- **`dataset_source`** — global source identity, keyed by `dataset_source_id` = `ds-{64 lowercase hex characters}` from the full BLAKE3 digest of the canonicalized URL (`SourceIdentity::dataset_id`). Runtime caches use that typed source identity plus semantic revision, preventing aliasing while still reusing source/generated-coarse work across workspaces.
 - **`workspace_dataset`** — a dataset's membership/layer *inside one workspace*, keyed by `wds-{uuid}` (random, opaque, globally unique). This is the id the client, the document, saved views, and rendering use.
 
 `DatasetOpened` and every document command carry the `wds-` id; source/cache/chunk routing maps `wds-` → `ds-` server-side. Saved views and inline `#view` payloads key dataset state by `wds-` id and intentionally omit source URLs. v0 enforces one membership per source per workspace (`unique(workspace_id, dataset_source_id)`), so a duplicate add is a no-op (`ON CONFLICT … DO NOTHING`). **Invariant:** any operation given a `wds-` id must still validate that the membership belongs to the current workspace.
@@ -39,12 +39,39 @@ Renaming a dataset's display label is a real document mutation, not a local edit
 ## Interactions
 
 - [Authentication](auth.md) — members/link grants resolve through the same `AuthPrincipal` boundary; email is the v0 membership key, with provider subject stored for later hardening.
-- [Saved Views](saved-views.md) — workspace saved views are the third saved-view surface; they replaced the global bookmark concept once workspaces landed. Editors create/update/delete + set the `default_saved_view_id`; viewers list/open/copy.
-- [Presence and Follow Mode](presence-and-follow-mode.md) — the session is per-workspace: each `LiveWorkspace` owns its `Session`, broadcast channel, peer map, and `seq`. Presence, peers, follow chains, and document/saved-view broadcasts are all workspace-local; `ClientId` is workspace-local live-peer identity. There is no longer a single global shared session (ADR-0020).
+- [Saved Views](saved-views.md) — workspace saved views are the sole active server-stored view surface; the stable `#b=<id>` hash resolves within the workspace. Editors create/update/delete + set the `default_saved_view_id`; viewers list/open/copy subject to visibility rules.
+- [Presence and Follow Mode](presence-and-follow-mode.md) — the live session is per-workspace: each `LiveWorkspace` owns its `Session`, broadcast channel, peer map, and `seq`. Presence, peers, follow chains, and document broadcasts are workspace-local; `ClientId` is workspace-local live-peer identity. Saved-view CRUD stays on workspace REST rather than the session stream. There is no global shared session after [ADR-0043](../../decisions/0043-superseded-server-surfaces-sunset.md).
 
 ## Other gotchas / invariants
 
 - The shared document command flow is **authorize → apply → persist snapshot+seq → broadcast/ack**; commands persist before they broadcast. Sequencing locks per live workspace, never globally, so workspace A can't block workspace B.
+- Durable `document_json` writes use a versioned `{ "format_version": 1, "document": ... }` envelope. Historical bare documents are implicit v0 and migrate on their next successful write; explicit unknown or malformed versions fail closed without rewriting the row.
+- Released databases that still contain the earlier short `ds-{16 hex}` source ids are upgraded at server startup, after SQL schema migrations and before a workspace store is exposed. The Rust data migration validates every source/id pair and every `workspace_datasets` reference, plans the complete old→full rekey, then canonicalizes locator spellings and updates source primary keys/references in one deferred-FK transaction. It deliberately preserves all opaque `wds-*` ids and workspace/source metadata. Equivalent locators that would collapse, unknown id generations, and orphan references fail startup with no partial data rewrite; successful and repeated runs are recorded idempotently in `lucida_data_migrations` while still revalidating current rows. Startup failures carry a stable reason code and the same credential-safe source diagnostic used by offline recovery; raw canonical locators and database-driver detail are not retained in `Display`, `Debug`, tracing, or the top-level process error.
 - `workspace_datasets` is authoritative for membership; `document_json` is authoritative for the client-facing snapshot. Dataset add/remove updates both in one transaction.
 - Removing a dataset removes only that workspace's membership — never the global source, its cache, or saved views that reference it (those may go partially stale and warn on apply).
 - Lifecycle is archive/restore (no v0 hard delete outside admin); archiving revokes live usability and notifies clients. Idle live workspaces are evicted on a TTL while durable rows and shared cache survive.
+
+## Collaboration resource budgets
+
+Collaborative input is admitted once at the shared Rust boundary, before any
+mutation, persistence, or broadcast. The executable source of truth is
+`lucida-core/src/quota.rs`; deployments may lower surrounding ingress/cache
+budgets, but must not raise these wire guarantees independently in one client.
+
+| Boundary | Limit | Failure behavior |
+|---|---:|---|
+| Client WebSocket message / command JSON | 2 MiB | close code 1009 for an oversized frame; request-correlated `resource_limit` Nack for a decoded command |
+| Retained presence / viewer-interest update | 64 KiB per client | close code 1009 before session state changes |
+| Command text / identifier | 256 KiB / 1 KiB | atomic validation failure |
+| Annotations per dataset / comments per annotation | 100,000 / 4,096 | atomic validation failure |
+| Persisted collaborative document JSON | 24 MiB | rejected before the sequence or database changes |
+| Full session snapshot JSON | 32 MiB | connection closes instead of allocating or sending an unbounded snapshot |
+| Live connections | 64 per workspace; 8 per principal/workspace | upgrade closes with 1013 before presence is registered |
+| Outstanding request work | 32 per connection; 64 per principal process-wide | request receives a retryable, request-appropriate resource-limit result; admitted work is unchanged |
+| Per-connection unicast queue | 128 messages and 32 MiB | overload counters/logs increment and the connection closes with 1013 |
+| Chunk-planner candidates per pass | 65,536 | deterministic centered window before enumeration |
+
+Manifests additionally validate aggregate entity/image/level/reference counts,
+compact-reference expansion, identifiers, numeric geometry, and checked chunk
+byte layouts. Decoder output and cache budgets are enforced at their respective
+storage boundaries rather than being inferred from these collaboration limits.

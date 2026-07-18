@@ -4,8 +4,8 @@
 //
 //   - **Outbound** (scene → URL): on every viewport-change tick, debounce
 //     250-500 ms, encode the current SavedView, write `#view=…` via
-//     `history.replaceState`. Suppressed while applier is in progress so
-//     we don't fight ourselves during a recipient apply.
+//     `history.replaceState`. Changes emitted by a saved-view apply are tagged
+//     with that apply's epoch and retired by its settlement event.
 //
 //   - **Inbound** (URL → scene): on initial load, parse `window.location.hash`;
 //     on `popstate`, re-parse and re-apply. Both routed through the
@@ -32,7 +32,6 @@
 import { encode, decode } from "./encoder.ts";
 import type { SavedView } from "./types.ts";
 import { SavedViewApplier } from "./applier.ts";
-import { getBookmark } from "./bookmarksApi.ts";
 import {
   getRestoreLastViewEnabled,
   resolveInitialViewSource,
@@ -49,9 +48,7 @@ export interface UrlSyncOptions {
   debounceMs?: number;
   /** Override `window` for testing. */
   window?: Window;
-  /** Resolve `#b=<id>` to a saved view. Defaults to the production REST
-   *  helper; tests inject a stub so they don't need a fetch mock. */
-  fetchBookmark?: (id: string) => Promise<ResolvedSavedView | null>;
+  /** Resolve `#b=<id>` as an id in the current workspace's saved-view store. */
   fetchSavedViewById?: (id: string) => Promise<ResolvedSavedView | null>;
   /** Resolve the workspace default saved view for bare workspace URLs. */
   fetchDefaultSavedView?: () => Promise<ResolvedSavedView | null>;
@@ -63,28 +60,54 @@ export interface UrlSyncOptions {
   /** Whether the per-user "restore my last view" toggle is on. Defaults to
    *  the localStorage-backed preference; injectable for tests. */
   restoreLastViewEnabled?: () => boolean;
+  /** Test seam for deterministic delayed-write ordering. Production uses the
+   * canonical saved-view encoder. */
+  encodeView?: (view: SavedView) => Promise<string>;
+  /**
+   * Run when a genuinely bare workspace has neither an applicable remembered
+   * view nor an applicable workspace default. The web host uses this to frame
+   * the snapshot's first dataset without competing with an explicit URL,
+   * profile, last view, or default view.
+   */
+  onInitialViewFallback?: () => void | Promise<void>;
 }
 
 export type CaptureBuilder = () => SavedView | null;
+
+export interface CommittedShareLink {
+  /** Absolute URL after the matching captured view has been committed. */
+  url: string;
+  /** The exact capture encoded into `url` (also used for share warnings). */
+  view: SavedView;
+}
 
 export type FetchSavedViewById = (id: string) => Promise<ResolvedSavedView | null>;
 export type FetchDefaultSavedView = () => Promise<ResolvedSavedView | null>;
 export type FetchViewerProfile = (profile: string) => Promise<ResolvedSavedView | null>;
 export type FetchLastView = () => Promise<ResolvedSavedView | null>;
 
-/** Default `#b=<id>` resolver — the REST helper. Tests inject their
- *  own to avoid the production fetch path. */
-const defaultFetchSavedViewById: FetchSavedViewById = (id) => getBookmark(id);
+const unresolvedSavedView: FetchSavedViewById = async () => null;
 
 export class UrlSync {
   private debounceMs: number;
   private win: Window;
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private pendingChangeEpoch: number | null = null;
+  /** Serializes URL encodes/writes so an older debounced capture can never
+   * finish after and overwrite a user-explicit share capture. */
+  private writeTail: Promise<void> = Promise.resolve();
   private destroyed = false;
   private popstateHandler: ((e: PopStateEvent) => void) | null = null;
-  /** Last URL we wrote — used to skip no-op writes and to suppress our
-   * own popstate echoes. */
-  private lastWritten: string | null = null;
+  /** Serializes inbound navigation applies. Newer popstate generations make
+   * queued older ones stale before they touch the scene. */
+  private navigationTail: Promise<void> = Promise.resolve();
+  private navigationEpoch = 0;
+  /** Apply-settlement watermark for a default/last/profile restore whose bare
+   * address is intentional. The first coarse change-tick flush at or after that
+   * settlement is retired by epoch; a subsequent user mutation writes normally.
+   * This replaces the timing-sensitive `suppressNextEmptyHashFlush` boolean. */
+  private preserveEmptyHashEpoch = 0;
+  private retiredPreserveEmptyHashEpoch = 0;
 
   private readonly captureBuilder: CaptureBuilder;
   private readonly applier: SavedViewApplier;
@@ -93,7 +116,8 @@ export class UrlSync {
   private readonly fetchViewerProfile: FetchViewerProfile | null;
   private readonly fetchLastView: FetchLastView | null;
   private readonly restoreLastViewEnabled: () => boolean;
-  private suppressNextEmptyHashFlush = false;
+  private readonly encodeView: (view: SavedView) => Promise<string>;
+  private readonly onInitialViewFallback: (() => void | Promise<void>) | null;
 
   constructor(
     captureBuilder: CaptureBuilder,
@@ -104,13 +128,14 @@ export class UrlSync {
     this.applier = applier;
     this.debounceMs = options.debounceMs ?? 350;
     this.win = options.window ?? window;
-    this.fetchSavedViewById =
-      options.fetchSavedViewById ?? options.fetchBookmark ?? defaultFetchSavedViewById;
+    this.fetchSavedViewById = options.fetchSavedViewById ?? unresolvedSavedView;
     this.fetchDefaultSavedView = options.fetchDefaultSavedView ?? null;
     this.fetchViewerProfile = options.fetchViewerProfile ?? null;
     this.fetchLastView = options.fetchLastView ?? null;
     this.restoreLastViewEnabled =
       options.restoreLastViewEnabled ?? getRestoreLastViewEnabled;
+    this.encodeView = options.encodeView ?? encode;
+    this.onInitialViewFallback = options.onInitialViewFallback ?? null;
   }
 
   /** Hook the popstate listener. Idempotent + re-armable after `destroy()`
@@ -121,9 +146,9 @@ export class UrlSync {
     this.destroyed = false;
     if (this.popstateHandler !== null) return;
     this.popstateHandler = () => {
-      // popstate fires for back/forward navigation. Re-apply whatever's
-      // in the URL. If applier is busy, skip to avoid race.
-      if (this.applier.isInProgress()) return;
+      // popstate fires for back/forward navigation. Generation serialization
+      // means a busy apply is awaited and a newer navigation supersedes an
+      // older queued one; no timing-based "busy, skip" window exists.
       this.bootstrap().catch((e) => {
         console.warn("[UrlSync] popstate apply failed:", e);
       });
@@ -154,8 +179,19 @@ export class UrlSync {
    * form so further pans don't drift the recipient back to a stale
    * snapshot every time the URL is re-applied.
    */
-  async bootstrap(): Promise<void> {
-    if (this.applier.isInProgress()) return;
+  bootstrap(): Promise<void> {
+    const navigationEpoch = ++this.navigationEpoch;
+    const run = async () => {
+      await this.waitForActiveApply();
+      if (this.destroyed || navigationEpoch !== this.navigationEpoch) return;
+      await this.bootstrapCurrentLocation();
+    };
+    const result = this.navigationTail.then(run, run);
+    this.navigationTail = result.catch(() => {});
+    return result;
+  }
+
+  private async bootstrapCurrentLocation(): Promise<void> {
 
     const hash = this.win.location.hash;
 
@@ -167,25 +203,25 @@ export class UrlSync {
     // the default/last view over the link's target. No fetch, no apply here.
     if (parseAnnotationHash(hash) !== null) return;
 
-    const bookmarkId = parseBookmarkHash(hash);
-    if (bookmarkId !== null) {
+    const savedViewId = parseSavedViewIdHash(hash);
+    if (savedViewId !== null) {
       let savedView: ResolvedSavedView | null;
       try {
-        savedView = await this.fetchSavedViewById(bookmarkId);
+        savedView = await this.fetchSavedViewById(savedViewId);
       } catch (e) {
         console.warn("[UrlSync] failed to fetch saved view:", e);
         return;
       }
       if (savedView === null) {
-        console.warn(`[UrlSync] saved view ${bookmarkId} not found`);
+        console.warn(`[UrlSync] saved view ${savedViewId} not found`);
         return;
       }
-      await this.applier.apply(savedView.view);
+      const settlement = await this.applier.apply(savedView.view);
       // Collapse `#b=<id>` to the live `#view=…` form so the URL reflects
       // the current scene, not the saved view's frozen snapshot. Skip if
       // the apply was a no-op (no scene yet); the next bootstrap will
       // rewrite when the scene is ready.
-      await this.flushAfterSavedViewApply();
+      if (settlement.status === "applied") await this.flushAfterSavedViewApply();
       return;
     }
 
@@ -249,13 +285,12 @@ export class UrlSync {
     });
 
     if (source === "last-view" && lastView !== null) {
-      this.suppressNextEmptyHashFlush = true;
-      await this.applier.apply(lastView.view);
-      return;
+      if (await this.applyPreservingEmptyAddress(lastView.view)) return;
     }
     if (source === "default") {
-      await this.applyDefaultSavedView();
+      if (await this.applyDefaultSavedView()) return;
     }
+    await this.applyInitialViewFallback();
   }
 
   private async applyViewerProfile(profile: string): Promise<void> {
@@ -267,21 +302,37 @@ export class UrlSync {
       return;
     }
     if (savedView === null) return;
-    this.suppressNextEmptyHashFlush = true;
-    await this.applier.apply(savedView.view);
+    await this.applyPreservingEmptyAddress(savedView.view);
   }
 
-  private async applyDefaultSavedView(): Promise<void> {
+  private async applyDefaultSavedView(): Promise<boolean> {
     let savedView: ResolvedSavedView | null;
     try {
       savedView = await this.fetchDefaultSavedView?.() ?? null;
     } catch (e) {
       console.warn("[UrlSync] failed to fetch default saved view:", e);
-      return;
+      return false;
     }
-    if (savedView === null) return;
-    this.suppressNextEmptyHashFlush = true;
-    await this.applier.apply(savedView.view);
+    if (savedView === null) return false;
+    return this.applyPreservingEmptyAddress(savedView.view);
+  }
+
+  private async applyPreservingEmptyAddress(view: SavedView): Promise<boolean> {
+    const settlement = await this.applier.apply(view);
+    if (settlement.status === "applied") {
+      this.preserveEmptyHashEpoch = Math.max(this.preserveEmptyHashEpoch, settlement.epoch);
+      return true;
+    }
+    return false;
+  }
+
+  private async applyInitialViewFallback(): Promise<void> {
+    if (!this.onInitialViewFallback) return;
+    try {
+      await this.onInitialViewFallback();
+    } catch (e) {
+      console.warn("[UrlSync] initial view fallback failed:", e);
+    }
   }
 
   /**
@@ -298,66 +349,131 @@ export class UrlSync {
     await this.flushAfterSavedViewApply();
   }
 
-  /** Encode and write `#view=…` immediately after a saved-view apply.
-   *  Bypasses the in-progress guard because `apply` has already returned;
-   *  the dedupe-against-lastWritten branch keeps this from looping. */
+  /** Encode and write `#view=…` immediately after a saved-view apply. The
+   * current browser route/hash is the write dedupe authority. */
   private async flushAfterSavedViewApply(): Promise<void> {
     if (this.destroyed) return;
     const view = this.captureBuilder();
     if (view === null) return;
-    let payload: string;
     try {
-      payload = await encode(view);
+      await this.writeCapturedView(view);
     } catch (e) {
-      console.warn("[UrlSync] post-bookmark encode failed:", e);
-      return;
+      console.warn("[UrlSync] post-saved-view encode failed:", e);
     }
-    const newHash = `#view=${payload}`;
-    const url = `${this.win.location.pathname}${this.win.location.search}${newHash}`;
-    if (url === this.lastWritten) return;
-    this.lastWritten = url;
-    this.win.history.replaceState(this.win.history.state, "", url);
   }
 
   /**
-   * Notify the sync that the scene has changed. Schedules a debounced
-   * URL update. If `applyInProgress` is true at fire time, the write
-   * is skipped (the URL already reflects the apply target).
+   * Notify the sync that the scene has changed. Schedules a debounced URL
+   * update tagged with the active apply generation, if any. Apply-owned ticks
+   * retire only after that exact generation settles; user ticks remain writable.
    */
   notifyChange(): void {
     if (this.destroyed) return;
+    // Capture cause at notification time. A render/effect that fires while an
+    // apply generation owns the scene is retired only after THAT epoch settles;
+    // a later user change records null and therefore remains writeable.
+    this.pendingChangeEpoch = this.applier.getActiveEpoch();
     if (this.timer !== null) {
       clearTimeout(this.timer);
     }
     this.timer = setTimeout(() => {
       this.timer = null;
-      void this.flush();
+      const causedByApplyEpoch = this.pendingChangeEpoch;
+      this.pendingChangeEpoch = null;
+      void this.flushChange(causedByApplyEpoch);
     }, this.debounceMs);
+  }
+
+  /**
+   * Atomically capture, encode, commit, and return a share URL.
+   *
+   * This is the only user-explicit share path. Returning the exact capture next
+   * to the committed URL prevents the old race where the clipboard received a
+   * stale location and warnings inspected a second, potentially different view.
+   */
+  async commitShareLink(): Promise<CommittedShareLink> {
+    if (this.destroyed) throw new Error("View sharing is not available yet.");
+    await this.waitForActiveApply();
+    if (this.destroyed) throw new Error("View sharing is not available yet.");
+    if (this.timer !== null) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    const view = this.captureBuilder();
+    if (view === null) throw new Error("There is no active view to share.");
+    const url = await this.writeCapturedView(view);
+    return { url: new URL(url, this.win.location.href).href, view };
   }
 
   /** Force-write immediately, bypassing the debounce. Used by tests
    * and on user-explicit save events. */
   async flush(): Promise<void> {
+    await this.flushChange(null);
+  }
+
+  private async flushChange(causedByApplyEpoch: number | null): Promise<void> {
     if (this.destroyed) return;
-    if (this.applier.isInProgress()) return;
-    if (this.suppressNextEmptyHashFlush && isEmptyHash(this.win.location.hash)) {
-      this.suppressNextEmptyHashFlush = false;
+    if (causedByApplyEpoch !== null) {
+      await this.applier.waitForSettlement(causedByApplyEpoch);
+      return;
+    }
+    await this.waitForActiveApply();
+    if (this.destroyed) return;
+    if (
+      isEmptyHash(this.win.location.hash)
+      && this.preserveEmptyHashEpoch > this.retiredPreserveEmptyHashEpoch
+    ) {
+      this.retiredPreserveEmptyHashEpoch = this.preserveEmptyHashEpoch;
       return;
     }
     const view = this.captureBuilder();
     if (view === null) return;
-    let payload: string;
     try {
-      payload = await encode(view);
+      await this.writeCapturedView(view);
     } catch (e) {
       console.warn("[UrlSync] encode failed:", e);
-      return;
     }
-    const newHash = `#view=${payload}`;
-    const url = `${this.win.location.pathname}${this.win.location.search}${newHash}`;
-    if (url === this.lastWritten) return;
-    this.lastWritten = url;
-    this.win.history.replaceState(this.win.history.state, "", url);
+  }
+
+  private async waitForActiveApply(): Promise<void> {
+    // A queued navigation can start generation N+1 synchronously when N settles,
+    // before this await continuation runs. Re-check the identity until no apply
+    // owns the scene, then the caller captures synchronously in the same task.
+    while (true) {
+      const epoch = this.applier.getActiveEpoch();
+      if (epoch === null) return;
+      await this.applier.waitForSettlement(epoch);
+    }
+  }
+
+  private async writeCapturedView(view: SavedView): Promise<string> {
+    let resolveResult!: (url: string) => void;
+    let rejectResult!: (error: unknown) => void;
+    const result = new Promise<string>((resolve, reject) => {
+      resolveResult = resolve;
+      rejectResult = reject;
+    });
+    const run = async (): Promise<void> => {
+      try {
+        if (this.destroyed) throw new Error("View sharing is not available yet.");
+        const payload = await this.encodeView(view);
+        if (this.destroyed) throw new Error("View sharing is not available yet.");
+        const newHash = `#view=${payload}`;
+        const url = `${this.win.location.pathname}${this.win.location.search}${newHash}`;
+        const currentUrl = `${this.win.location.pathname}${this.win.location.search}${this.win.location.hash}`;
+        if (url !== currentUrl) {
+          this.win.history.replaceState(this.win.history.state, "", url);
+        }
+        resolveResult(url);
+      } catch (error) {
+        rejectResult(error);
+      }
+    };
+    this.writeTail = this.writeTail.then(run, run);
+    // The queue tail intentionally absorbs this operation's failure; callers
+    // receive it through `result`, while later writes remain runnable.
+    this.writeTail = this.writeTail.catch(() => {});
+    return result;
   }
 }
 
@@ -381,12 +497,12 @@ export function parseViewHash(hash: string): string | null {
   return null;
 }
 
-/** Parse a `#b=<id>` URL hash and return the bookmark id, or null when
- *  the hash isn't of that shape. Validates the id matches a conservative
- *  character class (`[A-Za-z0-9._-]+`) — UUID-v4s qualify, and rejecting
- *  anything else keeps the resolver from issuing wild GETs against the
- *  bookmarks API for `#b=<%-encoded-junk>`. */
-export function parseBookmarkHash(hash: string): string | null {
+/** Parse the compact `#b=<id>` compatibility hash and return its workspace
+ *  saved-view id, or null when the hash isn't of that shape. The stable `b`
+ *  key is only URL syntax; it no longer names a separate bookmark resource.
+ *  Validating the conservative `[A-Za-z0-9._-]+` id class prevents malformed
+ *  hashes from driving arbitrary workspace saved-view item requests. */
+export function parseSavedViewIdHash(hash: string): string | null {
   if (!hash || hash === "#") return null;
   const stripped = hash.startsWith("#") ? hash.slice(1) : hash;
   for (const part of stripped.split("&")) {
@@ -403,7 +519,7 @@ export function parseBookmarkHash(hash: string): string | null {
 
 /** Parse a `#a=<annotation-id>` URL hash and return the annotation id, or null
  *  when the hash isn't of that shape (annotation-views slice 3). Mirrors
- *  {@link parseBookmarkHash}'s conservative character class
+ *  {@link parseSavedViewIdHash}'s conservative character class
  *  (`[A-Za-z0-9._-]+`) — annotation ids are client-minted UUID-v4s, which
  *  qualify — so a `#a=<%-encoded-junk>` link never drives a lookup against an
  *  attacker-chosen string. The link is the workspace URL + this hash; the

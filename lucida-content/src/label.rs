@@ -1,7 +1,12 @@
 use serde::{Deserialize, Serialize};
 
-use crate::id::{EntityId, ImageId};
-use crate::image::{DataType, ImageSpec};
+use crate::id::ImageId;
+use crate::image::ImageSpec;
+
+/// Categorical id reserved by every renderer as transparent background.
+/// A voxel may contain zero, but a palette must not claim it as a visible
+/// category because no declared color could ever be shown for that id.
+pub const LABEL_BACKGROUND_ID: i64 = 0;
 
 /// One entry of an OME `image-label` color table: the integer label value and
 /// the RGBA it should render as.
@@ -42,77 +47,11 @@ pub struct LabelSpec {
     pub source_declared: bool,
 }
 
-/// Read-view of a label attachment, projected from a [`LabelSpec`].
-///
-/// This is the lean shape consumers use to discover what labels exist and how
-/// they align: the label's identity, its source image, its integer dtype, the
-/// label's own axes and normalized level-0 scale (the alignment foundation),
-/// and its color table. Full per-level geometry lives on the backing
-/// [`LabelSpec`] for the streaming path.
-#[derive(Debug, Clone)]
-pub struct LabelAttachment {
-    pub name: String,
-    /// The intensity image this label overlays.
-    pub source_image_id: ImageId,
-    /// The entity that owns the source image. This is the entity to resolve in
-    /// the active layout to position the label overlay, so discovery via
-    /// `labels()` needs nothing beyond this read-view for placement.
-    pub source_entity_id: EntityId,
-    /// The label's own image id (distinct from the source image).
-    pub label_image_id: ImageId,
-    pub data_type: DataType,
-    /// The label's own axis names, in declared order (e.g. `["t","z","y","x"]`).
-    pub axis_names: Vec<String>,
-    /// The label's level-0 scale in fixed canonical 5D order
-    /// `[T=0, C=1, Z=2, Y=3, X=4]`, with any axis the label omits filled with
-    /// `1.0`. This ordering is independent of `axis_names`: index `i` of
-    /// `level0_scale` is always the canonical axis above, NOT `axis_names[i]`.
-    /// A label with axes `["t","z","y","x"]` still reports its Z scale at index
-    /// `2` and carries `1.0` at index `1` (the absent channel axis).
-    pub level0_scale: [f64; 5],
-    pub colors: Vec<LabelColor>,
-    pub source_declared: bool,
-}
-
-impl LabelAttachment {
-    /// Project a stored [`LabelSpec`] into the read-view. `axis_names` and
-    /// `level0_scale` are taken from the label's own multiscale so they stay
-    /// consistent with each other; a label with no levels degrades to a unit
-    /// scale rather than panicking.
-    pub(crate) fn from_spec(spec: &LabelSpec) -> Self {
-        let axis_names = spec
-            .image
-            .multiscale
-            .axes
-            .iter()
-            .map(|axis| axis.name.clone())
-            .collect();
-        let level0_scale = spec
-            .image
-            .multiscale
-            .levels
-            .first()
-            .map(|level| level.scale)
-            .unwrap_or([1.0; 5]);
-        LabelAttachment {
-            name: spec.name.clone(),
-            source_image_id: spec.source_image_id.clone(),
-            source_entity_id: spec.image.owner.clone(),
-            label_image_id: spec.image.image_id.clone(),
-            data_type: spec.image.multiscale.data_type,
-            axis_names,
-            level0_scale,
-            colors: spec.colors.clone(),
-            source_declared: spec.source_declared,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::id::EntityId;
-    use crate::image::{Axis, AxisKind, LevelGeometry, MultiscaleInfo};
+    use crate::image::{Axis, AxisKind, DataType, LevelGeometry, MultiscaleInfo};
 
     fn label_spec(name: &str) -> LabelSpec {
         LabelSpec {
@@ -160,38 +99,6 @@ mod tests {
             }],
             source_declared: true,
         }
-    }
-
-    #[test]
-    fn projection_preserves_dtype_axes_and_scale() {
-        let spec = label_spec("region-b");
-        let att = LabelAttachment::from_spec(&spec);
-
-        assert_eq!(att.name, "region-b");
-        assert_eq!(att.source_image_id, ImageId("img-0".to_string()));
-        // The read-view is self-contained for placement: it exposes the source
-        // image's owning entity directly.
-        assert_eq!(att.source_entity_id, EntityId("ent-0".to_string()));
-        assert_eq!(
-            att.label_image_id,
-            ImageId("img-0:label:region-b".to_string())
-        );
-        // dtype must survive projection exactly (no 16-bit truncation).
-        assert_eq!(att.data_type, DataType::Uint32);
-        assert_eq!(att.axis_names, vec!["t", "z", "y", "x"]);
-        // The label's own level-0 scale, normalized to 5D with c filled to 1.
-        // Index 1 (channel) is 1.0 even though axis_names has no "c".
-        assert_eq!(att.level0_scale, [1.0, 1.0, 1.0, 4.0, 4.0]);
-        assert!(att.source_declared);
-    }
-
-    #[test]
-    fn projection_carries_large_color_values() {
-        let att = LabelAttachment::from_spec(&label_spec("region-b"));
-        assert_eq!(att.colors.len(), 1);
-        // A value well past u16::MAX round-trips untouched.
-        assert_eq!(att.colors[0].value, 92801);
-        assert_eq!(att.colors[0].rgba, [10, 20, 30, 255]);
     }
 
     #[test]

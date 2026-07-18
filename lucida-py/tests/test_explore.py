@@ -85,3 +85,20 @@ def test_explore_descend_from_supplied_view_carries_breadcrumb():
 def test_explore_rejects_malformed_view_json():
     with pytest.raises(ValueError):
         lucida.explore("wds-x", (1, 1, 40, 128, 128), (800, 600), "{not json")
+
+
+@pytest.mark.parametrize("version", [None, 0, 2])
+def test_explore_rejects_unsupported_saved_view_versions(version):
+    root = json.loads(lucida.explore("wds-x", (1, 1, 40, 128, 128), (800, 600)))
+    view = root["current"]["view"]
+    if version is None:
+        view.pop("v")
+    else:
+        view["v"] = version
+    with pytest.raises(ValueError, match="version|missing field"):
+        lucida.explore(
+            "wds-x",
+            (1, 1, 40, 128, 128),
+            (800, 600),
+            json.dumps(view),
+        )

@@ -50,6 +50,12 @@ describe("FetchError", () => {
     expect(wrapped.cause).toBe(underlying);
   });
 
+  it("preserves a structured server failure", () => {
+    const failure = { category: "authorization", code: "permission", retryable: false } as const;
+    const error = new FetchError("denied", { kind: "permanent", failure });
+    expect(error.failure).toStrictEqual(failure);
+  });
+
   it("omits cause when not provided", () => {
     const err = new FetchError("solo", { kind: "transient" });
     expect(err.cause).toBeUndefined();
@@ -82,15 +88,15 @@ describe("classifyFetchError", () => {
     expect(fe.cause).toBe(dom);
   });
 
-  it("classifies a plain Error containing '404' as permanent", () => {
+  it("does not infer permanence from a plain Error containing '404'", () => {
     const fe = classifyFetchError(new Error("404 not found"));
-    expect(fe.kind).toBe("permanent");
+    expect(fe.kind).toBe("transient");
     expect(fe.message).toBe("404 not found");
   });
 
-  it("classifies a plain Error containing 'malformed' as permanent", () => {
+  it("does not infer permanence from a plain Error containing 'malformed'", () => {
     const fe = classifyFetchError(new Error("malformed response payload"));
-    expect(fe.kind).toBe("permanent");
+    expect(fe.kind).toBe("transient");
   });
 
   it("classifies any other plain Error as transient", () => {

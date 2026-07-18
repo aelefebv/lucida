@@ -11,6 +11,8 @@ import {
   __resetAnnotationIdentityForTesting,
 } from "./annotationIdentity.ts";
 
+const viewport = { apply: () => true, endGesture: () => {} };
+
 // Minimal WasmScene stub: the overlay only reads annotations() (per dataset)
 // plus zoom()/center() each RAF frame for projection. Everything else the
 // component touches is null-guarded.
@@ -58,6 +60,7 @@ describe("ownership with a string identity (annotationAuthorId)", () => {
         myId={me}
         sendCommand={() => {}}
         onDocumentChanged={() => {}}
+        viewport={viewport}
       />,
     );
 
@@ -100,6 +103,7 @@ describe("ownership with a string identity (annotationAuthorId)", () => {
         myId={me}
         sendCommand={() => {}}
         onDocumentChanged={() => {}}
+        viewport={viewport}
       />,
     );
 

@@ -5,12 +5,16 @@ description: "How chunk bytes become atlas slots become indirection-buffer entri
 tags: [lucida, subsystem]
 source_path: wiki/systems/subsystems/gpu-residency.md
 created: 2026-04-18
-modified: 2026-07-06
+modified: 2026-07-16
 ---
 
 # GPU Residency
 
 How chunk bytes become atlas slots become indirection-buffer entries become shader-sampled pixels. Lives in `lucida-web/src/renderer/`. All WebGPU work happens inside `gpu.worker.ts` (now a ~34 LOC entry point) on a dedicated Web Worker — see [All GPU Work on a Dedicated Web Worker](../../decisions/0003-gpu-on-dedicated-worker.md).
+
+## Truthful viewport-loading state
+
+`ViewportLoadingTracker` joins three renderer-owned facts for discrete transitions such as time/channel/group changes and initial fits: the scene epoch snapshot at invalidation, each active dataset's worker `wantedSetDelta`, and the correlated GPU `framePresented` id. The viewer's loading chip retires only after every dataset reports zero missing chunks for an epoch at least as new as the transition and the target-or-newer frame completes. Continuous pan/zoom does not start a chip, and late worker messages from rapid scrubs cannot retire the latest transition. Keep this state in the render loop; React network flags do not know whether the visible GPU view is resident or presented.
 
 ## Module layout
 
@@ -19,13 +23,13 @@ How chunk bytes become atlas slots become indirection-buffer entries become shad
 - `worker/bootstrap.ts` — `init` handler: builds `WorkerCtx`, creates GPU device + canvas context, instantiates the per-mode renderers (slice, volume, cursor, compositor), and constructs the per-session `RendererState`.
 - `worker/dispatch.ts` — message switch: routes every typed `MainToWorkerMessage` to its handler.
 - `worker/resources.ts` — LUT cache + offscreen-canvas pool + dummy textures/buffers (the persistent GPU resources that outlive a single cold state).
-- `worker/devtools.ts` — `self.__lucidaProxyStats` and friends.
-- `worker/lifecycle.ts` — `destroy` handler: tears down atlases + descriptor buffers + proxy pools.
+- `worker/devtools.ts` — renderer diagnostics exported to the debug surface.
+- `worker/lifecycle.ts` — `destroy` handler: tears down atlases and descriptor buffers.
 - `worker/state.ts` — the `RendererState` interface (see "De-globalized session state" below).
 
-The mode-specific code lives in three sibling subdirectories: `volume/` (`atlas.ts`, `upload.ts`, `eviction.ts`, `render.ts`, `remap.ts`), `slice/` (same plus `zRetarget.ts`), and `coldState/` (`apply.ts`, `groupEntries.ts`, `entityMetas.ts` — the cold-state ingestion block). The legacy proxy bridge lives in `proxy/` (`upload.ts`, `propagate.ts`) but the default fallback model is chunk-only. Descriptor serialization is in `descriptor/` (`layout.ts` for the byte-layout SSoT, `transient.ts` for the minimap path). Top-level helpers `chunkKeys.ts` (`parseChunkKey`, `makeCompositeKey`, `derivePoolKey`) and `poolKeys.ts` (`chunkTierPoolKey`, `memberTierKey`) live at the top of `renderer/` rather than being trapped inside a single mode's handler file.
+The mode-specific code lives in three sibling subdirectories: `volume/` (`atlas.ts`, `upload.ts`, `eviction.ts`, `render.ts`, `remap.ts`), `slice/` (same plus `zRetarget.ts`), and `coldState/` (`apply.ts`, `groupEntries.ts`, `entityMetas.ts`). Descriptor serialization is in `descriptor/`; `chunkKeys.ts` and `poolKeys.ts` own shared chunk/tier identities.
 
-The algorithmic core (`wantedSet.ts`, `proxyAtlas.ts`, `descriptorBuffer.ts`, `epochCheck.ts`, `dataTypeUtil.ts`) is unchanged — it was already well-tested and structurally healthy.
+The algorithmic core (`wantedSet.ts`, `descriptorBuffer.ts`, `epochCheck.ts`, `dataTypeUtil.ts`) remains shared and well-tested.
 
 ## Atlases and indirection
 
@@ -33,7 +37,6 @@ The GPU side never holds "one texture per chunk." That would shred VRAM and the 
 
 - **Slice atlas pools** — keyed by dataset, channel, slot dimensions, and tier (`detail` or `coarse`). Holds 2D slice tiles. State lives in `slice/atlas.ts` (per-pool `SliceAtlasState`).
 - **Volume atlas pools** — keyed by dataset, channel, slot dimensions, and tier (`detail` or `coarse`). Holds 3D chunks. State lives in `volume/atlas.ts` (per-pool `AtlasState`).
-- **Proxy atlases** (`renderer/proxyAtlas.ts`) — legacy bridge only. One pool per `(datasetId, kind, slotDims, channel)` when proxy compatibility is explicitly enabled.
 
 An **indirection buffer** (a `array<u32>` storage buffer) maps logical `(entity, lod, z, y, x)` → atlas slot coords. The shader reads it before sampling the atlas texture. Indirection is only flushed when chunk residency actually changes (atlas write/evict), not every frame — this is a big perf win because indirection writes are otherwise per-frame and bandwidth-bound.
 
@@ -48,7 +51,6 @@ The LRU eviction kernel (`eviction.ts` at the top of `renderer/`) and the indire
 - colormap LUT index (into the LUT texture)
 - per-LOD info (shape, indirection offset)
 - explicit chunk tier sources (`detail`, `coarse`) with level, grid/chunk dims, and indirection offsets
-- legacy proxy slot handles (`tileProxyPoolIndex`, `tileProxySlotIndex`, and the group-proxy equivalents) while the proxy bridge exists
 
 Shaders use `entityIndex` to look up its descriptor. The tick coordinator and worker share an explicit ordered `(memberId → index)` map so indices match by construction — both sides iterate the same active set in the same order.
 
@@ -65,7 +67,6 @@ Per fragment in `slice.wgsl` / `volume.wgsl`:
 5. **Fallback chain**:
    - Try the explicit `detail` tier source.
    - Fallback to the explicit `coarse` tier source when detail is missing for the fragment.
-   - Legacy bridge only: fallback to tile/group proxy textures if they are resident.
    - Last resort: blank.
 6. Apply contrast → gamma → LUT sample → opacity.
 
@@ -77,15 +78,9 @@ The chain runs **inside the volume ray-march loop** as well, so a ray that cross
 
 `coldState/groupEntries.ts` and `coldState/entityMetas.ts` are the pure pieces apply.ts delegates to. They group detail and coarse sources separately, so mismatched detail/coarse chunk shapes become separate pools instead of forcing one shared atlas layout.
 
-## Proxy Fallback Lifecycle
-
-The proxy path is the fallback below the default coarse/detail tiers (still fully wired). `proxy/upload.ts` handles the `proxyAssetData` message: validates the asset, allocates a slot in the right `(datasetId, kind, slotDims, channel)` pool, writes the u16 voxel buffer, and updates the descriptor handle pair on `state.proxyDescriptorsByEntity`, keyed by `(entityId, t, c)` so multichannel/time scrubs cannot overwrite another channel's fallback.
-
-`proxy/propagate.ts` is the group→tiles fan-out: when a `GroupProxy3D` lands for a group, every child tile whose descriptor references that group gets its `groupProxyHandle` updated. The fan-out reads `state.groupToTiles` (built per cold state) so each upload is O(children) instead of O(all-entities).
-
 ## De-globalized session state
 
-Per-session state lives on a single `RendererState` interface owned by `WorkerCtx.state` and created in `worker/bootstrap.ts`. Every handler reads `ctx.state.<field>` rather than a module global. The state fields cluster into five groups: cold-state routing (`memberToDataset`, legacy `memberToPool`, tier-aware `memberTierToPool`, `groupToTiles`, `groupsByDataset`, `currentEntityMetasByDataset`), legacy proxy + descriptor registries (`proxyPoolsByDataset`, `proxyDescriptorsByEntity`, `descriptorBuffersByDataset`), per-mode atlas registries (`volumeAtlases`, `sliceAtlases`), per-entity eviction reference points (`rayHitPerEntity`, `cameraUVPerEntity`), and cold-state/epoch tracking (`currentEpochs`, `currentColdState`). Explicit state ownership is also what makes `removeLayerResources` clear the routing Maps alongside the atlas pools and descriptor buffers — see ADR 0035.
+Per-session state lives on one `RendererState` owned by `WorkerCtx.state`. It groups cold-state routing, descriptor registries, per-mode detail/coarse atlas registries, eviction reference points, and epoch tracking. `removeLayerResources` clears routing maps alongside atlases and descriptor buffers.
 
 Renderer-class singletons (slice/volume/cursor/compositor) and persistent GPU resources (LUT cache, offscreen pool, dummy textures/buffers) intentionally stay at module scope in `worker/resources.ts` because they outlive any single session.
 
@@ -94,22 +89,22 @@ Renderer-class singletons (slice/volume/cursor/compositor) and persistent GPU re
 When worker residency changes or rejects an upload:
 
 1. Posts chunk feedback keyed by `memberId`. `keys` are re-eligible chunks whose optimistic sent state should clear; `skipped` is reserved for atlas-policy rejection (atlas full + too far).
-2. Includes missing detail/coarse chunks in the next `wantedSetDelta` from authoritative atlas state. Legacy proxy misses are included only for bridge entries.
-3. Main thread reconciles through [CPU Cache](cpu-cache.md): missing/re-eligible chunks clear `DeliveryState` chunk sent state; true rejections enter `RejectionTracker`; legacy missing proxies clear proxy sent state.
+2. Includes missing detail/coarse chunks in the next `wantedSetDelta` from authoritative atlas state.
+3. Main thread reconciles through [CPU Cache](cpu-cache.md): missing/re-eligible chunks clear sent state and true rejections enter `RejectionTracker`.
 4. Next `getDeliverable()` pass re-uploads cached, wanted, not-rejected, not-sent assets without relying on a pan/zoom cold-state rebuild.
 
 This is why **collection FPS is sensitive to pool capacity and CPU-cache size** — eviction churn cascades. See [Multi-Pool Atlases by (Dataset, Channel, Chunk Dims)](../../decisions/0004-multi-pool-atlases.md).
 
 ## Interactions
 
-- **Upstream**: the [Uploader](upload-pipeline.md) posts `coldState`, `viewHotState`, tier-labeled `sliceChunkData` and `volumeChunkData` messages over [Worker Protocol](worker-protocol.md). `proxyAssetData` carries the proxy fallback tier. The planner-only TickCoordinator drives the Uploader.
+- **Upstream**: the [Uploader](upload-pipeline.md) posts `coldState`, `viewHotState`, and tier-labeled `sliceChunkData`/`volumeChunkData` over [Worker Protocol](worker-protocol.md).
 - **Downstream**: the worker presents to the OffscreenCanvas; communicates back via `wantedSetDelta`, `chunksEvicted`, `intensityRange`.
 
 ## Invariants
 
 - **`entityIndex` matches between CPU and GPU.** Both sides build their lists by iterating the active set in identical order. Drift here is a class of bug that only surfaces visually (wrong colormap on the wrong entity).
 - **Every per-session Map lives on `WorkerCtx.state`.** Module-level mutable *session* state in render-session files is a regression. The documented exception is `worker/resources.ts`, which intentionally holds module-scoped persistent resources (e.g. `lutCache`) that outlive any single session — scope the `new Map` lint to the render-session files and exclude `worker/resources.ts`.
-- **memberId is the canonical owner key on every wire message** (`chunksEvicted.memberId`, `volumeChunkData.memberId`, `sliceChunkData.memberId`). `proxyAssetData` and `coldState` correctly stay `datasetId`-keyed because they really are per-dataset; every member-routed message uses `memberId`.
+- **memberId is the canonical owner key on every member-routed wire message** (`chunksEvicted`, `volumeChunkData`, `sliceChunkData`); cold state remains dataset-scoped.
 - **Descriptor byte offsets live only in `descriptor/layout.ts`.** Both TS writers and both WGSL shaders must agree; `layout.test.ts` enforces this by parsing the shaders at test time.
 - **Atlas slot IDs are pool-local.** A slot ID `42` in pool A is unrelated to slot `42` in pool B. The descriptor's tier source encodes which tier/indirection source to read.
 - **Indirection writes are batched per frame** — many residency changes coalesce into one mapped buffer write. Don't add a per-chunk write call.

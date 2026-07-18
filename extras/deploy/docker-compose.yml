@@ -11,7 +11,7 @@
 # own the result. The placeholders are the same ones in k8s/*.yaml.
 #
 # Quick start:
-#   1. Build (or pull) the lucida image; replace <YOUR-REGISTRY>/lucida:<YOUR-TAG>
+#   1. Build (or pull) the lucida image; replace the tag and immutable digest
 #   2. Replace the OAuth client placeholders + the hostname
 #   3. Put LUCIDA_GOOGLE_CLIENT_SECRET in a `.env` next to this file
 #      (NOT committed; see .gitignore patterns in the repo root)
@@ -20,10 +20,72 @@
 #      nginx, ...) — this compose file does NOT include TLS termination
 #      because every adopter terminates differently.
 services:
+  # One-shot upgrade helper for volumes created by older root-running images.
+  # It is profile-gated and never starts with the runtime service. Follow the
+  # quiesce + verified-backup ordering in RUNBOOK.md before acknowledging it.
+  lucida-volume-migrate:
+    profiles: ["volume-migration"]
+    image: <YOUR-REGISTRY>/lucida:<YOUR-TAG>@sha256:<YOUR-DIGEST>
+    user: "0:0"
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+    security_opt:
+      - no-new-privileges:true
+    network_mode: none
+    environment:
+      LUCIDA_VOLUME_MIGRATION_ACK: "${LUCIDA_VOLUME_MIGRATION_ACK:-}"
+    entrypoint: ["/bin/sh", "-eu", "-c"]
+    command:
+      - |
+        test "$${LUCIDA_VOLUME_MIGRATION_ACK}" = "backup-complete-and-lucida-stopped" || {
+          echo "refusing: stop lucida and verify the pre-upgrade backup first" >&2
+          exit 64
+        }
+        test "$$(id -u):$$(id -g)" = "0:0"
+        test -d /var/lib/lucida
+        volume_device="$$(stat -c '%d' /var/lib/lucida)"
+        application_paths="/var/lib/lucida/lucida.db /var/lib/lucida/lucida.db-wal /var/lib/lucida/lucida.db-shm /var/lib/lucida/generated-coarse /var/lib/lucida/proxy-cache"
+        for path in $${application_paths}; do
+          if test -e "$${path}" || test -L "$${path}"; then
+            test ! -L "$${path}" || {
+              echo "refusing symlinked application path: $${path}" >&2
+              exit 65
+            }
+            path_device="$$(stat -c '%d' "$${path}")"
+            test "$${path_device}" = "$${volume_device}" || {
+              echo "refusing separately mounted application path: $${path}" >&2
+              exit 66
+            }
+          fi
+        done
+        chown 10001:10001 /var/lib/lucida
+        for path in $${application_paths}; do
+          if test -e "$${path}" || test -L "$${path}"; then
+            find "$${path}" -xdev -exec chown -h 10001:10001 {} +
+          fi
+        done
+        test "$$(stat -c '%u:%g' /var/lib/lucida)" = "10001:10001"
+        echo "lucida volume ownership is ready for UID:GID 10001:10001"
+    volumes:
+      - lucida-data:/var/lib/lucida
+
   lucida:
-    image: <YOUR-REGISTRY>/lucida:<YOUR-TAG>
+    image: <YOUR-REGISTRY>/lucida:<YOUR-TAG>@sha256:<YOUR-DIGEST>
     container_name: lucida
     restart: unless-stopped
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    stop_grace_period: 35s
     # Bind to the host on 9876. If you put a reverse proxy on the same
     # host, change this to `127.0.0.1:9876:9876` so only the proxy can
     # reach it. The default below exposes lucida on the host's external
@@ -56,11 +118,22 @@ services:
       # Do NOT inline the secret value here.
       LUCIDA_GOOGLE_CLIENT_SECRET: "${LUCIDA_GOOGLE_CLIENT_SECRET}"
 
-      # ---- Required: where SQLite + the proxy cache live ----
+      # ---- Required: where SQLite + generated coarse chunks live ----
       # Absolute paths under the bind-mounted volume below.
       LUCIDA_DB_PATH: "/var/lib/lucida/lucida.db"
+      LUCIDA_GENERATED_COARSE_CACHE_DIR: "/var/lib/lucida/generated-coarse"
+      # Explicit 8 GiB ceiling leaves nominal headroom on the shared 50 GiB
+      # reference volume for SQLite/WAL and operator-managed dataset files.
+      LUCIDA_GENERATED_COARSE_DISK_BUDGET_BYTES: "8589934592"
+      # Deprecated proxy-era root: read only by clear-proxy-cache so upgrades
+      # can remove artifacts written by old releases. No new chunks land here.
       LUCIDA_PROXY_CACHE_DIR: "/var/lib/lucida/proxy-cache"
       LUCIDA_DATA_DIR: "/var/lib/lucida/data"
+
+      # Flip readiness first, then allow connections/background work a
+      # bounded drain window inside Compose's 35-second stop grace.
+      LUCIDA_SHUTDOWN_QUIET_PERIOD_SECS: "2"
+      LUCIDA_SHUTDOWN_TIMEOUT_SECS: "30"
 
       # ---- Required behind a TLS-terminating reverse proxy ----
       # The proxy terminates TLS and forwards http:// to this container.
@@ -75,21 +148,39 @@ services:
       # Bootstrap admin allowlist (comma-separated emails).
       # LUCIDA_ADMIN_EMAILS: "<ADMIN-EMAIL-ONE>,<ADMIN-EMAIL-TWO>"
 
-      # Per-generator concurrency cap for the on-disk proxy cache.
-      # LUCIDA_PROXY_CONCURRENCY: "<INT>"
+      # Dataset-source trust is deny-by-default. HTTP hosts, optional private
+      # CIDRs, and cloud buckets must be named explicitly. Cloud access also
+      # requires the ambient-credential opt-in.
+      # LUCIDA_SOURCE_HTTP_HOSTS: "<DATASET-HOST-ONE>,<DATASET-HOST-TWO>"
+      # LUCIDA_SOURCE_HTTP_CIDRS: "<TRUSTED-CIDR>"
+      # Operator-specific RFC 6052 translation prefixes are denylisted here;
+      # standardized NAT64/transition forms are rejected automatically.
+      # LUCIDA_SOURCE_HTTP_IPV6_TRANSLATION_CIDRS: "<IPV6-CIDR>"
+      # LUCIDA_SOURCE_S3_BUCKETS: "<S3-BUCKET-ONE>,<S3-BUCKET-TWO>"
+      # LUCIDA_SOURCE_GCS_BUCKETS: "<GCS-BUCKET-ONE>,<GCS-BUCKET-TWO>"
+      # LUCIDA_SOURCE_ALLOW_AMBIENT_CLOUD_CREDENTIALS: "true"
+
+      # Bounded concurrency for generated-coarse materialization.
+      # LUCIDA_GENERATED_COARSE_CONCURRENCY: "<INT>"
+
+      # Process-wide cap shared by every WebSocket outbound queue.
+      # LUCIDA_WEBSOCKET_OUTBOX_BUDGET_BYTES: "<BYTES>"
 
       # Run with auth disabled on a non-loopback bind. Required explicit
       # acknowledgment per ADR-0018. Do NOT set this in production
       # unless your network access controls fully authenticate callers.
       # LUCIDA_INSECURE: "1"
     volumes:
-      # Single named volume holding SQLite, the proxy cache, and any
-      # local dataset directory. Same shape as the k8s PVC mount.
+      # Single named volume holding SQLite, generated coarse chunks, retired
+      # proxy artifacts pending upgrade cleanup, and any local dataset
+      # directory. Same shape as the k8s PVC mount.
       - lucida-data:/var/lib/lucida
     healthcheck:
       # Mirrors the k8s readinessProbe; docker compose uses this to
       # decide when the service is "healthy" for `depends_on` ordering.
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:9876/readyz"]
+      # The runtime intentionally contains no wget/curl. Its own binary
+      # performs the readiness request with a hard deadline.
+      test: ["CMD", "lucida-server", "healthcheck"]
       interval: 10s
       timeout: 2s
       retries: 5

@@ -5,7 +5,7 @@ description: "Cross-cutting subsystem in lucida-server that gates every protecte
 tags: [lucida, subsystem]
 source_path: wiki/systems/subsystems/auth.md
 created: 2026-05-08
-modified: 2026-06-25
+modified: 2026-07-17
 ---
 
 # Authentication
@@ -85,7 +85,7 @@ All auth boundaries emit `tracing` events at `dot.scope` event names per [Loggin
 
 - **`X-Forwarded-Proto` is not trusted** for `Secure` cookie auto-detection. Operators behind TLS-terminating proxies must set `LUCIDA_COOKIE_SECURE=always`. Documented inline in `auth/cookie.rs`.
 - **Cross-origin cookie wrinkle in dev**: lucida-server (`:9876`) and Vite (`:5173`) run on different origins; SameSite=Lax cookies aren't sent on cross-origin XHR/fetch even with `credentials: include`. The Vite proxy in `lucida-web/vite.config.ts` forwards `/auth`, `/api`, `/admin`, `/ws` to the backend so the browser sees one origin. Visit `:5173`, never `:9876` directly.
-- **Pre-auth `dev@local` bookmarks** created during PRD #454's design phase carry `created_by: "dev@local"`. Migration policy at the auth-cutover for production is recorded in [Queue — Open Questions](../../queue.md).
+- **The retired bookmark migrations may contain `dev@local` rows.** They have no active API after [ADR-0043](../../decisions/0043-superseded-server-surfaces-sunset.md). The offline [`recover-legacy-bookmark`](saved-views.md#recovering-a-retired-bookmark) command requires a chosen workspace and a current member as creator; use `--creator` to reattribute a historical local-only identity safely.
 - **Disabled-auth multi-user testing is cookie-scoped.** In local disabled mode, the profile menu's "Dev user" form calls `/auth/dev/login` and sets a browser-specific `lucida_dev_principal` cookie. Use a separate browser profile or incognito window for each fake user. Leave "Admin override" unchecked when testing workspace viewer/editor behavior; admin users bypass normal workspace membership.
 
 ## Related

@@ -1,0 +1,31 @@
+[package]
+name = "lucida-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+lucida-store = { path = "../lucida-store" }
+
+# Keep fuzz-only dependencies and compiler settings out of the production
+# workspace lock and profile graph.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "ingest_tiff"
+path = "fuzz_targets/ingest_tiff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "collection_scanner"
+path = "fuzz_targets/collection_scanner.rs"
+test = false
+doc = false
+bench = false

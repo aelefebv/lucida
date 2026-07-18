@@ -15,10 +15,9 @@
 //! The router is built from the same auth-middleware + extractor pieces
 //! `main.rs` wires, but with a `MemorySessionStore` instead of SQLite.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 
 use axum::Router;
 use axum::body::Body;
@@ -28,7 +27,6 @@ use axum::routing::post;
 use chrono::{Duration as ChronoDuration, Utc};
 use http_body_util::BodyExt;
 use serde_json::Value;
-use tokio::sync::{Mutex, broadcast};
 use tower::ServiceExt;
 
 use lucida_content::url::dataset_url_hash16;
@@ -37,8 +35,7 @@ use lucida_server::auth::middleware::auth_middleware;
 use lucida_server::auth::principal::SessionCookieExtractor;
 use lucida_server::auth::session_store::{LoginSession, LoginSessionStore};
 use lucida_server::auth::{AuthConfig, MemorySessionStore};
-use lucida_server::session::Session;
-use lucida_server::{AppState, BroadcastItem, ProxyConfig, UnicastRoutes};
+use lucida_server::{AppState, DatasetRuntimeConfig};
 
 const URL_A: &str = "gs://lucida-test/datasets/dataset-a.zarr";
 const URL_B: &str = "gs://lucida-test/datasets/dataset-b.zarr";
@@ -68,15 +65,11 @@ fn build_router(
         ));
 
     let app_state = AppState {
-        session: Arc::new(Mutex::new(Session::new())),
-        tx: broadcast::channel::<BroadcastItem>(8).0,
-        next_id: Arc::new(AtomicU64::new(0)),
-        unicast_routes: Arc::new(Mutex::new(HashMap::new())) as UnicastRoutes,
         data_dir: None,
-        proxy_config: ProxyConfig {
-            cache_dir: cache_dir.to_path_buf(),
-            concurrency: 1,
-            ..ProxyConfig::defaults()
+        dataset_runtime: DatasetRuntimeConfig {
+            generated_cache_dir: cache_dir.to_path_buf(),
+            legacy_proxy_cache_dir: legacy_cache_dir(cache_dir),
+            ..DatasetRuntimeConfig::defaults()
         },
     };
 
@@ -84,6 +77,18 @@ fn build_router(
         .route("/admin/clear-proxy-cache", post(admin_clear_proxy_cache))
         .with_state(app_state)
         .layer(from_fn_with_state(extractor, auth_middleware))
+}
+
+fn legacy_cache_dir(active: &Path) -> std::path::PathBuf {
+    let name = active
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("lucida-test-cache");
+    active.with_file_name(format!("{name}-legacy-proxy-cache"))
+}
+
+fn active_cache_dir(tmp: &tempfile::TempDir) -> std::path::PathBuf {
+    tmp.path().join("generated-coarse")
 }
 
 /// Mint a fresh session for `email` and return its cookie ID.
@@ -145,8 +150,9 @@ fn admins(emails: &[&str]) -> HashSet<String> {
 #[tokio::test]
 async fn returns_401_without_session_cookie() {
     let tmp = tempfile::tempdir().unwrap();
+    let cache_dir = active_cache_dir(&tmp);
     let store = Arc::new(MemorySessionStore::new());
-    let app = build_router(tmp.path(), store, admins(&[ADMIN_EMAIL]));
+    let app = build_router(&cache_dir, store, admins(&[ADMIN_EMAIL]));
 
     let req = Request::builder()
         .method("POST")
@@ -160,10 +166,11 @@ async fn returns_401_without_session_cookie() {
 #[tokio::test]
 async fn returns_403_when_principal_not_admin() {
     let tmp = tempfile::tempdir().unwrap();
+    let cache_dir = active_cache_dir(&tmp);
     let store = Arc::new(MemorySessionStore::new());
     let cookie_id = seed_session(&store, NONADMIN_EMAIL).await;
 
-    let app = build_router(tmp.path(), Arc::clone(&store), admins(&[ADMIN_EMAIL]));
+    let app = build_router(&cache_dir, Arc::clone(&store), admins(&[ADMIN_EMAIL]));
     let req = Request::builder()
         .method("POST")
         .uri("/admin/clear-proxy-cache")
@@ -183,10 +190,11 @@ async fn returns_403_when_admin_set_empty() {
     // 403 for everyone)." A logged-in user with no configured admins
     // must still be rejected.
     let tmp = tempfile::tempdir().unwrap();
+    let cache_dir = active_cache_dir(&tmp);
     let store = Arc::new(MemorySessionStore::new());
     let cookie_id = seed_session(&store, ADMIN_EMAIL).await;
 
-    let app = build_router(tmp.path(), Arc::clone(&store), admins(&[])); // empty
+    let app = build_router(&cache_dir, Arc::clone(&store), admins(&[])); // empty
     let req = Request::builder()
         .method("POST")
         .uri("/admin/clear-proxy-cache")
@@ -200,15 +208,17 @@ async fn returns_403_when_admin_set_empty() {
 #[tokio::test]
 async fn returns_200_with_admin_session_and_clears_all() {
     let tmp = tempfile::tempdir().unwrap();
-    let dir_a = populate_dataset(tmp.path(), URL_A);
-    let dir_b = populate_dataset(tmp.path(), URL_B);
+    let cache_dir = active_cache_dir(&tmp);
+    let dir_a = populate_dataset(&cache_dir, URL_A);
+    let dir_b = populate_dataset(&cache_dir, URL_B);
+    let legacy_dir = populate_dataset(&legacy_cache_dir(&cache_dir), URL_A);
     assert!(dir_a.exists());
     assert!(dir_b.exists());
 
     let store = Arc::new(MemorySessionStore::new());
     let cookie_id = seed_session(&store, ADMIN_EMAIL).await;
 
-    let app = build_router(tmp.path(), Arc::clone(&store), admins(&[ADMIN_EMAIL]));
+    let app = build_router(&cache_dir, Arc::clone(&store), admins(&[ADMIN_EMAIL]));
     let req = Request::builder()
         .method("POST")
         .uri("/admin/clear-proxy-cache")
@@ -221,23 +231,26 @@ async fn returns_200_with_admin_session_and_clears_all() {
     let body = body_to_string(res.into_body()).await;
     let json: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(json["cleared"], Value::Bool(true));
-    assert_eq!(json["datasets"], Value::from(2));
-    assert_eq!(json["files"], Value::from(4));
+    assert_eq!(json["datasets"], Value::from(3));
+    assert_eq!(json["files"], Value::from(6));
 
     assert!(!dir_a.exists());
     assert!(!dir_b.exists());
+    assert!(!legacy_dir.exists());
 }
 
 #[tokio::test]
 async fn returns_200_and_clears_only_specified_dataset() {
     let tmp = tempfile::tempdir().unwrap();
-    let dir_a = populate_dataset(tmp.path(), URL_A);
-    let dir_b = populate_dataset(tmp.path(), URL_B);
+    let cache_dir = active_cache_dir(&tmp);
+    let dir_a = populate_dataset(&cache_dir, URL_A);
+    let dir_b = populate_dataset(&cache_dir, URL_B);
+    let legacy_a = populate_dataset(&legacy_cache_dir(&cache_dir), URL_A);
 
     let store = Arc::new(MemorySessionStore::new());
     let cookie_id = seed_session(&store, ADMIN_EMAIL).await;
 
-    let app = build_router(tmp.path(), Arc::clone(&store), admins(&[ADMIN_EMAIL]));
+    let app = build_router(&cache_dir, Arc::clone(&store), admins(&[ADMIN_EMAIL]));
     let encoded = urlencode(URL_A);
     let uri = format!("/admin/clear-proxy-cache?dataset={encoded}");
     let req = Request::builder()
@@ -251,11 +264,12 @@ async fn returns_200_and_clears_only_specified_dataset() {
 
     let body = body_to_string(res.into_body()).await;
     let json: Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(json["datasets"], Value::from(1));
-    assert_eq!(json["files"], Value::from(2));
+    assert_eq!(json["datasets"], Value::from(2));
+    assert_eq!(json["files"], Value::from(4));
 
     assert!(!dir_a.exists(), "A should be cleared");
     assert!(dir_b.exists(), "B should be untouched");
+    assert!(!legacy_a.exists(), "legacy A should also be cleared");
 }
 
 /// Integration test: a dev-login session for `dev@local`, with
@@ -263,10 +277,11 @@ async fn returns_200_and_clears_only_specified_dataset() {
 #[tokio::test]
 async fn dev_local_session_with_dev_local_admin_allowlist_succeeds() {
     let tmp = tempfile::tempdir().unwrap();
+    let cache_dir = active_cache_dir(&tmp);
     let store = Arc::new(MemorySessionStore::new());
     let cookie_id = seed_session(&store, "dev@local").await;
 
-    let app = build_router(tmp.path(), Arc::clone(&store), admins(&["dev@local"]));
+    let app = build_router(&cache_dir, Arc::clone(&store), admins(&["dev@local"]));
     let req = Request::builder()
         .method("POST")
         .uri("/admin/clear-proxy-cache")
@@ -282,10 +297,11 @@ async fn dev_local_session_with_dev_local_admin_allowlist_succeeds() {
 #[tokio::test]
 async fn dev_local_session_without_admin_allowlist_403s() {
     let tmp = tempfile::tempdir().unwrap();
+    let cache_dir = active_cache_dir(&tmp);
     let store = Arc::new(MemorySessionStore::new());
     let cookie_id = seed_session(&store, "dev@local").await;
 
-    let app = build_router(tmp.path(), Arc::clone(&store), admins(&[]));
+    let app = build_router(&cache_dir, Arc::clone(&store), admins(&[]));
     let req = Request::builder()
         .method("POST")
         .uri("/admin/clear-proxy-cache")

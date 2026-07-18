@@ -1,65 +1,43 @@
-/**
- * Unit tests for `buildViewHotState` — pure builder that mirrors
- * `iterateColdMembers`, fanning the per-dataset ray hit out to every
- * member.
- *
- * Cases:
- *   1. Per-member fan-out — one rayHit entry per cold-state member.
- *   2. Composite member id dedup — if two entries produce the same
- *      `memberId` (e.g. group-as-proxy with entityId X and a tile with
- *      imageId X), only the first emits a rayHit.
- *   3. Empty cold msg → empty rayHitsByEntity.
- */
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import type {
   ColdStateActiveEntry,
   ColdStateMessage,
 } from "../../../renderer/workerProtocol.ts";
 import type { SceneEpochs } from "../../epochs.ts";
-import { buildViewHotState } from "./hotState.ts";
+import { buildViewHotState, buildViewHotStateFromMembers } from "./hotState.ts";
 
-function makeEntry(over: Partial<Omit<ColdStateActiveEntry, "kind">>): ColdStateActiveEntry {
-  const base = {
-    entityId: over.entityId ?? "ent",
-    targetLod: over.targetLod ?? 0,
-    detailOwnedLodRange: over.detailOwnedLodRange ?? [0, 0] as [number, number],
-    levels: over.levels ?? [],
-    proxyKind: over.proxyKind,
-    proxyAvailable: over.proxyAvailable ?? false,
-    groupProxyAvailable: over.groupProxyAvailable ?? false,
-    modelMatrix: over.modelMatrix ?? new Float32Array(16),
-    invModelMatrix: over.invModelMatrix ?? new Float32Array(16),
-    displayStateByChannel: over.displayStateByChannel ?? {},
-  };
-  // Discriminate via `mode` so existing call sites that pass
-  // `mode: "group-as-proxy"` (with `imageId: ""`) keep working.
-  const mode = over.mode ?? "tiles-with-detail";
-  if (mode === "group-as-proxy") {
-    return {
-      ...base,
-      kind: "group-as-proxy",
-      mode: "group-as-proxy",
-      parentGroupId: null,
-    };
-  }
+const epochs: SceneEpochs = {
+  content: 0,
+  layout: 0,
+  view: 0,
+  selection: 0,
+  request: 0,
+};
+
+function entry(entityId: string, imageId: string): ColdStateActiveEntry {
+  const identity = new Float32Array(16);
+  identity[0] = identity[5] = identity[10] = identity[15] = 1;
   return {
-    ...base,
     kind: "tile",
-    imageId: over.imageId ?? "img",
-    mode,
-    parentGroupId: over.parentGroupId ?? null,
+    entityId,
+    imageId,
+    targetLod: 0,
+    detailOwnedLodRange: [0, 0],
+    detailLevel: 0,
+    coarseLevel: null,
+    wantedLodLevels: [0],
+    levels: [],
+    modelMatrix: identity,
+    invModelMatrix: identity.slice(),
+    displayStateByChannel: {},
   };
 }
 
-function makeColdMsg(
-  visibleChannels: number[],
-  activeSet: ColdStateActiveEntry[],
-): ColdStateMessage {
-  const epochs: SceneEpochs = { content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0 };
+function cold(activeSet: ColdStateActiveEntry[], visibleChannels = [0]): ColdStateMessage {
   return {
     type: "coldState",
     epochs,
-    datasetId: "ds1",
+    datasetId: "ds-1",
     currentT: 0,
     currentZ: 0,
     multiChannel: visibleChannels.length > 1,
@@ -77,71 +55,57 @@ function makeColdMsg(
 }
 
 describe("buildViewHotState", () => {
-  it("emits one rayHit entry per cold-state member (per-member fan-out)", () => {
-    const cold = makeColdMsg(
-      [0], // single channel
-      [
-        makeEntry({ entityId: "ent-a", imageId: "img-a", mode: "tiles-with-detail" }),
-        makeEntry({ entityId: "ent-b", imageId: "img-b", mode: "tiles-with-detail" }),
-        makeEntry({ entityId: "group-c", imageId: "", mode: "group-as-proxy" }),
-      ],
-    );
-    const rayHit: [number, number, number] = [10, 20, 30];
-
-    const msg = buildViewHotState({
-      coldMsg: cold,
-      rayHit,
-      epochs: cold.epochs,
-      datasetId: "ds1",
+  it("fans one dataset ray hit out to every cold-state member", () => {
+    const state = cold([entry("a", "image-a"), entry("b", "image-b")]);
+    const result = buildViewHotState({
+      coldMsg: state,
+      rayHit: [10, 20, 30],
+      epochs,
+      datasetId: "ds-1",
     });
 
-    expect(msg.type).toBe("viewHotState");
-    expect(msg.datasetId).toBe("ds1");
-    expect(msg.epochs).toBe(cold.epochs);
-
-    // 3 members → 3 entries, each with the same rayHit.
-    expect(msg.rayHitsByEntity).toHaveLength(3);
-    const memberIds = msg.rayHitsByEntity.map(([id]) => id);
-    expect(memberIds).toEqual(["img-a", "img-b", "group-c"]);
-    for (const [, hit] of msg.rayHitsByEntity) {
-      expect(hit).toEqual([10, 20, 30]);
-    }
+    expect(result).toEqual({
+      type: "viewHotState",
+      epochs,
+      datasetId: "ds-1",
+      rayHitsByEntity: [
+        ["image-a", [10, 20, 30]],
+        ["image-b", [10, 20, 30]],
+      ],
+    });
   });
 
-  it("dedupes when two entries produce the same memberId", () => {
-    // group-as-proxy entityId="dup", tile imageId="dup" → both yield
-    // memberId "dup" in single-channel mode. Only the first one emits.
-    const cold = makeColdMsg(
-      [0],
-      [
-        makeEntry({ entityId: "dup", imageId: "", mode: "group-as-proxy" }),
-        makeEntry({ entityId: "other-ent", imageId: "dup", mode: "tiles-with-detail" }),
-        makeEntry({ entityId: "ent-c", imageId: "img-c", mode: "tiles-with-detail" }),
-      ],
-    );
-
-    const msg = buildViewHotState({
-      coldMsg: cold,
+  it("uses canonical channel-suffixed member ids in composite mode", () => {
+    const state = cold([entry("a", "image-a")], [0, 2]);
+    const result = buildViewHotState({
+      coldMsg: state,
       rayHit: [1, 2, 3],
-      epochs: cold.epochs,
-      datasetId: "ds1",
+      epochs,
+      datasetId: "ds-1",
     });
-
-    // 2 unique memberIds → 2 entries (the second "dup" is deduped).
-    expect(msg.rayHitsByEntity).toHaveLength(2);
-    expect(msg.rayHitsByEntity.map(([id]) => id)).toEqual(["dup", "img-c"]);
+    expect(result.rayHitsByEntity.map(([id]) => id)).toEqual([
+      "image-a:ch0",
+      "image-a:ch2",
+    ]);
   });
 
-  it("empty cold msg → empty rayHitsByEntity", () => {
-    const cold = makeColdMsg([0], []);
-    const msg = buildViewHotState({
-      coldMsg: cold,
-      rayHit: [0, 0, 0],
-      epochs: cold.epochs,
-      datasetId: "ds1",
+  it("deduplicates repeated member ids in first-seen order", () => {
+    const result = buildViewHotStateFromMembers({
+      memberIds: ["same", "same", "other"],
+      rayHit: [1, 2, 3],
+      epochs,
+      datasetId: "ds-1",
     });
-    expect(msg.rayHitsByEntity).toEqual([]);
-    expect(msg.type).toBe("viewHotState");
-    expect(msg.datasetId).toBe("ds1");
+    expect(result.rayHitsByEntity.map(([id]) => id)).toEqual(["same", "other"]);
+  });
+
+  it("returns an empty update for an empty cold state", () => {
+    const result = buildViewHotState({
+      coldMsg: cold([]),
+      rayHit: [0, 0, 0],
+      epochs,
+      datasetId: "ds-1",
+    });
+    expect(result.rayHitsByEntity).toEqual([]);
   });
 });

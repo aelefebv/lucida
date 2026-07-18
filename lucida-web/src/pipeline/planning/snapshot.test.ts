@@ -2,8 +2,8 @@ import { describe, it, expect } from "vitest";
 import type { WasmScene } from "lucida-core";
 import type { DatasetManifest, ImageSpec, LevelGeometry } from "../../manifestTypes.ts";
 import type { DatasetSettings } from "../../tickCommon.ts";
-import type { AssetCatalogSnapshot } from "./index.ts";
-import type { SceneEpochs } from "../epochs.ts";
+import { makeSceneEpochs } from "../../test/fixtures.ts";
+import { encodeViewQueryFixture } from "../../test/viewQueryBinaryFixture.ts";
 import { DEFAULT_PLANNING_CONFIG } from "./config.ts";
 import {
   buildPlanningSnapshot,
@@ -17,7 +17,7 @@ import {
 // ---------------------------------------------------------------------------
 //
 // `buildPlanningSnapshot` only reads a small slice of the WasmScene
-// surface: `view_query`, `member_positions`, `visible_region`, and the
+// surface: binary `view_query`, `member_positions`, `visible_region`, and the
 // scalar accessors `c() / t() / z()`. The stub below honours that
 // minimal contract and is then cast to `WasmScene` so callers don't
 // need a full WASM bundle to test the translation logic.
@@ -82,8 +82,10 @@ function makeStubScene(overrides: Partial<StubSceneConfig> = {}): WasmScene {
   };
 
   const stub = {
-    view_query: (_dsId: string) =>
-      JSON.stringify({ visible_entities: config.visibleEntities }),
+    view_query: (_dsId: string) => encodeViewQueryFixture({
+      epochs: { content: 1, layout: 1, view: 1, selection: 1, annotation: 0 },
+      visible_entities: config.visibleEntities,
+    }),
     member_positions: (_dsId: string) => JSON.stringify(config.positions),
     visible_region: (_dsId: string) =>
       config.visibleRegion === null ? "null" : JSON.stringify(config.visibleRegion),
@@ -91,7 +93,7 @@ function makeStubScene(overrides: Partial<StubSceneConfig> = {}): WasmScene {
     t: () => config.t,
     z: () => config.z,
     epochs: () =>
-      JSON.stringify({ content: 1, layout: 1, view: 1, selection: 1, asset: 1 }),
+      JSON.stringify({ content: 1, layout: 1, view: 1, selection: 1 }),
   };
   return stub as unknown as WasmScene;
 }
@@ -165,16 +167,11 @@ function makeDsSettings(overrides?: Partial<DatasetSettings>): DatasetSettings {
   };
 }
 
-function makeEpochs(): SceneEpochs {
-  return { content: 1, layout: 1, view: 1, selection: 1, asset: 1, request: 0 };
-}
-
 interface MakeArgsOverrides {
   scene?: WasmScene;
   dataset?: SnapshotDatasetEntry;
   dsSettings?: DatasetSettings | undefined;
   multiChannel?: boolean;
-  assetCatalog?: AssetCatalogSnapshot;
   mode?: "slice" | "volume";
 }
 
@@ -184,13 +181,10 @@ function makeArgs(overrides?: MakeArgsOverrides): BuildPlanningSnapshotArgs {
     datasetId: "ds1",
     dataset: overrides?.dataset ?? makeDataset(),
     dsSettings: overrides?.dsSettings ?? makeDsSettings(),
-    assetCatalog:
-      overrides?.assetCatalog ??
-      ({ byEntity: new Map() } as AssetCatalogSnapshot),
     minimapPending: new Map(),
     mode: overrides?.mode ?? "slice",
     multiChannel: overrides?.multiChannel ?? false,
-    currentEpochs: makeEpochs(),
+    currentEpochs: makeSceneEpochs(),
     requestEpoch: 0,
     config: DEFAULT_PLANNING_CONFIG,
   };
@@ -222,7 +216,7 @@ describe("buildPlanningSnapshot — typical case", () => {
     // tile entirely.
     const stub = {
       ...(scene as unknown as Record<string, unknown>),
-      view_query: () => JSON.stringify(null),
+      view_query: () => encodeViewQueryFixture(null),
     } as unknown as WasmScene;
     const built = buildPlanningSnapshot(makeArgs({ scene: stub }));
     expect(built).toBeNull();
@@ -422,20 +416,10 @@ describe("buildPlanningSnapshot — selection state", () => {
   });
 });
 
-describe("buildPlanningSnapshot — pass-through tiles", () => {
-  it("threads the asset catalog through into the snapshot", () => {
-    const catalog: AssetCatalogSnapshot = {
-      byEntity: new Map([
-        ["tile-0", { kinds: new Set(["GroupProxy3D"]), footprints: new Map() }],
-      ]),
-    };
-    const built = buildPlanningSnapshot(makeArgs({ assetCatalog: catalog }));
-    expect(built!.snapshot.assetCatalog).toBe(catalog);
-  });
-
+describe("buildPlanningSnapshot — pass-through state", () => {
   it("threads the epoch counters through into the snapshot", () => {
     const built = buildPlanningSnapshot(makeArgs());
-    expect(built!.snapshot.epochs).toEqual(makeEpochs());
+    expect(built!.snapshot.epochs).toEqual(makeSceneEpochs());
   });
 
   it("returns the same visibleRegion object embedded in the snapshot", () => {

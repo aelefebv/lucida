@@ -1,14 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
-
-interface BrowseEntry {
-  name: string;
-  type: "directory" | "file";
-}
-
-interface BrowseResponse {
-  path: string;
-  entries: BrowseEntry[];
-}
+import { useModalDialog } from "../hooks/useModalDialog.ts";
+import {
+  browseLocalFiles,
+  type BrowseEntry,
+} from "../workspaceApi.ts";
+import "./FileBrowser.css";
 
 interface FileBrowserProps {
   /** Open the single navigated-to dataset into the CURRENT workspace (the
@@ -21,7 +17,6 @@ interface FileBrowserProps {
    *  canonical-form paths the user accumulated. */
   onCreateWorkspace?: (paths: string[]) => void;
   onClose: () => void;
-  serverPort?: number;
 }
 
 /**
@@ -40,8 +35,8 @@ export function FileBrowser({
   onSelect,
   onCreateWorkspace,
   onClose,
-  serverPort = 9876,
 }: FileBrowserProps) {
+  const { dialogRef, onKeyDown } = useModalDialog({ open: true, onClose });
   const [currentPath, setCurrentPath] = useState(() => {
     // On first-ever open `saved` is null → use `""`, which the server
     // interprets as "give me the platform-default root." This avoids
@@ -65,18 +60,7 @@ export function FileBrowser({
       setLoading(true);
       setError(null);
       try {
-        // Empty path → omit the query param so the server falls into
-        // its platform-default-root branch. Otherwise URL-encode the
-        // canonical-form path verbatim (it's already forward-slashed).
-        const url = path
-          ? `http://localhost:${serverPort}/api/browse?path=${encodeURIComponent(path)}`
-          : `http://localhost:${serverPort}/api/browse`;
-        const res = await fetch(url);
-        if (!res.ok) {
-          const text = await res.text();
-          throw new Error(text || res.statusText);
-        }
-        const data: BrowseResponse = await res.json();
+        const data = await browseLocalFiles(path);
         setCurrentPath(data.path);
         setEntries(data.entries);
         setHasZarrJson(data.entries.some((e) => e.name === "zarr.json"));
@@ -87,7 +71,7 @@ export function FileBrowser({
         setLoading(false);
       }
     },
-    [serverPort]
+    []
   );
 
   useEffect(() => {
@@ -171,107 +155,59 @@ export function FileBrowser({
   const atRoot = currentPath === "" || currentPath === "/";
 
   return (
+    // Pointer users may dismiss through the backdrop; the dialog's Escape key
+    // handler and explicit Close button provide the equivalent keyboard paths.
     <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        zIndex: 100,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        background: "rgba(0, 0, 0, 0.5)",
-        backdropFilter: "blur(4px)",
-      }}
+      role="presentation"
+      className="file-browser-backdrop"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
+      {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape/focus-trap keys bubble from dialog controls. */}
       <div
-        style={{
-          background: "#1a1a1a",
-          border: "1px solid rgba(255, 255, 255, 0.1)",
-          borderRadius: 8,
-          width: 520,
-          maxHeight: "70vh",
-          display: "flex",
-          flexDirection: "column",
-          fontFamily: "system-ui, -apple-system, sans-serif",
-          color: "white",
-          fontSize: 13,
-        }}
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="file-browser-title"
+        aria-busy={loading}
+        tabIndex={-1}
+        onKeyDown={onKeyDown}
+        className="file-browser-dialog"
       >
-        {/* Header */}
-        <div
-          style={{
-            padding: "12px 16px",
-            borderBottom: "1px solid rgba(255, 255, 255, 0.1)",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-          }}
-        >
-          <span style={{ fontWeight: 600 }}>Browse Local Files</span>
+        <div className="file-browser-header">
+          <span id="file-browser-title" className="file-browser-title">
+            Browse Local Files
+          </span>
           <button
+            type="button"
             onClick={onClose}
-            style={{
-              background: "none",
-              border: "none",
-              color: "rgba(255,255,255,0.5)",
-              fontSize: 18,
-              cursor: "pointer",
-              padding: "0 4px",
-            }}
+            aria-label="Close file browser"
+            className="file-browser-icon-button"
           >
             ×
           </button>
         </div>
 
-        {/* Breadcrumb path */}
-        <div
-          style={{
-            padding: "8px 16px",
-            borderBottom: "1px solid rgba(255, 255, 255, 0.05)",
-            display: "flex",
-            alignItems: "center",
-            gap: 2,
-            fontSize: 12,
-            overflow: "hidden",
-          }}
-        >
+        <div className="file-browser-breadcrumbs">
           <button
+            type="button"
             onClick={() => browse("")}
-            style={{
-              background: "none",
-              border: "none",
-              color: "rgba(255,255,255,0.5)",
-              cursor: "pointer",
-              padding: "2px 4px",
-              fontSize: 12,
-            }}
+            className="file-browser-breadcrumb-button"
           >
             /
           </button>
           {segments.map((seg, i) => (
-            <span key={i} style={{ display: "flex", alignItems: "center" }}>
-              <span style={{ color: "rgba(255,255,255,0.3)", margin: "0 2px" }}>
-                /
-              </span>
+            <span key={`${seg}-${i}`} className="file-browser-breadcrumb-segment">
+              <span className="file-browser-breadcrumb-separator">/</span>
               <button
+                type="button"
                 onClick={() =>
                   browse(leadingSlash + segments.slice(0, i + 1).join("/"))
                 }
-                style={{
-                  background: "none",
-                  border: "none",
-                  color:
-                    i === segments.length - 1
-                      ? "rgba(255,255,255,0.9)"
-                      : "rgba(255,255,255,0.5)",
-                  cursor: "pointer",
-                  padding: "2px 4px",
-                  fontSize: 12,
-                  whiteSpace: "nowrap",
-                }}
+                className={`file-browser-breadcrumb-button${
+                  i === segments.length - 1 ? " current" : ""
+                }`}
               >
                 {seg}
               </button>
@@ -279,106 +215,53 @@ export function FileBrowser({
           ))}
         </div>
 
-        {/* Entry list */}
-        <div
-          style={{
-            flex: 1,
-            overflowY: "auto",
-            padding: "4px 0",
-            minHeight: 200,
-          }}
-        >
+        <div className="file-browser-list">
           {loading && (
-            <div
-              style={{
-                padding: 16,
-                textAlign: "center",
-                color: "rgba(255,255,255,0.4)",
-              }}
-            >
+            <div role="status" className="file-browser-status">
               Loading...
             </div>
           )}
           {error && (
-            <div style={{ padding: 16, color: "#f44" }}>{error}</div>
+            <div role="alert" className="file-browser-error">
+              <span>{error}</span>
+              <button
+                type="button"
+                className="file-browser-action"
+                onClick={() => void browse(currentPath)}
+              >
+                Retry
+              </button>
+            </div>
           )}
           {!loading && !error && (
             <>
-              {/* Up directory — hidden at the platform-default root */}
               {!atRoot && (
                 <button
+                  type="button"
                   onClick={navigateUp}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 8,
-                    width: "100%",
-                    padding: "6px 16px",
-                    background: "none",
-                    border: "none",
-                    color: "rgba(255,255,255,0.5)",
-                    cursor: "pointer",
-                    textAlign: "left",
-                    fontSize: 13,
-                  }}
-                  onMouseEnter={(e) =>
-                    (e.currentTarget.style.background =
-                      "rgba(255,255,255,0.05)")
-                  }
-                  onMouseLeave={(e) =>
-                    (e.currentTarget.style.background = "none")
-                  }
+                  className="file-browser-entry"
                 >
                   ..
                 </button>
               )}
               {entries.map((entry) => (
                 <button
+                  type="button"
                   key={entry.name}
                   onClick={() => {
                     if (entry.type === "directory") navigateTo(entry.name);
                   }}
                   disabled={entry.type !== "directory"}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 8,
-                    width: "100%",
-                    padding: "6px 16px",
-                    background: "none",
-                    border: "none",
-                    color:
-                      entry.type === "directory"
-                        ? "rgba(255,255,255,0.85)"
-                        : "rgba(255,255,255,0.35)",
-                    cursor:
-                      entry.type === "directory" ? "pointer" : "default",
-                    textAlign: "left",
-                    fontSize: 13,
-                  }}
-                  onMouseEnter={(e) => {
-                    if (entry.type === "directory")
-                      e.currentTarget.style.background =
-                        "rgba(255,255,255,0.05)";
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.background = "none";
-                  }}
+                  className="file-browser-entry"
                 >
-                  <span style={{ opacity: 0.5, fontSize: 11 }}>
+                  <span className="file-browser-entry-icon" aria-hidden="true">
                     {entry.type === "directory" ? "\u{1F4C1}" : "\u{1F4C4}"}
                   </span>
                   {entry.name}
                 </button>
               ))}
               {entries.length === 0 && !loading && (
-                <div
-                  style={{
-                    padding: 16,
-                    textAlign: "center",
-                    color: "rgba(255,255,255,0.3)",
-                  }}
-                >
+                <div className="file-browser-empty">
                   Empty directory
                 </div>
               )}
@@ -386,39 +269,15 @@ export function FileBrowser({
           )}
         </div>
 
-        {/* Selection tray — only in the create-workspace (multi-select) flow. */}
         {multiSelect && selected.length > 0 && (
           <div
             data-testid="file-browser-selection"
-            style={{
-              padding: "8px 16px",
-              borderTop: "1px solid rgba(255, 255, 255, 0.05)",
-              display: "flex",
-              flexWrap: "wrap",
-              gap: 6,
-            }}
+            className="file-browser-selection"
           >
             {selected.map((path) => (
-              <span
-                key={path}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 6,
-                  padding: "2px 8px",
-                  borderRadius: 12,
-                  background: "rgba(100, 108, 255, 0.25)",
-                  fontSize: 12,
-                  maxWidth: "100%",
-                }}
-              >
+              <span key={path} className="file-browser-selection-chip">
                 <span
-                  style={{
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                    maxWidth: 360,
-                  }}
+                  className="file-browser-selection-path"
                   title={path}
                 >
                   {path}
@@ -427,15 +286,7 @@ export function FileBrowser({
                   type="button"
                   aria-label={`Remove ${path} from selection`}
                   onClick={() => handleRemoveFromSelection(path)}
-                  style={{
-                    background: "none",
-                    border: "none",
-                    color: "rgba(255,255,255,0.6)",
-                    cursor: "pointer",
-                    fontSize: 13,
-                    padding: 0,
-                    lineHeight: 1,
-                  }}
+                  className="file-browser-selection-remove"
                 >
                   ×
                 </button>
@@ -444,39 +295,17 @@ export function FileBrowser({
           </div>
         )}
 
-        {/* Footer with action buttons */}
-        <div
-          style={{
-            padding: "12px 16px",
-            borderTop: "1px solid rgba(255, 255, 255, 0.1)",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            gap: 8,
-          }}
-        >
+        <div className="file-browser-footer">
           <span
-            style={{
-              fontSize: 11,
-              color: hasZarrJson
-                ? "rgba(100, 200, 100, 0.8)"
-                : "rgba(255,255,255,0.3)",
-            }}
+            className={`file-browser-detection${hasZarrJson ? " detected" : ""}`}
           >
             {hasZarrJson ? "Zarr dataset detected" : "Navigate to a .zarr directory"}
           </span>
-          <div style={{ display: "flex", gap: 8 }}>
+          <div className="file-browser-actions">
             <button
+              type="button"
               onClick={onClose}
-              style={{
-                padding: "6px 16px",
-                border: "1px solid rgba(255,255,255,0.15)",
-                borderRadius: 4,
-                background: "none",
-                color: "rgba(255,255,255,0.7)",
-                cursor: "pointer",
-                fontSize: 13,
-              }}
+              className="file-browser-action"
             >
               Cancel
             </button>
@@ -485,38 +314,17 @@ export function FileBrowser({
                 type="button"
                 onClick={handleAddToSelection}
                 disabled={!hasZarrJson || alreadySelected}
-                style={{
-                  padding: "6px 16px",
-                  border: "1px solid rgba(255,255,255,0.15)",
-                  borderRadius: 4,
-                  background: "none",
-                  color:
-                    hasZarrJson && !alreadySelected
-                      ? "rgba(255,255,255,0.85)"
-                      : "rgba(255,255,255,0.3)",
-                  cursor: hasZarrJson && !alreadySelected ? "pointer" : "default",
-                  fontSize: 13,
-                }}
+                className="file-browser-action"
               >
                 {alreadySelected ? "Added" : "Add to selection"}
               </button>
             )}
             {onSelect && (
               <button
+                type="button"
                 onClick={handleOpen}
                 disabled={!hasZarrJson}
-                style={{
-                  padding: "6px 16px",
-                  border: "none",
-                  borderRadius: 4,
-                  background: hasZarrJson
-                    ? "rgba(100, 108, 255, 0.8)"
-                    : "rgba(100, 108, 255, 0.2)",
-                  color: hasZarrJson ? "white" : "rgba(255,255,255,0.3)",
-                  cursor: hasZarrJson ? "pointer" : "default",
-                  fontSize: 13,
-                  fontWeight: 500,
-                }}
+                className="file-browser-action primary"
               >
                 Open
               </button>
@@ -526,23 +334,7 @@ export function FileBrowser({
                 type="button"
                 onClick={handleCreateWorkspace}
                 disabled={selected.length === 0 && !hasZarrJson}
-                style={{
-                  padding: "6px 16px",
-                  border: "none",
-                  borderRadius: 4,
-                  background:
-                    selected.length > 0 || hasZarrJson
-                      ? "rgba(100, 108, 255, 0.8)"
-                      : "rgba(100, 108, 255, 0.2)",
-                  color:
-                    selected.length > 0 || hasZarrJson
-                      ? "white"
-                      : "rgba(255,255,255,0.3)",
-                  cursor:
-                    selected.length > 0 || hasZarrJson ? "pointer" : "default",
-                  fontSize: 13,
-                  fontWeight: 500,
-                }}
+                className="file-browser-action primary"
               >
                 {selected.length > 1
                   ? `Create workspace (${selected.length})`

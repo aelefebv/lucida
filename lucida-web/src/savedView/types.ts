@@ -4,6 +4,10 @@
 // `wiki/decisions/0013-url-as-app-state-for-saved-views.md` for the
 // rationale).
 
+import type { LabelSettings } from "../labelSettings.ts";
+
+export type { LabelSettings } from "../labelSettings.ts";
+
 export const SAVED_VIEW_VERSION = 1;
 
 /** 2D slice camera. `serde(tag = "mode")` puts `mode: "slice"` at top level. */
@@ -81,15 +85,6 @@ export interface ChannelSettings {
    *  Mirrors `lucida_core::scene::ChannelSettings::name` (serde-skipped when
    *  None), so it is omitted on the wire unless set. */
   name?: string;
-}
-
-/** Per-label overlay display state (mirrors `lucida_core::scene::LabelSettings`),
- *  captured + restored so a saved view reproduces the author's visible-label set
- *  and per-label opacity. `#[serde(default)]` on the Rust side keeps it additive:
- *  absent on views persisted before per-label controls existed. */
-export interface LabelSettings {
-  visible: boolean;
-  opacity: number;
 }
 
 export interface DatasetDisplaySettings {

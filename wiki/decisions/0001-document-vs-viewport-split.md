@@ -5,7 +5,7 @@ description: "Lucida splits state mutations into two disjoint enums in lucida-co
 tags: [lucida, decision]
 source_path: wiki/decisions/0001-document-vs-viewport-split.md
 created: 2026-04-18
-modified: 2026-05-07
+modified: 2026-07-16
 ---
 
 # Document vs Viewport Command Split
@@ -17,7 +17,12 @@ Lucida splits state mutations into two disjoint enums in [lucida-core](../system
 - **`DocumentCommand`** — shared, sequenced, persisted, broadcast to all clients. Examples: `DatasetOpened`, `RemoveDataset`, `RegisterLayout`, `SetActiveLayout`, `ApplyAssetCatalogDelta`.
 - **`ViewportCommand`** — local-only, applied immediately, emitted as ephemeral presence. Examples: `Pan`, `ZoomBy`, `SetT`, `SetGamma`, `SetChannelColormap`, `SetMultiChannel`.
 
-A `Command` wrapper enum (`#[serde(untagged)]`) deserializes from either shape, used at the JSON boundary in [lucida-py](../systems/crates/lucida-py.md) and [lucida-cli](../systems/crates/lucida-cli.md).
+A `Command` wrapper enum (`#[serde(untagged)]`) deserializes either shape at
+the generic local JSON boundary used by [lucida-py](../systems/crates/lucida-py.md)
+and the WASM facade. [lucida-cli](../systems/crates/lucida-cli.md) does not
+deserialize this ambiguous wrapper: it constructs typed `ViewportCommand`
+values for local/viewer operations and typed `DocumentCommand` values for the
+sequenced session protocol.
 
 ## Why
 

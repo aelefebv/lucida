@@ -11,7 +11,6 @@ import type { ImageSpec, DatasetManifest } from "../../manifestTypes.ts";
 import type { DatasetSettings } from "../../tickCommon.ts";
 import { getActiveChannels } from "../../tickCommon.ts";
 import type {
-  AssetCatalogSnapshot,
   EntitySnapshot,
   MinimapChunkCoord,
   PlanningSnapshot,
@@ -23,19 +22,17 @@ import type { PlanningConfig } from "./config.ts";
 import {
   makeEntitySnapshot,
   type SnapshotEntityDeps,
-  type ViewQueryEntityJson,
 } from "./snapshotDelta.ts";
+import {
+  decodeViewQuery,
+  type ViewQueryBinaryResult,
+} from "./viewQueryBinary.ts";
 
 // Re-export from canonical home in `./index.ts`.
 export type { MinimapChunkCoord } from "./index.ts";
 // Re-export the coarse-level resolver — its canonical home is the shared
 // per-row translation module, but consumers historically import it here.
 export { resolveCoarseLevel } from "./snapshotDelta.ts";
-
-/** Wire shape of `view_query`'s top-level object. */
-interface ViewQueryJson {
-  visible_entities?: ViewQueryEntityJson[];
-}
 
 /** Wire shape of `visible_region`'s JSON output (snake_case). */
 interface VisibleRegionJson {
@@ -83,8 +80,6 @@ export interface BuildPlanningSnapshotArgs {
   dataset: SnapshotDatasetEntry;
   /** Per-dataset settings — drives multi-channel selection assembly. */
   dsSettings: DatasetSettings | undefined;
-  /** Current asset catalog snapshot threaded through into the result. */
-  assetCatalog: AssetCatalogSnapshot;
   /**
    * Per-image pending minimap fetches the orchestrator has
    * accumulated this tick. Forwarded verbatim into
@@ -109,7 +104,7 @@ export interface BuildPlanningSnapshotArgs {
   /**
    * Optional precomputed camera-independent inputs. These derive solely
    * from the scene's fixed 2D layout placement and the immutable dataset
-   * manifest — they change only when the content / layout / asset epoch
+   * manifest — they change only when the content or layout epoch
    * moves, never on a camera move. A caller that caches them per-dataset
    * across view-only replans passes them here so the snapshot builder
    * skips the `member_positions` serde and the two manifest-map rebuilds.
@@ -118,7 +113,7 @@ export interface BuildPlanningSnapshotArgs {
    * builder computes it internally, identically to a caller that never
    * caches — the internal path is the byte-for-byte default. When
    * provided, the value MUST equal what the internal path would produce
-   * for the current scene state (same content / layout / asset epoch);
+   * for the current scene state (same content / layout epoch);
    * a stale value yields wrong tile positions or parent edges.
    */
   precomputed?: {
@@ -152,8 +147,9 @@ export interface BuildPlanningSnapshotArgs {
  * assembled {@link PlanningSnapshot} and the raw helper artifacts the
  * orchestrator still needs (the parsed `entities` list — for telemetry
  * and roster construction — and the `visibleRegion` it stashes for the
- * coordinate-diagnostic panel). `null` when this dataset has no
- * visible entities (the orchestrator should `continue` past it).
+ * coordinate-diagnostic panel). `null` when the dataset is unknown to the
+ * scene (the orchestrator should `continue` past it); a known empty full set
+ * remains a valid snapshot with zero entities.
  */
 export interface BuildPlanningSnapshotResult {
   snapshot: PlanningSnapshot;
@@ -167,8 +163,8 @@ export interface BuildPlanningSnapshotResult {
  *
  * Pure with respect to its inputs: identical args produce identical
  * outputs, no module state is touched, no parameter is mutated. Returns
- * `null` if `view_query(datasetId)` produces a missing or empty
- * `visible_entities` payload — the caller should skip this dataset.
+ * `null` if `view_query(datasetId)` reports an unknown dataset — the caller
+ * should skip it. A known dataset with an empty full set is preserved.
  *
  * Assembly order: `view_query` → `member_positions` → `visible_region`
  * → stitch in `imageSpec` + `parentId` → assemble `EntitySnapshot[]` →
@@ -184,7 +180,6 @@ export function buildPlanningSnapshot(
     datasetId,
     dataset,
     dsSettings,
-    assetCatalog,
     minimapPending,
     mode,
     multiChannel,
@@ -199,20 +194,20 @@ export function buildPlanningSnapshot(
 
   // When the caller supplies `entitiesOverride`, the entity set is taken
   // verbatim (it was reconstructed incrementally from `view_query_delta`) and
-  // steps 1–4 below — the full `view_query` parse, `member_positions`, the
+  // steps 1–4 below — the full binary `view_query` decode,
+  // `member_positions`, the
   // manifest maps, and the per-row translation — are all skipped. Only
   // `visibleRegion` and `selection` (steps 5–6) run, so they stay fresh.
   const entitiesOverride = args.entitiesOverride;
 
-  // 1. view_query — may be null / empty when the dataset isn't yet
+  // 1. view_query — may report unknown when the dataset isn't yet
   //    registered in the scene. Caller treats this as "skip this
   //    dataset" (matches the historical `continue`). Skipped entirely on
   //    the override path.
-  let vq: ViewQueryJson | null = null;
+  let vq: ViewQueryBinaryResult | null = null;
   if (!entitiesOverride) {
-    const vqJson = scene.view_query(datasetId);
-    vq = JSON.parse(vqJson) as ViewQueryJson | null;
-    if (!vq || !vq.visible_entities) return null;
+    vq = decodeViewQuery(scene.view_query(datasetId));
+    if (!vq) return null;
   }
 
   // 2. member_positions — keyed by entityId, 2D layout placement. Reuse a
@@ -274,7 +269,7 @@ export function buildPlanningSnapshot(
     };
     // `vq` is non-null here — the override branch is the only path that
     // leaves it null, and it's taken above.
-    entities = vq!.visible_entities!.map((e) => makeEntitySnapshot(e, deps));
+    entities = vq!.visible_entities.map((e) => makeEntitySnapshot(e, deps));
   }
 
   // 5. visible_region — null when WASM has nothing yet for this dataset.
@@ -329,7 +324,6 @@ export function buildPlanningSnapshot(
     entities,
     visibleRegion,
     selection,
-    assetCatalog,
     minimapPending,
   };
 

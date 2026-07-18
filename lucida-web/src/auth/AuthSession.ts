@@ -7,6 +7,7 @@
 
 import { createContext, useContext } from "react";
 import type { AuthPrincipal } from "./types.ts";
+import type { LogoutFailure } from "./whoami.ts";
 
 /**
  * Provided to the authed subtree by `<AuthGate>`. `principal` is
@@ -17,7 +18,8 @@ export interface AuthSession {
   principal: AuthPrincipal;
   /** Re-run /auth/whoami and publish the latest principal. */
   refresh: () => Promise<void>;
-  signOut: () => Promise<void>;
+  signOut: () => Promise<boolean>;
+  logoutFailure: LogoutFailure | null;
 }
 
 export const AuthSessionContext = createContext<AuthSession | null>(null);

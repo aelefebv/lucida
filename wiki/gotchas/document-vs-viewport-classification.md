@@ -21,7 +21,7 @@ Misclassifying a viewport command as a document command, or vice versa, has loud
 
 The split is documented in [Document vs Viewport Command Split](../decisions/0001-document-vs-viewport-split.md). Quick rule:
 
-- Does the change affect **what's loaded** (datasets, layouts, asset catalogs)? → **DocumentCommand**.
+- Does the change affect **what's loaded or shared** (datasets, layouts, annotations)? → **DocumentCommand**.
 - Does the change affect **how I'm looking at it** (camera, slice index, contrast, channel visibility)? → **ViewportCommand**.
 
 The Rust enums in [lucida-core](../systems/crates/lucida-core.md) `command.rs` enumerate every variant. If you're adding a new command, decide which enum it belongs in *before* writing the apply logic, and use [lucida-web](../systems/crates/lucida-web.md)'s `applyDocumentCommand` vs `applyViewportCommand` accordingly.

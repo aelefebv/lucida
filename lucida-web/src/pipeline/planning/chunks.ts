@@ -13,6 +13,7 @@ import type {
   PlanStats,
   SelectionState,
 } from "./types.ts";
+import { createChunkContract } from "../../chunkContract.ts";
 
 /** Canonical chunk key: "level/t/c/z/y/x". */
 export function chunkKey(
@@ -81,15 +82,11 @@ export function chunkWorldDims(
  * Ported from Rust `visible_chunks()` in lucida-core/src/chunk.rs.
  *
  * Accepts the full {@link ActiveSetEntry} union so callers don't have to
- * pre-narrow. Short-circuits to an empty list for non-tile entries:
- *   - `group-as-proxy` — the group is served by a single proxy asset,
- *     not by chunk requests.
- *   - `invisible` — pass-through entry; no chunk requests apply.
+ * pre-narrow. Invisible entries short-circuit to an empty list.
  *
  * Returned `ChunkRequest`s are placeholders: `priority` is `0`, `lane`
  * is `"detail"`, and `datasetId` is stamped from the caller-supplied
- * arg (defaults to the empty string for synthetic test snapshots that
- * don't model dataset ownership). The caller (`plan()`) finalises
+ * dataset identity. The caller (`plan()`) finalises
  * `priority`/`lane` per lane before they leave the planner.
  *
  * Thin wrapper around {@link iterateChunksAtLodRange}: short-circuits
@@ -100,8 +97,8 @@ export function iterateChunks(
   entry: ActiveSetEntry,
   visibleRegion: VisibleRegion,
   selection: SelectionState,
+  datasetId: string,
   stats: PlanStats | null = null,
-  datasetId = "",
 ): ChunkRequest[] {
   if (entry.kind !== "tile") return [];
   return iterateChunksAtLodRange(
@@ -109,8 +106,8 @@ export function iterateChunks(
     entry.detailOwnedLodRange,
     visibleRegion,
     selection,
-    stats,
     datasetId,
+    stats,
   );
 }
 
@@ -119,18 +116,15 @@ export function iterateChunks(
  * down to finest, all visible channels, and pushes one
  * {@link ChunkRequest} per surviving grid cell.
  *
- * This is the form used directly by the overview lane (which doesn't
- * need an `ActiveSetEntry` to supply the range — it always wants the
- * coarsest level). The detail/prefetch lanes call {@link iterateChunks}
- * which forwards the range from the active-set entry.
+ * This form is also useful to callers that emit a single explicit LOD.
  */
 export function iterateChunksAtLodRange(
   entity: EntitySnapshot,
   lodRange: [number, number],
   visibleRegion: VisibleRegion,
   selection: SelectionState,
+  datasetId: string,
   stats: PlanStats | null = null,
-  datasetId = "",
 ): ChunkRequest[] {
   const requests: ChunkRequest[] = [];
 
@@ -364,6 +358,8 @@ function makeChunkRequest(
   y: number,
   x: number,
 ): ChunkRequest {
+  const geometry = entity.levels[level];
+  if (!geometry) throw new Error(`Missing level ${level} for ${entity.imageId}`);
   return {
     datasetId,
     entityId: entity.entityId,
@@ -378,5 +374,17 @@ function makeChunkRequest(
     tier: "detail",
     priority: 0,
     chunkKey: chunkKey(level, t, c, z, y, x),
+    contract: createChunkContract({
+      datasetId,
+      imageId: entity.imageId,
+      channel: c,
+      role: "intensity",
+      sourceDtype: entity.sourceDtype,
+      shape: [
+        geometry.chunk_shape[Axis.Z],
+        geometry.chunk_shape[Axis.Y],
+        geometry.chunk_shape[Axis.X],
+      ],
+    }),
   };
 }

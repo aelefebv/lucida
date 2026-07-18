@@ -1,8 +1,58 @@
 use serde::Serialize;
+use std::ops::Range;
 
 use lucida_content::LevelGeometry;
 
 use crate::camera::VisibleRegion;
+
+/// Hard CPU/allocation ceiling for one view-relative chunk planning pass.
+/// A pathological manifest or enormous frustum is reduced to a deterministic
+/// window around the view's sort center before enumeration.
+pub const MAX_CHUNK_PLAN_CANDIDATES: usize = 65_536;
+
+fn bounded_centered_ranges(
+    ranges: [Range<u32>; 3],
+    centers: [f64; 3],
+    limit: usize,
+) -> [Range<u32>; 3] {
+    let mut lengths: [u64; 3] =
+        std::array::from_fn(|axis| u64::from(ranges[axis].end.saturating_sub(ranges[axis].start)));
+    while u128::from(lengths[0])
+        .saturating_mul(u128::from(lengths[1]))
+        .saturating_mul(u128::from(lengths[2]))
+        > limit as u128
+    {
+        let Some((axis, _)) = lengths
+            .iter()
+            .enumerate()
+            .filter(|(_, length)| **length > 1)
+            .max_by_key(|(_, length)| **length)
+        else {
+            break;
+        };
+        lengths[axis] = lengths[axis].div_ceil(2);
+    }
+
+    std::array::from_fn(|axis| {
+        let range = &ranges[axis];
+        let available = range.end.saturating_sub(range.start);
+        let length = u32::try_from(lengths[axis])
+            .unwrap_or(available)
+            .min(available);
+        if length == 0 {
+            return range.start..range.start;
+        }
+        let center = centers[axis].floor().clamp(
+            f64::from(range.start),
+            f64::from(range.end.saturating_sub(1)),
+        ) as u32;
+        let mut start = center.saturating_sub(length / 2).max(range.start);
+        if start.saturating_add(length) > range.end {
+            start = range.end - length;
+        }
+        start..start + length
+    })
+}
 
 /// A chunk coordinate in the multiscale grid.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -113,10 +163,26 @@ pub fn visible_chunks(
     let z_start = (region.z_range.start as f64 / chunk_world_z).floor() as u32;
     let z_end = ((region.z_range.end as f64 / chunk_world_z).ceil().max(0.0) as u32).min(max_z);
 
+    let center = match region.sort_center {
+        Some([cx, cy, cz]) => [cx / chunk_world_x, cy / chunk_world_y, cz / chunk_world_z],
+        None => [
+            (col_start + col_end) as f64 / 2.0,
+            (row_start + row_end) as f64 / 2.0,
+            (z_start + z_end) as f64 / 2.0,
+        ],
+    };
+    let [cols, rows, zs] = bounded_centered_ranges(
+        [col_start..col_end, row_start..row_end, z_start..z_end],
+        center,
+        MAX_CHUNK_PLAN_CANDIDATES,
+    );
     let mut chunks = Vec::new();
-    for z in z_start..z_end {
-        for row in row_start..row_end {
-            for col in col_start..col_end {
+    'candidates: for z in zs {
+        for row in rows.clone() {
+            for col in cols.clone() {
+                if chunks.len() >= MAX_CHUNK_PLAN_CANDIDATES {
+                    break 'candidates;
+                }
                 if let Some(ref planes) = region.frustum_planes {
                     let cmin = [
                         col as f64 * chunk_world_x,
@@ -145,14 +211,7 @@ pub fn visible_chunks(
     }
 
     // Sort center-out
-    let (center_col, center_row, center_z) = match region.sort_center {
-        Some([cx, cy, cz]) => (cx / chunk_world_x, cy / chunk_world_y, cz / chunk_world_z),
-        None => (
-            (col_start + col_end) as f64 / 2.0,
-            (row_start + row_end) as f64 / 2.0,
-            (z_start + z_end) as f64 / 2.0,
-        ),
-    };
+    let [center_col, center_row, center_z] = center;
     chunks.sort_by(|a, b| {
         let da = (a.x as f64 + 0.5 - center_col).powi(2)
             + (a.y as f64 + 0.5 - center_row).powi(2)
@@ -219,10 +278,32 @@ pub fn visible_and_prefetch_chunks(
 
     let mut needed = Vec::new();
     let mut prefetch = Vec::new();
+    let mut inspected = 0usize;
+    let center = match region.sort_center {
+        Some([cx, cy, cz]) => [cx / chunk_world_x, cy / chunk_world_y, cz / chunk_world_z],
+        None => [
+            (col_start + col_end) as f64 / 2.0,
+            (row_start + row_end) as f64 / 2.0,
+            (z_start + z_end) as f64 / 2.0,
+        ],
+    };
+    let [cols, rows, zs] = bounded_centered_ranges(
+        [
+            exp_col_start..exp_col_end,
+            exp_row_start..exp_row_end,
+            z_start..z_end,
+        ],
+        center,
+        MAX_CHUNK_PLAN_CANDIDATES,
+    );
 
-    for z in z_start..z_end {
-        for row in exp_row_start..exp_row_end {
-            for col in exp_col_start..exp_col_end {
+    'candidates: for z in zs {
+        for row in rows.clone() {
+            for col in cols.clone() {
+                if inspected >= MAX_CHUNK_PLAN_CANDIDATES {
+                    break 'candidates;
+                }
+                inspected += 1;
                 if let Some(ref planes) = region.frustum_planes {
                     let cmin = [
                         col as f64 * chunk_world_x,
@@ -257,14 +338,7 @@ pub fn visible_and_prefetch_chunks(
         }
     }
 
-    let (center_col, center_row, center_z) = match region.sort_center {
-        Some([cx, cy, cz]) => (cx / chunk_world_x, cy / chunk_world_y, cz / chunk_world_z),
-        None => (
-            (col_start + col_end) as f64 / 2.0,
-            (row_start + row_end) as f64 / 2.0,
-            (z_start + z_end) as f64 / 2.0,
-        ),
-    };
+    let [center_col, center_row, center_z] = center;
     let sort_fn = |a: &ChunkCoord, b: &ChunkCoord| {
         let da = (a.x as f64 + 0.5 - center_col).powi(2)
             + (a.y as f64 + 0.5 - center_row).powi(2)
@@ -436,6 +510,29 @@ mod tests {
                 c.y,
             );
         }
+    }
+
+    #[test]
+    fn pathological_visible_grid_is_capped_before_unbounded_allocation() {
+        let region = VisibleRegion {
+            xy_bounds: [0.0, 0.0, 1024.0, 1024.0],
+            z_range: 0..1024,
+            effective_zoom: 1.0,
+            radius_basis_vox: 1024.0,
+            sort_center: None,
+            frustum_planes: None,
+        };
+        let g = geo(0, [1024, 1024, 1024], [1, 1, 1]);
+        let chunks = visible_chunks(&region, &g, 0, 0, &g);
+        assert!(chunks.len() <= MAX_CHUNK_PLAN_CANDIDATES);
+        assert!(
+            chunks
+                .iter()
+                .any(|chunk| chunk.x > 0 && chunk.y > 0 && chunk.z > 0)
+        );
+
+        let (needed, prefetch) = visible_and_prefetch_chunks(&region, &g, 0, 0, &g);
+        assert!(needed.len() + prefetch.len() <= MAX_CHUNK_PLAN_CANDIDATES);
     }
 
     #[test]

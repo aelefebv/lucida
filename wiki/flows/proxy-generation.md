@@ -1,18 +1,18 @@
 ---
 type: Flow
 title: "Flow: Proxy Generation (S5)"
-description: "coarse/detail (ADR 0039-0041)."
-tags: [lucida, flow]
+description: "Historical proxy-generation flow deleted under ADR-0043."
+tags: [lucida, flow, historical]
 source_path: wiki/flows/proxy-generation.md
 created: 2026-04-18
-modified: 2026-07-06
+modified: 2026-07-16
 ---
 
 # Flow: Proxy Generation (S5)
 
-Status: Historical / legacy bridge. The default fallback model is chunk-only
-coarse/detail (ADR 0039-0041). Proxy generation remains documented here only
-for the opt-in compatibility path and for understanding older code.
+Status: **Historical; no executable path remains.** [ADR-0043](../decisions/0043-superseded-server-surfaces-sunset.md)
+deleted this protocol on 2026-07-16. The trace below describes pre-deletion code
+and must not be used as current implementation guidance.
 
 How a `GroupProxy3D` or `TileProxy3D` request travels from the renderer's "I want this proxy" through the server's bounded-concurrency generator, the per-dataset on-disk cache, and back as a binary frame the renderer can drop into a proxy atlas.
 
@@ -57,7 +57,13 @@ Steps 4–8 of the above run for every advertised entity at `(T=0, C=0)` with `p
 Cached proxies are validated on read by:
 
 - **`algorithm_version`** check (in `lucida-proxy::ProxyHeader`). Bumped when the generation algorithm changes; bumping invalidates all cached proxies.
-- **`source_content_hash`** — BLAKE3 of source bytes that fed generation. If the source data changes (e.g. dataset re-imported with different bytes), the hash mismatches and the cached proxy is regenerated.
+- **`source_content_hash`** — despite the historical name, this is a BLAKE3
+  fingerprint of the contributing manifest geometry: entity ids/kinds,
+  transforms, multiscale metadata, and `(t, c)` selectors. It does **not** hash
+  source voxel bytes. Geometry/metadata changes invalidate the cache;
+  byte-only replacement under identical metadata does not. This was a property
+  of the deleted proxy surface; callers must not infer any current cache or
+  content-addressing guarantee from this historical field.
 
 ## Why pre-fetch instead of letting the algorithm fetch
 
@@ -82,7 +88,7 @@ The alternative — letting `lucida-proxy` do its own async I/O — would couple
 
 ## Related
 
-- [lucida-proxy](../systems/crates/lucida-proxy.md) — the algorithm crate
+- [lucida-proxy](../systems/crates/lucida-proxy.md) — historical page for the deleted algorithm crate
 - [lucida-server](../systems/crates/lucida-server.md) — the wrapper layer
 - [GPU Residency](../systems/subsystems/gpu-residency.md) — where proxies land in the GPU
 - [Planning Domain](../systems/subsystems/planning-domain.md) — what triggers proxy demand

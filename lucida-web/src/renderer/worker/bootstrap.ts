@@ -23,7 +23,7 @@ import { SliceRenderer } from "../sliceRenderer.ts";
 import { VolumeRenderer } from "../volumeRenderer.ts";
 import { LayerCompositor } from "../layerCompositor.ts";
 import { CursorRenderer } from "../cursorRenderer.ts";
-import { computeWantedSet, type ProxyAtlasSnapshot } from "../wantedSet.ts";
+import { computeWantedSet } from "../wantedSet.ts";
 import {
   buildDescriptorBuffer,
   destroyDescriptorBuffer,
@@ -35,7 +35,8 @@ import {
   getDummyTexture,
   getOrCreateLUT,
 } from "./resources.ts";
-import { proxyDescriptorKey } from "../workerContext.ts";
+import { GpuResourceBudget } from "../gpuResourceBudget.ts";
+import { GPU_SESSION_BUDGET } from "../workerProtocol.ts";
 
 /**
  * Bootstrap the worker: init the GPU, create a fresh {@link RendererState},
@@ -49,6 +50,7 @@ export async function bootstrapWorker(
 ): Promise<WorkerCtx> {
   const { device, context, format } = await initGPU(canvas);
   const state = createInitialState();
+  const gpuResources = new GpuResourceBudget(GPU_SESSION_BUDGET);
 
   // Renderer-class singletons (lazy-init on first use). Persisted across
   // messages; not per-session state, so they stay in this closure rather
@@ -58,30 +60,14 @@ export async function bootstrapWorker(
   let compositor: LayerCompositor | null = null;
   let cursorRenderer: CursorRenderer | null = null;
 
-  /**
-   * Build a flat snapshot of all proxy pools for a dataset, in the shape
-   * `computeWantedSet()` expects. Cheap — pool maps are small.
-   */
-  function buildProxyAtlasSnapshot(datasetId: string): Map<string, ProxyAtlasSnapshot> {
-    const snap = new Map<string, ProxyAtlasSnapshot>();
-    const pools = state.proxyPoolsByDataset.get(datasetId);
-    if (!pools) return snap;
-    for (const [poolKey, pool] of pools) {
-      snap.set(poolKey, { kind: pool.kind, slots: pool.slots });
-    }
-    return snap;
-  }
-
   /** Compute and post wanted-set delta from current cold state + atlas state. */
   function postWantedSet(): void {
     if (!state.currentColdState || !state.currentEpochs) return;
-    const proxySnap = buildProxyAtlasSnapshot(state.currentColdState.datasetId);
     const result = computeWantedSet(
       state.currentColdState,
       state.volumeAtlases,
       state.sliceAtlases,
       state.memberTierToPool,
-      proxySnap,
     );
     post({
       type: "wantedSetDelta",
@@ -95,13 +81,14 @@ export async function bootstrapWorker(
     device,
     context,
     format,
+    gpuResources,
     state,
     getSliceRenderer() {
-      if (!sliceRenderer) sliceRenderer = new SliceRenderer(device);
+      if (!sliceRenderer) sliceRenderer = new SliceRenderer(device, gpuResources);
       return sliceRenderer;
     },
     getVolumeRenderer() {
-      if (!volumeRenderer) volumeRenderer = new VolumeRenderer(device);
+      if (!volumeRenderer) volumeRenderer = new VolumeRenderer(device, gpuResources);
       return volumeRenderer;
     },
     getCompositor() {
@@ -109,23 +96,24 @@ export async function bootstrapWorker(
       return compositor;
     },
     getCursorRenderer() {
-      if (!cursorRenderer) cursorRenderer = new CursorRenderer(device, format);
+      if (!cursorRenderer) cursorRenderer = new CursorRenderer(device, format, gpuResources);
       return cursorRenderer;
     },
-    ensureOffscreenPool: (count, w, h) => ensureOffscreenPool(device, count, w, h),
-    getDummyTexture: () => getDummyTexture(device),
-    getDummy3DTexture: () => getDummy3DTexture(device),
-    getOrCreateLUT: (name) => getOrCreateLUT(device, name),
+    destroyRenderers() {
+      sliceRenderer?.destroy();
+      volumeRenderer?.destroy();
+      cursorRenderer?.destroy();
+      sliceRenderer = null;
+      volumeRenderer = null;
+      cursorRenderer = null;
+      compositor = null;
+    },
+    ensureOffscreenPool: (count, w, h) => ensureOffscreenPool(device, gpuResources, count, w, h),
+    getDummyTexture: () => getDummyTexture(device, gpuResources),
+    getDummy3DTexture: () => getDummy3DTexture(device, gpuResources),
+    getOrCreateLUT: (name) => getOrCreateLUT(device, gpuResources, name),
     post,
     postWantedSet,
-    lookupProxyDescriptor(entityId: string, t: number, c: number) {
-      return state.proxyDescriptorsByEntity.get(proxyDescriptorKey(entityId, t, c)) ?? null;
-    },
-    lookupProxyPool(datasetId: string, poolKey: string) {
-      const dsPools = state.proxyPoolsByDataset.get(datasetId);
-      if (!dsPools) return null;
-      return dsPools.get(poolKey) ?? null;
-    },
     lookupEntityDescriptor(datasetId: string) {
       return state.descriptorBuffersByDataset.get(datasetId) ?? null;
     },
@@ -135,14 +123,8 @@ export async function bootstrapWorker(
 }
 
 /**
- * Rebuild the per-dataset entity descriptor buffer iff the upload's
- * dataset matches the current cold state. Proxy uploads for other
- * datasets stay resident in their pools, but their descriptor buffer
- * isn't refreshed until cold state lands for that dataset.
- *
- * Lives here (not in `dispatch.ts`) because it's a small helper that
- * binds together cold-state, proxy, and descriptor concerns — the same
- * mix that `bootstrap` already imports.
+ * Rebuild the per-dataset entity descriptor buffer iff the dataset
+ * matches the current cold state.
  */
 export function rebuildDescriptorIfMatching(ctx: WorkerCtx, datasetId: string): void {
   const state = ctx.state;
@@ -154,9 +136,8 @@ export function rebuildDescriptorIfMatching(ctx: WorkerCtx, datasetId: string): 
     buildDescriptorBuffer(
       ctx.device,
       state.currentColdState,
-      state.proxyDescriptorsByEntity,
-      state.proxyPoolsByDataset,
       state.currentEntityMetasByDataset.get(datasetId) ?? new Map(),
+      ctx.gpuResources,
     ),
   );
 }

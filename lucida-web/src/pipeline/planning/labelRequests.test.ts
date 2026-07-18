@@ -3,7 +3,6 @@ import {
   __resetLabelWarningsForTest,
   computeLabelChunkRequests,
   eligibleLabelInfos,
-  resolveDefaultLabel,
   resolveVisibleLabels,
   volumeBudgetPrefix,
 } from "./labelRequests.ts";
@@ -219,7 +218,7 @@ describe("computeLabelChunkRequests", () => {
     expect(reqs.every((r) => r.level === 1)).toBe(true);
   });
 
-  // --- MAJOR: shared default-label resolution (fetch + render agree) ---
+  // --- MAJOR: shared visible-label resolution (fetch + render agree) ---
 
   function singleLevelLabel(id: string, dtype: string, yx: [number, number]): LabelSpec {
     return {
@@ -238,14 +237,11 @@ describe("computeLabelChunkRequests", () => {
     };
   }
 
-  it("MAJOR: skips a first label with no fitting level and resolves the next eligible", () => {
+  it("MAJOR: skips a first label with no fitting level and requests the next eligible", () => {
     // First label is a giant single-scale (no level ≤ maxDim); second fits.
     const first = singleLevelLabel("huge", "Uint32", [20000, 20000]);
     const second = singleLevelLabel("ok", "Uint32", [512, 512]);
     const manifest = multiLabelManifest([first, second]);
-
-    const resolved = resolveDefaultLabel(manifest);
-    expect(resolved?.label.image.image_id).toBe("img-0:label:ok");
 
     // Fetch agrees: with both masks turned on, requests target the resolvable
     // second label, not the ineligible first.
@@ -270,23 +266,29 @@ describe("computeLabelChunkRequests", () => {
     );
   });
 
-  it("MAJOR: skips a non-uint32 (uint8) label and resolves a uint32 sibling", () => {
+  it("requests every supported unsigned label width", () => {
     const manifest = multiLabelManifest([
       singleLevelLabel("mask8", "Uint8", [512, 512]),
+      singleLevelLabel("mask16", "Uint16", [512, 512]),
       singleLevelLabel("seg32", "Uint32", [512, 512]),
     ]);
-    const resolved = resolveDefaultLabel(manifest);
-    expect(resolved?.label.image.image_id).toBe("img-0:label:seg32");
-
-    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0, labelSettings: allOn(2) });
-    expect(reqs.every((r) => r.imageId === "img-0:label:seg32")).toBe(true);
+    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0, labelSettings: allOn(3) });
+    expect(new Set(reqs.map((r) => r.imageId))).toEqual(new Set([
+      "img-0:label:mask8",
+      "img-0:label:mask16",
+      "img-0:label:seg32",
+    ]));
+    expect(new Set(reqs.map((r) => r.contract.dtype))).toEqual(new Set(["uint32"]));
   });
 
-  it("MAJOR: a uint8-only label set yields no requests (skipped, no pool)", () => {
+  it("widens a uint8-only label set into the canonical uint32 contract", () => {
     const manifest = multiLabelManifest([singleLevelLabel("mask8", "Uint8", [512, 512])]);
-    expect(resolveDefaultLabel(manifest)).toBeNull();
-    // Even explicitly turned on, an ineligible uint8 mask fetches nothing.
-    expect(computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0, labelSettings: allOn(1) })).toEqual([]);
+    const [request] = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0, labelSettings: allOn(1) });
+    expect(request.contract).toEqual(expect.objectContaining({
+      sourceDtype: "uint8",
+      dtype: "uint32",
+      normalization: "uint8_to_uint32",
+    }));
   });
 });
 
@@ -368,16 +370,14 @@ describe("resolveVisibleLabels", () => {
     expect(out.map((r) => r.name)).toEqual(["a", "b"]);
   });
 
-  it("still skips a non-uint32 label even when it is marked visible", () => {
+  it("keeps uint8 and uint32 labels when both are marked visible", () => {
     const m = manifestWithLabels([uintLabel("mask8", "Uint8"), uintLabel("seg32", "Uint32")]);
     const out = resolveVisibleLabels(m, [
       { visible: true, opacity: 0.5 },
       { visible: true, opacity: 0.7 },
     ]);
-    // The uint8 label is ineligible and dropped; only the uint32 sibling remains,
-    // keeping its own per-label opacity (index-aligned to the manifest).
-    expect(out.map((r) => r.name)).toEqual(["seg32"]);
-    expect(out[0].opacity).toBe(0.7);
+    expect(out.map((r) => r.name)).toEqual(["mask8", "seg32"]);
+    expect(out.map((r) => r.opacity)).toEqual([0.5, 0.7]);
   });
 
   it("hiding the only eligible label yields an empty set (nothing drawn/fetched)", () => {
@@ -444,12 +444,12 @@ describe("resolveVisibleLabels", () => {
   });
 
   it("returns [] when only ineligible labels are marked visible (no substitution)", () => {
-    // Settings mark index 0 (uint8, undrawable) visible and index 1 (uint32,
+    // Settings mark index 0 (float32, undrawable) visible and index 1 (uint32,
     // drawable) explicitly hidden. Nothing is both visible AND eligible, so
     // nothing is drawn — resolveVisibleLabels never substitutes a stand-in for
     // the ineligible visible label (that would put an overlay on screen whose own
     // checkbox reads off).
-    const m = manifestWithLabels([uintLabel("mask8", "Uint8"), uintLabel("region-c", "Uint32")]);
+    const m = manifestWithLabels([uintLabel("mask-float", "Float32"), uintLabel("region-c", "Uint32")]);
     expect(
       resolveVisibleLabels(m, [
         { visible: true, opacity: 0.5 },
@@ -482,8 +482,8 @@ describe("resolveVisibleLabels", () => {
     expect(out).toEqual([]);
   });
 
-  it("no fallback when there is no eligible label at all (all uint8)", () => {
-    const m = manifestWithLabels([uintLabel("m8a", "Uint8"), uintLabel("m8b", "Uint8")]);
+  it("no fallback when there is no eligible label dtype", () => {
+    const m = manifestWithLabels([uintLabel("mf32", "Float32"), uintLabel("mf64", "Float64")]);
     expect(
       resolveVisibleLabels(m, [
         { visible: true, opacity: 0.5 },
@@ -594,15 +594,18 @@ describe("eligibleLabelInfos", () => {
     ]);
   });
 
-  it("omits a non-uint32 label and PRESERVES the manifest index of the rest", () => {
-    // [uint16, uint32, uint16] → only index 1 is drawable, and it keeps index 1
-    // (so its control targets the right label_settings entry).
+  it("keeps every unsigned width, omits floats, and preserves manifest indexes", () => {
     const m = manifestWithLabels([
       uintLabel("region-a", "Uint16"),
-      uintLabel("region-c", "Uint32"),
-      uintLabel("region-d", "Uint16"),
+      uintLabel("unsupported", "Float32"),
+      uintLabel("region-c", "Uint8"),
+      uintLabel("region-d", "Uint32"),
     ]);
-    expect(eligibleLabelInfos(m)).toEqual([{ index: 1, name: "region-c" }]);
+    expect(eligibleLabelInfos(m)).toEqual([
+      { index: 0, name: "region-a" },
+      { index: 2, name: "region-c" },
+      { index: 3, name: "region-d" },
+    ]);
   });
 
   it("returns [] for a manifest with no labels", () => {

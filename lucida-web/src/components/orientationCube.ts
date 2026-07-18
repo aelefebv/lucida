@@ -14,35 +14,9 @@ const ORIENT_FACES: { indices: number[]; normal: Vec3; label: string; color: str
   { indices: [0, 1, 2, 3], normal: [ 0,  0, -1], label: "K", color: "rgba(40,80,170,"  },  // -Z dim blue
 ];
 
-function buildViewRotation(theta: number, phi: number): number[] {
-  const sp = Math.sin(phi), cp = Math.cos(phi);
-  const st = Math.sin(theta), ct = Math.cos(theta);
-
-  // Eye direction (z axis)
-  const zx = sp * st, zy = cp, zz = sp * ct;
-
-  // Up vector
-  const upx = -cp * st, upy = sp, upz = -cp * ct;
-
-  // x = normalize(cross(up, z))
-  let xx = upy * zz - upz * zy;
-  let xy = upz * zx - upx * zz;
-  let xz = upx * zy - upy * zx;
-  const xLen = Math.sqrt(xx * xx + xy * xy + xz * xz);
-  if (xLen > 1e-10) { xx /= xLen; xy /= xLen; xz /= xLen; }
-  else { xx = 1; xy = 0; xz = 0; }
-
-  // y = cross(z, x)
-  const yx = zy * xz - zz * xy;
-  const yy = zz * xx - zx * xz;
-  const yz = zx * xy - zy * xx;
-
-  return [xx, xy, xz, yx, yy, yz, zx, zy, zz];
-}
-
 export function drawOrientationCube(
   ctx: CanvasRenderingContext2D,
-  theta: number, phi: number,
+  viewRotation: Float32Array,
   canvasW: number, canvasH: number,
 ) {
   const dpr = devicePixelRatio;
@@ -61,8 +35,7 @@ export function drawOrientationCube(
   ctx.fill();
 
   // Rotate vertices and normals
-  const rot = buildViewRotation(theta, -phi);
-  const [rxx, rxy, rxz, ryx, ryy, ryz, rzx, rzy, rzz] = rot;
+  const [rxx, rxy, rxz, ryx, ryy, ryz, rzx, rzy, rzz] = viewRotation;
 
   const rotatedVerts = ORIENT_VERTS.map(([vx, vy, vz]) => [
     rxx * vx + rxy * vy + rxz * vz,

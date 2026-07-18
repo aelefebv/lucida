@@ -3,6 +3,12 @@
   "request_id": "web-7d2f45aa",
   "url": "gs://lucida-fixtures/kidney-multiplex.zarr",
   "seq": 43,
+  "summary": {
+    "workspace_dataset_id": "wds-0f3a",
+    "name": "kidney-multiplex.zarr",
+    "image_count": 1,
+    "entity_count": 1
+  },
   "opened": {
     "manifest": {
       "dataset_id": "wds-0f3a",
@@ -318,27 +324,6 @@
           }
         ]
       }
-    },
-    "catalog": {
-      "entries": [
-        {
-          "entity_id": "img-0",
-          "kinds": [
-            "TileProxy3D"
-          ],
-          "footprints": [
-            {
-              "kind": "TileProxy3D",
-              "dims": [
-                50,
-                128,
-                128
-              ],
-              "bytes": 1638400
-            }
-          ]
-        }
-      ]
     },
     "opener_client_id": 7
   },

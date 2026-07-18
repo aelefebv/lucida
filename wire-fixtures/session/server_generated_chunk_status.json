@@ -4,5 +4,10 @@
   "image_id": "multiscale-0",
   "key": "2/1/0/1/0/0",
   "status": "failed_transient",
+  "failure": {
+    "category": "source",
+    "code": "storage_backend",
+    "retryable": true
+  },
   "message": "source read timed out"
 }

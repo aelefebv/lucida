@@ -14,10 +14,12 @@
 target/
 target_*/
 **/target/
+.cargo-target/
 node_modules/
 **/node_modules/
+**/.vite/
 lucida-web/dist/
-lucida-core/pkg/
+lucida-core/pkg
 
 # --- local dev SQLite (must NOT enter the image) --------------------
 # These are the WAL/SHM/main DB files lucida creates on first run;

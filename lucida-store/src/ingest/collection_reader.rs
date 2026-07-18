@@ -15,6 +15,7 @@ use tiff::decoder::{Decoder, DecodingResult};
 use super::collection_scanner::TileLayout;
 use super::pyramid::VoxelSize;
 use super::tiff_reader::Volume;
+use super::tiff_reader::checked_volume_layout;
 
 /// Read individual TIFF files for one tile and assemble into a Volume.
 ///
@@ -34,26 +35,50 @@ pub fn read_tile_tiffs(
     image_height: u32,
     voxel_size: VoxelSize,
 ) -> Result<Volume, String> {
-    let pixels_per_plane = (image_width as usize) * (image_height as usize);
-    let total_pixels =
-        (timepoints as usize) * (channels as usize) * (z_planes as usize) * pixels_per_plane;
+    voxel_size.validate()?;
+    let (pixels_per_plane, slot_count, total_pixels) =
+        checked_volume_layout(image_width, image_height, timepoints, channels, z_planes)?;
+
+    // Validate every externally discovered coordinate before allocating or
+    // decoding.  A slot table gives rayon safe, disjoint mutable slices and
+    // removes the raw-pointer arithmetic this path previously relied on.
+    let mut slot_paths = vec![None; slot_count];
+    for (&(t, c, z), path) in &tile.files {
+        if t >= timepoints || c >= channels || z >= z_planes {
+            return Err(format!(
+                "tile {} coordinate t={t}, c={c}, z={z} is outside T={timepoints}, C={channels}, Z={z_planes}",
+                tile.index
+            ));
+        }
+        let slot = usize::try_from(t)
+            .ok()
+            .and_then(|value| value.checked_mul(channels as usize))
+            .and_then(|value| value.checked_add(c as usize))
+            .and_then(|value| value.checked_mul(z_planes as usize))
+            .and_then(|value| value.checked_add(z as usize))
+            .ok_or_else(|| "collection tile slot arithmetic overflow".to_string())?;
+        let destination = slot_paths
+            .get_mut(slot)
+            .ok_or_else(|| "collection tile slot escaped admitted bounds".to_string())?;
+        if destination.replace(path).is_some() {
+            return Err(format!(
+                "tile {} has duplicate input for t={t}, c={c}, z={z}",
+                tile.index
+            ));
+        }
+    }
 
     // Pre-allocate zero-initialized buffer in TCZYX order.
     let mut data: Vec<u16> = vec![0u16; total_pixels];
 
-    let entries: Vec<_> = tile.files.iter().collect();
-    let total_files = entries.len();
+    let total_files = tile.files.len();
     let progress = AtomicUsize::new(0);
 
-    // Use a raw pointer to allow non-overlapping parallel writes into the buffer.
-    let data_ptr = data.as_mut_ptr() as usize;
-
-    let errors: Vec<String> = entries
-        .par_iter()
-        .filter_map(|((t, c, z), path)| {
-            let (t, c, z) = (*t, *c, *z);
-            let data_ptr = data_ptr as *mut u16;
-
+    let errors: Vec<String> = slot_paths
+        .into_par_iter()
+        .zip(data.par_chunks_mut(pixels_per_plane))
+        .filter_map(|(path, destination)| {
+            let path = path?;
             // Open and decode the TIFF file.
             let file = match File::open(path) {
                 Ok(f) => f,
@@ -116,12 +141,6 @@ pub fn read_tile_tiffs(
                 }
             };
 
-            // Compute buffer offset: t * (C*Z*H*W) + c * (Z*H*W) + z * (H*W)
-            let offset =
-                (t as usize) * (channels as usize) * (z_planes as usize) * pixels_per_plane
-                    + (c as usize) * (z_planes as usize) * pixels_per_plane
-                    + (z as usize) * pixels_per_plane;
-
             match image {
                 DecodingResult::U16(pixels) => {
                     if pixels.len() != pixels_per_plane {
@@ -131,13 +150,7 @@ pub fn read_tile_tiffs(
                             pixels.len()
                         ));
                     }
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            pixels.as_ptr(),
-                            data_ptr.add(offset),
-                            pixels_per_plane,
-                        );
-                    }
+                    destination.copy_from_slice(&pixels);
                 }
                 DecodingResult::U8(pixels) => {
                     if pixels.len() != pixels_per_plane {
@@ -148,16 +161,20 @@ pub fn read_tile_tiffs(
                         ));
                     }
                     // Promote u8 to u16: multiply by 257 to map 0..255 → 0..65535.
-                    let dst = unsafe {
-                        std::slice::from_raw_parts_mut(data_ptr.add(offset), pixels_per_plane)
-                    };
-                    for (d, &s) in dst.iter_mut().zip(pixels.iter()) {
+                    for (d, &s) in destination.iter_mut().zip(pixels.iter()) {
                         *d = (s as u16) * 257;
                     }
                 }
                 _ => {
                     return Some(format!("{}: unexpected pixel format", path.display()));
                 }
+            }
+
+            if decoder.more_images() {
+                return Some(format!(
+                    "{} contains multiple pages; collection slots require exactly one page per file",
+                    path.display()
+                ));
             }
 
             let count = progress.fetch_add(1, Ordering::Relaxed) + 1;
@@ -346,5 +363,25 @@ mod tests {
         let result = read_tile_tiffs(&tile, 1, 1, 1, 4, 4, VoxelSize::default());
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("do not match"));
+    }
+
+    #[test]
+    fn read_tile_rejects_out_of_range_slot_before_io() {
+        let mut files = HashMap::new();
+        files.insert((1, 0, 0), PathBuf::from("must-not-be-opened.tiff"));
+        let tile = TileLayout { index: 7, files };
+        let error = read_tile_tiffs(&tile, 1, 1, 1, 4, 4, VoxelSize::default()).unwrap_err();
+        assert!(error.contains("outside T=1, C=1, Z=1"));
+    }
+
+    #[test]
+    fn read_tile_rejects_over_budget_volume_before_allocation() {
+        let tile = TileLayout {
+            index: 0,
+            files: HashMap::new(),
+        };
+        let error =
+            read_tile_tiffs(&tile, 2, 2, 2, u32::MAX, u32::MAX, VoxelSize::default()).unwrap_err();
+        assert!(error.contains("overflow") || error.contains("limit"));
     }
 }

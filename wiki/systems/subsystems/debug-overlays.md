@@ -5,7 +5,7 @@ description: "The in-app developer surface for inspecting the rendering pipeline
 tags: [lucida, subsystem]
 source_path: wiki/systems/subsystems/debug-overlays.md
 created: 2026-06-25
-modified: 2026-07-06
+modified: 2026-07-16
 ---
 
 # Debug overlays & diagnostics UI
@@ -35,8 +35,8 @@ The prod/dev split below is what keeps that out of production behavior.
   share them.
 - **Inspect + reset-to-safe in prod; full control in dev.** The write paths
   are dev-build gated (`import.meta.env.DEV`): the Config tab's planning
-  knobs (including the `coarseDetailEnabled` bridge flag) and the Cache
-  tab's budget/fetch-limit inputs render read-only in production — live
+  knobs and the Cache tab's budget/fetch-limit inputs render read-only in
+  production — live
   values visible, inputs disabled, with a one-line note. Everything is
   writable in dev builds. The Config tab's "Reset all to defaults" stays
   enabled in every build: knobs persisted by an earlier session still
@@ -50,10 +50,9 @@ The prod/dev split below is what keeps that out of production behavior.
   / `debug.overlays`), not planner or cache behavior, so they remain usable
   for field debugging.
 - **`window.__orch` (alias `__lucidaOrch`) is dev-only.** It bundles the
-  tickCoordinator, cpuCache, and a `requestTestProxy(...)` helper that
-  issues real fetches — installed in a `useEffect` behind
-  `import.meta.env.DEV`, deleted on cleanup. Production builds never
-  install it (dead-code eliminated).
+  tickCoordinator and cpuCache inspection surfaces — installed in a
+  `useEffect` behind `import.meta.env.DEV`, deleted on cleanup. Production
+  builds never install it (dead-code eliminated).
 
 ## What it shows
 
@@ -72,13 +71,14 @@ The prod/dev split below is what keeps that out of production behavior.
   - *renderRadius* — the actual detail/coarse render-radius boundary, drawn as
     projected circles (3 planes in 3D).
 - **`DebugPanel`** — a tabbed side panel: Render, Scene, Pick, Planning, Cache,
-  **Health**, Orch, Catalog, Config, Logging. *Config* is the planning-config
+  **Health**, Orch, Config, Logging. *Config* is the planning-config
   editor (sliders backed by `configStore`; see [Planning Domain](planning-domain.md)) —
   live editor in dev builds, read-only viewer in prod. *Logging*
   hosts the category toggles and the overlay toggles above. *Health* fetches
   **server-authored** `DatasetSourceHealth` over the WS (`bridge.requestDatasetHealth`),
   the same per-source status/stage model traced in [Flow: Dataset Diagnostics](../../flows/dataset-diagnostics.md) —
-  client-side residency telemetry lives in Cache/Catalog instead.
+  client-side residency and generated-availability telemetry lives in
+  Cache/Orch instead.
 
 ## How it's toggled
 

@@ -35,6 +35,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::backend::StoreError;
 
+/// Hard admission ceiling for one decompressed storage chunk.
+///
+/// This is intentionally shared with every decoder.  Metadata that would
+/// require a larger allocation is rejected before a source read, and a codec
+/// header cannot override the admitted size later.
+pub const MAX_DECODED_CHUNK_BYTES: usize = 256 * 1024 * 1024;
+
 /// How the canonical wire-chunk slice is laid out within the decompressed
 /// on-disk chunk bytes.
 ///
@@ -73,14 +80,30 @@ pub struct ChunkByteLayout {
 }
 
 impl ChunkByteLayout {
-    /// Compute the `(offset, size)` byte range for one wire chunk request.
-    ///
-    /// `wire_t` and `wire_c` are the voxel coordinates from the wire chunk
-    /// key (e.g. `c=3` means channel 3). The function reduces them to
-    /// intra-chunk indices via `wire_value % chunk_size`. For typical
-    /// OME-Zarrs (chunk_size 1 on t and c), the result is always
-    /// `(0, canonical_byte_size)`.
-    pub fn slice_range(&self, wire_t: u64, wire_c: u64) -> (usize, usize) {
+    /// Revalidate a serialized or otherwise externally reconstructed layout at
+    /// the allocation boundary. New imports can only produce valid values, but
+    /// keeping this check on the value itself protects older persisted seeds and
+    /// prevents callers from having to duplicate the ceiling logic.
+    pub fn validate_admitted(&self) -> Result<(), StoreError> {
+        if self.canonical_byte_size == 0
+            || self.on_disk_byte_size == 0
+            || self.on_disk_byte_size > MAX_DECODED_CHUNK_BYTES
+            || self.canonical_byte_size > self.on_disk_byte_size
+        {
+            return Err(StoreError::Bounds(
+                "chunk byte layout exceeds its admitted bounds".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Checked byte range for one wire request.
+    pub fn checked_slice_range(
+        &self,
+        wire_t: u64,
+        wire_c: u64,
+    ) -> Result<std::ops::Range<usize>, StoreError> {
+        self.validate_admitted()?;
         let intra_t = if self.chunk_size_t > 1 {
             wire_t % self.chunk_size_t
         } else {
@@ -91,10 +114,40 @@ impl ChunkByteLayout {
         } else {
             0
         };
-        let offset = (intra_t as usize)
-            .saturating_mul(self.byte_stride_t)
-            .saturating_add((intra_c as usize).saturating_mul(self.byte_stride_c));
-        (offset, self.canonical_byte_size)
+        let offset_t = usize::try_from(intra_t)
+            .ok()
+            .and_then(|value| value.checked_mul(self.byte_stride_t))
+            .ok_or_else(|| StoreError::Bounds("t byte offset overflow".to_string()))?;
+        let offset_c = usize::try_from(intra_c)
+            .ok()
+            .and_then(|value| value.checked_mul(self.byte_stride_c))
+            .ok_or_else(|| StoreError::Bounds("c byte offset overflow".to_string()))?;
+        let offset = offset_t
+            .checked_add(offset_c)
+            .ok_or_else(|| StoreError::Bounds("chunk byte offset overflow".to_string()))?;
+        let end = offset
+            .checked_add(self.canonical_byte_size)
+            .ok_or_else(|| StoreError::Bounds("chunk slice end overflow".to_string()))?;
+        if end > self.on_disk_byte_size {
+            return Err(StoreError::Bounds(format!(
+                "chunk slice {offset}..{end} exceeds decoded size {}",
+                self.on_disk_byte_size
+            )));
+        }
+        Ok(offset..end)
+    }
+
+    /// Compute the `(offset, size)` byte range for one wire chunk request.
+    ///
+    /// `wire_t` and `wire_c` are the voxel coordinates from the wire chunk
+    /// key (e.g. `c=3` means channel 3). The function reduces them to
+    /// intra-chunk indices via `wire_value % chunk_size`. For typical
+    /// OME-Zarrs (chunk_size 1 on t and c), the result is always
+    /// `(0, canonical_byte_size)`.
+    pub fn slice_range(&self, wire_t: u64, wire_c: u64) -> (usize, usize) {
+        self.checked_slice_range(wire_t, wire_c)
+            .map(|range| (range.start, range.len()))
+            .unwrap_or((usize::MAX, 0))
     }
 }
 
@@ -119,12 +172,27 @@ pub fn compute_chunk_byte_layout(
     dtype_size: u8,
     pinned: &[PinnedAxis],
 ) -> Result<ChunkByteLayout, StoreError> {
-    if axes.len() != chunk_shape.len() {
-        return Err(StoreError::Metadata(format!(
+    if axes.is_empty() || axes.len() != chunk_shape.len() {
+        return Err(StoreError::Bounds(format!(
             "axes/chunk_shape length mismatch: axes has {} entries, chunk_shape has {}",
             axes.len(),
             chunk_shape.len(),
         )));
+    }
+    if axes.len() > 32 {
+        return Err(StoreError::Bounds(
+            "chunk axis rank exceeds admission limit 32".to_string(),
+        ));
+    }
+    if dtype_size == 0 {
+        return Err(StoreError::Bounds(
+            "dtype byte size must be positive".to_string(),
+        ));
+    }
+    if chunk_shape.contains(&0) {
+        return Err(StoreError::Bounds(
+            "chunk dimensions must be positive".to_string(),
+        ));
     }
 
     let pinned_names: std::collections::HashSet<String> =
@@ -141,16 +209,30 @@ pub fn compute_chunk_byte_layout(
     for (i, name) in axes.iter().enumerate() {
         let dim = chunk_shape[i] as u128;
         let lower = name.to_lowercase();
-        on_disk = on_disk.saturating_mul(dim);
+        on_disk = on_disk
+            .checked_mul(dim)
+            .ok_or_else(|| StoreError::Bounds("chunk byte size overflow".to_string()))?;
         if is_kept_canonical(&lower) {
-            canonical = canonical.saturating_mul(dim);
+            canonical = canonical.checked_mul(dim).ok_or_else(|| {
+                StoreError::Bounds("canonical chunk byte size overflow".to_string())
+            })?;
         }
     }
 
     let on_disk_byte_size = usize::try_from(on_disk)
-        .map_err(|_| StoreError::Metadata("chunk byte size exceeds usize".to_string()))?;
+        .map_err(|_| StoreError::Bounds("chunk byte size exceeds usize".to_string()))?;
     let canonical_byte_size = usize::try_from(canonical)
-        .map_err(|_| StoreError::Metadata("canonical chunk byte size exceeds usize".to_string()))?;
+        .map_err(|_| StoreError::Bounds("canonical chunk byte size exceeds usize".to_string()))?;
+    if on_disk_byte_size > MAX_DECODED_CHUNK_BYTES {
+        return Err(StoreError::Bounds(format!(
+            "decoded chunk size {on_disk_byte_size} exceeds limit {MAX_DECODED_CHUNK_BYTES}"
+        )));
+    }
+    if canonical_byte_size > on_disk_byte_size {
+        return Err(StoreError::Bounds(
+            "canonical chunk size exceeds on-disk chunk size".to_string(),
+        ));
+    }
 
     // Compute byte strides for the canonical-indexed axes (t, c) by
     // walking right-to-left and accumulating dtype_size × ∏ inner dims.
@@ -162,16 +244,18 @@ pub fn compute_chunk_byte_layout(
         match lower.as_str() {
             "t" => {
                 byte_stride_t = usize::try_from(current_stride)
-                    .map_err(|_| StoreError::Metadata("t byte stride exceeds usize".to_string()))?;
+                    .map_err(|_| StoreError::Bounds("t byte stride exceeds usize".to_string()))?;
             }
             "c" => {
                 byte_stride_c = usize::try_from(current_stride)
-                    .map_err(|_| StoreError::Metadata("c byte stride exceeds usize".to_string()))?;
+                    .map_err(|_| StoreError::Bounds("c byte stride exceeds usize".to_string()))?;
             }
             _ => {}
         }
         let dim = chunk_shape[i] as u128;
-        current_stride = current_stride.saturating_mul(dim);
+        current_stride = current_stride
+            .checked_mul(dim)
+            .ok_or_else(|| StoreError::Bounds("chunk byte stride overflow".to_string()))?;
     }
 
     // Look up the chunk_size on t and c (default 1 when the axis is
@@ -208,7 +292,7 @@ pub fn compute_chunk_byte_layout(
                 } else {
                     "canonical-indexed (t/c)"
                 };
-                return Err(StoreError::Metadata(format!(
+                return Err(StoreError::Bounds(format!(
                     "axis '{}' (chunk_size {}) is {} and falls in a non-prefix position; \
                      contiguous slicing requires all indexed and pinned axes to precede any \
                      kept canonical axis (z, y, x) with chunk_size > 1 (axes order: {:?})",
@@ -395,6 +479,94 @@ mod tests {
             .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("length mismatch"), "{msg}");
+    }
+
+    #[test]
+    fn rejects_zero_and_oversized_chunk_dimensions_before_allocation() {
+        let zero = compute_chunk_byte_layout(&axes(&["y", "x"]), &[0, 16], 2, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(zero.contains("positive"), "{zero}");
+
+        let oversized = compute_chunk_byte_layout(
+            &axes(&["y", "x"]),
+            &[MAX_DECODED_CHUNK_BYTES as u64, 2],
+            2,
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(oversized.contains("exceeds limit"), "{oversized}");
+    }
+
+    #[test]
+    fn decoded_chunk_admission_accepts_exact_limit_and_rejects_over_and_usize_adjacent() {
+        let exact = compute_chunk_byte_layout(
+            &axes(&["y", "x"]),
+            &[(MAX_DECODED_CHUNK_BYTES / 2) as u64, 1],
+            2,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(exact.on_disk_byte_size, MAX_DECODED_CHUNK_BYTES);
+        assert_eq!(exact.canonical_byte_size, MAX_DECODED_CHUNK_BYTES);
+
+        let over = compute_chunk_byte_layout(
+            &axes(&["y", "x"]),
+            &[(MAX_DECODED_CHUNK_BYTES / 2 + 1) as u64, 1],
+            2,
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(over.contains("exceeds limit"), "{over}");
+
+        // Arithmetic is performed in u128 and checked against both usize and
+        // the admission ceiling; a value near the platform integer boundary
+        // never reaches an allocation or wraps first.
+        let adjacent = compute_chunk_byte_layout(&axes(&["y", "x"]), &[u64::MAX, 1], 8, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            adjacent.contains("usize") || adjacent.contains("exceeds limit"),
+            "{adjacent}"
+        );
+    }
+
+    #[test]
+    fn checked_slice_rejects_inconsistent_restored_layout() {
+        let layout = ChunkByteLayout {
+            canonical_byte_size: 32,
+            on_disk_byte_size: 16,
+            byte_stride_t: usize::MAX,
+            byte_stride_c: 0,
+            chunk_size_t: 2,
+            chunk_size_c: 1,
+        };
+        assert!(layout.checked_slice_range(1, 0).is_err());
+
+        // Older persisted binding seeds still deserialize unchanged, but a
+        // zero or over-limit layout is rejected again at the use boundary.
+        for layout in [
+            ChunkByteLayout {
+                canonical_byte_size: 0,
+                on_disk_byte_size: 0,
+                byte_stride_t: 0,
+                byte_stride_c: 0,
+                chunk_size_t: 1,
+                chunk_size_c: 1,
+            },
+            ChunkByteLayout {
+                canonical_byte_size: 1,
+                on_disk_byte_size: MAX_DECODED_CHUNK_BYTES + 1,
+                byte_stride_t: 0,
+                byte_stride_c: 0,
+                chunk_size_t: 1,
+                chunk_size_c: 1,
+            },
+        ] {
+            assert!(layout.checked_slice_range(0, 0).is_err());
+        }
     }
 
     // Canonical-indexed (t, c) chunk_size > 1 cases.

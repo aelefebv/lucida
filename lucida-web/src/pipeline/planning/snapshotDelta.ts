@@ -34,7 +34,7 @@
 import type { ImageSpec } from "../../manifestTypes.ts";
 import type { DatasetSettings } from "../../tickCommon.ts";
 import type { EntitySnapshot } from "./types.ts";
-import type { SceneEpochs } from "../epochs.ts";
+import { parseChunkSourceDType } from "../../chunkContract.ts";
 
 /**
  * Wire shape of one record in a view-query payload (snake_case). Shared by
@@ -53,6 +53,17 @@ export interface ViewQueryEntityJson {
   importance: number;
 }
 
+/** Epochs produced by Rust's scene query. Planning's separate `request` epoch
+ * is intentionally absent; `annotation` is scene-owned and preserved even
+ * though entity folding does not consume it. */
+export interface ViewQueryEpochs {
+  content: number;
+  layout: number;
+  view: number;
+  selection: number;
+  annotation: number;
+}
+
 /**
  * Wire shape of an incremental view-query delta (serde externally-tagged
  * enum). `Full` carries the entire visible set (a fresh start); `Delta`
@@ -61,10 +72,10 @@ export interface ViewQueryEntityJson {
  * Mirrors the Rust `ViewQueryDelta` in `lucida-core/src/query.rs`.
  */
 export type ViewQueryDeltaJson =
-  | { Full: { epochs: SceneEpochs; visible_entities: ViewQueryEntityJson[] } }
+  | { Full: { epochs: ViewQueryEpochs; visible_entities: ViewQueryEntityJson[] } }
   | {
       Delta: {
-        epochs: SceneEpochs;
+        epochs: ViewQueryEpochs;
         entered: ViewQueryEntityJson[];
         left: string[];
         changed: ViewQueryEntityJson[];
@@ -167,6 +178,7 @@ export function makeEntitySnapshot(
     importance: row.importance,
     layoutPositionVox,
     levels,
+    sourceDtype: parseChunkSourceDType(imgSpec?.multiscale.data_type ?? "Uint16"),
   };
   if (row.kind === "Tile") {
     const parentId = deps.parentByEntityId.get(row.entity_id);

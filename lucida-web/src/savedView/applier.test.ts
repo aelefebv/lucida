@@ -71,6 +71,11 @@ function createMockScene(opts: {
       const obj = JSON.parse(json);
       Object.assign(presence, obj);
     },
+    import_dataset_presence(json: string) {
+      const obj = JSON.parse(json);
+      datasetPresence.dataset_order = [...(obj.dataset_order ?? [])];
+      datasetPresence.dataset_settings = { ...(obj.dataset_settings ?? {}) };
+    },
   };
 }
 
@@ -121,7 +126,7 @@ describe("SavedViewApplier", () => {
     expect(scene.calls.some((c) => c.includes('"type":"set_t"'))).toBe(true);
     expect(scene.calls.some((c) => c.includes('"type":"set_c"'))).toBe(true);
     expect(scene.calls.some((c) => c.includes('"type":"set_gamma"'))).toBe(true);
-    expect(applier.isInProgress()).toBe(false);
+    expect(applier.getState().inProgress).toBe(false);
   });
 
   it("opens missing datasets and waits for DatasetOpened notification", async () => {
@@ -135,13 +140,16 @@ describe("SavedViewApplier", () => {
     // Tick the event loop so the open dispatch fires.
     await new Promise((r) => setTimeout(r, 0));
     expect(openCalls).toEqual(["gs://bucket/a.zarr"]);
-    expect(applier.isInProgress()).toBe(true);
+    expect(applier.getActiveEpoch()).not.toBeNull();
+    expect(applier.ownsDatasetOpen(expectedId)).toBe(true);
+    expect(applier.ownsDatasetOpen("ds-unrelated")).toBe(false);
 
     // Simulate the bridge calling notifyDatasetOpened after server response.
     scene.addDataset(expectedId);
     applier.notifyDatasetOpened(expectedId);
     await promise;
-    expect(applier.isInProgress()).toBe(false);
+    expect(applier.getActiveEpoch()).toBeNull();
+    expect(applier.ownsDatasetOpen(expectedId)).toBe(false);
     expect(applier.getState().okOpened).toBe(1);
   });
 
@@ -438,23 +446,23 @@ describe("SavedViewApplier", () => {
     });
   });
 
-  it("applyInProgress flag is true between start and resolution", async () => {
+  it("exposes an active generation between start and settlement", async () => {
     const scene = createMockScene();
     const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl, 1000);
 
     const v = emptyView();
     v.datasets = ["gs://x.zarr"];
 
-    expect(applier.isInProgress()).toBe(false);
+    expect(applier.getActiveEpoch()).toBeNull();
     const promise = applier.apply(v);
     await new Promise((r) => setTimeout(r, 0));
-    expect(applier.isInProgress()).toBe(true);
+    expect(applier.getActiveEpoch()).not.toBeNull();
 
     const id = fakeIdForUrl("gs://x.zarr");
     scene.addDataset(id);
     applier.notifyDatasetOpened(id);
     await promise;
-    expect(applier.isInProgress()).toBe(false);
+    expect(applier.getActiveEpoch()).toBeNull();
   });
 
   it("subscriber notified on state changes", async () => {
@@ -482,6 +490,112 @@ describe("SavedViewApplier", () => {
     scene.addDataset(id);
     applier.notifyDatasetOpened(id);
     await p;
+  });
+
+  it("settles each apply epoch after inProgress becomes false", async () => {
+    const scene = createMockScene();
+    const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl);
+    const observed: Array<{ epoch: number; status: string; busy: boolean }> = [];
+    applier.subscribeApplySettled((event) => {
+      observed.push({
+        epoch: event.epoch,
+        status: event.status,
+        busy: applier.getState().inProgress,
+      });
+    });
+
+    const first = await applier.apply(emptyView());
+    const second = await applier.apply(emptyView());
+
+    expect(first.epoch).toBe(1);
+    expect(second.epoch).toBe(2);
+    expect(observed).toEqual([
+      { epoch: 1, status: "applied", busy: false },
+      { epoch: 2, status: "applied", busy: false },
+    ]);
+    await expect(applier.waitForSettlement(first.epoch)).resolves.toBe(first);
+  });
+
+  it("rejects a malformed nested setting before opening or mutating anything", async () => {
+    const scene = createMockScene({ datasetIds: ["ds-a"] });
+    const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl);
+    const events: string[] = [];
+    applier.subscribeApplySettled((event) => events.push(event.status));
+    const malformed = {
+      ...emptyView(),
+      datasets: ["gs://would-open.zarr"],
+      dataset_settings: {
+        "ds-a": {
+          visible: true,
+          opacity: "opaque",
+        },
+      },
+    } as unknown as SavedView;
+
+    await expect(applier.apply(malformed)).rejects.toThrow(/opacity/);
+
+    expect(openCalls).toEqual([]);
+    expect(scene.calls).toEqual([]);
+    expect(events).toEqual(["failed"]);
+    expect(applier.getState()).toMatchObject({
+      inProgress: false,
+      activeEpoch: null,
+      settledEpoch: 1,
+    });
+  });
+
+  it("cancels an old apply's watchdog so it cannot abort a later open", async () => {
+    vi.useFakeTimers();
+    try {
+      const scene = createMockScene();
+      const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl, 100);
+      const firstView = emptyView();
+      firstView.datasets = ["gs://first.zarr"];
+      const first = applier.apply(firstView);
+      await vi.advanceTimersByTimeAsync(90);
+      const firstId = fakeIdForUrl("gs://first.zarr");
+      scene.addDataset(firstId);
+      applier.notifyDatasetOpened(firstId);
+      await first;
+
+      const secondView = emptyView();
+      secondView.datasets = ["gs://second.zarr"];
+      const second = applier.apply(secondView);
+      // Cross the first apply's original deadline. A stale global watchdog
+      // used to clear the second generation's pending map here.
+      await vi.advanceTimersByTimeAsync(11);
+      expect(applier.getState().openStatuses).toEqual([
+        { url: "gs://second.zarr", state: "pending" },
+      ]);
+      const secondId = fakeIdForUrl("gs://second.zarr");
+      scene.addDataset(secondId);
+      applier.notifyDatasetOpened(secondId);
+      await second;
+      expect(applier.getState().anyOpenFailed).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("waits for workspace dataset availability from the opened event without polling", async () => {
+    const scene = createMockScene();
+    const applier = new SavedViewApplier(
+      bridge,
+      () => scene as never,
+      fakeIdForUrl,
+      1000,
+      "workspace-dataset-id",
+      false,
+    );
+    const view = emptyView();
+    view.dataset_order = ["wds-late"];
+    const pending = applier.apply(view);
+    await Promise.resolve();
+    scene.addDataset("wds-late");
+    applier.notifyDatasetOpened("wds-late");
+
+    await expect(pending).resolves.toMatchObject({ status: "applied" });
+    expect(applier.getState().warnings).toEqual([]);
   });
 
   // --- selectedDatasetId wrinkle resolution (option c) -------------------
@@ -587,19 +701,18 @@ describe("SavedViewApplier", () => {
     expect(setZSeen).toBe(true);
   });
 
-  it("subscribeApplyComplete fires while inProgress is still true", async () => {
-    // Subscribers want post-apply state but BEFORE the inProgress flag
-    // flips back; this lets urlSync stay suppressed for the duration of
-    // the apply-complete handler's render-dirty + state-sync work.
+  it("subscribeApplyComplete fires from the settled boundary", async () => {
+    // Completion consumers no longer infer ordering from a busy flag: the
+    // callback runs only after the matching apply epoch is settled.
     const scene = createMockScene();
     const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl);
     let inProgressDuringCallback = false;
     applier.subscribeApplyComplete(() => {
-      inProgressDuringCallback = applier.isInProgress();
+      inProgressDuringCallback = applier.getState().inProgress;
     });
     await applier.apply(emptyView());
-    expect(inProgressDuringCallback).toBe(true);
-    expect(applier.isInProgress()).toBe(false);
+    expect(inProgressDuringCallback).toBe(false);
+    expect(applier.getState().inProgress).toBe(false);
   });
 
   it("subscribeApplyComplete unsubscribe stops further callbacks", async () => {

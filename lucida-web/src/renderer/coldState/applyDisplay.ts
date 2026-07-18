@@ -4,13 +4,13 @@
  * Applies a {@link ColdStateDisplayMessage}: swap the per-channel display
  * state (contrast / gamma / opacity / colormap) on the dataset's most
  * recent cold state and rebuild just its entity descriptor buffer. Pools,
- * atlases, indirection, group→tile membership, and proxy residency are all
+ * atlases and indirection are all
  * untouched — a display edit changes no geometry — so this is far cheaper
  * than {@link applyColdState} and never re-ingests the active set.
  *
  * Because the descriptor is rebuilt from the same {@link buildDescriptorBuffer}
- * path the full ingest uses (same active set, same entity metas, same proxy
- * pools), the result is byte-identical to a full cold state carrying these
+ * path the full ingest uses (same active set and entity metas), the result is
+ * byte-identical to a full cold state carrying these
  * display values — including the dense colormap-LUT reassignment a colormap
  * change needs.
  *
@@ -37,7 +37,7 @@ export function applyColdStateDisplay(
   // Every entry in a dataset's cold state shares one per-channel display
   // map (it is dataset-level, not per-entity), so swapping the reference
   // on each entry re-points the whole active set at the new values. The
-  // active set itself — geometry, LOD, matrices, proxy flags — is left
+  // active set itself — geometry, LOD, and matrices — is left
   // exactly as the last full cold state built it.
   for (const entry of cold.activeSet) {
     entry.displayStateByChannel = msg.displayStateByChannel;
@@ -52,9 +52,8 @@ export function applyColdStateDisplay(
     buildDescriptorBuffer(
       ctx.device,
       cold,
-      state.proxyDescriptorsByEntity,
-      state.proxyPoolsByDataset,
       metas,
+      ctx.gpuResources,
     ),
   );
 }

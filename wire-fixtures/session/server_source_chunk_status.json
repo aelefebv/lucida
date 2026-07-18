@@ -4,5 +4,8 @@
   "image_id": "multiscale-0",
   "key": "0/1/0/1/0/0",
   "status": "failed_permanent",
+  "category": "authorization",
+  "code": "permission",
+  "retryable": false,
   "message": "access to the dataset store was denied"
 }

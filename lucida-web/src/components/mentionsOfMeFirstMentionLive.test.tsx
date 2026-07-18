@@ -25,6 +25,7 @@ import { useMemo, useState } from "react";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import initWasm, { WasmScene } from "lucida-core";
+import type { DatasetManifest } from "../manifestTypes.ts";
 import { MentionsOfMe } from "./MentionsOfMe.tsx";
 import {
   currentDatasetAnnotations,
@@ -46,12 +47,66 @@ const MY_ID = "author-me-stable-identity";
 const MY_HANDLE = deriveHandle(MY_ID); // what a peer's @-mention of me carries.
 const DATASET = "wds-1";
 
-/** A scene with the dataset's manifest absent (the peer opened/created the pin
- * before this client opened the dataset) but a pin+comment mentioning me already
- * applied. Mirrors the inbound `add_annotation` + `add_comment` sequence. */
+/** Small, structurally complete dataset used to satisfy the document invariant
+ * that annotations can only reference a dataset present in the workspace. */
+const datasetManifest: DatasetManifest = {
+  dataset_id: DATASET,
+  name: "mention-fixture.zarr",
+  kind: "Single",
+  entities: [{ id: "img-0", kind: "Image", parent: null, labels: {} }],
+  transforms: [],
+  images: [
+    {
+      image_id: "ms-0",
+      owner: "img-0",
+      multiscale: {
+        axes: [
+          { name: "t", kind: "Time" },
+          { name: "c", kind: "Channel" },
+          { name: "z", kind: "Space" },
+          { name: "y", kind: "Space" },
+          { name: "x", kind: "Space" },
+        ],
+        levels: [
+          {
+            level_index: 0,
+            shape: [1, 1, 1, 32, 32],
+            chunk_shape: [1, 1, 1, 32, 32],
+            grid_shape: [1, 1, 1, 1, 1],
+            scale: [1, 1, 1, 1, 1],
+          },
+        ],
+        data_type: "Uint16",
+      },
+    },
+  ],
+  source_layouts: [
+    {
+      id: "layout-source",
+      name: "Source positions",
+      placements: [{ entity_id: "img-0", position: [0, 0] }],
+    },
+  ],
+  default_layout_id: "layout-source",
+  labels: [],
+};
+
+function sceneWithDataset(): WasmScene {
+  const scene = new WasmScene(800, 600);
+  scene.load_document(
+    JSON.stringify({
+      manifests: { [DATASET]: datasetManifest },
+      annotations: {},
+    }),
+  );
+  return scene;
+}
+
+/** A scene with the dataset open but no dataset selected, and a pin+comment
+ * mentioning me already applied. Mirrors the inbound `add_annotation` +
+ * `add_comment` sequence while preserving core's reference integrity. */
 function sceneWithMention(): WasmScene {
-  const s = new WasmScene(800, 600);
-  s.load_document(JSON.stringify({ manifests: {}, annotations: {} }));
+  const s = sceneWithDataset();
   s.apply_command(
     JSON.stringify({
       type: "add_annotation",
@@ -139,8 +194,7 @@ describe("#802 badge: MentionsOfMe reflects a first mention with no selection", 
     // Mirror App's wiring: a wasm scene, a remoteDocumentVersion counter bumped
     // on each inbound command, currentAnnotations resolved via the real helper
     // with NO dataset selected, feeding the real <MentionsOfMe>.
-    const scene = new WasmScene(800, 600);
-    scene.load_document(JSON.stringify({ manifests: {}, annotations: {} }));
+    const scene = sceneWithDataset();
 
     function Harness() {
       const [version, setVersion] = useState(0);

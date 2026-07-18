@@ -62,7 +62,7 @@ pub const UNAUTH_LANDING_HTML: &str = r##"<!DOCTYPE html>
 
 /// The HTML the middleware serves when the marker cookie
 /// `lucida_signed_out=1` is present (i.e. the user just clicked sign
-/// out, then refreshed / opened a new tab / clicked a bookmark).
+/// out, then refreshed / opened a new tab / followed a saved link).
 ///
 /// Same scaffolding as `UNAUTH_LANDING_HTML`, but **does not auto-bounce**.
 /// The user must click "Sign in again" — which is the whole point: a

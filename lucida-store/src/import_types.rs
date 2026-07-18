@@ -1,3 +1,4 @@
+use lucida_content::url::SourceRevision;
 use lucida_content::{DatasetManifest, ImageId};
 use lucida_protocol::FetchSource;
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,10 @@ pub struct ImportResult {
     pub manifest: DatasetManifest,
     pub fetch: FetchSource,
     pub binding_seed: ServerBindingSeed,
+    /// Semantic generation of the source metadata used to build this import.
+    /// Dataset/workspace ids and the user-selected display name are excluded,
+    /// so the same source generation has one revision in every workspace.
+    pub source_revision: SourceRevision,
     /// Non-fatal problems encountered while importing, in the order they were
     /// discovered. Empty for a fully valid dataset. A collection whose individual
     /// groups fail to parse records one entry per skipped group here rather than
@@ -36,16 +41,10 @@ pub enum ImportWarningKind {
     /// A collection group was dropped from the import because its metadata was
     /// missing, unreadable, or malformed. The rest of the collection still opens.
     SkippedGroup,
-    /// One or more group representative tiles could not be read or parsed
-    /// while selecting the collection's shared multiscale geometry, so
-    /// representative-tile selection fell forward to a later readable group
-    /// representative. The collection still opens over the geometry of the
-    /// first readable tile. Always aggregated: one warning per import
-    /// summarizes every passed-over representative, because a store-wide
-    /// condition (throttling, or a permission configuration that answers a
-    /// missing key with an error instead of NotFound) can make many
-    /// representatives unreadable at once. The message names a few affected
-    /// tiles and the likely store-side causes.
+    /// Legacy warning retained for backward-compatible deserialization of
+    /// imports created before strict all-tile collection admission. New imports
+    /// fail before binding construction when any declared tile's geometry is
+    /// unreadable or divergent, so they do not emit this warning.
     UnreadableTileGeometry,
     /// Label discovery on a large collection probed only a sample of tiles, so
     /// labels present only on unsampled tiles were not discovered. The message
@@ -61,6 +60,10 @@ pub enum ImportWarningKind {
     /// The message names the exhaustive-discovery override and the likely
     /// store-side causes.
     UnusableLabelIndex,
+    /// Parsed label indexes collectively declared more names than the
+    /// import-wide retention budget. Later names were ignored in declared tile
+    /// order before their vectors could accumulate in process memory.
+    LabelMetadataBudget,
 }
 
 /// Everything the server needs to build its operational binding.
@@ -99,5 +102,34 @@ pub struct LevelBindingInfo {
     pub level_index: u32,
     pub compression: StorageCompression,
     pub chunk_shape: Vec<u64>,
+    /// Canonical [t,c,z,y,x] voxel shape used to reject out-of-bounds t/c.
+    #[serde(default = "ones_5d")]
+    pub shape: [u64; 5],
+    /// Canonical [t,c,z,y,x] chunk-grid shape.  z/y/x coordinates in the
+    /// wire key are grid coordinates and are checked against this value.
+    #[serde(default = "ones_5d")]
+    pub grid_shape: [u64; 5],
     pub chunk_byte_layout: ChunkByteLayout,
+}
+
+fn ones_5d() -> [u64; 5] {
+    [1; 5]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_unreadable_tile_warning_remains_wire_compatible() {
+        let warning = serde_json::json!({
+            "kind": "UnreadableTileGeometry",
+            "target": "A/1",
+            "message": "legacy import warning"
+        });
+
+        let decoded: ImportWarning = serde_json::from_value(warning.clone()).unwrap();
+        assert_eq!(decoded.kind, ImportWarningKind::UnreadableTileGeometry);
+        assert_eq!(serde_json::to_value(decoded).unwrap(), warning);
+    }
 }

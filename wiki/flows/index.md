@@ -10,7 +10,7 @@ End-to-end traces showing how data or control moves through Lucida. Each article
 - [Flow: Presence Propagation](presence-propagation.md) — local viewport change → throttled wire emit → server fan-out (self-filtered) → peer apply (or follow-mirror)
 - [Flow: Follow Chain Resolution](follow-chain-resolution.md) — `set_follow` validation, transitive flatten into stars, disconnect-driven reset
 - [Flow: Document Command Application](document-command-application.md) — client → server `seq` assignment → broadcast (with `Ack` to sender) → WASM `apply_command` on every client
-- [Flow: Proxy Generation (S5)](proxy-generation.md) — historical opt-in proxy bridge; default fallback is chunk-only coarse/detail
+- [Flow: Proxy Generation (S5, historical)](proxy-generation.md) — deleted proxy bridge retained for archaeology
 - [Flow: Authentication Sign-In](auth-signin.md) — unauthed visit → JS shim captures hash → /auth/start → Google → /auth/callback → state validate → JWT validate → session create → cookie + 302 to original URL
 - [Flow: Saved-View Recipient Apply](saved-view-recipient-apply.md) — `#view=…` or `#b=<id>` URL → bootstrap parse → diff datasets → open missing → apply layouts/settings/camera in order → `applyInProgress` flag prevents feedback loop → `selectedDatasetId` auto-selects to first visible
 - [Flow: Annotation Lifecycle](annotation-lifecycle.md) — shift-drag pin → capture author's view onto the pin (empty `datasets`) → `add_annotation` document command broadcast + persist → light recipient-local restore via thread click, @mention, or `#a=<id>` link

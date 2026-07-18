@@ -1,0 +1,10 @@
+artifacts/
+coverage/
+
+# libFuzzer writes coverage discoveries back into the corpus using SHA-1
+# names. Keep the small, reviewed semantic seeds in git and leave campaign
+# output local unless a specific reproducer is intentionally promoted.
+corpus/*/[0-9a-f]*
+!corpus/collection_scanner/boundary_names
+!corpus/ingest_tiff/not_tiff
+!corpus/ingest_tiff/truncated_header

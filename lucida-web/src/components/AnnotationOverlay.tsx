@@ -20,7 +20,8 @@
  */
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
-import { applyViewportCommand } from "../applyAndSend.ts";
+import type { RenderLoop } from "../renderLoop.ts";
+import type { ViewportCoordinator } from "../viewportCoordinator.ts";
 import type { Annotation } from "./annotationDocument.ts";
 import { useAnnotationOverlay } from "./useAnnotationOverlay.ts";
 import {
@@ -80,13 +81,12 @@ interface Props {
   /** Notify the parent that the document changed locally (a pin/comment was
    * added or removed) so this overlay re-reads via a fresh `version`. */
   onDocumentChanged: () => void;
-  /** Notify the parent that the *viewport* changed locally (a plain drag on an
-   * own pin panned the view). The parent marks the render loop dirty so the
-   * canvas actually repaints under the panned camera — the same thing
-   * `SliceViewer` does after its own pan. Optional + defaulted to a no-op so the
-   * gesture (and the move/click paths) work without it; a panned view simply
-   * wouldn't repaint until the next frame the loop already redraws. */
-  onViewportChanged?: () => void;
+  /** Narrow port to the host's sole viewport-effect coordinator. Required by
+   * construction: annotation code cannot fall back to a direct scene write or
+   * remember only repaint/presence while omitting URL, follow, or saved-view
+   * invalidation. */
+  viewport: Pick<ViewportCoordinator, "apply" | "endGesture">;
+  frameSignal?: Pick<RenderLoop, "subscribePresentedFrame"> | null;
   /** Personal, view-only visibility for ALL annotations (issue #792). When
    * `false`, the overlay renders NOTHING — no pins/lines/boxes, no resize/
    * endpoint handles, no open thread popover — so the user can declutter the view
@@ -148,7 +148,7 @@ const HANDLE_CURSOR: Record<BoxHandle, string> = {
  *  - `mode: "move"` — a Shift+drag, which repositions the pin and emits one
  *    `move_annotation` on release (the deliberate, gated move gesture).
  *  - `mode: "pan"` — a plain (non-Shift) drag, which forwards the SAME viewport
- *    pan the canvas uses (`applyViewportCommand({ type: "pan", … })`, dpr-aware
+ *    pan the canvas uses (`viewport.apply({ type: "pan", … })`, CSS-logical
  *    and negated) so dragging off a pin pans exactly like dragging empty canvas,
  *    and never moves the pin. */
 interface PinDrag {
@@ -259,7 +259,7 @@ function shapeVertices(pin: Annotation): ShapeVertices | null {
   return { position: [pin.position[0], pin.position[1]], end: [end[0], end[1]] };
 }
 
-export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, viewContext, myId, sendCommand, onDocumentChanged, onViewportChanged, visible = true, mentionCandidates = [], onGoToAuthorView }: Props, ref) {
+export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, viewContext, myId, sendCommand, onDocumentChanged, viewport, frameSignal, visible = true, mentionCandidates = [], onGoToAuthorView }: Props, ref) {
   const dotRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   // SVG geometry element per non-point pin (the line segment / box outline),
   // re-projected each frame through the SAME world->screen math as the dot.
@@ -267,7 +267,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
   // The authoritative pin set + which thread is open, with their shared
   // lifecycle (re-read on version/dataset change, close on vanish/dataset
   // switch/hide) — the view-independent overlay state.
-  const { annotations, annotationsRef, openPinId, setOpenPinId } = useAnnotationOverlay({
+  const { annotations, annotationsRef, openPinId, setOpenPinId, focusPinWhenAvailable } = useAnnotationOverlay({
     wasmSceneRef,
     datasetId,
     version,
@@ -398,28 +398,25 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
     ref,
     () => ({
       focusPin: (pinId: string) => {
-        const pin = annotationsRef.current.find((p) => p.id === pinId);
-        if (!pin) return;
-        setOpenPinId(pin.id);
-        const scene = wasmSceneRef.current;
-        if (scene) {
-          applyViewportCommand(scene, {
-            type: "set_center",
-            x: pin.position[0],
-            y: pin.position[1],
-          });
-          // Repaint under the recentered camera, mirroring the collection selector /
-          // pin-pan paths. No-op when unwired (e.g. a test harness).
-          onViewportChanged?.();
-        }
+        return focusPinWhenAvailable(pinId, (pin) => {
+          const applied = viewport.apply(
+            {
+              type: "set_center",
+              x: pin.position[0],
+              y: pin.position[1],
+            },
+            { source: "annotation_focus", history: { label: "annotation focus" } },
+          );
+          if (applied) setOpenPinId(pin.id);
+          return applied;
+        });
       },
     }),
-    [wasmSceneRef, onViewportChanged, annotationsRef, setOpenPinId],
+    [viewport, setOpenPinId, focusPinWhenAvailable],
   );
 
   useEffect(() => {
-    let rafId: number;
-    const tick = () => {
+    const projectFrame = () => {
       const scene = wasmSceneRef.current;
       if (scene) {
         // world -> screen in CSS pixels (the exact inverse of the shared
@@ -555,11 +552,16 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
           }
         }
       }
-      rafId = requestAnimationFrame(tick);
     };
-    rafId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafId);
-  }, [wasmSceneRef, canvas, annotationsRef]);
+    // One post-commit projection covers the initial DOM refs. Subsequent work is
+    // driven by actual worker-presented frames, so an idle viewer owns no RAF.
+    const initialFrame = requestAnimationFrame(projectFrame);
+    const unsubscribe = frameSignal?.subscribePresentedFrame(projectFrame);
+    return () => {
+      cancelAnimationFrame(initialFrame);
+      unsubscribe?.();
+    };
+  }, [wasmSceneRef, canvas, annotationsRef, frameSignal, version, visible]);
 
   /** The shared inverse camera projection (`eventToWorld`, the same math
    * SliceViewer's pointer handlers use), tolerating an unready scene. Reused so
@@ -637,22 +639,24 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
     if (drag.mode === "pan") {
       // A plain drag pans the view — it never moves the pin. Forward the SAME
       // viewport pan SliceViewer applies: incremental travel since the last
-      // event, scaled to physical pixels (dpr-aware) and negated (dragging the
+      // event, in the same CSS-logical units as camera zoom, and negated (dragging the
       // image right moves the camera left). Apply-locally only — a pan is
       // viewport state, never a document command, so it is not sent to peers.
-      const dpr = devicePixelRatio;
-      const dx = (e.clientX - drag.lastX) * dpr;
-      const dy = (e.clientY - drag.lastY) * dpr;
+      const dx = e.clientX - drag.lastX;
+      const dy = e.clientY - drag.lastY;
       drag.lastX = e.clientX;
       drag.lastY = e.clientY;
-      const scene = wasmSceneRef.current;
-      if (scene) {
-        applyViewportCommand(scene, { type: "pan", dx: -dx, dy: -dy });
-        // Ask the parent to repaint under the panned camera (marks the render
-        // loop dirty), mirroring SliceViewer's markInteractiveDirty after a pan.
-        // No-op when unwired (e.g. the test harness) — the pan still applied.
-        onViewportChanged?.();
-      }
+      viewport.apply(
+        { type: "pan", dx: -dx, dy: -dy },
+        {
+          source: "annotation_pan",
+          history: {
+            label: "pan",
+            coalesceKey: "annotation_pan",
+            coalesceWindowMs: Infinity,
+          },
+        },
+      );
       return;
     }
 
@@ -680,6 +684,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
     // a drag must not also toggle the thread. If it never traveled, it's a plain
     // click: emit nothing and let onClick toggle the thread (don't suppress).
     if (drag.mode === "pan") {
+      viewport.endGesture("annotation_pan");
       if (drag.moved) suppressClickRef.current = pin.id;
       return;
     }
@@ -714,6 +719,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
     const captured = drag.pointerId;
     dragRef.current = null;
     releasePointer(e.currentTarget as Element, captured);
+    if (drag.mode === "pan") viewport.endGesture("annotation_pan");
   };
 
   // --- Shape reshape gesture (drag a box corner/edge OR a line endpoint) ------
@@ -1157,8 +1163,13 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
                 accident while panning). Deletion lives in the open thread as a
                 deliberate, confirmed Delete. A peer's pin only clicks (no gesture
                 handlers, no delete affordance). */}
-            <div
+            <button
+              type="button"
+              data-floating-anchor=""
               data-testid={`annot-pin-${pin.id}`}
+              aria-label={mine ? "Open your annotation discussion" : `Open annotation discussion by ${pin.author}`}
+              aria-expanded={isOpen}
+              aria-controls={`annot-thread-${pin.id}`}
               title={
                 mine
                   ? `Pin by you — click for thread, Shift+drag to move`
@@ -1186,10 +1197,12 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
                 position: "absolute",
                 top: 0,
                 left: 0,
-                width: 12,
-                height: 12,
-                marginLeft: -6,
-                marginTop: -6,
+                width: 24,
+                height: 24,
+                minHeight: 24,
+                marginLeft: -12,
+                marginTop: -12,
+                padding: 0,
                 borderRadius: "50%",
                 backgroundColor: "#FF3B30",
                 // Off-context pins get a distinct dashed outline (on top of the
@@ -1237,6 +1250,8 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
                 onClose={() => setOpenPinId(null)}
                 mentionCandidates={mentionCandidates}
                 onGoToAuthorView={onGoToAuthorView}
+                frameSignal={frameSignal}
+                canvas={canvas}
               />
             )}
           </div>

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use lucida_content::{
     DatasetId, DatasetKind, DatasetManifest, EntityId, EntityKind, LayoutId, LayoutSpec,
 };
-use lucida_protocol::{AssetCatalogDelta, DatasetOpened};
+use lucida_protocol::DatasetOpened;
 
 use crate::camera::Camera;
 use crate::scene::{BlendMode, Colormap, RenderMode, Scene};
@@ -43,12 +43,6 @@ pub enum DocumentCommand {
     SetActiveLayout {
         dataset_id: DatasetId,
         layout_id: LayoutId,
-    },
-    /// Merge an asset catalog delta into the document. Bumps `epochs.asset`.
-    /// Idempotent on identical re-apply.
-    ApplyAssetCatalogDelta {
-        dataset_id: DatasetId,
-        delta: AssetCatalogDelta,
     },
     /// Drop a collaborative annotation (point pin) onto `dataset_id` at an
     /// in-plane world-space `position` and additive depth `z` (the pin's world
@@ -464,6 +458,11 @@ enum ViewportScope {
     DatasetDisplay,
 }
 
+const MAX_CHANNEL_SETTINGS_INDEX: u32 = (1 << 16) - 1;
+const MAX_VIEWPORT_DATASET_ID_BYTES: usize = 1024;
+const MAX_VIEWPORT_DATASET_ORDER: usize = 4096;
+const MAX_CHANNEL_NAME_BYTES: usize = 4096;
+
 impl ViewportCommand {
     /// Classify which state slice this command may touch. See
     /// [`ViewportScope`].
@@ -598,7 +597,44 @@ impl ViewportCommand {
 }
 
 impl Scene {
+    /// Shared, atomic command boundary used by native and WASM callers.
+    pub fn try_apply(&mut self, cmd: Command) -> Result<(), crate::scene::CommandValidationError> {
+        match &cmd {
+            Command::Document(command) => self.document.validate_command(command)?,
+            Command::Viewport(command) => self.validate_viewport_command(command)?,
+        }
+
+        let document_command = matches!(&cmd, Command::Document(_));
+        let mut candidate = self.clone();
+        candidate.apply_unchecked(cmd);
+        if document_command {
+            candidate.document.validate_state()?;
+        }
+        let encoded =
+            crate::quota::to_json_vec_bounded(&candidate, crate::quota::MAX_SNAPSHOT_JSON_BYTES)
+                .map_err(|error| crate::scene::CommandValidationError {
+                    category: crate::scene::CommandValidationCategory::ResourceLimit,
+                    path: "scene_json".to_string(),
+                    message: error.to_string(),
+                })?;
+        crate::scene::validate_serialized_scene(&encoded).map_err(|error| {
+            crate::scene::CommandValidationError {
+                category: crate::scene::CommandValidationCategory::Serialization,
+                path: "scene_json".to_string(),
+                message: error.to_string(),
+            }
+        })?;
+        *self = candidate;
+        Ok(())
+    }
+
     pub fn apply(&mut self, cmd: Command) {
+        // Compatibility/internal entry point. Untrusted native and WASM
+        // boundaries use `try_apply`, which is atomic and structured.
+        self.apply_unchecked(cmd);
+    }
+
+    fn apply_unchecked(&mut self, cmd: Command) {
         match cmd {
             Command::Document(doc_cmd) => {
                 // Handle Scene-level side effects for document commands.
@@ -726,13 +762,17 @@ impl Scene {
                         }
                     }
                     DocumentCommand::RemoveDataset { id } => {
-                        self.dataset_order.retain(|s| s != id);
-                        self.dataset_settings.remove(id);
-                        self.derived.remove(id);
-                        self.view_query_cursors.remove(id);
+                        // Removal is idempotent. A replay for an already-gone
+                        // dataset must not manufacture structural epoch churn.
+                        if self.document.manifests.contains_key(id) {
+                            self.dataset_order.retain(|s| s != id);
+                            self.dataset_settings.remove(id);
+                            self.derived.remove(id);
+                            self.view_query_cursors.remove(id);
 
-                        self.epochs.content += 1;
-                        self.epochs.layout += 1;
+                            self.epochs.content += 1;
+                            self.epochs.layout += 1;
+                        }
                     }
                     DocumentCommand::RenameDataset { .. } => {
                         // A rename only changes the manifest's display label
@@ -754,11 +794,6 @@ impl Scene {
                     DocumentCommand::SetActiveLayout { .. } => {
                         unreachable!("handled above");
                     }
-                    DocumentCommand::ApplyAssetCatalogDelta { .. } => {
-                        // Bump the asset epoch. Document state update happens
-                        // below via self.document.apply().
-                        self.epochs.asset += 1;
-                    }
                     DocumentCommand::AddAnnotation { .. }
                     | DocumentCommand::RemoveAnnotation { .. }
                     | DocumentCommand::MoveAnnotation { .. }
@@ -777,6 +812,249 @@ impl Scene {
             }
             Command::Viewport(vp_cmd) => self.apply_viewport(vp_cmd),
         }
+    }
+
+    fn validate_viewport_command(
+        &self,
+        command: &ViewportCommand,
+    ) -> Result<(), crate::scene::CommandValidationError> {
+        use crate::scene::{
+            CommandValidationCategory as Category, CommandValidationError as Error,
+        };
+        crate::quota::to_json_vec_bounded(command, crate::quota::MAX_COMMAND_JSON_BYTES).map_err(
+            |error| Error {
+                category: Category::ResourceLimit,
+                path: "viewport_command_json".to_string(),
+                message: error.to_string(),
+            },
+        )?;
+        if !command.inputs_finite() {
+            return Err(Error {
+                category: Category::InvalidValue,
+                path: "viewport_command".to_string(),
+                message: "floating-point inputs must be finite".to_string(),
+            });
+        }
+        match command {
+            ViewportCommand::SetZ { z: u32::MAX } => {
+                return Err(Error {
+                    category: Category::OutOfBounds,
+                    path: "viewport_command.z".to_string(),
+                    message: "z cannot be u32::MAX because the stored range end is z + 1"
+                        .to_string(),
+                });
+            }
+            ViewportCommand::SetZRange { start, end } if start >= end => {
+                return Err(Error {
+                    category: Category::InvalidValue,
+                    path: "viewport_command.z_range".to_string(),
+                    message: format!("z range must be non-empty and ascending; got {start}..{end}"),
+                });
+            }
+            _ => {}
+        }
+        let dataset_ids: &[String] = match command {
+            ViewportCommand::SetDatasetOrder { order } => {
+                if order.len() > MAX_VIEWPORT_DATASET_ORDER {
+                    return Err(Error {
+                        category: Category::ResourceLimit,
+                        path: "viewport_command.order".to_string(),
+                        message: format!(
+                            "dataset order has {} entries; limit is {MAX_VIEWPORT_DATASET_ORDER}",
+                            order.len()
+                        ),
+                    });
+                }
+                order
+            }
+            _ => &[],
+        };
+        let mut ordered_ids = HashSet::with_capacity(dataset_ids.len());
+        for dataset_id in dataset_ids {
+            if dataset_id.is_empty()
+                || dataset_id.len() > MAX_VIEWPORT_DATASET_ID_BYTES
+                || dataset_id.contains('\0')
+            {
+                return Err(Error {
+                    category: Category::InvalidValue,
+                    path: "viewport_command.dataset_id".to_string(),
+                    message: "dataset id is empty, oversized, or contains NUL".to_string(),
+                });
+            }
+            if !ordered_ids.insert(dataset_id) {
+                return Err(Error {
+                    category: Category::Duplicate,
+                    path: "viewport_command.order".to_string(),
+                    message: format!("dataset '{dataset_id}' appears more than once"),
+                });
+            }
+            if !self
+                .document
+                .manifests
+                .contains_key(&DatasetId(dataset_id.clone()))
+            {
+                return Err(Error {
+                    category: Category::MissingReference,
+                    path: "viewport_command.order".to_string(),
+                    message: format!("unknown dataset '{dataset_id}'"),
+                });
+            }
+        }
+        let target_dataset_id = match command {
+            ViewportCommand::SetDatasetVisible { dataset_id, .. }
+            | ViewportCommand::SetDatasetOpacity { dataset_id, .. }
+            | ViewportCommand::SetDatasetContrast { dataset_id, .. }
+            | ViewportCommand::SetDatasetGamma { dataset_id, .. }
+            | ViewportCommand::SetDatasetBlendMode { dataset_id, .. }
+            | ViewportCommand::SetDatasetRenderMode { dataset_id, .. }
+            | ViewportCommand::SetDatasetDetailLevelOverride { dataset_id, .. }
+            | ViewportCommand::SetChannelVisible { dataset_id, .. }
+            | ViewportCommand::SetChannelColormap { dataset_id, .. }
+            | ViewportCommand::SetChannelName { dataset_id, .. }
+            | ViewportCommand::SetChannelContrast { dataset_id, .. }
+            | ViewportCommand::SetChannelGamma { dataset_id, .. }
+            | ViewportCommand::SetChannelBlendMode { dataset_id, .. }
+            | ViewportCommand::SetLabelVisible { dataset_id, .. }
+            | ViewportCommand::SetLabelOpacity { dataset_id, .. } => Some(dataset_id),
+            _ => None,
+        };
+        if let Some(dataset_id) = target_dataset_id
+            && (dataset_id.is_empty()
+                || dataset_id.len() > MAX_VIEWPORT_DATASET_ID_BYTES
+                || dataset_id.contains('\0'))
+        {
+            return Err(Error {
+                category: Category::InvalidValue,
+                path: "viewport_command.dataset_id".to_string(),
+                message: "dataset id is empty, oversized, or contains NUL".to_string(),
+            });
+        }
+        if let Some(dataset_id) = target_dataset_id
+            && !self
+                .document
+                .manifests
+                .contains_key(&DatasetId(dataset_id.clone()))
+        {
+            return Err(Error {
+                category: Category::MissingReference,
+                path: "viewport_command.dataset_id".to_string(),
+                message: format!("unknown dataset '{dataset_id}'"),
+            });
+        }
+        if let ViewportCommand::CenterOnVoxel3D { dataset_id, .. } = command {
+            if dataset_id.is_empty()
+                || dataset_id.len() > MAX_VIEWPORT_DATASET_ID_BYTES
+                || dataset_id.contains('\0')
+            {
+                return Err(Error {
+                    category: Category::InvalidValue,
+                    path: "viewport_command.dataset_id".to_string(),
+                    message: "dataset id is empty, oversized, or contains NUL".to_string(),
+                });
+            }
+            if !self
+                .document
+                .manifests
+                .contains_key(&DatasetId(dataset_id.clone()))
+            {
+                return Err(Error {
+                    category: Category::MissingReference,
+                    path: "viewport_command.dataset_id".to_string(),
+                    message: format!("unknown dataset '{dataset_id}'"),
+                });
+            }
+        }
+        if let ViewportCommand::SetChannelName {
+            name: Some(name), ..
+        } = command
+            && (name.len() > MAX_CHANNEL_NAME_BYTES || name.contains('\0'))
+        {
+            return Err(Error {
+                category: Category::ResourceLimit,
+                path: "viewport_command.name".to_string(),
+                message: format!(
+                    "channel name exceeds {MAX_CHANNEL_NAME_BYTES} bytes or contains NUL"
+                ),
+            });
+        }
+        let channel_target = match command {
+            ViewportCommand::SetChannelVisible {
+                dataset_id,
+                channel,
+                ..
+            }
+            | ViewportCommand::SetChannelColormap {
+                dataset_id,
+                channel,
+                ..
+            }
+            | ViewportCommand::SetChannelName {
+                dataset_id,
+                channel,
+                ..
+            }
+            | ViewportCommand::SetChannelContrast {
+                dataset_id,
+                channel,
+                ..
+            }
+            | ViewportCommand::SetChannelGamma {
+                dataset_id,
+                channel,
+                ..
+            } => Some((dataset_id, *channel)),
+            _ => None,
+        };
+        if let Some((dataset_id, channel)) = channel_target {
+            let id = DatasetId(dataset_id.clone());
+            let manifest = self.document.manifests.get(&id).ok_or_else(|| Error {
+                category: Category::MissingReference,
+                path: "viewport_command.dataset_id".to_string(),
+                message: format!("unknown dataset '{dataset_id}'"),
+            })?;
+            let channel_count = manifest
+                .images()
+                .iter()
+                .filter_map(|image| image.multiscale.levels.first())
+                .map(|level| level.shape[1])
+                .max()
+                .unwrap_or(1);
+            if u64::from(channel) >= channel_count {
+                return Err(Error {
+                    category: Category::OutOfBounds,
+                    path: "viewport_command.channel".to_string(),
+                    message: format!("channel {channel} outside bound {channel_count}"),
+                });
+            }
+        }
+        let label_target = match command {
+            ViewportCommand::SetLabelVisible {
+                dataset_id, label, ..
+            }
+            | ViewportCommand::SetLabelOpacity {
+                dataset_id, label, ..
+            } => Some((dataset_id, *label)),
+            _ => None,
+        };
+        if let Some((dataset_id, label)) = label_target {
+            let id = DatasetId(dataset_id.clone());
+            let manifest = self.document.manifests.get(&id).ok_or_else(|| Error {
+                category: Category::MissingReference,
+                path: "viewport_command.dataset_id".to_string(),
+                message: format!("unknown dataset '{dataset_id}'"),
+            })?;
+            if label as usize >= manifest.label_specs().len() {
+                return Err(Error {
+                    category: Category::OutOfBounds,
+                    path: "viewport_command.label".to_string(),
+                    message: format!(
+                        "label {label} outside bound {}",
+                        manifest.label_specs().len()
+                    ),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Apply a local viewport command, then bump epochs under ONE policy for
@@ -814,9 +1092,13 @@ impl Scene {
         match cmd.scope() {
             ViewportScope::Camera => {
                 let before = self.camera.clone();
+                let mode_before = std::mem::discriminant(&before);
                 self.mutate_viewport(cmd);
                 if self.camera != before {
                     self.epochs.view += 1;
+                    if std::mem::discriminant(&self.camera) != mode_before {
+                        self.view_query_cursors.clear();
+                    }
                 }
             }
             ViewportScope::ViewSelectors => {
@@ -851,13 +1133,13 @@ impl Scene {
     fn mutate_viewport(&mut self, cmd: ViewportCommand) {
         match cmd {
             ViewportCommand::SetMode2D => {
-                self.set_mode_2d();
+                self.set_mode_2d_untracked();
             }
             ViewportCommand::SetMode3D => {
-                self.set_mode_3d();
+                self.set_mode_3d_untracked();
             }
             ViewportCommand::SetModeFly => {
-                self.set_mode_fly();
+                self.set_mode_fly_untracked();
             }
             ViewportCommand::SetViewport { width, height } => {
                 self.inner_set_viewport(width, height);
@@ -1055,6 +1337,9 @@ impl Scene {
                 channel,
                 visible,
             } => {
+                if channel > MAX_CHANNEL_SETTINGS_INDEX {
+                    return;
+                }
                 if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.ensure_channel(channel as usize).visible = visible;
                 }
@@ -1064,6 +1349,9 @@ impl Scene {
                 channel,
                 colormap,
             } => {
+                if channel > MAX_CHANNEL_SETTINGS_INDEX {
+                    return;
+                }
                 if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.ensure_channel(channel as usize).colormap = colormap;
                 }
@@ -1073,6 +1361,9 @@ impl Scene {
                 channel,
                 name,
             } => {
+                if channel > MAX_CHANNEL_SETTINGS_INDEX {
+                    return;
+                }
                 if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.ensure_channel(channel as usize).name = name;
                 }
@@ -1083,6 +1374,9 @@ impl Scene {
                 min,
                 max,
             } => {
+                if channel > MAX_CHANNEL_SETTINGS_INDEX {
+                    return;
+                }
                 if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     let ch = s.ensure_channel(channel as usize);
                     ch.contrast_min = min;
@@ -1094,6 +1388,9 @@ impl Scene {
                 channel,
                 gamma,
             } => {
+                if channel > MAX_CHANNEL_SETTINGS_INDEX {
+                    return;
+                }
                 if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.ensure_channel(channel as usize).gamma = gamma;
                 }
@@ -3359,165 +3656,6 @@ mod tests {
         assert_no_null(&serde_json::to_value(&scene.camera).unwrap());
     }
 
-    // --- Asset catalog tests ---
-
-    #[test]
-    fn apply_asset_catalog_delta_bumps_only_asset_epoch() {
-        use lucida_protocol::{AssetCatalogDelta, ProxyAvailability, ProxyKind};
-        let mut scene = Scene::new([800, 600]);
-        // Register a dataset first so the catalog is initialized.
-        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
-        scene.apply(DocumentCommand::DatasetOpened(reg).into());
-        let baseline = scene.epochs.clone();
-        assert_eq!(baseline.asset, 0);
-
-        let cmd = DocumentCommand::ApplyAssetCatalogDelta {
-            dataset_id: DatasetId("ds1".into()),
-            delta: AssetCatalogDelta {
-                added: vec![ProxyAvailability {
-                    entity_id: lucida_content::EntityId("ds1-entity".into()),
-                    kinds: vec![ProxyKind::TileProxy3D],
-                    footprints: vec![],
-                }],
-            },
-        };
-        scene.apply(cmd.into());
-
-        assert_eq!(scene.epochs.asset, 1);
-        // No other epoch should change.
-        assert_eq!(scene.epochs.content, baseline.content);
-        assert_eq!(scene.epochs.layout, baseline.layout);
-        assert_eq!(scene.epochs.view, baseline.view);
-        assert_eq!(scene.epochs.selection, baseline.selection);
-    }
-
-    #[test]
-    fn apply_asset_catalog_delta_idempotent_on_repeat() {
-        use lucida_protocol::{AssetCatalogDelta, ProxyAvailability, ProxyKind};
-        let mut scene = Scene::new([800, 600]);
-        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
-        scene.apply(DocumentCommand::DatasetOpened(reg).into());
-
-        let delta = AssetCatalogDelta {
-            added: vec![ProxyAvailability {
-                entity_id: lucida_content::EntityId("ds1-entity".into()),
-                kinds: vec![ProxyKind::TileProxy3D],
-                footprints: vec![],
-            }],
-        };
-        let cmd1 = DocumentCommand::ApplyAssetCatalogDelta {
-            dataset_id: DatasetId("ds1".into()),
-            delta: delta.clone(),
-        };
-        let cmd2 = DocumentCommand::ApplyAssetCatalogDelta {
-            dataset_id: DatasetId("ds1".into()),
-            delta,
-        };
-
-        scene.apply(cmd1.into());
-        let after_first = scene.document.asset_catalogs[&DatasetId("ds1".into())].clone();
-        // Asset epoch bumps each call (it's the message-arrival counter; whether
-        // catalog *contents* changed is checked separately below).
-        assert_eq!(scene.epochs.asset, 1);
-
-        scene.apply(cmd2.into());
-        let after_second = scene.document.asset_catalogs[&DatasetId("ds1".into())].clone();
-
-        // Catalog contents must be identical — the merge must dedupe.
-        assert_eq!(after_first, after_second);
-        assert_eq!(after_second.entries.len(), 1);
-        assert_eq!(after_second.entries[0].kinds, vec![ProxyKind::TileProxy3D]);
-    }
-
-    #[test]
-    fn apply_asset_catalog_delta_merges_kinds_for_same_entity() {
-        use lucida_protocol::{AssetCatalogDelta, ProxyAvailability, ProxyKind};
-        let mut scene = Scene::new([800, 600]);
-        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
-        scene.apply(DocumentCommand::DatasetOpened(reg).into());
-
-        scene.apply(
-            DocumentCommand::ApplyAssetCatalogDelta {
-                dataset_id: DatasetId("ds1".into()),
-                delta: AssetCatalogDelta {
-                    added: vec![ProxyAvailability {
-                        entity_id: lucida_content::EntityId("e1".into()),
-                        kinds: vec![ProxyKind::TileProxy3D],
-                        footprints: vec![],
-                    }],
-                },
-            }
-            .into(),
-        );
-
-        scene.apply(
-            DocumentCommand::ApplyAssetCatalogDelta {
-                dataset_id: DatasetId("ds1".into()),
-                delta: AssetCatalogDelta {
-                    added: vec![ProxyAvailability {
-                        entity_id: lucida_content::EntityId("e1".into()),
-                        kinds: vec![ProxyKind::GroupProxy3D],
-                        footprints: vec![],
-                    }],
-                },
-            }
-            .into(),
-        );
-
-        let cat = &scene.document.asset_catalogs[&DatasetId("ds1".into())];
-        assert_eq!(cat.entries.len(), 1);
-        assert!(cat.entries[0].kinds.contains(&ProxyKind::TileProxy3D));
-        assert!(cat.entries[0].kinds.contains(&ProxyKind::GroupProxy3D));
-    }
-
-    #[test]
-    fn dataset_opened_seeds_catalog_from_event() {
-        use lucida_protocol::{AssetCatalog, ProxyAvailability, ProxyKind};
-        let mut scene = Scene::new([800, 600]);
-        let mut reg = test_helpers::make_dataset_opened("ds1", "test", 1);
-        reg.catalog = AssetCatalog {
-            entries: vec![ProxyAvailability {
-                entity_id: lucida_content::EntityId("seed".into()),
-                kinds: vec![ProxyKind::GroupProxy3D],
-                footprints: vec![],
-            }],
-        };
-        scene.apply(DocumentCommand::DatasetOpened(reg).into());
-
-        let cat = &scene.document.asset_catalogs[&DatasetId("ds1".into())];
-        assert_eq!(cat.entries.len(), 1);
-        assert_eq!(
-            cat.entries[0].entity_id,
-            lucida_content::EntityId("seed".into())
-        );
-    }
-
-    #[test]
-    fn apply_asset_catalog_delta_command_round_trips() {
-        use lucida_protocol::{AssetCatalogDelta, ProxyAvailability, ProxyKind};
-        let cmd = DocumentCommand::ApplyAssetCatalogDelta {
-            dataset_id: DatasetId("ds1".into()),
-            delta: AssetCatalogDelta {
-                added: vec![ProxyAvailability {
-                    entity_id: lucida_content::EntityId("e1".into()),
-                    kinds: vec![ProxyKind::TileProxy3D],
-                    footprints: vec![],
-                }],
-            },
-        };
-        let json = serde_json::to_string(&cmd).unwrap();
-        assert!(json.contains("\"type\":\"apply_asset_catalog_delta\""));
-        let parsed: DocumentCommand = serde_json::from_str(&json).unwrap();
-        match parsed {
-            DocumentCommand::ApplyAssetCatalogDelta { dataset_id, delta } => {
-                assert_eq!(dataset_id, DatasetId("ds1".into()));
-                assert_eq!(delta.added.len(), 1);
-                assert_eq!(delta.added[0].kinds, vec![ProxyKind::TileProxy3D]);
-            }
-            _ => panic!("expected ApplyAssetCatalogDelta"),
-        }
-    }
-
     #[test]
     fn scene_epochs_serde_round_trip() {
         use crate::epoch::SceneEpochs;
@@ -3526,8 +3664,7 @@ mod tests {
             layout: 2,
             view: 3,
             selection: 4,
-            asset: 5,
-            annotation: 6,
+            annotation: 5,
         };
         let json = serde_json::to_string(&epochs).unwrap();
         let parsed: SceneEpochs = serde_json::from_str(&json).unwrap();
@@ -4862,7 +4999,6 @@ mod tests {
         assert_eq!(scene.epochs.layout, baseline.layout);
         assert_eq!(scene.epochs.view, baseline.view);
         assert_eq!(scene.epochs.selection, baseline.selection);
-        assert_eq!(scene.epochs.asset, baseline.asset);
 
         scene.apply(
             DocumentCommand::RemoveAnnotation {
@@ -5048,6 +5184,7 @@ mod tests {
         use crate::protocol::{ClientMessage, ServerMessage};
         let cmd = move_annotation_cmd("wds-1", "pin-1", [3.0, 4.0], 8.5);
         let inbound = ClientMessage::Command {
+            request_id: "req-move".into(),
             command: cmd.clone(),
         };
         let broadcast = ServerMessage::CommandBroadcast {
@@ -5670,7 +5807,6 @@ mod tests {
         assert_eq!(scene.epochs.layout, baseline.layout);
         assert_eq!(scene.epochs.view, baseline.view);
         assert_eq!(scene.epochs.selection, baseline.selection);
-        assert_eq!(scene.epochs.asset, baseline.asset);
     }
 
     #[test]
@@ -5902,6 +6038,7 @@ mod tests {
         use crate::protocol::{ClientMessage, ServerMessage};
         let cmd = add_comment_cmd("wds-1", "pin-1", "c-1", "alice", "hi");
         let inbound = ClientMessage::Command {
+            request_id: "req-comment".into(),
             command: cmd.clone(),
         };
         let broadcast = ServerMessage::CommandBroadcast {
@@ -6111,7 +6248,6 @@ mod tests {
         assert_eq!(scene.epochs.layout, baseline.layout);
         assert_eq!(scene.epochs.view, baseline.view);
         assert_eq!(scene.epochs.selection, baseline.selection);
-        assert_eq!(scene.epochs.asset, baseline.asset);
 
         scene.apply(remove_comment_cmd("ds1", "pin-1", "c1").into());
         assert_eq!(scene.epochs.annotation, baseline.annotation + 2);
@@ -6254,6 +6390,7 @@ mod tests {
         use crate::protocol::{ClientMessage, ServerMessage};
         let cmd = edit_comment_cmd("wds-1", "pin-1", "c-1", "new text");
         let inbound = ClientMessage::Command {
+            request_id: "req-edit".into(),
             command: cmd.clone(),
         };
         let broadcast = ServerMessage::CommandBroadcast {
@@ -6399,7 +6536,6 @@ mod tests {
         assert_eq!(scene.epochs.layout, baseline.layout);
         assert_eq!(scene.epochs.view, baseline.view);
         assert_eq!(scene.epochs.selection, baseline.selection);
-        assert_eq!(scene.epochs.asset, baseline.asset);
     }
 
     #[test]
@@ -6461,5 +6597,1076 @@ mod tests {
             .map(|m| m.position)
             .collect();
         assert_eq!(positions_before, positions_after);
+    }
+
+    #[test]
+    fn try_apply_rejects_rigid_translation_overflow_atomically() {
+        let mut document = crate::scene::DocumentState::default();
+        let opened = test_helpers::make_dataset_opened("ds1", "test", 1);
+        document
+            .try_apply(DocumentCommand::DatasetOpened(opened))
+            .unwrap();
+        document
+            .try_apply(DocumentCommand::AddAnnotation {
+                dataset_id: DatasetId("ds1".into()),
+                id: "line".into(),
+                position: [-1.0e308, 0.0],
+                end: Some([-1.0e308, 1.0]),
+                z: 0.0,
+                t: 0,
+                c: 0,
+                author: "alice".into(),
+                kind: crate::scene::AnnotationKind::Line,
+                view: None,
+            })
+            .unwrap();
+        let before = serde_json::to_string(&document).unwrap();
+        let error = document
+            .try_apply(DocumentCommand::MoveAnnotation {
+                dataset_id: DatasetId("ds1".into()),
+                id: "line".into(),
+                position: [1.0e308, 0.0],
+                end: None,
+                z: 0.0,
+            })
+            .unwrap_err();
+        assert_eq!(
+            error.category,
+            crate::scene::CommandValidationCategory::OutOfBounds
+        );
+        assert_eq!(serde_json::to_string(&document).unwrap(), before);
+    }
+
+    #[test]
+    fn try_apply_rejects_unknown_layout_and_max_channel_without_mutation() {
+        let mut scene = Scene::new([800, 600]);
+        let opened = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene
+            .try_apply(DocumentCommand::DatasetOpened(opened).into())
+            .unwrap();
+        let before = serde_json::to_string(&scene).unwrap();
+
+        assert!(
+            scene
+                .try_apply(
+                    DocumentCommand::SetActiveLayout {
+                        dataset_id: DatasetId("ds1".into()),
+                        layout_id: LayoutId("unknown".into()),
+                    }
+                    .into(),
+                )
+                .is_err()
+        );
+        assert!(
+            scene
+                .try_apply(
+                    ViewportCommand::SetChannelVisible {
+                        dataset_id: "ds1".into(),
+                        channel: u32::MAX,
+                        visible: false,
+                    }
+                    .into(),
+                )
+                .is_err()
+        );
+        assert_eq!(serde_json::to_string(&scene).unwrap(), before);
+    }
+
+    #[test]
+    fn try_apply_rejects_every_nonfinite_viewport_payload_atomically() {
+        let commands = vec![
+            ViewportCommand::Pan {
+                dx: f64::NAN,
+                dy: 0.0,
+            },
+            ViewportCommand::ZoomBy {
+                factor: f64::INFINITY,
+            },
+            ViewportCommand::SetCenter {
+                x: f64::NAN,
+                y: 0.0,
+            },
+            ViewportCommand::SetZoom {
+                value: f64::NEG_INFINITY,
+            },
+            ViewportCommand::Rotate3D {
+                d_theta: f64::NAN,
+                d_phi: 0.0,
+            },
+            ViewportCommand::Zoom3D { delta: f64::NAN },
+            ViewportCommand::Pan3D {
+                dx: 0.0,
+                dy: f64::INFINITY,
+            },
+            ViewportCommand::CenterOnVoxel3D {
+                dataset_id: "missing".into(),
+                x: 0.0,
+                y: f64::NAN,
+                z: 0.0,
+            },
+            ViewportCommand::FlyTick {
+                dt: f64::NAN,
+                forward: 0.0,
+                right: 0.0,
+                up: 0.0,
+                yaw: 0.0,
+                pitch: 0.0,
+                roll: 0.0,
+            },
+            ViewportCommand::FlySetBaseSpeed { speed: f64::NAN },
+            ViewportCommand::FlyAdjustSpeed { factor: f64::NAN },
+            ViewportCommand::AdjustClipDistance { delta: f64::NAN },
+            ViewportCommand::SetContrast {
+                min: f64::NAN,
+                max: 1.0,
+            },
+            ViewportCommand::SetGamma {
+                gamma: f64::INFINITY,
+            },
+            ViewportCommand::SetDatasetOpacity {
+                dataset_id: "missing".into(),
+                opacity: f32::NAN,
+            },
+            ViewportCommand::SetDatasetContrast {
+                dataset_id: "missing".into(),
+                min: 0.0,
+                max: f64::NAN,
+            },
+            ViewportCommand::SetDatasetGamma {
+                dataset_id: "missing".into(),
+                gamma: f64::NAN,
+            },
+            ViewportCommand::SetChannelContrast {
+                dataset_id: "missing".into(),
+                channel: 0,
+                min: f64::NAN,
+                max: 1.0,
+            },
+            ViewportCommand::SetChannelGamma {
+                dataset_id: "missing".into(),
+                channel: 0,
+                gamma: f64::NAN,
+            },
+        ];
+        let mut scene = Scene::new([800, 600]);
+        let before = serde_json::to_string(&scene).unwrap();
+        for command in commands {
+            let error = scene.try_apply(command.into()).unwrap_err();
+            assert_eq!(
+                error.category,
+                crate::scene::CommandValidationCategory::InvalidValue
+            );
+            assert_eq!(serde_json::to_string(&scene).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn document_quota_rejects_oversized_command_atomically() {
+        let mut document = crate::scene::DocumentState::default();
+        document
+            .try_apply(DocumentCommand::DatasetOpened(
+                test_helpers::make_dataset_opened("ds1", "test", 1),
+            ))
+            .unwrap();
+        let before = serde_json::to_string(&document).unwrap();
+        let error = document
+            .try_apply(DocumentCommand::AddAnnotation {
+                dataset_id: DatasetId("ds1".into()),
+                id: "pin".into(),
+                position: [0.0, 0.0],
+                end: None,
+                z: 0.0,
+                t: 0,
+                c: 0,
+                author: "x".repeat(256 * 1024 + 1),
+                kind: crate::scene::AnnotationKind::Point,
+                view: None,
+            })
+            .unwrap_err();
+        assert_eq!(
+            error.category,
+            crate::scene::CommandValidationCategory::ResourceLimit
+        );
+        assert_eq!(serde_json::to_string(&document).unwrap(), before);
+    }
+
+    #[test]
+    fn cumulative_document_quota_is_checked_without_unbounded_json_allocation() {
+        use crate::scene::{Annotation, AnnotationKind, CommandValidationCategory, Comment};
+
+        let mut document = crate::scene::DocumentState::default();
+        document
+            .try_apply(DocumentCommand::DatasetOpened(
+                test_helpers::make_dataset_opened("ds1", "test", 1),
+            ))
+            .unwrap();
+        let dataset_id = DatasetId("ds1".into());
+        let comments = (0..100)
+            .map(|index| Comment {
+                id: format!("comment-{index}"),
+                author: "alice".into(),
+                text: "x".repeat(256 * 1024),
+            })
+            .collect();
+        document.annotations.insert(
+            dataset_id,
+            vec![Annotation {
+                id: "pin".into(),
+                position: [0.0, 0.0],
+                z: 0.0,
+                t: 0,
+                c: 0,
+                author: "alice".into(),
+                kind: AnnotationKind::Point,
+                end: None,
+                comments,
+                anchor: None,
+                view: None,
+            }],
+        );
+        let error = document.validate_state().unwrap_err();
+        assert_eq!(error.category, CommandValidationCategory::ResourceLimit);
+        assert_eq!(error.path, "document_json");
+    }
+
+    #[test]
+    fn viewport_label_index_is_validated_before_vector_growth() {
+        let mut scene = Scene::new([800, 600]);
+        scene
+            .try_apply(
+                DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened("ds1", "test", 1))
+                    .into(),
+            )
+            .unwrap();
+        let before = serde_json::to_string(&scene).unwrap();
+        assert!(
+            scene
+                .try_apply(
+                    ViewportCommand::SetLabelVisible {
+                        dataset_id: "ds1".into(),
+                        label: u32::MAX,
+                        visible: true,
+                    }
+                    .into(),
+                )
+                .is_err()
+        );
+        assert_eq!(serde_json::to_string(&scene).unwrap(), before);
+    }
+
+    fn command_matrix_layout(id: &str) -> LayoutSpec {
+        LayoutSpec {
+            id: LayoutId(id.into()),
+            name: id.into(),
+            placements: vec![lucida_content::EntityPlacement {
+                entity_id: EntityId("ds1-entity".into()),
+                position: [4.0, 8.0],
+            }],
+        }
+    }
+
+    fn command_matrix_opened(id: &str, name: &str, channels: u64, labels: usize) -> DatasetOpened {
+        let mut opened = test_helpers::make_dataset_opened_with_labels(id, name, channels, labels);
+        let label_images: Vec<_> = opened
+            .manifest
+            .label_specs()
+            .iter()
+            .map(|label| lucida_protocol::ProxiedImageSpec {
+                image_id: label.image.image_id.clone(),
+                wire_format: lucida_protocol::WireFormat::Raw {
+                    data_type: label.image.multiscale.data_type,
+                },
+            })
+            .collect();
+        let lucida_protocol::FetchSource::Proxied(fetch) = &mut opened.fetch;
+        fetch.images.extend(label_images);
+        opened
+    }
+
+    fn command_matrix_scene() -> Scene {
+        let mut scene = Scene::new([800, 600]);
+        scene
+            .try_apply(
+                DocumentCommand::DatasetOpened(command_matrix_opened("ds1", "test", 2, 2)).into(),
+            )
+            .unwrap();
+        scene
+            .try_apply(
+                DocumentCommand::RegisterLayout {
+                    dataset_id: DatasetId("ds1".into()),
+                    layout: command_matrix_layout("layout-a"),
+                }
+                .into(),
+            )
+            .unwrap();
+        scene
+            .try_apply(
+                DocumentCommand::SetActiveLayout {
+                    dataset_id: DatasetId("ds1".into()),
+                    layout_id: LayoutId("layout-a".into()),
+                }
+                .into(),
+            )
+            .unwrap();
+        scene
+            .try_apply(
+                DocumentCommand::AddAnnotation {
+                    dataset_id: DatasetId("ds1".into()),
+                    id: "pin".into(),
+                    position: [1.0, 2.0],
+                    end: None,
+                    z: 0.0,
+                    t: 0,
+                    c: 1,
+                    author: "alice".into(),
+                    kind: crate::scene::AnnotationKind::Point,
+                    view: None,
+                }
+                .into(),
+            )
+            .unwrap();
+        scene
+            .try_apply(
+                DocumentCommand::AddComment {
+                    dataset_id: DatasetId("ds1".into()),
+                    annotation_id: "pin".into(),
+                    id: "comment".into(),
+                    author: "alice".into(),
+                    text: "before".into(),
+                }
+                .into(),
+            )
+            .unwrap();
+        scene
+    }
+
+    fn assert_debug_finite(name: &str, state_kind: &str, debug: &str) {
+        let non_finite = debug
+            .split(|character: char| {
+                !(character.is_ascii_alphanumeric() || matches!(character, '-' | '+' | '.' | '_'))
+            })
+            .find(|token| matches!(*token, "NaN" | "inf" | "-inf"));
+        assert!(
+            non_finite.is_none(),
+            "{name}: {state_kind} contains non-finite number {non_finite:?}"
+        );
+    }
+
+    fn assert_document_property(name: &str, document: &crate::scene::DocumentState) {
+        assert_debug_finite(name, "document", &format!("{document:?}"));
+        let encoded = document
+            .to_validated_json()
+            .unwrap_or_else(|error| panic!("{name}: invalid document post-state: {error}"));
+        let value = serde_json::to_value(document)
+            .unwrap_or_else(|error| panic!("{name}: document JSON serialization failed: {error}"));
+        let restored: crate::scene::DocumentState = serde_json::from_slice(&encoded)
+            .unwrap_or_else(|error| panic!("{name}: document JSON reload failed: {error}"));
+        restored
+            .validate_state()
+            .unwrap_or_else(|error| panic!("{name}: reloaded document is invalid: {error}"));
+        assert_debug_finite(name, "reloaded document", &format!("{restored:?}"));
+        assert_eq!(
+            serde_json::to_value(&restored).unwrap(),
+            value,
+            "{name}: document changed across persistence round-trip"
+        );
+    }
+
+    fn assert_scene_property(name: &str, scene: &Scene) {
+        scene
+            .document
+            .validate_state()
+            .unwrap_or_else(|error| panic!("{name}: invalid scene document: {error}"));
+        assert!(
+            scene.view.z_range.start < scene.view.z_range.end,
+            "{name}: scene has an empty or inverted z range"
+        );
+        assert_debug_finite(name, "scene", &format!("{scene:?}"));
+        let value = serde_json::to_value(scene)
+            .unwrap_or_else(|error| panic!("{name}: scene JSON serialization failed: {error}"));
+        let encoded = serde_json::to_vec(scene)
+            .unwrap_or_else(|error| panic!("{name}: scene JSON encoding failed: {error}"));
+        let restored: Scene = serde_json::from_slice(&encoded)
+            .unwrap_or_else(|error| panic!("{name}: scene JSON reload failed: {error}"));
+        restored
+            .document
+            .validate_state()
+            .unwrap_or_else(|error| panic!("{name}: reloaded scene document is invalid: {error}"));
+        assert_debug_finite(name, "reloaded scene", &format!("{restored:?}"));
+        assert_eq!(
+            serde_json::to_value(&restored).unwrap(),
+            value,
+            "{name}: scene changed across JSON round-trip"
+        );
+    }
+
+    fn document_variant_name(command: &DocumentCommand) -> &'static str {
+        match command {
+            DocumentCommand::DatasetOpened(_) => "dataset_opened",
+            DocumentCommand::RemoveDataset { .. } => "remove_dataset",
+            DocumentCommand::RenameDataset { .. } => "rename_dataset",
+            DocumentCommand::RegisterLayout { .. } => "register_layout",
+            DocumentCommand::SetActiveLayout { .. } => "set_active_layout",
+            DocumentCommand::AddAnnotation { .. } => "add_annotation",
+            DocumentCommand::RemoveAnnotation { .. } => "remove_annotation",
+            DocumentCommand::AddComment { .. } => "add_comment",
+            DocumentCommand::RemoveComment { .. } => "remove_comment",
+            DocumentCommand::MoveAnnotation { .. } => "move_annotation",
+            DocumentCommand::EditComment { .. } => "edit_comment",
+        }
+    }
+
+    fn valid_document_command_matrix() -> Vec<DocumentCommand> {
+        vec![
+            DocumentCommand::DatasetOpened(command_matrix_opened("ds2", "second", 2, 1)),
+            DocumentCommand::RemoveDataset {
+                id: DatasetId("ds1".into()),
+            },
+            DocumentCommand::RenameDataset {
+                id: DatasetId("ds1".into()),
+                name: "renamed".into(),
+            },
+            DocumentCommand::RegisterLayout {
+                dataset_id: DatasetId("ds1".into()),
+                layout: command_matrix_layout("layout-b"),
+            },
+            DocumentCommand::SetActiveLayout {
+                dataset_id: DatasetId("ds1".into()),
+                layout_id: LayoutId("layout-a".into()),
+            },
+            DocumentCommand::AddAnnotation {
+                dataset_id: DatasetId("ds1".into()),
+                id: "pin-new".into(),
+                position: [3.0, 4.0],
+                end: Some([5.0, 6.0]),
+                z: 0.0,
+                t: 0,
+                c: 0,
+                author: "bob".into(),
+                kind: crate::scene::AnnotationKind::Line,
+                view: None,
+            },
+            DocumentCommand::RemoveAnnotation {
+                dataset_id: DatasetId("ds1".into()),
+                id: "pin".into(),
+            },
+            DocumentCommand::AddComment {
+                dataset_id: DatasetId("ds1".into()),
+                annotation_id: "pin".into(),
+                id: "comment-new".into(),
+                author: "bob".into(),
+                text: "hello".into(),
+            },
+            DocumentCommand::RemoveComment {
+                dataset_id: DatasetId("ds1".into()),
+                annotation_id: "pin".into(),
+                id: "comment".into(),
+            },
+            DocumentCommand::MoveAnnotation {
+                dataset_id: DatasetId("ds1".into()),
+                id: "pin".into(),
+                position: [7.0, 9.0],
+                end: None,
+                z: 0.0,
+            },
+            DocumentCommand::EditComment {
+                dataset_id: DatasetId("ds1".into()),
+                annotation_id: "pin".into(),
+                id: "comment".into(),
+                text: "after".into(),
+            },
+        ]
+    }
+
+    #[test]
+    fn every_document_command_variant_preserves_valid_roundtrippable_state() {
+        let base = command_matrix_scene();
+        let commands = valid_document_command_matrix();
+        let names: std::collections::HashSet<_> =
+            commands.iter().map(document_variant_name).collect();
+        assert_eq!(commands.len(), 11, "update the exhaustive command matrix");
+        assert_eq!(
+            names.len(),
+            commands.len(),
+            "matrix contains a duplicate variant"
+        );
+
+        for command in commands {
+            let name = document_variant_name(&command);
+            let mut document = base.document.clone();
+            document
+                .try_apply(command.clone())
+                .unwrap_or_else(|error| panic!("{name}: document command rejected: {error}"));
+            assert_document_property(name, &document);
+
+            let mut scene = base.clone();
+            scene
+                .try_apply(command.into())
+                .unwrap_or_else(|error| panic!("{name}: scene command rejected: {error}"));
+            assert_scene_property(name, &scene);
+        }
+    }
+
+    fn viewport_variant_name(command: &ViewportCommand) -> &'static str {
+        match command {
+            ViewportCommand::SetMode2D => "set_mode_2d",
+            ViewportCommand::SetMode3D => "set_mode_3d",
+            ViewportCommand::SetModeFly => "set_mode_fly",
+            ViewportCommand::SetViewport { .. } => "set_viewport",
+            ViewportCommand::Pan { .. } => "pan",
+            ViewportCommand::ZoomBy { .. } => "zoom_by",
+            ViewportCommand::SetCenter { .. } => "set_center",
+            ViewportCommand::SetZoom { .. } => "set_zoom",
+            ViewportCommand::Rotate3D { .. } => "rotate_3d",
+            ViewportCommand::Zoom3D { .. } => "zoom_3d",
+            ViewportCommand::Pan3D { .. } => "pan_3d",
+            ViewportCommand::CenterOnVoxel3D { .. } => "center_on_voxel_3d",
+            ViewportCommand::FlyTick { .. } => "fly_tick",
+            ViewportCommand::FlySetBaseSpeed { .. } => "fly_set_base_speed",
+            ViewportCommand::FlyAdjustSpeed { .. } => "fly_adjust_speed",
+            ViewportCommand::AdjustClipDistance { .. } => "adjust_clip_distance",
+            ViewportCommand::SetZ { .. } => "set_z",
+            ViewportCommand::SetZRange { .. } => "set_z_range",
+            ViewportCommand::SetT { .. } => "set_t",
+            ViewportCommand::SetC { .. } => "set_c",
+            ViewportCommand::SetContrast { .. } => "set_contrast",
+            ViewportCommand::SetGamma { .. } => "set_gamma",
+            ViewportCommand::SetDatasetOrder { .. } => "set_dataset_order",
+            ViewportCommand::SetDatasetVisible { .. } => "set_dataset_visible",
+            ViewportCommand::SetDatasetOpacity { .. } => "set_dataset_opacity",
+            ViewportCommand::SetDatasetContrast { .. } => "set_dataset_contrast",
+            ViewportCommand::SetDatasetGamma { .. } => "set_dataset_gamma",
+            ViewportCommand::SetDatasetBlendMode { .. } => "set_dataset_blend_mode",
+            ViewportCommand::SetDatasetRenderMode { .. } => "set_dataset_render_mode",
+            ViewportCommand::SetDatasetDetailLevelOverride { .. } => {
+                "set_dataset_detail_level_override"
+            }
+            ViewportCommand::SetMultiChannel { .. } => "set_multi_channel",
+            ViewportCommand::SetChannelVisible { .. } => "set_channel_visible",
+            ViewportCommand::SetChannelColormap { .. } => "set_channel_colormap",
+            ViewportCommand::SetChannelName { .. } => "set_channel_name",
+            ViewportCommand::SetChannelContrast { .. } => "set_channel_contrast",
+            ViewportCommand::SetChannelGamma { .. } => "set_channel_gamma",
+            ViewportCommand::SetChannelBlendMode { .. } => "set_channel_blend_mode",
+            ViewportCommand::SetLabelVisible { .. } => "set_label_visible",
+            ViewportCommand::SetLabelOpacity { .. } => "set_label_opacity",
+        }
+    }
+
+    fn valid_viewport_command_matrix() -> Vec<ViewportCommand> {
+        vec![
+            ViewportCommand::SetMode2D,
+            ViewportCommand::SetMode3D,
+            ViewportCommand::SetModeFly,
+            ViewportCommand::SetViewport {
+                width: 640,
+                height: 480,
+            },
+            ViewportCommand::Pan { dx: 2.0, dy: -3.0 },
+            ViewportCommand::ZoomBy { factor: 1.25 },
+            ViewportCommand::SetCenter { x: 4.0, y: 5.0 },
+            ViewportCommand::SetZoom { value: 2.0 },
+            ViewportCommand::Rotate3D {
+                d_theta: 0.1,
+                d_phi: -0.2,
+            },
+            ViewportCommand::Zoom3D { delta: 0.25 },
+            ViewportCommand::Pan3D { dx: 1.0, dy: -1.0 },
+            ViewportCommand::CenterOnVoxel3D {
+                dataset_id: "ds1".into(),
+                x: 4.0,
+                y: 5.0,
+                z: 0.0,
+            },
+            ViewportCommand::FlyTick {
+                dt: 0.016,
+                forward: 1.0,
+                right: 0.25,
+                up: -0.25,
+                yaw: 0.1,
+                pitch: -0.1,
+                roll: 0.05,
+            },
+            ViewportCommand::FlySetBaseSpeed { speed: 2.0 },
+            ViewportCommand::FlyAdjustSpeed { factor: 1.1 },
+            ViewportCommand::AdjustClipDistance { delta: 0.25 },
+            ViewportCommand::SetZ { z: 0 },
+            ViewportCommand::SetZRange { start: 0, end: 1 },
+            ViewportCommand::SetT { t: 0 },
+            ViewportCommand::SetC { c: 1 },
+            ViewportCommand::SetContrast {
+                min: 10.0,
+                max: 100.0,
+            },
+            ViewportCommand::SetGamma { gamma: 1.5 },
+            ViewportCommand::SetDatasetOrder {
+                order: vec!["ds1".into()],
+            },
+            ViewportCommand::SetDatasetVisible {
+                dataset_id: "ds1".into(),
+                visible: false,
+            },
+            ViewportCommand::SetDatasetOpacity {
+                dataset_id: "ds1".into(),
+                opacity: 0.75,
+            },
+            ViewportCommand::SetDatasetContrast {
+                dataset_id: "ds1".into(),
+                min: 5.0,
+                max: 50.0,
+            },
+            ViewportCommand::SetDatasetGamma {
+                dataset_id: "ds1".into(),
+                gamma: 1.25,
+            },
+            ViewportCommand::SetDatasetBlendMode {
+                dataset_id: "ds1".into(),
+                blend_mode: BlendMode::Additive,
+            },
+            ViewportCommand::SetDatasetRenderMode {
+                dataset_id: "ds1".into(),
+                render_mode: RenderMode::MaxIntensity,
+            },
+            ViewportCommand::SetDatasetDetailLevelOverride {
+                dataset_id: "ds1".into(),
+                level: Some(0),
+            },
+            ViewportCommand::SetMultiChannel { enabled: true },
+            ViewportCommand::SetChannelVisible {
+                dataset_id: "ds1".into(),
+                channel: 1,
+                visible: false,
+            },
+            ViewportCommand::SetChannelColormap {
+                dataset_id: "ds1".into(),
+                channel: 1,
+                colormap: Colormap::Green,
+            },
+            ViewportCommand::SetChannelName {
+                dataset_id: "ds1".into(),
+                channel: 1,
+                name: Some("channel-one".into()),
+            },
+            ViewportCommand::SetChannelContrast {
+                dataset_id: "ds1".into(),
+                channel: 1,
+                min: 3.0,
+                max: 30.0,
+            },
+            ViewportCommand::SetChannelGamma {
+                dataset_id: "ds1".into(),
+                channel: 1,
+                gamma: 1.2,
+            },
+            ViewportCommand::SetChannelBlendMode {
+                dataset_id: "ds1".into(),
+                blend_mode: BlendMode::Max,
+            },
+            ViewportCommand::SetLabelVisible {
+                dataset_id: "ds1".into(),
+                label: 1,
+                visible: true,
+            },
+            ViewportCommand::SetLabelOpacity {
+                dataset_id: "ds1".into(),
+                label: 1,
+                opacity: 0.4,
+            },
+        ]
+    }
+
+    #[test]
+    fn untagged_command_families_have_disjoint_exhaustive_wire_tags() {
+        let document_commands = valid_document_command_matrix();
+        let viewport_commands = valid_viewport_command_matrix();
+        assert_eq!(document_commands.len(), 11, "update the exhaustive matrix");
+        assert_eq!(viewport_commands.len(), 39, "update the exhaustive matrix");
+
+        let wire_tag = |value: serde_json::Value| {
+            value
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .expect("every command has one string wire tag")
+                .to_string()
+        };
+        let document_tags: std::collections::HashSet<_> = document_commands
+            .iter()
+            .map(|command| wire_tag(serde_json::to_value(command).unwrap()))
+            .collect();
+        let viewport_tags: std::collections::HashSet<_> = viewport_commands
+            .iter()
+            .map(|command| wire_tag(serde_json::to_value(command).unwrap()))
+            .collect();
+        assert_eq!(document_tags.len(), document_commands.len());
+        assert_eq!(viewport_tags.len(), viewport_commands.len());
+        let collisions: Vec<_> = document_tags.intersection(&viewport_tags).collect();
+        assert!(
+            collisions.is_empty(),
+            "serde(untagged) would silently interpret these shared tags as Document first: \
+             {collisions:?}"
+        );
+
+        for command in document_commands {
+            let encoded = serde_json::to_value(&command).unwrap();
+            assert!(matches!(
+                serde_json::from_value::<Command>(encoded).unwrap(),
+                Command::Document(_)
+            ));
+        }
+        for command in viewport_commands {
+            let encoded = serde_json::to_value(&command).unwrap();
+            assert!(matches!(
+                serde_json::from_value::<Command>(encoded).unwrap(),
+                Command::Viewport(_)
+            ));
+        }
+    }
+
+    fn prepare_viewport_command_mode(scene: &mut Scene, command: &ViewportCommand) {
+        let mode = match command {
+            ViewportCommand::Rotate3D { .. }
+            | ViewportCommand::Zoom3D { .. }
+            | ViewportCommand::Pan3D { .. }
+            | ViewportCommand::CenterOnVoxel3D { .. }
+            | ViewportCommand::AdjustClipDistance { .. } => Some(ViewportCommand::SetMode3D),
+            ViewportCommand::FlyTick { .. }
+            | ViewportCommand::FlySetBaseSpeed { .. }
+            | ViewportCommand::FlyAdjustSpeed { .. } => Some(ViewportCommand::SetModeFly),
+            _ => None,
+        };
+        if let Some(mode) = mode {
+            scene.try_apply(mode.into()).unwrap();
+        }
+    }
+
+    #[test]
+    fn every_viewport_command_variant_preserves_valid_roundtrippable_state() {
+        let base = command_matrix_scene();
+        let commands = valid_viewport_command_matrix();
+        let names: std::collections::HashSet<_> =
+            commands.iter().map(viewport_variant_name).collect();
+        assert_eq!(commands.len(), 39, "update the exhaustive command matrix");
+        assert_eq!(
+            names.len(),
+            commands.len(),
+            "matrix contains a duplicate variant"
+        );
+
+        for command in commands {
+            let name = viewport_variant_name(&command);
+            let mut scene = base.clone();
+            prepare_viewport_command_mode(&mut scene, &command);
+            scene
+                .try_apply(command.into())
+                .unwrap_or_else(|error| panic!("{name}: viewport command rejected: {error}"));
+            assert_scene_property(name, &scene);
+        }
+    }
+
+    fn invalid_document_command_matrix()
+    -> Vec<(DocumentCommand, crate::scene::CommandValidationCategory)> {
+        use crate::scene::CommandValidationCategory as Category;
+
+        let mut invalid_open = command_matrix_opened("invalid", "invalid", 2, 1);
+        invalid_open.manifest.dataset_id = DatasetId(String::new());
+        vec![
+            (
+                DocumentCommand::DatasetOpened(invalid_open),
+                Category::InconsistentState,
+            ),
+            (
+                DocumentCommand::RemoveDataset {
+                    id: DatasetId(String::new()),
+                },
+                Category::InvalidValue,
+            ),
+            (
+                DocumentCommand::RenameDataset {
+                    id: DatasetId("ds1".into()),
+                    name: "bad\0name".into(),
+                },
+                Category::InvalidValue,
+            ),
+            (
+                DocumentCommand::RegisterLayout {
+                    dataset_id: DatasetId("ds1".into()),
+                    layout: LayoutSpec {
+                        id: LayoutId("bad-layout".into()),
+                        name: "bad".into(),
+                        placements: vec![lucida_content::EntityPlacement {
+                            entity_id: EntityId("ds1-entity".into()),
+                            position: [f64::NAN, 0.0],
+                        }],
+                    },
+                },
+                Category::InvalidValue,
+            ),
+            (
+                DocumentCommand::SetActiveLayout {
+                    dataset_id: DatasetId("ds1".into()),
+                    layout_id: LayoutId("missing".into()),
+                },
+                Category::MissingReference,
+            ),
+            (
+                DocumentCommand::AddAnnotation {
+                    dataset_id: DatasetId("ds1".into()),
+                    id: String::new(),
+                    position: [0.0, 0.0],
+                    end: None,
+                    z: 0.0,
+                    t: 0,
+                    c: 0,
+                    author: "alice".into(),
+                    kind: crate::scene::AnnotationKind::Point,
+                    view: None,
+                },
+                Category::InvalidValue,
+            ),
+            (
+                DocumentCommand::RemoveAnnotation {
+                    dataset_id: DatasetId("ds1".into()),
+                    id: String::new(),
+                },
+                Category::InvalidValue,
+            ),
+            (
+                DocumentCommand::AddComment {
+                    dataset_id: DatasetId("ds1".into()),
+                    annotation_id: String::new(),
+                    id: "new".into(),
+                    author: "alice".into(),
+                    text: "text".into(),
+                },
+                Category::InvalidValue,
+            ),
+            (
+                DocumentCommand::RemoveComment {
+                    dataset_id: DatasetId("ds1".into()),
+                    annotation_id: "pin".into(),
+                    id: String::new(),
+                },
+                Category::InvalidValue,
+            ),
+            (
+                DocumentCommand::MoveAnnotation {
+                    dataset_id: DatasetId("ds1".into()),
+                    id: "pin".into(),
+                    position: [f64::INFINITY, 0.0],
+                    end: None,
+                    z: 0.0,
+                },
+                Category::InvalidValue,
+            ),
+            (
+                DocumentCommand::EditComment {
+                    dataset_id: DatasetId("ds1".into()),
+                    annotation_id: "pin".into(),
+                    id: "comment".into(),
+                    text: "bad\0text".into(),
+                },
+                Category::InvalidValue,
+            ),
+        ]
+    }
+
+    #[test]
+    fn every_document_command_rejection_is_typed_and_atomic() {
+        let base = command_matrix_scene();
+        let cases = invalid_document_command_matrix();
+        let names: std::collections::HashSet<_> = cases
+            .iter()
+            .map(|(command, _)| document_variant_name(command))
+            .collect();
+        assert_eq!(cases.len(), 11, "update the exhaustive rejection matrix");
+        assert_eq!(
+            names.len(),
+            cases.len(),
+            "matrix contains a duplicate variant"
+        );
+
+        for (command, expected_category) in cases {
+            let name = document_variant_name(&command);
+            let mut document = base.document.clone();
+            let document_before = serde_json::to_value(&document).unwrap();
+            let error = document.try_apply(command.clone()).unwrap_err();
+            assert_eq!(error.category, expected_category, "{name}: wrong category");
+            assert!(!error.path.is_empty(), "{name}: missing error path");
+            assert!(!error.message.is_empty(), "{name}: missing error message");
+            assert_eq!(
+                serde_json::to_value(&document).unwrap(),
+                document_before,
+                "{name}: DocumentState changed after rejection"
+            );
+
+            let mut scene = base.clone();
+            let scene_before = serde_json::to_value(&scene).unwrap();
+            let error = scene.try_apply(command.into()).unwrap_err();
+            assert_eq!(error.category, expected_category, "{name}: wrong category");
+            assert!(!error.path.is_empty(), "{name}: missing error path");
+            assert!(!error.message.is_empty(), "{name}: missing error message");
+            assert_eq!(
+                serde_json::to_value(&scene).unwrap(),
+                scene_before,
+                "{name}: Scene changed after rejection"
+            );
+        }
+    }
+
+    #[test]
+    fn viewport_reference_index_and_range_rejections_are_typed_and_atomic() {
+        use crate::scene::CommandValidationCategory as Category;
+
+        let cases = vec![
+            (ViewportCommand::SetZ { z: u32::MAX }, Category::OutOfBounds),
+            (
+                ViewportCommand::SetZRange { start: 4, end: 3 },
+                Category::InvalidValue,
+            ),
+            (
+                ViewportCommand::CenterOnVoxel3D {
+                    dataset_id: "missing".into(),
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                Category::MissingReference,
+            ),
+            (
+                ViewportCommand::SetDatasetOrder {
+                    order: vec!["ds1".into(), "ds1".into()],
+                },
+                Category::Duplicate,
+            ),
+            (
+                ViewportCommand::SetDatasetVisible {
+                    dataset_id: "missing".into(),
+                    visible: true,
+                },
+                Category::MissingReference,
+            ),
+            (
+                ViewportCommand::SetDatasetOpacity {
+                    dataset_id: "missing".into(),
+                    opacity: 0.5,
+                },
+                Category::MissingReference,
+            ),
+            (
+                ViewportCommand::SetDatasetContrast {
+                    dataset_id: "missing".into(),
+                    min: 0.0,
+                    max: 1.0,
+                },
+                Category::MissingReference,
+            ),
+            (
+                ViewportCommand::SetDatasetGamma {
+                    dataset_id: "missing".into(),
+                    gamma: 1.0,
+                },
+                Category::MissingReference,
+            ),
+            (
+                ViewportCommand::SetDatasetBlendMode {
+                    dataset_id: "missing".into(),
+                    blend_mode: BlendMode::Alpha,
+                },
+                Category::MissingReference,
+            ),
+            (
+                ViewportCommand::SetDatasetRenderMode {
+                    dataset_id: "missing".into(),
+                    render_mode: RenderMode::Translucent,
+                },
+                Category::MissingReference,
+            ),
+            (
+                ViewportCommand::SetDatasetDetailLevelOverride {
+                    dataset_id: "missing".into(),
+                    level: Some(0),
+                },
+                Category::MissingReference,
+            ),
+            (
+                ViewportCommand::SetChannelVisible {
+                    dataset_id: "ds1".into(),
+                    channel: u32::MAX,
+                    visible: true,
+                },
+                Category::OutOfBounds,
+            ),
+            (
+                ViewportCommand::SetChannelColormap {
+                    dataset_id: "ds1".into(),
+                    channel: u32::MAX,
+                    colormap: Colormap::Gray,
+                },
+                Category::OutOfBounds,
+            ),
+            (
+                ViewportCommand::SetChannelName {
+                    dataset_id: "ds1".into(),
+                    channel: 0,
+                    name: Some("x".repeat(MAX_CHANNEL_NAME_BYTES + 1)),
+                },
+                Category::ResourceLimit,
+            ),
+            (
+                ViewportCommand::SetChannelContrast {
+                    dataset_id: "ds1".into(),
+                    channel: u32::MAX,
+                    min: 0.0,
+                    max: 1.0,
+                },
+                Category::OutOfBounds,
+            ),
+            (
+                ViewportCommand::SetChannelGamma {
+                    dataset_id: "ds1".into(),
+                    channel: u32::MAX,
+                    gamma: 1.0,
+                },
+                Category::OutOfBounds,
+            ),
+            (
+                ViewportCommand::SetChannelBlendMode {
+                    dataset_id: "missing".into(),
+                    blend_mode: BlendMode::Alpha,
+                },
+                Category::MissingReference,
+            ),
+            (
+                ViewportCommand::SetLabelVisible {
+                    dataset_id: "ds1".into(),
+                    label: u32::MAX,
+                    visible: true,
+                },
+                Category::OutOfBounds,
+            ),
+            (
+                ViewportCommand::SetLabelOpacity {
+                    dataset_id: "ds1".into(),
+                    label: u32::MAX,
+                    opacity: 0.5,
+                },
+                Category::OutOfBounds,
+            ),
+        ];
+        let base = command_matrix_scene();
+        let before = serde_json::to_value(&base).unwrap();
+        for (command, expected_category) in cases {
+            let name = viewport_variant_name(&command);
+            let mut scene = base.clone();
+            let error = scene.try_apply(command.into()).unwrap_err();
+            assert_eq!(error.category, expected_category, "{name}: wrong category");
+            assert!(!error.path.is_empty(), "{name}: missing error path");
+            assert!(!error.message.is_empty(), "{name}: missing error message");
+            assert_eq!(
+                serde_json::to_value(scene).unwrap(),
+                before,
+                "{name}: Scene changed after rejection"
+            );
+        }
     }
 }

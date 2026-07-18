@@ -7,6 +7,7 @@ use serde_json::{Map, Value};
 #[allow(dead_code)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorKind {
+    Usage,
     Config,
     InvalidServer,
     UnreachableServer,
@@ -21,12 +22,14 @@ pub enum ErrorKind {
     Protocol,
     Io,
     Network,
+    DeadlineExceeded,
     Unexpected,
 }
 
 impl ErrorKind {
     pub fn as_str(self) -> &'static str {
         match self {
+            ErrorKind::Usage => "usage",
             ErrorKind::Config => "config",
             ErrorKind::InvalidServer => "invalid_server",
             ErrorKind::UnreachableServer => "unreachable_server",
@@ -41,12 +44,14 @@ impl ErrorKind {
             ErrorKind::Protocol => "protocol",
             ErrorKind::Io => "io",
             ErrorKind::Network => "network",
+            ErrorKind::DeadlineExceeded => "deadline_exceeded",
             ErrorKind::Unexpected => "unexpected",
         }
     }
 
     pub fn exit_code(self) -> i32 {
         match self {
+            ErrorKind::Usage => 2,
             ErrorKind::Unauthenticated => 2,
             ErrorKind::Unauthorized => 3,
             ErrorKind::MissingResource => 4,
@@ -60,6 +65,7 @@ impl ErrorKind {
             | ErrorKind::Protocol
             | ErrorKind::Io
             | ErrorKind::Network
+            | ErrorKind::DeadlineExceeded
             | ErrorKind::Unexpected => 1,
         }
     }
@@ -101,6 +107,11 @@ impl CliError {
         if let Ok(value) = serde_json::to_value(value) {
             self.context.insert(key.into(), value);
         }
+        self
+    }
+
+    pub fn with_message_suffix(mut self, suffix: impl AsRef<str>) -> Self {
+        self.message.push_str(suffix.as_ref());
         self
     }
 

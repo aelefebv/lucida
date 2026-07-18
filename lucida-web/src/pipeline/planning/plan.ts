@@ -9,10 +9,9 @@ import {
   emitCoarseLane,
   emitDetailLane,
   emitMinimapLane,
-  emitOverviewLane,
   emitPrefetchLane,
 } from "./emit.ts";
-import { assignCoarseDetailModes, assignModes } from "./modes.ts";
+import { assignChunkModes } from "./modes.ts";
 import {
   emptyPlanStats,
   type ActiveSetEntry,
@@ -21,12 +20,11 @@ import {
   type PlanningSnapshot,
   type PlanStats,
   type PlanningState,
-  type ProxyRequest,
   type RequestPlan,
 } from "./types.ts";
 import { validatePlanningInputs } from "./validate.ts";
 
-function compareChunkRequests(a: ChunkRequest, b: ChunkRequest): number {
+export function compareChunkRequests(a: ChunkRequest, b: ChunkRequest): number {
   const priority = a.priority - b.priority;
   if (priority !== 0) return priority;
 
@@ -44,20 +42,55 @@ function compareChunkRequests(a: ChunkRequest, b: ChunkRequest): number {
   );
 }
 
-function compareProxyRequests(a: ProxyRequest, b: ProxyRequest): number {
-  const priority = a.priority - b.priority;
-  if (priority !== 0) return priority;
-  return (
-    a.datasetId.localeCompare(b.datasetId) ||
-    a.entityId.localeCompare(b.entityId) ||
-    a.kind.localeCompare(b.kind) ||
-    a.t - b.t ||
-    a.c - b.c
+/**
+ * Reconcile bulk minimap priority across the workspace-wide fetch queue.
+ *
+ * A per-dataset plan can only place its bulk minimap requests behind that
+ * dataset's view work. The scheduler is shared, however, so the real fairness
+ * invariant is workspace-wide: every bulk seed must follow every view-serving
+ * request from every dataset. Planner outputs are freshly allocated and
+ * explicitly caller-mutable, so this adjusts them in place and restores their
+ * canonical order without another allocation.
+ */
+export function applyWorkspaceMinimapPriority(
+  requestsByDataset: readonly ChunkRequest[][],
+  minimapPending: ReadonlyMap<string, readonly unknown[]>,
+  config: PlanningConfig = DEFAULT_PLANNING_CONFIG,
+): void {
+  let pendingTotal = 0;
+  for (const coords of minimapPending.values()) pendingTotal += coords.length;
+  const fastMax = config.minimapSeedFastMaxChunks
+    ?? DEFAULT_PLANNING_CONFIG.minimapSeedFastMaxChunks
+    ?? 0;
+  if (pendingTotal <= fastMax) return;
+
+  let workspaceViewMax = Number.NEGATIVE_INFINITY;
+  for (const requests of requestsByDataset) {
+    for (const request of requests) {
+      if (request.lane !== "minimap") {
+        workspaceViewMax = Math.max(workspaceViewMax, request.priority);
+      }
+    }
+  }
+  const floor = Math.max(
+    config.minimapSeedBulkLaneOffset
+      ?? DEFAULT_PLANNING_CONFIG.minimapSeedBulkLaneOffset
+      ?? 0,
+    Number.isFinite(workspaceViewMax) ? workspaceViewMax + 1 : 0,
   );
+  for (const requests of requestsByDataset) {
+    let changed = false;
+    for (const request of requests) {
+      if (request.lane !== "minimap" || request.priority >= floor) continue;
+      request.priority = floor;
+      changed = true;
+    }
+    if (changed) requests.sort(compareChunkRequests);
+  }
 }
 
 /**
- * Emit the chunk + proxy request streams for an ALREADY-RESOLVED active set.
+ * Emit the chunk request stream for an already-resolved active set.
  *
  * This is steps 2–7 of {@link plan} — every lane emission plus the final
  * priority sort — factored out so a caller that already holds a valid active
@@ -69,18 +102,18 @@ function compareProxyRequests(a: ProxyRequest, b: ProxyRequest): number {
  * region, and the selection, so reusing an unchanged active set with a snapshot
  * whose only difference is `selection.t` / `selection.z` (and, on a Z move,
  * `visibleRegion.zRangeVox`) yields exactly the requests a full {@link plan}
- * would produce for that selection — with none of `assignModes`' work.
+ * would produce for that selection — with none of `assignChunkModes`' work.
  *
- * Postconditions match {@link plan}: `requests` and `proxyRequests` are sorted
- * ascending by priority; output objects are freshly allocated and carry
- * `datasetId` from {@link PlanningSnapshot.datasetId}.
+ * Postconditions match {@link plan}: `requests` is sorted ascending by
+ * priority; output objects are freshly allocated and carry `datasetId` from
+ * {@link PlanningSnapshot.datasetId}.
  */
 export function emitPlanRequests(
   activeSet: ActiveSetEntry[],
   snapshot: PlanningSnapshot,
   stats: PlanStats,
   config: PlanningConfig = DEFAULT_PLANNING_CONFIG,
-): { requests: ChunkRequest[]; proxyRequests: ProxyRequest[] } {
+): { requests: ChunkRequest[] } {
   // Step 2: Build entity lookup.
   const entityById = new Map<string, EntitySnapshot>();
   for (const entity of snapshot.entities) {
@@ -88,35 +121,14 @@ export function emitPlanRequests(
   }
 
   const allRequests: ChunkRequest[] = [];
-  const proxyRequests: ProxyRequest[] = [];
-
-  // Track group-proxy requests we've already emitted (one per
-  // (groupId, t, c)) so multiple tiles-with-proxy-fallback tiles of
-  // the same group don't each push a duplicate parent-group request.
-  const groupProxyEmitted = new Set<string>();
-
-  // Step 3: Detail / proxy lane (per active entry).
-  emitDetailLane(
-    activeSet,
-    snapshot,
-    entityById,
-    stats,
-    allRequests,
-    proxyRequests,
-    groupProxyEmitted,
-    config,
-  );
+  // Step 3: Detail lane (per active entry).
+  emitDetailLane(activeSet, snapshot, entityById, stats, allRequests, config);
 
   // Step 4: Prefetch lane — for tile-mode entries only.
   emitPrefetchLane(activeSet, snapshot, entityById, stats, allRequests, config);
 
-  // Step 5: Context fallback lane. The bridge emits explicit coarse
-  // tier chunks; the legacy path keeps the old overview migration lane.
-  if (config.coarseDetailEnabled) {
-    emitCoarseLane(activeSet, snapshot, entityById, stats, allRequests, config);
-  } else {
-    emitOverviewLane(snapshot.entities, snapshot, stats, allRequests, config);
-  }
+  // Step 5: Source-backed coarse context lane.
+  emitCoarseLane(activeSet, snapshot, entityById, stats, allRequests, config);
 
   // Step 6: Minimap lane (see ADR 0023). Small seed sets ride the
   // dedicated top lane (priority 0 — the sort puts them first, so the
@@ -145,9 +157,7 @@ export function emitPlanRequests(
   // multi-channel upload reaches all channels for focal cells instead
   // of exhausting the budget on one channel's whole grid.
   allRequests.sort(compareChunkRequests);
-  proxyRequests.sort(compareProxyRequests);
-
-  return { requests: allRequests, proxyRequests };
+  return { requests: allRequests };
 }
 
 /**
@@ -155,7 +165,7 @@ export function emitPlanRequests(
  * caller stored from the previous tick's {@link RequestPlan.nextState}.
  *
  * Postconditions:
- *   - `requests` and `proxyRequests` are sorted ascending by `priority`
+ *   - `requests` is sorted ascending by `priority`
  *     (lower = more urgent).
  *   - Output objects are freshly allocated; the caller may mutate them.
  *     Every request carries `datasetId` from {@link PlanningSnapshot.datasetId}.
@@ -174,20 +184,11 @@ export function plan(
 
   const stats = emptyPlanStats();
 
-  // Step 1: Resolve residency entries. The coarse/detail bridge bypasses
-  // proxy promotion while the legacy path preserves the three-tier model.
-  const activeSet = config.coarseDetailEnabled
-    ? assignCoarseDetailModes(snapshot.entities)
-    : assignModes(
-        snapshot.entities,
-        state.previousActiveSet,
-        snapshot.assetCatalog,
-        stats,
-        config,
-      );
+  // Step 1: Resolve each visible entity onto the ordinary chunk path.
+  const activeSet = assignChunkModes(snapshot.entities);
 
   // Steps 2–7: emit + sort the request streams for the resolved active set.
-  const { requests, proxyRequests } = emitPlanRequests(activeSet, snapshot, stats, config);
+  const { requests } = emitPlanRequests(activeSet, snapshot, stats, config);
 
   // Step 8: Epoch propagation.
   const epochs: SceneEpochs = {
@@ -199,5 +200,5 @@ export function plan(
   // hand back on the next tick — today derived from `activeSet`, but
   // future planner-internal state lands here without churning callers.
   const nextState: PlanningState = { previousActiveSet: activeSet };
-  return { requests, activeSet, epochs, proxyRequests, stats, nextState };
+  return { requests, activeSet, epochs, stats, nextState };
 }

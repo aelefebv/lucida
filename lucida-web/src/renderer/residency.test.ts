@@ -287,7 +287,7 @@ describe("applyViewHotState", () => {
   ): ViewHotStateMessage {
     return {
       type: "viewHotState",
-      epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 0 },
+      epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 0 },
       datasetId: "ds1",
       rayHitsByEntity,
     };

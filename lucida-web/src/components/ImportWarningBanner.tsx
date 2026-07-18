@@ -49,6 +49,7 @@ export function ImportWarningBanner({ warnings, overflow = 0, onDismiss }: Props
     <div
       role="status"
       data-testid="import-warning-banner"
+      data-floating-safe-region
       style={{
         position: "absolute",
         // Below the loading banner (top: 12) so a co-visible restore banner
@@ -58,15 +59,15 @@ export function ImportWarningBanner({ warnings, overflow = 0, onDismiss }: Props
         transform: "translateX(-50%)",
         display: "flex",
         flexDirection: "column",
-        background: "#5a3a00",
-        color: "#fff",
+        background: "var(--warning-surface)",
+        color: "var(--text-primary)",
         padding: "0.5rem 0.875rem",
         borderRadius: 6,
-        border: "1px solid #b88500",
+        border: "1px solid var(--warning-border)",
         fontSize: "0.85rem",
         zIndex: 50,
         maxWidth: 480,
-        boxShadow: "0 2px 8px rgba(0,0,0,0.35)",
+        boxShadow: "var(--shadow-popover)",
       }}
     >
       <div>
@@ -109,8 +110,8 @@ export function ImportWarningBanner({ warnings, overflow = 0, onDismiss }: Props
           padding: "0.2rem 0.5rem",
           fontSize: "0.75rem",
           background: "transparent",
-          color: "#fff",
-          border: "1px solid #888",
+          color: "var(--text-primary)",
+          border: "1px solid var(--border-strong)",
           borderRadius: 4,
           cursor: "pointer",
         }}

@@ -21,6 +21,8 @@ export function setCameraUVForMember(
   memberId: string,
   uv: [number, number],
 ): void {
+  // An explicitly rendered member supersedes any dormant aggregate mapping.
+  state.aggregateCameraByMember.delete(memberId);
   state.cameraUVPerEntity.set(memberId, uv);
 }
 
@@ -29,17 +31,32 @@ export function cameraUVForMember(
   state: RendererState,
   memberId: string,
 ): [number, number] {
+  const aggregate = state.aggregateCameraByMember.get(memberId);
+  if (aggregate) {
+    const [rx, ry, rw, rh] = aggregate.rect;
+    const { view } = aggregate;
+    const memberW = rw * view.dataW;
+    const memberH = rh * view.dataH;
+    if (memberW > 0 && memberH > 0) {
+      return [
+        (view.cx - (view.offsetX + rx * view.dataW)) / memberW,
+        (view.cy - (view.offsetY + ry * view.dataH)) / memberH,
+      ];
+    }
+  }
   return state.cameraUVPerEntity.get(memberId) ?? [0.5, 0.5];
 }
 
 /** Drop camera-UV state for a removed dataset / member. */
 export function clearCameraUVForMember(state: RendererState, idOrMember: string): void {
   state.cameraUVPerEntity.delete(idOrMember);
+  state.aggregateCameraByMember.delete(idOrMember);
 }
 
 /** Drop all camera-UV state (worker destroy). */
 export function clearAllCameraUVs(state: RendererState): void {
   state.cameraUVPerEntity.clear();
+  state.aggregateCameraByMember.clear();
 }
 
 /**
@@ -69,7 +86,7 @@ export function findFarthestSlot2D(
     slots: atlas.slots,
     slotGridIdx: atlas.slotGridIdx,
     entityMetas: atlas.entityMetas,
-    cameraFor: (memberId) => state.cameraUVPerEntity.get(memberId) ?? [0.5, 0.5],
+    cameraFor: (memberId) => cameraUVForMember(state, memberId),
     is3D: false,
   });
 }

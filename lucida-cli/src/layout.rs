@@ -4,7 +4,6 @@ use futures_util::{Stream, StreamExt};
 use lucida_content::LayoutId;
 use lucida_core::DatasetId;
 use lucida_core::command::DocumentCommand;
-use lucida_core::protocol::{ClientMessage, ServerMessage};
 use lucida_core::scene::DocumentState;
 use serde::Serialize;
 
@@ -12,8 +11,9 @@ use crate::config::EffectiveServer;
 use crate::credentials::EffectiveToken;
 use crate::error::{CliError, ErrorKind};
 use crate::session::{
-    IncomingSessionMessage, SessionWait, WorkspaceSnapshot, connect_workspace_socket,
-    incoming_messages, observe_until, send_client_message, wait_for_workspace_snapshot,
+    IncomingSessionMessage, PendingCommand, SessionDeadline, SessionWait, WorkspaceSnapshot,
+    connect_workspace_socket, incoming_messages, send_client_message, wait_for_command_result,
+    wait_for_workspace_snapshot,
 };
 use crate::workspace::{WorkspaceRecord, WorkspaceRole, WorkspaceTarget};
 
@@ -120,15 +120,17 @@ impl LayoutWorkspaceClient {
     ) -> Result<(u64, String, Option<String>, DatasetLayoutState), CliError> {
         ensure_layout_mutation_allowed(workspace)?;
 
-        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
+        let deadline = SessionDeadline::new(wait, "workspace WebSocket operation");
+        let socket =
+            connect_workspace_socket(&self.ws_url, self.token.as_deref(), &deadline).await?;
         let (mut write, read) = socket.split();
         let mut incoming = incoming_messages(read);
-        let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
+        let snapshot = wait_for_workspace_snapshot(&mut incoming, &deadline).await?;
         let dataset_id = resolve_dataset_id(&snapshot.document, dataset_selector)?;
         let layout_id = resolve_layout_id(&snapshot.document, &dataset_id, layout_selector)?;
-        let message = set_active_layout_message(&dataset_id, &layout_id);
-        send_client_message(&mut write, &message).await?;
-        let seq = wait_for_layout_set_ack(&mut incoming, &dataset_id, &layout_id, wait).await?;
+        let pending = set_active_layout_message(&dataset_id, &layout_id);
+        send_client_message(&mut write, &pending.message, &deadline).await?;
+        let seq = wait_for_layout_set_ack(&mut incoming, &pending.request_id, &deadline).await?;
 
         let mut document = snapshot.document;
         document
@@ -140,10 +142,12 @@ impl LayoutWorkspaceClient {
     }
 
     async fn snapshot(&self, wait: Duration) -> Result<WorkspaceSnapshot, CliError> {
-        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
+        let deadline = SessionDeadline::new(wait, "workspace WebSocket operation");
+        let socket =
+            connect_workspace_socket(&self.ws_url, self.token.as_deref(), &deadline).await?;
         let (_write, read) = socket.split();
         let mut incoming = incoming_messages(read);
-        wait_for_workspace_snapshot(&mut incoming, wait).await
+        wait_for_workspace_snapshot(&mut incoming, &deadline).await
     }
 }
 
@@ -435,20 +439,17 @@ fn resolve_layout_id(
     }
 }
 
-fn set_active_layout_message(dataset_id: &DatasetId, layout_id: &LayoutId) -> ClientMessage {
-    ClientMessage::Command {
-        command: DocumentCommand::SetActiveLayout {
-            dataset_id: dataset_id.clone(),
-            layout_id: layout_id.clone(),
-        },
-    }
+fn set_active_layout_message(dataset_id: &DatasetId, layout_id: &LayoutId) -> PendingCommand {
+    PendingCommand::new(DocumentCommand::SetActiveLayout {
+        dataset_id: dataset_id.clone(),
+        layout_id: layout_id.clone(),
+    })
 }
 
 async fn wait_for_layout_set_ack<S>(
     messages: &mut S,
-    dataset_id: &DatasetId,
-    layout_id: &LayoutId,
-    wait: Duration,
+    request_id: &str,
+    deadline: &SessionDeadline,
 ) -> Result<u64, CliError>
 where
     S: Stream<Item = Result<IncomingSessionMessage, CliError>> + Unpin,
@@ -459,21 +460,7 @@ where
         timeout_subject: "active layout confirmation",
         timeout_kind: ErrorKind::RejectedCommand,
     };
-    observe_until(messages, wait, &LAYOUT_SET_WAIT, |message| match message {
-        ServerMessage::Ack { seq } => Ok(Some(seq)),
-        ServerMessage::CommandBroadcast {
-            seq,
-            command:
-                DocumentCommand::SetActiveLayout {
-                    dataset_id: observed_dataset_id,
-                    layout_id: observed_layout_id,
-                },
-        } if &observed_dataset_id == dataset_id && &observed_layout_id == layout_id => {
-            Ok(Some(seq))
-        }
-        _ => Ok(None),
-    })
-    .await
+    wait_for_command_result(messages, request_id, deadline, &LAYOUT_SET_WAIT).await
 }
 
 #[cfg(test)]
@@ -527,8 +514,7 @@ mod tests {
             },
             "active_layout_ids": {
                 "wds-test": "layout-registered"
-            },
-            "asset_catalogs": {}
+            }
         }))
         .unwrap()
     }
@@ -617,13 +603,14 @@ mod tests {
 
     #[test]
     fn set_active_layout_command_maps_to_document_command() {
-        let message = set_active_layout_message(
+        let pending = set_active_layout_message(
             &DatasetId("wds-test".to_string()),
             &LayoutId("layout-registered".to_string()),
         );
-        let value = serde_json::to_value(message).unwrap();
+        let value = serde_json::to_value(pending.message).unwrap();
 
         assert_eq!(value["type"], "command");
+        assert_eq!(value["request_id"], pending.request_id);
         assert_eq!(value["command"]["type"], "set_active_layout");
         assert_eq!(value["command"]["dataset_id"], "wds-test");
         assert_eq!(value["command"]["layout_id"], "layout-registered");
@@ -633,14 +620,13 @@ mod tests {
     async fn layout_set_wait_accepts_ack() {
         let mut messages = text_messages(vec![
             serde_json::json!({ "type": "peer_left", "client_id": 99 }).to_string(),
-            serde_json::json!({ "type": "ack", "seq": 23 }).to_string(),
+            serde_json::json!({ "type": "ack", "request_id": "layout-1", "seq": 23 }).to_string(),
         ]);
 
         let seq = wait_for_layout_set_ack(
             &mut messages,
-            &DatasetId("wds-test".to_string()),
-            &LayoutId("layout-registered".to_string()),
-            Duration::from_secs(1),
+            "layout-1",
+            &SessionDeadline::new(Duration::from_secs(1), "test layout set"),
         )
         .await
         .unwrap();
@@ -649,30 +635,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn layout_set_wait_accepts_matching_broadcast() {
+    async fn layout_set_wait_ignores_other_command_results() {
         let mut messages = text_messages(vec![
             serde_json::json!({
-                "type": "command_broadcast",
-                "seq": 24,
-                "command": {
-                    "type": "set_active_layout",
-                    "dataset_id": "wds-test",
-                    "layout_id": "layout-registered"
-                }
+                "type": "ack",
+                "request_id": "other-command",
+                "seq": 24
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "ack",
+                "request_id": "layout-2",
+                "seq": 25
             })
             .to_string(),
         ]);
 
         let seq = wait_for_layout_set_ack(
             &mut messages,
-            &DatasetId("wds-test".to_string()),
-            &LayoutId("layout-registered".to_string()),
-            Duration::from_secs(1),
+            "layout-2",
+            &SessionDeadline::new(Duration::from_secs(1), "test layout set"),
         )
         .await
         .unwrap();
 
-        assert_eq!(seq, 24);
+        assert_eq!(seq, 25);
     }
 
     #[tokio::test]
@@ -681,9 +668,8 @@ mod tests {
 
         let error = wait_for_layout_set_ack(
             &mut messages,
-            &DatasetId("wds-test".to_string()),
-            &LayoutId("layout-registered".to_string()),
-            Duration::from_millis(1),
+            "layout-timeout",
+            &SessionDeadline::new(Duration::from_millis(1), "test layout set timeout"),
         )
         .await
         .unwrap_err();

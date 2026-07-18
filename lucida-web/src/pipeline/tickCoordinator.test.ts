@@ -3,15 +3,18 @@ import type { DatasetManifest } from "../manifestTypes.ts";
 import type { DatasetEntry } from "../renderLoopTypes.ts";
 import type { CpuCache } from "./fetch/index.ts";
 import type { TickContext } from "../renderLoopTypes.ts";
-import { AssetCatalog } from "./assetCatalog.ts";
 import type { ColdStateMessage } from "../renderer/workerProtocol.ts";
 import type { RequestPlan } from "./planning/index.ts";
-import { TickCoordinator } from "./tickCoordinator.ts";
+import { TickCoordinator, displayStatesEqual } from "./tickCoordinator.ts";
 import { Uploader } from "./upload/uploader.ts";
 import { plan } from "./planning/index.ts";
 import { bumpSettingsGeneration } from "../tickCommon.ts";
 import { configStore } from "./planning/configStore.ts";
 import { debugStats } from "../debug/debugStats.ts";
+import {
+  encodeViewQueryDeltaFixture,
+  encodeViewQueryFixture,
+} from "../test/viewQueryBinaryFixture.ts";
 
 // Planner-only tests: epoch caching + multi-dataset planning state.
 // Upload-side describes live in `upload/uploader.test.ts`.
@@ -26,8 +29,7 @@ import { debugStats } from "../debug/debugStats.ts";
 //
 // Because injection means the describes now share the real module singletons
 // (no per-test module reset), reset the ones tests mutate after every test so
-// order can't leak: configStore (which persists `coarseDetailEnabled` to
-// happy-dom localStorage), debugStats (`enabled`/`orch`), and localStorage.
+// order can't leak: configStore, debugStats (`enabled`/`orch`), and localStorage.
 afterEach(() => {
   configStore.__resetForTesting();
   debugStats.enabled = false;
@@ -35,23 +37,49 @@ afterEach(() => {
   if (typeof localStorage !== "undefined") localStorage.clear();
 });
 
-/** Stub WASM scene that satisfies AssetCatalog's narrow interface. */
-function createMockAssetCatalog(entries: Parameters<AssetCatalog["applyInitial"]>[1]["entries"] = []): AssetCatalog {
-  const catalog = new AssetCatalog({ apply_asset_catalog_delta: () => {} });
-  if (entries.length > 0) {
-    catalog.applyInitial("ds1", { entries });
-  }
-  return catalog;
-}
+describe("displayStatesEqual", () => {
+  const base = {
+    contrastMin: 0,
+    contrastMax: 1,
+    gamma: 1,
+    opacity: 1,
+    colormapName: "gray",
+    channelMask: 1,
+  };
+
+  it("compares every user-editable intensity display field", () => {
+    expect(displayStatesEqual({ 0: base }, { 0: { ...base } })).toBe(true);
+    for (const [field, value] of [
+      ["contrastMin", 0.1],
+      ["contrastMax", 2],
+      ["gamma", 2],
+      ["opacity", 0.5],
+      ["colormapName", "viridis"],
+    ] as const) {
+      expect(displayStatesEqual(
+        { 0: base },
+        { 0: { ...base, [field]: value } },
+      )).toBe(false);
+    }
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Mock factories
 // ---------------------------------------------------------------------------
 
 function createMockCpuCache(): CpuCache {
+  const submit = vi.fn();
+  const onPlanRebuildStart = vi.fn();
   return {
-    submit: vi.fn(),
-    onPlanRebuildStart: vi.fn(),
+    submit,
+    onPlanRebuildStart,
+    publishPlanningCycle: vi.fn((publications: Array<{ plan: RequestPlan }>) => {
+      // Preserve the legacy spies used by older focused assertions while the
+      // coordinator exercises the new one-shot workspace publication API.
+      onPlanRebuildStart();
+      for (const publication of publications) submit(publication.plan);
+    }),
     getDeliverable: vi.fn(function* () {}),
     markSent: vi.fn(),
     snapshot: vi.fn(() => ({ cached: new Map(), inFlight: new Map() })),
@@ -72,7 +100,7 @@ interface MockSceneConfig {
     visible_entities: {
       entity_id: string;
       image_id: string;
-      kind: string;
+      kind: "Image" | "Group" | "Tile";
       visible: boolean;
       projected_diagonal_px: number;
       projected_area_px2: number;
@@ -145,8 +173,16 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
 
   return {
     epochs: () => JSON.stringify(config.epochs),
-    view_query: (_dsId: string) => JSON.stringify(config.viewQuery),
-    view_query_delta: (_dsId: string) => JSON.stringify({ Full: config.viewQuery }),
+    view_query: (_dsId: string) => encodeViewQueryFixture({
+      epochs: { ...config.epochs, annotation: 0 },
+      visible_entities: config.viewQuery.visible_entities,
+    }),
+    view_query_delta: (_dsId: string) => encodeViewQueryDeltaFixture({
+      Full: {
+        epochs: { ...config.epochs, annotation: 0 },
+        visible_entities: config.viewQuery.visible_entities,
+      },
+    }),
     member_positions: (_dsId: string) => JSON.stringify(config.memberPositions),
     visible_region: (_dsId: string) => JSON.stringify(config.visibleRegion),
     t: () => config.t,
@@ -306,7 +342,6 @@ describe("epoch caching", () => {
       mode: "slice",
       renderScale: 1,
       cpuCache: createMockCpuCache(),
-      assetCatalog: createMockAssetCatalog(),
     } as unknown as TickContext;
   }
 
@@ -332,9 +367,12 @@ describe("epoch caching", () => {
     const { scene, datasets } = makeTickCoordinatorDeps();
     const orch = makeOrch();
 
-    orch.planAndFetch(makeCtx(scene, datasets), emptyMinimap);
+    const result = orch.planAndFetch(makeCtx(scene, datasets), emptyMinimap);
 
     expect(planSpy).toHaveBeenCalledTimes(1);
+    expect(result?.memberPositionsByDataset.get("ds1")).toStrictEqual({
+      "tile-0": [0, 0],
+    });
   });
 
   it("returns cached result when epochs are unchanged", () => {
@@ -413,7 +451,7 @@ describe("epoch caching", () => {
 
   it("re-derives manifest-based planning inputs when ds.manifest is replaced without an epoch bump", () => {
     // The per-dataset snapshot-input cache keys camera-independent positions on
-    // the content|layout|asset epoch, but the manifest-derived maps
+    // the content|layout epochs, but the manifest-derived maps
     // (imageSpecById / parentByEntityId) track ds.manifest — which the
     // generated-availability path replaces with a NEW manifest object WITHOUT
     // bumping any scene epoch (renderLoop.updateDatasetManifest only setDirty()s).
@@ -642,50 +680,6 @@ describe("epoch caching", () => {
     }
   });
 
-  it("submits only budget-admitted legacy proxies while preserving detail requests", () => {
-    const previousDebugEnabled = debugStats.enabled;
-    debugStats.enabled = true;
-    debugStats.orch = null;
-    configStore.set("coarseDetailEnabled", false);
-    const { scene, datasets } = makeTickCoordinatorDeps();
-    const orch = makeOrch();
-    const cpuCache = createMockCpuCache();
-    const coldState = vi.fn();
-    const ctx = makeCtx(scene, datasets);
-    ctx.cpuCache = cpuCache;
-    ctx.client = { coldState, coldStateDelta: vi.fn(), viewHotState: vi.fn() } as unknown as TickContext["client"];
-    ctx.assetCatalog = createMockAssetCatalog([
-      {
-        entity_id: "tile-0",
-        kinds: ["TileProxy3D"],
-        footprints: [{ kind: "TileProxy3D", dims: [1, 128, 128], bytes: 512 * 1024 * 1024 }],
-      },
-      {
-        entity_id: "group-0",
-        kinds: ["GroupProxy3D"],
-        footprints: [{ kind: "GroupProxy3D", dims: [1, 128, 128], bytes: 512 * 1024 * 1024 }],
-      },
-    ]);
-
-    try {
-      orch.planAndFetch(ctx, emptyMinimap);
-
-      const submitted = vi.mocked(cpuCache.submit).mock.calls[0][0] as RequestPlan;
-      expect(submitted.requests.length).toBeGreaterThan(0);
-      expect(submitted.proxyRequests).toEqual([]);
-      const cold = coldState.mock.calls[0][0] as ColdStateMessage;
-      expect(cold.desiredProxyKeys).toEqual([]);
-      const orchDebug = debugStats.orch as { proxyResidency?: unknown } | null;
-      expect(orchDebug?.proxyResidency).toMatchObject({
-        desiredProxyCount: 0,
-        skippedProxyCount: 2,
-        admittedBytes: 0,
-      });
-    } finally {
-      debugStats.enabled = previousDebugEnabled;
-    }
-  });
-
   // A uint32 label over `img-0` with a 4-deep, 2-chunk-Z level: slice mode
   // fetches one z-plane (1 chunk), volume mode the whole volume (2 z-chunks).
   function labeledContent(): DatasetManifest {
@@ -827,7 +821,6 @@ describe("display-only fast path", () => {
       mode: "slice",
       renderScale: 1,
       cpuCache: over?.cpuCache ?? createMockCpuCache(),
-      assetCatalog: createMockAssetCatalog(),
     } as unknown as TickContext;
   }
 
@@ -969,11 +962,11 @@ describe("display-only fast path", () => {
       const coldState = vi.fn();
       const coldStateSelection = vi.fn();
 
-      const planeRegion = (start: number) => ({
+      const planeRegion = (start: number, endNoise = 0) => ({
         xy_bounds: [0, 0, 1024, 1024] as [number, number, number, number],
-        z_range: [start, start + 1] as [number, number],
+        z_range: [start, start + 1 + endNoise] as [number, number],
         effective_zoom: 1.0,
-        sort_center: null,
+        sort_center: [512, 512, start + 0.5] as [number, number, number],
         frustum_planes: null,
       });
       bumpSettingsGeneration();
@@ -996,7 +989,9 @@ describe("display-only fast path", () => {
         epochs: { content: 1, layout: 1, view: 1, selection: 2 },
         allSettings: baseSettings(),
         z: 1,
-        visibleRegion: planeRegion(1),
+        // Tiny floating-point width drift is equivalent to the same one-plane
+        // slab and must not force the O(active-set) path.
+        visibleRegion: planeRegion(1, 1e-12),
       });
       orch.planAndFetch(makeCtx(scene2, datasets, { cpuCache, coldState, coldStateSelection }), emptyMinimap);
 
@@ -1008,10 +1003,15 @@ describe("display-only fast path", () => {
       expect(coldStateSelection).toHaveBeenCalledTimes(1);
       const patch = coldStateSelection.mock.calls[0][0] as {
         currentZ: number;
-        visibleRegion: { zRangeVox: [number, number] };
+        visibleRegion: {
+          zRangeVox: [number, number];
+          sortCenterVox: [number, number, number] | null;
+        };
       };
       expect(patch.currentZ).toBe(1);
-      expect(patch.visibleRegion.zRangeVox).toEqual([1, 2]);
+      expect(patch.visibleRegion.zRangeVox[0]).toBe(1);
+      expect(patch.visibleRegion.zRangeVox[1]).toBeCloseTo(2, 10);
+      expect(patch.visibleRegion.sortCenterVox?.[2]).toBeCloseTo(1.5, 10);
     } finally {
       vi.useRealTimers();
     }
@@ -1067,7 +1067,7 @@ describe("display-only fast path", () => {
     }
   });
 
-  it("does a full rebuild for a T scrub in volume mode (scoped to the slice view)", () => {
+  it("serves a volume T scrub with the same compact selection path", () => {
     vi.useFakeTimers({ toFake: ["performance"] });
     try {
       const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
@@ -1097,6 +1097,54 @@ describe("display-only fast path", () => {
         t: 5,
       });
       orch.planAndFetch(volumeCtx(scene2), emptyMinimap);
+
+      expect(planSpy).not.toHaveBeenCalled();
+      expect(coldState).not.toHaveBeenCalled();
+      expect(coldStateSelection).toHaveBeenCalledTimes(1);
+      expect(coldStateSelection.mock.calls[0][0]).toMatchObject({
+        currentT: 5,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("falls back to a full rebuild when volume Z changes", () => {
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
+      const orch = makeOrch();
+      const coldState = vi.fn();
+      const coldStateSelection = vi.fn();
+      const volumeCtx = (scene: unknown) => ({
+        ...makeCtx(scene, datasets, { coldState, coldStateSelection }),
+        mode: "volume",
+      }) as TickContext;
+      const region = (z: number) => ({
+        xy_bounds: [0, 0, 1024, 1024] as [number, number, number, number],
+        z_range: [z, z + 1] as [number, number],
+        effective_zoom: 1,
+        sort_center: [512, 512, z + 0.5] as [number, number, number],
+        frustum_planes: null,
+      });
+
+      bumpSettingsGeneration();
+      orch.planAndFetch(volumeCtx(createMockScene({
+        epochs: { content: 1, layout: 1, view: 1, selection: 1 },
+        allSettings: baseSettings(),
+        z: 0,
+        visibleRegion: region(0),
+      })), emptyMinimap);
+      planSpy.mockClear();
+      coldState.mockClear();
+
+      vi.advanceTimersByTime(500);
+      orch.planAndFetch(volumeCtx(createMockScene({
+        epochs: { content: 1, layout: 1, view: 1, selection: 2 },
+        allSettings: baseSettings(),
+        z: 1,
+        visibleRegion: region(1),
+      })), emptyMinimap);
 
       expect(planSpy).toHaveBeenCalledTimes(1);
       expect(coldState).toHaveBeenCalledTimes(1);
@@ -1381,7 +1429,6 @@ describe("multi-dataset planning", () => {
       mode: "slice",
       renderScale: 1,
       cpuCache: createMockCpuCache(),
-      assetCatalog: createMockAssetCatalog(),
     } as unknown as TickContext;
   }
 
@@ -1485,6 +1532,69 @@ describe("multi-dataset planning", () => {
     expect(tick2Ds1State).toBe(tick1Ds1Result.nextState);
     expect(tick2Ds2State).toBe(tick1Ds2Result.nextState);
   });
+
+  it("rolls back the whole workspace cycle when a later dataset planner throws", () => {
+    let failSecondDataset = false;
+    const transactionalPlan = vi.fn((...args: Parameters<typeof plan>) => {
+      if (failSecondDataset && args[0].datasetId === "ds2") {
+        throw new Error("ds2 planner failed");
+      }
+      return plan(...args);
+    });
+    const orch = new TickCoordinator(
+      new Uploader(),
+      transactionalPlan as unknown as typeof plan,
+    );
+    const datasets = makeTwoDatasetEntries();
+    const cpuCache = createMockCpuCache();
+    const client = {
+      coldState: vi.fn(),
+      coldStateDisplay: vi.fn(),
+      coldStateSelection: vi.fn(),
+      coldStateDelta: vi.fn(),
+      viewHotState: vi.fn(),
+    } as unknown as TickContext["client"];
+    const ctxFor = (scene: unknown): TickContext => {
+      const ctx = makeCtx(scene, datasets);
+      ctx.cpuCache = cpuCache;
+      ctx.client = client;
+      return ctx;
+    };
+
+    orch.planAndFetch(ctxFor(makeMultiDatasetScene()), emptyMinimap);
+    const baselineDs1State = transactionalPlan.mock.results[0].value.nextState;
+    transactionalPlan.mockClear();
+    vi.mocked(cpuCache.publishPlanningCycle).mockClear();
+    vi.mocked(client.coldState).mockClear();
+    vi.mocked(client.coldStateDelta).mockClear();
+
+    failSecondDataset = true;
+    const visibleSettings = {
+      ds1: { visible: true },
+      ds2: { visible: true },
+    };
+    const failedScene = createMockScene({
+      datasetOrder: ["ds1", "ds2"],
+      epochs: { content: 2, layout: 1, view: 1, selection: 1 },
+      allSettings: visibleSettings,
+    });
+    expect(() => orch.planAndFetch(ctxFor(failedScene), emptyMinimap))
+      .toThrow("ds2 planner failed");
+    expect(cpuCache.publishPlanningCycle).not.toHaveBeenCalled();
+    expect(client.coldState).not.toHaveBeenCalled();
+    expect(client.coldStateDelta).not.toHaveBeenCalled();
+
+    failSecondDataset = false;
+    transactionalPlan.mockClear();
+    const recoveredScene = createMockScene({
+      datasetOrder: ["ds1", "ds2"],
+      epochs: { content: 3, layout: 1, view: 1, selection: 1 },
+      allSettings: visibleSettings,
+    });
+    orch.planAndFetch(ctxFor(recoveredScene), emptyMinimap);
+    expect(transactionalPlan.mock.calls[0][1]).toBe(baselineDs1State);
+    expect(cpuCache.publishPlanningCycle).toHaveBeenCalledTimes(1);
+  });
 });
 
 // ===========================================================================
@@ -1526,7 +1636,6 @@ describe("incremental delta fold", () => {
       mode: "slice",
       renderScale: 1,
       cpuCache: createMockCpuCache(),
-      assetCatalog: createMockAssetCatalog(),
     } as unknown as TickContext;
   }
 
@@ -1547,14 +1656,18 @@ describe("incremental delta fold", () => {
     };
   }
 
-  const deltaEpochs = { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 0 };
+  const deltaEpochs = { content: 1, layout: 1, view: 1, selection: 1, annotation: 0 };
 
-  function fullPayload(rows: FoldRow[]): string {
-    return JSON.stringify({ Full: { epochs: deltaEpochs, visible_entities: rows } });
+  function fullPayload(rows: FoldRow[]): Uint8Array {
+    return encodeViewQueryDeltaFixture({
+      Full: { epochs: deltaEpochs, visible_entities: rows },
+    });
   }
 
-  function deltaPayload(entered: FoldRow[], left: string[], changed: FoldRow[]): string {
-    return JSON.stringify({ Delta: { epochs: deltaEpochs, entered, left, changed } });
+  function deltaPayload(entered: FoldRow[], left: string[], changed: FoldRow[]): Uint8Array {
+    return encodeViewQueryDeltaFixture({
+      Delta: { epochs: deltaEpochs, entered, left, changed },
+    });
   }
 
   /**
@@ -1566,13 +1679,16 @@ describe("incremental delta fold", () => {
    */
   function makeFoldScene(opts: {
     fullRows: FoldRow[];
-    deltaScript: string[];
+    deltaScript: Uint8Array[];
     memberPositions: Record<string, [number, number]>;
   }) {
     const epochs = { content: 1, layout: 1, view: 1, selection: 1 };
     const fullRows = opts.fullRows;
     const script = [...opts.deltaScript];
-    const viewQuery = vi.fn(() => JSON.stringify({ visible_entities: fullRows }));
+    const viewQuery = vi.fn(() => encodeViewQueryFixture({
+      epochs: { ...epochs, annotation: 0 },
+      visible_entities: fullRows,
+    }));
     const viewQueryDelta = vi.fn(() => {
       const next = script.shift();
       if (next === undefined) throw new Error("view_query_delta script exhausted");
@@ -1629,6 +1745,13 @@ describe("incremental delta fold", () => {
             ["img-0"],
             [foldRow({ entity_id: "tile-1", image_id: "img-1", ideal_target_lod: 2 })],
           ),
+          // Tick 3 — descriptor-only change with stable membership/order;
+          // eligible for the O(delta) cold-state builder.
+          deltaPayload(
+            [],
+            [],
+            [foldRow({ entity_id: "tile-1", image_id: "img-1", ideal_target_lod: 1 })],
+          ),
         ],
         memberPositions: positions4,
       });
@@ -1642,7 +1765,8 @@ describe("incremental delta fold", () => {
       // window folds the Delta onto the cursor.
       vi.advanceTimersByTime(500);
       fold.setView(2);
-      orch.planAndFetch(makeCtx(fold.scene, datasets), emptyMinimap);
+      const deltaCtx = makeCtx(fold.scene, datasets);
+      orch.planAndFetch(deltaCtx, emptyMinimap);
 
       // The fold engaged — the Delta was applied without a full re-parse.
       expect(fold.viewQuery).not.toHaveBeenCalled();
@@ -1655,6 +1779,22 @@ describe("incremental delta fold", () => {
       expect(byImage.get("img-1")?.idealTargetLod).toBe(2); // changed row applied
       expect(byImage.has("img-2")).toBe(true); // entered row present
       expect(byImage.has("img-0")).toBe(false); // left row absent
+      const coldDelta = vi.mocked(deltaCtx.client.coldStateDelta).mock.calls[0][0];
+      expect(coldDelta.removedEntityIds).toEqual(["tile-0"]);
+      expect(coldDelta.appendedEntityIds).toBeUndefined();
+      expect(coldDelta.activeSetOrder).toEqual(["tile-1", "tile-2"]);
+
+      // A subsequent changed-only delta has a provably stable order and takes
+      // the incremental builder: no full activeSetOrder is emitted.
+      planSpy.mockClear();
+      vi.advanceTimersByTime(500);
+      fold.setView(3);
+      const changedOnlyCtx = makeCtx(fold.scene, datasets);
+      orch.planAndFetch(changedOnlyCtx, emptyMinimap);
+      const changedOnly = vi.mocked(changedOnlyCtx.client.coldStateDelta).mock.calls[0][0];
+      expect(changedOnly.activeSetOrder).toBeUndefined();
+      expect(changedOnly.appendedEntityIds).toEqual([]);
+      expect(changedOnly.upserts.map((entry) => entry.entityId)).toEqual(["tile-1"]);
     } finally {
       vi.useRealTimers();
     }
@@ -1775,7 +1915,6 @@ describe("cache occupancy telemetry", () => {
       mode: "slice",
       renderScale: 1,
       cpuCache,
-      assetCatalog: createMockAssetCatalog(),
     } as unknown as TickContext;
   }
 
@@ -1888,7 +2027,6 @@ describe("debug stat row bounds", () => {
       mode: "slice",
       renderScale: 1,
       cpuCache: createMockCpuCache(),
-      assetCatalog: createMockAssetCatalog(),
     } as unknown as TickContext;
   }
 
@@ -1958,7 +2096,6 @@ describe("debug member stats honesty", () => {
       mode: "slice",
       renderScale: 1,
       cpuCache: cpuCache ?? createMockCpuCache(),
-      assetCatalog: createMockAssetCatalog(),
     } as unknown as TickContext;
   }
 

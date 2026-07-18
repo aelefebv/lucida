@@ -23,7 +23,10 @@ use std::time::Duration;
 
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use lucida_core::DatasetId;
-use lucida_core::protocol::{ClientId, ClientMessage, PresenceState, ServerMessage};
+use lucida_core::command::DocumentCommand;
+use lucida_core::protocol::{
+    ClientId, ClientMessage, CommandFailureCode, PresenceState, ServerMessage,
+};
 use lucida_core::scene::DocumentState;
 use lucida_protocol::GeneratedAvailabilitySnapshot;
 use tokio::net::TcpStream;
@@ -35,6 +38,44 @@ use tokio_tungstenite::tungstenite::protocol::{Message, WebSocketConfig};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_config};
 
 use crate::error::{CliError, ErrorKind};
+use crate::transport::TransportLimits;
+
+#[derive(Debug, Clone, Copy)]
+pub struct SessionDeadline {
+    expires_at: tokio::time::Instant,
+    budget: Duration,
+    operation: &'static str,
+}
+
+impl SessionDeadline {
+    pub fn new(budget: Duration, operation: &'static str) -> Self {
+        Self {
+            expires_at: tokio::time::Instant::now() + budget,
+            budget,
+            operation,
+        }
+    }
+
+    fn remaining(self) -> Result<Duration, CliError> {
+        self.expires_at
+            .checked_duration_since(tokio::time::Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| self.error())
+    }
+
+    fn error(self) -> CliError {
+        CliError::new(
+            ErrorKind::DeadlineExceeded,
+            format!(
+                "{} exceeded its end-to-end deadline after {}s",
+                self.operation,
+                self.budget.as_secs_f64()
+            ),
+        )
+        .with_context("operation", self.operation)
+        .with_context("deadline_ms", self.budget.as_millis())
+    }
+}
 
 /// The connected workspace socket; callers `split()` it into a write half
 /// (for [`send_client_message`]) and a read half (for [`incoming_messages`]).
@@ -58,6 +99,32 @@ pub enum IncomingSessionMessage {
     Text(String),
     Close,
     Ignore,
+}
+
+/// A document command and the correlation id that must identify its terminal
+/// Ack/Nack. Keeping the pair in one value prevents call sites from generating
+/// an id for the wire message and accidentally waiting on a different id.
+#[derive(Debug, Clone)]
+pub struct PendingCommand {
+    pub request_id: String,
+    pub message: ClientMessage,
+}
+
+impl PendingCommand {
+    pub fn new(command: DocumentCommand) -> Self {
+        let request_id = format!(
+            "cli-command-{hi:016x}{lo:016x}",
+            hi = rand::random::<u64>(),
+            lo = rand::random::<u64>()
+        );
+        Self {
+            message: ClientMessage::Command {
+                request_id: request_id.clone(),
+                command,
+            },
+            request_id,
+        }
+    }
 }
 
 /// Names one wait's error surfaces so the shared loop reports failures in the
@@ -111,24 +178,28 @@ pub fn workspace_ws_request(ws_url: &str, token: Option<&str>) -> Result<WsReque
 /// are legitimately large, so raise tungstenite's 64 MiB / 16 MiB defaults
 /// (which would otherwise drop the connection mid-handshake) well clear of
 /// any payload the server produces.
-fn workspace_socket_config() -> WebSocketConfig {
-    WebSocketConfig::default()
-        .max_message_size(Some(256 * 1024 * 1024))
-        .max_frame_size(Some(64 * 1024 * 1024))
+fn workspace_socket_config() -> Result<WebSocketConfig, CliError> {
+    let limits = TransportLimits::from_env()?;
+    Ok(WebSocketConfig::default()
+        .max_message_size(Some(limits.ws_message_bytes))
+        .max_frame_size(Some(limits.ws_frame_bytes)))
 }
 
 /// Connect to a workspace WebSocket URL with optional bearer auth.
 pub async fn connect_workspace_socket(
     ws_url: &str,
     token: Option<&str>,
+    deadline: &SessionDeadline,
 ) -> Result<WorkspaceSocket, CliError> {
-    let (socket, _response) = connect_async_with_config(
+    let connect = connect_async_with_config(
         workspace_ws_request(ws_url, token)?,
-        Some(workspace_socket_config()),
+        Some(workspace_socket_config()?),
         false,
-    )
-    .await
-    .map_err(map_websocket_error)?;
+    );
+    let (socket, _response) = tokio::time::timeout(deadline.remaining()?, connect)
+        .await
+        .map_err(|_| deadline.error())?
+        .map_err(map_websocket_error)?;
     Ok(socket)
 }
 
@@ -147,42 +218,54 @@ where
 }
 
 /// Send one [`ClientMessage`] as a JSON text frame.
-pub async fn send_client_message<W>(write: &mut W, message: &ClientMessage) -> Result<(), CliError>
+pub async fn send_client_message<W>(
+    write: &mut W,
+    message: &ClientMessage,
+    deadline: &SessionDeadline,
+) -> Result<(), CliError>
 where
     W: Sink<Message, Error = WebSocketError> + Unpin,
 {
     let json = serde_json::to_string(message)?;
-    write
-        .send(Message::Text(json.into()))
-        .await
-        .map_err(map_websocket_error)
+    tokio::time::timeout(
+        deadline.remaining()?,
+        write.send(Message::Text(json.into())),
+    )
+    .await
+    .map_err(|_| deadline.error())?
+    .map_err(map_websocket_error)
 }
 
 /// Wait for the connect handshake: the first [`ServerMessage::Snapshot`] on
 /// the session.
 pub async fn wait_for_workspace_snapshot<S>(
     messages: &mut S,
-    wait: Duration,
+    deadline: &SessionDeadline,
 ) -> Result<WorkspaceSnapshot, CliError>
 where
     S: Stream<Item = Result<IncomingSessionMessage, CliError>> + Unpin,
 {
-    wait_for_server_message(messages, wait, &SNAPSHOT_WAIT, |message| match message {
-        ServerMessage::Snapshot {
-            seq,
-            document,
-            peers,
-            your_id,
-            generated_availability,
-        } => Ok(Some(WorkspaceSnapshot {
-            seq,
-            document,
-            peers,
-            your_id,
-            generated_availability,
-        })),
-        _ => Ok(None),
-    })
+    wait_for_server_message(
+        messages,
+        deadline,
+        &SNAPSHOT_WAIT,
+        |message| match message {
+            ServerMessage::Snapshot {
+                seq,
+                document,
+                peers,
+                your_id,
+                generated_availability,
+            } => Ok(Some(WorkspaceSnapshot {
+                seq,
+                document,
+                peers,
+                your_id,
+                generated_availability,
+            })),
+            _ => Ok(None),
+        },
+    )
     .await
 }
 
@@ -199,7 +282,7 @@ where
 /// `on_message`, so a reply observer cannot mistake one for its reply.
 pub async fn observe_until<S, T, F>(
     messages: &mut S,
-    wait: Duration,
+    deadline: &SessionDeadline,
     outcomes: &SessionWait,
     mut on_message: F,
 ) -> Result<T, CliError>
@@ -207,16 +290,69 @@ where
     S: Stream<Item = Result<IncomingSessionMessage, CliError>> + Unpin,
     F: FnMut(ServerMessage) -> Result<Option<T>, CliError>,
 {
-    wait_for_server_message(messages, wait, outcomes, |message| match message {
+    wait_for_server_message(messages, deadline, outcomes, |message| match message {
         ServerMessage::Snapshot { .. } => Ok(None),
         message => on_message(message),
     })
     .await
 }
 
+/// Wait for the terminal result of exactly one document command.
+///
+/// Results for other in-flight commands are ignored. A matching Nack is
+/// converted into stable CLI categories while retaining the server's typed
+/// failure code and retryability in machine-readable error context.
+pub async fn wait_for_command_result<S>(
+    messages: &mut S,
+    request_id: &str,
+    deadline: &SessionDeadline,
+    outcomes: &SessionWait,
+) -> Result<u64, CliError>
+where
+    S: Stream<Item = Result<IncomingSessionMessage, CliError>> + Unpin,
+{
+    observe_until(messages, deadline, outcomes, |message| match message {
+        ServerMessage::Ack {
+            request_id: observed,
+            seq,
+        } if observed == request_id => Ok(Some(seq)),
+        ServerMessage::Nack {
+            request_id: observed,
+            code,
+            message,
+            retryable,
+        } if observed == request_id => {
+            Err(command_nack_error(request_id, code, message, retryable))
+        }
+        _ => Ok(None),
+    })
+    .await
+}
+
+fn command_nack_error(
+    request_id: &str,
+    code: CommandFailureCode,
+    message: String,
+    retryable: bool,
+) -> CliError {
+    let kind = match code {
+        CommandFailureCode::Forbidden => ErrorKind::Unauthorized,
+        CommandFailureCode::AuthorizationUnavailable
+        | CommandFailureCode::PersistenceUnavailable => ErrorKind::Network,
+        CommandFailureCode::Internal => ErrorKind::Unexpected,
+        CommandFailureCode::InvalidRequest
+        | CommandFailureCode::Conflict
+        | CommandFailureCode::ResourceLimit => ErrorKind::RejectedCommand,
+    };
+    CliError::new(kind, message)
+        .with_context("request_id", request_id)
+        .with_context("command_failure_code", code)
+        .with_context("retryable", retryable)
+}
+
 async fn wait_for_server_message<S, T, F>(
     messages: &mut S,
-    wait: Duration,
+    deadline: &SessionDeadline,
     outcomes: &SessionWait,
     mut on_message: F,
 ) -> Result<T, CliError>
@@ -224,17 +360,15 @@ where
     S: Stream<Item = Result<IncomingSessionMessage, CliError>> + Unpin,
     F: FnMut(ServerMessage) -> Result<Option<T>, CliError>,
 {
-    tokio::time::timeout(wait, async {
+    tokio::time::timeout(deadline.remaining()?, async {
         while let Some(message) = messages.next().await {
             match message? {
                 IncomingSessionMessage::Text(text) => {
-                    // Skip text frames that don't parse as a known
-                    // `ServerMessage`: a newer server may notify with
-                    // message types this binary predates, and none of them
-                    // can be the reply an observer is waiting for. Failing
-                    // the whole wait would make every server-side protocol
-                    // addition break deployed CLIs.
-                    let Ok(message) = serde_json::from_str::<ServerMessage>(&text) else {
+                    // Unknown string-tagged variants are forward-compatible
+                    // notifications and can be skipped. Malformed JSON,
+                    // missing tags, and malformed *known* variants are
+                    // protocol errors rather than timeout-shaped failures.
+                    let Some(message) = decode_server_message(&text)? else {
                         continue;
                     };
                     if matches!(message, ServerMessage::WorkspaceArchived { .. }) {
@@ -272,12 +406,79 @@ where
         CliError::new(
             outcomes.timeout_kind,
             format!(
-                "timed out waiting for {} after {}s",
+                "timed out waiting for {} within the end-to-end {}s deadline",
                 outcomes.timeout_subject,
-                wait.as_secs()
+                deadline.budget.as_secs_f64()
             ),
         )
+        .with_context("operation", deadline.operation)
+        .with_context("deadline_ms", deadline.budget.as_millis())
     })?
+}
+
+fn decode_server_message(text: &str) -> Result<Option<ServerMessage>, CliError> {
+    match serde_json::from_str::<ServerMessage>(text) {
+        Ok(message) => Ok(Some(message)),
+        Err(server_message_error) => {
+            let value = serde_json::from_str::<serde_json::Value>(text).map_err(|error| {
+                CliError::new(
+                    ErrorKind::Protocol,
+                    format!("invalid workspace server JSON: {error}"),
+                )
+            })?;
+            let object = value.as_object().ok_or_else(|| {
+                CliError::new(
+                    ErrorKind::Protocol,
+                    "workspace server message must be a JSON object",
+                )
+            })?;
+            let message_type = object
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .filter(|message_type| !message_type.is_empty())
+                .ok_or_else(|| {
+                    CliError::new(
+                        ErrorKind::Protocol,
+                        "workspace server message requires a non-empty string field 'type'",
+                    )
+                })?;
+            if !is_known_server_message_type(message_type) {
+                return Ok(None);
+            }
+            Err(CliError::new(
+                ErrorKind::Protocol,
+                format!(
+                    "workspace server message type {message_type:?} had an invalid schema: \
+                     {server_message_error}"
+                ),
+            )
+            .with_context("message_type", message_type))
+        }
+    }
+}
+
+fn is_known_server_message_type(message_type: &str) -> bool {
+    matches!(
+        message_type,
+        "snapshot"
+            | "command_broadcast"
+            | "ack"
+            | "nack"
+            | "peer_joined"
+            | "peer_left"
+            | "presence_update"
+            | "cursor_update"
+            | "follow_changed"
+            | "dataset_presence_update"
+            | "dataset_open_progress"
+            | "open_dataset_succeeded"
+            | "open_dataset_failed"
+            | "dataset_health"
+            | "generated_availability_update"
+            | "generated_chunk_status"
+            | "workspace_archived"
+            | "source_chunk_status"
+    )
 }
 
 /// Map WebSocket transport failures onto the CLI's categorized errors,
@@ -336,8 +537,7 @@ mod tests {
         serde_json::json!({
             "manifests": {},
             "registered_layouts": {},
-            "active_layout_ids": {},
-            "asset_catalogs": {}
+            "active_layout_ids": {}
         })
     }
 
@@ -410,9 +610,12 @@ mod tests {
             snapshot_message(41, 7),
         ]);
 
-        let snapshot = wait_for_workspace_snapshot(&mut messages, Duration::from_secs(1))
-            .await
-            .unwrap();
+        let snapshot = wait_for_workspace_snapshot(
+            &mut messages,
+            &SessionDeadline::new(Duration::from_secs(1), "test workspace snapshot"),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(snapshot.seq, 41);
         assert_eq!(snapshot.your_id, 7);
@@ -424,9 +627,12 @@ mod tests {
     async fn snapshot_wait_timeout_is_session_disconnect() {
         let mut messages = stream::pending::<Result<IncomingSessionMessage, CliError>>();
 
-        let error = wait_for_workspace_snapshot(&mut messages, Duration::from_millis(1))
-            .await
-            .unwrap_err();
+        let error = wait_for_workspace_snapshot(
+            &mut messages,
+            &SessionDeadline::new(Duration::from_millis(1), "test workspace snapshot timeout"),
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(error.kind, ErrorKind::SessionDisconnect);
         assert!(error.message.contains("timed out"));
@@ -435,16 +641,22 @@ mod tests {
     #[tokio::test]
     async fn snapshot_wait_close_and_disconnect_are_session_disconnect() {
         let mut closed = stream::iter(vec![Ok::<_, CliError>(IncomingSessionMessage::Close)]);
-        let closed_error = wait_for_workspace_snapshot(&mut closed, Duration::from_secs(1))
-            .await
-            .unwrap_err();
+        let closed_error = wait_for_workspace_snapshot(
+            &mut closed,
+            &SessionDeadline::new(Duration::from_secs(1), "test closed workspace"),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(closed_error.kind, ErrorKind::SessionDisconnect);
         assert!(closed_error.message.contains("closed before snapshot"));
 
         let mut ended = stream::empty::<Result<IncomingSessionMessage, CliError>>();
-        let ended_error = wait_for_workspace_snapshot(&mut ended, Duration::from_secs(1))
-            .await
-            .unwrap_err();
+        let ended_error = wait_for_workspace_snapshot(
+            &mut ended,
+            &SessionDeadline::new(Duration::from_secs(1), "test ended workspace"),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(ended_error.kind, ErrorKind::SessionDisconnect);
         assert!(ended_error.message.contains("disconnected before snapshot"));
     }
@@ -457,7 +669,7 @@ mod tests {
 
         let error = observe_until(
             &mut messages,
-            Duration::from_secs(1),
+            &SessionDeadline::new(Duration::from_secs(1), "test archive outcome"),
             &ack_wait(),
             |_message| Ok(Some(())),
         )
@@ -476,20 +688,20 @@ mod tests {
         let mut messages = text_messages(vec![
             serde_json::json!({ "type": "peer_left", "client_id": 3 }).to_string(),
             snapshot_message(50, 7),
-            serde_json::json!({ "type": "ack", "seq": 51 }).to_string(),
+            serde_json::json!({ "type": "ack", "request_id": "generic-1", "seq": 51 }).to_string(),
         ]);
 
         let mut observed_snapshot = false;
         let seq = observe_until(
             &mut messages,
-            Duration::from_secs(1),
+            &SessionDeadline::new(Duration::from_secs(1), "test observe sequence"),
             &ack_wait(),
             |message| match message {
                 ServerMessage::Snapshot { .. } => {
                     observed_snapshot = true;
                     Ok(None)
                 }
-                ServerMessage::Ack { seq } => Ok(Some(seq)),
+                ServerMessage::Ack { seq, .. } => Ok(Some(seq)),
                 _ => Ok(None),
             },
         )
@@ -507,19 +719,26 @@ mod tests {
         // awaited reply, so the wait skips them instead of failing.
         let mut messages = text_messages(vec![
             serde_json::json!({
+                "type": "bookmark_changed",
+                "id": "retired-bookmark",
+                "action": "updated",
+                "dataset_urls": []
+            })
+            .to_string(),
+            serde_json::json!({
                 "type": "notification_from_the_future",
                 "detail": "unknown vocabulary"
             })
             .to_string(),
-            serde_json::json!({ "type": "ack", "seq": 9 }).to_string(),
+            serde_json::json!({ "type": "ack", "request_id": "generic-2", "seq": 9 }).to_string(),
         ]);
 
         let seq = observe_until(
             &mut messages,
-            Duration::from_secs(1),
+            &SessionDeadline::new(Duration::from_secs(1), "test rejection context"),
             &ack_wait(),
             |message| match message {
-                ServerMessage::Ack { seq } => Ok(Some(seq)),
+                ServerMessage::Ack { seq, .. } => Ok(Some(seq)),
                 _ => Ok(None),
             },
         )
@@ -530,12 +749,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn observe_until_rejects_malformed_known_message_without_timing_out() {
+        let mut messages = text_messages(vec![
+            serde_json::json!({ "type": "ack", "request_id": "missing-seq" }).to_string(),
+        ]);
+
+        let error = observe_until(
+            &mut messages,
+            &SessionDeadline::new(Duration::from_secs(1), "test malformed message"),
+            &ack_wait(),
+            |_message| Ok(Some(())),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.kind, ErrorKind::Protocol);
+        assert!(error.message.contains("invalid schema"));
+        assert_eq!(error.to_json()["error"]["message_type"], "ack");
+    }
+
+    #[test]
+    fn pending_command_keeps_wire_and_wait_ids_together() {
+        let pending = PendingCommand::new(DocumentCommand::RemoveDataset {
+            id: DatasetId("dataset-1".into()),
+        });
+        let ClientMessage::Command {
+            request_id,
+            command: DocumentCommand::RemoveDataset { id },
+        } = pending.message
+        else {
+            panic!("expected document command");
+        };
+        assert_eq!(request_id, pending.request_id);
+        assert!(request_id.starts_with("cli-command-"));
+        assert_eq!(id.0, "dataset-1");
+    }
+
+    #[tokio::test]
+    async fn command_result_ignores_foreign_results_and_correlates_exact_ack() {
+        let mut messages = text_messages(vec![
+            serde_json::json!({
+                "type": "nack",
+                "request_id": "other",
+                "code": "internal",
+                "message": "not ours",
+                "retryable": true
+            })
+            .to_string(),
+            serde_json::json!({ "type": "ack", "request_id": "other", "seq": 8 }).to_string(),
+            serde_json::json!({ "type": "ack", "request_id": "ours", "seq": 9 }).to_string(),
+        ]);
+
+        let seq = wait_for_command_result(
+            &mut messages,
+            "ours",
+            &SessionDeadline::new(Duration::from_secs(1), "test command result"),
+            &ack_wait(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(seq, 9);
+    }
+
+    #[test]
+    fn command_nack_codes_map_to_stable_cli_categories() {
+        let cases = [
+            (
+                CommandFailureCode::InvalidRequest,
+                ErrorKind::RejectedCommand,
+            ),
+            (CommandFailureCode::Forbidden, ErrorKind::Unauthorized),
+            (CommandFailureCode::Conflict, ErrorKind::RejectedCommand),
+            (
+                CommandFailureCode::ResourceLimit,
+                ErrorKind::RejectedCommand,
+            ),
+            (
+                CommandFailureCode::AuthorizationUnavailable,
+                ErrorKind::Network,
+            ),
+            (
+                CommandFailureCode::PersistenceUnavailable,
+                ErrorKind::Network,
+            ),
+            (CommandFailureCode::Internal, ErrorKind::Unexpected),
+        ];
+
+        for (code, expected) in cases {
+            let error = command_nack_error("req-1", code, "rejected".into(), true);
+            assert_eq!(error.kind, expected);
+            let json = error.to_json();
+            assert_eq!(json["error"]["request_id"], "req-1");
+            assert_eq!(json["error"]["retryable"], true);
+            assert!(json["error"]["command_failure_code"].is_string());
+        }
+    }
+
+    #[tokio::test]
     async fn observe_until_timeout_uses_the_wait_vocabulary() {
         let mut messages = stream::pending::<Result<IncomingSessionMessage, CliError>>();
 
         let error = observe_until(
             &mut messages,
-            Duration::from_millis(1),
+            &SessionDeadline::new(Duration::from_millis(1), "test chatter deadline"),
             &ack_wait(),
             |_message| Ok(Some(())),
         )
@@ -550,9 +867,13 @@ mod tests {
     async fn send_client_message_writes_one_json_text_frame() {
         let mut write = RecordingSink::default();
 
-        send_client_message(&mut write, &ClientMessage::RequestSnapshot)
-            .await
-            .unwrap();
+        send_client_message(
+            &mut write,
+            &ClientMessage::RequestSnapshot,
+            &SessionDeadline::new(Duration::from_secs(1), "test WebSocket send"),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(write.sent.len(), 1);
         match &write.sent[0] {

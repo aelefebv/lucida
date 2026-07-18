@@ -3,9 +3,9 @@
  *
  * Applies a {@link ColdStateDeltaMessage}: patch the dataset's most recent cold
  * state in place — remove the removed entity ids, upsert the changed/added
- * descriptors by entity id, and reorder the active set to the message's
- * `activeSetOrder` — then re-ingest it via the same {@link applyColdState} path a
- * full cold state uses.
+ * descriptors by entity id, and either apply the full-order fallback or the
+ * producer's O(delta) remove/retain/append ordering hint — then re-ingest it
+ * via the same {@link applyColdState} path a full cold state uses.
  *
  * The reordering is what keeps the worker and main thread agreeing on
  * descriptor-buffer entity indices: `activeSetOrder` is the exact order the main
@@ -50,27 +50,57 @@ export function applyColdStateDelta(
   }
 
   const nextActiveSet: ColdStateActiveEntry[] = [];
-  for (const entityId of msg.activeSetOrder) {
-    const entry = byEntity.get(entityId);
-    // Every id in the order MUST be either retained (in the prior active set and
-    // not removed) or present in `upserts` — `buildColdStateDelta` guarantees
-    // this by always upserting a non-reusable entry. A miss is a producer-
-    // invariant violation: silently skipping it would shift every subsequent
-    // descriptor index by one and bind wrong-entity descriptors on screen with
-    // no error. Fail loudly instead so such a regression can never surface as
-    // silent wrong-tile corruption.
-    if (!entry) {
-      throw new Error(
-        `applyColdStateDelta: activeSetOrder id ${entityId} missing from ` +
-          `retained+upserts (producer invariant violation)`,
-      );
+  if (msg.activeSetOrder !== undefined) {
+    for (const entityId of msg.activeSetOrder) {
+      const entry = byEntity.get(entityId);
+      // Every id in the order MUST be either retained (in the prior active set
+      // and not removed) or present in `upserts`. A miss would shift every
+      // subsequent descriptor index, so fail loudly.
+      if (!entry) {
+        throw new Error(
+          `applyColdStateDelta: activeSetOrder id ${entityId} missing from ` +
+            `retained+upserts (producer invariant violation)`,
+        );
+      }
+      nextActiveSet.push(entry);
     }
-    nextActiveSet.push(entry);
+  } else {
+    // A view-query delta preserves the order of changed records, removes left
+    // records, and appends entered records. Mirror that operation directly so
+    // worker/main indices stay equal without shipping or walking a full order.
+    const placed = new Set<string>();
+    for (const prior of cold.activeSet) {
+      if (removed.has(prior.entityId)) continue;
+      const entry = byEntity.get(prior.entityId);
+      if (!entry) {
+        throw new Error(
+          `applyColdStateDelta: retained id ${prior.entityId} missing from patched set`,
+        );
+      }
+      nextActiveSet.push(entry);
+      placed.add(prior.entityId);
+    }
+    for (const entityId of msg.appendedEntityIds ?? []) {
+      const entry = byEntity.get(entityId);
+      if (!entry || placed.has(entityId)) {
+        throw new Error(
+          `applyColdStateDelta: appended id ${entityId} is missing or already retained`,
+        );
+      }
+      nextActiveSet.push(entry);
+      placed.add(entityId);
+    }
+    for (const entry of msg.upserts) {
+      if (!placed.has(entry.entityId)) {
+        throw new Error(
+          `applyColdStateDelta: upsert id ${entry.entityId} was neither retained nor appended`,
+        );
+      }
+    }
   }
 
   cold.activeSet = nextActiveSet;
   cold.visibleRegion = msg.visibleRegion;
-  cold.desiredProxyKeys = msg.desiredProxyKeys;
   cold.currentT = msg.currentT;
   cold.currentZ = msg.currentZ;
   cold.renderRadiusView = msg.renderRadiusView;

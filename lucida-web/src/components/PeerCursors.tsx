@@ -3,6 +3,7 @@ import type { WasmScene } from "lucida-core";
 import type { ClientId, PeerIdentity, PresenceState } from "../bridge.ts";
 import { projectToCanvas } from "./minimapMath.ts";
 import { makeWorldToScreen } from "./cameraProjection.ts";
+import type { RenderLoop } from "../renderLoop.ts";
 
 const PEER_COLORS = [
   "#FF6B6B",
@@ -64,6 +65,7 @@ interface Props {
   t: number;
   c: number;
   cursorLabels: CursorLabel[];
+  frameSignal?: Pick<RenderLoop, "subscribePresentedFrame"> | null;
 }
 
 function dimBadge(peer: PresenceState, localZ: number, localT: number, localC: number, localIs3d: boolean): { dim: boolean; badge: string } {
@@ -99,7 +101,7 @@ function dimBadge(peer: PresenceState, localZ: number, localT: number, localC: n
 
 const EDGE_MARGIN = 16;
 
-export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, viewMode, z, t, c, cursorLabels }: Props) {
+export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, viewMode, z, t, c, cursorLabels, frameSignal }: Props) {
   const labelRefs = useRef<Map<ClientId, HTMLDivElement>>(new Map());
   const chevronRefs = useRef<Map<ClientId, HTMLDivElement>>(new Map());
   const chevronLabelRefs = useRef<Map<ClientId, HTMLDivElement>>(new Map());
@@ -124,9 +126,7 @@ export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, v
   followTargetRef.current = followTarget;
 
   useEffect(() => {
-    let rafId: number;
-
-    const tick = () => {
+    const projectFrame = () => {
       const scene = wasmSceneRef.current;
       if (scene) {
         const canvasW = canvas.clientWidth;
@@ -232,14 +232,17 @@ export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, v
         }
       }
 
-      rafId = requestAnimationFrame(tick);
     };
 
-    rafId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafId);
+    const initialFrame = requestAnimationFrame(projectFrame);
+    const unsubscribe = frameSignal?.subscribePresentedFrame(projectFrame);
+    return () => {
+      cancelAnimationFrame(initialFrame);
+      unsubscribe?.();
+    };
     // myId, peers, etc. are read via the mirror refs above so the RAF tick
     // sees the latest values without re-mounting the loop on every change.
-  }, [wasmSceneRef, canvas]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [wasmSceneRef, canvas, frameSignal, peers, cursorLabels, viewMode, followTarget]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const peerEntries = Array.from(peers.entries()).filter(
     ([id]) => id !== myId,

@@ -2,6 +2,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { createRef } from "react";
 import { LayerPanel, type LayerInfo } from "./LayerPanel.tsx";
 
 function layer(overrides: Partial<LayerInfo> = {}): LayerInfo {
@@ -63,6 +64,66 @@ function baseProps(
 
 afterEach(() => {
   cleanup();
+});
+
+describe("LayerPanel view-mode affordance", () => {
+  it("labels the current mode while its accessible name describes the action", () => {
+    const onClick = vi.fn();
+    render(
+      <LayerPanel
+        {...baseProps(true, vi.fn())}
+        viewModeToggle={{ current: "2D", next: "3D", onClick }}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: "Switch view mode to 3D" });
+    expect(button.textContent).toBe("View: 2D");
+    expect(button.getAttribute("aria-pressed")).toBe("false");
+    fireEvent.click(button);
+    expect(onClick).toHaveBeenCalledOnce();
+  });
+});
+
+describe("LayerPanel mobile drawer semantics", () => {
+  it("makes the closed drawer inert and exposes a dedicated close control when open", () => {
+    const panelRef = createRef<HTMLDivElement>();
+    const closeButtonRef = createRef<HTMLButtonElement>();
+    const onClose = vi.fn();
+    const drawer = {
+      open: false,
+      panelRef,
+      onKeyDown: vi.fn(),
+      onClose,
+    };
+    const { rerender } = render(
+      <LayerPanel {...baseProps(true, vi.fn())} drawer={drawer} />,
+    );
+
+    const panel = document.getElementById("layers-panel")!;
+    expect(panel.getAttribute("aria-hidden")).toBe("true");
+    expect(panel.hasAttribute("inert")).toBe(true);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Close layers panel" })).toBeNull();
+
+    rerender(
+      <LayerPanel
+        {...baseProps(true, vi.fn())}
+        drawerCloseButtonRef={closeButtonRef}
+        drawer={{ ...drawer, open: true }}
+      />,
+    );
+
+    const dialog = screen.getByRole("dialog", { name: "Layers" });
+    expect(dialog).toBe(panelRef.current);
+    expect(dialog.getAttribute("aria-modal")).toBe("true");
+    expect(dialog.hasAttribute("aria-hidden")).toBe(false);
+    expect(dialog.hasAttribute("inert")).toBe(false);
+    const closeButton = screen.getByRole("button", { name: "Close layers panel" });
+    expect(closeButtonRef.current).toBe(closeButton);
+    expect(document.activeElement).toBe(closeButton);
+    fireEvent.click(closeButton);
+    expect(onClose).toHaveBeenCalledOnce();
+  });
 });
 
 describe("LayerPanel rename affordance", () => {

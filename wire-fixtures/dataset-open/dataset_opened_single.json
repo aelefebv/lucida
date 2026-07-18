@@ -314,26 +314,5 @@
       ]
     }
   },
-  "catalog": {
-    "entries": [
-      {
-        "entity_id": "img-0",
-        "kinds": [
-          "TileProxy3D"
-        ],
-        "footprints": [
-          {
-            "kind": "TileProxy3D",
-            "dims": [
-              50,
-              128,
-              128
-            ],
-            "bytes": 1638400
-          }
-        ]
-      }
-    ]
-  },
   "opener_client_id": 7
 }

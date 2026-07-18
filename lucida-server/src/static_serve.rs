@@ -47,7 +47,7 @@ use tower_http::services::{ServeDir, ServeFile};
 ///
 /// The returned router is a catch-all (`fallback`) — merge it LAST into
 /// the application router so route-specific handlers (`/auth/*`,
-/// `/api/*`, `/admin/*`, `/ws`) take precedence and the SPA fallback
+/// `/api/*`, `/admin/*`, `/ws/workspaces/*`) take precedence and the SPA fallback
 /// only fires for truly unknown paths.
 pub fn router(dist_path: PathBuf) -> Router {
     Router::new()

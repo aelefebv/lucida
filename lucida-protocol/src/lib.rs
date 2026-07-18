@@ -1,13 +1,13 @@
-pub mod asset;
-pub mod asset_request;
+pub mod chunk_frame;
 pub mod diagnostics;
 pub mod fetch;
-pub mod generated;
+pub mod generated_coarse;
 pub mod register;
+pub mod session;
 
-pub use asset::*;
-pub use asset_request::*;
+pub use chunk_frame::*;
 pub use diagnostics::*;
 pub use fetch::*;
-pub use generated::*;
+pub use generated_coarse::*;
 pub use register::*;
+pub use session::*;

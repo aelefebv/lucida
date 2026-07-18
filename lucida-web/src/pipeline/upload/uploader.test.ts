@@ -5,19 +5,16 @@ import type {
   CpuCache,
   ReadyChunkDelivery,
   ReadyDelivery,
-  ReadyProxyDelivery,
 } from "../fetch/index.ts";
-import type { ActiveSetEntry } from "../planning/index.ts";
-import { AssetCatalog } from "../assetCatalog.ts";
 import type {
   ColdStateMessage,
   MissingChunk,
-  MissingProxy,
 } from "../../renderer/workerProtocol.ts";
-
-function createMockAssetCatalog(): AssetCatalog {
-  return new AssetCatalog({ apply_asset_catalog_delta: () => {} });
-}
+import {
+  encodeViewQueryDeltaFixture,
+  encodeViewQueryFixture,
+} from "../../test/viewQueryBinaryFixture.ts";
+import { chunkContractForLevel } from "../../chunkContract.ts";
 
 interface MockSceneConfig {
   epochs: { content: number; layout: number; view: number; selection: number };
@@ -25,7 +22,7 @@ interface MockSceneConfig {
     visible_entities: {
       entity_id: string;
       image_id: string;
-      kind: string;
+      kind: "Image" | "Group" | "Tile";
       visible: boolean;
       projected_diagonal_px: number;
       projected_area_px2: number;
@@ -98,8 +95,16 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
 
   return {
     epochs: () => JSON.stringify(config.epochs),
-    view_query: () => JSON.stringify(config.viewQuery),
-    view_query_delta: () => JSON.stringify({ Full: config.viewQuery }),
+    view_query: () => encodeViewQueryFixture({
+      epochs: { ...config.epochs, annotation: 0 },
+      visible_entities: config.viewQuery.visible_entities,
+    }),
+    view_query_delta: () => encodeViewQueryDeltaFixture({
+      Full: {
+        epochs: { ...config.epochs, annotation: 0 },
+        visible_entities: config.viewQuery.visible_entities,
+      },
+    }),
     member_positions: () => JSON.stringify(config.memberPositions),
     visible_region: () => JSON.stringify(config.visibleRegion),
     t: () => config.t,
@@ -149,9 +154,9 @@ function createMockContent(datasetId = "ds1"): DatasetManifest {
           levels: [
             {
               level_index: 0,
-              shape: [1, 1, 1, 1024, 1024],
-              chunk_shape: [1, 1, 1, 256, 256],
-              grid_shape: [1, 1, 1, 4, 4],
+              shape: [1, 3, 1, 1, 512],
+              chunk_shape: [1, 1, 1, 1, 512],
+              grid_shape: [1, 3, 1, 1, 1],
               scale: [1, 1, 1, 1, 1],
             },
           ],
@@ -164,20 +169,34 @@ function createMockContent(datasetId = "ds1"): DatasetManifest {
 }
 
 function makeCpuCache(deliveries: ReadyDelivery[] = []): CpuCache {
+  const submit = vi.fn();
+  const onPlanRebuildStart = vi.fn();
   return {
-    submit: vi.fn(),
-    onPlanRebuildStart: vi.fn(),
+    submit,
+    onPlanRebuildStart,
+    publishPlanningCycle: vi.fn((publications: Array<{ plan: unknown }>) => {
+      onPlanRebuildStart();
+      for (const publication of publications) submit(publication.plan);
+    }),
     getDeliverable: vi.fn(function* () {
       yield* deliveries;
     }),
+    getDeliverableTierDemand: vi.fn(() => ({
+      detail: deliveries.some((delivery) =>
+        (delivery.residencyTier ?? (delivery.lane === "coarse" || delivery.lane === "minimap"
+          ? "coarse"
+          : "detail")) === "detail"),
+      coarse: deliveries.some((delivery) =>
+        (delivery.residencyTier ?? (delivery.lane === "coarse" || delivery.lane === "minimap"
+          ? "coarse"
+          : "detail")) === "coarse"),
+    })),
     markSent: vi.fn(),
     markRejected: vi.fn(),
     markChunkEvicted: vi.fn(),
     markChunkMissing: vi.fn(),
-    markProxyMissing: vi.fn(),
     snapshot: vi.fn(() => ({ cached: new Map(), inFlight: new Map() })),
     getCachedChunk: vi.fn(() => null),
-    getCachedProxy: vi.fn(() => null),
     telemetry: vi.fn(),
     updateConfig: vi.fn(),
     subscribe: vi.fn(() => () => {}),
@@ -187,45 +206,34 @@ function makeCpuCache(deliveries: ReadyDelivery[] = []): CpuCache {
 }
 
 function makeChunkDelivery(overrides?: Partial<ReadyChunkDelivery>): ReadyChunkDelivery {
+  const datasetId = overrides?.datasetId ?? "ds1";
+  const image = createMockContent(datasetId).images[0];
+  const channel = overrides?.c ?? 0;
+  const contract = overrides?.contract ?? chunkContractForLevel({
+    datasetId,
+    image,
+    level: image.multiscale.levels[0],
+    channel,
+    role: "intensity",
+  });
   return {
     kind: "chunk",
     entityId: "tile-0",
     imageId: "img-0",
     level: 0,
     t: 0,
-    c: 0,
+    c: channel,
     z: 0,
     y: 0,
     x: 0,
     chunkKey: "0/0/0/0/0/0",
-    data: new ArrayBuffer(1024),
-    dataType: "uint16",
-    epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+    data: new ArrayBuffer(contract.expectedBytes),
+    contract,
+    epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
     lane: "detail",
     priority: 10,
     ...overrides,
-  };
-}
-
-function makeProxyDelivery(overrides?: Partial<ReadyProxyDelivery>): ReadyProxyDelivery {
-  return {
-    kind: "proxy",
-    datasetId: "ds1",
-    entityId: "tile-0",
-    imageId: "img-0",
-    proxyKind: "TileProxy3D",
-    t: 0,
-    c: 0,
-    header: {
-      algorithmVersion: 1,
-      sourceContentHash: new Uint8Array(32),
-      dims: [4, 4, 4],
-      dtype: "u16",
-    },
-    data: new ArrayBuffer(128),
-    epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
-    priority: 5,
-    ...overrides,
+    datasetId,
   };
 }
 
@@ -244,7 +252,6 @@ function makeCtx(args: {
     client: {
       coldState: vi.fn(),
       viewHotState: vi.fn(),
-      proxyAssetData: vi.fn(),
       sliceChunkData: vi.fn(),
       volumeChunkData: vi.fn(),
       removeLayerResources: vi.fn(),
@@ -256,7 +263,6 @@ function makeCtx(args: {
     mode: args.mode ?? "slice",
     renderScale: 1,
     cpuCache: args.cpuCache ?? makeCpuCache(),
-    assetCatalog: createMockAssetCatalog(),
   } as TickContext;
 }
 
@@ -279,22 +285,18 @@ describe("Uploader unified delivery", () => {
 
   it("dispatches deliverables from CpuCache and marks sent only after dispatch", () => {
     const chunk = makeChunkDelivery();
-    const proxy = makeProxyDelivery();
-    const cpuCache = makeCpuCache([proxy, chunk]);
+    const cpuCache = makeCpuCache([chunk]);
     const markSent = cpuCache.markSent as ReturnType<typeof vi.fn>;
     const sliceChunkData = vi.fn();
-    const proxyAssetData = vi.fn();
     const ctx = makeCtx({
       cpuCache,
-      client: { sliceChunkData, proxyAssetData },
+      client: { sliceChunkData },
     });
 
     const ret = new Uploader().deliverToWorker(ctx, 8 * 1024 * 1024, 0);
 
-    expect(proxyAssetData).toHaveBeenCalledTimes(1);
     expect(sliceChunkData).toHaveBeenCalledTimes(1);
-    expect(markSent.mock.calls.map(c => c[0])).toEqual([proxy, chunk]);
-    expect(scopedDebugStats.upload!.tick!.uploadedProxies).toBe(1);
+    expect(markSent.mock.calls.map(c => c[0])).toEqual([chunk]);
     expect(scopedDebugStats.upload!.tick!.uploadedChunks).toBe(1);
     expect(ret).toBe(true);
   });
@@ -314,44 +316,62 @@ describe("Uploader unified delivery", () => {
 
   it("preserves the one-item soft budget cap", () => {
     const large = makeChunkDelivery({
-      data: new ArrayBuffer(4 * 1024 * 1024),
       priority: 1,
     });
     const smallerLowerPriority = makeChunkDelivery({
       chunkKey: "0/0/0/0/0/1",
-      data: new ArrayBuffer(64),
       priority: 100,
     });
     const cpuCache = makeCpuCache([large, smallerLowerPriority]);
     const sliceChunkData = vi.fn();
     const ctx = makeCtx({ cpuCache, client: { sliceChunkData } });
 
-    const ret = new Uploader().deliverToWorker(ctx, 1 * 1024 * 1024, 0);
+    const ret = new Uploader().deliverToWorker(ctx, 512, 0);
 
     expect(sliceChunkData).toHaveBeenCalledTimes(1);
     expect(sliceChunkData.mock.calls[0][1][0].key).toBe(large.chunkKey);
     expect(scopedDebugStats.upload!.tick!.budgetExhausted).toBe(true);
-    expect(scopedDebugStats.upload!.tick!.bytesUploaded).toBe(4 * 1024 * 1024);
+    expect(scopedDebugStats.upload!.tick!.bytesUploaded).toBe(1024);
     expect(ret).toBe(true);
+  });
+
+  it("pulls ready work incrementally instead of materializing the queue", () => {
+    const first = makeChunkDelivery();
+    const cpuCache = makeCpuCache([first]);
+    let iteratorClosed = false;
+    cpuCache.getDeliverable = vi.fn(function* () {
+      try {
+        yield first;
+        throw new Error("uploader advanced beyond its exhausted budget");
+      } finally {
+        iteratorClosed = true;
+      }
+    });
+    const sliceChunkData = vi.fn();
+
+    expect(() => new Uploader().deliverToWorker(
+      makeCtx({ cpuCache, client: { sliceChunkData } }),
+      512,
+      0,
+    )).not.toThrow();
+    expect(sliceChunkData).toHaveBeenCalledTimes(1);
+    expect(iteratorClosed).toBe(true);
   });
 
   it("splits upload budget across detail and coarse when both tiers have deliverables", () => {
     const largeDetail = makeChunkDelivery({
-      data: new ArrayBuffer(700),
       priority: 1,
       residencyTier: "detail",
       lane: "detail",
     });
     const secondDetail = makeChunkDelivery({
       chunkKey: "0/0/0/0/0/1",
-      data: new ArrayBuffer(100),
       priority: 2,
       residencyTier: "detail",
       lane: "detail",
     });
     const coarse = makeChunkDelivery({
       chunkKey: "0/0/0/0/0/2",
-      data: new ArrayBuffer(100),
       priority: 100,
       residencyTier: "coarse",
       lane: "coarse",
@@ -360,7 +380,7 @@ describe("Uploader unified delivery", () => {
     const sliceChunkData = vi.fn();
     const ctx = makeCtx({ cpuCache, client: { sliceChunkData } });
 
-    new Uploader().deliverToWorker(ctx, 1000, 0);
+    new Uploader().deliverToWorker(ctx, 2048, 0);
 
     expect(sliceChunkData).toHaveBeenCalledTimes(2);
     expect(sliceChunkData.mock.calls.map((call) => call[1][0].key)).toEqual([
@@ -374,27 +394,27 @@ describe("Uploader unified delivery", () => {
   });
 
   it("reports real posted bytes against the caller's budget for the panel header", () => {
-    const chunk = makeChunkDelivery({ data: new ArrayBuffer(2048) });
+    const chunk = makeChunkDelivery();
     const cpuCache = makeCpuCache([chunk]);
     const sliceChunkData = vi.fn();
     const ctx = makeCtx({ cpuCache, client: { sliceChunkData } });
 
     new Uploader().deliverToWorker(ctx, 8 * 1024 * 1024, 0);
 
-    expect(scopedDebugStats.uploadBytesUsed).toBe(2048);
+    expect(scopedDebugStats.uploadBytesUsed).toBe(1024);
     expect(scopedDebugStats.uploadBudgetTotal).toBe(8 * 1024 * 1024);
     expect(scopedDebugStats.budgetExhausted).toBe(false);
   });
 
   it("flags the panel header when the upload budget is exhausted", () => {
-    const chunk = makeChunkDelivery({ data: new ArrayBuffer(2048) });
+    const chunk = makeChunkDelivery();
     const cpuCache = makeCpuCache([chunk]);
     const sliceChunkData = vi.fn();
     const ctx = makeCtx({ cpuCache, client: { sliceChunkData } });
 
-    new Uploader().deliverToWorker(ctx, 1024, 0);
+    new Uploader().deliverToWorker(ctx, 512, 0);
 
-    expect(scopedDebugStats.uploadBytesUsed).toBe(2048);
+    expect(scopedDebugStats.uploadBytesUsed).toBe(1024);
     expect(scopedDebugStats.budgetExhausted).toBe(true);
   });
 
@@ -459,24 +479,6 @@ describe("Uploader worker feedback", () => {
       1,
       ["0/0/1/0/0/0"],
       ["0/0/1/0/0/1"],
-    );
-  });
-
-  it("clears missing proxy sent state through CpuCache", () => {
-    const cpuCache = makeCpuCache();
-    const missing: MissingProxy = {
-      kind: "proxy",
-      datasetId: "ds1",
-      entityId: "tile-0",
-      proxyKind: "TileProxy3D",
-      t: 0,
-      c: 2,
-    };
-
-    new Uploader().handleWantedSetDelta("ds1", [missing], cpuCache);
-
-    expect(cpuCache.markProxyMissing).toHaveBeenCalledWith(
-      "ds1|tile-0|TileProxy3D|0|2",
     );
   });
 
@@ -617,6 +619,6 @@ describe("Uploader cold and hot state", () => {
       new Map(),
     );
     const cold = coldState.mock.calls[0][0] as ColdStateMessage;
-    expect((cold.activeSet[0] as ActiveSetEntry).entityId).toBe("tile-0");
+    expect(cold.activeSet[0].entityId).toBe("tile-0");
   });
 });

@@ -210,4 +210,26 @@ describe("MentionsOfMe read/unread inbox (#803)", () => {
     openPanel();
     expect(screen.queryByTestId(/^mention-of-me-item-/)).toBeNull();
   });
+
+  it("keeps focus on the non-modal trigger and restores it after Escape inside the panel", () => {
+    render(
+      <MentionsOfMe
+        annotations={twoMentions()}
+        currentUserId={MY_ID}
+        onNavigate={() => {}}
+        viewedCommentIds={[]}
+      />,
+    );
+    const trigger = screen.getByTestId("mentions-of-me-badge");
+    trigger.focus();
+    fireEvent.click(trigger);
+    expect(document.activeElement).toBe(trigger);
+
+    const firstControl = screen.getByTestId("mentions-of-me-hide-viewed-toggle");
+    firstControl.focus();
+    fireEvent.keyDown(firstControl, { key: "Escape" });
+
+    expect(screen.queryByTestId("mentions-of-me-panel")).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
 });

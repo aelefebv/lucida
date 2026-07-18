@@ -6,6 +6,7 @@ Start with [Chunk Lifecycle](../../flows/chunk-lifecycle.md) for the end-to-end 
 
 ## The chunk pipeline
 
+- [Collection Admission and Label Discovery](collection-admission-and-label-discovery.md) — strict all-tile metadata validation plus bounded sampled/exhaustive OME-Zarr label discovery
 - [Planning Domain](planning-domain.md) — wanted-set computation, detail/coarse tier selection, lane-based priority formula
 - [CPU Cache](cpu-cache.md) — sole chunk fetch path; tiered LRU eviction; decode pool dispatch; drain to GPU
 - [Generated Coarse](generated-coarse.md) — server-managed derived coarse pyramid levels served through the normal chunk path
@@ -24,7 +25,7 @@ Start with [Chunk Lifecycle](../../flows/chunk-lifecycle.md) for the end-to-end 
 
 ## Collaboration, persistence, and auth
 
-- [Saved Views](saved-views.md) — `#view=…` URL-as-app-state + server-stored `#b=<id>` bookmarks; spans `lucida-core` (schema), `lucida-web` (encoder/applier/sidebar), `lucida-server` (SQLite store + REST + broadcast)
+- [Saved Views](saved-views.md) — `#view=…` URL-as-app-state + workspace-scoped `#b=<id>` saved views; spans `lucida-core` (schema), `lucida-web` (encoder/applier/sidebar), and `lucida-server` (workspace SQLite store + REST)
 - [Workspaces](workspaces.md) — server-stored container of opened datasets, saved views, and members; the unit of collaboration and of the live session (`/ws/workspaces/:id`); `wds-` membership vs `ds-` source identity
 - [Presence and Follow Mode](presence-and-follow-mode.md) — peer-to-peer presence, transitive follow chains, throttling
 - [Annotations, comments, and mentions](annotations.md) — point/line/box pins with comment threads and `@mention`s; authoritative state in `lucida-core`, persistence/broadcast in `lucida-server`, overlays/inbox in `lucida-web`

@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { ContrastControls } from "./ContrastControls.tsx";
 import { ColormapSelector } from "./ColormapSelector.tsx";
-import { LayoutSwitcher } from "./LayoutSwitcher.tsx";
+import { InlineRenameInput } from "./InlineRenameInput.tsx";
+import { LayoutSwitcherController } from "./LayoutSwitcherController.tsx";
 import type { LayoutRegistry } from "../pipeline/layoutRegistry.ts";
 import type { BlendMode, Colormap, RenderMode } from "../savedView/types.ts";
+import { DEFAULT_LABEL_OPACITY } from "../labelSettings.ts";
 import "./LayerPanel.css";
 
 export interface LayerInfo {
@@ -87,13 +89,23 @@ interface Props {
   onLabelSetVisible?: (id: string, label: number, visible: boolean) => void;
   /** Set a single label overlay's opacity (0..1). */
   onLabelSetOpacity?: (id: string, label: number, opacity: number) => void;
-  viewModeToggle: { label: string; onClick: () => void } | null;
+  viewModeToggle: { current: "2D" | "3D"; next: "2D" | "3D"; onClick: () => void } | null;
   cameraModeToggle: { label: string; onClick: () => void } | null;
   debugToggle?: { label: string; active: boolean; onClick: () => void };
   layoutRegistry: LayoutRegistry | null;
   sendCommand: (json: string) => void;
   onLayoutChange?: () => void;
+  className?: string;
   style?: React.CSSProperties;
+  /** Explicit initial-focus target for the mobile drawer close control. */
+  drawerCloseButtonRef?: React.Ref<HTMLButtonElement>;
+  /** Mobile-only modal drawer behavior; omitted for the desktop sidebar. */
+  drawer?: {
+    open: boolean;
+    panelRef: React.RefObject<HTMLDivElement | null>;
+    onKeyDown: React.KeyboardEventHandler<HTMLDivElement>;
+    onClose: () => void;
+  };
 }
 
 export function LayerPanel({
@@ -133,7 +145,10 @@ export function LayerPanel({
   layoutRegistry,
   sendCommand,
   onLayoutChange,
+  className,
   style,
+  drawerCloseButtonRef,
+  drawer,
 }: Props) {
   // Which layer row's name is currently being edited inline (editor-only).
   const [renamingLayerId, setRenamingLayerId] = useState<string | null>(null);
@@ -181,17 +196,52 @@ export function LayerPanel({
       return next;
     });
   };
+  const panelId = "layers-panel";
+  const panelHeadingId = `${panelId}-heading`;
+  const drawerClosed = drawer !== undefined && !drawer.open;
   return (
-    <div className="layer-panel" style={style}>
+    <div
+      id={panelId}
+      ref={drawer?.panelRef}
+      className={`layer-panel${className ? ` ${className}` : ""}`}
+      style={style}
+      role={drawer?.open ? "dialog" : undefined}
+      aria-modal={drawer?.open ? true : undefined}
+      aria-labelledby={drawer?.open ? panelHeadingId : undefined}
+      aria-hidden={drawerClosed ? true : undefined}
+      inert={drawerClosed || undefined}
+      tabIndex={drawer?.open ? -1 : undefined}
+      onKeyDown={drawer?.onKeyDown}
+    >
       <div className="layer-panel-header">
-        <h3>Layers</h3>
+        <h3 id={panelHeadingId}>Layers</h3>
         <div className="layer-panel-header-buttons">
+          {drawer?.open && (
+            <button
+              ref={drawerCloseButtonRef}
+              // This is a true modal drawer: moving focus from background
+              // content on open is required. useModalDialog owns the trap and
+              // restoration; native autoFocus covers the pre-layout frame in
+              // which responsive CSS can temporarily hide this control.
+              // eslint-disable-next-line jsx-a11y/no-autofocus
+              autoFocus
+              type="button"
+              className="mobile-layer-close-button"
+              aria-label="Close layers panel"
+              title="Close layers panel"
+              onClick={drawer.onClose}
+            >
+              ×
+            </button>
+          )}
           {viewModeToggle && (
             <button
-              aria-label={`Switch view mode to ${viewModeToggle.label}`}
+              aria-label={`Switch view mode to ${viewModeToggle.next}`}
+              aria-pressed={viewModeToggle.current === "3D"}
               onClick={viewModeToggle.onClick}
+              title={`Switch view mode to ${viewModeToggle.next}`}
             >
-              {viewModeToggle.label}
+              View: {viewModeToggle.current}
             </button>
           )}
           {cameraModeToggle && (
@@ -206,9 +256,10 @@ export function LayerPanel({
           {debugToggle && (
             <button
               aria-label={debugToggle.label}
+              aria-pressed={debugToggle.active}
+              className={`layer-debug-toggle${debugToggle.active ? " active" : ""}`}
               onClick={debugToggle.onClick}
               title="Toggle debug overlay"
-              style={debugToggle.active ? { background: "#4a9eff", color: "#fff" } : undefined}
             >
               {debugToggle.label}
             </button>
@@ -228,7 +279,6 @@ export function LayerPanel({
             <div
               key={layer.id}
               className={`layer-row${isSelected ? " selected" : ""}`}
-              onClick={() => onSelectLayer(layer.id)}
             >
               <div className="layer-row-header">
                 <button
@@ -241,8 +291,10 @@ export function LayerPanel({
                   {layer.visible ? "\u25C9" : "\u25CB"}
                 </button>
                 {canEdit && renamingLayerId === layer.id ? (
-                  <LayerNameInput
-                    initial={layer.name}
+                  <InlineRenameInput
+                    initialValue={layer.name}
+                    className="layer-name-input"
+                    aria-label="Layer name"
                     onCommit={(name) => {
                       setRenamingLayerId(null);
                       onRenameLayer(layer.id, name);
@@ -250,13 +302,16 @@ export function LayerPanel({
                     onCancel={() => setRenamingLayerId(null)}
                   />
                 ) : (
-                  <span
-                    className="layer-name"
+                  <button
+                    type="button"
+                    className="layer-name layer-select-button"
                     title={canEdit ? "Double-click to rename" : layer.name}
-                    onDoubleClick={canEdit ? (e) => { e.stopPropagation(); setRenamingLayerId(layer.id); } : undefined}
+                    aria-pressed={isSelected}
+                    onClick={() => onSelectLayer(layer.id)}
+                    onDoubleClick={canEdit ? () => setRenamingLayerId(layer.id) : undefined}
                   >
                     {layer.name}
-                  </span>
+                  </button>
                 )}
                 {/*
                   Discoverability affordance: a small count pill on the row when
@@ -309,8 +364,8 @@ export function LayerPanel({
                 </button>
               </div>
               {isExpanded && (
-                <div className="layer-detail" onClick={(e) => e.stopPropagation()}>
-                  <LayoutSwitcher
+                <div className="layer-detail">
+                  <LayoutSwitcherController
                     datasetId={layer.id}
                     registry={layoutRegistry}
                     sendCommand={sendCommand}
@@ -319,7 +374,7 @@ export function LayerPanel({
                   {multiChannel && layer.channelSettings ? (
                     <>
                       <div className="layer-detail-row channel-collapse-controls">
-                        <label>Channels</label>
+                        <span className="layer-detail-label">Channels</span>
                         <button
                           className="channel-collapse-all-btn"
                           aria-label={`Collapse all channels of ${layer.name}`}
@@ -368,12 +423,14 @@ export function LayerPanel({
                               {ch.visible ? "\u25C9" : "\u25CB"}
                             </button>
                             {canEdit && isRenamingChannel ? (
-                              <ChannelNameInput
+                              <InlineRenameInput
                                 // Pre-fill with the user override if one is set;
                                 // otherwise start empty so the placeholder shows
                                 // the inherited (omero/`Ch N`) name and a blank
                                 // commit clears back to it.
-                                initial={ch.name ?? ""}
+                                initialValue={ch.name ?? ""}
+                                className="channel-name-input"
+                                aria-label="Channel name"
                                 placeholder={chName}
                                 onCommit={(name) => {
                                   setRenamingChannelKey(null);
@@ -427,7 +484,7 @@ export function LayerPanel({
                           {isChannelExpanded && (
                             <div className="channel-sublayer-detail">
                               <div className="layer-detail-row">
-                                <label>Colormap</label>
+                                <span className="layer-detail-label">Colormap</span>
                                 <ColormapSelector
                                   value={ch.colormap}
                                   label={`${layer.name} ${chName} colormap`}
@@ -456,7 +513,7 @@ export function LayerPanel({
                         );
                       })}
                       <div className="layer-detail-row">
-                        <label>Ch Blend</label>
+                        <span className="layer-detail-label">Ch Blend</span>
                         <select
                           aria-label={`${layer.name} channel blend mode`}
                           value={layer.channelBlendMode}
@@ -487,7 +544,7 @@ export function LayerPanel({
                         labelPrefix={layer.name}
                       />
                       <div className="layer-detail-row">
-                        <label>Colormap</label>
+                        <span className="layer-detail-label">Colormap</span>
                         <ColormapSelector
                           value={layer.colormap}
                           label={`${layer.name} colormap`}
@@ -506,17 +563,17 @@ export function LayerPanel({
                     underneath"). Handlers pass the label's MANIFEST index (row.index)
                     — not the row position — so they hit the right label even when
                     earlier labels were skipped. Neither ever reframes the camera.
-                    The enclosing `.layer-detail` already stops row-click
-                    propagation, so these controls don't need their own.
+                    Selection is owned by the native layer-name button, so these
+                    controls never depend on row-click propagation.
                   */}
                   {layer.labelRows && layer.labelRows.length > 0 && (
                     <div className="layer-labels-section" data-testid={`labels-section-${layer.id}`}>
                       <div className="layer-detail-row">
-                        <label>Labels</label>
+                        <span className="layer-detail-label">Labels</span>
                       </div>
                       {layer.labelRows.map((row) => {
                         const labelName = row.name.trim() || `Label ${row.index}`;
-                        const labelPct = Math.round((row.opacity ?? 0.5) * 100);
+                        const labelPct = Math.round((row.opacity ?? DEFAULT_LABEL_OPACITY) * 100);
                         // A label drawable only in the OTHER view mode: its
                         // controls are inert here, so disable them and show the
                         // reason as text. This keeps the panel honest — no eye
@@ -570,7 +627,7 @@ export function LayerPanel({
                     </div>
                   )}
                   <div className="layer-detail-row">
-                    <label>Blend</label>
+                    <span className="layer-detail-label">Blend</span>
                     <select
                       aria-label={`${layer.name} blend mode`}
                       value={layer.blendMode}
@@ -582,7 +639,7 @@ export function LayerPanel({
                     </select>
                   </div>
                   <div className="layer-detail-row">
-                    <label>Rendering</label>
+                    <span className="layer-detail-label">Rendering</span>
                     <select
                       aria-label={`${layer.name} rendering mode`}
                       value={layer.renderMode}
@@ -594,7 +651,7 @@ export function LayerPanel({
                   </div>
                   {layer.detailLevelOptions.length > 0 && (
                     <div className="layer-detail-row">
-                      <label>Detail</label>
+                      <span className="layer-detail-label">Detail</span>
                       <select
                         aria-label={`${layer.name} detail level`}
                         value={layer.detailLevelOverride ?? ""}
@@ -630,8 +687,8 @@ export function LayerPanel({
                       Down
                     </button>
                     <button
+                      className="layer-remove-btn"
                       onClick={() => onRemoveLayer(layer.id)}
-                      style={{ marginLeft: "auto", color: "#f44" }}
                       aria-label={`Remove layer ${layer.name}`}
                     >
                       Remove
@@ -644,101 +701,5 @@ export function LayerPanel({
         })}
       </div>
     </div>
-  );
-}
-
-/**
- * Inline rename input for a layer name. Auto-focuses and selects on mount;
- * Enter (or blur) commits, Escape cancels. Stops click propagation so editing
- * the name does not select/collapse the row. Mirrors the saved-view rename
- * affordance for a consistent feel.
- */
-function LayerNameInput({
-  initial,
-  onCommit,
-  onCancel,
-}: {
-  initial: string;
-  onCommit: (name: string) => void;
-  onCancel: () => void;
-}) {
-  const [value, setValue] = useState(initial);
-  const ref = useRef<HTMLInputElement | null>(null);
-  useEffect(() => {
-    ref.current?.focus();
-    ref.current?.select();
-  }, []);
-  return (
-    <input
-      ref={ref}
-      type="text"
-      className="layer-name-input"
-      aria-label="Layer name"
-      value={value}
-      onChange={(e) => setValue(e.target.value)}
-      onClick={(e) => e.stopPropagation()}
-      onBlur={() => onCommit(value)}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          onCommit(value);
-        } else if (e.key === "Escape") {
-          e.preventDefault();
-          onCancel();
-        }
-      }}
-    />
-  );
-}
-
-/**
- * Inline rename input for a single channel's display-name override. Mirrors
- * {@link LayerNameInput} (auto-focus + select on mount; Enter/blur commits,
- * Escape cancels; stops click propagation), with two channel-specific
- * differences:
- *  - it starts from the current override (empty when none is set) and shows the
- *    inherited name (omero label / `Ch N`) as the `placeholder`, and
- *  - an **empty** commit is meaningful: it clears the override (the caller maps
- *    blank → `null`), falling the label back to the omero/`Ch N` name. (The
- *    layer rename, by contrast, ignores a blank value.)
- */
-function ChannelNameInput({
-  initial,
-  placeholder,
-  onCommit,
-  onCancel,
-}: {
-  initial: string;
-  placeholder: string;
-  onCommit: (name: string) => void;
-  onCancel: () => void;
-}) {
-  const [value, setValue] = useState(initial);
-  const ref = useRef<HTMLInputElement | null>(null);
-  useEffect(() => {
-    ref.current?.focus();
-    ref.current?.select();
-  }, []);
-  return (
-    <input
-      ref={ref}
-      type="text"
-      className="channel-name-input"
-      aria-label="Channel name"
-      placeholder={placeholder}
-      value={value}
-      onChange={(e) => setValue(e.target.value)}
-      onClick={(e) => e.stopPropagation()}
-      onBlur={() => onCommit(value)}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          onCommit(value);
-        } else if (e.key === "Escape") {
-          e.preventDefault();
-          onCancel();
-        }
-      }}
-    />
   );
 }

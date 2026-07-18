@@ -5,12 +5,14 @@ import type {
   MinimapUploadOverviewChunksForLayerMessage,
   ThumbnailRenderMessage,
 } from "./workerProtocol.ts";
-import { createEmptyVolumeTexture, createOffscreenTarget, writeVolumeChunk } from "./gpuContext.ts";
-import type { CompositeLayer } from "./layerCompositor.ts";
+import { OFFSCREEN_FORMAT, writeVolumeChunk } from "./gpuContext.ts";
 import { sampleIntensityRange } from "../zarr/intensitySampler.ts";
+import type { TrackedGpuResource } from "./gpuResourceBudget.ts";
+import { assertChunkBufferLength } from "../chunkContract.ts";
 
 interface MinimapOverviewEntry {
   texture: GPUTexture;
+  allocation?: TrackedGpuResource<GPUTexture>;
   uploaded: Set<string>;
   t: number;
   c: number;
@@ -25,6 +27,7 @@ const minimapOverviewPerDataset = new Map<string, MinimapOverviewEntry>();
 
 let minimapContext: GPUCanvasContext | null = null;
 let minimapOffscreenPool: GPUTexture[] = [];
+let minimapOffscreenAllocations: TrackedGpuResource<GPUTexture>[] = [];
 let minimapPoolWidth = 0;
 let minimapPoolHeight = 0;
 
@@ -44,12 +47,33 @@ let minimapPoolHeight = 0;
 let thumbnailCanvas: OffscreenCanvas | null = null;
 let thumbnailContext: GPUCanvasContext | null = null;
 let thumbnailOffscreenPool: GPUTexture[] = [];
+let thumbnailOffscreenAllocations: TrackedGpuResource<GPUTexture>[] = [];
 let thumbnailPoolSize = 0;
 
-function ensureThumbnailTargets(ctx: WorkerCtx, size: number, count: number) {
+function destroyTexture(
+  texture: GPUTexture,
+  allocation?: TrackedGpuResource<GPUTexture>,
+): void {
+  if (allocation) allocation.destroy();
+  else texture.destroy();
+}
+
+function destroyOffscreenPool(
+  textures: GPUTexture[],
+  allocations: TrackedGpuResource<GPUTexture>[],
+): void {
+  if (allocations.length > 0) {
+    for (const allocation of allocations) allocation.destroy();
+  } else {
+    for (const texture of textures) texture.destroy();
+  }
+}
+
+function ensureThumbnailTarget(ctx: WorkerCtx, size: number): GPUTexture {
   if (size !== thumbnailPoolSize) {
-    for (const tex of thumbnailOffscreenPool) tex.destroy();
+    destroyOffscreenPool(thumbnailOffscreenPool, thumbnailOffscreenAllocations);
     thumbnailOffscreenPool = [];
+    thumbnailOffscreenAllocations = [];
     thumbnailPoolSize = size;
     // The canvas is reconfigured (not just resized) so its backing store matches
     // the new size; a fresh context keeps the configure() simple.
@@ -61,21 +85,46 @@ function ensureThumbnailTargets(ctx: WorkerCtx, size: number, count: number) {
     thumbnailCanvas.width = size;
     thumbnailCanvas.height = size;
   }
-  while (thumbnailOffscreenPool.length < count) {
-    thumbnailOffscreenPool.push(createOffscreenTarget(ctx.device, size, size));
+  if (thumbnailOffscreenPool.length === 0) {
+    const allocation = ctx.gpuResources.createTexture(
+      ctx.device,
+      { key: "session:thumbnail-offscreen:0", kind: "offscreen" },
+      {
+        size: [size, size],
+        format: OFFSCREEN_FORMAT,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+      },
+    );
+    const texture = allocation.resource;
+    thumbnailOffscreenPool.push(texture);
+    thumbnailOffscreenAllocations.push(allocation);
   }
+  return thumbnailOffscreenPool[0];
 }
 
-function ensureMinimapOffscreenPool(device: GPUDevice, count: number, w: number, h: number) {
+function ensureMinimapOffscreenTarget(ctx: WorkerCtx, w: number, h: number): GPUTexture {
   if (w !== minimapPoolWidth || h !== minimapPoolHeight) {
-    for (const tex of minimapOffscreenPool) tex.destroy();
+    destroyOffscreenPool(minimapOffscreenPool, minimapOffscreenAllocations);
     minimapOffscreenPool = [];
+    minimapOffscreenAllocations = [];
     minimapPoolWidth = w;
     minimapPoolHeight = h;
   }
-  while (minimapOffscreenPool.length < count) {
-    minimapOffscreenPool.push(createOffscreenTarget(device, w, h));
+  if (minimapOffscreenPool.length === 0) {
+    const allocation = ctx.gpuResources.createTexture(
+      ctx.device,
+      { key: "session:minimap-offscreen:0", kind: "offscreen" },
+      {
+        size: [w, h],
+        format: OFFSCREEN_FORMAT,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+      },
+    );
+    const texture = allocation.resource;
+    minimapOffscreenPool.push(texture);
+    minimapOffscreenAllocations.push(allocation);
   }
+  return minimapOffscreenPool[0];
 }
 
 export function handleMinimapInit(ctx: WorkerCtx, msg: MinimapInitMessage): void {
@@ -92,22 +141,15 @@ export function handleMinimapRender(ctx: WorkerCtx, msg: MinimapRenderMessage): 
 
   const renderer = ctx.getVolumeRenderer();
   const comp = ctx.getCompositor();
-  ensureMinimapOffscreenPool(ctx.device, msg.layers.length, msg.canvasW, msg.canvasH);
-
-  const renderedLayers: CompositeLayer[] = [];
+  const target = ensureMinimapOffscreenTarget(ctx, msg.canvasW, msg.canvasH);
+  const canvasView = minimapContext.getCurrentTexture().createView();
+  let isFirstLayer = true;
 
   for (const layer of msg.layers) {
     const overview = minimapOverviewPerDataset.get(layer.datasetId);
     if (!overview) continue;
 
-    const idx = renderedLayers.length;
-    // Minimap renders the overview as a single-LOD volume — the
-    // transient descriptor sets proxy slot indices to the sentinel, so
-    // the unified chain naturally falls through to the chunk path.
-    // Reset textures in case a previous main-view draw bound real proxy
-    // textures — leaving stale handles bound is harmless but signals
-    // intent more clearly.
-    renderer.setProxyTextures(null, null);
+    // Minimap renders the overview as a single-LOD volume.
     // Bind the active channel's colormap LUT for the minimap's own draw. Without
     // this the minimap reuses whatever LUT the volume renderer last had — set by
     // the 3D main view (so 3D looks right) but left at the default gray in 2D
@@ -126,15 +168,23 @@ export function handleMinimapRender(ctx: WorkerCtx, msg: MinimapRenderMessage): 
       layer.contrastMin, layer.contrastMax, layer.gamma, 1.0,
     );
     const layerEncoder = ctx.device.createCommandEncoder();
-    renderer.renderTo(minimapOffscreenPool[idx].createView(), layerEncoder, undefined, undefined, msg.canvasW, msg.canvasH);
+    renderer.renderTo(target.createView(), layerEncoder, undefined, undefined, msg.canvasW, msg.canvasH);
     ctx.device.queue.submit([layerEncoder.finish()]);
-    renderedLayers.push({ view: minimapOffscreenPool[idx].createView(), blendMode: "alpha" });
+    const compEncoder = ctx.device.createCommandEncoder();
+    comp.composite(
+      canvasView,
+      [{ view: target.createView(), blendMode: "alpha" }],
+      compEncoder,
+      isFirstLayer,
+    );
+    ctx.device.queue.submit([compEncoder.finish()]);
+    isFirstLayer = false;
   }
 
-  if (renderedLayers.length > 0) {
-    const compEncoder = ctx.device.createCommandEncoder();
-    comp.composite(minimapContext.getCurrentTexture().createView(), renderedLayers, compEncoder);
-    ctx.device.queue.submit([compEncoder.finish()]);
+  if (isFirstLayer) {
+    const clearEncoder = ctx.device.createCommandEncoder();
+    comp.composite(canvasView, [], clearEncoder);
+    ctx.device.queue.submit([clearEncoder.finish()]);
   }
 }
 
@@ -155,19 +205,18 @@ export function handleThumbnailRender(ctx: WorkerCtx, msg: ThumbnailRenderMessag
 
   const renderer = ctx.getVolumeRenderer();
   const comp = ctx.getCompositor();
-  ensureThumbnailTargets(ctx, size, msg.layers.length);
+  const target = ensureThumbnailTarget(ctx, size);
 
-  const renderedLayers: CompositeLayer[] = [];
+  const canvasView = thumbnailContext?.getCurrentTexture().createView() ?? null;
+  let renderedLayerCount = 0;
   for (const layer of msg.layers) {
     const overview = minimapOverviewPerDataset.get(layer.datasetId);
     if (!overview) continue;
 
-    const idx = renderedLayers.length;
-    // Same single-LOD overview draw as the minimap: reset proxy textures, bind
-    // the active channel's LUT before setVolume (setVolume rebuilds the bind
+    // Same single-LOD overview draw as the minimap: bind the active channel's
+    // LUT before setVolume (setVolume rebuilds the bind
     // group from the current LUT), then a transient descriptor so the shader
     // reads this layer's model matrix + contrast/gamma over the full overview.
-    renderer.setProxyTextures(null, null);
     renderer.setColormapTexture(ctx.getOrCreateLUT(layer.colormap));
     renderer.setVolume(overview.texture, overview.width, overview.height, overview.depth);
     renderer.setMatrices(msg.invViewProj, msg.eye);
@@ -177,21 +226,27 @@ export function handleThumbnailRender(ctx: WorkerCtx, msg: ThumbnailRenderMessag
       layer.contrastMin, layer.contrastMax, layer.gamma, 1.0,
     );
     const layerEncoder = ctx.device.createCommandEncoder();
-    renderer.renderTo(thumbnailOffscreenPool[idx].createView(), layerEncoder, undefined, undefined, size, size);
+    renderer.renderTo(target.createView(), layerEncoder, undefined, undefined, size, size);
     ctx.device.queue.submit([layerEncoder.finish()]);
-    renderedLayers.push({ view: thumbnailOffscreenPool[idx].createView(), blendMode: "alpha" });
+    if (canvasView) {
+      const compEncoder = ctx.device.createCommandEncoder();
+      comp.composite(
+        canvasView,
+        [{ view: target.createView(), blendMode: "alpha" }],
+        compEncoder,
+        renderedLayerCount === 0,
+      );
+      ctx.device.queue.submit([compEncoder.finish()]);
+    }
+    renderedLayerCount++;
   }
 
-  if (renderedLayers.length === 0 || !thumbnailContext || !thumbnailCanvas) {
+  if (renderedLayerCount === 0 || !thumbnailContext || !thumbnailCanvas) {
     // No resident overview for any layer → nothing to draw; let the panel keep
     // the label-only row. (Reply is required so the pending promise resolves.)
     ctx.post({ type: "thumbnailResult", id: msg.id, bitmap: null });
     return;
   }
-
-  const compEncoder = ctx.device.createCommandEncoder();
-  comp.composite(thumbnailContext.getCurrentTexture().createView(), renderedLayers, compEncoder);
-  ctx.device.queue.submit([compEncoder.finish()]);
 
   // Snapshot the composited canvas into a transferable ImageBitmap. The canvas
   // is reused for the next thumbnail, so we must capture now (not transfer the
@@ -206,15 +261,29 @@ export function handleMinimapUploadOverviewChunks(ctx: WorkerCtx, msg: MinimapUp
   let entry = minimapOverviewPerDataset.get(datasetId);
 
   if (entry && (entry.t !== t || entry.c !== c)) {
-    entry.texture.destroy();
+    destroyTexture(entry.texture, entry.allocation);
     entry = undefined;
     minimapOverviewPerDataset.delete(datasetId);
   }
 
   if (!entry) {
-    const texture = createEmptyVolumeTexture(ctx.device, levelWidth, levelHeight, levelDepth);
+    const allocation = ctx.gpuResources.createTexture(
+      ctx.device,
+      {
+        key: `minimap:overview:${datasetId}`,
+        kind: "minimap",
+        datasetId,
+      },
+      {
+        size: [levelWidth, levelHeight, levelDepth],
+        format: "r16uint",
+        dimension: "3d",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+      },
+    );
+    const texture = allocation.resource;
     entry = {
-      texture, uploaded: new Set(),
+      texture, allocation, uploaded: new Set(),
       t, c,
       width: levelWidth, height: levelHeight, depth: levelDepth,
       intensityMin: 65535, intensityMax: 0,
@@ -225,6 +294,13 @@ export function handleMinimapUploadOverviewChunks(ctx: WorkerCtx, msg: MinimapUp
   let intensityChanged = false;
   const totalChunks = msg.chunks.length;
   for (const chunk of msg.chunks) {
+    assertChunkBufferLength(chunk.data, chunk.contract, "worker");
+    if (chunk.contract.role !== "intensity" || chunk.contract.dtype !== "uint16") {
+      throw new Error(`minimap chunk ${chunk.key} has a non-intensity contract`);
+    }
+    if (chunk.contract.channel !== c) {
+      throw new Error(`minimap chunk ${chunk.key} channel contract mismatch`);
+    }
     if (entry.uploaded.has(chunk.key)) continue;
     const data = new Uint16Array(chunk.data);
     const xOff = chunk.x * chunkX;
@@ -244,13 +320,23 @@ export function handleMinimapUploadOverviewChunks(ctx: WorkerCtx, msg: MinimapUp
   }
 
   if (intensityChanged) {
-    ctx.post({ type: "intensityRange", datasetId, min: entry.intensityMin, max: entry.intensityMax });
+    const contract = msg.chunks[0]?.contract;
+    if (contract) {
+      ctx.post({
+        type: "intensityRange",
+        datasetId: contract.datasetId,
+        channel: contract.channel,
+        min: entry.intensityMin,
+        max: entry.intensityMax,
+      });
+    }
   }
 }
 
 export function handleMinimapDestroy(): void {
-  for (const tex of minimapOffscreenPool) tex.destroy();
+  destroyOffscreenPool(minimapOffscreenPool, minimapOffscreenAllocations);
   minimapOffscreenPool = [];
+  minimapOffscreenAllocations = [];
   minimapPoolWidth = 0;
   minimapPoolHeight = 0;
   if (minimapContext) {
@@ -259,8 +345,9 @@ export function handleMinimapDestroy(): void {
   }
   // Thumbnail off-screen render state shares the overview textures + renderer
   // with the minimap, so it's torn down here too.
-  for (const tex of thumbnailOffscreenPool) tex.destroy();
+  destroyOffscreenPool(thumbnailOffscreenPool, thumbnailOffscreenAllocations);
   thumbnailOffscreenPool = [];
+  thumbnailOffscreenAllocations = [];
   thumbnailPoolSize = 0;
   if (thumbnailContext) {
     thumbnailContext.unconfigure();
@@ -272,13 +359,15 @@ export function handleMinimapDestroy(): void {
 export function removeMinimapResources(datasetId: string): void {
   const mmEntry = minimapOverviewPerDataset.get(datasetId);
   if (mmEntry) {
-    mmEntry.texture.destroy();
+    destroyTexture(mmEntry.texture, mmEntry.allocation);
     minimapOverviewPerDataset.delete(datasetId);
   }
 }
 
 export function destroyAllMinimapResources(): void {
-  for (const mmE of minimapOverviewPerDataset.values()) mmE.texture.destroy();
+  for (const mmE of minimapOverviewPerDataset.values()) {
+    destroyTexture(mmE.texture, mmE.allocation);
+  }
   minimapOverviewPerDataset.clear();
   handleMinimapDestroy();
 }

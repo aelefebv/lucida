@@ -1,40 +1,23 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ProxiedContentSource, DEFAULT_TIMEOUT_MS } from "./contentSource.ts";
-import { proxyResponseKey } from "./wireProtocol.ts";
 import { FetchError } from "./retry.ts";
+import type { FailureDescriptor } from "../../bridge.ts";
+
+const TRANSIENT_SOURCE_FAILURE: FailureDescriptor = {
+  category: "source",
+  code: "storage_backend",
+  retryable: true,
+};
+
+const PERMANENT_SOURCE_FAILURE: FailureDescriptor = {
+  category: "authorization",
+  code: "permission",
+  retryable: false,
+};
 
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
-
-/** Build a 64-byte header buffer plus optional payload. */
-function makeProxyResponse(opts?: {
-  dims?: [number, number, number];
-  payloadBytes?: number;
-  badMagic?: boolean;
-}): ArrayBuffer {
-  const payloadBytes = opts?.payloadBytes ?? 16;
-  const buf = new ArrayBuffer(64 + payloadBytes);
-  const view = new DataView(buf);
-  if (opts?.badMagic) {
-    view.setUint8(0, 0x00);
-  } else {
-    view.setUint8(0, 0x4c); // 'L'
-    view.setUint8(1, 0x50); // 'P'
-    view.setUint8(2, 0x52); // 'R'
-    view.setUint8(3, 0x58); // 'X'
-  }
-  view.setUint32(4, 1, true); // algorithmVersion
-  const dims = opts?.dims ?? [2, 2, 2];
-  view.setUint32(8, dims[0], true);
-  view.setUint32(12, dims[1], true);
-  view.setUint32(16, dims[2], true);
-  view.setUint32(20, 0, true); // dtype = u16
-  // Hash bytes left at zero.
-  // Fill payload with a recognizable byte so callers can assert it.
-  new Uint8Array(buf, 64).fill(0xAB);
-  return buf;
-}
 
 let sentMessages: string[];
 let source: ProxiedContentSource;
@@ -183,21 +166,15 @@ describe("ProxiedContentSource.fetch", () => {
     await expect(p2).resolves.toMatchObject({ dataType: "uint16" });
   });
 
-  it("rejectAll cancels every pending chunk and proxy request", async () => {
+  it("rejectAll cancels every pending chunk request", async () => {
     const ctrl = new AbortController();
     const chunkPromise = source.fetch(
       { datasetId: "ds-1", imageId: "image-1", chunkKey: "0/0/0/0/0/0" },
       ctrl.signal,
     );
-    const proxyPromise = source.fetchProxy(
-      { datasetId: "ds-1", entityId: "ent-1", kind: "GroupProxy3D", t: 0, c: 0 },
-      ctrl.signal,
-    );
-
     source.rejectAll();
 
     await expect(chunkPromise).rejects.toThrow(/Bridge disconnected/);
-    await expect(proxyPromise).rejects.toThrow(/Bridge disconnected/);
   });
 
   it("generated pending status rejects with FetchError kind pending", async () => {
@@ -232,9 +209,19 @@ describe("ProxiedContentSource.fetch", () => {
         { datasetId: "ds-1", imageId: "image-1", chunkKey },
         ctrl.signal,
       );
-      source.handleChunkStatus("ds-1", "image-1", chunkKey, status, "test");
+      source.handleChunkStatus(
+        "ds-1",
+        "image-1",
+        chunkKey,
+        status,
+        kind === "transient" ? TRANSIENT_SOURCE_FAILURE : PERMANENT_SOURCE_FAILURE,
+        "test",
+      );
 
-      await expect(promise).rejects.toMatchObject({ kind });
+      await expect(promise).rejects.toMatchObject({
+        kind,
+        failure: kind === "transient" ? TRANSIENT_SOURCE_FAILURE : PERMANENT_SOURCE_FAILURE,
+      });
     }
   });
 
@@ -262,12 +249,14 @@ describe("ProxiedContentSource.fetch", () => {
         "image-1",
         chunkKey,
         status,
+        kind === "transient" ? TRANSIENT_SOURCE_FAILURE : PERMANENT_SOURCE_FAILURE,
         "store rejected the read",
       );
 
       await expect(promise).rejects.toMatchObject({
         name: "FetchError",
         kind,
+        failure: kind === "transient" ? TRANSIENT_SOURCE_FAILURE : PERMANENT_SOURCE_FAILURE,
         message: expect.stringContaining("store rejected the read"),
       });
     }
@@ -279,7 +268,13 @@ describe("ProxiedContentSource.fetch", () => {
     const first = source.fetch(request, ctrl.signal);
     const second = source.fetch(request, ctrl.signal);
 
-    source.handleSourceChunkStatus("ds-1", "image-1", "2/0/0/0/0/0", "unavailable");
+    source.handleSourceChunkStatus(
+      "ds-1",
+      "image-1",
+      "2/0/0/0/0/0",
+      "unavailable",
+      TRANSIENT_SOURCE_FAILURE,
+    );
     await expect(first).rejects.toMatchObject({ kind: "transient" });
     await expect(second).rejects.toMatchObject({ kind: "transient" });
 
@@ -291,80 +286,14 @@ describe("ProxiedContentSource.fetch", () => {
 
   it("a source-chunk status with no pending fetch is a no-op", () => {
     expect(() =>
-      source.handleSourceChunkStatus("ds-1", "image-1", "9/9/9/9/9/9", "failed_permanent"),
+      source.handleSourceChunkStatus(
+        "ds-1",
+        "image-1",
+        "9/9/9/9/9/9",
+        "failed_permanent",
+        PERMANENT_SOURCE_FAILURE,
+      ),
     ).not.toThrow();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Proxy fetches
-// ---------------------------------------------------------------------------
-
-describe("ProxiedContentSource.fetchProxy", () => {
-  it("happy path: sends asset_request; handleProxyData decodes header + slices payload", async () => {
-    const ctrl = new AbortController();
-    const promise = source.fetchProxy(
-      { datasetId: "ds-1", entityId: "ent-1", kind: "GroupProxy3D", t: 0, c: 0 },
-      ctrl.signal,
-    );
-
-    expect(sentMessages.length).toBe(1);
-    const msg = JSON.parse(sentMessages[0]);
-    expect(msg.type).toBe("asset_request");
-    expect(msg.entity_id).toBe("ent-1");
-    expect(msg.kind).toBe("GroupProxy3D");
-
-    const response = makeProxyResponse({ dims: [2, 2, 2], payloadBytes: 16 });
-    source.handleProxyData(
-      proxyResponseKey("ent-1", "GroupProxy3D", 0, 0),
-      response,
-    );
-
-    const result = await promise;
-    expect(result.header.dims).toEqual([2, 2, 2]);
-    expect(result.header.dtype).toBe("u16");
-    expect(result.data.byteLength).toBe(16);
-  });
-
-  it("times out after the configured proxyTimeoutMs", async () => {
-    const fastSource = new ProxiedContentSource(
-      (json) => sentMessages.push(json),
-      10_000,
-      50,
-    );
-    const ctrl = new AbortController();
-    const promise = fastSource.fetchProxy(
-      { datasetId: "ds-1", entityId: "ent-1", kind: "GroupProxy3D", t: 0, c: 0 },
-      ctrl.signal,
-    );
-    vi.advanceTimersByTime(60);
-    await expect(promise).rejects.toThrow(/timed out/);
-  });
-
-  it("aborts when the signal fires", async () => {
-    const ctrl = new AbortController();
-    const promise = source.fetchProxy(
-      { datasetId: "ds-1", entityId: "ent-1", kind: "GroupProxy3D", t: 0, c: 0 },
-      ctrl.signal,
-    );
-    ctrl.abort();
-    await expect(promise).rejects.toMatchObject({ name: "AbortError" });
-  });
-
-  it("propagates parse errors from a malformed header", async () => {
-    const ctrl = new AbortController();
-    const promise = source.fetchProxy(
-      { datasetId: "ds-1", entityId: "ent-1", kind: "GroupProxy3D", t: 0, c: 0 },
-      ctrl.signal,
-    );
-
-    const bad = makeProxyResponse({ badMagic: true });
-    source.handleProxyData(
-      proxyResponseKey("ent-1", "GroupProxy3D", 0, 0),
-      bad,
-    );
-
-    await expect(promise).rejects.toThrow(/magic/i);
   });
 });
 
@@ -373,25 +302,7 @@ describe("ProxiedContentSource.fetchProxy", () => {
 // ---------------------------------------------------------------------------
 
 describe("ProxiedContentSource.handleBinary", () => {
-  it("routes a `proxy/...` key to the proxy queue", async () => {
-    const ctrl = new AbortController();
-    const promise = source.fetchProxy(
-      { datasetId: "ds-1", entityId: "ent-1", kind: "GroupProxy3D", t: 0, c: 0 },
-      ctrl.signal,
-    );
-
-    const response = makeProxyResponse({ dims: [2, 2, 2], payloadBytes: 16 });
-    source.handleBinary(
-      proxyResponseKey("ent-1", "GroupProxy3D", 0, 0),
-      response,
-    );
-
-    const result = await promise;
-    expect(result.header.dims).toEqual([2, 2, 2]);
-    expect(result.data.byteLength).toBe(16);
-  });
-
-  it("routes a non-proxy key to the chunk queue", async () => {
+  it("routes a binary response to the chunk queue", async () => {
     const ctrl = new AbortController();
     const promise = source.fetch(
       { datasetId: "ds-1", imageId: "image-1", chunkKey: "0/0/0/0/0/0" },

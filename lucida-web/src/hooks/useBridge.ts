@@ -5,7 +5,10 @@ export type { Bridge } from "../bridge.ts";
 import type { DatasetState } from "../types.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import type { Session } from "../session.ts";
-import { SessionController } from "../sessionController.ts";
+import {
+  SessionController,
+  type RemoteDatasetErrorKind,
+} from "../sessionController.ts";
 export type { SavedViewBridgeHooks } from "../sessionController.ts";
 import type { SavedViewBridgeHooks } from "../sessionController.ts";
 import type { DatasetCallbacks } from "./useDatasetSettings.ts";
@@ -68,9 +71,8 @@ export function useBridge(params: Params) {
 
   const controllerRef = useRef<SessionController | null>(null);
   const sessionRef = useRef<Session | null>(null);
-  /** Mirrors `controller.bridge` as React state so consumers (e.g.
-   *  `useBookmarks` for `bookmark_changed` subscriptions) re-run effects when
-   *  the bridge becomes available. Set immediately after construction. */
+  /** Mirrors `controller.bridge` as React state for consumers that need the
+   *  live transport handle. Set immediately after construction. */
   const [bridge, setBridge] = useState<Bridge | null>(null);
   // REAL transport-readiness signals, distinct from `Boolean(bridge)` (which
   // flips synchronously when the Bridge is constructed, while its WebSocket is
@@ -90,6 +92,8 @@ export function useBridge(params: Params) {
   const followTargetRef = useRef<ClientId | null>(null);
   const [remoteDatasetLoading, setRemoteDatasetLoading] = useState(false);
   const [remoteDatasetError, setRemoteDatasetError] = useState<string | null>(null);
+  const [remoteDatasetErrorKind, setRemoteDatasetErrorKind] =
+    useState<RemoteDatasetErrorKind | null>(null);
   const [remoteDatasetProgress, setRemoteDatasetProgress] = useState<string | null>(null);
   // Durable non-fatal import warnings collected across dataset opens. Unlike
   // `remoteDatasetProgress`, these survive open completion; they are cleared by
@@ -138,6 +142,7 @@ export function useBridge(params: Params) {
         onRemoteDatasetActivity: (activity) => {
           setRemoteDatasetLoading(activity.loading);
           setRemoteDatasetError(activity.error);
+          setRemoteDatasetErrorKind(activity.errorKind);
           setRemoteDatasetProgress(activity.progress);
           setRemoteDatasetWarnings(activity.warnings);
           setRemoteDatasetWarningsOverflow(activity.warningsOverflow);
@@ -150,9 +155,8 @@ export function useBridge(params: Params) {
     });
     controllerRef.current = controller;
     sessionRef.current = controller.session;
-    // Publish the bridge as React state so consumer hooks (useBookmarks
-    // subscribes to `bookmark_changed`) can take a dependency on it and run
-    // their subscribe effect once it's live.
+    // Publish the bridge as React state for consumers that need a stable live
+    // transport handle.
     setBridge(controller.bridge);
 
     return () => {
@@ -177,6 +181,7 @@ export function useBridge(params: Params) {
       followTargetRef.current = null;
       setRemoteDatasetLoading(false);
       setRemoteDatasetError(null);
+      setRemoteDatasetErrorKind(null);
       setRemoteDatasetProgress(null);
       setRemoteDatasetWarnings([]);
       setRemoteDatasetWarningsOverflow(0);
@@ -199,8 +204,11 @@ export function useBridge(params: Params) {
     controllerRef.current?.emitDatasetPresence();
   }, []);
 
-  const sendCursor = useCallback((position: [number, number] | null) => {
-    controllerRef.current?.sendCursor(position);
+  const sendCursor = useCallback((
+    position: [number, number] | null,
+    datasetId: string | null,
+  ) => {
+    controllerRef.current?.sendCursor(position, datasetId);
   }, []);
 
   const sendOpenRemoteDataset = useCallback((url: string) => {
@@ -217,6 +225,14 @@ export function useBridge(params: Params) {
 
   const dismissRemoteDatasetWarnings = useCallback(() => {
     controllerRef.current?.dismissOpenWarnings();
+  }, []);
+
+  const retryRemoteDatasetOpen = useCallback(() => {
+    controllerRef.current?.retryFailedOpen();
+  }, []);
+
+  const dismissRemoteDatasetError = useCallback(() => {
+    controllerRef.current?.dismissFailedOpen();
   }, []);
 
   const followablePeers = Array.from(peers.entries())
@@ -247,6 +263,7 @@ export function useBridge(params: Params) {
     sendOpenRemoteDataset,
     remoteDatasetLoading,
     remoteDatasetError,
+    remoteDatasetErrorKind,
     remoteDatasetProgress,
     /** Durable non-fatal import warnings collected across opens. Stays
      *  populated after an open completes; cleared by
@@ -259,6 +276,8 @@ export function useBridge(params: Params) {
      *  the cap; drives the banner's "+N more" affordance. */
     remoteDatasetWarningsOverflow,
     dismissRemoteDatasetWarnings,
+    retryRemoteDatasetOpen,
+    dismissRemoteDatasetError,
     breakFollow,
     handleFollow,
     followablePeers,

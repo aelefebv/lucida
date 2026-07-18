@@ -1,5 +1,15 @@
 import type { SavedView } from "./savedView/types.ts";
 
+export interface BrowseEntry {
+  name: string;
+  type: "directory" | "file";
+}
+
+export interface BrowseResponse {
+  path: string;
+  entries: BrowseEntry[];
+}
+
 export type WorkspaceRole = "viewer" | "editor" | "owner";
 export type WorkspaceLinkAccess = "restricted" | "anyone_with_link";
 
@@ -146,6 +156,12 @@ async function requestNoContent(input: RequestInfo, init?: RequestInit): Promise
     }
     throw new Error(detail);
   }
+}
+
+/** Browse server-local datasets through the same-origin authenticated API seam. */
+export function browseLocalFiles(path = ""): Promise<BrowseResponse> {
+  const query = path ? `?path=${encodeURIComponent(path)}` : "";
+  return requestJson<BrowseResponse>(`/api/browse${query}`);
 }
 
 export function listWorkspaces(): Promise<WorkspaceSummary[]> {

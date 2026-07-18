@@ -1,14 +1,12 @@
 use std::collections::BTreeMap;
 use std::env;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-#[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::CliError;
+use crate::secure_file::write_private_atomic;
 
 pub const DEFAULT_SERVER: &str = "http://localhost:9876";
 
@@ -118,38 +116,13 @@ impl ConfigStore {
             })?;
         }
 
-        let raw = serde_json::to_string_pretty(config)?;
-        let mut options = OpenOptions::new();
-        options.create(true).truncate(true).write(true);
-        #[cfg(unix)]
-        {
-            options.mode(0o600);
-        }
-        let mut file = options.open(&self.path).map_err(|error| {
+        let raw = format!("{}\n", serde_json::to_string_pretty(config)?);
+        write_private_atomic(&self.path, raw.as_bytes()).map_err(|error| {
             CliError::config(format!(
-                "failed to write config {}: {error}",
+                "failed to atomically write private config {}: {error}",
                 self.path.display()
             ))
-        })?;
-        file.write_all(format!("{raw}\n").as_bytes())
-            .map_err(|error| {
-                CliError::config(format!(
-                    "failed to write config {}: {error}",
-                    self.path.display()
-                ))
-            })?;
-        #[cfg(unix)]
-        {
-            fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600)).map_err(
-                |error| {
-                    CliError::config(format!(
-                        "failed to set permissions on {}: {error}",
-                        self.path.display()
-                    ))
-                },
-            )?;
-        }
-        Ok(())
+        })
     }
 }
 

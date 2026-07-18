@@ -1,6 +1,6 @@
 .layer-panel {
-  background: #1a1a1a;
-  border-right: 1px solid #333;
+  background: var(--surface-1);
+  border-right: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
   overflow-y: auto;
@@ -11,7 +11,7 @@
   align-items: center;
   justify-content: space-between;
   padding: 0.5rem 0.75rem;
-  border-bottom: 1px solid #333;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .layer-panel-header h3 {
@@ -30,20 +30,24 @@
   font-size: 0.75rem;
 }
 
+.layer-debug-toggle.active {
+  background: var(--accent-strong);
+  color: var(--accent-contrast);
+}
+
 .layer-list {
   flex: 1;
   overflow-y: auto;
 }
 
 .layer-row {
-  border-bottom: 1px solid #2a2a2a;
-  cursor: pointer;
+  border-bottom: 1px solid var(--border-subtle);
   border-left: 3px solid transparent;
 }
 
 .layer-row.selected {
-  border-left-color: #646cff;
-  background: #252535;
+  border-left-color: var(--accent);
+  background: var(--surface-raised);
 }
 
 .layer-row-header {
@@ -69,6 +73,17 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.layer-select-button {
+  min-width: 0;
+  min-height: 1.5rem;
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  background: transparent;
+  color: inherit;
+  text-align: start;
 }
 
 .layer-name-input {
@@ -106,7 +121,7 @@
 
 .layer-detail {
   padding: 0.5rem 0.75rem;
-  border-top: 1px solid #333;
+  border-top: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
@@ -123,17 +138,18 @@
   font-size: 0.8rem;
 }
 
-.layer-detail-row label {
+.layer-detail-row label,
+.layer-detail-row .layer-detail-label {
   min-width: 3rem;
   font-size: 0.75rem;
-  color: #aaa;
+  color: var(--text-muted);
 }
 
 .layer-detail-row select {
   flex: 1;
-  background: #2a2a2a;
-  color: #ddd;
-  border: 1px solid #444;
+  background: var(--surface-3);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-strong);
   border-radius: 4px;
   padding: 0.2rem 0.3rem;
   font-size: 0.75rem;
@@ -150,15 +166,20 @@
   font-size: 0.7rem;
 }
 
+.layer-actions .layer-remove-btn {
+  margin-inline-start: auto;
+  color: var(--danger-text);
+}
+
 .layer-empty {
   padding: 1rem;
   text-align: center;
-  color: #666;
+  color: var(--text-secondary);
   font-size: 0.85rem;
 }
 
 .channel-sublayer {
-  border-left: 2px solid #444;
+  border-left: 2px solid var(--border-strong);
   padding-left: 0.5rem;
   margin-left: 0.25rem;
 }
@@ -175,7 +196,7 @@
   min-width: 2rem;
   flex: 1;
   font-size: 0.75rem;
-  color: #aaa;
+  color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -222,12 +243,12 @@
    mirroring the channel sublayer look. */
 .layer-labels-section {
   margin-top: 0.25rem;
-  border-top: 1px solid #333;
+  border-top: 1px solid var(--border-subtle);
   padding-top: 0.25rem;
 }
 
 .label-sublayer {
-  border-left: 2px solid #444;
+  border-left: 2px solid var(--border-strong);
   padding-left: 0.5rem;
   margin-left: 0.25rem;
 }
@@ -244,7 +265,7 @@
   flex: 1;
   min-width: 2rem;
   font-size: 0.75rem;
-  color: #aaa;
+  color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -260,7 +281,7 @@
    WHY the overlay can't be toggled here. */
 .label-disabled-reason {
   font-size: 0.7rem;
-  color: #e3a008;
+  color: var(--warning-text);
   padding: 0 0 0.2rem 0;
   font-style: italic;
 }
@@ -273,8 +294,8 @@
   line-height: 1;
   padding: 0.1rem 0.3rem;
   border-radius: 8px;
-  background: #1f6feb;
-  color: #fff;
+  background: var(--accent-strong);
+  color: var(--accent-contrast);
   white-space: nowrap;
 }
 

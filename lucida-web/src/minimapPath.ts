@@ -6,6 +6,10 @@ import type { MinimapLayerParams } from "./renderer/workerProtocol.ts";
 import type { TickContext, MinimapOverlayData } from "./renderLoopTypes.ts";
 import { MINIMAP_UPLOAD_BUDGET_BYTES, MINIMAP_OVERVIEW_SCAN_INTERVAL_MS } from "./renderLoopTypes.ts";
 import type { MinimapChunkCoord } from "./pipeline/tickCoordinator.ts";
+import {
+  assertChunkBufferLength,
+  type ChunkContract,
+} from "./chunkContract.ts";
 
 export interface MinimapState {
   overviewKey: Map<string, string>;
@@ -375,7 +379,7 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState, now: 
 
   let budgetRemaining = MINIMAP_UPLOAD_BUDGET_BYTES;
 
-  for (const [, ds] of datasets) {
+  for (const [datasetId, ds] of datasets) {
     // Iterate per-member so each tile gets its own minimap overview texture.
     for (const img of ds.manifest.images) {
       const memberId = img.image_id;
@@ -405,7 +409,14 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState, now: 
 
       const uploaded = state.overviewUploaded.get(memberId)!;
       const missing: { level: number; x: number; y: number; z: number; t: number; c: number; key: string }[] = [];
-      const available: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
+      const available: {
+        data: Uint16Array;
+        contract: ChunkContract;
+        x: number;
+        y: number;
+        z: number;
+        key: string;
+      }[] = [];
 
       for (let iz = 0; iz < nz; iz++) {
         for (let iy = 0; iy < ny; iy++) {
@@ -415,17 +426,16 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState, now: 
 
             const cached = ctx.cpuCache.getCachedChunk(memberId, chunkKey);
             if (cached && cached.data.byteLength > 0) {
-              // GPU expects uint16 — expand uint8 if needed
-              let u16: Uint16Array;
-              if (cached.dataType.toLowerCase() === "uint8") {
-                const src = new Uint8Array(cached.data);
-                u16 = new Uint16Array(src.length);
-                u16.set(src);
-              } else {
-                u16 = new Uint16Array(cached.data);
+              assertChunkBufferLength(cached.data, cached.contract, "decoded");
+              if (cached.contract.role !== "intensity" || cached.contract.dtype !== "uint16") {
+                throw new Error(`Minimap chunk ${chunkKey} has a non-intensity contract`);
+              }
+              if (cached.contract.datasetId !== datasetId || cached.contract.channel !== c) {
+                throw new Error(`Minimap chunk ${chunkKey} contract identity mismatch`);
               }
               available.push({
-                data: u16,
+                data: new Uint16Array(cached.data),
+                contract: cached.contract,
                 x: ix, y: iy, z: iz, key: chunkKey,
               });
               uploaded.add(chunkKey);
@@ -758,6 +768,38 @@ export function readMinimapOverviewEpochs(scene: WasmScene): { content: number; 
   }
 }
 
+/**
+ * Read the camera-only world-to-view rotation used by orientation UI. The
+ * structural cast keeps unit-test fakes and a stale local wasm package
+ * compatible; current wasm exposes the matrix directly so fly roll is kept.
+ */
+export function readCameraViewRotation(scene: WasmScene): Float32Array {
+  const reader = (scene as unknown as { camera_view_rotation?: () => Float32Array })
+    .camera_view_rotation;
+  if (reader) {
+    const rotation = new Float32Array(reader.call(scene));
+    if (rotation.length === 9 && rotation.every(Number.isFinite)) return rotation;
+  }
+
+  // Legacy arcball-only fallback for a locally stale wasm package. A rebuilt
+  // package always takes the branch above, including in fly mode.
+  const theta = scene.camera_theta();
+  const phi = scene.camera_phi();
+  const sinPhi = Math.sin(phi);
+  const cosPhi = Math.cos(phi);
+  const sinTheta = Math.sin(theta);
+  const cosTheta = Math.cos(theta);
+  const backward = [sinPhi * sinTheta, cosPhi, sinPhi * cosTheta];
+  const up = [-cosPhi * sinTheta, sinPhi, -cosPhi * cosTheta];
+  const forward = backward.map((value) => -value);
+  const right = [
+    forward[1] * up[2] - forward[2] * up[1],
+    forward[2] * up[0] - forward[0] * up[2],
+    forward[0] * up[1] - forward[1] * up[0],
+  ];
+  return new Float32Array([...right, ...up, ...backward]);
+}
+
 export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: number): void {
   if (!state.enabled) return;
 
@@ -765,6 +807,7 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
 
   const theta = scene.camera_theta();
   const phi = scene.camera_phi();
+  const cameraViewRotation = readCameraViewRotation(scene);
 
   const settingsSnap = scene.all_dataset_settings();
   const orderSnap = scene.dataset_order();
@@ -842,7 +885,7 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
   // pose stringifies to a stable key, so an idle tick still early-returns.
   const overlayCamSnap =
     mode === "volume"
-      ? `${scene.eye_position()}|${scene.inv_view_proj()}`
+      ? `${scene.eye_position()}|${scene.inv_view_proj()}|${cameraViewRotation}`
       : `${scene.zoom()}|${scene.center()}`;
   const overlayCamKey = `${mode}|${overlayCamSnap}`;
   const zForOverlay = mode === "slice" ? sliceZ : 0;
@@ -938,8 +981,11 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
     // every camera change from the fresh zoom/center over the cached members.
     let sliceViewports: MinimapOverlayData["sliceViewports"] = [];
     if (mode === "slice") {
-      const mainW = Math.round(canvas.clientWidth * devicePixelRatio);
-      const mainH = Math.round(canvas.clientHeight * devicePixelRatio);
+      // Slice camera zoom/viewport are canonical CSS-logical units. The
+      // minimap outline describes that logical field of view, not the backing
+      // texture, so moving the window between DPRs cannot change its bounds.
+      const mainW = canvas.clientWidth;
+      const mainH = canvas.clientHeight;
       const z = scene.zoom();
       const c = scene.center();
       const halfW = mainW / (2 * z);
@@ -960,8 +1006,7 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
       datasetLayers: cache.datasetOverlayLayers,
       sliceViewports,
       mode,
-      theta,
-      phi,
+      cameraViewRotation,
       canvasW: cache.backingSize,
       canvasH: cache.backingSize,
       currentZ,

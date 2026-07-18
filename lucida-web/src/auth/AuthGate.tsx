@@ -22,7 +22,7 @@ interface AuthGateProps {
 }
 
 export function AuthGate({ children }: AuthGateProps) {
-  const { state, refresh, signOut } = useAuthState();
+  const { state, logoutFailure, refresh, signOut } = useAuthState();
 
   if ("status" in state && state.status === "loading") {
     return <AuthLoading />;
@@ -34,11 +34,18 @@ export function AuthGate({ children }: AuthGateProps) {
     // "Signed out — Sign in again" card when set; auto-bounces
     // otherwise (cold visit / session expiry mid-tab).
     const signedOut = "signedOut" in state && state.signedOut === true;
-    return <UnauthLanding signedOut={signedOut} />;
+    return (
+      <UnauthLanding
+        signedOut={signedOut}
+        logoutFailure={logoutFailure ?? undefined}
+      />
+    );
   }
 
   return (
-    <AuthSessionContext.Provider value={{ principal: state.principal, refresh, signOut }}>
+    <AuthSessionContext.Provider
+      value={{ principal: state.principal, refresh, signOut, logoutFailure }}
+    >
       {children}
     </AuthSessionContext.Provider>
   );
@@ -48,7 +55,7 @@ export function AuthGate({ children }: AuthGateProps) {
 // happy path so this is rarely visible.
 function AuthLoading() {
   return (
-    <div style={{ padding: "2rem", color: "#888" }}>
+    <div style={{ padding: "2rem", color: "var(--text-muted)" }}>
       Checking authentication...
     </div>
   );

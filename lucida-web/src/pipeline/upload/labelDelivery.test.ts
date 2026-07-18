@@ -23,16 +23,18 @@ import type { ReadyChunkDelivery } from "../fetch/index.ts";
 import type { UploadClient } from "./uploadClient.ts";
 import type { SceneEpochs } from "../epochs.ts";
 import type { WorkerCtx } from "../../renderer/workerContext.ts";
-import type { LabelSliceChunkDataMessage } from "../../renderer/workerProtocol.ts";
+import type { Chunk, LabelSliceChunkDataMessage } from "../../renderer/workerProtocol.ts";
 import { createInitialState } from "../../renderer/worker/state.ts";
+import { GpuResourceBudget } from "../../renderer/gpuResourceBudget.ts";
 import { handleLabelSliceChunkData } from "../../renderer/slice/upload.ts";
 import { handleLabelVolumeChunkData } from "../../renderer/volume/upload.ts";
 import type { LabelVolumeChunkDataMessage } from "../../renderer/workerProtocol.ts";
 import { computeLabelChunkRequests } from "../planning/labelRequests.ts";
-import { buildManifestByImage } from "./delivery/manifestIndex.ts";
+import { buildManifestByImage, manifestEntryKey } from "./delivery/manifestIndex.ts";
 import { dispatchLabelChunkDelivery, dispatchLabelVolumeChunkDelivery } from "./delivery/dispatch.ts";
+import { chunkContractForLevel } from "../../chunkContract.ts";
 
-const EPOCHS: SceneEpochs = { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 };
+const EPOCHS: SceneEpochs = { content: 1, layout: 1, view: 1, selection: 1, request: 1 };
 
 function ms(
   id: string,
@@ -92,7 +94,11 @@ function makeWorkerCtx(writes: WriteTextureCall[]): WorkerCtx {
       submit: vi.fn(),
     },
   } as unknown as GPUDevice;
-  return { device, state: createInitialState() } as unknown as WorkerCtx;
+  return {
+    device,
+    gpuResources: new GpuResourceBudget(512 * 1024 * 1024),
+    state: createInitialState(),
+  } as unknown as WorkerCtx;
 }
 
 describe("label chunk flow: request → pre-sliced delivery → pool", () => {
@@ -109,13 +115,14 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
     const ids = new Uint32Array([10, 11, 12, 13, 92801, 92801 + 65536, 30, 4_294_967_295]);
     const delivery: ReadyChunkDelivery = {
       kind: "chunk",
+      datasetId: "ds-0",
       entityId: req.entityId,
       imageId: req.imageId,
       level: req.level,
       t: req.t, c: req.c, z: req.z, y: req.y, x: req.x,
       chunkKey: req.chunkKey,
       data: ids.buffer as ArrayBuffer,
-      dataType: "Uint32",
+      contract: req.contract,
       epochs: EPOCHS,
       lane: "detail",
       residencyTier: "detail",
@@ -126,7 +133,9 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
     const datasets = new Map<string, DatasetEntry>([
       ["ds-0", { manifest } as unknown as DatasetEntry],
     ]);
-    const meta = buildManifestByImage(datasets).get("img-0:label:region-b");
+    const meta = buildManifestByImage(datasets).get(
+      manifestEntryKey("ds-0", "img-0:label:region-b"),
+    );
     expect(meta?.isLabel).toBe(true);
 
     const writes: WriteTextureCall[] = [];
@@ -135,7 +144,7 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
       labelSliceChunkData: vi.fn((
         memberId: string,
         datasetId: string,
-        chunks: { data: ArrayBuffer; dataType: string; x: number; y: number; z: number; key: string }[],
+        chunks: Chunk[],
         level: number, t: number, c: number,
         levelWidth: number, levelHeight: number,
         chunkX: number, chunkY: number,
@@ -177,16 +186,23 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
   it("drops a delivery whose Z-chunk no longer matches the current view", () => {
     const meta = buildManifestByImage(
       new Map<string, DatasetEntry>([["ds-0", { manifest } as unknown as DatasetEntry]]),
-    ).get("img-0:label:region-b");
+    ).get(manifestEntryKey("ds-0", "img-0:label:region-b"));
     const delivery: ReadyChunkDelivery = {
       kind: "chunk",
+      datasetId: "ds-0",
       entityId: "img-0:label:region-b",
       imageId: "img-0:label:region-b",
       level: 0,
       t: 0, c: 0, z: 5, y: 0, x: 0, // z-chunk 5, but the view maps to z-chunk 0
       chunkKey: "0/0/0/5/0/0",
       data: new Uint32Array(8).buffer as ArrayBuffer,
-      dataType: "Uint32",
+      contract: chunkContractForLevel({
+        datasetId: "ds-0",
+        image: label.image,
+        level: label.image.multiscale.levels[0],
+        channel: 0,
+        role: "label",
+      }),
       epochs: EPOCHS,
       lane: "detail",
       residencyTier: "detail",
@@ -211,13 +227,14 @@ describe("label chunk flow (3D): volume request → whole-chunk delivery → vol
     const ids = new Uint32Array([10, 11, 12, 13, 92801, 92801 + 65536, 30, 4_294_967_295]);
     const delivery: ReadyChunkDelivery = {
       kind: "chunk",
+      datasetId: "ds-0",
       entityId: req.entityId,
       imageId: req.imageId,
       level: req.level,
       t: req.t, c: req.c, z: req.z, y: req.y, x: req.x,
       chunkKey: req.chunkKey,
       data: ids.buffer as ArrayBuffer,
-      dataType: "Uint32",
+      contract: req.contract,
       epochs: EPOCHS,
       lane: "detail",
       residencyTier: "detail",
@@ -227,7 +244,9 @@ describe("label chunk flow (3D): volume request → whole-chunk delivery → vol
     const datasets = new Map<string, DatasetEntry>([
       ["ds-0", { manifest } as unknown as DatasetEntry],
     ]);
-    const meta = buildManifestByImage(datasets).get("img-0:label:region-b");
+    const meta = buildManifestByImage(datasets).get(
+      manifestEntryKey("ds-0", "img-0:label:region-b"),
+    );
     expect(meta?.isLabel).toBe(true);
 
     const writes: WriteTextureCall[] = [];
@@ -236,7 +255,7 @@ describe("label chunk flow (3D): volume request → whole-chunk delivery → vol
       labelVolumeChunkData: vi.fn((
         memberId: string,
         datasetId: string,
-        chunks: { data: ArrayBuffer; dataType: string; x: number; y: number; z: number; key: string }[],
+        chunks: Chunk[],
         level: number, t: number, c: number,
         levelWidth: number, levelHeight: number, levelDepth: number,
         chunkX: number, chunkY: number, chunkZ: number,

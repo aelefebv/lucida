@@ -20,23 +20,44 @@ import {
 } from "./cpuCache.ts";
 import { ProxiedContentSource } from "./contentSource.ts";
 import { FetchError } from "./retry.ts";
+import type { FailureDescriptor } from "../../bridge.ts";
 import type {
   ContentSource,
   FetchRequest,
   FetchResult,
-  FetchProxyRequest,
-  FetchProxyResult,
-  ProxyHeaderJs,
 } from "./contentSource.ts";
 import type { DecodePool } from "./decodePool.ts";
 import type {
   ChunkRequest,
   ActiveSetEntry,
-  ProxyRequest,
   RequestPlan,
 } from "../planning/index.ts";
+import { makeChunkContract } from "../../test/fixtures.ts";
 import type { SceneEpochs } from "../epochs.ts";
 import { emptyPlanStats } from "../planning/index.ts";
+
+const TRANSIENT_SOURCE_FAILURE: FailureDescriptor = {
+  category: "source",
+  code: "storage_backend",
+  retryable: true,
+};
+
+const PERMANENT_SOURCE_FAILURE: FailureDescriptor = {
+  category: "authorization",
+  code: "permission",
+  retryable: false,
+};
+
+function permanentSourceError(message = "404 not found"): FetchError {
+  return new FetchError(message, {
+    kind: "permanent",
+    failure: {
+      category: "source",
+      code: "missing_object",
+      retryable: false,
+    },
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Test Factories
@@ -50,26 +71,10 @@ interface MockContentSource extends ContentSource {
   reject(compositeKey: string, error: Error): void;
   /** Auto-resolve mode: immediately resolves fetches with a buffer of the given size. */
   autoResolveBytes: number | null;
-
-  // Proxy fetch state — mirrors the chunk side.
-  fetchProxyCount: number;
-  fetchProxyCalls: FetchProxyRequest[];
-  /** Default header used when auto-resolving proxies. */
-  proxyHeader: ProxyHeaderJs;
-  /**
-   * Auto-resolve proxies with this many voxel bytes. Set to `null` to hold
-   * proxy fetches in-flight (like the chunk `pendingFetches` map) so the
-   * scheduler slot stays occupied until {@link resolveProxy} or an abort.
-   */
-  autoResolveProxyBytes: number | null;
-  /** Held proxy fetches when `autoResolveProxyBytes` is null. */
-  pendingProxyFetches: Map<string, { resolve: (r: FetchProxyResult) => void; reject: (e: Error) => void }>;
-  resolveProxy(key: string, bytes?: number): void;
 }
 
 function createMockContentSource(): MockContentSource {
   const pendingFetches = new Map<string, { resolve: (r: FetchResult) => void; reject: (e: Error) => void }>();
-  const pendingProxyFetches = new Map<string, { resolve: (r: FetchProxyResult) => void; reject: (e: Error) => void }>();
   let fetchCount = 0;
   const autoResolveBytes: number | null = null;
 
@@ -78,17 +83,6 @@ function createMockContentSource(): MockContentSource {
     fetchCount: 0,
     lastSignal: null,
     autoResolveBytes: null,
-
-    fetchProxyCount: 0,
-    fetchProxyCalls: [],
-    pendingProxyFetches,
-    proxyHeader: {
-      algorithmVersion: 1,
-      sourceContentHash: new Uint8Array(32),
-      dims: [4, 4, 4],
-      dtype: "u16",
-    },
-    autoResolveProxyBytes: 4 * 4 * 4 * 2,
 
     fetch(request: FetchRequest, signal: AbortSignal): Promise<FetchResult> {
       fetchCount++;
@@ -115,27 +109,6 @@ function createMockContentSource(): MockContentSource {
       });
     },
 
-    fetchProxy(request: FetchProxyRequest, signal: AbortSignal): Promise<FetchProxyResult> {
-      source.fetchProxyCount++;
-      source.fetchProxyCalls.push(request);
-
-      if (source.autoResolveProxyBytes !== null) {
-        return Promise.resolve({
-          header: source.proxyHeader,
-          data: new ArrayBuffer(source.autoResolveProxyBytes),
-        });
-      }
-
-      const key = `${request.datasetId}|${request.entityId}|${request.kind}|${request.t}|${request.c}`;
-      return new Promise<FetchProxyResult>((resolve, reject) => {
-        pendingProxyFetches.set(key, { resolve, reject });
-        signal.addEventListener("abort", () => {
-          pendingProxyFetches.delete(key);
-          reject(new DOMException("Aborted", "AbortError"));
-        });
-      });
-    },
-
     handleBinary(_key: string, _data: ArrayBuffer): void {},
 
     resolve(compositeKey: string, bytes?: ArrayBuffer, dataType?: string) {
@@ -155,17 +128,6 @@ function createMockContentSource(): MockContentSource {
       if (entry) {
         pendingFetches.delete(compositeKey);
         entry.reject(error);
-      }
-    },
-
-    resolveProxy(key: string, bytes = 64) {
-      const entry = pendingProxyFetches.get(key);
-      if (entry) {
-        pendingProxyFetches.delete(key);
-        entry.resolve({
-          header: source.proxyHeader,
-          data: new ArrayBuffer(bytes),
-        });
       }
     },
   };
@@ -197,6 +159,11 @@ function makeRequest(overrides?: Partial<ChunkRequest>): ChunkRequest {
     lane: "detail",
     priority: 0,
     chunkKey: `${overrides?.level ?? 0}/${overrides?.t ?? 0}/${overrides?.c ?? 0}/${overrides?.z ?? 0}/${overrides?.y ?? 0}/${overrides?.x ?? 0}`,
+    contract: makeChunkContract({
+      datasetId: overrides?.datasetId ?? "entity-1",
+      imageId: overrides?.imageId ?? "image-1",
+      channel: overrides?.c ?? 0,
+    }),
     ...overrides,
   };
 }
@@ -214,20 +181,18 @@ function makePlan(
     targetLod: 0,
     coarsestDetailLod: 2,
     detailOwnedLodRange: [0, 2],
-    proxyKind: undefined,
-    proxyAvailable: false,
-    groupProxyAvailable: false,
+    detailLevel: 0,
+    coarseLevel: 2,
+    wantedLodLevels: [0, 2],
   }];
   return {
     requests,
     activeSet: resolvedActiveSet,
-    proxyRequests: [],
     epochs: {
       content: 1,
       layout: 1,
       view: 1,
       selection: 1,
-      asset: 0,
       request: 1,
       ...epochs,
     },
@@ -245,9 +210,9 @@ function makeActiveEntry(entityId: string, imageId?: string): ActiveSetEntry {
     targetLod: 0,
     coarsestDetailLod: 2,
     detailOwnedLodRange: [0, 2],
-    proxyKind: undefined,
-    proxyAvailable: false,
-    groupProxyAvailable: false,
+    detailLevel: 0,
+    coarseLevel: 2,
+    wantedLodLevels: [0, 2],
   };
 }
 
@@ -307,7 +272,6 @@ describe("CpuCache", () => {
       expect(deliveries).toHaveLength(1);
       expect(deliveries[0].entityId).toBe("entity-1");
       const delivery = deliveries[0];
-      if (delivery.kind === "proxy") throw new Error("expected chunk delivery");
       expect(delivery.chunkKey).toBe("0/0/0/0/0/0");
       expect(delivery.lane).toBe("detail");
     });
@@ -349,47 +313,6 @@ describe("CpuCache", () => {
   });
 
   describe("getDeliverable", () => {
-    function makeProxyRequest(overrides?: Partial<ProxyRequest>): ProxyRequest {
-      return {
-        datasetId: "ds-1",
-        entityId: "entity-1",
-        imageId: "image-1",
-        kind: "TileProxy3D",
-        t: 0,
-        c: 0,
-        priority: 0,
-        ...overrides,
-      };
-    }
-
-    function makePlanWithProxies(
-      requests: ChunkRequest[],
-      proxyRequests: ProxyRequest[],
-    ): RequestPlan {
-      return {
-        ...makePlan(requests),
-        proxyRequests,
-      };
-    }
-
-    it("merges chunks and proxies in priority order", async () => {
-      const { cache, source } = createTestCache();
-      source.autoResolveBytes = 64;
-      source.autoResolveProxyBytes = 32;
-      cache.onPlanRebuildStart();
-
-      cache.submit(makePlanWithProxies(
-        [makeRequest({ priority: 100 })],
-        [makeProxyRequest({ priority: 10 })],
-      ));
-      await flush();
-
-      expect(Array.from(cache.getDeliverable()).map(d => d.kind)).toEqual([
-        "proxy",
-        "chunk",
-      ]);
-    });
-
     it("interleaves equal-priority multi-channel chunks by spatial cell", async () => {
       const { cache, source } = createTestCache();
       source.autoResolveBytes = 64;
@@ -404,9 +327,7 @@ describe("CpuCache", () => {
       cache.submit(makePlan(reqs));
       await flush();
 
-      expect(Array.from(cache.getDeliverable()).map(d =>
-        d.kind === "chunk" ? [d.x, d.c] : ["proxy", -1],
-      )).toEqual([
+      expect(Array.from(cache.getDeliverable()).map(d => [d.x, d.c])).toEqual([
         [0, 0],
         [0, 1],
         [1, 0],
@@ -422,7 +343,6 @@ describe("CpuCache", () => {
       const detail = makeRequest({
         entityId: "image-1",
         imageId: "image-1",
-        chunkKey: "0/0/0/0/0/0",
         lane: "detail",
       });
       const prefetch = makeRequest({
@@ -436,7 +356,7 @@ describe("CpuCache", () => {
       await flush();
 
       const first = Array.from(cache.getDeliverable());
-      expect(first.map(d => d.kind === "chunk" ? d.chunkKey : "proxy")).toEqual([
+      expect(first.map(d => d.chunkKey)).toEqual([
         detail.chunkKey,
       ]);
 
@@ -515,15 +435,13 @@ describe("CpuCache", () => {
       expect(cache.telemetry().overviewBytes).toBe(64);
 
       const deliveries = Array.from(cache.getDeliverable());
-      expect(deliveries.map((d) => d.kind === "chunk" ? d.residencyTier : "proxy")).toEqual([
+      expect(deliveries.map((d) => d.residencyTier)).toEqual([
         "detail",
         "coarse",
       ]);
 
       cache.markSent(deliveries[0]);
-      expect(Array.from(cache.getDeliverable()).map((d) =>
-        d.kind === "chunk" ? d.residencyTier : "proxy",
-      )).toEqual(["coarse"]);
+      expect(Array.from(cache.getDeliverable()).map((d) => d.residencyTier)).toEqual(["coarse"]);
     });
 
     it("resolves skipped chunk feedback from imageId back to entityId", async () => {
@@ -552,42 +470,21 @@ describe("CpuCache", () => {
       source.autoResolveBytes = 64;
 
       cache.onPlanRebuildStart();
-      const a = makeRequest({ entityId: "entity-a", imageId: "image-a", chunkKey: "0/0/0/0/0/0" });
-      const b = makeRequest({ entityId: "entity-b", imageId: "image-b", chunkKey: "0/0/0/0/0/1", x: 1 });
+      const a = makeRequest({ datasetId: "dataset-a", entityId: "entity-a", imageId: "image-a", chunkKey: "0/0/0/0/0/0" });
+      const b = makeRequest({ datasetId: "dataset-b", entityId: "entity-b", imageId: "image-b", chunkKey: "0/0/0/0/0/1", x: 1 });
       cache.submit(makePlan([a], [makeActiveEntry("entity-a", "image-a")]));
       cache.submit(makePlan([b], [makeActiveEntry("entity-b", "image-b")]));
       await flush();
 
-      expect(Array.from(cache.getDeliverable()).map(d =>
-        d.kind === "chunk" ? d.entityId : "proxy",
-      ).sort()).toEqual(["entity-a", "entity-b"]);
+      expect(Array.from(cache.getDeliverable()).map(d => d.entityId).sort()).toEqual([
+        "entity-a",
+        "entity-b",
+      ]);
 
       cache.onPlanRebuildStart();
       cache.submit(makePlan([b], [makeActiveEntry("entity-b", "image-b")]));
 
-      expect(Array.from(cache.getDeliverable()).map(d =>
-        d.kind === "chunk" ? d.entityId : "proxy",
-      )).toEqual(["entity-b"]);
-    });
-
-    it("proxy sent state survives rebuild and clears on missing feedback", async () => {
-      const { cache, source } = createTestCache();
-      source.autoResolveProxyBytes = 32;
-      const req = makeProxyRequest();
-
-      cache.onPlanRebuildStart();
-      cache.submit(makePlanWithProxies([], [req]));
-      await flush();
-      const [proxy] = Array.from(cache.getDeliverable());
-      expect(proxy.kind).toBe("proxy");
-      cache.markSent(proxy);
-
-      cache.onPlanRebuildStart();
-      cache.submit(makePlanWithProxies([], [req]));
-      expect(Array.from(cache.getDeliverable())).toEqual([]);
-
-      cache.markProxyMissing("ds-1|entity-1|TileProxy3D|0|0");
-      expect(Array.from(cache.getDeliverable()).map(d => d.kind)).toEqual(["proxy"]);
+      expect(Array.from(cache.getDeliverable()).map(d => d.entityId)).toEqual(["entity-b"]);
     });
 
     it("cancels stale in-flight chunks omitted by a newer rebuild", async () => {
@@ -967,49 +864,126 @@ describe("CpuCache", () => {
       expect(source.fetchCount).toBe(1);
     });
 
-    it("submit with empty proxy plan does not cancel in-flight proxy", () => {
-      const { cache, source } = createTestCache();
-      const proxyReq: ProxyRequest = {
-        datasetId: "ds-1",
-        entityId: "entity-1",
-        imageId: "image-1",
-        kind: "TileProxy3D",
-        t: 0,
-        c: 0,
-        priority: 0,
-      };
+  });
 
-      // Block fetchProxy by overriding to never resolve.
-      let proxyResolve: (() => void) | null = null;
-      source.fetchProxy = (_req, signal) => {
-        source.fetchProxyCount++;
-        return new Promise((resolve, reject) => {
-          proxyResolve = () => resolve({
-            header: source.proxyHeader,
-            data: new ArrayBuffer(64),
-          });
-          signal.addEventListener("abort", () => {
-            reject(new DOMException("Aborted", "AbortError"));
-          });
-        });
-      };
+  describe("workspace planning publication", () => {
+    function wantedKeys(cache: CpuCache): string[] {
+      return cache.getWantedSnapshot().map(
+        (request) => `${request.datasetId}:${request.chunkKey}:${request.priority}`,
+      );
+    }
 
-      cache.submit({
-        requests: [],
-        activeSet: [],
-        proxyRequests: [proxyReq],
-        epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
-        stats: emptyPlanStats(),
-        nextState: { previousActiveSet: [] },
+    it("makes sequential owner submissions equivalent to one workspace publication", () => {
+      const sequential = createTestCache({ maxConcurrentFetches: 0 }).cache;
+      const combined = createTestCache({ maxConcurrentFetches: 0 }).cache;
+      const a = makeRequest({
+        datasetId: "ds-a", entityId: "entity-a", imageId: "image-a",
+        chunkKey: "0/0/0/0/0/0",
       });
-      expect(cache.telemetry().inFlightProxyCount).toBe(1);
+      const b = makeRequest({
+        datasetId: "ds-b", entityId: "entity-b", imageId: "image-b",
+        chunkKey: "0/0/0/0/0/1", x: 1,
+      });
+      const planA = makePlan([a], [makeActiveEntry("entity-a", "image-a")]);
+      const planB = makePlan([b], [makeActiveEntry("entity-b", "image-b")]);
 
-      // Submit again with no proxies — must not abort.
-      cache.submit(makePlan([]));
-      expect(cache.telemetry().inFlightProxyCount).toBe(1);
+      sequential.submit(planA);
+      sequential.submit(planB);
+      combined.publishPlanningCycle([
+        { datasetId: "ds-a", plan: planA },
+        { datasetId: "ds-b", plan: planB },
+      ]);
 
-      // Cleanup so promise doesn't dangle.
-      void proxyResolve;
+      expect(wantedKeys(sequential)).toEqual(wantedKeys(combined));
+      expect(sequential.getPendingSnapshot()).toHaveLength(2);
+      expect(combined.getPendingSnapshot()).toHaveLength(2);
+    });
+
+    it("produces a byte-equivalent wanted set from full replacement and delta publication", () => {
+      const full = createTestCache({ maxConcurrentFetches: 0 }).cache;
+      const incremental = createTestCache({ maxConcurrentFetches: 0 }).cache;
+      const active = [makeActiveEntry("entity-a", "image-a")];
+      const a = makeRequest({ datasetId: "ds-a", entityId: "entity-a", imageId: "image-a", x: 0 });
+      const b = makeRequest({ datasetId: "ds-a", entityId: "entity-a", imageId: "image-a", x: 1 });
+      const bChanged = { ...b, priority: 17 };
+      const c = makeRequest({ datasetId: "ds-a", entityId: "entity-a", imageId: "image-a", x: 2 });
+      const initial = makePlan([a, b], active, { request: 1 });
+      const next = makePlan([bChanged, c], active, { request: 2 });
+
+      full.publishPlanningCycle([{ datasetId: "ds-a", plan: initial }]);
+      incremental.publishPlanningCycle([{ datasetId: "ds-a", plan: initial }]);
+      full.publishPlanningCycle([{ datasetId: "ds-a", plan: next }]);
+      incremental.publishPlanDeltas([{
+        datasetId: "ds-a",
+        upserts: [bChanged, c],
+        removed: [a],
+        activeSet: active,
+        epochs: next.epochs,
+      }]);
+
+      expect(wantedKeys(incremental)).toEqual(wantedKeys(full));
+      expect(incremental.getPendingSnapshot().map((request) => request.chunkKey).sort())
+        .toEqual(full.getPendingSnapshot().map((request) => request.chunkKey).sort());
+    });
+
+    it("cancels omission only for its owner and releases the slot fairly", async () => {
+      const { cache, source } = createTestCache({ maxConcurrentFetches: 1 });
+      const a = makeRequest({
+        datasetId: "ds-a", entityId: "entity-a", imageId: "image-a", x: 0,
+      });
+      const b = makeRequest({
+        datasetId: "ds-b", entityId: "entity-b", imageId: "image-b", x: 1,
+      });
+      const planA = makePlan([a], [makeActiveEntry("entity-a", "image-a")]);
+      const planB = makePlan([b], [makeActiveEntry("entity-b", "image-b")]);
+      cache.publishPlanningCycle([
+        { datasetId: "ds-a", plan: planA },
+        { datasetId: "ds-b", plan: planB },
+      ]);
+      expect(source.pendingFetches.has(`ds-a/image-a/${a.chunkKey}`)).toBe(true);
+      expect(source.pendingFetches.has(`ds-b/image-b/${b.chunkKey}`)).toBe(false);
+
+      cache.publishPlanDeltas([{
+        datasetId: "ds-a",
+        upserts: [],
+        removed: [a],
+        activeSet: [],
+        epochs: { ...planA.epochs, request: planA.epochs.request + 1 },
+      }]);
+      await flush();
+
+      expect(source.pendingFetches.has(`ds-a/image-a/${a.chunkKey}`)).toBe(false);
+      expect(source.pendingFetches.has(`ds-b/image-b/${b.chunkKey}`)).toBe(true);
+      expect(wantedKeys(cache)).toEqual([
+        `ds-b:${b.chunkKey}:${b.priority}`,
+      ]);
+    });
+
+    it("keeps ready delivery fair across datasets without a global resort", async () => {
+      const { cache, source } = createTestCache({ maxConcurrentFetches: 8 });
+      source.autoResolveBytes = 64;
+      const requestsA = [0, 1].map((x) => makeRequest({
+        datasetId: "ds-a", entityId: `entity-a-${x}`, imageId: `image-a-${x}`,
+        x, priority: x,
+      }));
+      const requestsB = [0, 1].map((x) => makeRequest({
+        datasetId: "ds-b", entityId: `entity-b-${x}`, imageId: `image-b-${x}`,
+        x: x + 2, priority: 100 + x,
+      }));
+      cache.publishPlanningCycle([
+        {
+          datasetId: "ds-a",
+          plan: makePlan(requestsA, requestsA.map((r) => makeActiveEntry(r.entityId, r.imageId))),
+        },
+        {
+          datasetId: "ds-b",
+          plan: makePlan(requestsB, requestsB.map((r) => makeActiveEntry(r.entityId, r.imageId))),
+        },
+      ]);
+      await flush();
+
+      expect(Array.from(cache.getDeliverable()).map((delivery) => delivery.datasetId))
+        .toEqual(["ds-a", "ds-b", "ds-a", "ds-b"]);
     });
   });
 
@@ -1018,36 +992,6 @@ describe("CpuCache", () => {
   // =========================================================================
 
   describe("cancelDataset", () => {
-    function makeProxyRequest(overrides?: Partial<ProxyRequest>): ProxyRequest {
-      return {
-        datasetId: "ds-1",
-        entityId: "entity-1",
-        imageId: "image-1",
-        kind: "TileProxy3D",
-        t: 0,
-        c: 0,
-        priority: 0,
-        ...overrides,
-      };
-    }
-
-    function makeProxyPlan(
-      proxyRequests: ProxyRequest[],
-      epochs?: Partial<SceneEpochs>,
-    ): RequestPlan {
-      return {
-        requests: [],
-        activeSet: [],
-        proxyRequests,
-        epochs: {
-          content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1,
-          ...epochs,
-        },
-        stats: emptyPlanStats(),
-        nextState: { previousActiveSet: [] },
-      };
-    }
-
     it("cancels in-flight chunks matching entityIds; preserves bytes accounting", () => {
       const { cache, source } = createTestCache();
       const req = makeRequest({ entityId: "entity-1" });
@@ -1063,54 +1007,15 @@ describe("CpuCache", () => {
       expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/0")).toBe(false);
     });
 
-    it("cancels in-flight proxies matching datasetId; preserves bytes accounting", () => {
-      const { cache, source } = createTestCache();
-      const proxyReq = makeProxyRequest();
-
-      // Block fetchProxy with a never-resolving promise so the entry stays in-flight.
-      let pendingResolve: ((v: FetchProxyResult) => void) | null = null;
-      source.fetchProxy = (_req, signal) => {
-        source.fetchProxyCount++;
-        return new Promise<FetchProxyResult>((resolve, reject) => {
-          pendingResolve = resolve;
-          signal.addEventListener("abort", () => {
-            reject(new DOMException("Aborted", "AbortError"));
-          });
-        });
-      };
-      cache.submit(makeProxyPlan([proxyReq]));
-      expect(cache.telemetry().inFlightProxyCount).toBe(1);
-
-      cache.cancelDataset("ds-1", []);
-
-      expect(cache.telemetry().inFlightProxyCount).toBe(0);
-      expect(cache.telemetry().inFlightProxyBytes).toBe(0);
-      void pendingResolve;
-    });
-
-    it("clears pending queue entries (chunks + proxies)", () => {
+    it("clears pending chunk queue entries", () => {
       const { cache } = createTestCache({
         maxConcurrentFetches: 1,
         maxBytesInFlight: 1, // throttle so subsequent requests sit in pending queue
       });
       const reqA = makeRequest({ x: 0, chunkKey: "0/0/0/0/0/0" });
       const reqB = makeRequest({ x: 1, chunkKey: "0/0/0/0/0/1" });
-      const proxyReq: ProxyRequest = {
-        datasetId: "ds-1",
-        entityId: "entity-1",
-        imageId: "image-1",
-        kind: "TileProxy3D",
-        t: 0, c: 0, priority: 0,
-      };
 
-      cache.submit({
-        requests: [reqA, reqB],
-        activeSet: [],
-        proxyRequests: [proxyReq],
-        epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
-        stats: emptyPlanStats(),
-        nextState: { previousActiveSet: [] },
-      });
+      cache.submit(makePlan([reqA, reqB]));
 
       // At least one request should be queued.
       const tel = cache.telemetry();
@@ -1120,17 +1025,16 @@ describe("CpuCache", () => {
 
       const after = cache.telemetry();
       expect(after.pendingCount).toBe(0);
-      expect(after.pendingProxyCount).toBe(0);
     });
 
-    it("drops cached chunks (detail + overview); subtracts bytes", async () => {
+    it("drops cached chunks (detail + minimap); subtracts bytes", async () => {
       const { cache, source } = createTestCache();
       source.autoResolveBytes = 100;
 
       const detailReq = makeRequest({ entityId: "entity-1", lane: "detail", chunkKey: "0/0/0/0/0/0" });
-      const overviewReq = makeRequest({ entityId: "entity-1", lane: "overview", chunkKey: "0/0/0/0/0/1" });
+      const minimapReq = makeRequest({ entityId: "entity-1", lane: "minimap", chunkKey: "0/0/0/0/0/1" });
 
-      cache.submit(makePlan([detailReq, overviewReq]));
+      cache.submit(makePlan([detailReq, minimapReq]));
       await flush();
 
       expect(cache.telemetry().mainBytes).toBe(100);
@@ -1146,22 +1050,6 @@ describe("CpuCache", () => {
       expect(cache.getCachedChunk("entity-1", "0/0/0/0/0/1")).toBeNull();
     });
 
-    it("drops cached proxies; subtracts bytes", async () => {
-      const { cache, source } = createTestCache();
-      source.autoResolveProxyBytes = 256;
-
-      cache.submit(makeProxyPlan([makeProxyRequest()]));
-      await flush();
-
-      expect(cache.telemetry().proxyBytes).toBe(256);
-      expect(cache.getCachedProxy("ds-1", "entity-1", "TileProxy3D", 0, 0)).not.toBeNull();
-
-      cache.cancelDataset("ds-1", ["entity-1"]);
-
-      expect(cache.telemetry().proxyBytes).toBe(0);
-      expect(cache.getCachedProxy("ds-1", "entity-1", "TileProxy3D", 0, 0)).toBeNull();
-    });
-
     it("clears ready deliveries", async () => {
       const { cache, source } = createTestCache();
       source.autoResolveBytes = 64;
@@ -1171,9 +1059,6 @@ describe("CpuCache", () => {
       ]));
       await flush();
       // Don't consume — leave delivery eligible.
-
-      cache.submit(makeProxyPlan([makeProxyRequest()]));
-      await flush();
 
       cache.cancelDataset("ds-1", ["entity-1"]);
 
@@ -1185,7 +1070,7 @@ describe("CpuCache", () => {
       const req = makeRequest({ entityId: "entity-1" });
       cache.submit(makePlan([req]));
 
-      source.reject("entity-1/image-1/0/0/0/0/0/0", new Error("404 not found"));
+      source.reject("entity-1/image-1/0/0/0/0/0/0", permanentSourceError());
       await flush();
       await flush();
 
@@ -1227,58 +1112,29 @@ describe("CpuCache", () => {
     it("does not touch other datasets' state", async () => {
       const { cache, source } = createTestCache();
       source.autoResolveBytes = 64;
-      source.autoResolveProxyBytes = 128;
 
       // Dataset A
-      const reqA = makeRequest({ entityId: "entity-A", imageId: "image-A", chunkKey: "0/0/0/0/0/0" });
-      const proxyA: ProxyRequest = {
-        datasetId: "ds-A", entityId: "entity-A", imageId: "image-A",
-        kind: "TileProxy3D", t: 0, c: 0, priority: 0,
-      };
-      cache.submit({
-        requests: [reqA],
-        activeSet: [makeActiveEntry("entity-A", "image-A")],
-        proxyRequests: [proxyA],
-        epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
-        stats: emptyPlanStats(),
-        nextState: { previousActiveSet: [] },
-      });
+      const reqA = makeRequest({ datasetId: "ds-A", entityId: "entity-A", imageId: "image-A", chunkKey: "0/0/0/0/0/0" });
+      cache.submit(makePlan([reqA], [makeActiveEntry("entity-A", "image-A")]));
       await flush();
 
       // Dataset B
-      const reqB = makeRequest({ entityId: "entity-B", imageId: "image-B", chunkKey: "0/0/0/0/0/0" });
-      const proxyB: ProxyRequest = {
-        datasetId: "ds-B", entityId: "entity-B", imageId: "image-B",
-        kind: "TileProxy3D", t: 0, c: 0, priority: 0,
-      };
-      cache.submit({
-        requests: [reqB],
-        activeSet: [makeActiveEntry("entity-B", "image-B")],
-        proxyRequests: [proxyB],
-        epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
-        stats: emptyPlanStats(),
-        nextState: { previousActiveSet: [] },
-      });
+      const reqB = makeRequest({ datasetId: "ds-B", entityId: "entity-B", imageId: "image-B", chunkKey: "0/0/0/0/0/0" });
+      cache.submit(makePlan([reqB], [makeActiveEntry("entity-B", "image-B")]));
       await flush();
 
       const beforeDetailB = cache.getCachedChunk("entity-B", "0/0/0/0/0/0");
-      const beforeProxyB = cache.getCachedProxy("ds-B", "entity-B", "TileProxy3D", 0, 0);
       expect(beforeDetailB).not.toBeNull();
-      expect(beforeProxyB).not.toBeNull();
       const mainBytesBoth = cache.telemetry().mainBytes;
-      const proxyBytesBoth = cache.telemetry().proxyBytes;
 
       cache.cancelDataset("ds-A", ["entity-A"]);
 
       // Dataset A is gone.
       expect(cache.getCachedChunk("entity-A", "0/0/0/0/0/0")).toBeNull();
-      expect(cache.getCachedProxy("ds-A", "entity-A", "TileProxy3D", 0, 0)).toBeNull();
       // Dataset B is intact.
       expect(cache.getCachedChunk("entity-B", "0/0/0/0/0/0")).not.toBeNull();
-      expect(cache.getCachedProxy("ds-B", "entity-B", "TileProxy3D", 0, 0)).not.toBeNull();
       // Bytes accounting reflects only A's data was subtracted.
       expect(cache.telemetry().mainBytes).toBe(mainBytesBoth - 64);
-      expect(cache.telemetry().proxyBytes).toBe(proxyBytesBoth - 128);
     });
   });
 
@@ -1646,7 +1502,7 @@ describe("CpuCache", () => {
       const req = makeRequest();
       cache.submit(makePlan([req]));
 
-      source.reject("entity-1/image-1/0/0/0/0/0/0", new Error("404 not found"));
+      source.reject("entity-1/image-1/0/0/0/0/0/0", permanentSourceError());
       await flush();
 
       expect(source.fetchCount).toBe(1); // no retry
@@ -1719,7 +1575,7 @@ describe("CpuCache", () => {
         // --- Permanent key: excluded regardless of elapsed time. ---
         const permanentReq = makeRequest({ x: 1 });
         cache.submit(makePlan([permanentReq]));
-        source.reject("entity-1/image-1/0/0/0/0/0/1", new Error("404 not found"));
+        source.reject("entity-1/image-1/0/0/0/0/0/1", permanentSourceError());
         await vi.advanceTimersByTimeAsync(0);
         expect(cache.failuresTracked()).toBe(1);
 
@@ -1888,7 +1744,7 @@ describe("CpuCache", () => {
       cache.submit(makePlan(reqs));
 
       for (let i = 0; i < count; i++) {
-        source.reject(`entity-1/image-1/0/0/0/0/0/${i}`, new Error("404 not found"));
+        source.reject(`entity-1/image-1/0/0/0/0/0/${i}`, permanentSourceError());
       }
       await flush();
 
@@ -1930,7 +1786,7 @@ describe("CpuCache", () => {
         );
         cache.submit(makePlan(permReqs));
         for (let i = 0; i < MAX_TRACKED_FAILURES; i++) {
-          source.reject(`entity-1/image-1/0/0/0/0/0/${i}`, new Error("404 not found"));
+          source.reject(`entity-1/image-1/0/0/0/0/0/${i}`, permanentSourceError());
         }
         await vi.advanceTimersByTimeAsync(0);
         expect(cache.failuresTracked()).toBe(MAX_TRACKED_FAILURES);
@@ -2000,7 +1856,7 @@ describe("CpuCache", () => {
         // Backoff elapses → re-planned, re-fetched. This time it is a 404.
         clock += FAILURE_BACKOFF_MAX_MS + 1;
         cache.submit(makePlan([req]));
-        source.reject(composite, new Error("404 not found"));
+        source.reject(composite, permanentSourceError());
         await vi.advanceTimersByTimeAsync(0);
 
         // Still exactly one tracked entry — it moved stores, not duplicated.
@@ -2019,7 +1875,7 @@ describe("CpuCache", () => {
     it("reports errors in telemetry", async () => {
       const { cache, source } = createTestCache();
       cache.submit(makePlan([makeRequest()]));
-      source.reject("entity-1/image-1/0/0/0/0/0/0", new Error("404 not found"));
+      source.reject("entity-1/image-1/0/0/0/0/0/0", permanentSourceError());
       await flush();
 
       const tel = cache.telemetry();
@@ -2083,7 +1939,7 @@ describe("CpuCache", () => {
       );
       cache.submit(makePlan(reqs));
       for (let i = 0; i < reqs.length; i++) {
-        source.reject(`entity-1/image-1/0/0/0/0/0/${i}`, new Error("404 not found"));
+        source.reject(`entity-1/image-1/0/0/0/0/0/${i}`, permanentSourceError());
       }
       await flush();
 
@@ -2095,8 +1951,8 @@ describe("CpuCache", () => {
       // Failures continuing inside the throttle window stay silent — the
       // signal is an aggregate, never per-chunk spam.
       cache.submit(makePlan([makeRequest({ y: 1 }), makeRequest({ y: 1, x: 1 })]));
-      source.reject("entity-1/image-1/0/0/0/0/1/0", new Error("404 not found"));
-      source.reject("entity-1/image-1/0/0/0/0/1/1", new Error("404 not found"));
+      source.reject("entity-1/image-1/0/0/0/0/1/0", permanentSourceError());
+      source.reject("entity-1/image-1/0/0/0/0/1/1", permanentSourceError());
       await flush();
 
       expect(onChunkFailureStreak).toHaveBeenCalledTimes(1);
@@ -2115,7 +1971,7 @@ describe("CpuCache", () => {
       );
       cache.submit(makePlan(firstBatch));
       for (let i = 0; i < firstBatch.length; i++) {
-        source.reject(`entity-1/image-1/0/0/0/0/0/${i}`, new Error("404 not found"));
+        source.reject(`entity-1/image-1/0/0/0/0/0/${i}`, permanentSourceError());
       }
       await flush();
 
@@ -2130,7 +1986,7 @@ describe("CpuCache", () => {
       );
       cache.submit(makePlan(secondBatch));
       for (let i = 0; i < secondBatch.length; i++) {
-        source.reject(`entity-1/image-1/0/0/0/0/3/${i}`, new Error("404 not found"));
+        source.reject(`entity-1/image-1/0/0/0/0/3/${i}`, permanentSourceError());
       }
       await flush();
 
@@ -2187,7 +2043,7 @@ describe("CpuCache", () => {
         const reqs = Array.from({ length: count }, (_, i) => makeRequest({ y, x: i }));
         cache.submit(makePlan(reqs));
         for (let i = 0; i < count; i++) {
-          source.reject(`entity-1/image-1/0/0/0/0/${y}/${i}`, new Error("404 not found"));
+          source.reject(`entity-1/image-1/0/0/0/0/${y}/${i}`, permanentSourceError());
         }
         await flush();
       };
@@ -2228,7 +2084,7 @@ describe("CpuCache", () => {
       );
       cache.submit(makePlan(reqs));
       for (let i = 0; i < CHUNK_FAILURE_STREAK_THRESHOLD - 1; i++) {
-        source.reject(`entity-1/image-1/0/0/0/0/0/${i}`, new Error("404 not found"));
+        source.reject(`entity-1/image-1/0/0/0/0/0/${i}`, permanentSourceError());
       }
       // …then the last fetch COMPLETES but its bytes cannot be decoded
       // (e.g. a source answering 200 with the wrong wire format). That is
@@ -2270,6 +2126,7 @@ describe("CpuCache", () => {
           "image-1",
           `0/0/0/0/0/${i}`,
           status,
+          status === "unavailable" ? TRANSIENT_SOURCE_FAILURE : PERMANENT_SOURCE_FAILURE,
           "access to the dataset store was denied",
         );
       }
@@ -2313,6 +2170,7 @@ describe("CpuCache", () => {
             "image-1",
             `0/0/0/0/0/${i}`,
             "unavailable",
+            TRANSIENT_SOURCE_FAILURE,
             "backend temporarily unavailable",
           );
         }
@@ -2369,7 +2227,7 @@ describe("CpuCache", () => {
         for (let i = 0; i < throttled.length; i++) {
           realSource.handleSourceChunkStatus(
             "entity-1", "image-1", `0/0/0/0/0/${i}`,
-            "unavailable", "backend throttled",
+            "unavailable", TRANSIENT_SOURCE_FAILURE, "backend throttled",
           );
         }
         await vi.advanceTimersByTimeAsync(0);
@@ -2381,7 +2239,7 @@ describe("CpuCache", () => {
         for (let i = 0; i < throttled.length; i++) {
           realSource.handleSourceChunkStatus(
             "entity-1", "image-1", `0/0/0/0/0/${i}`,
-            "unavailable", "backend throttled",
+            "unavailable", TRANSIENT_SOURCE_FAILURE, "backend throttled",
           );
         }
         await vi.advanceTimersByTimeAsync(0);
@@ -2404,7 +2262,7 @@ describe("CpuCache", () => {
         for (let i = 0; i < dead.length; i++) {
           realSource.handleSourceChunkStatus(
             "entity-1", "image-1", `0/0/0/0/1/${i}`,
-            "failed_permanent", "credentials revoked",
+            "failed_permanent", PERMANENT_SOURCE_FAILURE, "credentials revoked",
           );
         }
         await vi.advanceTimersByTimeAsync(0);
@@ -2476,7 +2334,7 @@ describe("CpuCache", () => {
         const reqs = Array.from({ length: count }, (_, i) => makeRequest({ y, x: i }));
         cache.submit(makePlan(reqs));
         for (let i = 0; i < count; i++) {
-          source.reject(`entity-1/image-1/0/0/0/0/${y}/${i}`, new Error("404 not found"));
+          source.reject(`entity-1/image-1/0/0/0/0/${y}/${i}`, permanentSourceError());
         }
         await flush();
       };
@@ -2765,7 +2623,7 @@ describe("CpuCache", () => {
       expect(tel.mainBytes).toBeLessThanOrEqual(budget);
     });
 
-    it("overview and detail budgets are independent", async () => {
+    it("coarse and detail budgets are independent", async () => {
       const { cache, source } = createTestCache({
         mainBudgetBytes: 200,
         overviewBudgetBytes: 200,
@@ -2780,12 +2638,12 @@ describe("CpuCache", () => {
       cache.submit(makePlan(detail));
       await flush();
 
-      // Fill overview
-      const overview = [
-        makeRequest({ lane: "overview", x: 0, chunkKey: "0/0/0/0/0/2" }),
-        makeRequest({ lane: "overview", x: 1, chunkKey: "0/0/0/0/0/3" }),
+      // Fill the coarse residency tier.
+      const coarse = [
+        makeRequest({ lane: "coarse", tier: "coarse", x: 0, chunkKey: "0/0/0/0/0/2" }),
+        makeRequest({ lane: "coarse", tier: "coarse", x: 1, chunkKey: "0/0/0/0/0/3" }),
       ];
-      cache.submit(makePlan([...detail, ...overview]));
+      cache.submit(makePlan([...detail, ...coarse]));
       await flush();
 
       const tel = cache.telemetry();
@@ -2813,7 +2671,7 @@ describe("CpuCache", () => {
       expect(result!.imageId).toBe("image-1");
       expect(result!.chunkKey).toBe("0/0/0/0/0/0");
       expect(result!.lane).toBe("detail");
-      expect(result!.dataType).toBe("uint16");
+      expect(result!.contract.dtype).toBe("uint16");
       expect(result!.data.byteLength).toBe(64);
     });
 
@@ -2890,402 +2748,8 @@ describe("CpuCache", () => {
       const tel = cache.telemetry();
       expect(tel.mainBytes).toBe(0);
       expect(tel.overviewBytes).toBe(0);
-      expect(tel.proxyBytes).toBe(0);
     });
   });
-
-  // =========================================================================
-  // Proxy tier
-  // =========================================================================
-
-  describe("proxy tier", () => {
-    function makeProxyRequest(overrides?: Partial<ProxyRequest>): ProxyRequest {
-      return {
-        datasetId: "ds-1",
-        entityId: "entity-1",
-        imageId: "image-1",
-        kind: "TileProxy3D",
-        t: 0,
-        c: 0,
-        priority: 0,
-        ...overrides,
-      };
-    }
-
-    function makeProxyPlan(
-      proxyRequests: ProxyRequest[],
-      epochs?: Partial<SceneEpochs>,
-    ): RequestPlan {
-      return {
-        requests: [],
-        activeSet: [],
-        proxyRequests,
-        epochs: {
-          content: 1,
-          layout: 1,
-          view: 1,
-          selection: 1,
-          asset: 0,
-          request: 1,
-          ...epochs,
-        },
-        stats: emptyPlanStats(),
-        nextState: { previousActiveSet: [] },
-      };
-    }
-
-    it("submit with proxy request → fetchProxy called once", async () => {
-      const { cache, source } = createTestCache();
-      cache.submit(makeProxyPlan([makeProxyRequest()]));
-      await flush();
-
-      expect(source.fetchProxyCount).toBe(1);
-      expect(source.fetchProxyCalls[0]).toMatchObject({
-        datasetId: "ds-1",
-        entityId: "entity-1",
-        kind: "TileProxy3D",
-        t: 0,
-        c: 0,
-      });
-    });
-
-    it("getDeliverable returns a proxy delivery with kind: proxy and header", async () => {
-      const { cache, source } = createTestCache();
-      cache.submit(makeProxyPlan([makeProxyRequest()]));
-      await flush();
-
-      const deliveries = consumeDeliverables(cache);
-      expect(deliveries).toHaveLength(1);
-      const d = deliveries[0];
-      expect(d.kind).toBe("proxy");
-      if (d.kind !== "proxy") throw new Error("expected proxy delivery");
-      expect(d.datasetId).toBe("ds-1");
-      expect(d.entityId).toBe("entity-1");
-      expect(d.proxyKind).toBe("TileProxy3D");
-      expect(d.t).toBe(0);
-      expect(d.c).toBe(0);
-      expect(d.header).toEqual(source.proxyHeader);
-      expect(d.data.byteLength).toBe(source.autoResolveProxyBytes);
-    });
-
-    it("starts proxy fallback work even when chunk capacity is saturated", async () => {
-      const { cache, source } = createTestCache({ maxConcurrentFetches: 1 });
-      const chunkReq = makeRequest({ chunkKey: "0/0/0/0/0/0" });
-      const proxyReq = makeProxyRequest();
-
-      cache.submit({
-        ...makePlan([chunkReq]),
-        proxyRequests: [proxyReq],
-      });
-
-      expect(source.fetchProxyCount).toBe(1);
-      expect(source.fetchCount).toBe(0);
-
-      await flush();
-
-      expect(source.fetchCount).toBe(1);
-    });
-
-    it("does not re-fetch a cached proxy on second submit (cache hit)", async () => {
-      const { cache, source } = createTestCache();
-      const req = makeProxyRequest();
-      cache.submit(makeProxyPlan([req]));
-      await flush();
-      // Mark the first delivery sent.
-      consumeDeliverables(cache);
-
-      const fetchesBefore = source.fetchProxyCount;
-      cache.submit(makeProxyPlan([req]));
-      await flush();
-
-      // No new network fetch.
-      expect(source.fetchProxyCount).toBe(fetchesBefore);
-
-      // TickCoordinator resends evicted proxies via `getCachedProxy`.
-      const replays = consumeDeliverables(cache);
-      expect(replays).toHaveLength(0);
-    });
-
-    it("submit() with already-cached proxy does not push to ready", async () => {
-      const { cache } = createTestCache();
-      const req = makeProxyRequest();
-      cache.submit(makeProxyPlan([req]));
-      await flush();
-      // Mark the initial decode delivery sent.
-      const initial = consumeDeliverables(cache);
-      expect(initial).toHaveLength(1);
-
-      // Second submit of the same plan: nothing should land in `ready`.
-      cache.submit(makeProxyPlan([req]));
-      await flush();
-      expect(consumeDeliverables(cache)).toHaveLength(0);
-    });
-
-    it("notifyListeners is not called on re-submit-cached-proxy", async () => {
-      const { cache } = createTestCache();
-      const req = makeProxyRequest();
-
-      let notifyCount = 0;
-      cache.subscribe(() => {
-        notifyCount++;
-      });
-
-      cache.submit(makeProxyPlan([req]));
-      await flush();
-      // First decode notifies (from fetchProxy).
-      const afterFirst = notifyCount;
-      expect(afterFirst).toBeGreaterThanOrEqual(1);
-
-      // Second submit hits the cache → no new ready, no new notify.
-      cache.submit(makeProxyPlan([req]));
-      await flush();
-      expect(notifyCount).toBe(afterFirst);
-    });
-
-    it("getCachedProxy returns null for misses and the entry for hits", async () => {
-      const { cache } = createTestCache();
-      expect(
-        cache.getCachedProxy("ds-1", "entity-x", "TileProxy3D", 0, 0),
-      ).toBeNull();
-
-      cache.submit(makeProxyPlan([makeProxyRequest()]));
-      await flush();
-
-      const hit = cache.getCachedProxy(
-        "ds-1",
-        "entity-1",
-        "TileProxy3D",
-        0,
-        0,
-      );
-      expect(hit).not.toBeNull();
-      expect(hit!.kind).toBe("proxy");
-      expect(hit!.entityId).toBe("entity-1");
-    });
-
-    it("telemetry reports proxy bytes, budget, and queue depth", async () => {
-      const { cache, source } = createTestCache({ proxyBudgetBytes: 1024 });
-      source.autoResolveProxyBytes = 256;
-
-      cache.submit(makeProxyPlan([makeProxyRequest({ t: 0 })]));
-      await flush();
-      cache.submit(makeProxyPlan([makeProxyRequest({ t: 1 })]));
-      await flush();
-
-      const tel = cache.telemetry();
-      expect(tel.proxyBudget).toBe(1024);
-      expect(tel.proxyBytes).toBe(512);
-    });
-
-    it("evicts oldest proxies when over budget", async () => {
-      const budget = 256;
-      const { cache, source } = createTestCache({ proxyBudgetBytes: budget });
-      source.autoResolveProxyBytes = 100;
-
-      cache.submit(makeProxyPlan([makeProxyRequest({ t: 0 })]));
-      await flush();
-      cache.submit(makeProxyPlan([makeProxyRequest({ t: 1 })]));
-      await flush();
-      // Both fit (200 <= 256).
-      expect(cache.telemetry().proxyBytes).toBe(200);
-
-      cache.submit(makeProxyPlan([makeProxyRequest({ t: 2 })]));
-      await flush();
-      // 300 > 256 → oldest (t=0) was evicted.
-      expect(cache.telemetry().proxyBytes).toBeLessThanOrEqual(budget);
-      expect(
-        cache.getCachedProxy("ds-1", "entity-1", "TileProxy3D", 0, 0),
-      ).toBeNull();
-      expect(
-        cache.getCachedProxy("ds-1", "entity-1", "TileProxy3D", 2, 0),
-      ).not.toBeNull();
-    });
-
-    it("reset clears proxy cache state", async () => {
-      const { cache, source } = createTestCache();
-      cache.submit(makeProxyPlan([makeProxyRequest()]));
-      await flush();
-      expect(cache.telemetry().proxyBytes).toBeGreaterThan(0);
-
-      cache.reset();
-      expect(cache.telemetry().proxyBytes).toBe(0);
-      expect(
-        cache.getCachedProxy("ds-1", "entity-1", "TileProxy3D", 0, 0),
-      ).toBeNull();
-      // Counter sanity check — fetchProxy not called again on reset.
-      const before = source.fetchProxyCount;
-      consumeDeliverables(cache);
-      expect(source.fetchProxyCount).toBe(before);
-    });
-
-    describe("departed-entity proxy cancel", () => {
-      const AWAY_KEY = "ds-1|entity-1|TileProxy3D|0|0";
-      const CURRENT_KEY = "ds-2|entity-2|TileProxy3D|0|0";
-
-      /** A plan whose active set names `entityId` and that requests its proxy. */
-      function proxyPlanFor(
-        datasetId: string,
-        entityId: string,
-        imageId: string,
-      ): RequestPlan {
-        return {
-          ...makePlan([], [makeActiveEntry(entityId, imageId)]),
-          proxyRequests: [makeProxyRequest({ datasetId, entityId, imageId })],
-        };
-      }
-
-      it("cancels a departed entity's in-flight proxy at the rebuild boundary", async () => {
-        const { cache, source } = createTestCache();
-        source.autoResolveProxyBytes = null; // hold the proxy in-flight
-
-        cache.onPlanRebuildStart();
-        cache.submit(proxyPlanFor("ds-1", "entity-1", "image-1"));
-        expect(source.fetchProxyCount).toBe(1);
-        expect(cache.telemetry().inFlightProxyCount).toBe(1);
-        expect(source.pendingProxyFetches.has(AWAY_KEY)).toBe(true);
-
-        // entity-1 leaves the view; entity-2 is the current view now. The
-        // departure is only detected at the NEXT rebuild boundary.
-        cache.onPlanRebuildStart();
-        cache.submit(makePlan([], [makeActiveEntry("entity-2", "image-2")]));
-        expect(cache.telemetry().inFlightProxyCount).toBe(1);
-
-        // entity-1 absent for a full rebuild → its proxy is aborted at the
-        // boundary, releasing the shared concurrency slot to the current view.
-        cache.onPlanRebuildStart();
-        cache.submit(makePlan([], [makeActiveEntry("entity-2", "image-2")]));
-        await flush();
-
-        expect(cache.telemetry().inFlightProxyCount).toBe(0);
-        expect(source.pendingProxyFetches.has(AWAY_KEY)).toBe(false);
-      });
-
-      it("frees the shared single slot for the current view's proxy", async () => {
-        // One shared concurrency slot: the chunk and proxy schedulers share
-        // the cap, so a departed entity's proxy holding it starves the view.
-        const { cache, source } = createTestCache({ maxConcurrentFetches: 1 });
-        source.autoResolveProxyBytes = null;
-
-        // entity-1's proxy takes the single shared slot.
-        cache.onPlanRebuildStart();
-        cache.submit(proxyPlanFor("ds-1", "entity-1", "image-1"));
-        expect(source.fetchProxyCount).toBe(1);
-
-        // entity-1 leaves; entity-2 (current view) wants its proxy but cannot
-        // start — the only slot is still held by the departed entity.
-        cache.onPlanRebuildStart();
-        cache.submit(proxyPlanFor("ds-2", "entity-2", "image-2"));
-        expect(source.pendingProxyFetches.has(CURRENT_KEY)).toBe(false);
-
-        // Next rebuild: entity-1 absent for a full rebuild → its proxy is
-        // cancelled at the boundary, freeing the slot for the current view.
-        cache.onPlanRebuildStart();
-        cache.submit(proxyPlanFor("ds-2", "entity-2", "image-2"));
-        await flush();
-
-        expect(source.pendingProxyFetches.has(AWAY_KEY)).toBe(false);
-        expect(source.pendingProxyFetches.has(CURRENT_KEY)).toBe(true);
-        expect(cache.telemetry().inFlightProxyCount).toBe(1);
-      });
-
-      it("re-fetches a returning entity's proxy after its departure cancel", async () => {
-        const { cache, source } = createTestCache();
-        source.autoResolveProxyBytes = null;
-
-        cache.onPlanRebuildStart();
-        cache.submit(proxyPlanFor("ds-1", "entity-1", "image-1"));
-        expect(source.fetchProxyCount).toBe(1);
-
-        // entity-1 leaves for a full rebuild → its in-flight proxy is aborted.
-        cache.onPlanRebuildStart();
-        cache.submit(makePlan([], [makeActiveEntry("entity-2", "image-2")]));
-        cache.onPlanRebuildStart();
-        cache.submit(makePlan([], [makeActiveEntry("entity-2", "image-2")]));
-        await flush();
-        expect(cache.telemetry().inFlightProxyCount).toBe(0);
-
-        // entity-1 returns: proxies are NeverRetry, so the orchestrator's
-        // resubmit is the only path back — it must re-fetch, not stay dropped.
-        cache.onPlanRebuildStart();
-        cache.submit(proxyPlanFor("ds-1", "entity-1", "image-1"));
-        expect(source.fetchProxyCount).toBe(2);
-        expect(source.pendingProxyFetches.has(AWAY_KEY)).toBe(true);
-      });
-
-      it("does not cancel a still-visible entity's in-flight proxy", () => {
-        const { cache, source } = createTestCache();
-        source.autoResolveProxyBytes = null;
-
-        cache.onPlanRebuildStart();
-        cache.submit(proxyPlanFor("ds-1", "entity-1", "image-1"));
-        expect(cache.telemetry().inFlightProxyCount).toBe(1);
-
-        // entity-1 stays visible across rebuilds; its in-flight proxy persists
-        // (a re-submit finds it in-flight and does not re-enqueue or cancel it).
-        cache.onPlanRebuildStart();
-        cache.submit(proxyPlanFor("ds-1", "entity-1", "image-1"));
-        cache.onPlanRebuildStart();
-        cache.submit(proxyPlanFor("ds-1", "entity-1", "image-1"));
-
-        expect(cache.telemetry().inFlightProxyCount).toBe(1);
-        expect(source.fetchProxyCount).toBe(1);
-        expect(source.pendingProxyFetches.has(AWAY_KEY)).toBe(true);
-      });
-
-      it("keeps a still-wanted group proxy when its group leaves the active set on a zoom-in", async () => {
-        // Group-to-tile zoom-in: the group first renders as a single
-        // GroupProxy3D (the group is the active entity), then resolves into
-        // individual tiles that share that SAME group proxy as their fallback.
-        // The group id leaves the active set, but the group proxy — keyed by
-        // the group id, not a per-tile entity — stays continuously requested.
-        // The per-entity departure cancel must NOT abort it (that would churn
-        // a large shared fallback with an abort + refetch every zoom-in).
-        const { cache, source } = createTestCache();
-        source.autoResolveProxyBytes = null; // hold the proxy in-flight
-
-        const GROUP_KEY = "ds-1|group-1|GroupProxy3D|0|0";
-        const groupProxy = makeProxyRequest({
-          datasetId: "ds-1",
-          entityId: "group-1",
-          imageId: "image-group-1",
-          kind: "GroupProxy3D",
-        });
-
-        // Group active; its group proxy takes a slot and stays in-flight.
-        cache.onPlanRebuildStart();
-        cache.submit({
-          ...makePlan([], [makeActiveEntry("group-1", "image-group-1")]),
-          proxyRequests: [groupProxy],
-        });
-        expect(source.fetchProxyCount).toBe(1);
-        expect(cache.telemetry().inFlightProxyCount).toBe(1);
-        expect(source.pendingProxyFetches.has(GROUP_KEY)).toBe(true);
-
-        // Zoom-in: the tiles become the active entities; the group id drops
-        // out of the active set, but the group proxy is still requested.
-        cache.onPlanRebuildStart();
-        cache.submit({
-          ...makePlan([], [makeActiveEntry("tile-1", "image-tile-1")]),
-          proxyRequests: [groupProxy],
-        });
-
-        // Departure boundary for the group id. The group proxy's wantedness
-        // tracks plan membership (still requested), not one tile's departure,
-        // so it must survive the boundary — in-flight, never refetched.
-        cache.onPlanRebuildStart();
-        cache.submit({
-          ...makePlan([], [makeActiveEntry("tile-1", "image-tile-1")]),
-          proxyRequests: [groupProxy],
-        });
-        await flush();
-
-        expect(cache.telemetry().inFlightProxyCount).toBe(1);
-        expect(source.fetchProxyCount).toBe(1);
-        expect(source.pendingProxyFetches.has(GROUP_KEY)).toBe(true);
-      });
-    });
-  });
-
   // =========================================================================
   // Subtle behaviours: race orderings, telemetry shape, eviction-burst log.
   // =========================================================================
@@ -3534,16 +2998,11 @@ describe("CpuCache", () => {
         mainBudget: expect.any(Number),
         overviewBytes: expect.any(Number),
         overviewBudget: expect.any(Number),
-        proxyBytes: expect.any(Number),
-        proxyBudget: expect.any(Number),
         maxConcurrentFetches: expect.any(Number),
         maxBytesInFlight: expect.any(Number),
         inFlightCount: expect.any(Number),
         inFlightBytes: expect.any(Number),
-        inFlightProxyCount: expect.any(Number),
-        inFlightProxyBytes: expect.any(Number),
         pendingCount: expect.any(Number),
-        pendingProxyCount: expect.any(Number),
         pendingOldestAgeMs: expect.any(Number),
         readyCount: expect.any(Number),
         hitRate: expect.any(Number),
@@ -3553,7 +3012,6 @@ describe("CpuCache", () => {
           demotedDetail: expect.any(Number),
           prefetch: expect.any(Number),
           overview: expect.any(Number),
-          proxy: expect.any(Number),
         },
         interactionMode: expect.stringMatching(/^(panning|scrubbing|idle)$/),
         evictionTierOrder: expect.any(Array),
@@ -3572,7 +3030,6 @@ describe("CpuCache", () => {
           demotedDetail: { count: expect.any(Number), bytes: expect.any(Number) },
           prefetch: { count: expect.any(Number), bytes: expect.any(Number) },
           overview: { count: expect.any(Number), bytes: expect.any(Number) },
-          proxy: { count: expect.any(Number), bytes: expect.any(Number) },
         },
         tierDemand: {
           desired: {

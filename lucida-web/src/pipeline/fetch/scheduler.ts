@@ -1,8 +1,8 @@
 /**
  * Pending queue + in-flight tracking + concurrency / bytes caps.
  *
- * Generic over the request shape so one class backs both the chunk and
- * proxy schedulers; the dedup ladder lives in `cpuCache.ts` and feeds
+ * Generic over the request shape so fetch policy stays independent of
+ * concrete chunk request details; the dedup ladder lives in `cpuCache.ts` and feeds
  * this with a pre-deduped list. The scheduler doesn't know about
  * decode, retry, or the cache — the `startFn` callback owns that work
  * and must call back via {@link correctInFlightBytes} +
@@ -10,6 +10,7 @@
  */
 
 import type { BurstLogger } from "./telemetry.ts";
+import { FairPriorityQueue } from "./fairPriorityQueue.ts";
 
 export interface SchedulableRequest {
   datasetId: string;
@@ -20,12 +21,6 @@ export interface SchedulerConfig {
   maxConcurrentFetches: number;
   maxBytesInFlight: number;
   burstLogger?: BurstLogger;
-  /**
-   * Counts toward this scheduler's caps from a sibling scheduler. The
-   * proxy scheduler reports the chunk scheduler's totals so combined
-   * load can't exceed the shared cap.
-   */
-  siblingInFlight?: () => { count: number; bytes: number };
 }
 
 export interface InFlightEntry<Req extends SchedulableRequest> {
@@ -45,8 +40,17 @@ export interface SchedulerDump<Req extends SchedulableRequest> {
   pending: SchedulerDumpEntry<Req>[];
 }
 
+export interface SchedulerQueuePolicy<Req extends SchedulableRequest> {
+  /** Local priority inside one fair bucket. Equal items retain enqueue order. */
+  compare?: (a: Req, b: Req) => number;
+  /** Defaults to one bucket per dataset. */
+  bucketOf?: (req: Req) => string;
+  /** Suppresses tombstones for metadata-equivalent refreshes. */
+  equals?: (a: Req, b: Req) => boolean;
+}
+
 export class Scheduler<Req extends SchedulableRequest> {
-  private pending: Req[] = [];
+  private readonly pending: FairPriorityQueue<Req>;
   private inFlight = new Map<string, InFlightEntry<Req>>();
   private inFlightBytesCounter = 0;
   /** First-enqueue timestamps; oldest age is the pending-starvation signal. */
@@ -70,10 +74,17 @@ export class Scheduler<Req extends SchedulableRequest> {
       estimatedBytes: number,
       key: string,
     ) => void,
+    queuePolicy: SchedulerQueuePolicy<Req> = {},
   ) {
     this.config = config;
     this.keyFn = keyFn;
     this.startFn = startFn;
+    this.pending = new FairPriorityQueue<Req>({
+      keyOf: keyFn,
+      compare: queuePolicy.compare,
+      bucketOf: queuePolicy.bucketOf,
+      equals: queuePolicy.equals,
+    });
   }
 
   get inFlightSize(): number {
@@ -85,7 +96,7 @@ export class Scheduler<Req extends SchedulableRequest> {
   }
 
   get pendingSize(): number {
-    return this.pending.length;
+    return this.pending.size;
   }
 
   hasInFlight(key: string): boolean {
@@ -108,7 +119,7 @@ export class Scheduler<Req extends SchedulableRequest> {
 
   /** Caller-owned copy in dequeue order; safe to mutate. */
   pendingSnapshot(): readonly Req[] {
-    return [...this.pending];
+    return this.pending.snapshotFair();
   }
 
   /** Age (ms) of the longest-waiting pending entry; 0 when empty. */
@@ -132,13 +143,43 @@ export class Scheduler<Req extends SchedulableRequest> {
    * scheduler does no filtering.
    */
   enqueue(reqs: Req[], now: number = performance.now()): void {
-    this.pending = reqs;
-    const next = new Map<string, number>();
+    const desired = new Set(reqs.map((req) => this.keyFn(req)));
+    for (const current of this.pending.snapshotFair()) {
+      const key = this.keyFn(current);
+      if (desired.has(key)) continue;
+      this.pending.delete(key);
+      this.enqueuedAt.delete(key);
+    }
     for (const req of reqs) {
       const key = this.keyFn(req);
-      next.set(key, this.enqueuedAt.get(key) ?? now);
+      if (!this.enqueuedAt.has(key)) this.enqueuedAt.set(key, now);
+      this.pending.upsert(req);
     }
-    this.enqueuedAt = next;
+  }
+
+  /** Replace only one dataset's pending ownership; every other dataset stays. */
+  replaceDataset(datasetId: string, reqs: readonly Req[], now: number = performance.now()): void {
+    for (const req of reqs) {
+      const key = this.keyFn(req);
+      if (!this.enqueuedAt.has(key)) this.enqueuedAt.set(key, now);
+    }
+    const removed = this.pending.replaceDataset(datasetId, reqs);
+    for (const key of removed) this.enqueuedAt.delete(key);
+  }
+
+  /** Apply an owner-scoped pending delta without rebuilding another queue. */
+  applyDatasetDelta(
+    datasetId: string,
+    upserts: readonly Req[],
+    removedKeys: readonly string[],
+    now: number = performance.now(),
+  ): void {
+    for (const req of upserts) {
+      const key = this.keyFn(req);
+      if (!this.enqueuedAt.has(key)) this.enqueuedAt.set(key, now);
+    }
+    const removed = this.pending.applyDatasetDelta(datasetId, upserts, removedKeys);
+    for (const key of removed) this.enqueuedAt.delete(key);
   }
 
   /**
@@ -147,25 +188,23 @@ export class Scheduler<Req extends SchedulableRequest> {
    * fires its rate-limited backpressure summary.
    */
   drain(estimateBytes: (req: Req) => number): void {
-    while (this.pending.length > 0 && this.canStartMore()) {
-      const req = this.pending.shift()!;
+    while (this.pending.size > 0 && this.canStartMore()) {
+      const req = this.pending.shift();
+      if (!req) break;
       const key = this.keyFn(req);
       this.enqueuedAt.delete(key);
       const estimate = estimateBytes(req);
       this.startInFlight(req, key, estimate);
     }
 
-    if (this.pending.length > 0 && !this.canStartMore() && this.config.burstLogger) {
-      const sibling = this.config.siblingInFlight?.();
-      const totalCount = this.inFlight.size + (sibling?.count ?? 0);
-      const totalBytes = this.inFlightBytesCounter + (sibling?.bytes ?? 0);
+    if (this.pending.size > 0 && !this.canStartMore() && this.config.burstLogger) {
       this.config.burstLogger.recordSkipped(
-        this.pending.length,
+        this.pending.size,
         (skipped) => ({
-          pending: this.pending.length,
-          inFlight: totalCount,
+          pending: this.pending.size,
+          inFlight: this.inFlight.size,
           maxConcurrent: this.config.maxConcurrentFetches,
-          inFlightBytes: totalBytes,
+          inFlightBytes: this.inFlightBytesCounter,
           maxBytes: this.config.maxBytesInFlight,
           skippedSinceLastLog: skipped,
         }),
@@ -174,12 +213,9 @@ export class Scheduler<Req extends SchedulableRequest> {
   }
 
   private canStartMore(): boolean {
-    const sibling = this.config.siblingInFlight?.();
-    const totalCount = this.inFlight.size + (sibling?.count ?? 0);
-    const totalBytes = this.inFlightBytesCounter + (sibling?.bytes ?? 0);
     return (
-      totalCount < this.config.maxConcurrentFetches &&
-      totalBytes < this.config.maxBytesInFlight
+      this.inFlight.size < this.config.maxConcurrentFetches &&
+      this.inFlightBytesCounter < this.config.maxBytesInFlight
     );
   }
 
@@ -259,7 +295,7 @@ export class Scheduler<Req extends SchedulableRequest> {
     }
     // Build a synthetic InFlightEntry so callers can share one predicate
     // across both in-flight and pending entries.
-    this.pending = this.pending.filter((req) => {
+    const pendingCancelled = this.pending.deleteWhere((req) => {
       const key = this.keyFn(req);
       const synthetic: InFlightEntry<Req> = {
         request: req,
@@ -269,10 +305,10 @@ export class Scheduler<Req extends SchedulableRequest> {
       const drop = predicate(synthetic);
       if (drop) {
         this.enqueuedAt.delete(key);
-        cancelled.push(key);
       }
-      return !drop;
+      return drop;
     });
+    cancelled.push(...pendingCancelled);
     return cancelled;
   }
 
@@ -282,7 +318,7 @@ export class Scheduler<Req extends SchedulableRequest> {
     }
     this.inFlight.clear();
     this.inFlightBytesCounter = 0;
-    this.pending = [];
+    this.pending.clear();
     this.enqueuedAt.clear();
   }
 
@@ -292,7 +328,7 @@ export class Scheduler<Req extends SchedulableRequest> {
     for (const [key, entry] of this.inFlight) {
       inFlight.push({ key, request: entry.request });
     }
-    const pending: SchedulerDumpEntry<Req>[] = this.pending.map((req) => ({
+    const pending: SchedulerDumpEntry<Req>[] = this.pending.snapshotFair().map((req) => ({
       key: this.keyFn(req),
       request: req,
     }));

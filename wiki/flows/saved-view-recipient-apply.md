@@ -5,7 +5,7 @@ description: "The path a #view=<inline> or #b=<id> URL takes from \"user clicks 
 tags: [lucida, flow]
 source_path: wiki/flows/saved-view-recipient-apply.md
 created: 2026-05-08
-modified: 2026-06-25
+modified: 2026-07-16
 ---
 
 # Flow: Saved-View Recipient Apply
@@ -46,10 +46,10 @@ The path a `#view=<inline>` or `#b=<id>` URL takes from "user clicks a shared li
 
 Steps 1-3 unchanged. Differences:
 
-4. **`urlSync` bootstrap** matches the `#b=…` regex via `parseBookmarkHash` (validator: `[A-Za-z0-9._-]+`).
-5. **Fetch the bookmark** via the injected `fetchBookmark` REST helper (`bookmarksApi.getBookmark(id)`). 404 → `null` → console warn + leave hash alone. A 401 is caught generically (console.warn, no explicit `UnauthLanding` redirect in this path); the AuthGate before mount likely makes it moot.
+4. **`urlSync` bootstrap** matches the `#b=…` regex via `parseSavedViewIdHash` (validator: `[A-Za-z0-9._-]+`). The legacy hash key is retained for link stability, but it denotes a workspace saved-view id rather than the retired global bookmark store.
+5. **Resolve the workspace saved view** through the injected `fetchSavedViewById` callback. Production `App.tsx` binds it to `getWorkspaceSavedView(workspaceId, id)`, so the workspace path supplies the authorization boundary. Missing/inaccessible rows reject or return `null`; urlSync warns and leaves the hash unchanged.
 6. **Apply** the returned `view` payload via the same applier path (steps 5-9 above).
-7. **URL collapse** (`urlSync.ts`): after successful apply, `replaceState` to `#view=<inline>` (encoded from the just-applied `SavedView`). Further pans drift the URL forward; the user is no longer "viewing the bookmark," they're viewing live state. Per [Saved Views](../systems/subsystems/saved-views.md) this is intentional — `BookmarkChanged` Updated/Deleted broadcasts must NOT re-rewrite the hash.
+7. **URL collapse** (`urlSync.ts`): after successful apply, `replaceState` to `#view=<inline>` (encoded from the just-applied `SavedView`). Further pans advance the URL from that snapshot; the tab is not live-bound to later edits of the stored row.
 
 ## Apply order matters
 
@@ -100,7 +100,8 @@ Browser back/forward fires `popstate`. `urlSync` re-runs the bootstrap (`#view=�
 
 - [Saved Views](../systems/subsystems/saved-views.md) — subsystem overview + invariants
 - [URL-as-App-State for Saved Views](../decisions/0013-url-as-app-state-for-saved-views.md) — Y-model rationale
-- [Server-Stored Bookmarks and the AuthPrincipal Seam](../decisions/0015-server-stored-bookmarks-and-auth-seam.md) — server side of `#b=<id>`
+- [Server-Stored Bookmarks and the AuthPrincipal Seam](../decisions/0015-server-stored-bookmarks-and-auth-seam.md) — historical predecessor and auth-seam rationale
+- [Sunset dispositions for the three superseded server surfaces](../decisions/0043-superseded-server-surfaces-sunset.md) — redefines `#b=<id>` as a workspace saved-view address
 - [Flow: Document Command Application](document-command-application.md) — `OpenRemoteDataset` is a document command
 - [Flow: Dataset Opening](dataset-opening.md) — the open path each missing dataset takes
 - [Flow: Authentication Sign-In](auth-signin.md) — hash preservation through OAuth

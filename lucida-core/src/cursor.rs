@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use crate::camera::Camera;
 use crate::camera::ray_aabb_hit;
 use crate::mat4::{invert4_f64, normalize3, unproject};
+use crate::protocol::ClientId;
 use crate::scene::Scene;
+use lucida_content::DatasetId;
 
 const PEER_COLORS: [[f32; 3]; 8] = [
     [1.0, 0.420, 0.420],   // #FF6B6B
@@ -18,14 +20,16 @@ const PEER_COLORS: [[f32; 3]; 8] = [
     [0.973, 0.710, 0.0],   // #F8B500
 ];
 
-pub fn peer_color(client_id: u64) -> [f32; 3] {
+pub fn peer_color(client_id: ClientId) -> [f32; 3] {
     PEER_COLORS[(client_id as usize) % PEER_COLORS.len()]
 }
 
 #[derive(Deserialize)]
 pub struct PeerInput {
-    pub id: u64,
+    pub id: ClientId,
     pub cursor: Option<[f64; 2]>,
+    #[serde(default)]
+    pub dataset_id: Option<DatasetId>,
     pub mode: String,
     #[serde(default)]
     pub camera: Option<Camera>,
@@ -44,7 +48,7 @@ pub struct CursorOutput {
 
 #[derive(Serialize)]
 pub struct LabelOutput {
-    pub id: u64,
+    pub id: ClientId,
     pub sx: f64,
     pub sy: f64,
     /// World-space marker position for 3D re-projection (3D→3D, 2D→3D).
@@ -206,7 +210,39 @@ fn voxel_to_world(x: f64, y: f64, z: f64, shape: [u32; 3], model: &[f64; 16]) ->
 pub fn compute_peer_cursors(
     scene: &Scene,
     peers: &[PeerInput],
-    my_id: u64,
+    my_id: ClientId,
+    screen_w: f64,
+    screen_h: f64,
+) -> CursorOutput {
+    compute_peer_cursors_with_reference(scene, None, peers, my_id, screen_w, screen_h)
+}
+
+/// Dataset-safe cursor projection used by production callers. Geometry is
+/// derived from the explicit local reference dataset and peers whose cursor
+/// belongs to another (or unknown) coordinate space are omitted.
+pub fn compute_peer_cursors_for_dataset(
+    scene: &Scene,
+    reference_dataset_id: &DatasetId,
+    peers: &[PeerInput],
+    my_id: ClientId,
+    screen_w: f64,
+    screen_h: f64,
+) -> CursorOutput {
+    compute_peer_cursors_with_reference(
+        scene,
+        Some(reference_dataset_id),
+        peers,
+        my_id,
+        screen_w,
+        screen_h,
+    )
+}
+
+fn compute_peer_cursors_with_reference(
+    scene: &Scene,
+    reference_dataset_id: Option<&DatasetId>,
+    peers: &[PeerInput],
+    my_id: ClientId,
     screen_w: f64,
     screen_h: f64,
 ) -> CursorOutput {
@@ -215,11 +251,19 @@ pub fn compute_peer_cursors(
         Camera::Arcball(_) | Camera::Fly(_) => "arcball",
     };
 
-    let volume_shape = scene.volume_shape();
-    let inv_model_f64: Option<[f64; 16]> = scene
-        .volume_transform()
-        .map(|t| t.inv_model.map(|v| v as f64));
-    let model_f64: Option<[f64; 16]> = scene.volume_transform().map(|t| t.model.map(|v| v as f64));
+    let volume_shape = reference_dataset_id
+        .and_then(|id| scene.volume_shape_for(id))
+        .or_else(|| scene.volume_shape());
+    let inv_model_f64: Option<[f64; 16]> = reference_dataset_id
+        .map(|id| scene.dataset_inv_model_matrix(&id.0).map(|v| v as f64))
+        .or_else(|| {
+            scene
+                .volume_transform()
+                .map(|t| t.inv_model.map(|v| v as f64))
+        });
+    let model_f64: Option<[f64; 16]> = reference_dataset_id
+        .map(|id| scene.dataset_model_matrix(&id.0).map(|v| v as f64))
+        .or_else(|| scene.volume_transform().map(|t| t.model.map(|v| v as f64)));
 
     let identity: [f64; 16] = [
         1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
@@ -232,6 +276,9 @@ pub fn compute_peer_cursors(
 
     for peer in peers {
         if peer.id == my_id {
+            continue;
+        }
+        if reference_dataset_id.is_some() && peer.dataset_id.as_ref() != reference_dataset_id {
             continue;
         }
         let cursor = match peer.cursor {
@@ -521,10 +568,11 @@ mod tests {
         scene
     }
 
-    fn peer(id: u64, cursor: Option<[f64; 2]>, mode: &str) -> PeerInput {
+    fn peer(id: ClientId, cursor: Option<[f64; 2]>, mode: &str) -> PeerInput {
         PeerInput {
             id,
             cursor,
+            dataset_id: None,
             mode: mode.into(),
             camera: None,
             view_z: None,
@@ -534,7 +582,7 @@ mod tests {
 
     /// Create a PeerInput with a camera, using the serde tag as the mode string
     /// (matching how the TypeScript client builds the peer array from camera.mode).
-    fn peer_with_camera(id: u64, cursor: Option<[f64; 2]>, camera: Camera) -> PeerInput {
+    fn peer_with_camera(id: ClientId, cursor: Option<[f64; 2]>, camera: Camera) -> PeerInput {
         let mode = match &camera {
             Camera::Slice(_) => "slice",
             Camera::Arcball(_) => "arcball",
@@ -543,6 +591,7 @@ mod tests {
         PeerInput {
             id,
             cursor,
+            dataset_id: None,
             mode: mode.into(),
             camera: Some(camera),
             view_z: None,
@@ -563,6 +612,26 @@ mod tests {
             600.0,
         );
         assert!(result.gpu.is_empty());
+    }
+
+    #[test]
+    fn explicit_reference_rejects_peer_coordinates_from_another_dataset() {
+        let scene = scene_2d_with_shape([800, 600], [10, 200, 300]);
+        let reference = DatasetId("default".into());
+        let mut foreign = peer(2, Some([100.0, 75.0]), "slice");
+        foreign.dataset_id = Some(DatasetId("other".into()));
+
+        let rejected =
+            compute_peer_cursors_for_dataset(&scene, &reference, &[foreign], 1, 800.0, 600.0);
+        assert!(rejected.gpu.is_empty());
+        assert!(rejected.labels.is_empty());
+
+        let mut matching = peer(2, Some([100.0, 75.0]), "slice");
+        matching.dataset_id = Some(reference.clone());
+        let accepted =
+            compute_peer_cursors_for_dataset(&scene, &reference, &[matching], 1, 800.0, 600.0);
+        assert_eq!(accepted.gpu.len(), 1);
+        assert_eq!(accepted.labels.len(), 1);
     }
 
     #[test]

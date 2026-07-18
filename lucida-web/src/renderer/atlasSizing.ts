@@ -17,7 +17,15 @@
  * which is stored as `[Z, Y, X]`. Don't mix them.
  */
 
+import { Axis } from "../axes.ts";
 import type { DeviceLimits } from "./gpuContext.ts";
+import { computeTextureAtlasLayout } from "./atlasLayout.ts";
+
+/** WebGPU's guaranteed floor for `maxTextureDimension3D`. */
+export const WEBGPU_MIN_MAX_TEXTURE_DIMENSION_3D = 2048;
+
+/** Bytes one categorical label voxel occupies in an `r32uint` atlas. */
+export const LABEL_VOLUME_BYTES_PER_VOXEL = 4;
 
 export interface AtlasGeometry {
   slotsX: number;
@@ -88,4 +96,124 @@ export function computeAtlasGeometry(
     atlasW: slotsX * chunkX,
     atlasH: slotsY * chunkY,
   };
+}
+
+/** Ceil-divide a level extent into its chunk-grid cell count (>= 1). */
+function gridCells(extent: number, chunk: number): number {
+  return chunk > 0 ? Math.max(1, Math.ceil(extent / chunk)) : 1;
+}
+
+interface LabelBrickGrid {
+  chunkX: number;
+  chunkY: number;
+  chunkZ: number;
+  gridX: number;
+  gridY: number;
+  gridZ: number;
+  gridCellCount: number;
+}
+
+/** Pure normalized brick/grid geometry shared by sizing and byte accounting. */
+function labelBrickGrid(
+  width: number,
+  height: number,
+  depth: number,
+  chunkX: number,
+  chunkY: number,
+  chunkZ: number,
+): LabelBrickGrid {
+  const w = Math.max(1, Math.floor(width));
+  const h = Math.max(1, Math.floor(height));
+  const d = Math.max(1, Math.floor(depth));
+  const cx = Math.max(1, Math.min(Math.floor(chunkX), w));
+  const cy = Math.max(1, Math.min(Math.floor(chunkY), h));
+  const cz = Math.max(1, Math.min(Math.floor(chunkZ), d));
+  const gridX = gridCells(w, cx);
+  const gridY = gridCells(h, cy);
+  const gridZ = gridCells(d, cz);
+  return {
+    chunkX: cx,
+    chunkY: cy,
+    chunkZ: cz,
+    gridX,
+    gridY,
+    gridZ,
+    gridCellCount: gridX * gridY * gridZ,
+  };
+}
+
+/** Pure slot-grid geometry for one bricked categorical volume atlas. */
+export interface LabelVolumeSizing {
+  chunkX: number;
+  chunkY: number;
+  chunkZ: number;
+  gridX: number;
+  gridY: number;
+  gridZ: number;
+  gridCellCount: number;
+  slotsX: number;
+  slotsY: number;
+  slotsZ: number;
+  capacity: number;
+  totalSlots: number;
+  textureSize: [number, number, number];
+}
+
+/**
+ * Size a label atlas to retain a level's complete brick grid. Capacity is
+ * bounded only by the device dimension; admission owns the byte/chunk caps.
+ */
+export function computeLabelVolumeSizing(
+  width: number,
+  height: number,
+  depth: number,
+  chunkX: number,
+  chunkY: number,
+  chunkZ: number,
+  maxTextureDimension3D: number,
+): LabelVolumeSizing {
+  const grid = labelBrickGrid(
+    width,
+    height,
+    depth,
+    chunkX,
+    chunkY,
+    chunkZ,
+  );
+  const layout = computeTextureAtlasLayout(
+    [grid.chunkZ, grid.chunkY, grid.chunkX],
+    grid.gridCellCount,
+    maxTextureDimension3D,
+  );
+  return {
+    ...grid,
+    slotsX: layout.slotsX,
+    slotsY: layout.slotsY,
+    slotsZ: layout.slotsZ,
+    capacity: layout.capacity,
+    totalSlots: layout.slotsX * layout.slotsY * layout.slotsZ,
+    textureSize: layout.textureSize,
+  };
+}
+
+/**
+ * Upper-bound bytes reserved by a label level's padded rectangular slot grid.
+ * Packing at the WebGPU guaranteed floor can only be looser than a device with
+ * a larger limit, so admission never under-counts the eventual allocation.
+ */
+export function labelPaddedVolumeBytes(
+  levelShape: readonly number[],
+  chunkShape: readonly number[],
+): number {
+  const sizing = computeLabelVolumeSizing(
+    levelShape[Axis.X],
+    levelShape[Axis.Y],
+    levelShape[Axis.Z],
+    chunkShape[Axis.X],
+    chunkShape[Axis.Y],
+    chunkShape[Axis.Z],
+    WEBGPU_MIN_MAX_TEXTURE_DIMENSION_3D,
+  );
+  const [texW, texH, texD] = sizing.textureSize;
+  return texW * texH * texD * LABEL_VOLUME_BYTES_PER_VOXEL;
 }

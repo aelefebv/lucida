@@ -5,7 +5,7 @@ description: "A retina backing store doubles the pixels the GPU fills per frame;
 tags: [lucida, gotcha]
 source_path: wiki/gotchas/retina-dpr2-render-verification.md
 created: 2026-07-08
-modified: 2026-07-08
+modified: 2026-07-16
 ---
 
 # Verify Rendering at devicePixelRatio 2, Not Just 1
@@ -47,6 +47,15 @@ deviceScaleFactor: 2 })`; via raw CDP: `Emulation.setDeviceMetricsOverride`
 with `deviceScaleFactor: 2`. Confirm a *content* frame actually presents (pixel
 sample the main canvas, or check the frame counter advances) — a green unit
 suite and a "loads without error" check both pass while the screen is black.
+
+This is executable policy now, not only a review reminder. The tryout web
+surface launches isolated DPR 1 and DPR 2 browser contexts against the
+production SPA, requires an advancing presented-frame counter and nonblank
+canvas pixels in both, and retains per-arm page/canvas screenshots plus console
+logs. CI generates a real three-channel `uint8` OME-Zarr fixture and runs one
+server through the maintained CLI, Python, and web clients. The browser arm also
+checks the reported dtype, channel count, selected channel, and contrast window;
+device loss, a DPR-only black frame, or content-metadata drift fails the job.
 
 ## Interactions
 

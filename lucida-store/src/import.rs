@@ -7,17 +7,20 @@ use std::sync::Arc;
 
 use futures_util::stream::StreamExt;
 use object_store::ObjectStore;
-use object_store::path::Path;
 
 use lucida_content::normalize::{classify_axes, normalize_to_5d};
+use lucida_content::url::SourceRevision;
 use lucida_content::*;
 use lucida_protocol::*;
 
 use crate::backend::StoreError;
+use crate::cache::SharedObjectCache;
 use crate::coarse::{SourceCoarseConfig, select_source_coarse_level};
-use crate::codec::parse_codec_chain;
+use crate::codec::{StorageCompression, parse_codec_chain};
 use crate::import_types::*;
+use crate::label_discovery::*;
 use crate::layout::compute_chunk_byte_layout;
+use crate::metadata::MetadataReader;
 use crate::parse;
 
 /// Import a dataset from an OME-Zarr store.
@@ -33,35 +36,105 @@ pub async fn import_dataset(
     // read exactly once, here at the entry point, and threaded down as a
     // plain argument so every inner path is a pure function of its inputs.
     let force_exhaustive = exhaustive_label_discovery_forced();
-    import_dataset_with_label_discovery(store, id, name, force_exhaustive).await
+    let metadata = MetadataReader::standalone(Arc::clone(store));
+    import_dataset_with_reader(
+        &metadata,
+        id,
+        name,
+        CollectionAdmissionPolicy::production(force_exhaustive),
+    )
+    .await
+}
+
+/// Import through the server's process-wide source admission budget. Metadata
+/// receives an ephemeral namespace: reads within this import coalesce and own
+/// resident reservations, while later imports always re-read a mutable source
+/// to establish its current semantic revision.
+pub async fn import_dataset_with_shared_cache(
+    store: &Arc<dyn ObjectStore>,
+    id: &str,
+    name: &str,
+    shared_cache: Arc<SharedObjectCache>,
+) -> Result<ImportResult, StoreError> {
+    let force_exhaustive = exhaustive_label_discovery_forced();
+    let metadata = MetadataReader::with_shared_cache(Arc::clone(store), shared_cache);
+    import_dataset_with_reader(
+        &metadata,
+        id,
+        name,
+        CollectionAdmissionPolicy::production(force_exhaustive),
+    )
+    .await
 }
 
 /// [`import_dataset`] with the exhaustive-label-discovery decision passed
 /// explicitly instead of read from the environment.
+#[cfg(test)]
 async fn import_dataset_with_label_discovery(
     store: &Arc<dyn ObjectStore>,
     id: &str,
     name: &str,
     force_exhaustive_label_discovery: bool,
 ) -> Result<ImportResult, StoreError> {
-    let root_json = parse::read_zarr_json(store, "zarr.json").await?;
+    let metadata = MetadataReader::standalone(Arc::clone(store));
+    import_dataset_with_reader(
+        &metadata,
+        id,
+        name,
+        CollectionAdmissionPolicy::production(force_exhaustive_label_discovery),
+    )
+    .await
+}
+
+/// Collection-wide resource and discovery policy captured once at the import
+/// boundary. Production imports always use the documented hard limits; tests
+/// can inject smaller limits to prove that the same running budget is shared
+/// across tile boundaries without constructing tens of thousands of labels.
+#[derive(Debug, Clone, Copy)]
+struct CollectionAdmissionPolicy {
+    force_exhaustive_label_discovery: bool,
+    max_labels: usize,
+    max_label_colors: usize,
+}
+
+impl CollectionAdmissionPolicy {
+    fn production(force_exhaustive_label_discovery: bool) -> Self {
+        Self {
+            force_exhaustive_label_discovery,
+            max_labels: MAX_LABELS_PER_DATASET,
+            max_label_colors: MAX_LABEL_COLORS_PER_DATASET,
+        }
+    }
+}
+
+#[cfg(test)]
+async fn import_dataset_with_admission_policy(
+    store: &Arc<dyn ObjectStore>,
+    id: &str,
+    name: &str,
+    policy: CollectionAdmissionPolicy,
+) -> Result<ImportResult, StoreError> {
+    let metadata = MetadataReader::standalone(Arc::clone(store));
+    import_dataset_with_reader(&metadata, id, name, policy).await
+}
+
+async fn import_dataset_with_reader(
+    metadata: &MetadataReader,
+    id: &str,
+    name: &str,
+    policy: CollectionAdmissionPolicy,
+) -> Result<ImportResult, StoreError> {
+    let root_json = parse::read_zarr_json(metadata, "zarr.json").await?;
 
     if root_json.pointer("/attributes/ome/plate").is_some() {
-        import_collection(
-            store,
-            id,
-            name,
-            &root_json,
-            force_exhaustive_label_discovery,
-        )
-        .await
+        import_collection(metadata, id, name, &root_json, policy).await
     } else {
-        import_single_image(store, id, name, &root_json).await
+        import_single_image(metadata, id, name, &root_json).await
     }
 }
 
 async fn import_single_image(
-    store: &Arc<dyn ObjectStore>,
+    metadata: &MetadataReader,
     id: &str,
     name: &str,
     root_json: &serde_json::Value,
@@ -73,7 +146,7 @@ async fn import_single_image(
     // Channel display names from the OME omero block (generic; optional).
     let channel_infos = parse::parse_omero_channels(root_json);
 
-    let level_metas = parse::read_level_metas(store, "", &level_entries).await?;
+    let level_metas = parse::read_level_metas(metadata, "", &level_entries).await?;
 
     let data_type = parse_data_type(&level_metas[0].data_type)?;
     let layout = classify_axes(&axes_names, &level_metas[0].shape);
@@ -123,17 +196,20 @@ async fn import_single_image(
     // possibly-incomplete discovery never passes silently.
     let mut warnings: Vec<ImportWarning> = Vec::new();
     let mut label_budget = LabelBudget::new();
-    let probed = probe_labels_for_image(store, "").await;
+    let probed = probe_labels_for_image(metadata, "").await;
     if probed.index == LabelIndexState::Unusable {
-        warnings.push(unusable_label_index_warning(
-            id,
-            1,
-            &[probed.labels_prefix.as_str()],
-        ));
+        warnings.push(unusable_label_index_warning(id, 1, &["labels".to_string()]));
     }
-    let labels =
-        build_labels_within_budget(&mut label_budget, store, id, &image_id, &entity_id, probed)
-            .await;
+    let labels = build_labels_within_budget(
+        &mut label_budget,
+        metadata,
+        id,
+        &image_id,
+        &entity_id,
+        "labels",
+        probed,
+    )
+    .await;
 
     let default_layout_id = LayoutId("source".to_string());
     let source_layout = LayoutSpec {
@@ -177,110 +253,25 @@ async fn import_single_image(
         images: binding_images,
     };
 
-    Ok(ImportResult {
-        manifest,
-        fetch,
-        binding_seed,
-        warnings,
-    })
+    finish_import(manifest, fetch, binding_seed, warnings, id)
 }
 
 /// Maximum number of metadata object-store GETs kept in flight while importing
 /// a collection. Bounds fan-out so a wide collection opens quickly without self-throttling
 /// the backing store.
-const METADATA_FETCH_CONCURRENCY: usize = 32;
+pub(super) const METADATA_FETCH_CONCURRENCY: usize = 32;
 
-/// Sampled label discovery engages only when it would skip at least this
-/// many per-tile probes; otherwise the whole collection is probed
-/// exhaustively. Sampling probes each group's first and last tile and only
-/// probes a group's remaining tiles when a sampled tile signals labels, so
-/// label-discovery metadata traffic scales with the number of groups (plus
-/// labeled tiles) rather than with total tiles. Without this, a wide remote
-/// collection pays one round-trip per tile — nearly always a 404 — and that
-/// fan-out dominates the whole open.
-///
-/// Measuring the threshold against the savings (total tiles minus sampled
-/// tiles) rather than a flat tile count means a collection only slightly
-/// wider than its own sample keeps complete discovery: curtailing it would
-/// save fewer than this many reads, which is not worth the completeness
-/// loss.
-///
-/// Trade-off sampling accepts: a group whose labels sit only on tiles that
-/// are neither first nor last — with clean misses on both sampled tiles — is
-/// never expanded, so those labels go undiscovered. Whenever any tile goes
-/// unprobed the import records an [`ImportWarning`] naming
-/// [`EXHAUSTIVE_LABEL_DISCOVERY_ENV`], which restores full per-tile probing.
-const LABEL_PROBE_SAMPLING_MIN_SKIPPED: usize = 64;
-
-/// Environment variable that forces per-tile label probing on collections of
-/// every size (one metadata read per tile, full discovery). Any value other
-/// than empty or `"0"` enables it. Read once per import, at the
-/// [`import_dataset`] entry point.
-const EXHAUSTIVE_LABEL_DISCOVERY_ENV: &str = "LUCIDA_EXHAUSTIVE_LABEL_DISCOVERY";
-
-/// Per-import cap on group expansions triggered by an *unusable* sampled
-/// labels index — one whose read failed short of a clean NotFound, or whose
-/// content held no usable names. A usable index that actually listed names
-/// is never subject to this cap: real labels always expand their group.
-/// Only expansions that would add reads are charged: a group whose samples
-/// already cover all of its tiles is fully probed as-is, so its expansion
-/// costs nothing and consumes no allowance.
-///
-/// Trade-off: a genuinely labeled group hiding behind a broken index is
-/// probed in full only while this budget lasts (charged in declared group
-/// order); past it, that group's labels go undiscovered until the operator
-/// sets [`EXHAUSTIVE_LABEL_DISCOVERY_ENV`], which the aggregated
-/// unusable-index warning names. The cap is kept single-digit because many
-/// suspect groups at once almost always means one store-wide condition —
-/// throttling, timeouts, or a permission configuration in which missing keys
-/// surface as errors rather than NotFound — where every group looks
-/// label-suspect simultaneously and uncapped expansion would recreate the
-/// per-tile fan-out sampling exists to avoid, aimed at a store that is
-/// already struggling. Four keeps discovery complete for a real dataset with
-/// a handful of damaged indexes while bounding worst-case anomaly-triggered
-/// traffic to four group-widths of extra reads on top of the samples.
-const MAX_UNUSABLE_GROUP_EXPANSIONS: usize = 4;
-
-/// Number of example paths named in the aggregated unusable-index warning
-/// message: enough to locate the pattern without flooding the message when a
-/// store-wide failure makes every index unusable.
-const UNUSABLE_INDEX_WARNING_EXAMPLES: usize = 3;
-
-/// Whether [`EXHAUSTIVE_LABEL_DISCOVERY_ENV`] requests exhaustive discovery.
-fn exhaustive_label_discovery_forced() -> bool {
-    std::env::var(EXHAUSTIVE_LABEL_DISCOVERY_ENV)
-        .map(|v| !v.is_empty() && v != "0")
-        .unwrap_or(false)
-}
-
-/// Whether every tile of a collection should be probed for labels, given the
-/// total tile count, the number of tiles sampling would probe, and the
-/// operator override. Exhaustive unless sampling skips at least
-/// [`LABEL_PROBE_SAMPLING_MIN_SKIPPED`] tiles.
-fn use_exhaustive_label_probes(
-    total_tiles: usize,
-    sample_count: usize,
-    force_exhaustive: bool,
-) -> bool {
-    force_exhaustive || total_tiles < sample_count.saturating_add(LABEL_PROBE_SAMPLING_MIN_SKIPPED)
-}
-
-/// The tile indices sampled per group when label discovery is not exhaustive:
-/// each group's first and last tile. `group_spans` are per-group index ranges
-/// into the flattened tile list, in declared group order.
-fn sample_probe_indices(group_spans: &[std::ops::Range<usize>]) -> Vec<usize> {
-    let mut indices = Vec::with_capacity(group_spans.len() * 2);
-    for span in group_spans {
-        if span.is_empty() {
-            continue;
-        }
-        indices.push(span.start);
-        if span.end - span.start > 1 {
-            indices.push(span.end - 1);
-        }
-    }
-    indices
-}
+/// Import cardinality is admitted before allocating request/result fan-out.
+/// These ceilings are intentionally generous relative to ordinary collections
+/// while keeping adversarial metadata finite in memory, I/O, and CPU cost.
+const MAX_COLLECTION_AXIS_LABELS: usize = 1 << 16;
+const MAX_COLLECTION_GROUPS: usize = 1 << 16;
+const MAX_TILES_PER_GROUP: usize = 1 << 12;
+const MAX_COLLECTION_TILES: usize = 1_000_000;
+const MAX_COLLECTION_PATH_BYTES: usize = 4096;
+const MAX_COLLECTION_LABEL_BYTES: usize = 1024;
+const MAX_TILE_TRANSFORMS: usize = 32;
+const MAX_TRANSLATION_COMPONENTS: usize = 32;
 
 /// One group's parsed metadata: its collection path, grid coordinates, and the tiles
 /// it declares. Produced concurrently, then assembled in declared order.
@@ -329,139 +320,373 @@ fn skipped_group_warning(target: &str, reason: String) -> ImportWarning {
     }
 }
 
-/// Number of example tile prefixes named in the aggregated
-/// unreadable-tile-geometry warning message: enough to locate the pattern
-/// without flooding the message when a store-wide condition makes many
-/// candidate representatives unreadable at once.
-const UNREADABLE_GEOMETRY_WARNING_EXAMPLES: usize = 3;
-
-/// One aggregated [`ImportWarning`] covering every group representative tile
-/// that could not be read while selecting the collection's shared geometry.
-/// Aggregated by design — a store-wide condition (throttling, timeouts, or a
-/// permission configuration that answers a missing key with an error rather
-/// than NotFound) can make many representatives unreadable at once, and one
-/// warning per candidate would drown the open result. Only emitted once the
-/// collection has opened over a later readable representative; `examples` are
-/// the passed-over tile prefixes, of which only the first
-/// [`UNREADABLE_GEOMETRY_WARNING_EXAMPLES`] are named.
-fn unreadable_tile_geometry_warning(
-    dataset_id: &str,
-    unreadable: usize,
-    examples: &[&str],
-) -> ImportWarning {
-    let noun = if unreadable == 1 { "tile" } else { "tiles" };
-    let examples = examples
-        .iter()
-        .take(UNREADABLE_GEOMETRY_WARNING_EXAMPLES)
-        .map(|prefix| format!("{prefix:?}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    ImportWarning {
-        kind: ImportWarningKind::UnreadableTileGeometry,
-        target: dataset_id.to_string(),
-        message: format!(
-            "{unreadable} representative {noun} could not be read for the \
-             collection's shared geometry (e.g. {examples}); the collection \
-             opened over the next readable tile's geometry. A store permission \
-             or throttling issue may be the cause."
-        ),
-    }
+fn is_safe_collection_relative_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= MAX_COLLECTION_PATH_BYTES
+        && !path.starts_with('/')
+        && !path.contains(['\\', '\0'])
+        && path
+            .split('/')
+            .all(|component| !component.is_empty() && !matches!(component, "." | ".."))
 }
 
-/// The shared multiscale geometry every tile of a collection inherits, learned
-/// by reading one representative tile. OME-Zarr collections require all tiles to
-/// share one multiscale, so a single readable tile's axes, levels, geometry, and
-/// channel metadata apply to every tile.
+/// Parse one positional label axis without ever compacting malformed entries.
+///
+/// Row and column indices in `ome.plate.wells` refer to these arrays by
+/// position. Silently dropping an entry would therefore relabel every later
+/// group, which is worse than rejecting the malformed collection at its
+/// admission boundary.
+fn parse_collection_axis_labels(
+    collection_json: &serde_json::Value,
+    field: &str,
+) -> Result<Vec<String>, StoreError> {
+    let values = collection_json
+        .get(field)
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| StoreError::Schema(format!("ome.plate.{field} must be an array")))?;
+    if values.len() > MAX_COLLECTION_AXIS_LABELS {
+        return Err(StoreError::Bounds(format!(
+            "ome.plate.{field} declares {} entries; limit is {MAX_COLLECTION_AXIS_LABELS}",
+            values.len()
+        )));
+    }
+
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            value
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .filter(|name| {
+                    !name.is_empty()
+                        && name.len() <= MAX_COLLECTION_LABEL_BYTES
+                        && !name.contains('\0')
+                })
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    StoreError::Schema(format!("ome.plate.{field}[{index}].name must be a string"))
+                })
+        })
+        .collect()
+}
+
+/// Parse a tile's optional translation without dropping malformed components.
+/// A translation is positional metadata: removing one non-numeric value would
+/// shift every following axis and silently place the tile at the wrong point.
+fn parse_tile_translation(
+    image_entry: &serde_json::Value,
+    target: &str,
+    image_index: usize,
+) -> Result<Option<Vec<f64>>, ImportWarning> {
+    let Some(raw_transforms) = image_entry.get("coordinateTransformations") else {
+        return Ok(None);
+    };
+    let Some(transforms) = raw_transforms.as_array() else {
+        return Err(skipped_group_warning(
+            target,
+            format!("ome.well.images[{image_index}].coordinateTransformations must be an array"),
+        ));
+    };
+    if transforms.len() > MAX_TILE_TRANSFORMS {
+        return Err(skipped_group_warning(
+            target,
+            format!(
+                "ome.well.images[{image_index}].coordinateTransformations declares {} entries; limit is {MAX_TILE_TRANSFORMS}",
+                transforms.len()
+            ),
+        ));
+    }
+
+    let mut translation = None;
+    for (transform_index, transform) in transforms.iter().enumerate() {
+        let Some(transform_type) = transform.get("type").and_then(|value| value.as_str()) else {
+            return Err(skipped_group_warning(
+                target,
+                format!(
+                    "ome.well.images[{image_index}].coordinateTransformations[{transform_index}].type must be a string"
+                ),
+            ));
+        };
+        if transform_type != "translation" {
+            continue;
+        }
+        if translation.is_some() {
+            return Err(skipped_group_warning(
+                target,
+                format!(
+                    "ome.well.images[{image_index}].coordinateTransformations contains more than one translation"
+                ),
+            ));
+        }
+
+        let path = format!(
+            "ome.well.images[{image_index}].coordinateTransformations[{transform_index}].translation"
+        );
+        let Some(values) = transform
+            .get("translation")
+            .and_then(serde_json::Value::as_array)
+        else {
+            return Err(skipped_group_warning(
+                target,
+                format!("{path} must be an array"),
+            ));
+        };
+        if values.len() > MAX_TRANSLATION_COMPONENTS {
+            return Err(skipped_group_warning(
+                target,
+                format!(
+                    "{path} declares {} entries; limit is {MAX_TRANSLATION_COMPONENTS}",
+                    values.len()
+                ),
+            ));
+        }
+        let mut parsed = Vec::with_capacity(values.len());
+        for (value_index, value) in values.iter().enumerate() {
+            let Some(component) = value.as_f64().filter(|component| component.is_finite()) else {
+                return Err(skipped_group_warning(
+                    target,
+                    format!("{path}[{value_index}] must be a finite number"),
+                ));
+            };
+            parsed.push(component);
+        }
+        translation = Some(parsed);
+    }
+
+    Ok(translation)
+}
+
+/// Maximum number of tile identities included in one collection-admission
+/// error. The importer still validates every tile and reports the exact count;
+/// examples are bounded so a store-wide outage cannot create an unbounded
+/// diagnostic string.
+const COLLECTION_ADMISSION_ERROR_EXAMPLES: usize = 3;
+
+/// The shared multiscale geometry every tile of a collection inherits after
+/// strict admission has proved that every declared tile carries the same
+/// structural metadata.
 struct SharedTileGeometry {
     axes_names: Vec<String>,
     level_entries: Vec<parse::LevelEntry>,
     channel_infos: Vec<ChannelInfo>,
-    level_metas: Vec<parse::ArrayMeta>,
+    level_metas: Vec<parse::ParsedArrayMeta>,
 }
 
-/// Read and parse one tile's shared multiscale geometry. Any read or parse
-/// failure — an unreadable/malformed `zarr.json` or unreadable level-array
-/// metadata — is returned as an error so the caller can fall forward to the next
-/// candidate tile instead of aborting the whole collection.
+/// The structural projection that must match across every tile before the
+/// representative geometry can be cloned into per-tile manifests and binding
+/// seeds. Codec JSON is normalized to the typed runtime codec so harmless
+/// spelling aliases compare equal while unsupported chains fail admission.
+#[derive(Debug, PartialEq, Eq)]
+struct CollectionTileFingerprint {
+    axes_names: Vec<String>,
+    levels: Vec<CollectionLevelFingerprint>,
+    channel_infos: Vec<ChannelInfo>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CollectionLevelFingerprint {
+    path: String,
+    scale_bits: [u64; 5],
+    shape: Vec<u64>,
+    data_type: DataType,
+    chunk_shape: Vec<u64>,
+    compression: StorageCompression,
+}
+
+impl CollectionTileFingerprint {
+    /// Return the first field whose value would make cloning the baseline
+    /// geometry or binding incorrect. The stable field path is used directly
+    /// in the admission diagnostic and in regression tests.
+    fn first_mismatch(&self, other: &Self) -> Option<String> {
+        if self.axes_names != other.axes_names {
+            return Some("axes".to_string());
+        }
+        if self.levels.len() != other.levels.len() {
+            return Some("levels".to_string());
+        }
+        for (index, (expected, actual)) in self.levels.iter().zip(&other.levels).enumerate() {
+            let prefix = format!("levels[{index}]");
+            if expected.path != actual.path {
+                return Some(format!("{prefix}.path"));
+            }
+            if expected.scale_bits != actual.scale_bits {
+                return Some(format!("{prefix}.scale"));
+            }
+            if expected.shape != actual.shape {
+                return Some(format!("{prefix}.shape"));
+            }
+            if expected.data_type != actual.data_type {
+                return Some(format!("{prefix}.data_type"));
+            }
+            if expected.chunk_shape != actual.chunk_shape {
+                return Some(format!("{prefix}.chunk_grid.configuration.chunk_shape"));
+            }
+            if expected.compression != actual.compression {
+                return Some(format!("{prefix}.codecs"));
+            }
+        }
+        if self.channel_infos != other.channel_infos {
+            return Some("omero.channels".to_string());
+        }
+        None
+    }
+}
+
+/// Read, parse, and run the ordinary per-level admission checks for one tile.
+/// This is deliberately the same boundary used for a single image: collection
+/// validation must not invent a weaker metadata path for nonrepresentative
+/// tiles.
 async fn read_tile_geometry(
-    store: &Arc<dyn ObjectStore>,
+    metadata: &MetadataReader,
     tile_prefix: &str,
-) -> Result<SharedTileGeometry, StoreError> {
-    let tile_json = parse::read_zarr_json(store, &format!("{tile_prefix}/zarr.json")).await?;
+) -> Result<(SharedTileGeometry, CollectionTileFingerprint), StoreError> {
+    let tile_json = parse::read_zarr_json(metadata, &format!("{tile_prefix}/zarr.json")).await?;
     let parsed = parse::parse_multiscales(&tile_json, &format!("{tile_prefix}: "))?;
     // Channel display names from the tile's omero block (generic; optional).
     let channel_infos = parse::parse_omero_channels(&tile_json);
-    let level_metas = parse::read_level_metas(store, tile_prefix, &parsed.level_entries).await?;
-    Ok(SharedTileGeometry {
+    let level_metas = parse::read_level_metas(metadata, tile_prefix, &parsed.level_entries).await?;
+    let geometry = SharedTileGeometry {
         axes_names: parsed.axes_names,
         level_entries: parsed.level_entries,
         channel_infos,
         level_metas,
+    };
+    let fingerprint = collection_tile_fingerprint(&geometry)?;
+    Ok((geometry, fingerprint))
+}
+
+fn collection_tile_fingerprint(
+    geometry: &SharedTileGeometry,
+) -> Result<CollectionTileFingerprint, StoreError> {
+    let first = geometry
+        .level_metas
+        .first()
+        .ok_or_else(|| StoreError::Bounds("multiscale has no levels".to_string()))?;
+    let data_type = parse_data_type(&first.data_type)?;
+    let layout = classify_axes(&geometry.axes_names, &first.shape);
+
+    // These calls are intentionally not just comparisons: every tile must
+    // independently pass raw rank/shape/layout/codec/byte-cap admission.
+    build_level_geometries(
+        &geometry.level_entries,
+        &geometry.level_metas,
+        &geometry.axes_names,
+    )?;
+    let bindings = build_level_binding_infos(
+        &geometry.axes_names,
+        &geometry.level_metas,
+        data_type_size(data_type),
+        &layout.pinned,
+    )?;
+
+    let levels = geometry
+        .level_entries
+        .iter()
+        .zip(&geometry.level_metas)
+        .zip(bindings)
+        .map(|((entry, meta), binding)| CollectionLevelFingerprint {
+            path: entry.path.clone(),
+            scale_bits: entry.scale.map(f64::to_bits),
+            shape: meta.shape.clone(),
+            data_type,
+            chunk_shape: meta.chunk_grid.configuration.chunk_shape.clone(),
+            compression: binding.compression,
+        })
+        .collect();
+    Ok(CollectionTileFingerprint {
+        axes_names: geometry.axes_names.clone(),
+        levels,
+        channel_infos: geometry.channel_infos.clone(),
     })
 }
 
-/// Select a collection's shared multiscale geometry from candidate
-/// representative tiles — one per group, in declared order.
-///
-/// Because every tile of an OME-Zarr collection shares one multiscale, a
-/// single readable representative anywhere defines the geometry for all, so the
-/// search never needs to look past one tile per group: the candidate set is
-/// O(groups), the same cost tier as parsing the groups themselves, never
-/// O(total tiles).
-///
-/// The first candidate is read alone, so a healthy collection reads exactly one
-/// tile before any fan-out. Only when the leading representative is unreadable
-/// are the remaining candidates fanned out with bounded concurrency
-/// ([`METADATA_FETCH_CONCURRENCY`]) and reduced in declared order, taking the
-/// first whose geometry reads. This keeps a corrupt leading representative — or
-/// a whole corrupt leading group — falling forward concurrently instead of one
-/// serial round-trip per candidate, even under a store-wide condition that
-/// makes every read fail.
-///
-/// Returns the chosen geometry (`None` when no candidate is readable) together
-/// with the prefixes of the unreadable candidates that were passed over, in
-/// declared order, so the caller can aggregate them into a single warning.
-///
-/// Candidates are taken by owned value so the concurrent futures — and the
-/// stream that drives them — borrow nothing from the caller, keeping the
-/// resulting future straightforwardly `Send`.
-async fn select_shared_tile_geometry(
-    store: &Arc<dyn ObjectStore>,
-    candidate_prefixes: Vec<String>,
-) -> (Option<SharedTileGeometry>, Vec<String>) {
-    let mut unreadable: Vec<String> = Vec::new();
-    let mut candidates = candidate_prefixes.into_iter();
-
-    // The leading candidate is read on its own so the common case — a healthy
-    // collection — costs exactly one representative read.
-    let Some(first) = candidates.next() else {
-        return (None, unreadable);
-    };
-    match read_tile_geometry(store, &first).await {
-        Ok(geometry) => return (Some(geometry), unreadable),
-        Err(_) => unreadable.push(first),
+/// Strictly admit every collection tile with bounded metadata concurrency.
+/// A collection's homogeneous-multiscale rule is an invariant we verify, not
+/// an assumption: unreadable, malformed, or structurally divergent interior
+/// tiles fail before any binding is constructed. The first readable tile in
+/// declared order is retained only as the canonical value after all peers have
+/// matched it.
+async fn admit_collection_tile_geometry(
+    metadata: &MetadataReader,
+    tile_prefixes: &[String],
+) -> Result<SharedTileGeometry, StoreError> {
+    if tile_prefixes.is_empty() {
+        return Err(StoreError::Schema(
+            "collection has no declared tiles".to_string(),
+        ));
     }
 
-    // Reached only when the leading representative is unreadable. Fan the rest
-    // out with bounded concurrency and consume the results in declared order,
-    // so the first readable candidate wins while reads overlap rather than
-    // serialize. Returning early drops the stream, cancelling the reads still
-    // in flight past the chosen tile.
-    let mut stream = futures_util::stream::iter(candidates.map(|prefix| {
-        let store = store.clone();
+    let mut stream = futures_util::stream::iter(tile_prefixes.iter().cloned().map(|prefix| {
+        let metadata = metadata.clone();
         async move {
-            let outcome = read_tile_geometry(&store, &prefix).await;
+            let outcome = read_tile_geometry(&metadata, &prefix)
+                .await
+                .map_err(|error| error.with_context(format!("tile {prefix:?}")));
             (prefix, outcome)
         }
     }))
     .buffered(METADATA_FETCH_CONCURRENCY);
+
+    let mut baseline: Option<(String, SharedTileGeometry, CollectionTileFingerprint)> = None;
+    let mut first_failure: Option<StoreError> = None;
+    let mut failure_count = 0usize;
+    let mut failure_examples = Vec::new();
+    let mut divergence_count = 0usize;
+    let mut divergence_examples = Vec::new();
+
     while let Some((prefix, outcome)) = stream.next().await {
         match outcome {
-            Ok(geometry) => return (Some(geometry), unreadable),
-            Err(_) => unreadable.push(prefix),
+            Ok((geometry, fingerprint)) => {
+                if let Some((_, _, expected)) = &baseline {
+                    if let Some(field) = expected.first_mismatch(&fingerprint) {
+                        divergence_count += 1;
+                        if divergence_examples.len() < COLLECTION_ADMISSION_ERROR_EXAMPLES {
+                            divergence_examples.push(format!("{prefix:?} at {field}"));
+                        }
+                    }
+                } else {
+                    baseline = Some((prefix, geometry, fingerprint));
+                }
+            }
+            Err(error) => {
+                failure_count += 1;
+                if failure_examples.len() < COLLECTION_ADMISSION_ERROR_EXAMPLES {
+                    failure_examples.push(format!("{prefix:?}"));
+                }
+                first_failure.get_or_insert(error);
+            }
         }
     }
-    (None, unreadable)
+
+    if let Some(error) = first_failure {
+        let noun = if failure_count == 1 { "tile" } else { "tiles" };
+        return Err(error.with_context(format!(
+            "strict collection admission rejected {failure_count} unreadable or invalid {noun} \
+             (examples: {}); every declared tile must have readable, valid metadata",
+            failure_examples.join(", ")
+        )));
+    }
+
+    let Some((baseline_prefix, geometry, _)) = baseline else {
+        return Err(StoreError::Schema(
+            "collection has no tile with readable geometry".to_string(),
+        ));
+    };
+    if divergence_count > 0 {
+        let noun = if divergence_count == 1 {
+            "tile"
+        } else {
+            "tiles"
+        };
+        return Err(StoreError::Schema(format!(
+            "strict collection admission found {divergence_count} divergent {noun} relative to \
+             baseline {baseline_prefix:?} (examples: {}); axes, levels, paths, transforms, \
+             shapes, dtypes, chunking, codecs, and channel metadata must be homogeneous",
+            divergence_examples.join(", ")
+        )));
+    }
+    Ok(geometry)
 }
 
 /// Fetch and parse a single group's `zarr.json`, extracting its tiles.
@@ -473,7 +698,7 @@ async fn select_shared_tile_geometry(
 /// `target` is the group's collection path used in any warning, computed by the caller
 /// so this future owns all of its inputs.
 async fn parse_one_group(
-    store: Arc<dyn ObjectStore>,
+    metadata: MetadataReader,
     path: Option<String>,
     row_index: u32,
     column_index: u32,
@@ -485,32 +710,20 @@ async fn parse_one_group(
             "collection entry is missing 'path'".to_string(),
         ));
     };
+    if !is_safe_collection_relative_path(&group_path) {
+        return Err(skipped_group_warning(
+            &target,
+            "collection path is not a safe relative path".to_string(),
+        ));
+    }
 
-    let group_meta_path = Path::from(format!("{group_path}/zarr.json"));
-    let group_bytes = match store.get(&group_meta_path).await {
-        Ok(response) => match response.bytes().await {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                return Err(skipped_group_warning(
-                    &target,
-                    format!("group metadata is unreadable: {e}"),
-                ));
-            }
-        },
-        Err(e) => {
-            return Err(skipped_group_warning(
-                &target,
-                format!("group metadata is unreadable: {e}"),
-            ));
-        }
-    };
-
-    let group_json: serde_json::Value = match serde_json::from_slice(&group_bytes) {
+    let group_meta_path = format!("{group_path}/zarr.json");
+    let group_json = match metadata.read_json_value(&group_meta_path).await {
         Ok(value) => value,
         Err(e) => {
             return Err(skipped_group_warning(
                 &target,
-                format!("group metadata is not valid JSON: {e}"),
+                format!("group metadata is unusable: {e}"),
             ));
         }
     };
@@ -534,30 +747,31 @@ async fn parse_one_group(
             "group metadata's ome.well.images list is empty".to_string(),
         ));
     }
+    if images.len() > MAX_TILES_PER_GROUP {
+        return Err(skipped_group_warning(
+            &target,
+            format!(
+                "group metadata declares {} tiles; limit is {MAX_TILES_PER_GROUP}",
+                images.len()
+            ),
+        ));
+    }
 
-    let mut tiles: Vec<TileParsed> = Vec::new();
-    for image_entry in images {
+    let mut tiles: Vec<TileParsed> = Vec::with_capacity(images.len());
+    for (image_index, image_entry) in images.iter().enumerate() {
         let tile_path = image_entry
             .get("path")
             .and_then(|v| v.as_str())
-            .unwrap_or("0")
-            .to_string();
+            .unwrap_or("0");
+        if !is_safe_collection_relative_path(tile_path) {
+            return Err(skipped_group_warning(
+                &target,
+                format!("ome.well.images[{image_index}].path is not a safe relative path"),
+            ));
+        }
         let store_prefix = format!("{group_path}/{tile_path}");
 
-        let translation = image_entry
-            .get("coordinateTransformations")
-            .and_then(|v| v.as_array())
-            .and_then(|transforms| {
-                transforms.iter().find_map(|ct| {
-                    if ct.get("type").and_then(|v| v.as_str()) == Some("translation") {
-                        ct.get("translation")
-                            .and_then(|v| v.as_array())
-                            .map(|arr| arr.iter().filter_map(|v| v.as_f64()).collect())
-                    } else {
-                        None
-                    }
-                })
-            });
+        let translation = parse_tile_translation(image_entry, &target, image_index)?;
 
         tiles.push(TileParsed {
             store_prefix,
@@ -574,41 +788,30 @@ async fn parse_one_group(
 }
 
 async fn import_collection(
-    store: &Arc<dyn ObjectStore>,
+    metadata: &MetadataReader,
     id: &str,
     name: &str,
     root_json: &serde_json::Value,
-    force_exhaustive_label_discovery: bool,
+    policy: CollectionAdmissionPolicy,
 ) -> Result<ImportResult, StoreError> {
     let collection_json = root_json
         .pointer("/attributes/ome/plate")
-        .ok_or_else(|| StoreError::Metadata("no ome.plate in root zarr.json".into()))?;
+        .ok_or_else(|| StoreError::Schema("no ome.plate in root zarr.json".into()))?;
 
     // Parse rows and columns.
-    let rows: Vec<String> = collection_json
-        .get("rows")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|r| r.get("name").and_then(|n| n.as_str()).map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let columns: Vec<String> = collection_json
-        .get("columns")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|c| c.get("name").and_then(|n| n.as_str()).map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
+    let rows = parse_collection_axis_labels(collection_json, "rows")?;
+    let columns = parse_collection_axis_labels(collection_json, "columns")?;
 
     let groups_json = collection_json
         .get("wells")
         .and_then(|v| v.as_array())
-        .ok_or_else(|| StoreError::Metadata("collection has no groups array".into()))?;
+        .ok_or_else(|| StoreError::Schema("collection has no groups array".into()))?;
+    if groups_json.is_empty() || groups_json.len() > MAX_COLLECTION_GROUPS {
+        return Err(StoreError::Bounds(format!(
+            "collection group count {} is outside 1..={MAX_COLLECTION_GROUPS}",
+            groups_json.len()
+        )));
+    }
 
     // Fetch every group's `zarr.json` with bounded concurrency, keyed by its
     // declared position, then re-order the results so downstream assembly runs
@@ -657,10 +860,10 @@ async fn import_collection(
             (0..requests.len()).map(|_| None).collect();
         let mut stream =
             futures_util::stream::iter(requests.into_iter().enumerate().map(|(index, req)| {
-                let store = store.clone();
+                let metadata = metadata.clone();
                 async move {
                     let outcome = parse_one_group(
-                        store,
+                        metadata,
                         req.path,
                         req.row_index,
                         req.column_index,
@@ -671,7 +874,18 @@ async fn import_collection(
                 }
             }))
             .buffer_unordered(METADATA_FETCH_CONCURRENCY);
+        let mut admitted_tiles = 0usize;
         while let Some((index, outcome)) = stream.next().await {
+            if let Ok(group) = &outcome {
+                admitted_tiles = admitted_tiles
+                    .checked_add(group.tiles.len())
+                    .ok_or_else(|| StoreError::Bounds("collection tile count overflowed".into()))?;
+                if admitted_tiles > MAX_COLLECTION_TILES {
+                    return Err(StoreError::Bounds(format!(
+                        "collection declares more than {MAX_COLLECTION_TILES} tiles"
+                    )));
+                }
+            }
             slots[index] = Some(outcome);
         }
         slots
@@ -684,8 +898,8 @@ async fn import_collection(
     // skipped groups become warnings (never a hard failure while any group
     // parses), so representative-tile selection and ordering are computed over
     // the survivors exactly as the sequential importer would.
-    let mut parsed_groups: Vec<GroupParsed> = Vec::new();
-    let mut warnings: Vec<ImportWarning> = Vec::new();
+    let mut parsed_groups: Vec<GroupParsed> = Vec::with_capacity(group_outcomes.len());
+    let mut warnings: Vec<ImportWarning> = Vec::with_capacity(group_outcomes.len());
     for outcome in group_outcomes {
         match outcome {
             Ok(group) => parsed_groups.push(group),
@@ -694,7 +908,7 @@ async fn import_collection(
     }
 
     if parsed_groups.is_empty() {
-        return Err(StoreError::Metadata(
+        return Err(StoreError::Schema(
             "collection has no readable groups".into(),
         ));
     }
@@ -707,56 +921,22 @@ async fn import_collection(
         .flat_map(|group| group.tiles.iter())
         .any(|tile| tile.translation.is_some());
 
-    // Learn the shared multiscale geometry every tile inherits by reading a
-    // single representative tile. OME-Zarr collections require all tiles to
-    // share one multiscale, so any tile whose geometry reads and parses defines
-    // axes, levels, geometry, and channels for every tile — exactly one
-    // readable tile anywhere is enough.
-    //
-    // The candidate set is therefore one representative per group (its first
-    // tile), tried in declared order. A candidate whose `zarr.json` or
-    // level-array metadata is unreadable or malformed is passed over and the
-    // next group's representative is tried, so one corrupt tile — or a whole
-    // corrupt leading group — no longer aborts an otherwise-valid collection.
-    // Because a single readable representative suffices, the interior tiles of
-    // a group whose representative is unreadable are never probed: the search
-    // stays O(groups), never O(total tiles), even when a store-wide condition
-    // (throttling, timeouts, or permissions masking NotFound as an error)
-    // makes every read fail. The healthy common case reads exactly one tile;
-    // a corrupt leading representative falls forward with bounded concurrency.
-    //
-    // If no representative is readable the import fails loudly rather than open
-    // a geometry-less collection.
-    let representative_prefixes: Vec<String> = parsed_groups
+    // The manifest and binding clone one shared multiscale onto every tile, so
+    // homogeneity is a hard admission invariant rather than an OME-Zarr trust
+    // assumption. Read every declared tile with bounded concurrency, run the
+    // ordinary per-image validator on each, and compare the complete structural
+    // fingerprint before constructing a single binding.
+    let tile_prefixes: Vec<String> = parsed_groups
         .iter()
-        .filter_map(|group| group.tiles.first())
+        .flat_map(|group| &group.tiles)
         .map(|tile| tile.store_prefix.clone())
         .collect();
-    let (shared_geometry, unreadable_representatives) =
-        select_shared_tile_geometry(store, representative_prefixes).await;
     let SharedTileGeometry {
         axes_names,
         level_entries,
         channel_infos,
         level_metas,
-    } = shared_geometry.ok_or_else(|| {
-        StoreError::Metadata("collection has no tile with readable geometry".into())
-    })?;
-
-    // The collection opened. If selection had to fall forward past unreadable
-    // representatives, surface them as one aggregated warning; the common case
-    // — the leading representative read cleanly — records nothing.
-    if !unreadable_representatives.is_empty() {
-        let examples: Vec<&str> = unreadable_representatives
-            .iter()
-            .map(String::as_str)
-            .collect();
-        warnings.push(unreadable_tile_geometry_warning(
-            id,
-            unreadable_representatives.len(),
-            &examples,
-        ));
-    }
+    } = admit_collection_tile_geometry(metadata, &tile_prefixes).await?;
 
     let (full_shape_5d, _full_chunk_5d) = parse::extract_full_res(&level_metas, &axes_names);
 
@@ -822,7 +1002,7 @@ async fn import_collection(
     // The budget is shared across tiles so aggregate label/color memory is
     // bounded no matter how many tiles carry labels.
     let mut label_specs: Vec<LabelSpec> = Vec::new();
-    let mut label_budget = LabelBudget::new();
+    let mut label_budget = LabelBudget::with_limits(policy.max_labels, policy.max_label_colors);
 
     // Discover per-tile `labels/` groups. This is the only remaining per-tile
     // metadata I/O, so it must not fan out one read per tile on a wide
@@ -832,25 +1012,40 @@ async fn import_collection(
     // group when a sample signals labels. Tiles left unprobed are treated as
     // label-free and the import records a warning naming the
     // exhaustive-discovery override.
-    let mut tile_prefixes: Vec<String> = Vec::new();
     let mut group_spans: Vec<std::ops::Range<usize>> = Vec::with_capacity(parsed_groups.len());
+    let mut tile_cursor = 0usize;
     for group in &parsed_groups {
-        let start = tile_prefixes.len();
-        tile_prefixes.extend(group.tiles.iter().map(|tile| tile.store_prefix.clone()));
-        group_spans.push(start..tile_prefixes.len());
+        let start = tile_cursor;
+        tile_cursor += group.tiles.len();
+        group_spans.push(start..tile_cursor);
     }
     let mut probed_labels: Vec<Option<ProbedLabels>> =
         (0..tile_prefixes.len()).map(|_| None).collect();
+    let mut parsed_label_budget = ParsedLabelBudget::new(policy.max_labels);
     let samples = sample_probe_indices(&group_spans);
     if use_exhaustive_label_probes(
         tile_prefixes.len(),
         samples.len(),
-        force_exhaustive_label_discovery,
+        policy.force_exhaustive_label_discovery,
     ) {
         let all: Vec<usize> = (0..tile_prefixes.len()).collect();
-        probe_labels_for_tiles(store, &tile_prefixes, all, &mut probed_labels).await;
+        probe_labels_for_tiles(
+            metadata,
+            &tile_prefixes,
+            all,
+            &mut probed_labels,
+            &mut parsed_label_budget,
+        )
+        .await;
     } else {
-        probe_labels_for_tiles(store, &tile_prefixes, samples, &mut probed_labels).await;
+        probe_labels_for_tiles(
+            metadata,
+            &tile_prefixes,
+            samples,
+            &mut probed_labels,
+            &mut parsed_label_budget,
+        )
+        .await;
 
         // Expand to every tile of any group whose sampled tiles signal
         // labels, so a labeled group's discovery stays complete (its cost
@@ -908,7 +1103,14 @@ async fn import_collection(
             }
         }
         if !follow_up.is_empty() {
-            probe_labels_for_tiles(store, &tile_prefixes, follow_up, &mut probed_labels).await;
+            probe_labels_for_tiles(
+                metadata,
+                &tile_prefixes,
+                follow_up,
+                &mut probed_labels,
+                &mut parsed_label_budget,
+            )
+            .await;
         }
 
         let unprobed = probed_labels.iter().filter(|slot| slot.is_none()).count();
@@ -929,20 +1131,39 @@ async fn import_collection(
         }
     }
 
+    if parsed_label_budget.dropped_names() > 0 {
+        warnings.push(ImportWarning {
+            kind: ImportWarningKind::LabelMetadataBudget,
+            target: id.to_string(),
+            message: format!(
+                "label-index metadata exceeded the dataset budget: retained at most {} names and ignored {} later names in declared tile order",
+                policy.max_labels,
+                parsed_label_budget.dropped_names(),
+            ),
+        });
+    }
+
     // Aggregate every unusable labels index probed above — whichever
     // discovery path (sampled or exhaustive) probed it — into one warning.
     // Absence stays silent; an unusable index means labels may exist that
     // discovery could not see, and that must reach the user.
-    let unusable_prefixes: Vec<&str> = probed_labels
-        .iter()
-        .flatten()
-        .filter(|probed| probed.index == LabelIndexState::Unusable)
-        .map(|probed| probed.labels_prefix.as_str())
-        .collect();
-    if !unusable_prefixes.is_empty() {
+    let mut unusable_count = 0usize;
+    let mut unusable_prefixes = Vec::with_capacity(UNUSABLE_INDEX_WARNING_EXAMPLES);
+    for (prefix, probed) in tile_prefixes.iter().zip(&probed_labels) {
+        if probed
+            .as_ref()
+            .is_some_and(|probed| probed.index == LabelIndexState::Unusable)
+        {
+            unusable_count += 1;
+            if unusable_prefixes.len() < UNUSABLE_INDEX_WARNING_EXAMPLES {
+                unusable_prefixes.push(format!("{prefix}/labels"));
+            }
+        }
+    }
+    if unusable_count > 0 {
         warnings.push(unusable_label_index_warning(
             id,
-            unusable_prefixes.len(),
+            unusable_count,
             &unusable_prefixes,
         ));
     }
@@ -950,23 +1171,30 @@ async fn import_collection(
     // Build the probed labels serially, in declared tile order, gated by the
     // shared running budget: `build_label`'s expensive per-label reads and
     // allocations only run while the budget has room and stop the instant it is
-    // exhausted. This keeps peak label memory/IO O(budget) and reproduces the
-    // sequential importer's retention exactly — the same labels and colors are
-    // kept, and the same ones dropped, in the same order.
+    // exhausted. Parsed names were already admitted under the same count ceiling
+    // above, so peak retained label metadata and build I/O both stay O(budget).
+    // Within the admitted prefix, labels and colors are built in declared order.
     let mut tile_labels = Vec::with_capacity(tile_prefixes.len());
     for (prefix, probed) in tile_prefixes.iter().zip(probed_labels) {
         // A tile left unprobed by sampled discovery is treated as label-free
         // (the sampling warning above covers the possibility it wasn't).
         let probed = probed.unwrap_or_else(|| ProbedLabels {
-            labels_prefix: format!("{prefix}/labels"),
-            names: Vec::new(),
+            names: Box::default(),
             index: LabelIndexState::Absent,
         });
+        let labels_prefix = format!("{prefix}/labels");
         let image_id = ImageId(format!("{id}:image:{prefix}"));
         let owner = EntityId(format!("{id}:tile:{prefix}"));
-        let imported =
-            build_labels_within_budget(&mut label_budget, store, id, &image_id, &owner, probed)
-                .await;
+        let imported = build_labels_within_budget(
+            &mut label_budget,
+            metadata,
+            id,
+            &image_id,
+            &owner,
+            &labels_prefix,
+            probed,
+        )
+        .await;
         tile_labels.push(imported);
     }
     let mut tile_labels = tile_labels.into_iter();
@@ -1134,7 +1362,7 @@ async fn import_collection(
             &tile_entities,
             full_shape_5d,
         )
-        .map_err(|e| StoreError::Metadata(e.to_string()))?;
+        .map_err(|e| StoreError::Bounds(e.to_string()))?;
 
         transforms = grid_transforms;
     }
@@ -1174,12 +1402,124 @@ async fn import_collection(
         images: binding_images,
     };
 
-    Ok(ImportResult {
+    finish_import(manifest, fetch, binding_seed, warnings, id)
+}
+
+fn finish_import(
+    manifest: DatasetManifest,
+    fetch: FetchSource,
+    binding_seed: ServerBindingSeed,
+    warnings: Vec<ImportWarning>,
+    runtime_dataset_id: &str,
+) -> Result<ImportResult, StoreError> {
+    let source_revision =
+        source_revision_for_import(&manifest, &fetch, &binding_seed, runtime_dataset_id)?;
+    validate_import_result(ImportResult {
         manifest,
         fetch,
         binding_seed,
+        source_revision,
         warnings,
     })
+}
+
+/// Fingerprint the source-facing import projection, not workspace identity.
+/// Importer-generated ids are deterministic derivatives of the runtime
+/// workspace dataset id, so normalize those fields back to a stable marker.
+/// The manifest display name is also workspace-owned and intentionally does
+/// not make a new source generation.
+fn source_revision_for_import(
+    manifest: &DatasetManifest,
+    fetch: &FetchSource,
+    binding_seed: &ServerBindingSeed,
+    runtime_dataset_id: &str,
+) -> Result<SourceRevision, StoreError> {
+    let single_image = matches!(manifest.kind, DatasetKind::Single);
+    let mut manifest = serde_json::to_value(manifest)
+        .map_err(|error| StoreError::Schema(format!("source revision manifest: {error}")))?;
+    if let Some(object) = manifest.as_object_mut() {
+        object.remove("name");
+    }
+    if single_image
+        && let Some(entities) = manifest
+            .get_mut("entities")
+            .and_then(serde_json::Value::as_array_mut)
+    {
+        for entity in entities {
+            if let Some(labels) = entity
+                .get_mut("labels")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                labels.remove("name");
+            }
+        }
+    }
+    normalize_runtime_ids(&mut manifest, runtime_dataset_id);
+
+    let mut fetch = serde_json::to_value(fetch)
+        .map_err(|error| StoreError::Schema(format!("source revision fetch: {error}")))?;
+    normalize_runtime_ids(&mut fetch, runtime_dataset_id);
+
+    let mut binding = serde_json::to_value(binding_seed)
+        .map_err(|error| StoreError::Schema(format!("source revision binding: {error}")))?;
+    normalize_runtime_ids(&mut binding, runtime_dataset_id);
+
+    let projection = serde_json::json!({
+        "format": "lucida-source-revision-v1",
+        "manifest": manifest,
+        "fetch": fetch,
+        "binding": binding,
+    });
+    let bytes = serde_json::to_vec(&projection)
+        .map_err(|error| StoreError::Schema(format!("source revision encode: {error}")))?;
+    Ok(SourceRevision::from_bytes(&bytes))
+}
+
+fn normalize_runtime_ids(value: &mut serde_json::Value, runtime_dataset_id: &str) {
+    const ID_FIELDS: &[&str] = &[
+        "dataset_id",
+        "image_id",
+        "source_image_id",
+        "owner",
+        "entity_id",
+        "from",
+        "to",
+        "parent",
+        "id",
+        "default_layout_id",
+    ];
+
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, child) in object {
+                if ID_FIELDS.contains(&key.as_str())
+                    && let serde_json::Value::String(raw) = child
+                {
+                    if raw == runtime_dataset_id {
+                        *raw = "$dataset".to_string();
+                    } else if let Some(suffix) = raw.strip_prefix(runtime_dataset_id)
+                        && suffix.starts_with(':')
+                    {
+                        *raw = format!("$dataset{suffix}");
+                    }
+                }
+                normalize_runtime_ids(child, runtime_dataset_id);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                normalize_runtime_ids(child, runtime_dataset_id);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn validate_import_result(result: ImportResult) -> Result<ImportResult, StoreError> {
+    result.manifest.validate().map_err(|errors| {
+        StoreError::Schema(format!("manifest admission validation failed: {errors}"))
+    })?;
+    Ok(result)
 }
 
 fn parse_data_type(s: &str) -> Result<DataType, StoreError> {
@@ -1189,7 +1529,7 @@ fn parse_data_type(s: &str) -> Result<DataType, StoreError> {
         "uint32" => Ok(DataType::Uint32),
         "float32" => Ok(DataType::Float32),
         "float64" => Ok(DataType::Float64),
-        other => Err(StoreError::Metadata(format!(
+        other => Err(StoreError::Schema(format!(
             "unsupported data type: {other}"
         ))),
     }
@@ -1213,34 +1553,40 @@ fn data_type_size(dt: DataType) -> u8 {
 /// level index so the user can locate it in their dataset (e.g.
 /// `"level 0: unsupported codec 'gzip' in storage chain"`). The first
 /// failing level short-circuits — we don't accumulate all failures.
-fn build_level_binding_infos(
+fn build_level_binding_infos<M>(
     axes_names: &[String],
-    level_metas: &[parse::ArrayMeta],
+    level_metas: &[M],
     dtype_size: u8,
     pinned: &[PinnedAxis],
-) -> Result<Vec<LevelBindingInfo>, StoreError> {
+) -> Result<Vec<LevelBindingInfo>, StoreError>
+where
+    M: AsRef<parse::ArrayMeta>,
+{
     level_metas
         .iter()
         .enumerate()
         .map(|(i, meta)| {
-            let compression = parse_codec_chain(&meta.codecs).map_err(|e| match e {
-                StoreError::Metadata(msg) => StoreError::Metadata(format!("level {i}: {msg}")),
-                other => other,
-            })?;
+            let meta = meta.as_ref();
+            let compression = parse_codec_chain(&meta.codecs)
+                .map_err(|error| error.with_context(format!("level {i}")))?;
             let chunk_byte_layout = compute_chunk_byte_layout(
                 axes_names,
                 &meta.chunk_grid.configuration.chunk_shape,
                 dtype_size,
                 pinned,
             )
-            .map_err(|e| match e {
-                StoreError::Metadata(msg) => StoreError::Metadata(format!("level {i}: {msg}")),
-                other => other,
-            })?;
+            .map_err(|error| error.with_context(format!("level {i}")))?;
             Ok(LevelBindingInfo {
                 level_index: i as u32,
                 compression,
                 chunk_shape: meta.chunk_grid.configuration.chunk_shape.clone(),
+                shape: normalize_to_5d(&meta.shape, axes_names, 1),
+                grid_shape: {
+                    let shape = normalize_to_5d(&meta.shape, axes_names, 1);
+                    let chunk =
+                        normalize_to_5d(&meta.chunk_grid.configuration.chunk_shape, axes_names, 1);
+                    std::array::from_fn(|axis| shape[axis].div_ceil(chunk[axis]))
+                },
                 chunk_byte_layout,
             })
         })
@@ -1281,24 +1627,118 @@ fn build_axes(axes_names: &[String]) -> Vec<Axis> {
 /// panic). This keeps untrusted array metadata — a label's or an image's
 /// `chunk_shape` — from aborting the process: a bad label surfaces as an `Err`
 /// the caller skips, and a bad source array fails the import loudly.
-fn build_level_geometries(
+fn build_level_geometries<M>(
     level_entries: &[parse::LevelEntry],
-    level_metas: &[parse::ArrayMeta],
+    level_metas: &[M],
     axes_names: &[String],
-) -> Result<Vec<LevelGeometry>, StoreError> {
+) -> Result<Vec<LevelGeometry>, StoreError>
+where
+    M: AsRef<parse::ArrayMeta>,
+{
+    if level_entries.len() != level_metas.len() {
+        return Err(StoreError::Bounds(format!(
+            "level metadata count mismatch: {} entries, {} arrays",
+            level_entries.len(),
+            level_metas.len()
+        )));
+    }
+    let Some(first) = level_metas.first().map(AsRef::as_ref) else {
+        return Err(StoreError::Bounds("multiscale has no levels".to_string()));
+    };
+    if first.shape.len() != axes_names.len() {
+        return Err(StoreError::Bounds(format!(
+            "levels[0].shape has rank {}; expected {}",
+            first.shape.len(),
+            axes_names.len()
+        )));
+    }
+    if first.chunk_grid.configuration.chunk_shape.len() != axes_names.len() {
+        return Err(StoreError::Bounds(format!(
+            "levels[0].chunk_grid.configuration.chunk_shape has rank {}; expected {}",
+            first.chunk_grid.configuration.chunk_shape.len(),
+            axes_names.len()
+        )));
+    }
+    let expected_dtype = first.data_type.as_str();
+    let noncanonical_axes: Vec<(usize, &str)> = axes_names
+        .iter()
+        .enumerate()
+        .filter_map(|(index, name)| {
+            (!matches!(
+                name.to_ascii_lowercase().as_str(),
+                "t" | "c" | "z" | "y" | "x"
+            ))
+            .then_some((index, name.as_str()))
+        })
+        .collect();
     level_entries
         .iter()
         .zip(level_metas.iter())
         .enumerate()
         .map(|(i, (entry, meta))| {
+            let meta = meta.as_ref();
+            let expected_path = i.to_string();
+            if entry.path != expected_path {
+                return Err(StoreError::Schema(format!(
+                    "levels[{i}].path is {:?}; this chunk-key layout requires {:?}",
+                    entry.path, expected_path
+                )));
+            }
+            if meta.shape.len() != axes_names.len() {
+                return Err(StoreError::Bounds(format!(
+                    "levels[{i}].shape has rank {}; expected {}",
+                    meta.shape.len(),
+                    axes_names.len()
+                )));
+            }
+            if meta.chunk_grid.configuration.chunk_shape.len() != axes_names.len() {
+                return Err(StoreError::Bounds(format!(
+                    "levels[{i}].chunk_grid.configuration.chunk_shape has rank {}; expected {}",
+                    meta.chunk_grid.configuration.chunk_shape.len(),
+                    axes_names.len()
+                )));
+            }
+            if meta.data_type != expected_dtype {
+                return Err(StoreError::Schema(format!(
+                    "levels[{i}].data_type '{}' differs from level 0 '{}'",
+                    meta.data_type, expected_dtype
+                )));
+            }
+            if meta.shape.contains(&0) {
+                return Err(StoreError::Bounds(format!(
+                    "levels[{i}].shape must contain only positive dimensions"
+                )));
+            }
+            if meta.chunk_grid.configuration.chunk_shape.contains(&0) {
+                return Err(StoreError::Bounds(format!(
+                    "levels[{i}].chunk_grid.configuration.chunk_shape contains a zero dimension; \
+                     raw dimensions must be positive before axis normalization"
+                )));
+            }
+            if i > 0 {
+                for &(axis_index, axis_name) in &noncanonical_axes {
+                    if meta.shape[axis_index] != first.shape[axis_index] {
+                        return Err(StoreError::Bounds(format!(
+                            "levels[{i}].shape[{axis_index}] for pinned axis {axis_name:?} is {}; \
+                             expected level-0 value {}",
+                            meta.shape[axis_index], first.shape[axis_index]
+                        )));
+                    }
+                    if meta.chunk_grid.configuration.chunk_shape[axis_index]
+                        != first.chunk_grid.configuration.chunk_shape[axis_index]
+                    {
+                        return Err(StoreError::Bounds(format!(
+                            "levels[{i}].chunk_grid.configuration.chunk_shape[{axis_index}] for \
+                             pinned axis {axis_name:?} is {}; expected level-0 value {}",
+                            meta.chunk_grid.configuration.chunk_shape[axis_index],
+                            first.chunk_grid.configuration.chunk_shape[axis_index]
+                        )));
+                    }
+                }
+            }
             let shape = normalize_to_5d(&meta.shape, axes_names, 1);
             let chunk_shape =
                 normalize_to_5d(&meta.chunk_grid.configuration.chunk_shape, axes_names, 1);
-            if chunk_shape.contains(&0) {
-                return Err(StoreError::Metadata(format!(
-                    "level {i}: chunk_shape {chunk_shape:?} has a zero dimension"
-                )));
-            }
             let grid_shape = std::array::from_fn(|d| shape[d].div_ceil(chunk_shape[d]));
             Ok(LevelGeometry {
                 level_index: i as u32,
@@ -1311,33 +1751,6 @@ fn build_level_geometries(
         .collect()
 }
 
-/// Dataset-wide ceiling on retained labels. The per-group name cap bounds one
-/// `labels` list; this bounds the total kept across every tile of a collection so
-/// an adversarial dataset can't accumulate unbounded label specs in memory.
-const MAX_LABELS_PER_DATASET: usize = 1 << 16;
-
-/// Dataset-wide ceiling on retained color-table entries, summed across all
-/// labels. Complements the per-label color cap in `parse` so the total color
-/// memory across a whole collection stays bounded.
-const MAX_LABEL_COLORS_PER_DATASET: usize = 1 << 20;
-
-/// Remaining dataset-wide budget for retained labels and color entries, carried
-/// across every source image / collection tile so aggregate memory is bounded even
-/// when per-label caps are individually satisfied.
-struct LabelBudget {
-    labels_remaining: usize,
-    colors_remaining: usize,
-}
-
-impl LabelBudget {
-    fn new() -> Self {
-        Self {
-            labels_remaining: MAX_LABELS_PER_DATASET,
-            colors_remaining: MAX_LABEL_COLORS_PER_DATASET,
-        }
-    }
-}
-
 /// Label overlays imported for one source image: the manifest specs plus the
 /// fetch/binding entries the server needs to stream each label's chunks.
 #[derive(Default)]
@@ -1347,147 +1760,19 @@ struct ImportedLabels {
     bindings: Vec<ImageBindingSeed>,
 }
 
-/// One source image's `labels/` group after its index has been read but before
-/// any label is built. Holds the group prefix (for the per-label reads and
-/// diagnostics) and the declared label names in order — never the built
-/// multiscale specs, so holding one of these for every tile of a wide collection at
-/// once costs no per-label memory.
-#[derive(Default)]
-struct ProbedLabels {
-    labels_prefix: String,
-    names: Vec<String>,
-    /// What the probe learned about the labels index object itself, kept
-    /// separate from `names` so sampled discovery can tell a definitive miss
-    /// from an index that exists but could not be used.
-    index: LabelIndexState,
-}
-
-/// What probing a source image's `labels/` index object established.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum LabelIndexState {
-    /// A clean NotFound: no index object exists, so the image is
-    /// definitively label-free.
-    #[default]
-    Absent,
-    /// The index exists and lists at least one usable label name.
-    Listed,
-    /// Something is there but nothing usable came back: the read failed
-    /// short of a clean NotFound, the object was not valid JSON, or the JSON
-    /// carried no usable `attributes.ome.labels` names. Under sampled
-    /// discovery this marks the group label-suspect, so its remaining tiles
-    /// are probed instead of being assumed label-free.
-    Unusable,
-}
-
-/// One aggregated [`ImportWarning`] covering every labels index that was
-/// probed during an import but could not be used
-/// ([`LabelIndexState::Unusable`]): the read failed short of a clean
-/// NotFound, the bytes were not valid JSON, or the index listed no usable
-/// names. Aggregated by design — a store-wide condition (throttling, or a
-/// permission configuration in which a missing key surfaces as an error
-/// rather than NotFound) makes every index unusable at once, and one warning
-/// per tile would drown the open result. `examples` are the affected
-/// `labels/` prefixes; only the first
-/// [`UNUSABLE_INDEX_WARNING_EXAMPLES`] are named in the message.
-fn unusable_label_index_warning(
-    dataset_id: &str,
-    unusable: usize,
-    examples: &[&str],
-) -> ImportWarning {
-    let noun = if unusable == 1 {
-        "label index"
-    } else {
-        "label indexes"
-    };
-    let examples = examples
-        .iter()
-        .take(UNUSABLE_INDEX_WARNING_EXAMPLES)
-        .map(|prefix| format!("{prefix:?}"))
+/// Retain a declared-order color prefix without carrying the rejected
+/// suffix's backing allocation into the long-lived manifest.
+fn retain_label_color_prefix_exact(colors: &mut Vec<LabelColor>, limit: usize) {
+    let keep = colors.len().min(limit);
+    if keep == colors.len() && colors.capacity() == colors.len() {
+        return;
+    }
+    *colors = std::mem::take(colors)
+        .into_iter()
+        .take(keep)
         .collect::<Vec<_>>()
-        .join(", ");
-    ImportWarning {
-        kind: ImportWarningKind::UnusableLabelIndex,
-        target: dataset_id.to_string(),
-        message: format!(
-            "{unusable} {noun} could not be read or held no usable label \
-             names (e.g. {examples}); label discovery may be incomplete. A \
-             store permission or throttling issue may be the cause. Set \
-             {EXHAUSTIVE_LABEL_DISCOVERY_ENV}=1 to probe every tile.",
-        ),
-    }
-}
-
-/// Read a source image's `labels/` group index and return the label names it
-/// declares, in order, without building any of them. A missing `labels/` group —
-/// the common case — yields an empty list, marked [`LabelIndexState::Absent`];
-/// an index that exists but yields no usable names is marked
-/// [`LabelIndexState::Unusable`] so callers can treat the anomaly as a signal.
-///
-/// This reads exactly one small index object and holds only names, so it is the
-/// only per-tile label I/O safe to fan out concurrently: probing every tile of
-/// a wide collection at once costs no per-label memory. The expensive per-label reads
-/// happen later in [`build_labels_within_budget`], gated by the shared budget.
-async fn probe_labels_for_image(store: &Arc<dyn ObjectStore>, base_prefix: &str) -> ProbedLabels {
-    let labels_prefix = if base_prefix.is_empty() {
-        "labels".to_string()
-    } else {
-        format!("{base_prefix}/labels")
-    };
-
-    let labels_json =
-        match parse::read_optional_zarr_json(store, &format!("{labels_prefix}/zarr.json")).await {
-            parse::OptionalZarrJson::Parsed(value) => value,
-            parse::OptionalZarrJson::Absent => {
-                return ProbedLabels {
-                    labels_prefix,
-                    names: Vec::new(),
-                    index: LabelIndexState::Absent,
-                };
-            }
-            parse::OptionalZarrJson::Unusable => {
-                return ProbedLabels {
-                    labels_prefix,
-                    names: Vec::new(),
-                    index: LabelIndexState::Unusable,
-                };
-            }
-        };
-
-    let names = parse::parse_labels_names(&labels_json);
-    let index = if names.is_empty() {
-        LabelIndexState::Unusable
-    } else {
-        LabelIndexState::Listed
-    };
-    ProbedLabels {
-        labels_prefix,
-        names,
-        index,
-    }
-}
-
-/// Probe the `labels/` group index of the given tiles (indices into
-/// `tile_prefixes`) with bounded concurrency, filling each probed slot of
-/// `probed_labels`. Slots not named in `indices` are left untouched, so
-/// callers can layer probe passes (sample first, then expand).
-async fn probe_labels_for_tiles(
-    store: &Arc<dyn ObjectStore>,
-    tile_prefixes: &[String],
-    indices: Vec<usize>,
-    probed_labels: &mut [Option<ProbedLabels>],
-) {
-    let mut probe_stream = futures_util::stream::iter(indices.into_iter().map(|index| {
-        let store = store.clone();
-        let prefix = tile_prefixes[index].clone();
-        async move {
-            let probed = probe_labels_for_image(&store, &prefix).await;
-            (index, probed)
-        }
-    }))
-    .buffer_unordered(METADATA_FETCH_CONCURRENCY);
-    while let Some((index, probed)) = probe_stream.next().await {
-        probed_labels[index] = Some(probed);
-    }
+        .into_boxed_slice()
+        .into_vec();
 }
 
 /// Build a source image's probed labels in declared order, charging the shared
@@ -1497,20 +1782,18 @@ async fn probe_labels_for_tiles(
 /// color-table reads and allocations only ever run for labels that are actually
 /// retained: peak label memory and build I/O stay O(budget), never O(total
 /// declared), even for an adversarial dataset that lists far more labels than
-/// the budget allows. Malformed labels and budget exhaustion are logged exactly
-/// as a purely sequential importer would, so the retained set — and which labels
-/// and colors are dropped once the budget is exceeded — is identical no matter
-/// how the probe that produced `probed` was scheduled.
+/// the budget allows. Malformed labels and budget exhaustion are handled in the
+/// admitted prefix's declared order, independent of probe completion timing.
 async fn build_labels_within_budget(
     budget: &mut LabelBudget,
-    store: &Arc<dyn ObjectStore>,
+    metadata: &MetadataReader,
     dataset_id: &str,
     source_image_id: &ImageId,
     source_owner: &EntityId,
+    labels_prefix: &str,
     probed: ProbedLabels,
 ) -> ImportedLabels {
     let ProbedLabels {
-        labels_prefix,
         names,
         // Build cost is driven purely by the names; how the index responded
         // matters only to discovery scheduling.
@@ -1525,13 +1808,19 @@ async fn build_labels_within_budget(
             );
             break;
         }
-        match build_label(store, &labels_prefix, &name, source_image_id, source_owner).await {
+        match build_label(
+            metadata,
+            labels_prefix,
+            &name,
+            source_image_id,
+            source_owner,
+        )
+        .await
+        {
             Ok(mut label) => {
                 // Clamp this label's colors to the remaining dataset-wide budget
                 // before retaining them, then charge both budgets.
-                if label.spec.colors.len() > budget.colors_remaining {
-                    label.spec.colors.truncate(budget.colors_remaining);
-                }
+                retain_label_color_prefix_exact(&mut label.spec.colors, budget.colors_remaining);
                 budget.colors_remaining -= label.spec.colors.len();
                 budget.labels_remaining -= 1;
                 imported.specs.push(label.spec);
@@ -1563,21 +1852,21 @@ struct BuiltLabel {
 /// distinct from the source image's geometry, which is the spatial-alignment
 /// foundation for later rendering.
 async fn build_label(
-    store: &Arc<dyn ObjectStore>,
+    metadata: &MetadataReader,
     labels_prefix: &str,
     name: &str,
     source_image_id: &ImageId,
     source_owner: &EntityId,
 ) -> Result<BuiltLabel, StoreError> {
     let group_prefix = format!("{labels_prefix}/{name}");
-    let group_json = parse::read_zarr_json(store, &format!("{group_prefix}/zarr.json")).await?;
+    let group_json = parse::read_zarr_json(metadata, &format!("{group_prefix}/zarr.json")).await?;
 
     let error_prefix = format!("label {name:?}: ");
     let parsed = parse::parse_multiscales(&group_json, &error_prefix)?;
     let axes_names = parsed.axes_names;
     let level_entries = parsed.level_entries;
 
-    let level_metas = parse::read_level_metas(store, &group_prefix, &level_entries).await?;
+    let level_metas = parse::read_level_metas(metadata, &group_prefix, &level_entries).await?;
 
     // Preserve the label's integer dtype exactly (uint8/16/32) — a uint32 mask
     // whose ids exceed 65535 must never be narrowed.
@@ -1647,8 +1936,116 @@ async fn build_label(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use object_store::path::Path;
     use std::fs;
     use std::path::PathBuf;
+
+    #[test]
+    fn rejected_label_colors_release_their_backing_capacity() {
+        let mut colors = Vec::with_capacity(1024);
+        colors.extend((0..128).map(|value| LabelColor {
+            value,
+            rgba: [1, 2, 3, 4],
+        }));
+
+        retain_label_color_prefix_exact(&mut colors, 3);
+
+        assert_eq!(
+            colors.iter().map(|color| color.value).collect::<Vec<_>>(),
+            [0, 1, 2]
+        );
+        assert_eq!(colors.capacity(), colors.len());
+    }
+
+    #[test]
+    fn collection_axis_labels_reject_malformed_entry_without_compacting_positions() {
+        let plate = serde_json::json!({
+            "rows": [{"name": "A"}, {"name": 2}, {"name": "C"}],
+        });
+
+        let error = parse_collection_axis_labels(&plate, "rows").unwrap_err();
+        assert!(
+            error.to_string().contains("ome.plate.rows[1].name"),
+            "error must pinpoint the positional entry: {error}"
+        );
+    }
+
+    #[test]
+    fn collection_metadata_paths_reject_traversal_and_absolute_forms() {
+        for unsafe_path in [
+            "",
+            ".",
+            "..",
+            "../outside",
+            "a/../../outside",
+            "/outside",
+            "a\\b",
+        ] {
+            assert!(
+                !is_safe_collection_relative_path(unsafe_path),
+                "{unsafe_path}"
+            );
+        }
+        for safe_path in ["A/1", "0", "nested/tile"] {
+            assert!(is_safe_collection_relative_path(safe_path), "{safe_path}");
+        }
+    }
+
+    #[test]
+    fn tile_translation_rejects_transform_and_rank_fanout_before_allocating() {
+        let too_many_transforms = serde_json::json!({
+            "coordinateTransformations": (0..(MAX_TILE_TRANSFORMS + 1))
+                .map(|_| serde_json::json!({"type": "scale", "scale": [1]}))
+                .collect::<Vec<_>>()
+        });
+        let warning = parse_tile_translation(&too_many_transforms, "A/1", 0).unwrap_err();
+        assert!(warning.message.contains("limit"));
+
+        let too_many_components = serde_json::json!({
+            "coordinateTransformations": [{
+                "type": "translation",
+                "translation": vec![0.0; MAX_TRANSLATION_COMPONENTS + 1]
+            }]
+        });
+        let warning = parse_tile_translation(&too_many_components, "A/1", 0).unwrap_err();
+        assert!(warning.message.contains("limit"));
+    }
+
+    #[test]
+    fn tile_translation_rejects_malformed_component_without_compacting_axes() {
+        let image = serde_json::json!({
+            "coordinateTransformations": [{
+                "type": "translation",
+                "translation": [0.0, "not-a-number", 2.0]
+            }]
+        });
+
+        let warning = parse_tile_translation(&image, "A/1", 7).unwrap_err();
+        assert_eq!(warning.kind, ImportWarningKind::SkippedGroup);
+        assert_eq!(warning.target, "A/1");
+        assert!(
+            warning
+                .message
+                .contains("ome.well.images[7].coordinateTransformations[0].translation[1]"),
+            "warning must pinpoint the positional component: {}",
+            warning.message
+        );
+    }
+
+    #[test]
+    fn tile_translation_preserves_every_declared_component() {
+        let image = serde_json::json!({
+            "coordinateTransformations": [{
+                "type": "translation",
+                "translation": [0.0, 1.0, 2.0, 3.0, 4.0]
+            }]
+        });
+
+        assert_eq!(
+            parse_tile_translation(&image, "A/1", 0).unwrap(),
+            Some(vec![0.0, 1.0, 2.0, 3.0, 4.0])
+        );
+    }
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir()
@@ -1979,11 +2376,8 @@ mod tests {
         assert_eq!(result.manifest.images().len(), tiles.len());
 
         // Fetch should be Proxied with one spec per image.
-        if let FetchSource::Proxied(ref proxied) = result.fetch {
-            assert_eq!(proxied.images.len(), tiles.len());
-        } else {
-            panic!("Expected Proxied fetch descriptor");
-        }
+        let FetchSource::Proxied(ref proxied) = result.fetch;
+        assert_eq!(proxied.images.len(), tiles.len());
 
         // Binding seed should have one entry per image, each with store_prefix.
         assert_eq!(result.binding_seed.images.len(), tiles.len());
@@ -2038,6 +2432,146 @@ mod tests {
         println!("{}", serde_json::to_string_pretty(&result).unwrap());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Every field cloned from the collection baseline is part of one strict
+    /// structural contract. A non-leading tile that differs in any such field
+    /// fails with its tile identity and the first divergent field path.
+    #[tokio::test]
+    async fn nonrepresentative_tile_structural_fingerprint_matrix_fails_closed() {
+        for (case, expected_field) in [
+            ("axes", "axes"),
+            ("levels", "levels"),
+            ("path", "levels[0].path"),
+            ("scale", "levels[0].scale"),
+            ("shape", "levels[0].shape"),
+            ("rank", "levels[0].shape has rank"),
+            ("dtype", "levels[0].data_type"),
+            ("chunk", "levels[0].chunk_grid.configuration.chunk_shape"),
+            ("pinned_zero", "raw dimensions must be positive"),
+            ("codec", "levels[0].codecs"),
+            ("channels", "omero.channels"),
+        ] {
+            let dir = temp_dir(&format!("collection_fingerprint_{case}"));
+            create_collection_fixture(
+                &dir,
+                "fingerprint",
+                &["A"],
+                &["1"],
+                &[("A", "1", 0, 0, 2)],
+                [1, 1, 1, 64, 64],
+                [1, 1, 1, 64, 64],
+                2,
+            );
+
+            let tile = dir.join("A").join("1").join("1");
+            let tile_root_path = tile.join("zarr.json");
+            let mut tile_root: serde_json::Value =
+                serde_json::from_slice(&fs::read(&tile_root_path).unwrap()).unwrap();
+            match case {
+                "axes" => {
+                    tile_root["attributes"]["ome"]["multiscales"][0]["axes"][4]["name"] =
+                        serde_json::Value::from("X");
+                }
+                "levels" => {
+                    tile_root["attributes"]["ome"]["multiscales"][0]["datasets"]
+                        .as_array_mut()
+                        .unwrap()
+                        .pop();
+                }
+                "path" => {
+                    tile_root["attributes"]["ome"]["multiscales"][0]["datasets"][0]["path"] =
+                        serde_json::Value::from("alternate");
+                    let alternate = tile.join("alternate");
+                    fs::create_dir_all(&alternate).unwrap();
+                    fs::copy(
+                        tile.join("0").join("zarr.json"),
+                        alternate.join("zarr.json"),
+                    )
+                    .unwrap();
+                }
+                "scale" => {
+                    tile_root["attributes"]["ome"]["multiscales"][0]["datasets"][0]["coordinateTransformations"]
+                        [0]["scale"][4] = serde_json::Value::from(2.0);
+                }
+                "channels" => {
+                    tile_root["attributes"]["ome"]["omero"] = serde_json::json!({
+                        "channels": [{"label": "different"}]
+                    });
+                }
+                "pinned_zero" => {
+                    tile_root["attributes"]["ome"]["multiscales"][0]["axes"]
+                        .as_array_mut()
+                        .unwrap()
+                        .insert(3, serde_json::json!({"name": "m", "type": "space"}));
+                    for dataset in tile_root["attributes"]["ome"]["multiscales"][0]["datasets"]
+                        .as_array_mut()
+                        .unwrap()
+                    {
+                        dataset["coordinateTransformations"][0]["scale"]
+                            .as_array_mut()
+                            .unwrap()
+                            .insert(3, serde_json::Value::from(1.0));
+                    }
+                }
+                _ => {}
+            }
+            fs::write(
+                &tile_root_path,
+                serde_json::to_vec_pretty(&tile_root).unwrap(),
+            )
+            .unwrap();
+
+            for level in 0..2 {
+                let path = tile.join(level.to_string()).join("zarr.json");
+                let mut array: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                match case {
+                    "shape" if level == 0 => {
+                        array["shape"][4] = serde_json::Value::from(63);
+                    }
+                    "rank" if level == 0 => {
+                        array["shape"].as_array_mut().unwrap().pop();
+                    }
+                    "dtype" => array["data_type"] = serde_json::Value::from("uint8"),
+                    "chunk" => {
+                        array["chunk_grid"]["configuration"]["chunk_shape"][4] =
+                            serde_json::Value::from(32);
+                    }
+                    "pinned_zero" => {
+                        array["shape"]
+                            .as_array_mut()
+                            .unwrap()
+                            .insert(3, serde_json::Value::from(2));
+                        array["chunk_grid"]["configuration"]["chunk_shape"]
+                            .as_array_mut()
+                            .unwrap()
+                            .insert(3, serde_json::Value::from(0));
+                    }
+                    "codec" => {
+                        array["codecs"][1] = serde_json::json!({"name": "zstd"});
+                    }
+                    _ => {}
+                }
+                fs::write(&path, serde_json::to_vec_pretty(&array).unwrap()).unwrap();
+            }
+
+            let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+            let error = import_dataset(&store, "fp", "Fingerprint")
+                .await
+                .expect_err(case);
+            let message = error.to_string();
+            assert!(
+                message.contains("A/1/1"),
+                "{case} failure must name the nonrepresentative tile: {message}"
+            );
+            assert!(
+                message.contains(expected_field),
+                "{case} failure must name {expected_field}: {message}"
+            );
+
+            let _ = fs::remove_dir_all(&dir);
+        }
     }
 
     /// A single hollow/unreadable group is skipped with a recorded warning while
@@ -2120,19 +2654,17 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(err, StoreError::Metadata(_)),
+            matches!(err, StoreError::Schema(_)),
             "expected a metadata error, got {err:?}",
         );
-
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// An unreadable representative tile no longer aborts the whole collection:
-    /// selection falls forward to the next tile whose geometry parses, records a
-    /// warning naming the corrupt tile, and every tile (including the corrupt
-    /// one) still imports over the shared geometry.
+    /// Strict collection admission never clones a readable tile's geometry onto
+    /// an unreadable peer. The failure names the exact tile before any binding
+    /// can be constructed.
     #[tokio::test]
-    async fn unreadable_representative_tile_falls_forward() {
+    async fn unreadable_tile_fails_strict_admission_with_identity() {
         let dir = temp_dir("unreadable_rep_tile");
         create_collection_fixture(
             &dir,
@@ -2145,9 +2677,7 @@ mod tests {
             1,
         );
 
-        // Corrupt the first tile's own multiscale metadata — the tile that
-        // would be picked as representative — while leaving its group's
-        // well/images list and every other tile intact.
+        // Corrupt one tile while leaving every peer readable.
         fs::write(
             dir.join("A").join("1").join("0").join("zarr.json"),
             b"{ not json",
@@ -2155,56 +2685,24 @@ mod tests {
         .unwrap();
 
         let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
-        let result = import_dataset(&store, "rep-id", "Rep Collection")
+        let err = import_dataset(&store, "rep-id", "Rep Collection")
             .await
-            .unwrap();
-
-        // Exactly one aggregated geometry warning, keyed to the dataset and
-        // naming the unreadable candidate tile as an example.
-        let geo_warnings: Vec<_> = result
-            .warnings
-            .iter()
-            .filter(|w| w.kind == ImportWarningKind::UnreadableTileGeometry)
-            .collect();
-        assert_eq!(
-            geo_warnings.len(),
-            1,
-            "expected one aggregated unreadable-tile-geometry warning, got {:?}",
-            result.warnings,
-        );
-        assert_eq!(geo_warnings[0].target, "rep-id");
+            .expect_err("one unreadable tile must reject the collection");
+        assert!(matches!(err, StoreError::Schema(_)), "got {err:?}");
+        let message = err.to_string();
+        assert!(message.contains("strict collection admission"), "{message}");
         assert!(
-            geo_warnings[0].message.contains("A/1/0"),
-            "message should name the tile, got {:?}",
-            geo_warnings[0].message,
+            message.contains("A/1/0"),
+            "failure must name the unreadable tile: {message}"
         );
-
-        // All three tiles remain — only the geometry source tile changed.
-        let tiles: Vec<_> = result
-            .manifest
-            .entities()
-            .iter()
-            .filter(|e| e.kind == EntityKind::Tile)
-            .collect();
-        assert_eq!(
-            tiles.len(),
-            3,
-            "every tile still imports over shared geometry"
-        );
-
-        // The shared geometry was learned from a readable tile.
-        for image in result.manifest.images() {
-            assert_eq!(image.multiscale.levels[0].shape, [1, 1, 1, 256, 256]);
-        }
 
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// When the representative candidates are corrupt across more than one group,
-    /// selection keeps falling forward across group boundaries until a readable
-    /// tile is found; only the corrupt candidates read before it are warned.
+    /// Tile identity is preserved across group boundaries as well; a valid
+    /// sibling group cannot mask an invalid tile in an earlier group.
     #[tokio::test]
-    async fn representative_tile_falls_forward_across_groups() {
+    async fn unreadable_tile_in_one_group_is_not_masked_by_another_group() {
         let dir = temp_dir("rep_tile_across_groups");
         create_collection_fixture(
             &dir,
@@ -2217,40 +2715,18 @@ mod tests {
             1,
         );
 
-        // The entire first group's only tile is unreadable; the second group's
-        // tile is valid and must supply the shared geometry.
+        // The first group's tile is unreadable and the second group's tile is valid.
         fs::write(dir.join("A").join("1").join("0").join("zarr.json"), b"nope").unwrap();
 
         let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
-        let result = import_dataset(&store, "cross-id", "Cross Group Collection")
+        let err = import_dataset(&store, "cross-id", "Cross Group Collection")
             .await
-            .unwrap();
-
-        let geo_warnings: Vec<_> = result
-            .warnings
-            .iter()
-            .filter(|w| w.kind == ImportWarningKind::UnreadableTileGeometry)
-            .collect();
-        assert_eq!(
-            geo_warnings.len(),
-            1,
-            "only the one corrupt candidate is warned"
-        );
-        assert_eq!(geo_warnings[0].target, "cross-id");
+            .expect_err("a later valid group must not mask an unreadable tile");
+        let message = err.to_string();
         assert!(
-            geo_warnings[0].message.contains("A/1/0"),
-            "message should name the corrupt candidate, got {:?}",
-            geo_warnings[0].message,
+            message.contains("A/1/0"),
+            "failure must name the cross-group tile: {message}"
         );
-
-        // Both groups' tiles still import.
-        let tiles: Vec<_> = result
-            .manifest
-            .entities()
-            .iter()
-            .filter(|e| e.kind == EntityKind::Tile)
-            .collect();
-        assert_eq!(tiles.len(), 2);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2282,20 +2758,25 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(err, StoreError::Metadata(_)),
+            matches!(err, StoreError::Schema(_)),
             "expected a metadata error, got {err:?}",
         );
+        let message = err.to_string();
+        assert!(
+            message.contains("rejected 2 unreadable or invalid tiles"),
+            "{message}"
+        );
+        assert!(message.contains("A/1/0"), "{message}");
+        assert!(message.contains("A/2/0"), "{message}");
 
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// The geometry search never reads a corrupt leading group tile-by-tile.
-    /// With every tile of the leading group unreadable, the search tries that
-    /// group's single representative, then falls forward to the next group's
-    /// representative — so the corrupt group's interior tiles are never read
-    /// and total geometry reads track the group count, not the tile count.
+    /// Strict admission checks interior tiles instead of trusting one group
+    /// representative. Aggregated examples stay deterministic and bounded even
+    /// when a whole leading group is corrupt.
     #[tokio::test]
-    async fn corrupt_leading_group_geometry_search_skips_interior_tiles() {
+    async fn corrupt_leading_group_reports_bounded_deterministic_tile_examples() {
         let dir = temp_dir("corrupt_leading_group_geometry");
         create_collection_fixture(
             &dir,
@@ -2307,8 +2788,7 @@ mod tests {
             [1, 1, 1, 64, 64],
             1,
         );
-        // Corrupt EVERY tile of the leading group, so no tile in it is
-        // readable. The search must still not read the group tile-by-tile.
+        // Corrupt every tile of the leading group.
         for tile in 0..20 {
             fs::write(
                 dir.join("A")
@@ -2321,77 +2801,84 @@ mod tests {
         }
 
         let (store, reads) = recording_store(&dir);
-        let result =
+        let err =
             import_dataset_with_label_discovery(&store, "clg", "Corrupt Leading Group", false)
                 .await
-                .expect("a corrupt leading group must fall forward, not fail the import");
+                .expect_err("every invalid interior tile must fail strict admission");
+        let message = err.to_string();
+        assert!(
+            message.contains("rejected 20 unreadable or invalid tiles"),
+            "{message}"
+        );
+        let example0 = message.find("A/1/0").expect("first example");
+        let example1 = message.find("A/1/1").expect("second example");
+        let example2 = message.find("A/1/2").expect("third example");
+        assert!(example0 < example1 && example1 < example2, "{message}");
+        assert!(
+            !message.contains("A/1/3"),
+            "diagnostic examples must be capped at {COLLECTION_ADMISSION_ERROR_EXAMPLES}: {message}"
+        );
 
-        // The collection opened over the healthy group's geometry: every tile
-        // of both groups still imports.
-        assert_eq!(result.manifest.images().len(), 40, "one image per tile");
-
-        // Decisive: the leading group cost exactly one geometry read (its
-        // representative), never its 20 tiles, and the search fell forward to
-        // the next group's representative.
+        // Every tile root is checked, including interiors and the healthy
+        // sibling group; no unchecked tile can inherit the baseline binding.
         let reads = reads.lock().unwrap();
-        assert!(
-            reads.iter().any(|p| p == "A/1/0/zarr.json"),
-            "the leading group's representative must be tried: {reads:?}",
-        );
-        assert!(
-            reads.iter().any(|p| p == "B/1/0/zarr.json"),
-            "selection must fall forward to the next group's representative: {reads:?}",
-        );
-        for interior in ["A/1/1/zarr.json", "A/1/10/zarr.json", "A/1/19/zarr.json"] {
+        for interior in [
+            "A/1/1/zarr.json",
+            "A/1/10/zarr.json",
+            "A/1/19/zarr.json",
+            "B/1/19/zarr.json",
+        ] {
             assert!(
-                !reads.iter().any(|p| p == interior),
-                "interior tiles of the corrupt leading group must never be read for \
-                 geometry, but {interior} was: {reads:?}",
+                reads.iter().any(|p| p == interior),
+                "strict admission must read {interior}: {reads:?}",
             );
         }
-        drop(reads);
-
-        // One aggregated geometry warning, naming the fell-forward
-        // representative as an example.
-        let geo: Vec<_> = result
-            .warnings
-            .iter()
-            .filter(|w| w.kind == ImportWarningKind::UnreadableTileGeometry)
-            .collect();
-        assert_eq!(geo.len(), 1, "warnings: {:?}", result.warnings);
-        assert_eq!(geo[0].target, "clg");
-        assert!(geo[0].message.contains("A/1/0"), "{}", geo[0].message);
 
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Store-wide tile-geometry read errors must not re-open the per-tile
-    /// fan-out: with every tile's own `zarr.json` GET failing (non-NotFound)
-    /// on a wide collection whose group metadata still reads, the geometry
-    /// search reads exactly one representative per group — never one per tile —
-    /// and then fails loudly rather than opening a geometry-less collection.
+    /// Strict all-tile validation remains bounded in *concurrency* under a
+    /// store-wide failure. It reports the exact tile count in deterministic
+    /// declared order while never exceeding the metadata semaphore.
     #[tokio::test]
-    async fn store_wide_tile_geometry_read_errors_are_bounded_by_groups() {
+    async fn store_wide_tile_geometry_errors_are_bounded_and_deterministic() {
         let dir = temp_dir("store_wide_geometry_errors");
         // 4 rows x 3 columns = 12 groups, 20 tiles each = 240 tiles.
         wide_label_free_fixture(&dir, &["A", "B", "C", "D"], &["1", "2", "3"], 20);
 
-        let (store, reads) = tile_geometry_read_erroring_store(&dir);
+        let (store, reads, concurrency) = tile_geometry_read_erroring_store(&dir);
         let err = import_dataset_with_label_discovery(&store, "swg", "Store Wide Geometry", false)
             .await
             .expect_err("no tile has readable geometry, so the import must fail loudly");
-        assert!(matches!(err, StoreError::Metadata(_)), "got {err:?}");
+        assert!(matches!(err, StoreError::ObjectStore { .. }), "got {err:?}");
+        assert_eq!(err.category(), lucida_protocol::FailureCategory::Source);
+        assert!(err.is_retryable());
+        let public = err.public_message();
+        assert!(
+            public.contains("rejected 240 unreadable or invalid tiles"),
+            "{public}"
+        );
+        let first = public.find("A/1/0").expect("first declared tile example");
+        let second = public.find("A/1/1").expect("second declared tile example");
+        let third = public.find("A/1/2").expect("third declared tile example");
+        assert!(first < second && second < third, "{public}");
 
-        // Decisive: one geometry read per group (12), never one per tile (240).
+        // Every tile is validated, but reads overlap only within the documented
+        // concurrency ceiling. The injected delay proves actual overlap rather
+        // than merely checking the constant.
         let tile_geometry_reads = count_tile_geometry_reads(&reads);
         assert_eq!(
-            tile_geometry_reads, 12,
-            "expected one geometry read per group (12 groups), got {tile_geometry_reads}",
+            tile_geometry_reads, 240,
+            "expected one geometry read per declared tile, got {tile_geometry_reads}",
         );
         assert!(
-            tile_geometry_reads <= 24,
-            "geometry reads must stay bounded by groups, not the 240 tiles: \
-             {tile_geometry_reads}",
+            concurrency.max() > 1,
+            "the test must observe overlapping metadata reads"
+        );
+        assert!(
+            concurrency.max() <= METADATA_FETCH_CONCURRENCY,
+            "observed {} concurrent reads; limit is {METADATA_FETCH_CONCURRENCY}",
+            concurrency.max()
         );
 
         let _ = fs::remove_dir_all(&dir);
@@ -2941,11 +3428,10 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// A zero (or non-finite) voxel scale is malformed metadata. We must not
-    /// panic or divide by zero — the import falls back to a unit scale and
-    /// translations are passed through unchanged.
+    /// A zero (or non-finite) voxel scale is malformed metadata. It is rejected
+    /// at admission rather than silently changing the dataset's calibration.
     #[tokio::test]
-    async fn zero_voxel_scale_falls_back_with_warning() {
+    async fn zero_voxel_scale_is_rejected_at_admission() {
         let dir = temp_dir("zero_voxel_scale");
         let translations = vec![
             Some([0.0, 0.0, 0.0, 0.0, 0.0]),
@@ -2956,33 +3442,12 @@ mod tests {
         create_explicit_collection_fixture(&dir, &translations, scale);
 
         let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
-        let result = import_dataset(&store, "zero-scale", "Zero Scale")
+        let error = import_dataset(&store, "zero-scale", "Zero Scale")
             .await
-            .unwrap();
-
-        // tile 0 at origin.
-        let t0 = find_tile_transform(&result, "zero-scale", 0);
-        assert!((t0.transform.matrix()[12]).abs() < 1e-9);
-        assert!((t0.transform.matrix()[13]).abs() < 1e-9);
-
-        // tile 1: X falls back to scale=1 (raw 100 -> 100). Y uses real
-        // scale=0.5 (raw 200 -> 400). Verify no NaN/Inf.
-        let t1 = find_tile_transform(&result, "zero-scale", 1);
-        assert!(
-            t1.transform.matrix()[12].is_finite(),
-            "tile 1 tx must be finite (no division by zero), got {}",
-            t1.transform.matrix()[12],
-        );
-        assert!(
-            (t1.transform.matrix()[12] - 100.0).abs() < 1e-9,
-            "tile 1 tx should be 100 (X scale fell back to 1.0), got {}",
-            t1.transform.matrix()[12],
-        );
-        assert!(
-            (t1.transform.matrix()[13] - 400.0).abs() < 1e-9,
-            "tile 1 ty should be 400 (Y scale 0.5 still applied), got {}",
-            t1.transform.matrix()[13],
-        );
+            .expect_err("zero calibration must fail closed");
+        let message = error.to_string();
+        assert!(message.contains("scale"), "{message}");
+        assert!(message.contains("positive"), "{message}");
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -3048,6 +3513,75 @@ mod tests {
             serde_json::to_string_pretty(&arr).unwrap(),
         )
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn source_zero_chunk_on_raw_pinned_axis_fails_before_normalization() {
+        let dir = temp_dir("import_6d_zero_pinned_chunk");
+        create_6d_with_m_fixture(&dir);
+        let array_path = dir.join("0").join("zarr.json");
+        let mut array: serde_json::Value =
+            serde_json::from_slice(&fs::read(&array_path).unwrap()).unwrap();
+        array["chunk_grid"]["configuration"]["chunk_shape"][3] = serde_json::Value::from(0);
+        fs::write(&array_path, serde_json::to_vec_pretty(&array).unwrap()).unwrap();
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let error = import_dataset(&store, "zero-pinned", "Zero Pinned")
+            .await
+            .expect_err("a raw zero on pinned m must not disappear during normalization");
+        let message = error.to_string();
+        assert!(message.contains("zero"), "{message}");
+        assert!(message.contains("raw"), "{message}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pinned_axis_shape_and_chunk_must_remain_stable_across_levels() {
+        fn meta(shape: Vec<u64>, chunk_shape: Vec<u64>) -> parse::ArrayMeta {
+            serde_json::from_value(serde_json::json!({
+                "shape": shape,
+                "data_type": "uint16",
+                "chunk_grid": {
+                    "configuration": {"chunk_shape": chunk_shape}
+                },
+                "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}]
+            }))
+            .unwrap()
+        }
+
+        let axes = ["t", "c", "z", "m", "y", "x"].map(str::to_string).to_vec();
+        let entries = vec![
+            parse::LevelEntry {
+                path: "0".to_string(),
+                scale: [1.0; 5],
+            },
+            parse::LevelEntry {
+                path: "1".to_string(),
+                scale: [1.0; 5],
+            },
+        ];
+        let level0_shape = vec![1, 1, 1, 6, 64, 64];
+        let level0_chunk = vec![1, 1, 1, 2, 32, 32];
+
+        for (field, level1_shape, level1_chunk) in [
+            ("shape[3]", vec![1, 1, 1, 7, 32, 32], level0_chunk.clone()),
+            (
+                "chunk_shape[3]",
+                vec![1, 1, 1, 6, 32, 32],
+                vec![1, 1, 1, 1, 32, 32],
+            ),
+        ] {
+            let metas = vec![
+                meta(level0_shape.clone(), level0_chunk.clone()),
+                meta(level1_shape, level1_chunk),
+            ];
+            let message = build_level_geometries(&entries, &metas, &axes)
+                .expect_err("pinned-axis divergence must fail before normalization")
+                .to_string();
+            assert!(message.contains("pinned axis \"m\""), "{message}");
+            assert!(message.contains(field), "{message}");
+        }
     }
 
     /// End-to-end: a 6D OME-Zarr with a non-canonical `m` axis ingests
@@ -3378,7 +3912,7 @@ mod tests {
         let err = import_dataset(&store, "gzip-bad", "gzip bad")
             .await
             .unwrap_err();
-        assert!(matches!(err, StoreError::Metadata(_)));
+        assert!(matches!(err, StoreError::Codec(_)));
         let msg = err.to_string();
         assert!(msg.contains("gzip"), "error should name 'gzip': {msg}");
         assert!(
@@ -3405,7 +3939,7 @@ mod tests {
         let err = import_dataset(&store, "big-endian-bad", "big endian bad")
             .await
             .unwrap_err();
-        assert!(matches!(err, StoreError::Metadata(_)));
+        assert!(matches!(err, StoreError::Codec(_)));
         let msg = err.to_string();
         assert!(msg.contains("big"), "error should mention 'big': {msg}");
 
@@ -3435,7 +3969,7 @@ mod tests {
         let err = import_dataset(&store, "mid-pyramid-bad", "mid-pyramid bad")
             .await
             .unwrap_err();
-        assert!(matches!(err, StoreError::Metadata(_)));
+        assert!(matches!(err, StoreError::Codec(_)));
         let msg = err.to_string();
         assert!(
             msg.contains("level 1"),
@@ -3470,7 +4004,7 @@ mod tests {
         let err = import_dataset(&store, "blosc-blosclz", "blosc blosclz")
             .await
             .unwrap_err();
-        assert!(matches!(err, StoreError::Metadata(_)));
+        assert!(matches!(err, StoreError::Codec(_)));
         let msg = err.to_string();
         assert!(
             msg.contains("blosclz"),
@@ -3541,6 +4075,38 @@ mod tests {
             serde_json::to_string_pretty(&arr).unwrap(),
         )
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn source_revision_ignores_workspace_identity_and_changes_on_same_locator_mutation() {
+        let dir = temp_dir("source_revision_mutation");
+        create_single_image_fixture(&dir, None);
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+
+        let first = import_dataset(&store, "workspace-a", "Display A")
+            .await
+            .unwrap();
+        let same_source = import_dataset(&store, "workspace-b", "Display B")
+            .await
+            .unwrap();
+        assert_eq!(first.source_revision, same_source.source_revision);
+
+        let level_path = dir.join("0/zarr.json");
+        let mut level: serde_json::Value =
+            serde_json::from_slice(&fs::read(&level_path).unwrap()).unwrap();
+        level["shape"] = serde_json::json!([1, 2, 1, 128, 64]);
+        fs::write(&level_path, serde_json::to_vec_pretty(&level).unwrap()).unwrap();
+
+        let mutated = import_dataset(&store, "workspace-a", "Display A")
+            .await
+            .unwrap();
+        assert_ne!(first.source_revision, mutated.source_revision);
+        assert_ne!(
+            first.manifest.images()[0].multiscale.levels[0].shape,
+            mutated.manifest.images()[0].multiscale.levels[0].shape
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A single image whose omero block carries channel labels yields a
@@ -3783,17 +4349,29 @@ mod tests {
         assert_eq!(result.manifest.images().len(), 1);
         let source_image_id = result.manifest.images()[0].image_id.clone();
 
-        let labels = result.manifest.labels();
+        let labels = result.manifest.label_specs();
         assert_eq!(labels.len(), 1);
         let label = &labels[0];
         assert_eq!(label.name, "region-b");
         assert_eq!(label.source_image_id, source_image_id);
         // dtype preserved end to end (uint32), never narrowed.
-        assert_eq!(label.data_type, DataType::Uint32);
+        assert_eq!(label.image.multiscale.data_type, DataType::Uint32);
         // The label's own axes (no channel), distinct from the source's TCZYX.
-        assert_eq!(label.axis_names, vec!["t", "z", "y", "x"]);
+        assert_eq!(
+            label
+                .image
+                .multiscale
+                .axes
+                .iter()
+                .map(|axis| axis.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["t", "z", "y", "x"],
+        );
         // The label's own level-0 scale, normalized to 5D with c filled to 1.
-        assert_eq!(label.level0_scale, [1.0, 1.0, 1.0, 4.0, 4.0]);
+        assert_eq!(
+            label.image.multiscale.levels[0].scale,
+            [1.0, 1.0, 1.0, 4.0, 4.0],
+        );
         // Colors, including a value well beyond u16::MAX.
         assert_eq!(label.colors.len(), 2);
         assert_eq!(label.colors[0].rgba, [230, 25, 75, 255]);
@@ -3802,7 +4380,7 @@ mod tests {
 
         // The label image is streamable and distinct from the source image, and
         // is deliberately absent from manifest.images().
-        let label_image_id = label.label_image_id.clone();
+        let label_image_id = label.image.image_id.clone();
         assert_ne!(label_image_id, source_image_id);
         assert!(
             !result
@@ -3813,12 +4391,9 @@ mod tests {
             "label must not appear among ordinary images",
         );
 
-        if let FetchSource::Proxied(ref p) = result.fetch {
-            assert_eq!(p.images.len(), 2, "source image + label image");
-            assert!(p.images.iter().any(|i| i.image_id == label_image_id));
-        } else {
-            panic!("expected Proxied fetch");
-        }
+        let FetchSource::Proxied(ref p) = result.fetch;
+        assert_eq!(p.images.len(), 2, "source image + label image");
+        assert!(p.images.iter().any(|i| i.image_id == label_image_id));
 
         let binding = result
             .binding_seed
@@ -3853,10 +4428,9 @@ mod tests {
         let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
         let result = import_dataset(&store, "no-lbl", "No Labels").await.unwrap();
 
-        assert!(result.manifest.labels().is_empty());
-        if let FetchSource::Proxied(ref p) = result.fetch {
-            assert_eq!(p.images.len(), 1);
-        }
+        assert!(result.manifest.label_specs().is_empty());
+        let FetchSource::Proxied(ref p) = result.fetch;
+        assert_eq!(p.images.len(), 1);
         assert_eq!(result.binding_seed.images.len(), 1);
 
         let _ = fs::remove_dir_all(&dir);
@@ -3903,7 +4477,7 @@ mod tests {
         // The source image still imported.
         assert_eq!(result.manifest.images().len(), 1);
 
-        let labels = result.manifest.labels();
+        let labels = result.manifest.label_specs();
         let names: Vec<&str> = labels.iter().map(|l| l.name.as_str()).collect();
         assert_eq!(labels.len(), 2, "broken label skipped, other two kept");
         assert!(names.contains(&"good"));
@@ -3914,7 +4488,7 @@ mod tests {
         let nc = labels.iter().find(|l| l.name == "nocolors").unwrap();
         assert!(nc.colors.is_empty());
         assert!(!nc.source_declared);
-        assert_eq!(nc.data_type, DataType::Uint8);
+        assert_eq!(nc.image.multiscale.data_type, DataType::Uint8);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -3969,12 +4543,21 @@ mod tests {
         ));
         assert_eq!(result.manifest.images().len(), 4);
 
-        let labels = result.manifest.labels();
+        let labels = result.manifest.label_specs();
         assert_eq!(labels.len(), 1);
         let label = &labels[0];
         assert_eq!(label.name, "region-c");
-        assert_eq!(label.data_type, DataType::Uint32);
-        assert_eq!(label.axis_names, vec!["t", "z", "y", "x"]);
+        assert_eq!(label.image.multiscale.data_type, DataType::Uint32);
+        assert_eq!(
+            label
+                .image
+                .multiscale
+                .axes
+                .iter()
+                .map(|axis| axis.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["t", "z", "y", "x"],
+        );
         // Attached to the A/1/0 tile image specifically.
         let expected_source = ImageId("collection-lbl:image:A/1/0".to_string());
         assert_eq!(label.source_image_id, expected_source);
@@ -3992,7 +4575,7 @@ mod tests {
             .binding_seed
             .images
             .iter()
-            .find(|b| b.image_id == label.label_image_id)
+            .find(|b| b.image_id == label.image.image_id)
             .expect("label binding present");
         assert_eq!(
             binding.store_prefix.as_deref(),
@@ -4052,10 +4635,10 @@ mod tests {
         .unwrap();
     }
 
-    /// A label whose level-0 array has a zero chunk dimension (which would
-    /// divide by zero when computing its grid) is skipped without panicking or
-    /// failing the import; the source image and well-formed sibling labels still
-    /// import.
+    /// A zero chunk on a raw pinned axis must be rejected before normalization:
+    /// canonical 5D normalization would otherwise drop the offending component
+    /// and make the label appear valid. A malformed label is skipped without
+    /// failing its source image or well-formed siblings.
     #[tokio::test]
     async fn label_with_zero_chunk_dimension_is_skipped() {
         let dir = temp_dir("import_label_zero_chunk");
@@ -4071,14 +4654,15 @@ mod tests {
             "uint16",
             serde_json::json!({"colors": [{"label-value": 1, "rgba": [1, 2, 3, 4]}]}),
         );
-        // Zero in the Y chunk dimension.
+        // The non-canonical `m` axis is dropped by normalize_to_5d. Its raw
+        // zero must still reject this label at the shared admission boundary.
         write_label_multiscale(
             &dir,
             "zerochunk",
-            &["t", "z", "y", "x"],
-            &[1, 1, 16, 16],
-            &[1, 1, 0, 16],
-            &[1.0, 1.0, 1.0, 1.0],
+            &["t", "z", "m", "y", "x"],
+            &[1, 1, 2, 16, 16],
+            &[1, 1, 0, 16, 16],
+            &[1.0, 1.0, 1.0, 1.0, 1.0],
             "uint32",
             serde_json::json!({"colors": []}),
         );
@@ -4091,7 +4675,7 @@ mod tests {
         // Source image still imported.
         assert_eq!(result.manifest.images().len(), 1);
         // Only the well-formed label survives; the zero-chunk one is skipped.
-        let labels = result.manifest.labels();
+        let labels = result.manifest.label_specs();
         let names: Vec<&str> = labels.iter().map(|l| l.name.as_str()).collect();
         assert_eq!(labels.len(), 1);
         assert!(names.contains(&"good"));
@@ -4111,7 +4695,7 @@ mod tests {
         let err = import_dataset(&store, "szc", "Src Zero Chunk")
             .await
             .expect_err("a zero-chunk source array must fail the import");
-        assert!(matches!(err, StoreError::Metadata(_)));
+        assert!(matches!(err, StoreError::Bounds(_)));
         assert!(
             err.to_string().contains("zero"),
             "error should name the zero dimension: {err}",
@@ -4120,8 +4704,9 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// The same guard applies on the collection path: a zero chunk dimension in the
-    /// representative tile's array fails loudly rather than panicking.
+    /// The same guard applies on the collection path: a zero chunk dimension in
+    /// any tile's array fails loudly rather than panicking or inheriting a peer's
+    /// valid geometry.
     #[tokio::test]
     async fn collection_source_with_zero_chunk_fails_without_panic() {
         let dir = temp_dir("import_collection_zero_chunk");
@@ -4140,7 +4725,7 @@ mod tests {
         let err = import_dataset(&store, "pzc", "Collection Zero Chunk")
             .await
             .expect_err("a zero-chunk collection tile array must fail the import");
-        assert!(matches!(err, StoreError::Metadata(_)));
+        assert!(matches!(err, StoreError::Bounds(_)));
         assert!(
             err.to_string().contains("zero"),
             "error should name the zero dimension: {err}",
@@ -4162,6 +4747,39 @@ mod tests {
         inner: Arc<dyn ObjectStore>,
         reads: Arc<std::sync::Mutex<Vec<String>>>,
         fail_get_when: Option<fn(&str) -> bool>,
+        tile_geometry_concurrency: Option<Arc<ReadConcurrencyProbe>>,
+    }
+
+    #[derive(Debug, Default)]
+    struct ReadConcurrencyProbe {
+        active: std::sync::atomic::AtomicUsize,
+        max: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ReadConcurrencyProbe {
+        fn enter(&self) -> ReadConcurrencyGuard<'_> {
+            let active = self
+                .active
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            self.max
+                .fetch_max(active, std::sync::atomic::Ordering::SeqCst);
+            ReadConcurrencyGuard(self)
+        }
+
+        fn max(&self) -> usize {
+            self.max.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    struct ReadConcurrencyGuard<'a>(&'a ReadConcurrencyProbe);
+
+    impl Drop for ReadConcurrencyGuard<'_> {
+        fn drop(&mut self) {
+            self.0
+                .active
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     impl std::fmt::Display for RecordingStore {
@@ -4196,6 +4814,18 @@ mod tests {
         ) -> object_store::Result<object_store::GetResult> {
             let location_str = location.to_string();
             self.reads.lock().unwrap().push(location_str.clone());
+            let is_tile_geometry =
+                location_str.ends_with("/zarr.json") && location_str.matches('/').count() == 3;
+            let concurrency_guard = self
+                .tile_geometry_concurrency
+                .as_ref()
+                .filter(|_| is_tile_geometry)
+                .map(|probe| probe.enter());
+            if concurrency_guard.is_some() {
+                // Make overlap observable without coupling the assertion to
+                // local filesystem speed or scheduler luck.
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
             if let Some(should_fail) = self.fail_get_when
                 && should_fail(&location_str)
             {
@@ -4207,8 +4837,15 @@ mod tests {
             self.inner.get_opts(location, options).await
         }
 
-        async fn delete(&self, location: &Path) -> object_store::Result<()> {
-            self.inner.delete(location).await
+        fn delete_stream(
+            &self,
+            locations: futures_util::stream::BoxStream<
+                'static,
+                object_store::Result<object_store::path::Path>,
+            >,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::path::Path>>
+        {
+            self.inner.delete_stream(locations)
         }
 
         fn list(
@@ -4234,12 +4871,13 @@ mod tests {
             self.inner.list_with_delimiter(prefix).await
         }
 
-        async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-            self.inner.copy(from, to).await
-        }
-
-        async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-            self.inner.copy_if_not_exists(from, to).await
+        async fn copy_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
         }
     }
 
@@ -4275,7 +4913,9 @@ mod tests {
             inner: crate::backend::open(dir.to_str().unwrap()).unwrap(),
             reads: reads.clone(),
             fail_get_when: None,
+            tile_geometry_concurrency: None,
         });
+        let metadata = MetadataReader::standalone(Arc::clone(&store));
 
         // A budget of exactly two labels, with ample color headroom.
         let mut budget = LabelBudget {
@@ -4287,15 +4927,19 @@ mod tests {
         let source_owner = EntityId("owner".to_string());
 
         // The probe discovers all declared names — cheap, and expected.
-        let probed = probe_labels_for_image(&store, "").await;
-        assert_eq!(probed.names, vec!["keep0", "keep1", "over"]);
+        let probed = probe_labels_for_image(&metadata, "").await;
+        assert_eq!(
+            probed.names.iter().map(String::as_str).collect::<Vec<_>>(),
+            vec!["keep0", "keep1", "over"]
+        );
 
         let imported = build_labels_within_budget(
             &mut budget,
-            &store,
+            &metadata,
             "ds",
             &source_image_id,
             &source_owner,
+            "labels",
             probed,
         )
         .await;
@@ -4328,6 +4972,169 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// The running label budget belongs to the collection import, not to one
+    /// tile. Once the declared-order cutoff is reached, later labels and later
+    /// tiles perform no label-group metadata reads at all.
+    #[tokio::test]
+    async fn collection_label_budget_stops_across_tile_boundaries() {
+        let dir = temp_dir("collection_label_budget_stop");
+        create_collection_fixture(
+            &dir,
+            "budget",
+            &["A"],
+            &["1"],
+            &[("A", "1", 0, 0, 3)],
+            [1, 1, 1, 32, 32],
+            [1, 1, 1, 32, 32],
+            1,
+        );
+
+        for (tile, names) in [
+            ("0", ["a0", "a1"]),
+            ("1", ["b0", "b1"]),
+            ("2", ["c0", "c1"]),
+        ] {
+            let tile_dir = dir.join("A").join("1").join(tile);
+            write_labels_index(&tile_dir, &names);
+            for name in names {
+                write_label_multiscale(
+                    &tile_dir,
+                    name,
+                    &["t", "z", "y", "x"],
+                    &[1, 1, 16, 16],
+                    &[1, 1, 16, 16],
+                    &[1.0; 4],
+                    "uint16",
+                    serde_json::json!({
+                        "colors": [{"label-value": 1, "rgba": [1, 2, 3, 4]}]
+                    }),
+                );
+            }
+        }
+
+        let (store, reads) = recording_store(&dir);
+        let result = import_dataset_with_admission_policy(
+            &store,
+            "budget-id",
+            "Budget",
+            CollectionAdmissionPolicy {
+                force_exhaustive_label_discovery: true,
+                max_labels: 3,
+                max_label_colors: MAX_LABEL_COLORS_PER_DATASET,
+            },
+        )
+        .await
+        .unwrap();
+
+        let kept: Vec<String> = result
+            .manifest
+            .label_specs()
+            .iter()
+            .map(|label| label.name.clone())
+            .collect();
+        assert_eq!(kept, ["a0", "a1", "b0"]);
+
+        let reads = reads.lock().unwrap();
+        for admitted in ["labels/a0/", "labels/a1/", "labels/b0/"] {
+            assert!(
+                reads.iter().any(|path| path.contains(admitted)),
+                "in-budget label {admitted} must be built: {reads:?}"
+            );
+        }
+        for over_budget in ["labels/b1/", "labels/c0/", "labels/c1/"] {
+            assert!(
+                reads.iter().all(|path| !path.contains(over_budget)),
+                "over-budget label {over_budget} must not be read: {reads:?}"
+            );
+        }
+        drop(reads);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A listed sample expands its whole group, so every tile can expose a
+    /// high-cardinality index. Parsed names must still be admitted once, in
+    /// declared order, under the collection-wide cap rather than accumulating
+    /// one full vector per tile before the build budget is consulted.
+    #[tokio::test]
+    async fn many_high_cardinality_label_indexes_share_parsed_metadata_budget() {
+        const TILES: u32 = 80;
+        const NAMES_PER_TILE: usize = 128;
+        const ADMITTED_NAMES: usize = 3;
+
+        let dir = temp_dir("parsed_label_metadata_budget");
+        create_collection_fixture(
+            &dir,
+            "parsed-budget",
+            &["A"],
+            &["1"],
+            &[("A", "1", 0, 0, TILES)],
+            [1, 1, 1, 32, 32],
+            [1, 1, 1, 32, 32],
+            1,
+        );
+        let names = (0..NAMES_PER_TILE)
+            .map(|index| format!("label-{index:03}"))
+            .collect::<Vec<_>>();
+        let name_refs = names.iter().map(String::as_str).collect::<Vec<_>>();
+        for tile in 0..TILES {
+            write_labels_index(&dir.join("A").join("1").join(tile.to_string()), &name_refs);
+        }
+        let first_tile = dir.join("A").join("1").join("0");
+        for name in names.iter().take(ADMITTED_NAMES) {
+            write_label_multiscale(
+                &first_tile,
+                name,
+                &["t", "z", "y", "x"],
+                &[1, 1, 16, 16],
+                &[1, 1, 16, 16],
+                &[1.0; 4],
+                "uint16",
+                serde_json::json!({
+                    "colors": [{"label-value": 1, "rgba": [1, 2, 3, 4]}]
+                }),
+            );
+        }
+
+        let (store, reads) = recording_store(&dir);
+        let result = import_dataset_with_admission_policy(
+            &store,
+            "parsed-budget-id",
+            "Parsed Budget",
+            CollectionAdmissionPolicy {
+                force_exhaustive_label_discovery: false,
+                max_labels: ADMITTED_NAMES,
+                max_label_colors: MAX_LABEL_COLORS_PER_DATASET,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(count_label_probes(&reads), TILES as usize);
+        let kept = result
+            .manifest
+            .label_specs()
+            .iter()
+            .map(|label| label.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(kept, ["label-000", "label-001", "label-002"]);
+
+        let warnings = result
+            .warnings
+            .iter()
+            .filter(|warning| warning.kind == ImportWarningKind::LabelMetadataBudget)
+            .collect::<Vec<_>>();
+        assert_eq!(warnings.len(), 1, "warnings: {:?}", result.warnings);
+        let dropped = TILES as usize * NAMES_PER_TILE - ADMITTED_NAMES;
+        assert!(
+            warnings[0].message.contains(&dropped.to_string()),
+            "{}",
+            warnings[0].message
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// Wrap a local fixture directory in a [`RecordingStore`], returning the
     /// store and the shared read log.
     fn recording_store(
@@ -4338,6 +5145,7 @@ mod tests {
             inner: crate::backend::open(dir.to_str().unwrap()).unwrap(),
             reads: reads.clone(),
             fail_get_when: None,
+            tile_geometry_concurrency: None,
         });
         (store, reads)
     }
@@ -4354,6 +5162,7 @@ mod tests {
             inner: crate::backend::open(dir.to_str().unwrap()).unwrap(),
             reads: reads.clone(),
             fail_get_when: Some(|location| location.ends_with("labels/zarr.json")),
+            tile_geometry_concurrency: None,
         });
         (store, reads)
     }
@@ -4364,23 +5173,29 @@ mod tests {
     /// store-wide. Group and root metadata sit shallower (fewer path
     /// separators) and still read cleanly, so groups parse while no tile's
     /// geometry can be read. The failed reads are still recorded.
-    fn tile_geometry_read_erroring_store(
-        dir: &std::path::Path,
-    ) -> (Arc<dyn ObjectStore>, Arc<std::sync::Mutex<Vec<String>>>) {
+    type ConcurrencyRecordingStore = (
+        Arc<dyn ObjectStore>,
+        Arc<std::sync::Mutex<Vec<String>>>,
+        Arc<ReadConcurrencyProbe>,
+    );
+
+    fn tile_geometry_read_erroring_store(dir: &std::path::Path) -> ConcurrencyRecordingStore {
         let reads = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let concurrency = Arc::new(ReadConcurrencyProbe::default());
         let store: Arc<dyn ObjectStore> = Arc::new(RecordingStore {
             inner: crate::backend::open(dir.to_str().unwrap()).unwrap(),
             reads: reads.clone(),
             fail_get_when: Some(|location| {
                 location.ends_with("/zarr.json") && location.matches('/').count() == 3
             }),
+            tile_geometry_concurrency: Some(concurrency.clone()),
         });
-        (store, reads)
+        (store, reads, concurrency)
     }
 
-    /// Count the recorded tile-geometry metadata reads
-    /// (`group/column/tile/zarr.json`), which the geometry search must keep
-    /// bounded by the group count rather than the total tile count.
+    /// Count recorded tile-root metadata reads
+    /// (`group/column/tile/zarr.json`). Strict admission performs exactly one
+    /// such read per declared tile while bounding how many are in flight.
     fn count_tile_geometry_reads(reads: &std::sync::Mutex<Vec<String>>) -> usize {
         reads
             .lock()
@@ -4433,14 +5248,12 @@ mod tests {
         assert_eq!(sample_probe_indices(&spans), vec![0, 1, 3, 4, 8]);
     }
 
-    /// A label-free collection wide enough for sampled discovery imports
-    /// with metadata read traffic proportional to its GROUPS, never one read
-    /// per tile: 6 groups x 60 tiles = 360 tiles must cost on the order of
-    /// dozens of reads (root + one per group + the representative tile's
-    /// template + two label samples per group). The bounded discovery is
-    /// surfaced as a warning naming the exhaustive override.
+    /// Strict geometry admission reads every tile, while independent label
+    /// discovery still samples two indexes per group. This regression keeps the
+    /// correctness cost explicit and proves label probing does not accidentally
+    /// become exhaustive as a side effect.
     #[tokio::test]
-    async fn label_free_wide_collection_reads_scale_with_groups() {
+    async fn wide_collection_validates_all_geometry_but_samples_label_indexes() {
         let dir = temp_dir("wide_label_free");
         create_collection_fixture(
             &dir,
@@ -4466,7 +5279,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.manifest.images().len(), 360, "one image per tile");
-        assert!(result.manifest.labels().is_empty());
+        assert!(result.manifest.label_specs().is_empty());
 
         let reads = reads.lock().unwrap();
         // Label probes: exactly two per group (first + last tile), never one
@@ -4479,15 +5292,18 @@ mod tests {
             label_probes, 12,
             "expected 2 label probes per group (6 groups), got {label_probes}",
         );
-        // Total metadata reads track structure (root + 6 group metas + the
-        // representative tile and its level + 12 label samples ≈ 21), never
-        // the 360 tiles.
-        println!("metadata reads for 6x60 collection: {}", reads.len());
-        assert!(
-            reads.len() <= 40,
-            "expected dozens of metadata reads for a 360-tile collection, got {}",
-            reads.len(),
+        let tile_geometry_reads = reads
+            .iter()
+            .filter(|path| path.ends_with("/zarr.json") && path.matches('/').count() == 3)
+            .count();
+        assert_eq!(
+            tile_geometry_reads, 360,
+            "strict admission must validate every declared tile root"
         );
+        // One root + six group objects + two metadata objects per tile + 12
+        // sampled label indexes. Keep a tight upper bound so accidental extra
+        // passes over the tile metadata are caught.
+        assert_eq!(reads.len(), 1 + 6 + 2 * 360 + 12);
         drop(reads);
 
         // Bounded discovery is announced, with the escape hatch named.
@@ -4548,7 +5364,7 @@ mod tests {
         // All three labels found, attached to the right tile images.
         let mut sources: Vec<String> = result
             .manifest
-            .labels()
+            .label_specs()
             .iter()
             .map(|l| l.source_image_id.0.clone())
             .collect();
@@ -4624,7 +5440,7 @@ mod tests {
         let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
         let result = import_dataset(&store, "small", "Small").await.unwrap();
 
-        let labels = result.manifest.labels();
+        let labels = result.manifest.label_specs();
         assert_eq!(labels.len(), 1, "the interior tile's label must be found");
         assert_eq!(
             labels[0].source_image_id,
@@ -4681,7 +5497,7 @@ mod tests {
             .await
             .unwrap();
 
-        let labels = result.manifest.labels();
+        let labels = result.manifest.label_specs();
         assert_eq!(labels.len(), 1, "labels: {labels:?}");
         assert_eq!(
             labels[0].source_image_id,
@@ -4724,7 +5540,7 @@ mod tests {
             .await
             .unwrap();
 
-        let labels = result.manifest.labels();
+        let labels = result.manifest.label_specs();
         assert_eq!(labels.len(), 1, "labels: {labels:?}");
         assert_eq!(
             labels[0].source_image_id,
@@ -4762,7 +5578,7 @@ mod tests {
             .await
             .unwrap();
 
-        let labels = result.manifest.labels();
+        let labels = result.manifest.label_specs();
         assert_eq!(labels.len(), 1, "labels: {labels:?}");
         assert_eq!(
             labels[0].source_image_id,
@@ -4821,7 +5637,7 @@ mod tests {
             .expect("store-wide label-read errors must never fail the import");
 
         assert_eq!(result.manifest.images().len(), 480, "one image per tile");
-        assert!(result.manifest.labels().is_empty());
+        assert!(result.manifest.label_specs().is_empty());
 
         // Read bound: two samples per group (48) plus at most
         // MAX_UNUSABLE_GROUP_EXPANSIONS expanded groups (18 remaining tiles
@@ -4892,7 +5708,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.manifest.labels().is_empty());
+        assert!(result.manifest.label_specs().is_empty());
 
         // 6 groups x 2 samples, then the cap: only
         // MAX_UNUSABLE_GROUP_EXPANSIONS of the 6 anomaly-flagged groups
@@ -4950,7 +5766,7 @@ mod tests {
             .unwrap();
 
         // Every group's label was found: no cap applied.
-        assert_eq!(result.manifest.labels().len(), 6);
+        assert_eq!(result.manifest.label_specs().len(), 6);
         // All 6 groups expanded in full: 12 samples + 6 x 18 remaining tiles.
         assert_eq!(count_label_probes(&reads), 12 + 6 * 18);
         // Nothing was unusable, so no anomaly warning.
@@ -5020,7 +5836,7 @@ mod tests {
             .await
             .unwrap();
 
-        let labels = result.manifest.labels();
+        let labels = result.manifest.label_specs();
         assert_eq!(labels.len(), 1, "labels: {labels:?}");
         assert_eq!(
             labels[0].source_image_id,
@@ -5103,7 +5919,7 @@ mod tests {
             .await
             .unwrap();
 
-        let labels = result.manifest.labels();
+        let labels = result.manifest.label_specs();
         assert_eq!(labels.len(), 1, "labels: {labels:?}");
         assert_eq!(
             labels[0].source_image_id,
@@ -5167,10 +5983,10 @@ mod tests {
             .unwrap();
 
         assert!(
-            result.manifest.labels().is_empty(),
+            result.manifest.label_specs().is_empty(),
             "a costly group past the cap is not expanded, so its interior \
              label stays undiscovered: {:?}",
-            result.manifest.labels(),
+            result.manifest.label_specs(),
         );
         assert_eq!(
             count_label_probes(&reads),
@@ -5219,7 +6035,7 @@ mod tests {
             .await
             .expect("a corrupt labels index must not fail the import");
 
-        assert!(result.manifest.labels().is_empty());
+        assert!(result.manifest.label_specs().is_empty());
         let unusable: Vec<_> = result
             .warnings
             .iter()
@@ -5258,7 +6074,7 @@ mod tests {
             .expect("a corrupt labels index must not fail the import");
 
         assert_eq!(result.manifest.images().len(), 1);
-        assert!(result.manifest.labels().is_empty());
+        assert!(result.manifest.label_specs().is_empty());
         let unusable: Vec<_> = result
             .warnings
             .iter()

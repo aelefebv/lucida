@@ -1,10 +1,13 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type RefObject,
 } from "react";
-import { relativeTimeFromIso } from "../savedView/useBookmarks.ts";
+import { relativeTimeFromIso } from "../savedView/relativeTime.ts";
 import {
   defaultWorkspaceSavedViewName,
   useWorkspaceSavedViews,
@@ -12,10 +15,13 @@ import {
   type WorkspaceSavedViewVisibility,
 } from "../savedView/useWorkspaceSavedViews.ts";
 import type { SavedView } from "../savedView/types.ts";
-import "./BookmarkSidebar.css";
+import { useModalDialog } from "../hooks/useModalDialog.ts";
+import { FloatingPortalSurface } from "./FloatingSurface.tsx";
+import { InlineRenameInput } from "./InlineRenameInput.tsx";
+import "./SavedViewSidebar.css";
 
-// How long a rejected proposal lingers (hidden, undoable) before the reject
-// PATCH actually fires. Long enough to read the toast and hit Undo; short
+// How long a rejected proposal lingers (hidden, cancelable) before the reject
+// PATCH actually fires. Long enough to read the toast and cancel; short
 // enough that an editor curating a queue isn't left waiting.
 const REJECT_UNDO_WINDOW_MS = 6000;
 
@@ -49,18 +55,18 @@ interface ToastAction {
 
 interface ToastMessage {
   /** Stable identity for this toast. Plain status toasts get an auto-generated
-   *  id; an Undo toast for a deferred reject is keyed by `reject:<savedViewId>`
+   *  id; a cancellation toast for a deferred reject is keyed by `reject:<savedViewId>`
    *  so each pending reject owns its OWN dismissible toast (the data layer
    *  already supports independent multi-undo via the per-id timer Map — the
    *  toast stack is the matching presentation). */
   id: string;
   text: string;
   kind: "info" | "warn";
-  /** Optional inline action (e.g. "Undo") rendered as a button in the toast. */
+  /** Optional inline action rendered as a button in the toast. */
   action?: ToastAction;
 }
 
-/** Stable toast id for a deferred reject so its Undo toast never collides with
+/** Stable toast id for a deferred reject so its cancellation toast never collides with
  *  (or gets clobbered by) another pending reject's toast. */
 function rejectToastId(savedViewId: string): string {
   return `reject:${savedViewId}`;
@@ -72,8 +78,7 @@ interface ConfirmRequest {
 
 interface MenuState {
   savedViewId: string;
-  x: number;
-  y: number;
+  anchorElement: HTMLElement;
 }
 
 export function WorkspaceSavedViewsSidebar({
@@ -150,6 +155,7 @@ export function WorkspaceSavedViewsSidebar({
   const [confirmDelete, setConfirmDelete] = useState<ConfirmRequest | null>(null);
   const [confirmPropose, setConfirmPropose] = useState<ConfirmRequest | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   // A STACK of toasts, not a single slot: rejecting view B must not evict view
   // A's still-live "Undo" toast while A's reject timer keeps running (#818).
   // Newest renders on top of the stack.
@@ -221,7 +227,7 @@ export function WorkspaceSavedViewsSidebar({
   }, []);
 
   // One timer per deferred reject so a power-user can stack several at once and
-  // Undo each independently. Cleaned up on unmount so a pending PATCH never
+  // Cancel each independently. Cleaned up on unmount so a pending PATCH never
   // fires after the sidebar is gone.
   const rejectTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   useEffect(() => {
@@ -240,12 +246,16 @@ export function WorkspaceSavedViewsSidebar({
     if (menu === null) return;
     const onDoc = (e: MouseEvent) => {
       const target = e.target as HTMLElement | null;
-      if (target?.closest(".bookmark-menu")) return;
-      if (target?.closest(".bookmark-menu-btn")) return;
+      if (target?.closest(".saved-view-menu")) return;
+      if (target?.closest(".saved-view-menu-btn")) return;
       setMenu(null);
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setMenu(null);
+      if (e.key === "Escape") {
+        e.preventDefault();
+        menu.anchorElement.focus({ preventScroll: true });
+        setMenu(null);
+      }
     };
     document.addEventListener("mousedown", onDoc);
     document.addEventListener("keydown", onKey);
@@ -253,6 +263,21 @@ export function WorkspaceSavedViewsSidebar({
       document.removeEventListener("mousedown", onDoc);
       document.removeEventListener("keydown", onKey);
     };
+  }, [menu]);
+
+  useLayoutEffect(() => {
+    if (menu === null) return;
+    const closeIfDetached = () => {
+      if (!menu.anchorElement.isConnected) {
+        setMenu((current) => current === menu ? null : current);
+      }
+    };
+    closeIfDetached();
+    const observer = typeof MutationObserver === "undefined"
+      ? null
+      : new MutationObserver(closeIfDetached);
+    observer?.observe(document.body, { childList: true, subtree: true });
+    return () => observer?.disconnect();
   }, [menu]);
 
   const handleSave = useCallback(
@@ -383,7 +408,7 @@ export function WorkspaceSavedViewsSidebar({
 
   // Cancel a pending reject before it commits: clear its timer, un-hide the
   // row (it was only hidden locally — never sent), and drop ONLY this view's
-  // Undo toast (others stay). No PATCH ever happens, so the rejection simply
+  // cancellation toast (others stay). No PATCH ever happens, so the rejection simply
   // never occurred.
   const cancelReject = useCallback(
     (id: string) => {
@@ -404,7 +429,7 @@ export function WorkspaceSavedViewsSidebar({
   );
 
   // Reject is a delayed, cancelable send: hide the row immediately and offer an
-  // Undo, but only fire the reject PATCH once the window elapses. Approve stays
+  // cancellation, but only fire the reject PATCH once the window elapses. Approve stays
   // immediate (see handleApprove) — only rejection is recoverable.
   const handleReject = useCallback(
     (view: WorkspaceSavedView) => {
@@ -420,13 +445,13 @@ export function WorkspaceSavedViewsSidebar({
 
       const timer = setTimeout(() => {
         rejectTimers.current.delete(id);
-        // The window elapsed without an Undo: commit the rejection. The hook
+        // The window elapsed without cancellation: commit the rejection. The hook
         // drops it from the list and refreshes; clear our local hide once it
         // settles (on failure the refresh restores the row, so it reappears).
         void rejectSavedView(id)
           .then(() => {
             // The view is really gone now — if it was the open/active row, tell
-            // the host so the highlight doesn't dangle (#818). Undo never
+            // the host so the highlight doesn't dangle (#818). Cancellation never
             // reaches here (it clears the timer first), so the live view is
             // still flagged active across the whole cancelable window.
             invalidateIfOpen(id);
@@ -448,14 +473,14 @@ export function WorkspaceSavedViewsSidebar({
       }, REJECT_UNDO_WINDOW_MS);
       rejectTimers.current.set(id, timer);
 
-      // Keep the toast (and its Undo) alive for the whole cancelable window so
+      // Keep the toast action alive for the whole cancelable window so
       // the affordance never vanishes while the reject can still be undone. The
       // toast is keyed by the saved-view id, so rejecting a second view pushes
-      // its OWN Undo toast onto the stack instead of evicting this one (#818).
+      // its own cancellation toast onto the stack instead of evicting this one (#818).
       showToast(`Rejected "${view.name}"`, "info", {
         durationMs: REJECT_UNDO_WINDOW_MS,
         id: rejectToastId(id),
-        action: { label: "Undo", onClick: () => cancelReject(id) },
+        action: { label: "Cancel rejection", onClick: () => cancelReject(id) },
       });
     },
     [cancelReject, invalidateIfOpen, rejectSavedView, showToast],
@@ -547,9 +572,25 @@ export function WorkspaceSavedViewsSidebar({
     ? savedViews.filter((view) => view.visibility !== "proposed")
     : savedViews;
 
+  const closeMenuAndRestoreFocus = (afterClose?: () => void) => {
+    const trigger = menu?.anchorElement;
+    if (trigger?.isConnected) trigger.focus({ preventScroll: true });
+    setMenu(null);
+    afterClose?.();
+  };
+
+  // A fully clipped row trigger is not a valid focus-restoration target. The
+  // shared floating-surface owner reports that transition; close the menu state
+  // (which clears aria-expanded/aria-controls) and move focus to the stable,
+  // visible search field above the scrolling list.
+  const closeMenuForHiddenAnchor = () => {
+    setMenu(null);
+    searchInputRef.current?.focus({ preventScroll: true });
+  };
+
   return (
-    <div className="bookmark-sidebar" style={style}>
-      <div className="bookmark-sidebar-header">
+    <div className="saved-view-sidebar" data-floating-safe-region style={style}>
+      <div className="saved-view-sidebar-header">
         <h3>Saved Views</h3>
         <button
           type="button"
@@ -565,15 +606,17 @@ export function WorkspaceSavedViewsSidebar({
         </button>
       </div>
 
-      <div className="bookmark-filter-row">
+      <div className="saved-view-filter-row">
         <input
+          ref={searchInputRef}
           type="text"
-          className="bookmark-search"
+          aria-label="Search saved views"
+          className="saved-view-search"
           placeholder="Search name or creator..."
           value={filter.search}
           onChange={(e) => setSearch(e.target.value)}
         />
-        <label className="bookmark-mine-toggle">
+        <label className="saved-view-mine-toggle">
           <input
             type="checkbox"
             checked={filter.mineOnly}
@@ -583,15 +626,19 @@ export function WorkspaceSavedViewsSidebar({
         </label>
       </div>
 
-      {error && <div className="bookmark-error">Error: {error}</div>}
-      {isLoading && <div className="bookmark-loading">Loading saved views...</div>}
+      {error && <div className="saved-view-error" role="alert">Error: {error}</div>}
+      {isLoading && (
+        <div className="saved-view-loading" role="status" aria-live="polite">
+          Loading saved views...
+        </div>
+      )}
 
       {reviewQueue.length > 0 && (
-        <div className="bookmark-review-section" data-testid="saved-view-review-queue">
-          <div className="bookmark-section-header">
+        <div className="saved-view-review-section" data-testid="saved-view-review-queue">
+          <div className="saved-view-section-header">
             Proposed for review ({reviewQueue.length})
           </div>
-          <div className="bookmark-list" role="list">
+          <div className="saved-view-list" role="list">
             {reviewQueue.map((view) => (
               <SavedViewRow
                 key={view.id}
@@ -599,24 +646,37 @@ export function WorkspaceSavedViewsSidebar({
                 isRenaming={renameId === view.id}
                 isDefault={defaultSavedViewId === view.id}
                 isActive={currentOpenSavedViewId === view.id}
+                menuOpen={menu?.savedViewId === view.id}
                 onRenameCommit={(n) => handleRenameCommit(view.id, n)}
                 onRenameCancel={() => setRenameId(null)}
                 onOpen={() => void handleOpen(view)}
-                onMenu={(rect) =>
-                  setMenu({ savedViewId: view.id, x: rect.right, y: rect.bottom })}
+                onMenu={(anchorElement) => setMenu((current) =>
+                  current?.savedViewId === view.id
+                    ? null
+                    : { savedViewId: view.id, anchorElement })}
               >
-                <div className="bookmark-review-actions">
-                  <button
-                    type="button"
-                    className="primary"
-                    data-testid={`saved-view-approve-${view.id}`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void handleApprove(view);
-                    }}
-                  >
-                    Approve
-                  </button>
+                <div className="saved-view-review-actions">
+                  {isMine(view) ? (
+                    <span
+                      className="saved-view-review-self-note"
+                      data-testid={`saved-view-self-approval-note-${view.id}`}
+                      role="note"
+                    >
+                      A different editor must approve your proposal.
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      className="primary"
+                      data-testid={`saved-view-approve-${view.id}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void handleApprove(view);
+                      }}
+                    >
+                      Approve
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="danger"
@@ -635,28 +695,33 @@ export function WorkspaceSavedViewsSidebar({
         </div>
       )}
 
-      <div className="bookmark-list" role="list">
-        {mainList.map((view) => (
-          <SavedViewRow
-            key={view.id}
-            view={view}
-            isRenaming={renameId === view.id}
-            isDefault={defaultSavedViewId === view.id}
-            isActive={currentOpenSavedViewId === view.id}
-            onRenameCommit={(n) => handleRenameCommit(view.id, n)}
-            onRenameCancel={() => setRenameId(null)}
-            onOpen={() => void handleOpen(view)}
-            onMenu={(rect) =>
-              setMenu({ savedViewId: view.id, x: rect.right, y: rect.bottom })}
-          />
-        ))}
-        {showEmptyState && <div className="bookmark-empty">{emptyText}</div>}
-      </div>
+      {showEmptyState ? (
+        <div className="saved-view-empty">{emptyText}</div>
+      ) : (
+        <div className="saved-view-list" role="list">
+          {mainList.map((view) => (
+            <SavedViewRow
+              key={view.id}
+              view={view}
+              isRenaming={renameId === view.id}
+              isDefault={defaultSavedViewId === view.id}
+              isActive={currentOpenSavedViewId === view.id}
+              menuOpen={menu?.savedViewId === view.id}
+              onRenameCommit={(n) => handleRenameCommit(view.id, n)}
+              onRenameCancel={() => setRenameId(null)}
+              onOpen={() => void handleOpen(view)}
+              onMenu={(anchorElement) => setMenu((current) =>
+                current?.savedViewId === view.id
+                  ? null
+                  : { savedViewId: view.id, anchorElement })}
+            />
+          ))}
+        </div>
+      )}
 
       {menu && (
         <WorkspaceSavedViewActionsMenu
-          x={menu.x}
-          y={menu.y}
+          anchorElement={menu.anchorElement}
           canEdit={canEdit}
           isMine={(() => {
             const view = savedViews.find((item) => item.id === menu.savedViewId);
@@ -667,6 +732,9 @@ export function WorkspaceSavedViewsSidebar({
           })()}
           isDefault={defaultSavedViewId === menu.savedViewId}
           savedViewId={menu.savedViewId}
+          onCloseAndRestoreFocus={() => closeMenuAndRestoreFocus()}
+          onAnchorHidden={closeMenuForHiddenAnchor}
+          hiddenAnchorFocusRef={searchInputRef}
           canPromote={(() => {
             const view = savedViews.find((item) => item.id === menu.savedViewId);
             return view ? canPromoteToShared(view) : false;
@@ -681,43 +749,49 @@ export function WorkspaceSavedViewsSidebar({
           })()}
           onPromote={() => {
             const view = savedViews.find((item) => item.id === menu.savedViewId);
-            setMenu(null);
-            if (view) void handlePromote(view);
+            closeMenuAndRestoreFocus(() => {
+              if (view) void handlePromote(view);
+            });
           }}
           onPropose={() => {
             const view = savedViews.find((item) => item.id === menu.savedViewId);
-            setMenu(null);
-            // Confirm first — proposing makes the view visible to every editor.
-            if (view) setConfirmPropose({ savedView: view });
+            closeMenuAndRestoreFocus(() => {
+              // Confirm first — proposing makes the view visible to every editor.
+              if (view) setConfirmPropose({ savedView: view });
+            });
           }}
           onWithdraw={() => {
             const view = savedViews.find((item) => item.id === menu.savedViewId);
-            setMenu(null);
-            if (view) void handleWithdraw(view);
+            closeMenuAndRestoreFocus(() => {
+              if (view) void handleWithdraw(view);
+            });
           }}
           onRename={() => {
-            setRenameId(menu.savedViewId);
-            setMenu(null);
+            closeMenuAndRestoreFocus(() => setRenameId(menu.savedViewId));
           }}
           onSetDefault={() => {
             const view = savedViews.find((item) => item.id === menu.savedViewId);
-            setMenu(null);
-            if (view) void handleSetDefault(view);
+            closeMenuAndRestoreFocus(() => {
+              if (view) void handleSetDefault(view);
+            });
           }}
           onReplace={() => {
             const view = savedViews.find((item) => item.id === menu.savedViewId);
-            setMenu(null);
-            if (view) void handleReplace(view);
+            closeMenuAndRestoreFocus(() => {
+              if (view) void handleReplace(view);
+            });
           }}
           onDelete={() => {
             const view = savedViews.find((item) => item.id === menu.savedViewId);
-            setMenu(null);
-            if (view) setConfirmDelete({ savedView: view });
+            closeMenuAndRestoreFocus(() => {
+              if (view) setConfirmDelete({ savedView: view });
+            });
           }}
           onCopyLink={() => {
             const view = savedViews.find((item) => item.id === menu.savedViewId);
-            setMenu(null);
-            if (view) void handleCopyLink(view);
+            closeMenuAndRestoreFocus(() => {
+              if (view) void handleCopyLink(view);
+            });
           }}
         />
       )}
@@ -771,19 +845,19 @@ export function WorkspaceSavedViewsSidebar({
       )}
 
       {toasts.length > 0 && (
-        <div className="bookmark-toast-stack" data-testid="saved-view-toast-stack">
+        <div className="saved-view-toast-stack" data-testid="saved-view-toast-stack">
           {toasts.map((t) => (
             <div
               key={t.id}
               role="status"
-              className={`bookmark-toast${t.kind === "warn" ? " warn" : ""}`}
+              className={`saved-view-toast${t.kind === "warn" ? " warn" : ""}`}
               data-testid="saved-view-toast"
             >
-              <span className="bookmark-toast-text">{t.text}</span>
+              <span className="saved-view-toast-text">{t.text}</span>
               {t.action && (
                 <button
                   type="button"
-                  className="bookmark-toast-action"
+                  className="saved-view-toast-action"
                   data-testid="saved-view-toast-action"
                   onClick={t.action.onClick}
                 >
@@ -815,6 +889,7 @@ function SavedViewRow({
   isRenaming,
   isDefault,
   isActive,
+  menuOpen,
   onRenameCommit,
   onRenameCancel,
   onOpen,
@@ -825,43 +900,45 @@ function SavedViewRow({
   isRenaming: boolean;
   isDefault: boolean;
   isActive: boolean;
+  menuOpen: boolean;
   onRenameCommit: (name: string) => void;
   onRenameCancel: () => void;
   onOpen: () => void;
-  onMenu: (rect: DOMRect) => void;
+  onMenu: (anchorElement: HTMLElement) => void;
   children?: React.ReactNode;
 }) {
   const chip = VISIBILITY_CHIP[view.visibility];
   return (
     <div
       role="listitem"
-      className="bookmark-row"
+      className="saved-view-row"
       data-testid="saved-view-row"
       data-visibility={view.visibility}
       data-active={isActive ? "true" : undefined}
       aria-current={isActive ? "true" : undefined}
-      onClick={(e) => {
-        const target = e.target as HTMLElement | null;
-        if (target?.closest(".bookmark-menu-btn")) return;
-        if (target?.closest(".bookmark-name-input")) return;
-        if (target?.closest(".bookmark-review-actions")) return;
-        if (isRenaming) return;
-        onOpen();
-      }}
     >
-      <div className="bookmark-row-top">
+      <div className="saved-view-row-top">
         {isRenaming ? (
-          <RenameInput
-            initial={view.name}
+          <InlineRenameInput
+            initialValue={view.name}
+            className="saved-view-name-input"
+            aria-label="Saved view name"
             onCommit={onRenameCommit}
             onCancel={onRenameCancel}
           />
         ) : (
-          <span className="bookmark-name" title={view.name}>{view.name}</span>
+          <button
+            type="button"
+            className="saved-view-name saved-view-open-button"
+            title={view.name}
+            onClick={onOpen}
+          >
+            {view.name}
+          </button>
         )}
         {chip && (
           <span
-            className={`bookmark-visibility-chip bookmark-visibility-chip-${view.visibility}`}
+            className={`saved-view-visibility-chip saved-view-visibility-chip-${view.visibility}`}
             data-testid={`saved-view-visibility-${view.id}`}
             title={chip.title}
           >
@@ -870,17 +947,20 @@ function SavedViewRow({
         )}
         <button
           type="button"
-          className="bookmark-menu-btn"
+          className="saved-view-menu-btn"
           aria-label="Saved view actions"
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          aria-controls={menuOpen ? `saved-view-actions-${view.id}` : undefined}
           onClick={(e) => {
             e.stopPropagation();
-            onMenu((e.currentTarget as HTMLElement).getBoundingClientRect());
+            onMenu(e.currentTarget);
           }}
         >
           ...
         </button>
       </div>
-      <div className="bookmark-row-meta">
+      <div className="saved-view-row-meta">
         {view.created_by_name || view.created_by} | {relativeTimeFromIso(view.updated_at)}
         {isDefault ? " | default" : ""}
       </div>
@@ -901,50 +981,15 @@ function pickEmptyMessage({
   return "No saved views yet.";
 }
 
-function RenameInput({
-  initial,
-  onCommit,
-  onCancel,
-}: {
-  initial: string;
-  onCommit: (name: string) => void;
-  onCancel: () => void;
-}) {
-  const [value, setValue] = useState(initial);
-  const ref = useRef<HTMLInputElement | null>(null);
-  useEffect(() => {
-    ref.current?.focus();
-    ref.current?.select();
-  }, []);
-  return (
-    <input
-      ref={ref}
-      type="text"
-      className="bookmark-name-input"
-      value={value}
-      onChange={(e) => setValue(e.target.value)}
-      onClick={(e) => e.stopPropagation()}
-      onBlur={() => onCommit(value)}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          onCommit(value);
-        } else if (e.key === "Escape") {
-          e.preventDefault();
-          onCancel();
-        }
-      }}
-    />
-  );
-}
-
 function WorkspaceSavedViewActionsMenu({
-  x,
-  y,
+  anchorElement,
   canEdit,
   isMine,
   isDefault,
   savedViewId,
+  onCloseAndRestoreFocus,
+  onAnchorHidden,
+  hiddenAnchorFocusRef,
   canPromote,
   canPropose,
   canWithdraw,
@@ -957,12 +1002,14 @@ function WorkspaceSavedViewActionsMenu({
   onDelete,
   onCopyLink,
 }: {
-  x: number;
-  y: number;
+  anchorElement: HTMLElement;
   canEdit: boolean;
   isMine: boolean;
   isDefault: boolean;
   savedViewId: string;
+  onCloseAndRestoreFocus: () => void;
+  onAnchorHidden: () => void;
+  hiddenAnchorFocusRef: RefObject<HTMLElement | null>;
   canPromote: boolean;
   canPropose: boolean;
   canWithdraw: boolean;
@@ -980,11 +1027,50 @@ function WorkspaceSavedViewActionsMenu({
   // so offer it whenever the row is mine — even to a viewer. Set-default /
   // Update / promote act on the shared document and stay gated by edit access.
   const canManageOwn = canEdit || isMine;
+  const menuId = `saved-view-actions-${savedViewId}`;
+  useLayoutEffect(() => {
+    document.getElementById(menuId)
+      ?.querySelector<HTMLElement>("[role='menuitem']:not([disabled])")
+      ?.focus({ preventScroll: true });
+  }, [menuId]);
+
+  const onMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const items = Array.from(
+      event.currentTarget.querySelectorAll<HTMLElement>(
+        "[role='menuitem']:not([disabled])",
+      ),
+    );
+    if (items.length === 0) return;
+    const activeIndex = items.indexOf(document.activeElement as HTMLElement);
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowDown") nextIndex = (activeIndex + 1) % items.length;
+    if (event.key === "ArrowUp") {
+      nextIndex = activeIndex <= 0 ? items.length - 1 : activeIndex - 1;
+    }
+    if (event.key === "Home") nextIndex = 0;
+    if (event.key === "End") nextIndex = items.length - 1;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      onCloseAndRestoreFocus();
+      return;
+    }
+    if (nextIndex !== null) {
+      event.preventDefault();
+      items[nextIndex]?.focus({ preventScroll: true });
+    }
+  };
   return (
-    <div
-      className="bookmark-menu"
-      style={{ left: x - 180, top: y + 4 }}
+    <FloatingPortalSurface
+      anchorElement={anchorElement}
+      fallbackSize={{ width: 180, height: 320 }}
+      onAnchorHidden={onAnchorHidden}
+      focusFallbackRef={hiddenAnchorFocusRef}
+      className="saved-view-menu"
+      id={menuId}
       role="menu"
+      aria-label="Saved view actions"
+      onKeyDown={onMenuKeyDown}
     >
       <button type="button" role="menuitem" onClick={onCopyLink}>Copy view link</button>
       {canPromote && (
@@ -1033,7 +1119,7 @@ function WorkspaceSavedViewActionsMenu({
           </button>
         </>
       )}
-    </div>
+    </FloatingPortalSurface>
   );
 }
 
@@ -1059,6 +1145,11 @@ function SaveWorkspaceSavedViewModal({
     "personal",
   );
   const ref = useRef<HTMLInputElement | null>(null);
+  const { dialogRef, onKeyDown } = useModalDialog({
+    open: true,
+    onClose: onCancel,
+    initialFocusRef: ref,
+  });
   useEffect(() => {
     ref.current?.focus();
     ref.current?.select();
@@ -1071,17 +1162,28 @@ function SaveWorkspaceSavedViewModal({
   };
 
   return (
-    <div className="bookmark-save-overlay" onClick={onCancel}>
+    // Backdrop clicks are a pointer convenience; Escape and Cancel are the
+    // equivalent keyboard paths managed by useModalDialog.
+    // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
+    <div
+      className="saved-view-save-overlay"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onCancel();
+      }}
+    >
+      {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape/focus-trap keys bubble from dialog controls. */}
       <div
-        className="bookmark-save-modal"
-        onClick={(e) => e.stopPropagation()}
+        ref={dialogRef}
+        className="saved-view-save-modal"
         role="dialog"
         aria-modal="true"
         aria-label="Save current view"
+        tabIndex={-1}
+        onKeyDown={onKeyDown}
       >
         <h4>Save current view</h4>
-        <label className="bookmark-save-field">
-          <span className="bookmark-save-tile-label">Name</span>
+        <label className="saved-view-save-field">
+          <span className="saved-view-save-field-label">Name</span>
           <input
             ref={ref}
             type="text"
@@ -1100,11 +1202,12 @@ function SaveWorkspaceSavedViewModal({
           />
         </label>
 
-        <fieldset className="bookmark-visibility-fieldset">
-          <legend className="bookmark-save-tile-label">Who can see this</legend>
-          <div className="bookmark-visibility-options" role="radiogroup" aria-label="Who can see this view">
+        <fieldset className="saved-view-visibility-fieldset">
+          <legend className="saved-view-save-field-label">Who can see this</legend>
+          <div className="saved-view-visibility-options" role="radiogroup" aria-label="Who can see this view">
             <label
-              className={`bookmark-visibility-option${
+              aria-label="Personal (only me)"
+              className={`saved-view-visibility-option${
                 visibility === "personal" ? " selected" : ""
               }`}
             >
@@ -1116,16 +1219,17 @@ function SaveWorkspaceSavedViewModal({
                 checked={visibility === "personal"}
                 onChange={() => setVisibility("personal")}
               />
-              <span className="bookmark-visibility-option-text">
-                <span className="bookmark-visibility-option-title">Personal (only me)</span>
-                <span className="bookmark-visibility-option-hint">
+              <span className="saved-view-visibility-option-text">
+                <span className="saved-view-visibility-option-title">Personal (only me)</span>
+                <span className="saved-view-visibility-option-hint">
                   Saved to your account; teammates won't see it.
                 </span>
               </span>
             </label>
 
             <label
-              className={`bookmark-visibility-option${
+              aria-label="Shared with the team"
+              className={`saved-view-visibility-option${
                 visibility === "shared" ? " selected" : ""
               }${canSaveShared ? "" : " disabled"}`}
             >
@@ -1138,9 +1242,9 @@ function SaveWorkspaceSavedViewModal({
                 disabled={!canSaveShared}
                 onChange={() => setVisibility("shared")}
               />
-              <span className="bookmark-visibility-option-text">
-                <span className="bookmark-visibility-option-title">Shared (team)</span>
-                <span className="bookmark-visibility-option-hint">
+              <span className="saved-view-visibility-option-text">
+                <span className="saved-view-visibility-option-title">Shared (team)</span>
+                <span className="saved-view-visibility-option-hint">
                   {canSaveShared
                     ? "Everyone in this workspace can open it."
                     : "Needs edit access — viewers can only save personal views."}
@@ -1150,7 +1254,7 @@ function SaveWorkspaceSavedViewModal({
           </div>
         </fieldset>
 
-        <div className="bookmark-save-modal-actions">
+        <div className="saved-view-save-modal-actions">
           <button type="button" onClick={onCancel}>Cancel</button>
           <button
             type="button"
@@ -1190,17 +1294,30 @@ function ConfirmModal({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
+  const { dialogRef, onKeyDown } = useModalDialog({ open: true, onClose: onCancel });
   return (
-    <div className="bookmark-confirm-overlay" onClick={onCancel}>
+    // Backdrop clicks are a pointer convenience; Escape and Cancel are the
+    // equivalent keyboard paths managed by useModalDialog.
+    // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
+    <div
+      className="saved-view-confirm-overlay"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onCancel();
+      }}
+    >
+      {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape/focus-trap keys bubble from dialog controls. */}
       <div
-        className={`bookmark-confirm-modal bookmark-confirm-modal-${tone}`}
-        onClick={(e) => e.stopPropagation()}
+        ref={dialogRef}
+        className={`saved-view-confirm-modal saved-view-confirm-modal-${tone}`}
         role="alertdialog"
+        aria-modal="true"
         aria-label={ariaLabel}
+        tabIndex={-1}
+        onKeyDown={onKeyDown}
       >
         <h4>{title}</h4>
         <p>{body}</p>
-        <div className="bookmark-confirm-modal-actions">
+        <div className="saved-view-confirm-modal-actions">
           <button type="button" onClick={onCancel}>Cancel</button>
           <button
             type="button"

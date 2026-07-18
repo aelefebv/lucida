@@ -317,29 +317,6 @@
     "active_layout_ids": {
       "wds-0f3a": "layout-grid"
     },
-    "asset_catalogs": {
-      "wds-0f3a": {
-        "entries": [
-          {
-            "entity_id": "img-0",
-            "kinds": [
-              "TileProxy3D"
-            ],
-            "footprints": [
-              {
-                "kind": "TileProxy3D",
-                "dims": [
-                  50,
-                  128,
-                  128
-                ],
-                "bytes": 1638400
-              }
-            ]
-          }
-        ]
-      }
-    },
     "annotations": {
       "wds-0f3a": [
         {
@@ -522,6 +499,7 @@
         412.0,
         233.5
       ],
+      "cursor_dataset_id": "wds-0f3a",
       "dataset_order": [
         "wds-0f3a"
       ],
@@ -684,13 +662,23 @@
           "image_id": "multiscale-0",
           "level_index": 2,
           "key": "2/1/0/0/0/0",
-          "status": "unavailable"
+          "status": "unavailable",
+          "failure": {
+            "category": "source",
+            "code": "missing_object",
+            "retryable": false
+          }
         },
         {
           "image_id": "multiscale-0",
           "level_index": 2,
           "key": "2/1/0/1/0/0",
           "status": "failed_transient",
+          "failure": {
+            "category": "source",
+            "code": "storage_backend",
+            "retryable": true
+          },
           "message": "source read timed out"
         },
         {
@@ -698,6 +686,11 @@
           "level_index": 2,
           "key": "2/2/0/0/0/0",
           "status": "failed_permanent",
+          "failure": {
+            "category": "codec",
+            "code": "decode_failure",
+            "retryable": false
+          },
           "message": "chunk exceeds generation budget"
         }
       ]

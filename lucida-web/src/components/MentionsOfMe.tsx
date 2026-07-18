@@ -6,11 +6,11 @@
  * `Comment.text` (the slice-1 grammar), so this reads the plain annotation data
  * already in hand and needs NO wire/command/Rust change.
  *
- * PURE by construction: this component does not touch the scene, the network, or
- * any ref. It works entirely off the `annotations` array (and the identity props)
- * passed in, and reports navigation back through `onNavigate(pinId)` — so the
- * host owns the actual "open the thread + recenter" effect (the seam), and this
- * stays trivially testable and re-renderable.
+ * PURE with respect to product state: this component does not touch the scene or
+ * network. It works off the `annotations` array (and identity props), with one
+ * DOM anchor ref used only by the shared floating-surface placement contract.
+ * Navigation reports through `onNavigate(pinId)`, so the host still owns the
+ * actual "open the thread + recenter" effect.
  *
  * WHO IS "ME" — the handle set, computed exactly like the slice-1 candidate
  * builder so a mention is matchable to the same person everywhere:
@@ -35,6 +35,7 @@ import { useMemo, useState } from "react";
 import type { Annotation } from "./annotationDocument.ts";
 import { splitMentionTokens } from "./annotationMentions.ts";
 import { deriveHandle, handleFromName } from "./annotationParticipants.ts";
+import { FloatingPortalSurface } from "./FloatingSurface.tsx";
 
 interface Props {
   /** The CURRENT dataset's pins (each with its nested `comments`), as plain data
@@ -160,6 +161,7 @@ export function MentionsOfMe({
   viewedCommentIds = [],
   onMarkViewed,
 }: Props) {
+  const [anchorElement, setAnchorElement] = useState<HTMLButtonElement | null>(null);
   // Whether the panel is shown. The badge is ALWAYS rendered (it shows the count
   // even at zero); the panel only appears after a click on the badge, and a
   // second click hides it again — the contract's toggle.
@@ -219,8 +221,18 @@ export function MentionsOfMe({
       <button
         type="button"
         data-testid="mentions-of-me-badge"
-        onClick={() => setOpen((v) => !v)}
+        onClick={(event) => {
+          if (open) {
+            setOpen(false);
+            setAnchorElement(null);
+          } else {
+            setAnchorElement(event.currentTarget);
+            setOpen(true);
+          }
+        }}
         aria-expanded={open}
+        aria-controls="mentions-of-me-panel"
+        aria-haspopup="dialog"
         aria-label={
           count === 0
             ? "Mentions of me: no unread"
@@ -241,8 +253,8 @@ export function MentionsOfMe({
           // Tint when there ARE mentions (and again when the panel is open) so
           // "someone mentioned you" reads at a glance, matching the accent the
           // sibling toolbar toggles use.
-          background: open ? "#646cff" : count > 0 ? "#1f6feb" : undefined,
-          color: open || count > 0 ? "#fff" : undefined,
+          background: open ? "var(--accent)" : count > 0 ? "var(--accent-strong)" : undefined,
+          color: open || count > 0 ? "var(--accent-contrast)" : undefined,
         }}
       >
         <span aria-hidden="true">@</span>
@@ -256,8 +268,8 @@ export function MentionsOfMe({
             height: 16,
             padding: "0 4px",
             borderRadius: 8,
-            background: count > 0 ? "#da3633" : "rgba(255,255,255,0.18)",
-            color: "#fff",
+            background: count > 0 ? "var(--badge-danger)" : "var(--surface-3)",
+            color: "var(--text-primary)",
             fontSize: 11,
             lineHeight: "16px",
             textAlign: "center",
@@ -272,23 +284,31 @@ export function MentionsOfMe({
           snippet and, on click, navigates to its pin thread. Zero mentions → the
           empty-state line (and NO mention-of-me-item-* nodes). */}
       {open && (
-        <div
+        <FloatingPortalSurface
+          anchorElement={anchorElement}
+          fallbackSize={{ width: 320, height: 360 }}
+          id="mentions-of-me-panel"
           data-testid="mentions-of-me-panel"
           role="dialog"
           aria-label="Comments that mention you"
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              event.preventDefault();
+              event.stopPropagation();
+              setOpen(false);
+              setAnchorElement(null);
+              anchorElement?.focus();
+            }
+          }}
           style={{
-            position: "absolute",
-            top: "calc(100% + 6px)",
-            left: 0,
-            width: 320,
+            width: "min(320px, calc(100vw - 1rem))",
             maxHeight: 360,
             overflowY: "auto",
-            background: "rgba(22,27,34,0.98)",
-            color: "#e6edf3",
-            border: "1px solid #30363d",
+            background: "var(--overlay-panel-strong)",
+            color: "var(--text-primary)",
+            border: "1px solid var(--border-subtle)",
             borderRadius: 8,
-            boxShadow: "0 6px 18px rgba(0,0,0,0.6)",
-            zIndex: 50,
+            boxShadow: "var(--shadow-raised)",
             fontSize: 12,
           }}
         >
@@ -300,7 +320,7 @@ export function MentionsOfMe({
           <div
             style={{
               padding: "8px 10px",
-              borderBottom: "1px solid #30363d",
+              borderBottom: "1px solid var(--border-subtle)",
               fontWeight: 600,
               display: "flex",
               alignItems: "center",
@@ -332,24 +352,24 @@ export function MentionsOfMe({
                 fontWeight: 600,
                 whiteSpace: "nowrap",
                 borderRadius: 6,
-                border: "1px solid #30363d",
+                border: "1px solid var(--border-subtle)",
                 cursor: "pointer",
-                background: hideViewed ? "#646cff" : "transparent",
-                color: hideViewed ? "#fff" : "#8b949e",
+                background: hideViewed ? "var(--accent)" : "transparent",
+                color: hideViewed ? "var(--accent-contrast)" : "var(--text-muted)",
               }}
             >
               {hideViewed ? "Unread only" : "Hide read"}
             </button>
           </div>
           {hits.length === 0 ? (
-            <div style={{ padding: "10px", color: "#8b949e" }}>
+            <div style={{ padding: "10px", color: "var(--text-muted)" }}>
               When a collaborator @-mentions you in a comment on this dataset, it
               shows up here.
             </div>
           ) : visibleHits.length === 0 ? (
             // There ARE mentions, but hide-viewed is engaged and every one is
             // read: list NO items (contract #5) and say why.
-            <div style={{ padding: "10px", color: "#8b949e" }}>
+            <div style={{ padding: "10px", color: "var(--text-muted)" }}>
               No unread mentions. Toggle off “Hide read” to see read ones.
             </div>
           ) : (
@@ -382,10 +402,10 @@ export function MentionsOfMe({
                         lineHeight: 1.4,
                         background: "none",
                         border: "none",
-                        borderBottom: "1px solid rgba(48,54,61,0.6)",
+                        borderBottom: "1px solid var(--border-subtle)",
                         // Read items recede (dimmed, normal weight); unread stay
                         // bright + bold so the unread ones pop in a mixed list.
-                        color: isViewed ? "#8b949e" : "#e6edf3",
+                        color: isViewed ? "var(--text-muted)" : "var(--text-primary)",
                         fontWeight: isViewed ? 400 : 600,
                         cursor: "pointer",
                         whiteSpace: "nowrap",
@@ -400,7 +420,7 @@ export function MentionsOfMe({
               })}
             </ul>
           )}
-        </div>
+        </FloatingPortalSurface>
       )}
     </div>
   );

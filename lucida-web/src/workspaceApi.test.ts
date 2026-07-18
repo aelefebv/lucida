@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   archiveWorkspace,
+  browseLocalFiles,
   duplicateWorkspace,
   createWorkspaceSavedView,
   deleteWorkspaceSavedView,
@@ -61,6 +62,21 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+});
+
+describe("local file browser API", () => {
+  it("uses same-origin config and omits the empty root query", async () => {
+    await browseLocalFiles();
+    expect(calls[0].url).toBe("/api/browse");
+    expect(calls[0].init?.credentials).toBe("same-origin");
+  });
+
+  it("encodes canonical paths in the shared request helper", async () => {
+    await browseLocalFiles("c:/Users/a b/data.zarr");
+    expect(calls[0].url).toBe(
+      `/api/browse?path=${encodeURIComponent("c:/Users/a b/data.zarr")}`,
+    );
+  });
 });
 
 describe("workspace saved view API", () => {

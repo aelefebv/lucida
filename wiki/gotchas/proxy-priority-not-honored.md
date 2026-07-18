@@ -2,13 +2,17 @@
 type: Gotcha
 title: "Proxy Generator Priority Is Not Honored Yet"
 description: "lucida-server proxy::ProxyGenerator::request(spec, priority) accepts a priority: u8 parameter, but the MVP doesn't actually order requests by priority."
-tags: [lucida, gotcha]
+tags: [lucida, gotcha, historical]
 source_path: wiki/gotchas/proxy-priority-not-honored.md
 created: 2026-04-18
-modified: 2026-07-06
+modified: 2026-07-16
 ---
 
 # Proxy Generator Priority Is Not Honored Yet
+
+Status: **Closed by deletion.** The generator and its priority parameter were
+removed with the proxy/asset fallback under [ADR-0043](../decisions/0043-superseded-server-surfaces-sunset.md)
+on 2026-07-16. The rest of this page is retained as historical context.
 
 ## The footgun
 

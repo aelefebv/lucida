@@ -1,11 +1,9 @@
 /**
- * Pool-key helpers — canonical encoding for the chunk + proxy atlas
+ * Pool-key helpers — canonical encoding for chunk atlas
  * pool keys. Single source of truth for pool-key formatting; drift
  * against the worker's inline format strings is caught by
  * `poolKeys.test.ts`.
  */
-
-export { proxyPoolKey } from "./proxyAtlas.ts";
 
 /**
  * Build the canonical chunk-pool key for the worker's shared volume +

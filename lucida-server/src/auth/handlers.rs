@@ -25,9 +25,12 @@ use super::bearer_token::{BearerToken, BearerTokenStore, hash_bearer_token};
 use super::cli_authorization::{CliTokenAuthorization, CliTokenAuthorizationStore};
 use super::config::AuthConfig;
 use super::cookie::{
-    build_clearing_cookie, build_clearing_signed_out_marker, build_session_cookie,
-    build_signed_out_marker, read_session_cookie, read_signed_out_marker, request_is_https,
+    OAUTH_BINDING_COOKIE_NAME, OAUTH_BINDING_TTL_SECS, build_clearing_cookie,
+    build_clearing_oauth_binding_cookie, build_clearing_signed_out_marker,
+    build_oauth_binding_cookie, build_session_cookie, build_signed_out_marker, read_named_cookie,
+    read_session_cookie, read_signed_out_marker, request_is_https,
 };
+use super::credential_mutation::CredentialMutationExecutor;
 use super::dev::{
     build_clearing_dev_principal_cookie, build_dev_principal_cookie, default_dev_principal,
     normalize_dev_principal,
@@ -65,6 +68,10 @@ pub struct CliAuthState {
     pub config: Arc<AuthConfig>,
     pub token_store: Arc<dyn BearerTokenStore>,
     pub cli_store: Arc<dyn CliTokenAuthorizationStore>,
+    /// Live-connection revocation hook. Optional so focused auth tests and
+    /// embedders can use the credential flows without constructing the
+    /// workspace runtime.
+    pub workspace_manager: Option<Arc<crate::workspace::WorkspaceManager>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -356,7 +363,11 @@ pub async fn revoke_current_bearer_token(
         return bad_request("request was authenticated without a bearer token");
     };
     let hash = hash_bearer_token(raw);
-    match state.token_store.revoke_by_hash(&hash, Utc::now()).await {
+    let executor = CredentialMutationExecutor::new(state.workspace_manager.clone());
+    match executor
+        .revoke_bearer(Arc::clone(&state.token_store), hash, Utc::now())
+        .await
+    {
         Ok(Some(row)) => {
             info!(
                 token_id = %row.id,
@@ -645,6 +656,8 @@ pub async fn dev_login(
 pub struct LogoutState {
     pub config: Arc<AuthConfig>,
     pub store: Arc<dyn LoginSessionStore>,
+    /// Process-wide live-connection revocation hook.
+    pub workspace_manager: Option<Arc<crate::workspace::WorkspaceManager>>,
 }
 
 /// `POST /auth/logout` — local-only sign-out.
@@ -659,35 +672,43 @@ pub struct LogoutState {
 /// Returns 302 to `/`. fetch() in the web client follows redirects by
 /// default but the body of `/` is irrelevant — useAuthState refreshes
 /// via `/auth/whoami` after the call resolves, which then returns 401.
+/// A server-side deletion failure still clears the local cookie but returns
+/// 503 instead of falsely claiming that the credential was revoked. Bearer
+/// callers must use `/auth/tokens/revoke-current` and receive 400 here.
 pub async fn logout<B>(State(state): State<LogoutState>, req: Request<B>) -> Response {
+    // Preserve the identity that middleware already validated for safe audit
+    // context only. A durable session-delete failure must not advance local
+    // revocation state.
+    let authenticated_email = req
+        .extensions()
+        .get::<AuthPrincipal>()
+        .map(|principal| principal.email.clone());
     let (parts, _body) = req.into_parts();
+    if parts.headers.contains_key(AUTHORIZATION) {
+        return bad_request("bearer credentials must be revoked with /auth/tokens/revoke-current");
+    }
     let session_id = read_session_cookie(&parts, &state.config.cookie_name);
 
-    // Try to look up the email for the audit log before deletion. We
-    // don't fail logout when the lookup errors — the deletion attempt
-    // (and the cookie clear) still need to happen. Storage errors
-    // surface in tracing but not to the client.
-    let email = match &session_id {
-        Some(id) => match state.store.get(id).await {
-            Ok(Some(row)) => Some(row.email),
-            Ok(None) => None,
-            Err(e) => {
-                tracing::warn!(error = %e, "logout.lookup_email.failed");
-                None
+    let mut deleted_email = None;
+    let delete_failed = if let Some(id) = session_id {
+        let executor = CredentialMutationExecutor::new(state.workspace_manager.clone());
+        match executor.delete_session(Arc::clone(&state.store), id).await {
+            Ok(row) => {
+                deleted_email = row.map(|row| row.email);
+                false
             }
-        },
-        None => None,
+            Err(e) => {
+                // Clear the browser cookie below, but do not report a
+                // successful logout while the server-side credential remains
+                // valid. A caller can retry the explicit failed revocation.
+                tracing::error!(error = %e, "logout.delete_session.failed");
+                true
+            }
+        }
+    } else {
+        false
     };
-
-    if let Some(id) = session_id.as_deref()
-        && let Err(e) = state.store.delete(id).await
-    {
-        // Even on store failure, fall through to clear the cookie.
-        // Worst case the row lingers until the background sweep; the
-        // browser is forced unauthenticated immediately, which is
-        // the user-visible promise of logout.
-        tracing::error!(error = %e, "logout.delete_session.failed");
-    }
+    let email = deleted_email.or(authenticated_email);
 
     // Always emit the audit event so the absence of a row in the audit
     // log distinguishes "user never clicked sign-out" from "endpoint
@@ -713,8 +734,13 @@ pub async fn logout<B>(State(state): State<LogoutState>, req: Request<B>) -> Res
     let clearing = build_clearing_cookie(&state.config, is_https);
     let marker = build_signed_out_marker(&state.config, is_https);
     let dev_clearing = build_clearing_dev_principal_cookie(&state.config, is_https);
+    let status = if delete_failed {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::FOUND
+    };
     (
-        StatusCode::FOUND,
+        status,
         AppendHeaders([
             (SET_COOKIE, clearing),
             (SET_COOKIE, marker),
@@ -799,13 +825,21 @@ pub async fn auth_start(
     let hash = first_nonempty(&[json_payload.hash.as_deref(), query.hash.as_deref()])
         .unwrap_or("")
         .to_string();
+    let Some((path, hash)) = normalize_return_target(&path, &hash) else {
+        return bad_request("return target must be a same-origin application path");
+    };
 
     let state_token = random_state_token();
+    let browser_binding = random_state_token();
+    let browser_binding_hash = blake3::hash(browser_binding.as_bytes())
+        .to_hex()
+        .to_string();
     let now = Utc::now();
     if let Err(e) = state
         .pending_store
         .insert(PendingAuth {
             state_token: state_token.clone(),
+            browser_binding_hash,
             intended_path: path,
             intended_hash: hash,
             created_at: now,
@@ -822,8 +856,15 @@ pub async fn auth_start(
 
     let prompt = had_signed_out_marker.then_some(Prompt::SelectAccount);
     let url = state.google.authorize_url(&state_token, prompt);
+    let binding_cookie =
+        build_oauth_binding_cookie(&state.config, &browser_binding, request_is_https(&parts));
     info!(reauth = had_signed_out_marker, "auth.signin.start");
-    (StatusCode::FOUND, [(LOCATION, url)]).into_response()
+    (
+        StatusCode::FOUND,
+        AppendHeaders([(SET_COOKIE, binding_cookie)]),
+        [(LOCATION, url)],
+    )
+        .into_response()
 }
 
 /// Query params Google redirects back with. We only use `code` and
@@ -883,11 +924,24 @@ pub async fn auth_callback(
         }
     };
 
-    let pending = match state.pending_store.consume(state_token).await {
+    let Some(browser_binding) = read_named_cookie(&parts.headers, OAUTH_BINDING_COOKIE_NAME) else {
+        warn!("auth.signin.error.browser_binding_mismatch");
+        return redirect_to_error(&[("code", "auth_failed")]);
+    };
+    let browser_binding_hash = blake3::hash(browser_binding.as_bytes())
+        .to_hex()
+        .to_string();
+    let oldest_allowed = Utc::now() - ChronoDuration::seconds(OAUTH_BINDING_TTL_SECS);
+    let pending = match state
+        .pending_store
+        .consume(state_token, &browser_binding_hash, oldest_allowed)
+        .await
+    {
         Ok(Some(row)) => row,
         Ok(None) => {
-            // Missing or already-used.
-            warn!(state = %state_token, "auth.signin.error.state_mismatch");
+            // Missing, expired, browser-mismatched, or already used. Never
+            // log either credential: possession is the authorization proof.
+            warn!("auth.signin.error.state_or_browser_mismatch");
             return redirect_to_error(&[("code", "auth_failed")]);
         }
         Err(e) => {
@@ -983,8 +1037,6 @@ pub async fn auth_callback(
     let target = redirect_target(&pending.intended_path, &pending.intended_hash);
     info!(
         email = %principal.email,
-        session_id = %id,
-        target = %target,
         "auth.signin.success",
     );
 
@@ -995,9 +1047,14 @@ pub async fn auth_callback(
     // `AppendHeaders` because the array form `[(K, V); N]` would
     // overwrite duplicate header names.
     let clearing_marker = build_clearing_signed_out_marker(&state.config, is_https);
+    let clearing_binding = build_clearing_oauth_binding_cookie(&state.config, is_https);
     (
         StatusCode::FOUND,
-        AppendHeaders([(SET_COOKIE, cookie_header), (SET_COOKIE, clearing_marker)]),
+        AppendHeaders([
+            (SET_COOKIE, cookie_header),
+            (SET_COOKIE, clearing_marker),
+            (SET_COOKIE, clearing_binding),
+        ]),
         [(LOCATION, target)],
     )
         .into_response()
@@ -1030,17 +1087,71 @@ pub(crate) fn redirect_to_error(params: &[(&str, &str)]) -> Response {
 /// Path defaults to `/` when empty (defensive — the shim always
 /// supplies one in practice).
 pub(crate) fn redirect_target(intended_path: &str, intended_hash: &str) -> String {
-    let path = if intended_path.is_empty() {
-        "/"
+    let (path, hash) = normalize_return_target(intended_path, intended_hash)
+        .unwrap_or_else(|| ("/".to_string(), String::new()));
+    if hash.is_empty() {
+        path
     } else {
-        intended_path
-    };
-    if intended_hash.is_empty() {
-        path.to_string()
-    } else if intended_hash.starts_with('#') {
-        format!("{path}{intended_hash}")
-    } else {
-        format!("{path}#{intended_hash}")
+        format!("{path}#{hash}")
+    }
+}
+
+/// Normalize a post-authentication destination into a same-origin path and
+/// fragment. The path deliberately excludes query strings: the browser shim
+/// captures `location.pathname` and the fragment is stored separately.
+fn normalize_return_target(path: &str, hash: &str) -> Option<(String, String)> {
+    let path = if path.is_empty() { "/" } else { path };
+    if path.len() > 2_048
+        || !path.starts_with('/')
+        || path.starts_with("//")
+        || path.contains(['\\', '?', '#'])
+        || path
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte == b' ')
+        || has_ambiguous_percent_encoding(path)
+    {
+        return None;
+    }
+
+    let hash = hash.strip_prefix('#').unwrap_or(hash);
+    if hash.len() > 8_192 || hash.bytes().any(|byte| byte.is_ascii_control()) {
+        return None;
+    }
+    Some((path.to_string(), hash.to_string()))
+}
+
+fn has_ambiguous_percent_encoding(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            index += 1;
+            continue;
+        }
+        let Some((high, low)) = bytes.get(index + 1).zip(bytes.get(index + 2)) else {
+            return true;
+        };
+        let Some(decoded) = hex_value(*high).and_then(|high| {
+            hex_value(*low).map(|low| high.saturating_mul(16).saturating_add(low))
+        }) else {
+            return true;
+        };
+        if decoded.is_ascii_control()
+            || matches!(decoded, b'/' | b'\\' | b'%' | b'?' | b'#' | b' ' | 0x7f)
+        {
+            return true;
+        }
+        index += 3;
+    }
+    false
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -1074,6 +1185,7 @@ mod tests {
         AuthMode, BearerTokenStore, CliTokenAuthorizationStore, MemoryBearerTokenStore,
         MemoryCliTokenAuthorizationStore,
     };
+    use async_trait::async_trait;
     use axum::Router;
     use axum::body::{Body, to_bytes};
     use axum::http::Request;
@@ -1139,6 +1251,7 @@ mod tests {
             config: Arc::clone(&config),
             token_store: Arc::clone(&token_store) as Arc<dyn BearerTokenStore>,
             cli_store: Arc::clone(&cli_store) as Arc<dyn CliTokenAuthorizationStore>,
+            workspace_manager: None,
         };
         let extractor: SharedExtractor = crate::auth::middleware::build_extractor(
             Arc::clone(&config),
@@ -1310,11 +1423,57 @@ mod tests {
         LogoutState {
             config: Arc::new(AuthConfig::for_tests()),
             store: store as Arc<dyn LoginSessionStore>,
+            workspace_manager: None,
         }
     }
 
     fn logout_app(state: LogoutState) -> Router {
         Router::new().route("/auth/logout", post(logout).with_state(state))
+    }
+
+    struct DeleteFailingSessionStore {
+        inner: Arc<MemorySessionStore>,
+    }
+
+    #[async_trait]
+    impl LoginSessionStore for DeleteFailingSessionStore {
+        async fn create(
+            &self,
+            session: LoginSession,
+        ) -> Result<(), crate::auth::SessionStoreError> {
+            self.inner.create(session).await
+        }
+
+        async fn get(
+            &self,
+            id: &str,
+        ) -> Result<Option<LoginSession>, crate::auth::SessionStoreError> {
+            self.inner.get(id).await
+        }
+
+        async fn touch_last_used(
+            &self,
+            id: &str,
+            now: chrono::DateTime<Utc>,
+        ) -> Result<(), crate::auth::SessionStoreError> {
+            self.inner.touch_last_used(id, now).await
+        }
+
+        async fn delete(
+            &self,
+            _id: &str,
+        ) -> Result<Option<LoginSession>, crate::auth::SessionStoreError> {
+            Err(crate::auth::SessionStoreError::Backend(
+                "simulated delete failure".into(),
+            ))
+        }
+
+        async fn delete_expired(
+            &self,
+            now: chrono::DateTime<Utc>,
+        ) -> Result<u64, crate::auth::SessionStoreError> {
+            self.inner.delete_expired(now).await
+        }
     }
 
     #[tokio::test]
@@ -1377,6 +1536,73 @@ mod tests {
 
         // The row must be gone after logout.
         assert!(store.get("kill-me").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn logout_store_failure_is_not_reported_as_success() {
+        let inner = Arc::new(MemorySessionStore::new());
+        let now = Utc::now();
+        inner
+            .create(LoginSession {
+                id: "cannot-delete".into(),
+                email: "dev@local".into(),
+                display_name: "Local Dev".into(),
+                picture_url: None,
+                created_at: now,
+                last_used_at: now,
+                expires_at: now + ChronoDuration::hours(24),
+            })
+            .await
+            .unwrap();
+        let state = LogoutState {
+            config: Arc::new(AuthConfig::for_tests()),
+            store: Arc::new(DeleteFailingSessionStore {
+                inner: Arc::clone(&inner),
+            }),
+            workspace_manager: None,
+        };
+        let app = logout_app(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/auth/logout")
+                    .header("cookie", "lucida_session=cannot-delete")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(inner.get("cannot-delete").await.unwrap().is_some());
+        assert!(
+            response
+                .headers()
+                .get_all(SET_COOKIE)
+                .iter()
+                .any(|value| value.to_str().unwrap().contains("lucida_session=")
+                    && value.to_str().unwrap().contains("Max-Age=0"))
+        );
+    }
+
+    #[tokio::test]
+    async fn logout_rejects_bearer_credentials_without_claiming_revocation() {
+        let store = Arc::new(MemorySessionStore::new());
+        let app = logout_app(logout_state_with(store));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/auth/logout")
+                    .header(AUTHORIZATION, "Bearer still-active")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -1482,6 +1708,22 @@ mod tests {
     #[test]
     fn redirect_target_defaults_path_to_slash_when_empty() {
         assert_eq!(redirect_target("", "view=a"), "/#view=a");
+    }
+
+    #[test]
+    fn redirect_target_fails_closed_for_cross_origin_and_ambiguous_paths() {
+        for malicious in [
+            "https://attacker.example/",
+            "//attacker.example/",
+            r"\\attacker.example",
+            r"/\\attacker.example",
+            "/%2f%2fattacker.example",
+            "/%5cattacker.example",
+            "/ok%0d%0aLocation:evil",
+            "/ok?next=//attacker.example",
+        ] {
+            assert_eq!(redirect_target(malicious, "secret"), "/", "{malicious}");
+        }
     }
 
     #[test]

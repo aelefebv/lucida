@@ -18,17 +18,10 @@ export {
   UPLOAD_WINDOW_MS,
 } from "./constants.ts";
 
-export {
-  proxyKeyFromDelivery,
-  proxyKeyFromMissing,
-  proxyKeyFromRequest,
-} from "./proxyKeys.ts";
-
 export { identityMatrix } from "./coldState/identity.ts";
 export { buildDisplayStateByChannel } from "./coldState/displayState.ts";
 export {
   buildRoster,
-  synthesizeGroupRosterEntry,
   type BuildRosterResult,
 } from "./coldState/roster.ts";
 export { buildColdState, buildColdActiveEntry } from "./coldState/build.ts";
@@ -39,12 +32,12 @@ export { computeScissorRect } from "./scissor.ts";
 export { WorkerFeedback } from "./delivery/feedback.ts";
 export {
   buildManifestByImage,
+  manifestEntryKey,
   type ManifestEntry,
 } from "./delivery/manifestIndex.ts";
 export {
   dispatchChunk,
   dispatchChunkDelivery,
-  dispatchProxy,
   workerMemberIdForChunk,
   parseWorkerMemberId,
   channelFromChunkKey,

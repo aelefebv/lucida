@@ -1,17 +1,12 @@
 /**
  * Wanted-set computation — pure function that diffs expected chunks against
  * actual atlas contents to determine what the GPU worker is missing.
- *
- * Reports missing chunks and missing proxy assets via a discriminated
- * union (`MissingChunk | MissingProxy`).
  */
 
 import type {
   ColdStateMessage,
   MissingChunk,
-  MissingProxy,
 } from "./workerProtocol.ts";
-import type { ProxyKind } from "../pipeline/assetCatalog.ts";
 import {
   RENDER_RADIUS_DISABLED,
   chunkWithinRenderRadius,
@@ -39,63 +34,26 @@ export interface AtlasSnapshot {
   lodMetas?: AtlasLodMeta[];
 }
 
-/**
- * Minimal per-pool view of proxy residency for wanted-set queries.
- * Independent from `ProxyAtlasState` so this module stays GPU-free.
- *
- * The map key is the composite slot key `${entityId}|${t}|${c}` —
- * matches `proxySlotKey()` in `./proxyAtlas.ts`. `kind` is carried so
- * residency checks distinguish `GroupProxy3D` vs `TileProxy3D` pools
- * for entities that could appear as either (a defensive safeguard;
- * pool keying already separates them in practice).
- */
-export interface ProxyAtlasSnapshot {
-  kind: ProxyKind;
-  slots: Map<string, number>;
-}
-
 export interface WantedSetResult {
-  missing: Array<MissingChunk | MissingProxy>;
+  missing: MissingChunk[];
 }
 
 /**
- * Compute which chunks AND proxies the GPU worker is missing.
+ * Compute which chunks the GPU worker is missing.
  *
  * Pure function — no side effects, no GPU dependencies.
  *
  * Chunk wanted-set rules: for each detail-owned LOD on each visible
  * channel, enumerate the visible-region grid cells and report any
  * whose composite slot key is missing.
- *
- * Proxy wanted-set rules: for each cold-state active entry, walk its
- * `mode`:
- *
- *   - `group-as-proxy` (entry.entityId IS the groupId)
- *       → emit a `MissingProxy { kind: GroupProxy3D }` per visible
- *         channel if the group's slot isn't resident.
- *   - `tiles-with-proxy-fallback` (entry.entityId is the tileId)
- *       → emit a `MissingProxy { kind: TileProxy3D }` for the tile
- *         per channel (if `proxyAvailable`), and a single
- *         `MissingProxy { kind: GroupProxy3D }` for the parent group per
- *         channel (if `groupProxyAvailable` and `parentGroupId` is set).
- *         Parent-group requests are deduped per (parentGroupId, t, c).
- *   - `tiles-with-detail`
- *       → existing chunk wanted-set + a per-channel tile-proxy
- *         request when the catalog advertises one but it isn't yet
- *         resident.
  */
 export function computeWantedSet(
   coldState: ColdStateMessage,
   volumeAtlases: Map<string, AtlasSnapshot>,
   sliceAtlases: Map<string, AtlasSnapshot>,
   memberTierToPool?: Map<string, string>,
-  proxyAtlases?: Map<string, ProxyAtlasSnapshot>,
 ): WantedSetResult {
-  const missing: Array<MissingChunk | MissingProxy> = [];
-  const desiredProxyKeys =
-    coldState.desiredProxyKeys === undefined
-      ? null
-      : new Set(coldState.desiredProxyKeys);
+  const missing: MissingChunk[] = [];
 
   if (coldState.activeSet.length === 0) {
     return { missing };
@@ -103,99 +61,8 @@ export function computeWantedSet(
 
   const isMultiChannel = coldState.multiChannel;
 
-  // Dedup per (groupId, t, c) so multiple tile entries of the same
-  // parent only emit one parent-group-proxy request.
-  const groupProxyEmitted = new Set<string>();
-
   for (const entry of coldState.activeSet) {
-    // Proxy wanted-set. `entry.kind` discriminates so the tile
-    // branches see the tile variant typed-out.
-    if (entry.kind === "group-as-proxy") {
-      for (const c of coldState.visibleChannels) {
-        if (
-          isProxyDesired(desiredProxyKeys, coldState.datasetId, entry.entityId, "GroupProxy3D", coldState.currentT, c) &&
-          !isProxyResident(proxyAtlases, entry.entityId, coldState.currentT, c, "GroupProxy3D")
-        ) {
-          missing.push({
-            kind: "proxy",
-            datasetId: coldState.datasetId,
-            entityId: entry.entityId,
-            proxyKind: "GroupProxy3D",
-            t: coldState.currentT,
-            c,
-          });
-        }
-      }
-      continue;
-    }
-
-    if (entry.mode === "tiles-with-proxy-fallback") {
-      if (entry.proxyAvailable && entry.proxyKind === "TileProxy3D") {
-        for (const c of coldState.visibleChannels) {
-          if (
-            isProxyDesired(desiredProxyKeys, coldState.datasetId, entry.entityId, "TileProxy3D", coldState.currentT, c) &&
-            !isProxyResident(proxyAtlases, entry.entityId, coldState.currentT, c, "TileProxy3D")
-          ) {
-            missing.push({
-              kind: "proxy",
-              datasetId: coldState.datasetId,
-              entityId: entry.entityId,
-              proxyKind: "TileProxy3D",
-              t: coldState.currentT,
-              c,
-            });
-          }
-        }
-      }
-      const groupId = entry.parentGroupId ?? null;
-      if (entry.groupProxyAvailable && groupId) {
-        for (const c of coldState.visibleChannels) {
-          const dk = `${groupId}|${coldState.currentT}|${c}`;
-          if (groupProxyEmitted.has(dk)) continue;
-          if (
-            isProxyDesired(desiredProxyKeys, coldState.datasetId, groupId, "GroupProxy3D", coldState.currentT, c) &&
-            !isProxyResident(proxyAtlases, groupId, coldState.currentT, c, "GroupProxy3D")
-          ) {
-            groupProxyEmitted.add(dk);
-            missing.push({
-              kind: "proxy",
-              datasetId: coldState.datasetId,
-              entityId: groupId,
-              proxyKind: "GroupProxy3D",
-              t: coldState.currentT,
-              c,
-            });
-          } else {
-            // Already resident; mark dedup to avoid re-checking.
-            groupProxyEmitted.add(dk);
-          }
-        }
-      }
-    } else if (entry.mode === "tiles-with-detail") {
-      // Tile proxy fallback for the worker to use while detail chunks
-      // are still loading. Only request if catalog advertises one.
-      if (entry.proxyAvailable && entry.proxyKind === "TileProxy3D") {
-        for (const c of coldState.visibleChannels) {
-          if (
-            isProxyDesired(desiredProxyKeys, coldState.datasetId, entry.entityId, "TileProxy3D", coldState.currentT, c) &&
-            !isProxyResident(proxyAtlases, entry.entityId, coldState.currentT, c, "TileProxy3D")
-          ) {
-            missing.push({
-              kind: "proxy",
-              datasetId: coldState.datasetId,
-              entityId: entry.entityId,
-              proxyKind: "TileProxy3D",
-              t: coldState.currentT,
-              c,
-            });
-          }
-        }
-      }
-    }
-
-    // Chunk wanted-set. memberIdForColdEntry centralizes the
-    // group-as-proxy → entityId convention even though those entries are
-    // narrowed out above.
+    // Chunk wanted-set.
     const members: Array<{ memberId: string; channel: number }> = [];
     if (isMultiChannel) {
       for (const c of coldState.visibleChannels) {
@@ -339,67 +206,15 @@ function renderRadiusForTier(
 }
 
 function chunkSourcesForEntry(
-  entry: Exclude<ColdStateMessage["activeSet"][number], { kind: "group-as-proxy" }>,
+  entry: ColdStateMessage["activeSet"][number],
 ): Array<{ tier: ChunkTier; levels: number[] }> {
-  if (entry.detailLevel === undefined) {
-    const levels = entry.wantedLodLevels && entry.wantedLodLevels.length > 0
-      ? [...new Set(entry.wantedLodLevels)].sort((a, b) => a - b)
-      : levelsFromRange(entry.detailOwnedLodRange);
-    return [{ tier: "detail", levels }];
-  }
-
   const sources: Array<{ tier: ChunkTier; levels: number[] }> = [
     { tier: "detail", levels: [entry.detailLevel] },
   ];
   if (
-    entry.coarseLevel !== undefined &&
     entry.coarseLevel !== null
   ) {
     sources.push({ tier: "coarse", levels: [entry.coarseLevel] });
   }
   return sources;
-}
-
-function levelsFromRange([finest, coarsest]: [number, number]): number[] {
-  const out: number[] = [];
-  for (let lvl = finest; lvl <= coarsest; lvl++) out.push(lvl);
-  return out;
-}
-
-/**
- * Check whether a proxy is resident across any pool with matching
- * `(entityId, t, c)`. We don't know the pool key from cold state alone
- * (it depends on slot dims and channel); instead we scan all pools
- * indexed by the channel + composite key.
- *
- * In practice the orchestrator provides `proxyAtlases` indexed by
- * `proxyPoolKey()` strings; the slot composite key is unique per
- * `(entityId, t, c)`, so a single hit anywhere counts.
- */
-function isProxyResident(
-  proxyAtlases: Map<string, ProxyAtlasSnapshot> | undefined,
-  entityId: string,
-  t: number,
-  c: number,
-  proxyKind: ProxyKind,
-): boolean {
-  if (!proxyAtlases || proxyAtlases.size === 0) return false;
-  const slotKey = `${entityId}|${t}|${c}`;
-  for (const atlas of proxyAtlases.values()) {
-    if (atlas.kind !== proxyKind) continue;
-    if (atlas.slots.has(slotKey)) return true;
-  }
-  return false;
-}
-
-function isProxyDesired(
-  desiredProxyKeys: Set<string> | null,
-  datasetId: string,
-  entityId: string,
-  proxyKind: ProxyKind,
-  t: number,
-  c: number,
-): boolean {
-  if (desiredProxyKeys === null) return true;
-  return desiredProxyKeys.has(`${datasetId}|${entityId}|${proxyKind}|${t}|${c}`);
 }

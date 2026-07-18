@@ -120,12 +120,14 @@ Developer-run reliability smoke:
 ```bash
 env LUCIDA_BIND=127.0.0.1:9995 LUCIDA_AUTH=disabled \
   cargo run -p lucida-server -- serve \
-  --data-dir /Users/austin/local_data/lucida_test_zarrs \
-  --generated-coarse-enabled
+  --data-dir /Users/austin/local_data/lucida_test_zarrs
 
 uv run --project lucida-py python scripts/smoke_dataset_reliability.py \
   --server http://127.0.0.1:9995
 ```
+
+Generated coarse planning is enabled by default; the smoke command does not
+need an opt-in flag.
 
 The smoke opens every configured fixture present under
 `/Users/austin/local_data/lucida_test_zarrs`:

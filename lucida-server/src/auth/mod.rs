@@ -47,6 +47,7 @@
 //!   `login_sessions` and `pending_auth` rows so storage growth stays
 //!   bounded over the life of a long-running deployment.
 
+pub mod access_epoch;
 #[cfg(test)]
 mod audit_event_tests;
 pub mod bearer_token;
@@ -58,6 +59,7 @@ pub mod cli_authorization_memory;
 pub mod cli_authorization_sqlite;
 pub mod config;
 pub mod cookie;
+mod credential_mutation;
 pub mod dev;
 pub mod error_page;
 pub mod extractors;
@@ -73,6 +75,7 @@ pub mod session_store_memory;
 pub mod session_store_sqlite;
 pub mod unauth_landing;
 
+pub use access_epoch::AuthEpochRegistry;
 pub use bearer_token::{BearerToken, BearerTokenStore, BearerTokenStoreError, hash_bearer_token};
 pub use bearer_token_memory::MemoryBearerTokenStore;
 pub use bearer_token_sqlite::SqliteBearerTokenStore;

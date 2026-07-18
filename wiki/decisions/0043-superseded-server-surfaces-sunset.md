@@ -5,12 +5,19 @@ description: "End-state decisions for the global /ws session, the bookmarks stor
 tags: [lucida, decision]
 source_path: wiki/decisions/0043-superseded-server-surfaces-sunset.md
 created: 2026-07-04
-modified: 2026-07-06
+modified: 2026-07-17
 ---
 
 # Sunset dispositions for the three superseded server surfaces
 
 Status: **Accepted** (2026-07-04, repository owner). Each disposition executes as its own named follow-up change.
+
+Execution: **Subject C completed 2026-07-16.** The proxy/asset implementation,
+`lucida-proxy` workspace crate, legacy flags/cache, dead Direct/Local and
+`ChunkFetch` vocabulary, client binary relay, catalog document state/epoch, web
+lane, and five obsolete fixtures were deleted. `FetchSource::Proxied` remains as
+the live chunk-relay descriptor. The compatibility-named cache administration
+surface now targets the generated-coarse cache through `DatasetRuntimeConfig`.
 
 Three server surfaces predate the current workspace/chunk-tier architecture and still coexist with it: the global `/ws` session, the bookmarks store, and the proxy/asset fallback protocol. Each duplicates a newer surface, and every session-shaped feature (the lagged-broadcast resync path in `lucida-server/src/handler.rs` being the freshest example) must be reasoned about across both generations. This ADR fixes an end-state for each. All consumer claims below were verified against the current code; module paths cite the evidence.
 
@@ -50,19 +57,19 @@ Consumer survey — the bookmarks surface has no live producer or consumer:
 
 **What absorb means concretely:** delete `lucida-server/src/bookmarks/` and the `/api/bookmarks*` routes; delete `ServerMessage::BookmarkChanged` + `BookmarkAction`, the golden `wire-fixtures/session/server_bookmark_changed.json`, and the `bookmark_actions` entry in `wire-fixtures/vocab/enum_vocabulary.json` (regenerate the vocab golden — the `vocab!` exhaustive-match tripwire in `lucida-server/tests/wire_goldens.rs` makes the enum deletion a compile error until the list is updated); delete `useBookmarks.ts`, `bookmarksApi.ts` (moving the `#b=` resolver default into the workspace API), and the bridge `bookmark_changed` case + `subscribeBookmarkChanged` plumbing. The `#b=<id>` hash form is *kept* and formally redefined as "workspace saved-view id". Removing the wire variant is skew-safe: it is unsequenced and refetch-repaired (see [Saved Views](../systems/subsystems/saved-views.md) §"BookmarkChanged is unsequenced"), the bridge's message switch drops unknown types silently, and the single-image deploy unit ([ADR-0020](0020-single-image-with-servedir.md)) bounds client/server skew to a reload.
 
-**Existing rows:** no destructive migration. The `bookmarks`/`bookmark_datasets` tables stay in place (their migration remains in the ledger), and the follow-up documents a one-off SQL graft for anyone who wants an orphaned row moved into `workspace_saved_views` — the `view` payload is the same `SavedView` JSON, so the graft is an INSERT plus a target workspace choice.
+**Existing rows:** no destructive migration. The `bookmarks`/`bookmark_datasets` tables stay in place (their migration remains in the ledger). Recovery is implemented as the offline `lucida-server recover-legacy-bookmark` command, not a raw SQL insert: the command requires a target workspace, resolves each legacy URL to exactly one current membership, remaps both generations of URL-derived `ds-*` ids across every dataset-keyed field, strips source URLs, validates the chosen creator/visibility, and writes atomically. It defaults to a dry run and personal visibility; missing or ambiguous mappings leave the database unchanged. See [Saved Views](../systems/subsystems/saved-views.md#recovering-a-retired-bookmark) for the operator workflow.
 
 **Trade-off (the strongest counter-argument):** bookmarks were the only *cross-workspace*, dataset-keyed discovery surface — ADR-0015's headline feature ("show me other people's analyses of this dataset"). Workspace saved views are siloed per workspace, so this forecloses cross-workspace discovery until someone rebuilds it as a workspace-aware query. Mitigating fact: that capability has had no UI since #819, so keeping the dormant store preserves rows, not the feature.
 
 ## C. Proxy/asset fallback protocol — delete, including `lucida-proxy`
 
-**Disposition: delete the entire path in a named follow-up. [ADR-0039](0039-chunk-only-coarse-detail-residency.md) already ruled "proxy compatibility is temporary … should be deleted"; this ADR declares the bridge period over and names the inventory.**
+**Disposition: executed. [ADR-0039](0039-chunk-only-coarse-detail-residency.md) ruled "proxy compatibility is temporary … should be deleted"; the bridge was removed on 2026-07-16.**
 
 Reachability — no supported configuration reaches the fallback end-to-end. The decisive gate is server-side:
 
 - **Server side (the gate that keeps the lane dead)**: `legacy_proxy_enabled` defaults to `false` (`lucida-server/src/lib.rs`, `ProxyConfig::defaults`); the only setters are `--legacy-proxy-enabled` / `LUCIDA_LEGACY_PROXY_ENABLED` (`lucida-server/src/main.rs`). When false, `DatasetOpened` carries an empty catalog and background pre-generation gets an empty work list (`lucida-server/src/dataset_open.rs`, `proxy_catalog_entries_for_manifest`), and every incoming `AssetMessage::AssetRequest` is rejected at the per-binding gate in the dispatch loop (`lucida-server/src/handler.rs`) — whatever the client sends.
 - **Client side**: the shipped web client *can* emit `asset_request` — planning's `coarseDetailEnabled` (default `true`, `lucida-web/src/pipeline/planning/config.ts`) has a live persisted setter in the debug panel (`lucida-web/src/debug/ConfigTab.tsx` via `configStore`, `lucida-web/src/pipeline/planning/configStore.ts`, persisted under `localStorage["lucida.planning.config"]`), and flipping it off routes planning through the catalog-aware mode assignment into the proxy request lane (`modes.ts::assignModes`, `proxyResidency.ts`, `contentSource.ts::fetchProxy`). But that knob is a hidden debug-tab toggle, not a supported user surface — it is itself slated for gating under the tracked debug-tooling issue (bead lucida-s6m) — and against a default-configured server it is moot anyway: the empty catalog leaves the degrade path nothing to request, and any `asset_request` that does arrive is dropped at the gate above. Exercising the fallback therefore takes an operator-set server flag *and* a debug-tab client toggle, in concert; neither is a supported path. A "keep with trigger condition" disposition is not honest on these terms: no deployment can drift into the fallback on its own, so the trigger could never fire in the field.
-- **`lucida-proxy` has no consumer outside this path.** Generated coarse implements its own downsampling (`lucida-server/src/generated.rs`, `DOWNSAMPLE_ALGORITHM_VERSION`) and imports nothing from `lucida_proxy`. The crate's only dependents are `lucida-server`'s proxy modules and `lucida-protocol`'s `ProxyKind` re-export (`lucida-protocol/src/asset.rs` — the protocol-depends-on-compute layering wart tracked as bead lucida-b0u, which this deletion resolves). So the crate retires with the path.
+- **`lucida-proxy` has no consumer outside this path.** Generated coarse implements its own downsampling (`lucida-server/src/generated_coarse/materialize.rs`, `DOWNSAMPLE_ALGORITHM_VERSION`) and imports nothing from `lucida_proxy`. The crate's only dependents are `lucida-server`'s proxy modules and `lucida-protocol`'s `ProxyKind` re-export (`lucida-protocol/src/asset.rs` — the protocol-depends-on-compute layering wart tracked as bead lucida-b0u, which this deletion resolves). So the crate retires with the path.
 
 **Deletion inventory:**
 

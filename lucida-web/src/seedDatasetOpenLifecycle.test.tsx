@@ -25,74 +25,16 @@ import { useEffect, useRef, useState } from "react";
 import { act, cleanup, render } from "@testing-library/react";
 import { Bridge, type BridgeHandlers } from "./bridge.ts";
 import { useSeedDatasetOpens } from "./hooks/useSeedDatasetOpens.ts";
-
-/**
- * Minimal controllable WebSocket stand-in. Starts in CONNECTING; `send`
- * mirrors the browser contract by THROWING if called before OPEN (the real
- * `Bridge.send` guards against this with a `readyState === OPEN` check, so a
- * correct bridge never triggers the throw — and an incorrect one that sends
- * early is caught by `sent` staying empty + this throw). `flipOpen()` moves it
- * to OPEN and fires `onopen`, exactly like a real socket completing its
- * handshake on a later tick.
- */
-class MockWebSocket {
-  static CONNECTING = 0 as const;
-  static OPEN = 1 as const;
-  static CLOSING = 2 as const;
-  static CLOSED = 3 as const;
-
-  readyState: number = MockWebSocket.CONNECTING;
-  binaryType = "blob";
-  onopen: (() => void) | null = null;
-  onclose: (() => void) | null = null;
-  onerror: (() => void) | null = null;
-  onmessage: ((ev: { data: unknown }) => void) | null = null;
-
-  /** Every frame the bridge handed to `send` while OPEN. */
-  readonly sent: string[] = [];
-  url: string;
-
-  constructor(url: string) {
-    this.url = url;
-    MockWebSocket.instances.push(this);
-  }
-
-  send(data: string) {
-    if (this.readyState !== MockWebSocket.OPEN) {
-      // A real browser WebSocket throws InvalidStateError here; surface the
-      // same so an early send is unmistakably a bug rather than a no-op.
-      throw new Error("INVALID_STATE_ERR: send before OPEN");
-    }
-    this.sent.push(data);
-  }
-
-  close() {
-    this.readyState = MockWebSocket.CLOSED;
-    this.onclose?.();
-  }
-
-  /** Test control: complete the handshake. */
-  flipOpen() {
-    this.readyState = MockWebSocket.OPEN;
-    this.onopen?.();
-  }
-
-  static instances: MockWebSocket[] = [];
-  static latest(): MockWebSocket {
-    const ws = MockWebSocket.instances.at(-1);
-    if (!ws) throw new Error("no MockWebSocket constructed");
-    return ws;
-  }
-}
+import { FakeWebSocket, installFakeWebSocket } from "./test/fakeWebSocket.ts";
 
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
-  MockWebSocket.instances.length = 0;
+  FakeWebSocket.reset();
 });
 
 /** Frames the bridge sent that are `open_remote_dataset` for `url`. */
-function openFramesFor(ws: MockWebSocket, url: string): unknown[] {
+function openFramesFor(ws: FakeWebSocket, url: string): unknown[] {
   return ws.sent
     .map((s) => JSON.parse(s))
     .filter((m) => m.type === "open_remote_dataset" && m.url === url);
@@ -136,18 +78,18 @@ function SeedHarness({ url }: { url: string }) {
 
 describe("seed dataset open lifecycle (CONNECTING → OPEN), #697 race", () => {
   it("does NOT send while CONNECTING, then sends exactly once after OPEN", () => {
-    vi.stubGlobal("WebSocket", MockWebSocket as unknown as typeof WebSocket);
+    installFakeWebSocket();
     const url = "/data/sample.ome.zarr";
 
     act(() => {
       render(<SeedHarness url={url} />);
     });
 
-    const ws = MockWebSocket.latest();
+    const ws = FakeWebSocket.latest();
     // The bridge object exists and its socket is CONNECTING — the OLD gate
     // (`Boolean(bridge)`) would have fired the open here, into a socket that
     // drops it. The real gate keeps it pending: nothing sent yet.
-    expect(ws.readyState).toBe(MockWebSocket.CONNECTING);
+    expect(ws.readyState).toBe(FakeWebSocket.CONNECTING);
     expect(ws.sent).toEqual([]);
 
     // Socket completes its handshake on a later tick → `onopen` → `connected`.
@@ -161,7 +103,7 @@ describe("seed dataset open lifecycle (CONNECTING → OPEN), #697 race", () => {
   });
 
   it("a re-render after OPEN does not re-open (one-shot holds)", () => {
-    vi.stubGlobal("WebSocket", MockWebSocket as unknown as typeof WebSocket);
+    installFakeWebSocket();
     const url = "/data/a.zarr";
 
     let rerender: (ui: React.ReactElement) => void = () => {};
@@ -170,7 +112,7 @@ describe("seed dataset open lifecycle (CONNECTING → OPEN), #697 race", () => {
       rerender = r.rerender;
     });
 
-    const ws = MockWebSocket.latest();
+    const ws = FakeWebSocket.latest();
     act(() => {
       ws.flipOpen();
     });
@@ -184,7 +126,7 @@ describe("seed dataset open lifecycle (CONNECTING → OPEN), #697 race", () => {
   });
 
   it("bridge invariants: send drops before OPEN; onConnected fires on onopen", () => {
-    vi.stubGlobal("WebSocket", MockWebSocket as unknown as typeof WebSocket);
+    installFakeWebSocket();
     const onConnected = vi.fn();
     const bridge = new Bridge(
       {
@@ -195,10 +137,10 @@ describe("seed dataset open lifecycle (CONNECTING → OPEN), #697 race", () => {
       } as unknown as BridgeHandlers,
       "ws://test/invariants",
     );
-    const ws = MockWebSocket.latest();
+    const ws = FakeWebSocket.latest();
 
     // Before OPEN: a send is silently dropped (guarded) — it must NOT throw and
-    // must NOT reach the socket. (If the guard regressed, MockWebSocket.send
+    // must NOT reach the socket. (If the guard regressed, FakeWebSocket.send
     // would throw INVALID_STATE_ERR.)
     expect(() => bridge.sendOpenRemoteDataset("/early.zarr")).not.toThrow();
     expect(ws.sent).toEqual([]);

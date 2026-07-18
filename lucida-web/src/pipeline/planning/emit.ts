@@ -1,13 +1,13 @@
 /**
  * Lane emission helpers + priority computation. Translates active-set
- * entries and minimap-pending coords into {@link ChunkRequest} /
- * {@link ProxyRequest} streams, one per lane. See ADR 0029.
+ * entries and minimap-pending coords into {@link ChunkRequest} streams,
+ * one per lane. See ADR 0029.
  */
 
 import { Axis } from "../../axes.ts";
 import type { VisibleRegion } from "../viewport.ts";
 import { chunkWithinRenderRadius } from "../renderRadius.ts";
-import { chunkWorldDims, iterateChunks, iterateChunksAtLodRange } from "./chunks.ts";
+import { chunkWorldDims, iterateChunksAtLodRange } from "./chunks.ts";
 import {
   MINIMAP_SEED_BULK_LANE_OFFSET,
   MINIMAP_SEED_FAST_MAX_CHUNKS,
@@ -20,13 +20,13 @@ import type {
   MinimapChunkCoord,
   PlanningSnapshot,
   PlanStats,
-  ProxyRequest,
   SelectionState,
 } from "./types.ts";
+import { createChunkContract } from "../../chunkContract.ts";
 
 /**
  * Numeric priority for a chunk request. Lower = more urgent. Lane
- * offset separates lanes (detail < proxy < prefetch < overview);
+ * offset separates the detail, coarse, prefetch, and minimap lanes;
  * importance and distance order within a lane.
  */
 function computePriority(
@@ -99,6 +99,8 @@ export function emitMinimapLane(
     const pending = minimapPending.get(entity.imageId);
     if (!pending) continue;
     for (const coord of pending) {
+      const geometry = entity.levels[coord.level];
+      if (!geometry) continue;
       out.push({
         datasetId,
         entityId: entity.entityId,
@@ -113,21 +115,28 @@ export function emitMinimapLane(
         tier: "coarse",
         priority,
         chunkKey: coord.key,
+        contract: createChunkContract({
+          datasetId,
+          imageId: entity.imageId,
+          channel: coord.c,
+          role: "intensity",
+          sourceDtype: entity.sourceDtype,
+          shape: [
+            geometry.chunk_shape[Axis.Z],
+            geometry.chunk_shape[Axis.Y],
+            geometry.chunk_shape[Axis.X],
+          ],
+        }),
       });
     }
   }
 }
 
 /**
- * Detail lane — for each active entry, push detail chunks (tile modes)
- * or a single proxy request per visible channel (`group-as-proxy`).
+ * Detail lane — push the source/generated-ready detail level for each
+ * visible chunk-backed entity.
  *
- * Also emits the per-tile TileProxy3D fallback for tile-mode entries
- * whose proxy is advertised, and a parent `GroupProxy3D` (deduped per
- * `(groupId, t, c)`) when the entry is in `tiles-with-proxy-fallback`
- * and the parent group's proxy is advertised.
- *
- * Mutates `allRequests`, `proxyRequests`, and `groupProxyEmitted`.
+ * Mutates `allRequests`.
  */
 export function emitDetailLane(
   activeSet: ActiveSetEntry[],
@@ -135,52 +144,24 @@ export function emitDetailLane(
   entityById: Map<string, EntitySnapshot>,
   stats: PlanStats,
   allRequests: ChunkRequest[],
-  proxyRequests: ProxyRequest[],
-  groupProxyEmitted: Set<string>,
   config: PlanningConfig,
 ): void {
   const datasetId = snapshot.datasetId;
   for (const entry of activeSet) {
-    if (entry.kind === "group-as-proxy") {
-      // `imageId: ""` matches the pre-discrimination convention — groups
-      // have no single owning image.
-      for (const c of snapshot.selection.visibleChannels) {
-        proxyRequests.push({
-          datasetId,
-          entityId: entry.entityId,
-          imageId: "",
-          kind: "GroupProxy3D",
-          t: snapshot.selection.t,
-          c,
-          priority: config.proxyLaneOffset + 0,
-        });
-      }
-      continue;
-    }
-
     if (entry.kind === "invisible") continue;
 
     // Narrowed: entry is TileEntry below this point.
     const entity = entityById.get(entry.entityId);
     if (entity === undefined) continue;
 
-    const chunks = entry.detailLevel !== undefined
-      ? iterateChunksAtLodRange(
-          entity,
-          [entry.detailLevel, entry.detailLevel],
-          snapshot.visibleRegion,
-          snapshot.selection,
-          stats,
-          datasetId,
-        )
-      : iterateChunks(
-          entity,
-          entry,
-          snapshot.visibleRegion,
-          snapshot.selection,
-          stats,
-          datasetId,
-        );
+    const chunks = iterateChunksAtLodRange(
+      entity,
+      [entry.detailLevel, entry.detailLevel],
+      snapshot.visibleRegion,
+      snapshot.selection,
+      datasetId,
+      stats,
+    );
     for (const req of chunks) {
       if (!requestWithinRenderRadius(req, snapshot.visibleRegion, entity, config.detailRenderRadiusView)) {
         continue;
@@ -197,46 +178,6 @@ export function emitDetailLane(
       allRequests.push(req);
     }
 
-    if (entry.proxyAvailable && entry.proxyKind === "TileProxy3D") {
-      for (const c of snapshot.selection.visibleChannels) {
-        proxyRequests.push({
-          datasetId,
-          entityId: entry.entityId,
-          imageId: entry.imageId,
-          kind: "TileProxy3D",
-          t: snapshot.selection.t,
-          c,
-          priority: config.proxyLaneOffset + 1,
-        });
-      }
-    }
-
-    // Parent-group proxy (only for proxy-fallback mode; at
-    // `tiles-with-detail` zoom the chunk path keeps up). Dedup per
-    // (groupId, t, c). Narrow on `kind === "Tile"` because only
-    // `TileSnapshot` carries a `parentId`; a non-Tile here is a
-    // producer invariant violation we skip silently.
-    if (
-      entry.mode === "tiles-with-proxy-fallback" &&
-      entry.groupProxyAvailable &&
-      entity.kind === "Tile"
-    ) {
-      const groupId = entity.parentId;
-      for (const c of snapshot.selection.visibleChannels) {
-        const dedupKey = `${groupId}|${snapshot.selection.t}|${c}`;
-        if (groupProxyEmitted.has(dedupKey)) continue;
-        groupProxyEmitted.add(dedupKey);
-        proxyRequests.push({
-          datasetId,
-          entityId: groupId,
-          imageId: "",
-          kind: "GroupProxy3D",
-          t: snapshot.selection.t,
-          c,
-          priority: config.proxyLaneOffset + config.groupProxyPriorityBump,
-        });
-      }
-    }
   }
 }
 
@@ -270,23 +211,14 @@ export function emitPrefetchLane(
         t: nextT,
       };
 
-      const chunks = entry.detailLevel !== undefined
-        ? iterateChunksAtLodRange(
-            entity,
-            [entry.detailLevel, entry.detailLevel],
-            snapshot.visibleRegion,
-            prefetchSelection,
-            stats,
-            datasetId,
-          )
-        : iterateChunks(
-            entity,
-            entry,
-            snapshot.visibleRegion,
-            prefetchSelection,
-            stats,
-            datasetId,
-          );
+      const chunks = iterateChunksAtLodRange(
+        entity,
+        [entry.detailLevel, entry.detailLevel],
+        snapshot.visibleRegion,
+        prefetchSelection,
+        datasetId,
+        stats,
+      );
       for (const req of chunks) {
         if (!requestWithinRenderRadius(req, snapshot.visibleRegion, entity, config.detailRenderRadiusView)) {
           continue;
@@ -332,8 +264,8 @@ export function emitCoarseLane(
       [entry.coarseLevel, entry.coarseLevel],
       snapshot.visibleRegion,
       snapshot.selection,
-      stats,
       datasetId,
+      stats,
     );
     for (const req of chunks) {
       if (!requestWithinRenderRadius(req, snapshot.visibleRegion, entity, config.coarseRenderRadiusView)) {
@@ -344,50 +276,6 @@ export function emitCoarseLane(
       req.tier = "coarse";
       req.priority = computePriority(
         config.coarseLaneOffset,
-        entity.importance,
-        dist,
-        config,
-      );
-      allRequests.push(req);
-    }
-  }
-}
-
-/**
- * Overview lane — for every entity in the snapshot (visible or not),
- * iterate the coarsest LOD's chunks via {@link iterateChunksAtLodRange}.
- * No active-set entry needed; the overview range is always
- * `[coarsest, coarsest]`. Removes the previous synthetic-entry
- * workaround that was in step 5 of `plan()`.
- *
- * Mutates `allRequests`.
- */
-export function emitOverviewLane(
-  entities: EntitySnapshot[],
-  snapshot: PlanningSnapshot,
-  stats: PlanStats,
-  allRequests: ChunkRequest[],
-  config: PlanningConfig,
-): void {
-  const datasetId = snapshot.datasetId;
-  for (const entity of entities) {
-    if (entity.levels.length === 0) continue;
-
-    const coarsest = Math.max(entity.levels.length - 1, 0);
-    const chunks = iterateChunksAtLodRange(
-      entity,
-      [coarsest, coarsest],
-      snapshot.visibleRegion,
-      snapshot.selection,
-      stats,
-      datasetId,
-    );
-    for (const req of chunks) {
-      const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity, config.depthBiasView);
-      req.lane = "overview";
-      req.tier = "coarse";
-      req.priority = computePriority(
-        config.overviewLaneOffset,
         entity.importance,
         dist,
         config,

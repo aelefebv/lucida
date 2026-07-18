@@ -25,8 +25,7 @@ async fn dataset_membership_and_document_persist_together() {
         .persist_dataset_opened(
             &workspace.id,
             &workspace_dataset_id,
-            "ds_source",
-            "file:///data/demo.zarr",
+            &test_source("file:///data/demo.zarr"),
             "demo.zarr",
             &owner.email,
             1,
@@ -38,10 +37,11 @@ async fn dataset_membership_and_document_persist_together() {
     let sources = store.list_dataset_sources(&workspace.id).await.unwrap();
     assert_eq!(sources.len(), 1);
     assert_eq!(sources[0].workspace_dataset_id, workspace_dataset_id);
-    assert_eq!(sources[0].dataset_source_id, "ds_source");
+    let identity = SourceIdentity::parse("file:///data/demo.zarr").unwrap();
+    assert_eq!(sources[0].identity, identity);
     assert_eq!(
         store
-            .dataset_by_source(&workspace.id, "ds_source")
+            .dataset_by_source(&workspace.id, &identity)
             .await
             .unwrap()
             .unwrap()
@@ -56,6 +56,111 @@ async fn dataset_membership_and_document_persist_together() {
             .document
             .manifests
             .contains_key(&DatasetId("wds_runtime".into()))
+    );
+}
+
+#[tokio::test]
+async fn persisted_source_rejects_mismatched_locator_reuse() {
+    let (store, pool) = fresh_store_with_pool().await;
+    let owner = principal("owner@example.com", false);
+    let workspace = store.create_workspace(&owner, Some("Demo")).await.unwrap();
+    let workspace_dataset_id = DatasetId("wds-collision".into());
+    let source = test_source("gs://bucket/original.zarr");
+    store
+        .persist_dataset_opened(
+            &workspace.id,
+            &workspace_dataset_id,
+            &source,
+            "original.zarr",
+            &owner.email,
+            1,
+            &DocumentState::default(),
+        )
+        .await
+        .unwrap();
+
+    sqlx::query("UPDATE dataset_sources SET canonical_url = ? WHERE id = ?")
+        .bind("gs://bucket/different.zarr")
+        .bind(source.identity.dataset_id())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let error = store
+        .list_dataset_sources(&workspace.id)
+        .await
+        .expect_err("mismatched persisted locator must be rejected");
+    assert!(matches!(error, StoreError::InvalidSourceIdentity(_)));
+}
+
+#[tokio::test]
+async fn source_revision_and_document_refresh_commit_atomically() {
+    let store = fresh_store().await;
+    let owner = principal("owner@example.com", false);
+    let workspace = store.create_workspace(&owner, Some("Demo")).await.unwrap();
+    let workspace_dataset_id = DatasetId("wds-refresh".into());
+    let identity = SourceIdentity::parse("gs://bucket/mutable.zarr").unwrap();
+    let first = SourceVersion::new(
+        identity.clone(),
+        SourceRevision::from_bytes(b"generation-a"),
+    );
+    let mut first_document = DocumentState::default();
+    first_document.manifests.insert(
+        workspace_dataset_id.clone(),
+        lucida_content::DatasetManifest::new(
+            workspace_dataset_id.clone(),
+            "Generation A".into(),
+            lucida_content::DatasetKind::Single,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            None,
+        ),
+    );
+    store
+        .persist_dataset_opened(
+            &workspace.id,
+            &workspace_dataset_id,
+            &first,
+            "mutable.zarr",
+            &owner.email,
+            1,
+            &first_document,
+        )
+        .await
+        .unwrap();
+
+    let second = SourceVersion::new(identity, SourceRevision::from_bytes(b"generation-b"));
+    let mut second_document = first_document;
+    second_document
+        .manifests
+        .get_mut(&workspace_dataset_id)
+        .unwrap()
+        .name = "Generation B".into();
+    store
+        .persist_dataset_refreshed(
+            &workspace.id,
+            &workspace_dataset_id,
+            &second,
+            "mutable.zarr",
+            2,
+            &second_document,
+        )
+        .await
+        .unwrap();
+
+    let persisted_source = store
+        .dataset_by_workspace_dataset(&workspace.id, &workspace_dataset_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let persisted_workspace = store.get_workspace(&workspace.id).await.unwrap().unwrap();
+    assert_eq!(persisted_source.revision, Some(second.revision));
+    assert_eq!(persisted_workspace.seq, 2);
+    assert_eq!(
+        persisted_workspace.document.manifests[&workspace_dataset_id].name,
+        "Generation B"
     );
 }
 
@@ -75,7 +180,7 @@ async fn rename_dataset_survives_evict_and_reopen() {
     let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
     let manager = WorkspaceManager::new_with_runtime_config(
         Arc::new(store.clone()),
-        ProxyConfig::defaults(),
+        DatasetRuntimeConfig::defaults(),
         idle_eviction_config(),
     );
 
@@ -129,7 +234,7 @@ async fn rename_dataset_trims_and_persists_trimmed_name() {
     let store = fresh_store().await;
     let owner = principal("owner@example.com", false);
     let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
     let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
 
     manager
@@ -154,7 +259,7 @@ async fn rename_dataset_is_editor_only_and_never_leaks() {
     let store = fresh_store().await;
     let owner = principal("owner@example.com", false);
     let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
 
     let viewer = principal("viewer@example.com", false);
     manager
@@ -199,7 +304,7 @@ async fn rename_dataset_missing_id_is_not_found() {
     let owner = principal("owner@example.com", false);
     let (workspace_id, _wds_id) =
         seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
     let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
 
     // An editor renaming a dataset that does not exist in the document
@@ -224,7 +329,7 @@ async fn rename_dataset_validation_rejects_empty_whitespace_and_overlong() {
     let store = fresh_store().await;
     let owner = principal("owner@example.com", false);
     let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
     let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
 
     for bad in ["", "   ", "\t\n"] {
@@ -256,7 +361,7 @@ async fn rename_dataset_leaves_source_url_unchanged() {
     let store = fresh_store().await;
     let owner = principal("owner@example.com", false);
     let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
     let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
 
     let url_before = store
@@ -264,7 +369,8 @@ async fn rename_dataset_leaves_source_url_unchanged() {
         .await
         .unwrap()
         .unwrap()
-        .canonical_url;
+        .identity
+        .locator;
 
     manager
         .rename_dataset(&live, &owner, &wds_id, "Renamed")
@@ -276,10 +382,13 @@ async fn rename_dataset_leaves_source_url_unchanged() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(after.canonical_url, url_before);
-    assert_eq!(after.canonical_url, "file:///data/original.zarr");
+    assert_eq!(after.identity.locator, url_before);
+    assert_eq!(after.identity.locator.as_str(), "/data/original.zarr");
     // The source id is unchanged; only the per-workspace label moved.
-    assert_eq!(after.dataset_source_id, "ds_source");
+    assert_eq!(
+        after.identity,
+        SourceIdentity::parse("file:///data/original.zarr").unwrap()
+    );
     assert_eq!(after.display_name, "Renamed");
 }
 
@@ -288,7 +397,7 @@ async fn rename_dataset_leaves_existing_saved_view_name_unchanged() {
     let store = fresh_store().await;
     let owner = principal("owner@example.com", false);
     let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
 
     // A saved view references dataset ids, not names; renaming the dataset
     // must not rewrite the saved view's own name.
@@ -321,7 +430,7 @@ async fn rename_dataset_broadcasts_command_to_peers() {
     let store = fresh_store().await;
     let owner = principal("owner@example.com", false);
     let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
     let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
 
     // A co-present peer subscribes to the live broadcast channel.
@@ -331,41 +440,14 @@ async fn rename_dataset_broadcasts_command_to_peers() {
         .rename_dataset(&live, &owner, &wds_id, "Live Rename")
         .await
         .unwrap();
-    // The handler is what broadcasts in production; here we assert the
-    // rename produced the document the peer would converge on, then
-    // emulate the handler's broadcast and confirm the peer receives a
-    // CommandBroadcast carrying the rename.
-    let (seq, command) = {
-        // Re-derive what the handler sends: it forwards the same
-        // (seq, RenameDataset) returned by rename_dataset. We already
-        // applied; reconstruct the broadcast item exactly as the handler.
-        let sess = live.session.lock().await;
-        (
-            sess.seq,
-            DocumentCommand::RenameDataset {
-                id: wds_id.clone(),
-                name: "Live Rename".to_string(),
-            },
-        )
-    };
-    let broadcast_msg = ServerMessage::CommandBroadcast { seq, command };
-    let ack_msg = ServerMessage::Ack { seq };
-    // `BroadcastItem` is not `Debug`, so don't `.unwrap()` the send result
-    // (its error would need Debug); a failed send just means no receiver.
-    let _ = live.tx.send(BroadcastItem::CommandBroadcast {
-        sender: u64::MAX,
-        broadcast_json: serde_json::to_string(&broadcast_msg).unwrap(),
-        ack_json: serde_json::to_string(&ack_msg).unwrap(),
-    });
 
     let item = rx.recv().await.unwrap();
-    match item {
-        BroadcastItem::CommandBroadcast { broadcast_json, .. } => {
-            assert!(broadcast_json.contains("\"type\":\"rename_dataset\""));
-            assert!(broadcast_json.contains("Live Rename"));
-        }
-        _ => panic!("expected a CommandBroadcast broadcast item"),
-    }
+    assert!(matches!(
+        item.kind(),
+        BroadcastKind::CommandBroadcast { .. }
+    ));
+    assert!(item.primary_json().contains("\"type\":\"rename_dataset\""));
+    assert!(item.primary_json().contains("Live Rename"));
 }
 
 #[tokio::test]
@@ -374,8 +456,8 @@ async fn same_source_can_have_distinct_workspace_dataset_ids() {
     let owner = principal("owner@example.com", false);
     let a = store.create_workspace(&owner, Some("A")).await.unwrap();
     let b = store.create_workspace(&owner, Some("B")).await.unwrap();
-    let source_id = "ds_shared_source";
     let canonical_url = "file:///data/shared.zarr";
+    let identity = SourceIdentity::parse(canonical_url).unwrap();
 
     for (workspace, workspace_dataset_id) in [
         (&a, DatasetId("wds_workspace_a".into())),
@@ -399,8 +481,7 @@ async fn same_source_can_have_distinct_workspace_dataset_ids() {
             .persist_dataset_opened(
                 &workspace.id,
                 &workspace_dataset_id,
-                source_id,
-                canonical_url,
+                &test_source(canonical_url),
                 "shared.zarr",
                 &owner.email,
                 1,
@@ -411,18 +492,17 @@ async fn same_source_can_have_distinct_workspace_dataset_ids() {
     }
 
     let source_a = store
-        .dataset_by_source(&a.id, source_id)
+        .dataset_by_source(&a.id, &identity)
         .await
         .unwrap()
         .unwrap();
     let source_b = store
-        .dataset_by_source(&b.id, source_id)
+        .dataset_by_source(&b.id, &identity)
         .await
         .unwrap()
         .unwrap();
 
-    assert_eq!(source_a.dataset_source_id, source_b.dataset_source_id);
-    assert_eq!(source_a.canonical_url, source_b.canonical_url);
+    assert_eq!(source_a.identity, source_b.identity);
     assert_ne!(source_a.workspace_dataset_id, source_b.workspace_dataset_id);
     assert_eq!(
         source_a.workspace_dataset_id,
@@ -440,13 +520,23 @@ async fn live_workspace_sessions_are_independent() {
     let owner = principal("owner@example.com", false);
     let a = store.create_workspace(&owner, Some("A")).await.unwrap();
     let b = store.create_workspace(&owner, Some("B")).await.unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store), ProxyConfig::defaults());
+    let dataset_id = open_dataset_into(
+        &store,
+        &a.id,
+        &owner,
+        "independent-session-source",
+        "file:///data/independent-session.zarr",
+        "Independent session dataset",
+        1,
+    )
+    .await;
+    let manager = WorkspaceManager::new(Arc::new(store), DatasetRuntimeConfig::defaults());
 
     let live_a = manager.live_workspace(&a.id, &owner).await.unwrap();
     let live_b = manager.live_workspace(&b.id, &owner).await.unwrap();
 
     let cmd = DocumentCommand::RegisterLayout {
-        dataset_id: DatasetId("ds-a".into()),
+        dataset_id: dataset_id.clone(),
         layout: lucida_content::LayoutSpec {
             id: lucida_content::LayoutId("layout-a".into()),
             name: "Layout A".into(),
@@ -463,7 +553,7 @@ async fn live_workspace_sessions_are_independent() {
         .await
         .unwrap();
 
-    assert_eq!(live_a.session.lock().await.seq, 1);
+    assert_eq!(live_a.session.lock().await.seq, 2);
     assert_eq!(live_b.session.lock().await.seq, 0);
     assert!(
         live_a
@@ -472,7 +562,7 @@ async fn live_workspace_sessions_are_independent() {
             .await
             .document
             .registered_layouts
-            .contains_key(&DatasetId("ds-a".into()))
+            .contains_key(&dataset_id)
     );
     assert!(
         !live_b
@@ -481,7 +571,7 @@ async fn live_workspace_sessions_are_independent() {
             .await
             .document
             .registered_layouts
-            .contains_key(&DatasetId("ds-a".into()))
+            .contains_key(&dataset_id)
     );
 }
 // ===================================================================
@@ -502,7 +592,7 @@ async fn apply_document_command_is_editor_gated_and_never_mutates_on_deny() {
     let store = fresh_store().await;
     let owner = principal("owner@example.com", false);
     let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "layer.zarr").await;
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
 
     let viewer = principal("viewer@example.com", false);
     manager
@@ -583,11 +673,351 @@ async fn apply_document_command_is_editor_gated_and_never_mutates_on_deny() {
 }
 
 #[tokio::test]
+async fn inverse_command_rechecks_authorship_revision_persistence_and_replay() {
+    let store = fresh_store().await;
+    let owner = principal("owner@example.com", false);
+    let (workspace_id, dataset_id) =
+        seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
+    let editor = principal("editor@example.com", false);
+    manager
+        .upsert_member(
+            &workspace_id,
+            &owner,
+            &editor.email,
+            None,
+            WorkspaceRole::Editor,
+        )
+        .await
+        .unwrap();
+    let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
+
+    let (target, _) = manager
+        .apply_document_command(
+            &live,
+            &owner,
+            DocumentCommand::RenameDataset {
+                id: dataset_id.clone(),
+                name: "renamed.zarr".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(target, 2);
+    let mut peer_document = live.session.lock().await.document.clone();
+
+    // Editor role is insufficient: collaborative undo is additionally scoped
+    // to the authenticated author of the target operation.
+    assert!(matches!(
+        manager
+            .apply_inverse_command(&live, &editor, target, target)
+            .await
+            .unwrap_err(),
+        CommandApplyError::Forbidden
+    ));
+    assert!(matches!(
+        manager
+            .apply_inverse_command(&live, &owner, target, target + 1)
+            .await
+            .unwrap_err(),
+        CommandApplyError::Conflict(_)
+    ));
+    {
+        let session = live.session.lock().await;
+        assert_eq!(session.seq, target);
+        assert_eq!(session.document.manifests[&dataset_id].name, "renamed.zarr");
+    }
+
+    let (undo_seq, inverse) = manager
+        .apply_inverse_command(&live, &owner, target, target)
+        .await
+        .unwrap();
+    assert_eq!(undo_seq, 3);
+    peer_document.try_apply(inverse).unwrap();
+    assert_eq!(
+        serde_json::to_value(&peer_document).unwrap(),
+        serde_json::to_value(&live.session.lock().await.document).unwrap(),
+        "all clients converge by applying the ordinary inverse broadcast"
+    );
+    let persisted = store.get_workspace(&workspace_id).await.unwrap().unwrap();
+    assert_eq!(persisted.seq, undo_seq);
+    assert_eq!(
+        persisted.document.manifests[&dataset_id].name,
+        "original.zarr"
+    );
+    assert_eq!(
+        store
+            .dataset_by_workspace_dataset(&workspace_id, &dataset_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .display_name,
+        "original.zarr",
+        "inverse rename updates the private listing row and document atomically"
+    );
+
+    // Replaying the original target conflicts because its semantic
+    // postcondition no longer holds. Redo targets the newly appended inverse.
+    assert!(matches!(
+        manager
+            .apply_inverse_command(&live, &owner, target, target)
+            .await
+            .unwrap_err(),
+        CommandApplyError::Conflict(_)
+    ));
+    let (redo_seq, redo) = manager
+        .apply_inverse_command(&live, &owner, undo_seq, undo_seq)
+        .await
+        .unwrap();
+    assert_eq!(redo_seq, 4);
+    assert!(matches!(
+        redo,
+        DocumentCommand::RenameDataset { name, .. } if name == "renamed.zarr"
+    ));
+}
+
+#[tokio::test]
+async fn persistence_failure_never_publishes_or_revokes_staged_command() {
+    let (store, pool) = fresh_store_with_pool().await;
+    let owner = principal("owner@example.com", false);
+    let (workspace_id, dataset_id) =
+        seed_workspace_with_dataset(&store, &owner, "durable.zarr").await;
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
+    let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
+
+    let service = {
+        let mut session = live.session.lock().await;
+        let manifest = session.document.manifests[&dataset_id].clone();
+        let binding = inert_server_binding("file:///data/durable.zarr", manifest);
+        let service = Arc::clone(&binding.generated_service);
+        session.server_bindings.insert(dataset_id.clone(), binding);
+        service
+    };
+
+    sqlx::query(
+        r#"
+        CREATE TRIGGER reject_document_persist
+        BEFORE UPDATE OF seq ON workspaces
+        BEGIN
+            SELECT RAISE(FAIL, 'injected persistence failure');
+        END
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let error = manager
+        .apply_document_command(
+            &live,
+            &owner,
+            DocumentCommand::RemoveDataset {
+                id: dataset_id.clone(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, CommandApplyError::PersistFailed(_)));
+
+    let session = live.session.lock().await;
+    assert_eq!(session.seq, 1);
+    assert!(session.document.manifests.contains_key(&dataset_id));
+    assert!(session.server_bindings.contains_key(&dataset_id));
+    drop(session);
+    assert!(!service.is_shutdown().await);
+    assert!(
+        store
+            .dataset_by_workspace_dataset(&workspace_id, &dataset_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn concurrent_persistence_failure_cannot_skip_or_poison_the_next_acknowledged_revision() {
+    let (store, pool) = fresh_store_with_pool().await;
+    let owner = principal("owner@example.com", false);
+    let (workspace_id, dataset_id) =
+        seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
+    let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
+
+    // Reject only the candidate containing this name. Whichever future gets
+    // the ordered workspace commit lock first, one write fails and the other
+    // must still publish the exact next durable revision.
+    sqlx::query(
+        r#"
+        CREATE TRIGGER reject_one_document_candidate
+        BEFORE UPDATE OF seq ON workspaces
+        WHEN NEW.document_json LIKE '%rejected-name%'
+        BEGIN
+            SELECT RAISE(FAIL, 'injected candidate-specific persistence failure');
+        END
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let rejected = manager.apply_document_command(
+        &live,
+        &owner,
+        DocumentCommand::RenameDataset {
+            id: dataset_id.clone(),
+            name: "rejected-name".into(),
+        },
+    );
+    let accepted = manager.apply_document_command(
+        &live,
+        &owner,
+        DocumentCommand::RenameDataset {
+            id: dataset_id.clone(),
+            name: "acknowledged-name".into(),
+        },
+    );
+    let (rejected, accepted) = tokio::join!(rejected, accepted);
+
+    assert!(matches!(rejected, Err(CommandApplyError::PersistFailed(_))));
+    let (acknowledged_seq, acknowledged_command) = accepted.unwrap();
+    assert_eq!(acknowledged_seq, 2);
+    assert!(matches!(
+        acknowledged_command,
+        DocumentCommand::RenameDataset { name, .. } if name == "acknowledged-name"
+    ));
+
+    let session = live.session.lock().await;
+    assert_eq!(session.seq, acknowledged_seq);
+    assert_eq!(
+        session.document.manifests[&dataset_id].name,
+        "acknowledged-name"
+    );
+    drop(session);
+
+    let persisted = store.get_workspace(&workspace_id).await.unwrap().unwrap();
+    assert_eq!(persisted.seq, acknowledged_seq);
+    assert_eq!(
+        persisted.document.manifests[&dataset_id].name,
+        "acknowledged-name"
+    );
+    assert_eq!(
+        store
+            .dataset_by_workspace_dataset(&workspace_id, &dataset_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .display_name,
+        "acknowledged-name"
+    );
+}
+
+#[tokio::test]
+async fn durable_dataset_removal_revokes_every_runtime_capability() {
+    let store = fresh_store().await;
+    let owner = principal("owner@example.com", false);
+    let (workspace_id, dataset_id) =
+        seed_workspace_with_dataset(&store, &owner, "removable.zarr").await;
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
+    let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
+
+    let service = {
+        let mut session = live.session.lock().await;
+        let manifest = session.document.manifests[&dataset_id].clone();
+        let binding = inert_server_binding("file:///data/removable.zarr", manifest);
+        let service = Arc::clone(&binding.generated_service);
+        session.server_bindings.insert(dataset_id.clone(), binding);
+        session.record_binding_source(
+            dataset_id.clone(),
+            "file:///data/removable.zarr".into(),
+            Some("source-removable".into()),
+            "removable.zarr".into(),
+        );
+        session
+            .generated_availability
+            .insert(dataset_id.clone(), Default::default());
+        service
+    };
+
+    let (seq, _) = manager
+        .apply_document_command(
+            &live,
+            &owner,
+            DocumentCommand::RemoveDataset {
+                id: dataset_id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(seq, 2);
+
+    let session = live.session.lock().await;
+    assert!(!session.document.manifests.contains_key(&dataset_id));
+    assert!(!session.server_bindings.contains_key(&dataset_id));
+    assert!(!session.binding_runtime.contains_key(&dataset_id));
+    assert!(!session.generated_availability.contains_key(&dataset_id));
+    drop(session);
+    assert!(service.is_shutdown().await);
+    assert!(
+        store
+            .dataset_by_workspace_dataset(&workspace_id, &dataset_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn process_shutdown_checkpoints_active_and_late_workspace_services() {
+    let store = fresh_store().await;
+    let owner = principal("owner@example.com", false);
+    let active = store
+        .create_workspace(&owner, Some("Active runtime"))
+        .await
+        .unwrap();
+    let late = store
+        .create_workspace(&owner, Some("Late runtime"))
+        .await
+        .unwrap();
+    let manager = WorkspaceManager::new(Arc::new(store), DatasetRuntimeConfig::defaults());
+    let active_live = manager.live_workspace(&active.id, &owner).await.unwrap();
+    let dataset_id = DatasetId("shutdown-runtime".into());
+    let manifest = DatasetManifest::new(
+        dataset_id.clone(),
+        "runtime".into(),
+        lucida_content::DatasetKind::Single,
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+        None,
+    );
+    let service = {
+        let mut session = active_live.session.lock().await;
+        let binding = inert_server_binding("file:///data/runtime.zarr", manifest);
+        let service = Arc::clone(&binding.generated_service);
+        session.server_bindings.insert(dataset_id, binding);
+        service
+    };
+
+    let stopped = manager
+        .shutdown_all_live_background("process_shutdown")
+        .await;
+    assert_eq!(stopped, 1);
+    assert!(active_live.background_cancelled());
+    assert!(service.is_shutdown().await);
+
+    // A restore racing after the process-wide marker cannot start a fresh
+    // background runtime after the original live-workspace snapshot.
+    let late_live = manager.live_workspace(&late.id, &owner).await.unwrap();
+    assert!(late_live.background_cancelled());
+}
+
+#[tokio::test]
 async fn dataset_source_for_retry_is_editor_gated() {
     let store = fresh_store().await;
     let owner = principal("owner@example.com", false);
     let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "layer.zarr").await;
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
 
     let viewer = principal("viewer@example.com", false);
     manager
@@ -621,7 +1051,7 @@ async fn dataset_source_for_retry_is_editor_gated() {
         .unwrap()
         .expect("seeded dataset source must resolve");
     assert_eq!(source.workspace_dataset_id, wds_id);
-    assert_eq!(source.canonical_url, "file:///data/original.zarr");
+    assert_eq!(source.identity.locator.as_str(), "/data/original.zarr");
 
     // …and an unknown dataset id resolves to None (not an error).
     assert!(
@@ -643,7 +1073,7 @@ async fn gate_store_failure_is_infrastructure_not_an_authorization_verdict() {
     let (store, pool) = fresh_store_with_pool().await;
     let owner = principal("owner@example.com", false);
     let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "layer.zarr").await;
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
     let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
 
     // Kill the store: role lookups (and everything else) now error.

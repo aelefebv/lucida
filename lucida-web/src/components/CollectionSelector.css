@@ -1,0 +1,5 @@
+.collection-selector-panel button:focus-visible {
+  /* Edge cells live in a scrollport. Draw the shared focus ring inward so the
+     rightmost/lowest position never clips the only visible keyboard cue. */
+  outline-offset: -3px;
+}

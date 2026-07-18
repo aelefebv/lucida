@@ -25,7 +25,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { explore_view } from "lucida-core";
 import type { SavedView } from "../savedView/types.ts";
-import "./BookmarkSidebar.css";
+import "./SavedViewSidebar.css";
 import "./ExplorationPanel.css";
 
 /** Dataset shape in canonical `[T, C, Z, Y, X]` order (the OME-Zarr level shape
@@ -60,7 +60,7 @@ export interface ExplorationPanelProps {
    *  Both the candidate rows AND the manual nudge buttons go through this — a
    *  nudge is just a shortcut to the generator's matching child view. */
   applyView: (view: SavedView) => Promise<void>;
-  /** Bookmark the current view (App's workspace `createSavedView`). Always saved
+  /** Save the current view (App's workspace `createSavedView`). Always stored
    *  as an ephemeral PERSONAL view — guided exploration never auto-shares. */
   createSavedView: (
     name: string,
@@ -86,6 +86,11 @@ export interface ExplorationPanelProps {
   requestThumbnail?: (view: SavedView, size: number) => Promise<ImageBitmap | null>;
   style?: React.CSSProperties;
 }
+
+type ExploreRetryAction =
+  | { kind: "descend"; cell: ExplorationCell }
+  | { kind: "back" }
+  | { kind: "home" };
 
 // The manual nudge buttons, each keyed to the generator move (`ViewTransform::id`)
 // it is a shortcut for. A button applies the SAME candidate the generator already
@@ -347,14 +352,19 @@ export function ExplorationPanel({
     backRef.current = [...backRef.current, view];
     setBackDepth(backRef.current.length);
   }, []);
-  const popBack = useCallback((): SavedView | undefined => {
+  const peekBack = useCallback((): SavedView | undefined => {
+    return backRef.current[backRef.current.length - 1];
+  }, []);
+  const commitBack = useCallback((): void => {
     const view = backRef.current[backRef.current.length - 1];
     if (view !== undefined) {
       backRef.current = backRef.current.slice(0, -1);
       setBackDepth(backRef.current.length);
     }
-    return view;
   }, []);
+  const transitionInFlightRef = useRef(false);
+  const [transitionPending, setTransitionPending] = useState(false);
+  const [retryAction, setRetryAction] = useState<ExploreRetryAction | null>(null);
 
   // The trail of moves taken from Home to here — plain-language labels, rendered
   // at the top of the panel. Without thumbnails this is the user's PRIMARY proof
@@ -404,6 +414,7 @@ export function ExplorationPanel({
   // Captures the live view, runs the generator, and either surfaces an error or
   // sets the candidate rows. Stable identity (reads everything via refs).
   const refresh = useCallback(() => {
+    setRetryAction(null);
     const dsId = datasetIdRef.current;
     const ds = dimsRef.current;
     if (!dsId || !ds) {
@@ -440,20 +451,37 @@ export function ExplorationPanel({
   // pointed at change while open) so the menu reflects the live view.
   useEffect(() => {
     if (!visible) return;
-    refresh();
+    let cancelled = false;
+    // Defer the scene capture until after this commit. Besides avoiding a
+    // cascading render, the microtask coalesces a dataset+dims prop update into
+    // one generator run and cannot observe a half-committed prop combination.
+    void Promise.resolve().then(() => {
+      if (!cancelled) refresh();
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [visible, datasetId, dims, refresh]);
 
   // Descend into a candidate: remember where we are (for Back), apply the
   // candidate's view to the viewer, then regenerate the menu from there.
   const descend = useCallback(
     async (cell: ExplorationCell) => {
+      if (transitionInFlightRef.current) return;
+      transitionInFlightRef.current = true;
+      setTransitionPending(true);
+      setRetryAction({ kind: "descend", cell });
       const current = captureBuilderRef.current();
       try {
         await applyView(cell.view);
       } catch (e) {
         setError(`Could not open that view: ${e instanceof Error ? e.message : String(e)}`);
         return;
+      } finally {
+        transitionInFlightRef.current = false;
+        setTransitionPending(false);
       }
+      setRetryAction(null);
       if (current) pushBack(current);
       pushTrail(cell.label);
       refresh();
@@ -464,23 +492,33 @@ export function ExplorationPanel({
   // Back: pop the previous view (and the matching trail step), then apply it
   // (without pushing onto the stack).
   const goBack = useCallback(async () => {
-    const prevView = popBack();
+    if (transitionInFlightRef.current) return;
+    const prevView = peekBack();
     if (!prevView) return;
+    transitionInFlightRef.current = true;
+    setTransitionPending(true);
+    setRetryAction({ kind: "back" });
     try {
       await applyView(prevView);
     } catch (e) {
       setError(`Could not go back: ${e instanceof Error ? e.message : String(e)}`);
       return;
+    } finally {
+      transitionInFlightRef.current = false;
+      setTransitionPending(false);
     }
+    setRetryAction(null);
+    commitBack();
     popTrail();
     refresh();
-  }, [applyView, popBack, popTrail, refresh]);
+  }, [applyView, commitBack, peekBack, popTrail, refresh]);
 
   // Home: ask the generator for the dataset's Home view (`view_json = undefined`
   // makes the wasm wrapper synthesize it), remember where we were for Back, apply
   // the Home view, then reset the trail to the root and regenerate the menu. Home
   // is the exploration root, so its walk depth is 0.
   const goHome = useCallback(async () => {
+    if (transitionInFlightRef.current) return;
     const dsId = datasetIdRef.current;
     const ds = dimsRef.current;
     if (!dsId || !ds) return;
@@ -490,18 +528,31 @@ export function ExplorationPanel({
       return;
     }
     const current = captureBuilderRef.current();
+    transitionInFlightRef.current = true;
+    setTransitionPending(true);
+    setRetryAction({ kind: "home" });
     try {
       await applyView(sidecar.current.view);
     } catch (e) {
       setError(`Could not return home: ${e instanceof Error ? e.message : String(e)}`);
       return;
+    } finally {
+      transitionInFlightRef.current = false;
+      setTransitionPending(false);
     }
+    setRetryAction(null);
     if (current) pushBack(current);
     setTrail([]);
     // Re-capture the zoom reference from the fresh Home camera on next refresh.
     homeDistanceRef.current = undefined;
     refresh();
   }, [applyView, pushBack, setTrail, refresh]);
+
+  const retryTransition = useCallback(() => {
+    if (retryAction?.kind === "descend") void descend(retryAction.cell);
+    else if (retryAction?.kind === "back") void goBack();
+    else if (retryAction?.kind === "home") void goHome();
+  }, [descend, goBack, goHome, retryAction]);
 
   // A manual nudge is a SHORTCUT to one of the generator's own offered moves: it
   // finds the candidate in the live `cells` by transform id and descends into it
@@ -519,20 +570,20 @@ export function ExplorationPanel({
     [cells, descend],
   );
 
-  const handleBookmark = useCallback(async () => {
+  const handleSaveView = useCallback(async () => {
     const current = captureBuilderRef.current();
     if (!current) {
-      setError("No active view to bookmark.");
+      setError("No active view to save.");
       return;
     }
-    const name = window.prompt("Name this bookmark", suggestBookmarkName(datasetName));
+    const name = window.prompt("Name this saved view", suggestSavedViewName(datasetName));
     if (name === null) return; // cancelled
     const trimmed = name.trim();
     if (trimmed.length === 0) return;
     try {
       await createSavedView(trimmed, current, "personal");
     } catch (e) {
-      setError(`Bookmark failed: ${e instanceof Error ? e.message : String(e)}`);
+      setError(`Save view failed: ${e instanceof Error ? e.message : String(e)}`);
     }
   }, [createSavedView, datasetName]);
 
@@ -541,18 +592,24 @@ export function ExplorationPanel({
   const noDataset = !datasetId || !dims;
 
   return (
-    <div className="bookmark-sidebar explore-panel" style={style} data-testid="explore-panel">
-      <div className="bookmark-sidebar-header">
+    <div
+      className="saved-view-sidebar explore-panel"
+      style={style}
+      data-floating-safe-region
+      data-testid="explore-panel"
+      aria-busy={transitionPending}
+    >
+      <div className="saved-view-sidebar-header">
         <h3>Explore</h3>
         <button
           type="button"
           className="primary"
-          onClick={() => void handleBookmark()}
-          disabled={noDataset}
-          title="Bookmark the current view (saved privately to you)"
-          data-testid="explore-bookmark"
+          onClick={() => void handleSaveView()}
+          disabled={noDataset || transitionPending}
+          title="Save the current view privately"
+          data-testid="explore-save-view"
         >
-          Bookmark
+          Save view
         </button>
       </div>
 
@@ -585,7 +642,7 @@ export function ExplorationPanel({
               key={n.transform}
               type="button"
               onClick={() => applyNudge(n.transform)}
-              disabled={noDataset || !available}
+              disabled={noDataset || transitionPending || !available}
               title={available ? n.text : n.unavailableTitle}
               data-testid={n.testid}
             >
@@ -596,7 +653,7 @@ export function ExplorationPanel({
         <button
           type="button"
           onClick={() => void goHome()}
-          disabled={noDataset}
+          disabled={noDataset || transitionPending}
           title="Frame the whole dataset"
         >
           Home
@@ -604,17 +661,17 @@ export function ExplorationPanel({
         <button
           type="button"
           onClick={() => void goBack()}
-          disabled={backDepth === 0}
-          title="Go back to the previous view"
+          disabled={transitionPending || backDepth === 0}
+          title="Restore the previous Explore view"
           data-testid="explore-back"
         >
-          Back
+          Previous view
         </button>
         <button
           type="button"
           className="explore-suggest"
           onClick={() => refresh()}
-          disabled={noDataset}
+          disabled={noDataset || transitionPending}
           title="Suggest views from where you are now"
           data-testid="explore-suggest"
         >
@@ -633,52 +690,63 @@ export function ExplorationPanel({
       </div>
 
       {error && (
-        <div className="bookmark-error" data-testid="explore-error">
-          {error}
+        <div className="saved-view-error" data-testid="explore-error" role="alert">
+          <span>{error}</span>
+          {retryAction && (
+            <button type="button" onClick={retryTransition} disabled={transitionPending}>
+              Retry
+            </button>
+          )}
         </div>
       )}
 
       <div className="explore-section-header">Suggested next views</div>
-      <div className="bookmark-list" role="list">
-        {noDataset && (
-          <div className="bookmark-empty">
-            Open a dataset to start exploring.
-          </div>
-        )}
-        {!noDataset && cells.length === 0 && !error && (
-          <div className="bookmark-empty">
-            No suggestions from here. Try Home, or zoom out.
-          </div>
-        )}
+      {noDataset && (
+        <div className="saved-view-empty">
+          Open a dataset to start exploring.
+        </div>
+      )}
+      {!noDataset && cells.length === 0 && !error && (
+        <div className="saved-view-empty">
+          No suggestions from here. Try Home, or zoom out.
+        </div>
+      )}
+      {cells.length > 0 && <div className="saved-view-list" role="list">
         {cells.map((cell) => (
           <div
             role="listitem"
             key={cell.handle + cell.transform}
-            className={`bookmark-row explore-cell${thumbnailsOn ? " explore-cell-has-thumb" : ""}`}
+            className="saved-view-row explore-cell"
             data-testid="explore-cell"
-            onClick={() => void descend(cell)}
           >
-            {thumbnailsOn && requestThumbnail && (
-              <ExploreThumbnail
-                view={cell.view}
-                // The handle is the content address of the child view, so it
-                // changes exactly when the view (hence the thumbnail) should.
-                viewKey={cell.handle}
-                request={requestThumbnail}
-                scheduler={scheduler}
-              />
-            )}
-            <div className="explore-cell-text">
-              <div className="bookmark-row-top">
-                <span className="bookmark-name" title={cell.label}>
-                  {cell.label}
-                </span>
+            <button
+              type="button"
+              className={`explore-cell-button${thumbnailsOn ? " explore-cell-has-thumb" : ""}`}
+              aria-label={`Open suggested view: ${cell.label}`}
+              onClick={() => void descend(cell)}
+              disabled={transitionPending}
+            >
+              {thumbnailsOn && requestThumbnail && (
+                <ExploreThumbnail
+                  view={cell.view}
+                  // The handle is the content address of the child view, so it
+                  // changes exactly when the view (hence the thumbnail) should.
+                  viewKey={cell.handle}
+                  request={requestThumbnail}
+                  scheduler={scheduler}
+                />
+              )}
+              <div className="explore-cell-text">
+                <div className="saved-view-row-top">
+                  <span className="saved-view-name" title={cell.label}>
+                    {cell.label}
+                  </span>
+                </div>
               </div>
-              <div className="bookmark-row-meta explore-cell-transform">{cell.transform}</div>
-            </div>
+            </button>
           </div>
         ))}
-      </div>
+      </div>}
     </div>
   );
 }
@@ -744,8 +812,8 @@ function formatBreadcrumb(trail: readonly string[]): string {
   return ["Home", ...steps].join(" › ");
 }
 
-/** Default bookmark name suggestion. */
-function suggestBookmarkName(datasetName?: string | null): string {
+/** Default saved-view name suggestion. */
+function suggestSavedViewName(datasetName?: string | null): string {
   const base = datasetName?.trim();
-  return base && base.length > 0 ? `${base} — explore` : "Explore bookmark";
+  return base && base.length > 0 ? `${base} — explore` : "Explore view";
 }

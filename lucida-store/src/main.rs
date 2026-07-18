@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use lucida_store::ingest::pyramid::VoxelSize;
+use lucida_store::ingest::collection_scanner::VoxelSizeOverrides;
 use lucida_store::ingest::tiff_reader::{DimensionHints, DimensionOrder};
 
 /// Convert image data to OME-Zarr v2 multiscale stores.
@@ -147,10 +147,10 @@ fn main() {
             let chunk_size = [chunk_z, chunk_xy, chunk_xy];
 
             let voxel_overrides = if voxel_x.is_some() || voxel_y.is_some() || voxel_z.is_some() {
-                Some(VoxelSize {
-                    x: voxel_x.unwrap_or(1.0),
-                    y: voxel_y.unwrap_or(1.0),
-                    z: voxel_z.unwrap_or(1.0),
+                Some(VoxelSizeOverrides {
+                    x: voxel_x,
+                    y: voxel_y,
+                    z: voxel_z,
                 })
             } else {
                 None

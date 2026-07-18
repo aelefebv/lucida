@@ -2,7 +2,7 @@
  * Volume render-multipass orchestration.
  *
  * Per layer: resolve member→pool→datasetId, look up descriptor + atlas,
- * compute hasDetail, resolve proxy textures, bind, draw to offscreen,
+ * compute chunk residency, bind detail/coarse atlases, draw to offscreen,
  * composite. After the loop: cursor draw.
  */
 
@@ -14,11 +14,15 @@ import {
   type LodIndirectionMeta,
   ensureDepthTexture,
   getDepthTexture,
-  getDummyIndirection,
 } from "./atlas.ts";
 import { serializeTransientDescriptor } from "../descriptor/transient.ts";
 import { DESCRIPTOR_ENTRY_SIZE } from "../descriptor/layout.ts";
 import { packLabelPalette } from "../labelColors.ts";
+import { DEFAULT_LABEL_OPACITY } from "../../labelSettings.ts";
+import {
+  admitWorkerRenderSurface,
+  admitWorkerRenderViewport,
+} from "../worker/surface.ts";
 
 /** Identity 4×4 (column-major) — the fallback model transform for a label
  *  layer that somehow arrives without matrices (defensive; a real label
@@ -26,9 +30,6 @@ import { packLabelPalette } from "../labelColors.ts";
 const IDENTITY_4X4 = new Float32Array([
   1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
 ]);
-
-/** Default overlay opacity for a label layer that omits one. */
-const DEFAULT_LABEL_OPACITY = 0.5;
 
 /**
  * The transient categorical descriptor for a label volume pool. The buffer
@@ -65,10 +66,19 @@ function ensureLabelVolumeDescriptor(
     labelOpacity: opacity,
   });
   if (!pool.descBuffer) {
-    pool.descBuffer = ctx.device.createBuffer({
-      size: DESCRIPTOR_ENTRY_SIZE,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
+    pool.descAllocation = ctx.gpuResources.createBuffer(
+      ctx.device,
+      {
+        key: `label-volume:${pool.memberId ?? pool.datasetId}:descriptor`,
+        kind: "descriptor",
+        datasetId: pool.datasetId,
+      },
+      {
+        size: DESCRIPTOR_ENTRY_SIZE,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      },
+    );
+    pool.descBuffer = pool.descAllocation.resource;
   }
   ctx.device.queue.writeBuffer(pool.descBuffer, 0, descBytes);
   return pool.descBuffer;
@@ -90,13 +100,24 @@ function ensureLabelVolumePalette(
   if (pool.labelColorCount === count) {
     return { buffer: pool.labelColorBuffer ?? null, count };
   }
-  pool.labelColorBuffer?.destroy();
+  pool.labelColorAllocation?.destroy();
+  if (!pool.labelColorAllocation) pool.labelColorBuffer?.destroy();
+  pool.labelColorAllocation = undefined;
   pool.labelColorBuffer = undefined;
   if (packed && count > 0) {
-    const buffer = ctx.device.createBuffer({
-      size: packed.byteLength,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
+    pool.labelColorAllocation = ctx.gpuResources.createBuffer(
+      ctx.device,
+      {
+        key: `label-volume:${pool.memberId ?? pool.datasetId}:palette:${count}`,
+        kind: "buffer",
+        datasetId: pool.datasetId,
+      },
+      {
+        size: packed.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      },
+    );
+    const buffer = pool.labelColorAllocation.resource;
     ctx.device.queue.writeBuffer(buffer, 0, packed);
     pool.labelColorBuffer = buffer;
   }
@@ -138,7 +159,6 @@ function renderLabelVolumeLayer(
   const palette = ensureLabelVolumePalette(ctx, pool, layer.labelColors);
 
   const renderer = ctx.getVolumeRenderer();
-  renderer.setProxyTextures(null, null);
   // Categorical shading computes color from the id in-shader; the LUT is
   // bound (a valid gray ramp) but unread on this path.
   renderer.setColormapTexture(ctx.getOrCreateLUT("gray"));
@@ -160,7 +180,7 @@ function renderLabelVolumeLayer(
   renderer.setLabelColorBuffer(palette.buffer);
   renderer.setDescriptorBinding(descBuffer, 0, palette.count);
 
-  const depth = ensureDepthTexture(ctx.device, msg.canvasW, msg.canvasH);
+  const depth = ensureDepthTexture(ctx, msg.canvasW, msg.canvasH);
   const depthView = depth.createView();
   const encoder = ctx.device.createCommandEncoder();
   renderer.renderTo(target.createView(), encoder, depthView, isFirstLayer, undefined, undefined, layer.scissorRect);
@@ -171,13 +191,31 @@ function renderLabelVolumeLayer(
 
 export function handleVolumeRenderMultiPass(
   ctx: WorkerCtx,
-  msg: VolumeRenderMultiPassMessage,
+  incoming: VolumeRenderMultiPassMessage,
   layerToPool: (memberId: string) => {
     detailPoolKey: string | null;
     coarsePoolKey: string | null;
     datasetId: string | null;
   } | null,
-): void {
+): boolean {
+  const surface = admitWorkerRenderSurface(
+    ctx,
+    incoming.canvasW,
+    incoming.canvasH,
+  );
+  const fullSurface = admitWorkerRenderViewport(
+    incoming.fullW,
+    incoming.fullH,
+  );
+  if (!surface || !fullSurface) return false;
+  const msg: VolumeRenderMultiPassMessage = {
+    ...incoming,
+    canvasW: surface.width,
+    canvasH: surface.height,
+    fullW: fullSurface.width,
+    fullH: fullSurface.height,
+  };
+
   const canvas = ctx.context.canvas as OffscreenCanvas;
   canvas.width = msg.canvasW;
   canvas.height = msg.canvasH;
@@ -244,62 +282,22 @@ export function handleVolumeRenderMultiPass(
       }
     }
 
-    // Pool index + slot index live in the descriptor; CPU side only
-    // needs the texture handle for binding. Read the pool by walking
-    // the dense `proxyPoolsByIndex` array (resolved via the member's
-    // time/channel-specific proxy descriptor mirror).
-    const desc = descIndex.proxyDescriptorByMember.get(memberId) ?? null;
-    let tileProxyTexture: GPUTexture | null = null;
-    let tileProxySlotResident = false;
-    let groupProxyTexture: GPUTexture | null = null;
-    let groupProxySlotResident = false;
-    let proxySlotDimsForVolumeFallback: [number, number, number] = [1, 1, 1];
-
-    if (desc) {
-      if (desc.tileProxyHandle) {
-        const poolIdx = descIndex.proxyPoolIndexByKey.get(desc.tileProxyHandle.poolKey);
-        if (poolIdx !== undefined) {
-          const pool = descIndex.proxyPoolsByIndex[poolIdx];
-          tileProxyTexture = pool.texture;
-          tileProxySlotResident = true;
-          proxySlotDimsForVolumeFallback = pool.slotDims;
-        }
-      }
-      if (desc.groupProxyHandle) {
-        const poolIdx = descIndex.proxyPoolIndexByKey.get(desc.groupProxyHandle.poolKey);
-        if (poolIdx !== undefined) {
-          const pool = descIndex.proxyPoolsByIndex[poolIdx];
-          groupProxyTexture = pool.texture;
-          groupProxySlotResident = true;
-          if (!tileProxySlotResident) {
-            proxySlotDimsForVolumeFallback = pool.slotDims;
-          }
-        }
-      }
-    }
-
-    // Skip when the layer has nothing renderable: no detail/coarse chunks
-    // AND no resident proxy. Entities with either chunk tier or a resident
-    // proxy continue rendering; the shader fallback chain handles the rest.
-    if (!hasDetail && !hasCoarse && !tileProxySlotResident && !groupProxySlotResident) {
+    // Skip when neither chunk tier has anything renderable.
+    if (!hasDetail && !hasCoarse) {
       continue;
     }
 
-    renderer.setProxyTextures(tileProxyTexture, groupProxyTexture);
-
     const dimsMeta = detailMetas?.[0] ?? coarseMetas?.[0] ?? null;
-    const volumeDims: [number, number, number] = dimsMeta
-      ? [dimsMeta.levelDims[2], dimsMeta.levelDims[1], dimsMeta.levelDims[0]]
-      : [
-          proxySlotDimsForVolumeFallback[2],
-          proxySlotDimsForVolumeFallback[1],
-          proxySlotDimsForVolumeFallback[0],
-        ];
+    if (!dimsMeta) continue;
+    const volumeDims: [number, number, number] = [
+      dimsMeta.levelDims[2],
+      dimsMeta.levelDims[1],
+      dimsMeta.levelDims[0],
+    ];
     const fallbackTexture = detailAtlas?.texture ?? coarseAtlas?.texture ?? ctx.getDummy3DTexture();
     const fallbackIndirection =
       detailAtlas?.indirectionBuf ??
-      coarseAtlas?.indirectionBuf ??
-      getDummyIndirection(ctx.device);
+      coarseAtlas!.indirectionBuf;
     renderer.setTierAtlases(
       hasDetail && detailAtlas ? detailAtlas.texture : fallbackTexture,
       hasDetail && detailAtlas ? detailAtlas.indirectionBuf : fallbackIndirection,
@@ -316,7 +314,7 @@ export function handleVolumeRenderMultiPass(
     // a prior label draw's palette buffer never leaks into this bind group.
     renderer.setLabelColorBuffer(null);
     renderer.setDescriptorBinding(descIndex.buffer, entityIndex);
-    const depth = ensureDepthTexture(ctx.device, msg.canvasW, msg.canvasH);
+    const depth = ensureDepthTexture(ctx, msg.canvasW, msg.canvasH);
     const depthView = depth.createView();
 
     // Render volume to single offscreen texture, then composite onto canvas
@@ -342,4 +340,5 @@ export function handleVolumeRenderMultiPass(
     cr.renderVolume(canvasView, depthTex.createView(), cursorEncoder, msg.viewProj, msg.fullW, msg.fullH);
     ctx.device.queue.submit([cursorEncoder.finish()]);
   }
+  return true;
 }

@@ -2,12 +2,21 @@
 
 import type { SceneEpochs } from "../pipeline/epochs.ts";
 import type { VisibleRegion } from "../pipeline/viewport.ts";
+import type { ChunkContract } from "../chunkContract.ts";
 
-/** Atlas budget for the fixed-size 3D volume atlas (per dataset). */
-export const VOLUME_ATLAS_BUDGET = 512 * 1024 * 1024; // 512 MB
+/**
+ * Conservative aggregate ceiling for every tracked allocation owned by one
+ * renderer worker/device session. WebGPU exposes device limits but no portable
+ * VRAM budget, so a single explicit ceiling is safer than multiplying a large
+ * nominal budget by every dataset/channel/tier/chunk-shape pool.
+ */
+export const GPU_SESSION_BUDGET = 512 * 1024 * 1024; // 512 MiB total
 
-/** Atlas budget for the fixed-size 2D slice atlas (per dataset). */
-export const SLICE_ATLAS_BUDGET = 64 * 1024 * 1024; // 64 MB
+/** Maximum share one 3D intensity pool may reserve from the global budget. */
+export const VOLUME_ATLAS_BUDGET = 96 * 1024 * 1024; // 96 MiB / pool
+
+/** Maximum share one 2D intensity pool may reserve from the global budget. */
+export const SLICE_ATLAS_BUDGET = 32 * 1024 * 1024; // 32 MiB / pool
 
 // --- Main -> Worker ---
 
@@ -30,7 +39,7 @@ export interface ResizeMessage {
  */
 export interface Chunk {
   data: ArrayBuffer;
-  dataType: string;
+  contract: ChunkContract;
   x: number;
   y: number;
   z: number;
@@ -68,7 +77,7 @@ export interface SliceChunkDataMessage {
  * `chunk.data` is a single 2D Z-plane of `chunkY*chunkX` ids (the delivery
  * path extracts it from the 3D chunk, so ~64 KB crosses the wire, not the
  * full ~8 MB 3D chunk — critical so a whole label lands within one upload
- * budget). `chunk.dataType` is `"Uint32"`; ids are never narrowed to 16
+ * budget). `chunk.contract.dtype` is `"uint32"`; ids are never narrowed to 16
  * bits. `level`/`t`/`c` are informational; `chunk.z` is the plane's own
  * (already-resolved) index and is unused by the writer.
  */
@@ -116,8 +125,9 @@ export interface VolumeChunkDataMessage {
  * routed to the r32uint label VOLUME pool and drawn categorically. Unlike
  * {@link LabelSliceChunkDataMessage} (which pre-slices to a single ~64 KB
  * Z-plane), the 3D first-hit surface needs the full volume, so each
- * `chunk.data` is the entire 3D chunk (~8 MB for a 128³ tile). `chunk.dataType`
- * is `"Uint32"`; ids are never narrowed to 16 bits. `chunk.x/y/z` are the
+ * `chunk.data` is the entire 3D chunk (~8 MB for a 128³ tile).
+ * `chunk.contract.dtype` is `"uint32"`; ids are never narrowed to 16 bits.
+ * `chunk.x/y/z` are the
  * chunk's grid coords, used to place it within the single-tile texture.
  */
 export interface LabelVolumeChunkDataMessage {
@@ -143,26 +153,6 @@ export interface LabelVolumeChunkDataMessage {
   chunkZ: number;
 }
 
-/**
- * A generated proxy asset delivered to the worker. Carries the compact
- * `[Z, Y, X]` u16 voxel buffer plus identifying metadata.
- */
-export interface ProxyAssetDataMessage {
-  type: "proxyAssetData";
-  epochs: SceneEpochs;
-  datasetId: string;
-  entityId: string;
-  imageId: string;
-  kind: "GroupProxy3D" | "TileProxy3D";
-  t: number;
-  c: number;
-  /** `[Z, Y, X]` voxel counts. */
-  dims: [number, number, number];
-  dataType: "u16";
-  /** Raw u16 voxels (little-endian), `Z*Y*X*2` bytes. */
-  data: ArrayBuffer;
-}
-
 // Multi-pass render messages
 
 export interface VolumeLayerParams {
@@ -171,10 +161,7 @@ export interface VolumeLayerParams {
   renderMode: "translucent" | "max_intensity";
   scissorRect?: [number, number, number, number];
   /**
-   * Per-entity id retained for compatibility and inspection. For tile
-   * entries this is the tile's entity id; for `group-as-proxy` entries
-   * this is the group's entity id. Proxy binding is selected from the
-   * member id because proxy residency is scoped by `(entity, t, c)`.
+   * Per-entity id retained for inspection and descriptor lookup.
    */
   entityId?: string;
   /**
@@ -220,7 +207,7 @@ export interface VolumeLayerParams {
  * **Stale-tolerant**: the worker draws with whatever state it has at
  * draw time. Render messages do not run through `isStaleDelivery` —
  * the latest geometry/material state simply renders against the most
- * recent residency. Contrast with chunk + proxy data messages, which
+ * recent residency. Contrast with chunk data messages, which
  * carry `epochs` for stale-rejection (`isStaleDelivery` drops a
  * delivery whose epoch is older than the worker's current view of the
  * world).
@@ -231,6 +218,8 @@ export interface VolumeLayerParams {
  */
 export interface VolumeRenderMultiPassMessage {
   type: "volumeRenderMultiPass";
+  /** Monotonic client id acknowledged only after submitted GPU work completes. */
+  frameId: number;
   epochs: SceneEpochs;
   layers: VolumeLayerParams[];
   invViewProj: Float32Array;
@@ -257,19 +246,17 @@ export interface VolumeRenderMultiPassMessage {
  *
  * The quads here are the CANDIDATE set, in roster order (their order is
  * the aggregate's internal draw order). At draw time the worker:
- *   - drops quads for members with nothing resident in any tier
- *     (detail metas, coarse metas, resident proxy) — the same skip rule
+ *   - drops quads for members with nothing resident in either chunk tier
  *     the per-member path applies, so residency is judged where it
  *     lives (evictions included);
- *   - groups survivors by pool binding set (detail/coarse chunk pools +
- *     tile/group proxy pools) and issues one instanced draw per group
+ *   - groups survivors by detail/coarse chunk-pool binding set and issues one instanced draw per group
  *     with exactly those pools bound — members of heterogeneous chunk
  *     shapes/pyramid depths never sample another pool's indirection;
  *   - reads each quad's own descriptor entry in-shader, so display
  *     state (contrast/gamma/opacity/colormap) tracks the CURRENT
  *     descriptor build every frame, like the per-member passes.
  */
-export interface SliceAggregateParams {
+interface SliceAggregateBaseParams {
   /**
    * Member id used to resolve the descriptor buffer and colormap for
    * the whole batch. Members of one (dataset, channel) share both by
@@ -277,7 +264,7 @@ export interface SliceAggregateParams {
    * first.
    */
   poolMemberId: string;
-  /** Number of member quads in {@link quads}. */
+  /** Number of member quads in the published buffer. */
   count: number;
   /**
    * Interleaved per-member records, 32 bytes each, matching the
@@ -290,6 +277,27 @@ export interface SliceAggregateParams {
    */
   quads: ArrayBuffer;
 }
+
+/**
+ * Aggregate geometry is either explicitly uncached or has a complete cache
+ * identity. Keeping the three ownership fields atomic prevents key-only
+ * references that the worker cannot recover or clean up correctly.
+ */
+export type SliceAggregateParams = SliceAggregateBaseParams & (
+  | {
+      /** Stable publish-once geometry identity. */
+      cacheKey: string;
+      /** One replaceable cache slot per dataset/channel. */
+      cacheOwnerKey: string;
+      /** Dataset cleanup and topology-generation owner. */
+      ownerDatasetId: string;
+    }
+  | {
+      cacheKey?: never;
+      cacheOwnerKey?: never;
+      ownerDatasetId?: never;
+    }
+);
 
 export interface SliceLayerParams {
   datasetId: string;
@@ -344,6 +352,8 @@ export interface SliceLayerParams {
  */
 export interface SliceRenderMultiPassMessage {
   type: "sliceRenderMultiPass";
+  /** Monotonic client id acknowledged only after submitted GPU work completes. */
+  frameId: number;
   epochs: SceneEpochs;
   layers: SliceLayerParams[];
   zoom: number;
@@ -451,9 +461,9 @@ interface ColdStateActiveEntryBase {
   layoutPositionVox?: [number, number];
   targetLod: number;
   detailOwnedLodRange: [number, number]; // [finest, coarsest]
-  detailLevel?: number;
-  coarseLevel?: number | null;
-  wantedLodLevels?: number[];
+  detailLevel: number;
+  coarseLevel: number | null;
+  wantedLodLevels: number[];
   levels: Array<{
     level: number;
     chunkShape: [number, number, number]; // [Z, Y, X]
@@ -461,25 +471,9 @@ interface ColdStateActiveEntryBase {
     levelDims: [number, number, number];  // [Z, Y, X] voxel dimensions
   }>;
   /**
-   * Which proxy kind (if any) this entry would prefer. For
-   * `group-as-proxy` this is `GroupProxy3D`; for tile modes it's
-   * `TileProxy3D` if the catalog advertises it.
-   */
-  proxyKind?: "GroupProxy3D" | "TileProxy3D";
-  /** Catalog says the preferred proxy is fetchable. */
-  proxyAvailable: boolean;
-  /**
-   * Catalog says the parent group's `GroupProxy3D` is fetchable. For
-   * `group-as-proxy` entries equals `proxyAvailable`; for tile entries
-   * this drives the secondary parent-group-proxy request.
-   */
-  groupProxyAvailable: boolean;
-  /**
    * Precomputed column-major model matrix mapping the entity's
    * `[0,1]^3` unit cube to world space. The orchestrator derives this
-   * from `scene.member_model_matrix` for tile entries and synthesises
-   * it from the group AABB for `group-as-proxy` entries (see
-   * `synthesizeGroupRosterEntry` in tickCoordinator.ts). The worker writes
+   * from `scene.member_model_matrix` for tile entries. The worker writes
    * this straight into the descriptor buffer; render messages do not
    * carry per-frame model matrices.
    */
@@ -500,53 +494,12 @@ interface ColdStateActiveEntryBase {
   displayStateByChannel: Record<number, ColdStateDisplayState>;
 }
 
-/**
- * Per-entity cold-state record. Discriminated union on `kind`:
- *
- *   - `kind: "tile"` — an image member with a real `imageId` and
- *     (usually) chunks to upload. `mode` distinguishes whether the
- *     worker should serve the proxy alongside the chunks
- *     (`tiles-with-proxy-fallback`) or rely on chunks only
- *     (`tiles-with-detail`). Invisible entries from the planner also
- *     surface as `tile` with `mode: "tiles-with-detail"` so the
- *     worker doesn't try to fetch proxies for them.
- *   - `kind: "group-as-proxy"` — a synthesised group-level entry with no
- *     backing image; the worker renders the group's proxy directly.
- *     `imageId` is intentionally absent (`?: never`) — use `entityId`
- *     as the routing key throughout the pipeline.
- *
- * `kind` lets TypeScript narrow the variant without the `imageId === ""`
- * sentinel. `mode` is retained for backward compat (logging, debug,
- * existing inspection paths); future work can drop it once every
- * consumer routes through `kind`.
- */
-export type ColdStateActiveEntry =
-  | (ColdStateActiveEntryBase & {
-      kind: "tile";
-      /** Image member id from the planner. Always a non-empty string. */
-      imageId: string;
-      mode: "tiles-with-detail" | "tiles-with-proxy-fallback";
-      /**
-       * Parent group id for tile entries (so the worker can map a
-       * tile's descriptor back to its parent's groupProxyHandle).
-       * `null` for tiles that don't belong to a group. The orchestrator
-       * always emits a string or null — never `undefined`.
-       */
-      parentGroupId: string | null;
-    })
-  | (ColdStateActiveEntryBase & {
-      kind: "group-as-proxy";
-      /**
-       * Group-as-proxy entries have no backing image — use the group's
-       * `entityId` as the routing key throughout the pipeline.
-       * Declared `?: never` so the type system rejects any consumer
-       * that tries to read it.
-       */
-      imageId?: never;
-      mode: "group-as-proxy";
-      /** Groups have no parent group. */
-      parentGroupId: null;
-    });
+/** Per-entity cold-state record for the sole chunk-backed residency path. */
+export interface ColdStateActiveEntry extends ColdStateActiveEntryBase {
+  kind: "tile";
+  /** Image member id from the planner. Always a non-empty string. */
+  imageId: string;
+}
 
 /**
  * Per-channel display state in cold state. The worker writes these
@@ -595,8 +548,6 @@ export interface ColdStateMessage {
     detail: number;
     coarse: number;
   };
-  /** Budget-admitted proxy residency keys: `${datasetId}|${entityId}|${kind}|${t}|${c}`. */
-  desiredProxyKeys?: string[];
   activeSet: ColdStateActiveEntry[];
   viewMode: "slice" | "volume";
 }
@@ -646,13 +597,17 @@ export interface ColdStateDisplayMessage {
  *
  * `currentT` / `currentZ` are top-level scalars on {@link ColdStateMessage},
  * never part of a per-entity descriptor, so a pure scrub carries just the new
- * selection scalars, the new visible region, and the budget-admitted proxy
- * keys for that selection — no active set, no matrices, no LOD geometry. The
+ * selection scalars and the new visible region — no active set, no matrices,
+ * no LOD geometry. The
  * worker re-points the dataset's most recent {@link ColdStateMessage} at the
  * new selection and re-ingests it (repacking the atlas indirection for the new
  * plane/timepoint), so the result is identical to a full cold state at the new
  * T / Z without the sender building or re-transmitting the O(active-set)
  * descriptor array.
+ *
+ * Visible channels are intentionally absent. The sender may use this message
+ * only after proving the visible-channel list is unchanged; a channel change
+ * requires a full cold state because it changes descriptor cardinality.
  */
 export interface ColdStateSelectionMessage {
   type: "coldStateSelection";
@@ -660,8 +615,6 @@ export interface ColdStateSelectionMessage {
   currentT: number;
   currentZ: number;
   visibleRegion: VisibleRegion;
-  /** Budget-admitted proxy residency keys for the new selection. */
-  desiredProxyKeys: string[];
   epochs: SceneEpochs;
 }
 
@@ -675,13 +628,15 @@ export interface ColdStateSelectionMessage {
  * carries only the delta against the dataset's most recent {@link ColdStateMessage}:
  *
  *   - `upserts` — descriptors for entities that are new to the active set or
- *     whose view-dependent fields (target LOD, LOD range, mode, proxy flags)
+ *     whose view-dependent fields (target LOD and LOD range)
  *     changed. Built by the exact same `buildColdActiveEntry` path a full cold
  *     state uses, so they are byte-identical to what a full rebuild would emit.
  *   - `removedEntityIds` — entities that left the active set.
- *   - `activeSetOrder` — the full new active-set order, as entity ids. The
- *     worker reorders its patched active set to match, so the descriptor-buffer
- *     entity indices agree with the main thread's by construction.
+ *   - `activeSetOrder` — fallback full new active-set order when no trustworthy
+ *     producer delta exists.
+ *   - `appendedEntityIds` — incremental order hint when membership came from a
+ *     view-query delta. Existing entries retain their order, removals are
+ *     deleted, and entered entities append in producer order.
  *
  * The worker patches its retained cold state (remove removed ids, upsert
  * changed/added by entity id, reorder to `activeSetOrder`) and re-runs the same
@@ -704,14 +659,14 @@ export interface ColdStateDeltaMessage {
     detail: number;
     coarse: number;
   };
-  /** Budget-admitted proxy residency keys for the new view. */
-  desiredProxyKeys?: string[];
   /** Entity ids that left the active set since the retained cold state. */
   removedEntityIds: string[];
   /** Descriptors for entities new to the active set or whose descriptor changed. */
   upserts: ColdStateActiveEntry[];
-  /** The full new active-set order, as entity ids, so worker/main agree on indices. */
-  activeSetOrder: string[];
+  /** Full-order fallback. Mutually exclusive with `appendedEntityIds`. */
+  activeSetOrder?: string[];
+  /** O(delta) ordering hint: new entity ids appended after retained entries. */
+  appendedEntityIds?: string[];
 }
 
 export type MainToWorkerMessage =
@@ -721,7 +676,6 @@ export type MainToWorkerMessage =
   | LabelSliceChunkDataMessage
   | VolumeChunkDataMessage
   | LabelVolumeChunkDataMessage
-  | ProxyAssetDataMessage
   | VolumeRenderMultiPassMessage
   | SliceRenderMultiPassMessage
   | MinimapInitMessage
@@ -742,16 +696,41 @@ export type MainToWorkerMessage =
 
 export interface ReadyMessage {
   type: "ready";
+  /** Live device limit used by the main-thread surface admission boundary. */
+  maxTextureDimension2D?: number;
 }
+
+export type RenderWorkerErrorCode =
+  | "gpu-out-of-memory"
+  | "gpu-device-lost"
+  | "gpu-uncaptured-error"
+  | "aggregate-cache-miss";
 
 export interface ErrorMessage {
   type: "error";
   message: string;
+  /** Stable machine-readable classification; absent for generic failures. */
+  code?: RenderWorkerErrorCode;
+}
+
+export interface FramePresentedMessage {
+  type: "framePresented";
+  frameId: number;
+}
+
+/** Recoverable worker cache desynchronization; the frame is not presented. */
+export interface AggregateCacheMissMessage {
+  type: "aggregateCacheMiss";
+  frameId: number;
+  cacheKey: string;
+  cacheOwnerKey: string;
+  ownerDatasetId: string;
 }
 
 export interface IntensityRangeMessage {
   type: "intensityRange";
   datasetId: string;
+  channel: number;
   min: number;
   max: number;
 }
@@ -815,38 +794,21 @@ export type MissingChunk = {
   chunkKey: string;
 };
 
-/**
- * A proxy asset that the worker is missing from its proxy atlas.
- *
- * `datasetId` is included so the main thread can clear CpuCache's
- * proxy-sent delivery state by composite key. Populated from
- * `coldState.datasetId` in `wantedSet.computeWantedSet`.
- */
-export type MissingProxy = {
-  kind: "proxy";
-  datasetId: string;
-  entityId: string;
-  proxyKind: "GroupProxy3D" | "TileProxy3D";
-  t: number;
-  c: number;
-};
-
 export interface WantedSetDeltaMessage {
   type: "wantedSetDelta";
   datasetId: string;
   epochs: SceneEpochs;
   /**
-   * Discriminated union over chunks and proxies. Existing chunk
-   * consumers should match on `kind === "chunk"` to extract `chunkKey`;
-   * the orchestrator uses proxy entries to know which proxies to
-   * re-deliver from CpuCache.
+   * Chunks missing from the worker's detail/coarse atlases.
    */
-  missing: Array<MissingChunk | MissingProxy>;
+  missing: MissingChunk[];
 }
 
 export type WorkerToMainMessage =
   | ReadyMessage
   | ErrorMessage
+  | AggregateCacheMissMessage
+  | FramePresentedMessage
   | IntensityRangeMessage
   | ThumbnailResultMessage
   | ChunksEvictedMessage

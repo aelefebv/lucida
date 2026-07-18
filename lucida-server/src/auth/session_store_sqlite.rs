@@ -10,6 +10,7 @@
 //! anyway; the default pool of 5 is plenty for the loopback-only
 //! deployment shape.
 
+use std::fmt;
 use std::path::Path;
 
 use async_trait::async_trait;
@@ -24,6 +25,35 @@ use super::session_store::{LoginSession, LoginSessionStore, SessionStoreError};
 /// `.sql` file to `migrations/` and rebuilding picks it up.
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
+/// Startup migration detail that is safe for terminal and tracing output.
+/// Construction is private so arbitrary database values cannot be smuggled
+/// into the public `StoreOpenError` surface.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SafeStoreOpenDiagnostic(String);
+
+impl SafeStoreOpenDiagnostic {
+    fn source_identity(
+        error: crate::source_identity_migration::SourceIdentityMigrationError,
+    ) -> Self {
+        Self(format!("{}: {error}", error.code()))
+    }
+}
+
+impl fmt::Debug for SafeStoreOpenDiagnostic {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("SafeStoreOpenDiagnostic")
+            .field(&self.0)
+            .finish()
+    }
+}
+
+impl fmt::Display for SafeStoreOpenDiagnostic {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
 /// Errors from opening the database. Distinct from `SessionStoreError`
 /// because they only occur during startup; the boot path needs them
 /// before the store handle exists.
@@ -33,6 +63,8 @@ pub enum StoreOpenError {
     Connect(String, sqlx::Error),
     #[error("migration failed: {0}")]
     Migrate(sqlx::migrate::MigrateError),
+    #[error("dataset source identity migration failed: {0}")]
+    DatasetSourceIdentity(SafeStoreOpenDiagnostic),
 }
 
 /// Production session store. Wraps a `SqlitePool` and runs queries
@@ -51,6 +83,9 @@ impl SqliteSessionStore {
         let opts = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
+            // Source-identity rekeys defer (rather than disable) FK checks;
+            // make the relationship contract explicit on every pool member.
+            .foreign_keys(true)
             // WAL keeps readers and the touch-writer non-blocking
             // relative to each other; the touch fire-and-forget would
             // otherwise occasionally serialize behind a long read.
@@ -63,6 +98,10 @@ impl SqliteSessionStore {
             .map_err(|e| StoreOpenError::Connect(path_str, e))?;
 
         MIGRATOR.run(&pool).await.map_err(StoreOpenError::Migrate)?;
+        crate::source_identity_migration::migrate_dataset_source_identities(&pool)
+            .await
+            .map_err(SafeStoreOpenDiagnostic::source_identity)
+            .map_err(StoreOpenError::DatasetSourceIdentity)?;
 
         Ok(Self { pool })
     }
@@ -75,7 +114,8 @@ impl SqliteSessionStore {
     pub async fn open_in_memory() -> Result<Self, StoreOpenError> {
         let opts = SqliteConnectOptions::new()
             .filename(":memory:")
-            .create_if_missing(true);
+            .create_if_missing(true)
+            .foreign_keys(true);
 
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
@@ -87,6 +127,10 @@ impl SqliteSessionStore {
             .map_err(|e| StoreOpenError::Connect(":memory:".into(), e))?;
 
         MIGRATOR.run(&pool).await.map_err(StoreOpenError::Migrate)?;
+        crate::source_identity_migration::migrate_dataset_source_identities(&pool)
+            .await
+            .map_err(SafeStoreOpenDiagnostic::source_identity)
+            .map_err(StoreOpenError::DatasetSourceIdentity)?;
 
         Ok(Self { pool })
     }
@@ -162,13 +206,28 @@ impl LoginSessionStore for SqliteSessionStore {
         Ok(())
     }
 
-    async fn delete(&self, id: &str) -> Result<(), SessionStoreError> {
-        sqlx::query("DELETE FROM login_sessions WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(map_err)?;
-        Ok(())
+    async fn delete(&self, id: &str) -> Result<Option<LoginSession>, SessionStoreError> {
+        let row = sqlx::query(
+            r#"
+            DELETE FROM login_sessions
+            WHERE id = ?
+            RETURNING id, email, display_name, picture_url,
+                      created_at, last_used_at, expires_at
+            "#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_err)?;
+        Ok(row.map(|row| LoginSession {
+            id: row.get("id"),
+            email: row.get("email"),
+            display_name: row.get("display_name"),
+            picture_url: row.get("picture_url"),
+            created_at: row.get("created_at"),
+            last_used_at: row.get("last_used_at"),
+            expires_at: row.get("expires_at"),
+        }))
     }
 
     async fn delete_expired(&self, now: DateTime<Utc>) -> Result<u64, SessionStoreError> {

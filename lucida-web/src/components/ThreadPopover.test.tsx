@@ -44,6 +44,7 @@ function renderThread(pin: Annotation, onGoToAuthorView?: (id: string) => void) 
       onDocumentChanged={() => {}}
       onClose={() => {}}
       onGoToAuthorView={onGoToAuthorView}
+      canvas={document.createElement("canvas")}
     />,
   );
 }

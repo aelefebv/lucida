@@ -8,7 +8,7 @@
  * left must be gone (no ghost), and unchanged entities must survive untouched.
  */
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 
 (globalThis as Record<string, unknown>).GPUTextureUsage = {
   COPY_SRC: 0x01, COPY_DST: 0x02, TEXTURE_BINDING: 0x04,
@@ -28,24 +28,18 @@ import type {
   ColdStateMessage,
 } from "../workerProtocol.ts";
 import { createInitialState } from "../worker/state.ts";
-
-function makeMockDevice(): GPUDevice {
-  const createTexture = vi.fn((desc: GPUTextureDescriptor) => ({
-    destroyed: false, destroy() { this.destroyed = true; }, size: desc.size, format: desc.format,
-  }));
-  const createBuffer = vi.fn((desc: GPUBufferDescriptor) => ({
-    destroyed: false, destroy() { this.destroyed = true; }, size: desc.size, usage: desc.usage,
-  }));
-  return {
-    createTexture,
-    createBuffer,
-    queue: { writeBuffer: vi.fn(), writeTexture: vi.fn() } as unknown as GPUQueue,
-  } as unknown as GPUDevice;
-}
+import { GpuResourceBudget } from "../gpuResourceBudget.ts";
+import {
+  makeColdEntry,
+  makeColdMessage,
+  makeMockGpuDevice,
+} from "../testFixtures.ts";
 
 function makeCtx(): WorkerCtx {
+  const device = makeMockGpuDevice();
   return {
-    device: makeMockDevice(),
+    device,
+    gpuResources: new GpuResourceBudget(512 * 1024 * 1024),
     context: {} as GPUCanvasContext,
     format: "bgra8unorm",
     state: createInitialState(),
@@ -53,30 +47,21 @@ function makeCtx(): WorkerCtx {
     getVolumeRenderer: () => ({} as never),
     getCompositor: () => ({} as never),
     getCursorRenderer: () => ({} as never),
+    destroyRenderers: () => {},
     ensureOffscreenPool: () => [],
     getDummyTexture: () => ({} as GPUTexture),
     getDummy3DTexture: () => ({} as GPUTexture),
     getOrCreateLUT: () => ({} as GPUTexture),
     post: () => {},
     postWantedSet: () => {},
-    lookupProxyDescriptor: () => null,
-    lookupProxyPool: () => null,
     lookupEntityDescriptor: () => null,
   };
 }
 
-function identityMatrix(): Float32Array {
-  const m = new Float32Array(16);
-  m[0] = m[5] = m[10] = m[15] = 1;
-  return m;
-}
-
 function tile(entityId: string, imageId: string, targetLod = 0): ColdStateActiveEntry {
-  return {
-    kind: "tile",
+  return makeColdEntry({
     entityId,
     imageId,
-    mode: "tiles-with-detail",
     targetLod,
     detailOwnedLodRange: [targetLod, targetLod],
     detailLevel: targetLod,
@@ -85,35 +70,14 @@ function tile(entityId: string, imageId: string, targetLod = 0): ColdStateActive
     levels: [
       { level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] },
     ],
-    proxyKind: undefined,
-    proxyAvailable: false,
-    groupProxyAvailable: false,
-    parentGroupId: null,
-    modelMatrix: identityMatrix(),
-    invModelMatrix: identityMatrix(),
     displayStateByChannel: {
       0: { contrastMin: 0, contrastMax: 1, gamma: 1, opacity: 1, colormapName: "gray", channelMask: 1 },
     },
-  };
+  });
 }
 
 function makeCold(activeSet: ColdStateActiveEntry[]): ColdStateMessage {
-  return {
-    type: "coldState",
-    epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 0 },
-    datasetId: "ds1",
-    currentT: 0,
-    currentZ: 0,
-    multiChannel: false,
-    visibleChannels: [0],
-    visibleRegion: {
-      xyBoundsVox: [0, 0, 1024, 1024], zRangeVox: [0, 1], effectiveZoom: 1,
-      sortCenterVox: null, frustumPlanes: null,
-    },
-    desiredProxyKeys: [],
-    activeSet,
-    viewMode: "volume",
-  };
+  return makeColdMessage(activeSet, { datasetId: "ds1" });
 }
 
 describe("applyColdStateDelta", () => {
@@ -131,14 +95,13 @@ describe("applyColdStateDelta", () => {
     const delta: ColdStateDeltaMessage = {
       type: "coldStateDelta",
       datasetId: "ds1",
-      epochs: { content: 1, layout: 1, view: 2, selection: 1, asset: 0, request: 1 },
+      epochs: { content: 1, layout: 1, view: 2, selection: 1, request: 1 },
       currentT: 0,
       currentZ: 0,
       visibleRegion: {
         xyBoundsVox: [0, 0, 512, 512], zRangeVox: [0, 1], effectiveZoom: 2,
         sortCenterVox: null, frustumPlanes: null,
       },
-      desiredProxyKeys: [],
       removedEntityIds: ["b"],
       upserts: [tile("a", "img-a", 2), tile("d", "img-d", 0)],
       activeSetOrder: ["a", "c", "d"],
@@ -181,19 +144,48 @@ describe("applyColdStateDelta", () => {
     expect(patched.epochs.view).toBe(2);
   });
 
+  it("applies remove/retain/append hints identically to a full-order delta", () => {
+    const initial = [tile("a", "img-a", 1), tile("b", "img-b", 1), tile("c", "img-c", 1)];
+    const common = {
+      type: "coldStateDelta" as const,
+      datasetId: "ds1",
+      epochs: { content: 1, layout: 1, view: 2, selection: 1, request: 1 },
+      currentT: 0,
+      currentZ: 0,
+      visibleRegion: makeCold([]).visibleRegion,
+      removedEntityIds: ["b"],
+      upserts: [tile("a", "img-a", 2), tile("d", "img-d", 0)],
+    };
+    const incrementalCtx = makeCtx();
+    const incrementalCold = makeCold(initial.map((entry) => ({ ...entry })));
+    incrementalCtx.state.coldStateByDataset.set("ds1", incrementalCold);
+    applyColdState(incrementalCtx, incrementalCold);
+    applyColdStateDelta(incrementalCtx, { ...common, appendedEntityIds: ["d"] });
+
+    const fallbackCtx = makeCtx();
+    const fallbackCold = makeCold(initial.map((entry) => ({ ...entry })));
+    fallbackCtx.state.coldStateByDataset.set("ds1", fallbackCold);
+    applyColdState(fallbackCtx, fallbackCold);
+    applyColdStateDelta(fallbackCtx, { ...common, activeSetOrder: ["a", "c", "d"] });
+
+    expect(incrementalCtx.state.coldStateByDataset.get("ds1")!.activeSet)
+      .toEqual(fallbackCtx.state.coldStateByDataset.get("ds1")!.activeSet);
+    expect(incrementalCtx.state.descriptorBuffersByDataset.get("ds1")!.memberByIndex)
+      .toEqual(fallbackCtx.state.descriptorBuffersByDataset.get("ds1")!.memberByIndex);
+  });
+
   it("is a no-op when no cold state has landed for the dataset yet", () => {
     const ctx = makeCtx();
     applyColdStateDelta(ctx, {
       type: "coldStateDelta",
       datasetId: "never-ingested",
-      epochs: { content: 1, layout: 1, view: 2, selection: 1, asset: 0, request: 1 },
+      epochs: { content: 1, layout: 1, view: 2, selection: 1, request: 1 },
       currentT: 0,
       currentZ: 0,
       visibleRegion: {
         xyBoundsVox: [0, 0, 1, 1], zRangeVox: [0, 1], effectiveZoom: 1,
         sortCenterVox: null, frustumPlanes: null,
       },
-      desiredProxyKeys: [],
       removedEntityIds: [],
       upserts: [],
       activeSetOrder: [],
@@ -215,11 +207,10 @@ describe("applyColdStateDelta", () => {
       applyColdStateDelta(ctx, {
         type: "coldStateDelta",
         datasetId: "ds1",
-        epochs: { content: 1, layout: 1, view: 2, selection: 1, asset: 0, request: 1 },
+        epochs: { content: 1, layout: 1, view: 2, selection: 1, request: 1 },
         currentT: 0,
         currentZ: 0,
         visibleRegion: cold.visibleRegion,
-        desiredProxyKeys: [],
         removedEntityIds: [],
         upserts: [],
         // "c" is neither retained ([a, b]) nor upserted.
@@ -251,14 +242,13 @@ describe("applyColdStateDelta", () => {
     applyColdStateDelta(ctx, {
       type: "coldStateDelta",
       datasetId: "ds1",
-      epochs: { content: 1, layout: 1, view: 2, selection: 1, asset: 0, request: 1 },
+      epochs: { content: 1, layout: 1, view: 2, selection: 1, request: 1 },
       currentT: 0,
       currentZ: 0,
       visibleRegion: {
         xyBoundsVox: [0, 0, 512, 512], zRangeVox: [0, 1], effectiveZoom: 2,
         sortCenterVox: null, frustumPlanes: null,
       },
-      desiredProxyKeys: [],
       removedEntityIds: [],
       upserts: [],
       activeSetOrder: ["a", "b"],

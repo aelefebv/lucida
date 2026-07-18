@@ -3,11 +3,11 @@ import {
   hasLocalFilePaths,
   localFilePathCount,
 } from "../savedView/captureBuilder.ts";
-import type { SavedView } from "../savedView/types.ts";
+import type { CommittedShareLink } from "../savedView/urlSync.ts";
 
 interface Props {
-  /** Returns the live SavedView (used to surface the local-file warning). */
-  getCurrentSavedView: () => SavedView | null;
+  /** Captures one view and returns the URL after that exact capture is committed. */
+  prepareShareLink: () => Promise<CommittedShareLink>;
 }
 
 interface ToastMessage {
@@ -23,8 +23,10 @@ let toastIdCounter = 0;
  * a transient inline notification with the link size, plus warnings for
  * local-file paths and oversize URLs.
  */
-export function ShareToolbarButton({ getCurrentSavedView }: Props) {
+export function ShareToolbarButton({ prepareShareLink }: Props) {
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const [status, setStatus] = useState<"idle" | "pending" | "error">("idle");
+  const [error, setError] = useState<string | null>(null);
   const pushToast = useCallback((text: string, kind: ToastMessage["kind"] = "info") => {
     const id = ++toastIdCounter;
     setToasts((prev) => [...prev, { id, text, kind }]);
@@ -35,20 +37,26 @@ export function ShareToolbarButton({ getCurrentSavedView }: Props) {
   }, []);
 
   const handleClick = useCallback(async () => {
-    const url = window.location.href;
+    if (status === "pending") return;
+    setStatus("pending");
+    setError(null);
+    let committed: CommittedShareLink;
     try {
-      await navigator.clipboard.writeText(url);
+      committed = await prepareShareLink();
+      await navigator.clipboard.writeText(committed.url);
     } catch (e) {
-      pushToast(`Copy failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+      setStatus("error");
+      setError(e instanceof Error ? e.message : String(e));
       return;
     }
+    setStatus("idle");
+    const { url, view } = committed;
     const sizeKb = (url.length / 1024).toFixed(1);
     pushToast(`Copied URL (${sizeKb} KB)`, "info");
 
     // Local-file warning: per
     // wiki/decisions/0014-local-file-datasets-personal-only-in-saved-views.md
-    const view = getCurrentSavedView();
-    if (view && hasLocalFilePaths(view)) {
+    if (hasLocalFilePaths(view)) {
       const n = localFilePathCount(view);
       pushToast(
         `This view references local files (${n} path${n === 1 ? "" : "s"}) — link only works on a server with the same files at the same paths.`,
@@ -59,17 +67,19 @@ export function ShareToolbarButton({ getCurrentSavedView }: Props) {
     // Soft 4 KB warning.
     if (url.length > 4096) {
       pushToast(
-        "Link is large — may not fit in some chat apps; consider saving as a bookmark.",
+        "Link is large — it may not fit in some chat apps; consider saving it as a workspace view.",
         "warn",
       );
     }
-  }, [getCurrentSavedView, pushToast]);
+  }, [prepareShareLink, pushToast, status]);
 
   return (
     <>
       <button
         type="button"
         onClick={handleClick}
+        disabled={status === "pending"}
+        aria-busy={status === "pending"}
         title="Copy a link to this view"
         style={{
           padding: "0.375rem 0.75rem",
@@ -77,8 +87,15 @@ export function ShareToolbarButton({ getCurrentSavedView }: Props) {
           whiteSpace: "nowrap",
         }}
       >
-        Share view
+        {status === "pending" ? "Preparing link…" : "Share view"}
       </button>
+      {error && (
+        <div className="share-copy-error" role="alert">
+          <span>Could not copy this view: {error}</span>
+          <button type="button" onClick={() => void handleClick()}>Retry</button>
+          <button type="button" onClick={() => { setError(null); setStatus("idle"); }}>Dismiss</button>
+        </div>
+      )}
       <ShareToastTray toasts={toasts} />
     </>
   );
@@ -106,12 +123,12 @@ function ShareToastTray({ toasts }: { toasts: ToastMessage[] }) {
           role="status"
           style={{
             padding: "0.5rem 0.75rem",
-            background: t.kind === "warn" ? "#5a3a00" : "#222",
-            color: "#fff",
+            background: t.kind === "warn" ? "var(--warning-surface)" : "var(--surface-2)",
+            color: "var(--text-primary)",
             borderRadius: 6,
-            border: t.kind === "warn" ? "1px solid #b88500" : "1px solid #444",
+            border: t.kind === "warn" ? "1px solid var(--warning-border)" : "1px solid var(--border-strong)",
             fontSize: "0.85rem",
-            boxShadow: "0 2px 8px rgba(0,0,0,0.4)",
+            boxShadow: "var(--shadow-popover)",
             pointerEvents: "auto",
           }}
         >

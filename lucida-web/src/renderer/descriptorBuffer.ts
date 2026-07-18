@@ -1,10 +1,9 @@
 /**
  * Per-dataset entity descriptor buffer.
  *
- * Holds the geometric/LOD/proxy/display fields the shader reads per
+ * Holds the geometric/LOD/display fields the shader reads per
  * sample: model matrix + inverse, per-LOD chunk/grid/level dims with
- * indirection offsets, proxy handles (pool index + slot index), proxy
- * slot dims, and per-channel display state (contrast/gamma/opacity/
+ * indirection offsets and per-channel display state (contrast/gamma/opacity/
  * colormapLutIndex/channelMask).
  *
  * The descriptor lives entirely in worker-side state. TickCoordinator and
@@ -27,18 +26,16 @@ import type {
   ColdStateActiveEntry,
   ColdStateDisplayState,
 } from "./workerProtocol.ts";
-import {
-  proxyDescriptorKey,
-  type EntityProxyDescriptor,
-} from "./workerContext.ts";
-import type { ProxyAtlasState } from "./proxyAtlas.ts";
 import type { LodIndirectionMeta } from "./volume/atlas.ts";
+import type {
+  GpuResourceBudget,
+  TrackedGpuResource,
+} from "./gpuResourceBudget.ts";
 import {
   DESCRIPTOR_ENTRY_SIZE,
   DESCRIPTOR_LOD_INFO_SIZE,
   DESCRIPTOR_LODS_OFFSET,
   DESCRIPTOR_MAX_LODS,
-  DESCRIPTOR_SENTINEL_INDEX,
   LOD_OFFSET_CHUNK_DIMS,
   LOD_OFFSET_GRID_DIMS,
   LOD_OFFSET_INDIRECTION_OFFSET,
@@ -50,9 +47,6 @@ import {
   OFFSET_COLORMAP_LUT_INDEX,
   OFFSET_CONTRAST_MAX,
   OFFSET_CONTRAST_MIN,
-  OFFSET_TILE_PROXY_DIMS,
-  OFFSET_TILE_PROXY_POOL_INDEX,
-  OFFSET_TILE_PROXY_SLOT_INDEX,
   OFFSET_GAMMA,
   OFFSET_INV_MODEL_MATRIX,
   OFFSET_LABEL_OPACITY,
@@ -62,12 +56,6 @@ import {
   OFFSET_DETAIL_SOURCE,
   OFFSET_MODEL_MATRIX,
   OFFSET_OPACITY,
-  OFFSET_PAD_PROXY0,
-  OFFSET_PAD_PROXY1,
-  OFFSET_PAD_PROXY2,
-  OFFSET_GROUP_PROXY_DIMS,
-  OFFSET_GROUP_PROXY_POOL_INDEX,
-  OFFSET_GROUP_PROXY_SLOT_INDEX,
   SOURCE_OFFSET_CHUNK_DIMS,
   SOURCE_OFFSET_GRID_DIMS,
   SOURCE_OFFSET_INDIRECTION_OFFSET,
@@ -89,6 +77,7 @@ export {
 
 export interface EntityDescriptorIndex {
   buffer: GPUBuffer;
+  bufferAllocation?: TrackedGpuResource<GPUBuffer>;
   /** memberId → entity index in {@link buffer}. */
   indexByMember: Map<string, number>;
   /**
@@ -98,11 +87,6 @@ export interface EntityDescriptorIndex {
    * the quad record carries. 1:1 with `indexByMember` by construction.
    */
   memberByIndex: string[];
-  /** poolKey → dense pool index (matches GPU descriptor's *PoolIndex fields). */
-  proxyPoolIndexByKey: Map<string, number>;
-  /** Dense pool array indexed by proxy pool index, used by render handlers
-   * to bind the right proxy texture without re-walking the descriptor. */
-  proxyPoolsByIndex: ProxyAtlasState[];
   /** Number of populated descriptor entries (== `indexByMember.size`). */
   entityCount: number;
   /**
@@ -115,8 +99,30 @@ export interface EntityDescriptorIndex {
   colormapLutIndices: Map<string, number>;
   /** memberId → colormap name. Drives per-draw LUT texture binding. */
   colormapNameByMember: Map<string, string>;
-  /** memberId → proxy descriptor for the cold state's current `(t,c)`. */
-  proxyDescriptorByMember: Map<string, EntityProxyDescriptor>;
+}
+
+// Worker-local serialization scratch. `GPUQueue.writeBuffer` copies the bytes
+// before returning, so one grow-only buffer is safe across sequential dataset
+// rebuilds and avoids a fresh multi-megabyte ArrayBuffer on every cold state.
+let descriptorScratch = new ArrayBuffer(0);
+
+function acquireDescriptorScratch(byteLength: number): ArrayBuffer {
+  if (descriptorScratch.byteLength < byteLength) {
+    descriptorScratch = new ArrayBuffer(byteLength);
+  }
+  // A fresh ArrayBuffer was implicitly zeroed. Reuse must preserve that same
+  // contract because malformed/short matrices deliberately leave fields at 0.
+  new Uint8Array(descriptorScratch, 0, byteLength).fill(0);
+  return descriptorScratch;
+}
+
+/** Test-only reset/inspection for the allocation-reuse contract. */
+export function __resetDescriptorScratchForTest(): void {
+  descriptorScratch = new ArrayBuffer(0);
+}
+
+export function __descriptorScratchCapacityForTest(): number {
+  return descriptorScratch.byteLength;
 }
 
 /**
@@ -128,19 +134,13 @@ export interface EntityDescriptorIndex {
  * Mirrors the keying in `gpu.worker.ts`'s cold-state handler:
  *   - Single-channel field:           `entry.imageId`
  *   - Multi-channel field:            `${entry.imageId}:ch${channel}`
- *   - Single-channel group-as-proxy:   `entry.entityId`
- *   - Multi-channel group-as-proxy:    `${entry.entityId}:ch${channel}`
- *
- * `ColdStateActiveEntry` is a discriminated union on `kind`; narrowing
- * through `entry.kind` makes the group-as-proxy variant TS-visible (it
- * has no `imageId`).
  */
 export function memberIdForColdEntry(
   entry: ColdStateActiveEntry,
   channel: number,
   multiChannel: boolean,
 ): string {
-  const base = entry.kind === "group-as-proxy" ? entry.entityId : entry.imageId;
+  const base = entry.imageId;
   return multiChannel ? `${base}:ch${channel}` : base;
 }
 
@@ -188,35 +188,22 @@ export function computeMemberIndexMap(
  *
  * The buffer covers every (entry, channel) combination from
  * `cold.activeSet × cold.visibleChannels` in canonical iteration order.
- * Proxy pool indices and colormap LUT indices are assigned dense from
- * the set of poolKeys / colormap names referenced by the active entries.
+ * Colormap LUT indices are assigned densely from the active entries.
  */
 export function buildDescriptorBuffer(
   device: GPUDevice,
   cold: ColdStateMessage,
-  proxyDescriptorsByEntity: Map<string, EntityProxyDescriptor>,
-  proxyPoolsByDataset: Map<string, Map<string, ProxyAtlasState>>,
   entityMetasByMember: Map<string, LodIndirectionMeta[]>,
+  resources: GpuResourceBudget,
 ): EntityDescriptorIndex {
   const indexByMember = new Map<string, number>();
-  const proxyPoolIndexByKey = new Map<string, number>();
-  const proxyPoolsByIndex: ProxyAtlasState[] = [];
   const colormapLutIndices = new Map<string, number>();
   const colormapNameByMember = new Map<string, string>();
-  const proxyDescriptorByMember = new Map<string, EntityProxyDescriptor>();
-  const dsPools = proxyPoolsByDataset.get(cold.datasetId) ?? null;
 
   // Pass 1: assign entity + pool + colormap indices in canonical order
   // (stable by construction — the orchestrator walks the same order).
   // Indices are recorded eagerly so the descriptor write below sees fully-
   // populated maps.
-  const recordPool = (poolKey: string): void => {
-    if (proxyPoolIndexByKey.has(poolKey)) return;
-    const pool = dsPools?.get(poolKey);
-    if (!pool) return;
-    proxyPoolIndexByKey.set(poolKey, proxyPoolsByIndex.length);
-    proxyPoolsByIndex.push(pool);
-  };
   const recordColormap = (name: string): number => {
     let idx = colormapLutIndices.get(name);
     if (idx === undefined) {
@@ -236,17 +223,11 @@ export function buildDescriptorBuffer(
     const ds = displayStateForChannel(entry, channel);
     colormapNameByMember.set(memberId, ds.colormapName);
     recordColormap(ds.colormapName);
-    const desc = proxyDescriptorsByEntity.get(
-      proxyDescriptorKey(entry.entityId, cold.currentT, channel),
-    );
-    if (desc) proxyDescriptorByMember.set(memberId, desc);
-    if (desc?.tileProxyHandle) recordPool(desc.tileProxyHandle.poolKey);
-    if (desc?.groupProxyHandle) recordPool(desc.groupProxyHandle.poolKey);
   }
 
   const entityCount = indexByMember.size;
   const bufferSize = Math.max(entityCount * DESCRIPTOR_ENTRY_SIZE, DESCRIPTOR_ENTRY_SIZE);
-  const cpuBuffer = new ArrayBuffer(bufferSize);
+  const cpuBuffer = acquireDescriptorScratch(bufferSize);
 
   // Pass 2: serialize each entity once.
   const written = new Set<string>();
@@ -260,42 +241,45 @@ export function buildDescriptorBuffer(
       entry,
       entityMetasByMember.get(memberId) ?? [],
       displayStateForChannel(entry, channel),
-      proxyDescriptorsByEntity,
-      proxyPoolIndexByKey,
-      proxyPoolsByIndex,
       colormapLutIndices,
-      proxyDescriptorKey(entry.entityId, cold.currentT, channel),
     );
   }
 
-  const buffer = device.createBuffer({
-    size: bufferSize,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-  });
-  device.queue.writeBuffer(buffer, 0, cpuBuffer);
+  const bufferAllocation = resources.createBuffer(
+    device,
+    {
+      key: `descriptor:${cold.datasetId}`,
+      kind: "descriptor",
+      datasetId: cold.datasetId,
+    },
+    {
+      size: bufferSize,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    },
+  );
+  const buffer = bufferAllocation.resource;
+  // Upload exactly the populated prefix. The scratch may be larger after a
+  // previous wide collection; stale tail bytes must never reach this buffer.
+  device.queue.writeBuffer(buffer, 0, cpuBuffer, 0, bufferSize);
 
   return {
     buffer,
+    bufferAllocation,
     indexByMember,
     memberByIndex,
-    proxyPoolIndexByKey,
-    proxyPoolsByIndex,
     entityCount,
     colormapLutIndices,
     colormapNameByMember,
-    proxyDescriptorByMember,
   };
 }
 
 export function destroyDescriptorBuffer(idx: EntityDescriptorIndex): void {
-  idx.buffer.destroy();
+  idx.bufferAllocation?.destroy();
+  if (!idx.bufferAllocation) idx.buffer.destroy();
   idx.indexByMember.clear();
   idx.memberByIndex.length = 0;
-  idx.proxyPoolIndexByKey.clear();
-  idx.proxyPoolsByIndex.length = 0;
   idx.colormapLutIndices.clear();
   idx.colormapNameByMember.clear();
-  idx.proxyDescriptorByMember.clear();
 }
 
 /**
@@ -338,11 +322,7 @@ export function serializeEntityDescriptor(
   entry: ColdStateActiveEntry,
   lodMetas: LodIndirectionMeta[],
   displayState: ColdStateDisplayState,
-  proxyDescriptorsByEntity: Map<string, EntityProxyDescriptor>,
-  proxyPoolIndexByKey: Map<string, number>,
-  proxyPoolsByIndex: ProxyAtlasState[],
   colormapLutIndices: Map<string, number>,
-  proxyKey: string | null = null,
 ): void {
   const f32 = new Float32Array(target, offset, DESCRIPTOR_ENTRY_SIZE / 4);
   const u32 = new Uint32Array(target, offset, DESCRIPTOR_ENTRY_SIZE / 4);
@@ -350,53 +330,9 @@ export function serializeEntityDescriptor(
   if (entry.modelMatrix.length === 16) f32.set(entry.modelMatrix, OFFSET_MODEL_MATRIX / 4);
   if (entry.invModelMatrix.length === 16) f32.set(entry.invModelMatrix, OFFSET_INV_MODEL_MATRIX / 4);
 
-  // Resolve proxy handles to (poolIndex, slotIndex, dims). Sentinels for
-  // any missing handle.
-  const desc = proxyDescriptorsByEntity.get(proxyKey ?? entry.entityId);
-  let tilePoolIdx = DESCRIPTOR_SENTINEL_INDEX;
-  let tileSlotIdx = DESCRIPTOR_SENTINEL_INDEX;
-  let tileDims: [number, number, number] = [1, 1, 1];
-  let groupPoolIdx = DESCRIPTOR_SENTINEL_INDEX;
-  let groupSlotIdx = DESCRIPTOR_SENTINEL_INDEX;
-  let groupDims: [number, number, number] = [1, 1, 1];
-  if (desc?.tileProxyHandle) {
-    const p = proxyPoolIndexByKey.get(desc.tileProxyHandle.poolKey);
-    if (p !== undefined) {
-      tilePoolIdx = p;
-      tileSlotIdx = desc.tileProxyHandle.slotIndex >>> 0;
-      tileDims = proxyPoolsByIndex[p].slotDims;
-    }
-  }
-  if (desc?.groupProxyHandle) {
-    const p = proxyPoolIndexByKey.get(desc.groupProxyHandle.poolKey);
-    if (p !== undefined) {
-      groupPoolIdx = p;
-      groupSlotIdx = desc.groupProxyHandle.slotIndex >>> 0;
-      groupDims = proxyPoolsByIndex[p].slotDims;
-    }
-  }
-
   const lutIdx = colormapLutIndices.get(displayState.colormapName) ?? 0;
 
   u32[OFFSET_CHANNEL_MASK / 4]          = displayState.channelMask >>> 0;
-  u32[OFFSET_TILE_PROXY_POOL_INDEX / 4] = tilePoolIdx;
-  u32[OFFSET_TILE_PROXY_SLOT_INDEX / 4] = tileSlotIdx;
-  u32[OFFSET_GROUP_PROXY_POOL_INDEX / 4]  = groupPoolIdx;
-  u32[OFFSET_GROUP_PROXY_SLOT_INDEX / 4]  = groupSlotIdx;
-  u32[OFFSET_PAD_PROXY0 / 4] = 0;
-  u32[OFFSET_PAD_PROXY1 / 4] = 0;
-  u32[OFFSET_PAD_PROXY2 / 4] = 0;
-  const tileDimsBase = OFFSET_TILE_PROXY_DIMS / 4;
-  u32[tileDimsBase + 0] = tileDims[0];
-  u32[tileDimsBase + 1] = tileDims[1];
-  u32[tileDimsBase + 2] = tileDims[2];
-  u32[tileDimsBase + 3] = 0;
-  const groupDimsBase = OFFSET_GROUP_PROXY_DIMS / 4;
-  u32[groupDimsBase + 0] = groupDims[0];
-  u32[groupDimsBase + 1] = groupDims[1];
-  u32[groupDimsBase + 2] = groupDims[2];
-  u32[groupDimsBase + 3] = 0;
-
   f32[OFFSET_CONTRAST_MIN / 4] = displayState.contrastMin;
   f32[OFFSET_CONTRAST_MAX / 4] = displayState.contrastMax;
   f32[OFFSET_GAMMA / 4]        = displayState.gamma;
@@ -449,8 +385,8 @@ export function serializeEntityDescriptor(
     }
   }
 
-  const detailLevel = entry.kind === "tile" ? entry.detailLevel : undefined;
-  const coarseLevel = entry.kind === "tile" ? entry.coarseLevel : undefined;
+  const detailLevel = entry.detailLevel;
+  const coarseLevel = entry.coarseLevel;
   const hasTierSources = detailLevel !== undefined;
   const detailMeta = hasTierSources
     ? findLodMeta(lodMetas, detailLevel)

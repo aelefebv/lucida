@@ -16,9 +16,9 @@
  * WHY keyed by dataset: comment ids are only unique within a document/dataset,
  * and "viewed" is a per-dataset inbox. Keying the stored set by the selected
  * dataset id means switching datasets shows that dataset's own read-state, and
- * one dataset's reads never bleed into another's count. When nothing is selected
- * (`null`) we use a stable sentinel key so the no-selection inbox — the very
- * window issue #802's resolver feeds — still has somewhere to persist.
+ * one dataset's reads never bleed into another's count. A null scope is kept in
+ * memory only: persistence begins only once the host resolves the annotation's
+ * real dataset, so placeholder state can never leak across datasets.
  *
  * The hook owns the Set; {@link MentionsOfMe} stays PURE and receives the id
  * list + a `markViewed` callback as props.
@@ -31,21 +31,16 @@ import { useCallback, useMemo, useState } from "react";
  * the set so reads never bleed across datasets. */
 export const VIEWED_MENTIONS_KEY_PREFIX = "lucida.mentions.viewed.";
 
-/** Sentinel appended when no dataset is selected (`selectedDatasetId === null`).
- * The #802 resolver still surfaces a first inbound mention with nothing
- * selected, so that no-selection inbox needs a stable place to persist its
- * reads rather than sharing a real dataset's key. */
-const NO_DATASET_SENTINEL = "__none__";
-
 /** The full storage key for a given dataset selection. */
-function storageKey(datasetId: string | null): string {
-  return `${VIEWED_MENTIONS_KEY_PREFIX}${datasetId ?? NO_DATASET_SENTINEL}`;
+function storageKey(datasetId: string): string {
+  return `${VIEWED_MENTIONS_KEY_PREFIX}${datasetId}`;
 }
 
 /** Read the persisted viewed-id set for `datasetId`, or an empty set when
  * absent/empty/malformed/unavailable. Never throws: a broken storage simply
  * means "nothing viewed yet" (degrade to all-unviewed). */
 function readViewed(datasetId: string | null): Set<string> {
+  if (datasetId === null) return new Set();
   if (typeof localStorage === "undefined") return new Set();
   try {
     const raw = localStorage.getItem(storageKey(datasetId));
@@ -64,6 +59,7 @@ function readViewed(datasetId: string | null): Set<string> {
  * an in-memory set that doesn't survive a reload still beats throwing out of the
  * toolbar. Stored as a JSON string[] so it round-trips through {@link readViewed}. */
 function writeViewed(datasetId: string | null, ids: Set<string>): void {
+  if (datasetId === null) return;
   if (typeof localStorage === "undefined") return;
   try {
     localStorage.setItem(storageKey(datasetId), JSON.stringify([...ids]));

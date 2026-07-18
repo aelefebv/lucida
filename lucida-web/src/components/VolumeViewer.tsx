@@ -4,15 +4,17 @@ import type { WasmScene } from "lucida-core";
 import { RenderClient } from "../renderer/renderClient.ts";
 import { RenderLoop, type DatasetEntry } from "../renderLoop.ts";
 import type { Session } from "../session.ts";
-import { applyDocumentCommand, applyViewportCommand } from "../applyAndSend.ts";
+import { applyDocumentCommand } from "../applyAndSend.ts";
+import type { ViewportCoordinator } from "../viewportCoordinator.ts";
 import { buildAnnotationView, liveViewWithLiveTC } from "../savedView/buildAnnotationView.ts";
 import { useKeyState } from "../hooks/useKeyState.ts";
 import { getBoundKeys, isActionPressed } from "../config/keyBindings.ts";
 import { useFlyCameraInput } from "../hooks/useFlyCameraInput.ts";
 import { FlyCameraHint } from "./FlyCameraHint.tsx";
-import type { AnnotationDraft } from "./annotationDraft.ts";
+import type { AnnotationDraftStore } from "./annotationDraft.ts";
 import { exceedsClickSlop } from "./annotationInteraction.ts";
 import { eventToScreenPx } from "./cameraProjection.ts";
+import { DemandDrivenAnimationFrame } from "../demandDrivenAnimationFrame.ts";
 
 interface Props {
   session: Session;
@@ -21,8 +23,7 @@ interface Props {
   client: RenderClient;
   canvas: HTMLCanvasElement;
   remoteDocumentVersion: number;
-  emitPresence: () => void;
-  breakFollow: () => void;
+  viewport: ViewportCoordinator;
   sendCursor: (position: [number, number] | null) => void;
   t: number;
   c: number;
@@ -46,7 +47,7 @@ interface Props {
   /** Shared channel for the live box/line draw preview (screen-space CSS px,
    * relative to the canvas), rendered by {@link AnnotationDraftOverlay}; the
    * shift-drag writes it and clears it on release/cancel. */
-  annotationDraftRef: RefObject<AnnotationDraft | null>;
+  annotationDraft: AnnotationDraftStore;
 }
 
 const CLIP_SPEED = 0.02; // world-space units per frame at 60 fps
@@ -54,7 +55,7 @@ const INTERACTION_RENDER_SCALE = 0.5;
 const FULL_RENDER_SCALE = 1.0;
 const SCALE_RESTORE_DELAY_MS = 50;
 
-export function VolumeViewer({ session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, t, c, loopRef: parentLoopRef, onLoopChange, onCameraModeChange, annotationDatasetId, annotationKind, myId, sendCommand, onDocumentChanged, annotationDraftRef }: Props) {
+export function VolumeViewer({ session, scene, datasets, client, canvas, remoteDocumentVersion, viewport, sendCursor, t, c, loopRef: parentLoopRef, onLoopChange, onCameraModeChange, annotationDatasetId, annotationKind, myId, sendCommand, onDocumentChanged, annotationDraft }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
   const [cameraMode, setCameraMode] = useState<string>(() => scene.camera_mode());
   const [showHint, setShowHint] = useState(false);
@@ -101,7 +102,7 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
   // eslint-disable-next-line react-hooks/refs
   canvasRef.current = canvas;
   const boundKeys = useMemo(() => getBoundKeys(), []);
-  const pressedKeys = useKeyState(canvasRef, boundKeys);
+  const keyState = useKeyState(canvasRef, boundKeys);
 
   // Stable refs for callbacks needed by useFlyCameraInput
   const sceneRef = useRef<WasmScene>(scene);
@@ -117,11 +118,19 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
   // the rate-limiter collapses 60+/sec into one log line per second.
   const fly = useFlyCameraInput(
     sceneRef,
-    applyViewportCommand,
-    { current: pressedKeys },
+    useCallback(
+      (command) => viewport.apply(command, {
+        source: "fly_camera_input",
+        history: {
+          label: "fly camera",
+          coalesceKey: "fly_camera_input",
+          coalesceWindowMs: 250,
+        },
+      }),
+      [viewport],
+    ),
+    keyState,
     isFlyMode,
-    emitPresence,
-    useCallback(() => loopRef.current?.markInteractiveDirty("fly_camera_input"), []),
     useCallback(() => {
       clearTimeout(scaleTimerRef.current);
       loopRef.current?.setRenderScale(INTERACTION_RENDER_SCALE);
@@ -163,57 +172,71 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
     loopRef.current?.markInteractiveDirty();
   }, [t, c]);
 
-  // Clip distance adjustment + fly mode toggle via RAF loop
+  // Clip distance adjustment + fly mode toggle. Key changes wake one frame;
+  // clip adjustment remains continuous only while a clip key is held.
   useEffect(() => {
-    let rafId: number | null = null;
-    let lastTime = 0;
+    let lastTime = performance.now();
     let fWasPressed = false;
 
-    function tick(time: number) {
-      const dt = lastTime > 0 ? Math.min((time - lastTime) / 1000, 0.1) : 0;
+    const scheduler = new DemandDrivenAnimationFrame((time) => {
+      const dt = Math.min((time - lastTime) / 1000, 0.1);
       lastTime = time;
+      const pressedKeys = keyState.pressed;
 
       // Clip distance
       const inc = isActionPressed(pressedKeys, "clip.increase");
       const dec = isActionPressed(pressedKeys, "clip.decrease");
       if (inc || dec) {
         const delta = (inc ? 1 : -1) * CLIP_SPEED * (dt * 60); // normalize to ~60fps
-        scene.adjust_clip_distance(delta);
-        emitPresence();
-        loopRef.current?.markInteractiveDirty();
+        viewport.commit(
+          () => scene.adjust_clip_distance(delta),
+          {
+            source: "clip_distance",
+            history: {
+              label: "clip distance",
+              coalesceKey: "clip_distance",
+              coalesceWindowMs: 250,
+            },
+          },
+        );
       }
 
       // Toggle fly mode on F key press (edge detect)
       const fPressed = isActionPressed(pressedKeys, "camera.toggleFly");
       if (fPressed && !fWasPressed) {
-        const currentMode = scene.camera_mode();
-        if (currentMode === "fly") {
-          scene.set_mode_arcball();
-        } else if (currentMode === "arcball") {
-          scene.set_mode_fly();
-          const BASE_SPEED_FACTOR = 0.3;
-          const diagonal = scene.volume_diagonal();
-          scene.fly_set_base_speed(diagonal * BASE_SPEED_FACTOR);
-        }
+        viewport.commit(() => {
+          const currentMode = scene.camera_mode();
+          if (currentMode === "fly") {
+            scene.set_mode_arcball();
+          } else if (currentMode === "arcball") {
+            scene.set_mode_fly();
+            const BASE_SPEED_FACTOR = 0.3;
+            const diagonal = scene.dataset_volume_diagonal(annotationDatasetIdRef.current ?? "");
+            scene.fly_set_base_speed(diagonal * BASE_SPEED_FACTOR);
+          }
+        }, { source: "camera_mode_keyboard" });
         const newMode = scene.camera_mode();
         setCameraMode(newMode);
         onCameraModeChange?.(newMode);
         if (newMode === "fly") setShowHint(true);
-        breakFollow();
-        emitPresence();
-        loopRef.current?.markInteractiveDirty();
         canvas.focus();
       }
       fWasPressed = fPressed;
 
-      rafId = requestAnimationFrame(tick);
-    }
+      return inc || dec;
+    });
 
-    rafId = requestAnimationFrame(tick);
-    return () => {
-      if (rafId !== null) cancelAnimationFrame(rafId);
+    const wake = () => {
+      if (!scheduler.pending) lastTime = performance.now();
+      scheduler.wake();
     };
-  }, [scene, pressedKeys, emitPresence, breakFollow, canvas]); // eslint-disable-line react-hooks/exhaustive-deps
+    const unsubscribe = keyState.subscribe(wake);
+    if (keyState.pressed.size > 0) wake();
+    return () => {
+      unsubscribe();
+      scheduler.dispose();
+    };
+  }, [scene, keyState, viewport, canvas]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Resolution scaling during interaction
   const scaleTimerRef = useRef<number>(0);
@@ -369,10 +392,11 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
         // grows it under the cursor — the camera is held still during a draw, so
         // raw screen coords match where the committed shape lands on release.
         const drawKind = annotationKindRef.current;
-        annotationDraftRef.current =
+        annotationDraft.set(
           press.moved && (drawKind === "line" || drawKind === "box")
             ? { kind: drawKind, x0: press.x - rect.left, y0: press.y - rect.top, x1: e.clientX - rect.left, y1: e.clientY - rect.top }
-            : null;
+            : null,
+        );
         return;
       }
 
@@ -391,27 +415,45 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
       const dy = e.clientY - lastPos.current.y;
       lastPos.current = { x: e.clientX, y: e.clientY };
 
-      breakFollow();
       if (shiftDragRef.current) {
-        applyViewportCommand(scene, { type: "arcball_pan", dx, dy });
+        viewport.apply(
+          { type: "arcball_pan", dx, dy },
+          {
+            source: "arcball_pan",
+            history: {
+              label: "orbit pan",
+              coalesceKey: "arcball_drag",
+              coalesceWindowMs: Infinity,
+            },
+          },
+        );
       } else {
         const dTheta = -dx * 0.005;
         const dPhi = -dy * 0.005;
-        applyViewportCommand(scene, { type: "arcball_rotate", d_theta: dTheta, d_phi: dPhi });
+        viewport.apply(
+          { type: "arcball_rotate", d_theta: dTheta, d_phi: dPhi },
+          {
+            source: "arcball_rotate",
+            history: {
+              label: "orbit",
+              coalesceKey: "arcball_drag",
+              coalesceWindowMs: Infinity,
+            },
+          },
+        );
       }
-      emitPresence();
-      loopRef.current?.markInteractiveDirty();
     },
-    [dragging, scene, canvas, emitPresence, breakFollow, sendCursor, annotationDraftRef],
+    [dragging, canvas, viewport, sendCursor, annotationDraft],
   );
 
   const onArcballPointerUp = useCallback(
     (e: PointerEvent) => {
       setDragging(false);
+      viewport.endGesture("arcball_drag");
       scheduleFullRes();
       const press = pinPressRef.current;
       pinPressRef.current = null;
-      annotationDraftRef.current = null; // draw ended; committed shape takes over
+      annotationDraft.set(null); // draw ended; committed shape takes over
       if (!press) return;
       if (press.shape && press.moved) {
         // A dragged line/box: draw from the press anchor to the release point.
@@ -422,7 +464,7 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
       }
       // A point-kind shift-pan (moved, not a shape) draws nothing — unchanged.
     },
-    [scheduleFullRes, drawAnnotation, annotationDraftRef],
+    [scheduleFullRes, drawAnnotation, annotationDraft, viewport],
   );
 
   // Fly input handling
@@ -462,10 +504,11 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
   const onPointerCancel = useCallback(() => {
     pinPressRef.current = null;
     setDragging(false);
-    annotationDraftRef.current = null;
+    viewport.endGesture("arcball_drag");
+    annotationDraft.set(null);
     scheduleFullRes();
     if (isFlyMode) fly.onPointerUp();
-  }, [scheduleFullRes, isFlyMode, fly, annotationDraftRef]);
+  }, [scheduleFullRes, isFlyMode, fly, annotationDraft, viewport]);
 
   // Clear cursor on unmount (e.g. mode switch to 2D)
   useEffect(() => {
@@ -476,14 +519,21 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
     (e: WheelEvent) => {
       e.preventDefault();
       const delta = e.deltaY * 0.001;
-      breakFollow();
-      applyViewportCommand(scene, { type: "arcball_zoom", delta });
-      emitPresence();
-      loopRef.current?.markInteractiveDirty();
+      viewport.apply(
+        { type: "arcball_zoom", delta },
+        {
+          source: "arcball_zoom",
+          history: {
+            label: "orbit zoom",
+            coalesceKey: "arcball_zoom",
+            coalesceWindowMs: 250,
+          },
+        },
+      );
       setLowRes();
       scheduleFullRes();
     },
-    [scene, emitPresence, breakFollow, setLowRes, scheduleFullRes],
+    [viewport, setLowRes, scheduleFullRes],
   );
 
   const onFlyWheel = useCallback(
@@ -491,9 +541,18 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
       e.preventDefault();
       // Scroll up (negative deltaY) = faster, scroll down = slower
       const factor = e.deltaY < 0 ? 1.2 : 1 / 1.2;
-      scene.fly_adjust_speed(factor);
+      viewport.commit(
+        () => scene.fly_adjust_speed(factor),
+        {
+          source: "fly_speed",
+          breakFollow: false,
+          invalidation: "none",
+          publication: "none",
+          recordLiveView: false,
+        },
+      );
     },
-    [scene],
+    [scene, viewport],
   );
 
   const onWheel = isFlyMode ? onFlyWheel : onArcballWheel;

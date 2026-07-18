@@ -97,7 +97,7 @@ vi.mock("lucida-core", () => {
     dataset_volume_shape(_id: string) { return new Uint32Array([4, 8, 8]); }
     export_presence() {
       return JSON.stringify({
-        camera: { mode: "slice", center: [0, 0], zoom: 1 },
+        camera: { mode: "slice", center: [0, 0], zoom: 1, viewport: [800, 600] },
         view: { z_range: { start: 0, end: 1 }, t: 0, c: 0 },
         display: { contrast_min: 0, contrast_max: 1, gamma: 1 },
       });
@@ -107,10 +107,8 @@ vi.mock("lucida-core", () => {
     import_dataset_presence(_json: string) {}
     compute_peer_cursors() { return JSON.stringify({ gpu: [], labels: [] }); }
     fit_camera_to_dataset_bounds(_id: string) {}
-    apply_asset_catalog_delta(_datasetId: string, _deltaJson: string) {}
-    asset_epoch() { return 0; }
     epochs() {
-      return JSON.stringify({ content: 0, layout: 0, view: 0, selection: 0, asset: 0 });
+      return JSON.stringify({ content: 0, layout: 0, view: 0, selection: 0 });
     }
     free() {}
   }
@@ -153,7 +151,6 @@ vi.mock("./bridge.ts", () => {
     sendCursor = vi.fn();
     sendFollow = vi.fn();
     sendOpenRemoteDataset = vi.fn();
-    subscribeBookmarkChanged = vi.fn(() => () => {});
     constructor(handlers: unknown, _url?: string, workspaceId?: string) {
       this.handlers = handlers;
       this.workspaceId = workspaceId;
@@ -240,7 +237,11 @@ import {
 } from "./invalidation.ts";
 
 const MockedBridge = Bridge as unknown as {
-  instances: Array<{ handlers: BridgeHandlers; sendCommand: ReturnType<typeof vi.fn> }>;
+  instances: Array<{
+    handlers: BridgeHandlers;
+    sendCommand: ReturnType<typeof vi.fn>;
+    sendOpenRemoteDataset: ReturnType<typeof vi.fn>;
+  }>;
 };
 const FakeScene = WasmScene as unknown as {
   instances: Array<{
@@ -302,7 +303,7 @@ function makePinWithView(pinId: string) {
       v: 1,
       datasets: [],
       active_layouts: {},
-      camera: { mode: "slice", center: [4, 4], zoom: 2 },
+      camera: { mode: "slice", center: [4, 4], zoom: 2, viewport: [800, 600] },
       view: { z_range: { start: 1, end: 2 }, t: 0, c: 0 },
       display: { contrast_min: 0, contrast_max: 1, gamma: 1 },
       dataset_order: [],
@@ -328,24 +329,45 @@ const authSession = {
     is_admin: false,
   },
   refresh: async () => {},
-  signOut: async () => {},
+  signOut: async () => true,
+  logoutFailure: null,
 };
 
-function renderApp() {
+interface RenderAppOptions {
+  workspaceName?: string;
+  canRenameWorkspace?: boolean;
+  onRenameWorkspace?: (name: string) => Promise<void>;
+}
+
+function renderApp({
+  workspaceName = "Wiring",
+  canRenameWorkspace = false,
+  onRenameWorkspace = async () => {},
+}: RenderAppOptions = {}) {
   return render(
     <AuthSessionContext.Provider value={authSession}>
       <App
         workspaceId="ws-1"
-        workspaceName="Wiring"
+        workspaceName={workspaceName}
         workspaceRole="editor"
         defaultSavedViewId={null}
-        canRenameWorkspace={false}
+        canRenameWorkspace={canRenameWorkspace}
         onBackToDashboard={() => {}}
-        onRenameWorkspace={async () => {}}
+        onRenameWorkspace={onRenameWorkspace}
         onSetDefaultSavedView={async () => {}}
       />
     </AuthSessionContext.Provider>,
   );
+}
+
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 /** Mount the app, let the (mocked) WASM init settle so the session controller
@@ -371,7 +393,142 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
-  window.location.hash = "";
+  window.history.replaceState({}, "", "/");
+});
+
+describe("App wiring: chrome-free production capture", () => {
+  it("?render=1 suppresses both inspectors even though Saved Views is the default", async () => {
+    window.history.replaceState({}, "", "/w/ws-1?render=1");
+    renderApp();
+    await act(async () => {});
+
+    expect(document.querySelector(".app.render-mode")).not.toBeNull();
+    expect(document.querySelector(".saved-view-sidebar")).toBeNull();
+
+    // The toolbar is clipped outside the capture viewport, but exercising its
+    // state transition proves render mode remains authoritative even if an
+    // inspector is selected after mount rather than only at initialization.
+    fireEvent.click(screen.getByTestId("explore-toggle"));
+    expect(screen.queryByTestId("explore-panel")).toBeNull();
+    expect(document.querySelector(".saved-view-sidebar")).toBeNull();
+  });
+});
+
+describe("App wiring: mobile Layers drawer", () => {
+  it("keeps the closed panel inert and owns modal focus until Escape restores the trigger", async () => {
+    const originalWidth = window.innerWidth;
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: 390,
+    });
+    try {
+      await mountWithSnapshot(documentJson(["wds-1"]));
+
+      const trigger = screen.getByRole("button", { name: "Layers" });
+      const panel = document.getElementById("layers-panel")!;
+      expect(trigger.getAttribute("aria-controls")).toBe("layers-panel");
+      expect(trigger.getAttribute("aria-expanded")).toBe("false");
+      expect(panel.getAttribute("aria-hidden")).toBe("true");
+      expect(panel.hasAttribute("inert")).toBe(true);
+
+      trigger.focus();
+      fireEvent.click(trigger);
+      await act(async () => {
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+      });
+
+      const dialog = screen.getByRole("dialog", { name: "Layers" });
+      const close = screen.getByRole("button", { name: "Close layers panel" });
+      expect(trigger.getAttribute("aria-expanded")).toBe("true");
+      expect(dialog.getAttribute("aria-modal")).toBe("true");
+      expect(document.activeElement).toBe(close);
+
+      const scrim = document.querySelector<HTMLButtonElement>(".mobile-layer-scrim")!;
+      expect(scrim.getAttribute("aria-hidden")).toBe("true");
+      expect(scrim.tabIndex).toBe(-1);
+
+      fireEvent.keyDown(dialog, { key: "Escape" });
+      expect(trigger.getAttribute("aria-expanded")).toBe("false");
+      expect(panel.getAttribute("aria-hidden")).toBe("true");
+      expect(panel.hasAttribute("inert")).toBe(true);
+      expect(document.activeElement).toBe(trigger);
+    } finally {
+      Object.defineProperty(window, "innerWidth", {
+        configurable: true,
+        value: originalWidth,
+      });
+    }
+  });
+});
+
+describe("App wiring: workspace rename operation contract", () => {
+  it("announces pending and success states and rejects a double submit", async () => {
+    const request = deferred();
+    const rename = vi.fn(() => request.promise);
+    renderApp({ canRenameWorkspace: true, onRenameWorkspace: rename });
+
+    const input = screen.getByRole("textbox", { name: "Workspace name" });
+    fireEvent.change(input, { target: { value: "Renamed workspace" } });
+    fireEvent.blur(input);
+
+    const pending = await screen.findByRole("status");
+    expect(pending.textContent).toBe("Renaming workspace to Renamed workspace…");
+    expect(pending.getAttribute("aria-live")).toBe("polite");
+    expect((input as HTMLInputElement).disabled).toBe(true);
+    fireEvent.blur(input);
+    expect(rename).toHaveBeenCalledTimes(1);
+
+    await act(async () => request.resolve());
+
+    const success = await screen.findByRole("status");
+    expect(success.textContent).toBe("Workspace renamed to Renamed workspace.");
+    expect(success.getAttribute("data-operation-phase")).toBe("success");
+    expect((input as HTMLInputElement).disabled).toBe(false);
+  });
+
+  it("keeps a failed value retryable and replaces the error with truthful recovery state", async () => {
+    const retryRequest = deferred();
+    const rename = vi
+      .fn<(name: string) => Promise<void>>()
+      .mockRejectedValueOnce(new Error("rename endpoint unavailable"))
+      .mockImplementationOnce(() => retryRequest.promise);
+    renderApp({ canRenameWorkspace: true, onRenameWorkspace: rename });
+
+    const input = screen.getByRole("textbox", { name: "Workspace name" });
+    fireEvent.change(input, { target: { value: "Retry me" } });
+    fireEvent.blur(input);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Workspace name was not saved.");
+    expect(alert.textContent).toContain("rename endpoint unavailable");
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+    expect(rename).toHaveBeenCalledTimes(2);
+    expect(rename).toHaveBeenLastCalledWith("Retry me");
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect((await screen.findByRole("status")).textContent).toContain("Renaming workspace");
+
+    await act(async () => retryRequest.resolve());
+    expect((await screen.findByRole("status")).textContent).toBe("Workspace renamed to Retry me.");
+  });
+
+  it("does not publish a late failure after its keyed workspace route unmounts", async () => {
+    const request = deferred();
+    const view = renderApp({
+      canRenameWorkspace: true,
+      onRenameWorkspace: () => request.promise,
+    });
+    const input = screen.getByRole("textbox", { name: "Workspace name" });
+    fireEvent.change(input, { target: { value: "Old route" } });
+    fireEvent.blur(input);
+    await screen.findByRole("status");
+
+    view.unmount();
+    await act(async () => request.reject(new Error("late response")));
+
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("status")).toBeNull();
+  });
 });
 
 describe("App wiring: layout switch (the #780 class)", () => {
@@ -444,5 +601,60 @@ describe("App wiring: dataset-settings mutation canary", () => {
     expect(vi.mocked(invalidateDisplaySettings)).toHaveBeenCalled();
     const reread = getSceneSettings(scene as unknown as InstanceType<typeof WasmScene>);
     expect(reread).not.toBe(primed);
+  });
+});
+
+describe("App wiring: 2D canvas keyboard navigation", () => {
+  it("routes arrow and zoom keys through the viewport transaction boundary", async () => {
+    const { scene } = await mountWithSnapshot(documentJson(["wds-1"]));
+    const canvas = screen.getByLabelText("2D slice viewer");
+
+    fireEvent.keyDown(canvas, { key: "ArrowRight" });
+    fireEvent.keyDown(canvas, { key: "+" });
+
+    expect(scene.commands).toContainEqual({ type: "pan", dx: 32, dy: 0 });
+    expect(scene.commands).toContainEqual({ type: "zoom_by", factor: 1.1 });
+  });
+});
+
+describe("App wiring: dataset-open failure surface", () => {
+  it("keeps the alert above viewer content and wires retry plus dismiss to the failed open", async () => {
+    const { bridge } = await mountWithSnapshot(documentJson([]));
+    const failedUrl = "gs://bucket/broken.zarr";
+
+    await act(async () => {
+      bridge.handlers.onOpenDatasetFailed?.(
+        "req-broken-1",
+        failedUrl,
+        "This dataset could not be opened.",
+      );
+    });
+
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toContain("This dataset could not be opened.");
+    expect(alert.classList.contains("viewer-error")).toBe(true);
+    // App owns this ordering: workspace chrome, then the error, then the
+    // heavier viewer surfaces. Keeping the alert here prevents the old
+    // below-the-fold failure at supported short viewports.
+    const chrome = document.querySelector(".workspace-chrome");
+    expect(chrome).not.toBeNull();
+    expect(chrome!.nextElementSibling).toBe(alert);
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry dataset" }));
+    expect(bridge.sendOpenRemoteDataset).toHaveBeenLastCalledWith(failedUrl);
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    await act(async () => {
+      bridge.handlers.onOpenDatasetFailed?.(
+        "req-broken-2",
+        failedUrl,
+        "This dataset could not be opened.",
+      );
+    });
+    const sendsBeforeDismiss = bridge.sendOpenRemoteDataset.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(bridge.sendOpenRemoteDataset).toHaveBeenCalledTimes(sendsBeforeDismiss);
   });
 });

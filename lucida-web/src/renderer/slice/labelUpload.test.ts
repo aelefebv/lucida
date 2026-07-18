@@ -9,6 +9,8 @@ import { createInitialState } from "../worker/state.ts";
 import { handleLabelSliceChunkData } from "./upload.ts";
 import { destroyAllSliceResources, removeSliceResources } from "./index.ts";
 import { resetLabelSliceAllocWarnings } from "./atlas.ts";
+import { GpuResourceBudget } from "../gpuResourceBudget.ts";
+import { makeChunkContract } from "../../test/fixtures.ts";
 
 interface WriteTextureCall {
   origin: [number, number, number] | undefined;
@@ -32,17 +34,34 @@ function makeCtx(writes: WriteTextureCall[], maxDim = 8192): WorkerCtx {
       submit: vi.fn(),
     },
   } as unknown as GPUDevice;
-  return { device, state: createInitialState() } as unknown as WorkerCtx;
+  return {
+    device,
+    gpuResources: new GpuResourceBudget(512 * 1024 * 1024),
+    state: createInitialState(),
+  } as unknown as WorkerCtx;
 }
 
 /** A pre-sliced 2x2 Z-plane message (the delivery path extracts one plane). */
 function labelPlaneMsg(plane: Uint32Array): LabelSliceChunkDataMessage {
   return {
     type: "labelSliceChunkData",
-    epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+    epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
     memberId: "img-0:label:region-b",
     datasetId: "ds-0",
-    chunks: [{ data: plane.buffer as ArrayBuffer, dataType: "Uint32", x: 0, y: 0, z: 0, key: "0/0/0/0/0/0" }],
+    chunks: [{
+      data: plane.buffer as ArrayBuffer,
+      contract: makeChunkContract({
+        datasetId: "ds-0",
+        imageId: "img-0:label:region-b",
+        role: "label",
+        sourceDtype: "uint32",
+        shape: [1, 2, 2],
+      }),
+      x: 0,
+      y: 0,
+      z: 0,
+      key: "0/0/0/0/0/0",
+    }],
     level: 0,
     t: 0,
     c: 0,
@@ -101,8 +120,16 @@ describe("handleLabelSliceChunkData", () => {
     const ctx = makeCtx(writes, 64); // tiny device limit
     // A 128x128 plane on a 64px-limited device: pool must clamp, and the
     // write is clamped to the resident texture (no out-of-bounds throw).
+    const message = labelPlaneMsg(new Uint32Array(128 * 128));
+    message.chunks[0].contract = makeChunkContract({
+      datasetId: "ds-0",
+      imageId: "img-0:label:region-b",
+      role: "label",
+      sourceDtype: "uint32",
+      shape: [1, 128, 128],
+    });
     handleLabelSliceChunkData(ctx, {
-      ...labelPlaneMsg(new Uint32Array(128 * 128)),
+      ...message,
       levelWidth: 128,
       levelHeight: 128,
       chunkX: 128,
@@ -125,7 +152,7 @@ describe("handleLabelSliceChunkData", () => {
     const writes: WriteTextureCall[] = [];
     const ctx = makeCtx(writes);
     // Worker has advanced to selection epoch 5; the delivery is from epoch 1.
-    ctx.state.currentEpochs = { content: 1, layout: 1, view: 1, selection: 5, asset: 0, request: 1 };
+    ctx.state.currentEpochs = { content: 1, layout: 1, view: 1, selection: 5, request: 1 };
     handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4])));
     expect(writes).toHaveLength(0);
     expect(ctx.state.labelSlicePools.has("img-0:label:region-b")).toBe(false);

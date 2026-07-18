@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { DatasetManifest, LevelGeometry } from "../manifestTypes.ts";
 import {
   GeneratedAvailabilityCatalog,
+  MAX_GENERATED_CATALOG_CHUNKS,
   mergeGeneratedAvailabilityIntoManifest,
   type WireGeneratedAvailabilitySnapshot,
 } from "./generatedAvailability.ts";
@@ -151,5 +152,109 @@ describe("GeneratedAvailabilityCatalog", () => {
     catalog.removeDataset("ds-1");
 
     expect(catalog.snapshot("ds-1")).toEqual({ levels: [], chunks: [] });
+  });
+
+  it("maintains status counts incrementally when a key changes status", () => {
+    const catalog = new GeneratedAvailabilityCatalog();
+    const update = (status: "pending" | "ready" | "failed_transient") => {
+      catalog.applyDelta("ds-1", {
+        chunks: [{
+          image_id: "img-1",
+          level_index: 1,
+          key: "1/0/0/0/0/0",
+          status,
+        }],
+      });
+    };
+
+    update("pending");
+    update("failed_transient");
+    update("ready");
+
+    expect(catalog.statusCounts("ds-1")).toEqual({
+      levels: 0,
+      totalChunks: 1,
+      ready: 1,
+      pending: 0,
+      unavailable: 0,
+      failed: 0,
+      failedTransient: 0,
+      failedPermanent: 0,
+    });
+    expect(catalog.stats()).toMatchObject({
+      retainedChunks: 1,
+      chunkWrites: 3,
+      chunkEvictions: 0,
+    });
+  });
+
+  it("uses collision-safe compound keys for arbitrary image and chunk ids", () => {
+    const catalog = new GeneratedAvailabilityCatalog();
+    catalog.applyDelta("ds-1", {
+      chunks: [
+        { image_id: "a|1", level_index: 2, key: "b", status: "ready" },
+        { image_id: "a", level_index: 1, key: "2|b", status: "failed_permanent" },
+      ],
+    });
+
+    expect(catalog.statusFor("ds-1", "a|1", 2, "b")?.status).toBe("ready");
+    expect(catalog.statusFor("ds-1", "a", 1, "2|b")?.status).toBe("failed_permanent");
+    expect(catalog.stats().retainedChunks).toBe(2);
+  });
+
+  it("enforces one process-wide LRU budget across datasets", () => {
+    const catalog = new GeneratedAvailabilityCatalog({ maxLevels: 1, maxChunks: 2 });
+    catalog.applySnapshot("ds-1", generatedSnapshot());
+    catalog.applyDelta("ds-1", {
+      chunks: [
+        { image_id: "img-1", level_index: 1, key: "old", status: "pending" },
+        { image_id: "img-1", level_index: 1, key: "kept", status: "ready" },
+      ],
+    });
+    // Reading the old entry makes it most recently used; the untouched entry
+    // is therefore the one displaced by the next dataset's status.
+    expect(catalog.statusFor("ds-1", "img-1", 1, "old")?.status).toBe("pending");
+    catalog.applyDelta("ds-2", {
+      chunks: [{ image_id: "img-2", level_index: 1, key: "new", status: "ready" }],
+    });
+
+    expect(catalog.statusFor("ds-1", "img-1", 1, "kept")).toBeNull();
+    expect(catalog.statusFor("ds-1", "img-1", 1, "old")?.status).toBe("pending");
+    expect(catalog.statusFor("ds-2", "img-2", 1, "new")?.status).toBe("ready");
+    expect(catalog.stats()).toMatchObject({ retainedChunks: 2, chunkEvictions: 1 });
+  });
+
+  it("has deterministic linear work and bounded retention at 10k and 100k transitions", () => {
+    const run = (transitions: number) => {
+      const retainedLimit = 4_096;
+      const catalog = new GeneratedAvailabilityCatalog({ maxChunks: retainedLimit });
+      const batchSize = 250;
+      for (let start = 0; start < transitions; start += batchSize) {
+        catalog.applyDelta("ds-scale", {
+          chunks: Array.from(
+            { length: Math.min(batchSize, transitions - start) },
+            (_, offset) => ({
+              image_id: "img-scale",
+              level_index: 1,
+              key: `1/0/0/0/${start + offset}/0`,
+              status: "ready" as const,
+            }),
+          ),
+        });
+      }
+      return catalog.stats();
+    };
+
+    const tenThousand = run(10_000);
+    const hundredThousand = run(100_000);
+
+    expect(tenThousand.chunkWrites).toBe(10_000);
+    expect(hundredThousand.chunkWrites).toBe(100_000);
+    expect(hundredThousand.chunkWrites / tenThousand.chunkWrites).toBe(10);
+    expect(tenThousand.retainedChunks).toBe(4_096);
+    expect(hundredThousand.retainedChunks).toBe(4_096);
+    expect(hundredThousand.retainedChunks).toBeLessThan(MAX_GENERATED_CATALOG_CHUNKS);
+    expect(tenThousand.chunkEvictions).toBe(10_000 - 4_096);
+    expect(hundredThousand.chunkEvictions).toBe(100_000 - 4_096);
   });
 });

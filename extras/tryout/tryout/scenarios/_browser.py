@@ -41,6 +41,7 @@ from typing import Any, Sequence
 from ..errors import TryoutError
 from ..surfaces._subproc import run_group, scan_json_line
 from ..surfaces.web_surface import (
+    capture_real_spa,
     _ensure_playwright,
     _system_browser_path,
 )
@@ -125,6 +126,7 @@ class DriveOutcome:
     console_messages: int | None = None
     console_log: str | None = None
     driver_log: str | None = None
+    render_matrix: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         record: dict[str, Any] = {
@@ -139,6 +141,8 @@ class DriveOutcome:
             record["console_log"] = self.console_log
         if self.driver_log is not None:
             record["driver_log"] = self.driver_log
+        if self.render_matrix is not None:
+            record["render_matrix"] = self.render_matrix
         return record
 
 
@@ -170,6 +174,7 @@ const url = req.url;
 const exe = req.executable_path || undefined;
 const width = req.width || 1400;
 const height = req.height || 900;
+const deviceScaleFactor = req.device_scale_factor;
 const shotsDir = req.shots_dir;
 const consoleLog = req.console_log;
 const initScripts = req.init_scripts || [];
@@ -272,7 +277,10 @@ async function runStep(page, step, shotsTaken) {
   }
 
   try {
-    const context = await browser.newContext({ viewport: { width, height }, deviceScaleFactor: 1 });
+    if (deviceScaleFactor !== 2) {
+      throw new Error('scenario interaction driver must run at DPR2 after the DPR1/2 preflight');
+    }
+    const context = await browser.newContext({ viewport: { width, height }, deviceScaleFactor });
     // Pin localStorage (and anything else) BEFORE any page script runs.
     for (const script of initScripts) {
       await context.addInitScript(script);
@@ -358,6 +366,22 @@ def drive_ui_program(
     console_log = work_dir / "ui-console.log"
     driver_log = work_dir / "ui-driver.log"
 
+    # Every interactive scenario first proves that the same production URL can
+    # present real canvas pixels at DPR1 and DPR2. The program itself then runs
+    # at the stricter DPR2; we do not replay mutating UI steps in a second
+    # browser and accidentally duplicate comments/saved views.
+    render_matrix = capture_real_spa(
+        url=url,
+        web_out=work_dir / "render-matrix",
+        log=log,
+    )
+    if not render_matrix.ok:
+        return DriveOutcome(
+            ran=False,
+            reason=f"DPR1/2 render preflight failed: {render_matrix.reason}",
+            render_matrix=render_matrix.to_dict(),
+        )
+
     node = shutil.which("node")
     if node is None:
         raise TryoutError(
@@ -381,6 +405,7 @@ def drive_ui_program(
             "executable_path": browser_path,
             "width": viewport[0],
             "height": viewport[1],
+            "device_scale_factor": 2,
             "shots_dir": str(shots_dir),
             "console_log": str(console_log),
             "init_scripts": list(init_scripts),
@@ -430,6 +455,7 @@ def drive_ui_program(
             console_log=str(console_log) if console_log.is_file() else None,
             driver_log=str(driver_log),
             shots_taken=_existing_shot_names(shots_dir, steps),
+            render_matrix=render_matrix.to_dict(),
         )
 
     duration = round(time.monotonic() - started, 3)
@@ -447,6 +473,7 @@ def drive_ui_program(
             console_log=str(console_log) if console_log.is_file() else None,
             driver_log=str(driver_log),
             shots_taken=_existing_shot_names(shots_dir, steps),
+            render_matrix=render_matrix.to_dict(),
         )
 
     steps_out = [
@@ -470,6 +497,7 @@ def drive_ui_program(
         console_messages=payload.get("console_messages"),
         console_log=str(console_log) if console_log.is_file() else None,
         driver_log=str(driver_log),
+        render_matrix=render_matrix.to_dict(),
     )
 
 

@@ -18,7 +18,7 @@ import {
   type DimensionExtentsResolver,
   type LabelNamesResolver,
 } from "../savedView/applier.ts";
-import { UrlSync } from "../savedView/urlSync.ts";
+import { UrlSync, type CommittedShareLink } from "../savedView/urlSync.ts";
 import { buildCapture } from "../savedView/captureBuilder.ts";
 import { getRestoreLastViewEnabled } from "../lastViewPreference.ts";
 import type { DatasetReferenceMode, SavedView, ViewState } from "../savedView/types.ts";
@@ -69,7 +69,7 @@ interface Params {
    *  omit to leave per-label handling positional. */
   labelNamesFor?: LabelNamesResolver;
   /** React-side dim mirrors. The applier writes set_c/set_t/set_z_range
-   *  to WASM; without these the C/T/Z sliders stay stale (e.g. bookmark
+   *  to WASM; without these the C/T/Z sliders stay stale (e.g. a saved view
    *  saved on ch2 opens with the C slider showing 0; Bug #3 root cause). */
   setC: React.Dispatch<React.SetStateAction<number>>;
   setT: React.Dispatch<React.SetStateAction<number>>;
@@ -141,14 +141,16 @@ export function useSavedViewSync({
   applier: SavedViewApplier;
   captureBuilder: () => SavedView | null;
   trackedSendOpen: (url: string) => void;
-  /** Schedule a debounced URL write. App.tsx wraps this into the
-   *  `emitPresence`/`emitDatasetPresence` callbacks so every viewport
-   *  mutation co-taps the URL (Bug #1 fix). Stable identity. */
+  /** Schedule a debounced URL write. App.tsx installs this as the viewport
+   * coordinator's `recordLiveView` effect, so every successful mutation co-taps
+   * the URL without exposing raw effect callbacks to components. */
   notifyChange: () => void;
   /** Collapse a resolved `#a=`/`#b=` hash to the live `#view=…` form — used by
    *  App.tsx after restoring an annotation deep-link (slice 3), exactly as the
    *  `#b=` bootstrap collapses after its apply. Stable identity. */
   collapseDeepLinkHash: () => Promise<void>;
+  /** Capture and synchronously commit the canonical URL used by Share view. */
+  prepareShareLink: () => Promise<CommittedShareLink>;
 } {
   const fetchSavedViewByIdRef = useRef(fetchSavedViewById);
   const fetchDefaultSavedViewRef = useRef(fetchDefaultSavedView);
@@ -243,6 +245,25 @@ export function useSavedViewSync({
       fetchLastView: async () => fetchLastViewRef.current?.() ?? null,
       restoreLastViewEnabled: () =>
         (restoreEnabledRef.current ?? getRestoreLastViewEnabled)(),
+      onInitialViewFallback: () => {
+        const scene = getScene();
+        if (!scene) return;
+        const compatibleScene = scene as unknown as {
+          dataset_order?: () => string;
+          dataset_ids?: () => string;
+          fit_camera_to_dataset_bounds?: (datasetId: string) => void;
+        };
+        const orderJson = compatibleScene.dataset_order?.() ?? compatibleScene.dataset_ids?.();
+        if (!orderJson || !compatibleScene.fit_camera_to_dataset_bounds) return;
+        const parsed: unknown = JSON.parse(orderJson);
+        if (!Array.isArray(parsed)) return;
+        const datasetId = parsed.find((value): value is string => typeof value === "string");
+        if (!datasetId) return;
+
+        compatibleScene.fit_camera_to_dataset_bounds(datasetId);
+        syncSceneViewState(scene, { setZ, setT, setC, setViewMode, setMultiChannel });
+        invalidateAfterViewRestore(loopRef.current, "auto_fit_on_snapshot");
+      },
     });
     return { applier, urlSync, urlByDatasetId };
   });
@@ -311,31 +332,43 @@ export function useSavedViewSync({
   // auth-off mode, so NO server call is ever made there — and (b) the
   // per-user toggle is on. The capture is wrapped so a build/persist failure
   // (offline, non-member 403/404, encode error) degrades silently and never
-  // throws into the UI. We skip while an apply is in progress so we don't
-  // persist a view the recipient is mid-applying rather than one the user
-  // navigated to.
+  // throws into the UI. If a restore owns the scene when the debounce fires, we
+  // await its explicit settlement boundary before capturing; there is no
+  // timing-sensitive "busy, drop this write" branch.
   useEffect(() => {
     // Cheap setup gate: skip scheduling entirely when capture can't apply
     // (no callback = auth-off, or toggle off). The authoritative checks run
     // again at fire time below, since both can change during the debounce.
     if (!persistLastViewRef.current) return;
     if (!(restoreEnabledRef.current ?? getRestoreLastViewEnabled)()) return;
+    let cancelled = false;
     const timer = setTimeout(() => {
-      // Re-read at fire time: the toggle may have flipped, or an apply may be
-      // mid-flight (don't persist a view the recipient is applying rather than
-      // one the user navigated to).
-      if (!(restoreEnabledRef.current ?? getRestoreLastViewEnabled)()) return;
-      const persistNow = persistLastViewRef.current;
-      if (!persistNow) return;
-      if (bundle.applier.isInProgress()) return;
-      const view = captureBuilder();
-      if (!view) return;
-      void Promise.resolve(persistNow(view)).catch((e) => {
+      void (async () => {
+        // An apply can settle and another queued navigation can start before an
+        // awaiting continuation runs. Loop on the generation identity until the
+        // scene is actually idle, then capture synchronously in this task.
+        while (true) {
+          const epoch = bundle.applier.getActiveEpoch();
+          if (epoch === null) break;
+          await bundle.applier.waitForSettlement(epoch);
+          if (cancelled) return;
+        }
+        if (cancelled) return;
+        if (!(restoreEnabledRef.current ?? getRestoreLastViewEnabled)()) return;
+        const persistNow = persistLastViewRef.current;
+        if (!persistNow) return;
+        const view = captureBuilder();
+        if (!view) return;
+        await Promise.resolve(persistNow(view));
+      })().catch((e) => {
         // Non-member / offline / auth-off race: never surface to the UI.
         console.warn("[SavedView] last-view capture failed:", e);
       });
     }, lastViewDebounceMs);
-    return () => clearTimeout(timer);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, [bundle.applier, captureBuilder, changeTick, lastViewDebounceMs]);
 
   // Selected-dataset wrinkle (option c): subscribe to the applier's
@@ -386,9 +419,8 @@ export function useSavedViewSync({
     });
   }, [bundle.applier, getScene, loopRef, setC, setT, setZ, setViewMode, setMultiChannel, setAutoContrastMap]);
 
-  // Stable notifyChange: App.tsx wraps emitPresence/emitDatasetPresence
-  // so every viewport mutation co-taps the URL (Bug #1 fix). Forwards
-  // to the underlying UrlSync; identity is stable across renders.
+  // Stable notifyChange: App.tsx gives this to the viewport coordinator as its
+  // one live-view recording effect. Identity is stable across renders.
   const notifyChange = useCallback(() => {
     bundle.urlSync.notifyChange();
   }, [bundle.urlSync]);
@@ -399,6 +431,10 @@ export function useSavedViewSync({
     () => bundle.urlSync.collapseToLiveView(),
     [bundle.urlSync],
   );
+  const prepareShareLink = useCallback(
+    () => bundle.urlSync.commitShareLink(),
+    [bundle.urlSync],
+  );
 
   return {
     applier: bundle.applier,
@@ -406,5 +442,6 @@ export function useSavedViewSync({
     trackedSendOpen,
     notifyChange,
     collapseDeepLinkHash,
+    prepareShareLink,
   };
 }

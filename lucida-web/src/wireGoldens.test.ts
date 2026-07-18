@@ -19,7 +19,6 @@
  * - `DatasetOpened` payloads against the `manifestTypes` mirrors and through
  *   `extractDataType` / `mergeGeneratedAvailabilityIntoManifest`;
  * - generated-availability payloads through `GeneratedAvailabilityCatalog`;
- * - asset-catalog deltas through the `AssetCatalog` web mirror;
  * - the enum vocabulary fixture against the production TS unions and
  *   `COLORMAP_NAMES`, so a Rust variant rename/addition cannot outrun the
  *   web's string dispatch vocabulary.
@@ -31,12 +30,12 @@
  * fixture but not these literals, so this suite fails instead of the web
  * silently reading `undefined`.
  *
- * Scope note: the binary chunk/proxy frames are locked separately
- * (`pipeline/fetch/wireProtocol.test.ts`); `ChunkMessage::ChunkFetch` is
- * currently unproduced wire vocabulary (nothing sends it; the server
- * ignores it if a client does) and is excluded from the lock. A newly
- * added serde-skipped field that no fixture populates is invisible to this
- * lock — see the Rust test header for that documented limit.
+ * Scope note: binary contracts remain in this suite's exhaustive inventory,
+ * while their byte/semantic assertions live beside their production decoders:
+ * the chunk envelope in `chunkFrame.test.ts` and full/delta view queries in
+ * `pipeline/planning/viewQueryBinary.test.ts`. A newly added serde-skipped
+ * field that no fixture populates is invisible to this lock — see the Rust
+ * test header for that documented limit.
  *
  * On failure, first decide which side is wrong. If the Rust wire change is
  * intentional, regenerate fixtures with
@@ -52,7 +51,6 @@ import { dirname, join } from "node:path";
 import {
   Bridge,
   type BridgeHandlers,
-  type BookmarkAction,
   type DatasetHealthStatus,
   type DatasetOpenProgressDiagnostic,
   type DatasetOpenStage,
@@ -79,12 +77,6 @@ import {
   type WireGeneratedAvailabilitySnapshot,
   type WireGeneratedLevelAvailability,
 } from "./pipeline/generatedAvailability.ts";
-import {
-  AssetCatalog,
-  type ProxyKind,
-  type WireAssetCatalog,
-  type WireAssetCatalogDelta,
-} from "./pipeline/assetCatalog.ts";
 import { ProxiedContentSource } from "./pipeline/fetch/contentSource.ts";
 import { COLORMAP_NAMES } from "./colormaps.ts";
 import {
@@ -100,6 +92,11 @@ import {
 } from "./savedView/types.ts";
 import { viewModeForCamera } from "./savedView/restoreAnnotationView.ts";
 import type { Annotation } from "./components/annotationDocument.ts";
+import {
+  FakeWebSocket,
+  installFakeWebSocket,
+  makeBridgeHandlers,
+} from "./test/fakeWebSocket.ts";
 
 // ---------------------------------------------------------------------------
 // Fixture loading
@@ -134,6 +131,14 @@ function allFixtureFiles(): string[] {
 /** Fixtures asserted somewhere in this suite; kept in sync by the inventory
  *  test so a new Rust-side fixture cannot land without web-side coverage. */
 const COVERED_FIXTURES = new Set<string>();
+// Binary contracts are decoded byte-for-byte beside their production decoders.
+// Keep them in this inventory so the repository-wide fixture lock remains
+// exhaustive.
+COVERED_FIXTURES.add("binary/chunk_frame.json");
+COVERED_FIXTURES.add("binary/view_query_v1.json");
+COVERED_FIXTURES.add("binary/view_query_delta_v1.json");
+// The compact-manifest corpus is consumed by compactManifestCorpus.test.ts.
+COVERED_FIXTURES.add("manifest/compact_multiscale_cases.json");
 
 function coveredFixture(rel: string): unknown {
   COVERED_FIXTURES.add(rel);
@@ -144,59 +149,21 @@ function coveredFixture(rel: string): unknown {
 // Bridge harness (stand-in transport, real Bridge)
 // ---------------------------------------------------------------------------
 
-class FakeWebSocket {
-  static instances: FakeWebSocket[] = [];
-  static OPEN = 1;
-  static CONNECTING = 0;
-  static CLOSED = 3;
-
-  url: string;
-  binaryType = "blob";
-  readyState = FakeWebSocket.CONNECTING;
-  onopen: (() => void) | null = null;
-  onmessage: ((e: { data: unknown }) => void) | null = null;
-  onclose: (() => void) | null = null;
-  onerror: (() => void) | null = null;
-  sent: string[] = [];
-
-  constructor(url: string) {
-    this.url = url;
-    FakeWebSocket.instances.push(this);
-  }
-
-  send(data: string): void {
-    this.sent.push(data);
-  }
-
-  close(): void {
-    this.readyState = FakeWebSocket.CLOSED;
-  }
-
-  open(): void {
-    this.readyState = FakeWebSocket.OPEN;
-    this.onopen?.();
-  }
-}
-
-function makeHandlers(overrides: Partial<BridgeHandlers> = {}): BridgeHandlers {
-  return {
-    onSnapshot: vi.fn(),
-    onCommand: vi.fn(),
-    onAck: vi.fn(),
-    ...overrides,
-  };
-}
-
 function openBridge(overrides: Partial<BridgeHandlers> = {}) {
-  const handlers = makeHandlers(overrides);
-  const bridge = new Bridge(handlers, "ws://test/ws/workspaces/w1");
+  const handlers = makeBridgeHandlers(overrides);
+  const bridge = new Bridge(
+    handlers,
+    "ws://test/ws/workspaces/w1",
+    undefined,
+    () => "req-golden",
+  );
   const ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
   ws.open();
   return { bridge, ws, handlers };
 }
 
 function deliver(ws: FakeWebSocket, raw: string): void {
-  ws.onmessage?.({ data: raw });
+  ws.receive(raw);
 }
 
 function lastSent(ws: FakeWebSocket): unknown {
@@ -349,30 +316,16 @@ const expectedFetchSingle: FetchSource = {
   },
 };
 
-const expectedCatalogSingle: WireAssetCatalog = {
-  entries: [
-    {
-      entity_id: "img-0",
-      kinds: ["TileProxy3D"],
-      footprints: [
-        { kind: "TileProxy3D", dims: [50, 128, 128], bytes: 1638400 },
-      ],
-    },
-  ],
-};
-
 /** Wire shape of `lucida_protocol::DatasetOpened`. */
 interface WireDatasetOpened {
   manifest: DatasetManifest;
   fetch: FetchSource;
-  catalog: WireAssetCatalog;
   opener_client_id: number | null;
 }
 
 const expectedDatasetOpenedSingle: WireDatasetOpened = {
   manifest: expectedManifestSingle,
   fetch: expectedFetchSingle,
-  catalog: expectedCatalogSingle,
   opener_client_id: 7,
 };
 
@@ -487,14 +440,12 @@ const expectedFetchCollection: FetchSourceWire = {
 interface WireDatasetOpenedCollection {
   manifest: DatasetManifestWire;
   fetch: FetchSourceWire;
-  catalog: WireAssetCatalog;
   opener_client_id: number | null;
 }
 
 const expectedDatasetOpenedCollection: WireDatasetOpenedCollection = {
   manifest: expectedManifestCollection,
   fetch: expectedFetchCollection,
-  catalog: { entries: [] },
   opener_client_id: null,
 };
 
@@ -600,6 +551,7 @@ const expectedPeerPresence = {
   display: expectedDisplay,
   following: 9,
   cursor: [412, 233.5] as [number, number],
+  cursor_dataset_id: "wds-0f3a",
   dataset_order: ["wds-0f3a"],
   dataset_settings: { "wds-0f3a": expectedDisplaySettings },
   identity: {
@@ -704,7 +656,6 @@ interface WireDocumentState {
   manifests: Record<string, DatasetManifest>;
   registered_layouts: Record<string, LayoutSpec[]>;
   active_layout_ids: Record<string, string>;
-  asset_catalogs: Record<string, WireAssetCatalog>;
   annotations: Record<string, WireAnnotation[]>;
 }
 
@@ -712,7 +663,6 @@ const expectedDocument: WireDocumentState = {
   manifests: { "wds-0f3a": expectedManifestSingle },
   registered_layouts: { "wds-0f3a": [expectedGridLayout] },
   active_layout_ids: { "wds-0f3a": "layout-grid" },
-  asset_catalogs: { "wds-0f3a": expectedCatalogSingle },
   annotations: {
     "wds-0f3a": [expectedBoxAnnotation, expectedPointAnnotation, expectedLineAnnotation],
   },
@@ -761,12 +711,19 @@ const expectedGeneratedSnapshot: WireGeneratedAvailabilitySnapshot = {
   chunks: [
     { image_id: "multiscale-0", level_index: 2, key: "2/0/0/0/0/0", status: "ready" },
     { image_id: "multiscale-0", level_index: 2, key: "2/0/0/1/0/0", status: "pending" },
-    { image_id: "multiscale-0", level_index: 2, key: "2/1/0/0/0/0", status: "unavailable" },
+    {
+      image_id: "multiscale-0",
+      level_index: 2,
+      key: "2/1/0/0/0/0",
+      status: "unavailable",
+      failure: { category: "source", code: "missing_object", retryable: false },
+    },
     {
       image_id: "multiscale-0",
       level_index: 2,
       key: "2/1/0/1/0/0",
       status: "failed_transient",
+      failure: { category: "source", code: "storage_backend", retryable: true },
       message: "source read timed out",
     },
     {
@@ -774,6 +731,7 @@ const expectedGeneratedSnapshot: WireGeneratedAvailabilitySnapshot = {
       level_index: 2,
       key: "2/2/0/0/0/0",
       status: "failed_permanent",
+      failure: { category: "codec", code: "decode_failure", retryable: false },
       message: "chunk exceeds generation budget",
     },
   ],
@@ -816,6 +774,9 @@ const expectedSourceHealth: DatasetSourceHealth = {
       current_bytes: 73400320,
       max_bytes: 1073741824,
       used_percent: 6,
+      entry_count: 4096,
+      max_entries: 100000,
+      entry_used_percent: 4,
       evictions: 4,
       root: "/var/cache/lucida/generated",
     },
@@ -825,6 +786,7 @@ const expectedSourceHealth: DatasetSourceHealth = {
         level_index: 2,
         key: "2/1/0/1/0/0",
         status: "failed_transient",
+        failure: { category: "source", code: "storage_backend", retryable: true },
         message: "source read timed out",
       },
     ],
@@ -838,18 +800,6 @@ const expectedProgressDiagnostic: DatasetOpenProgressDiagnostic = {
   workspace_dataset_id: "wds-0f3a",
   dataset_source_id: "source-9b31",
   detail: "1 derived level over 2 source levels",
-};
-
-const expectedAssetCatalogDelta: WireAssetCatalogDelta = {
-  added: [
-    {
-      entity_id: "img-0",
-      kinds: ["GroupProxy3D", "TileProxy3D"],
-      footprints: [
-        { kind: "GroupProxy3D", dims: [50, 256, 256], bytes: 6553600 },
-      ],
-    },
-  ],
 };
 
 /** The interest hint exactly as `tickCoordinator.emitViewerInterestHint`
@@ -880,8 +830,7 @@ const expectedInterestHint = {
 
 describe("wire goldens: server messages through Bridge dispatch", () => {
   beforeEach(() => {
-    FakeWebSocket.instances = [];
-    vi.stubGlobal("WebSocket", FakeWebSocket);
+    installFakeWebSocket();
   });
 
   afterEach(() => {
@@ -923,7 +872,7 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     expect(viewModeForCamera(pinView!.camera)).toBe("3d");
   });
 
-  it("command_broadcast(dataset_opened): the manifest/fetch/catalog payload", () => {
+  it("command_broadcast(dataset_opened): the manifest/fetch payload", () => {
     const raw = fixtureRaw("session/server_command_broadcast_dataset_opened.json");
     COVERED_FIXTURES.add("session/server_command_broadcast_dataset_opened.json");
     expect(JSON.parse(raw)).toStrictEqual({
@@ -944,18 +893,43 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     expect(command.type).toBe("dataset_opened");
     expect(command.manifest).toStrictEqual(expectedManifestSingle);
     expect(command.fetch).toStrictEqual(expectedFetchSingle);
-    expect(command.catalog).toStrictEqual(expectedCatalogSingle);
     expect(command.opener_client_id).toBe(7);
   });
 
   it("ack", () => {
     const raw = fixtureRaw("session/server_ack.json");
     COVERED_FIXTURES.add("session/server_ack.json");
-    expect(JSON.parse(raw)).toStrictEqual({ type: "ack", seq: 44 });
+    expect(JSON.parse(raw)).toStrictEqual({
+      type: "ack",
+      request_id: "req-golden",
+      seq: 44,
+    });
 
     const { ws, handlers } = openBridge();
     deliver(ws, raw);
-    expect(handlers.onAck).toHaveBeenCalledWith(44);
+    expect(handlers.onAck).toHaveBeenCalledWith(44, "req-golden");
+  });
+
+  it("nack", () => {
+    const raw = fixtureRaw("session/server_nack.json");
+    COVERED_FIXTURES.add("session/server_nack.json");
+    expect(JSON.parse(raw)).toStrictEqual({
+      type: "nack",
+      request_id: "req-rejected",
+      code: "forbidden",
+      message: "workspace role or ownership policy denied the command",
+      retryable: false,
+    });
+
+    const onNack = vi.fn();
+    const { ws } = openBridge({ onNack });
+    deliver(ws, raw);
+    expect(onNack).toHaveBeenCalledWith({
+      requestId: "req-rejected",
+      code: "forbidden",
+      message: "workspace role or ownership policy denied the command",
+      retryable: false,
+    });
   });
 
   it("peer_joined carries the full presence (fly camera, no identity)", () => {
@@ -1013,12 +987,13 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
       type: "cursor_update",
       client_id: 3,
       position: [412, 233.5],
+      dataset_id: "wds-0f3a",
     });
 
     const onCursorUpdate = vi.fn();
     const { ws } = openBridge({ onCursorUpdate });
     deliver(ws, raw);
-    expect(onCursorUpdate).toHaveBeenCalledWith(3, [412, 233.5]);
+    expect(onCursorUpdate).toHaveBeenCalledWith(3, [412, 233.5], "wds-0f3a");
   });
 
   it("follow_changed", () => {
@@ -1109,9 +1084,8 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
   });
 
   it("open_dataset_succeeded: requester-only success envelope", () => {
-    // The web treats the broadcast `command_broadcast(dataset_opened)` as
-    // authoritative and has no dispatch arm for this envelope, but it still
-    // crosses the socket to the web session — lock its shape.
+    // The requester gets the full compatibility payload exactly once; peers
+    // receive the authoritative command broadcast instead.
     const raw = fixtureRaw("session/server_open_dataset_succeeded.json");
     COVERED_FIXTURES.add("session/server_open_dataset_succeeded.json");
     expect(JSON.parse(raw)).toStrictEqual({
@@ -1119,6 +1093,12 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
       request_id: "web-7d2f45aa",
       url: "gs://lucida-fixtures/kidney-multiplex.zarr",
       seq: 43,
+      summary: {
+        workspace_dataset_id: "wds-0f3a",
+        name: "kidney-multiplex.zarr",
+        image_count: 1,
+        entity_count: 1,
+      },
       opened: expectedDatasetOpenedSingle,
       diagnostic: {
         stage: "complete",
@@ -1128,6 +1108,29 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
         message: "dataset opened",
       },
     });
+
+    const onCommand = vi.fn();
+    const onOpenDatasetSucceeded = vi.fn();
+    const { ws } = openBridge({ onCommand, onOpenDatasetSucceeded });
+    deliver(ws, raw);
+    expect(onCommand).toHaveBeenCalledTimes(1);
+    const [openedSeq, openedCommand] = onCommand.mock.calls[0] as [number, string];
+    expect(openedSeq).toBe(43);
+    expect(JSON.parse(openedCommand)).toStrictEqual({
+      type: "dataset_opened",
+      ...expectedDatasetOpenedSingle,
+    });
+    expect(onOpenDatasetSucceeded).toHaveBeenCalledWith(
+      "web-7d2f45aa",
+      "gs://lucida-fixtures/kidney-multiplex.zarr",
+      43,
+      {
+        workspace_dataset_id: "wds-0f3a",
+        name: "kidney-multiplex.zarr",
+        image_count: 1,
+        entity_count: 1,
+      },
+    );
   });
 
   it("open_dataset_failed carries error + failure diagnostic", () => {
@@ -1140,10 +1143,11 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
       error: "object not found",
       diagnostic: {
         stage: "backend_open",
-        kind: "missing_object",
-        retryable: true,
+        category: "source",
+        code: "missing_object",
+        retryable: false,
         message: "object not found",
-        detail: "gs://lucida-fixtures/missing.zarr/.zattrs returned 404",
+        detail: "root metadata object returned 404",
       },
     });
 
@@ -1151,8 +1155,17 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     const { ws } = openBridge({ onOpenDatasetFailed });
     deliver(ws, raw);
     expect(onOpenDatasetFailed).toHaveBeenCalledWith(
+      "web-81c09b",
       "gs://lucida-fixtures/missing.zarr",
       "object not found",
+      {
+        stage: "backend_open",
+        category: "source",
+        code: "missing_object",
+        retryable: false,
+        message: "object not found",
+        detail: "root metadata object returned 404",
+      },
     );
   });
 
@@ -1177,41 +1190,6 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     // the bridge to resolve the right pending promise).
     deliver(ws, JSON.stringify({ ...envelope, request_id: sent.request_id }));
     await expect(pending).resolves.toStrictEqual([expectedSourceHealth]);
-  });
-
-  it("asset_catalog_update: delta reaches the handler and the web AssetCatalog mirror", () => {
-    const raw = fixtureRaw("session/server_asset_catalog_update.json");
-    COVERED_FIXTURES.add("session/server_asset_catalog_update.json");
-    expect(JSON.parse(raw)).toStrictEqual({
-      type: "asset_catalog_update",
-      dataset_id: "wds-0f3a",
-      delta: expectedAssetCatalogDelta,
-    });
-
-    const onAssetCatalogUpdate = vi.fn();
-    const { ws } = openBridge({ onAssetCatalogUpdate });
-    deliver(ws, raw);
-    expect(onAssetCatalogUpdate).toHaveBeenCalledTimes(1);
-    const [datasetId, deltaJson] = onAssetCatalogUpdate.mock.calls[0];
-    expect(datasetId).toBe("wds-0f3a");
-    const delta: WireAssetCatalogDelta = JSON.parse(deltaJson);
-    expect(delta).toStrictEqual(expectedAssetCatalogDelta);
-
-    // Feed the delta through the real web mirror, as renderLoop does.
-    const wasm = { apply_asset_catalog_delta: vi.fn() };
-    const catalog = new AssetCatalog(wasm);
-    catalog.applyDelta(datasetId, delta);
-    expect(
-      JSON.parse(wasm.apply_asset_catalog_delta.mock.calls[0][0]),
-    ).toStrictEqual({ dataset_id: "wds-0f3a", delta: expectedAssetCatalogDelta });
-    const entity = catalog.snapshot().byEntity.get("img-0");
-    expect(entity).toBeDefined();
-    expect([...entity!.kinds].sort()).toStrictEqual(["GroupProxy3D", "TileProxy3D"]);
-    expect(entity!.footprints.get("GroupProxy3D")).toStrictEqual({
-      kind: "GroupProxy3D",
-      dims: [50, 256, 256],
-      bytes: 6553600,
-    });
   });
 
   it("generated_availability_update: delta reaches the handler intact", () => {
@@ -1241,6 +1219,11 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
       image_id: "multiscale-0",
       key: "2/1/0/1/0/0",
       status: "failed_transient",
+      failure: {
+        category: "source",
+        code: "storage_backend",
+        retryable: true,
+      },
       message: "source read timed out",
     });
 
@@ -1252,6 +1235,11 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
       "multiscale-0",
       "2/1/0/1/0/0",
       "failed_transient",
+      {
+        category: "source",
+        code: "storage_backend",
+        retryable: true,
+      },
       "source read timed out",
     );
   });
@@ -1265,6 +1253,9 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
       image_id: "multiscale-0",
       key: "0/1/0/1/0/0",
       status: "failed_permanent",
+      category: "authorization",
+      code: "permission",
+      retryable: false,
       message: "access to the dataset store was denied",
     });
 
@@ -1276,6 +1267,11 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
       "multiscale-0",
       "0/1/0/1/0/0",
       "failed_permanent",
+      {
+        category: "authorization",
+        code: "permission",
+        retryable: false,
+      },
       "access to the dataset store was denied",
     );
 
@@ -1288,43 +1284,14 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
       { datasetId: "wds-0f3a", imageId: "multiscale-0", chunkKey: "0/1/0/1/0/0" },
       new AbortController().signal,
     );
-    const [datasetId, imageId, key, status, message] = onSourceChunkStatus.mock.calls[0];
-    source.handleSourceChunkStatus(datasetId, imageId, key, status, message);
+    const [datasetId, imageId, key, status, failure, message] =
+      onSourceChunkStatus.mock.calls[0];
+    source.handleSourceChunkStatus(datasetId, imageId, key, status, failure, message);
     await expect(pending).rejects.toMatchObject({
       name: "FetchError",
       kind: "permanent",
       message: expect.stringContaining("access to the dataset store was denied"),
     });
-  });
-
-  it("bookmark_changed fans out to handler and subscribers", () => {
-    const raw = fixtureRaw("session/server_bookmark_changed.json");
-    COVERED_FIXTURES.add("session/server_bookmark_changed.json");
-    expect(JSON.parse(raw)).toStrictEqual({
-      type: "bookmark_changed",
-      id: "bookmark-31f7",
-      action: "updated",
-      dataset_urls: [
-        "gs://lucida-fixtures/kidney-multiplex.zarr",
-        "gs://lucida-fixtures/screening-collection-01.zarr",
-      ],
-    });
-
-    const onBookmarkChanged = vi.fn();
-    const listener = vi.fn();
-    const { bridge, ws } = openBridge({ onBookmarkChanged });
-    bridge.subscribeBookmarkChanged(listener);
-    deliver(ws, raw);
-    const expectedArgs = [
-      "bookmark-31f7",
-      "updated",
-      [
-        "gs://lucida-fixtures/kidney-multiplex.zarr",
-        "gs://lucida-fixtures/screening-collection-01.zarr",
-      ],
-    ];
-    expect(onBookmarkChanged).toHaveBeenCalledWith(...expectedArgs);
-    expect(listener).toHaveBeenCalledWith(...expectedArgs);
   });
 
   it("workspace_archived reaches the handler (and tears the bridge down)", () => {
@@ -1457,21 +1424,11 @@ const commandCases: [string, string, Record<string, unknown>][] = [
     // hooks/useDatasetSettings.ts handleLayerRename.
     { type: "rename_dataset", id: "wds-0f3a", name: "kidney multiplex (deconvolved)" },
   ],
-  [
-    "apply_asset_catalog_delta",
-    "session/client_command_apply_asset_catalog_delta.json",
-    {
-      type: "apply_asset_catalog_delta",
-      dataset_id: "wds-0f3a",
-      delta: expectedAssetCatalogDelta,
-    },
-  ],
 ];
 
 describe("wire goldens: client messages through Bridge senders", () => {
   beforeEach(() => {
-    FakeWebSocket.instances = [];
-    vi.stubGlobal("WebSocket", FakeWebSocket);
+    installFakeWebSocket();
     vi.useFakeTimers();
   });
 
@@ -1489,6 +1446,14 @@ describe("wire goldens: client messages through Bridge senders", () => {
     },
   );
 
+  it("sendInverseCommand emits the revision-checked inverse envelope", () => {
+    const { bridge, ws } = openBridge();
+    bridge.sendInverseCommand(41, 41);
+    expect(lastSent(ws)).toStrictEqual(
+      coveredFixture("session/client_inverse_command.json"),
+    );
+  });
+
   it("sendPresence merges the type tag into the presence body", () => {
     const { bridge, ws } = openBridge();
     bridge.sendPresence(
@@ -1503,7 +1468,7 @@ describe("wire goldens: client messages through Bridge senders", () => {
 
   it("sendCursor emits the cursor envelope", () => {
     const { bridge, ws } = openBridge();
-    bridge.sendCursor([412, 233.5]);
+    bridge.sendCursor([412, 233.5], "wds-0f3a");
     vi.advanceTimersByTime(60); // trailing-edge throttle
     expect(lastSent(ws)).toStrictEqual(coveredFixture("session/client_cursor.json"));
   });
@@ -1537,8 +1502,11 @@ describe("wire goldens: client messages through Bridge senders", () => {
 
   it("sendOpenRemoteDataset emits the open envelope with a fresh request id", () => {
     const { bridge, ws } = openBridge();
-    bridge.sendOpenRemoteDataset("gs://lucida-fixtures/kidney-multiplex.zarr");
+    const requestId = bridge.sendOpenRemoteDataset(
+      "gs://lucida-fixtures/kidney-multiplex.zarr",
+    );
     const sent = lastSent(ws) as { request_id: string };
+    expect(requestId).toBe(sent.request_id);
     expect(sent.request_id).toMatch(/^web-/);
     const golden = coveredFixture("session/client_open_remote_dataset.json") as {
       request_id: string;
@@ -1634,30 +1602,6 @@ describe("wire goldens: content-source request envelopes", () => {
     await expect(pending).rejects.toThrow(/aborted/i);
   });
 
-  it("fetchProxy() sends the asset_request envelope", async () => {
-    const sent: string[] = [];
-    const source = new ProxiedContentSource((json) => sent.push(json));
-
-    const controller = new AbortController();
-    const pending = source.fetchProxy(
-      {
-        datasetId: "wds-collection-77",
-        entityId: "tile-A1-f0",
-        kind: "TileProxy3D",
-        t: 0,
-        c: 2,
-      },
-      controller.signal,
-    );
-
-    expect(sent).toHaveLength(1);
-    expect(JSON.parse(sent[0])).toStrictEqual(
-      coveredFixture("session/asset_request.json"),
-    );
-
-    controller.abort();
-    await expect(pending).rejects.toThrow(/aborted/i);
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1734,44 +1678,10 @@ describe("wire goldens: dataset-open payloads", () => {
     expect(resolveFetchSource(opened.fetch)).toStrictEqual(expectedFetchSingle);
   });
 
-  it("FetchSource variants match the externally tagged mirror", () => {
+  it("FetchSource matches the single supported externally tagged mirror", () => {
     expect(coveredFixture("dataset-open/fetch_source_proxied.json")).toStrictEqual(
       expectedFetchSingle,
     );
-
-    const direct = coveredFixture("dataset-open/fetch_source_direct.json") as FetchSource;
-    expect(direct).toStrictEqual({
-      Direct: {
-        images: [
-          {
-            image_id: "multiscale-0",
-            wire_format: { Zstd: { data_type: "Uint16" } },
-            levels: [
-              { level_index: 0, path: "kidney-multiplex.zarr/0" },
-              { level_index: 1, path: "kidney-multiplex.zarr/1" },
-            ],
-            store_prefix: "gs://lucida-fixtures",
-          },
-        ],
-      },
-    });
-
-    const local = coveredFixture("dataset-open/fetch_source_local.json") as FetchSource;
-    expect(local).toStrictEqual({
-      Local: {
-        images: [
-          {
-            image_id: "multiscale-0",
-            wire_format: { Raw: { data_type: "Float32" } },
-            levels: [{ level_index: 0, path: "/data/kidney-multiplex.zarr/0" }],
-            store_prefix: null,
-          },
-        ],
-      },
-    });
-    if ("Local" in local) {
-      expect(extractDataType(local.Local.images[0].wire_format)).toBe("Float32");
-    }
   });
 });
 
@@ -1805,6 +1715,7 @@ describe("wire goldens: generated availability", () => {
       level_index: 2,
       key: "2/1/0/1/0/0",
       status: "failed_transient",
+      failure: { category: "source", code: "storage_backend", retryable: true },
       message: "source read timed out",
     });
   });
@@ -1826,6 +1737,7 @@ describe("wire goldens: generated availability", () => {
       level_index: 2,
       key: "2/0/0/1/0/0",
       status: "ready",
+      failure: null,
       message: null,
     });
   });
@@ -1871,7 +1783,6 @@ describe("wire goldens: enum vocabulary", () => {
     const blendModes: BlendMode[] = ["alpha", "additive", "max"];
     const renderModes: RenderMode[] = ["translucent", "max_intensity"];
     const entityKinds: Entity["kind"][] = ["Image", "Group", "Tile"];
-    const proxyKinds: ProxyKind[] = ["GroupProxy3D", "TileProxy3D"];
     const openStages: DatasetOpenStage[] = [
       "request_received",
       "authorization",
@@ -1892,7 +1803,6 @@ describe("wire goldens: enum vocabulary", () => {
       "failed_permanent",
       "ready",
     ];
-    const bookmarkActions: BookmarkAction[] = ["created", "updated", "deleted"];
     const annotationKinds: WireAnnotation["kind"][] = ["point", "line", "box"];
 
     expect(coveredFixture("vocab/enum_vocabulary.json")).toStrictEqual({
@@ -1905,7 +1815,6 @@ describe("wire goldens: enum vocabulary", () => {
       entity_kinds: entityKinds,
       data_types: ["Uint8", "Uint16", "Uint32", "Float32", "Float64"],
       positioning_modes: ["Explicit", "Derived"],
-      proxy_kinds: proxyKinds,
       dataset_open_stages: openStages,
       // No TS union today: the DebugPanel renders the kind string verbatim.
       dataset_open_failure_kinds: [
@@ -1913,6 +1822,7 @@ describe("wire goldens: enum vocabulary", () => {
         "session_closed",
         "workspace_lookup",
         "unsupported_scheme",
+        "invalid_locator",
         "local_path",
         "missing_object",
         "permission",
@@ -1920,17 +1830,24 @@ describe("wire goldens: enum vocabulary", () => {
         "http",
         "storage_backend",
         "unsupported_codec",
+        "decode_failure",
         "unsupported_layout",
+        "chunk_out_of_bounds",
+        "resource_limit",
         "malformed_metadata",
         "missing_metadata",
         "import",
+        "unknown_dataset",
+        "unknown_image",
+        "missing_chunk_metadata",
+        "invalid_chunk_key",
+        "protocol",
         "persistence",
         "internal",
       ],
       dataset_health_statuses: healthStatuses,
       generated_chunk_statuses: chunkStatuses,
       generated_level_roles: ["coarse"],
-      bookmark_actions: bookmarkActions,
       // Strings the tick coordinator emits (pipeline/tickCoordinator.ts).
       viewer_interest_modes: ["slice", "volume"],
       viewer_interaction_modes: ["idle", "panning", "zooming", "scrubbing"],

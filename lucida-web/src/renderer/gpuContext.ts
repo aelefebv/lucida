@@ -1,5 +1,7 @@
 /** WebGPU device/canvas initialization and texture helpers. */
 
+import { WEBGPU_MIN_MAX_TEXTURE_DIMENSION_3D } from "./atlasSizing.ts";
+
 export const OFFSCREEN_FORMAT: GPUTextureFormat = "rgba16float";
 
 /**
@@ -25,19 +27,12 @@ export function getDeviceLimits(device: GPUDevice): DeviceLimits {
   const limits = device.limits as Partial<GPUSupportedLimits> | undefined;
   return {
     maxTextureDimension2D: limits?.maxTextureDimension2D ?? 8192,
-    maxTextureDimension3D: limits?.maxTextureDimension3D ?? 2048,
+    maxTextureDimension3D:
+      limits?.maxTextureDimension3D ?? WEBGPU_MIN_MAX_TEXTURE_DIMENSION_3D,
     maxStorageBufferBindingSize:
       limits?.maxStorageBufferBindingSize ?? 128 * 1024 * 1024,
     maxBufferSize: limits?.maxBufferSize ?? 256 * 1024 * 1024,
   };
-}
-
-export function createOffscreenTarget(device: GPUDevice, w: number, h: number): GPUTexture {
-  return device.createTexture({
-    size: [w, h],
-    format: OFFSCREEN_FORMAT,
-    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-  });
 }
 
 export interface GPUContext {
@@ -71,21 +66,6 @@ export async function initGPU(canvas: HTMLCanvasElement | OffscreenCanvas): Prom
   context.configure({ device, format, alphaMode: "opaque" });
 
   return { device, context, format };
-}
-
-export function createEmptyVolumeTexture(
-  device: GPUDevice,
-  width: number,
-  height: number,
-  depth: number,
-  format: SliceTextureFormat = "r16uint",
-): GPUTexture {
-  return device.createTexture({
-    size: [width, height, depth],
-    format,
-    dimension: "3d",
-    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-  });
 }
 
 export function writeVolumeChunk(
@@ -131,50 +111,6 @@ function makeLike(source: SliceVoxels, length: number): SliceVoxels {
   return source instanceof Uint32Array
     ? new Uint32Array(length)
     : new Uint16Array(length);
-}
-
-export function createSliceTexture(
-  device: GPUDevice,
-  width: number,
-  height: number,
-  data?: SliceVoxels | null,
-  format: SliceTextureFormat = "r16uint",
-): GPUTexture {
-  const bpv = bytesPerVoxelFor(format);
-  const texture = device.createTexture({
-    size: [width, height],
-    format,
-    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-  });
-
-  if (data) {
-    const bytesPerRow = width * bpv;
-    const alignedBytesPerRow = Math.ceil(bytesPerRow / 256) * 256;
-
-    if (alignedBytesPerRow === bytesPerRow) {
-      device.queue.writeTexture(
-        { texture },
-        data.buffer,
-        { offset: data.byteOffset, bytesPerRow },
-        [width, height],
-      );
-    } else {
-      // Pad rows to satisfy WebGPU 256-byte alignment
-      const paddedWidth = alignedBytesPerRow / bpv;
-      const padded = makeLike(data, paddedWidth * height);
-      for (let y = 0; y < height; y++) {
-        padded.set(data.subarray(y * width, y * width + width), y * paddedWidth);
-      }
-      device.queue.writeTexture(
-        { texture },
-        padded.buffer,
-        { bytesPerRow: alignedBytesPerRow },
-        [width, height],
-      );
-    }
-  }
-
-  return texture;
 }
 
 export function writeSliceRegion(

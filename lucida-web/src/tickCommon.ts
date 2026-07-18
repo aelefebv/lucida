@@ -1,5 +1,6 @@
 /** Shared utilities for the chunk rendering tick pipeline (slice + volume). */
 import type { WasmScene } from "lucida-core";
+import type { LabelSettings } from "./labelSettings.ts";
 
 let cachedSettings: SceneSettings | null = null;
 let settingsGeneration = -1;
@@ -18,12 +19,6 @@ export interface ChannelSettingsJS {
   gamma: number;
 }
 
-/** Per-label overlay settings (mirrors `lucida_core::scene::LabelSettings`). */
-export interface LabelSettingsJS {
-  visible: boolean;
-  opacity: number;
-}
-
 export interface DatasetSettings {
   visible: boolean;
   opacity: number;
@@ -35,7 +30,7 @@ export interface DatasetSettings {
   channel_settings: ChannelSettingsJS[];
   /** Per-label visibility/opacity, positional by manifest label order. Absent
    *  on settings from snapshots that predate per-label controls. */
-  label_settings?: LabelSettingsJS[];
+  label_settings?: LabelSettings[];
   channel_blend_mode: string;
   detail_level_override?: number | null;
 }

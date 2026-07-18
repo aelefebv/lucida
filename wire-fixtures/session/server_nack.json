@@ -1,0 +1,7 @@
+{
+  "type": "nack",
+  "request_id": "req-rejected",
+  "code": "forbidden",
+  "message": "workspace role or ownership policy denied the command",
+  "retryable": false
+}

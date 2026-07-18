@@ -31,21 +31,24 @@ export function CommentCountBadge({
 }) {
   if (count <= 0) return null;
   return (
-    <div
+    <button
+      type="button"
       aria-label={`${count} comment${count === 1 ? "" : "s"}`}
       onClick={onToggleThread}
       style={{
         position: "absolute",
         top: -14,
         left: 4,
-        minWidth: 16,
-        height: 16,
+        minWidth: 24,
+        height: 24,
+        minHeight: 24,
         padding: "0 4px",
-        borderRadius: 8,
+        border: 0,
+        borderRadius: 12,
         backgroundColor: "#1f6feb",
         color: "white",
         fontSize: 11,
-        lineHeight: "16px",
+        lineHeight: "24px",
         textAlign: "center",
         fontWeight: 600,
         boxShadow: "0 1px 2px rgba(0,0,0,0.5)",
@@ -54,7 +57,7 @@ export function CommentCountBadge({
       }}
     >
       {count}
-    </div>
+    </button>
   );
 }
 

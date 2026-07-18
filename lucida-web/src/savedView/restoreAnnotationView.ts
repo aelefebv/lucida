@@ -49,6 +49,7 @@ import type { ViewportCommand } from "../commands.ts";
 import { guardedSceneCall } from "../sceneGuard.ts";
 import { clampViewIndices, clampNotice, datasetDisplayCommands } from "./applier.ts";
 import type { DimensionExtentsResolver, LabelNamesResolver } from "./applier.ts";
+import { validateSavedView } from "./encoder.ts";
 import type { Camera, DatasetId, SavedView } from "./types.ts";
 
 /** Apply one viewport/display command locally (never sent to peers). Kept inline
@@ -190,6 +191,12 @@ export function restoreAnnotationView({
   dimensionExtentsFor,
   labelNamesFor,
 }: RestoreAnnotationViewParams): RestoreResult {
+  // Annotation captures come from collaborative/persisted JSON, not a trusted
+  // TypeScript constructor. Normalize every nested field before the first mode
+  // or display command so a malformed optional value cannot strand the light
+  // restore midway through its sequence.
+  view = validateSavedView(view);
+
   // 1. Camera MODE first (2D<->3D), before anything reads/writes the camera.
   const mode = switchCameraMode(scene, view.camera);
 

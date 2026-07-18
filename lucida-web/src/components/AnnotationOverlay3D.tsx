@@ -54,7 +54,8 @@ import {
 } from "./annotationInteraction.ts";
 import { eventToScreenPx, makeProjectAnnotationToCss } from "./cameraProjection.ts";
 import { CommentCountBadge, OffContextHelptext } from "./AnnotationPinBadges.tsx";
-import { applyViewportCommand } from "../applyAndSend.ts";
+import type { RenderLoop } from "../renderLoop.ts";
+import type { ViewportCoordinator } from "../viewportCoordinator.ts";
 import { annotationVertices, isClosedShape, type ScreenPoint } from "./annotationGeometry.ts";
 import { isOffContext, type ViewContext } from "./annotationContext.ts";
 import { ThreadPopover } from "./ThreadPopover.tsx";
@@ -87,14 +88,10 @@ interface Props {
    * added/edited/removed/moved) so dependent overlays re-read via a fresh
    * `version`. App.tsx already passes it. */
   onDocumentChanged: () => void;
-  /** Notify the parent that the *viewport* changed locally so it can mark the
-   * render loop dirty and the volume repaints under the moved camera. The 3D
-   * twin of the 2D overlay's prop: the pull-based loop won't repaint on its own,
-   * so `focusPin`'s recenter (issue #526) must trip it, exactly like the
-   * collection-selector group-click does after a `set_center`. Optional + defaulted to
-   * a no-op so the overlay works unwired (e.g. a test harness); then a recenter
-   * simply isn't reflected until the next frame the loop already redraws. */
-  onViewportChanged?: () => void;
+  /** Narrow port to the host's sole viewport-effect coordinator. Required by
+   * construction; there is no direct-scene/repaint-only fallback. */
+  viewport: Pick<ViewportCoordinator, "apply">;
+  frameSignal?: Pick<RenderLoop, "subscribePresentedFrame"> | null;
   /** Personal, view-only visibility for ALL annotations (issue #792) — the 3D
    * twin of the 2D overlay's prop. When `false`, the overlay renders NOTHING (no
    * pin markers, no line/box geometry, no open thread popover), so one toolbar
@@ -144,7 +141,7 @@ interface Pin3DDrag {
   forwarded: boolean;
 }
 
-export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, viewContext, myId, sendCommand, onDocumentChanged, onViewportChanged, visible = true, mentionCandidates = [], onGoToAuthorView }: Props, ref) {
+export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, viewContext, myId, sendCommand, onDocumentChanged, viewport, frameSignal, visible = true, mentionCandidates = [], onGoToAuthorView }: Props, ref) {
   const dotRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   // SVG geometry element per line/box, re-projected each frame through the SAME
   // `project_annotation` call the dots use — so a line/box tracks the volume as
@@ -154,7 +151,7 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
   // lifecycle (re-read on version/dataset change, close on vanish/dataset
   // switch/hide) — the same view-independent overlay state the 2D overlay
   // holds. (3D has no hovered-handle state on top of it.)
-  const { annotations, annotationsRef, openPinId, setOpenPinId } = useAnnotationOverlay({
+  const { annotations, annotationsRef, openPinId, setOpenPinId, focusPinWhenAvailable } = useAnnotationOverlay({
     wasmSceneRef,
     datasetId,
     version,
@@ -172,9 +169,9 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
   // is the arcball/fly, which `set_center` never touches). Instead this issues
   // `arcball_center_on_voxel`: the scene lifts the pin's voxel point to world via
   // the SAME rendering transform `project_annotation` uses and makes it the
-  // arcball target, so the pin's marker re-projects to the viewport center. Then
-  // it marks the render loop dirty (`onViewportChanged`) — the pull-based loop
-  // won't repaint otherwise — so the volume actually moves. The RAF tick
+  // arcball target, so the pin's marker re-projects to the viewport center. The
+  // coordinator publishes presence/URL/follow state and marks the pull-based
+  // render loop dirty as one effect boundary. The RAF tick
   // reprojects the now-open pin's marker, and its thread popover anchors there.
   // Reads the live pin set + dataset via refs; a missing pin / unready scene is a
   // safe no-op (and an unanchorable dataset is a no-op scene-side too).
@@ -182,28 +179,26 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
     ref,
     () => ({
       focusPin: (pinId: string) => {
-        const pin = annotationsRef.current.find((p) => p.id === pinId);
-        if (!pin) return;
-        setOpenPinId(pin.id);
-        const scene = wasmSceneRef.current;
-        if (scene) {
-          applyViewportCommand(scene, {
-            type: "arcball_center_on_voxel",
-            dataset_id: datasetIdRef.current,
-            x: pin.position[0],
-            y: pin.position[1],
-            // The pin's slice depth (defaulted to 0 on a pre-depth pin), so the
-            // arcball target is the pin's full 3D world point, not its in-plane
-            // projection at z=0.
-            z: pin.z ?? 0,
-          });
-          // Repaint under the moved camera; the pull-based loop won't otherwise.
-          // No-op when unwired (e.g. a test harness).
-          onViewportChanged?.();
-        }
+        return focusPinWhenAvailable(pinId, (pin) => {
+          const applied = viewport.apply(
+            {
+              type: "arcball_center_on_voxel",
+              dataset_id: datasetIdRef.current,
+              x: pin.position[0],
+              y: pin.position[1],
+              // The pin's slice depth (defaulted to 0 on a pre-depth pin), so the
+              // arcball target is the pin's full 3D world point, not its in-plane
+              // projection at z=0.
+              z: pin.z ?? 0,
+            },
+            { source: "annotation_focus_3d", history: { label: "annotation focus" } },
+          );
+          if (applied) setOpenPinId(pin.id);
+          return applied;
+        });
       },
     }),
-    [wasmSceneRef, onViewportChanged, annotationsRef, setOpenPinId],
+    [viewport, setOpenPinId, focusPinWhenAvailable],
   );
 
   // The live gesture, if any. Declared before the RAF effect because the tick
@@ -215,8 +210,7 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
   const suppressClickRef = useRef<string | null>(null);
 
   useEffect(() => {
-    let rafId: number;
-    const tick = () => {
+    const projectFrame = () => {
       const scene = wasmSceneRef.current;
       if (scene) {
         // The single per-vertex projection every kind reuses: lift (x, y, z) to
@@ -276,11 +270,14 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
           }
         }
       }
-      rafId = requestAnimationFrame(tick);
     };
-    rafId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafId);
-  }, [wasmSceneRef, canvas, annotationsRef]);
+    const initialFrame = requestAnimationFrame(projectFrame);
+    const unsubscribe = frameSignal?.subscribePresentedFrame(projectFrame);
+    return () => {
+      cancelAnimationFrame(initialFrame);
+      unsubscribe?.();
+    };
+  }, [wasmSceneRef, canvas, annotationsRef, frameSignal, version, visible]);
 
   // --- Pin gesture: click opens the thread; drag orbits; Shift+drag moves -----
   // Every marker is interactive (so any pin's thread can be opened by a click),
@@ -568,8 +565,13 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
                 drag is handed to the canvas (orbit); a Shift+drag on an own pin
                 moves it. Every marker accepts the pointer so any pin's thread can
                 open — a peer's pin just can't be Shift-moved. */}
-            <div
+            <button
+              type="button"
+              data-floating-anchor=""
               data-testid={`annot-pin-${pin.id}`}
+              aria-label={mine ? "Open your annotation discussion" : `Open annotation discussion by ${pin.author}`}
+              aria-expanded={isOpen}
+              aria-controls={`annot-thread-${pin.id}`}
               title={
                 mine
                   ? "Pin by you — click for thread, Shift+drag to move, drag to orbit"
@@ -594,10 +596,12 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
                 position: "absolute",
                 top: 0,
                 left: 0,
-                width: 12,
-                height: 12,
-                marginLeft: -6,
-                marginTop: -6,
+                width: 24,
+                height: 24,
+                minHeight: 24,
+                marginLeft: -12,
+                marginTop: -12,
+                padding: 0,
                 borderRadius: "50%",
                 backgroundColor: "#FF3B30",
                 // Distinct dashed outline off-context (mirrors the 2D overlay),
@@ -642,6 +646,8 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
                 onClose={() => setOpenPinId(null)}
                 mentionCandidates={mentionCandidates}
                 onGoToAuthorView={onGoToAuthorView}
+                frameSignal={frameSignal}
+                canvas={canvas}
               />
             )}
           </div>

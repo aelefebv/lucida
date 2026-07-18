@@ -5,7 +5,7 @@
  *
  * Persistence schema (`localStorage["lucida.planning.config"]`):
  *
- *     { "schemaVersion": 2, "config": { ...PlanningConfig } }
+ *     { "schemaVersion": 3, "config": { ...PlanningConfig } }
  *
  * Missing/unparseable/version-mismatch falls back to defaults with one
  * log line; partial configs merge over defaults.
@@ -21,7 +21,7 @@ import {
 const STORAGE_KEY = "lucida.planning.config";
 
 /** Schema version for the persisted envelope. Bump on breaking changes. */
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 type Listener = () => void;
 

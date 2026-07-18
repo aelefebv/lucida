@@ -9,8 +9,6 @@ use serde::{Deserialize, Serialize, Serializer};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FetchSource {
     Proxied(ProxiedFetchDescriptor),
-    Direct(DirectFetchDescriptor),
-    Local(LocalFetchDescriptor),
 }
 
 /// Server-proxied fetch. Client sends logical chunk keys,
@@ -37,8 +35,7 @@ pub enum FetchSource {
 /// canonical encoder output: `encode(decode(x)) == x` byte-for-byte when `x`
 /// came out of this encoder, while valid non-canonical inputs (duplicate or
 /// unreferenced table entries, inline duplicates) decode fine and re-encode
-/// canonically. (`Direct`/`Local` descriptors keep the inline form: their
-/// entries are dominated by genuinely per-image paths.)
+/// canonically.
 #[derive(Debug, Clone)]
 pub struct ProxiedFetchDescriptor {
     pub images: Vec<ProxiedImageSpec>,
@@ -231,34 +228,6 @@ impl<'de> Deserialize<'de> for ProxiedFetchDescriptor {
     }
 }
 
-/// Client fetches directly from storage (future).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DirectFetchDescriptor {
-    pub images: Vec<DirectImageSpec>,
-}
-
-/// Local filesystem access (Python headless).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LocalFetchDescriptor {
-    pub images: Vec<DirectImageSpec>,
-}
-
-/// Per-image fetch metadata for modes where the client resolves storage paths.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DirectImageSpec {
-    pub image_id: ImageId,
-    pub wire_format: WireFormat,
-    pub levels: Vec<LevelAddress>,
-    pub store_prefix: Option<String>,
-}
-
-/// How to address a specific level within an image's multiscale pyramid.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LevelAddress {
-    pub level_index: u32,
-    pub path: String,
-}
-
 /// What byte format the client should expect from chunk responses.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WireFormat {
@@ -307,82 +276,15 @@ mod tests {
         });
         let json = serde_json::to_string(&desc).unwrap();
         let back: FetchSource = serde_json::from_str(&json).unwrap();
-        match &back {
-            FetchSource::Proxied(p) => {
-                assert_eq!(p.images.len(), 1);
-                assert_eq!(p.images[0].image_id, ImageId("img1".into()));
-                assert_eq!(
-                    p.images[0].wire_format,
-                    WireFormat::Raw {
-                        data_type: DataType::Uint16,
-                    }
-                );
+        let FetchSource::Proxied(p) = &back;
+        assert_eq!(p.images.len(), 1);
+        assert_eq!(p.images[0].image_id, ImageId("img1".into()));
+        assert_eq!(
+            p.images[0].wire_format,
+            WireFormat::Raw {
+                data_type: DataType::Uint16,
             }
-            _ => panic!("expected Proxied variant"),
-        }
-    }
-
-    #[test]
-    fn direct_round_trip() {
-        let desc = FetchSource::Direct(DirectFetchDescriptor {
-            images: vec![DirectImageSpec {
-                image_id: ImageId("img2".into()),
-                wire_format: WireFormat::Lz4 {
-                    data_type: DataType::Float32,
-                },
-                levels: vec![
-                    LevelAddress {
-                        level_index: 0,
-                        path: "s3://bucket/level0".into(),
-                    },
-                    LevelAddress {
-                        level_index: 1,
-                        path: "s3://bucket/level1".into(),
-                    },
-                ],
-                store_prefix: Some("s3://bucket".into()),
-            }],
-        });
-        let json = serde_json::to_string(&desc).unwrap();
-        let back: FetchSource = serde_json::from_str(&json).unwrap();
-        match &back {
-            FetchSource::Direct(d) => {
-                assert_eq!(d.images.len(), 1);
-                assert_eq!(d.images[0].image_id, ImageId("img2".into()));
-                assert_eq!(d.images[0].levels.len(), 2);
-                assert_eq!(d.images[0].levels[0].level_index, 0);
-                assert_eq!(d.images[0].levels[1].path, "s3://bucket/level1");
-                assert_eq!(d.images[0].store_prefix, Some("s3://bucket".to_string()));
-            }
-            _ => panic!("expected Direct variant"),
-        }
-    }
-
-    #[test]
-    fn local_round_trip() {
-        let desc = FetchSource::Local(LocalFetchDescriptor {
-            images: vec![DirectImageSpec {
-                image_id: ImageId("local-img".into()),
-                wire_format: WireFormat::Raw {
-                    data_type: DataType::Uint8,
-                },
-                levels: vec![LevelAddress {
-                    level_index: 0,
-                    path: "/data/level0".into(),
-                }],
-                store_prefix: None,
-            }],
-        });
-        let json = serde_json::to_string(&desc).unwrap();
-        let back: FetchSource = serde_json::from_str(&json).unwrap();
-        match &back {
-            FetchSource::Local(l) => {
-                assert_eq!(l.images.len(), 1);
-                assert_eq!(l.images[0].image_id, ImageId("local-img".into()));
-                assert!(l.images[0].store_prefix.is_none());
-            }
-            _ => panic!("expected Local variant"),
-        }
+        );
     }
 
     #[test]

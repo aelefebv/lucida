@@ -86,7 +86,7 @@ pub struct ViewQueryResult {
 /// The [`SceneEpochs`] carried on both variants reflect structural and selection
 /// changes — a change of the active selection along a dimension axis or of a
 /// per-channel display setting (see [`SceneEpochs::selection`]), or of entity
-/// membership, layout, or the asset catalog — that the quantized set does not
+/// membership, layout, or annotations — that the quantized set does not
 /// encode. A consumer that must react to those (for example, a selection change
 /// that should drive its own refetch) must consult `epochs`, not just `entered`
 /// / `left` / `changed`.

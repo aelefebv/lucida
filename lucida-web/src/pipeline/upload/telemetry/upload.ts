@@ -33,7 +33,6 @@ interface TickWindowEntry {
   uploaded: number;
   skipped: number;
   skippedPrefetch: number;
-  skippedOverview: number;
   skippedWrongLod: number;
   skippedAlreadySent: number;
   skippedNoMeta: number;
@@ -44,7 +43,6 @@ interface EventEntry {
   at: number;
   bytes: number;
   isResend: boolean;
-  kind: "chunk" | "proxy";
 }
 
 export class UploadTelemetry {
@@ -78,9 +76,8 @@ export class UploadTelemetry {
     now: number,
     bytes: number,
     isResend: boolean,
-    kind: "chunk" | "proxy" = "chunk",
   ): void {
-    this.uploadEvents.push({ at: now, bytes, isResend, kind });
+    this.uploadEvents.push({ at: now, bytes, isResend });
     this.uploadSizeSamples.push(bytes);
     if (this.uploadSizeSamples.length > UPLOAD_SIZE_SAMPLES) {
       this.uploadSizeSamples.shift();
@@ -93,12 +90,11 @@ export class UploadTelemetry {
   publish(now: number, stats: UploadTickStats): void {
     const skipped =
       stats.skippedPrefetch +
-      stats.skippedOverview +
       stats.skippedWrongLod +
       stats.skippedAlreadySent +
       stats.skippedNoMeta;
-    const drained = stats.drainedChunks + stats.drainedProxies;
-    const uploaded = stats.uploadedChunks + stats.uploadedProxies;
+    const drained = stats.drainedChunks;
+    const uploaded = stats.uploadedChunks;
     this.uploadTickWindow.push({
       at: now,
       drained,
@@ -106,7 +102,6 @@ export class UploadTelemetry {
       uploaded,
       skipped,
       skippedPrefetch: stats.skippedPrefetch,
-      skippedOverview: stats.skippedOverview,
       skippedWrongLod: stats.skippedWrongLod,
       skippedAlreadySent: stats.skippedAlreadySent,
       skippedNoMeta: stats.skippedNoMeta,
@@ -128,13 +123,11 @@ export class UploadTelemetry {
     let bytesInWindow = 0;
     let uploadsInWindow = 0;
     let chunkUploadsInWindow = 0;
-    let proxyUploadsInWindow = 0;
     let resendUploads = 0;
     for (const e of this.uploadEvents) {
       bytesInWindow += e.bytes;
       uploadsInWindow += 1;
-      if (e.kind === "proxy") proxyUploadsInWindow += 1;
-      else chunkUploadsInWindow += 1;
+      chunkUploadsInWindow += 1;
       if (e.isResend) resendUploads += 1;
     }
 
@@ -143,7 +136,6 @@ export class UploadTelemetry {
     let skippedInWindow = 0;
     let exhaustedTicks = 0;
     let winSkippedPrefetch = 0;
-    let winSkippedOverview = 0;
     let winSkippedWrongLod = 0;
     let winSkippedAlreadySent = 0;
     let winSkippedNoMeta = 0;
@@ -152,7 +144,6 @@ export class UploadTelemetry {
       drainedChunksInWindow += t.drainedChunks;
       skippedInWindow += t.skipped;
       winSkippedPrefetch += t.skippedPrefetch;
-      winSkippedOverview += t.skippedOverview;
       winSkippedWrongLod += t.skippedWrongLod;
       winSkippedAlreadySent += t.skippedAlreadySent;
       winSkippedNoMeta += t.skippedNoMeta;
@@ -160,15 +151,14 @@ export class UploadTelemetry {
     }
     const skippedInWindowByCause = {
       skippedPrefetch: winSkippedPrefetch,
-      skippedOverview: winSkippedOverview,
       skippedWrongLod: winSkippedWrongLod,
       skippedAlreadySent: winSkippedAlreadySent,
       skippedNoMeta: winSkippedNoMeta,
     };
     // Upload-bound = chunks meant for the main GPU atlas. Excludes
-    // prefetch (cache-only), overview (minimap), and proxies (separate atlas).
+    // prefetch traffic (cache-only).
     const drainedUploadBoundInWindow =
-      drainedChunksInWindow - winSkippedPrefetch - winSkippedOverview;
+      drainedChunksInWindow - winSkippedPrefetch;
     const skippedUploadBoundInWindow =
       winSkippedWrongLod + winSkippedAlreadySent + winSkippedNoMeta;
 
@@ -185,7 +175,6 @@ export class UploadTelemetry {
       bytesPerSec: bytesInWindow,
       uploadsPerSec: uploadsInWindow,
       chunkUploadsPerSec: chunkUploadsInWindow,
-      proxyUploadsPerSec: proxyUploadsInWindow,
       resendRatio: uploadsInWindow > 0 ? resendUploads / uploadsInWindow : NaN,
       filterRatio:
         drainedUploadBoundInWindow > 0
@@ -233,7 +222,6 @@ export class UploadTelemetry {
       skippedUploadBoundInWindow: number;
       byCause: {
         skippedPrefetch: number;
-        skippedOverview: number;
         skippedWrongLod: number;
         skippedAlreadySent: number;
         skippedNoMeta: number;
@@ -269,10 +257,9 @@ export class UploadTelemetry {
       skippedWrongLod: window.byCause.skippedWrongLod,
       skippedAlreadySent: window.byCause.skippedAlreadySent,
       skippedNoMeta: window.byCause.skippedNoMeta,
-      // Informational — prefetch/overview don't count toward the ratio
+      // Informational — prefetch doesn't count toward the ratio
       // but are useful "was the decode pool busy?" context.
       skippedPrefetch: window.byCause.skippedPrefetch,
-      skippedOverview: window.byCause.skippedOverview,
       sustainedMs: Math.round(sustainedMs),
     }));
   }

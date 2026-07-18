@@ -9,7 +9,7 @@
  * The sequenced-document layer is a nameable internal seam — `handleSequenced`
  * / `drainPendingSequenced` / `deliverStale`, the `pendingSequenced` /
  * `pendingLocalCommands` / `documentDatasetIds` state, and the resync timers,
- * delivering through `onSnapshot`/`onCommand`/`onAck` — and could compose as
+ * delivering through `onSnapshot`/`onCommand`/`onAck`/`onNack` — and could compose as
  * a separate documentSync module the Bridge owns. It stays in-file
  * deliberately: its resets are interleaved with the connection lifecycle
  * (`onclose`, `destroy`, per-connection re-seeding) and its send-side hook
@@ -19,6 +19,8 @@
  * changes behavior.
  */
 import { isDebugEnabled } from "./debug/logging.ts";
+import { decodeChunkFrame } from "./chunkFrame.ts";
+import { parseFailureDescriptor, type FailureDescriptor } from "./failureContract.ts";
 import type { SourceChunkStatus } from "./pipeline/fetch/contentSource.ts";
 import type {
   GeneratedChunkStatus,
@@ -26,6 +28,19 @@ import type {
 } from "./pipeline/generatedAvailability.ts";
 
 export type ClientId = number;
+
+const MAX_CLIENT_ID = 0xffff_ffff;
+
+function isClientId(value: unknown): value is ClientId {
+  return Number.isInteger(value) && (value as number) >= 0 && (value as number) <= MAX_CLIENT_ID;
+}
+
+export { parseFailureDescriptor } from "./failureContract.ts";
+export type {
+  FailureCategory,
+  FailureCode,
+  FailureDescriptor,
+} from "./failureContract.ts";
 
 export type DatasetHealthStatus = "healthy" | "degraded" | "unavailable";
 
@@ -50,8 +65,12 @@ export interface DatasetGeneratedCoarseCacheStats {
   current_bytes: number;
   max_bytes?: number | null;
   used_percent?: number | null;
+  entry_count?: number;
+  max_entries?: number | null;
+  entry_used_percent?: number | null;
   evictions: number;
   root?: string | null;
+  accounting_healthy?: boolean;
 }
 
 export interface DatasetGeneratedCoarseFailure {
@@ -59,6 +78,7 @@ export interface DatasetGeneratedCoarseFailure {
   level_index: number;
   key: string;
   status: GeneratedChunkStatus;
+  failure?: FailureDescriptor | null;
   message?: string | null;
 }
 
@@ -98,6 +118,12 @@ export type DatasetOpenStage =
   | "broadcast"
   | "complete";
 
+export interface DatasetOpenFailureDiagnostic extends FailureDescriptor {
+  stage: DatasetOpenStage;
+  message: string;
+  detail?: string | null;
+}
+
 export interface DatasetOpenProgressDiagnostic {
   stage: DatasetOpenStage;
   message: string;
@@ -109,6 +135,17 @@ export interface DatasetOpenProgressDiagnostic {
    *  on the wire when false; the bridge coerces it to a clean boolean so
    *  every consumer can rely on `diagnostic.warning === true`/`=== false`. */
   warning?: boolean;
+}
+
+/** Lightweight requester-only confirmation. The full manifest/fetch payload
+ * arrives exactly once: in this requester's success envelope, or in a
+ * `dataset_opened` command broadcast for peers. Bridge normalizes both shapes
+ * into the same sequenced command path before publishing this summary. */
+export interface OpenedDatasetSummary {
+  workspace_dataset_id: string;
+  name: string;
+  image_count: number;
+  entity_count: number;
 }
 
 interface PendingDatasetHealthRequest {
@@ -133,7 +170,8 @@ interface PendingSequenced {
 }
 
 /** A document command this client applied locally (optimistic apply) and
- *  transmitted, whose `Ack` has not arrived yet. A mid-session snapshot's
+ *  transmitted, whose correlated `Ack`/`Nack` has not arrived yet. A
+ *  mid-session snapshot's
  *  full-replace would silently erase its local effect — usually because
  *  the server built the snapshot before applying this command — so these
  *  are replayed locally after snapshot adoption. That premise is not
@@ -143,15 +181,16 @@ interface PendingSequenced {
  *  any newer peer edit the snapshot carried. Accepted tradeoff: that
  *  divergence is local-only and bounded by the next edit or snapshot,
  *  whereas skipping the replay would erase the author's own edit in the
- *  common case. The ack retires entries FIFO: the server processes one
- *  client's commands in send order and acks each exactly once. */
+ *  common case. Entries are retired by request id, so out-of-order outcomes
+ *  and explicit rejections cannot retire or replay an unrelated command. */
 interface PendingLocalCommand {
+  requestId: string;
   commandJson: string;
   commandType?: string;
   datasetId?: string;
-  /** `Date.now()` at transmission. Acks carry only a seq (no command id),
-   *  so retirement is FIFO and staleness must be structural — see
-   *  [`PENDING_LOCAL_COMMAND_TTL_MS`]. */
+  /** `Date.now()` at transmission. A stale entry is still unsafe to replay
+   *  forever if its outcome was lost with a dying transport, so age remains
+   *  a structural cleanup signal — see [`PENDING_LOCAL_COMMAND_TTL_MS`]. */
   sentAt: number;
 }
 
@@ -164,15 +203,17 @@ interface PendingLocalCommand {
  *  storm at worst one request per interval instead of one per message. */
 const RESYNC_RETRY_MS = 5000;
 
-/** Maximum age of a pending local command. A healthy ack round-trips in
- *  well under a second; an entry unacked for this long is a server-side
- *  rejection (rejections are log-only — no ack ever comes), was orphaned
- *  by a cap shed, or sits on a dying connection. Expired entries are
- *  pruned at every retirement/replay/send sweep, so one ack-less command
- *  cannot misalign FIFO retirement indefinitely — without expiry, a stale
+/** Maximum age of a pending local command. A healthy outcome round-trips in
+ *  well under a second; an entry without an Ack/Nack for this long was lost
+ *  with a dying connection or orphaned by a cap shed. Expired entries are
+ *  pruned at every retirement/replay/send sweep — without expiry, a stale
  *  pending `remove_dataset` replayed by a much-later snapshot would
  *  delete a re-opened dataset and poison the membership mirror. */
 const PENDING_LOCAL_COMMAND_TTL_MS = 10_000;
+
+/** Server-side request-id validation is intentionally strict and bounded. */
+const MAX_COMMAND_REQUEST_ID_BYTES = 128;
+const VALID_COMMAND_REQUEST_ID = /^[A-Za-z0-9._:-]+$/;
 
 /** How long a seq hole may stand before it is treated as loss. A hole is
  *  NOT proof of loss: the server applies commands under the session lock
@@ -240,10 +281,10 @@ export function bridgeLog(event: string, data: Record<string, unknown> = {}, wsR
 /**
  * Mirror of `lucida_core::protocol::PeerIdentity`. Server-authored from the
  * connecting principal and surfaced on the peer's live cursor (#540). All
- * fields are best-effort: `display_name` may be empty, `picture_url` may be
- * absent (dev sessions, providers without avatars). The whole object is
- * absent for sessions without auth (the non-workspace `/ws` path), so peer
- * rendering must tolerate a missing `identity`.
+ * fields are best-effort: `display_name` may be empty and `picture_url` may be
+ * absent (dev sessions, providers without avatars). The whole object remains
+ * optional so a current client can render snapshots from before peer identity
+ * was added; current workspace connections always provide it.
  *
  * Privacy: the raw email is deliberately NOT here — collaborator emails are
  * owner-only, so presence (seen by every co-present peer, including non-owner
@@ -267,11 +308,21 @@ export interface PresenceState {
   display: { contrast_min: number; contrast_max: number; gamma: number };
   following: ClientId | null;
   cursor: [number, number] | null;
+  cursor_dataset_id?: string | null;
   dataset_order: string[];
   dataset_settings: Record<string, unknown>;
   /** Presentational identity for this peer's cursor (#540). Optional:
    *  absent for peers from a session without auth. */
   identity?: PeerIdentity | null;
+}
+
+/** A server-rejected document command, correlated to the exact optimistic
+ * local mutation that must be retired and reconciled. */
+export interface CommandNack {
+  requestId: string;
+  code: string;
+  message: string;
+  retryable: boolean;
 }
 
 export interface BridgeHandlers {
@@ -283,19 +334,22 @@ export interface BridgeHandlers {
     generatedAvailability: WireGeneratedAvailabilityByDataset,
   ) => void;
   onCommand: (seq: number, commandJson: string) => void;
-  onAck: (seq: number) => void;
+  onAck: (seq: number, requestId: string) => void;
+  onNack?: (nack: CommandNack) => void;
   /**
    * Binary frame received from the WebSocket. The bridge parses the
-   * envelope (client_id + keyLen + key + payload) and forwards
-   * (key, payload) here. The chunk-vs-proxy routing decision lives
-   * in the application layer (the content source) so the bridge stays
-   * a generic binary transport.
+   * envelope (client_id + keyLen + key + payload) and forwards the decoded
+   * chunk payload to the application layer.
    */
   onBinary?: (key: string, payload: ArrayBuffer) => void;
   onPeerJoined?: (clientId: ClientId, presence: PresenceState) => void;
   onPeerLeft?: (clientId: ClientId) => void;
   onPresenceUpdate?: (clientId: ClientId, camera: unknown, view: PresenceState["view"], display: PresenceState["display"]) => void;
-  onCursorUpdate?: (clientId: ClientId, position: [number, number] | null) => void;
+  onCursorUpdate?: (
+    clientId: ClientId,
+    position: [number, number] | null,
+    datasetId: string | null,
+  ) => void;
   onFollowChanged?: (clientId: ClientId, target: ClientId | null) => void;
   onDatasetPresenceUpdate?: (clientId: ClientId, datasetOrder: string[], datasetSettings: Record<string, unknown>) => void;
   onDatasetOpenProgress?: (
@@ -303,17 +357,25 @@ export interface BridgeHandlers {
     url: string,
     diagnostic: DatasetOpenProgressDiagnostic,
   ) => void;
-  onOpenDatasetFailed?: (url: string, error: string) => void;
-  /**
-   * The server may emit an empty `delta.added` as a sanity check (no-op).
-   */
-  onAssetCatalogUpdate?: (datasetId: string, deltaJson: string) => void;
+  onOpenDatasetSucceeded?: (
+    requestId: string,
+    url: string,
+    seq: number,
+    summary: OpenedDatasetSummary,
+  ) => void;
+  onOpenDatasetFailed?: (
+    requestId: string,
+    url: string,
+    error: string,
+    diagnostic?: DatasetOpenFailureDiagnostic | null,
+  ) => void;
   onGeneratedAvailabilityUpdate?: (datasetId: string, deltaJson: string) => void;
   onGeneratedChunkStatus?: (
     datasetId: string,
     imageId: string,
     key: string,
     status: GeneratedChunkStatus,
+    failure?: FailureDescriptor | null,
     message?: string | null,
   ) => void;
   /**
@@ -327,20 +389,8 @@ export interface BridgeHandlers {
     imageId: string,
     key: string,
     status: SourceChunkStatus,
+    failure: FailureDescriptor,
     message?: string | null,
-  ) => void;
-  /**
-   * Cross-peer bookmark-sidebar updates. Fired when the server
-   * broadcasts a `bookmark_changed` message because some client
-   * mutated a bookmark whose dataset URLs overlap a loaded dataset
-   * in this session. `useBookmarks` uses this to refetch
-   * (Created/Updated) or remove from local state (Deleted) without
-   * waiting for a manual refresh.
-   */
-  onBookmarkChanged?: (
-    id: string,
-    action: BookmarkAction,
-    datasetUrls: string[],
   ) => void;
   onWorkspaceArchived?: (workspaceId: string) => void;
   /**
@@ -353,20 +403,6 @@ export interface BridgeHandlers {
   onConnected?: () => void;
   onDisconnect?: () => void;
 }
-
-/** Mirror of `lucida_core::protocol::BookmarkAction` (lowercase wire form). */
-export type BookmarkAction = "created" | "updated" | "deleted";
-
-/** Listener for cross-peer `bookmark_changed` broadcasts. Subscribed to
- *  via [`Bridge.subscribeBookmarkChanged`] — the WS handler invokes
- *  every registered listener in registration order. Fan-out lives on
- *  the bridge so feature code (e.g. `useBookmarks`) doesn't have to
- *  thread a pub-sub through React props. */
-export type BookmarkChangedListener = (
-  id: string,
-  action: BookmarkAction,
-  datasetUrls: string[],
-) => void;
 
 export class Bridge {
   private ws: WebSocket | null = null;
@@ -381,10 +417,10 @@ export class Bridge {
   private cursorTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingCursor: string | null = null;
   private pendingDatasetHealth = new Map<string, PendingDatasetHealthRequest>();
-  /** Bookmark-sidebar cross-peer subscribers. Owned on the bridge so
-   *  feature code subscribes via a stable handle instead of wiring
-   *  callbacks through React props. */
-  private bookmarkChangedListeners: BookmarkChangedListener[] = [];
+  /** Recipient id established by this connection's authoritative snapshot.
+   * Binary frames are ignored until it is known and whenever their header
+   * names a different client. */
+  private clientId: ClientId | null = null;
   /** Highest contiguously-applied document `seq` on this connection —
    *  advanced by snapshots, in-order `command_broadcast`s, and `ack`s of
    *  our own commands (which the server sequences but never rebroadcasts
@@ -394,6 +430,10 @@ export class Bridge {
    *  snapshot (or a disconnect — a reconnect's snapshot re-seeds). */
   private resyncInFlight = false;
   private lastResyncRequestAt = 0;
+  /** A rejected optimistic command needs an authoritative snapshot even when
+   *  the sequenced stream has no gap. Kept separate from `resyncInFlight` so
+   *  a stale snapshot cannot falsely settle the reconciliation. */
+  private authoritativeSnapshotRequired = false;
   /** Armed when a seq hole appears; fires after [`RESYNC_GRACE_MS`] and
    *  requests a snapshot only if the hole still stands (a late arrival
    *  filling it empties the buffer and the callback no-ops). */
@@ -419,29 +459,40 @@ export class Bridge {
   /** Locally-applied document commands awaiting their ack (see
    *  [`PendingLocalCommand`]). Replayed after snapshot adoption so a
    *  mid-session full-replace can't erase the author's own optimistic
-   *  applies; retired FIFO on ack; cleared on disconnect. */
-  private pendingLocalCommands: PendingLocalCommand[] = [];
+   *  applies; retired by correlated request id; cleared on disconnect. */
+  private pendingLocalCommands = new Map<string, PendingLocalCommand>();
+  private commandRequestCounter = 0;
+  private readonly commandRequestIdFactory?: () => string;
 
-  constructor(handlers: BridgeHandlers, urlOverride?: string, workspaceId?: string) {
+  constructor(
+    handlers: BridgeHandlers,
+    urlOverride?: string,
+    workspaceId?: string,
+    commandRequestIdFactory?: () => string,
+  ) {
     // Same-origin WebSocket so the lucida_session cookie is sent on
     // the upgrade handshake (browsers refuse cross-origin cookies on
-    // WS upgrades with SameSite=Lax). Vite dev server proxies `/ws`
-    // to the backend; production serves both from one origin.
+    // WS upgrades with SameSite=Lax). Vite dev server proxies the workspace
+    // WebSocket prefix to the backend; production serves both from one origin.
     if (urlOverride) {
       this.url = urlOverride;
     } else {
       const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const path = workspaceId
-        ? `/ws/workspaces/${encodeURIComponent(workspaceId)}`
-        : "/ws";
+      if (!workspaceId) {
+        throw new Error("Bridge requires a workspace id when no URL override is provided");
+      }
+      const path = `/ws/workspaces/${encodeURIComponent(workspaceId)}`;
       this.url = `${proto}//${window.location.host}${path}`;
     }
     this.handlers = handlers;
+    this.commandRequestIdFactory = commandRequestIdFactory;
     this.connect();
   }
 
   private connect() {
     if (this.destroyed) return;
+
+    this.clientId = null;
 
     const ws = new WebSocket(this.url);
     ws.binaryType = "arraybuffer";
@@ -474,6 +525,19 @@ export class Bridge {
         const msg = JSON.parse(event.data);
         switch (msg.type) {
           case "snapshot": {
+            const snapshotClientId = msg.your_id;
+            if (!isClientId(snapshotClientId)) {
+              bridgeLog("snapshot.invalid_client_id", { clientId: snapshotClientId });
+              break;
+            }
+            if (this.clientId !== null && snapshotClientId !== this.clientId) {
+              bridgeLog("snapshot.client_id_changed", {
+                expectedClientId: this.clientId,
+                receivedClientId: snapshotClientId,
+              });
+              ws.close();
+              break;
+            }
             // A requested snapshot travels on the per-client unicast queue
             // while broadcasts keep flowing on the broadcast queue, so it
             // can arrive AFTER late out-of-order broadcasts already caught
@@ -495,13 +559,16 @@ export class Bridge {
               this.clearGraceTimer();
               this.clearRetryTimer();
               this.drainPendingSequenced();
+              if (this.authoritativeSnapshotRequired) this.armRetryTimer();
               break;
             }
             // A snapshot (join, reconnect, or resync) is authoritative
             // through its seq: adopt it as the tracking baseline and settle
             // any outstanding resync before handing it to the app.
             this.lastAppliedSeq = snapshotSeq;
+            this.clientId = snapshotClientId;
             this.resyncInFlight = false;
+            this.authoritativeSnapshotRequired = false;
             // A hole this snapshot repaired must not leave its timers
             // running: a NEW hole appearing inside a leftover grace window
             // would get short grace and fire a premature request straight
@@ -524,12 +591,12 @@ export class Bridge {
             // much-later snapshot.
             {
               this.prunePendingLocalCommands();
-              const replay = [...this.pendingLocalCommands];
+              const replay = [...this.pendingLocalCommands.values()];
               this.handlers.onSnapshot(
                 msg.seq,
                 JSON.stringify(msg.document),
                 msg.peers ?? [],
-                msg.your_id ?? 0,
+                snapshotClientId,
                 msg.generated_availability ?? {},
               );
               // Replay our own locally-applied-but-unacked commands:
@@ -544,6 +611,7 @@ export class Bridge {
               // its ack lands.
               for (const entry of replay) {
                 bridgeLog("snapshot.replayed_pending_command", {
+                  requestId: entry.requestId,
                   commandType: entry.commandType ?? null,
                 });
                 this.handlers.onCommand(snapshotSeq, entry.commandJson);
@@ -568,20 +636,39 @@ export class Bridge {
             );
             break;
           }
-          case "ack":
+          case "ack": {
             // An ack means the server sequenced OUR command (which we
             // applied optimistically before sending), so it advances seq
             // tracking exactly like a broadcast — with nothing to apply.
-            // It also retires the oldest FRESH pending local command:
-            // acks come back one per command in send order, but an
-            // ack-less entry (rejected, or shed) would misalign FIFO
-            // retirement forever — expired entries are pruned first so
-            // retirement realigns onto the entry this ack belongs to.
+            // Correlation retires exactly this command even when outcomes
+            // arrive out of order or another command was explicitly rejected.
+            const requestId = typeof msg.request_id === "string" ? msg.request_id : "";
             this.prunePendingLocalCommands();
-            this.pendingLocalCommands.shift();
+            this.pendingLocalCommands.delete(requestId);
             this.handleSequenced(msg.seq, null);
-            this.handlers.onAck(msg.seq);
+            this.handlers.onAck(msg.seq, requestId);
             break;
+          }
+          case "nack": {
+            const nack: CommandNack = {
+              requestId: typeof msg.request_id === "string" ? msg.request_id : "",
+              code: typeof msg.code === "string" ? msg.code : "command_rejected",
+              message:
+                typeof msg.message === "string"
+                  ? msg.message
+                  : "The server rejected this command.",
+              retryable: msg.retryable === true,
+            };
+            this.prunePendingLocalCommands();
+            this.pendingLocalCommands.delete(nack.requestId);
+            this.handlers.onNack?.(nack);
+            // The caller applied the command optimistically. A Nack carries no
+            // inverse operation, so replace from an authoritative snapshot and
+            // replay only the still-pending (non-rejected) local commands.
+            this.authoritativeSnapshotRequired = true;
+            this.requestResync(this.lastAppliedSeq ?? 0, "command_nack");
+            break;
+          }
           case "peer_joined":
             this.handlers.onPeerJoined?.(msg.client_id, msg.presence);
             break;
@@ -592,7 +679,11 @@ export class Bridge {
             this.handlers.onPresenceUpdate?.(msg.client_id, msg.camera, msg.view, msg.display);
             break;
           case "cursor_update":
-            this.handlers.onCursorUpdate?.(msg.client_id, msg.position);
+            this.handlers.onCursorUpdate?.(
+              msg.client_id,
+              msg.position,
+              typeof msg.dataset_id === "string" ? msg.dataset_id : null,
+            );
             break;
           case "follow_changed":
             this.handlers.onFollowChanged?.(msg.client_id, msg.target);
@@ -603,17 +694,14 @@ export class Bridge {
           case "dataset_open_progress":
             this.handleDatasetOpenProgress(msg);
             break;
+          case "open_dataset_succeeded":
+            this.handleOpenDatasetSucceeded(msg);
+            break;
           case "open_dataset_failed":
-            this.handlers.onOpenDatasetFailed?.(msg.url, msg.error);
+            this.handleOpenDatasetFailed(msg);
             break;
           case "dataset_health":
             this.handleDatasetHealth(msg);
-            break;
-          case "asset_catalog_update":
-            this.handlers.onAssetCatalogUpdate?.(
-              msg.dataset_id,
-              JSON.stringify(msg.delta ?? { added: [] }),
-            );
             break;
           case "generated_availability_update":
             this.handlers.onGeneratedAvailabilityUpdate?.(
@@ -627,6 +715,7 @@ export class Bridge {
               msg.image_id,
               msg.key,
               msg.status,
+              parseFailureDescriptor(msg.failure),
               msg.message ?? null,
             );
             break;
@@ -636,27 +725,14 @@ export class Bridge {
               msg.image_id,
               msg.key,
               msg.status,
+              parseFailureDescriptor(msg) ?? {
+                category: "source",
+                code: "storage_backend",
+                retryable: msg.status !== "failed_permanent",
+              },
               msg.message ?? null,
             );
             break;
-          case "bookmark_changed": {
-            const action = msg.action as BookmarkAction;
-            const datasetUrls: string[] = Array.isArray(msg.dataset_urls)
-              ? msg.dataset_urls
-              : [];
-            const id: string = typeof msg.id === "string" ? msg.id : "";
-            this.handlers.onBookmarkChanged?.(id, action, datasetUrls);
-            for (const cb of this.bookmarkChangedListeners) {
-              try {
-                cb(id, action, datasetUrls);
-              } catch (e) {
-                bridgeLog("bookmark_changed.listener_threw", {
-                  error: e instanceof Error ? e.message : String(e),
-                });
-              }
-            }
-            break;
-          }
           case "workspace_archived":
             this.handlers.onWorkspaceArchived?.(msg.workspace_id ?? "");
             this.destroy();
@@ -681,8 +757,10 @@ export class Bridge {
       this.lastAppliedSeq = null;
       this.resyncInFlight = false;
       this.pendingSequenced = [];
-      this.pendingLocalCommands = [];
+      this.pendingLocalCommands.clear();
       this.documentDatasetIds = null;
+      this.clientId = null;
+      this.authoritativeSnapshotRequired = false;
       this.clearGraceTimer();
       this.clearRetryTimer();
       this.handlers.onDisconnect?.();
@@ -698,17 +776,17 @@ export class Bridge {
   }
 
   private handleBinary(buffer: ArrayBuffer) {
-    if (buffer.byteLength < 6) return;
-    const view = new DataView(buffer);
-    // Skip client_id (4 bytes) — we are the target
-    const keyLen = view.getUint16(4, true);
-    if (buffer.byteLength < 6 + keyLen) return;
-    const keyBytes = new Uint8Array(buffer, 6, keyLen);
-    const key = new TextDecoder().decode(keyBytes);
-    const payload = buffer.slice(6 + keyLen);
-    // The transport doesn't know the application's chunk-vs-proxy
-    // taxonomy — forward the (key, payload) pair and let the
-    // application layer dispatch.
+    const decoded = decodeChunkFrame(buffer);
+    if (!decoded.ok) return;
+    const { clientId, key, payload } = decoded.frame;
+    if (this.clientId === null || clientId !== this.clientId) {
+      bridgeLog("chunk.recipient_mismatch", {
+        expectedClientId: this.clientId,
+        receivedClientId: clientId,
+      }, this.ws?.readyState);
+      return;
+    }
+    // Forward the decoded chunk payload to the application dispatcher.
     this.handlers.onBinary?.(key, payload);
   }
 
@@ -759,6 +837,77 @@ export class Bridge {
       datasetId: diagnostic.workspace_dataset_id ?? null,
     }, this.ws?.readyState);
     this.handlers.onDatasetOpenProgress?.(requestId, url, diagnostic);
+  }
+
+  private handleOpenDatasetFailed(msg: unknown) {
+    if (!msg || typeof msg !== "object") return;
+    const obj = msg as Record<string, unknown>;
+    const requestId = typeof obj.request_id === "string" ? obj.request_id : "";
+    const url = typeof obj.url === "string" ? obj.url : "";
+    const error = typeof obj.error === "string" ? obj.error : "dataset open failed";
+    const rawDiagnostic = obj.diagnostic;
+    const failure = parseFailureDescriptor(rawDiagnostic);
+    let diagnostic: DatasetOpenFailureDiagnostic | null = null;
+    if (failure && rawDiagnostic && typeof rawDiagnostic === "object") {
+      const raw = rawDiagnostic as Record<string, unknown>;
+      if (typeof raw.stage === "string" && typeof raw.message === "string") {
+        diagnostic = {
+          ...failure,
+          stage: raw.stage as DatasetOpenStage,
+          message: raw.message,
+          detail: typeof raw.detail === "string" ? raw.detail : null,
+        };
+      }
+    }
+    this.handlers.onOpenDatasetFailed?.(requestId, url, error, diagnostic);
+  }
+
+  private handleOpenDatasetSucceeded(msg: unknown) {
+    if (!msg || typeof msg !== "object") return;
+    const obj = msg as Record<string, unknown>;
+    const requestId = typeof obj.request_id === "string" ? obj.request_id : "";
+    const url = typeof obj.url === "string" ? obj.url : "";
+    const seq = typeof obj.seq === "number" ? obj.seq : -1;
+
+    // The server sends the requester the full DatasetOpened payload inside
+    // this success envelope and excludes that socket from the peer broadcast.
+    // Normalize the envelope at the transport boundary so SessionController
+    // has exactly one registration path, with the same ordering, gap repair,
+    // membership tracking, and stale-dedup behavior as a command broadcast.
+    const rawOpened = obj.opened;
+    if (seq >= 0 && rawOpened && typeof rawOpened === "object") {
+      const opened = rawOpened as Record<string, unknown>;
+      const command = { ...opened, type: "dataset_opened" };
+      const datasetId = membershipDatasetId(
+        command as { type?: string; manifest?: { dataset_id?: unknown } },
+      );
+      if (datasetId) {
+        this.handleSequenced(
+          seq,
+          JSON.stringify(command),
+          "dataset_opened",
+          datasetId,
+        );
+      } else {
+        bridgeLog("open_remote_dataset.malformed_opened", { requestId, url, seq });
+      }
+    }
+
+    const raw = obj.summary;
+    if (!requestId || !url || seq < 0 || !raw || typeof raw !== "object") return;
+    const summary = raw as Record<string, unknown>;
+    if (
+      typeof summary.workspace_dataset_id !== "string"
+      || typeof summary.name !== "string"
+      || !Number.isSafeInteger(summary.image_count)
+      || !Number.isSafeInteger(summary.entity_count)
+    ) return;
+    this.handlers.onOpenDatasetSucceeded?.(requestId, url, seq, {
+      workspace_dataset_id: summary.workspace_dataset_id,
+      name: summary.name,
+      image_count: summary.image_count as number,
+      entity_count: summary.entity_count as number,
+    });
   }
 
   private scheduleReconnect() {
@@ -913,7 +1062,7 @@ export class Bridge {
     if (this.pendingSequenced.length === 0) {
       // Hole fully resolved: nothing left to wait for or retry.
       this.clearGraceTimer();
-      this.clearRetryTimer();
+      if (!this.authoritativeSnapshotRequired) this.clearRetryTimer();
     }
   }
 
@@ -947,7 +1096,7 @@ export class Bridge {
    *  eaten by the server's per-client throttle or lost on the wire. A gap
    *  storm therefore produces one request per interval, not one per
    *  message. */
-  private requestResync(gapSeq: number) {
+  private requestResync(gapSeq: number, reason = "sequence_gap") {
     const now = Date.now();
     if (this.resyncInFlight && now - this.lastResyncRequestAt < RESYNC_RETRY_MS) {
       return;
@@ -955,8 +1104,8 @@ export class Bridge {
     this.resyncInFlight = true;
     this.lastResyncRequestAt = now;
     bridgeLog(
-      "seq.gap_requesting_snapshot",
-      { lastAppliedSeq: this.lastAppliedSeq, gapSeq },
+      "snapshot.requested",
+      { lastAppliedSeq: this.lastAppliedSeq, gapSeq, reason },
       this.ws?.readyState,
     );
     this.send(JSON.stringify({ type: "request_snapshot" }));
@@ -972,8 +1121,11 @@ export class Bridge {
     this.resyncRetryTimer = setTimeout(() => {
       this.resyncRetryTimer = null;
       if (this.destroyed) return;
-      if (this.pendingSequenced.length === 0) return;
-      this.requestResync(this.pendingSequenced[0].seq);
+      if (this.pendingSequenced.length === 0 && !this.authoritativeSnapshotRequired) return;
+      this.requestResync(
+        this.pendingSequenced[0]?.seq ?? this.lastAppliedSeq ?? 0,
+        this.authoritativeSnapshotRequired ? "command_nack_retry" : "sequence_gap_retry",
+      );
     }, RESYNC_RETRY_MS);
   }
 
@@ -991,21 +1143,51 @@ export class Bridge {
     }
   }
 
-  /** Drop pending local commands older than the TTL. Acks carry no command
-   *  id, so an entry whose ack never comes (server-side rejection is
-   *  log-only; a cap shed orphans the ack that DOES come) would misalign
-   *  FIFO retirement indefinitely — age is the structural staleness
-   *  signal. Runs before every retirement, replay, and send. */
+  /** Drop pending local commands older than the TTL. Even with exact outcome
+   *  correlation, a dead transport may lose both Ack/Nack; age prevents that
+   *  orphan from being replayed forever. Runs before every retirement,
+   *  replay, and send. */
   private prunePendingLocalCommands() {
-    if (this.pendingLocalCommands.length === 0) return;
+    if (this.pendingLocalCommands.size === 0) return;
     const cutoff = Date.now() - PENDING_LOCAL_COMMAND_TTL_MS;
-    const fresh = this.pendingLocalCommands.filter((entry) => entry.sentAt >= cutoff);
-    if (fresh.length !== this.pendingLocalCommands.length) {
-      bridgeLog("pending_command.expired", {
-        dropped: this.pendingLocalCommands.length - fresh.length,
-      });
-      this.pendingLocalCommands = fresh;
+    let dropped = 0;
+    for (const [requestId, entry] of this.pendingLocalCommands) {
+      if (entry.sentAt < cutoff) {
+        this.pendingLocalCommands.delete(requestId);
+        dropped += 1;
+      }
     }
+    if (dropped > 0) {
+      bridgeLog("pending_command.expired", {
+        dropped,
+      });
+    }
+  }
+
+  /** Produce a server-valid, bounded correlation id. The optional factory is
+   *  a deterministic test seam; production ids combine an instance counter
+   *  with UUID entropy (or a bounded random fallback). */
+  private nextCommandRequestId(): string {
+    this.commandRequestCounter += 1;
+    const generated = this.commandRequestIdFactory?.() ?? (() => {
+      const entropy = globalThis.crypto?.randomUUID?.()
+        ?? Math.random().toString(36).slice(2);
+      return `web-command-${this.commandRequestCounter.toString(36)}-${entropy}`;
+    })();
+    if (
+      generated.length === 0
+      || generated.length > MAX_COMMAND_REQUEST_ID_BYTES
+      || !VALID_COMMAND_REQUEST_ID.test(generated)
+    ) {
+      throw new Error("Command request id must be 1-128 ASCII letters, digits, '.', '_', ':', or '-'");
+    }
+    if (!this.pendingLocalCommands.has(generated)) return generated;
+    const suffix = `:${this.commandRequestCounter.toString(36)}`;
+    const deduplicated = `${generated.slice(0, MAX_COMMAND_REQUEST_ID_BYTES - suffix.length)}${suffix}`;
+    if (this.pendingLocalCommands.has(deduplicated)) {
+      throw new Error("Command request id factory produced a duplicate pending id");
+    }
+    return deduplicated;
   }
 
   /** Send a document command wrapped in the ClientMessage envelope.
@@ -1017,35 +1199,55 @@ export class Bridge {
    *  would otherwise erase its local effect on full-replace. A frame the
    *  socket drops (CONNECTING/closed/destroyed) is NOT tracked — it never
    *  reaches the server, and the next snapshot rightfully reverts it. */
-  sendCommand(json: string) {
+  sendCommand(json: string): string {
     const cmd = JSON.parse(json) as {
       type?: string;
       id?: unknown;
       manifest?: { dataset_id?: unknown };
     };
+    const requestId = this.nextCommandRequestId();
     const willTransmit =
       !this.destroyed && this.ws !== null && this.ws.readyState === WebSocket.OPEN;
     if (willTransmit) {
       this.prunePendingLocalCommands();
-      this.pendingLocalCommands.push({
+      this.pendingLocalCommands.set(requestId, {
+        requestId,
         commandJson: JSON.stringify(cmd),
         commandType: cmd?.type,
         datasetId: membershipDatasetId(cmd),
         sentAt: Date.now(),
       });
-      if (this.pendingLocalCommands.length > MAX_PENDING_LOCAL_COMMANDS) {
-        // Shed the oldest rather than grow unbounded. Most likely these
-        // are rejection-orphans (their ack will never come), but a shed
-        // entry may also be a transmitted command whose ack WILL come —
-        // that ack then retires the wrong (newer) entry. The TTL prune
-        // bounds how long any such misalignment can survive.
-        this.pendingLocalCommands.splice(
-          0,
-          this.pendingLocalCommands.length - MAX_PENDING_LOCAL_COMMANDS,
-        );
+      while (this.pendingLocalCommands.size > MAX_PENDING_LOCAL_COMMANDS) {
+        // Map insertion order gives a deterministic oldest-first cap without
+        // compromising later Ack/Nack correlation for the retained entries.
+        const oldestRequestId = this.pendingLocalCommands.keys().next().value;
+        if (oldestRequestId === undefined) break;
+        this.pendingLocalCommands.delete(oldestRequestId);
       }
     }
-    this.send(JSON.stringify({ type: "command", command: cmd }));
+    this.send(JSON.stringify({ type: "command", request_id: requestId, command: cmd }));
+    return requestId;
+  }
+
+  /** Request an authoritative collaborative inverse. Unlike `sendCommand`,
+   * this is not applied optimistically: the server rechecks authorship,
+   * permission, revision, and semantic preconditions, then sends the concrete
+   * inverse back through `command_broadcast` to this client and every peer. */
+  sendInverseCommand(targetOperationId: number, expectedRevision: number): string {
+    if (!Number.isSafeInteger(targetOperationId) || targetOperationId < 0) {
+      throw new Error("Target operation id must be a non-negative safe integer");
+    }
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+      throw new Error("Expected revision must be a non-negative safe integer");
+    }
+    const requestId = this.nextCommandRequestId();
+    this.send(JSON.stringify({
+      type: "inverse_command",
+      request_id: requestId,
+      target_operation_id: targetOperationId,
+      expected_revision: expectedRevision,
+    }));
+    return requestId;
   }
 
   /** Send presence update, throttled to [`PRESENCE_THROTTLE_MS`]
@@ -1090,12 +1292,17 @@ export class Bridge {
   /** Send an open-remote-dataset request and return the `request_id` stamped
    *  on it. The server echoes this id on every `dataset_open_progress` frame
    *  for this open, so a caller can attribute progress/warnings to the exact
-   *  open they initiated (and ignore stragglers from a superseded one). The id
-   *  is returned even when the frame is dropped (socket not OPEN) — no progress
-   *  can arrive for a dropped send, so the returned id is simply never matched. */
-  sendOpenRemoteDataset(url: string): string {
+   *  open they initiated (and ignore stragglers from a superseded one).
+   *
+   *  `null` is an explicit transport-admission failure: the bridge did not
+   *  hand the frame to an OPEN socket. Callers must not create pending state
+   *  for that case because no correlated terminal response can ever arrive. */
+  sendOpenRemoteDataset(url: string): string | null {
     const requestId = makeOpenDatasetRequestId();
+    const willTransmit =
+      !this.destroyed && this.ws !== null && this.ws.readyState === WebSocket.OPEN;
     bridgeLog("open_remote_dataset.send", { url, requestId }, this.ws?.readyState);
+    if (!willTransmit) return null;
     this.send(JSON.stringify({
       type: "open_remote_dataset",
       request_id: requestId,
@@ -1150,19 +1357,23 @@ export class Bridge {
     this.send(JSON.stringify({ type: "follow", target }));
   }
 
-  /** Send a cursor position update, throttled to [`PRESENCE_THROTTLE_MS`].
-   *  Null sends immediately. */
-  sendCursor(position: [number, number] | null) {
+  /** Send a cursor position plus its dataset coordinate space, throttled to
+   *  [`PRESENCE_THROTTLE_MS`]. Null sends immediately and clears identity. */
+  sendCursor(position: [number, number] | null, datasetId: string | null = null) {
     if (position === null) {
       if (this.cursorTimer !== null) {
         clearTimeout(this.cursorTimer);
         this.cursorTimer = null;
       }
       this.pendingCursor = null;
-      this.send(JSON.stringify({ type: "cursor", position: null }));
+      this.send(JSON.stringify({ type: "cursor", position: null, dataset_id: null }));
       return;
     }
-    this.pendingCursor = JSON.stringify({ type: "cursor", position });
+    this.pendingCursor = JSON.stringify({
+      type: "cursor",
+      position,
+      dataset_id: datasetId,
+    });
     if (!this.cursorTimer) {
       this.cursorTimer = setTimeout(() => {
         this.cursorTimer = null;
@@ -1172,17 +1383,6 @@ export class Bridge {
         }
       }, PRESENCE_THROTTLE_MS);
     }
-  }
-
-  /** Subscribe to cross-peer `bookmark_changed` broadcasts. Returns
-   *  an unsubscribe function. Listeners run in registration order;
-   *  exceptions in a listener are logged but don't break the chain. */
-  subscribeBookmarkChanged(cb: BookmarkChangedListener): () => void {
-    this.bookmarkChangedListeners.push(cb);
-    return () => {
-      const idx = this.bookmarkChangedListeners.indexOf(cb);
-      if (idx >= 0) this.bookmarkChangedListeners.splice(idx, 1);
-    };
   }
 
   /** Low-level send (raw JSON string). Drops the frame unless the socket is
@@ -1221,9 +1421,11 @@ export class Bridge {
     }
     this.pendingDatasetHealth.clear();
     this.pendingSequenced = [];
-    this.pendingLocalCommands = [];
+    this.pendingLocalCommands.clear();
     this.documentDatasetIds = null;
+    this.clientId = null;
     this.resyncInFlight = false;
+    this.authoritativeSnapshotRequired = false;
     this.clearGraceTimer();
     this.clearRetryTimer();
     const ws = this.ws;

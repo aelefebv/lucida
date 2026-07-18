@@ -27,7 +27,6 @@ vi.mock("../bridge.ts", () => {
     sendCursor = vi.fn();
     sendFollow = vi.fn();
     sendOpenRemoteDataset = vi.fn();
-    subscribeBookmarkChanged = vi.fn(() => () => {});
     constructor(handlers: unknown, _url?: string, _workspaceId?: string) {
       this.handlers = handlers;
       MockBridge.instances.push(this);
@@ -78,7 +77,6 @@ function makeFakeScene() {
   return {
     load_document: vi.fn(),
     apply_command: vi.fn(),
-    apply_asset_catalog_delta: vi.fn(),
     available_layouts: vi.fn(() => "[]"),
     export_presence: vi.fn(() => "{}"),
   };

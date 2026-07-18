@@ -7,11 +7,10 @@
 //! - session envelopes (`lucida_core::protocol::{ServerMessage, ClientMessage}`),
 //!   including every web-live `DocumentCommand` and the open/health
 //!   diagnostics the envelopes carry;
-//! - the dataset-open payload (`lucida_protocol::DatasetOpened`) and the
-//!   `FetchSource` variants;
+//! - the dataset-open payload (`lucida_protocol::DatasetOpened`) and its
+//!   chunk fetch contract;
 //! - generated-availability payloads (snapshot/delta/chunk status updates);
-//! - the JSON request envelopes `ChunkMessage::ChunkRequest` and
-//!   `AssetMessage::AssetRequest`;
+//! - the JSON request envelope `ChunkMessage::ChunkRequest`;
 //! - the enum vocabulary fixture (`vocab/enum_vocabulary.json`): one exemplar
 //!   per variant for every enum whose string form the web switches on.
 //!
@@ -56,7 +55,7 @@
 //!   the fixture set (not at every occurrence).
 //! - **Variant exhaustiveness** (the `*_fixture_paths` matches and the
 //!   `vocab!` lists): adding a `ServerMessage`/`ClientMessage`/
-//!   `DocumentCommand`/`ChunkMessage`/`AssetMessage` variant, or a variant of
+//!   `DocumentCommand`/`ChunkMessage` variant, or a variant of
 //!   any vocabulary enum, is a COMPILE error until it is wired to a fixture
 //!   (or an explicit documented exclusion).
 //! - **Maximal fixtures**: every `Option`/`skip_serializing_if` field on the
@@ -70,14 +69,8 @@
 //!   appears in any fixture, so this lock cannot see it. The mitigation is
 //!   the maximal-fixture discipline above (populate every optional field in
 //!   at least one fixture when adding it) plus review.
-//! - The **binary** chunk/proxy frames (length-prefixed `client_id + key +
-//!   payload` framing and the 64-byte proxy header) are out of scope here;
-//!   the proxy header layout is locked separately by
-//!   `lucida-web/src/pipeline/fetch/wireProtocol.test.ts`.
-//! - `ChunkMessage::ChunkFetch` is currently unproduced wire vocabulary:
-//!   nothing in the repo sends it, and the server's handler accepts and
-//!   ignores it. It is excluded below because there is no producer or
-//!   consumer to lock.
+//! - Binary chunk framing is locked by its dedicated cross-language fixture;
+//!   this suite covers the JSON envelopes around chunk requests and status.
 //!
 //! # Fixture-authoring constraint
 //!
@@ -105,7 +98,7 @@ use lucida_content::{
 use lucida_core::camera::{Arcball, Camera, ClipMode, Fly, Slice};
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{
-    BookmarkAction, ChunkMessage, ClientMessage, PeerIdentity, PresenceState, ServerMessage,
+    ChunkMessage, ClientMessage, OpenedDatasetSummary, PeerIdentity, PresenceState, ServerMessage,
     ViewerInteractionMode, ViewerInterestChunkKey, ViewerInterestHint, ViewerInterestLane,
     ViewerInterestMode, ViewerInterestViewport,
 };
@@ -116,15 +109,13 @@ use lucida_core::scene::{
 };
 use lucida_core::view::ViewState;
 use lucida_protocol::{
-    AssetCatalog, AssetCatalogDelta, AssetMessage, DatasetGeneratedCoarseCacheStats,
-    DatasetGeneratedCoarseFailure, DatasetGeneratedCoarseHealth, DatasetHealthComponent,
-    DatasetHealthStatus, DatasetOpenFailureDiagnostic, DatasetOpenFailureKind,
-    DatasetOpenProgressDiagnostic, DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened,
-    DatasetSourceCacheStats, DatasetSourceHealth, DirectFetchDescriptor, DirectImageSpec,
+    DatasetGeneratedCoarseCacheStats, DatasetGeneratedCoarseFailure, DatasetGeneratedCoarseHealth,
+    DatasetHealthComponent, DatasetHealthStatus, DatasetOpenFailureDiagnostic,
+    DatasetOpenFailureKind, DatasetOpenProgressDiagnostic, DatasetOpenStage,
+    DatasetOpenSuccessDiagnostic, DatasetOpened, DatasetSourceCacheStats, DatasetSourceHealth,
     FetchSource, GeneratedAvailabilityDelta, GeneratedAvailabilitySnapshot, GeneratedChunkStatus,
-    GeneratedChunkStatusUpdate, GeneratedLevelAvailability, GeneratedLevelSummary, LevelAddress,
-    LocalFetchDescriptor, ProxiedFetchDescriptor, ProxiedImageSpec, ProxyAvailability,
-    ProxyFootprint, ProxyKind, SourceChunkStatus, WireFormat,
+    GeneratedChunkStatusUpdate, GeneratedLevelAvailability, GeneratedLevelSummary,
+    ProxiedFetchDescriptor, ProxiedImageSpec, SourceChunkStatus, WireFormat,
 };
 
 const REGEN_HINT: &str = "fixture out of date with the Rust wire types. If the wire change is \
@@ -280,6 +271,7 @@ fn server_message_fixture_paths(msg: &ServerMessage) -> &'static [&'static str] 
             &["session/server_command_broadcast_dataset_opened.json"]
         }
         ServerMessage::Ack { .. } => &["session/server_ack.json"],
+        ServerMessage::Nack { .. } => &["session/server_nack.json"],
         ServerMessage::PeerJoined { .. } => &["session/server_peer_joined.json"],
         ServerMessage::PeerLeft { .. } => &["session/server_peer_left.json"],
         ServerMessage::PresenceUpdate { .. } => &["session/server_presence_update.json"],
@@ -297,7 +289,6 @@ fn server_message_fixture_paths(msg: &ServerMessage) -> &'static [&'static str] 
         }
         ServerMessage::OpenDatasetFailed { .. } => &["session/server_open_dataset_failed.json"],
         ServerMessage::DatasetHealth { .. } => &["session/server_dataset_health.json"],
-        ServerMessage::AssetCatalogUpdate { .. } => &["session/server_asset_catalog_update.json"],
         ServerMessage::GeneratedAvailabilityUpdate { .. } => {
             &["session/server_generated_availability_update.json"]
         }
@@ -305,7 +296,6 @@ fn server_message_fixture_paths(msg: &ServerMessage) -> &'static [&'static str] 
             &["session/server_generated_chunk_status.json"]
         }
         ServerMessage::SourceChunkStatus { .. } => &["session/server_source_chunk_status.json"],
-        ServerMessage::BookmarkChanged { .. } => &["session/server_bookmark_changed.json"],
         ServerMessage::WorkspaceArchived { .. } => &["session/server_workspace_archived.json"],
     }
 }
@@ -325,8 +315,8 @@ fn client_message_fixture_paths(msg: &ClientMessage) -> &'static [&'static str] 
             "session/client_command_set_active_layout.json",
             "session/client_command_remove_dataset.json",
             "session/client_command_rename_dataset.json",
-            "session/client_command_apply_asset_catalog_delta.json",
         ],
+        ClientMessage::InverseCommand { .. } => &["session/client_inverse_command.json"],
         ClientMessage::Presence { .. } => &["session/client_presence.json"],
         ClientMessage::Cursor { .. } => &["session/client_cursor.json"],
         ClientMessage::Follow { .. } => &["session/client_follow.json"],
@@ -351,9 +341,6 @@ fn document_command_fixture_paths(cmd: &DocumentCommand) -> &'static [&'static s
         DocumentCommand::SetActiveLayout { .. } => {
             &["session/client_command_set_active_layout.json"]
         }
-        DocumentCommand::ApplyAssetCatalogDelta { .. } => {
-            &["session/client_command_apply_asset_catalog_delta.json"]
-        }
         DocumentCommand::AddAnnotation { .. } => &["session/client_command_add_annotation.json"],
         DocumentCommand::RemoveAnnotation { .. } => {
             &["session/client_command_remove_annotation.json"]
@@ -368,19 +355,6 @@ fn document_command_fixture_paths(cmd: &DocumentCommand) -> &'static [&'static s
 fn chunk_message_fixture_paths(msg: &ChunkMessage) -> &'static [&'static str] {
     match msg {
         ChunkMessage::ChunkRequest { .. } => &["session/chunk_request.json"],
-        // Excluded: currently unproduced wire vocabulary. Nothing in the
-        // repo sends ChunkFetch — it exists as a type (with a round-trip
-        // unit test), and the server's handler accepts and ignores it if a
-        // client ever does send one (lucida-server/src/handler.rs). With no
-        // producer and no consumer there is nothing to lock; wire a fixture
-        // here if a producer ever appears.
-        ChunkMessage::ChunkFetch { .. } => &[],
-    }
-}
-
-fn asset_message_fixture_paths(msg: &AssetMessage) -> &'static [&'static str] {
-    match msg {
-        AssetMessage::AssetRequest { .. } => &["session/asset_request.json"],
     }
 }
 
@@ -416,13 +390,11 @@ struct EnumVocabulary {
     entity_kinds: Vec<EntityKind>,
     data_types: Vec<DataType>,
     positioning_modes: Vec<PositioningMode>,
-    proxy_kinds: Vec<ProxyKind>,
     dataset_open_stages: Vec<DatasetOpenStage>,
     dataset_open_failure_kinds: Vec<DatasetOpenFailureKind>,
     dataset_health_statuses: Vec<DatasetHealthStatus>,
     generated_chunk_statuses: Vec<GeneratedChunkStatus>,
     generated_level_roles: Vec<GeneratedLevelRole>,
-    bookmark_actions: Vec<BookmarkAction>,
     viewer_interest_modes: Vec<ViewerInterestMode>,
     viewer_interaction_modes: Vec<ViewerInteractionMode>,
     viewer_interest_lanes: Vec<ViewerInterestLane>,
@@ -442,23 +414,22 @@ fn enum_vocabulary() -> EnumVocabulary {
         entity_kinds: vocab!(EntityKind::{ Image, Group, Tile }),
         data_types: vocab!(DataType::{ Uint8, Uint16, Uint32, Float32, Float64 }),
         positioning_modes: vocab!(PositioningMode::{ Explicit, Derived }),
-        proxy_kinds: vocab!(ProxyKind::{ GroupProxy3D, TileProxy3D }),
         dataset_open_stages: vocab!(DatasetOpenStage::{
             RequestReceived, Authorization, SourceLookup, BackendOpen, MetadataImport,
             BindingBuild, GeneratedCoarsePlanning, WorkspacePersist, Broadcast, Complete,
         }),
         dataset_open_failure_kinds: vocab!(DatasetOpenFailureKind::{
-            Authorization, SessionClosed, WorkspaceLookup, UnsupportedScheme, LocalPath,
-            MissingObject, Permission, CloudConfiguration, Http, StorageBackend,
-            UnsupportedCodec, UnsupportedLayout, MalformedMetadata, MissingMetadata, Import,
-            Persistence, Internal,
+            Authorization, SessionClosed, WorkspaceLookup, UnsupportedScheme, InvalidLocator,
+            LocalPath, MissingObject, Permission, CloudConfiguration, Http, StorageBackend,
+            UnsupportedCodec, DecodeFailure, UnsupportedLayout, ChunkOutOfBounds, ResourceLimit,
+            MalformedMetadata, MissingMetadata, Import, UnknownDataset, UnknownImage,
+            MissingChunkMetadata, InvalidChunkKey, Protocol, Persistence, Internal,
         }),
         dataset_health_statuses: vocab!(DatasetHealthStatus::{ Healthy, Degraded, Unavailable }),
         generated_chunk_statuses: vocab!(GeneratedChunkStatus::{
             Pending, Unavailable, FailedTransient, FailedPermanent, Ready,
         }),
         generated_level_roles: vocab!(GeneratedLevelRole::{ Coarse }),
-        bookmark_actions: vocab!(BookmarkAction::{ Created, Updated, Deleted }),
         viewer_interest_modes: vocab!(ViewerInterestMode::{ Slice, Volume }),
         viewer_interaction_modes: vocab!(ViewerInteractionMode::{
             Idle, Panning, Zooming, Scrubbing,
@@ -665,21 +636,10 @@ fn single_fetch() -> FetchSource {
     })
 }
 
-fn single_catalog() -> AssetCatalog {
-    AssetCatalog {
-        entries: vec![ProxyAvailability {
-            entity_id: EntityId(SINGLE_ENTITY_ID.into()),
-            kinds: vec![ProxyKind::TileProxy3D],
-            footprints: vec![ProxyFootprint::u16(ProxyKind::TileProxy3D, [50, 128, 128])],
-        }],
-    }
-}
-
 fn single_dataset_opened() -> DatasetOpened {
     DatasetOpened {
         manifest: single_manifest(),
         fetch: single_fetch(),
-        catalog: single_catalog(),
         opener_client_id: Some(7),
     }
 }
@@ -829,7 +789,6 @@ fn collection_dataset_opened() -> DatasetOpened {
         fetch: FetchSource::Proxied(ProxiedFetchDescriptor {
             images: fetch_images,
         }),
-        catalog: AssetCatalog::default(),
         opener_client_id: None,
     }
 }
@@ -951,6 +910,7 @@ fn peer_presence() -> PresenceState {
         display: shared_display_state(),
         following: Some(9),
         cursor: Some([412.0, 233.5]),
+        cursor_dataset_id: Some(DatasetId(SINGLE_DATASET_ID.into())),
         dataset_order: vec![DatasetId(SINGLE_DATASET_ID.into())],
         dataset_settings,
         identity: Some(PeerIdentity {
@@ -1036,9 +996,6 @@ fn snapshot_document() -> DocumentState {
         .active_layout_ids
         .insert(dataset_id.clone(), LayoutId("layout-grid".into()));
     document
-        .asset_catalogs
-        .insert(dataset_id.clone(), single_catalog());
-    document
         .annotations
         .insert(dataset_id, snapshot_annotations());
     document
@@ -1080,6 +1037,7 @@ fn generated_chunk_updates() -> Vec<GeneratedChunkStatusUpdate> {
         level_index: 2,
         key: key.into(),
         status,
+        failure: status.failure_descriptor(),
         message: message.map(String::from),
     };
     vec![
@@ -1136,6 +1094,7 @@ fn generated_delta() -> GeneratedAvailabilityDelta {
             level_index: 2,
             key: "2/0/0/1/0/0".into(),
             status: GeneratedChunkStatus::Ready,
+            failure: None,
             message: None,
         }],
     }
@@ -1175,28 +1134,26 @@ fn source_health() -> DatasetSourceHealth {
                 current_bytes: 73400320,
                 max_bytes: Some(1073741824),
                 used_percent: Some(6),
+                entry_count: 4096,
+                max_entries: Some(100000),
+                entry_used_percent: Some(4),
                 evictions: 4,
                 root: Some("/var/cache/lucida/generated".into()),
+                accounting_healthy: true,
             }),
             recent_failures: vec![DatasetGeneratedCoarseFailure {
                 image_id: SINGLE_IMAGE_ID.into(),
                 level_index: 2,
                 key: "2/1/0/1/0/0".into(),
                 status: GeneratedChunkStatus::FailedTransient,
+                failure: Some(lucida_protocol::FailureDescriptor::new(
+                    lucida_protocol::FailureCode::StorageBackend,
+                    true,
+                )),
                 message: Some("source read timed out".into()),
             }],
         },
         messages: vec!["generated coarse cache is warming".into()],
-    }
-}
-
-fn asset_catalog_delta() -> AssetCatalogDelta {
-    AssetCatalogDelta {
-        added: vec![ProxyAvailability {
-            entity_id: EntityId(SINGLE_ENTITY_ID.into()),
-            kinds: vec![ProxyKind::GroupProxy3D, ProxyKind::TileProxy3D],
-            footprints: vec![ProxyFootprint::u16(ProxyKind::GroupProxy3D, [50, 256, 256])],
-        }],
     }
 }
 
@@ -1259,21 +1216,11 @@ const PROXIED_FETCH_REQUIRED: &[&str] = &[
     "/Proxied/images/0/wire_format/Zstd/data_type",
 ];
 
-/// Required fields of the populated `AssetCatalog` shape.
-const CATALOG_REQUIRED: &[&str] = &[
-    "/entries/0/entity_id",
-    "/entries/0/kinds",
-    "/entries/0/footprints/0/kind",
-    "/entries/0/footprints/0/dims",
-    "/entries/0/footprints/0/bytes",
-];
-
 /// Required fields of `DatasetOpened` (with the single manifest inside).
 fn dataset_opened_required() -> Vec<String> {
     let mut keys = vec!["/manifest".to_string(), "/fetch".to_string()];
     keys.extend(req("/manifest", MANIFEST_REQUIRED));
     keys.extend(req("/fetch", PROXIED_FETCH_REQUIRED));
-    keys.extend(req("/catalog", CATALOG_REQUIRED));
     keys
 }
 
@@ -1445,8 +1392,24 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
         ),
         (
             "session/server_ack.json",
-            ServerMessage::Ack { seq: 44 },
+            ServerMessage::Ack {
+                request_id: "req-golden".into(),
+                seq: 44,
+            },
+            // Correlation was added after the original Ack shape.  New servers
+            // emit it for identified requests, while old `{"type":"ack","seq":...}`
+            // payloads must remain readable during a rolling upgrade.
             req("", &["/type", "/seq"]),
+        ),
+        (
+            "session/server_nack.json",
+            ServerMessage::Nack {
+                request_id: "req-rejected".into(),
+                code: lucida_core::protocol::CommandFailureCode::Forbidden,
+                message: "workspace role or ownership policy denied the command".into(),
+                retryable: false,
+            },
+            req("", &["/type", "/code", "/message", "/retryable"]),
         ),
         (
             "session/server_peer_joined.json",
@@ -1476,6 +1439,7 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                     display: DisplayState::default(),
                     following: None,
                     cursor: None,
+                    cursor_dataset_id: None,
                     dataset_order: vec![],
                     dataset_settings: HashMap::new(),
                     identity: None,
@@ -1540,6 +1504,7 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
             ServerMessage::CursorUpdate {
                 client_id: 3,
                 position: Some([412.0, 233.5]),
+                dataset_id: Some(DatasetId("wds-0f3a".into())),
             },
             req("", &["/type", "/client_id"]),
         ),
@@ -1629,7 +1594,13 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                 request_id: "web-7d2f45aa".into(),
                 url: "gs://lucida-fixtures/kidney-multiplex.zarr".into(),
                 seq: 43,
-                opened: single_dataset_opened(),
+                summary: Some(OpenedDatasetSummary {
+                    workspace_dataset_id: DatasetId(SINGLE_DATASET_ID.into()),
+                    name: "kidney-multiplex.zarr".into(),
+                    image_count: 1,
+                    entity_count: 1,
+                }),
+                opened: Some(single_dataset_opened()),
                 diagnostic: Some(DatasetOpenSuccessDiagnostic {
                     stage: DatasetOpenStage::Complete,
                     source_url: "gs://lucida-fixtures/kidney-multiplex.zarr".into(),
@@ -1638,22 +1609,31 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                     message: "dataset opened".into(),
                 }),
             },
-            req(
-                "",
-                &[
-                    "/type",
-                    "/request_id",
-                    "/url",
-                    "/seq",
-                    "/opened",
-                    "/opened/manifest",
-                    "/opened/fetch",
-                    "/diagnostic/stage",
-                    "/diagnostic/source_url",
-                    "/diagnostic/workspace_dataset_id",
-                    "/diagnostic/message",
-                ],
-            ),
+            {
+                let mut required = req(
+                    "",
+                    &[
+                        "/type",
+                        "/request_id",
+                        "/url",
+                        "/seq",
+                        "/summary/workspace_dataset_id",
+                        "/summary/name",
+                        "/summary/image_count",
+                        "/summary/entity_count",
+                        "/diagnostic/stage",
+                        "/diagnostic/source_url",
+                        "/diagnostic/workspace_dataset_id",
+                        "/diagnostic/message",
+                    ],
+                );
+                required.extend(
+                    dataset_opened_required()
+                        .into_iter()
+                        .map(|pointer| format!("/opened{pointer}")),
+                );
+                required
+            },
         ),
         (
             "session/server_open_dataset_failed.json",
@@ -1663,10 +1643,12 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                 error: "object not found".into(),
                 diagnostic: Some(DatasetOpenFailureDiagnostic {
                     stage: DatasetOpenStage::BackendOpen,
-                    kind: DatasetOpenFailureKind::MissingObject,
-                    retryable: true,
+                    failure: lucida_protocol::FailureDescriptor::new(
+                        DatasetOpenFailureKind::MissingObject,
+                        false,
+                    ),
                     message: "object not found".into(),
-                    detail: Some("gs://lucida-fixtures/missing.zarr/.zattrs returned 404".into()),
+                    detail: Some("root metadata object returned 404".into()),
                 }),
             },
             req(
@@ -1677,7 +1659,8 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                     "/url",
                     "/error",
                     "/diagnostic/stage",
-                    "/diagnostic/kind",
+                    "/diagnostic/category",
+                    "/diagnostic/code",
                     "/diagnostic/retryable",
                     "/diagnostic/message",
                 ],
@@ -1692,27 +1675,6 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
             {
                 let mut keys = req("", &["/type", "/request_id", "/datasets"]);
                 keys.extend(req("/datasets/0", SOURCE_HEALTH_REQUIRED));
-                keys
-            },
-        ),
-        (
-            "session/server_asset_catalog_update.json",
-            ServerMessage::AssetCatalogUpdate {
-                dataset_id: DatasetId(SINGLE_DATASET_ID.into()),
-                delta: asset_catalog_delta(),
-            },
-            {
-                let mut keys = req("", &["/type", "/dataset_id", "/delta", "/delta/added"]);
-                keys.extend(req(
-                    "/delta/added/0",
-                    &[
-                        "/entity_id",
-                        "/kinds",
-                        "/footprints/0/kind",
-                        "/footprints/0/dims",
-                        "/footprints/0/bytes",
-                    ],
-                ));
                 keys
             },
         ),
@@ -1746,11 +1708,21 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                 image_id: ImageId(SINGLE_IMAGE_ID.into()),
                 key: "2/1/0/1/0/0".into(),
                 status: GeneratedChunkStatus::FailedTransient,
+                failure: GeneratedChunkStatus::FailedTransient.failure_descriptor(),
                 message: Some("source read timed out".into()),
             },
             req(
                 "",
-                &["/type", "/dataset_id", "/image_id", "/key", "/status"],
+                &[
+                    "/type",
+                    "/dataset_id",
+                    "/image_id",
+                    "/key",
+                    "/status",
+                    "/failure/category",
+                    "/failure/code",
+                    "/failure/retryable",
+                ],
             ),
         ),
         (
@@ -1760,24 +1732,25 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                 image_id: ImageId(SINGLE_IMAGE_ID.into()),
                 key: "0/1/0/1/0/0".into(),
                 status: SourceChunkStatus::FailedPermanent,
+                failure: lucida_protocol::FailureDescriptor::new(
+                    lucida_protocol::FailureCode::Permission,
+                    false,
+                ),
                 message: Some("access to the dataset store was denied".into()),
             },
             req(
                 "",
-                &["/type", "/dataset_id", "/image_id", "/key", "/status"],
-            ),
-        ),
-        (
-            "session/server_bookmark_changed.json",
-            ServerMessage::BookmarkChanged {
-                id: "bookmark-31f7".into(),
-                action: BookmarkAction::Updated,
-                dataset_urls: vec![
-                    "gs://lucida-fixtures/kidney-multiplex.zarr".into(),
-                    "gs://lucida-fixtures/screening-collection-01.zarr".into(),
+                &[
+                    "/type",
+                    "/dataset_id",
+                    "/image_id",
+                    "/key",
+                    "/status",
+                    "/category",
+                    "/code",
+                    "/retryable",
                 ],
-            },
-            req("", &["/type", "/id", "/action", "/dataset_urls"]),
+            ),
         ),
         (
             "session/server_workspace_archived.json",
@@ -1904,14 +1877,6 @@ fn command_goldens() -> Vec<(&'static str, DocumentCommand, Vec<&'static str>)> 
             },
             vec!["/id", "/name"],
         ),
-        (
-            "session/client_command_apply_asset_catalog_delta.json",
-            DocumentCommand::ApplyAssetCatalogDelta {
-                dataset_id: DatasetId(SINGLE_DATASET_ID.into()),
-                delta: asset_catalog_delta(),
-            },
-            vec!["/dataset_id", "/delta", "/delta/added"],
-        ),
     ]
 }
 
@@ -1923,13 +1888,39 @@ fn client_goldens() -> Vec<(&'static str, ClientMessage, Vec<String>)> {
     let mut goldens: Vec<(&'static str, ClientMessage, Vec<String>)> = command_goldens()
         .into_iter()
         .map(|(rel, command, required)| {
+            // `request_id` is emitted by current clients but remains optional
+            // so pre-correlation command envelopes continue to deserialize.
             let mut keys = req("", &["/type", "/command", "/command/type"]);
             keys.extend(req("/command", &required));
-            (rel, ClientMessage::Command { command }, keys)
+            (
+                rel,
+                ClientMessage::Command {
+                    request_id: "req-golden".into(),
+                    command,
+                },
+                keys,
+            )
         })
         .collect();
 
     goldens.extend(vec![
+        (
+            "session/client_inverse_command.json",
+            ClientMessage::InverseCommand {
+                request_id: "req-golden".into(),
+                target_operation_id: 41,
+                expected_revision: 41,
+            },
+            req(
+                "",
+                &[
+                    "/type",
+                    "/request_id",
+                    "/target_operation_id",
+                    "/expected_revision",
+                ],
+            ),
+        ),
         (
             "session/client_presence.json",
             ClientMessage::Presence {
@@ -1946,6 +1937,7 @@ fn client_goldens() -> Vec<(&'static str, ClientMessage, Vec<String>)> {
             "session/client_cursor.json",
             ClientMessage::Cursor {
                 position: Some([412.0, 233.5]),
+                dataset_id: Some(DatasetId("wds-0f3a".into())),
             },
             req("", &["/type"]),
         ),
@@ -2064,8 +2056,6 @@ const DATASET_OPEN_FILES: &[&str] = &[
     "dataset-open/dataset_opened_single.json",
     "dataset-open/dataset_opened_collection.json",
     "dataset-open/fetch_source_proxied.json",
-    "dataset-open/fetch_source_direct.json",
-    "dataset-open/fetch_source_local.json",
 ];
 
 const GENERATED_FILES: &[&str] = &[
@@ -2073,7 +2063,16 @@ const GENERATED_FILES: &[&str] = &[
     "generated/availability_delta.json",
 ];
 
-const REQUEST_FILES: &[&str] = &["session/chunk_request.json", "session/asset_request.json"];
+const REQUEST_FILES: &[&str] = &["session/chunk_request.json"];
+
+// Owned by lucida_protocol::chunk_frame's cross-language codec test. This
+// suite inventories it so fixture ownership remains exhaustive, but does not
+// duplicate the binary byte assertions here.
+const BINARY_FILES: &[&str] = &[
+    "binary/chunk_frame.json",
+    "binary/view_query_delta_v1.json",
+    "binary/view_query_v1.json",
+];
 
 const VOCAB_FILES: &[&str] = &["vocab/enum_vocabulary.json"];
 
@@ -2082,16 +2081,6 @@ fn chunk_request_golden() -> ChunkMessage {
         dataset_id: DatasetId(SINGLE_DATASET_ID.into()),
         image_id: ImageId(SINGLE_IMAGE_ID.into()),
         key: "1/2/1/12/3/4".into(),
-    }
-}
-
-fn asset_request_golden() -> AssetMessage {
-    AssetMessage::AssetRequest {
-        dataset_id: DatasetId("wds-collection-77".into()),
-        entity_id: EntityId("tile-A1-f0".into()),
-        kind: ProxyKind::TileProxy3D,
-        t: 0,
-        c: 2,
     }
 }
 
@@ -2120,7 +2109,7 @@ fn client_messages_match_goldens() {
             client_message_fixture_paths(&msg).contains(&rel),
             "{rel}: not declared for its ClientMessage variant in client_message_fixture_paths"
         );
-        if let ClientMessage::Command { command } = &msg {
+        if let ClientMessage::Command { command, .. } = &msg {
             assert!(
                 document_command_fixture_paths(command).contains(&rel),
                 "{rel}: not declared for its DocumentCommand variant in \
@@ -2142,18 +2131,6 @@ fn request_envelopes_match_goldens() {
         "session/chunk_request.json",
         &chunk,
         &req("", &["/type", "/dataset_id", "/image_id", "/key"]),
-        &mut failures,
-    );
-
-    let asset = asset_request_golden();
-    assert!(asset_message_fixture_paths(&asset).contains(&"session/asset_request.json"));
-    check(
-        "session/asset_request.json",
-        &asset,
-        &req(
-            "",
-            &["/type", "/dataset_id", "/entity_id", "/kind", "/t", "/c"],
-        ),
         &mut failures,
     );
 
@@ -2198,60 +2175,6 @@ fn dataset_open_payloads_match_goldens() {
         "dataset-open/fetch_source_proxied.json",
         &single_fetch(),
         &req("", PROXIED_FETCH_REQUIRED),
-        &mut failures,
-    );
-
-    check(
-        "dataset-open/fetch_source_direct.json",
-        &FetchSource::Direct(DirectFetchDescriptor {
-            images: vec![DirectImageSpec {
-                image_id: ImageId(SINGLE_IMAGE_ID.into()),
-                wire_format: WireFormat::Zstd {
-                    data_type: DataType::Uint16,
-                },
-                levels: vec![
-                    LevelAddress {
-                        level_index: 0,
-                        path: "kidney-multiplex.zarr/0".into(),
-                    },
-                    LevelAddress {
-                        level_index: 1,
-                        path: "kidney-multiplex.zarr/1".into(),
-                    },
-                ],
-                store_prefix: Some("gs://lucida-fixtures".into()),
-            }],
-        }),
-        &req(
-            "",
-            &[
-                "/Direct/images",
-                "/Direct/images/0/image_id",
-                "/Direct/images/0/wire_format",
-                "/Direct/images/0/levels",
-                "/Direct/images/0/levels/0/level_index",
-                "/Direct/images/0/levels/0/path",
-            ],
-        ),
-        &mut failures,
-    );
-
-    check(
-        "dataset-open/fetch_source_local.json",
-        &FetchSource::Local(LocalFetchDescriptor {
-            images: vec![DirectImageSpec {
-                image_id: ImageId(SINGLE_IMAGE_ID.into()),
-                wire_format: WireFormat::Raw {
-                    data_type: DataType::Float32,
-                },
-                levels: vec![LevelAddress {
-                    level_index: 0,
-                    path: "/data/kidney-multiplex.zarr/0".into(),
-                }],
-                store_prefix: None,
-            }],
-        }),
-        &req("", &["/Local/images"]),
         &mut failures,
     );
 
@@ -2304,13 +2227,11 @@ fn enum_vocabulary_matches_golden() {
             "/entity_kinds",
             "/data_types",
             "/positioning_modes",
-            "/proxy_kinds",
             "/dataset_open_stages",
             "/dataset_open_failure_kinds",
             "/dataset_health_statuses",
             "/generated_chunk_statuses",
             "/generated_level_roles",
-            "/bookmark_actions",
             "/viewer_interest_modes",
             "/viewer_interaction_modes",
             "/viewer_interest_lanes",
@@ -2349,6 +2270,8 @@ fn fixture_directory_matches_declared_set() {
         .iter()
         .chain(GENERATED_FILES)
         .chain(REQUEST_FILES)
+        .chain(BINARY_FILES)
+        .chain(["manifest/compact_multiscale_cases.json"].iter())
         .chain(VOCAB_FILES)
     {
         declared.insert((*rel).to_string());

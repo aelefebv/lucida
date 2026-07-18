@@ -24,8 +24,7 @@ export type ColdStateCauseKey =
   | "content"
   | "layout"
   | "view"
-  | "selection"
-  | "asset";
+  | "selection";
 
 interface ColdStateEvent {
   at: number;
@@ -44,7 +43,6 @@ export class ColdStateTelemetry {
     layout: 0,
     view: 0,
     selection: 0,
-    asset: 0,
   };
   /** FIFO sample buffer for p50/p95 rebuild duration. */
   private coldStateRebuildDurations: number[] = [];
@@ -142,7 +140,6 @@ export class ColdStateTelemetry {
       layout: 0,
       view: 0,
       selection: 0,
-      asset: 0,
     };
     for (const e of this.coldStateEvents) {
       if (e.kind === "rebuild") {

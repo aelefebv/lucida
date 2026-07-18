@@ -10,9 +10,17 @@ import type { WorkerCtx } from "../workerContext.ts";
 import type { AggregateDrawParams } from "../sliceRenderer.ts";
 import type { SliceRenderMultiPassMessage } from "../workerProtocol.ts";
 import type { LodIndirectionMeta } from "../volume/atlas.ts";
-import { createInitialState, type RendererState } from "../worker/state.ts";
+import {
+  createInitialState,
+  invalidateAggregateTopologyForDataset,
+  type RendererState,
+} from "../worker/state.ts";
 import type { SliceAtlasState } from "./atlas.ts";
-import { handleSliceRenderMultiPass } from "./render.ts";
+import { cameraUVForMember } from "./eviction.ts";
+import {
+  handleSliceRenderMultiPass,
+  removeAggregateQuadCacheForDataset,
+} from "./render.ts";
 
 function makeDevice(): GPUDevice {
   const encoder = {
@@ -72,12 +80,9 @@ function makeDescIndex(
     buffer: {} as GPUBuffer,
     indexByMember: new Map(memberIds.map((id, i) => [id, i])),
     memberByIndex: [...memberIds],
-    proxyPoolIndexByKey: new Map(),
-    proxyPoolsByIndex: [],
     entityCount: memberIds.length,
     colormapLutIndices: new Map([["gray", 0]]),
     colormapNameByMember: new Map(memberIds.map((id) => [id, "gray"])),
-    proxyDescriptorByMember: new Map(),
     ...overrides,
   };
 }
@@ -98,7 +103,6 @@ function makeQuads(
 
 interface MockRenderer {
   setColormapTexture: ReturnType<typeof vi.fn>;
-  setProxyTextures: ReturnType<typeof vi.fn>;
   setAtlas: ReturnType<typeof vi.fn>;
   setTierAtlases: ReturnType<typeof vi.fn>;
   setTransform: ReturnType<typeof vi.fn>;
@@ -111,7 +115,6 @@ interface MockRenderer {
 function makeRenderer(): MockRenderer {
   return {
     setColormapTexture: vi.fn(),
-    setProxyTextures: vi.fn(),
     setAtlas: vi.fn(),
     setTierAtlases: vi.fn(),
     setTransform: vi.fn(),
@@ -128,6 +131,8 @@ function makeCtx(opts: {
   renderer: MockRenderer;
   composite: ReturnType<typeof vi.fn>;
   descIndex: EntityDescriptorIndex;
+  ensureOffscreenPool?: ReturnType<typeof vi.fn>;
+  post?: ReturnType<typeof vi.fn>;
 }): WorkerCtx {
   return {
     device: opts.device,
@@ -139,15 +144,16 @@ function makeCtx(opts: {
     getSliceRenderer: () => opts.renderer,
     getCompositor: () => ({ composite: opts.composite }),
     getCursorRenderer: () => ({ hasData: () => false }),
-    ensureOffscreenPool: (n: number) =>
-      Array.from({ length: n }, () => ({ createView: () => ({}) })),
+    ensureOffscreenPool: opts.ensureOffscreenPool ?? ((n: number) =>
+      Array.from({ length: n }, () => ({ createView: () => ({}) }))),
     getOrCreateLUT: () => ({}),
     lookupEntityDescriptor: () => opts.descIndex,
     getDummyTexture: () => ({}),
+    post: opts.post ?? vi.fn(),
   } as unknown as WorkerCtx;
 }
 
-const EPOCHS = { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 };
+const EPOCHS = { content: 1, layout: 1, view: 1, selection: 1, request: 1 };
 
 describe("handleSliceRenderMultiPass", () => {
   it("renders a layer backed only by a resident coarse chunk tier", () => {
@@ -165,6 +171,7 @@ describe("handleSliceRenderMultiPass", () => {
       ctx,
       {
         type: "sliceRenderMultiPass",
+        frameId: 1,
         epochs: EPOCHS,
         layers: [
           { datasetId: "img-a", entityId: "entity-a", entityIndex: 0, blendMode: "alpha", dataW: 128, dataH: 128 },
@@ -190,59 +197,55 @@ describe("handleSliceRenderMultiPass", () => {
     expect(composite.mock.calls[0][1]).toHaveLength(1);
   });
 
-  it("renders a layer backed only by a resident tile proxy", () => {
+  it("keeps the offscreen pool at one texture for 256 ordered layers", () => {
     const device = makeDevice();
     const renderer = makeRenderer();
     const composite = vi.fn();
     const state = createInitialState();
-    const tileProxyTexture = {} as GPUTexture;
-    const descIndex = makeDescIndex(["img-a:ch1"], {
-      proxyPoolIndexByKey: new Map([["tile-proxy-ch1", 0]]),
-      proxyPoolsByIndex: [{
-        texture: tileProxyTexture,
-        slots: new Map(),
-        freeSlots: [],
-        capacity: 1,
-        requestedCapacity: 1,
-        slotDims: [8, 16, 32],
-        slotsX: 1,
-        slotsY: 1,
-        slotsZ: 1,
-        kind: "TileProxy3D",
-        channel: 1,
-        touchOrder: [],
-      }],
-      colormapLutIndices: new Map([["green", 0]]),
-      colormapNameByMember: new Map([["img-a:ch1", "green"]]),
-      proxyDescriptorByMember: new Map([
-        ["img-a:ch1", {
-          tileProxyHandle: { poolKey: "tile-proxy-ch1", slotIndex: 0 },
-          groupProxyHandle: null,
-        }],
-      ]),
+    state.sliceAtlases.set(
+      "coarse-pool",
+      makeAtlas(new Map([["img-a", residentMetas()]])),
+    );
+    const ensureOffscreenPool = vi.fn(() => [
+      { createView: () => ({}) } as GPUTexture,
+    ]);
+    const ctx = makeCtx({
+      device,
+      state,
+      renderer,
+      composite,
+      descIndex: makeDescIndex(["img-a"]),
+      ensureOffscreenPool,
     });
-    const ctx = makeCtx({ device, state, renderer, composite, descIndex });
+    const layers = Array.from({ length: 256 }, () => ({
+      datasetId: "img-a",
+      entityId: "entity-a",
+      entityIndex: 0,
+      blendMode: "alpha" as const,
+      dataW: 128,
+      dataH: 128,
+    }));
 
     handleSliceRenderMultiPass(
       ctx,
       {
         type: "sliceRenderMultiPass",
+        frameId: 1,
         epochs: EPOCHS,
-        layers: [
-          { datasetId: "img-a:ch1", entityId: "entity-a", entityIndex: 0, blendMode: "additive", dataW: 256, dataH: 256 },
-        ],
+        layers,
         zoom: 1,
-        cx: 128,
-        cy: 128,
+        cx: 64,
+        cy: 64,
         canvasW: 64,
         canvasH: 64,
       },
-      () => ({ detailPoolKey: null, coarsePoolKey: null, datasetId: "ds-0" }),
+      () => ({ detailPoolKey: null, coarsePoolKey: "coarse-pool", datasetId: "ds-0" }),
     );
 
-    expect(renderer.renderTo).toHaveBeenCalledTimes(1);
-    expect(renderer.setProxyTextures).toHaveBeenCalledWith(tileProxyTexture, null);
-    expect(composite).toHaveBeenCalledTimes(1);
+    expect(ensureOffscreenPool).toHaveBeenCalledTimes(1);
+    expect(ensureOffscreenPool).toHaveBeenCalledWith(1, 64, 64);
+    expect(renderer.renderTo).toHaveBeenCalledTimes(256);
+    expect(composite).toHaveBeenCalledTimes(256);
   });
 });
 
@@ -255,6 +258,7 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
   ): SliceRenderMultiPassMessage {
     return {
       type: "sliceRenderMultiPass",
+      frameId: 1,
       epochs: EPOCHS,
       layers: [
         {
@@ -324,6 +328,225 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
     );
     // One composite layer for the whole batch.
     expect(composite.mock.calls[0][1]).toHaveLength(1);
+  });
+
+  it("reuses publish-once quad geometry and bounds replacement by owner slot", () => {
+    const device = makeDevice();
+    const renderer = makeRenderer();
+    const state = createInitialState();
+    state.sliceAtlases.set("coarse-pool", makeAtlas(new Map([
+      ["img-0", residentMetas()],
+      ["img-1", residentMetas()],
+    ])));
+    const ctx = makeCtx({
+      device,
+      state,
+      renderer,
+      composite: vi.fn(),
+      descIndex: makeDescIndex(["img-0", "img-1"]),
+    });
+    const resolvePool = () => ({
+      detailPoolKey: null,
+      coarsePoolKey: "coarse-pool",
+      datasetId: "ds-0",
+    });
+    const published = aggregateMsg(twoMemberQuads(), 2);
+    Object.assign(published.layers[0].aggregate!, {
+      cacheKey: "aggregate-1",
+      cacheOwnerKey: "ds-0|single",
+      ownerDatasetId: "ds-0",
+    });
+    handleSliceRenderMultiPass(ctx, published, resolvePool);
+
+    const reference = aggregateMsg(new ArrayBuffer(0), 2);
+    Object.assign(reference.layers[0].aggregate!, {
+      cacheKey: "aggregate-1",
+      cacheOwnerKey: "ds-0|single",
+      ownerDatasetId: "ds-0",
+    });
+    handleSliceRenderMultiPass(ctx, reference, resolvePool);
+
+    expect(renderer.renderAggregateBatches).toHaveBeenCalledTimes(2);
+    const second = renderer.renderAggregateBatches.mock.calls[1][2] as AggregateDrawParams;
+    expect(new Uint32Array(second.quadData)[12]).toBe(1);
+    expect(state.aggregateQuadCache.has("aggregate-1")).toBe(true);
+
+    const replacement = aggregateMsg(twoMemberQuads(), 2);
+    Object.assign(replacement.layers[0].aggregate!, {
+      cacheKey: "aggregate-2",
+      cacheOwnerKey: "ds-0|single",
+      ownerDatasetId: "ds-0",
+    });
+    handleSliceRenderMultiPass(ctx, replacement, resolvePool);
+    expect(state.aggregateQuadCache.has("aggregate-1")).toBe(false);
+    expect(state.aggregateQuadCache.has("aggregate-2")).toBe(true);
+
+    removeAggregateQuadCacheForDataset(ctx, "ds-0");
+    expect(state.aggregateQuadCache.size).toBe(0);
+  });
+
+  it("reuses resolved topology on camera-only frames and derives eviction UV lazily", () => {
+    const device = makeDevice();
+    const renderer = makeRenderer();
+    const state = createInitialState();
+    state.sliceAtlases.set("coarse-pool", makeAtlas(new Map([
+      ["img-0", residentMetas()],
+      ["img-1", residentMetas()],
+    ])));
+    const ctx = makeCtx({
+      device,
+      state,
+      renderer,
+      composite: vi.fn(),
+      descIndex: makeDescIndex(["img-0", "img-1"]),
+    });
+    const resolvePool = vi.fn(() => ({
+      detailPoolKey: null,
+      coarsePoolKey: "coarse-pool",
+      datasetId: "ds-0",
+    }));
+    const published = aggregateMsg(twoMemberQuads(), 2);
+    Object.assign(published.layers[0].aggregate!, {
+      cacheKey: "aggregate-1",
+      cacheOwnerKey: "ds-0|single",
+      ownerDatasetId: "ds-0",
+    });
+    handleSliceRenderMultiPass(ctx, published, resolvePool);
+    const first = renderer.renderAggregateBatches.mock.calls[0][2] as AggregateDrawParams;
+
+    const reference = aggregateMsg(new ArrayBuffer(0), 2);
+    reference.cx = 612;
+    reference.cy = 456;
+    Object.assign(reference.layers[0].aggregate!, {
+      cacheKey: "aggregate-1",
+      cacheOwnerKey: "ds-0|single",
+      ownerDatasetId: "ds-0",
+    });
+    handleSliceRenderMultiPass(ctx, reference, resolvePool);
+    const second = renderer.renderAggregateBatches.mock.calls[1][2] as AggregateDrawParams;
+
+    expect(second.quadData).toBe(first.quadData);
+    // First frame: one pool lookup for the aggregate + one per member.
+    // Cache hit: only the aggregate lookup remains (no O(members) scan).
+    expect(resolvePool).toHaveBeenCalledTimes(4);
+    expect(state.cameraUVPerEntity.size).toBe(0);
+    expect(cameraUVForMember(state, "img-0")).toEqual([0.5, 0.5]);
+  });
+
+  it("rebuilds cached topology after residency generation or descriptor identity changes", () => {
+    const device = makeDevice();
+    const renderer = makeRenderer();
+    const state = createInitialState();
+    state.sliceAtlases.set("coarse-pool", makeAtlas(new Map([
+      ["img-0", residentMetas()],
+      ["img-1", residentMetas()],
+    ])));
+    let descriptor = makeDescIndex(["img-0", "img-1"]);
+    const ctx = makeCtx({
+      device,
+      state,
+      renderer,
+      composite: vi.fn(),
+      descIndex: descriptor,
+    });
+    ctx.lookupEntityDescriptor = () => descriptor;
+    const resolvePool = () => ({
+      detailPoolKey: null,
+      coarsePoolKey: "coarse-pool",
+      datasetId: "ds-0",
+    });
+    const published = aggregateMsg(twoMemberQuads(), 2);
+    Object.assign(published.layers[0].aggregate!, {
+      cacheKey: "aggregate-1",
+      cacheOwnerKey: "ds-0|single",
+      ownerDatasetId: "ds-0",
+    });
+    handleSliceRenderMultiPass(ctx, published, resolvePool);
+    const first = renderer.renderAggregateBatches.mock.calls[0][2] as AggregateDrawParams;
+
+    const reference = aggregateMsg(new ArrayBuffer(0), 2);
+    Object.assign(reference.layers[0].aggregate!, {
+      cacheKey: "aggregate-1",
+      cacheOwnerKey: "ds-0|single",
+      ownerDatasetId: "ds-0",
+    });
+    invalidateAggregateTopologyForDataset(state, "ds-0");
+    handleSliceRenderMultiPass(ctx, reference, resolvePool);
+    const afterResidency = renderer.renderAggregateBatches.mock.calls[1][2] as AggregateDrawParams;
+    expect(afterResidency.quadData).not.toBe(first.quadData);
+
+    descriptor = makeDescIndex(["img-0", "img-1"]);
+    handleSliceRenderMultiPass(ctx, reference, resolvePool);
+    const afterDescriptor = renderer.renderAggregateBatches.mock.calls[2][2] as AggregateDrawParams;
+    expect(afterDescriptor.quadData).not.toBe(afterResidency.quadData);
+    expect(afterDescriptor.descriptorBuffer).toBe(descriptor.buffer);
+  });
+
+  it("bounds worker owner/key indexes while one slot churns 1000 keys", () => {
+    const device = makeDevice();
+    const renderer = makeRenderer();
+    const state = createInitialState();
+    const ctx = makeCtx({
+      device,
+      state,
+      renderer,
+      composite: vi.fn(),
+      descIndex: makeDescIndex(["img-0"]),
+    });
+    const resolvePool = () => ({
+      detailPoolKey: null,
+      coarsePoolKey: null,
+      datasetId: "ds-0",
+    });
+
+    for (let i = 0; i < 1000; i++) {
+      const message = aggregateMsg(new ArrayBuffer(32), 0);
+      Object.assign(message.layers[0].aggregate!, {
+        cacheKey: `aggregate-${i}`,
+        cacheOwnerKey: "ds-0|single",
+        ownerDatasetId: "ds-0",
+      });
+      handleSliceRenderMultiPass(ctx, message, resolvePool);
+    }
+
+    expect(state.aggregateQuadCache.size).toBe(1);
+    expect(state.aggregateQuadCache.has("aggregate-999")).toBe(true);
+    expect(state.aggregateKeyByOwner).toEqual(
+      new Map([["ds-0|single", "aggregate-999"]]),
+    );
+  });
+
+  it("reports a typed key-only cache miss and aborts the frame before drawing", () => {
+    const post = vi.fn();
+    const renderer = makeRenderer();
+    const composite = vi.fn();
+    const ctx = makeCtx({
+      device: makeDevice(),
+      state: createInitialState(),
+      renderer,
+      composite,
+      descIndex: makeDescIndex(["img-0", "img-1"]),
+      post,
+    });
+    const reference = aggregateMsg(new ArrayBuffer(0), 2);
+    Object.assign(reference.layers[0].aggregate!, {
+      cacheKey: "missing-key",
+      cacheOwnerKey: "ds-0|single",
+      ownerDatasetId: "ds-0",
+    });
+
+    const complete = handleSliceRenderMultiPass(ctx, reference, () => null);
+
+    expect(complete).toBe(false);
+    expect(post).toHaveBeenCalledWith({
+      type: "aggregateCacheMiss",
+      frameId: 1,
+      cacheKey: "missing-key",
+      cacheOwnerKey: "ds-0|single",
+      ownerDatasetId: "ds-0",
+    });
+    expect(renderer.renderAggregateBatches).not.toHaveBeenCalled();
+    expect(composite).not.toHaveBeenCalled();
   });
 
   it("updates camera-UV eviction recency for chunk-backed batched members", () => {
@@ -441,51 +664,4 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
     expect(composite.mock.calls[0][1]).toHaveLength(1);
   });
 
-  it("binds a proxy-backed batched member's own pool texture", () => {
-    const device = makeDevice();
-    const renderer = makeRenderer();
-    const composite = vi.fn();
-    const state = createInitialState(); // no chunk atlases at all
-    const tileProxyTexture = {} as GPUTexture;
-    const descIndex = makeDescIndex(["img-0", "img-1"], {
-      proxyPoolIndexByKey: new Map([["tile-proxy-ch0", 0]]),
-      proxyPoolsByIndex: [{
-        texture: tileProxyTexture,
-        slots: new Map(),
-        freeSlots: [],
-        capacity: 1,
-        requestedCapacity: 1,
-        slotDims: [8, 16, 32],
-        slotsX: 1,
-        slotsY: 1,
-        slotsZ: 1,
-        kind: "TileProxy3D",
-        channel: 0,
-        touchOrder: [],
-      }],
-      proxyDescriptorByMember: new Map([
-        ["img-0", {
-          tileProxyHandle: { poolKey: "tile-proxy-ch0", slotIndex: 0 },
-          groupProxyHandle: null,
-        }],
-      ]),
-    });
-    const ctx = makeCtx({ device, state, renderer, composite, descIndex });
-
-    handleSliceRenderMultiPass(
-      ctx,
-      aggregateMsg(twoMemberQuads(), 2),
-      () => ({ detailPoolKey: null, coarsePoolKey: null, datasetId: "ds-0" }),
-    );
-
-    const params = renderer.renderAggregateBatches.mock.calls[0][2] as AggregateDrawParams;
-    // img-0 rides its proxy pool; img-1 (nothing resident) is dropped.
-    expect(params.batches).toHaveLength(1);
-    expect(params.batches[0].count).toBe(1);
-    expect(params.batches[0].tileProxyTexture).toBe(tileProxyTexture);
-    expect(params.batches[0].detail).toBeNull();
-    expect(params.batches[0].coarse).toBeNull();
-    // Proxy-only members carry no chunk residency → no camera-UV update.
-    expect(state.cameraUVPerEntity.size).toBe(0);
-  });
 });

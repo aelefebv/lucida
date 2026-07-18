@@ -20,7 +20,6 @@ vi.mock("../bridge.ts", () => {
     sendCursor = vi.fn();
     sendFollow = vi.fn();
     sendOpenRemoteDataset = vi.fn();
-    subscribeBookmarkChanged = vi.fn(() => () => {});
     constructor(_handlers: unknown, _url?: string, workspaceId?: string) {
       this.workspaceId = workspaceId;
       MockBridge.instances.push(this);

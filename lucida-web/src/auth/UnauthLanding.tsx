@@ -11,6 +11,7 @@
 // back to the authed branch.
 
 import { useEffect, useRef } from "react";
+import type { LogoutFailure } from "./whoami.ts";
 
 /** Where /auth/start lives on the same origin. Relative — Vite dev
  *  proxies `/auth/*` to the backend; production serves the web bundle
@@ -53,16 +54,23 @@ export interface UnauthLandingProps {
    *  a static "Sign in again" card so we don't immediately re-auth
    *  them via Google's still-active session. */
   signedOut?: boolean;
+  /** A failed logout takes precedence over the ordinary signed-out card. */
+  logoutFailure?: LogoutFailure;
 }
 
-export function UnauthLanding({ navigate, location, signedOut }: UnauthLandingProps = {}) {
+export function UnauthLanding({
+  navigate,
+  location,
+  signedOut,
+  logoutFailure,
+}: UnauthLandingProps = {}) {
   // useRef + useEffect so a single AuthGate render produces exactly
   // one navigation. React 18+ in strict mode double-invokes effect
   // bodies; the ref guards against navigating twice.
   const navigatedRef = useRef(false);
 
   useEffect(() => {
-    if (signedOut) return;
+    if (signedOut || logoutFailure) return;
     if (navigatedRef.current) return;
     navigatedRef.current = true;
     const loc = location ?? window.location;
@@ -74,7 +82,17 @@ export function UnauthLanding({ navigate, location, signedOut }: UnauthLandingPr
       // entry the user can hit back into.
       window.location.replace(url);
     }
-  }, [navigate, location, signedOut]);
+  }, [navigate, location, signedOut, logoutFailure]);
+
+  if (logoutFailure) {
+    return (
+      <SignOutFailureCard
+        failure={logoutFailure}
+        navigate={navigate}
+        location={location}
+      />
+    );
+  }
 
   if (signedOut) {
     return <SignedOutCard navigate={navigate} location={location} />;
@@ -84,11 +102,69 @@ export function UnauthLanding({ navigate, location, signedOut }: UnauthLandingPr
     <div
       style={{
         padding: "2rem",
-        color: "#aaa",
+        color: "var(--text-muted)",
         fontFamily: "system-ui, -apple-system, sans-serif",
       }}
     >
       Redirecting to sign-in...
+    </div>
+  );
+}
+
+function SignOutFailureCard({
+  failure,
+  navigate,
+  location,
+}: {
+  failure: LogoutFailure;
+  navigate?: (url: string) => void;
+  location?: { pathname: string; search: string; hash: string };
+}) {
+  const onSignIn = () => {
+    const loc = location ?? window.location;
+    const url = buildSignInUrl(loc);
+    if (navigate) navigate(url);
+    else window.location.assign(url);
+  };
+  return (
+    <div
+      style={{
+        minHeight: "100vh",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        background: "var(--surface-1)",
+        color: "var(--text-primary)",
+        fontFamily: "system-ui, -apple-system, sans-serif",
+      }}
+    >
+      <div
+        role="alert"
+        style={{
+          padding: "24px 32px",
+          border: "1px solid var(--danger-border)",
+          borderRadius: 8,
+          background: "var(--surface-2)",
+          maxWidth: 440,
+        }}
+      >
+        <h1 style={{ marginTop: 0 }}>Sign-out incomplete</h1>
+        <p>{failure.message}</p>
+        {failure.localSession === "cleared" && (
+          <p style={{ color: "var(--text-muted)" }}>
+            This browser is locally signed out, but this is not confirmation
+            that every copy of the session credential was revoked.
+          </p>
+        )}
+        <p style={{ color: "var(--text-muted)" }}>
+          {failure.retryable
+            ? "If another authenticated session is available, retry there when the service recovers; otherwise contact an administrator."
+            : "Contact an administrator before relying on this sign-out."}
+        </p>
+        <button type="button" onClick={onSignIn} style={signInButtonStyle}>
+          Sign in again
+        </button>
+      </div>
     </div>
   );
 }
@@ -118,35 +194,26 @@ function SignedOutCard({
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        background: "#1a1a1f",
-        color: "#eee",
+        background: "var(--surface-1)",
+        color: "var(--text-primary)",
         fontFamily: "system-ui, -apple-system, sans-serif",
       }}
     >
       <div
         style={{
           padding: "24px 32px",
-          border: "1px solid #444",
+          border: "1px solid var(--border-strong)",
           borderRadius: 8,
-          background: "#22222a",
+          background: "var(--surface-2)",
           maxWidth: 360,
         }}
       >
         <h1 style={{ marginTop: 0 }}>Signed out</h1>
-        <p style={{ color: "#aaa" }}>You've been signed out of lucida.</p>
+        <p style={{ color: "var(--text-muted)" }}>You've been signed out of lucida.</p>
         <button
           type="button"
           onClick={onSignIn}
-          style={{
-            marginTop: 8,
-            padding: "8px 16px",
-            background: "#646cff",
-            color: "#fff",
-            border: "none",
-            borderRadius: 6,
-            cursor: "pointer",
-            font: "inherit",
-          }}
+          style={signInButtonStyle}
         >
           Sign in again
         </button>
@@ -154,3 +221,14 @@ function SignedOutCard({
     </div>
   );
 }
+
+const signInButtonStyle = {
+  marginTop: 8,
+  padding: "8px 16px",
+  background: "var(--accent-strong)",
+  color: "var(--accent-contrast)",
+  border: "none",
+  borderRadius: 6,
+  cursor: "pointer",
+  font: "inherit",
+};

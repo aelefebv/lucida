@@ -26,7 +26,7 @@ Three alternatives could deliver single-origin:
 2. **Two separate images** with deployment-time path-routing on the Ingress. Same problems as the sidecar plus the Ingress now carries the routing knowledge that should live in the deployment artifact itself.
 3. **Single image serving both** via `ServeDir` baked into lucida-server. One thing to build, version, scan, and deploy. The SPA and the API are versioned together and cannot drift.
 
-(3) is the right shape because lucida is shipped as one cohesive product (the chunk pipeline straddles WASM-on-the-server-build-side and JS-on-the-client-side anyway — they are already tightly version-coupled by `lucida-web/package.json`'s `"lucida-core": "file:../lucida-core/pkg"` dependency). Splitting them at the container boundary creates a gap that cannot exist in the source code.
+(3) is the right shape because lucida is shipped as one cohesive product (the chunk pipeline straddles WASM-on-the-server-build-side and JS-on-the-client-side anyway — they are already tightly version-coupled by `lucida-web/package.json`'s `"lucida-core": "link:../lucida-core/pkg"` dependency). Splitting them at the container boundary creates a gap that cannot exist in the source code.
 
 The same decision also collapses three localhost personas onto a clean substrate:
 

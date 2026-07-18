@@ -9,7 +9,7 @@ import {
 // camera-owning state (restore / follow) is active.
 const FIT: AutoFitContext = {
   isOpener: true,
-  restoreInProgress: false,
+  restoreOwnsDatasetOpen: false,
   following: false,
 };
 
@@ -34,7 +34,7 @@ describe("shouldAutoFitOnOpen", () => {
 
   it("does NOT fit while a saved/last view is restoring (#700: restore wins)", () => {
     expect(
-      shouldAutoFitOnOpen("dataset_opened", { ...FIT, restoreInProgress: true }),
+      shouldAutoFitOnOpen("dataset_opened", { ...FIT, restoreOwnsDatasetOpen: true }),
     ).toBe(false);
   });
 
@@ -42,7 +42,7 @@ describe("shouldAutoFitOnOpen", () => {
     expect(
       shouldAutoFitOnOpen("dataset_opened", {
         isOpener: true,
-        restoreInProgress: true,
+        restoreOwnsDatasetOpen: true,
         following: true,
       }),
     ).toBe(false);
@@ -65,17 +65,17 @@ describe("shouldAutoFitOnOpen", () => {
     const types = ["dataset_opened", "remove_dataset", ""];
     for (const commandType of types) {
       for (const isOpener of [true, false]) {
-        for (const restoreInProgress of [true, false]) {
+        for (const restoreOwnsDatasetOpen of [true, false]) {
           for (const following of [true, false]) {
             const expected =
               commandType === "dataset_opened" &&
               isOpener &&
-              !restoreInProgress &&
+              !restoreOwnsDatasetOpen &&
               !following;
             expect(
               shouldAutoFitOnOpen(commandType, {
                 isOpener,
-                restoreInProgress,
+                restoreOwnsDatasetOpen,
                 following,
               }),
             ).toBe(expected);
@@ -91,7 +91,7 @@ describe("shouldAutoFitOnOpen", () => {
     // flipping exactly one of {not opener, following, restoring} suppresses it.
     expect(shouldAutoFitOnOpen("dataset_opened", { ...FIT, isOpener: false })).toBe(false);
     expect(shouldAutoFitOnOpen("dataset_opened", { ...FIT, following: true })).toBe(false);
-    expect(shouldAutoFitOnOpen("dataset_opened", { ...FIT, restoreInProgress: true })).toBe(false);
+    expect(shouldAutoFitOnOpen("dataset_opened", { ...FIT, restoreOwnsDatasetOpen: true })).toBe(false);
   });
 });
 

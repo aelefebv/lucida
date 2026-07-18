@@ -1,11 +1,17 @@
-// Decompress (Raw / LZ4 / Zstd), then normalize to GPU-ready u16.
+// Decompress, validate exact source shape, then role-normalize to the GPU type.
 
 import { extractDataType, type WireFormat } from "../../manifestTypes.ts";
+import {
+  normalizeChunkBytes,
+  parseChunkSourceDType,
+  type ChunkContract,
+} from "../../chunkContract.ts";
 
 interface DecodeRequest {
   id: number;
   bytes: ArrayBuffer;
   wireFormat: WireFormat;
+  contract: ChunkContract;
 }
 
 interface DecodeResponse {
@@ -92,54 +98,20 @@ function decompress(bytes: ArrayBuffer, wireFormat: WireFormat): ArrayBuffer | P
 }
 
 // ---------------------------------------------------------------------------
-// Pixel-format normalization → GPU-ready Uint16
-// ---------------------------------------------------------------------------
-
-function normalize(buf: ArrayBuffer, dataType: string): ArrayBuffer {
-  switch (dataType.toLowerCase()) {
-    case "uint8":
-      // Conversion to u16 happens at GPU upload to avoid doubling memory here.
-      return buf;
-    case "uint32":
-      // Label ids are kept at full 32-bit width and uploaded to an
-      // r32uint atlas. Narrowing to u16 here would collapse distinct ids
-      // above 65535 onto one value.
-      return buf;
-    case "bool": {
-      const src = new Uint8Array(buf);
-      const dst = new Uint16Array(src.length);
-      for (let i = 0; i < src.length; i++) dst[i] = src[i] ? 255 : 0;
-      return dst.buffer;
-    }
-    case "float32": {
-      if (buf.byteLength % 4 !== 0) {
-        throw new Error(`float32 buffer byteLength ${buf.byteLength} is not a multiple of 4`);
-      }
-      const src = new Float32Array(buf);
-      const dst = new Uint16Array(src.length);
-      for (let i = 0; i < src.length; i++) {
-        const value = src[i];
-        dst[i] = Number.isFinite(value)
-          ? Math.round(Math.min(1, Math.max(0, value)) * 65535)
-          : 0;
-      }
-      return dst.buffer;
-    }
-    case "uint16":
-    default:
-      return buf;
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Message handler
 // ---------------------------------------------------------------------------
 
 self.onmessage = async (e: MessageEvent<DecodeRequest>) => {
-  const { id, bytes, wireFormat } = e.data;
+  const { id, bytes, wireFormat, contract } = e.data;
   try {
+    const wireDtype = parseChunkSourceDType(extractDataType(wireFormat));
+    if (wireDtype !== contract.sourceDtype) {
+      throw new Error(
+        `Wire dtype ${wireDtype} differs from chunk contract ${contract.sourceDtype}`,
+      );
+    }
     const decompressed = await decompress(bytes, wireFormat);
-    const data = normalize(decompressed, extractDataType(wireFormat));
+    const data = normalizeChunkBytes(decompressed, contract);
     (self as unknown as Worker).postMessage({ id, data } satisfies DecodeResponse, [data]);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -148,5 +120,5 @@ self.onmessage = async (e: MessageEvent<DecodeRequest>) => {
 };
 
 // Re-exported for direct testing (imported as a module, not a worker).
-export { decompressLz4, decompressZstd, normalize };
+export { decompressLz4, decompressZstd };
 export type { DecodeRequest, DecodeResponse, DecodeError };

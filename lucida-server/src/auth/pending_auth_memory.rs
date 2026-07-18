@@ -47,9 +47,15 @@ impl PendingAuthStore for MemoryPendingAuthStore {
     async fn consume(
         &self,
         state_token: &str,
+        browser_binding_hash: &str,
+        created_at_or_after: DateTime<Utc>,
     ) -> Result<Option<PendingAuth>, PendingAuthStoreError> {
         let mut rows = self.rows.lock().expect("memory store mutex poisoned");
-        Ok(rows.remove(state_token))
+        let accepted = rows.get(state_token).is_some_and(|row| {
+            row.browser_binding_hash == browser_binding_hash
+                && row.created_at >= created_at_or_after
+        });
+        Ok(accepted.then(|| rows.remove(state_token)).flatten())
     }
 
     async fn delete_expired(
@@ -71,6 +77,7 @@ mod tests {
     fn sample(token: &str, path: &str, hash: &str, now: DateTime<Utc>) -> PendingAuth {
         PendingAuth {
             state_token: token.to_string(),
+            browser_binding_hash: "binding-hash".to_string(),
             intended_path: path.to_string(),
             intended_hash: hash.to_string(),
             created_at: now,
@@ -82,8 +89,20 @@ mod tests {
         let store = MemoryPendingAuthStore::new();
         let now = Utc::now();
         store.insert(sample("t", "/", "", now)).await.unwrap();
-        assert!(store.consume("t").await.unwrap().is_some());
-        assert!(store.consume("t").await.unwrap().is_none());
+        assert!(
+            store
+                .consume("t", "binding-hash", now)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .consume("t", "binding-hash", now)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -93,6 +112,37 @@ mod tests {
         store.insert(sample("dupe", "/", "", now)).await.unwrap();
         let res = store.insert(sample("dupe", "/x", "", now)).await;
         assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn consume_requires_matching_browser_and_fresh_row_atomically() {
+        let store = MemoryPendingAuthStore::new();
+        let now = Utc::now();
+        store.insert(sample("bound", "/", "", now)).await.unwrap();
+
+        assert!(
+            store
+                .consume("bound", "wrong", now - ChronoDuration::minutes(1))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(store.len(), 1, "wrong browser must not consume state");
+        assert!(
+            store
+                .consume("bound", "binding-hash", now + ChronoDuration::seconds(1))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(store.len(), 1, "expired callback must not consume state");
+        assert!(
+            store
+                .consume("bound", "binding-hash", now)
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -112,7 +162,19 @@ mod tests {
 
         let removed = store.delete_expired(now).await.unwrap();
         assert_eq!(removed, 1);
-        assert!(store.consume("boundary").await.unwrap().is_some());
-        assert!(store.consume("old").await.unwrap().is_none());
+        assert!(
+            store
+                .consume("boundary", "binding-hash", now)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .consume("old", "binding-hash", now)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

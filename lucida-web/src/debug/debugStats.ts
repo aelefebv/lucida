@@ -52,20 +52,14 @@ export interface PlanningDatasetDebug {
   /**
    * Total chunk requests in the plan, broken down by lane. The
    * `minimap` lane is highest priority (see
-   * [[decisions/0023-minimap-lane-with-highest-priority]]); `proxy`
-   * is a chunk-lane reservation used by the type-system extension
-   * (proxy *requests* are still tracked separately in {@link proxyCount}).
+   * [[decisions/0023-minimap-lane-with-highest-priority]]).
    */
   lanes: {
     minimap: number;
     detail: number;
     coarse: number;
-    proxy: number;
     prefetch: number;
-    overview: number;
   };
-  /** Proxy requests in the plan (separate from chunk lanes). */
-  proxyCount: number;
   /** Total chunk requests in the plan (sum of `lanes`). */
   totalChunks: number;
   /** Chunk requests grouped by LOD level — independent of lane. */
@@ -87,13 +81,10 @@ export interface PlanningDatasetDebug {
     afterZRange: number;
     afterFrustum: number;
   };
-  /** Number of times catalog-aware mode assignment downgraded a group's mode. */
-  catalogDegradations: number;
   /** Active-set entries grouped by tier mode. */
   groupsByMode: {
-    groupAsProxy: number;
-    tilesWithProxyFallback: number;
     tilesWithDetail: number;
+    invisible: number;
   };
   /**
    * Entity nearest the viewport center (or null if no visible entities).
@@ -133,13 +124,11 @@ export interface OrchDebug {
   activeSetTotal: number;
   /** Mode tallies over the FULL active set (not just the capped rows). */
   activeSetModeCounts: {
-    groupAsProxy: number;
-    tilesProxyFallback: number;
     tilesDetail: number;
     invisible: number;
   };
   /** Request counts by lane */
-  laneCount: { detail: number; coarse: number; prefetch: number; overview: number };
+  laneCount: { minimap: number; detail: number; coarse: number; prefetch: number };
   /** Request counts by level */
   chunksByLevel: Record<number, number>;
   /** First N requests for inspection */
@@ -159,8 +148,6 @@ export interface OrchDebug {
   hasMixedLevels: boolean;
   /** Whether this was an epoch cache hit (plan() skipped) */
   epochCacheHit: boolean;
-  /** Proxy residency budget/admission snapshot from the latest planning pass. */
-  proxyResidency: ProxyResidencyDebug | null;
   /**
    * Cold-state rebuild telemetry. Counts and rates for `planAndFetch`
    * fast-path hits vs full rebuilds, with per-epoch cause attribution
@@ -183,32 +170,12 @@ export interface OrchDebug {
   }>;
 }
 
-export interface ProxyResidencyDebug {
-  budgetBytes: number;
-  admittedBytes: number;
-  desiredProxyCount: number;
-  candidateBundleCount: number;
-  admittedBundleCount: number;
-  skippedBundleCount: number;
-  skippedProxyCount: number;
-  missingFootprintCount: number;
-  topDecisions: Array<{
-    datasetId: string;
-    groupId: string;
-    representation: "tile" | "group";
-    proxyCount: number;
-    bytes: number;
-    reason: "admitted" | "over-budget" | "replaced";
-  }>;
-}
-
 /** Per-epoch cause attribution counters. */
 export interface ColdStateCauseCounts {
   content: number;
   layout: number;
   view: number;
   selection: number;
-  asset: number;
 }
 
 export interface ColdStateDebug {
@@ -251,8 +218,8 @@ export function emptyColdStateDebug(): ColdStateDebug {
     hitRate: NaN,
     rebuildsLastSecond: 0,
     hitsLastSecond: 0,
-    causeLastSecond: { content: 0, layout: 0, view: 0, selection: 0, asset: 0 },
-    causeTotal: { content: 0, layout: 0, view: 0, selection: 0, asset: 0 },
+    causeLastSecond: { content: 0, layout: 0, view: 0, selection: 0 },
+    causeTotal: { content: 0, layout: 0, view: 0, selection: 0 },
     lastRebuildMs: null,
     rebuildP50Ms: null,
     rebuildP95Ms: null,
@@ -347,10 +314,8 @@ export interface DebugStats {
 export interface UploadTickStats {
   /** Deliverable items considered from `cpuCache.getDeliverable()` this tick. */
   drainedChunks: number;
-  drainedProxies: number;
   /** Items actually posted to the worker this tick. */
   uploadedChunks: number;
-  uploadedProxies: number;
   /** Bytes actually posted (from delivery `data.byteLength`). */
   bytesUploaded: number;
   /** Upload byte budget passed in by the caller. */
@@ -364,8 +329,6 @@ export interface UploadTickStats {
   // Skip reasons during the delivery pass (one entry per considered item):
   /** Lane was `prefetch` — pre-cached for future timepoint. */
   skippedPrefetch: number;
-  /** Lane was `overview` — minimap path owns these. */
-  skippedOverview: number;
   /** Chunk level didn't match `targetLevelByImage[imageId]`. Stale plan. */
   skippedWrongLod: number;
   /** Chunk already in CpuCache delivery sent state for the worker memberId. */
@@ -374,7 +337,6 @@ export interface UploadTickStats {
   skippedNoMeta: number;
   // Legacy resend counters retained for telemetry shape compatibility.
   resendChunkUploads: number;
-  resendProxyUploads: number;
   resendChunksConsidered: number;
   resendChunksAlreadySent: number;
   resendChunksNotCached: number;
@@ -385,9 +347,6 @@ export interface UploadTickStats {
    * next plan rebuild clears the rejection state.
    */
   resendChunksRejected: number;
-  resendProxiesConsidered: number;
-  resendProxiesAlreadyDelivered: number;
-  resendProxiesNotCached: number;
 }
 
 /**
@@ -397,12 +356,10 @@ export interface UploadTickStats {
 export interface UploadRollingStats {
   /** Bytes/sec across all uploads in the last 1s. */
   bytesPerSec: number;
-  /** Uploads/sec (chunks + proxies). */
+  /** Chunk uploads/sec. */
   uploadsPerSec: number;
   /** Chunk uploads/sec in the last 1s. */
   chunkUploadsPerSec: number;
-  /** Proxy uploads/sec in the last 1s. */
-  proxyUploadsPerSec: number;
   /**
    * Legacy resend-sourced ratio. Now normally 0 because deliverability is a
    * single `cpuCache.getDeliverable()` pass.
@@ -411,10 +368,10 @@ export interface UploadRollingStats {
   /**
    * Ratio of *upload-bound* considered chunks that were filtered out:
    * `(skippedWrongLod + skippedAlreadySent + skippedNoMeta) /
-   *  (drainedChunks − skippedPrefetch − skippedOverview)`.
+   *  (drainedChunks − skippedPrefetch)`.
    *
-   * Excludes prefetch (cache-only by design), overview (minimap path),
-   * and proxies (separate atlas, never skipped). High = real
+   * Excludes prefetch (cache-only by design).
+   * High = real
    * planning / wanted-set sync issue — chunks the orch *meant* to
    * upload to the main GPU atlas got filtered.
    */
@@ -431,16 +388,15 @@ export interface UploadRollingStats {
 
 export function emptyUploadTickStats(): UploadTickStats {
   return {
-    drainedChunks: 0, drainedProxies: 0,
-    uploadedChunks: 0, uploadedProxies: 0,
+    drainedChunks: 0,
+    uploadedChunks: 0,
     bytesUploaded: 0, bytesBudget: 0,
     budgetExhausted: false,
-    skippedPrefetch: 0, skippedOverview: 0, skippedWrongLod: 0,
+    skippedPrefetch: 0, skippedWrongLod: 0,
     skippedAlreadySent: 0, skippedNoMeta: 0,
-    resendChunkUploads: 0, resendProxyUploads: 0,
+    resendChunkUploads: 0,
     resendChunksConsidered: 0, resendChunksAlreadySent: 0, resendChunksNotCached: 0,
     resendChunksRejected: 0,
-    resendProxiesConsidered: 0, resendProxiesAlreadyDelivered: 0, resendProxiesNotCached: 0,
   };
 }
 

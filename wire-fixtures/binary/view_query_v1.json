@@ -1,0 +1,48 @@
+{
+  "format_version": 1,
+  "frame_hex": "4c5651310100010003000000380000000100000000000000020000000000000003000000000000000400000000000000050000000000000009000000070000000000000000010000000000000000f83f0000000000000440000000000000f0bf00000000000000000000000000000a400000000000001240656e746974792dceb1696d6167652d300800000007000000030000000100000000000000000000000000000000000000000000000000594000000000008034c0000000000000c03f000000000000d03f67726f75702fceb2696d6167652d31080000000700000006000000020100000000000000c062400000000000f9d540000000000000f03f000000000000004000000000000008400000000000c0584074696c652de99baa696d6167652d32",
+  "value": {
+    "epochs": {
+      "content": 1,
+      "layout": 2,
+      "view": 3,
+      "selection": 4,
+      "annotation": 5
+    },
+    "visible_entities": [
+      {
+        "entity_id": "entity-α",
+        "image_id": "image-0",
+        "kind": "Image",
+        "visible": true,
+        "projected_diagonal_px": 1.5,
+        "projected_area_px2": 2.5,
+        "centroid_world": [-1.0, 0.0, 3.25],
+        "ideal_target_lod": 0,
+        "importance": 4.5
+      },
+      {
+        "entity_id": "group/β",
+        "image_id": "image-1",
+        "kind": "Group",
+        "visible": false,
+        "projected_diagonal_px": 0.0,
+        "projected_area_px2": 0.0,
+        "centroid_world": [100.0, -20.5, 0.125],
+        "ideal_target_lod": 3,
+        "importance": 0.25
+      },
+      {
+        "entity_id": "tile-雪",
+        "image_id": "image-2",
+        "kind": "Tile",
+        "visible": true,
+        "projected_diagonal_px": 150.0,
+        "projected_area_px2": 22500.0,
+        "centroid_world": [1.0, 2.0, 3.0],
+        "ideal_target_lod": 6,
+        "importance": 99.0
+      }
+    ]
+  }
+}

@@ -1,15 +1,15 @@
-/* Explore panel — layered on top of the shared BookmarkSidebar.css so the
+/* Explore panel — layered on top of the shared SavedViewSidebar.css so the
    chrome (sidebar shell, header, list, rows) matches the saved-views sidebar.
    Only the exploration-specific bits live here. */
 
 .explore-here {
   padding: 0.5rem 0.75rem;
-  border-bottom: 1px solid #2a2a2a;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .explore-here-dataset {
   font-size: 0.85rem;
-  color: #ddd;
+  color: var(--text-primary);
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -18,7 +18,7 @@
 
 .explore-here-detail {
   font-size: 0.72rem;
-  color: #9a9aa6;
+  color: var(--text-muted);
   margin-top: 0.15rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
@@ -28,7 +28,7 @@
    somehow overflows the head-truncation. */
 .explore-breadcrumb {
   font-size: 0.72rem;
-  color: #b9b9c6;
+  color: var(--text-secondary);
   margin-top: 0.2rem;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -40,23 +40,23 @@
   flex-wrap: wrap;
   gap: 0.35rem;
   padding: 0.5rem 0.75rem;
-  border-bottom: 1px solid #2a2a2a;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .explore-controls button {
   padding: 0.25rem 0.5rem;
   font-size: 0.75rem;
-  background: #2a2a2a;
-  color: #ddd;
-  border: 1px solid #444;
+  background: var(--surface-3);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-strong);
   border-radius: 4px;
   cursor: pointer;
   white-space: nowrap;
 }
 
 .explore-controls button:hover:not(:disabled) {
-  background: #33334a;
-  border-color: #54546a;
+  background: var(--surface-raised);
+  border-color: var(--accent);
 }
 
 .explore-controls button:disabled {
@@ -67,14 +67,14 @@
 /* The primary call-to-action of the panel — make it read as the accent action. */
 .explore-controls button.explore-suggest {
   flex-basis: 100%;
-  background: #646cff;
-  border-color: #646cff;
-  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
 }
 
 .explore-controls button.explore-suggest:hover:not(:disabled) {
-  background: #535bdf;
-  border-color: #535bdf;
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
 }
 
 .explore-section-header {
@@ -82,16 +82,29 @@
   font-weight: 600;
   letter-spacing: 0.03em;
   text-transform: uppercase;
-  color: #9a9aa6;
+  color: var(--text-muted);
   padding: 0.45rem 0.75rem 0.25rem;
 }
 
 /* The muted transform tag sits under the plain-language label as a small
    machine-id hint. */
-.explore-cell-transform {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: #777;
-  font-size: 0.68rem;
+.explore-cell-button {
+  width: 100%;
+  min-height: 3rem;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  text-align: start;
+}
+
+.explore-cell-button:disabled {
+  cursor: progress;
+  opacity: 0.7;
 }
 
 /* "Show previews" toggle, sitting under the accent action on its own line so it
@@ -102,7 +115,7 @@
   align-items: center;
   gap: 0.35rem;
   font-size: 0.72rem;
-  color: #b9b9c6;
+  color: var(--text-secondary);
   cursor: pointer;
   user-select: none;
 }
@@ -120,6 +133,16 @@
   gap: 0.6rem;
 }
 
+.saved-view-error {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.saved-view-error span {
+  flex: 1;
+}
+
 .explore-cell-text {
   min-width: 0; /* let the label ellipsize next to the thumb */
   flex: 1 1 auto;
@@ -135,8 +158,8 @@
   height: 66px;
   border-radius: 4px;
   overflow: hidden;
-  background: #15151c;
-  border: 1px solid #2a2a2a;
+  background: var(--surface-canvas);
+  border: 1px solid var(--border-subtle);
 }
 
 .explore-thumb-pending {

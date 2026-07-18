@@ -5,7 +5,7 @@ description: "When the GPU worker evicts a chunk to make room for a new upload, 
 tags: [lucida, gotcha]
 source_path: wiki/gotchas/worker-eviction-async-reporting.md
 created: 2026-04-18
-modified: 2026-05-17
+modified: 2026-07-16
 ---
 
 # Worker Eviction Reporting Is Async
@@ -43,7 +43,10 @@ Code that assumes "I just sent it, so it's there" is wrong. The worker may have 
 
 `chunksEvicted.skipped` means "atlas-policy rejection" only: the atlas was full and the incoming chunk was farther than the farthest resident slot. This is what suppresses resend churn.
 
-`wantedSetDelta` is authoritative for both chunks and proxies. Missing chunk entries clear chunk sent state; missing proxy entries call `cpuCache.markProxyMissing(...)`, which clears `DeliveryState` proxy sent state so the next `getDeliverable()` pass can re-send the cached proxy.
+`wantedSetDelta` is authoritative for chunks. Missing chunk entries clear chunk
+sent state so the next `getDeliverable()` pass can re-send a still-cached chunk.
+The former proxy-missing branch was removed with the proxy fallback protocol in
+[ADR-0043](../decisions/0043-superseded-server-surfaces-sunset.md).
 
 ## Related
 

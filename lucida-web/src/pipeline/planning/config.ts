@@ -8,15 +8,6 @@
  * {@link DEFAULT_PLANNING_CONFIG} without a circular dependency.
  */
 
-/** Far threshold (px). Below this, a group promotes to `group-as-proxy`. */
-export const FAR_THRESHOLD_PX = 80;
-
-/** Medium/Detail threshold (px). Above this, tiles use real detail chunks. */
-export const DETAIL_THRESHOLD_PX = 150;
-
-/** Hysteresis band (px) on either side of each threshold. */
-export const HYSTERESIS_PX = 5;
-
 /**
  * Minimap lane offset — highest urgency, dedicated lane at `0` so
  * whole-sample spatial context appears within ~1 s of dataset open.
@@ -58,20 +49,8 @@ export const MINIMAP_SEED_BULK_LANE_OFFSET = 2600;
 /** Priority lane offset for detail requests (visible chunks). */
 export const DETAIL_LANE_OFFSET = 500;
 
-/** Priority lane offset for proxy requests (group/tile proxy fallbacks). */
-export const PROXY_LANE_OFFSET = 1000;
-
-/** Default worker-global GPU proxy residency budget: 128 MiB. */
-export const DEFAULT_PROXY_RESIDENCY_BUDGET_BYTES = 128 * 1024 * 1024;
-
 /** Priority lane offset for prefetch (next-timepoint) requests. */
 export const PREFETCH_LANE_OFFSET = 1500;
-
-/**
- * Overview lane offset — per-entity coarsest pass that backstops the
- * shader's fallback chain. Lowest urgency.
- */
-export const OVERVIEW_LANE_OFFSET = 2500;
 
 /**
  * Coarse lane offset for the chunk-only bridge. Kept near the old
@@ -112,23 +91,8 @@ export const DISTANCE_WEIGHT = 10;
  */
 export const DEPTH_BIAS_VIEW = 0;
 
-/**
- * Bump on the parent-group `GroupProxy3D` request inside
- * `tiles-with-proxy-fallback` — pushes it below per-tile proxies so
- * the group proxy is only a coarse fallback while those are in flight.
- */
-export const GROUP_PROXY_PRIORITY_BUMP = 100;
-
 /** Per-tick planning tunables threaded through {@link plan}. */
 export interface PlanningConfig {
-  // -- mode-decision thresholds ---------------------------------------
-  /** Below this projected diagonal (px) a group promotes to `group-as-proxy`. */
-  farThresholdPx: number;
-  /** Above this projected diagonal (px) tiles use real detail chunks. */
-  detailThresholdPx: number;
-  /** Hysteresis band (px) on either side of each threshold. */
-  hysteresisPx: number;
-
   // -- prefetch -------------------------------------------------------
   /** Number of future timepoints to prefetch (length of the prefetch lane). */
   prefetchDepth: number;
@@ -147,22 +111,7 @@ export interface PlanningConfig {
    * visible Z range. See {@link DEPTH_BIAS_VIEW}.
    */
   depthBiasView: number;
-  /**
-   * Bump applied to the parent-group `GroupProxy3D` request emitted inside
-   * `tiles-with-proxy-fallback`. Pushes it below per-tile proxies.
-   */
-  groupProxyPriorityBump: number;
-
-  // -- GPU proxy residency -------------------------------------------
-  /** Worker-global GPU proxy residency budget, in bytes. */
-  proxyResidencyBudgetBytes: number;
-
   // -- residency model ------------------------------------------------
-  /**
-   * Internal bridge flag for chunk-only coarse/detail residency. False
-   * preserves the proxy-era planner until the new path reaches parity.
-   */
-  coarseDetailEnabled: boolean;
   /**
    * Detail render radius as a multiplier of the visible-region
    * half-diagonal. The default max value disables filtering.
@@ -194,37 +143,25 @@ export interface PlanningConfig {
   minimapSeedBulkLaneOffset?: number;
   /** Detail requests (visible chunks). */
   detailLaneOffset: number;
-  /** Proxy requests (group/tile proxy fallbacks). */
-  proxyLaneOffset: number;
   /** Prefetch (next-timepoint) requests. */
   prefetchLaneOffset: number;
-  /** Overview requests (lowest urgency). */
-  overviewLaneOffset: number;
   /** Coarse requests for the chunk-only bridge. */
   coarseLaneOffset: number;
 }
 
 /** Canonical defaults. Sourced from the module-level constants so the two cannot drift. */
 export const DEFAULT_PLANNING_CONFIG: PlanningConfig = {
-  farThresholdPx: FAR_THRESHOLD_PX,
-  detailThresholdPx: DETAIL_THRESHOLD_PX,
-  hysteresisPx: HYSTERESIS_PX,
   prefetchDepth: PREFETCH_DEPTH,
   importanceWeight: IMPORTANCE_WEIGHT,
   distanceWeight: DISTANCE_WEIGHT,
   depthBiasView: DEPTH_BIAS_VIEW,
-  groupProxyPriorityBump: GROUP_PROXY_PRIORITY_BUMP,
-  proxyResidencyBudgetBytes: DEFAULT_PROXY_RESIDENCY_BUDGET_BYTES,
-  coarseDetailEnabled: true,
   detailRenderRadiusView: RENDER_RADIUS_DISABLED_VIEW,
   coarseRenderRadiusView: RENDER_RADIUS_DISABLED_VIEW,
   minimapLaneOffset: MINIMAP_LANE_OFFSET,
   minimapSeedFastMaxChunks: MINIMAP_SEED_FAST_MAX_CHUNKS,
   minimapSeedBulkLaneOffset: MINIMAP_SEED_BULK_LANE_OFFSET,
   detailLaneOffset: DETAIL_LANE_OFFSET,
-  proxyLaneOffset: PROXY_LANE_OFFSET,
   prefetchLaneOffset: PREFETCH_LANE_OFFSET,
-  overviewLaneOffset: OVERVIEW_LANE_OFFSET,
   coarseLaneOffset: COARSE_LANE_OFFSET,
 };
 

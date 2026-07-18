@@ -1,5 +1,6 @@
 {
   "type": "command",
+  "request_id": "req-golden",
   "command": {
     "type": "rename_dataset",
     "id": "wds-0f3a",

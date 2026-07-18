@@ -17,71 +17,82 @@
 use std::sync::Arc;
 
 use lucida_content::DatasetId;
-use lucida_content::url::{dataset_url_hash16, normalize_dataset_url};
+use lucida_content::url::SourceVersion;
+use lucida_core::command::DocumentCommand;
 use lucida_protocol::{
-    AssetCatalog, DatasetOpenFailureDiagnostic, DatasetOpened, GeneratedAvailabilityDelta,
+    DatasetOpenFailureDiagnostic, DatasetOpenFailureKind, DatasetOpenStage, DatasetOpened,
+    GeneratedAvailabilityDelta,
 };
 use lucida_store::cache::CachedStore;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::Mutex;
 
 use crate::binding::{ChunkResolver, ServerBinding};
-use crate::generated::{
+use crate::generated_coarse::{
     DerivedChunkCache, GeneratedCoarseConfig, GeneratedCoarseService, GeneratedSchedulingConfig,
-    plan_generated_coarse_for_manifest,
+    GeneratedStatusBudget, plan_generated_coarse_for_source,
 };
-use crate::open_diagnostics::{backend_open_failure, import_failure};
-use crate::proxy::{ProxyCache, ProxyGenerator, proxy_catalog_entries_for_manifest};
+use crate::open_diagnostics::{
+    backend_open_failure, dataset_opened_validation_failure, import_failure, open_failure,
+    source_policy_failure,
+};
 use crate::session::Session;
+use crate::workspace::store::WorkspaceStore;
 use crate::workspace::types::WorkspaceDatasetSource;
-use crate::{BroadcastItem, ProxyConfig};
+use crate::{BroadcastSender, DatasetRuntimeConfig};
 
 /// Rebuild server-private dataset bindings for a lazily restored workspace.
 ///
 /// The durable workspace document stores client-facing dataset state, but
-/// operational chunk/proxy/generated services are intentionally not part of
+/// operational chunk/generated services are intentionally not part of
 /// `DocumentState`. On first open after a server restart, rebuild those
 /// bindings from the structured `workspace_datasets → dataset_sources`
 /// records before the first snapshot goes out.
-pub async fn restore_workspace_bindings(
+pub(crate) async fn restore_workspace_bindings(
     session: Arc<Mutex<Session>>,
-    tx: broadcast::Sender<BroadcastItem>,
+    tx: BroadcastSender,
+    workspace_id: &str,
+    persistence: Arc<dyn WorkspaceStore>,
     sources: Vec<WorkspaceDatasetSource>,
-    proxy_config: ProxyConfig,
+    dataset_runtime: DatasetRuntimeConfig,
+    generated_status_budget: Arc<GeneratedStatusBudget>,
 ) {
     for source in sources {
+        if session
+            .lock()
+            .await
+            .server_bindings
+            .contains_key(&source.workspace_dataset_id)
         {
-            let mut sess = session.lock().await;
-            if sess
-                .server_bindings
-                .contains_key(&source.workspace_dataset_id)
-            {
-                continue;
-            }
-            sess.record_binding_source(
-                source.workspace_dataset_id.clone(),
-                normalize_dataset_url(&source.canonical_url),
-                Some(source.dataset_source_id.clone()),
-                source.display_name.clone(),
-            );
+            continue;
         }
-        if let Err(e) =
-            restore_one_workspace_binding(Arc::clone(&session), tx.clone(), &source, &proxy_config)
-                .await
+        let redacted_source = dataset_runtime
+            .source_policy
+            .redact_untrusted(source.identity.locator.as_str());
+        if let Err(e) = restore_one_workspace_binding(
+            Arc::clone(&session),
+            tx.clone(),
+            workspace_id,
+            Arc::clone(&persistence),
+            &source,
+            &dataset_runtime,
+            Arc::clone(&generated_status_budget),
+        )
+        .await
         {
             {
                 let mut sess = session.lock().await;
                 sess.record_binding_restore_failure(
                     source.workspace_dataset_id.clone(),
-                    normalize_dataset_url(&source.canonical_url),
-                    Some(source.dataset_source_id.clone()),
+                    redacted_source.clone(),
+                    Some(source.identity.dataset_id()),
                     source.display_name.clone(),
                     e.clone(),
                 );
             }
             tracing::warn!(
                 dataset_id = %source.workspace_dataset_id,
-                dataset_source_id = %source.dataset_source_id,
-                url = %source.canonical_url,
+                dataset_source_id = %source.identity.dataset_id(),
+                source = %redacted_source,
                 error = %e.message,
                 stage = ?e.stage,
                 kind = ?e.kind,
@@ -94,19 +105,45 @@ pub async fn restore_workspace_bindings(
 
 async fn restore_one_workspace_binding(
     session: Arc<Mutex<Session>>,
-    tx: broadcast::Sender<BroadcastItem>,
+    tx: BroadcastSender,
+    workspace_id: &str,
+    persistence: Arc<dyn WorkspaceStore>,
     source: &WorkspaceDatasetSource,
-    proxy_config: &ProxyConfig,
+    dataset_runtime: &DatasetRuntimeConfig,
+    generated_status_budget: Arc<GeneratedStatusBudget>,
 ) -> Result<(), DatasetOpenFailureDiagnostic> {
-    let canonical_url = normalize_dataset_url(&source.canonical_url);
+    let admitted = dataset_runtime
+        .source_policy
+        .admit(source.identity.locator.as_str())
+        .await
+        .map_err(|error| source_policy_failure(&error))?;
+    let canonical_url = admitted.canonical_url().to_string();
+    let dataset_source_id = source.identity.dataset_id();
     let dataset_id = source.workspace_dataset_id.0.clone();
     let dataset_id_key = DatasetId(dataset_id.clone());
 
-    let store =
-        lucida_store::backend::open(&canonical_url).map_err(|e| backend_open_failure(&e))?;
-    let result = lucida_store::import::import_dataset(&store, &dataset_id, &source.display_name)
-        .await
-        .map_err(|e| import_failure(&e))?;
+    if admitted.identity != source.identity {
+        return Err(open_failure(
+            DatasetOpenStage::Authorization,
+            DatasetOpenFailureKind::Persistence,
+            false,
+            "persisted source identity no longer matches admitted locator",
+            None,
+        ));
+    }
+
+    let store = admitted
+        .open_backend()
+        .map_err(|error| backend_open_failure(&error))?;
+    let result = lucida_store::import::import_dataset_with_shared_cache(
+        &store,
+        &dataset_id,
+        &source.display_name,
+        Arc::clone(&dataset_runtime.source_cache),
+    )
+    .await
+    .map_err(|e| import_failure(&e))?;
+    let source_version = SourceVersion::new(source.identity.clone(), result.source_revision);
 
     let import_warnings: Vec<String> = result.warnings.iter().map(|w| w.message.clone()).collect();
     for warning in &result.warnings {
@@ -118,38 +155,80 @@ async fn restore_one_workspace_binding(
         );
     }
 
-    let catalog_entries =
-        proxy_catalog_entries_for_manifest(&result.manifest, proxy_config.legacy_proxy_enabled);
     let dataset_opened = DatasetOpened {
         manifest: result.manifest.clone(),
         fetch: result.fetch,
-        catalog: AssetCatalog {
-            entries: catalog_entries.clone(),
-        },
         // Server-side workspace restore has no originating client, so no peer
         // should auto-fit off this broadcast.
         opener_client_id: None,
     };
+    // Restore is an admission boundary too: persisted membership never makes
+    // a freshly imported manifest/fetch mismatch safe to register.
+    dataset_opened
+        .validate()
+        .map_err(|error| dataset_opened_validation_failure(&error))?;
 
-    let cached = Arc::new(CachedStore::new(store.clone(), 512 * 1024 * 1024));
+    if source.revision != Some(result.source_revision) {
+        let command = DocumentCommand::DatasetOpened(dataset_opened.clone());
+        let mut sess = session.lock().await;
+        let staged = sess.stage_durable_document(command).map_err(|error| {
+            open_failure(
+                DatasetOpenStage::WorkspacePersist,
+                DatasetOpenFailureKind::Persistence,
+                false,
+                "restored source generation exceeds document limits",
+                Some(error.to_string()),
+            )
+        })?;
+        let seq = staged.seq();
+        persistence
+            .persist_dataset_refreshed(
+                workspace_id,
+                &dataset_id_key,
+                &source_version,
+                &source.display_name,
+                seq,
+                staged.document(),
+            )
+            .await
+            .map_err(|error| {
+                open_failure(
+                    DatasetOpenStage::WorkspacePersist,
+                    DatasetOpenFailureKind::Persistence,
+                    true,
+                    "restored source generation could not be persisted",
+                    Some(error.to_string()),
+                )
+            })?;
+        sess.commit_staged_document(staged);
+    }
+
+    let cached = Arc::new(CachedStore::with_source_version(
+        store.clone(),
+        &source_version,
+        Arc::clone(&dataset_runtime.source_cache),
+    ));
     let resolver = Arc::new(ChunkResolver::new(&result.binding_seed));
     let generated_config = GeneratedCoarseConfig {
-        target_long_axis: proxy_config.generated_target_long_axis,
-        chunk_long_axis: proxy_config.generated_chunk_long_axis,
-        max_chunk_bytes: proxy_config.generated_max_chunk_bytes,
+        target_long_axis: dataset_runtime.generated_target_long_axis,
+        chunk_long_axis: dataset_runtime.generated_chunk_long_axis,
+        max_chunk_bytes: dataset_runtime.generated_max_chunk_bytes,
     };
-    let generated_plans = if proxy_config.generated_enabled {
-        plan_generated_coarse_for_manifest(&result.manifest, generated_config)
+    let generated_plans = if dataset_runtime.generated_enabled {
+        plan_generated_coarse_for_source(&result.manifest, result.source_revision, generated_config)
     } else {
         vec![]
     };
 
-    let url_hash16 = dataset_url_hash16(&canonical_url);
-    let derived_chunks = Arc::new(DerivedChunkCache::new_on_disk_with_budget(
-        proxy_config.generated_cache_dir.clone(),
-        url_hash16,
-        proxy_config.generated_disk_budget_bytes,
-    ));
+    let derived_chunks = Arc::new(
+        DerivedChunkCache::new_on_disk_for_source_with_status_budget(
+            dataset_runtime.generated_cache_dir.clone(),
+            &source_version,
+            dataset_runtime.generated_disk_budget_bytes,
+            Arc::clone(&dataset_runtime.source_cache),
+            generated_status_budget,
+        ),
+    );
     let mut generated_initial_delta = GeneratedAvailabilityDelta::default();
     for plan in &generated_plans {
         match derived_chunks.register_generated_plan(plan) {
@@ -164,14 +243,11 @@ async fn restore_one_workspace_binding(
                     error = %e,
                     "workspace.binding_restore.generated_registration_failed"
                 );
-                derived_chunks.upsert_level(plan.availability.clone());
-                generated_initial_delta
-                    .levels
-                    .push(plan.availability.clone());
+                let retained = derived_chunks.upsert_level(plan.availability.clone());
+                generated_initial_delta.levels.extend(retained.levels);
             }
         }
     }
-    let proxy_cache = Arc::new(ProxyCache::new(proxy_config.cache_dir.clone(), url_hash16));
     let generated_service = Arc::new(GeneratedCoarseService::new(
         generated_plans.clone(),
         Arc::new(result.manifest.clone()),
@@ -181,31 +257,20 @@ async fn restore_one_workspace_binding(
         Arc::clone(&session),
         tx,
         GeneratedSchedulingConfig {
-            concurrency: proxy_config.generated_concurrency,
-            background_chunk_limit: proxy_config.generated_background_chunk_limit,
+            concurrency: dataset_runtime.generated_concurrency,
+            background_chunk_limit: dataset_runtime.generated_background_chunk_limit,
             ..GeneratedSchedulingConfig::default()
         },
     ));
     generated_service.start();
-    let proxy_generator = Arc::new(ProxyGenerator::new(
-        proxy_cache.clone(),
-        cached.clone(),
-        resolver.clone(),
-        Arc::new(result.manifest),
-        proxy_config.concurrency,
-    ));
-
     let binding = ServerBinding {
-        source_url: canonical_url.clone(),
+        source: source_version,
         store,
         resolver,
         cache: cached,
         dataset_opened,
         derived_chunks,
         generated_service: generated_service.clone(),
-        legacy_proxy_enabled: proxy_config.legacy_proxy_enabled,
-        proxy_cache,
-        proxy_generator,
         import_warnings,
     };
 
@@ -214,7 +279,7 @@ async fn restore_one_workspace_binding(
         sess.record_binding_source(
             dataset_id_key.clone(),
             canonical_url,
-            Some(source.dataset_source_id.clone()),
+            Some(dataset_source_id),
             source.display_name.clone(),
         );
         sess.clear_binding_restore_failure(&dataset_id_key);

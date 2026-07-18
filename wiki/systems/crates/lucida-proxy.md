@@ -1,18 +1,19 @@
 ---
 type: Crate
 title: "lucida-proxy"
-description: "using source or generated pyramid levels (coarseDetailEnabled defaults true);"
-tags: [lucida, crate]
+description: "Historical proxy-generation crate deleted under ADR-0043."
+tags: [lucida, crate, historical]
 source_path: wiki/systems/crates/lucida-proxy.md
 created: 2026-04-18
-modified: 2026-07-06
+modified: 2026-07-16
 ---
 
 # lucida-proxy
 
-Status: Fallback path, still wired. The default model is chunk-only coarse/detail
-using source or generated pyramid levels (`coarseDetailEnabled` defaults true);
-this crate stays wired as the proxy fallback when that path can't serve.
+Status: **Retired and deleted (2026-07-16).** This page preserves the old
+design for archaeology only. [ADR-0043](../../decisions/0043-superseded-server-surfaces-sunset.md)
+removed the crate, its server modules, wire types, and web lane; source/generated
+coarse-detail chunks are the sole supported path.
 
 Pure-compute proxy generation. Given a `DatasetManifest` plus caller-supplied source-volume bytes, produces a `ProxyAsset` — a small low-resolution placeholder volume that stands in for either a single tile's downsampled image (`TileProxy3D`) or an aggregated group composed of many tiles (`GroupProxy3D`).
 
@@ -49,7 +50,12 @@ The trade-off: callers must pre-fetch all source chunks into a `ProxySourceData`
 
 ## Invariants
 
-- **`source_content_hash` in the header is the BLAKE3 of the source bytes** that fed generation. The server cache uses it to invalidate stale proxies if the source dataset changes. `algorithm_version` is bumped on any algorithm change so old cached proxies are rejected.
+- **`source_content_hash` is a metadata fingerprint, not a voxel-byte hash.**
+  It covers the contributing entity ids/kinds, transforms, multiscale
+  geometry, and `(t, c)` selectors. The cache therefore invalidates when that
+  generation geometry changes, but cannot detect byte-only source replacement
+  under identical metadata. `algorithm_version` is bumped when generation
+  semantics change so old cached proxies are rejected.
 - **Output dtype is always `u16`**. The on-the-wire frame from the server is `[client_id u32 LE][key_len u16 LE][key][header 64][voxels u16 row-major]` — see `lucida-server/src/handler.rs:encode_proxy_frame`.
 - **Output dims are `[Z, Y, X]` only**. T and C are encoded in the cache key, not in the voxel buffer. One proxy = one (entity, kind, t, c) tuple.
 

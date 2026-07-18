@@ -1,5 +1,5 @@
 /**
- * Per-image manifest index. Built once per `deliverToWorker` tick from
+ * Per-(dataset,image) manifest index. Built once per `deliverToWorker` tick from
  * `ctx.datasets` so chunk dispatch is O(1) per chunk instead of O(D×I).
  */
 
@@ -36,11 +36,15 @@ export interface ManifestEntry {
   labelLevel0?: Level0;
 }
 
+export function manifestEntryKey(datasetId: string, imageId: string): string {
+  return `${datasetId}\u0000${imageId}`;
+}
+
 /**
- * If two datasets contain images sharing an image_id (not expected in
- * practice), last-writer-wins. Label images are indexed alongside the
- * intensity images (under their own distinct image ids) so their chunk
- * deliveries resolve geometry the same way.
+ * Dataset identity is part of the key: image ids are stable only within a
+ * dataset, so two open datasets may legitimately use the same source image id.
+ * Label images are indexed alongside intensity images under the same compound
+ * identity rule.
  */
 export function buildManifestByImage(
   datasets: Map<string, DatasetEntry>,
@@ -48,7 +52,7 @@ export function buildManifestByImage(
   const out = new Map<string, ManifestEntry>();
   for (const [datasetId, ds] of datasets) {
     for (const image of ds.manifest.images) {
-      out.set(image.image_id, {
+      out.set(manifestEntryKey(datasetId, image.image_id), {
         datasetId,
         manifest: ds.manifest,
         image,
@@ -62,7 +66,7 @@ export function buildManifestByImage(
       const label0 = label.image.multiscale.levels[0];
       const source0 = source?.multiscale.levels[0] ?? label0;
       if (!label0) continue;
-      out.set(label.image.image_id, {
+      out.set(manifestEntryKey(datasetId, label.image.image_id), {
         datasetId,
         manifest: ds.manifest,
         image: label.image,

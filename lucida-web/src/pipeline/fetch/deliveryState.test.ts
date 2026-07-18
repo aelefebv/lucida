@@ -42,27 +42,12 @@ describe("DeliveryState", () => {
     expect(state.wasChunkSent("img-0", 1, "b")).toBe(false);
   });
 
-  it("clears chunk state but preserves proxy state on plan rebuild", () => {
+  it("clears chunk state on plan rebuild", () => {
     const state = new DeliveryState();
     state.markChunkSent("img-0", 0, "a");
-    state.markProxySent("ds1|tile-0|TileProxy3D|0|0");
 
     state.onPlanRebuildStart();
 
     expect(state.wasChunkSent("img-0", 0, "a")).toBe(false);
-    expect(state.wasProxySent("ds1|tile-0|TileProxy3D|0|0")).toBe(true);
-  });
-
-  it("tracks proxy state by composite key and clears by key or dataset", () => {
-    const state = new DeliveryState();
-    state.markProxySent("ds1|tile-0|TileProxy3D|0|0");
-    state.markProxySent("ds2|tile-0|TileProxy3D|0|0");
-
-    state.clearProxySent("ds1|tile-0|TileProxy3D|0|0");
-    expect(state.wasProxySent("ds1|tile-0|TileProxy3D|0|0")).toBe(false);
-    expect(state.wasProxySent("ds2|tile-0|TileProxy3D|0|0")).toBe(true);
-
-    state.clearProxySentForDataset("ds2");
-    expect(state.wasProxySent("ds2|tile-0|TileProxy3D|0|0")).toBe(false);
   });
 });

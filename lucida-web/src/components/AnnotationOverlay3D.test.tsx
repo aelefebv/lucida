@@ -1,11 +1,13 @@
 // @vitest-environment happy-dom
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { createRef } from "react";
 import type { WasmScene } from "lucida-core";
 import { AnnotationOverlay3D } from "./AnnotationOverlay3D.tsx";
-import type { Annotation } from "./annotationDocument.ts";
+import type { Annotation, AnnotationOverlayHandle } from "./annotationDocument.ts";
+import type { ViewportCommand } from "../commands.ts";
+import type { ViewportCoordinator } from "../viewportCoordinator.ts";
 
 /**
  * Stand-in for the WASM scene exercising only the 3D overlay's surface:
@@ -18,7 +20,8 @@ import type { Annotation } from "./annotationDocument.ts";
 function makeScene(
   initial: Annotation[],
   pick: (x: number, y: number) => number[] = () => [50, 60, 7],
-): { scene: WasmScene; applied: Array<Record<string, unknown>> } {
+  project: () => number[] = () => [100, 100],
+): { scene: WasmScene; applied: Array<Record<string, unknown>>; removePin: (id: string) => void } {
   let pins: Annotation[] = JSON.parse(JSON.stringify(initial));
   const applied: Array<Record<string, unknown>> = [];
   const scene = {
@@ -26,7 +29,7 @@ function makeScene(
     // Every vertex projects to a fixed, on-screen point so the marker renders
     // (the overlay hides a marker only on an empty projection).
     project_annotation: (_ds: string, _x: number, _y: number, _z: number) =>
-      new Float64Array([100, 100]),
+      new Float64Array(project()),
     pick_annotation_voxel: (_ds: string, x: number, y: number) =>
       new Float64Array(pick(x, y)),
     apply_command: (json: string) => {
@@ -74,13 +77,16 @@ function makeScene(
       }
     },
   } as unknown as WasmScene;
-  return { scene, applied };
+  return { scene, applied, removePin: (id: string) => { pins = pins.filter((pin) => pin.id !== id); } };
 }
 
 /** A canvas with a fixed layout box that records pointer-capture transfers and
  * any pointerdown events forwarded (dispatched) onto it. */
 function makeCanvas() {
   const canvas = document.createElement("canvas");
+  canvas.tabIndex = 0;
+  canvas.dataset.testViewerCanvas = "";
+  document.body.append(canvas);
   Object.defineProperty(canvas, "clientWidth", { value: 800, configurable: true });
   Object.defineProperty(canvas, "clientHeight", { value: 600, configurable: true });
   canvas.getBoundingClientRect = () =>
@@ -95,6 +101,18 @@ function makeCanvas() {
   const forwardedDowns: PointerEvent[] = [];
   canvas.addEventListener("pointerdown", (e) => forwardedDowns.push(e as PointerEvent));
   return { canvas, capturedPointers, forwardedDowns };
+}
+
+function viewportForScene(scene: WasmScene): Pick<ViewportCoordinator, "apply"> {
+  return {
+    apply(commands) {
+      const batch: readonly ViewportCommand[] = Array.isArray(commands)
+        ? commands
+        : [commands as ViewportCommand];
+      for (const command of batch) scene.apply_command(JSON.stringify(command));
+      return true;
+    },
+  };
 }
 
 // The annotation-author identity is now a stable string (issue #777), not the
@@ -122,13 +140,19 @@ function renderOverlay(opts: {
   /** The view's Z/T/C. Defaults to the on-context view for the standard test
    * pins (z=3, t/c absent → 0); the off-context suite overrides it. */
   viewContext?: { z: number; t: number; c: number };
+  project?: () => number[];
+  frameSignal?: {
+    subscribePresentedFrame: (listener: () => void) => () => void;
+  };
+  visible?: boolean;
 }) {
-  const { scene, applied } = makeScene(opts.pins, opts.pick);
+  const { scene, applied, removePin } = makeScene(opts.pins, opts.pick, opts.project);
   const sent: Array<Record<string, unknown>> = [];
   const sceneRef = createRef<WasmScene | null>();
   sceneRef.current = scene;
   let changed = 0;
   let version = 0;
+  let visible = opts.visible ?? true;
   let viewContext = opts.viewContext ?? { z: 3, t: 0, c: 0 };
   const { canvas, capturedPointers, forwardedDowns } = makeCanvas();
   const overlay = (v: number) => (
@@ -143,9 +167,13 @@ function renderOverlay(opts: {
       onDocumentChanged={() => {
         changed += 1;
       }}
+      viewport={viewportForScene(scene)}
+      frameSignal={opts.frameSignal}
+      visible={visible}
     />
   );
-  const { rerender } = render(overlay(version));
+  const rendered = render(overlay(version));
+  const { rerender } = rendered;
   // Re-read the authoritative pin set by bumping the document version, exactly as
   // App.tsx does after onDocumentChanged — so a test can observe a just-added
   // comment surface in the open thread.
@@ -160,7 +188,23 @@ function renderOverlay(opts: {
     viewContext = next;
     rerender(overlay(version));
   };
-  return { applied, sent, getChanged: () => changed, capturedPointers, forwardedDowns, bumpVersion, setViewContext };
+  const setVisible = (next: boolean) => {
+    visible = next;
+    rerender(overlay(version));
+  };
+  return {
+    applied,
+    sent,
+    getChanged: () => changed,
+    capturedPointers,
+    forwardedDowns,
+    bumpVersion,
+    removePin,
+    setVisible,
+    setViewContext,
+    canvas,
+    unmount: rendered.unmount,
+  };
 }
 
 beforeEach(() => {
@@ -169,6 +213,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  document.querySelectorAll("canvas[data-test-viewer-canvas]").forEach((canvas) => canvas.remove());
 });
 
 describe("AnnotationOverlay3D — Shift+drag moves; plain drag orbits (issue #778)", () => {
@@ -276,6 +321,52 @@ describe("AnnotationOverlay3D — Shift+drag moves; plain drag orbits (issue #77
   });
 });
 
+describe("AnnotationOverlay3D — canonical viewport port", () => {
+  it("routes imperative voxel focus through the coordinator without a direct scene write", async () => {
+    const pin = ownPin({ id: "focus-3d", position: [11, 29], z: 7 });
+    const { scene, applied } = makeScene([pin]);
+    const sceneRef = createRef<WasmScene | null>();
+    sceneRef.current = scene;
+    const overlayRef = createRef<AnnotationOverlayHandle>();
+    const viewport = { apply: vi.fn(() => true) };
+    const { canvas } = makeCanvas();
+    render(
+      <AnnotationOverlay3D
+        ref={overlayRef}
+        datasetId="wds-1"
+        wasmSceneRef={sceneRef}
+        canvas={canvas}
+        version={0}
+        viewContext={{ z: 7, t: 0, c: 0 }}
+        myId={MY_ID}
+        sendCommand={() => {}}
+        onDocumentChanged={() => {}}
+        viewport={viewport}
+      />,
+    );
+    await screen.findByTestId("annot-pin-focus-3d");
+
+    let focused = false;
+    await act(async () => {
+      focused = await overlayRef.current!.focusPin("focus-3d");
+    });
+
+    expect(focused).toBe(true);
+    expect(viewport.apply).toHaveBeenCalledExactlyOnceWith(
+      {
+        type: "arcball_center_on_voxel",
+        dataset_id: "wds-1",
+        x: 11,
+        y: 29,
+        z: 7,
+      },
+      { source: "annotation_focus_3d", history: { label: "annotation focus" } },
+    );
+    expect(applied).toEqual([]);
+    expect(screen.getByTestId("annot-thread-focus-3d")).toBeTruthy();
+  });
+});
+
 describe("AnnotationOverlay3D — comment thread, brought to 3D (issue #771)", () => {
   /** Open a pin's thread with a pure click (down+up same point, then the
    * synthetic click), the same gesture the 2D suite uses so drag-suppression
@@ -292,10 +383,67 @@ describe("AnnotationOverlay3D — comment thread, brought to 3D (issue #771)", (
     // Closed to start — no popover.
     expect(screen.queryByTestId("annot-thread-pin-a")).toBeNull();
     openThread("pin-a");
-    expect(screen.getByTestId("annot-thread-pin-a")).toBeTruthy();
+    const thread = screen.getByTestId("annot-thread-pin-a");
+    const marker = screen.getByTestId("annot-pin-pin-a");
+    expect(thread.getAttribute("role")).toBe("dialog");
+    expect(thread.hasAttribute("data-floating-safe-region")).toBe(true);
+    expect(marker.getAttribute("aria-controls")).toBe("annot-thread-pin-a");
+    expect(marker.getAttribute("aria-expanded")).toBe("true");
     // Clicking again closes it (toggle), like 2D.
     openThread("pin-a");
     expect(screen.queryByTestId("annot-thread-pin-a")).toBeNull();
+  });
+
+  it("restores the 3D marker after both Close and Escape", () => {
+    renderOverlay({ pins: [ownPin()] });
+    const marker = screen.getByTestId("annot-pin-pin-a");
+    // The production projection frame reveals this wrapper before the user can
+    // click it; make that painted precondition explicit in happy-dom.
+    screen.getByTestId("annot-pin-wrapper-pin-a").style.display = "";
+
+    openThread("pin-a");
+    const close = screen.getByRole("button", { name: "Close thread" });
+    close.focus();
+    fireEvent.click(close);
+    expect(document.activeElement).toBe(marker);
+
+    openThread("pin-a");
+    const composer = screen.getByTestId("comment-add-input-pin-a");
+    composer.focus();
+    fireEvent.keyDown(composer, { key: "Escape" });
+    expect(document.activeElement).toBe(marker);
+  });
+
+  it("moves focus to the viewer when the projected 3D marker leaves the camera", async () => {
+    let projected: number[] = [100, 100];
+    const frameListeners = new Set<() => void>();
+    const frameSignal = {
+      subscribePresentedFrame(listener: () => void) {
+        frameListeners.add(listener);
+        return () => frameListeners.delete(listener);
+      },
+    };
+    const { canvas } = renderOverlay({
+      pins: [ownPin()],
+      project: () => projected,
+      frameSignal,
+    });
+    const wrapper = screen.getByTestId("annot-pin-wrapper-pin-a");
+    wrapper.style.display = "";
+    openThread("pin-a");
+    const marker = screen.getByTestId("annot-pin-pin-a");
+    marker.focus();
+
+    projected = [];
+    await act(async () => {
+      for (const listener of frameListeners) listener();
+      for (const listener of frameListeners) listener();
+      wrapper.style.display = "none";
+      window.dispatchEvent(new Event("scroll"));
+    });
+
+    await waitFor(() => expect(screen.queryByTestId("annot-thread-pin-a")).toBeNull());
+    expect(document.activeElement).toBe(canvas);
   });
 
   it("the open 3D thread shows the pin's existing comment text", () => {
@@ -407,6 +555,61 @@ describe("AnnotationOverlay3D — comment thread, brought to 3D (issue #771)", (
     expect(removes).toHaveLength(1);
     expect(removes[0]).toEqual({ type: "remove_annotation", dataset_id: "wds-1", id: "pin-a" });
     expect(getChanged()).toBe(1);
+  });
+
+  it("falls back to the viewer when 3D deletion removes the focused marker", async () => {
+    const { bumpVersion, canvas } = renderOverlay({ pins: [ownPin()] });
+    screen.getByTestId("annot-pin-wrapper-pin-a").style.display = "";
+    openThread("pin-a");
+    fireEvent.click(screen.getByTestId("pin-delete-pin-a"));
+    const confirm = screen.getByTestId("pin-delete-confirm-pin-a");
+    confirm.focus();
+    fireEvent.click(confirm);
+    bumpVersion();
+
+    await waitFor(() => expect(screen.queryByTestId("annot-thread-pin-a")).toBeNull());
+    await act(async () => Promise.resolve());
+    expect(screen.queryByTestId("annot-pin-pin-a")).toBeNull();
+    expect(document.activeElement).toBe(canvas);
+  });
+
+  it("falls back to the viewer when a remotely removed 3D marker owned focus", async () => {
+    const { removePin, bumpVersion, canvas } = renderOverlay({ pins: [ownPin()] });
+    screen.getByTestId("annot-pin-wrapper-pin-a").style.display = "";
+    const marker = screen.getByTestId("annot-pin-pin-a");
+    openThread("pin-a");
+    marker.focus();
+
+    removePin("pin-a");
+    bumpVersion();
+    await waitFor(() => expect(screen.queryByTestId("annot-pin-pin-a")).toBeNull());
+    await act(async () => Promise.resolve());
+    expect(document.activeElement).toBe(canvas);
+  });
+
+  it("falls back to the viewer when hiding 3D annotations removes a focused marker", async () => {
+    const { setVisible, canvas } = renderOverlay({ pins: [ownPin()] });
+    screen.getByTestId("annot-pin-wrapper-pin-a").style.display = "";
+    const marker = screen.getByTestId("annot-pin-pin-a");
+    openThread("pin-a");
+    marker.focus();
+
+    setVisible(false);
+    await act(async () => Promise.resolve());
+    expect(screen.queryByTestId("annot-pin-pin-a")).toBeNull();
+    expect(document.activeElement).toBe(canvas);
+  });
+
+  it("falls back to the viewer when the 3D overlay unmounts with marker-owned focus", async () => {
+    const { unmount, canvas } = renderOverlay({ pins: [ownPin()] });
+    screen.getByTestId("annot-pin-wrapper-pin-a").style.display = "";
+    const marker = screen.getByTestId("annot-pin-pin-a");
+    openThread("pin-a");
+    marker.focus();
+
+    unmount();
+    await act(async () => Promise.resolve());
+    expect(document.activeElement).toBe(canvas);
   });
 
   it("a peer can open a peer's pin thread and add a comment (anyone may comment)", () => {
@@ -619,7 +822,7 @@ describe("AnnotationOverlay3D — passive pin-select stays gentle; Go to author'
         myId={MY_ID}
         sendCommand={() => {}}
         onDocumentChanged={() => {}}
-        onViewportChanged={() => {}}
+        viewport={viewportForScene(scene)}
         onGoToAuthorView={(id) => goToCalls.push(id)}
       />,
     );

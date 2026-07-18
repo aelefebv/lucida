@@ -16,7 +16,7 @@
 //! - Anything else (empty chain, length > 2, missing `bytes`, `endian: big`,
 //!   missing `endian`, unknown second-codec name, blosc with unsupported
 //!   `cname`/`shuffle`/`typesize`, blosc with missing config) is rejected
-//!   with a [`StoreError::Metadata`] whose message names the offending value
+//!   with a [`StoreError::Codec`] whose message names the offending value
 //!   so the operator can find it in their OME-Zarr metadata.
 
 use serde::{Deserialize, Serialize};
@@ -71,16 +71,16 @@ pub enum BloscShuffle {
 /// - **Length 2**: must be `[bytes(little), <compressor>]`. The compressor is
 ///   one of `lz4` / `numcodecs/lz4` / `zstd` / `numcodecs/zstd` / `blosc` with
 ///   a validated config.
-/// - All other shapes are rejected with a [`StoreError::Metadata`] whose
+/// - All other shapes are rejected with a [`StoreError::Codec`] whose
 ///   message contains the offending value verbatim.
 pub fn parse_codec_chain(codecs: &[serde_json::Value]) -> Result<StorageCompression, StoreError> {
     if codecs.is_empty() {
-        return Err(StoreError::Metadata(
+        return Err(StoreError::Codec(
             "storage codec chain is empty (expected [bytes] or [bytes, compressor])".into(),
         ));
     }
     if codecs.len() > 2 {
-        return Err(StoreError::Metadata(format!(
+        return Err(StoreError::Codec(format!(
             "storage codec chain too long: got {} codecs (expected 1 or 2)",
             codecs.len(),
         )));
@@ -89,24 +89,22 @@ pub fn parse_codec_chain(codecs: &[serde_json::Value]) -> Result<StorageCompress
     // First codec must be `bytes` with `endian: "little"`.
     let first = &codecs[0];
     let first_name = first.get("name").and_then(|n| n.as_str()).ok_or_else(|| {
-        StoreError::Metadata("first storage codec missing 'name' field (expected 'bytes')".into())
+        StoreError::Codec("first storage codec missing 'name' field (expected 'bytes')".into())
     })?;
     if first_name != "bytes" {
-        return Err(StoreError::Metadata(format!(
+        return Err(StoreError::Codec(format!(
             "first storage codec must be 'bytes', got '{first_name}'",
         )));
     }
     let first_config = first.get("configuration").ok_or_else(|| {
-        StoreError::Metadata(
-            "bytes codec missing 'configuration' object (need endian: little)".into(),
-        )
+        StoreError::Codec("bytes codec missing 'configuration' object (need endian: little)".into())
     })?;
     let endian = first_config
         .get("endian")
         .and_then(|e| e.as_str())
-        .ok_or_else(|| StoreError::Metadata("bytes codec missing 'endian' configuration".into()))?;
+        .ok_or_else(|| StoreError::Codec("bytes codec missing 'endian' configuration".into()))?;
     if endian != "little" {
-        return Err(StoreError::Metadata(format!(
+        return Err(StoreError::Codec(format!(
             "bytes codec endian must be 'little', got '{endian}'",
         )));
     }
@@ -118,7 +116,7 @@ pub fn parse_codec_chain(codecs: &[serde_json::Value]) -> Result<StorageCompress
     // Second codec is a compressor.
     let second = &codecs[1];
     let second_name = second.get("name").and_then(|n| n.as_str()).ok_or_else(|| {
-        StoreError::Metadata(
+        StoreError::Codec(
             "second storage codec missing 'name' field (expected lz4/zstd/blosc)".into(),
         )
     })?;
@@ -127,7 +125,7 @@ pub fn parse_codec_chain(codecs: &[serde_json::Value]) -> Result<StorageCompress
         "zstd" | "numcodecs/zstd" => Ok(StorageCompression::Zstd),
         "blosc" => {
             let cfg = second.get("configuration").ok_or_else(|| {
-                StoreError::Metadata(
+                StoreError::Codec(
                     "blosc codec missing 'configuration' object (need cname/shuffle/typesize)"
                         .into(),
                 )
@@ -135,7 +133,7 @@ pub fn parse_codec_chain(codecs: &[serde_json::Value]) -> Result<StorageCompress
             let blosc = parse_blosc_config(cfg)?;
             Ok(StorageCompression::Blosc(blosc))
         }
-        other => Err(StoreError::Metadata(format!(
+        other => Err(StoreError::Codec(format!(
             "unsupported codec '{other}' in storage chain (supported: lz4, zstd, blosc)",
         ))),
     }
@@ -148,21 +146,20 @@ fn parse_blosc_config(cfg: &serde_json::Value) -> Result<BloscConfig, StoreError
     let cname = cfg
         .get("cname")
         .and_then(|c| c.as_str())
-        .ok_or_else(|| StoreError::Metadata("blosc configuration missing 'cname' field".into()))?;
-    let shuffle_str = cfg.get("shuffle").and_then(|s| s.as_str()).ok_or_else(|| {
-        StoreError::Metadata("blosc configuration missing 'shuffle' field".into())
-    })?;
+        .ok_or_else(|| StoreError::Codec("blosc configuration missing 'cname' field".into()))?;
+    let shuffle_str = cfg
+        .get("shuffle")
+        .and_then(|s| s.as_str())
+        .ok_or_else(|| StoreError::Codec("blosc configuration missing 'shuffle' field".into()))?;
     let typesize_raw = cfg
         .get("typesize")
         .and_then(|t| t.as_u64())
-        .ok_or_else(|| {
-            StoreError::Metadata("blosc configuration missing 'typesize' field".into())
-        })?;
+        .ok_or_else(|| StoreError::Codec("blosc configuration missing 'typesize' field".into()))?;
 
     let cname = match cname {
         "zstd" => BloscCompressor::Zstd,
         other => {
-            return Err(StoreError::Metadata(format!(
+            return Err(StoreError::Codec(format!(
                 "blosc cname '{other}' not supported (only 'zstd')",
             )));
         }
@@ -172,7 +169,7 @@ fn parse_blosc_config(cfg: &serde_json::Value) -> Result<BloscConfig, StoreError
         "shuffle" => BloscShuffle::Byte,
         "bitshuffle" => BloscShuffle::Bit,
         other => {
-            return Err(StoreError::Metadata(format!(
+            return Err(StoreError::Codec(format!(
                 "blosc shuffle '{other}' not supported (use noshuffle, shuffle, or bitshuffle)",
             )));
         }
@@ -180,7 +177,7 @@ fn parse_blosc_config(cfg: &serde_json::Value) -> Result<BloscConfig, StoreError
     let typesize = match typesize_raw {
         1 | 2 | 4 => typesize_raw as u8,
         other => {
-            return Err(StoreError::Metadata(format!(
+            return Err(StoreError::Codec(format!(
                 "blosc typesize {other} not supported (only 1, 2, or 4)",
             )));
         }

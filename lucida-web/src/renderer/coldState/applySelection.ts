@@ -2,13 +2,12 @@
  * Selection-scrub cold-state update.
  *
  * Applies a {@link ColdStateSelectionMessage}: re-point the dataset's most
- * recent cold state at the new current T / Z / visible region (and the
- * budget-admitted proxy keys for that selection) and re-ingest it via the
+ * recent cold state at the new current T / Z / visible region and re-ingest it via the
  * same {@link applyColdState} path a full cold state uses.
  *
  * `currentT` / `currentZ` are top-level scalars on the cold state, never part
  * of a per-entity descriptor, so on a pure scrub the active set — geometry,
- * LOD, matrices, proxy flags, display state — is exactly what the last full
+ * LOD, matrices, and display state — is exactly what the last full
  * cold state built. Re-ingesting with the swapped selection repacks the atlas
  * indirection for the new plane/timepoint and yields a result byte-identical to
  * a full cold state at the new T / Z — without the sender rebuilding or
@@ -39,7 +38,6 @@ export function applyColdStateSelection(
   cold.currentT = msg.currentT;
   cold.currentZ = msg.currentZ;
   cold.visibleRegion = msg.visibleRegion;
-  cold.desiredProxyKeys = msg.desiredProxyKeys;
   cold.epochs = msg.epochs;
 
   ctx.state.currentColdState = cold;

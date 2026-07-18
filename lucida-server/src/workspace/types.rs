@@ -5,6 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use lucida_content::DatasetId;
+use lucida_content::url::{SourceIdentity, SourceRevision};
 use lucida_core::saved_view::SavedView;
 use lucida_core::scene::DocumentState;
 use serde::{Deserialize, Serialize};
@@ -154,8 +155,10 @@ pub struct WorkspaceRecord {
 #[derive(Debug, Clone)]
 pub struct WorkspaceDatasetSource {
     pub workspace_dataset_id: DatasetId,
-    pub dataset_source_id: String,
-    pub canonical_url: String,
+    pub identity: SourceIdentity,
+    /// `None` is accepted only for rows written before source revisions were
+    /// introduced; the next successful import upgrades the membership.
+    pub revision: Option<SourceRevision>,
     pub display_name: String,
 }
 
@@ -192,6 +195,7 @@ pub struct WorkspaceViewerProfile {
     pub workspace_id: String,
     pub user_email: String,
     pub profile: String,
+    pub revision: u64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub seed_source: Option<String>,

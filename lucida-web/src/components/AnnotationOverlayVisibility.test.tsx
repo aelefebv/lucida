@@ -25,6 +25,7 @@ import type { Annotation } from "./annotationDocument.ts";
 import { AnnotationOverlay3D } from "./AnnotationOverlay3D.tsx";
 
 const MY_ID = "7";
+const viewport = { apply: () => true, endGesture: () => {} };
 
 /** A minimal 2D scene stand-in: only the surface the 2D overlay reads. */
 function make2DScene(initial: Annotation[]): WasmScene {
@@ -93,6 +94,7 @@ describe("AnnotationOverlay (2D) — visible prop (issue #792)", () => {
         myId={MY_ID}
         sendCommand={() => {}}
         onDocumentChanged={() => {}}
+        viewport={viewport}
         visible={visible}
       />,
     );
@@ -107,6 +109,7 @@ describe("AnnotationOverlay (2D) — visible prop (issue #792)", () => {
           myId={MY_ID}
           sendCommand={() => {}}
           onDocumentChanged={() => {}}
+          viewport={viewport}
           visible={next}
         />,
       );
@@ -200,6 +203,7 @@ describe("AnnotationOverlay3D — visible prop (issue #792)", () => {
         myId={MY_ID}
         sendCommand={() => {}}
         onDocumentChanged={() => {}}
+        viewport={viewport}
         visible={visible}
       />,
     );
@@ -214,6 +218,7 @@ describe("AnnotationOverlay3D — visible prop (issue #792)", () => {
           myId={MY_ID}
           sendCommand={() => {}}
           onDocumentChanged={() => {}}
+          viewport={viewport}
           visible={next}
         />,
       );
@@ -276,6 +281,7 @@ describe("toolbar toggle wiring (issue #792) — button flips overlay visibility
           myId={MY_ID}
           sendCommand={() => {}}
           onDocumentChanged={() => {}}
+          viewport={viewport}
           visible={annotationsVisible}
         />
       </>

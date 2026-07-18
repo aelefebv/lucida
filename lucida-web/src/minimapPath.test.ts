@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { WasmScene } from "lucida-core";
-import { createMinimapState, identityModelMatrix, intersectSliceViewWithMember, minimapCoarseLevelIndex, readMemberRenderMatrices, readMinimapOverviewEpochs, resolveMinimapLayerContrast, resolveMinimapLayerColormap, tickMinimap, tickMinimapOverview } from "./minimapPath.ts";
+import { createMinimapState, identityModelMatrix, intersectSliceViewWithMember, minimapCoarseLevelIndex, readCameraViewRotation, readMemberRenderMatrices, readMinimapOverviewEpochs, resolveMinimapLayerContrast, resolveMinimapLayerColormap, tickMinimap, tickMinimapOverview } from "./minimapPath.ts";
 import type { MinimapState } from "./minimapPath.ts";
 import type { MultiscaleInfo } from "./manifestTypes.ts";
 import type { TickContext, MinimapOverlayData } from "./renderLoopTypes.ts";
@@ -238,6 +238,19 @@ describe("readMinimapOverviewEpochs", () => {
   });
 });
 
+describe("readCameraViewRotation", () => {
+  it("uses the authoritative wasm basis, including fly roll", () => {
+    const rolled = new Float32Array([0, -1, 0, 1, 0, 0, 0, 0, 1]);
+    const scene = {
+      camera_view_rotation: () => rolled,
+      camera_theta: () => 0.5,
+      camera_phi: () => 0.8,
+    } as unknown as WasmScene;
+
+    expect(Array.from(readCameraViewRotation(scene))).toEqual(Array.from(rolled));
+  });
+});
+
 describe("tickMinimap overview/overlay split", () => {
   /**
    * A mutable fake scene exposing just the surface `tickMinimap` reads, so a
@@ -256,6 +269,7 @@ describe("tickMinimap overview/overlay split", () => {
      * mode a pure look-around changes ONLY this (eye + theta/phi stay fixed).
      */
     invViewProj: number[];
+    viewRotation: number[];
     order: string;
     settings: string;
     /** Bumped by a dataset add/remove (see readMinimapOverviewEpochs). */
@@ -275,6 +289,7 @@ describe("tickMinimap overview/overlay split", () => {
       center: [0, 0],
       eye: [0, 0, 10],
       invViewProj: new Array<number>(16).fill(0),
+      viewRotation: [1, 0, 0, 0, 1, 0, 0, 0, 1],
       order: JSON.stringify(["ds"]),
       settings: JSON.stringify({
         ds: { visible: true, opacity: 1, blend_mode: "normal", contrast_min: 0, contrast_max: 65535, gamma: 1 },
@@ -286,6 +301,7 @@ describe("tickMinimap overview/overlay split", () => {
     s.wasm = {
       camera_theta: () => s.theta,
       camera_phi: () => s.phi,
+      camera_view_rotation: () => new Float32Array(s.viewRotation),
       all_dataset_settings: () => s.settings,
       dataset_order: () => s.order,
       c: () => s.activeC,
@@ -295,7 +311,7 @@ describe("tickMinimap overview/overlay split", () => {
       center: () => s.center,
       eye_position: () => new Float32Array(s.eye),
       epochs: () =>
-        JSON.stringify({ content: s.contentEpoch, layout: s.layoutEpoch, view: 0, selection: 0, asset: 0 }),
+        JSON.stringify({ content: s.contentEpoch, layout: s.layoutEpoch, view: 0, selection: 0 }),
       // 35 floats: [0..16) invViewProj, [16..19) eye, [19..35) viewProj.
       minimap_camera: () => new Float32Array(35),
       member_positions: () => JSON.stringify({ m0: [0, 0] }),
@@ -371,7 +387,7 @@ describe("tickMinimap overview/overlay split", () => {
     expect(overlay.mock.calls[0][0].staticDirty).toBe(true);
 
     // Pan the main camera: overlay must recompute, overview must NOT redraw.
-    scene.center = [1000, 1000];
+    scene.center = [600, 600];
     tickMinimap(ctx, state, 0);
     expect(renderCount.n).toBe(1);
     expect(overlay).toHaveBeenCalledTimes(2);
@@ -395,6 +411,23 @@ describe("tickMinimap overview/overlay split", () => {
     tickMinimap(ctx, state, 0);
     expect(renderCount.n).toBe(1);
     expect(overlay).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the slice viewport outline in the same world bounds across DPR", () => {
+    const captureAt = (dpr: number) => {
+      globalThis.devicePixelRatio = dpr;
+      const scene = makeScene();
+      scene.center = [250, 250];
+      scene.zoom = 2;
+      const overlay = vi.fn();
+      tickMinimap(makeCtx(scene, "slice", { n: 0 }), makeState(overlay), 0);
+      return overlay.mock.calls[0][0].sliceViewports[0].bounds;
+    };
+
+    const dpr1 = captureAt(1);
+    const dpr2 = captureAt(2);
+    expect(dpr2).toEqual(dpr1);
+    expect(dpr2).toEqual({ minX: 50, minY: 100, maxX: 450, maxY: 400 });
   });
 
   it("early-returns when neither the overview nor the camera changed", () => {
@@ -649,6 +682,7 @@ describe("tickMinimap overview/overlay split", () => {
 
     scene.theta = 1.0;
     scene.phi = 0.3;
+    scene.viewRotation = [0, -1, 0, 1, 0, 0, 0, 0, 1];
     tickMinimap(ctx, state, 0);
 
     expect(renderCount.n).toBe(2);
@@ -665,18 +699,17 @@ describe("tickMinimap overview/overlay split", () => {
     expect(overlay).toHaveBeenCalledTimes(2);
     const orbitCall = overlay.mock.calls[1][0];
     expect(orbitCall.staticDirty).toBe(true);
-    expect(orbitCall.theta).toBe(1.0);
-    expect(orbitCall.phi).toBe(0.3);
+    expect(Array.from(orbitCall.cameraViewRotation)).toEqual(scene.viewRotation);
     expect(orbitCall.mainInvViewProj).not.toBeNull();
     expect(Array.from(orbitCall.viewProj)).not.toEqual(Array.from(firstViewProj));
   });
 
   it("in volume mode re-strokes the frustum on a fly look-around without redrawing the overview", () => {
     // Fly look-around: the view direction rotates while the eye stays put, so
-    // scene.eye_position() and the arcball theta/phi constants are UNCHANGED and
-    // only scene.inv_view_proj() (the main camera pose, the frustum's source)
-    // moves. The frustum must track the new orientation: the overlay callback
-    // must fire with the fresh mainInvViewProj and staticDirty = true, WITHOUT
+    // scene.eye_position() and the arcball theta/phi constants are UNCHANGED.
+    // The authoritative view basis and inv_view_proj move. The cube and frustum
+    // must track the new orientation: the overlay callback must fire with both
+    // fresh values and staticDirty = true, WITHOUT
     // re-rendering the overview (minimap camera + member geometry unchanged) and
     // WITHOUT re-reading any members.
     const scene = makeScene();
@@ -696,6 +729,7 @@ describe("tickMinimap overview/overlay split", () => {
 
     // Rotate the view direction only: eye + theta + phi fixed, pose moves.
     scene.invViewProj = new Array<number>(16).fill(0).map((_, i) => i + 1);
+    scene.viewRotation = [0, -1, 0, 1, 0, 0, 0, 0, 1];
     tickMinimap(ctx, state, 0);
 
     // No overview redraw, no minimap camera recompute, no member re-read.
@@ -711,9 +745,8 @@ describe("tickMinimap overview/overlay split", () => {
     expect(lookCall.staticDirty).toBe(true);
     expect(lookCall.mainInvViewProj).not.toBeNull();
     expect(Array.from(lookCall.mainInvViewProj as Float32Array)).toEqual(scene.invViewProj);
-    // Eye-only inputs did not move, so this is not an orbit: no viewProj change.
-    expect(lookCall.theta).toBe(scene.theta);
-    expect(lookCall.phi).toBe(scene.phi);
+    // Eye and arcball-only inputs did not move, but the cube follows fly roll.
+    expect(Array.from(lookCall.cameraViewRotation)).toEqual(scene.viewRotation);
 
     // A follow-up idle tick (stable pose) must early-return: no extra overlay
     // call, no overview render — a stable inv_view_proj hashes to a stable key.

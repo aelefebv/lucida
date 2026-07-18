@@ -1,0 +1,42 @@
+# Rust dependency policy. Every exception carries its owner, bounded exposure,
+# and expiry inline so a waiver cannot become invisible permanent policy.
+[advisories]
+ignore = [
+  { id = "RUSTSEC-2023-0071", reason = "owner=@aelefebv; test-only rsa generates an ephemeral OAuth fixture signing key and exposes no attacker-observable private-key operation; expires=2026-10-16; remove when the fixture uses a maintained non-RSA signer or rsa publishes a fix" },
+]
+
+[licenses]
+confidence-threshold = 0.8
+allow = [
+  "0BSD",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "MIT-0",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+exceptions = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+allow = []
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

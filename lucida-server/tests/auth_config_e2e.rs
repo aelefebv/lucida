@@ -8,9 +8,10 @@
 //!
 //! Running the binary (rather than calling `from_env` in-process) is
 //! the only way to cover the whole startup path: fail-fast in
-//! `main.rs`, the bind syscall, and the startup logging banner. The
+//! `main.rs`, the bind syscall, and tracing initialization. The
 //! lower-level `from_env_map` path is exercised by the unit tests in
-//! `auth/config.rs`.
+//! `auth/config.rs`; the structured insecure-start event is locked by
+//! `auth/audit_event_tests.rs` without depending on process-output timing.
 //!
 //! Each test:
 //! - Picks a unique loopback port via `pick_loopback_port`.
@@ -64,9 +65,9 @@ fn server_command(tmp_db: &std::path::Path, env: &[(&str, &str)]) -> Command {
 
 /// Spawn the server with the given env, poll the port until it accepts
 /// a TCP connection (success) or the process exits (failure), then
-/// kill / harvest. Returns the captured stderr so callers can grep
-/// for any expected banners (the LUCIDA_INSECURE warning, etc).
-fn assert_server_starts(port: u16, env: &[(&str, &str)]) -> String {
+/// kill / harvest. Stderr is captured only so a premature exit or timeout has
+/// useful diagnostics; operational-event shape belongs to the tracing tests.
+fn assert_server_starts(port: u16, env: &[(&str, &str)]) {
     let tmp = tempfile::tempdir().unwrap();
     let db_path = tmp.path().join("lucida.db");
     let mut cmd = server_command(&db_path, env);
@@ -104,9 +105,7 @@ fn assert_server_starts(port: u16, env: &[(&str, &str)]) -> String {
     }
     let _ = child.kill();
     let _ = child.wait();
-    // Drain whatever stderr was buffered up to the bind moment. Tests
-    // that care about the startup banner can grep this.
-    drain(child.stderr.as_mut().unwrap())
+    let _ = drain(child.stderr.as_mut().unwrap());
 }
 
 /// Spawn the server with the given env, expect it to exit non-zero
@@ -196,26 +195,19 @@ fn explicit_disabled_non_loopback_with_insecure_starts() {
     // 0.0.0.0 is the wildcard bind: `Ipv4Addr::is_loopback()` returns
     // false for it (verified), so it correctly trips the "non-loopback"
     // branch of the auto-detect safety check. With LUCIDA_INSECURE=1
-    // set, the server should boot — and emit the multi-line audit
-    // banner per ADR-0018 §"Consequences" so it's impossible to miss
-    // in a `journalctl`/k8s log scroll.
+    // set, the server should boot. The structured
+    // `auth.startup.insecure_mode` warning (including bind and mode fields)
+    // is asserted in auth/audit_event_tests.rs; this process test owns only
+    // the startup/admission behavior.
     let port = pick_loopback_port();
     let bind = format!("0.0.0.0:{port}");
-    let stderr = assert_server_starts(
+    assert_server_starts(
         port,
         &[
             ("LUCIDA_BIND", &bind),
             ("LUCIDA_AUTH", "disabled"),
             ("LUCIDA_INSECURE", "1"),
         ],
-    );
-    assert!(
-        stderr.contains("LUCIDA_INSECURE=1"),
-        "warning banner missing from stderr; got=\n{stderr}",
-    );
-    assert!(
-        stderr.contains("AUTH DISABLED"),
-        "warning banner missing AUTH DISABLED line; got=\n{stderr}",
     );
 }
 

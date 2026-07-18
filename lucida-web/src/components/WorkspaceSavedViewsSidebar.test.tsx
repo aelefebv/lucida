@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
   WorkspaceSavedViewsSidebar,
@@ -37,6 +37,20 @@ function jsonResponse(status: number, body: unknown): Response {
     status,
     headers: { "content-type": "application/json" },
   });
+}
+
+function domRect(left: number, top: number, width: number, height: number): DOMRect {
+  return {
+    x: left,
+    y: top,
+    left,
+    top,
+    right: left + width,
+    bottom: top + height,
+    width,
+    height,
+    toJSON: () => ({}),
+  } as DOMRect;
 }
 
 function savedViewRow(overrides: Record<string, unknown> = {}) {
@@ -87,9 +101,17 @@ beforeEach(() => {
 afterEach(() => {
   globalThis.fetch = originalFetch;
   cleanup();
+  vi.restoreAllMocks();
 });
 
 describe("WorkspaceSavedViewsSidebar — visibility on rows", () => {
+  it("renders an empty-state message outside ARIA list semantics", async () => {
+    await renderSidebar(true);
+
+    const empty = screen.getByText("No saved views yet. Save the current view to get started.");
+    expect(empty.closest("[role='list']")).toBeNull();
+  });
+
   it("marks shared and personal rows with data-visibility and a Personal cue", async () => {
     responder = () =>
       jsonResponse(200, [
@@ -119,6 +141,138 @@ async function openRowMenu(view: { name: string }) {
   await userEvent.click(trigger);
   return screen.getByRole("menu");
 }
+
+describe("WorkspaceSavedViewsSidebar — actions menu keyboard contract", () => {
+  it("publishes trigger state, focuses the first item, navigates, and restores focus on Escape", async () => {
+    responder = () => jsonResponse(200, [savedViewRow({ name: "Keyboard view" })]);
+    await renderSidebar(true);
+
+    const row = screen.getByTestId("saved-view-row");
+    const trigger = within(row).getByRole("button", { name: "Saved view actions" });
+    expect(trigger.getAttribute("aria-haspopup")).toBe("menu");
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(trigger.hasAttribute("aria-controls")).toBe(false);
+
+    await userEvent.click(trigger);
+    const menu = screen.getByRole("menu", { name: "Saved view actions" });
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    expect(trigger.getAttribute("aria-controls")).toBe(menu.id);
+    const items = within(menu).getAllByRole("menuitem");
+    await waitFor(() => expect(document.activeElement).toBe(items[0]));
+
+    await userEvent.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(items[1]);
+    await userEvent.keyboard("{End}");
+    expect(document.activeElement).toBe(items.at(-1));
+    await userEvent.keyboard("{Home}");
+    expect(document.activeElement).toBe(items[0]);
+    await userEvent.keyboard("{ArrowUp}");
+    expect(document.activeElement).toBe(items.at(-1));
+
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("menu", { name: "Saved view actions" })).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(trigger.hasAttribute("aria-controls")).toBe(false);
+  });
+
+  it("restores the row trigger for keyboard actions and makes it the delete modal invoker", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const onSetDefaultSavedView = vi.fn().mockResolvedValue(undefined);
+    responder = () => jsonResponse(200, [savedViewRow({ name: "Action view" })]);
+    const props = { ...baseProps(true), onSetDefaultSavedView };
+    await act(async () => render(<WorkspaceSavedViewsSidebar {...props} />));
+
+    const trigger = within(screen.getByTestId("saved-view-row"))
+      .getByRole("button", { name: "Saved view actions" });
+    trigger.focus();
+
+    await userEvent.keyboard("{Enter}");
+    await waitFor(() => expect(screen.getByRole("menuitem", { name: "Copy view link" }))
+      .toBe(document.activeElement));
+    await userEvent.keyboard("{Enter}");
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    expect(document.activeElement).toBe(trigger);
+    expect(writeText).toHaveBeenCalledOnce();
+
+    await userEvent.keyboard("{Enter}");
+    await userEvent.keyboard("{ArrowDown}{Enter}");
+    await waitFor(() => expect(onSetDefaultSavedView).toHaveBeenCalledWith("view-1"));
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+
+    await userEvent.keyboard("{Enter}");
+    await userEvent.keyboard("{End}{Enter}");
+    const dialog = await screen.findByRole("alertdialog", { name: "Confirm delete" });
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("closes a menu whose filtered row detached and reopens the recreated row in one click", async () => {
+    responder = () => jsonResponse(200, [savedViewRow({ name: "Filter target" })]);
+    await renderSidebar(true);
+
+    const firstTrigger = within(screen.getByTestId("saved-view-row"))
+      .getByRole("button", { name: "Saved view actions" });
+    await userEvent.click(firstTrigger);
+    expect(screen.getByRole("menu")).toBeTruthy();
+
+    const search = screen.getByRole("textbox", { name: "Search saved views" });
+    await userEvent.type(search, "no match");
+    await waitFor(() => expect(screen.queryByTestId("saved-view-row")).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+
+    await userEvent.clear(search);
+    const restoredRow = await screen.findByTestId("saved-view-row");
+    const restoredTrigger = within(restoredRow)
+      .getByRole("button", { name: "Saved view actions" });
+    expect(restoredTrigger).not.toBe(firstTrigger);
+    expect(restoredTrigger.getAttribute("aria-expanded")).toBe("false");
+    await userEvent.click(restoredTrigger);
+    expect(screen.getByRole("menu")).toBeTruthy();
+    expect(restoredTrigger.getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("closes a menu whose connected trigger becomes fully clipped and focuses search", async () => {
+    responder = () => jsonResponse(200, [savedViewRow({ name: "Scroll target" })]);
+    let triggerTop = 130;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      if (this.classList.contains("saved-view-list")) return domRect(100, 100, 300, 180);
+      if (this.classList.contains("saved-view-menu-btn")) return domRect(350, triggerTop, 32, 28);
+      if (this.classList.contains("saved-view-menu")) return domRect(190, 120, 180, 260);
+      return domRect(110, 110, 120, 32);
+    });
+    await renderSidebar(true);
+
+    const trigger = within(screen.getByTestId("saved-view-row"))
+      .getByRole("button", { name: "Saved view actions" });
+    await userEvent.click(trigger);
+    await waitFor(() => expect(screen.getByRole("menu")).toBeTruthy());
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+
+    // The row stays mounted, but scrolling moves its trigger wholly above the
+    // list's painted clip. This is the distinct case a detached-node observer
+    // cannot see.
+    triggerTop = -80;
+    await act(async () => window.dispatchEvent(new Event("scroll")));
+
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    expect(trigger.isConnected).toBe(true);
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(trigger.hasAttribute("aria-controls")).toBe(false);
+    expect(document.activeElement).toBe(
+      screen.getByRole("textbox", { name: "Search saved views" }),
+    );
+  });
+});
 
 describe("WorkspaceSavedViewsSidebar — promote to shared", () => {
   it("shows 'Share with team' for an own personal view (editor), PATCHes visibility, and the row becomes shared", async () => {
@@ -267,12 +421,12 @@ describe("WorkspaceSavedViewsSidebar — save modal (viewer)", () => {
   });
 });
 
-// --- Coverage ported from the deleted BookmarkSidebar.test.tsx ---------------
+// --- Coverage ported from the deleted WorkspaceSavedViewsSidebar.test.tsx ---------------
 // These four behavior groups (rename, delete-with-confirm, copy link, filter)
-// were exercised only by the now-removed BookmarkSidebar test. They are still
+// were exercised only by the now-removed pre-workspace sidebar test. They are still
 // live in WorkspaceSavedViewsSidebar, so they are re-asserted here against the
 // successor component's real API and DOM (menu via "Saved view actions" ->
-// role="menu"; rename via .bookmark-name-input; delete via a role="alertdialog"
+// role="menu"; rename via .saved-view-name-input; delete via a role="alertdialog"
 // ConfirmModal; PATCH/DELETE to /api/workspaces/<ws>/saved-views/<id>).
 
 describe("WorkspaceSavedViewsSidebar — inline rename", () => {
@@ -296,7 +450,7 @@ describe("WorkspaceSavedViewsSidebar — inline rename", () => {
 
     // The rename input renders in place of the name (class set by RenameInput);
     // pick it by class so the search box isn't grabbed instead.
-    const input = document.querySelector(".bookmark-name-input") as HTMLInputElement;
+    const input = document.querySelector(".saved-view-name-input") as HTMLInputElement;
     expect(input).toBeTruthy();
     await userEvent.clear(input);
     await act(async () => {
@@ -320,7 +474,7 @@ describe("WorkspaceSavedViewsSidebar — inline rename", () => {
     const menu = await openRowMenu({ name: "old" });
     await userEvent.click(within(menu).getByRole("menuitem", { name: /rename/i }));
 
-    const input = document.querySelector(".bookmark-name-input") as HTMLInputElement;
+    const input = document.querySelector(".saved-view-name-input") as HTMLInputElement;
     expect(input).toBeTruthy();
     await userEvent.clear(input);
     await act(async () => {
@@ -329,7 +483,7 @@ describe("WorkspaceSavedViewsSidebar — inline rename", () => {
 
     expect(calls.some((c) => c.method === "PATCH")).toBe(false);
     // The rename input closed; the original name is shown again.
-    expect(document.querySelector(".bookmark-name-input")).toBeNull();
+    expect(document.querySelector(".saved-view-name-input")).toBeNull();
     expect(screen.getByText("old")).toBeTruthy();
   });
 });
@@ -441,6 +595,46 @@ describe("WorkspaceSavedViewsSidebar — filter and search", () => {
   });
 });
 
+describe("WorkspaceSavedViewsSidebar — truthful proposal review actions", () => {
+  it("does not offer self-approval, explains why, and retains reject and withdraw", async () => {
+    responder = () =>
+      jsonResponse(200, [
+        savedViewRow({
+          id: "mine",
+          name: "My proposal",
+          visibility: "proposed",
+          created_by: "ALICE@example.com",
+        }),
+      ]);
+    await renderSidebar(true);
+
+    expect(screen.queryByTestId("saved-view-approve-mine")).toBeNull();
+    expect(screen.getByTestId("saved-view-self-approval-note-mine").textContent)
+      .toMatch(/different editor must approve/i);
+    expect(screen.getByTestId("saved-view-reject-mine")).toBeTruthy();
+
+    const menu = await openRowMenu({ name: "My proposal" });
+    expect(within(menu).getByTestId("saved-view-withdraw-mine")).toBeTruthy();
+    expect(calls.some((call) => call.url.endsWith("/approve"))).toBe(false);
+  });
+
+  it("still offers approval for another member's proposal", async () => {
+    responder = () =>
+      jsonResponse(200, [
+        savedViewRow({
+          id: "theirs",
+          name: "Their proposal",
+          visibility: "proposed",
+          created_by: "bob@example.com",
+        }),
+      ]);
+    await renderSidebar(true);
+
+    expect(screen.getByTestId("saved-view-approve-theirs")).toBeTruthy();
+    expect(screen.queryByTestId("saved-view-self-approval-note-theirs")).toBeNull();
+  });
+});
+
 // --- Fix A (#818 part 1): deferred reject keeps an independent, reachable Undo
 // per pending view ------------------------------------------------------------
 // Reject is a delayed, cancelable PATCH backed by a per-id timer; the toast used
@@ -497,7 +691,7 @@ describe("WorkspaceSavedViewsSidebar — deferred reject (multi-undo)", () => {
       fireEvent.click(rejectButton("pb"));
     });
 
-    // Two distinct toasts, each naming its view and each carrying an Undo — A's
+    // Two distinct toasts, each naming its view and each carrying cancellation — A's
     // toast was NOT evicted by B's (the bug). No reject has been sent yet.
     const toasts = screen.getAllByTestId("saved-view-toast");
     expect(toasts).toHaveLength(2);
@@ -505,12 +699,12 @@ describe("WorkspaceSavedViewsSidebar — deferred reject (multi-undo)", () => {
     const bToast = toasts.find((t) => within(t).queryByText(/Proposal B/)) as HTMLElement;
     expect(aToast).toBeTruthy();
     expect(bToast).toBeTruthy();
-    expect(within(aToast).getByTestId("saved-view-toast-action").textContent).toMatch(/undo/i);
-    expect(within(bToast).getByTestId("saved-view-toast-action").textContent).toMatch(/undo/i);
+    expect(within(aToast).getByTestId("saved-view-toast-action").textContent).toMatch(/cancel rejection/i);
+    expect(within(bToast).getByTestId("saved-view-toast-action").textContent).toMatch(/cancel rejection/i);
     expect(rejectPosts()).toHaveLength(0);
   });
 
-  it("Undo on the first reject cancels ONLY it; the other still commits its reject after the window", async () => {
+  it("Cancel rejection on the first view cancels only it; the other still commits", async () => {
     await renderEditorWithTwoProposals();
 
     await act(async () => {
@@ -520,7 +714,7 @@ describe("WorkspaceSavedViewsSidebar — deferred reject (multi-undo)", () => {
       fireEvent.click(rejectButton("pb"));
     });
 
-    // Undo A specifically (via A's own toast's Undo button).
+    // Cancel A specifically via its own toast action.
     const aToast = screen
       .getAllByTestId("saved-view-toast")
       .find((t) => within(t).queryByText(/Proposal A/)) as HTMLElement;

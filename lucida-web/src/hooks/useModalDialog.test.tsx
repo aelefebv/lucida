@@ -1,0 +1,218 @@
+// @vitest-environment happy-dom
+
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { useEffect, useRef, useState } from "react";
+import { afterEach, describe, expect, it } from "vitest";
+import { useModalDialog } from "./useModalDialog.ts";
+
+afterEach(() => cleanup());
+
+function Harness() {
+  const [open, setOpen] = useState(false);
+  const { dialogRef, onKeyDown } = useModalDialog({ open, onClose: () => setOpen(false) });
+  return (
+    <>
+      <button type="button" onClick={() => setOpen(true)}>Open dialog</button>
+      {open && (
+        <div
+          ref={dialogRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Test dialog"
+          tabIndex={-1}
+          onKeyDown={onKeyDown}
+        >
+          <button type="button">First</button>
+          <button type="button" style={{ display: "none" }}>CSS hidden</button>
+          <span style={{ display: "none" }}>
+            <button type="button">Hidden by ancestor</button>
+          </span>
+          <button type="button">Last</button>
+        </div>
+      )}
+      <button type="button">Outside target</button>
+    </>
+  );
+}
+
+function PreferredHarness({
+  preferred,
+  focusRootOnMount = false,
+  revealPreferredAfterFrame = false,
+  autoFocusPreferred = false,
+  explicitReturnTarget = false,
+}: {
+  preferred: "visible" | "hidden" | "disabled" | "missing";
+  focusRootOnMount?: boolean;
+  revealPreferredAfterFrame?: boolean;
+  autoFocusPreferred?: boolean;
+  explicitReturnTarget?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const invokerRef = useRef<HTMLButtonElement>(null);
+  const preferredRef = useRef<HTMLButtonElement>(null);
+  const { dialogRef, onKeyDown } = useModalDialog({
+    open,
+    onClose: () => setOpen(false),
+    initialFocusRef: preferredRef,
+    returnFocusRef: explicitReturnTarget ? invokerRef : undefined,
+  });
+  useEffect(() => {
+    if (!open || !revealPreferredAfterFrame) return;
+    const frame = requestAnimationFrame(() => {
+      preferredRef.current?.style.removeProperty("display");
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [open, revealPreferredAfterFrame]);
+  return (
+    <>
+      <button ref={invokerRef} type="button" onClick={() => setOpen(true)}>Open preferred dialog</button>
+      {open && (
+        <div
+          ref={(element) => {
+            dialogRef.current = element;
+            if (element && focusRootOnMount) element.focus();
+          }}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Preferred dialog"
+          tabIndex={-1}
+          onKeyDown={onKeyDown}
+        >
+          <button type="button">Fallback</button>
+          {preferred !== "missing" && (
+            <button
+              ref={preferredRef}
+              // Deliberately exercises the browser commit ordering that the
+              // hook must tolerate; production use is limited to true modals.
+              // eslint-disable-next-line jsx-a11y/no-autofocus
+              autoFocus={autoFocusPreferred}
+              type="button"
+              disabled={preferred === "disabled"}
+              style={preferred === "hidden" || revealPreferredAfterFrame
+                ? { display: "none" }
+                : undefined}
+            >
+              Preferred
+            </button>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
+describe("useModalDialog", () => {
+  it("moves focus into the dialog and restores the invoker on Escape", async () => {
+    render(<Harness />);
+    const invoker = screen.getByRole("button", { name: "Open dialog" });
+    invoker.focus();
+    fireEvent.click(invoker);
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "First" }));
+
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await act(async () => Promise.resolve());
+    expect(document.activeElement).toBe(invoker);
+  });
+
+  it("keeps valid in-dialog focus and recaptures focus stolen outside", async () => {
+    render(<Harness />);
+    fireEvent.click(screen.getByRole("button", { name: "Open dialog" }));
+    const first = screen.getByRole("button", { name: "First" });
+    const last = screen.getByRole("button", { name: "Last" });
+
+    last.focus();
+    await act(async () => Promise.resolve());
+    expect(document.activeElement).toBe(last);
+
+    screen.getByRole("button", { name: "Outside target" }).focus();
+    expect(document.activeElement).toBe(first);
+  });
+
+  it("uses a visible preferred target", () => {
+    render(<PreferredHarness preferred="visible" />);
+    fireEvent.click(screen.getByRole("button", { name: "Open preferred dialog" }));
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Preferred" }));
+  });
+
+  it("moves from a transiently-focused dialog root to the preferred target", () => {
+    render(<PreferredHarness preferred="visible" focusRootOnMount />);
+    fireEvent.click(screen.getByRole("button", { name: "Open preferred dialog" }));
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Preferred" }));
+  });
+
+  it("restores an explicit invoker when autoFocus runs before the opening effect", () => {
+    render(
+      <PreferredHarness
+        preferred="visible"
+        autoFocusPreferred
+        explicitReturnTarget
+      />,
+    );
+    const invoker = screen.getByRole("button", { name: "Open preferred dialog" });
+    fireEvent.click(invoker);
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Preferred" }));
+
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    expect(document.activeElement).toBe(invoker);
+  });
+
+  it("reclaims the preferred target after responsive CSS reveals it", async () => {
+    render(<PreferredHarness preferred="visible" revealPreferredAfterFrame />);
+    fireEvent.click(screen.getByRole("button", { name: "Open preferred dialog" }));
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Fallback" }));
+
+    await act(async () => {
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    });
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Preferred" }));
+  });
+
+  it("falls back when the preferred target is hidden, disabled, or absent", () => {
+    render(<PreferredHarness preferred="hidden" />);
+    fireEvent.click(screen.getByRole("button", { name: "Open preferred dialog" }));
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Fallback" }));
+
+    cleanup();
+    render(<PreferredHarness preferred="disabled" />);
+    fireEvent.click(screen.getByRole("button", { name: "Open preferred dialog" }));
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Fallback" }));
+
+    cleanup();
+    render(<PreferredHarness preferred="missing" />);
+    fireEvent.click(screen.getByRole("button", { name: "Open preferred dialog" }));
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Fallback" }));
+  });
+
+  it("wraps Tab navigation at both ends", async () => {
+    render(<Harness />);
+    fireEvent.click(screen.getByRole("button", { name: "Open dialog" }));
+    await act(async () => {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    });
+    const first = screen.getByRole("button", { name: "First" });
+    const last = screen.getByRole("button", { name: "Last" });
+
+    last.focus();
+    fireEvent.keyDown(last, { key: "Tab" });
+    expect(document.activeElement).toBe(first);
+
+    first.focus();
+    fireEvent.keyDown(first, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(last);
+  });
+
+  it("ignores CSS-hidden descendants when choosing the trap boundaries", async () => {
+    render(<Harness />);
+    fireEvent.click(screen.getByRole("button", { name: "Open dialog" }));
+    await act(async () => {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    });
+    const first = screen.getByRole("button", { name: "First" });
+    const last = screen.getByRole("button", { name: "Last" });
+    last.focus();
+    fireEvent.keyDown(last, { key: "Tab" });
+    expect(document.activeElement).toBe(first);
+  });
+});

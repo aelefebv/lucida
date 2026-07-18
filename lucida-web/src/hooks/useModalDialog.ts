@@ -1,0 +1,190 @@
+import { useCallback, useLayoutEffect, useRef } from "react";
+
+const FOCUSABLE_SELECTOR = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "[tabindex]:not([tabindex='-1'])",
+].join(",");
+
+interface ModalDialogOptions {
+  open: boolean;
+  onClose: () => void;
+  initialFocusRef?: React.RefObject<HTMLElement | null>;
+  returnFocusRef?: React.RefObject<HTMLElement | null>;
+}
+
+function isCssVisible(element: HTMLElement): boolean {
+  if (element.closest("[hidden], [aria-hidden='true'], [inert]")) return false;
+  for (let current: HTMLElement | null = element; current; current = current.parentElement) {
+    const style = window.getComputedStyle(current);
+    if (style.display === "none" || style.visibility === "hidden") return false;
+    if (current === document.body) break;
+  }
+  return true;
+}
+
+function isActuallyVisible(element: HTMLElement): boolean {
+  if (!isCssVisible(element)) return false;
+  // Real browsers expose layout boxes; happy-dom does not, so only use this
+  // stronger test when the document itself has a layout engine.
+  if (document.documentElement.getClientRects().length > 0
+      && element.getClientRects().length === 0) return false;
+  return true;
+}
+
+function focusableElements(dialog: HTMLElement, requireLayout = true): HTMLElement[] {
+  return Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
+    .filter(requireLayout ? isActuallyVisible : isCssVisible);
+}
+
+function focusInsideDialog(
+  dialog: HTMLElement,
+  preferred: HTMLElement | null | undefined,
+): void {
+  const active = document.activeElement;
+  const preferredInside = preferred
+    && dialog.contains(preferred)
+    && isCssVisible(preferred)
+    ? preferred
+    : null;
+  // Honor an explicit initial target even if the browser temporarily focused
+  // the newly focusable dialog root during the opening commit. A generic
+  // "already inside" return before this branch strands focus on that root and
+  // skips the intended first action (the mobile Layers Close button).
+  if (preferredInside && active !== preferredInside) {
+    preferredInside.focus({ preventScroll: true });
+    if (document.activeElement === preferredInside) return;
+  }
+  if (active && dialog.contains(active)) return;
+  if (preferredInside) {
+    preferredInside.focus({ preventScroll: true });
+    if (dialog.contains(document.activeElement)) return;
+  }
+
+  const first = focusableElements(dialog, false)[0];
+  if (first) {
+    first.focus({ preventScroll: true });
+    if (dialog.contains(document.activeElement)) return;
+  }
+  dialog.focus({ preventScroll: true });
+}
+
+/**
+ * Shared keyboard/focus contract for every modal surface.
+ *
+ * The hook deliberately owns only modal behavior, not presentation: focus enters
+ * the dialog when it opens, Tab cannot escape, Escape closes it, and focus is
+ * restored to the invoking control. Keeping this in one place prevents each
+ * feature dialog from growing a subtly different accessibility implementation.
+ */
+export function useModalDialog({
+  open,
+  onClose,
+  initialFocusRef,
+  returnFocusRef,
+}: ModalDialogOptions) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    // React's `autoFocus` runs during the same opening commit, before layout
+    // effects. When a dialog needs that browser-native assist (for example a
+    // responsive drawer whose close control is revealed by CSS), the active
+    // element may already be inside the dialog by the time this effect runs.
+    // An explicit invoker is therefore authoritative when one is available;
+    // ordinary dialogs continue to restore the element that was active before
+    // opening.
+    previousFocusRef.current = returnFocusRef?.current
+      ?? (document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null);
+
+    let disposed = false;
+    const claimFocus = () => {
+      if (disposed) return;
+      const dialog = dialogRef.current;
+      if (dialog) focusInsideDialog(dialog, initialFocusRef?.current);
+    };
+    const containFocus = (event: FocusEvent) => {
+      const dialog = dialogRef.current;
+      if (!dialog || (event.target instanceof Node && dialog.contains(event.target))) return;
+      claimFocus();
+    };
+
+    // Claim focus during the opening commit, then verify it once more after
+    // every ref/attribute update in that commit has settled. The verifier is
+    // deliberately idempotent: a user or another control that already moved
+    // focus within the dialog keeps that focus.
+    document.addEventListener("focusin", containFocus, true);
+    claimFocus();
+    queueMicrotask(claimFocus);
+    // Responsive drawers can mount while their preferred control is still
+    // hidden by the pre-layout media-query state. Recheck after the browser has
+    // completed layout and paint preparation; a second frame also covers a
+    // sibling layout effect that schedules its own first-frame style update.
+    // This is opening-only work, so it does not create an idle animation loop.
+    let secondFrame: number | null = null;
+    const firstFrame = requestAnimationFrame(() => {
+      claimFocus();
+      secondFrame = requestAnimationFrame(claimFocus);
+    });
+    const delayedClaim = window.setTimeout(() => {
+      const dialog = dialogRef.current;
+      const active = document.activeElement;
+      // Retry only while opening focus is still outside or stranded on the
+      // dialog root. Never steal focus from a user who already advanced to a
+      // meaningful control inside the dialog.
+      if (dialog && (!active || active === dialog || !dialog.contains(active))) {
+        focusInsideDialog(dialog, initialFocusRef?.current);
+      }
+    }, 200);
+
+    return () => {
+      // Stop containment before restoring the invoker, otherwise the focusin
+      // generated by restoration would be pulled back into the closing dialog.
+      disposed = true;
+      cancelAnimationFrame(firstFrame);
+      if (secondFrame !== null) cancelAnimationFrame(secondFrame);
+      window.clearTimeout(delayedClaim);
+      document.removeEventListener("focusin", containFocus, true);
+      const previous = previousFocusRef.current;
+      previousFocusRef.current = null;
+      if (previous?.isConnected) previous.focus({ preventScroll: true });
+    };
+  }, [initialFocusRef, open, returnFocusRef]);
+
+  const onKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
+      return;
+    }
+    if (event.key !== "Tab") return;
+
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    const focusable = focusableElements(dialog);
+    if (focusable.length === 0) {
+      event.preventDefault();
+      dialog.focus({ preventScroll: true });
+      return;
+    }
+
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus({ preventScroll: true });
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus({ preventScroll: true });
+    }
+  }, [onClose]);
+
+  return { dialogRef, onKeyDown };
+}

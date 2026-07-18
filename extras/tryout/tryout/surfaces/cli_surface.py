@@ -12,10 +12,9 @@ actually talks.
 Design choices that keep it honest and reusable:
 
   * **Captured, not fatal.** Each command's argv + stdout + stderr + exit code is
-    written to ``DIR/cli/NN-<name>.log`` and recorded in the result. A non-zero
-    exit is *data* (an agent wants to see what failed), so the tour continues and
-    the surface only reports a harness-level error if it could not run the CLI at
-    all (binary missing / build failed).
+    written to ``DIR/cli/NN-<name>.log`` and recorded in the result. The tour
+    continues after every command, while the final verdict distinguishes an
+    unexpected failure from an explicitly asserted structured error.
   * **Hermetic.** Every invocation gets ``--server`` pointed at the throwaway
     server and ``LUCIDA_CONFIG_PATH`` redirected into the out dir, so the run
     never reads or writes the user's real ``~/.config/lucida/config.json`` or
@@ -55,15 +54,19 @@ class CliStep:
     the result entry. ``args`` are the CLI args *after* the injected globals
     (``--server`` and any ``--json``); the runner prepends the binary and the
     connection globals so the plan stays about intent, not plumbing.
-    ``allow_failure`` marks steps whose non-zero exit is expected-ish on some
-    datasets (so it never taints the harness verdict), but every step is captured
-    regardless.
+    ``allow_failure`` marks best-effort steps whose non-zero exit must be
+    captured without tainting the harness verdict. Security and protocol
+    failures are stricter: ``expected_error_kind`` and ``expected_exit_code``
+    turn the failure into an exact assertion, so an unexpected success or a
+    differently shaped failure still fails the surface.
     """
 
     name: str
     args: tuple[str, ...]
     as_json: bool = False
     allow_failure: bool = False
+    expected_error_kind: str | None = None
+    expected_exit_code: int | None = None
 
 
 @dataclass
@@ -75,6 +78,8 @@ class CliCommandResult:
     log: str
     duration_s: float
     timed_out: bool = False
+    expected_error_kind: str | None = None
+    observed_error_kind: str | None = None
 
 
 @dataclass
@@ -114,6 +119,16 @@ class CliSurfaceResult(SurfaceResult):
                     "log": command.log,
                     "duration_s": command.duration_s,
                     **({"timed_out": True} if command.timed_out else {}),
+                    **(
+                        {"expected_error_kind": command.expected_error_kind}
+                        if command.expected_error_kind is not None
+                        else {}
+                    ),
+                    **(
+                        {"observed_error_kind": command.observed_error_kind}
+                        if command.observed_error_kind is not None
+                        else {}
+                    ),
                 }
                 for command in self.commands
             ],
@@ -217,13 +232,25 @@ def plan_cli_tour(
         CliStep("viewer-state-after", ("viewer", "state"), as_json=True),
     ]
 
+    if selector is not None:
+        # Put a known, datatype-correct channel window into the durable viewer
+        # profile before browser capture. The web surface later proves that the
+        # renderer consumed this per-channel value (rather than merely echoing
+        # the global display default).
+        steps.append(
+            CliStep(
+                "channel-contrast",
+                ("channel", "contrast", selector, "0", "--min", "0", "--max", "255"),
+                as_json=True,
+            )
+        )
+
     # --- saved-view sharing lifecycle (#699 promote, #702 propose/approve/reject)
     # Capture the current state into views at each visibility, then exercise the
-    # CLI's sharing verbs end-to-end against the live server. The single dev user
-    # is the workspace owner here, so they can both propose and approve/reject —
-    # which is exactly what drives these commands through the wire. Each capture
-    # is shown in BOTH human and --json form so the logs document the visibility
-    # field; the transition commands are captured the same way.
+    # CLI's sharing verbs end-to-end against the live server. A proposal's author
+    # must not approve their own work, so that command is an exact unauthorized
+    # assertion; the same author may reject/withdraw it. Each capture is shown in
+    # both human and --json form so the logs document the resulting visibility.
     steps += plan_saved_view_sharing_steps()
 
     if selector is not None:
@@ -253,13 +280,13 @@ def plan_saved_view_sharing_steps() -> list[CliStep]:
     so the logs document the visibility field in both output modes:
 
       * personal -> ``promote`` -> shared
-      * proposed -> ``approve``  -> shared
-      * proposed -> ``reject``   -> personal
+      * proposed -> self-``approve`` -> exact ``unauthorized`` denial
+      * proposed -> ``reject``        -> personal (author withdrawal)
 
     Distinct names per flow keep name-based resolution unambiguous. These run
     after the discovery/mutation tour, so the workspace already has real state to
-    capture. They are NOT marked ``allow_failure``: the whole point is that the
-    new commands must succeed against a live server.
+    capture. They are NOT marked ``allow_failure``: success paths must succeed,
+    while the self-approval denial must match its exact structured contract.
     """
     personal = "tryout-share-personal"
     propose_approve = "tryout-share-approve"
@@ -290,10 +317,19 @@ def plan_saved_view_sharing_steps() -> list[CliStep]:
             ("saved-view", "promote", personal, "--visibility", "shared"),
             personal,
         ),
-        # proposed -> approve -> shared
+        # A proposal's author cannot approve it. Prove the guard and then show
+        # that the proposal remained pending.
         *capture("proposed-approve", propose_approve, "proposed"),
-        *transition(
-            "approve", ("saved-view", "approve", propose_approve), propose_approve
+        CliStep(
+            "saved-view-self-approve-denied",
+            ("saved-view", "approve", propose_approve),
+            as_json=True,
+            expected_error_kind="unauthorized",
+            expected_exit_code=3,
+        ),
+        CliStep(
+            "saved-view-self-approve-denied-human",
+            ("saved-view", "show", propose_approve),
         ),
         # proposed -> reject -> personal
         *capture("proposed-reject", propose_reject, "proposed"),
@@ -457,7 +493,17 @@ def _run_one(
         stderr = f"[tryout] failed to execute command: {error}"
 
     duration = round(time.monotonic() - started, 3)
-    ok = exit_code == 0
+    observed_error_kind = _extract_error_kind(stderr, stdout)
+    if step.expected_error_kind is not None:
+        expected_exit_code = step.expected_exit_code
+        ok = (
+            exit_code is not None
+            and exit_code != 0
+            and (expected_exit_code is None or exit_code == expected_exit_code)
+            and observed_error_kind == step.expected_error_kind
+        )
+    else:
+        ok = exit_code == 0
     _write_command_log(
         log_path,
         argv=argv,
@@ -479,7 +525,34 @@ def _run_one(
         log=str(log_path),
         duration_s=duration,
         timed_out=timed_out,
+        expected_error_kind=step.expected_error_kind,
+        observed_error_kind=observed_error_kind,
     )
+
+
+def _extract_error_kind(*streams: str) -> str | None:
+    """Return ``error.kind`` from a CLI JSON diagnostic, if present.
+
+    Machine-mode commands currently emit one pretty-printed JSON object on
+    stderr. Keeping this parser small and structural prevents a message-text
+    match from accidentally blessing the wrong failure, while trying both
+    streams leaves the harness compatible with a future stdout transport.
+    """
+
+    for stream in streams:
+        text = stream.strip()
+        if not text:
+            continue
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        error = payload.get("error")
+        if isinstance(error, dict) and isinstance(error.get("kind"), str):
+            return error["kind"]
+    return None
 
 
 def _write_command_log(

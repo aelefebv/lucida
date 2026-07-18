@@ -1,11 +1,13 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { createRef } from "react";
 import type { WasmScene } from "lucida-core";
 import { AnnotationOverlay } from "./AnnotationOverlay.tsx";
-import type { Annotation } from "./annotationDocument.ts";
+import type { Annotation, AnnotationOverlayHandle } from "./annotationDocument.ts";
+import type { ViewportCommand } from "../commands.ts";
+import type { ViewportCoordinator } from "../viewportCoordinator.ts";
 
 /**
  * A hand-rolled stand-in for the WASM scene, exercising only the surface this
@@ -17,6 +19,7 @@ import type { Annotation } from "./annotationDocument.ts";
 function makeScene(initial: Annotation[]): {
   scene: WasmScene;
   applied: Array<Record<string, unknown>>;
+  removePin: (id: string) => void;
 } {
   let pins: Annotation[] = JSON.parse(JSON.stringify(initial));
   const applied: Array<Record<string, unknown>> = [];
@@ -58,18 +61,39 @@ function makeScene(initial: Annotation[]): {
       }
     },
   } as unknown as WasmScene;
-  return { scene, applied };
+  return { scene, applied, removePin: (id: string) => { pins = pins.filter((pin) => pin.id !== id); } };
 }
 
 /** A canvas whose layout box is a fixed 800x600 at the origin, so world<->screen
  * math is deterministic regardless of happy-dom's zero-size default. */
 function makeCanvas(): HTMLCanvasElement {
   const canvas = document.createElement("canvas");
+  canvas.tabIndex = 0;
+  canvas.dataset.testViewerCanvas = "";
+  document.body.append(canvas);
   Object.defineProperty(canvas, "clientWidth", { value: 800, configurable: true });
   Object.defineProperty(canvas, "clientHeight", { value: 600, configurable: true });
   canvas.getBoundingClientRect = () =>
     ({ left: 0, top: 0, width: 800, height: 600, right: 800, bottom: 600, x: 0, y: 0, toJSON() {} }) as DOMRect;
   return canvas;
+}
+
+function viewportForScene(
+  scene: WasmScene,
+  onApplied: () => void = () => {},
+  onEnded: (key: string) => void = () => {},
+): Pick<ViewportCoordinator, "apply" | "endGesture"> {
+  return {
+    apply(commands) {
+      const batch: readonly ViewportCommand[] = Array.isArray(commands)
+        ? commands
+        : [commands as ViewportCommand];
+      for (const command of batch) scene.apply_command(JSON.stringify(command));
+      onApplied();
+      return true;
+    },
+    endGesture: onEnded,
+  };
 }
 
 // The annotation-author identity is now a stable string (issue #777), not the
@@ -85,60 +109,73 @@ function renderOverlay(opts: {
    * pins (z=3, t/c absent → 0), so existing suites see today's look; the
    * off-context suite overrides it (or the pins) to force a mismatch. */
   viewContext?: { z: number; t: number; c: number };
+  frameSignal?: {
+    subscribePresentedFrame: (listener: () => void) => () => void;
+  };
+  visible?: boolean;
 }) {
-  const { scene, applied } = makeScene(opts.pins);
+  const { scene, applied, removePin } = makeScene(opts.pins);
   const sent: Array<Record<string, unknown>> = [];
   const sceneRef = createRef<WasmScene | null>();
   // Prime the ref before render (RefObject.current is writable in tests).
   sceneRef.current = scene;
   let changed = 0;
   let viewportChanged = 0;
+  const endedGestures: string[] = [];
   const canvas = makeCanvas();
-  const { rerender } = render(
+  const viewport = viewportForScene(
+    scene,
+    () => { viewportChanged += 1; },
+    (key) => endedGestures.push(key),
+  );
+  let version = 0;
+  let visible = opts.visible ?? true;
+  let viewContext = opts.viewContext ?? { z: 3, t: 0, c: 0 };
+  const overlay = () => (
     <AnnotationOverlay
       datasetId="wds-1"
       wasmSceneRef={sceneRef}
       canvas={canvas}
-      version={0}
-      viewContext={opts.viewContext ?? { z: 3, t: 0, c: 0 }}
+      version={version}
+      viewContext={viewContext}
       myId={opts.myId ?? MY_ID}
       sendCommand={(json) => sent.push(JSON.parse(json) as Record<string, unknown>)}
       onDocumentChanged={() => {
         changed += 1;
       }}
-      onViewportChanged={() => {
-        viewportChanged += 1;
-      }}
-    />,
+      viewport={viewport}
+      frameSignal={opts.frameSignal}
+      visible={visible}
+    />
   );
+  const rendered = render(overlay());
   /** Re-render with a new view context (the rest of the props are fixed), so a
    * test can navigate the view and assert the off-context status updates — it's a
    * pure function of the view, so this is how "navigate to match" is exercised. */
-  const setViewContext = (viewContext: { z: number; t: number; c: number }) => {
-    rerender(
-      <AnnotationOverlay
-        datasetId="wds-1"
-        wasmSceneRef={sceneRef}
-        canvas={canvas}
-        version={0}
-        viewContext={viewContext}
-        myId={opts.myId ?? MY_ID}
-        sendCommand={(json) => sent.push(JSON.parse(json) as Record<string, unknown>)}
-        onDocumentChanged={() => {
-          changed += 1;
-        }}
-        onViewportChanged={() => {
-          viewportChanged += 1;
-        }}
-      />,
-    );
+  const setViewContext = (nextViewContext: { z: number; t: number; c: number }) => {
+    viewContext = nextViewContext;
+    rendered.rerender(overlay());
+  };
+  const bumpVersion = () => {
+    version += 1;
+    rendered.rerender(overlay());
+  };
+  const setVisible = (next: boolean) => {
+    visible = next;
+    rendered.rerender(overlay());
   };
   return {
     applied,
     sent,
     getChanged: () => changed,
     getViewportChanged: () => viewportChanged,
+    endedGestures,
     setViewContext,
+    bumpVersion,
+    removePin,
+    setVisible,
+    canvas,
+    unmount: rendered.unmount,
   };
 }
 
@@ -161,6 +198,8 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  document.querySelectorAll("canvas[data-test-viewer-canvas]").forEach((canvas) => canvas.remove());
+  vi.restoreAllMocks();
 });
 
 describe("AnnotationOverlay — move a pin (move_annotation)", () => {
@@ -286,13 +325,55 @@ describe("AnnotationOverlay — move a pin (move_annotation)", () => {
   });
 });
 
+describe("AnnotationOverlay — canonical viewport port", () => {
+  it("routes imperative focus through the coordinator and never writes the scene directly", async () => {
+    const pin = ownPin({ id: "focus-me", position: [17, 23] });
+    const { scene, applied } = makeScene([pin]);
+    const sceneRef = createRef<WasmScene | null>();
+    sceneRef.current = scene;
+    const overlayRef = createRef<AnnotationOverlayHandle>();
+    const viewport = {
+      apply: vi.fn(() => true),
+      endGesture: vi.fn(),
+    };
+    render(
+      <AnnotationOverlay
+        ref={overlayRef}
+        datasetId="wds-1"
+        wasmSceneRef={sceneRef}
+        canvas={makeCanvas()}
+        version={0}
+        viewContext={{ z: 3, t: 0, c: 0 }}
+        myId={MY_ID}
+        sendCommand={() => {}}
+        onDocumentChanged={() => {}}
+        viewport={viewport}
+      />,
+    );
+    await screen.findByTestId("annot-pin-focus-me");
+
+    let focused = false;
+    await act(async () => {
+      focused = await overlayRef.current!.focusPin("focus-me");
+    });
+
+    expect(focused).toBe(true);
+    expect(viewport.apply).toHaveBeenCalledExactlyOnceWith(
+      { type: "set_center", x: 17, y: 23 },
+      { source: "annotation_focus", history: { label: "annotation focus" } },
+    );
+    expect(applied).toEqual([]);
+    expect(screen.getByTestId("annot-thread-focus-me")).toBeTruthy();
+  });
+});
+
 describe("AnnotationOverlay — Shift gates move; plain drag pans (issue #778)", () => {
   it("a plain drag on an own pin pans the view and emits NO move", () => {
     // The headline of the slice: a plain (non-Shift) drag that starts on an own
     // marker must pan the view exactly like dragging the canvas — never move the
     // pin. Pan = apply-locally-only viewport command, so it lands in `applied`
     // (apply_command) but never in `sent` (it isn't broadcast).
-    const { applied, sent } = renderOverlay({ pins: [ownPin()] });
+    const { applied, sent, endedGestures } = renderOverlay({ pins: [ownPin()] });
     const marker = screen.getByTestId("annot-pin-pin-a");
 
     fireEvent.pointerDown(marker, { pointerId: 1, button: 0, clientX: 200, clientY: 200 });
@@ -308,12 +389,12 @@ describe("AnnotationOverlay — Shift gates move; plain drag pans (issue #778)",
     expect(pans.length).toBeGreaterThanOrEqual(1);
     // …and a pan is viewport state, never broadcast.
     expect(sent.some((c) => c.type === "pan")).toBe(false);
+    expect(endedGestures).toEqual(["annotation_pan"]);
   });
 
-  it("the pan forwarded is dpr-aware and negated (the SliceViewer pan)", () => {
-    // dpr=2 (set here), incremental travel of +30 CSS px in x and +10 in y from
-    // the press. The pan command must be the negated, dpr-scaled delta:
-    // dx = -(30*2) = -60, dy = -(10*2) = -20 — exactly what SliceViewer applies.
+  it("forwards a DPR-invariant, negated CSS-logical pan (the SliceViewer pan)", () => {
+    // Incremental travel of +30 CSS px in x and +10 in y remains (-30,-10) at
+    // DPR2: persisted 2D zoom and pan are logical, not backing-pixel units.
     Object.defineProperty(globalThis, "devicePixelRatio", { value: 2, configurable: true });
     const { applied } = renderOverlay({ pins: [ownPin()] });
     const marker = screen.getByTestId("annot-pin-pin-a");
@@ -325,7 +406,7 @@ describe("AnnotationOverlay — Shift gates move; plain drag pans (issue #778)",
 
     const pans = applied.filter((c) => c.type === "pan");
     expect(pans).toHaveLength(1);
-    expect(pans[0]).toMatchObject({ type: "pan", dx: -60, dy: -20 });
+    expect(pans[0]).toMatchObject({ type: "pan", dx: -30, dy: -10 });
   });
 
   it("a plain drag consumes incremental deltas across multiple moves", () => {
@@ -387,10 +468,101 @@ describe("AnnotationOverlay — Shift gates move; plain drag pans (issue #778)",
     fireEvent.pointerUp(marker, { pointerId: 1, clientX: 200, clientY: 200 });
     fireEvent.click(marker, { clientX: 200, clientY: 200 });
 
-    // Thread opened.
-    expect(screen.getByTestId("annot-thread-pin-a")).toBeTruthy();
+    // Thread opened and is linked to its non-modal trigger in reading order.
+    const thread = screen.getByTestId("annot-thread-pin-a");
+    expect(thread.getAttribute("role")).toBe("dialog");
+    expect(thread.hasAttribute("data-floating-safe-region")).toBe(true);
+    expect(marker.getAttribute("aria-controls")).toBe("annot-thread-pin-a");
+    expect(marker.getAttribute("aria-expanded")).toBe("true");
     expect(applied.some((c) => c.type === "pan")).toBe(false);
     expect(sent.some((c) => c.type === "move_annotation")).toBe(false);
+  });
+
+  it("restores the marker after both Close and Escape", () => {
+    renderOverlay({ pins: [ownPin()] });
+    const marker = screen.getByTestId("annot-pin-pin-a");
+
+    fireEvent.click(marker);
+    const close = screen.getByRole("button", { name: "Close thread" });
+    close.focus();
+    fireEvent.click(close);
+    expect(screen.queryByTestId("annot-thread-pin-a")).toBeNull();
+    expect(document.activeElement).toBe(marker);
+
+    fireEvent.click(marker);
+    const composer = screen.getByTestId("comment-add-input-pin-a");
+    composer.focus();
+    fireEvent.keyDown(composer, { key: "Escape" });
+    expect(screen.queryByTestId("annot-thread-pin-a")).toBeNull();
+    expect(document.activeElement).toBe(marker);
+  });
+
+  it("does not steal focus from a control the user intentionally chose before unmount", async () => {
+    const { unmount } = renderOverlay({ pins: [ownPin()] });
+    const marker = screen.getByTestId("annot-pin-pin-a");
+    fireEvent.click(marker);
+    screen.getByTestId("comment-add-input-pin-a").focus();
+
+    const outside = document.createElement("button");
+    outside.textContent = "Outside choice";
+    document.body.append(outside);
+    outside.focus();
+    unmount();
+    await act(async () => Promise.resolve());
+
+    expect(document.activeElement).toBe(outside);
+    outside.remove();
+  });
+
+  it("closes an open thread when its painted pin leaves the clipped canvas", async () => {
+    let markerRect = {
+      left: 388, top: 288, right: 412, bottom: 312, width: 24, height: 24,
+    };
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      if (this.hasAttribute("data-floating-anchor")) {
+        return { ...markerRect, x: markerRect.left, y: markerRect.top, toJSON() {} } as DOMRect;
+      }
+      if (this.style.overflow === "hidden" && this.style.width === "100%") {
+        return {
+          left: 0, top: 0, right: 800, bottom: 600, width: 800, height: 600,
+          x: 0, y: 0, toJSON() {},
+        } as DOMRect;
+      }
+      return {
+        left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0,
+        x: 0, y: 0, toJSON() {},
+      } as DOMRect;
+    });
+    const frameListeners = new Set<() => void>();
+    const frameSignal = {
+      subscribePresentedFrame(listener: () => void) {
+        frameListeners.add(listener);
+        return () => frameListeners.delete(listener);
+      },
+    };
+    const { canvas } = renderOverlay({
+      pins: [ownPin({ comments: [{ id: "c1", author: MY_ID, text: "hi" }] })],
+      frameSignal,
+    });
+    const marker = screen.getByTestId("annot-pin-pin-a");
+    fireEvent.click(marker);
+    marker.focus();
+    expect(screen.getByTestId("annot-thread-pin-a").hidden).toBe(false);
+    expect(marker.getAttribute("aria-expanded")).toBe("true");
+
+    markerRect = {
+      left: 1_200, top: 288, right: 1_224, bottom: 312, width: 24, height: 24,
+    };
+    await act(async () => {
+      for (const listener of frameListeners) listener();
+    });
+
+    await waitFor(() => expect(screen.queryByTestId("annot-thread-pin-a")).toBeNull());
+    expect(marker.getAttribute("aria-expanded")).toBe("false");
+    expect(marker.hasAttribute("data-floating-anchor")).toBe(true);
+    expect(document.activeElement).toBe(canvas);
   });
 
   it("a stationary Shift-press does nothing (no move, no pan, no thread toggle)", () => {
@@ -602,6 +774,58 @@ describe("AnnotationOverlay — delete a pin (remove_annotation, confirmed)", ()
       id: "pin-a",
     });
     expect(getChanged()).toBe(1);
+  });
+
+  it("falls back to the viewer when deletion removes the focused thread and marker", async () => {
+    const { bumpVersion, canvas } = openOwnThread({
+      comments: [{ id: "c1", author: String(MY_ID), text: "one" }],
+    });
+    fireEvent.click(screen.getByTestId("pin-delete-pin-a"));
+    const confirm = screen.getByTestId("pin-delete-confirm-pin-a");
+    confirm.focus();
+    fireEvent.click(confirm);
+    bumpVersion();
+
+    await waitFor(() => expect(screen.queryByTestId("annot-thread-pin-a")).toBeNull());
+    await act(async () => Promise.resolve());
+    expect(screen.queryByTestId("annot-pin-pin-a")).toBeNull();
+    expect(document.activeElement).toBe(canvas);
+  });
+
+  it("falls back to the viewer when a remotely removed marker owned focus", async () => {
+    const { removePin, bumpVersion, canvas } = renderOverlay({ pins: [ownPin()] });
+    const marker = screen.getByTestId("annot-pin-pin-a");
+    fireEvent.click(marker);
+    marker.focus();
+
+    removePin("pin-a");
+    bumpVersion();
+    await waitFor(() => expect(screen.queryByTestId("annot-pin-pin-a")).toBeNull());
+    await act(async () => Promise.resolve());
+    expect(document.activeElement).toBe(canvas);
+  });
+
+  it("falls back to the viewer when hiding annotations removes a focused marker", async () => {
+    const { setVisible, canvas } = renderOverlay({ pins: [ownPin()] });
+    const marker = screen.getByTestId("annot-pin-pin-a");
+    fireEvent.click(marker);
+    marker.focus();
+
+    setVisible(false);
+    await act(async () => Promise.resolve());
+    expect(screen.queryByTestId("annot-pin-pin-a")).toBeNull();
+    expect(document.activeElement).toBe(canvas);
+  });
+
+  it("falls back to the viewer when the overlay unmounts with marker-owned focus", async () => {
+    const { unmount, canvas } = renderOverlay({ pins: [ownPin()] });
+    const marker = screen.getByTestId("annot-pin-pin-a");
+    fireEvent.click(marker);
+    marker.focus();
+
+    unmount();
+    await act(async () => Promise.resolve());
+    expect(document.activeElement).toBe(canvas);
   });
 
   it("Cancel emits nothing and dismisses the confirm, leaving the pin intact", () => {
@@ -1294,6 +1518,7 @@ describe("AnnotationOverlay — reflects re-anchored positions after a layout sw
       myId: MY_ID,
       sendCommand: () => {},
       onDocumentChanged: () => {},
+      viewport: viewportForScene(scene),
     });
     const { rerender } = render(<AnnotationOverlay {...props(0)} />);
 
@@ -1336,6 +1561,7 @@ describe("AnnotationOverlay — reflects re-anchored positions after a layout sw
       myId: MY_ID,
       sendCommand: () => {},
       onDocumentChanged: () => {},
+      viewport: viewportForScene(scene),
     });
     const { rerender } = render(<AnnotationOverlay {...props(0)} />);
     runFrame();
@@ -1390,7 +1616,7 @@ describe("AnnotationOverlay — passive pin-select stays gentle; Go to author's 
         myId={MY_ID}
         sendCommand={() => {}}
         onDocumentChanged={() => {}}
-        onViewportChanged={() => {}}
+        viewport={viewportForScene(scene)}
         onGoToAuthorView={(id) => goToCalls.push(id)}
       />,
     );

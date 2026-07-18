@@ -30,12 +30,17 @@ use super::config::{AuthConfig, SecureCookieMode};
 /// `lucida_session` (HttpOnly + SameSite=Lax + Path=/ + auto Secure).
 pub const SIGNED_OUT_COOKIE_NAME: &str = "lucida_signed_out";
 
+/// Short-lived, HttpOnly browser proof bound to an in-flight OAuth state.
+/// It is scoped to the callback endpoint and never exposed to JavaScript.
+pub const OAUTH_BINDING_COOKIE_NAME: &str = "lucida_oauth_binding";
+pub const OAUTH_BINDING_TTL_SECS: i64 = 10 * 60;
+
 /// TTL for the marker cookie: 10 minutes. A backstop for the rare path
 /// where the user never returns to `/auth/start` to clear it (closed
 /// the tab, walked away). Short enough that "I logged out, came back
 /// the next morning" behaves as a fresh visit (auto-bounce friction-
 /// free), long enough to cover the realistic refresh / new-tab /
-/// bookmark-click windows immediately after logout.
+/// saved-link windows immediately after logout.
 pub const SIGNED_OUT_TTL_SECS: i64 = 600;
 
 /// Pull the session id out of an inbound request's `Cookie` header.
@@ -47,8 +52,13 @@ pub const SIGNED_OUT_TTL_SECS: i64 = 600;
 /// from a temporary inside the iterator chain — owning the value is
 /// cheaper than wrestling lifetimes for what's a UUID-sized string.
 pub fn read_session_cookie(parts: &Parts, cookie_name: &str) -> Option<String> {
-    parts
-        .headers
+    read_named_cookie(&parts.headers, cookie_name)
+}
+
+/// Read one named cookie from a request header map without logging or
+/// otherwise exposing its credential value.
+pub fn read_named_cookie(headers: &axum::http::HeaderMap, cookie_name: &str) -> Option<String> {
+    headers
         .get_all(COOKIE)
         .iter()
         .filter_map(|hv| hv.to_str().ok())
@@ -61,6 +71,30 @@ pub fn read_session_cookie(parts: &Parts, cookie_name: &str) -> Option<String> {
                 None
             }
         })
+}
+
+pub fn build_oauth_binding_cookie(
+    config: &AuthConfig,
+    binding: &str,
+    request_is_https: bool,
+) -> String {
+    let mut cookie = Cookie::new(OAUTH_BINDING_COOKIE_NAME, binding.to_string());
+    cookie.set_http_only(true);
+    cookie.set_path("/auth/callback");
+    cookie.set_same_site(SameSite::Lax);
+    cookie.set_secure(resolve_secure(config.secure_mode, request_is_https));
+    cookie.set_max_age(CookieDuration::seconds(OAUTH_BINDING_TTL_SECS));
+    cookie.to_string()
+}
+
+pub fn build_clearing_oauth_binding_cookie(config: &AuthConfig, request_is_https: bool) -> String {
+    let mut cookie = Cookie::new(OAUTH_BINDING_COOKIE_NAME, "");
+    cookie.set_http_only(true);
+    cookie.set_path("/auth/callback");
+    cookie.set_same_site(SameSite::Lax);
+    cookie.set_secure(resolve_secure(config.secure_mode, request_is_https));
+    cookie.set_max_age(CookieDuration::ZERO);
+    cookie.to_string()
 }
 
 /// Decide whether to set the `Secure` attribute given the request

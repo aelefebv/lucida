@@ -5,12 +5,37 @@ description: "Every dataset URL passes through a single string-level normalizati
 tags: [lucida, decision]
 source_path: wiki/decisions/0042-canonical-dataset-url-form.md
 created: 2026-05-26
-modified: 2026-05-26
+modified: 2026-07-17
 ---
 
 # Canonical dataset URL form
 
 Status: Accepted (PRD #703).
+
+## Source-generation addendum (2026-07)
+
+Canonical location is now represented by the typed `SourceIdentity`, rather
+than passed independently as a display string and a hash. Its full BLAKE3
+digest is the collision-safe locator identity. Import separately derives a
+`SourceRevision` from the admitted source metadata, and `SourceVersion` pairs
+the two. Runtime binding reuse, persisted document replacement, source-byte
+caches, proxy caches, and generated-coarse caches all use that complete
+generation boundary. Reopening a locator therefore verifies the current
+revision before reusing its binding; a changed source at the same locator
+cannot inherit stale document or cache state.
+
+Persisted identity and locator values are validated as a pair on restore. A
+startup data migration first recognizes the one released truncated source-id
+generation, computes the full identity in Rust, and transactionally rekeys
+both `dataset_sources` and all `workspace_datasets` references while preserving
+the opaque workspace-local `wds-*` ids. It prevalidates the complete graph and
+fails without writes for an unknown id, orphan reference, or two locator rows
+that normalize to the same full identity; it never guesses which membership to
+discard. Once that compatibility step has run, a row whose locator does not
+reproduce its stored full identity is rejected instead of being silently
+re-canonicalized. The same explicit legacy-id helper is used by offline
+bookmark recovery. Legacy truncated-hash cache directories are recognized only
+so the cache-admin operation can remove them during the migration period.
 
 ## Decision
 
@@ -44,13 +69,13 @@ Placement in `lucida-content::url` honors the existing crate boundaries: both `l
 ## Consequences
 
 - **`DatasetId`** and **proxy-cache directory naming** derive from the normalized form. Existing v0 bookmarks (Unix-pathed) are unaffected — Unix-path normalization is a passthrough.
-- **`lucida-store::backend::open` normalizes internally**, so all callers (server, py, future cli) get cross-platform classification for free; the server also normalizes at its own input boundary because it needs the canonical form for `dataset_id_for_url` *before* calling open. Idempotence makes the double-call safe.
+- **`lucida-store::backend::open` normalizes internally** and is the trusted library/client entry point, so Python and other non-server callers get cross-platform local access through `object_store::LocalFileSystem`. Server-local sources do not reopen this ambient backend: `SourceTrustPolicy` admits them beneath an operator-configured `ConfinedLocalRoot` and retains an `AdmittedLocalDataset` capability. That descriptor-confined path rejects descendant symlinks and fails closed on platforms where the primitive is unavailable.
 - **The SPA normalizes user input on submit** in `handleUrlSubmit`. Cosmetic surprise: a Windows user typing `C:\Users\me\foo.zarr` sees `c:/Users/me/foo.zarr` in the URL bar and saved-view URLs after open. Acceptable for v0; what's stored is what's shown.
 - **The browse handler returns canonical-form paths** in its response, converting `\\?\C:\…` and `\\?\UNC\…` verbatim UNC results from `tokio::fs::canonicalize` back to canonical form via a small helper. The `data_dir` constraint security check stays on segment-aware `starts_with` over canonicalized PathBufs.
 - **What's explicitly NOT solved:** `..` resolution (`/foo/../bar` stays `/foo/../bar`); symlink collapse; full case-folding of the path (only the drive letter and a leading URI scheme are lowercased — host names, though also case-insensitive per RFC 3986, are left as typed); cross-machine path equivalence (still deferred to [Local-File Datasets Are Personal-Only in Saved Views](0014-local-file-datasets-personal-only-in-saved-views.md)'s personal-only-share rule).
 - **ADR-0014's classifier rule** is amended (one-line addendum): the test is now `is_local_dataset_url(normalize_dataset_url(s))`, extended to cover drive-letter and UNC patterns. The personal-only-share decision and the `DatasetId`-blake3-collision sharp edge remain valid verbatim.
 - **`lucida-protocol`'s "owns nothing computational" claim stays valid** — the new helpers live in `lucida-content::url`, not protocol.
-- **CI stays Linux-only**; Windows support is verified manually by the author at PR time. [Queue — Open Questions](../queue.md) entry records the deferral. Adding a `windows-latest` matrix entry remains a future option, deferred until Windows usage stops being single-developer.
+- **Focused Windows CI is required**. A native Windows runner compiles and exercises the `lucida-store` backend split, including a successful trusted local read and fail-closed server confinement, then builds `lucida-py` and reads a local object through `PyStore`. The broader workspace/browser matrix remains on its platform-specific jobs; this focused lane is the compatibility gate for Windows local-file opening.
 
 ## Related
 

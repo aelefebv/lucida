@@ -7,11 +7,10 @@
 # reference for any target cluster.
 #
 # Why a single replica:
-#   - The session store and bookmark store are SQLite files on a PVC
-#     (see [[wiki/decisions/0015-server-stored-bookmarks-and-auth-seam]]).
-#     SQLite + WAL is single-writer; multi-replica would require a real
-#     RDBMS migration first.
-#   - The proxy on-disk cache (LUCIDA_PROXY_CACHE_DIR) is also on the
+#   - Session, workspace, and saved-view stores share one SQLite database on a
+#     PVC (see [[wiki/systems/subsystems/workspaces]]). SQLite + WAL is
+#     single-writer; multi-replica would require a real RDBMS migration first.
+#   - The generated-coarse cache (LUCIDA_GENERATED_COARSE_CACHE_DIR) is also on the
 #     PVC and is single-writer for the same reason.
 #   - Strategy is Recreate so the writer slot is never double-booked
 #     during rollouts (the new pod waits for the old pod to release the
@@ -46,20 +45,34 @@ spec:
         app.kubernetes.io/component: server
     spec:
       serviceAccountName: lucida
-      # Set securityContext per your cluster's PodSecurity profile. The
-      # debian:bookworm-slim runtime image runs as root by default; if
-      # your cluster enforces "restricted" you'll want to add a
-      # non-root user to the Dockerfile and pin runAsUser/runAsGroup
-      # here. Left unset upstream so the manifest stays valid in any
-      # PodSecurity admission mode.
+      # Lucida never calls the Kubernetes API. Workload-identity admission
+      # controllers can still inject their own projected identity token.
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 35
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: lucida
-          # Replace with your registry path + tag. The upstream image
+          # Replace with your registry path + release tag + immutable digest.
+          # The tag is readable; the digest prevents a registry-side tag move.
+          # The upstream image
           # is published per release-please by .github/workflows/release.yml
           # — adopters generally re-tag into their own registry for
           # promotion control.
-          image: <YOUR-REGISTRY>/lucida:<YOUR-TAG>
+          image: <YOUR-REGISTRY>/lucida:<YOUR-TAG>@sha256:<YOUR-DIGEST>
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
           ports:
             - name: http
               containerPort: 9876
@@ -106,16 +119,27 @@ spec:
                   name: lucida-google-oauth
                   key: client_secret
 
-            # ---- Required: where SQLite + the proxy cache live ----
+            # ---- Required: where SQLite + generated coarse chunks live ----
             # Absolute path under the PVC mount below. The default
             # CWD-relative `./lucida.db` is brittle in containers; set
             # an absolute path explicitly.
             - name: LUCIDA_DB_PATH
               value: "/var/lib/lucida/lucida.db"
+            - name: LUCIDA_GENERATED_COARSE_CACHE_DIR
+              value: "/var/lib/lucida/generated-coarse"
+            # 8 GiB cap on recomputable chunks; the reference 50 GiB PVC keeps
+            # nominal headroom for SQLite/WAL and operator dataset files.
+            - name: LUCIDA_GENERATED_COARSE_DISK_BUDGET_BYTES
+              value: "8589934592"
+            # Deprecated, clear-only proxy-era root for upgrade cleanup.
             - name: LUCIDA_PROXY_CACHE_DIR
               value: "/var/lib/lucida/proxy-cache"
             - name: LUCIDA_DATA_DIR
               value: "/var/lib/lucida/data"
+            - name: LUCIDA_SHUTDOWN_QUIET_PERIOD_SECS
+              value: "2"
+            - name: LUCIDA_SHUTDOWN_TIMEOUT_SECS
+              value: "30"
 
             # ---- Required behind a TLS-terminating ingress ----
             # The ingress terminates TLS and forwards http:// to the
@@ -139,6 +163,26 @@ spec:
             # - name: LUCIDA_ADMIN_EMAILS
             #   value: "<ADMIN-EMAIL-ONE>,<ADMIN-EMAIL-TWO>"
 
+            # Dataset-source trust is deny-by-default. Name every remote
+            # scope this deployment is allowed to read. HTTP hosts are exact
+            # hostnames; CIDRs are an additional explicit opt-in for private
+            # or LAN destinations. Cloud reads require both a bucket allowlist
+            # and the ambient-credential switch.
+            # - name: LUCIDA_SOURCE_HTTP_HOSTS
+            #   value: "<DATASET-HOST-ONE>,<DATASET-HOST-TWO>"
+            # - name: LUCIDA_SOURCE_HTTP_CIDRS
+            #   value: "<TRUSTED-CIDR>"
+            # Operator-specific RFC 6052 translation prefixes to deny. The
+            # standardized NAT64/transition forms are rejected automatically.
+            # - name: LUCIDA_SOURCE_HTTP_IPV6_TRANSLATION_CIDRS
+            #   value: "<IPV6-CIDR>"
+            # - name: LUCIDA_SOURCE_S3_BUCKETS
+            #   value: "<S3-BUCKET-ONE>,<S3-BUCKET-TWO>"
+            # - name: LUCIDA_SOURCE_GCS_BUCKETS
+            #   value: "<GCS-BUCKET-ONE>,<GCS-BUCKET-TWO>"
+            # - name: LUCIDA_SOURCE_ALLOW_AMBIENT_CLOUD_CREDENTIALS
+            #   value: "true"
+
             # Override the default cookie name (`lucida_session`).
             # - name: LUCIDA_COOKIE_NAME
             #   value: "<YOUR-COOKIE-NAME>"
@@ -150,10 +194,14 @@ spec:
             # - name: LUCIDA_SESSION_IDLE_TIMEOUT_HOURS
             #   value: "<HOURS>"
 
-            # Per-generator concurrency cap for the on-disk proxy cache.
+            # Bounded concurrency for generated-coarse materialization.
             # CLI flag wins over env if both are set.
-            # - name: LUCIDA_PROXY_CONCURRENCY
+            # - name: LUCIDA_GENERATED_COARSE_CONCURRENCY
             #   value: "<INT>"
+
+            # Process-wide cap shared by every WebSocket outbound queue.
+            # - name: LUCIDA_WEBSOCKET_OUTBOX_BUDGET_BYTES
+            #   value: "<BYTES>"
 
             # Privileged "service-to-service" admin token (alternative to
             # cookie-based admin). Treat as a real secret if you set it.
@@ -196,8 +244,7 @@ spec:
           resources:
             # Starting points. Tune from your actual usage. The chunk
             # pipeline can spike memory under heavy concurrent fetch;
-            # the proxy cache uses disk, not RAM, but the sled-style
-            # in-process indexes scale with cache size.
+            # generated coarse data uses disk rather than process RAM.
             requests:
               cpu: "200m"
               memory: "512Mi"
@@ -207,7 +254,12 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/lucida
+            - name: tmp
+              mountPath: /tmp
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: lucida-data
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

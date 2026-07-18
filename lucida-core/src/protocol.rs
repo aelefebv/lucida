@@ -3,9 +3,14 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use lucida_content::{DatasetId, ImageId};
+pub use lucida_protocol::{
+    ChunkMessage, ClientId, CommandFailureCode, OpenedDatasetSummary, PeerIdentity,
+    ViewerInteractionMode, ViewerInterestChunkKey, ViewerInterestHint, ViewerInterestLane,
+    ViewerInterestMode, ViewerInterestViewport,
+};
 use lucida_protocol::{
-    AssetCatalogDelta, DatasetOpenFailureDiagnostic, DatasetOpenProgressDiagnostic,
-    DatasetOpenSuccessDiagnostic, DatasetSourceHealth, GeneratedAvailabilityDelta,
+    DatasetOpenFailureDiagnostic, DatasetOpenProgressDiagnostic, DatasetOpenSuccessDiagnostic,
+    DatasetSourceHealth, FailureDescriptor, GeneratedAvailabilityDelta,
     GeneratedAvailabilitySnapshot, GeneratedChunkStatus, SourceChunkStatus,
 };
 
@@ -13,70 +18,6 @@ use crate::camera::Camera;
 use crate::command::DocumentCommand;
 use crate::scene::{DatasetDisplaySettings, DisplayState, DocumentState};
 use crate::view::ViewState;
-
-pub type ClientId = u64;
-
-/// Presentational identity of a connected peer, surfaced on their live
-/// cursor in collaborative mode (issue #540). Server-authored from the
-/// session's authenticated `AuthPrincipal` — clients never send this, so
-/// it can't be spoofed and is only ever shown to co-present peers.
-///
-/// Privacy: the raw email address is NEVER carried here. Collaborator
-/// emails are owner-only (the `/sharing` endpoint is `require_owner`-gated),
-/// so presence — which every co-present peer receives, including non-owner
-/// link-access viewers/editors — must not leak them. Only the
-/// non-identifying `display_name`, `picture_url`, and a single-grapheme
-/// `initial` cross the wire.
-///
-/// All fields are best-effort: an unauthenticated/legacy session leaves
-/// `identity` as `None` on `PresenceState`, and within an identity a
-/// provider may omit `picture_url`. Consumers fall back name → initial
-/// chip → numeric id/color.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PeerIdentity {
-    /// Human-facing name (`AuthPrincipal::display_name`). May be empty if
-    /// the provider supplied none.
-    pub display_name: String,
-    /// Avatar URL (`AuthPrincipal::picture_url`). `None` for dev sessions
-    /// and providers without a picture — the cursor falls back to an
-    /// initial chip.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub picture_url: Option<String>,
-    /// Single-grapheme fallback glyph for the avatar chip, computed
-    /// server-side from the display name (or, when blank, the email
-    /// local-part) so the cursor has a stable initial WITHOUT the raw
-    /// email crossing the wire. Empty only when no usable source existed.
-    #[serde(default)]
-    pub initial: String,
-}
-
-impl PeerIdentity {
-    /// Build a wire identity from the connection's authenticated principal,
-    /// computing the fallback `initial` server-side from the display name —
-    /// or, when that is blank, the email local-part — so the raw `email`
-    /// never crosses the wire. The returned `PeerIdentity` carries no email.
-    pub fn from_principal_parts(
-        display_name: String,
-        picture_url: Option<String>,
-        email: &str,
-    ) -> Self {
-        let initial = Self::compute_initial(&display_name, email);
-        Self {
-            display_name,
-            picture_url,
-            initial,
-        }
-    }
-
-    /// First uppercased character of the display name, falling back to the
-    /// email local-part (the bit before `@`), else empty. Only this single
-    /// grapheme — never the full address — is exposed to peers.
-    fn compute_initial(display_name: &str, email: &str) -> String {
-        let from = |s: &str| s.trim().chars().next();
-        let ch = from(display_name).or_else(|| from(email.split('@').next().unwrap_or("")));
-        ch.map(|c| c.to_uppercase().to_string()).unwrap_or_default()
-    }
-}
 
 /// Per-client ephemeral state broadcast to other clients.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,14 +29,19 @@ pub struct PresenceState {
     /// Who this client is following (`None` = independent).
     pub following: Option<ClientId>,
     pub cursor: Option<[f64; 2]>,
+    /// Dataset coordinate space the cursor belongs to. `None` when the cursor
+    /// is absent or from a legacy client; consumers must not project unknown
+    /// coordinates through an arbitrary local dataset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_dataset_id: Option<DatasetId>,
     #[serde(default)]
     pub dataset_order: Vec<DatasetId>,
     #[serde(default)]
     pub dataset_settings: HashMap<DatasetId, DatasetDisplaySettings>,
-    /// Presentational identity for the peer's cursor (#540). Server-set
-    /// from the authed principal; `None` for sessions without auth (the
-    /// non-workspace `/ws` path) so older/anonymous peers still render
-    /// via the numeric-id fallback.
+    /// Presentational identity for the peer's cursor (#540), authored by the
+    /// server from the authenticated workspace principal. Optional on the wire
+    /// only for backward compatibility with snapshots produced before peer
+    /// identity existed; current workspace connections always populate it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<PeerIdentity>,
 }
@@ -105,7 +51,26 @@ pub struct PresenceState {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
     /// A document command (shared, sequenced).
-    Command { command: DocumentCommand },
+    Command {
+        /// Opaque client-generated correlation id. The server echoes it in an
+        /// explicit Ack or Nack after the durable outcome is known. Empty is
+        /// reserved for the pre-correlation wire shape so already-deployed
+        /// clients can keep sending commands during the migration.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        request_id: String,
+        command: DocumentCommand,
+    },
+    /// Request an append-only inverse of an already-sequenced document
+    /// operation. `target_operation_id` is the server-assigned operation id
+    /// (currently the workspace sequence); `expected_revision` makes the
+    /// caller state which revision it observed. The server rechecks both,
+    /// authorship, current authorization, and the target's semantic
+    /// precondition before appending the concrete inverse command.
+    InverseCommand {
+        request_id: String,
+        target_operation_id: u64,
+        expected_revision: u64,
+    },
     /// Viewport presence update (ephemeral, latest-wins).
     Presence {
         camera: Camera,
@@ -113,7 +78,11 @@ pub enum ClientMessage {
         display: DisplayState,
     },
     /// Cursor position update (null = cursor left the canvas).
-    Cursor { position: Option<[f64; 2]> },
+    Cursor {
+        position: Option<[f64; 2]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dataset_id: Option<DatasetId>,
+    },
     /// Follow another client (or stop following with `target: null`).
     Follow { target: Option<ClientId> },
     /// Layer presence update (ephemeral, latest-wins).
@@ -153,67 +122,6 @@ pub enum ClientMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ViewerInterestHint {
-    #[serde(default)]
-    pub client_id: Option<ClientId>,
-    pub dataset_id: DatasetId,
-    pub generation: u64,
-    pub t: u32,
-    pub z: u32,
-    #[serde(default)]
-    pub channels: Vec<u32>,
-    pub mode: ViewerInterestMode,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub viewport: Option<ViewerInterestViewport>,
-    #[serde(default)]
-    pub desired_keys: Vec<ViewerInterestChunkKey>,
-    #[serde(default)]
-    pub predicted_keys: Vec<ViewerInterestChunkKey>,
-    pub interaction: ViewerInteractionMode,
-    pub timestamp_ms: u64,
-    pub ttl_ms: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ViewerInterestMode {
-    Slice,
-    Volume,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ViewerInteractionMode {
-    Idle,
-    Panning,
-    Zooming,
-    Scrubbing,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ViewerInterestViewport {
-    pub xy_bounds: [f64; 4],
-    pub z_range: [f64; 2],
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ViewerInterestChunkKey {
-    pub image_id: ImageId,
-    pub key: String,
-    #[serde(default)]
-    pub lane: ViewerInterestLane,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ViewerInterestLane {
-    #[default]
-    Visible,
-    Predicted,
-    Background,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
     /// First message on connect. Full authoritative document state + peer presence.
@@ -231,7 +139,21 @@ pub enum ServerMessage {
     /// Command from another client, broadcast to all except sender.
     CommandBroadcast { seq: u64, command: DocumentCommand },
     /// Sent only to the command's sender confirming application.
-    Ack { seq: u64 },
+    Ack {
+        /// Missing only when acknowledging a legacy command that arrived
+        /// without a request id. New clients always receive their exact id.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        request_id: String,
+        seq: u64,
+    },
+    /// Sent only to the command requester when no mutation was published.
+    Nack {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        request_id: String,
+        code: CommandFailureCode,
+        message: String,
+        retryable: bool,
+    },
     /// A new client connected.
     PeerJoined {
         client_id: ClientId,
@@ -250,6 +172,8 @@ pub enum ServerMessage {
     CursorUpdate {
         client_id: ClientId,
         position: Option<[f64; 2]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dataset_id: Option<DatasetId>,
     },
     /// A peer's follow target changed.
     FollowChanged {
@@ -274,7 +198,15 @@ pub enum ServerMessage {
         request_id: String,
         url: String,
         seq: u64,
-        opened: lucida_protocol::DatasetOpened,
+        /// Small result used by current clients. Optional on read so the
+        /// pre-summary success envelope remains deserializable.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<OpenedDatasetSummary>,
+        /// Compatibility payload for clients released before the summary
+        /// result existed. The server sends this once to the requester and
+        /// excludes that socket from the parallel command broadcast.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        opened: Option<lucida_protocol::DatasetOpened>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diagnostic: Option<DatasetOpenSuccessDiagnostic>,
     },
@@ -291,11 +223,6 @@ pub enum ServerMessage {
         request_id: String,
         datasets: Vec<DatasetSourceHealth>,
     },
-    /// Incremental update to a dataset's asset catalog.
-    AssetCatalogUpdate {
-        dataset_id: DatasetId,
-        delta: AssetCatalogDelta,
-    },
     /// Runtime generated-level metadata/readiness update. Server-authored and
     /// unsequenced; clients merge it into their local availability view.
     GeneratedAvailabilityUpdate {
@@ -310,20 +237,9 @@ pub enum ServerMessage {
         key: String,
         status: GeneratedChunkStatus,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure: Option<FailureDescriptor>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
-    },
-    /// A server-stored bookmark was created, renamed, or deleted.
-    /// Broadcast to clients whose session has at least one loaded dataset
-    /// that overlaps `dataset_urls`. The client refetches the bookmark by
-    /// id (on Created/Updated) or removes it from local state (on
-    /// Deleted) — keeping the broadcast payload small.
-    ///
-    /// Variant added at the end so the serde tag positions of older
-    /// variants don't shift (see `wiki/gotchas/scene-document-state-json-compat`).
-    BookmarkChanged {
-        id: String,
-        action: BookmarkAction,
-        dataset_urls: Vec<String>,
     },
     /// A workspace was archived while this client was connected.
     /// Workspace clients should stop reconnecting and leave the workspace route.
@@ -343,38 +259,10 @@ pub enum ServerMessage {
         image_id: ImageId,
         key: String,
         status: SourceChunkStatus,
+        #[serde(flatten)]
+        failure: FailureDescriptor,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
-    },
-}
-
-/// The kind of mutation a `BookmarkChanged` describes. Wire encoding is
-/// the lowercase variant name (`"created"` / `"updated"` / `"deleted"`)
-/// so the JSON shape stays stable if the Rust enum is later renamed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum BookmarkAction {
-    Created,
-    Updated,
-    Deleted,
-}
-
-/// Chunk-related messages exchanged between clients and server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ChunkMessage {
-    /// Viewer -> Server: request a chunk from the dataset's data source.
-    ChunkRequest {
-        dataset_id: DatasetId,
-        image_id: ImageId,
-        key: String,
-    },
-    /// Server -> Data source: fetch this chunk and send it to `client_id`.
-    ChunkFetch {
-        client_id: u64,
-        dataset_id: DatasetId,
-        image_id: ImageId,
-        key: String,
     },
 }
 
@@ -405,14 +293,79 @@ mod tests {
 
     #[test]
     fn ack_round_trips() {
-        let msg = ServerMessage::Ack { seq: 42 };
+        let msg = ServerMessage::Ack {
+            request_id: "req-42".into(),
+            seq: 42,
+        };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"ack\""));
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
-            ServerMessage::Ack { seq } => assert_eq!(seq, 42),
+            ServerMessage::Ack { request_id, seq } => {
+                assert_eq!(request_id, "req-42");
+                assert_eq!(seq, 42);
+            }
             _ => panic!("expected Ack"),
         }
+    }
+
+    #[test]
+    fn pre_correlation_command_and_ack_wire_shapes_remain_compatible() {
+        let command = r#"{"type":"command","command":{"type":"remove_dataset","id":"ds1"}}"#;
+        let parsed: ClientMessage = serde_json::from_str(command).unwrap();
+        assert!(matches!(
+            parsed,
+            ClientMessage::Command { request_id, .. } if request_id.is_empty()
+        ));
+
+        let ack = ServerMessage::Ack {
+            request_id: String::new(),
+            seq: 9,
+        };
+        assert_eq!(
+            serde_json::to_value(ack).unwrap(),
+            serde_json::json!({"type": "ack", "seq": 9})
+        );
+    }
+
+    #[test]
+    fn dataset_open_success_accepts_both_rolling_upgrade_payloads() {
+        let opened = crate::scene::test_helpers::make_dataset_opened("ds1", "test", 1);
+        let message = ServerMessage::OpenDatasetSucceeded {
+            request_id: "request-1".into(),
+            url: "https://example.invalid/test".into(),
+            seq: 1,
+            summary: Some(OpenedDatasetSummary {
+                workspace_dataset_id: DatasetId("ds1".into()),
+                name: "test".into(),
+                image_count: 1,
+                entity_count: 1,
+            }),
+            opened: Some(opened),
+            diagnostic: None,
+        };
+
+        let mut legacy_opened = serde_json::to_value(&message).unwrap();
+        legacy_opened.as_object_mut().unwrap().remove("summary");
+        assert!(matches!(
+            serde_json::from_value::<ServerMessage>(legacy_opened).unwrap(),
+            ServerMessage::OpenDatasetSucceeded {
+                summary: None,
+                opened: Some(_),
+                ..
+            }
+        ));
+
+        let mut summary_only = serde_json::to_value(message).unwrap();
+        summary_only.as_object_mut().unwrap().remove("opened");
+        assert!(matches!(
+            serde_json::from_value::<ServerMessage>(summary_only).unwrap(),
+            ServerMessage::OpenDatasetSucceeded {
+                summary: Some(_),
+                opened: None,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -425,45 +378,26 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"chunk_request\""));
         let parsed: ChunkMessage = serde_json::from_str(&json).unwrap();
-        match parsed {
-            ChunkMessage::ChunkRequest {
-                dataset_id,
-                image_id,
-                key,
-            } => {
-                assert_eq!(dataset_id, DatasetId("ds1".into()));
-                assert_eq!(image_id, ImageId("img1".into()));
-                assert_eq!(key, "0/0/0/0/0/0");
-            }
-            _ => panic!("expected ChunkRequest"),
-        }
+        let ChunkMessage::ChunkRequest {
+            dataset_id,
+            image_id,
+            key,
+        } = parsed;
+        assert_eq!(dataset_id, DatasetId("ds1".into()));
+        assert_eq!(image_id, ImageId("img1".into()));
+        assert_eq!(key, "0/0/0/0/0/0");
     }
 
     #[test]
-    fn chunk_fetch_round_trips() {
-        let msg = ChunkMessage::ChunkFetch {
-            client_id: 42,
-            dataset_id: DatasetId("ds1".into()),
-            image_id: ImageId("img1".into()),
-            key: "1/0/0/2/3/4".into(),
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains("\"type\":\"chunk_fetch\""));
-        let parsed: ChunkMessage = serde_json::from_str(&json).unwrap();
-        match parsed {
-            ChunkMessage::ChunkFetch {
-                client_id,
-                dataset_id,
-                image_id,
-                key,
-            } => {
-                assert_eq!(client_id, 42);
-                assert_eq!(dataset_id, DatasetId("ds1".into()));
-                assert_eq!(image_id, ImageId("img1".into()));
-                assert_eq!(key, "1/0/0/2/3/4");
-            }
-            _ => panic!("expected ChunkFetch"),
-        }
+    fn retired_chunk_fetch_fails_closed() {
+        let legacy = r#"{
+            "type":"chunk_fetch",
+            "client_id":42,
+            "dataset_id":"ds1",
+            "image_id":"img1",
+            "key":"1/0/0/2/3/4"
+        }"#;
+        assert!(serde_json::from_str::<ChunkMessage>(legacy).is_err());
     }
 
     #[test]
@@ -563,6 +497,7 @@ mod tests {
     fn client_message_command_round_trips() {
         let reg = crate::scene::test_helpers::make_dataset_opened("ds1", "test", 1);
         let msg = ClientMessage::Command {
+            request_id: "req-open".into(),
             command: DocumentCommand::DatasetOpened(reg),
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -574,7 +509,7 @@ mod tests {
     #[test]
     fn client_message_add_annotation_matches_wire_envelope() {
         // The exact client->server envelope from the slice wire contract.
-        let json = r#"{"type":"command","command":{"type":"add_annotation","dataset_id":"wds-1","id":"pin-1","position":[3.0,4.0],"author":"alice","kind":"point"}}"#;
+        let json = r#"{"type":"command","request_id":"req-1","command":{"type":"add_annotation","dataset_id":"wds-1","id":"pin-1","position":[3.0,4.0],"author":"alice","kind":"point"}}"#;
         let parsed: ClientMessage = serde_json::from_str(json).unwrap();
         match parsed {
             ClientMessage::Command {
@@ -586,6 +521,7 @@ mod tests {
                         author,
                         ..
                     },
+                ..
             } => {
                 assert_eq!(dataset_id, DatasetId("wds-1".into()));
                 assert_eq!(id, "pin-1");
@@ -614,6 +550,7 @@ mod tests {
             view: None,
         };
         let inbound = ClientMessage::Command {
+            request_id: "req-annotation".into(),
             command: cmd.clone(),
         };
         let broadcast = ServerMessage::CommandBroadcast {
@@ -675,6 +612,7 @@ mod tests {
 
         // Inbound wire bytes the author broadcasts.
         let inbound_json = serde_json::to_string(&ClientMessage::Command {
+            request_id: "req-view".into(),
             command: cmd.clone(),
         })
         .unwrap();
@@ -682,7 +620,7 @@ mod tests {
         // SERVER: parse the inbound message, then re-serialize the parsed command
         // inside a broadcast (the real from_str -> to_string path).
         let parsed: ClientMessage = serde_json::from_str(&inbound_json).unwrap();
-        let ClientMessage::Command { command } = parsed else {
+        let ClientMessage::Command { command, .. } = parsed else {
             panic!("expected Command");
         };
         let broadcast_json =
@@ -761,11 +699,12 @@ mod tests {
 
     #[test]
     fn client_message_remove_annotation_matches_wire_envelope() {
-        let json = r#"{"type":"command","command":{"type":"remove_annotation","dataset_id":"wds-1","id":"pin-1"}}"#;
+        let json = r#"{"type":"command","request_id":"req-1","command":{"type":"remove_annotation","dataset_id":"wds-1","id":"pin-1"}}"#;
         let parsed: ClientMessage = serde_json::from_str(json).unwrap();
         match parsed {
             ClientMessage::Command {
                 command: DocumentCommand::RemoveAnnotation { dataset_id, id },
+                ..
             } => {
                 assert_eq!(dataset_id, DatasetId("wds-1".into()));
                 assert_eq!(id, "pin-1");
@@ -777,7 +716,7 @@ mod tests {
     #[test]
     fn client_message_move_annotation_matches_wire_envelope() {
         // The exact client->server envelope from the slice wire contract.
-        let json = r#"{"type":"command","command":{"type":"move_annotation","dataset_id":"wds-1","id":"pin-1","position":[3.0,4.0],"z":5.0}}"#;
+        let json = r#"{"type":"command","request_id":"req-1","command":{"type":"move_annotation","dataset_id":"wds-1","id":"pin-1","position":[3.0,4.0],"z":5.0}}"#;
         let parsed: ClientMessage = serde_json::from_str(json).unwrap();
         match parsed {
             ClientMessage::Command {
@@ -789,6 +728,7 @@ mod tests {
                         end,
                         z,
                     },
+                ..
             } => {
                 assert_eq!(dataset_id, DatasetId("wds-1".into()));
                 assert_eq!(id, "pin-1");
@@ -804,7 +744,7 @@ mod tests {
     #[test]
     fn client_message_edit_comment_matches_wire_envelope() {
         // The exact client->server envelope from the slice wire contract.
-        let json = r#"{"type":"command","command":{"type":"edit_comment","dataset_id":"wds-1","annotation_id":"pin-1","id":"c-1","text":"edited"}}"#;
+        let json = r#"{"type":"command","request_id":"req-1","command":{"type":"edit_comment","dataset_id":"wds-1","annotation_id":"pin-1","id":"c-1","text":"edited"}}"#;
         let parsed: ClientMessage = serde_json::from_str(json).unwrap();
         match parsed {
             ClientMessage::Command {
@@ -815,6 +755,7 @@ mod tests {
                         id,
                         text,
                     },
+                ..
             } => {
                 assert_eq!(dataset_id, DatasetId("wds-1".into()));
                 assert_eq!(annotation_id, "pin-1");
@@ -929,6 +870,7 @@ mod tests {
             display: DisplayState::default(),
             following: None,
             cursor: Some([100.0, 200.0]),
+            cursor_dataset_id: None,
             dataset_order: vec![],
             dataset_settings: HashMap::new(),
             identity: None,
@@ -952,6 +894,7 @@ mod tests {
             display: DisplayState::default(),
             following: None,
             cursor: Some([1.0, 2.0]),
+            cursor_dataset_id: None,
             dataset_order: vec![],
             dataset_settings: HashMap::new(),
             identity: Some(PeerIdentity {
@@ -1050,6 +993,7 @@ mod tests {
             display: DisplayState::default(),
             following: None,
             cursor: None,
+            cursor_dataset_id: None,
             dataset_order: vec![],
             dataset_settings: HashMap::new(),
             identity: None,
@@ -1083,6 +1027,7 @@ mod tests {
             display: DisplayState::default(),
             following: Some(3),
             cursor: Some([0.5, 0.5]),
+            cursor_dataset_id: None,
             dataset_order: vec![],
             dataset_settings: HashMap::new(),
             identity: None,
@@ -1243,6 +1188,7 @@ mod tests {
     fn open_dataset_failed_round_trips() {
         use lucida_protocol::{
             DatasetOpenFailureDiagnostic, DatasetOpenFailureKind, DatasetOpenStage,
+            FailureDescriptor,
         };
 
         let msg = ServerMessage::OpenDatasetFailed {
@@ -1251,15 +1197,14 @@ mod tests {
             error: "not found".into(),
             diagnostic: Some(DatasetOpenFailureDiagnostic {
                 stage: DatasetOpenStage::BackendOpen,
-                kind: DatasetOpenFailureKind::MissingObject,
-                retryable: false,
+                failure: FailureDescriptor::new(DatasetOpenFailureKind::MissingObject, false),
                 message: "not found".into(),
                 detail: None,
             }),
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"open_dataset_failed\""));
-        assert!(json.contains("\"kind\":\"missing_object\""));
+        assert!(json.contains("\"code\":\"missing_object\""));
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ServerMessage::OpenDatasetFailed {
@@ -1323,34 +1268,13 @@ mod tests {
     }
 
     #[test]
-    fn asset_catalog_update_round_trips() {
-        use lucida_protocol::{AssetCatalogDelta, ProxyAvailability, ProxyKind};
-
-        let msg = ServerMessage::AssetCatalogUpdate {
-            dataset_id: DatasetId("ds1".into()),
-            delta: AssetCatalogDelta {
-                added: vec![ProxyAvailability {
-                    entity_id: lucida_content::EntityId("e1".into()),
-                    kinds: vec![ProxyKind::GroupProxy3D],
-                    footprints: vec![],
-                }],
-            },
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains("\"type\":\"asset_catalog_update\""));
-        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
-        match parsed {
-            ServerMessage::AssetCatalogUpdate { dataset_id, delta } => {
-                assert_eq!(dataset_id, DatasetId("ds1".into()));
-                assert_eq!(delta.added.len(), 1);
-                assert_eq!(
-                    delta.added[0].entity_id,
-                    lucida_content::EntityId("e1".into())
-                );
-                assert_eq!(delta.added[0].kinds, vec![ProxyKind::GroupProxy3D]);
-            }
-            _ => panic!("expected AssetCatalogUpdate"),
-        }
+    fn retired_asset_catalog_update_fails_closed() {
+        let legacy = r#"{
+            "type":"asset_catalog_update",
+            "dataset_id":"ds1",
+            "delta":{"added":[]}
+        }"#;
+        assert!(serde_json::from_str::<ServerMessage>(legacy).is_err());
     }
 
     #[test]
@@ -1387,6 +1311,7 @@ mod tests {
                     level_index: 2,
                     key: "2/0/0/0/0/0".into(),
                     status: GeneratedChunkStatus::Ready,
+                    failure: None,
                     message: None,
                 }],
             },
@@ -1411,6 +1336,7 @@ mod tests {
             image_id: ImageId("img1".into()),
             key: "2/0/0/0/0/0".into(),
             status: GeneratedChunkStatus::Pending,
+            failure: None,
             message: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -1432,6 +1358,7 @@ mod tests {
             image_id: ImageId("img1".into()),
             key: "0/0/0/0/0/0".into(),
             status: SourceChunkStatus::FailedPermanent,
+            failure: FailureDescriptor::new(lucida_protocol::FailureCode::Permission, false),
             message: Some("access denied".into()),
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -1446,76 +1373,6 @@ mod tests {
                 assert_eq!(message.as_deref(), Some("access denied"));
             }
             _ => panic!("expected SourceChunkStatus"),
-        }
-    }
-
-    #[test]
-    fn bookmark_action_serializes_lowercase() {
-        // Wire-stability assertion: action names are the lowercase enum
-        // variant names. The web client matches on these strings; renaming
-        // a variant must not change the JSON.
-        assert_eq!(
-            serde_json::to_string(&BookmarkAction::Created).unwrap(),
-            "\"created\"",
-        );
-        assert_eq!(
-            serde_json::to_string(&BookmarkAction::Updated).unwrap(),
-            "\"updated\"",
-        );
-        assert_eq!(
-            serde_json::to_string(&BookmarkAction::Deleted).unwrap(),
-            "\"deleted\"",
-        );
-        let parsed: BookmarkAction = serde_json::from_str("\"created\"").unwrap();
-        assert_eq!(parsed, BookmarkAction::Created);
-    }
-
-    #[test]
-    fn bookmark_changed_round_trips() {
-        let msg = ServerMessage::BookmarkChanged {
-            id: "abc-123".into(),
-            action: BookmarkAction::Created,
-            dataset_urls: vec!["gs://bucket/a.zarr".into(), "gs://bucket/b.zarr".into()],
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains("\"type\":\"bookmark_changed\""));
-        assert!(json.contains("\"action\":\"created\""));
-        assert!(json.contains("\"id\":\"abc-123\""));
-        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
-        match parsed {
-            ServerMessage::BookmarkChanged {
-                id,
-                action,
-                dataset_urls,
-            } => {
-                assert_eq!(id, "abc-123");
-                assert_eq!(action, BookmarkAction::Created);
-                assert_eq!(
-                    dataset_urls,
-                    vec![
-                        "gs://bucket/a.zarr".to_string(),
-                        "gs://bucket/b.zarr".to_string()
-                    ],
-                );
-            }
-            _ => panic!("expected BookmarkChanged"),
-        }
-    }
-
-    #[test]
-    fn bookmark_changed_updated_and_deleted_actions_round_trip() {
-        for action in [BookmarkAction::Updated, BookmarkAction::Deleted] {
-            let msg = ServerMessage::BookmarkChanged {
-                id: "id".into(),
-                action,
-                dataset_urls: vec![],
-            };
-            let json = serde_json::to_string(&msg).unwrap();
-            let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
-            match parsed {
-                ServerMessage::BookmarkChanged { action: a, .. } => assert_eq!(a, action),
-                _ => panic!("expected BookmarkChanged"),
-            }
         }
     }
 

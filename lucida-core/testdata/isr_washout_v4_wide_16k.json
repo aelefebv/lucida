@@ -1,0 +1,30 @@
+{
+  "fixture_id": "isr-washout-v4-wide-16k-derived",
+  "derivation": "Structure-only deterministic expansion of the local 20250925_CPPX245_ISR_Washout_v4.ome plate metadata; no image data or source paths.",
+  "source_plate_name": "20250925_CPPX245_ISR_Washout_v4.ome",
+  "rows": ["D", "E", "F", "G", "H", "I", "J", "K", "L", "M"],
+  "columns": ["3", "4", "6", "9", "10", "11", "12", "13", "14", "16", "21", "22"],
+  "wells": [
+    ["D", "3"],
+    ["D", "6"],
+    ["E", "4"],
+    ["E", "10"],
+    ["F", "14"],
+    ["G", "9"],
+    ["G", "21"],
+    ["H", "12"],
+    ["I", "11"],
+    ["J", "6"],
+    ["K", "6"],
+    ["K", "16"],
+    ["L", "11"],
+    ["L", "22"],
+    ["M", "13"],
+    ["M", "22"]
+  ],
+  "fields_per_well": 4,
+  "replicas": 256,
+  "replica_columns": 16,
+  "expected_groups": 4096,
+  "expected_members": 16384
+}

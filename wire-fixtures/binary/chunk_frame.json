@@ -1,0 +1,8 @@
+{
+  "client_id": 9,
+  "dataset_id": "ds1",
+  "image_id": "img1",
+  "chunk_key": "2/0/0/0/0/0",
+  "payload_hex": "010203",
+  "frame_hex": "0900000014006473312f696d67312f322f302f302f302f302f30010203"
+}

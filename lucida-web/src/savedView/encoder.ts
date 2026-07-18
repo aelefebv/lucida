@@ -6,8 +6,7 @@
 //
 // Pipeline on decode:
 //   base64url → gunzip (DecompressionStream) → JSON → restore defaults
-//     → reject if `v` missing/zero; warn if `v > SAVED_VIEW_VERSION` and
-//       best-effort apply known fields
+//     → validate the complete v1 shape before returning it
 //
 // Both flows are async because `CompressionStream` is stream-based.
 //
@@ -28,7 +27,7 @@ import {
 // Public API
 
 export async function encode(view: SavedView): Promise<string> {
-  const stripped = stripDefaults(view);
+  const stripped = stripDefaults(validateSavedView(view));
   const json = JSON.stringify(stripped);
   const gz = await gzip(new TextEncoder().encode(json));
   return base64UrlEncode(gz);
@@ -54,7 +53,7 @@ export async function decode(s: string): Promise<SavedView> {
   } catch (e) {
     throw new SavedViewDecodeError(`JSON parse failed: ${e instanceof Error ? e.message : String(e)}`);
   }
-  return validateAndRestore(parsed);
+  return validateSavedView(parsed);
 }
 
 export class SavedViewDecodeError extends Error {
@@ -66,24 +65,243 @@ export class SavedViewDecodeError extends Error {
 
 // Validation + version handling
 
-function validateAndRestore(raw: unknown): SavedView {
+/**
+ * Validate and normalize an untrusted saved-view object.
+ *
+ * This is intentionally the single runtime boundary used by both URL decode
+ * and the applier. API responses and hand-authored callers do not pass through
+ * `decode()`, so TypeScript's static `SavedView` annotation is not evidence
+ * that their nested fields are safe to forward to WASM. Validation completes
+ * before a normalized value is returned, giving restore an all-or-nothing
+ * preflight: a malformed optional field cannot fail halfway through scene
+ * mutation.
+ *
+ * Version policy is deliberately strict. v1 is the only supported major
+ * version; missing/zero/legacy/future versions are rejected. Additive v1
+ * fields remain backwards compatible through defaults, while a future major
+ * requires an explicit migration instead of a best-effort partial apply.
+ */
+export function validateSavedView(raw: unknown): SavedView {
   if (typeof raw !== "object" || raw === null) {
     throw new SavedViewDecodeError("payload must be an object");
   }
   const obj = raw as Record<string, unknown>;
   const v = obj.v;
-  if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) {
+  if (typeof v !== "number" || !Number.isInteger(v) || v !== SAVED_VIEW_VERSION) {
     throw new SavedViewDecodeError(`missing or invalid version (got ${JSON.stringify(v)})`);
   }
-  if (v > SAVED_VIEW_VERSION) {
-    // Best-effort: warn but try to consume known fields. Future versions
-    // are expected to be additive; if they aren't, downstream apply will
-    // surface a clean error per the failure-handling policy.
-    console.warn(
-      `[SavedView] payload version ${v} exceeds known version ${SAVED_VIEW_VERSION}; applying best-effort.`,
-    );
-  }
+  validateStringArray(obj.datasets, "datasets", true);
+  validateStringMap(obj.active_layouts, "active_layouts", true);
+  validateCamera(obj.camera, "camera");
+  validateView(obj.view, "view");
+  validateDisplay(obj.display, "display");
+  validateStringArray(obj.dataset_order, "dataset_order", true);
+  validateDatasetSettingsMap(obj.dataset_settings, "dataset_settings");
+  validateBooleanMap(obj.auto_contrast, "auto_contrast", true);
   return restoreDefaults(obj);
+}
+
+function fail(path: string, expected: string, value: unknown): never {
+  throw new SavedViewDecodeError(
+    `${path} must be ${expected} (got ${JSON.stringify(value)})`,
+  );
+}
+
+function record(value: unknown, path: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    fail(path, "an object", value);
+  }
+  return value as Record<string, unknown>;
+}
+
+function optionalRecord(value: unknown, path: string): Record<string, unknown> | undefined {
+  return value === undefined ? undefined : record(value, path);
+}
+
+function finite(value: unknown, path: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) fail(path, "a finite number", value);
+  return value;
+}
+
+function optionalFinite(value: unknown, path: string): void {
+  if (value !== undefined) finite(value, path);
+}
+
+function uint(value: unknown, path: string): number {
+  const n = finite(value, path);
+  if (!Number.isSafeInteger(n) || n < 0 || n > 0xffff_ffff) {
+    fail(path, "an unsigned 32-bit integer", value);
+  }
+  return n;
+}
+
+function optionalUint(value: unknown, path: string): void {
+  if (value !== undefined) uint(value, path);
+}
+
+function bool(value: unknown, path: string): boolean {
+  if (typeof value !== "boolean") fail(path, "a boolean", value);
+  return value;
+}
+
+function optionalBool(value: unknown, path: string): void {
+  if (value !== undefined) bool(value, path);
+}
+
+function text(value: unknown, path: string): string {
+  if (typeof value !== "string") fail(path, "a string", value);
+  return value;
+}
+
+function optionalText(value: unknown, path: string): void {
+  if (value !== undefined) text(value, path);
+}
+
+function tuple(value: unknown, length: number, path: string, item: (v: unknown, p: string) => unknown): void {
+  if (!Array.isArray(value) || value.length !== length) fail(path, `an array of length ${length}`, value);
+  value.forEach((entry, index) => item(entry, `${path}[${index}]`));
+}
+
+function validateStringArray(value: unknown, path: string, optional = false): void {
+  if (value === undefined && optional) return;
+  if (!Array.isArray(value)) fail(path, "an array", value);
+  value.forEach((entry, index) => text(entry, `${path}[${index}]`));
+}
+
+function validateStringMap(value: unknown, path: string, optional = false): void {
+  if (value === undefined && optional) return;
+  for (const [key, entry] of Object.entries(record(value, path))) {
+    text(key, `${path} key`);
+    text(entry, `${path}.${key}`);
+  }
+}
+
+function validateBooleanMap(value: unknown, path: string, optional = false): void {
+  if (value === undefined && optional) return;
+  for (const [key, entry] of Object.entries(record(value, path))) {
+    text(key, `${path} key`);
+    bool(entry, `${path}.${key}`);
+  }
+}
+
+function validateEnum(value: unknown, allowed: readonly string[], path: string): void {
+  if (typeof value !== "string" || !allowed.includes(value)) {
+    fail(path, `one of ${allowed.join(", ")}`, value);
+  }
+}
+
+function validateCamera(value: unknown, path: string): void {
+  const camera = record(value, path);
+  const mode = text(camera.mode, `${path}.mode`);
+  if (mode === "slice") {
+    tuple(camera.center, 2, `${path}.center`, finite);
+    finite(camera.zoom, `${path}.zoom`);
+    tuple(camera.viewport, 2, `${path}.viewport`, uint);
+    return;
+  }
+  if (mode === "arcball") {
+    tuple(camera.target, 3, `${path}.target`, finite);
+    for (const key of ["theta", "phi", "distance", "fov", "near", "far"] as const) {
+      finite(camera[key], `${path}.${key}`);
+    }
+    tuple(camera.viewport, 2, `${path}.viewport`, uint);
+    optionalFinite(camera.clip_distance, `${path}.clip_distance`);
+    if (camera.clip_mode !== undefined) {
+      validateEnum(camera.clip_mode, ["plane", "sphere"], `${path}.clip_mode`);
+    }
+    return;
+  }
+  if (mode === "fly") {
+    tuple(camera.position, 3, `${path}.position`, finite);
+    tuple(camera.orientation, 4, `${path}.orientation`, finite);
+    for (const key of ["fov", "near", "far", "speed_multiplier"] as const) {
+      finite(camera[key], `${path}.${key}`);
+    }
+    tuple(camera.viewport, 2, `${path}.viewport`, uint);
+    optionalFinite(camera.base_speed, `${path}.base_speed`);
+    optionalFinite(camera.clip_distance, `${path}.clip_distance`);
+    if (camera.clip_mode !== undefined) {
+      validateEnum(camera.clip_mode, ["plane", "sphere"], `${path}.clip_mode`);
+    }
+    return;
+  }
+  fail(`${path}.mode`, "slice, arcball, or fly", mode);
+}
+
+function validateView(value: unknown, path: string): void {
+  const view = optionalRecord(value, path);
+  if (!view) return;
+  if (view.z_range !== undefined) {
+    const range = record(view.z_range, `${path}.z_range`);
+    const start = uint(range.start, `${path}.z_range.start`);
+    const end = uint(range.end, `${path}.z_range.end`);
+    if (start >= end) fail(`${path}.z_range`, "a non-empty ascending range", view.z_range);
+  }
+  optionalUint(view.t, `${path}.t`);
+  optionalUint(view.c, `${path}.c`);
+  optionalBool(view.multi_channel, `${path}.multi_channel`);
+}
+
+function validateDisplay(value: unknown, path: string): void {
+  const display = optionalRecord(value, path);
+  if (!display) return;
+  optionalFinite(display.contrast_min, `${path}.contrast_min`);
+  optionalFinite(display.contrast_max, `${path}.contrast_max`);
+  optionalFinite(display.gamma, `${path}.gamma`);
+}
+
+const COLORMAPS = [
+  "gray", "magenta", "green", "cyan", "red", "blue", "yellow",
+  "viridis", "inferno", "plasma", "magma", "turbo", "hot", "cool", "jet",
+] as const;
+const BLEND_MODES = ["alpha", "additive", "max"] as const;
+const RENDER_MODES = ["translucent", "max_intensity"] as const;
+
+function validateDatasetSettingsMap(value: unknown, path: string): void {
+  if (value === undefined) return;
+  for (const [id, entry] of Object.entries(record(value, path))) {
+    validateDatasetSettings(entry, `${path}.${id}`);
+  }
+}
+
+function validateDatasetSettings(value: unknown, path: string): void {
+  const settings = record(value, path);
+  optionalBool(settings.visible, `${path}.visible`);
+  optionalFinite(settings.opacity, `${path}.opacity`);
+  optionalFinite(settings.contrast_min, `${path}.contrast_min`);
+  optionalFinite(settings.contrast_max, `${path}.contrast_max`);
+  optionalFinite(settings.gamma, `${path}.gamma`);
+  if (settings.blend_mode !== undefined) validateEnum(settings.blend_mode, BLEND_MODES, `${path}.blend_mode`);
+  if (settings.render_mode !== undefined) validateEnum(settings.render_mode, RENDER_MODES, `${path}.render_mode`);
+  if (settings.channel_blend_mode !== undefined) {
+    validateEnum(settings.channel_blend_mode, BLEND_MODES, `${path}.channel_blend_mode`);
+  }
+  if (settings.detail_level_override !== undefined && settings.detail_level_override !== null) {
+    uint(settings.detail_level_override, `${path}.detail_level_override`);
+  }
+  if (settings.channel_settings !== undefined) {
+    if (!Array.isArray(settings.channel_settings)) fail(`${path}.channel_settings`, "an array", settings.channel_settings);
+    settings.channel_settings.forEach((entry, index) => validateChannel(entry, `${path}.channel_settings[${index}]`));
+  }
+  if (settings.label_settings !== undefined) {
+    if (!Array.isArray(settings.label_settings)) fail(`${path}.label_settings`, "an array", settings.label_settings);
+    settings.label_settings.forEach((entry, index) => {
+      const label = record(entry, `${path}.label_settings[${index}]`);
+      optionalBool(label.visible, `${path}.label_settings[${index}].visible`);
+      optionalFinite(label.opacity, `${path}.label_settings[${index}].opacity`);
+    });
+  }
+  validateStringArray(settings.label_names, `${path}.label_names`, true);
+}
+
+function validateChannel(value: unknown, path: string): void {
+  const channel = record(value, path);
+  optionalBool(channel.visible, `${path}.visible`);
+  if (channel.colormap !== undefined) validateEnum(channel.colormap, COLORMAPS, `${path}.colormap`);
+  optionalFinite(channel.contrast_min, `${path}.contrast_min`);
+  optionalFinite(channel.contrast_max, `${path}.contrast_max`);
+  optionalFinite(channel.gamma, `${path}.gamma`);
+  optionalText(channel.name, `${path}.name`);
 }
 
 // Defaults stripping (encode-side).
@@ -183,6 +401,12 @@ function stripDatasetSettings(s: DatasetDisplaySettings): Record<string, unknown
       stripChannel(c, i) ?? {},
     );
   }
+  if (s.label_settings && s.label_settings.length > 0) {
+    out.label_settings = s.label_settings;
+  }
+  if (s.label_names && s.label_names.length > 0) {
+    out.label_names = s.label_names;
+  }
   return out;
 }
 
@@ -268,6 +492,13 @@ function restoreDatasetSettings(p: unknown): DatasetDisplaySettings {
   if (typeof partial.detail_level_override === "number") {
     out.detail_level_override = partial.detail_level_override;
   }
+  if (partial.label_settings) {
+    out.label_settings = partial.label_settings.map((label) => ({
+      visible: label.visible ?? true,
+      opacity: label.opacity ?? 1,
+    }));
+  }
+  if (partial.label_names) out.label_names = [...partial.label_names];
   return out;
 }
 

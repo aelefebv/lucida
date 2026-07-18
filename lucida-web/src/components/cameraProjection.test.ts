@@ -3,6 +3,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import type { WasmScene } from "lucida-core";
 import {
+  centerForWorldAnchor,
   eventToScreenPx,
   eventToWorld,
   makeProjectAnnotationToCss,
@@ -65,16 +66,13 @@ describe("eventToWorld (2D inverse camera)", () => {
     expect(eventToWorld(scene, canvas, { clientX: 500, clientY: 400 })).toEqual([100, 30]);
   });
 
-  it("is dpr-aware: cursor and canvas half both scale, so a CSS point maps identically", () => {
+  it("maps the same CSS point identically at DPR1 and DPR2", () => {
     const canvas = makeCanvas();
     const scene = makeScene2D(1, [0, 0]);
     const at1 = eventToWorld(scene, canvas, { clientX: 500, clientY: 400 });
     setDpr(2);
-    // With zoom in PHYSICAL px per world unit, doubling dpr doubles both the
-    // cursor offset and the half-extents; at the same zoom the world point's
-    // offset from center doubles too.
     const at2 = eventToWorld(scene, canvas, { clientX: 500, clientY: 400 });
-    expect(at2).toEqual([at1[0] * 2, at1[1] * 2]);
+    expect(at2).toEqual(at1);
   });
 });
 
@@ -102,6 +100,34 @@ describe("makeWorldToScreen (2D forward camera)", () => {
     const before = project([100, 100]);
     zoom = 4; // the camera moves mid-frame…
     expect(project([100, 100])).toEqual(before); // …but this frame stays consistent
+  });
+
+  it("projects identical serialized 2D camera state identically across DPR", () => {
+    const scene = makeScene2D(1.75, [41, -9]);
+    const canvas = makeCanvas(0, 0, 960, 540);
+    const world: [number, number] = [123, 77];
+    setDpr(1);
+    const at1 = makeWorldToScreen(scene, canvas)(world);
+    setDpr(2);
+    const at2 = makeWorldToScreen(scene, canvas)(world);
+    expect(at2).toEqual(at1);
+    expect(eventToWorld(scene, canvas, { clientX: at2[0], clientY: at2[1] }))
+      .toEqual(world);
+  });
+});
+
+describe("centerForWorldAnchor (2D wheel anchoring)", () => {
+  it("keeps the same world point under the same CSS pointer at DPR1 and DPR2", () => {
+    const canvas = makeCanvas(100, 50, 800, 600);
+    const pointer = { clientX: 620, clientY: 410 };
+    const initial = makeScene2D(1.25, [20, -30]);
+    setDpr(1);
+    const world = eventToWorld(initial, canvas, pointer);
+    const at1 = centerForWorldAnchor(canvas, pointer, world, 2.5);
+    setDpr(2);
+    const at2 = centerForWorldAnchor(canvas, pointer, world, 2.5);
+    expect(at2).toEqual(at1);
+    expect(eventToWorld(makeScene2D(2.5, at2), canvas, pointer)).toEqual(world);
   });
 });
 

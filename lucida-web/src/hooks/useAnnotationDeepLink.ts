@@ -47,10 +47,8 @@ export interface UseAnnotationDeepLinkParams {
    *  owning dataset, then invoke `onRestored` once the restore has ACTUALLY
    *  applied. The host wires this to `restoreAnnotationDeepLinkPin` (selecting
    *  the pin's dataset so the overlay mounts, then restoring). `onRestored` is
-   *  the hash-collapse: it MUST run after the restore lands — the restore may be
-   *  deferred a frame when the pin is on a not-yet-selected dataset, and
-   *  collapsing before it applies would capture the PRE-restore camera into
-   *  `#view=` (a stale frame in the URL for the ~one-frame window). */
+   *  the hash-collapse: it MUST run after the overlay's focus-completion promise
+   *  resolves, or it would capture the PRE-focus camera into `#view=`. */
   onRestore: (pin: Annotation, datasetId: string, onRestored: () => void) => void;
   /** Collapse the `#a=` hash to the live `#view=` form. Handed to `onRestore`
    *  to run in its tail (after the restore applies), NOT called directly here —
@@ -95,9 +93,8 @@ export function useAnnotationDeepLink({
 
     handledRef.current = annotationId;
     onNotFound(false);
-    // Hand the collapse to the restore so it runs AFTER the restore applies
-    // (the restore can defer a frame). Collapsing here, synchronously, would
-    // snapshot the pre-restore camera into `#view=` — a stale frame in the URL.
+    // Hand the collapse to the restore so it runs AFTER observable focus
+    // completion. Collapsing here would snapshot the pre-focus camera.
     onRestore(result.annotation, result.datasetId, onCollapseHash);
     // Re-run on each doc-version bump (the post-doc-load signal); the callbacks
     // are stable from the host. `handledRef` keeps it once-per-link.

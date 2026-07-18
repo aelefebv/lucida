@@ -65,7 +65,7 @@ describe("FileBrowser — empty-root initial fetch", () => {
     const url = fetchSpy.urls[0];
     // Bare endpoint — no `path=` param of any kind. This is the signal
     // to the server to return its platform-default root.
-    expect(url).toBe("http://localhost:9876/api/browse");
+    expect(url).toBe("/api/browse");
     expect(url).not.toContain("path=");
   });
 
@@ -148,7 +148,7 @@ describe("FileBrowser — navigation", () => {
         render(<FileBrowser onSelect={() => {}} onClose={() => {}} />);
       });
       // Initial fetch: no path param.
-      expect(fetchSpy.urls[0]).toBe("http://localhost:9876/api/browse");
+      expect(fetchSpy.urls[0]).toBe("/api/browse");
 
       // Click `c:` — the empty-root branch in `navigateTo` must NOT
       // prefix a `/`, otherwise we'd produce `/c:` (a bogus path).
@@ -157,7 +157,7 @@ describe("FileBrowser — navigation", () => {
       });
       expect(fetchSpy.urls.length).toBe(2);
       expect(fetchSpy.urls[1]).toBe(
-        `http://localhost:9876/api/browse?path=${encodeURIComponent("c:")}`,
+        `/api/browse?path=${encodeURIComponent("c:")}`,
       );
       // Triple-check: there's no `/c:` artefact in the URL.
       expect(fetchSpy.urls[1]).not.toContain(encodeURIComponent("/c:"));
@@ -321,7 +321,7 @@ describe("FileBrowser — root breadcrumb", () => {
       fireEvent.click(homeButton);
     });
     expect(fetchSpy.urls.length).toBe(2);
-    expect(fetchSpy.urls[1]).toBe("http://localhost:9876/api/browse");
+    expect(fetchSpy.urls[1]).toBe("/api/browse");
     expect(fetchSpy.urls[1]).not.toContain("path=");
   });
 });

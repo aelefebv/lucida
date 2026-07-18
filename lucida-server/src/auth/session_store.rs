@@ -69,9 +69,11 @@ pub trait LoginSessionStore: Send + Sync + 'static {
     /// only ever monotonically increases under normal use.
     async fn touch_last_used(&self, id: &str, now: DateTime<Utc>) -> Result<(), SessionStoreError>;
 
-    /// Remove a single session by id. Used by the logout flow and by
-    /// tests; idempotent (no error if the row is already gone).
-    async fn delete(&self, id: &str) -> Result<(), SessionStoreError>;
+    /// Atomically remove and return a single session by id. Logout uses the
+    /// returned row so local revocation targets exactly the credential whose
+    /// deletion committed, rather than the result of a preceding racy lookup.
+    /// Idempotent: a row that is already gone returns `Ok(None)`.
+    async fn delete(&self, id: &str) -> Result<Option<LoginSession>, SessionStoreError>;
 
     /// Bulk-delete every session whose `expires_at` is `<= now`.
     /// Returns the number of rows deleted. Called from the periodic

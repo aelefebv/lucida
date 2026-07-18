@@ -3,9 +3,11 @@ use serde::Serialize;
 use lucida_core::auth_principal::AuthPrincipal;
 
 use crate::config::EffectiveServer;
+use crate::http::{api_url, bounded_json, bounded_text, http_client};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StatusReport {
+    pub ok: bool,
     pub server: EffectiveServer,
     pub checks: ServerChecks,
     pub auth: AuthCheck,
@@ -48,18 +50,25 @@ impl ServerClient {
         Self {
             base_url: base_url.into(),
             token,
-            http: reqwest::Client::new(),
+            http: http_client(),
         }
     }
 
     pub async fn status_report(&self, server: EffectiveServer) -> StatusReport {
+        let (healthz, readyz, version, auth) = tokio::join!(
+            self.text_check("/healthz"),
+            self.text_check("/readyz"),
+            self.text_check("/version"),
+            self.auth_check(),
+        );
         let checks = ServerChecks {
-            healthz: self.text_check("/healthz").await,
-            readyz: self.text_check("/readyz").await,
-            version: self.text_check("/version").await,
+            healthz,
+            readyz,
+            version,
         };
-        let auth = self.auth_check().await;
+        let ok = checks.healthz.ok && checks.readyz.ok && checks.version.ok;
         StatusReport {
+            ok,
             server,
             checks,
             auth,
@@ -67,11 +76,21 @@ impl ServerClient {
     }
 
     async fn text_check(&self, path: &str) -> EndpointCheck {
-        let url = format!("{}{}", self.base_url, path);
+        let url = match api_url(&self.base_url, &[path.trim_start_matches('/')]) {
+            Ok(url) => url,
+            Err(error) => {
+                return EndpointCheck {
+                    ok: false,
+                    status: None,
+                    body: None,
+                    error: Some(error.to_string()),
+                };
+            }
+        };
         match self.http.get(url).send().await {
             Ok(response) => {
                 let status = response.status();
-                match response.text().await {
+                match bounded_text(response).await {
                     Ok(body) => EndpointCheck {
                         ok: status.is_success(),
                         status: Some(status.as_u16()),
@@ -96,7 +115,14 @@ impl ServerClient {
     }
 
     async fn auth_check(&self) -> AuthCheck {
-        let url = format!("{}/auth/whoami", self.base_url);
+        let url = match api_url(&self.base_url, &["auth", "whoami"]) {
+            Ok(url) => url,
+            Err(error) => {
+                return AuthCheck::Unknown {
+                    error: error.to_string(),
+                };
+            }
+        };
         let mut request = self
             .http
             .get(url)
@@ -107,7 +133,7 @@ impl ServerClient {
         let response = request.send().await;
         match response {
             Ok(response) if response.status().is_success() => {
-                match response.json::<AuthPrincipal>().await {
+                match bounded_json::<AuthPrincipal>(response).await {
                     Ok(principal) => AuthCheck::Authenticated { principal },
                     Err(error) => AuthCheck::Unknown {
                         error: error.to_string(),
@@ -145,6 +171,12 @@ pub fn format_status_human(report: &StatusReport) -> String {
     ));
     lines.push(format!("Auth: {}", format_auth(&report.auth)));
     lines.join("\n")
+}
+
+impl StatusReport {
+    pub fn is_healthy(&self) -> bool {
+        self.ok
+    }
 }
 
 fn format_endpoint(check: &EndpointCheck) -> String {

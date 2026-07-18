@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Lucida">
+  <rect width="64" height="64" rx="14" fill="#171b22"/>
+  <path d="M18 14v31c0 4 3 7 7 7h23v-9H29c-1 0-2-1-2-2V14z" fill="#8c92ff"/>
+  <circle cx="44" cy="20" r="8" fill="#f3f5f7"/>
+</svg>

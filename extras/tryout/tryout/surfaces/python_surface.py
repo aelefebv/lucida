@@ -107,6 +107,42 @@ def main():
         steps.append(entry)
         return value
 
+    def expect_error(name, fn, expected_kind):
+        """Assert one exact structured client error without aborting the tour."""
+        emit("")
+        emit(f">>> {name} (expect {expected_kind})")
+        entry = {
+            "name": name,
+            "ok": False,
+            "expected_error": {"kind": expected_kind},
+        }
+        try:
+            fn()
+        except LucidaError as error:
+            observed = error.to_dict().get("error") or {
+                "kind": error.kind,
+                "message": error.message,
+            }
+            entry["error"] = observed
+            entry["ok"] = error.kind == expected_kind
+            if entry["ok"]:
+                emit(f"    -> expected ERROR [{error.kind}]: {error.message}")
+            else:
+                emit(
+                    f"    ERROR: expected [{expected_kind}], "
+                    f"observed [{error.kind}]: {error.message}"
+                )
+        except Exception as error:  # noqa: BLE001 - assertion must stay captured
+            entry["error"] = {"kind": "unexpected", "message": repr(error)}
+            emit(f"    ERROR: expected [{expected_kind}], observed unexpected: {error!r}")
+        else:
+            entry["error"] = {
+                "kind": "unexpected_success",
+                "message": f"expected {expected_kind} error but call succeeded",
+            }
+            emit(f"    ERROR: expected [{expected_kind}], but call succeeded")
+        steps.append(entry)
+
     # token=None + a throwaway config_path keeps the client off the user's real
     # CLI config / keychain; the server has auth disabled anyway.
     emit(f"# LucidaClient(base_url={base_url!r})")
@@ -227,14 +263,27 @@ def main():
             lambda: workspace.layer.list(timeout=timeout),
             summarize=lambda layers: {"count": len(layers)},
         )
+        # Establish a deterministic per-channel display window in the same
+        # durable profile the browser will consume. This gives the cross-stack
+        # render probe an exact, renderer-relevant value to verify.
+        record(
+            "channel.contrast",
+            lambda: workspace.channel.contrast(selector, 0, 0, 255, timeout=timeout),
+            summarize=lambda _res: {
+                "dataset": selector,
+                "channel": 0,
+                "min": 0,
+                "max": 255,
+            },
+        )
 
     # --- saved-view sharing lifecycle (#699 promote, #702 propose/approve/reject)
     # The Python parity for the CLI's sharing verbs. Build a real SavedView
     # payload from this client's own presence in a live snapshot (so the `v`,
     # camera/view/display the server requires are genuine, not hand-faked), then
     # drive create(visibility=...) / set_visibility() / approve() / reject().
-    # The single dev user owns the workspace, so they can both propose and
-    # approve/reject — exercising every command end-to-end.
+    # The author must not approve their own proposal; that exact authorization
+    # denial is part of the contract. The author may reject/withdraw it.
     def build_saved_view():
         snapshot = workspace.snapshot(timeout=timeout)
         own_id = snapshot.get("your_id")
@@ -274,7 +323,8 @@ def main():
                 summarize=lambda sv: {"id": sv.get("id"), "visibility": sv.get("visibility")},
             )
 
-        # proposed -> approve -> shared
+        # proposed -> self-approve is forbidden. Keep it as an exact structured
+        # error assertion rather than weakening it into an optional failure.
         approve = record(
             "saved_views.create.proposed_approve",
             lambda: workspace.saved_views.create(
@@ -283,10 +333,10 @@ def main():
             summarize=lambda sv: {"id": sv.get("id"), "visibility": sv.get("visibility")},
         )
         if approve is not None:
-            record(
-                "saved_views.approve",
+            expect_error(
+                "saved_views.self_approve_denied",
                 lambda: workspace.saved_views.approve(approve["id"]),
-                summarize=lambda sv: {"id": sv.get("id"), "visibility": sv.get("visibility")},
+                "unauthorized",
             )
 
         # proposed -> reject -> personal
@@ -344,6 +394,7 @@ class PythonStepResult:
     ok: bool
     summary: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
+    expected_error: dict[str, Any] | None = None
     optional: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -352,6 +403,8 @@ class PythonStepResult:
             record["summary"] = self.summary
         if self.error is not None:
             record["error"] = self.error
+        if self.expected_error is not None:
+            record["expected_error"] = self.expected_error
         if self.optional:
             record["optional"] = True
         return record
@@ -505,6 +558,7 @@ def run_python_surface(
             ok=bool(step.get("ok")),
             summary=step.get("summary"),
             error=step.get("error"),
+            expected_error=step.get("expected_error"),
             optional=bool(step.get("optional")),
         )
         for step in (payload.get("steps") or [])

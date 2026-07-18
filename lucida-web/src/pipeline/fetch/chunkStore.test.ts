@@ -5,13 +5,14 @@ import { LRUPolicy, TieredPolicy } from "./eviction.ts";
 import type { CacheEntry, EvictionTier } from "./types.ts";
 import type { EvictionRecordTier } from "./telemetry.ts";
 import type { SceneEpochs } from "../epochs.ts";
+import { makeChunkContract } from "../../test/fixtures.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 const ZERO_EPOCHS: SceneEpochs = {
-  content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0,
+  content: 0, layout: 0, view: 0, selection: 0, request: 0,
 };
 
 let nextInsertedAt = 0;
@@ -25,9 +26,11 @@ function makeEntry(overrides: Partial<CacheEntry> & {
   const insertedAt = overrides.insertedAt ?? nextInsertedAt++;
   const base: CacheEntry = {
     data: new ArrayBuffer(0),
+    contract: makeChunkContract({ datasetId: "ds-1", imageId: "img-1" }),
     sizeBytes: 0,
     lane: "detail",
     tier: "active-detail",
+    datasetId: "ds-1",
     entityId: "e-1",
     imageId: "img-1",
     level: 0,
@@ -39,7 +42,7 @@ function makeEntry(overrides: Partial<CacheEntry> & {
     chunkKey: `key-${insertedAt}`,
     insertedAt,
     epochs: ZERO_EPOCHS,
-    dataType: "u8",
+    wanted: true,
     priority: 0,
     lastSeenTick: 0,
   };

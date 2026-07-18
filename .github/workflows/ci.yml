@@ -12,27 +12,44 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Read-only is the workflow floor. The paths-filter job opts into PR metadata;
+# no build/test job receives write authority.
+permissions:
+  contents: read
+
 jobs:
   rust:
     name: Rust workspace (test + clippy)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install stable Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable 2026-07-16
         with:
+          toolchain: 1.95.0
           components: clippy
 
       - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
 
       # --locked: fail if Cargo.lock is out of sync with the manifests
       # instead of silently re-resolving deps on the runner. Keeps CI
       # testing the same dep graph the Docker image builds from.
       - name: cargo test
         run: cargo test --locked --workspace --all-features
+
+      # Release-only because wall-clock budgets are meaningless in an
+      # unoptimized build. This runs the canonical pin-drop/layout-switch
+      # operations at 4k, 16k, and the checked-in ISR-derived wide topology;
+      # the ignored test owns absolute 40/100 ms interaction thresholds plus
+      # a scaling-ratio guard.
+      - name: Annotation anchoring release budget (4k / 16k / real-wide)
+        run: >-
+          cargo test --locked -p lucida-core --release
+          annotation_anchor_release_budget_4k_16k_and_real_wide_collection
+          -- --ignored --nocapture
 
       # Format check: enforces `cargo fmt --all` consistency across the
       # workspace. The format sweep landed alongside the lint debt cleanup
@@ -45,42 +62,143 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --locked --workspace --all-features --all-targets -- -D warnings
 
+      # Publish the exact native clients exercised by the cross-stack lane.
+      # Keeping build ownership here means that lane consumes already-proven
+      # artifacts instead of compiling a subtly different graph a second time.
+      - name: Build cross-stack server and CLI artifacts
+        run: cargo build --locked -p lucida-server -p lucida-cli
+
+      - name: Upload cross-stack server and CLI artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cross-stack-rust
+          path: |
+            target/debug/lucida-server
+            target/debug/lucida
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  windows-local-open:
+    name: Windows trusted local open + server confinement
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable 2026-07-16
+        with:
+          toolchain: 1.95.0
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+        with:
+          shared-key: windows-local-open
+
+      - name: Check and exercise local backend split
+        run: |
+          cargo check --locked -p lucida-store --all-targets --all-features
+          cargo test --locked -p lucida-store backend::tests -- --nocapture
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - name: Build Python extension and read a local object
+        working-directory: lucida-py
+        run: |
+          uv sync --locked --python 3.12
+          uv run maturin develop
+          uv run pytest -q tests/test_store.py::test_store_opens_and_reads_local_object
+
+  ingestion-safety:
+    name: Ingestion safety (Miri + ASan + fuzz)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      # Pin the nightly because Miri and sanitizer behavior is toolchain-specific.
+      # This lane is intentionally separate from the stable workspace gate.
+      - name: Install pinned nightly with Miri
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable 2026-07-16
+        with:
+          toolchain: nightly-2026-07-01
+          components: miri,rust-src
+
+      - name: Cache safety-tool builds
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+        with:
+          shared-key: ingestion-safety
+
+      # Keep Miri focused on Lucida-owned indexing and in-place permutation
+      # code. Rayon/crossbeam's lock-free scheduler is not Miri-compatible;
+      # the complete parallel decode path runs immediately below under ASan.
+      - name: Miri checked indexing and page permutation
+        run: |
+          cargo miri test --locked -p lucida-store --lib \
+            ingest::collection_reader::tests::read_tile_rejects_out_of_range_slot_before_io \
+            -- --exact
+          cargo miri test --locked -p lucida-store --lib \
+            ingest::tiff_reader::tests::page_reorder_uses_one_volume_and_preserves_blocks \
+            -- --exact
+
+      - name: AddressSanitizer parallel decode and publication faults
+        env:
+          RUSTFLAGS: -Zsanitizer=address
+          RUSTDOCFLAGS: -Zsanitizer=address
+          ASAN_OPTIONS: detect_leaks=1
+        run: |
+          cargo test --locked -p lucida-store --lib \
+            --target x86_64-unknown-linux-gnu \
+            ingest::tiff_reader::tests::parallel_decode_uses_disjoint_slices_and_reorders_pages \
+            -- --exact
+          cargo test --locked -p lucida-store --lib \
+            --target x86_64-unknown-linux-gnu ingest::collection_reader::tests
+          cargo test --locked -p lucida-store --lib \
+            --target x86_64-unknown-linux-gnu ingest::atomic_output_tests
+
+      - name: Install pinned cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+
+      # cargo-fuzz enables AddressSanitizer by default. Bounded run counts make
+      # malformed TIFF/page-count and collection-filename coverage a stable PR
+      # gate while preserving the corpora for longer local campaigns.
+      - name: Fuzz malformed TIFF and collection scanner inputs
+        run: |
+          cargo fuzz run --fuzz-dir fuzz ingest_tiff fuzz/corpus/ingest_tiff \
+            -- -runs=2000 -max_len=1048576 -timeout=10
+          cargo fuzz run --fuzz-dir fuzz collection_scanner fuzz/corpus/collection_scanner \
+            -- -runs=2000 -max_len=65536 -timeout=10
+
   web:
     name: Web (wasm-pack + pnpm)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install Rust + wasm32 target
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable 2026-07-16
         with:
+          toolchain: 1.95.0
           targets: wasm32-unknown-unknown
 
       - name: Cache cargo build (shared with rust job)
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
 
-      - name: Install wasm-pack
-        uses: jetli/wasm-pack-action@v0.4.0
-        with:
-          # Pin an explicit version. `version: latest` resolves via a GitHub
-          # API call from the runner; under rate limits the action silently
-          # falls back to wasm-pack v0.9.1 (2020), whose generated
-          # pkg/package.json vitest cannot resolve — the wasm-importing test
-          # files then fail with "Failed to resolve entry for lucida-core"
-          # while build/install/tsc/lint pass (lucida-cuk). Keep this in lockstep
-          # with the wasm-pack pin in Dockerfile.
-          version: 'v0.15.0'
+      - name: Install checksum-verified wasm-pack v0.15.0
+        run: sh scripts/install-wasm-pack.sh "$HOME/.cargo/bin"
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
-          version: 9
+          version: 9.15.9
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 'lts/*'
+          node-version-file: .node-version
           cache: pnpm
           cache-dependency-path: lucida-web/pnpm-lock.yaml
 
@@ -96,6 +214,10 @@ jobs:
       - name: Install web deps
         working-directory: lucida-web
         run: pnpm install --frozen-lockfile
+
+      - name: Audit shipped web dependencies
+        working-directory: lucida-web
+        run: pnpm audit --prod --audit-level high
 
       - name: Type check (tsc --noEmit -p tsconfig.app.json — see wiki/gotchas/ts-typecheck-trap)
         working-directory: lucida-web
@@ -116,16 +238,174 @@ jobs:
         working-directory: lucida-web
         run: pnpm run build
 
+      - name: Upload production SPA artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cross-stack-web
+          path: lucida-web/dist
+          if-no-files-found: error
+          retention-days: 7
+
+  wire-contracts:
+    name: Cross-language wire contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable 2026-07-16
+        with:
+          toolchain: 1.95.0
+
+      - name: Cache cargo build (shared with rust job)
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 9.15.9
+
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+          cache-dependency-path: lucida-web/pnpm-lock.yaml
+
+      - name: Install web dependencies
+        working-directory: lucida-web
+        run: pnpm install --frozen-lockfile
+
+      - name: Install uv and Python fixture dependencies
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - name: Sync Python fixture environment
+        working-directory: lucida-py
+        run: uv sync --locked --python 3.12
+
+      - name: Verify exhaustive envelopes, codecs, mirrors, and shared fixtures
+        run: sh scripts/verify-wire-contracts.sh
+
+  cross-stack:
+    name: Real server + CLI + Python + production browser (DPR1/2)
+    needs: [rust, web, python]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download proven native clients
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cross-stack-rust
+          path: .cross-stack/bin
+
+      - name: Download proven production SPA
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cross-stack-web
+          path: lucida-web/dist
+
+      # Playwright and axe-core are pinned harness dependencies. Playwright
+      # drives the system Chrome already installed on the hosted runner; no
+      # browser binary is downloaded.
+      - name: Install pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 9.15.9
+
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+          cache-dependency-path: lucida-web/pnpm-lock.yaml
+
+      - name: Install pinned browser harness
+        working-directory: lucida-web
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: pnpm install --frozen-lockfile
+
+      - name: Install uv for the maintained Python client surface
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - name: Select the runner's system Chrome
+        run: |
+          set -euo pipefail
+          browser=""
+          for candidate in google-chrome google-chrome-stable chromium chromium-browser; do
+            if command -v "$candidate" >/dev/null 2>&1; then
+              browser="$(command -v "$candidate")"
+              break
+            fi
+          done
+          test -n "$browser"
+          echo "LUCIDA_BROWSER=$browser" >> "$GITHUB_ENV"
+
+      - name: Prove WebGPU ownership churn and idle frame budgets in Chrome
+        working-directory: lucida-web
+        run: pnpm test:browser-contracts
+
+      - name: Prove tryout receipt semantics and fixture contracts
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python3 -m unittest discover -s extras/tryout/tests
+
+      - name: Generate deterministic wide-collection uint8 OME-Zarr fixture
+        run: python3 scripts/create_browser_smoke_fixture.py /tmp/lucida-browser-smoke.ome.zarr
+
+      # One server and one real fixture are exercised through all maintained
+      # public surfaces. The browser contract requires isolated DPR1 and DPR2
+      # contexts; desktop and mobile layout baselines; 2D/3D 0x0 recovery;
+      # simultaneous floating surfaces at normal/zoom/mobile geometry; a real
+      # 1x12 collection selector whose right edge stays focusable/clickable;
+      # visible
+      # error placement; keyboard/focus behavior; an idle RAF/presentation trace;
+      # WCAG A/AA axe checks; and the first-run create, open, navigate, and
+      # sharing-dialog flow. It also proves advancing presented
+      # frames, nonblank canvas pixels, clean GPU diagnostics, the uint8 dtype,
+      # all three channels, and the fixture's channel-0 contrast window. Any
+      # required surface failure returns 1 while preserving the tour's evidence.
+      - name: Exercise every public surface against real content
+        env:
+          LUCIDA_TRYOUT_SERVER_BIN: ${{ github.workspace }}/.cross-stack/bin/lucida-server
+          LUCIDA_TRYOUT_CLI: ${{ github.workspace }}/.cross-stack/bin/lucida
+          LUCIDA_TRYOUT_WEB_DIST: ${{ github.workspace }}/lucida-web/dist
+          LUCIDA_TRYOUT_REQUIRE_NON_U16: "1"
+          LUCIDA_TRYOUT_MIN_CHANNELS: "3"
+          LUCIDA_TRYOUT_EXPECT_CHANNEL: "0"
+          LUCIDA_TRYOUT_EXPECT_CONTRAST_MIN: "0"
+          LUCIDA_TRYOUT_EXPECT_CONTRAST_MAX: "255"
+          LUCIDA_TRYOUT_REQUIRE_FIRST_RUN: "1"
+        run: |
+          chmod +x .cross-stack/bin/lucida-server .cross-stack/bin/lucida
+          python3 extras/tryout/tryout.py drive \
+            --surface all \
+            --fixture /tmp/lucida-browser-smoke.ome.zarr \
+            --out /tmp/lucida-cross-stack \
+            --json
+
+      - name: Retain cross-stack logs and DPR screenshots
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cross-stack-evidence
+          path: /tmp/lucida-cross-stack
+          if-no-files-found: warn
+          retention-days: 14
+
   docker:
     name: Docker smoke build (no push)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     # paths-filter needs read access to PR refs to diff against base.
     permissions:
       contents: read
       pull-requests: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       # Skip the build entirely on PRs that don't touch the Docker
       # build context. The rust + web jobs already prove the code
@@ -136,12 +416,15 @@ jobs:
       - name: Detect build-context changes
         id: filter
         if: github.event_name == 'pull_request'
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3.0.3
         with:
           filters: |
             build:
               - 'Dockerfile'
               - '.dockerignore'
+              - 'rust-toolchain.toml'
+              - 'scripts/install-wasm-pack.sh'
+              - 'extras/deploy/docker-compose.yml'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '**/Cargo.toml'
@@ -149,7 +432,6 @@ jobs:
               - 'lucida-content/src/**'
               - 'lucida-core/src/**'
               - 'lucida-protocol/src/**'
-              - 'lucida-proxy/src/**'
               - 'lucida-server/src/**'
               - 'lucida-store/src/**'
               - 'lucida-web/src/**'
@@ -177,7 +459,7 @@ jobs:
 
       - name: Set up Docker Buildx
         if: steps.gate.outputs.build == 'true'
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       # Single-arch (amd64) for speed. Multi-arch is the release
       # workflow's job; for PR signal all we need is "the Dockerfile
@@ -191,17 +473,18 @@ jobs:
       # cold; pushed fixup commits and rebases see warm caches.
       - name: Build image (single-arch, no push)
         if: steps.gate.outputs.build == 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           platforms: linux/amd64
+          build-args: LUCIDA_BUILD_VERSION=ci-${{ github.sha }}
           push: false
           load: true
           tags: lucida:ci-smoke
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # True smoke (release-please PRs only): start the image and prove
+      # True smoke: start every built image and prove
       # the binary actually serves /healthz, /readyz, /version. This is
       # the last gate before merging the release PR fires release.yml;
       # on every other PR the cargo + pnpm build artifacts inside the
@@ -215,8 +498,8 @@ jobs:
       # documented opt-in that prevents accidentally shipping `disabled`
       # on a non-loopback bind without acknowledging it; the ephemeral
       # CI runner is the textbook legitimate-insecure case.
-      - name: True smoke (run + probe)
-        if: github.head_ref == 'release-please--branches--main'
+      - name: True smoke (run + native healthcheck)
+        if: steps.gate.outputs.build == 'true'
         run: |
           set -euo pipefail
           docker run -d --name lucida-smoke -p 9876:9876 \
@@ -237,20 +520,36 @@ jobs:
               exit 1
             fi
           done
+          docker exec lucida-smoke lucida-server healthcheck
+          test "$(docker inspect --format '{{.State.Health.Status}}' lucida-smoke)" != "unhealthy"
           echo "--- /healthz ---"; curl -fsS http://localhost:9876/healthz; echo
           echo "--- /readyz ---";  curl -fsS http://localhost:9876/readyz;  echo
-          echo "--- /version ---"; curl -fsS http://localhost:9876/version; echo
+          echo "--- /version ---"
+          version="$(curl -fsS http://localhost:9876/version)"
+          test "$version" = "ci-${{ github.sha }}"
+          echo "$version"
 
       - name: Container logs on smoke failure
-        if: failure() && github.head_ref == 'release-please--branches--main'
+        if: failure() && steps.gate.outputs.build == 'true'
         run: docker logs lucida-smoke || true
+
+  delivery-contracts:
+    name: Delivery contract checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Validate dev flow, release order, pins, runtime defaults, and package boundary
+        run: |
+          python3 scripts/test_dev_flow.py
+          python3 scripts/validate-delivery-contracts.py
 
   manifests:
     name: K8s manifest dry-run (extras/deploy/k8s)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       # The reference manifests in extras/deploy/k8s/ ship with
       # <UPPERCASE-WITH-DASHES> placeholders per ADR-0021. Substitute
@@ -268,7 +567,7 @@ jobs:
           # you introduce a new <PLACEHOLDER> in the manifests.
           sed -i \
             -e 's|<YOUR-NAMESPACE>|lucida-ci|g' \
-            -e 's|<YOUR-REGISTRY>/lucida:<YOUR-TAG>|ghcr.io/example/lucida:dummy|g' \
+            -e 's|<YOUR-REGISTRY>/lucida:<YOUR-TAG>@sha256:<YOUR-DIGEST>|ghcr.io/example/lucida:dummy@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|g' \
             -e 's|<YOUR-OAUTH-CLIENT-ID>|dummy-client-id|g' \
             -e 's|<YOUR-EXTERNAL-HOSTNAME>|lucida.example.test|g' \
             -e 's|<YOUR-STORAGE-CLASS>|standard|g' \
@@ -286,34 +585,42 @@ jobs:
             exit 1
           fi
 
-      # kubeconform validates k8s manifests against bundled OpenAPI
-      # schemas — fully offline, no apiserver round-trip required.
+      # kubeconform validates k8s manifests against the exact Kubernetes
+      # version selected below; no apiserver round-trip is required.
       # `kubectl apply --dry-run=client` doesn't work for offline CI
       # because even with --validate=false it tries to look up resource
       # types via REST mapping (hits localhost:8080).
       - name: Install kubeconform
         run: |
-          curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
-            | tar -xz -C /usr/local/bin kubeconform
+          set -euo pipefail
+          archive=/tmp/kubeconform-linux-amd64.tar.gz
+          curl -fsSL \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            -o "$archive"
+          echo "95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73  $archive" \
+            | sha256sum --check --strict
+          tar -xzf "$archive" -C /usr/local/bin kubeconform
 
       - name: kubeconform validation
-        run: kubeconform -strict -summary /tmp/k8s-rendered/
+        run: kubeconform -strict -kubernetes-version 1.36.2 -summary /tmp/k8s-rendered/
 
   python:
     name: lucida-py (maturin + pytest)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install stable Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable 2026-07-16
+        with:
+          toolchain: 1.95.0
 
       - name: Cache cargo build (shared with rust job)
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
 
       # lucida-py is excluded from the cargo workspace, so the `rust` job does
       # NOT build it — this job is its sole CI gate. Build the pyo3 extension
@@ -322,6 +629,60 @@ jobs:
       - name: Build extension + run tests
         working-directory: lucida-py
         run: |
-          uv sync --python 3.12
+          uv sync --locked --python 3.12
           uv run maturin develop
           uv run pytest -q
+
+      - name: Build and clean-install wheel
+        working-directory: lucida-py
+        run: |
+          uv build --wheel --out-dir dist
+          wheel="$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
+          test -n "$wheel"
+          uv venv /tmp/lucida-wheel --python 3.12
+          uv pip install --python /tmp/lucida-wheel/bin/python "$wheel"
+          /tmp/lucida-wheel/bin/python -c 'from importlib.metadata import requires; from lucida import LucidaClient, PyScene, PyStore; assert LucidaClient and PyScene and PyStore; assert all("maturin" not in item.lower() for item in (requires("lucida") or []))'
+
+      - name: Audit shipped Python dependencies
+        working-directory: lucida-py
+        run: |
+          uv export --frozen --no-dev --no-emit-project --all-extras \
+            --output-file /tmp/lucida-runtime-requirements.txt
+          uv run pip-audit --requirement /tmp/lucida-runtime-requirements.txt \
+            --no-deps --disable-pip
+
+  dependency-review:
+    name: Dependency diff policy
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+          license-check: true
+
+  cargo-policy:
+    name: Rust advisories, licenses, and sources
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Check workspace dependency policy
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          rust-version: 1.95.0
+          command: check advisories licenses sources bans
+          arguments: --locked --all-features
+
+      # lucida-py is intentionally outside the root Cargo workspace and owns a
+      # separate lockfile. Audit its Rust extension graph explicitly so it
+      # cannot disappear behind the Python-only job.
+      - name: Check Python extension Rust dependency policy
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          rust-version: 1.95.0
+          manifest-path: ./lucida-py/Cargo.toml
+          command: check advisories licenses sources bans
+          arguments: --locked --all-features

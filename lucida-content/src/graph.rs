@@ -8,7 +8,7 @@ use crate::id::{DatasetId, EntityId, ImageId, LayoutId};
 use crate::image::{Axis, ChannelInfo, GeneratedLevelInfo, LevelGeometry, PinnedAxis};
 use crate::image::{ImageSpec, MultiscaleInfo};
 use crate::kind::DatasetKind;
-use crate::label::{LabelAttachment, LabelSpec};
+use crate::label::LabelSpec;
 use crate::layout::LayoutSpec;
 use crate::transform::{TransformEdge, VoxelTransform};
 
@@ -137,12 +137,6 @@ impl DatasetManifest {
     /// reach a label's full per-level geometry.
     pub fn label_specs(&self) -> &[LabelSpec] {
         &self.labels
-    }
-
-    /// Every label attached to any image in this dataset (standalone or collection),
-    /// projected into the lean [`LabelAttachment`] read-view.
-    pub fn labels(&self) -> Vec<LabelAttachment> {
-        self.labels.iter().map(LabelAttachment::from_spec).collect()
     }
 }
 
@@ -566,7 +560,7 @@ impl TryFrom<DatasetManifestWire> for DatasetManifest {
             })
             .collect::<Result<Vec<_>, String>>()?;
 
-        Ok(DatasetManifest {
+        let manifest = DatasetManifest {
             dataset_id: wire.dataset_id,
             name: wire.name,
             kind: wire.kind,
@@ -576,7 +570,9 @@ impl TryFrom<DatasetManifestWire> for DatasetManifest {
             source_layouts: wire.source_layouts,
             default_layout_id: wire.default_layout_id,
             labels: wire.labels,
-        })
+        };
+        manifest.validate().map_err(|errors| errors.to_string())?;
+        Ok(manifest)
     }
 }
 
@@ -594,6 +590,70 @@ mod tests {
     use crate::id::{EntityId, ImageId};
     use crate::image::{Axis, AxisKind, DataType, LevelGeometry, MultiscaleInfo};
     use crate::transform::VoxelTransform;
+
+    fn apply_corpus_operation(target: &mut serde_json::Value, operation: &serde_json::Value) {
+        let path = operation["path"].as_str().expect("corpus operation path");
+        let (parent_path, key) = path.rsplit_once('/').expect("non-root corpus path");
+        let replacement = match operation["op"].as_str().expect("corpus operation kind") {
+            "set" => Some(operation["value"].clone()),
+            "copy" => Some(
+                target
+                    .pointer(operation["from"].as_str().expect("copy source"))
+                    .expect("copy source exists")
+                    .clone(),
+            ),
+            "remove" => None,
+            other => panic!("unsupported compact-corpus operation {other}"),
+        };
+        let parent = target
+            .pointer_mut(parent_path)
+            .expect("corpus operation parent exists");
+        match parent {
+            serde_json::Value::Object(object) => {
+                if let Some(value) = replacement {
+                    object.insert(key.to_string(), value);
+                } else {
+                    object.remove(key).expect("removed corpus field exists");
+                }
+            }
+            serde_json::Value::Array(array) => {
+                let index: usize = key.parse().expect("array index");
+                if let Some(value) = replacement {
+                    array[index] = value;
+                } else {
+                    array.remove(index);
+                }
+            }
+            _ => panic!("corpus operation parent is not a container"),
+        }
+    }
+
+    #[test]
+    fn compact_multiscale_accept_reject_policy_matches_shared_corpus() {
+        let corpus: serde_json::Value = serde_json::from_str(include_str!(
+            "../../wire-fixtures/manifest/compact_multiscale_cases.json"
+        ))
+        .unwrap();
+        let opened: serde_json::Value = serde_json::from_str(include_str!(
+            "../../wire-fixtures/dataset-open/dataset_opened_collection.json"
+        ))
+        .unwrap();
+
+        for case in corpus["cases"].as_array().expect("corpus cases") {
+            let name = case["name"].as_str().expect("case name");
+            let accepted = case["accepted"].as_bool().expect("acceptance flag");
+            let mut manifest = opened["manifest"].clone();
+            for operation in case["operations"].as_array().expect("case operations") {
+                apply_corpus_operation(&mut manifest, operation);
+            }
+            let result = serde_json::from_value::<DatasetManifest>(manifest);
+            assert_eq!(
+                result.is_ok(),
+                accepted,
+                "shared compact-multiscale case {name} diverged: {result:?}",
+            );
+        }
+    }
 
     fn make_single_image_graph() -> DatasetManifest {
         let entity_id = EntityId("img-0".to_string());
@@ -758,13 +818,16 @@ mod tests {
         assert_eq!(spec.colors[0].value, 92801);
         assert!(spec.source_declared);
 
-        // The projected read-view is intact, including the source entity used
-        // for placement.
-        let labels = back.labels();
+        // The canonical rich label spec retains placement and geometry without
+        // a second projected API that can drift from it.
+        let labels = back.label_specs();
         assert_eq!(labels.len(), 1);
-        assert_eq!(labels[0].source_entity_id, EntityId("img-0".to_string()));
-        assert_eq!(labels[0].data_type, DataType::Uint32);
-        assert_eq!(labels[0].level0_scale, [1.0, 1.0, 1.0, 4.0, 4.0]);
+        assert_eq!(labels[0].image.owner, EntityId("img-0".to_string()));
+        assert_eq!(labels[0].image.multiscale.data_type, DataType::Uint32);
+        assert_eq!(
+            labels[0].image.multiscale.levels[0].scale,
+            [1.0, 1.0, 1.0, 4.0, 4.0],
+        );
     }
 
     #[test]
@@ -781,7 +844,7 @@ mod tests {
         // deserializes, defaulting to no labels.
         let back: DatasetManifest = serde_json::from_value(value).unwrap();
         assert!(back.label_specs().is_empty());
-        assert!(back.labels().is_empty());
+        assert!(back.label_specs().is_empty());
     }
 
     fn collection_multiscale() -> MultiscaleInfo {
@@ -1198,10 +1261,14 @@ mod tests {
         assert_eq!(value["images"][0]["multiscale_ref"], serde_json::json!(0));
         assert_eq!(value["images"][1]["multiscale_ref"], serde_json::json!(0));
 
-        let decoded: DatasetManifest = serde_json::from_value(value).unwrap();
-        assert_eq!(
-            decoded.images()[1].multiscale.levels[0].scale[0].to_bits(),
-            0.0f64.to_bits(),
+        // Zero scale is not semantically admissible even though the compact
+        // encoder can represent and deduplicate it.  Admission validation runs
+        // after reference expansion and rejects the canonicalized value.
+        let error = serde_json::from_value::<DatasetManifest>(value).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("scale must be finite and positive")
         );
     }
 

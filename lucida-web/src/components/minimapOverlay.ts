@@ -249,12 +249,12 @@ export function drawZPlaneOverlays(ctx: CanvasRenderingContext2D, data: MinimapO
 
 /**
  * Draw the viewport sub-layer — the per-member viewport rectangles (slice mode)
- * plus the orientation cube (both modes, drawn last). These are cheap (bounded
+ * or the orientation cube (volume mode, drawn last). These are cheap (bounded
  * by the visible viewports, not the member count) and are re-stroked every
  * overlay callback. Does NOT clear: it strokes over the composited layers.
  */
 export function drawViewportOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData): void {
-  const { viewProj, sliceViewports, mode, canvasW, canvasH, currentZ, theta, phi } = data;
+  const { viewProj, sliceViewports, mode, canvasW, canvasH, currentZ, cameraViewRotation } = data;
 
   if (mode === "slice") {
     // View rectangle intersections (per-member, in member-local voxel coordinates)
@@ -267,8 +267,11 @@ export function drawViewportOverlays(ctx: CanvasRenderingContext2D, data: Minima
     }
   }
 
-  // Orientation cube (drawn last, on top of everything)
-  drawOrientationCube(ctx, theta, phi, canvasW, canvasH);
+  if (mode === "volume") {
+    // Orientation is a 3D affordance. The matrix comes from the same
+    // authoritative camera pose as rendering, including fly-camera roll.
+    drawOrientationCube(ctx, cameraViewRotation, canvasW, canvasH);
+  }
 }
 
 /**

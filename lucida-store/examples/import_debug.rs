@@ -92,10 +92,6 @@ async fn main() {
                 match &result.fetch {
                     lucida_protocol::FetchSource::Proxied(p) =>
                         format!("Proxied ({} images)", p.images.len()),
-                    lucida_protocol::FetchSource::Direct(d) =>
-                        format!("Direct ({} images)", d.images.len()),
-                    lucida_protocol::FetchSource::Local(l) =>
-                        format!("Local ({} images)", l.images.len()),
                 }
             );
             eprintln!(

@@ -190,16 +190,19 @@ tmp/
 # Node / frontend
 node_modules/
 .pnpm-store/
+.vite/
+**/.vite/
 .playwright-mcp/
 client-web/dist/
 AGENTS.md
 
 # Added by cargo
 /target
+/.cargo-target
 /example_files
 
-# WASM build output
-lucida-core/pkg/
+# WASM build output (both a directory and a provisioned symlink)
+/lucida-core/pkg
 
 .claude/
 /.claude

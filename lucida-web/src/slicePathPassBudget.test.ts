@@ -4,6 +4,7 @@ import {
   MAX_INDIVIDUAL_MEMBER_PASSES,
   MAX_SLICE_BACKING_PIXELS,
   MEMBER_AGGREGATE_MAX_DIAG_PX,
+  createSliceState,
   pushMemberLayers,
   sliceBackingScale,
   tickSlice,
@@ -55,6 +56,45 @@ describe("pushMemberLayers", () => {
     const agg = layers[0].aggregate;
     expect(agg).toBeDefined();
     expect(agg!.count).toBe(5000);
+  });
+
+  it("reuses aggregate geometry across camera-only frames and invalidates on its basis", () => {
+    const members = rosterGrid(5000, 100, 1024);
+    const indexByMember = indexFor(members, null);
+    const state = createSliceState();
+    const input = {
+      members,
+      indexByMember,
+      channel: null,
+      blendMode: "alpha" as const,
+      fullResWidth: 1024,
+      fullResHeight: 1024,
+      zoom: 0.0005,
+      cache: { state, datasetId: "ds-0", epochKey: "1|1|1" },
+    };
+    const first: SliceLayerParams[] = [];
+    const second: SliceLayerParams[] = [];
+    pushMemberLayers(first, input);
+    pushMemberLayers(second, input);
+
+    expect(second[0]).toBe(first[0]);
+    expect(second[0].aggregate?.quads).toBe(first[0].aggregate?.quads);
+    expect(second[0].aggregate?.cacheKey).toBe(first[0].aggregate?.cacheKey);
+
+    const nearbyZoom: SliceLayerParams[] = [];
+    pushMemberLayers(nearbyZoom, { ...input, zoom: input.zoom * 1.1 });
+    expect(nearbyZoom[0].aggregate?.quads).toBe(first[0].aggregate?.quads);
+    expect(nearbyZoom[0].aggregate?.cacheKey).toBe(
+      first[0].aggregate?.cacheKey,
+    );
+
+    const changed: SliceLayerParams[] = [];
+    pushMemberLayers(changed, {
+      ...input,
+      cache: { ...input.cache, epochKey: "1|2|1" },
+    });
+    expect(changed[0].aggregate?.quads).not.toBe(first[0].aggregate?.quads);
+    expect(changed[0].aggregate?.cacheKey).not.toBe(first[0].aggregate?.cacheKey);
   });
 
   it("keeps per-member passes for members at normal zoom (no aggregate)", () => {
@@ -346,6 +386,9 @@ function makeSeamHarness(opts: {
   const members = rosterGrid(opts.memberCount, 100, 1024);
   const orchResult: TickCoordinatorResult = {
     memberRoster: new Map([["ds1", members]]),
+    memberPositionsByDataset: new Map([
+      ["ds1", Object.fromEntries(members.map((m) => [m.imageId, m.position]))],
+    ]),
     settings: {
       layerOrder: ["ds1"],
       allSettings: {
@@ -362,7 +405,7 @@ function makeSeamHarness(opts: {
       },
     },
     multiChannel: false,
-    epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+    epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
     entityIndexByDataset: new Map([["ds1", indexFor(members, null)]]),
   };
   const tickCoordinator = {
@@ -469,13 +512,13 @@ describe("tickSlice render-message seam", () => {
     tickSlice(h.ctx, h.tickCoordinator, h.uploader, 0, 0, 0, new Map());
     const { zoom, canvasW, canvasH } = h.posted();
     expect(canvasW * canvasH).toBeLessThanOrEqual(MAX_SLICE_BACKING_PIXELS * 1.01);
-    // Field of view preserved: world width per screen = canvasW / zoom.
-    expect(canvasW / zoom).toBeCloseTo(6000 / 1, 0);
+    // The logical 3000 CSS-pixel viewport still spans 3000 world units.
+    expect(canvasW / zoom).toBeCloseTo(3000 / 1, 0);
     // The presented canvas is resized to the same clamped backing.
-    expect(h.resize).toHaveBeenCalledWith(canvasW, canvasH);
-    // Planning still sees the FULL device-pixel viewport.
+    expect(h.resize).toHaveBeenCalledWith(canvasW, canvasH, "slice");
+    // Planning sees the canonical CSS-logical viewport, independent of DPR.
     expect((h.ctx.scene as unknown as { set_viewport: ReturnType<typeof vi.fn> }).set_viewport)
-      .toHaveBeenCalledWith(6000, 4000);
+      .toHaveBeenCalledWith(3000, 2000);
   });
 
   it("keeps full backing at DPR 2 for the fixed-size canvas (no needless degrade)", () => {
@@ -485,6 +528,27 @@ describe("tickSlice render-message seam", () => {
     const { canvasW, canvasH, zoom } = h.posted();
     expect(canvasW).toBe(1600);
     expect(canvasH).toBe(1200);
-    expect(zoom).toBe(1);
+    expect(zoom).toBe(2);
+  });
+
+  it("keeps planning, aggregate crossover, and CSS field of view identical across DPR", () => {
+    vi.stubGlobal("devicePixelRatio", 1);
+    const dpr1 = makeSeamHarness({ memberCount: 11, zoom: 0.02 });
+    tickSlice(dpr1.ctx, dpr1.tickCoordinator, dpr1.uploader, 0, 0, 0, new Map());
+    const first = dpr1.posted();
+
+    vi.stubGlobal("devicePixelRatio", 2);
+    const dpr2 = makeSeamHarness({ memberCount: 11, zoom: 0.02 });
+    tickSlice(dpr2.ctx, dpr2.tickCoordinator, dpr2.uploader, 0, 0, 0, new Map());
+    const second = dpr2.posted();
+
+    expect((dpr1.ctx.scene as unknown as { set_viewport: ReturnType<typeof vi.fn> }).set_viewport)
+      .toHaveBeenCalledWith(800, 600);
+    expect((dpr2.ctx.scene as unknown as { set_viewport: ReturnType<typeof vi.fn> }).set_viewport)
+      .toHaveBeenCalledWith(800, 600);
+    expect(second.layers.map((layer) => layer.aggregate?.count ?? layer.datasetId))
+      .toEqual(first.layers.map((layer) => layer.aggregate?.count ?? layer.datasetId));
+    expect(second.canvasW * second.canvasH).toBe(first.canvasW * first.canvasH * 4);
+    expect(first.canvasW / first.zoom).toBeCloseTo(second.canvasW / second.zoom, 10);
   });
 });

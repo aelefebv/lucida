@@ -1,5 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Bridge, type BridgeHandlers } from "./bridge.ts";
+import {
+  FakeWebSocket,
+  installFakeWebSocket,
+  makeBridgeHandlers,
+} from "./test/fakeWebSocket.ts";
 
 /**
  * Seq discipline of the sequenced document stream, driven through the real
@@ -22,51 +27,8 @@ import { Bridge, type BridgeHandlers } from "./bridge.ts";
  *   stomps a newer peer value (local-only, bounded by the next
  *   edit/snapshot).
  */
-class FakeWebSocket {
-  static instances: FakeWebSocket[] = [];
-  static OPEN = 1;
-  static CONNECTING = 0;
-  static CLOSED = 3;
-
-  url: string;
-  binaryType = "blob";
-  readyState = FakeWebSocket.CONNECTING;
-  onopen: (() => void) | null = null;
-  onmessage: ((e: { data: unknown }) => void) | null = null;
-  onclose: (() => void) | null = null;
-  onerror: (() => void) | null = null;
-  sent: string[] = [];
-
-  constructor(url: string) {
-    this.url = url;
-    FakeWebSocket.instances.push(this);
-  }
-
-  send(data: string): void {
-    this.sent.push(data);
-  }
-
-  close(): void {
-    this.readyState = FakeWebSocket.CLOSED;
-  }
-
-  open(): void {
-    this.readyState = FakeWebSocket.OPEN;
-    this.onopen?.();
-  }
-}
-
-function makeHandlers(overrides: Partial<BridgeHandlers> = {}): BridgeHandlers {
-  return {
-    onSnapshot: vi.fn(),
-    onCommand: vi.fn(),
-    onAck: vi.fn(),
-    ...overrides,
-  };
-}
-
 function openBridge(overrides: Partial<BridgeHandlers> = {}) {
-  const handlers = makeHandlers(overrides);
+  const handlers = makeBridgeHandlers(overrides);
   const bridge = new Bridge(handlers, "ws://test/ws/workspaces/w1");
   const ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
   ws.open();
@@ -74,7 +36,7 @@ function openBridge(overrides: Partial<BridgeHandlers> = {}) {
 }
 
 function deliver(ws: FakeWebSocket, raw: string): void {
-  ws.onmessage?.({ data: raw });
+  ws.receive(raw);
 }
 
 function snapshotMsg(seq: number, manifests: Record<string, unknown> = {}): string {
@@ -98,8 +60,43 @@ function datasetOpenedCmd(datasetId: string): Record<string, unknown> {
   return { type: "dataset_opened", manifest: { dataset_id: datasetId } };
 }
 
-function ackMsg(seq: number): string {
-  return JSON.stringify({ type: "ack", seq });
+function datasetOpenSucceededMsg(seq: number, datasetId: string): string {
+  return JSON.stringify({
+    type: "open_dataset_succeeded",
+    request_id: `open-${seq}`,
+    url: `/data/${datasetId}.zarr`,
+    seq,
+    summary: {
+      workspace_dataset_id: datasetId,
+      name: `${datasetId}.zarr`,
+      image_count: 1,
+      entity_count: 1,
+    },
+    opened: {
+      manifest: { dataset_id: datasetId },
+      fetch: { Proxied: { images: [] } },
+      opener_client_id: 7,
+    },
+  });
+}
+
+function ackMsg(seq: number, requestId = `untracked-${seq}`): string {
+  return JSON.stringify({ type: "ack", request_id: requestId, seq });
+}
+
+function nackMsg(
+  requestId: string,
+  code = "forbidden",
+  message = "command rejected",
+  retryable = false,
+): string {
+  return JSON.stringify({
+    type: "nack",
+    request_id: requestId,
+    code,
+    message,
+    retryable,
+  });
 }
 
 /** Count `request_snapshot` envelopes transmitted on this socket. */
@@ -123,8 +120,7 @@ const PAST_GRACE_MS = 250;
 
 describe("Bridge sequenced-stream gap detection and snapshot resync", () => {
   beforeEach(() => {
-    FakeWebSocket.instances = [];
-    vi.stubGlobal("WebSocket", FakeWebSocket);
+    installFakeWebSocket();
     vi.useFakeTimers();
   });
 
@@ -142,6 +138,34 @@ describe("Bridge sequenced-stream gap detection and snapshot resync", () => {
     vi.advanceTimersByTime(1000);
 
     expect(appliedSeqs(handlers)).toEqual([11, 12, 13]);
+    expect(resyncRequests(ws)).toBe(0);
+  });
+
+  it("normalizes requester dataset-open success into the sequenced command stream", () => {
+    const onOpenDatasetSucceeded = vi.fn();
+    const { ws, handlers } = openBridge({ onOpenDatasetSucceeded });
+    deliver(ws, snapshotMsg(42));
+    deliver(ws, datasetOpenSucceededMsg(43, "wds-opened"));
+    deliver(ws, broadcastMsg(44));
+
+    expect(appliedSeqs(handlers)).toEqual([43, 44]);
+    expect(JSON.parse(appliedCommands(handlers)[0])).toStrictEqual({
+      type: "dataset_opened",
+      manifest: { dataset_id: "wds-opened" },
+      fetch: { Proxied: { images: [] } },
+      opener_client_id: 7,
+    });
+    expect(onOpenDatasetSucceeded).toHaveBeenCalledExactlyOnceWith(
+      "open-43",
+      "/data/wds-opened.zarr",
+      43,
+      {
+        workspace_dataset_id: "wds-opened",
+        name: "wds-opened.zarr",
+        image_count: 1,
+        entity_count: 1,
+      },
+    );
     expect(resyncRequests(ws)).toBe(0);
   });
 
@@ -297,7 +321,7 @@ describe("Bridge sequenced-stream gap detection and snapshot resync", () => {
     deliver(ws, broadcastMsg(5));
     vi.advanceTimersByTime(1000);
 
-    expect(handlers.onAck).toHaveBeenCalledWith(4);
+    expect(handlers.onAck).toHaveBeenCalledWith(4, "untracked-4");
     expect(appliedSeqs(handlers)).toEqual([5]);
     expect(resyncRequests(ws)).toBe(0);
   });
@@ -490,8 +514,7 @@ describe("Bridge sequenced-stream gap detection and snapshot resync", () => {
 
 describe("Bridge pending local commands across snapshot full-replace", () => {
   beforeEach(() => {
-    FakeWebSocket.instances = [];
-    vi.stubGlobal("WebSocket", FakeWebSocket);
+    installFakeWebSocket();
     vi.useFakeTimers();
   });
 
@@ -508,9 +531,10 @@ describe("Bridge pending local commands across snapshot full-replace", () => {
     deliver(ws, snapshotMsg(10, { "wds-1": {} }));
 
     // Optimistically applied by the caller (repo convention), then sent.
-    bridge.sendCommand(RENAME_JSON);
+    const requestId = bridge.sendCommand(RENAME_JSON);
     expect(JSON.parse(ws.sent[ws.sent.length - 1])).toStrictEqual({
       type: "command",
+      request_id: requestId,
       command: RENAME,
     });
 
@@ -521,7 +545,7 @@ describe("Bridge pending local commands across snapshot full-replace", () => {
     expect(appliedCommands(handlers)).toEqual([RENAME_JSON]);
 
     // The ack lands (our command was sequenced at 13): pending retires.
-    deliver(ws, ackMsg(13));
+    deliver(ws, ackMsg(13, requestId));
     deliver(ws, snapshotMsg(13, { "wds-1": {} }));
     expect(appliedCommands(handlers)).toEqual([RENAME_JSON]); // no second replay
   });
@@ -536,7 +560,7 @@ describe("Bridge pending local commands across snapshot full-replace", () => {
     const OURS = JSON.stringify({ type: "rename_dataset", id: "wds-1", name: "Ours" });
     const { bridge, ws, handlers } = openBridge();
     deliver(ws, snapshotMsg(10, { "wds-1": { name: "Original" } }));
-    bridge.sendCommand(OURS); // sequenced server-side at 11; ack in flight
+    const requestId = bridge.sendCommand(OURS); // sequenced server-side at 11; ack in flight
 
     // Peer renamed to "Theirs" at seq 12; the snapshot (built at 12) holds
     // the peer's value AND already reflects our seq-11 command. It arrives
@@ -552,8 +576,8 @@ describe("Bridge pending local commands across snapshot full-replace", () => {
     // the next edit or snapshot converges it. This is accepted over the
     // alternative (skipping replay), which would erase the author's own
     // edit in the common pre-apply case.
-    deliver(ws, ackMsg(11));
-    expect(handlers.onAck).toHaveBeenCalledWith(11);
+    deliver(ws, ackMsg(11, requestId));
+    expect(handlers.onAck).toHaveBeenCalledWith(11, requestId);
     expect(appliedCommands(handlers)).toEqual([OURS]);
     vi.advanceTimersByTime(1000);
     expect(resyncRequests(ws)).toBe(0);
@@ -568,11 +592,69 @@ describe("Bridge pending local commands across snapshot full-replace", () => {
   it("a command acked before the snapshot is not replayed", () => {
     const { bridge, ws, handlers } = openBridge();
     deliver(ws, snapshotMsg(10, { "wds-1": {} }));
-    bridge.sendCommand(RENAME_JSON);
-    deliver(ws, ackMsg(11)); // retired
+    const requestId = bridge.sendCommand(RENAME_JSON);
+    deliver(ws, ackMsg(11, requestId)); // retired
     deliver(ws, snapshotMsg(11, { "wds-1": {} })); // includes the command's effect
 
     expect(appliedCommands(handlers)).toEqual([]);
+  });
+
+  it("retires out-of-order acknowledgements by request id rather than send order", () => {
+    const { bridge, ws, handlers } = openBridge();
+    deliver(ws, snapshotMsg(10, { "wds-1": {} }));
+    const first = bridge.sendCommand(
+      JSON.stringify({ type: "rename_dataset", id: "wds-1", name: "first" }),
+    );
+    const second = bridge.sendCommand(
+      JSON.stringify({ type: "rename_dataset", id: "wds-1", name: "second" }),
+    );
+
+    // A later command's outcome can overtake the earlier one. Its seq waits
+    // behind the normal gap discipline, but correlation still retires the
+    // correct optimistic command immediately.
+    deliver(ws, ackMsg(12, second));
+    deliver(ws, ackMsg(11, first));
+    deliver(ws, snapshotMsg(12, { "wds-1": {} }));
+
+    expect(handlers.onAck).toHaveBeenNthCalledWith(1, 12, second);
+    expect(handlers.onAck).toHaveBeenNthCalledWith(2, 11, first);
+    expect(appliedCommands(handlers)).toEqual([]);
+    expect(resyncRequests(ws)).toBe(0);
+  });
+
+  it("retires only the nacked command, surfaces it, and reconciles from a snapshot", () => {
+    const onNack = vi.fn();
+    const { bridge, ws, handlers } = openBridge({ onNack });
+    deliver(ws, snapshotMsg(10, { "wds-1": {} }));
+    const rejected = bridge.sendCommand(
+      JSON.stringify({ type: "rename_dataset", id: "wds-1", name: "rejected" }),
+    );
+    const stillPendingJson = JSON.stringify({
+      type: "rename_dataset",
+      id: "wds-1",
+      name: "still pending",
+    });
+    const stillPending = bridge.sendCommand(stillPendingJson);
+
+    deliver(ws, nackMsg(rejected, "forbidden", "owner policy denied the change"));
+    expect(onNack).toHaveBeenCalledWith({
+      requestId: rejected,
+      code: "forbidden",
+      message: "owner policy denied the change",
+      retryable: false,
+    });
+    expect(resyncRequests(ws)).toBe(1);
+
+    // The authoritative replacement rolls back the rejected optimistic
+    // command; only the unrelated command still awaiting an outcome replays.
+    deliver(ws, snapshotMsg(10, { "wds-1": {} }));
+    expect(appliedCommands(handlers)).toEqual([stillPendingJson]);
+    deliver(ws, ackMsg(11, stillPending));
+    deliver(ws, snapshotMsg(11, { "wds-1": {} }));
+    expect(appliedCommands(handlers)).toEqual([stillPendingJson]);
+
+    vi.advanceTimersByTime(6000);
+    expect(resyncRequests(ws)).toBe(1);
   });
 
   it("pending commands are dropped on disconnect (an unacked command may never have reached the server)", () => {
@@ -590,7 +672,7 @@ describe("Bridge pending local commands across snapshot full-replace", () => {
   });
 
   it("a command handed to a non-OPEN socket is not tracked (it never reached the server)", () => {
-    const handlers = makeHandlers();
+    const handlers = makeBridgeHandlers();
     const bridge = new Bridge(handlers, "ws://test/ws/workspaces/w1");
     const ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
     // Socket still CONNECTING: Bridge.send drops the frame silently.
@@ -616,23 +698,26 @@ describe("Bridge pending local commands across snapshot full-replace", () => {
     expect((JSON.parse(replayed[63]) as { name: string }).name).toBe("n69");
   });
 
-  it("an expired never-acked entry is pruned: retirement realigns and later snapshots don't replay it", () => {
+  it("an expired outcome-orphan is pruned and later snapshots do not replay it", () => {
     const { bridge, ws, handlers } = openBridge();
     deliver(ws, snapshotMsg(10, { "wds-1": {} }));
 
-    // Server-side rejections are log-only — this command will never ack,
-    // and blind FIFO would misalign every retirement after it (its worst
-    // case: a stale remove_dataset replayed by a much-later snapshot,
-    // deleting a re-opened dataset and poisoning the membership mirror).
+    // Simulate a transport that lost both sides of the outcome. The orphan
+    // must not replay forever (its worst case is a stale remove_dataset
+    // deleting a re-opened dataset on a much-later snapshot).
     bridge.sendCommand(JSON.stringify({ type: "remove_dataset", id: "wds-1" }));
     vi.advanceTimersByTime(11_000); // well past the pending TTL
 
-    // Two healthy commands afterwards. Their acks must retire THEM — the
-    // expired entry is pruned before each retirement, realigning FIFO.
-    bridge.sendCommand(JSON.stringify({ type: "rename_dataset", id: "wds-1", name: "a" }));
-    bridge.sendCommand(JSON.stringify({ type: "rename_dataset", id: "wds-1", name: "b" }));
-    deliver(ws, ackMsg(11));
-    deliver(ws, ackMsg(12));
+    // Two healthy commands afterwards. Their correlated acks retire them;
+    // the expired orphan is pruned before the first new send.
+    const requestA = bridge.sendCommand(
+      JSON.stringify({ type: "rename_dataset", id: "wds-1", name: "a" }),
+    );
+    const requestB = bridge.sendCommand(
+      JSON.stringify({ type: "rename_dataset", id: "wds-1", name: "b" }),
+    );
+    deliver(ws, ackMsg(11, requestA));
+    deliver(ws, ackMsg(12, requestB));
 
     // A much-later snapshot replays nothing: the stale removal expired and
     // both healthy commands were retired by their own acks.

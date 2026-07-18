@@ -83,7 +83,14 @@ function renderOverlay(opts: { pins: Annotation[]; myId?: string }) {
       onDocumentChanged={() => {
         changed += 1;
       }}
-      onViewportChanged={() => {}}
+      viewport={{
+        apply: (commands) => {
+          const batch = Array.isArray(commands) ? commands : [commands];
+          for (const command of batch) scene.apply_command(JSON.stringify(command));
+          return true;
+        },
+        endGesture: () => {},
+      }}
     />,
   );
   return { applied, sent, getChanged: () => changed };

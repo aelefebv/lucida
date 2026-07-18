@@ -120,8 +120,8 @@ describe("buildLayerInfos label rows (scene → LayerInfo seam)", () => {
     ]);
   });
 
-  it("omits an ineligible (uint16) label and PRESERVES the manifest index", () => {
-    // [uint16, uint32]: only index 1 is drawable, and its row keeps index 1 so the
+  it("omits an ineligible float label and PRESERVES the manifest index", () => {
+    // [float32, uint16]: only index 1 is drawable, and its row keeps index 1 so the
     // toggle/opacity handlers target the right label_settings entry.
     const scene = stubScene(
       ["ds-0"],
@@ -132,7 +132,7 @@ describe("buildLayerInfos label rows (scene → LayerInfo seam)", () => {
     );
     const infos = buildLayerInfos(
       scene,
-      datasetsWith([label("region-a", "Uint16"), label("region-c", "Uint32")]),
+      datasetsWith([label("region-a", "Float32"), label("region-c", "Uint16")]),
       emptyMaps,
     );
     expect(infos[0].labelRows).toEqual([{ index: 1, name: "region-c", visible: true, opacity: 0.7 }]);
@@ -151,8 +151,8 @@ describe("buildLayerInfos label rows (scene → LayerInfo seam)", () => {
 
   it("leaves labelRows undefined for a dataset with no drawable labels", () => {
     const scene = stubScene(["ds-0"], settingsWith([]));
-    // A single uint8 (ineligible) label → no drawable rows.
-    const infos = buildLayerInfos(scene, datasetsWith([label("mask", "Uint8")]), emptyMaps);
+    // A floating-point label is not a valid discrete-id mask.
+    const infos = buildLayerInfos(scene, datasetsWith([label("mask", "Float32")]), emptyMaps);
     expect(infos[0].labelRows).toBeUndefined();
   });
 });

@@ -16,11 +16,11 @@ export {
   destroyAtlas,
   ensureDepthTexture,
   getDepthTexture,
-  getDummyIndirection,
   getOrCreateLabelVolumePool,
   getOrCreateVolumePool,
   removeLabelVolumePool,
   removeLabelVolumePoolsForDataset,
+  resetLabelVolumeAllocWarnings,
   removeVolumeAtlas,
   resizeIndirection,
 } from "./atlas.ts";

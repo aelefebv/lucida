@@ -1,6 +1,10 @@
 # Lucida
 
-Collaborative volumetric image viewer. Multiple peers open the same OME-Zarr dataset, follow each other's viewport, and share annotations in real time. Server in Rust (Axum + Tokio), client in TypeScript + WebGPU + WASM.
+A collaborative, domain-neutral viewer for large n-dimensional array/image
+datasets. People and agents can open the same OME-Zarr dataset, navigate and
+annotate it together, and stream only the chunks needed for the current view.
+The server is Rust (Axum + Tokio); the interactive client is TypeScript +
+WebGPU + WASM.
 
 [![CI](https://github.com/aelefebv/lucida/actions/workflows/ci.yml/badge.svg)](https://github.com/aelefebv/lucida/actions/workflows/ci.yml)
 [![Release](https://github.com/aelefebv/lucida/actions/workflows/release.yml/badge.svg)](https://github.com/aelefebv/lucida/actions/workflows/release.yml)
@@ -34,7 +38,9 @@ For any production-shape deployment — multi-user identity, proper admin gating
 
 ### Develop on it
 
-Prerequisites: rust + cargo, pnpm, wasm-pack, node — your package manager equivalent.
+Prerequisites are pinned for reproducibility: Rust 1.95.0, Node 22.14.0,
+pnpm 9.15.9, and wasm-pack 0.15.0. See
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for installation and upgrade policy.
 
 One command brings everything up to date and runs both servers:
 
@@ -42,17 +48,24 @@ One command brings everything up to date and runs both servers:
 ./scripts/dev.sh
 ```
 
-It installs the web deps if they're missing, rebuilds the `lucida-core` wasm pkg **only when a `lucida-*` Rust source actually changed** (content-hashed, so an mtime bump from `git checkout` doesn't trigger a needless rebuild), builds `lucida-server`, then starts the relay server (binds `127.0.0.1:9876`, auth auto-disabled on loopback) and the Vite SPA dev server (which proxies `/auth /api /admin /ws` to `:9876`), streaming both logs. `Ctrl-C` stops both cleanly. Pass `--wasm` to force a wasm rebuild, or `--help` for details.
+It syncs the web deps from the frozen lockfile, verifies both the `lucida-core` WASM build inputs and the generated package fingerprint, builds `lucida-server`, then starts the relay server (binds `127.0.0.1:9876`, auth auto-disabled on loopback) and the Vite SPA dev server (which proxies `/auth /api /admin /ws/workspaces` to `:9876`), streaming both logs. `Ctrl-C` stops both cleanly. Pass `--wasm` to force a WASM rebuild. If an older dev process still owns either port, all builds are repaired first and the script prints the owning process; rerun with `--replace` to terminate cooperative listeners and launch the fresh pair.
+
+Parallel worktrees can choose their own ports with `LUCIDA_DEV_BACKEND_PORT` and
+`LUCIDA_DEV_WEB_PORT`. For a manually launched Vite instance, set
+`LUCIDA_VITE_PROXY_TARGET` to a credential-free HTTP(S) origin such as
+`http://127.0.0.1:9988`.
 
 Then visit <http://localhost:5173>.
 
 <details>
 <summary>Prefer to run the two-terminal loop by hand?</summary>
 
-One-time setup:
+One-time setup from the canonical `lucida-web` package boundary:
 
 ```bash
-(cd lucida-web && pnpm install)
+sh scripts/install-wasm-pack.sh "$HOME/.cargo/bin"
+(cd lucida-core && wasm-pack build --target web --out-dir pkg -- --locked)
+(cd lucida-web && corepack pnpm install --frozen-lockfile)
 ```
 
 Terminal 1 — relay server (binds 127.0.0.1:9876, auth auto-disabled on loopback):
@@ -61,13 +74,17 @@ Terminal 1 — relay server (binds 127.0.0.1:9876, auth auto-disabled on loopbac
 cargo run -p lucida-server
 ```
 
-Terminal 2 — SPA dev server (Vite proxies /auth /api /admin /ws to :9876):
+Terminal 2 — SPA dev server (Vite proxies /auth /api /admin /ws/workspaces to :9876):
 
 ```bash
-(pnpm install --force && cd lucida-web && pnpm run build:wasm && pnpm run dev -- --force)
+(cd lucida-web && corepack pnpm run build:wasm && corepack pnpm install --frozen-lockfile && corepack pnpm run dev)
 ```
 
-`pnpm install --force` refreshes the local `file:../lucida-core/pkg` copy in `node_modules`, and `pnpm run dev -- --force` makes Vite discard any stale optimized dependency cache.
+The WASM build runs before dependency installation so the local
+`link:../lucida-core/pkg` package exists. Because the package is a live link and
+is excluded from Vite dependency optimization, rebuilt WASM is visible without
+copying dependencies or bypassing the cache. Generated Vite state under
+`lucida-web/.vite` is ignored and never source-controlled.
 
 Visit <http://localhost:5173>.
 
@@ -164,26 +181,48 @@ uv run --project lucida-py python scripts/smoke_dataset_reliability.py \
 
 Add to any of the `docker run` recipes above.
 
-**Mount a local data directory** so `/api/browse` can list OME-Zarr files on your filesystem (otherwise browsing is restricted to `gs://` / `s3://` / `http(s)://` URLs):
+**Mount a local data directory** so `/api/browse` can list OME-Zarr files on your filesystem. Without it, local browsing is disabled. Remote sources are separately deny-by-default and must be explicitly allowlisted with the `LUCIDA_SOURCE_*` settings described below.
 
 ```bash
 -v /path/on/host:/var/lib/lucida/data \
   -e LUCIDA_DATA_DIR=/var/lib/lucida/data
 ```
 
-**Persist bookmarks/sessions across restarts** with a named volume covering the whole `/var/lib/lucida` tree (`lucida.db` + proxy cache). Without this, `docker rm` wipes everything; matters most for the LAN-shared case where multiple people accumulate state:
+**Persist workspaces/sessions across restarts** with a named volume covering the whole `/var/lib/lucida` tree (`lucida.db` + the generated-coarse cache, bounded to 8 GiB by default). Without this, `docker rm` wipes everything; matters most for the LAN-shared case where multiple people accumulate state:
 
 ```bash
 -v lucida-data:/var/lib/lucida
 ```
 
+Before upgrading a persistent deployment, follow
+[`extras/deploy/RUNBOOK.md` §10](extras/deploy/RUNBOOK.md#10-updating-to-a-new-release):
+stop the old writer, verify a WAL-safe backup, run the one-time Compose
+UID/GID `10001:10001` volume helper when needed, and only then start the new
+image. Rollback across the source-ID migration requires restoring that backup;
+switching only the binary is unsafe.
+
+### Reading remote datasets securely
+
+Server-side source access is deny-by-default. Allow exact HTTP(S) hostnames
+with `LUCIDA_SOURCE_HTTP_HOSTS`; add `LUCIDA_SOURCE_HTTP_CIDRS` only for
+intentional private/LAN destinations. Standard IPv6 NAT64/transition forms are
+rejected before transport pinning; list any operator-specific RFC 6052 prefix
+in `LUCIDA_SOURCE_HTTP_IPV6_TRANSLATION_CIDRS` so it is denied too. Allow cloud scopes with
+`LUCIDA_SOURCE_GCS_BUCKETS` or `LUCIDA_SOURCE_S3_BUCKETS`. Cloud credentials
+are not used unless `LUCIDA_SOURCE_ALLOW_AMBIENT_CLOUD_CREDENTIALS=true` is
+also set. These controls are cumulative with the identity permissions below.
+
 ### Reading from `gs://`
 
 Lucida discovers Google Cloud credentials, in order: object_store-native `GOOGLE_SERVICE_ACCOUNT*` env vars, then `GOOGLE_APPLICATION_CREDENTIALS` (forwarded explicitly), then the well-known ADC file at `$HOME/.config/gcloud/application_default_credentials.json`, then the GCE metadata server. See [`wiki/gotchas/gcs-credentials.md`](wiki/gotchas/gcs-credentials.md) for the full story (and how to avoid the off-cluster ~13s metadata-server hang).
 
-**Bare binary on a dev laptop** with `gcloud auth application-default login` already done — zero env config; the well-known ADC file at `$HOME/.config/gcloud/application_default_credentials.json` is read automatically:
+**Bare binary on a dev laptop** with `gcloud auth application-default login`
+already done. Name the buckets Lucida may read and explicitly allow the
+process to use ADC; the well-known file is then discovered automatically:
 
 ```bash
+export LUCIDA_SOURCE_GCS_BUCKETS=my-dataset-bucket
+export LUCIDA_SOURCE_ALLOW_AMBIENT_CLOUD_CREDENTIALS=true
 cargo run -p lucida-server
 ```
 
@@ -192,12 +231,17 @@ cargo run -p lucida-server
 ```bash
 docker run --rm -p 127.0.0.1:9876:9876 \
   -e LUCIDA_AUTH=disabled -e LUCIDA_INSECURE=1 \
+  -e LUCIDA_SOURCE_GCS_BUCKETS=my-dataset-bucket \
+  -e LUCIDA_SOURCE_ALLOW_AMBIENT_CLOUD_CREDENTIALS=true \
   -e GOOGLE_APPLICATION_CREDENTIALS=/gcp/adc.json \
   -v "$HOME/.config/gcloud/application_default_credentials.json:/gcp/adc.json:ro" \
   ghcr.io/aelefebv/lucida:latest
 ```
 
-**GKE with Workload Identity** — annotate the KSA with the GSA email and lucida picks credentials up via the metadata server with no env config. Full walkthrough in [`extras/deploy/RUNBOOK.md`](extras/deploy/RUNBOOK.md) §5.
+**GKE with Workload Identity** — annotate the KSA with the GSA email, set the
+GCS bucket allowlist and ambient-credential opt-in in the Deployment, and
+Lucida can discover the workload identity through the metadata server. Full
+walkthrough in [`extras/deploy/RUNBOOK.md`](extras/deploy/RUNBOOK.md) §5.
 
 ## Working with the codebase
 
@@ -205,20 +249,29 @@ docker run --rm -p 127.0.0.1:9876:9876 \
 - **TypeScript changes in `lucida-web/`** → Vite hot-reloads automatically
 - **Python binding changes in `lucida-py/`** → `(cd lucida-py && maturin develop)`
 
-Tests:
+Run the CI-equivalent local verification:
 
 ```bash
-cargo test --workspace
-(cd lucida-web && pnpm test)
+./scripts/verify.sh
 ```
 
-Type-check the SPA: `(cd lucida-web && pnpm exec tsc --noEmit -p tsconfig.app.json)` — see [`wiki/gotchas/ts-typecheck-trap`](wiki/gotchas/ts-typecheck-trap.md) for why the project flag is load-bearing.
+For a narrow web-only pass, type-check with `(cd lucida-web && pnpm exec tsc
+--noEmit -p tsconfig.app.json)` — see
+[`wiki/gotchas/ts-typecheck-trap`](wiki/gotchas/ts-typecheck-trap.md) for why
+the project flag is load-bearing.
 
 ## Architecture
 
 The wiki under [`wiki/`](wiki/) is the primary reference — start at [`wiki/index.md`](wiki/index.md) (or [`wiki/CLAUDE.md`](wiki/CLAUDE.md) for navigation conventions).
 
 For *why* something is shaped the way it is, look in [`wiki/decisions/`](wiki/decisions/) (numbered ADRs). For *what bites you when you don't expect it*, look in [`wiki/gotchas/`](wiki/gotchas/).
+
+## Project contracts
+
+- [Contributing and verification](CONTRIBUTING.md)
+- [Compatibility and supported boundaries](COMPATIBILITY.md)
+- [Support](SUPPORT.md)
+- [Private security reporting and supported versions](SECURITY.md)
 
 ## License
 

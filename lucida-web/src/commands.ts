@@ -8,10 +8,9 @@
  * Scope: every command the web produces as a JSON literal, plus `set_zoom`
  * (no producer authors it today — interactive 2D zoom is the relative
  * `zoom_by` — but it is kept so the 2D camera's absolute setters, `set_center`
- * and `set_zoom`, travel together). Commands the web only consumes
- * (`dataset_opened`, `apply_asset_catalog_delta` — both server-originated; the
- * web applies their inbound JSON verbatim) and camera ops issued through
- * dedicated typed wasm methods (`set_viewport`, `fly_set_base_speed`,
+ * and `set_zoom`, travel together). The server-originated `dataset_opened`
+ * command is consumed by applying its inbound JSON verbatim. Camera ops issued
+ * through dedicated typed wasm methods (`set_viewport`, `fly_set_base_speed`,
  * `fly_adjust_speed`, `adjust_clip_distance`) are deliberately absent: their
  * contracts are locked elsewhere (wire goldens / the wasm-bindgen `.d.ts`).
  *

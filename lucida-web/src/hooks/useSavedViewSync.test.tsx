@@ -37,6 +37,8 @@ interface MockScene {
   multi_channel: () => boolean;
   apply_command: (json: string) => void;
   dataset_ids: () => string;
+  dataset_order: () => string;
+  fit_camera_to_dataset_bounds: (id: string) => void;
   available_layouts: (id: string) => string;
   dataset_volume_shape: (id: string) => Uint32Array;
   export_presence: () => string;
@@ -72,6 +74,8 @@ function makeMockScene(): MockScene {
       } catch { /* ignore */ }
     },
     dataset_ids: () => "[]",
+    dataset_order: () => "[]",
+    fit_camera_to_dataset_bounds: vi.fn(),
     available_layouts: () => "[]",
     dataset_volume_shape: () => new Uint32Array(0),
     export_presence: () => JSON.stringify(presence),
@@ -83,6 +87,26 @@ function makeMockScene(): MockScene {
   };
   return m;
 }
+
+describe("useSavedViewSync — bare snapshot framing", () => {
+  it("fits the first ordered dataset and invalidates both render lanes", async () => {
+    const scene = makeMockScene();
+    scene.dataset_order = () => JSON.stringify(["wide-collection", "other"]);
+    const outRef: Captured = { current: null };
+    const loop = makeMockLoop();
+    window.history.replaceState(null, "", "/");
+
+    await act(async () => {
+      render(<HookHarness scene={scene} outRef={outRef} loopRef={loop.ref} />);
+    });
+
+    await vi.waitFor(() => {
+      expect(scene.fit_camera_to_dataset_bounds).toHaveBeenCalledWith("wide-collection");
+    });
+    expect(loop.interactiveCalls).toContain("auto_fit_on_snapshot");
+    expect(loop.residencyCalls).toContain("auto_fit_on_snapshot");
+  });
+});
 
 function emptyView(): SavedView {
   return {

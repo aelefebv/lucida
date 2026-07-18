@@ -6,12 +6,17 @@ import type { DatasetManifest } from "../manifestTypes.ts";
 import type { DatasetState, ViewMode } from "../types.ts";
 import { dtypeMax } from "../types.ts";
 import { applyDocumentCommand } from "../applyAndSend.ts";
-import { guardedSceneCall } from "../sceneGuard.ts";
 import type { ViewportCommand } from "../commands.ts";
 import type { BlendMode, Colormap, RenderMode } from "../savedView/types.ts";
-import { invalidateDisplaySettings, requestRender } from "../invalidation.ts";
+import type { ViewportMutationOptions } from "../viewportCoordinator.ts";
+import { requestRender } from "../invalidation.ts";
 import { Axis } from "../axes.ts";
 import { eligibleLabelInfos, volumeBudgetPrefix } from "../pipeline/planning/labelRequests.ts";
+import {
+  resolveLabelSettings,
+  type LabelSettings,
+} from "../labelSettings.ts";
+import { intensityRangeKey } from "./useIntensityBatcher.ts";
 
 /** A per-label overlay row for the layer panel, keyed by manifest index. */
 interface PanelLabelRow {
@@ -48,7 +53,7 @@ interface PanelLabelRow {
  */
 function buildLabelRows(
   manifest: DatasetManifest,
-  rawLabelSettings: { visible: boolean; opacity: number }[] | undefined,
+  rawLabelSettings: LabelSettings[] | undefined,
   viewMode: ViewMode,
 ): PanelLabelRow[] {
   const labels = manifest.labels;
@@ -61,23 +66,21 @@ function buildLabelRows(
   );
   const is3d = viewMode === "3d";
   const currentEligible = is3d ? volumeEligible : sliceEligible;
-  const hasLabelSettings = !!rawLabelSettings && rawLabelSettings.length > 0;
-
   const rows: PanelLabelRow[] = [];
   for (let i = 0; i < labels.length; i++) {
     const drawableInEitherMode = sliceEligible.has(i) || volumeEligible.has(i);
     if (!drawableInEitherMode) continue; // drawable in neither → omitted
 
     const drawableNow = currentEligible.has(i);
-    const ls = rawLabelSettings?.[i];
+    const setting = resolveLabelSettings(rawLabelSettings, i);
     const row: PanelLabelRow = {
       index: i,
       name: labels[i].name,
       // Masks are opt-in: a label with no explicit setting defaults to HIDDEN; an
       // explicit flag is honored. With NO settings, every row starts hidden.
       // Mirrors `resolveVisibleLabels`.
-      visible: hasLabelSettings ? (ls?.visible ?? false) : false,
-      opacity: ls?.opacity ?? 0.5,
+      visible: setting.visible,
+      opacity: setting.opacity,
     };
     if (!drawableNow) {
       row.disabledReason = is3d
@@ -105,18 +108,6 @@ function buildLabelRows(
   return rows;
 }
 
-/** Apply a display-settings command and signal the change: the planner's
- *  settings cache is invalidated and the render loop (when mounted) is asked
- *  for a frame, in one composed intent so neither tap can be forgotten. */
-function applySettingsCommand(
-  scene: WasmScene,
-  cmd: ViewportCommand,
-  loop: RenderLoop | null,
-): void {
-  guardedSceneCall("apply_command", scene, () => scene.apply_command(JSON.stringify(cmd)));
-  invalidateDisplaySettings(loop);
-}
-
 function detailLevelOptions(ds: DatasetState | undefined): { level: number; label: string }[] {
   const multiscale = ds?.manifest.images[0]?.multiscale;
   if (!multiscale) return [];
@@ -142,7 +133,7 @@ interface RawDatasetSettings {
   blend_mode: string;
   render_mode?: string;
   channel_settings?: { visible: boolean; colormap: string; contrast_min: number; contrast_max: number; gamma: number; name?: string }[];
-  label_settings?: { visible: boolean; opacity: number }[];
+  label_settings?: LabelSettings[];
   channel_blend_mode?: string;
   detail_level_override?: number | null;
 }
@@ -186,7 +177,7 @@ export function buildLayerInfos(
   return layerOrder.slice().reverse().map((id) => {
     const settings = allSettings[id];
     const ds = datasets.get(id);
-    const dr = maps.dataRange.get(id) ?? null;
+    const dr = maps.dataRange.get(intensityRangeKey(id, currentC)) ?? null;
     const frMax = ds ? dtypeMax(ds.manifest.images[0].multiscale.data_type) : 65535;
 
     const chSettings = settings?.channel_settings?.[currentC];
@@ -226,11 +217,16 @@ export function buildLayerInfos(
   });
 }
 
-export interface BridgeCallbacks {
+export interface SceneMutationCallbacks {
   sendCommand: (json: string) => void;
-  emitPresence: () => void;
-  emitDatasetPresence: () => void;
-  breakFollow: () => void;
+  /** Delegates every local camera/view/display write to the host's one effect
+   * coordinator. Raw presence, follow, URL, and repaint callbacks are
+   * intentionally not exposed here, so a hook cannot assemble a partial
+   * side-effect sequence. */
+  mutateViewport: (
+    commands: ViewportCommand | readonly ViewportCommand[],
+    options: ViewportMutationOptions,
+  ) => boolean;
 }
 
 export interface DatasetCallbacks {
@@ -243,7 +239,7 @@ interface Params {
   loopRef: React.RefObject<RenderLoop | null>;
   selectedDatasetId: string | null;
   setSelectedDatasetId: React.Dispatch<React.SetStateAction<string | null>>;
-  bridgeCallbacksRef: React.RefObject<BridgeCallbacks>;
+  bridgeCallbacksRef: React.RefObject<SceneMutationCallbacks>;
   datasetCallbacksRef: React.RefObject<DatasetCallbacks>;
   datasetsVersion: number;
   remoteDocumentVersion: number;
@@ -289,7 +285,14 @@ export function useDatasetSettings({
   const cleanupLayerMaps = useCallback((id: string) => {
     setAutoContrastMap(prev => { const next = new Map(prev); next.delete(id); return next; });
     setFullRangeMap(prev => { const next = new Map(prev); next.delete(id); return next; });
-    setDataRangeMap(prev => { const next = new Map(prev); next.delete(id); return next; });
+    setDataRangeMap(prev => {
+      const next = new Map(prev);
+      const prefix = `${id}\u0000`;
+      for (const key of next.keys()) {
+        if (key.startsWith(prefix)) next.delete(key);
+      }
+      return next;
+    });
   }, []);
 
   const handleLayerSelect = useCallback((id: string) => {
@@ -308,79 +311,105 @@ export function useDatasetSettings({
     setExpandedLayerId(selectedDatasetId);
   }, [selectedDatasetId, expandedLayerId]);
 
+  // Every local display mutation crosses the same coordinator boundary as
+  // camera and dimension changes. Besides eliminating repeated partial
+  // side-effect bundles, this is the capture point for bounded local undo.
+  const mutateDisplay = useCallback((
+    command: ViewportCommand,
+    source: string,
+    label: string,
+    continuous = false,
+  ) => bridgeCallbacksRef.current.mutateViewport(command, {
+    source,
+    invalidation: "display",
+    publication: "dataset-presence",
+    history: continuous
+      ? { label, coalesceKey: source, coalesceWindowMs: 250 }
+      : { label },
+  }), [bridgeCallbacksRef]);
+
   const handleLayerSetVisible = useCallback((id: string, visible: boolean) => {
-    const scene = wasmSceneRef.current;
-    if (scene) {
-      bridgeCallbacksRef.current.breakFollow();
-      applySettingsCommand(scene, { type: "set_dataset_visible", dataset_id: id, visible }, loopRef.current);
-      bridgeCallbacksRef.current.emitDatasetPresence();
+    if (mutateDisplay(
+      { type: "set_dataset_visible", dataset_id: id, visible },
+      "dataset_visibility",
+      "layer visibility",
+    )) {
       setLayerSettingsVersion((v) => v + 1);
     }
-  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+  }, [mutateDisplay]);
 
   const handleLayerSetOpacity = useCallback((id: string, opacity: number) => {
-    const scene = wasmSceneRef.current;
-    if (scene) {
-      bridgeCallbacksRef.current.breakFollow();
-      applySettingsCommand(scene, { type: "set_dataset_opacity", dataset_id: id, opacity }, loopRef.current);
-      bridgeCallbacksRef.current.emitDatasetPresence();
+    if (mutateDisplay(
+      { type: "set_dataset_opacity", dataset_id: id, opacity },
+      "dataset_opacity",
+      "layer opacity",
+      true,
+    )) {
       setLayerSettingsVersion((v) => v + 1);
     }
-  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+  }, [mutateDisplay]);
 
   const handleLayerSetContrast = useCallback((id: string, min: number, max: number) => {
     const scene = wasmSceneRef.current;
     if (scene) {
-      bridgeCallbacksRef.current.breakFollow();
       const c = scene.c();
-      applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min, max }, loopRef.current);
-      bridgeCallbacksRef.current.emitDatasetPresence();
+      mutateDisplay(
+        { type: "set_channel_contrast", dataset_id: id, channel: c, min, max },
+        "dataset_contrast",
+        "contrast",
+        true,
+      );
     }
     setAutoContrastMap(prev => { const next = new Map(prev); next.set(id, false); return next; });
-  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+  }, [wasmSceneRef, mutateDisplay]);
 
   const handleLayerSetGamma = useCallback((id: string, gamma: number) => {
     const scene = wasmSceneRef.current;
     if (scene) {
-      bridgeCallbacksRef.current.breakFollow();
       const c = scene.c();
-      applySettingsCommand(scene, { type: "set_channel_gamma", dataset_id: id, channel: c, gamma }, loopRef.current);
-      bridgeCallbacksRef.current.emitDatasetPresence();
+      mutateDisplay(
+        { type: "set_channel_gamma", dataset_id: id, channel: c, gamma },
+        "dataset_gamma",
+        "gamma",
+        true,
+      );
       setLayerSettingsVersion((v) => v + 1);
     }
-  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+  }, [wasmSceneRef, mutateDisplay]);
 
   const handleLayerSetColormap = useCallback((id: string, colormap: Colormap) => {
     const scene = wasmSceneRef.current;
     if (scene) {
-      bridgeCallbacksRef.current.breakFollow();
       const c = scene.c();
-      applySettingsCommand(scene, { type: "set_channel_colormap", dataset_id: id, channel: c, colormap }, loopRef.current);
-      bridgeCallbacksRef.current.emitDatasetPresence();
+      mutateDisplay(
+        { type: "set_channel_colormap", dataset_id: id, channel: c, colormap },
+        "dataset_colormap",
+        "colormap",
+      );
       setLayerSettingsVersion((v) => v + 1);
     }
-  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+  }, [wasmSceneRef, mutateDisplay]);
 
   // Channel-specific handlers for multi-channel sublayer controls
   const handleChannelSetVisible = useCallback((id: string, channel: number, visible: boolean) => {
-    const scene = wasmSceneRef.current;
-    if (scene) {
-      bridgeCallbacksRef.current.breakFollow();
-      applySettingsCommand(scene, { type: "set_channel_visible", dataset_id: id, channel, visible }, loopRef.current);
-      bridgeCallbacksRef.current.emitDatasetPresence();
+    if (mutateDisplay(
+      { type: "set_channel_visible", dataset_id: id, channel, visible },
+      "channel_visibility",
+      "channel visibility",
+    )) {
       setLayerSettingsVersion((v) => v + 1);
     }
-  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+  }, [mutateDisplay]);
 
   const handleChannelSetColormap = useCallback((id: string, channel: number, colormap: Colormap) => {
-    const scene = wasmSceneRef.current;
-    if (scene) {
-      bridgeCallbacksRef.current.breakFollow();
-      applySettingsCommand(scene, { type: "set_channel_colormap", dataset_id: id, channel, colormap }, loopRef.current);
-      bridgeCallbacksRef.current.emitDatasetPresence();
+    if (mutateDisplay(
+      { type: "set_channel_colormap", dataset_id: id, channel, colormap },
+      "channel_colormap",
+      "channel colormap",
+    )) {
       setLayerSettingsVersion((v) => v + 1);
     }
-  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+  }, [mutateDisplay]);
 
   // Set (or clear) a user display-name override for one channel. A
   // viewport/display command exactly like handleChannelSetColormap — applies
@@ -389,44 +418,46 @@ export function useDatasetSettings({
   // override, falling the label back to the omero name / `Ch N`. Whitespace is
   // trimmed before this is called; the caller passes null for a blank value.
   const handleChannelSetName = useCallback((id: string, channel: number, name: string | null) => {
-    const scene = wasmSceneRef.current;
-    if (scene) {
-      bridgeCallbacksRef.current.breakFollow();
-      applySettingsCommand(scene, { type: "set_channel_name", dataset_id: id, channel, name }, loopRef.current);
-      bridgeCallbacksRef.current.emitDatasetPresence();
+    if (mutateDisplay(
+      { type: "set_channel_name", dataset_id: id, channel, name },
+      "channel_name",
+      "channel name",
+    )) {
       setLayerSettingsVersion((v) => v + 1);
     }
-  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+  }, [mutateDisplay]);
 
   const handleChannelSetContrast = useCallback((id: string, channel: number, min: number, max: number) => {
-    const scene = wasmSceneRef.current;
-    if (scene) {
-      bridgeCallbacksRef.current.breakFollow();
-      applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel, min, max }, loopRef.current);
-      bridgeCallbacksRef.current.emitDatasetPresence();
+    if (mutateDisplay(
+      { type: "set_channel_contrast", dataset_id: id, channel, min, max },
+      "channel_contrast",
+      "channel contrast",
+      true,
+    )) {
       setLayerSettingsVersion((v) => v + 1);
     }
-  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+  }, [mutateDisplay]);
 
   const handleChannelSetGamma = useCallback((id: string, channel: number, gamma: number) => {
-    const scene = wasmSceneRef.current;
-    if (scene) {
-      bridgeCallbacksRef.current.breakFollow();
-      applySettingsCommand(scene, { type: "set_channel_gamma", dataset_id: id, channel, gamma }, loopRef.current);
-      bridgeCallbacksRef.current.emitDatasetPresence();
+    if (mutateDisplay(
+      { type: "set_channel_gamma", dataset_id: id, channel, gamma },
+      "channel_gamma",
+      "channel gamma",
+      true,
+    )) {
       setLayerSettingsVersion((v) => v + 1);
     }
-  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+  }, [mutateDisplay]);
 
   const handleChannelSetBlendMode = useCallback((id: string, blendMode: BlendMode) => {
-    const scene = wasmSceneRef.current;
-    if (scene) {
-      bridgeCallbacksRef.current.breakFollow();
-      applySettingsCommand(scene, { type: "set_channel_blend_mode", dataset_id: id, blend_mode: blendMode }, loopRef.current);
-      bridgeCallbacksRef.current.emitDatasetPresence();
+    if (mutateDisplay(
+      { type: "set_channel_blend_mode", dataset_id: id, blend_mode: blendMode },
+      "channel_blend_mode",
+      "channel blend mode",
+    )) {
       setLayerSettingsVersion((v) => v + 1);
     }
-  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+  }, [mutateDisplay]);
 
   // Per-label overlay handlers. Mirror handleChannelSetVisible exactly (a
   // viewport/display command — applies locally, breaks follow, marks dirty,
@@ -434,68 +465,71 @@ export function useDatasetSettings({
   // single label overlay. Toggling / adjusting a label NEVER reframes the
   // camera (view-state only), mirroring the per-channel behavior.
   const handleLabelSetVisible = useCallback((id: string, label: number, visible: boolean) => {
-    const scene = wasmSceneRef.current;
-    if (scene) {
-      bridgeCallbacksRef.current.breakFollow();
-      applySettingsCommand(scene, { type: "set_label_visible", dataset_id: id, label, visible }, loopRef.current);
-      bridgeCallbacksRef.current.emitDatasetPresence();
+    if (mutateDisplay(
+      { type: "set_label_visible", dataset_id: id, label, visible },
+      "label_visibility",
+      "label visibility",
+    )) {
       setLayerSettingsVersion((v) => v + 1);
     }
-  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+  }, [mutateDisplay]);
 
   const handleLabelSetOpacity = useCallback((id: string, label: number, opacity: number) => {
-    const scene = wasmSceneRef.current;
-    if (scene) {
-      bridgeCallbacksRef.current.breakFollow();
-      applySettingsCommand(scene, { type: "set_label_opacity", dataset_id: id, label, opacity }, loopRef.current);
-      bridgeCallbacksRef.current.emitDatasetPresence();
+    if (mutateDisplay(
+      { type: "set_label_opacity", dataset_id: id, label, opacity },
+      "label_opacity",
+      "label opacity",
+      true,
+    )) {
       setLayerSettingsVersion((v) => v + 1);
     }
-  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+  }, [mutateDisplay]);
 
   const handleLayerSetBlendMode = useCallback((id: string, mode: BlendMode) => {
-    const scene = wasmSceneRef.current;
-    if (scene) {
-      bridgeCallbacksRef.current.breakFollow();
-      applySettingsCommand(scene, { type: "set_dataset_blend_mode", dataset_id: id, blend_mode: mode }, loopRef.current);
-      bridgeCallbacksRef.current.emitDatasetPresence();
+    if (mutateDisplay(
+      { type: "set_dataset_blend_mode", dataset_id: id, blend_mode: mode },
+      "dataset_blend_mode",
+      "layer blend mode",
+    )) {
       setLayerSettingsVersion((v) => v + 1);
     }
-  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+  }, [mutateDisplay]);
 
   const handleLayerSetRenderMode = useCallback((id: string, mode: RenderMode) => {
-    const scene = wasmSceneRef.current;
-    if (scene) {
-      bridgeCallbacksRef.current.breakFollow();
-      applySettingsCommand(scene, { type: "set_dataset_render_mode", dataset_id: id, render_mode: mode }, loopRef.current);
-      bridgeCallbacksRef.current.emitDatasetPresence();
+    if (mutateDisplay(
+      { type: "set_dataset_render_mode", dataset_id: id, render_mode: mode },
+      "dataset_render_mode",
+      "render mode",
+    )) {
       setLayerSettingsVersion((v) => v + 1);
     }
-  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+  }, [mutateDisplay]);
 
   const handleLayerSetDetailLevelOverride = useCallback((id: string, level: number | null) => {
-    const scene = wasmSceneRef.current;
-    if (scene) {
-      bridgeCallbacksRef.current.breakFollow();
-      applySettingsCommand(scene, { type: "set_dataset_detail_level_override", dataset_id: id, level }, loopRef.current);
-      bridgeCallbacksRef.current.emitDatasetPresence();
+    if (mutateDisplay(
+      { type: "set_dataset_detail_level_override", dataset_id: id, level },
+      "dataset_detail_level",
+      "detail level",
+    )) {
       setLayerSettingsVersion((v) => v + 1);
     }
-  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+  }, [mutateDisplay]);
 
   const handleLayerAutoContrast = useCallback((id: string) => {
-    const dr = dataRangeMap.get(id);
-    if (dr) {
-      const scene = wasmSceneRef.current;
-      if (scene) {
-        bridgeCallbacksRef.current.breakFollow();
-        const c = scene.c();
-        applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min: dr.min, max: dr.max }, loopRef.current);
-        bridgeCallbacksRef.current.emitDatasetPresence();
+    const scene = wasmSceneRef.current;
+    if (scene) {
+      const c = scene.c();
+      const dr = dataRangeMap.get(intensityRangeKey(id, c));
+      if (dr) {
+        mutateDisplay(
+          { type: "set_channel_contrast", dataset_id: id, channel: c, min: dr.min, max: dr.max },
+          "auto_contrast",
+          "auto contrast",
+        );
       }
     }
     setAutoContrastMap(prev => { const next = new Map(prev); next.set(id, true); return next; });
-  }, [dataRangeMap, wasmSceneRef, loopRef, bridgeCallbacksRef]);
+  }, [dataRangeMap, wasmSceneRef, mutateDisplay]);
 
   const handleLayerAutoContrastToggle = useCallback((id: string) => {
     setAutoContrastMap(prev => {
@@ -503,20 +537,22 @@ export function useDatasetSettings({
       const wasAuto = prev.get(id) ?? true;
       next.set(id, !wasAuto);
       if (!wasAuto) {
-        const dr = dataRangeMap.get(id);
-        if (dr) {
-          const scene = wasmSceneRef.current;
-          if (scene) {
-            bridgeCallbacksRef.current.breakFollow();
-            const c = scene.c();
-            applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min: dr.min, max: dr.max }, loopRef.current);
-            bridgeCallbacksRef.current.emitDatasetPresence();
+        const scene = wasmSceneRef.current;
+        if (scene) {
+          const c = scene.c();
+          const dr = dataRangeMap.get(intensityRangeKey(id, c));
+          if (dr) {
+            mutateDisplay(
+              { type: "set_channel_contrast", dataset_id: id, channel: c, min: dr.min, max: dr.max },
+              "auto_contrast_toggle",
+              "auto contrast",
+            );
           }
         }
       }
       return next;
     });
-  }, [dataRangeMap, wasmSceneRef, loopRef, bridgeCallbacksRef]);
+  }, [dataRangeMap, wasmSceneRef, mutateDisplay]);
 
   const handleLayerFullRangeToggle = useCallback((id: string) => {
     setFullRangeMap(prev => {
@@ -525,17 +561,24 @@ export function useDatasetSettings({
       next.set(id, !wasFull);
       const scene = wasmSceneRef.current;
       if (scene) {
-        bridgeCallbacksRef.current.breakFollow();
         const c = scene.c();
         if (!wasFull) {
           const ds = datasetsRef.current.get(id);
           const frMax = ds ? dtypeMax(ds.manifest.images[0].multiscale.data_type) : 65535;
-          applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min: 0, max: frMax }, loopRef.current);
+          mutateDisplay(
+            { type: "set_channel_contrast", dataset_id: id, channel: c, min: 0, max: frMax },
+            "full_range_toggle",
+            "full range",
+          );
           setAutoContrastMap(p => { const n = new Map(p); n.set(id, false); return n; });
         } else {
-          const dr = dataRangeMap.get(id);
+          const dr = dataRangeMap.get(intensityRangeKey(id, c));
           if (dr) {
-            applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min: dr.min, max: dr.max }, loopRef.current);
+            mutateDisplay(
+              { type: "set_channel_contrast", dataset_id: id, channel: c, min: dr.min, max: dr.max },
+              "full_range_toggle",
+              "full range",
+            );
           } else {
             // No recorded data range to return to: the scene is unchanged,
             // but keep the frame this toggle has always requested so the
@@ -544,26 +587,27 @@ export function useDatasetSettings({
           }
           setAutoContrastMap(p => { const n = new Map(p); n.set(id, true); return n; });
         }
-        bridgeCallbacksRef.current.emitDatasetPresence();
       }
       return next;
     });
-  }, [dataRangeMap, wasmSceneRef, datasetsRef, loopRef, bridgeCallbacksRef]);
+  }, [dataRangeMap, wasmSceneRef, datasetsRef, loopRef, mutateDisplay]);
 
   const handleLayerMove = useCallback((id: string, direction: "up" | "down") => {
     const scene = wasmSceneRef.current;
     if (!scene) return;
-    bridgeCallbacksRef.current.breakFollow();
     const order: string[] = JSON.parse(scene.dataset_order());
     const idx = order.indexOf(id);
     if (idx < 0) return;
     const swapIdx = direction === "up" ? idx + 1 : idx - 1;
     if (swapIdx < 0 || swapIdx >= order.length) return;
     [order[idx], order[swapIdx]] = [order[swapIdx], order[idx]];
-    applySettingsCommand(scene, { type: "set_dataset_order", order }, loopRef.current);
-    bridgeCallbacksRef.current.emitDatasetPresence();
+    mutateDisplay(
+      { type: "set_dataset_order", order },
+      "dataset_order",
+      "layer order",
+    );
     setLayerSettingsVersion((v) => v + 1);
-  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+  }, [wasmSceneRef, mutateDisplay]);
 
   const handleRemoveLayer = useCallback((id: string) => {
     if (

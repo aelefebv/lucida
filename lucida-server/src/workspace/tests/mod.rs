@@ -5,7 +5,8 @@ use axum::Router;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
 use chrono::Utc;
-use lucida_content::DatasetId;
+use lucida_content::url::{SourceIdentity, SourceRevision, SourceVersion};
+use lucida_content::{DatasetId, DatasetManifest};
 use lucida_core::auth_principal::AuthPrincipal;
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::ServerMessage;
@@ -13,10 +14,12 @@ use lucida_core::saved_view::SavedView;
 use lucida_core::scene::DocumentState;
 use serde_json::json;
 
-use crate::{BroadcastItem, ProxyConfig};
+use crate::DatasetRuntimeConfig;
+use crate::outbox::BroadcastKind;
 
 use super::manager::{
-    MAX_DATASET_NAME_CHARS, ensure_saved_view_readable, saved_view_transition_allowed,
+    AccessMutationTestHook, MAX_DATASET_NAME_CHARS, ensure_saved_view_readable,
+    saved_view_transition_allowed,
 };
 use super::store::normalize_email;
 
@@ -25,6 +28,13 @@ use axum::http::{Method, Request};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tower::ServiceExt;
+
+use crate::binding::{ChunkResolver, ServerBinding};
+use crate::generated_coarse::{DerivedChunkCache, GeneratedCoarseService};
+use lucida_protocol::{DatasetOpened, FetchSource, ProxiedFetchDescriptor};
+use lucida_store::cache::CachedStore;
+use lucida_store::import_types::ServerBindingSeed;
+use object_store::memory::InMemory;
 
 use crate::auth::{
     AuthConfig, AuthMode, BearerToken, BearerTokenStore, LoginSessionStore, MemoryBearerTokenStore,
@@ -46,6 +56,7 @@ pub fn principal(email: &str, is_admin: bool) -> AuthPrincipal {
         display_name: email.to_string(),
         picture_url: None,
         is_admin,
+        auth_epoch: 0,
     }
 }
 
@@ -68,6 +79,34 @@ async fn fresh_store_with_pool() -> (SqliteWorkspaceStore, sqlx::sqlite::SqliteP
         .unwrap();
     MIGRATOR.run(&pool).await.unwrap();
     (SqliteWorkspaceStore::new(pool.clone()), pool)
+}
+
+fn inert_server_binding(source_url: &str, manifest: DatasetManifest) -> ServerBinding {
+    let store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
+    let cache = Arc::new(CachedStore::new(Arc::clone(&store), 1024));
+    let resolver = Arc::new(ChunkResolver::new(&ServerBindingSeed { images: vec![] }));
+    let derived_chunks = Arc::new(DerivedChunkCache::default());
+    ServerBinding {
+        source: test_source(source_url),
+        store,
+        resolver,
+        cache,
+        dataset_opened: DatasetOpened {
+            manifest,
+            fetch: FetchSource::Proxied(ProxiedFetchDescriptor { images: vec![] }),
+            opener_client_id: None,
+        },
+        derived_chunks: Arc::clone(&derived_chunks),
+        generated_service: Arc::new(GeneratedCoarseService::inert(derived_chunks)),
+        import_warnings: vec![],
+    }
+}
+
+fn test_source(url: &str) -> SourceVersion {
+    SourceVersion::new(
+        SourceIdentity::parse(url).unwrap(),
+        SourceRevision::from_bytes(b"workspace-test-revision"),
+    )
 }
 
 fn idle_eviction_config() -> WorkspaceRuntimeConfig {
@@ -150,8 +189,7 @@ async fn seed_workspace_with_dataset(
         .persist_dataset_opened(
             &workspace.id,
             &workspace_dataset_id,
-            "ds_source",
-            "file:///data/original.zarr",
+            &test_source("file:///data/original.zarr"),
             name,
             &owner.email,
             1,
@@ -169,7 +207,7 @@ async fn open_dataset_into(
     store: &SqliteWorkspaceStore,
     workspace_id: &str,
     owner: &AuthPrincipal,
-    source_id: &str,
+    _source_id: &str,
     url: &str,
     display_name: &str,
     seq: u64,
@@ -199,8 +237,7 @@ async fn open_dataset_into(
         .persist_dataset_opened(
             workspace_id,
             &wds_id,
-            source_id,
-            url,
+            &test_source(url),
             display_name,
             &owner.email,
             seq,
@@ -364,7 +401,7 @@ async fn seed_rich_source(
 }
 
 fn manager_for(store: &SqliteWorkspaceStore) -> WorkspaceManager {
-    WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults())
+    WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults())
 }
 
 /// Seed a pin whose captured author view embeds SOURCE dataset *URLs* in

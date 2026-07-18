@@ -1,5 +1,6 @@
 /** WebGPU renderer for peer cursor crosshairs and rays. */
 import shaderSource from "./cursors.wgsl?raw";
+import type { GpuResourceBudget, TrackedGpuResource } from "./gpuResourceBudget.ts";
 
 // Uniform layout: view_proj(64) + params(16) + camera_2d(16) + extra(16) = 112 bytes
 const UNIFORM_SIZE = 112;
@@ -19,9 +20,14 @@ export class CursorRenderer {
   private bindGroup3D: GPUBindGroup | null = null;
   private cursorCount = 0;
   private dummyDepthTex: GPUTexture;
+  private uniformAllocation!: TrackedGpuResource<GPUBuffer>;
+  private cursorAllocation!: TrackedGpuResource<GPUBuffer>;
+  private dummyDepthAllocation!: TrackedGpuResource<GPUTexture>;
+  private readonly resources: GpuResourceBudget;
 
-  constructor(device: GPUDevice, canvasFormat: GPUTextureFormat) {
+  constructor(device: GPUDevice, canvasFormat: GPUTextureFormat, resources: GpuResourceBudget) {
     this.device = device;
+    this.resources = resources;
 
     const shaderModule = device.createShaderModule({ code: shaderSource });
 
@@ -62,22 +68,38 @@ export class CursorRenderer {
       primitive: { topology: "triangle-list" },
     });
 
-    this.uniformBuffer = device.createBuffer({
-      size: UNIFORM_SIZE,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
+    try {
+      this.uniformAllocation = resources.createBuffer(
+        device,
+        { key: "renderer:cursor:uniform", kind: "buffer" },
+        { size: UNIFORM_SIZE, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST },
+      );
+      this.uniformBuffer = this.uniformAllocation.resource;
 
-    this.cursorBuffer = device.createBuffer({
-      size: MAX_CURSORS * FLOATS_PER_CURSOR * 4,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
+      this.cursorAllocation = resources.createBuffer(
+        device,
+        { key: "renderer:cursor:data", kind: "buffer" },
+        {
+          size: MAX_CURSORS * FLOATS_PER_CURSOR * 4,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        },
+      );
+      this.cursorBuffer = this.cursorAllocation.resource;
 
-    // 1x1 dummy depth texture for 2D mode (depth sampling not used but binding required)
-    this.dummyDepthTex = device.createTexture({
-      size: [1, 1],
-      format: "depth24plus",
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
-    });
+      this.dummyDepthAllocation = resources.createTexture(
+        device,
+        { key: "renderer:cursor:dummy-depth", kind: "depth" },
+        {
+          size: [1, 1],
+          format: "depth24plus",
+          usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
+        },
+      );
+      this.dummyDepthTex = this.dummyDepthAllocation.resource;
+    } catch (error) {
+      resources.destroyOwnerPrefix("renderer:cursor:");
+      throw error;
+    }
 
     this.bindGroup2D = device.createBindGroup({
       layout: this.bindGroupLayout2D,
@@ -183,5 +205,9 @@ export class CursorRenderer {
     pass.setBindGroup(0, this.bindGroup3D);
     pass.draw(VERTS_PER_CURSOR, this.cursorCount);
     pass.end();
+  }
+
+  destroy(): void {
+    this.resources.destroyOwnerPrefix("renderer:cursor:");
   }
 }

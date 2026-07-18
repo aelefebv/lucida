@@ -1,8 +1,9 @@
 /** Slice render path: upload chunks + render multi-pass. */
 import { Axis } from "./axes.ts";
 import { labelFootprint } from "./renderer/labelLayout.ts";
-import { resolveVisibleLabels, type LabelViewSetting } from "./pipeline/planning/labelRequests.ts";
-import type { SliceLayerParams } from "./renderer/workerProtocol.ts";
+import { resolveVisibleLabels } from "./pipeline/planning/labelRequests.ts";
+import type { LabelSettings } from "./labelSettings.ts";
+import type { SliceAggregateParams, SliceLayerParams } from "./renderer/workerProtocol.ts";
 import type { DatasetManifest } from "./manifestTypes.ts";
 import type { TickContext } from "./renderLoopTypes.ts";
 import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./pipeline/upload/constants.ts";
@@ -12,13 +13,50 @@ import type { SceneEpochs } from "./pipeline/epochs.ts";
 import type { TickCoordinator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/tickCoordinator.ts";
 import type { Uploader } from "./pipeline/upload/uploader.ts";
 import { debugStats } from "./debug/debugStats.ts";
+import {
+  createMemberPlacementAccessor,
+  type MemberPlacementAccessor,
+} from "./memberPlacement.ts";
 
-export type SliceState = Record<string, never>;
+interface AggregateEmissionCache {
+  /**
+   * Geometry is valid for exactly one roster + descriptor-index identity.
+   * Weak keys let superseded planner snapshots reclaim their potentially
+   * large quad buffers without an explicit sweep.
+   */
+  byRoster: WeakMap<
+    MemberRosterEntry[],
+    WeakMap<Map<string, number>, Map<string, {
+      basisKey: string;
+      /** Maximal zoom band whose aggregate/individual partition is stable. */
+      zoomBand: readonly [minInclusive: number, maxExclusive: number];
+      layers: SliceLayerParams[];
+    }>>
+  >;
+  namespace: number;
+  nextId: number;
+  revision: number;
+}
 
-export function createSliceState(): SliceState { return {}; }
+let nextAggregateCacheNamespace = 1;
+
+export interface SliceState {
+  aggregateEmissionCache: AggregateEmissionCache;
+}
+
+export function createSliceState(): SliceState {
+  return {
+    aggregateEmissionCache: {
+      byRoster: new WeakMap(),
+      namespace: nextAggregateCacheNamespace++,
+      nextId: 1,
+      revision: 0,
+    },
+  };
+}
 
 /**
- * Device-pixel diagonal below which a member's layer is folded into its
+ * CSS-pixel diagonal below which a member's layer is folded into its
  * dataset's aggregate pass instead of getting an individual render
  * pass. At overview zoom on a wide collection every member is far below
  * this, so the whole collection renders in one instanced pass; at
@@ -42,8 +80,8 @@ export const MAX_INDIVIDUAL_MEMBER_PASSES = 256;
  * pass budget is the primary frame-cost bound; this is the bounded
  * fallback for very large backings (high-DPR fullscreen), where the
  * target is rendered at reduced resolution and upscaled by the browser
- * so a frame always presents. Planning keeps the full device-pixel
- * viewport (mirrors the volume path's renderScale split).
+ * so a frame always presents. Planning keeps the logical CSS-pixel viewport;
+ * DPR and this cap are applied only at the renderer boundary.
  */
 export const MAX_SLICE_BACKING_PIXELS = 3840 * 2160;
 
@@ -70,8 +108,18 @@ export interface MemberLayerInput {
   /** Fallback footprint for members without their own `dataW`/`dataH`. */
   fullResWidth: number;
   fullResHeight: number;
-  /** Device pixels per voxel at the render backing resolution. */
+  /** Logical CSS pixels per voxel (the persisted/shared 2D camera zoom). */
   zoom: number;
+  /**
+   * Optional render-loop cache. Production supplies this; focused pure unit
+   * tests may omit it. Roster + descriptor-map identity carry residency and
+   * active-set changes, while `epochKey` carries placement/settings changes.
+   */
+  cache?: {
+    state: SliceState;
+    datasetId: string;
+    epochKey: string;
+  };
 }
 
 /** Internal classification record for one renderable member. */
@@ -93,7 +141,7 @@ const AGGREGATE_QUAD_STRIDE_BYTES = 32;
  * member-pass budget.
  *
  * Members whose on-screen diagonal is at least
- * {@link MEMBER_AGGREGATE_MAX_DIAG_PX} device pixels keep individual
+ * {@link MEMBER_AGGREGATE_MAX_DIAG_PX} CSS pixels keep individual
  * layers, in roster order, with the standard per-member layer shape.
  * Smaller members — and, past {@link MAX_INDIVIDUAL_MEMBER_PASSES}, the
  * smallest of the rest — fold into ONE aggregate layer covering their
@@ -110,7 +158,54 @@ export function pushMemberLayers(
     fullResWidth, fullResHeight, zoom,
   } = input;
 
+  let cachedLayers: SliceLayerParams[] | undefined;
+  let cacheBucket: Map<string, {
+    basisKey: string;
+    zoomBand: readonly [minInclusive: number, maxExclusive: number];
+    layers: SliceLayerParams[];
+  }> | undefined;
+  let cacheSlot = "";
+  let basisKey = "";
+  if (input.cache) {
+    const cache = input.cache.state.aggregateEmissionCache;
+    let byIndex = cache.byRoster.get(members);
+    if (!byIndex) {
+      byIndex = new WeakMap();
+      cache.byRoster.set(members, byIndex);
+    }
+    cacheBucket = byIndex.get(indexByMember);
+    if (!cacheBucket) {
+      cacheBucket = new Map();
+      byIndex.set(indexByMember, cacheBucket);
+    }
+    cacheSlot = `${input.cache.datasetId}|${channel ?? "single"}`;
+    basisKey = [
+      cache.revision,
+      input.cache.epochKey,
+      channel ?? "single",
+      blendMode,
+      fullResWidth,
+      fullResHeight,
+    ].join("|");
+    const cached = cacheBucket.get(cacheSlot);
+    if (
+      cached?.basisKey === basisKey &&
+      zoom >= cached.zoomBand[0] &&
+      zoom < cached.zoomBand[1]
+    ) {
+      cachedLayers = cached.layers;
+    }
+  }
+  if (cachedLayers) {
+    layers.push(...cachedLayers);
+    return;
+  }
+
+  const emissionStart = layers.length;
+
   const candidates: MemberLayerCandidate[] = [];
+  let zoomBandMin = 0;
+  let zoomBandMax = Infinity;
   for (const m of members) {
     // Synthesized aggregate-footprint entries carry their own
     // dataW/dataH; normal tile entries use the dataset's image dims.
@@ -124,13 +219,24 @@ export function pushMemberLayers(
     const memberKey = channel === null ? m.imageId : compositeKey(m.imageId, channel);
     const entityIndex = indexByMember.get(memberKey);
     if (entityIndex === undefined) continue;
+    const diagonalVoxels = Math.hypot(dataW, dataH);
+    const diagPx = diagonalVoxels * zoom;
+    const thresholdZoom = MEMBER_AGGREGATE_MAX_DIAG_PX / diagonalVoxels;
+    // Aggregation membership changes only when a member crosses this exact
+    // threshold. Cache the whole stable zoom interval, not the current zoom,
+    // so a continuous gesture reuses O(N) geometry between real crossings.
+    if (diagPx >= MEMBER_AGGREGATE_MAX_DIAG_PX) {
+      zoomBandMin = Math.max(zoomBandMin, thresholdZoom);
+    } else {
+      zoomBandMax = Math.min(zoomBandMax, thresholdZoom);
+    }
     candidates.push({
       member: m,
       memberKey,
       entityIndex,
       dataW,
       dataH,
-      diagPx: Math.hypot(dataW, dataH) * zoom,
+      diagPx,
       order: candidates.length,
     });
   }
@@ -201,6 +307,23 @@ export function pushMemberLayers(
       // INDIVIDUAL member composites beneath it regardless of roster
       // position — the accepted residual of folding into one pass
       // (batched members are the smallest on screen).
+      const aggregate: SliceAggregateParams = input.cache
+        ? {
+            poolMemberId: batched[0].memberKey,
+            count: batched.length,
+            quads,
+            cacheKey:
+              `slice-aggregate-${input.cache.state.aggregateEmissionCache.namespace}-` +
+              `${input.cache.state.aggregateEmissionCache.nextId++}`,
+            cacheOwnerKey:
+              `${input.cache.datasetId}|${channel === null ? "single" : `ch${channel}`}`,
+            ownerDatasetId: input.cache.datasetId,
+          }
+        : {
+            poolMemberId: batched[0].memberKey,
+            count: batched.length,
+            quads,
+          };
       layers.push({
         datasetId: batched[0].memberKey,
         dataW: extW,
@@ -211,11 +334,7 @@ export function pushMemberLayers(
         // Informational for an aggregate layer — each quad carries its
         // own descriptor index in `quads`.
         entityIndex: batched[0].entityIndex,
-        aggregate: {
-          poolMemberId: batched[0].memberKey,
-          count: batched.length,
-          quads,
-        },
+        aggregate,
       });
     } else {
       // Defensive only: zero-extent members are culled at candidate
@@ -237,6 +356,16 @@ export function pushMemberLayers(
       offsetY: c.member.position[1],
       entityId: c.member.entityId,
       entityIndex: c.entityIndex,
+    });
+  }
+
+  if (cacheBucket) {
+    // One entry per dataset/channel slot. A continuous zoom gesture replaces
+    // the prior geometry instead of retaining one wide buffer per zoom value.
+    cacheBucket.set(cacheSlot, {
+      basisKey,
+      zoomBand: [zoomBandMin, zoomBandMax],
+      layers: layers.slice(emissionStart),
     });
   }
 }
@@ -264,9 +393,8 @@ export function pushMemberLayers(
 export function pushLabelLayers(
   layers: SliceLayerParams[],
   manifest: DatasetManifest,
-  members: MemberRosterEntry[],
-  labelSettings?: LabelViewSetting[],
-  memberPositions?: Record<string, [number, number]>,
+  placement: MemberPlacementAccessor,
+  labelSettings?: LabelSettings[],
 ): void {
   for (const resolved of resolveVisibleLabels(manifest, labelSettings)) {
     const { label, source, opacity } = resolved;
@@ -275,14 +403,12 @@ export function pushLabelLayers(
     const { dataW, dataH } = labelFootprint(sourceLevel0, labelLevel0);
     // Tiles can be offset within a collection/layout; place the overlay at the
     // source member's position so it lands on the image it annotates. The
-    // source tile is frequently ABSENT from the active-set roster — in a collection
-    // a whole group renders as a single proxy, and off-view tiles aren't active
-    // at all — so fall back to the scene's authoritative per-member layout
+    // source tile can be absent from the active-set roster when it is off-view,
+    // so fall back to the scene's authoritative per-member layout
     // position (keyed by the source ENTITY id, the same space as the roster's
     // positions). Falling back to the origin instead would stack every
     // off-roster label on the first group (the bug this repairs).
-    const sourceMember = members.find((m) => m.imageId === label.source_image_id);
-    const position = sourceMember?.position ?? memberPositions?.[source.owner] ?? [0, 0];
+    const position = placement.position2d(label.source_image_id, source.owner);
     layers.push({
       datasetId: label.image.image_id,
       dataW,
@@ -301,6 +427,7 @@ export function pushLabelLayers(
 /** Result of the plan+fetch phase, passed to the upload+render phase. */
 interface SlicePlanResult {
   memberRoster: Map<string, MemberRosterEntry[]>;
+  memberPositionsByDataset: Map<string, Record<string, [number, number]>>;
   settings: SceneSettings;
   vpCx: number;
   vpCy: number;
@@ -322,6 +449,7 @@ function uploadAndRenderSlice(
   sliceC: number,
   planResult: SlicePlanResult,
   shouldRender: boolean = true,
+  sliceState?: SliceState,
 ): boolean {
   const { scene, client, canvas, datasets } = ctx;
   const { memberRoster, settings, multiChannel, entityIndexByDataset } = planResult;
@@ -347,13 +475,25 @@ function uploadAndRenderSlice(
   if (!shouldRender) return budgetExhausted;
 
   const { layerOrder, allSettings } = settings;
-  const currentZoom = scene.zoom() * backingScale;
+  // Shared camera zoom is CSS px/world-unit. Convert it to backing pixels only
+  // at the renderer seam. Pass partitioning stays logical so DPR cannot alter
+  // which collection members are batched and therefore cannot alter content.
+  const logicalZoom = scene.zoom();
+  const renderZoom = logicalZoom * dpr * backingScale;
   const centerArr = scene.center();
   const cx = centerArr[0];
   const cy = centerArr[1];
 
   const layers: SliceLayerParams[] = [];
   const passesByDataset: Record<string, number> = {};
+  // View is intentionally excluded: panning changes the camera but not the
+  // roster geometry. A new roster/index object still invalidates via the weak
+  // identity keys when planning changes which members are renderable.
+  const aggregateEpochKey = [
+    planResult.epochs.content,
+    planResult.epochs.layout,
+    planResult.epochs.selection,
+  ].join("|");
   for (const dsId of layerOrder) {
     const layersBefore = layers.length;
     const ds = datasets.get(dsId);
@@ -384,7 +524,12 @@ function uploadAndRenderSlice(
           blendMode: channelBlend,
           fullResWidth,
           fullResHeight,
-          zoom: currentZoom,
+          zoom: logicalZoom,
+          cache: sliceState ? {
+            state: sliceState,
+            datasetId: dsId,
+            epochKey: aggregateEpochKey,
+          } : undefined,
         });
       }
     } else {
@@ -397,23 +542,29 @@ function uploadAndRenderSlice(
         blendMode: dsSettings.blend_mode as "alpha" | "additive" | "max",
         fullResWidth,
         fullResHeight,
-        zoom: currentZoom,
+        zoom: logicalZoom,
+        cache: sliceState ? {
+          state: sliceState,
+          datasetId: dsId,
+          epochKey: aggregateEpochKey,
+        } : undefined,
       });
     }
     // Categorical label overlays, composited on top of this dataset's
     // intensity layers. Honors the per-label visible set + opacity; never
     // affects camera/bounds. A label's source tile is often not in the active
-    // roster (collection groups proxy; off-view tiles), so hand the scene's full
-    // per-member position map (entity id -> [x, y]) as the placement fallback.
-    let labelMemberPositions: Record<string, [number, number]> | undefined;
-    if (ds.manifest.labels && ds.manifest.labels.length > 0) {
-      try {
-        labelMemberPositions = JSON.parse(scene.member_positions(dsId)) as Record<string, [number, number]>;
-      } catch {
-        labelMemberPositions = undefined;
-      }
-    }
-    pushLabelLayers(layers, ds.manifest, members, dsSettings.label_settings, labelMemberPositions);
+    // roster (for example, off-view tiles), so use the same placement policy
+    // as the volume path with the coordinator's already-parsed layout map.
+    const labelPlacement = createMemberPlacementAccessor({
+      members,
+      positions: planResult.memberPositionsByDataset.get(dsId),
+    });
+    pushLabelLayers(
+      layers,
+      ds.manifest,
+      labelPlacement,
+      dsSettings.label_settings,
+    );
 
     const added = layers.length - layersBefore;
     if (added > 0) passesByDataset[dsId] = added;
@@ -423,8 +574,8 @@ function uploadAndRenderSlice(
     debugStats.renderPasses = { total: layers.length, byDataset: passesByDataset };
   }
 
-  client.resize(canvasW, canvasH);
-  client.sliceRenderMultiPass(layers, currentZoom, cx, cy, canvasW, canvasH, planResult.epochs);
+  client.resize(canvasW, canvasH, "slice");
+  client.sliceRenderMultiPass(layers, renderZoom, cx, cy, canvasW, canvasH, planResult.epochs);
 
   return budgetExhausted;
 }
@@ -442,6 +593,7 @@ export function tickSlice(
   sliceC: number,
   minimapPendingFetch: Map<string, MinimapChunkCoord[]>,
   shouldRender: boolean = true,
+  sliceState?: SliceState,
 ): boolean {
   const { scene, canvas } = ctx;
 
@@ -449,9 +601,8 @@ export function tickSlice(
   scene.set_z(sliceZ);
   scene.set_t(sliceT);
   scene.set_c(sliceC);
-  const dpr = devicePixelRatio;
-  const canvasW = Math.round(canvas.clientWidth * dpr);
-  const canvasH = Math.round(canvas.clientHeight * dpr);
+  const canvasW = Math.round(canvas.clientWidth);
+  const canvasH = Math.round(canvas.clientHeight);
   scene.set_viewport(canvasW, canvasH);
 
   const t0 = debugStats.enabled ? performance.now() : 0;
@@ -462,6 +613,7 @@ export function tickSlice(
   const vpCenter = scene.center();
   const planResult: SlicePlanResult = {
     memberRoster: orchResult.memberRoster,
+    memberPositionsByDataset: orchResult.memberPositionsByDataset,
     settings: orchResult.settings,
     vpCx: vpCenter[0],
     vpCy: vpCenter[1],
@@ -471,11 +623,26 @@ export function tickSlice(
   };
 
   const t1 = debugStats.enabled ? performance.now() : 0;
-  const result = uploadAndRenderSlice(ctx, uploader, sliceZ, sliceT, sliceC, planResult, shouldRender);
+  const result = uploadAndRenderSlice(
+    ctx,
+    uploader,
+    sliceZ,
+    sliceT,
+    sliceC,
+    planResult,
+    shouldRender,
+    sliceState,
+  );
   if (debugStats.enabled) debugStats.uploadTimeMs = performance.now() - t1;
   return result;
 }
 
-export function clearSliceForDataset(_state: SliceState, _dsId: string): void {}
+export function clearSliceForDataset(state: SliceState, _dsId: string): void {
+  // Existing weak entries become unreachable from new cache keys immediately;
+  // their roster snapshots reclaim the backing buffers once superseded.
+  state.aggregateEmissionCache.revision++;
+}
 
-export function clearSliceForMembers(_state: SliceState, _memberIds: string[]): void {}
+export function clearSliceForMembers(state: SliceState, _memberIds: string[]): void {
+  state.aggregateEmissionCache.revision++;
+}

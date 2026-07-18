@@ -5,9 +5,10 @@
   "error": "object not found",
   "diagnostic": {
     "stage": "backend_open",
-    "kind": "missing_object",
-    "retryable": true,
+    "category": "source",
+    "code": "missing_object",
+    "retryable": false,
     "message": "object not found",
-    "detail": "gs://lucida-fixtures/missing.zarr/.zattrs returned 404"
+    "detail": "root metadata object returned 404"
   }
 }

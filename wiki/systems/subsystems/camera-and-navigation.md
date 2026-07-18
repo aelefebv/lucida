@@ -5,7 +5,7 @@ description: "How Lucida moves the viewpoint through a dataset, and how raw keyb
 tags: [lucida, subsystem]
 source_path: wiki/systems/subsystems/camera-and-navigation.md
 created: 2026-06-25
-modified: 2026-07-06
+modified: 2026-07-16
 ---
 
 # Camera and Navigation
@@ -23,6 +23,10 @@ How Lucida moves the viewpoint through a dataset, and how raw keyboard/pointer i
 The enum holds `f64`, so it derives `PartialEq` but not `Eq` — which is what lets a [SavedView](saved-views.md) embedded on an annotation derive `PartialEq` too.
 
 `Camera` exposes a uniform surface regardless of variant: `viewport`/`set_viewport`, `effective_zoom`, `eye_position`, `project_to_screen` (returns `None` behind the camera in 3D), `unproject_ray`, and `visible_region`. Everything downstream — picking, [planning](planning-domain.md), presence — talks to this surface, not the variant.
+
+Arcball and Fly differ only in how they produce a pose. Both feed a private `PerspectiveProjection` value in `camera.rs`; that single projection layer owns view/inverse matrices, screen rays, frustum unprojection, culling planes, and surface-distance LOD. Keep projection behavior there rather than adding mode-specific implementations. An Arcball→Fly parity test exercises the complete projection surface so equivalent poses cannot silently drift between navigation modes.
+
+Orientation UI uses that same projection pose. `Camera::view_rotation` / `WasmScene::camera_view_rotation` expose the camera-only world-to-view basis as row-major `[right; up; backward]`; the minimap cube consumes it directly. Do not reconstruct orientation from `camera_theta`/`camera_phi`: those values describe Arcball only and discard Fly yaw/pitch/roll.
 
 ## View mode is derived, not stored
 
@@ -67,6 +71,7 @@ It is purely a **fetch-priority hint** — not camera state, not saved-view/disp
 ## Gotchas
 
 - **`viewMode` and `cameraMode` are two separate React states**, both mirrors of the canonical WASM camera. They can drift if a code path mutates the camera without updating the mirror — always re-read `camera_mode()` after a restore rather than trusting the React copy.
-- **`set_mode_*` is the conventional path; calling `set_mode_2d/3d/fly` on the inner scene directly bypasses the epoch bump** in `wasm.rs` and the renderer goes silently stale.
+- **Orientation affordances consume `camera_view_rotation`, not Arcball angles.** The basis comes from the same `PerspectiveProjection` that builds render matrices and therefore preserves Fly roll. A 2D slice has no 3D orientation affordance, so the minimap cube is volume-only.
+- **Mode helpers are tracked mutation boundaries.** Public `Scene::set_mode_2d/3d/fly` route through viewport commands, bump `view` only on a real change, and clear delta-query baselines when the camera family changes. The epoch-free implementations are crate-only `*_untracked` helpers used by `Scene::apply_viewport` while it owns change detection.
 - **XY frustum bounds are not clamped to the volume** (only Z is) — for collections the camera may look at a group at a large XY offset, and per-member AABB tests handle visibility downstream. Don't "fix" this by clamping XY.
 - **Fly mode key handling is edge-detected and input-focus-gated.** A toggle that fires every frame, or one that steals keystrokes from a text field, means the edge-detect or `isInputFocused` guard was bypassed.

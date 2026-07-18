@@ -1,19 +1,20 @@
 mod types;
 
 pub use types::{
-    Annotation, AnnotationKind, BlendMode, ChannelSettings, Colormap, Comment,
-    DatasetDisplaySettings, DisplayState, DocumentState, LabelSettings, MemberChunkPlan,
-    RenderMode,
+    Annotation, AnnotationKind, BlendMode, ChannelSettings, Colormap, CommandValidationCategory,
+    CommandValidationError, Comment, DatasetDisplaySettings, DisplayState, DocumentState,
+    LabelSettings, MemberChunkPlan, RenderMode,
 };
 
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use lucida_content::*;
 
 use crate::camera::Camera;
 use crate::chunk::{self, ChunkRequestPlan};
+use crate::command::{DocumentCommand, ViewportCommand};
 use crate::epoch::SceneEpochs;
 use crate::query::{EntityQueryResult, ViewQueryDelta, ViewQueryResult};
 use crate::transform::{self, VolumeTransform};
@@ -138,31 +139,136 @@ impl PlacementCorrection {
 }
 
 /// The complete viewer state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Scene {
-    pub camera: Camera,
-    pub view: ViewState,
+    pub(crate) camera: Camera,
+    pub(crate) view: ViewState,
     /// Shared document state (dataset manifests).
     #[serde(flatten)]
-    pub document: DocumentState,
+    pub(crate) document: DocumentState,
     /// Display settings (contrast window + gamma). Per-client, not part of shared document.
     #[serde(default)]
-    pub display: DisplayState,
+    pub(crate) display: DisplayState,
     #[serde(default)]
-    pub dataset_order: Vec<DatasetId>,
+    pub(crate) dataset_order: Vec<DatasetId>,
     #[serde(default)]
-    pub dataset_settings: HashMap<DatasetId, DatasetDisplaySettings>,
+    pub(crate) dataset_settings: HashMap<DatasetId, DatasetDisplaySettings>,
     /// Derived state for fast hot-path lookups. Rebuilt on register/remove.
     #[serde(skip)]
-    pub derived: HashMap<DatasetId, DatasetDerivedState>,
+    pub(crate) derived: HashMap<DatasetId, DatasetDerivedState>,
     /// Monotonic epoch counters for change detection.
     #[serde(default)]
-    pub epochs: SceneEpochs,
+    pub(crate) epochs: SceneEpochs,
     /// Per-dataset snapshot of the last [`Scene::view_query_delta`], used to
     /// diff successive queries. Client-local scratch, not part of shared or
     /// serialized state.
     #[serde(skip)]
     pub(crate) view_query_cursors: HashMap<DatasetId, ViewQueryCursor>,
+}
+
+/// Typed input for hydrating a coherent scene from a document plus local
+/// viewport state (presence, a saved view, or another trusted snapshot).
+///
+/// The fields are intentionally private: callers construct this value and hand
+/// it to [`Scene::hydrate`] / [`Scene::from_hydration`] instead of assigning
+/// individual `Scene` fields and remembering to repair derived state, dataset
+/// defaults, epochs, and view-query cursors afterward.
+#[derive(Debug, Clone)]
+pub struct SceneHydration {
+    document: DocumentState,
+    camera: Camera,
+    view: ViewState,
+    display: DisplayState,
+    dataset_order: Vec<DatasetId>,
+    dataset_settings: HashMap<DatasetId, DatasetDisplaySettings>,
+}
+
+impl SceneHydration {
+    pub fn new(
+        document: DocumentState,
+        camera: Camera,
+        view: ViewState,
+        display: DisplayState,
+    ) -> Self {
+        Self {
+            document,
+            camera,
+            view,
+            display,
+            dataset_order: Vec::new(),
+            dataset_settings: HashMap::new(),
+        }
+    }
+
+    pub fn with_dataset_presence(
+        mut self,
+        dataset_order: Vec<DatasetId>,
+        dataset_settings: HashMap<DatasetId, DatasetDisplaySettings>,
+    ) -> Self {
+        self.dataset_order = dataset_order;
+        self.dataset_settings = dataset_settings;
+        self
+    }
+}
+
+/// Serde-only representation of `Scene`. `derived` and delta cursors are
+/// deliberately absent because they are local caches reconstructed below.
+#[derive(Deserialize)]
+struct SerializedScene {
+    camera: Camera,
+    view: ViewState,
+    #[serde(flatten)]
+    document: DocumentState,
+    #[serde(default)]
+    display: DisplayState,
+    #[serde(default)]
+    dataset_order: Vec<DatasetId>,
+    #[serde(default)]
+    dataset_settings: HashMap<DatasetId, DatasetDisplaySettings>,
+    #[serde(default)]
+    epochs: SceneEpochs,
+}
+
+/// Validate the serialized Scene shape without constructing its derived cache.
+/// Atomic mutation boundaries already hold a fully rebuilt candidate; their
+/// bounded encode/decode check should not rebuild a large collection a second
+/// time merely to discard it.
+pub(crate) fn validate_serialized_scene(bytes: &[u8]) -> serde_json::Result<()> {
+    let _: SerializedScene = serde_json::from_slice(bytes)?;
+    Ok(())
+}
+
+impl<'de> Deserialize<'de> for Scene {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let serialized = SerializedScene::deserialize(deserializer)?;
+        let mut scene = Self {
+            camera: serialized.camera,
+            view: serialized.view,
+            document: serialized.document,
+            display: serialized.display,
+            dataset_order: serialized.dataset_order,
+            dataset_settings: serialized.dataset_settings,
+            derived: HashMap::new(),
+            epochs: serialized.epochs,
+            view_query_cursors: HashMap::new(),
+        };
+        scene.rebuild_derived();
+        scene.reconcile_document_local_state();
+        Ok(scene)
+    }
+}
+
+fn documents_serialize_equally(left: &DocumentState, right: &DocumentState) -> bool {
+    // Values canonicalize object-key ordering, so logically identical
+    // HashMaps are no-op-equivalent even when constructed in a different
+    // insertion order.
+    match (serde_json::to_value(left), serde_json::to_value(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
 }
 
 /// The camera's geometry family. A change between families routes the entity
@@ -214,7 +320,6 @@ pub(crate) struct ViewQueryCursor {
     /// membership base was rebuilt, so the query resyncs to a full snapshot.
     content: u64,
     layout: u64,
-    asset: u64,
     /// Camera geometry family at snapshot time. A change resyncs.
     mode: CameraModeKind,
     /// Quantized state per present record, keyed by the unique per-record
@@ -238,33 +343,185 @@ impl Scene {
         }
     }
 
-    /// Get the volume transform for the first dataset's first image.
-    pub fn volume_transform(&self) -> Option<&VolumeTransform> {
+    /// Read-only access to the local camera. Mutations go through viewport
+    /// commands or the tracked mode helpers below.
+    pub fn camera(&self) -> &Camera {
+        &self.camera
+    }
+
+    pub fn view(&self) -> &ViewState {
+        &self.view
+    }
+
+    pub fn document(&self) -> &DocumentState {
+        &self.document
+    }
+
+    pub fn display(&self) -> &DisplayState {
+        &self.display
+    }
+
+    pub fn dataset_order(&self) -> &[DatasetId] {
+        &self.dataset_order
+    }
+
+    pub fn dataset_settings(&self) -> &HashMap<DatasetId, DatasetDisplaySettings> {
+        &self.dataset_settings
+    }
+
+    pub fn derived(&self) -> &HashMap<DatasetId, DatasetDerivedState> {
+        &self.derived
+    }
+
+    pub fn epochs(&self) -> &SceneEpochs {
+        &self.epochs
+    }
+
+    /// Build a coherent scene from a document plus local viewport state.
+    pub fn from_hydration(hydration: SceneHydration) -> Self {
+        let viewport = hydration.camera.viewport();
+        let mut scene = Self::new(viewport);
+        scene.hydrate(hydration);
+        scene
+    }
+
+    /// Validate and build a coherent scene from an untrusted persisted input.
+    pub fn try_from_hydration(hydration: SceneHydration) -> Result<Self, CommandValidationError> {
+        let viewport = hydration.camera.viewport();
+        let mut scene = Self::new(viewport);
+        scene.try_hydrate(hydration)?;
+        Ok(scene)
+    }
+
+    /// Atomically replace document + local viewport state, rebuild all derived
+    /// geometry, canonicalize dataset defaults, and invalidate only the epoch
+    /// and delta-cursor domains whose inputs actually changed.
+    pub fn hydrate(&mut self, hydration: SceneHydration) {
+        self.hydrate_unchecked(hydration);
+    }
+
+    /// Validated variant of [`Self::hydrate`] for transport/persistence
+    /// boundaries. Failure leaves the original scene untouched.
+    pub fn try_hydrate(&mut self, hydration: SceneHydration) -> Result<(), CommandValidationError> {
+        hydration.document.validate_state()?;
+        let mut candidate = self.clone();
+        candidate.hydrate_unchecked(hydration);
+        let encoded =
+            crate::quota::to_json_vec_bounded(&candidate, crate::quota::MAX_SNAPSHOT_JSON_BYTES)
+                .map_err(|error| CommandValidationError {
+                    category: CommandValidationCategory::ResourceLimit,
+                    path: "scene_json".to_string(),
+                    message: error.to_string(),
+                })?;
+        validate_serialized_scene(&encoded).map_err(|error| CommandValidationError {
+            category: CommandValidationCategory::Serialization,
+            path: "scene_json".to_string(),
+            message: error.to_string(),
+        })?;
+        *self = candidate;
+        Ok(())
+    }
+
+    fn hydrate_unchecked(&mut self, hydration: SceneHydration) {
+        let document_changed = !documents_serialize_equally(&self.document, &hydration.document);
+        let camera_mode_before = CameraModeKind::of(&self.camera);
+
+        let mut camera = hydration.camera;
+        camera.sanitize();
+        let camera_changed = self.camera != camera;
+        let camera_mode_changed = camera_mode_before != CameraModeKind::of(&camera);
+
+        let mut candidate = Self {
+            camera,
+            view: hydration.view,
+            document: hydration.document,
+            display: hydration.display,
+            dataset_order: hydration.dataset_order,
+            dataset_settings: hydration.dataset_settings,
+            derived: HashMap::new(),
+            epochs: self.epochs.clone(),
+            view_query_cursors: HashMap::new(),
+        };
+        candidate.rebuild_derived();
+        candidate.reconcile_document_local_state();
+
+        let selection_changed = document_changed
+            || self.view != candidate.view
+            || self.display != candidate.display
+            || self.dataset_order != candidate.dataset_order
+            || self.dataset_settings != candidate.dataset_settings;
+
+        if document_changed {
+            candidate.epochs.content += 1;
+            candidate.epochs.layout += 1;
+            candidate.epochs.annotation += 1;
+        }
+        if camera_changed {
+            candidate.epochs.view += 1;
+        }
+        if selection_changed {
+            candidate.epochs.selection += 1;
+        }
+
+        // Structural changes and camera-family changes require a Full query.
+        // Same-family camera motion is delta-safe, and a truly unchanged
+        // hydration is cursor-silent as well as epoch-silent.
+        if !document_changed && !camera_mode_changed {
+            candidate.view_query_cursors = self.view_query_cursors.clone();
+        }
+
+        *self = candidate;
+    }
+
+    /// Deterministic compatibility reference for callers that have not yet
+    /// supplied a dataset explicitly: first live id in document order, then a
+    /// lexical fallback for derived-only test scenes. HashMap insertion order
+    /// is never allowed to select geometry.
+    fn primary_dataset_id(&self) -> Option<&DatasetId> {
+        self.dataset_order
+            .iter()
+            .find(|id| self.derived.contains_key(*id))
+            .or_else(|| self.derived.keys().min_by(|a, b| a.0.cmp(&b.0)))
+    }
+
+    /// Get the first member's volume transform for an explicit dataset.
+    pub fn volume_transform_for(&self, dataset_id: &DatasetId) -> Option<&VolumeTransform> {
         self.derived
-            .values()
-            .next()
+            .get(dataset_id)
             .and_then(|d| d.members.first())
             .map(|m| &m.volume_transform)
     }
 
-    /// Get the volume shape [Z, Y, X] for the first dataset's first image.
-    pub fn volume_shape(&self) -> Option<[u32; 3]> {
+    /// Compatibility wrapper using [`Self::primary_dataset_id`]. New
+    /// production call sites should use [`Self::volume_transform_for`].
+    pub fn volume_transform(&self) -> Option<&VolumeTransform> {
+        self.primary_dataset_id()
+            .and_then(|id| self.volume_transform_for(id))
+    }
+
+    /// Get volume shape `[Z, Y, X]` for an explicit dataset.
+    pub fn volume_shape_for(&self, dataset_id: &DatasetId) -> Option<[u32; 3]> {
         self.derived
-            .values()
-            .next()
+            .get(dataset_id)
             .and_then(|d| d.members.first())
             .and_then(|m| m.levels.first())
             .map(|l| [l.shape[2] as u32, l.shape[3] as u32, l.shape[4] as u32])
     }
 
-    /// World-space bounding-box diagonal of the first dataset's first volume,
+    /// Compatibility wrapper using [`Self::primary_dataset_id`].
+    pub fn volume_shape(&self) -> Option<[u32; 3]> {
+        self.primary_dataset_id()
+            .and_then(|id| self.volume_shape_for(id))
+    }
+
+    /// World-space bounding-box diagonal of an explicit dataset's first volume,
     /// **after** the multi-dataset global correction
     /// ([`Self::placement_correction`]) — the same scale the renderer draws it
     /// at. Consumers size world-space motion from it (fly-camera base speed,
     /// initial 3D framing). Returns `1.0` when no volume is loaded so speed
     /// seeding always has a sane basis.
-    pub fn volume_diagonal(&self) -> f64 {
-        let member = self.derived.values().next().and_then(|d| d.members.first());
+    pub fn volume_diagonal_for(&self, dataset_id: &DatasetId) -> f64 {
+        let member = self.derived.get(dataset_id).and_then(|d| d.members.first());
         let Some(m) = member else {
             return 1.0;
         };
@@ -276,8 +533,20 @@ impl Scene {
         (sx * sx + sy * sy + sz * sz).sqrt()
     }
 
-    /// Switch to 2D mode, preserving the current viewport.
+    /// Compatibility wrapper using [`Self::primary_dataset_id`].
+    pub fn volume_diagonal(&self) -> f64 {
+        self.primary_dataset_id()
+            .map_or(1.0, |id| self.volume_diagonal_for(id))
+    }
+
+    /// Switch to 2D mode through the tracked viewport mutation boundary.
     pub fn set_mode_2d(&mut self) {
+        self.apply(ViewportCommand::SetMode2D.into());
+    }
+
+    /// Epoch-free implementation used only by `Scene::apply_viewport`, which
+    /// owns scoped change detection and epoch accounting.
+    pub(crate) fn set_mode_2d_untracked(&mut self) {
         if !matches!(self.camera, Camera::Slice(_)) {
             let vp = self.camera.viewport();
             self.camera = Camera::new_2d(vp);
@@ -287,6 +556,10 @@ impl Scene {
     /// Switch to 3D arcball mode, preserving the current viewport.
     /// If currently in fly mode, converts to arcball preserving eye position and view direction.
     pub fn set_mode_3d(&mut self) {
+        self.apply(ViewportCommand::SetMode3D.into());
+    }
+
+    pub(crate) fn set_mode_3d_untracked(&mut self) {
         if !matches!(self.camera, Camera::Arcball(_)) {
             match &self.camera {
                 Camera::Fly(v) => {
@@ -302,6 +575,10 @@ impl Scene {
 
     /// Switch to fly mode, converting from arcball if possible.
     pub fn set_mode_fly(&mut self) {
+        self.apply(ViewportCommand::SetModeFly.into());
+    }
+
+    pub(crate) fn set_mode_fly_untracked(&mut self) {
         if !matches!(self.camera, Camera::Fly(_)) {
             match &self.camera {
                 Camera::Arcball(v) => {
@@ -320,12 +597,14 @@ impl Scene {
         self.camera.set_viewport(width, height);
     }
 
-    pub fn remove_dataset(&mut self, id: &DatasetId) {
-        self.document.remove_dataset(id);
-        self.dataset_order.retain(|s| s != id);
-        self.dataset_settings.remove(id);
-        self.derived.remove(id);
-        self.view_query_cursors.remove(id);
+    /// Remove a dataset through the tracked document-command boundary. Returns
+    /// `false` without touching epochs or cursors when the id is already absent.
+    pub fn remove_dataset(&mut self, id: &DatasetId) -> bool {
+        if !self.document.manifests.contains_key(id) {
+            return false;
+        }
+        self.apply(DocumentCommand::RemoveDataset { id: id.clone() }.into());
+        true
     }
 
     /// Returns the maximum `max_physical_extent` across all datasets.
@@ -1105,10 +1384,46 @@ impl Scene {
     /// `selection` (dataset order/settings may have changed) — consumers must
     /// re-read rather than render from a stale plan. `view` is deliberately NOT
     /// bumped: the local camera is untouched by design.
+    /// Validate and load an untrusted/persisted document atomically.
+    ///
+    /// The compatibility [`Self::load_document`] method remains available for
+    /// trusted fixtures, but every transport boundary must use this path so a
+    /// malformed restore cannot partially rebuild derived or display state.
+    pub fn try_load_document(&mut self, doc: DocumentState) -> Result<(), CommandValidationError> {
+        doc.validate_state()?;
+        let mut candidate = self.clone();
+        candidate.load_document(doc);
+        let encoded =
+            crate::quota::to_json_vec_bounded(&candidate, crate::quota::MAX_SNAPSHOT_JSON_BYTES)
+                .map_err(|error| CommandValidationError {
+                    category: CommandValidationCategory::ResourceLimit,
+                    path: "scene_json".to_string(),
+                    message: error.to_string(),
+                })?;
+        validate_serialized_scene(&encoded).map_err(|error| CommandValidationError {
+            category: CommandValidationCategory::Serialization,
+            path: "scene_json".to_string(),
+            message: error.to_string(),
+        })?;
+        *self = candidate;
+        Ok(())
+    }
+
     pub fn load_document(&mut self, doc: DocumentState) {
         self.document = doc;
         self.rebuild_derived();
+        self.reconcile_document_local_state();
 
+        self.epochs.content += 1;
+        self.epochs.layout += 1;
+        self.epochs.annotation += 1;
+        self.epochs.selection += 1;
+    }
+
+    /// Canonicalize local dataset order/settings against the current document.
+    /// This is the single policy used by deserialization, document loads, and
+    /// full Scene hydration.
+    fn reconcile_document_local_state(&mut self) {
         for id in self.document.manifests.keys().cloned().collect::<Vec<_>>() {
             if !self.dataset_order.contains(&id) {
                 self.dataset_order.push(id.clone());
@@ -1123,12 +1438,12 @@ impl Scene {
                 self.dataset_settings.insert(id, seeded);
             }
         }
-        let dataset_ids: std::collections::HashSet<&DatasetId> =
-            self.document.manifests.keys().collect();
-        self.dataset_order.retain(|id| dataset_ids.contains(id));
+        let dataset_ids: std::collections::HashSet<DatasetId> =
+            self.document.manifests.keys().cloned().collect();
+        let mut seen = std::collections::HashSet::with_capacity(self.dataset_order.len());
+        self.dataset_order
+            .retain(|id| dataset_ids.contains(id) && seen.insert(id.clone()));
         self.dataset_settings
-            .retain(|id, _| dataset_ids.contains(id));
-        self.view_query_cursors
             .retain(|id, _| dataset_ids.contains(id));
 
         // Realign any KEPT per-label settings that carry the author's label
@@ -1158,12 +1473,6 @@ impl Scene {
                 }
             }
         }
-
-        self.epochs.content += 1;
-        self.epochs.layout += 1;
-        self.epochs.asset += 1;
-        self.epochs.annotation += 1;
-        self.epochs.selection += 1;
     }
 
     /// Adopt another client's camera + view + display (follow mode / saved-view
@@ -1178,6 +1487,7 @@ impl Scene {
     /// chunk plan instead of leaving the renderer on a stale one.
     pub fn import_presence(&mut self, camera: Camera, view: ViewState, display: DisplayState) {
         let viewport = self.camera.viewport();
+        let mode_before = std::mem::discriminant(&self.camera);
         let mut camera = camera;
         camera.set_viewport(viewport[0], viewport[1]);
         // A peer's camera is clamped into the same ranges the local mutators
@@ -1190,6 +1500,9 @@ impl Scene {
         if self.camera != camera {
             self.camera = camera;
             self.epochs.view += 1;
+            if std::mem::discriminant(&self.camera) != mode_before {
+                self.view_query_cursors.clear();
+            }
         }
         if self.view != view || self.display != display {
             self.view = view;
@@ -1242,9 +1555,10 @@ impl Scene {
         }
     }
 
-    /// Rebuild derived state from the document's dataset manifests.
-    /// Call this after deserializing a Scene (since derived is not serialized).
-    pub fn rebuild_derived(&mut self) {
+    /// Rebuild derived state from the document's dataset manifests. Any prior
+    /// delta baseline is unsafe across a rebuild, so every rebuild forces the
+    /// next query to return `Full`.
+    fn rebuild_derived(&mut self) {
         self.derived.clear();
         for (id, manifest) in &self.document.manifests {
             let layout = resolve_layout(
@@ -1255,6 +1569,7 @@ impl Scene {
             self.derived
                 .insert(id.clone(), build_derived_state(manifest, &layout));
         }
+        self.view_query_cursors.clear();
     }
 
     /// Query the scene for geometric information about all entities in a dataset
@@ -1410,7 +1725,7 @@ impl Scene {
     /// Incremental counterpart to [`Scene::view_query`].
     ///
     /// The first query for a dataset, a query after the membership base was
-    /// rebuilt (a move in the content, layout, or asset epoch), and a query
+    /// rebuilt (a move in the content or layout epoch), and a query
     /// after the camera changed geometry family all return
     /// [`ViewQueryDelta::Full`] — a complete snapshot that also (re)seeds this
     /// dataset's cursor. Any other query returns [`ViewQueryDelta::Delta`]
@@ -1441,7 +1756,6 @@ impl Scene {
 
         let content = self.epochs.content;
         let layout = self.epochs.layout;
-        let asset = self.epochs.asset;
         let mode = CameraModeKind::of(&self.camera);
 
         // A cursor whose structural epochs and camera family match the current
@@ -1450,9 +1764,10 @@ impl Scene {
         // or a camera-family change — forces a full resync. When in doubt, a
         // full snapshot is slow-but-correct; a delta computed across a changed
         // base could ship a wrong tile.
-        let can_delta = self.view_query_cursors.get(dataset_id).is_some_and(|c| {
-            c.content == content && c.layout == layout && c.asset == asset && c.mode == mode
-        });
+        let can_delta = self
+            .view_query_cursors
+            .get(dataset_id)
+            .is_some_and(|c| c.content == content && c.layout == layout && c.mode == mode);
 
         let new_entries: HashMap<ImageId, QuantizedEntity> = result
             .visible_entities
@@ -1466,7 +1781,6 @@ impl Scene {
                 ViewQueryCursor {
                     content,
                     layout,
-                    asset,
                     mode,
                     entries: new_entries,
                 },
@@ -1487,7 +1801,6 @@ impl Scene {
             ViewQueryCursor {
                 content,
                 layout,
-                asset,
                 mode,
                 entries: new_entries,
             },
@@ -1662,13 +1975,10 @@ pub fn build_derived_state(manifest: &DatasetManifest, layout: &LayoutSpec) -> D
     }
 }
 
-/// Hash-indexed resolver for entity positions in a layout, with the exact
-/// first-match semantics of [`resolve_entity_position`] but O(1) per lookup.
-///
-/// [`build_derived_state`] constructs one per rebuild and resolves every image
-/// through it; [`resolve_entity_position`] remains the single-lookup form for
-/// callers resolving a handful of entities (annotation anchoring), where
-/// building an index would cost more than the scan it replaces.
+/// Hash-indexed resolver for entity positions in a layout with deterministic
+/// first-match semantics and O(1) lookup after one linear build. Both scene
+/// derivation and bulk annotation anchoring/re-anchoring reuse an index across
+/// every entity or pin in the operation.
 pub(crate) struct LayoutPositionIndex<'a> {
     /// First placement per entity id.
     placement_by_entity: HashMap<&'a EntityId, [f64; 2]>,
@@ -1709,10 +2019,9 @@ impl<'a> LayoutPositionIndex<'a> {
         }
     }
 
-    /// Resolve an entity's `[x, y]`, or `None` when it has no placement —
-    /// mirrors [`resolve_entity_position`] step for step (direct placement,
-    /// else parent placement + tile→parent transform translation, defaulting
-    /// the translation to `[0, 0]` when no edge exists).
+    /// Resolve an entity's `[x, y]`, or `None` when it has no placement:
+    /// direct placement, else parent placement + tile→parent transform
+    /// translation, defaulting the translation to `[0, 0]` when no edge exists.
     pub(crate) fn resolve(&self, entity_id: &EntityId) -> Option<[f64; 2]> {
         if let Some(p) = self.placement_by_entity.get(entity_id) {
             return Some(*p);
@@ -1727,59 +2036,6 @@ impl<'a> LayoutPositionIndex<'a> {
             .unwrap_or([0.0, 0.0]);
         Some([parent_pos[0] + offset[0], parent_pos[1] + offset[1]])
     }
-}
-
-/// Resolve an entity's `[x, y]` in `layout`, or `None` when it has no placement
-/// there (neither a direct placement nor a placed parent to compose against).
-///
-/// For Image entities: look up directly in layout placements. For Tile
-/// entities: parent group's placement + tile→group transform translation.
-/// This is the single-lookup owner of that composition rule;
-/// [`LayoutPositionIndex`] is its hash-indexed bulk twin (used by
-/// [`build_derived_state`], where the render path collapses an unresolvable
-/// entity to `[0.0, 0.0]` so it always gets *some* position).
-///
-/// Unlike that render-path fallback, the `Option` here distinguishes
-/// "genuinely placed at the origin" from "not placeable in this layout".
-/// Annotation anchoring (`DocumentState::apply` in `scene::types`) depends on
-/// that distinction:
-///   - picking the nearest entity must not treat unplaceable entities as if they
-///     sat at the origin, and
-///   - re-anchoring on a layout switch must skip a pin whose anchor isn't placed
-///     in *both* layouts (leaving it untouched) rather than yanking it toward a
-///     phantom `[0, 0]`.
-pub(crate) fn resolve_entity_position(
-    entity_id: &EntityId,
-    layout: &LayoutSpec,
-    entities: &[Entity],
-    transforms: &[TransformEdge],
-) -> Option<[f64; 2]> {
-    // Direct placement?
-    if let Some(p) = layout.placements.iter().find(|p| &p.entity_id == entity_id) {
-        return Some(p.position);
-    }
-
-    // Otherwise, compose a tile's position from its parent group's placement plus
-    // the tile->group transform translation. Only resolvable if the parent is
-    // itself placed in this layout.
-    let entity = entities.iter().find(|e| &e.id == entity_id)?;
-    let parent_id = entity.parent.as_ref()?;
-    let parent_pos = layout
-        .placements
-        .iter()
-        .find(|p| &p.entity_id == parent_id)
-        .map(|p| p.position)?;
-
-    let transform_offset = transforms
-        .iter()
-        .find(|t| &t.from == entity_id && &t.to == parent_id)
-        .map(|t| [t.transform.matrix()[12], t.transform.matrix()[13]])
-        .unwrap_or([0.0, 0.0]);
-
-    Some([
-        parent_pos[0] + transform_offset[0],
-        parent_pos[1] + transform_offset[1],
-    ])
 }
 
 /// Test helpers for constructing dataset manifests and DatasetOpened events.
@@ -1863,7 +2119,6 @@ pub(crate) mod test_helpers {
         DatasetOpened {
             manifest,
             fetch,
-            catalog: AssetCatalog::default(),
             opener_client_id: None,
         }
     }
@@ -1968,7 +2223,6 @@ pub(crate) mod test_helpers {
         DatasetOpened {
             manifest,
             fetch,
-            catalog: AssetCatalog::default(),
             opener_client_id: None,
         }
     }
@@ -2166,7 +2420,6 @@ pub(crate) mod test_helpers {
         DatasetOpened {
             manifest,
             fetch,
-            catalog: AssetCatalog::default(),
             opener_client_id: None,
         }
     }
@@ -2294,7 +2547,6 @@ pub(crate) mod test_helpers {
         DatasetOpened {
             manifest,
             fetch,
-            catalog: AssetCatalog::default(),
             opener_client_id: None,
         }
     }
@@ -2428,7 +2680,6 @@ pub(crate) mod test_helpers {
         DatasetOpened {
             manifest,
             fetch,
-            catalog: AssetCatalog::default(),
             opener_client_id: None,
         }
     }
@@ -2438,6 +2689,8 @@ pub(crate) mod test_helpers {
 mod tests {
     use super::*;
     use crate::command::DocumentCommand;
+    use lucida_protocol::DatasetOpened;
+    use serde::Deserialize;
 
     #[test]
     fn empty_scene_produces_empty_plan() {
@@ -2507,13 +2760,26 @@ mod tests {
         let mut scene = Scene::new([800, 600]);
         assert!(matches!(scene.camera, Camera::Slice(_)));
 
+        let initial_epochs = scene.epochs.clone();
+        scene.set_mode_2d();
+        assert_eq!(
+            scene.epochs, initial_epochs,
+            "reasserting the active mode must be epoch-silent"
+        );
+
         scene.set_mode_3d();
         assert!(matches!(scene.camera, Camera::Arcball(_)));
         assert_eq!(scene.camera.viewport(), [800, 600]);
+        assert_eq!(scene.epochs.view, initial_epochs.view + 1);
+
+        let after_change = scene.epochs.clone();
+        scene.set_mode_3d();
+        assert_eq!(scene.epochs, after_change);
 
         scene.set_mode_2d();
         assert!(matches!(scene.camera, Camera::Slice(_)));
         assert_eq!(scene.camera.viewport(), [800, 600]);
+        assert_eq!(scene.epochs.view, initial_epochs.view + 2);
     }
 
     #[test]
@@ -2527,9 +2793,7 @@ mod tests {
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
 
         let json = serde_json::to_string(&scene).unwrap();
-        let mut parsed: Scene = serde_json::from_str(&json).unwrap();
-        // Rebuild derived state after deserialization
-        parsed.rebuild_derived();
+        let parsed: Scene = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed.view.z_range, 5..6);
         assert_eq!(parsed.view.t, 2);
@@ -2540,6 +2804,10 @@ mod tests {
                 .document
                 .manifests
                 .contains_key(&DatasetId("ds1".into()))
+        );
+        assert!(
+            parsed.derived.contains_key(&DatasetId("ds1".into())),
+            "derived state must be coherent immediately after deserialization"
         );
         if let Camera::Slice(v) = &parsed.camera {
             assert_eq!(v.viewport, [800, 600]);
@@ -2570,11 +2838,21 @@ mod tests {
         scene.apply(DocumentCommand::DatasetOpened(reg2).into());
         let ds1_id = DatasetId("ds1".into());
         let ds2_id = DatasetId("ds2".into());
-        scene.remove_dataset(&ds1_id);
+        let epochs_before = scene.epochs.clone();
+        assert!(scene.remove_dataset(&ds1_id));
         assert_eq!(scene.dataset_order, vec![ds2_id.clone()]);
         assert!(!scene.dataset_settings.contains_key(&ds1_id));
         assert!(scene.dataset_settings.contains_key(&ds2_id));
         assert!(!scene.derived.contains_key(&ds1_id));
+        assert_eq!(scene.epochs.content, epochs_before.content + 1);
+        assert_eq!(scene.epochs.layout, epochs_before.layout + 1);
+
+        let after_remove = scene.epochs.clone();
+        assert!(!scene.remove_dataset(&ds1_id));
+        assert_eq!(
+            scene.epochs, after_remove,
+            "removing an already-absent dataset must be a no-op"
+        );
     }
 
     #[test]
@@ -2608,8 +2886,37 @@ mod tests {
     }
 
     #[test]
+    fn camera_family_change_clears_delta_cursors_but_mode_noop_does_not() {
+        let mut scene = Scene::new([800, 600]);
+        let dataset_id = DatasetId("ds1".into());
+        scene.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened("ds1", "first", 1))
+                .into(),
+        );
+        assert!(matches!(
+            scene.view_query_delta(&dataset_id),
+            Some(ViewQueryDelta::Full(_))
+        ));
+
+        scene.set_mode_2d();
+        assert!(scene.view_query_cursors.contains_key(&dataset_id));
+        assert!(matches!(
+            scene.view_query_delta(&dataset_id),
+            Some(ViewQueryDelta::Delta { .. })
+        ));
+
+        scene.set_mode_3d();
+        assert!(scene.view_query_cursors.is_empty());
+        assert!(matches!(
+            scene.view_query_delta(&dataset_id),
+            Some(ViewQueryDelta::Full(_))
+        ));
+    }
+
+    #[test]
     fn scene_backward_compat_deserialization_without_settings() {
-        // JSON without dataset_order/dataset_settings should deserialize with defaults
+        // Legacy JSON without dataset_order/dataset_settings should hydrate
+        // complete local defaults and derived state automatically.
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
@@ -2619,8 +2926,11 @@ mod tests {
         val.as_object_mut().unwrap().remove("dataset_order");
         val.as_object_mut().unwrap().remove("dataset_settings");
         let parsed: Scene = serde_json::from_value(val).unwrap();
-        assert!(parsed.dataset_order.is_empty());
-        assert!(parsed.dataset_settings.is_empty());
+        let dataset_id = DatasetId("ds1".into());
+        assert_eq!(parsed.dataset_order, vec![dataset_id.clone()]);
+        assert!(parsed.dataset_settings.contains_key(&dataset_id));
+        assert!(parsed.derived.contains_key(&dataset_id));
+        assert!(parsed.view_query_cursors.is_empty());
     }
 
     #[test]
@@ -3453,10 +3763,9 @@ mod tests {
             scene.volume_diagonal()
         );
 
-        // Opening a physically larger dataset re-normalizes the scene.
-        // Whichever dataset happens to be first, the diagonal must equal the
-        // diagonal of ITS corrected render scale (the diagonal terms of
-        // rendering_transform's forward model).
+        // Opening a physically larger dataset re-normalizes the scene. Query
+        // the collection explicitly: HashMap order must never choose which
+        // dataset seeds camera behavior.
         scene.apply(
             DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened_with_shape(
                 "big",
@@ -3468,19 +3777,19 @@ mod tests {
             ))
             .into(),
         );
-        let first = scene
+        let collection_id = DatasetId("collection".into());
+        let collection_member = scene
             .derived
-            .values()
-            .next()
+            .get(&collection_id)
             .and_then(|d| d.members.first())
-            .expect("first member");
-        let rt = scene.rendering_transform(first).0.model;
+            .expect("collection member");
+        let rt = scene.rendering_transform(collection_member).0.model;
         let expected =
             ((rt[0] as f64).powi(2) + (rt[5] as f64).powi(2) + (rt[10] as f64).powi(2)).sqrt();
         assert!(
-            (scene.volume_diagonal() - expected).abs() < 1e-6,
+            (scene.volume_diagonal_for(&collection_id) - expected).abs() < 1e-6,
             "corrected diagonal drifted from render scale: {} vs {}",
-            scene.volume_diagonal(),
+            scene.volume_diagonal_for(&collection_id),
             expected
         );
 
@@ -3519,6 +3828,53 @@ mod tests {
             scene.volume_diagonal().is_finite() && scene.volume_diagonal() > 0.0,
             "diagonal must stay finite once data is loaded"
         );
+    }
+
+    #[test]
+    fn explicit_volume_queries_are_independent_of_dataset_insertion_order() {
+        let build = |order: [&str; 2]| {
+            let mut scene = Scene::new([800, 600]);
+            for id in order {
+                let shape = if id == "small" {
+                    [1, 1, 4, 64, 96]
+                } else {
+                    [1, 1, 20, 512, 384]
+                };
+                scene.apply(
+                    DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened_with_shape(
+                        id,
+                        id,
+                        1,
+                        shape,
+                        [1, 1, 1, 32, 32],
+                        1,
+                    ))
+                    .into(),
+                );
+            }
+            scene
+        };
+        let small_first = build(["small", "large"]);
+        let large_first = build(["large", "small"]);
+
+        for id in ["small", "large"] {
+            let dataset_id = DatasetId(id.into());
+            assert_eq!(
+                small_first.volume_shape_for(&dataset_id),
+                large_first.volume_shape_for(&dataset_id),
+            );
+            assert_eq!(
+                small_first.volume_transform_for(&dataset_id).unwrap().model,
+                large_first.volume_transform_for(&dataset_id).unwrap().model,
+            );
+            assert!(
+                (small_first.volume_diagonal_for(&dataset_id)
+                    - large_first.volume_diagonal_for(&dataset_id))
+                .abs()
+                    < 1e-6,
+                "explicit diagonal changed with insertion order for {id}",
+            );
+        }
     }
 
     /// `dataset_world_bounds` is folded directly from
@@ -3863,12 +4219,28 @@ mod tests {
         // Every document-scoped epoch advances so consumers re-read...
         assert!(scene.epochs.content > baseline.content);
         assert!(scene.epochs.layout > baseline.layout);
-        assert!(scene.epochs.asset > baseline.asset);
         assert!(scene.epochs.annotation > baseline.annotation);
         assert!(scene.epochs.selection > baseline.selection);
         // ...but the local camera is untouched, so view does not.
         assert_eq!(scene.epochs.view, baseline.view);
         assert_eq!(scene.camera, camera_before);
+    }
+
+    #[test]
+    fn try_load_document_rejects_invalid_graph_without_partial_scene_mutation() {
+        let mut scene = Scene::new([640, 480]);
+        scene
+            .try_apply(crate::command::ViewportCommand::SetCenter { x: 42.0, y: 7.0 }.into())
+            .unwrap();
+        let before = serde_json::to_value(&scene).unwrap();
+
+        let mut invalid = DocumentState::default();
+        invalid
+            .registered_layouts
+            .insert(DatasetId("missing".into()), Vec::new());
+        let error = scene.try_load_document(invalid).unwrap_err();
+        assert_eq!(error.category, CommandValidationCategory::MissingReference);
+        assert_eq!(serde_json::to_value(&scene).unwrap(), before);
     }
 
     #[test]
@@ -3905,6 +4277,85 @@ mod tests {
         );
         assert!(!scene.dataset_order.contains(&stale));
         assert!(!scene.dataset_settings.contains_key(&stale));
+    }
+
+    #[test]
+    fn structural_hydration_rebuilds_state_and_forces_full_delta_resync() {
+        let mut scene = Scene::new([800, 600]);
+        let dataset_id = DatasetId("ds1".into());
+        scene.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened("ds1", "one", 1))
+                .into(),
+        );
+        assert!(matches!(
+            scene.view_query_delta(&dataset_id),
+            Some(ViewQueryDelta::Full(_))
+        ));
+        assert!(scene.view_query_cursors.contains_key(&dataset_id));
+
+        let mut donor = scene.clone();
+        donor.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened("ds2", "two", 2))
+                .into(),
+        );
+        let before = scene.epochs.clone();
+        scene.hydrate(
+            SceneHydration::new(
+                donor.document.clone(),
+                scene.camera.clone(),
+                scene.view.clone(),
+                scene.display.clone(),
+            )
+            .with_dataset_presence(scene.dataset_order.clone(), scene.dataset_settings.clone()),
+        );
+
+        let second_id = DatasetId("ds2".into());
+        assert!(scene.derived.contains_key(&dataset_id));
+        assert!(scene.derived.contains_key(&second_id));
+        assert!(scene.dataset_order.contains(&second_id));
+        assert!(scene.dataset_settings.contains_key(&second_id));
+        assert!(
+            scene.view_query_cursors.is_empty(),
+            "a rebuild must discard stale delta baselines"
+        );
+        assert_eq!(scene.epochs.content, before.content + 1);
+        assert_eq!(scene.epochs.layout, before.layout + 1);
+        assert_eq!(scene.epochs.annotation, before.annotation + 1);
+        assert_eq!(scene.epochs.selection, before.selection + 1);
+        assert_eq!(scene.epochs.view, before.view);
+        assert!(matches!(
+            scene.view_query_delta(&dataset_id),
+            Some(ViewQueryDelta::Full(_))
+        ));
+    }
+
+    #[test]
+    fn identical_hydration_is_epoch_and_cursor_silent() {
+        let mut scene = Scene::new([800, 600]);
+        let dataset_id = DatasetId("ds1".into());
+        scene.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened("ds1", "one", 1))
+                .into(),
+        );
+        scene.view_query_delta(&dataset_id);
+        let before = scene.epochs.clone();
+
+        scene.hydrate(
+            SceneHydration::new(
+                scene.document.clone(),
+                scene.camera.clone(),
+                scene.view.clone(),
+                scene.display.clone(),
+            )
+            .with_dataset_presence(scene.dataset_order.clone(), scene.dataset_settings.clone()),
+        );
+
+        assert_eq!(scene.epochs, before);
+        assert!(scene.view_query_cursors.contains_key(&dataset_id));
+        assert!(matches!(
+            scene.view_query_delta(&dataset_id),
+            Some(ViewQueryDelta::Delta { .. })
+        ));
     }
 
     // --- import_presence / import_dataset_presence ---
@@ -4144,7 +4595,7 @@ mod tests {
     }
 
     #[test]
-    fn layout_position_index_matches_single_lookup_resolver() {
+    fn layout_position_index_preserves_first_match_and_parent_composition() {
         use lucida_content::layout::EntityPlacement;
 
         let ent = |id: &str, parent: Option<&str>| Entity {
@@ -4192,18 +4643,18 @@ mod tests {
         };
 
         let index = LayoutPositionIndex::new(&layout, &entities, &transforms);
-        for id in [
-            "placed-direct",
-            "tile-with-edge",
-            "tile-without-edge",
-            "tile-unplaced-parent",
-            "tile-no-parent",
-            "unknown-entity",
+        for (id, expected) in [
+            ("placed-direct", Some([5.0, 7.0])),
+            ("tile-with-edge", Some([15.0, 27.0])),
+            ("tile-without-edge", Some([5.0, 7.0])),
+            ("tile-unplaced-parent", None),
+            ("tile-no-parent", None),
+            ("unknown-entity", None),
         ] {
             let entity_id = EntityId(id.into());
             assert_eq!(
                 index.resolve(&entity_id),
-                resolve_entity_position(&entity_id, &layout, &entities, &transforms),
+                expected,
                 "position mismatch for entity '{id}'"
             );
         }
@@ -4638,5 +5089,275 @@ mod tests {
         assert_eq!(entered[0].ideal_target_lod, 5);
         assert!(left.is_empty());
         assert!(changed.is_empty());
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct RealWideCollectionFixture {
+        fixture_id: String,
+        rows: Vec<String>,
+        columns: Vec<String>,
+        wells: Vec<[String; 2]>,
+        fields_per_well: usize,
+        replicas: usize,
+        replica_columns: usize,
+        expected_groups: usize,
+        expected_members: usize,
+    }
+
+    fn real_wide_collection_fixture() -> RealWideCollectionFixture {
+        serde_json::from_str(include_str!("../../testdata/isr_washout_v4_wide_16k.json"))
+            .expect("real-wide annotation fixture must parse")
+    }
+
+    fn assert_real_wide_fixture_contract(fixture: &RealWideCollectionFixture) {
+        assert_eq!(fixture.fixture_id, "isr-washout-v4-wide-16k-derived");
+        assert_eq!(
+            fixture.wells.len() * fixture.replicas,
+            fixture.expected_groups
+        );
+        assert_eq!(
+            fixture.expected_groups * fixture.fields_per_well,
+            fixture.expected_members,
+        );
+        assert_eq!(fixture.expected_members, 16_384);
+        assert!(fixture.replica_columns > 0);
+        for [row, column] in &fixture.wells {
+            assert!(fixture.rows.contains(row), "unknown fixture row {row}");
+            assert!(
+                fixture.columns.contains(column),
+                "unknown fixture column {column}"
+            );
+        }
+    }
+
+    /// Generates only the manifest/fetch metadata needed by the hot path. The
+    /// checked-in JSON records the real sparse-well/field topology; replicas
+    /// make that shape wide enough to catch quadratic regressions without
+    /// committing source pixels or a machine-local path.
+    fn make_real_wide_collection_opened() -> DatasetOpened {
+        let fixture = real_wide_collection_fixture();
+        assert_real_wide_fixture_contract(&fixture);
+        let id = &fixture.fixture_id;
+        let mut opened = test_helpers::make_grouped_collection_opened(
+            id,
+            fixture.expected_groups,
+            fixture.fields_per_well,
+        );
+        let plate_stride_x = fixture.columns.len() + 1;
+        let plate_stride_y = fixture.rows.len() + 1;
+        let placements = (0..fixture.replicas)
+            .flat_map(|replica| {
+                let fixture = &fixture;
+                fixture
+                    .wells
+                    .iter()
+                    .enumerate()
+                    .map(move |(well_index, [row, column])| {
+                        let group_index = replica * fixture.wells.len() + well_index;
+                        let row_index = fixture.rows.iter().position(|item| item == row).unwrap();
+                        let column_index = fixture
+                            .columns
+                            .iter()
+                            .position(|item| item == column)
+                            .unwrap();
+                        let replica_x = replica % fixture.replica_columns;
+                        let replica_y = replica / fixture.replica_columns;
+                        EntityPlacement {
+                            entity_id: EntityId(format!("{id}-g{group_index}")),
+                            position: [
+                                ((replica_x * plate_stride_x + column_index) * 800) as f64,
+                                ((replica_y * plate_stride_y + row_index) * 800) as f64,
+                            ],
+                        }
+                    })
+            })
+            .collect();
+        let manifest = DatasetManifest::new(
+            DatasetId(id.clone()),
+            id.clone(),
+            DatasetKind::Collection {
+                rows: fixture.rows,
+                columns: fixture.columns,
+                positioning_mode: PositioningMode::Derived,
+                has_explicit_positions: false,
+            },
+            opened.manifest.entities().to_vec(),
+            opened.manifest.transforms().to_vec(),
+            opened.manifest.images().to_vec(),
+            vec![LayoutSpec {
+                id: LayoutId("default".into()),
+                name: "ISR washout source topology".into(),
+                placements,
+            }],
+            Some(LayoutId("default".into())),
+        );
+        opened.manifest = manifest;
+        opened
+    }
+
+    fn annotation_performance_command(dataset_id: &DatasetId) -> DocumentCommand {
+        DocumentCommand::AddAnnotation {
+            dataset_id: dataset_id.clone(),
+            id: "performance-pin".into(),
+            position: [1_000_000.0, 1_000_000.0],
+            end: None,
+            z: 0.0,
+            t: 0,
+            c: 0,
+            author: "performance".into(),
+            kind: AnnotationKind::Point,
+            view: None,
+        }
+    }
+
+    fn anchor_drop_time(opened: DatasetOpened, repetitions: u32) -> std::time::Duration {
+        let dataset_id = opened.manifest.dataset_id.clone();
+        let mut document = DocumentState::default();
+        document.apply(DocumentCommand::DatasetOpened(opened));
+        let elapsed = best_of_3(|| {
+            for _ in 0..repetitions {
+                document.apply(annotation_performance_command(&dataset_id));
+            }
+        });
+        std::hint::black_box(document.annotations.get(&dataset_id));
+        elapsed / repetitions
+    }
+
+    fn real_wide_reanchor_time(opened: DatasetOpened, repetitions: u32) -> std::time::Duration {
+        assert_eq!(
+            repetitions % 2,
+            0,
+            "benchmark must return to default layout"
+        );
+        let dataset_id = opened.manifest.dataset_id.clone();
+        let default_layout = opened.manifest.source_layouts()[0].clone();
+        let shifted_layout = LayoutSpec {
+            id: LayoutId("shifted".into()),
+            name: "Shifted".into(),
+            placements: default_layout
+                .placements
+                .iter()
+                .map(|placement| EntityPlacement {
+                    entity_id: placement.entity_id.clone(),
+                    position: [placement.position[0] + 32.0, placement.position[1] + 48.0],
+                })
+                .collect(),
+        };
+        let anchors = opened
+            .manifest
+            .entities()
+            .iter()
+            .filter(|entity| matches!(entity.kind, EntityKind::Tile))
+            .map(|entity| entity.id.clone())
+            .collect::<Vec<_>>();
+        let mut document = DocumentState::default();
+        document.apply(DocumentCommand::DatasetOpened(opened));
+        document.apply(DocumentCommand::RegisterLayout {
+            dataset_id: dataset_id.clone(),
+            layout: shifted_layout,
+        });
+        document.annotations.insert(
+            dataset_id.clone(),
+            anchors
+                .into_iter()
+                .enumerate()
+                .map(|(index, anchor)| Annotation {
+                    id: format!("pin-{index}"),
+                    position: [0.0, 0.0],
+                    z: 0.0,
+                    t: 0,
+                    c: 0,
+                    author: "performance".into(),
+                    kind: AnnotationKind::Point,
+                    end: None,
+                    comments: vec![],
+                    anchor: Some(anchor),
+                    view: None,
+                })
+                .collect(),
+        );
+
+        let elapsed = best_of_3(|| {
+            for iteration in 0..repetitions {
+                document.apply(DocumentCommand::SetActiveLayout {
+                    dataset_id: dataset_id.clone(),
+                    layout_id: if iteration % 2 == 0 {
+                        LayoutId("shifted".into())
+                    } else {
+                        default_layout.id.clone()
+                    },
+                });
+            }
+        });
+        assert_eq!(document.annotations[&dataset_id][0].position, [0.0, 0.0]);
+        std::hint::black_box(document.annotations.get(&dataset_id));
+        elapsed / repetitions
+    }
+
+    #[test]
+    fn named_real_wide_collection_fixture_is_self_consistent() {
+        assert_real_wide_fixture_contract(&real_wide_collection_fixture());
+    }
+
+    const ANCHOR_DROP_4K_BUDGET: std::time::Duration = std::time::Duration::from_millis(40);
+    const ANCHOR_DROP_16K_BUDGET: std::time::Duration = std::time::Duration::from_millis(100);
+    const REAL_WIDE_REANCHOR_BUDGET: std::time::Duration = std::time::Duration::from_millis(100);
+    const ANCHOR_SCALING_RATIO_BUDGET: f64 = 8.0;
+
+    /// Release-mode CI gate for the full canonical annotation operations. Run with:
+    /// `cargo test -p lucida-core --release annotation_anchor_release_budget_4k_16k_and_real_wide_collection -- --ignored --nocapture`.
+    ///
+    /// The absolute limits are interaction budgets, not machine-relative
+    /// ratios: a 4k pin drop must stay below 40 ms, and 16k pin drops plus a
+    /// 16k-pin layout switch must stay below the 100 ms response threshold.
+    #[test]
+    #[ignore = "release-mode CI performance budget"]
+    fn annotation_anchor_release_budget_4k_16k_and_real_wide_collection() {
+        let repetitions = 8;
+        let four_k = anchor_drop_time(
+            test_helpers::make_grouped_collection_opened(
+                "anchor-4k",
+                SCALING_GROUPS_1X,
+                SCALING_TILES_PER_GROUP,
+            ),
+            repetitions,
+        );
+        let sixteen_k = anchor_drop_time(
+            test_helpers::make_grouped_collection_opened(
+                "anchor-16k",
+                SCALING_GROUPS_4X,
+                SCALING_TILES_PER_GROUP,
+            ),
+            repetitions,
+        );
+        let real_wide = anchor_drop_time(make_real_wide_collection_opened(), repetitions);
+        let real_wide_reanchor = real_wide_reanchor_time(make_real_wide_collection_opened(), 4);
+        let ratio = sixteen_k.as_secs_f64() / four_k.as_secs_f64().max(1e-9);
+
+        eprintln!(
+            "annotation-anchor-budget 4k={four_k:?} 16k={sixteen_k:?} ratio={ratio:.2} \
+             real-wide={real_wide:?} real-wide-reanchor={real_wide_reanchor:?}"
+        );
+        assert!(
+            four_k <= ANCHOR_DROP_4K_BUDGET,
+            "4k anchor drop took {four_k:?}, budget is {ANCHOR_DROP_4K_BUDGET:?}"
+        );
+        assert!(
+            sixteen_k <= ANCHOR_DROP_16K_BUDGET,
+            "16k anchor drop took {sixteen_k:?}, budget is {ANCHOR_DROP_16K_BUDGET:?}"
+        );
+        assert!(
+            real_wide <= ANCHOR_DROP_16K_BUDGET,
+            "real-wide anchor drop took {real_wide:?}, budget is {ANCHOR_DROP_16K_BUDGET:?}"
+        );
+        assert!(
+            real_wide_reanchor <= REAL_WIDE_REANCHOR_BUDGET,
+            "real-wide reanchor took {real_wide_reanchor:?}, budget is {REAL_WIDE_REANCHOR_BUDGET:?}"
+        );
+        assert!(
+            ratio <= ANCHOR_SCALING_RATIO_BUDGET,
+            "4x members took {ratio:.2}x ({four_k:?} -> {sixteen_k:?}); \
+             budget is {ANCHOR_SCALING_RATIO_BUDGET:.1}x"
+        );
     }
 }

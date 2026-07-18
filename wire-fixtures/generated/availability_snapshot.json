@@ -109,13 +109,23 @@
       "image_id": "multiscale-0",
       "level_index": 2,
       "key": "2/1/0/0/0/0",
-      "status": "unavailable"
+      "status": "unavailable",
+      "failure": {
+        "category": "source",
+        "code": "missing_object",
+        "retryable": false
+      }
     },
     {
       "image_id": "multiscale-0",
       "level_index": 2,
       "key": "2/1/0/1/0/0",
       "status": "failed_transient",
+      "failure": {
+        "category": "source",
+        "code": "storage_backend",
+        "retryable": true
+      },
       "message": "source read timed out"
     },
     {
@@ -123,6 +133,11 @@
       "level_index": 2,
       "key": "2/2/0/0/0/0",
       "status": "failed_permanent",
+      "failure": {
+        "category": "codec",
+        "code": "decode_failure",
+        "retryable": false
+      },
       "message": "chunk exceeds generation budget"
     }
   ]

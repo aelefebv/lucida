@@ -1,12 +1,8 @@
 import { useEffect, useRef } from "react";
 import type { WasmScene } from "lucida-core";
-import type { Session } from "../session.ts";
 import type { ViewportCommand } from "../commands.ts";
 import type { RenderClient } from "../renderer/renderClient.ts";
-import { invalidateResidency } from "../invalidation.ts";
-import { guardedSceneCall } from "../sceneGuard.ts";
-import type { RenderLoop } from "../renderLoop.ts";
-import type { DatasetState } from "../types.ts";
+import type { ViewportCoordinator } from "../viewportCoordinator.ts";
 
 declare global {
   interface Window {
@@ -22,10 +18,16 @@ interface Params {
   clientRef: React.RefObject<RenderClient | null>;
   autoContrastMapRef: React.RefObject<Map<string, boolean>>;
   wasmSceneRef: React.RefObject<WasmScene | null>;
-  loopRef: React.RefObject<RenderLoop | null>;
-  sessionRef: React.RefObject<Session | null>;
-  datasetsRef: React.RefObject<Map<string, DatasetState>>;
+  /** The sole local viewport/display mutation boundary. Automatic contrast is
+   * data-driven, but it still changes the shareable scene and must publish the
+   * same URL/dataset-presence/invalidation effects as a panel-driven change. */
+  viewport: Pick<ViewportCoordinator, "apply">;
   setDataRangeMap: React.Dispatch<React.SetStateAction<Map<string, { min: number; max: number }>>>;
+}
+
+/** Stable key for ranges that must never union across channels. */
+export function intensityRangeKey(datasetId: string, channel: number): string {
+  return `${datasetId}\u0000${channel}`;
 }
 
 export function useIntensityBatcher({
@@ -33,9 +35,7 @@ export function useIntensityBatcher({
   clientRef,
   autoContrastMapRef,
   wasmSceneRef,
-  loopRef,
-  sessionRef,
-  datasetsRef,
+  viewport,
   setDataRangeMap,
 }: Params) {
   const pendingIntensityRef = useRef(new Map<string, { min: number; max: number }>());
@@ -44,22 +44,10 @@ export function useIntensityBatcher({
   useEffect(() => {
     const client = clientRef.current;
     if (!client) return;
-    client.onIntensityRange = (rawId, min, max) => {
-      // For collection datasets, the GPU worker reports intensity using member IDs,
-      // but contrast settings and data-range maps are keyed by parent dataset ID.
-      let datasetId = rawId;
-      const datasets = datasetsRef.current;
-      if (!datasets.has(rawId)) {
-        for (const [dsId, ds] of datasets) {
-          if (ds.manifest.images.some(img => img.image_id === rawId)) {
-            datasetId = dsId;
-            break;
-          }
-        }
-      }
-
-      // Merge with any existing pending range (union across members)
-      const existing = pendingIntensityRef.current.get(datasetId);
+    client.onIntensityRange = (datasetId, channel, min, max) => {
+      const key = intensityRangeKey(datasetId, channel);
+      // Merge across members of this dataset/channel only.
+      const existing = pendingIntensityRef.current.get(key);
       const mergedMin = existing ? Math.min(existing.min, min) : min;
       const mergedMax = existing ? Math.max(existing.max, max) : max;
 
@@ -71,21 +59,24 @@ export function useIntensityBatcher({
       if (isAuto) {
         const scene = wasmSceneRef.current;
         if (scene) {
-          const c = scene.c();
           const cmd: ViewportCommand = {
             type: "set_channel_contrast",
             dataset_id: datasetId,
-            channel: c,
+            channel,
             min: mergedMin,
             max: mergedMax,
           };
-          guardedSceneCall("apply_command", scene, () => scene.apply_command(JSON.stringify(cmd)));
-          invalidateResidency(loopRef.current, "auto_contrast");
-          sessionRef.current?.bridge.sendDatasetPresence(scene.export_dataset_presence());
+          viewport.apply(cmd, {
+            source: "auto_contrast",
+            breakFollow: false,
+            publication: "dataset-presence",
+            invalidation: "residency",
+            history: { skip: true },
+          });
         }
       }
 
-      pendingIntensityRef.current.set(datasetId, { min: mergedMin, max: mergedMax });
+      pendingIntensityRef.current.set(key, { min: mergedMin, max: mergedMax });
       if (!intensityRafRef.current) {
         intensityRafRef.current = requestAnimationFrame(() => {
           intensityRafRef.current = 0;
@@ -117,5 +108,5 @@ export function useIntensityBatcher({
         intensityRafRef.current = 0;
       }
     };
-  }, [clientReady, clientRef, autoContrastMapRef, wasmSceneRef, loopRef, sessionRef, datasetsRef, setDataRangeMap]);
+  }, [clientReady, clientRef, autoContrastMapRef, wasmSceneRef, viewport, setDataRangeMap]);
 }

@@ -55,10 +55,6 @@
     "Explicit",
     "Derived"
   ],
-  "proxy_kinds": [
-    "GroupProxy3D",
-    "TileProxy3D"
-  ],
   "dataset_open_stages": [
     "request_received",
     "authorization",
@@ -76,6 +72,7 @@
     "session_closed",
     "workspace_lookup",
     "unsupported_scheme",
+    "invalid_locator",
     "local_path",
     "missing_object",
     "permission",
@@ -83,10 +80,18 @@
     "http",
     "storage_backend",
     "unsupported_codec",
+    "decode_failure",
     "unsupported_layout",
+    "chunk_out_of_bounds",
+    "resource_limit",
     "malformed_metadata",
     "missing_metadata",
     "import",
+    "unknown_dataset",
+    "unknown_image",
+    "missing_chunk_metadata",
+    "invalid_chunk_key",
+    "protocol",
     "persistence",
     "internal"
   ],
@@ -104,11 +109,6 @@
   ],
   "generated_level_roles": [
     "coarse"
-  ],
-  "bookmark_actions": [
-    "created",
-    "updated",
-    "deleted"
   ],
   "viewer_interest_modes": [
     "slice",

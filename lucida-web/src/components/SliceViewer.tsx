@@ -4,11 +4,15 @@ import type { WasmScene } from "lucida-core";
 import { RenderClient } from "../renderer/renderClient.ts";
 import { RenderLoop, type DatasetEntry } from "../renderLoop.ts";
 import type { Session } from "../session.ts";
-import { applyDocumentCommand, applyViewportCommand } from "../applyAndSend.ts";
+import { applyDocumentCommand } from "../applyAndSend.ts";
+import type { ViewportCoordinator } from "../viewportCoordinator.ts";
 import { buildAnnotationView, liveViewWithLiveZTC } from "../savedView/buildAnnotationView.ts";
-import type { AnnotationDraft } from "./annotationDraft.ts";
+import type { AnnotationDraftStore } from "./annotationDraft.ts";
 import { exceedsClickSlop } from "./annotationInteraction.ts";
-import { eventToWorld as sceneEventToWorld } from "./cameraProjection.ts";
+import {
+  centerForWorldAnchor,
+  eventToWorld as sceneEventToWorld,
+} from "./cameraProjection.ts";
 
 interface Props {
   z: number;
@@ -20,8 +24,7 @@ interface Props {
   client: RenderClient;
   canvas: HTMLCanvasElement;
   remoteDocumentVersion: number;
-  emitPresence: () => void;
-  breakFollow: () => void;
+  viewport: ViewportCoordinator;
   sendCursor: (position: [number, number] | null) => void;
   loopRef: RefObject<RenderLoop | null>;
   onLoopChange: (loop: RenderLoop | null) => void;
@@ -44,10 +47,10 @@ interface Props {
    * the in-progress shape here (screen-space CSS px, relative to the canvas) and
    * {@link AnnotationDraftOverlay} renders it growing under the cursor. Cleared
    * on release/cancel, when the real annotation is committed. */
-  annotationDraftRef: RefObject<AnnotationDraft | null>;
+  annotationDraft: AnnotationDraftStore;
 }
 
-export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, loopRef: parentLoopRef, onLoopChange, annotationDatasetId, annotationKind, myId, sendCommand, onDocumentChanged, annotationDraftRef }: Props) {
+export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas, remoteDocumentVersion, viewport, sendCursor, loopRef: parentLoopRef, onLoopChange, annotationDatasetId, annotationKind, myId, sendCommand, onDocumentChanged, annotationDraft }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
   const [dragging, setDragging] = useState(false);
   const lastPos = useRef({ x: 0, y: 0 });
@@ -136,7 +139,6 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
 
   const onPointerMove = useCallback(
     (e: PointerEvent) => {
-      const dpr = devicePixelRatio;
       const rect = canvas.getBoundingClientRect();
       // Cursor presence rides the same shared inverse camera projection every
       // world-anchored producer uses.
@@ -150,25 +152,33 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
       const press = pressStart.current;
       if (press?.pin) {
         const drawKind = annotationKindRef.current;
-        annotationDraftRef.current =
+        annotationDraft.set(
           (drawKind === "line" || drawKind === "box") &&
           exceedsClickSlop(press.x, press.y, e.clientX, e.clientY)
             ? { kind: drawKind, x0: press.x - rect.left, y0: press.y - rect.top, x1: e.clientX - rect.left, y1: e.clientY - rect.top }
-            : null;
+            : null,
+        );
       }
 
       if (!dragging) return;
-      const dx = (e.clientX - lastPos.current.x) * dpr;
-      const dy = (e.clientY - lastPos.current.y) * dpr;
+      const dx = e.clientX - lastPos.current.x;
+      const dy = e.clientY - lastPos.current.y;
       lastPos.current = { x: e.clientX, y: e.clientY };
       const pdx = -dx;
       const pdy = -dy;
-      breakFollow();
-      applyViewportCommand(scene, { type: "pan", dx: pdx, dy: pdy });
-      emitPresence();
-      loopRef.current?.markInteractiveDirty();
+      viewport.apply(
+        { type: "pan", dx: pdx, dy: pdy },
+        {
+          source: "slice_pan",
+          history: {
+            label: "pan",
+            coalesceKey: "slice_pan",
+            coalesceWindowMs: Infinity,
+          },
+        },
+      );
     },
-    [dragging, scene, canvas, emitPresence, breakFollow, sendCursor, annotationDraftRef, eventToWorld],
+    [dragging, canvas, viewport, sendCursor, annotationDraft, eventToWorld],
   );
 
   const onPointerUp = useCallback(
@@ -176,9 +186,10 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
       const press = pressStart.current;
       pressStart.current = null;
       setDragging(false);
+      viewport.endGesture("slice_pan");
       // The draw is ending — clear the live preview; the committed shape (below)
       // takes over.
-      annotationDraftRef.current = null;
+      annotationDraft.set(null);
 
       // Only a shift-press draws, and only when a dataset is selected to scope
       // the annotation to.
@@ -251,15 +262,16 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
       onDocumentChangedRef.current();
       loopRef.current?.markInteractiveDirty();
     },
-    [eventToWorld, scene, annotationDraftRef],
+    [eventToWorld, scene, annotationDraft, viewport],
   );
 
   const onPointerCancel = useCallback(() => {
     // A cancelled gesture never drops a pin.
     pressStart.current = null;
     setDragging(false);
-    annotationDraftRef.current = null;
-  }, [annotationDraftRef]);
+    viewport.endGesture("slice_pan");
+    annotationDraft.set(null);
+  }, [annotationDraft, viewport]);
 
   const onPointerLeave = useCallback(() => {
     sendCursor(null);
@@ -274,29 +286,31 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
     (e: WheelEvent) => {
       e.preventDefault();
 
-      const dpr = devicePixelRatio;
-      const rect = canvas.getBoundingClientRect();
-      const cursorX = (e.clientX - rect.left) * dpr;
-      const cursorY = (e.clientY - rect.top) * dpr;
-      const canvasW = canvas.clientWidth * dpr;
-      const canvasH = canvas.clientHeight * dpr;
-
       // The world point under the cursor (the zoom anchor), via the shared
       // inverse projection — read BEFORE the zoom changes the camera.
       const [worldX, worldY] = sceneEventToWorld(scene, canvas, e);
 
       const factor = e.deltaY > 0 ? 0.9 : 1.1;
-      breakFollow();
-      applyViewportCommand(scene, { type: "zoom_by", factor });
-      const newZoom = scene.zoom();
-
-      const newCx = worldX - (cursorX - canvasW / 2) / newZoom;
-      const newCy = worldY - (cursorY - canvasH / 2) / newZoom;
-      applyViewportCommand(scene, { type: "set_center", x: newCx, y: newCy });
-      emitPresence();
-      loopRef.current?.markInteractiveDirty();
+      viewport.transact((liveScene, apply) => {
+        apply({ type: "zoom_by", factor });
+        const newZoom = liveScene.zoom();
+        const [newCx, newCy] = centerForWorldAnchor(
+          canvas,
+          e,
+          [worldX, worldY],
+          newZoom,
+        );
+        apply({ type: "set_center", x: newCx, y: newCy });
+      }, {
+        source: "slice_zoom",
+        history: {
+          label: "zoom",
+          coalesceKey: "slice_zoom",
+          coalesceWindowMs: 250,
+        },
+      });
     },
-    [scene, canvas, emitPresence, breakFollow],
+    [scene, canvas, viewport],
   );
 
   useEffect(() => {

@@ -9,6 +9,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { act, render, screen, cleanup, fireEvent } from "@testing-library/react";
 import { ProfileMenu } from "./ProfileMenu.tsx";
 import type { AuthPrincipal } from "./types.ts";
+import type { LogoutFailure } from "./whoami.ts";
 
 const PRINCIPAL: AuthPrincipal = {
   email: "dev@local",
@@ -20,11 +21,13 @@ const PRINCIPAL: AuthPrincipal = {
 let session: {
   principal: AuthPrincipal;
   refresh: () => Promise<void>;
-  signOut: () => Promise<void>;
+  signOut: () => Promise<boolean>;
+  logoutFailure: LogoutFailure | null;
 } = {
   principal: PRINCIPAL,
   refresh: async () => {},
-  signOut: async () => {},
+  signOut: async () => true,
+  logoutFailure: null,
 };
 
 const fetchDevAuthStatus = vi.fn(async () => ({
@@ -44,7 +47,12 @@ vi.mock("./whoami.ts", () => ({
 
 afterEach(() => {
   cleanup();
-  session = { principal: PRINCIPAL, refresh: async () => {}, signOut: async () => {} };
+  session = {
+    principal: PRINCIPAL,
+    refresh: async () => {},
+    signOut: async () => true,
+    logoutFailure: null,
+  };
   fetchDevAuthStatus.mockClear();
   fetchDevAuthStatus.mockResolvedValue({
     enabled: false,
@@ -74,8 +82,8 @@ describe("ProfileMenu", () => {
   });
 
   it("calls signOut when Sign out is clicked", async () => {
-    const signOut = vi.fn(async () => {});
-    session = { principal: PRINCIPAL, refresh: async () => {}, signOut };
+    const signOut = vi.fn(async () => true);
+    session = { principal: PRINCIPAL, refresh: async () => {}, signOut, logoutFailure: null };
     render(<ProfileMenu />);
 
     fireEvent.click(screen.getByRole("button", { name: /account menu/i }));
@@ -86,15 +94,34 @@ describe("ProfileMenu", () => {
     expect(signOut).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps a retryable sign-out failure visible while still authenticated", () => {
+    session = {
+      principal: PRINCIPAL,
+      refresh: async () => {},
+      signOut: async () => false,
+      logoutFailure: {
+        kind: "request_failed",
+        message: "Lucida could not confirm sign-out.",
+        retryable: true,
+        localSession: "unknown",
+      },
+    };
+    render(<ProfileMenu />);
+    fireEvent.click(screen.getByRole("button", { name: /account menu/i }));
+    expect(screen.getByRole("alert").textContent).toMatch(
+      /could not confirm sign-out.*try again/i,
+    );
+  });
+
   it("disables Sign out while the call is in flight", async () => {
-    let resolveSignOut!: () => void;
+    let resolveSignOut!: (completed: boolean) => void;
     const signOut = vi.fn(
       () =>
-        new Promise<void>((resolve) => {
+        new Promise<boolean>((resolve) => {
           resolveSignOut = resolve;
         }),
     );
-    session = { principal: PRINCIPAL, refresh: async () => {}, signOut };
+    session = { principal: PRINCIPAL, refresh: async () => {}, signOut, logoutFailure: null };
     render(<ProfileMenu />);
 
     fireEvent.click(screen.getByRole("button", { name: /account menu/i }));
@@ -106,7 +133,7 @@ describe("ProfileMenu", () => {
     expect(pending.disabled).toBe(true);
 
     await act(async () => {
-      resolveSignOut();
+      resolveSignOut(true);
     });
   });
 
@@ -114,7 +141,8 @@ describe("ProfileMenu", () => {
     session = {
       principal: { ...PRINCIPAL, picture_url: "https://example.com/me.png" },
       refresh: async () => {},
-      signOut: async () => {},
+      signOut: async () => true,
+      logoutFailure: null,
     };
     const { container } = render(<ProfileMenu />);
     const img = container.querySelector("img");
@@ -128,7 +156,12 @@ describe("ProfileMenu", () => {
       default_principal: PRINCIPAL,
     });
     const refresh = vi.fn(async () => {});
-    session = { principal: PRINCIPAL, refresh, signOut: async () => {} };
+    session = {
+      principal: PRINCIPAL,
+      refresh,
+      signOut: async () => true,
+      logoutFailure: null,
+    };
 
     await act(async () => {
       render(<ProfileMenu />);

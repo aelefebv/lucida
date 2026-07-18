@@ -7,10 +7,8 @@ import type { CpuCache } from "../../fetch/index.ts";
 import type {
   ChunkFeedbackReason,
   MissingChunk,
-  MissingProxy,
 } from "../../../renderer/workerProtocol.ts";
 import { debugLog } from "../../../debug/logging.ts";
-import { proxyKeyFromMissing } from "../proxyKeys.ts";
 import {
   channelFromChunkKey,
   parseWorkerMemberId,
@@ -68,50 +66,42 @@ export class WorkerFeedback {
   }
 
   /**
-   * Worker wanted-set is authoritative residency feedback. Chunks clear
-   * optimistic sent state; proxies do the same through their composite
-   * proxy key. Both paths schedule a residency tick in RenderLoop.
+   * Worker wanted-set is authoritative residency feedback. Missing chunks
+   * clear optimistic sent state and schedule a residency tick in RenderLoop.
    */
   handleWantedSetDelta(
     datasetId: string,
-    missing: Array<MissingChunk | MissingProxy>,
+    missing: MissingChunk[],
     cpuCache: CpuCache,
   ): void {
     this.datasetsWithWantedSnapshot.add(datasetId);
     const missingChunksForDataset = new Map<string, Map<number, Set<string>>>();
     let missingChunks = 0;
-    let missingProxies = 0;
     for (const entry of missing) {
-      if (entry.kind === "chunk") {
-        const parsed = parseWorkerMemberId(entry.memberId);
-        const c = entry.c ?? parsed.c ?? channelFromChunkKey(entry.chunkKey) ?? 0;
-        const imageId = parsed.imageId;
-        let byChannel = missingChunksForDataset.get(imageId);
-        if (!byChannel) {
-          byChannel = new Map();
-          missingChunksForDataset.set(imageId, byChannel);
-        }
-        let keys = byChannel.get(c);
-        if (!keys) {
-          keys = new Set();
-          byChannel.set(c, keys);
-        }
-        keys.add(entry.chunkKey);
-        if (entry.tier) {
-          cpuCache.markChunkMissing(parsed.imageId, c, entry.chunkKey, entry.tier);
-        } else {
-          cpuCache.markChunkMissing(parsed.imageId, c, entry.chunkKey);
-        }
-        missingChunks++;
-      } else if (entry.kind === "proxy") {
-        cpuCache.markProxyMissing(proxyKeyFromMissing(entry));
-        missingProxies++;
+      const parsed = parseWorkerMemberId(entry.memberId);
+      const c = entry.c ?? parsed.c ?? channelFromChunkKey(entry.chunkKey) ?? 0;
+      const imageId = parsed.imageId;
+      let byChannel = missingChunksForDataset.get(imageId);
+      if (!byChannel) {
+        byChannel = new Map();
+        missingChunksForDataset.set(imageId, byChannel);
       }
+      let keys = byChannel.get(c);
+      if (!keys) {
+        keys = new Set();
+        byChannel.set(c, keys);
+      }
+      keys.add(entry.chunkKey);
+      if (entry.tier) {
+        cpuCache.markChunkMissing(parsed.imageId, c, entry.chunkKey, entry.tier);
+      } else {
+        cpuCache.markChunkMissing(parsed.imageId, c, entry.chunkKey);
+      }
+      missingChunks++;
     }
-    if (missingChunks > 0 || missingProxies > 0) {
+    if (missingChunks > 0) {
       debugLog("orch", "upload.worker_wanted_set_delta", {
         missingChunks,
-        missingProxies,
       });
     }
     this.missingChunksByDataset.set(datasetId, missingChunksForDataset);

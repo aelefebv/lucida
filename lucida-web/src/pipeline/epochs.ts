@@ -9,11 +9,6 @@ export interface SceneEpochs {
   layout: number;
   view: number;
   selection: number;
-  /**
-   * Bumped by `apply_asset_catalog_delta` (catalog membership change).
-   * The orchestrator reads it from `wasmScene.asset_epoch()` each tick.
-   */
-  asset: number;
   /** Bumped when Planning produces a new request plan. */
   request: number;
 }
