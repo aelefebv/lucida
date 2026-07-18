@@ -1,0 +1,133 @@
+{
+  "schema_version": 1,
+  "base_fixture": "dataset-open/dataset_opened_collection.json",
+  "target": "manifest",
+  "cases": [
+    {
+      "name": "valid_reference",
+      "accepted": true,
+      "operations": []
+    },
+    {
+      "name": "valid_inline",
+      "accepted": true,
+      "operations": [
+        { "op": "copy", "from": "/multiscales/0", "path": "/images/0/multiscale" },
+        { "op": "remove", "path": "/images/0/multiscale_ref" }
+      ]
+    },
+    {
+      "name": "both_inline_and_reference",
+      "accepted": false,
+      "field": "images[].multiscale",
+      "operations": [
+        { "op": "copy", "from": "/multiscales/0", "path": "/images/0/multiscale" }
+      ]
+    },
+    {
+      "name": "neither_inline_nor_reference",
+      "accepted": false,
+      "field": "images[].multiscale",
+      "operations": [
+        { "op": "remove", "path": "/images/0/multiscale_ref" }
+      ]
+    },
+    {
+      "name": "inline_is_not_object",
+      "accepted": false,
+      "field": "images[].multiscale",
+      "operations": [
+        { "op": "remove", "path": "/images/0/multiscale_ref" },
+        { "op": "set", "path": "/images/0/multiscale", "value": [] }
+      ]
+    },
+    {
+      "name": "reference_is_boolean",
+      "accepted": false,
+      "field": "images[].multiscale_ref",
+      "operations": [
+        { "op": "set", "path": "/images/0/multiscale_ref", "value": true }
+      ]
+    },
+    {
+      "name": "reference_is_string",
+      "accepted": false,
+      "field": "images[].multiscale_ref",
+      "operations": [
+        { "op": "set", "path": "/images/0/multiscale_ref", "value": "0" }
+      ]
+    },
+    {
+      "name": "reference_is_negative",
+      "accepted": false,
+      "field": "images[].multiscale_ref",
+      "operations": [
+        { "op": "set", "path": "/images/0/multiscale_ref", "value": -1 }
+      ]
+    },
+    {
+      "name": "reference_is_out_of_range",
+      "accepted": false,
+      "field": "images[].multiscale_ref",
+      "operations": [
+        { "op": "set", "path": "/images/0/multiscale_ref", "value": 99 }
+      ]
+    },
+    {
+      "name": "shared_table_is_missing",
+      "accepted": false,
+      "field": "multiscales",
+      "operations": [
+        { "op": "remove", "path": "/multiscales" }
+      ]
+    },
+    {
+      "name": "shared_table_is_not_array",
+      "accepted": false,
+      "field": "multiscales",
+      "operations": [
+        { "op": "set", "path": "/multiscales", "value": {} }
+      ]
+    },
+    {
+      "name": "shared_entry_is_not_object",
+      "accepted": false,
+      "field": "multiscales[0]",
+      "operations": [
+        { "op": "set", "path": "/multiscales/0", "value": [] }
+      ]
+    },
+    {
+      "name": "format_version_is_string",
+      "accepted": false,
+      "field": "format_version",
+      "operations": [
+        { "op": "set", "path": "/format_version", "value": "2" }
+      ]
+    },
+    {
+      "name": "format_version_is_fractional",
+      "accepted": false,
+      "field": "format_version",
+      "operations": [
+        { "op": "set", "path": "/format_version", "value": 2.5 }
+      ]
+    },
+    {
+      "name": "format_version_is_negative",
+      "accepted": false,
+      "field": "format_version",
+      "operations": [
+        { "op": "set", "path": "/format_version", "value": -1 }
+      ]
+    },
+    {
+      "name": "format_version_overflows_u32",
+      "accepted": false,
+      "field": "format_version",
+      "operations": [
+        { "op": "set", "path": "/format_version", "value": 4294967296 }
+      ]
+    }
+  ]
+}

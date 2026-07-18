@@ -28,6 +28,10 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+# Cross-language wire fixtures are checked-in source, including the
+# lower-case manifest contract directory on case-insensitive filesystems.
+!wire-fixtures/manifest/
+!wire-fixtures/manifest/**
 
 # PyInstaller
 #  Usually these files are written by a python script from a template

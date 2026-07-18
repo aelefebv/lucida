@@ -186,7 +186,15 @@ SESSION_CONTRACT: dict[str, tuple[str, frozenset[str]]] = {
     "server_snapshot.json": (
         "snapshot",
         frozenset(
-            {"type", "seq", "document", "peers", "your_id", "generated_availability"}
+            {
+                "type",
+                "seq",
+                "document",
+                "peers",
+                "your_id",
+                "generated_availability",
+                "dataset_fetch",
+            }
         ),
     ),
     "server_source_chunk_status.json": (

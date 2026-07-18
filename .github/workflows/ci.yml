@@ -115,6 +115,11 @@ jobs:
     name: Ingestion safety (Miri + ASan + fuzz)
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    # The repository pins stable in rust-toolchain.toml. An explicit job-level
+    # override is required so every Cargo invocation in this safety lane uses
+    # the same pinned nightly that provides Miri and sanitizer support.
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-07-01
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
