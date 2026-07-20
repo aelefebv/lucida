@@ -962,12 +962,91 @@ def passing_arm(dpr: int) -> web_surface.RealSpaArmResult:
 
 
 class RealSpaMatrixTests(unittest.TestCase):
+    def test_process_reaper_is_not_a_renderer_acceptance_deadline(self) -> None:
+        # The driver contains many independently bounded acceptance phases.
+        # Its parent timeout is only the orphan-process backstop and therefore
+        # must not reuse the much shorter initial-render readiness budget.
+        self.assertEqual(web_surface.DEFAULT_SPA_RENDER_WAIT_MS, 150_000)
+        self.assertEqual(web_surface.DEFAULT_SPA_PROCESS_REAP_TIMEOUT_S, 20 * 60)
+        self.assertGreater(
+            web_surface.DEFAULT_SPA_PROCESS_REAP_TIMEOUT_S,
+            web_surface.DEFAULT_SPA_RENDER_WAIT_MS / 1000,
+        )
+
+    def test_process_reaper_timeout_remains_a_structured_failed_arm(self) -> None:
+        timeout = subprocess.TimeoutExpired(
+            ["node", "driver.cjs"],
+            7,
+            output="partial progress\n",
+            stderr="driver still running\n",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            with (
+                patch.object(web_surface.shutil, "which", return_value="/node"),
+                patch.object(web_surface, "_ensure_playwright", return_value=root / "modules"),
+                patch.object(web_surface, "_system_browser_path", return_value="/browser"),
+                patch.object(web_surface, "run_group", side_effect=timeout),
+            ):
+                arm = web_surface._capture_real_spa_arm(
+                    url="http://127.0.0.1/w/ws-test",
+                    web_out=root,
+                    device_scale_factor=2,
+                    process_reap_timeout_s=7,
+                    log=lambda _message: None,
+                )
+
+            driver_log = (root / "spa-driver-dpr2.log").read_text()
+
+        self.assertFalse(arm.captured)
+        self.assertFalse(arm.rendered)
+        self.assertEqual(
+            arm.reason,
+            "real-SPA process exceeded the 7s reaper ceiling",
+        )
+        self.assertIn("partial progress", driver_log)
+        self.assertIn("driver still running", driver_log)
+        self.assertIn("reaper ceiling", driver_log)
+
+    def test_render_readiness_and_process_reaper_budgets_are_plumbed_separately(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=(
+                '{"captured":false,"rendered":false,"frame_advanced":false,'
+                '"reason":"not-ready"}\n'
+            ),
+            stderr="",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            with (
+                patch.object(web_surface.shutil, "which", return_value="/node"),
+                patch.object(web_surface, "_ensure_playwright", return_value=root / "modules"),
+                patch.object(web_surface, "_system_browser_path", return_value="/browser"),
+                patch.object(web_surface, "run_group", return_value=completed) as run_group,
+            ):
+                web_surface._capture_real_spa_arm(
+                    url="http://127.0.0.1/w/ws-test",
+                    web_out=root,
+                    device_scale_factor=2,
+                    process_reap_timeout_s=601,
+                    render_wait_ms=12_345,
+                    log=lambda _message: None,
+                )
+
+        request = json.loads(run_group.call_args.args[0][2])
+        self.assertEqual(request["render_wait_ms"], 12_345)
+        self.assertEqual(run_group.call_args.kwargs["timeout"], 601)
+
     def test_matrix_always_runs_dpr1_then_dpr2_and_uses_dpr2_as_primary(self) -> None:
-        seen: list[int] = []
+        seen: list[tuple[int, float | None, int]] = []
 
         def fake_arm(**kwargs):
             dpr = kwargs["device_scale_factor"]
-            seen.append(dpr)
+            seen.append(
+                (dpr, kwargs["process_reap_timeout_s"], kwargs["render_wait_ms"]),
+            )
             return passing_arm(dpr)
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -978,7 +1057,7 @@ class RealSpaMatrixTests(unittest.TestCase):
                     log=lambda _message: None,
                 )
 
-        self.assertEqual(seen, [1, 2])
+        self.assertEqual(seen, [(1, 1200.0, 150_000), (2, 1200.0, 150_000)])
         self.assertTrue(result.ok)
         self.assertTrue(result.captured)
         self.assertEqual(result.spa_png, "/tmp/spa-dpr2.png")
@@ -989,6 +1068,36 @@ class RealSpaMatrixTests(unittest.TestCase):
         )
         self.assertEqual(result.to_dict()["dpr_matrix"]["backing_area_ratio"], 4.0)
         self.assertTrue(result.to_dict()["dpr_matrix"]["passed"])
+
+    def test_legacy_spa_timeout_keyword_remains_compatible(self) -> None:
+        seen: list[float | None] = []
+
+        def fake_arm(**kwargs):
+            seen.append(kwargs["process_reap_timeout_s"])
+            return passing_arm(kwargs["device_scale_factor"])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.object(web_surface, "_capture_real_spa_arm", side_effect=fake_arm):
+                result = web_surface.capture_real_spa(
+                    url="http://127.0.0.1/w/ws-test",
+                    web_out=Path(temp_dir),
+                    spa_timeout_s=321,
+                    log=lambda _message: None,
+                )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(seen, [321, 321])
+
+    def test_reaper_timeout_keywords_are_mutually_exclusive(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ValueError, "either spa_timeout_s"):
+                web_surface.capture_real_spa(
+                    url="http://127.0.0.1/w/ws-test",
+                    web_out=Path(temp_dir),
+                    spa_timeout_s=321,
+                    process_reap_timeout_s=654,
+                    log=lambda _message: None,
+                )
 
     def test_matrix_rejects_a_false_dpr2_backing_area(self) -> None:
         dpr1 = passing_arm(1)

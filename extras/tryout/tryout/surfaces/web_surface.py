@@ -67,9 +67,15 @@ DEFAULT_CAPTURE_TIMEOUT_S = 180.0
 # Seconds we ask lucida's own renderer to wait for the canvas (passed through to
 # `viewer screenshot --timeout-seconds`). Slightly under the subprocess ceiling.
 DEFAULT_RENDER_WAIT_S = 150
-# Hard ceiling for each Playwright matrix subprocess (provision + launch +
-# navigate + render-wait + capture). Generous; the backstop against an orphan.
-DEFAULT_SPA_TIMEOUT_S = 240.0
+# Last-resort ceiling for each Playwright matrix subprocess. This is process
+# reaping, not a renderer-liveness or acceptance deadline: the embedded driver
+# owns strict, phase-local waits for navigation, presentation, and interactions.
+# The full driver is a serial acceptance program, not one render wait. Its
+# phase-local timeouts remain the correctness gates; this outer 20-minute bound
+# is an operational ceiling for pathological accumulation or an unbounded
+# third-party browser call. CI owns a separate job-level ceiling with room for
+# both arms, setup, the CLI/Python surfaces, teardown, and evidence upload.
+DEFAULT_SPA_PROCESS_REAP_TIMEOUT_S = 20 * 60.0
 # How long the Playwright driver waits for window.__lucidaCaptureReady, in ms.
 DEFAULT_SPA_RENDER_WAIT_MS = 150_000
 # Default full-page viewport for each matrix arm.
@@ -5796,7 +5802,7 @@ def _capture_real_spa_arm(
     url: str,
     web_out: Path,
     device_scale_factor: int,
-    spa_timeout_s: float = DEFAULT_SPA_TIMEOUT_S,
+    process_reap_timeout_s: float | None = None,
     render_wait_ms: int = DEFAULT_SPA_RENDER_WAIT_MS,
     viewport: tuple[int, int] = (DEFAULT_VIEWPORT_W, DEFAULT_VIEWPORT_H),
     first_run_dataset_path: str | None = None,
@@ -5808,11 +5814,18 @@ def _capture_real_spa_arm(
 
     Never raises: every failure to provision Node/Playwright/a browser, or any
     runtime error, becomes a structured failed arm. The
-    subprocess has a hard timeout so a stuck browser can't hang the run, and the
-    driver always closes its browser, so no orphan survives.
+    subprocess has a last-resort reaper ceiling so a stuck browser can't hang
+    the run, while strict phase-local deadlines inside the driver remain the
+    acceptance gates. The driver always closes its browser, so no orphan
+    survives.
     """
     if device_scale_factor not in (1, 2):
         raise ValueError("device_scale_factor must be exactly 1 or 2")
+    reap_timeout_s = (
+        process_reap_timeout_s
+        if process_reap_timeout_s is not None
+        else DEFAULT_SPA_PROCESS_REAP_TIMEOUT_S
+    )
     suffix = f"dpr{device_scale_factor}"
     spa_png = web_out / f"spa-{suffix}.png"
     canvas_png = web_out / f"canvas-{suffix}.png"
@@ -5893,7 +5906,7 @@ def _capture_real_spa_arm(
             env=env,
             capture_output=True,
             text=True,
-            timeout=spa_timeout_s,
+            timeout=reap_timeout_s,
         )
         stdout = completed.stdout or ""
         stderr = completed.stderr or ""
@@ -5902,7 +5915,7 @@ def _capture_real_spa_arm(
         stdout = error.stdout.decode() if isinstance(error.stdout, bytes) else (error.stdout or "")
         stderr = (
             (error.stderr.decode() if isinstance(error.stderr, bytes) else (error.stderr or ""))
-            + f"\n[tryout] real-SPA capture timed out after {spa_timeout_s:g}s"
+            + f"\n[tryout] real-SPA process exceeded the {reap_timeout_s:g}s reaper ceiling"
         )
         returncode = None
         _write_text(driver_log, _spa_driver_log(argv, stdout, stderr, returncode))
@@ -5913,7 +5926,10 @@ def _capture_real_spa_arm(
             captured=False,
             rendered=False,
             frame_advanced=False,
-            reason=f"real-SPA capture timed out after {spa_timeout_s:g}s",
+            reason=(
+                "real-SPA process exceeded the "
+                f"{reap_timeout_s:g}s reaper ceiling"
+            ),
             spa_png=str(spa_png) if spa_png.is_file() else None,
             canvas_png=str(canvas_png) if canvas_png.is_file() else None,
             console_log=str(console_log) if console_log.is_file() else None,
@@ -6198,7 +6214,8 @@ def capture_real_spa(
     *,
     url: str,
     web_out: Path,
-    spa_timeout_s: float = DEFAULT_SPA_TIMEOUT_S,
+    spa_timeout_s: float | None = None,
+    process_reap_timeout_s: float | None = None,
     render_wait_ms: int = DEFAULT_SPA_RENDER_WAIT_MS,
     viewport: tuple[int, int] = (DEFAULT_VIEWPORT_W, DEFAULT_VIEWPORT_H),
     expectation: RealContentExpectation = RealContentExpectation(),
@@ -6213,6 +6230,15 @@ def capture_real_spa(
     pixels, a forced resize produces a later GPU-complete frame, and neither arm
     reports a device-loss/GPU-fatal diagnostic.
     """
+    if spa_timeout_s is not None and process_reap_timeout_s is not None:
+        raise ValueError(
+            "pass either spa_timeout_s or process_reap_timeout_s, not both",
+        )
+    configured_reap_timeout_s = (
+        process_reap_timeout_s
+        if process_reap_timeout_s is not None
+        else spa_timeout_s
+    )
     require_collection_1x12 = (
         expectation.require_collection_1x12
         or _fixture_has_known_collection_1x12_profile(first_run_dataset_path)
@@ -6222,7 +6248,11 @@ def capture_real_spa(
             url=url,
             web_out=web_out,
             device_scale_factor=device_scale_factor,
-            spa_timeout_s=spa_timeout_s,
+            process_reap_timeout_s=(
+                configured_reap_timeout_s
+                if configured_reap_timeout_s is not None
+                else DEFAULT_SPA_PROCESS_REAP_TIMEOUT_S
+            ),
             render_wait_ms=render_wait_ms,
             viewport=viewport,
             first_run_dataset_path=first_run_dataset_path,

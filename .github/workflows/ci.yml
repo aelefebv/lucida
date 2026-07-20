@@ -296,7 +296,10 @@ jobs:
     name: Real server + CLI + Python + production browser (DPR1/2)
     needs: [rust, web, python]
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    # The production-browser harness runs two isolated serial acceptance arms.
+    # Each arm retains strict phase-local deadlines; this job ceiling covers the
+    # full cross-stack program plus teardown and evidence upload.
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
