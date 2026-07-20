@@ -288,6 +288,22 @@ def passing_browser_contract(
 
     def mobile_persistent_profile() -> dict:
         probe = overlay_probe("mobile")
+        selector_rect = {
+            "left": 28,
+            "top": 190,
+            "right": 338,
+            "bottom": 259,
+            "width": 310,
+            "height": 69,
+        }
+        minimap_rect = {
+            "left": 136,
+            "top": 271,
+            "right": 338,
+            "bottom": 473,
+            "width": 202,
+            "height": 202,
+        }
         return {
             "label": "mobile-persistent",
             "viewport": [390, 844],
@@ -295,9 +311,19 @@ def passing_browser_contract(
             "owner_present": True,
             "owner_layout": "stacked",
             "overlap": False,
-            "collection": probe["named_surfaces"]["collection_selector"],
-            "minimap": probe["named_surfaces"]["minimap"],
-            "collection_interaction": probe["collection_interaction"],
+            "collection": {
+                **probe["named_surfaces"]["collection_selector"],
+                "rect": dict(selector_rect),
+            },
+            "minimap": {
+                **probe["named_surfaces"]["minimap"],
+                "rect": dict(minimap_rect),
+            },
+            "collection_interaction": {
+                **probe["collection_interaction"],
+                "selector_rect": dict(selector_rect),
+                "minimap_rect": dict(minimap_rect),
+            },
         }
 
     idle_before = runtime_snapshot(posted=8, presented=8, worker_messages=12)
@@ -1299,6 +1325,18 @@ class RealSpaMatrixTests(unittest.TestCase):
         self.assertIn("current.getAttribute('aria-hidden') === 'true'", web_surface._SPA_DRIVER)
         self.assertIn("async function waitForLayoutSettlement", web_surface._SPA_DRIVER)
         self.assertIn("async function prepareViewportTrigger", web_surface._SPA_DRIVER)
+        persistent_start = web_surface._SPA_DRIVER.index(
+            "async function persistentOverlayProfile",
+        )
+        persistent_end = web_surface._SPA_DRIVER.index(
+            "async function floatingSurfaceProbe",
+            persistent_start,
+        )
+        persistent_profile = web_surface._SPA_DRIVER[persistent_start:persistent_end]
+        self.assertLess(
+            persistent_profile.index("exerciseCollectionSelector(page, label)"),
+            persistent_profile.index("waitForLayoutSettlement(page)"),
+        )
         probe_start = web_surface._SPA_DRIVER.index("async function floatingSurfaceProbe")
         interaction = web_surface._SPA_DRIVER.index(
             "const collectionInteraction = exercisePersistentInteraction", probe_start,
@@ -1321,6 +1359,45 @@ class RealSpaMatrixTests(unittest.TestCase):
             "[role=\"dialog\"][aria-label=\"Layers\"]",
             web_surface._SPA_DRIVER,
         )
+
+    def test_zero_size_recovery_separates_progress_from_quiescence(self) -> None:
+        self.assertIn("async function waitForSurfaceRecovery", web_surface._SPA_DRIVER)
+        recovery_start = web_surface._SPA_DRIVER.index(
+            "async function waitForSurfaceRecovery",
+        )
+        recovery_end = web_surface._SPA_DRIVER.index(
+            "async function waitForFinalCanvasSettlement",
+            recovery_start,
+        )
+        recovery_helper = web_surface._SPA_DRIVER[recovery_start:recovery_end]
+        self.assertIn("snapshot.client.frames.presented > presented", recovery_helper)
+        self.assertNotIn("snapshot.client.frames.pending === 0", recovery_helper)
+        self.assertIn("surface recovery timed out", recovery_helper)
+        self.assertIn("observed_frames", recovery_helper)
+        initial_recovery_start = web_surface._SPA_DRIVER.index(
+            "async function initialZeroSizeRecovery",
+        )
+        initial_recovery_end = web_surface._SPA_DRIVER.index(
+            "async function zeroSizeRecovery",
+            initial_recovery_start,
+        )
+        initial_recovery = web_surface._SPA_DRIVER[
+            initial_recovery_start:initial_recovery_end
+        ]
+        self.assertIn("waitForSurfaceRecovery(page", initial_recovery)
+        self.assertNotIn("snapshot.client.frames.pending === 0", initial_recovery)
+        later_recovery_start = web_surface._SPA_DRIVER.index(
+            "async function zeroSizeRecovery",
+        )
+        later_recovery_end = web_surface._SPA_DRIVER.index(
+            "async function runAxe",
+            later_recovery_start,
+        )
+        later_recovery = web_surface._SPA_DRIVER[
+            later_recovery_start:later_recovery_end
+        ]
+        self.assertIn("waitForSurfaceRecovery(page", later_recovery)
+        self.assertIn("waitForRuntimeSettled(page, 30000)", later_recovery)
 
     def test_idle_driver_uses_three_samples_without_masking_activity(self) -> None:
         self.assertIn("for (let index = 0; index < 3; index++)", web_surface._SPA_DRIVER)
@@ -1462,6 +1539,24 @@ class RealSpaMatrixTests(unittest.TestCase):
             missing_collection_failures,
         )
 
+        inconsistent_mobile = deepcopy(contract)
+        inconsistent_mobile_profile = inconsistent_mobile["overlays"][
+            "persistent_profiles"
+        ]["mobile"]
+        inconsistent_mobile_profile["collection_interaction"]["selector_rect"][
+            "left"
+        ] += 100
+        inconsistent_mobile_failures = web_surface._browser_acceptance_contract_failures(
+            inconsistent_mobile,
+            device_scale_factor=1,
+            require_first_run=False,
+            required_channel_count=3,
+        )
+        self.assertIn(
+            "overlay mobile persistent-overlay profile did not pass",
+            inconsistent_mobile_failures,
+        )
+
         non_collection = deepcopy(contract)
         for probe in non_collection["overlays"]["probes"].values():
             probe["named_surfaces"]["collection_selector"].update({
@@ -1492,6 +1587,35 @@ class RealSpaMatrixTests(unittest.TestCase):
             "required_cell_count": 12,
             "skip_reason": "fixture does not expose a visible collection selector",
         }
+
+        missing_optional_receipt = deepcopy(non_collection)
+        del missing_optional_receipt["overlays"]["persistent_profiles"]["mobile"][
+            "collection_interaction"
+        ]
+        self.assertIn(
+            "overlay mobile persistent-overlay profile did not pass",
+            web_surface._browser_acceptance_contract_failures(
+                missing_optional_receipt,
+                device_scale_factor=1,
+                require_first_run=False,
+                required_channel_count=3,
+            ),
+        )
+
+        unexplained_optional_skip = deepcopy(non_collection)
+        del unexplained_optional_skip["overlays"]["persistent_profiles"]["mobile"][
+            "collection_interaction"
+        ]["skip_reason"]
+        self.assertIn(
+            "overlay mobile persistent-overlay profile did not pass",
+            web_surface._browser_acceptance_contract_failures(
+                unexplained_optional_skip,
+                device_scale_factor=1,
+                require_first_run=False,
+                required_channel_count=3,
+            ),
+        )
+
         self.assertEqual(
             web_surface._browser_acceptance_contract_failures(
                 non_collection,

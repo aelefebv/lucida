@@ -1871,6 +1871,41 @@ async function waitForRuntimeSettled(page, timeoutMs = 15000, quietMs = 350) {
   return null;
 }
 
+async function waitForSurfaceRecovery(page, baseline, timeoutMs = 30000) {
+  // Recovery and quiescence are distinct guarantees. Requiring the presented
+  // frame and `pending === 0` in the same browser poll can miss a valid recovery
+  // when the renderer immediately schedules follow-up residency work. This
+  // helper proves only the recovery boundary; callers whose contract requires
+  // quiescence must separately use the quiet-window settlement helper.
+  try {
+    await page.waitForFunction(({ expectedMode, forwarded, posted, presented }) => {
+      const contract = window.__lucidaRenderContract;
+      if (!contract || contract.version !== 1) return false;
+      const snapshot = contract.getSnapshot();
+      const counters = snapshot.client.surface.byMode[expectedMode];
+      const accepted = snapshot.client.surface.lastForwarded;
+      return snapshot.mode === expectedMode
+        && counters.forwarded > forwarded
+        && accepted && accepted.mode === expectedMode
+        && accepted.width > 0 && accepted.height > 0 && !accepted.rejection
+        && snapshot.client.frames.posted > posted
+        && snapshot.client.frames.presented > presented;
+    }, baseline, { timeout: timeoutMs });
+  } catch (error) {
+    const snapshot = await renderRuntimeSnapshot(page);
+    const counters = snapshot && snapshot.client.surface.byMode[baseline.expectedMode];
+    throw new Error(baseline.expectedMode + ' surface recovery timed out: ' + JSON.stringify({
+      baseline,
+      observed_mode: snapshot && snapshot.mode,
+      observed_surface: counters,
+      observed_last_forwarded: snapshot && snapshot.client.surface.lastForwarded,
+      observed_frames: snapshot && snapshot.client.frames,
+      cause: String(error && error.message ? error.message : error).split('\n')[0],
+    }));
+  }
+  return renderRuntimeSnapshot(page);
+}
+
 async function waitForFinalCanvasSettlement(
   page,
   timeoutMs = 30000,
@@ -2029,23 +2064,12 @@ async function initialZeroSizeRecovery(context, sourcePage, target) {
       window.__lucidaTryoutReleaseInitialZero && window.__lucidaTryoutReleaseInitialZero();
       window.dispatchEvent(new Event('resize'));
     });
-    await page.waitForFunction(({ expectedMode, forwarded, posted, presented }) => {
-      const contract = window.__lucidaRenderContract;
-      if (!contract || contract.version !== 1) return false;
-      const snapshot = contract.getSnapshot();
-      const counters = snapshot.client.surface.byMode[expectedMode];
-      return snapshot.mode === expectedMode
-        && counters.forwarded > forwarded
-        && snapshot.client.frames.posted > posted
-        && snapshot.client.frames.presented > presented
-        && snapshot.client.frames.pending === 0;
-    }, {
+    const restored = await waitForSurfaceRecovery(page, {
       expectedMode: mode,
       forwarded: Number(modeBefore && modeBefore.forwarded || 0),
       posted: Number(initial && initial.client.frames.posted || 0),
       presented: Number(initial && initial.client.frames.presented || 0),
-    }, { timeout: 30000 });
-    const restored = await renderRuntimeSnapshot(page);
+    });
     const canvasLabel = target === '3d' ? '3D volume viewer' : '2D slice viewer';
     const rect = await page.locator('canvas[aria-label="' + canvasLabel + '"]').evaluate(
       (element) => window.__lucidaTryoutRectRecord(element),
@@ -2146,26 +2170,16 @@ async function zeroSizeRecovery(page, target) {
     window.dispatchEvent(new Event('resize'));
   }, { canvasLabel: label, oldStyle: savedStyle });
   const collapsedMode = collapsedRuntime.client.surface.byMode[mode];
-  await page.waitForFunction(({ expectedMode, forwarded, posted, presented }) => {
-    const contract = window.__lucidaRenderContract;
-    if (!contract || contract.version !== 1) return false;
-    const snapshot = contract.getSnapshot();
-    const counters = snapshot.client.surface.byMode[expectedMode];
-    const accepted = snapshot.client.surface.lastForwarded;
-    return snapshot.mode === expectedMode
-      && counters.forwarded > forwarded
-      && accepted && accepted.mode === expectedMode
-      && accepted.width > 0 && accepted.height > 0 && !accepted.rejection
-      && snapshot.client.frames.posted > posted
-      && snapshot.client.frames.presented > presented
-      && snapshot.client.frames.pending === 0;
-  }, {
+  await waitForSurfaceRecovery(page, {
     expectedMode: mode,
     forwarded: collapsedMode.forwarded,
     posted: collapsedRuntime.client.frames.posted,
     presented: collapsedRuntime.client.frames.presented,
-  }, { timeout: 30000 });
-  const restoredRuntime = await waitForRuntimeSettled(page);
+  });
+  const restoredRuntime = await waitForRuntimeSettled(page, 30000);
+  if (!restoredRuntime) {
+    throw new Error(mode + ' surface recovered but renderer did not settle');
+  }
   const restored = await page.evaluate((canvasLabel) => {
     const canvas = document.querySelector('canvas[aria-label="' + canvasLabel + '"]');
     return window.__lucidaTryoutRectRecord(canvas);
@@ -2870,6 +2884,11 @@ async function exerciseCollectionSelector(page, label) {
 }
 
 async function persistentOverlayProfile(page, label) {
+  // The edge-cell interaction scrolls the wide selector into its usable mobile
+  // arrangement. Measure the persistent overlays after that state transition;
+  // combining pre-interaction geometry with a post-interaction receipt makes a
+  // single profile describe two mutually inconsistent layouts.
+  const collectionInteraction = await exerciseCollectionSelector(page, label);
   const layoutSettlement = await waitForLayoutSettlement(page);
   const geometry = await page.evaluate((profileLabel) => {
     const visual = window.visualViewport;
@@ -2921,7 +2940,7 @@ async function persistentOverlayProfile(page, label) {
   return {
     ...geometry,
     layout_settlement: layoutSettlement,
-    collection_interaction: await exerciseCollectionSelector(page, label),
+    collection_interaction: collectionInteraction,
   };
 }
 
@@ -3425,6 +3444,10 @@ async function exerciseOverlayContract(
 
 function overlayFailures(contract, requireCollectionProfile) {
   const failures = [];
+  const sameRect = (left, right, tolerance = 2) => Boolean(left && right)
+    && ['left', 'top', 'right', 'bottom', 'width', 'height'].every((key) =>
+      Number.isFinite(left[key]) && Number.isFinite(right[key])
+        && Math.abs(left[key] - right[key]) <= tolerance);
   if (!contract || !contract.thread
     || contract.thread.trigger_hit_testable_before_click !== true) {
     failures.push('annotation thread trigger was not hit-testable before click');
@@ -3484,6 +3507,11 @@ function overlayFailures(contract, requireCollectionProfile) {
   if (!mobilePersistent
     || !mobilePersistent.layout_settlement || mobilePersistent.layout_settlement.settled !== true
     || mobilePersistent.owner_present !== true
+    || !mobilePersistentInteraction
+    || typeof mobilePersistentInteraction.applicable !== 'boolean'
+    || (mobilePersistentInteraction.applicable === false
+      && (typeof mobilePersistentInteraction.skip_reason !== 'string'
+        || mobilePersistentInteraction.skip_reason.trim().length === 0))
     || !mobilePersistentMinimap || mobilePersistentMinimap.present !== true
     || mobilePersistentMinimap.within_viewport !== true
     || mobilePersistentMinimap.registered_safe_region !== true) {
@@ -3497,6 +3525,9 @@ function overlayFailures(contract, requireCollectionProfile) {
     || mobilePersistentCollection.registered_safe_region !== true
     || !mobilePersistentCollection.accessible_name
     || !mobilePersistentInteraction || mobilePersistentInteraction.applicable !== true
+    || mobilePersistentInteraction.owner_layout !== mobilePersistent.owner_layout
+    || !sameRect(mobilePersistentCollection.rect, mobilePersistentInteraction.selector_rect)
+    || !sameRect(mobilePersistentMinimap.rect, mobilePersistentInteraction.minimap_rect)
     || mobilePersistentInteraction.populated_cell_count < mobilePersistentInteraction.required_cell_count
     || mobilePersistentInteraction.edge_cell_label !== 'Go to A12'
     || mobilePersistentInteraction.selector_minimap_overlap !== false
@@ -5890,6 +5921,15 @@ def _browser_acceptance_contract_failures(
             current = current.get(key)
         return current
 
+    def rects_match(left: Any, right: Any, tolerance: float = 2.0) -> bool:
+        keys = ("left", "top", "right", "bottom", "width", "height")
+        return isinstance(left, dict) and isinstance(right, dict) and all(
+            numeric_at_least(left.get(key), -math.inf)
+            and numeric_at_least(right.get(key), -math.inf)
+            and abs(float(left[key]) - float(right[key])) <= tolerance
+            for key in keys
+        )
+
     def audits_ok(value: Any, required_labels: set[str], scope: str) -> None:
         audits = value if isinstance(value, list) else []
         by_label = {
@@ -6282,6 +6322,15 @@ def _browser_acceptance_contract_failures(
             and isinstance(mobile_persistent_settlement, dict)
             and mobile_persistent_settlement.get("settled") is True
             and mobile_persistent.get("owner_present") is True
+            and isinstance(mobile_persistent_interaction, dict)
+            and isinstance(mobile_persistent_interaction.get("applicable"), bool)
+            and (
+                mobile_persistent_interaction.get("applicable") is True
+                or (
+                    isinstance(mobile_persistent_interaction.get("skip_reason"), str)
+                    and bool(mobile_persistent_interaction["skip_reason"].strip())
+                )
+            )
             and isinstance(mobile_persistent_minimap, dict)
             and mobile_persistent_minimap.get("present") is True
             and mobile_persistent_minimap.get("within_viewport") is True
@@ -6301,6 +6350,16 @@ def _browser_acceptance_contract_failures(
                 and bool(mobile_persistent_collection.get("accessible_name"))
                 and isinstance(mobile_persistent_interaction, dict)
                 and mobile_persistent_interaction.get("applicable") is True
+                and mobile_persistent_interaction.get("owner_layout")
+                == mobile_persistent.get("owner_layout")
+                and rects_match(
+                    mobile_persistent_collection.get("rect"),
+                    mobile_persistent_interaction.get("selector_rect"),
+                )
+                and rects_match(
+                    mobile_persistent_minimap.get("rect"),
+                    mobile_persistent_interaction.get("minimap_rect"),
+                )
                 and numeric_at_least(
                     mobile_persistent_interaction.get("populated_cell_count"), 12,
                 )
