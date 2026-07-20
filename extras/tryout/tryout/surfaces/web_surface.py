@@ -4965,69 +4965,113 @@ async function exerciseViewerApiFailures(browser, sourcePage, sourceDeviceScaleF
   }
 }
 
-async function exerciseTransportFailure(browser, sourcePage, sourceDeviceScaleFactor) {
+function installTransportFaultHarness() {
+  const NativeWebSocket = window.WebSocket;
+  const sockets = [];
+  const socketReceipts = [];
+  let datasetOpenFrames = 0;
+  let closeEvents = 0;
+  let snapshotFrames = 0;
+  let holdReconnects = false;
+  let reconnectGeneration = 0;
+  class HarnessObservedWebSocket extends NativeWebSocket {
+    constructor(socketUrl, protocols) {
+      if (protocols === undefined) super(socketUrl);
+      else super(socketUrl, protocols);
+      sockets.push(this);
+      const receipt = {
+        socket: this,
+        id: sockets.length,
+        constructed_generation: reconnectGeneration,
+        snapshot_frames: 0,
+      };
+      socketReceipts.push(receipt);
+      this.addEventListener('open', () => {
+        // A socket that was already CONNECTING when the hold was released is
+        // still part of the held epoch. Close it so only a socket constructed
+        // after release can prove recovery with its own snapshot frame.
+        if (holdReconnects || receipt.constructed_generation !== reconnectGeneration) {
+          this.close(4012, 'tryout held reconnect');
+        }
+      });
+      this.addEventListener('close', () => { closeEvents += 1; });
+      this.addEventListener('message', (event) => {
+        if (typeof event.data !== 'string') return;
+        try {
+          if (JSON.parse(event.data).type === 'snapshot') {
+            snapshotFrames += 1;
+            receipt.snapshot_frames += 1;
+          }
+        } catch (_) {}
+      });
+    }
+    send(data) {
+      if (typeof data === 'string') {
+        try {
+          if (JSON.parse(data).type === 'open_remote_dataset') datasetOpenFrames += 1;
+        } catch (_) {}
+      }
+      return super.send(data);
+    }
+  }
+  window.WebSocket = HarnessObservedWebSocket;
+  window.__lucidaTryoutTransportFaults = {
+    closeLatest() {
+      holdReconnects = true;
+      const socket = [...sockets].reverse().find((item) => item.readyState === NativeWebSocket.OPEN);
+      if (!socket) return false;
+      // Browser clients may send only 1000 or application codes 3000-4999.
+      // 4012 preserves the injected-reconnect identity without Chromium's
+      // InvalidAccessError aborting the acceptance path.
+      socket.close(4012, 'tryout injected reconnect');
+      return true;
+    },
+    releaseReconnects() {
+      reconnectGeneration += 1;
+      holdReconnects = false;
+      return reconnectGeneration;
+    },
+    snapshot() {
+      const latestOpen = [...socketReceipts].reverse().find(
+        (item) => item.socket.readyState === NativeWebSocket.OPEN,
+      );
+      return {
+        sockets_created: sockets.length,
+        open_sockets: sockets.filter((item) => item.readyState === NativeWebSocket.OPEN).length,
+        reconnects_held: holdReconnects,
+        reconnect_generation: reconnectGeneration,
+        latest_open_socket_id: latestOpen ? latestOpen.id : null,
+        latest_open_socket_generation: latestOpen ? latestOpen.constructed_generation : null,
+        latest_open_socket_snapshot_frames: latestOpen ? latestOpen.snapshot_frames : 0,
+        dataset_open_frames: datasetOpenFrames,
+        close_events: closeEvents,
+        snapshot_frames: snapshotFrames,
+      };
+    },
+  };
+}
+
+async function exerciseTransportFailure(
+  browser,
+  sourcePage,
+  sourceDeviceScaleFactor,
+  diagnostics,
+) {
   const context = await browser.newContext({
     viewport: { width: 1280, height: 720 },
     deviceScaleFactor: sourceDeviceScaleFactor,
   });
   const page = await context.newPage();
+  attachAcceptanceDiagnostics(page, diagnostics);
   try {
-    await page.addInitScript(() => {
-      const NativeWebSocket = window.WebSocket;
-      const sockets = [];
-      let datasetOpenFrames = 0;
-      let closeEvents = 0;
-      let snapshotFrames = 0;
-      class HarnessObservedWebSocket extends NativeWebSocket {
-        constructor(socketUrl, protocols) {
-          if (protocols === undefined) super(socketUrl);
-          else super(socketUrl, protocols);
-          sockets.push(this);
-          this.addEventListener('close', () => { closeEvents += 1; });
-          this.addEventListener('message', (event) => {
-            if (typeof event.data !== 'string') return;
-            try {
-              if (JSON.parse(event.data).type === 'snapshot') snapshotFrames += 1;
-            } catch (_) {}
-          });
-        }
-        send(data) {
-          if (typeof data === 'string') {
-            try {
-              if (JSON.parse(data).type === 'open_remote_dataset') datasetOpenFrames += 1;
-            } catch (_) {}
-          }
-          return super.send(data);
-        }
-      }
-      window.WebSocket = HarnessObservedWebSocket;
-      window.__lucidaTryoutTransportFaults = {
-        closeLatest() {
-          const socket = [...sockets].reverse().find((item) => item.readyState === NativeWebSocket.OPEN);
-          if (!socket) return false;
-          // Browser clients may send only 1000 or application codes 3000-4999.
-          // 4012 preserves the injected-reconnect identity without Chromium's
-          // InvalidAccessError aborting the acceptance path.
-          socket.close(4012, 'tryout injected reconnect');
-          return true;
-        },
-        snapshot() {
-          return {
-            sockets_created: sockets.length,
-            open_sockets: sockets.filter((item) => item.readyState === NativeWebSocket.OPEN).length,
-            dataset_open_frames: datasetOpenFrames,
-            close_events: closeEvents,
-            snapshot_frames: snapshotFrames,
-          };
-        },
-      };
-    });
+    await page.addInitScript(installTransportFaultHarness);
     await page.goto(sourcePage.url(), { waitUntil: 'load', timeout: renderWaitMs });
     await waitForReady(page, -1, 30000);
     const before = await page.evaluate(() => window.__lucidaTryoutTransportFaults.snapshot());
     const injected = await page.evaluate(() => window.__lucidaTryoutTransportFaults.closeLatest());
     await page.waitForFunction((closedBefore) => (
       window.__lucidaTryoutTransportFaults.snapshot().close_events > closedBefore
+      && window.__lucidaTryoutTransportFaults.snapshot().open_sockets === 0
     ), before.close_events, { timeout: 10000 });
     const input = page.getByLabel('Dataset URL or path');
     const missing = 'file:///__lucida_tryout_transport_recovery_dpr'
@@ -5037,10 +5081,15 @@ async function exerciseTransportFailure(browser, sourcePage, sourceDeviceScaleFa
     const transportAlert = page.getByRole('alert').filter({ hasText: 'workspace connection is not ready' });
     await transportAlert.waitFor({ state: 'visible', timeout: 10000 });
     const afterRejectedSend = await page.evaluate(() => window.__lucidaTryoutTransportFaults.snapshot());
-    await page.waitForFunction((snapshotsBefore) => {
+    const recoveryGeneration = await page.evaluate(
+      () => window.__lucidaTryoutTransportFaults.releaseReconnects(),
+    );
+    await page.waitForFunction((expectedGeneration) => {
       const state = window.__lucidaTryoutTransportFaults.snapshot();
-      return state.open_sockets > 0 && state.snapshot_frames > snapshotsBefore;
-    }, before.snapshot_frames, { timeout: 15000 });
+      return state.open_sockets > 0
+        && state.latest_open_socket_generation === expectedGeneration
+        && state.latest_open_socket_snapshot_frames > 0;
+    }, recoveryGeneration, { timeout: 15000 });
     const retry = transportAlert.getByRole('button', { name: 'Retry dataset' });
     const retryVisible = await retry.isVisible();
     await retry.click();
@@ -5681,6 +5730,7 @@ async function exerciseFirstRun(context, sourcePage, datasetPath, screenshotPath
           browser,
           page,
           deviceScaleFactor,
+          diagnostics,
         );
         const asyncReceipts = {
           ...dashboardFailures,

@@ -1976,6 +1976,11 @@ function mockPage(snapshots) {
             "construction_failure_surfaced",
             "presented_frame_count",
             "socket.close(4012",
+            "holdReconnects = true",
+            "releaseReconnects()",
+            "snapshot().open_sockets === 0",
+            "latest_open_socket_generation === expectedGeneration",
+            "latest_open_socket_snapshot_frames > 0",
             "asyncFailureContractFailures(",
             "terminalPathFailures(",
         ):
@@ -1984,6 +1989,96 @@ function mockPage(snapshots) {
         self.assertIn("class HarnessObservedWebSocket", web_surface._SPA_DRIVER)
         self.assertIn("class HarnessObservedWorker", web_surface._SPA_DRIVER)
         self.assertNotIn("__lucidaTestBackdoor", web_surface._SPA_DRIVER)
+
+    def test_transport_fault_harness_rejects_pre_release_connecting_socket(self) -> None:
+        helper_start = web_surface._SPA_DRIVER.index(
+            "function installTransportFaultHarness()",
+        )
+        helper_end = web_surface._SPA_DRIVER.index(
+            "async function exerciseTransportFailure(",
+            helper_start,
+        )
+        helper = web_surface._SPA_DRIVER[helper_start:helper_end]
+        script = helper + r'''
+class MockNativeWebSocket {
+  static CONNECTING = 0;
+  static OPEN = 1;
+  static CLOSING = 2;
+  static CLOSED = 3;
+
+  constructor() {
+    this.readyState = MockNativeWebSocket.CONNECTING;
+    this.listeners = new Map();
+    this.closeCalls = [];
+  }
+
+  addEventListener(type, listener) {
+    if (!this.listeners.has(type)) this.listeners.set(type, []);
+    this.listeners.get(type).push(listener);
+  }
+
+  emit(type, event = {}) {
+    if (type === 'open') this.readyState = MockNativeWebSocket.OPEN;
+    if (type === 'close') this.readyState = MockNativeWebSocket.CLOSED;
+    for (const listener of this.listeners.get(type) || []) listener(event);
+  }
+
+  close(code, reason) {
+    this.closeCalls.push({ code, reason });
+    this.readyState = MockNativeWebSocket.CLOSING;
+  }
+
+  send() {}
+}
+
+global.window = { WebSocket: MockNativeWebSocket };
+installTransportFaultHarness();
+
+const initial = new window.WebSocket('ws://initial');
+initial.emit('open');
+initial.emit('message', { data: JSON.stringify({ type: 'snapshot' }) });
+const initialState = window.__lucidaTryoutTransportFaults.snapshot();
+if (initialState.latest_open_socket_generation !== 0) {
+  throw new Error('initial socket did not retain construction generation zero');
+}
+
+if (!window.__lucidaTryoutTransportFaults.closeLatest()) {
+  throw new Error('initial socket was not selected for injected close');
+}
+initial.emit('close');
+
+const staleConnecting = new window.WebSocket('ws://stale');
+const releasedGeneration = window.__lucidaTryoutTransportFaults.releaseReconnects();
+staleConnecting.emit('open');
+if (staleConnecting.closeCalls.length !== 1 || staleConnecting.closeCalls[0].code !== 4012) {
+  throw new Error('pre-release connecting socket was accepted after release');
+}
+staleConnecting.emit('close');
+
+const recovered = new window.WebSocket('ws://recovered');
+recovered.emit('open');
+recovered.emit('message', { data: JSON.stringify({ type: 'snapshot' }) });
+const recoveredState = window.__lucidaTryoutTransportFaults.snapshot();
+process.stdout.write(JSON.stringify({ releasedGeneration, recoveredState }));
+'''
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=TRYOUT_ROOT.parent.parent,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        receipt = json.loads(completed.stdout)
+        self.assertEqual(receipt["releasedGeneration"], 1)
+        self.assertEqual(receipt["recoveredState"]["open_sockets"], 1)
+        self.assertEqual(
+            receipt["recoveredState"]["latest_open_socket_generation"],
+            1,
+        )
+        self.assertEqual(
+            receipt["recoveredState"]["latest_open_socket_snapshot_frames"],
+            1,
+        )
 
     def test_browser_harness_fallback_uses_exact_repository_pins(self) -> None:
         package = (
