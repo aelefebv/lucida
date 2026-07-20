@@ -722,6 +722,8 @@ export interface ErrorMessage {
 export interface FramePresentedMessage {
   type: "framePresented";
   frameId: number;
+  /** True when this GPU-complete frame drew at least one main-view layer. */
+  contentPresented?: boolean;
 }
 
 /** Recoverable worker cache desynchronization; the frame is not presented. */

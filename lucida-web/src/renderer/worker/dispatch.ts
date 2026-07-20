@@ -56,9 +56,13 @@ import { admitWorkerRenderSurface } from "./surface.ts";
  * handshake in one helper prevents slice and volume paths from drifting and
  * gives capture/FPS/overlay consumers a truthful lifecycle boundary.
  */
-export function reportFramePresentedAfterGpuCompletion(ctx: WorkerCtx, frameId: number): void {
+export function reportFramePresentedAfterGpuCompletion(
+  ctx: WorkerCtx,
+  frameId: number,
+  contentPresented: boolean = false,
+): void {
   void ctx.device.queue.onSubmittedWorkDone()
-    .then(() => ctx.post({ type: "framePresented", frameId }))
+    .then(() => ctx.post({ type: "framePresented", frameId, contentPresented }))
     .catch((error) => ctx.post({
       type: "error",
       message: error instanceof Error ? error.message : String(error),
@@ -139,7 +143,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       handleLabelVolumeChunkData(ctx, msg);
       return;
     case "volumeRenderMultiPass": {
-      const complete = handleVolumeRenderMultiPass(ctx, msg, (memberId) => {
+      const result = handleVolumeRenderMultiPass(ctx, msg, (memberId) => {
         const detailPoolKey =
           ctx.state.memberTierToPool.get(memberTierKey(memberId, "detail")) ??
           ctx.state.memberToPool.get(memberId) ??
@@ -152,7 +156,13 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
         }
         return { detailPoolKey, coarsePoolKey, datasetId };
       });
-      if (complete) reportFramePresentedAfterGpuCompletion(ctx, msg.frameId);
+      if (result) {
+        reportFramePresentedAfterGpuCompletion(
+          ctx,
+          msg.frameId,
+          result.contentPresented,
+        );
+      }
       return;
     }
 

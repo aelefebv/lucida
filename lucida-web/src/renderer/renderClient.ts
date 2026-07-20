@@ -45,6 +45,8 @@ const EMPTY_AGGREGATE_QUADS = new ArrayBuffer(0);
 export interface PresentedFrame {
   frameId: number;
   receivedAt: number;
+  /** True only when the worker actually drew at least one main-view layer. */
+  contentPresented?: boolean;
 }
 
 export type RenderSurfaceMode = "slice" | "volume" | "unspecified";
@@ -287,7 +289,11 @@ export class RenderClient implements UploadClient {
         msg.bitmap.close();
       }
     } else if (msg.type === "framePresented") {
-      const frame = { frameId: msg.frameId, receivedAt: performance.now() };
+      const frame = {
+        frameId: msg.frameId,
+        receivedAt: performance.now(),
+        contentPresented: msg.contentPresented === true,
+      };
       this.presentedFrameCount++;
       this.pendingFrameCount = Math.max(0, this.pendingFrameCount - 1);
       this.lastPresentedFrameId = msg.frameId;

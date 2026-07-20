@@ -40,7 +40,7 @@ move with it.
 - `wantedSetDelta` — the tier-labeled chunks the worker wants but does not have. Drives the next `submit`.
 - `chunksEvicted { memberId, keys, skipped? }` — keys evicted (+ keys it skipped because they were never actually present). The main thread clears delivery tracking so the next drain re-uploads.
 - `intensityRange { datasetId, min, max }` — running min/max from `sampleIntensityRange` after a chunk upload, batched on the main side via `useIntensityBatcher`.
-- `framePresented { frameId }` — GPU-complete presentation acknowledgement;
+- `framePresented { frameId, contentPresented? }` — GPU-complete presentation acknowledgement;
   capture readiness and frame telemetry consume this instead of equating a
   browser animation callback with completed GPU work. `RenderClient` also
   starts a presentation obligation when dirty view/residency work is scheduled,
@@ -52,6 +52,10 @@ move with it.
   hidden-tab time is excluded, intentional loop stops/collapsed canvases cancel
   work that was never submitted, and direct non-empty renders also arm the
   watchdog.
+  `contentPresented` distinguishes a frame that actually drew at least one
+  main-view layer from a clear-only frame. Volume cold-start quality promotion
+  waits for this evidence, so an early blank frame cannot retire the bounded
+  first-content pixel budget before remote chunks become renderable.
 - `thumbnailResult { id, bitmap }` — correlated minimap/collection-thumbnail
   response. The bitmap is transferred, and `null` means no resident overview
   could be drawn yet.

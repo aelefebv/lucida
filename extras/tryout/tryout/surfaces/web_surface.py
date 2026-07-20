@@ -2063,39 +2063,136 @@ async function waitForRuntimeSettled(page, timeoutMs = 15000, quietMs = 350) {
   return null;
 }
 
+async function surfaceRecoverySnapshot(page) {
+  // Runtime progress and the terminal UI must come from one browser task. If
+  // they are sampled separately, renderer teardown can pair stale counters
+  // with a newer terminal state (or with an already-removed runtime).
+  return page.evaluate(() => {
+    const contract = window.__lucidaRenderContract;
+    const runtime = contract && contract.version === 1
+      && typeof contract.getSnapshot === 'function'
+      ? contract.getSnapshot()
+      : null;
+    const terminal = Array.from(document.querySelectorAll('[data-render-error-code]'))
+      .find((element) => {
+        const style = window.getComputedStyle(element);
+        return element.getClientRects().length > 0
+          && style.display !== 'none'
+          && style.visibility !== 'hidden';
+      }) || null;
+    return {
+      runtime: runtime && runtime.version === 1 ? runtime : null,
+      terminal: terminal ? {
+        code: terminal.getAttribute('data-render-error-code'),
+        message: (terminal.textContent || '').trim(),
+      } : null,
+    };
+  });
+}
+
+function surfaceRecoveryAdvanced(receipt, baseline) {
+  const snapshot = receipt && receipt.runtime;
+  if (!snapshot) return false;
+  const counters = snapshot.client.surface.byMode[baseline.expectedMode];
+  const accepted = snapshot.client.surface.lastForwarded;
+  return snapshot.mode === baseline.expectedMode
+    && counters.forwarded > baseline.forwarded
+    && accepted && accepted.mode === baseline.expectedMode
+    && accepted.width > 0 && accepted.height > 0 && !accepted.rejection
+    && snapshot.client.frames.posted > baseline.posted
+    && snapshot.client.frames.presented > baseline.presented;
+}
+
+function surfaceRecoveryFailureEvidence(baseline, receipt, lastRuntime, cause) {
+  const currentRuntime = receipt && receipt.runtime;
+  const observed = currentRuntime || lastRuntime;
+  const counters = observed && observed.client.surface.byMode[baseline.expectedMode];
+  return {
+    baseline,
+    observed_runtime_source: currentRuntime ? 'current' : (lastRuntime ? 'last-non-null' : null),
+    observed_mode: observed && observed.mode,
+    observed_surface: counters,
+    observed_last_forwarded: observed && observed.client.surface.lastForwarded,
+    observed_frames: observed && observed.client.frames,
+    observed_terminal: receipt && receipt.terminal,
+    cause,
+  };
+}
+
+async function waitForInitialSurfaceSuppression(
+  page,
+  expectedMode,
+  requireExpectedMode = true,
+  timeoutMs = 30000,
+) {
+  const baseline = { expectedMode, forwarded: 0, posted: 0, presented: 0 };
+  const deadline = Date.now() + timeoutMs;
+  let receipt = null;
+  let lastRuntime = null;
+  while (true) {
+    receipt = await surfaceRecoverySnapshot(page);
+    if (receipt.runtime) lastRuntime = receipt.runtime;
+    if (receipt.terminal) {
+      throw new Error(expectedMode + ' initial zero-size setup reached terminal renderer state: '
+        + JSON.stringify(surfaceRecoveryFailureEvidence(
+          baseline,
+          receipt,
+          lastRuntime,
+          'terminal-renderer-state',
+        )));
+    }
+    const runtime = receipt.runtime;
+    const counters = runtime && runtime.client.surface.byMode[expectedMode];
+    if (runtime && (!requireExpectedMode || runtime.mode === expectedMode)
+      && counters && counters.suppressed > 0) {
+      return runtime;
+    }
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) break;
+    await page.waitForTimeout(Math.min(100, remainingMs));
+  }
+  throw new Error(expectedMode + ' initial zero-size suppression timed out: '
+    + JSON.stringify(surfaceRecoveryFailureEvidence(
+      baseline,
+      receipt,
+      lastRuntime,
+      'deadline-exhausted',
+    )));
+}
+
 async function waitForSurfaceRecovery(page, baseline, timeoutMs = 30000) {
   // Recovery and quiescence are distinct guarantees. Requiring the presented
   // frame and `pending === 0` in the same browser poll can miss a valid recovery
   // when the renderer immediately schedules follow-up residency work. This
   // helper proves only the recovery boundary; callers whose contract requires
   // quiescence must separately use the quiet-window settlement helper.
-  try {
-    await page.waitForFunction(({ expectedMode, forwarded, posted, presented }) => {
-      const contract = window.__lucidaRenderContract;
-      if (!contract || contract.version !== 1) return false;
-      const snapshot = contract.getSnapshot();
-      const counters = snapshot.client.surface.byMode[expectedMode];
-      const accepted = snapshot.client.surface.lastForwarded;
-      return snapshot.mode === expectedMode
-        && counters.forwarded > forwarded
-        && accepted && accepted.mode === expectedMode
-        && accepted.width > 0 && accepted.height > 0 && !accepted.rejection
-        && snapshot.client.frames.posted > posted
-        && snapshot.client.frames.presented > presented;
-    }, baseline, { timeout: timeoutMs });
-  } catch (error) {
-    const snapshot = await renderRuntimeSnapshot(page);
-    const counters = snapshot && snapshot.client.surface.byMode[baseline.expectedMode];
-    throw new Error(baseline.expectedMode + ' surface recovery timed out: ' + JSON.stringify({
-      baseline,
-      observed_mode: snapshot && snapshot.mode,
-      observed_surface: counters,
-      observed_last_forwarded: snapshot && snapshot.client.surface.lastForwarded,
-      observed_frames: snapshot && snapshot.client.frames,
-      cause: String(error && error.message ? error.message : error).split('\n')[0],
-    }));
+  const deadline = Date.now() + timeoutMs;
+  let receipt = null;
+  let lastRuntime = null;
+  while (true) {
+    receipt = await surfaceRecoverySnapshot(page);
+    if (receipt.runtime) lastRuntime = receipt.runtime;
+    if (receipt.terminal) {
+      throw new Error(baseline.expectedMode + ' surface recovery reached terminal renderer state: '
+        + JSON.stringify(surfaceRecoveryFailureEvidence(
+          baseline,
+          receipt,
+          lastRuntime,
+          'terminal-renderer-state',
+        )));
+    }
+    if (surfaceRecoveryAdvanced(receipt, baseline)) return receipt.runtime;
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) break;
+    await page.waitForTimeout(Math.min(100, remainingMs));
   }
-  return renderRuntimeSnapshot(page);
+  throw new Error(baseline.expectedMode + ' surface recovery timed out: '
+    + JSON.stringify(surfaceRecoveryFailureEvidence(
+      baseline,
+      receipt,
+      lastRuntime,
+      'deadline-exhausted',
+    )));
 }
 
 async function waitForFinalCanvasSettlement(
@@ -2231,25 +2328,13 @@ async function initialZeroSizeRecovery(context, sourcePage, target) {
     await installBrowserProbes(page);
     const toggle = page.getByRole('button', { name: /Switch view mode to/ });
     await toggle.waitFor({ state: 'visible', timeout: 30000 });
-    await page.waitForFunction(() => {
-      const contract = window.__lucidaRenderContract;
-      if (!contract || contract.version !== 1) return false;
-      const snapshot = contract.getSnapshot();
-      return snapshot.version === 1 && snapshot.client.surface.byMode.slice.suppressed > 0;
-    }, undefined, { timeout: 30000 });
+    let initial = await waitForInitialSurfaceSuppression(page, 'slice', false);
     if (target === '3d') {
       const current = ((await toggle.textContent()) || '').trim();
       if (current !== 'View: 3D') await toggle.click();
-      await page.waitForFunction(() => {
-        const contract = window.__lucidaRenderContract;
-        if (!contract || contract.version !== 1) return false;
-        const snapshot = contract.getSnapshot();
-        return snapshot.mode === 'volume'
-          && snapshot.client.surface.byMode.volume.suppressed > 0;
-      }, undefined, { timeout: 30000 });
+      initial = await waitForInitialSurfaceSuppression(page, 'volume', true);
     }
     const mode = target === '3d' ? 'volume' : 'slice';
-    const initial = await renderRuntimeSnapshot(page);
     const modeBefore = initial && initial.client.surface.byMode[mode];
     const suppressed = initial && initial.client.surface.lastSuppressed;
     await page.evaluate(() => {

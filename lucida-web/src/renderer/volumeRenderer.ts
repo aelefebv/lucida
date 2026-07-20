@@ -23,6 +23,20 @@ const UNIFORM_SIZE = 256;
 /** 16-byte uniform with the entity index for the current draw. */
 const ENTITY_REF_SIZE = 16;
 
+export interface VolumeRenderTargetOptions {
+  depthView?: GPUTextureView;
+  isFirstLayer?: boolean;
+  targetWidth?: number;
+  targetHeight?: number;
+  scissorRect?: [number, number, number, number];
+  /**
+   * Clear the reusable color target before drawing. This must remain true for
+   * categorical draws, whose miss path discards fragments. Intensity draws
+   * overwrite every pixel in their scissor and can safely load the target.
+   */
+  clearColor?: boolean;
+}
+
 export class VolumeRenderer {
   private device: GPUDevice;
   private pipeline: GPURenderPipeline;
@@ -400,8 +414,21 @@ export class VolumeRenderer {
     return this.transientDepthTex.createView();
   }
 
-  renderTo(target: GPUTextureView, encoder: GPUCommandEncoder, depthView?: GPUTextureView, isFirstLayer?: boolean, targetWidth?: number, targetHeight?: number, scissorRect?: [number, number, number, number]) {
+  renderTo(
+    target: GPUTextureView,
+    encoder: GPUCommandEncoder,
+    options: VolumeRenderTargetOptions = {},
+  ) {
     if (!this.bindGroup || !this.descriptorBindGroup) return;
+
+    const {
+      depthView,
+      isFirstLayer,
+      targetWidth,
+      targetHeight,
+      scissorRect,
+      clearColor = true,
+    } = options;
 
     // Compute step size based on volume dimensions
     const maxDim = Math.max(...this.volumeDims);
@@ -438,9 +465,11 @@ export class VolumeRenderer {
 
     const colorAttachment: GPURenderPassColorAttachment = {
       view: target,
-      loadOp: "clear",
+      loadOp: clearColor ? "clear" : "load",
       storeOp: "store",
-      clearValue: { r: 0, g: 0, b: 0, a: 0 },
+      ...(clearColor
+        ? { clearValue: { r: 0, g: 0, b: 0, a: 0 } }
+        : {}),
     };
 
     // Shader always writes frag_depth, so a depth attachment is required.

@@ -314,7 +314,11 @@ describe("worker frame completion handshake", () => {
     resolveCompletion();
     await completion;
     await Promise.resolve();
-    expect(posts).toEqual([{ type: "framePresented", frameId: 17 }]);
+    expect(posts).toEqual([{
+      type: "framePresented",
+      frameId: 17,
+      contentPresented: false,
+    }]);
   });
 
   it("reports GPU completion failure instead of claiming presentation", async () => {

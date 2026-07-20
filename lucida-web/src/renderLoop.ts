@@ -35,6 +35,9 @@ export type { DatasetEntry, RenderLoopOptions, MinimapOverlayData } from "./rend
 
 export type { LucidaCaptureReadyState } from "./captureContract.ts";
 
+/** Maximum backing pixels used by a volume loop's first presented frame. */
+export const INITIAL_VOLUME_RENDER_PIXEL_BUDGET = 512 * 1024;
+
 declare global {
   interface Window {
     __lucidaCaptureReady?: LucidaCaptureReadyState;
@@ -52,6 +55,7 @@ export class RenderLoop {
   private residencyDirty = false;
   private lastResidencyRenderTime = 0;
   private rafId: number | null = null;
+  private running = false;
   private unsubs = new Map<string, () => void>();
 
   // Debug instrumentation (gated on the "render" category).
@@ -99,7 +103,17 @@ export class RenderLoop {
   private cpuCacheUnsub: () => void;
   private configStoreUnsub: () => void;
 
-  private _renderScale = 1.0;
+  /**
+   * Volume rendering starts with a DPR-independent coarse pixel budget. The
+   * first worker-confirmed content presentation retires the bootstrap and,
+   * when the budget reduced the surface, promotes it to full resolution.
+   * Clear-only frames cannot retire the cap; interaction may request a lower
+   * scale but cannot exceed the cap until content is visible. Slice rendering
+   * remains full-resolution.
+   */
+  private _renderScale: number;
+  private initialVolumeRefinementPending: boolean;
+  private initialVolumeFrameId: number | null = null;
 
   /** Track previous multi_channel state to detect transitions and clean up. */
   private prevMultiChannel = false;
@@ -118,6 +132,8 @@ export class RenderLoop {
     this.client = opts.client;
     this.canvas = opts.canvas;
     this.mode = opts.mode;
+    this._renderScale = 1.0;
+    this.initialVolumeRefinementPending = this.mode === "volume";
     this.cpuCacheUnsub = this.session.cpuCache.subscribe(() => {
       this.setDirty("residency", "cache_subscribe");
     });
@@ -131,6 +147,7 @@ export class RenderLoop {
   }
 
   start(): void {
+    this.running = true;
     this.installRuntimeContract();
     // Capture and runtime state are one ownership domain. Publish only after
     // this loop owns the pull contract so a superseded loop cannot race a
@@ -182,6 +199,7 @@ export class RenderLoop {
           this.presentedFrameTimes.shift();
         }
       }
+      this.scheduleInitialVolumeRefinement(frame.frameId, frame.contentPresented === true);
       this.publishRenderedCaptureReady();
       for (const listener of this.presentedFrameListeners) listener();
     }) ?? null;
@@ -197,6 +215,7 @@ export class RenderLoop {
   }
 
   stop(): void {
+    this.running = false;
     if (this.rafId !== null) {
       cancelAnimationFrame(this.rafId);
       this.rafId = null;
@@ -212,6 +231,7 @@ export class RenderLoop {
     this.removeRuntimeContract();
     this.invalidateCaptureReadyOnStop();
     this.client.cancelUnsubmittedFrameExpectations();
+    this.initialVolumeFrameId = null;
     this.viewportLoading.reset();
     this.cpuCacheUnsub();
     this.configStoreUnsub();
@@ -487,8 +507,33 @@ export class RenderLoop {
   }
 
   setRenderScale(s: number): void {
+    // Interaction still owns the requested scale, but until a content-bearing
+    // volume frame is presented the bootstrap pixel cap remains authoritative.
+    // This keeps an input arriving before the first RAF from bypassing cold
+    // start protection. Once content is visible, a sub-full interaction scale
+    // suppresses the automatic refinement; the caller's later full-scale
+    // update schedules it through the normal path.
     this._renderScale = s;
     this.setDirty("interactive", "render_scale");
+  }
+
+  private scheduleInitialVolumeRefinement(
+    presentedFrameId: number,
+    contentPresented: boolean,
+  ): void {
+    if (
+      !this.running
+      || !this.initialVolumeRefinementPending
+      || this.initialVolumeFrameId === null
+      || presentedFrameId < this.initialVolumeFrameId
+      || !contentPresented
+    ) return;
+    const needsRefinement = this.initialVolumeRenderScale() < 1;
+    this.initialVolumeRefinementPending = false;
+    this.initialVolumeFrameId = null;
+    if (!needsRefinement || this._renderScale < 1) return;
+    this._renderScale = 1.0;
+    this.setDirty("interactive", "initial_volume_refinement");
   }
 
   setMinimap(enabled: boolean, size?: number, overlayCallback?: ((data: MinimapOverlayData) => void) | null): void {
@@ -653,6 +698,14 @@ export class RenderLoop {
     // obligation through worker submission and GPU completion.
     if (this.datasets.size > 0 && this.hasUsableCanvas()) {
       const targetFrameId = this.client.expectNextMainFrame();
+      if (
+        this.mode === "volume"
+        && this.running
+        && this.initialVolumeRefinementPending
+        && this.initialVolumeFrameId === null
+      ) {
+        this.initialVolumeFrameId = targetFrameId;
+      }
       const minimumEpochs = this.currentSceneEpochs();
       if (isDiscreteViewportTransition(source)) {
         this.viewportLoading.begin({
@@ -716,16 +769,38 @@ export class RenderLoop {
   }
 
   private buildContext(): TickContext {
+    let renderScale = this._renderScale;
+    if (this.mode === "volume" && this.initialVolumeRefinementPending) {
+      renderScale = Math.min(renderScale, this.initialVolumeRenderScale());
+    }
     return {
       scene: this.session.scene!,
       datasets: this.datasets,
       client: this.client,
       canvas: this.canvas,
       mode: this.mode,
-      renderScale: this._renderScale,
+      renderScale,
       cpuCache: this.session.cpuCache,
       sendViewerInterest: (interest) => this.session.bridge.sendViewerInterest(interest),
     };
+  }
+
+  private initialVolumeRenderScale(): number {
+    const surface = this.devicePixelCanvasSize();
+    // Match tickVolume's rounded full surface, then round the budgeted target
+    // down so its eventual per-axis Math.round cannot cross the pixel cap.
+    const width = Math.round(surface.width);
+    const height = Math.round(surface.height);
+    const backingPixels = width * height;
+    if (backingPixels <= 0 || backingPixels <= INITIAL_VOLUME_RENDER_PIXEL_BUDGET) {
+      return 1;
+    }
+    const idealScale = Math.sqrt(
+      INITIAL_VOLUME_RENDER_PIXEL_BUDGET / backingPixels,
+    );
+    const budgetedWidth = Math.max(1, Math.floor(width * idealScale));
+    const budgetedHeight = Math.max(1, Math.floor(height * idealScale));
+    return Math.min(budgetedWidth / width, budgetedHeight / height);
   }
 
   private tick = (): void => {

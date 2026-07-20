@@ -168,7 +168,10 @@ export function handleMinimapRender(ctx: WorkerCtx, msg: MinimapRenderMessage): 
       layer.contrastMin, layer.contrastMax, layer.gamma, 1.0,
     );
     const layerEncoder = ctx.device.createCommandEncoder();
-    renderer.renderTo(target.createView(), layerEncoder, undefined, undefined, msg.canvasW, msg.canvasH);
+    renderer.renderTo(target.createView(), layerEncoder, {
+      targetWidth: msg.canvasW,
+      targetHeight: msg.canvasH,
+    });
     ctx.device.queue.submit([layerEncoder.finish()]);
     const compEncoder = ctx.device.createCommandEncoder();
     comp.composite(
@@ -226,7 +229,10 @@ export function handleThumbnailRender(ctx: WorkerCtx, msg: ThumbnailRenderMessag
       layer.contrastMin, layer.contrastMax, layer.gamma, 1.0,
     );
     const layerEncoder = ctx.device.createCommandEncoder();
-    renderer.renderTo(target.createView(), layerEncoder, undefined, undefined, size, size);
+    renderer.renderTo(target.createView(), layerEncoder, {
+      targetWidth: size,
+      targetHeight: size,
+    });
     ctx.device.queue.submit([layerEncoder.finish()]);
     if (canvasView) {
       const compEncoder = ctx.device.createCommandEncoder();

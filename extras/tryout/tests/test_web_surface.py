@@ -1412,17 +1412,21 @@ class RealSpaMatrixTests(unittest.TestCase):
     def test_zero_size_recovery_separates_progress_from_quiescence(self) -> None:
         self.assertIn("async function waitForSurfaceRecovery", web_surface._SPA_DRIVER)
         recovery_start = web_surface._SPA_DRIVER.index(
-            "async function waitForSurfaceRecovery",
+            "async function surfaceRecoverySnapshot",
         )
         recovery_end = web_surface._SPA_DRIVER.index(
             "async function waitForFinalCanvasSettlement",
             recovery_start,
         )
         recovery_helper = web_surface._SPA_DRIVER[recovery_start:recovery_end]
-        self.assertIn("snapshot.client.frames.presented > presented", recovery_helper)
+        self.assertIn("snapshot.client.frames.presented > baseline.presented", recovery_helper)
         self.assertNotIn("snapshot.client.frames.pending === 0", recovery_helper)
         self.assertIn("surface recovery timed out", recovery_helper)
         self.assertIn("observed_frames", recovery_helper)
+        self.assertIn("observed_terminal", recovery_helper)
+        self.assertIn("'last-non-null'", recovery_helper)
+        self.assertIn("if (receipt.terminal)", recovery_helper)
+        self.assertIn("timeoutMs = 30000", recovery_helper)
         initial_recovery_start = web_surface._SPA_DRIVER.index(
             "async function initialZeroSizeRecovery",
         )
@@ -1433,6 +1437,8 @@ class RealSpaMatrixTests(unittest.TestCase):
         initial_recovery = web_surface._SPA_DRIVER[
             initial_recovery_start:initial_recovery_end
         ]
+        self.assertIn("waitForInitialSurfaceSuppression(page, 'slice', false)", initial_recovery)
+        self.assertIn("waitForInitialSurfaceSuppression(page, 'volume', true)", initial_recovery)
         self.assertIn("waitForSurfaceRecovery(page", initial_recovery)
         self.assertNotIn("snapshot.client.frames.pending === 0", initial_recovery)
         later_recovery_start = web_surface._SPA_DRIVER.index(
@@ -1447,6 +1453,152 @@ class RealSpaMatrixTests(unittest.TestCase):
         ]
         self.assertIn("waitForSurfaceRecovery(page", later_recovery)
         self.assertIn("waitForRuntimeSettled(page, 30000)", later_recovery)
+
+    def test_surface_recovery_driver_retains_atomic_terminal_and_runtime_evidence(self) -> None:
+        helper_start = web_surface._SPA_DRIVER.index(
+            "async function surfaceRecoverySnapshot",
+        )
+        helper_end = web_surface._SPA_DRIVER.index(
+            "async function waitForFinalCanvasSettlement",
+            helper_start,
+        )
+        helpers = web_surface._SPA_DRIVER[helper_start:helper_end]
+        script = helpers + r"""
+let clock = 0;
+Date.now = () => clock;
+
+function runtime({ forwarded = 0, posted = 0, presented = 0, suppressed = 0 } = {}) {
+  return {
+    version: 1,
+    mode: 'volume',
+    client: {
+      frames: { posted, presented, pending: Math.max(0, posted - presented) },
+      surface: {
+        byMode: {
+          volume: { forwarded, suppressed },
+        },
+        lastForwarded: forwarded > 0 ? {
+          mode: 'volume', width: 800, height: 600, rejection: null,
+        } : null,
+      },
+    },
+  };
+}
+
+function mockPage(receipts) {
+  let index = 0;
+  let evaluations = 0;
+  return {
+    evaluate: async () => {
+      evaluations += 1;
+      const value = receipts[Math.min(index, receipts.length - 1)];
+      index += 1;
+      return value;
+    },
+    waitForTimeout: async (milliseconds) => { clock += milliseconds; },
+    evaluations: () => evaluations,
+  };
+}
+
+function evidence(error) {
+  const start = error.message.indexOf('{');
+  return JSON.parse(error.message.slice(start));
+}
+
+(async () => {
+  const baseline = { expectedMode: 'volume', forwarded: 0, posted: 0, presented: 0 };
+
+  clock = 0;
+  const successPage = mockPage([
+    { runtime: runtime(), terminal: null },
+    { runtime: runtime({ forwarded: 1, posted: 1, presented: 1 }), terminal: null },
+  ]);
+  const success = await waitForSurfaceRecovery(successPage, baseline, 1000);
+
+  clock = 0;
+  const terminalPage = mockPage([
+    { runtime: runtime({ suppressed: 1 }), terminal: null },
+    { runtime: null, terminal: { code: 'frame_starvation', message: 'stopped' } },
+  ]);
+  let terminalError = null;
+  try {
+    await waitForSurfaceRecovery(terminalPage, baseline, 1000);
+  } catch (error) {
+    terminalError = error;
+  }
+  const terminalEvidence = evidence(terminalError);
+  const terminalClock = clock;
+
+  clock = 0;
+  const timeoutPage = mockPage([
+    { runtime: runtime({ suppressed: 2 }), terminal: null },
+    { runtime: null, terminal: null },
+  ]);
+  let timeoutError = null;
+  try {
+    await waitForSurfaceRecovery(timeoutPage, baseline, 200);
+  } catch (error) {
+    timeoutError = error;
+  }
+  const timeoutEvidence = evidence(timeoutError);
+
+  clock = 0;
+  const initialTerminalPage = mockPage([
+    { runtime: null, terminal: { code: 'device_lost', message: 'lost' } },
+  ]);
+  let initialError = null;
+  try {
+    await waitForInitialSurfaceSuppression(initialTerminalPage, 'volume', true, 1000);
+  } catch (error) {
+    initialError = error;
+  }
+  const initialClock = clock;
+
+  process.stdout.write(JSON.stringify({
+    successPresented: success.client.frames.presented,
+    successEvaluations: successPage.evaluations(),
+    terminalCause: terminalEvidence.cause,
+    terminalCode: terminalEvidence.observed_terminal.code,
+    terminalRuntimeSource: terminalEvidence.observed_runtime_source,
+    terminalSuppressed: terminalEvidence.observed_surface.suppressed,
+    terminalEvaluations: terminalPage.evaluations(),
+    terminalClock,
+    timeoutCause: timeoutEvidence.cause,
+    timeoutRuntimeSource: timeoutEvidence.observed_runtime_source,
+    timeoutSuppressed: timeoutEvidence.observed_surface.suppressed,
+    timeoutEvaluations: timeoutPage.evaluations(),
+    initialError: initialError && initialError.message,
+    initialEvaluations: initialTerminalPage.evaluations(),
+    initialClock,
+  }));
+})().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=TRYOUT_ROOT.parent.parent,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        receipt = json.loads(completed.stdout)
+        self.assertEqual(receipt["successPresented"], 1)
+        self.assertEqual(receipt["successEvaluations"], 2)
+        self.assertEqual(receipt["terminalCause"], "terminal-renderer-state")
+        self.assertEqual(receipt["terminalCode"], "frame_starvation")
+        self.assertEqual(receipt["terminalRuntimeSource"], "last-non-null")
+        self.assertEqual(receipt["terminalSuppressed"], 1)
+        self.assertEqual(receipt["terminalEvaluations"], 2)
+        self.assertEqual(receipt["terminalClock"], 100)
+        self.assertEqual(receipt["timeoutCause"], "deadline-exhausted")
+        self.assertEqual(receipt["timeoutRuntimeSource"], "last-non-null")
+        self.assertEqual(receipt["timeoutSuppressed"], 2)
+        self.assertEqual(receipt["timeoutEvaluations"], 3)
+        self.assertIn("terminal renderer state", receipt["initialError"])
+        self.assertEqual(receipt["initialEvaluations"], 1)
+        self.assertEqual(receipt["initialClock"], 0)
 
     def test_initial_viewport_gate_stages_mutation_and_restoration_presentations(self) -> None:
         helper_start = web_surface._SPA_DRIVER.index(

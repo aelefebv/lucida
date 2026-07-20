@@ -126,11 +126,12 @@ describe("RenderClient destroy", () => {
     const listener = vi.fn();
     const unsubscribe = client.subscribeFramePresented(listener);
 
-    worker.emit({ type: "framePresented", frameId: 41 });
+    worker.emit({ type: "framePresented", frameId: 41, contentPresented: true });
     expect(listener).toHaveBeenCalledOnce();
     expect(listener).toHaveBeenCalledWith({
       frameId: 41,
       receivedAt: expect.any(Number),
+      contentPresented: true,
     });
 
     unsubscribe();

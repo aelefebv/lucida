@@ -6,6 +6,8 @@ export type BlendMode = "alpha" | "additive" | "max";
 export interface CompositeLayer {
   view: GPUTextureView;
   blendMode: BlendMode;
+  /** Screen pixels covered by this layer. Omit only for a full-surface layer. */
+  scissorRect?: [number, number, number, number];
 }
 
 const BG = { r: 0.05, g: 0.05, b: 0.08, a: 1 };
@@ -97,6 +99,14 @@ export class LayerCompositor {
 
       pass.setPipeline(this.pipelines[layer.blendMode]);
       pass.setBindGroup(0, bg);
+      if (layer.scissorRect) {
+        pass.setScissorRect(
+          layer.scissorRect[0],
+          layer.scissorRect[1],
+          layer.scissorRect[2],
+          layer.scissorRect[3],
+        );
+      }
       pass.draw(3);
       pass.end();
     }
