@@ -1300,6 +1300,32 @@ class RealSpaMatrixTests(unittest.TestCase):
         self.assertIn("forward_states: forward", web_surface._SPA_DRIVER)
 
     def test_overlay_and_error_probes_use_reflow_clips_and_workspace_scroll(self) -> None:
+        overlay_start = web_surface._SPA_DRIVER.index(
+            "async function exerciseOverlayContract(",
+        )
+        overlay_body_start = web_surface._SPA_DRIVER.index(
+            "async function exerciseOverlayContractInPage(", overlay_start,
+        )
+        overlay_wrapper = web_surface._SPA_DRIVER[overlay_start:overlay_body_start]
+        self.assertIn("browser.newContext({", overlay_wrapper)
+        self.assertIn("deviceScaleFactor: sourceDeviceScaleFactor", overlay_wrapper)
+        self.assertIn("await context.close()", overlay_wrapper)
+        self.assertIn("await sourcePage.goto('about:blank'", overlay_wrapper)
+        self.assertIn("await page.goto(sourceUrl", overlay_wrapper)
+        self.assertIn("await ensureViewMode(page, '2d')", overlay_wrapper)
+        self.assertIn("await sourcePage.goto(sourceUrl", overlay_wrapper)
+        self.assertIn("attachAcceptanceDiagnostics(page, diagnostics)", overlay_wrapper)
+        self.assertIn("state: 'detached'", overlay_wrapper)
+        self.assertIn(
+            "__lucida_tryout_overlay_notice_missing_dpr",
+            web_surface._SPA_DRIVER,
+        )
+        self.assertIn(
+            "visible alerts=",
+            web_surface._SPA_DRIVER,
+        )
+        self.assertIn("received dataset terminals=", web_surface._SPA_DRIVER)
+        self.assertIn("const diagnostics = { messages, pageErrors", web_surface._SPA_DRIVER)
         self.assertIn("browser-page-scale-1.25", web_surface._SPA_DRIVER)
         self.assertIn("width: 1024, height: 576", web_surface._SPA_DRIVER)
         self.assertIn("Emulation.setPageScaleFactor", web_surface._SPA_DRIVER)

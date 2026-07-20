@@ -39,17 +39,20 @@ function PreferredHarness({
   preferred,
   focusRootOnMount = false,
   revealPreferredAfterFrame = false,
+  hideFallbackUntilFrame = false,
   autoFocusPreferred = false,
   explicitReturnTarget = false,
 }: {
   preferred: "visible" | "hidden" | "disabled" | "missing";
   focusRootOnMount?: boolean;
   revealPreferredAfterFrame?: boolean;
+  hideFallbackUntilFrame?: boolean;
   autoFocusPreferred?: boolean;
   explicitReturnTarget?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const invokerRef = useRef<HTMLButtonElement>(null);
+  const fallbackRef = useRef<HTMLButtonElement>(null);
   const preferredRef = useRef<HTMLButtonElement>(null);
   const { dialogRef, onKeyDown } = useModalDialog({
     open,
@@ -58,12 +61,13 @@ function PreferredHarness({
     returnFocusRef: explicitReturnTarget ? invokerRef : undefined,
   });
   useEffect(() => {
-    if (!open || !revealPreferredAfterFrame) return;
+    if (!open || (!revealPreferredAfterFrame && !hideFallbackUntilFrame)) return;
     const frame = requestAnimationFrame(() => {
-      preferredRef.current?.style.removeProperty("display");
+      if (revealPreferredAfterFrame) preferredRef.current?.style.removeProperty("display");
+      if (hideFallbackUntilFrame) fallbackRef.current?.style.removeProperty("display");
     });
     return () => cancelAnimationFrame(frame);
-  }, [open, revealPreferredAfterFrame]);
+  }, [hideFallbackUntilFrame, open, revealPreferredAfterFrame]);
   return (
     <>
       <button ref={invokerRef} type="button" onClick={() => setOpen(true)}>Open preferred dialog</button>
@@ -79,7 +83,13 @@ function PreferredHarness({
           tabIndex={-1}
           onKeyDown={onKeyDown}
         >
-          <button type="button">Fallback</button>
+          <button
+            ref={fallbackRef}
+            type="button"
+            style={hideFallbackUntilFrame ? { display: "none" } : undefined}
+          >
+            Fallback
+          </button>
           {preferred !== "missing" && (
             <button
               ref={preferredRef}
@@ -142,6 +152,12 @@ describe("useModalDialog", () => {
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "Preferred" }));
   });
 
+  it("moves from provisional root focus to a fallback when the preference cannot focus", () => {
+    render(<PreferredHarness preferred="disabled" focusRootOnMount />);
+    fireEvent.click(screen.getByRole("button", { name: "Open preferred dialog" }));
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Fallback" }));
+  });
+
   it("restores an explicit invoker when autoFocus runs before the opening effect", () => {
     render(
       <PreferredHarness
@@ -158,10 +174,29 @@ describe("useModalDialog", () => {
     expect(document.activeElement).toBe(invoker);
   });
 
-  it("reclaims the preferred target after responsive CSS reveals it", async () => {
+  it("does not steal meaningful descendant focus when responsive CSS reveals a preference", async () => {
     render(<PreferredHarness preferred="visible" revealPreferredAfterFrame />);
     fireEvent.click(screen.getByRole("button", { name: "Open preferred dialog" }));
-    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Fallback" }));
+    const fallback = screen.getByRole("button", { name: "Fallback" });
+    expect(document.activeElement).toBe(fallback);
+
+    await act(async () => {
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    });
+    expect(document.activeElement).toBe(fallback);
+  });
+
+  it("promotes provisional root focus after responsive CSS reveals the preferred control", async () => {
+    render(
+      <PreferredHarness
+        preferred="visible"
+        focusRootOnMount
+        revealPreferredAfterFrame
+        hideFallbackUntilFrame
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Open preferred dialog" }));
+    expect(document.activeElement).toBe(screen.getByRole("dialog"));
 
     await act(async () => {
       await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));

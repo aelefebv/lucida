@@ -45,6 +45,11 @@ function focusInsideDialog(
   preferred: HTMLElement | null | undefined,
 ): void {
   const active = document.activeElement;
+  // A real control inside the dialog is meaningful focus and may already
+  // reflect user intent. The dialog root, however, is only a temporary safety
+  // target used while responsive CSS has not exposed any controls yet; later
+  // opening retries must be allowed to promote it to the requested control.
+  if (active && active !== dialog && dialog.contains(active)) return;
   const preferredInside = preferred
     && dialog.contains(preferred)
     && isCssVisible(preferred)
@@ -57,11 +62,6 @@ function focusInsideDialog(
   if (preferredInside && active !== preferredInside) {
     preferredInside.focus({ preventScroll: true });
     if (document.activeElement === preferredInside) return;
-  }
-  if (active && dialog.contains(active)) return;
-  if (preferredInside) {
-    preferredInside.focus({ preventScroll: true });
-    if (dialog.contains(document.activeElement)) return;
   }
 
   const first = focusableElements(dialog, false)[0];

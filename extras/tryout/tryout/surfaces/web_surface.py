@@ -3208,12 +3208,53 @@ async function floatingSurfaceProbe(page, label, exercisePersistentInteraction =
   };
 }
 
-async function pageZoomOverlayProbe(browser, sourcePage, sourceDeviceScaleFactor) {
+function attachAcceptanceDiagnostics(page, diagnostics) {
+  page.on('console', (message) => {
+    try {
+      diagnostics.messages.push('[' + message.type() + '] ' + message.text());
+    } catch (_) {}
+  });
+  page.on('pageerror', (error) => {
+    const text = String(error && error.message ? error.message : error);
+    diagnostics.pageErrors.push(text);
+    diagnostics.messages.push('[pageerror] ' + text);
+  });
+  page.on('requestfailed', (request) => {
+    try {
+      const failure = {
+        url: request.url(),
+        error: request.failure() && request.failure().errorText,
+      };
+      diagnostics.requestFailures.push(failure);
+      diagnostics.messages.push('[requestfailed] ' + failure.url + ' ' + failure.error);
+    } catch (_) {}
+  });
+  page.on('websocket', (socket) => {
+    socket.on('framereceived', (event) => {
+      try {
+        const text = typeof event.payload === 'string'
+          ? event.payload
+          : event.payload.toString('utf8');
+        if (/"type"\s*:\s*"open_dataset_failed"/.test(text)) {
+          diagnostics.datasetTerminals.push(text.slice(0, 2000));
+        }
+      } catch (_) {}
+    });
+  });
+}
+
+async function pageZoomOverlayProbe(
+  browser,
+  sourcePage,
+  sourceDeviceScaleFactor,
+  diagnostics,
+) {
   const context = await browser.newContext({
     viewport: { width: 1024, height: 576 },
     deviceScaleFactor: sourceDeviceScaleFactor,
   });
   const page = await context.newPage();
+  attachAcceptanceDiagnostics(page, diagnostics);
   try {
     await page.goto(sourcePage.url(), { waitUntil: 'load', timeout: renderWaitMs });
     await installBrowserProbes(page);
@@ -3266,9 +3307,72 @@ async function pageZoomOverlayProbe(browser, sourcePage, sourceDeviceScaleFactor
 }
 
 async function exerciseOverlayContract(
+  sourcePage,
+  browser,
+  sourceDeviceScaleFactor,
+  diagnostics,
+) {
+  // Overlay geometry and error-state assertions must not inherit renderer or
+  // alert state from the zero-size recovery exercises that precede them on the
+  // matrix arm's main page. A dedicated context gives this capability profile
+  // its own controller, transport, error precedence, viewport, and lifecycle.
+  // Suspend the matrix arm's source page while the isolated profile runs. If
+  // both clients stayed connected, the peer banner would add flow content and
+  // this would silently become a different geometry profile from the original
+  // single-client acceptance scenario.
+  const sourceUrl = sourcePage.url();
+  await sourcePage.goto('about:blank', { waitUntil: 'load', timeout: renderWaitMs });
+  let context = null;
+  let result = null;
+  let failure = null;
+  try {
+    context = await browser.newContext({
+      viewport: { width: 1280, height: 720 },
+      deviceScaleFactor: sourceDeviceScaleFactor,
+    });
+    const page = await context.newPage();
+    attachAcceptanceDiagnostics(page, diagnostics);
+    await page.goto(sourceUrl, { waitUntil: 'load', timeout: renderWaitMs });
+    await installBrowserProbes(page);
+    const ready = await waitForReady(page, -1, 30000);
+    if (!ready || !ready.ready) {
+      throw new Error('overlay profile viewer did not become ready in its isolated context');
+    }
+    await ensureViewMode(page, '2d');
+    await page.locator('.peer-list').waitFor({ state: 'detached', timeout: 10000 });
+    result = await exerciseOverlayContractInPage(
+      page,
+      browser,
+      sourceDeviceScaleFactor,
+      diagnostics,
+    );
+  } catch (error) {
+    failure = error;
+  } finally {
+    if (context) await context.close();
+  }
+  try {
+    await sourcePage.goto(sourceUrl, { waitUntil: 'load', timeout: renderWaitMs });
+    await installBrowserProbes(sourcePage);
+    const restored = await ensureViewMode(sourcePage, '2d');
+    if (!restored || !restored.ready) {
+      throw new Error('matrix source page did not recover after isolated overlay profile');
+    }
+    await sourcePage.locator('.peer-list').waitFor({ state: 'detached', timeout: 10000 });
+  } catch (restoreError) {
+    failure = failure
+      ? new Error(String(failure) + '; source page restore failed: ' + String(restoreError))
+      : restoreError;
+  }
+  if (failure) throw failure;
+  return result;
+}
+
+async function exerciseOverlayContractInPage(
   page,
   browser,
   sourceDeviceScaleFactor,
+  diagnostics,
 ) {
   await page.setViewportSize({ width: 1280, height: 720 });
   await resetWorkspaceScroll(page);
@@ -3310,15 +3414,35 @@ async function exerciseOverlayContract(
   const noticeInput = page.getByLabel('Dataset URL or path');
   const noticeInputTrigger = await prepareViewportTrigger(page, noticeInput, 'notice: dataset input');
   if (!noticeInputTrigger.hit_testable) throw new Error('notice dataset input was not hit-testable');
-  await noticeInput.fill('file:///__lucida_tryout_overlay_notice_missing.ome.zarr');
+  await noticeInput.fill(
+    'file:///__lucida_tryout_overlay_notice_missing_dpr'
+      + sourceDeviceScaleFactor + '.ome.zarr',
+  );
   const noticeOpen = page.getByRole('button', { name: 'Open', exact: true });
   const noticeOpenTrigger = await prepareViewportTrigger(page, noticeOpen, 'notice: Open');
   if (!noticeOpenTrigger.hit_testable) throw new Error('notice Open trigger was not hit-testable');
+  const terminalStart = diagnostics.datasetTerminals.length;
   await noticeOpen.click();
   const noticeAlert = page.getByRole('alert').filter({
     has: page.getByRole('button', { name: 'Retry dataset' }),
   }).last();
-  await noticeAlert.waitFor({ state: 'visible', timeout: 15000 });
+  try {
+    await noticeAlert.waitFor({ state: 'visible', timeout: 15000 });
+  } catch (error) {
+    const visibleAlerts = await page.getByRole('alert').evaluateAll((elements) =>
+      elements.map((element) => ({
+        text: (element.textContent || '').trim(),
+        buttons: Array.from(element.querySelectorAll('button'))
+          .map((button) => (button.textContent || '').trim()),
+      })),
+    );
+    throw new Error(
+      'overlay dataset error did not surface Retry dataset; visible alerts='
+        + JSON.stringify(visibleAlerts) + '; received dataset terminals='
+        + JSON.stringify(diagnostics.datasetTerminals.slice(terminalStart))
+        + '; cause=' + String(error),
+    );
+  }
   await page.waitForTimeout(150);
   // The error banner and toolbar are both ordinary document content. A taller
   // desktop viewport makes their simultaneous state physically representable,
@@ -3341,7 +3465,12 @@ async function exerciseOverlayContract(
   await page.setViewportSize({ width: 1280, height: 720 });
   await resetWorkspaceScroll(page);
   await mentions.evaluate((element) => element.focus({ preventScroll: true }));
-  const zoomed = await pageZoomOverlayProbe(browser, page, sourceDeviceScaleFactor);
+  const zoomed = await pageZoomOverlayProbe(
+    browser,
+    page,
+    sourceDeviceScaleFactor,
+    diagnostics,
+  );
   await resetWorkspaceScroll(page);
   const originalEdgeStyles = await page.evaluate(() => {
     const anchor = document.querySelector('[data-testid="mentions-of-me-badge"]');
@@ -5051,6 +5180,7 @@ async function exerciseFirstRun(context, sourcePage, datasetPath, screenshotPath
   const messages = [];
   const pageErrors = [];
   const requestFailures = [];
+  const datasetTerminals = [];
   let browser = null;
   const browserArgs = req.browser_args;
   if (!Array.isArray(browserArgs) || browserArgs.length === 0) {
@@ -5129,20 +5259,10 @@ async function exerciseFirstRun(context, sourcePage, datasetPath, screenshotPath
         nativeClearInterval(id);
       };
     });
-    // Capture the browser console + page errors -> console.log artifact.
-    page.on('console', (msg) => { try { messages.push('[' + msg.type() + '] ' + msg.text()); } catch (_) {} });
-    page.on('pageerror', (err) => {
-      const text = String(err && err.message ? err.message : err);
-      pageErrors.push(text);
-      messages.push('[pageerror] ' + text);
-    });
-    page.on('requestfailed', (rq) => {
-      try {
-        const failure = { url: rq.url(), error: rq.failure() && rq.failure().errorText };
-        requestFailures.push(failure);
-        messages.push('[requestfailed] ' + failure.url + ' ' + failure.error);
-      } catch (_) {}
-    });
+    // Capture fatal diagnostics from the main page and every isolated
+    // acceptance profile into one arm-level result and console artifact.
+    const diagnostics = { messages, pageErrors, requestFailures, datasetTerminals };
+    attachAcceptanceDiagnostics(page, diagnostics);
 
     await page.goto(url, { waitUntil: 'load', timeout: renderWaitMs });
     await installBrowserProbes(page);
@@ -5243,7 +5363,12 @@ async function exerciseFirstRun(context, sourcePage, datasetPath, screenshotPath
       }
       await ensureViewMode(page, '2d');
 
-      browserContract.overlays = await exerciseOverlayContract(page, browser, deviceScaleFactor);
+      browserContract.overlays = await exerciseOverlayContract(
+        page,
+        browser,
+        deviceScaleFactor,
+        diagnostics,
+      );
       contractFailures.push(...overlayFailures(
         browserContract.overlays,
         requireCollection1x12,
