@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
 import struct
 import tempfile
@@ -16,6 +18,7 @@ if str(TRYOUT_ROOT) not in sys.path:
 
 from tryout.surfaces import web_surface  # noqa: E402
 from tryout.scenarios import _browser  # noqa: E402
+from tryout.browser_launch import headless_webgpu_browser_args  # noqa: E402
 
 
 def write_rgba_png(path: Path, width: int, height: int, pixel) -> None:
@@ -1222,6 +1225,29 @@ class RealSpaMatrixTests(unittest.TestCase):
         self.assertNotIn("deviceScaleFactor: 1,", web_surface._SPA_DRIVER)
         self.assertNotIn("deviceScaleFactor: 1.25", web_surface._SPA_DRIVER)
 
+    def test_embedded_driver_enables_linux_software_webgpu(self) -> None:
+        capture_base = [
+            "--enable-unsafe-webgpu",
+            "--ignore-gpu-blocklist",
+            "--no-first-run",
+            "--no-default-browser-check",
+        ]
+        linux_software = [
+            "--enable-features=CDPScreenshotNewSurface,Vulkan,WebGPU",
+            "--enable-unsafe-swiftshader",
+            "--use-angle=swiftshader",
+            "--use-webgpu-adapter=swiftshader",
+        ]
+        self.assertEqual(headless_webgpu_browser_args("darwin"), capture_base)
+        self.assertEqual(headless_webgpu_browser_args("win32"), capture_base)
+        self.assertEqual(
+            headless_webgpu_browser_args("linux"),
+            [*capture_base, *linux_software],
+        )
+        self.assertIn("const browserArgs = req.browser_args", web_surface._SPA_DRIVER)
+        self.assertIn("args: browserArgs", web_surface._SPA_DRIVER)
+        self.assertNotIn("browserArgs.filter", web_surface._SPA_DRIVER)
+
     def test_layers_dialog_focus_wait_uses_the_product_dialog_identity(self) -> None:
         self.assertIn("async function waitForFocusInside", web_surface._SPA_DRIVER)
         self.assertIn("wait_error: waitError", web_surface._SPA_DRIVER)
@@ -2011,6 +2037,55 @@ class ScenarioBrowserMatrixTests(unittest.TestCase):
         self.assertIn("device_scale_factor", _browser._UI_DRIVER)
         self.assertIn("deviceScaleFactor !== 2", _browser._UI_DRIVER)
         self.assertNotIn("deviceScaleFactor: 1", _browser._UI_DRIVER)
+
+    def test_interaction_driver_enables_linux_software_webgpu(self) -> None:
+        self.assertIn("const browserArgs = req.browser_args", _browser._UI_DRIVER)
+        self.assertIn("args: browserArgs", _browser._UI_DRIVER)
+        self.assertNotIn("browserArgs.filter", _browser._UI_DRIVER)
+
+    def test_interaction_request_passes_the_platform_profile_to_playwright(self) -> None:
+        expected = [
+            "--enable-unsafe-webgpu",
+            "--ignore-gpu-blocklist",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--enable-features=CDPScreenshotNewSurface,Vulkan,WebGPU",
+            "--enable-unsafe-swiftshader",
+            "--use-angle=swiftshader",
+            "--use-webgpu-adapter=swiftshader",
+        ]
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout='{"ran":true,"reason":"ok","steps":[],"shots_taken":[]}\n',
+            stderr="",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            with (
+                patch.object(_browser, "capture_real_spa", return_value=web_surface.RealSpaResult(
+                    captured=True,
+                    ok=True,
+                    reason="rendered",
+                )),
+                patch.object(_browser.shutil, "which", return_value="/node"),
+                patch.object(_browser, "_ensure_playwright", return_value=root / "modules"),
+                patch.object(_browser, "_system_browser_path", return_value="/browser"),
+                patch.object(_browser, "headless_webgpu_browser_args", return_value=expected),
+                patch.object(_browser, "run_group", return_value=completed) as run_group,
+            ):
+                result = _browser.drive_ui_program(
+                    url="http://127.0.0.1/w/ws-test",
+                    shots_dir=root / "shots",
+                    steps=[],
+                    init_scripts=[],
+                    work_dir=root,
+                    log=lambda _message: None,
+                )
+
+        request = json.loads(run_group.call_args.args[0][2])
+        self.assertTrue(result.ran)
+        self.assertEqual(request["browser_args"], expected)
 
     def test_failed_render_preflight_stops_before_mutating_steps(self) -> None:
         failed = web_surface.RealSpaResult(

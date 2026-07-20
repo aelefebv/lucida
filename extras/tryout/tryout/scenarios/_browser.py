@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
+from ..browser_launch import headless_webgpu_browser_args
 from ..errors import TryoutError
 from ..surfaces._subproc import run_group, scan_json_line
 from ..surfaces.web_surface import (
@@ -265,11 +266,16 @@ async function runStep(page, step, shotsTaken) {
   const stepResults = [];
   const shotsTaken = [];
   let browser = null;
+  const browserArgs = req.browser_args;
+  if (!Array.isArray(browserArgs) || browserArgs.length === 0) {
+    out({ ran: false, reason: 'browser_launch_args_missing', steps: [], shots_taken: [] });
+    process.exit(0);
+  }
   try {
     browser = await chromium.launch({
       headless: true,
       executablePath: exe,
-      args: ['--enable-unsafe-webgpu', '--ignore-gpu-blocklist', '--no-first-run', '--no-default-browser-check'],
+      args: browserArgs,
     });
   } catch (e) {
     out({ ran: false, reason: 'browser_launch_failed: ' + String(e).split('\n')[0], steps: [], shots_taken: [] });
@@ -403,6 +409,7 @@ def drive_ui_program(
         {
             "url": url,
             "executable_path": browser_path,
+            "browser_args": headless_webgpu_browser_args(),
             "width": viewport[0],
             "height": viewport[1],
             "device_scale_factor": 2,

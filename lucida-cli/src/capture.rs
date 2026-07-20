@@ -28,6 +28,31 @@ use crate::transport::TransportLimits;
 
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+const HEADLESS_BROWSER_ARGS: &[&str] = &[
+    "--headless=new",
+    "--enable-unsafe-webgpu",
+    "--ignore-gpu-blocklist",
+    "--no-first-run",
+    "--no-default-browser-check",
+];
+const LINUX_SOFTWARE_WEBGPU_ARGS: &[&str] = &[
+    "--enable-features=CDPScreenshotNewSurface,Vulkan,WebGPU",
+    "--enable-unsafe-swiftshader",
+    "--use-angle=swiftshader",
+    "--use-webgpu-adapter=swiftshader",
+];
+
+fn headless_browser_args() -> Vec<&'static str> {
+    headless_browser_args_for(cfg!(target_os = "linux"))
+}
+
+fn headless_browser_args_for(is_linux: bool) -> Vec<&'static str> {
+    let mut arguments = HEADLESS_BROWSER_ARGS.to_vec();
+    if is_linux {
+        arguments.extend_from_slice(LINUX_SOFTWARE_WEBGPU_ARGS);
+    }
+    arguments
+}
 
 /// Retina is the durable capture default. Every call still passes the value
 /// explicitly through [`CaptureOptions`], so the CDP layer never silently
@@ -344,12 +369,10 @@ impl BrowserProcess {
         deadline: &CaptureDeadline,
     ) -> Result<Self, CliError> {
         let mut command = TokioCommand::new(binary);
+        for argument in headless_browser_args() {
+            command.arg(argument);
+        }
         command
-            .arg("--headless=new")
-            .arg("--enable-unsafe-webgpu")
-            .arg("--ignore-gpu-blocklist")
-            .arg("--no-first-run")
-            .arg("--no-default-browser-check")
             .arg("--remote-debugging-port=0")
             .arg(format!("--user-data-dir={}", profile.path().display()))
             .arg(format!(
@@ -1233,6 +1256,41 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
     use tokio_tungstenite::accept_async;
+
+    #[test]
+    fn linux_browser_launch_enables_the_software_webgpu_backend() {
+        let portable = headless_browser_args_for(false);
+        let linux = headless_browser_args_for(true);
+
+        assert_eq!(
+            portable,
+            vec![
+                "--headless=new",
+                "--enable-unsafe-webgpu",
+                "--ignore-gpu-blocklist",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ]
+        );
+        assert_eq!(
+            linux,
+            vec![
+                "--headless=new",
+                "--enable-unsafe-webgpu",
+                "--ignore-gpu-blocklist",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--enable-features=CDPScreenshotNewSurface,Vulkan,WebGPU",
+                "--enable-unsafe-swiftshader",
+                "--use-angle=swiftshader",
+                "--use-webgpu-adapter=swiftshader",
+            ]
+        );
+        assert_eq!(
+            headless_browser_args(),
+            headless_browser_args_for(cfg!(target_os = "linux"))
+        );
+    }
 
     #[test]
     fn capture_options_require_explicit_supported_dpr_and_count_physical_pixels() {

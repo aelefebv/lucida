@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { chromium } from "playwright";
+import { headlessCaptureLaunchOptions } from "./headless-browser-contract.mjs";
 
 const baseUrl = process.env.LUCIDA_BASE_URL ?? "http://127.0.0.1:5173";
 const fixture = process.env.LUCIDA_FIXTURE;
@@ -172,16 +173,7 @@ let evidence = {
 try {
   await mkdir(dirname(evidencePath), { recursive: true });
   stage = "launch_browser";
-  browser = await chromium.launch({
-    headless: true,
-    executablePath,
-    args: [
-      "--enable-unsafe-webgpu",
-      "--ignore-gpu-blocklist",
-      "--no-first-run",
-      "--no-default-browser-check",
-    ],
-  });
+  browser = await chromium.launch(headlessCaptureLaunchOptions(executablePath));
 
   stage = "create_clients";
   const contextOptions = {

@@ -53,6 +53,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
+from ..browser_launch import headless_webgpu_browser_args
 from ..errors import TryoutError
 from . import SurfaceResult
 from ._subproc import run_group, scan_json_line, shquote
@@ -5020,11 +5021,16 @@ async function exerciseFirstRun(context, sourcePage, datasetPath, screenshotPath
   const pageErrors = [];
   const requestFailures = [];
   let browser = null;
+  const browserArgs = req.browser_args;
+  if (!Array.isArray(browserArgs) || browserArgs.length === 0) {
+    out({ captured: false, reason: 'browser_launch_args_missing' });
+    process.exit(0);
+  }
   try {
     browser = await chromium.launch({
       headless: true,
       executablePath: exe,
-      args: ['--enable-unsafe-webgpu', '--ignore-gpu-blocklist', '--no-first-run', '--no-default-browser-check'],
+      args: browserArgs,
     });
   } catch (e) {
     out({ captured: false, reason: 'browser_launch_failed: ' + String(e).split('\n')[0] });
@@ -5409,6 +5415,7 @@ def _capture_real_spa_arm(
             "focus_failure_png": str(focus_failure_png),
             "console_log": str(console_log),
             "executable_path": browser_path,
+            "browser_args": headless_webgpu_browser_args(),
             "width": viewport[0],
             "height": viewport[1],
             "device_scale_factor": device_scale_factor,

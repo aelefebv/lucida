@@ -581,6 +581,49 @@ def validate_cross_stack_contract() -> None:
         and (ROOT / "extras/tryout/tests/test_web_surface.py").is_file(),
         "cross-stack fixture/DPR contract tests are missing",
     )
+    linux_webgpu_flags = (
+        "--enable-features=CDPScreenshotNewSurface,Vulkan,WebGPU",
+        "--enable-unsafe-swiftshader",
+        "--use-angle=swiftshader",
+        "--use-webgpu-adapter=swiftshader",
+    )
+    capture_base_flags = (
+        "--enable-unsafe-webgpu",
+        "--ignore-gpu-blocklist",
+        "--no-first-run",
+        "--no-default-browser-check",
+    )
+    browser_launch_contracts = (
+        ROOT / "lucida-cli/src/capture.rs",
+        ROOT / "lucida-web/scripts/headless-browser-contract.mjs",
+        ROOT / "extras/tryout/tryout/browser_launch.py",
+    )
+    for contract in browser_launch_contracts:
+        source = contract.read_text()
+        for flag in (*capture_base_flags, *linux_webgpu_flags):
+            require(
+                flag in source,
+                f"{contract.relative_to(ROOT)} is missing Linux WebGPU launch flag {flag}",
+            )
+    for consumer, marker in (
+        (ROOT / "lucida-web/scripts/gpu-resource-stress.mjs", "args: webGpuStressBrowserArgs(),"),
+        (
+            ROOT / "lucida-web/scripts/viewport-coordinator-two-client.mjs",
+            "chromium.launch(headlessCaptureLaunchOptions(executablePath))",
+        ),
+        (
+            ROOT / "extras/tryout/tryout/surfaces/web_surface.py",
+            '"browser_args": headless_webgpu_browser_args()',
+        ),
+        (
+            ROOT / "extras/tryout/tryout/scenarios/_browser.py",
+            '"browser_args": headless_webgpu_browser_args()',
+        ),
+    ):
+        require(
+            marker in consumer.read_text(),
+            f"{consumer.relative_to(ROOT)} does not consume the headless browser contract",
+        )
     browser_harness = (
         ROOT / "extras/tryout/tryout/surfaces/web_surface.py"
     ).read_text()

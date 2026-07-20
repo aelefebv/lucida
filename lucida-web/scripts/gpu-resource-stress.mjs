@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { createServer } from "vite";
+import { webGpuStressBrowserArgs } from "./headless-browser-contract.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const vite = await createServer({
@@ -38,18 +39,10 @@ try {
   const browserTarget = process.env.LUCIDA_BROWSER
     ? { executablePath: process.env.LUCIDA_BROWSER }
     : { channel: process.env.LUCIDA_CHROME_CHANNEL || "chrome" };
-  const browserArgs = ["--enable-unsafe-webgpu"];
-  if (process.platform === "linux") {
-    browserArgs.push(
-      "--enable-features=Vulkan,WebGPU",
-      "--enable-unsafe-swiftshader",
-      "--use-angle=swiftshader",
-    );
-  }
   browser = await chromium.launch({
     ...browserTarget,
     headless: true,
-    args: browserArgs,
+    args: webGpuStressBrowserArgs(),
   });
   const page = await browser.newPage();
   await page.goto(`http://127.0.0.1:${address.port}/gpu-resource-stress.html`);

@@ -15,7 +15,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:browser-contracts": "node scripts/gpu-resource-stress.mjs",
+    "test:browser-contracts": "node scripts/headless-browser-contract.test.mjs && node scripts/gpu-resource-stress.mjs",
     "test:gpu-browser": "node scripts/gpu-resource-stress.mjs",
     "test:watch": "vitest"
   },
