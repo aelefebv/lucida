@@ -40,6 +40,9 @@ function PreferredHarness({
   focusRootOnMount = false,
   revealPreferredAfterFrame = false,
   hideFallbackUntilFrame = false,
+  revealPreferredAfterDelayMs = null,
+  disableFallbackFocus = false,
+  redirectFallbackFocus = false,
   autoFocusPreferred = false,
   explicitReturnTarget = false,
 }: {
@@ -47,12 +50,16 @@ function PreferredHarness({
   focusRootOnMount?: boolean;
   revealPreferredAfterFrame?: boolean;
   hideFallbackUntilFrame?: boolean;
+  revealPreferredAfterDelayMs?: number | null;
+  disableFallbackFocus?: boolean;
+  redirectFallbackFocus?: boolean;
   autoFocusPreferred?: boolean;
   explicitReturnTarget?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const invokerRef = useRef<HTMLButtonElement>(null);
   const fallbackRef = useRef<HTMLButtonElement>(null);
+  const redirectTargetRef = useRef<HTMLButtonElement>(null);
   const preferredRef = useRef<HTMLButtonElement>(null);
   const { dialogRef, onKeyDown } = useModalDialog({
     open,
@@ -60,6 +67,13 @@ function PreferredHarness({
     initialFocusRef: preferredRef,
     returnFocusRef: explicitReturnTarget ? invokerRef : undefined,
   });
+  useEffect(() => {
+    if (!open || revealPreferredAfterDelayMs === null) return;
+    const timeout = window.setTimeout(() => {
+      preferredRef.current?.style.removeProperty("display");
+    }, revealPreferredAfterDelayMs);
+    return () => window.clearTimeout(timeout);
+  }, [open, revealPreferredAfterDelayMs]);
   useEffect(() => {
     if (!open || (!revealPreferredAfterFrame && !hideFallbackUntilFrame)) return;
     const frame = requestAnimationFrame(() => {
@@ -84,12 +98,21 @@ function PreferredHarness({
           onKeyDown={onKeyDown}
         >
           <button
-            ref={fallbackRef}
+            ref={(element) => {
+              fallbackRef.current = element;
+              if (element && disableFallbackFocus) element.focus = () => undefined;
+              if (element && redirectFallbackFocus) {
+                element.focus = () => redirectTargetRef.current?.focus();
+              }
+            }}
             type="button"
             style={hideFallbackUntilFrame ? { display: "none" } : undefined}
           >
             Fallback
           </button>
+          {redirectFallbackFocus && (
+            <button ref={redirectTargetRef} type="button">Redirect target</button>
+          )}
           {preferred !== "missing" && (
             <button
               ref={preferredRef}
@@ -100,6 +123,7 @@ function PreferredHarness({
               type="button"
               disabled={preferred === "disabled"}
               style={preferred === "hidden" || revealPreferredAfterFrame
+                || revealPreferredAfterDelayMs !== null
                 ? { display: "none" }
                 : undefined}
             >
@@ -158,6 +182,18 @@ describe("useModalDialog", () => {
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "Fallback" }));
   });
 
+  it("preserves meaningful focus redirected by a fallback focus handler", () => {
+    render(
+      <PreferredHarness
+        preferred="missing"
+        focusRootOnMount
+        redirectFallbackFocus
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Open preferred dialog" }));
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Redirect target" }));
+  });
+
   it("restores an explicit invoker when autoFocus runs before the opening effect", () => {
     render(
       <PreferredHarness
@@ -200,6 +236,24 @@ describe("useModalDialog", () => {
 
     await act(async () => {
       await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    });
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Preferred" }));
+  });
+
+  it("keeps acquiring focus after early preferred and fallback attempts fail", async () => {
+    render(
+      <PreferredHarness
+        preferred="visible"
+        focusRootOnMount
+        revealPreferredAfterDelayMs={300}
+        disableFallbackFocus
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Open preferred dialog" }));
+    expect(document.activeElement).toBe(screen.getByRole("dialog"));
+
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 400));
     });
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "Preferred" }));
   });

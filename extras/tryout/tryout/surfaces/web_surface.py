@@ -1679,6 +1679,99 @@ async function waitForReady(page, minimumFrame, timeoutMs) {
   return probe;
 }
 
+async function viewportPresentationSnapshot(page) {
+  const [ready, runtime, layout] = await Promise.all([
+    page.evaluate(readyProbe),
+    renderRuntimeSnapshot(page),
+    page.evaluate(() => {
+      const canvas = Array.from(document.querySelectorAll('canvas'))
+        .find((element) => element.getClientRects().length > 0) || null;
+      const rect = canvas && canvas.getBoundingClientRect();
+      return {
+        viewport: [window.innerWidth, window.innerHeight],
+        canvas: canvas && rect ? {
+          css: [rect.width, rect.height],
+          backing: [canvas.width, canvas.height],
+        } : null,
+      };
+    }),
+  ]);
+  return { ready, runtime, ...layout };
+}
+
+function viewportPresentationAdvanced(before, after, expectedViewport) {
+  const beforeClient = before && before.runtime && before.runtime.client;
+  const afterClient = after && after.runtime && after.runtime.client;
+  return Boolean(beforeClient && afterClient
+    && after && after.ready && after.ready.ready
+    && Array.isArray(after.viewport)
+    && after.viewport[0] === expectedViewport[0]
+    && after.viewport[1] === expectedViewport[1]
+    && Number(after.ready.frame_count || 0) > Number(before.ready.frame_count || 0)
+    && afterClient.surface.forwarded > beforeClient.surface.forwarded
+    && afterClient.frames.posted > beforeClient.frames.posted
+    && afterClient.frames.presented > beforeClient.frames.presented);
+}
+
+async function waitForViewportPresentation(page, before, expectedViewport, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let snapshot = await viewportPresentationSnapshot(page);
+  while (Date.now() < deadline) {
+    if (viewportPresentationAdvanced(before, snapshot, expectedViewport)) {
+      return { passed: true, snapshot };
+    }
+    await page.waitForTimeout(100);
+    snapshot = await viewportPresentationSnapshot(page);
+  }
+  return { passed: false, snapshot };
+}
+
+async function exerciseInitialViewportPresentation(page, width, height, timeoutMs) {
+  const baseline = await viewportPresentationSnapshot(page);
+  const originalViewport = Array.isArray(baseline.viewport)
+    ? baseline.viewport
+    : [width, height];
+  const originalWidth = originalViewport[0];
+  const mutationDelta = Math.min(160, Math.max(64, Math.floor(originalWidth * 0.1)));
+  const narrowerWidth = Math.max(320, originalWidth - mutationDelta);
+  const mutatedViewport = [
+    narrowerWidth === originalWidth ? originalWidth + mutationDelta : narrowerWidth,
+    originalViewport[1],
+  ];
+  await page.setViewportSize({ width: mutatedViewport[0], height: mutatedViewport[1] });
+  const mutated = await waitForViewportPresentation(
+    page,
+    baseline,
+    mutatedViewport,
+    timeoutMs,
+  );
+  await page.setViewportSize({ width: originalViewport[0], height: originalViewport[1] });
+  if (!mutated.passed) {
+    await page.evaluate(() => new Promise((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    return {
+      passed: false,
+      failed_stage: 'mutated-presentation',
+      baseline,
+      mutated: mutated.snapshot,
+      restored: await viewportPresentationSnapshot(page),
+    };
+  }
+  const restored = await waitForViewportPresentation(
+    page,
+    mutated.snapshot,
+    originalViewport,
+    timeoutMs,
+  );
+  return {
+    passed: restored.passed,
+    failed_stage: restored.passed ? null : 'restored-presentation',
+    baseline,
+    mutated: mutated.snapshot,
+    restored: restored.snapshot,
+  };
+}
+
 async function waitForRenderedChannel(page, minimumFrame, expectedChannel, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   let probe = null;
@@ -5277,27 +5370,26 @@ async function exerciseFirstRun(context, sourcePage, datasetPath, screenshotPath
     }
 
     const rendered = Boolean(probe && probe.ready);
-    const baselineFrameCount = probe ? Number(probe.frame_count || 0) : 0;
     let frameAdvanced = false;
+    let initialViewportPresentation = null;
     if (rendered) {
-      // A ready flag from an earlier frame is insufficient. Force a real
-      // viewport mutation, then require a later GPU-complete acknowledgement.
-      await page.setViewportSize({ width: Math.max(320, width - 1), height });
-      await page.setViewportSize({ width, height });
-      const frameDeadline = Date.now() + Math.min(renderWaitMs, 30000);
-      while (Date.now() < frameDeadline) {
-        probe = await page.evaluate(readyProbe);
-        if (probe && probe.ready && Number(probe.frame_count || 0) > baselineFrameCount) {
-          frameAdvanced = true;
-          break;
-        }
-        await page.waitForTimeout(100);
-      }
+      // Prove a durable intermediate viewport and its GPU presentation before
+      // restoring. Back-to-back CDP metric updates can be coalesced to the
+      // original size and falsely look like an unresponsive renderer.
+      initialViewportPresentation = await exerciseInitialViewportPresentation(
+        page,
+        width,
+        height,
+        Math.min(renderWaitMs, 30000),
+      );
+      frameAdvanced = initialViewportPresentation.passed;
+      probe = initialViewportPresentation.restored.ready;
     }
 
     const contractFailures = [];
     const browserContract = {
       runtime: null,
+      initial_viewport_presentation: initialViewportPresentation,
       fixture_capabilities: {
         collection_1x12_required: requireCollection1x12,
       },
@@ -5477,7 +5569,9 @@ async function exerciseFirstRun(context, sourcePage, datasetPath, screenshotPath
       frame_advanced: frameAdvanced,
       reason: !rendered
         ? ('captured_not_ready: ' + (probe ? probe.reason : 'unknown'))
-        : (!frameAdvanced ? 'presented_frame_did_not_advance'
+        : (!frameAdvanced
+          ? ('initial_viewport_presentation_failed:'
+            + (initialViewportPresentation && initialViewportPresentation.failed_stage || 'unknown'))
           : (gpuFailures.length ? 'gpu_failure' : (runtimeFailures.length ? 'page_error' : 'rendered'))),
       console_messages: messages.length,
       gpu_failures: gpuFailures,
@@ -6075,6 +6169,62 @@ def _browser_acceptance_contract_failures(
     runtime = contract.get("runtime")
     if not isinstance(runtime, dict) or runtime.get("version") != 1:
         failures.append("renderer runtime contract version 1 was unavailable")
+
+    viewport_presentation = contract.get("initial_viewport_presentation")
+    baseline_viewport = nested(viewport_presentation, "baseline", "viewport")
+    mutated_viewport = nested(viewport_presentation, "mutated", "viewport")
+    restored_viewport = nested(viewport_presentation, "restored", "viewport")
+
+    def viewport_snapshot_valid(snapshot: Any) -> bool:
+        viewport = nested(snapshot, "viewport")
+        canvas_css = nested(snapshot, "canvas", "css")
+        canvas_backing = nested(snapshot, "canvas", "backing")
+        return (
+            isinstance(snapshot, dict)
+            and isinstance(viewport, list)
+            and len(viewport) == 2
+            and all(numeric_at_least(value, 1) for value in viewport)
+            and isinstance(canvas_css, list)
+            and len(canvas_css) == 2
+            and all(numeric_at_least(value, 1) for value in canvas_css)
+            and isinstance(canvas_backing, list)
+            and len(canvas_backing) == 2
+            and all(numeric_at_least(value, 1) for value in canvas_backing)
+            and nested(snapshot, "ready", "ready") is True
+            and nested(snapshot, "runtime", "version") == 1
+        )
+
+    def viewport_stage_advanced(before: Any, after: Any) -> bool:
+        return all(
+            numeric_at_least(after_value, 0)
+            and numeric_at_least(before_value, 0)
+            and float(after_value) > float(before_value)
+            for before_value, after_value in (
+                (nested(before, "ready", "frame_count"),
+                 nested(after, "ready", "frame_count")),
+                (nested(before, "runtime", "client", "surface", "forwarded"),
+                 nested(after, "runtime", "client", "surface", "forwarded")),
+                (nested(before, "runtime", "client", "frames", "posted"),
+                 nested(after, "runtime", "client", "frames", "posted")),
+                (nested(before, "runtime", "client", "frames", "presented"),
+                 nested(after, "runtime", "client", "frames", "presented")),
+            )
+        )
+
+    viewport_snapshots = [
+        nested(viewport_presentation, "baseline"),
+        nested(viewport_presentation, "mutated"),
+        nested(viewport_presentation, "restored"),
+    ]
+    if not isinstance(viewport_presentation, dict) \
+            or viewport_presentation.get("passed") is not True \
+            or viewport_presentation.get("failed_stage") is not None \
+            or not all(viewport_snapshot_valid(value) for value in viewport_snapshots) \
+            or baseline_viewport == mutated_viewport \
+            or restored_viewport != baseline_viewport \
+            or not viewport_stage_advanced(viewport_snapshots[0], viewport_snapshots[1]) \
+            or not viewport_stage_advanced(viewport_snapshots[1], viewport_snapshots[2]):
+        failures.append("initial viewport mutation/restoration presentation receipt did not pass")
 
     canvas_isolation = contract.get("canvas_isolation")
     if not isinstance(canvas_isolation, dict) \

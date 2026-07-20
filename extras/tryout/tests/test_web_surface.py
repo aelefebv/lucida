@@ -49,6 +49,7 @@ def runtime_snapshot(
     long_task_count: int = 0,
     long_task_duration_ms: int = 0,
     mode: str = "slice",
+    forwarded: int | None = None,
 ) -> dict:
     return {
         "version": 1,
@@ -66,6 +67,7 @@ def runtime_snapshot(
             },
             "worker": {"messages": worker_messages},
             "surface": {
+                "forwarded": posted if forwarded is None else forwarded,
                 "byMode": {
                     "slice": {"attempts": 0, "forwarded": 0, "suppressed": 0},
                     "volume": {"attempts": 0, "forwarded": 0, "suppressed": 0},
@@ -356,8 +358,29 @@ def passing_browser_contract(
         }
         for index in range(3)
     ]
+    def viewport_stage(viewport: list[int], count: int) -> dict:
+        return {
+            "ready": {"ready": True, "frame_count": count},
+            "runtime": runtime_snapshot(
+                posted=count,
+                presented=count,
+                forwarded=count,
+            ),
+            "viewport": viewport,
+            "canvas": {
+                "css": [800, 600],
+                "backing": [800 * dpr, 600 * dpr],
+            },
+        }
     contract = {
         "runtime": runtime_snapshot(),
+        "initial_viewport_presentation": {
+            "passed": True,
+            "failed_stage": None,
+            "baseline": viewport_stage([1280, 720], 5),
+            "mutated": viewport_stage([1152, 720], 6),
+            "restored": viewport_stage([1280, 720], 7),
+        },
         "canvas_isolation": {
             "executed": True,
             "contaminated_differs_from_black": True,
@@ -1424,6 +1447,70 @@ class RealSpaMatrixTests(unittest.TestCase):
         ]
         self.assertIn("waitForSurfaceRecovery(page", later_recovery)
         self.assertIn("waitForRuntimeSettled(page, 30000)", later_recovery)
+
+    def test_initial_viewport_gate_stages_mutation_and_restoration_presentations(self) -> None:
+        helper_start = web_surface._SPA_DRIVER.index(
+            "async function exerciseInitialViewportPresentation",
+        )
+        helper_end = web_surface._SPA_DRIVER.index(
+            "async function waitForRenderedChannel",
+            helper_start,
+        )
+        helper = web_surface._SPA_DRIVER[helper_start:helper_end]
+        self.assertIn("await page.setViewportSize({ width: mutatedViewport[0]", helper)
+        self.assertIn("const mutated = await waitForViewportPresentation", helper)
+        self.assertIn("width: originalViewport[0], height: originalViewport[1]", helper)
+        self.assertIn("const restored = await waitForViewportPresentation", helper)
+        self.assertIn(
+            "narrowerWidth === originalWidth ? originalWidth + mutationDelta",
+            helper,
+        )
+        self.assertLess(
+            helper.index("const mutated = await waitForViewportPresentation"),
+            helper.index("width: originalViewport[0], height: originalViewport[1]"),
+        )
+        progress_start = web_surface._SPA_DRIVER.index(
+            "function viewportPresentationAdvanced",
+        )
+        progress_end = web_surface._SPA_DRIVER.index(
+            "async function waitForViewportPresentation",
+            progress_start,
+        )
+        progress = web_surface._SPA_DRIVER[progress_start:progress_end]
+        for marker in (
+            "afterClient.surface.forwarded > beforeClient.surface.forwarded",
+            "afterClient.frames.posted > beforeClient.frames.posted",
+            "afterClient.frames.presented > beforeClient.frames.presented",
+            "after.viewport[0] === expectedViewport[0]",
+            "after.ready.frame_count",
+        ):
+            self.assertIn(marker, progress)
+        self.assertIn("initial_viewport_presentation: initialViewportPresentation", web_surface._SPA_DRIVER)
+        self.assertIn("initial_viewport_presentation_failed:", web_surface._SPA_DRIVER)
+
+    def test_viewport_presentation_receipt_is_independently_validated(self) -> None:
+        for mutate in (
+            lambda contract: contract.pop("initial_viewport_presentation"),
+            lambda contract: contract["initial_viewport_presentation"].update(passed=False),
+            lambda contract: contract["initial_viewport_presentation"]["mutated"].update(
+                viewport=[1280, 720],
+            ),
+            lambda contract: contract["initial_viewport_presentation"]["restored"][
+                "runtime"
+            ]["client"]["frames"].update(presented=6),
+        ):
+            contract = passing_browser_contract(1)
+            mutate(contract)
+            failures = web_surface._browser_acceptance_contract_failures(
+                contract,
+                device_scale_factor=1,
+                require_first_run=False,
+                required_channel_count=3,
+            )
+            self.assertIn(
+                "initial viewport mutation/restoration presentation receipt did not pass",
+                failures,
+            )
 
     def test_idle_driver_uses_three_samples_without_masking_activity(self) -> None:
         self.assertIn("for (let index = 0; index < 3; index++)", web_surface._SPA_DRIVER)
