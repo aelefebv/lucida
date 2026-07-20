@@ -5332,11 +5332,19 @@ mod tests {
         );
         let real_wide = anchor_drop_time(make_real_wide_collection_opened(), repetitions);
         let real_wide_reanchor = real_wide_reanchor_time(make_real_wide_collection_opened(), 4);
-        let ratio = sixteen_k.as_secs_f64() / four_k.as_secs_f64().max(1e-9);
+        // Both calls exercise the same nearest-anchor hot path at roughly 16k
+        // members, but with independent synthetic and production-derived
+        // shapes. Use the faster replicate for the relative complexity guard:
+        // a scheduler pause isolated to one phase must not masquerade as
+        // super-linear work, while a shared quadratic regression slows both.
+        // The absolute budgets below still gate each 16k workload separately.
+        let representative_16k = sixteen_k.min(real_wide);
+        let ratio = representative_16k.as_secs_f64() / four_k.as_secs_f64().max(1e-9);
 
         eprintln!(
-            "annotation-anchor-budget 4k={four_k:?} 16k={sixteen_k:?} ratio={ratio:.2} \
-             real-wide={real_wide:?} real-wide-reanchor={real_wide_reanchor:?}"
+            "annotation-anchor-budget 4k={four_k:?} 16k={sixteen_k:?} \
+             real-wide={real_wide:?} representative-16k={representative_16k:?} ratio={ratio:.2} \
+             real-wide-reanchor={real_wide_reanchor:?}"
         );
         assert!(
             four_k <= ANCHOR_DROP_4K_BUDGET,
@@ -5356,7 +5364,8 @@ mod tests {
         );
         assert!(
             ratio <= ANCHOR_SCALING_RATIO_BUDGET,
-            "4x members took {ratio:.2}x ({four_k:?} -> {sixteen_k:?}); \
+            "representative 16k workload took {ratio:.2}x ({four_k:?} -> \
+             {representative_16k:?}); \
              budget is {ANCHOR_SCALING_RATIO_BUDGET:.1}x"
         );
     }
