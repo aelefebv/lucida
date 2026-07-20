@@ -76,6 +76,24 @@ describe("FrameStarvationWatchdog", () => {
     expect(onStarved).not.toHaveBeenCalled();
   });
 
+  it("gives the remaining ordered queue a fresh budget after presentation progress", () => {
+    const { watchdog, onStarved } = makeWatchdog();
+    watchdog.expected(1);
+    watchdog.expected(2);
+    watchdog.submitted(1);
+    watchdog.submitted(2);
+
+    advance(9_000);
+    watchdog.presented(1);
+    advance(1_000);
+    expect(onStarved).not.toHaveBeenCalled();
+
+    advance(8_000);
+    watchdog.presented(2);
+    advance(FRAME_STARVATION_TIMEOUT_MS * 2);
+    expect(onStarved).not.toHaveBeenCalled();
+  });
+
   it("newer submissions cannot postpone an older stuck frame", () => {
     const { watchdog, onStarved } = makeWatchdog();
     watchdog.submitted(1);
@@ -90,16 +108,36 @@ describe("FrameStarvationWatchdog", () => {
     });
   });
 
-  it("keeps a newer frame pending after an earlier acknowledgement", () => {
+  it("reports the oldest pending frame when progress stops", () => {
     const { watchdog, onStarved } = makeWatchdog();
+    watchdog.expected(1);
+    watchdog.expected(2);
     watchdog.submitted(1);
-    advance(1_000);
     watchdog.submitted(2);
+
+    advance(9_000);
     watchdog.presented(1);
 
     advance(FRAME_STARVATION_TIMEOUT_MS - 1);
     expect(onStarved).not.toHaveBeenCalled();
     advance(1);
+    expect(onStarved).toHaveBeenCalledWith({
+      oldestFrameId: 2,
+      pendingFrameCount: 1,
+      ageMs: FRAME_STARVATION_TIMEOUT_MS,
+    });
+  });
+
+  it("does not treat a duplicate acknowledgement as queue progress", () => {
+    const { watchdog, onStarved } = makeWatchdog();
+    watchdog.submitted(1);
+    watchdog.submitted(2);
+    watchdog.presented(1);
+
+    advance(9_000);
+    watchdog.presented(1);
+    advance(1_000);
+
     expect(onStarved).toHaveBeenCalledWith({
       oldestFrameId: 2,
       pendingFrameCount: 1,

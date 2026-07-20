@@ -78,6 +78,7 @@ export class RenderLoop {
   private canvasResizeObserver: ResizeObserver | null = null;
   private longTaskMonitor: MainThreadLongTaskMonitor | null = null;
   private runtimeContract: LucidaRenderContract | null = null;
+  private captureReadyState: LucidaCaptureReadyState | null = null;
   // Last-set timestamps for each dirty flag. Lets the panel show a brief
   // "afterglow" so transient flips (e.g. an interactive flag that gets
   // cleared within one RAF) are visible at the 200ms polling rate.
@@ -127,11 +128,14 @@ export class RenderLoop {
     this.configStoreUnsub = configStore.subscribe(() => {
       this.setDirty("interactive", "planning_config_changed");
     });
-    this.publishCaptureReady(false, "initializing");
   }
 
   start(): void {
     this.installRuntimeContract();
+    // Capture and runtime state are one ownership domain. Publish only after
+    // this loop owns the pull contract so a superseded loop cannot race a
+    // replacement with stale ready/view metadata.
+    this.publishCaptureReady(false, "initializing");
     // When the worker evicts or skips chunks, update the uploader's
     // delivery tracking so they can be re-sent. Evictions trigger a new
     // tick.
@@ -206,6 +210,7 @@ export class RenderLoop {
     this.canvasResizeObserver?.disconnect();
     this.canvasResizeObserver = null;
     this.removeRuntimeContract();
+    this.invalidateCaptureReadyOnStop();
     this.client.cancelUnsubmittedFrameExpectations();
     this.viewportLoading.reset();
     this.cpuCacheUnsub();
@@ -331,8 +336,14 @@ export class RenderLoop {
   }
 
   private publishCaptureReady(ready: boolean, reason: string): void {
-    if (typeof window === "undefined") return;
-    window.__lucidaCaptureReady = {
+    if (
+      typeof window === "undefined"
+      || this.runtimeContract === null
+      || window.__lucidaRenderContract !== this.runtimeContract
+    ) {
+      return;
+    }
+    const state: LucidaCaptureReadyState = {
       ready,
       reason,
       frameCount: this.renderedFrameCount,
@@ -345,6 +356,26 @@ export class RenderLoop {
       view: captureViewSummary(this.session.scene, this.datasets.keys()),
       camera: captureCameraSummary(this.session.scene),
     };
+    this.captureReadyState = state;
+    window.__lucidaCaptureReady = state;
+  }
+
+  private invalidateCaptureReadyOnStop(): void {
+    if (
+      typeof window === "undefined"
+      || this.captureReadyState === null
+      || window.__lucidaCaptureReady !== this.captureReadyState
+    ) {
+      return;
+    }
+    const state: LucidaCaptureReadyState = {
+      ...this.captureReadyState,
+      ready: false,
+      reason: "render_loop_stopped",
+      at: performance.now(),
+    };
+    this.captureReadyState = state;
+    window.__lucidaCaptureReady = state;
   }
 
   private installRuntimeContract(): void {

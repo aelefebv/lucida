@@ -53,11 +53,28 @@ function makeLoop(
     cpuCache: { subscribe: vi.fn(() => vi.fn()) },
     scene: {
       epochs: () => JSON.stringify({ content: 0, layout: 0, view: 0, selection: 0, request: 0 }),
+      t: () => 0,
+      c: () => 0,
+      z: () => 0,
+      multi_channel: () => false,
+      contrast_min: () => 0,
+      contrast_max: () => 1,
+      dataset_order: () => JSON.stringify(["dataset-1"]),
+      all_dataset_settings: () => JSON.stringify({}),
     },
   } as unknown as Session;
   const canvas = { clientWidth: width, clientHeight: height } as HTMLCanvasElement;
   const datasets = new Map([
-    ["dataset-1", { manifest: {} as DatasetManifest }],
+    ["dataset-1", { manifest: {
+      dataset_id: "dataset-1",
+      name: "dataset-1",
+      kind: "Single",
+      entities: [],
+      transforms: [],
+      images: [],
+      source_layouts: [],
+      default_layout_id: null,
+    } satisfies DatasetManifest }],
   ]);
 
   return {
@@ -201,5 +218,58 @@ describe("RenderLoop frame-starvation boundary", () => {
 
     loop.stop();
     expect(window.__lucidaRenderContract).toBeUndefined();
+  });
+
+  it("invalidates rendered capture readiness when the loop stops", () => {
+    vi.stubGlobal("window", {});
+    const { loop, present } = makeLoop();
+    loop.start();
+
+    present(1);
+    expect(window.__lucidaCaptureReady).toMatchObject({
+      ready: true,
+      reason: "rendered",
+      frameCount: 1,
+    });
+
+    loop.stop();
+    expect(window.__lucidaCaptureReady).toMatchObject({
+      ready: false,
+      reason: "render_loop_stopped",
+      frameCount: 1,
+    });
+
+    loop.start();
+    expect(window.__lucidaCaptureReady?.ready).toBe(false);
+    present(2);
+    expect(window.__lucidaCaptureReady).toMatchObject({
+      ready: true,
+      reason: "rendered",
+      frameCount: 2,
+    });
+    loop.stop();
+  });
+
+  it("does not let an older loop invalidate a replacement loop's readiness", () => {
+    vi.stubGlobal("window", {});
+    const old = makeLoop();
+    old.loop.start();
+    old.present(1);
+
+    const replacement = makeLoop();
+    replacement.loop.start();
+    replacement.present(1);
+    const replacementReady = window.__lucidaCaptureReady;
+
+    // A delayed acknowledgement from the superseded loop must not combine its
+    // stale capture metadata with the replacement's runtime contract.
+    old.present(2);
+    expect(window.__lucidaCaptureReady).toBe(replacementReady);
+
+    old.loop.stop();
+    expect(window.__lucidaCaptureReady).toBe(replacementReady);
+    expect(window.__lucidaCaptureReady?.ready).toBe(true);
+
+    replacement.loop.stop();
   });
 });

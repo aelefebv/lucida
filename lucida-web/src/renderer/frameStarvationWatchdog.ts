@@ -6,7 +6,8 @@
  * worker-confirmed `framePresented` can retire it. This covers both halves of
  * frame starvation: a render loop that never submits and GPU work that never
  * completes. The oldest outstanding obligation owns the deadline, so a stream
- * of newer renders cannot postpone detection forever.
+ * of newer renders cannot postpone detection forever. Confirmed ordered
+ * presentation is progress and gives the still-pending queue a fresh budget.
  * Background tabs pause the deadline and receive a fresh budget on return;
  * browsers routinely suspend WebGPU work while hidden, which is not failure.
  */
@@ -32,9 +33,10 @@ export class FrameStarvationWatchdog {
   private readonly now: () => number;
   private readonly isVisible: () => boolean;
   private readonly obligations = new Map<number, {
-    createdAt: number;
+    waitingSince: number;
     submitted: boolean;
   }>();
+  private lastPresentedFrameId: number | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
 
@@ -49,7 +51,7 @@ export class FrameStarvationWatchdog {
   /** Create a deadline for the next frame before RAF/render submission. */
   expected(frameId: number): void {
     if (this.stopped || this.obligations.has(frameId)) return;
-    this.obligations.set(frameId, { createdAt: this.now(), submitted: false });
+    this.obligations.set(frameId, { waitingSince: this.now(), submitted: false });
     this.schedule();
   }
 
@@ -61,7 +63,7 @@ export class FrameStarvationWatchdog {
       // it must not reset the user's end-to-end wait budget.
       obligation.submitted = true;
     } else {
-      this.obligations.set(frameId, { createdAt: this.now(), submitted: true });
+      this.obligations.set(frameId, { waitingSince: this.now(), submitted: true });
     }
     this.schedule();
   }
@@ -70,8 +72,19 @@ export class FrameStarvationWatchdog {
     if (this.stopped) return;
     // Frame ids are monotonic and the worker queue is ordered. Acknowledging N
     // proves every earlier main-view submission has also completed.
+    const madeProgress = this.lastPresentedFrameId === null
+      || frameId > this.lastPresentedFrameId;
+    if (madeProgress) this.lastPresentedFrameId = frameId;
     for (const pendingId of this.obligations.keys()) {
-      if (pendingId <= frameId) this.obligations.delete(pendingId);
+      if (pendingId <= frameId) {
+        this.obligations.delete(pendingId);
+      }
+    }
+    if (madeProgress) {
+      const progressedAt = this.now();
+      for (const obligation of this.obligations.values()) {
+        obligation.waitingSince = progressedAt;
+      }
     }
     this.schedule();
   }
@@ -95,7 +108,7 @@ export class FrameStarvationWatchdog {
     if (!this.isVisible()) return;
     const resumedAt = this.now();
     for (const obligation of this.obligations.values()) {
-      obligation.createdAt = resumedAt;
+      obligation.waitingSince = resumedAt;
     }
     this.schedule();
   }
@@ -113,7 +126,7 @@ export class FrameStarvationWatchdog {
 
     const oldest = this.oldest();
     if (!oldest) return;
-    const remainingMs = Math.max(0, this.timeoutMs - (this.now() - oldest.createdAt));
+    const remainingMs = Math.max(0, this.timeoutMs - (this.now() - oldest.waitingSince));
     this.timer = setTimeout(() => this.check(), remainingMs);
   }
 
@@ -123,7 +136,7 @@ export class FrameStarvationWatchdog {
     const oldest = this.oldest();
     if (!oldest) return;
 
-    const ageMs = this.now() - oldest.createdAt;
+    const ageMs = this.now() - oldest.waitingSince;
     if (ageMs < this.timeoutMs) {
       this.schedule();
       return;
@@ -140,18 +153,18 @@ export class FrameStarvationWatchdog {
     });
   }
 
-  private oldest(): { frameId: number; createdAt: number; pendingCount: number } | null {
+  private oldest(): { frameId: number; waitingSince: number; pendingCount: number } | null {
     let frameId: number | null = null;
-    let createdAt = Number.POSITIVE_INFINITY;
+    let waitingSince = Number.POSITIVE_INFINITY;
     for (const [candidateId, obligation] of this.obligations) {
-      if (obligation.createdAt < createdAt) {
+      if (obligation.waitingSince < waitingSince) {
         frameId = candidateId;
-        createdAt = obligation.createdAt;
+        waitingSince = obligation.waitingSince;
       }
     }
     return frameId === null
       ? null
-      : { frameId, createdAt, pendingCount: this.obligations.size };
+      : { frameId, waitingSince, pendingCount: this.obligations.size };
   }
 
   private cancelTimer(): void {

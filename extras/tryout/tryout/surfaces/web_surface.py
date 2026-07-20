@@ -1680,23 +1680,104 @@ async function waitForReady(page, minimumFrame, timeoutMs) {
 }
 
 async function viewportPresentationSnapshot(page) {
-  const [ready, runtime, layout] = await Promise.all([
-    page.evaluate(readyProbe),
-    renderRuntimeSnapshot(page),
-    page.evaluate(() => {
-      const canvas = Array.from(document.querySelectorAll('canvas'))
-        .find((element) => element.getClientRects().length > 0) || null;
-      const rect = canvas && canvas.getBoundingClientRect();
-      return {
-        viewport: [window.innerWidth, window.innerHeight],
-        canvas: canvas && rect ? {
-          css: [rect.width, rect.height],
-          backing: [canvas.width, canvas.height],
-        } : null,
-      };
-    }),
-  ]);
-  return { ready, runtime, ...layout };
+  // Read every field in one browser task. Separate page.evaluate calls can
+  // straddle a terminal renderer transition and create a contradictory receipt
+  // (for example stale capture-ready state paired with a removed runtime).
+  const raw = await page.evaluate(() => {
+    const canvas = Array.from(document.querySelectorAll('canvas'))
+      .find((element) => element.getClientRects().length > 0) || null;
+    const rect = canvas && canvas.getBoundingClientRect();
+    const contract = window.__lucidaRenderContract;
+    const runtime = contract && contract.version === 1
+      && typeof contract.getSnapshot === 'function'
+      ? contract.getSnapshot()
+      : null;
+    const capture = window.__lucidaCaptureReady || null;
+    const terminal = document.querySelector('[data-render-error-code]');
+    return {
+      capture,
+      runtime: runtime && runtime.version === 1 ? runtime : null,
+      viewport: [window.innerWidth, window.innerHeight],
+      devicePixelRatio: Number(window.devicePixelRatio || 0),
+      canvas: canvas && rect ? {
+        css: [rect.width, rect.height],
+        client: [canvas.clientWidth, canvas.clientHeight],
+        backing: [canvas.width, canvas.height],
+      } : null,
+      terminal: terminal ? {
+        code: terminal.getAttribute('data-render-error-code'),
+        message: (terminal.textContent || '').trim(),
+      } : null,
+    };
+  });
+  const canvas = raw.canvas;
+  const capture = raw.capture;
+  const backingWidth = Number(canvas && canvas.backing && canvas.backing[0] || 0);
+  const backingHeight = Number(canvas && canvas.backing && canvas.backing[1] || 0);
+  const clientWidth = Number(canvas && canvas.client && canvas.client[0] || 0);
+  const clientHeight = Number(canvas && canvas.client && canvas.client[1] || 0);
+  const frameCount = Number(capture && capture.frameCount || 0);
+  const datasetCount = Number(capture && capture.datasetCount || 0);
+  const ready = Boolean(capture && capture.ready)
+    && frameCount > 0 && datasetCount > 0
+    && backingWidth > 0 && backingHeight > 0;
+  return {
+    ready: {
+      ready,
+      reason: ready ? 'rendered' : String(capture && capture.reason || 'not_ready'),
+      frame_count: frameCount,
+      dataset_count: datasetCount,
+      canvas_width: backingWidth || Math.floor(clientWidth),
+      canvas_height: backingHeight || Math.floor(clientHeight),
+      canvas_backing_width: backingWidth,
+      canvas_backing_height: backingHeight,
+      canvas_client_width: clientWidth,
+      canvas_client_height: clientHeight,
+      canvas_css_width: Number(canvas && canvas.css && canvas.css[0] || 0),
+      canvas_css_height: Number(canvas && canvas.css && canvas.css[1] || 0),
+      backing_to_client_x: clientWidth > 0 ? backingWidth / clientWidth : null,
+      backing_to_client_y: clientHeight > 0 ? backingHeight / clientHeight : null,
+      device_pixel_ratio: raw.devicePixelRatio,
+      datasets: capture && Array.isArray(capture.datasets) ? capture.datasets : [],
+      view: capture && capture.view || null,
+      camera: capture && capture.camera || null,
+    },
+    runtime: raw.runtime,
+    viewport: raw.viewport,
+    canvas: raw.canvas ? { css: raw.canvas.css, backing: raw.canvas.backing } : null,
+    terminal: raw.terminal,
+  };
+}
+
+function viewportBaselineSettled(snapshot) {
+  const runtime = snapshot && snapshot.runtime;
+  const client = runtime && runtime.client;
+  const loop = runtime && runtime.loop;
+  return Boolean(snapshot && !snapshot.terminal
+    && snapshot.ready && snapshot.ready.ready
+    && runtime && runtime.version === 1 && client && loop
+    && client.frames.pending === 0
+    && !loop.animationFramePending
+    && !loop.interactiveDirty
+    && !loop.residencyDirty);
+}
+
+async function waitForViewportBaseline(page, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let snapshot = null;
+  while (true) {
+    snapshot = await viewportPresentationSnapshot(page);
+    if (snapshot.terminal) {
+      return { passed: false, reason: 'terminal-renderer-state', snapshot };
+    }
+    if (viewportBaselineSettled(snapshot)) {
+      return { passed: true, reason: 'settled', snapshot };
+    }
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) break;
+    await page.waitForTimeout(Math.min(100, remainingMs));
+  }
+  return { passed: false, reason: 'baseline-settlement-timeout', snapshot };
 }
 
 function viewportPresentationAdvanced(before, after, expectedViewport) {
@@ -1715,19 +1796,35 @@ function viewportPresentationAdvanced(before, after, expectedViewport) {
 
 async function waitForViewportPresentation(page, before, expectedViewport, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
-  let snapshot = await viewportPresentationSnapshot(page);
-  while (Date.now() < deadline) {
-    if (viewportPresentationAdvanced(before, snapshot, expectedViewport)) {
-      return { passed: true, snapshot };
-    }
-    await page.waitForTimeout(100);
+  let snapshot = null;
+  while (true) {
     snapshot = await viewportPresentationSnapshot(page);
+    if (snapshot.terminal) {
+      return { passed: false, reason: 'terminal-renderer-state', snapshot };
+    }
+    if (viewportPresentationAdvanced(before, snapshot, expectedViewport)) {
+      return { passed: true, reason: 'presented', snapshot };
+    }
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) break;
+    await page.waitForTimeout(Math.min(100, remainingMs));
   }
-  return { passed: false, snapshot };
+  return { passed: false, reason: 'presentation-timeout', snapshot };
 }
 
 async function exerciseInitialViewportPresentation(page, width, height, timeoutMs) {
-  const baseline = await viewportPresentationSnapshot(page);
+  const baselineResult = await waitForViewportBaseline(page, timeoutMs);
+  const baseline = baselineResult.snapshot;
+  if (!baselineResult.passed) {
+    return {
+      passed: false,
+      failed_stage: 'baseline-settlement',
+      failure_reason: baselineResult.reason,
+      baseline,
+      mutated: baseline,
+      restored: baseline,
+    };
+  }
   const originalViewport = Array.isArray(baseline.viewport)
     ? baseline.viewport
     : [width, height];
@@ -1752,6 +1849,7 @@ async function exerciseInitialViewportPresentation(page, width, height, timeoutM
     return {
       passed: false,
       failed_stage: 'mutated-presentation',
+      failure_reason: mutated.reason,
       baseline,
       mutated: mutated.snapshot,
       restored: await viewportPresentationSnapshot(page),
@@ -1766,6 +1864,7 @@ async function exerciseInitialViewportPresentation(page, width, height, timeoutM
   return {
     passed: restored.passed,
     failed_stage: restored.passed ? null : 'restored-presentation',
+    failure_reason: restored.passed ? null : restored.reason,
     baseline,
     mutated: mutated.snapshot,
     restored: restored.snapshot,
@@ -5362,9 +5461,13 @@ async function exerciseFirstRun(context, sourcePage, datasetPath, screenshotPath
 
     // Poll the product readiness probe until the viewer has rendered the dataset.
     let probe = null;
+    let readinessTerminal = null;
     const deadline = Date.now() + renderWaitMs;
     while (Date.now() < deadline) {
-      probe = await page.evaluate(readyProbe);
+      const readiness = await viewportPresentationSnapshot(page);
+      probe = readiness.ready;
+      readinessTerminal = readiness.terminal;
+      if (readinessTerminal) break;
       if (probe && probe.ready) break;
       await page.waitForTimeout(250);
     }
@@ -5568,7 +5671,9 @@ async function exerciseFirstRun(context, sourcePage, datasetPath, screenshotPath
       rendered,
       frame_advanced: frameAdvanced,
       reason: !rendered
-        ? ('captured_not_ready: ' + (probe ? probe.reason : 'unknown'))
+        ? ('captured_not_ready: ' + (readinessTerminal
+          ? ('terminal-renderer-state:' + (readinessTerminal.code || 'unknown'))
+          : (probe ? probe.reason : 'unknown')))
         : (!frameAdvanced
           ? ('initial_viewport_presentation_failed:'
             + (initialViewportPresentation && initialViewportPresentation.failed_stage || 'unknown'))
@@ -6192,6 +6297,7 @@ def _browser_acceptance_contract_failures(
             and all(numeric_at_least(value, 1) for value in canvas_backing)
             and nested(snapshot, "ready", "ready") is True
             and nested(snapshot, "runtime", "version") == 1
+            and nested(snapshot, "terminal") is None
         )
 
     def viewport_stage_advanced(before: Any, after: Any) -> bool:
@@ -6216,10 +6322,23 @@ def _browser_acceptance_contract_failures(
         nested(viewport_presentation, "mutated"),
         nested(viewport_presentation, "restored"),
     ]
+    baseline_runtime_settled = (
+        numeric_equal(
+            nested(viewport_snapshots[0], "runtime", "client", "frames", "pending"),
+            0,
+        )
+        and nested(viewport_snapshots[0], "runtime", "loop", "animationFramePending")
+        is False
+        and nested(viewport_snapshots[0], "runtime", "loop", "interactiveDirty")
+        is False
+        and nested(viewport_snapshots[0], "runtime", "loop", "residencyDirty")
+        is False
+    )
     if not isinstance(viewport_presentation, dict) \
             or viewport_presentation.get("passed") is not True \
             or viewport_presentation.get("failed_stage") is not None \
             or not all(viewport_snapshot_valid(value) for value in viewport_snapshots) \
+            or not baseline_runtime_settled \
             or baseline_viewport == mutated_viewport \
             or restored_viewport != baseline_viewport \
             or not viewport_stage_advanced(viewport_snapshots[0], viewport_snapshots[1]) \

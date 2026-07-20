@@ -1457,6 +1457,8 @@ class RealSpaMatrixTests(unittest.TestCase):
             helper_start,
         )
         helper = web_surface._SPA_DRIVER[helper_start:helper_end]
+        self.assertIn("const baselineResult = await waitForViewportBaseline", helper)
+        self.assertIn("failed_stage: 'baseline-settlement'", helper)
         self.assertIn("await page.setViewportSize({ width: mutatedViewport[0]", helper)
         self.assertIn("const mutated = await waitForViewportPresentation", helper)
         self.assertIn("width: originalViewport[0], height: originalViewport[1]", helper)
@@ -1485,6 +1487,38 @@ class RealSpaMatrixTests(unittest.TestCase):
             "after.ready.frame_count",
         ):
             self.assertIn(marker, progress)
+        snapshot_start = web_surface._SPA_DRIVER.index(
+            "async function viewportPresentationSnapshot",
+        )
+        snapshot_end = web_surface._SPA_DRIVER.index(
+            "function viewportBaselineSettled",
+            snapshot_start,
+        )
+        snapshot = web_surface._SPA_DRIVER[snapshot_start:snapshot_end]
+        self.assertEqual(snapshot.count("page.evaluate("), 1)
+        self.assertIn("document.querySelector('[data-render-error-code]')", snapshot)
+        baseline_start = web_surface._SPA_DRIVER.index(
+            "async function waitForViewportBaseline",
+        )
+        baseline_end = web_surface._SPA_DRIVER.index(
+            "function viewportPresentationAdvanced",
+            baseline_start,
+        )
+        baseline = web_surface._SPA_DRIVER[baseline_start:baseline_end]
+        self.assertIn("viewportBaselineSettled(snapshot)", baseline)
+        self.assertIn("reason: 'terminal-renderer-state'", baseline)
+        presentation_start = web_surface._SPA_DRIVER.index(
+            "async function waitForViewportPresentation",
+        )
+        presentation_end = web_surface._SPA_DRIVER.index(
+            "async function exerciseInitialViewportPresentation",
+            presentation_start,
+        )
+        presentation = web_surface._SPA_DRIVER[presentation_start:presentation_end]
+        self.assertIn("if (snapshot.terminal)", presentation)
+        self.assertIn("reason: 'terminal-renderer-state'", presentation)
+        self.assertIn("const readiness = await viewportPresentationSnapshot(page)", web_surface._SPA_DRIVER)
+        self.assertIn("if (readinessTerminal) break", web_surface._SPA_DRIVER)
         self.assertIn("initial_viewport_presentation: initialViewportPresentation", web_surface._SPA_DRIVER)
         self.assertIn("initial_viewport_presentation_failed:", web_surface._SPA_DRIVER)
 
@@ -1498,6 +1532,15 @@ class RealSpaMatrixTests(unittest.TestCase):
             lambda contract: contract["initial_viewport_presentation"]["restored"][
                 "runtime"
             ]["client"]["frames"].update(presented=6),
+            lambda contract: contract["initial_viewport_presentation"]["mutated"].update(
+                terminal={"code": "frame_starvation", "message": "renderer stopped"},
+            ),
+            lambda contract: contract["initial_viewport_presentation"]["baseline"][
+                "runtime"
+            ]["client"]["frames"].update(pending=1),
+            lambda contract: contract["initial_viewport_presentation"]["baseline"][
+                "runtime"
+            ]["loop"].update(interactiveDirty=True),
         ):
             contract = passing_browser_contract(1)
             mutate(contract)
@@ -1511,6 +1554,139 @@ class RealSpaMatrixTests(unittest.TestCase):
                 "initial viewport mutation/restoration presentation receipt did not pass",
                 failures,
             )
+
+    def test_viewport_driver_observes_atomic_terminal_idle_and_deadline_boundaries(self) -> None:
+        helper_start = web_surface._SPA_DRIVER.index(
+            "async function viewportPresentationSnapshot",
+        )
+        helper_end = web_surface._SPA_DRIVER.index(
+            "async function exerciseInitialViewportPresentation",
+            helper_start,
+        )
+        helpers = web_surface._SPA_DRIVER[helper_start:helper_end]
+        script = helpers + r"""
+let clock = 0;
+Date.now = () => clock;
+
+function rawSnapshot({
+  pending = 0,
+  active = false,
+  terminal = null,
+  frame = 1,
+  forwarded = 1,
+  posted = 1,
+  presented = 1,
+  viewport = [1400, 900],
+  canvas = [778, 600],
+} = {}) {
+  return {
+    capture: {
+      ready: true,
+      reason: 'rendered',
+      frameCount: frame,
+      datasetCount: 1,
+      datasets: [],
+      view: {},
+      camera: {},
+    },
+    runtime: {
+      version: 1,
+      loop: {
+        animationFramePending: active,
+        interactiveDirty: active,
+        residencyDirty: false,
+      },
+      client: {
+        frames: { pending, posted, presented },
+        surface: { forwarded },
+      },
+    },
+    viewport,
+    devicePixelRatio: 1,
+    canvas: { css: canvas, client: canvas, backing: canvas },
+    terminal,
+  };
+}
+
+function mockPage(snapshots) {
+  let index = 0;
+  let evaluations = 0;
+  return {
+    evaluate: async () => {
+      evaluations += 1;
+      const value = snapshots[Math.min(index, snapshots.length - 1)];
+      index += 1;
+      return value;
+    },
+    waitForTimeout: async (milliseconds) => { clock += milliseconds; },
+    evaluations: () => evaluations,
+  };
+}
+
+(async () => {
+  clock = 0;
+  const baselinePage = mockPage([
+    rawSnapshot({ pending: 1, active: true }),
+    rawSnapshot(),
+  ]);
+  const baseline = await waitForViewportBaseline(baselinePage, 100);
+
+  clock = 0;
+  const terminalPage = mockPage([
+    rawSnapshot({ terminal: { code: 'frame_starvation', message: 'stopped' } }),
+  ]);
+  const terminal = await waitForViewportBaseline(terminalPage, 100);
+
+  clock = 0;
+  const beforePage = mockPage([rawSnapshot()]);
+  const before = await viewportPresentationSnapshot(beforePage);
+  const presentationPage = mockPage([
+    rawSnapshot(),
+    rawSnapshot({
+      frame: 2,
+      forwarded: 2,
+      posted: 2,
+      presented: 2,
+      viewport: [1260, 900],
+      canvas: [638, 600],
+    }),
+  ]);
+  const presentation = await waitForViewportPresentation(
+    presentationPage,
+    before,
+    [1260, 900],
+    100,
+  );
+
+  process.stdout.write(JSON.stringify({
+    baselinePassed: baseline.passed,
+    baselineEvaluations: baselinePage.evaluations(),
+    terminalPassed: terminal.passed,
+    terminalReason: terminal.reason,
+    terminalEvaluations: terminalPage.evaluations(),
+    presentationPassed: presentation.passed,
+    presentationEvaluations: presentationPage.evaluations(),
+  }));
+})().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=TRYOUT_ROOT.parent.parent,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        receipt = json.loads(completed.stdout)
+        self.assertTrue(receipt["baselinePassed"])
+        self.assertEqual(receipt["baselineEvaluations"], 2)
+        self.assertFalse(receipt["terminalPassed"])
+        self.assertEqual(receipt["terminalReason"], "terminal-renderer-state")
+        self.assertEqual(receipt["terminalEvaluations"], 1)
+        self.assertTrue(receipt["presentationPassed"])
+        self.assertEqual(receipt["presentationEvaluations"], 2)
 
     def test_idle_driver_uses_three_samples_without_masking_activity(self) -> None:
         self.assertIn("for (let index = 0; index < 3; index++)", web_surface._SPA_DRIVER)
