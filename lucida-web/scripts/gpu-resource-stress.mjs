@@ -63,6 +63,64 @@ try {
       delay(2_000).then(() => { throw new Error(`${label} timed out`); }),
     ]);
 
+    // The production renderer owns WebGPU from a dedicated worker and renders
+    // into a transferred OffscreenCanvas. A page-thread adapter probe is not a
+    // substitute: headless Chrome can expose WebGPU on the window while its
+    // worker/canvas path never completes device initialization.
+    const workerSource = `
+      self.onmessage = async ({ data: canvas }) => {
+        let device;
+        try {
+          if (!self.navigator.gpu) throw new Error("worker does not expose WebGPU");
+          const adapter = await self.navigator.gpu.requestAdapter();
+          if (!adapter) throw new Error("worker has no WebGPU adapter");
+          device = await adapter.requestDevice({
+            requiredLimits: {
+              maxBufferSize: adapter.limits.maxBufferSize,
+              maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+            },
+          });
+          const context = canvas.getContext("webgpu");
+          if (!context) throw new Error("worker has no WebGPU canvas context");
+          const format = self.navigator.gpu.getPreferredCanvasFormat();
+          context.configure({ device, format, alphaMode: "opaque" });
+          const encoder = device.createCommandEncoder();
+          const pass = encoder.beginRenderPass({
+            colorAttachments: [{
+              view: context.getCurrentTexture().createView(),
+              clearValue: { r: 0.2, g: 0.4, b: 0.6, a: 1 },
+              loadOp: "clear",
+              storeOp: "store",
+            }],
+          });
+          pass.end();
+          device.queue.submit([encoder.finish()]);
+          await device.queue.onSubmittedWorkDone();
+          self.postMessage({ ok: true });
+        } catch (error) {
+          self.postMessage({ ok: false, error: error instanceof Error ? error.message : String(error) });
+        } finally {
+          device?.destroy();
+        }
+      };
+    `;
+    const workerUrl = URL.createObjectURL(new Blob([workerSource], { type: "text/javascript" }));
+    const worker = new Worker(workerUrl);
+    const workerCanvas = document.createElement("canvas");
+    workerCanvas.width = 8;
+    workerCanvas.height = 8;
+    const workerReceipt = await deadline(new Promise((resolve, reject) => {
+      worker.onmessage = ({ data }) => data.ok
+        ? resolve(data)
+        : reject(new Error(data.error || "worker WebGPU probe failed"));
+      worker.onerror = event => reject(new Error(event.message || "worker WebGPU probe crashed"));
+      const offscreen = workerCanvas.transferControlToOffscreen();
+      worker.postMessage(offscreen, [offscreen]);
+    }), "dedicated-worker OffscreenCanvas WebGPU").finally(() => {
+      worker.terminate();
+      URL.revokeObjectURL(workerUrl);
+    });
+
     // Trace the production scheduler against the browser's actual RAF queue.
     // The page is otherwise empty, so every observed callback belongs to this
     // owner. An idle window must schedule/fire zero callbacks; a 10k-event
@@ -251,6 +309,7 @@ try {
 
     return {
       adapter: true,
+      workerAdapter: workerReceipt.ok,
       idleTrace: {
         idleWindowMs: 120,
         burstWakeCount: 10_000,

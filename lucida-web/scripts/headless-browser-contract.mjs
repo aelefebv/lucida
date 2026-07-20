@@ -11,8 +11,13 @@ const LINUX_SOFTWARE_WEBGPU_ARGS = Object.freeze([
   // --enable-features switch. Chromium only honors the last repeated switch,
   // so preserve that feature when enabling the Linux WebGPU backend.
   "--enable-features=CDPScreenshotNewSurface,Vulkan,WebGPU",
+  // Headless Chrome otherwise forces software rendering before the explicit
+  // SwiftShader drivers below can own an OffscreenCanvas in a render worker.
+  "--enable-gpu",
   "--enable-unsafe-swiftshader",
+  "--use-gl=angle",
   "--use-angle=swiftshader",
+  "--use-vulkan=swiftshader",
   "--use-webgpu-adapter=swiftshader",
 ]);
 

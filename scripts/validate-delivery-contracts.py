@@ -583,8 +583,11 @@ def validate_cross_stack_contract() -> None:
     )
     linux_webgpu_flags = (
         "--enable-features=CDPScreenshotNewSurface,Vulkan,WebGPU",
+        "--enable-gpu",
         "--enable-unsafe-swiftshader",
+        "--use-gl=angle",
         "--use-angle=swiftshader",
+        "--use-vulkan=swiftshader",
         "--use-webgpu-adapter=swiftshader",
     )
     capture_base_flags = (

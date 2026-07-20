@@ -1234,8 +1234,11 @@ class RealSpaMatrixTests(unittest.TestCase):
         ]
         linux_software = [
             "--enable-features=CDPScreenshotNewSurface,Vulkan,WebGPU",
+            "--enable-gpu",
             "--enable-unsafe-swiftshader",
+            "--use-gl=angle",
             "--use-angle=swiftshader",
+            "--use-vulkan=swiftshader",
             "--use-webgpu-adapter=swiftshader",
         ]
         self.assertEqual(headless_webgpu_browser_args("darwin"), capture_base)
@@ -2050,8 +2053,11 @@ class ScenarioBrowserMatrixTests(unittest.TestCase):
             "--no-first-run",
             "--no-default-browser-check",
             "--enable-features=CDPScreenshotNewSurface,Vulkan,WebGPU",
+            "--enable-gpu",
             "--enable-unsafe-swiftshader",
+            "--use-gl=angle",
             "--use-angle=swiftshader",
+            "--use-vulkan=swiftshader",
             "--use-webgpu-adapter=swiftshader",
         ]
         completed = subprocess.CompletedProcess(
