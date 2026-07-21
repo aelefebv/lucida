@@ -2607,6 +2607,187 @@ async function focusAppearance(locator) {
   });
 }
 
+async function installBoundedFocusTrace(page) {
+  return page.evaluate(() => {
+    const previous = window.__lucidaTryoutFocusTrace;
+    if (previous && typeof previous.stop === 'function') previous.stop();
+
+    const prototype = HTMLElement.prototype;
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, 'focus');
+    if (!descriptor || typeof descriptor.value !== 'function') {
+      return { installed: false, reason: 'HTMLElement.prototype.focus was unavailable' };
+    }
+    const nativeFocus = descriptor.value;
+    const firstEntries = [];
+    const tailEntries = [];
+    const firstEntryLimit = 128;
+    const tailEntryLimit = 384;
+    let tailWriteIndex = 0;
+    let droppedCount = 0;
+    let focusCallCount = 0;
+    const identity = (target) => target instanceof Element ? {
+      tag: target.tagName.toLowerCase(),
+      id: target.id || null,
+      role: target.getAttribute('role'),
+      aria_label: target.getAttribute('aria-label'),
+    } : null;
+    const traceEntries = () => {
+      const tail = droppedCount > 0
+        ? tailEntries.slice(tailWriteIndex).concat(tailEntries.slice(0, tailWriteIndex))
+        : tailEntries.slice();
+      return firstEntries.concat(tail);
+    };
+    const record = (entry) => {
+      const enriched = {
+        at_ms: performance.now(),
+        document_has_focus: document.hasFocus(),
+        visibility_state: document.visibilityState,
+        ...entry,
+      };
+      if (firstEntries.length < firstEntryLimit) {
+        firstEntries.push(enriched);
+      } else if (tailEntries.length < tailEntryLimit) {
+        tailEntries.push(enriched);
+      } else {
+        tailEntries[tailWriteIndex] = enriched;
+        tailWriteIndex = (tailWriteIndex + 1) % tailEntryLimit;
+        droppedCount += 1;
+      }
+    };
+    const safely = (work) => {
+      try {
+        return work();
+      } catch (_error) {
+        return undefined;
+      }
+    };
+    const marker = (label) => safely(() => record({
+      kind: 'marker',
+      label: String(label).slice(0, 80),
+      active: identity(document.activeElement),
+    }));
+    const tracedFocus = function(...args) {
+      const target = this;
+      const callIndex = focusCallCount;
+      focusCallCount += 1;
+      const before = safely(() => identity(document.activeElement));
+      let result;
+      let nativeError;
+      let nativeThrew = false;
+      try {
+        result = Reflect.apply(nativeFocus, target, args);
+      } catch (error) {
+        nativeError = error;
+        nativeThrew = true;
+      }
+      safely(() => {
+        const stack = callIndex < 16
+          ? String(new Error('focus trace').stack || '').split('\n').slice(2, 7)
+            .map((line) => line.slice(0, 240))
+          : null;
+        record({
+          kind: 'focus-call',
+          target: identity(target),
+          before,
+          after: identity(document.activeElement),
+          stack,
+          error: nativeThrew
+            ? String(nativeError && nativeError.message ? nativeError.message : nativeError).slice(0, 240)
+            : null,
+        });
+        queueMicrotask(() => safely(() => record({
+          kind: 'focus-call-settled',
+          target: identity(target),
+          active: identity(document.activeElement),
+        })));
+      });
+      if (nativeThrew) throw nativeError;
+      return result;
+    };
+
+    const eventTypes = ['focus', 'blur', 'focusin', 'focusout'];
+    const onFocusEvent = (event) => {
+      safely(() => record({
+        kind: 'focus-event',
+        event: event.type,
+        target: identity(event.target),
+        related_target: identity(event.relatedTarget),
+        active: identity(document.activeElement),
+      }));
+      safely(() => queueMicrotask(() => safely(() => record({
+        kind: 'focus-event-settled',
+        event: event.type,
+        target: identity(event.target),
+        active: identity(document.activeElement),
+      }))));
+    };
+
+    let stopped = false;
+    const stop = () => {
+      if (!stopped) {
+        for (const type of eventTypes) {
+          safely(() => document.removeEventListener(type, onFocusEvent, true));
+        }
+        safely(() => {
+          const current = Object.getOwnPropertyDescriptor(prototype, 'focus');
+          if (current && current.value === tracedFocus) {
+            Object.defineProperty(prototype, 'focus', descriptor);
+          }
+        });
+        safely(() => delete window.__lucidaTryoutFocusTrace);
+        stopped = true;
+      }
+      return {
+        installed: true,
+        truncated: droppedCount > 0,
+        dropped_count: droppedCount,
+        entries: traceEntries(),
+      };
+    };
+    let wrapperInstalled = false;
+    const listenerTypes = [];
+    try {
+      Object.defineProperty(prototype, 'focus', { ...descriptor, value: tracedFocus });
+      wrapperInstalled = true;
+      for (const type of eventTypes) {
+        document.addEventListener(type, onFocusEvent, true);
+        listenerTypes.push(type);
+      }
+      window.__lucidaTryoutFocusTrace = { marker, stop };
+      marker('installed');
+      return { installed: true, reason: null };
+    } catch (error) {
+      for (const type of listenerTypes) {
+        safely(() => document.removeEventListener(type, onFocusEvent, true));
+      }
+      if (wrapperInstalled) safely(() => Object.defineProperty(prototype, 'focus', descriptor));
+      safely(() => delete window.__lucidaTryoutFocusTrace);
+      return {
+        installed: false,
+        reason: String(error && error.message ? error.message : error).slice(0, 240),
+      };
+    }
+  });
+}
+
+async function markBoundedFocusTrace(page, label) {
+  await page.evaluate((markerLabel) => {
+    const trace = window.__lucidaTryoutFocusTrace;
+    if (trace && typeof trace.marker === 'function') trace.marker(markerLabel);
+  }, label);
+}
+
+async function stopBoundedFocusTrace(page, finalLabel) {
+  return page.evaluate((markerLabel) => {
+    const trace = window.__lucidaTryoutFocusTrace;
+    if (!trace || typeof trace.stop !== 'function') {
+      return { installed: false, reason: 'focus trace was unavailable', entries: [] };
+    }
+    trace.marker(markerLabel);
+    return trace.stop();
+  }, finalLabel);
+}
+
 async function waitForFocusInside(
   page,
   state,
@@ -2631,19 +2812,41 @@ async function waitForFocusInside(
     const element = document.querySelector(targetSelector);
     const expected = focusSelector ? document.querySelector(focusSelector) : null;
     const active = document.activeElement;
+    const describe = (target) => target ? {
+      tag: target.tagName.toLowerCase(),
+      id: target.id || null,
+      role: target.getAttribute('role'),
+      aria_label: target.getAttribute('aria-label'),
+      aria_labelledby: target.getAttribute('aria-labelledby'),
+      text: (target.textContent || '').trim().slice(0, 120),
+    } : null;
+    const expectedStyle = expected ? getComputedStyle(expected) : null;
+    const expectedRect = expected ? expected.getBoundingClientRect() : null;
+    const expectedState = expected ? {
+      disabled: Boolean(expected.disabled),
+      tab_index: expected.tabIndex,
+      inert: Boolean(expected.inert),
+      closest_inert: describe(expected.closest('[inert]')),
+      closest_aria_hidden: describe(expected.closest("[aria-hidden='true']")),
+      display: expectedStyle && expectedStyle.display,
+      visibility: expectedStyle && expectedStyle.visibility,
+      pointer_events: expectedStyle && expectedStyle.pointerEvents,
+      client_rect_count: expected.getClientRects().length,
+      rect: expectedRect ? {
+        x: expectedRect.x,
+        y: expectedRect.y,
+        width: expectedRect.width,
+        height: expectedRect.height,
+      } : null,
+      document_has_focus: document.hasFocus(),
+    } : null;
     return {
       target_found: Boolean(element),
       focus_inside: Boolean(element && active && element.contains(active)),
       expected_focus_found: focusSelector ? Boolean(expected) : null,
       expected_focus_matched: focusSelector ? active === expected : null,
-      active_element: active ? {
-        tag: active.tagName.toLowerCase(),
-        id: active.id || null,
-        role: active.getAttribute('role'),
-        aria_label: active.getAttribute('aria-label'),
-        aria_labelledby: active.getAttribute('aria-labelledby'),
-        text: (active.textContent || '').trim().slice(0, 120),
-      } : null,
+      active_element: describe(active),
+      expected_focus_state: expectedState,
     };
   }, { targetSelector: selector, focusSelector: expectedFocusSelector });
   return {
@@ -2719,6 +2922,8 @@ async function exerciseDialogFocusCycle(page, dialog) {
   const initial = await focusState();
   const focusableCount = initial.count;
   await dialog.evaluate((element) => {
+    const trace = window.__lucidaTryoutFocusTrace;
+    if (trace && typeof trace.marker === 'function') trace.marker('before-cycle-first-focus');
     const selector = 'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])';
     const first = Array.from(element.querySelectorAll(selector)).find((candidate) => {
       const rect = candidate.getBoundingClientRect();
@@ -2727,6 +2932,7 @@ async function exerciseDialogFocusCycle(page, dialog) {
         && style.visibility !== 'hidden' && style.display !== 'none';
     });
     if (first) first.focus();
+    if (trace && typeof trace.marker === 'function') trace.marker('after-cycle-first-focus');
   });
   const cycleStart = await focusState();
   const forward = [];
@@ -4208,23 +4414,48 @@ async function exerciseKeyboardContract(page, focusFailureScreenshotPath) {
     drawerTrigger,
     'keyboard: Layers',
   );
-  await drawerTrigger.focus();
-  await drawerTrigger.press('Enter');
-  const drawer = page.getByRole('dialog', { name: 'Layers' });
-  await drawer.waitFor({ state: 'visible', timeout: 10000 });
-  const close = drawer.getByRole('button', { name: 'Close layers panel' });
-  const drawerFocusWait = await waitForFocusInside(
-    page,
-    'keyboard.layers-dialog-initial-focus',
-    '#layers-panel[role="dialog"]',
-    '#layers-panel button[aria-label="Close layers panel"]',
-  );
-  if (!drawerFocusWait.wait_passed && focusFailureScreenshotPath) {
-    await page.screenshot({ path: focusFailureScreenshotPath, fullPage: true });
+  const focusTraceInstall = await installBoundedFocusTrace(page);
+  let drawerFocusTrace = null;
+  let drawerFocusWait;
+  try {
+    await markBoundedFocusTrace(page, 'before-trigger-focus');
+    await drawerTrigger.focus();
+    await markBoundedFocusTrace(page, 'before-enter');
+    await drawerTrigger.press('Enter');
+    await markBoundedFocusTrace(page, 'after-enter');
+    const tracedDrawer = page.getByRole('dialog', { name: 'Layers' });
+    await tracedDrawer.waitFor({ state: 'visible', timeout: 10000 });
+    await markBoundedFocusTrace(page, 'drawer-visible');
+    drawerFocusWait = await waitForFocusInside(
+      page,
+      'keyboard.layers-dialog-initial-focus',
+      '#layers-panel[role="dialog"]',
+      '#layers-panel button[aria-label="Close layers panel"]',
+    );
+    await markBoundedFocusTrace(page, 'after-wait');
+  } catch (error) {
+    drawerFocusTrace = await stopBoundedFocusTrace(page, 'opening-error').catch(() => null);
+    throw error;
   }
-  const initialFocusInside = await drawer.evaluate((element) => element.contains(document.activeElement));
-  const closeFocus = await focusAppearance(close);
-  const focusCycle = await exerciseDialogFocusCycle(page, drawer);
+  const drawer = page.getByRole('dialog', { name: 'Layers' });
+  const close = drawer.getByRole('button', { name: 'Close layers panel' });
+  let initialFocusInside;
+  let closeFocus;
+  let focusCycle;
+  try {
+    if (!drawerFocusWait.wait_passed && focusFailureScreenshotPath) {
+      await markBoundedFocusTrace(page, 'before-failure-screenshot');
+      await page.screenshot({ path: focusFailureScreenshotPath, fullPage: true });
+      await markBoundedFocusTrace(page, 'after-failure-screenshot');
+    }
+    initialFocusInside = await drawer.evaluate((element) => element.contains(document.activeElement));
+    closeFocus = await focusAppearance(close);
+    await markBoundedFocusTrace(page, 'before-focus-cycle');
+    focusCycle = await exerciseDialogFocusCycle(page, drawer);
+    await markBoundedFocusTrace(page, 'after-focus-cycle');
+  } finally {
+    drawerFocusTrace = await stopBoundedFocusTrace(page, 'trace-complete').catch(() => null);
+  }
   const reducedMotion = await drawer.evaluate((element) => {
     const values = getComputedStyle(element).transitionDuration.split(',').map((value) => {
       const trimmed = value.trim();
@@ -4250,6 +4481,8 @@ async function exerciseKeyboardContract(page, focusFailureScreenshotPath) {
     sidebar_focus: sidebarFocus,
     viewer_focus: viewerFocus,
     drawer_focus_wait: drawerFocusWait,
+    drawer_focus_trace_install: focusTraceInstall,
+    drawer_focus_trace: drawerFocusTrace,
     drawer_trigger_viewport: drawerTriggerViewport,
     drawer_focus_failure_screenshot: !drawerFocusWait.wait_passed
       ? focusFailureScreenshotPath
