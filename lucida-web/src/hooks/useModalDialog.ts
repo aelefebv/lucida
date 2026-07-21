@@ -120,18 +120,25 @@ export function useModalDialog({
       // Keeping this rule aligned with focusInsideDialog prevents responsive
       // drawers from becoming stranded on a non-interactive container after
       // their opening retry has already observed the preferred control.
-      if (event.target instanceof Node
-        && event.target !== dialog
-        && dialog.contains(event.target)) return;
+      if (event.target instanceof Node && dialog.contains(event.target)) {
+        if (event.target === dialog) {
+          // Chrome can complete the original root focus operation after a
+          // synchronous nested focus() call, overwriting that nested result.
+          // Retry after the focus event has unwound so the preferred control
+          // becomes the final active element.
+          queueMicrotask(claimFocus);
+        }
+        return;
+      }
       claimFocus();
     };
 
     // Claim focus during the opening commit, then keep verifying the outcome
     // while responsive CSS, inert removal, and child refs settle. Linux Chrome
-    // can reject every early focus attempt even though the control becomes
-    // focusable shortly afterward. The bounded loop is opening-only and stops
-    // as soon as a meaningful descendant owns focus; it never steals from a
-    // user who already advanced within the dialog.
+    // can reject every early focus attempt or transiently accept one before a
+    // pending root-focus operation wins. The bounded loop is opening-only;
+    // focusInsideDialog preserves any meaningful descendant, so verification
+    // never steals from a user who already advanced within the dialog.
     document.addEventListener("focusin", containFocus, true);
     claimFocus();
     queueMicrotask(claimFocus);
@@ -139,11 +146,7 @@ export function useModalDialog({
     let focusFrame: number | null = null;
     const verifyOpeningFocus = () => {
       claimFocus();
-      const dialog = dialogRef.current;
-      const active = document.activeElement;
-      if (dialog
-        && (!active || active === dialog || !dialog.contains(active))
-        && performance.now() < focusDeadline) {
+      if (performance.now() < focusDeadline) {
         focusFrame = requestAnimationFrame(verifyOpeningFocus);
       }
     };

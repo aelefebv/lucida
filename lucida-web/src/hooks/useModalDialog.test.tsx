@@ -176,7 +176,7 @@ describe("useModalDialog", () => {
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "Preferred" }));
   });
 
-  it("reclaims a late browser focus transfer from the dialog root", () => {
+  it("reclaims a late browser focus transfer after its focus event settles", async () => {
     render(<PreferredHarness preferred="visible" />);
     fireEvent.click(screen.getByRole("button", { name: "Open preferred dialog" }));
     const preferred = screen.getByRole("button", { name: "Preferred" });
@@ -184,11 +184,12 @@ describe("useModalDialog", () => {
     expect(document.activeElement).toBe(preferred);
 
     dialog.focus();
+    await act(async () => Promise.resolve());
 
     expect(document.activeElement).toBe(preferred);
   });
 
-  it("keeps root focus as the bounded fallback when no control is available", () => {
+  it("keeps root focus as the bounded fallback when no control is available", async () => {
     render(
       <PreferredHarness
         preferred="missing"
@@ -201,6 +202,7 @@ describe("useModalDialog", () => {
     expect(document.activeElement).toBe(dialog);
 
     invoker.focus();
+    await act(async () => Promise.resolve());
 
     expect(document.activeElement).toBe(dialog);
   });
