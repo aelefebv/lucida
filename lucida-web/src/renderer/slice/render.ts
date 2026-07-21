@@ -34,6 +34,7 @@ import { packLabelPalette } from "../labelColors.ts";
 import { DEFAULT_LABEL_OPACITY } from "../../labelSettings.ts";
 import { admitWorkerRenderSurface } from "../worker/surface.ts";
 import { labelPoolKey } from "../labelPoolKey.ts";
+import { parseCompositeKey } from "../chunkKeys.ts";
 
 const IDENTITY_4X4 = new Float32Array([
   1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
@@ -41,6 +42,28 @@ const IDENTITY_4X4 = new Float32Array([
 
 /** Bytes per aggregate quad record (see `SliceAggregateParams.quads`). */
 const AGGREGATE_QUAD_STRIDE_BYTES = 32;
+
+/**
+ * Build the current-slice resident-member view once per atlas and render.
+ * Cold state publishes entity metadata before any chunk arrives, while Z
+ * retargeting can retain old chunks as explicitly stale cache entries. Only a
+ * shader-mapped, non-stale slot can contribute content to this presentation.
+ */
+function residentMembersForSliceAtlas(
+  atlas: SliceAtlasState,
+  cache: Map<SliceAtlasState, Set<string>>,
+): Set<string> {
+  const cached = cache.get(atlas);
+  if (cached) return cached;
+  const members = new Set<string>();
+  for (const [key, slotIndex] of atlas.slots) {
+    if (atlas.slotGridIdx[slotIndex] < 0 || atlas.staleSliceKeys?.has(key)) continue;
+    const parsed = parseCompositeKey(key);
+    if (parsed) members.add(parsed.memberId);
+  }
+  cache.set(atlas, members);
+  return members;
+}
 
 /**
  * Resolve publish-once aggregate geometry. A non-empty keyed buffer replaces
@@ -309,6 +332,7 @@ function buildAggregateBatches(
     coarsePoolKey: string | null;
     datasetId: string | null;
   } | null,
+  residentMemberCache: Map<SliceAtlasState, Set<string>>,
 ): BuiltAggregate {
   const atlasMap = ctx.state.sliceAtlases;
   const srcF32 = new Float32Array(quads);
@@ -350,8 +374,12 @@ function buildAggregateBatches(
       detailAtlas?.entityMetas.get(memberId) ?? null;
     const coarseMetas: LodIndirectionMeta[] | null =
       coarseAtlas?.entityMetas.get(memberId) ?? null;
-    const hasDetail = detailMetas != null && detailMetas.length > 0;
-    const hasCoarse = coarseMetas != null && coarseMetas.length > 0;
+    const hasDetail = detailMetas != null && detailMetas.length > 0
+      && detailAtlas !== null
+      && residentMembersForSliceAtlas(detailAtlas, residentMemberCache).has(memberId);
+    const hasCoarse = coarseMetas != null && coarseMetas.length > 0
+      && coarseAtlas !== null
+      && residentMembersForSliceAtlas(coarseAtlas, residentMemberCache).has(memberId);
 
     // Residency guard — identical to the per-member skip rule.
     if (!hasDetail && !hasCoarse) continue;
@@ -497,13 +525,13 @@ export function handleSliceRenderMultiPass(
     coarsePoolKey: string | null;
     datasetId: string | null;
   } | null,
-): boolean {
+): { contentPresented: boolean } | null {
   const surface = admitWorkerRenderSurface(
     ctx,
     incoming.canvasW,
     incoming.canvasH,
   );
-  if (!surface) return false;
+  if (!surface) return null;
   const msg: SliceRenderMultiPassMessage = {
     ...incoming,
     canvasW: surface.width,
@@ -540,7 +568,7 @@ export function handleSliceRenderMultiPass(
       });
     }
   }
-  if (!complete) return false;
+  if (!complete) return null;
 
   const canvas = ctx.context.canvas as OffscreenCanvas;
   canvas.width = msg.canvasW;
@@ -563,6 +591,7 @@ export function handleSliceRenderMultiPass(
     isFirstLayer = false;
   };
   const atlasMap = ctx.state.sliceAtlases;
+  const residentMemberCache = new Map<SliceAtlasState, Set<string>>();
 
   for (const layer of msg.layers) {
     const memberId = layer.datasetId;
@@ -611,6 +640,7 @@ export function handleSliceRenderMultiPass(
           geometry.quads,
           descIndex,
           layerToPool,
+          residentMemberCache,
         );
         if (geometry.entry && geometry.cacheKey) {
           topology = installResolvedAggregateTopology(
@@ -673,9 +703,9 @@ export function handleSliceRenderMultiPass(
     if (!descIndex) continue;
     const entityIndex = layer.entityIndex;
 
-    // Detect "no detail" via descriptor-derived state: the canonical
-    // signal that this entity has no chunks in the pool. Drives the
-    // dummy chunk atlas binding + skip-render guard below.
+    // Metadata defines descriptor layout, but cold state installs it before
+    // any chunk arrives. Require a current, shader-mapped slot as the
+    // authoritative content-residency signal.
     const detailAtlas: SliceAtlasState | null = resolved.detailPoolKey
       ? atlasMap.get(resolved.detailPoolKey) ?? null
       : null;
@@ -686,8 +716,12 @@ export function handleSliceRenderMultiPass(
       detailAtlas?.entityMetas.get(memberId) ?? null;
     const coarseMetas: LodIndirectionMeta[] | null =
       coarseAtlas?.entityMetas.get(memberId) ?? null;
-    const hasDetail = detailMetas != null && detailMetas.length > 0;
-    const hasCoarse = coarseMetas != null && coarseMetas.length > 0;
+    const hasDetail = detailMetas != null && detailMetas.length > 0
+      && detailAtlas !== null
+      && residentMembersForSliceAtlas(detailAtlas, residentMemberCache).has(memberId);
+    const hasCoarse = coarseMetas != null && coarseMetas.length > 0
+      && coarseAtlas !== null
+      && residentMembersForSliceAtlas(coarseAtlas, residentMemberCache).has(memberId);
 
     const ox = layer.offsetX ?? 0;
     const oy = layer.offsetY ?? 0;
@@ -745,5 +779,5 @@ export function handleSliceRenderMultiPass(
     cr.renderSlice(canvasView, cursorEncoder, msg.zoom, msg.cx, msg.cy, msg.canvasW, msg.canvasH);
     ctx.device.queue.submit([cursorEncoder.finish()]);
   }
-  return true;
+  return { contentPresented: !isFirstLayer };
 }

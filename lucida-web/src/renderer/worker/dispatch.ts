@@ -108,7 +108,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       handleLabelSliceChunkData(ctx, msg);
       return;
     case "sliceRenderMultiPass": {
-      const complete = handleSliceRenderMultiPass(ctx, msg, (memberId) => {
+      const result = handleSliceRenderMultiPass(ctx, msg, (memberId) => {
         const detailPoolKey =
           ctx.state.memberTierToPool.get(memberTierKey(memberId, "detail")) ??
           ctx.state.memberToPool.get(memberId) ??
@@ -121,7 +121,13 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
         }
         return { detailPoolKey, coarsePoolKey, datasetId };
       });
-      if (complete) reportFramePresentedAfterGpuCompletion(ctx, msg.frameId);
+      if (result) {
+        reportFramePresentedAfterGpuCompletion(
+          ctx,
+          msg.frameId,
+          result.contentPresented,
+        );
+      }
       return;
     }
 

@@ -35,8 +35,10 @@ export type { DatasetEntry, RenderLoopOptions, MinimapOverlayData } from "./rend
 
 export type { LucidaCaptureReadyState } from "./captureContract.ts";
 
-/** Maximum backing pixels used by a volume loop's first presented frame. */
-export const INITIAL_VOLUME_RENDER_PIXEL_BUDGET = 512 * 1024;
+/** Maximum backing pixels used by any render loop's first presented frame. */
+export const INITIAL_RENDER_PIXEL_BUDGET = 512 * 1024;
+/** Compatibility name retained for downstream tests and debug tooling. */
+export const INITIAL_VOLUME_RENDER_PIXEL_BUDGET = INITIAL_RENDER_PIXEL_BUDGET;
 
 declare global {
   interface Window {
@@ -104,16 +106,15 @@ export class RenderLoop {
   private configStoreUnsub: () => void;
 
   /**
-   * Volume rendering starts with a DPR-independent coarse pixel budget. The
+   * Both render modes start with a DPR-independent coarse pixel budget. The
    * first worker-confirmed content presentation retires the bootstrap and,
    * when the budget reduced the surface, promotes it to full resolution.
    * Clear-only frames cannot retire the cap; interaction may request a lower
-   * scale but cannot exceed the cap until content is visible. Slice rendering
-   * remains full-resolution.
+   * scale but cannot exceed the cap until content is visible.
    */
   private _renderScale: number;
-  private initialVolumeRefinementPending: boolean;
-  private initialVolumeFrameId: number | null = null;
+  private initialRefinementPending: boolean;
+  private initialFrameId: number | null = null;
 
   /** Track previous multi_channel state to detect transitions and clean up. */
   private prevMultiChannel = false;
@@ -133,7 +134,7 @@ export class RenderLoop {
     this.canvas = opts.canvas;
     this.mode = opts.mode;
     this._renderScale = 1.0;
-    this.initialVolumeRefinementPending = this.mode === "volume";
+    this.initialRefinementPending = true;
     this.cpuCacheUnsub = this.session.cpuCache.subscribe(() => {
       this.setDirty("residency", "cache_subscribe");
     });
@@ -199,7 +200,7 @@ export class RenderLoop {
           this.presentedFrameTimes.shift();
         }
       }
-      this.scheduleInitialVolumeRefinement(frame.frameId, frame.contentPresented === true);
+      this.scheduleInitialRefinement(frame.frameId, frame.contentPresented === true);
       this.publishRenderedCaptureReady();
       for (const listener of this.presentedFrameListeners) listener();
     }) ?? null;
@@ -231,7 +232,7 @@ export class RenderLoop {
     this.removeRuntimeContract();
     this.invalidateCaptureReadyOnStop();
     this.client.cancelUnsubmittedFrameExpectations();
-    this.initialVolumeFrameId = null;
+    this.initialFrameId = null;
     this.viewportLoading.reset();
     this.cpuCacheUnsub();
     this.configStoreUnsub();
@@ -508,7 +509,7 @@ export class RenderLoop {
 
   setRenderScale(s: number): void {
     // Interaction still owns the requested scale, but until a content-bearing
-    // volume frame is presented the bootstrap pixel cap remains authoritative.
+    // frame is presented the bootstrap pixel cap remains authoritative.
     // This keeps an input arriving before the first RAF from bypassing cold
     // start protection. Once content is visible, a sub-full interaction scale
     // suppresses the automatic refinement; the caller's later full-scale
@@ -517,23 +518,23 @@ export class RenderLoop {
     this.setDirty("interactive", "render_scale");
   }
 
-  private scheduleInitialVolumeRefinement(
+  private scheduleInitialRefinement(
     presentedFrameId: number,
     contentPresented: boolean,
   ): void {
     if (
       !this.running
-      || !this.initialVolumeRefinementPending
-      || this.initialVolumeFrameId === null
-      || presentedFrameId < this.initialVolumeFrameId
+      || !this.initialRefinementPending
+      || this.initialFrameId === null
+      || presentedFrameId < this.initialFrameId
       || !contentPresented
     ) return;
-    const needsRefinement = this.initialVolumeRenderScale() < 1;
-    this.initialVolumeRefinementPending = false;
-    this.initialVolumeFrameId = null;
+    const needsRefinement = this.initialRenderScale() < 1;
+    this.initialRefinementPending = false;
+    this.initialFrameId = null;
     if (!needsRefinement || this._renderScale < 1) return;
     this._renderScale = 1.0;
-    this.setDirty("interactive", "initial_volume_refinement");
+    this.setDirty("interactive", "initial_render_refinement");
   }
 
   setMinimap(enabled: boolean, size?: number, overlayCallback?: ((data: MinimapOverlayData) => void) | null): void {
@@ -699,12 +700,11 @@ export class RenderLoop {
     if (this.datasets.size > 0 && this.hasUsableCanvas()) {
       const targetFrameId = this.client.expectNextMainFrame();
       if (
-        this.mode === "volume"
-        && this.running
-        && this.initialVolumeRefinementPending
-        && this.initialVolumeFrameId === null
+        this.running
+        && this.initialRefinementPending
+        && this.initialFrameId === null
       ) {
-        this.initialVolumeFrameId = targetFrameId;
+        this.initialFrameId = targetFrameId;
       }
       const minimumEpochs = this.currentSceneEpochs();
       if (isDiscreteViewportTransition(source)) {
@@ -770,8 +770,8 @@ export class RenderLoop {
 
   private buildContext(): TickContext {
     let renderScale = this._renderScale;
-    if (this.mode === "volume" && this.initialVolumeRefinementPending) {
-      renderScale = Math.min(renderScale, this.initialVolumeRenderScale());
+    if (this.initialRefinementPending) {
+      renderScale = Math.min(renderScale, this.initialRenderScale());
     }
     return {
       scene: this.session.scene!,
@@ -785,18 +785,18 @@ export class RenderLoop {
     };
   }
 
-  private initialVolumeRenderScale(): number {
+  private initialRenderScale(): number {
     const surface = this.devicePixelCanvasSize();
-    // Match tickVolume's rounded full surface, then round the budgeted target
-    // down so its eventual per-axis Math.round cannot cross the pixel cap.
+    // Match both render paths' rounded full surface, then round the budgeted
+    // target down so its eventual per-axis Math.round cannot cross the cap.
     const width = Math.round(surface.width);
     const height = Math.round(surface.height);
     const backingPixels = width * height;
-    if (backingPixels <= 0 || backingPixels <= INITIAL_VOLUME_RENDER_PIXEL_BUDGET) {
+    if (backingPixels <= 0 || backingPixels <= INITIAL_RENDER_PIXEL_BUDGET) {
       return 1;
     }
     const idealScale = Math.sqrt(
-      INITIAL_VOLUME_RENDER_PIXEL_BUDGET / backingPixels,
+      INITIAL_RENDER_PIXEL_BUDGET / backingPixels,
     );
     const budgetedWidth = Math.max(1, Math.floor(width * idealScale));
     const budgetedHeight = Math.max(1, Math.floor(height * idealScale));

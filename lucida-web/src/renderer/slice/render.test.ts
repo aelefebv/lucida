@@ -36,15 +36,32 @@ function makeDevice(): GPUDevice {
   } as unknown as GPUDevice;
 }
 
-function makeAtlas(entityMetas: SliceAtlasState["entityMetas"]): SliceAtlasState {
+function makeAtlas(
+  entityMetas: SliceAtlasState["entityMetas"],
+  residency: "mapped" | "unmapped" | "stale" | "metadata-only" = "mapped",
+): SliceAtlasState {
+  const memberIds = [...entityMetas.keys()];
+  const totalSlots = Math.max(1, memberIds.length);
+  const slots = new Map<string, number>();
+  const slotGridIdx = new Int32Array(totalSlots).fill(-1);
+  const indirectionData = new Uint32Array(totalSlots).fill(0xFFFFFFFF);
+  if (residency !== "metadata-only") {
+    memberIds.forEach((memberId, index) => {
+      slots.set(`${memberId}|2/0/0/0/0/${index}`, index);
+      if (residency !== "unmapped") {
+        slotGridIdx[index] = index;
+        indirectionData[index] = index;
+      }
+    });
+  }
   return {
     texture: {} as GPUTexture,
     indirectionBuf: {} as GPUBuffer,
-    indirectionData: new Uint32Array([0]),
-    slots: new Map(),
-    slotGridIdx: new Int32Array(1),
+    indirectionData,
+    slots,
+    slotGridIdx,
     freeSlots: [],
-    totalSlots: 1,
+    totalSlots,
     chunkX: 64,
     chunkY: 64,
     slotsX: 1,
@@ -54,7 +71,7 @@ function makeAtlas(entityMetas: SliceAtlasState["entityMetas"]): SliceAtlasState
     z: 0,
     t: 0,
     c: 0,
-    staleSliceKeys: null,
+    staleSliceKeys: residency === "stale" ? new Set(slots.keys()) : null,
     intensityMin: 0,
     intensityMax: 0,
     indirectionDirty: false,
@@ -167,7 +184,7 @@ describe("handleSliceRenderMultiPass", () => {
     const descIndex = makeDescIndex(["img-a"]);
     const ctx = makeCtx({ device, state, renderer, composite, descIndex });
 
-    handleSliceRenderMultiPass(
+    const result = handleSliceRenderMultiPass(
       ctx,
       {
         type: "sliceRenderMultiPass",
@@ -186,6 +203,7 @@ describe("handleSliceRenderMultiPass", () => {
     );
 
     expect(renderer.renderTo).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ contentPresented: true });
     expect(renderer.setTierAtlases).toHaveBeenCalledWith(
       null,
       null,
@@ -196,6 +214,86 @@ describe("handleSliceRenderMultiPass", () => {
     );
     expect(composite.mock.calls[0][1]).toHaveLength(1);
   });
+
+  it("distinguishes a clear-only frame from presented slice content", () => {
+    const device = makeDevice();
+    const renderer = makeRenderer();
+    const composite = vi.fn();
+    const state = createInitialState();
+    const ctx = makeCtx({
+      device,
+      state,
+      renderer,
+      composite,
+      descIndex: makeDescIndex([]),
+    });
+
+    const result = handleSliceRenderMultiPass(
+      ctx,
+      {
+        type: "sliceRenderMultiPass",
+        frameId: 2,
+        epochs: EPOCHS,
+        layers: [],
+        zoom: 1,
+        cx: 0,
+        cy: 0,
+        canvasW: 64,
+        canvasH: 64,
+      },
+      () => null,
+    );
+
+    expect(result).toEqual({ contentPresented: false });
+    expect(composite).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["metadata-only", "unmapped", "stale"] as const)(
+    "does not report %s slice state as presented content",
+    (residency) => {
+      const renderer = makeRenderer();
+      const composite = vi.fn();
+      const state = createInitialState();
+      state.sliceAtlases.set(
+        "coarse-pool",
+        makeAtlas(new Map([["img-a", residentMetas()]]), residency),
+      );
+      const ctx = makeCtx({
+        device: makeDevice(),
+        state,
+        renderer,
+        composite,
+        descIndex: makeDescIndex(["img-a"]),
+      });
+
+      const result = handleSliceRenderMultiPass(
+        ctx,
+        {
+          type: "sliceRenderMultiPass",
+          frameId: 3,
+          epochs: EPOCHS,
+          layers: [{
+            datasetId: "img-a",
+            entityId: "entity-a",
+            entityIndex: 0,
+            blendMode: "alpha",
+            dataW: 128,
+            dataH: 128,
+          }],
+          zoom: 1,
+          cx: 64,
+          cy: 64,
+          canvasW: 64,
+          canvasH: 64,
+        },
+        () => ({ detailPoolKey: null, coarsePoolKey: "coarse-pool", datasetId: "ds-0" }),
+      );
+
+      expect(result).toEqual({ contentPresented: false });
+      expect(renderer.renderTo).not.toHaveBeenCalled();
+      expect(composite.mock.calls[0][1]).toHaveLength(0);
+    },
+  );
 
   it("keeps the offscreen pool at one texture for 256 ordered layers", () => {
     const device = makeDevice();
@@ -537,7 +635,7 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
 
     const complete = handleSliceRenderMultiPass(ctx, reference, () => null);
 
-    expect(complete).toBe(false);
+    expect(complete).toBeNull();
     expect(post).toHaveBeenCalledWith({
       type: "aggregateCacheMiss",
       frameId: 1,
@@ -593,6 +691,33 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
 
     expect(renderer.renderAggregateBatches).not.toHaveBeenCalled();
     expect(renderer.renderTo).not.toHaveBeenCalled();
+    expect(composite.mock.calls[0][1]).toHaveLength(0);
+  });
+
+  it("does not report stale aggregate slots as presented content", () => {
+    const renderer = makeRenderer();
+    const composite = vi.fn();
+    const state = createInitialState();
+    state.sliceAtlases.set("coarse-pool", makeAtlas(new Map([
+      ["img-0", residentMetas()],
+      ["img-1", residentMetas()],
+    ]), "stale"));
+    const ctx = makeCtx({
+      device: makeDevice(),
+      state,
+      renderer,
+      composite,
+      descIndex: makeDescIndex(["img-0", "img-1"]),
+    });
+
+    const result = handleSliceRenderMultiPass(
+      ctx,
+      aggregateMsg(twoMemberQuads(), 2),
+      () => ({ detailPoolKey: null, coarsePoolKey: "coarse-pool", datasetId: "ds-0" }),
+    );
+
+    expect(result).toEqual({ contentPresented: false });
+    expect(renderer.renderAggregateBatches).not.toHaveBeenCalled();
     expect(composite.mock.calls[0][1]).toHaveLength(0);
   });
 

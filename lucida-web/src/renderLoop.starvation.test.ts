@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DatasetManifest } from "./manifestTypes.ts";
 import {
+  INITIAL_RENDER_PIXEL_BUDGET,
   INITIAL_VOLUME_RENDER_PIXEL_BUDGET,
   RenderLoop,
 } from "./renderLoop.ts";
@@ -15,6 +16,7 @@ function makeLoop(
   const expectNextMainFrame = vi.fn(() => 1);
   const cancelUnsubmittedFrameExpectations = vi.fn();
   const resize = vi.fn(() => false);
+  const sliceRenderMultiPass = vi.fn();
   const volumeRenderMultiPass = vi.fn();
   let presented: ((frame: {
     frameId: number;
@@ -30,6 +32,7 @@ function makeLoop(
     expectNextMainFrame,
     cancelUnsubmittedFrameExpectations,
     resize,
+    sliceRenderMultiPass,
     volumeRenderMultiPass,
     getRuntimeSnapshot: vi.fn(() => ({
       frames: {
@@ -75,9 +78,14 @@ function makeLoop(
       t: () => 0,
       c: () => 0,
       z: () => 0,
+      set_t: vi.fn(),
+      set_c: vi.fn(),
+      set_z: vi.fn(),
       multi_channel: () => false,
       contrast_min: () => 0,
       contrast_max: () => 1,
+      center: () => [0, 0],
+      zoom: () => 1,
       set_viewport: vi.fn(),
       eye_position: () => [0, 0, 1],
       inv_view_proj: () => new Float32Array(16),
@@ -108,6 +116,7 @@ function makeLoop(
     expectNextMainFrame,
     cancelUnsubmittedFrameExpectations,
     resize,
+    sliceRenderMultiPass,
     volumeRenderMultiPass,
     canvas,
     client,
@@ -393,12 +402,42 @@ describe("RenderLoop frame-starvation boundary", () => {
     expect(frameCallbacks).toHaveLength(0);
   });
 
-  it("keeps slice startup at full resolution", () => {
-    const { loop } = makeLoop(800, 600, "slice");
-    const context = (loop as unknown as { buildContext(): { renderScale: number } })
-      .buildContext();
+  it("presents a coarse DPR2 slice frame before one full-resolution refinement", () => {
+    const frameCallbacks: FrameRequestCallback[] = [];
+    vi.stubGlobal("devicePixelRatio", 2);
+    vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
+      frameCallbacks.push(callback);
+      return frameCallbacks.length;
+    }));
+    const { loop, sliceRenderMultiPass, present } = makeLoop(800, 600, "slice");
+    makeVolumeRenderable(loop);
 
-    expect(context.renderScale).toBe(1);
+    loop.start();
+    expect(frameCallbacks).toHaveLength(1);
+    frameCallbacks.shift()!(0);
+    expect(sliceRenderMultiPass).toHaveBeenCalledTimes(1);
+    const coarse = sliceRenderMultiPass.mock.calls[0];
+    expect(coarse[4] * coarse[5]).toBeLessThanOrEqual(INITIAL_RENDER_PIXEL_BUDGET);
+    expect(coarse.slice(4, 6)).not.toEqual([1600, 1200]);
+    expect(coarse[4] / coarse[1]).toBeCloseTo(800, 0);
+
+    present(1, false);
+    expect(frameCallbacks).toHaveLength(0);
+
+    loop.setRenderScale(1);
+    expect(frameCallbacks).toHaveLength(1);
+    frameCallbacks.shift()!(1);
+    expect(sliceRenderMultiPass).toHaveBeenCalledTimes(2);
+    expect(sliceRenderMultiPass.mock.calls[1].slice(4, 6)).toEqual(coarse.slice(4, 6));
+
+    present(1, true);
+    expect(frameCallbacks).toHaveLength(1);
+    frameCallbacks.shift()!(2);
+    expect(sliceRenderMultiPass).toHaveBeenCalledTimes(3);
+    expect(sliceRenderMultiPass.mock.calls[2].slice(4, 6)).toEqual([1600, 1200]);
+
+    present(2, true);
+    expect(frameCallbacks).toHaveLength(0);
     loop.stop();
   });
 

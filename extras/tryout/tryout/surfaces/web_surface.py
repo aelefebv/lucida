@@ -2312,8 +2312,7 @@ async function waitForFinalCanvasSettlement(
   };
 }
 
-async function initialZeroSizeRecovery(context, sourcePage, target) {
-  const page = await context.newPage();
+async function initialZeroSizeRecovery(page, sourceUrl, target) {
   await page.addInitScript(() => {
     const style = document.createElement('style');
     style.id = 'lucida-tryout-initial-zero-size';
@@ -2329,58 +2328,118 @@ async function initialZeroSizeRecovery(context, sourcePage, target) {
       style.remove();
     };
   });
-  try {
-    await page.goto(sourcePage.url(), { waitUntil: 'load', timeout: renderWaitMs });
-    await installBrowserProbes(page);
-    const toggle = page.getByRole('button', { name: /Switch view mode to/ });
-    await toggle.waitFor({ state: 'visible', timeout: 30000 });
-    let initial = await waitForInitialSurfaceSuppression(page, 'slice', false);
-    if (target === '3d') {
-      const current = ((await toggle.textContent()) || '').trim();
-      if (current !== 'View: 3D') await toggle.click();
-      initial = await waitForInitialSurfaceSuppression(page, 'volume', true);
-    }
-    const mode = target === '3d' ? 'volume' : 'slice';
-    const modeBefore = initial && initial.client.surface.byMode[mode];
-    const suppressed = initial && initial.client.surface.lastSuppressed;
-    await page.evaluate(() => {
-      window.__lucidaTryoutReleaseInitialZero && window.__lucidaTryoutReleaseInitialZero();
-      window.dispatchEvent(new Event('resize'));
-    });
-    const restored = await waitForSurfaceRecovery(page, {
-      expectedMode: mode,
-      forwarded: Number(modeBefore && modeBefore.forwarded || 0),
-      posted: Number(initial && initial.client.frames.posted || 0),
-      presented: Number(initial && initial.client.frames.presented || 0),
-    });
-    const canvasLabel = target === '3d' ? '3D volume viewer' : '2D slice viewer';
-    const rect = await page.locator('canvas[aria-label="' + canvasLabel + '"]').evaluate(
-      (element) => window.__lucidaTryoutRectRecord(element),
-    );
-    const forwarded = restored && restored.client.surface.lastForwarded;
-    return {
-      mode: target,
-      contract_version: initial && initial.version,
-      initial_suppressed: Boolean(modeBefore && modeBefore.suppressed > 0)
-        && Boolean(suppressed && suppressed.mode === mode
-          && suppressed.rejection === 'non-positive'
-          && (suppressed.width <= 0 || suppressed.height <= 0)),
-      initial_invalid_not_forwarded: Boolean(modeBefore && modeBefore.forwarded === 0),
-      initial: initial,
-      restored_finite_positive: Boolean(rect)
-        && [rect.width, rect.height].every(Number.isFinite)
-        && rect.width > 0 && rect.height > 0,
-      restored_forwarded_positive: Boolean(forwarded && forwarded.mode === mode
-        && forwarded.width > 0 && forwarded.height > 0 && !forwarded.rejection),
-      frame_advanced: Boolean(restored && initial
-        && restored.client.frames.posted > initial.client.frames.posted
-        && restored.client.frames.presented > initial.client.frames.presented),
-      restored,
-      rect,
-    };
-  } finally {
-    await page.close();
+  await page.goto(sourceUrl, { waitUntil: 'load', timeout: renderWaitMs });
+  await installBrowserProbes(page);
+  const toggle = page.getByRole('button', { name: /Switch view mode to/ });
+  await toggle.waitFor({ state: 'visible', timeout: 30000 });
+  let initial = await waitForInitialSurfaceSuppression(page, 'slice', false);
+  if (target === '3d') {
+    const current = ((await toggle.textContent()) || '').trim();
+    if (current !== 'View: 3D') await toggle.click();
+    initial = await waitForInitialSurfaceSuppression(page, 'volume', true);
   }
+  const mode = target === '3d' ? 'volume' : 'slice';
+  const modeBefore = initial && initial.client.surface.byMode[mode];
+  const suppressed = initial && initial.client.surface.lastSuppressed;
+  await page.evaluate(() => {
+    window.__lucidaTryoutReleaseInitialZero && window.__lucidaTryoutReleaseInitialZero();
+    window.dispatchEvent(new Event('resize'));
+  });
+  const restored = await waitForSurfaceRecovery(page, {
+    expectedMode: mode,
+    forwarded: Number(modeBefore && modeBefore.forwarded || 0),
+    posted: Number(initial && initial.client.frames.posted || 0),
+    presented: Number(initial && initial.client.frames.presented || 0),
+  });
+  const canvasLabel = target === '3d' ? '3D volume viewer' : '2D slice viewer';
+  const rect = await page.locator('canvas[aria-label="' + canvasLabel + '"]').evaluate(
+    (element) => window.__lucidaTryoutRectRecord(element),
+  );
+  const forwarded = restored && restored.client.surface.lastForwarded;
+  return {
+    mode: target,
+    contract_version: initial && initial.version,
+    initial_suppressed: Boolean(modeBefore && modeBefore.suppressed > 0)
+      && Boolean(suppressed && suppressed.mode === mode
+        && suppressed.rejection === 'non-positive'
+        && (suppressed.width <= 0 || suppressed.height <= 0)),
+    initial_invalid_not_forwarded: Boolean(modeBefore && modeBefore.forwarded === 0),
+    initial: initial,
+    restored_finite_positive: Boolean(rect)
+      && [rect.width, rect.height].every(Number.isFinite)
+      && rect.width > 0 && rect.height > 0,
+    restored_forwarded_positive: Boolean(forwarded && forwarded.mode === mode
+      && forwarded.width > 0 && forwarded.height > 0 && !forwarded.rejection),
+    frame_advanced: Boolean(restored && initial
+      && restored.client.frames.posted > initial.client.frames.posted
+      && restored.client.frames.presented > initial.client.frames.presented),
+    restored,
+    rect,
+  };
+}
+
+async function exerciseInitialZeroSizeRecoveries(
+  browser,
+  sourcePage,
+  sourceDeviceScaleFactor,
+  diagnostics,
+) {
+  const sourceUrl = sourcePage.url();
+  const viewport = sourcePage.viewportSize() || { width: 1280, height: 720 };
+  const receipts = [];
+  let failure = null;
+
+  // These are fresh-mount GPU lifecycle profiles, not concurrent-client
+  // profiles. Suspend the matrix viewer and give each target its own context
+  // so queued work from layout probes or a sibling worker cannot consume the
+  // strict first-presentation budget.
+  try {
+    await sourcePage.goto('about:blank', { waitUntil: 'load', timeout: renderWaitMs });
+    for (const target of ['2d', '3d']) {
+      let context = null;
+      let profileFailure = null;
+      try {
+        context = await browser.newContext({
+          viewport,
+          deviceScaleFactor: sourceDeviceScaleFactor,
+        });
+        const page = await context.newPage();
+        attachAcceptanceDiagnostics(page, diagnostics);
+        receipts.push(await initialZeroSizeRecovery(page, sourceUrl, target));
+      } catch (error) {
+        profileFailure = error;
+      } finally {
+        if (context) {
+          try {
+            await context.close();
+          } catch (closeError) {
+            profileFailure = profileFailure
+              ? new Error(String(profileFailure) + '; isolated context close failed: ' + String(closeError))
+              : closeError;
+          }
+        }
+      }
+      if (profileFailure) throw profileFailure;
+    }
+  } catch (error) {
+    failure = error;
+  }
+
+  try {
+    await sourcePage.goto(sourceUrl, { waitUntil: 'load', timeout: renderWaitMs });
+    await installBrowserProbes(sourcePage);
+    const ready = await ensureViewMode(sourcePage, '2d');
+    const settled = await waitForRuntimeSettled(sourcePage);
+    if (!ready || !ready.ready || !settled) {
+      throw new Error('matrix source page did not settle after isolated initial zero-size profiles');
+    }
+  } catch (restoreError) {
+    failure = failure
+      ? new Error(String(failure) + '; source page restore failed: ' + String(restoreError))
+      : restoreError;
+  }
+  if (failure) throw failure;
+  return receipts;
 }
 
 function initialZeroSizeFailures(contract) {
@@ -5673,10 +5732,12 @@ async function exerciseFirstRun(context, sourcePage, datasetPath, screenshotPath
 
       await page.setViewportSize({ width: 1280, height: 720 });
       browserContract.initial_zero_size_recovery.push(
-        await initialZeroSizeRecovery(context, page, '2d'),
-      );
-      browserContract.initial_zero_size_recovery.push(
-        await initialZeroSizeRecovery(context, page, '3d'),
+        ...await exerciseInitialZeroSizeRecoveries(
+          browser,
+          page,
+          deviceScaleFactor,
+          diagnostics,
+        ),
       );
       for (const recovery of browserContract.initial_zero_size_recovery) {
         contractFailures.push(...initialZeroSizeFailures(recovery));

@@ -1550,6 +1550,10 @@ class RealSpaMatrixTests(unittest.TestCase):
         self.assertIn("waitForInitialSurfaceSuppression(page, 'volume', true)", initial_recovery)
         self.assertIn("waitForSurfaceRecovery(page", initial_recovery)
         self.assertNotIn("snapshot.client.frames.pending === 0", initial_recovery)
+        self.assertIn("await sourcePage.goto('about:blank'", initial_recovery)
+        self.assertIn("for (const target of ['2d', '3d'])", initial_recovery)
+        self.assertIn("await context.close()", initial_recovery)
+        self.assertIn("await waitForRuntimeSettled(sourcePage)", initial_recovery)
         later_recovery_start = web_surface._SPA_DRIVER.index(
             "async function zeroSizeRecovery",
         )

@@ -467,7 +467,11 @@ function uploadAndRenderSlice(
   // presents. Zoom is scaled by the same factor below, keeping the
   // world field of view — and therefore the on-screen appearance —
   // unchanged apart from resolution.
-  const backingScale = sliceBackingScale(fullW, fullH);
+  // The render loop may apply a stricter presentation bootstrap until the
+  // worker confirms that content reached the screen. Compose it with the
+  // steady-state oversized-backing cap so cold DPR2 surfaces cannot bypass
+  // the same bounded-first-frame contract used by volume rendering.
+  const backingScale = Math.min(ctx.renderScale, sliceBackingScale(fullW, fullH));
   const canvasW = Math.max(1, Math.round(fullW * backingScale));
   const canvasH = Math.max(1, Math.round(fullH * backingScale));
 
