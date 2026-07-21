@@ -113,7 +113,16 @@ export function useModalDialog({
     };
     const containFocus = (event: FocusEvent) => {
       const dialog = dialogRef.current;
-      if (!dialog || (event.target instanceof Node && dialog.contains(event.target))) return;
+      if (!dialog) return;
+      // A meaningful descendant may reflect user intent and must retain focus.
+      // The dialog root is only a provisional fallback, however, so a late
+      // browser focus transfer back to the root must re-run initial placement.
+      // Keeping this rule aligned with focusInsideDialog prevents responsive
+      // drawers from becoming stranded on a non-interactive container after
+      // their opening retry has already observed the preferred control.
+      if (event.target instanceof Node
+        && event.target !== dialog
+        && dialog.contains(event.target)) return;
       claimFocus();
     };
 

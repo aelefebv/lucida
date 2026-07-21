@@ -176,6 +176,35 @@ describe("useModalDialog", () => {
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "Preferred" }));
   });
 
+  it("reclaims a late browser focus transfer from the dialog root", () => {
+    render(<PreferredHarness preferred="visible" />);
+    fireEvent.click(screen.getByRole("button", { name: "Open preferred dialog" }));
+    const preferred = screen.getByRole("button", { name: "Preferred" });
+    const dialog = screen.getByRole("dialog");
+    expect(document.activeElement).toBe(preferred);
+
+    dialog.focus();
+
+    expect(document.activeElement).toBe(preferred);
+  });
+
+  it("keeps root focus as the bounded fallback when no control is available", () => {
+    render(
+      <PreferredHarness
+        preferred="missing"
+        hideFallbackUntilFrame
+      />,
+    );
+    const invoker = screen.getByRole("button", { name: "Open preferred dialog" });
+    fireEvent.click(invoker);
+    const dialog = screen.getByRole("dialog");
+    expect(document.activeElement).toBe(dialog);
+
+    invoker.focus();
+
+    expect(document.activeElement).toBe(dialog);
+  });
+
   it("moves from provisional root focus to a fallback when the preference cannot focus", () => {
     render(<PreferredHarness preferred="disabled" focusRootOnMount />);
     fireEvent.click(screen.getByRole("button", { name: "Open preferred dialog" }));
