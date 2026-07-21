@@ -1502,6 +1502,7 @@ dependencies = [
  "font8x8",
  "futures-util",
  "image",
+ "libc",
  "lucida-content",
  "lucida-core",
  "lucida-protocol",

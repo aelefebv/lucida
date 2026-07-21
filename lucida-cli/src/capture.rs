@@ -28,6 +28,8 @@ use crate::transport::TransportLimits;
 
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+const PROFILE_REMOVE_ATTEMPTS: usize = 100;
+const PROFILE_REMOVE_RETRY_DELAY: Duration = Duration::from_millis(25);
 const HEADLESS_BROWSER_ARGS: &[&str] = &[
     "--headless=new",
     "--enable-unsafe-webgpu",
@@ -246,8 +248,18 @@ async fn screenshot_to_path_inner(
         &deadline,
     )
     .await;
-    let png = finish_browser(result, browser).await?;
+    let result = match result {
+        Ok(png) => write_screenshot(output_path, png, &deadline).await,
+        Err(error) => Err(error),
+    };
+    combine_with_cleanup(result, browser.shutdown().await)
+}
 
+async fn write_screenshot(
+    output_path: &Path,
+    png: Vec<u8>,
+    deadline: &CaptureDeadline,
+) -> Result<(), CliError> {
     if let Some(parent) = output_path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -350,7 +362,9 @@ where
 /// errors through [`Self::shutdown`].
 struct BrowserProcess {
     child: Option<Child>,
-    profile: Option<TempDir>,
+    profile_path: Option<PathBuf>,
+    #[cfg(unix)]
+    process_group_id: Option<i32>,
     endpoint: String,
 }
 
@@ -389,15 +403,29 @@ impl BrowserProcess {
             .stdout(Stdio::null())
             .stdin(Stdio::null())
             .kill_on_drop(true);
+        #[cfg(unix)]
+        command.process_group(0);
         let child = command.spawn().map_err(|error| {
             CliError::new(
                 ErrorKind::Config,
                 format!("failed to launch browser {binary:?}: {error}"),
             )
         })?;
+        #[cfg(unix)]
+        let process_group_id = child
+            .id()
+            .and_then(|pid| i32::try_from(pid).ok())
+            .ok_or_else(|| {
+                CliError::new(
+                    ErrorKind::Unexpected,
+                    "launched browser did not expose a valid process group id",
+                )
+            })?;
         let mut process = Self {
             child: Some(child),
-            profile: Some(profile),
+            profile_path: Some(profile.keep()),
+            #[cfg(unix)]
+            process_group_id: Some(process_group_id),
             endpoint: String::new(),
         };
         let stderr = process
@@ -426,11 +454,23 @@ impl BrowserProcess {
     async fn shutdown(mut self) -> Result<(), CliError> {
         let mut first_error = None;
         if let Some(mut child) = self.child.take() {
+            #[cfg(unix)]
+            if let Some(process_group_id) = self.process_group_id.take()
+                && let Err(error) = terminate_process_group(process_group_id)
+                && first_error.is_none()
+            {
+                first_error = Some(browser_cleanup_error(
+                    error,
+                    "browser process group cleanup",
+                ));
+            }
             let _ = child.start_kill();
             match tokio::time::timeout(CLEANUP_TIMEOUT, child.wait()).await {
                 Ok(Ok(_)) => {}
-                Ok(Err(error)) => first_error = Some(CliError::from(error)),
-                Err(_) => {
+                Ok(Err(error)) if first_error.is_none() => {
+                    first_error = Some(browser_cleanup_error(error, "browser cleanup"));
+                }
+                Err(_) if first_error.is_none() => {
                     first_error = Some(
                         CliError::new(
                             ErrorKind::DeadlineExceeded,
@@ -440,14 +480,15 @@ impl BrowserProcess {
                         .with_context("phase", "browser cleanup"),
                     );
                 }
+                _ => {}
             }
         }
-        if let Some(profile) = self.profile.take() {
-            let close = tokio::task::spawn_blocking(move || profile.close());
+        if let Some(profile_path) = self.profile_path.take() {
+            let close = tokio::task::spawn_blocking(move || remove_profile(&profile_path));
             match tokio::time::timeout(CLEANUP_TIMEOUT, close).await {
                 Ok(Ok(Ok(()))) => {}
                 Ok(Ok(Err(error))) if first_error.is_none() => {
-                    first_error = Some(CliError::from(error));
+                    first_error = Some(browser_cleanup_error(error, "browser profile cleanup"));
                 }
                 Ok(Err(error)) if first_error.is_none() => {
                     first_error = Some(CliError::new(ErrorKind::Unexpected, error.to_string()));
@@ -474,24 +515,99 @@ impl BrowserProcess {
 
 impl Drop for BrowserProcess {
     fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(process_group_id) = self.process_group_id.take() {
+            let _ = terminate_process_group(process_group_id);
+        }
         if let Some(child) = self.child.as_mut() {
             let _ = child.start_kill();
         }
-        // `profile` is a TempDir and is removed by its own Drop after this.
+        if let Some(profile_path) = self.profile_path.take() {
+            // Future cancellation cannot await shutdown, so perform the same
+            // bounded removal synchronously after signalling the whole tree.
+            let _ = remove_profile(&profile_path);
+        }
     }
+}
+
+fn browser_cleanup_error(error: std::io::Error, phase: &'static str) -> CliError {
+    CliError::from(error)
+        .with_context("operation", "viewer_capture")
+        .with_context("phase", phase)
+}
+
+#[cfg(unix)]
+fn terminate_process_group(process_group_id: i32) -> std::io::Result<()> {
+    // The child is launched with `process_group(0)`, so negating its pid sends
+    // SIGKILL to Chrome and every helper it created without affecting Lucida.
+    let result = unsafe { libc::kill(-process_group_id, libc::SIGKILL) };
+    if result == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
+
+fn remove_profile(path: &Path) -> std::io::Result<()> {
+    remove_profile_with(
+        path,
+        PROFILE_REMOVE_ATTEMPTS,
+        PROFILE_REMOVE_RETRY_DELAY,
+        |path| std::fs::remove_dir_all(path),
+    )
+}
+
+fn remove_profile_with<F>(
+    path: &Path,
+    attempts: usize,
+    retry_delay: Duration,
+    mut remove: F,
+) -> std::io::Result<()>
+where
+    F: FnMut(&Path) -> std::io::Result<()>,
+{
+    debug_assert!(attempts > 0);
+    let mut last_error = None;
+    for attempt in 0..attempts {
+        match remove(path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => last_error = Some(error),
+        }
+        if attempt + 1 < attempts {
+            std::thread::sleep(retry_delay);
+        }
+    }
+    Err(last_error.expect("at least one profile removal attempt"))
 }
 
 async fn finish_browser<T>(
     result: Result<T, CliError>,
     browser: BrowserProcess,
 ) -> Result<T, CliError> {
-    let cleanup = browser.shutdown().await;
+    combine_with_cleanup(result, browser.shutdown().await)
+}
+
+fn combine_with_cleanup<T>(
+    result: Result<T, CliError>,
+    cleanup: Result<(), CliError>,
+) -> Result<T, CliError> {
     match result {
         Ok(value) => {
             cleanup?;
             Ok(value)
         }
-        Err(error) => Err(error),
+        Err(error) => Err(match cleanup {
+            Ok(()) => error,
+            Err(cleanup_error) => {
+                let cleanup_details = cleanup_error.to_json()["error"].clone();
+                error.with_context("cleanup_error", cleanup_details)
+            }
+        }),
     }
 }
 
@@ -1735,6 +1851,68 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn fake_browser_with_profile_writer(
+        script_dir: &Path,
+        browser_pid_file: &Path,
+        writer_pid_file: &Path,
+        writer_activity_file: &Path,
+        profile_path: &Path,
+    ) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tail = ["/usr/bin/tail", "/bin/tail"]
+            .into_iter()
+            .find(|path| Path::new(path).exists())
+            .expect("tail executable");
+        let sleep = ["/usr/bin/sleep", "/bin/sleep"]
+            .into_iter()
+            .find(|path| Path::new(path).exists())
+            .expect("sleep executable");
+        let writer = script_dir.join("profile-writer");
+        std::fs::write(
+            &writer,
+            format!(
+                "#!/bin/sh\n\
+                 echo $$ > '{}'\n\
+                 while :; do\n\
+                   mkdir -p '{}/active'\n\
+                   : > '{}/active/state'\n\
+                   printf . >> '{}'\n\
+                   '{}' 0.01\n\
+                 done\n",
+                writer_pid_file.display(),
+                profile_path.display(),
+                profile_path.display(),
+                writer_activity_file.display(),
+                sleep,
+            ),
+        )
+        .unwrap();
+        let mut writer_permissions = std::fs::metadata(&writer).unwrap().permissions();
+        writer_permissions.set_mode(0o755);
+        std::fs::set_permissions(&writer, writer_permissions).unwrap();
+        let script = script_dir.join("fake-browser-with-profile-writer");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n\
+                 echo $$ > '{}'\n\
+                 '{}' &\n\
+                 echo 'DevTools listening on ws://127.0.0.1:9/devtools/browser/fake' >&2\n\
+                 exec '{}' -f /dev/null\n",
+                browser_pid_file.display(),
+                writer.display(),
+                tail,
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+        script
+    }
+
+    #[cfg(unix)]
     fn process_is_alive(pid: u32) -> bool {
         std::process::Command::new("kill")
             .args(["-0", &pid.to_string()])
@@ -1758,12 +1936,73 @@ mod tests {
     #[cfg(unix)]
     async fn read_pid(path: &Path) -> u32 {
         for _ in 0..100 {
-            if let Ok(raw) = tokio::fs::read_to_string(path).await {
-                return raw.trim().parse().unwrap();
+            if let Ok(raw) = tokio::fs::read_to_string(path).await
+                && let Ok(pid) = raw.trim().parse()
+            {
+                return pid;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("fake browser never wrote its pid");
+    }
+
+    #[test]
+    fn profile_removal_retries_without_consuming_the_path() {
+        let fixture = tempfile::tempdir().unwrap();
+        let profile_path = fixture.path().join("profile");
+        std::fs::create_dir(&profile_path).unwrap();
+        std::fs::write(profile_path.join("state"), b"active").unwrap();
+        let mut attempts = 0;
+
+        remove_profile_with(&profile_path, 3, Duration::ZERO, |path| {
+            attempts += 1;
+            if attempts == 1 {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::DirectoryNotEmpty,
+                    "simulated concurrent profile write",
+                ))
+            } else {
+                std::fs::remove_dir_all(path)
+            }
+        })
+        .unwrap();
+
+        assert_eq!(attempts, 2);
+        assert!(!profile_path.exists());
+    }
+
+    #[test]
+    fn primary_failure_retains_cleanup_diagnostics() {
+        let primary = CliError::new(ErrorKind::Protocol, "capture failed");
+        let cleanup = browser_cleanup_error(
+            std::io::Error::other("profile remained active"),
+            "browser profile cleanup",
+        );
+        let error = combine_with_cleanup::<()>(Err(primary), Err(cleanup)).unwrap_err();
+
+        assert_eq!(error.kind, ErrorKind::Protocol);
+        let cleanup = &error.to_json()["error"]["cleanup_error"];
+        assert_eq!(cleanup["kind"], "io");
+        assert_eq!(cleanup["message"], "profile remained active");
+        assert_eq!(cleanup["operation"], "viewer_capture");
+        assert_eq!(cleanup["phase"], "browser profile cleanup");
+    }
+
+    #[tokio::test]
+    async fn successful_screenshot_file_is_preserved_when_cleanup_fails() {
+        let fixture = tempfile::tempdir().unwrap();
+        let output_path = fixture.path().join("capture.png");
+        let deadline = CaptureDeadline::new(Duration::from_secs(1)).unwrap();
+        let write = write_screenshot(&output_path, PNG_SIGNATURE.to_vec(), &deadline).await;
+        let cleanup = Err(CliError::new(
+            ErrorKind::Io,
+            "simulated browser profile cleanup failure",
+        ));
+
+        let error = combine_with_cleanup(write, cleanup).unwrap_err();
+
+        assert_eq!(error.kind, ErrorKind::Io);
+        assert_eq!(std::fs::read(output_path).unwrap(), PNG_SIGNATURE);
     }
 
     #[cfg(unix)]
@@ -1817,12 +2056,91 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn browser_shutdown_stops_descendant_profile_writer_before_removal() {
+        let fixture = tempfile::tempdir().unwrap();
+        let browser_pid_file = fixture.path().join("browser.pid");
+        let writer_pid_file = fixture.path().join("writer.pid");
+        let writer_activity_file = fixture.path().join("writer.activity");
+        let profile = tempfile::tempdir().unwrap();
+        let profile_path = profile.path().to_path_buf();
+        let script = fake_browser_with_profile_writer(
+            fixture.path(),
+            &browser_pid_file,
+            &writer_pid_file,
+            &writer_activity_file,
+            &profile_path,
+        );
+        let geometry = CaptureGeometry {
+            width: 100,
+            height: 50,
+            device_scale_factor: 2.0,
+            physical_pixels: 20_000,
+        };
+        let deadline = CaptureDeadline::new(Duration::from_secs(2)).unwrap();
+        let browser = BrowserProcess::launch_with_profile(&script, profile, geometry, &deadline)
+            .await
+            .unwrap();
+        let writer_pid = read_pid(&writer_pid_file).await;
+        let mut writer_wrote_profile = false;
+        for _ in 0..100 {
+            if writer_activity_file
+                .metadata()
+                .is_ok_and(|metadata| metadata.len() > 0)
+            {
+                writer_wrote_profile = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            writer_wrote_profile && profile_path.join("active/state").is_file(),
+            "profile writer did not exercise the live removal race"
+        );
+
+        let shutdown = browser.shutdown().await;
+        let activity_after_shutdown = std::fs::metadata(&writer_activity_file)
+            .map(|metadata| metadata.len())
+            .unwrap_or_default();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let activity_later = std::fs::metadata(&writer_activity_file)
+            .map(|metadata| metadata.len())
+            .unwrap_or_default();
+        let mut writer_stopped = false;
+        for _ in 0..100 {
+            if !process_is_alive(writer_pid) {
+                writer_stopped = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        if process_is_alive(writer_pid) {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &writer_pid.to_string()])
+                .status();
+        }
+
+        shutdown.unwrap();
+        assert!(writer_stopped, "profile writer {writer_pid} was orphaned");
+        assert_eq!(activity_after_shutdown, activity_later);
+        assert!(!profile_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn simulated_ctrl_c_cancels_without_orphaning_browser_or_profile() {
         let fixture = tempfile::tempdir().unwrap();
         let pid_file = fixture.path().join("cancel.pid");
-        let script = fake_browser(fixture.path(), &pid_file, true);
+        let writer_pid_file = fixture.path().join("cancel-writer.pid");
+        let writer_activity_file = fixture.path().join("cancel-writer.activity");
         let profile = tempfile::tempdir().unwrap();
         let profile_path = profile.path().to_path_buf();
+        let script = fake_browser_with_profile_writer(
+            fixture.path(),
+            &pid_file,
+            &writer_pid_file,
+            &writer_activity_file,
+            &profile_path,
+        );
         let geometry = CaptureGeometry {
             width: 100,
             height: 50,
@@ -1831,12 +2149,15 @@ mod tests {
         };
         let pid = Arc::new(AtomicU32::new(0));
         let operation_pid = Arc::clone(&pid);
+        let writer_pid = Arc::new(AtomicU32::new(0));
+        let operation_writer_pid = Arc::clone(&writer_pid);
         let (ready_tx, ready_rx) = oneshot::channel();
         let operation = async move {
             let deadline = CaptureDeadline::new(Duration::from_secs(2)).unwrap();
             let browser =
                 BrowserProcess::launch_with_profile(&script, profile, geometry, &deadline).await?;
             operation_pid.store(browser.pid().unwrap(), Ordering::SeqCst);
+            operation_writer_pid.store(read_pid(&writer_pid_file).await, Ordering::SeqCst);
             let _ = ready_tx.send(());
             std::future::pending::<Result<(), CliError>>().await
         };
@@ -1851,6 +2172,9 @@ mod tests {
         let pid = pid.load(Ordering::SeqCst);
         assert_ne!(pid, 0);
         assert_process_stops(pid).await;
+        let writer_pid = writer_pid.load(Ordering::SeqCst);
+        assert_ne!(writer_pid, 0);
+        assert_process_stops(writer_pid).await;
         assert!(!profile_path.exists());
     }
 }
