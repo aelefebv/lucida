@@ -2,7 +2,7 @@
 
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { useEffect, useRef, useState } from "react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { useModalDialog } from "./useModalDialog.ts";
 
 afterEach(() => cleanup());
@@ -287,6 +287,61 @@ describe("useModalDialog", () => {
       await new Promise((resolve) => window.setTimeout(resolve, 400));
     });
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "Preferred" }));
+  });
+
+  it("allows three opening frames even when the first arrives after the wall deadline", async () => {
+    const frames: FrameRequestCallback[] = [];
+    let clock = 0;
+    const requestFrame = vi.spyOn(window, "requestAnimationFrame")
+      .mockImplementation((callback) => {
+        frames.push(callback);
+        return frames.length;
+      });
+    const cancelFrame = vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => undefined);
+    const now = vi.spyOn(performance, "now").mockImplementation(() => clock);
+    try {
+      render(
+        <PreferredHarness
+          preferred="hidden"
+          focusRootOnMount
+          disableFallbackFocus
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Open preferred dialog" }));
+      const preferred = screen.getByText("Preferred").closest("button");
+      expect(preferred).not.toBeNull();
+      expect(document.activeElement).toBe(screen.getByRole("dialog"));
+      expect(frames).toHaveLength(1);
+
+      clock = 1_600;
+      await act(async () => {
+        frames.shift()?.(clock);
+        await Promise.resolve();
+      });
+      expect(frames).toHaveLength(1);
+      expect(document.activeElement).toBe(screen.getByRole("dialog"));
+
+      clock = 1_616;
+      await act(async () => {
+        frames.shift()?.(clock);
+        await Promise.resolve();
+      });
+      expect(frames).toHaveLength(1);
+      expect(document.activeElement).toBe(screen.getByRole("dialog"));
+
+      preferred!.style.removeProperty("display");
+      clock = 1_632;
+      await act(async () => {
+        frames.shift()?.(clock);
+        await Promise.resolve();
+      });
+      expect(document.activeElement).toBe(preferred);
+      expect(frames).toHaveLength(0);
+    } finally {
+      requestFrame.mockRestore();
+      cancelFrame.mockRestore();
+      now.mockRestore();
+    }
   });
 
   it("falls back when the preferred target is hidden, disabled, or absent", () => {

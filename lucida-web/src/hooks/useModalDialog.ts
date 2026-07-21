@@ -143,10 +143,21 @@ export function useModalDialog({
     claimFocus();
     queueMicrotask(claimFocus);
     const focusDeadline = performance.now() + 1_500;
+    // A wall-clock deadline alone is not a useful bound for work whose
+    // precondition (responsive CSS becoming focusable) advances on animation
+    // frames. Under a cold software-GPU load, the first callback can arrive
+    // after nearly the entire deadline and still observe the pre-paint style.
+    // Always allow the browser three opening callbacks, which gives style and
+    // layout two presentation intervals after a delayed first callback. The
+    // loop owns only one pending frame at a time, and cleanup cancels it
+    // immediately when the dialog closes.
+    const minimumOpeningFrames = 3;
+    let openingFrameCount = 0;
     let focusFrame: number | null = null;
     const verifyOpeningFocus = () => {
+      openingFrameCount += 1;
       claimFocus();
-      if (performance.now() < focusDeadline) {
+      if (performance.now() < focusDeadline || openingFrameCount < minimumOpeningFrames) {
         focusFrame = requestAnimationFrame(verifyOpeningFocus);
       }
     };
