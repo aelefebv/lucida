@@ -233,3 +233,7 @@ id_ed25519.*
 *.db
 .beads-credential-key
 .beads/proxieddb/
+
+# Gas City
+.beads/*
+!.beads/identity.toml
