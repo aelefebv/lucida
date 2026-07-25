@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { SavedViewApplier, type ApplierBridge, clampViewIndices } from "./applier.ts";
+import { observeSceneCalls } from "../sceneGuard.ts";
 import {
   SAVED_VIEW_VERSION,
   type BlendMode,
@@ -24,9 +25,14 @@ function createMockScene(opts: {
   availableLayouts?: Record<string, Array<{ id: string; name: string; active?: boolean }>>;
   volumeShapes?: Record<string, Uint32Array>;
   rejectCommand?: (cmd: Record<string, unknown>) => string | undefined;
+  /** Message the presence READ throws with. `export_presence` returns a plain
+   *  String on the wasm side, so it has no refusal path of its own — it throws
+   *  only when the instance itself is gone (dead handle / trap). */
+  presenceReadError?: string;
 } = {}) {
   const calls: string[] = [];
   const rejectCommand = opts.rejectCommand;
+  const presenceReadError = opts.presenceReadError;
   const ids = [...(opts.datasetIds ?? [])];
   const layouts = { ...(opts.availableLayouts ?? {}) };
   const shapes = { ...(opts.volumeShapes ?? {}) };
@@ -82,6 +88,7 @@ function createMockScene(opts: {
       return shapes[id] ?? new Uint32Array(0);
     },
     export_presence() {
+      if (presenceReadError !== undefined) throw new Error(presenceReadError);
       return JSON.stringify(presence);
     },
     export_dataset_presence() {
@@ -817,6 +824,115 @@ describe("SavedViewApplier", () => {
     // The camera never got its chance — and the notice does not pretend it did.
     expect(JSON.parse(scene.export_presence()).camera).toMatchObject({ zoom: 1.0 });
     expect(applier.isInProgress()).toBe(false);
+  });
+
+  it("stops when the presence read hits a dead engine, and says the engine failed", async () => {
+    // Same policy on the READ that precedes the camera write: `export_presence`
+    // hands back a plain string, so it throws only when the instance is gone.
+    // Filing that as one more skipped setting would end the apply with
+    // "everything else was restored" on an engine that restored nothing after
+    // it, and the session would never raise its engine banner either.
+    const scene = createMockScene({
+      datasetIds: ["ds-volume"],
+      rejectCommand: (cmd) =>
+        cmd.type === "set_channel_colormap"
+          ? "unknown variant `spectral`, expected one of `gray`, `magenta`, `green`, " +
+            "`cyan` at line 1 column 63"
+          : undefined,
+      presenceReadError: "null pointer passed to rust",
+    });
+    scene.setShape("ds-volume", new Uint32Array([340, 2048, 2048]));
+    const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl);
+    const v = emptyView();
+    v.camera = { mode: "slice", center: [11, 13], zoom: 6.0, viewport: [1600, 1200] };
+    v.dataset_order = ["ds-volume"];
+    v.dataset_settings = {
+      "ds-volume": {
+        visible: true,
+        opacity: 1,
+        contrast_min: 0,
+        contrast_max: 65535,
+        gamma: 1,
+        blend_mode: "alpha",
+        channel_settings: [
+          { visible: true, colormap: "spectral" as Colormap, contrast_min: 0, contrast_max: 4096, gamma: 1.0 },
+        ],
+      },
+    };
+
+    const failures: string[] = [];
+    const unobserve = observeSceneCalls({
+      onSceneCallApplied: () => {},
+      onSceneCallFailed: (_e, context) => { failures.push(context); },
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await expect(applier.apply(v)).rejects.toThrow(/null pointer passed to rust/);
+    } finally {
+      warn.mockRestore();
+      unobserve();
+    }
+
+    // The read reports through the same seam as the writes, so the session can
+    // raise its engine banner instead of the restore absorbing the failure.
+    expect(failures).toContain("export_presence");
+    // What was already lost is still named — and nothing claims the rest landed.
+    expect(applier.getState().warnings).toEqual([
+      "Could not apply 1 setting from this view: channel colormap. " +
+        "The restore then stopped, so more may be missing.",
+    ]);
+    expect(applier.isInProgress()).toBe(false);
+  });
+
+  it("names a layout this build does not have among the settings it could not apply", async () => {
+    // The recipient has no such layout, so the author's layout is dropped and
+    // the default stays. That drop used to be console-only, which made the
+    // notice's "everything else was restored" false for the one setting the
+    // user could actually see was different.
+    const scene = createMockScene({
+      datasetIds: ["ds-volume"],
+      availableLayouts: {
+        "ds-volume": [{ id: "L0", name: "default", active: true }],
+      },
+      rejectCommand: (cmd) =>
+        cmd.type === "set_channel_colormap"
+          ? "unknown variant `spectral`, expected one of `gray`, `magenta`, `green`, " +
+            "`cyan` at line 1 column 63"
+          : undefined,
+    });
+    scene.setShape("ds-volume", new Uint32Array([340, 2048, 2048]));
+    const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl);
+    const v = emptyView();
+    v.camera = { mode: "slice", center: [21, 34], zoom: 5.5, viewport: [1600, 1200] };
+    v.dataset_order = ["ds-volume"];
+    v.active_layouts = { "ds-volume": "L-newer-build" };
+    v.dataset_settings = {
+      "ds-volume": {
+        visible: true,
+        opacity: 1,
+        contrast_min: 0,
+        contrast_max: 65535,
+        gamma: 1,
+        blend_mode: "alpha",
+        channel_settings: [
+          { visible: true, colormap: "spectral" as Colormap, contrast_min: 0, contrast_max: 4096, gamma: 1.0 },
+        ],
+      },
+    };
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await applier.apply(v);
+    warn.mockRestore();
+
+    // Both losses are named, in the order the apply hit them.
+    expect(applier.getState().warnings).toEqual([
+      "Could not apply 2 settings from this view: layout, channel colormap. " +
+        "Everything else was restored.",
+    ]);
+    // Nothing was broadcast for a layout that does not exist here, and the rest
+    // of the restore — including the camera — still landed.
+    expect(docCmds.find((c) => c.includes('"set_active_layout"'))).toBeUndefined();
+    expect(JSON.parse(scene.export_presence()).camera).toEqual(v.camera);
   });
 });
 

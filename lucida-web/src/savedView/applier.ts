@@ -421,8 +421,14 @@ export class SavedViewApplier {
         const currentActive = layouts.find((l) => l.active)?.id;
         const exists = layouts.some((l) => l.id === layoutId);
         if (!exists) {
-          console.warn(
-            `[SavedViewApplier] dataset ${id} has no layout ${JSON.stringify(layoutId)}; falling back to default`,
+          // This build (or this dataset) has no such layout, so the author's
+          // layout is dropped and the recipient keeps the default. Count it
+          // among the skipped settings: the end-of-apply notice says
+          // "everything else was restored", and a layout quietly missing from
+          // that list would make the sentence a lie.
+          this.noteSkip(
+            commandLabel("set_active_layout"),
+            `dataset ${id} has no layout ${JSON.stringify(layoutId)}; keeping the default`,
           );
           continue;
         }
@@ -623,8 +629,8 @@ export class SavedViewApplier {
   }
 
   /**
-   * Dispatch ONE scene mutation, containing a refusal to that ONE command.
-   * Returns whether the command landed.
+   * Dispatch ONE scene call, containing a refusal to that ONE step.
+   * Returns whether the step landed.
    *
    * A saved view is a bag of largely independent settings and the engine
    * refuses them one at a time: a value this build's deserializer doesn't
@@ -655,10 +661,14 @@ export class SavedViewApplier {
 
   /** Remember (and log) one part of the view that did not land, for the
    *  end-of-apply notice. */
-  private recordSkip(label: string, e: unknown): void {
-    const message = e instanceof Error ? e.message : String(e);
+  private noteSkip(label: string, message: string): void {
     this.skipped.push({ label, message });
     console.warn(`[SavedViewApplier] skipped ${label}: ${message}`);
+  }
+
+  /** `noteSkip` for a part the engine refused, carrying the engine's message. */
+  private recordSkip(label: string, e: unknown): void {
+    this.noteSkip(label, e instanceof Error ? e.message : String(e));
   }
 
   private applyDocument(cmd: DocumentCommand): void {
@@ -706,20 +716,24 @@ export class SavedViewApplier {
     // We only want to update the camera shape here — view + display were
     // already applied step-by-step. Pass them through unchanged by reading
     // the live scene.
-    let presence: { camera: Camera; view: unknown; display: unknown };
-    try {
-      presence = JSON.parse(scene.export_presence()) as {
-        camera: Camera;
-        view: unknown;
-        display: unknown;
-      };
-    } catch (e) {
-      // Live presence unreadable: there is nothing to merge the camera into.
-      // Record it so the notice reports the framing as missing rather than
-      // letting the restore look complete.
-      this.recordSkip(CAMERA_LABEL, e);
-      return;
-    }
+    //
+    // The READ runs through the same seam as the writes. `export_presence`
+    // hands back a plain string rather than a fallible result, so the ways it
+    // throws are the ones that end the apply anyway — a dead handle or a trap —
+    // and filing those as one more skipped setting would let the notice claim
+    // everything else was restored on an engine that can no longer restore
+    // anything. Going through `dispatch` keeps that verdict in one place, and
+    // through `guardedSceneCall` lets the session surface its engine banner.
+    let presence: { camera: Camera; view: unknown; display: unknown } | undefined;
+    this.dispatch(CAMERA_LABEL, () => {
+      presence = JSON.parse(
+        guardedSceneCall("export_presence", scene, () => scene.export_presence()),
+      ) as { camera: Camera; view: unknown; display: unknown };
+    });
+    // Unreadable for a non-fatal reason (malformed payload): there is nothing
+    // to merge the camera into, and `dispatch` already recorded the skip, so
+    // the notice reports the framing as missing instead of looking complete.
+    if (presence === undefined) return;
     presence.camera = camera;
     this.dispatch(
       CAMERA_LABEL,
