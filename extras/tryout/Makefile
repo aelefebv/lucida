@@ -25,7 +25,7 @@ FIXTURE_ARG := $(if $(strip $(FIXTURE)),--fixture $(FIXTURE),)
 # unless the caller overrode OUT on the command line.
 REPORT_OUT_ARG := $(if $(filter-out /tmp/lucida-tryout,$(OUT)),--out $(OUT),)
 
-.PHONY: up up-human drive drive-human scenario scenario-list report report-human help
+.PHONY: up up-human drive drive-human scenario scenario-list report report-human test help
 
 help:
 	@$(PYTHON) $(HERE)tryout.py --help
@@ -53,3 +53,6 @@ report:  ## Run every surface and emit report.html + report.md (JSON; default OU
 
 report-human:  ## Same, but human-readable summary
 	@$(PYTHON) $(HERE)tryout.py report $(REPORT_OUT_ARG) $(FIXTURE_ARG)
+
+test:  ## The harness's own tests (retina render gate policy). Stdlib only: no browser, no server, seconds.
+	@$(PYTHON) -m unittest discover -s $(HERE)tests -v

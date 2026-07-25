@@ -7,8 +7,9 @@ Three commands, all real and end-to-end against a live `lucida-server` brought u
   JSON, capture a server log, then tear it down cleanly.
 - **`drive`** — bring up a live server, then **exercise lucida's surfaces the way
   an agent would** — the `lucida` CLI, the `LucidaClient` Python client, and the
-  **web** surface (a non-blank screenshot of the real rendered viewer, plus a
-  best-effort real-SPA full-page capture + browser console) — capturing every
+  **web** surface (a non-blank screenshot of the real rendered viewer, plus the
+  real SPA driven in a real browser at `deviceScaleFactor` 2 *and* 1, gating on
+  the retina one actually presenting a content frame) — capturing every
   step's output, then tear it down.
 - **`report`** — the capstone: run **every** surface (it reuses `drive --surface
   all`) and emit a single, **self-contained `report.html`** (plus a `report.md`
@@ -100,13 +101,16 @@ everything, then always tears the server down.
     (`lucida viewer screenshot DIR/web/viewer.png`, and `viewer overview`) which
     renders the real viewer in headless Chrome and writes a **non-blank** PNG.
     The captured workspace **URL** is recorded so a human can re-open the view.
-  - **Ceiling (best-effort):** drives the real SPA itself in a browser via
-    **Playwright** (provisioned through `npm` into a harness cache, pointed at the
-    same system Chrome — no browser download), waits for the same render-readiness
-    signal the product uses, then captures a full-page `DIR/web/spa.png` and the
-    browser `DIR/web/console.log`. If Playwright or a browser can't be
-    provisioned this is recorded as `{captured: false, reason}` and the floor
-    still stands.
+  - **Ceiling — the DPR render matrix (the retina arm *gates*):** drives the real
+    SPA itself in a browser via **Playwright** (provisioned through `npm` into a
+    harness cache, pointed at the same system Chrome — no browser download) at
+    `deviceScaleFactor` **2 and 1**, waits for the same render-readiness signal
+    the product uses, and then judges each arm on **whether a content frame
+    actually presented into the main canvas**. If the DPR 2 arm runs and the
+    canvas is blank, the web surface **fails**. If Playwright or a browser can't
+    be provisioned, no arm runs, this is recorded as `{captured: false, reason}`
+    with an explicitly *unenforced* gate, and the floor still stands. See
+    [the retina render gate](#the-retina-render-gate-dpr-2) below.
 - The full result is written to `DIR/drive.json` and printed (one JSON object
   under `--json`). `DIR/server.log` is captured too.
 
@@ -143,21 +147,91 @@ requested surface ran without a harness-level error), `out_dir`, `workspace_id`,
         { "name": "viewer", "png": "DIR/web/viewer.png", "nonblank": true, "ok": true },
         { "name": "overview", "png": "DIR/web/overview.png", "nonblank": true, "ok": true }
       ],
+      // The one verdict that can flip the web surface besides the floor.
+      // `gated: false` means the DPR 2 arm never ran — NOT that it passed.
+      "render_gate": {
+        "ok": true, "gated": true, "required": false, "device_scale_factor": 2,
+        "reason": "a content frame presented",
+        "checks": { "ready": true, "device_scale_factor": true, "content_frame": true }
+      },
       "real_spa": {
-        "captured": true, "reason": "rendered",
-        "spa_png": "DIR/web/spa.png", "spa_png_nonblank": true,
-        "console_log": "DIR/web/console.log",
-        "render": { "ready": true, "frame_count": 2, "dataset_count": 1 }
+        "captured": true, "reason": "drove the SPA at deviceScaleFactor 2 and 1",
+        "scale_factors": [2, 1],
+        "arms": [
+          {
+            "device_scale_factor": 2, "gating": true, "ran": true, "ok": true,
+            "reason": "a content frame presented",
+            "checks": { "ready": true, "device_scale_factor": true, "content_frame": true },
+            "render": { "ready": true, "frame_count": 148, "dataset_count": 1 },
+            "metrics": { "device_pixel_ratio": 2, "css_width": 1160, "backing_width": 2320 },
+            "content": {
+              "width": 2320, "height": 1660,
+              "centre": { "distinct_colors": 1459, "modal_fraction": 0.0198, "nonblack_fraction": 1.0 }
+            },
+            "spa_png": "DIR/web/spa-dpr2.png", "canvas_png": "DIR/web/canvas-dpr2.png",
+            "console_log": "DIR/web/console-dpr2.log", "duration_s": 9.0
+          },
+          { "device_scale_factor": 1, "gating": false, "ran": true, "ok": true, "…": "…" }
+        ],
+        "gate": { "…": "same object as web.render_gate" }
       }
     }
   }
 }
 ```
 
-The web surface's `ok` requires a **non-blank** `viewer.png` (the required
-floor); a failed `overview` or a skipped real-SPA ceiling is captured but never
-flips `ok`. `real_spa.captured: false` carries a `reason` (e.g. Playwright/Chrome
-not provisionable) — the floor still stands.
+The web surface's `ok` requires a **non-blank** `viewer.png` (the required floor)
+**and** a passing retina render gate. A failed `overview`, a non-gating DPR 1
+arm, or a *skipped* ceiling is captured but never flips `ok`.
+`real_spa.captured: false` carries a `reason` (e.g. Playwright/Chrome not
+provisionable) — the floor still stands.
+
+### The retina render gate (DPR 2)
+
+Headless browsers default to `deviceScaleFactor` 1. A canvas's backing store is
+CSS pixels × DPR, so retina makes the GPU fill **4× the pixels per frame** — and
+there is a class of lucida render defects that only appears there. Those defects
+are **silent**: no exception, no console message, the frame counter still
+climbing, and `window.__lucidaCaptureReady` still reporting `ready: true`
+(it is published from the JS side of a WebGPU submit, before the GPU has
+presented anything). The viewer is simply, permanently black. See
+[`wiki/gotchas/retina-dpr2-render-verification.md`](../../wiki/gotchas/retina-dpr2-render-verification.md).
+
+So the ceiling runs **both** scale factors on every run and the retina one
+decides. Each arm must satisfy three checks:
+
+| Check | What it asserts | Why it is not enough on its own |
+| --- | --- | --- |
+| `ready` | the product's own `window.__lucidaCaptureReady` says it rendered a frame with a dataset loaded | **the defect satisfies this** — it is a JS-side signal, not proof of presentation |
+| `device_scale_factor` | the page observed the `devicePixelRatio` we asked for, *and* the captured canvas image is that many times its CSS box | a retina arm that silently degraded to DPR 1 is not evidence about retina |
+| `content_frame` | the **centre 60% × 60%** of the main canvas is not one flat colour (≥ 2 distinct sampled colours, and the modal colour is ≤ 98% of samples) | this is the one that catches the defect |
+
+Why the *centre of the canvas*, and not the page or the whole canvas:
+
+- the **full page** is useless — the SPA chrome (sidebar, toolbar, text) renders
+  perfectly while the viewer is black, so a full-page "non-blank" check passes on
+  a completely dead viewer;
+- the **whole canvas box** is nearly as bad — an element-clipped canvas shot
+  composites the DOM overlaid on the canvas (the FPS badge, the orientation cube,
+  the minimap), which are corner- and edge-anchored, so they supply a spurious
+  "second colour". Measured against a black stand-in viewer: the canvas crop had
+  **27 distinct colours** and the repo's own `scripts/assert_png_nonblank.py`
+  passed it, while the centre had **1**.
+
+The "main canvas" is the largest by CSS area (the SPA also mounts small minimap
+and thumbnail canvases, so "the first `<canvas>` in the DOM" is not it).
+
+Artifacts, per arm: `DIR/web/spa-dpr{N}.png` (full page), `DIR/web/canvas-dpr{N}.png`
+(the judged canvas region), `DIR/web/console-dpr{N}.log`. The whole matrix runs in
+one node process and one browser (a context per arm), so the second scale factor
+costs a page load, not another launch — roughly **+4s** on the ceiling in
+practice. The Node driver only *measures*; the pass/fail policy is pure Python in
+`tryout/surfaces/web_surface.py` (`judge_render_arm`, `build_render_gate`) and is
+tested without a browser by `make -C extras/tryout test`.
+
+Scenario UI shots (`drive --scenario`) default to `deviceScaleFactor` 2 for the
+same reason; pass `device_scale_factor=1` to `drive_ui_program` for the DPR 1
+rendering.
 
 ## `report`: one run, one portable verification report
 
@@ -168,7 +242,8 @@ python3 extras/tryout/tryout.py report [--json] [--out DIR] [--fixture PATH] \
 
 The capstone. It runs the **full cross-surface session** (it *reuses* `drive
 --surface all` — CLI + Python + web, same hermetic spine, same raw artifacts:
-`server.log`, `cli/*.log`, `python/session.log`, `web/viewer.png` (+ `spa.png`),
+`server.log`, `cli/*.log`, `python/session.log`, `web/viewer.png` (+ the DPR
+render matrix's `web/spa-dpr{2,1}.png` / `canvas-dpr{2,1}.png`),
 `drive.json`) and then consolidates that one run into two artifacts a human opens
 to verify lucida works **without re-running**:
 
@@ -201,7 +276,8 @@ to verify lucida works **without re-running**:
 
 One JSON object with at least: `ok`, `out_dir`, `report_html` (path), `report_md`
 (path), a `surfaces` summary (`cli`/`python`/`web`, each with `ran`/`ok` and a
-pass count or `viewer_png_nonblank`), `workspace_id`, `dataset_id`, plus
+pass count or `viewer_png_nonblank` + the retina render gate's verdict),
+`workspace_id`, `dataset_id`, plus
 `base_url`, `versions`, and `drive_json` (a pointer to the full raw detail).
 
 ```jsonc
@@ -215,7 +291,9 @@ pass count or `viewer_png_nonblank`), `workspace_id`, `dataset_id`, plus
   "surfaces": {
     "cli":    { "ran": true, "ok": true, "passed": 16, "total": 16 },
     "python": { "ran": true, "ok": true, "passed": 12, "total": 12 },
-    "web":    { "ran": true, "ok": true, "viewer_png_nonblank": true, "real_spa_captured": true }
+    // `render_gate_enforced: false` means the DPR 2 arm never ran — not that it passed.
+    "web":    { "ran": true, "ok": true, "viewer_png_nonblank": true, "real_spa_captured": true,
+                "render_gate_enforced": true, "render_gate_ok": true, "scale_factors": [2, 1] }
   },
   "drive_json": ".../drive.json"
 }
@@ -330,6 +408,8 @@ fixture → report → teardown.**
 | `LUCIDA_TRYOUT_WEB_DIST` | Reuse this prebuilt `lucida-web/dist` (must contain `index.html`) for the web surface; else it is built from the working tree. |
 | `LUCIDA_TRYOUT_PLAYWRIGHT_DIR` | A `node_modules`-parent dir where Playwright is provisioned/cached for the real-SPA ceiling (default: `~/.cache/lucida-tryout/playwright`). |
 | `LUCIDA_BROWSER` | Browser executable used by both the floor (product CLI) and the real-SPA ceiling; defaults to the platform's Chrome/Chromium/Edge. |
+| `LUCIDA_TRYOUT_SCALE_FACTORS` | The ceiling's DPR render matrix, e.g. `2,1` (default) or `2`. An unparseable value falls back to the default, so a typo can never silently drop the retina arm. |
+| `LUCIDA_TRYOUT_REQUIRE_DPR2` | `1` makes a *skipped* retina arm (no browser/Playwright) fail the run instead of being tolerated. Set it in CI, where a missing browser is a misconfiguration rather than a fact of life. |
 | `LUCIDA_TRYOUT_COURIER` | Path to courier's `courier.py` for `drive --scenario --email`; else a `courier` on `PATH` is used, else email is recorded as skipped (never fatal). |
 
 ## Layout
@@ -350,7 +430,7 @@ extras/tryout/
       python_client.py # workspace create + dataset open via LucidaClient (bring-up)
       cli_surface.py   # drive the real `lucida` CLI tour, capture each command
       python_surface.py# broad LucidaClient read/mutate tour, capture transcript
-      web_surface.py   # non-blank viewer screenshot (CLI) + real-SPA Playwright capture
+      web_surface.py   # non-blank viewer screenshot (CLI) + the DPR render matrix (Playwright; DPR 2 gates)
     scenarios/
       __init__.py      # the ScenarioResult contract + the Scenario REGISTRY
       _runner.py       # the framework: boot -> seed -> drive UI -> capture -> (email) -> reap
@@ -361,6 +441,8 @@ extras/tryout/
     capture.py         # the one writer: record shape + on-disk artifacts (up.json/drive.json/report.*)
     netutil.py         # free-port allocation, /healthz polling
     errors.py          # staged TryoutError
+  tests/
+    test_render_matrix.py  # the retina render gate's judging policy (stdlib unittest, no browser)
 ```
 
 The `surfaces/` package is where each way of driving the server lives, each a
@@ -436,7 +518,9 @@ For `up`: expect exit 0, a JSON object on stdout with a `127.0.0.1:PORT` base UR
 For `drive`: expect exit 0, `surfaces.cli` with several captured commands (each
 with an `exit_code`), `surfaces.python.ran` true, and `surfaces.web.ok` true with
 a **non-blank** `/tmp/tryout-drive/web/viewer.png` and a recorded `viewer_url`
-(plus `web/spa.png` + `web/console.log` when the real-SPA ceiling is available);
+(plus `web/spa-dpr2.png`, `web/canvas-dpr2.png`, `web/console-dpr2.log` and their
+DPR 1 counterparts, and `surfaces.web.render_gate.ok` true, when the real-SPA
+ceiling is available);
 non-empty `/tmp/tryout-drive/cli/*.log` and `/tmp/tryout-drive/python/session.log`,
 `/tmp/tryout-drive/drive.json`, `teardown: "clean"`, and no orphaned
 `lucida-server` (or headless browser).

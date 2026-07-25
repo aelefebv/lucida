@@ -13,14 +13,24 @@ so both images are genuinely content-bearing rather than blank canvases:
     run, and its PNG is the required verification artifact. The captured URL is
     recorded so a human can re-open the same view.
 
-  * **Ceiling (best-effort).** Drive the real SPA ourselves in a real browser via
-    Playwright (provisioned through ``npm``/``npx`` into a harness-owned cache,
-    pointed at the same system Chrome the CLI uses — no browser download), open
-    the workspace URL, wait for the *same* ``window.__lucidaCaptureReady`` signal,
-    then capture a full-page ``DIR/web/spa.png`` and the browser ``console.log``.
-    If Playwright or a browser can't be provisioned, this is recorded as
-    ``{captured: false, reason}`` and the floor still stands — a browser hiccup is
-    captured, never fatal.
+  * **Ceiling: the DPR render matrix (gating at retina).** Drive the real SPA
+    ourselves in a real browser via Playwright (provisioned through ``npm``/``npx``
+    into a harness-owned cache, pointed at the same system Chrome the CLI uses —
+    no browser download) at ``deviceScaleFactor`` **2 and 1**, wait for the *same*
+    ``window.__lucidaCaptureReady`` signal, then judge each arm on whether a
+    content frame actually presented into the main canvas. The retina arm gates:
+    if it runs and the canvas is blank, the surface fails. If Playwright or a
+    browser can't be provisioned, no arm runs, this is recorded as
+    ``{captured: false, reason}`` with an explicitly *unenforced* gate, and the
+    floor still stands — a provisioning hiccup is captured, never fatal (unless
+    ``LUCIDA_TRYOUT_REQUIRE_DPR2=1``).
+
+Why the retina arm is the one that gates: headless browsers default to
+``deviceScaleFactor`` 1, and a class of render defects only appears when the
+canvas backing store is 2x its CSS box (4x the pixels to fill). Those defects are
+*silent* — no exception, no console error, the frame counter still climbing —
+so the check has to be pixels in the canvas, not the absence of an error. See
+``wiki/gotchas/retina-dpr2-render-verification.md``.
 
 Design choices, matching the CLI/Python surfaces:
 
@@ -61,13 +71,53 @@ DEFAULT_CAPTURE_TIMEOUT_S = 180.0
 # `viewer screenshot --timeout-seconds`). Slightly under the subprocess ceiling.
 DEFAULT_RENDER_WAIT_S = 150
 # Hard ceiling for the Playwright ceiling subprocess (provision + launch +
-# navigate + render-wait + capture). Generous; the backstop against an orphan.
-DEFAULT_SPA_TIMEOUT_S = 240.0
-# How long the Playwright driver waits for window.__lucidaCaptureReady, in ms.
-DEFAULT_SPA_RENDER_WAIT_MS = 150_000
+# navigate + render-wait + capture for EVERY arm of the render matrix).
+# Generous; the backstop against an orphan.
+DEFAULT_SPA_TIMEOUT_S = 360.0
+# How long the Playwright driver waits for window.__lucidaCaptureReady, per arm,
+# in ms. Two arms share DEFAULT_SPA_TIMEOUT_S, so this is deliberately under half
+# of it: a wedged arm cannot eat the other arm's budget.
+DEFAULT_SPA_RENDER_WAIT_MS = 120_000
 # Default full-page viewport for the ceiling capture.
 DEFAULT_VIEWPORT_W = 1400
 DEFAULT_VIEWPORT_H = 900
+
+# --- the DPR render matrix ------------------------------------------------- #
+# Backing store size is CSS pixels x devicePixelRatio, so a retina context makes
+# the GPU fill 4x the pixels per frame. A frame cost that crosses the completion
+# budget there fails SILENTLY AND TOTALLY (black canvas, no console error) while
+# the same code limps along at DPR 1 — and headless Chromium/Playwright/CI all
+# default to deviceScaleFactor 1, i.e. only ever the easy half of the matrix.
+# See wiki/gotchas/retina-dpr2-render-verification.md. So the ceiling drives BOTH
+# scale factors, gating on the retina one.
+DEFAULT_SCALE_FACTORS: tuple[int, ...] = (2, 1)
+# The arm whose verdict flips the surface: stricter, and what retina users hit.
+GATING_SCALE_FACTOR = 2
+# Env overrides: the matrix itself, and whether a *skipped* retina arm (no
+# browser/Playwright on this host) is tolerated. Default is tolerant, because a
+# missing browser is an environment fact, not a lucida defect — but CI can set
+# LUCIDA_TRYOUT_REQUIRE_DPR2=1 to make the gate mandatory.
+SCALE_FACTORS_ENV = "LUCIDA_TRYOUT_SCALE_FACTORS"
+REQUIRE_DPR2_ENV = "LUCIDA_TRYOUT_REQUIRE_DPR2"
+
+# --- what counts as "a content frame actually presented" ------------------- #
+# Judged on the CENTRE of the main canvas, not the page and not the whole canvas
+# box. Two reasons, both learned from the defect this gate exists for:
+#   * the full page is useless — the SPA chrome (sidebar, toolbar, text) renders
+#     fine while the viewer is black, so a full-page shot has thousands of
+#     colours and "non-blank" passes on a black viewer;
+#   * an element-clipped canvas shot composites any DOM overlaid on the canvas
+#     (FPS badge, orientation cube, minimap, annotations), which are corner- and
+#     edge-anchored — enough to supply a spurious "second colour".
+# The centre of the viewport is where a fit view puts the data, so a flat centre
+# means nothing was presented. "Flat" rather than "black" on purpose: it also
+# catches a canvas cleared to any solid colour and never drawn into.
+CONTENT_CENTRE_INSET = 0.2          # analyse the middle 60% x 60%
+CONTENT_MIN_DISTINCT_COLORS = 2
+CONTENT_MAX_MODAL_FRACTION = 0.98   # >=2% of centre samples must differ
+# Tolerance when checking that the arm really ran at the scale factor we asked
+# for (observed devicePixelRatio, and the captured canvas image's scale).
+DPR_FIDELITY_TOLERANCE = 0.05
 
 
 @dataclass
@@ -108,8 +158,63 @@ class WebCaptureResult:
 
 
 @dataclass
+class RenderArmResult:
+    """One arm of the DPR render matrix: the SPA driven at one scale factor.
+
+    ``ok`` is the judged verdict for this arm and answers the only question that
+    matters: *did a content frame actually present at this devicePixelRatio?* It
+    is deliberately not "the driver didn't throw" — the defect this exists for
+    threw nothing, logged nothing, and reported itself ready.
+    """
+
+    device_scale_factor: int
+    gating: bool
+    ran: bool = False
+    ok: bool = False
+    reason: str = ""
+    ready: bool = False
+    render: dict[str, Any] | None = None     # the product's own readiness probe
+    metrics: dict[str, Any] | None = None    # observed DPR + canvas geometry
+    content: dict[str, Any] | None = None    # canvas pixel statistics
+    checks: dict[str, bool] = field(default_factory=dict)
+    failures: list[str] = field(default_factory=list)
+    spa_png: str | None = None
+    spa_png_nonblank: bool | None = None
+    canvas_png: str | None = None
+    console_log: str | None = None
+    console_messages: int | None = None
+    duration_s: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        record: dict[str, Any] = {
+            "device_scale_factor": self.device_scale_factor,
+            "gating": self.gating,
+            "ran": self.ran,
+            "ok": self.ok,
+            "reason": self.reason,
+            "ready": self.ready,
+            "checks": dict(self.checks),
+        }
+        if self.failures:
+            record["failures"] = list(self.failures)
+        for key in ("render", "metrics", "content", "spa_png", "spa_png_nonblank",
+                    "canvas_png", "console_log", "console_messages", "duration_s"):
+            value = getattr(self, key)
+            if value is not None:
+                record[key] = value
+        return record
+
+
+@dataclass
 class RealSpaResult:
-    """The best-effort real-SPA ceiling outcome."""
+    """The real-SPA ceiling outcome: the whole DPR render matrix.
+
+    ``captured`` still means "we got a browser and drove the SPA" (a host with no
+    Chrome/Playwright records ``captured: false`` with a reason and never fails
+    the run). What is NEW is ``gate``: once a browser *was* available, the
+    deviceScaleFactor-2 arm's verdict is authoritative, because that is the arm a
+    retina user actually hits.
+    """
 
     captured: bool
     reason: str
@@ -120,6 +225,12 @@ class RealSpaResult:
     console_messages: int | None = None
     render: dict[str, Any] | None = None
     log: str | None = None
+    arms: list[RenderArmResult] = field(default_factory=list)
+    gate: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def gating_arm(self) -> RenderArmResult | None:
+        return next((arm for arm in self.arms if arm.gating), None)
 
     def to_dict(self) -> dict[str, Any]:
         record: dict[str, Any] = {"captured": self.captured, "reason": self.reason}
@@ -137,6 +248,9 @@ class RealSpaResult:
             record["render"] = self.render
         if self.log is not None:
             record["log"] = self.log
+        record["scale_factors"] = [arm.device_scale_factor for arm in self.arms]
+        record["arms"] = [arm.to_dict() for arm in self.arms]
+        record["gate"] = dict(self.gate)
         return record
 
 
@@ -186,6 +300,12 @@ class WebSurfaceResult(SurfaceResult):
             "captures": [capture.to_dict() for capture in self.captures],
             "real_spa": (self.real_spa.to_dict() if self.real_spa is not None
                          else {"captured": False, "reason": "not attempted"}),
+            # The second load-bearing verification fact, next to the floor: did
+            # the retina (DPR 2) arm present a real content frame? Hoisted to the
+            # top level for the same reason `viewer_png_nonblank` is — a reader
+            # must not have to dig for the answer the harness exists to give.
+            "render_gate": (self.real_spa.gate if self.real_spa is not None
+                            else {"gated": False, "reason": "not attempted"}),
         }
         if self.web_dist is not None:
             record["web_dist"] = self.web_dist
@@ -385,7 +505,7 @@ def run_web_surface(
         captures=captures,
     )
 
-    # --- ceiling: best-effort real-SPA capture (never fatal) -----------------
+    # --- ceiling: the DPR render matrix (DPR 2 gates) ------------------------
     if attempt_real_spa:
         # Drive the same workspace URL the floor captured (with the viewer
         # profile), so the ceiling shows the same view the floor verified.
@@ -395,8 +515,18 @@ def run_web_surface(
             web_out=web_out,
             log=log,
         )
+        # A browser we COULD drive that did not present a content frame at
+        # retina is a lucida defect, so it flips the surface. A browser we could
+        # not provision is an environment fact, so it does not (unless the
+        # caller demanded the gate via LUCIDA_TRYOUT_REQUIRE_DPR2).
+        if not result.real_spa.gate.get("ok", True):
+            result.ok = False
     else:
-        result.real_spa = RealSpaResult(captured=False, reason="disabled by caller")
+        result.real_spa = RealSpaResult(
+            captured=False,
+            reason="disabled by caller",
+            gate={"ok": True, "gated": False, "reason": "disabled by caller"},
+        )
 
     return result
 
@@ -603,13 +733,35 @@ def _write_capture_log(
 
 
 # --------------------------------------------------------------------------- #
-# Ceiling: drive the real SPA in a real browser via Playwright (best-effort).
+# Ceiling: the DPR render matrix — drive the real SPA in a real browser at
+# deviceScaleFactor 2 AND 1, and gate on the retina arm presenting content.
+#
+# This is the durable backstop for the retina blind spot. Three properties make
+# it able to catch the defect class that hid for two days (see
+# wiki/gotchas/retina-dpr2-render-verification.md):
+#
+#   1. **Both scale factors, every run.** Not a flag someone remembers to pass:
+#      the matrix is the default, DPR 2 first because it gates.
+#   2. **The verdict is pixels in the canvas, not "no error".** The defect threw
+#      nothing and logged nothing, and the SPA chrome around the viewer rendered
+#      perfectly — so a full-page "non-blank" check passes on a black viewer.
+#      We clip to the main canvas and judge its CENTRE.
+#   3. **The arm proves it really was retina.** The observed devicePixelRatio and
+#      the captured image's scale are both checked against what we asked for, so
+#      a DPR 2 arm that silently degraded to DPR 1 fails loudly instead of
+#      manufacturing confidence about the half of the matrix nobody tests.
 # --------------------------------------------------------------------------- #
 
 # The Node driver. It is resilient by construction: every failure prints one JSON
 # object to stdout and exits, so the Python side always gets a structured reason.
-# It reuses the product's own readiness contract (window.__lucidaCaptureReady)
-# so spa.png is captured only once the viewer has actually rendered the dataset.
+# It reuses the product's own readiness contract (window.__lucidaCaptureReady) so
+# an arm is only "ready" once the viewer says it rendered the dataset — and then
+# measures the canvas anyway, because that contract is published from the JS side
+# of a WebGPU submit and can report a frame the GPU never presented.
+#
+# The driver only MEASURES (readiness, geometry, pixel statistics). The pass/fail
+# policy lives in Python (:func:`judge_render_arm`) so it is testable without a
+# browser and so a threshold change is a one-line diff, not a JS edit.
 _SPA_DRIVER = r'''
 'use strict';
 const fs = require('fs');
@@ -622,19 +774,20 @@ try {
 } catch (e1) {
   try { ({ chromium } = require('@playwright/test')); }
   catch (e2) {
-    out({ captured: false, reason: 'playwright_not_resolvable: ' + String(e2).split('\n')[0] });
+    out({ captured: false, reason: 'playwright_not_resolvable: ' + String(e2).split('\n')[0], arms: [] });
     process.exit(0);
   }
 }
 
 const req = JSON.parse(process.argv[2]);
 const url = req.url;
-const spaPng = req.spa_png;
-const consoleLog = req.console_log;
 const exe = req.executable_path || undefined;
 const width = req.width || 1400;
 const height = req.height || 900;
-const renderWaitMs = req.render_wait_ms || 150000;
+const renderWaitMs = req.render_wait_ms || 120000;
+const scaleFactors = (req.scale_factors && req.scale_factors.length) ? req.scale_factors : [2, 1];
+const shots = req.shots || {};
+const centreInset = typeof req.centre_inset === 'number' ? req.centre_inset : 0.2;
 
 // The product's render-readiness probe (kept in lockstep with the CLI's
 // LUCIDA_CAPTURE_READY_PROBE): a sized canvas whose __lucidaCaptureReady reports
@@ -653,8 +806,97 @@ function readyProbe() {
   return { ready, reason: ready ? 'rendered' : String(s.reason || 'not_ready'), frame_count: fc, dataset_count: dc, canvas_width: cw, canvas_height: ch };
 }
 
+// Geometry: the observed devicePixelRatio, and the MAIN canvas — the largest by
+// CSS area, because the SPA also mounts small minimap / thumbnail canvases and
+// `querySelector('canvas')` is only "first in the DOM".
+function metricsProbe() {
+  const list = Array.from(document.querySelectorAll('canvas'));
+  let index = -1;
+  let best = -1;
+  for (let i = 0; i < list.length; i++) {
+    const r = list[i].getBoundingClientRect();
+    const area = r.width * r.height;
+    if (area > best) { best = area; index = i; }
+  }
+  const el = index >= 0 ? list[index] : null;
+  const rect = el ? el.getBoundingClientRect() : null;
+  const round2 = (v) => Math.round(v * 100) / 100;
+  return {
+    device_pixel_ratio: window.devicePixelRatio,
+    canvas_count: list.length,
+    canvas_index: index,
+    css_width: rect ? round2(rect.width) : 0,
+    css_height: rect ? round2(rect.height) : 0,
+    backing_width: el ? (el.width || 0) : 0,
+    backing_height: el ? (el.height || 0) : 0,
+    inner_width: window.innerWidth,
+    inner_height: window.innerHeight,
+  };
+}
+
+// Decode a captured PNG and reduce it to pixel statistics. Runs in a SEPARATE
+// blank page (never the page under test) so a broken SPA cannot influence — or
+// break — the measurement, and so the decode uses the browser's native PNG path
+// rather than a slow pure-Python one.
+function pixelStats(args) {
+  return (async () => {
+    const img = new Image();
+    img.src = 'data:image/png;base64,' + args.data;
+    await img.decode();
+    const w = img.naturalWidth, h = img.naturalHeight;
+    if (!w || !h) return { width: w, height: h, full: null, centre: null };
+    const canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0);
+    const px = ctx.getImageData(0, 0, w, h).data;
+    const round6 = (v) => Math.round(v * 1e6) / 1e6;
+
+    function region(x0, y0, x1, y1) {
+      const stepX = Math.max(1, Math.floor((x1 - x0) / 256));
+      const stepY = Math.max(1, Math.floor((y1 - y0) / 256));
+      const counts = new Map();
+      let n = 0, nonblack = 0, sum = 0, max = 0;
+      for (let y = y0; y < y1; y += stepY) {
+        for (let x = x0; x < x1; x += stepX) {
+          const i = (y * w + x) * 4;
+          const r = px[i], g = px[i + 1], b = px[i + 2], a = px[i + 3];
+          const key = ((r * 256 + g) * 256 + b) * 256 + a;
+          counts.set(key, (counts.get(key) || 0) + 1);
+          // A fully transparent pixel composites to the page behind it; for the
+          // purpose of "did the viewer draw anything" it counts as nothing.
+          const lum = a === 0 ? 0 : (0.2126 * r + 0.7152 * g + 0.0722 * b);
+          sum += lum;
+          if (lum > max) max = lum;
+          if (lum > 6) nonblack += 1;
+          n += 1;
+        }
+      }
+      let modal = 0, modalKey = -1;
+      for (const entry of counts) { if (entry[1] > modal) { modal = entry[1]; modalKey = entry[0]; } }
+      const colour = modalKey < 0 ? null : [
+        (modalKey >>> 24) & 255, (modalKey >>> 16) & 255, (modalKey >>> 8) & 255, modalKey & 255,
+      ];
+      return {
+        samples: n,
+        distinct_colors: counts.size,
+        modal_fraction: round6(n ? modal / n : 1),
+        modal_color: colour,
+        nonblack_fraction: round6(n ? nonblack / n : 0),
+        mean_luma: round6(n ? sum / n : 0),
+        max_luma: round6(max),
+      };
+    }
+
+    const inset = args.inset;
+    const ix0 = Math.floor(w * inset), iy0 = Math.floor(h * inset);
+    const ix1 = Math.max(ix0 + 1, Math.ceil(w * (1 - inset)));
+    const iy1 = Math.max(iy0 + 1, Math.ceil(h * (1 - inset)));
+    return { width: w, height: h, full: region(0, 0, w, h), centre: region(ix0, iy0, ix1, iy1) };
+  })();
+}
+
 (async () => {
-  const messages = [];
   let browser = null;
   try {
     browser = await chromium.launch({
@@ -663,54 +905,306 @@ function readyProbe() {
       args: ['--enable-unsafe-webgpu', '--ignore-gpu-blocklist', '--no-first-run', '--no-default-browser-check'],
     });
   } catch (e) {
-    out({ captured: false, reason: 'browser_launch_failed: ' + String(e).split('\n')[0] });
+    out({ captured: false, reason: 'browser_launch_failed: ' + String(e).split('\n')[0], arms: [] });
     process.exit(0);
   }
 
+  // The measurement page: always DPR 1, always about:blank.
+  let helper = null;
   try {
-    const context = await browser.newContext({ viewport: { width, height }, deviceScaleFactor: 1 });
-    const page = await context.newPage();
-    // Capture the browser console + page errors -> console.log artifact.
-    page.on('console', (msg) => { try { messages.push('[' + msg.type() + '] ' + msg.text()); } catch (_) {} });
-    page.on('pageerror', (err) => { messages.push('[pageerror] ' + String(err && err.message ? err.message : err)); });
-    page.on('requestfailed', (rq) => { try { messages.push('[requestfailed] ' + rq.url() + ' ' + (rq.failure() && rq.failure().errorText)); } catch (_) {} });
-
-    await page.goto(url, { waitUntil: 'load', timeout: renderWaitMs });
-
-    // Poll the product readiness probe until the viewer has rendered the dataset.
-    let probe = null;
-    const deadline = Date.now() + renderWaitMs;
-    while (Date.now() < deadline) {
-      probe = await page.evaluate(readyProbe);
-      if (probe && probe.ready) break;
-      await page.waitForTimeout(250);
-    }
-
-    // Capture full-page no matter what (even if not "ready") so the human sees
-    // whatever rendered; nonblank-ness is judged by the Python side.
-    await page.screenshot({ path: spaPng, fullPage: true });
-
-    try { fs.writeFileSync(consoleLog, messages.join('\n') + '\n'); } catch (_) {}
-
-    const rendered = Boolean(probe && probe.ready);
-    out({
-      captured: true,
-      rendered,
-      reason: rendered ? 'rendered' : ('captured_not_ready: ' + (probe ? probe.reason : 'unknown')),
-      console_messages: messages.length,
-      render: probe || null,
-      url,
-    });
+    const helperContext = await browser.newContext({ viewport: { width: 200, height: 200 }, deviceScaleFactor: 1 });
+    helper = await helperContext.newPage();
+    await helper.goto('about:blank');
   } catch (e) {
-    // Still try to flush the console log we gathered before failing.
-    try { fs.writeFileSync(consoleLog, messages.join('\n') + '\n'); } catch (_) {}
-    out({ captured: false, reason: 'spa_capture_failed: ' + String(e).split('\n')[0], console_messages: messages.length });
-  } finally {
     try { await browser.close(); } catch (_) {}
+    out({ captured: false, reason: 'analysis_page_unavailable: ' + String(e).split('\n')[0], arms: [] });
+    process.exit(0);
   }
+
+  async function analyse(buffer) {
+    if (!buffer) return null;
+    return await helper.evaluate(pixelStats, { data: buffer.toString('base64'), inset: centreInset });
+  }
+
+  const arms = [];
+  for (const dsf of scaleFactors) {
+    const started = Date.now();
+    const paths = shots[String(dsf)] || {};
+    const messages = [];
+    const arm = { device_scale_factor: dsf, ran: false, ready: false, reason: '' };
+    let context = null;
+    try {
+      context = await browser.newContext({ viewport: { width, height }, deviceScaleFactor: dsf });
+      const page = await context.newPage();
+      page.on('console', (msg) => { try { messages.push('[' + msg.type() + '] ' + msg.text()); } catch (_) {} });
+      page.on('pageerror', (err) => { messages.push('[pageerror] ' + String(err && err.message ? err.message : err)); });
+      page.on('requestfailed', (rq) => { try { messages.push('[requestfailed] ' + rq.url() + ' ' + (rq.failure() && rq.failure().errorText)); } catch (_) {} });
+
+      await page.goto(url, { waitUntil: 'load', timeout: renderWaitMs });
+
+      // Poll the product readiness probe until the viewer says it rendered.
+      let probe = null;
+      const deadline = Date.now() + renderWaitMs;
+      while (Date.now() < deadline) {
+        probe = await page.evaluate(readyProbe);
+        if (probe && probe.ready) break;
+        await page.waitForTimeout(250);
+      }
+      const metrics = await page.evaluate(metricsProbe);
+
+      // Capture regardless of readiness so the human sees whatever rendered.
+      let fullBuffer = null;
+      try {
+        fullBuffer = await page.screenshot({ path: paths.spa_png, fullPage: true });
+      } catch (e) {
+        arm.full_page_error = String(e && e.message ? e.message : e).split('\n')[0];
+      }
+      let canvasBuffer = null;
+      if (metrics && metrics.canvas_index >= 0) {
+        try {
+          canvasBuffer = await page.locator('canvas').nth(metrics.canvas_index).screenshot({ path: paths.canvas_png });
+        } catch (e) {
+          arm.canvas_error = String(e && e.message ? e.message : e).split('\n')[0];
+        }
+      } else {
+        arm.canvas_error = 'no canvas element in the page';
+      }
+
+      arm.render = probe;
+      arm.metrics = metrics;
+      arm.ready = Boolean(probe && probe.ready);
+      arm.content = await analyse(canvasBuffer);
+      arm.full_page = await analyse(fullBuffer);
+      arm.ran = true;
+      arm.reason = arm.ready ? 'rendered' : ('not_ready: ' + (probe ? probe.reason : 'unknown'));
+    } catch (e) {
+      arm.reason = 'arm_failed: ' + String(e && e.message ? e.message : e).split('\n')[0];
+    } finally {
+      try { if (paths.console_log) fs.writeFileSync(paths.console_log, messages.join('\n') + '\n'); } catch (_) {}
+      arm.console_messages = messages.length;
+      arm.duration_s = Math.round((Date.now() - started) / 100) / 10;
+      try { if (context) await context.close(); } catch (_) {}
+    }
+    arms.push(arm);
+  }
+
+  try { await browser.close(); } catch (_) {}
+  const ranAny = arms.some((a) => a.ran);
+  out({
+    captured: ranAny,
+    reason: ranAny ? 'drove the SPA at deviceScaleFactor ' + scaleFactors.join(' and ')
+                   : ('no arm ran: ' + (arms.length ? arms[0].reason : 'no scale factors')),
+    arms,
+    url,
+  });
   process.exit(0);
 })();
 '''
+
+
+# --------------------------------------------------------------------------- #
+# The verdict policy. Pure functions over the driver's measurements, so the rule
+# "a content frame actually presented at retina" is unit-testable with no
+# browser, and a threshold is a one-line change in one place.
+# --------------------------------------------------------------------------- #
+
+def _check_dpr_fidelity(
+    metrics: Any, content: Any, device_scale_factor: int
+) -> tuple[bool, list[str]]:
+    """Did this arm really run at the scale factor it claims?
+
+    Two independent witnesses: what the page observed (``devicePixelRatio``) and
+    how big the captured canvas image is relative to its CSS box (Playwright
+    scales element screenshots by the context's ``deviceScaleFactor``). If either
+    disagrees, the arm is not the retina arm it says it is — and a matrix whose
+    strict half quietly collapsed into its lenient half is exactly the false
+    confidence this gate exists to prevent.
+    """
+    failures: list[str] = []
+    if not isinstance(metrics, dict):
+        return False, ["no page metrics were captured"]
+
+    observed = metrics.get("device_pixel_ratio")
+    if not isinstance(observed, (int, float)) or isinstance(observed, bool):
+        failures.append(f"page did not report a devicePixelRatio (got {observed!r})")
+    elif abs(float(observed) - device_scale_factor) > DPR_FIDELITY_TOLERANCE:
+        failures.append(
+            f"page ran at devicePixelRatio {float(observed):g}, asked for {device_scale_factor}"
+        )
+
+    css_width = _as_float(metrics.get("css_width"))
+    shot_width = _as_float((content or {}).get("width") if isinstance(content, dict) else None)
+    if css_width <= 0:
+        failures.append("the main canvas has zero CSS width (nothing to capture)")
+    elif shot_width <= 0:
+        failures.append("no canvas image was captured")
+    else:
+        scale = shot_width / css_width
+        if abs(scale - device_scale_factor) > DPR_FIDELITY_TOLERANCE:
+            failures.append(
+                f"canvas capture is {scale:.3g}x its CSS box, asked for {device_scale_factor}x "
+                f"({shot_width:g} device px / {css_width:g} CSS px)"
+            )
+    return (not failures), failures
+
+
+def _check_canvas_content(content: Any) -> tuple[bool, list[str]]:
+    """Did a content frame actually present into the canvas?
+
+    Flatness of the canvas CENTRE is the test. A permanently black viewer — the
+    exact shape of the defect this gate exists for — is one flat colour there,
+    while everything around it (SPA chrome, corner overlays, the console, the
+    frame counter) looks healthy.
+    """
+    if not isinstance(content, dict):
+        return False, ["no canvas pixels were analysed (canvas missing or not capturable)"]
+    centre = content.get("centre")
+    if not isinstance(centre, dict) or int(centre.get("samples") or 0) <= 0:
+        return False, ["the canvas centre had no sampled pixels"]
+
+    distinct = int(centre.get("distinct_colors") or 0)
+    modal = _as_float(centre.get("modal_fraction"), default=1.0)
+    colour = centre.get("modal_color")
+    if distinct < CONTENT_MIN_DISTINCT_COLORS:
+        return False, [
+            f"the canvas centre is one flat colour rgba{tuple(colour) if colour else '(?)'} "
+            "— no content frame presented"
+        ]
+    if modal > CONTENT_MAX_MODAL_FRACTION:
+        return False, [
+            f"the canvas centre is {modal:.2%} a single colour "
+            f"rgba{tuple(colour) if colour else '(?)'} "
+            f"(limit {CONTENT_MAX_MODAL_FRACTION:.0%}) — no content frame presented"
+        ]
+    return True, []
+
+
+def judge_render_arm(
+    payload: dict[str, Any],
+    *,
+    device_scale_factor: int,
+    gating: bool,
+) -> RenderArmResult:
+    """Turn one arm's raw measurements into a verdict.
+
+    Three checks, all of which must hold: the product said it rendered, the arm
+    really was this scale factor, and the canvas actually shows something. The
+    first alone is what the harness used to rely on — and it is precisely the one
+    the defect satisfied, because ``__lucidaCaptureReady`` is published from the
+    JS side of a WebGPU submit, before the GPU has presented anything.
+    """
+    arm = RenderArmResult(device_scale_factor=device_scale_factor, gating=gating)
+    arm.ran = bool(payload.get("ran"))
+    arm.ready = bool(payload.get("ready"))
+    arm.render = payload.get("render")
+    arm.metrics = payload.get("metrics")
+    arm.content = payload.get("content")
+    arm.console_messages = payload.get("console_messages")
+    arm.duration_s = payload.get("duration_s")
+
+    full_page = payload.get("full_page")
+    if isinstance(full_page, dict) and isinstance(full_page.get("full"), dict):
+        # Recorded, never gating: the SPA chrome around a black viewer makes the
+        # full page "non-blank" no matter what the viewer did.
+        arm.spa_png_nonblank = (
+            int(full_page["full"].get("distinct_colors") or 0) >= CONTENT_MIN_DISTINCT_COLORS
+        )
+
+    if not arm.ran:
+        arm.reason = str(payload.get("reason") or "the arm did not run")
+        arm.failures = [arm.reason]
+        return arm
+
+    failures: list[str] = []
+    if not arm.ready:
+        failures.append(
+            f"the viewer never reported a rendered frame ({payload.get('reason') or 'not ready'})"
+        )
+    dpr_ok, dpr_failures = _check_dpr_fidelity(arm.metrics, arm.content, device_scale_factor)
+    failures.extend(dpr_failures)
+    content_ok, content_failures = _check_canvas_content(arm.content)
+    failures.extend(content_failures)
+
+    arm.checks = {
+        "ready": arm.ready,
+        "device_scale_factor": dpr_ok,
+        "content_frame": content_ok,
+    }
+    arm.ok = arm.ready and dpr_ok and content_ok
+    arm.failures = failures
+    arm.reason = "a content frame presented" if arm.ok else "; ".join(failures)
+    return arm
+
+
+def build_render_gate(
+    arms: Sequence[RenderArmResult],
+    *,
+    skip_reason: str | None = None,
+    require: bool = False,
+) -> dict[str, Any]:
+    """The one verdict that can flip the web surface: the retina arm's.
+
+    A retina arm that ran and failed is a lucida defect and fails the surface. A
+    retina arm that could not run (no Chrome, no Playwright, no node) is an
+    environment fact and does not — but it is reported as ``gated: false`` so a
+    reader never mistakes a missing gate for a passing one, and
+    ``LUCIDA_TRYOUT_REQUIRE_DPR2=1`` turns it into a failure for CI.
+    """
+    gating = next((arm for arm in arms if arm.gating and arm.ran), None)
+    if gating is not None:
+        return {
+            "ok": gating.ok,
+            "gated": True,
+            "required": require,
+            "device_scale_factor": gating.device_scale_factor,
+            "reason": gating.reason,
+            "failures": list(gating.failures),
+            "checks": dict(gating.checks),
+        }
+    reason = skip_reason or "the deviceScaleFactor 2 arm did not run"
+    return {
+        "ok": not require,
+        "gated": False,
+        "required": require,
+        "device_scale_factor": GATING_SCALE_FACTOR,
+        "reason": f"retina render gate NOT enforced: {reason}",
+    }
+
+
+def _as_float(value: Any, *, default: float = 0.0) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    return float(value)
+
+
+def scale_factors_from_env(default: Sequence[int] = DEFAULT_SCALE_FACTORS) -> list[int]:
+    """The render matrix, honoring ``LUCIDA_TRYOUT_SCALE_FACTORS`` (e.g. ``"2,1"``).
+
+    An unparseable value falls back to the default rather than failing the run —
+    but the default already includes 2, so the gate can never be dropped by a
+    typo, only by an explicit, valid override.
+    """
+    raw = os.environ.get(SCALE_FACTORS_ENV)
+    if not raw or not raw.strip():
+        return list(default)
+    parsed: list[int] = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            value = int(token)
+        except ValueError:
+            return list(default)
+        if value > 0 and value not in parsed:
+            parsed.append(value)
+    return parsed or list(default)
+
+
+def require_dpr2_from_env() -> bool:
+    """Whether a skipped retina arm should fail the run (``LUCIDA_TRYOUT_REQUIRE_DPR2``)."""
+    raw = (os.environ.get(REQUIRE_DPR2_ENV) or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 def capture_real_spa(
@@ -720,47 +1214,58 @@ def capture_real_spa(
     spa_timeout_s: float = DEFAULT_SPA_TIMEOUT_S,
     render_wait_ms: int = DEFAULT_SPA_RENDER_WAIT_MS,
     viewport: tuple[int, int] = (DEFAULT_VIEWPORT_W, DEFAULT_VIEWPORT_H),
+    scale_factors: Sequence[int] | None = None,
+    require_dpr2: bool | None = None,
     log=print,
 ) -> RealSpaResult:
-    """Best-effort: drive the real SPA in a browser and capture spa.png + console.
+    """Drive the real SPA at every scale factor in the matrix and judge each arm.
 
-    Never raises: every failure to provision Node/Playwright/a browser, or any
-    runtime error, becomes ``RealSpaResult(captured=False, reason=...)``. The
-    subprocess has a hard timeout so a stuck browser can't hang the run, and the
-    driver always closes its browser, so no orphan survives.
+    Never raises: a failure to provision node/Playwright/a browser, or any runtime
+    error, becomes ``RealSpaResult(captured=False, reason=...)`` with an
+    unenforced (``gated: false``) gate. The whole matrix runs in ONE node process
+    and ONE browser (a context per arm), so the second scale factor costs a page
+    load, not another launch + provision. The subprocess has a hard timeout and
+    the driver always closes its browser, so no orphan survives.
     """
-    spa_png = web_out / "spa.png"
+    factors = list(scale_factors) if scale_factors is not None else scale_factors_from_env()
+    require = require_dpr2_from_env() if require_dpr2 is None else require_dpr2
     console_log = web_out / "console.log"
     driver_log = web_out / "spa-driver.log"
 
+    def skipped(reason: str) -> RealSpaResult:
+        return _spa_skipped(reason, console_log=console_log, require=require)
+
     node = shutil.which("node")
     if node is None:
-        return _spa_skipped(
-            "node not found on PATH (the real-SPA ceiling needs Node + Playwright)",
-            console_log=console_log,
-        )
+        return skipped("node not found on PATH (the real-SPA ceiling needs Node + Playwright)")
 
     try:
         node_path = _ensure_playwright(log=log)
     except TryoutError as error:
-        return _spa_skipped(error.message, console_log=console_log)
+        return skipped(error.message)
 
     browser_path = _system_browser_path()
     if browser_path is None:
-        return _spa_skipped(
-            "no Chrome/Chromium found (set LUCIDA_BROWSER) for the real-SPA ceiling",
-            console_log=console_log,
-        )
+        return skipped("no Chrome/Chromium found (set LUCIDA_BROWSER) for the real-SPA ceiling")
 
+    shots = {
+        str(dsf): {
+            "spa_png": str(web_out / f"spa-dpr{dsf}.png"),
+            "canvas_png": str(web_out / f"canvas-dpr{dsf}.png"),
+            "console_log": str(web_out / f"console-dpr{dsf}.log"),
+        }
+        for dsf in factors
+    }
     request = json.dumps(
         {
             "url": url,
-            "spa_png": str(spa_png),
-            "console_log": str(console_log),
             "executable_path": browser_path,
             "width": viewport[0],
             "height": viewport[1],
             "render_wait_ms": render_wait_ms,
+            "scale_factors": factors,
+            "shots": shots,
+            "centre_inset": CONTENT_CENTRE_INSET,
         }
     )
     env = dict(os.environ)
@@ -774,8 +1279,9 @@ def capture_real_spa(
     env.setdefault("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "1")
 
     log(
-        f"[tryout] web ceiling: driving the real SPA via Playwright "
-        f"(system Chrome) at {url}"
+        "[tryout] web ceiling: driving the real SPA via Playwright (system Chrome) at "
+        f"{url} — deviceScaleFactor {', '.join(str(f) for f in factors)} "
+        f"(DPR {GATING_SCALE_FACTOR} gates)"
     )
     # Write the driver to a real .cjs file (rather than `node -e`): a file script
     # puts the request at argv[2] deterministically, resolves `require` naturally,
@@ -800,19 +1306,29 @@ def capture_real_spa(
         stdout = error.stdout.decode() if isinstance(error.stdout, bytes) else (error.stdout or "")
         stderr = (
             (error.stderr.decode() if isinstance(error.stderr, bytes) else (error.stderr or ""))
-            + f"\n[tryout] real-SPA capture timed out after {spa_timeout_s:g}s"
+            + f"\n[tryout] real-SPA render matrix timed out after {spa_timeout_s:g}s"
         )
         returncode = None
         _write_text(driver_log, _spa_driver_log(argv, stdout, stderr, returncode))
         # run_group SIGKILLs the whole process group on timeout, so the node
-        # driver and its browser child are reaped together; record a clean skip.
+        # driver and its browser child are reaped together. A timeout is NOT a
+        # clean skip: the browser was there and never presented, which is exactly
+        # the failure mode this gate is for.
+        reason = f"real-SPA render matrix timed out after {spa_timeout_s:g}s"
         return RealSpaResult(
             captured=False,
-            reason=f"real-SPA capture timed out after {spa_timeout_s:g}s",
-            spa_png=str(spa_png) if spa_png.is_file() else None,
+            reason=reason,
             console_log=str(console_log) if console_log.is_file() else None,
             url=url,
             log=str(driver_log),
+            gate={
+                "ok": False,
+                "gated": True,
+                "required": require,
+                "device_scale_factor": GATING_SCALE_FACTOR,
+                "reason": reason,
+                "failures": [reason],
+            },
         )
 
     duration = round(time.monotonic() - started, 3)
@@ -828,38 +1344,80 @@ def capture_real_spa(
         return RealSpaResult(
             captured=False,
             reason=reason,
-            spa_png=str(spa_png) if spa_png.is_file() else None,
             console_log=str(console_log) if console_log.is_file() else None,
             url=url,
             log=str(driver_log),
+            gate=build_render_gate([], skip_reason=reason, require=require),
         )
 
+    raw_arms = payload.get("arms") or []
+    arms: list[RenderArmResult] = []
+    for index, dsf in enumerate(factors):
+        raw = raw_arms[index] if index < len(raw_arms) else {}
+        if not isinstance(raw, dict):
+            raw = {}
+        arm = judge_render_arm(
+            raw,
+            device_scale_factor=int(raw.get("device_scale_factor") or dsf),
+            gating=(dsf == GATING_SCALE_FACTOR),
+        )
+        paths = shots[str(dsf)]
+        for attribute, key in (("spa_png", "spa_png"), ("canvas_png", "canvas_png"),
+                               ("console_log", "console_log")):
+            candidate = Path(paths[key])
+            if candidate.is_file():
+                setattr(arm, attribute, str(candidate))
+        arms.append(arm)
+
     captured = bool(payload.get("captured"))
-    spa_exists = spa_png.is_file()
-    spa_nonblank = png_is_nonblank(spa_png) if spa_exists else False
-    console_exists = console_log.is_file()
-    log(
-        f"[tryout]   web ceiling: {'captured' if captured else 'skipped'} "
-        f"({payload.get('reason')}) in {duration:g}s"
-        + (f" -> spa.png ({'non-blank' if spa_nonblank else 'blank'})" if spa_exists else "")
+    gate = build_render_gate(
+        arms,
+        skip_reason=str(payload.get("reason") or "no arm ran"),
+        require=require,
     )
+
+    for arm in arms:
+        verdict = "ok" if arm.ok else ("FAIL" if arm.ran else "did not run")
+        log(
+            f"[tryout]   web ceiling: deviceScaleFactor {arm.device_scale_factor}"
+            f"{' (gates)' if arm.gating else ''}: {verdict} — {arm.reason}"
+            + (f" ({arm.duration_s:g}s)" if arm.duration_s is not None else "")
+        )
+    log(
+        f"[tryout]   web ceiling: retina render gate "
+        f"{'PASS' if gate.get('ok') else 'FAIL'}"
+        f"{'' if gate.get('gated') else ' (not enforced)'} in {duration:g}s"
+    )
+
+    gating_arm = next((arm for arm in arms if arm.gating), None)
+    primary = gating_arm or (arms[0] if arms else None)
     return RealSpaResult(
         captured=captured,
         reason=str(payload.get("reason") or ("captured" if captured else "not captured")),
-        spa_png=str(spa_png) if spa_exists else None,
-        spa_png_nonblank=spa_nonblank if spa_exists else None,
-        console_log=str(console_log) if console_exists else None,
+        spa_png=(primary.spa_png if primary is not None else None),
+        spa_png_nonblank=(primary.spa_png_nonblank if primary is not None else None),
+        console_log=(
+            primary.console_log if primary is not None and primary.console_log
+            else (str(console_log) if console_log.is_file() else None)
+        ),
         url=str(payload.get("url") or url),
-        console_messages=payload.get("console_messages"),
-        render=payload.get("render"),
+        console_messages=(primary.console_messages if primary is not None else None),
+        render=(primary.render if primary is not None else None),
         log=str(driver_log),
+        arms=arms,
+        gate=gate,
     )
 
 
-def _spa_skipped(reason: str, *, console_log: Path) -> RealSpaResult:
+def _spa_skipped(reason: str, *, console_log: Path, require: bool = False) -> RealSpaResult:
     # Leave a breadcrumb so the artifact dir explains the skip even with no PNG.
-    _write_text(console_log, f"# real-SPA ceiling skipped: {reason}\n")
-    return RealSpaResult(captured=False, reason=reason, console_log=str(console_log))
+    _write_text(console_log, f"# real-SPA render matrix skipped: {reason}\n")
+    return RealSpaResult(
+        captured=False,
+        reason=reason,
+        console_log=str(console_log),
+        gate=build_render_gate([], skip_reason=reason, require=require),
+    )
 
 
 def _system_browser_path() -> str | None:

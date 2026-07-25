@@ -129,8 +129,9 @@ def build_parser() -> argparse.ArgumentParser:
             "the requested surface(s) against the real opened dataset: a sequence "
             "of `lucida` CLI commands, a `LucidaClient` Python session, and/or the "
             "web surface (a non-blank screenshot of the real rendered viewer via "
-            "`lucida viewer screenshot`, plus a best-effort real-SPA full-page "
-            "capture + browser console). Each CLI command is captured to "
+            "`lucida viewer screenshot`, plus the real SPA driven in a real "
+            "browser at deviceScaleFactor 2 and 1, gating on the retina arm "
+            "actually presenting a content frame). Each CLI command is captured to "
             "DIR/cli/NN-<name>.log, the Python session to DIR/python/session.log, "
             "and the web images to DIR/web/. The full result is written to "
             "DIR/drive.json and printed. A failing command or browser hiccup is "
@@ -513,7 +514,11 @@ def _emit_drive_human(record: dict[str, Any], log: _Stderr) -> None:
     web = surfaces.get("web")
     if web is not None:
         if web.get("ran"):
-            verdict = "ok (non-blank viewer)" if web.get("ok") else "NO non-blank viewer"
+            verdict = (
+                "ok (non-blank viewer, retina render gate held)"
+                if web.get("ok")
+                else "FAIL (blank viewer or retina render gate failed)"
+            )
             lines.append(f"  web         : {verdict}")
             lines.append(f"      viewer    : {web.get('viewer_png')}")
             lines.append(f"      url       : {web.get('viewer_url')}")
@@ -524,15 +529,31 @@ def _emit_drive_human(record: dict[str, Any], log: _Stderr) -> None:
                     mark = (capture.get("detail") or {}).get("reason") or "failed"
                 lines.append(f"      - {capture.get('name'):<18} {mark}")
             real_spa = web.get("real_spa") or {}
-            if real_spa.get("captured"):
-                nb = real_spa.get("spa_png_nonblank")
-                tag = "non-blank" if nb else ("blank" if nb is False else "")
-                lines.append(
-                    f"      real-SPA  : captured {tag} -> {real_spa.get('spa_png')}"
-                )
-                lines.append(f"                  console -> {real_spa.get('console_log')}")
-            else:
+            # The DPR render matrix: one line per arm, then the gate's verdict.
+            # An unenforced gate is printed as such — never as a pass.
+            for arm in (real_spa.get("arms") or []):
+                dsf = arm.get("device_scale_factor")
+                if not arm.get("ran"):
+                    mark = f"did not run ({arm.get('reason')})"
+                elif arm.get("ok"):
+                    mark = "content frame presented"
+                else:
+                    mark = f"NO CONTENT FRAME — {arm.get('reason')}"
+                gates = " (gates)" if arm.get("gating") else ""
+                lines.append(f"      - DPR {dsf}{gates:<8} {mark}")
+                if arm.get("canvas_png"):
+                    lines.append(f"                  canvas -> {arm.get('canvas_png')}")
+            if not real_spa.get("captured"):
                 lines.append(f"      real-SPA  : skipped ({real_spa.get('reason')})")
+            gate = web.get("render_gate") or real_spa.get("gate") or {}
+            if gate:
+                if not gate.get("gated"):
+                    lines.append(f"      gate      : NOT ENFORCED — {gate.get('reason')}")
+                else:
+                    lines.append(
+                        f"      gate      : {'PASS' if gate.get('ok') else 'FAIL'} "
+                        f"(retina) — {gate.get('reason')}"
+                    )
         else:
             err = (web.get("error") or {}).get("message")
             lines.append(f"  web         : DID NOT RUN ({err})")

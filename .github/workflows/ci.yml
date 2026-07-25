@@ -325,3 +325,19 @@ jobs:
           uv sync --python 3.12
           uv run maturin develop
           uv run pytest -q
+
+  tryout:
+    name: Tryout harness (retina render gate policy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # The tryout harness's DPR 2 render gate decides whether a run that
+      # produced a black viewer is reported as a pass. Its judging policy is
+      # pure Python (no browser, no server), so CI can hold it to the one
+      # property that matters: the fixtures describing the retina black-canvas
+      # defect must FAIL, and a healthy render must pass. Stdlib unittest only —
+      # no dependencies, seconds to run.
+      - name: Render gate policy tests
+        run: python3 -m unittest discover -s extras/tryout/tests -v

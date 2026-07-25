@@ -5,7 +5,7 @@ description: "A retina backing store doubles the pixels the GPU fills per frame;
 tags: [lucida, gotcha]
 source_path: wiki/gotchas/retina-dpr2-render-verification.md
 created: 2026-07-08
-modified: 2026-07-08
+modified: 2026-07-25
 ---
 
 # Verify Rendering at devicePixelRatio 2, Not Just 1
@@ -47,6 +47,39 @@ deviceScaleFactor: 2 })`; via raw CDP: `Emulation.setDeviceMetricsOverride`
 with `deviceScaleFactor: 2`. Confirm a *content* frame actually presents (pixel
 sample the main canvas, or check the frame counter advances) — a green unit
 suite and a "loads without error" check both pass while the screen is black.
+
+## Where the rule is enforced
+
+The tryout harness's web-surface ceiling is the durable backstop: it drives the
+real SPA at `deviceScaleFactor` **2 and 1** on every run and the DPR 2 arm gates
+the surface (`extras/tryout/tryout/surfaces/web_surface.py` —
+`judge_render_arm` / `build_render_gate`). Three properties make it able to catch
+this defect class rather than merely mention it:
+
+- **The verdict is canvas pixels, not the absence of an error.** An arm passes
+  only if the **centre 60% × 60%** of the main canvas is not one flat colour.
+  Neither of the cheaper checks works: the full page is richly coloured because
+  the SPA chrome renders fine while the viewer is black, and an element-clipped
+  canvas shot composites the corner-anchored overlays (FPS badge, orientation
+  cube, minimap) that supply a spurious second colour. Against a black stand-in
+  viewer the canvas crop had 27 distinct colours and the repo's own
+  `scripts/assert_png_nonblank.py` passed it; the centre had 1.
+- **`window.__lucidaCaptureReady` is checked but never trusted alone.** It is
+  published from the JS side of a WebGPU submit, so it reports `ready: true` with
+  a climbing `frameCount` on a frame the GPU never presented — which is precisely
+  what this defect does.
+- **Each arm proves it really was the scale factor it claims** (observed
+  `devicePixelRatio` *and* the captured image's scale versus its CSS box), so a
+  retina arm that silently degrades to DPR 1 fails loudly instead of manufacturing
+  confidence about the untested half of the matrix. For the same reason, a run
+  where no browser could be provisioned reports the gate as **not enforced**
+  rather than passing (`LUCIDA_TRYOUT_REQUIRE_DPR2=1` makes it fatal).
+
+Scenario UI captures (`extras/tryout/tryout/scenarios/_browser.py`) default to
+`deviceScaleFactor` 2 for the same reason. Still **not** covered: the product
+CLI's own capture path (`lucida-cli/src/main.rs`) hardcodes `deviceScaleFactor: 1`
+in its `Emulation.setDeviceMetricsOverride` calls, so the harness *floor* is DPR 1
+only.
 
 ## Interactions
 

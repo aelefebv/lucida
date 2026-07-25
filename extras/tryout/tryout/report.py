@@ -233,11 +233,18 @@ def _summary_python(py: dict[str, Any]) -> dict[str, Any]:
 
 def _summary_web(web: dict[str, Any]) -> dict[str, Any]:
     real_spa = web.get("real_spa") or {}
+    gate = web.get("render_gate") or real_spa.get("gate") or {}
     return {
         "ran": bool(web.get("ran")),
         "ok": bool(web.get("ok")),
         "viewer_png_nonblank": web.get("viewer_png_nonblank"),
         "real_spa_captured": bool(real_spa.get("captured")),
+        # The retina render gate, summarized next to the floor's non-blank fact.
+        # ``render_gate_enforced: false`` means no browser ran the DPR 2 arm — a
+        # reader must be able to tell "gate passed" from "gate never ran".
+        "render_gate_enforced": bool(gate.get("gated")),
+        "render_gate_ok": bool(gate.get("ok")) if gate else None,
+        "scale_factors": real_spa.get("scale_factors") or [],
         "error": _error_message(web),
     }
 
@@ -403,6 +410,9 @@ section.surface .body { padding: 1rem 1.1rem; }
 .pill.pass { background: #2da44e; }
 .pill.fail { background: #d1242f; }
 .pill.skip { background: #6e7781; }
+/* An UNENFORCED gate is not a pass and not a skip: it is the one state a reader
+   must never mistake for "verified", so it gets its own colour. */
+.pill.warn { background: #bf8700; }
 .count { color: #57606a; font-weight: 500; font-size: .9rem; }
 table.cmd { width: 100%; border-collapse: collapse; font-size: .9rem; }
 table.cmd th, table.cmd td { text-align: left; padding: .4rem .55rem; border-bottom: 1px solid #eaeef2; }
@@ -666,13 +676,28 @@ def _render_web_html(web: dict[str, Any] | None, *, out_dir: Path) -> str:
         out.append(_shot_html(overview.get("png"), out_dir=out_dir,
                               title="Overview — fit-to-dataset", required=False,
                               nonblank=overview.get("nonblank")))
+    # The ceiling is a matrix: one arm per deviceScaleFactor. Show every arm's
+    # page shot, and — only when the gate FAILED — the exact canvas crop that was
+    # judged, so the evidence for a failure is the image the verdict came from.
     real_spa = web.get("real_spa") or {}
-    if real_spa.get("captured") and real_spa.get("spa_png"):
-        out.append(_shot_html(real_spa.get("spa_png"), out_dir=out_dir,
-                              title="Ceiling — real SPA (Playwright)", required=False,
-                              nonblank=real_spa.get("spa_png_nonblank")))
+    arms = real_spa.get("arms") or []
+    for arm in arms:
+        title = _arm_title(arm)
+        if arm.get("spa_png"):
+            # Deliberately no non-blank pill: the PAGE is richly coloured even
+            # when the viewer is dead, and saying "non-blank" here would repeat
+            # the exact mistake the gate exists to correct.
+            out.append(_shot_html(arm.get("spa_png"), out_dir=out_dir,
+                                  title=title, required=False, nonblank=None))
+        if arm.get("gating") and not arm.get("ok") and arm.get("canvas_png"):
+            out.append(_shot_html(
+                arm.get("canvas_png"), out_dir=out_dir,
+                title=f"Retina gate — the judged canvas "
+                      f"(deviceScaleFactor {arm.get('device_scale_factor')}); its centre is what failed",
+                required=False, nonblank=None))
     out.append("</div>")
 
+    out.append(_render_gate_html(web))
     if not real_spa.get("captured"):
         out.append(
             "<p class='count'>Real-SPA ceiling skipped (floor still verified): "
@@ -680,6 +705,54 @@ def _render_web_html(web: dict[str, Any] | None, *, out_dir: Path) -> str:
         )
     out.append("</div></section>")
     return "\n".join(out)
+
+
+def _arm_title(arm: dict[str, Any]) -> str:
+    """One render-matrix arm's caption: which scale factor, and its verdict.
+
+    The verdict goes in the title rather than a "non-blank" pill because the
+    full-page image IS non-blank on a dead viewer — labelling it that way is the
+    false confidence the gate exists to remove.
+    """
+    dsf = arm.get("device_scale_factor")
+    gates = " (gates)" if arm.get("gating") else ""
+    if not arm.get("ran"):
+        verdict = "did not run"
+    else:
+        verdict = "content frame presented" if arm.get("ok") else "NO CONTENT FRAME"
+    return f"Ceiling — real SPA at deviceScaleFactor {dsf}{gates}: {verdict}"
+
+
+def _render_gate_html(web: dict[str, Any]) -> str:
+    """The retina render gate's verdict, stated in words.
+
+    Three distinct states, never collapsed: enforced+pass, enforced+fail, and
+    *not enforced* (no browser, so the DPR 2 arm never ran). The third must not
+    read like the first — an unenforced gate is the false confidence this whole
+    mechanism exists to prevent.
+    """
+    real_spa = web.get("real_spa") or {}
+    gate = web.get("render_gate") or real_spa.get("gate") or {}
+    if not gate:
+        return ""
+    dsf = gate.get("device_scale_factor", 2)
+    reason = _esc(str(gate.get("reason") or ""))
+    if not gate.get("gated"):
+        return (
+            f"<p class='count'><span class='pill warn'>gate not enforced</span> "
+            f"Retina render gate (deviceScaleFactor {dsf}) did not run: {reason}</p>"
+        )
+    if gate.get("ok"):
+        return (
+            f"<p class='count'><span class='pill pass'>gate passed</span> "
+            f"Retina render gate (deviceScaleFactor {dsf}): {reason}</p>"
+        )
+    failures = "".join(f"<li>{_esc(str(item))}</li>" for item in (gate.get("failures") or []))
+    return (
+        f"<p class='count'><span class='pill fail'>gate FAILED</span> "
+        f"Retina render gate (deviceScaleFactor {dsf}) — the viewer did not present "
+        f"a content frame at retina:</p><ul class='count'>{failures}</ul>"
+    )
 
 
 def _shot_html(
@@ -877,10 +950,18 @@ def render_markdown(
                 lines.append(_md_shot(overview.get("png"), out_dir, "Overview — fit-to-dataset",
                                       overview.get("nonblank")))
             real_spa = web.get("real_spa") or {}
-            if real_spa.get("captured") and real_spa.get("spa_png"):
-                lines.append(_md_shot(real_spa.get("spa_png"), out_dir, "Ceiling — real SPA (Playwright)",
-                                      real_spa.get("spa_png_nonblank")))
-            elif not real_spa.get("captured"):
+            for arm in (real_spa.get("arms") or []):
+                if arm.get("spa_png"):
+                    lines.append(_md_shot(arm.get("spa_png"), out_dir, _arm_title(arm), None))
+                if arm.get("gating") and not arm.get("ok") and arm.get("canvas_png"):
+                    lines.append(_md_shot(
+                        arm.get("canvas_png"), out_dir,
+                        f"Retina gate — the judged canvas (deviceScaleFactor "
+                        f"{arm.get('device_scale_factor')}); its centre is what failed",
+                        None,
+                    ))
+            lines.extend(_render_gate_md(web))
+            if not real_spa.get("captured"):
                 lines.append("")
                 lines.append(
                     f"_Real-SPA ceiling skipped (floor still verified): "
@@ -905,6 +986,28 @@ def render_markdown(
     )
     lines.append("")
     return "\n".join(lines)
+
+
+def _render_gate_md(web: dict[str, Any]) -> list[str]:
+    """The retina render gate's verdict in Markdown. Mirrors :func:`_render_gate_html`."""
+    real_spa = web.get("real_spa") or {}
+    gate = web.get("render_gate") or real_spa.get("gate") or {}
+    if not gate:
+        return []
+    dsf = gate.get("device_scale_factor", 2)
+    reason = str(gate.get("reason") or "")
+    if not gate.get("gated"):
+        return ["", f"> **Retina render gate (deviceScaleFactor {dsf}) NOT enforced** — {reason}"]
+    if gate.get("ok"):
+        return ["", f"**Retina render gate (deviceScaleFactor {dsf}): PASS** — {reason}"]
+    lines = [
+        "",
+        f"**Retina render gate (deviceScaleFactor {dsf}): FAIL** — the viewer did not "
+        "present a content frame at retina:",
+        "",
+    ]
+    lines.extend(f"- {item}" for item in (gate.get("failures") or []))
+    return lines
 
 
 def _md_shot(png: str | None, out_dir: Path, title: str, nonblank: Any) -> str:

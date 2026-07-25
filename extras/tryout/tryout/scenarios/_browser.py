@@ -14,6 +14,9 @@ exactly the browser the rest of the harness uses:
   * **system Chrome** (``executablePath``) — no browser download;
   * ``--enable-unsafe-webgpu --ignore-gpu-blocklist`` so the WebGPU viewer
     renders;
+  * ``deviceScaleFactor`` **2 by default** (a headless browser's default of 1 is
+    a configuration no user runs, and retina-only render defects are silent —
+    see ``wiki/gotchas/retina-dpr2-render-verification.md``);
   * ``NODE_PATH`` pointed at the harness-owned Playwright cache so
     ``require('playwright')`` resolves regardless of cwd;
   * an ``addInitScript`` hook that runs BEFORE any page script — used here to pin
@@ -41,6 +44,7 @@ from typing import Any, Sequence
 from ..errors import TryoutError
 from ..surfaces._subproc import run_group, scan_json_line
 from ..surfaces.web_surface import (
+    GATING_SCALE_FACTOR,
     _ensure_playwright,
     _system_browser_path,
 )
@@ -55,6 +59,12 @@ DEFAULT_STEP_WAIT_MS = 30_000
 DEFAULT_LOAD_WAIT_MS = 60_000
 DEFAULT_VIEWPORT_W = 1400
 DEFAULT_VIEWPORT_H = 900
+# Scenario shots default to RETINA, matching the web surface's gating arm. A
+# headless browser's default of 1 is the easy half of the matrix, and scenario
+# shots are verification evidence a human looks at — evidence taken at a scale
+# factor no user runs is evidence about a configuration nobody ships. Callers
+# that specifically want the DPR 1 rendering pass an explicit 1.
+DEFAULT_DEVICE_SCALE_FACTOR = GATING_SCALE_FACTOR
 
 
 @dataclass(frozen=True)
@@ -125,6 +135,10 @@ class DriveOutcome:
     console_messages: int | None = None
     console_log: str | None = None
     driver_log: str | None = None
+    # What we asked for, and what the page observed. Recorded on every outcome so
+    # a scenario's shots always state the scale factor they were taken at.
+    device_scale_factor: int | None = None
+    device_pixel_ratio: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         record: dict[str, Any] = {
@@ -133,6 +147,10 @@ class DriveOutcome:
             "steps": [step.to_dict() for step in self.steps],
             "shots_taken": list(self.shots_taken),
         }
+        if self.device_scale_factor is not None:
+            record["device_scale_factor"] = self.device_scale_factor
+        if self.device_pixel_ratio is not None:
+            record["device_pixel_ratio"] = self.device_pixel_ratio
         if self.console_messages is not None:
             record["console_messages"] = self.console_messages
         if self.console_log is not None:
@@ -176,6 +194,7 @@ const initScripts = req.init_scripts || [];
 const steps = req.steps || [];
 const stepWaitMs = req.step_wait_ms || 30000;
 const loadWaitMs = req.load_wait_ms || 60000;
+const deviceScaleFactor = req.device_scale_factor || 2;
 
 function tid(id) { return '[data-testid="' + id + '"]'; }
 function tidPrefix(p) { return '[data-testid^="' + p + '"]'; }
@@ -272,7 +291,7 @@ async function runStep(page, step, shotsTaken) {
   }
 
   try {
-    const context = await browser.newContext({ viewport: { width, height }, deviceScaleFactor: 1 });
+    const context = await browser.newContext({ viewport: { width, height }, deviceScaleFactor });
     // Pin localStorage (and anything else) BEFORE any page script runs.
     for (const script of initScripts) {
       await context.addInitScript(script);
@@ -283,6 +302,11 @@ async function runStep(page, step, shotsTaken) {
     page.on('requestfailed', (rq) => { try { messages.push('[requestfailed] ' + rq.url() + ' ' + (rq.failure() && rq.failure().errorText)); } catch (_) {} });
 
     await page.goto(url, { waitUntil: 'load', timeout: loadWaitMs });
+
+    // Report what the page actually observed, so a shot never silently claims a
+    // scale factor the browser quietly declined to honour.
+    let observedDpr = null;
+    try { observedDpr = await page.evaluate(() => window.devicePixelRatio); } catch (_) {}
 
     let aborted = false;
     let abortReason = '';
@@ -309,6 +333,8 @@ async function runStep(page, step, shotsTaken) {
       steps: stepResults,
       shots_taken: shotsTaken,
       console_messages: messages.length,
+      device_scale_factor: deviceScaleFactor,
+      device_pixel_ratio: observedDpr,
       url,
     });
   } catch (e) {
@@ -336,6 +362,7 @@ def drive_ui_program(
     init_scripts: Sequence[str],
     work_dir: Path,
     viewport: tuple[int, int] = (DEFAULT_VIEWPORT_W, DEFAULT_VIEWPORT_H),
+    device_scale_factor: int = DEFAULT_DEVICE_SCALE_FACTOR,
     program_timeout_s: float = DEFAULT_PROGRAM_TIMEOUT_S,
     step_wait_ms: int = DEFAULT_STEP_WAIT_MS,
     load_wait_ms: int = DEFAULT_LOAD_WAIT_MS,
@@ -344,8 +371,10 @@ def drive_ui_program(
     """Launch system Chrome via Playwright and run the declarative UI program.
 
     Reuses the web surface's Playwright provisioning + system-Chrome resolution so
-    the scenario rides the identical launch config. Never raises for a UI step
-    failure (those are captured in the per-step trace); raises
+    the scenario rides the identical launch config, and defaults to
+    ``deviceScaleFactor`` 2 for the same reason the web surface gates there: a
+    headless default of 1 renders a configuration no user runs. Never raises for a
+    UI step failure (those are captured in the per-step trace); raises
     :class:`TryoutError` (stage ``browser``) only if the browser/Playwright could
     not be provisioned at all, so the scenario can record a clean error and still
     write whatever shots exist.
@@ -387,6 +416,7 @@ def drive_ui_program(
             "steps": [step.to_request() for step in steps],
             "step_wait_ms": step_wait_ms,
             "load_wait_ms": load_wait_ms,
+            "device_scale_factor": device_scale_factor,
         }
     )
 
@@ -401,7 +431,10 @@ def drive_ui_program(
     _write_text(driver_path, _UI_DRIVER)
     argv = [node, str(driver_path), request]
 
-    log(f"[tryout] scenario UI: driving the SPA via Playwright (system Chrome) at {url}")
+    log(
+        "[tryout] scenario UI: driving the SPA via Playwright (system Chrome) at "
+        f"{url} — deviceScaleFactor {device_scale_factor}"
+    )
     started = time.monotonic()
     try:
         completed = run_group(
@@ -430,6 +463,7 @@ def drive_ui_program(
             console_log=str(console_log) if console_log.is_file() else None,
             driver_log=str(driver_log),
             shots_taken=_existing_shot_names(shots_dir, steps),
+            device_scale_factor=device_scale_factor,
         )
 
     duration = round(time.monotonic() - started, 3)
@@ -447,6 +481,7 @@ def drive_ui_program(
             console_log=str(console_log) if console_log.is_file() else None,
             driver_log=str(driver_log),
             shots_taken=_existing_shot_names(shots_dir, steps),
+            device_scale_factor=device_scale_factor,
         )
 
     steps_out = [
@@ -458,9 +493,11 @@ def drive_ui_program(
         )
         for step in (payload.get("steps") or [])
     ]
+    observed = payload.get("device_pixel_ratio")
     log(
         f"[tryout]   scenario UI: {payload.get('reason')} "
-        f"({sum(1 for s in steps_out if s.ok)}/{len(steps_out)} steps ok, {duration:g}s)"
+        f"({sum(1 for s in steps_out if s.ok)}/{len(steps_out)} steps ok, "
+        f"devicePixelRatio {observed if observed is not None else '?'}, {duration:g}s)"
     )
     return DriveOutcome(
         ran=bool(payload.get("ran")),
@@ -470,6 +507,8 @@ def drive_ui_program(
         console_messages=payload.get("console_messages"),
         console_log=str(console_log) if console_log.is_file() else None,
         driver_log=str(driver_log),
+        device_scale_factor=device_scale_factor,
+        device_pixel_ratio=(observed if isinstance(observed, (int, float)) else None),
     )
 
 
