@@ -169,7 +169,12 @@ class RenderArmResult:
 
     device_scale_factor: int
     gating: bool
+    # `ran`: we attempted this arm against a live browser. `completed`: it got
+    # all the way to its measurements. The two differ exactly when the arm threw
+    # — a timeout, a renderer crash — and that difference must read as a
+    # FAILURE, not as "no browser here", which is the one state allowed to skip.
     ran: bool = False
+    completed: bool = False
     ok: bool = False
     reason: str = ""
     ready: bool = False
@@ -190,6 +195,7 @@ class RenderArmResult:
             "device_scale_factor": self.device_scale_factor,
             "gating": self.gating,
             "ran": self.ran,
+            "completed": self.completed,
             "ok": self.ok,
             "reason": self.reason,
             "ready": self.ready,
@@ -931,7 +937,15 @@ function pixelStats(args) {
     const started = Date.now();
     const paths = shots[String(dsf)] || {};
     const messages = [];
-    const arm = { device_scale_factor: dsf, ran: false, ready: false, reason: '' };
+    // `ran` means "we attempted this arm against a live browser", and is set
+    // BEFORE the work, not after it. If it were the last statement of the try,
+    // any throw — a goto timeout, a renderer crash under a 4x backing store —
+    // would be indistinguishable from "this host has no browser", and the gate
+    // would decline to answer, which resolves to pass. A GPU process dying at
+    // retina is one of the likeliest shapes of the defect this gate exists for.
+    // `completed` is the separate, narrower fact: the arm got all the way to its
+    // measurements. An arm that ran but did not complete is judged and FAILS.
+    const arm = { device_scale_factor: dsf, ran: true, completed: false, ready: false, reason: '' };
     let context = null;
     try {
       context = await browser.newContext({ viewport: { width, height }, deviceScaleFactor: dsf });
@@ -974,9 +988,13 @@ function pixelStats(args) {
       arm.metrics = metrics;
       arm.ready = Boolean(probe && probe.ready);
       arm.content = await analyse(canvasBuffer);
-      arm.full_page = await analyse(fullBuffer);
-      arm.ran = true;
+      arm.completed = true;
       arm.reason = arm.ready ? 'rendered' : ('not_ready: ' + (probe ? probe.reason : 'unknown'));
+      // Informational only (the full page is non-blank even when the viewer is
+      // black), so it is measured AFTER the arm is complete and cannot demote a
+      // judged arm into an error.
+      try { arm.full_page = await analyse(fullBuffer); }
+      catch (e) { arm.full_page_analysis_error = String(e && e.message ? e.message : e).split('\n')[0]; }
     } catch (e) {
       arm.reason = 'arm_failed: ' + String(e && e.message ? e.message : e).split('\n')[0];
     } finally {
@@ -989,14 +1007,18 @@ function pixelStats(args) {
   }
 
   try { await browser.close(); } catch (_) {}
-  const ranAny = arms.some((a) => a.ran);
-  out({
-    captured: ranAny,
-    reason: ranAny ? 'drove the SPA at deviceScaleFactor ' + scaleFactors.join(' and ')
-                   : ('no arm ran: ' + (arms.length ? arms[0].reason : 'no scale factors')),
-    arms,
-    url,
-  });
+  const done = arms.filter((a) => a.completed);
+  const broke = arms.filter((a) => !a.completed);
+  const list = (xs) => xs.map((a) => a.device_scale_factor).join(' and ');
+  // The reason string must never claim more than happened: an arm that threw
+  // used to be summarised as "drove the SPA at deviceScaleFactor 2 and 1".
+  let reason;
+  if (!arms.length) reason = 'no scale factors requested';
+  else if (!broke.length) reason = 'drove the SPA at deviceScaleFactor ' + list(arms);
+  else if (!done.length) reason = 'every arm failed: ' + broke.map((a) => a.device_scale_factor + ' (' + a.reason + ')').join('; ');
+  else reason = 'drove the SPA at deviceScaleFactor ' + list(done)
+    + '; failed at ' + broke.map((a) => a.device_scale_factor + ' (' + a.reason + ')').join('; ');
+  out({ captured: done.length > 0, reason, arms, url });
   process.exit(0);
 })();
 '''
@@ -1087,14 +1109,17 @@ def judge_render_arm(
 ) -> RenderArmResult:
     """Turn one arm's raw measurements into a verdict.
 
-    Three checks, all of which must hold: the product said it rendered, the arm
-    really was this scale factor, and the canvas actually shows something. The
-    first alone is what the harness used to rely on — and it is precisely the one
-    the defect satisfied, because ``__lucidaCaptureReady`` is published from the
-    JS side of a WebGPU submit, before the GPU has presented anything.
+    Four checks, all of which must hold: the attempt got far enough to be
+    measured, the product said it rendered, the arm really was this scale factor,
+    and the canvas actually shows something. The readiness one alone is what the
+    harness used to rely on — and it is precisely the one the defect satisfied,
+    because ``__lucidaCaptureReady`` is published from the JS side of a WebGPU
+    submit, before the GPU has presented anything.
     """
     arm = RenderArmResult(device_scale_factor=device_scale_factor, gating=gating)
     arm.ran = bool(payload.get("ran"))
+    # Older payloads have no `completed`; for them, running is completing.
+    arm.completed = bool(payload.get("completed", payload.get("ran")))
     arm.ready = bool(payload.get("ready"))
     arm.render = payload.get("render")
     arm.metrics = payload.get("metrics")
@@ -1116,6 +1141,13 @@ def judge_render_arm(
         return arm
 
     failures: list[str] = []
+    if not arm.completed:
+        # The browser was there and the attempt broke. Say so plainly, and keep
+        # going: the checks below all fail closed on missing measurements, so the
+        # arm's verdict is FAIL and the gate is enforced.
+        failures.append(
+            f"the arm errored before it could be measured ({payload.get('reason') or 'unknown error'})"
+        )
     if not arm.ready:
         failures.append(
             f"the viewer never reported a rendered frame ({payload.get('reason') or 'not ready'})"
@@ -1126,11 +1158,12 @@ def judge_render_arm(
     failures.extend(content_failures)
 
     arm.checks = {
+        "attempt_completed": arm.completed,
         "ready": arm.ready,
         "device_scale_factor": dpr_ok,
         "content_frame": content_ok,
     }
-    arm.ok = arm.ready and dpr_ok and content_ok
+    arm.ok = arm.completed and arm.ready and dpr_ok and content_ok
     arm.failures = failures
     arm.reason = "a content frame presented" if arm.ok else "; ".join(failures)
     return arm
@@ -1144,23 +1177,54 @@ def build_render_gate(
 ) -> dict[str, Any]:
     """The one verdict that can flip the web surface: the retina arm's.
 
-    A retina arm that ran and failed is a lucida defect and fails the surface. A
-    retina arm that could not run (no Chrome, no Playwright, no node) is an
-    environment fact and does not — but it is reported as ``gated: false`` so a
-    reader never mistakes a missing gate for a passing one, and
-    ``LUCIDA_TRYOUT_REQUIRE_DPR2=1`` turns it into a failure for CI.
+    Exactly ONE state is allowed to answer "not enforced", and it is narrow: no
+    arm was attempted at all, because this host has no node / no Playwright / no
+    browser. That is an environment fact, and it is still reported as
+    ``gated: false`` so a reader never mistakes a missing gate for a passing one
+    (``LUCIDA_TRYOUT_REQUIRE_DPR2=1`` turns it into a failure).
+
+    Everything else fails. In particular, if a browser WAS available and the
+    retina arm still did not produce a verdict — a navigation timeout, a renderer
+    or GPU process death under a 4x backing store — that is not a skip, it is the
+    gate's own subject matter arriving in a different shape. ``arms`` is the
+    signal that tells the two apart: a genuine provisioning skip never gets as
+    far as building one (see ``_spa_skipped`` and the driver's early exits), so a
+    non-empty ``arms`` means a browser launched.
     """
-    gating = next((arm for arm in arms if arm.gating and arm.ran), None)
-    if gating is not None:
+    gating_arms = [arm for arm in arms if arm.gating]
+    judged = next((arm for arm in gating_arms if arm.ran), None)
+    if judged is not None:
         return {
-            "ok": gating.ok,
+            "ok": judged.ok,
             "gated": True,
             "required": require,
-            "device_scale_factor": gating.device_scale_factor,
-            "reason": gating.reason,
-            "failures": list(gating.failures),
-            "checks": dict(gating.checks),
+            "device_scale_factor": judged.device_scale_factor,
+            "reason": judged.reason,
+            "failures": list(judged.failures),
+            "checks": dict(judged.checks),
         }
+
+    if gating_arms:
+        # The retina arm was in the matrix, a browser launched, and it still
+        # produced nothing. Fail: an absent answer here is not a passing one.
+        # (No gating arm at all is different — that is the explicit
+        # LUCIDA_TRYOUT_SCALE_FACTORS opt-out, which falls through to
+        # "not enforced" below.)
+        detail = (gating_arms[0].reason if gating_arms and gating_arms[0].reason
+                  else (skip_reason or "no measurements were produced"))
+        reason = (
+            f"the deviceScaleFactor {GATING_SCALE_FACTOR} arm was attempted in a live "
+            f"browser but produced no verdict: {detail}"
+        )
+        return {
+            "ok": False,
+            "gated": True,
+            "required": require,
+            "device_scale_factor": GATING_SCALE_FACTOR,
+            "reason": reason,
+            "failures": [reason],
+        }
+
     reason = skip_reason or "the deviceScaleFactor 2 arm did not run"
     return {
         "ok": not require,
@@ -1341,13 +1405,25 @@ def capture_real_spa(
             f"real-SPA driver produced no result (exit {returncode}); "
             + (("stderr: " + "\n".join(stderr.splitlines()[-6:])) if stderr.strip() else "no stderr")
         )
+        # Fail closed, for the same reason the timeout branch above does. By this
+        # point node was found, Playwright resolved and a browser path resolved,
+        # so a driver that dies without printing a result is not an environment
+        # fact — it is an unexplained failure to answer the question, and the one
+        # thing this gate must never do is treat "no answer" as "yes".
         return RealSpaResult(
             captured=False,
             reason=reason,
             console_log=str(console_log) if console_log.is_file() else None,
             url=url,
             log=str(driver_log),
-            gate=build_render_gate([], skip_reason=reason, require=require),
+            gate={
+                "ok": False,
+                "gated": True,
+                "required": require,
+                "device_scale_factor": GATING_SCALE_FACTOR,
+                "reason": reason,
+                "failures": [reason],
+            },
         )
 
     raw_arms = payload.get("arms") or []

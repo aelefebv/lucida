@@ -514,12 +514,10 @@ def _emit_drive_human(record: dict[str, Any], log: _Stderr) -> None:
     web = surfaces.get("web")
     if web is not None:
         if web.get("ran"):
-            verdict = (
-                "ok (non-blank viewer, retina render gate held)"
-                if web.get("ok")
-                else "FAIL (blank viewer or retina render gate failed)"
-            )
-            lines.append(f"  web         : {verdict}")
+            # Same one-liner as `report --human`, so the two never disagree —
+            # and so an unenforced gate is never summarised as one that "held".
+            verdict = "ok" if web.get("ok") else "FAIL"
+            lines.append(f"  web         : {verdict} ({_web_summary_detail(web)})")
             lines.append(f"      viewer    : {web.get('viewer_png')}")
             lines.append(f"      url       : {web.get('viewer_url')}")
             for capture in web.get("captures", []):
@@ -535,6 +533,8 @@ def _emit_drive_human(record: dict[str, Any], log: _Stderr) -> None:
                 dsf = arm.get("device_scale_factor")
                 if not arm.get("ran"):
                     mark = f"did not run ({arm.get('reason')})"
+                elif not arm.get("completed", True):
+                    mark = f"ERRORED — {arm.get('reason')}"
                 elif arm.get("ok"):
                     mark = "content frame presented"
                 else:
@@ -816,7 +816,22 @@ def _emit_report(record: dict[str, Any], *, as_json: bool, log: _Stderr) -> None
 
 
 def _web_summary_detail(surf: dict[str, Any]) -> str:
-    return "viewer non-blank" if surf.get("viewer_png_nonblank") else "viewer BLANK/missing"
+    """The web surface's one-line verdict — floor AND retina render gate.
+
+    Both halves matter, and the gate has to be able to speak first: reporting
+    "viewer non-blank" next to FAIL is the exact reassuring-but-irrelevant signal
+    this gate exists to stop showing, because the floor's non-blank check is what
+    passes a black viewer.
+    """
+    floor = "viewer non-blank" if surf.get("viewer_png_nonblank") else "viewer BLANK/missing"
+    gate = surf.get("render_gate")
+    if not isinstance(gate, dict):
+        return floor
+    if gate.get("ok") is False:
+        return f"retina render gate FAILED: {gate.get('reason') or 'no reason given'}"
+    if not gate.get("gated"):
+        return f"{floor}, retina render gate NOT ENFORCED"
+    return f"{floor}, retina render gate held"
 
 
 def _count_summary_detail(surf: dict[str, Any]) -> str:

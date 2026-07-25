@@ -689,6 +689,15 @@ def _render_web_html(web: dict[str, Any] | None, *, out_dir: Path) -> str:
             # the exact mistake the gate exists to correct.
             out.append(_shot_html(arm.get("spa_png"), out_dir=out_dir,
                                   title=title, required=False, nonblank=None))
+        else:
+            # An arm that wedged has no image at all. Say so in the same place
+            # the other arms appear — an arm that silently vanishes from the
+            # matrix reads as a matrix that was never run.
+            out.append(
+                f"<figure class='shot'><figcaption>{_esc(title)}</figcaption>"
+                f"<p class='count'>No screenshot: {_esc(str(arm.get('reason') or 'unknown'))}</p>"
+                "</figure>"
+            )
         if arm.get("gating") and not arm.get("ok") and arm.get("canvas_png"):
             out.append(_shot_html(
                 arm.get("canvas_png"), out_dir=out_dir,
@@ -718,6 +727,8 @@ def _arm_title(arm: dict[str, Any]) -> str:
     gates = " (gates)" if arm.get("gating") else ""
     if not arm.get("ran"):
         verdict = "did not run"
+    elif not arm.get("completed", True):
+        verdict = "ERRORED before it could be measured"
     else:
         verdict = "content frame presented" if arm.get("ok") else "NO CONTENT FRAME"
     return f"Ceiling — real SPA at deviceScaleFactor {dsf}{gates}: {verdict}"
@@ -953,6 +964,14 @@ def render_markdown(
             for arm in (real_spa.get("arms") or []):
                 if arm.get("spa_png"):
                     lines.append(_md_shot(arm.get("spa_png"), out_dir, _arm_title(arm), None))
+                else:
+                    # Mirrors the HTML: a wedged arm has no image, and must still
+                    # appear rather than vanishing out of the matrix.
+                    lines.append("")
+                    lines.append(
+                        f"**{_arm_title(arm)}** — no screenshot: "
+                        f"{arm.get('reason') or 'unknown'}"
+                    )
                 if arm.get("gating") and not arm.get("ok") and arm.get("canvas_png"):
                     lines.append(_md_shot(
                         arm.get("canvas_png"), out_dir,

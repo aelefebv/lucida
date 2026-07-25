@@ -186,6 +186,11 @@ arm, or a *skipped* ceiling is captured but never flips `ok`.
 `real_spa.captured: false` carries a `reason` (e.g. Playwright/Chrome not
 provisionable) — the floor still stands.
 
+A failed render gate also fails the **run**: `drive` reports `ok: false` and
+exits non-zero. This is deliberately narrow — the run verdict reads the surface's
+declared `render_gate`, not its `ok`, so ordinary per-command and per-step
+failures keep their existing non-fatal semantics.
+
 ### The retina render gate (DPR 2)
 
 Headless browsers default to `deviceScaleFactor` 1. A canvas's backing store is
@@ -198,10 +203,11 @@ presented anything). The viewer is simply, permanently black. See
 [`wiki/gotchas/retina-dpr2-render-verification.md`](../../wiki/gotchas/retina-dpr2-render-verification.md).
 
 So the ceiling runs **both** scale factors on every run and the retina one
-decides. Each arm must satisfy three checks:
+decides. Each arm must satisfy four checks:
 
 | Check | What it asserts | Why it is not enough on its own |
 | --- | --- | --- |
+| `attempt_completed` | the arm reached its measurements at all (it did not time out or lose its renderer) | an arm that threw has no measurements, so the rest fail closed behind it |
 | `ready` | the product's own `window.__lucidaCaptureReady` says it rendered a frame with a dataset loaded | **the defect satisfies this** — it is a JS-side signal, not proof of presentation |
 | `device_scale_factor` | the page observed the `devicePixelRatio` we asked for, *and* the captured canvas image is that many times its CSS box | a retina arm that silently degraded to DPR 1 is not evidence about retina |
 | `content_frame` | the **centre 60% × 60%** of the main canvas is not one flat colour (≥ 2 distinct sampled colours, and the modal colour is ≤ 98% of samples) | this is the one that catches the defect |
@@ -221,13 +227,31 @@ Why the *centre of the canvas*, and not the page or the whole canvas:
 The "main canvas" is the largest by CSS area (the SPA also mounts small minimap
 and thumbnail canvases, so "the first `<canvas>` in the DOM" is not it).
 
+**A gate that cannot answer does not answer "pass".** Exactly one state is
+tolerated as *not enforced*: no arm was attempted at all, because this host has
+no node, no Playwright or no browser. That is an environment fact, it is reported
+as `gated: false` (never as a quiet pass), and `LUCIDA_TRYOUT_REQUIRE_DPR2=1`
+makes it fatal. Everything else **fails**: a retina arm that was attempted in a
+live browser and threw (a navigation timeout, a renderer or GPU process death
+under the 4× backing store — a very plausible retina manifestation), a driver
+that died without printing a result, or the whole matrix timing out. The
+distinction is `arms`: a genuine provisioning skip never gets far enough to build
+one, so a non-empty `arms` means a browser launched and the answer is owed.
+
 Artifacts, per arm: `DIR/web/spa-dpr{N}.png` (full page), `DIR/web/canvas-dpr{N}.png`
 (the judged canvas region), `DIR/web/console-dpr{N}.log`. The whole matrix runs in
 one node process and one browser (a context per arm), so the second scale factor
 costs a page load, not another launch — roughly **+4s** on the ceiling in
-practice. The Node driver only *measures*; the pass/fail policy is pure Python in
+practice.
+
+The Node driver only *measures*; the pass/fail policy is pure Python in
 `tryout/surfaces/web_surface.py` (`judge_render_arm`, `build_render_gate`) and is
-tested without a browser by `make -C extras/tryout test`.
+tested without a browser by `make -C extras/tryout test`. Be precise about what
+that buys: **CI runs the policy tests only.** No CI job launches a browser or
+renders anything, so the driver's region maths, canvas geometry and DPR-fidelity
+measurement are not exercised there, and a green CI run is *not* evidence that
+lucida renders at retina. That evidence still comes from a human — or a runner
+with a browser — invoking `tryout drive`.
 
 Scenario UI shots (`drive --scenario`) default to `deviceScaleFactor` 2 for the
 same reason; pass `device_scale_factor=1` to `drive_ui_program` for the DPR 1
@@ -409,7 +433,7 @@ fixture → report → teardown.**
 | `LUCIDA_TRYOUT_PLAYWRIGHT_DIR` | A `node_modules`-parent dir where Playwright is provisioned/cached for the real-SPA ceiling (default: `~/.cache/lucida-tryout/playwright`). |
 | `LUCIDA_BROWSER` | Browser executable used by both the floor (product CLI) and the real-SPA ceiling; defaults to the platform's Chrome/Chromium/Edge. |
 | `LUCIDA_TRYOUT_SCALE_FACTORS` | The ceiling's DPR render matrix, e.g. `2,1` (default) or `2`. An unparseable value falls back to the default, so a typo can never silently drop the retina arm. |
-| `LUCIDA_TRYOUT_REQUIRE_DPR2` | `1` makes a *skipped* retina arm (no browser/Playwright) fail the run instead of being tolerated. Set it in CI, where a missing browser is a misconfiguration rather than a fact of life. |
+| `LUCIDA_TRYOUT_REQUIRE_DPR2` | `1` makes a *skipped* retina arm (no node, no Playwright, no browser) fail the run instead of being tolerated. Set it wherever a missing browser would be a misconfiguration rather than a fact of life. Nothing in this repository sets it today, because no CI job runs `tryout drive` — see below. |
 | `LUCIDA_TRYOUT_COURIER` | Path to courier's `courier.py` for `drive --scenario --email`; else a `courier` on `PATH` is used, else email is recorded as skipped (never fatal). |
 
 ## Layout

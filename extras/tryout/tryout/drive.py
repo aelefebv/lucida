@@ -112,6 +112,24 @@ def parse_surfaces(raw: str | None) -> list[str]:
     return [surface for surface in known if surface in requested]
 
 
+def surface_render_gate_failed(surface_record: dict[str, Any]) -> bool:
+    """Did this surface declare a render gate, and did it fail?
+
+    A *gate* is a promise that one specific property holds. If a gate can print
+    FAIL under an OK headline and still exit 0, it is a suggestion, not a gate —
+    so this feeds the run verdict.
+
+    Deliberately narrow on both sides. It reads the surface's declared
+    ``render_gate`` rather than its ``ok``, so the harness's existing lenient
+    treatment of ordinary per-command and per-step failures is untouched; and it
+    tests ``ok is False`` rather than falsiness, so a gate that is *unenforced*
+    (no browser on this host, ``ok: true, gated: false``) or a surface with no
+    gate at all is not swept up.
+    """
+    gate = surface_record.get("render_gate")
+    return isinstance(gate, dict) and gate.get("ok") is False
+
+
 def drive(
     *,
     out_dir: Path,
@@ -264,6 +282,15 @@ def drive(
                 # the run not-ok; per-command/per-step failures do not.
                 if not result.ran:
                     any_surface_failed = True
+                # ...and so does a failed *render gate* (see
+                # `surface_render_gate_failed` for why this is narrow).
+                if surface_render_gate_failed(surface_results[name]):
+                    any_surface_failed = True
+                    gate = surface_results[name]["render_gate"]
+                    log(
+                        f"[tryout] {name} surface: render gate FAILED — "
+                        f"{gate.get('reason') or 'no reason given'}"
+                    )
     finally:
         # Defensive: guarantee the server is down even on an unexpected escape.
         teardown_state = server.stop()
@@ -276,10 +303,11 @@ def drive(
         "elapsed_s": round(time.monotonic() - started, 3),
     }
 
-    # ok iff bring-up succeeded (we got here) AND every requested surface ran
-    # without a harness-level error. Per-command/per-step failures inside a
-    # surface are captured and do NOT flip ok to false — but they ARE visible in
-    # each surface's passed/total and ok fields.
+    # ok iff bring-up succeeded (we got here), every requested surface ran
+    # without a harness-level error, and no surface's declared render gate
+    # failed. Per-command/per-step failures inside a surface are captured and do
+    # NOT flip ok to false — but they ARE visible in each surface's passed/total
+    # and ok fields.
     ok = not any_surface_failed
     record = _build_record(
         ok=ok,

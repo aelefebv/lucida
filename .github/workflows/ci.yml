@@ -326,18 +326,27 @@ jobs:
           uv run maturin develop
           uv run pytest -q
 
+  # WHAT THIS JOB DOES NOT DO: it does not render anything. No browser, no
+  # server, no GPU, no lucida build. Nothing in CI drives the viewer at
+  # devicePixelRatio 2, so retina rendering itself is still verified only by a
+  # human (or a self-hosted runner) invoking `tryout drive` on a machine that has
+  # a browser. Do not read a green tick here as "retina rendering is covered".
+  #
+  # WHAT IT DOES: it tests the *judging policy* of the tryout harness's retina
+  # render gate — the pure functions that turn a set of measurements into a
+  # verdict. That policy is what decides whether a run that produced a black
+  # viewer is reported as a pass, so it is worth holding to its properties in
+  # CI: measurements describing the retina black-canvas defect must FAIL, a
+  # healthy render must pass, and an arm that could not be measured must never
+  # resolve to pass. The measurements themselves (region maths, canvas geometry,
+  # DPR fidelity) come from the browser driver and are NOT exercised here.
+  # Stdlib unittest only — no dependencies, seconds to run.
   tryout:
-    name: Tryout harness (retina render gate policy)
+    name: Tryout render gate policy (no browser; does not render)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
 
-      # The tryout harness's DPR 2 render gate decides whether a run that
-      # produced a black viewer is reported as a pass. Its judging policy is
-      # pure Python (no browser, no server), so CI can hold it to the one
-      # property that matters: the fixtures describing the retina black-canvas
-      # defect must FAIL, and a healthy render must pass. Stdlib unittest only —
-      # no dependencies, seconds to run.
       - name: Render gate policy tests
         run: python3 -m unittest discover -s extras/tryout/tests -v

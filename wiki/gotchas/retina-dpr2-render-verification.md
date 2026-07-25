@@ -71,15 +71,31 @@ this defect class rather than merely mention it:
 - **Each arm proves it really was the scale factor it claims** (observed
   `devicePixelRatio` *and* the captured image's scale versus its CSS box), so a
   retina arm that silently degrades to DPR 1 fails loudly instead of manufacturing
-  confidence about the untested half of the matrix. For the same reason, a run
-  where no browser could be provisioned reports the gate as **not enforced**
-  rather than passing (`LUCIDA_TRYOUT_REQUIRE_DPR2=1` makes it fatal).
+  confidence about the untested half of the matrix.
+- **A gate that cannot answer does not answer "pass".** Only one state is
+  tolerated as *not enforced*: no arm was attempted at all, because the host has
+  no node, no Playwright or no browser. Even then it is reported as such, never as
+  a quiet pass, and `LUCIDA_TRYOUT_REQUIRE_DPR2=1` makes it fatal. A retina arm
+  that was attempted in a live browser and then threw — a navigation timeout, a
+  renderer or GPU process death under the 4× backing store — **fails**, because
+  that is this defect class arriving in a different shape, not an absent browser.
+
+A failed gate fails the run: `tryout drive` reports `ok: false` and exits
+non-zero.
 
 Scenario UI captures (`extras/tryout/tryout/scenarios/_browser.py`) default to
-`deviceScaleFactor` 2 for the same reason. Still **not** covered: the product
-CLI's own capture path (`lucida-cli/src/main.rs`) hardcodes `deviceScaleFactor: 1`
-in its `Emulation.setDeviceMetricsOverride` calls, so the harness *floor* is DPR 1
-only.
+`deviceScaleFactor` 2 for the same reason.
+
+Two things this does **not** cover, so nobody reads more into it than is there:
+
+- **CI does not render.** The `tryout` CI job runs the gate's *judging policy*
+  (pure functions over measurements) and nothing else — no browser, no server, no
+  lucida build. A green tick means the policy would reject a black retina frame;
+  it is not evidence that lucida renders at retina. That still requires a human,
+  or a runner with a browser, invoking `tryout drive`.
+- **The harness floor is DPR 1 only.** The product CLI's own capture path
+  (`lucida-cli/src/main.rs`) hardcodes `deviceScaleFactor: 1` in its
+  `Emulation.setDeviceMetricsOverride` calls.
 
 ## Interactions
 
