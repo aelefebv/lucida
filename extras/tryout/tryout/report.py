@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any
 
 from . import capture
-from .drive import DriveOutcome, drive
+from .drive import DriveOutcome, drive, surface_render_gate_failed
 from .server import repo_root
 from .surfaces import registered_names
 
@@ -550,6 +550,27 @@ def _render_meta_html(drive_record: dict[str, Any], versions: dict[str, Any]) ->
     return "\n".join(body)
 
 
+def _web_display_ok(web: dict[str, Any]) -> Any:
+    """The status word a reader should see for the web surface: floor AND gate.
+
+    The surface's own ``ok`` is the floor and only the floor — which is exactly
+    what a black viewer passes. Printing PASS from it directly above a gate
+    section that reads FAIL, in a report whose run exited non-zero, is the
+    reassuring word the gate exists to stop showing. Display only: the JSON keeps
+    ``ok`` and ``render_gate`` separate and unchanged.
+
+    "Did the gate fail?" is asked of ``surface_render_gate_failed`` and never
+    re-derived here. One rule, one implementation: a private copy is free to
+    drift from the run verdict, and a report heading that reads FAIL over a run
+    that exited 0 (or PASS over one that exited 1) is its own false confidence.
+    Any future tolerance for an older record shape belongs in that function,
+    where the CLI and the run verdict get it too.
+    """
+    if surface_render_gate_failed(web):
+        return False
+    return web.get("ok")
+
+
 def _surface_header(title: str, *, ran: bool | None, ok: bool | None, count: str | None) -> str:
     if not ran:
         pill = "<span class='pill skip'>DID NOT RUN</span>"
@@ -647,7 +668,7 @@ def _render_web_html(web: dict[str, Any] | None, *, out_dir: Path) -> str:
     if web is None:
         return ""
     ran = web.get("ran")
-    ok = web.get("ok")
+    ok = _web_display_ok(web)
     nonblank = web.get("viewer_png_nonblank")
     count = ("viewer render: non-blank" if nonblank else "viewer render: BLANK/missing") if ran else None
     out = ["<section class='surface'>", _surface_header("Web surface (rendered viewer)", ran=ran, ok=ok, count=count)]
@@ -940,7 +961,7 @@ def render_markdown(
     # --- Web surface ----------------------------------------------------------
     web = surfaces.get("web")
     if web is not None:
-        head = _status_word(web.get("ran"), web.get("ok"))
+        head = _status_word(web.get("ran"), _web_display_ok(web))
         nb = web.get("viewer_png_nonblank")
         suffix = ""
         if web.get("ran"):
@@ -972,6 +993,7 @@ def render_markdown(
                         f"**{_arm_title(arm)}** — no screenshot: "
                         f"{arm.get('reason') or 'unknown'}"
                     )
+                    lines.append("")
                 if arm.get("gating") and not arm.get("ok") and arm.get("canvas_png"):
                     lines.append(_md_shot(
                         arm.get("canvas_png"), out_dir,

@@ -521,12 +521,14 @@ def run_web_surface(
             web_out=web_out,
             log=log,
         )
-        # A browser we COULD drive that did not present a content frame at
-        # retina is a lucida defect, so it flips the surface. A browser we could
-        # not provision is an environment fact, so it does not (unless the
-        # caller demanded the gate via LUCIDA_TRYOUT_REQUIRE_DPR2).
-        if not result.real_spa.gate.get("ok", True):
-            result.ok = False
+        # The gate deliberately does NOT flip `result.ok`. `ok` means one thing
+        # and keeps meaning it: the required floor held (a non-blank viewer.png).
+        # The gate travels separately, in `render_gate`, and it is carried from
+        # there — into the run verdict by `surface_render_gate_failed`, and into
+        # the printed verdict word by the CLI. Folding it back into `ok` would
+        # give one field two meanings and the run two routes to the same failure,
+        # and it would leave a reader unable to tell a black retina frame from a
+        # blank floor.
     else:
         result.real_spa = RealSpaResult(
             captured=False,
@@ -1174,6 +1176,7 @@ def build_render_gate(
     *,
     skip_reason: str | None = None,
     require: bool = False,
+    browser_drove_an_arm: bool | None = None,
 ) -> dict[str, Any]:
     """The one verdict that can flip the web surface: the retina arm's.
 
@@ -1183,13 +1186,23 @@ def build_render_gate(
     ``gated: false`` so a reader never mistakes a missing gate for a passing one
     (``LUCIDA_TRYOUT_REQUIRE_DPR2=1`` turns it into a failure).
 
-    Everything else fails. In particular, if a browser WAS available and the
-    retina arm still did not produce a verdict — a navigation timeout, a renderer
-    or GPU process death under a 4x backing store — that is not a skip, it is the
-    gate's own subject matter arriving in a different shape. ``arms`` is the
-    signal that tells the two apart: a genuine provisioning skip never gets as
-    far as building one (see ``_spa_skipped`` and the driver's early exits), so a
-    non-empty ``arms`` means a browser launched.
+    Everything else fails. In particular, if the browser was up and driving arms
+    and the retina arm still did not produce a verdict, that is not a skip, it is
+    the gate's own subject matter arriving in a different shape.
+
+    The discriminator is ``ran``, and ONLY ``ran``. The driver sets it before it
+    does an arm's work precisely so that an arm which then throws is still marked
+    as attempted; ``capture_real_spa`` synthesises a placeholder arm (``ran``
+    false) for every requested scale factor the driver returned no record for. So
+    "an arm ran" means the browser was genuinely up. The *length* of ``arms``
+    proves nothing — a host whose browser cannot launch still gets a full-length
+    list of placeholders.
+
+    ``browser_drove_an_arm`` is that same fact read straight off the driver's raw
+    records, and callers who have them should pass it: if pairing matched nothing
+    at all, every arm here is a placeholder, and inferring from these arms would
+    report "the browser was never up" over a payload that says otherwise. Callers
+    holding only judged arms may omit it and the arms are used instead.
     """
     gating_arms = [arm for arm in arms if arm.gating]
     judged = next((arm for arm in gating_arms if arm.ran), None)
@@ -1204,17 +1217,26 @@ def build_render_gate(
             "checks": dict(judged.checks),
         }
 
-    if gating_arms:
-        # The retina arm was in the matrix, a browser launched, and it still
-        # produced nothing. Fail: an absent answer here is not a passing one.
-        # (No gating arm at all is different — that is the explicit
-        # LUCIDA_TRYOUT_SCALE_FACTORS opt-out, which falls through to
-        # "not enforced" below.)
-        detail = (gating_arms[0].reason if gating_arms and gating_arms[0].reason
-                  else (skip_reason or "no measurements were produced"))
+    drove = any(arm.ran for arm in arms) if browser_drove_an_arm is None else browser_drove_an_arm
+    if gating_arms and drove:
+        # The retina arm was in the matrix, the browser was up and driving other
+        # arms, and the retina one still produced nothing. Fail: an absent answer
+        # here is not a passing one. Two neighbouring states are NOT this, and
+        # both fall through to "not enforced" below:
+        #   * no arm ran at all — the browser never started (its launch failed,
+        #     or its libraries are missing). An environment fact, and the state
+        #     most hosts without a working browser are actually in;
+        #   * no gating arm at all — the explicit LUCIDA_TRYOUT_SCALE_FACTORS
+        #     opt-out.
+        # Say everything that is known about why: the unrun arm's own reason
+        # (which names a pairing mismatch or a conflicting duplicate when that is
+        # what happened) and, if it is not already in there, the driver's.
+        detail = gating_arms[0].reason or skip_reason or "no measurements were produced"
+        if skip_reason and skip_reason not in detail:
+            detail = f"{detail}; the driver reported: {skip_reason}"
         reason = (
-            f"the deviceScaleFactor {GATING_SCALE_FACTOR} arm was attempted in a live "
-            f"browser but produced no verdict: {detail}"
+            f"the deviceScaleFactor {GATING_SCALE_FACTOR} arm produced no verdict while "
+            f"the browser was driving other arms: {detail}"
         )
         return {
             "ok": False,
@@ -1426,15 +1448,63 @@ def capture_real_spa(
             },
         )
 
-    raw_arms = payload.get("arms") or []
+    # Pair each requested scale factor with the driver record that NAMES it,
+    # never with whatever landed at the same index. A truncated or reordered
+    # `arms` list would otherwise relabel someone else's measurements as the
+    # retina arm's, which is the one mislabelling this whole surface cannot
+    # afford. A factor with no record gets a placeholder that carries the
+    # driver's own reason, so it explains itself in the report.
+    raw_arms = [arm for arm in (payload.get("arms") or []) if isinstance(arm, dict)]
+    # "Was the browser up?" is a fact about what the DRIVER did, so read it from
+    # the raw records rather than inferring it from the paired arms. If pairing
+    # matches nothing — a driver/Python contract mismatch, which is the very
+    # thing name-based pairing defends against — every paired arm is a
+    # placeholder, and inferring would announce "no browser was ever up" over a
+    # payload that plainly says two arms were driven.
+    browser_drove_an_arm = any(arm.get("ran") for arm in raw_arms)
+
+    raw_by_dsf: dict[int, dict[str, Any]] = {}
+    conflicting: set[int] = set()
+    for raw_arm in raw_arms:
+        try:
+            key = int(raw_arm.get("device_scale_factor"))
+        except (TypeError, ValueError):
+            continue
+        if key in raw_by_dsf:
+            # Two records claiming the same scale factor is a contract
+            # violation, and one of them may be the black one. Refusing to
+            # choose is the only honest move: the factor goes unanswered, which
+            # the gate then treats as the failure it is.
+            conflicting.add(key)
+            continue
+        raw_by_dsf[key] = raw_arm
+
+    driver_reason = str(payload.get("reason") or "")
+    named = ", ".join(str(key) for key in sorted(raw_by_dsf))
+    if named:
+        # Name what the driver DID return, so a mismatch reads as a mismatch
+        # instead of as a mysteriously absent arm.
+        missing_reason = (
+            f"the driver returned no record naming this scale factor (it named {named})"
+            + (f"; it reported: {driver_reason}" if driver_reason else "")
+        )
+    else:
+        missing_reason = driver_reason or "the driver returned no record for this scale factor"
+
     arms: list[RenderArmResult] = []
-    for index, dsf in enumerate(factors):
-        raw = raw_arms[index] if index < len(raw_arms) else {}
-        if not isinstance(raw, dict):
-            raw = {}
+    for dsf in factors:
+        if dsf in conflicting:
+            raw = {
+                "reason": (
+                    f"the driver returned more than one record for deviceScaleFactor {dsf}; "
+                    "refusing to pick one"
+                )
+            }
+        else:
+            raw = raw_by_dsf.get(dsf) or {"reason": missing_reason}
         arm = judge_render_arm(
             raw,
-            device_scale_factor=int(raw.get("device_scale_factor") or dsf),
+            device_scale_factor=dsf,
             gating=(dsf == GATING_SCALE_FACTOR),
         )
         paths = shots[str(dsf)]
@@ -1450,6 +1520,7 @@ def capture_real_spa(
         arms,
         skip_reason=str(payload.get("reason") or "no arm ran"),
         require=require,
+        browser_drove_an_arm=browser_drove_an_arm,
     )
 
     for arm in arms:

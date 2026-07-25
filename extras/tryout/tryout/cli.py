@@ -24,7 +24,7 @@ from typing import Any
 
 from . import capture
 from .bringup import bring_up
-from .drive import drive as run_drive, parse_surfaces
+from .drive import drive as run_drive, parse_surfaces, surface_render_gate_failed
 from .errors import TryoutError
 from .report import run_report
 from .surfaces import registered_names
@@ -516,7 +516,7 @@ def _emit_drive_human(record: dict[str, Any], log: _Stderr) -> None:
         if web.get("ran"):
             # Same one-liner as `report --human`, so the two never disagree —
             # and so an unenforced gate is never summarised as one that "held".
-            verdict = "ok" if web.get("ok") else "FAIL"
+            verdict = "FAIL" if _surface_failed(web) else "ok"
             lines.append(f"  web         : {verdict} ({_web_summary_detail(web)})")
             lines.append(f"      viewer    : {web.get('viewer_png')}")
             lines.append(f"      url       : {web.get('viewer_url')}")
@@ -815,6 +815,23 @@ def _emit_report(record: dict[str, Any], *, as_json: bool, log: _Stderr) -> None
     _emit_report_human(record)
 
 
+# How much of a failing gate's reason the one-line summary carries before it
+# defers to the full text printed below it.
+_SUMMARY_REASON_CHARS = 96
+
+
+def _surface_failed(surf: dict[str, Any]) -> bool:
+    """Whether the printed verdict word for a surface should read FAIL.
+
+    Display only — it does not change any surface's ``ok`` in the JSON, which
+    stays exactly what it has always meant (for the web surface, the floor).
+    It exists because ``ok`` alone would print ``PASS`` beside a failed retina
+    gate, and the run it belongs to exits non-zero. A verdict word that
+    contradicts the reason printed next to it is worse than no word at all.
+    """
+    return not surf.get("ok") or surface_render_gate_failed(surf)
+
+
 def _web_summary_detail(surf: dict[str, Any]) -> str:
     """The web surface's one-line verdict — floor AND retina render gate.
 
@@ -828,7 +845,13 @@ def _web_summary_detail(surf: dict[str, Any]) -> str:
     if not isinstance(gate, dict):
         return floor
     if gate.get("ok") is False:
-        return f"retina render gate FAILED: {gate.get('reason') or 'no reason given'}"
+        # Clipped: the same multi-clause reason is printed in full on the gate's
+        # own line a few rows below, and again on the failing arm's line. The
+        # headline only has to say which verdict failed and roughly why.
+        reason = str(gate.get("reason") or "no reason given")
+        if len(reason) > _SUMMARY_REASON_CHARS:
+            reason = reason[:_SUMMARY_REASON_CHARS].rstrip(" ,;—-") + "…"
+        return f"retina render gate FAILED: {reason}"
     if not gate.get("gated"):
         return f"{floor}, retina render gate NOT ENFORCED"
     return f"{floor}, retina render gate held"
@@ -870,7 +893,7 @@ def _emit_report_human(record: dict[str, Any]) -> None:
             err = surf.get("error") or "did not run"
             lines.append(f"  {name:<11} : DID NOT RUN ({err})")
             continue
-        verdict = "PASS" if surf.get("ok") else "FAIL"
+        verdict = "FAIL" if _surface_failed(surf) else "PASS"
         detail = _REPORT_SUMMARY_DETAIL.get(name, _count_summary_detail)
         lines.append(f"  {name:<11} : {verdict} ({detail(surf)})")
     error = record.get("error")

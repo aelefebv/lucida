@@ -180,16 +180,23 @@ requested surface ran without a harness-level error), `out_dir`, `workspace_id`,
 }
 ```
 
-The web surface's `ok` requires a **non-blank** `viewer.png` (the required floor)
-**and** a passing retina render gate. A failed `overview`, a non-gating DPR 1
-arm, or a *skipped* ceiling is captured but never flips `ok`.
-`real_spa.captured: false` carries a `reason` (e.g. Playwright/Chrome not
-provisionable) — the floor still stands.
+The web surface's `ok` is the **floor**, unchanged: a non-blank `viewer.png` from
+the required capture. A failed `overview`, a non-gating DPR 1 arm, or a *skipped*
+ceiling is captured but never flips it. `real_spa.captured: false` carries a
+`reason` (e.g. Playwright/Chrome not provisionable) — the floor still stands.
 
-A failed render gate also fails the **run**: `drive` reports `ok: false` and
-exits non-zero. This is deliberately narrow — the run verdict reads the surface's
-declared `render_gate`, not its `ok`, so ordinary per-command and per-step
-failures keep their existing non-fatal semantics.
+The retina gate is reported separately, in `render_gate`, and it is the half that
+fails the **run**: a failed gate makes `drive` report `ok: false` and exit
+non-zero. Keeping the two apart is deliberate — the run verdict reads the
+surface's declared `render_gate`, not its `ok`, so ordinary per-command and
+per-step failures keep their existing non-fatal semantics.
+
+Because `ok` is only half the answer, every place a human reads a verdict word —
+the `--human` summaries, and the web section headings in `report.html` and
+`report.md` — reflects **both**: a failing gate reads `FAIL` beside its reason
+even though the floor held. (The JSON is unchanged; this is a display rule, and
+its whole point is never to print a reassuring word beside a failure in a run
+that exits non-zero.)
 
 ### The retina render gate (DPR 2)
 
@@ -227,16 +234,24 @@ Why the *centre of the canvas*, and not the page or the whole canvas:
 The "main canvas" is the largest by CSS area (the SPA also mounts small minimap
 and thumbnail canvases, so "the first `<canvas>` in the DOM" is not it).
 
-**A gate that cannot answer does not answer "pass".** Exactly one state is
-tolerated as *not enforced*: no arm was attempted at all, because this host has
-no node, no Playwright or no browser. That is an environment fact, it is reported
-as `gated: false` (never as a quiet pass), and `LUCIDA_TRYOUT_REQUIRE_DPR2=1`
-makes it fatal. Everything else **fails**: a retina arm that was attempted in a
-live browser and threw (a navigation timeout, a renderer or GPU process death
-under the 4× backing store — a very plausible retina manifestation), a driver
-that died without printing a result, or the whole matrix timing out. The
-distinction is `arms`: a genuine provisioning skip never gets far enough to build
-one, so a non-empty `arms` means a browser launched and the answer is owed.
+**A gate that cannot answer does not answer "pass".** One state is tolerated as
+*not enforced*: **no arm was attempted at all**, because this host has no node,
+no Playwright, no browser — or has a browser that will not start (missing system
+libraries, or a sandbox it cannot enter). That is an environment fact, it is
+reported as `gated: false` (never as a quiet pass), and
+`LUCIDA_TRYOUT_REQUIRE_DPR2=1` makes it fatal. Everything else **fails**: a
+retina arm that was attempted and threw (a navigation timeout, a renderer or GPU
+process death under the 4× backing store — a very plausible retina
+manifestation), a driver that died without printing a result, or the whole matrix
+timing out.
+
+The discriminator is each arm's `ran` flag, and only that. The driver sets `ran`
+*before* it does an arm's work, precisely so an arm that then throws is still
+marked attempted; `capture_real_spa` synthesises a placeholder arm (`ran: false`,
+carrying the driver's reason) for every requested scale factor the driver
+returned no record for. So "some arm ran" means the browser was genuinely up.
+The *length* of `arms` proves nothing — a host whose browser cannot launch still
+gets a full-length list of placeholders, and that host must skip, not fail.
 
 Artifacts, per arm: `DIR/web/spa-dpr{N}.png` (full page), `DIR/web/canvas-dpr{N}.png`
 (the judged canvas region), `DIR/web/console-dpr{N}.log`. The whole matrix runs in
@@ -550,7 +565,12 @@ non-empty `/tmp/tryout-drive/cli/*.log` and `/tmp/tryout-drive/python/session.lo
 `lucida-server` (or headless browser).
 
 For `report`: expect exit 0, a JSON object with `ok: true`, a `report_html` +
-`report_md` path, and `surfaces.{cli,python,web}` all `ok`. The
+`report_md` path, `surfaces.{cli,python}` `ok`, and the same web pair as `drive`
+— `surfaces.web.ok` (the floor) true and `surfaces.web.render_gate_ok` true when
+`render_gate_enforced` is true. The web surface's `ok` alone is **not** the
+acceptance: it stays true for a black retina frame, which is exactly the run the
+gate fails. The top-level `ok` is the one that reflects both, and it is what the
+exit code follows. The
 `/tmp/tryout-report/report.html` is non-empty and **self-contained** — it opens
 standalone with the screenshots showing inline (the bytes are embedded as base64
 `data:` URIs) and an obvious PASS/FAIL banner. Run with **no `--out`** to confirm

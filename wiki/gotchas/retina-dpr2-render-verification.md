@@ -72,13 +72,16 @@ this defect class rather than merely mention it:
   `devicePixelRatio` *and* the captured image's scale versus its CSS box), so a
   retina arm that silently degrades to DPR 1 fails loudly instead of manufacturing
   confidence about the untested half of the matrix.
-- **A gate that cannot answer does not answer "pass".** Only one state is
-  tolerated as *not enforced*: no arm was attempted at all, because the host has
-  no node, no Playwright or no browser. Even then it is reported as such, never as
-  a quiet pass, and `LUCIDA_TRYOUT_REQUIRE_DPR2=1` makes it fatal. A retina arm
-  that was attempted in a live browser and then threw — a navigation timeout, a
-  renderer or GPU process death under the 4× backing store — **fails**, because
-  that is this defect class arriving in a different shape, not an absent browser.
+- **A gate that cannot answer does not answer "pass".** One state is tolerated as
+  *not enforced*: no arm was attempted at all, because the host has no node, no
+  Playwright, no browser, or a browser that will not start. Even then it is
+  reported as such, never as a quiet pass, and `LUCIDA_TRYOUT_REQUIRE_DPR2=1`
+  makes it fatal. A retina arm that was attempted and then threw — a navigation
+  timeout, a renderer or GPU process death under the 4× backing store — **fails**,
+  because that is this defect class arriving in a different shape, not an absent
+  browser. The discriminator is each arm's `ran` flag, which the driver sets
+  before doing the arm's work; the number of arms proves nothing, because a
+  requested scale factor with no driver record still gets a placeholder.
 
 A failed gate fails the run: `tryout drive` reports `ok: false` and exits
 non-zero.
