@@ -21,13 +21,20 @@
 //      recipient's datasets, with a non-blocking "adjusted to fit" notice.
 //  10. Camera last (via import_presence so it goes through one mutator).
 //
+// Every one of those steps is dispatched INDIVIDUALLY (see `dispatch`): a
+// value this build's deserializer refuses — typically a closed-enum variant
+// (colormap / blend mode / render mode) from a newer build's link — costs only
+// its own command, and the settings that follow it, up to and including the
+// camera, still land. Whatever was refused is named in a warning at the end of
+// the apply, so a partial restore never passes for a complete one.
+//
 // `applyInProgress` is exposed so urlSync can suppress writes; the
 // per-step status is broadcast to subscribers (the loading banner) so
 // users see "loading 2 of 4 datasets…".
 
 import type { WasmScene } from "lucida-core";
 import type { DocumentCommand, ViewportCommand } from "../commands.ts";
-import { guardedSceneCall } from "../sceneGuard.ts";
+import { classifySceneError, guardedSceneCall } from "../sceneGuard.ts";
 import type {
   Camera,
   DatasetDisplaySettings,
@@ -133,6 +140,57 @@ function workspaceDatasetIdsForView(view: SavedView): string[] {
   return out;
 }
 
+/** One command the recipient's engine refused during an apply, kept so the
+ *  end-of-apply notice can name exactly which parts of the view did NOT land. */
+interface SkippedCommand {
+  /** Plain name of the setting the command carried, for the user-facing notice. */
+  label: string;
+  /** The engine's own message. Console only — the banner stays readable. */
+  message: string;
+}
+
+/** Plain names for the command tags whose derived name would be cryptic.
+ *  Every other tag derives its name mechanically (`set_channel_colormap` →
+ *  "channel colormap"), so a command added later still reads sensibly. */
+const COMMAND_LABELS: Readonly<Record<string, string>> = {
+  set_t: "timepoint",
+  set_c: "channel index",
+  set_z_range: "Z range",
+  set_dataset_order: "dataset order",
+  set_dataset_visible: "dataset visibility",
+  set_multi_channel: "multi-channel display",
+  set_active_layout: "layout",
+};
+
+/** The camera import is not an `apply_command`, so it carries its own name. */
+const CAMERA_LABEL = "camera framing";
+
+function commandLabel(type: string): string {
+  return COMMAND_LABELS[type] ?? type.replace(/^set_/, "").replace(/_/g, " ");
+}
+
+/**
+ * The end-of-apply notice naming the settings the engine refused, so a partial
+ * restore says out loud which parts of what's on screen are NOT the author's.
+ * Repeated labels are counted (`channel colormap (x3)`) rather than repeated.
+ *
+ * `completed` is false only when the apply aborted early (a dead engine), in
+ * which case the notice must not claim that everything else landed.
+ */
+function skippedNotice(
+  skipped: readonly SkippedCommand[],
+  completed: boolean,
+): string {
+  const counts = new Map<string, number>();
+  for (const s of skipped) counts.set(s.label, (counts.get(s.label) ?? 0) + 1);
+  const named = Array.from(counts, ([label, n]) => (n > 1 ? `${label} (x${n})` : label));
+  const noun = skipped.length === 1 ? "setting" : "settings";
+  const tail = completed
+    ? "Everything else was restored."
+    : "The restore then stopped, so more may be missing.";
+  return `Could not apply ${skipped.length} ${noun} from this view: ${named.join(", ")}. ${tail}`;
+}
+
 function workspaceMissingDatasetWarnings(
   loadedIds: Set<string>,
   requestedIds: Set<string>,
@@ -159,6 +217,9 @@ export class SavedViewApplier {
     reject: (e: Error) => void;
   }>();
   private pendingByUrl = new Map<string, string>(); // url → datasetId
+  /** Commands the engine refused during the CURRENT apply. Reset per apply and
+   *  reported once at the end (see `dispatch` / `skippedNotice`). */
+  private skipped: SkippedCommand[] = [];
   private readonly bridge: ApplierBridge;
   private readonly getScene: () => WasmScene | null;
   private readonly datasetIdForUrl: (url: string) => string;
@@ -279,6 +340,10 @@ export class SavedViewApplier {
       throw new Error("SavedViewApplier.apply: another apply already in progress");
     }
     this.setState({ ...IDLE_STATE, inProgress: true });
+    this.skipped = [];
+    // Flipped once the last step (the camera) has been attempted, so the
+    // end-of-apply notice can tell "the rest landed" apart from "we stopped".
+    let completed = false;
     try {
       // Compute requested dataset ids. Global saved views identify
       // datasets by source URL and may open missing datasets. Workspace
@@ -439,6 +504,7 @@ export class SavedViewApplier {
       // Step 10: camera last. Use import_presence so the WASM side
       // reapplies camera+view+display in one go (keeping local viewport).
       this.importCameraView(sceneAfter, view.camera);
+      completed = true;
 
       // Selected-dataset wrinkle resolution (option c, [[wiki/queue]]
       // 2026-05-07): emit the post-apply visibility set so consumers
@@ -452,6 +518,12 @@ export class SavedViewApplier {
       // See `useSavedViewSync` for usage.
       for (const fn of this.applyCompleteListeners) fn(view);
     } finally {
+      // Say what did NOT land before the banner settles. Emitted here (not at
+      // the end of the try) so a restore that aborted still names the settings
+      // it had already skipped instead of reporting a clean load.
+      if (this.skipped.length > 0) {
+        this.addWarning(skippedNotice(this.skipped, completed));
+      }
       // Ratchet the inProgress flag down regardless of any throw.
       this.setState({ ...this.state, inProgress: false });
     }
@@ -550,15 +622,65 @@ export class SavedViewApplier {
     }
   }
 
+  /**
+   * Dispatch ONE scene mutation, containing a refusal to that ONE command.
+   * Returns whether the command landed.
+   *
+   * A saved view is a bag of largely independent settings and the engine
+   * refuses them one at a time: a value this build's deserializer doesn't
+   * recognize — a colormap / blend-mode / render-mode variant written by a
+   * NEWER build, since those are closed enums — throws at exactly that
+   * command and touches nothing. Before this seam a single such throw unwound
+   * the whole apply, so every step AFTER it (global contrast/gamma, T/C/Z, and
+   * the camera, which is deliberately LAST) was silently dropped while the
+   * user was told the view had loaded. Reproducing the author's framing is the
+   * entire point of a share link, and version skew on a link that outlives a
+   * deploy is an ordinary condition — so one stale field must cost only that
+   * field. What was refused is recorded and named at the end of the apply.
+   *
+   * `fatal` still aborts: a trapped or borrow-poisoned wasm instance cannot
+   * apply anything, so pressing on would only pile up skips and then claim a
+   * partial restore that never happened.
+   */
+  private dispatch(label: string, run: () => void): boolean {
+    try {
+      run();
+      return true;
+    } catch (e) {
+      if (classifySceneError(e) === "fatal") throw e;
+      this.recordSkip(label, e);
+      return false;
+    }
+  }
+
+  /** Remember (and log) one part of the view that did not land, for the
+   *  end-of-apply notice. */
+  private recordSkip(label: string, e: unknown): void {
+    const message = e instanceof Error ? e.message : String(e);
+    this.skipped.push({ label, message });
+    console.warn(`[SavedViewApplier] skipped ${label}: ${message}`);
+  }
+
   private applyDocument(cmd: DocumentCommand): void {
     const json = JSON.stringify(cmd);
     const scene = this.getScene();
-    if (scene) guardedSceneCall("apply_command", scene, () => scene.apply_command(json));
+    if (scene) {
+      const applied = this.dispatch(
+        commandLabel(cmd.type),
+        () => guardedSceneCall("apply_command", scene, () => scene.apply_command(json)),
+      );
+      // Our own engine refused it — don't broadcast a document mutation this
+      // session could not apply, or peers diverge from what this user sees.
+      if (!applied) return;
+    }
     this.bridge.sendCommand(json);
   }
 
-  private applyViewport(scene: WasmScene, cmd: ViewportCommand): void {
-    guardedSceneCall("apply_command", scene, () => scene.apply_command(JSON.stringify(cmd)));
+  private applyViewport(scene: WasmScene, cmd: ViewportCommand): boolean {
+    return this.dispatch(
+      commandLabel(cmd.type),
+      () => guardedSceneCall("apply_command", scene, () => scene.apply_command(JSON.stringify(cmd))),
+    );
   }
 
   private applyDatasetSettings(
@@ -584,13 +706,25 @@ export class SavedViewApplier {
     // We only want to update the camera shape here — view + display were
     // already applied step-by-step. Pass them through unchanged by reading
     // the live scene.
-    const presence = JSON.parse(scene.export_presence()) as {
-      camera: Camera;
-      view: unknown;
-      display: unknown;
-    };
+    let presence: { camera: Camera; view: unknown; display: unknown };
+    try {
+      presence = JSON.parse(scene.export_presence()) as {
+        camera: Camera;
+        view: unknown;
+        display: unknown;
+      };
+    } catch (e) {
+      // Live presence unreadable: there is nothing to merge the camera into.
+      // Record it so the notice reports the framing as missing rather than
+      // letting the restore look complete.
+      this.recordSkip(CAMERA_LABEL, e);
+      return;
+    }
     presence.camera = camera;
-    guardedSceneCall("import_presence", scene, () => scene.import_presence(JSON.stringify(presence)));
+    this.dispatch(
+      CAMERA_LABEL,
+      () => guardedSceneCall("import_presence", scene, () => scene.import_presence(JSON.stringify(presence))),
+    );
   }
 
   private updateOpenStatus(url: string, newState: OpenStatus["state"], error?: string): void {

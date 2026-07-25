@@ -5,7 +5,7 @@ description: "Cross-cutting subsystem spanning lucida-core (the SavedView schema
 tags: [lucida, subsystem]
 source_path: wiki/systems/subsystems/saved-views.md
 created: 2026-05-08
-modified: 2026-07-03
+modified: 2026-07-25
 ---
 
 # Saved Views
@@ -40,7 +40,7 @@ Beyond the three surfaces above, `SavedView` is also embedded as `Annotation::vi
 All under `lucida-web/src/savedView/`:
 
 - **`encoder.ts`** — pure `encode(SavedView) → string` and `decode(string) → SavedView`. Default-stripping on encode (don't emit `gamma: 1.0`, `visible: true`, etc.); restore on decode. `CompressionStream` for gzip; base64url for the URL-safe wrapper. The encoder owns the `v: 1` discipline.
-- **`applier.ts`** — async orchestrator. Diffs current vs target datasets, opens missing via `bridge.sendOpenRemoteDataset`, awaits `DatasetOpened` broadcasts, then applies in fixed order: layouts → dataset_order → per-dataset settings → global display → view dimensions → camera last. Manages `applyInProgress` flag (urlSync reads to suppress writes). Surfaces `OpenDatasetFailed` to the loading-banner state. Out-of-range z/t/c clamps silently; missing layout falls back to dataset's default.
+- **`applier.ts`** — async orchestrator. Diffs current vs target datasets, opens missing via `bridge.sendOpenRemoteDataset`, awaits `DatasetOpened` broadcasts, then applies in fixed order: layouts → dataset_order → per-dataset settings → global display → view dimensions → camera last. Manages `applyInProgress` flag (urlSync reads to suppress writes). Surfaces `OpenDatasetFailed` to the loading-banner state. Out-of-range z/t/c clamps silently; missing layout falls back to dataset's default. Each command is dispatched individually, so a value this build's deserializer refuses costs only its own setting and the steps after it (including the camera) still land — what was refused is named in a loading-banner warning.
 - **`urlSync.ts`** — bootstraps from `window.location.hash` on initial load (handles both `#view=…` and `#b=<id>`), subscribes to viewport/scene change events, debounces 250-500 ms idle, encodes + `replaceState`. Listens for `popstate`. Reads `applyInProgress` to break the apply/sync feedback loop.
 
 The `subscribeApplyResult` channel on the applier is the seam for UI-state that doesn't live in the WASM scene (currently just the `selectedDatasetId` auto-select). Future capture-record fields needing similar after-apply effects should subscribe here.
@@ -126,6 +126,7 @@ Resolution (option c per [Queue — Open Questions](../../queue.md)): the applie
 - **Pre-auth `dev@local` bookmarks** created during the auth design phase carry `created_by: "dev@local"`. Cutover policy at production rollout is recorded in [Queue — Open Questions](../../queue.md).
 - **Dataset URLs in saved views are visible to anyone with the link.** Presigned URLs and similar credentialed URLs are exposed via clipboard, browser history, screenshots, copy-paste. See [Saved-View URLs Expose Dataset URLs (and Anything in Them)](../../gotchas/saved-view-credentials-in-urls.md).
 - **Workspace saved views are not source-open recipes.** In workspace mode, `SavedView.datasets` is empty and the applier never opens source URLs. Missing `workspace_dataset_id` references partially apply with warnings.
+- **A link written by a NEWER build is an ordinary condition, not corruption.** `Colormap` / `BlendMode` / `RenderMode` are closed serde enums, and `encoder.ts` only fills in *absent* keys — an unknown value passes straight through to the command, where the wasm side refuses it. The heavy applier isolates that to one command (`dispatch`) precisely because the camera is the LAST step: until then, one stale enum from a share link that outlived a deploy dropped the framing while the banner still said the view had loaded. The **light** annotation restore (`restoreAnnotationView.ts`) hardens only the camera import that way; a refused per-channel display command there still aborts the rest of that restore.
 - **`UrlSync` is one-shot-by-default in dev.** React Strict-Mode double-invokes mount effects; without re-arming `start()` after `destroy()`, the URL silently never updates. Bit us in PR #483 hours after shipping. See [React Strict-Mode Kills One-Shot `destroy()` Classes](../../gotchas/strict-mode-destroyable-classes.md).
 - **JS-only preferences don't round-trip without a dedicated SavedView field.** WASM scene state captures cleanly via `export_presence`; React-state preferences (e.g. `autoContrastMap`) that *mutate* WASM state from the JS side will be silently overridden by the recipient's defaults. Caught with auto-contrast in PR #484. See [SavedView Mirrors WASM Presence — Client-Only State Won't Round-Trip Without a Dedicated Field](../../gotchas/saved-view-client-only-state.md) for the fix pattern when adding new client-only preferences.
 

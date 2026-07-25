@@ -1,18 +1,32 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { SavedViewApplier, type ApplierBridge, clampViewIndices } from "./applier.ts";
-import { SAVED_VIEW_VERSION, type SavedView } from "./types.ts";
+import {
+  SAVED_VIEW_VERSION,
+  type BlendMode,
+  type Colormap,
+  type SavedView,
+} from "./types.ts";
 
 // Mock WasmScene: records every apply_command call and lets the test
 // pre-seed dataset_ids/available_layouts/dataset_volume_shape.
 //
 // We pass it through as `unknown as WasmScene` to side-step the opaque
 // wasm-bindgen class type; the applier only uses the methods we mock.
+//
+// `rejectCommand` lets a test refuse individual commands the way the real wasm
+// deserializer does: it sees each parsed command and returns the message to
+// throw (a serde "unknown variant …" for a value written by a newer build, or
+// a wasm-bindgen "null pointer passed to rust" for a dead instance), or
+// undefined to let it through. A refused command never reaches `calls`, so the
+// recorded calls are exactly the ones that landed.
 function createMockScene(opts: {
   datasetIds?: string[];
   availableLayouts?: Record<string, Array<{ id: string; name: string; active?: boolean }>>;
   volumeShapes?: Record<string, Uint32Array>;
+  rejectCommand?: (cmd: Record<string, unknown>) => string | undefined;
 } = {}) {
   const calls: string[] = [];
+  const rejectCommand = opts.rejectCommand;
   const ids = [...(opts.datasetIds ?? [])];
   const layouts = { ...(opts.availableLayouts ?? {}) };
   const shapes = { ...(opts.volumeShapes ?? {}) };
@@ -37,6 +51,12 @@ function createMockScene(opts: {
       shapes[id] = shape;
     },
     apply_command(json: string) {
+      // Refuse before recording: a rejected command changes nothing in the
+      // real scene either.
+      if (rejectCommand) {
+        const message = rejectCommand(JSON.parse(json) as Record<string, unknown>);
+        if (message !== undefined) throw new Error(message);
+      }
       calls.push(json);
       // Track the active layout in our mock so the next available_layouts
       // call reflects it.
@@ -640,6 +660,163 @@ describe("SavedViewApplier", () => {
     const setCCall = scene.calls.find((c) => c.includes('"type":"set_c"'));
     expect(setCCall).toBeDefined();
     expect(JSON.parse(setCCall!)).toMatchObject({ type: "set_c", c: 2 });
+  });
+
+  // --- one refused value must not take the rest of the restore with it ----
+  //
+  // Colormap / blend mode / render mode are closed enums on the wasm side, so a
+  // link written by a NEWER build carries variants this build's deserializer
+  // refuses, and the decoder passes unknown values straight through (encoder.ts
+  // only fills in ABSENT keys). The refusal therefore lands at one command.
+  // Version skew on a link that outlives a deploy is ordinary for a viewer, so
+  // it must cost one setting — not the framing.
+
+  it("restores the camera and Z/T/C when a channel colormap is refused", async () => {
+    const scene = createMockScene({
+      datasetIds: ["ds-volume"],
+      // Only the unknown colormap is refused; the known one still applies —
+      // the wasm side rejects on the VALUE, not on the command shape.
+      rejectCommand: (cmd) =>
+        cmd.type === "set_channel_colormap" && cmd.colormap === "spectral"
+          ? "unknown variant `spectral`, expected one of `gray`, `magenta`, `green`, " +
+            "`cyan` at line 1 column 63"
+          : undefined,
+    });
+    // A 340-plane, multi-channel volume: the shape this viewer exists for, and
+    // deep enough that the saved Z/T/C need no clamping.
+    scene.setShape("ds-volume", new Uint32Array([340, 2048, 2048]));
+
+    const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl);
+    const v = emptyView();
+    v.camera = { mode: "slice", center: [512, 384], zoom: 4.25, viewport: [1600, 1200] };
+    v.view = { z_range: { start: 118, end: 121 }, t: 7, c: 2, multi_channel: true };
+    v.dataset_order = ["ds-volume"];
+    v.dataset_settings = {
+      "ds-volume": {
+        visible: true,
+        opacity: 1,
+        contrast_min: 120,
+        contrast_max: 4096,
+        gamma: 0.8,
+        blend_mode: "additive",
+        channel_settings: [
+          // Two channels carry a colormap from a newer build. The cast is the
+          // point: the TS union mirrors THIS build's enum, the wire does not.
+          { visible: true, colormap: "spectral" as Colormap, contrast_min: 0, contrast_max: 4096, gamma: 1.0 },
+          { visible: true, colormap: "spectral" as Colormap, contrast_min: 0, contrast_max: 4096, gamma: 1.2 },
+          { visible: true, colormap: "green", contrast_min: 10, contrast_max: 3000, gamma: 1.0 },
+        ],
+      },
+    };
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await applier.apply(v);
+    warn.mockRestore();
+
+    // The camera is the LAST step and the whole point of a share link.
+    expect(JSON.parse(scene.export_presence()).camera).toEqual(v.camera);
+    // The saved plane / timepoint / channel all landed.
+    const applied = (type: string) =>
+      JSON.parse(scene.calls.find((c) => c.includes(`"type":"${type}"`))!);
+    expect(applied("set_z_range")).toMatchObject({ start: 118, end: 121 });
+    expect(applied("set_t")).toMatchObject({ t: 7 });
+    expect(applied("set_c")).toMatchObject({ c: 2 });
+    expect(applied("set_multi_channel")).toMatchObject({ enabled: true });
+    expect(applied("set_gamma")).toMatchObject({ gamma: v.display.gamma });
+    // Commands that FOLLOW the refused one still apply — both the rest of the
+    // refused channel's display and the channel with a colormap we know.
+    expect(scene.calls.some((c) => c.includes('"set_channel_gamma"') && c.includes('"gamma":1.2'))).toBe(true);
+    expect(scene.calls.some((c) => c.includes('"set_channel_colormap"') && c.includes('"green"'))).toBe(true);
+    // Only the two unknown colormaps were lost.
+    expect(scene.calls.some((c) => c.includes('"spectral"'))).toBe(false);
+
+    // And the user is told exactly what did not apply — no silent success.
+    const warnings = applier.getState().warnings;
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toBe(
+      "Could not apply 2 settings from this view: channel colormap (x2). " +
+        "Everything else was restored.",
+    );
+    expect(applier.isInProgress()).toBe(false);
+  });
+
+  it("does not broadcast a layout its own engine refused, and still restores the camera", async () => {
+    const scene = createMockScene({
+      datasetIds: ["ds-volume"],
+      availableLayouts: {
+        "ds-volume": [
+          { id: "L0", name: "default", active: true },
+          { id: "L1", name: "alt" },
+        ],
+      },
+      rejectCommand: (cmd) =>
+        cmd.type === "set_active_layout"
+          ? "unknown field `axis_order`, expected one of `dataset_id`, `layout_id` " +
+            "at line 1 column 58"
+          : undefined,
+    });
+    scene.setShape("ds-volume", new Uint32Array([340, 2048, 2048]));
+    const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl);
+    const v = emptyView();
+    v.camera = { mode: "slice", center: [40, 60], zoom: 3.5, viewport: [1600, 1200] };
+    v.dataset_order = ["ds-volume"];
+    v.active_layouts = { "ds-volume": "L1" };
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await applier.apply(v);
+    warn.mockRestore();
+
+    // Refused locally, so peers never see it: broadcasting a mutation this
+    // session could not apply would put them on a different document.
+    expect(docCmds.find((c) => c.includes('"set_active_layout"'))).toBeUndefined();
+    expect(JSON.parse(scene.export_presence()).camera).toEqual(v.camera);
+    expect(applier.getState().warnings).toEqual([
+      "Could not apply 1 setting from this view: layout. Everything else was restored.",
+    ]);
+  });
+
+  it("stops on a dead engine and reports the restore as unfinished", async () => {
+    // A trapped/poisoned wasm instance cannot apply anything, so pressing on
+    // would only collect skips and then claim a partial restore that never
+    // happened. The apply aborts — but it still names what it had already lost.
+    const scene = createMockScene({
+      datasetIds: ["ds-volume"],
+      rejectCommand: (cmd) => {
+        if (cmd.type === "set_dataset_blend_mode") {
+          return "unknown variant `screen`, expected one of `alpha`, `additive`, `max` " +
+            "at line 1 column 71";
+        }
+        if (cmd.type === "set_t") return "null pointer passed to rust";
+        return undefined;
+      },
+    });
+    scene.setShape("ds-volume", new Uint32Array([340, 2048, 2048]));
+    const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl);
+    const v = emptyView();
+    v.camera = { mode: "slice", center: [7, 9], zoom: 2.5, viewport: [1600, 1200] };
+    v.dataset_order = ["ds-volume"];
+    v.dataset_settings = {
+      "ds-volume": {
+        visible: true,
+        opacity: 1,
+        contrast_min: 0,
+        contrast_max: 65535,
+        gamma: 1,
+        blend_mode: "screen" as BlendMode,
+      },
+    };
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await expect(applier.apply(v)).rejects.toThrow(/null pointer passed to rust/);
+    warn.mockRestore();
+
+    expect(applier.getState().warnings).toEqual([
+      "Could not apply 1 setting from this view: dataset blend mode. " +
+        "The restore then stopped, so more may be missing.",
+    ]);
+    // The camera never got its chance — and the notice does not pretend it did.
+    expect(JSON.parse(scene.export_presence()).camera).toMatchObject({ zoom: 1.0 });
+    expect(applier.isInProgress()).toBe(false);
   });
 });
 
