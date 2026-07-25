@@ -17,6 +17,7 @@ interface BrowseResponse {
 
 interface FetchSpy {
   urls: string[];
+  inits: (RequestInit | undefined)[];
   responder: (url: string) => BrowseResponse;
 }
 
@@ -34,6 +35,7 @@ beforeEach(() => {
   originalFetch = globalThis.fetch;
   fetchSpy = {
     urls: [],
+    inits: [],
     // Default responder: drive-list style root with one drive `c:` so
     // tests exercising the "click into root entry" path have something
     // to click.
@@ -42,8 +44,9 @@ beforeEach(() => {
       entries: [{ name: "c:", type: "directory" }],
     }),
   };
-  globalThis.fetch = (async (url: string) => {
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
     fetchSpy.urls.push(url);
+    fetchSpy.inits.push(init);
     return jsonResponse(fetchSpy.responder(url));
   }) as typeof globalThis.fetch;
   // Each test starts with a clean sessionStorage so the initial-path
@@ -56,6 +59,48 @@ afterEach(() => {
   cleanup();
 });
 
+describe("FileBrowser — same-origin request shape", () => {
+  it("requests a RELATIVE /api path, never an absolute origin", async () => {
+    // Regression guard: the browser used to hand-build
+    // `http://localhost:9876/api/browse`. Served from anywhere other
+    // than the developer's own machine that URL points at the VIEWER's
+    // machine — cross-origin, so the session cookie never rides along
+    // and the auth-protected route is unreachable. Every listing the
+    // component can issue must stay relative.
+    fetchSpy.responder = () => ({
+      path: "/home/me",
+      entries: [{ name: "data", type: "directory" }],
+    });
+    window.sessionStorage.setItem("lucida-browse-path", "/home/me");
+
+    await act(async () => {
+      render(<FileBrowser onSelect={() => {}} onClose={() => {}} />);
+    });
+    // Navigate in, and back up, so the join / strip branches are covered too.
+    await act(async () => {
+      fireEvent.click(screen.getByText("data"));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getAllByRole("button", { name: "/" })[0]);
+    });
+
+    expect(fetchSpy.urls.length).toBe(3);
+    for (const url of fetchSpy.urls) {
+      expect(url.startsWith("/api/browse")).toBe(true);
+      expect(url).not.toMatch(/^[a-z]+:\/\//);
+      expect(url).not.toContain("localhost");
+      expect(url).not.toContain("9876");
+    }
+  });
+
+  it("sends the session cookie by using credentials: same-origin", async () => {
+    await act(async () => {
+      render(<FileBrowser onSelect={() => {}} onClose={() => {}} />);
+    });
+    expect(fetchSpy.inits[0]?.credentials).toBe("same-origin");
+  });
+});
+
 describe("FileBrowser — empty-root initial fetch", () => {
   it("issues exactly one fetch on mount with no `path=` query param", async () => {
     await act(async () => {
@@ -65,7 +110,7 @@ describe("FileBrowser — empty-root initial fetch", () => {
     const url = fetchSpy.urls[0];
     // Bare endpoint — no `path=` param of any kind. This is the signal
     // to the server to return its platform-default root.
-    expect(url).toBe("http://localhost:9876/api/browse");
+    expect(url).toBe("/api/browse");
     expect(url).not.toContain("path=");
   });
 
@@ -148,7 +193,7 @@ describe("FileBrowser — navigation", () => {
         render(<FileBrowser onSelect={() => {}} onClose={() => {}} />);
       });
       // Initial fetch: no path param.
-      expect(fetchSpy.urls[0]).toBe("http://localhost:9876/api/browse");
+      expect(fetchSpy.urls[0]).toBe("/api/browse");
 
       // Click `c:` — the empty-root branch in `navigateTo` must NOT
       // prefix a `/`, otherwise we'd produce `/c:` (a bogus path).
@@ -157,7 +202,7 @@ describe("FileBrowser — navigation", () => {
       });
       expect(fetchSpy.urls.length).toBe(2);
       expect(fetchSpy.urls[1]).toBe(
-        `http://localhost:9876/api/browse?path=${encodeURIComponent("c:")}`,
+        `/api/browse?path=${encodeURIComponent("c:")}`,
       );
       // Triple-check: there's no `/c:` artefact in the URL.
       expect(fetchSpy.urls[1]).not.toContain(encodeURIComponent("/c:"));
@@ -321,7 +366,7 @@ describe("FileBrowser — root breadcrumb", () => {
       fireEvent.click(homeButton);
     });
     expect(fetchSpy.urls.length).toBe(2);
-    expect(fetchSpy.urls[1]).toBe("http://localhost:9876/api/browse");
+    expect(fetchSpy.urls[1]).toBe("/api/browse");
     expect(fetchSpy.urls[1]).not.toContain("path=");
   });
 });

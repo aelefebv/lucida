@@ -1,14 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 
-interface BrowseEntry {
-  name: string;
-  type: "directory" | "file";
-}
-
-interface BrowseResponse {
-  path: string;
-  entries: BrowseEntry[];
-}
+import { browse as browseApi, type BrowseEntry } from "../browseApi.ts";
 
 interface FileBrowserProps {
   /** Open the single navigated-to dataset into the CURRENT workspace (the
@@ -21,7 +13,6 @@ interface FileBrowserProps {
    *  canonical-form paths the user accumulated. */
   onCreateWorkspace?: (paths: string[]) => void;
   onClose: () => void;
-  serverPort?: number;
 }
 
 /**
@@ -35,12 +26,15 @@ interface FileBrowserProps {
  * forward-slash). On Windows the empty string is the explicit sentinel
  * for "synthetic drives root" so `"" + "/" + name` would yield a bogus
  * `"/c:"`; `navigateTo` special-cases the empty-root case.
+ *
+ * Every listing goes through `browseApi`, which talks to the relative,
+ * same-origin `/api/browse` — the browser is a normal authenticated
+ * affordance, not a localhost-only dev tool.
  */
 export function FileBrowser({
   onSelect,
   onCreateWorkspace,
   onClose,
-  serverPort = 9876,
 }: FileBrowserProps) {
   const [currentPath, setCurrentPath] = useState(() => {
     // On first-ever open `saved` is null → use `""`, which the server
@@ -60,35 +54,21 @@ export function FileBrowser({
   const multiSelect = Boolean(onCreateWorkspace);
   const alreadySelected = selected.includes(currentPath);
 
-  const browse = useCallback(
-    async (path: string) => {
-      setLoading(true);
-      setError(null);
-      try {
-        // Empty path → omit the query param so the server falls into
-        // its platform-default-root branch. Otherwise URL-encode the
-        // canonical-form path verbatim (it's already forward-slashed).
-        const url = path
-          ? `http://localhost:${serverPort}/api/browse?path=${encodeURIComponent(path)}`
-          : `http://localhost:${serverPort}/api/browse`;
-        const res = await fetch(url);
-        if (!res.ok) {
-          const text = await res.text();
-          throw new Error(text || res.statusText);
-        }
-        const data: BrowseResponse = await res.json();
-        setCurrentPath(data.path);
-        setEntries(data.entries);
-        setHasZarrJson(data.entries.some((e) => e.name === "zarr.json"));
-        sessionStorage.setItem("lucida-browse-path", data.path);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-      } finally {
-        setLoading(false);
-      }
-    },
-    [serverPort]
-  );
+  const browse = useCallback(async (path: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await browseApi(path);
+      setCurrentPath(data.path);
+      setEntries(data.entries);
+      setHasZarrJson(data.entries.some((e) => e.name === "zarr.json"));
+      sessionStorage.setItem("lucida-browse-path", data.path);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     // Initial-mount fetch — `browse` setStates loading/entries internally.
