@@ -16,7 +16,7 @@ modified: 2026-05-15
 
 Three alternatives considered:
 
-1. **Keep string matching, widen the substrings.** Rejected — every new permanent error (registration miss, dataset gone, bad asset id) would need a coordinated edit on both ends and one round of inevitable bugs. The match was already drift-prone (dechaos pass 5 surfaced it).
+1. **Keep string matching, widen the substrings.** Rejected — every new permanent error (registration miss, dataset gone, bad asset id) would need a coordinated edit on both ends and one round of inevitable bugs. The match was already drift-prone — the pre-refactor contract scan surfaced it.
 2. **Error-code enum on a single `FetchError` base, no `kind` discriminator.** Rejected — the cache really does want to dispatch on a small closed set (retry / fail / silent-cleanup). A flat code enum would force every consumer to maintain its own code-to-bucket mapping.
 3. **Separate error classes per kind (`PermanentFetchError`, `TransientFetchError`, `AbortedFetchError`).** Rejected for now — the `kind` discriminator buys the same exhaustiveness without three `instanceof` chains and three sets of constructors. If a future failure mode needs subtype-specific fields (e.g. `RetryAfterFetchError` with a server-suggested delay), promote that one kind to its own subclass without rewriting the others.
 

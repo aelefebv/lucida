@@ -24,7 +24,7 @@ The `pipeline/upload/` directory mirrors the shape of `pipeline/fetch/` after [`
 
 The split mirrors [`cpuCache.ts` split into `pipeline/fetch/` modules](0032-cpucache-split-into-pipeline-fetch.md) in shape: a single overgrown file becomes a coordinator plus a directory of 50–250 LOC modules, behaviour-preserving except for explicit named bug fixes. The two refactors complete the chunk pipeline's structural cleanup — fetch/decode upstream (CPU bytes in), upload downstream (GPU bytes out) — and adopting the same shape on both halves means the pipeline reads as one consistent system rather than two unrelated styles.
 
-`pipeline/upload/` mirrors `pipeline/fetch/` for the same composability reasons spelled out in 0032: the eight-pass dechaos analysis identified the same kinds of extractable units (a state tracker, pure builders, telemetry counters, a feedback handler) and recommended the same kind of directory-of-small-files destination. The eleven modules below are not an arbitrary count — they correspond one-to-one with the extractable seams Pass 2 ranked and Pass 6 confirmed.
+`pipeline/upload/` mirrors `pipeline/fetch/` for the same composability reasons spelled out in 0032: the same structural analysis identified the same kinds of extractable units (a state tracker, pure builders, telemetry counters, a feedback handler) and recommended the same kind of directory-of-small-files destination. The eleven modules below are not an arbitrary count — they correspond one-to-one with the extractable seams that analysis ranked and confirmed.
 
 ## Why the integration test suite stays monolithic through Slice 9
 
@@ -36,7 +36,7 @@ The migration happens in Slice 10, after `Uploader` exists: upload-related test 
 
 ## Why bug fixes ride along inside slices
 
-Two real bugs were surfaced by the eight-pass dechaos analysis:
+Two real bugs were surfaced by the structural analysis that preceded this split:
 
 1. `_lastFilteredRequests` / `_lastProxyRequests` are flat fields written per-dataset in the planning loop — only the last dataset's requests survive. The resend pass therefore only resends for the last dataset processed in the rebuild (multi-dataset under-resends).
 2. `workerWantedSet` is populated from `wantedSetDelta` but never read 
@@ -51,7 +51,7 @@ This matches the fetch refactor's Slice 10 (cpuCache as coordinator) in intent: 
 
 ## Why chunk/proxy unification is NOT pursued here
 
-Pass 6 of the dechaos analysis explicitly recommended **against** an asset-abstraction-over-chunk-and-proxy in the upload phase: the helper bodies (`dispatchChunk`, `dispatchProxy`; the chunk vs proxy classification paths) are ~30 LOC each, and unifying them behind a shared `Asset` interface would add abstraction overhead without reducing duplication. This contrasts with the fetch refactor, where Pass 6 identified chunk/proxy unification as a medium-payoff deferred opportunity (cf. [`cpuCache.ts` split into `pipeline/fetch/` modules](0032-cpucache-split-into-pipeline-fetch.md)'s deferred Slice 12). The asymmetry is intentional and matches the spirit of [ContentSource (JS) vs FetchSource (wire)](0006-content-source-vs-fetch-source.md) — two near-identical names for related-but-distinct concerns, where the cost of conflation exceeds the cost of duplication.
+The composability review explicitly recommended **against** an asset-abstraction-over-chunk-and-proxy in the upload phase: the helper bodies (`dispatchChunk`, `dispatchProxy`; the chunk vs proxy classification paths) are ~30 LOC each, and unifying them behind a shared `Asset` interface would add abstraction overhead without reducing duplication. This contrasts with the fetch refactor, where the same review identified chunk/proxy unification as a medium-payoff deferred opportunity (cf. [`cpuCache.ts` split into `pipeline/fetch/` modules](0032-cpucache-split-into-pipeline-fetch.md)'s deferred Slice 12). The asymmetry is intentional and matches the spirit of [ContentSource (JS) vs FetchSource (wire)](0006-content-source-vs-fetch-source.md) — two near-identical names for related-but-distinct concerns, where the cost of conflation exceeds the cost of duplication.
 
 ## How this decision shows up in code
 
@@ -71,5 +71,4 @@ Pass 6 of the dechaos analysis explicitly recommended **against** an asset-abstr
 - [`planning/index.ts` Split into Per-Concern Files](0029-planning-index-split-into-per-concern-files.md) — earlier directory-of-small-files refactor; original template both this ADR and 0032 mirror
 - [ContentSource (JS) vs FetchSource (wire)](0006-content-source-vs-fetch-source.md) — context for the chunk/proxy duplication-vs-unification trade-off (the spirit this refactor honours by NOT unifying)
 - [CpuCache as Sole Fetch Path](0008-cpu-cache-as-sole-fetch-path.md) — establishes the fetch-side phase boundaries; upload-side is the symmetric downstream half
-- Flow: Chunk Lifecycle — overarching pipeline architecture; will be refreshed in Slice 13 after the refactor stabilizes
 - PRD #607 — the work item this ADR was created during

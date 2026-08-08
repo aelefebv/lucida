@@ -198,6 +198,10 @@ AGENTS.md
 /target
 /example_files
 
+# Alternate CARGO_TARGET_DIR used by out-of-tree build setups. 328 of these
+# artifacts were once committed by accident; never track build output.
+.cargo-target/
+
 # WASM build output
 lucida-core/pkg/
 

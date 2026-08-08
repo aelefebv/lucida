@@ -30,7 +30,7 @@ The four `adaptive eviction` tests are an exception: they migrate to `interactio
 
 ## Why bug fixes ride along inside slices
 
-Two latent bugs were surfaced by the eight-pass dechaos analysis:
+Two latent bugs were surfaced by the structural analysis that preceded this split:
 
 1. `ProxiedContentSource.imageWireFormats` is never cleared on dataset removal (long-session leak).
 2. `fetchAndDecode` classifies "no wire format registered" as transient rather than permanent (one wasted retry on a setup bug).
