@@ -65,7 +65,7 @@ services:
       # ---- Required behind a TLS-terminating reverse proxy ----
       # The proxy terminates TLS and forwards http:// to this container.
       # Force `Secure` cookies so they survive the https-origin browser
-      # check. See wiki/gotchas/oss-config-defaults.md.
+      # check. See RUNBOOK.md for the full env-var contract.
       LUCIDA_COOKIE_SECURE: "always"
 
       # ---- Optional: uncomment as needed ----

@@ -35,6 +35,6 @@ The aggressive form would strip `levels` from `GroupSnapshot` (group-as-proxy ne
 ## Related
 
 - [Principles — Planning Domain](../principles/planning.md) — the framework this decision lives within
-- [Planning Domain](../systems/subsystems/planning-domain.md) — subsystem article; refreshed for the new contract shape
+- Planning Domain — subsystem article; refreshed for the new contract shape
 - [`PlanningState` as the Carry-Forward Seam](0027-planning-state-as-the-carry-forward-seam.md) — sister decision; same PRD, same principle
 - PRD #563 — the work item this ADR was created during

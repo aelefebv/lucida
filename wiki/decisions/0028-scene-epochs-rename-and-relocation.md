@@ -18,7 +18,7 @@ Cited [Principles — Planning Domain](../principles/planning.md#4-planning-is-p
 
 ## Why `SceneEpochs`, not `Epochs`
 
-`Epochs` alone is too generic in a codebase that may host other epoch-like concepts (auth sessions, document versions, ...). `SceneEpochs` matches the existing wiki vocabulary ([Scene State and Epochs](../systems/subsystems/scene-state-and-epochs.md)) and reads correctly: these are epochs that track scene-state changes that downstream subsystems consume.
+`Epochs` alone is too generic in a codebase that may host other epoch-like concepts (auth sessions, document versions, ...). `SceneEpochs` matches the existing wiki vocabulary (Scene State and Epochs) and reads correctly: these are epochs that track scene-state changes that downstream subsystems consume.
 
 ## Why no compatibility shim
 
@@ -34,6 +34,6 @@ Re-exports add long-term cognitive noise — readers see two import paths for th
 ## Related
 
 - [Principles — Planning Domain](../principles/planning.md) — the framework this decision lives within
-- [Scene State and Epochs](../systems/subsystems/scene-state-and-epochs.md) — subsystem article; vocabulary source for the rename
-- [Planning Domain](../systems/subsystems/planning-domain.md) — subsystem article; refreshed for the new type homes
+- Scene State and Epochs — subsystem article; vocabulary source for the rename
+- Planning Domain — subsystem article; refreshed for the new type homes
 - PRD #563 — the work item this ADR was created during

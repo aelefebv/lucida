@@ -45,7 +45,7 @@ The starvation risk on initial load is bounded: minimap chunks are small (~16 ch
 ## Related
 
 - [Principles — Planning Domain](../principles/planning.md) — the framework this decision lives within
-- [Flow: Chunk Lifecycle](../flows/chunk-lifecycle.md) — end-to-end trace; priority table updated to match
-- [Planning Domain](../systems/subsystems/planning-domain.md) — subsystem article; refreshed for the new lane
-- [CPU Cache](../systems/subsystems/cpu-cache.md) — eviction tier mapping note
+- Flow: Chunk Lifecycle — end-to-end trace; priority table updated to match
+- Planning Domain — subsystem article; refreshed for the new lane
+- CPU Cache — eviction tier mapping note
 - PRD #545 — the work item this ADR was created during

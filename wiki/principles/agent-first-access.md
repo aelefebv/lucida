@@ -41,4 +41,4 @@ Lucida should be drivable without a human in the loop: an LLM agent or a script 
 
 ## Related
 
-[lucida-cli](../systems/crates/lucida-cli.md) · [Saved Views](../systems/subsystems/saved-views.md) · [Surface Parity](surface-parity.md) · [Collaboration & Reproducibility](collaboration-and-reproducibility.md)
+lucida-cli · Saved Views · [Surface Parity](surface-parity.md) · [Collaboration & Reproducibility](collaboration-and-reproducibility.md)

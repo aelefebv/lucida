@@ -198,6 +198,10 @@ AGENTS.md
 /target
 /example_files
 
+# Alternate CARGO_TARGET_DIR used by out-of-tree build setups. 328 of these
+# artifacts were once committed by accident; never track build output.
+.cargo-target/
+
 # WASM build output
 lucida-core/pkg/
 
@@ -212,8 +216,7 @@ wiki/.obsidian
 
 # Credentials and key material — defensive patterns so a downloaded
 # OAuth client JSON or stray private key never sneaks into a commit.
-# See wiki/gotchas/oss-config-defaults for the env-var-based contract
-# these files would otherwise feed.
+# Every organization-specific value is supplied by env var instead.
 *client_secret*.json
 *.oauth.json
 google-oauth.json
@@ -228,12 +231,5 @@ id_ecdsa.*
 id_ed25519
 id_ed25519.*
 
-# Beads / Dolt files (added by bd init)
-.dolt/
+# Local databases (dev server state, caches)
 *.db
-.beads-credential-key
-.beads/proxieddb/
-
-# Gas City
-.beads/*
-!.beads/identity.toml

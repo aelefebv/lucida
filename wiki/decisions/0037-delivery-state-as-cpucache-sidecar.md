@@ -47,6 +47,6 @@ The final shape is easier to reason about: planning submits wanted work, `CpuCac
 - [CpuCache as Sole Fetch Path](0008-cpu-cache-as-sole-fetch-path.md)
 - [`cpuCache.ts` split into `pipeline/fetch/` modules](0032-cpucache-split-into-pipeline-fetch.md)
 - [`orchestrator.ts` split into `pipeline/upload/` modules](0034-orchestrator-split-into-pipeline-upload.md)
-- [CPU Cache](../systems/subsystems/cpu-cache.md)
-- [Upload Pipeline](../systems/subsystems/upload-pipeline.md)
+- CPU Cache
+- Upload Pipeline
 - PRD #640

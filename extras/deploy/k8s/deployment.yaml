@@ -22,7 +22,7 @@
 # LUCIDA_WEB_DIST are set unconditionally. Everything else lives in
 # the example Secret + the commented-out optional env block — uncomment
 # the ones your deployment needs. The full contract is documented in
-# wiki/gotchas/oss-config-defaults.md.
+# ../RUNBOOK.md.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -90,7 +90,7 @@ spec:
             # `google` is the v1 supported provider. `disabled` is for
             # closed-network deployments (and requires LUCIDA_INSECURE=1
             # when LUCIDA_BIND is non-loopback — which is always true in
-            # k8s). See wiki/gotchas/oss-config-defaults.md.
+            # k8s). See ../RUNBOOK.md.
             - name: LUCIDA_AUTH
               value: "google"
 
@@ -123,8 +123,7 @@ spec:
             # the request scheme; with http it would NOT mark cookies
             # Secure, and the browser would refuse to set them on the
             # https origin. Force `always` to bridge the gap.
-            # See wiki/gotchas/oss-config-defaults.md for why we
-            # deliberately don't trust X-Forwarded-Proto.
+            # We deliberately don't trust X-Forwarded-Proto here.
             - name: LUCIDA_COOKIE_SECURE
               value: "always"
 

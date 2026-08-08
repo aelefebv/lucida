@@ -67,7 +67,7 @@ The trade-off: if someone leaves the org mid-session, they retain access until t
 - **WebSocket upgrade gains auth check.** Cookie validated at upgrade time; rejected with close frame on failure. Mid-connection expiry is *not* enforced in v1 (open WS persists for its lifetime); mitigation tracked for v2.
 - **`AuthPrincipal` is now a real per-request value** that handlers can extract. Saved views (PRD #454) and any future feature consume it without knowing about auth providers.
 - **CSRF posture depends on REST discipline.** GET endpoints must remain side-effect-free for `SameSite=Lax` cookies to be sufficient CSRF protection. Worth recording as an invariant.
-- **Pre-auth `dev@local` bookmarks** (created during PRD #454's design phase) need a migration policy at cutover; recorded in [Queue — Open Questions](../queue.md).
+- **Pre-auth `dev@local` bookmarks** (created during PRD #454's design phase) need a migration policy at cutover; recorded in Queue — Open Questions.
 
 ## How this decision shows up in code
 

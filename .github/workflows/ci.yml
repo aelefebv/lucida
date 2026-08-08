@@ -97,7 +97,7 @@ jobs:
         working-directory: lucida-web
         run: pnpm install --frozen-lockfile
 
-      - name: Type check (tsc --noEmit -p tsconfig.app.json — see wiki/gotchas/ts-typecheck-trap)
+      - name: Type check (the -p tsconfig.app.json flag is load-bearing)
         working-directory: lucida-web
         run: pnpm exec tsc --noEmit -p tsconfig.app.json
 

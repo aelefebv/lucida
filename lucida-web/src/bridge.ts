@@ -1011,7 +1011,7 @@ export class Bridge {
   /** Send a document command wrapped in the ClientMessage envelope.
    *
    *  By repo convention every `sendCommand` is paired with an optimistic
-   *  local apply (see wiki/flows/document-command-application.md), so a
+   *  local apply, so a
    *  command actually handed to an OPEN socket is tracked as pending until
    *  its ack: a mid-session snapshot built before the server applied it
    *  would otherwise erase its local effect on full-replace. A frame the

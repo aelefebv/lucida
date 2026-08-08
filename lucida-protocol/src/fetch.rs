@@ -28,8 +28,7 @@ pub enum FetchSource {
 /// the table is present, the descriptor leads with a `format_version` marker
 /// ([`COMPACT_FETCH_FORMAT_VERSION`]) so future readers can recognize the
 /// format generation; decoders that predate the compact form hard-reject any
-/// descriptor that uses it (see
-/// `wiki/gotchas/compact-manifest-decoder-one-way-door.md`).
+/// descriptor that uses it.
 ///
 /// Decoding accepts both forms and resolves references back into the
 /// in-memory model — consumers always see a populated

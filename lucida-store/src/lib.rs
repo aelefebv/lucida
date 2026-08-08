@@ -21,8 +21,7 @@ const ALL_DIMS: [&str; 5] = ["t", "c", "z", "y", "x"];
 /// `chunk_shape[t] == chunk_shape[c] == 1`, the two interpretations
 /// coincide. When `chunk_shape[t] > 1` or `chunk_shape[c] > 1`, this
 /// function divides the wire `t`/`c` value by the on-disk chunk size to
-/// produce the correct disk-grid coordinate. See
-/// `wiki/gotchas/wire-chunk-key-conventions.md`.
+/// produce the correct disk-grid coordinate.
 ///
 /// `chunk_shape` parallels `axes` (one entry per on-disk axis).
 ///

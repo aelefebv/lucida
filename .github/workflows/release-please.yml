@@ -36,7 +36,6 @@ jobs:
           # downstream workflows — specifically release.yml. The default
           # GITHUB_TOKEN can't trigger workflow-from-workflow chains, so
           # release.yml would never fire and no image would be built.
-          # See wiki/gotchas/branching-and-releases for the full story.
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           # Auto-merge is OFF per ADR-0022. The action opens or updates
           # the "chore(release): X.Y.Z" PR; the maintainer manually

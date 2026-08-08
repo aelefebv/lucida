@@ -22,7 +22,7 @@ restored the extractor (so this ADR's loopback-default promise actually
 holds) and re-gated the dev-login machinery on disabled mode rather
 than removing it: `dev_status` and `dev_login` both still exist in
 `main.rs`, with `/auth/dev/login` registered only when
-`mode == AuthMode::Disabled`. See [Authentication](../systems/subsystems/auth.md) for the post-restoration
+`mode == AuthMode::Disabled`. See Authentication for the post-restoration
 extractor lineup.
 
 ## Decision

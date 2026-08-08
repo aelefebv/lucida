@@ -105,7 +105,7 @@ A runtime invariant that fires on first execution against real producer output i
 ## Related
 
 - [Principles — Planning Domain](../principles/planning.md) — the framework this decision lives within
-- [Planning Domain](../systems/subsystems/planning-domain.md) — subsystem article; gains a "developer-mode validator" mention
+- Planning Domain — subsystem article; gains a "developer-mode validator" mention
 - [`planning/index.ts` Split into Per-Concern Files](0029-planning-index-split-into-per-concern-files.md) — sister decision; same PRD
 - [Coordinate-Frame Naming Discipline at the JS↔WASM Boundary](0030-coordinate-frame-naming-discipline.md) — sister decision; same PRD
 - PRD #578 — the work item this ADR was created during

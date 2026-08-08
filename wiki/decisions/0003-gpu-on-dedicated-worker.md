@@ -12,7 +12,7 @@ modified: 2026-05-07
 
 ## Decision
 
-All WebGPU calls happen inside `lucida-web/src/renderer/gpu.worker.ts`. The main thread never touches the WebGPU API. The render canvas is transferred via `OffscreenCanvas` once, on `init`. Communication happens via a typed `postMessage` protocol — see [Worker Protocol](../systems/subsystems/worker-protocol.md).
+All WebGPU calls happen inside `lucida-web/src/renderer/gpu.worker.ts`. The main thread never touches the WebGPU API. The render canvas is transferred via `OffscreenCanvas` once, on `init`. Communication happens via a typed `postMessage` protocol — see Worker Protocol.
 
 ## Why
 
@@ -25,7 +25,7 @@ Three concrete benefits:
 ## Tradeoffs
 
 - **Debugging is harder.** Browser DevTools attach to workers but the tooling is less polished than main-thread profiling. The worker → main messages (`wantedSetDelta`, `chunksEvicted`, `intensityRange`) surface some telemetry the DevTools won't.
-- **Every state change crosses a serialization boundary.** Cold state, hot state, chunk uploads — all `postMessage`. We mitigate with the cold/hot/delta split (see [Worker Protocol](../systems/subsystems/worker-protocol.md)) and typed array transfers, but it's a real cost.
+- **Every state change crosses a serialization boundary.** Cold state, hot state, chunk uploads — all `postMessage`. We mitigate with the cold/hot/delta split (see Worker Protocol) and typed array transfers, but it's a real cost.
 - **Lifecycle is annoying.** `OffscreenCanvas` can be transferred only once. A worker crash means losing the canvas and re-initing. There's no graceful recovery path; we rely on workers not crashing.
 
 ## Alternatives considered (inferred)
@@ -44,6 +44,6 @@ Three concrete benefits:
 
 ## Related
 
-- [Worker Protocol](../systems/subsystems/worker-protocol.md) — the message contract
-- [GPU Residency](../systems/subsystems/gpu-residency.md) — what lives in the worker
-- [Flow: Chunk Lifecycle](../flows/chunk-lifecycle.md) — where the drain-to-worker step happens
+- Worker Protocol — the message contract
+- GPU Residency — what lives in the worker
+- Flow: Chunk Lifecycle — where the drain-to-worker step happens

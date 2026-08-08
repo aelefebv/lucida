@@ -234,6 +234,6 @@ on its own and the next fresh visit behaves like a cold visit.
 
 - [Backend-Mediated OAuth with Session Cookies](0016-backend-mediated-oauth-with-session-cookies.md) —
   the parent ADR; this one extends its logout flow.
-- [Flow: Authentication Sign-In](../flows/auth-signin.md) — end-to-end trace, including the explicit-
+- Flow: Authentication Sign-In — end-to-end trace, including the explicit-
   logout path this ADR shapes.
-- [Authentication](../systems/subsystems/auth.md) — the subsystem this lives in.
+- Authentication — the subsystem this lives in.

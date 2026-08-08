@@ -386,8 +386,7 @@ function App({
 
   // The three callback-ref population sites below (savedViewHooksRef,
   // bridgeCallbacksRef, datasetCallbacksRef) implement the "callback refs
-  // populated after all hooks return" pattern documented in
-  // wiki/gotchas/app-tsx-hook-order.md. Hooks defined earlier in the file
+  // populated after all hooks return" pattern. Hooks defined earlier in the file
   // depend on these refs to break circular dependencies; populating during
   // render (before effects fire) is load-bearing — switching to useEffect
   // would leave the refs unpopulated for the very first effect pass.
@@ -1122,8 +1121,7 @@ function App({
   // SliceViewer / VolumeViewer / PeerCursors / Minimap / DebugOverlays /
   // DebugPanel so those children can read the latest canvas, scene, loop, etc.
   // each render. This is the canonical "ref-as-current-value-prop" idiom that
-  // partners with the wiki-documented App.tsx hook order
-  // (wiki/gotchas/app-tsx-hook-order.md): callback refs are populated AFTER
+  // partners with the App.tsx hook order above: callback refs are populated AFTER
   // all hooks return, then read in the same render via `.current`. The
   // versioning state (datasetsVersion, remoteDocumentVersion) drives the
   // re-render that surfaces ref updates downstream. The new

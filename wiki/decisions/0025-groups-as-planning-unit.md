@@ -23,7 +23,7 @@ On collection datasets, planning treats the **group** as the unit of decision. A
 
 A group in `group-as-proxy` mode does not enumerate detail chunks for any of its tiles, regardless of any individual tile's visibility, importance, or projected size.
 
-This ADR is a *ratification* — the rule has existed in the code (in `groupMembers` and `assignModes`) and in the wiki article ([Planning Domain](../systems/subsystems/planning-domain.md) under "Invariants") since the three-tier promotion landed. It is captured here so future contributors do not relax it.
+This ADR is a *ratification* — the rule has existed in the code (in `groupMembers` and `assignModes`) and in the wiki article (Planning Domain under "Invariants") since the three-tier promotion landed. It is captured here so future contributors do not relax it.
 
 Cited in PRD #545.
 
@@ -49,6 +49,6 @@ This decision honors [Principles — Planning Domain](../principles/planning.md#
 ## Related
 
 - [Principles — Planning Domain](../principles/planning.md) — the framework this decision lives within
-- [Planning Domain](../systems/subsystems/planning-domain.md) — subsystem article; the "Invariants" section
-- [Flow: Chunk Lifecycle](../flows/chunk-lifecycle.md) — section 1c (single vs collection divergence) and section 3b (promotion)
+- Planning Domain — subsystem article; the "Invariants" section
+- Flow: Chunk Lifecycle — section 1c (single vs collection divergence) and section 3b (promotion)
 - PRD #545 — the work item during which this ADR was captured

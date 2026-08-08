@@ -91,8 +91,7 @@ the deployment to Google's token exchange.
 If you want to restrict sign-in to one or more Google Workspace domains,
 note the workspace domain(s) now (e.g., `example.com`). You will use them as
 `LUCIDA_ALLOWED_HOSTED_DOMAINS` (comma-separated). Empty / unset = anyone
-with a verified Google account can sign in (the OSS-permissive default; see
-[wiki/gotchas/oss-config-defaults.md](../../wiki/gotchas/oss-config-defaults.md)).
+with a verified Google account can sign in (the OSS-permissive default).
 
 ## 3. Create the Kubernetes Secret for the OAuth client secret
 
@@ -193,8 +192,8 @@ clusters reading from GCS), Workload Identity isn't an option. Mount a
 Google service-account JSON key as a secret/volume inside the pod (or bind
 it in via `docker run -v`) and set `GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json`
 in the deployment env. Lucida forwards that env var to the GCS client
-explicitly; see [wiki/gotchas/gcs-credentials.md](../../wiki/gotchas/gcs-credentials.md)
-for credential discovery order. WI on GKE remains the recommended path
+explicitly; see the README's "Google Cloud credentials" notes for the
+discovery order. WI on GKE remains the recommended path
 when available.
 
 ### EKS IRSA (IAM Roles for Service Accounts)
@@ -308,9 +307,8 @@ Lucida's admin allowlist starts empty. To make yourself an admin:
 3. Sign out and sign back in (or refresh — admin status is computed
    per-request from the session principal, not stored on the session row).
 
-There is no in-app admin promotion today;
-[wiki/gotchas/oss-config-defaults.md](../../wiki/gotchas/oss-config-defaults.md)
-documents the "I want to add an admin without restarting" gotcha. Plan
+There is no in-app admin promotion today: the admin list is read from the
+environment at startup, so adding an admin requires a restart. Plan
 admin changes around restarts.
 
 ## 9. Backup considerations
@@ -387,8 +385,8 @@ and intend to track upstream:
    the manifest set or add adopter-specific resources, that job will
    continue to validate them.
 3. **Release workflow**. The upstream release process (release-please +
-   image publish) is documented in
-   [wiki/gotchas/branching-and-releases.md](../../wiki/gotchas/branching-and-releases.md).
+   image publish) lives in `.github/workflows/`; see also
+   `wiki/decisions/0022-manual-merge-release-please-on-main.md`.
    If you want to publish your own image tags from your fork, replicate
    the relevant pieces of `.github/workflows/release.yml` against your
    registry credentials.

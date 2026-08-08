@@ -32,6 +32,6 @@ Today `nextState = { previousActiveSet: result.activeSet }` would be a trivial d
 ## Related
 
 - [Principles — Planning Domain](../principles/planning.md) — the framework this decision lives within
-- [Planning Domain](../systems/subsystems/planning-domain.md) — subsystem article; refreshed for the new seam
+- Planning Domain — subsystem article; refreshed for the new seam
 - [Discriminated Active-Set and Entity Types](0026-discriminated-active-set-and-entity-types.md) — sister decision; same PRD, same principle
 - PRD #563 — the work item this ADR was created during

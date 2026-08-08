@@ -4,7 +4,7 @@
 
 A principle is a guiding light, not a mechanism. It is an aspirational, directional statement about what this part of the product *should optimize for* — the kind of thing you'd want to be true even after every line of today's code has been rewritten. It tells you which way to lean when a decision is a genuine trade-off and the spec alone won't settle it.
 
-A principle is therefore deliberately *blind to decisions*. It names a direction ("prefer the smoother render"), never an implementation ("use epoch-gated texture atlasing"). The moment a statement names a data structure, a file, or a wire format, it has stopped being a principle and become a mechanic — and mechanics belong in ADRs and subsystem docs, not here. The test: if the sentence could only have been written by someone who'd read the current code, it's too low.
+A principle is therefore deliberately *blind to decisions*. It names a direction ("prefer the smoother render"), never an implementation ("use epoch-gated texture atlasing"). The moment a statement names a data structure, a file, or a wire format, it has stopped being a principle and become a mechanic — and mechanics belong in ADRs or the code itself, not here. The test: if the sentence could only have been written by someone who'd read the current code, it's too low.
 
 Principles are read by the rest of the wiki, never read from it. ADRs cite a principle as the *justification* for a specific choice; a principle never cites an ADR back, so it keeps applying as the decisions underneath it change. When a proposed change can't honor a principle, that's not a reason to quietly edit the principle — it's an ADR that names the principle being relaxed, the alternatives weighed, and why the trade was worth it.
 

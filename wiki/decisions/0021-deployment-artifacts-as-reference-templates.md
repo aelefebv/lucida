@@ -46,7 +46,7 @@ The same logic applies to provider-specific resources. A `gke-internal-lb/` Kust
 
 - **`extras/deploy/k8s/` contents are documentation, not source.** Adopters fork. The upstream files exist to communicate "here is the shape of the deployment" — they are not designed to be `kubectl apply`'d directly without edits. The placeholders are obvious enough that this should not surprise anyone, but `RUNBOOK.md` says it explicitly.
 - **Adopter customization is unbounded.** Some will wrap in Helm, some in Kustomize, some in plain shell with `envsubst`. The upstream cannot know what shape an adopter chose, which is the point.
-- **Provider-specific guidance lives in `wiki/systems/subsystems/deployment.md`, not in the manifests.** The deployment article documents Workload Identity for GKE, IRSA for EKS, etc., as text. The manifests stay generic. Cross-cloud parity by reference, not by overlay.
+- **Provider-specific guidance lives in `extras/deploy/RUNBOOK.md`, not in the manifests.** Workload Identity for GKE, IRSA for EKS, etc. are documented as text. The manifests stay generic. Cross-cloud parity by reference, not by overlay.
 - **CI validates manifest syntax, not behavior.** A `kubectl apply --dry-run=client -f extras/deploy/k8s/` step (with placeholders substituted to dummy strings) catches schema regressions; we do not run a real cluster in CI for this artifact.
 - **`extras/deploy/RUNBOOK.md` carries weight.** The manifest-by-itself is incomplete; the RUNBOOK is the procedural counterpart. Both must stay accurate to the env-var contract.
 
@@ -55,7 +55,6 @@ The same logic applies to provider-specific resources. A `gke-internal-lb/` Kust
 - `extras/deploy/k8s/{deployment,service,pvc,serviceaccount,ingress}.yaml` — five files, raw YAML, `<PLACEHOLDER>` syntax.
 - `extras/deploy/docker-compose.yml` — small-deploy alternative; same posture (placeholder values).
 - `extras/deploy/RUNBOOK.md` — step-by-step walkthrough using placeholder values.
-- `wiki/systems/subsystems/deployment.md` — the conceptual reference these artifacts implement.
 - *Conspicuous absence:* no `Chart.yaml`, no `kustomization.yaml`, no `values.yaml`, no provider-specific CRD examples in the upstream repo.
 
 ## Related
@@ -63,4 +62,4 @@ The same logic applies to provider-specific resources. A `gke-internal-lb/` Kust
 - PRD #486 — implementation specification
 - [Configurable From Day One for OSS Release](0017-configurable-from-day-one-for-oss-release.md) — the OSS posture this extends from configuration to deployment
 - [Single-Image Container with `ServeDir` is the Canonical Deploy Unit](0020-single-image-with-servedir.md) — the deploy unit these manifests reference
-- [OSS Config Defaults and the LUCIDA_* Env Var Contract](../gotchas/oss-config-defaults.md) — env-var contract the manifests plug values into
+- OSS Config Defaults and the LUCIDA_* Env Var Contract — env-var contract the manifests plug values into

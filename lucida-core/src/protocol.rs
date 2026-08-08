@@ -319,7 +319,7 @@ pub enum ServerMessage {
     /// Deleted) — keeping the broadcast payload small.
     ///
     /// Variant added at the end so the serde tag positions of older
-    /// variants don't shift (see `wiki/gotchas/scene-document-state-json-compat`).
+    /// variants don't shift.
     BookmarkChanged {
         id: String,
         action: BookmarkAction,
@@ -337,7 +337,7 @@ pub enum ServerMessage {
     /// stay invisible behind a stalling canvas.
     ///
     /// Variant added at the end so the serde tag positions of older
-    /// variants don't shift (see `wiki/gotchas/scene-document-state-json-compat`).
+    /// variants don't shift.
     SourceChunkStatus {
         dataset_id: DatasetId,
         image_id: ImageId,

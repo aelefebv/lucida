@@ -20,7 +20,7 @@ When the asset catalog does not advertise a proxy that the desired promotion mod
 
 Tier-skipping (e.g., `group-as-proxy` → `tiles-with-detail` directly) is not allowed even when both intermediate tiers' assets are unavailable. Each degrade step is recorded in `PlanStats.catalogDegradations` for telemetry.
 
-This ADR is a *ratification* — the rule has existed in the code (in `assignModes`) and in the wiki article ([Planning Domain](../systems/subsystems/planning-domain.md) under "Invariants") since the three-tier promotion landed. It is captured here so future contributors do not relax it.
+This ADR is a *ratification* — the rule has existed in the code (in `assignModes`) and in the wiki article (Planning Domain under "Invariants") since the three-tier promotion landed. It is captured here so future contributors do not relax it.
 
 Cited in PRD #545.
 
@@ -44,6 +44,6 @@ The one-tier-at-a-time rule honors [Principles — Planning Domain](../principle
 ## Related
 
 - [Principles — Planning Domain](../principles/planning.md) — the framework this decision lives within
-- [Planning Domain](../systems/subsystems/planning-domain.md) — subsystem article; the "Invariants" section
-- [Flow: Chunk Lifecycle](../flows/chunk-lifecycle.md) — section 3b (promotion) and the catalog-aware degradation paragraph
+- Planning Domain — subsystem article; the "Invariants" section
+- Flow: Chunk Lifecycle — section 3b (promotion) and the catalog-aware degradation paragraph
 - PRD #545 — the work item during which this ADR was captured

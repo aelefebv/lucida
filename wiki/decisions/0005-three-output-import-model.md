@@ -12,10 +12,10 @@ modified: 2026-07-03
 
 ## Decision
 
-[lucida-store](../systems/crates/lucida-store.md)'s `import_dataset` produces an **`ImportResult`** with three components:
+lucida-store's `import_dataset` produces an **`ImportResult`** with three components:
 
-- **`DatasetManifest`** (from [lucida-content](../systems/crates/lucida-content.md)) — what the renderer needs: entities, transforms, images, source layouts, default layout.
-- **`FetchSource`** (from [lucida-protocol](../systems/crates/lucida-protocol.md)) — how the client should fetch chunk bytes (currently always `Proxied`).
+- **`DatasetManifest`** (from lucida-content) — what the renderer needs: entities, transforms, images, source layouts, default layout.
+- **`FetchSource`** (from lucida-protocol) — how the client should fetch chunk bytes (currently always `Proxied`).
 - **`ServerBindingSeed`** (defined in `lucida-store/src/import_types.rs`) — what the server needs to resolve chunk keys to object-store paths and detect storage compression.
 
 Only `DatasetManifest` and `FetchSource` are sent on the wire (via `DatasetOpened { manifest, fetch, catalog }`). `ServerBindingSeed` is server-private — the server uses it to build a `ChunkResolver` and never broadcasts it.
@@ -52,7 +52,7 @@ The renames moved the names toward what they actually describe (the manifest is 
 
 ## Related
 
-- [lucida-store](../systems/crates/lucida-store.md) — the import implementation
-- [lucida-protocol](../systems/crates/lucida-protocol.md) — the wire types
-- [lucida-content](../systems/crates/lucida-content.md) — the manifest data model
+- lucida-store — the import implementation
+- lucida-protocol — the wire types
+- lucida-content — the manifest data model
 - [ContentSource (JS) vs FetchSource (wire)](0006-content-source-vs-fetch-source.md) — the JS/wire naming split
