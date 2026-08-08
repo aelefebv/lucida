@@ -221,8 +221,7 @@ export interface SessionControllerDeps {
  * plus reconnect/throttle timers, in-flight fetches, pending request
  * timeouts, decode workers — and clears the dataset registry. A host that
  * needs a session again constructs a fresh controller; nothing here is
- * re-armable (the instance-per-mount resolution in
- * wiki/gotchas/strict-mode-destroyable-classes.md).
+ * re-armable (the instance-per-mount resolution).
  *
  * This module is framework-free on purpose: the session must not care how
  * often a UI re-renders or re-runs effects. React (or a test) adapts via

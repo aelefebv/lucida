@@ -40,7 +40,7 @@ In a collection, all the tiles of a single group are one visual unit. They shoul
 
 **When in tension.** Coherence can cost responsiveness: if one tile could load faster than its siblings, coherence makes everyone wait for the slowest. This principle says that's the right call.
 
-**Where today's default disagrees.** The shipped coarse/detail path resolves residency tiers *per tile* (see [Planning Domain](../systems/subsystems/planning-domain.md)), so this principle currently describes the direction we want, not the behavior we have. Kept as a guiding light, flagged as not-yet-true.
+**Where today's default disagrees.** The shipped coarse/detail path resolves residency tiers *per tile* (see Planning Domain), so this principle currently describes the direction we want, not the behavior we have. Kept as a guiding light, flagged as not-yet-true.
 
 ## 4. Planning is a pure function of a snapshot
 

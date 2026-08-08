@@ -18,7 +18,7 @@ The destination layout (six new subdirectories): `coldState/` (`apply.ts`, `grou
 
 ## Why this shape
 
-The eight-pass dechaos analysis under `wiki/outputs/dechaos-render-2026-05-16/` makes the structural case: `gpu.worker.ts` owns 14 distinct responsibilities (cold-state ingestion, message dispatch, GPU bootstrap, devtools, lifecycle, LUT/offscreen-pool resources, proxy upload, descriptor rebuilds, member-registry routing, group→tiles fan-out, render-loop ticks, eviction triggers, atlas state, transient descriptors) and `volumeHandlers.ts` (646 LOC) + `sliceHandlers.ts` (554 LOC) each own 8 responsibilities of their own. The orchestration code — the parts that wire pure algorithmic units together — has zero direct tests today and is the source of the file's reasoning load.
+The eight-pass dechaos analysis makes the structural case: `gpu.worker.ts` owns 14 distinct responsibilities (cold-state ingestion, message dispatch, GPU bootstrap, devtools, lifecycle, LUT/offscreen-pool resources, proxy upload, descriptor rebuilds, member-registry routing, group→tiles fan-out, render-loop ticks, eviction triggers, atlas state, transient descriptors) and `volumeHandlers.ts` (646 LOC) + `sliceHandlers.ts` (554 LOC) each own 8 responsibilities of their own. The orchestration code — the parts that wire pure algorithmic units together — has zero direct tests today and is the source of the file's reasoning load.
 
 Pass 2 of the dechaos identified 15 seams ranked by severity; the top five (cold-state ingestion inside dispatch, atlas-state/driver fusion in handlers, member/pool registry as ambient state, proxy lifecycle, module-level mutable state across 4 files) map one-to-one onto the directory tree above. Pass 6 identified 14 extractable composability units; the top three (pool-grouping primitive, eviction distance + farthest-slot finder, indirection remap) collapse 2D/3D duplicate code that today exists in parallel in `volumeHandlers.ts` and `sliceHandlers.ts`. Pass 7 confirmed which test suites need to land before each extraction — and crucially, that ~60% of the test investment lands *post*-extraction because the orchestration must be extractable first.
 
@@ -28,7 +28,7 @@ This ADR does not cite a principle. `principles/render-pipeline.md` does not yet
 
 ## Decision: 11 incremental slices
 
-The dechaos's Pass 8 sequencing (`wiki/outputs/dechaos-render-2026-05-16/08-refactor-sequencing.md`) lays out 11 slices ordered by precondition. Summary:
+The dechaos's Pass 8 sequencing lays out 11 slices ordered by precondition. Summary:
 
 - **Slice 0** — directory scaffold (empty placeholder files for the layout above).
 - **Slice 1** — renames (`chunksEvicted.datasetId` → `memberId`; same for `volumeChunkData.datasetId` / `sliceChunkData.datasetId`) + relocate `parseChunkKey` / `makeCompositeKey` / `derivePoolKey` to `chunkKeys.ts` + declare `chunkPoolKey(...)` in `poolKeys.ts`.
@@ -110,7 +110,6 @@ Pass 8 explicitly recommends **against** producing a `RenderClient` interface sp
 - [`planning/index.ts` Split into Per-Concern Files](0029-planning-index-split-into-per-concern-files.md) — first refactor in the chunk-pipeline arc; precedent for the cadence and the integration-tests-stay-monolithic discipline
 - [All GPU Work on a Dedicated Web Worker](0003-gpu-on-dedicated-worker.md) — establishes the worker boundary this refactor cleans up inside of
 - [Discriminated Active-Set and Entity Types](0026-discriminated-active-set-and-entity-types.md) — the discrimination pattern Slice 11 mirrors on the cold-state wire boundary
-- [Flow: Chunk Lifecycle](../flows/chunk-lifecycle.md) — overarching pipeline architecture; will be refreshed after the refactor stabilizes
+- Flow: Chunk Lifecycle — overarching pipeline architecture; will be refreshed after the refactor stabilizes
 - PRD #622 — the work item this ADR was created during
 - PRDs #545 / #592 / #607 — the cumulative arc this refactor completes
-- `wiki/outputs/dechaos-render-2026-05-16/` — the eight-pass design exploration that produced the slice plan

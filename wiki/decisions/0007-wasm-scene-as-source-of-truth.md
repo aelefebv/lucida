@@ -12,7 +12,7 @@ modified: 2026-06-25
 
 ## Decision
 
-The web client doesn't reimplement the Scene model. The Rust [lucida-core](../systems/crates/lucida-core.md) crate compiles to WASM, the web client loads it, and JS treats `Scene` as the authority for "what is visible, at what scale, with what camera." JS owns the network, the GPU, and the DOM; WASM owns the Scene state, command application, view query, and ray pick.
+The web client doesn't reimplement the Scene model. The Rust lucida-core crate compiles to WASM, the web client loads it, and JS treats `Scene` as the authority for "what is visible, at what scale, with what camera." JS owns the network, the GPU, and the DOM; WASM owns the Scene state, command application, view query, and ray pick.
 
 This affects every viewport command, every `view_query`, every chunk plan, every ray pick. Concretely, JS calls `scene.apply_command(json)` for every incoming broadcast and `scene.view_query(dsId)` every render tick.
 
@@ -35,11 +35,11 @@ WASM literally cannot make a `fetch()`, open a WebSocket, or write to the GPU. T
 ### Code reuse
 Several surfaces need the same answers:
 
-- **[lucida-cli](../systems/crates/lucida-cli.md)** uses `Scene::chunk_plan_for(datasetId)` to print visible chunks for a viewport, identical to what the browser would compute.
-- **[lucida-py](../systems/crates/lucida-py.md)** wraps `Scene` (`PyScene`) for scriptable analyses, exposing `chunk_plan`/`chunk_plan_for`.
-- **[lucida-web](../systems/crates/lucida-web.md)** runs the same Scene in the browser via WASM.
+- **lucida-cli** uses `Scene::chunk_plan_for(datasetId)` to print visible chunks for a viewport, identical to what the browser would compute.
+- **lucida-py** wraps `Scene` (`PyScene`) for scriptable analyses, exposing `chunk_plan`/`chunk_plan_for`.
+- **lucida-web** runs the same Scene in the browser via WASM.
 
-(Note: [lucida-server](../systems/crates/lucida-server.md) does *not* instantiate `Scene` or call `chunk_plan` — its headless prefetch uses a separate viewer-interest work-key mechanism, not the Scene model.)
+(Note: lucida-server does *not* instantiate `Scene` or call `chunk_plan` — its headless prefetch uses a separate viewer-interest work-key mechanism, not the Scene model.)
 
 If each had its own implementation, those bugs would coexist in subtly different ways. By compiling Rust to WASM, all four share one implementation — including the view-query math that's the most failure-prone piece (projected diagonals, ideal LOD, importance scoring).
 
@@ -71,7 +71,7 @@ The cost is one parse+serialize per call — negligible at human input rates, mi
 
 ## Costs
 
-- **Build complexity.** Rust changes require `cargo test -p lucida-core` and then `cd lucida-web && npm run build:wasm`. Vite hot-reload picks up the new WASM but doesn't trigger the rebuild itself. See [WASM Rebuild After Rust Changes](../gotchas/wasm-rebuild-after-rust-changes.md).
+- **Build complexity.** Rust changes require `cargo test -p lucida-core` and then `cd lucida-web && npm run build:wasm`. Vite hot-reload picks up the new WASM but doesn't trigger the rebuild itself. See WASM Rebuild After Rust Changes.
 - **JSON marshaling at the boundary.** `apply_command(json)` serializes commands as JSON across the WASM boundary because typed pyo3-style bindings would balloon the API surface — see the cost note under "What crosses the boundary" above.
 - **Debugging crosses runtimes.** A bug in view-query math shows up as a wrong projected diagonal in JS; you have to reach into Rust source to debug it. Mitigated by the test suite in `lucida-core/src/scene/`, which is JS-callable equivalent.
 
@@ -90,6 +90,6 @@ The cost is one parse+serialize per call — negligible at human input rates, mi
 
 ## Related
 
-- [lucida-core](../systems/crates/lucida-core.md)
-- [Scene State and Epochs](../systems/subsystems/scene-state-and-epochs.md)
-- [Flow: Chunk Lifecycle](../flows/chunk-lifecycle.md)
+- lucida-core
+- Scene State and Epochs
+- Flow: Chunk Lifecycle

@@ -48,7 +48,7 @@ interface Params {
  * controller.
  *
  * StrictMode safety comes from the fresh-instance-per-mount pattern
- * (wiki/gotchas/strict-mode-destroyable-classes.md): the bootstrap effect's
+ * the bootstrap effect's
  * create/destroy pair is complete, so mount → cleanup → mount builds a
  * brand-new stack against a fresh WebSocket rather than restarting a dead
  * one, and an extra effect re-run costs a reconnect, never correctness.

@@ -55,7 +55,7 @@ Local vars (e.g., `centerX` / `centerY` / `centerZ` in `chunkDistanceFromCenter`
 ## Related
 
 - [Principles — Planning Domain](../principles/planning.md) — the framework this decision lives within
-- [Planning Domain](../systems/subsystems/planning-domain.md) — subsystem article; refreshed for the new naming
+- Planning Domain — subsystem article; refreshed for the new naming
 - [`planning/index.ts` Split into Per-Concern Files](0029-planning-index-split-into-per-concern-files.md) — sister decision; same PRD
 - [`validatePlanningInputs` as the Dev-Mode Boundary Check](0031-validate-planning-inputs-dev-mode-boundary-check.md) — sister decision; same PRD
 - PRD #578 — the work item this ADR was created during

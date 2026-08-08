@@ -58,7 +58,6 @@ The release process is part of lucida's public OSS contract: adopters pinning to
 - `.github/workflows/release-please.yml` — runs on main push after CI; opens/updates the release PR. Auto-merge OFF.
 - `.github/workflows/release.yml` — runs on git-tag push (`v*`); builds multi-arch + SBOM + trivy + push to ghcr.io.
 - `release-please-config.json` + `.release-please-manifest.json` — single-root `release-type: simple` config (`packages: { ".": {} }`); one tag stream, one root `CHANGELOG.md`. Per-crate `Cargo.toml` versions are decorative and not bumped on release; the git tag is the only version that means anything externally. See "Single-root config over per-crate linked-versions" in Consequences.
-- `wiki/gotchas/branching-and-releases.md` (new) — operational guide: trunk-based shape, image-tag promotion, branch-protection prerequisite.
 - *Documented prerequisite (not code)*: branch protection on `main` enabled via repo Settings.
 
 ## Related

@@ -19,7 +19,7 @@ GPU-side temporal lookahead (keeping next-timepoint chunks resident on the GPU w
 ## Why not GPU-side lookahead
 
 - **GPU memory is the binding constraint** for collection datasets. Reserving slots for next-timepoint speculation means fewer slots available for currently-visible detail; the latter is always more valuable.
-- **Mapping vs unmapping is the expensive part of GPU residency**, not the upload itself. Once chunks are in the [CPU Cache](../systems/subsystems/cpu-cache.md), pushing them to a free GPU slot is fast. So a CPU-side prefetch that uploads on-demand at scrub time has competitive perceived latency without sacrificing GPU capacity.
+- **Mapping vs unmapping is the expensive part of GPU residency**, not the upload itself. Once chunks are in the CPU Cache, pushing them to a free GPU slot is fast. So a CPU-side prefetch that uploads on-demand at scrub time has competitive perceived latency without sacrificing GPU capacity.
 - **Scrubbing patterns are bursty, not continuous.** Users scrub through a range, pause, then scrub more. The CPU cache's prefetch tier keeps the relevant chunks decoded; the GPU upload happens at the scrub event. Latency is a few ms — well under perceptual threshold.
 
 ## What stayed
@@ -29,6 +29,6 @@ GPU-side temporal lookahead (keeping next-timepoint chunks resident on the GPU w
 
 ## Related
 
-- [CPU Cache](../systems/subsystems/cpu-cache.md) — prefetch tier and lane priority
-- [Flow: Chunk Lifecycle](../flows/chunk-lifecycle.md) — where the prefetch lane shows up in the priority formula
-- [Planning Domain](../systems/subsystems/planning-domain.md) — emits prefetch requests
+- CPU Cache — prefetch tier and lane priority
+- Flow: Chunk Lifecycle — where the prefetch lane shows up in the priority formula
+- Planning Domain — emits prefetch requests

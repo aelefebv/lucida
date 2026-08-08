@@ -47,6 +47,6 @@ By keying on `(channel)`, channels stop fighting for shared capacity; by keying 
 
 ## Related
 
-- [GPU Residency](../systems/subsystems/gpu-residency.md) — atlas architecture
-- [Flow: Chunk Lifecycle](../flows/chunk-lifecycle.md) — where the upload path consults pool capacity
-- [Planning Domain](../systems/subsystems/planning-domain.md) — what generates the proxy demand
+- GPU Residency — atlas architecture
+- Flow: Chunk Lifecycle — where the upload path consults pool capacity
+- Planning Domain — what generates the proxy demand

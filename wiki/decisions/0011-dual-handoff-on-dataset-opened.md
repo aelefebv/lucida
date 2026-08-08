@@ -14,7 +14,7 @@ modified: 2026-06-25
 
 When the web client receives a `dataset_opened` broadcast, it splits the work in **two parallel hand-offs**:
 
-- **WASM side**: `scene.apply_command(commandJson)` — the Rust [lucida-core](../systems/crates/lucida-core.md) Scene ingests entities, transforms, images, and layouts. From here, all spatial/visibility logic is WASM-driven.
+- **WASM side**: `scene.apply_command(commandJson)` — the Rust lucida-core Scene ingests entities, transforms, images, and layouts. From here, all spatial/visibility logic is WASM-driven.
 - **JS side**: in `useBridge.setupFetchPipeline`, five steps in order:
   1. `contentSource.registerImage(image_id, wire_format)` per image
   2. `datasetsRef.set(datasetId, {id, name, manifest, fetch})`
@@ -29,7 +29,7 @@ Both sides observe the same `DatasetOpened` event but consume different parts of
 A single ingestion path would force one of two compromises:
 
 - **WASM does everything**, including managing JS-side fetch state — but fetch state lives in JS (promise tables, network plumbing, decode pool). Crossing the WASM boundary for every fetch detail is expensive.
-- **JS does everything**, including building Scene state — but that reimplements [lucida-core](../systems/crates/lucida-core.md) and breaks the [WASM-as-source-of-truth invariant](0007-wasm-scene-as-source-of-truth.md).
+- **JS does everything**, including building Scene state — but that reimplements lucida-core and breaks the [WASM-as-source-of-truth invariant](0007-wasm-scene-as-source-of-truth.md).
 
 Splitting at the event boundary is the cleanest cut: each side does what it owns; the event is the synchronization point.
 
@@ -42,17 +42,17 @@ Within JS-side, the order is intentional:
 - the grow-the-vec `set_channel_visible` **after** the dataset is registered with WASM — the call goes through `wasmScene.apply_command` and would fail otherwise.
 - `loopRef.current.addDataset(...)` last on the JS side because flipping `interactiveDirty` triggers the next tick, and the tick must see the fully set-up state.
 
-Reordering breaks subtly — see [App.tsx Hook Order and Callback Refs](../gotchas/app-tsx-hook-order.md) for the related hook-order rule.
+Reordering breaks subtly — see App.tsx Hook Order and Callback Refs for the related hook-order rule.
 
 ## How this decision shows up in code
 
 - `lucida-web/src/hooks/useBridge.ts` — the `dataset_opened` command handler.
 - `lucida-web/src/hooks/useBridge.ts::setupFetchPipeline` — the JS-side hand-off.
 - `lucida-web/src/manifestTypes.ts` mirrors the manifest shape on the TS side so both `apply_command` and `setupFetchPipeline` see the same structure.
-- See the dataset-opening flow article: [Flow: Dataset Opening](../flows/dataset-opening.md).
+- See the dataset-opening flow article: Flow: Dataset Opening.
 
 ## Related
 
-- [Scene State and Epochs](../systems/subsystems/scene-state-and-epochs.md)
-- [Flow: Chunk Lifecycle](../flows/chunk-lifecycle.md)
-- [Flow: Dataset Opening](../flows/dataset-opening.md)
+- Scene State and Epochs
+- Flow: Chunk Lifecycle
+- Flow: Dataset Opening

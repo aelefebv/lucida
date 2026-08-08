@@ -30,7 +30,7 @@ The four `adaptive eviction` tests are an exception: they migrate to `interactio
 
 ## Why bug fixes ride along inside slices
 
-Two latent bugs were surfaced by the eight-pass dechaos analysis under `wiki/outputs/dechaos-fetch-decode-2026-05-15/`:
+Two latent bugs were surfaced by the eight-pass dechaos analysis:
 
 1. `ProxiedContentSource.imageWireFormats` is never cleared on dataset removal (long-session leak).
 2. `fetchAndDecode` classifies "no wire format registered" as transient rather than permanent (one wasted retry on a setup bug).
@@ -57,7 +57,6 @@ Unification is captured as deferred Slice 12 — landed only when a third asset 
 - [CpuCache as Sole Fetch Path](0008-cpu-cache-as-sole-fetch-path.md) — earlier ADR; documented the file at ~900 lines pre-growth
 - [`planning/index.ts` Split into Per-Concern Files](0029-planning-index-split-into-per-concern-files.md) — sister-refactor pattern on the upstream half of the chunk pipeline
 - [ContentSource (JS) vs FetchSource (wire)](0006-content-source-vs-fetch-source.md) — context for the `ContentSource` type and the chunk/proxy duplication-vs-unification trade-off
-- [CPU Cache](../systems/subsystems/cpu-cache.md) — subsystem article (refreshed in Phase 5 after the refactor ships)
-- [Flow: Chunk Lifecycle](../flows/chunk-lifecycle.md) — overarching pipeline architecture
+- CPU Cache — subsystem article (refreshed in Phase 5 after the refactor ships)
+- Flow: Chunk Lifecycle — overarching pipeline architecture
 - PRD #592 — the work item this ADR was created during
-- `wiki/outputs/dechaos-fetch-decode-2026-05-15/` — the eight-pass design exploration that produced the slice plan

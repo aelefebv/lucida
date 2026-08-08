@@ -103,8 +103,7 @@ pub async fn broadcast_bookmark_change(
 
     // Build the wire message once — every recipient gets the same JSON.
     // Variant added at the end of `ServerMessage` so this serializes
-    // without reshuffling existing tag positions (see
-    // `wiki/gotchas/scene-document-state-json-compat`).
+    // without reshuffling existing tag positions.
     let msg = ServerMessage::BookmarkChanged {
         id: bookmark_id.to_string(),
         action,

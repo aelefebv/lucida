@@ -57,7 +57,7 @@ The 5-file split + barrel is intact, but the directory has grown since this ADR 
 ## Related
 
 - [Principles — Planning Domain](../principles/planning.md) — the framework this decision lives within
-- [Planning Domain](../systems/subsystems/planning-domain.md) — subsystem article; refreshed for the new module layout
+- Planning Domain — subsystem article; refreshed for the new module layout
 - [Coordinate-Frame Naming Discipline at the JS↔WASM Boundary](0030-coordinate-frame-naming-discipline.md) — sister decision; same PRD
 - [`validatePlanningInputs` as the Dev-Mode Boundary Check](0031-validate-planning-inputs-dev-mode-boundary-check.md) — sister decision; same PRD
 - PRD #578 — the work item this ADR was created during

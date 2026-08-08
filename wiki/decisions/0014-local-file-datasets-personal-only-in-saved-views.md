@@ -52,5 +52,5 @@ See "Why" §3 above.
 ## Related
 
 - [URL-as-App-State for Saved Views](0013-url-as-app-state-for-saved-views.md) — the umbrella saved-views decision; this one carves out a sharp edge in it
-- [lucida-store](../systems/crates/lucida-store.md) — `backend::open` URL-scheme routing
-- [lucida-server](../systems/crates/lucida-server.md) — `dataset_id_for_url` and the `/api/browse` endpoint
+- lucida-store — `backend::open` URL-scheme routing
+- lucida-server — `dataset_id_for_url` and the `/api/browse` endpoint

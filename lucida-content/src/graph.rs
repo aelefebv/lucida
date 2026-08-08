@@ -48,8 +48,7 @@ use crate::transform::{TransformEdge, VoxelTransform};
 /// Persisted inline documents therefore keep loading — and re-persist in the
 /// compact form on their next write, because the encoder has no inline mode.
 /// The reverse is a one-way door: decoders that predate the compact form
-/// hard-reject any manifest that uses it (see
-/// `wiki/gotchas/compact-manifest-decoder-one-way-door.md`).
+/// hard-reject any manifest that uses it.
 ///
 /// The serialization fixed point is the **canonical encoder output**:
 /// `encode(decode(x)) == x` byte-for-byte when `x` came out of this encoder.

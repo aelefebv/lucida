@@ -27,7 +27,7 @@ Merging into one path resolved all three. The cache's **tiered LRU** (`prefetch 
 ## Tradeoffs
 
 - **One bug ruins everything.** A bug in `cpuCache.ts` no longer has a fallback path. Tests in `cpuCache.test.ts` were prioritized for this reason — they cover the eviction tier ordering specifically.
-- **Code surface concentrated.** The fetch path is dense, and future changes risk touching unrelated concerns. Mitigated two ways: the [Flow: Chunk Lifecycle](../flows/chunk-lifecycle.md)'s clear phase boundaries (`submit → schedule → decode → drain`), and the split of the path across `lucida-web/src/pipeline/fetch/` ([ADR 0032](0032-cpucache-split-into-pipeline-fetch.md)) so the once-monolithic cache no longer lives in a single file.
+- **Code surface concentrated.** The fetch path is dense, and future changes risk touching unrelated concerns. Mitigated two ways: the Flow: Chunk Lifecycle's clear phase boundaries (`submit → schedule → decode → drain`), and the split of the path across `lucida-web/src/pipeline/fetch/` ([ADR 0032](0032-cpucache-split-into-pipeline-fetch.md)) so the once-monolithic cache no longer lives in a single file.
 
 ## How this decision shows up in code
 
@@ -38,6 +38,6 @@ Merging into one path resolved all three. The cache's **tiered LRU** (`prefetch 
 
 ## Related
 
-- [CPU Cache](../systems/subsystems/cpu-cache.md)
-- [Flow: Chunk Lifecycle](../flows/chunk-lifecycle.md)
-- [Planning Domain](../systems/subsystems/planning-domain.md) — produces the `RequestPlan` consumed by `submit`
+- CPU Cache
+- Flow: Chunk Lifecycle
+- Planning Domain — produces the `RequestPlan` consumed by `submit`

@@ -38,4 +38,4 @@ Lucida is one open, local-first product that runs on a laptop with no cloud acco
 
 ## Related
 
-[Deployment](../systems/subsystems/deployment.md) · [lucida-store](../systems/crates/lucida-store.md) · [Single-Image Container with `ServeDir` is the Canonical Deploy Unit](../decisions/0020-single-image-with-servedir.md) · [Surface Parity](surface-parity.md)
+Deployment · lucida-store · [Single-Image Container with `ServeDir` is the Canonical Deploy Unit](../decisions/0020-single-image-with-servedir.md) · [Surface Parity](surface-parity.md)

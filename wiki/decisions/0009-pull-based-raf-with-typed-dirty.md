@@ -52,6 +52,6 @@ The typed split lets the loop be aggressive when the user wants snap response (`
 
 ## Related
 
-- [Flow: Chunk Lifecycle](../flows/chunk-lifecycle.md)
-- [Scene State and Epochs](../systems/subsystems/scene-state-and-epochs.md) — the WASM-side epoch model the orchestrator consults to decide if planning is needed at all
-- [Minimap Skip-When-Stationary via Render Key](../gotchas/minimap-render-key.md) — a related render-skip mechanism
+- Flow: Chunk Lifecycle
+- Scene State and Epochs — the WASM-side epoch model the orchestrator consults to decide if planning is needed at all
+- Minimap Skip-When-Stationary via Render Key — a related render-skip mechanism

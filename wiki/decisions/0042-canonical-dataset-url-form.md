@@ -50,12 +50,12 @@ Placement in `lucida-content::url` honors the existing crate boundaries: both `l
 - **What's explicitly NOT solved:** `..` resolution (`/foo/../bar` stays `/foo/../bar`); symlink collapse; full case-folding of the path (only the drive letter and a leading URI scheme are lowercased — host names, though also case-insensitive per RFC 3986, are left as typed); cross-machine path equivalence (still deferred to [Local-File Datasets Are Personal-Only in Saved Views](0014-local-file-datasets-personal-only-in-saved-views.md)'s personal-only-share rule).
 - **ADR-0014's classifier rule** is amended (one-line addendum): the test is now `is_local_dataset_url(normalize_dataset_url(s))`, extended to cover drive-letter and UNC patterns. The personal-only-share decision and the `DatasetId`-blake3-collision sharp edge remain valid verbatim.
 - **`lucida-protocol`'s "owns nothing computational" claim stays valid** — the new helpers live in `lucida-content::url`, not protocol.
-- **CI stays Linux-only**; Windows support is verified manually by the author at PR time. [Queue — Open Questions](../queue.md) entry records the deferral. Adding a `windows-latest` matrix entry remains a future option, deferred until Windows usage stops being single-developer.
+- **CI stays Linux-only**; Windows support is verified manually by the author at PR time. Queue — Open Questions entry records the deferral. Adding a `windows-latest` matrix entry remains a future option, deferred until Windows usage stops being single-developer.
 
 ## Related
 
 - [Local-File Datasets Are Personal-Only in Saved Views](0014-local-file-datasets-personal-only-in-saved-views.md) — gets a one-line addendum re-pointing classifier at the new helper; the personal-only-share decision still stands
-- [lucida-content](../systems/crates/lucida-content.md) — hosts the new `url` module
-- [lucida-store](../systems/crates/lucida-store.md) — `backend::open` normalizes internally before classifying
-- [lucida-server](../systems/crates/lucida-server.md) — `/api/browse` returns canonical-form paths and a platform-default root
+- lucida-content — hosts the new `url` module
+- lucida-store — `backend::open` normalizes internally before classifying
+- lucida-server — `/api/browse` returns canonical-form paths and a platform-default root
 - PRD #703

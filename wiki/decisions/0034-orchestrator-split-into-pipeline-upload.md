@@ -24,7 +24,7 @@ The `pipeline/upload/` directory mirrors the shape of `pipeline/fetch/` after [`
 
 The split mirrors [`cpuCache.ts` split into `pipeline/fetch/` modules](0032-cpucache-split-into-pipeline-fetch.md) in shape: a single overgrown file becomes a coordinator plus a directory of 50–250 LOC modules, behaviour-preserving except for explicit named bug fixes. The two refactors complete the chunk pipeline's structural cleanup — fetch/decode upstream (CPU bytes in), upload downstream (GPU bytes out) — and adopting the same shape on both halves means the pipeline reads as one consistent system rather than two unrelated styles.
 
-`pipeline/upload/` mirrors `pipeline/fetch/` for the same composability reasons spelled out in 0032: the eight-pass dechaos analysis under `wiki/outputs/dechaos-upload-2026-05-15/` identified the same kinds of extractable units (a state tracker, pure builders, telemetry counters, a feedback handler) and recommended the same kind of directory-of-small-files destination. The eleven modules below are not an arbitrary count — they correspond one-to-one with the extractable seams Pass 2 ranked and Pass 6 confirmed.
+`pipeline/upload/` mirrors `pipeline/fetch/` for the same composability reasons spelled out in 0032: the eight-pass dechaos analysis identified the same kinds of extractable units (a state tracker, pure builders, telemetry counters, a feedback handler) and recommended the same kind of directory-of-small-files destination. The eleven modules below are not an arbitrary count — they correspond one-to-one with the extractable seams Pass 2 ranked and Pass 6 confirmed.
 
 ## Why the integration test suite stays monolithic through Slice 9
 
@@ -32,11 +32,11 @@ The split mirrors [`cpuCache.ts` split into `pipeline/fetch/` modules](0032-cpuc
 
 Through Slices 2–9 the integration tests stay put while per-module tests get added alongside each extracted module (`tracker.test.ts`, `drain.test.ts`, `displayState.test.ts`, etc.). Splitting `orchestrator.test.ts` into per-module test files mid-refactor would mean deciding which test belongs with which module while the modules are themselves moving — the same cognitive-load argument [`cpuCache.ts` split into `pipeline/fetch/` modules](0032-cpucache-split-into-pipeline-fetch.md) used for the cpu-cache split.
 
-The migration happens in Slice 10, after `Uploader` exists: upload-related test blocks (proxy delivery tracking, cold-state display state, viewHotState emission) move from `orchestrator.test.ts` to the appropriate per-module test files (`tracker.test.ts`, `coldState/displayState.test.ts`, `coldState/hotState.test.ts`). Planning-only tests stay on `orchestrator.test.ts`. The end state matches the destination diagram in `wiki/outputs/dechaos-upload-2026-05-15/08-refactor-sequencing.md`.
+The migration happens in Slice 10, after `Uploader` exists: upload-related test blocks (proxy delivery tracking, cold-state display state, viewHotState emission) move from `orchestrator.test.ts` to the appropriate per-module test files (`tracker.test.ts`, `coldState/displayState.test.ts`, `coldState/hotState.test.ts`). Planning-only tests stay on `orchestrator.test.ts`. The end state matches the destination diagram in the sequencing plan.
 
 ## Why bug fixes ride along inside slices
 
-Two real bugs were surfaced by the eight-pass dechaos analysis under `wiki/outputs/dechaos-upload-2026-05-15/`:
+Two real bugs were surfaced by the eight-pass dechaos analysis:
 
 1. `_lastFilteredRequests` / `_lastProxyRequests` are flat fields written per-dataset in the planning loop — only the last dataset's requests survive. The resend pass therefore only resends for the last dataset processed in the rebuild (multi-dataset under-resends).
 2. `workerWantedSet` is populated from `wantedSetDelta` but never read 
@@ -71,6 +71,5 @@ Pass 6 of the dechaos analysis explicitly recommended **against** an asset-abstr
 - [`planning/index.ts` Split into Per-Concern Files](0029-planning-index-split-into-per-concern-files.md) — earlier directory-of-small-files refactor; original template both this ADR and 0032 mirror
 - [ContentSource (JS) vs FetchSource (wire)](0006-content-source-vs-fetch-source.md) — context for the chunk/proxy duplication-vs-unification trade-off (the spirit this refactor honours by NOT unifying)
 - [CpuCache as Sole Fetch Path](0008-cpu-cache-as-sole-fetch-path.md) — establishes the fetch-side phase boundaries; upload-side is the symmetric downstream half
-- [Flow: Chunk Lifecycle](../flows/chunk-lifecycle.md) — overarching pipeline architecture; will be refreshed in Slice 13 after the refactor stabilizes
+- Flow: Chunk Lifecycle — overarching pipeline architecture; will be refreshed in Slice 13 after the refactor stabilizes
 - PRD #607 — the work item this ADR was created during
-- `wiki/outputs/dechaos-upload-2026-05-15/` — the eight-pass design exploration that produced the slice plan

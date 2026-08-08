@@ -23,7 +23,7 @@ Concretely:
 - Sharing a view = copying the current URL. There is no separate "save" verb in the wire format.
 - Refresh preserves state (the URL is the state).
 
-The encoded payload is a versioned record (`{v: 1, datasets, active_layouts, camera, view, display, dataset_order, dataset_settings}`) — gzip-compressed, base64url-encoded, defaults stripped before encoding. See [Saved Views](../systems/subsystems/saved-views.md) for the per-field rationale.
+The encoded payload is a versioned record (`{v: 1, datasets, active_layouts, camera, view, display, dataset_order, dataset_settings}`) — gzip-compressed, base64url-encoded, defaults stripped before encoding. See Saved Views for the per-field rationale.
 
 ## Why
 
@@ -43,7 +43,7 @@ The runtime cost is negligible: `history.replaceState` is microseconds; encoding
 ## Alternatives considered
 
 - **Encode-on-demand (X)**: simpler to implement, but loses refresh-preserves and forces a separate Share affordance. Rejected as a regression in the *personal* use case despite being slightly cleaner code.
-- **`pushState` per change**: every Pan would create a history entry. Rejected — back-button becomes useless. (See [Queue — Open Questions](../queue.md): a separate in-app undo/redo system is the right answer for milestone-event nav, not history-API piggybacking.)
+- **`pushState` per change**: every Pan would create a history entry. Rejected — back-button becomes useless. (See Queue — Open Questions: a separate in-app undo/redo system is the right answer for milestone-event nav, not history-API piggybacking.)
 - **Hybrid `pushState` for milestone changes (dataset opened, layout changed) + `replaceState` for continuous changes**: nontrivial classification logic; back-button semantics get muddled. Rejected for v1; in-app undo/redo is the cleaner separation.
 - **Server-side bookmark store as v1**: requires new persistent storage in `lucida-server` (currently entirely session-scoped), TTL policy, and possibly auth. Deferred — additive on top of Y's encoding when URL length pressure earns the infra.
 
@@ -53,7 +53,7 @@ The runtime cost is negligible: `history.replaceState` is microseconds; encoding
 - Apply-time race conditions matter: while the recipient flow is opening datasets and applying viewport commands, the URL-write debounce must be suppressed (an `applyInProgress` flag) to avoid feedback loops.
 - The capture record is a durable wire format. Schema evolution requires the `v:` field discipline — add fields with defaults, never repurpose, bump `v` on breaking changes.
 - Local-file datasets create a sharp edge: the URL is technically valid (refresh-preserves works for the sender) but the link is fragile when shared across machines. Handled separately in [Local-File Datasets Are Personal-Only in Saved Views](0014-local-file-datasets-personal-only-in-saved-views.md).
-- The selected-dataset wrinkle ([Queue — Open Questions](../queue.md)): UI focus is excluded from the capture, so the recipient may land with controls pointing at a different dataset than the sender was tweaking. Pixels match; follow-up controls don't. To revisit during implementation.
+- The selected-dataset wrinkle (Queue — Open Questions): UI focus is excluded from the capture, so the recipient may land with controls pointing at a different dataset than the sender was tweaking. Pixels match; follow-up controls don't. To revisit during implementation.
 
 ## How this decision shows up in code
 
@@ -64,12 +64,12 @@ The runtime cost is negligible: `history.replaceState` is microseconds; encoding
 - `lucida-web/src/hooks/useSavedViewSync.ts` — React wiring; constructs urlSync + applier; subscribes to `DatasetOpened`/`OpenDatasetFailed` via `useBridge`.
 - `lucida-web/src/components/ShareToolbarButton.tsx` — Copy URL toolbar button with size/local-file/4KB warnings.
 - `lucida-web/src/components/LoadingViewBanner.tsx` — recipient apply progress.
-- See [Saved Views](../systems/subsystems/saved-views.md) subsystem article and [Flow: Saved-View Recipient Apply](../flows/saved-view-recipient-apply.md) for end-to-end traces.
+- See Saved Views subsystem article and Flow: Saved-View Recipient Apply for end-to-end traces.
 
 ## Related
 
 - [Document vs Viewport Command Split](0001-document-vs-viewport-split.md) — defines the two state tiers the capture record spans
 - [Peer-to-Peer Follow Mode](0002-peer-to-peer-follow-mode.md) — saved views are conceptually "one-shot follow against a frozen snapshot"
 - [Local-File Datasets Are Personal-Only in Saved Views](0014-local-file-datasets-personal-only-in-saved-views.md) — sharp edge for local-file paths
-- [Presence and Follow Mode](../systems/subsystems/presence-and-follow-mode.md) — what the capture record mirrors
-- [Queue — Open Questions](../queue.md) — undo/redo system; selected-dataset wrinkle
+- Presence and Follow Mode — what the capture record mirrors
+- Queue — Open Questions — undo/redo system; selected-dataset wrinkle

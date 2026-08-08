@@ -38,4 +38,4 @@ A view in Lucida is a *thing you can hand to someone*. This doc states the tenet
 
 ## Related
 
-[Saved Views](../systems/subsystems/saved-views.md) · [Presence and Follow Mode](../systems/subsystems/presence-and-follow-mode.md) · [Workspaces](../systems/subsystems/workspaces.md) · [Topic: Collaboration](../topics/collaboration.md)
+Saved Views · Presence and Follow Mode · Workspaces · Topic: Collaboration

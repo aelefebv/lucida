@@ -14,7 +14,7 @@ modified: 2026-06-25
 
 Two distinct types share related-sounding names by design:
 
-- **`FetchSource`** (Rust, in [lucida-protocol](../systems/crates/lucida-protocol.md)) — wire envelope describing how to fetch bytes. Currently `Proxied(ProxiedFetchDescriptor)`; reserved variants `Direct` and `Local`. The reserved `Local` variant is also why the open command is named `OpenRemoteDataset` (server-mediated) — it leaves room for a future `OpenLocalDataset` sibling for browser-side paths. See [Flow: Dataset Opening](../flows/dataset-opening.md).
+- **`FetchSource`** (Rust, in lucida-protocol) — wire envelope describing how to fetch bytes. Currently `Proxied(ProxiedFetchDescriptor)`; reserved variants `Direct` and `Local`. The reserved `Local` variant is also why the open command is named `OpenRemoteDataset` (server-mediated) — it leaves room for a future `OpenLocalDataset` sibling for browser-side paths.
 - **`ContentSource`** (TypeScript, in `lucida-web/src/pipeline/fetch/contentSource.ts`) — in-browser fetch orchestrator. `ContentSource` is the interface; `ProxiedContentSource` is the concrete implementation, constructed from a `FetchSource`. It exposes `registerImage(id, wireFormat)` and `fetch(request, signal)` (the `AbortSignal` lets in-flight fetches be cancelled), returning a binary frame promise.
 
 The split was clarified in commit `1718e9a`. The names hint at the relationship; the prefixes (`Content` vs `Fetch`) hint at the layer.
@@ -29,7 +29,7 @@ A single type would either:
 By keeping `FetchSource` minimal and adding `ContentSource` as a JS-side wrapper, each layer carries only what it needs:
 
 - `FetchSource` is a discriminated union with one variant currently in use; deserializing it is mechanical.
-- `ContentSource` carries the per-image `WireFormat` mapping, the pending-fetch promise table keyed by `(level, t, c, z, y, x)`, and the routing into [`bridge.ts`](../systems/crates/lucida-web.md) for binary frames.
+- `ContentSource` carries the per-image `WireFormat` mapping, the pending-fetch promise table keyed by `(level, t, c, z, y, x)`, and the routing into `bridge.ts` for binary frames.
 
 The `register_dataset → dataset_opened` server-event rename in commit `c1d982d` is a related cleanup — names now reflect what they do rather than mixing layer concerns.
 
@@ -49,6 +49,6 @@ The `register_dataset → dataset_opened` server-event rename in commit `c1d982d
 
 ## Related
 
-- [lucida-protocol](../systems/crates/lucida-protocol.md) — wire types
-- [Flow: Chunk Lifecycle](../flows/chunk-lifecycle.md) — where ContentSource is invoked in the fetch path
+- lucida-protocol — wire types
+- Flow: Chunk Lifecycle — where ContentSource is invoked in the fetch path
 - [Three-Output Import Model](0005-three-output-import-model.md) — the broader split that FetchSource is part of

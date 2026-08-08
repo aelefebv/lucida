@@ -12,12 +12,12 @@ modified: 2026-05-07
 
 ## Decision
 
-Lucida splits state mutations into two disjoint enums in [lucida-core](../systems/crates/lucida-core.md)'s `command.rs`:
+Lucida splits state mutations into two disjoint enums in lucida-core's `command.rs`:
 
 - **`DocumentCommand`** — shared, sequenced, persisted, broadcast to all clients. Examples: `DatasetOpened`, `RemoveDataset`, `RegisterLayout`, `SetActiveLayout`, `ApplyAssetCatalogDelta`.
 - **`ViewportCommand`** — local-only, applied immediately, emitted as ephemeral presence. Examples: `Pan`, `ZoomBy`, `SetT`, `SetGamma`, `SetChannelColormap`, `SetMultiChannel`.
 
-A `Command` wrapper enum (`#[serde(untagged)]`) deserializes from either shape, used at the JSON boundary in [lucida-py](../systems/crates/lucida-py.md) and [lucida-cli](../systems/crates/lucida-cli.md).
+A `Command` wrapper enum (`#[serde(untagged)]`) deserializes from either shape, used at the JSON boundary in lucida-py and lucida-cli.
 
 ## Why
 
@@ -34,12 +34,12 @@ Three concrete consequences shape the design:
 
 ## How this decision shows up in code
 
-- The web client's `applyAndSend.ts` exposes `applyDocumentCommand(cmd)` (sends to server) and `applyViewportCommand(cmd)` (applies locally + emits presence). Misclassifying is a footgun — see [Document vs Viewport Command Classification](../gotchas/document-vs-viewport-classification.md).
-- [lucida-server](../systems/crates/lucida-server.md)'s `Session::apply` only accepts `DocumentCommand` and increments `seq`. There's no "apply viewport command" path on the server because viewport state isn't shared.
-- [Epoch bumps](../systems/subsystems/scene-state-and-epochs.md) are split: `DatasetOpened` bumps `content` and `layout`; `Pan` bumps `view`; `SetT` bumps `selection`. The orchestrator uses these to skip cold-state rebuilds when only viewport changed.
+- The web client's `applyAndSend.ts` exposes `applyDocumentCommand(cmd)` (sends to server) and `applyViewportCommand(cmd)` (applies locally + emits presence). Misclassifying is a footgun — see Document vs Viewport Command Classification.
+- lucida-server's `Session::apply` only accepts `DocumentCommand` and increments `seq`. There's no "apply viewport command" path on the server because viewport state isn't shared.
+- Epoch bumps are split: `DatasetOpened` bumps `content` and `layout`; `Pan` bumps `view`; `SetT` bumps `selection`. The orchestrator uses these to skip cold-state rebuilds when only viewport changed.
 
 ## Related
 
-- [Scene State and Epochs](../systems/subsystems/scene-state-and-epochs.md) — how the split surfaces in the epoch model
-- [Presence and Follow Mode](../systems/subsystems/presence-and-follow-mode.md) — what presence updates carry
-- [Document vs Viewport Command Classification](../gotchas/document-vs-viewport-classification.md) — what goes wrong when you misclassify
+- Scene State and Epochs — how the split surfaces in the epoch model
+- Presence and Follow Mode — what presence updates carry
+- Document vs Viewport Command Classification — what goes wrong when you misclassify

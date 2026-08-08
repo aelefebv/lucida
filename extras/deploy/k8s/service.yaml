@@ -8,7 +8,7 @@
 # Ingress) in front.
 #
 # Port 9876 matches:
-#   - LUCIDA_BIND default port (see wiki/gotchas/oss-config-defaults.md)
+#   - LUCIDA_BIND default port (see ../RUNBOOK.md)
 #   - Dockerfile EXPOSE
 #   - The deployment.yaml containerPort name "http"
 apiVersion: v1

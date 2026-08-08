@@ -39,4 +39,3 @@ Three alternatives considered:
 - [`cpuCache.ts` split into `pipeline/fetch/` modules](0032-cpucache-split-into-pipeline-fetch.md) — parent split this slice lives inside
 - [ContentSource (JS) vs FetchSource (wire)](0006-content-source-vs-fetch-source.md) — earlier source contract that this slice extends with typed errors
 - PRD #592, issue #602 — the slice that landed this
-- `wiki/outputs/dechaos-fetch-decode-2026-05-15/05-contract-scan.md` — the dechaos pass that surfaced the misclassification

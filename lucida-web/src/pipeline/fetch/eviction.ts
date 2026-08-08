@@ -8,7 +8,7 @@
  *    tiebreaker. Used by the main (detail) cache. Walks tiers in
  *    {@link getTierOrder} for the current interaction mode; within
  *    active-detail it uses the `(lastSeenTick ↑, priority ↓, insertedAt ↑)`
- *    rule documented in `wiki/systems/subsystems/cpu-cache.md` so focal
+ *    rule, so focal
  *    chunks aren't swept out by their own freshness.
  *
  * Pure: policies take synthetic entries and return victims. The cache

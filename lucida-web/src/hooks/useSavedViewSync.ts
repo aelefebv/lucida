@@ -7,8 +7,7 @@
 //
 // Mounted in App.tsx after the bridge hook so it can hand the applier
 // `sendCommand` + `sendOpenRemoteDataset` directly. Subscribes to scene
-// epochs to drive the debounced URL writes — see
-// `wiki/systems/subsystems/scene-state-and-epochs.md`.
+// epochs to drive the debounced URL writes.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { WasmScene } from "lucida-core";

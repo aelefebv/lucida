@@ -38,4 +38,4 @@ Lucida is reachable from a web viewer, a `lucida` CLI, Python, and (by design) a
 
 ## Related
 
-[Workspaces](../systems/subsystems/workspaces.md) · [lucida-cli](../systems/crates/lucida-cli.md) · [lucida-py](../systems/crates/lucida-py.md) · [lucida-web](../systems/crates/lucida-web.md) · [Agent-First Access](agent-first-access.md)
+Workspaces · lucida-cli · lucida-py · lucida-web · [Agent-First Access](agent-first-access.md)
