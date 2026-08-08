@@ -9,3 +9,17 @@ Pick a real fixture, not a toy one: lucida loads OME-Zarr lazily in chunks, so m
 When verifying anything the viewer renders, test at `devicePixelRatio` 2 (retina), not just 1 — headless browsers default to 1 and it has hidden whole defect classes.
 
 Keep everything domain-neutral. Do NOT use biology- or science-specific terms anywhere — code, identifiers, comments, docs, commits, PRs, issues, or test fixtures. lucida is a general n-dimensional array/image viewer, and the vocabulary should stay generalized across domains. Prefer neutral wording (e.g. "channel", "dataset", "volume", "sample", "label") over domain-loaded jargon.
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues on `aelefebv/lucida`, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical roles, each label string equal to its name (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context, but the docs live in `intention.md` and `wiki/` (principles + numbered ADRs) rather than `CONTEXT.md` + `docs/adr/`. See `docs/agents/domain.md`.
