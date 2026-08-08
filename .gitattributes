@@ -1,4 +1,4 @@
-# CHANGELOG.md is append-only (slipway and release tooling add entries at the end).
+# CHANGELOG.md is append-only (release tooling adds entries at the end).
 # A union merge keeps the appended lines from both sides instead of conflicting,
 # so stacked branches / concurrent entries merge cleanly.
 CHANGELOG.md merge=union

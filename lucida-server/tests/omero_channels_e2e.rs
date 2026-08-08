@@ -1,4 +1,4 @@
-//! Frozen acceptance (slice B1): omero channel labels flow into the manifest.
+//! Acceptance: omero channel labels flow into the manifest.
 //!
 //! Robust to internal accessor names: we serialize the manifest and assert the
 //! labels appear under `channel_infos`. Public API only (import_dataset).
@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use lucida_store::import::import_dataset;
 
 fn write_store(name: &str, omero: Option<serde_json::Value>) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("slipway-b1-{name}"));
+    let dir = std::env::temp_dir().join(format!("omero-channels-{name}"));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     let mut ome = serde_json::json!({

@@ -1,7 +1,0 @@
-{
-  "database": "dolt",
-  "backend": "dolt",
-  "dolt_mode": "server",
-  "dolt_database": "lucida",
-  "project_id": "b14c78b1-d011-4407-902a-4bb979bc5895"
-}

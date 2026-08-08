@@ -212,8 +212,7 @@ wiki/.obsidian
 
 # Credentials and key material — defensive patterns so a downloaded
 # OAuth client JSON or stray private key never sneaks into a commit.
-# See wiki/gotchas/oss-config-defaults for the env-var-based contract
-# these files would otherwise feed.
+# Every organization-specific value is supplied by env var instead.
 *client_secret*.json
 *.oauth.json
 google-oauth.json
@@ -228,12 +227,5 @@ id_ecdsa.*
 id_ed25519
 id_ed25519.*
 
-# Beads / Dolt files (added by bd init)
-.dolt/
+# Local databases (dev server state, caches)
 *.db
-.beads-credential-key
-.beads/proxieddb/
-
-# Gas City
-.beads/*
-!.beads/identity.toml
