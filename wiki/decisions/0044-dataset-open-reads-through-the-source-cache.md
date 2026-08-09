@@ -87,16 +87,33 @@ should not be settled as a side effect of fixing open.
 
 ## Consequences
 
-- **Repeat opens of a live source cost nothing.** Measured on the 21,371-member GCS
-  fixture, alternating before/after runs on one machine (remote latency swings by ~3x
-  between sessions, so only interleaved runs compare): cold open 1.89–2.01 s before vs
-  1.85–2.01 s after — parity — and repeat open **1.42–1.43 s before vs 0.021–0.023 s
-  after**, 652 backend reads before and 0 after. A slower-network sample the same day put
-  the repeat open at 5.74 s before vs 0.019 s after. End to end through the DPR2 harness
+- **Repeat opens of a live source cost nothing.** Measured on the GCS fixture the
+  original measurement used (a 24 x 9 = 216-group collection, 21,371 images), alternating before/after runs on one machine (remote latency swings by ~3x
+  between sessions, so only interleaved runs compare). Three rounds on a fast sample:
+  cold 1.89–2.01 s before vs 1.85–2.01 s after, repeat **1.42–1.43 s before vs
+  0.021–0.023 s after**. Three rounds on a slow sample: cold 6.56–6.92 s before vs
+  6.38–7.06 s after, repeat **5.77–5.95 s before vs 0.019–0.021 s after**. Cold open is
+  at parity in both; the repeat costs 652 backend reads before and 0 after. End to end
+  through the DPR2 harness
   (`docs/research/remote-rates-harness/`, on branch `research/remote-rates`) the cold open
   measured 2.43 s before vs 2.52 s after.
 - **Two datasets on one source report one cache's numbers.** Health for each of them
-  reflects the shared source cache, because that is what they are both reading.
+  reflects the shared source cache, because that is what they are both reading, and a
+  per-open read cost is exact only when nothing else is reading that source at the same
+  time. Sharing across workspaces leaks nothing: source reads have always used the
+  server's own storage identity, not the requesting principal's.
+- **A dataset mutated in place is not re-read until its source closes.** Cached metadata
+  and remembered absences both live as long as the source cache — so a `labels/` group
+  added after first open stays invisible to that binding. The cache already assumed
+  immutable source bytes; this extends the assumption from chunks to metadata.
+- **Metadata and chunks share one byte budget.** A session that streams more than the
+  budget of chunks can evict an open's metadata, and the next open of that source pays
+  the round trips again. Separating the budgets would be the fix if that shows up in
+  practice; it was not worth pre-empting.
+- **A not-found on the optional-metadata path is an answer, not an error.** It is
+  excluded from `backend_errors`, which drives source-cache health — otherwise the
+  hundreds of label-index probes a wide collection makes would report every healthy
+  dataset as degraded.
 - **Import is no longer callable without a cache.** Every caller — server, Python
   binding, tests — wraps its store first.
 - **The reported read time is a sum, not a duration.** Reads overlap; `source_read_millis`

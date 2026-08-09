@@ -183,7 +183,10 @@ pub(crate) fn open_success(
 /// The import reads through the same `CachedStore` the chunk path uses, so
 /// the cache's own counters already observe it; this is the per-open slice of
 /// those counters, which is the number an operator wants when asking why an
-/// open took seconds. Both open paths report it — the interactive open on the
+/// open took seconds. The cache is shared per source, so two opens of one
+/// source running at the same time — or chunk reads on an already-open
+/// binding — attribute some of each other's reads; the slice is exact only
+/// for an open that does not overlap another reader of the same source. Both open paths report it — the interactive open on the
 /// progress trail the CLI and the web's open view render, the workspace
 /// restore in its log line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

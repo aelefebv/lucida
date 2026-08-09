@@ -26,8 +26,10 @@ const DEFAULT_SOURCE_READ_CONCURRENCY: usize = 12;
 /// and the chunk reads that follow share one budget of a known size.
 pub const DEFAULT_SOURCE_CACHE_BYTES: usize = 512 * 1024 * 1024;
 
-/// Cap on concurrent backend reads of *metadata* objects, which are counted
-/// separately from chunk reads.
+/// Cap on concurrent backend reads of *metadata* objects, which are bounded
+/// separately from chunk reads. Not operator-tunable: unlike the chunk cap it
+/// has no pressure to relieve — it tracks the import pipeline's fan-out, and
+/// the two move together.
 ///
 /// A metadata object is a few kilobytes of JSON and an open reads hundreds of
 /// them back to back, so the cost profile is round trips, not bytes: the two
@@ -47,10 +49,6 @@ const ABSENT_MEMO_CAPACITY: usize = 65_536;
 /// concurrent-source-read cap. Read once, the first time the limiter is used.
 const SOURCE_READ_CONCURRENCY_ENV: &str = "LUCIDA_SOURCE_READ_CONCURRENCY";
 
-/// Environment variable an operator can set to override the process-global
-/// concurrent-metadata-read cap.
-const METADATA_READ_CONCURRENCY_ENV: &str = "LUCIDA_METADATA_READ_CONCURRENCY";
-
 /// The process-global limiter shared by every [`CachedStore`] built via
 /// [`CachedStore::new`].
 ///
@@ -67,30 +65,18 @@ fn global_source_read_limiter() -> &'static Arc<Semaphore> {
 /// [`global_source_read_limiter`] for the other read class.
 fn global_metadata_read_limiter() -> &'static Arc<Semaphore> {
     static LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
-    LIMITER.get_or_init(|| Arc::new(Semaphore::new(configured_metadata_read_limit())))
+    LIMITER.get_or_init(|| Arc::new(Semaphore::new(DEFAULT_METADATA_READ_CONCURRENCY)))
 }
 
 /// Resolve the source-read cap from the operator override, falling back to
 /// [`DEFAULT_SOURCE_READ_CONCURRENCY`]. A non-numeric or zero value is
 /// ignored in favour of the default so a typo can never wedge all reads.
 fn configured_source_read_limit() -> usize {
-    configured_limit(SOURCE_READ_CONCURRENCY_ENV, DEFAULT_SOURCE_READ_CONCURRENCY)
-}
-
-/// Resolve the metadata-read cap the same way.
-fn configured_metadata_read_limit() -> usize {
-    configured_limit(
-        METADATA_READ_CONCURRENCY_ENV,
-        DEFAULT_METADATA_READ_CONCURRENCY,
-    )
-}
-
-fn configured_limit(env_var: &str, default: usize) -> usize {
-    std::env::var(env_var)
+    std::env::var(SOURCE_READ_CONCURRENCY_ENV)
         .ok()
         .and_then(|raw| raw.trim().parse::<usize>().ok())
         .filter(|&limit| limit > 0)
-        .unwrap_or(default)
+        .unwrap_or(DEFAULT_SOURCE_READ_CONCURRENCY)
 }
 
 /// The classification-relevant shape of a captured backend error.
@@ -167,6 +153,22 @@ impl SharedError {
             },
         }
     }
+}
+
+/// What a caller is reading, which decides two things a read cannot decide
+/// for itself: which concurrency cap bounds it, and whether a not-found
+/// answer is a fault or an answer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ReadClass {
+    /// A chunk of the data itself. Bounded by the chunk cap; a not-found is
+    /// counted as a backend error, as it has always been.
+    Chunk,
+    /// A metadata object the dataset is expected to have.
+    Metadata,
+    /// A metadata object the dataset may or may not have (a `labels/`
+    /// index). Bounded like other metadata, but a not-found is the answer —
+    /// counting it would report a perfectly healthy dataset as degraded.
+    OptionalMetadata,
 }
 
 /// Result shared over the in-flight broadcast. Success carries `Bytes`
@@ -410,7 +412,7 @@ impl CachedStore {
     /// is surfaced to all current waiters and is **not** cached, so a later
     /// read re-attempts the backend.
     pub async fn get_bytes(&self, path: &Path) -> Result<Bytes, object_store::Error> {
-        self.get_bytes_limited(path, &self.source_read).await
+        self.get_bytes_as(path, ReadClass::Chunk).await
     }
 
     /// Read a metadata object (a `zarr.json` and friends) through the same
@@ -418,13 +420,13 @@ impl CachedStore {
     /// See [`DEFAULT_METADATA_READ_CONCURRENCY`] for why the two classes are
     /// counted apart.
     pub async fn get_metadata_bytes(&self, path: &Path) -> Result<Bytes, object_store::Error> {
-        self.get_bytes_limited(path, &self.metadata_read).await
+        self.get_bytes_as(path, ReadClass::Metadata).await
     }
 
-    async fn get_bytes_limited(
+    async fn get_bytes_as(
         &self,
         path: &Path,
-        limiter: &Arc<Semaphore>,
+        class: ReadClass,
     ) -> Result<Bytes, object_store::Error> {
         let key = path.to_string();
 
@@ -470,7 +472,7 @@ impl CachedStore {
                 // panicked). The guard has removed the in-flight entry, so
                 // fall back to a direct backend read: this waiter still gets a
                 // real answer and the path is not wedged.
-                Err(_) => self.fetch_from_backend(path, &key, limiter).await,
+                Err(_) => self.fetch_from_backend(path, &key, class).await,
             };
         }
 
@@ -480,7 +482,7 @@ impl CachedStore {
         // completion `complete` removes the entry and broadcasts the result
         // exactly once; the guard's `Drop` is then a no-op.
         let mut guard = LeaderGuard::new(&self.in_flight, key.clone());
-        let result = self.fetch_from_backend(path, &key, limiter).await;
+        let result = self.fetch_from_backend(path, &key, class).await;
         guard.complete(&result);
         result
     }
@@ -509,7 +511,7 @@ impl CachedStore {
             }
         }
 
-        match self.get_metadata_bytes(path).await {
+        match self.get_bytes_as(path, ReadClass::OptionalMetadata).await {
             Ok(bytes) => Ok(Some(bytes)),
             Err(object_store::Error::NotFound { .. }) => {
                 self.absent.lock().unwrap().put(key, ());
@@ -526,8 +528,12 @@ impl CachedStore {
         &self,
         path: &Path,
         key: &str,
-        limiter: &Arc<Semaphore>,
+        class: ReadClass,
     ) -> Result<Bytes, object_store::Error> {
+        let limiter = match class {
+            ReadClass::Chunk => &self.source_read,
+            ReadClass::Metadata | ReadClass::OptionalMetadata => &self.metadata_read,
+        };
         // Timed from here, before the permit is acquired: queueing behind our
         // own concurrency cap is part of what a caller waits for, and leaving
         // it out would understate the read by roughly half on a remote store.
@@ -551,7 +557,11 @@ impl CachedStore {
             Ok(bytes) => bytes,
             Err(error) => {
                 let mut state = self.cache.lock().unwrap();
-                state.backend_errors += 1;
+                let absent_as_expected = class == ReadClass::OptionalMetadata
+                    && matches!(error, object_store::Error::NotFound { .. });
+                if !absent_as_expected {
+                    state.backend_errors += 1;
+                }
                 state.source_reads += 1;
                 state.source_read_nanos += elapsed_nanos;
                 return Err(error);
@@ -1186,6 +1196,32 @@ mod tests {
         assert!(cached.get_bytes(&sparse).await.is_err());
         assert!(cached.get_bytes(&sparse).await.is_err());
         assert_eq!(get_count.load(Ordering::SeqCst), 3);
+    }
+
+    /// An optional object that isn't there is an answer, not a fault. The
+    /// server turns `backend_errors` into a Degraded source-cache health, so
+    /// counting label-index probes there would report almost every dataset as
+    /// unhealthy — on a wide collection those probes are most of the reads.
+    #[tokio::test]
+    async fn absent_optional_metadata_is_not_a_backend_error() {
+        let store = Arc::new(CountingStore::new(0));
+        let cached = CachedStore::new(store, 1024);
+
+        assert!(
+            cached
+                .get_optional_metadata_bytes(&Path::from("labels/zarr.json"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let stats = cached.stats();
+        assert_eq!(
+            stats.backend_errors, 0,
+            "an absent optional object is not an error"
+        );
+        // The round trip it cost is still counted.
+        assert_eq!(stats.source_reads, 1);
     }
 
     #[tokio::test]
