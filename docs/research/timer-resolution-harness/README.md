@@ -5,7 +5,15 @@ into CI. Derived from `docs/research/remote-rates-harness/` (#899) — read that
 `research/remote-rates` first; its gotchas still apply (ADC not a service account, DPR2 verified
 from real screenshot pixels, private `CARGO_TARGET_DIR`, no `timeout(1)` on macOS).
 
-Two pieces, because the questions split cleanly:
+Three files:
+
+- `tr_clock.js` — the probe **source strings**, shared by both runners. They live in one place
+  because the first version copied them into both files and the copies drifted; see the gotchas.
+- `tr_run.py` + `tr_driver.cjs` — the full-app arm.
+- `tr_probe.cjs` — the standalone arm.
+
+Raw output from the run written up in `docs/research/timer-resolution.md` is committed under
+`docs/research/timer-resolution-results/`.
 
 ## `tr_run.py` — the full-app arm
 
@@ -16,8 +24,14 @@ the live page. Runs twice against the same fixture:
 - **isolated** — `LUCIDA_COI=1`, which makes the throwaway patch send `COOP: same-origin` +
   `COEP: require-corp` from `static_serve.rs`.
 
-The isolated arm is the crux experiment: if `COEP: require-corp` cost lucida anything, it would
-show up as a blocked request or a dataset that never renders. It does neither.
+The isolated arm is the crux experiment, and it does double duty. If `COEP: require-corp` cost
+lucida anything it would show up as a blocked request or a dataset that never renders (it does
+neither) — and because the arm also runs at 5 µs, it is the **ground truth** the 100 µs arm's
+aggregates are checked against.
+
+The instrumentation patch times three real stages — `buildContext` (`renderLoop`),
+`tryDispatchDelivery` (uploader) and decompress+normalize (decode worker, reported to the main
+thread on the decode response) — recording the **raw quantised delta histogram**, never a mean.
 
 ```bash
 git apply docs/research/timer-resolution-instrumentation.patch
@@ -28,7 +42,8 @@ CARGO_TARGET_DIR=/tmp/tr-target cargo build --release -p lucida-server
 python3 docs/research/timer-resolution-harness/tr_run.py /tmp/tr/run-1 \
   gs://calico-ylm-zarr-01/processed_zarrs/20260626_Guk1_BY_DHY.v1319.processed_catchers.zarr both
 
-git checkout -- lucida-server   # put the tree back
+# put the tree back (the patch adds a file, so removing it is part of the revert)
+git checkout -- lucida-server lucida-web/src && rm -f lucida-web/src/trStageProbe.ts
 ```
 
 Writes `<arm>/<arm>-summary.json`, `<arm>-console.log` and DPR2 screenshots per arm.
@@ -57,7 +72,11 @@ NODE_PATH=~/.cache/lucida-tryout/playwright/node_modules \
   just that the run said `ok`.
 - **`about:blank` cannot detect COOP.** A same-origin or `about:blank` popup inherits its opener
   regardless of policy. The opener-severing probe must open a genuinely **cross-origin** URL.
-- **The clock probe must count distinct deltas, not a mean.** The clamp is visible as *exactly one*
-  distinct non-zero delta across millions of samples; an average hides it completely.
+- **Count distinct deltas and keep the histogram; never a mean.** The clamp shows up as *exactly
+  one* distinct non-zero delta across millions of samples, and "average 0.004 ms" reads like a 4 µs
+  stage when the truth is 96% zeros and 4% one whole 100 µs tick. Different fact.
+- **A synthetic stand-in is not the stage.** The first pass measured a 35 ns `Map` lookup and
+  concluded a 5 µs clock would not help either. Real upload dispatch is 5–30 µs, where a 5 µs clock
+  helps a great deal. Instrument the real stage before drawing a conclusion about it.
 - **Measure the clock before waiting for the dataset**, so a failed open still yields a clock
   answer — in the isolated arm, a failed open would have *been* the answer.

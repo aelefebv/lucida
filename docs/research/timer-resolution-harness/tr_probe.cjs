@@ -36,35 +36,7 @@ function serve(headers) {
   });
 }
 
-const CLOCK_PROBE = `(() => {
-  const t_end = Date.now() + 1000;
-  const deltas = new Map();
-  let samples = 0, last = performance.now();
-  while (Date.now() < t_end) {
-    for (let i = 0; i < 2000; i++) {
-      const n = performance.now();
-      samples++;
-      if (n !== last) { const d = +(n - last).toFixed(6); deltas.set(d, (deltas.get(d) || 0) + 1); last = n; }
-    }
-  }
-  const distinct = [...deltas.entries()].sort((a, b) => a[0] - b[0]);
-  return {
-    crossOriginIsolated: (typeof crossOriginIsolated !== 'undefined') ? crossOriginIsolated : null,
-    samples, distinct_delta_count: distinct.length,
-    distinct_deltas_ms: distinct.slice(0, 6),
-    min_nonzero_delta_ms: distinct.length ? distinct[0][0] : null,
-  };
-})()`;
-
-const WORKER_SRC = 'self.onmessage = () => { postMessage(' + CLOCK_PROBE + '); };';
-const WORKER_PROBE = `(() => new Promise((resolve) => {
-  const src = ${JSON.stringify(WORKER_SRC)};
-  const w = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
-  const to = setTimeout(() => resolve({ error: 'worker_timeout' }), 20000);
-  w.onmessage = (e) => { clearTimeout(to); w.terminate(); resolve(e.data); };
-  w.onerror = (e) => { clearTimeout(to); resolve({ error: 'worker_error: ' + (e && e.message) }); };
-  w.postMessage(0);
-}))()`;
+const { CLOCK_PROBE, WORKER_PROBE } = require('./tr_clock.js');
 
 // Can a cross-origin iframe to the Perfetto UI load on this page?
 const IFRAME_PROBE = `(() => new Promise((resolve) => {
@@ -119,6 +91,9 @@ const POPUP_PROBE = `(() => {
     r.main = await page.evaluate(CLOCK_PROBE);
     r.worker = await page.evaluate(WORKER_PROBE);
     r.perfetto_iframe = await page.evaluate(IFRAME_PROBE);
+    // An iframe fires `load` even when COEP blocked it (it becomes an error
+    // page), so the verdict comes from the network layer, not the event.
+    r.perfetto_iframe_blocked = failures.some((f) => f.url.startsWith('https://ui.perfetto.dev'));
     r.perfetto_popup = await page.evaluate(POPUP_PROBE);
     await page.waitForTimeout(1500);
     r.popup_opener_severed = await (async () => {
@@ -142,6 +117,18 @@ const POPUP_PROBE = `(() => {
     srv.close();
   }
   await browser.close();
+  // Whether ui.perfetto.dev opts in to being embedded is a fact about THEIR
+  // headers. Fetched here rather than by an ad-hoc curl so it lands in the
+  // committed result JSON with everything else.
+  try {
+    const res = await fetch('https://ui.perfetto.dev/');
+    results.perfetto_headers = {
+      status: res.status,
+      coop: res.headers.get('cross-origin-opener-policy'),
+      coep: res.headers.get('cross-origin-embedder-policy'),
+      corp: res.headers.get('cross-origin-resource-policy'),
+    };
+  } catch (e) { results.perfetto_headers = { error: String(e).split('\n')[0] }; }
   const outfile = process.argv[2];
   const text = JSON.stringify(results, null, 2);
   if (outfile) fs.writeFileSync(outfile, text);

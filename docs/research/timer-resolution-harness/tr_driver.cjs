@@ -41,77 +41,7 @@ function readyProbe() {
   return { ready, reason: ready ? 'rendered' : String(s.reason || 'not_ready'), frame_count: fc, dataset_count: dc };
 }
 
-// ---- the clock probe, run identically on the main thread and in a worker ----
-//
-// Spin on performance.now() and collect every DISTINCT non-zero delta. On a
-// clamped clock there is exactly one: the clamp. Also measure how many of a
-// batch of realistic short operations register as a zero-duration span, and
-// what the same batch costs when timed in aggregate — that is the whole
-// aggregation-vs-isolation argument, measured rather than asserted.
-const CLOCK_PROBE = `(() => {
-  const t_end = Date.now() + 1200;
-  const deltas = new Map();
-  let samples = 0, last = performance.now();
-  while (Date.now() < t_end) {
-    for (let i = 0; i < 2000; i++) {
-      const n = performance.now();
-      samples++;
-      if (n !== last) {
-        const d = +(n - last).toFixed(6);
-        deltas.set(d, (deltas.get(d) || 0) + 1);
-        last = n;
-      }
-    }
-  }
-  const distinct = [...deltas.entries()].sort((a, b) => a[0] - b[0]);
-
-  // A stand-in for a fine pipeline stage: one lookup in a 20k-entry Map,
-  // the shape of the per-chunk cache lookup the trace wants to time.
-  const map = new Map();
-  for (let i = 0; i < 20000; i++) map.set('level/0/0/' + i, i);
-  const keys = [];
-  for (let i = 0; i < 20000; i++) keys.push('level/0/0/' + ((i * 7919) % 20000));
-
-  let zero = 0, nonzero = 0, sumIndividual = 0;
-  for (let i = 0; i < keys.length; i++) {
-    const a = performance.now();
-    map.get(keys[i]);
-    const b = performance.now();
-    if (b === a) zero++; else { nonzero++; sumIndividual += (b - a); }
-  }
-
-  const a0 = performance.now();
-  for (let i = 0; i < keys.length; i++) map.get(keys[i]);
-  const a1 = performance.now();
-  const batchTotalMs = a1 - a0;
-
-  return {
-    crossOriginIsolated: (typeof crossOriginIsolated !== 'undefined') ? crossOriginIsolated : null,
-    samples,
-    distinct_deltas_ms: distinct.slice(0, 12),
-    distinct_delta_count: distinct.length,
-    min_nonzero_delta_ms: distinct.length ? distinct[0][0] : null,
-    fine_stage: {
-      n: keys.length,
-      timed_individually_zero: zero,
-      timed_individually_nonzero: nonzero,
-      individual_sum_ms: +sumIndividual.toFixed(4),
-      batch_total_ms: +batchTotalMs.toFixed(4),
-      batch_per_op_us: +((batchTotalMs * 1000) / keys.length).toFixed(4),
-    },
-  };
-})()`;
-
-// The worker body is the same probe source, inlined into a blob worker.
-const WORKER_SRC = 'self.onmessage = () => { postMessage(' + CLOCK_PROBE + '); };';
-const WORKER_PROBE = `(() => new Promise((resolve) => {
-  const src = ${JSON.stringify(WORKER_SRC)};
-  const w = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
-  const to = setTimeout(() => resolve({ error: 'worker_timeout' }), 30000);
-  w.onmessage = (e) => { clearTimeout(to); w.terminate(); resolve(e.data); };
-  w.onerror = (e) => { clearTimeout(to); resolve({ error: 'worker_error: ' + (e && e.message) }); };
-  w.postMessage(0);
-}))`;
+const { CLOCK_PROBE, WORKER_PROBE } = require('./tr_clock.js');
 
 async function dragTarget(page) {
   const t = await page.evaluate(() => {
@@ -188,6 +118,7 @@ async function pan(page, ms) {
     // result we are looking for in the isolated arm).
     result.clock.main = await page.evaluate(CLOCK_PROBE);
     result.clock.worker = await page.evaluate(WORKER_PROBE);
+    if (!result.clock.worker) result.clock.worker = { error: 'evaluate_returned_undefined' };
 
     let probe = null; const deadline = Date.now() + readyWaitMs;
     while (Date.now() < deadline) {
@@ -198,10 +129,22 @@ async function pan(page, ms) {
     result.ready.cold = probe;
     if (probe && probe.ready) {
       await page.waitForTimeout(settleMs);
+      // Real lucida stages, instrumented by the throwaway patch. This is the
+      // measurement the decision rests on — the synthetic fine_stage in the
+      // clock probe is only a bound; these are the actual spans.
+      result.stages_after_cold = await page.evaluate(() => (window.__trDump ? window.__trDump() : { error: 'no___trDump' }));
       await page.screenshot({ path: outDir + '/' + arm + '-cold.png' });
+      await page.evaluate(() => { if (window.__trReset) window.__trReset(); });
       await pan(page, panMs);
       await page.waitForTimeout(2000);
-      await page.screenshot({ path: outDir + '/' + arm + '-pan.png' });
+      result.stages_pan = await page.evaluate(() => (window.__trDump ? window.__trDump() : { error: 'no___trDump' }));
+      const shotPath = outDir + '/' + arm + '-pan.png';
+      await page.screenshot({ path: shotPath });
+      // Record real pixel dimensions so DPR2 is evidenced by the run itself.
+      try {
+        const buf = fs.readFileSync(shotPath);
+        result.screenshot_px = { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+      } catch (_) {}
       result.ready.after_pan = await page.evaluate(readyProbe);
       // Re-measure the clock after real pipeline work, in case anything
       // about a busy page changes the granularity.
