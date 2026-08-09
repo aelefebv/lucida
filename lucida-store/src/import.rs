@@ -46,7 +46,7 @@ async fn import_dataset_with_label_discovery(
 ) -> Result<ImportResult, StoreError> {
     let root_json = parse::read_zarr_json(store, "zarr.json").await?;
 
-    if parse::ome_attr(&root_json, "plate").is_some() {
+    if parse::resolve_ome_block(&root_json, "plate").is_some() {
         import_collection(
             store,
             id,
@@ -515,7 +515,7 @@ async fn parse_one_group(
         }
     };
 
-    let Some(images) = parse::ome_attr(&group_json, "well")
+    let Some(images) = parse::resolve_ome_block(&group_json, "well")
         .and_then(|well| well.get("images"))
         .and_then(|v| v.as_array())
     else {
@@ -580,8 +580,8 @@ async fn import_collection(
     root_json: &serde_json::Value,
     force_exhaustive_label_discovery: bool,
 ) -> Result<ImportResult, StoreError> {
-    let collection_json = parse::ome_attr(root_json, "plate").ok_or_else(|| {
-        StoreError::Metadata(parse::describe_missing_ome_attr(root_json, "plate"))
+    let collection_json = parse::resolve_ome_block(root_json, "plate").ok_or_else(|| {
+        StoreError::Metadata(parse::describe_missing_ome_block(root_json, "plate"))
     })?;
 
     // Parse rows and columns.

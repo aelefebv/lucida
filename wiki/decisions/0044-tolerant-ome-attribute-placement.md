@@ -47,10 +47,10 @@ metadata and declines to on a technicality fails the [runs-anywhere-and-open](..
 promise — the user's response is to rewrite metadata to satisfy us, which is work we
 imposed rather than work the format required.
 
-Crucially, tolerance here is cheap because nothing downstream had to bend. The store that
-prompted this carries seven axes; the two non-canonical ones were already pinned by the
-existing axis classifier, and its chunk layout was already accepted by the existing
-byte-layout rule. The placement was the whole of the gap.
+Tolerance is worth buying here because it is cheap: the placement is the *whole* of the
+gap. Nothing downstream of metadata resolution had to bend to accept these stores — the
+axis and chunk-layout rules already covered what they contain. A tolerance that required
+reworking the read path would be a different trade.
 
 The no-mixing rule is what keeps tolerance from costing correctness. Reading each block
 independently from whichever placement happens to have it would let a 0.5 group silently
@@ -89,10 +89,9 @@ not imply 0.4 semantics for anything lucida consumes.
 - A group carrying non-OME top-level attributes named `plate` or `multiscales` would now
   be read as OME metadata. Accepted: those keys are OME-defined, and the alternative
   (namespace-only) has the larger, demonstrated cost.
-- Opening a store is no longer evidence its pyramid has data. The store that prompted this
-  declares a level 0 with no chunks written; lucida will render it as fill value, which is
-  correct Zarr semantics and a defect in the data. Surfacing empty levels is a separate
-  concern, not solved here.
+- Opening a store is not evidence its pyramid has data. A level whose chunks were never
+  written reads as fill value — correct Zarr semantics, and indistinguishable at import
+  from a legitimately empty region. Surfacing that is a separate concern, not solved here.
 - The 0.4-style placement is **read, not written**. Lucida's own writer continues to emit
   the 0.5 namespaced form.
 
