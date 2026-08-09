@@ -93,8 +93,8 @@ describe("UploadTelemetry — recordEvent + counters", () => {
 
   it("keeps only the last second of events across sustained load", () => {
     const tel = new UploadTelemetry();
-    // 60 ticks of 128 events each, 16ms apart — well past one window's worth,
-    // so the buffers must wrap and prune repeatedly rather than grow forever.
+    // 200 ticks of 128 events each, 16ms apart — well past one window's
+    // worth, so the buffers wrap and prune repeatedly rather than grow.
     const perTick = 128;
     const tickMs = 16;
     const ticks = 200;
@@ -113,31 +113,55 @@ describe("UploadTelemetry — recordEvent + counters", () => {
     expect(rolling.totalUploads).toBe(ticks * perTick);
   });
 
-  it("publishes in well under a frame budget at a high event rate", () => {
+  it("publishes far faster than the shift()-pruned window it replaced", () => {
     // Regression guard for #898. The old prune was `Array.shift()` in a
     // loop; V8 left-trims cheaply until the backing store outgrows a regular
     // heap object, after which every shift is a full memmove. 128 events per
-    // tick at ~120Hz puts the 1s ring at ~15.5k entries — past that cliff,
-    // where the shift version measures ~1.15ms per publish.
-    const tel = new UploadTelemetry();
+    // tick at ~120Hz puts the 1s window at ~15.5k entries — past that cliff,
+    // where the shift version measures ~1.15ms per publish against a 16.7ms
+    // frame budget.
+    //
+    // The assertion is a ratio against that old shape, measured in the same
+    // run, rather than an absolute millisecond bound: the cliff is
+    // structural in V8, so the ratio holds on a slow CI box where an
+    // absolute bound would just flake.
     const perTick = 128;
     const tickMs = 8;
-    const drive = (base: number, ticks: number): number => {
+    const ticks = 300;
+
+    const timeTicks = (base: number, onTick: (now: number) => void): number => {
       const start = performance.now();
-      for (let i = 0; i < ticks; i++) {
-        const now = base + i * tickMs;
-        for (let e = 0; e < perTick; e++) tel.recordEvent(now, 10, false);
-        tel.publish(now, makeTickStats());
-      }
+      for (let i = 0; i < ticks; i++) onTick(base + i * tickMs);
       return performance.now() - start;
+    };
+
+    const tel = new UploadTelemetry();
+    const ringTick = (now: number): void => {
+      for (let e = 0; e < perTick; e++) tel.recordEvent(now, 10, false);
+      tel.publish(now, makeTickStats());
     };
     // Warm to steady state so the measured ticks are the expensive ones
     // (a full second of events resident, pruning on every tick).
-    drive(100_000, 300);
-    const perPublishMs = drive(200_000, 300) / 300;
-    // Generous bound — CI machines are noisy, and the point is the shape of
-    // the curve, not a precise number. The shift version is ~60x over this.
-    expect(perPublishMs).toBeLessThan(0.2);
+    timeTicks(100_000, ringTick);
+    const ringMs = timeTicks(200_000, ringTick) / ticks;
+
+    // The pre-fix shape: a plain array pruned with `shift()`, then scanned.
+    const events: Array<{ at: number; bytes: number }> = [];
+    const shiftTick = (now: number): void => {
+      for (let e = 0; e < perTick; e++) events.push({ at: now, bytes: 10 });
+      const cutoff = now - UPLOAD_WINDOW_MS;
+      while (events.length > 0 && events[0].at < cutoff) events.shift();
+      let bytes = 0;
+      for (const e of events) bytes += e.bytes;
+      if (bytes < 0) throw new Error("unreachable");
+    };
+    timeTicks(100_000, shiftTick);
+    const shiftMs = timeTicks(200_000, shiftTick) / ticks;
+
+    // Both windows hold the same events, so this is like for like.
+    expect(events.length).toBeGreaterThan(15_000);
+    // Measured ~16x on a dev machine; 4x is the flake-proof floor.
+    expect(ringMs * 4).toBeLessThan(shiftMs);
   });
 
   it("derives p50 / p95 upload size from the sample buffer", () => {

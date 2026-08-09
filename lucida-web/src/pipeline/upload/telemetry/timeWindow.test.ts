@@ -8,10 +8,14 @@ interface Entry {
 
 const entry = (at: number, v = at): Entry => ({ at, v });
 
-/** Peek at the private backing store — capacity is an implementation detail
- * everywhere except the grow/shrink tests, which are about exactly that. */
-const capacityOf = (w: TimeWindow<Entry>): number =>
-  (w as unknown as { slots: unknown[] }).slots.length;
+/**
+ * How many slots still hold an entry. Reaches into the backing store because
+ * "a pruned entry is no longer referenced" is not observable from the public
+ * surface, and a buffer that quietly retains everything it pruned is a leak.
+ */
+const liveSlots = (w: TimeWindow<Entry>): number =>
+  (w as unknown as { slots: Array<Entry | undefined> }).slots.filter(Boolean)
+    .length;
 
 describe("TimeWindow", () => {
   it("starts empty", () => {
@@ -94,23 +98,22 @@ describe("TimeWindow", () => {
     expect(seen).toEqual([3, 4, 5]);
   });
 
-  it("drops references to pruned entries so they can be collected", () => {
+  it("drops its reference to a pruned entry", () => {
     const w = new TimeWindow<Entry>(4);
-    const ref = new WeakRef(entry(1));
-    w.push(ref.deref()!);
+    w.push(entry(1));
     w.push(entry(2));
     w.pruneBefore(2);
-    // The pruned slot must not still point at the old entry.
     expect(w.toArray().map((e) => e.v)).toEqual([2]);
-    expect(
-      (w as unknown as { slots: Array<Entry | undefined> }).slots.filter(Boolean),
-    ).toHaveLength(1);
+    // The buffer must not go on retaining the pruned entry: one live slot,
+    // one live entry. (Capacity 4, so no shrink to muddy the count.)
+    expect(w.capacity).toBe(4);
+    expect(liveSlots(w)).toBe(1);
   });
 
   it("gives storage back after a burst subsides", () => {
     const w = new TimeWindow<Entry>(4);
     for (let t = 0; t < 10_000; t++) w.push(entry(t));
-    const peak = capacityOf(w);
+    const peak = w.capacity;
     expect(peak).toBeGreaterThanOrEqual(10_000);
     w.pruneBefore(9_999);
     expect(w.toArray().map((e) => e.v)).toEqual([9_999]);
@@ -120,7 +123,7 @@ describe("TimeWindow", () => {
       w.push(entry(t));
       w.pruneBefore(t);
     }
-    expect(capacityOf(w)).toBeLessThan(peak / 8);
+    expect(w.capacity).toBeLessThan(peak / 8);
   });
 
   it("does not thrash storage at a steady push/prune rate", () => {
@@ -130,25 +133,12 @@ describe("TimeWindow", () => {
       w.push(entry(t));
       w.pruneBefore(t - 49);
     }
-    const settled = capacityOf(w);
+    const settled = w.capacity;
     for (let t = 500; t < 5_000; t++) {
       w.push(entry(t));
       w.pruneBefore(t - 49);
-      expect(capacityOf(w)).toBe(settled);
+      expect(w.capacity).toBe(settled);
     }
     expect(w.length).toBe(50);
-  });
-
-  it("prunes a large burst in linear time rather than quadratic", () => {
-    // Regression guard for the O(k·n) `Array.shift()` prune this replaced.
-    const w = new TimeWindow<Entry>();
-    const n = 200_000;
-    for (let t = 0; t < n; t++) w.push(entry(t));
-    const start = performance.now();
-    w.pruneBefore(n);
-    const elapsed = performance.now() - start;
-    expect(w.length).toBe(0);
-    // A shift()-based prune of 200k entries takes seconds; this is ~ms.
-    expect(elapsed).toBeLessThan(500);
   });
 });

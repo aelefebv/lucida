@@ -36,6 +36,11 @@ export class TimeWindow<T extends Timestamped> {
     return this.count;
   }
 
+  /** @internal Test-only accessor — slots allocated, live or not. */
+  get capacity(): number {
+    return this.slots.length;
+  }
+
   /** Append an entry. Callers are expected to push in nondecreasing `at`. */
   push(item: T): void {
     if (this.count === this.slots.length) this.grow();
