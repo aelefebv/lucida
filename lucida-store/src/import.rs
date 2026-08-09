@@ -46,7 +46,7 @@ async fn import_dataset_with_label_discovery(
 ) -> Result<ImportResult, StoreError> {
     let root_json = parse::read_zarr_json(store, "zarr.json").await?;
 
-    if root_json.pointer("/attributes/ome/plate").is_some() {
+    if parse::ome_attr(&root_json, "plate").is_some() {
         import_collection(
             store,
             id,
@@ -515,8 +515,8 @@ async fn parse_one_group(
         }
     };
 
-    let Some(images) = group_json
-        .pointer("/attributes/ome/well/images")
+    let Some(images) = parse::ome_attr(&group_json, "well")
+        .and_then(|well| well.get("images"))
         .and_then(|v| v.as_array())
     else {
         return Err(skipped_group_warning(
@@ -580,9 +580,9 @@ async fn import_collection(
     root_json: &serde_json::Value,
     force_exhaustive_label_discovery: bool,
 ) -> Result<ImportResult, StoreError> {
-    let collection_json = root_json
-        .pointer("/attributes/ome/plate")
-        .ok_or_else(|| StoreError::Metadata("no ome.plate in root zarr.json".into()))?;
+    let collection_json = parse::ome_attr(root_json, "plate").ok_or_else(|| {
+        StoreError::Metadata(parse::describe_missing_ome_attr(root_json, "plate"))
+    })?;
 
     // Parse rows and columns.
     let rows: Vec<String> = collection_json
@@ -3108,6 +3108,173 @@ mod tests {
         assert_ne!(layout.canonical_byte_size, layout.on_disk_byte_size);
         assert_eq!(layout.canonical_byte_size, 2048 * 1504 * 2);
         assert_eq!(layout.on_disk_byte_size, 2 * 2048 * 1504 * 2);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Create a 7-axis fixture whose OME attributes use the 0.4-style
+    /// top-level placement (`attributes.multiscales`) inside a Zarr **v3**
+    /// group, rather than the 0.5 `attributes.ome.multiscales` namespace.
+    /// Mirrors the metadata shape of a real store that previously failed to
+    /// open (two non-canonical axes, two levels, an `omero` block).
+    fn create_7d_top_level_placement_fixture(dir: &std::path::Path) {
+        fs::create_dir_all(dir).unwrap();
+
+        let root = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {
+                "multiscales": [{
+                    "version": "0.4",
+                    "name": "sample",
+                    "axes": [
+                        {"name": "m", "type": "space", "unit": "position"},
+                        {"name": "p", "type": "space", "unit": "site"},
+                        {"name": "t", "type": "time"},
+                        {"name": "z", "type": "space"},
+                        {"name": "c", "type": "channel"},
+                        {"name": "y", "type": "space"},
+                        {"name": "x", "type": "space"}
+                    ],
+                    "datasets": [
+                        {
+                            "path": "0",
+                            "coordinateTransformations": [{
+                                "type": "scale",
+                                "scale": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+                            }]
+                        },
+                        {
+                            "path": "1",
+                            "coordinateTransformations": [{
+                                "type": "scale",
+                                "scale": [1.0, 1.0, 1.0, 1.0, 1.0, 8.0, 8.0]
+                            }]
+                        }
+                    ]
+                }],
+                "omero": {
+                    "channels": [
+                        {"label": "Ch A", "active": true},
+                        {"label": "Ch B", "active": true}
+                    ]
+                }
+            }
+        });
+        fs::write(
+            dir.join("zarr.json"),
+            serde_json::to_string_pretty(&root).unwrap(),
+        )
+        .unwrap();
+
+        // [m, p, t, z, c, y, x] at both levels; y/x are 8x coarser at level 1.
+        let levels: [(&str, [u64; 7], [u64; 7]); 2] = [
+            (
+                "0",
+                [24, 9, 448, 3, 2, 2048, 2048],
+                [1, 9, 16, 3, 1, 2048, 2048],
+            ),
+            (
+                "1",
+                [24, 9, 448, 3, 2, 256, 256],
+                [24, 1, 1, 3, 1, 256, 256],
+            ),
+        ];
+        for (path, shape, chunk) in levels {
+            let level_dir = dir.join(path);
+            fs::create_dir_all(&level_dir).unwrap();
+            let arr = serde_json::json!({
+                "zarr_format": 3,
+                "node_type": "array",
+                "shape": shape,
+                "data_type": "uint16",
+                "chunk_grid": {
+                    "name": "regular",
+                    "configuration": { "chunk_shape": chunk }
+                },
+                "codecs": [
+                    {"name": "bytes", "configuration": {"endian": "little"}},
+                    {"name": "zstd", "configuration": {"level": 3, "checksum": false}}
+                ],
+                "fill_value": 0
+            });
+            fs::write(
+                level_dir.join("zarr.json"),
+                serde_json::to_string_pretty(&arr).unwrap(),
+            )
+            .unwrap();
+        }
+    }
+
+    /// End-to-end regression for a Zarr v3 store carrying the OME-Zarr
+    /// 0.4-style top-level attribute placement. It must import exactly as the
+    /// namespaced 0.5 form does: canonical 5D axes, both non-canonical axes
+    /// pinned, omero labels picked up, and per-level chunk byte layouts
+    /// computed from the raw 7-axis order.
+    #[tokio::test]
+    async fn import_reads_top_level_ome_attribute_placement() {
+        let dir = temp_dir("import_top_level_placement");
+        create_7d_top_level_placement_fixture(&dir);
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "placement-test", "Placement Test")
+            .await
+            .unwrap();
+
+        assert!(matches!(result.manifest.kind, DatasetKind::Single));
+        let multiscale = &result.manifest.images()[0].multiscale;
+
+        // Canonical axes keep the source's declared order (here z precedes c);
+        // shapes and scales are mapped by name, so this list is descriptive,
+        // never a positional index into the 5D arrays.
+        let names: Vec<&str> = multiscale.axes.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, vec!["t", "z", "c", "y", "x"]);
+        assert_eq!(
+            multiscale.pinned_axes,
+            vec![
+                PinnedAxis {
+                    name: "m".to_string(),
+                    size: 24,
+                    pinned_index: 0,
+                },
+                PinnedAxis {
+                    name: "p".to_string(),
+                    size: 9,
+                    pinned_index: 0,
+                },
+            ],
+        );
+
+        // Both declared levels survive, normalized to canonical 5D.
+        assert_eq!(multiscale.levels.len(), 2);
+        assert_eq!(multiscale.levels[0].shape, [448, 2, 3, 2048, 2048]);
+        assert_eq!(multiscale.levels[1].shape, [448, 2, 3, 256, 256]);
+
+        // The `omero` block is read from the same top-level placement.
+        let labels: Vec<&str> = multiscale
+            .channel_infos
+            .iter()
+            .map(|c| c.label.as_str())
+            .collect();
+        assert_eq!(labels, vec!["Ch A", "Ch B"]);
+
+        // Raw axes order is preserved for the chunk-path resolver, and the
+        // level-1 layout slices the m=24 bundle down to one canonical chunk.
+        let seed = &result.binding_seed.images[0];
+        assert_eq!(seed.axes_names, vec!["m", "p", "t", "z", "c", "y", "x"]);
+        let level1 = seed
+            .levels
+            .iter()
+            .find(|l| l.level_index == 1)
+            .expect("level 1 binding");
+        assert_eq!(
+            level1.chunk_byte_layout.canonical_byte_size,
+            3 * 256 * 256 * 2
+        );
+        assert_eq!(
+            level1.chunk_byte_layout.on_disk_byte_size,
+            24 * 3 * 256 * 256 * 2
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

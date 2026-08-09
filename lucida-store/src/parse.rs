@@ -59,6 +59,82 @@ pub(crate) async fn read_zarr_json(
         .map_err(|e| StoreError::Metadata(format!("invalid JSON in {path}: {e}")))
 }
 
+/// Upper bound on attribute keys echoed back in a "no multiscales" error.
+/// Enough to identify what a group actually carries without pasting an
+/// arbitrarily large key list into a message.
+const MAX_REPORTED_ATTRIBUTE_KEYS: usize = 12;
+
+/// Resolve one OME metadata block from a `zarr.json` value, tolerating both
+/// attribute placements that occur in the wild.
+///
+/// OME-Zarr 0.5 namespaces every block under `attributes.ome` (`multiscales`,
+/// `omero`, `labels`, `image-label`, `plate`, `well`). The preceding 0.4
+/// conventions put those same keys at the top level of the group's attributes,
+/// and writers that moved to Zarr v3 ahead of the 0.5 metadata layout emit
+/// Zarr v3 `zarr.json` files carrying the 0.4-style top-level placement. Both
+/// are unambiguous, so both are read.
+///
+/// The two placements are never mixed: when `attributes.ome` is an object it is
+/// the sole source, so a conformant 0.5 group can't have a block silently
+/// satisfied by a stray same-named top-level key. A present-but-non-object
+/// `ome` (e.g. a bare version string) does not count as the namespace and falls
+/// back to the top level.
+pub(crate) fn ome_attr<'a>(
+    root_json: &'a serde_json::Value,
+    key: &str,
+) -> Option<&'a serde_json::Value> {
+    let attributes = root_json.get("attributes")?.as_object()?;
+    match attributes.get("ome").and_then(|v| v.as_object()) {
+        Some(ome) => ome.get(key),
+        None => attributes.get(key),
+    }
+}
+
+/// Explain a missing OME metadata block in terms a user can act on: which
+/// placements were checked, and what the group actually carries.
+///
+/// `block` is the unqualified key (e.g. `multiscales`). Untrusted-input safe —
+/// the key list is bounded by [`MAX_REPORTED_ATTRIBUTE_KEYS`].
+pub(crate) fn describe_missing_ome_attr(root_json: &serde_json::Value, block: &str) -> String {
+    let mut msg = format!(
+        "no OME-Zarr {block} metadata in zarr.json: expected `attributes.ome.{block}` \
+         (OME-Zarr 0.5) or `attributes.{block}` (0.4-style placement)"
+    );
+
+    if root_json.get("node_type").and_then(|v| v.as_str()) == Some("array") {
+        msg.push_str(
+            "; this path is a Zarr array, not a group — point at the parent group that \
+             carries the multiscale metadata",
+        );
+        return msg;
+    }
+
+    // Report the keys actually present, at whichever level was searched, so the
+    // user can see what the group does carry.
+    let attributes = root_json.get("attributes").and_then(|v| v.as_object());
+    let (scope, keys) = match attributes {
+        Some(attrs) => match attrs.get("ome").and_then(|v| v.as_object()) {
+            Some(ome) => ("attributes.ome", ome.keys()),
+            None => ("attributes", attrs.keys()),
+        },
+        None => {
+            msg.push_str("; this group has no attributes at all");
+            return msg;
+        }
+    };
+
+    let found: Vec<&str> = keys
+        .take(MAX_REPORTED_ATTRIBUTE_KEYS)
+        .map(String::as_str)
+        .collect();
+    if found.is_empty() {
+        msg.push_str("; this group has no attributes at all");
+    } else {
+        msg.push_str(&format!("; {scope} has: {}", found.join(", ")));
+    }
+    msg
+}
+
 /// Parsed OME multiscales metadata.
 #[derive(Debug)]
 pub(crate) struct ParsedMultiscales {
@@ -72,12 +148,12 @@ pub(crate) fn parse_multiscales(
     root_json: &serde_json::Value,
     error_prefix: &str,
 ) -> Result<ParsedMultiscales, StoreError> {
-    let multiscales = root_json
-        .pointer("/attributes/ome/multiscales")
+    let multiscales = ome_attr(root_json, "multiscales")
         .and_then(|v| v.as_array())
         .ok_or_else(|| {
             StoreError::Metadata(format!(
-                "{error_prefix}no ome.multiscales in root zarr.json"
+                "{error_prefix}{}",
+                describe_missing_ome_attr(root_json, "multiscales")
             ))
         })?;
 
@@ -174,8 +250,8 @@ pub(crate) fn parse_multiscales(
 /// falls back per-index for any channel beyond the list. See the module tests
 /// for the malformed-input matrix this guarantees.
 pub(crate) fn parse_omero_channels(root_json: &serde_json::Value) -> Vec<ChannelInfo> {
-    let Some(channels) = root_json
-        .pointer("/attributes/ome/omero/channels")
+    let Some(channels) = ome_attr(root_json, "omero")
+        .and_then(|omero| omero.get("channels"))
         .and_then(|v| v.as_array())
     else {
         return Vec::new();
@@ -298,10 +374,7 @@ fn is_safe_label_name(name: &str) -> bool {
 /// [`MAX_LABEL_GROUPS`]. The returned names are safe to use as store-path
 /// segments.
 pub(crate) fn parse_labels_names(labels_group_json: &serde_json::Value) -> Vec<String> {
-    let Some(entries) = labels_group_json
-        .pointer("/attributes/ome/labels")
-        .and_then(|v| v.as_array())
-    else {
+    let Some(entries) = ome_attr(labels_group_json, "labels").and_then(|v| v.as_array()) else {
         return Vec::new();
     };
 
@@ -342,7 +415,7 @@ pub(crate) struct ImageLabelMeta {
 /// [`MAX_LABEL_COLORS`]. `properties`, when present, is intentionally not
 /// consumed here.
 pub(crate) fn parse_image_label(label_group_json: &serde_json::Value) -> ImageLabelMeta {
-    let Some(image_label) = label_group_json.pointer("/attributes/ome/image-label") else {
+    let Some(image_label) = ome_attr(label_group_json, "image-label") else {
         return ImageLabelMeta::default();
     };
 
@@ -493,6 +566,206 @@ mod tests {
         assert!(
             msg.contains("A/1/0: "),
             "error should contain prefix: {msg}",
+        );
+    }
+
+    #[test]
+    fn parse_multiscales_missing_error_names_both_placements_and_found_keys() {
+        // The message must tell a user what was looked for and what the group
+        // actually carries, not just that a pointer missed.
+        let root_json = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {"acquisition": {}, "producer": "somewriter"}
+        });
+        let msg = parse_multiscales(&root_json, "").unwrap_err().to_string();
+        assert!(
+            msg.contains("attributes.ome.multiscales"),
+            "must name the 0.5 placement: {msg}",
+        );
+        assert!(
+            msg.contains("attributes.multiscales"),
+            "must name the 0.4-style placement: {msg}",
+        );
+        assert!(
+            msg.contains("acquisition") && msg.contains("producer"),
+            "must list the attribute keys that are present: {msg}",
+        );
+    }
+
+    #[test]
+    fn parse_multiscales_missing_error_reports_empty_attributes() {
+        let root_json =
+            serde_json::json!({"zarr_format": 3, "node_type": "group", "attributes": {}});
+        let msg = parse_multiscales(&root_json, "").unwrap_err().to_string();
+        assert!(
+            msg.contains("no attributes"),
+            "an attribute-less group should say so plainly: {msg}",
+        );
+    }
+
+    #[test]
+    fn parse_multiscales_missing_error_flags_a_zarr_array() {
+        // Pointing at an array instead of its parent group is a common
+        // mistake; the message should say which way to go.
+        let root_json = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "array",
+            "shape": [10, 10],
+            "attributes": {}
+        });
+        let msg = parse_multiscales(&root_json, "").unwrap_err().to_string();
+        assert!(
+            msg.contains("array"),
+            "must say the path is a Zarr array: {msg}",
+        );
+        assert!(
+            msg.contains("group"),
+            "must point the user at the parent group: {msg}",
+        );
+    }
+
+    /// A Zarr v3 group written with the OME-Zarr 0.4 top-level attribute
+    /// placement: `attributes.multiscales` rather than
+    /// `attributes.ome.multiscales`. Produced by writers that adopted Zarr v3
+    /// while keeping the 0.4 metadata conventions.
+    #[test]
+    fn parse_multiscales_accepts_top_level_placement() {
+        let root_json = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {
+                "multiscales": [{
+                    "version": "0.4",
+                    "name": "sample",
+                    "axes": [
+                        {"name": "m", "type": "space", "unit": "position"},
+                        {"name": "p", "type": "space", "unit": "site"},
+                        {"name": "t", "type": "time"},
+                        {"name": "z", "type": "space"},
+                        {"name": "c", "type": "channel"},
+                        {"name": "y", "type": "space"},
+                        {"name": "x", "type": "space"}
+                    ],
+                    "datasets": [
+                        {
+                            "path": "0",
+                            "coordinateTransformations": [{
+                                "type": "scale",
+                                "scale": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+                            }]
+                        },
+                        {
+                            "path": "1",
+                            "coordinateTransformations": [{
+                                "type": "scale",
+                                "scale": [1.0, 1.0, 1.0, 1.0, 1.0, 8.0, 8.0]
+                            }]
+                        }
+                    ]
+                }]
+            }
+        });
+
+        let parsed = parse_multiscales(&root_json, "").unwrap();
+
+        assert_eq!(parsed.axes_names, vec!["m", "p", "t", "z", "c", "y", "x"]);
+        assert_eq!(parsed.level_entries.len(), 2);
+        // Non-canonical m/p contribute no scale; y/x pick up the level-1 8x.
+        assert_eq!(parsed.level_entries[0].scale, [1.0, 1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(parsed.level_entries[1].scale, [1.0, 1.0, 1.0, 8.0, 8.0]);
+    }
+
+    #[test]
+    fn ome_namespace_wins_over_top_level_when_both_present() {
+        // A conformant 0.5 group is read from `ome` even if stray top-level
+        // keys of the same name exist — the namespace is never mixed.
+        let root_json = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {
+                "multiscales": [{
+                    "axes": [{"name": "y"}, {"name": "x"}],
+                    "datasets": [{"path": "stale"}]
+                }],
+                "ome": {
+                    "version": "0.5",
+                    "multiscales": [{
+                        "axes": [{"name": "y"}, {"name": "x"}],
+                        "datasets": [{"path": "current"}]
+                    }]
+                }
+            }
+        });
+        let parsed = parse_multiscales(&root_json, "").unwrap();
+        assert_eq!(parsed.level_entries[0].path, "current");
+    }
+
+    #[test]
+    fn non_object_ome_falls_back_to_top_level() {
+        // Defensive: a junk `ome` value must not shadow readable 0.4-style
+        // attributes.
+        let root_json = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {
+                "ome": "0.4",
+                "multiscales": [{
+                    "axes": [{"name": "y"}, {"name": "x"}],
+                    "datasets": [{"path": "0"}]
+                }]
+            }
+        });
+        let parsed = parse_multiscales(&root_json, "").unwrap();
+        assert_eq!(parsed.level_entries[0].path, "0");
+    }
+
+    #[test]
+    fn omero_channels_read_from_top_level_placement() {
+        let root = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {
+                "multiscales": [],
+                "omero": {"channels": [{"label": "Ch A"}, {"label": "Ch B"}]}
+            }
+        });
+        let infos = parse_omero_channels(&root);
+        assert_eq!(infos.len(), 2);
+        assert_eq!(infos[0].label, "Ch A");
+        assert_eq!(infos[1].label, "Ch B");
+    }
+
+    #[test]
+    fn labels_names_read_from_top_level_placement() {
+        let json = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {"labels": ["region-a", "region-b"]}
+        });
+        assert_eq!(parse_labels_names(&json), vec!["region-a", "region-b"]);
+    }
+
+    #[test]
+    fn image_label_read_from_top_level_placement() {
+        let json = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {
+                "image-label": {
+                    "colors": [{"label-value": 7, "rgba": [1, 2, 3, 4]}],
+                    "source": {"image": "../../"}
+                }
+            }
+        });
+        let meta = parse_image_label(&json);
+        assert!(meta.source_declared);
+        assert_eq!(
+            meta.colors,
+            vec![LabelColor {
+                value: 7,
+                rgba: [1, 2, 3, 4]
+            }]
         );
     }
 
