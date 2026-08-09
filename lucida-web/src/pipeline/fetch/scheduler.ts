@@ -363,7 +363,10 @@ export class Scheduler<Req extends SchedulableRequest> {
    * Returns every scheduler key that was removed so callers can clear
    * sidecar metadata keyed outside the scheduler.
    */
-  cancelWhere(predicate: (entry: InFlightEntry<Req>) => boolean): string[] {
+  cancelWhere(
+    predicate: (entry: InFlightEntry<Req>) => boolean,
+    now: number = performance.now(),
+  ): string[] {
     const cancelled: string[] = [];
     for (const [key, entry] of this.inFlight) {
       if (predicate(entry)) {
@@ -392,7 +395,7 @@ export class Scheduler<Req extends SchedulableRequest> {
     });
     // A bulk removal can pull any number of backlog entries into the
     // window; stamp them so the starvation signal stays complete.
-    this.syncWindow(performance.now());
+    this.syncWindow(now);
     return cancelled;
   }
 

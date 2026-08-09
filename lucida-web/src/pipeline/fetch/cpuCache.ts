@@ -411,7 +411,7 @@ export class CpuCache {
     for (let i = 0; i < requests.length; i++) {
       const req = requests[i];
       const tier = this.requestResidencyTier(req);
-      const key = `${req.entityId}/${tier}/${req.chunkKey}`;
+      const key = chunkSchedulerKey(req, tier);
       keys[i] = key;
       tiers[i] = tier;
       if (unwantedInFlightKeys.size > 0) unwantedInFlightKeys.delete(key);
@@ -967,13 +967,23 @@ export class CpuCache {
     return this.proxyStore.dump();
   }
 
-  /** Per-entry age (ms since enqueue) for the starvation panel. */
+  /**
+   * Per-entry state for the starvation panel.
+   *
+   * `admitted` distinguishes the scheduler's admission window from the
+   * backlog behind it (ADR 0044). Only admitted entries carry an
+   * admission timestamp, so `ageMs` is `null` — not zero — for backlog
+   * entries: they have been waiting at least as long as the oldest
+   * admitted one, and reporting 0 would paint a deeply oversubscribed
+   * queue as a healthy one on exactly the case the panel exists for.
+   */
   getPendingDump(): Array<{
     chunkKey: string;
     entityId: string;
     lane: Lane;
     priority: number;
-    ageMs: number;
+    ageMs: number | null;
+    admitted: boolean;
   }> {
     const now = performance.now();
     return this.chunkScheduler.pendingSnapshot().map(r => {
@@ -983,7 +993,8 @@ export class CpuCache {
         entityId: r.entityId,
         lane: r.lane,
         priority: r.priority,
-        ageMs: enq !== undefined ? now - enq : 0,
+        ageMs: enq !== undefined ? now - enq : null,
+        admitted: enq !== undefined,
       };
     });
   }
@@ -1743,8 +1754,19 @@ export class CpuCache {
   }
 
   private inFlightKey(req: ChunkRequest): string {
-    return `${req.entityId}/${this.requestResidencyTier(req)}/${req.chunkKey}`;
+    return chunkSchedulerKey(req, this.requestResidencyTier(req));
   }
+}
+
+/**
+ * The scheduler key for a chunk request at a known residency tier. Sole
+ * definition of that string: `CpuCache.submit` derives the tier once per
+ * request and calls this directly, while {@link CpuCache.inFlightKey}
+ * resolves the tier first and then calls it — so the two paths cannot
+ * drift into producing different keys for the same request.
+ */
+function chunkSchedulerKey(req: ChunkRequest, tier: ResidencyTier): string {
+  return `${req.entityId}/${tier}/${req.chunkKey}`;
 }
 
 /**

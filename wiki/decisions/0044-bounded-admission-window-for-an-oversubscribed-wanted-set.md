@@ -75,31 +75,34 @@ minutes, on a viewer with a documented history of interaction stutter.
 
 ## Decision
 
-Split the scheduler's pending queue into a bounded **admission window** and an
-untimestamped **backlog**, and stop paying per-request costs for the backlog.
+The scheduler's pending queue becomes two things with different obligations: a
+bounded **admission window** the scheduler has committed to fetching soon, and
+an ordered **backlog** it merely intends to. Only the window carries per-request
+bookkeeping. `Scheduler` (`lucida-web/src/pipeline/fetch/scheduler.ts`) owns the
+split; ordering, drain order, and cancellation semantics are unchanged.
 
-- The window is the front `max(64, maxConcurrentFetches * 4)` entries of the
-  same `pending` array. Ordering, drain order, and cancellation semantics are
-  unchanged — the split is purely about which entries carry bookkeeping.
-- Only window entries carry an enqueue timestamp. `enqueuedAt` therefore means
-  *when the scheduler committed to fetching this soon*, and is bounded by
-  window ÷ throughput rather than by how long ago a tile first became wanted.
-- `drain` promotes one backlog entry into the window per dequeue, and
-  `cancelWhere` re-syncs it after a bulk removal. **The backlog is never
-  dropped**: a scheduler that receives no further `enqueue` still works through
-  everything it holds, so an at-rest collection fill completes exactly as before.
-- `submit` derives each request's residency tier and scheduler key **once** per
-  rebuild and reuses them, instead of rebuilding them for the planned-key set,
-  the tier-demand pass, the enqueue loop, and the tier-allocation interleave.
-- Omitted-work cancellation aborts in-flight entries only
-  (`Scheduler.cancelInFlightWhere`). It previously ran `cancelWhere`, which
-  walked the entire ~21k-entry pending array — allocating a synthetic entry and
-  rebuilding a key string per element — moments before `enqueue` replaced that
-  array wholesale with this plan's request set. Filtering the outgoing queue had
-  no observable effect.
+Two properties are load-bearing:
 
-Measured result: `submit` at 21,400 requests goes from **20.5–22.2 ms p50 to
-9.1–9.5 ms p50** (~105 → ~46 ms/s of main thread).
+- **The backlog is never dropped.** Rebuilds stop when the camera stops, so a
+  shed request would never be re-offered and an at-rest collection fill would
+  stall forever. The scheduler promotes from its own backlog as the window
+  drains, and completes the fill with no further submits.
+- **An enqueue timestamp now means "admitted", not "first wanted".** The
+  starvation signal is therefore bounded by window ÷ throughput. Surfaces that
+  report it say so, and backlog entries report *no* age rather than a
+  misleadingly small one.
+
+This is [planning principle 2](../principles/planning.md) — "every policy must
+be bounded… no unbounded enumeration, no carry-forward state that only grows"
+— applied to the request queue rather than to memory. The queue was the one
+piece of carry-forward state whose per-entry cost grew with member count and
+which had no budget at all. The window is that budget; the backlog is the
+defined behaviour for what exceeds it.
+
+`CpuCache.submit` correspondingly derives each request's residency tier and
+scheduler key once per rebuild rather than up to four times, and omitted-work
+cancellation stops walking the outgoing pending queue — that queue is replaced
+wholesale a few statements later, so filtering it had no observable effect.
 
 ## Measured, before and after
 
