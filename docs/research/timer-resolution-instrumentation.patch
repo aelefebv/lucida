@@ -1,0 +1,52 @@
+diff --git a/lucida-server/Cargo.toml b/lucida-server/Cargo.toml
+index 3d5207e..5ee15c7 100644
+--- a/lucida-server/Cargo.toml
++++ b/lucida-server/Cargo.toml
+@@ -18,7 +18,7 @@ object_store = "0.12"
+ tokio = { version = "1", features = ["full"] }
+ axum = { version = "0.8", features = ["ws"] }
+ tower = { version = "0.5", features = ["util"] }
+-tower-http = { version = "0.6", features = ["cors", "fs"] }
++tower-http = { version = "0.6", features = ["cors", "fs", "set-header"] }
+ futures-util = "0.3"
+ serde = { version = "1", features = ["derive"] }
+ serde_json = "1"
+diff --git a/lucida-server/src/static_serve.rs b/lucida-server/src/static_serve.rs
+index 3aa662a..0d6e39f 100644
+--- a/lucida-server/src/static_serve.rs
++++ b/lucida-server/src/static_serve.rs
+@@ -50,11 +50,32 @@ use tower_http::services::{ServeDir, ServeFile};
+ /// `/api/*`, `/admin/*`, `/ws`) take precedence and the SPA fallback
+ /// only fires for truly unknown paths.
+ pub fn router(dist_path: PathBuf) -> Router {
+-    Router::new()
++    let r = Router::new()
+         .fallback(serve_static)
+         .with_state(StaticState {
+             dist_path: Arc::new(dist_path),
+-        })
++        });
++    // THROWAWAY (issue #897 experiment): serve the SPA cross-origin
++    // isolated when LUCIDA_COI is set, so the timer-resolution arm can
++    // be measured against the real app. Not product code.
++    if std::env::var("LUCIDA_COI").is_ok() {
++        let coep = std::env::var("LUCIDA_COI").unwrap_or_default();
++        let coep = if coep == "credentialless" {
++            "credentialless"
++        } else {
++            "require-corp"
++        };
++        return r
++            .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
++                axum::http::HeaderName::from_static("cross-origin-opener-policy"),
++                axum::http::HeaderValue::from_static("same-origin"),
++            ))
++            .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
++                axum::http::HeaderName::from_static("cross-origin-embedder-policy"),
++                axum::http::HeaderValue::from_str(coep).unwrap(),
++            ));
++    }
++    r
+ }
+ 
+ /// State threaded into the fallback handler so it can re-stat the dist
