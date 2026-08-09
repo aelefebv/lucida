@@ -12,6 +12,7 @@ import {
   UPLOAD_BUDGET_EXHAUSTED_STREAK_THRESHOLD,
   UPLOAD_FILTER_RATIO_THRESHOLD,
   UPLOAD_RESEND_RATIO_THRESHOLD,
+  UPLOAD_SIZE_SAMPLES,
   UPLOAD_WINDOW_MS,
   UPLOAD_LOG_RATE_LIMIT_MS,
   UPLOAD_LOG_SUSTAIN_MS,
@@ -90,6 +91,55 @@ describe("UploadTelemetry — recordEvent + counters", () => {
     expect(rolling.totalBytes).toBe(1000);
   });
 
+  it("keeps only the last second of events across sustained load", () => {
+    const tel = new UploadTelemetry();
+    // 60 ticks of 128 events each, 16ms apart — well past one window's worth,
+    // so the buffers must wrap and prune repeatedly rather than grow forever.
+    const perTick = 128;
+    const tickMs = 16;
+    const ticks = 200;
+    for (let i = 0; i < ticks; i++) {
+      const now = 100_000 + i * tickMs;
+      for (let e = 0; e < perTick; e++) tel.recordEvent(now, 10, false);
+      tel.publish(now, makeTickStats());
+    }
+    const rolling = debugStats.upload.rolling!;
+    // Events stamped at or after `now - 1000` survive: ceil(1000/16) = 63 ticks
+    // (the current tick plus the 62 preceding ones inside the window).
+    const ticksInWindow = Math.floor(UPLOAD_WINDOW_MS / tickMs) + 1;
+    expect(rolling.uploadsPerSec).toBe(ticksInWindow * perTick);
+    expect(rolling.bytesPerSec).toBe(ticksInWindow * perTick * 10);
+    // Cumulative counters keep counting everything.
+    expect(rolling.totalUploads).toBe(ticks * perTick);
+  });
+
+  it("publishes in well under a frame budget at a high event rate", () => {
+    // Regression guard for #898. The old prune was `Array.shift()` in a
+    // loop; V8 left-trims cheaply until the backing store outgrows a regular
+    // heap object, after which every shift is a full memmove. 128 events per
+    // tick at ~120Hz puts the 1s ring at ~15.5k entries — past that cliff,
+    // where the shift version measures ~1.15ms per publish.
+    const tel = new UploadTelemetry();
+    const perTick = 128;
+    const tickMs = 8;
+    const drive = (base: number, ticks: number): number => {
+      const start = performance.now();
+      for (let i = 0; i < ticks; i++) {
+        const now = base + i * tickMs;
+        for (let e = 0; e < perTick; e++) tel.recordEvent(now, 10, false);
+        tel.publish(now, makeTickStats());
+      }
+      return performance.now() - start;
+    };
+    // Warm to steady state so the measured ticks are the expensive ones
+    // (a full second of events resident, pruning on every tick).
+    drive(100_000, 300);
+    const perPublishMs = drive(200_000, 300) / 300;
+    // Generous bound — CI machines are noisy, and the point is the shape of
+    // the curve, not a precise number. The shift version is ~60x over this.
+    expect(perPublishMs).toBeLessThan(0.2);
+  });
+
   it("derives p50 / p95 upload size from the sample buffer", () => {
     const tel = new UploadTelemetry();
     // Build a known distribution: 1,2,3,...,10.
@@ -100,6 +150,25 @@ describe("UploadTelemetry — recordEvent + counters", () => {
     expect(rolling.uploadSizeP50).toBe(600);
     // Math.floor(10 * 0.95) = 9 → sorted[9] = 1000.
     expect(rolling.uploadSizeP95).toBe(1000);
+  });
+
+  it("keeps only the most recent UPLOAD_SIZE_SAMPLES sizes once it wraps", () => {
+    const tel = new UploadTelemetry();
+    const n = UPLOAD_SIZE_SAMPLES * 2;
+    for (let i = 1; i <= n; i++) tel.recordEvent(10_000, i * 100, false);
+    tel.publish(10_000, makeTickStats());
+    const rolling = debugStats.upload.rolling!;
+    // Retained window is i = SAMPLES+1 .. 2*SAMPLES, sorted ascending.
+    const retained = Array.from(
+      { length: UPLOAD_SIZE_SAMPLES },
+      (_, k) => (UPLOAD_SIZE_SAMPLES + 1 + k) * 100,
+    );
+    expect(rolling.uploadSizeP50).toBe(
+      retained[Math.floor(UPLOAD_SIZE_SAMPLES * 0.5)],
+    );
+    expect(rolling.uploadSizeP95).toBe(
+      retained[Math.floor(UPLOAD_SIZE_SAMPLES * 0.95)],
+    );
   });
 });
 
