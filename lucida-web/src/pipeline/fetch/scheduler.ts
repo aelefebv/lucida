@@ -7,6 +7,15 @@
  * decode, retry, or the cache — the `startFn` callback owns that work
  * and must call back via {@link correctInFlightBytes} +
  * {@link markInFlightDone} to close out the slot.
+ *
+ * The pending queue is split in two (ADR 0044): a bounded, timestamped
+ * ADMISSION WINDOW at the front, and an untimestamped BACKLOG behind it.
+ * Both live in the same `pending` array — the window is simply its first
+ * {@link SchedulerConfig.admissionWindow} entries — so ordering, drain,
+ * and cancellation are unchanged. Only the per-key bookkeeping is
+ * bounded. See the ADR for why: on an oversubscribed remote collection
+ * the wanted set is ~21k requests re-submitted ~5x/s, and stamping all
+ * of them cost ~9% of the main thread while saying nothing useful.
  */
 
 import type { BurstLogger } from "./telemetry.ts";
@@ -15,6 +24,23 @@ export interface SchedulableRequest {
   datasetId: string;
   entityId: string;
 }
+
+/**
+ * Admission-window floor, applied when a caller's window would otherwise
+ * be smaller than this. Keeps the window meaningful for the proxy
+ * scheduler and for small/local datasets, where the entire wanted set is
+ * routinely under this size and the split should be invisible.
+ */
+export const MIN_ADMISSION_WINDOW = 64;
+
+/**
+ * Default admission window as a multiple of `maxConcurrentFetches`. Deep
+ * enough that the drain loop never runs dry between rebuilds (a rebuild
+ * refills the window wholesale, and every fetch completion re-drains),
+ * shallow enough that the window is a promise the transport can keep
+ * within a couple of seconds at remote fetch rates.
+ */
+export const ADMISSION_WINDOW_CONCURRENCY_MULTIPLE = 4;
 
 export interface SchedulerConfig {
   maxConcurrentFetches: number;
@@ -26,6 +52,13 @@ export interface SchedulerConfig {
    * load can't exceed the shared cap.
    */
   siblingInFlight?: () => { count: number; bytes: number };
+  /**
+   * How many front-of-queue entries carry an enqueue timestamp. Defaults
+   * to `max(MIN_ADMISSION_WINDOW, maxConcurrentFetches *
+   * ADMISSION_WINDOW_CONCURRENCY_MULTIPLE)`. Entries behind it are
+   * retained and drained in order, but untimestamped until promoted.
+   */
+  admissionWindow?: number;
 }
 
 export interface InFlightEntry<Req extends SchedulableRequest> {
@@ -49,8 +82,17 @@ export class Scheduler<Req extends SchedulableRequest> {
   private pending: Req[] = [];
   private inFlight = new Map<string, InFlightEntry<Req>>();
   private inFlightBytesCounter = 0;
-  /** First-enqueue timestamps; oldest age is the pending-starvation signal. */
+  /**
+   * Admission timestamps for the window only — the moment a request
+   * entered the front {@link admissionWindow} entries of `pending`, i.e.
+   * when the scheduler committed to fetching it soon. Backlog entries
+   * behind the window carry no stamp until promoted. The oldest stamp is
+   * the pending-starvation signal, and it is now bounded by the window
+   * rather than by how long ago a tile first became wanted.
+   */
   private enqueuedAt = new Map<string, number>();
+
+  private readonly admissionWindow: number;
 
   private readonly config: SchedulerConfig;
   private readonly keyFn: (req: Req) => string;
@@ -74,6 +116,13 @@ export class Scheduler<Req extends SchedulableRequest> {
     this.config = config;
     this.keyFn = keyFn;
     this.startFn = startFn;
+    // An explicit window is taken literally; only the derived default
+    // gets the floor, so a caller can ask for a small window and a
+    // small/local dataset never notices the split.
+    this.admissionWindow = config.admissionWindow ?? Math.max(
+      MIN_ADMISSION_WINDOW,
+      config.maxConcurrentFetches * ADMISSION_WINDOW_CONCURRENCY_MULTIPLE,
+    );
   }
 
   get inFlightSize(): number {
@@ -125,34 +174,50 @@ export class Scheduler<Req extends SchedulableRequest> {
     return this.enqueuedAt.get(key);
   }
 
+  /** How many pending entries currently carry an admission stamp. */
+  get admittedSize(): number {
+    return this.enqueuedAt.size;
+  }
+
   /**
-   * Replace the pending queue, preserving the original enqueue
-   * timestamp for any already-pending key (starvation signal reflects
-   * first appearance, not most recent plan tick). Caller dedups; the
-   * scheduler does no filtering.
+   * Replace the pending queue. Only the front {@link admissionWindow}
+   * entries are stamped; a key already in the window keeps its original
+   * stamp, so the starvation signal reflects first admission rather than
+   * the most recent plan tick. Entries behind the window are retained in
+   * order and stamped when {@link drain} promotes them.
+   *
+   * Bounding the stamp map here is the whole point of the split: the
+   * caller hands us the complete wanted set on every rebuild, and on a
+   * large remote collection that is ~21k entries ~5x/s. Caller dedups;
+   * the scheduler does no filtering.
    */
   enqueue(reqs: Req[], now: number = performance.now()): void {
     this.pending = reqs;
+    const windowEnd = Math.min(this.admissionWindow, reqs.length);
     const next = new Map<string, number>();
-    for (const req of reqs) {
-      const key = this.keyFn(req);
+    for (let i = 0; i < windowEnd; i++) {
+      const key = this.keyFn(reqs[i]);
       next.set(key, this.enqueuedAt.get(key) ?? now);
     }
     this.enqueuedAt = next;
   }
 
   /**
-   * Drain pending into in-flight up to either cap. If a cap blocks
-   * further dequeue while pending remain, the optional burstLogger
-   * fires its rate-limited backpressure summary.
+   * Drain pending into in-flight up to either cap, promoting backlog
+   * entries into the admission window as the window empties — so a
+   * scheduler that never receives another `enqueue` still works through
+   * its whole backlog (an at-rest collection fill must still complete).
+   * If a cap blocks further dequeue while pending remain, the optional
+   * burstLogger fires its rate-limited backpressure summary.
    */
-  drain(estimateBytes: (req: Req) => number): void {
+  drain(estimateBytes: (req: Req) => number, now: number = performance.now()): void {
     while (this.pending.length > 0 && this.canStartMore()) {
       const req = this.pending.shift()!;
       const key = this.keyFn(req);
       this.enqueuedAt.delete(key);
       const estimate = estimateBytes(req);
       this.startInFlight(req, key, estimate);
+      this.promoteIntoWindow(now);
     }
 
     if (this.pending.length > 0 && !this.canStartMore() && this.config.burstLogger) {
@@ -170,6 +235,32 @@ export class Scheduler<Req extends SchedulableRequest> {
           skippedSinceLastLog: skipped,
         }),
       );
+    }
+  }
+
+  /**
+   * Stamp the single entry that a front-of-queue removal just pulled
+   * into the admission window. Cheap counterpart to
+   * {@link syncWindow} for the hot drain loop: exactly one index can
+   * newly qualify per `shift()`.
+   */
+  private promoteIntoWindow(now: number): void {
+    const idx = this.admissionWindow - 1;
+    if (idx >= this.pending.length) return;
+    const key = this.keyFn(this.pending[idx]);
+    if (!this.enqueuedAt.has(key)) this.enqueuedAt.set(key, now);
+  }
+
+  /**
+   * Re-stamp the whole window. Used after a bulk removal
+   * ({@link cancelWhere}), where an arbitrary number of backlog entries
+   * can be pulled forward at once.
+   */
+  private syncWindow(now: number): void {
+    const windowEnd = Math.min(this.admissionWindow, this.pending.length);
+    for (let i = 0; i < windowEnd; i++) {
+      const key = this.keyFn(this.pending[i]);
+      if (!this.enqueuedAt.has(key)) this.enqueuedAt.set(key, now);
     }
   }
 
@@ -242,6 +333,32 @@ export class Scheduler<Req extends SchedulableRequest> {
   }
 
   /**
+   * Abort IN-FLIGHT entries matching `predicate`, leaving the pending
+   * queue untouched. The predicate receives the scheduler key alongside
+   * the entry so a caller matching on keys does not have to rebuild them.
+   * Returns the keys removed.
+   *
+   * Use this instead of {@link cancelWhere} when the caller is about to
+   * replace the pending queue anyway: `cancelWhere` walks every pending
+   * entry, and on an oversubscribed collection that queue is tens of
+   * thousands deep (issue #900).
+   */
+  cancelInFlightWhere(
+    predicate: (entry: InFlightEntry<Req>, key: string) => boolean,
+  ): string[] {
+    const cancelled: string[] = [];
+    for (const [key, entry] of this.inFlight) {
+      if (!predicate(entry, key)) continue;
+      entry.controller.abort();
+      this.inFlightBytesCounter -= entry.estimatedBytes;
+      this.inFlight.delete(key);
+      this.enqueuedAt.delete(key);
+      cancelled.push(key);
+    }
+    return cancelled;
+  }
+
+  /**
    * Cancel in-flight + drop pending entries matching `predicate`.
    * Returns every scheduler key that was removed so callers can clear
    * sidecar metadata keyed outside the scheduler.
@@ -273,6 +390,9 @@ export class Scheduler<Req extends SchedulableRequest> {
       }
       return !drop;
     });
+    // A bulk removal can pull any number of backlog entries into the
+    // window; stamp them so the starvation signal stays complete.
+    this.syncWindow(performance.now());
     return cancelled;
   }
 

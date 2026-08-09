@@ -388,16 +388,51 @@ export class CpuCache {
 
     const newActiveIds = new Set(plan.activeSet.map(e => e.entityId));
     for (const entityId of newActiveIds) this.activeEntityIdsThisRebuild.add(entityId);
-    const plannedChunkKeys = new Set(plan.requests.map(req => this.inFlightKey(req)));
-    this.recordTierDemand(plan.requests);
+
+    // One pass over the request list builds every derived key exactly
+    // once (issue #900). The planner hands `submit` the dataset's
+    // COMPLETE wanted set on every rebuild — ~21k entries at ~5/s on a
+    // large remote collection — so re-deriving `inFlightKey` separately
+    // for the planned-key set, the tier-demand pass, and the enqueue
+    // loop cost three string builds and ~six residency-tier calls per
+    // request per rebuild. `keys[i]` and `tiers[i]` are read back by the
+    // enqueue loop below. Order of effects is unchanged: tier demand is
+    // still recorded over the FULL list before the enqueue loop, so
+    // demand-lane resolution stays independent of request order.
+    const requests = plan.requests;
+    const keys = new Array<string>(requests.length);
+    const tiers = new Array<ResidencyTier>(requests.length);
+    // Seeded with every in-flight key belonging to an entity in THIS
+    // submit's active set; the pass below strikes out each key the plan
+    // still wants, leaving the omitted work to abort. Bounded by the
+    // concurrency cap, so this replaces a ~21k-entry planned-key set with
+    // a set of at most a couple of dozen strings.
+    const unwantedInFlightKeys = this.activeInFlightChunkKeys(newActiveIds);
+    for (let i = 0; i < requests.length; i++) {
+      const req = requests[i];
+      const tier = this.requestResidencyTier(req);
+      const key = `${req.entityId}/${tier}/${req.chunkKey}`;
+      keys[i] = key;
+      tiers[i] = tier;
+      if (unwantedInFlightKeys.size > 0) unwantedInFlightKeys.delete(key);
+      if (tier === "detail") {
+        this.desiredDetailKeysThisTick.add(key);
+      } else if (tier === "coarse") {
+        this.desiredCoarseKeysThisTick.add(key);
+        if (req.lane === "coarse") this.viewCoarseKeysThisTick.add(key);
+      }
+    }
+
     this.applyElasticTierBudgets();
-    this.cancelOmittedChunkWork(newActiveIds, plannedChunkKeys);
+    this.cancelOmittedChunkWork(unwantedInFlightKeys);
 
     const pendingChunks: ChunkRequest[] = [];
+    const pendingTiers: ResidencyTier[] = [];
     const pendingKeys = new Set<string>();
     const enqueueNow = performance.now();
-    for (const req of plan.requests) {
-      const key = this.inFlightKey(req);
+    for (let i = 0; i < requests.length; i++) {
+      const req = requests[i];
+      const key = keys[i];
 
       this.counters.recordRequest();
 
@@ -417,7 +452,7 @@ export class CpuCache {
         this.counters.recordHit();
         const lane = this.resolveDemandLane(req.lane, key);
         cachedEntry.lane = lane;
-        cachedEntry.residencyTier = this.requestResidencyTier(req);
+        cachedEntry.residencyTier = tiers[i];
         cachedEntry.tier = this.laneToTier(lane);
         // A relabelled minimap request must not overwrite the view's
         // own (more urgent) delivery priority for the same chunk.
@@ -448,8 +483,12 @@ export class CpuCache {
       if (pendingKeys.has(key)) continue;
       pendingKeys.add(key);
       pendingChunks.push(req);
+      pendingTiers.push(tiers[i]);
     }
-    this.chunkScheduler.enqueue(this.orderChunkRequestsForTierAllocation(pendingChunks), enqueueNow);
+    this.chunkScheduler.enqueue(
+      orderChunkRequestsForTierAllocation(pendingChunks, pendingTiers),
+      enqueueNow,
+    );
 
     const proxyRequests = plan.proxyRequests ?? [];
     const pendingProxies: ProxyRequest[] = [];
@@ -487,16 +526,40 @@ export class CpuCache {
    * simply be submitted in a separate call this rebuild; departure of an
    * entity from the view entirely is handled at the rebuild boundary in
    * {@link onPlanRebuildStart}.
+   *
+   * `unwantedInFlightKeys` is computed by {@link submit}'s derivation pass
+   * (issue #900): it starts as this submit's active-entity in-flight keys
+   * and has every key the plan still wants struck out of it, so what
+   * remains is exactly the set to abort — a handful of keys, rather than a
+   * membership test against a ~21k planned-key set.
+   *
+   * Only IN-FLIGHT work is cancelled. The pending queue is deliberately
+   * left alone: `submit` replaces it wholesale a few statements later with
+   * exactly this plan's request set, so filtering the outgoing queue is
+   * work with no observable effect — and on a large remote collection that
+   * filter walked ~21k entries, allocating a synthetic entry and rebuilding
+   * a key string for every one of them, on every rebuild.
    */
-  private cancelOmittedChunkWork(
-    activeEntityIds: Set<string>,
-    plannedChunkKeys: Set<string>,
-  ): void {
-    if (activeEntityIds.size === 0) return;
-    const cancelled = this.chunkScheduler.cancelWhere((entry) => (
-      activeEntityIds.has(entry.request.entityId) &&
-      !plannedChunkKeys.has(this.inFlightKey(entry.request))
-    ));
+  /**
+   * In-flight chunk keys whose entity is in `activeEntityIds`. Bounded by
+   * the concurrency cap, so building it is cheap regardless of how large
+   * the wanted set is. Empty when no entity is active — the caller then
+   * has nothing to cancel.
+   */
+  private activeInFlightChunkKeys(activeEntityIds: Set<string>): Set<string> {
+    const keys = new Set<string>();
+    if (activeEntityIds.size === 0) return keys;
+    for (const [key, entry] of this.chunkScheduler.inFlightEntries()) {
+      if (activeEntityIds.has(entry.request.entityId)) keys.add(key);
+    }
+    return keys;
+  }
+
+  private cancelOmittedChunkWork(unwantedInFlightKeys: Set<string>): void {
+    if (unwantedInFlightKeys.size === 0) return;
+    const cancelled = this.chunkScheduler.cancelInFlightWhere(
+      (_entry, key) => unwantedInFlightKeys.has(key),
+    );
     for (const key of cancelled) {
       this.inFlightChunkMeta.delete(key);
     }
@@ -1233,32 +1296,6 @@ export class CpuCache {
     this.chunkScheduler.drain(estimateBytes);
   }
 
-  private orderChunkRequestsForTierAllocation(requests: ChunkRequest[]): ChunkRequest[] {
-    const detail: ChunkRequest[] = [];
-    const coarse: ChunkRequest[] = [];
-    const other: ChunkRequest[] = [];
-
-    for (const req of requests) {
-      const tier = this.requestResidencyTier(req);
-      if (tier === "detail") detail.push(req);
-      else if (tier === "coarse") coarse.push(req);
-      else other.push(req);
-    }
-
-    if (detail.length === 0 || coarse.length === 0) {
-      return [...detail, ...coarse, ...other];
-    }
-
-    const ordered: ChunkRequest[] = [];
-    const max = Math.max(detail.length, coarse.length);
-    for (let i = 0; i < max; i++) {
-      if (i < detail.length) ordered.push(detail[i]);
-      if (i < coarse.length) ordered.push(coarse[i]);
-    }
-    ordered.push(...other);
-    return ordered;
-  }
-
   private applyElasticTierBudgets(): void {
     const detailDemand = this.desiredDetailKeysThisTick.size > 0;
     const coarseDemand = this.desiredCoarseKeysThisTick.size > 0;
@@ -1614,21 +1651,6 @@ export class CpuCache {
       : "detail";
   }
 
-  private recordTierDemand(requests: ChunkRequest[]): void {
-    for (const req of requests) {
-      if (this.requestResidencyTier(req) === "detail") {
-        this.desiredDetailKeysThisTick.add(this.inFlightKey(req));
-      } else if (this.requestResidencyTier(req) === "coarse") {
-        const key = this.inFlightKey(req);
-        this.desiredCoarseKeysThisTick.add(key);
-        // Recorded over the FULL request list before the enqueue loop
-        // runs, so demand-lane resolution is independent of the order
-        // in which a chunk's minimap and coarse requests appear.
-        if (req.lane === "coarse") this.viewCoarseKeysThisTick.add(key);
-      }
-    }
-  }
-
   private computeTierDemandTelemetry(): CacheTelemetry["tierDemand"] {
     let residentDetailChunks = 0;
     let residentDetailBytes = 0;
@@ -1723,6 +1745,43 @@ export class CpuCache {
   private inFlightKey(req: ChunkRequest): string {
     return `${req.entityId}/${this.requestResidencyTier(req)}/${req.chunkKey}`;
   }
+}
+
+/**
+ * Interleave detail and coarse requests so neither tier can exhaust the
+ * fetch slots before the other gets any — the two caches have separate
+ * budgets, and a priority-sorted run of one tier would otherwise fill
+ * the queue head. `tiers[i]` is the residency tier of `requests[i]`,
+ * precomputed by {@link CpuCache.submit}'s single derivation pass so a
+ * large wanted set is not re-classified here (issue #900).
+ */
+function orderChunkRequestsForTierAllocation(
+  requests: ChunkRequest[],
+  tiers: ResidencyTier[],
+): ChunkRequest[] {
+  const detail: ChunkRequest[] = [];
+  const coarse: ChunkRequest[] = [];
+  const other: ChunkRequest[] = [];
+
+  for (let i = 0; i < requests.length; i++) {
+    const tier = tiers[i];
+    if (tier === "detail") detail.push(requests[i]);
+    else if (tier === "coarse") coarse.push(requests[i]);
+    else other.push(requests[i]);
+  }
+
+  if (detail.length === 0 || coarse.length === 0) {
+    return [...detail, ...coarse, ...other];
+  }
+
+  const ordered: ChunkRequest[] = [];
+  const max = Math.max(detail.length, coarse.length);
+  for (let i = 0; i < max; i++) {
+    if (i < detail.length) ordered.push(detail[i]);
+    if (i < coarse.length) ordered.push(coarse[i]);
+  }
+  ordered.push(...other);
+  return ordered;
 }
 
 function isEpochStale(deliveryEpochs: SceneEpochs, currentEpochs: SceneEpochs): boolean {

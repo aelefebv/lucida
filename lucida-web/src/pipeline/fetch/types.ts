@@ -217,8 +217,18 @@ export interface CacheTelemetry {
   inFlightProxyBytes: number;
   pendingCount: number;
   pendingProxyCount: number;
-  /** Age (ms) of the longest-waiting entry in the chunk scheduler's
-   *  pending queue; 0 if empty. */
+  /**
+   * Age (ms) of the longest-waiting entry in the chunk scheduler's
+   * ADMISSION WINDOW — the bounded front of the pending queue the
+   * scheduler has committed to fetching soon (ADR 0044); 0 if empty.
+   *
+   * This is a drain-health signal, not a time-since-first-wanted one. On
+   * an oversubscribed collection the backlog behind the window can be
+   * tens of thousands deep, and the honest wait for a tile at the back of
+   * it is `pendingCount / fetch rate` — read those two together. Before
+   * the window existed this field pinned near the age of the whole
+   * session on such a collection and told you nothing.
+   */
   pendingOldestAgeMs: number;
   /** Cached, wanted, unsent deliverables currently visible to upload. */
   readyCount: number;
