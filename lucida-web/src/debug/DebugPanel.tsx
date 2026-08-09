@@ -1729,6 +1729,12 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                           <span style={{ color: "#f88" }}> · backend errors {cache.backend_errors}</span>
                         )}
                       </div>
+                      <div style={{ color: "#888" }}>
+                        backend reads {cache.source_reads} · {cache.source_read_millis} ms
+                        {cache.source_reads > 0 && (
+                          <> · {Math.round(cache.source_read_millis / cache.source_reads)} ms/read</>
+                        )}
+                      </div>
                     </div>
                   ) : (
                     <div style={{ color: "#888", marginTop: 5 }}>

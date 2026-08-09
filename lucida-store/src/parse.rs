@@ -5,7 +5,6 @@
 
 use std::sync::Arc;
 
-use object_store::ObjectStore;
 use object_store::path::Path;
 use serde::Deserialize;
 
@@ -13,6 +12,7 @@ use lucida_content::normalize::{normalize_f64_to_5d, normalize_to_5d};
 use lucida_content::{ChannelInfo, LabelColor};
 
 use crate::backend::StoreError;
+use crate::cache::CachedStore;
 
 /// Upper bound on label groups parsed from one `labels` list. Guards against
 /// oversized/untrusted metadata; far above any realistic label count.
@@ -51,10 +51,10 @@ pub struct ChunkGridConfig {
 
 /// Read and parse a zarr.json file from the object store.
 pub(crate) async fn read_zarr_json(
-    store: &Arc<dyn ObjectStore>,
+    store: &Arc<CachedStore>,
     path: &str,
 ) -> Result<serde_json::Value, StoreError> {
-    let bytes = store.get(&Path::from(path)).await?.bytes().await?;
+    let bytes = store.get_metadata_bytes(&Path::from(path)).await?;
     serde_json::from_slice(&bytes)
         .map_err(|e| StoreError::Metadata(format!("invalid JSON in {path}: {e}")))
 }
@@ -250,24 +250,18 @@ pub(crate) enum OptionalZarrJson {
 /// must never fail the whole import — the caller proceeds either way, but can
 /// tell a definitive miss from an anomaly.
 pub(crate) async fn read_optional_zarr_json(
-    store: &Arc<dyn ObjectStore>,
+    store: &Arc<CachedStore>,
     path: &str,
 ) -> OptionalZarrJson {
-    match store.get(&Path::from(path)).await {
-        Ok(response) => match response.bytes().await {
-            Ok(bytes) => match serde_json::from_slice(&bytes) {
-                Ok(value) => OptionalZarrJson::Parsed(value),
-                Err(e) => {
-                    eprintln!("[lucida-store] ignoring malformed optional metadata {path}: {e}");
-                    OptionalZarrJson::Unusable
-                }
-            },
+    match store.get_optional_metadata_bytes(&Path::from(path)).await {
+        Ok(Some(bytes)) => match serde_json::from_slice(&bytes) {
+            Ok(value) => OptionalZarrJson::Parsed(value),
             Err(e) => {
-                eprintln!("[lucida-store] ignoring unreadable optional metadata {path}: {e}");
+                eprintln!("[lucida-store] ignoring malformed optional metadata {path}: {e}");
                 OptionalZarrJson::Unusable
             }
         },
-        Err(object_store::Error::NotFound { .. }) => OptionalZarrJson::Absent,
+        Ok(None) => OptionalZarrJson::Absent,
         Err(e) => {
             eprintln!("[lucida-store] ignoring optional metadata {path}: {e}");
             OptionalZarrJson::Unusable
@@ -391,7 +385,7 @@ fn parse_label_color(entry: &serde_json::Value) -> Option<LabelColor> {
 /// Read ArrayMeta for each level in the multiscale pyramid.
 /// `base_prefix` is prepended to level paths (empty for root, "A/1/0" for collection tiles).
 pub(crate) async fn read_level_metas(
-    store: &Arc<dyn ObjectStore>,
+    store: &Arc<CachedStore>,
     base_prefix: &str,
     level_entries: &[LevelEntry],
 ) -> Result<Vec<ArrayMeta>, StoreError> {
@@ -402,7 +396,7 @@ pub(crate) async fn read_level_metas(
         } else {
             Path::from(format!("{base_prefix}/{}/zarr.json", entry.path))
         };
-        let level_bytes = store.get(&level_path).await?.bytes().await?;
+        let level_bytes = store.get_metadata_bytes(&level_path).await?;
         let error_ctx = if base_prefix.is_empty() {
             entry.path.clone()
         } else {

@@ -6,7 +6,6 @@
 use std::sync::Arc;
 
 use futures_util::stream::StreamExt;
-use object_store::ObjectStore;
 use object_store::path::Path;
 
 use lucida_content::normalize::{classify_axes, normalize_to_5d};
@@ -14,6 +13,7 @@ use lucida_content::*;
 use lucida_protocol::*;
 
 use crate::backend::StoreError;
+use crate::cache::CachedStore;
 use crate::coarse::{SourceCoarseConfig, select_source_coarse_level};
 use crate::codec::parse_codec_chain;
 use crate::import_types::*;
@@ -25,7 +25,7 @@ use crate::parse;
 /// Detects whether the root describes a collection or a single image and
 /// produces the appropriate [`ImportResult`].
 pub async fn import_dataset(
-    store: &Arc<dyn ObjectStore>,
+    store: &Arc<CachedStore>,
     id: &str,
     name: &str,
 ) -> Result<ImportResult, StoreError> {
@@ -39,7 +39,7 @@ pub async fn import_dataset(
 /// [`import_dataset`] with the exhaustive-label-discovery decision passed
 /// explicitly instead of read from the environment.
 async fn import_dataset_with_label_discovery(
-    store: &Arc<dyn ObjectStore>,
+    store: &Arc<CachedStore>,
     id: &str,
     name: &str,
     force_exhaustive_label_discovery: bool,
@@ -61,7 +61,7 @@ async fn import_dataset_with_label_discovery(
 }
 
 async fn import_single_image(
-    store: &Arc<dyn ObjectStore>,
+    store: &Arc<CachedStore>,
     id: &str,
     name: &str,
     root_json: &serde_json::Value,
@@ -384,7 +384,7 @@ struct SharedTileGeometry {
 /// metadata — is returned as an error so the caller can fall forward to the next
 /// candidate tile instead of aborting the whole collection.
 async fn read_tile_geometry(
-    store: &Arc<dyn ObjectStore>,
+    store: &Arc<CachedStore>,
     tile_prefix: &str,
 ) -> Result<SharedTileGeometry, StoreError> {
     let tile_json = parse::read_zarr_json(store, &format!("{tile_prefix}/zarr.json")).await?;
@@ -426,7 +426,7 @@ async fn read_tile_geometry(
 /// stream that drives them — borrow nothing from the caller, keeping the
 /// resulting future straightforwardly `Send`.
 async fn select_shared_tile_geometry(
-    store: &Arc<dyn ObjectStore>,
+    store: &Arc<CachedStore>,
     candidate_prefixes: Vec<String>,
 ) -> (Option<SharedTileGeometry>, Vec<String>) {
     let mut unreadable: Vec<String> = Vec::new();
@@ -473,7 +473,7 @@ async fn select_shared_tile_geometry(
 /// `target` is the group's collection path used in any warning, computed by the caller
 /// so this future owns all of its inputs.
 async fn parse_one_group(
-    store: Arc<dyn ObjectStore>,
+    store: Arc<CachedStore>,
     path: Option<String>,
     row_index: u32,
     column_index: u32,
@@ -487,16 +487,8 @@ async fn parse_one_group(
     };
 
     let group_meta_path = Path::from(format!("{group_path}/zarr.json"));
-    let group_bytes = match store.get(&group_meta_path).await {
-        Ok(response) => match response.bytes().await {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                return Err(skipped_group_warning(
-                    &target,
-                    format!("group metadata is unreadable: {e}"),
-                ));
-            }
-        },
+    let group_bytes = match store.get_metadata_bytes(&group_meta_path).await {
+        Ok(bytes) => bytes,
         Err(e) => {
             return Err(skipped_group_warning(
                 &target,
@@ -574,7 +566,7 @@ async fn parse_one_group(
 }
 
 async fn import_collection(
-    store: &Arc<dyn ObjectStore>,
+    store: &Arc<CachedStore>,
     id: &str,
     name: &str,
     root_json: &serde_json::Value,
@@ -1427,7 +1419,7 @@ fn unusable_label_index_warning(
 /// only per-tile label I/O safe to fan out concurrently: probing every tile of
 /// a wide collection at once costs no per-label memory. The expensive per-label reads
 /// happen later in [`build_labels_within_budget`], gated by the shared budget.
-async fn probe_labels_for_image(store: &Arc<dyn ObjectStore>, base_prefix: &str) -> ProbedLabels {
+async fn probe_labels_for_image(store: &Arc<CachedStore>, base_prefix: &str) -> ProbedLabels {
     let labels_prefix = if base_prefix.is_empty() {
         "labels".to_string()
     } else {
@@ -1471,7 +1463,7 @@ async fn probe_labels_for_image(store: &Arc<dyn ObjectStore>, base_prefix: &str)
 /// `probed_labels`. Slots not named in `indices` are left untouched, so
 /// callers can layer probe passes (sample first, then expand).
 async fn probe_labels_for_tiles(
-    store: &Arc<dyn ObjectStore>,
+    store: &Arc<CachedStore>,
     tile_prefixes: &[String],
     indices: Vec<usize>,
     probed_labels: &mut [Option<ProbedLabels>],
@@ -1503,7 +1495,7 @@ async fn probe_labels_for_tiles(
 /// how the probe that produced `probed` was scheduled.
 async fn build_labels_within_budget(
     budget: &mut LabelBudget,
-    store: &Arc<dyn ObjectStore>,
+    store: &Arc<CachedStore>,
     dataset_id: &str,
     source_image_id: &ImageId,
     source_owner: &EntityId,
@@ -1563,7 +1555,7 @@ struct BuiltLabel {
 /// distinct from the source image's geometry, which is the spatial-alignment
 /// foundation for later rendering.
 async fn build_label(
-    store: &Arc<dyn ObjectStore>,
+    store: &Arc<CachedStore>,
     labels_prefix: &str,
     name: &str,
     source_image_id: &ImageId,
@@ -1647,6 +1639,21 @@ async fn build_label(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use object_store::ObjectStore;
+
+    /// Cache budget for import tests: far above any fixture's metadata, so a
+    /// test never measures eviction it did not intend.
+    const TEST_CACHE_BYTES: usize = 8 * 1024 * 1024;
+
+    /// The store an import reads through: a fixture directory behind a
+    /// `CachedStore`, exactly as the server wires it.
+    fn cached_store(dir: &str) -> Arc<CachedStore> {
+        Arc::new(CachedStore::new(
+            crate::backend::open(dir).unwrap(),
+            TEST_CACHE_BYTES,
+        ))
+    }
+
     use std::fs;
     use std::path::PathBuf;
 
@@ -1869,11 +1876,10 @@ mod tests {
     #[tokio::test]
     #[ignore = "depends on example_files/volume-3d.ome.zarr (not in repo)"]
     async fn import_single_image() {
-        let store = crate::backend::open(&format!(
+        let store = cached_store(&format!(
             "{}/example_files/volume-3d.ome.zarr",
             env!("CARGO_MANIFEST_DIR").trim_end_matches("/lucida-store"),
-        ))
-        .unwrap();
+        ));
         let result = import_dataset(&store, "test-id", "Test Dataset")
             .await
             .unwrap();
@@ -1934,7 +1940,7 @@ mod tests {
             2,
         );
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let result = import_dataset(&store, "collection-id", "Test Collection")
             .await
             .unwrap();
@@ -2064,7 +2070,7 @@ mod tests {
         // Corrupt one group's metadata so it cannot be parsed.
         fs::write(dir.join("A").join("2").join("zarr.json"), b"{ not json").unwrap();
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let result = import_dataset(&store, "skip-id", "Skip Collection")
             .await
             .unwrap();
@@ -2115,7 +2121,7 @@ mod tests {
         fs::write(dir.join("A").join("1").join("zarr.json"), b"nonsense").unwrap();
         fs::write(dir.join("A").join("2").join("zarr.json"), b"nonsense").unwrap();
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let err = import_dataset(&store, "broken-id", "Broken Collection")
             .await
             .unwrap_err();
@@ -2154,7 +2160,7 @@ mod tests {
         )
         .unwrap();
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let result = import_dataset(&store, "rep-id", "Rep Collection")
             .await
             .unwrap();
@@ -2221,7 +2227,7 @@ mod tests {
         // tile is valid and must supply the shared geometry.
         fs::write(dir.join("A").join("1").join("0").join("zarr.json"), b"nope").unwrap();
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let result = import_dataset(&store, "cross-id", "Cross Group Collection")
             .await
             .unwrap();
@@ -2277,7 +2283,7 @@ mod tests {
         fs::write(dir.join("A").join("1").join("0").join("zarr.json"), b"nope").unwrap();
         fs::write(dir.join("A").join("2").join("0").join("zarr.json"), b"nope").unwrap();
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let err = import_dataset(&store, "broken-geo-id", "Broken Geometry")
             .await
             .unwrap_err();
@@ -2414,7 +2420,7 @@ mod tests {
             1,
         );
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let result = import_dataset(&store, "empty-id", "Empty Images Collection")
             .await
             .unwrap();
@@ -2575,7 +2581,7 @@ mod tests {
             .unwrap();
         }
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let result = import_dataset(&store, "explicit-id", "Explicit Collection")
             .await
             .unwrap();
@@ -2803,7 +2809,7 @@ mod tests {
         let scale = Some([1.0, 1.0, 1.0, 0.5, 0.5]);
         create_explicit_collection_fixture(&dir, &translations, scale);
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let result = import_dataset(&store, "explicit-vox", "Explicit Voxel")
             .await
             .unwrap();
@@ -2859,7 +2865,7 @@ mod tests {
         let scale = Some([1.0, 1.0, 1.0, 0.5, 0.5]);
         create_explicit_collection_fixture(&dir, &translations, scale);
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let result = import_dataset(&store, "grid-collection", "Grid Collection")
             .await
             .unwrap();
@@ -2915,7 +2921,7 @@ mod tests {
         // No explicit scale entry -> default of 1.0 in parse.rs.
         create_explicit_collection_fixture(&dir, &translations, None);
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let result = import_dataset(&store, "missing-scale", "Missing Scale")
             .await
             .unwrap();
@@ -2955,7 +2961,7 @@ mod tests {
         let scale = Some([1.0, 1.0, 1.0, 0.5, 0.0]);
         create_explicit_collection_fixture(&dir, &translations, scale);
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let result = import_dataset(&store, "zero-scale", "Zero Scale")
             .await
             .unwrap();
@@ -3060,7 +3066,7 @@ mod tests {
         let dir = temp_dir("import_6d_m");
         create_6d_with_m_fixture(&dir);
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let result = import_dataset(&store, "czi-test", "CZI Test")
             .await
             .unwrap();
@@ -3200,7 +3206,7 @@ mod tests {
             Some(serde_json::json!({"name": "numcodecs/lz4", "configuration": {}})),
         );
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let result = import_dataset(&store, "lz4-6d", "lz4 6D").await.unwrap();
 
         assert_eq!(result.binding_seed.images[0].levels.len(), 1);
@@ -3242,7 +3248,7 @@ mod tests {
             })),
         );
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let result = import_dataset(&store, "blosc-6d", "blosc 6D")
             .await
             .unwrap();
@@ -3274,7 +3280,7 @@ mod tests {
             None,
         );
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let err = import_dataset(&store, "bad-6d", "Bad 6D")
             .await
             .unwrap_err();
@@ -3374,7 +3380,7 @@ mod tests {
             ]],
         );
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let err = import_dataset(&store, "gzip-bad", "gzip bad")
             .await
             .unwrap_err();
@@ -3401,7 +3407,7 @@ mod tests {
             ]],
         );
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let err = import_dataset(&store, "big-endian-bad", "big endian bad")
             .await
             .unwrap_err();
@@ -3431,7 +3437,7 @@ mod tests {
             ],
         );
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let err = import_dataset(&store, "mid-pyramid-bad", "mid-pyramid bad")
             .await
             .unwrap_err();
@@ -3466,7 +3472,7 @@ mod tests {
             ]],
         );
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let err = import_dataset(&store, "blosc-blosclz", "blosc blosclz")
             .await
             .unwrap_err();
@@ -3558,7 +3564,7 @@ mod tests {
             })),
         );
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let result = import_dataset(&store, "omero-id", "Omero").await.unwrap();
 
         let ci = &result.manifest.images()[0].multiscale.channel_infos;
@@ -3577,7 +3583,7 @@ mod tests {
         let dir = temp_dir("import_no_omero");
         create_single_image_fixture(&dir, None);
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let result = import_dataset(&store, "no-omero-id", "No Omero")
             .await
             .unwrap();
@@ -3602,7 +3608,7 @@ mod tests {
             Some(serde_json::json!({ "channels": "not-an-array" })),
         );
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let result = import_dataset(&store, "bad-omero-id", "Bad Omero")
             .await
             .expect("malformed omero must not fail import");
@@ -3775,7 +3781,7 @@ mod tests {
             }),
         );
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let result = import_dataset(&store, "lbl-id", "Labeled").await.unwrap();
 
         // The base image import is unchanged.
@@ -3850,7 +3856,7 @@ mod tests {
         let dir = temp_dir("import_no_labels");
         create_single_image_fixture(&dir, None);
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let result = import_dataset(&store, "no-lbl", "No Labels").await.unwrap();
 
         assert!(result.manifest.labels().is_empty());
@@ -3895,7 +3901,7 @@ mod tests {
             serde_json::json!({"colors": "not-an-array"}),
         );
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let result = import_dataset(&store, "degrade", "Degrade")
             .await
             .expect("a malformed label must not fail the whole import");
@@ -3957,7 +3963,7 @@ mod tests {
             }),
         );
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let result = import_dataset(&store, "collection-lbl", "Collection Labeled")
             .await
             .unwrap();
@@ -4083,7 +4089,7 @@ mod tests {
             serde_json::json!({"colors": []}),
         );
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let result = import_dataset(&store, "zc", "Zero Chunk")
             .await
             .expect("a zero-chunk label must not panic or fail the whole import");
@@ -4107,7 +4113,7 @@ mod tests {
         let dir = temp_dir("import_source_zero_chunk");
         create_single_image_with_chunk(&dir, [1, 1, 1, 64, 64], [1, 1, 1, 0, 64]);
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let err = import_dataset(&store, "szc", "Src Zero Chunk")
             .await
             .expect_err("a zero-chunk source array must fail the import");
@@ -4136,7 +4142,7 @@ mod tests {
             1,
         );
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let err = import_dataset(&store, "pzc", "Collection Zero Chunk")
             .await
             .expect_err("a zero-chunk collection tile array must fail the import");
@@ -4271,11 +4277,14 @@ mod tests {
         }
 
         let reads = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let store: Arc<dyn ObjectStore> = Arc::new(RecordingStore {
-            inner: crate::backend::open(dir.to_str().unwrap()).unwrap(),
-            reads: reads.clone(),
-            fail_get_when: None,
-        });
+        let store = Arc::new(CachedStore::new(
+            Arc::new(RecordingStore {
+                inner: crate::backend::open(dir.to_str().unwrap()).unwrap(),
+                reads: reads.clone(),
+                fail_get_when: None,
+            }),
+            TEST_CACHE_BYTES,
+        ));
 
         // A budget of exactly two labels, with ample color headroom.
         let mut budget = LabelBudget {
@@ -4328,17 +4337,82 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// An import reads through the source cache, so no object is fetched from
+    /// the backend twice — within one import or across a repeat import
+    /// through the same cache. The repeat is the case that matters remotely:
+    /// re-opening a wide collection used to re-pay every metadata round trip.
+    #[tokio::test]
+    async fn import_reads_are_served_from_the_source_cache() {
+        let dir = temp_dir("import_cached_reads");
+        create_collection_fixture(
+            &dir,
+            "cached",
+            &["A", "B"],
+            &["1", "2"],
+            &[
+                ("A", "1", 0, 0, 4),
+                ("A", "2", 0, 1, 4),
+                ("B", "1", 1, 0, 4),
+                ("B", "2", 1, 1, 4),
+            ],
+            [1, 1, 1, 64, 64],
+            [1, 1, 1, 64, 64],
+            2,
+        );
+
+        let (store, reads) = recording_store(&dir);
+        import_dataset(&store, "cached-1", "Cached")
+            .await
+            .expect("first import");
+
+        let first: Vec<String> = reads.lock().unwrap().clone();
+        let distinct: std::collections::HashSet<&String> = first.iter().collect();
+        assert_eq!(
+            first.len(),
+            distinct.len(),
+            "an import must not fetch the same object twice: {first:?}",
+        );
+        assert!(!first.is_empty(), "the import must read something");
+
+        let stats_after_first = store.stats();
+        assert_eq!(
+            stats_after_first.source_reads as usize,
+            first.len(),
+            "every backend read must be counted by the cache instrumentation",
+        );
+
+        // Repeat import through the same cache: entirely cache-served.
+        import_dataset(&store, "cached-2", "Cached")
+            .await
+            .expect("repeat import");
+        assert_eq!(
+            reads.lock().unwrap().len(),
+            first.len(),
+            "a repeat import must not touch the backend at all",
+        );
+        assert_eq!(store.stats().source_reads, stats_after_first.source_reads);
+        assert!(
+            store.stats().hits >= first.len() as u64,
+            "the repeat import's reads must be recorded as cache hits",
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// Wrap a local fixture directory in a [`RecordingStore`], returning the
     /// store and the shared read log.
     fn recording_store(
         dir: &std::path::Path,
-    ) -> (Arc<dyn ObjectStore>, Arc<std::sync::Mutex<Vec<String>>>) {
+    ) -> (Arc<CachedStore>, Arc<std::sync::Mutex<Vec<String>>>) {
         let reads = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let store: Arc<dyn ObjectStore> = Arc::new(RecordingStore {
-            inner: crate::backend::open(dir.to_str().unwrap()).unwrap(),
-            reads: reads.clone(),
-            fail_get_when: None,
-        });
+        let store = Arc::new(CachedStore::new(
+            Arc::new(RecordingStore {
+                inner: crate::backend::open(dir.to_str().unwrap()).unwrap(),
+                reads: reads.clone(),
+                fail_get_when: None,
+            }),
+            TEST_CACHE_BYTES,
+        ));
         (store, reads)
     }
 
@@ -4348,13 +4422,16 @@ mod tests {
     /// NotFound, timeouts). The failed reads are still recorded.
     fn label_read_erroring_store(
         dir: &std::path::Path,
-    ) -> (Arc<dyn ObjectStore>, Arc<std::sync::Mutex<Vec<String>>>) {
+    ) -> (Arc<CachedStore>, Arc<std::sync::Mutex<Vec<String>>>) {
         let reads = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let store: Arc<dyn ObjectStore> = Arc::new(RecordingStore {
-            inner: crate::backend::open(dir.to_str().unwrap()).unwrap(),
-            reads: reads.clone(),
-            fail_get_when: Some(|location| location.ends_with("labels/zarr.json")),
-        });
+        let store = Arc::new(CachedStore::new(
+            Arc::new(RecordingStore {
+                inner: crate::backend::open(dir.to_str().unwrap()).unwrap(),
+                reads: reads.clone(),
+                fail_get_when: Some(|location| location.ends_with("labels/zarr.json")),
+            }),
+            TEST_CACHE_BYTES,
+        ));
         (store, reads)
     }
 
@@ -4366,15 +4443,18 @@ mod tests {
     /// geometry can be read. The failed reads are still recorded.
     fn tile_geometry_read_erroring_store(
         dir: &std::path::Path,
-    ) -> (Arc<dyn ObjectStore>, Arc<std::sync::Mutex<Vec<String>>>) {
+    ) -> (Arc<CachedStore>, Arc<std::sync::Mutex<Vec<String>>>) {
         let reads = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let store: Arc<dyn ObjectStore> = Arc::new(RecordingStore {
-            inner: crate::backend::open(dir.to_str().unwrap()).unwrap(),
-            reads: reads.clone(),
-            fail_get_when: Some(|location| {
-                location.ends_with("/zarr.json") && location.matches('/').count() == 3
+        let store = Arc::new(CachedStore::new(
+            Arc::new(RecordingStore {
+                inner: crate::backend::open(dir.to_str().unwrap()).unwrap(),
+                reads: reads.clone(),
+                fail_get_when: Some(|location| {
+                    location.ends_with("/zarr.json") && location.matches('/').count() == 3
+                }),
             }),
-        });
+            TEST_CACHE_BYTES,
+        ));
         (store, reads)
     }
 
@@ -4621,7 +4701,7 @@ mod tests {
             serde_json::json!({"colors": [{"label-value": 1, "rgba": [1, 2, 3, 4]}]}),
         );
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let result = import_dataset(&store, "small", "Small").await.unwrap();
 
         let labels = result.manifest.labels();
@@ -4757,7 +4837,7 @@ mod tests {
         write_nameless_labels_index(&dir.join("A").join("1").join("0"));
         write_nameless_labels_index(&dir.join("A").join("1").join("39"));
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let result = import_dataset_with_label_discovery(&store, "nx", "Nameless Endpoints", false)
             .await
             .unwrap();
@@ -5214,7 +5294,7 @@ mod tests {
         );
         write_corrupt_labels_index(&dir.join("A").join("1").join("1"));
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let result = import_dataset(&store, "xc", "Exhaustive Corrupt")
             .await
             .expect("a corrupt labels index must not fail the import");
@@ -5252,7 +5332,7 @@ mod tests {
         create_single_image_fixture(&dir, None);
         write_corrupt_labels_index(&dir);
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let result = import_dataset(&store, "sc", "Single Corrupt")
             .await
             .expect("a corrupt labels index must not fail the import");

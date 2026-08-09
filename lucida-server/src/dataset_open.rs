@@ -38,8 +38,8 @@ use crate::generated::{
     plan_generated_coarse_for_manifest,
 };
 use crate::open_diagnostics::{
-    backend_kind_for_url, backend_open_failure, import_failure, open_failure, open_progress,
-    open_success, open_warning,
+    MetadataReadCost, backend_kind_for_url, backend_open_failure, import_failure, open_failure,
+    open_progress, open_success, open_warning,
 };
 use crate::proxy::{
     PROXY_TARGET_LONG_AXIS, ProxyCache, ProxyGenerator, proxy_catalog_entries_for_manifest,
@@ -413,13 +413,28 @@ pub async fn open_dataset(
         name = %name,
         "importing dataset"
     );
-    let result = match lucida_store::import::import_dataset(&store, &dataset_id, &name).await {
+    // The source cache is resolved here, BEFORE the import, and the import
+    // reads through it: metadata objects are the first thing an open reads, they are
+    // the largest single term in a remote open, and routing them through the
+    // same `CachedStore` the chunk path uses is what makes them both cacheable
+    // and visible to the source-cache instrumentation. The same Arc goes on to
+    // back the binding, so nothing is read twice across the boundary — and it
+    // is keyed by SOURCE, so a second workspace opening the same URL is served
+    // from what the first one already read.
+    let cached = CachedStore::shared_for_source(
+        &dataset_source_id,
+        store.clone(),
+        lucida_store::cache::DEFAULT_SOURCE_CACHE_BYTES,
+    );
+    let reads_before = cached.stats();
+    let result = match lucida_store::import::import_dataset(&cached, &dataset_id, &name).await {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, "open_remote_dataset.import_failed");
             return Err(import_failure(&e));
         }
     };
+    let import_reads = MetadataReadCost::between(&reads_before, &cached.stats());
 
     if let Some(scope) = ctx.workspace.as_ref()
         && scope.live.background_cancelled()
@@ -450,6 +465,9 @@ pub async fn open_dataset(
         images = n_images,
         levels = n_levels,
         binding_images = result.binding_seed.images.len(),
+        metadata_reads = import_reads.reads,
+        metadata_read_millis = import_reads.read_millis,
+        metadata_read_cache_hits = import_reads.hits,
         "import complete"
     );
     emit(
@@ -460,7 +478,8 @@ pub async fn open_dataset(
             Some(dataset_id_key.clone()),
             Some(dataset_source_id.clone()),
             Some(format!(
-                "entities: {n_entities}, images: {n_images}, first image levels: {n_levels}"
+                "entities: {n_entities}, images: {n_images}, first image levels: {n_levels}, {}",
+                import_reads.summary()
             )),
         ),
     );
@@ -503,7 +522,6 @@ pub async fn open_dataset(
         ),
     );
     let proxy_config = &ctx.proxy_config;
-    let cached = Arc::new(CachedStore::new(store.clone(), 512 * 1024 * 1024));
     let resolver = Arc::new(ChunkResolver::new(&result.binding_seed));
     let generated_config = GeneratedCoarseConfig {
         target_long_axis: proxy_config.generated_target_long_axis,

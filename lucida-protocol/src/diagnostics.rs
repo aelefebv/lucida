@@ -107,6 +107,13 @@ pub struct DatasetSourceCacheStats {
     pub misses: u64,
     pub evictions: u64,
     pub backend_errors: u64,
+    /// Backend round trips this source has performed, across metadata import
+    /// and chunk reads alike.
+    pub source_reads: u64,
+    /// Cumulative time in those round trips, including queueing behind the
+    /// source-read concurrency cap. Reads overlap, so this is a sum of
+    /// per-read latencies rather than elapsed wall time.
+    pub source_read_millis: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -143,7 +143,10 @@ async fn six_d_with_m_blosc_decodes_to_canonical_m0_slice() {
     fs::write(chunk_dir.join("0"), ENC_6D_BLOSC).unwrap();
 
     // Open via the import pipeline.
-    let store = lucida_store::backend::open(dir.to_str().unwrap()).unwrap();
+    let store = std::sync::Arc::new(lucida_store::cache::CachedStore::new(
+        lucida_store::backend::open(dir.to_str().unwrap()).unwrap(),
+        lucida_store::cache::DEFAULT_SOURCE_CACHE_BYTES,
+    ));
     let result = import_dataset(&store, "blosc-e2e", "Blosc E2E")
         .await
         .unwrap();

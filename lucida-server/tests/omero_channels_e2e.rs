@@ -69,7 +69,10 @@ fn omero_three() -> serde_json::Value {
 #[tokio::test]
 async fn omero_labels_flow_into_manifest() {
     let dir = write_store("with-omero", Some(omero_three()));
-    let store = lucida_store::backend::open(dir.to_str().unwrap()).unwrap();
+    let store = std::sync::Arc::new(lucida_store::cache::CachedStore::new(
+        lucida_store::backend::open(dir.to_str().unwrap()).unwrap(),
+        lucida_store::cache::DEFAULT_SOURCE_CACHE_BYTES,
+    ));
     let result = import_dataset(&store, "b1-omero", "B1 omero")
         .await
         .unwrap();
@@ -87,7 +90,10 @@ async fn omero_labels_flow_into_manifest() {
 #[tokio::test]
 async fn no_omero_is_back_compatible() {
     let dir = write_store("no-omero", None);
-    let store = lucida_store::backend::open(dir.to_str().unwrap()).unwrap();
+    let store = std::sync::Arc::new(lucida_store::cache::CachedStore::new(
+        lucida_store::backend::open(dir.to_str().unwrap()).unwrap(),
+        lucida_store::cache::DEFAULT_SOURCE_CACHE_BYTES,
+    ));
     let result = import_dataset(&store, "b1-plain", "B1 plain")
         .await
         .unwrap();

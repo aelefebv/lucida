@@ -214,6 +214,10 @@ impl PyStore {
         let result = self
             .runtime
             .block_on(async {
+                let store = std::sync::Arc::new(lucida_store::cache::CachedStore::new(
+                    store,
+                    lucida_store::cache::DEFAULT_SOURCE_CACHE_BYTES,
+                ));
                 lucida_store::import::import_dataset(&store, "temp-id", &name).await
             })
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
