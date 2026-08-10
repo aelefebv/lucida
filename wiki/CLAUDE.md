@@ -25,6 +25,13 @@ A note earns its place if it would still be true, and still useful, after the
 implementation is rewritten. Anything narrating current structure does not qualify —
 that's a code comment or a commit message.
 
+**Terms do not live here.** The glossary is `CONTEXT.md` at the repo root: what a
+word means and which synonyms to avoid, and nothing more. An ADR that coins a term
+defines it in prose and the term gets a `CONTEXT.md` entry; the entry points back
+here for the reasoning. That is not the descriptive layer this wiki dropped —
+naming is durable in a way that behaviour walkthroughs were not — but it only stays
+durable if it holds the line at definitions and never drifts into how things work.
+
 ## Bundle layout
 
 The wiki is an [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md)
