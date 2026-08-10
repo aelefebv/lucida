@@ -24,6 +24,7 @@ import {
   ConsecutiveTickDetector,
   SustainedCondition,
 } from "./sustained.ts";
+import { TimeWindow } from "./timeWindow.ts";
 
 /** Per-tick aggregate stored in the rolling window. */
 interface TickWindowEntry {
@@ -48,10 +49,16 @@ interface EventEntry {
 }
 
 export class UploadTelemetry {
-  private uploadEvents: EventEntry[] = [];
-  private uploadTickWindow: TickWindowEntry[] = [];
-  /** FIFO sample buffer for p50/p95 upload size. */
-  private uploadSizeSamples: number[] = [];
+  private readonly uploadEvents = new TimeWindow<EventEntry>();
+  private readonly uploadTickWindow = new TimeWindow<TickWindowEntry>();
+  /**
+   * Circular sample buffer for p50/p95 upload size: the most recent
+   * `UPLOAD_SIZE_SAMPLES` byte counts, in arbitrary order (they get sorted
+   * before use, so the write position carries no meaning).
+   */
+  private readonly uploadSizeSamples = new Array<number>(UPLOAD_SIZE_SAMPLES);
+  private uploadSizeCursor = 0;
+  private uploadSizeCount = 0;
   private uploadTotalBytes = 0;
   private uploadTotalUploads = 0;
 
@@ -81,10 +88,9 @@ export class UploadTelemetry {
     kind: "chunk" | "proxy" = "chunk",
   ): void {
     this.uploadEvents.push({ at: now, bytes, isResend, kind });
-    this.uploadSizeSamples.push(bytes);
-    if (this.uploadSizeSamples.length > UPLOAD_SIZE_SAMPLES) {
-      this.uploadSizeSamples.shift();
-    }
+    this.uploadSizeSamples[this.uploadSizeCursor] = bytes;
+    this.uploadSizeCursor = (this.uploadSizeCursor + 1) % UPLOAD_SIZE_SAMPLES;
+    if (this.uploadSizeCount < UPLOAD_SIZE_SAMPLES) this.uploadSizeCount += 1;
     this.uploadTotalBytes += bytes;
     this.uploadTotalUploads += 1;
   }
@@ -113,30 +119,23 @@ export class UploadTelemetry {
       budgetExhausted: stats.budgetExhausted,
     });
 
-    // Prune both ring buffers to the 1s window.
+    // Prune both ring buffers to the 1s window. O(dropped), not O(dropped·n).
     const cutoff = now - UPLOAD_WINDOW_MS;
-    while (this.uploadEvents.length > 0 && this.uploadEvents[0].at < cutoff) {
-      this.uploadEvents.shift();
-    }
-    while (
-      this.uploadTickWindow.length > 0 &&
-      this.uploadTickWindow[0].at < cutoff
-    ) {
-      this.uploadTickWindow.shift();
-    }
+    this.uploadEvents.pruneBefore(cutoff);
+    this.uploadTickWindow.pruneBefore(cutoff);
 
     let bytesInWindow = 0;
     let uploadsInWindow = 0;
     let chunkUploadsInWindow = 0;
     let proxyUploadsInWindow = 0;
     let resendUploads = 0;
-    for (const e of this.uploadEvents) {
+    this.uploadEvents.forEach((e) => {
       bytesInWindow += e.bytes;
       uploadsInWindow += 1;
       if (e.kind === "proxy") proxyUploadsInWindow += 1;
       else chunkUploadsInWindow += 1;
       if (e.isResend) resendUploads += 1;
-    }
+    });
 
     let drainedInWindow = 0;
     let drainedChunksInWindow = 0;
@@ -147,7 +146,7 @@ export class UploadTelemetry {
     let winSkippedWrongLod = 0;
     let winSkippedAlreadySent = 0;
     let winSkippedNoMeta = 0;
-    for (const t of this.uploadTickWindow) {
+    this.uploadTickWindow.forEach((t) => {
       drainedInWindow += t.drained;
       drainedChunksInWindow += t.drainedChunks;
       skippedInWindow += t.skipped;
@@ -157,7 +156,7 @@ export class UploadTelemetry {
       winSkippedAlreadySent += t.skippedAlreadySent;
       winSkippedNoMeta += t.skippedNoMeta;
       if (t.budgetExhausted) exhaustedTicks += 1;
-    }
+    });
     const skippedInWindowByCause = {
       skippedPrefetch: winSkippedPrefetch,
       skippedOverview: winSkippedOverview,
@@ -174,8 +173,10 @@ export class UploadTelemetry {
 
     let p50: number | null = null;
     let p95: number | null = null;
-    if (this.uploadSizeSamples.length > 0) {
-      const sorted = [...this.uploadSizeSamples].sort((a, b) => a - b);
+    if (this.uploadSizeCount > 0) {
+      const sorted = this.uploadSizeSamples
+        .slice(0, this.uploadSizeCount)
+        .sort((a, b) => a - b);
       p50 = sorted[Math.floor(sorted.length * 0.5)];
       p95 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))];
     }
