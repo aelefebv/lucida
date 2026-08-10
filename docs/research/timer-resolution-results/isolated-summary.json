@@ -1,0 +1,482 @@
+{
+  "ok": true,
+  "arm": "isolated",
+  "url": "http://127.0.0.1:59478/w/8c22923e-ea56-4775-92fc-b01e101e12c9?viewer_profile=default",
+  "dpr": 2,
+  "clock": {
+    "main": {
+      "crossOriginIsolated": true,
+      "samples": 15516000,
+      "distinct_deltas_ms": [
+        [
+          0.005,
+          238750
+        ],
+        [
+          0.01,
+          102
+        ],
+        [
+          0.015,
+          87
+        ],
+        [
+          0.02,
+          50
+        ],
+        [
+          0.025,
+          35
+        ],
+        [
+          0.03,
+          12
+        ],
+        [
+          0.035,
+          4
+        ],
+        [
+          0.04,
+          3
+        ],
+        [
+          0.045,
+          1
+        ],
+        [
+          0.055,
+          1
+        ],
+        [
+          0.065,
+          1
+        ],
+        [
+          0.165,
+          1
+        ]
+      ],
+      "distinct_delta_count": 13,
+      "min_nonzero_delta_ms": 0.005,
+      "fine_stage": {
+        "n": 20000,
+        "timed_individually_zero": 19467,
+        "timed_individually_nonzero": 533,
+        "individual_sum_ms": 2.69,
+        "individual_outer_ms": 4.215,
+        "batch_total_ms": 0.98,
+        "batch_per_op_us": 0.049
+      }
+    },
+    "worker": {
+      "crossOriginIsolated": true,
+      "samples": 14532000,
+      "distinct_deltas_ms": [
+        [
+          0.005,
+          237950
+        ],
+        [
+          0.01,
+          196
+        ],
+        [
+          0.015,
+          119
+        ],
+        [
+          0.02,
+          47
+        ],
+        [
+          0.025,
+          31
+        ],
+        [
+          0.03,
+          30
+        ],
+        [
+          0.035,
+          25
+        ],
+        [
+          0.04,
+          18
+        ],
+        [
+          0.045,
+          5
+        ],
+        [
+          0.05,
+          1
+        ],
+        [
+          0.055,
+          4
+        ],
+        [
+          0.06,
+          2
+        ]
+      ],
+      "distinct_delta_count": 18,
+      "min_nonzero_delta_ms": 0.005,
+      "fine_stage": {
+        "n": 20000,
+        "timed_individually_zero": 19506,
+        "timed_individually_nonzero": 494,
+        "individual_sum_ms": 2.485,
+        "individual_outer_ms": 4.185,
+        "batch_total_ms": 0.91,
+        "batch_per_op_us": 0.0455
+      }
+    },
+    "main_after_work": {
+      "crossOriginIsolated": true,
+      "samples": 15592000,
+      "distinct_deltas_ms": [
+        [
+          0.005,
+          239064
+        ],
+        [
+          0.01,
+          35
+        ],
+        [
+          0.015,
+          52
+        ],
+        [
+          0.02,
+          22
+        ],
+        [
+          0.025,
+          1
+        ],
+        [
+          0.24,
+          1
+        ],
+        [
+          0.25,
+          1
+        ],
+        [
+          0.255,
+          1
+        ],
+        [
+          0.27,
+          1
+        ],
+        [
+          0.465,
+          1
+        ],
+        [
+          0.73,
+          1
+        ]
+      ],
+      "distinct_delta_count": 11,
+      "min_nonzero_delta_ms": 0.005,
+      "fine_stage": {
+        "n": 20000,
+        "timed_individually_zero": 19554,
+        "timed_individually_nonzero": 446,
+        "individual_sum_ms": 2.245,
+        "individual_outer_ms": 3.805,
+        "batch_total_ms": 1.055,
+        "batch_per_op_us": 0.0528
+      }
+    }
+  },
+  "ready": {
+    "cold": {
+      "ready": true,
+      "reason": "rendered",
+      "frame_count": 35,
+      "dataset_count": 1
+    },
+    "after_pan": {
+      "ready": true,
+      "reason": "rendered",
+      "frame_count": 747,
+      "dataset_count": 1
+    }
+  },
+  "doc_headers": {
+    "cross-origin-opener-policy": "same-origin",
+    "cross-origin-embedder-policy": "require-corp"
+  },
+  "failed_requests": [
+    {
+      "url": "http://127.0.0.1:59478/api/workspaces/8c22923e-ea56-4775-92fc-b01e101e12c9/viewer-profiles/default",
+      "method": "GET",
+      "type": "fetch",
+      "failure": "net::ERR_ABORTED"
+    }
+  ],
+  "stages_after_cold": {
+    "crossOriginIsolated": true,
+    "buildContext": {
+      "n": 131,
+      "zeros": 105,
+      "zero_frac": 0.8015,
+      "sum_ms": 0.135,
+      "min_nonzero_ms": 0.005,
+      "distinct_nonzero": 2,
+      "hist": [
+        [
+          0.005,
+          25
+        ],
+        [
+          0.01,
+          1
+        ]
+      ],
+      "window_ms": 1955.12
+    },
+    "decodeWorker": {
+      "n": 36,
+      "zeros": 16,
+      "zero_frac": 0.4444,
+      "sum_ms": 0.215,
+      "min_nonzero_ms": 0.005,
+      "distinct_nonzero": 4,
+      "hist": [
+        [
+          0.005,
+          13
+        ],
+        [
+          0.01,
+          4
+        ],
+        [
+          0.03,
+          1
+        ],
+        [
+          0.04,
+          2
+        ]
+      ],
+      "window_ms": 1241.655
+    },
+    "uploadDispatch": {
+      "n": 18,
+      "zeros": 0,
+      "zero_frac": 0,
+      "sum_ms": 0.79,
+      "min_nonzero_ms": 0.005,
+      "distinct_nonzero": 13,
+      "hist": [
+        [
+          0.005,
+          1
+        ],
+        [
+          0.01,
+          2
+        ],
+        [
+          0.015,
+          1
+        ],
+        [
+          0.02,
+          1
+        ],
+        [
+          0.035,
+          1
+        ],
+        [
+          0.04,
+          1
+        ],
+        [
+          0.045,
+          3
+        ],
+        [
+          0.05,
+          2
+        ],
+        [
+          0.055,
+          1
+        ],
+        [
+          0.06,
+          2
+        ],
+        [
+          0.065,
+          1
+        ],
+        [
+          0.07,
+          1
+        ],
+        [
+          0.11,
+          1
+        ]
+      ],
+      "window_ms": 1233.99
+    }
+  },
+  "stages_pan": {
+    "crossOriginIsolated": true,
+    "buildContext": {
+      "n": 840,
+      "zeros": 751,
+      "zero_frac": 0.894,
+      "sum_ms": 0.45,
+      "min_nonzero_ms": 0.005,
+      "distinct_nonzero": 2,
+      "hist": [
+        [
+          0.005,
+          88
+        ],
+        [
+          0.01,
+          1
+        ]
+      ],
+      "window_ms": 8009.22
+    },
+    "uploadDispatch": {
+      "n": 435,
+      "zeros": 73,
+      "zero_frac": 0.1678,
+      "sum_ms": 6.57,
+      "min_nonzero_ms": 0.005,
+      "distinct_nonzero": 17,
+      "hist": [
+        [
+          0.005,
+          123
+        ],
+        [
+          0.01,
+          82
+        ],
+        [
+          0.015,
+          42
+        ],
+        [
+          0.02,
+          3
+        ],
+        [
+          0.025,
+          16
+        ],
+        [
+          0.03,
+          22
+        ],
+        [
+          0.035,
+          27
+        ],
+        [
+          0.04,
+          14
+        ],
+        [
+          0.045,
+          16
+        ],
+        [
+          0.05,
+          5
+        ],
+        [
+          0.055,
+          2
+        ],
+        [
+          0.06,
+          2
+        ],
+        [
+          0.065,
+          4
+        ],
+        [
+          0.07,
+          1
+        ],
+        [
+          0.08,
+          1
+        ],
+        [
+          0.09,
+          1
+        ],
+        [
+          0.18,
+          1
+        ]
+      ],
+      "window_ms": 7359.81
+    },
+    "decodeWorker": {
+      "n": 208,
+      "zeros": 100,
+      "zero_frac": 0.4808,
+      "sum_ms": 0.75,
+      "min_nonzero_ms": 0.005,
+      "distinct_nonzero": 7,
+      "hist": [
+        [
+          0.005,
+          94
+        ],
+        [
+          0.01,
+          7
+        ],
+        [
+          0.015,
+          1
+        ],
+        [
+          0.02,
+          1
+        ],
+        [
+          0.03,
+          1
+        ],
+        [
+          0.035,
+          3
+        ],
+        [
+          0.04,
+          1
+        ]
+      ],
+      "window_ms": 7396.065
+    }
+  },
+  "screenshot_px": {
+    "width": 3200,
+    "height": 2000
+  },
+  "console_error_count": 0
+}
