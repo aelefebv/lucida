@@ -3,7 +3,7 @@ type: Decision
 title: "Tolerant OME attribute placement"
 description: "The metadata reader accepts OME blocks at both attributes.ome.<block> and attributes.<block>, never mixing the two, and explains what it looked for when neither is present."
 tags: [lucida, decision]
-source_path: wiki/decisions/0044-tolerant-ome-attribute-placement.md
+source_path: wiki/decisions/0045-tolerant-ome-attribute-placement.md
 created: 2026-08-09
 modified: 2026-08-09
 ---
