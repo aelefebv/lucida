@@ -3,7 +3,7 @@ type: Decision
 title: "Unconditional recording under a design budget"
 description: "The pipeline performance monitor records always, with no opt-out; its cost is a CI-asserted design contract rather than a runtime governor, memory is bounded by a resident byte cap evicted a run at a time, and the only degradation is a loudly declared truncation."
 tags: [lucida, decision]
-source_path: wiki/decisions/0048-unconditional-recording-under-a-design-budget.md
+source_path: wiki/decisions/0049-unconditional-recording-under-a-design-budget.md
 created: 2026-08-10
 modified: 2026-08-10
 ---
