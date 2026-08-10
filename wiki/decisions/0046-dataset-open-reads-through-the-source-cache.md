@@ -3,7 +3,7 @@ type: Decision
 title: "Dataset-open reads go through the source cache"
 description: "Metadata reads performed while opening a dataset run through the same CachedStore as chunk reads — so they are cached, coalesced and counted — but under their own concurrency cap, and with absence remembered only for optional metadata."
 tags: [lucida, decision]
-source_path: wiki/decisions/0044-dataset-open-reads-through-the-source-cache.md
+source_path: wiki/decisions/0046-dataset-open-reads-through-the-source-cache.md
 created: 2026-08-09
 modified: 2026-08-09
 ---

@@ -1,0 +1,239 @@
+diff --git a/lucida-server/Cargo.toml b/lucida-server/Cargo.toml
+index 3d5207e..5ee15c7 100644
+--- a/lucida-server/Cargo.toml
++++ b/lucida-server/Cargo.toml
+@@ -18,7 +18,7 @@ object_store = "0.12"
+ tokio = { version = "1", features = ["full"] }
+ axum = { version = "0.8", features = ["ws"] }
+ tower = { version = "0.5", features = ["util"] }
+-tower-http = { version = "0.6", features = ["cors", "fs"] }
++tower-http = { version = "0.6", features = ["cors", "fs", "set-header"] }
+ futures-util = "0.3"
+ serde = { version = "1", features = ["derive"] }
+ serde_json = "1"
+diff --git a/lucida-server/src/static_serve.rs b/lucida-server/src/static_serve.rs
+index 3aa662a..b8fcdd8 100644
+--- a/lucida-server/src/static_serve.rs
++++ b/lucida-server/src/static_serve.rs
+@@ -50,11 +50,26 @@ use tower_http::services::{ServeDir, ServeFile};
+ /// `/api/*`, `/admin/*`, `/ws`) take precedence and the SPA fallback
+ /// only fires for truly unknown paths.
+ pub fn router(dist_path: PathBuf) -> Router {
+-    Router::new()
++    let r = Router::new()
+         .fallback(serve_static)
+         .with_state(StaticState {
+             dist_path: Arc::new(dist_path),
+-        })
++        });
++    // THROWAWAY (issue #897 experiment): serve the SPA cross-origin
++    // isolated when LUCIDA_COI is set, so the timer-resolution arm can
++    // be measured against the real app. Not product code.
++    if std::env::var("LUCIDA_COI").is_ok() {
++        return r
++            .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
++                axum::http::HeaderName::from_static("cross-origin-opener-policy"),
++                axum::http::HeaderValue::from_static("same-origin"),
++            ))
++            .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
++                axum::http::HeaderName::from_static("cross-origin-embedder-policy"),
++                axum::http::HeaderValue::from_static("require-corp"),
++            ));
++    }
++    r
+ }
+ 
+ /// State threaded into the fallback handler so it can re-stat the dist
+diff --git a/lucida-web/src/pipeline/fetch/decode.worker.ts b/lucida-web/src/pipeline/fetch/decode.worker.ts
+index ec2eef6..3adc3fb 100644
+--- a/lucida-web/src/pipeline/fetch/decode.worker.ts
++++ b/lucida-web/src/pipeline/fetch/decode.worker.ts
+@@ -138,9 +138,13 @@ function normalize(buf: ArrayBuffer, dataType: string): ArrayBuffer {
+ self.onmessage = async (e: MessageEvent<DecodeRequest>) => {
+   const { id, bytes, wireFormat } = e.data;
+   try {
++    // THROWAWAY (#897): worker-side raw quantised delta, reported to the
++    // main thread so both clocks are the page's clock.
++    const __t0 = performance.now();
+     const decompressed = await decompress(bytes, wireFormat);
+     const data = normalize(decompressed, extractDataType(wireFormat));
+-    (self as unknown as Worker).postMessage({ id, data } satisfies DecodeResponse, [data]);
++    const __d = performance.now() - __t0;
++    (self as unknown as Worker).postMessage({ id, data, trDecodeMs: __d } as unknown as DecodeResponse, [data]);
+   } catch (err) {
+     const message = err instanceof Error ? err.message : String(err);
+     (self as unknown as Worker).postMessage({ id, error: message } satisfies DecodeError);
+diff --git a/lucida-web/src/pipeline/fetch/decodePool.ts b/lucida-web/src/pipeline/fetch/decodePool.ts
+index 1c2b556..2842dec 100644
+--- a/lucida-web/src/pipeline/fetch/decodePool.ts
++++ b/lucida-web/src/pipeline/fetch/decodePool.ts
+@@ -6,6 +6,7 @@
+  */
+ 
+ import type { WireFormat } from "../../manifestTypes.ts";
++import { trDelta } from "../../trStageProbe.ts"; // THROWAWAY (#897)
+ 
+ export const MIN_DECODE_WORKERS = 2;
+ export const DECODE_POOL_HEADROOM = 1;
+@@ -38,8 +39,10 @@ export class DecodePool {
+       });
+       const pending = new Map<number, PendingEntry>();
+       const entry: PoolWorker = { worker: w, pending, activeCount: 0 };
+-      w.onmessage = (e: MessageEvent<{ id: number; data?: ArrayBuffer; error?: string }>) => {
++      w.onmessage = (e: MessageEvent<{ id: number; data?: ArrayBuffer; error?: string; trDecodeMs?: number }>) => {
+         const { id, data, error } = e.data;
++        // THROWAWAY (#897)
++        if (typeof e.data.trDecodeMs === "number") trDelta("decodeWorker", e.data.trDecodeMs);
+         const p = pending.get(id);
+         if (p) {
+           pending.delete(id);
+diff --git a/lucida-web/src/pipeline/upload/uploader.ts b/lucida-web/src/pipeline/upload/uploader.ts
+index ec50bbb..7750deb 100644
+--- a/lucida-web/src/pipeline/upload/uploader.ts
++++ b/lucida-web/src/pipeline/upload/uploader.ts
+@@ -7,6 +7,7 @@
+  */
+ 
+ import type { CpuCache, ReadyDelivery, ResidencyTier } from "../fetch/index.ts";
++import { trSpan } from "../../trStageProbe.ts"; // THROWAWAY (#897)
+ import type {
+   ActiveSetEntry,
+   EntitySnapshot,
+@@ -361,6 +362,21 @@ export class Uploader {
+     multiChannel: boolean;
+     sliceZ: number | null;
+     epochs: SceneEpochs;
++  }): number {
++    // THROWAWAY (#897): time the real stage, raw quantised delta.
++    const __t0 = performance.now();
++    const __r = this.tryDispatchDeliveryInner(args);
++    trSpan("uploadDispatch", __t0, performance.now());
++    return __r;
++  }
++
++  private tryDispatchDeliveryInner(args: {
++    delivery: ReadyDelivery;
++    ctx: TickContext;
++    manifestByImage: Map<string, ManifestEntry>;
++    multiChannel: boolean;
++    sliceZ: number | null;
++    epochs: SceneEpochs;
+   }): number {
+     const { delivery, ctx, manifestByImage, multiChannel, sliceZ, epochs } = args;
+ 
+diff --git a/lucida-web/src/renderLoop.ts b/lucida-web/src/renderLoop.ts
+index 29a741c..989a911 100644
+--- a/lucida-web/src/renderLoop.ts
++++ b/lucida-web/src/renderLoop.ts
+@@ -4,6 +4,7 @@ import type { TickContext, RenderLoopOptions, MinimapOverlayData } from "./rende
+ import { RESIDENCY_RENDER_INTERVAL_MS } from "./renderLoopTypes.ts";
+ import type { SceneEpochs } from "./pipeline/epochs.ts";
+ import { debugStats, resetFrameStats } from "./debug/debugStats.ts";
++import { trSpan } from "./trStageProbe.ts"; // THROWAWAY (#897)
+ import { debugLog } from "./debug/logging.ts";
+ import { type SliceState, createSliceState, tickSlice, clearSliceForDataset, clearSliceForMembers } from "./slicePath.ts";
+ import { type VolumeState, createVolumeState, tickVolume, clearVolumeForDataset, clearVolumeForMembers, resetVolumeState } from "./volumePath.ts";
+@@ -492,6 +493,14 @@ export class RenderLoop {
+   }
+ 
+   private buildContext(): TickContext {
++    // THROWAWAY (#897): time the real stage, raw quantised delta.
++    const __t0 = performance.now();
++    const __r = this.buildContextInner();
++    trSpan("buildContext", __t0, performance.now());
++    return __r;
++  }
++
++  private buildContextInner(): TickContext {
+     return {
+       scene: this.session.scene!,
+       datasets: this.datasets,
+diff --git a/lucida-web/src/trStageProbe.ts b/lucida-web/src/trStageProbe.ts
+new file mode 100644
+index 0000000..e3d22f3
+--- /dev/null
++++ b/lucida-web/src/trStageProbe.ts
+@@ -0,0 +1,83 @@
++// THROWAWAY instrumentation (issue #897). Not product code.
++//
++// Records the RAW quantised `performance.now()` delta for a few real
++// pipeline stages, so the clock floor can be judged against lucida's own
++// spans rather than a synthetic stand-in. Deliberately stores the delta
++// histogram, not a mean: the clamp is only visible as a set of discrete
++// multiples, and an average launders it away.
++
++interface StageRec {
++  n: number;
++  zeros: number;
++  sum_ms: number;
++  /** delta (ms, as string) -> count. */
++  hist: Record<string, number>;
++  first_ms: number | null;
++  last_ms: number | null;
++}
++
++const stages = new Map<string, StageRec>();
++
++function rec(stage: string): StageRec {
++  let r = stages.get(stage);
++  if (!r) {
++    r = { n: 0, zeros: 0, sum_ms: 0, hist: {}, first_ms: null, last_ms: null };
++    stages.set(stage, r);
++  }
++  return r;
++}
++
++/** Record one span. `t0`/`t1` are raw `performance.now()` readings. */
++export function trSpan(stage: string, t0: number, t1: number): void {
++  const r = rec(stage);
++  const d = t1 - t0;
++  r.n++;
++  if (d === 0) r.zeros++;
++  else {
++    r.sum_ms += d;
++    const k = d.toFixed(6);
++    r.hist[k] = (r.hist[k] || 0) + 1;
++  }
++  if (r.first_ms === null) r.first_ms = t0;
++  r.last_ms = t1;
++}
++
++/** Record a span whose duration was measured elsewhere (e.g. in a worker). */
++export function trDelta(stage: string, d: number): void {
++  const now = performance.now();
++  trSpan(stage, now - d, now);
++}
++
++declare global {
++  interface Window {
++    __trDump?: () => unknown;
++    __trReset?: () => void;
++  }
++}
++
++if (typeof window !== "undefined") {
++  window.__trDump = () => {
++    const out: Record<string, unknown> = {
++      crossOriginIsolated: typeof crossOriginIsolated !== "undefined" ? crossOriginIsolated : null,
++    };
++    for (const [stage, r] of stages) {
++      const entries = Object.entries(r.hist)
++        .map(([k, v]) => [Number(k), v] as [number, number])
++        .sort((a, b) => a[0] - b[0]);
++      out[stage] = {
++        n: r.n,
++        zeros: r.zeros,
++        zero_frac: r.n ? +(r.zeros / r.n).toFixed(4) : null,
++        sum_ms: +r.sum_ms.toFixed(4),
++        min_nonzero_ms: entries.length ? entries[0][0] : null,
++        distinct_nonzero: entries.length,
++        hist: entries.slice(0, 20),
++        // Wall-clock window the stage's events span, so the sum of quantised
++        // spans can be sanity-checked against something the clock measures well.
++        window_ms: r.first_ms !== null && r.last_ms !== null ? +(r.last_ms - r.first_ms).toFixed(3) : null,
++      };
++    }
++    return out;
++  };
++  window.__trReset = () => stages.clear();
++}

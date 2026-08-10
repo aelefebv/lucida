@@ -209,13 +209,19 @@ function dumpPending(cache: import("../pipeline/fetch/index.ts").CpuCache | unde
     return;
   }
   const pending = cache.getPendingDump();
-  console.group(`[DebugPanel] pending cpuCache queue (${pending.length} entries)`);
+  const admitted = pending.filter(p => p.admitted).length;
+  console.group(
+    `[DebugPanel] pending cpuCache queue (${pending.length} entries, ` +
+      `${admitted} admitted / ${pending.length - admitted} backlog)`,
+  );
   console.table(pending.map(p => ({
     chunkKey: p.chunkKey,
     entityId: p.entityId,
     lane: p.lane,
     priority: p.priority,
-    ageMs: Math.round(p.ageMs),
+    // Backlog entries carry no admission stamp (ADR 0044); they have
+    // waited at least as long as the oldest admitted entry.
+    ageMs: p.ageMs === null ? "backlog" : Math.round(p.ageMs),
   })));
   console.groupEnd();
 }

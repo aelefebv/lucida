@@ -49,6 +49,7 @@ function makeScheduler(opts?: {
   maxBytesInFlight?: number;
   burstLogger?: BurstLogger;
   siblingInFlight?: () => { count: number; bytes: number };
+  admissionWindow?: number;
 }) {
   const startCalls: StartCall[] = [];
   const startFn = (
@@ -65,6 +66,7 @@ function makeScheduler(opts?: {
       maxBytesInFlight: opts?.maxBytesInFlight ?? 1_000_000,
       burstLogger: opts?.burstLogger,
       siblingInFlight: opts?.siblingInFlight,
+      admissionWindow: opts?.admissionWindow,
     },
     keyOf,
     startFn,
@@ -690,5 +692,136 @@ describe("Scheduler.inFlightEntries", () => {
     expect(collected.size).toBe(2);
     expect(collected.get(keyOf(req({ chunkKey: "a" })))?.request.chunkKey).toBe("a");
     expect(collected.get(keyOf(req({ chunkKey: "b" })))?.request.chunkKey).toBe("b");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bounded admission window (issue #900)
+// ---------------------------------------------------------------------------
+
+describe("Scheduler admission window", () => {
+  function manyReqs(n: number): TestRequest[] {
+    return Array.from({ length: n }, (_, i) => req({ chunkKey: `k${i}` }));
+  }
+
+  it("retains the whole backlog but stamps only the window", () => {
+    const { scheduler } = makeScheduler({
+      maxConcurrentFetches: 0,
+      admissionWindow: 8,
+    });
+    scheduler.enqueue(manyReqs(1000), 1000);
+
+    expect(scheduler.pendingSize).toBe(1000);
+    expect(scheduler.admittedSize).toBe(8);
+    expect(scheduler.enqueueTimeFor(keyOf(req({ chunkKey: "k0" })))).toBe(1000);
+    expect(scheduler.enqueueTimeFor(keyOf(req({ chunkKey: "k7" })))).toBe(1000);
+    expect(scheduler.enqueueTimeFor(keyOf(req({ chunkKey: "k8" })))).toBeUndefined();
+    expect(scheduler.enqueueTimeFor(keyOf(req({ chunkKey: "k999" })))).toBeUndefined();
+  });
+
+  it("bounds oldestPendingAgeMs to time in the window, not time in the backlog", () => {
+    const { scheduler } = makeScheduler({
+      maxConcurrentFetches: 2,
+      admissionWindow: 4,
+    });
+    scheduler.enqueue(manyReqs(1000), 1000);
+    expect(scheduler.oldestPendingAgeMs(2000)).toBe(1000);
+
+    // Two slots drain; the two backlog entries promoted into the window
+    // are stamped at promotion time, not at first enqueue.
+    scheduler.drain(() => 0, 5000);
+    expect(scheduler.enqueueTimeFor(keyOf(req({ chunkKey: "k4" })))).toBe(5000);
+    expect(scheduler.enqueueTimeFor(keyOf(req({ chunkKey: "k5" })))).toBe(5000);
+    // k2, k3 still carry the original 1000 stamp.
+    expect(scheduler.oldestPendingAgeMs(6000)).toBe(5000);
+  });
+
+  it("promotes backlog entries into the window as the window drains", () => {
+    const { scheduler, startCalls } = makeScheduler({
+      maxConcurrentFetches: 2,
+      admissionWindow: 3,
+    });
+    scheduler.enqueue(manyReqs(10), 1000);
+    scheduler.drain(() => 0, 1000);
+    expect(startCalls).toHaveLength(2);
+
+    expect(scheduler.enqueueTimeFor(keyOf(req({ chunkKey: "k3" })))).toBe(1000);
+    expect(scheduler.enqueueTimeFor(keyOf(req({ chunkKey: "k4" })))).toBe(1000);
+    expect(scheduler.enqueueTimeFor(keyOf(req({ chunkKey: "k5" })))).toBeUndefined();
+    expect(scheduler.admittedSize).toBe(3);
+  });
+
+  it("keeps the whole backlog reachable so an idle fill still completes", () => {
+    const { scheduler, startCalls } = makeScheduler({
+      maxConcurrentFetches: 1,
+      admissionWindow: 2,
+    });
+    scheduler.enqueue(manyReqs(20), 1000);
+
+    // No further enqueue calls: drain alone must work through all 20.
+    for (let i = 0; i < 20; i++) {
+      scheduler.drain(() => 0, 1000 + i);
+      scheduler.markInFlightDone(keyOf(req({ chunkKey: `k${i}` })));
+    }
+    expect(startCalls.map(c => c.req.chunkKey)).toEqual(
+      manyReqs(20).map(r => r.chunkKey),
+    );
+    expect(scheduler.pendingSize).toBe(0);
+    expect(scheduler.admittedSize).toBe(0);
+  });
+
+  it("re-enqueue preserves window stamps and drops stamps for departed keys", () => {
+    const { scheduler } = makeScheduler({
+      maxConcurrentFetches: 0,
+      admissionWindow: 2,
+    });
+    scheduler.enqueue([req({ chunkKey: "a" }), req({ chunkKey: "b" })], 1000);
+    scheduler.enqueue([req({ chunkKey: "a" }), req({ chunkKey: "c" })], 2000);
+    expect(scheduler.enqueueTimeFor(keyOf(req({ chunkKey: "a" })))).toBe(1000);
+    expect(scheduler.enqueueTimeFor(keyOf(req({ chunkKey: "b" })))).toBeUndefined();
+    expect(scheduler.enqueueTimeFor(keyOf(req({ chunkKey: "c" })))).toBe(2000);
+  });
+
+  it("a key promoted out of the backlog after re-enqueue is stamped once", () => {
+    const { scheduler } = makeScheduler({
+      maxConcurrentFetches: 0,
+      admissionWindow: 2,
+    });
+    scheduler.enqueue(manyReqs(5), 1000);
+    // k2 is backlog on the first enqueue, window on the second.
+    expect(scheduler.enqueueTimeFor(keyOf(req({ chunkKey: "k2" })))).toBeUndefined();
+    scheduler.enqueue([req({ chunkKey: "k2" }), req({ chunkKey: "k3" })], 2000);
+    expect(scheduler.enqueueTimeFor(keyOf(req({ chunkKey: "k2" })))).toBe(2000);
+  });
+
+  it("cancelWhere drops backlog entries beyond the window", () => {
+    const { scheduler } = makeScheduler({
+      maxConcurrentFetches: 0,
+      admissionWindow: 2,
+    });
+    scheduler.enqueue(
+      [
+        req({ chunkKey: "a", entityId: "keep" }),
+        req({ chunkKey: "b", entityId: "keep" }),
+        req({ chunkKey: "c", entityId: "drop" }),
+        req({ chunkKey: "d", entityId: "drop" }),
+      ],
+      1000,
+    );
+    scheduler.cancelWhere(e => e.request.entityId === "drop");
+    expect(scheduler.pendingSize).toBe(2);
+    expect(scheduler.pendingSnapshot().map(r => r.chunkKey)).toEqual(["a", "b"]);
+  });
+
+  it("reset clears the window as well as the backlog", () => {
+    const { scheduler } = makeScheduler({
+      maxConcurrentFetches: 0,
+      admissionWindow: 2,
+    });
+    scheduler.enqueue(manyReqs(50), 1000);
+    scheduler.reset();
+    expect(scheduler.pendingSize).toBe(0);
+    expect(scheduler.admittedSize).toBe(0);
+    expect(scheduler.oldestPendingAgeMs(9999)).toBe(0);
   });
 });

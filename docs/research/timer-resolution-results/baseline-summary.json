@@ -1,0 +1,221 @@
+{
+  "ok": true,
+  "arm": "baseline",
+  "url": "http://127.0.0.1:59310/w/4f954ff4-cd2e-46fb-a532-4f2e5de04c99?viewer_profile=default",
+  "dpr": 2,
+  "clock": {
+    "main": {
+      "crossOriginIsolated": false,
+      "samples": 15126000,
+      "distinct_deltas_ms": [
+        [
+          0.1,
+          11988
+        ],
+        [
+          0.2,
+          1
+        ],
+        [
+          0.3,
+          1
+        ]
+      ],
+      "distinct_delta_count": 3,
+      "min_nonzero_delta_ms": 0.1,
+      "fine_stage": {
+        "n": 20000,
+        "timed_individually_zero": 19974,
+        "timed_individually_nonzero": 26,
+        "individual_sum_ms": 2.6,
+        "individual_outer_ms": 3.9,
+        "batch_total_ms": 1.2,
+        "batch_per_op_us": 0.06
+      }
+    },
+    "worker": {
+      "crossOriginIsolated": false,
+      "samples": 14392000,
+      "distinct_deltas_ms": [
+        [
+          0.1,
+          11979
+        ],
+        [
+          0.2,
+          7
+        ]
+      ],
+      "distinct_delta_count": 2,
+      "min_nonzero_delta_ms": 0.1,
+      "fine_stage": {
+        "n": 20000,
+        "timed_individually_zero": 19974,
+        "timed_individually_nonzero": 26,
+        "individual_sum_ms": 2.6,
+        "individual_outer_ms": 4.3,
+        "batch_total_ms": 1.2,
+        "batch_per_op_us": 0.06
+      }
+    },
+    "main_after_work": {
+      "crossOriginIsolated": false,
+      "samples": 15688000,
+      "distinct_deltas_ms": [
+        [
+          0.1,
+          11983
+        ],
+        [
+          0.2,
+          2
+        ],
+        [
+          0.3,
+          2
+        ],
+        [
+          0.6,
+          1
+        ]
+      ],
+      "distinct_delta_count": 4,
+      "min_nonzero_delta_ms": 0.1,
+      "fine_stage": {
+        "n": 20000,
+        "timed_individually_zero": 19974,
+        "timed_individually_nonzero": 26,
+        "individual_sum_ms": 2.6,
+        "individual_outer_ms": 3.9,
+        "batch_total_ms": 1,
+        "batch_per_op_us": 0.05
+      }
+    }
+  },
+  "ready": {
+    "cold": {
+      "ready": true,
+      "reason": "rendered",
+      "frame_count": 26,
+      "dataset_count": 1
+    },
+    "after_pan": {
+      "ready": true,
+      "reason": "rendered",
+      "frame_count": 729,
+      "dataset_count": 1
+    }
+  },
+  "doc_headers": {
+    "cross-origin-opener-policy": null,
+    "cross-origin-embedder-policy": null
+  },
+  "failed_requests": [
+    {
+      "url": "http://127.0.0.1:59310/api/workspaces/4f954ff4-cd2e-46fb-a532-4f2e5de04c99/viewer-profiles/default",
+      "method": "GET",
+      "type": "fetch",
+      "failure": "net::ERR_ABORTED"
+    }
+  ],
+  "stages_after_cold": {
+    "crossOriginIsolated": false,
+    "buildContext": {
+      "n": 154,
+      "zeros": 153,
+      "zero_frac": 0.9935,
+      "sum_ms": 0.1,
+      "min_nonzero_ms": 0.1,
+      "distinct_nonzero": 1,
+      "hist": [
+        [
+          0.1,
+          1
+        ]
+      ],
+      "window_ms": 1831.8
+    },
+    "decodeWorker": {
+      "n": 36,
+      "zeros": 36,
+      "zero_frac": 1,
+      "sum_ms": 0,
+      "min_nonzero_ms": null,
+      "distinct_nonzero": 0,
+      "hist": [],
+      "window_ms": 1101.9
+    },
+    "uploadDispatch": {
+      "n": 18,
+      "zeros": 9,
+      "zero_frac": 0.5,
+      "sum_ms": 0.9,
+      "min_nonzero_ms": 0.1,
+      "distinct_nonzero": 1,
+      "hist": [
+        [
+          0.1,
+          9
+        ]
+      ],
+      "window_ms": 1091.4
+    }
+  },
+  "stages_pan": {
+    "crossOriginIsolated": false,
+    "buildContext": {
+      "n": 859,
+      "zeros": 855,
+      "zero_frac": 0.9953,
+      "sum_ms": 0.4,
+      "min_nonzero_ms": 0.1,
+      "distinct_nonzero": 1,
+      "hist": [
+        [
+          0.1,
+          4
+        ]
+      ],
+      "window_ms": 8034.7
+    },
+    "uploadDispatch": {
+      "n": 480,
+      "zeros": 393,
+      "zero_frac": 0.8187,
+      "sum_ms": 9,
+      "min_nonzero_ms": 0.1,
+      "distinct_nonzero": 2,
+      "hist": [
+        [
+          0.1,
+          84
+        ],
+        [
+          0.2,
+          3
+        ]
+      ],
+      "window_ms": 6029.2
+    },
+    "decodeWorker": {
+      "n": 220,
+      "zeros": 208,
+      "zero_frac": 0.9455,
+      "sum_ms": 1.2,
+      "min_nonzero_ms": 0.1,
+      "distinct_nonzero": 1,
+      "hist": [
+        [
+          0.1,
+          12
+        ]
+      ],
+      "window_ms": 7528
+    }
+  },
+  "screenshot_px": {
+    "width": 3200,
+    "height": 2000
+  },
+  "console_error_count": 0
+}
