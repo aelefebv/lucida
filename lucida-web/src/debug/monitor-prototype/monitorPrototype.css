@@ -1,0 +1,529 @@
+/* PROTOTYPE — throwaway. Issue #892. */
+
+.proto-root {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: #101010;
+  color: #e6e6e6;
+  font: 13px/1.45 system-ui, -apple-system, sans-serif;
+}
+
+.proto-banner {
+  padding: 4px 12px;
+  background: #3a2d00;
+  color: #ffd166;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  flex: 0 0 auto;
+}
+
+.proto-stage {
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 12px 12px 64px;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+/* ---- floating switcher ---------------------------------------------- */
+
+.proto-bar {
+  position: fixed;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: #f2f2f2;
+  color: #111;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.55);
+  z-index: 100;
+  max-width: calc(100vw - 24px);
+  flex-wrap: wrap;
+}
+
+.proto-bar button,
+.proto-bar select {
+  border: 1px solid #bbb;
+  background: #fff;
+  color: #111;
+  border-radius: 6px;
+  padding: 3px 8px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.proto-bar button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.proto-label {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.proto-sep {
+  width: 1px;
+  align-self: stretch;
+  background: #ccc;
+}
+
+.proto-cost {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: #444;
+}
+
+/* ---- variant A: the wall -------------------------------------------- */
+
+.va {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  height: 100%;
+}
+
+.va-canvas {
+  width: 100%;
+  height: 560px;
+  display: block;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.va-foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+}
+
+.va-foot button {
+  background: #262626;
+  color: #ddd;
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.va-cursor {
+  font-family: ui-monospace, monospace;
+  color: #ffd166;
+  min-width: 90px;
+}
+
+.va-dim {
+  color: #7a7a7a;
+}
+
+.va-rows {
+  overflow: auto;
+  max-height: 40vh;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+}
+
+.va-rows table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.va-rows th,
+.va-rows td {
+  text-align: left;
+  padding: 2px 8px;
+  border-bottom: 1px solid #1f1f1f;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.va-rows th {
+  position: sticky;
+  top: 0;
+  background: #1a1a1a;
+  color: #9a9a9a;
+}
+
+/* ---- variant B: the budget ------------------------------------------ */
+
+.vb {
+  max-width: 1100px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.vb-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+}
+
+.vb-total {
+  font-size: 40px;
+  font-weight: 300;
+  line-height: 1;
+}
+
+.vb-sub,
+.vb-note {
+  color: #8a8a8a;
+  font-size: 12px;
+}
+
+.vb-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  color: #b0b0b0;
+  font-size: 12px;
+}
+
+.vb-bar {
+  display: flex;
+  height: 44px;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.vb-bar.small {
+  height: 20px;
+}
+
+.vb-seg {
+  border: none;
+  padding: 0;
+  color: #111;
+  font: 600 11px/1 system-ui, sans-serif;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.vb-seg.on {
+  outline: 2px solid #fff;
+  outline-offset: -2px;
+}
+
+.vb-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.vb-table th {
+  text-align: left;
+  color: #8a8a8a;
+  font-weight: 500;
+  font-size: 11px;
+  border-bottom: 1px solid #2a2a2a;
+  padding: 4px 8px;
+}
+
+.vb-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid #1e1e1e;
+}
+
+.vb-table tbody tr:not(.vb-drill) {
+  cursor: pointer;
+}
+
+.vb-table tbody tr:not(.vb-drill):hover {
+  background: #1a1a1a;
+}
+
+.vb-table tr.on {
+  background: #1d1d1d;
+}
+
+.vb-phase {
+  font-weight: 600;
+}
+
+.vb-table .warn {
+  color: #ff8a5c;
+}
+
+.vb-chev {
+  color: #777;
+}
+
+.dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.vb-drill td {
+  background: #151515;
+}
+
+.vb-strip {
+  width: 100%;
+  height: 180px;
+  display: block;
+  border-radius: 3px;
+}
+
+.vb-server h3 {
+  font-size: 13px;
+  color: #b8b8b8;
+  margin: 0 0 6px;
+}
+
+.vb-serverrow {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: #9a9a9a;
+  margin-top: 4px;
+}
+
+.vb-serverrow em {
+  font-style: normal;
+  font-weight: 600;
+}
+
+/* ---- variant C: the verdict ----------------------------------------- */
+
+.vc {
+  max-width: 900px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.vc-header h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 500;
+}
+
+.vc-header p {
+  margin: 2px 0 0;
+  color: #8a8a8a;
+  font-size: 12px;
+}
+
+.vc-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.vc-card {
+  border: 1px solid #2a2a2a;
+  border-left-width: 4px;
+  border-radius: 4px;
+  padding: 10px 12px;
+  background: #161616;
+}
+
+.vc-card.critical {
+  border-left-color: #ff4d6d;
+}
+
+.vc-card.warn {
+  border-left-color: #ffb020;
+}
+
+.vc-card.info {
+  border-left-color: #4a9eff;
+}
+
+.vc-cardhead {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  background: none;
+  border: none;
+  color: inherit;
+  text-align: left;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+}
+
+.vc-sev {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #8a8a8a;
+  min-width: 56px;
+}
+
+.vc-headline {
+  font-size: 15px;
+  font-weight: 500;
+  flex: 1;
+}
+
+.vc-chev {
+  color: #777;
+}
+
+.vc-detail {
+  margin: 6px 0 0 66px;
+  color: #a0a0a0;
+  font-size: 12px;
+}
+
+.vc-scope {
+  margin: 10px 0 0 66px;
+}
+
+.vc-lane {
+  position: relative;
+  height: 140px;
+  background: #101010;
+  border: 1px solid #242424;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.vc-span {
+  position: absolute;
+  height: 2px;
+  opacity: 0.6;
+}
+
+.vc-note {
+  color: #8a8a8a;
+  font-size: 11px;
+  margin: 6px 0 0;
+}
+
+.vc-metalist {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: #b0b0b0;
+}
+
+.vc-metalist li {
+  display: flex;
+  gap: 14px;
+  font-size: 11px;
+}
+
+.vc-gaps {
+  border-top: 1px solid #242424;
+  padding-top: 10px;
+}
+
+.vc-gaps h3 {
+  font-size: 12px;
+  color: #8a8a8a;
+  margin: 0 0 6px;
+  font-weight: 500;
+}
+
+.vc-gaps ul {
+  margin: 0;
+  padding-left: 18px;
+  color: #9a9a9a;
+  font-size: 12px;
+}
+
+.vc-agent button {
+  background: none;
+  border: none;
+  color: #9ac0ff;
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+}
+
+.vc-agent pre {
+  background: #0c0c0c;
+  border: 1px solid #242424;
+  border-radius: 4px;
+  padding: 10px;
+  overflow: auto;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: #c8c8c8;
+}
+
+.vc.recording {
+  align-items: center;
+  justify-content: center;
+  height: 60vh;
+  text-align: center;
+}
+
+.vc-rec {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  color: #ff6b6b;
+}
+
+.vc-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #ff4d4d;
+  animation: vc-pulse 1s infinite;
+}
+
+@keyframes vc-pulse {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+.vc-counts {
+  display: flex;
+  gap: 40px;
+}
+
+.vc-counts div {
+  display: flex;
+  flex-direction: column;
+}
+
+.vc-counts strong {
+  font-size: 34px;
+  font-weight: 300;
+}
+
+.vc-counts span {
+  color: #8a8a8a;
+  font-size: 12px;
+}
+
+.vc-recnote {
+  color: #7a7a7a;
+  font-size: 12px;
+}
+
+.vc-stop {
+  background: #262626;
+  color: #eee;
+  border: 1px solid #3a3a3a;
+  border-radius: 6px;
+  padding: 8px 18px;
+  cursor: pointer;
+  font: inherit;
+}
