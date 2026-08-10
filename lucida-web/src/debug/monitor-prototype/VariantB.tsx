@@ -19,7 +19,8 @@ import {
   type BrowserPhase,
   type Trace,
 } from "./traceModel.ts";
-import { PHASE_COLORS, sizeToDpr } from "./dprCanvas.ts";
+import { sizeToDpr } from "./dprCanvas.ts";
+import { PHASE_COLORS } from "./phaseColors.ts";
 import {
   formatUs,
   rollupMeta,

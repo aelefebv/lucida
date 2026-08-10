@@ -26,16 +26,3 @@ export function sizeToDpr(
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   return { ctx, w, h, dpr };
 }
-
-export const PHASE_COLORS: Record<string, string> = {
-  plan: "#7c6cff",
-  queue: "#ff6b4a",
-  wire: "#ffb020",
-  decode: "#3fc4a0",
-  upload: "#4a9eff",
-  present: "#9aa4b2",
-  permit: "#ff8a5c",
-  ttfb: "#ffd166",
-  body: "#57d9a3",
-  enqueue: "#8d99ae",
-};

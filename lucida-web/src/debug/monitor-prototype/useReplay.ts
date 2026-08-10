@@ -29,6 +29,12 @@ export interface Replay {
   setSpeed: (s: number) => void;
   /** ms the last monitor render took, measured by the variant */
   reportRenderMs: (ms: number) => void;
+  /**
+   * p95 of the variant's own render cost. Sampled whether or not the replay is
+   * playing, deliberately: while playing, variant A draws only a 6 s scrolling
+   * window, so a playing-only sample measures a subset of the spans and
+   * understates the cost of the paused view, which draws all of them.
+   */
   renderMsP95: number;
 }
 
@@ -66,11 +72,6 @@ export function useReplay(durationUs: number): Replay {
       if (t - lastCoarse > 250) {
         lastCoarse = t;
         setCoarseNowUs(nowRef.current);
-        const s = samples.current;
-        if (s.length > 8) {
-          const sorted = s.slice(-120).sort((a, b) => a - b);
-          setRenderMsP95(sorted[Math.floor(sorted.length * 0.95)]);
-        }
       }
       if (nowRef.current >= durationUs) {
         setPlaying(false);
@@ -83,6 +84,18 @@ export function useReplay(durationUs: number): Replay {
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
   }, [playing, durationUs]);
+
+  // Cost sampling runs on its own 2 Hz timer, independent of playback.
+  useEffect(() => {
+    const id = setInterval(() => {
+      const s = samples.current;
+      if (s.length > 8) {
+        const sorted = s.slice(-240).sort((a, b) => a - b);
+        setRenderMsP95(sorted[Math.floor(sorted.length * 0.95)]);
+      }
+    }, 500);
+    return () => clearInterval(id);
+  }, []);
 
   const play = useCallback(() => {
     if (nowRef.current >= durationUs) nowRef.current = 0;

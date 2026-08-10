@@ -9,9 +9,13 @@
 import {
   BROWSER_PHASES,
   END_IN_FLIGHT,
+  laneName,
+  META_FIRST,
+  META_LAST,
   NO_STAMP,
   SERVER_PHASES,
   SERVER_STAMP_COUNT,
+  SOURCE_READ_CONCURRENCY,
   type BrowserPhase,
   type Trace,
 } from "./traceModel.ts";
@@ -134,8 +138,8 @@ export function rollupMeta(trace: Trace): {
   cached: boolean;
 } {
   if (!trace.meta.length) return { totalUs: 0, n: 0, cached: false };
-  const first = trace.meta[0].stamps[0];
-  const last = Math.max(...trace.meta.map((m) => m.stamps[4]));
+  const first = trace.meta[0].stamps[META_FIRST];
+  const last = Math.max(...trace.meta.map((m) => m.stamps[META_LAST]));
   return {
     totalUs: last - first,
     n: trace.meta.length,
@@ -150,8 +154,8 @@ export interface Callout {
   severity: CalloutSeverity;
   headline: string;
   detail: string;
-  /** what a click should scope the timeline to */
-  focus?: { phase?: BrowserPhase; row?: number; fromUs?: number; toUs?: number };
+  /** which phase a click should scope the timeline to, if any */
+  focus?: { phase: BrowserPhase };
 }
 
 /**
@@ -179,7 +183,7 @@ export const THRESHOLDS = {
   dominantFloorUs: 250_000,
 } as const;
 
-function fmt(us: number): string {
+export function formatUs(us: number): string {
   if (us >= 1e6) return `${(us / 1e6).toFixed(1)} s`;
   if (us >= 1e3) return `${Math.round(us / 1e3)} ms`;
   return `${Math.round(us)} µs`;
@@ -202,7 +206,11 @@ export function computeCallouts(trace: Trace): Callout[] {
       severity: "critical",
       headline: `${worst.phase} holds ${Math.round(worst.share * 100)}% of chunk-time`,
       detail:
-        `${worst.n.toLocaleString()} chunks, p50 ${fmt(worst.p50Us)}, p95 ${fmt(worst.p95Us)}, worst ${fmt(worst.maxUs)}. ` +
+        `${worst.n.toLocaleString()} chunks completed it, p50 ${formatUs(worst.p50Us)}, ` +
+        `p95 ${formatUs(worst.p95Us)}, worst completed ${formatUs(worst.maxUs)}` +
+        (worst.openN
+          ? `, and ${worst.openN.toLocaleString()} never finished it. `
+          : ". ") +
         (worst.phase === "queue"
           ? "This is admission throughput, not the network: rank divided by rate."
           : "Compare against the server split before blaming the network."),
@@ -216,9 +224,8 @@ export function computeCallouts(trace: Trace): Callout[] {
     out.push({
       id: "meta-reads",
       severity: meta.totalUs > 2_000_000 ? "critical" : "warn",
-      headline: `dataset-open metadata reads took ${fmt(meta.totalUs)} before the first chunk was planned`,
+      headline: `dataset-open metadata reads took ${formatUs(meta.totalUs)} before the first chunk was planned`,
       detail: `${meta.n} object reads, ${meta.cached ? "all served by the source cache" : "all source-cache misses"}. This is ahead of every chunk in the table.`,
-      focus: { fromUs: 0, toUs: meta.totalUs },
     });
   }
 
@@ -233,22 +240,25 @@ export function computeCallouts(trace: Trace): Callout[] {
       severity: "warn",
       headline:
         `${queue.openN.toLocaleString()} chunks never left the queue` +
-        (etaUs > 0 ? ` — ${fmt(etaUs)} more to drain at the observed rate` : ""),
+        (etaUs > 0 ? ` — ${formatUs(etaUs)} more to drain at the observed rate` : ""),
       detail:
-        `Worst completed wait ${fmt(queue.maxUs)}: chunk ${trace.chunks.keys[queue.worstRow]} ` +
-        `(lane ${["main", "minimap", "label"][trace.chunks.lane[queue.worstRow]]}). ` +
+        `Worst completed wait ${formatUs(queue.maxUs)}: chunk ${trace.chunks.keys[queue.worstRow]} ` +
+        `(lane ${laneName(trace.chunks, queue.worstRow)}). ` +
         `The unfinished waits are lower bounds, not measurements — the run ended before they did.`,
-      focus: { row: queue.worstRow, phase: "queue" },
+      focus: { phase: "queue" },
     });
   }
 
   // 4. In-flight pinned at the cap for the whole run — the cap is the ceiling.
-  const pinned = countTicks(trace, (i) => trace.ticks.inFlight[i] >= 12);
+  const pinned = countTicks(
+    trace,
+    (i) => trace.ticks.inFlight[i] >= SOURCE_READ_CONCURRENCY,
+  );
   if (pinned / Math.max(1, trace.ticks.n) > 0.5) {
     out.push({
       id: "cap-pinned",
       severity: "warn",
-      headline: `source-read concurrency pinned at 12 for ${Math.round((pinned / trace.ticks.n) * 100)}% of the run`,
+      headline: `source-read concurrency pinned at ${SOURCE_READ_CONCURRENCY} for ${Math.round((pinned / trace.ticks.n) * 100)}% of the run`,
       detail:
         "In-flight backend reads never dropped below the process-global cap, so the observed fetch rate is our own limiter, not the object store.",
     });
@@ -280,7 +290,10 @@ export function computeCallouts(trace: Trace): Callout[] {
     });
   }
 
-  return out;
+  // Rank by severity. Insertion order only looked ranked because these two
+  // fixtures happened to produce their worst finding first.
+  const rank: Record<CalloutSeverity, number> = { critical: 0, warn: 1, info: 2 };
+  return out.sort((a, b) => rank[a.severity] - rank[b.severity]);
 }
 
 /** Observed drain rate, chunks/s, from the slope of the queue-depth counter. */
@@ -302,5 +315,3 @@ function countTicks(trace: Trace, pred: (i: number) => boolean): number {
   for (let i = 0; i < trace.ticks.n; i++) if (pred(i)) n++;
   return n;
 }
-
-export { fmt as formatUs };

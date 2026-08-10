@@ -5,7 +5,10 @@
  * so the variants are judged against realistic volume and realistic shape
  * rather than a toy. Every constant below is traceable to a source:
  *
- *   #899 (docs/research/remote-rates.md), run2, GCS us-west1:
+ * (The two research write-ups cited below live on their own branches,
+ * `research/remote-rates` and `research/trace-volumes`, not on main.)
+ *
+ *   #899 (`remote-rates.md`), run2, GCS us-west1:
  *     permit wait p50 165.6 ms / p95 223.6 / max 426
  *     TTFB       p50  97.5 ms / p95 169.2 / max 321
  *     body       p50  51.6 ms / p95 106.7 / max 928
@@ -14,7 +17,7 @@
  *     0 retries and 0 real failures across 3,781 reads
  *     plan.requests_per_submit p50 = 21,400 (every member, every rebuild)
  *     minimap probes 213,710/s
- *   #888 (docs/research/trace-volumes.md):
+ *   #888 (`trace-volumes.md`):
  *     cold open touches 20-37 chunks; warm re-open 2,559
  *     idle emits nothing
  *   #902 / ADR 0046: warm metadata reads come back from the source cache in
@@ -393,14 +396,4 @@ export function buildTrace(key: RunKey): Trace {
     points,
     ticks,
   };
-}
-
-/** Row indices that never reached a given slot — "still in flight at run end". */
-export function unfinishedAt(trace: Trace, slot: number): number {
-  const { chunks } = trace;
-  let n = 0;
-  for (let r = 0; r < chunks.n; r++) {
-    if (chunks.stamps[slot * chunks.cap + r] === NO_STAMP) n++;
-  }
-  return n;
 }

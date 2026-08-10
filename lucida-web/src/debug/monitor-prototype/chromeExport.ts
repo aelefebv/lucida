@@ -18,7 +18,9 @@
  *   One thread per phase plus `thread_name` metadata, with complete events
  *   (`ph: "X"`), renders as one named lane per phase with the counter tracks
  *   below it — i.e. the whole raw-span surface, for free. It is also smaller:
- *   2.4 MB against 3.9 MB, because a complete event is one object, not two.
+ *   2.7 MB against 3.9 MB, because a complete event is one object, not two.
+ *   (A straight b/e-to-X conversion of the same trace is 2.4 MB; this exporter
+ *   adds the unfinished-phase spans, which the async form silently dropped.)
  *
  * Thread here is a *display* lane, not a real thread. That is a lie the format
  * requires and it is worth paying: the alternative is a viewer nobody can read.
@@ -27,6 +29,10 @@
 import {
   BROWSER_PHASES,
   END_IN_FLIGHT,
+  laneName,
+  tierName,
+  metaDurationUs,
+  META_FIRST,
   NO_STAMP,
   SERVER_PHASES,
   SERVER_STAMP_COUNT,
@@ -70,8 +76,8 @@ export function toChromeTrace(trace: Trace): TraceEvent[] {
 
   for (let r = 0; r < chunks.n; r++) {
     const key = chunks.keys[chunks.keyId[r]];
-    const lane = ["main", "minimap", "label"][chunks.lane[r]];
-    const tier = chunks.tier[r] === 0 ? "detail" : "coarse";
+    const lane = laneName(chunks, r);
+    const tier = tierName(chunks, r);
     for (let p = 0; p < BROWSER_PHASES.length; p++) {
       const a = chunks.stamps[p * chunks.cap + r];
       const b = chunks.stamps[(p + 1) * chunks.cap + r];
@@ -140,8 +146,8 @@ export function toChromeTrace(trace: Trace): TraceEvent[] {
       name: m.path,
       cat: "dataset-open",
       ph: "X",
-      ts: m.stamps[0],
-      dur: Math.max(1, m.stamps[4] - m.stamps[0]),
+      ts: m.stamps[META_FIRST],
+      dur: Math.max(1, metaDurationUs(m)),
       pid: PID_SERVER,
       tid: META_TID,
       args: { bytes: m.bytes, sourceCacheHit: m.hit },

@@ -14,12 +14,17 @@ import { useEffect, useRef, useState } from "react";
 import {
   BROWSER_PHASES,
   END_IN_FLIGHT,
+  laneName,
+  tierName,
+  META_FIRST,
+  META_LAST,
   NO_STAMP,
   SERVER_PHASES,
   SERVER_STAMP_COUNT,
   type Trace,
 } from "./traceModel.ts";
-import { PHASE_COLORS, sizeToDpr } from "./dprCanvas.ts";
+import { sizeToDpr } from "./dprCanvas.ts";
+import { PHASE_COLORS } from "./phaseColors.ts";
 import { formatUs } from "./analysis.ts";
 import type { Replay } from "./useReplay.ts";
 
@@ -125,8 +130,8 @@ export function VariantA({ trace, replay }: { trace: Trace; replay: Replay }) {
               {rows.slice(0, 200).map((r) => (
                 <tr key={r}>
                   <td className="mono">{trace.chunks.keys[trace.chunks.keyId[r]]}</td>
-                  <td>{["main", "minimap", "label"][trace.chunks.lane[r]]}</td>
-                  <td>{trace.chunks.tier[r] === 0 ? "detail" : "coarse"}</td>
+                  <td>{laneName(trace.chunks, r)}</td>
+                  <td>{tierName(trace.chunks, r)}</td>
                   {BROWSER_PHASES.map((p, i) => {
                     const a = trace.chunks.stamps[i * trace.chunks.cap + r];
                     const b = trace.chunks.stamps[(i + 1) * trace.chunks.cap + r];
@@ -260,10 +265,10 @@ function paint(
   ctx.globalAlpha = 0.5;
   for (let m = 0; m < trace.meta.length; m++) {
     const row = trace.meta[m];
-    if (row.stamps[0] > nowUs) continue;
-    const b = Math.min(row.stamps[4], nowUs);
-    if (b < t0 || row.stamps[0] > t1) continue;
-    const xa = x(row.stamps[0]);
+    if (row.stamps[META_FIRST] > nowUs) continue;
+    const b = Math.min(row.stamps[META_LAST], nowUs);
+    if (b < t0 || row.stamps[META_FIRST] > t1) continue;
+    const xa = x(row.stamps[META_FIRST]);
     ctx.fillRect(
       xa,
       y + 2 + ((m * 7919) % (SERVER_LANE_H - 12)),

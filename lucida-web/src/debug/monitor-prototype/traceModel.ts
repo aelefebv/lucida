@@ -57,6 +57,8 @@ export const SERVER_STAMP_COUNT = SERVER_STAMPS.length;
 
 /** Metadata-object reads during dataset open — the third table. */
 export const META_PHASES = ["permit", "ttfb", "body", "parse"] as const;
+export const META_FIRST = 0;
+export const META_LAST = META_PHASES.length;
 
 /** Values for `ChunkTable.endReason`. */
 export const END_IN_FLIGHT = 0;
@@ -65,7 +67,15 @@ export const END_COMPLETE = 1;
 /** stopped on purpose: resident and not wanted by the current view */
 export const END_RETIRED = 2;
 
-export type Lane = "main" | "minimap" | "label";
+export const LANES = ["main", "minimap", "label"] as const;
+/**
+ * `CachedStore.source_read`'s default permit count. The run's central claim is
+ * that this cap, not the object store, sets the observed fetch rate, so it is
+ * one named constant rather than a literal repeated in a detector and a string.
+ */
+export const SOURCE_READ_CONCURRENCY = 12;
+
+export type Lane = (typeof LANES)[number];
 export type ResidencyTier = "detail" | "coarse";
 
 /** Per-chunk lifecycle table. Column-per-field, row index is the chunk. */
@@ -175,24 +185,43 @@ export interface Trace {
   ticks: TickTable;
 }
 
-/** Read a stamp slot for a row. Columns are contiguous, stride = cap. */
-export function stampAt(t: ChunkTable, row: number, slot: number): number {
-  return t.stamps[slot * t.cap + row];
+/** Lane and tier are stored as bytes; these are the only place they are named. */
+export function laneName(t: ChunkTable, row: number): Lane {
+  return LANES[t.lane[row]];
 }
 
-export function serverStampAt(
-  t: ServerTable,
-  row: number,
-  slot: number,
-): number {
-  return t.stamps[slot * t.cap + row];
+export function tierName(t: ChunkTable, row: number): ResidencyTier {
+  return t.tier[row] === 0 ? "detail" : "coarse";
 }
 
-/** Bytes the in-memory table occupies, for the overhead-budget question. */
+/** Wall time a metadata read occupied, first stamp to last. */
+export function metaDurationUs(m: MetaReadRow): number {
+  return m.stamps[META_LAST] - m.stamps[META_FIRST];
+}
+
+/**
+ * Bytes the in-memory trace occupies, for the overhead-budget question.
+ *
+ * Counts everything the export also carries — including the key dictionary,
+ * the metadata table and the point events. Summing only the typed arrays would
+ * flatter the columnar side against the JSON it is being compared to, and the
+ * comparison is the whole point of the number.
+ */
 export function tableBytes(trace: Trace): number {
   const c = trace.chunks;
   const s = trace.server;
+  // UTF-16 in the engine's string table, plus a pointer per entry.
+  const keyBytes = c.keys.reduce((n, k) => n + k.length * 2 + 8, 0);
+  // Rough but not flattering: 5 numbers, a path string and two flags per read.
+  const metaBytes = trace.meta.reduce(
+    (n, m) => n + 5 * 8 + m.path.length * 2 + 16,
+    0,
+  );
+  const pointBytes = trace.points.reduce((n, p) => n + 16 + p.reason.length * 2, 0);
   return (
+    keyBytes +
+    metaBytes +
+    pointBytes +
     c.stamps.byteLength +
     c.keyId.byteLength +
     c.correlationId.byteLength +

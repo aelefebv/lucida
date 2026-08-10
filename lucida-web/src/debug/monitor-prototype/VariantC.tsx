@@ -19,10 +19,11 @@ import { useMemo, useState } from "react";
 import {
   BROWSER_PHASES,
   END_IN_FLIGHT,
+  metaDurationUs,
   NO_STAMP,
   type Trace,
 } from "./traceModel.ts";
-import { PHASE_COLORS } from "./dprCanvas.ts";
+import { PHASE_COLORS } from "./phaseColors.ts";
 import {
   computeCallouts,
   formatUs,
@@ -42,6 +43,7 @@ export function VariantC({ trace, replay }: { trace: Trace; replay: Replay }) {
   if (replay.playing) {
     const done = countStamped(trace, 6, replay.coarseNowUs);
     const started = countStamped(trace, 0, replay.coarseNowUs);
+    const inFlight = countInFlight(trace, replay.coarseNowUs);
     return (
       <div className="vc recording">
         <div className="vc-rec">
@@ -58,8 +60,12 @@ export function VariantC({ trace, replay }: { trace: Trace; replay: Replay }) {
             <span>visible</span>
           </div>
           <div>
-            <strong>{(started - done).toLocaleString()}</strong>
+            <strong>{inFlight.toLocaleString()}</strong>
             <span>in flight</span>
+          </div>
+          <div>
+            <strong>{(started - done - inFlight).toLocaleString()}</strong>
+            <span>retired</span>
           </div>
         </div>
         <p className="vc-recnote">
@@ -178,7 +184,7 @@ function ScopedTimeline({ trace, callout }: { trace: Trace; callout: Callout }) 
           {trace.meta.slice(0, 8).map((m) => (
             <li key={m.path}>
               <span className="mono">{m.path}</span>
-              <span className="mono">{formatUs(m.stamps[4] - m.stamps[0])}</span>
+              <span className="mono">{formatUs(metaDurationUs(m))}</span>
               <span>{m.hit ? "cache hit" : "miss"}</span>
             </li>
           ))}
@@ -220,6 +226,26 @@ function ScopedTimeline({ trace, callout }: { trace: Trace; callout: Callout }) 
       </p>
     </div>
   );
+}
+
+/**
+ * Started, not yet visible, and still moving. Subtracting visible from planned
+ * counts retired rows as in flight forever — the same conflation that turned
+ * variant A's upload lane into a false slab, and the reason the row carries an
+ * `endReason` byte at all.
+ */
+function countInFlight(trace: Trace, untilUs: number): number {
+  const { chunks } = trace;
+  let n = 0;
+  for (let r = 0; r < chunks.n; r++) {
+    const start = chunks.stamps[r];
+    if (start === NO_STAMP || start > untilUs) continue;
+    if (chunks.endReason[r] !== END_IN_FLIGHT) continue;
+    const visible = chunks.stamps[6 * chunks.cap + r];
+    if (visible !== NO_STAMP && visible <= untilUs) continue;
+    n++;
+  }
+  return n;
 }
 
 function countStamped(trace: Trace, slot: number, untilUs: number): number {

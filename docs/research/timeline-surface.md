@@ -32,8 +32,10 @@ store 3156 × 1124 for a 1578 CSS-px canvas, verified per run) or **[C]** read f
 3. **The live view should show progress counters and withhold the verdict**, not
    auto-follow a scrolling timeline.
 4. **A separate page, not an overlay in the viewer tab.** Cost of the monitor's own
-   rendering is p95 **0.7 ms/frame** [M] for the densest variant, so an overlay is
-   affordable — the argument for separation is isolation, not cost.
+   rendering is p95 **1.0 ms/frame** [M] for the densest variant drawing every span, so an
+   overlay is affordable — the argument for separation is isolation, not cost. This is the
+   monitor's paint cost measured on its own page; it is **not** a measurement of
+   perturbation, which needs a recorder that does not exist yet (see §7).
 
 ---
 
@@ -132,7 +134,7 @@ what makes it honest — 1,059 chunks never left the queue, and their true wait 
 
 ### C — "the verdict": callouts first, timeline as drill-in
 
-`timeline-surface-shots/warm-C.png`, `cold-C.png`. Severity-ranked callout cards, each
+`timeline-surface-shots/warm-C.png`, `cold-C.png`. Callout cards ranked by severity, each
 expanding into a timeline scoped to that callout, then a "what this run does not tell you"
 section and the #893 agent text rendered from the same derivation.
 
@@ -173,8 +175,8 @@ Three policies, one per variant, and the disagreement is the point:
   has already scrolled away by the time you notice a stall.
 - **B ignores the question.** The bar is an aggregate; a run in progress renders the same
   as a finished one, only less certain. Nothing to follow, nothing to freeze.
-- **C refuses to answer while recording** — a counter (`2,559 planned / 67 visible /
-  2,492 in flight`) and a *Stop & analyse* button, nothing more
+- **C refuses to answer while recording** — a counter (`2,559 planned / 67 visible / 1,059
+  in flight / 1,433 retired`) and a *Stop & analyse* button, nothing more
   (`timeline-surface-shots/live-C.png`).
 
 **Recommendation: C's shape, with B's bar visible while recording.** C-as-built is too
@@ -216,23 +218,48 @@ Cost is not the argument, though — the numbers say an overlay would be afforda
 
 | | warm run (2,559 chunks) | cold run (36 chunks) |
 | --- | --- | --- |
-| in-memory columnar table | **184 kB** | 26 kB |
+| in-memory trace | **265 kB** | 41 kB |
 | Chrome JSON export | **2.7 MB** | — |
-| variant A render, p95 | **0.7 ms/frame** | — |
+| variant A render, p95, whole run | **1.0 ms/frame** | — |
+| variant A render, p95, 6 s follow window | 1.2 ms/frame | — |
 
-184 kB against 2.7 MB is a **15× ratio**, measured on the artifact rather than estimated —
+265 kB against 2.7 MB is a **10× ratio**, measured on the artifact rather than estimated —
 direct confirmation of ADR 0047's decision to keep the table columnar and treat Chrome JSON
-as an export-time projection.
+as an export-time projection. The 265 kB counts everything the JSON also carries, including
+the key dictionary, the metadata table and the point events; counting only the typed arrays
+gives 184 kB and a flattering 15×, which is the wrong comparison.
 
-The 0.7 ms figure is for the densest variant redrawing every span every frame on a canvas
-outside React. It holds only because of how it is built: the replay cursor lives in a ref
-read inside `requestAnimationFrame`, React chrome updates at 4 Hz, and no variant re-renders
-a component tree per frame. A React tree re-rendering at 60 fps inside the tab it profiles
-is the failure mode this number does *not* cover.
+The 1.0 ms figure is the densest variant redrawing **every** span every frame on a canvas
+outside React, with the replay paused so nothing is culled. It holds only because of how it
+is built: the replay cursor lives in a ref read inside `requestAnimationFrame`, React chrome
+updates at 4 Hz, and no variant re-renders a component tree per frame. A React tree
+re-rendering at 60 fps inside the tab it profiles is the failure mode this number does
+*not* cover.
 
 ---
 
-## 6. Findings that belong to other tickets
+## 6. What this prototype does not establish
+
+Stated plainly, because a prototype that oversells itself is worse than one that admits its
+edges:
+
+- **Perturbation is not measured.** There is no recorder, and the monitor was never run
+  inside a viewer tab under load. §5 measures the monitor's own paint cost on an idle page,
+  which bounds one term of the problem and not the interesting one. Proving the monitor
+  does not perturb what it measures remains open (the map already lists it as unspecified).
+- **The live view replays a finished trace.** `useReplay` moves a cursor over a fully built
+  table; no buffer grows while you watch. So the freeze-vs-follow question was judged on
+  what the reader can *use*, not on what a growing buffer *costs*. The recommendation in §3
+  is about legibility and should not be read as a performance claim.
+- **Perfetto was tested at 2.7 MB / 13,842 slices, not at #888's ceiling.** #888's alarming
+  43 MB/minute figure is for the object-per-event representation ADR 0047 rejected; at this
+  emit shape a 21 s run is 2.7 MB, so a minute is roughly **8 MB** [C] — extrapolated, not
+  measured. Whether the borrowed viewer stays usable at 8–40 MB is untested, and the
+  25 s load time at 2.7 MB is not encouraging.
+- **The trace is synthetic.** It is calibrated to real measurements, but no run here came
+  off a real dataset open.
+
+## 7. Findings that belong to other tickets
 
 - **ADR 0047 / [#886]:** the lifecycle row needs an `endReason` byte. Timestamps alone
   cannot distinguish a retired chunk from a stuck one, and the two render as opposites.
