@@ -1,0 +1,226 @@
+{
+  "baseline": {
+    "arm": "baseline",
+    "main": {
+      "crossOriginIsolated": false,
+      "samples": 16150000,
+      "distinct_deltas_ms": [
+        [
+          0.1,
+          11991
+        ],
+        [
+          0.2,
+          1
+        ]
+      ],
+      "distinct_delta_count": 2,
+      "min_nonzero_delta_ms": 0.1,
+      "fine_stage": {
+        "n": 20000,
+        "timed_individually_zero": 19980,
+        "timed_individually_nonzero": 20,
+        "individual_sum_ms": 2,
+        "individual_outer_ms": 3.7,
+        "batch_total_ms": 0.8,
+        "batch_per_op_us": 0.04
+      }
+    },
+    "worker": {
+      "crossOriginIsolated": false,
+      "samples": 15400000,
+      "distinct_deltas_ms": [
+        [
+          0.1,
+          12000
+        ]
+      ],
+      "distinct_delta_count": 1,
+      "min_nonzero_delta_ms": 0.1,
+      "fine_stage": {
+        "n": 20000,
+        "timed_individually_zero": 19975,
+        "timed_individually_nonzero": 25,
+        "individual_sum_ms": 2.5,
+        "individual_outer_ms": 3.8,
+        "batch_total_ms": 0.7,
+        "batch_per_op_us": 0.035
+      }
+    },
+    "perfetto_iframe": {
+      "event": "load",
+      "contentWindowPresent": true
+    },
+    "perfetto_iframe_blocked": false,
+    "perfetto_popup": {
+      "opened": true,
+      "closedImmediately": false
+    },
+    "popup_opener_severed": {
+      "hasOpener": true
+    },
+    "request_failures": [
+      {
+        "url": "http://127.0.0.1:9001/status",
+        "failure": "net::ERR_CONNECTION_REFUSED"
+      },
+      {
+        "url": "https://perfetto-gae-internal.googleplex.com/extension_server_assets/manifest",
+        "failure": "net::ERR_FAILED"
+      },
+      {
+        "url": "https://accounts.google.com/ServiceLogin?passive=1209600&continue=https://storage.cloud.google.com/perfetto-ui-internal/",
+        "failure": "net::ERR_BLOCKED_BY_ORB"
+      }
+    ]
+  },
+  "isolated": {
+    "arm": "isolated",
+    "main": {
+      "crossOriginIsolated": true,
+      "samples": 15808000,
+      "distinct_deltas_ms": [
+        [
+          0.005,
+          239036
+        ],
+        [
+          0.01,
+          83
+        ],
+        [
+          0.015,
+          100
+        ],
+        [
+          0.02,
+          49
+        ],
+        [
+          0.025,
+          29
+        ],
+        [
+          0.03,
+          5
+        ],
+        [
+          0.035,
+          5
+        ],
+        [
+          0.04,
+          2
+        ],
+        [
+          0.045,
+          2
+        ],
+        [
+          0.08,
+          1
+        ],
+        [
+          0.135,
+          1
+        ]
+      ],
+      "distinct_delta_count": 11,
+      "min_nonzero_delta_ms": 0.005,
+      "fine_stage": {
+        "n": 20000,
+        "timed_individually_zero": 19575,
+        "timed_individually_nonzero": 425,
+        "individual_sum_ms": 2.14,
+        "individual_outer_ms": 3.73,
+        "batch_total_ms": 0.995,
+        "batch_per_op_us": 0.0498
+      }
+    },
+    "worker": {
+      "crossOriginIsolated": true,
+      "samples": 15024000,
+      "distinct_deltas_ms": [
+        [
+          0.005,
+          239048
+        ],
+        [
+          0.01,
+          102
+        ],
+        [
+          0.015,
+          90
+        ],
+        [
+          0.02,
+          35
+        ],
+        [
+          0.025,
+          18
+        ],
+        [
+          0.03,
+          14
+        ],
+        [
+          0.035,
+          3
+        ],
+        [
+          0.04,
+          3
+        ],
+        [
+          0.055,
+          1
+        ],
+        [
+          0.06,
+          1
+        ],
+        [
+          0.075,
+          1
+        ]
+      ],
+      "distinct_delta_count": 11,
+      "min_nonzero_delta_ms": 0.005,
+      "fine_stage": {
+        "n": 20000,
+        "timed_individually_zero": 19554,
+        "timed_individually_nonzero": 446,
+        "individual_sum_ms": 2.235,
+        "individual_outer_ms": 3.915,
+        "batch_total_ms": 0.92,
+        "batch_per_op_us": 0.046
+      }
+    },
+    "perfetto_iframe": {
+      "event": "load",
+      "contentWindowPresent": true
+    },
+    "perfetto_iframe_blocked": true,
+    "perfetto_popup": {
+      "opened": true,
+      "closedImmediately": false
+    },
+    "popup_opener_severed": {
+      "hasOpener": false
+    },
+    "request_failures": [
+      {
+        "url": "https://ui.perfetto.dev/",
+        "failure": "net::ERR_BLOCKED_BY_RESPONSE"
+      }
+    ]
+  },
+  "perfetto_headers": {
+    "status": 200,
+    "coop": null,
+    "coep": null,
+    "corp": null
+  }
+}
