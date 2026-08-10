@@ -3222,7 +3222,7 @@ mod tests {
         let dir = temp_dir("import_top_level_placement");
         create_7d_top_level_placement_fixture(&dir);
 
-        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let store = cached_store(dir.to_str().unwrap());
         let result = import_dataset(&store, "placement-test", "Placement Test")
             .await
             .unwrap();
