@@ -21,6 +21,30 @@ use tokio::sync::{Semaphore, broadcast};
 /// burst of misses fan out into hundreds of simultaneous connections.
 const DEFAULT_SOURCE_READ_CONCURRENCY: usize = 12;
 
+/// Byte budget for one dataset's source cache. Every production caller sizes
+/// its `CachedStore` from this constant so the metadata reads an open performs
+/// and the chunk reads that follow share one budget of a known size.
+pub const DEFAULT_SOURCE_CACHE_BYTES: usize = 512 * 1024 * 1024;
+
+/// Cap on concurrent backend reads of *metadata* objects, which are bounded
+/// separately from chunk reads. Not operator-tunable: unlike the chunk cap it
+/// has no pressure to relieve — it tracks the import pipeline's fan-out, and
+/// the two move together.
+///
+/// A metadata object is a few kilobytes of JSON and an open reads hundreds of
+/// them back to back, so the cost profile is round trips, not bytes: the two
+/// classes want different bounds and sharing one would make an open queue
+/// behind the chunk cap for no bandwidth reason. This matches the fan-out the
+/// import pipeline already drives (`METADATA_FETCH_CONCURRENCY`).
+const DEFAULT_METADATA_READ_CONCURRENCY: usize = 32;
+
+/// How many known-absent object paths
+/// [`CachedStore::get_optional_metadata_bytes`] remembers. Each entry is a
+/// path string, so the memo is bounded by count rather than charged against
+/// the byte budget; 64k paths is far more than any single open probes and
+/// still trivially small next to the byte cache.
+const ABSENT_MEMO_CAPACITY: usize = 65_536;
+
 /// Environment variable an operator can set to override the process-global
 /// concurrent-source-read cap. Read once, the first time the limiter is used.
 const SOURCE_READ_CONCURRENCY_ENV: &str = "LUCIDA_SOURCE_READ_CONCURRENCY";
@@ -35,6 +59,13 @@ const SOURCE_READ_CONCURRENCY_ENV: &str = "LUCIDA_SOURCE_READ_CONCURRENCY";
 fn global_source_read_limiter() -> &'static Arc<Semaphore> {
     static LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
     LIMITER.get_or_init(|| Arc::new(Semaphore::new(configured_source_read_limit())))
+}
+
+/// The process-global limiter for metadata reads, the counterpart to
+/// [`global_source_read_limiter`] for the other read class.
+fn global_metadata_read_limiter() -> &'static Arc<Semaphore> {
+    static LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    LIMITER.get_or_init(|| Arc::new(Semaphore::new(DEFAULT_METADATA_READ_CONCURRENCY)))
 }
 
 /// Resolve the source-read cap from the operator override, falling back to
@@ -124,6 +155,22 @@ impl SharedError {
     }
 }
 
+/// What a caller is reading, which decides two things a read cannot decide
+/// for itself: which concurrency cap bounds it, and whether a not-found
+/// answer is a fault or an answer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ReadClass {
+    /// A chunk of the data itself. Bounded by the chunk cap; a not-found is
+    /// counted as a backend error, as it has always been.
+    Chunk,
+    /// A metadata object the dataset is expected to have.
+    Metadata,
+    /// A metadata object the dataset may or may not have (a `labels/`
+    /// index). Bounded like other metadata, but a not-found is the answer —
+    /// counting it would report a perfectly healthy dataset as degraded.
+    OptionalMetadata,
+}
+
 /// Result shared over the in-flight broadcast. Success carries `Bytes`
 /// (cheap, reference-counted clones); failure carries a [`SharedError`].
 type ShareResult = Result<Bytes, SharedError>;
@@ -140,6 +187,17 @@ pub struct CacheStats {
     /// Single-flight followers served a leader's result without issuing
     /// their own backend read.
     pub coalesced: u64,
+    /// Backend round trips actually performed (successes and failures).
+    /// Distinct from `misses`: a miss that coalesces behind a leader, or one
+    /// served by the LRU insert race, costs no round trip.
+    pub source_reads: u64,
+    /// Cumulative wall time spent in those round trips, in milliseconds.
+    /// Measured from the moment a read starts queueing for a source-read
+    /// permit to the moment its body is in hand, so it includes lucida's own
+    /// queueing behind the concurrency cap — which remote measurement shows
+    /// is comparable to the network wait itself. Reads overlap, so this is a
+    /// sum of per-read latencies, not elapsed wall time.
+    pub source_read_millis: u64,
 }
 
 /// A memory-bounded LRU cache wrapping an ObjectStore.
@@ -150,10 +208,25 @@ pub struct CachedStore {
     /// the same path subscribe to the leader's broadcast instead of each
     /// hitting the backend.
     in_flight: Mutex<HashMap<String, broadcast::Sender<ShareResult>>>,
-    /// Caps concurrent backend reads. Shared process-wide by default (see
-    /// [`global_source_read_limiter`]); a dedicated limiter can be threaded
-    /// in via [`CachedStore::with_source_limiter`].
+    /// Paths [`CachedStore::get_optional_metadata_bytes`] has found absent, so a
+    /// repeated probe for the same optional object costs no round trip.
+    ///
+    /// Deliberately separate from the byte cache and consulted only by that
+    /// method: an absent *chunk* is legitimate sparse data whose absence is a
+    /// property of the data, and remembering it would make a chunk that
+    /// appears later read as empty. An absent *optional metadata object* — a
+    /// `labels/zarr.json` that a dataset simply does not have — is a property
+    /// of the dataset's shape, and re-probing it on every open is pure cost:
+    /// on a wide remote collection these 404s are a large fraction of the
+    /// open's reads.
+    absent: Mutex<LruCache<String, ()>>,
+    /// Caps concurrent backend chunk reads. Shared process-wide by default
+    /// (see [`global_source_read_limiter`]); a dedicated limiter can be
+    /// threaded in via [`CachedStore::with_source_limiter`].
     source_read: Arc<Semaphore>,
+    /// Caps concurrent backend metadata reads, independently of chunk reads
+    /// (see [`DEFAULT_METADATA_READ_CONCURRENCY`]).
+    metadata_read: Arc<Semaphore>,
 }
 
 struct LruState {
@@ -165,6 +238,8 @@ struct LruState {
     evictions: u64,
     backend_errors: u64,
     coalesced: u64,
+    source_reads: u64,
+    source_read_nanos: u128,
 }
 
 /// The shared in-flight registry keyed by object path.
@@ -231,7 +306,47 @@ impl Drop for LeaderGuard<'_> {
     }
 }
 
+/// Live source caches, keyed by the caller's source identity.
+///
+/// Held weakly on purpose: the registry exists so two bindings on the same
+/// source (the same dataset open in two workspaces, or reopened after a
+/// workspace wake) read through one warm cache instead of each paying the
+/// source's metadata round trips again. It must not, however, keep a
+/// half-gigabyte budget alive for a source nothing is looking at any more, so
+/// the last binding to drop its `Arc` releases the cache.
+fn source_cache_registry() -> &'static Mutex<HashMap<String, std::sync::Weak<CachedStore>>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<String, std::sync::Weak<CachedStore>>>> =
+        OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 impl CachedStore {
+    /// The cache for one source, shared with any live caller that asked for
+    /// the same `source_key`.
+    ///
+    /// `source_key` must identify the *source* (lucida uses the canonical
+    /// URL's dataset source id), not the workspace-local dataset: two
+    /// workspaces viewing one URL are two datasets over one source, and the
+    /// second open should be served from what the first already read.
+    /// `inner` and `max_bytes` are used only when no live cache exists for
+    /// the key.
+    pub fn shared_for_source(
+        source_key: &str,
+        inner: Arc<dyn ObjectStore>,
+        max_bytes: usize,
+    ) -> Arc<Self> {
+        let mut registry = source_cache_registry().lock().unwrap();
+        if let Some(live) = registry.get(source_key).and_then(std::sync::Weak::upgrade) {
+            return live;
+        }
+        let created = Arc::new(Self::new(inner, max_bytes));
+        registry.insert(source_key.to_string(), Arc::downgrade(&created));
+        // Drop the tombstones left by sources that have since closed. Bounded
+        // work proportional to the registry, run only when a source is opened.
+        registry.retain(|_, weak| weak.strong_count() > 0);
+        created
+    }
+
     /// Create a new CachedStore wrapping `inner` with a maximum cache size of
     /// `max_bytes`. Backend-read concurrency is bounded by the process-global
     /// limiter shared with every other `CachedStore` built this way.
@@ -259,9 +374,15 @@ impl CachedStore {
                 evictions: 0,
                 backend_errors: 0,
                 coalesced: 0,
+                source_reads: 0,
+                source_read_nanos: 0,
             }),
             in_flight: Mutex::new(HashMap::new()),
+            absent: Mutex::new(LruCache::new(
+                std::num::NonZeroUsize::new(ABSENT_MEMO_CAPACITY).expect("capacity is non-zero"),
+            )),
             source_read,
+            metadata_read: global_metadata_read_limiter().clone(),
         }
     }
 
@@ -276,6 +397,8 @@ impl CachedStore {
             evictions: state.evictions,
             backend_errors: state.backend_errors,
             coalesced: state.coalesced,
+            source_reads: state.source_reads,
+            source_read_millis: (state.source_read_nanos / 1_000_000) as u64,
         }
     }
 
@@ -289,6 +412,22 @@ impl CachedStore {
     /// is surfaced to all current waiters and is **not** cached, so a later
     /// read re-attempts the backend.
     pub async fn get_bytes(&self, path: &Path) -> Result<Bytes, object_store::Error> {
+        self.get_bytes_as(path, ReadClass::Chunk).await
+    }
+
+    /// Read a metadata object (a `zarr.json` and friends) through the same
+    /// cache, bounded by the metadata-read cap rather than the chunk one.
+    /// See [`DEFAULT_METADATA_READ_CONCURRENCY`] for why the two classes are
+    /// counted apart.
+    pub async fn get_metadata_bytes(&self, path: &Path) -> Result<Bytes, object_store::Error> {
+        self.get_bytes_as(path, ReadClass::Metadata).await
+    }
+
+    async fn get_bytes_as(
+        &self,
+        path: &Path,
+        class: ReadClass,
+    ) -> Result<Bytes, object_store::Error> {
         let key = path.to_string();
 
         // Cache hit — served without touching the backend or a permit.
@@ -333,7 +472,7 @@ impl CachedStore {
                 // panicked). The guard has removed the in-flight entry, so
                 // fall back to a direct backend read: this waiter still gets a
                 // real answer and the path is not wedged.
-                Err(_) => self.fetch_from_backend(path, &key).await,
+                Err(_) => self.fetch_from_backend(path, &key, class).await,
             };
         }
 
@@ -343,9 +482,43 @@ impl CachedStore {
         // completion `complete` removes the entry and broadcasts the result
         // exactly once; the guard's `Drop` is then a no-op.
         let mut guard = LeaderGuard::new(&self.in_flight, key.clone());
-        let result = self.fetch_from_backend(path, &key).await;
+        let result = self.fetch_from_backend(path, &key, class).await;
         guard.complete(&result);
         result
+    }
+
+    /// Read an object that may legitimately not exist, remembering absence.
+    ///
+    /// `Ok(None)` means the object is not there. Unlike [`get_metadata_bytes`], a
+    /// not-found answer is retained (see [`Self::absent`]), so a repeated
+    /// probe for the same missing object — the common shape of optional
+    /// metadata discovery across a wide collection — is served locally.
+    /// Every other error is surfaced unchanged and never remembered.
+    ///
+    /// [`get_metadata_bytes`]: Self::get_metadata_bytes
+    pub async fn get_optional_metadata_bytes(
+        &self,
+        path: &Path,
+    ) -> Result<Option<Bytes>, object_store::Error> {
+        let key = path.to_string();
+        {
+            let mut absent = self.absent.lock().unwrap();
+            if absent.get(&key).is_some() {
+                drop(absent);
+                let mut state = self.cache.lock().unwrap();
+                state.hits += 1;
+                return Ok(None);
+            }
+        }
+
+        match self.get_bytes_as(path, ReadClass::OptionalMetadata).await {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(object_store::Error::NotFound { .. }) => {
+                self.absent.lock().unwrap().put(key, ());
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Perform a single backend read under a source-read permit and, on
@@ -355,13 +528,21 @@ impl CachedStore {
         &self,
         path: &Path,
         key: &str,
+        class: ReadClass,
     ) -> Result<Bytes, object_store::Error> {
+        let limiter = match class {
+            ReadClass::Chunk => &self.source_read,
+            ReadClass::Metadata | ReadClass::OptionalMetadata => &self.metadata_read,
+        };
+        // Timed from here, before the permit is acquired: queueing behind our
+        // own concurrency cap is part of what a caller waits for, and leaving
+        // it out would understate the read by roughly half on a remote store.
+        let started = std::time::Instant::now();
         let fetch = {
             // Bound concurrent backend reads process-wide. Scoped to just the
             // GET + body read so the permit is released before the (fast,
             // synchronous) cache insert below.
-            let _permit = self
-                .source_read
+            let _permit = limiter
                 .acquire()
                 .await
                 .expect("source-read semaphore is never closed");
@@ -370,12 +551,19 @@ impl CachedStore {
                 Err(error) => Err(error),
             }
         };
+        let elapsed_nanos = started.elapsed().as_nanos();
 
         let bytes = match fetch {
             Ok(bytes) => bytes,
             Err(error) => {
                 let mut state = self.cache.lock().unwrap();
-                state.backend_errors += 1;
+                let absent_as_expected = class == ReadClass::OptionalMetadata
+                    && matches!(error, object_store::Error::NotFound { .. });
+                if !absent_as_expected {
+                    state.backend_errors += 1;
+                }
+                state.source_reads += 1;
+                state.source_read_nanos += elapsed_nanos;
                 return Err(error);
             }
         };
@@ -383,6 +571,8 @@ impl CachedStore {
         // Insert into cache, evicting LRU entries to stay within budget.
         {
             let mut state = self.cache.lock().unwrap();
+            state.source_reads += 1;
+            state.source_read_nanos += elapsed_nanos;
             if let Some(existing) = state.lru.get(key) {
                 return Ok(existing.clone());
             }
@@ -874,6 +1064,213 @@ mod tests {
             .expect("follower task panicked")
             .expect("follower fetch should succeed");
         assert_eq!(&bytes[..], b"payload");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn stats_report_backend_read_count_and_elapsed_time() {
+        // Two distinct paths, each delayed, so the accumulated read time is
+        // unambiguously at least the sum of the two delays.
+        let delay_ms = 40;
+        let store = Arc::new(CountingStore::new(delay_ms));
+        store.seed("a", b"aaaa").await;
+        store.seed("b", b"bbbb").await;
+
+        let cached = CachedStore::with_source_limiter(store, 1024, Arc::new(Semaphore::new(1)));
+        cached.get_bytes(&Path::from("a")).await.unwrap();
+        cached.get_bytes(&Path::from("b")).await.unwrap();
+        // A hit costs no backend read and no read time.
+        cached.get_bytes(&Path::from("a")).await.unwrap();
+
+        let stats = cached.stats();
+        assert_eq!(stats.source_reads, 2, "one backend read per distinct path");
+        assert!(
+            stats.source_read_millis >= 2 * delay_ms,
+            "accumulated read time {} ms should cover both delayed reads",
+            stats.source_read_millis
+        );
+        assert_eq!(stats.hits, 1);
+    }
+
+    /// Metadata reads must not queue behind the chunk cap. Routing an import
+    /// through the cache is only worth doing if it does not also halve the
+    /// fan-out the import pipeline drives: measured against a 21k-member
+    /// remote collection, sharing one cap cost the cold open ~2x.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn metadata_reads_are_not_bounded_by_the_chunk_read_cap() {
+        let store = Arc::new(CountingStore::new(50));
+        let distinct = 8usize;
+        for i in 0..distinct {
+            let bytes: &'static [u8] = Box::leak(vec![b'x'; 4].into_boxed_slice());
+            store.seed(&format!("meta-{i}"), bytes).await;
+        }
+        let max_active = store.max_active.clone();
+
+        // A chunk cap of one: if metadata shared it, the reads would fully
+        // serialize.
+        let cached = Arc::new(CachedStore::with_source_limiter(
+            store,
+            1024 * 1024,
+            Arc::new(Semaphore::new(1)),
+        ));
+
+        let mut handles = Vec::new();
+        for i in 0..distinct {
+            let cached = cached.clone();
+            handles.push(tokio::spawn(async move {
+                cached
+                    .get_metadata_bytes(&Path::from(format!("meta-{i}")))
+                    .await
+            }));
+        }
+        for handle in handles {
+            handle.await.unwrap().unwrap();
+        }
+
+        assert!(
+            max_active.load(Ordering::SeqCst) > 1,
+            "metadata reads serialized behind the chunk cap",
+        );
+    }
+
+    #[tokio::test]
+    async fn one_source_key_shares_one_warm_cache_while_it_is_in_use() {
+        let store = Arc::new(CountingStore::new(0));
+        store.seed("zarr.json", b"{}").await;
+        let get_count = store.get_count.clone();
+
+        let first = CachedStore::shared_for_source("src-a", store.clone(), 1024);
+        first.get_bytes(&Path::from("zarr.json")).await.unwrap();
+
+        // A second open of the same source reads what the first one cached.
+        let second = CachedStore::shared_for_source("src-a", store.clone(), 1024);
+        assert!(Arc::ptr_eq(&first, &second));
+        second.get_bytes(&Path::from("zarr.json")).await.unwrap();
+        assert_eq!(get_count.load(Ordering::SeqCst), 1);
+
+        // A different source is a different cache.
+        let other = CachedStore::shared_for_source("src-b", store.clone(), 1024);
+        assert!(!Arc::ptr_eq(&first, &other));
+        other.get_bytes(&Path::from("zarr.json")).await.unwrap();
+        assert_eq!(get_count.load(Ordering::SeqCst), 2);
+
+        // Once nothing holds the source's cache, its budget is released
+        // rather than pinned for the life of the process.
+        drop(first);
+        drop(second);
+        let reopened = CachedStore::shared_for_source("src-a", store.clone(), 1024);
+        reopened.get_bytes(&Path::from("zarr.json")).await.unwrap();
+        assert_eq!(get_count.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn optional_reads_remember_absence_but_chunk_reads_do_not() {
+        let store = Arc::new(CountingStore::new(0));
+        let get_count = store.get_count.clone();
+        let cached = CachedStore::new(store, 1024);
+
+        let missing = Path::from("labels/zarr.json");
+        assert!(
+            cached
+                .get_optional_metadata_bytes(&missing)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            cached
+                .get_optional_metadata_bytes(&missing)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            get_count.load(Ordering::SeqCst),
+            1,
+            "the second probe for a known-absent object must not hit the backend",
+        );
+        assert_eq!(cached.stats().hits, 1, "the memoized probe counts as a hit");
+
+        // An absent chunk is data, not shape: `get_bytes` keeps asking, so a
+        // sparse region that later has content is never stuck reading empty.
+        let sparse = Path::from("0/c/0/0/0/0/0");
+        assert!(cached.get_bytes(&sparse).await.is_err());
+        assert!(cached.get_bytes(&sparse).await.is_err());
+        assert_eq!(get_count.load(Ordering::SeqCst), 3);
+    }
+
+    /// An optional object that isn't there is an answer, not a fault. The
+    /// server turns `backend_errors` into a Degraded source-cache health, so
+    /// counting label-index probes there would report almost every dataset as
+    /// unhealthy — on a wide collection those probes are most of the reads.
+    #[tokio::test]
+    async fn absent_optional_metadata_is_not_a_backend_error() {
+        let store = Arc::new(CountingStore::new(0));
+        let cached = CachedStore::new(store, 1024);
+
+        assert!(
+            cached
+                .get_optional_metadata_bytes(&Path::from("labels/zarr.json"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let stats = cached.stats();
+        assert_eq!(
+            stats.backend_errors, 0,
+            "an absent optional object is not an error"
+        );
+        // The round trip it cost is still counted.
+        assert_eq!(stats.source_reads, 1);
+    }
+
+    #[tokio::test]
+    async fn optional_read_returns_present_bytes_and_surfaces_other_errors() {
+        let store = Arc::new(CountingStore::new(0));
+        store.seed("present", b"payload").await;
+        let fail = store.fail.clone();
+        let cached = CachedStore::new(store, 1024);
+
+        let found = cached
+            .get_optional_metadata_bytes(&Path::from("present"))
+            .await
+            .unwrap()
+            .expect("a present object must come back as Some");
+        assert_eq!(&found[..], b"payload");
+
+        // A non-not-found failure is an error, not an absence, and is not
+        // remembered: the next probe re-attempts the backend.
+        fail.store(true, Ordering::SeqCst);
+        assert!(
+            cached
+                .get_optional_metadata_bytes(&Path::from("other"))
+                .await
+                .is_err()
+        );
+        fail.store(false, Ordering::SeqCst);
+        assert!(
+            cached
+                .get_optional_metadata_bytes(&Path::from("other"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_backend_reads_are_counted_and_timed() {
+        let store = Arc::new(CountingStore::new(20));
+        store.fail.store(true, Ordering::SeqCst);
+        let cached = CachedStore::new(store, 1024);
+
+        assert!(cached.get_bytes(&Path::from("a")).await.is_err());
+
+        let stats = cached.stats();
+        assert_eq!(
+            stats.source_reads, 1,
+            "a failed read still cost a round trip"
+        );
+        assert!(stats.source_read_millis >= 20);
     }
 
     #[test]

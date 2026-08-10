@@ -802,6 +802,8 @@ const expectedSourceHealth: DatasetSourceHealth = {
     misses: 421,
     evictions: 17,
     backend_errors: 2,
+    source_reads: 430,
+    source_read_millis: 51280,
   },
   generated_coarse: {
     status: "degraded",

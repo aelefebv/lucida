@@ -140,7 +140,10 @@ async fn five_channels_per_chunk_resolve_and_slice_independently() {
     fs::write(chunk_dir.join("0"), ENC_5CH_BLOSC).unwrap();
 
     // Open via the import pipeline.
-    let store = lucida_store::backend::open(dir.to_str().unwrap()).unwrap();
+    let store = std::sync::Arc::new(lucida_store::cache::CachedStore::new(
+        lucida_store::backend::open(dir.to_str().unwrap()).unwrap(),
+        lucida_store::cache::DEFAULT_SOURCE_CACHE_BYTES,
+    ));
     let result = import_dataset(&store, "multi-c-e2e", "Multi-C E2E")
         .await
         .unwrap();
@@ -277,7 +280,10 @@ async fn rejects_canonical_indexed_after_kept_canonical() {
     )
     .unwrap();
 
-    let store = lucida_store::backend::open(dir.to_str().unwrap()).unwrap();
+    let store = std::sync::Arc::new(lucida_store::cache::CachedStore::new(
+        lucida_store::backend::open(dir.to_str().unwrap()).unwrap(),
+        lucida_store::cache::DEFAULT_SOURCE_CACHE_BYTES,
+    ));
     let err = import_dataset(&store, "non-prefix-e2e", "Non-prefix E2E")
         .await
         .unwrap_err();

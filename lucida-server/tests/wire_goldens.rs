@@ -1161,6 +1161,8 @@ fn source_health() -> DatasetSourceHealth {
             misses: 421,
             evictions: 17,
             backend_errors: 2,
+            source_reads: 430,
+            source_read_millis: 51280,
         }),
         generated_coarse: DatasetGeneratedCoarseHealth {
             status: DatasetHealthStatus::Degraded,

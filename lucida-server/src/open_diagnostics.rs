@@ -177,6 +177,52 @@ pub(crate) fn open_success(
     }
 }
 
+/// What one dataset open's metadata reads cost, taken as the difference of
+/// two [`lucida_store::cache::CacheStats`] snapshots around the import.
+///
+/// The import reads through the same `CachedStore` the chunk path uses, so
+/// the cache's own counters already observe it; this is the per-open slice of
+/// those counters, which is the number an operator wants when asking why an
+/// open took seconds. The cache is shared per source, so two opens of one
+/// source running at the same time — or chunk reads on an already-open
+/// binding — attribute some of each other's reads; the slice is exact only
+/// for an open that does not overlap another reader of the same source. Both open paths report it — the interactive open on the
+/// progress trail the CLI and the web's open view render, the workspace
+/// restore in its log line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct MetadataReadCost {
+    /// Backend round trips performed during the import.
+    pub reads: u64,
+    /// Reads the cache served without touching the backend.
+    pub hits: u64,
+    /// Cumulative time in those round trips, including queueing behind the
+    /// source-read cap. Reads overlap, so this exceeds elapsed wall time.
+    pub read_millis: u64,
+}
+
+impl MetadataReadCost {
+    pub fn between(
+        before: &lucida_store::cache::CacheStats,
+        after: &lucida_store::cache::CacheStats,
+    ) -> Self {
+        MetadataReadCost {
+            reads: after.source_reads.saturating_sub(before.source_reads),
+            hits: after.hits.saturating_sub(before.hits),
+            read_millis: after
+                .source_read_millis
+                .saturating_sub(before.source_read_millis),
+        }
+    }
+
+    /// One-line form for the open trail and the log.
+    pub fn summary(&self) -> String {
+        format!(
+            "metadata reads: {} ({} ms in backend reads, {} served from cache)",
+            self.reads, self.read_millis, self.hits
+        )
+    }
+}
+
 pub(crate) fn backend_kind_for_url(url: &str) -> String {
     if is_local_dataset_url(url) {
         "local".to_string()
@@ -246,6 +292,49 @@ mod tests {
             source: boxed("503 Service Unavailable"),
         };
         assert_eq!(store_error_status(&generic), SourceChunkStatus::Unavailable);
+    }
+
+    #[test]
+    fn metadata_read_cost_is_the_per_open_slice_of_the_cache_counters() {
+        // The cache is process-lived and shared with the chunk path, so the
+        // per-open cost must be a difference of snapshots, never the absolute
+        // counters — otherwise a second open would report the first one's
+        // reads on top of its own.
+        let before = lucida_store::cache::CacheStats {
+            max_bytes: 1024,
+            current_bytes: 10,
+            entry_count: 1,
+            hits: 4,
+            misses: 7,
+            evictions: 0,
+            backend_errors: 0,
+            coalesced: 0,
+            source_reads: 7,
+            source_read_millis: 900,
+        };
+        let after = lucida_store::cache::CacheStats {
+            hits: 9,
+            misses: 20,
+            source_reads: 20,
+            source_read_millis: 3_400,
+            ..before.clone()
+        };
+
+        let cost = MetadataReadCost::between(&before, &after);
+        assert_eq!(cost.reads, 13);
+        assert_eq!(cost.hits, 5);
+        assert_eq!(cost.read_millis, 2_500);
+        assert_eq!(
+            cost.summary(),
+            "metadata reads: 13 (2500 ms in backend reads, 5 served from cache)"
+        );
+
+        // A repeat open that reads nothing new reports zero, not a negative
+        // wrap-around.
+        assert_eq!(
+            MetadataReadCost::between(&after, &before),
+            MetadataReadCost::default()
+        );
     }
 
     #[test]

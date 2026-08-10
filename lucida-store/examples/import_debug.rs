@@ -52,6 +52,10 @@ async fn main() {
     };
 
     eprintln!("Importing as id={id}, name={name}");
+    let store = std::sync::Arc::new(lucida_store::cache::CachedStore::new(
+        store,
+        lucida_store::cache::DEFAULT_SOURCE_CACHE_BYTES,
+    ));
     match lucida_store::import::import_dataset(&store, &id, &name).await {
         Ok(result) => {
             // Summary to stderr

@@ -43,6 +43,8 @@ export interface DatasetSourceCacheStats {
   misses: number;
   evictions: number;
   backend_errors: number;
+  source_reads: number;
+  source_read_millis: number;
 }
 
 export interface DatasetGeneratedCoarseCacheStats {

@@ -971,6 +971,8 @@ fn cache_stats_for_protocol(stats: lucida_store::cache::CacheStats) -> DatasetSo
         misses: stats.misses,
         evictions: stats.evictions,
         backend_errors: stats.backend_errors,
+        source_reads: stats.source_reads,
+        source_read_millis: stats.source_read_millis,
     }
 }
 
@@ -1815,10 +1817,16 @@ mod tests {
             evictions: 2,
             backend_errors: 1,
             coalesced: 5,
+            source_reads: 8,
+            source_read_millis: 2_400,
         });
 
         assert_eq!(stats.used_percent, 92);
         assert_eq!(stats.backend_errors, 1);
+        // The read cost an open pays is carried on the same health payload the
+        // CLI and the debug panel already render.
+        assert_eq!(stats.source_reads, 8);
+        assert_eq!(stats.source_read_millis, 2_400);
     }
 
     #[test]

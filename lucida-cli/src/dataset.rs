@@ -1668,6 +1668,8 @@ mod tests {
                     misses: 4,
                     evictions: 1,
                     backend_errors: 0,
+                    source_reads: 4,
+                    source_read_millis: 120,
                 }),
                 generated_coarse: lucida_protocol::DatasetGeneratedCoarseHealth {
                     status: DatasetHealthStatus::Healthy,

@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use lucida_content::DatasetId;
-use lucida_content::url::{dataset_url_hash16, normalize_dataset_url};
+use lucida_content::url::{dataset_id_for_url, dataset_url_hash16, normalize_dataset_url};
 use lucida_protocol::{
     AssetCatalog, DatasetOpenFailureDiagnostic, DatasetOpened, GeneratedAvailabilityDelta,
 };
@@ -29,7 +29,7 @@ use crate::generated::{
     DerivedChunkCache, GeneratedCoarseConfig, GeneratedCoarseService, GeneratedSchedulingConfig,
     plan_generated_coarse_for_manifest,
 };
-use crate::open_diagnostics::{backend_open_failure, import_failure};
+use crate::open_diagnostics::{MetadataReadCost, backend_open_failure, import_failure};
 use crate::proxy::{ProxyCache, ProxyGenerator, proxy_catalog_entries_for_manifest};
 use crate::session::Session;
 use crate::workspace::types::WorkspaceDatasetSource;
@@ -104,9 +104,26 @@ async fn restore_one_workspace_binding(
 
     let store =
         lucida_store::backend::open(&canonical_url).map_err(|e| backend_open_failure(&e))?;
-    let result = lucida_store::import::import_dataset(&store, &dataset_id, &source.display_name)
+    // Built before the import so the metadata reads go through the cache and
+    // are counted by the same source-cache instrumentation as the chunk reads
+    // that follow. Mirrors the interactive open path in `crate::dataset_open`.
+    let cached = CachedStore::shared_for_source(
+        &dataset_id_for_url(&canonical_url),
+        store.clone(),
+        lucida_store::cache::DEFAULT_SOURCE_CACHE_BYTES,
+    );
+    let reads_before = cached.stats();
+    let result = lucida_store::import::import_dataset(&cached, &dataset_id, &source.display_name)
         .await
         .map_err(|e| import_failure(&e))?;
+    let import_reads = MetadataReadCost::between(&reads_before, &cached.stats());
+    tracing::info!(
+        dataset_id = %dataset_id,
+        metadata_reads = import_reads.reads,
+        metadata_read_millis = import_reads.read_millis,
+        metadata_read_cache_hits = import_reads.hits,
+        "workspace.binding_restore.import_complete"
+    );
 
     let import_warnings: Vec<String> = result.warnings.iter().map(|w| w.message.clone()).collect();
     for warning in &result.warnings {
@@ -131,7 +148,6 @@ async fn restore_one_workspace_binding(
         opener_client_id: None,
     };
 
-    let cached = Arc::new(CachedStore::new(store.clone(), 512 * 1024 * 1024));
     let resolver = Arc::new(ChunkResolver::new(&result.binding_seed));
     let generated_config = GeneratedCoarseConfig {
         target_long_axis: proxy_config.generated_target_long_axis,
