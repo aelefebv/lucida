@@ -87,7 +87,7 @@ _Avoid_: deduplication, batching (batching combines *different* work)
 ## Performance monitor
 
 Defined by `wiki/decisions/0047-trace-model-phases-runs-and-lifecycle-rows.md`
-and `wiki/decisions/0050-the-trace-driver-and-the-page-export-seam.md`, which are
+and `wiki/decisions/0051-the-trace-driver-and-the-page-export-seam.md`, which are
 the authority if this summary and they ever disagree.
 
 **Trace**:

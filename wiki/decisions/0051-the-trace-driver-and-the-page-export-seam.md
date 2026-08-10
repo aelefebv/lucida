@@ -3,7 +3,7 @@ type: Decision
 title: "The trace driver and the page export seam"
 description: "How lucida trace drives a headless run and gets the trace out: a production page-level export seam that both entry points call, a published quiescence predicate that closes the run, and a file on disk as the artifact."
 tags: [lucida, decision]
-source_path: wiki/decisions/0050-the-trace-driver-and-the-page-export-seam.md
+source_path: wiki/decisions/0051-the-trace-driver-and-the-page-export-seam.md
 created: 2026-08-10
 modified: 2026-08-10
 ---
@@ -16,7 +16,8 @@ Context: issue [#895], under the [#885] map. Builds on
 [ADR 0047](0047-trace-model-phases-runs-and-lifecycle-rows.md) (what is recorded),
 [ADR 0048](0048-correlating-work-across-the-browser-server-boundary.md) (`rid`),
 [ADR 0049](0049-unconditional-recording-under-a-design-budget.md) (recording
-policy) and the [#893] prototype (what the output says). Prior art in
+policy), [ADR 0050](0050-server-timings-reach-the-monitor.md) (how the server's
+rows get to the browser) and the [#893] prototype (what the output says). Prior art in
 `lucida-cli/src/main.rs` (the montage headless path) and
 `lucida-web/src/renderLoop.ts`.
 
@@ -85,24 +86,30 @@ Putting them in the CLI would quietly make the second entry point a second-class
 citizen — the failure [surface parity](../principles/surface-parity.md) exists to
 prevent.
 
-## The server half is fetched and joined by the CLI
+## Nothing fetches the server half, because it is already in the page
 
-ADR 0048 keeps the server's rows in their own table, joined on `rid`. The page
-cannot see that table, so someone must fetch it. **The CLI requests the server
-rows for the run's `rid` range and performs the join.** The server keeps a
-byte-bounded ring — no run concept server-side, since `rid` is monotonic per
-connection and a range selects — and its reply declares what it no longer holds,
-which lands in the document's `coverage` block rather than silently shortening
-the table. That mirrors ADR 0049's shape deliberately: one idea about bounded
-retention that declares its own truncation, not two.
+The obvious shape for a CLI that owns the join is: ask the page for the browser
+table, ask the server for its `rid` range, merge. That shape is wrong, and
+[ADR 0050](0050-server-timings-reach-the-monitor.md) — settled in parallel with
+this decision — is why. The server pushes its rows to the client that caused
+them, batched over the existing socket, and **there is deliberately no
+server-side trace store and no server-side trace endpoint** to ask. A
+client-driven pull is not merely a worse option there, it is structurally
+unavailable: the server has no concept of a run, so it cannot detect the end of
+one, and pulling would force it to retain a whole session.
 
-The cost is real and is stated rather than hidden: **an agent driving its own
-browser gets a browser-only document** unless it makes the same server request.
-That dents "the same bytes" at exactly one seam. The alternative — pushing server
-rows into the page continuously so the export is complete — spends ADR 0049's
-budget on data the page never renders, on every session, to serve the export
-path. The mitigation already exists: [#893]'s coverage block must declare missing
-server rows anyway, and one of its five samples is that degradation.
+**So the seam returns a document that is already merged, and the CLI fetches
+nothing.** This is strictly better than the alternative this decision first
+reached for, and it removes a cost that looked unavoidable: an agent driving its
+own browser was going to get a browser-only document unless it repeated the CLI's
+server request, denting "the same bytes" at exactly one seam. Under ADR 0050 that
+dent does not exist. Both entry points call one function and get one complete
+artifact, which is what [surface parity](../principles/surface-parity.md) asked
+for in the first place.
+
+The measured reason the push is affordable belongs to ADR 0050 rather than here:
+at [#899]'s ~82 reads/s remote, a 250 ms batch is about twenty rows and under
+7 kB, four messages a second beside the chunk payload.
 
 ## Settling is a published predicate, not an inference
 
