@@ -79,3 +79,32 @@ shared-`dev@local` semantics first — it's the simpler model, fewer
 moving parts, and matches what ADR-0018 and the auth subsystem article
 already say. The per-browser model is a refinement to revisit if
 demand for "multi-user without OAuth" surfaces.
+
+## One lifetime for the dev-controls surface
+
+The surviving mutation surface after
+[ADR 0051](0051-debug-surface-dispositions.md) holds knobs with two different
+lifetimes. The planning knobs are backed by `configStore` and persist to
+`localStorage`, surviving reload and continuing to steer the planner in
+production builds — which is why "Reset all to defaults" stays enabled there.
+The four cache knobs inherited from the old Cache tab go through
+`CpuCache.updateConfig`, which is an `Object.assign` onto a live instance: no
+persistence, gone on reload, and useless without a live session.
+
+**Sketch.** Move `CpuCacheConfig` onto `configStore` so every knob on the
+surface persists, resets, and validates the same way, and the UI no longer has
+to carry a "session-scoped" label warning that four of its controls behave
+differently from the rest.
+
+**Cost.** `configStore` already has the shape — `TunableSpec` entries, per-field
+reset, `useSyncExternalStore` wiring, live validators. The work is on the
+`CpuCache` side: a persisted budget has to be reconciled with elastic tier
+budgets at construction rather than only on `updateConfig`, and a bad persisted
+value would then follow a user across sessions into a hot fetch path, so the
+bounds need to be enforced in the store rather than trusted from the input.
+
+**Why deferred.** Reworking a hot fetch path's configuration lifetime inside a
+debug-surface disposition would expand ADR 0051 well past what it decides. The
+lifetime split is honest and visible in the meantime; unifying it is a cleanup
+with no user-visible payoff, best done when `CpuCacheConfig` is next opened for
+another reason.
