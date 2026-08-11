@@ -12,6 +12,8 @@
 
 import {
   BOUNDARY_COUNT,
+  LANE_NAMES,
+  laneIndex,
   RESIDENCY_TIER_NAMES,
   ROW_OUTCOME_NAMES,
   RowOutcome,
@@ -61,9 +63,9 @@ class StringPool {
 export class RowTable {
   /**
    * 3 interned ids + 6 coordinates + 7 boundary slots + the two-part wire
-   * label, all uint32, plus two bytes.
+   * label, all uint32, plus three bytes.
    */
-  static readonly BYTES_PER_ROW = (3 + COORDS_PER_ROW + BOUNDARY_COUNT + 2) * 4 + 2;
+  static readonly BYTES_PER_ROW = (3 + COORDS_PER_ROW + BOUNDARY_COUNT + 2) * 4 + 3;
 
   private readonly strings = new StringPool();
 
@@ -75,6 +77,7 @@ export class RowTable {
   private rids: Uint32Array;
   private connectionGenerations: Uint32Array;
   private tiers: Uint8Array;
+  private lanes: Uint8Array;
   private outcomes: Uint8Array;
 
   private rows = 0;
@@ -90,6 +93,7 @@ export class RowTable {
     this.rids = new Uint32Array(this.capacity);
     this.connectionGenerations = new Uint32Array(this.capacity);
     this.tiers = new Uint8Array(this.capacity);
+    this.lanes = new Uint8Array(this.capacity);
     this.outcomes = new Uint8Array(this.capacity);
   }
 
@@ -119,6 +123,7 @@ export class RowTable {
     this.entityIds[index] = this.strings.intern(src.entityId);
     this.imageIds[index] = this.strings.intern(src.imageId);
     this.tiers[index] = tier;
+    this.lanes[index] = laneIndex(src.lane);
     this.outcomes[index] = RowOutcome.InFlight;
     this.rids[index] = UNLABELLED.rid;
     this.connectionGenerations[index] = UNLABELLED.connectionGeneration;
@@ -188,6 +193,7 @@ export class RowTable {
         datasetId: this.strings.get(this.datasetIds[i]),
         entityId: this.strings.get(this.entityIds[i]),
         imageId: this.strings.get(this.imageIds[i]),
+        lane: LANE_NAMES[this.lanes[i]],
         residencyTier: RESIDENCY_TIER_NAMES[this.tiers[i]],
         level,
         t,
@@ -213,6 +219,7 @@ export class RowTable {
     this.rids = copyInto(this.rids, new Uint32Array(next));
     this.connectionGenerations = copyInto(this.connectionGenerations, new Uint32Array(next));
     this.tiers = copyInto(this.tiers, new Uint8Array(next));
+    this.lanes = copyInto(this.lanes, new Uint8Array(next));
     this.outcomes = copyInto(this.outcomes, new Uint8Array(next));
     this.capacity = next;
   }

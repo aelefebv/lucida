@@ -11,6 +11,7 @@ function browserRow(overrides: Partial<TraceRow> & { rid: number }): TraceRow {
     datasetId: "ds-1",
     entityId: "e-1",
     imageId: "img-1",
+    lane: overrides.lane ?? "detail",
     residencyTier: "detail",
     level: 0,
     t: 0,

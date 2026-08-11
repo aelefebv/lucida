@@ -12,6 +12,7 @@ import type { SceneEpochs } from "./pipeline/epochs.ts";
 import type { TickCoordinator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/tickCoordinator.ts";
 import type { Uploader } from "./pipeline/upload/uploader.ts";
 import { debugStats } from "./debug/debugStats.ts";
+import { traceRecorder } from "./trace/recorder.ts";
 
 export type SliceState = Record<string, never>;
 
@@ -425,6 +426,10 @@ function uploadAndRenderSlice(
 
   client.resize(canvasW, canvasH);
   client.sliceRenderMultiPass(layers, currentZoom, cx, cy, canvasW, canvasH, planResult.epochs);
+  // The worker is FIFO, so every chunk posted above is written before this
+  // render runs: `upload` closes here and `present` opens. Rows that opened
+  // `present` at the previous frame are drawn by now and close here too.
+  traceRecorder.noteFrameDispatched();
 
   return budgetExhausted;
 }

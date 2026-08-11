@@ -11,6 +11,7 @@ const CHUNK = {
   datasetId: "ds",
   entityId: "member-1",
   imageId: "image-1",
+  lane: "detail" as const,
   level: 1,
   t: 0,
   c: 0,
@@ -222,7 +223,154 @@ describe("TraceRecorder rows", () => {
 
   it("declares which phases it actually measured", () => {
     const { recorder } = makeRecorder();
-    expect(recorder.exportDocument().instrumentedPhases).toEqual(["wire"]);
+    expect(recorder.exportDocument().instrumentedPhases)
+      .toEqual(["plan", "queue", "wire", "decode", "upload", "present"]);
+  });
+});
+
+describe("TraceRecorder plan and queue", () => {
+  it("dates plan from the pass that enqueued the request and queue from its admission", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+
+    // A plan pass: wanted-set computation, then the enqueue that ends it.
+    recorder.markPlanStart();          // t = 1_000
+    advance(20);
+    recorder.notePlanEnqueue(1_020);   // admitted here
+    advance(80);                       // queued for 80 ms
+    const row = recorder.beginChunkRow(CHUNK, 0);
+    recorder.stampAdmission(row, 1_020);
+    recorder.stamp(row, Boundary.WireStart);
+    recorder.closeRun("explicit");
+
+    const [serialised] = recorder.exportDocument().runs[0].rows;
+    expect(serialised.phases.plan).toEqual({ startUs: 0, endUs: 20_000, durationUs: 20_000 });
+    expect(serialised.phases.queue)
+      .toEqual({ startUs: 20_000, endUs: 100_000, durationUs: 80_000 });
+  });
+
+  it("attributes a row to the pass it was admitted in, not the newest one", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+
+    recorder.markPlanStart();          // t = 1_000
+    advance(10);
+    recorder.notePlanEnqueue(1_010);   // the pass that admitted our row
+    advance(90);
+    recorder.markPlanStart();          // a later replan, t = 1_100
+    advance(5);
+    recorder.notePlanEnqueue(1_105);
+    advance(20);
+
+    const row = recorder.beginChunkRow(CHUNK, 0);
+    recorder.stampAdmission(row, 1_010);
+    recorder.closeRun("explicit");
+
+    const [serialised] = recorder.exportDocument().runs[0].rows;
+    expect(serialised.phases.plan!.startUs).toBe(0);
+    expect(serialised.phases.plan!.endUs).toBe(10_000);
+  });
+
+  it("leaves plan unset rather than inventing one when no pass is on record", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    advance(30);
+    const row = recorder.beginChunkRow(CHUNK, 0);
+    recorder.stampAdmission(row, 1_030);
+    recorder.stamp(row, Boundary.WireStart);
+    recorder.closeRun("explicit");
+
+    const [serialised] = recorder.exportDocument().runs[0].rows;
+    expect(serialised.phases.plan).toBeUndefined();
+    expect(serialised.phases.queue).toEqual({ startUs: 30_000, endUs: 30_000, durationUs: 0 });
+  });
+
+  it("falls back to the last enqueue for a row admitted straight off the backlog", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    recorder.markPlanStart();
+    advance(10);
+    recorder.notePlanEnqueue(1_010);
+    advance(200);
+
+    const row = recorder.beginChunkRow(CHUNK, 0);
+    // No admission stamp: ADR 0044 keeps them for the admission window only.
+    recorder.stampAdmission(row, undefined);
+    recorder.stamp(row, Boundary.WireStart);
+    recorder.closeRun("explicit");
+
+    const [serialised] = recorder.exportDocument().runs[0].rows;
+    expect(serialised.phases.queue)
+      .toEqual({ startUs: 10_000, endUs: 210_000, durationUs: 200_000 });
+  });
+});
+
+describe("TraceRecorder upload and present", () => {
+  it("closes upload at the frame that follows the handoff and present at the next one", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    const row = recorder.beginChunkRow(CHUNK, 0);
+    recorder.stamp(row, Boundary.UploadStart);   // decode ended at t = 0
+
+    advance(12);
+    recorder.noteHandedToRenderer(row);
+    advance(4);
+    recorder.noteFrameDispatched();              // resident at t = 16 ms
+    advance(17);
+    recorder.noteFrameDispatched();              // drawn by t = 33 ms
+    recorder.closeRun("explicit");
+
+    const [serialised] = recorder.exportDocument().runs[0].rows;
+    expect(serialised.phases.upload)
+      .toEqual({ startUs: 0, endUs: 16_000, durationUs: 16_000 });
+    expect(serialised.phases.present)
+      .toEqual({ startUs: 16_000, endUs: 33_000, durationUs: 17_000 });
+    expect(serialised.outcome).toBe("complete");
+  });
+
+  it("leaves a chunk that never reached a frame in flight rather than complete", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    const row = recorder.beginChunkRow(CHUNK, 0);
+    recorder.stamp(row, Boundary.UploadStart);
+    advance(5);
+    recorder.noteHandedToRenderer(row);
+    recorder.closeRun("explicit");
+
+    const [serialised] = recorder.exportDocument().runs[0].rows;
+    expect(serialised.phases.upload).toBeUndefined();
+    expect(serialised.phases.present).toBeUndefined();
+    expect(serialised.outcome).toBe("in-flight");
+  });
+});
+
+describe("TraceRecorder counted stages", () => {
+  it("counts the stages below the clock floor instead of timing them", () => {
+    const { recorder } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    recorder.countCacheAdmission();
+    recorder.countCacheAdmission();
+    recorder.countWorkerDispatch();
+    recorder.countCoalesceAttach();
+    recorder.countCoalesceAttach();
+    recorder.countCoalesceAttach();
+    recorder.closeRun("explicit");
+
+    expect(recorder.exportDocument().runs[0].counted)
+      .toEqual({ cacheAdmission: 2, workerDispatch: 1, coalesceAttach: 3 });
+  });
+
+  it("keeps each run's counts to itself", () => {
+    const { recorder } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    recorder.countCacheAdmission();
+    recorder.closeRun("explicit");
+    recorder.openRun({ ...OPEN_CAUSE, source: "second" });
+    recorder.closeRun("explicit");
+
+    const doc = recorder.exportDocument();
+    expect(doc.runs[0].counted.cacheAdmission).toBe(1);
+    expect(doc.runs[1].counted.cacheAdmission).toBe(0);
   });
 });
 
