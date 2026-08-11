@@ -276,7 +276,6 @@ export function tickVolume(
     if (firstDsId) {
       const lodInfo = scene.debug_lod_info(firstDsId);
       debugStats.effectiveZoom = lodInfo[0];
-      debugStats.zoomPerVoxel = lodInfo[1];
     }
     debugStats.activeChannels = orchResult.multiChannel
       ? getActiveChannels(orchResult.settings.allSettings[orchResult.settings.layerOrder[0]]).length

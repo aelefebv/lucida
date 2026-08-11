@@ -23,20 +23,6 @@ export interface MemberStat {
  */
 export const DEBUG_MEMBER_ROW_CAP = 100;
 
-/** Per-member debug data from the TickCoordinator's adapter translation. */
-export interface OrchMemberDebug {
-  imageId: string;
-  position: [number, number];
-  neededCount: number;
-  prefetchCount: number;
-  /** Level selected by upload path: needed[0]?.level */
-  uploadLevel: number | undefined;
-  /** Breakdown: how many needed chunks at each level */
-  chunksByLevel: Record<number, number>;
-  /** True if needed[] contains chunks at more than one level */
-  mixedLevels: boolean;
-}
-
 /**
  * Per-dataset planning snapshot. Populated by the orchestrator after each
  * full plan() run; replayed onto cache-hit ticks so the panel doesn't
@@ -52,15 +38,12 @@ export interface PlanningDatasetDebug {
   /**
    * Total chunk requests in the plan, broken down by lane. The
    * `minimap` lane is highest priority (see
-   * [[decisions/0023-minimap-lane-with-highest-priority]]); `proxy`
-   * is a chunk-lane reservation used by the type-system extension
-   * (proxy *requests* are still tracked separately in {@link proxyCount}).
+   * [[decisions/0023-minimap-lane-with-highest-priority]]).
    */
   lanes: {
     minimap: number;
     detail: number;
     coarse: number;
-    proxy: number;
     prefetch: number;
     overview: number;
   };
@@ -68,8 +51,6 @@ export interface PlanningDatasetDebug {
   proxyCount: number;
   /** Total chunk requests in the plan (sum of `lanes`). */
   totalChunks: number;
-  /** Chunk requests grouped by LOD level — independent of lane. */
-  chunksByLevel: Record<number, number>;
   /**
    * Per-LOD breakdown for the focused dataset. One entry per LOD that
    * appears in the plan, with cross-references against the CPU cache.
@@ -126,7 +107,6 @@ export interface OrchDebug {
     /** Tier mode — see {@link import("../pipeline/planning/index.ts").EntityMode}. */
     mode: string;
     targetLod: number;
-    coarsestDetailLod: number;
     detailOwnedLodRange: [number, number];
   }>;
   /** Full active-set size (the `activeSet` array above is row-capped). */
@@ -136,7 +116,6 @@ export interface OrchDebug {
     groupAsProxy: number;
     tilesProxyFallback: number;
     tilesDetail: number;
-    invisible: number;
   };
   /** Request counts by lane */
   laneCount: { detail: number; coarse: number; prefetch: number; overview: number };
@@ -144,19 +123,11 @@ export interface OrchDebug {
   chunksByLevel: Record<number, number>;
   /** First N requests for inspection */
   topRequests: Array<{
-    entityId: string;
     level: number;
-    t: number; c: number; z: number; y: number; x: number;
     lane: string;
     priority: number;
     chunkKey: string;
   }>;
-  /** Per-member roster rows (for debug display), capped at {@link DEBUG_MEMBER_ROW_CAP}. */
-  members: OrchMemberDebug[];
-  /** Full roster size across datasets (the `members` array is row-capped). */
-  membersTotal: number;
-  /** True if any member has mixed levels in needed[] */
-  hasMixedLevels: boolean;
   /** Whether this was an epoch cache hit (plan() skipped) */
   epochCacheHit: boolean;
   /** Proxy residency budget/admission snapshot from the latest planning pass. */
@@ -192,14 +163,6 @@ export interface ProxyResidencyDebug {
   skippedBundleCount: number;
   skippedProxyCount: number;
   missingFootprintCount: number;
-  topDecisions: Array<{
-    datasetId: string;
-    groupId: string;
-    representation: "tile" | "group";
-    proxyCount: number;
-    bytes: number;
-    reason: "admitted" | "over-budget" | "replaced";
-  }>;
 }
 
 /** Per-epoch cause attribution counters. */
@@ -228,8 +191,6 @@ export interface ColdStateDebug {
    * t-scrub with camera motion), so the sum may exceed `rebuildsLastSecond`.
    */
   causeLastSecond: ColdStateCauseCounts;
-  /** Cumulative per-epoch invalidation counts since session start. */
-  causeTotal: ColdStateCauseCounts;
   /** Wall-clock ms for the most recent rebuild (planAndFetch non-fast-path). */
   lastRebuildMs: number | null;
   /** p50 of last-N rebuild durations (60-sample window). */
@@ -252,7 +213,6 @@ export function emptyColdStateDebug(): ColdStateDebug {
     rebuildsLastSecond: 0,
     hitsLastSecond: 0,
     causeLastSecond: { content: 0, layout: 0, view: 0, selection: 0, asset: 0 },
-    causeTotal: { content: 0, layout: 0, view: 0, selection: 0, asset: 0 },
     lastRebuildMs: null,
     rebuildP50Ms: null,
     rebuildP95Ms: null,
@@ -270,7 +230,6 @@ export interface DebugStats {
 
   // LOD
   effectiveZoom: number;
-  zoomPerVoxel: number;
   selectedLevel: number;
   numLevels: number;
 
@@ -294,10 +253,6 @@ export interface DebugStats {
 
   // Multi-channel
   activeChannels: number;
-
-  // Plan cache
-  planCacheHits: number;
-  planCacheMisses: number;
 
   // Per-member breakdown. Rows exist only for members with pending
   // chunk requests (the panel filters to those anyway) and are capped
@@ -372,22 +327,6 @@ export interface UploadTickStats {
   skippedAlreadySent: number;
   /** Couldn't resolve dataset/imageSpec/level meta — should be ~0; bug indicator. */
   skippedNoMeta: number;
-  // Legacy resend counters retained for telemetry shape compatibility.
-  resendChunkUploads: number;
-  resendProxyUploads: number;
-  resendChunksConsidered: number;
-  resendChunksAlreadySent: number;
-  resendChunksNotCached: number;
-  /**
-   * Chunks the worker has reported as `skipped` (atlas full + farther
-   * than the farthest existing slot). Tracked in the orchestrator's
-   * CpuCache rejection state and skipped by `getDeliverable()` until the
-   * next plan rebuild clears the rejection state.
-   */
-  resendChunksRejected: number;
-  resendProxiesConsidered: number;
-  resendProxiesAlreadyDelivered: number;
-  resendProxiesNotCached: number;
 }
 
 /**
@@ -403,11 +342,6 @@ export interface UploadRollingStats {
   chunkUploadsPerSec: number;
   /** Proxy uploads/sec in the last 1s. */
   proxyUploadsPerSec: number;
-  /**
-   * Legacy resend-sourced ratio. Now normally 0 because deliverability is a
-   * single `cpuCache.getDeliverable()` pass.
-   */
-  resendRatio: number;
   /**
    * Ratio of *upload-bound* considered chunks that were filtered out:
    * `(skippedWrongLod + skippedAlreadySent + skippedNoMeta) /
@@ -437,10 +371,6 @@ export function emptyUploadTickStats(): UploadTickStats {
     budgetExhausted: false,
     skippedPrefetch: 0, skippedOverview: 0, skippedWrongLod: 0,
     skippedAlreadySent: 0, skippedNoMeta: 0,
-    resendChunkUploads: 0, resendProxyUploads: 0,
-    resendChunksConsidered: 0, resendChunksAlreadySent: 0, resendChunksNotCached: 0,
-    resendChunksRejected: 0,
-    resendProxiesConsidered: 0, resendProxiesAlreadyDelivered: 0, resendProxiesNotCached: 0,
   };
 }
 
@@ -450,7 +380,6 @@ export const debugStats: DebugStats = {
   planTimeMs: 0,
   uploadTimeMs: 0,
   effectiveZoom: 0,
-  zoomPerVoxel: 0,
   selectedLevel: 0,
   numLevels: 0,
   uploadBytesUsed: 0,
@@ -460,8 +389,6 @@ export const debugStats: DebugStats = {
   visibleMembers: 0,
   totalMembers: 0,
   activeChannels: 1,
-  planCacheHits: 0,
-  planCacheMisses: 0,
   memberStats: [],
   memberStatsActiveTotal: 0,
   mode: "",
@@ -472,8 +399,6 @@ export const debugStats: DebugStats = {
 
 /** Reset per-frame counters. Call at the start of each tick. */
 export function resetFrameStats(): void {
-  debugStats.planCacheHits = 0;
-  debugStats.planCacheMisses = 0;
   debugStats.memberStats = [];
   debugStats.memberStatsActiveTotal = 0;
   debugStats.visibleMembers = 0;

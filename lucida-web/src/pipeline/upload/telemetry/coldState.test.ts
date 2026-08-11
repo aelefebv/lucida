@@ -33,14 +33,13 @@ describe("ColdStateTelemetry — basics", () => {
     expect(snap.rebuilds).toBe(2);
     expect(snap.cacheHits).toBe(0);
     expect(snap.rebuildsLastSecond).toBe(2);
-    expect(snap.causeTotal).toEqual({
+    expect(snap.causeLastSecond).toEqual({
       content: 1,
       layout: 0,
       view: 1,
       selection: 1,
       asset: 0,
     });
-    expect(snap.causeLastSecond).toEqual(snap.causeTotal);
     expect(snap.lastRebuildMs).toBe(2.5);
     expect(snap.lastRebuildAt).toBe(1100);
   });
@@ -61,14 +60,6 @@ describe("ColdStateTelemetry — basics", () => {
     expect(snap.hitsLastSecond).toBe(0);
     expect(snap.causeLastSecond).toEqual({
       content: 0,
-      layout: 0,
-      view: 1,
-      selection: 0,
-      asset: 0,
-    });
-    // Cumulative cause attribution is monotonic.
-    expect(snap.causeTotal).toEqual({
-      content: 1,
       layout: 0,
       view: 1,
       selection: 0,
