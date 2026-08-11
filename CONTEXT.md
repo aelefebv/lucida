@@ -184,10 +184,31 @@ _Avoid_: completeness, confidence, quality score
 
 **Coverage gap**:
 A hole in what a run can account for: wall clock no phase covers, the tail after a
-truncation, or records a ring or the server dropped. Each carries whether the
-bottleneck could be inside it, so the judgement is made once rather than by each
-reading surface.
+truncation, a socket outage, or records a ring, the server, or this side let go of.
+Each carries whether the bottleneck could be inside it, so the judgement is made
+once rather than by each reading surface.
 _Avoid_: missing data, hole, blind spot
+
+**Connection record**:
+One socket a run was recorded over, with the outage that preceded it and the
+correlation labels minted on it. A run can outlive a socket and labels restart at
+zero on each one, so this is what tells two `rid: 0` rows in one run apart. The
+browser writes it because the server cannot tell a returning client from a new one.
+_Avoid_: session, reconnect event
+
+**Socket outage**:
+The stretch between a socket dropping and the next one opening, declared by the
+browser. Requests in flight are lost and the rows the server had buffered for the
+dead connection are discarded rather than replayed.
+_Avoid_: downtime, disconnect window, reconnect gap
+
+**Discarded server row**:
+A server row this side refused because nothing in the interval could place it — a
+label the interval never minted, or an open it never bracketed. Counted, never
+stored: an orphan row is not a diagnostic and would spend the budget truncation
+exists to protect. Distinct from a row the *server* dropped before sending, which is
+its own coverage gap.
+_Avoid_: unmatched row, orphan (in prose, say what could not place it)
 
 **Structural limit**:
 Something this instrument can never measure, on any run — the 100 µs clock floor,

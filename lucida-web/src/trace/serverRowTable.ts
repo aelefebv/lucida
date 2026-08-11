@@ -116,6 +116,18 @@ export interface StoredServerRow {
   metadataPhase: MetadataReadPhase | null;
 }
 
+/**
+ * Whether one incoming row is worth storing. Called with the wire's own
+ * values rather than a row object, because a batch is a burst and building an
+ * object per row to ask a question about it would allocate on the socket's
+ * path.
+ */
+export type AcceptServerRow = (
+  rid: number,
+  requestId: string | null,
+  family: WireRowFamily,
+) => boolean;
+
 export class ServerRowTable {
   /**
    * 3 label columns + one column per phase as uint32, plus the two metadata
@@ -172,15 +184,26 @@ export class ServerRowTable {
   }
 
   /**
-   * Copy one batch in. `connectionGeneration` is the browser's, not the
-   * server's: the server has no idea connections are numbered, and the
-   * generation is what makes a restarted `rid` counter unambiguous.
+   * Copy one batch in, skipping the rows `accept` refuses. Returns how many
+   * it refused.
+   *
+   * `connectionGeneration` is the browser's, not the server's: the server has
+   * no idea connections are numbered, and the generation is what makes a
+   * restarted `rid` counter unambiguous.
    *
    * A batch whose columns disagree in length is a protocol violation rather
    * than a partial reading; the shortest column wins so a malformed message
    * cannot produce rows made of other rows' numbers.
+   *
+   * The caller owns the accept decision because only the recorder knows which
+   * labels and which opens the interval holds. This side only knows not to
+   * store what it is told nothing can place.
    */
-  ingest(batch: ServerTimingBatch, connectionGeneration: number): void {
+  ingest(
+    batch: ServerTimingBatch,
+    connectionGeneration: number,
+    accept: AcceptServerRow,
+  ): number {
     this.droppedByServer += batch.dropped ?? 0;
     let count = Math.min(
       batch.rid.length,
@@ -195,7 +218,13 @@ export class ServerRowTable {
     for (const key of PHASE_COLUMNS) {
       count = Math.min(count, (batch[key] as number[] | undefined)?.length ?? 0);
     }
+    let refused = 0;
     for (let i = 0; i < count; i++) {
+      const requestId = batch.request_id[i] ?? null;
+      if (!accept(batch.rid[i], requestId, batch.family[i])) {
+        refused++;
+        continue;
+      }
       if (this.rows === this.capacity) this.grow();
       const index = this.rows++;
       this.rids[index] = batch.rid[i];
@@ -224,11 +253,11 @@ export class ServerRowTable {
       const phaseName = phase === null || phase === undefined ? undefined : PHASE_FROM_WIRE[phase];
       this.metadataPhases[index] =
         phaseName === undefined ? NO_PHASE : METADATA_READ_PHASES.indexOf(phaseName);
-      const requestId = batch.request_id[i];
       // Index 0 is a real pool entry, so the column stores id + 1 and
       // reserves 0 for "this row is not keyed on an open".
       this.requestIds[index] = requestId ? this.openIds.intern(requestId) + 1 : 0;
     }
+    return refused;
   }
 
   serialise(): StoredServerRow[] {

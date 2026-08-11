@@ -44,6 +44,9 @@ const HEADER: RunHeader = {
   quiescenceHoldMs: 500,
   timeoutMs: 60_000,
   truncation: null,
+  connections: [
+    { generation: 1, openedAtUs: null, closedAtUs: null, gapUs: null, firstRid: 0, lastRid: 4 },
+  ],
   outstandingAtSettle: {
     pending: 0,
     inFlight: 0,
@@ -124,6 +127,7 @@ function run(overrides: Partial<TraceRun> = {}): TraceRun {
     datasetOpens: [],
     datasetOpensDropped: 0,
     serverRowsDropped: 0,
+    serverRowsDiscarded: 0,
     ...overrides,
   };
 }
@@ -182,6 +186,29 @@ describe("the Chrome Trace Event projection", () => {
     // No decode / wire / upload spans: those boundaries were never stamped,
     // and a phase absent from a row is "not measured", not "took no time".
     expect(named(events, "wire").filter(e => e.ph === "X")).toHaveLength(0);
+  });
+
+  it("draws a socket outage on the run's own track", () => {
+    const header = {
+      ...HEADER,
+      connections: [
+        ...HEADER.connections,
+        {
+          generation: 2,
+          openedAtUs: 3_000_000,
+          closedAtUs: null,
+          gapUs: 2_000_000,
+          firstRid: 0,
+          lastRid: 9,
+        },
+      ],
+    };
+    const events = toChromeTraceEvents(doc(run({ header })));
+
+    const [outage] = named(events, "socket outage → generation 2");
+    expect(outage).toMatchObject({ ph: "X", ts: 1_000_000, dur: 2_000_000, tid: 1 });
+    // The connection this run started on never dropped, so it draws nothing.
+    expect(events.filter(event => event.cat === "run,connection")).toHaveLength(1);
   });
 
   it("reports no wire request rather than a plausible rid when the row was never labelled", () => {

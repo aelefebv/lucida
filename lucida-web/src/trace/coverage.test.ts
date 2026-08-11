@@ -1,7 +1,14 @@
 import { describe, it, expect } from "vitest";
 
 import { computeCoverage, MIN_REPORTED_GAP_US, STRUCTURAL_LIMITS } from "./coverage.ts";
-import type { CoverageGapKind, Phase, TraceRow, TraceTick, TruncationRecord } from "./types.ts";
+import type {
+  ConnectionRecord,
+  CoverageGapKind,
+  Phase,
+  TraceRow,
+  TraceTick,
+  TruncationRecord,
+} from "./types.ts";
 
 const MS = 1_000;
 
@@ -51,8 +58,22 @@ function coverageOf(overrides: Partial<Parameters<typeof computeCoverage>[0]> = 
     ticksDropped: 0,
     eventsDropped: 0,
     serverRowsDropped: 0,
+    serverRowsDiscarded: 0,
+    connections: [],
     ...overrides,
   });
+}
+
+function connection(overrides: Partial<ConnectionRecord> = {}): ConnectionRecord {
+  return {
+    generation: 2,
+    openedAtUs: 0,
+    closedAtUs: null,
+    gapUs: null,
+    firstRid: null,
+    lastRid: null,
+    ...overrides,
+  };
 }
 
 function kinds(gaps: { kind: CoverageGapKind }[]): CoverageGapKind[] {
@@ -194,15 +215,89 @@ describe("stream losses", () => {
       ticksDropped: 7,
       eventsDropped: 2,
       serverRowsDropped: 5,
+      serverRowsDiscarded: 3,
     });
 
-    expect(kinds(coverage.gaps)).toEqual(["ticks-dropped", "events-dropped", "server-rows-dropped"]);
+    expect(kinds(coverage.gaps)).toEqual([
+      "ticks-dropped",
+      "events-dropped",
+      "server-rows-dropped",
+      "server-rows-discarded",
+    ]);
     for (const gap of coverage.gaps) {
       expect(gap.durationUs).toBe(0);
       expect(gap.startUs).toBeNull();
       expect(gap.couldHideBottleneck).toBe(false);
     }
-    expect(coverage.gaps.map(gap => gap.records)).toEqual([7, 2, 5]);
+    expect(coverage.gaps.map(gap => gap.records)).toEqual([7, 2, 5, 3]);
+  });
+
+  it("tells the two server-row losses apart, because only one of them is ours", () => {
+    const covered = { wallClockUs: 100 * MS, rows: [row({ wire: [0, 100 * MS] })] };
+    const [declared] = coverageOf({ ...covered, serverRowsDropped: 5 }).gaps;
+    const [refused] = coverageOf({ ...covered, serverRowsDiscarded: 5 }).gaps;
+
+    expect(declared.kind).toBe("server-rows-dropped");
+    expect(refused.kind).toBe("server-rows-discarded");
+    expect(declared.statement).not.toBe(refused.statement);
+  });
+});
+
+describe("the socket the run was recorded over", () => {
+  it("declares the outage between two connections as a gap of its own", () => {
+    const coverage = coverageOf({
+      wallClockUs: 100 * MS,
+      rows: [row({ wire: [0, 100 * MS] })],
+      connections: [
+        connection({ generation: 2, openedAtUs: null, closedAtUs: 20 * MS }),
+        connection({ generation: 3, openedAtUs: 25 * MS, gapUs: 5 * MS }),
+      ],
+    });
+
+    expect(kinds(coverage.gaps)).toEqual(["connection-gap"]);
+    const [gap] = coverage.gaps;
+    expect(gap.startUs).toBe(20 * MS);
+    expect(gap.endUs).toBe(25 * MS);
+    expect(gap.durationUs).toBe(5 * MS);
+    // 5 ms of a 100 ms run, well under the floor: real, and not the headline.
+    expect(gap.couldHideBottleneck).toBe(false);
+  });
+
+  it("flags an outage long enough to be the run's whole story", () => {
+    const coverage = coverageOf({
+      wallClockUs: 10_000 * MS,
+      connections: [
+        connection({ generation: 1, openedAtUs: null, closedAtUs: 1_000 * MS }),
+        connection({ generation: 2, openedAtUs: 6_000 * MS, gapUs: 5_000 * MS }),
+      ],
+    });
+
+    expect(coverage.gaps.find(gap => gap.kind === "connection-gap")?.couldHideBottleneck).toBe(true);
+  });
+
+  it("clamps an outage that started before the run to the run's own start", () => {
+    const coverage = coverageOf({
+      wallClockUs: 100 * MS,
+      // The socket dropped 30 ms before this interval opened and came back
+      // 10 ms in. Only the 10 ms inside the run is this run's wall clock; the
+      // outage's full length stays on the header's connection record.
+      connections: [connection({ generation: 4, openedAtUs: 10 * MS, gapUs: 40 * MS })],
+    });
+
+    const [gap] = coverage.gaps.filter(candidate => candidate.kind === "connection-gap");
+    expect(gap.startUs).toBe(0);
+    expect(gap.endUs).toBe(10 * MS);
+    expect(gap.durationUs).toBe(10 * MS);
+  });
+
+  it("says nothing about a run that held one connection throughout", () => {
+    const coverage = coverageOf({
+      wallClockUs: 100 * MS,
+      rows: [row({ wire: [0, 100 * MS] })],
+      connections: [connection({ generation: 2, openedAtUs: null })],
+    });
+
+    expect(coverage.gaps).toEqual([]);
   });
 });
 

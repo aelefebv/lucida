@@ -1919,6 +1919,54 @@ mod tests {
         )
     }
 
+    /// A socket that is already gone: every send fails, as one to a closed
+    /// connection does.
+    struct DeadSocket;
+
+    impl futures_util::Sink<Message> for DeadSocket {
+        type Error = ();
+
+        fn poll_ready(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Err(()))
+        }
+
+        fn start_send(self: std::pin::Pin<&mut Self>, _item: Message) -> Result<(), Self::Error> {
+            Err(())
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Err(()))
+        }
+
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Err(()))
+        }
+    }
+
+    fn chunk_row(rid: u32) -> crate::timing::ServedRow {
+        let mut phases = [lucida_protocol::PHASE_UNSET; lucida_protocol::SERVER_PHASES.len()];
+        phases[0] = 5;
+        crate::timing::ServedRow {
+            key: crate::timing::RowKey::Label(rid),
+            family: TimingRowFamily::Chunk,
+            outcome: TimingRowOutcome::Delivered,
+            phases,
+            coalesced_onto: lucida_protocol::LABEL_NONE,
+            dispatch_offset_us: 0,
+            duration_us: 0,
+            metadata_phase: None,
+        }
+    }
+
     /// The outcome of the one row a serve filed.
     fn sole_outcome(buffer: &TimingBuffer) -> TimingRowOutcome {
         let batch = buffer.take_batch().expect("the serve filed a row");
@@ -1958,6 +2006,23 @@ mod tests {
         };
         assert_eq!(batch.rid, vec![41]);
         assert_eq!(batch.arrival_us, vec![5]);
+    }
+
+    #[tokio::test]
+    async fn rows_buffered_for_a_dead_connection_are_discarded_never_replayed() {
+        let buffer = TimingBuffer::new();
+        buffer.record(chunk_row(41));
+
+        assert!(
+            !flush_timings(&buffer, &mut DeadSocket).await,
+            "a dead socket ends the outbound loop"
+        );
+        // Replay would need retention across connections and re-identification
+        // of a returning client. The browser declares the gap instead.
+        assert!(
+            buffer.take_batch().is_none(),
+            "the rows went with the connection rather than waiting for the next one"
+        );
     }
 
     /// Health is a worst-of fold, and no component may be lost to argument

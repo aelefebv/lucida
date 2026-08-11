@@ -80,6 +80,7 @@ import {
 import { applyDocumentCommand, applyViewportCommand } from "./applyAndSend.ts";
 import { Bridge, type BridgeHandlers, type PresenceState } from "./bridge.ts";
 import { DecodePool, ProxiedContentSource, CpuCache } from "./pipeline/fetch/index.ts";
+import { traceRecorder } from "./trace/recorder.ts";
 import type { WasmScene } from "lucida-core";
 
 const MockedBridge = Bridge as unknown as {
@@ -1225,5 +1226,23 @@ describe("SessionController teardown", () => {
     expect(MockedContentSource.instances[0].rejectAll).toHaveBeenCalledTimes(1);
     expect(MockedDecodePool.instances[0].terminate).toHaveBeenCalledTimes(1);
     expect(deps.datasets.size).toBe(0);
+  });
+});
+
+describe("SessionController transport lifecycle", () => {
+  it("tells the trace which socket it is on, and when it lost one", () => {
+    const { handlers } = makeHarness();
+    const connected = vi.spyOn(traceRecorder, "noteConnected");
+    const disconnected = vi.spyOn(traceRecorder, "noteDisconnected");
+
+    handlers.onConnected?.(4);
+    handlers.onDisconnect?.();
+    handlers.onConnected?.(5);
+
+    // The generation goes with it: a run spanning two sockets holds two
+    // `rid: 0` rows meaning different requests, and this is what tells them
+    // apart.
+    expect(connected.mock.calls.map(call => call[0])).toEqual([4, 5]);
+    expect(disconnected).toHaveBeenCalledTimes(1);
   });
 });

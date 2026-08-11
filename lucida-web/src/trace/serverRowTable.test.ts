@@ -33,10 +33,17 @@ function batch(overrides: Partial<ServerTimingBatch> = {}): ServerTimingBatch {
   };
 }
 
+/**
+ * Whether a row is joinable is the recorder's question — it holds the labels
+ * and the opens. These tests are about the copy, so they take every row.
+ */
+const ingest = (table: ServerRowTable, rows: ServerTimingBatch, generation: number) =>
+  table.ingest(rows, generation, () => true);
+
 describe("ServerRowTable", () => {
   it("copies a batch's columns in and stamps the arriving connection", () => {
     const table = new ServerRowTable(1);
-    table.ingest(batch(), 3);
+    ingest(table, batch(), 3);
 
     expect(table.length).toBe(2);
     expect(table.serialise()).toEqual([
@@ -81,7 +88,7 @@ describe("ServerRowTable", () => {
 
   it("sums only the phases a row entered", () => {
     const table = new ServerRowTable();
-    table.ingest(batch(), 1);
+    ingest(table, batch(), 1);
     const [chunk, asset] = table.serialise();
     expect(serverRowTotalUs(chunk.phases)).toBe(10 + 5 + 7 + 1 + 900 + 60 + 20 + 4 + 3);
     expect(serverRowTotalUs(asset.phases)).toBe(20 + 6 + 8 + 2 + 9);
@@ -89,7 +96,7 @@ describe("ServerRowTable", () => {
 
   it("keeps a follower's wait apart from a backend read", () => {
     const table = new ServerRowTable();
-    table.ingest(
+    ingest(table, 
       batch({
         rid: [9],
         family: ["chunk"],
@@ -121,7 +128,7 @@ describe("ServerRowTable", () => {
 
   it("translates the wire vocabulary and refuses to read a strange word as success", () => {
     const table = new ServerRowTable();
-    table.ingest(
+    ingest(table, 
       batch({
         rid: [1],
         request_id: [null],
@@ -150,16 +157,28 @@ describe("ServerRowTable", () => {
 
   it("accumulates what the server declared it dropped", () => {
     const table = new ServerRowTable();
-    table.ingest(batch({ dropped: 4 }), 1);
-    table.ingest(batch({ dropped: 7 }), 1);
+    ingest(table, batch({ dropped: 4 }), 1);
+    ingest(table, batch({ dropped: 7 }), 1);
     // Two sources of loss, both reported: a coverage block that counted only
     // the browser's would overstate coverage for the other side.
     expect(table.droppedCount).toBe(11);
   });
 
+  it("stores only the rows the caller accepts, and reports how many it refused", () => {
+    const table = new ServerRowTable();
+    const refused = table.ingest(batch(), 1, rid => rid === 2);
+
+    expect(refused).toBe(1);
+    expect(table.length).toBe(1);
+    expect(table.serialise()[0].rid).toBe(2);
+    // A refusal costs no capacity and is not a server-declared drop: the two
+    // losses have different causes and different lines in the coverage block.
+    expect(table.droppedCount).toBe(0);
+  });
+
   it("keeps rows whole when a malformed batch's columns disagree", () => {
     const table = new ServerRowTable();
-    table.ingest(batch({ handoff_us: [1_000] }), 1);
+    ingest(table, batch({ handoff_us: [1_000] }), 1);
     // Better one row short than a row assembled from another row's numbers.
     expect(table.length).toBe(1);
     expect(table.serialise()[0].phases.handoff).toBe(1_000);
@@ -167,7 +186,7 @@ describe("ServerRowTable", () => {
 
   it("keys a metadata read on its open and translates the phase vocabulary", () => {
     const table = new ServerRowTable();
-    table.ingest(
+    ingest(table, 
       batch({
         rid: [0, 0],
         request_id: ["web-open-4c1a", "web-open-4c1a"],
@@ -190,7 +209,7 @@ describe("ServerRowTable", () => {
   it("interns the open id, so one open's hundreds of reads hold one string", () => {
     const table = new ServerRowTable();
     for (let i = 0; i < 4; i++) {
-      table.ingest(
+      ingest(table, 
         batch({
           rid: [0],
           request_id: ["web-open-4c1a"],
@@ -207,14 +226,14 @@ describe("ServerRowTable", () => {
     expect(ids).toEqual(new Set(["web-open-4c1a"]));
     // The first pool entry is index 0, and a row that is not keyed on an
     // open must still read as unkeyed rather than borrowing it.
-    table.ingest(batch({ rid: [9], request_id: [null], family: ["chunk"], metadata_phase: [null],
+    ingest(table, batch({ rid: [9], request_id: [null], family: ["chunk"], metadata_phase: [null],
       dispatch_offset_us: [1], duration_us: [1], outcome: ["delivered"] }), 1);
     expect(table.serialise().at(-1)?.requestId).toBeNull();
   });
 
   it("leaves an unreadable phase unset rather than guessing at one", () => {
     const table = new ServerRowTable();
-    table.ingest(
+    ingest(table, 
       batch({
         rid: [0],
         request_id: ["web-open-4c1a"],
@@ -233,7 +252,7 @@ describe("ServerRowTable", () => {
 
   it("grows by doubling rather than reallocating per row", () => {
     const table = new ServerRowTable(2);
-    for (let i = 0; i < 5; i++) table.ingest(batch(), 1);
+    for (let i = 0; i < 5; i++) ingest(table, batch(), 1);
     expect(table.length).toBe(10);
     expect(table.serialise()).toHaveLength(10);
     expect(table.byteLength).toBe(16 * ServerRowTable.BYTES_PER_ROW);
