@@ -466,8 +466,9 @@ export class RenderLoop implements TraceEnvironment {
   }
 
   /**
-   * Snapshot of render-loop dirty state for the DebugPanel "Render" tab.
-   * Frame timings are the recorder's now (ADR 0049), not this snapshot's.
+   * Snapshot of render-loop dirty state, polled by the debug panel's
+   * remaining Render rows. Frame timings are the recorder's (ADR 0049),
+   * not this snapshot's.
    */
   getDebugSnapshot(): {
     interactiveDirty: boolean;

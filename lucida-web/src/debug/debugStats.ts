@@ -6,85 +6,12 @@
  * (ADR 0049: recording is unconditional), and the gauges went with it rather
  * than becoming unconditional work, because the trace already carries the same
  * per-tick aggregates on a path that allocates nothing. What is left are the
- * types the upload and cold-state windows are expressed in, which the `orch`
- * log category still emits.
- */
-
-
-/**
- * Upper bound on rows in any per-member debug ARRAY (`memberStats`,
- * `orch.activeSet`). A wide collection has tens of
- * thousands of members; building (and letting the panel copy/render)
- * unbounded per-member rows freezes the page for seconds. Scalar totals
- * next to each array keep reporting the full population.
- */
-/**
- * Per-dataset planning snapshot. Populated by the orchestrator after each
- * full plan() run; replayed onto cache-hit ticks so the panel doesn't
- * blink to zero between non-planning frames.
- *
- * Single datasets and collections use the same shape. For single, `groupsByMode`
- * collapses to a single "tiles-with-detail" count; the per-LOD breakdown
- * carries the heavy lifting (it's the dominant signal for "is my LOD
- * selection sane").
+ * types the upload window is expressed in, which the `orch` log category still
+ * emits.
  */
 
 
 
-/** Per-epoch cause attribution counters. */
-export interface ColdStateCauseCounts {
-  content: number;
-  layout: number;
-  view: number;
-  selection: number;
-  asset: number;
-}
-
-export interface ColdStateDebug {
-  /** Cumulative rebuilds since session start. */
-  rebuilds: number;
-  /** Cumulative cache hits since session start. */
-  cacheHits: number;
-  /** Hit rate over the last 1s window (0..1). NaN if no events yet. */
-  hitRate: number;
-  /** Rebuilds in the last 1s rolling window. */
-  rebuildsLastSecond: number;
-  /** Cache hits in the last 1s rolling window. */
-  hitsLastSecond: number;
-  /**
-   * Per-epoch invalidation counts in the last 1s window. A single
-   * rebuild can bump multiple epochs (e.g. view + selection during a
-   * t-scrub with camera motion), so the sum may exceed `rebuildsLastSecond`.
-   */
-  causeLastSecond: ColdStateCauseCounts;
-  /** Wall-clock ms for the most recent rebuild (planAndFetch non-fast-path). */
-  lastRebuildMs: number | null;
-  /** p50 of last-N rebuild durations (60-sample window). */
-  rebuildP50Ms: number | null;
-  /** p95 of last-N rebuild durations. */
-  rebuildP95Ms: number | null;
-  /**
-   * `performance.now()` timestamp of the last rebuild. The DebugPanel
-   * polls every ~200ms and computes `now - lastRebuildAt` to drive the
-   * header pulse afterglow.
-   */
-  lastRebuildAt: number;
-}
-
-export function emptyColdStateDebug(): ColdStateDebug {
-  return {
-    rebuilds: 0,
-    cacheHits: 0,
-    hitRate: NaN,
-    rebuildsLastSecond: 0,
-    hitsLastSecond: 0,
-    causeLastSecond: { content: 0, layout: 0, view: 0, selection: 0, asset: 0 },
-    lastRebuildMs: null,
-    rebuildP50Ms: null,
-    rebuildP95Ms: null,
-    lastRebuildAt: 0,
-  };
-}
 
 
 /**

@@ -10,6 +10,7 @@ Issue [#928], under the [#921] spec, enforcing [ADR 0049][0049].
 [#928]: https://github.com/aelefebv/lucida/issues/928
 [#949]: https://github.com/aelefebv/lucida/issues/949
 [0049]: ../../../wiki/decisions/0049-unconditional-recording-under-a-design-budget.md
+[0052]: ../../../wiki/decisions/0052-debug-surface-dispositions.md
 
 Recording is unconditional and there is no toggle at any scope, so the
 recorder's cost is a contract rather than something a user can opt out of.
@@ -224,14 +225,40 @@ in the test file.
 
 **Step 1 recorded, [#918] landed (2026-08-11).** `[#928] floor check: typical
 tick (8 chunks, 93 write calls) p50=3.38 µs | one 2,560-chunk run holds 663 kB
-live`. What makes that number the whole picture rather than half of it: the gate
+live`. What the gate's removal changed about the *shape* of this obligation: it
 came out by *deleting* the gauges it guarded, not by making them unconditional.
-`debugStats` no longer holds a sink, so there is no second instrument left to
-add to the recorder's 663 kB — the panel's 1.05 MB working set is gone with it,
-and [#919] removes a reader that now reads nothing rather than a live cost.
+`debugStats` no longer holds a sink, so the pipeline's own always-on
+instrumentation is the recorder and nothing else.
 
-Measurement 2 is therefore **not run and not needed for step 1**: a
-before/after heap A/B compares the recorder against the recorder plus a deleted
-sink, so the arms only become meaningful again if a future change re-introduces
-always-on gauges. The live figure to beat stands at 663 kB against the 1.05 MB
-floor.
+The obligation is **not discharged yet**. `DebugPanel.tsx` still exists, still
+mounts, and still polls at 200 ms — what it polls is now live state pulled from
+the scene, the CPU cache, the render loop and the server, not a sink the
+pipeline pushes into. So the `debugStats`-fed share of the panel's working set
+is gone; the rest goes with [#919].
+
+Measurement 2 is therefore deferred to [#919], where its arms are meaningful:
+after the panel is deleted there is one instrument to weigh, and today's
+before/after would be measuring a reader that is still on screen. The live
+figure to beat stands at 663 kB against the 1.05 MB floor.
+
+**An absorption [ADR 0052][0052] promised that the trace does not yet carry.**
+Recorded here rather than left to be discovered, because it is exactly the
+failure that ADR names as its reason to exist — *"marking those absorbed would
+have deleted real capability under a label asserting it was preserved"*. The
+Render row is dispositioned **Absorbed — frame/plan/upload ms, FPS are
+temporal**, and the Orch row's **rolling 1s + cold state** likewise. Of those,
+[#918] deleted:
+
+- **plan ms and upload ms** per tick (`slicePath.ts`, `volumePath.ts`),
+- the **FPS / sticky-max ring** (`renderLoop.frameSamples`), and
+- the **cold-state windowed rates and rebuild p50/p95**
+  (`ColdStateTelemetry`'s snapshot).
+
+`READING_NAMES` is `["queueDepth", "inFlight", "frameTimeUs",
+"residentBytes"]`, so only frame time survives; the per-tick counters are
+planning aggregates, not timings. Absorbing the rest means widening the reading
+ring, which [ADR 0049][0049] treats as a deliberate spend from a fixed budget
+rather than something a teardown may help itself to — so it is named here for
+the monitor work instead of taken now. Nothing regressed for an always-on
+consumer: none of these ever flowed unless the panel was open. What the churn
+detector needs it still counts itself, and it still emits through `orch`.

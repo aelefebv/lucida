@@ -1,6 +1,9 @@
 /**
- * Debug side panel — renders stats from debugStats as a tabbed panel
- * docked to the right of the canvas. Polls at ~200ms intervals for low overhead.
+ * Debug side panel — a tabbed panel docked to the right of the canvas,
+ * polling live state at ~200ms intervals. Every tab now reads its source
+ * directly (the WASM scene, the CPU cache, the render loop, the server);
+ * the gauge sink the panel used to poll is gone with ADR 0049's gate, and
+ * ADR 0052 retires what is left of this surface in its final step.
  *
  * When wasmSceneRef and datasetId are provided, also shows Scene Query
  * debug info: epochs, per-entity ViewQueryResult, and last ray pick.

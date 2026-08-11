@@ -158,13 +158,6 @@ const VIEW_REPLAN_INTERVAL_MS = 200;
 const SELECTION_COALESCE_INTERVAL_MS = 150;
 
 /**
- * Minimum spacing between per-member sent-count refreshes on epoch-hit
- * ticks. Sent counts advance between rebuilds as the upload path drains
- * the cache, so the replayed rows are recomputed from the delivery
- * ledger — but not on every idle frame; the panel only polls ~5×/s.
- */
-
-/**
  * Per-dataset carry-forward captured at each full rebuild. Lets the next
  * rebuild prove — cheaply, without re-running the O(active-set) rebuild —
  * that the ONLY thing that changed is the per-channel intensity display

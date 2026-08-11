@@ -1,21 +1,15 @@
 /**
  * Gate for the orchestration telemetry aggregators — the upload rolling
  * window ({@link UploadTelemetry}) and the cold-state rebuild window
- * ({@link ColdStateTelemetry}), including their sustained-anomaly
- * detectors.
+ * ({@link ColdStateTelemetry}), including their sustained-anomaly detectors.
  *
- * These aggregators have exactly one consumer left: the `orch` debug-log
- * category, which the detectors emit through. The debug panel was the other,
- * fed through `debugStats` while it was open — that gate is gone with the
- * unconditional recorder (ADR 0049), and the gauges went with it, because the
- * trace already carries the per-tick aggregates on a path that allocates
- * nothing.
- *
- * When the log category is off there is no one to see the output, so the
- * per-tick ring-buffer/window bookkeeping is skipped at the call sites
- * (Uploader.deliverToWorker, TickCoordinator.planAndFetch). The telemetry
- * classes themselves stay unconditional and pure — gating lives with the
- * callers.
+ * The `orch` debug-log category is their only consumer: the detectors emit
+ * through it. When it is off nobody sees the output, so the per-tick
+ * ring-buffer bookkeeping is skipped at the call sites
+ * (Uploader.deliverToWorker, TickCoordinator.planAndFetch) — the telemetry
+ * classes themselves stay unconditional and pure, and gating lives with the
+ * callers. Named rather than inlined because "who can still see this?" is the
+ * question both call sites are asking.
  */
 
 import { isDebugEnabled } from "../../../debug/logging.ts";
