@@ -16,6 +16,7 @@
 
 import { diagnoseDocument } from "../trace/diagnose/diagnose.ts";
 import type { DiagnosticDocument } from "../trace/diagnose/types.ts";
+import type { LiveProgress } from "../trace/liveProgress.ts";
 import type { LucidaTraceSeam } from "../trace/seam.ts";
 import type { TraceDocument } from "../trace/types.ts";
 
@@ -74,6 +75,30 @@ export function readMonitor(runId?: string, seam = window.lucidaTrace): MonitorS
       runs,
     };
   }
+}
+
+/**
+ * The run in progress, or null when none is open (#937).
+ *
+ * The one read on this page that leaves the recording alone — polled while a
+ * run is open, where every other read here would conclude the interval being
+ * watched. A page with no seam on it has no run in progress either, so the
+ * missing-seam case is the same null rather than a second shape.
+ */
+export function readProgress(seam = window.lucidaTrace): LiveProgress | null {
+  return seam?.progress() ?? null;
+}
+
+/**
+ * *Stop & analyse*: close the run explicitly so it can be read.
+ *
+ * `explicit` rather than `timeout`, and the distinction is not cosmetic —
+ * `timeout` says the run ran out of the recorder's own patience, where this
+ * says a person decided they had seen enough. A later reader trusts that
+ * field.
+ */
+export function stopRun(seam = window.lucidaTrace): void {
+  seam?.closeRun("explicit");
 }
 
 function summariseRuns(document: TraceDocument): MonitorRunSummary[] {

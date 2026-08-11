@@ -420,6 +420,35 @@ describe("the trace seam", () => {
     expect(runs.map(run => run.header.runId)).toContain(concluded);
   });
 
+  /**
+   * The live view's read (#937). Everything else through this seam concludes
+   * the interval it is asked about, which is the one thing a surface watching
+   * an open run must not do.
+   */
+  it("reports a run's progress without closing it, and nothing at all between runs", async () => {
+    const seam = installTraceSeam();
+    expect(seam.progress()).toBeNull();
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    const source = new ControlledSource();
+    const cache = new CpuCache(source, makeDecode());
+    cache.submit(makePlan([makeRequest()]));
+    await flush();
+
+    const progress = seam.progress()!;
+    expect(progress.runId).toBeTruthy();
+    expect(progress.planned).toBeGreaterThan(0);
+    expect(progress.planned).toBe(progress.visible + progress.inFlight + progress.retired);
+    // Reading it changed nothing: the run is still open and still the one
+    // being watched.
+    expect(seam.runState.open).toBe(true);
+    expect(seam.progress()!.runId).toBe(progress.runId);
+
+    seam.closeRun();
+    expect(seam.progress()).toBeNull();
+    expect(seam.diagnose(progress.runId).runId).toBe(progress.runId);
+  });
+
   it("stops a run without exporting it", () => {
     const seam = installTraceSeam();
     traceRecorder.openRun(OPEN_CAUSE);

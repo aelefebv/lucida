@@ -17,8 +17,9 @@
  * you are measuring by reading it.
  */
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import "./MonitorPage.css";
+import { buildLiveView, type LiveView } from "./liveModel.ts";
 import {
   buildMonitorView,
   formatMs,
@@ -28,7 +29,14 @@ import {
   type MonitorTrackGroup,
   type MonitorView,
 } from "./monitorModel.ts";
-import { downloadTraceFile, readMonitor, type MonitorSnapshot } from "./monitorSource.ts";
+import {
+  downloadTraceFile,
+  readMonitor,
+  readProgress,
+  stopRun,
+  type MonitorSnapshot,
+} from "./monitorSource.ts";
+import type { LiveProgress } from "../trace/liveProgress.ts";
 import type { PhaseRollup } from "../trace/diagnose/types.ts";
 
 export interface MonitorPageProps {
@@ -36,20 +44,77 @@ export interface MonitorPageProps {
   onClose: () => void;
 }
 
+/**
+ * How often the live view re-reads the run (#937).
+ *
+ * Not a frame cadence. The counters move in thousands and the bar changes
+ * shape in tenths of a second, so twice a second is as fast as a reader can
+ * use — and the read walks the run's rows, which is main-thread time taken
+ * from the pipeline being watched.
+ */
+const LIVE_POLL_MS = 500;
+
 export function MonitorPage({ onClose }: MonitorPageProps) {
+  // A run that is still open is watched, not read: reading closes the
+  // interval, and what somebody came here to see is still happening.
+  const [live, setLive] = useState<LiveProgress | null>(readProgress);
   // Reading is what closes the run in progress, so the page does it once on
-  // mount and once per control — not twice for one answer.
-  const [snapshot, setSnapshot] = useState<MonitorSnapshot>(() => readMonitor());
+  // mount and once per control — not twice for one answer, and not at all
+  // while a run is open.
+  const [snapshot, setSnapshot] = useState<MonitorSnapshot | null>(() =>
+    live ? null : readMonitor(),
+  );
   const [drill, setDrill] = useState<MonitorDrill | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
-  const { read, runs } = snapshot;
-  const runId = read.ok ? read.document.runId : undefined;
+  const read = snapshot?.read;
+  const runs = snapshot?.runs ?? [];
+  const runId = read?.ok ? read.document.runId : undefined;
 
+  // Read one run and show it. The only path from watching to reading, so the
+  // two states cannot both be on screen.
   const readRun = useCallback((next?: string) => {
     setDrill(null);
     setSaved(null);
+    setLive(null);
     setSnapshot(readMonitor(next));
   }, []);
+
+  // Watch the run until it ends — by going quiescent, by timing out, or
+  // because somebody stopped it. Whichever way it ends, the verdict for *that*
+  // run replaces the live view where it stood: no reload, and no reading of
+  // the newest interval, which by then is the export's own.
+  const watchedRunId = live?.runId ?? null;
+  useEffect(() => {
+    if (watchedRunId === null) return;
+    const timer = setInterval(() => {
+      const next = readProgress();
+      if (next && next.runId === watchedRunId) setLive(next);
+      else readRun(watchedRunId);
+    }, LIVE_POLL_MS);
+    return () => clearInterval(timer);
+  }, [watchedRunId, readRun]);
+
+  // A run that opens while a verdict is on screen — a second dataset opened in
+  // the viewer behind this page, or a camera move. It is offered rather than
+  // taken: switching the page out from under somebody reading a verdict they
+  // asked for would be the auto-following this view exists without.
+  const [nextRunId, setNextRunId] = useState<string | null>(null);
+  useEffect(() => {
+    if (watchedRunId !== null) return;
+    const timer = setInterval(() => setNextRunId(readProgress()?.runId ?? null), LIVE_POLL_MS);
+    return () => clearInterval(timer);
+  }, [watchedRunId]);
+
+  const watchNextRun = useCallback(() => {
+    setDrill(null);
+    setSaved(null);
+    setLive(readProgress());
+  }, []);
+
+  const stopAndAnalyse = useCallback(() => {
+    stopRun();
+    readRun(watchedRunId ?? undefined);
+  }, [readRun, watchedRunId]);
 
   // Named for the run on screen, so the file and the follow-up command that
   // names that run agree.
@@ -66,10 +131,18 @@ export function MonitorPage({ onClose }: MonitorPageProps) {
         </button>
         <h1>Pipeline monitor</h1>
         <span className="monitor-run-id" data-testid="monitor-run-id">
-          {runId ?? "no run"}
+          {live?.runId ?? runId ?? "no run"}
         </span>
         <div className="monitor-chrome-actions">
-          {runs.length > 0 && (
+          {/* While a run is open the only control offered is the one that ends
+              it. Every other read here exports, and exporting would close the
+              run being watched without saying that is what it did. */}
+          {live && (
+            <button type="button" onClick={stopAndAnalyse} data-testid="monitor-stop">
+              Stop &amp; analyse
+            </button>
+          )}
+          {!live && runs.length > 0 && (
             <select
               aria-label="Run"
               data-testid="monitor-run-select"
@@ -83,33 +156,47 @@ export function MonitorPage({ onClose }: MonitorPageProps) {
               ))}
             </select>
           )}
-          <button type="button" onClick={() => readRun()} data-testid="monitor-reread">
-            Read the newest run
-          </button>
-          <button
-            type="button"
-            onClick={() => save("trace")}
-            disabled={!read.ok}
-            data-testid="monitor-save-run"
-          >
-            Save run
-          </button>
-          <button
-            type="button"
-            onClick={() => save("perfetto")}
-            disabled={!read.ok}
-            data-testid="monitor-save-perfetto"
-          >
-            Save for Perfetto
-          </button>
+          {!live && (
+            <>
+              <button type="button" onClick={() => readRun()} data-testid="monitor-reread">
+                Read the newest run
+              </button>
+              <button
+                type="button"
+                onClick={() => save("trace")}
+                disabled={!read?.ok}
+                data-testid="monitor-save-run"
+              >
+                Save run
+              </button>
+              <button
+                type="button"
+                onClick={() => save("perfetto")}
+                disabled={!read?.ok}
+                data-testid="monitor-save-perfetto"
+              >
+                Save for Perfetto
+              </button>
+            </>
+          )}
         </div>
       </header>
 
       <p className="monitor-observation-only">
-        Observation only — nothing on this page changes what the pipeline does. Opening the monitor
-        reads the recording, and reading closes the run in progress: an interval has to end before it
-        can be analysed.
+        Observation only — nothing on this page changes what the pipeline does.{" "}
+        {live
+          ? "This run is still open, so it is being watched rather than read: reading would close it, which is why saving and choosing another run are not offered until it ends. Watching costs a walk over the run's rows twice a second, on the same thread the run is using."
+          : "Opening the monitor reads the recording, and reading closes the run in progress: an interval has to end before it can be analysed."}
       </p>
+
+      {!live && nextRunId && (
+        <p className="monitor-note" data-testid="monitor-next-run">
+          A run is open behind this page.{" "}
+          <button type="button" onClick={watchNextRun} data-testid="monitor-watch-next">
+            Watch the run in progress
+          </button>
+        </p>
+      )}
 
       {saved && (
         <p className="monitor-saved" data-testid="monitor-saved">
@@ -117,14 +204,89 @@ export function MonitorPage({ onClose }: MonitorPageProps) {
         </p>
       )}
 
-      {read.ok ? (
+      {live ? (
+        <LiveReport view={buildLiveView(live)} />
+      ) : read?.ok ? (
         <MonitorReport view={buildMonitorView(read.document)} drill={drill} onDrill={setDrill} />
       ) : (
         <p className="monitor-empty" data-testid="monitor-empty">
-          {read.reason} Open a dataset, let it settle, then read the run.
+          {read?.reason} Open a dataset, let it reach quiescence, then read the run.
         </p>
       )}
     </main>
+  );
+}
+
+/**
+ * A run in progress, and no verdict (#937).
+ *
+ * What is here is what a run can honestly say before it ends: how much work
+ * it has made, how much of it reached the screen, and where the rest is
+ * sitting. What is deliberately absent is the whole report — a headline that
+ * changes between two glances is not a headline, and the attribution
+ * back-walk needs an end to walk back from.
+ *
+ * There is no window and no scrolling: every counter is cumulative from run
+ * start, which is what stops the interesting part of an open going past
+ * before anyone looks at it.
+ */
+function LiveReport({ view }: { view: LiveView }) {
+  return (
+    <section className="monitor-section monitor-live" aria-labelledby="monitor-live-heading">
+      <h2 id="monitor-live-heading">Run in progress</h2>
+      <p className="monitor-note" data-testid="monitor-live-status">
+        {view.cause} · running {view.elapsed} · {view.quiescence}
+      </p>
+
+      <dl className="monitor-live-counters" data-testid="monitor-live-counters">
+        {view.counters.map((counter) => (
+          <div key={counter.label} className="monitor-live-counter">
+            <dt>{counter.label}</dt>
+            <dd>{counter.value}</dd>
+            <p className="monitor-dim">{counter.meaning}</p>
+          </div>
+        ))}
+      </dl>
+
+      {view.unrecorded && (
+        <p className="monitor-note" data-testid="monitor-live-unrecorded">
+          {view.unrecorded}
+        </p>
+      )}
+
+      <h3>Where the rows in flight are</h3>
+      {view.bar.length > 0 ? (
+        <>
+          <div className="monitor-live-bar" data-testid="monitor-live-bar">
+            {view.bar.map((segment) => (
+              <span
+                key={segment.id}
+                className={`monitor-live-bar-segment monitor-live-bar-${segment.id}`}
+                style={{ width: `${segment.pct}%` }}
+                data-testid={`monitor-live-bar-${segment.id}`}
+              />
+            ))}
+          </div>
+          <ul className="monitor-live-legend">
+            {view.bar.map((segment) => (
+              <li key={segment.id}>
+                <span className={`monitor-live-swatch monitor-live-bar-${segment.id}`} />
+                {segment.id} <span className="monitor-dim">{segment.rows.toLocaleString()}</span>
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : (
+        <p className="monitor-note" data-testid="monitor-live-bar-empty">
+          Nothing in flight this instant.
+        </p>
+      )}
+
+      <p className="monitor-note">
+        The verdict waits for the run to end. Closing the interval is what makes it analysable —
+        let it reach quiescence, or stop it here.
+      </p>
+    </section>
   );
 }
 

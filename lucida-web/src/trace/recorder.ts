@@ -22,6 +22,7 @@ import {
   type ServerTimingBatch,
   type WireRowFamily,
 } from "./serverRowTable.ts";
+import type { LivePhaseOccupancy, LiveProgress } from "./liveProgress.ts";
 import type { QuiescenceState } from "./quiescence.ts";
 import { tableSinkFactory, type TraceSink, type TraceSinkFactory } from "./sink.ts";
 import { TickScratch } from "./tickRing.ts";
@@ -29,6 +30,7 @@ import {
   Boundary,
   clampStamp,
   COUNTED_PHASES,
+  PHASES,
   READING_NAMES,
   ReadingColumn,
   RowOutcome,
@@ -249,6 +251,14 @@ export class TraceRecorder {
   private readonly countedPhases = new Uint32Array(COUNTED_PHASES.length);
   /** One vector, refilled per tick, for the same reason as the scratch above. */
   private readonly readingColumns = new Float64Array(READING_NAMES.length);
+  /**
+   * The live view's phase-occupancy vector, refilled per poll rather than
+   * allocated per poll — the walk that fills it runs over every row the run
+   * has made, and that is not the place to hand the collector a buffer. The
+   * reading it produces is a fresh object by design: it is a snapshot handed
+   * to a surface, not something the recorder keeps.
+   */
+  private readonly occupancyScratch = new Uint32Array(PHASES.length);
   private tickInProgress = false;
 
   private holdTimer: ReturnType<typeof setTimeout> | null = null;
@@ -326,6 +336,43 @@ export class TraceRecorder {
   /** The last state the page published, or null before the first publication. */
   get quiescence(): QuiescenceState | null {
     return this.lastQuiescence;
+  }
+
+  /**
+   * What the run in progress can say about itself, or null when no labelled
+   * run is open (#937).
+   *
+   * The one read that does not conclude the interval it describes. Everything
+   * else — the document, the Chrome projection, the diagnostic — closes the
+   * run, because a run without an end reason is not an artifact. This returns
+   * counts and occupancy rather than a verdict for the same reason: the
+   * attribution back-walk needs an end to walk back from.
+   *
+   * Costed on the reader, not the writer. It walks the rows the run has made
+   * so far, so a page nobody has opened pays nothing.
+   */
+  get liveProgress(): LiveProgress | null {
+    const run = this.open;
+    if (!run?.cause) return null;
+    const tally = run.sink.liveTally(this.occupancyScratch);
+    const occupancy: LivePhaseOccupancy[] = [];
+    for (let i = 0; i < PHASES.length; i++) {
+      occupancy.push({ phase: PHASES[i], rows: this.occupancyScratch[i] });
+    }
+    return {
+      runId: run.runId,
+      cause: run.cause,
+      elapsedMs: this.now() - run.startedAtMs,
+      planned: tally.complete + tally.retired + tally.inFlight,
+      visible: tally.complete,
+      inFlight: tally.inFlight,
+      retired: tally.retired,
+      unrecorded: run.truncation?.rowsUnrecorded ?? 0,
+      occupancy,
+      unstamped: tally.unstamped,
+      quiescent: this.lastQuiescence?.quiescent ?? false,
+      quiescenceReason: this.lastQuiescence?.reason ?? "unpublished",
+    };
   }
 
   /**

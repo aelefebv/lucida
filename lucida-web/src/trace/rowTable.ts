@@ -32,6 +32,21 @@ import {
 /** Six coordinate columns per row: level, t, c, z, y, x. */
 const COORDS_PER_ROW = 6;
 
+/**
+ * The rows of a run in progress, tallied by how they ended (#937).
+ *
+ * `inFlight` is the remainder rather than a fourth count: every row is
+ * exactly one of the three, and deriving it here is what stops the live view
+ * showing three numbers that do not add up to the fourth.
+ */
+export interface LiveTally {
+  complete: number;
+  retired: number;
+  inFlight: number;
+  /** Of the in-flight rows, how many have reached no boundary at all. */
+  unstamped: number;
+}
+
 export class RowTable {
   /**
    * 3 interned ids + 6 coordinates + 7 boundary slots + the two-part wire
@@ -137,6 +152,55 @@ export class RowTable {
 
   outcomeAt(index: number): number {
     return this.outcomes[index];
+  }
+
+  /**
+   * One pass over the rows: how they ended, and where the unfinished ones are
+   * sitting right now (#937).
+   *
+   * The live view's counters and phase bar, and the only read on this table
+   * that happens while a run is still open. It is a walk rather than counters
+   * kept on the write path deliberately: the write path is the pipeline's
+   * hottest, and nobody is watching most of the time. The cost lands on the
+   * reader, once per poll, and is bounded by the per-run cap — ~76 ns a row,
+   * so ~1.3 ms at the 16,385 rows a truncated run holds, twice a second while
+   * somebody is watching. Gated for linearity in `recorderCost.perf.test.ts`:
+   * a walk that went quadratic would turn watching a run into perturbing it.
+   *
+   * `occupancy` is the caller's vector, in {@link PHASES} order, zeroed here:
+   * a poll reads this instant, not a sum of every poll before it. It is
+   * passed in rather than returned so a page polling twice a second allocates
+   * nothing.
+   */
+  liveTally(occupancy: Uint32Array): LiveTally {
+    occupancy.fill(0);
+    let complete = 0;
+    let retired = 0;
+    let unstamped = 0;
+    for (let i = 0; i < this.rows; i++) {
+      const outcome = this.outcomes[i];
+      if (outcome === RowOutcome.Complete) {
+        complete++;
+        continue;
+      }
+      if (outcome === RowOutcome.Retired) {
+        retired++;
+        continue;
+      }
+      // A row is in the phase after the last boundary it stamped. Scanning
+      // backwards finds it in one step for a row on the wire, which is where
+      // most rows are while a run is open.
+      let boundary = BOUNDARY_COUNT - 1;
+      while (boundary >= 0 && this.stamps[i * BOUNDARY_COUNT + boundary] === UNSET_STAMP) {
+        boundary--;
+      }
+      // Nothing stamped yet: the planner has asked for this chunk and no
+      // boundary has been reached. Not `plan` — that would invent time in a
+      // phase the row has not entered.
+      if (boundary < 0) unstamped++;
+      else if (boundary < PHASES.length) occupancy[boundary]++;
+    }
+    return { complete, retired, inFlight: this.rows - complete - retired, unstamped };
   }
 
   /** Fans each row out into its phases. The only place that knows about spans. */

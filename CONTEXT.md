@@ -391,6 +391,14 @@ The pipeline performance surface — where and when the pipeline slowed down.
 Observation only.
 _Avoid_: profiler, debug panel, dashboard
 
+**Live view**:
+What the monitor shows while a run is still open: progress counters and the
+phase bar, cumulative from run start, and no verdict. A verdict needs a closed
+interval, so the monitor withholds one until the run ends — by going quiescent,
+by timing out, or through *Stop & analyse*, which closes it with `explicit` as
+the end reason.
+_Avoid_: real-time view, following window (there is no window), live verdict
+
 **Dev controls**:
 The dev-only mutating surface: planning knobs, overlay toggles, and the
 session-scoped cache knobs. Deliberately separate from the monitor — observation

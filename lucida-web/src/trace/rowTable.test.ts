@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 
 import { RowTable } from "./rowTable.ts";
-import { Boundary, RowOutcome, UNSET_STAMP, BOUNDARY_COUNT } from "./types.ts";
+import { Boundary, PHASES, RowOutcome, UNSET_STAMP, BOUNDARY_COUNT } from "./types.ts";
 
 function source(overrides: Partial<Parameters<RowTable["append"]>[0]> = {}) {
   return {
@@ -133,5 +133,61 @@ describe("RowTable", () => {
     const table = new RowTable(4);
     for (let i = 0; i < 4; i++) table.append(source(), 0);
     expect(table.internedStringCount).toBe(3);
+  });
+});
+
+describe("the live tally (#937)", () => {
+  it("counts outcomes and parks each unfinished row in the phase it is sitting in", () => {
+    const table = new RowTable(4);
+    const occupancy = new Uint32Array(PHASES.length);
+
+    const waiting = table.append(source(), 0);
+    table.stamp(waiting, Boundary.QueueStart, 10);
+    const onTheWire = table.append(source(), 0);
+    table.stamp(onTheWire, Boundary.QueueStart, 10);
+    table.stamp(onTheWire, Boundary.WireStart, 20);
+    const drawn = table.append(source(), 0);
+    table.stamp(drawn, Boundary.PresentEnd, 90);
+    table.setOutcome(drawn, RowOutcome.Complete);
+    const abandoned = table.append(source(), 0);
+    table.setOutcome(abandoned, RowOutcome.Retired);
+
+    const tally = table.liveTally(occupancy);
+
+    expect(tally).toEqual({ complete: 1, retired: 1, inFlight: 2, unstamped: 0 });
+    // A row's phase is the one after its last boundary: queue starts where
+    // plan ended.
+    expect(occupancy[PHASES.indexOf("queue")]).toBe(1);
+    expect(occupancy[PHASES.indexOf("wire")]).toBe(1);
+    expect(occupancy[PHASES.indexOf("present")]).toBe(0);
+  });
+
+  it("separates a row that has stamped nothing from one sitting in `plan`", () => {
+    // A row exists from the moment the planner asks for it, before admission
+    // stamps anything. Counting it as `plan` would invent time in a phase it
+    // has not entered.
+    const table = new RowTable(2);
+    const occupancy = new Uint32Array(PHASES.length);
+    table.append(source(), 0);
+    const planned = table.append(source(), 0);
+    table.stamp(planned, Boundary.PlanStart, 5);
+
+    const tally = table.liveTally(occupancy);
+
+    expect(tally.unstamped).toBe(1);
+    expect(tally.inFlight).toBe(2);
+    expect(occupancy[PHASES.indexOf("plan")]).toBe(1);
+  });
+
+  it("zeroes the caller's vector, so a poll reads this instant and not a sum of polls", () => {
+    const table = new RowTable(2);
+    const occupancy = new Uint32Array(PHASES.length);
+    const row = table.append(source(), 0);
+    table.stamp(row, Boundary.WireStart, 1);
+
+    table.liveTally(occupancy);
+    table.liveTally(occupancy);
+
+    expect(occupancy[PHASES.indexOf("wire")]).toBe(1);
   });
 });

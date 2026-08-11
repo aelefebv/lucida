@@ -34,6 +34,27 @@ body {
   color: #888;
 }
 
+/* The viewer's slot (#937).
+ *
+ * Onstage it has no box of its own — `display: contents` keeps the layout
+ * exactly what it is without the wrapper, and the wrapper exists only so the
+ * viewer never changes position in the tree and never remounts.
+ *
+ * Offstage, while the monitor is on screen, it keeps its size and loses its
+ * pixels. `visibility: hidden`, NOT `display: none`: a viewer with no layout
+ * box has a zero-sized canvas, and the run the monitor is watching would then
+ * be a run planned for a viewport nobody has. The point of a live view is to
+ * watch the run that would have happened anyway. */
+.route-onstage {
+  display: contents;
+}
+
+.route-offstage {
+  position: fixed;
+  inset: 0;
+  visibility: hidden;
+}
+
 /* In-viewer "create workspace from selection" failure notice (#697). A
    dismissible, non-blocking banner pinned above the viewer — the workspace
    stays mounted underneath. Mirrors .workspace-dashboard-error's red styling. */

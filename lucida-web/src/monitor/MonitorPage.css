@@ -11,6 +11,9 @@
 .monitor-page {
   flex: 1;
   min-width: 0;
+  /* The live view is a short page — without this the viewport shows the
+     document's background below it rather than the monitor's. */
+  min-height: 100vh;
   padding: 16px 20px 48px;
   overflow-y: auto;
   color: #e6e6e6;
@@ -190,6 +193,108 @@
   margin: 0 0 8px;
   font-size: 14px;
   font-weight: 600;
+}
+
+/* --- the run in progress (#937) -------------------------------------------- *
+ * Counters big enough to read from across a desk while an open is happening,
+ * and one bar for where the rows in flight are sitting. Percentages, like the
+ * tracks above, so it reads the same at device pixel ratio 1 and 2.
+ */
+
+.monitor-live-counters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 24px;
+  margin: 12px 0 20px;
+}
+
+.monitor-live-counter dt {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #9aa0a6;
+}
+
+.monitor-live-counter dd {
+  margin: 2px 0;
+  font-size: 26px;
+  font-variant-numeric: tabular-nums;
+  color: #e6e6e6;
+}
+
+.monitor-live-counter p {
+  margin: 0;
+  font-size: 11px;
+  max-width: 22ch;
+}
+
+.monitor-live-bar {
+  display: flex;
+  height: 18px;
+  margin: 8px 0;
+  background: #202020;
+  border: 1px solid #2c2c2c;
+  overflow: hidden;
+}
+
+.monitor-live-bar-segment {
+  display: block;
+  min-width: 2px;
+  background: #6f8fd1;
+}
+
+.monitor-live-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 11px;
+  font-family: "SF Mono", "Menlo", "Monaco", monospace;
+}
+
+.monitor-live-legend li {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.monitor-live-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  background: #6f8fd1;
+}
+
+/* One colour per phase, in the order work moves through them: the planned and
+   queued ends are the waits, the middle is the wire, the far end is ours. */
+.monitor-live-bar-planned {
+  background: #4a4a4a;
+}
+
+.monitor-live-bar-plan {
+  background: #8a7fb0;
+}
+
+.monitor-live-bar-queue {
+  background: #c9a227;
+}
+
+.monitor-live-bar-wire {
+  background: #6f8fd1;
+}
+
+.monitor-live-bar-decode {
+  background: #7fb07f;
+}
+
+.monitor-live-bar-upload {
+  background: #d18f6f;
+}
+
+.monitor-live-bar-present {
+  background: #d1c46f;
 }
 
 /* --- tracks ---------------------------------------------------------------- */

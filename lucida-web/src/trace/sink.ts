@@ -15,7 +15,7 @@
 
 import { EventRing } from "./eventRing.ts";
 import { ReadingRing } from "./readingRing.ts";
-import { RowTable } from "./rowTable.ts";
+import { RowTable, type LiveTally } from "./rowTable.ts";
 import { TickRing, type TickScratch } from "./tickRing.ts";
 import type {
   ChunkEventSource,
@@ -36,6 +36,11 @@ export interface TraceSink {
   setLabel(index: number, label: WireLabel): void;
   stamp(index: number, boundary: number, offsetUs: number): void;
   setOutcome(index: number, outcome: RowOutcomeValue): void;
+  /**
+   * The rows so far, tallied for the live view (#937). The one read that
+   * happens while the interval is still open.
+   */
+  liveTally(occupancy: Uint32Array): LiveTally;
   serialise(): TraceRow[];
   /** `counted` is the counted-not-timed phase tally since the previous tick. */
   appendTick(atUs: number, scratch: TickScratch, counted: Uint32Array): void;
@@ -81,6 +86,11 @@ export class NoopTraceSink implements TraceSink {
   stamp(): void {}
 
   setOutcome(): void {}
+
+  liveTally(occupancy: Uint32Array): LiveTally {
+    occupancy.fill(0);
+    return { complete: 0, retired: 0, inFlight: 0, unstamped: 0 };
+  }
 
   serialise(): TraceRow[] {
     return [];
@@ -150,6 +160,10 @@ export class TableTraceSink implements TraceSink {
 
   setOutcome(index: number, outcome: RowOutcomeValue): void {
     this.rows.setOutcome(index, outcome);
+  }
+
+  liveTally(occupancy: Uint32Array): LiveTally {
+    return this.rows.liveTally(occupancy);
   }
 
   serialise(): TraceRow[] {

@@ -335,18 +335,23 @@ describe("WorkspaceRoot — create workspace from dataset(s) (#697)", () => {
   });
 });
 
-describe("WorkspaceRoot — the monitor route (#936)", () => {
-  it("renders the monitor at its own path rather than an overlay on the viewer", () => {
+describe("WorkspaceRoot — the monitor route (#936, #937)", () => {
+  it("renders the monitor at its own path, with no viewer to keep when none was left", () => {
     window.history.replaceState({}, "", "/monitor");
     render(<WorkspaceRoot />);
 
     expect(screen.getByRole("heading", { name: "Pipeline monitor" })).toBeTruthy();
-    // A separate page: the viewer is not mounted underneath it.
+    // Typed straight into the URL bar: there is no viewer to hold open, and a
+    // run outlives the viewer that produced it.
     expect(screen.queryByTestId("app-mounted")).toBeNull();
     expect(screen.queryByTestId("dashboard-mounted")).toBeNull();
   });
 
-  it("leaves the viewer for the monitor and comes back to the same workspace", async () => {
+  it("keeps the viewer running offstage, so a run being watched is not torn down", async () => {
+    // #937: the monitor grew a live view, and unmounting the viewer to reach it
+    // would stop the very run somebody navigated here to watch. The viewer
+    // stays mounted and offstage instead — same instance, so the session, the
+    // socket and the render loop all survive the trip.
     openWorkspaceMock.mockResolvedValue({
       id: "ws-secret",
       name: "Workspace",
@@ -355,13 +360,20 @@ describe("WorkspaceRoot — the monitor route (#936)", () => {
     } as unknown as WorkspaceRecord);
     render(<WorkspaceRoot />);
     await screen.findByTestId("app-mounted");
+    const viewer = screen.getByTestId("app-mounted");
 
     fireEvent.click(screen.getByText("in-viewer-open-monitor"));
+
     expect(screen.getByRole("heading", { name: "Pipeline monitor" })).toBeTruthy();
     expect(window.location.pathname).toBe("/monitor");
+    // The same node, not a remount — and hidden rather than unlaid-out, so the
+    // canvas keeps the size the run was planned for.
+    expect(screen.getByTestId("app-mounted")).toBe(viewer);
+    expect(viewer.closest(".route-offstage")).not.toBeNull();
 
     fireEvent.click(screen.getByTestId("monitor-close"));
-    await screen.findByTestId("app-mounted");
+    expect(screen.getByTestId("app-mounted")).toBe(viewer);
+    expect(viewer.closest(".route-offstage")).toBeNull();
     expect(window.location.pathname).toBe("/w/ws-secret");
   });
 
