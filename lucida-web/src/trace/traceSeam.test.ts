@@ -316,6 +316,33 @@ describe("the trace seam", () => {
     expect(tracks).toEqual(expect.arrayContaining(["plan", "queue", "wire", "serve"]));
   });
 
+  /**
+   * The derivation lives behind the seam, so the agent's text and the
+   * monitor's cards are two readings of one object rather than two opinions
+   * (#933). The CLI holding no diagnostic logic is what this protects.
+   */
+  it("reads the run as a diagnostic, and renders that same object as text", async () => {
+    installTraceSeam();
+    const source = new ControlledSource();
+    const cache = new CpuCache(source, makeDecode());
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    cache.submit(makePlan([makeRequest()]));
+    await flush();
+
+    const diagnostic = window.lucidaTrace!.diagnose();
+    expect(traceRecorder.isRunOpen).toBe(false);
+    expect(diagnostic.verdict.text).not.toBe("");
+    expect(diagnostic.attribution.degraded).not.toBe("");
+    expect(diagnostic.ruleset.version).toBeGreaterThan(0);
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    const text = window.lucidaTrace!.diagnoseText();
+    expect(text.split("\n").length).toBeLessThanOrEqual(30);
+    expect(text).toContain("NOT A HEALTH SIGNAL");
+    expect(text).toContain("coverage  ");
+  });
+
   it("stops a run without exporting it", () => {
     const seam = installTraceSeam();
     traceRecorder.openRun(OPEN_CAUSE);

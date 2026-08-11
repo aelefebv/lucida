@@ -327,6 +327,63 @@ prefetch lane's future timepoints. Excluded from the quiescence predicate and fr
 the view's demand, and reported at settle rather than hidden.
 _Avoid_: background, idle, optional
 
+**Diagnostic**:
+What a trace *means*, derived from it by one pure function. Both surfaces read
+the same diagnostic, so the agent text and the monitor's cards cannot disagree
+about which phase stalled. Distinct from the trace, which is what was recorded.
+_Avoid_: analysis, report, summary, insight
+
+**Ruleset**:
+The versioned set of thresholds that produced a diagnostic, shipped inside the
+document with each rule's rationale. Three families, because one number cannot
+serve a pipeline whose network first byte and whose queue wait differ by two
+orders of magnitude: absolute p95 ceilings, a backlog ETA, and a relative share.
+Every ceiling is provisional and re-derivable; shipping it in the document makes
+a change to one visible rather than silent.
+_Avoid_: config, budget, SLO, threshold (a *threshold* is one rule's number)
+
+**Verdict**:
+The diagnostic's one-sentence answer, withheld until the run closes — a verdict
+that changes while you read it is not a verdict.
+_Avoid_: result, status, score, grade
+
+**Finding**:
+One rule firing on one subject, ranked against the others. A `note` is a finding
+that is not a stall: worth a line, not worth blame.
+_Avoid_: issue, warning, alert, violation
+
+**Attribution**:
+What the run was waiting on, and how much the derivation is willing to claim.
+Carries one of seven confidence words, each with an explicit statement of what
+it still cannot see.
+_Avoid_: root cause, blame, diagnosis (the *diagnostic* is the whole document)
+
+**Critical path**:
+The serial chain the run finished on, walked backwards from its completion —
+never a maximum over per-phase totals, which measure concurrency rather than
+what anything waited for. Starts at run start rather than at the first recorded
+row.
+_Avoid_: hot path, longest path, bottleneck chain
+
+**Unrecorded prefix**:
+The chain's first link: wall clock before the first recorded boundary. Part of
+the chain so it cannot be quietly dropped, never blamable because nothing
+measured it, and always a coverage gap.
+_Avoid_: startup, boot time, warmup
+
+**Limiter**:
+A cap that work queues behind, named so a queue wait resolves to something
+rather than staying anonymous. Its cap is inferred from the highest concurrency
+a run observed, because a client sees its own rows and no aggregate.
+_Avoid_: throttle, semaphore, bottleneck
+
+**Backlog ETA**:
+Pending divided by the rate admissions are completing at, measured over the
+trailing second — the wait a newly planned chunk will actually see. Queue phases
+are judged by this and never by a per-chunk ceiling, which at the observed
+spread would fire on every row or on none.
+_Avoid_: queue depth (depth alone is not the signal), wait time, latency
+
 ## Surfaces
 
 **Monitor**:
