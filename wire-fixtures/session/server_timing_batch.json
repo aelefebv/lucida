@@ -4,23 +4,38 @@
     "dropped": 3,
     "rid": [
       2558,
-      2559
+      2559,
+      0
+    ],
+    "request_id": [
+      null,
+      null,
+      "web-open-4c1a"
     ],
     "family": [
       "chunk",
-      "asset"
+      "asset",
+      "metadata_read"
+    ],
+    "metadata_phase": [
+      null,
+      null,
+      "backend_read"
     ],
     "dispatch_offset_us": [
       142,
-      96
+      96,
+      1204
     ],
     "duration_us": [
       8137,
-      214902
+      214902,
+      63441
     ],
     "outcome": [
       "delivered",
-      "not_ready"
+      "not_ready",
+      "delivered"
     ]
   }
 }

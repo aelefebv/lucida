@@ -123,9 +123,9 @@ use lucida_protocol::{
     DatasetSourceCacheStats, DatasetSourceHealth, DirectFetchDescriptor, DirectImageSpec,
     FetchSource, GeneratedAvailabilityDelta, GeneratedAvailabilitySnapshot, GeneratedChunkStatus,
     GeneratedChunkStatusUpdate, GeneratedLevelAvailability, GeneratedLevelSummary, LevelAddress,
-    LocalFetchDescriptor, ProxiedFetchDescriptor, ProxiedImageSpec, ProxyAvailability,
-    ProxyFootprint, ProxyKind, ServerTimingBatch, SourceChunkStatus, TimingRowFamily,
-    TimingRowOutcome, WireFormat,
+    LocalFetchDescriptor, MetadataReadPhase, ProxiedFetchDescriptor, ProxiedImageSpec,
+    ProxyAvailability, ProxyFootprint, ProxyKind, ServerTimingBatch, SourceChunkStatus,
+    TimingRowFamily, TimingRowOutcome, WireFormat,
 };
 
 const REGEN_HINT: &str = "fixture out of date with the Rust wire types. If the wire change is \
@@ -1788,11 +1788,24 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
             ServerMessage::TimingBatch {
                 batch: ServerTimingBatch {
                     dropped: 3,
-                    rid: vec![2558, 2559],
-                    family: vec![TimingRowFamily::Chunk, TimingRowFamily::Asset],
-                    dispatch_offset_us: vec![142, 96],
-                    duration_us: vec![8_137, 214_902],
-                    outcome: vec![TimingRowOutcome::Delivered, TimingRowOutcome::NotReady],
+                    // The metadata-read row keys on the open's request id
+                    // and leaves the correlation label unset; the chunk and
+                    // asset rows do the reverse.
+                    rid: vec![2558, 2559, 0],
+                    request_id: vec![None, None, Some("web-open-4c1a".into())],
+                    family: vec![
+                        TimingRowFamily::Chunk,
+                        TimingRowFamily::Asset,
+                        TimingRowFamily::MetadataRead,
+                    ],
+                    metadata_phase: vec![None, None, Some(MetadataReadPhase::BackendRead)],
+                    dispatch_offset_us: vec![142, 96, 1_204],
+                    duration_us: vec![8_137, 214_902, 63_441],
+                    outcome: vec![
+                        TimingRowOutcome::Delivered,
+                        TimingRowOutcome::NotReady,
+                        TimingRowOutcome::Delivered,
+                    ],
                 },
             },
             req(
@@ -1802,7 +1815,9 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                     "/batch",
                     "/batch/dropped",
                     "/batch/rid",
+                    "/batch/request_id",
                     "/batch/family",
+                    "/batch/metadata_phase",
                     "/batch/dispatch_offset_us",
                     "/batch/duration_us",
                     "/batch/outcome",
