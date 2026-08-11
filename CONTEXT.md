@@ -97,8 +97,9 @@ _Avoid_: deduplication, batching (batching combines *different* work)
 
 ## Performance monitor
 
-Defined by `wiki/decisions/0047-trace-model-phases-runs-and-lifecycle-rows.md`,
-which is the authority if this summary and it ever disagree.
+Defined by `wiki/decisions/0047-trace-model-phases-runs-and-lifecycle-rows.md`
+and `wiki/decisions/0051-the-trace-driver-and-the-page-export-seam.md`, which are
+the authority if this summary and they ever disagree.
 
 **Trace**:
 The single artifact the monitor records. The visual timeline and the agent
@@ -122,6 +123,26 @@ _Avoid_: session, capture, trial
 The per-chunk unit of record: one fixed-width row with a timestamp slot per phase
 boundary. A row, not a list of spans — spans exist only at export.
 _Avoid_: event, record, entry
+
+**Quiescent**:
+The condition that closes a run on its own: the render loop has no dirty flag set
+and no frame in flight, and every chunk the view asked for is resident with
+nothing pending or in flight. Speculative prefetch does not count against it.
+Published by the page as a boolean, never inferred from the outside.
+_Avoid_: idle, settled, done, ready (`ready` already means "a frame was drawn")
+
+**End reason**:
+Why a run closed — `quiescent`, `timeout`, or `explicit`. A required field: a run
+that never settled is still a run, and the reason is the difference between a
+result and a missing one.
+_Avoid_: status, outcome
+
+**Trace seam**:
+The page-level export function that returns the trace document. The one place
+every reader goes — the CLI, an agent driving its own browser, the monitor's save
+button — so that no surface gets a privately-shaped copy. Public interface in
+every build, not a debug affordance.
+_Avoid_: endpoint, hook, API
 
 **Point event**:
 A rare occurrence recorded as a single timestamped record rather than a phase
@@ -186,6 +207,12 @@ The in-viewport layer drawn over the canvas in dataset coordinates — which chu
 where on screen. Spatial, where the monitor is temporal; the two never merge.
 _Avoid_: overlay image (an integer-valued image whose values name regions is a
 label, see above), heads-up display
+
+**Trace driver**:
+The `lucida trace` command: it launches its own headless browser, opens a
+dataset, waits for the run to become quiescent, and writes the trace. One of two
+entry points to the trace seam — the other is an agent driving a browser itself.
+_Avoid_: recorder, profiler run, headless mode
 
 **Agent surface**:
 Any diagnostic path an LLM agent reads — the CLI, the Python client, the trace
