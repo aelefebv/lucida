@@ -174,8 +174,17 @@ export interface RunCause {
   source: string;
 }
 
-/** Why a run closed. Required on every run — a run that never settled is still a run. */
-export type EndReason = "quiescent" | "timeout" | "explicit";
+/**
+ * Why a run closed. Required on every run — a run that never settled is still
+ * a run.
+ *
+ * The last two belong to the unlabelled steady-state interval alone.
+ * `run-opened` means a labelled run began, which is not a settling event.
+ * `rotated` means the interval reached the per-run cap: steady state has no
+ * privileged start, so it hands over to a fresh interval rather than
+ * truncating and losing the most recent work.
+ */
+export type EndReason = "quiescent" | "timeout" | "explicit" | "run-opened" | "rotated";
 
 export interface Viewport {
   cssWidth: number;
@@ -250,12 +259,44 @@ export interface RunConditions {
   viewport: Viewport;
 }
 
+/**
+ * What a run stopped recording, and how much it went on to miss.
+ *
+ * A boolean would be the cheap version and the useless one. A truncated run
+ * stops storing rows but keeps counting them, which turns "truncated at
+ * 18,000 rows" into "truncated at 18,000 of an eventual 63,412" — the
+ * difference between a trace nobody can trust and a trace that states it
+ * covered the first 28% of the run (ADR 0049).
+ */
+export interface TruncationRecord {
+  /** One rung, one reason. There is no sampling or coarsening rung to name. */
+  reason: "per-run-cap";
+  /** Microseconds from run start at which recording stopped. */
+  atUs: number;
+  /** The cap that was hit, so the number is readable without the build. */
+  capBytes: number;
+  /** Lifecycle rows stored before the cap. */
+  rowsRecorded: number;
+  /** Lifecycle rows the run saw afterwards and refused. */
+  rowsUnrecorded: number;
+  ticksUnrecorded: number;
+  eventsUnrecorded: number;
+  /** Server rows dropped after truncation — counted, so coverage is not overstated on one side only. */
+  serverRowsUnrecorded: number;
+}
+
 export interface RunHeader extends RunConditions {
   cacheWarmth: CacheWarmth;
   schemaVersion: number;
   runId: string;
-  cause: RunCause;
+  /**
+   * Why the run opened, or null for the unlabelled steady-state interval
+   * between runs. Same object, differing only by label (ADR 0047).
+   */
+  cause: RunCause | null;
   endReason: EndReason;
+  /** Null on a run that recorded everything it saw. */
+  truncation: TruncationRecord | null;
   build: BuildIdentity;
   gpu: GpuIdentity | null;
   /** Wall-clock epoch milliseconds at run start, so an archived run has a date. */
@@ -382,9 +423,115 @@ export interface WireLabel {
 /** No wire request was sent for this row — see {@link WireLabel.connectionGeneration}. */
 export const UNLABELLED: WireLabel = { rid: 0, connectionGeneration: 0 };
 
-/** Which labelled request family a server row describes. */
-export type ServerRowFamily = "chunk" | "asset";
-export const SERVER_ROW_FAMILIES: readonly ServerRowFamily[] = ["chunk", "asset"];
+/**
+ * Which family a server row describes.
+ *
+ * `metadata-read` is the one that is not a wire request: it is one object
+ * read performed while a dataset was being opened, and it keys on the
+ * open's `request_id` rather than on a correlation label. Index order is
+ * the wire order of the column and must not be reordered.
+ */
+export type ServerRowFamily = "chunk" | "asset" | "metadata-read";
+export const SERVER_ROW_FAMILIES: readonly ServerRowFamily[] = [
+  "chunk",
+  "asset",
+  "metadata-read",
+];
+
+/**
+ * What a metadata read's time was. Short, and its own vocabulary rather
+ * than a slice of the chunk phases: a metadata read has no dispatch, no
+ * decode and no upload.
+ *
+ * A `coalesced-wait` row waited on another reader's in-flight read and
+ * performed no round trip of its own, so counting round trips means
+ * counting `backend-read` rows — reading the whole family as trips would
+ * report an open making thousands where it made hundreds.
+ */
+export type MetadataReadPhase = "cache-hit" | "coalesced-wait" | "backend-read";
+export const METADATA_READ_PHASES: readonly MetadataReadPhase[] = [
+  "cache-hit",
+  "coalesced-wait",
+  "backend-read",
+];
+
+/**
+ * The server's phase enum, wider than the browser's because its clock is
+ * finer: ADR 0047's 100 µs floor was a browser-platform measurement (#897)
+ * and Rust's `Instant` has no such floor, so the rule is clock-relative.
+ * Comparing a server phase against a browser phase by resolution is a
+ * category error.
+ *
+ * - `arrival`         frame off the socket → the request is recognised.
+ * - `binding-lookup`  resolving the dataset binding, behind the shared
+ *                     session mutex every client in the workspace takes.
+ * - `dispatch`        binding in hand → the serve task is doing work.
+ * - `cache-lookup`    the source cache's LRU probe and single-flight
+ *                     election, or the generated cache's lookup.
+ * - `permit-wait`     queued behind the source-read cap. Leader rows only.
+ * - `backend-read`    the round trip. Leader rows only, so a sum over this
+ *                     phase counts each real read exactly once.
+ * - `coalesced-wait`  parked on another request's in-flight read of the
+ *                     same object. A follower's whole wait lives here, so
+ *                     it is diagnosed as waiting on a read in flight rather
+ *                     than as a slow backend.
+ * - `decompress`      storage codec decode.
+ * - `slice-encode`    the (t, c) slice and the wire frame.
+ * - `handoff`         onto the outbound queue. Terminal: socket write time
+ *                     is excluded, as it happens in a separate task behind
+ *                     an unbounded queue.
+ */
+export const SERVER_PHASES = [
+  "arrival",
+  "binding-lookup",
+  "dispatch",
+  "cache-lookup",
+  "permit-wait",
+  "backend-read",
+  "coalesced-wait",
+  "decompress",
+  "slice-encode",
+  "handoff",
+] as const;
+export type ServerPhase = (typeof SERVER_PHASES)[number];
+
+/**
+ * The wire column each phase arrives in. Rust spells these snake_case; the
+ * document spells multi-word names kebab-case, the same disagreement the
+ * outcome vocabulary already has.
+ *
+ * A map rather than a second array in the same order: two parallel arrays
+ * would let a reordering of either silently swap two columns, with nothing
+ * to catch it.
+ */
+export const SERVER_PHASE_WIRE_KEY: Record<ServerPhase, string> = {
+  arrival: "arrival_us",
+  "binding-lookup": "binding_lookup_us",
+  dispatch: "dispatch_us",
+  "cache-lookup": "cache_lookup_us",
+  "permit-wait": "permit_wait_us",
+  "backend-read": "backend_read_us",
+  "coalesced-wait": "coalesced_wait_us",
+  decompress: "decompress_us",
+  "slice-encode": "slice_encode_us",
+  handoff: "handoff_us",
+};
+
+/**
+ * A phase the request never entered. Durations are microseconds in a
+ * uint32 and zero is a legitimate duration, so the sentinel is the top of
+ * the range — the same choice {@link UNSET_STAMP} makes for boundaries.
+ */
+export const PHASE_UNSET = 0xffffffff;
+
+/** How long a row spent in each phase it entered. Absent means unentered. */
+export type ServerPhaseDurations = Partial<Record<ServerPhase, number>>;
+
+/**
+ * The label column's "this row led its own read" value, mirroring the
+ * server's `LABEL_NONE`.
+ */
+export const LABEL_NONE = 0xffffffff;
 
 /**
  * How the server's work for a label ended. `not-ready` is the one that
@@ -439,7 +586,25 @@ export type UnplacedReason =
   /** The bracket never closed and never will: the server answered without bytes. */
   | "answered-without-delivery"
   /** The bracket is still open for another reason; the row is not evidence of a server stall. */
-  | "bracket-open";
+  | "bracket-open"
+  /** A metadata read whose open this run never saw sent — the open predates the run. */
+  | "no-open-bracket";
+
+/**
+ * The browser's bracket for one dataset open, on the browser's clock: the
+ * request went out at `startUs` and the server's answer landed at `endUs`.
+ *
+ * This is the second bracket the exporter nests into. Without it a cold
+ * remote open is several seconds of silence before the first chunk row,
+ * because the reads that fill it happen before any chunk exists.
+ */
+export interface DatasetOpenBracket {
+  requestId: string;
+  /** Microseconds from run start. */
+  startUs: number;
+  /** Null while the open has not settled — a run can close over an open one. */
+  endUs: number | null;
+}
 
 /**
  * The server's half of a request's life, as the browser received it.
@@ -448,10 +613,35 @@ export type UnplacedReason =
 export interface TraceServerRow extends WireLabel {
   family: ServerRowFamily;
   outcome: ServerRowOutcome;
-  /** Server-side arrival → start of serve. */
+  /**
+   * How long the server spent in each phase it entered, from the frame
+   * coming off the socket to the handoff. A phase it never entered is
+   * absent, not zero. Empty on a `metadata-read` row, which has no slot in
+   * this enum and states its span in the two columns below.
+   */
+  phases: ServerPhaseDurations;
+  /**
+   * For a single-flight follower, the label of the read it waited on; null
+   * for every other row. It is what turns a coalesced wait from "it waited"
+   * into "it waited on that read", and the server-side coalescing count is
+   * a group-by over it.
+   *
+   * Labels are per connection, so a leader on another connection joins to
+   * nothing here — which is also why this carries no peer identity.
+   */
+  coalescedOnto: number | null;
+  /**
+   * On a `metadata-read` row, the open's arrival → the start of that read,
+   * which is what lets the reads be laid out across the open instead of
+   * stacked at its midpoint. Zero on every other family.
+   */
   dispatchOffsetUs: number;
-  /** Start of serve → handoff to the outbound queue. */
+  /** On a `metadata-read` row, the read itself; zero on every other family. */
   durationUs: number;
+  /** The open a `metadata-read` row belongs to, and null on every other family. */
+  requestId: string | null;
+  /** Set on `metadata-read` rows and null elsewhere. */
+  metadataPhase: MetadataReadPhase | null;
   placement: ServerPlacement | null;
   unplacedReason: UnplacedReason | null;
 }
@@ -606,8 +796,87 @@ export interface TracePointEvent {
   } | null;
 }
 
+/**
+ * The kinds of hole a run can have. A closed enum, because a reader deciding
+ * whether to trust a verdict needs to know the list is exhaustive.
+ *
+ * The first three are wall clock no recorded phase covers. The fourth is the
+ * per-run cap. The last three are stream losses: records a ring or the server
+ * dropped, which cost detail without hiding elapsed time.
+ */
+export const COVERAGE_GAP_KINDS = [
+  "nothing-recorded",
+  "unrecorded-prefix",
+  "unaccounted-interior",
+  "unrecorded-suffix",
+  "truncated",
+  "ticks-dropped",
+  "events-dropped",
+  "server-rows-dropped",
+] as const;
+export type CoverageGapKind = (typeof COVERAGE_GAP_KINDS)[number];
+
+export interface CoverageGap {
+  kind: CoverageGapKind;
+  /** Run-relative microseconds, or null when the gap is a stream loss rather than an interval. */
+  startUs: number | null;
+  endUs: number | null;
+  /** Zero for a stream loss: it cost records, not elapsed time. */
+  durationUs: number;
+  /**
+   * Records the gap swallowed, across every tier it swallowed them from.
+   * Zero for an interval gap, which has no record count; the per-tier
+   * breakdown for a truncation is on {@link TruncationRecord}.
+   */
+  records: number;
+  /**
+   * Whether the run's bottleneck could be inside this gap. A caveat that only
+   * a careful reader would derive is a caveat most readers will miss, so the
+   * gap carries the judgement rather than leaving it to each surface.
+   */
+  couldHideBottleneck: boolean;
+  /** Why this gap exists, in one sentence. Constant per kind; the numbers live in the fields. */
+  statement: string;
+}
+
+/**
+ * A limit of the instrument itself rather than of this run. Emitted on every
+ * run, identically, because they never go away: a reader who knows a run is
+ * clean still has to know what a clean run cannot tell them.
+ */
+export interface CoverageLimit {
+  id: string;
+  statement: string;
+}
+
+/**
+ * What the run measured and what it did not. On every run, including clean
+ * ones — "no stall found" is only worth anything next to how much of the run
+ * was actually instrumented.
+ */
+export interface TraceCoverage {
+  /** The run's whole duration, the denominator for everything else here. */
+  wallClockUs: number;
+  /** Wall clock covered by at least one recorded phase span, counting overlap once. */
+  accountedUs: number;
+  /** The remainder. Exact, including gaps too short to be worth listing. */
+  unaccountedUs: number;
+  /**
+   * The holes worth naming, ordered as they occurred and then by stream.
+   * Interval gaps below the reporting floor are counted in
+   * {@link unaccountedUs} but not listed, because a hundred sub-millisecond
+   * entries would bury the one that matters.
+   */
+  gaps: CoverageGap[];
+  /** Run totals for the phases that are counted rather than timed, summed off the tick samples. */
+  countedPhases: Record<CountedPhase, number>;
+  limits: readonly CoverageLimit[];
+}
+
 export interface TraceRun {
   header: RunHeader;
+  /** What this run measured and what it did not. Present on clean runs too. */
+  coverage: TraceCoverage;
   rows: TraceRow[];
   /**
    * Per-tick aggregates, oldest-first. Unlike the per-chunk tier this is a
@@ -628,6 +897,19 @@ export interface TraceRun {
    */
   serverRows: TraceServerRow[];
   /**
+   * The dataset opens this run issued, as the browser bracketed them. The
+   * metadata-read rows nest inside these, and an open still in flight at
+   * run close carries a null end rather than being dropped — an open that
+   * never settled is the most diagnostic one there is.
+   */
+  datasetOpens: DatasetOpenBracket[];
+  /**
+   * Opens this run declined to bracket because it was already holding the
+   * recorder's per-run limit. Their metadata rows arrive unplaceable, so a
+   * silent cap would look like a server that stopped reporting.
+   */
+  datasetOpensDropped: number;
+  /**
    * Server rows the server itself declared it dropped before sending. The
    * coverage story has two sources of loss once the server can be one of
    * them, and reporting only ours would overstate coverage.
@@ -635,9 +917,30 @@ export interface TraceRun {
   serverRowsDropped: number;
 }
 
+/**
+ * The retention policy the document was produced under, and what it cost.
+ *
+ * Recorded rather than assumed because the caps are derived, not universal:
+ * they come from measured volumes at a 384-member collection, and a workload
+ * an order of magnitude larger should have them re-derived rather than be
+ * quietly truncated against numbers that never fit it (ADR 0049).
+ */
+export interface RetentionRecord {
+  residentCapBytes: number;
+  perRunCapBytes: number;
+  /** Bytes the recorder holds right now, across every retained interval. */
+  residentBytes: number;
+  /** Completed intervals discarded oldest-first to stay under the resident cap. */
+  intervalsEvicted: number;
+  /** The workload the caps were derived from, and the unit they are measured in. */
+  derivedFrom: string;
+  capUnit: string;
+}
+
 export interface TraceDocument {
   schemaVersion: number;
   exportedAtEpochMs: number;
+  retention: RetentionRecord;
   /**
    * Which phases this build instruments. A document-level statement, not a
    * per-row guarantee: a row still omits any phase whose boundaries it did
@@ -652,16 +955,30 @@ export interface TraceDocument {
    * Their counts live on the per-tick samples.
    */
   countedPhases: CountedPhase[];
+  /** Chronological. Interleave with {@link steadyState} on `startedAtEpochMs`. */
   runs: TraceRun[];
   /**
-   * Rows the recorder saw while no run was open. Counted, not kept: the
-   * unlabelled steady-state interval and its retention are #927.
+   * The unlabelled intervals between runs, chronological. Recording is
+   * continuous, so steady state is retained under the same cap rather than
+   * thrown away — the pan that preceded a stall is often the thing that
+   * explains it. Same shape as a run; its header carries a null cause.
+   *
+   * Kept in its own array rather than mixed into {@link runs} so that a
+   * reader looking for a run cannot accidentally analyse an interval that has
+   * no cause, no settle and no verdict as though it were one.
+   */
+  steadyState: TraceRun[];
+  /**
+   * Rows the recorder saw with no interval to put them in — before the page
+   * registered an environment, or after it withdrew one. A run whose
+   * conditions cannot be recorded is not a comparable artifact, so these are
+   * counted rather than kept.
    */
   rowsOutsideRun: number;
   /**
-   * Server rows that arrived while no run was open. Counted, not kept: an
-   * unjoinable server row is not a diagnostic, but a silently uncounted one
-   * would make the document claim coverage it does not have.
+   * Server rows that arrived with no interval to put them in. Counted, not
+   * kept: an unjoinable server row is not a diagnostic, but a silently
+   * uncounted one would make the document claim coverage it does not have.
    */
   serverRowsOutsideRun: number;
 }

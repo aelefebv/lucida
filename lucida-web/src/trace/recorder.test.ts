@@ -3,7 +3,13 @@ import { describe, it, expect, vi } from "vitest";
 import { TraceRecorder } from "./recorder.ts";
 import { noopSinkFactory } from "./sink.ts";
 import { createQuiescenceState, evaluateQuiescence, type QuiescenceState } from "./quiescence.ts";
-import { Boundary, RowOutcome, TRACE_SCHEMA_VERSION } from "./types.ts";
+import {
+  Boundary,
+  LABEL_NONE,
+  PHASE_UNSET,
+  RowOutcome,
+  TRACE_SCHEMA_VERSION,
+} from "./types.ts";
 
 const OPEN_CAUSE = { epoch: "content", dirtyKind: "interactive", source: "dataset_added" } as const;
 
@@ -58,13 +64,51 @@ function makeRecorder(overrides: Partial<ConstructorParameters<typeof TraceRecor
 }
 
 describe("TraceRecorder run lifecycle", () => {
-  it("records nothing into a run until one is open, but counts what it saw", () => {
+  it("keeps work seen before the first run as an unlabelled steady-state interval", () => {
     const { recorder } = makeRecorder();
+    expect(recorder.beginChunkRow(CHUNK, 0)).toBeGreaterThanOrEqual(0);
+
+    const doc = recorder.exportDocument();
+    expect(doc.runs).toHaveLength(0);
+    expect(doc.steadyState).toHaveLength(1);
+    expect(doc.steadyState[0].header.cause).toBeNull();
+    expect(doc.steadyState[0].rows).toHaveLength(1);
+    expect(doc.rowsOutsideRun).toBe(0);
+  });
+
+  it("counts, without keeping, what it saw with no page to say what conditions applied", () => {
+    const { recorder } = makeRecorder();
+    recorder.setEnvironment(null);
     expect(recorder.beginChunkRow(CHUNK, 0)).toBe(-1);
 
     const doc = recorder.exportDocument();
     expect(doc.runs).toHaveLength(0);
+    expect(doc.steadyState).toHaveLength(0);
     expect(doc.rowsOutsideRun).toBe(1);
+  });
+
+  it("hands the steady state before a run over as its own interval", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.beginChunkRow(CHUNK, 0);
+    advance(200);
+    recorder.openRun(OPEN_CAUSE);
+    recorder.beginChunkRow(CHUNK, 0);
+    recorder.closeRun("explicit");
+
+    const doc = recorder.exportDocument();
+    expect(doc.steadyState.map(interval => interval.header.endReason)).toEqual(["run-opened"]);
+    expect(doc.runs).toHaveLength(1);
+    expect(doc.runs[0].rows).toHaveLength(1);
+  });
+
+  it("discards an unlabelled interval that recorded nothing", () => {
+    const { recorder } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    recorder.closeRun("explicit");
+
+    const doc = recorder.exportDocument();
+    expect(doc.runs).toHaveLength(1);
+    expect(doc.steadyState).toEqual([]);
   });
 
   it("does not open a run before the page can say what conditions it ran under", () => {
@@ -348,10 +392,23 @@ describe("TraceRecorder server rows", () => {
   const BATCH = {
     dropped: 2,
     rid: [5],
+    request_id: [null],
+    metadata_phase: [null],
+    dispatch_offset_us: [0],
+    duration_us: [0],
     family: ["chunk" as const],
-    dispatch_offset_us: [100],
-    duration_us: [2_900],
     outcome: ["delivered" as const],
+    arrival_us: [100],
+    binding_lookup_us: [PHASE_UNSET],
+    dispatch_us: [PHASE_UNSET],
+    cache_lookup_us: [PHASE_UNSET],
+    permit_wait_us: [2_000],
+    backend_read_us: [900],
+    coalesced_wait_us: [PHASE_UNSET],
+    decompress_us: [PHASE_UNSET],
+    slice_encode_us: [PHASE_UNSET],
+    handoff_us: [PHASE_UNSET],
+    coalesced_onto: [LABEL_NONE],
   };
 
   it("places a server row inside the bracket the browser measured", () => {
@@ -376,13 +433,24 @@ describe("TraceRecorder server rows", () => {
     expect(run.serverRowsDropped).toBe(2);
   });
 
-  it("counts server rows that arrive between runs instead of keeping them", () => {
+  it("keeps server rows that arrive between runs in the steady-state interval", () => {
     const { recorder } = makeRecorder();
     recorder.ingestServerBatch(BATCH, 1);
     const doc = recorder.exportDocument();
 
-    expect(doc.serverRowsOutsideRun).toBe(1);
+    expect(doc.serverRowsOutsideRun).toBe(0);
     expect(doc.runs).toHaveLength(0);
+    expect(doc.steadyState[0].serverRows).toHaveLength(1);
+  });
+
+  it("counts server rows that arrive with no interval to put them in", () => {
+    const { recorder } = makeRecorder();
+    recorder.setEnvironment(null);
+    recorder.ingestServerBatch(BATCH, 1);
+    const doc = recorder.exportDocument();
+
+    expect(doc.serverRowsOutsideRun).toBe(1);
+    expect(doc.steadyState).toHaveLength(0);
   });
 
   it("gives every coalesced row the same label, so the join is a group-by", () => {
@@ -418,5 +486,153 @@ describe("TraceRecorder sink injection", () => {
 
     expect(row).toBeGreaterThanOrEqual(0);
     expect(recorder.exportDocument().runs[0].rows).toHaveLength(0);
+  });
+});
+
+describe("TraceRecorder dataset opens", () => {
+  function metadataBatch(offsetUs: number, durationUs: number, requestId = "req-1") {
+    return {
+      dropped: 0,
+      rid: [0],
+      request_id: [requestId],
+      family: ["metadata_read" as const],
+      metadata_phase: ["backend_read" as const],
+      dispatch_offset_us: [offsetUs],
+      duration_us: [durationUs],
+      outcome: ["delivered" as const],
+      // A metadata read has no slot in the chunk phase enum.
+      arrival_us: [PHASE_UNSET],
+      binding_lookup_us: [PHASE_UNSET],
+      dispatch_us: [PHASE_UNSET],
+      cache_lookup_us: [PHASE_UNSET],
+      permit_wait_us: [PHASE_UNSET],
+      backend_read_us: [PHASE_UNSET],
+      coalesced_wait_us: [PHASE_UNSET],
+      decompress_us: [PHASE_UNSET],
+      slice_encode_us: [PHASE_UNSET],
+      handoff_us: [PHASE_UNSET],
+      coalesced_onto: [LABEL_NONE],
+    };
+  }
+
+  it("opens a run at the open request, so a cold open's reads land inside one", () => {
+    const { recorder, advance } = makeRecorder();
+    // No run is open, and the first chunk does not exist yet — the reads
+    // about to arrive have nowhere else to go.
+    expect(recorder.isRunOpen).toBe(false);
+    recorder.noteOpenSent("req-1");
+    expect(recorder.isRunOpen).toBe(true);
+
+    advance(2_000);
+    recorder.ingestServerBatch(metadataBatch(150_000, 63_000), 1);
+    recorder.noteOpenSettled("req-1");
+
+    const run = recorder.exportDocument().runs[0];
+    expect(run.datasetOpens).toEqual([{ requestId: "req-1", startUs: 0, endUs: 2_000_000 }]);
+    expect(run.serverRows[0].placement).toEqual({
+      startUs: 150_000,
+      endUs: 213_000,
+      gapUs: 0,
+      overshootUs: 0,
+    });
+  });
+
+  it("keeps a failed open's rows, which is the case that needs them", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.noteOpenSent("req-1");
+    advance(800);
+    // The reads arrived on the timing ticker while the open was running;
+    // the open then failed and settled with no dataset.
+    recorder.ingestServerBatch(metadataBatch(10_000, 500_000), 1);
+    recorder.noteOpenSettled("req-1");
+
+    const run = recorder.exportDocument().runs[0];
+    expect(run.serverRows).toHaveLength(1);
+    expect(run.serverRows[0].unplacedReason).toBeNull();
+    expect(run.datasetOpens[0].endUs).toBe(800_000);
+  });
+
+  it("carries an open that never settled with a null end", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.noteOpenSent("req-1");
+    advance(400);
+    recorder.ingestServerBatch(metadataBatch(1_000, 2_000), 1);
+
+    const run = recorder.exportDocument().runs[0];
+    expect(run.datasetOpens[0].endUs).toBeNull();
+    // Placement needs only the start, so the reads are still readable.
+    expect(run.serverRows[0].placement?.startUs).toBe(1_000);
+  });
+
+  it("counts the opens it declined to bracket rather than dropping them silently", () => {
+    const { recorder } = makeRecorder();
+    for (let i = 0; i < 70; i++) recorder.noteOpenSent(`req-${i}`);
+
+    const run = recorder.exportDocument().runs[0];
+    expect(run.datasetOpens).toHaveLength(64);
+    expect(run.datasetOpensDropped).toBe(6);
+  });
+
+  it("holds the run open while an open is unsettled, or a cold open discards its own rows", () => {
+    vi.useFakeTimers();
+    try {
+      const { recorder, advance } = makeRecorder();
+      recorder.noteOpenSent("req-1");
+      // Before the first chunk exists the pipeline is trivially quiescent:
+      // nothing dirty, nothing wanted, nothing in flight. The server is
+      // several seconds into reading metadata.
+      recorder.noteQuiescence(evaluateQuiescence(inputs(), 1_000));
+      advance(4_000);
+      vi.advanceTimersByTime(4_000);
+      expect(recorder.isRunOpen).toBe(true);
+
+      recorder.ingestServerBatch(metadataBatch(3_000_000, 900_000), 1);
+      recorder.noteOpenSettled("req-1");
+      // Settling re-reads the page's last published state, so the hold
+      // starts here rather than at the next tick, which may never come.
+      vi.advanceTimersByTime(500);
+      expect(recorder.isRunOpen).toBe(false);
+
+      const [run] = recorder.exportDocument().runs;
+      expect(run.header.endReason).toBe("quiescent");
+      // The rows the open produced are inside the run, which is the point.
+      expect(run.serverRows).toHaveLength(1);
+      expect(run.serverRows[0].placement?.startUs).toBe(3_000_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still times out a run whose open never settles", () => {
+    vi.useFakeTimers();
+    try {
+      const { recorder } = makeRecorder();
+      recorder.noteOpenSent("req-1");
+      recorder.noteQuiescence(evaluateQuiescence(inputs(), 1_000));
+      // An unsettled open holds off quiescence, not the timeout: a run that
+      // never finishes is the most diagnostic one there is, and it has to
+      // be emitted rather than held open forever.
+      vi.advanceTimersByTime(4_999);
+      expect(recorder.isRunOpen).toBe(true);
+      vi.advanceTimersByTime(1);
+      expect(recorder.isRunOpen).toBe(false);
+
+      const [run] = recorder.exportDocument().runs;
+      expect(run.header.endReason).toBe("timeout");
+      expect(run.datasetOpens[0].endUs).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ignores a second settle, so a straggler cannot move an end that happened", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.noteOpenSent("req-1");
+    advance(100);
+    recorder.noteOpenSettled("req-1");
+    advance(900);
+    recorder.noteOpenSettled("req-1");
+
+    expect(recorder.exportDocument().runs[0].datasetOpens[0].endUs).toBe(100_000);
   });
 });

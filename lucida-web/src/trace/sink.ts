@@ -47,6 +47,12 @@ export interface TraceSink {
   ): void;
   serialiseEvents(): TracePointEvent[];
   readonly length: number;
+  /**
+   * Whether this sink recorded nothing at all, across every tier. An
+   * unlabelled interval that saw no work is not an artifact and is discarded
+   * rather than retained under the cap.
+   */
+  readonly isEmpty: boolean;
   readonly byteLength: number;
   readonly ticksDropped: number;
   readonly eventsDropped: number;
@@ -88,6 +94,10 @@ export class NoopTraceSink implements TraceSink {
 
   get length(): number {
     return this.rows;
+  }
+
+  get isEmpty(): boolean {
+    return true;
   }
 
   get byteLength(): number {
@@ -153,6 +163,10 @@ export class TableTraceSink implements TraceSink {
 
   get length(): number {
     return this.rows.length;
+  }
+
+  get isEmpty(): boolean {
+    return this.rows.length === 0 && this.ticks.length === 0 && this.events.length === 0;
   }
 
   /** Every tier a run holds, because the resident cap in ADR 0049 is on the run. */

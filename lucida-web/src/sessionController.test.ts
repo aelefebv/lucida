@@ -691,7 +691,7 @@ describe("SessionController error recovery and precedence", () => {
 
   it("dataset-open progress still supersedes a previous open failure", () => {
     const { handlers, events } = makeHarness();
-    handlers.onOpenDatasetFailed?.("http://example/a.zarr", "permission denied");
+    handlers.onOpenDatasetFailed?.("req-open", "http://example/a.zarr", "permission denied");
     expect(lastActivity(events).error).toBe("permission denied");
 
     handlers.onDatasetOpenProgress?.("req-1", "http://example/b.zarr", {
@@ -706,7 +706,7 @@ describe("SessionController error recovery and precedence", () => {
     // problem — the stalling canvas would otherwise be attributed to the
     // wrong (already-final) cause. open/data resolve by last-writer.
     const { handlers, events } = makeHarness();
-    handlers.onOpenDatasetFailed?.("http://example/a.zarr", "permission denied");
+    handlers.onOpenDatasetFailed?.("req-open", "http://example/a.zarr", "permission denied");
     expect(lastActivity(events).error).toBe("permission denied");
 
     MockedCpuCache.instances[0].config!.onChunkFailureStreak!(12, "403 rejected");
@@ -717,7 +717,7 @@ describe("SessionController error recovery and precedence", () => {
     const { handlers, events } = makeHarness();
     MockedCpuCache.instances[0].config!.onChunkFailureStreak!(12, "403 rejected");
 
-    handlers.onOpenDatasetFailed?.("http://example/a.zarr", "permission denied");
+    handlers.onOpenDatasetFailed?.("req-open", "http://example/a.zarr", "permission denied");
     expect(lastActivity(events).error).toBe("permission denied");
   });
 
@@ -953,7 +953,7 @@ describe("SessionController durable import warnings", () => {
     });
     expect(lastActivity(events).warnings).toStrictEqual(["warn-a", "warn-b"]);
 
-    handlers.onOpenDatasetFailed?.("gs://a.zarr", "object not found");
+    handlers.onOpenDatasetFailed?.("req-open", "gs://a.zarr", "object not found");
     expect(lastActivity(events).warnings).toStrictEqual(["warn-b"]);
   });
 
@@ -972,7 +972,7 @@ describe("SessionController durable import warnings", () => {
       message: sampledLabelNotice,
       warning: true,
     });
-    handlers.onOpenDatasetFailed?.("gs://a.zarr", "object not found");
+    handlers.onOpenDatasetFailed?.("req-open", "gs://a.zarr", "object not found");
     expect(lastActivity(events).warnings).toStrictEqual([sampledLabelNotice]);
   });
 
@@ -1112,7 +1112,7 @@ describe("SessionController import-warning cap", () => {
     floodWarnings(handlers, "gs://b.zarr", 7, "b");
     expect(lastActivity(events).warningsOverflow).toBe(5 + 7);
 
-    handlers.onOpenDatasetFailed?.("gs://b.zarr", "object not found");
+    handlers.onOpenDatasetFailed?.("req-open", "gs://b.zarr", "object not found");
     // b contributed no retained warnings (display was already full), so the
     // list is unchanged; only b's 7 overflow are retired.
     const activity = lastActivity(events);
@@ -1130,7 +1130,7 @@ describe("SessionController import-warning cap", () => {
     floodWarnings(handlers, "gs://b.zarr", 3, "b");
     expect(lastActivity(events).warningsOverflow).toBe(5 + 3);
 
-    handlers.onOpenDatasetFailed?.("gs://a.zarr", "object not found");
+    handlers.onOpenDatasetFailed?.("req-open", "gs://a.zarr", "object not found");
     const activity = lastActivity(events);
     // The detailed list emptied with A, but the fact of B's warnings survives.
     expect(activity.warnings).toStrictEqual([]);
