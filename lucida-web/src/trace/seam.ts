@@ -19,6 +19,9 @@
  */
 
 import { toChromeTraceJson } from "./chromeTrace.ts";
+import { diagnoseDocument } from "./diagnose/diagnose.ts";
+import { renderDiagnostic } from "./diagnose/renderText.ts";
+import type { DiagnosticDocument } from "./diagnose/types.ts";
 import { traceRecorder } from "./recorder.ts";
 import type { QuiescenceState } from "./quiescence.ts";
 import { TRACE_SCHEMA_VERSION, type GpuIdentity, type TraceDocument } from "./types.ts";
@@ -57,6 +60,26 @@ export interface LucidaTraceSeam {
    * the same export, in the other format.
    */
   exportChromeTrace(): string;
+  /**
+   * The trace read as a diagnostic (#933): thresholds, the attribution
+   * back-walk, the coverage block and the verdict. Defaults to the newest run.
+   *
+   * The derivation lives behind the seam because both surfaces read it — the
+   * monitor's cards and the agent's text render from this one object, so they
+   * cannot disagree — and because a CLI that computed its own verdict would
+   * make the second entry point a second-class citizen.
+   *
+   * Closes the run in progress, exactly as {@link exportTrace} does: asking
+   * what a run means concludes the interval being asked about.
+   */
+  diagnose(runId?: string): DiagnosticDocument;
+  /**
+   * The same diagnostic rendered as the default text. One renderer, so every
+   * number in the text exists in {@link diagnose}'s output — a caller drops to
+   * the JSON for the fields the text selected against, never for a different
+   * answer.
+   */
+  diagnoseText(runId?: string): string;
   /** Close the run in progress without exporting — the *Stop & analyse* path. */
   closeRun(): void;
 }
@@ -82,6 +105,9 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
     },
     exportTrace: () => traceRecorder.exportDocument(),
     exportChromeTrace: () => toChromeTraceJson(traceRecorder.exportDocument()),
+    diagnose: (runId?: string) => diagnoseDocument(traceRecorder.exportDocument(), { runId }),
+    diagnoseText: (runId?: string) =>
+      renderDiagnostic(diagnoseDocument(traceRecorder.exportDocument(), { runId })).text,
     closeRun: () => traceRecorder.closeRun("explicit"),
   };
   target.lucidaTrace = seam;
