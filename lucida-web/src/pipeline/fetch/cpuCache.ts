@@ -506,7 +506,13 @@ export class CpuCache {
     // Closes the plan phase at the exact instant the scheduler took the
     // requests, so a row's plan end and its queue start are one number rather
     // than two readings of the clock that nearly agree.
-    traceRecorder.notePlanEnqueue(enqueueNow);
+    //
+    // Only when this submit actually enqueued something. A submit that
+    // enqueues no chunks has no row to attribute, and one arriving from
+    // outside a tick — `requestTestProxy` is the only such caller — would
+    // otherwise close a plan pass that a tick opened long ago and publish the
+    // gap between them as plan time.
+    if (pendingChunks.length > 0) traceRecorder.notePlanEnqueue(enqueueNow);
     this.chunkScheduler.enqueue(
       orderChunkRequestsForTierAllocation(pendingChunks, pendingTiers),
       enqueueNow,
@@ -776,8 +782,8 @@ export class CpuCache {
       // frame proves the worker has written it; the handle is cleared off the
       // entry so a re-delivery after an eviction cannot re-stamp a row whose
       // life is already over.
-      if (delivery.traceRow !== undefined && delivery.traceRow >= 0) {
-        traceRecorder.noteHandedToRenderer(delivery.traceRow);
+      if ((delivery.traceRow ?? -1) >= 0) {
+        traceRecorder.noteHandedToRenderer(delivery.traceRow!);
         const entry =
           this.chunkStore.get(delivery.entityId, delivery.chunkKey) ??
           this.overviewStore.get(delivery.entityId, delivery.chunkKey);

@@ -352,6 +352,11 @@ export class TraceRecorder {
    * the worker gets to it, which the main thread learns by ordering rather
    * than by asking: the next render message cannot be processed before the
    * upload ahead of it.
+   *
+   * A row exists only for a chunk this page fetched. A chunk re-delivered
+   * from the CPU cache — evicted from the GPU and sent again within the same
+   * page — carries no row and so contributes no second `upload`. Its first
+   * delivery is recorded; the re-delivery is not.
    */
   noteHandedToRenderer(handle: number): void {
     if (handle < 0 || !this.resolve(handle)) return;

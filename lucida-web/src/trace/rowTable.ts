@@ -13,7 +13,6 @@
 import {
   BOUNDARY_COUNT,
   LANE_NAMES,
-  UNKNOWN_LANE,
   laneIndex,
   RESIDENCY_TIER_NAMES,
   ROW_OUTCOME_NAMES,
@@ -170,7 +169,7 @@ export class RowTable {
         datasetId: this.strings.get(this.datasetIds[i]),
         entityId: this.strings.get(this.entityIds[i]),
         imageId: this.strings.get(this.imageIds[i]),
-        lane: this.lanes[i] === UNKNOWN_LANE ? null : LANE_NAMES[this.lanes[i]],
+        lane: LANE_NAMES[this.lanes[i]],
         residencyTier: RESIDENCY_TIER_NAMES[this.tiers[i]],
         level,
         t,

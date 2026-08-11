@@ -132,12 +132,14 @@ export const LANE_NAMES: readonly LaneName[] = [
   "overview",
 ];
 
-/** The column value for an unrecognised lane, so a new lane cannot silently read as `minimap`. */
-export const UNKNOWN_LANE = 0xff;
-
-export function laneIndex(lane: string): number {
-  const index = LANE_NAMES.indexOf(lane as LaneName);
-  return index < 0 ? UNKNOWN_LANE : index;
+/**
+ * Declared here rather than imported from the planner, so a lane added there
+ * and not here fails to compile at the emit site. The alternative — a runtime
+ * sentinel for an unrecognised lane — turns the drift into a column of nulls
+ * nobody reads until they wonder where a lane went.
+ */
+export function laneIndex(lane: LaneName): number {
+  return LANE_NAMES.indexOf(lane);
 }
 
 /**
@@ -149,7 +151,7 @@ export interface ChunkRowSource {
   datasetId: string;
   entityId: string;
   imageId: string;
-  lane: string;
+  lane: LaneName;
   level: number;
   t: number;
   c: number;
@@ -299,8 +301,8 @@ export interface TraceRow {
   datasetId: string;
   entityId: string;
   imageId: string;
-  /** An attribute, not a phase. Absent when the lane was not one this build knows. */
-  lane: LaneName | null;
+  /** An attribute, not a phase. */
+  lane: LaneName;
   residencyTier: ResidencyTierName;
   level: number;
   t: number;
@@ -325,10 +327,11 @@ export interface TraceDocument {
   schemaVersion: number;
   exportedAtEpochMs: number;
   /**
-   * Which phases carry timings in this document. The row model reserves a
-   * slot for every phase in {@link PHASES}; this states which of them were
-   * actually measured, so an absent phase reads as "not instrumented"
-   * rather than "took no time".
+   * Which phases this build instruments. A document-level statement, not a
+   * per-row guarantee: a row still omits any phase whose boundaries it did
+   * not reach, and an omitted phase reads as "not measured on this row"
+   * rather than "took no time". A phase absent from this list was never
+   * measured anywhere.
    */
   instrumentedPhases: Phase[];
   runs: TraceRun[];

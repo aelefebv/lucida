@@ -8,7 +8,7 @@ function source(overrides: Partial<Parameters<RowTable["append"]>[0]> = {}) {
     datasetId: "ds",
     entityId: "member-1",
     imageId: "image-1",
-    lane: "detail",
+    lane: "detail" as const,
     level: 2,
     t: 3,
     c: 1,
@@ -46,15 +46,12 @@ describe("RowTable", () => {
   });
 
   it("carries lane as a column, not as a phase", () => {
-    const table = new RowTable(3);
+    const table = new RowTable(2);
     table.append(source({ lane: "prefetch" }), 0);
     table.append(source({ lane: "minimap" }), 1);
-    // A lane this build does not know reads as absent rather than as the
-    // first name in the list.
-    table.append(source({ lane: "not-a-lane" }), 0);
 
     const rows = table.serialise();
-    expect(rows.map(r => r.lane)).toEqual(["prefetch", "minimap", null]);
+    expect(rows.map(r => r.lane)).toEqual(["prefetch", "minimap"]);
     expect(rows.every(r => Object.keys(r.phases).length === 0)).toBe(true);
   });
 

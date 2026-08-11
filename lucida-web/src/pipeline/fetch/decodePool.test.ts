@@ -11,7 +11,7 @@ const CHUNK = {
   datasetId: "ds",
   entityId: "member-1",
   imageId: "image-1",
-  lane: "detail",
+  lane: "detail" as const,
   level: 0,
   t: 0,
   c: 0,
