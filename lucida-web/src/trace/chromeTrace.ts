@@ -255,6 +255,10 @@ function emitRun(events: ChromeTraceEvent[], run: TraceRun, baseUs: number): voi
         rid: serverRow.rid,
         connectionGeneration: serverRow.connectionGeneration,
         outcome: serverRow.outcome,
+        phases: serverRow.phases,
+        coalescedOnto: serverRow.coalescedOnto,
+        requestId: serverRow.requestId,
+        metadataPhase: serverRow.metadataPhase,
         dispatchOffsetUs: serverRow.dispatchOffsetUs,
         durationUs: serverRow.durationUs,
         gapUs: placement.gapUs,
@@ -320,6 +324,7 @@ function countUndrawableInFlight(rows: readonly TraceRow[]): number {
 function countUnplaced(rows: readonly TraceServerRow[]): Record<UnplacedReason, number> {
   const counts: Record<UnplacedReason, number> = {
     "no-browser-row": 0,
+    "no-open-bracket": 0,
     "answered-without-delivery": 0,
     "bracket-open": 0,
   };

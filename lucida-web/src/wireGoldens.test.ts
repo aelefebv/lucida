@@ -86,7 +86,8 @@ import {
   type WireAssetCatalogDelta,
 } from "./pipeline/assetCatalog.ts";
 import { ProxiedContentSource } from "./pipeline/fetch/contentSource.ts";
-import { ServerRowTable } from "./trace/serverRowTable.ts";
+import { ServerRowTable, serverRowTotalUs } from "./trace/serverRowTable.ts";
+import { LABEL_NONE, PHASE_UNSET } from "./trace/types.ts";
 import { COLORMAP_NAMES } from "./colormaps.ts";
 import {
   type ArcballCamera,
@@ -1154,6 +1155,9 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     const { ws } = openBridge({ onOpenDatasetFailed });
     deliver(ws, raw);
     expect(onOpenDatasetFailed).toHaveBeenCalledWith(
+      // The open's own id comes back with the failure: the trace closes a
+      // failed open's bracket exactly as it closes a successful one's.
+      "web-81c09b",
       "gs://lucida-fixtures/missing.zarr",
       "object not found",
     );
@@ -1307,11 +1311,28 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
       type: "timing_batch",
       batch: {
         dropped: 3,
-        rid: [2558, 2559],
-        family: ["chunk", "asset"],
-        dispatch_offset_us: [142, 96],
-        duration_us: [8137, 214902],
-        outcome: ["delivered", "not_ready"],
+        rid: [2558, 2559, 0],
+        request_id: [null, null, "web-open-4c1a"],
+        family: ["chunk", "asset", "metadata_read"],
+        metadata_phase: [null, null, "backend_read"],
+        // A metadata read has no slot in the phase enum, so it states its
+        // span here and leaves every phase column unset.
+        dispatch_offset_us: [0, 0, 1204],
+        duration_us: [0, 0, 63441],
+        outcome: ["delivered", "not_ready", "delivered"],
+        arrival_us: [142, 96, PHASE_UNSET],
+        binding_lookup_us: [37, 41, PHASE_UNSET],
+        dispatch_us: [88, 74, PHASE_UNSET],
+        cache_lookup_us: [2, 3, PHASE_UNSET],
+        // The second row never touched the source store, so its store
+        // phases are unset rather than zero.
+        permit_wait_us: [3100000, PHASE_UNSET, PHASE_UNSET],
+        backend_read_us: [211400, PHASE_UNSET, PHASE_UNSET],
+        coalesced_wait_us: [PHASE_UNSET, PHASE_UNSET, PHASE_UNSET],
+        decompress_us: [4512, PHASE_UNSET, PHASE_UNSET],
+        slice_encode_us: [903, PHASE_UNSET, PHASE_UNSET],
+        handoff_us: [61, 55, PHASE_UNSET],
+        coalesced_onto: [LABEL_NONE, LABEL_NONE, LABEL_NONE],
       },
     });
 
@@ -1329,9 +1350,23 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     const table = new ServerRowTable();
     table.ingest(batch, generation);
     expect(table.droppedCount).toBe(3);
-    expect(table.serialise().map(row => [row.rid, row.family, row.durationUs])).toEqual([
-      [2558, "chunk", 8137],
-      [2559, "asset", 214902],
+    expect(
+      table
+        .serialise()
+        .map(row => [
+          row.rid,
+          row.family,
+          serverRowTotalUs(row.phases),
+          row.durationUs,
+          row.requestId,
+          row.metadataPhase,
+        ]),
+    ).toEqual([
+      [2558, "chunk", 142 + 37 + 88 + 2 + 3100000 + 211400 + 4512 + 903 + 61, 0, null, null],
+      [2559, "asset", 96 + 41 + 74 + 3 + 55, 0, null, null],
+      // The metadata read keys on the open, not on a correlation label, and
+      // its span is in its own column rather than in any phase.
+      [0, "metadata-read", 0, 63441, "web-open-4c1a", "backend-read"],
     ]);
   });
 

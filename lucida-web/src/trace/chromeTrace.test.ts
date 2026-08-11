@@ -43,6 +43,7 @@ const HEADER: RunHeader = {
   durationUs: 5_000_000,
   quiescenceHoldMs: 500,
   timeoutMs: 60_000,
+  truncation: null,
   outstandingAtSettle: {
     pending: 0,
     inFlight: 0,
@@ -104,6 +105,14 @@ function tick(atUs: number): TraceTick {
 function run(overrides: Partial<TraceRun> = {}): TraceRun {
   return {
     header: HEADER,
+    coverage: {
+      wallClockUs: HEADER.durationUs,
+      accountedUs: 0,
+      unaccountedUs: HEADER.durationUs,
+      gaps: [],
+      countedPhases: { "cache-admission": 0, "worker-dispatch": 0, "coalesce-attach": 0 },
+      limits: [],
+    },
     rows: [],
     ticks: [],
     ticksDropped: 0,
@@ -112,6 +121,8 @@ function run(overrides: Partial<TraceRun> = {}): TraceRun {
     events: [],
     eventsDropped: 0,
     serverRows: [],
+    datasetOpens: [],
+    datasetOpensDropped: 0,
     serverRowsDropped: 0,
     ...overrides,
   };
@@ -123,7 +134,16 @@ function doc(...runs: TraceRun[]): TraceDocument {
     exportedAtEpochMs: 1_700_000_010_000,
     instrumentedPhases: [...PHASES],
     countedPhases: ["cache-admission", "worker-dispatch", "coalesce-attach"],
+    retention: {
+      residentCapBytes: 8 * 1024 * 1024,
+      perRunCapBytes: 2 * 1024 * 1024,
+      residentBytes: 0,
+      intervalsEvicted: 0,
+      derivedFrom: "",
+      capUnit: "",
+    },
     runs,
+    steadyState: [],
     rowsOutsideRun: 4,
     serverRowsOutsideRun: 1,
   };
@@ -258,8 +278,12 @@ describe("the Chrome Trace Event projection", () => {
               connectionGeneration: 1,
               family: "chunk",
               outcome: "delivered",
-              dispatchOffsetUs: 100,
-              durationUs: 900,
+              phases: { arrival: 100, "backend-read": 800 },
+              coalescedOnto: null,
+              requestId: null,
+              metadataPhase: null,
+              dispatchOffsetUs: 0,
+              durationUs: 0,
               placement: { startUs: 2_000, endUs: 2_900, gapUs: 2_100, overshootUs: 0 },
               unplacedReason: null,
             },
@@ -283,8 +307,12 @@ describe("the Chrome Trace Event projection", () => {
             connectionGeneration: 1,
             family: "asset",
             outcome: "not-ready",
-            dispatchOffsetUs: 10,
-            durationUs: 20,
+            phases: { arrival: 10, handoff: 20 },
+            coalescedOnto: null,
+            requestId: null,
+            metadataPhase: null,
+            dispatchOffsetUs: 0,
+            durationUs: 0,
             placement: null,
             unplacedReason: "answered-without-delivery",
           },
@@ -297,6 +325,7 @@ describe("the Chrome Trace Event projection", () => {
     const header = chromeTraceOtherData(document);
     expect((header.runs as Record<string, unknown>[])[0].unplacedServerRows).toEqual({
       "no-browser-row": 0,
+      "no-open-bracket": 0,
       "answered-without-delivery": 1,
       "bracket-open": 0,
     });

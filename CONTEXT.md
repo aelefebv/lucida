@@ -139,6 +139,15 @@ by quiescence or explicitly. A dataset-open run and an interaction run are the
 same object, differing only in cause.
 _Avoid_: session, capture, trial
 
+**Steady-state interval**:
+The unlabelled interval between runs. The same object as a run with no cause, so
+the pan that preceded a stall is retained rather than discarded, and it is
+retained under the same resident cap. It rotates rather than truncates when it
+reaches the per-run cap: a run's beginning is its diagnostic payload, but steady
+state has no privileged start, and truncating it would delete the most recent
+work — the very thing it is kept for.
+_Avoid_: idle interval, gap, background run (a *gap* is a hole in coverage)
+
 **Lifecycle row**:
 The per-chunk unit of record: one fixed-width row with a timestamp slot per phase
 boundary. A row, not a list of spans — spans exist only at export.
@@ -152,10 +161,40 @@ Published by the page as a boolean, never inferred from the outside.
 _Avoid_: idle, settled, done, ready (`ready` already means "a frame was drawn")
 
 **End reason**:
-Why a run closed — `quiescent`, `timeout`, or `explicit`. A required field: a run
-that never settled is still a run, and the reason is the difference between a
-result and a missing one.
+Why a run closed — `quiescent`, `timeout`, or `explicit`, plus two that belong to
+a steady-state interval alone: `run-opened` when a labelled run began, and
+`rotated` when the interval reached the per-run cap and handed over to a fresh
+one. A required field: a run that never settled is still a run, and the reason is
+the difference between a result and a missing one.
 _Avoid_: status, outcome
+
+**Truncation record**:
+What a run stopped recording, and how much it went on to miss — offset, cap, rows
+recorded, rows unrecorded. A record, not a boolean: a truncated run stops storing
+rows but keeps counting them, which turns "truncated at 18,000 rows" into
+"truncated at 18,000 of an eventual 63,412".
+_Avoid_: truncated flag, overflow, dropped (a *drop* is a ring overwriting its
+oldest record, which is a different loss)
+
+**Coverage block**:
+What a run measured and what it did not — accounted wall clock, the gaps, the
+counted phases, and the structural limits. On every run, including clean ones,
+because "no stall found" is worth nothing without its denominator.
+_Avoid_: completeness, confidence, quality score
+
+**Coverage gap**:
+A hole in what a run can account for: wall clock no phase covers, the tail after a
+truncation, or records a ring or the server dropped. Each carries whether the
+bottleneck could be inside it, so the judgement is made once rather than by each
+reading surface.
+_Avoid_: missing data, hole, blind spot
+
+**Structural limit**:
+Something this instrument can never measure, on any run — the 100 µs clock floor,
+queue time before the admission window, the unattributed remainder inside a
+request. Stated on every run because a reader who has just been told a run is
+clean is the one who needs to know what a clean run still cannot tell them.
+_Avoid_: caveat, known issue, limitation (a limitation sounds fixable)
 
 **Trace seam**:
 The page-level export function that returns the trace document. The one place
@@ -231,8 +270,21 @@ client)
 **Bracket**:
 The interval a browser row measures around one wire request, on one clock. Server
 rows are placed by nesting inside it rather than by clock synchronisation, so the
-unattributed remainder is named as a gap rather than absorbed.
+unattributed remainder is named as a gap rather than absorbed. A dataset open has
+a bracket of its own, keyed by request id, and the metadata reads nest in that.
 _Avoid_: window, span, round trip
+
+**Metadata read**:
+One object read the server performs while opening a dataset — resolving the
+dataset's shape, before any chunk exists. Its own server-row family, keyed on the
+open's request id rather than on a correlation label, and its own short phase
+vocabulary: `cache-hit`, `coalesced-wait`, `backend-read`. Only a `backend-read`
+is a round trip, and an open's `backend-read` count is the trips that open
+performed — a `coalesced-wait` may have been served by a leader outside it.
+Why it keys on the open and why the family is its own:
+`wiki/decisions/0048-correlating-work-across-the-browser-server-boundary.md` and
+`wiki/decisions/0050-server-timings-reach-the-monitor.md`.
+_Avoid_: metadata fetch, import read, open read
 
 **Boundary**:
 The handoff a lifecycle row stamps. A row holds one timestamp slot per boundary,

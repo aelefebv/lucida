@@ -14,7 +14,9 @@
  */
 
 import { buildIdentity } from "./buildInfo.ts";
+import { computeCoverage } from "./coverage.ts";
 import { placeServerRows } from "./merge.ts";
+import { CAP_DERIVATION, CAP_UNIT, PER_RUN_CAP_BYTES, RESIDENT_CAP_BYTES } from "./retention.ts";
 import { ServerRowTable, type ServerTimingBatch } from "./serverRowTable.ts";
 import type { QuiescenceState } from "./quiescence.ts";
 import { tableSinkFactory, type TraceSink, type TraceSinkFactory } from "./sink.ts";
@@ -30,6 +32,7 @@ import {
   type ChunkEventSource,
   type ChunkRowSource,
   type CountedPhaseIndexValue,
+  type DatasetOpenBracket,
   type EndReason,
   type CacheWarmth,
   type GpuIdentity,
@@ -43,6 +46,7 @@ import {
   type RunHeader,
   type TraceDocument,
   type TraceRun,
+  type TruncationRecord,
   type WireLabel,
 } from "./types.ts";
 
@@ -89,6 +93,17 @@ export const DEFAULT_QUIESCENCE_HOLD_MS = 500;
 export const DEFAULT_RUN_TIMEOUT_MS = 60_000;
 
 /**
+ * How many dataset opens one run brackets.
+ *
+ * A page opens a handful — a workspace reload opens its members, a person
+ * opens one at a time — so this is a backstop against a page that loops,
+ * not a budget anyone spends. Opens past it are counted rather than
+ * bracketed, because their metadata rows then arrive unplaceable and a
+ * silent cap would read as a server that stopped reporting.
+ */
+export const MAX_TRACKED_OPENS = 64;
+
+/**
  * What the page can tell the recorder about the conditions a run ran under.
  * Supplied by the render loop, which is the one place that holds the canvas,
  * the mode, the dataset set and the CPU cache at once.
@@ -111,12 +126,19 @@ export interface TraceRecorderOptions {
   timeoutMs?: number;
 }
 
-interface OpenRun {
+/**
+ * One interval of the continuous recording. A labelled run and the unlabelled
+ * steady state between runs are the same object, differing only by `cause`
+ * (ADR 0047) — which is why steady state is retained rather than thrown away:
+ * the pan before a stall is often the thing that explains it.
+ */
+interface OpenInterval {
   runId: string;
-  cause: RunCause;
+  /** Null for the unlabelled steady-state interval. */
+  cause: RunCause | null;
   /**
-   * Held for the run's lifetime. A run cannot open without an environment,
-   * so nothing downstream has to cope with its absence.
+   * Held for the interval's lifetime. An interval cannot open without an
+   * environment, so nothing downstream has to cope with its absence.
    */
   environment: TraceEnvironment;
   cacheWarmth: CacheWarmth;
@@ -124,13 +146,27 @@ interface OpenRun {
   startedAtEpochMs: number;
   sink: TraceSink;
   serverRows: ServerRowTable;
+  /** Keyed by `request_id`, which is what the server's metadata rows join on. */
+  datasetOpens: Map<string, DatasetOpenBracket>;
+  datasetOpensDropped: number;
   generation: number;
+  /**
+   * Set once the interval crosses the per-run cap, and mutated from there on:
+   * a truncated interval stops storing records but keeps counting them, which
+   * is what turns "truncated at 18,000 rows" into "18,000 of an eventual
+   * 63,412".
+   */
+  truncation: TruncationRecord | null;
 }
 
-interface ClosedRun {
+interface ClosedInterval {
   header: RunHeader;
   sink: TraceSink;
   serverRows: ServerRowTable;
+  datasetOpens: DatasetOpenBracket[];
+  datasetOpensDropped: number;
+  /** Frozen at close, so the resident total is a running sum rather than a walk. */
+  byteLength: number;
 }
 
 /** Row indices are packed with the run generation so a stale handle is inert. */
@@ -146,8 +182,11 @@ export class TraceRecorder {
   private environment: TraceEnvironment | null = null;
   private gpu: GpuIdentity | null = null;
 
-  private open: OpenRun | null = null;
-  private closed: ClosedRun[] = [];
+  private open: OpenInterval | null = null;
+  private closed: ClosedInterval[] = [];
+  /** Running sum over {@link closed}, so the resident cap is a comparison, not a walk. */
+  private closedBytes = 0;
+  private intervalsEvicted = 0;
   private generation = 0;
   private runSeq = 0;
   private rowsOutsideRun = 0;
@@ -198,16 +237,26 @@ export class TraceRecorder {
     this.timeoutMs = options.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS;
   }
 
+  /**
+   * Register — or withdraw — the page that can say what conditions a run ran
+   * under. Registering starts the unlabelled steady-state interval, because
+   * recording is continuous and the interval before the first run is as
+   * retainable as the ones between later runs.
+   */
   setEnvironment(environment: TraceEnvironment | null): void {
+    if (environment === this.environment) return;
+    this.finishInterval("explicit");
     this.environment = environment;
+    this.beginInterval(null);
   }
 
   setGpu(gpu: GpuIdentity | null): void {
     this.gpu = gpu;
   }
 
+  /** Whether a *labelled* run is open. The unlabelled interval is not one. */
   get isRunOpen(): boolean {
-    return this.open !== null;
+    return this.open?.cause != null;
   }
 
   /**
@@ -232,62 +281,25 @@ export class TraceRecorder {
    * conditions cannot be recorded is not a comparable artifact.
    */
   openRun(cause: RunCause): void {
-    if (this.open) return;
-    const environment = this.environment;
-    if (!environment) return;
-    const startedAtMs = this.now();
-    const startedAtEpochMs = this.epochNow();
-    this.generation++;
-    this.open = {
-      runId: `run-${startedAtEpochMs}-${++this.runSeq}`,
-      cause,
-      environment,
-      cacheWarmth: environment.captureWarmth(),
-      startedAtMs,
-      startedAtEpochMs,
-      sink: this.sinkFactory(),
-      serverRows: new ServerRowTable(),
-      generation: this.generation,
-    };
-    this.timeoutTimer = setTimeout(() => this.closeRun("timeout"), this.timeoutMs);
+    if (this.open?.cause) return;
+    if (!this.environment) return;
+    // Hand the steady state that led up to this run over as its own interval,
+    // rather than folding it into the run and dating the run from before its
+    // cause.
+    this.finishInterval("run-opened");
+    this.beginInterval(cause);
   }
 
+  /**
+   * Close the interval in progress and start the next steady-state one.
+   * Recording is continuous: there is no state in which the recorder is
+   * merely counting what it saw, only one in which no page has told it what
+   * conditions it would be recording under.
+   */
   closeRun(endReason: EndReason): void {
-    const run = this.open;
-    if (!run) return;
-    this.clearHoldTimer();
-    if (this.timeoutTimer !== null) {
-      clearTimeout(this.timeoutTimer);
-      this.timeoutTimer = null;
-    }
-    this.open = null;
-    // A tick half-filled when the run closed belongs to no run, and the
-    // counts behind it belong to no interval.
-    this.tickInProgress = false;
-    this.countedPhases.fill(0);
-
-    this.awaitingResident.length = 0;
-    this.awaitingDrawn.length = 0;
-
-    this.closed.push({
-      sink: run.sink,
-      serverRows: run.serverRows,
-      header: {
-        ...run.environment.captureConditions(),
-        cacheWarmth: run.cacheWarmth,
-        schemaVersion: TRACE_SCHEMA_VERSION,
-        runId: run.runId,
-        cause: run.cause,
-        endReason,
-        build: buildIdentity(),
-        gpu: this.gpu,
-        startedAtEpochMs: run.startedAtEpochMs,
-        durationUs: clampStamp(Math.round((this.now() - run.startedAtMs) * 1000)),
-        quiescenceHoldMs: this.quiescenceHoldMs,
-        timeoutMs: this.timeoutMs,
-        outstandingAtSettle: run.environment.captureOutstanding(),
-      },
-    });
+    if (!this.open) return;
+    this.finishInterval(endReason);
+    this.beginInterval(null);
   }
 
   /**
@@ -297,8 +309,18 @@ export class TraceRecorder {
    */
   noteQuiescence(state: QuiescenceState): void {
     this.lastQuiescence = state;
-    if (!this.open) return;
-    if (!state.quiescent) {
+    // Settling ends a labelled run. The unlabelled interval has nothing to
+    // settle into — it is what a settled page records.
+    if (!this.isRunOpen) {
+      this.clearHoldTimer();
+      return;
+    }
+    // An unsettled dataset open holds the run open, whatever the page's
+    // predicate says. Before the first chunk exists the pipeline is
+    // trivially quiescent — nothing dirty, nothing wanted — so a cold open
+    // would otherwise close its own run 500 ms in and discard the metadata
+    // reads it is still waiting on, which is the whole of a cold open.
+    if (!state.quiescent || this.hasUnsettledOpen()) {
       this.clearHoldTimer();
       return;
     }
@@ -311,18 +333,27 @@ export class TraceRecorder {
 
   /**
    * Start a lifecycle row. Returns a handle for {@link stamp} and
-   * {@link finishRow}, or -1 when no run is open — rows outside a run are
-   * counted so the document does not overstate what it kept.
+   * {@link finishRow}, or -1 when there is no interval to record into —
+   * either no page has registered an environment, or the interval has
+   * truncated. Both cases are counted so the document does not overstate what
+   * it kept.
    */
   beginChunkRow(src: ChunkRowSource, tier: 0 | 1): number {
-    const run = this.open;
+    const run = this.intervalForRecording();
     if (!run) {
-      this.rowsOutsideRun++;
+      this.countRefusedRow();
       return -1;
     }
     const index = run.sink.append(src, tier);
     if (index < 0) return -1;
     return run.generation * GENERATION_STRIDE + index;
+  }
+
+  /** A row nobody kept is counted either way, so coverage is never overstated. */
+  private countRefusedRow(): void {
+    const truncation = this.open?.truncation;
+    if (truncation) truncation.rowsUnrecorded++;
+    else this.rowsOutsideRun++;
   }
 
   /**
@@ -435,15 +466,74 @@ export class TraceRecorder {
   }
 
   /**
+   * A dataset-open request went out. Opens the run if none is open: this
+   * *is* the start of the cold open the monitor exists to explain, and a
+   * run that began when the first chunk arrived would leave the reads that
+   * decided the dataset's shape outside every run there was.
+   *
+   * The bracket is what the server's metadata-read rows nest inside, so an
+   * open that is never noted here files rows nobody can place.
+   */
+  noteOpenSent(requestId: string): void {
+    this.openRun({ epoch: "content", dirtyKind: "interactive", source: "dataset_open_request" });
+    const run = this.open;
+    if (!run) return;
+    if (run.datasetOpens.has(requestId)) return;
+    if (run.datasetOpens.size >= MAX_TRACKED_OPENS) {
+      run.datasetOpensDropped++;
+      return;
+    }
+    run.datasetOpens.set(requestId, {
+      requestId,
+      startUs: this.offsetUs(run, this.now()),
+      endUs: null,
+    });
+  }
+
+  /**
+   * The open settled, either way. A failed open closes its bracket exactly
+   * as a successful one does — its reads are the ones most worth reading,
+   * and dropping them here would lose them in the case that needs them.
+   */
+  noteOpenSettled(requestId: string): void {
+    const run = this.open;
+    if (!run) return;
+    const open = run.datasetOpens.get(requestId);
+    // A second terminal frame for one open — a failure after a warning, a
+    // stray progress frame — must not move an end that already happened.
+    if (!open || open.endUs !== null) return;
+    open.endUs = this.offsetUs(run, this.now());
+    // The open was the only thing holding the run; re-read the page's last
+    // published state so a run that has been quiescent all along can now
+    // start its hold rather than waiting for the next tick that may never
+    // come.
+    if (this.lastQuiescence) this.noteQuiescence(this.lastQuiescence);
+  }
+
+  /** Whether any open this run brackets is still in flight. */
+  private hasUnsettledOpen(): boolean {
+    const run = this.open;
+    if (!run) return false;
+    for (const open of run.datasetOpens.values()) {
+      if (open.endUs === null) return true;
+    }
+    return false;
+  }
+
+  /**
    * Take a flush window of the server's rows. They belong to the run that is
    * open when they arrive; rows that arrive between runs are counted and
    * dropped, because an unjoinable server row is not a diagnostic and
    * keeping it would spend budget on nothing.
    */
   ingestServerBatch(batch: ServerTimingBatch, connectionGeneration: number): void {
-    const run = this.open;
+    const run = this.intervalForRecording();
+    // Dropped but still counted, on whichever side: silently not counting one
+    // side of the join would overstate coverage asymmetrically.
     if (!run) {
-      this.serverRowsOutsideRun += batch.rid.length;
+      const truncation = this.open?.truncation;
+      if (truncation) truncation.serverRowsUnrecorded += batch.rid.length;
+      else this.serverRowsOutsideRun += batch.rid.length;
       return;
     }
     run.serverRows.ingest(batch, connectionGeneration);
@@ -487,9 +577,14 @@ export class TraceRecorder {
   commitTick(): void {
     if (!this.tickInProgress) return;
     this.tickInProgress = false;
-    const run = this.open;
-    if (!run) return;
-    run.sink.appendTick(this.offsetUs(run, this.now()), this.tickScratch, this.countedPhases);
+    const run = this.intervalForRecording();
+    if (run) {
+      run.sink.appendTick(this.offsetUs(run, this.now()), this.tickScratch, this.countedPhases);
+    } else if (this.open?.truncation) {
+      this.open.truncation.ticksUnrecorded++;
+    }
+    // Either way the tallies belong to the interval just ended, not the next
+    // one: carrying them forward would publish two intervals' counts as one.
     this.countedPhases.fill(0);
   }
 
@@ -539,8 +634,11 @@ export class TraceRecorder {
     chunk: ChunkEventSource | null = null,
     tier: 0 | 1 = 0,
   ): void {
-    const run = this.open;
-    if (!run) return;
+    const run = this.intervalForRecording();
+    if (!run) {
+      if (this.open?.truncation) this.open.truncation.eventsUnrecorded++;
+      return;
+    }
     run.sink.appendEvent(this.offsetUs(run, this.now()), kind, reason, chunk, tier);
   }
 
@@ -551,49 +649,226 @@ export class TraceRecorder {
    */
   exportDocument(): TraceDocument {
     this.closeRun("explicit");
+    const intervals = this.closed.map(interval => this.serialiseInterval(interval));
     return {
       schemaVersion: TRACE_SCHEMA_VERSION,
       exportedAtEpochMs: this.epochNow(),
+      retention: {
+        residentCapBytes: RESIDENT_CAP_BYTES,
+        perRunCapBytes: PER_RUN_CAP_BYTES,
+        residentBytes: this.closedBytes + (this.open ? intervalBytes(this.open) : 0),
+        intervalsEvicted: this.intervalsEvicted,
+        derivedFrom: CAP_DERIVATION,
+        capUnit: CAP_UNIT,
+      },
       instrumentedPhases: [...INSTRUMENTED_PHASES],
       countedPhases: [...COUNTED_PHASES],
-      runs: this.closed.map<TraceRun>(run => {
-        const rows = run.sink.serialise();
-        return {
-          header: run.header,
-          rows,
-          ticks: run.sink.serialiseTicks(),
-          ticksDropped: run.sink.ticksDropped,
-          readings: run.sink.serialiseReadings(),
-          readingsDropped: run.sink.readingsDropped,
-          events: run.sink.serialiseEvents(),
-          eventsDropped: run.sink.eventsDropped,
-          // Placement happens here, at export, because it needs both tables
-          // — and because the in-memory model stays a table.
-          serverRows: placeServerRows(rows, run.serverRows.serialise()),
-          serverRowsDropped: run.serverRows.droppedCount,
-        };
-      }),
+      runs: intervals.filter(interval => interval.header.cause !== null),
+      steadyState: intervals.filter(interval => interval.header.cause === null),
       rowsOutsideRun: this.rowsOutsideRun,
       serverRowsOutsideRun: this.serverRowsOutsideRun,
     };
   }
 
   /**
-   * Drop the whole recording, including the run in progress. The resident
-   * cap and whole-run eviction that will call this in the product are #927;
-   * until then it is how a test isolates one run from the next.
+   * Drop the whole recording, including the interval in progress, and start a
+   * fresh steady-state one. Nothing in the product calls this — retention is
+   * whole-interval eviction under the resident cap — but a test needs one run
+   * isolated from the next.
    */
   reset(): void {
-    this.closeRun("explicit");
+    this.finishInterval("explicit");
     this.closed = [];
+    this.closedBytes = 0;
+    this.intervalsEvicted = 0;
     this.rowsOutsideRun = 0;
     this.serverRowsOutsideRun = 0;
     this.lastQuiescence = null;
     this.planSpanCount = 0;
     this.openPlanStartMs = null;
+    this.beginInterval(null);
   }
 
-  private offsetUs(run: OpenRun, atMs: number): number {
+  private beginInterval(cause: RunCause | null): void {
+    const environment = this.environment;
+    if (!environment) return;
+    const startedAtEpochMs = this.epochNow();
+    this.generation++;
+    this.open = {
+      runId: `${cause ? "run" : "steady"}-${startedAtEpochMs}-${++this.runSeq}`,
+      cause,
+      environment,
+      cacheWarmth: environment.captureWarmth(),
+      startedAtMs: this.now(),
+      startedAtEpochMs,
+      sink: this.sinkFactory(),
+      serverRows: new ServerRowTable(),
+      datasetOpens: new Map(),
+      datasetOpensDropped: 0,
+      generation: this.generation,
+      truncation: null,
+    };
+    // A fresh interval preallocates its buffers, so opening one spends from
+    // the resident budget before it has recorded anything. Evict here as well
+    // as on append, or the total sits above the cap for as long as the page
+    // is idle — which is exactly when nobody is appending.
+    this.evictToResidentCap(intervalBytes(this.open));
+    // Only a labelled run can fail to settle. Steady state is what a settled
+    // page records, so there is nothing for a timeout to declare about it.
+    if (cause) this.timeoutTimer = setTimeout(() => this.closeRun("timeout"), this.timeoutMs);
+  }
+
+  private finishInterval(endReason: EndReason): void {
+    const run = this.open;
+    if (!run) return;
+    this.clearHoldTimer();
+    if (this.timeoutTimer !== null) {
+      clearTimeout(this.timeoutTimer);
+      this.timeoutTimer = null;
+    }
+    this.open = null;
+    // A tick half-filled when the interval closed belongs to no interval, and
+    // the counts behind it belong to no interval either.
+    this.tickInProgress = false;
+    this.countedPhases.fill(0);
+
+    this.awaitingResident.length = 0;
+    this.awaitingDrawn.length = 0;
+
+    // An unlabelled interval that recorded nothing is not an artifact. A
+    // labelled run that recorded nothing is — a run that saw no work is
+    // exactly the news somebody is looking for.
+    if (run.cause === null && run.sink.isEmpty && run.serverRows.length === 0) return;
+
+    const byteLength = intervalBytes(run);
+    this.closed.push({
+      sink: run.sink,
+      serverRows: run.serverRows,
+      // An open still in flight keeps its null end rather than being
+      // dropped or given the interval's close as an end it never reached.
+      datasetOpens: [...run.datasetOpens.values()],
+      datasetOpensDropped: run.datasetOpensDropped,
+      byteLength,
+      header: {
+        ...run.environment.captureConditions(),
+        cacheWarmth: run.cacheWarmth,
+        schemaVersion: TRACE_SCHEMA_VERSION,
+        runId: run.runId,
+        cause: run.cause,
+        endReason,
+        truncation: run.truncation,
+        build: buildIdentity(),
+        gpu: this.gpu,
+        startedAtEpochMs: run.startedAtEpochMs,
+        durationUs: clampStamp(Math.round((this.now() - run.startedAtMs) * 1000)),
+        quiescenceHoldMs: this.quiescenceHoldMs,
+        timeoutMs: this.timeoutMs,
+        outstandingAtSettle: run.environment.captureOutstanding(),
+      },
+    });
+    this.closedBytes += byteLength;
+    this.evictToResidentCap(0);
+  }
+
+  /**
+   * The interval a new record belongs in, once the caps have had their say —
+   * or null when there is nowhere to put it.
+   *
+   * Checked before the write rather than after it, so a rotation hands the
+   * caller a live interval instead of a handle into one that just closed.
+   *
+   * The two rungs, in the order they bite. The per-run cap acts on the
+   * interval in progress; the resident cap discards completed intervals
+   * oldest-first. There is deliberately no third rung: no sampling, no
+   * coarsening, no downsample to aggregates. Reaching the per-run cap means
+   * something pathological is happening, and a loud truncation diagnoses
+   * pathology better than a quietly coarsened trace that still looks
+   * complete (ADR 0049).
+   */
+  private intervalForRecording(): OpenInterval | null {
+    const run = this.open;
+    if (!run || run.truncation) return null;
+
+    const openBytes = intervalBytes(run);
+    if (openBytes <= PER_RUN_CAP_BYTES) {
+      this.evictToResidentCap(openBytes);
+      return run;
+    }
+
+    // A run truncates because the beginning of a run is its diagnostic
+    // payload. Steady state has no privileged start — it is the same kind of
+    // stream the tick and event rings drop the oldest of — so truncating it
+    // would delete the most recent pan, which is the one thing it is retained
+    // for. It hands over to a fresh interval instead, and the old one ages
+    // out under the resident cap like any other completed interval.
+    if (run.cause === null) {
+      this.finishInterval("rotated");
+      this.beginInterval(null);
+      return this.open;
+    }
+
+    run.truncation = {
+      reason: "per-run-cap",
+      atUs: this.offsetUs(run, this.now()),
+      capBytes: PER_RUN_CAP_BYTES,
+      rowsRecorded: run.sink.length,
+      rowsUnrecorded: 0,
+      ticksUnrecorded: 0,
+      eventsUnrecorded: 0,
+      serverRowsUnrecorded: 0,
+    };
+    this.evictToResidentCap(openBytes);
+    return null;
+  }
+
+  /**
+   * Whole completed intervals, oldest first, never the one in progress. A
+   * half-evicted interval is not a diagnostic artifact, and the interval
+   * being recorded right now is the one somebody is about to ask about.
+   */
+  private evictToResidentCap(openBytes: number): void {
+    while (this.closed.length > 0 && this.closedBytes + openBytes > RESIDENT_CAP_BYTES) {
+      const evicted = this.closed.shift();
+      if (!evicted) return;
+      this.closedBytes -= evicted.byteLength;
+      this.intervalsEvicted++;
+    }
+  }
+
+  private serialiseInterval(interval: ClosedInterval): TraceRun {
+    const rows = interval.sink.serialise();
+    const ticks = interval.sink.serialiseTicks();
+    const ticksDropped = interval.sink.ticksDropped;
+    const eventsDropped = interval.sink.eventsDropped;
+    const serverRowsDropped = interval.serverRows.droppedCount;
+    return {
+      header: interval.header,
+      coverage: computeCoverage({
+        wallClockUs: interval.header.durationUs,
+        rows,
+        ticks,
+        truncation: interval.header.truncation,
+        ticksDropped,
+        eventsDropped,
+        serverRowsDropped,
+      }),
+      rows,
+      ticks,
+      ticksDropped,
+      readings: interval.sink.serialiseReadings(),
+      readingsDropped: interval.sink.readingsDropped,
+      events: interval.sink.serialiseEvents(),
+      eventsDropped,
+      // Placement happens here, at export, because it needs both tables
+      // — and because the in-memory model stays a table.
+      serverRows: placeServerRows(rows, interval.serverRows.serialise(), interval.datasetOpens),
+      datasetOpens: interval.datasetOpens,
+      datasetOpensDropped: interval.datasetOpensDropped,
+      serverRowsDropped,
+    };
+  }
+
+  private offsetUs(run: OpenInterval, atMs: number): number {
     return clampStamp(Math.round((atMs - run.startedAtMs) * 1000));
   }
 
@@ -616,7 +891,7 @@ export class TraceRecorder {
     return bestStart;
   }
 
-  private resolve(handle: number): OpenRun | null {
+  private resolve(handle: number): OpenInterval | null {
     if (handle < 0) return null;
     const run = this.open;
     if (!run) return null;
@@ -628,6 +903,11 @@ export class TraceRecorder {
     clearTimeout(this.holdTimer);
     this.holdTimer = null;
   }
+}
+
+/** Every tier an interval holds. Allocated bytes, because the cap is on memory. */
+function intervalBytes(interval: Pick<OpenInterval, "sink" | "serverRows">): number {
+  return interval.sink.byteLength + interval.serverRows.byteLength;
 }
 
 /**

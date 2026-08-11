@@ -122,10 +122,10 @@ use lucida_protocol::{
     DatasetOpenProgressDiagnostic, DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened,
     DatasetSourceCacheStats, DatasetSourceHealth, DirectFetchDescriptor, DirectImageSpec,
     FetchSource, GeneratedAvailabilityDelta, GeneratedAvailabilitySnapshot, GeneratedChunkStatus,
-    GeneratedChunkStatusUpdate, GeneratedLevelAvailability, GeneratedLevelSummary, LevelAddress,
-    LocalFetchDescriptor, ProxiedFetchDescriptor, ProxiedImageSpec, ProxyAvailability,
-    ProxyFootprint, ProxyKind, ServerTimingBatch, SourceChunkStatus, TimingRowFamily,
-    TimingRowOutcome, WireFormat,
+    GeneratedChunkStatusUpdate, GeneratedLevelAvailability, GeneratedLevelSummary, LABEL_NONE,
+    LevelAddress, LocalFetchDescriptor, MetadataReadPhase, PHASE_UNSET, ProxiedFetchDescriptor,
+    ProxiedImageSpec, ProxyAvailability, ProxyFootprint, ProxyKind, ServerTimingBatch,
+    SourceChunkStatus, TimingRowFamily, TimingRowOutcome, WireFormat,
 };
 
 const REGEN_HINT: &str = "fixture out of date with the Rust wire types. If the wire change is \
@@ -1788,11 +1788,41 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
             ServerMessage::TimingBatch {
                 batch: ServerTimingBatch {
                     dropped: 3,
-                    rid: vec![2558, 2559],
-                    family: vec![TimingRowFamily::Chunk, TimingRowFamily::Asset],
-                    dispatch_offset_us: vec![142, 96],
-                    duration_us: vec![8_137, 214_902],
-                    outcome: vec![TimingRowOutcome::Delivered, TimingRowOutcome::NotReady],
+                    // The metadata-read row keys on the open's request id
+                    // and leaves the correlation label unset; the chunk and
+                    // asset rows do the reverse.
+                    rid: vec![2558, 2559, 0],
+                    request_id: vec![None, None, Some("web-open-4c1a".into())],
+                    family: vec![
+                        TimingRowFamily::Chunk,
+                        TimingRowFamily::Asset,
+                        TimingRowFamily::MetadataRead,
+                    ],
+                    outcome: vec![
+                        TimingRowOutcome::Delivered,
+                        TimingRowOutcome::NotReady,
+                        TimingRowOutcome::Delivered,
+                    ],
+                    // A source chunk that led its own read, and a generated
+                    // chunk answered not-ready: the second row's store
+                    // phases are unset because it never touched the store.
+                    // The third row is a metadata read, which has no slot in
+                    // the phase enum at all and states its span in the two
+                    // metadata columns below.
+                    arrival_us: vec![142, 96, PHASE_UNSET],
+                    binding_lookup_us: vec![37, 41, PHASE_UNSET],
+                    dispatch_us: vec![88, 74, PHASE_UNSET],
+                    cache_lookup_us: vec![2, 3, PHASE_UNSET],
+                    permit_wait_us: vec![3_100_000, PHASE_UNSET, PHASE_UNSET],
+                    backend_read_us: vec![211_400, PHASE_UNSET, PHASE_UNSET],
+                    coalesced_wait_us: vec![PHASE_UNSET, PHASE_UNSET, PHASE_UNSET],
+                    decompress_us: vec![4_512, PHASE_UNSET, PHASE_UNSET],
+                    slice_encode_us: vec![903, PHASE_UNSET, PHASE_UNSET],
+                    handoff_us: vec![61, 55, PHASE_UNSET],
+                    coalesced_onto: vec![LABEL_NONE, LABEL_NONE, LABEL_NONE],
+                    metadata_phase: vec![None, None, Some(MetadataReadPhase::BackendRead)],
+                    dispatch_offset_us: vec![0, 0, 1_204],
+                    duration_us: vec![0, 0, 63_441],
                 },
             },
             req(
@@ -1802,10 +1832,23 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                     "/batch",
                     "/batch/dropped",
                     "/batch/rid",
+                    "/batch/request_id",
                     "/batch/family",
+                    "/batch/metadata_phase",
                     "/batch/dispatch_offset_us",
                     "/batch/duration_us",
                     "/batch/outcome",
+                    "/batch/arrival_us",
+                    "/batch/binding_lookup_us",
+                    "/batch/dispatch_us",
+                    "/batch/cache_lookup_us",
+                    "/batch/permit_wait_us",
+                    "/batch/backend_read_us",
+                    "/batch/coalesced_wait_us",
+                    "/batch/decompress_us",
+                    "/batch/slice_encode_us",
+                    "/batch/handoff_us",
+                    "/batch/coalesced_onto",
                 ],
             ),
         ),

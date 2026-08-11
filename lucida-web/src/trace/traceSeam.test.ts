@@ -324,7 +324,7 @@ describe("the trace seam", () => {
     expect(seam.exportTrace().runs[0].header.endReason).toBe("explicit");
   });
 
-  it("records rows seen with no run open without pretending they were kept", async () => {
+  it("keeps rows seen with no run open as unlabelled steady state", async () => {
     installTraceSeam();
     const source = new ControlledSource();
     const cache = new CpuCache(source, makeDecode());
@@ -334,7 +334,9 @@ describe("the trace seam", () => {
 
     const doc = window.lucidaTrace!.exportTrace();
     expect(doc.runs).toHaveLength(0);
-    expect(doc.rowsOutsideRun).toBeGreaterThan(0);
+    expect(doc.rowsOutsideRun).toBe(0);
+    expect(doc.steadyState[0].rows.length).toBeGreaterThan(0);
+    expect(doc.steadyState[0].header.cause).toBeNull();
   });
 });
 

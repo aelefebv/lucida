@@ -115,17 +115,35 @@ describe("per-tick aggregates", () => {
     expect(run.readingsDropped).toBe(0);
   });
 
-  it("records no reading while no run is open", () => {
+  /**
+   * Recording is continuous, so a reading taken between runs is retained in
+   * the unlabelled interval rather than discarded (#927).
+   */
+  it("keeps a reading in the unlabelled interval while no run is open", () => {
     const { recorder } = makeRecorder();
     recorder.noteReading(5, 5, 5, 5);
-    expect(recorder.exportDocument().runs).toHaveLength(0);
+
+    const doc = recorder.exportDocument();
+    expect(doc.runs).toHaveLength(0);
+    expect(doc.steadyState[0].readings).toHaveLength(1);
   });
 
-  it("hands out no scratch while no run is open", () => {
+  it("samples into the unlabelled interval while no run is open", () => {
     const { recorder } = makeRecorder();
+    expect(recorder.beginTick("ds")).not.toBeNull();
+    recorder.commitTick();
+
+    const doc = recorder.exportDocument();
+    expect(doc.runs).toHaveLength(0);
+    expect(doc.steadyState[0].ticks).toHaveLength(1);
+  });
+
+  it("hands out no scratch with no page to say what conditions applied", () => {
+    const { recorder } = makeRecorder();
+    recorder.setEnvironment(null);
     expect(recorder.beginTick("ds")).toBeNull();
     recorder.commitTick();
-    expect(recorder.exportDocument().runs).toHaveLength(0);
+    expect(recorder.exportDocument().steadyState).toHaveLength(0);
   });
 
   it("carries the counted-not-timed phases and resets them each sample", () => {
