@@ -5,7 +5,7 @@ description: "Cross-process conventions for debug logging."
 tags: [lucida, decision]
 source_path: wiki/decisions/0012-logging-conventions.md
 created: 2026-04-20
-modified: 2026-07-04
+modified: 2026-08-10
 ---
 
 # Logging Conventions
@@ -43,8 +43,7 @@ When in doubt: **the prefix should be the most useful word to grep for.** If you
 - **Inconsistency persists in untouched flows.** Old `eprintln!`s in chunk-serve, proxy-generate, etc. aren't actively wrong — they just don't benefit from spans/levels. Replacing them all in one go is a refactor with no functional payoff; the convention propagates as each flow gets touched.
 - **`localStorage.debug` gating is per-browser-profile.** Fine for solo debugging; for shared bug repros, narrate the toggle explicitly.
 - **Event names are not enforced.** The dot-scope naming is convention, not type-checked. Reviewers should flag drift.
-- **DebugPanel toggle has a bootstrap gap.** Events that fire before the panel mounts (initial WS connect, first frame) aren't captured by a freshly-flicked toggle. Workaround: enable, reload, then capture the next session.
-- **The JS gate is cached, not read per call.** `logging.ts` reads `localStorage.debug` once at module init and on refresh events; `isDebugEnabled` is an in-memory Set lookup (it sits on the bridge/cache/render hot paths, so a per-call `localStorage.getItem` is not acceptable). The cache refreshes via `setDebugEnabled` (panel toggles) and the cross-tab `storage` event. Consequence: a same-tab out-of-band `localStorage.debug` write (DevTools console) updates **neither** the JS gate nor WASM until `refreshDebugCategories()` runs or the page reloads.
+- **The JS gate is cached, not read per call.** `logging.ts` reads `localStorage.debug` once at module init and on refresh events; `isDebugEnabled` is an in-memory Set lookup (it sits on the bridge/cache/render hot paths, so a per-call `localStorage.getItem` is not acceptable). The cache refreshes via `setDebugEnabled` and the cross-tab `storage` event. Consequence: a same-tab out-of-band `localStorage.debug` write (DevTools console) updates **neither** the JS gate nor WASM until `refreshDebugCategories()` runs or the page reloads. Since the reload is now part of the documented interface (below), this is a one-step workflow rather than a trap.
 - **WASM logger holds its own copy of the enabled set.** WASM can't read `localStorage` directly. JS pushes via `set_debug_categories(csv)` on init (in `useWasmScene`) and on every category-set change (via `onDebugCategoriesChanged`, which also fires on the refresh paths above).
 
 ## How this decision shows up in code
@@ -53,7 +52,7 @@ When in doubt: **the prefix should be the most useful word to grep for.** If you
 - `lucida-web/src/renderLoop.ts` — `setDirty(kind, source)` private helper + `markInteractiveDirty(source)` / `markResidencyDirty(source)` public methods; throttle skip aggregation in `tick()`.
 - `lucida-web/src/bridge.ts` — `bridgeLog` helper (the existing `[Bridge]` `console.log`/`console.warn` lines predate this convention and remain until next touch).
 - `lucida-web/src/hooks/useWasmScene.ts` — pushes initial categories into WASM after `init()` and subscribes to JS-side changes.
-- `lucida-web/src/debug/DebugPanel.tsx` — "Logging" tab UI over `localStorage.debug`.
+- **The interface is the console, not a UI.** Set `localStorage.debug = 'bridge,cache'` (or `'*'`) and reload. There is no checkbox surface: the "Logging" tab that used to provide one was deleted with `DebugPanel.tsx` by [ADR 0052](0052-debug-surface-dispositions.md), which found it to be a UI over a one-line incantation. The parallel `debug.overlays` registry in the same module keeps a UI, on the dev-controls surface, because the overlays it drives survive.
 - `lucida-core/src/wasm_log.rs` — WASM `set_categories` / `is_enabled` / `log_raw` / `wasm_log!` macro.
 - `lucida-core/src/wasm.rs::set_debug_categories` — wasm-bindgen entry point JS calls.
 - `lucida-server/src/dataset_open.rs::open_dataset` (the `dataset_open` span) — first instrumented handler.

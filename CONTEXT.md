@@ -189,10 +189,24 @@ The pipeline performance surface — where and when the pipeline slowed down.
 Observation only.
 _Avoid_: profiler, debug panel, dashboard
 
+**Dev controls**:
+The dev-only mutating surface: planning knobs, overlay toggles, and the
+session-scoped cache knobs. Deliberately separate from the monitor — observation
+and mutation are two different tools. Named for mutation, not for configuration,
+because configuration is only one of its contents.
+_Avoid_: debug panel, config tab, dev tools, inspector
+
 **Debug panel**:
-The configuration-mutating surface. Deliberately separate from the monitor:
-observation and mutation are two different tools.
-_Avoid_: dev tools, inspector
+The retired ten-tab observation-and-mutation surface (`DebugPanel.tsx`),
+dismantled by `wiki/decisions/0052-debug-surface-dispositions.md`. Historical
+only — never use it for the surviving surface.
+_Avoid_: using this term for anything current; say monitor or dev controls
+
+**Overlay** (debug):
+The in-viewport layer drawn over the canvas in dataset coordinates — which chunk,
+where on screen. Spatial, where the monitor is temporal; the two never merge.
+_Avoid_: overlay image (an integer-valued image whose values name regions is a
+label, see above), heads-up display
 
 **Trace driver**:
 The `lucida trace` command: it launches its own headless browser, opens a

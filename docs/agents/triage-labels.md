@@ -14,4 +14,4 @@ When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use the 
 
 Edit the right-hand column to match whatever vocabulary you actually use.
 
-In this repo only `wontfix` exists on GitHub today; create the other four with `gh label create <name>` the first time you need them.
+All five exist on GitHub, so a skill can apply any of them without checking first. If you add a sixth role, create the label with `gh label create <name>` and add a row above.
