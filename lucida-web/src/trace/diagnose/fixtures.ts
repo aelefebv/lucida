@@ -420,7 +420,7 @@ export function interactionRun(): TraceRun {
     },
     rows,
     // One reading per frame, each frame most of its own interval: the shape a
-    // main thread held by a per-tick stage makes.
+    // main thread held by a per-tick phase makes.
     readings: Array.from({ length: 100 }, (_, i) =>
       makeReading(i * 20 * MS, { queueDepth: 4, inFlight: 4, frameTimeUs: 18_000 }),
     ),
@@ -429,7 +429,7 @@ export function interactionRun(): TraceRun {
 
 /**
  * A quiet run: no completion event, no backlog, no ceiling crossed and no
- * stage holding the main thread. The honest answer is that there is nothing to
+ * phase holding the main thread. The honest answer is that there is nothing to
  * attribute, and the derivation has to be willing to say so.
  */
 export function quietRun(): TraceRun {

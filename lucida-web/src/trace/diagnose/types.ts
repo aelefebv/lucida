@@ -24,41 +24,41 @@ import type { Ruleset } from "./ruleset.ts";
 export const DIAGNOSTIC_SCHEMA_VERSION = 1;
 
 /**
- * Which family of work a stage belongs to, and therefore which threshold
+ * Which family of work a phase belongs to, and therefore which threshold
  * family may judge it.
  *
  * The split is not cosmetic. A pipeline whose p50 network first byte is 98 ms
  * and whose p50 scheduler queue wait is 4,600 ms (#899) has no single number
  * that can serve both: any per-chunk ceiling on a queue either fires on every
- * row or on none. Queue stages therefore get a backlog ETA instead of a
+ * row or on none. Queue phases therefore get a backlog ETA instead of a
  * ceiling, and `unrecorded` exists so the chain can carry time no instrument
  * claims without anything downstream being able to blame it.
  */
-export type StageClass = "io" | "compute" | "queue" | "unrecorded";
+export type PhaseClass = "io" | "compute" | "queue" | "unrecorded";
 
-/** Which side of the boundary a stage was measured on. */
-export type StageSide = "browser" | "server" | "metadata";
+/** Which side of the boundary a phase was measured on. */
+export type PhaseSide = "browser" | "server" | "metadata";
 
 /**
- * One stage's shape across the run.
+ * One phase's shape across the run.
  *
  * `totalMs` deliberately is not a share of the run. Thousands of rows are in
  * flight at once, so the totals overlap and their sum routinely exceeds the
  * wall clock — reading the largest total as the answer is precisely the
  * mistake the critical-path back-walk exists to avoid.
  */
-export interface StageRollup {
+export interface PhaseRollup {
   /** `browser.wire`, `server.permit-wait`, `metadata.backend-read`. */
   id: string;
   label: string;
-  side: StageSide;
-  class: StageClass;
+  side: PhaseSide;
+  class: PhaseClass;
   n: number;
   p50Ms: number;
   p95Ms: number;
   maxMs: number;
   totalMs: number;
-  /** `totalMs` over the run's wall clock: how many of this stage ran at once, on average. */
+  /** `totalMs` over the run's wall clock: how many of this phase ran at once, on average. */
   concurrencyFactor: number;
 }
 
@@ -90,13 +90,13 @@ export interface LimiterSummary {
 }
 
 /**
- * A stage recorded only as per-tick aggregates, so it has no per-item rows and
+ * A phase recorded only as per-tick aggregates, so it has no per-item rows and
  * can never appear on a row-built critical path. It still holds the main
  * thread, so it is offered as a candidate with a confidence ceiling that says
  * exactly that.
  */
 export interface AggregateCandidate {
-  stage: string;
+  phase: string;
   /** A lower bound: each reading is charged only for the interval it covers. */
   busyMs: number;
   sharePct: number;
@@ -107,7 +107,7 @@ export interface AggregateCandidate {
 /** One link in the back-walk. */
 export interface PathSegment {
   label: string;
-  class: StageClass;
+  class: PhaseClass;
   ms: number;
   sharePct: number;
   /** Where the segment's number came from: which table, and how many rows of it. */
@@ -179,6 +179,14 @@ export interface FindingObservation {
   stat?: "p50" | "p95" | "max";
   ms?: number;
   sharePct?: number;
+  /**
+   * What `sharePct` is a share *of*. A path segment's share is of the chain,
+   * which ends at the run's completion; an aggregate's is of the wall clock.
+   * On a run whose chain ends before the run does these are different
+   * denominators, and printing both as "% of the run" would be wrong for one
+   * of them.
+   */
+  shareOf?: "chain" | "run";
   n?: number;
   rows?: number;
   pending?: number;
@@ -197,7 +205,7 @@ export interface Finding {
   severity: FindingSeverity;
   /** The rule that fired, by id, so a reader can look up the rationale in the shipped ruleset. */
   rule: string;
-  /** What the rule fired on: a stage id, a limiter id, or a path segment's label. */
+  /** What the rule fired on: a phase id, a limiter id, or a path segment's label. */
   subject: string;
   observed: FindingObservation;
   threshold: { kind: string; value: number; why: string };
@@ -307,7 +315,7 @@ export interface DiagnosticDocument {
   attribution: Attribution;
   findings: Finding[];
   criticalPath: CriticalPath;
-  stages: StageRollup[];
+  phases: PhaseRollup[];
   limiters: LimiterSummary[];
   aggregates: AggregateCandidate[];
   counts: {

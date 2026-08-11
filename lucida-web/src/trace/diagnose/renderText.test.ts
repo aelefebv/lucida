@@ -100,6 +100,12 @@ describe("the default rendering", () => {
     // The two unconditional lines survive every squeeze.
     expect(squeezed.text).toContain("coverage  ");
     expect(squeezed.text).toContain("NOT A HEALTH SIGNAL");
+
+    // And a budget below what even the required lines occupy is still honoured:
+    // a verdict's prose is unbounded, the budget is not.
+    const clamped = renderDiagnostic(diagnoseRun(run), { maxLines: 8, maxBytes: 400 });
+    expect(new TextEncoder().encode(clamped.text).length).toBeLessThanOrEqual(400);
+    expect(clamped.text).toContain("…");
   });
 
   it("always carries the coverage line and the not-a-health-signal line", () => {
@@ -143,11 +149,11 @@ describe("the default rendering", () => {
 
     expect(findingLines.length).toBeLessThanOrEqual(3);
     expect(text).toContain("lucida trace show");
-    expect(text).toContain("--format chrome");
+    expect(text).toContain("lucida trace perfetto");
   });
 
   it("inlines nothing per-row at either depth", () => {
-    for (const depth of ["summary", "stages"] as const) {
+    for (const depth of ["summary", "phases"] as const) {
       const small = renderDiagnostic(diagnoseRun(rowCountRun(20)), { depth }).text;
       const large = renderDiagnostic(diagnoseRun(rowCountRun(4_000)), { depth }).text;
 
@@ -161,7 +167,7 @@ describe("parity with the document", () => {
   it("prints no number that does not exist in the JSON", () => {
     for (const [name, document] of Object.entries(DOCUMENTS)) {
       const inDocument = new Set(numericTokens(JSON.stringify(document)));
-      for (const depth of ["summary", "stages"] as const) {
+      for (const depth of ["summary", "phases"] as const) {
         const { text } = renderDiagnostic(document, { depth });
         for (const token of numericTokens(text)) {
           expect(inDocument.has(token), `${name}/${depth}: ${token} is printed but not in the document`).toBe(

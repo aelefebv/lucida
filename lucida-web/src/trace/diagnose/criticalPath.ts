@@ -1,8 +1,8 @@
 /**
  * The critical-path back-walk.
  *
- * Never a `max()` over stage totals. On the cold-open sample the largest total
- * belongs to whichever stage the most rows happened to sit in at once, which
+ * Never a `max()` over phase totals. On the cold-open sample the largest total
+ * belongs to whichever phase the most rows happened to sit in at once, which
  * is a statement about concurrency rather than about what the run waited for —
  * two hundred rows spending 100 ms each on the wire is 20 s of total inside a
  * 1.2 s run.
@@ -17,7 +17,7 @@
  */
 
 import type { TraceRow, TraceRun, TraceServerRow } from "../types.ts";
-import { percentile, usToMs } from "./stages.ts";
+import { metadataReadRows, percentile, phaseClassOf, usToMs } from "./phaseRollup.ts";
 import type { CriticalPath, PathSegment } from "./types.ts";
 
 /** The chain's first link, and the only one nothing may be blamed for. */
@@ -75,7 +75,7 @@ export function buildCriticalPath(run: TraceRun): CriticalPath {
       class: "io",
       ms: usToMs(openEndUs - cursorUs),
       source: "dataset-open bracket",
-      rows: run.serverRows.filter((row) => row.family === "metadata-read").length,
+      rows: metadataReadRows(run.serverRows).length,
       breakdown: metadataBreakdown(run.serverRows),
     });
     cursorUs = openEndUs;
@@ -101,7 +101,10 @@ export function buildCriticalPath(run: TraceRun): CriticalPath {
   for (const [phase, timing] of Object.entries(terminal.phases)) {
     add({
       label: `browser.${phase}`,
-      class: phase === "queue" ? "queue" : phase === "wire" ? "io" : "compute",
+      // The one inventory, not a second cascade beside it: a phase reclassified
+      // in the ruleset and not here would judge one way in the rollup and
+      // another on the chain, with nothing to catch the disagreement.
+      class: phaseClassOf(`browser.${phase}`),
       ms: usToMs(timing.durationUs),
       source: "the row the run finished on",
       rows: 1,
@@ -160,8 +163,8 @@ function openEnd(run: TraceRun, targetUs: number): number {
 
 function metadataBreakdown(serverRows: TraceServerRow[]): Record<string, number> {
   const byPhase = new Map<string, number[]>();
-  for (const row of serverRows) {
-    if (row.family !== "metadata-read" || !row.metadataPhase) continue;
+  for (const row of metadataReadRows(serverRows)) {
+    if (!row.metadataPhase) continue;
     const bucket = byPhase.get(row.metadataPhase);
     if (bucket) bucket.push(row.durationUs);
     else byPhase.set(row.metadataPhase, [row.durationUs]);

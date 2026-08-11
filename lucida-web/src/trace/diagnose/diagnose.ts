@@ -13,11 +13,11 @@
  * fixture runs.
  */
 
-import { PHASES, type TraceCoverage, type TraceDocument, type TraceRun } from "../types.ts";
-import { buildCriticalPath, PRE_PLAN, UNRECORDED_PREFIX } from "./criticalPath.ts";
+import type { TraceCoverage, TraceDocument, TraceRun } from "../types.ts";
+import { buildCriticalPath, UNRECORDED_PREFIX } from "./criticalPath.ts";
 import { backlogExceeded, isPinned, summariseLimiters } from "./limiters.ts";
-import { RULESET } from "./ruleset.ts";
-import { aggregateCandidates, rollupStages, usToMs } from "./stages.ts";
+import { RULESET, type AbsoluteRule } from "./ruleset.ts";
+import { aggregateCandidates, metadataReadRows, rollupPhases, usToMs } from "./phaseRollup.ts";
 import {
   DIAGNOSTIC_SCHEMA_VERSION,
   type AggregateCandidate,
@@ -28,9 +28,8 @@ import {
   type DiagnosticDocument,
   type Finding,
   type LimiterSummary,
-  type PathSegment,
   type RunIdentity,
-  type StageRollup,
+  type PhaseRollup,
   type Verdict,
 } from "./types.ts";
 
@@ -82,15 +81,15 @@ export function diagnoseDocument(
 }
 
 export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): DiagnosticDocument {
-  const stages = rollupStages(run);
+  const phases = rollupPhases(run);
   const limiters = summariseLimiters(run);
   const aggregates = aggregateCandidates(run);
   const path = buildCriticalPath(run);
   const coverage = deriveCoverage(run);
-  const attribution = attribute({ run, path, stages, limiters, aggregates, coverage });
+  const attribution = attribute({ run, path, phases, limiters, aggregates, coverage });
   const findings = rankFindings({
     path,
-    stages,
+    phases,
     limiters,
     aggregates,
     attribution,
@@ -107,20 +106,20 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
     attribution,
     findings,
     criticalPath: path,
-    stages,
+    phases,
     limiters,
     aggregates,
     counts: {
       rows: run.rows.length,
-      serverRows: run.serverRows.filter((row) => row.family !== "metadata-read").length,
-      metadataRows: run.serverRows.filter((row) => row.family === "metadata-read").length,
+      serverRows: run.serverRows.length - metadataReadRows(run.serverRows).length,
+      metadataRows: metadataReadRows(run.serverRows).length,
       ticks: run.ticks.length,
       pointEvents: run.events.length,
     },
     raw: {
       inlined: false,
       why: "Raw spans are for a viewer, not a context window: a warm re-open is tens of thousands of rows, and nothing per-row appears at any depth here.",
-      command: `lucida trace export ${run.header.runId} --format chrome`,
+      command: "lucida trace perfetto",
     },
     next: nextSteps(run, findings, attribution),
     ruleset: RULESET,
@@ -200,7 +199,7 @@ function countEvents(run: TraceRun, kind: string): number {
 interface AttributionInput {
   run: TraceRun;
   path: CriticalPath;
-  stages: StageRollup[];
+  phases: PhaseRollup[];
   limiters: LimiterSummary[];
   aggregates: AggregateCandidate[];
   coverage: DiagnosticCoverage;
@@ -215,7 +214,7 @@ function passesShare(ms: number, sharePct: number): boolean {
 }
 
 function attribute(input: AttributionInput): Attribution {
-  const { path, stages, limiters, aggregates, coverage } = input;
+  const { path, phases, limiters, aggregates, coverage } = input;
   const saturated = limiters.find((limiter) => backlogExceeded(limiter));
   const aggregate = aggregates.find((candidate) => passesShare(candidate.busyMs, candidate.sharePct));
 
@@ -226,26 +225,26 @@ function attribute(input: AttributionInput): Attribution {
         confidence: "resource-limited",
         cause: saturated.id,
         why: `${saturated.id} held ${saturated.pending.toLocaleString()} requests behind a cap of ${saturated.cap}, draining at ${saturated.drainPerS}/s over the trailing ${RULESET.backlog.windowMs} ms`,
-        degraded: `${reason}, so the backlog is the constraint the run is under rather than a segment on anyone's path`,
+        degraded: `${reason} — the backlog is the constraint the run is under rather than a segment on anyone's path`,
         runnerUp: null,
       };
     }
     if (aggregate) {
       return {
         confidence: "aggregate-only",
-        cause: aggregate.stage,
-        why: `${aggregate.stage} held the main thread for ${aggregate.busyMs} ms of the run (${aggregate.sharePct}%), recorded as per-tick readings because a per-item row here would be a six-figure-per-second write`,
-        degraded: `${reason}; with no per-item rows this stage can be shown to overlap the work, not to be on its path, and its busy total is a lower bound`,
+        cause: aggregate.phase,
+        why: `${aggregate.phase} held the main thread for ${aggregate.busyMs} ms of the run (${aggregate.sharePct}%), recorded as per-tick readings because a per-item row here would be a six-figure-per-second write`,
+        degraded: `${reason}; with no per-item rows this phase can be shown to overlap the work, not to be on its path, and its busy total is a lower bound`,
         runnerUp: null,
       };
     }
-    const breach = worstCeilingBreach(stages);
+    const breach = ceilingBreaches(phases)[0];
     if (breach) {
       return {
         confidence: "rollup-only",
-        cause: breach.stage.id,
-        why: `${breach.stage.id} p95 ${breach.stage.p95Ms} ms over its ${breach.ceilMs} ms ceiling across ${breach.stage.n.toLocaleString()} rows`,
-        degraded: `${reason} — this is ranked by percentile, which is evidence the stage was slow and not evidence it was on the run's path`,
+        cause: breach.phase.id,
+        why: `${breach.phase.id} p95 ${breach.phase.p95Ms} ms over its ${breach.rule.ceilMs} ms ceiling across ${breach.phase.n.toLocaleString()} rows`,
+        degraded: `${reason} — this is ranked by percentile, which is evidence the phase was slow and not evidence it was on the run's path`,
         runnerUp: null,
       };
     }
@@ -262,26 +261,31 @@ function attribute(input: AttributionInput): Attribution {
   const leader = ranked[0];
   const second = ranked[1];
 
-  // The chain is led by time nothing recorded. No stage can be blamed for it,
+  // The chain is led by time nothing recorded. No phase can be blamed for it,
   // and saying so is the entire reason the segment is kept in the chain.
   if (leader.class === "unrecorded") {
     return {
       confidence: "partial",
       cause: null,
-      why: `the largest span on the critical path is ${leader.ms} ms (${leader.sharePct}% of the run) before the first recorded boundary`,
+      why: `the largest span on the critical path is ${leader.ms} ms (${leader.sharePct}% of the chain) before the first recorded boundary`,
       degraded:
-        "no stage can be blamed for it — nothing instruments that stretch, and the run's bottleneck may be inside it",
+        "no phase can be blamed for it — nothing instruments that stretch, and the run's bottleneck may be inside it",
       runnerUp: second ? { label: second.label, ms: second.ms } : null,
     };
   }
 
-  // An aggregate stage large enough to rival the chain leader. It cannot be
+  // An aggregate phase large enough to rival the chain leader. It cannot be
   // placed on the path, only shown to overlap it — a weaker claim, said plainly.
-  if (aggregate && aggregate.sharePct >= leader.sharePct) {
+  //
+  // Compared in milliseconds, not in percentages: a segment's share is of the
+  // chain and an aggregate's share is of the wall clock, and a run whose chain
+  // ends before the run does has two different denominators wearing the same
+  // "% of the run" costume.
+  if (aggregate && aggregate.busyMs >= leader.ms) {
     return {
       confidence: "aggregate-only",
-      cause: aggregate.stage,
-      why: `${aggregate.stage} held the main thread for ${aggregate.busyMs} ms (${aggregate.sharePct}% of the run) but has no per-item rows`,
+      cause: aggregate.phase,
+      why: `${aggregate.phase} held the main thread for ${aggregate.busyMs} ms (${aggregate.sharePct}% of the run) but has no per-item rows`,
       degraded: `it cannot be placed on the critical path, only shown to overlap it; the chain leader was ${leader.label} at ${leader.ms} ms and both are reported`,
       runnerUp: { label: leader.label, ms: leader.ms },
     };
@@ -331,26 +335,37 @@ function attribute(input: AttributionInput): Attribution {
   };
 }
 
-function worstCeilingBreach(
-  stages: StageRollup[],
-): { stage: StageRollup; ceilMs: number; ratio: number } | null {
-  let worst: { stage: StageRollup; ceilMs: number; ratio: number } | null = null;
+interface CeilingBreach {
+  phase: PhaseRollup;
+  rule: AbsoluteRule;
+  ratio: number;
+}
+
+/**
+ * Every phase over its absolute ceiling, worst first. One pass shared by the
+ * findings list and the non-path attribution: two copies of "is this phase over
+ * its ceiling" is two places for the comparison to drift.
+ */
+function ceilingBreaches(phases: PhaseRollup[]): CeilingBreach[] {
+  const breaches: CeilingBreach[] = [];
   for (const rule of RULESET.absolute) {
-    const stage = stages.find((candidate) => candidate.id === rule.stage);
-    if (!stage || stage.p95Ms <= rule.ceilMs) continue;
-    const ratio = stage.p95Ms / rule.ceilMs;
-    if (!worst || ratio > worst.ratio) worst = { stage, ceilMs: rule.ceilMs, ratio };
+    const phase = phases.find((candidate) => candidate.id === rule.phase);
+    if (!phase || phase.p95Ms <= rule.ceilMs) continue;
+    breaches.push({ phase, rule, ratio: phase.p95Ms / rule.ceilMs });
   }
-  return worst;
+  return breaches.sort((a, b) => b.ratio - a.ratio);
 }
 
 // ---------------------------------------------------------------------------
 // Findings
 // ---------------------------------------------------------------------------
 
+/** A finding before it is ranked: rank is what assigns an id and a confidence. */
+type RawFinding = Omit<Finding, "id" | "confidence" | "attribution">;
+
 interface FindingsInput {
   path: CriticalPath;
-  stages: StageRollup[];
+  phases: PhaseRollup[];
   limiters: LimiterSummary[];
   aggregates: AggregateCandidate[];
   attribution: Attribution;
@@ -358,17 +373,15 @@ interface FindingsInput {
 }
 
 function rankFindings(input: FindingsInput): Finding[] {
-  const raw: Omit<Finding, "id" | "confidence" | "attribution">[] = [];
+  const raw: RawFinding[] = [];
 
-  for (const rule of RULESET.absolute) {
-    const stage = input.stages.find((candidate) => candidate.id === rule.stage);
-    if (!stage || stage.p95Ms <= rule.ceilMs) continue;
+  for (const breach of ceilingBreaches(input.phases)) {
     raw.push({
       severity: "stall",
-      rule: rule.id,
-      subject: stage.id,
-      observed: { stat: rule.stat, ms: stage.p95Ms, n: stage.n },
-      threshold: { kind: "absolute", value: rule.ceilMs, why: rule.why },
+      rule: breach.rule.id,
+      subject: breach.phase.id,
+      observed: { stat: breach.rule.stat, ms: breach.phase.p95Ms, n: breach.phase.n },
+      threshold: { kind: "absolute", value: breach.rule.ceilMs, why: breach.rule.why },
     });
   }
 
@@ -411,9 +424,24 @@ function rankFindings(input: FindingsInput): Finding[] {
   }
 
   for (const segment of input.path.segments) {
-    // Unrecorded time is reported as missing coverage, never as a stall, and a
-    // queue segment is judged by whether its backlog drains rather than by how
-    // much of the run it holds.
+    // An unrecorded prefix large enough to hide the answer is a *note*, never a
+    // stall: nothing measured that stretch, so nothing can be blamed for it —
+    // but a reader deciding whether to trust the chain has to be told the chain
+    // is led by a hole.
+    if (segment.label === UNRECORDED_PREFIX) {
+      if (segment.sharePct >= RULESET.prefix.maxPct) {
+        raw.push({
+          severity: "note",
+          rule: RULESET.prefix.id,
+          subject: segment.label,
+          observed: { ms: segment.ms, sharePct: segment.sharePct, shareOf: "chain", rows: 0 },
+          threshold: { kind: "coverage", value: RULESET.prefix.maxPct, why: RULESET.prefix.why },
+        });
+      }
+      continue;
+    }
+    // A queue segment is judged by whether its backlog drains rather than by
+    // how much of the chain it holds.
     if (segment.class === "unrecorded" || segment.class === "queue") continue;
     if (!passesShare(segment.ms, segment.sharePct)) continue;
     raw.push({
@@ -423,6 +451,7 @@ function rankFindings(input: FindingsInput): Finding[] {
       observed: {
         ms: segment.ms,
         sharePct: segment.sharePct,
+        shareOf: "chain",
         rows: segment.rows,
         ...(segment.breakdown ? { breakdown: segment.breakdown } : {}),
       },
@@ -435,10 +464,11 @@ function rankFindings(input: FindingsInput): Finding[] {
     raw.push({
       severity: "stall",
       rule: RULESET.share.id,
-      subject: candidate.stage,
+      subject: candidate.phase,
       observed: {
         ms: candidate.busyMs,
         sharePct: candidate.sharePct,
+        shareOf: "run",
         rows: 0,
         tier: "per-tick readings",
       },
@@ -482,26 +512,26 @@ function rankFindings(input: FindingsInput): Finding[] {
  */
 function comparativeFindings(
   input: FindingsInput,
-): Omit<Finding, "id" | "confidence" | "attribution">[] {
+): RawFinding[] {
   const baseline = input.baseline;
   if (!baseline) return [];
 
-  const out: Omit<Finding, "id" | "confidence" | "attribution">[] = [];
-  for (const stage of input.stages) {
-    const before = baseline.stages.find((candidate) => candidate.id === stage.id);
+  const out: RawFinding[] = [];
+  for (const phase of input.phases) {
+    const before = baseline.phases.find((candidate) => candidate.id === phase.id);
     if (!before || before.p95Ms <= 0) continue;
-    const ratio = stage.p95Ms / before.p95Ms;
+    const ratio = phase.p95Ms / before.p95Ms;
     if (ratio <= RULESET.compare.minRatio) continue;
     out.push({
       severity: "stall",
       rule: RULESET.compare.id,
-      subject: stage.id,
+      subject: phase.id,
       observed: {
         stat: "p95",
-        ms: stage.p95Ms,
+        ms: phase.p95Ms,
         baselineMs: before.p95Ms,
         ratio: Math.round(ratio * 10) / 10,
-        n: stage.n,
+        n: phase.n,
       },
       threshold: { kind: "comparative", value: RULESET.compare.minRatio, why: RULESET.compare.why },
     });
@@ -528,7 +558,7 @@ function buildVerdict(
       .filter((segment) => segment.class !== "unrecorded")
       .sort((a, b) => b.ms - a.ms)[0];
     const tail = slowest
-      ? `slowest recorded segment was ${slowest.label} at ${slowest.ms} ms (${slowest.sharePct}% of the run)`
+      ? `slowest recorded segment was ${slowest.label} at ${slowest.ms} ms (${slowest.sharePct}% of the chain)`
       : "no recorded segment to rank";
     if (run.header.endReason !== "quiescent" && run.header.endReason !== "explicit") {
       return {
@@ -556,7 +586,10 @@ function buildVerdict(
     };
   }
 
-  const share = lead.observed.sharePct != null ? ` (${lead.observed.sharePct}% of the run)` : "";
+  const share =
+    lead.observed.sharePct != null
+      ? ` (${lead.observed.sharePct}% of the ${lead.observed.shareOf ?? "run"})`
+      : "";
   const amount = lead.observed.stat
     ? `${lead.observed.stat} ${lead.observed.ms} ms`
     : `${lead.observed.ms} ms`;
@@ -602,16 +635,24 @@ const INCONCLUSIVE: readonly Confidence[] = [
   "unattributed",
 ];
 
+/**
+ * The commands that go deeper.
+ *
+ * `lucida trace perfetto` exists today. The `show` verbs are the CLI surface
+ * #935 builds, and these strings are the contract it has to honour — a
+ * diagnostic that prints a command which does not run is worse than one that
+ * prints none, so if that ticket names them differently, it changes them here.
+ */
 function nextSteps(run: TraceRun, findings: Finding[], attribution: Attribution): DiagnosticDocument["next"] {
   const runId = run.header.runId;
   const steps: DiagnosticDocument["next"] = [
-    { why: "every phase, one row each", command: `lucida trace show ${runId} --stages` },
+    { why: "every phase, one row each", command: `lucida trace show ${runId} --phases` },
   ];
   const lead = findings.find((finding) => finding.severity !== "note");
   if (lead) {
     steps.unshift({
       why: `the shape behind ${lead.subject}`,
-      command: `lucida trace show ${runId} --stage ${lead.subject}`,
+      command: `lucida trace show ${runId} --phase ${lead.subject}`,
     });
   }
   if (INCONCLUSIVE.includes(attribution.confidence)) {
@@ -622,11 +663,7 @@ function nextSteps(run: TraceRun, findings: Finding[], attribution: Attribution)
   }
   steps.push({
     why: "raw spans, for a viewer rather than a context window",
-    command: `lucida trace export ${runId} --format chrome`,
+    command: "lucida trace perfetto",
   });
   return steps;
 }
-
-/** Re-exported so a surface can name the two segments it must handle specially. */
-export { PHASES, PRE_PLAN, UNRECORDED_PREFIX };
-export type { PathSegment };

@@ -36,7 +36,11 @@ export function summariseLimiters(run: TraceRun): LimiterSummary[] {
   if (cap <= 0) return [];
 
   const pinned = readings.filter((reading) => reading.inFlight >= cap).length;
-  const pending = readings[readings.length - 1].queueDepth || run.header.outstandingAtSettle.pending;
+  // The last reading, not "the last reading or the settle count": a queue that
+  // genuinely drained to zero is the good news this rule exists to distinguish,
+  // and treating that zero as absent would substitute the settle-time backlog
+  // and manufacture a saturated verdict out of a healthy run.
+  const pending = readings[readings.length - 1].queueDepth;
 
   const windowUs = RULESET.backlog.windowMs * 1_000;
   const windowStartUs = Math.max(0, run.header.durationUs - windowUs);
@@ -54,7 +58,10 @@ export function summariseLimiters(run: TraceRun): LimiterSummary[] {
     if (queue.endUs >= windowStartUs && queue.endUs <= run.header.durationUs) windowCompletions += 1;
   }
 
-  const drainPerS = Math.round(windowCompletions / windowSeconds);
+  // Rounded to tenths rather than to whole admissions. A queue draining at
+  // 0.4/s is desperately slow and still draining; rounding it to zero would
+  // report it as stopped, which is a different diagnosis.
+  const drainPerS = Math.round((windowCompletions / windowSeconds) * 10) / 10;
   return [
     {
       id: SCHEDULER_ADMISSION,
@@ -64,10 +71,10 @@ export function summariseLimiters(run: TraceRun): LimiterSummary[] {
       pinnedPct: Math.round((pinned / readings.length) * 100),
       pending,
       drainPerS,
-      // Null means "will not drain at the observed rate", which is worse news
-      // than a large number rather than an absent one — `willNotDrain` below
-      // is what the rule reads.
-      backlogEtaS: drainPerS > 0 ? Math.round(pending / drainPerS) : null,
+      // Null means strictly "there is a backlog and it is not draining", which
+      // is worse news than a large number rather than an absent one. An empty
+      // queue is zero at any rate: nothing is waiting, so nothing has a wait.
+      backlogEtaS: pending === 0 ? 0 : drainPerS > 0 ? Math.round(pending / drainPerS) : null,
       windowMs: RULESET.backlog.windowMs,
       windowCompletions,
     },

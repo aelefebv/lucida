@@ -24,7 +24,7 @@ import {
   uninstrumentedPrefixOpen,
 } from "./fixtures.ts";
 import { CONFIDENCE_WORDS, diagnoseDocument, diagnoseRun } from "./diagnose.ts";
-import { RULESET, RULESET_VERSION, STAGE_CLASSES } from "./ruleset.ts";
+import { RULESET, RULESET_VERSION, PHASE_CLASSES } from "./ruleset.ts";
 import type { TraceDocument } from "../types.ts";
 
 const MS = 1_000;
@@ -57,25 +57,25 @@ describe("thresholds", () => {
 
   it("keeps every absolute ceiling above the worst p95 the research runs observed", () => {
     for (const rule of RULESET.absolute) {
-      expect(STAGE_CLASSES[rule.stage]).toBeDefined();
-      expect(STAGE_CLASSES[rule.stage]).not.toBe("queue");
+      expect(PHASE_CLASSES[rule.phase]).toBeDefined();
+      expect(PHASE_CLASSES[rule.phase]).not.toBe("queue");
       expect(rule.why.length).toBeGreaterThan(20);
     }
   });
 
-  it("gives queue stages no per-chunk ceiling", () => {
-    const queueStages = Object.entries(STAGE_CLASSES)
+  it("gives queue phases no per-chunk ceiling", () => {
+    const queuePhases = Object.entries(PHASE_CLASSES)
       .filter(([, cls]) => cls === "queue")
       .map(([id]) => id);
-    expect(queueStages.length).toBeGreaterThan(0);
-    for (const stage of queueStages) {
-      expect(RULESET.absolute.some((r) => r.stage === stage)).toBe(false);
+    expect(queuePhases.length).toBeGreaterThan(0);
+    for (const phase of queuePhases) {
+      expect(RULESET.absolute.some((r) => r.phase === phase)).toBe(false);
     }
 
     // A run whose queue p95 is 4.6 s produces no absolute finding against it.
     const doc = diagnoseRun(saturatedReopen());
-    const queueStage = doc.stages.find((s) => s.id === "browser.queue");
-    expect(queueStage!.p95Ms).toBeGreaterThan(4_000);
+    const queuePhase = doc.phases.find((s) => s.id === "browser.queue");
+    expect(queuePhase!.p95Ms).toBeGreaterThan(4_000);
     expect(doc.findings.some((f) => f.subject === "browser.queue" && f.rule.startsWith("io."))).toBe(
       false,
     );
@@ -120,6 +120,38 @@ describe("thresholds", () => {
     expect(limiter.backlogEtaS).toBe(50);
   });
 
+  it("reads a queue that drained to zero as drained, not as the settle-time backlog", () => {
+    // The good news this rule has to be able to tell: the last reading says the
+    // queue emptied, while the header still carries what was outstanding when
+    // the run closed. Treating that zero as absent would substitute the
+    // backlog and manufacture a saturated verdict out of a healthy run.
+    const run = makeRun({
+      header: {
+        durationUs: 5_000 * MS,
+        outstandingAtSettle: {
+          pending: 20_000,
+          inFlight: 8,
+          speculativePending: 0,
+          speculativeInFlight: 0,
+          desiredDetailChunks: 0,
+          residentDetailChunks: 0,
+          desiredCoarseChunks: 0,
+          residentCoarseChunks: 0,
+        },
+      },
+      rows: Array.from({ length: 30 }, (_, i) =>
+        makeRow({ startUs: i * 100 * MS, durations: { plan: 100, queue: 5 * MS } }, i),
+      ),
+      readings: [makeReading(4_900 * MS, { queueDepth: 0, inFlight: 8 })],
+    });
+    const doc = diagnoseRun(run);
+
+    expect(doc.limiters[0].pending).toBe(0);
+    expect(doc.limiters[0].backlogEtaS).toBe(0);
+    expect(doc.findings.some((f) => f.rule === RULESET.backlog.id)).toBe(false);
+    expect(doc.verdict.kind).not.toBe("saturated");
+  });
+
   it("reports a comparative regression only above 2x", () => {
     const baseline = diagnoseRun(healthyLocalOpen());
 
@@ -134,7 +166,7 @@ describe("thresholds", () => {
 });
 
 describe("attribution", () => {
-  it("is a back-walk, not a max over stage totals", () => {
+  it("is a back-walk, not a max over phase totals", () => {
     // Two hundred concurrent rows spend 100 ms each on the wire — 20 s of
     // total, five times the run's own wall clock — while the row the run
     // actually waited on spent its time decoding.
@@ -158,8 +190,8 @@ describe("attribution", () => {
     const run = makeRun({ header: { durationUs: 1_200 * MS }, rows });
     const doc = diagnoseRun(run);
 
-    expect(doc.stages[0].id).toBe("browser.wire");
-    expect(doc.stages[0].totalMs).toBeGreaterThan(doc.run.wallMs);
+    expect(doc.phases[0].id).toBe("browser.wire");
+    expect(doc.phases[0].totalMs).toBeGreaterThan(doc.run.wallMs);
     expect(doc.criticalPath.kind).toBe("chain");
 
     const leader = [...doc.criticalPath.segments].sort((a, b) => b.ms - a.ms)[0];
@@ -199,7 +231,11 @@ describe("attribution", () => {
 
     expect(prefix.class).toBe("unrecorded");
     expect(prefix.ms).toBeGreaterThan(2_000);
-    expect(doc.findings.some((f) => f.subject === prefix.label)).toBe(false);
+    // A note, never a stall: nothing measured that stretch, so nothing can be
+    // blamed for it — but a chain led by a hole is worth a line of its own.
+    const onPrefix = doc.findings.filter((f) => f.subject === prefix.label);
+    expect(onPrefix.every((f) => f.severity === "note")).toBe(true);
+    expect(onPrefix.map((f) => f.rule)).toContain("coverage.unrecorded-prefix");
     expect(doc.coverage.gaps.some((g) => g.kind === "unrecorded-prefix")).toBe(true);
     expect(doc.coverage.incomplete).toBe(true);
   });
@@ -224,7 +260,7 @@ describe("attribution", () => {
     expect(["aggregate-only", "rollup-only", "resource-limited", "unattributed"]).toContain(
       doc.verdict.confidence,
     );
-    expect(doc.aggregates[0]?.stage).toBe("render.frame");
+    expect(doc.aggregates[0]?.phase).toBe("render.frame");
   });
 
   it("carries a degraded line on every one of the seven confidence words", () => {
@@ -372,7 +408,7 @@ function tiedChain() {
   return makeRun({ header: { runId: "tied", durationUs: 1_000 * MS }, rows });
 }
 
-/** No completion event, no saturation, but a stage over its absolute ceiling. */
+/** No completion event, no saturation, but a phase over its absolute ceiling. */
 function rollupOnlyRun() {
   const rows = Array.from({ length: 20 }, (_, i) =>
     makeRow(

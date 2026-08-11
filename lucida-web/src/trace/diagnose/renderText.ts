@@ -24,7 +24,7 @@ import type { DiagnosticDocument, Finding } from "./types.ts";
 export const DEFAULT_MAX_LINES = 30;
 export const DEFAULT_MAX_BYTES = 3_072;
 
-export type RenderDepth = "summary" | "stages";
+export type RenderDepth = "summary" | "phases";
 
 /** One number, as printed and as it exists in the document. */
 export interface Provenance {
@@ -47,9 +47,12 @@ export interface RenderedDiagnostic {
 const REQUIRED = 0;
 const IDENTITY = 1;
 const LEAD_FINDING = 2;
-const GAPS = 3;
-const MORE_FINDINGS = 4;
-const NEXT = 5;
+// The commands outrank the extra gaps and the second and third findings: the
+// default rendering is required to name what to run next, and a reader who has
+// the commands can reach everything below this line anyway.
+const NEXT = 3;
+const GAPS = 4;
+const MORE_FINDINGS = 5;
 const DETAIL = 6;
 
 interface Line {
@@ -145,7 +148,7 @@ export function renderDiagnostic(
     if (depth === "summary" && document.findings.length > shown.length) {
       push(
         MORE_FINDINGS,
-        `  ... ranked findings above; the run carries ${p("findings.length", document.findings.length)} in total (see --stages)`,
+        `  ... ranked findings above; the run carries ${p("findings.length", document.findings.length)} in total (see --phases)`,
       );
     }
   }
@@ -178,12 +181,12 @@ export function renderDiagnostic(
       DETAIL,
       "STAGES  (totals overlap: rows run concurrently, so a total is not a share of the wall clock)",
     );
-    for (const stage of document.stages) {
+    for (const phase of document.phases) {
       push(
         DETAIL,
-        `   ${stage.id.padEnd(24)} ${stage.class.padEnd(8)} n=${String(stage.n).padStart(6)} ` +
-          `p50 ${String(stage.p50Ms).padStart(8)} p95 ${String(stage.p95Ms).padStart(8)} ` +
-          `max ${String(stage.maxMs).padStart(8)} total ${String(stage.totalMs).padStart(9)} ${stage.concurrencyFactor}x`,
+        `   ${phase.id.padEnd(24)} ${phase.class.padEnd(8)} n=${String(phase.n).padStart(6)} ` +
+          `p50 ${String(phase.p50Ms).padStart(8)} p95 ${String(phase.p95Ms).padStart(8)} ` +
+          `max ${String(phase.maxMs).padStart(8)} total ${String(phase.totalMs).padStart(9)} ${phase.concurrencyFactor}x`,
       );
     }
     if (document.limiters.length > 0) {
@@ -223,20 +226,40 @@ function fit(
   maxLines: number,
   maxBytes: number,
 ): { kept: string[]; dropped: number } {
-  let cutoff = DETAIL;
-  for (;;) {
+  for (let cutoff = DETAIL; ; cutoff -= 1) {
     const kept = lines.filter((line) => line.band <= cutoff).map((line) => line.text);
     const dropped = lines.length - kept.length;
     // Numberless on purpose: the count belongs to the rendering rather than to
     // the run, and every number in this text has to exist in the document.
     // Callers that want the figure read `droppedLines` off the result.
-    const note = dropped > 0 ? ["   (lines dropped to fit the default budget — the JSON carries all of them)"] : [];
+    const note = dropped > 0 ? [DROP_NOTE] : [];
     const out = [...kept, ...note];
-    if ((out.length <= maxLines && byteLength(out.join("\n")) <= maxBytes) || cutoff === REQUIRED) {
+    if (out.length <= maxLines && byteLength(out.join("\n")) <= maxBytes) {
       return { kept: out, dropped };
     }
-    cutoff -= 1;
+    if (cutoff === REQUIRED) {
+      // The required lines cannot be dropped — a verdict without its coverage
+      // is the thing this whole module exists to prevent — so the last resort
+      // is to clamp their width. Prose in a verdict or a degraded line is
+      // unbounded; the budget is not.
+      return { kept: clampToBytes(out, maxBytes), dropped };
+    }
   }
+}
+
+const DROP_NOTE = "   (lines dropped to fit the default budget — the JSON carries all of them)";
+
+/** Shorten from the longest line down until the whole rendering fits. */
+function clampToBytes(lines: string[], maxBytes: number): string[] {
+  const out = [...lines];
+  while (byteLength(out.join("\n")) > maxBytes) {
+    let longest = 0;
+    for (let i = 1; i < out.length; i += 1) if (out[i].length > out[longest].length) longest = i;
+    const line = out[longest];
+    if (line.length <= 20) return out;
+    out[longest] = `${line.slice(0, Math.max(20, Math.floor(line.length * 0.75)))}…`;
+  }
+  return out;
 }
 
 function byteLength(text: string): number {
@@ -273,7 +296,9 @@ function describeObservation(finding: Finding, p: (path: string, value: string |
       `vs ${p(`${base}.baselineMs`, observed.baselineMs)} ms baseline (${p(`${base}.ratio`, observed.ratio ?? 0)}x)`,
     );
   }
-  if (observed.sharePct != null) parts.push(`${p(`${base}.sharePct`, observed.sharePct)}% of the run`);
+  if (observed.sharePct != null) {
+    parts.push(`${p(`${base}.sharePct`, observed.sharePct)}% of the ${observed.shareOf ?? "run"}`);
+  }
   if (observed.n != null) parts.push(`n=${p(`${base}.n`, observed.n)}`);
   if (observed.rows === 0 && observed.tier) parts.push(`no per-item rows (${observed.tier})`);
   return parts.join(" · ");
