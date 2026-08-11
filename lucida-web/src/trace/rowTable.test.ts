@@ -8,6 +8,7 @@ function source(overrides: Partial<Parameters<RowTable["append"]>[0]> = {}) {
     datasetId: "ds",
     entityId: "member-1",
     imageId: "image-1",
+    lane: "detail",
     level: 2,
     t: 3,
     c: 1,
@@ -38,10 +39,23 @@ describe("RowTable", () => {
 
   it("pins the row width, because the memory caps are derived from it", () => {
     // 3 interned identity ids + 6 chunk coordinates + 7 boundary slots, all
-    // uint32, plus a residency-tier byte and an outcome byte. #927 derives
-    // its resident and per-run caps from this figure, so a change here is a
-    // change to how much of a run fits.
-    expect(RowTable.BYTES_PER_ROW).toBe(66);
+    // uint32, plus a residency-tier byte, a lane byte and an outcome byte.
+    // #927 derives its resident and per-run caps from this figure, so a
+    // change here is a change to how much of a run fits.
+    expect(RowTable.BYTES_PER_ROW).toBe(67);
+  });
+
+  it("carries lane as a column, not as a phase", () => {
+    const table = new RowTable(3);
+    table.append(source({ lane: "prefetch" }), 0);
+    table.append(source({ lane: "minimap" }), 1);
+    // A lane this build does not know reads as absent rather than as the
+    // first name in the list.
+    table.append(source({ lane: "not-a-lane" }), 0);
+
+    const rows = table.serialise();
+    expect(rows.map(r => r.lane)).toEqual(["prefetch", "minimap", null]);
+    expect(rows.every(r => Object.keys(r.phases).length === 0)).toBe(true);
   });
 
   it("reports a fixed width per row", () => {

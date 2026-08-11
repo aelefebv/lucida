@@ -104,6 +104,12 @@ export interface ReadyChunkDelivery {
   residencyTier?: ResidencyTier;
   /** Lower numbers are delivered first when present on CpuCache output. */
   priority?: number;
+  /**
+   * Handle for this chunk's trace lifecycle row, carried from the fetch that
+   * produced it so the `upload` and `present` phases land on the same row as
+   * `wire` and `decode`. -1 when no run was open at fetch time.
+   */
+  traceRow?: number;
 }
 
 /**
@@ -164,6 +170,13 @@ export interface CacheEntry {
    * present in the current plan get evicted before chunks that are.
    */
   lastSeenTick: number;
+  /**
+   * Handle for this chunk's trace lifecycle row. Set once by the fetch that
+   * produced the entry and cleared when the chunk is handed to the renderer,
+   * so a chunk re-delivered after an eviction does not re-stamp a row whose
+   * life is already over. -1 when no run was open at fetch time.
+   */
+  traceRow?: number;
 }
 
 export interface TierResidencyEntry {

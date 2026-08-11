@@ -12,6 +12,9 @@
 
 import {
   BOUNDARY_COUNT,
+  LANE_NAMES,
+  UNKNOWN_LANE,
+  laneIndex,
   RESIDENCY_TIER_NAMES,
   ROW_OUTCOME_NAMES,
   RowOutcome,
@@ -57,8 +60,8 @@ class StringPool {
 }
 
 export class RowTable {
-  /** 3 interned ids + 6 coordinates + 7 boundary slots, all uint32, plus two bytes. */
-  static readonly BYTES_PER_ROW = (3 + COORDS_PER_ROW + BOUNDARY_COUNT) * 4 + 2;
+  /** 3 interned ids + 6 coordinates + 7 boundary slots, all uint32, plus three bytes. */
+  static readonly BYTES_PER_ROW = (3 + COORDS_PER_ROW + BOUNDARY_COUNT) * 4 + 3;
 
   private readonly strings = new StringPool();
 
@@ -68,6 +71,7 @@ export class RowTable {
   private coords: Uint32Array;
   private stamps: Uint32Array;
   private tiers: Uint8Array;
+  private lanes: Uint8Array;
   private outcomes: Uint8Array;
 
   private rows = 0;
@@ -81,6 +85,7 @@ export class RowTable {
     this.coords = new Uint32Array(this.capacity * COORDS_PER_ROW);
     this.stamps = new Uint32Array(this.capacity * BOUNDARY_COUNT);
     this.tiers = new Uint8Array(this.capacity);
+    this.lanes = new Uint8Array(this.capacity);
     this.outcomes = new Uint8Array(this.capacity);
   }
 
@@ -110,6 +115,7 @@ export class RowTable {
     this.entityIds[index] = this.strings.intern(src.entityId);
     this.imageIds[index] = this.strings.intern(src.imageId);
     this.tiers[index] = tier;
+    this.lanes[index] = laneIndex(src.lane);
     this.outcomes[index] = RowOutcome.InFlight;
 
     const c = index * COORDS_PER_ROW;
@@ -164,6 +170,7 @@ export class RowTable {
         datasetId: this.strings.get(this.datasetIds[i]),
         entityId: this.strings.get(this.entityIds[i]),
         imageId: this.strings.get(this.imageIds[i]),
+        lane: this.lanes[i] === UNKNOWN_LANE ? null : LANE_NAMES[this.lanes[i]],
         residencyTier: RESIDENCY_TIER_NAMES[this.tiers[i]],
         level,
         t,
@@ -187,6 +194,7 @@ export class RowTable {
     this.coords = copyInto(this.coords, new Uint32Array(next * COORDS_PER_ROW));
     this.stamps = copyInto(this.stamps, new Uint32Array(next * BOUNDARY_COUNT));
     this.tiers = copyInto(this.tiers, new Uint8Array(next));
+    this.lanes = copyInto(this.lanes, new Uint8Array(next));
     this.outcomes = copyInto(this.outcomes, new Uint8Array(next));
     this.capacity = next;
   }

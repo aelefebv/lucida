@@ -42,6 +42,7 @@ interface StartCall {
   controller: AbortController;
   estimatedBytes: number;
   key: string;
+  admittedAtMs: number | undefined;
 }
 
 function makeScheduler(opts?: {
@@ -57,8 +58,9 @@ function makeScheduler(opts?: {
     controller: AbortController,
     estimatedBytes: number,
     key: string,
+    admittedAtMs: number | undefined,
   ) => {
-    startCalls.push({ req: r, controller, estimatedBytes, key });
+    startCalls.push({ req: r, controller, estimatedBytes, key, admittedAtMs });
   };
   const scheduler = new Scheduler<TestRequest>(
     {
@@ -141,6 +143,31 @@ describe("Scheduler.enqueue + drain", () => {
     scheduler.drain(() => 0);
     expect(startCalls[0].key).toBe(keyOf(r));
     expect(scheduler.hasInFlight(keyOf(r))).toBe(true);
+  });
+
+  it("hands startFn the admission stamp, so the queue wait is measurable", () => {
+    const { scheduler, startCalls } = makeScheduler();
+    scheduler.enqueue([req({ chunkKey: "a" })], 1_000);
+    scheduler.drain(() => 0, 1_050);
+    expect(startCalls[0].admittedAtMs).toBe(1_000);
+  });
+
+  it("dates a backlog entry from its promotion into the window", () => {
+    // A window of one: the second entry sits in the backlog, and the
+    // scheduler deliberately keeps no bookkeeping for it (ADR 0044).
+    const { scheduler, startCalls } = makeScheduler({
+      maxConcurrentFetches: 1,
+      admissionWindow: 1,
+    });
+    scheduler.enqueue([req({ chunkKey: "a" }), req({ chunkKey: "b" })], 1_000);
+    scheduler.drain(() => 0, 1_000);
+    scheduler.markInFlightDone(keyOf(req({ chunkKey: "a" })));
+    // `b` was promoted into the window by the first drain, so it is stamped
+    // from its promotion rather than from when it was first wanted.
+    scheduler.drain(() => 0, 1_200);
+
+    expect(startCalls[0].admittedAtMs).toBe(1_000);
+    expect(startCalls[1].admittedAtMs).toBe(1_000);
   });
 });
 

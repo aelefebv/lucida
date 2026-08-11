@@ -20,10 +20,30 @@ export const TRACE_SCHEMA_VERSION = 1;
  * ad hoc, because adding a phase widens every lifecycle row and spends from
  * a fixed budget.
  *
- * Only `wire` is instrumented today (#924); the remaining phases keep their
- * slots reserved so filling them in (#925) does not re-shape the row.
- * {@link TraceDocument.instrumentedPhases} states which ones actually carry
- * timings, so a reader never mistakes a reserved slot for a measured zero.
+ * Every phase carries timings (#925). {@link TraceDocument.instrumentedPhases}
+ * still states which ones were measured, so a reader never mistakes a
+ * reserved slot for a measured zero.
+ *
+ * The boundaries are all main-thread observations. No worker timestamps
+ * itself and no clock is reconciled across contexts, so each phase is
+ * bracketed where the main thread can see both ends:
+ *
+ * - `plan`   the tick's wanted-set computation, including its synchronous
+ *            wasm calls, up to the moment the request was admitted to the
+ *            scheduler. Not a separate timing source — the same recorder
+ *            clock as every other phase.
+ * - `queue`  admitted to the scheduler → fetch dispatched.
+ * - `wire`   request sent → bytes in hand. The bracket server rows nest in.
+ * - `decode` the worker ROUND TRIP: postMessage out → onmessage in. Named
+ *            for the round trip, not for CPU time, because it includes the
+ *            wait for a free worker and that is usually the larger half.
+ * - `upload` bytes decoded → the chunk is on the GPU. Covers the wait in
+ *            the CPU cache for a delivery tick, the per-frame upload budget,
+ *            and the worker's own texture write; residency is established by
+ *            message ordering (the worker is FIFO, so a chunk posted before
+ *            a render has been written by the time that render runs).
+ * - `present` resident → drawn in a frame, bounded by the following frame's
+ *            dispatch.
  */
 export const PHASES = ["plan", "queue", "wire", "decode", "upload", "present"] as const;
 export type Phase = (typeof PHASES)[number];
@@ -96,6 +116,31 @@ export type ResidencyTierName = "detail" | "coarse";
 export const RESIDENCY_TIER_NAMES: readonly ResidencyTierName[] = ["detail", "coarse"];
 
 /**
+ * Which lane a request travelled on. An attribute of the row, not a phase of
+ * its own: a prefetch chunk and a detail chunk go through the same six
+ * phases, and splitting the enum by lane would widen every row to say
+ * something a column already says.
+ *
+ * Index order is the wire order of the column and must not be reordered.
+ */
+export type LaneName = "minimap" | "detail" | "coarse" | "prefetch" | "overview";
+export const LANE_NAMES: readonly LaneName[] = [
+  "minimap",
+  "detail",
+  "coarse",
+  "prefetch",
+  "overview",
+];
+
+/** The column value for an unrecognised lane, so a new lane cannot silently read as `minimap`. */
+export const UNKNOWN_LANE = 0xff;
+
+export function laneIndex(lane: string): number {
+  const index = LANE_NAMES.indexOf(lane as LaneName);
+  return index < 0 ? UNKNOWN_LANE : index;
+}
+
+/**
  * The identity fields a lifecycle row copies off a planned request. A
  * structural subset of `ChunkRequest`, so emit sites pass the object they
  * already hold and the recorder allocates nothing.
@@ -104,6 +149,7 @@ export interface ChunkRowSource {
   datasetId: string;
   entityId: string;
   imageId: string;
+  lane: string;
   level: number;
   t: number;
   c: number;
@@ -224,11 +270,37 @@ export interface PhaseTiming {
   durationUs: number;
 }
 
+/**
+ * Stages that happen too fast to time and are counted instead.
+ *
+ * The platform's clock floor is 100 µs. Cache admission, worker dispatch and
+ * coalesce attach all land below it, so timing them would show quantisation
+ * noise wearing the costume of data. A count is the honest measurement: it
+ * says how often the stage happened without claiming to know how long it
+ * took.
+ *
+ * Zero here is not a health signal, and a reader must not take it as one.
+ */
+export interface CountedEvents {
+  /** Fetched bytes admitted into a CPU-cache store. */
+  cacheAdmission: number;
+  /** Decodes handed to a pool worker. */
+  workerDispatch: number;
+  /** Second and later demands that attached to an in-flight or already-queued fetch. */
+  coalesceAttach: number;
+}
+
+export function emptyCountedEvents(): CountedEvents {
+  return { cacheAdmission: 0, workerDispatch: 0, coalesceAttach: 0 };
+}
+
 /** A lifecycle row, fanned out at serialisation. Spans exist only at export. */
 export interface TraceRow {
   datasetId: string;
   entityId: string;
   imageId: string;
+  /** An attribute, not a phase. Absent when the lane was not one this build knows. */
+  lane: LaneName | null;
   residencyTier: ResidencyTierName;
   level: number;
   t: number;
@@ -245,6 +317,8 @@ export interface TraceRow {
 export interface TraceRun {
   header: RunHeader;
   rows: TraceRow[];
+  /** The stages below the clock floor. Counted, never timed. */
+  counted: CountedEvents;
 }
 
 export interface TraceDocument {

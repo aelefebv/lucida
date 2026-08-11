@@ -69,6 +69,7 @@ import {
   iterateActiveSetMembers,
 } from "./upload/coldState/build.ts";
 import type { Uploader } from "./upload/uploader.ts";
+import { traceRecorder } from "../trace/recorder.ts";
 
 /** A visible member for render layer construction. */
 export interface MemberRosterEntry {
@@ -614,6 +615,11 @@ export class TickCoordinator {
     minimapPendingFetch: Map<string, MinimapChunkCoord[]>,
   ): TickCoordinatorResult | null {
     const tickStart = performance.now();
+    // Opens the `plan` phase: everything from here to the submit that hands
+    // the wanted set to the scheduler, synchronous wasm calls included. Not a
+    // separate timing source — one recorder, one clock, so plan time is
+    // comparable with the phases downstream of it.
+    traceRecorder.markPlanStart();
 
     // Step 1 — Epoch check
     const rawEpochs = JSON.parse(ctx.scene.epochs());
