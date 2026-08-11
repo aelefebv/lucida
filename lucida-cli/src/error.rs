@@ -19,6 +19,10 @@ pub enum ErrorKind {
     SessionDisconnect,
     RejectedCommand,
     Protocol,
+    /// An opt-in `--gate` refused a measurement. Its own kind because every
+    /// other non-zero exit here means the command failed to run at all, and a
+    /// pipe reading exit status should be able to tell the two apart.
+    GateFailed,
     Io,
     Network,
     Unexpected,
@@ -39,6 +43,7 @@ impl ErrorKind {
             ErrorKind::SessionDisconnect => "session_disconnect",
             ErrorKind::RejectedCommand => "rejected_command",
             ErrorKind::Protocol => "protocol",
+            ErrorKind::GateFailed => "gate_failed",
             ErrorKind::Io => "io",
             ErrorKind::Network => "network",
             ErrorKind::Unexpected => "unexpected",
@@ -52,6 +57,7 @@ impl ErrorKind {
             ErrorKind::MissingResource => 4,
             ErrorKind::AmbiguousName => 5,
             ErrorKind::ArchivedWorkspace => 6,
+            ErrorKind::GateFailed => 7,
             ErrorKind::Config | ErrorKind::InvalidServer => 64,
             ErrorKind::UnreachableServer
             | ErrorKind::DatasetOpenFailure

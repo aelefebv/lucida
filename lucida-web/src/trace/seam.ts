@@ -20,7 +20,7 @@
 
 import { toChromeTraceJson } from "./chromeTrace.ts";
 import { diagnoseDocument } from "./diagnose/diagnose.ts";
-import { renderDiagnostic } from "./diagnose/renderText.ts";
+import { renderDiagnostic, type RenderDepth } from "./diagnose/renderText.ts";
 import type { DiagnosticDocument } from "./diagnose/types.ts";
 import { traceRecorder } from "./recorder.ts";
 import type { QuiescenceState } from "./quiescence.ts";
@@ -78,10 +78,20 @@ export interface LucidaTraceSeam {
    * number in the text exists in {@link diagnose}'s output — a caller drops to
    * the JSON for the fields the text selected against, never for a different
    * answer.
+   *
+   * `depth` selects the rendering, not a different derivation: a driver that
+   * has to archive the deeper depth reads it here rather than growing a second
+   * renderer outside the page, where it would drift.
    */
-  diagnoseText(runId?: string): string;
-  /** Close the run in progress without exporting — the *Stop & analyse* path. */
-  closeRun(): void;
+  diagnoseText(runId?: string, options?: { depth?: RenderDepth }): string;
+  /**
+   * Close the run in progress without exporting — the *Stop & analyse* path.
+   *
+   * A driver that gave up on a run that never settled passes `"timeout"`:
+   * every run carries an end reason, and `explicit` would claim the run was
+   * concluded by somebody asking for it rather than by running out of time.
+   */
+  closeRun(endReason?: "explicit" | "timeout"): void;
 }
 
 declare global {
@@ -106,9 +116,12 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
     exportTrace: () => traceRecorder.exportDocument(),
     exportChromeTrace: () => toChromeTraceJson(traceRecorder.exportDocument()),
     diagnose: (runId?: string) => diagnoseDocument(traceRecorder.exportDocument(), { runId }),
-    diagnoseText: (runId?: string) =>
-      renderDiagnostic(diagnoseDocument(traceRecorder.exportDocument(), { runId })).text,
-    closeRun: () => traceRecorder.closeRun("explicit"),
+    diagnoseText: (runId?: string, options?: { depth?: RenderDepth }) =>
+      renderDiagnostic(diagnoseDocument(traceRecorder.exportDocument(), { runId }), {
+        depth: options?.depth,
+      }).text,
+    closeRun: (endReason: "explicit" | "timeout" = "explicit") =>
+      traceRecorder.closeRun(endReason),
   };
   target.lucidaTrace = seam;
   return seam;

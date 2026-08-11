@@ -343,12 +343,43 @@ describe("the trace seam", () => {
     expect(text).toContain("coverage  ");
   });
 
+  /**
+   * The driver reads the deeper depth off the same renderer rather than
+   * growing one of its own: `lucida trace show --phases` prints what the page
+   * rendered, so the CLI stays free of thresholds it would otherwise restate.
+   */
+  it("renders the deeper depth through the same renderer", async () => {
+    installTraceSeam();
+    const source = new ControlledSource();
+    const cache = new CpuCache(source, makeDecode());
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    cache.submit(makePlan([makeRequest()]));
+    await flush();
+
+    const phases = window.lucidaTrace!.diagnoseText(undefined, { depth: "phases" });
+    expect(phases).toContain("CRITICAL PATH");
+    expect(phases).toContain("RULESET v");
+  });
+
   it("stops a run without exporting it", () => {
     const seam = installTraceSeam();
     traceRecorder.openRun(OPEN_CAUSE);
     seam.closeRun();
     expect(traceRecorder.isRunOpen).toBe(false);
     expect(seam.exportTrace().runs[0].header.endReason).toBe("explicit");
+  });
+
+  /**
+   * A driver that gives up on a run that never settled has to say so in the
+   * run rather than in its own prose: `explicit` would claim somebody asked
+   * for the document, and the end reason is the field a later reader trusts.
+   */
+  it("lets a driver close a run that never settled as a timeout", () => {
+    const seam = installTraceSeam();
+    traceRecorder.openRun(OPEN_CAUSE);
+    seam.closeRun("timeout");
+    expect(seam.exportTrace().runs[0].header.endReason).toBe("timeout");
   });
 
   it("keeps rows seen with no run open as unlabelled steady state", async () => {
