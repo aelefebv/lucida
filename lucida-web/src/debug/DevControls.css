@@ -1,6 +1,7 @@
 /* Dev controls — standalone mutation surface docked beside the canvas.
-   Self-contained: it outlives the debug panel it was lifted out of, so
-   it owns its styles rather than borrowing DebugPanel.css. */
+   Self-contained: it was lifted out of the debug panel that ADR 0052
+   then deleted, so it owns its styles rather than borrowing that
+   panel's stylesheet. */
 
 .dev-controls {
   width: 300px;

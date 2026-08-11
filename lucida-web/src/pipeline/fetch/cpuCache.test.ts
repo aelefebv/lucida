@@ -693,9 +693,14 @@ describe("CpuCache", () => {
       await flush();
 
       expect(Array.from(cache.getDeliverable())).toEqual([]);
-      expect(cache.getCacheDump()).toMatchObject([
-        { chunkKey: "0/1/0/0/0/0", tier: "prefetch" },
-      ]);
+      // Tier is read off residency rather than a per-entry dump: the dump
+      // accessors went with the debug panel (ADR 0052). The counts carry no
+      // chunk key, so they pin the promotion only because this fixture holds
+      // exactly one chunk — the delivery assertion below binds the identity.
+      expect(cache.telemetry().tierResidency).toMatchObject({
+        prefetch: { count: 1 },
+        activeDetail: { count: 0 },
+      });
 
       cache.onPlanRebuildStart();
       cache.submit(makePlan([detail]));
@@ -708,9 +713,10 @@ describe("CpuCache", () => {
         chunkKey: "0/1/0/0/0/0",
         priority: 1,
       });
-      expect(cache.getCacheDump()).toMatchObject([
-        { chunkKey: "0/1/0/0/0/0", tier: "active-detail" },
-      ]);
+      expect(cache.telemetry().tierResidency).toMatchObject({
+        prefetch: { count: 0 },
+        activeDetail: { count: 1 },
+      });
     });
   });
 
@@ -3618,40 +3624,3 @@ describe("CpuCache", () => {
 
 import { TRANSIENT_RETRY_DELAY_MS } from "./cpuCache.ts";
 
-// ---------------------------------------------------------------------------
-// Pending dump: admission window vs backlog (ADR 0044)
-// ---------------------------------------------------------------------------
-
-describe("CpuCache.getPendingDump", () => {
-  it("reports no age for backlog entries rather than a misleading zero", () => {
-    const { cache } = createTestCache();
-    cache.onPlanRebuildStart();
-
-    // Far more requests than the admission window (max(64, 24*4) = 96) so
-    // the queue certainly has a backlog behind it.
-    const reqs = Array.from({ length: 500 }, (_, i) =>
-      makeRequest({
-        entityId: `entity-${i}`,
-        imageId: `image-${i}`,
-        chunkKey: `0/0/0/0/0/${i}`,
-        priority: i,
-      }),
-    );
-    cache.submit(makePlan(reqs, reqs.map(r => makeActiveEntry(r.entityId, r.imageId))));
-
-    const dump = cache.getPendingDump();
-    const admitted = dump.filter(d => d.admitted);
-    const backlog = dump.filter(d => !d.admitted);
-
-    // Both partitions are non-empty, and they partition the queue.
-    expect(admitted.length).toBeGreaterThan(0);
-    expect(backlog.length).toBeGreaterThan(0);
-    expect(admitted.length + backlog.length).toBe(dump.length);
-
-    // Admitted entries carry a real age; backlog entries carry none. The
-    // `null` is the point: reporting 0 would paint a deeply oversubscribed
-    // queue as a healthy one.
-    for (const entry of admitted) expect(entry.ageMs).not.toBeNull();
-    for (const entry of backlog) expect(entry.ageMs).toBeNull();
-  });
-});

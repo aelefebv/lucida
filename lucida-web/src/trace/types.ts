@@ -371,10 +371,11 @@ export type CountedPhaseIndexValue = (typeof CountedPhaseIndex)[keyof typeof Cou
  * The per-tick aggregate columns. A closed enum for the same reason the phase
  * inventory is closed: every name here widens a fixed-width tick sample.
  *
- * These are the shapes the debug panel carries today — lane counts, the
- * culling funnel, active-set tallies — recorded with a timestamp instead of
- * being polled off a flat sink, and recorded whether or not anybody is
- * looking. Per-level planned / cached / in-flight is variable-length and rides
+ * These are the shapes the debug panel used to carry — lane counts, the
+ * culling funnel, active-set tallies — now recorded with a timestamp instead
+ * of being polled off a flat sink, and recorded whether or not anybody is
+ * looking. The panel they came from is gone (ADR 0052); this is where the
+ * counts live. Per-level planned / cached / in-flight is variable-length and rides
  * in its own slots rather than here.
  */
 export const TICK_COUNTER_NAMES = [

@@ -55,7 +55,6 @@ function createMockCpuCache(): CpuCache {
     snapshot: vi.fn(() => ({ cached: new Map(), inFlight: new Map() })),
     levelResidency: vi.fn(() => ({ cached: [], inFlight: [] })),
     getCachedChunk: vi.fn(() => null),
-    isChunkSent: vi.fn(() => false),
     telemetry: vi.fn(),
     updateConfig: vi.fn(),
     subscribe: vi.fn(() => () => {}),

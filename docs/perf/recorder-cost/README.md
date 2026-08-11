@@ -230,16 +230,58 @@ came out by *deleting* the gauges it guarded, not by making them unconditional.
 `debugStats` no longer holds a sink, so the pipeline's own always-on
 instrumentation is the recorder and nothing else.
 
-The obligation is **not discharged yet**. `DebugPanel.tsx` still exists, still
-mounts, and still polls at 200 ms — what it polls is now live state pulled from
-the scene, the CPU cache, the render loop and the server, not a sink the
-pipeline pushes into. So the `debugStats`-fed share of the panel's working set
-is gone; the rest goes with [#919].
+**Step 2 measured on [#919]'s teardown branch (2026-08-11).** With the panel
+deleted there is one instrument left to weigh, so the arms are the tree before
+the teardown against the tree after it, compared on post-GC live JS heap at the
+end of the same drive. Run with `AB_MODE=heap`, which adds a
+`Runtime.getHeapUsage` reading over CDP after three forced collections. The two
+*before* arms were driven against a bundle built from the pre-teardown tree,
+the panel-open one with a click on the toolbar's Debug button — a step that
+exists only as long as that button does, so it is not a flag on the harness.
+Same fixture, machine and DPR 2 drive as the frame A/B above:
 
-Measurement 2 is therefore deferred to [#919], where its arms are meaningful:
-after the panel is deleted there is one instrument to weigh, and today's
-before/after would be measuring a reader that is still on screen. The live
-figure to beat stands at 663 kB against the 1.05 MB floor.
+| Arm | Live heap, post-GC | Frames in 10 s |
+| --- | --- | --- |
+| before, panel never opened | 4.693 MB | 1,151 |
+| before, panel open | 5.730 MB | 1,150 |
+| after (no panel to open) | 4.713 MB | 1,153 |
+| after, repeat — the noise floor | 4.701 MB | 1,154 |
+
+**The panel cost 1.04 MB live while open, and the teardown returns it.** Two
+readings make that a result rather than a coincidence: two runs of the same
+arm land 12 kB apart, so the 1,037 kB the panel adds is ~85× the run-to-run
+spread; and *after* sits 20 kB from *before-closed*, inside that spread, which
+is what a lazily-mounted panel should cost a session that never clicks it.
+Frame counts are flat across all four arms — this was never a throughput
+question.
+
+**Measurement 1, re-run on the same tree**, verbatim from `pnpm test`:
+
+> `[#928] floor check: typical tick (8 chunks, 93 write calls) p50=3.50 µs vs
+> #888's 1–3 µs/tick floor | one 2,560-chunk run holds 663 kB live vs the
+> 1.05 MB floor (retention's 8 MB cap is a separate, granted budget)`
+
+**Half met, and the half that fails is not the teardown's.** Live state is
+**under** the floor: 663 kB against ≈1.05 MB, with the panel's 1.04 MB
+returned on top. The typical tick is **over** it — 3.50 µs against a 1–3 µs
+band — so by the criterion stated above ("≤ 1.05 MB live **and** ≤ 1–3 µs per
+typical tick") the obligation is **not** fully discharged, and saying otherwise
+here would be the same "preserved" label over lost ground that [ADR 0052][0052]
+exists to refuse.
+
+The tick overage is [#949], not this teardown: the ceiling was derived from one
+write per chunk and dispatch emits three, so the figure is ~3× its own
+premise. Deleting a reader cannot move it — nothing the panel did was on the
+write path. Read the three recorded tick figures as one noisy quantity, not a
+trend: ~2.9 µs at [#928], 3.38 µs at [#918], 3.50 µs here, all on a
+few-microsecond microbenchmark whose spread across hosts is ~45× (see the 16×
+note above), all on the pessimistic whole-lifecycle-in-one-tick shape the real
+pipeline never produces. Closing [#949] closes this ledger.
+
+Note what the panel's 1.04 MB was *not*: by [#918] it no longer held a
+pipeline-fed sink, so this is a reader's own working set — polled snapshots,
+React trees, ten tabs of derived rows at 200 ms — which is why deleting it
+frees heap that no always-on consumer was paying for.
 
 **An absorption [ADR 0052][0052] promised that the trace does not yet carry.**
 Recorded here rather than left to be discovered, because it is exactly the

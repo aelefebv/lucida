@@ -17,6 +17,11 @@ Environment:
     AB_WEB_DIST     built SPA for this arm          (default: lucida-web/dist)
     AB_WINDOW_MS    measurement window              (default: 10000, #888's shape)
     AB_SETTLE_MS    post-first-render settle        (default: 8000)
+    AB_MODE         'frames' or 'heap'              (default: frames)
+
+`AB_MODE=heap` adds a post-GC live-heap reading at the end of the same drive,
+for the net non-regression ledger's measurement 2 (the debug-surface teardown,
+[#919]).
 """
 from __future__ import annotations
 
@@ -90,6 +95,7 @@ with ServerProcess(out_dir=OUT, binary=SERVER_BIN, web_dist=WEB_DIST, health_tim
         "ready_wait_ms": int(os.environ.get("AB_READY_WAIT_MS", "240000")),
         "settle_ms": int(os.environ.get("AB_SETTLE_MS", "8000")),
         "window_ms": int(os.environ.get("AB_WINDOW_MS", "10000")),
+        "mode": os.environ.get("AB_MODE", "frames"),
     }
     env = dict(os.environ)
     existing = env.get("NODE_PATH")
@@ -118,4 +124,7 @@ d = result.get("driver") or {}
 if result["ok"]:
     log(f"arm {ARM}: {d.get('frames')} frames in {d.get('elapsed_ms')} ms "
         f"({d.get('fps', 0):.1f} fps) at DPR {d.get('dpr')}")
+    if d.get("heap"):
+        log(f"arm {ARM}: live heap {d['heap']['used_bytes'] / 1e6:.3f} MB post-GC "
+            f"(samples {[round(s / 1e6, 3) for s in d['heap']['samples']]})")
 print(json.dumps({k: result[k] for k in ("ok", "arm", "out_dir", "viewer_url") if k in result}))

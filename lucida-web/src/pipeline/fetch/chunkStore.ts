@@ -19,15 +19,6 @@ export interface SingleBucketResidency {
   bytes: number;
 }
 
-export interface ChunkStoreDumpEntry {
-  entityId: string;
-  level: number;
-  tier: EvictionTier;
-  bytes: number;
-  chunkKey: string;
-  insertedAt: number;
-}
-
 export interface EvictionBurstInfo {
   removed: number;
   bytesFreed: number;
@@ -246,23 +237,6 @@ export class ChunkStore {
       }
     }
     return result;
-  }
-
-  dump(): ChunkStoreDumpEntry[] {
-    const out: ChunkStoreDumpEntry[] = [];
-    for (const entityMap of this.store.values()) {
-      for (const e of entityMap.values()) {
-        out.push({
-          entityId: e.entityId,
-          level: e.level,
-          tier: e.tier,
-          bytes: e.sizeBytes,
-          chunkKey: e.chunkKey,
-          insertedAt: e.insertedAt,
-        });
-      }
-    }
-    return out;
   }
 
   /** Main-store only; overview uses {@link totalResidency}. */

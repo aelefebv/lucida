@@ -27,7 +27,7 @@ import type {
 import {
   emptyUploadTickStats,
   type UploadTickStats,
-} from "../../debug/debugStats.ts";
+} from "./telemetry/upload.ts";
 import { buildColdState, buildColdStateDelta } from "./coldState/build.ts";
 import {
   buildViewHotState,

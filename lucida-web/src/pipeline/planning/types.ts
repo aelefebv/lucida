@@ -221,9 +221,10 @@ export interface RequestPlan {
   proxyRequests: ProxyRequest[];
   /**
    * Counters accumulated during this plan run. Always present (zeroed
-   * if no work happened); cost is negligible. Consumers (DebugPanel,
-   * tests) read it post-hoc to surface decision rationale (catalog
-   * degradations) and culling effectiveness.
+   * if no work happened); cost is negligible. Consumers (the trace's
+   * per-tick counters in `traceTick.ts`, tests) read it post-hoc to
+   * surface decision rationale (catalog degradations) and culling
+   * effectiveness.
    */
   stats: PlanStats;
   /**
@@ -440,7 +441,7 @@ export interface TileEntry {
 
 /**
  * Active-set entry for an invisible entity — pass-through so the CPU
- * cache eviction tier mapping and debug panels can still see it.
+ * cache eviction tier mapping can still see it.
  * Carries only enough to identify the entity and its coarsest level
  * (used for overview-lane bookkeeping); no LOD range or proxy tiles,
  * since invisibles don't request chunks or proxies.

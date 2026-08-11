@@ -1980,7 +1980,7 @@ describe("wire goldens: enum vocabulary", () => {
       positioning_modes: ["Explicit", "Derived"],
       proxy_kinds: proxyKinds,
       dataset_open_stages: openStages,
-      // No TS union today: the DebugPanel renders the kind string verbatim.
+      // No TS union today: the kind string is carried and rendered verbatim.
       dataset_open_failure_kinds: [
         "authorization",
         "session_closed",

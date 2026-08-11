@@ -70,17 +70,13 @@ import type { WorkspaceRole, WorkspaceMember } from "./workspaceApi.ts";
 import { isCaptureSurface } from "./captureSurface.ts";
 import "./App.css";
 
-// The debug UI (side panel + dev-controls panel + on-canvas overlay
-// layer) is code-split into its own on-demand chunk: each panel loads on
-// the first click of its toolbar button, the overlay layer only when an
-// overlay toggle is persisted on or a render-radius preview is being
-// dragged. A session that never opens any of them never downloads the
-// code — the main bundle keeps only the tiny gate/stat modules
-// (debug/logging.ts, debug/debugStats.ts) that production code paths
-// already share.
-const DebugPanel = lazy(() =>
-  import("./debug/DebugPanel.tsx").then((m) => ({ default: m.DebugPanel })),
-);
+// The debug UI (dev-controls panel + on-canvas overlay layer) is
+// code-split into its own on-demand chunk: the panel loads on the first
+// click of its toolbar button, the overlay layer only when an overlay
+// toggle is persisted on or a render-radius preview is being dragged. A
+// session that never opens either never downloads the code — the main
+// bundle keeps only the tiny gate module (debug/logging.ts) that
+// production code paths already share.
 const DevControls = lazy(() =>
   import("./debug/DevControls.tsx").then((m) => ({ default: m.DevControls })),
 );
@@ -966,7 +962,6 @@ function App({
   }, [datasets, urlInput]);
 
   const [showFileBrowser, setShowFileBrowser] = useState(false);
-  const [showDebug, setShowDebug] = useState(false);
   const [showDevControls, setShowDevControls] = useState(false);
   // Whether any on-canvas debug overlay is toggled on (persisted in
   // localStorage `debug.overlays`, independent of every panel). Drives the
@@ -1078,19 +1073,6 @@ function App({
     const spec = layoutRegistry.getSpec(selectedDatasetId, activeId);
     return spec?.name ?? activeId;
   }, [selectedDatasetId, layoutRegistry]);
-  const [lastClickScreen, setLastClickScreen] = useState<[number, number] | null>(null);
-  // eslint-disable-next-line react-hooks/preserve-manual-memoization
-  const handleDebugToggle = useCallback(() => {
-    setShowDebug(prev => !prev);
-    requestRender(render.loopRef.current, "debug_toggle");
-  }, [render.loopRef]);
-  const handleDebugClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    if (!showDebug) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
-    setLastClickScreen([(e.clientX - rect.left) * dpr, (e.clientY - rect.top) * dpr]);
-  }, [showDebug]);
-
   const handleFileBrowserSelect = useCallback((path: string) => {
     datasets.handleUrlSubmit(path);
   }, [datasets]);
@@ -1140,8 +1122,8 @@ function App({
 
   // The JSX block below reads `.current` from refs returned by useRenderClient,
   // useWasmScene, useBridge, useLayout, etc. — passing them as props to
-  // SliceViewer / VolumeViewer / PeerCursors / Minimap / DebugOverlays /
-  // DebugPanel so those children can read the latest canvas, scene, loop, etc.
+  // SliceViewer / VolumeViewer / PeerCursors / Minimap / DebugOverlays
+  // so those children can read the latest canvas, scene, loop, etc.
   // each render. This is the canonical "ref-as-current-value-prop" idiom that
   // partners with the App.tsx hook order above: callback refs are populated AFTER
   // all hooks return, then read in the same render via `.current`. The
@@ -1190,7 +1172,6 @@ function App({
         onAddLayer={() => setShowFileBrowser(true)}
         viewModeToggle={datasetsVersion > 0 ? { label: dims.viewMode === "2d" ? "3D" : "2D", onClick: dims.handleViewModeToggle } : null}
         cameraModeToggle={dims.viewMode === "3d" ? { label: cameraMode === "fly" ? "Arcball" : "Fly", onClick: handleCameraModeToggle } : null}
-        debugToggle={{ label: "Debug", active: showDebug, onClick: handleDebugToggle }}
         devControlsToggle={{
           label: "Dev",
           active: showDevControls,
@@ -1294,7 +1275,7 @@ function App({
             display: datasetsVersion > 0 ? "block" : "none",
             flex: 1,
             minWidth: 0,
-          }} onClick={handleDebugClick}>
+          }}>
             <canvas
               // Keyed per RenderClient generation: `transferControlToOffscreen`
               // is one-shot per element, so after a client teardown (dev
@@ -1303,8 +1284,8 @@ function App({
               ref={render.canvasRef}
               tabIndex={0}
               style={{
-                // Each docked side panel (debug, dev controls) is 300px wide.
-                width: layout.canvasWidth - 300 * ((showDebug ? 1 : 0) + (showDevControls ? 1 : 0)),
+                // The docked dev-controls panel is 300px wide.
+                width: layout.canvasWidth - 300 * (showDevControls ? 1 : 0),
                 height: layout.canvasHeight,
                 imageRendering: dims.viewMode === "2d" ? "pixelated" : "auto",
                 borderRadius: 8,
@@ -1547,19 +1528,6 @@ function App({
             )}
             <div className="canvas-resize-handle" onPointerDown={layout.handleCanvasResizeDown} />
           </div>
-          {showDebug && (
-            <Suspense fallback={null}>
-              <DebugPanel
-                wasmSceneRef={scene.wasmSceneRef}
-                datasetId={selectedDatasetId}
-                lastClickScreen={lastClickScreen}
-                datasets={datasetsRef.current}
-                sessionRef={bridge.sessionRef}
-                renderLoopRef={render.loopRef}
-                style={{ height: layout.canvasHeight }}
-              />
-            </Suspense>
-          )}
           {showDevControls && (
             <Suspense fallback={null}>
               <DevControls
