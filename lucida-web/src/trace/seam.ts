@@ -23,6 +23,7 @@ import { diagnoseDocument } from "./diagnose/diagnose.ts";
 import { renderDiagnostic, type RenderDepth } from "./diagnose/renderText.ts";
 import type { DiagnosticDocument } from "./diagnose/types.ts";
 import { traceRecorder } from "./recorder.ts";
+import type { LiveProgress } from "./liveProgress.ts";
 import type { QuiescenceState } from "./quiescence.ts";
 import { TRACE_SCHEMA_VERSION, type GpuIdentity, type TraceDocument } from "./types.ts";
 
@@ -57,6 +58,18 @@ export interface LucidaTraceSeam {
    * the empty interval the export itself just closed.
    */
   readonly runState: { open: boolean; concluded: number; lastConcludedRunId: string | null };
+  /**
+   * What the run in progress can say about itself, or null when no run is
+   * open (#937): counts of the rows it has made, where the unfinished ones
+   * are sitting, and how long it has been going.
+   *
+   * The only read here that does **not** close the run — which is what makes
+   * a live view possible at all. It deliberately carries no verdict: the
+   * attribution back-walk needs an end to walk back from, and a headline that
+   * changes while you read it is not a headline. Poll it, then read
+   * {@link diagnose} for the run named in `runId` once it closes.
+   */
+  progress(): LiveProgress | null;
   /**
    * The merged trace document. Closes the run in progress as `explicit`:
    * every run carries an end reason, and asking for the document concludes
@@ -135,6 +148,7 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
         lastConcludedRunId: concluded.lastId,
       };
     },
+    progress: () => traceRecorder.liveProgress,
     exportTrace: () => traceRecorder.exportDocument(),
     exportChromeTrace: () => toChromeTraceJson(traceRecorder.exportDocument()),
     diagnose: (runId?: string) => diagnoseDocument(traceRecorder.exportDocument(), { runId }),

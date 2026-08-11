@@ -812,3 +812,90 @@ describe("TraceRecorder dataset opens", () => {
     expect(recorder.exportDocument().runs[0].datasetOpens[0].endUs).toBe(100_000);
   });
 });
+
+describe("what a run in progress can say about itself (#937)", () => {
+  it("says nothing while no labelled run is open", () => {
+    const { recorder } = makeRecorder();
+    // Steady state is not a run: it has no cause to report and nothing to
+    // make progress against.
+    expect(recorder.liveProgress).toBeNull();
+    recorder.beginChunkRow(CHUNK, 0);
+    expect(recorder.liveProgress).toBeNull();
+  });
+
+  it("partitions the rows it has made into visible, in flight and retired", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+
+    const drawn = recorder.beginChunkRow(CHUNK, 0);
+    recorder.noteHandedToRenderer(drawn);
+    recorder.noteFrameDispatched();
+    recorder.noteFrameDispatched();
+    const abandoned = recorder.beginChunkRow(CHUNK, 0);
+    recorder.finishRow(abandoned, RowOutcome.Retired);
+    const going = recorder.beginChunkRow(CHUNK, 0);
+    recorder.stamp(going, Boundary.WireStart);
+    advance(250);
+
+    const progress = recorder.liveProgress!;
+    expect(progress.planned).toBe(3);
+    expect(progress.visible).toBe(1);
+    expect(progress.retired).toBe(1);
+    expect(progress.inFlight).toBe(1);
+    expect(progress.elapsedMs).toBe(250);
+    expect(progress.cause.source).toBe("dataset_added");
+  });
+
+  it("names the run, so the surface reads that run and not the export's own interval", () => {
+    const { recorder } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    const runId = recorder.liveProgress!.runId;
+
+    recorder.closeRun("explicit");
+    const document = recorder.exportDocument();
+
+    expect(document.runs.map(run => run.header.runId)).toContain(runId);
+    expect(document.runs[0].header.endReason).toBe("explicit");
+  });
+
+  it("places the in-flight rows in the phase each is sitting in", () => {
+    const { recorder } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    const onTheWire = recorder.beginChunkRow(CHUNK, 0);
+    recorder.stamp(onTheWire, Boundary.WireStart);
+    const decoding = recorder.beginChunkRow(CHUNK, 0);
+    recorder.stamp(decoding, Boundary.WireStart);
+    recorder.stamp(decoding, Boundary.DecodeStart);
+    recorder.beginChunkRow(CHUNK, 0);
+
+    const progress = recorder.liveProgress!;
+    const rowsIn = (phase: string) =>
+      progress.occupancy.find(slot => slot.phase === phase)!.rows;
+    expect(rowsIn("wire")).toBe(1);
+    expect(rowsIn("decode")).toBe(1);
+    // Planned and not yet admitted — counted apart from a phase it has not
+    // entered.
+    expect(progress.unstamped).toBe(1);
+  });
+
+  it("does not close the run it describes", () => {
+    const { recorder } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    recorder.beginChunkRow(CHUNK, 0);
+
+    expect(recorder.liveProgress).not.toBeNull();
+    expect(recorder.liveProgress).not.toBeNull();
+
+    expect(recorder.isRunOpen).toBe(true);
+    expect(recorder.concludedRuns.count).toBe(0);
+  });
+
+  it("carries the page's own predicate, so a stalled run reads as stalled", () => {
+    const { recorder } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    recorder.noteQuiescence(evaluateQuiescence(inputs({ inFlight: 3 }), 1_000));
+
+    expect(recorder.liveProgress!.quiescent).toBe(false);
+    expect(recorder.liveProgress!.quiescenceReason).toBe("chunks_in_flight");
+  });
+});

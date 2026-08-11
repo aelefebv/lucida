@@ -10,18 +10,41 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { diagnoseRun } from "../trace/diagnose/diagnose.ts";
 import { coldRemoteOpen, healthyLocalOpen, saturatedReopen } from "../trace/diagnose/fixtures.ts";
-import type { TraceRun } from "../trace/types.ts";
+import { PHASES, type TraceRun } from "../trace/types.ts";
+import type { LiveProgress } from "../trace/liveProgress.ts";
 import type { MonitorRead, MonitorRunSummary } from "./monitorSource.ts";
+
+/** A run in progress, as the recorder reports one. */
+function progress(overrides: Partial<LiveProgress> = {}): LiveProgress {
+  return {
+    runId: "run-open",
+    cause: { epoch: "content", dirtyKind: "interactive", source: "dataset_open_request" },
+    elapsedMs: 4_200,
+    planned: 1_000,
+    visible: 600,
+    inFlight: 300,
+    retired: 100,
+    unrecorded: 0,
+    occupancy: PHASES.map((phase) => ({ phase, rows: phase === "wire" ? 300 : 0 })),
+    unstamped: 0,
+    quiescent: false,
+    quiescenceReason: "chunks_in_flight",
+    ...overrides,
+  };
+}
 
 const read = vi.hoisted(() => ({ value: null as MonitorRead | null }));
 const runs = vi.hoisted(() => ({ value: [] as MonitorRunSummary[] }));
+const live = vi.hoisted(() => ({ value: null as unknown }));
 const downloadTraceFile = vi.hoisted(() => vi.fn(() => "lucida-run-1.trace.json"));
 const readMonitor = vi.hoisted(() => vi.fn(() => ({ read: read.value, runs: runs.value })));
+const readProgress = vi.hoisted(() => vi.fn(() => live.value));
+const stopRun = vi.hoisted(() => vi.fn(() => { live.value = null; }));
 
-vi.mock("./monitorSource.ts", () => ({ readMonitor, downloadTraceFile }));
+vi.mock("./monitorSource.ts", () => ({ readMonitor, downloadTraceFile, readProgress, stopRun }));
 
 const { MonitorPage } = await import("./MonitorPage.tsx");
 
@@ -33,7 +56,10 @@ function showing(run: TraceRun) {
 beforeEach(() => {
   downloadTraceFile.mockClear();
   readMonitor.mockClear();
+  readProgress.mockClear();
+  stopRun.mockClear();
   runs.value = [];
+  live.value = null;
 });
 
 afterEach(cleanup);
@@ -187,6 +213,106 @@ describe("observation only", () => {
     const labels = screen.getAllByRole("button").map((node) => node.textContent);
     for (const label of labels) {
       expect(label).toMatch(/^(Back|Read the newest run|Save run|Save for Perfetto|Show the rows behind .*|Close drill-down)$/);
+    }
+  });
+
+  it("adds only one control while a run is open, and it ends the run rather than the work", () => {
+    // *Stop & analyse* closes the recording's interval. The pipeline goes on
+    // doing exactly what it was doing — what ends is the run's label, which is
+    // what makes it readable.
+    live.value = progress();
+    render(<MonitorPage onClose={() => {}} />);
+
+    const labels = screen.getAllByRole("button").map((node) => node.textContent);
+    expect(labels).toEqual(["Back", "Stop & analyse"]);
+  });
+});
+
+describe("a run that is still open (#937)", () => {
+  it("shows the four progress counters and the phase bar", () => {
+    live.value = progress();
+    render(<MonitorPage onClose={() => {}} />);
+
+    const counters = screen.getByTestId("monitor-live-counters");
+    expect(counters.textContent).toContain("planned");
+    expect(counters.textContent).toContain("1,000");
+    expect(counters.textContent).toContain("visible");
+    expect(counters.textContent).toContain("in flight");
+    expect(counters.textContent).toContain("retired");
+    expect(screen.getByTestId("monitor-live-bar-wire")).toBeTruthy();
+    // Reading is what closes a run, so a page watching one has not read.
+    expect(readMonitor).not.toHaveBeenCalled();
+  });
+
+  it("renders no verdict while the run is open", () => {
+    live.value = progress();
+    render(<MonitorPage onClose={() => {}} />);
+
+    const headings = screen.getAllByRole("heading", { level: 2 }).map((node) => node.textContent);
+    expect(headings).not.toContain("Verdict");
+    expect(screen.queryByTestId(/^monitor-callout-/)).toBeNull();
+    expect(screen.queryByTestId("monitor-phase-table")).toBeNull();
+    // Nor the exports, which would close the run without saying so.
+    expect(screen.queryByTestId("monitor-save-run")).toBeNull();
+    expect(screen.queryByTestId("monitor-reread")).toBeNull();
+  });
+
+  it("closes the run explicitly on Stop & analyse and shows that run's verdict, no reload", () => {
+    live.value = progress();
+    read.value = { ok: true, document: diagnoseRun(coldRemoteOpen()) };
+    render(<MonitorPage onClose={() => {}} />);
+
+    fireEvent.click(screen.getByTestId("monitor-stop"));
+
+    expect(stopRun).toHaveBeenCalled();
+    // The run that was being watched, by id: the export closes a fresh
+    // steady-state interval of its own, so "the newest" is the export's
+    // artifact rather than the run somebody sat through.
+    expect(readMonitor).toHaveBeenCalledWith("run-open");
+    expect(screen.getByRole("heading", { name: "Verdict" })).toBeTruthy();
+    expect(screen.queryByTestId("monitor-live-counters")).toBeNull();
+  });
+
+  it("hands over to the verdict when the run settles on its own, without a reload", () => {
+    vi.useFakeTimers();
+    try {
+      live.value = progress();
+      read.value = { ok: true, document: diagnoseRun(coldRemoteOpen()) };
+      render(<MonitorPage onClose={() => {}} />);
+      expect(screen.getByTestId("monitor-live-counters")).toBeTruthy();
+
+      // The run settles: the recorder closes it, and progress reads null.
+      live.value = null;
+      act(() => {
+        vi.advanceTimersByTime(600);
+      });
+
+      expect(readMonitor).toHaveBeenCalledWith("run-open");
+      expect(screen.getByRole("heading", { name: "Verdict" })).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("counts from run start rather than following a window", () => {
+    // The counters are cumulative, so the first seconds of an open are still
+    // on screen minutes later — the prototype's auto-following window scrolled
+    // them away before anyone looked.
+    vi.useFakeTimers();
+    try {
+      live.value = progress({ visible: 4, elapsedMs: 900 });
+      render(<MonitorPage onClose={() => {}} />);
+
+      live.value = progress({ visible: 950, elapsedMs: 30_000 });
+      act(() => {
+        vi.advanceTimersByTime(600);
+      });
+
+      const counters = screen.getByTestId("monitor-live-counters").textContent ?? "";
+      expect(counters).toContain("950");
+      expect(screen.getByTestId("monitor-live-status").textContent).toContain("30.0 s");
+    } finally {
+      vi.useRealTimers();
     }
   });
 });
