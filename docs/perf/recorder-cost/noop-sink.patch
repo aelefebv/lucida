@@ -1,0 +1,19 @@
+diff --git a/lucida-web/src/trace/recorder.ts b/lucida-web/src/trace/recorder.ts
+index d4139b9..2c6b2d9 100644
+--- a/lucida-web/src/trace/recorder.ts
++++ b/lucida-web/src/trace/recorder.ts
+@@ -17,7 +17,7 @@ import { buildIdentity } from "./buildInfo.ts";
+ import { placeServerRows } from "./merge.ts";
+ import { ServerRowTable, type ServerTimingBatch } from "./serverRowTable.ts";
+ import type { QuiescenceState } from "./quiescence.ts";
+-import { tableSinkFactory, type TraceSink, type TraceSinkFactory } from "./sink.ts";
++import { noopSinkFactory, tableSinkFactory, type TraceSink, type TraceSinkFactory } from "./sink.ts";
+ import { TickScratch } from "./tickRing.ts";
+ import {
+   Boundary,
+@@ -595,4 +595,4 @@ export class TraceRecorder {
+  * the presence of recording a per-call-site decision — which is the toggle
+  * ADR 0049 rejected, in another costume.
+  */
+-export const traceRecorder = new TraceRecorder();
++export const traceRecorder = new TraceRecorder({ sinkFactory: noopSinkFactory });
