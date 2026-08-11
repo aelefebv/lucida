@@ -41,6 +41,7 @@
  * encodings that avoid it are the ones this shape was chosen over.
  */
 
+import { outageWindow } from "./coverage.ts";
 import {
   PHASES,
   type Phase,
@@ -213,16 +214,14 @@ function emitRun(events: ChromeTraceEvent[], run: TraceRun, baseUs: number): voi
   // wall of rows that stops for two seconds has the reason sitting next to
   // it rather than in a block a reader has to go and find.
   for (const connection of header.connections) {
-    if (connection.gapUs === null || connection.openedAtUs === null) continue;
-    const endUs = Math.min(connection.openedAtUs, header.durationUs);
-    const startUs = Math.max(0, endUs - connection.gapUs);
-    if (endUs <= startUs) continue;
+    const window = outageWindow(connection, header.durationUs);
+    if (!window) continue;
     events.push({
       name: `socket outage → generation ${connection.generation}`,
       cat: "run,connection",
       ph: "X",
-      ts: baseUs + startUs,
-      dur: endUs - startUs,
+      ts: baseUs + window.startUs,
+      dur: window.endUs - window.startUs,
       pid: PID_BROWSER,
       tid: RUN_TID,
       args: { ...connection },

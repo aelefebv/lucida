@@ -484,6 +484,22 @@ describe("TraceRecorder server rows", () => {
     expect(run.serverRowsDiscarded).toBe(1);
   });
 
+  it("refuses an asset row, which this build gives no browser bracket at all", () => {
+    const { recorder } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    const row = recorder.beginChunkRow(CHUNK, 0);
+    // Assets draw from the same label counter as chunks, so an asset's rid
+    // lands inside the range this run's chunks minted — and nothing here can
+    // place it even so. The family decides, not the arithmetic.
+    recorder.labelRow(row, { rid: 5, connectionGeneration: 2 });
+    recorder.ingestServerBatch({ ...BATCH, family: ["asset" as const] }, 2);
+    recorder.closeRun("explicit");
+
+    const run = recorder.exportDocument().runs[0];
+    expect(run.serverRows).toHaveLength(0);
+    expect(run.serverRowsDiscarded).toBe(1);
+  });
+
   it("counts server rows that arrive after the run truncated into the unrecorded total", () => {
     const { recorder } = makeRecorder();
     recorder.openRun(OPEN_CAUSE);
@@ -579,6 +595,40 @@ describe("TraceRecorder connections", () => {
     const gap = run.coverage.gaps.find(candidate => candidate.kind === "connection-gap");
     expect(gap?.startUs).toBe(0);
     expect(gap?.durationUs).toBe(1_000_000);
+  });
+
+  it("declares a reconnect that happened between two runs, not only inside one", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.noteConnected(1);
+    // Steady state is an interval like any other, and the pan before a stall
+    // is often the thing that explains it.
+    recorder.beginChunkRow(CHUNK, 0);
+    advance(100);
+    recorder.noteDisconnected();
+    advance(1_500);
+    recorder.noteConnected(2);
+
+    const [steady] = recorder.exportDocument().steadyState;
+    expect(steady.header.connections.map(record => record.generation)).toEqual([1, 2]);
+    expect(steady.header.connections[1].gapUs).toBe(1_500_000);
+    expect(steady.coverage.gaps.map(gap => gap.kind)).toContain("connection-gap");
+  });
+
+  it("ignores a repeat of the socket it is already on rather than eating the outage", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.noteConnected(1);
+    recorder.openRun(OPEN_CAUSE);
+    recorder.noteDisconnected();
+    advance(2_000);
+    // A duplicate report of the dead socket must not read as a reconnect.
+    recorder.noteConnected(1);
+    advance(500);
+    recorder.noteConnected(2);
+    recorder.closeRun("explicit");
+
+    const { connections } = recorder.exportDocument().runs[0].header;
+    expect(connections.map(record => record.generation)).toEqual([1, 2]);
+    expect(connections[1].gapUs).toBe(2_500_000);
   });
 
   it("names the labels each connection carried, so a repeated rid is readable", () => {

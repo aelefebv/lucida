@@ -128,8 +128,6 @@ export type AcceptServerRow = (
   family: WireRowFamily,
 ) => boolean;
 
-const acceptEvery: AcceptServerRow = () => true;
-
 export class ServerRowTable {
   /**
    * 3 label columns + one column per phase as uint32, plus the two metadata
@@ -204,7 +202,7 @@ export class ServerRowTable {
   ingest(
     batch: ServerTimingBatch,
     connectionGeneration: number,
-    accept: AcceptServerRow = acceptEvery,
+    accept: AcceptServerRow,
   ): number {
     this.droppedByServer += batch.dropped ?? 0;
     let count = Math.min(

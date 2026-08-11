@@ -66,7 +66,7 @@ const GAP_STATEMENTS: Record<CoverageGapKind, string> = {
   truncated:
     "The run hit its per-run byte cap and stopped recording. Everything after this offset is unknown, and the record says how much it went on to miss.",
   "connection-gap":
-    "The socket dropped and the browser reconnected. Requests in flight were lost, correlation labels restarted, and any rows the server had buffered for the dead connection were discarded rather than replayed.",
+    "The socket dropped and the browser reconnected. Requests in flight were lost, correlation labels restarted, and any rows the server had buffered for the dead connection were discarded rather than replayed. This names why a stretch of the run is empty, so it overlaps whatever interval gap covers the same wall clock rather than adding to it.",
   "ticks-dropped":
     "The per-tick aggregate ring wrapped and overwrote its oldest samples. Elapsed time is unaffected; the early planning detail is gone.",
   "events-dropped":
@@ -170,15 +170,13 @@ export function computeCoverage(input: CoverageInput): TraceCoverage {
   // An outage is elapsed time nothing could have been served in, and the
   // browser is the only side that knows it happened — the server sees a
   // socket close and a stranger connect.
+  // Clamped to the same scan end as the interval gaps: past a truncation the
+  // run stopped looking, and the truncation already declares that remainder
+  // as unbounded rather than as a list of things that happened in it.
   for (const record of input.connections) {
-    if (record.gapUs === null || record.openedAtUs === null) continue;
-    const endUs = Math.min(record.openedAtUs, wallClockUs);
-    // The outage may predate the interval. Its full length is on the header's
-    // connection record; what belongs here is the part of this run's wall
-    // clock it consumed.
-    const startUs = Math.max(0, endUs - record.gapUs);
-    if (endUs <= startUs) continue;
-    gaps.push(intervalGap("connection-gap", startUs, endUs, wallClockUs));
+    const window = outageWindow(record, scanEndUs);
+    if (!window) continue;
+    gaps.push(intervalGap("connection-gap", window.startUs, window.endUs, wallClockUs));
   }
 
   for (const [kind, records] of [
@@ -209,6 +207,25 @@ export function computeCoverage(input: CoverageInput): TraceCoverage {
     countedPhases: sumCounted(input.ticks),
     limits: STRUCTURAL_LIMITS,
   };
+}
+
+/**
+ * Where a connection's outage sits on this interval's clock, or null when it
+ * had none or none of it fell inside the interval.
+ *
+ * An outage can predate the interval that reports it — the socket dropped
+ * during the pan before the run opened. Its full length stays on the
+ * connection record; what this returns is the part of the interval's own wall
+ * clock it consumed, which is the only part any surface can draw.
+ */
+export function outageWindow(
+  connection: ConnectionRecord,
+  intervalDurationUs: number,
+): { startUs: number; endUs: number } | null {
+  if (connection.gapUs === null || connection.openedAtUs === null) return null;
+  const endUs = Math.min(connection.openedAtUs, intervalDurationUs);
+  const startUs = Math.max(0, endUs - connection.gapUs);
+  return endUs > startUs ? { startUs, endUs } : null;
 }
 
 /**

@@ -17,7 +17,11 @@ import { buildIdentity } from "./buildInfo.ts";
 import { computeCoverage } from "./coverage.ts";
 import { placeServerRows } from "./merge.ts";
 import { CAP_DERIVATION, CAP_UNIT, PER_RUN_CAP_BYTES, RESIDENT_CAP_BYTES } from "./retention.ts";
-import { ServerRowTable, type ServerTimingBatch } from "./serverRowTable.ts";
+import {
+  ServerRowTable,
+  type ServerTimingBatch,
+  type WireRowFamily,
+} from "./serverRowTable.ts";
 import type { QuiescenceState } from "./quiescence.ts";
 import { tableSinkFactory, type TraceSink, type TraceSinkFactory } from "./sink.ts";
 import { TickScratch } from "./tickRing.ts";
@@ -498,16 +502,9 @@ export class TraceRecorder {
     if (label.connectionGeneration === 0) return;
     let record = this.connectionRecord(run, label.connectionGeneration);
     if (!record) {
-      record = {
-        generation: label.connectionGeneration,
-        // Not witnessed: the interval began mid-connection, or opened before
-        // the page reported this socket.
-        openedAtUs: null,
-        closedAtUs: null,
-        gapUs: null,
-        firstRid: null,
-        lastRid: null,
-      };
+      // Not witnessed opening: the interval began mid-connection, or opened
+      // before the page reported this socket.
+      record = newConnection(label.connectionGeneration, null, null);
       run.connections.push(record);
     }
     record.firstRid = record.firstRid === null ? label.rid : Math.min(record.firstRid, label.rid);
@@ -575,21 +572,23 @@ export class TraceRecorder {
    * is the only thing that makes two `rid: 0` rows in one run tell apart.
    */
   noteConnected(generation: number): void {
+    // A repeat of the socket the page is already on says nothing new, and
+    // must not clear an outage still in progress: the generation bumps on
+    // every open, so the reconnect that ends the outage carries a new one.
+    if (this.connectionGeneration === generation) return;
     const atMs = this.now();
     const gapMs = this.disconnectedAtMs === null ? null : atMs - this.disconnectedAtMs;
     this.disconnectedAtMs = null;
-    if (this.connectionGeneration === generation) return;
     this.connectionGeneration = generation;
     const run = this.open;
     if (!run) return;
-    run.connections.push({
-      generation,
-      openedAtUs: this.offsetUs(run, atMs),
-      closedAtUs: null,
-      gapUs: gapMs === null ? null : clampStamp(Math.round(gapMs * 1000)),
-      firstRid: null,
-      lastRid: null,
-    });
+    run.connections.push(
+      newConnection(
+        generation,
+        this.offsetUs(run, atMs),
+        gapMs === null ? null : clampStamp(Math.round(gapMs * 1000)),
+      ),
+    );
   }
 
   /**
@@ -603,7 +602,10 @@ export class TraceRecorder {
     if (this.disconnectedAtMs === null) this.disconnectedAtMs = atMs;
     const run = this.open;
     if (!run) return;
-    const current = run.connections[run.connections.length - 1];
+    // The record for the socket that just died, by generation rather than by
+    // position: the list is only ordered by when this interval first heard of
+    // each connection, which is not always the order they opened in.
+    const current = this.connectionRecord(run, this.connectionGeneration);
     if (current && current.closedAtUs === null) current.closedAtUs = this.offsetUs(run, atMs);
   }
 
@@ -630,15 +632,32 @@ export class TraceRecorder {
     run.serverRowsDiscarded += run.serverRows.ingest(
       batch,
       connectionGeneration,
-      (rid, requestId, family) =>
-        family === "metadata_read"
-          ? requestId !== null && run.datasetOpens.has(requestId)
-          : this.mintedLabel(run, connectionGeneration, rid),
+      (rid, requestId, family) => this.canPlace(run, connectionGeneration, rid, requestId, family),
     );
   }
 
-  /** Whether this interval minted `rid` on `generation` — see {@link OpenInterval.connections}. */
-  private mintedLabel(run: OpenInterval, generation: number, rid: number): boolean {
+  /**
+   * Whether this interval holds the bracket a server row would be placed
+   * against — the only question that decides whether keeping it buys
+   * anything.
+   *
+   * A metadata read joins on the open it ran under. A chunk joins on the
+   * label, which this interval must have minted: labels restart at zero per
+   * connection and are minted in order, so the range this interval saw bounds
+   * every label it could place. An asset joins on nothing — assets draw from
+   * the same label counter but this build gives them no lifecycle row, so
+   * every asset row is unplaceable by construction and is refused as a family
+   * rather than by whether its label happens to land inside a chunk's range.
+   */
+  private canPlace(
+    run: OpenInterval,
+    generation: number,
+    rid: number,
+    requestId: string | null,
+    family: WireRowFamily,
+  ): boolean {
+    if (family === "metadata_read") return requestId !== null && run.datasetOpens.has(requestId);
+    if (family === "asset") return false;
     const record = this.connectionRecord(run, generation);
     if (!record || record.firstRid === null || record.lastRid === null) return false;
     return rid >= record.firstRid && rid <= record.lastRid;
@@ -829,16 +848,7 @@ export class TraceRecorder {
       // preceded it gets declared.
       connections:
         this.connectionGeneration !== 0 && this.disconnectedAtMs === null
-          ? [
-              {
-                generation: this.connectionGeneration,
-                openedAtUs: null,
-                closedAtUs: null,
-                gapUs: null,
-                firstRid: null,
-                lastRid: null,
-              },
-            ]
+          ? [newConnection(this.connectionGeneration, null, null)]
           : [],
       serverRowsDiscarded: 0,
       generation: this.generation,
@@ -1044,6 +1054,20 @@ export class TraceRecorder {
     clearTimeout(this.holdTimer);
     this.holdTimer = null;
   }
+}
+
+/**
+ * A connection as this interval first met it. `openedAtUs` and `gapUs` are
+ * null when the interval did not witness the socket open — it began
+ * mid-connection, and the outage before it, if any, belongs to an earlier
+ * interval.
+ */
+function newConnection(
+  generation: number,
+  openedAtUs: number | null,
+  gapUs: number | null,
+): ConnectionRecord {
+  return { generation, openedAtUs, closedAtUs: null, gapUs, firstRid: null, lastRid: null };
 }
 
 /** Every tier an interval holds. Allocated bytes, because the cap is on memory. */
