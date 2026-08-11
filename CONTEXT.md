@@ -62,6 +62,13 @@ The key the wire routes responses on.
 One resolution step of an image's multiscale pyramid, `0` being finest.
 _Avoid_: LOD, scale, zoom level, resolution
 
+**Proxy asset**:
+A small low-resolution placeholder volume standing in for a tile or a group of
+tiles, so the renderer can show something before detail chunks arrive. Always
+say "proxy asset", never bare "proxy": `lucida-proxy` generates these and is a
+pure-compute crate inside the server, not an intermediary in the network path.
+_Avoid_: proxy (unqualified — reads as a network hop), placeholder, stand-in
+
 ## Residency and delivery
 
 **Residency tier**:
@@ -80,8 +87,12 @@ The chunks the current view calls for. A statement of demand, not of possession.
 _Avoid_: visible set, request list
 
 **Coalescing**:
-Collapsing several callers' demand for the same composite key onto one wire
-request. Coalescing is normal and expected, not a defect to be removed.
+Collapsing several callers' demand for the same work onto one operation.
+Coalescing is normal and expected, not a defect to be removed. It happens at two
+independent layers and the two must never be conflated: **request coalescing**
+folds several callers' demand for one composite key onto one wire request, and
+**read coalescing** folds several wire requests for one object onto one backend
+read, via a leader that performs it and followers that wait on the result.
 _Avoid_: deduplication, batching (batching combines *different* work)
 
 ## Performance monitor
@@ -129,6 +140,26 @@ The per-interaction identifier on control messages such as `open_remote_dataset`
 and `dataset_health`. A different thing from a correlation label: different shape,
 different lifetime, different table. Never use one name for the other.
 _Avoid_: correlation label, rid
+
+**Connection generation**:
+The counter, incremented on each successful connect, that distinguishes one
+socket's lifetime from the next. The other half of the join key: a correlation
+label restarts per connection, so only `(connection generation, rid)` is unique
+across a run that outlived a reconnect.
+_Avoid_: session id, epoch (a scene epoch is unrelated), attempt
+
+**Timing batch**:
+One message carrying a flush window of server-side rows as parallel column
+arrays, pushed to the client whose requests produced them. Columns, not a list of
+records — the shape the receiving table stores.
+_Avoid_: telemetry, report, upload (nothing is uploaded; the flow is toward the
+client)
+
+**Bracket**:
+The interval a browser row measures around one wire request, on one clock. Server
+rows are placed by nesting inside it rather than by clock synchronisation, so the
+unattributed remainder is named as a gap rather than absorbed.
+_Avoid_: window, span, round trip
 
 ## Surfaces
 
