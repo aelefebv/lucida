@@ -55,7 +55,7 @@ of this measurement lies:
   source reads — the same read, by size.
 
 Two sweeps: **A** (11 levels × 120 objects × 4 passes) and **B** (6 levels × 120 objects × 6
-passes), 10,560 distinct objects read in total, zero errors [M].
+passes), 9,600 distinct objects read in total, zero errors [M].
 
 ### Throughput
 
@@ -106,7 +106,7 @@ throughput does — 17.8 MiB/s at 16, 18.9 at 32, never higher at any level [M].
 signature of a saturated pipe, not of a store refusing work.
 
 **3. The store never pushes back.** TTFB moves from 109 ms at level 8 to 129 ms at 32 —
-20 ms, across a 4× change in concurrency — and there were **zero errors in 10,560 reads** [M].
+20 ms, across a 4× change in concurrency — and there were **zero errors in 9,600 reads** [M].
 No throttling, no 429s, no connection refusals. Whatever limits us, GCS is not rationing it.
 
 **4. Everything past the knee is paid for in the payload.** Body-transfer p50 goes 98 ms at
@@ -149,6 +149,13 @@ fixed also removes build variance from the arm that *is* being measured.
 Runs are **alternated** (12, 16, 12, 16) because #899 measured ~2× session-to-session drift on
 this link and #902 found GCS latency swinging ~3× between sessions; two consecutive runs would
 report the weather.
+
+One thing this design does *not* measure, stated plainly: because both arms carry the new
+limiter, **its own cost is in both and is compared against neither.** That cost is a mutex
+acquisition plus a scan over the tracked readers on each release — and with one browser there
+is exactly one tracked reader and ~40 releases per second, against reads that take hundreds of
+milliseconds each. It is not detectable at this scale, but it is not measured, and on a server
+with many readers the scan is O(readers) per release.
 
 Four runs, 12,525 backend reads, DPR2 verified, cameras restored past the 3 s last-view
 debounce [M].
@@ -237,10 +244,14 @@ LUCIDA_SOURCE_READ_CONCURRENCY=16 python3 docs/research/remote-rates-harness/rr_
 * The knee on any link other than this one — **[U]**, and it is not extrapolable from here:
   §2.6 is the whole point.
 * Behaviour against a store that *does* throttle — **[U]**. GCS returned zero errors across
-  10,560 reads at up to 128 concurrent, so the throttled path is unexercised.
+  9,600 reads at up to 128 concurrent, so the throttled path is unexercised.
 * Whether the knee moves with object size — **[U]**. The sweep is banded to the interactive
   profile (325 KiB p50). Cold-open reads are ~5 MB and would saturate the link at a lower
   concurrency; that case is bandwidth-bound rather than round-trip-bound and was not swept.
 * Multi-client throughput under fair sharing — **[U]** at the network level. The fairness
   property is proven as an ordering guarantee in tests, not as a throughput measurement
   against the real store; the harness cannot drive two browsers.
+* Cross-client interference on the **metadata** read class — **[U]**, and unaddressed: only
+  chunk reads are fair-shared. A wide collection's open is hundreds of metadata round trips on
+  a plain FIFO cap of 32, so one client's open can still delay another's. See ADR 0053, "What
+  this does not cover".

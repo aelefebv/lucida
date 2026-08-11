@@ -16,6 +16,12 @@ Context: issue [#901], measurements in `docs/research/source-read-concurrency.md
 prior measurements from [#899] (`docs/research/remote-rates.md`) and the admission
 window of [ADR 0044](0044-bounded-admission-window-for-an-oversubscribed-wanted-set.md).
 
+Justified by [Runs Anywhere, Open by Default](../principles/runs-anywhere-and-open.md):
+lucida is one product that runs on a laptop and scales to a shared server without
+changing shape. A cap whose behaviour is correct for one user and quietly lets one
+client starve the others as soon as there are several is exactly that shape
+changing.
+
 [#899]: https://github.com/aelefebv/lucida/issues/899
 [#900]: https://github.com/aelefebv/lucida/issues/900
 [#901]: https://github.com/aelefebv/lucida/issues/901
@@ -93,6 +99,26 @@ part of the plateau and nothing more.
 lucida. The measured 16 is the knee on the link it was measured on; a deployment
 inside the same region as its bucket will have a higher one.
 `docs/research/source-read-concurrency-harness/` re-runs the sweep to find it.
+
+## What this does not cover
+
+**Metadata reads are still first-come-first-served, and that is accepted here
+rather than solved.** The two read classes are bounded apart (see
+`DEFAULT_METADATA_READ_CONCURRENCY`), and only the chunk class got fair
+admission. So the starvation guarantee above is a guarantee about *chunk* reads:
+a client opening a large collection can still make another client's open queue
+behind its metadata burst, which on a wide collection is hundreds of round trips.
+
+It is left for two reasons, one good and one merely true. The good one: metadata
+reads have no client to charge them to. They happen on the open path, which runs
+through the import pipeline, and no reader identity is threaded there — the
+attribution has to exist before the fairness can. The merely true one: the class
+is bounded at 32 and an open is finite, so the exposure is a slower open rather
+than an unbounded stall.
+
+This is the honest boundary of the claim, and it is the obvious next ticket: the
+open path is also the stretch #899 measured as the largest unmeasured part of a
+remote open.
 
 ## Consequences
 

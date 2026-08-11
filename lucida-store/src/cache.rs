@@ -21,7 +21,7 @@ use crate::source_limiter::{ReaderId, SourceReadLimiter};
 /// is supplied.
 ///
 /// Measured, not chosen: `docs/research/source-read-concurrency.md` sweeps this
-/// value against the real remote collection from #899 (2,880 reads per level,
+/// value against the real remote collection from #899 (up to 1,200 reads per level,
 /// levels interleaved across passes). Completed reads per second, pooled:
 ///
 /// ```text
@@ -202,6 +202,23 @@ enum ReadClass {
     /// index). Bounded like other metadata, but a not-found is the answer —
     /// counting it would report a perfectly healthy dataset as degraded.
     OptionalMetadata,
+}
+
+/// A read's claim on whichever cap bounds its [`ReadClass`], held for the
+/// duration of the backend round trip and released on drop.
+///
+/// The two classes queue on different machinery — chunks on the fair-share
+/// [`SourceReadLimiter`], metadata on a plain semaphore — and this is what
+/// lets one `match` on the class cover both. Splitting it into two optional
+/// permits would state the same mapping twice, in complementary directions,
+/// with nothing keeping them agreeing.
+///
+/// Neither payload is ever read: a permit is held, not consulted, and the
+/// release is its `Drop`.
+#[allow(dead_code)]
+enum ReadPermit<'a> {
+    Chunk(crate::source_limiter::SourcePermit),
+    Metadata(tokio::sync::SemaphorePermit<'a>),
 }
 
 /// Result shared over the in-flight broadcast. Success carries `Bytes`
@@ -593,13 +610,9 @@ impl CachedStore {
             // apart: chunk reads queue on the fair-share source limiter, which
             // has contention to arbitrate, while metadata reads take a plain
             // permit from their own cap.
-            let _chunk_permit = match class {
-                ReadClass::Chunk => Some(self.source_read.acquire(reader).await),
-                ReadClass::Metadata | ReadClass::OptionalMetadata => None,
-            };
-            let _metadata_permit = match class {
-                ReadClass::Chunk => None,
-                ReadClass::Metadata | ReadClass::OptionalMetadata => Some(
+            let _permit = match class {
+                ReadClass::Chunk => ReadPermit::Chunk(self.source_read.acquire(reader).await),
+                ReadClass::Metadata | ReadClass::OptionalMetadata => ReadPermit::Metadata(
                     self.metadata_read
                         .acquire()
                         .await

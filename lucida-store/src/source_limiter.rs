@@ -140,9 +140,16 @@ impl SourceReadLimiter {
     /// Return a permit and pass it straight to the next reader in line, if any.
     fn release(self: &Arc<Self>, reader: ReaderId) {
         let mut state = self.state.lock().expect("limiter state");
-        if let Some(entry) = state.readers.get_mut(&reader) {
-            entry.in_flight -= 1;
-        }
+        // A permit exists only because `admit` charged it to this reader, and
+        // `prune` never drops a reader holding one — so the entry is here.
+        // Asserting that keeps a future invariant break loud instead of
+        // silently returning a permit nobody was charged for, which would
+        // inflate the cap.
+        state
+            .readers
+            .get_mut(&reader)
+            .expect("a held permit keeps its reader tracked")
+            .in_flight -= 1;
         state.available += 1;
         state.prune(reader);
 
@@ -153,10 +160,11 @@ impl SourceReadLimiter {
             let Some(next) = state.neediest_waiting_reader() else {
                 break;
             };
-            let entry = state.reader_mut(next);
-            let Some(sender) = entry.waiters.pop_front() else {
-                break;
-            };
+            let sender = state
+                .reader_mut(next)
+                .waiters
+                .pop_front()
+                .expect("neediest_waiting_reader only returns readers with waiters");
             state.admit(next);
             let permit = SourcePermit {
                 limiter: Some(self.clone()),
@@ -183,8 +191,11 @@ impl State {
         self.readers.entry(reader).or_insert_with(|| ReaderState {
             in_flight: 0,
             waiters: VecDeque::new(),
-            // A newly seen reader is maximally "least recently served", so it
-            // is preferred over readers already being served.
+            // Starts at the current mark, i.e. as if just served. A newcomer
+            // does not need help from the tiebreak — it wins on `in_flight`,
+            // which is 0 — and starting it at 0 instead would let a reader
+            // that has been idle just long enough to be pruned re-enter ahead
+            // of everyone and leapfrog the rotation on every reappearance.
             last_granted: granted,
         })
     }

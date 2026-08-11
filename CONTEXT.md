@@ -95,6 +95,15 @@ folds several callers' demand for one composite key onto one wire request, and
 read, via a leader that performs it and followers that wait on the result.
 _Avoid_: deduplication, batching (batching combines *different* work)
 
+**Reader**:
+The party a backend source read is charged to when the concurrent-read cap is
+shared out — the requesting client, or one background class for reads no client
+asked for (imports, CLI work, proxy generation). A fairness identity, not a
+component and not a caller: two reads by one client are one reader, and the
+reasoning is in `wiki/decisions/0053-fair-share-source-read-admission.md`.
+_Avoid_: tenant, consumer, requester (a requester is any caller; a reader is the
+unit fairness is measured over)
+
 ## Performance monitor
 
 Defined by `wiki/decisions/0047-trace-model-phases-runs-and-lifecycle-rows.md`
