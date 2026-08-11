@@ -162,6 +162,11 @@ export function makeHeader(overrides: Partial<RunHeader> = {}): RunHeader {
     cause: { epoch: "content", dirtyKind: "interactive", source: "dataset_added" },
     endReason: "quiescent",
     truncation: null,
+    // One socket, up for the whole interval: the shape a healthy run has.
+    // A fixture that needs an outage declares its own connections.
+    connections: [
+      { generation: 1, openedAtUs: null, closedAtUs: null, gapUs: null, firstRid: null, lastRid: null },
+    ],
     build: { version: "0.2.0", mode: "production", dev: false },
     gpu: {
       vendor: "apple",
@@ -198,6 +203,7 @@ export interface RunSpec {
   ticksDropped?: number;
   eventsDropped?: number;
   serverRowsDropped?: number;
+  serverRowsDiscarded?: number;
 }
 
 /** Coverage is computed rather than declared, so a fixture cannot claim coverage its rows do not have. */
@@ -215,6 +221,8 @@ export function makeRun(spec: RunSpec = {}): TraceRun {
       ticksDropped: spec.ticksDropped ?? 0,
       eventsDropped: spec.eventsDropped ?? 0,
       serverRowsDropped: spec.serverRowsDropped ?? 0,
+      serverRowsDiscarded: spec.serverRowsDiscarded ?? 0,
+      connections: header.connections,
     }),
     rows,
     ticks,
@@ -227,6 +235,7 @@ export function makeRun(spec: RunSpec = {}): TraceRun {
     datasetOpens: spec.datasetOpens ?? [],
     datasetOpensDropped: 0,
     serverRowsDropped: spec.serverRowsDropped ?? 0,
+    serverRowsDiscarded: spec.serverRowsDiscarded ?? 0,
   };
 }
 
