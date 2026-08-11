@@ -305,32 +305,9 @@ impl WasmScene {
         }
     }
 
-    /// Debug helper: returns [effective_zoom, zoom_per_voxel] for a dataset.
-    pub fn debug_lod_info(&self, dataset_id: &str) -> Vec<f64> {
-        let ds_id = DatasetId(dataset_id.to_string());
-        let derived = match self.inner.derived.get(&ds_id) {
-            Some(d) => d,
-            None => return vec![0.0, 0.0],
-        };
-        let member = match derived.members.first() {
-            Some(m) => m,
-            None => return vec![0.0, 0.0],
-        };
-        let level0 = match member.levels.first() {
-            Some(l) => l,
-            None => return vec![0.0, 0.0],
-        };
-        let vol_shape = [
-            level0.shape[2] as u32,
-            level0.shape[3] as u32,
-            level0.shape[4] as u32,
-        ];
-        let region = self.inner.camera.visible_region(
-            &self.inner.view.z_range,
-            Some(&member.volume_transform),
-            Some(&vol_shape),
-        );
-        vec![self.inner.camera.effective_zoom(), region.effective_zoom]
+    /// Debug helper: the camera's effective zoom, for the Render tab.
+    pub fn debug_effective_zoom(&self) -> f64 {
+        self.inner.camera.effective_zoom()
     }
 
     /// Returns the visible region for a dataset as JSON.

@@ -61,6 +61,15 @@ pub enum ImportWarningKind {
     /// The message names the exhaustive-discovery override and the likely
     /// store-side causes.
     UnusableLabelIndex,
+    /// One or more declared pyramid levels have no chunks written, so they
+    /// read as fill and render as an all-zero image while coarser levels of
+    /// the same dataset do have data — a partially-written export. The level
+    /// is kept rather than dropped: level indices double as on-disk directory
+    /// names, so removing one would misalign every chunk key after it.
+    /// Always aggregated: whatever stops an export short usually leaves
+    /// several levels bare at once. See [`crate::unwritten`] for how a level
+    /// is judged unwritten without scanning its chunk prefix.
+    UnwrittenLevel,
 }
 
 /// Everything the server needs to build its operational binding.

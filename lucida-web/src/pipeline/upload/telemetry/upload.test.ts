@@ -11,7 +11,6 @@ import {
 import {
   UPLOAD_BUDGET_EXHAUSTED_STREAK_THRESHOLD,
   UPLOAD_FILTER_RATIO_THRESHOLD,
-  UPLOAD_RESEND_RATIO_THRESHOLD,
   UPLOAD_SIZE_SAMPLES,
   UPLOAD_WINDOW_MS,
   UPLOAD_LOG_RATE_LIMIT_MS,
@@ -49,9 +48,9 @@ afterEach(() => {
 describe("UploadTelemetry — recordEvent + counters", () => {
   it("accumulates total bytes and total uploads across recordEvent calls", () => {
     const tel = new UploadTelemetry();
-    tel.recordEvent(100, 1000, /*isResend*/ false);
-    tel.recordEvent(110, 2000, /*isResend*/ true);
-    tel.recordEvent(120, 4000, /*isResend*/ false);
+    tel.recordEvent(100, 1000);
+    tel.recordEvent(110, 2000);
+    tel.recordEvent(120, 4000);
     // No publish yet — push a no-op tick to materialize rolling.
     tel.publish(120, makeTickStats());
     const rolling = debugStats.upload.rolling!;
@@ -61,9 +60,9 @@ describe("UploadTelemetry — recordEvent + counters", () => {
 
   it("publishes rolling bytesPerSec equal to bytes in the 1s window", () => {
     const tel = new UploadTelemetry();
-    tel.recordEvent(10_000, 500, false);
-    tel.recordEvent(10_200, 700, false, "proxy");
-    tel.recordEvent(10_400, 800, true);
+    tel.recordEvent(10_000, 500);
+    tel.recordEvent(10_200, 700, "proxy");
+    tel.recordEvent(10_400, 800);
     tel.publish(10_500, makeTickStats());
     const rolling = debugStats.upload.rolling!;
     // Window = UPLOAD_WINDOW_MS = 1000ms, so bytesInWindow == bytesPerSec.
@@ -71,14 +70,12 @@ describe("UploadTelemetry — recordEvent + counters", () => {
     expect(rolling.uploadsPerSec).toBe(3);
     expect(rolling.chunkUploadsPerSec).toBe(2);
     expect(rolling.proxyUploadsPerSec).toBe(1);
-    // 1 of 3 uploads is a resend.
-    expect(rolling.resendRatio).toBeCloseTo(1 / 3);
   });
 
   it("prunes events older than UPLOAD_WINDOW_MS", () => {
     const tel = new UploadTelemetry();
-    tel.recordEvent(0, 500, false);
-    tel.recordEvent(100, 500, false);
+    tel.recordEvent(0, 500);
+    tel.recordEvent(100, 500);
     // Publish at time t such that the t=0 event falls outside the window.
     const t = UPLOAD_WINDOW_MS + 50;
     tel.publish(t, makeTickStats());
@@ -100,7 +97,7 @@ describe("UploadTelemetry — recordEvent + counters", () => {
     const ticks = 200;
     for (let i = 0; i < ticks; i++) {
       const now = 100_000 + i * tickMs;
-      for (let e = 0; e < perTick; e++) tel.recordEvent(now, 10, false);
+      for (let e = 0; e < perTick; e++) tel.recordEvent(now, 10);
       tel.publish(now, makeTickStats());
     }
     const rolling = debugStats.upload.rolling!;
@@ -137,7 +134,7 @@ describe("UploadTelemetry — recordEvent + counters", () => {
 
     const tel = new UploadTelemetry();
     const ringTick = (now: number): void => {
-      for (let e = 0; e < perTick; e++) tel.recordEvent(now, 10, false);
+      for (let e = 0; e < perTick; e++) tel.recordEvent(now, 10);
       tel.publish(now, makeTickStats());
     };
     // Warm to steady state so the measured ticks are the expensive ones
@@ -167,7 +164,7 @@ describe("UploadTelemetry — recordEvent + counters", () => {
   it("derives p50 / p95 upload size from the sample buffer", () => {
     const tel = new UploadTelemetry();
     // Build a known distribution: 1,2,3,...,10.
-    for (let i = 1; i <= 10; i++) tel.recordEvent(10_000 + i, i * 100, false);
+    for (let i = 1; i <= 10; i++) tel.recordEvent(10_000 + i, i * 100);
     tel.publish(10_100, makeTickStats());
     const rolling = debugStats.upload.rolling!;
     // Math.floor(10 * 0.5) = 5 → sorted[5] = 600.
@@ -179,7 +176,7 @@ describe("UploadTelemetry — recordEvent + counters", () => {
   it("keeps only the most recent UPLOAD_SIZE_SAMPLES sizes once it wraps", () => {
     const tel = new UploadTelemetry();
     const n = UPLOAD_SIZE_SAMPLES * 2;
-    for (let i = 1; i <= n; i++) tel.recordEvent(10_000, i * 100, false);
+    for (let i = 1; i <= n; i++) tel.recordEvent(10_000, i * 100);
     tel.publish(10_000, makeTickStats());
     const rolling = debugStats.upload.rolling!;
     // Retained window is i = SAMPLES+1 .. 2*SAMPLES, sorted ascending.
@@ -234,7 +231,6 @@ describe("UploadTelemetry — tick aggregation", () => {
     const tel = new UploadTelemetry();
     tel.publish(10_000, makeTickStats());
     const rolling = debugStats.upload.rolling!;
-    expect(rolling.resendRatio).toBeNaN();
     expect(rolling.filterRatio).toBeNaN();
   });
 
@@ -330,29 +326,6 @@ describe("UploadTelemetry — sustained anomaly detectors", () => {
     expect(findLogs("upload.budget_exhausted_sustained")).toHaveLength(0);
   });
 
-  it("resend_storm: arms when resendRatio stays > threshold for sustainMs", () => {
-    const tel = new UploadTelemetry();
-    // 4 resends + 1 fresh → 80%, well above UPLOAD_RESEND_RATIO_THRESHOLD = 0.5.
-    const recordResendHeavy = (now: number): void => {
-      tel.recordEvent(now, 100, true);
-      tel.recordEvent(now, 100, true);
-      tel.recordEvent(now, 100, true);
-      tel.recordEvent(now, 100, true);
-      tel.recordEvent(now, 100, false);
-    };
-    const t0 = UPLOAD_LOG_RATE_LIMIT_MS + 1000;
-    recordResendHeavy(t0);
-    tel.publish(t0, makeTickStats());
-    // Sustained beyond UPLOAD_LOG_SUSTAIN_MS → fires.
-    recordResendHeavy(t0 + UPLOAD_LOG_SUSTAIN_MS + 100);
-    tel.publish(t0 + UPLOAD_LOG_SUSTAIN_MS + 100, makeTickStats());
-    const logs = findLogs("upload.resend_storm");
-    expect(logs.length).toBeGreaterThanOrEqual(1);
-    expect((logs[0].payload as { resendRatio: number }).resendRatio).toBeGreaterThan(
-      UPLOAD_RESEND_RATIO_THRESHOLD,
-    );
-  });
-
   it("drain_waste: arms when filterRatio stays > threshold for sustainMs", () => {
     const tel = new UploadTelemetry();
     // High filter ratio: 10 drained chunks, 9 skipped wrong-lod → 0.9.
@@ -385,8 +358,8 @@ describe("UploadTelemetry — shape regression", () => {
    */
   it("preserves the full UploadRollingStats key set", () => {
     const tel = new UploadTelemetry();
-    tel.recordEvent(10_000, 512, false);
-    tel.recordEvent(10_100, 1024, true);
+    tel.recordEvent(10_000, 512);
+    tel.recordEvent(10_100, 1024);
     tel.publish(
       10_200,
       makeTickStats({
@@ -408,7 +381,6 @@ describe("UploadTelemetry — shape regression", () => {
         "uploadsPerSec",
         "chunkUploadsPerSec",
         "proxyUploadsPerSec",
-        "resendRatio",
         "filterRatio",
         "uploadSizeP50",
         "uploadSizeP95",
@@ -420,7 +392,6 @@ describe("UploadTelemetry — shape regression", () => {
     // Spot-check values for a regression on the arithmetic itself.
     expect(rolling.totalBytes).toBe(1536);
     expect(rolling.totalUploads).toBe(2);
-    expect(rolling.resendRatio).toBeCloseTo(0.5);
     // drainedUploadBound = 5 - 1 (prefetch) - 0 (overview) = 4
     // skippedUploadBound = 1 (wrongLod)
     // → filterRatio = 1/4 = 0.25

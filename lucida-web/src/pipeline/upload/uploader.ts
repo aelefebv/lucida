@@ -287,7 +287,7 @@ export class Uploader {
     const telemetryActive = orchTelemetryActive();
     const recordUpload = (bytes: number, kind: "chunk" | "proxy"): void => {
       if (!telemetryActive) return;
-      this.uploadTelemetry.recordEvent(tickStart, bytes, false, kind);
+      this.uploadTelemetry.recordEvent(tickStart, bytes, kind);
     };
 
     const deliverables = Array.from(ctx.cpuCache.getDeliverable());

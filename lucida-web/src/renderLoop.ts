@@ -379,10 +379,8 @@ export class RenderLoop {
     msSinceInteractiveDirty: number | null;
     msSinceResidencyDirty: number | null;
     throttleSkipsPending: number;
-    msSinceLastThrottleEmit: number | null;
     msSinceLastRender: number | null;
     fps: number | null;
-    sampleWindowMs: number | null;
     maxFrameMs: number;
     maxPlanMs: number;
     maxUploadMs: number;
@@ -399,14 +397,12 @@ export class RenderLoop {
     const rendered = recent.filter(s => s.rendered);
 
     let fps: number | null = null;
-    let sampleWindowMs: number | null = null;
     if (rendered.length >= 2) {
       const first = rendered[0].t;
       const last = rendered[rendered.length - 1].t;
       const span = last - first;
       if (span > 0) {
         fps = +((rendered.length - 1) / (span / 1000)).toFixed(1);
-        sampleWindowMs = Math.round(span);
       }
     }
 
@@ -440,12 +436,8 @@ export class RenderLoop {
         ? null
         : Math.round(now - this.lastResidencyDirtyAt),
       throttleSkipsPending: this.throttleSkipPending,
-      msSinceLastThrottleEmit: this.lastThrottleEmit === Number.NEGATIVE_INFINITY
-        ? null
-        : Math.round(now - this.lastThrottleEmit),
       msSinceLastRender,
       fps,
-      sampleWindowMs,
       maxFrameMs: +maxFrameMs.toFixed(1),
       maxPlanMs: +maxPlanMs.toFixed(1),
       maxUploadMs: +maxUploadMs.toFixed(1),
