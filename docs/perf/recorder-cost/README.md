@@ -221,3 +221,17 @@ The obligation is met when recorder + whatever observability survives the
 teardown is ≤ 1.05 MB live and ≤ 1–3 µs per typical tick. It is *not* met by
 the marginal gates alone, which is why this ledger exists rather than a comment
 in the test file.
+
+**Step 1 recorded, [#918] landed (2026-08-11).** `[#928] floor check: typical
+tick (8 chunks, 93 write calls) p50=3.38 µs | one 2,560-chunk run holds 663 kB
+live`. What makes that number the whole picture rather than half of it: the gate
+came out by *deleting* the gauges it guarded, not by making them unconditional.
+`debugStats` no longer holds a sink, so there is no second instrument left to
+add to the recorder's 663 kB — the panel's 1.05 MB working set is gone with it,
+and [#919] removes a reader that now reads nothing rather than a live cost.
+
+Measurement 2 is therefore **not run and not needed for step 1**: a
+before/after heap A/B compares the recorder against the recorder plus a deleted
+sink, so the arms only become meaningful again if a future change re-introduces
+always-on gauges. The live figure to beat stands at 663 kB against the 1.05 MB
+floor.

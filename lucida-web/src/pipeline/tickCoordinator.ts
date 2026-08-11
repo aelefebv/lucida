@@ -10,11 +10,9 @@
 import type { TickContext } from "../renderLoopTypes.ts";
 import type { DatasetSettings, SceneSettings } from "../tickCommon.ts";
 import type { DatasetManifest, ImageSpec } from "../manifestTypes.ts";
-import { Axis } from "../axes.ts";
 import {
   getActiveChannels,
   getSceneSettings,
-  compositeKey,
 } from "../tickCommon.ts";
 import { buildDisplayStateByChannel } from "./upload/coldState/displayState.ts";
 import type { ColdStateDisplayState } from "../renderer/workerProtocol.ts";
@@ -36,7 +34,6 @@ import {
   type ViewQueryEntityJson,
 } from "./planning/snapshotDelta.ts";
 import type { WasmScene } from "lucida-core";
-import { buildPlanningDatasetDebug } from "./planning/debug.ts";
 import { recordPlanningTick } from "./planning/traceTick.ts";
 import { computeLabelChunkRequests } from "./planning/labelRequests.ts";
 import type {
@@ -57,11 +54,6 @@ import type { VisibleRegion } from "./viewport.ts";
 export type { MinimapChunkCoord } from "./planning/index.ts";
 import type { CpuCache } from "./fetch/index.ts";
 import type { ProxyRequest } from "./planning/index.ts";
-import {
-  DEBUG_MEMBER_ROW_CAP,
-  debugStats,
-  type OrchDebug,
-} from "../debug/debugStats.ts";
 import type { ColdStateCauseKey } from "./upload/telemetry/coldState.ts";
 import { orchTelemetryActive } from "./upload/telemetry/active.ts";
 import { buildRoster } from "./upload/coldState/roster.ts";
@@ -171,7 +163,6 @@ const SELECTION_COALESCE_INTERVAL_MS = 150;
  * the cache, so the replayed rows are recomputed from the delivery
  * ledger — but not on every idle frame; the panel only polls ~5×/s.
  */
-const MEMBER_SENT_REFRESH_MS = 250;
 
 /**
  * Per-dataset carry-forward captured at each full rebuild. Lets the next
@@ -550,32 +541,7 @@ export class TickCoordinator {
    * Cleared on dataset removal so a re-added dataset re-syncs with a full send.
    */
   private readonly coldStateSyncedDatasets = new Set<string>();
-  /**
-   * Debug member stats from the most recent non-cache-hit run. Replayed
-   * onto `debugStats` on epoch cache hits so the panel doesn't flash
-   * `Visible: 0 / 0` between idle ticks.
-   */
-  private cachedDebugMemberSnapshot: {
-    visibleMembers: number;
-    totalMembers: number;
-    memberStats: typeof debugStats.memberStats;
-    /** Uncapped count of members with pending requests (rows are capped). */
-    memberStatsActiveTotal: number;
-    /**
-     * Planned (non-prefetch) chunk requests backing each `memberStats`
-     * row, index-aligned. Lets epoch-hit ticks recompute each row's
-     * sent count from the delivery ledger instead of replaying the
-     * rebuild-time values.
-     */
-    memberChunkRefs: ChunkRequest[][];
-    selectedLevel: number;
-    numLevels: number;
-  } | null = null;
-  /** Last time the replayed rows' sent counts were recomputed. Starts
-   *  at -Infinity so the first epoch-hit tick always refreshes. */
-  private lastMemberSentRefreshAt = -Infinity;
   private requestEpoch = 0;
-  private _lastRequests: ChunkRequest[] = [];
   /** Per-dataset snapshot of the most recent visible region. Consumed by `orchDebug`. */
   private _lastVisibleRegion = new Map<string, VisibleRegion>();
   /** Per-dataset snapshot of the most recent entity list. */
@@ -704,7 +670,7 @@ export class TickCoordinator {
       if (isHit) {
         this.pendingDeferredRebuild = false;
       }
-      this.serveCachedDebug(ctx, tickStart);
+      this.serveCachedTelemetry(tickStart);
       return this.cachedResult;
     }
 
@@ -741,7 +707,7 @@ export class TickCoordinator {
       selectionOnly &&
       this.tryDisplayOnlyUpdate({ ctx, currentEpochs, settings, multiChannel, tickStart })
     ) {
-      this.serveCachedDebug(ctx, tickStart);
+      this.serveCachedTelemetry(tickStart);
       return this.cachedResult;
     }
 
@@ -763,7 +729,7 @@ export class TickCoordinator {
         minimapPendingFetch, planningConfig,
       })
     ) {
-      this.serveCachedDebug(ctx, tickStart);
+      this.serveCachedTelemetry(tickStart);
       return this.cachedResult;
     }
 
@@ -781,21 +747,9 @@ export class TickCoordinator {
     // loop.
     ctx.cpuCache.onPlanRebuildStart();
 
-    // One CPU-cache snapshot per rebuild, taken only when a debug surface
-    // will read it. `snapshot()` walks every resident entity in the chunk
-    // and overview stores, so it must never run per-entity or per-dataset
-    // — with tens of thousands of visible entities that walk would
-    // dominate the rebuild. Every debug consumer below (planning panel,
-    // entityDiag) shares this single copy.
-    const cacheSnapshot = debugStats.enabled ? ctx.cpuCache.snapshot() : null;
-
     const memberRoster = new Map<string, MemberRosterEntry[]>();
     const entityIndexByDataset = new Map<string, Map<string, number>>();
     const plannedDatasets: PlannedDataset[] = [];
-    // Index-aligned with the rows pushed to `debugStats.memberStats`
-    // below (the render loop resets those per tick); captured into the
-    // member snapshot so epoch-hit ticks can refresh sent counts.
-    const memberChunkRefs: ChunkRequest[][] = [];
 
     for (const [dsId, ds] of ctx.datasets) {
       // Skip invisible datasets.
@@ -909,7 +863,6 @@ export class TickCoordinator {
       const result = this.planFn(snapshot, planningStateForDataset, planningConfig);
       this.planningState.set(dsId, result.nextState);
       this.requestEpoch = result.epochs.request;
-      this._lastRequests = result.requests;
       this._lastVisibleRegion.set(dsId, visibleRegion);
       this._lastEntities.set(dsId, entities);
       emitViewerInterestHint(ctx, dsId, selection, visibleRegion, result.requests, this.requestEpoch);
@@ -919,15 +872,6 @@ export class TickCoordinator {
       // recording does not wait for somebody to open a panel (ADR 0049).
       recordPlanningTick(dsId, result, ctx.cpuCache.levelResidency());
 
-      // Built before downstream side-effects so the panel reflects what
-      // `plan()` produced, not the post-LOD-filter upload-path view.
-      if (cacheSnapshot !== null) {
-        const entityById = new Map(entities.map(e => [e.entityId, e]));
-        debugStats.planning.byDataset[dsId] = buildPlanningDatasetDebug(
-          dsId, result, entities, entityById, visibleRegion, cacheSnapshot,
-          planningConfig,
-        );
-      }
 
       plannedDatasets.push({
         dsId,
@@ -1114,68 +1058,6 @@ export class TickCoordinator {
         nextState: result.nextState,
       });
 
-      // Debug stats. Everything here must stay O(entities + requests):
-      // a wide collection has tens of thousands of visible entities, and
-      // a per-entity scan of the active set or request list froze the
-      // page for seconds with the panel open. Per-member ROWS are also
-      // bounded (DEBUG_MEMBER_ROW_CAP) — the scalar counters keep the
-      // full population visible.
-      if (debugStats.enabled) {
-        const activeByEntity = new Map(
-          result.activeSet.map((a) => [a.entityId, a]),
-        );
-        const requestsByEntity = new Map<string, ChunkRequest[]>();
-        for (const r of result.requests) {
-          if (r.lane === "prefetch") continue;
-          const list = requestsByEntity.get(r.entityId);
-          if (list) list.push(r);
-          else requestsByEntity.set(r.entityId, [r]);
-        }
-        for (const entity of entities) {
-          debugStats.totalMembers++;
-          debugStats.visibleMembers++;
-          const activeEntry = activeByEntity.get(entity.entityId);
-          // Only tile entries carry `targetLod`; group-as-proxy has
-          // no LOD bookkeeping (-1 sentinel), invisibles report coarsest.
-          const tl =
-            activeEntry?.kind === "tile"
-              ? activeEntry.targetLod
-              : activeEntry?.kind === "invisible"
-                ? activeEntry.coarsestLod
-                : -1;
-          // Rows only for members with pending chunk requests — the
-          // panel filters to `chunksNeeded > 0` anyway — and row-capped.
-          const entityRequests = requestsByEntity.get(entity.entityId);
-          const chunksNeeded = entityRequests?.length ?? 0;
-          if (chunksNeeded > 0 && entityRequests) {
-            debugStats.memberStatsActiveTotal++;
-            if (debugStats.memberStats.length < DEBUG_MEMBER_ROW_CAP) {
-              const memberKey = multiChannel
-                ? compositeKey(entity.imageId, selection.c)
-                : entity.imageId;
-              // Delivery state clears at rebuild start (atlas remap), so
-              // this usually reads 0 here and climbs on epoch-hit ticks
-              // as the upload path re-sends — the honest signal.
-              let chunksSent = 0;
-              for (const r of entityRequests) {
-                if (ctx.cpuCache.isChunkSent(r)) chunksSent++;
-              }
-              debugStats.memberStats.push({
-                id: memberKey,
-                level: tl,
-                numLevels: entity.levels.length,
-                chunksNeeded,
-                chunksSent,
-              });
-              memberChunkRefs.push(entityRequests);
-            }
-          }
-          if (tl >= 0) {
-            debugStats.selectedLevel = tl;
-            debugStats.numLevels = entity.levels.length;
-          }
-        }
-      }
 
       // Capture this dataset's display-only fast-path signature: the
       // display state now on the worker, plus every non-display signal a
@@ -1189,125 +1071,6 @@ export class TickCoordinator {
       });
     }
 
-    // Step 4 — TickCoordinator debug snapshot
-    if (debugStats.enabled) {
-      const orchDebug: OrchDebug = {
-        activeSet: [],
-        activeSetTotal: 0,
-        activeSetModeCounts: {
-          groupAsProxy: 0,
-          tilesProxyFallback: 0,
-          tilesDetail: 0,
-        },
-        laneCount: { detail: 0, coarse: 0, prefetch: 0, overview: 0 },
-        chunksByLevel: {},
-        topRequests: [],
-        epochCacheHit: false,
-        proxyResidency: { ...proxyResidency.stats },
-        // Replaced after `coldStateTelemetry.recordRebuild` below.
-        coldState: this.uploader.coldStateTelemetry.publish(),
-        visibleRegion: null,
-        entityDiag: [],
-      };
-
-      // Aggregate per-dataset active sets from `previousActiveSet`
-      // (the active set produced by the most recent `plan()` call).
-      // ActiveSetEntry is a discriminated union; per-variant LOD columns
-      // are derived from `kind` (group-as-proxy = 0, tile reads from entry,
-      // invisible reports coarsest). Mode COUNTS run over the full set;
-      // row emission is capped like the other per-member arrays.
-      const modeCounts = orchDebug.activeSetModeCounts;
-      for (const [, state] of this.planningState) {
-        for (const entry of state.previousActiveSet) {
-          orchDebug.activeSetTotal++;
-          if (entry.kind === "group-as-proxy") {
-            modeCounts.groupAsProxy++;
-          } else if (entry.kind === "tile") {
-            if (entry.mode === "tiles-with-proxy-fallback") {
-              modeCounts.tilesProxyFallback++;
-            } else {
-              modeCounts.tilesDetail++;
-            }
-          }
-          if (orchDebug.activeSet.length >= DEBUG_MEMBER_ROW_CAP) continue;
-          if (entry.kind === "group-as-proxy") {
-            orchDebug.activeSet.push({
-              entityId: entry.entityId,
-              mode: "group-as-proxy",
-              targetLod: 0,
-              detailOwnedLodRange: [0, 0],
-            });
-          } else if (entry.kind === "tile") {
-            orchDebug.activeSet.push({
-              entityId: entry.entityId,
-              mode: entry.mode,
-              targetLod: entry.targetLod,
-              detailOwnedLodRange: entry.detailOwnedLodRange,
-            });
-          } else {
-            // invisible
-            orchDebug.activeSet.push({
-              entityId: entry.entityId,
-              mode: "invisible",
-              targetLod: entry.coarsestLod,
-              detailOwnedLodRange: [entry.coarsestLod, entry.coarsestLod],
-            });
-          }
-        }
-      }
-
-      // Store last plan's request stats (use the last dataset's plan for simplicity)
-      if (this._lastRequests) {
-        for (const r of this._lastRequests) {
-          if (r.lane === "detail") orchDebug.laneCount.detail++;
-          else if (r.lane === "coarse") orchDebug.laneCount.coarse++;
-          else if (r.lane === "prefetch") orchDebug.laneCount.prefetch++;
-          else orchDebug.laneCount.overview++;
-          orchDebug.chunksByLevel[r.level] = (orchDebug.chunksByLevel[r.level] ?? 0) + 1;
-        }
-        orchDebug.topRequests = this._lastRequests.slice(0, 20).map(r => ({
-          level: r.level,
-          lane: r.lane,
-          priority: r.priority,
-          chunkKey: r.chunkKey,
-        }));
-      }
-
-      // OrchDebug exposes one `visibleRegion`; pick the first dataset
-      // (insertion order = dataset iteration order in step 3).
-      const firstVisibleRegion = this._lastVisibleRegion.values().next().value;
-      orchDebug.visibleRegion = firstVisibleRegion
-        ? {
-            xyBounds: firstVisibleRegion.xyBoundsVox,
-            zRange: firstVisibleRegion.zRangeVox,
-            effectiveZoom: firstVisibleRegion.effectiveZoom,
-          }
-        : null;
-      // entityDiag is a flat array on the wire; aggregate the first
-      // 5 entities across every dataset so multi-dataset debug isn't
-      // truncated to the last-processed dataset's first 5 (the prior
-      // last-dataset-wins behavior).
-      const entityDiagEntries: OrchDebug["entityDiag"] = [];
-      for (const [, entities] of this._lastEntities) {
-        for (const e of entities) {
-          if (entityDiagEntries.length >= 5) break;
-          entityDiagEntries.push({
-            entityId: e.entityId,
-            position: e.layoutPositionVox,
-            fullShape: e.levels.length > 0
-              ? [e.levels[0].shape[Axis.X], e.levels[0].shape[Axis.Y]] as [number, number]
-              : null,
-            // Occupancy is counted lazily for just the entries shown
-            // here, against the shared per-rebuild cache snapshot.
-            cachedKeys: cacheSnapshot?.cached.get(e.entityId)?.size ?? 0,
-          });
-        }
-        if (entityDiagEntries.length >= 5) break;
-      }
-      orchDebug.entityDiag = entityDiagEntries;
-
-      debugStats.orch = orchDebug;
-    }
 
     // Step 5 — Cache and return
     const outputEpochs: SceneEpochs = { ...currentEpochs, request: this.requestEpoch };
@@ -1329,17 +1092,6 @@ export class TickCoordinator {
     for (const [dsId, dsSettings] of Object.entries(settings.allSettings)) {
       if (dsSettings.visible) this.lastVisibleDatasetIds.add(dsId);
     }
-    if (debugStats.enabled) {
-      this.cachedDebugMemberSnapshot = {
-        visibleMembers: debugStats.visibleMembers,
-        totalMembers: debugStats.totalMembers,
-        memberStats: [...debugStats.memberStats],
-        memberStatsActiveTotal: debugStats.memberStatsActiveTotal,
-        memberChunkRefs,
-        selectedLevel: debugStats.selectedLevel,
-        numLevels: debugStats.numLevels,
-      };
-    }
 
     // Stamp the coalescing anchor at rebuild COMPLETION. The window then
     // measures idle time since the rebuild finished, so coalescing engages
@@ -1349,64 +1101,26 @@ export class TickCoordinator {
     const rebuildEnd = performance.now();
     this.lastRebuildAt = rebuildEnd;
 
-    // Record cause + duration after step 4 so the OrchDebug published
-    // this tick reflects this rebuild. Gated like recordHit above: the
-    // rebuild window, cause attribution, and churn detector only run
-    // while observable.
+    // Gated like recordHit above: the rebuild window, cause attribution,
+    // and churn detector only run while the `orch` log category is on.
     if (orchTelemetryActive()) {
       this.uploader.coldStateTelemetry.recordRebuild(
         tickStart, causes, rebuildEnd - tickStart,
       );
-    }
-    if (debugStats.enabled && debugStats.orch) {
-      debugStats.orch.coldState = this.uploader.coldStateTelemetry.publish();
     }
 
     return this.cachedResult;
   }
 
   /**
-   * Cold-state window telemetry + debug member-stat replay for a tick that
-   * serves the cached result instead of rebuilding (a genuine cache hit, a
-   * coalesced skip, or the display-only fast path). Keeps the panel from
-   * blinking to "Visible: 0 / 0" between rebuilds and refreshes sent counts
-   * from the delivery ledger as idle fill lands.
+   * Cold-state window telemetry for a tick that serves the cached result
+   * instead of rebuilding (a genuine cache hit, a coalesced skip, or the
+   * display-only fast path).
    */
-  private serveCachedDebug(ctx: TickContext, tickStart: number): void {
-    // Aggregates only while someone can observe it — the panel
-    // (debugStats) or the `orch` log category.
+  private serveCachedTelemetry(tickStart: number): void {
+    // Aggregates only while the `orch` log category can carry the output.
     if (orchTelemetryActive()) {
       this.uploader.coldStateTelemetry.recordHit(tickStart);
-    }
-    if (debugStats.enabled && debugStats.orch) {
-      debugStats.orch.epochCacheHit = true;
-      debugStats.orch.coldState = this.uploader.coldStateTelemetry.publish();
-    }
-    if (debugStats.enabled && this.cachedDebugMemberSnapshot) {
-      const s = this.cachedDebugMemberSnapshot;
-      // Sent counts keep advancing between rebuilds as the upload path
-      // drains the cache; refresh the replayed rows from the delivery
-      // ledger (throttled) so idle fill shows as progress instead of
-      // freezing at the rebuild-time counts.
-      const now = performance.now();
-      if (now - this.lastMemberSentRefreshAt >= MEMBER_SENT_REFRESH_MS) {
-        this.lastMemberSentRefreshAt = now;
-        for (let i = 0; i < s.memberStats.length; i++) {
-          const refs = s.memberChunkRefs[i];
-          if (!refs) continue;
-          let sent = 0;
-          for (const r of refs) {
-            if (ctx.cpuCache.isChunkSent(r)) sent++;
-          }
-          s.memberStats[i].chunksSent = sent;
-        }
-      }
-      debugStats.visibleMembers = s.visibleMembers;
-      debugStats.totalMembers = s.totalMembers;
-      debugStats.memberStats = [...s.memberStats];
-      debugStats.memberStatsActiveTotal = s.memberStatsActiveTotal;
-      debugStats.selectedLevel = s.selectedLevel;
-      debugStats.numLevels = s.numLevels;
     }
   }
 
@@ -1756,7 +1470,6 @@ export class TickCoordinator {
     ctx.cpuCache.onPlanRebuildStart();
     for (const p of planned) {
       this.requestEpoch = scrubRequestEpoch;
-      this._lastRequests = p.requests;
       this._lastVisibleRegion.set(p.dsId, p.visibleRegion);
 
       emitViewerInterestHint(
@@ -1966,7 +1679,6 @@ export class TickCoordinator {
    * calls; member-shaped ids are no-ops against the datasetId-keyed maps.
    */
   clearMemberResources(workerMemberId: string): void {
-    delete debugStats.planning.byDataset[workerMemberId];
     this._lastPlanByDataset.delete(workerMemberId);
     this._lastEntities.delete(workerMemberId);
     this._lastVisibleRegion.delete(workerMemberId);

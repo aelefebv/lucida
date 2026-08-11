@@ -263,19 +263,34 @@ function makeCtx(args: {
 
 describe("Uploader unified delivery", () => {
   let Uploader: typeof import("./uploader.ts").Uploader;
-  let scopedDebugStats: typeof import("../../debug/debugStats.ts").debugStats;
-  let originalEnabled: boolean;
+  let priorLocalStorage: unknown;
+
+  /**
+   * The per-tick stats are handed to `UploadTelemetry.publish`, which the
+   * Uploader calls only while the `orch` log category is on — the one gate
+   * left now that the debug panel's is gone (ADR 0049). Open the category
+   * with an in-memory `localStorage` shim and read the stats off the spy,
+   * rather than out of a global sink.
+   */
+  function captureTickStats(uploader: InstanceType<typeof Uploader>) {
+    return vi.spyOn(uploader.uploadTelemetry, "publish");
+  }
 
   beforeEach(async () => {
+    const store = new Map<string, string>();
+    priorLocalStorage = (globalThis as Record<string, unknown>).localStorage;
+    (globalThis as Record<string, unknown>).localStorage = {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+      removeItem: (k: string) => void store.delete(k),
+    };
+    localStorage.setItem("debug", "orch");
     vi.resetModules();
     Uploader = (await import("./uploader.ts")).Uploader;
-    scopedDebugStats = (await import("../../debug/debugStats.ts")).debugStats;
-    originalEnabled = scopedDebugStats.enabled;
-    scopedDebugStats.enabled = true;
   });
 
   afterEach(() => {
-    scopedDebugStats.enabled = originalEnabled;
+    (globalThis as Record<string, unknown>).localStorage = priorLocalStorage;
   });
 
   it("dispatches deliverables from CpuCache and marks sent only after dispatch", () => {
@@ -290,13 +305,15 @@ describe("Uploader unified delivery", () => {
       client: { sliceChunkData, proxyAssetData },
     });
 
-    const ret = new Uploader().deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+    const uploader = new Uploader();
+    const publish = captureTickStats(uploader);
+    const ret = uploader.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
 
     expect(proxyAssetData).toHaveBeenCalledTimes(1);
     expect(sliceChunkData).toHaveBeenCalledTimes(1);
     expect(markSent.mock.calls.map(c => c[0])).toEqual([proxy, chunk]);
-    expect(scopedDebugStats.upload!.tick!.uploadedProxies).toBe(1);
-    expect(scopedDebugStats.upload!.tick!.uploadedChunks).toBe(1);
+    expect(publish.mock.calls[0][1].uploadedProxies).toBe(1);
+    expect(publish.mock.calls[0][1].uploadedChunks).toBe(1);
     expect(ret).toBe(true);
   });
 
@@ -306,11 +323,13 @@ describe("Uploader unified delivery", () => {
     const sliceChunkData = vi.fn();
     const ctx = makeCtx({ cpuCache, client: { sliceChunkData } });
 
-    new Uploader().deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+    const uploader = new Uploader();
+    const publish = captureTickStats(uploader);
+    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
 
     expect(sliceChunkData).not.toHaveBeenCalled();
     expect(cpuCache.markSent).not.toHaveBeenCalled();
-    expect(scopedDebugStats.upload!.tick!.skippedNoMeta).toBe(1);
+    expect(publish.mock.calls[0][1].skippedNoMeta).toBe(1);
   });
 
   it("preserves the one-item soft budget cap", () => {
@@ -327,12 +346,14 @@ describe("Uploader unified delivery", () => {
     const sliceChunkData = vi.fn();
     const ctx = makeCtx({ cpuCache, client: { sliceChunkData } });
 
-    const ret = new Uploader().deliverToWorker(ctx, 1 * 1024 * 1024, 0);
+    const uploader = new Uploader();
+    const publish = captureTickStats(uploader);
+    const ret = uploader.deliverToWorker(ctx, 1 * 1024 * 1024, 0);
 
     expect(sliceChunkData).toHaveBeenCalledTimes(1);
     expect(sliceChunkData.mock.calls[0][1][0].key).toBe(large.chunkKey);
-    expect(scopedDebugStats.upload!.tick!.budgetExhausted).toBe(true);
-    expect(scopedDebugStats.upload!.tick!.bytesUploaded).toBe(4 * 1024 * 1024);
+    expect(publish.mock.calls[0][1].budgetExhausted).toBe(true);
+    expect(publish.mock.calls[0][1].bytesUploaded).toBe(4 * 1024 * 1024);
     expect(ret).toBe(true);
   });
 
@@ -374,49 +395,56 @@ describe("Uploader unified delivery", () => {
     ]);
   });
 
-  it("reports real posted bytes against the caller's budget for the panel header", () => {
+  it("reports real posted bytes against the caller's budget", () => {
     const chunk = makeChunkDelivery({ data: new ArrayBuffer(2048) });
     const cpuCache = makeCpuCache([chunk]);
     const sliceChunkData = vi.fn();
     const ctx = makeCtx({ cpuCache, client: { sliceChunkData } });
 
-    new Uploader().deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+    const uploader = new Uploader();
+    const publish = captureTickStats(uploader);
+    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
 
-    expect(scopedDebugStats.uploadBytesUsed).toBe(2048);
-    expect(scopedDebugStats.uploadBudgetTotal).toBe(8 * 1024 * 1024);
-    expect(scopedDebugStats.budgetExhausted).toBe(false);
+    expect(publish.mock.calls[0][1].bytesUploaded).toBe(2048);
+    expect(publish.mock.calls[0][1].bytesBudget).toBe(8 * 1024 * 1024);
+    expect(publish.mock.calls[0][1].budgetExhausted).toBe(false);
   });
 
-  it("flags the panel header when the upload budget is exhausted", () => {
+  it("flags the tick when the upload budget is exhausted", () => {
     const chunk = makeChunkDelivery({ data: new ArrayBuffer(2048) });
     const cpuCache = makeCpuCache([chunk]);
     const sliceChunkData = vi.fn();
     const ctx = makeCtx({ cpuCache, client: { sliceChunkData } });
 
-    new Uploader().deliverToWorker(ctx, 1024, 0);
+    const uploader = new Uploader();
+    const publish = captureTickStats(uploader);
+    uploader.deliverToWorker(ctx, 1024, 0);
 
-    expect(scopedDebugStats.uploadBytesUsed).toBe(2048);
-    expect(scopedDebugStats.budgetExhausted).toBe(true);
+    expect(publish.mock.calls[0][1].bytesUploaded).toBe(2048);
+    expect(publish.mock.calls[0][1].budgetExhausted).toBe(true);
   });
 
-  it("skips telemetry aggregation when neither the panel nor the orch category is on", () => {
-    // debugStats.enabled=false + no `orch` log category (node env has no
-    // localStorage, so no categories) → orchTelemetryActive() is false.
-    scopedDebugStats.enabled = false;
+  it("skips telemetry aggregation when the orch category is off", async () => {
+    // The debug panel's gate is gone (ADR 0049), so the `orch` log category
+    // is the only thing left that can turn the aggregators on.
+    localStorage.removeItem("debug");
+    // The category set is cached at module load; this is the documented
+    // same-tab refresh path.
+    (await import("../../debug/logging.ts")).refreshDebugCategories();
     const chunk = makeChunkDelivery();
     const cpuCache = makeCpuCache([chunk]);
     const sliceChunkData = vi.fn();
     const ctx = makeCtx({ cpuCache, client: { sliceChunkData } });
 
-    const ret = new Uploader().deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+    const uploader = new Uploader();
+    const publish = captureTickStats(uploader);
+    const ret = uploader.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
 
     // The send loop itself is unaffected by the telemetry gate.
     expect(sliceChunkData).toHaveBeenCalledTimes(1);
     expect(cpuCache.markSent).toHaveBeenCalledTimes(1);
     expect(ret).toBe(true);
-    // No rolling-window aggregation was published.
-    expect(scopedDebugStats.upload.tick).toBeNull();
-    expect(scopedDebugStats.upload.rolling).toBeNull();
+    expect(publish).not.toHaveBeenCalled();
   });
 
   it("tracks worker member ids for lifecycle cleanup without using delivery state", () => {

@@ -2,13 +2,12 @@
  * Upload-phase telemetry. Owns rolling 1s ring buffers (events +
  * per-tick aggregates), a bounded size sketch, cumulative counters, and
  * two sustained-anomaly detectors. `publish` aggregates, derives
- * `UploadRollingStats`, fires anomaly logs, and writes to `debugStats.upload`.
+ * `UploadRollingStats` and fires anomaly logs.
  */
 
-import {
-  debugStats,
-  type UploadTickStats,
-  type UploadRollingStats,
+import type {
+  UploadTickStats,
+  UploadRollingStats,
 } from "../../../debug/debugStats.ts";
 import { debugLog } from "../../../debug/logging.ts";
 import {
@@ -87,7 +86,7 @@ export class UploadTelemetry {
   }
 
   /** Called once at the end of each `deliverToWorker` invocation. */
-  publish(now: number, stats: UploadTickStats): void {
+  publish(now: number, stats: UploadTickStats): UploadRollingStats {
     const skipped =
       stats.skippedPrefetch +
       stats.skippedOverview +
@@ -195,12 +194,7 @@ export class UploadTelemetry {
       byCause: skippedInWindowByCause,
     });
 
-    if (debugStats.enabled) {
-      debugStats.upload = {
-        tick: { ...stats },
-        rolling,
-      };
-    }
+    return rolling;
   }
 
   /**
