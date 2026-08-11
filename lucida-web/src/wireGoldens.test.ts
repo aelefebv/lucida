@@ -1348,7 +1348,7 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
 
     // Consumption path: the columns copy straight into the table.
     const table = new ServerRowTable();
-    table.ingest(batch, generation);
+    table.ingest(batch, generation, () => true);
     expect(table.droppedCount).toBe(3);
     expect(
       table

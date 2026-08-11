@@ -1301,6 +1301,10 @@ export class SessionController {
         // Correlation labels are per connection: the counter restarts here
         // and the generation goes on every row minted from now on.
         this.contentSource.resetConnection(generation);
+        // The trace hears about it too: a run can span two sockets, and the
+        // browser is the only side that can say so — the server sees a close
+        // and a stranger, and discards what it had buffered for the dead one.
+        traceRecorder.noteConnected(generation);
         this.deps.events.onConnectedChanged(true);
       },
       onTimingBatch: (batch, generation) => {
@@ -1327,6 +1331,10 @@ export class SessionController {
         this.clearAllOpenWarnings();
         this.updateRemoteActivity({ loading: false, progress: null });
         this.contentSource.rejectAll();
+        // Start of the gap the reconnect will close. Declared here rather
+        // than inferred from a silence, because a silent socket and a dead
+        // one look identical from the rows.
+        traceRecorder.noteDisconnected();
       },
     };
   }

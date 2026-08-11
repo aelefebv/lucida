@@ -285,6 +285,43 @@ export interface TruncationRecord {
   serverRowsUnrecorded: number;
 }
 
+/**
+ * One socket the interval was recorded over.
+ *
+ * A run is a client-side interval that can outlive a socket, and the
+ * correlation label restarts at zero on every new connection (ADR 0048) — so
+ * one run can hold two `rid: 0` rows meaning different requests. The
+ * generation is what disambiguates them, and this is where a reader learns
+ * which generations a run spanned rather than inferring the set by scanning
+ * the rows.
+ *
+ * The browser fills this in because the browser is the side holding the
+ * facts: the server never learns that a returning client is the same client,
+ * and the rows it had buffered for the dead socket are discarded rather than
+ * replayed.
+ */
+export interface ConnectionRecord {
+  /** The browser's per-connection counter. Zero never appears here. */
+  generation: number;
+  /**
+   * Microseconds from interval start at which this connection opened, or
+   * null when it was already open when the interval began.
+   */
+  openedAtUs: number | null;
+  /** Where the socket dropped, or null when it was still up at interval close. */
+  closedAtUs: number | null;
+  /**
+   * How long the browser had no socket at all before this connection opened,
+   * or null when no outage preceded it. Measured from the actual disconnect,
+   * which may predate the interval — the outage is a fact about the page, not
+   * about the interval that happens to be reading it.
+   */
+  gapUs: number | null;
+  /** The first and last correlation label minted on this connection inside this interval. */
+  firstRid: number | null;
+  lastRid: number | null;
+}
+
 export interface RunHeader extends RunConditions {
   cacheWarmth: CacheWarmth;
   schemaVersion: number;
@@ -307,6 +344,11 @@ export interface RunHeader extends RunConditions {
   /** How long the run was allowed to stay open before closing as `timeout`. */
   timeoutMs: number;
   outstandingAtSettle: Outstanding;
+  /**
+   * Every socket this interval spanned, oldest first. Empty before the page
+   * has ever connected.
+   */
+  connections: ConnectionRecord[];
 }
 
 /**
@@ -840,8 +882,9 @@ export interface TracePointEvent {
  * whether to trust a verdict needs to know the list is exhaustive.
  *
  * The first three are wall clock no recorded phase covers. The fourth is the
- * per-run cap. The last three are stream losses: records a ring or the server
- * dropped, which cost detail without hiding elapsed time.
+ * per-run cap. The fifth is an outage of the socket itself. The last four are
+ * stream losses: records a ring, the server, or this side dropped, which cost
+ * detail without hiding elapsed time.
  */
 export const COVERAGE_GAP_KINDS = [
   "nothing-recorded",
@@ -849,9 +892,11 @@ export const COVERAGE_GAP_KINDS = [
   "unaccounted-interior",
   "unrecorded-suffix",
   "truncated",
+  "connection-gap",
   "ticks-dropped",
   "events-dropped",
   "server-rows-dropped",
+  "server-rows-discarded",
 ] as const;
 export type CoverageGapKind = (typeof COVERAGE_GAP_KINDS)[number];
 
@@ -958,6 +1003,13 @@ export interface TraceRun {
    * them, and reporting only ours would overstate coverage.
    */
   serverRowsDropped: number;
+  /**
+   * Server rows this side refused: they named a label this interval never
+   * minted, or an open it never bracketed, so nothing here could ever place
+   * them. Counted rather than stored — an orphan row is not a diagnostic, and
+   * keeping it would spend the budget truncation exists to protect.
+   */
+  serverRowsDiscarded: number;
 }
 
 /**

@@ -184,10 +184,31 @@ _Avoid_: completeness, confidence, quality score
 
 **Coverage gap**:
 A hole in what a run can account for: wall clock no phase covers, the tail after a
-truncation, or records a ring or the server dropped. Each carries whether the
-bottleneck could be inside it, so the judgement is made once rather than by each
-reading surface.
+truncation, a socket outage, or records a ring, the server, or this side let go of.
+Each carries whether the bottleneck could be inside it, so the judgement is made
+once rather than by each reading surface.
 _Avoid_: missing data, hole, blind spot
+
+**Connection record**:
+One socket a run was recorded over, with the outage that preceded it and the
+correlation labels minted on it. A run can outlive a socket and labels restart at
+zero on each one, so this is what tells two `rid: 0` rows in one run apart. The
+browser writes it because the server cannot tell a returning client from a new one.
+_Avoid_: session, reconnect event
+
+**Socket outage**:
+The stretch between a socket dropping and the next one opening, declared by the
+browser. Requests in flight are lost and the rows the server had buffered for the
+dead connection are discarded rather than replayed.
+_Avoid_: downtime, disconnect window, reconnect gap
+
+**Discarded server row**:
+A server row this side refused because nothing in the interval could place it — a
+label the interval never minted, or an open it never bracketed. Counted, never
+stored: an orphan row is not a diagnostic and would spend the budget truncation
+exists to protect. Distinct from a row the *server* dropped before sending, which is
+its own coverage gap.
+_Avoid_: unmatched row, orphan (in prose, say what could not place it)
 
 **Structural limit**:
 Something this instrument can never measure, on any run — the 100 µs clock floor,
@@ -305,6 +326,63 @@ Work the pipeline started for a view nobody is looking at yet — today, the
 prefetch lane's future timepoints. Excluded from the quiescence predicate and from
 the view's demand, and reported at settle rather than hidden.
 _Avoid_: background, idle, optional
+
+**Diagnostic**:
+What a trace *means*, derived from it by one pure function. Both surfaces read
+the same diagnostic, so the agent text and the monitor's cards cannot disagree
+about which phase stalled. Distinct from the trace, which is what was recorded.
+_Avoid_: analysis, report, summary, insight
+
+**Ruleset**:
+The versioned set of thresholds that produced a diagnostic, shipped inside the
+document with each rule's rationale. Three families, because one number cannot
+serve a pipeline whose network first byte and whose queue wait differ by two
+orders of magnitude: absolute p95 ceilings, a backlog ETA, and a relative share.
+Every ceiling is provisional and re-derivable; shipping it in the document makes
+a change to one visible rather than silent.
+_Avoid_: config, budget, SLO, threshold (a *threshold* is one rule's number)
+
+**Verdict**:
+The diagnostic's one-sentence answer, withheld until the run closes — a verdict
+that changes while you read it is not a verdict.
+_Avoid_: result, status, score, grade
+
+**Finding**:
+One rule firing on one subject, ranked against the others. A `note` is a finding
+that is not a stall: worth a line, not worth blame.
+_Avoid_: issue, warning, alert, violation
+
+**Attribution**:
+What the run was waiting on, and how much the derivation is willing to claim.
+Carries one of seven confidence words, each with an explicit statement of what
+it still cannot see.
+_Avoid_: root cause, blame, diagnosis (the *diagnostic* is the whole document)
+
+**Critical path**:
+The serial chain the run finished on, walked backwards from its completion —
+never a maximum over per-phase totals, which measure concurrency rather than
+what anything waited for. Starts at run start rather than at the first recorded
+row.
+_Avoid_: hot path, longest path, bottleneck chain
+
+**Unrecorded prefix**:
+The chain's first link: wall clock before the first recorded boundary. Part of
+the chain so it cannot be quietly dropped, never blamable because nothing
+measured it, and always a coverage gap.
+_Avoid_: startup, boot time, warmup
+
+**Limiter**:
+A cap that work queues behind, named so a queue wait resolves to something
+rather than staying anonymous. Its cap is inferred from the highest concurrency
+a run observed, because a client sees its own rows and no aggregate.
+_Avoid_: throttle, semaphore, bottleneck
+
+**Backlog ETA**:
+Pending divided by the rate admissions are completing at, measured over the
+trailing second — the wait a newly planned chunk will actually see. Queue phases
+are judged by this and never by a per-chunk ceiling, which at the observed
+spread would fire on every row or on none.
+_Avoid_: queue depth (depth alone is not the signal), wait time, latency
 
 ## Surfaces
 
