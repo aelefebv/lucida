@@ -4,7 +4,7 @@ use std::sync::Arc;
 use lucida_content::ImageId;
 use lucida_protocol::DatasetOpened;
 use lucida_store::cache::CachedStore;
-use lucida_store::import_types::{LevelBindingInfo, ServerBindingSeed};
+use lucida_store::import_types::{ImportWarning, LevelBindingInfo, ServerBindingSeed};
 use object_store::ObjectStore;
 
 use crate::generated::{DerivedChunkCache, GeneratedCoarseService};
@@ -33,10 +33,13 @@ pub struct ServerBinding {
     pub legacy_proxy_enabled: bool,
     pub proxy_cache: Arc<ProxyCache>,
     pub proxy_generator: Arc<ProxyGenerator>,
-    /// Human-readable non-fatal messages from importing this dataset (e.g.
-    /// skipped collection groups). Retained so the Health tab can surface them
-    /// durably after the transient open-progress trail has scrolled past.
-    pub import_warnings: Vec<String>,
+    /// Non-fatal problems from importing this dataset (e.g. skipped collection
+    /// groups). Retained so dataset health can surface them durably after the
+    /// transient open-progress trail has scrolled past. Kept as typed
+    /// warnings rather than flattened messages so health can act on a kind —
+    /// an unwritten level has to move the aggregate status, not just add a
+    /// line nobody reads.
+    pub import_warnings: Vec<ImportWarning>,
 }
 
 /// Compiled key-to-path mapper. Built once at import from per-image binding seeds.
