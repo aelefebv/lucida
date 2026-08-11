@@ -21,6 +21,7 @@ interface CapturedAppProps {
   workspaceId: string;
   initialDatasetUrls?: readonly string[];
   onCreateWorkspaceFromDatasets?: (paths: string[]) => void;
+  onOpenMonitor?: () => void;
 }
 const lastAppProps: { current: CapturedAppProps | null } = { current: null };
 // Every `initialDatasetUrls` value the viewer was rendered with, in order — used
@@ -39,6 +40,9 @@ vi.mock("./App.tsx", () => ({
           }
         >
           in-viewer-create-from-datasets
+        </button>
+        <button type="button" onClick={() => props.onOpenMonitor?.()}>
+          in-viewer-open-monitor
         </button>
       </div>
     );
@@ -328,5 +332,43 @@ describe("WorkspaceRoot — create workspace from dataset(s) (#697)", () => {
     await screen.findByTestId("workspace-create-error");
     fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
     expect(screen.queryByTestId("workspace-create-error")).toBeNull();
+  });
+});
+
+describe("WorkspaceRoot — the monitor route (#936)", () => {
+  it("renders the monitor at its own path rather than an overlay on the viewer", () => {
+    window.history.replaceState({}, "", "/monitor");
+    render(<WorkspaceRoot />);
+
+    expect(screen.getByRole("heading", { name: "Pipeline monitor" })).toBeTruthy();
+    // A separate page: the viewer is not mounted underneath it.
+    expect(screen.queryByTestId("app-mounted")).toBeNull();
+    expect(screen.queryByTestId("dashboard-mounted")).toBeNull();
+  });
+
+  it("leaves the viewer for the monitor and comes back to the same workspace", async () => {
+    openWorkspaceMock.mockResolvedValue({
+      id: "ws-secret",
+      name: "Workspace",
+      role: "owner",
+      default_saved_view_id: null,
+    } as unknown as WorkspaceRecord);
+    render(<WorkspaceRoot />);
+    await screen.findByTestId("app-mounted");
+
+    fireEvent.click(screen.getByText("in-viewer-open-monitor"));
+    expect(screen.getByRole("heading", { name: "Pipeline monitor" })).toBeTruthy();
+    expect(window.location.pathname).toBe("/monitor");
+
+    fireEvent.click(screen.getByTestId("monitor-close"));
+    await screen.findByTestId("app-mounted");
+    expect(window.location.pathname).toBe("/w/ws-secret");
+  });
+
+  it("says there is nothing to read rather than failing when no run was recorded", () => {
+    window.history.replaceState({}, "", "/monitor");
+    render(<WorkspaceRoot />);
+
+    expect(screen.getByTestId("monitor-empty")).toBeTruthy();
   });
 });
