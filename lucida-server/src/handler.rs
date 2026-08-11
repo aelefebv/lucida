@@ -1309,7 +1309,7 @@ async fn handle_open_remote_dataset(
     // Rows travel on the timing ticker as the reads happen, so an open that
     // *fails* still carries them — the case whose timing is most worth
     // having.
-    let result = lucida_store::metadata_probe::observing(
+    let result = lucida_store::metadata_reads::observing(
         Arc::new(MetadataReadSink::new(&request_id, timings)),
         dataset_open::open_dataset(client_id, &url, &ctx, &progress_tx),
     )

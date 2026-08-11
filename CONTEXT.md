@@ -221,7 +221,9 @@ One object read the server performs while opening a dataset — resolving the
 dataset's shape, before any chunk exists. Its own server-row family, keyed on the
 open's request id rather than on a correlation label, and its own short phase
 vocabulary: `cache-hit`, `coalesced-wait`, `backend-read`. Only a `backend-read`
-is a round trip; counting the family as trips overstates what the store did.
+is a round trip. Why it keys on the open and why the family is its own:
+`wiki/decisions/0048-correlating-work-across-the-browser-server-boundary.md` and
+`wiki/decisions/0050-server-timings-reach-the-monitor.md`.
 _Avoid_: metadata fetch, import read, open read
 
 **Boundary**:

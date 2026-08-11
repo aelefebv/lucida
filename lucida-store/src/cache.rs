@@ -15,7 +15,7 @@ use object_store::path::Path;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Semaphore, broadcast};
 
-use crate::metadata_probe::{self, MetadataReadPhase};
+use crate::metadata_reads::{self, MetadataReadPhase};
 use crate::source_limiter::{ReaderId, RequestLabel, SourceReadLimiter};
 
 /// Default cap on concurrent backend source reads when no operator override
@@ -529,7 +529,7 @@ impl CachedStore {
                 let mut state = self.cache.lock().unwrap();
                 state.hits += 1;
                 drop(state);
-                metadata_probe::record(MetadataReadPhase::CacheHit, started, false);
+                metadata_reads::record(MetadataReadPhase::CacheHit, started, false);
                 return Ok(false);
             }
         }
@@ -538,12 +538,17 @@ impl CachedStore {
             if state.lru.get(&key).is_some() {
                 state.hits += 1;
                 drop(state);
-                metadata_probe::record(MetadataReadPhase::CacheHit, started, false);
+                metadata_reads::record(MetadataReadPhase::CacheHit, started, false);
                 return Ok(true);
             }
             state.misses += 1;
         }
 
+        // The cache's own read-cost counter times from the moment the read
+        // starts queueing, which is where it has always started. The row
+        // above times from the call, because where a read sits inside an
+        // open is measured from when the open asked for it.
+        let read_started = std::time::Instant::now();
         let head = {
             let _permit = self
                 .metadata_read
@@ -552,10 +557,10 @@ impl CachedStore {
                 .expect("source-read semaphore is never closed");
             self.inner.head(path).await
         };
-        let elapsed_nanos = started.elapsed().as_nanos();
+        let elapsed_nanos = read_started.elapsed().as_nanos();
         // A presence probe is a round trip like any other and queues behind
         // the same cap, so it files the same phase.
-        metadata_probe::record(
+        metadata_reads::record(
             MetadataReadPhase::BackendRead,
             started,
             !matches!(head, Ok(_) | Err(object_store::Error::NotFound { .. })),
@@ -602,7 +607,7 @@ impl CachedStore {
                 state.hits += 1;
                 drop(state);
                 if let Some(started) = started {
-                    metadata_probe::record(MetadataReadPhase::CacheHit, started, false);
+                    metadata_reads::record(MetadataReadPhase::CacheHit, started, false);
                 }
                 return Ok(bytes);
             }
@@ -640,7 +645,7 @@ impl CachedStore {
                     // rather than reporting thousands of trips for an open
                     // that made hundreds (ADR 0050).
                     if let Some(started) = started {
-                        metadata_probe::record(
+                        metadata_reads::record(
                             MetadataReadPhase::CoalescedWait,
                             started,
                             shared.is_err(),
@@ -698,7 +703,7 @@ impl CachedStore {
                 // make. It files a row for the same reason a resident hit
                 // does: the shape of an open is how many of its reads cost
                 // a round trip.
-                metadata_probe::record(MetadataReadPhase::CacheHit, started, false);
+                metadata_reads::record(MetadataReadPhase::CacheHit, started, false);
                 return Ok(None);
             }
         }
@@ -777,7 +782,7 @@ impl CachedStore {
             // rule the backend-error counter below applies.
             let absent_as_expected = class == ReadClass::OptionalMetadata
                 && matches!(fetch, Err(object_store::Error::NotFound { .. }));
-            metadata_probe::record(
+            metadata_reads::record(
                 MetadataReadPhase::BackendRead,
                 started,
                 fetch.is_err() && !absent_as_expected,
@@ -1429,7 +1434,7 @@ mod tests {
     /// the phases an open would have seen.
     #[derive(Default)]
     struct Watcher {
-        reads: Mutex<Vec<crate::metadata_probe::MetadataRead>>,
+        reads: Mutex<Vec<crate::metadata_reads::MetadataRead>>,
     }
 
     impl Watcher {
@@ -1452,8 +1457,8 @@ mod tests {
         }
     }
 
-    impl crate::metadata_probe::MetadataReadObserver for Watcher {
-        fn record(&self, read: crate::metadata_probe::MetadataRead) {
+    impl crate::metadata_reads::MetadataReadObserver for Watcher {
+        fn record(&self, read: crate::metadata_reads::MetadataRead) {
             self.reads.lock().unwrap().push(read);
         }
     }
@@ -1465,7 +1470,7 @@ mod tests {
         let cached = Arc::new(CachedStore::new(store, 1024));
         let watcher = Arc::new(Watcher::default());
 
-        crate::metadata_probe::observing(watcher.clone(), async {
+        crate::metadata_reads::observing(watcher.clone(), async {
             let path = Path::from("zarr.json");
             cached.get_metadata_bytes(&path).await.unwrap();
             cached.get_metadata_bytes(&path).await.unwrap();
@@ -1486,7 +1491,7 @@ mod tests {
         let cached = Arc::new(CachedStore::new(store, 1024));
         let watcher = Arc::new(Watcher::default());
 
-        crate::metadata_probe::observing(watcher.clone(), async {
+        crate::metadata_reads::observing(watcher.clone(), async {
             let path = Path::from("zarr.json");
             let leader = cached.get_metadata_bytes(&path);
             let follower = cached.get_metadata_bytes(&path);
@@ -1514,7 +1519,7 @@ mod tests {
         let cached = Arc::new(CachedStore::new(store, 1024));
         let watcher = Arc::new(Watcher::default());
 
-        crate::metadata_probe::observing(watcher.clone(), async {
+        crate::metadata_reads::observing(watcher.clone(), async {
             let path = Path::from("labels/zarr.json");
             assert!(
                 cached
@@ -1552,7 +1557,7 @@ mod tests {
         let cached = Arc::new(CachedStore::new(store, 1024));
         let watcher = Arc::new(Watcher::default());
 
-        crate::metadata_probe::observing(watcher.clone(), async {
+        crate::metadata_reads::observing(watcher.clone(), async {
             cached.probe_exists(&Path::from("chunk")).await.unwrap();
             cached
                 .get_bytes(&Path::from("chunk"), READER, LABEL)

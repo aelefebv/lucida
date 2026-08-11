@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use lucida_protocol::{MetadataReadPhase, ServerTimingBatch, TimingRowFamily, TimingRowOutcome};
-use lucida_store::metadata_probe::{MetadataRead, MetadataReadObserver};
+use lucida_store::metadata_reads::{MetadataRead, MetadataReadObserver};
 use tokio::sync::Notify;
 
 /// How often a connection's buffered rows are flushed to it.

@@ -43,7 +43,7 @@ interface Bracket {
 export function placeServerRows(
   browserRows: readonly TraceRow[],
   serverRows: readonly StoredServerRow[],
-  datasetOpens: readonly DatasetOpenBracket[] = [],
+  datasetOpens: readonly DatasetOpenBracket[],
 ): TraceServerRow[] {
   const opens = new Map(datasetOpens.map(open => [open.requestId, open]));
   const brackets = new Map<string, Bracket | null>();

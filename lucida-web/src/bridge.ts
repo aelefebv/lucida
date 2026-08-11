@@ -625,7 +625,7 @@ export class Bridge {
             this.handleDatasetOpenProgress(msg);
             break;
           case "open_dataset_failed":
-            this.handlers.onOpenDatasetFailed?.(msg.request_id ?? "", msg.url, msg.error);
+            this.handlers.onOpenDatasetFailed?.(msg.request_id, msg.url, msg.error);
             break;
           case "dataset_health":
             this.handleDatasetHealth(msg);

@@ -40,7 +40,7 @@ function serverRow(overrides: Partial<StoredServerRow> & { rid: number }): Store
 
 describe("placeServerRows", () => {
   it("nests the server's span inside the browser's bracket and names the remainder", () => {
-    const [placed] = placeServerRows([browserRow({ rid: 7 })], [serverRow({ rid: 7 })]);
+    const [placed] = placeServerRows([browserRow({ rid: 7 })], [serverRow({ rid: 7 })], []);
 
     const placement = placed.placement!;
     // Bracket is 10,000 µs; the server accounts for 6,000 of it.
@@ -59,6 +59,7 @@ describe("placeServerRows", () => {
     const [placed] = placeServerRows(
       [browserRow({ rid: 7 })],
       [serverRow({ rid: 7, durationUs: 20_000 })],
+      [],
     );
 
     const placement = placed.placement!;
@@ -84,6 +85,7 @@ describe("placeServerRows", () => {
         serverRow({ rid: 0, connectionGeneration: 1 }),
         serverRow({ rid: 0, connectionGeneration: 2 }),
       ],
+      [],
     );
 
     // Two requests that share `rid: 0` across a reconnect must not collapse
@@ -100,6 +102,7 @@ describe("placeServerRows", () => {
         browserRow({ rid: 4, phases: { wire: { startUs: 1_000, endUs: 11_000, durationUs: 10_000 } } }),
       ],
       [serverRow({ rid: 4 })],
+      [],
     );
 
     expect(rows).toHaveLength(1);
@@ -113,6 +116,7 @@ describe("placeServerRows", () => {
     const [placed] = placeServerRows(
       [browserRow({ rid: 7, phases: {}, outcome: "in-flight" })],
       [serverRow({ rid: 7, outcome: "not-ready", durationUs: 300 })],
+      [],
     );
 
     expect(placed.placement).toBeNull();
@@ -128,6 +132,7 @@ describe("placeServerRows", () => {
     const [placed] = placeServerRows(
       [browserRow({ rid: 0, connectionGeneration: 0 })],
       [serverRow({ rid: 0, connectionGeneration: 1 })],
+      [],
     );
     expect(placed.unplacedReason).toBe("no-browser-row");
   });
@@ -220,10 +225,11 @@ describe("placeServerRows", () => {
     const [openBracket] = placeServerRows(
       [browserRow({ rid: 7, phases: {}, outcome: "in-flight" })],
       [serverRow({ rid: 7 })],
+      [],
     );
     expect(openBracket.unplacedReason).toBe("bracket-open");
 
-    const [unknown] = placeServerRows([], [serverRow({ rid: 7 })]);
+    const [unknown] = placeServerRows([], [serverRow({ rid: 7 })], []);
     expect(unknown.unplacedReason).toBe("no-browser-row");
   });
 });
