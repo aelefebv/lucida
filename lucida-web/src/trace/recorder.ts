@@ -438,8 +438,29 @@ export class TraceRecorder {
    * either no page has registered an environment, or the interval has
    * truncated. Both cases are counted so the document does not overstate what
    * it kept.
+   *
+   * **A chunk row is born at dispatch**, so this one call also stamps the two
+   * phases already behind it — `plan` and `queue` — and opens `wire`. That is
+   * not a convenience: it is the whole event budget (#949). Three calls per
+   * chunk was three times the per-chunk event count ADR 0049 derived its
+   * 250 µs tick ceiling from, and two of them spent a handle round-trip —
+   * {@link resolve}, a generation divide and a modulo — to reach a row this
+   * frame had just made. The recorder has no other way to make a chunk row,
+   * so there is no shape this collapse forecloses.
+   *
+   * `admittedAtMs` is the scheduler's own admission stamp when it has one
+   * (ADR 0044 keeps them for the admission window only). Behind the window the
+   * scheduler deliberately keeps no per-key bookkeeping — on a large remote
+   * collection the backlog is tens of thousands of entries replanned several
+   * times a second — so a row admitted straight off the backlog dates its
+   * queue from the plan pass that enqueued it. Queue time before the window is
+   * therefore a floor, not a total.
+   *
+   * `plan` is attributed to the last pass that ended at or before admission.
+   * With no such pass in the ring the plan slot stays unset, which reads as
+   * "not measured" rather than as a phase that took no time.
    */
-  beginChunkRow(src: ChunkRowSource, tier: 0 | 1): number {
+  beginChunkRow(src: ChunkRowSource, tier: 0 | 1, admittedAtMs?: number): number {
     const run = this.intervalForRecording();
     if (!run) {
       this.countRefusedRow();
@@ -447,6 +468,20 @@ export class TraceRecorder {
     }
     const index = run.sink.append(src, tier);
     if (index < 0) return -1;
+
+    // One clock read for both boundaries: the moment the request goes out is
+    // the moment the queue ends, so reading the clock twice would open a gap
+    // between two halves of the same boundary (ADR 0047's shared-boundary row
+    // model).
+    const dispatchedAtMs = this.now();
+    const admittedMs = admittedAtMs ?? this.latestPlanEndMs() ?? dispatchedAtMs;
+    const planStartMs = this.planStartAtOrBefore(admittedMs);
+    if (planStartMs !== null) {
+      run.sink.stamp(index, Boundary.PlanStart, this.offsetUs(run, planStartMs));
+    }
+    run.sink.stamp(index, Boundary.QueueStart, this.offsetUs(run, admittedMs));
+    run.sink.stamp(index, Boundary.WireStart, this.offsetUs(run, dispatchedAtMs));
+
     return run.generation * GENERATION_STRIDE + index;
   }
 
@@ -485,35 +520,6 @@ export class TraceRecorder {
     this.planStartsMs[slot] = startMs;
     this.planEndsMs[slot] = enqueuedAtMs;
     this.planSpanCount++;
-  }
-
-  /**
-   * Stamp the boundary the `plan` and `queue` phases share: the moment the
-   * scheduler admitted this request.
-   *
-   * `admittedAtMs` is the scheduler's own admission stamp when it has one
-   * (ADR 0044 keeps them for the admission window only). Behind the window
-   * the scheduler deliberately keeps no per-key bookkeeping — on a large
-   * remote collection the backlog is tens of thousands of entries replanned
-   * several times a second — so a row admitted straight off the backlog dates
-   * its queue from the plan pass that enqueued it. Queue time before the
-   * window is therefore a floor, not a total.
-   *
-   * `plan` is attributed to the last pass that ended at or before admission.
-   * With no such pass in the ring the plan slot stays unset, which reads as
-   * "not measured" rather than as a phase that took no time.
-   */
-  stampAdmission(handle: number, admittedAtMs: number | undefined): void {
-    const run = this.resolve(handle);
-    if (!run) return;
-    const index = handle % GENERATION_STRIDE;
-    const admittedMs = admittedAtMs ?? this.latestPlanEndMs() ?? this.now();
-
-    const planStartMs = this.planStartAtOrBefore(admittedMs);
-    if (planStartMs !== null) {
-      run.sink.stamp(index, Boundary.PlanStart, this.offsetUs(run, planStartMs));
-    }
-    run.sink.stamp(index, Boundary.QueueStart, this.offsetUs(run, admittedMs));
   }
 
   /**

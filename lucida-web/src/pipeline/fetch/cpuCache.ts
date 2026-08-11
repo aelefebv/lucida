@@ -1199,15 +1199,17 @@ export class CpuCache {
     // next attempt opens a fresh one rather than overwriting the first
     // attempt's timings.
     //
-    // Three boundaries are stamped here in one go, because the row is opened
-    // at dispatch and the two phases behind it are already over: `plan` (the
+    // Three boundaries land in this one call, because the row is opened at
+    // dispatch and the two phases behind it are already over: `plan` (the
     // tick's wanted-set computation) and `queue` (admitted to the scheduler →
     // dispatched). `wire` — request sent → bytes in hand — starts now, and is
     // the bracket the server's own rows nest inside once they arrive.
+    //
+    // One call rather than three: this loop runs up to 2,943 times in a single
+    // submit, so the extra calls were three times the event count ADR 0049's
+    // tick ceiling was derived from (#949).
     const rowTier = this.requestResidencyTier(req) === "coarse" ? 1 : 0;
-    const traceRow = traceRecorder.beginChunkRow(req, rowTier);
-    traceRecorder.stampAdmission(traceRow, admittedAtMs);
-    traceRecorder.stamp(traceRow, Boundary.WireStart);
+    const traceRow = traceRecorder.beginChunkRow(req, rowTier, admittedAtMs);
 
     let result: FetchResult;
     try {

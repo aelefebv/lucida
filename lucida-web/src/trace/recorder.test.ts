@@ -282,15 +282,42 @@ describe("TraceRecorder plan and queue", () => {
     advance(20);
     recorder.notePlanEnqueue(1_020);   // admitted here
     advance(80);                       // queued for 80 ms
-    const row = recorder.beginChunkRow(CHUNK, 0);
-    recorder.stampAdmission(row, 1_020);
-    recorder.stamp(row, Boundary.WireStart);
+    const row = recorder.beginChunkRow(CHUNK, 0, 1_020);
+    expect(row).toBeGreaterThanOrEqual(0);
     recorder.closeRun("explicit");
 
     const [serialised] = recorder.exportDocument().runs[0].rows;
     expect(serialised.phases.plan).toEqual({ startUs: 0, endUs: 20_000, durationUs: 20_000 });
     expect(serialised.phases.queue)
       .toEqual({ startUs: 20_000, endUs: 100_000, durationUs: 80_000 });
+  });
+
+  it("births a row at dispatch with the two phases behind it already stamped", () => {
+    // The whole of #949: a row is born at dispatch, so the one call that
+    // makes it also closes `plan`, brackets `queue` and opens `wire`. Three
+    // recorder calls per chunk was three times the event count ADR 0049's
+    // tick ceiling was derived from, and two of them were handle round-trips
+    // — a `resolve`, a generation divide and a modulo — buying nothing.
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    recorder.markPlanStart();          // t = 1_000
+    advance(20);
+    recorder.notePlanEnqueue(1_020);
+    advance(80);
+
+    const row = recorder.beginChunkRow(CHUNK, 0, 1_020);
+    advance(35);
+    recorder.stamp(row, Boundary.DecodeStart);
+    recorder.closeRun("explicit");
+
+    const [serialised] = recorder.exportDocument().runs[0].rows;
+    expect(serialised.phases.plan).toEqual({ startUs: 0, endUs: 20_000, durationUs: 20_000 });
+    expect(serialised.phases.queue)
+      .toEqual({ startUs: 20_000, endUs: 100_000, durationUs: 80_000 });
+    // Wire opens at the call, not at some later stamp: the boundary queue
+    // ends on and the one wire starts on are the same clock read.
+    expect(serialised.phases.wire)
+      .toEqual({ startUs: 100_000, endUs: 135_000, durationUs: 35_000 });
   });
 
   it("attributes a row to the pass it was admitted in, not the newest one", () => {
@@ -306,8 +333,8 @@ describe("TraceRecorder plan and queue", () => {
     recorder.notePlanEnqueue(1_105);
     advance(20);
 
-    const row = recorder.beginChunkRow(CHUNK, 0);
-    recorder.stampAdmission(row, 1_010);
+    const row = recorder.beginChunkRow(CHUNK, 0, 1_010);
+    expect(row).toBeGreaterThanOrEqual(0);
     recorder.closeRun("explicit");
 
     const [serialised] = recorder.exportDocument().runs[0].rows;
@@ -319,9 +346,8 @@ describe("TraceRecorder plan and queue", () => {
     const { recorder, advance } = makeRecorder();
     recorder.openRun(OPEN_CAUSE);
     advance(30);
-    const row = recorder.beginChunkRow(CHUNK, 0);
-    recorder.stampAdmission(row, 1_030);
-    recorder.stamp(row, Boundary.WireStart);
+    const row = recorder.beginChunkRow(CHUNK, 0, 1_030);
+    expect(row).toBeGreaterThanOrEqual(0);
     recorder.closeRun("explicit");
 
     const [serialised] = recorder.exportDocument().runs[0].rows;
@@ -337,10 +363,9 @@ describe("TraceRecorder plan and queue", () => {
     recorder.notePlanEnqueue(1_010);
     advance(200);
 
-    const row = recorder.beginChunkRow(CHUNK, 0);
     // No admission stamp: ADR 0044 keeps them for the admission window only.
-    recorder.stampAdmission(row, undefined);
-    recorder.stamp(row, Boundary.WireStart);
+    const row = recorder.beginChunkRow(CHUNK, 0, undefined);
+    expect(row).toBeGreaterThanOrEqual(0);
     recorder.closeRun("explicit");
 
     const [serialised] = recorder.exportDocument().runs[0].rows;
@@ -861,21 +886,27 @@ describe("what a run in progress can say about itself (#937)", () => {
   it("places the in-flight rows in the phase each is sitting in", () => {
     const { recorder } = makeRecorder();
     recorder.openRun(OPEN_CAUSE);
-    const onTheWire = recorder.beginChunkRow(CHUNK, 0);
-    recorder.stamp(onTheWire, Boundary.WireStart);
-    const decoding = recorder.beginChunkRow(CHUNK, 0);
-    recorder.stamp(decoding, Boundary.WireStart);
-    recorder.stamp(decoding, Boundary.DecodeStart);
     recorder.beginChunkRow(CHUNK, 0);
+    const decoding = recorder.beginChunkRow(CHUNK, 0);
+    recorder.stamp(decoding, Boundary.DecodeStart);
+    const uploading = recorder.beginChunkRow(CHUNK, 0);
+    recorder.stamp(uploading, Boundary.DecodeStart);
+    recorder.stamp(uploading, Boundary.UploadStart);
 
     const progress = recorder.liveProgress!;
     const rowsIn = (phase: string) =>
       progress.occupancy.find(slot => slot.phase === phase)!.rows;
     expect(rowsIn("wire")).toBe(1);
     expect(rowsIn("decode")).toBe(1);
-    // Planned and not yet admitted — counted apart from a phase it has not
-    // entered.
-    expect(progress.unstamped).toBe(1);
+    expect(rowsIn("upload")).toBe(1);
+
+    // Every in-flight row the recorder made is in a phase: a chunk row is
+    // born at dispatch with `queue` stamped and `wire` open (#949), so the
+    // unstamped residual — which the table below the recorder can still hold
+    // — is empty for rows that came through this path.
+    expect(progress.unstamped).toBe(0);
+    const inBar = progress.occupancy.reduce((total, slot) => total + slot.rows, 0);
+    expect(inBar).toBe(progress.inFlight);
   });
 
   it("does not close the run it describes", () => {
