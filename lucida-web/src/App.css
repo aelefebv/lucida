@@ -21,7 +21,9 @@
    `viewer render`: hide every piece of UI so a headless screenshot is pure data
    on the WebGPU canvas, and let the canvas fill the whole viewport. The render
    loop draws to the canvas independent of the overlay DOM, so hiding overlays
-   never stops rendering. `> :not(canvas)` also sweeps up any future overlay. */
+   never stops rendering. `> :not(canvas)` also sweeps up any future overlay.
+   The surface also has a behavioural half — it writes no user state (#923);
+   the rule and its boundaries live in `captureSurface.ts`. */
 .app.render-mode {
   overflow: hidden;
 }

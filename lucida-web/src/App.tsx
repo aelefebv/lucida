@@ -37,7 +37,13 @@ import { deriveMentionCandidates } from "./components/annotationParticipants.ts"
 import { ProfileMenu } from "./auth/ProfileMenu.tsx";
 import { useAuthSession } from "./auth/AuthSession.ts";
 import { debugStats } from "./debug/debugStats.ts";
-import { DEBUG_OVERLAYS, isOverlayEnabled, onOverlaysChanged } from "./debug/logging.ts";
+import {
+  DEBUG_OVERLAYS,
+  getRenderRadiusPreviewTier,
+  isOverlayEnabled,
+  onOverlaysChanged,
+  onRenderRadiusPreviewChanged,
+} from "./debug/logging.ts";
 import type { DatasetState } from "./types.ts";
 import { useWasmScene } from "./hooks/useWasmScene.ts";
 import { useRenderClient } from "./hooks/useRenderClient.ts";
@@ -62,17 +68,22 @@ import {
   createWorkspaceSavedView,
 } from "./workspaceApi.ts";
 import type { WorkspaceRole, WorkspaceMember } from "./workspaceApi.ts";
+import { isCaptureSurface } from "./captureSurface.ts";
 import "./App.css";
 
-// The debug UI (side panel + on-canvas overlay layer) is code-split into
-// its own on-demand chunk: the panel loads on the first Debug-button
-// click, the overlay layer only when an overlay toggle is persisted on
-// (or the panel is open). A session that never opens either never
-// downloads the code — the main bundle keeps only the tiny gate/stat
-// modules (debug/logging.ts, debug/debugStats.ts) that production code
-// paths already share.
+// The debug UI (side panel + dev-controls panel + on-canvas overlay
+// layer) is code-split into its own on-demand chunk: each panel loads on
+// the first click of its toolbar button, the overlay layer only when an
+// overlay toggle is persisted on or a render-radius preview is being
+// dragged. A session that never opens any of them never downloads the
+// code — the main bundle keeps only the tiny gate/stat modules
+// (debug/logging.ts, debug/debugStats.ts) that production code paths
+// already share.
 const DebugPanel = lazy(() =>
   import("./debug/DebugPanel.tsx").then((m) => ({ default: m.DebugPanel })),
+);
+const DevControls = lazy(() =>
+  import("./debug/DevControls.tsx").then((m) => ({ default: m.DevControls })),
 );
 const DebugOverlays = lazy(() =>
   import("./debug/DebugOverlays.tsx").then((m) => ({ default: m.DebugOverlays })),
@@ -132,16 +143,15 @@ function App({
   // Foundation hooks
   const scene = useWasmScene();
   const render = useRenderClient();
-  // Chrome-free capture surface for `dataset montage` / `viewer render`:
-  // `?render=1` hides all UI chrome and lets the canvas fill the viewport so a
-  // headless screenshot is pure data. Parsed once — the URL is stable per capture.
-  const renderMode = useMemo(
-    () =>
-      typeof window !== "undefined" &&
-      new URLSearchParams(window.location.search).get("render") === "1",
-    [],
-  );
-  const layout = useLayout({ loopRef: render.loopRef, renderMode });
+  // Chrome-free capture surface for `dataset montage` / `viewer render` / the
+  // headless trace driver: `?render=1` hides all UI chrome and lets the canvas
+  // fill the viewport so a headless screenshot is pure data, AND suppresses
+  // every persisted write (#923). Both halves of the rule, and what still needs
+  // gating if you add a write, live in `captureSurface.ts` — read it before
+  // wiring anything new into this component. Parsed once: the URL is stable per
+  // capture.
+  const captureSurface = useMemo(() => isCaptureSurface(), []);
+  const layout = useLayout({ loopRef: render.loopRef, captureSurface });
 
   // Shared refs used by multiple hooks
   const datasetsRef = useRef<Map<string, DatasetState>>(new Map());
@@ -381,7 +391,12 @@ function App({
     fetchViewerProfile: fetchWorkspaceViewerProfile,
     fetchLastView: fetchWorkspaceLastView,
     persistLastView: persistWorkspaceLastView,
-    allowDocumentLayoutMutation: canEditWorkspace,
+    // The capture surface reads views but never writes one back (#923).
+    captureSurface,
+    // Restoring a view can change the shared active layout. A capture applies
+    // it to its own scene only, so the picture is right and nobody else's is
+    // touched; without edit rights the restore refuses and says so.
+    layoutMutation: captureSurface ? "local" : canEditWorkspace ? "broadcast" : "refuse",
   });
 
   // The three callback-ref population sites below (savedViewHooksRef,
@@ -950,15 +965,23 @@ function App({
 
   const [showFileBrowser, setShowFileBrowser] = useState(false);
   const [showDebug, setShowDebug] = useState(false);
+  const [showDevControls, setShowDevControls] = useState(false);
   // Whether any on-canvas debug overlay is toggled on (persisted in
-  // localStorage `debug.overlays`, independent of the panel). Drives the
+  // localStorage `debug.overlays`, independent of every panel). Drives the
   // mount of the code-split DebugOverlays layer: with every overlay off
-  // and the panel closed there is nothing it could draw, so the chunk
-  // isn't fetched. The panel being open also mounts it — the Config
-  // tab's radius-slider drag previews render through the overlay layer.
+  // there is nothing it could draw, so the chunk isn't fetched.
   const anyOverlayEnabled = useSyncExternalStore(
     onOverlaysChanged,
     () => DEBUG_OVERLAYS.some((o) => isOverlayEnabled(o)),
+    () => false,
+  );
+  // A held render-radius slider in Dev controls draws its preview through
+  // the same layer, so it mounts the layer for the duration of the drag
+  // even with every overlay off. This is the layer's only other input —
+  // no panel-open flag reaches it.
+  const radiusPreviewActive = useSyncExternalStore(
+    onRenderRadiusPreviewChanged,
+    () => getRenderRadiusPreviewTier() !== null,
     () => false,
   );
   const [showBookmarkSidebar, setShowBookmarkSidebar] = useState(true);
@@ -1129,12 +1152,12 @@ function App({
   // suspicious; they are intentional and load-bearing here.
   /* eslint-disable react-hooks/refs */
   return (
-    <div className={renderMode ? "app render-mode" : "app"}>
+    <div className={captureSurface ? "app render-mode" : "app"}>
       {/* ProfileMenu floats over the bottom-left corner of the app
           chrome. Absolute-positioning keeps it out of the existing
           flex layout so the LayerPanel + canvas geometry is untouched.
           Gated out of the chrome-free render surface. */}
-      {!renderMode && <ProfileMenu />}
+      {!captureSurface && <ProfileMenu />}
       <LayerPanel
         layers={layers.layerInfos}
         selectedLayerId={selectedDatasetId}
@@ -1169,6 +1192,11 @@ function App({
         viewModeToggle={datasetsVersion > 0 ? { label: dims.viewMode === "2d" ? "3D" : "2D", onClick: dims.handleViewModeToggle } : null}
         cameraModeToggle={dims.viewMode === "3d" ? { label: cameraMode === "fly" ? "Arcball" : "Fly", onClick: handleCameraModeToggle } : null}
         debugToggle={{ label: "Debug", active: showDebug, onClick: handleDebugToggle }}
+        devControlsToggle={{
+          label: "Dev",
+          active: showDevControls,
+          onClick: () => setShowDevControls((v) => !v),
+        }}
         layoutRegistry={layoutRegistry}
         sendCommand={bridge.sendCommand}
         onLayoutChange={() => {
@@ -1270,7 +1298,8 @@ function App({
               ref={render.canvasRef}
               tabIndex={0}
               style={{
-                width: showDebug ? layout.canvasWidth - 300 : layout.canvasWidth,
+                // Each docked side panel (debug, dev controls) is 300px wide.
+                width: layout.canvasWidth - 300 * ((showDebug ? 1 : 0) + (showDevControls ? 1 : 0)),
                 height: layout.canvasHeight,
                 imageRendering: dims.viewMode === "2d" ? "pixelated" : "auto",
                 borderRadius: 8,
@@ -1410,7 +1439,7 @@ function App({
             {render.clientReady && render.clientRef.current && (
               <Minimap client={render.clientRef.current} activeLoop={render.activeLoop} />
             )}
-            {(showDebug || anyOverlayEnabled) && (
+            {(anyOverlayEnabled || radiusPreviewActive) && (
               <Suspense fallback={null}>
                 <DebugOverlays
                   wasmSceneRef={scene.wasmSceneRef}
@@ -1522,6 +1551,17 @@ function App({
                 datasets={datasetsRef.current}
                 sessionRef={bridge.sessionRef}
                 renderLoopRef={render.loopRef}
+                style={{ height: layout.canvasHeight }}
+              />
+            </Suspense>
+          )}
+          {showDevControls && (
+            <Suspense fallback={null}>
+              <DevControls
+                // Deferred ref read (never during render): the session can
+                // attach or be replaced while the surface is open, and the
+                // surface re-reads on its own tick.
+                getCpuCache={() => bridge.sessionRef.current?.cpuCache ?? null}
                 style={{ height: layout.canvasHeight }}
               />
             </Suspense>

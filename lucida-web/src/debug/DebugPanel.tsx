@@ -7,16 +7,6 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { debugStats, type DebugStats } from "./debugStats.ts";
-import {
-  DEBUG_CATEGORIES,
-  isDebugEnabled,
-  setDebugEnabled,
-  type DebugCategory,
-  DEBUG_OVERLAYS,
-  isOverlayEnabled,
-  setOverlayEnabled,
-  type DebugOverlay,
-} from "./logging.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import type { WasmScene } from "lucida-core";
 import type { DatasetState } from "../types.ts";
@@ -24,18 +14,9 @@ import type { CacheTelemetry } from "../pipeline/fetch/index.ts";
 import type { GeneratedStatusCountsByDataset } from "../pipeline/generatedAvailability.ts";
 import type { Session } from "../session.ts";
 import type { DatasetHealthStatus, DatasetSourceHealth } from "../bridge.ts";
-import { ConfigTab } from "./ConfigTab.tsx";
 import "./DebugPanel.css";
 
 const POLL_INTERVAL_MS = 200;
-
-/**
- * The Cache tab's budget/fetch-limit inputs write live CpuCache config
- * (`cpuCache.updateConfig`). Like the planning knobs in ConfigTab, that
- * is a dev-build control surface; production builds render the values
- * read-only so the panel inspects without steering the fetch pipeline.
- */
-const CACHE_CONFIG_EDITABLE: boolean = import.meta.env.DEV;
 
 /** Short label for an EntityMode in the active-set rendering. */
 function modeLabel(mode: string): string {
@@ -65,24 +46,7 @@ function modeColor(mode: string): string {
   }
 }
 
-type TabId = "render" | "scene" | "pick" | "planning" | "cache" | "health" | "orch" | "catalog" | "config" | "logging";
-
-const LOGGING_CATEGORY_DESCRIPTIONS: Record<DebugCategory, string> = {
-  bridge: "WebSocket send/receive and dataset-open lifecycle",
-  wasm: "Scene mutations inside the Rust WASM module (scene.* events)",
-  render: "Render loop lifecycle, dirty-flag attribution, throttle skips",
-  cache: "CPU cache backpressure, failure bursts, eviction bursts",
-  orch: "TickCoordinator events — cold-state rebuild churn, upload budget exhaustion, resend storm, delivery waste",
-};
-
-const OVERLAY_DESCRIPTIONS: Record<DebugOverlay, string> = {
-  groupModes: "Per-group badge over the canvas: detail/coarse chunks available from the worker or CPU cache (Davailable/wanted Cavailable/wanted).",
-  chunkGrid: "LOD chunk grid for every visible tile, color-coded by status (cached / in-flight / planned). Capped at ~600 cells per tick.",
-  chunkTier: "Sub-color tile chunks by displayed render tier (detail = green, coarse = yellow, missing = red). Requires chunkGrid.",
-  renderRadius: "Draw the active detail/coarse render-radius boundary. 2D shows circles; 3D shows projected sphere/ellipsoid rings.",
-  cachedTier: "Sub-color cached chunks by eviction tier (active = bright green, demoted = pale sage, prefetch = teal). Requires chunkGrid.",
-  plannedRank: "Sub-color planned chunks by queue rank (top of queue = bright orange, bottom = dim red, gray = not in pending). Requires chunkGrid.",
-};
+type TabId = "render" | "scene" | "pick" | "planning" | "cache" | "health" | "orch" | "catalog";
 
 interface CatalogSnap {
   assetEpoch: number;
@@ -681,19 +645,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
     { id: "health", label: "Health" },
     { id: "orch", label: "Orch" },
     { id: "catalog", label: "Catalog" },
-    { id: "config", label: "Config" },
-    { id: "logging", label: "Logging" },
   ];
-
-  const [loggingTick, setLoggingTick] = useState(0);
-  const toggleCategory = (cat: DebugCategory) => {
-    setDebugEnabled(cat, !isDebugEnabled(cat));
-    setLoggingTick(t => t + 1);
-  };
-  const toggleOverlay = (name: DebugOverlay) => {
-    setOverlayEnabled(name, !isOverlayEnabled(name));
-    setLoggingTick(t => t + 1);
-  };
 
   // Cold-state header pulse: bright orange while a rebuild was within the
   // last poll interval, dim after that, gray when idle. The 500ms afterglow
@@ -838,7 +790,6 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
               <div className="debug-title">Members</div>
               <div>Visible: {snap.visibleMembers} / {snap.totalMembers}</div>
               <div>Channels: {snap.activeChannels}</div>
-              <div>Cache: {snap.planCacheHits}h / {snap.planCacheMisses}m</div>
             </div>
 
             {snap.memberStats.length > 0 && (() => {
@@ -1124,73 +1075,6 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                     avg: {fmt(cacheTelemetry.avgDecodeMs, 2)}ms
                   </div>
                 </div>
-
-                {/* Config */}
-                <div className="debug-section">
-                  <div className="debug-title">Config</div>
-                  {!CACHE_CONFIG_EDITABLE && (
-                    <div style={{ color: "#888", fontSize: "0.75rem", marginBottom: 6 }} role="note">
-                      Read-only in this build: live cache budgets shown for
-                      inspection; editing is a dev-build capability.
-                    </div>
-                  )}
-                  <div className="debug-config-row">
-                    <span>Main budget (MB)</span>
-                    <input
-                      className="debug-config-input"
-                      type="number"
-                      value={Math.round(cacheTelemetry.mainBudget / (1024 * 1024))}
-                      disabled={!CACHE_CONFIG_EDITABLE}
-                      onChange={e => {
-                        if (!CACHE_CONFIG_EDITABLE) return;
-                        const mb = Number(e.target.value);
-                        if (mb > 0) sessionRef?.current?.cpuCache.updateConfig({ mainBudgetBytes: mb * 1024 * 1024 });
-                      }}
-                    />
-                  </div>
-                  <div className="debug-config-row">
-                    <span>Overview budget (MB)</span>
-                    <input
-                      className="debug-config-input"
-                      type="number"
-                      value={Math.round(cacheTelemetry.overviewBudget / (1024 * 1024))}
-                      disabled={!CACHE_CONFIG_EDITABLE}
-                      onChange={e => {
-                        if (!CACHE_CONFIG_EDITABLE) return;
-                        const mb = Number(e.target.value);
-                        if (mb > 0) sessionRef?.current?.cpuCache.updateConfig({ overviewBudgetBytes: mb * 1024 * 1024 });
-                      }}
-                    />
-                  </div>
-                  <div className="debug-config-row">
-                    <span>Max fetches</span>
-                    <input
-                      className="debug-config-input"
-                      type="number"
-                      value={cacheTelemetry.maxConcurrentFetches}
-                      disabled={!CACHE_CONFIG_EDITABLE}
-                      onChange={e => {
-                        if (!CACHE_CONFIG_EDITABLE) return;
-                        const v = Number(e.target.value);
-                        if (v > 0) sessionRef?.current?.cpuCache.updateConfig({ maxConcurrentFetches: v });
-                      }}
-                    />
-                  </div>
-                  <div className="debug-config-row">
-                    <span>Max in-flight (MB)</span>
-                    <input
-                      className="debug-config-input"
-                      type="number"
-                      value={Math.round(cacheTelemetry.maxBytesInFlight / (1024 * 1024))}
-                      disabled={!CACHE_CONFIG_EDITABLE}
-                      onChange={e => {
-                        if (!CACHE_CONFIG_EDITABLE) return;
-                        const mb = Number(e.target.value);
-                        if (mb > 0) sessionRef?.current?.cpuCache.updateConfig({ maxBytesInFlight: mb * 1024 * 1024 });
-                      }}
-                    />
-                  </div>
-                </div>
               </>
             ) : (
               <div className="debug-section">
@@ -1204,19 +1088,6 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
           <>
             {snap.orch ? (
               <>
-                {/* Mixed levels warning */}
-                {snap.orch.hasMixedLevels && (
-                  <div className="debug-section" style={{ background: "#4a1111" }}>
-                    <div className="debug-warn" style={{ fontSize: 12 }}>
-                      MIXED LEVELS IN needed[]
-                    </div>
-                    <div style={{ fontSize: 10, color: "#f88" }}>
-                      Upload path uses needed[0].level for atlas config.
-                      Chunks at other levels will render at wrong scale or be dropped.
-                    </div>
-                  </div>
-                )}
-
                 {/* Cold state — epoch fast-path stats, rebuild rate,
                     per-epoch cause attribution, and rebuild timing. The
                     pulse next to the title is a visceral activity
@@ -1327,7 +1198,6 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                         t.skippedAlreadySent > 0 && `alreadySent:${t.skippedAlreadySent}`,
                         t.skippedNoMeta > 0 && `noMeta:${t.skippedNoMeta}`,
                       ].filter(Boolean) as string[];
-                      const resendUploads = t.resendChunkUploads + t.resendProxyUploads;
                       const bytePct = t.bytesBudget > 0
                         ? Math.min(100, Math.round((t.bytesUploaded / t.bytesBudget) * 100))
                         : 0;
@@ -1362,20 +1232,6 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                               background: t.budgetExhausted ? "#f44" : "#4f4",
                             }} />
                           </div>
-                          {(resendUploads > 0
-                            || t.resendChunksConsidered > 0
-                            || t.resendProxiesConsidered > 0) && (
-                            <div style={{ marginTop: 4, fontSize: 11 }}>
-                              <span style={{ color: "#888" }}>resend: </span>
-                              <span style={{ color: resendUploads > 0 ? "#fb4" : "#666" }}>
-                                {resendUploads} uploaded
-                              </span>{" "}
-                              <span style={{ color: "#888" }}>
-                                ({t.resendChunkUploads}c / {t.resendProxyUploads}p,{" "}
-                                {t.resendChunksConsidered + t.resendProxiesConsidered} considered)
-                              </span>
-                            </div>
-                          )}
                         </>
                       );
                     })()}
@@ -1423,7 +1279,6 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                       const r = snap.upload.rolling;
                       const fmtRatio = (n: number) =>
                         Number.isNaN(n) ? "—" : `${(n * 100).toFixed(0)}%`;
-                      const resendBad = !Number.isNaN(r.resendRatio) && r.resendRatio > 0.5;
                       const filterBad = !Number.isNaN(r.filterRatio) && r.filterRatio > 0.5;
                       return (
                         <>
@@ -1434,10 +1289,6 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                             {r.chunkUploadsPerSec} chunks/s · {r.proxyUploadsPerSec} proxies/s
                           </div>
                           <div>
-                            <span style={{ color: resendBad ? "#fb4" : "#888" }}>
-                              resend: {fmtRatio(r.resendRatio)}
-                            </span>
-                            {" · "}
                             <span style={{ color: filterBad ? "#fb4" : "#888" }}>
                               filtered: {fmtRatio(r.filterRatio)}
                             </span>
@@ -1564,33 +1415,6 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                       ))}
                   </div>
                 </div>
-
-                {/* Per-member adapter output */}
-                {snap.orch.members.length > 0 && (
-                  <div className="debug-section">
-                    <div className="debug-title">Members (adapter output, {snap.orch.membersTotal} total)</div>
-                    <div className="debug-member-list">
-                      {snap.orch.members.slice(0, 10).map((m, i) => (
-                        <div key={`${m.imageId}-${i}`} className="debug-member-row" style={{
-                          background: m.mixedLevels ? "#4a1111" : undefined,
-                        }}>
-                          <span className="debug-member-id" title={m.imageId}>
-                            {m.imageId.length > 14 ? "..." + m.imageId.slice(-12) : m.imageId}
-                          </span>
-                          <span>uploadL{m.uploadLevel ?? "?"}</span>
-                          <span>n:{m.neededCount} p:{m.prefetchCount}</span>
-                          <span title={`Levels: ${JSON.stringify(m.chunksByLevel)}`}>
-                            {Object.entries(m.chunksByLevel).map(([l, c]) => `L${l}:${c}`).join(" ")}
-                          </span>
-                          {m.mixedLevels && <span style={{ color: "#f44" }}>MIX</span>}
-                        </div>
-                      ))}
-                      {snap.orch.membersTotal > 10 && (
-                        <div className="debug-more">+{snap.orch.membersTotal - 10} more</div>
-                      )}
-                    </div>
-                  </div>
-                )}
 
                 {/* Top requests */}
                 {snap.orch.topRequests.length > 0 && (
@@ -1882,82 +1706,6 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                 </div>
               </div>
             )}
-          </>
-        )}
-
-        {activeTab === "config" && <ConfigTab />}
-
-        {activeTab === "logging" && (
-          <>
-            <div className="debug-section" key={`cats-${loggingTick}`}>
-              <div className="debug-title">Categories</div>
-              <div style={{ color: "#888", fontSize: "0.75rem", marginBottom: 6 }}>
-                Toggles persist in localStorage.debug. Most events fire after the
-                page boots; for startup events, enable then reload.
-              </div>
-              {DEBUG_CATEGORIES.map(cat => {
-                const on = isDebugEnabled(cat);
-                return (
-                  <label
-                    key={cat}
-                    style={{
-                      display: "flex",
-                      alignItems: "flex-start",
-                      gap: 8,
-                      padding: "4px 0",
-                      cursor: "pointer",
-                    }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={on}
-                      onChange={() => toggleCategory(cat)}
-                      style={{ marginTop: 2 }}
-                    />
-                    <div>
-                      <div style={{ fontFamily: "monospace" }}>{cat}</div>
-                      <div style={{ color: "#888", fontSize: "0.75rem" }}>
-                        {LOGGING_CATEGORY_DESCRIPTIONS[cat]}
-                      </div>
-                    </div>
-                  </label>
-                );
-              })}
-            </div>
-            <div className="debug-section" key={`ovs-${loggingTick}`}>
-              <div className="debug-title">Overlays</div>
-              <div style={{ color: "#888", fontSize: "0.75rem", marginBottom: 6 }}>
-                Visual layers drawn over the canvas. Slice + volume modes both work.
-              </div>
-              {DEBUG_OVERLAYS.map(name => {
-                const on = isOverlayEnabled(name);
-                return (
-                  <label
-                    key={name}
-                    style={{
-                      display: "flex",
-                      alignItems: "flex-start",
-                      gap: 8,
-                      padding: "4px 0",
-                      cursor: "pointer",
-                    }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={on}
-                      onChange={() => toggleOverlay(name)}
-                      style={{ marginTop: 2 }}
-                    />
-                    <div>
-                      <div style={{ fontFamily: "monospace" }}>{name}</div>
-                      <div style={{ color: "#888", fontSize: "0.75rem" }}>
-                        {OVERLAY_DESCRIPTIONS[name]}
-                      </div>
-                    </div>
-                  </label>
-                );
-              })}
-            </div>
           </>
         )}
       </div>

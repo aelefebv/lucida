@@ -50,23 +50,12 @@ describe("debug category gate", () => {
     getItem.mockRestore();
   });
 
-  it("setDebugEnabled writes through to storage and the cached gate", async () => {
-    const logging = await importLogging();
-    logging.setDebugEnabled("wasm", true);
-    expect(logging.isDebugEnabled("wasm")).toBe(true);
-    expect(localStorage.getItem("debug")).toContain("wasm");
-
-    logging.setDebugEnabled("wasm", false);
-    expect(logging.isDebugEnabled("wasm")).toBe(false);
-    // Empty set removes the key entirely (the documented contract).
-    expect(localStorage.getItem("debug")).toBeNull();
-  });
-
-  it("setDebugEnabled notifies subscribers with the enabled list", async () => {
+  it("refreshDebugCategories notifies subscribers with the enabled list", async () => {
     const logging = await importLogging();
     const seen: string[][] = [];
     const off = logging.onDebugCategoriesChanged((cats) => seen.push([...cats]));
-    logging.setDebugEnabled("render", true);
+    localStorage.setItem("debug", "render");
+    logging.refreshDebugCategories();
     expect(seen).toEqual([["render"]]);
     off();
   });

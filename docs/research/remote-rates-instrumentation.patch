@@ -1,0 +1,889 @@
+diff --git a/lucida-server/src/handler.rs b/lucida-server/src/handler.rs
+index a7a536b..e401b9d 100644
+--- a/lucida-server/src/handler.rs
++++ b/lucida-server/src/handler.rs
+@@ -1323,8 +1323,14 @@ async fn serve_chunk_from_store(
+ 
+     tracing::trace!(dataset = %dataset_id, image = %image_id, key = chunk_key, path = object_path, "serving chunk");
+     let obj_path = Path::from(object_path);
+-    let mut bytes: Vec<u8> = match cache.get_bytes(&obj_path).await {
++    let rr_t0 = std::time::Instant::now();
++    let rr_store_us = std::cell::Cell::new(0_u128);
++    let rr_decode_us = std::cell::Cell::new(0_u128);
++    let rr_got = cache.get_bytes(&obj_path).await;
++    rr_store_us.set(rr_t0.elapsed().as_micros());
++    let mut bytes: Vec<u8> = match rr_got {
+         Ok(storage_bytes) => {
++            let rr_d0 = std::time::Instant::now();
+             // Decode storage compression → raw bytes (WireFormat::Raw for phase 1).
+             // Shared with the proxy generator via [`crate::decode::decode_storage_bytes`].
+             match decode_storage_bytes(&storage_bytes, level_info.compression) {
+@@ -1336,6 +1342,7 @@ async fn serve_chunk_from_store(
+                         compression = ?level_info.compression,
+                         "chunk decoded"
+                     );
++                    rr_decode_us.set(rr_d0.elapsed().as_micros());
+                     raw
+                 }
+                 Err(e) => {
+@@ -1384,11 +1391,18 @@ async fn serve_chunk_from_store(
+     }
+ 
+     let buf = encode_chunk_frame(client_id, dataset_id, image_id, chunk_key, &bytes);
++    let rr_nbytes = bytes.len();
+ 
+     let senders = unicast_routes.lock().await;
+     if let Some(sender) = senders.get(&client_id) {
+         let _ = sender.send(Message::Binary(buf.into()));
+     }
++    lucida_store::rrtrace::emit_serve(
++        rr_store_us.get(),
++        rr_decode_us.get(),
++        rr_t0.elapsed().as_micros(),
++        rr_nbytes,
++    );
+ }
+ 
+ async fn serve_generated_chunk_request(
+diff --git a/lucida-store/src/cache.rs b/lucida-store/src/cache.rs
+index 6e49aaa..ec577ab 100644
+--- a/lucida-store/src/cache.rs
++++ b/lucida-store/src/cache.rs
+@@ -290,6 +290,7 @@ impl CachedStore {
+     /// read re-attempts the backend.
+     pub async fn get_bytes(&self, path: &Path) -> Result<Bytes, object_store::Error> {
+         let key = path.to_string();
++        let rr_t0 = std::time::Instant::now();
+ 
+         // Cache hit — served without touching the backend or a permit.
+         {
+@@ -297,6 +298,7 @@ impl CachedStore {
+             if let Some(bytes) = state.lru.get(&key) {
+                 let bytes = bytes.clone();
+                 state.hits += 1;
++                crate::rrtrace::emit_get("hit", rr_t0.elapsed().as_micros(), bytes.len());
+                 return Ok(bytes);
+             }
+             state.misses += 1;
+@@ -327,13 +329,27 @@ impl CachedStore {
+                         let mut state = self.cache.lock().unwrap();
+                         state.coalesced += 1;
+                     }
+-                    shared.map_err(SharedError::into_object_store_error)
++                    let out = shared.map_err(SharedError::into_object_store_error);
++                    crate::rrtrace::emit_get(
++                        "coalesce",
++                        rr_t0.elapsed().as_micros(),
++                        out.as_ref().map(|b| b.len()).unwrap_or(0),
++                    );
++                    out
+                 }
+                 // Leader vanished without broadcasting (dropped/cancelled/
+                 // panicked). The guard has removed the in-flight entry, so
+                 // fall back to a direct backend read: this waiter still gets a
+                 // real answer and the path is not wedged.
+-                Err(_) => self.fetch_from_backend(path, &key).await,
++                Err(_) => {
++                    let out = self.fetch_from_backend(path, &key).await;
++                    crate::rrtrace::emit_get(
++                        "orphan",
++                        rr_t0.elapsed().as_micros(),
++                        out.as_ref().map(|b| b.len()).unwrap_or(0),
++                    );
++                    out
++                }
+             };
+         }
+ 
+@@ -345,6 +361,11 @@ impl CachedStore {
+         let mut guard = LeaderGuard::new(&self.in_flight, key.clone());
+         let result = self.fetch_from_backend(path, &key).await;
+         guard.complete(&result);
++        crate::rrtrace::emit_get(
++            "miss",
++            rr_t0.elapsed().as_micros(),
++            result.as_ref().map(|b| b.len()).unwrap_or(0),
++        );
+         result
+     }
+ 
+@@ -360,15 +381,43 @@ impl CachedStore {
+             // Bound concurrent backend reads process-wide. Scoped to just the
+             // GET + body read so the permit is released before the (fast,
+             // synchronous) cache insert below.
++            let rr_q0 = std::time::Instant::now();
+             let _permit = self
+                 .source_read
+                 .acquire()
+                 .await
+                 .expect("source-read semaphore is never closed");
+-            match self.inner.get(path).await {
+-                Ok(object) => object.bytes().await,
+-                Err(error) => Err(error),
+-            }
++            let rr_permit_us = rr_q0.elapsed().as_micros();
++            let (_rr_guard, rr_inflight) = crate::rrtrace::InFlightGuard::enter();
++            let rr_g0 = std::time::Instant::now();
++            let out = match self.inner.get(path).await {
++                Ok(object) => {
++                    let rr_ttfb_us = rr_g0.elapsed().as_micros();
++                    let rr_b0 = std::time::Instant::now();
++                    let body = object.bytes().await;
++                    crate::rrtrace::emit_backend(
++                        rr_permit_us,
++                        rr_ttfb_us,
++                        rr_b0.elapsed().as_micros(),
++                        body.as_ref().map(|b| b.len()).unwrap_or(0),
++                        rr_inflight,
++                        body.is_ok(),
++                    );
++                    body
++                }
++                Err(error) => {
++                    crate::rrtrace::emit_backend(
++                        rr_permit_us,
++                        rr_g0.elapsed().as_micros(),
++                        0,
++                        0,
++                        rr_inflight,
++                        false,
++                    );
++                    Err(error)
++                }
++            };
++            out
+         };
+ 
+         let bytes = match fetch {
+diff --git a/lucida-store/src/lib.rs b/lucida-store/src/lib.rs
+index f368303..5657252 100644
+--- a/lucida-store/src/lib.rs
++++ b/lucida-store/src/lib.rs
+@@ -6,6 +6,7 @@ pub mod import;
+ pub mod import_types;
+ pub mod ingest;
+ pub mod layout;
++pub mod rrtrace;
+ pub(crate) mod parse;
+ 
+ /// The canonical 5D axis names in order.
+diff --git a/lucida-store/src/rrtrace.rs b/lucida-store/src/rrtrace.rs
+new file mode 100644
+index 0000000..c2fddc5
+--- /dev/null
++++ b/lucida-store/src/rrtrace.rs
+@@ -0,0 +1,92 @@
++//! THROWAWAY MEASUREMENT INSTRUMENTATION — issue #899 (research/remote-rates).
++//!
++//! Emits one compact stderr line per source read so a harness can rebuild the
++//! latency distribution of a remote object-store open. Off unless
++//! `LUCIDA_RR_TRACE=1`, and reverted before the research branch is committed;
++//! the diff lives in `docs/research/remote-rates-instrumentation.patch`.
++//!
++//! Line formats (whitespace separated, all times in microseconds):
++//!
++//! ```text
++//! RRGET  <epoch_us> <hit|miss|coalesce|orphan> <total_us> <bytes>
++//! RRBAK  <epoch_us> <permit_us> <ttfb_us> <body_us> <bytes> <inflight_at_start> <ok|err>
++//! RRSRV  <epoch_us> <store_us> <decode_us> <total_us> <bytes>
++//! ```
++
++use std::sync::OnceLock;
++use std::sync::atomic::{AtomicI64, Ordering};
++use std::time::{SystemTime, UNIX_EPOCH};
++
++pub static BACKEND_INFLIGHT: AtomicI64 = AtomicI64::new(0);
++
++pub fn enabled() -> bool {
++    static ON: OnceLock<bool> = OnceLock::new();
++    *ON.get_or_init(|| std::env::var("LUCIDA_RR_TRACE").as_deref() == Ok("1"))
++}
++
++pub fn now_us() -> u128 {
++    SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .unwrap_or_default()
++        .as_micros()
++}
++
++pub fn emit_get(outcome: &str, total_us: u128, bytes: usize) {
++    if !enabled() {
++        return;
++    }
++    eprintln!("RRGET {} {} {} {}", now_us(), outcome, total_us, bytes);
++}
++
++pub fn emit_backend(
++    permit_us: u128,
++    ttfb_us: u128,
++    body_us: u128,
++    bytes: usize,
++    inflight: i64,
++    ok: bool,
++) {
++    if !enabled() {
++        return;
++    }
++    eprintln!(
++        "RRBAK {} {} {} {} {} {} {}",
++        now_us(),
++        permit_us,
++        ttfb_us,
++        body_us,
++        bytes,
++        inflight,
++        if ok { "ok" } else { "err" }
++    );
++}
++
++pub fn emit_serve(store_us: u128, decode_us: u128, total_us: u128, bytes: usize) {
++    if !enabled() {
++        return;
++    }
++    eprintln!(
++        "RRSRV {} {} {} {} {}",
++        now_us(),
++        store_us,
++        decode_us,
++        total_us,
++        bytes
++    );
++}
++
++/// RAII guard for the backend in-flight gauge.
++pub struct InFlightGuard(());
++
++impl InFlightGuard {
++    pub fn enter() -> (Self, i64) {
++        let prev = BACKEND_INFLIGHT.fetch_add(1, Ordering::Relaxed);
++        (InFlightGuard(()), prev + 1)
++    }
++}
++
++impl Drop for InFlightGuard {
++    fn drop(&mut self) {
++        BACKEND_INFLIGHT.fetch_sub(1, Ordering::Relaxed);
++    }
++}
+diff --git a/lucida-web/src/debug/traceVolumes.ts b/lucida-web/src/debug/traceVolumes.ts
+new file mode 100644
+index 0000000..6773273
+--- /dev/null
++++ b/lucida-web/src/debug/traceVolumes.ts
+@@ -0,0 +1,116 @@
++/**
++ * THROWAWAY MEASUREMENT INSTRUMENTATION — issue #888 (research/trace-volumes).
++ *
++ * Counts per-stage pipeline events with 1-second bucketing so a driver can
++ * read totals AND peak per-second rates out of `window.__tv`. Deliberately as
++ * cheap as possible (one object-property increment per event) so the counter
++ * itself is not what we end up measuring.
++ *
++ * NOT product code. Reverted before the research branch is committed; the diff
++ * lives in docs/research/trace-volumes-instrumentation.patch.
++ */
++
++interface TvState {
++  t0: number;
++  totals: Record<string, number>;
++  /** name -> per-second bucket array, index = whole seconds since t0. */
++  buckets: Record<string, number[]>;
++  /** name -> max single observation (e.g. render passes in one frame). */
++  maxes: Record<string, number>;
++  /** name -> every observation, for distribution work (capped). */
++  samples: Record<string, number[]>;
++  marks: Array<{ name: string; at: number }>;
++}
++
++const SAMPLE_CAP = 200000;
++
++function fresh(): TvState {
++  return { t0: performance.now(), totals: {}, buckets: {}, maxes: {}, samples: {}, marks: [] };
++}
++
++declare global {
++  interface Window {
++    __tv?: TvState;
++    __tvReset?: () => void;
++    __tvDump?: () => unknown;
++  }
++}
++
++function st(): TvState | null {
++  if (typeof window === "undefined") return null;
++  if (!window.__tv) {
++    window.__tv = fresh();
++    window.__tvReset = () => {
++      window.__tv = fresh();
++    };
++    window.__tvDump = () => {
++      const s = window.__tv!;
++      const out: Record<string, unknown> = {
++        elapsed_ms: performance.now() - s.t0,
++        totals: s.totals,
++        maxes: s.maxes,
++        marks: s.marks,
++        peak_per_sec: {} as Record<string, number>,
++        buckets: s.buckets,
++        sample_stats: {} as Record<string, unknown>,
++      };
++      const peak = out.peak_per_sec as Record<string, number>;
++      for (const [k, arr] of Object.entries(s.buckets)) {
++        let m = 0;
++        for (const v of arr) if (v > m) m = v;
++        peak[k] = m;
++      }
++      const ss = out.sample_stats as Record<string, unknown>;
++      for (const [k, arr] of Object.entries(s.samples)) {
++        if (!arr.length) continue;
++        const sorted = [...arr].sort((a, b) => a - b);
++        const q = (p: number) => sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))];
++        ss[k] = {
++          n: sorted.length,
++          min: sorted[0],
++          p50: q(0.5),
++          p75: q(0.75),
++          p90: q(0.9),
++          p95: q(0.95),
++          p99: q(0.99),
++          max: sorted[sorted.length - 1],
++          sum: sorted.reduce((a, b) => a + b, 0),
++          under_0_1ms: sorted.filter((v) => v < 0.1).length,
++        };
++      }
++      return out;
++    };
++  }
++  return window.__tv;
++}
++
++/** Count `n` occurrences of `name`. */
++export function tvAdd(name: string, n = 1): void {
++  const s = st();
++  if (!s) return;
++  s.totals[name] = (s.totals[name] ?? 0) + n;
++  const sec = Math.floor((performance.now() - s.t0) / 1000);
++  let b = s.buckets[name];
++  if (!b) b = s.buckets[name] = [];
++  while (b.length <= sec) b.push(0);
++  b[sec] += n;
++}
++
++/** Record a single observation `v` of `name` (distribution + max), and count it. */
++export function tvObs(name: string, v: number): void {
++  const s = st();
++  if (!s) return;
++  tvAdd(name + ".sum", v);
++  tvAdd(name + ".n", 1);
++  if (v > (s.maxes[name] ?? -Infinity)) s.maxes[name] = v;
++  let a = s.samples[name];
++  if (!a) a = s.samples[name] = [];
++  if (a.length < SAMPLE_CAP) a.push(v);
++}
++
++/** Timestamped one-off marker (phase boundaries, first frame, …). */
++export function tvMark(name: string): void {
++  const s = st();
++  if (!s) return;
++  s.marks.push({ name, at: performance.now() - s.t0 });
++}
+diff --git a/lucida-web/src/debug/tvTelemetryFloor.test.ts b/lucida-web/src/debug/tvTelemetryFloor.test.ts
+new file mode 100644
+index 0000000..e4d6b71
+--- /dev/null
++++ b/lucida-web/src/debug/tvTelemetryFloor.test.ts
+@@ -0,0 +1,151 @@
++/**
++ * THROWAWAY MEASUREMENT (issue #888, research/trace-volumes).
++ *
++ * Benchmarks the EXISTING telemetry write+read paths at the event rates
++ * measured live, so the monitor's marginal cost is judged against a real
++ * floor. Not a product test — removed before the research branch commit.
++ *
++ *   npx vitest run src/debug/tvTelemetryFloor.test.ts --reporter=basic
++ */
++import { test } from "vitest";
++import { TelemetryCounters } from "../pipeline/fetch/telemetry.ts";
++import { UploadTelemetry } from "../pipeline/upload/telemetry/upload.ts";
++import { ColdStateTelemetry } from "../pipeline/upload/telemetry/coldState.ts";
++import { emptyUploadTickStats } from "./debugStats.ts";
++
++function bench(name: string, iters: number, fn: (i: number) => void): number {
++  for (let i = 0; i < Math.min(iters, 2000); i++) fn(i); // warm
++  const t0 = performance.now();
++  for (let i = 0; i < iters; i++) fn(i);
++  const dt = performance.now() - t0;
++  const ns = (dt * 1e6) / iters;
++  // eslint-disable-next-line no-console
++  console.log(`FLOOR ${name}: ${iters} iters, ${dt.toFixed(2)}ms total, ${ns.toFixed(1)} ns/op`);
++  return ns;
++}
++
++function retained(label: string, build: () => unknown): void {
++  const g = globalThis as { gc?: () => void };
++  g.gc?.();
++  const before = process.memoryUsage().heapUsed;
++  const held = build();
++  g.gc?.();
++  const after = process.memoryUsage().heapUsed;
++  // eslint-disable-next-line no-console
++  console.log(`RETAINED ${label}: ${(after - before).toLocaleString()} bytes`, held ? "" : "");
++}
++
++test("existing telemetry floor", () => {
++  // --- fetch/telemetry.ts -------------------------------------------------
++  const tc = new TelemetryCounters(0);
++  bench("TelemetryCounters.recordRequest", 2_000_000, () => tc.recordRequest());
++  bench("TelemetryCounters.recordHit", 2_000_000, () => tc.recordHit());
++  bench("TelemetryCounters.recordDecode (100-window push/shift)", 500_000, (i) =>
++    tc.recordDecode(i % 50));
++  bench("TelemetryCounters.recordEviction", 1_000_000, () => tc.recordEviction("active-detail"));
++  bench("TelemetryCounters.snapshot (copy+sort 100)", 200_000, (i) => tc.snapshot(i));
++
++  // --- upload/telemetry/upload.ts ----------------------------------------
++  const ut = new UploadTelemetry();
++  let now = 0;
++  bench("UploadTelemetry.recordEvent", 1_000_000, (i) => ut.recordEvent(i, 65536, false, "chunk"));
++  const stats = emptyUploadTickStats();
++  stats.drainedChunks = 20;
++  stats.uploadedChunks = 8;
++  bench("UploadTelemetry.publish (per deliverToWorker tick)", 100_000, () => {
++    now += 8;
++    ut.publish(now, stats);
++  });
++
++  // publish() cost as a function of live 1s event-ring size
++  for (const perTick of [1, 8, 64, 128]) {
++    const u2 = new UploadTelemetry();
++    let t = 0;
++    bench(`UploadTelemetry.publish with ${perTick} events/tick @120Hz (ring ~${perTick * 120})`,
++      20_000, () => {
++        t += 8.3;
++        for (let k = 0; k < perTick; k++) u2.recordEvent(t, 65536, false, "chunk");
++        u2.publish(t, stats);
++      });
++  }
++
++  // --- upload/telemetry/coldState.ts -------------------------------------
++  const cs = new ColdStateTelemetry();
++  let ct = 0;
++  bench("ColdStateTelemetry.recordHit (walks 1s ring)", 200_000, () => {
++    ct += 8.3;
++    cs.recordHit(ct);
++  });
++  bench("ColdStateTelemetry.recordRebuild", 100_000, () => {
++    ct += 8.3;
++    cs.recordRebuild(ct, ["view"], 3);
++  });
++  bench("ColdStateTelemetry.publish", 500_000, () => cs.publish());
++
++  // --- retained footprint -------------------------------------------------
++  retained("TelemetryCounters x1 (100-sample decode window, saturated)", () => {
++    const t = new TelemetryCounters(0);
++    for (let i = 0; i < 1000; i++) t.recordDecode(i % 40);
++    return t;
++  });
++  retained("UploadTelemetry x1 with a saturated 1s ring at 8 uploads/tick @120Hz (~960 events)", () => {
++    const u = new UploadTelemetry();
++    let t = 0;
++    for (let i = 0; i < 120; i++) {
++      t += 8.3;
++      for (let k = 0; k < 8; k++) u.recordEvent(t, 65536, false, "chunk");
++      u.publish(t, stats);
++    }
++    return u;
++  });
++  retained("UploadTelemetry x1 with a saturated 1s ring at 128 uploads/tick @120Hz (~15k events)", () => {
++    const u = new UploadTelemetry();
++    let t = 0;
++    for (let i = 0; i < 120; i++) {
++      t += 8.3;
++      for (let k = 0; k < 128; k++) u.recordEvent(t, 65536, false, "chunk");
++      u.publish(t, stats);
++    }
++    return u;
++  });
++  retained("ColdStateTelemetry x1 saturated (1s ring @120Hz + 60 durations)", () => {
++    const c = new ColdStateTelemetry();
++    let t = 0;
++    for (let i = 0; i < 240; i++) {
++      t += 8.3;
++      if (i % 2) c.recordHit(t);
++      else c.recordRebuild(t, ["view"], 3);
++    }
++    return c;
++  });
++
++  // --- what a naive per-event trace record would cost ---------------------
++  retained("10,000 plain per-event records {t,stage,key,bytes}", () => {
++    const arr: Array<{ t: number; stage: string; key: string; bytes: number }> = [];
++    for (let i = 0; i < 10_000; i++) {
++      arr.push({ t: i * 0.1, stage: "fetch", key: `0/0/0/${i >> 8}/${(i >> 4) & 15}/${i & 15}`, bytes: 65536 });
++    }
++    return arr;
++  });
++  retained("100,000 plain per-event records {t,stage,key,bytes}", () => {
++    const arr: Array<{ t: number; stage: string; key: string; bytes: number }> = [];
++    for (let i = 0; i < 100_000; i++) {
++      arr.push({ t: i * 0.1, stage: "fetch", key: `0/0/0/${i >> 8}/${(i >> 4) & 15}/${i & 15}`, bytes: 65536 });
++    }
++    return arr;
++  });
++  retained("100,000 columnar records (3 typed arrays + interned stage)", () => {
++    const t = new Float64Array(100_000);
++    const stage = new Uint8Array(100_000);
++    const bytes = new Uint32Array(100_000);
++    for (let i = 0; i < 100_000; i++) { t[i] = i * 0.1; stage[i] = 2; bytes[i] = 65536; }
++    return [t, stage, bytes];
++  });
++
++  bench("push one plain object record onto an array", 2_000_000, (i) => {
++    sink.push({ t: i, stage: 2, key: i, bytes: 65536 });
++    if (sink.length > 100_000) sink.length = 0;
++  });
++});
++
++const sink: Array<{ t: number; stage: number; key: number; bytes: number }> = [];
+diff --git a/lucida-web/src/minimapPath.ts b/lucida-web/src/minimapPath.ts
+index 8e06a90..4d03f18 100644
+--- a/lucida-web/src/minimapPath.ts
++++ b/lucida-web/src/minimapPath.ts
+@@ -1,5 +1,6 @@
+ /** Minimap render path: overview seeding + render + overlay callback. */
+ import type { WasmScene } from "lucida-core";
++import { tvAdd, tvObs } from "./debug/traceVolumes.ts";
+ import { Axis } from "./axes.ts";
+ import type { MultiscaleInfo } from "./manifestTypes.ts";
+ import type { MinimapLayerParams } from "./renderer/workerProtocol.ts";
+@@ -368,6 +369,8 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState, now:
+     return state.overviewBudgetPending || state.pendingFetch.size > 0;
+   }
+   state.lastOverviewScanMs = now;
++  tvAdd("minimap.overview_scan");
++  let tvProbes = 0;
+ 
+   const { scene, client, datasets } = ctx;
+   const t = scene.t();
+@@ -410,6 +413,7 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState, now:
+       for (let iz = 0; iz < nz; iz++) {
+         for (let iy = 0; iy < ny; iy++) {
+           for (let ix = 0; ix < nx; ix++) {
++            tvProbes++;
+             const chunkKey = `${coarsestIdx}/${t}/${c}/${iz}/${iy}/${ix}`;
+             if (uploaded.has(chunkKey)) continue;
+ 
+@@ -465,6 +469,7 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState, now:
+     if (budgetRemaining <= 0) break;
+   }
+ 
++  tvObs("minimap.probes_per_scan", tvProbes);
+   state.overviewBudgetPending = budgetRemaining <= 0;
+   return state.overviewBudgetPending;
+ }
+diff --git a/lucida-web/src/pipeline/fetch/cpuCache.ts b/lucida-web/src/pipeline/fetch/cpuCache.ts
+index c6c9581..bc6f2d1 100644
+--- a/lucida-web/src/pipeline/fetch/cpuCache.ts
++++ b/lucida-web/src/pipeline/fetch/cpuCache.ts
+@@ -13,6 +13,7 @@ import type {
+   FetchProxyResult,
+ } from "./contentSource.ts";
+ import type { DecodePool } from "./decodePool.ts";
++import { tvAdd, tvObs } from "../../debug/traceVolumes.ts";
+ import type {
+   RequestPlan,
+   ChunkRequest,
+@@ -344,6 +345,7 @@ export class CpuCache {
+       (req, controller, _estimate, key) => {
+         const startedEpochs = { ...this.currentEpochs };
+         this.rememberInFlightChunk(key, req, startedEpochs);
++        tvAdd("fetch.issued");
+         // `fetchAndDecode` handles fetch/decode failures internally (retry,
+         // failure map, streak surfacing); anything escaping here is an
+         // unexpected pipeline error — keep it out of the void.
+@@ -388,6 +390,7 @@ export class CpuCache {
+ 
+     const newActiveIds = new Set(plan.activeSet.map(e => e.entityId));
+     for (const entityId of newActiveIds) this.activeEntityIdsThisRebuild.add(entityId);
++    tvObs("plan.requests_per_submit", plan.requests.length);
+     const plannedChunkKeys = new Set(plan.requests.map(req => this.inFlightKey(req)));
+     this.recordTierDemand(plan.requests);
+     this.applyElasticTierBudgets();
+@@ -400,6 +403,7 @@ export class CpuCache {
+       const key = this.inFlightKey(req);
+ 
+       this.counters.recordRequest();
++      tvAdd("cache.request");
+ 
+       // Worker-rejected under the current camera. Skip without
+       // refreshing `lastSeenTick` so the cached copy can be evicted.
+@@ -415,6 +419,7 @@ export class CpuCache {
+       const cachedEntry = this.lookupCachedEntry(req);
+       if (cachedEntry) {
+         this.counters.recordHit();
++        tvAdd("cache.hit");
+         const lane = this.resolveDemandLane(req.lane, key);
+         cachedEntry.lane = lane;
+         cachedEntry.residencyTier = this.requestResidencyTier(req);
+@@ -980,6 +985,8 @@ export class CpuCache {
+     fedStreak = false,
+   ): Promise<void> {
+     let result: FetchResult;
++    const rrAttemptStart = performance.now();
++    if (retryCount > 0) tvAdd("fetch.retry_attempt");
+     try {
+       result = await this.source.fetch(
+         { datasetId: req.datasetId, imageId: req.imageId, chunkKey: req.chunkKey },
+@@ -987,6 +994,9 @@ export class CpuCache {
+       );
+     } catch (err: unknown) {
+       const fe = classifyFetchError(err);
++      tvAdd("fetch.error." + fe.kind);
++      if (fe.serverReported) tvAdd("fetch.error.server_reported");
++      tvObs("fetch.error_ms", performance.now() - rrAttemptStart);
+ 
+       if (fe.kind === "abort" || fe.kind === "pending") {
+         // A silent teardown: the caller cancelled, or generated bytes are not
+@@ -1020,6 +1030,7 @@ export class CpuCache {
+       }
+ 
+       if (this.chunkRetryPolicy.shouldRetry(fe, retryCount)) {
++        tvAdd("fetch.retry_scheduled");
+         await new Promise(r => setTimeout(r, this.chunkRetryPolicy.delayMs(retryCount)));
+         if (!this.chunkScheduler.hasInFlight(key)) return; // cancelled during wait
+         return this.fetchAndDecode(req, controller, key, retryCount + 1, startedEpochs, fed);
+@@ -1045,6 +1056,9 @@ export class CpuCache {
+       return;
+     }
+ 
++    tvAdd("fetch.completed");
++    tvObs("fetch.roundtrip_ms", performance.now() - rrAttemptStart);
++    tvObs("fetch.wire_bytes", result.bytes.byteLength);
+     this.counters.recordCompletedFetch(result.bytes.byteLength);
+     // Correct the in-flight byte estimate only while this settle still owns
+     // the slot; a superseded successor keeps its own accounting.
+@@ -1057,6 +1071,9 @@ export class CpuCache {
+       const t0 = performance.now();
+       decoded = await this.decode.decode(result.bytes, result.wireFormat);
+       this.counters.recordDecode(performance.now() - t0);
++      tvAdd("decode.completed");
++      tvObs("decode.ms", performance.now() - t0);
++      tvObs("decode.out_bytes", decoded.byteLength);
+     } catch (err: unknown) {
+       const message = err instanceof Error ? err.message : String(err);
+       // A fetch that completes but cannot be decoded (wrong wire format,
+diff --git a/lucida-web/src/pipeline/fetch/scheduler.ts b/lucida-web/src/pipeline/fetch/scheduler.ts
+index 54fc6f4..03e3229 100644
+--- a/lucida-web/src/pipeline/fetch/scheduler.ts
++++ b/lucida-web/src/pipeline/fetch/scheduler.ts
+@@ -10,6 +10,7 @@
+  */
+ 
+ import type { BurstLogger } from "./telemetry.ts";
++import { tvAdd, tvObs } from "../../debug/traceVolumes.ts";
+ 
+ export interface SchedulableRequest {
+   datasetId: string;
+@@ -147,12 +148,23 @@ export class Scheduler<Req extends SchedulableRequest> {
+    * fires its rate-limited backpressure summary.
+    */
+   drain(estimateBytes: (req: Req) => number): void {
++    const rrDrainNow = performance.now();
++    tvObs("sched.pending_at_drain", this.pending.length);
+     while (this.pending.length > 0 && this.canStartMore()) {
+       const req = this.pending.shift()!;
+       const key = this.keyFn(req);
++      const rrEnq = this.enqueuedAt.get(key);
++      if (rrEnq !== undefined) tvObs("sched.queue_wait_ms", rrDrainNow - rrEnq);
+       this.enqueuedAt.delete(key);
+       const estimate = estimateBytes(req);
+       this.startInFlight(req, key, estimate);
++      tvObs("sched.inflight_at_start", this.inFlight.size);
++    }
++    tvObs("sched.pending_after_drain", this.pending.length);
++
++    if (this.pending.length > 0 && !this.canStartMore()) {
++      tvAdd("sched.cap_blocked");
++      tvObs("sched.blocked_pending", this.pending.length);
+     }
+ 
+     if (this.pending.length > 0 && !this.canStartMore() && this.config.burstLogger) {
+diff --git a/lucida-web/src/pipeline/fetch/telemetry.ts b/lucida-web/src/pipeline/fetch/telemetry.ts
+index 9cf46d6..c8e76fa 100644
+--- a/lucida-web/src/pipeline/fetch/telemetry.ts
++++ b/lucida-web/src/pipeline/fetch/telemetry.ts
+@@ -19,6 +19,7 @@
+  */
+ 
+ import { debugLog, type DebugCategory } from "../../debug/logging.ts";
++import { tvAdd } from "../../debug/traceVolumes.ts";
+ import type { EvictionTier, TierCounters } from "./types.ts";
+ 
+ /** Fresh per-tier eviction counter. Shared shape with cpuCache exports. */
+@@ -108,6 +109,7 @@ export class TelemetryCounters {
+   }
+ 
+   recordEviction(tier: EvictionRecordTier): void {
++    tvAdd("cache.evict");
+     this.evictionsSinceSnapshot++;
+     switch (tier) {
+       case "active-detail":
+diff --git a/lucida-web/src/pipeline/planning/chunks.ts b/lucida-web/src/pipeline/planning/chunks.ts
+index e1842c7..3f48e20 100644
+--- a/lucida-web/src/pipeline/planning/chunks.ts
++++ b/lucida-web/src/pipeline/planning/chunks.ts
+@@ -4,6 +4,7 @@
+  */
+ 
+ import { Axis } from "../../axes.ts";
++import { tvAdd } from "../../debug/traceVolumes.ts";
+ import type { LevelGeometry } from "../../manifestTypes.ts";
+ import type { VisibleRegion } from "../viewport.ts";
+ import type {
+@@ -231,6 +232,7 @@ function iterateGridCells(
+         }
+         for (const c of channels) {
+           if (stats) stats.culling.afterFrustum++;
++          tvAdd("plan.chunk_emitted");
+           out.push(
+             makeChunkRequest(entity, datasetId, level, selection.t, c, iz, row, col),
+           );
+diff --git a/lucida-web/src/pipeline/tickCoordinator.ts b/lucida-web/src/pipeline/tickCoordinator.ts
+index 86787d3..4bd8c41 100644
+--- a/lucida-web/src/pipeline/tickCoordinator.ts
++++ b/lucida-web/src/pipeline/tickCoordinator.ts
+@@ -8,6 +8,7 @@
+  */
+ 
+ import type { TickContext } from "../renderLoopTypes.ts";
++import { tvAdd, tvObs } from "../debug/traceVolumes.ts";
+ import type { DatasetSettings, SceneSettings } from "../tickCommon.ts";
+ import type { DatasetManifest, ImageSpec } from "../manifestTypes.ts";
+ import { Axis } from "../axes.ts";
+@@ -1379,6 +1380,8 @@ export class TickCoordinator {
+     // this tick reflects this rebuild. Gated like recordHit above: the
+     // rebuild window, cause attribution, and churn detector only run
+     // while observable.
++    tvAdd("plan.full_rebuild");
++    tvObs("plan.rebuild_ms", rebuildEnd - tickStart);
+     if (orchTelemetryActive()) {
+       this.uploader.coldStateTelemetry.recordRebuild(
+         tickStart, causes, rebuildEnd - tickStart,
+@@ -1399,6 +1402,7 @@ export class TickCoordinator {
+    * from the delivery ledger as idle fill lands.
+    */
+   private serveCachedDebug(ctx: TickContext, tickStart: number): void {
++    tvAdd("plan.served_cached");
+     // Aggregates only while someone can observe it — the panel
+     // (debugStats) or the `orch` log category.
+     if (orchTelemetryActive()) {
+diff --git a/lucida-web/src/pipeline/upload/uploader.ts b/lucida-web/src/pipeline/upload/uploader.ts
+index ec50bbb..2a5a637 100644
+--- a/lucida-web/src/pipeline/upload/uploader.ts
++++ b/lucida-web/src/pipeline/upload/uploader.ts
+@@ -7,6 +7,7 @@
+  */
+ 
+ import type { CpuCache, ReadyDelivery, ResidencyTier } from "../fetch/index.ts";
++import { tvAdd, tvObs } from "../../debug/traceVolumes.ts";
+ import type {
+   ActiveSetEntry,
+   EntitySnapshot,
+@@ -291,6 +292,8 @@ export class Uploader {
+     };
+ 
+     const deliverables = Array.from(ctx.cpuCache.getDeliverable());
++    tvAdd("upload.deliver_call");
++    tvObs("upload.considered_per_call", deliverables.length);
+     const tierDemand = this.computeChunkTierDemand(deliverables);
+     const splitTierBudget = tierDemand.detail && tierDemand.coarse;
+     let detailRemaining = splitTierBudget ? Math.ceil(budget / 2) : budget;
+@@ -318,6 +321,7 @@ export class Uploader {
+       if (delivery.kind === "proxy") this.currentUploadStats.drainedProxies++;
+       else this.currentUploadStats.drainedChunks++;
+ 
++      const rrD0 = performance.now();
+       const sent = this.tryDispatchDelivery({
+         delivery,
+         ctx,
+@@ -326,9 +330,12 @@ export class Uploader {
+         sliceZ,
+         epochs,
+       });
++      tvObs("upload.dispatch_ms", performance.now() - rrD0);
+       if (sent === 0) continue;
+ 
+       ctx.cpuCache.markSent(delivery);
++      tvAdd("upload.posted");
++      tvObs("upload.posted_bytes", sent);
+       sentAny = true;
+       this.currentUploadStats.bytesUploaded += sent;
+       recordUpload(sent, delivery.kind);
+diff --git a/lucida-web/src/renderLoop.ts b/lucida-web/src/renderLoop.ts
+index 29a741c..e2245ec 100644
+--- a/lucida-web/src/renderLoop.ts
++++ b/lucida-web/src/renderLoop.ts
+@@ -1,5 +1,6 @@
+ /** Pull-based render loop: coalesces chunk arrivals into a single RAF tick. */
+ import type { DatasetManifest } from "./manifestTypes.ts";
++import { tvAdd, tvObs } from "./debug/traceVolumes.ts";
+ import type { TickContext, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
+ import { RESIDENCY_RENDER_INTERVAL_MS } from "./renderLoopTypes.ts";
+ import type { SceneEpochs } from "./pipeline/epochs.ts";
+@@ -560,7 +561,11 @@ export class RenderLoop {
+       }
+     }
+ 
++    tvAdd("loop.tick");
++    if (shouldRender) tvAdd("loop.render_frame");
++    const rrTickT0 = performance.now();
+     const ctx = this.buildContext();
++    tvObs("loop.build_context_ms", performance.now() - rrTickT0);
+ 
+     // Detect multi-channel mode transitions and clean up stale resources
+     this.handleMultiChannelTransition();
+@@ -597,6 +602,7 @@ export class RenderLoop {
+ 
+     if (tickMinimapOverview(ctx, this.minimapState, now)) this.setDirty("residency", "minimap_overview_continuation");
+     if (shouldRender) tickMinimap(ctx, this.minimapState, this.sliceZ);
++    tvObs("loop.tick_ms", performance.now() - rrTickT0);
+ 
+     // If work remains (budget exhausted or chunks pending), schedule another frame
+     this.scheduleIfNeeded();
+diff --git a/lucida-web/src/slicePath.ts b/lucida-web/src/slicePath.ts
+index 41a00c8..a9ee006 100644
+--- a/lucida-web/src/slicePath.ts
++++ b/lucida-web/src/slicePath.ts
+@@ -1,5 +1,6 @@
+ /** Slice render path: upload chunks + render multi-pass. */
+ import { Axis } from "./axes.ts";
++import { tvObs } from "./debug/traceVolumes.ts";
+ import { labelFootprint } from "./renderer/labelLayout.ts";
+ import { resolveVisibleLabels, type LabelViewSetting } from "./pipeline/planning/labelRequests.ts";
+ import type { SliceLayerParams } from "./renderer/workerProtocol.ts";
+@@ -419,6 +420,7 @@ function uploadAndRenderSlice(
+     if (added > 0) passesByDataset[dsId] = added;
+   }
+ 
++  tvObs("render.passes_per_frame", layers.length);
+   if (debugStats.enabled) {
+     debugStats.renderPasses = { total: layers.length, byDataset: passesByDataset };
+   }
+diff --git a/lucida-web/src/volumePath.ts b/lucida-web/src/volumePath.ts
+index 0b816a6..3fde153 100644
+--- a/lucida-web/src/volumePath.ts
++++ b/lucida-web/src/volumePath.ts
+@@ -1,5 +1,6 @@
+ /** Volume render path: plan-based chunk upload + multi-pass render. */
+ import { Axis } from "./axes.ts";
++import { tvObs } from "./debug/traceVolumes.ts";
+ import type { VolumeLayerParams } from "./renderer/workerProtocol.ts";
+ import type { TickContext } from "./renderLoopTypes.ts";
+ import type { DatasetManifest } from "./manifestTypes.ts";
+@@ -230,6 +231,7 @@ function uploadAndRenderVolume(
+     if (added > 0) passesByDataset[dsId] = added;
+   }
+ 
++  tvObs("render.passes_per_frame", layers.length);
+   if (debugStats.enabled) {
+     debugStats.renderPasses = { total: layers.length, byDataset: passesByDataset };
+   }

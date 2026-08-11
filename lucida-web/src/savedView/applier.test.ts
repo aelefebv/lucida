@@ -269,7 +269,7 @@ describe("SavedViewApplier", () => {
       fakeIdForUrl,
       30_000,
       "workspace-dataset-id",
-      false,
+      "refuse",
     );
     const v = emptyView();
     v.datasets = [];
@@ -314,7 +314,7 @@ describe("SavedViewApplier", () => {
       fakeIdForUrl,
       30_000,
       "workspace-dataset-id",
-      true,
+      "broadcast",
     );
     const v = emptyView();
     v.dataset_order = ["wds-a"];
@@ -329,6 +329,46 @@ describe("SavedViewApplier", () => {
       dataset_id: "wds-a",
       layout_id: "L1",
     });
+  });
+
+  it("local layout mutation switches this scene's layout without broadcasting it (#923)", async () => {
+    const scene = createMockScene({
+      datasetIds: ["wds-a"],
+      availableLayouts: {
+        "wds-a": [
+          { id: "L0", name: "default", active: true },
+          { id: "L1", name: "alt" },
+        ],
+      },
+    });
+    const applier = new SavedViewApplier(
+      bridge,
+      () => scene as never,
+      fakeIdForUrl,
+      30_000,
+      "workspace-dataset-id",
+      "local",
+    );
+    const v = emptyView();
+    v.dataset_order = ["wds-a"];
+    v.active_layouts = { "wds-a": "L1" };
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await applier.apply(v);
+
+    // The capture renders the layout the view asked for...
+    const localSetActive = scene.calls.find((c) => c.includes('"set_active_layout"'));
+    expect(JSON.parse(localSetActive!)).toMatchObject({
+      type: "set_active_layout",
+      dataset_id: "wds-a",
+      layout_id: "L1",
+    });
+    // ...and the shared document never hears about it, silently — a capture
+    // has nothing to warn a user about.
+    expect(docCmds.find((c) => c.includes('"set_active_layout"'))).toBeUndefined();
+    expect(applier.getState().warnings).toEqual([]);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 
   it("workspace mode warns and partially applies when a view references missing workspace datasets", async () => {
