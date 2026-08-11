@@ -257,15 +257,7 @@ export class CpuCache {
 
   /** Plan-rebuild generation stamped onto wanted cache entries. */
   private currentSubmitTick = 0;
-  /**
-   * Detail keys the VIEW asked for this tick. Speculative prefetch-lane
-   * demand is deliberately not counted here — it lands in
-   * {@link speculativeDetailKeysThisTick} instead — so both detail coverage
-   * and the quiescence predicate measure what is actually being looked at.
-   */
   private desiredDetailKeysThisTick = new Set<string>();
-  /** Prefetch-lane detail demand: future timepoints nobody is looking at yet. */
-  private speculativeDetailKeysThisTick = new Set<string>();
   private desiredCoarseKeysThisTick = new Set<string>();
   /**
    * Keys demanded by the VIEW's own coarse lane this tick (a strict
@@ -435,11 +427,7 @@ export class CpuCache {
       tiers[i] = tier;
       if (unwantedInFlightKeys.size > 0) unwantedInFlightKeys.delete(key);
       if (tier === "detail") {
-        if (req.lane === "prefetch") {
-          this.speculativeDetailKeysThisTick.add(key);
-        } else {
-          this.desiredDetailKeysThisTick.add(key);
-        }
+        this.desiredDetailKeysThisTick.add(key);
       } else if (tier === "coarse") {
         this.desiredCoarseKeysThisTick.add(key);
         if (req.lane === "coarse") this.viewCoarseKeysThisTick.add(key);
@@ -722,7 +710,6 @@ export class CpuCache {
     this.activeEntityIdsThisRebuild = new Set();
     this.currentSubmitTick++;
     this.desiredDetailKeysThisTick.clear();
-    this.speculativeDetailKeysThisTick.clear();
     this.desiredCoarseKeysThisTick.clear();
     this.viewCoarseKeysThisTick.clear();
     this.sparseDetailStreak = 0;
@@ -912,17 +899,31 @@ export class CpuCache {
   /**
    * The cache's half of the published quiescence predicate (ADR 0051):
    * everything the view asked for is resident, with nothing pending or in
-   * flight. Speculative prefetch is reported separately and never counted
-   * against the predicate — the prefetch lane keeps requesting future
-   * timepoints, so on a timeseries a naive "queues empty" test may never go
-   * true — but what is still outstanding is reported rather than hidden.
+   * flight.
+   *
+   * Writes into `out` and returns it. The render loop calls this every tick
+   * and owns one instance, because ADR 0049 asks the monitor not to allocate
+   * in steady state — an allocating recorder produces GC pauses that show up
+   * as stalls in its own trace.
+   *
+   * **Where prefetch is excluded, and where it is not.** ADR 0051 excludes
+   * speculative prefetch from the predicate because the prefetch lane keeps
+   * requesting future timepoints, so a naive "queues empty" test may never
+   * go true on a timeseries. That hazard lives in the *queues*, and that is
+   * where the exclusion is applied: `pending` and `inFlight` count
+   * non-speculative work only, and the speculative remainder is reported
+   * beside them rather than hidden. The demand counts stay on the same
+   * prefetch-inclusive basis the cache already publishes — resident and
+   * desired must be counted the same way or the ratio is nonsense, and
+   * prefetch demand is finite per timepoint and becomes resident like any
+   * other chunk, so including it cannot make quiescence unreachable.
    *
    * `pendingUnclassified` is set when the pending queue is deeper than
    * {@link QUIESCENCE_PENDING_SCAN_CAP}. That bounds the scan to the tick it
    * runs in, and reads as *not* quiescent, so a deep queue keeps a run open
    * rather than closing one early on a guess.
    */
-  quiescenceInputs(): CacheQuiescenceInputs {
+  quiescenceInputs(out: CacheQuiescenceInputs): CacheQuiescenceInputs {
     const demand = this.computeTierDemandTelemetry();
 
     let inFlight = this.proxyScheduler.inFlightSize;
@@ -936,22 +937,18 @@ export class CpuCache {
       req => req.lane === "prefetch",
       QUIESCENCE_PENDING_SCAN_CAP,
     );
-    const pending =
-      speculativePending === null
-        ? null
-        : this.chunkScheduler.pendingSize - speculativePending + this.proxyScheduler.pendingSize;
 
-    return {
-      desiredDetailChunks: demand.desired.detailChunks,
-      residentDetailChunks: demand.resident.detailChunks,
-      desiredCoarseChunks: demand.desired.coarseChunks,
-      residentCoarseChunks: demand.resident.coarseChunks,
-      pending: pending ?? this.chunkScheduler.pendingSize + this.proxyScheduler.pendingSize,
-      inFlight,
-      speculativePending: speculativePending ?? 0,
-      speculativeInFlight,
-      pendingUnclassified: speculativePending === null,
-    };
+    out.desiredDetailChunks = demand.desired.detailChunks;
+    out.residentDetailChunks = demand.resident.detailChunks;
+    out.desiredCoarseChunks = demand.desired.coarseChunks;
+    out.residentCoarseChunks = demand.resident.coarseChunks;
+    out.inFlight = inFlight;
+    out.speculativeInFlight = speculativeInFlight;
+    out.speculativePending = speculativePending ?? 0;
+    out.pendingUnclassified = speculativePending === null;
+    out.pending =
+      this.chunkScheduler.pendingSize - (speculativePending ?? 0) + this.proxyScheduler.pendingSize;
+    return out;
   }
 
   updateConfig(partial: Partial<CpuCacheConfig>): void {
@@ -1090,7 +1087,6 @@ export class CpuCache {
 
     this.activeEntityIds.clear();
     this.activeEntityIdsThisRebuild.clear();
-    this.speculativeDetailKeysThisTick.clear();
     this.viewCoarseKeysThisTick.clear();
     this.interactionDetector.reset();
     this.permanentFailures.clear();

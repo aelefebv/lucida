@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 
 import { TraceRecorder } from "./recorder.ts";
 import { noopRowSinkFactory } from "./sink.ts";
-import { evaluateQuiescence, type QuiescenceInputs } from "./quiescence.ts";
+import { createQuiescenceState, evaluateQuiescence, type QuiescenceState } from "./quiescence.ts";
 import { Boundary, RowOutcome, TRACE_SCHEMA_VERSION } from "./types.ts";
 
 const OPEN_CAUSE = { epoch: "content", dirtyKind: "interactive", source: "dataset_added" } as const;
@@ -19,22 +19,8 @@ const CHUNK = {
   x: 3,
 };
 
-function inputs(overrides: Partial<QuiescenceInputs> = {}): QuiescenceInputs {
-  return {
-    interactiveDirty: false,
-    residencyDirty: false,
-    frameInFlight: false,
-    desiredDetailChunks: 0,
-    residentDetailChunks: 0,
-    desiredCoarseChunks: 0,
-    residentCoarseChunks: 0,
-    pending: 0,
-    inFlight: 0,
-    speculativePending: 0,
-    speculativeInFlight: 0,
-    pendingUnclassified: false,
-    ...overrides,
-  };
+function inputs(overrides: Partial<QuiescenceState> = {}): QuiescenceState {
+  return Object.assign(createQuiescenceState(), overrides);
 }
 
 function makeRecorder(overrides: Partial<ConstructorParameters<typeof TraceRecorder>[0]> = {}) {
@@ -78,6 +64,15 @@ describe("TraceRecorder run lifecycle", () => {
     const doc = recorder.exportDocument();
     expect(doc.runs).toHaveLength(0);
     expect(doc.rowsOutsideRun).toBe(1);
+  });
+
+  it("does not open a run before the page can say what conditions it ran under", () => {
+    const { recorder } = makeRecorder();
+    recorder.setEnvironment(null);
+    recorder.openRun(OPEN_CAUSE);
+
+    expect(recorder.isRunOpen).toBe(false);
+    expect(recorder.exportDocument().runs).toHaveLength(0);
   });
 
   it("opens on a dataset-open cause and keeps one run open across repeats", () => {

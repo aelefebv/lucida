@@ -56,10 +56,16 @@ export type BoundaryIndex = (typeof Boundary)[keyof typeof Boundary];
 export const UNSET_STAMP = 0xffffffff;
 const MAX_STAMP = UNSET_STAMP - 1;
 
-/** Clamp a microsecond offset into the uint32 slot range. */
+/**
+ * Clamp a microsecond offset into the uint32 slot range.
+ *
+ * `Math.trunc`, not `| 0`: bitwise coercion is signed, so an offset past
+ * 2^31 — a run over about 36 minutes — would come back negative. Harmless
+ * inside a `Uint32Array`, but a run's duration is a plain number.
+ */
 export function clampStamp(offsetUs: number): number {
   if (!(offsetUs > 0)) return 0;
-  return offsetUs >= MAX_STAMP ? MAX_STAMP : offsetUs | 0;
+  return offsetUs >= MAX_STAMP ? MAX_STAMP : Math.trunc(offsetUs);
 }
 
 /**
@@ -156,11 +162,15 @@ export interface GpuIdentity {
 }
 
 /**
- * Work still outstanding when the run settled. Reported rather than hidden:
- * prefetch is excluded from the quiescence predicate, so a run can close
- * with speculative work in flight and the reader has to be able to see that.
+ * What the pipeline has left to do, from the CPU cache's point of view.
+ * One shape with two readings: live, it is the cache's half of the
+ * quiescence predicate; captured at run close, it is what was still
+ * outstanding at settle. Reported rather than hidden — prefetch is excluded
+ * from the predicate, so a run can close with speculative work in flight and
+ * the reader has to be able to see that.
  */
 export interface Outstanding {
+  /** Non-speculative work only; the speculative remainder is counted below. */
   pending: number;
   inFlight: number;
   speculativePending: number;

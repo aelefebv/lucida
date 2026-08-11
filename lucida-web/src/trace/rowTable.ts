@@ -181,25 +181,18 @@ export class RowTable {
 
   private grow(): void {
     const next = this.capacity * 2;
-    this.datasetIds = growUint32(this.datasetIds, next);
-    this.entityIds = growUint32(this.entityIds, next);
-    this.imageIds = growUint32(this.imageIds, next);
-    this.coords = growUint32(this.coords, next * COORDS_PER_ROW);
-    this.stamps = growUint32(this.stamps, next * BOUNDARY_COUNT);
-    this.tiers = growUint8(this.tiers, next);
-    this.outcomes = growUint8(this.outcomes, next);
+    this.datasetIds = copyInto(this.datasetIds, new Uint32Array(next));
+    this.entityIds = copyInto(this.entityIds, new Uint32Array(next));
+    this.imageIds = copyInto(this.imageIds, new Uint32Array(next));
+    this.coords = copyInto(this.coords, new Uint32Array(next * COORDS_PER_ROW));
+    this.stamps = copyInto(this.stamps, new Uint32Array(next * BOUNDARY_COUNT));
+    this.tiers = copyInto(this.tiers, new Uint8Array(next));
+    this.outcomes = copyInto(this.outcomes, new Uint8Array(next));
     this.capacity = next;
   }
 }
 
-function growUint32(src: Uint32Array, length: number): Uint32Array {
-  const next = new Uint32Array(length);
-  next.set(src);
-  return next;
-}
-
-function growUint8(src: Uint8Array, length: number): Uint8Array {
-  const next = new Uint8Array(length);
-  next.set(src);
+function copyInto<T extends Uint8Array | Uint32Array>(src: T, next: T): T {
+  next.set(src as never);
   return next;
 }

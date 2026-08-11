@@ -78,8 +78,9 @@ chunk in one is not the same resident as the same chunk in the other.
 _Avoid_: quality, priority, LOD tier
 
 **Lane**:
-Which concurrent stream of work a unit belongs to: `main`, `minimap`, or `label`.
-Orthogonal to every other dimension — the same work happens in each lane.
+Which concurrent stream of work a unit belongs to. The planner emits `detail`,
+`coarse`, `prefetch`, `minimap` and `overview`; the label path is its own stream
+again. Orthogonal to every other dimension — the same work happens in each lane.
 _Avoid_: track (a track is a timeline row), queue, channel
 
 **Wanted set**:
@@ -181,6 +182,26 @@ The interval a browser row measures around one wire request, on one clock. Serve
 rows are placed by nesting inside it rather than by clock synchronisation, so the
 unattributed remainder is named as a gap rather than absorbed.
 _Avoid_: window, span, round trip
+
+**Boundary**:
+The handoff a lifecycle row stamps. A row holds one timestamp slot per boundary,
+so N phases need N+1 slots and adjacent phases share the slot between them — a
+phase is the interval between two boundaries, never a slot of its own.
+_Avoid_: marker, checkpoint, timestamp (a boundary is the event; the stamp is what
+records it)
+
+**Row outcome**:
+How one lifecycle row's life ended — `in-flight`, `complete`, or `retired`. A
+column, not an inference: a stamp array alone cannot tell "never entered the next
+phase" from "entered and never left", and drawing them alike turns a healthy phase
+into a false slab. Distinct from end reason, which belongs to a run.
+_Avoid_: end reason (that is the run's field), status, state
+
+**Speculative**:
+Work the pipeline started for a view nobody is looking at yet — today, the
+prefetch lane's future timepoints. Excluded from the quiescence predicate and from
+the view's demand, and reported at settle rather than hidden.
+_Avoid_: background, idle, optional
 
 ## Surfaces
 

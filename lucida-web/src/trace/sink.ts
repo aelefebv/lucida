@@ -14,46 +14,13 @@ import { RowTable } from "./rowTable.ts";
 import type { ChunkRowSource, RowOutcomeValue, TraceRow } from "./types.ts";
 
 export interface RowSink {
-  /** Returns the row's index within this sink, or -1 if it kept nothing. */
+  /** Returns the row's index within this sink. */
   append(src: ChunkRowSource, tier: 0 | 1): number;
   stamp(index: number, boundary: number, offsetUs: number): void;
   setOutcome(index: number, outcome: RowOutcomeValue): void;
   serialise(): TraceRow[];
   readonly length: number;
   readonly byteLength: number;
-}
-
-/** The real sink: one fixed-width row per chunk in a growable columnar table. */
-export class TableRowSink implements RowSink {
-  private readonly table: RowTable;
-
-  constructor(initialCapacity?: number) {
-    this.table = new RowTable(initialCapacity);
-  }
-
-  append(src: ChunkRowSource, tier: 0 | 1): number {
-    return this.table.append(src, tier);
-  }
-
-  stamp(index: number, boundary: number, offsetUs: number): void {
-    this.table.stamp(index, boundary, offsetUs);
-  }
-
-  setOutcome(index: number, outcome: RowOutcomeValue): void {
-    this.table.setOutcome(index, outcome);
-  }
-
-  serialise(): TraceRow[] {
-    return this.table.serialise();
-  }
-
-  get length(): number {
-    return this.table.length;
-  }
-
-  get byteLength(): number {
-    return this.table.byteLength;
-  }
 }
 
 /**
@@ -87,5 +54,6 @@ export class NoopRowSink implements RowSink {
 
 export type RowSinkFactory = () => RowSink;
 
-export const tableRowSinkFactory: RowSinkFactory = () => new TableRowSink();
+/** The real sink: one fixed-width row per chunk in a growable columnar table. */
+export const tableRowSinkFactory: RowSinkFactory = () => new RowTable();
 export const noopRowSinkFactory: RowSinkFactory = () => new NoopRowSink();

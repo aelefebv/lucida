@@ -12,24 +12,13 @@
  * pending and in-flight counts. This module is where they meet.
  */
 
+import type { Outstanding } from "./types.ts";
+
 /**
- * What the page measures. The render loop supplies the first three; the CPU
- * cache supplies the rest through `quiescenceInputs()`.
- *
- * Speculative (prefetch-lane) work is reported separately and never counted
- * against the predicate: the prefetch lane keeps requesting future
- * timepoints, so on a timeseries a naive "queues empty" test may never go
- * true. What is still outstanding at settle is reported, not hidden.
+ * What the page measures. The render loop supplies the three flags; the CPU
+ * cache supplies the {@link Outstanding} half through `quiescenceInputs()`.
  */
-export interface CacheQuiescenceInputs {
-  desiredDetailChunks: number;
-  residentDetailChunks: number;
-  desiredCoarseChunks: number;
-  residentCoarseChunks: number;
-  pending: number;
-  inFlight: number;
-  speculativePending: number;
-  speculativeInFlight: number;
+export interface CacheQuiescenceInputs extends Outstanding {
   /**
    * True when the pending queue was too deep to classify by lane. The scan
    * is bounded so the predicate cannot cost more than the tick it runs in;
@@ -54,9 +43,42 @@ export interface QuiescenceState extends QuiescenceInputs {
   at: number;
 }
 
-export function evaluateQuiescence(inputs: QuiescenceInputs, at: number): QuiescenceState {
-  const reason = quiescenceReason(inputs);
-  return { ...inputs, at, reason, quiescent: reason === "quiescent" };
+/**
+ * A zeroed state, for a caller that will reuse one instance across ticks.
+ * The publish path runs every tick, and ADR 0049 asks the monitor not to
+ * allocate in steady state: its own GC pauses would appear as stalls in its
+ * own trace.
+ */
+export function createQuiescenceState(): QuiescenceState {
+  return {
+    interactiveDirty: false,
+    residencyDirty: false,
+    frameInFlight: false,
+    desiredDetailChunks: 0,
+    residentDetailChunks: 0,
+    desiredCoarseChunks: 0,
+    residentCoarseChunks: 0,
+    pending: 0,
+    inFlight: 0,
+    speculativePending: 0,
+    speculativeInFlight: 0,
+    pendingUnclassified: false,
+    quiescent: false,
+    reason: "unpublished",
+    at: 0,
+  };
+}
+
+/**
+ * Decide the predicate over `state`'s already-filled inputs, in place. The
+ * caller fills the input fields, this fills `reason`, `quiescent` and `at`.
+ */
+export function evaluateQuiescence(state: QuiescenceState, at: number): QuiescenceState {
+  const reason = quiescenceReason(state);
+  state.at = at;
+  state.reason = reason;
+  state.quiescent = reason === "quiescent";
+  return state;
 }
 
 function quiescenceReason(i: QuiescenceInputs): string {

@@ -15,7 +15,7 @@ import { identityMatrix } from "./pipeline/upload/coldState/identity.ts";
 import type { Session } from "./session.ts";
 import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap, markMinimapOverviewSeeded, clearMinimapForDataset } from "./minimapPath.ts";
 import { traceRecorder, type TraceEnvironment } from "./trace/recorder.ts";
-import { evaluateQuiescence } from "./trace/quiescence.ts";
+import { createQuiescenceState, evaluateQuiescence, type QuiescenceState } from "./trace/quiescence.ts";
 import type { CacheWarmth, Outstanding, RunConditions } from "./trace/types.ts";
 
 // Re-export types so downstream imports stay unchanged
@@ -73,6 +73,12 @@ export class RenderLoop implements TraceEnvironment {
   // cleared within one RAF) are visible at the 200ms polling rate.
   private lastInteractiveDirtyAt: number | null = null;
   private lastResidencyDirtyAt: number | null = null;
+
+  /**
+   * Reused across every publication. The predicate is evaluated once per
+   * tick, and ADR 0049 asks the monitor for zero steady-state allocation.
+   */
+  private quiescenceState: QuiescenceState = createQuiescenceState();
 
   private sliceState: SliceState = createSliceState();
   private volumeState: VolumeState = createVolumeState();
@@ -296,17 +302,12 @@ export class RenderLoop implements TraceEnvironment {
    * to reschedule, so a loop with work left to do never looks settled.
    */
   private publishQuiescence(): void {
-    traceRecorder.noteQuiescence(
-      evaluateQuiescence(
-        {
-          interactiveDirty: this.interactiveDirty,
-          residencyDirty: this.residencyDirty,
-          frameInFlight: this.rafId !== null,
-          ...this.session.cpuCache.quiescenceInputs(),
-        },
-        performance.now(),
-      ),
-    );
+    const state = this.quiescenceState;
+    this.session.cpuCache.quiescenceInputs(state);
+    state.interactiveDirty = this.interactiveDirty;
+    state.residencyDirty = this.residencyDirty;
+    state.frameInFlight = this.rafId !== null;
+    traceRecorder.noteQuiescence(evaluateQuiescence(state, performance.now()));
   }
 
   /** {@link TraceEnvironment}: what was already resident when the run opened. */
@@ -346,19 +347,15 @@ export class RenderLoop implements TraceEnvironment {
     };
   }
 
-  /** {@link TraceEnvironment}: what was still outstanding when the run closed. */
+  /**
+   * {@link TraceEnvironment}: what was still outstanding when the run closed.
+   * Read fresh rather than off the last publication — a run can be closed
+   * explicitly between ticks, and a stale reading would understate it.
+   */
   captureOutstanding(): Outstanding {
-    const inputs = this.session.cpuCache.quiescenceInputs();
-    return {
-      pending: inputs.pending,
-      inFlight: inputs.inFlight,
-      speculativePending: inputs.speculativePending,
-      speculativeInFlight: inputs.speculativeInFlight,
-      desiredDetailChunks: inputs.desiredDetailChunks,
-      residentDetailChunks: inputs.residentDetailChunks,
-      desiredCoarseChunks: inputs.desiredCoarseChunks,
-      residentCoarseChunks: inputs.residentCoarseChunks,
-    };
+    const { pendingUnclassified: _unclassified, ...outstanding } =
+      this.session.cpuCache.quiescenceInputs(createQuiescenceState());
+    return outstanding;
   }
 
   private publishRenderedCaptureReady(): void {

@@ -82,6 +82,11 @@ export interface TraceRecorderOptions {
 interface OpenRun {
   runId: string;
   cause: RunCause;
+  /**
+   * Held for the run's lifetime. A run cannot open without an environment,
+   * so nothing downstream has to cope with its absence.
+   */
+  environment: TraceEnvironment;
   cacheWarmth: CacheWarmth;
   startedAtMs: number;
   startedAtEpochMs: number;
@@ -143,18 +148,23 @@ export class TraceRecorder {
   }
 
   /**
-   * Open a run. A no-op while one is already open: opening a dataset that
-   * pulls in several members is one run, not one per member.
+   * Open a run. A no-op while one is already open — opening a dataset that
+   * pulls in several members is one run, not one per member — and a no-op
+   * before the page has registered an environment, because a run whose
+   * conditions cannot be recorded is not a comparable artifact.
    */
   openRun(cause: RunCause): void {
     if (this.open) return;
+    const environment = this.environment;
+    if (!environment) return;
     const startedAtMs = this.now();
     const startedAtEpochMs = this.epochNow();
     this.generation++;
     this.open = {
       runId: `run-${startedAtEpochMs}-${++this.runSeq}`,
       cause,
-      cacheWarmth: this.captureWarmth(),
+      environment,
+      cacheWarmth: environment.captureWarmth(),
       startedAtMs,
       startedAtEpochMs,
       sink: this.sinkFactory(),
@@ -176,7 +186,7 @@ export class TraceRecorder {
     this.closed.push({
       sink: run.sink,
       header: {
-        ...this.captureConditions(),
+        ...run.environment.captureConditions(),
         cacheWarmth: run.cacheWarmth,
         schemaVersion: TRACE_SCHEMA_VERSION,
         runId: run.runId,
@@ -188,7 +198,7 @@ export class TraceRecorder {
         durationUs: clampStamp(Math.round((this.now() - run.startedAtMs) * 1000)),
         quiescenceHoldMs: this.quiescenceHoldMs,
         timeoutMs: this.timeoutMs,
-        outstandingAtSettle: this.captureOutstanding(),
+        outstandingAtSettle: run.environment.captureOutstanding(),
       },
     });
   }
@@ -284,44 +294,6 @@ export class TraceRecorder {
     if (this.holdTimer === null) return;
     clearTimeout(this.holdTimer);
     this.holdTimer = null;
-  }
-
-  private captureConditions(): RunConditions {
-    return (
-      this.environment?.captureConditions() ?? {
-        datasetIds: [],
-        composedView: { url: "", mode: "slice" },
-        devicePixelRatio: 1,
-        viewport: { cssWidth: 0, cssHeight: 0, deviceWidth: 0, deviceHeight: 0 },
-      }
-    );
-  }
-
-  private captureWarmth(): CacheWarmth {
-    return (
-      this.environment?.captureWarmth() ?? {
-        detailChunks: 0,
-        detailBytes: 0,
-        coarseChunks: 0,
-        coarseBytes: 0,
-        proxyBytes: 0,
-      }
-    );
-  }
-
-  private captureOutstanding(): Outstanding {
-    return (
-      this.environment?.captureOutstanding() ?? {
-        pending: 0,
-        inFlight: 0,
-        speculativePending: 0,
-        speculativeInFlight: 0,
-        desiredDetailChunks: 0,
-        residentDetailChunks: 0,
-        desiredCoarseChunks: 0,
-        residentCoarseChunks: 0,
-      }
-    );
   }
 }
 

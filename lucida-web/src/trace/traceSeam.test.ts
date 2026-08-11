@@ -21,6 +21,7 @@ import type { ChunkRequest, RequestPlan } from "../pipeline/planning/index.ts";
 import { emptyPlanStats } from "../pipeline/planning/index.ts";
 import { installTraceSeam } from "./seam.ts";
 import { traceRecorder } from "./recorder.ts";
+import { createQuiescenceState } from "./quiescence.ts";
 import { TRACE_SCHEMA_VERSION } from "./types.ts";
 
 const OPEN_CAUSE = { epoch: "content", dirtyKind: "interactive", source: "dataset_added" } as const;
@@ -91,10 +92,31 @@ function makePlan(requests: ChunkRequest[]): RequestPlan {
 
 const flush = () => new Promise(resolve => setTimeout(resolve, 0));
 
+/**
+ * Stands in for the render loop, which is what registers the real one. A run
+ * cannot open without an environment — its conditions are what make it a
+ * comparable artifact.
+ */
+function registerEnvironment(): void {
+  traceRecorder.setEnvironment({
+    captureWarmth: () => ({
+      detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0, proxyBytes: 0,
+    }),
+    captureConditions: () => ({
+      datasetIds: ["ds"],
+      composedView: { url: "/w/ws-1", mode: "slice" },
+      devicePixelRatio: 2,
+      viewport: { cssWidth: 800, cssHeight: 600, deviceWidth: 1600, deviceHeight: 1200 },
+    }),
+    captureOutstanding: () => createQuiescenceState(),
+  });
+}
+
 describe("the trace seam", () => {
   beforeEach(() => {
     // The recorder is a page-lifetime singleton; each case gets a clean one.
     traceRecorder.reset();
+    registerEnvironment();
   });
 
   it("is installed on the page and declares its schema version", () => {
@@ -201,12 +223,13 @@ describe("the cache's half of the quiescence predicate", () => {
     ]));
     await flush();
 
-    const inputs = cache.quiescenceInputs();
+    const inputs = cache.quiescenceInputs(createQuiescenceState());
     expect(inputs.inFlight + inputs.speculativeInFlight).toBe(1);
     expect(inputs.pending + inputs.speculativePending).toBe(1);
     expect(inputs.speculativeInFlight + inputs.speculativePending).toBe(1);
     expect(inputs.pendingUnclassified).toBe(false);
-    // Prefetch never counts as demand the view is waiting on.
-    expect(inputs.desiredDetailChunks).toBe(1);
+    // Demand stays on the cache's own prefetch-inclusive basis, so resident
+    // and desired are counted the same way; the exclusion is in the queues.
+    expect(inputs.desiredDetailChunks).toBe(2);
   });
 });

@@ -1,23 +1,14 @@
 import { describe, it, expect } from "vitest";
 
-import { evaluateQuiescence, type QuiescenceInputs } from "./quiescence.ts";
+import { createQuiescenceState, evaluateQuiescence, type QuiescenceState } from "./quiescence.ts";
 
-function settled(overrides: Partial<QuiescenceInputs> = {}): QuiescenceInputs {
-  return {
-    interactiveDirty: false,
-    residencyDirty: false,
-    frameInFlight: false,
+function settled(overrides: Partial<QuiescenceState> = {}): QuiescenceState {
+  return Object.assign(createQuiescenceState(), {
     desiredDetailChunks: 12,
     residentDetailChunks: 12,
     desiredCoarseChunks: 3,
     residentCoarseChunks: 3,
-    pending: 0,
-    inFlight: 0,
-    speculativePending: 0,
-    speculativeInFlight: 0,
-    pendingUnclassified: false,
-    ...overrides,
-  };
+  }, overrides);
 }
 
 describe("evaluateQuiescence", () => {
