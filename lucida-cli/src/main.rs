@@ -1,5 +1,6 @@
 mod admin;
 mod auth;
+mod browser;
 mod config;
 mod credentials;
 mod dataset;
@@ -16,24 +17,17 @@ mod workspace;
 
 use std::io::Write;
 use std::path::Path;
-use std::process::Stdio;
 use std::time::Duration;
 
 use base64::Engine as _;
 use clap::{Parser, Subcommand, ValueEnum};
 use flate2::Compression;
 use flate2::write::GzEncoder;
-use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use lucida_core::command::ViewportCommand;
 use lucida_core::saved_view::SavedView;
 use lucida_core::scene::{BlendMode, Colormap, RenderMode};
 use lucida_core::view_transform::{ExplorationSidecar, ViewExtent, default_view};
-use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command as TokioCommand;
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::Error as WebSocketError;
-use tokio_tungstenite::tungstenite::protocol::Message;
+use serde_json::Value;
 
 use crate::admin::{
     AdminClearProxyCacheOutput, AdminClient, AdminWorkspaceDetailsOutput,
@@ -44,6 +38,7 @@ use crate::admin::{
 use crate::auth::{
     AuthClient, LoginResult, PollOutcome, generate_raw_token, open_browser, poll_interval,
 };
+use crate::browser::Viewport;
 use crate::config::{CliConfig, ConfigStore, normalize_server_base_url, resolve_server};
 use crate::credentials::{EffectiveToken, clear_local_token, resolve_token, store_local_token};
 use crate::dataset::{
@@ -85,8 +80,6 @@ use crate::workspace::{
     format_workspace_member_human, format_workspace_pin_human, format_workspace_sharing_human,
     resolve_workspace_record, target_for,
 };
-
-const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 
 #[derive(Parser, Debug)]
 #[command(name = "lucida", about = "Command line client for Lucida", version)]
@@ -3540,59 +3533,30 @@ async fn capture_viewer_screenshot(
         ));
     }
 
-    let browser = find_browser_binary()?;
-    let user_data_dir = chrome_user_data_dir();
-    tokio::fs::create_dir_all(&user_data_dir).await?;
-    let mut child = TokioCommand::new(&browser)
-        .arg("--headless=new")
-        .arg("--enable-unsafe-webgpu")
-        .arg("--ignore-gpu-blocklist")
-        .arg("--no-first-run")
-        .arg("--no-default-browser-check")
-        .arg("--remote-debugging-port=0")
-        .arg(format!("--user-data-dir={}", user_data_dir.display()))
-        .arg(format!("--window-size={width},{height}"))
-        .arg("about:blank")
-        .stderr(Stdio::piped())
-        .stdout(Stdio::null())
-        .stdin(Stdio::null())
-        .spawn()
-        .map_err(|error| {
-            CliError::new(
-                ErrorKind::Config,
-                format!("failed to launch browser {browser:?}: {error}"),
-            )
-        })?;
-
-    let result = async {
-        let stderr = child.stderr.take().ok_or_else(|| {
-            CliError::new(
-                ErrorKind::Protocol,
-                "browser stderr was not available for DevTools discovery",
-            )
-        })?;
-        let endpoint = wait_for_devtools_endpoint(stderr, wait).await?;
-        let png = capture_cdp_png(&endpoint, url, token, width, height, wait).await?;
+    browser::with_browser(capture_viewport(width, height), wait, async |browser| {
+        let mut page = browser.open_page(url, token, wait).await?;
+        let png = page.screenshot_png(wait).await?;
         if let Some(parent) = Path::new(output_path).parent()
             && !parent.as_os_str().is_empty()
         {
             tokio::fs::create_dir_all(parent).await?;
         }
         tokio::fs::write(output_path, png).await?;
-        Ok::<(), CliError>(())
-    }
-    .await;
+        Ok(())
+    })
+    .await
+}
 
-    let _ = child.kill().await;
-    let _ = child.wait().await;
-    let _ = tokio::fs::remove_dir_all(&user_data_dir).await;
-    result
+/// Viewport for the image-producing captures (`viewer screenshot`,
+/// `dataset montage`). Their device pixel ratio stays 1: it decides the output
+/// image's pixel size, not the workload the renderer is put under.
+fn capture_viewport(width: u32, height: u32) -> Viewport {
+    Viewport::new(width, height, 1.0)
 }
 
 /// Render many view URLs in ONE headless browser session and return a PNG per
-/// URL (in order). Reuses the single-shot screenshot spawn + DevTools discovery,
-/// then drives `capture_cdp_png` once per URL (it creates a fresh target each
-/// time) — much cheaper than relaunching the browser per montage cell.
+/// URL (in order). Each URL gets a fresh CDP target from the same launch —
+/// much cheaper than relaunching the browser per montage cell.
 async fn capture_montage_pngs(
     urls: &[String],
     token: Option<&EffectiveToken>,
@@ -3603,179 +3567,29 @@ async fn capture_montage_pngs(
     if urls.is_empty() {
         return Err(CliError::config("montage has no cells to render"));
     }
-    let browser = find_browser_binary()?;
-    let user_data_dir = chrome_user_data_dir();
-    tokio::fs::create_dir_all(&user_data_dir).await?;
-    let mut child = TokioCommand::new(&browser)
-        .arg("--headless=new")
-        .arg("--enable-unsafe-webgpu")
-        .arg("--ignore-gpu-blocklist")
-        .arg("--no-first-run")
-        .arg("--no-default-browser-check")
-        .arg("--remote-debugging-port=0")
-        .arg(format!("--user-data-dir={}", user_data_dir.display()))
-        .arg(format!("--window-size={width},{height}"))
-        .arg("about:blank")
-        .stderr(Stdio::piped())
-        .stdout(Stdio::null())
-        .stdin(Stdio::null())
-        .spawn()
-        .map_err(|error| {
-            CliError::new(
-                ErrorKind::Config,
-                format!("failed to launch browser {browser:?}: {error}"),
-            )
-        })?;
-
-    let result = async {
-        let stderr = child.stderr.take().ok_or_else(|| {
-            CliError::new(
-                ErrorKind::Protocol,
-                "browser stderr was not available for DevTools discovery",
-            )
-        })?;
-        let endpoint = wait_for_devtools_endpoint(stderr, wait).await?;
+    browser::with_browser(capture_viewport(width, height), wait, async |browser| {
         let mut pngs = Vec::with_capacity(urls.len());
         for url in urls {
-            pngs.push(capture_cdp_png(&endpoint, url, token, width, height, wait).await?);
+            let mut page = browser.open_page(url, token, wait).await?;
+            pngs.push(page.screenshot_png(wait).await?);
         }
-        Ok::<Vec<Vec<u8>>, CliError>(pngs)
-    }
-    .await;
-
-    let _ = child.kill().await;
-    let _ = child.wait().await;
-    let _ = tokio::fs::remove_dir_all(&user_data_dir).await;
-    result
+        Ok(pngs)
+    })
+    .await
 }
 
-/// Load a viewer URL in a fresh CDP target and read back the dataset's
-/// auto-contrast data window, which the web app publishes as
-/// `window.__lucidaAutoContrast` once it has computed the slice's range.
-/// Returns `None` if the page never published one. `dataset montage` uses this
-/// to derive a single shared, background-clipped window for every cell.
-async fn capture_cdp_auto_contrast(
-    browser_ws_url: &str,
-    url: &str,
-    token: Option<&EffectiveToken>,
-    width: u32,
-    height: u32,
-    wait: Duration,
-) -> Result<Option<[f64; 2]>, CliError> {
-    let (socket, _response) = connect_async(browser_ws_url)
-        .await
-        .map_err(|error| CliError::new(ErrorKind::SessionDisconnect, error.to_string()))?;
-    let (mut write, mut read) = socket.split();
-    let mut id = 1_u64;
+/// Reads back the dataset's auto-contrast data window, which the web app
+/// publishes as `window.__lucidaAutoContrast` once it has computed the slice's
+/// range.
+const AUTO_CONTRAST_PROBE: &str = "(() => { const a = window.__lucidaAutoContrast; return (a && Number.isFinite(a.min) && Number.isFinite(a.max)) ? [a.min, a.max] : null; })()";
 
-    let created = cdp_call(
-        &mut write,
-        &mut read,
-        &mut id,
-        None,
-        "Target.createTarget",
-        json!({ "url": "about:blank" }),
-        wait,
-    )
-    .await?;
-    let target_id = created
-        .get("targetId")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| CliError::new(ErrorKind::Protocol, "CDP targetId was missing"))?
-        .to_string();
-    let attached = cdp_call(
-        &mut write,
-        &mut read,
-        &mut id,
-        None,
-        "Target.attachToTarget",
-        json!({ "targetId": target_id, "flatten": true }),
-        wait,
-    )
-    .await?;
-    let session_id = attached
-        .get("sessionId")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| CliError::new(ErrorKind::Protocol, "CDP sessionId was missing"))?
-        .to_string();
-
-    cdp_call(
-        &mut write,
-        &mut read,
-        &mut id,
-        Some(&session_id),
-        "Network.enable",
-        json!({}),
-        wait,
-    )
-    .await?;
-    if let Some(token) = token {
-        cdp_call(
-            &mut write,
-            &mut read,
-            &mut id,
-            Some(&session_id),
-            "Network.setExtraHTTPHeaders",
-            json!({ "headers": { "Authorization": format!("Bearer {}", token.token) } }),
-            wait,
-        )
-        .await?;
-    }
-    cdp_call(
-        &mut write,
-        &mut read,
-        &mut id,
-        Some(&session_id),
-        "Emulation.setDeviceMetricsOverride",
-        json!({ "width": width, "height": height, "deviceScaleFactor": 1, "mobile": false }),
-        wait,
-    )
-    .await?;
-    cdp_call(
-        &mut write,
-        &mut read,
-        &mut id,
-        Some(&session_id),
-        "Page.enable",
-        json!({}),
-        wait,
-    )
-    .await?;
-    cdp_call(
-        &mut write,
-        &mut read,
-        &mut id,
-        Some(&session_id),
-        "Page.navigate",
-        json!({ "url": url }),
-        wait,
-    )
-    .await?;
-    wait_for_page_ready(&mut write, &mut read, &mut id, &session_id, wait).await?;
-    wait_for_lucida_capture_ready(&mut write, &mut read, &mut id, &session_id, wait).await?;
-    let evaluated = cdp_call(
-        &mut write,
-        &mut read,
-        &mut id,
-        Some(&session_id),
-        "Runtime.evaluate",
-        json!({
-            "expression": "(() => { const a = window.__lucidaAutoContrast; return (a && Number.isFinite(a.min) && Number.isFinite(a.max)) ? [a.min, a.max] : null; })()",
-            "returnByValue": true
-        }),
-        wait,
-    )
-    .await?;
-    let window = evaluated
-        .get("result")
-        .and_then(|value| value.get("value"))
-        .and_then(|value| value.as_array())
-        .and_then(|arr| {
-            let lo = arr.first()?.as_f64()?;
-            let hi = arr.get(1)?.as_f64()?;
-            Some([lo, hi])
-        });
-    Ok(window)
+/// Read an `[min, max]` window out of [`AUTO_CONTRAST_PROBE`]'s value, `None`
+/// when the page never published one.
+fn parse_auto_contrast_window(value: &Value) -> Option<[f64; 2]> {
+    let array = value.as_array()?;
+    let lo = array.first()?.as_f64()?;
+    let hi = array.get(1)?.as_f64()?;
+    Some([lo, hi])
 }
 
 /// Spawn one headless browser, load `url`, and return the dataset's
@@ -3788,547 +3602,12 @@ async fn probe_montage_auto_contrast(
     height: u32,
     wait: Duration,
 ) -> Result<Option<[f64; 2]>, CliError> {
-    let browser = find_browser_binary()?;
-    let user_data_dir = chrome_user_data_dir();
-    tokio::fs::create_dir_all(&user_data_dir).await?;
-    let mut child = TokioCommand::new(&browser)
-        .arg("--headless=new")
-        .arg("--enable-unsafe-webgpu")
-        .arg("--ignore-gpu-blocklist")
-        .arg("--no-first-run")
-        .arg("--no-default-browser-check")
-        .arg("--remote-debugging-port=0")
-        .arg(format!("--user-data-dir={}", user_data_dir.display()))
-        .arg(format!("--window-size={width},{height}"))
-        .arg("about:blank")
-        .stderr(Stdio::piped())
-        .stdout(Stdio::null())
-        .stdin(Stdio::null())
-        .spawn()
-        .map_err(|error| {
-            CliError::new(
-                ErrorKind::Config,
-                format!("failed to launch browser {browser:?}: {error}"),
-            )
-        })?;
-
-    let result = async {
-        let stderr = child.stderr.take().ok_or_else(|| {
-            CliError::new(
-                ErrorKind::Protocol,
-                "browser stderr was not available for DevTools discovery",
-            )
-        })?;
-        let endpoint = wait_for_devtools_endpoint(stderr, wait).await?;
-        capture_cdp_auto_contrast(&endpoint, url, token, width, height, wait).await
-    }
-    .await;
-
-    let _ = child.kill().await;
-    let _ = child.wait().await;
-    let _ = tokio::fs::remove_dir_all(&user_data_dir).await;
-    result
-}
-
-fn find_browser_binary() -> Result<String, CliError> {
-    if let Some(path) = std::env::var_os("LUCIDA_BROWSER") {
-        let path = path.to_string_lossy().to_string();
-        if Path::new(&path).exists() {
-            return Ok(path);
-        }
-        return Err(CliError::new(
-            ErrorKind::Config,
-            format!("LUCIDA_BROWSER points to a missing executable: {path}"),
-        ));
-    }
-
-    let absolute_candidates = [
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        "/Applications/Chromium.app/Contents/MacOS/Chromium",
-        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-    ];
-    for candidate in absolute_candidates {
-        if Path::new(candidate).exists() {
-            return Ok(candidate.to_string());
-        }
-    }
-
-    let path_candidates = [
-        "google-chrome",
-        "google-chrome-stable",
-        "chromium",
-        "chromium-browser",
-        "microsoft-edge",
-        "msedge",
-    ];
-    if let Some(paths) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&paths) {
-            for candidate in path_candidates {
-                let executable = dir.join(candidate);
-                if executable.is_file() {
-                    return Ok(executable.to_string_lossy().to_string());
-                }
-            }
-        }
-    }
-
-    Err(CliError::new(
-        ErrorKind::Config,
-        "could not find Chrome/Chromium; set LUCIDA_BROWSER to a browser executable",
-    ))
-}
-
-fn chrome_user_data_dir() -> std::path::PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    std::env::temp_dir().join(format!("lucida-cli-chrome-{}-{nanos}", std::process::id()))
-}
-
-async fn wait_for_devtools_endpoint<R>(stderr: R, wait: Duration) -> Result<String, CliError>
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    let mut lines = BufReader::new(stderr).lines();
-    tokio::time::timeout(wait, async {
-        while let Some(line) = lines.next_line().await? {
-            if let Some(endpoint) = line
-                .strip_prefix("DevTools listening on ")
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                return Ok(endpoint.to_string());
-            }
-        }
-        Err(CliError::new(
-            ErrorKind::Protocol,
-            "browser exited before printing a DevTools endpoint",
-        ))
+    browser::with_browser(capture_viewport(width, height), wait, async |browser| {
+        let mut page = browser.open_page(url, token, wait).await?;
+        let value = page.evaluate(AUTO_CONTRAST_PROBE, wait).await?;
+        Ok(parse_auto_contrast_window(&value))
     })
     .await
-    .map_err(|_| {
-        CliError::new(
-            ErrorKind::SessionDisconnect,
-            format!(
-                "timed out waiting for browser DevTools endpoint after {}s",
-                wait.as_secs()
-            ),
-        )
-    })?
-}
-
-async fn capture_cdp_png(
-    browser_ws_url: &str,
-    url: &str,
-    token: Option<&EffectiveToken>,
-    width: u32,
-    height: u32,
-    wait: Duration,
-) -> Result<Vec<u8>, CliError> {
-    let (socket, _response) = connect_async(browser_ws_url)
-        .await
-        .map_err(|error| CliError::new(ErrorKind::SessionDisconnect, error.to_string()))?;
-    let (mut write, mut read) = socket.split();
-    let mut id = 1_u64;
-
-    let created = cdp_call(
-        &mut write,
-        &mut read,
-        &mut id,
-        None,
-        "Target.createTarget",
-        json!({ "url": "about:blank" }),
-        wait,
-    )
-    .await?;
-    let target_id = created
-        .get("targetId")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| CliError::new(ErrorKind::Protocol, "CDP targetId was missing"))?
-        .to_string();
-    let attached = cdp_call(
-        &mut write,
-        &mut read,
-        &mut id,
-        None,
-        "Target.attachToTarget",
-        json!({ "targetId": target_id, "flatten": true }),
-        wait,
-    )
-    .await?;
-    let session_id = attached
-        .get("sessionId")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| CliError::new(ErrorKind::Protocol, "CDP sessionId was missing"))?
-        .to_string();
-
-    cdp_call(
-        &mut write,
-        &mut read,
-        &mut id,
-        Some(&session_id),
-        "Network.enable",
-        json!({}),
-        wait,
-    )
-    .await?;
-    if let Some(token) = token {
-        cdp_call(
-            &mut write,
-            &mut read,
-            &mut id,
-            Some(&session_id),
-            "Network.setExtraHTTPHeaders",
-            json!({ "headers": { "Authorization": format!("Bearer {}", token.token) } }),
-            wait,
-        )
-        .await?;
-    }
-    cdp_call(
-        &mut write,
-        &mut read,
-        &mut id,
-        Some(&session_id),
-        "Emulation.setDeviceMetricsOverride",
-        json!({
-            "width": width,
-            "height": height,
-            "deviceScaleFactor": 1,
-            "mobile": false
-        }),
-        wait,
-    )
-    .await?;
-    cdp_call(
-        &mut write,
-        &mut read,
-        &mut id,
-        Some(&session_id),
-        "Page.enable",
-        json!({}),
-        wait,
-    )
-    .await?;
-    cdp_call(
-        &mut write,
-        &mut read,
-        &mut id,
-        Some(&session_id),
-        "Page.navigate",
-        json!({ "url": url }),
-        wait,
-    )
-    .await?;
-    wait_for_page_ready(&mut write, &mut read, &mut id, &session_id, wait).await?;
-    wait_for_lucida_capture_ready(&mut write, &mut read, &mut id, &session_id, wait).await?;
-    let captured = cdp_call(
-        &mut write,
-        &mut read,
-        &mut id,
-        Some(&session_id),
-        "Page.captureScreenshot",
-        json!({ "format": "png", "fromSurface": true }),
-        wait,
-    )
-    .await?;
-    let data = captured
-        .get("data")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| CliError::new(ErrorKind::Protocol, "CDP screenshot data was missing"))?;
-    let png = base64::engine::general_purpose::STANDARD
-        .decode(data)
-        .map_err(|error| {
-            CliError::new(ErrorKind::Protocol, format!("invalid PNG data: {error}"))
-        })?;
-    ensure_png_signature(&png)?;
-    Ok(png)
-}
-
-async fn wait_for_page_ready<W, S>(
-    write: &mut W,
-    read: &mut S,
-    id: &mut u64,
-    session_id: &str,
-    wait: Duration,
-) -> Result<(), CliError>
-where
-    W: Sink<Message, Error = WebSocketError> + Unpin,
-    S: Stream<Item = Result<Message, WebSocketError>> + Unpin,
-{
-    let deadline = tokio::time::Instant::now() + wait;
-    loop {
-        let ready = cdp_call(
-            write,
-            read,
-            id,
-            Some(session_id),
-            "Runtime.evaluate",
-            json!({
-                "expression": "document.readyState === 'complete' && !!document.querySelector('canvas')",
-                "returnByValue": true
-            }),
-            wait,
-        )
-        .await?;
-        if ready
-            .get("result")
-            .and_then(|value| value.get("value"))
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false)
-        {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            return Ok(());
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Err(CliError::new(
-                ErrorKind::SessionDisconnect,
-                format!(
-                    "timed out waiting for viewer canvas after {}s",
-                    wait.as_secs()
-                ),
-            ));
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-}
-
-const LUCIDA_CAPTURE_READY_PROBE: &str = r#"(() => {
-  const canvas = document.querySelector('canvas');
-  if (!canvas) {
-    return {
-      ready: false,
-      reason: 'missing_canvas',
-      frame_count: 0,
-      dataset_count: 0,
-      canvas_width: 0,
-      canvas_height: 0,
-      mode: null
-    };
-  }
-  const canvasWidth = canvas.width || Math.floor(canvas.clientWidth);
-  const canvasHeight = canvas.height || Math.floor(canvas.clientHeight);
-  if (!canvasWidth || !canvasHeight) {
-    return {
-      ready: false,
-      reason: 'zero_size_canvas',
-      frame_count: 0,
-      dataset_count: 0,
-      canvas_width: canvasWidth || 0,
-      canvas_height: canvasHeight || 0,
-      mode: null
-    };
-  }
-  const state = window.__lucidaCaptureReady;
-  if (!state) {
-    return {
-      ready: false,
-      reason: 'missing_lucida_capture_ready',
-      frame_count: 0,
-      dataset_count: 0,
-      canvas_width: canvasWidth,
-      canvas_height: canvasHeight,
-      mode: null
-    };
-  }
-  const frameCount = Number(state.frameCount || 0);
-  const datasetCount = Number(state.datasetCount || 0);
-  const ready = Boolean(state.ready) && frameCount > 0 && datasetCount > 0;
-  return {
-    ready,
-    reason: ready ? 'rendered' : String(state.reason || 'not_ready'),
-    frame_count: frameCount,
-    dataset_count: datasetCount,
-    canvas_width: canvasWidth,
-    canvas_height: canvasHeight,
-    mode: state.mode || null
-  };
-})()"#;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CaptureReadyProbe {
-    ready: bool,
-    reason: String,
-    frame_count: u64,
-    dataset_count: u64,
-    canvas_width: u64,
-    canvas_height: u64,
-    mode: Option<String>,
-}
-
-async fn wait_for_lucida_capture_ready<W, S>(
-    write: &mut W,
-    read: &mut S,
-    id: &mut u64,
-    session_id: &str,
-    wait: Duration,
-) -> Result<(), CliError>
-where
-    W: Sink<Message, Error = WebSocketError> + Unpin,
-    S: Stream<Item = Result<Message, WebSocketError>> + Unpin,
-{
-    let deadline = tokio::time::Instant::now() + wait;
-    loop {
-        let result = cdp_call(
-            write,
-            read,
-            id,
-            Some(session_id),
-            "Runtime.evaluate",
-            json!({
-                "expression": LUCIDA_CAPTURE_READY_PROBE,
-                "returnByValue": true
-            }),
-            wait,
-        )
-        .await?;
-        let probe = capture_ready_probe_from_cdp_result(&result)?;
-        if probe.ready {
-            return Ok(());
-        }
-        if tokio::time::Instant::now() >= deadline {
-            let reason = capture_ready_probe_summary(&probe);
-            return Err(CliError::new(
-                ErrorKind::SessionDisconnect,
-                format!(
-                    "timed out waiting for Lucida viewer render after {}s ({reason})",
-                    wait.as_secs()
-                ),
-            ));
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-}
-
-fn capture_ready_probe_from_cdp_result(value: &Value) -> Result<CaptureReadyProbe, CliError> {
-    let probe = value
-        .get("result")
-        .and_then(|value| value.get("value"))
-        .ok_or_else(|| {
-            CliError::new(
-                ErrorKind::Protocol,
-                "capture-ready probe result was missing",
-            )
-        })?;
-    Ok(CaptureReadyProbe {
-        ready: probe
-            .get("ready")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false),
-        reason: probe
-            .get("reason")
-            .and_then(|value| value.as_str())
-            .unwrap_or("unknown")
-            .to_string(),
-        frame_count: probe
-            .get("frame_count")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(0),
-        dataset_count: probe
-            .get("dataset_count")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(0),
-        canvas_width: probe
-            .get("canvas_width")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(0),
-        canvas_height: probe
-            .get("canvas_height")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(0),
-        mode: probe
-            .get("mode")
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
-    })
-}
-
-fn capture_ready_probe_summary(probe: &CaptureReadyProbe) -> String {
-    format!(
-        "last probe: reason={}, frame_count={}, dataset_count={}, canvas={}x{}, mode={}",
-        probe.reason,
-        probe.frame_count,
-        probe.dataset_count,
-        probe.canvas_width,
-        probe.canvas_height,
-        probe.mode.as_deref().unwrap_or("unknown"),
-    )
-}
-
-fn ensure_png_signature(bytes: &[u8]) -> Result<(), CliError> {
-    if bytes.starts_with(PNG_SIGNATURE) {
-        return Ok(());
-    }
-    Err(CliError::new(
-        ErrorKind::Protocol,
-        "CDP screenshot did not return a PNG",
-    ))
-}
-
-async fn cdp_call<W, S>(
-    write: &mut W,
-    read: &mut S,
-    id: &mut u64,
-    session_id: Option<&str>,
-    method: &str,
-    params: Value,
-    wait: Duration,
-) -> Result<Value, CliError>
-where
-    W: Sink<Message, Error = WebSocketError> + Unpin,
-    S: Stream<Item = Result<Message, WebSocketError>> + Unpin,
-{
-    let request_id = *id;
-    *id += 1;
-    let mut message = json!({
-        "id": request_id,
-        "method": method,
-        "params": params,
-    });
-    if let Some(session_id) = session_id {
-        message["sessionId"] = json!(session_id);
-    }
-    write
-        .send(Message::Text(message.to_string().into()))
-        .await
-        .map_err(|error| CliError::new(ErrorKind::SessionDisconnect, error.to_string()))?;
-
-    tokio::time::timeout(wait, async {
-        while let Some(message) = read.next().await {
-            let Message::Text(text) = message
-                .map_err(|error| CliError::new(ErrorKind::SessionDisconnect, error.to_string()))?
-            else {
-                continue;
-            };
-            let value: Value = serde_json::from_str(&text).map_err(|error| {
-                CliError::new(ErrorKind::Protocol, format!("invalid CDP message: {error}"))
-            })?;
-            if value.get("id").and_then(|value| value.as_u64()) != Some(request_id) {
-                continue;
-            }
-            if let Some(error) = value.get("error") {
-                return Err(CliError::new(
-                    ErrorKind::Protocol,
-                    format!("CDP {method} failed: {error}"),
-                ));
-            }
-            return Ok(value.get("result").cloned().unwrap_or_else(|| json!({})));
-        }
-        Err(CliError::new(
-            ErrorKind::SessionDisconnect,
-            "browser DevTools connection closed",
-        ))
-    })
-    .await
-    .map_err(|_| {
-        CliError::new(
-            ErrorKind::SessionDisconnect,
-            format!(
-                "timed out waiting for CDP {method} after {}s",
-                wait.as_secs()
-            ),
-        )
-    })?
 }
 
 async fn emit_layout_command(
@@ -4522,6 +3801,7 @@ mod tests {
     use clap::CommandFactory;
     use lucida_core::DatasetId;
     use lucida_core::camera::Camera;
+    use serde_json::json;
     use std::io::Read;
 
     fn parse(args: &[&str]) -> Cli {
@@ -5815,53 +5095,21 @@ mod tests {
     }
 
     #[test]
-    fn capture_ready_probe_parser_distinguishes_ready_and_waiting_results() {
-        let ready = capture_ready_probe_from_cdp_result(&json!({
-            "result": {
-                "value": {
-                    "ready": true,
-                    "reason": "rendered",
-                    "frame_count": 2,
-                    "dataset_count": 1,
-                    "canvas_width": 900,
-                    "canvas_height": 700,
-                    "mode": "slice"
-                }
-            }
-        }))
-        .unwrap();
-
-        assert!(ready.ready);
-        assert_eq!(ready.frame_count, 2);
-        assert_eq!(ready.mode.as_deref(), Some("slice"));
-
-        let waiting = capture_ready_probe_from_cdp_result(&json!({
-            "result": {
-                "value": {
-                    "ready": false,
-                    "reason": "dataset_added_waiting_for_render",
-                    "frame_count": 0,
-                    "dataset_count": 1,
-                    "canvas_width": 900,
-                    "canvas_height": 700,
-                    "mode": "slice"
-                }
-            }
-        }))
-        .unwrap();
-
-        assert!(!waiting.ready);
-        assert!(capture_ready_probe_summary(&waiting).contains("dataset_added_waiting_for_render"));
+    fn auto_contrast_window_reads_a_pair_and_tolerates_no_window() {
+        assert_eq!(
+            parse_auto_contrast_window(&json!([12.0, 480.0])),
+            Some([12.0, 480.0])
+        );
+        assert_eq!(parse_auto_contrast_window(&Value::Null), None);
+        assert_eq!(parse_auto_contrast_window(&json!([12.0])), None);
     }
 
     #[test]
-    fn screenshot_png_signature_is_validated() {
-        let mut png = Vec::from(PNG_SIGNATURE.as_slice());
-        png.extend_from_slice(b"rest of fake png");
-        ensure_png_signature(&png).unwrap();
-
-        let error = ensure_png_signature(b"not a png").unwrap_err();
-        assert_eq!(error.kind, ErrorKind::Protocol);
+    fn image_captures_keep_a_scale_factor_of_one() {
+        let viewport = capture_viewport(900, 700);
+        assert_eq!(viewport.width, 900);
+        assert_eq!(viewport.height, 700);
+        assert_eq!(viewport.device_scale_factor, 1.0);
     }
 
     #[test]

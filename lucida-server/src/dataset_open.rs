@@ -487,7 +487,7 @@ pub async fn open_dataset(
     // Surface non-fatal import problems (e.g. skipped collection groups) on the open
     // trail so both the CLI and the web's latest-message view see them, and
     // retain them for the durable Health tab below.
-    let import_warnings: Vec<String> = result.warnings.iter().map(|w| w.message.clone()).collect();
+    let import_warnings = result.warnings.clone();
     for warning in &result.warnings {
         tracing::warn!(
             id = %dataset_id,
@@ -932,6 +932,7 @@ mod tests {
     use super::*;
     use crate::test_fixtures::single_image_manifest;
     use lucida_content::DataType;
+    use lucida_protocol::DatasetHealthStatus;
     use std::fs;
     use std::path::Path;
 
@@ -1448,5 +1449,166 @@ mod tests {
                 .manifests
                 .contains_key(&opened.manifest.dataset_id)
         );
+    }
+
+    /// A two-level image whose level 0 was never written, beside a level 1
+    /// that was — the shape of the partially-written export in issue #904.
+    fn write_partially_written_zarr(dir: &Path) {
+        let root = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": { "ome": {
+                "version": "0.5",
+                "multiscales": [{
+                    "version": "0.5",
+                    "name": "img",
+                    "axes": [
+                        {"name": "t", "type": "time"},
+                        {"name": "c", "type": "channel"},
+                        {"name": "z", "type": "space"},
+                        {"name": "y", "type": "space"},
+                        {"name": "x", "type": "space"}
+                    ],
+                    "datasets": [
+                        {"path": "0", "coordinateTransformations": [
+                            {"type": "scale", "scale": [1.0, 1.0, 1.0, 1.0, 1.0]}]},
+                        {"path": "1", "coordinateTransformations": [
+                            {"type": "scale", "scale": [1.0, 1.0, 1.0, 2.0, 2.0]}]}
+                    ]
+                }]
+            }}
+        });
+        fs::write(
+            dir.join("zarr.json"),
+            serde_json::to_string_pretty(&root).unwrap(),
+        )
+        .unwrap();
+
+        for (path, edge) in [("0", 8u64), ("1", 4u64)] {
+            let level_dir = dir.join(path);
+            fs::create_dir_all(&level_dir).unwrap();
+            let arr = serde_json::json!({
+                "zarr_format": 3,
+                "node_type": "array",
+                "shape": [1, 1, 1, edge, edge],
+                "data_type": "uint16",
+                "chunk_grid": {
+                    "name": "regular",
+                    "configuration": { "chunk_shape": [1, 1, 1, edge, edge] }
+                },
+                "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
+                "fill_value": 0
+            });
+            fs::write(
+                level_dir.join("zarr.json"),
+                serde_json::to_string_pretty(&arr).unwrap(),
+            )
+            .unwrap();
+
+            // Only the coarser level gets data written.
+            if path == "1" {
+                let chunk_dir = level_dir.join("c").join("0").join("0").join("0").join("0");
+                fs::create_dir_all(&chunk_dir).unwrap();
+                fs::write(chunk_dir.join("0"), vec![0u8; (edge * edge * 2) as usize]).unwrap();
+            }
+        }
+    }
+
+    /// Issue #904: the dataset opens (the level is legal and reads as fill),
+    /// but the open trail carries a warning diagnostic instead of letting an
+    /// all-zero level pass for data.
+    #[tokio::test]
+    async fn open_warns_on_the_trail_when_a_level_has_no_chunks_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("partial.zarr");
+        fs::create_dir_all(&data_dir).unwrap();
+        write_partially_written_zarr(&data_dir);
+        let url = data_dir.to_str().unwrap().to_string();
+
+        let ctx = test_context(tmp.path());
+        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+        let outcome = open_dataset(11, &url, &ctx, &progress_tx)
+            .await
+            .expect("open");
+        assert!(
+            matches!(outcome, DatasetOpenOutcome::Opened { .. }),
+            "a declared-but-unwritten level is legal and must still open"
+        );
+
+        drop(progress_tx);
+        let warnings: Vec<_> = std::iter::from_fn(|| progress_rx.try_recv().ok())
+            .filter(|d| d.warning)
+            .collect();
+        assert_eq!(warnings.len(), 1, "warnings: {warnings:?}");
+        assert_eq!(warnings[0].stage, DatasetOpenStage::MetadataImport);
+        let message = warnings[0].message.clone();
+        assert!(message.contains("level 0"), "{message}");
+        assert!(message.contains("no chunks written"), "{message}");
+    }
+
+    /// …and the durable surface stops calling it healthy.
+    #[tokio::test]
+    async fn dataset_health_degrades_when_a_level_has_no_chunks_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("partial-health.zarr");
+        fs::create_dir_all(&data_dir).unwrap();
+        write_partially_written_zarr(&data_dir);
+        let url = data_dir.to_str().unwrap().to_string();
+
+        let ctx = test_context(tmp.path());
+        let (progress_tx, _progress_rx) = mpsc::unbounded_channel();
+        open_dataset(12, &url, &ctx, &progress_tx)
+            .await
+            .expect("open");
+
+        let sess = ctx.session.lock().await;
+        let manifest = sess
+            .document
+            .manifests
+            .values()
+            .next()
+            .expect("one manifest");
+        let health = crate::handler::dataset_health_for_manifest(&sess, manifest);
+
+        // The headline: the durable surface stops saying `healthy`.
+        assert_eq!(health.status, DatasetHealthStatus::Degraded);
+        // …and it says why, in the same breath.
+        assert!(
+            health
+                .messages
+                .iter()
+                .any(|m| m.contains("level 0") && m.contains("no chunks written")),
+            "messages: {:?}",
+            health.messages
+        );
+        // The degradation comes from the import, not from a sick server.
+        assert_eq!(health.binding.status, DatasetHealthStatus::Healthy);
+    }
+
+    /// A fully written pyramid is still reported healthy — the check above
+    /// would pass just as well if everything degraded.
+    #[tokio::test]
+    async fn dataset_health_stays_healthy_when_every_level_has_chunks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("whole.zarr");
+        fs::create_dir_all(&data_dir).unwrap();
+        write_minimal_zarr(&data_dir);
+        let url = data_dir.to_str().unwrap().to_string();
+
+        let ctx = test_context(tmp.path());
+        let (progress_tx, _progress_rx) = mpsc::unbounded_channel();
+        open_dataset(13, &url, &ctx, &progress_tx)
+            .await
+            .expect("open");
+
+        let sess = ctx.session.lock().await;
+        let manifest = sess
+            .document
+            .manifests
+            .values()
+            .next()
+            .expect("one manifest");
+        let health = crate::handler::dataset_health_for_manifest(&sess, manifest);
+        assert_eq!(health.status, DatasetHealthStatus::Healthy);
     }
 }
