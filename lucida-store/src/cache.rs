@@ -15,6 +15,7 @@ use object_store::path::Path;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Semaphore, broadcast};
 
+use crate::metadata_reads::{self, MetadataReadPhase};
 use crate::source_limiter::{ReaderId, RequestLabel, SourceReadLimiter};
 
 /// Default cap on concurrent backend source reads when no operator override
@@ -202,6 +203,15 @@ enum ReadClass {
     /// index). Bounded like other metadata, but a not-found is the answer —
     /// counting it would report a perfectly healthy dataset as degraded.
     OptionalMetadata,
+}
+
+impl ReadClass {
+    /// Whether a read belongs to the dataset-open metadata family. The two
+    /// metadata classes differ only in what a not-found answer means, and
+    /// both are read while an open is resolving a dataset's shape.
+    fn is_metadata(self) -> bool {
+        matches!(self, ReadClass::Metadata | ReadClass::OptionalMetadata)
+    }
 }
 
 /// A read's claim on whichever cap bounds its [`ReadClass`], held for the
@@ -571,12 +581,15 @@ impl CachedStore {
     /// [`get_optional_metadata_bytes`]: Self::get_optional_metadata_bytes
     pub async fn probe_exists(&self, path: &Path) -> Result<bool, object_store::Error> {
         let key = path.to_string();
+        let started = std::time::Instant::now();
         {
             let mut absent = self.absent.lock().unwrap();
             if absent.get(&key).is_some() {
                 drop(absent);
                 let mut state = self.cache.lock().unwrap();
                 state.hits += 1;
+                drop(state);
+                metadata_reads::record(MetadataReadPhase::CacheHit, started, false);
                 return Ok(false);
             }
         }
@@ -584,12 +597,18 @@ impl CachedStore {
             let mut state = self.cache.lock().unwrap();
             if state.lru.get(&key).is_some() {
                 state.hits += 1;
+                drop(state);
+                metadata_reads::record(MetadataReadPhase::CacheHit, started, false);
                 return Ok(true);
             }
             state.misses += 1;
         }
 
-        let started = std::time::Instant::now();
+        // The cache's own read-cost counter times from the moment the read
+        // starts queueing, which is where it has always started. The row
+        // above times from the call, because where a read sits inside an
+        // open is measured from when the open asked for it.
+        let read_started = std::time::Instant::now();
         let head = {
             let _permit = self
                 .metadata_read
@@ -598,7 +617,14 @@ impl CachedStore {
                 .expect("source-read semaphore is never closed");
             self.inner.head(path).await
         };
-        let elapsed_nanos = started.elapsed().as_nanos();
+        let elapsed_nanos = read_started.elapsed().as_nanos();
+        // A presence probe is a round trip like any other and queues behind
+        // the same cap, so it files the same phase.
+        metadata_reads::record(
+            MetadataReadPhase::BackendRead,
+            started,
+            !matches!(head, Ok(_) | Err(object_store::Error::NotFound { .. })),
+        );
 
         // The round trip happened whatever it answered, so it is counted once
         // here rather than in each arm below.
@@ -629,6 +655,9 @@ impl CachedStore {
         label: RequestLabel,
     ) -> TimedRead {
         let key = path.to_string();
+        // Only metadata reads are watched, and only they pay for the clock
+        // read: the chunk path is timed at the request boundary instead.
+        let started = class.is_metadata().then(std::time::Instant::now);
 
         // Cache hit — served without touching the backend or a permit, and
         // reporting neither. A hit that showed up as a fast backend read
@@ -638,6 +667,10 @@ impl CachedStore {
             if let Some(bytes) = state.lru.get(&key) {
                 let bytes = bytes.clone();
                 state.hits += 1;
+                drop(state);
+                if let Some(started) = started {
+                    metadata_reads::record(MetadataReadPhase::CacheHit, started, false);
+                }
                 return TimedRead {
                     result: Ok(bytes),
                     timing: SourceReadTiming::default(),
@@ -674,6 +707,18 @@ impl CachedStore {
                         let mut state = self.cache.lock().unwrap();
                         state.coalesced += 1;
                     }
+                    // A follower's row owns its wait and nothing else. The
+                    // round trip belongs to the leader's row, so a sum over
+                    // the backend column counts each one exactly once
+                    // rather than reporting thousands of trips for an open
+                    // that made hundreds (ADR 0050).
+                    if let Some(started) = started {
+                        metadata_reads::record(
+                            MetadataReadPhase::CoalescedWait,
+                            started,
+                            shared.is_err(),
+                        );
+                    }
                     TimedRead {
                         result: shared.map_err(SharedError::into_object_store_error),
                         // The whole wait, and only the wait: the leader owns
@@ -692,7 +737,7 @@ impl CachedStore {
                 Err(_) => {
                     let coalesced_wait_us = micros(parked.elapsed());
                     let mut read = self
-                        .fetch_from_backend(path, &key, class, reader, label)
+                        .fetch_from_backend(path, &key, class, reader, label, started)
                         .await;
                     // This one row carries both: the follower waited on a
                     // flight that died, and then really did perform a read.
@@ -710,7 +755,7 @@ impl CachedStore {
         // exactly once; the guard's `Drop` is then a no-op.
         let mut guard = LeaderGuard::new(&self.in_flight, key.clone());
         let read = self
-            .fetch_from_backend(path, &key, class, reader, label)
+            .fetch_from_backend(path, &key, class, reader, label, started)
             .await;
         guard.complete(&read.result);
         read
@@ -730,12 +775,19 @@ impl CachedStore {
         path: &Path,
     ) -> Result<Option<Bytes>, object_store::Error> {
         let key = path.to_string();
+        let started = std::time::Instant::now();
         {
             let mut absent = self.absent.lock().unwrap();
             if absent.get(&key).is_some() {
                 drop(absent);
                 let mut state = self.cache.lock().unwrap();
                 state.hits += 1;
+                drop(state);
+                // Remembered absence is a read the open did not have to
+                // make. It files a row for the same reason a resident hit
+                // does: the shape of an open is how many of its reads cost
+                // a round trip.
+                metadata_reads::record(MetadataReadPhase::CacheHit, started, false);
                 return Ok(None);
             }
         }
@@ -769,6 +821,11 @@ impl CachedStore {
         class: ReadClass,
         reader: ReaderId,
         label: RequestLabel,
+        // When the *caller* asked, for a metadata read's row. A leader row
+        // and a follower row are then measured from the same origin, which
+        // is what makes the two comparable at all; the cache's own counters
+        // keep their own clock below.
+        called_at: Option<std::time::Instant>,
     ) -> TimedRead {
         // Timed from here, before the permit is acquired: queueing behind our
         // own concurrency cap is part of what a caller waits for, and leaving
@@ -824,6 +881,19 @@ impl CachedStore {
             backend_read_us: Some(micros(elapsed.saturating_sub(permit_wait))),
             ..SourceReadTiming::default()
         };
+
+        if let Some(called_at) = called_at {
+            // An optional object that is simply not there answered the
+            // question it was asked, so it is not a failed read — the same
+            // rule the backend-error counter below applies.
+            let absent_as_expected = class == ReadClass::OptionalMetadata
+                && matches!(fetch, Err(object_store::Error::NotFound { .. }));
+            metadata_reads::record(
+                MetadataReadPhase::BackendRead,
+                called_at,
+                fetch.is_err() && !absent_as_expected,
+            );
+        }
 
         let bytes = match fetch {
             Ok(bytes) => bytes,
@@ -1585,6 +1655,150 @@ mod tests {
         assert!(
             max_active.load(Ordering::SeqCst) > 1,
             "metadata reads serialized behind the chunk cap",
+        );
+    }
+
+    /// Collects whatever the watched scope files, so a test can assert on
+    /// the phases an open would have seen.
+    #[derive(Default)]
+    struct Watcher {
+        reads: Mutex<Vec<crate::metadata_reads::MetadataRead>>,
+    }
+
+    impl Watcher {
+        fn phases(&self) -> Vec<MetadataReadPhase> {
+            self.reads
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|read| read.phase)
+                .collect()
+        }
+
+        fn failures(&self) -> usize {
+            self.reads
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|read| read.failed)
+                .count()
+        }
+    }
+
+    impl crate::metadata_reads::MetadataReadObserver for Watcher {
+        fn record(&self, read: crate::metadata_reads::MetadataRead) {
+            self.reads.lock().unwrap().push(read);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_metadata_read_files_its_round_trip_and_the_repeat_files_a_hit() {
+        let store = Arc::new(CountingStore::new(0));
+        store.seed("zarr.json", b"{}").await;
+        let cached = Arc::new(CachedStore::new(store, 1024));
+        let watcher = Arc::new(Watcher::default());
+
+        crate::metadata_reads::observing(watcher.clone(), async {
+            let path = Path::from("zarr.json");
+            cached.get_metadata_bytes(&path).await.unwrap();
+            cached.get_metadata_bytes(&path).await.unwrap();
+        })
+        .await;
+
+        assert_eq!(
+            watcher.phases(),
+            vec![MetadataReadPhase::BackendRead, MetadataReadPhase::CacheHit],
+            "one row per read, whether or not it cost a round trip",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_coalesced_metadata_read_files_a_wait_and_leaves_the_trip_to_its_leader() {
+        let store = Arc::new(CountingStore::new(30));
+        store.seed("zarr.json", b"{}").await;
+        let cached = Arc::new(CachedStore::new(store, 1024));
+        let watcher = Arc::new(Watcher::default());
+
+        crate::metadata_reads::observing(watcher.clone(), async {
+            let path = Path::from("zarr.json");
+            let leader = cached.get_metadata_bytes(&path);
+            let follower = cached.get_metadata_bytes(&path);
+            let (a, b) = tokio::join!(leader, follower);
+            a.unwrap();
+            b.unwrap();
+        })
+        .await;
+
+        let mut phases = watcher.phases();
+        phases.sort_by_key(|phase| format!("{phase:?}"));
+        assert_eq!(
+            phases,
+            vec![
+                MetadataReadPhase::BackendRead,
+                MetadataReadPhase::CoalescedWait
+            ],
+            "the follower's wait must not be counted as a second round trip",
+        );
+    }
+
+    #[tokio::test]
+    async fn an_absent_optional_object_is_an_answer_not_a_failed_read() {
+        let store = Arc::new(CountingStore::new(0));
+        let cached = Arc::new(CachedStore::new(store, 1024));
+        let watcher = Arc::new(Watcher::default());
+
+        crate::metadata_reads::observing(watcher.clone(), async {
+            let path = Path::from("labels/zarr.json");
+            assert!(
+                cached
+                    .get_optional_metadata_bytes(&path)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            // The second probe is served by the absent memo.
+            assert!(
+                cached
+                    .get_optional_metadata_bytes(&path)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        })
+        .await;
+
+        assert_eq!(
+            watcher.phases(),
+            vec![MetadataReadPhase::BackendRead, MetadataReadPhase::CacheHit],
+        );
+        assert_eq!(
+            watcher.failures(),
+            0,
+            "a 404 answered the question it was asked"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_presence_probe_files_a_row_and_a_chunk_read_files_none() {
+        let store = Arc::new(CountingStore::new(0));
+        store.seed("chunk", b"data").await;
+        let cached = Arc::new(CachedStore::new(store, 1024));
+        let watcher = Arc::new(Watcher::default());
+
+        crate::metadata_reads::observing(watcher.clone(), async {
+            cached.probe_exists(&Path::from("chunk")).await.unwrap();
+            cached
+                .get_bytes(&Path::from("chunk"), READER, LABEL)
+                .await
+                .result
+                .unwrap();
+        })
+        .await;
+
+        assert_eq!(
+            watcher.phases(),
+            vec![MetadataReadPhase::BackendRead],
+            "the chunk family has its own rows and must not appear here",
         );
     }
 

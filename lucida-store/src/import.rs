@@ -4739,6 +4739,69 @@ mod tests {
     /// dozens of reads (root + one per group + the representative tile's
     /// template + two label samples per group). The bounded discovery is
     /// surfaced as a warning naming the exhaustive override.
+    /// The whole metadata-read family rests on one unasserted property: the
+    /// import's own fan-out stays on the task the open is awaited on, so a
+    /// task-local observer sees every read. `buffer_unordered` polls on the
+    /// caller's task and `tokio::spawn` would not, so this is a real import
+    /// through a real fixture rather than a unit test of the seam.
+    #[tokio::test]
+    async fn a_real_import_files_every_read_it_performs_to_the_watching_open() {
+        use crate::metadata_reads::{MetadataRead, MetadataReadObserver, MetadataReadPhase};
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct Watcher {
+            reads: Mutex<Vec<MetadataRead>>,
+        }
+        impl MetadataReadObserver for Watcher {
+            fn record(&self, read: MetadataRead) {
+                self.reads.lock().unwrap().push(read);
+            }
+        }
+
+        let dir = temp_dir("watched_import");
+        create_collection_fixture(
+            &dir,
+            "watched",
+            &["A", "B"],
+            &["1", "2"],
+            &[
+                ("A", "1", 0, 0, 4),
+                ("A", "2", 0, 1, 4),
+                ("B", "1", 1, 0, 4),
+                ("B", "2", 1, 1, 4),
+            ],
+            [1, 1, 1, 64, 64],
+            [1, 1, 1, 64, 64],
+            2,
+        );
+
+        let store = cached_store(dir.to_str().unwrap());
+        let watcher = Arc::new(Watcher::default());
+        let result = crate::metadata_reads::observing(watcher.clone(), async {
+            import_dataset(&store, "watched-id", "Watched").await
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.manifest.images().len(), 16);
+
+        let reads = watcher.reads.lock().unwrap();
+        // One row per object read, and the fan-out's reads are in there:
+        // a collection of this shape reads far more than the handful the
+        // top-level pass performs on its own task directly.
+        assert!(
+            reads.len() > 16,
+            "the fan-out's reads did not reach the observer: only {} rows",
+            reads.len(),
+        );
+        assert!(
+            reads
+                .iter()
+                .any(|read| read.phase == MetadataReadPhase::BackendRead),
+            "an import off a cold cache performs round trips",
+        );
+    }
+
     #[tokio::test]
     async fn label_free_wide_collection_reads_scale_with_groups() {
         let dir = temp_dir("wide_label_free");

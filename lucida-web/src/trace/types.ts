@@ -423,9 +423,37 @@ export interface WireLabel {
 /** No wire request was sent for this row — see {@link WireLabel.connectionGeneration}. */
 export const UNLABELLED: WireLabel = { rid: 0, connectionGeneration: 0 };
 
-/** Which labelled request family a server row describes. */
-export type ServerRowFamily = "chunk" | "asset";
-export const SERVER_ROW_FAMILIES: readonly ServerRowFamily[] = ["chunk", "asset"];
+/**
+ * Which family a server row describes.
+ *
+ * `metadata-read` is the one that is not a wire request: it is one object
+ * read performed while a dataset was being opened, and it keys on the
+ * open's `request_id` rather than on a correlation label. Index order is
+ * the wire order of the column and must not be reordered.
+ */
+export type ServerRowFamily = "chunk" | "asset" | "metadata-read";
+export const SERVER_ROW_FAMILIES: readonly ServerRowFamily[] = [
+  "chunk",
+  "asset",
+  "metadata-read",
+];
+
+/**
+ * What a metadata read's time was. Short, and its own vocabulary rather
+ * than a slice of the chunk phases: a metadata read has no dispatch, no
+ * decode and no upload.
+ *
+ * A `coalesced-wait` row waited on another reader's in-flight read and
+ * performed no round trip of its own, so counting round trips means
+ * counting `backend-read` rows — reading the whole family as trips would
+ * report an open making thousands where it made hundreds.
+ */
+export type MetadataReadPhase = "cache-hit" | "coalesced-wait" | "backend-read";
+export const METADATA_READ_PHASES: readonly MetadataReadPhase[] = [
+  "cache-hit",
+  "coalesced-wait",
+  "backend-read",
+];
 
 /**
  * The server's phase enum, wider than the browser's because its clock is
@@ -558,7 +586,25 @@ export type UnplacedReason =
   /** The bracket never closed and never will: the server answered without bytes. */
   | "answered-without-delivery"
   /** The bracket is still open for another reason; the row is not evidence of a server stall. */
-  | "bracket-open";
+  | "bracket-open"
+  /** A metadata read whose open this run never saw sent — the open predates the run. */
+  | "no-open-bracket";
+
+/**
+ * The browser's bracket for one dataset open, on the browser's clock: the
+ * request went out at `startUs` and the server's answer landed at `endUs`.
+ *
+ * This is the second bracket the exporter nests into. Without it a cold
+ * remote open is several seconds of silence before the first chunk row,
+ * because the reads that fill it happen before any chunk exists.
+ */
+export interface DatasetOpenBracket {
+  requestId: string;
+  /** Microseconds from run start. */
+  startUs: number;
+  /** Null while the open has not settled — a run can close over an open one. */
+  endUs: number | null;
+}
 
 /**
  * The server's half of a request's life, as the browser received it.
@@ -570,7 +616,8 @@ export interface TraceServerRow extends WireLabel {
   /**
    * How long the server spent in each phase it entered, from the frame
    * coming off the socket to the handoff. A phase it never entered is
-   * absent, not zero.
+   * absent, not zero. Empty on a `metadata-read` row, which has no slot in
+   * this enum and states its span in the two columns below.
    */
   phases: ServerPhaseDurations;
   /**
@@ -583,6 +630,18 @@ export interface TraceServerRow extends WireLabel {
    * nothing here — which is also why this carries no peer identity.
    */
   coalescedOnto: number | null;
+  /**
+   * On a `metadata-read` row, the open's arrival → the start of that read,
+   * which is what lets the reads be laid out across the open instead of
+   * stacked at its midpoint. Zero on every other family.
+   */
+  dispatchOffsetUs: number;
+  /** On a `metadata-read` row, the read itself; zero on every other family. */
+  durationUs: number;
+  /** The open a `metadata-read` row belongs to, and null on every other family. */
+  requestId: string | null;
+  /** Set on `metadata-read` rows and null elsewhere. */
+  metadataPhase: MetadataReadPhase | null;
   placement: ServerPlacement | null;
   unplacedReason: UnplacedReason | null;
 }
@@ -837,6 +896,19 @@ export interface TraceRun {
    * which there is none.
    */
   serverRows: TraceServerRow[];
+  /**
+   * The dataset opens this run issued, as the browser bracketed them. The
+   * metadata-read rows nest inside these, and an open still in flight at
+   * run close carries a null end rather than being dropped — an open that
+   * never settled is the most diagnostic one there is.
+   */
+  datasetOpens: DatasetOpenBracket[];
+  /**
+   * Opens this run declined to bracket because it was already holding the
+   * recorder's per-run limit. Their metadata rows arrive unplaceable, so a
+   * silent cap would look like a server that stopped reporting.
+   */
+  datasetOpensDropped: number;
   /**
    * Server rows the server itself declared it dropped before sending. The
    * coverage story has two sources of loss once the server can be one of

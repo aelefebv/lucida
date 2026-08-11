@@ -34,7 +34,7 @@ use crate::open_diagnostics::{
 };
 use crate::proxy::{PROXY_TARGET_LONG_AXIS, ProxyGenerator};
 use crate::session::Session;
-use crate::timing::{FLUSH_INTERVAL, RequestProbe, TimingBuffer};
+use crate::timing::{FLUSH_INTERVAL, MetadataReadSink, RequestProbe, TimingBuffer};
 use crate::workspace::{CommandApplyError, LiveWorkspace, WorkspaceError, WorkspaceManager};
 use crate::{BroadcastItem, ProxyConfig, UnicastRoutes};
 
@@ -483,6 +483,7 @@ async fn handle_client_inner(
                             let unicast_routes_clone = Arc::clone(&unicast_routes);
                             let proxy_config_clone = proxy_config.clone();
                             let workspace_clone = workspace.clone();
+                            let timings_clone = Arc::clone(&timings);
                             let request = OpenRemoteDatasetRequest { request_id, url };
                             tokio::spawn(async move {
                                 handle_open_remote_dataset(
@@ -493,6 +494,7 @@ async fn handle_client_inner(
                                     unicast_routes_clone,
                                     proxy_config_clone,
                                     workspace_clone,
+                                    timings_clone,
                                 )
                                 .await;
                             });
@@ -593,6 +595,7 @@ async fn handle_client_inner(
                             let unicast_routes_clone = Arc::clone(&unicast_routes);
                             let proxy_config_clone = proxy_config.clone();
                             let workspace_clone = workspace.clone();
+                            let timings_clone = Arc::clone(&timings);
                             let request = OpenRemoteDatasetRequest {
                                 request_id,
                                 url: source.canonical_url,
@@ -606,6 +609,7 @@ async fn handle_client_inner(
                                     unicast_routes_clone,
                                     proxy_config_clone,
                                     workspace_clone,
+                                    timings_clone,
                                 )
                                 .await;
                             });
@@ -1243,6 +1247,7 @@ struct OpenRemoteDatasetRequest {
 /// client's unicast channel. All domain behavior — authorization, dedup,
 /// import, binding construction, persistence, broadcast — lives in
 /// [`crate::dataset_open`]; this function only moves messages.
+#[allow(clippy::too_many_arguments)]
 async fn handle_open_remote_dataset(
     client_id: ClientId,
     request: OpenRemoteDatasetRequest,
@@ -1251,6 +1256,7 @@ async fn handle_open_remote_dataset(
     unicast_routes: UnicastRoutes,
     proxy_config: ProxyConfig,
     workspace: Option<WorkspaceScope>,
+    timings: Arc<TimingBuffer>,
 ) {
     let OpenRemoteDatasetRequest { request_id, url } = request;
     // Wire envelopes carry the canonical URL — the same (idempotent)
@@ -1286,7 +1292,20 @@ async fn handle_open_remote_dataset(
         proxy_config,
         workspace,
     };
-    let result = dataset_open::open_dataset(client_id, &url, &ctx, &progress_tx).await;
+    // Every metadata object this open reads files a row against the open's
+    // own `request_id`, on the requesting connection's buffer. Scoped
+    // around the whole orchestration rather than around the import alone:
+    // the binding build probes the store too, and an open's cost is what
+    // the open read, not what one of its steps read.
+    //
+    // Rows travel on the timing ticker as the reads happen, so an open that
+    // *fails* still carries them — the case whose timing is most worth
+    // having.
+    let result = lucida_store::metadata_reads::observing(
+        Arc::new(MetadataReadSink::new(&request_id, timings)),
+        dataset_open::open_dataset(client_id, &url, &ctx, &progress_tx),
+    )
+    .await;
     drop(progress_tx);
     let _ = forwarder.await;
 
@@ -1918,11 +1937,14 @@ mod tests {
         let mut phases = [lucida_protocol::PHASE_UNSET; lucida_protocol::SERVER_PHASES.len()];
         phases[0] = 5;
         buffer.record(crate::timing::ServedRow {
-            rid: 41,
+            key: crate::timing::RowKey::Label(41),
             family: TimingRowFamily::Chunk,
             outcome: TimingRowOutcome::Delivered,
             phases,
             coalesced_onto: lucida_protocol::LABEL_NONE,
+            dispatch_offset_us: 0,
+            duration_us: 0,
+            metadata_phase: None,
         });
 
         assert!(flush_timings(&buffer, &mut socket).await);

@@ -4,57 +4,91 @@
     "dropped": 3,
     "rid": [
       2558,
-      2559
+      2559,
+      0
+    ],
+    "request_id": [
+      null,
+      null,
+      "web-open-4c1a"
     ],
     "family": [
       "chunk",
-      "asset"
+      "asset",
+      "metadata_read"
+    ],
+    "metadata_phase": [
+      null,
+      null,
+      "backend_read"
+    ],
+    "dispatch_offset_us": [
+      0,
+      0,
+      1204
+    ],
+    "duration_us": [
+      0,
+      0,
+      63441
     ],
     "outcome": [
       "delivered",
-      "not_ready"
+      "not_ready",
+      "delivered"
     ],
     "arrival_us": [
       142,
-      96
+      96,
+      4294967295
     ],
     "binding_lookup_us": [
       37,
-      41
+      41,
+      4294967295
     ],
     "dispatch_us": [
       88,
-      74
+      74,
+      4294967295
     ],
     "cache_lookup_us": [
       2,
-      3
+      3,
+      4294967295
     ],
     "permit_wait_us": [
       3100000,
+      4294967295,
       4294967295
     ],
     "backend_read_us": [
       211400,
+      4294967295,
       4294967295
     ],
     "coalesced_wait_us": [
+      4294967295,
       4294967295,
       4294967295
     ],
     "decompress_us": [
       4512,
+      4294967295,
       4294967295
     ],
     "slice_encode_us": [
       903,
+      4294967295,
       4294967295
     ],
     "handoff_us": [
       61,
-      55
+      55,
+      4294967295
     ],
     "coalesced_onto": [
+      4294967295,
       4294967295,
       4294967295
     ]

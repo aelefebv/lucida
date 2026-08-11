@@ -433,7 +433,10 @@ export class SessionController {
       loading: true,
       progress: "dataset open request sent",
     });
-    this.session.bridge.sendOpenRemoteDataset(url);
+    // The open's bracket starts here, at the send, and the run with it: the
+    // metadata reads the server is about to perform are most of a cold
+    // open, and they all happen before the first chunk exists.
+    traceRecorder.noteOpenSent(this.session.bridge.sendOpenRemoteDataset(url));
   }
 
   /** Clear the durable import warnings (the user dismissed the surface). Emits
@@ -1219,8 +1222,12 @@ export class SessionController {
           }
         }
       },
-      onOpenDatasetFailed: (url, error) => {
+      onOpenDatasetFailed: (requestId, url, error) => {
         bridgeLog("open_remote_dataset.failed", { url, error });
+        // A failed open closes its bracket like any other. Its metadata
+        // rows already arrived on the timing ticker, and they are the ones
+        // most worth having.
+        traceRecorder.noteOpenSettled(requestId);
         // Spinner/progress always stop; the error surfaces through the ranked
         // slot (a fatal engine banner outranks an open failure). Only THIS
         // source's warnings clear — a failed open must not leave its own
@@ -1249,6 +1256,7 @@ export class SessionController {
           this.collectOpenWarning(url, diagnostic.message);
         }
         if (diagnostic.stage === "complete") {
+          traceRecorder.noteOpenSettled(requestId);
           // Clear the transient spinner/progress only; the durable warnings
           // survive completion — that is the whole point of collecting them.
           this.updateRemoteActivity({ loading: false, progress: null });

@@ -519,14 +519,24 @@ mod tests {
         let msg = ServerMessage::TimingBatch {
             batch: ServerTimingBatch {
                 dropped: 2,
-                rid: vec![4, 9],
+                rid: vec![4, 9, 0],
+                request_id: vec![None, None, Some("web-open-4c1a".into())],
                 family: vec![
                     lucida_protocol::TimingRowFamily::Chunk,
                     lucida_protocol::TimingRowFamily::Asset,
+                    lucida_protocol::TimingRowFamily::MetadataRead,
                 ],
+                metadata_phase: vec![
+                    None,
+                    None,
+                    Some(lucida_protocol::MetadataReadPhase::BackendRead),
+                ],
+                dispatch_offset_us: vec![0, 0, 1_204],
+                duration_us: vec![0, 0, 63_441],
                 outcome: vec![
                     lucida_protocol::TimingRowOutcome::Delivered,
                     lucida_protocol::TimingRowOutcome::NotReady,
+                    lucida_protocol::TimingRowOutcome::Delivered,
                 ],
                 arrival_us: vec![120, 340],
                 handoff_us: vec![8_100, 22_000],
@@ -537,13 +547,23 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"timing_batch\""));
         // Columns, not an array of objects.
-        assert!(json.contains("\"rid\":[4,9]"));
+        assert!(json.contains("\"rid\":[4,9,0]"));
+        // The metadata read keys on the open, and the two keys share one
+        // set of columns rather than a second table.
+        assert!(json.contains("\"request_id\":[null,null,\"web-open-4c1a\"]"));
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ServerMessage::TimingBatch { batch } => {
-                assert_eq!(batch.len(), 2);
+                assert_eq!(batch.len(), 3);
                 assert_eq!(batch.dropped, 2);
                 assert_eq!(batch.handoff_us, vec![8_100, 22_000]);
+                // The metadata row states its span in its own two columns:
+                // the phase array has no slot a metadata read can fill.
+                assert_eq!(batch.duration_us, vec![0, 0, 63_441]);
+                assert_eq!(
+                    batch.metadata_phase[2],
+                    Some(lucida_protocol::MetadataReadPhase::BackendRead)
+                );
             }
             _ => panic!("expected TimingBatch"),
         }

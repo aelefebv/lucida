@@ -161,7 +161,11 @@ describe("the per-run cap", () => {
       {
         dropped: 0,
         rid: [1],
+        request_id: [null],
         family: ["chunk"],
+        metadata_phase: [null],
+        dispatch_offset_us: [0],
+        duration_us: [0],
         outcome: ["delivered"],
         arrival_us: [1],
         binding_lookup_us: [PHASE_UNSET],

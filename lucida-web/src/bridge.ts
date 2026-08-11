@@ -306,7 +306,12 @@ export interface BridgeHandlers {
     url: string,
     diagnostic: DatasetOpenProgressDiagnostic,
   ) => void;
-  onOpenDatasetFailed?: (url: string, error: string) => void;
+  /**
+   * `requestId` is the open's own id, echoed back: the trace brackets an
+   * open by it, and a failed open's bracket has to close as surely as a
+   * successful one's.
+   */
+  onOpenDatasetFailed?: (requestId: string, url: string, error: string) => void;
   /**
    * The server may emit an empty `delta.added` as a sanity check (no-op).
    */
@@ -620,7 +625,7 @@ export class Bridge {
             this.handleDatasetOpenProgress(msg);
             break;
           case "open_dataset_failed":
-            this.handlers.onOpenDatasetFailed?.(msg.url, msg.error);
+            this.handlers.onOpenDatasetFailed?.(msg.request_id, msg.url, msg.error);
             break;
           case "dataset_health":
             this.handleDatasetHealth(msg);

@@ -164,6 +164,42 @@ pub struct DatasetGeneratedCoarseHealth {
 pub enum TimingRowFamily {
     Chunk,
     Asset,
+    /// One object read performed while opening a dataset. Keyed on the open's
+    /// `request_id` rather than on a correlation label: the open already has
+    /// a parent identifier and these reads are its children (ADR 0048).
+    MetadataRead,
+}
+
+/// Where a dataset-open metadata read spent its time.
+///
+/// Short on purpose, and its own enum rather than a slice of the chunk
+/// enum: a metadata read has no dispatch, no decompress and no encode, and
+/// reusing the wider vocabulary would ship slots that can never be filled.
+///
+/// Every phase carries the same two numbers — where the read sits inside
+/// the open, and how long it took — and the phase says what that time was:
+///
+/// - [`CacheHit`](Self::CacheHit) — answered from the resident cache or the
+///   absent memo, with no backend work. Its duration is a local lookup and
+///   is below anything worth reading as a duration; the row is worth having
+///   for the count, because an open whose reads are mostly hits is a
+///   different open from one whose reads are mostly round trips.
+/// - [`CoalescedWait`](Self::CoalescedWait) — this read attached to another
+///   reader's in-flight read and performed none of its own. The round trip
+///   belongs to the leader's row, so counting an open's round trips means
+///   counting its [`BackendRead`](Self::BackendRead) rows. Note what that
+///   number is: the trips *this open* performed. A leader can be another
+///   open, or a caller that is no open at all, in which case a wait here
+///   has no trip anywhere in this open's rows — the read still happened,
+///   it was simply not this open that paid for it.
+/// - [`BackendRead`](Self::BackendRead) — this read performed the round
+///   trip, and waited behind the metadata-read cap to do it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetadataReadPhase {
+    CacheHit,
+    CoalescedWait,
+    BackendRead,
 }
 
 /// How the server's work for a labelled request ended.
@@ -294,9 +330,31 @@ pub struct ServerTimingBatch {
     /// the pre-flush buffer was full. Declared rather than silently absorbed:
     /// a monitor that under-reports its own losses overstates its coverage.
     pub dropped: u32,
-    /// The correlation label each row belongs to.
+    /// The correlation label each row belongs to. Zero on a metadata-read
+    /// row, which is keyed by `request_id` instead — the family column says
+    /// which key to read, and an unused slot is what a fixed-width row is
+    /// for.
     pub rid: Vec<u32>,
+    /// The dataset-open request each metadata-read row belongs to, and
+    /// `None` on every other family. The exporter's second join path
+    /// (ADR 0048): an open already owns an identifier and its reads are its
+    /// children, so nothing here mints a second one.
+    pub request_id: Vec<Option<String>>,
     pub family: Vec<TimingRowFamily>,
+    /// Where a metadata read spent its time, and `None` on every other
+    /// family. Metadata reads get their own short enum because the chunk
+    /// enum's slots do not apply to them.
+    pub metadata_phase: Vec<Option<MetadataReadPhase>>,
+    /// Microseconds from the request's arrival to the start of its serve.
+    /// On a metadata-read row, from the *open's* arrival to the start of
+    /// that read — which is what places the read inside the open rather
+    /// than merely inside it somewhere.
+    pub dispatch_offset_us: Vec<u32>,
+    /// Microseconds the serve itself took, ending at handoff to the outbound
+    /// queue. Socket write time is deliberately excluded (ADR 0047). On a
+    /// metadata-read row, the read itself, including its wait behind the
+    /// metadata-read cap.
+    pub duration_us: Vec<u32>,
     pub outcome: Vec<TimingRowOutcome>,
     /// One column per [`ServerPhase`], in microseconds, [`PHASE_UNSET`] where
     /// the row never entered that phase.

@@ -14,7 +14,13 @@
  */
 
 import { serverRowTotalUs, type StoredServerRow } from "./serverRowTable.ts";
-import type { ServerPlacement, TraceRow, TraceServerRow, UnplacedReason } from "./types.ts";
+import type {
+  DatasetOpenBracket,
+  ServerPlacement,
+  TraceRow,
+  TraceServerRow,
+  UnplacedReason,
+} from "./types.ts";
 
 interface Bracket {
   startUs: number;
@@ -22,17 +28,24 @@ interface Bracket {
 }
 
 /**
- * Join each server row to the browser rows carrying its label and place it
- * inside their bracket.
+ * Join each server row to the bracket the browser measured for it and place
+ * it inside.
  *
- * The join is a plain equi-join on `(connectionGeneration, rid)`. Coalesced
- * browser rows all carry the first sender's label, so several rows may share
- * one bracket — that is the cardinality, not a defect to clean up.
+ * There are two joins, because there are two kinds of parent. A chunk or
+ * asset row equi-joins on `(connectionGeneration, rid)`; coalesced browser
+ * rows all carry the first sender's label, so several rows may share one
+ * bracket — that is the cardinality, not a defect to clean up. A
+ * metadata-read row joins on the `request_id` of the open that performed
+ * it, which is what puts a cold open's cost on the timeline at all: those
+ * reads happen before the first chunk exists, so no chunk bracket could
+ * ever hold them.
  */
 export function placeServerRows(
   browserRows: readonly TraceRow[],
   serverRows: readonly StoredServerRow[],
+  datasetOpens: readonly DatasetOpenBracket[],
 ): TraceServerRow[] {
+  const opens = new Map(datasetOpens.map(open => [open.requestId, open]));
   const brackets = new Map<string, Bracket | null>();
   for (const row of browserRows) {
     // Generation 0 is "no wire request was sent", not a label. Letting it
@@ -56,6 +69,11 @@ export function placeServerRows(
   }
 
   return serverRows.map(row => {
+    if (row.family === "metadata-read") {
+      const open = row.requestId === null ? undefined : opens.get(row.requestId);
+      if (!open) return unplaced(row, "no-open-bracket");
+      return { ...row, placement: placeInOpen(row, open), unplacedReason: null };
+    }
     const bracket = brackets.get(labelKey(row.connectionGeneration, row.rid));
     if (bracket === undefined) {
       return unplaced(row, "no-browser-row");
@@ -99,6 +117,38 @@ function place(row: StoredServerRow, bracket: Bracket): ServerPlacement {
     endUs: startUs + serverUs,
     gapUs,
     overshootUs: 0,
+  };
+}
+
+/**
+ * Lay a metadata read out where inside the open it happened, rather than
+ * centring it: the row carries its own offset from the open's arrival at
+ * the server, so hundreds of reads spread across the open's bracket
+ * instead of stacking at its midpoint.
+ *
+ * The offset is measured from the server's arrival and the bracket starts
+ * at the browser's send, so every read is drawn slightly late by the
+ * outbound network leg. That remainder is not attributed to any row — it
+ * is the same unattributed gap the labelled families name, and it belongs
+ * to the open as a whole rather than to one of its reads.
+ *
+ * An open that has not settled still places its reads. Unlike a chunk
+ * bracket, placement here needs only the start, and a run that closed over
+ * an open still running is exactly the run someone is reading.
+ */
+function placeInOpen(row: StoredServerRow, open: DatasetOpenBracket): ServerPlacement {
+  const startUs = open.startUs + row.dispatchOffsetUs;
+  const endUs = startUs + row.durationUs;
+  if (open.endUs === null) {
+    return { startUs, endUs, gapUs: 0, overshootUs: 0 };
+  }
+  // Past the end of the bracket means the two clocks disagree, and the
+  // bracket wins — it is the one measured on a single clock.
+  return {
+    startUs: Math.min(startUs, open.endUs),
+    endUs: Math.min(endUs, open.endUs),
+    gapUs: 0,
+    overshootUs: Math.max(0, endUs - open.endUs),
   };
 }
 

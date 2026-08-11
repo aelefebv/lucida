@@ -10,13 +10,16 @@
  * the browser table to do it.
  */
 
+import { StringPool } from "./stringPool.ts";
 import {
   LABEL_NONE,
+  METADATA_READ_PHASES,
   PHASE_UNSET,
   SERVER_PHASES,
   SERVER_PHASE_WIRE_KEY,
   SERVER_ROW_FAMILIES,
   SERVER_ROW_OUTCOMES,
+  type MetadataReadPhase,
   type ServerPhaseDurations,
   type ServerRowFamily,
   type ServerRowOutcome,
@@ -40,15 +43,41 @@ const OUTCOME_FROM_WIRE: Record<WireRowOutcome, ServerRowOutcome> = {
   failed: "failed",
 };
 
-/**
- * The wire shape of one flush window, as `ServerMessage::TimingBatch` carries
- * it: one column per server phase (see `SERVER_PHASES`), in microseconds,
- * {@link PHASE_UNSET} where the row never entered that phase.
- */
+/** The same disagreement, one column over. */
+export type WireRowFamily = "chunk" | "asset" | "metadata_read";
+
+const FAMILY_FROM_WIRE: Record<WireRowFamily, ServerRowFamily> = {
+  chunk: "chunk",
+  asset: "asset",
+  metadata_read: "metadata-read",
+};
+
+export type WireMetadataPhase = "cache_hit" | "coalesced_wait" | "backend_read";
+
+const PHASE_FROM_WIRE: Record<WireMetadataPhase, MetadataReadPhase> = {
+  cache_hit: "cache-hit",
+  coalesced_wait: "coalesced-wait",
+  backend_read: "backend-read",
+};
+
+/** Stored in the phase column when a row is not a metadata read. */
+const NO_PHASE = 0xff;
+
+/** The wire shape of one flush window, as `ServerMessage::TimingBatch` carries it. */
 export interface ServerTimingBatch {
   dropped: number;
   rid: number[];
-  family: ServerRowFamily[];
+  /** The open a metadata-read row belongs to; null on every other family. */
+  request_id: (string | null)[];
+  family: WireRowFamily[];
+  metadata_phase: (WireMetadataPhase | null)[];
+  /**
+   * A metadata read's position inside its open and how long it took. Its own
+   * pair of columns because the phase enum has no slot a metadata read can
+   * fill; zero on every other family.
+   */
+  dispatch_offset_us: number[];
+  duration_us: number[];
   outcome: WireRowOutcome[];
   arrival_us: number[];
   binding_lookup_us: number[];
@@ -80,11 +109,22 @@ export interface StoredServerRow {
   phases: ServerPhaseDurations;
   /** The read this one waited on, for a follower; null otherwise. */
   coalescedOnto: number | null;
+  dispatchOffsetUs: number;
+  durationUs: number;
+  /** The dataset open a metadata-read row keys on; null on every other family. */
+  requestId: string | null;
+  metadataPhase: MetadataReadPhase | null;
 }
 
 export class ServerRowTable {
-  /** 3 label columns + one column per phase as uint32, plus two enum bytes. */
-  static readonly BYTES_PER_ROW = (3 + SERVER_PHASES.length) * 4 + 2;
+  /**
+   * 3 label columns + one column per phase as uint32, plus the two metadata
+   * columns and the interned open id, and three enum bytes. Request ids are
+   * interned rather than stored per row: an open has one and files hundreds
+   * of reads under it, so the column is an index and the pool stops growing
+   * after the first read of each open.
+   */
+  static readonly BYTES_PER_ROW = (3 + SERVER_PHASES.length + 3) * 4 + 3;
 
   private rids: Uint32Array;
   private connectionGenerations: Uint32Array;
@@ -93,6 +133,12 @@ export class ServerRowTable {
   private phaseColumns: Uint32Array[];
   private families: Uint8Array;
   private outcomes: Uint8Array;
+  private metadataPhases: Uint8Array;
+  private requestIds: Uint32Array;
+  /** Metadata-read placement and span; zero on every other family. */
+  private dispatchOffsets: Uint32Array;
+  private durations: Uint32Array;
+  private readonly openIds = new StringPool();
 
   private rows = 0;
   private capacity: number;
@@ -106,6 +152,10 @@ export class ServerRowTable {
     this.phaseColumns = SERVER_PHASES.map(() => new Uint32Array(this.capacity));
     this.families = new Uint8Array(this.capacity);
     this.outcomes = new Uint8Array(this.capacity);
+    this.metadataPhases = new Uint8Array(this.capacity).fill(NO_PHASE);
+    this.requestIds = new Uint32Array(this.capacity);
+    this.dispatchOffsets = new Uint32Array(this.capacity);
+    this.durations = new Uint32Array(this.capacity);
   }
 
   get length(): number {
@@ -134,7 +184,11 @@ export class ServerRowTable {
     this.droppedByServer += batch.dropped ?? 0;
     let count = Math.min(
       batch.rid.length,
+      batch.request_id.length,
       batch.family.length,
+      batch.metadata_phase.length,
+      batch.dispatch_offset_us.length,
+      batch.duration_us.length,
       batch.outcome.length,
       batch.coalesced_onto?.length ?? 0,
     );
@@ -147,6 +201,8 @@ export class ServerRowTable {
       this.rids[index] = batch.rid[i];
       this.connectionGenerations[index] = connectionGeneration;
       this.coalescedOnto[index] = batch.coalesced_onto[i];
+      this.dispatchOffsets[index] = batch.dispatch_offset_us[i];
+      this.durations[index] = batch.duration_us[i];
       for (let p = 0; p < SERVER_PHASES.length; p++) {
         this.phaseColumns[p][index] = (batch[PHASE_COLUMNS[p]] as number[])[i];
       }
@@ -154,16 +210,32 @@ export class ServerRowTable {
       // which the goldens exist to prevent. An unreadable outcome resolves
       // to `failed`: a word we cannot read must not be able to hide a
       // request that never landed.
-      this.families[index] = Math.max(0, SERVER_ROW_FAMILIES.indexOf(batch.family[i]));
+      this.families[index] = Math.max(
+        0,
+        SERVER_ROW_FAMILIES.indexOf(FAMILY_FROM_WIRE[batch.family[i]]),
+      );
       this.outcomes[index] = SERVER_ROW_OUTCOMES.indexOf(
         OUTCOME_FROM_WIRE[batch.outcome[i]] ?? "failed",
       );
+      const phase = batch.metadata_phase[i];
+      // An unreadable phase word leaves the slot unset rather than
+      // resolving to a guess: the row's placement does not depend on it,
+      // and a wrong phase would misreport a coalesced wait as a round trip.
+      const phaseName = phase === null || phase === undefined ? undefined : PHASE_FROM_WIRE[phase];
+      this.metadataPhases[index] =
+        phaseName === undefined ? NO_PHASE : METADATA_READ_PHASES.indexOf(phaseName);
+      const requestId = batch.request_id[i];
+      // Index 0 is a real pool entry, so the column stores id + 1 and
+      // reserves 0 for "this row is not keyed on an open".
+      this.requestIds[index] = requestId ? this.openIds.intern(requestId) + 1 : 0;
     }
   }
 
   serialise(): StoredServerRow[] {
     const out: StoredServerRow[] = [];
     for (let i = 0; i < this.rows; i++) {
+      const requestIndex = this.requestIds[i];
+      const phase = this.metadataPhases[i];
       const phases: ServerPhaseDurations = {};
       for (let p = 0; p < SERVER_PHASES.length; p++) {
         const value = this.phaseColumns[p][i];
@@ -176,6 +248,10 @@ export class ServerRowTable {
         outcome: SERVER_ROW_OUTCOMES[this.outcomes[i]],
         phases,
         coalescedOnto: this.coalescedOnto[i] === LABEL_NONE ? null : this.coalescedOnto[i],
+        dispatchOffsetUs: this.dispatchOffsets[i],
+        durationUs: this.durations[i],
+        requestId: requestIndex === 0 ? null : this.openIds.get(requestIndex - 1),
+        metadataPhase: phase === NO_PHASE ? null : METADATA_READ_PHASES[phase],
       });
     }
     return out;
@@ -189,6 +265,10 @@ export class ServerRowTable {
     this.phaseColumns = this.phaseColumns.map(column => copyInto(column, new Uint32Array(next)));
     this.families = copyInto(this.families, new Uint8Array(next));
     this.outcomes = copyInto(this.outcomes, new Uint8Array(next));
+    this.metadataPhases = copyInto(this.metadataPhases, new Uint8Array(next).fill(NO_PHASE));
+    this.requestIds = copyInto(this.requestIds, new Uint32Array(next));
+    this.dispatchOffsets = copyInto(this.dispatchOffsets, new Uint32Array(next));
+    this.durations = copyInto(this.durations, new Uint32Array(next));
     this.capacity = next;
   }
 }

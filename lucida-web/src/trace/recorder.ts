@@ -30,6 +30,7 @@ import {
   type ChunkEventSource,
   type ChunkRowSource,
   type CountedPhaseIndexValue,
+  type DatasetOpenBracket,
   type EndReason,
   type CacheWarmth,
   type GpuIdentity,
@@ -90,6 +91,17 @@ export const DEFAULT_QUIESCENCE_HOLD_MS = 500;
 export const DEFAULT_RUN_TIMEOUT_MS = 60_000;
 
 /**
+ * How many dataset opens one run brackets.
+ *
+ * A page opens a handful — a workspace reload opens its members, a person
+ * opens one at a time — so this is a backstop against a page that loops,
+ * not a budget anyone spends. Opens past it are counted rather than
+ * bracketed, because their metadata rows then arrive unplaceable and a
+ * silent cap would read as a server that stopped reporting.
+ */
+export const MAX_TRACKED_OPENS = 64;
+
+/**
  * What the page can tell the recorder about the conditions a run ran under.
  * Supplied by the render loop, which is the one place that holds the canvas,
  * the mode, the dataset set and the CPU cache at once.
@@ -132,6 +144,9 @@ interface OpenInterval {
   startedAtEpochMs: number;
   sink: TraceSink;
   serverRows: ServerRowTable;
+  /** Keyed by `request_id`, which is what the server's metadata rows join on. */
+  datasetOpens: Map<string, DatasetOpenBracket>;
+  datasetOpensDropped: number;
   generation: number;
   /**
    * Set once the interval crosses the per-run cap, and mutated from there on:
@@ -146,6 +161,8 @@ interface ClosedInterval {
   header: RunHeader;
   sink: TraceSink;
   serverRows: ServerRowTable;
+  datasetOpens: DatasetOpenBracket[];
+  datasetOpensDropped: number;
   /** Frozen at close, so the resident total is a running sum rather than a walk. */
   byteLength: number;
 }
@@ -284,7 +301,12 @@ export class TraceRecorder {
       this.clearHoldTimer();
       return;
     }
-    if (!state.quiescent) {
+    // An unsettled dataset open holds the run open, whatever the page's
+    // predicate says. Before the first chunk exists the pipeline is
+    // trivially quiescent — nothing dirty, nothing wanted — so a cold open
+    // would otherwise close its own run 500 ms in and discard the metadata
+    // reads it is still waiting on, which is the whole of a cold open.
+    if (!state.quiescent || this.hasUnsettledOpen()) {
       this.clearHoldTimer();
       return;
     }
@@ -427,6 +449,61 @@ export class TraceRecorder {
     const run = this.resolve(handle);
     if (!run) return;
     run.sink.setLabel(handle % GENERATION_STRIDE, label);
+  }
+
+  /**
+   * A dataset-open request went out. Opens the run if none is open: this
+   * *is* the start of the cold open the monitor exists to explain, and a
+   * run that began when the first chunk arrived would leave the reads that
+   * decided the dataset's shape outside every run there was.
+   *
+   * The bracket is what the server's metadata-read rows nest inside, so an
+   * open that is never noted here files rows nobody can place.
+   */
+  noteOpenSent(requestId: string): void {
+    this.openRun({ epoch: "content", dirtyKind: "interactive", source: "dataset_open_request" });
+    const run = this.open;
+    if (!run) return;
+    if (run.datasetOpens.has(requestId)) return;
+    if (run.datasetOpens.size >= MAX_TRACKED_OPENS) {
+      run.datasetOpensDropped++;
+      return;
+    }
+    run.datasetOpens.set(requestId, {
+      requestId,
+      startUs: this.offsetUs(run, this.now()),
+      endUs: null,
+    });
+  }
+
+  /**
+   * The open settled, either way. A failed open closes its bracket exactly
+   * as a successful one does — its reads are the ones most worth reading,
+   * and dropping them here would lose them in the case that needs them.
+   */
+  noteOpenSettled(requestId: string): void {
+    const run = this.open;
+    if (!run) return;
+    const open = run.datasetOpens.get(requestId);
+    // A second terminal frame for one open — a failure after a warning, a
+    // stray progress frame — must not move an end that already happened.
+    if (!open || open.endUs !== null) return;
+    open.endUs = this.offsetUs(run, this.now());
+    // The open was the only thing holding the run; re-read the page's last
+    // published state so a run that has been quiescent all along can now
+    // start its hold rather than waiting for the next tick that may never
+    // come.
+    if (this.lastQuiescence) this.noteQuiescence(this.lastQuiescence);
+  }
+
+  /** Whether any open this run brackets is still in flight. */
+  private hasUnsettledOpen(): boolean {
+    const run = this.open;
+    if (!run) return false;
+    for (const open of run.datasetOpens.values()) {
+      if (open.endUs === null) return true;
+    }
+    return false;
   }
 
   /**
@@ -587,6 +664,8 @@ export class TraceRecorder {
       startedAtEpochMs,
       sink: this.sinkFactory(),
       serverRows: new ServerRowTable(),
+      datasetOpens: new Map(),
+      datasetOpensDropped: 0,
       generation: this.generation,
       truncation: null,
     };
@@ -626,6 +705,10 @@ export class TraceRecorder {
     this.closed.push({
       sink: run.sink,
       serverRows: run.serverRows,
+      // An open still in flight keeps its null end rather than being
+      // dropped or given the interval's close as an end it never reached.
+      datasetOpens: [...run.datasetOpens.values()],
+      datasetOpensDropped: run.datasetOpensDropped,
       byteLength,
       header: {
         ...run.environment.captureConditions(),
@@ -737,7 +820,9 @@ export class TraceRecorder {
       eventsDropped,
       // Placement happens here, at export, because it needs both tables
       // — and because the in-memory model stays a table.
-      serverRows: placeServerRows(rows, interval.serverRows.serialise()),
+      serverRows: placeServerRows(rows, interval.serverRows.serialise(), interval.datasetOpens),
+      datasetOpens: interval.datasetOpens,
+      datasetOpensDropped: interval.datasetOpensDropped,
       serverRowsDropped,
     };
   }

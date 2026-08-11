@@ -251,8 +251,21 @@ client)
 **Bracket**:
 The interval a browser row measures around one wire request, on one clock. Server
 rows are placed by nesting inside it rather than by clock synchronisation, so the
-unattributed remainder is named as a gap rather than absorbed.
+unattributed remainder is named as a gap rather than absorbed. A dataset open has
+a bracket of its own, keyed by request id, and the metadata reads nest in that.
 _Avoid_: window, span, round trip
+
+**Metadata read**:
+One object read the server performs while opening a dataset — resolving the
+dataset's shape, before any chunk exists. Its own server-row family, keyed on the
+open's request id rather than on a correlation label, and its own short phase
+vocabulary: `cache-hit`, `coalesced-wait`, `backend-read`. Only a `backend-read`
+is a round trip, and an open's `backend-read` count is the trips that open
+performed — a `coalesced-wait` may have been served by a leader outside it.
+Why it keys on the open and why the family is its own:
+`wiki/decisions/0048-correlating-work-across-the-browser-server-boundary.md` and
+`wiki/decisions/0050-server-timings-reach-the-monitor.md`.
+_Avoid_: metadata fetch, import read, open read
 
 **Boundary**:
 The handoff a lifecycle row stamps. A row holds one timestamp slot per boundary,
