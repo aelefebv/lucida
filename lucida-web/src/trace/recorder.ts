@@ -31,6 +31,7 @@ import {
   TRACE_SCHEMA_VERSION,
   type ChunkEventSource,
   type ChunkRowSource,
+  type ConnectionRecord,
   type CountedPhaseIndexValue,
   type DatasetOpenBracket,
   type EndReason,
@@ -149,6 +150,16 @@ interface OpenInterval {
   /** Keyed by `request_id`, which is what the server's metadata rows join on. */
   datasetOpens: Map<string, DatasetOpenBracket>;
   datasetOpensDropped: number;
+  /**
+   * The sockets this interval spanned, oldest first, and the label range
+   * minted on each. The range is what makes joinability decidable at ingest:
+   * labels are minted monotonically from zero per connection, so a server row
+   * naming a label outside the range this interval saw is a row this interval
+   * can never place.
+   */
+  connections: ConnectionRecord[];
+  /** Server rows refused because nothing in this interval could place them. */
+  serverRowsDiscarded: number;
   generation: number;
   /**
    * Set once the interval crosses the per-run cap, and mutated from there on:
@@ -165,6 +176,7 @@ interface ClosedInterval {
   serverRows: ServerRowTable;
   datasetOpens: DatasetOpenBracket[];
   datasetOpensDropped: number;
+  serverRowsDiscarded: number;
   /** Frozen at close, so the resident total is a running sum rather than a walk. */
   byteLength: number;
 }
@@ -191,6 +203,16 @@ export class TraceRecorder {
   private runSeq = 0;
   private rowsOutsideRun = 0;
   private serverRowsOutsideRun = 0;
+
+  /**
+   * The socket the page is on, and when it lost the previous one. Held across
+   * intervals because a run can open in the middle of a connection — or in
+   * the middle of an outage — and an interval that only knew about sockets it
+   * personally watched connect could not say which connection its rows came
+   * from.
+   */
+  private connectionGeneration = 0;
+  private disconnectedAtMs: number | null = null;
 
   /**
    * Recent plan passes as (start, end) wall pairs. Preallocated and
@@ -463,6 +485,33 @@ export class TraceRecorder {
     const run = this.resolve(handle);
     if (!run) return;
     run.sink.setLabel(handle % GENERATION_STRIDE, label);
+    this.trackLabel(run, label);
+  }
+
+  /**
+   * Widen the connection's label range. Labels are minted monotonically from
+   * zero per connection, so first and last bound every label this interval
+   * sent over that socket — which is the whole of what a server row has to be
+   * inside to be joinable here.
+   */
+  private trackLabel(run: OpenInterval, label: WireLabel): void {
+    if (label.connectionGeneration === 0) return;
+    let record = this.connectionRecord(run, label.connectionGeneration);
+    if (!record) {
+      record = {
+        generation: label.connectionGeneration,
+        // Not witnessed: the interval began mid-connection, or opened before
+        // the page reported this socket.
+        openedAtUs: null,
+        closedAtUs: null,
+        gapUs: null,
+        firstRid: null,
+        lastRid: null,
+      };
+      run.connections.push(record);
+    }
+    record.firstRid = record.firstRid === null ? label.rid : Math.min(record.firstRid, label.rid);
+    record.lastRid = record.lastRid === null ? label.rid : Math.max(record.lastRid, label.rid);
   }
 
   /**
@@ -521,6 +570,44 @@ export class TraceRecorder {
   }
 
   /**
+   * The page is on a socket. Called on every `onopen`, including the first:
+   * the generation restarts the correlation label counter (ADR 0048), so this
+   * is the only thing that makes two `rid: 0` rows in one run tell apart.
+   */
+  noteConnected(generation: number): void {
+    const atMs = this.now();
+    const gapMs = this.disconnectedAtMs === null ? null : atMs - this.disconnectedAtMs;
+    this.disconnectedAtMs = null;
+    if (this.connectionGeneration === generation) return;
+    this.connectionGeneration = generation;
+    const run = this.open;
+    if (!run) return;
+    run.connections.push({
+      generation,
+      openedAtUs: this.offsetUs(run, atMs),
+      closedAtUs: null,
+      gapUs: gapMs === null ? null : clampStamp(Math.round(gapMs * 1000)),
+      firstRid: null,
+      lastRid: null,
+    });
+  }
+
+  /**
+   * The socket dropped. The browser declares this because it is the side
+   * holding the facts: the server cannot tell a reconnecting client from a
+   * new one, and the rows it had buffered for the dead connection are
+   * discarded rather than replayed.
+   */
+  noteDisconnected(): void {
+    const atMs = this.now();
+    if (this.disconnectedAtMs === null) this.disconnectedAtMs = atMs;
+    const run = this.open;
+    if (!run) return;
+    const current = run.connections[run.connections.length - 1];
+    if (current && current.closedAtUs === null) current.closedAtUs = this.offsetUs(run, atMs);
+  }
+
+  /**
    * Take a flush window of the server's rows. They belong to the run that is
    * open when they arrive; rows that arrive between runs are counted and
    * dropped, because an unjoinable server row is not a diagnostic and
@@ -536,7 +623,38 @@ export class TraceRecorder {
       else this.serverRowsOutsideRun += batch.rid.length;
       return;
     }
-    run.serverRows.ingest(batch, connectionGeneration);
+    // A row this interval could never place is refused at the door rather
+    // than stored as an orphan: storing it would spend the very budget
+    // truncation exists to protect, and would then be reported as coverage
+    // this run does not have.
+    run.serverRowsDiscarded += run.serverRows.ingest(
+      batch,
+      connectionGeneration,
+      (rid, requestId, family) =>
+        family === "metadata_read"
+          ? requestId !== null && run.datasetOpens.has(requestId)
+          : this.mintedLabel(run, connectionGeneration, rid),
+    );
+  }
+
+  /** Whether this interval minted `rid` on `generation` — see {@link OpenInterval.connections}. */
+  private mintedLabel(run: OpenInterval, generation: number, rid: number): boolean {
+    const record = this.connectionRecord(run, generation);
+    if (!record || record.firstRid === null || record.lastRid === null) return false;
+    return rid >= record.firstRid && rid <= record.lastRid;
+  }
+
+  /**
+   * This interval's record for one connection, opened on first sight. An
+   * interval can begin mid-connection, in which case the first thing it hears
+   * about the socket it is already on is a label minted over it.
+   */
+  private connectionRecord(run: OpenInterval, generation: number): ConnectionRecord | null {
+    if (generation === 0) return null;
+    for (let i = run.connections.length - 1; i >= 0; i--) {
+      if (run.connections[i].generation === generation) return run.connections[i];
+    }
+    return null;
   }
 
   /** Stamp a phase boundary as a microsecond offset from run start. */
@@ -705,6 +823,24 @@ export class TraceRecorder {
       serverRows: new ServerRowTable(),
       datasetOpens: new Map(),
       datasetOpensDropped: 0,
+      // The socket the page is on right now, if it is on one. An interval
+      // that opens during an outage starts with no connection and gets its
+      // first when the page reconnects — which is also where the outage that
+      // preceded it gets declared.
+      connections:
+        this.connectionGeneration !== 0 && this.disconnectedAtMs === null
+          ? [
+              {
+                generation: this.connectionGeneration,
+                openedAtUs: null,
+                closedAtUs: null,
+                gapUs: null,
+                firstRid: null,
+                lastRid: null,
+              },
+            ]
+          : [],
+      serverRowsDiscarded: 0,
       generation: this.generation,
       truncation: null,
     };
@@ -748,6 +884,7 @@ export class TraceRecorder {
       // dropped or given the interval's close as an end it never reached.
       datasetOpens: [...run.datasetOpens.values()],
       datasetOpensDropped: run.datasetOpensDropped,
+      serverRowsDiscarded: run.serverRowsDiscarded,
       byteLength,
       header: {
         ...run.environment.captureConditions(),
@@ -764,6 +901,7 @@ export class TraceRecorder {
         quiescenceHoldMs: this.quiescenceHoldMs,
         timeoutMs: this.timeoutMs,
         outstandingAtSettle: run.environment.captureOutstanding(),
+        connections: run.connections,
       },
     });
     this.closedBytes += byteLength;
@@ -851,6 +989,8 @@ export class TraceRecorder {
         ticksDropped,
         eventsDropped,
         serverRowsDropped,
+        serverRowsDiscarded: interval.serverRowsDiscarded,
+        connections: interval.header.connections,
       }),
       rows,
       ticks,
@@ -865,6 +1005,7 @@ export class TraceRecorder {
       datasetOpens: interval.datasetOpens,
       datasetOpensDropped: interval.datasetOpensDropped,
       serverRowsDropped,
+      serverRowsDiscarded: interval.serverRowsDiscarded,
     };
   }
 
