@@ -35,6 +35,9 @@ import {
   type ProxyEvictable,
 } from "./proxyStore.ts";
 import { Scheduler, type SchedulableRequest } from "./scheduler.ts";
+import { traceRecorder } from "../../trace/recorder.ts";
+import { Boundary, RowOutcome } from "../../trace/types.ts";
+import type { CacheQuiescenceInputs } from "../../trace/quiescence.ts";
 import {
   classifyFetchError,
   NeverRetry,
@@ -92,6 +95,14 @@ export const CHUNK_FAILURE_STREAK_THRESHOLD = 10;
  *  persists — an aggregate signal, never per-chunk spam. */
 export const CHUNK_FAILURE_NOTIFY_INTERVAL_MS = 15_000;
 export const INTERACTION_MODE_WINDOW = 10;
+/**
+ * How deep the pending queue may be before {@link CpuCache.quiescenceInputs}
+ * stops classifying it by lane. The predicate runs on the tick path and an
+ * oversubscribed remote collection queues tens of thousands of requests, so
+ * the scan is bounded; past this depth the answer is "not quiescent",
+ * declared rather than guessed.
+ */
+const QUIESCENCE_PENDING_SCAN_CAP = 4096;
 const SPARSE_DETAIL_MIN_DESIRED_CHUNKS = 4;
 const SPARSE_DETAIL_COVERAGE_RATIO = 0.25;
 const SPARSE_DETAIL_STREAK_THRESHOLD = 3;
@@ -883,6 +894,61 @@ export class CpuCache {
     };
   }
 
+  /**
+   * The cache's half of the published quiescence predicate (ADR 0051):
+   * everything the view asked for is resident, with nothing pending or in
+   * flight.
+   *
+   * Writes into `out` and returns it. The render loop calls this every tick
+   * and owns one instance, because ADR 0049 asks the monitor not to allocate
+   * in steady state — an allocating recorder produces GC pauses that show up
+   * as stalls in its own trace.
+   *
+   * **Where prefetch is excluded, and where it is not.** ADR 0051 excludes
+   * speculative prefetch from the predicate because the prefetch lane keeps
+   * requesting future timepoints, so a naive "queues empty" test may never
+   * go true on a timeseries. That hazard lives in the *queues*, and that is
+   * where the exclusion is applied: `pending` and `inFlight` count
+   * non-speculative work only, and the speculative remainder is reported
+   * beside them rather than hidden. The demand counts stay on the same
+   * prefetch-inclusive basis the cache already publishes — resident and
+   * desired must be counted the same way or the ratio is nonsense, and
+   * prefetch demand is finite per timepoint and becomes resident like any
+   * other chunk, so including it cannot make quiescence unreachable.
+   *
+   * `pendingUnclassified` is set when the pending queue is deeper than
+   * {@link QUIESCENCE_PENDING_SCAN_CAP}. That bounds the scan to the tick it
+   * runs in, and reads as *not* quiescent, so a deep queue keeps a run open
+   * rather than closing one early on a guess.
+   */
+  quiescenceInputs(out: CacheQuiescenceInputs): CacheQuiescenceInputs {
+    const demand = this.computeTierDemandTelemetry();
+
+    let inFlight = this.proxyScheduler.inFlightSize;
+    let speculativeInFlight = 0;
+    for (const [, entry] of this.chunkScheduler.inFlightEntries()) {
+      if (entry.request.lane === "prefetch") speculativeInFlight++;
+      else inFlight++;
+    }
+
+    const speculativePending = this.chunkScheduler.countPending(
+      req => req.lane === "prefetch",
+      QUIESCENCE_PENDING_SCAN_CAP,
+    );
+
+    out.desiredDetailChunks = demand.desired.detailChunks;
+    out.residentDetailChunks = demand.resident.detailChunks;
+    out.desiredCoarseChunks = demand.desired.coarseChunks;
+    out.residentCoarseChunks = demand.resident.coarseChunks;
+    out.inFlight = inFlight;
+    out.speculativeInFlight = speculativeInFlight;
+    out.speculativePending = speculativePending ?? 0;
+    out.pendingUnclassified = speculativePending === null;
+    out.pending =
+      this.chunkScheduler.pendingSize - (speculativePending ?? 0) + this.proxyScheduler.pendingSize;
+    return out;
+  }
+
   /** Live config, for surfaces that edit it (Dev controls) — read-only. */
   getConfig(): Readonly<CpuCacheConfig> {
     return this.config;
@@ -1056,6 +1122,16 @@ export class CpuCache {
     startedEpochs: SceneEpochs = { ...this.currentEpochs },
     fedStreak = false,
   ): Promise<void> {
+    // The `wire` phase: request sent → bytes in hand. One row per attempt,
+    // so an in-fetch retry retires its row and the next attempt opens a
+    // fresh one rather than overwriting the first attempt's timings. This
+    // is the bracket the server's own rows nest inside once they arrive.
+    const traceRow = traceRecorder.beginChunkRow(
+      req,
+      this.requestResidencyTier(req) === "coarse" ? 1 : 0,
+    );
+    traceRecorder.stamp(traceRow, Boundary.WireStart);
+
     let result: FetchResult;
     try {
       result = await this.source.fetch(
@@ -1063,6 +1139,7 @@ export class CpuCache {
         controller.signal,
       );
     } catch (err: unknown) {
+      traceRecorder.finishRow(traceRow, RowOutcome.Retired);
       const fe = classifyFetchError(err);
 
       if (fe.kind === "abort" || fe.kind === "pending") {
@@ -1121,6 +1198,12 @@ export class CpuCache {
       }
       return;
     }
+
+    // Boundary 3 closes `wire` and opens `decode` — adjacent phases share
+    // the slot between them. `decode` itself is unstamped until #925, so the
+    // row completes at its last instrumented boundary.
+    traceRecorder.stamp(traceRow, Boundary.DecodeStart);
+    traceRecorder.finishRow(traceRow, RowOutcome.Complete);
 
     this.counters.recordCompletedFetch(result.bytes.byteLength);
     // Correct the in-flight byte estimate only while this settle still owns

@@ -1,0 +1,266 @@
+/**
+ * Trace model types — the vocabulary of ADR 0047 and ADR 0051, and the
+ * shape of the document the trace seam returns.
+ *
+ * `CONTEXT.md` is the glossary: a *trace* is the artifact, a *phase* is a
+ * stage delimited by a handoff, a *run* is a labelled interval within the
+ * continuous recording, a *lifecycle row* is the per-chunk unit of record,
+ * and *end reason* is why a run closed.
+ */
+
+/**
+ * Bumped whenever the document shape changes incompatibly. One integer for
+ * the whole file (ADR 0047): traces outlive the code that wrote them, and a
+ * file from two releases ago should either load or fail clearly.
+ */
+export const TRACE_SCHEMA_VERSION = 1;
+
+/**
+ * The closed browser phase enum. Fixed by the #921 spec rather than grown
+ * ad hoc, because adding a phase widens every lifecycle row and spends from
+ * a fixed budget.
+ *
+ * Only `wire` is instrumented today (#924); the remaining phases keep their
+ * slots reserved so filling them in (#925) does not re-shape the row.
+ * {@link TraceDocument.instrumentedPhases} states which ones actually carry
+ * timings, so a reader never mistakes a reserved slot for a measured zero.
+ */
+export const PHASES = ["plan", "queue", "wire", "decode", "upload", "present"] as const;
+export type Phase = (typeof PHASES)[number];
+
+/**
+ * Boundaries, not intervals: a row carries one timestamp slot per phase
+ * boundary (ADR 0047), so N phases need N+1 slots and phase `i` runs from
+ * slot `i` to slot `i + 1`. Adjacent phases share the slot between them —
+ * `wire` ends where `decode` begins.
+ */
+export const BOUNDARY_COUNT = PHASES.length + 1;
+
+export const Boundary = {
+  PlanStart: 0,
+  QueueStart: 1,
+  WireStart: 2,
+  /** End of `wire`, start of `decode`. */
+  DecodeStart: 3,
+  UploadStart: 4,
+  PresentStart: 5,
+  PresentEnd: 6,
+} as const;
+export type BoundaryIndex = (typeof Boundary)[keyof typeof Boundary];
+
+/**
+ * Slot value meaning "this boundary was never reached". Offsets are
+ * microseconds from run start held as uint32, and 0 is a legitimate offset,
+ * so the sentinel is the top of the range. The usable range is ~71 minutes.
+ */
+export const UNSET_STAMP = 0xffffffff;
+const MAX_STAMP = UNSET_STAMP - 1;
+
+/**
+ * Clamp a microsecond offset into the uint32 slot range.
+ *
+ * `Math.trunc`, not `| 0`: bitwise coercion is signed, so an offset past
+ * 2^31 — a run over about 36 minutes — would come back negative. Harmless
+ * inside a `Uint32Array`, but a run's duration is a plain number.
+ */
+export function clampStamp(offsetUs: number): number {
+  if (!(offsetUs > 0)) return 0;
+  return offsetUs >= MAX_STAMP ? MAX_STAMP : Math.trunc(offsetUs);
+}
+
+/**
+ * How a row's life ended. A stamp array alone cannot tell "never entered the
+ * next phase" from "entered and never left" (#892), and drawing those alike
+ * turns a healthy phase into a false slab — so the distinction is a column,
+ * not an inference.
+ */
+export const RowOutcome = {
+  /** Still open when the run closed. */
+  InFlight: 0,
+  /** Reached its last instrumented boundary. */
+  Complete: 1,
+  /** Abandoned — aborted, superseded, or failed. */
+  Retired: 2,
+} as const;
+export type RowOutcomeValue = (typeof RowOutcome)[keyof typeof RowOutcome];
+export type RowOutcomeName = "in-flight" | "complete" | "retired";
+
+export const ROW_OUTCOME_NAMES: readonly RowOutcomeName[] = ["in-flight", "complete", "retired"];
+
+/**
+ * Row identity carries the residency tier because `chunkKey` alone is not
+ * unique: the same key legitimately exists twice under the two tiers, which
+ * have separate budgets and separate eviction (ADR 0039, ADR 0041).
+ */
+export type ResidencyTierName = "detail" | "coarse";
+export const RESIDENCY_TIER_NAMES: readonly ResidencyTierName[] = ["detail", "coarse"];
+
+/**
+ * The identity fields a lifecycle row copies off a planned request. A
+ * structural subset of `ChunkRequest`, so emit sites pass the object they
+ * already hold and the recorder allocates nothing.
+ */
+export interface ChunkRowSource {
+  datasetId: string;
+  entityId: string;
+  imageId: string;
+  level: number;
+  t: number;
+  c: number;
+  z: number;
+  y: number;
+  x: number;
+}
+
+/**
+ * Why a run opened. Drawn from the vocabulary the code already has (ADR
+ * 0047) rather than a new one: `epoch` is a scene epoch-diff cause, and
+ * `dirtyKind` / `source` are the render loop's typed dirty-set attribution.
+ */
+export interface RunCause {
+  epoch: "content" | "layout" | "view" | "selection" | "asset" | null;
+  dirtyKind: "interactive" | "residency";
+  source: string;
+}
+
+/** Why a run closed. Required on every run — a run that never settled is still a run. */
+export type EndReason = "quiescent" | "timeout" | "explicit";
+
+export interface Viewport {
+  cssWidth: number;
+  cssHeight: number;
+  deviceWidth: number;
+  deviceHeight: number;
+}
+
+/** What the browser already held when the run opened. Server warmth belongs to the driver. */
+export interface CacheWarmth {
+  detailChunks: number;
+  detailBytes: number;
+  coarseChunks: number;
+  coarseBytes: number;
+  proxyBytes: number;
+}
+
+export interface ComposedView {
+  /** Path + query + hash of the page the run happened on; the dataset URL and view params live here. */
+  url: string;
+  mode: "slice" | "volume";
+}
+
+export interface BuildIdentity {
+  version: string;
+  mode: string;
+  dev: boolean;
+}
+
+export interface GpuIdentity {
+  vendor: string;
+  architecture: string;
+  device: string;
+  description: string;
+}
+
+/**
+ * What the pipeline has left to do, from the CPU cache's point of view.
+ * One shape with two readings: live, it is the cache's half of the
+ * quiescence predicate; captured at run close, it is what was still
+ * outstanding at settle. Reported rather than hidden — prefetch is excluded
+ * from the predicate, so a run can close with speculative work in flight and
+ * the reader has to be able to see that.
+ */
+export interface Outstanding {
+  /** Non-speculative work only; the speculative remainder is counted below. */
+  pending: number;
+  inFlight: number;
+  speculativePending: number;
+  speculativeInFlight: number;
+  desiredDetailChunks: number;
+  residentDetailChunks: number;
+  desiredCoarseChunks: number;
+  residentCoarseChunks: number;
+}
+
+/**
+ * The conditions a run happened under. Recorded so two runs are comparable
+ * — or visibly not. A header that omits device pixel ratio does not stop
+ * anyone comparing two runs at different DPR; it only stops them noticing.
+ *
+ * Captured when the run closes, not when it opens: a run opens before the
+ * canvas has been sized and before a collection's members have all arrived,
+ * so an at-open reading describes a page that does not exist yet. Cache
+ * warmth is the exception and is read at open — warmth means what was
+ * already there.
+ */
+export interface RunConditions {
+  datasetIds: string[];
+  composedView: ComposedView;
+  devicePixelRatio: number;
+  viewport: Viewport;
+}
+
+export interface RunHeader extends RunConditions {
+  cacheWarmth: CacheWarmth;
+  schemaVersion: number;
+  runId: string;
+  cause: RunCause;
+  endReason: EndReason;
+  build: BuildIdentity;
+  gpu: GpuIdentity | null;
+  /** Wall-clock epoch milliseconds at run start, so an archived run has a date. */
+  startedAtEpochMs: number;
+  durationUs: number;
+  /** How long `quiescent` had to hold before the run closed. Baked into every duration the run reports. */
+  quiescenceHoldMs: number;
+  /** How long the run was allowed to stay open before closing as `timeout`. */
+  timeoutMs: number;
+  outstandingAtSettle: Outstanding;
+}
+
+/** A phase that carries real timings on a row. Absent when the boundary pair was never stamped. */
+export interface PhaseTiming {
+  startUs: number;
+  endUs: number;
+  durationUs: number;
+}
+
+/** A lifecycle row, fanned out at serialisation. Spans exist only at export. */
+export interface TraceRow {
+  datasetId: string;
+  entityId: string;
+  imageId: string;
+  residencyTier: ResidencyTierName;
+  level: number;
+  t: number;
+  c: number;
+  z: number;
+  y: number;
+  x: number;
+  /** Canonical `"level/t/c/z/y/x"`, rebuilt from the columns. */
+  chunkKey: string;
+  outcome: RowOutcomeName;
+  phases: Partial<Record<Phase, PhaseTiming>>;
+}
+
+export interface TraceRun {
+  header: RunHeader;
+  rows: TraceRow[];
+}
+
+export interface TraceDocument {
+  schemaVersion: number;
+  exportedAtEpochMs: number;
+  /**
+   * Which phases carry timings in this document. The row model reserves a
+   * slot for every phase in {@link PHASES}; this states which of them were
+   * actually measured, so an absent phase reads as "not instrumented"
+   * rather than "took no time".
+   */
+  instrumentedPhases: Phase[];
+  runs: TraceRun[];
+  /**
+   * Rows the recorder saw while no run was open. Counted, not kept: the
+   * unlabelled steady-state interval and its retention are #927.
+   */
+  rowsOutsideRun: number;
+}
