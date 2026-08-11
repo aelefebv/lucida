@@ -34,6 +34,7 @@ import type {
   DatasetId,
   DatasetReferenceMode,
   LayoutId,
+  LayoutMutationMode,
   SavedView,
   ChannelSettings,
   LabelSettings,
@@ -163,7 +164,7 @@ export class SavedViewApplier {
   private readonly getScene: () => WasmScene | null;
   private readonly datasetIdForUrl: (url: string) => string;
   private readonly datasetReferenceMode: DatasetReferenceMode;
-  private readonly allowDocumentLayoutMutation: boolean;
+  private readonly layoutMutation: LayoutMutationMode;
   private readonly openTimeoutMs: number;
   /** Resolves per-dataset T/C extents for clamping (Z comes from the
    *  scene's volume shape). Optional: when absent, t/c pass through
@@ -185,7 +186,9 @@ export class SavedViewApplier {
     /** ms after which a queued open is considered failed (default 30 s). */
     openTimeoutMs: number = 30_000,
     datasetReferenceMode: DatasetReferenceMode = "source-url",
-    allowDocumentLayoutMutation: boolean = true,
+    /** What this restore may do to the shared active layout — see
+     *  `LayoutMutationMode`. */
+    layoutMutation: LayoutMutationMode = "broadcast",
     /** Resolves the recipient's per-dataset T/C extents so out-of-range
      *  timepoint/channel indices in an applied view clamp to fit. Z is
      *  always derived from `dataset_volume_shape`; this only adds T/C.
@@ -200,7 +203,7 @@ export class SavedViewApplier {
     this.getScene = getScene;
     this.datasetIdForUrl = datasetIdForUrl;
     this.datasetReferenceMode = datasetReferenceMode;
-    this.allowDocumentLayoutMutation = allowDocumentLayoutMutation;
+    this.layoutMutation = layoutMutation;
     this.openTimeoutMs = openTimeoutMs;
     this.dimensionExtentsFor = dimensionExtentsFor;
     this.labelNamesFor = labelNamesFor;
@@ -362,17 +365,16 @@ export class SavedViewApplier {
           continue;
         }
         if (currentActive !== layoutId) {
-          if (!this.allowDocumentLayoutMutation) {
+          if (this.layoutMutation === "refuse") {
             const warning = `Workspace view expects layout ${JSON.stringify(layoutId)} for dataset ${id}, but active layout is ${JSON.stringify(currentActive)}; leaving shared layout unchanged`;
             console.warn(`[SavedViewApplier] ${warning}`);
             this.addWarning(warning);
             continue;
           }
-          this.applyDocument({
-            type: "set_active_layout",
-            dataset_id: id,
-            layout_id: layoutId,
-          });
+          this.applyDocument(
+            { type: "set_active_layout", dataset_id: id, layout_id: layoutId },
+            this.layoutMutation === "broadcast",
+          );
         }
       }
 
@@ -550,11 +552,17 @@ export class SavedViewApplier {
     }
   }
 
-  private applyDocument(cmd: DocumentCommand): void {
+  /**
+   * Apply a document command to this page's scene, and — unless the caller
+   * says otherwise — send it so every peer and the server's persisted document
+   * follow. `broadcast: false` is a local-only apply: the picture changes here
+   * and nowhere else, which is what the capture surface needs (#923).
+   */
+  private applyDocument(cmd: DocumentCommand, broadcast: boolean = true): void {
     const json = JSON.stringify(cmd);
     const scene = this.getScene();
     if (scene) guardedSceneCall("apply_command", scene, () => scene.apply_command(json));
-    this.bridge.sendCommand(json);
+    if (broadcast) this.bridge.sendCommand(json);
   }
 
   private applyViewport(scene: WasmScene, cmd: ViewportCommand): void {

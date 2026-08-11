@@ -102,7 +102,15 @@ vi.mock("lucida-core", () => {
         display: { contrast_min: 0, contrast_max: 1, gamma: 1 },
       });
     }
-    export_dataset_presence() { return "{}"; }
+    // Shape-complete: `buildCapture` walks `dataset_settings`, so an empty
+    // object here makes every capture throw and silently no-op — which would
+    // make a "nothing was persisted" assertion pass for the wrong reason.
+    export_dataset_presence() {
+      return JSON.stringify({
+        dataset_order: Object.keys(this.doc.manifests ?? {}),
+        dataset_settings: {},
+      });
+    }
     import_presence(_json: string) {}
     import_dataset_presence(_json: string) {}
     compute_peer_cursors() { return JSON.stringify({ gpu: [], labels: [] }); }
@@ -234,6 +242,7 @@ import { AuthSessionContext } from "./auth/AuthSession.ts";
 import { Bridge, type BridgeHandlers } from "./bridge.ts";
 import { WasmScene } from "lucida-core";
 import { getSceneSettings } from "./tickCommon.ts";
+import { updateWorkspaceLastView } from "./workspaceApi.ts";
 import {
   invalidateDisplaySettings,
   invalidateAfterViewRestore,
@@ -422,6 +431,35 @@ describe("App wiring: annotation-view restore fan-out", () => {
       .mocked(invalidateAfterViewRestore)
       .mock.calls.filter(([, source]) => source === "annotation_view_restore");
     expect(restoreCalls).toHaveLength(1);
+  });
+});
+
+describe("App wiring: the capture surface writes no user state (#923)", () => {
+  // The whole point of these two is that they mount the REAL App: the gate is
+  // a prop threaded from a URL read at the top of App.tsx down into
+  // useSavedViewSync, and a hook-level test cannot fail if that thread breaks.
+  afterEach(() => {
+    window.history.replaceState(null, "", "/");
+    vi.useRealTimers();
+  });
+
+  it("persists the last view on an ordinary session", async () => {
+    vi.useFakeTimers();
+    await mountWithSnapshot(documentJson(["wds-1"]));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3100);
+    });
+    expect(vi.mocked(updateWorkspaceLastView)).toHaveBeenCalled();
+  });
+
+  it("persists nothing when loaded as ?render=1", async () => {
+    window.history.replaceState(null, "", "/?render=1");
+    vi.useFakeTimers();
+    await mountWithSnapshot(documentJson(["wds-1"]));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600_000);
+    });
+    expect(vi.mocked(updateWorkspaceLastView)).not.toHaveBeenCalled();
   });
 });
 

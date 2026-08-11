@@ -62,6 +62,7 @@ import {
   createWorkspaceSavedView,
 } from "./workspaceApi.ts";
 import type { WorkspaceRole, WorkspaceMember } from "./workspaceApi.ts";
+import { isCaptureSurface } from "./captureSurface.ts";
 import "./App.css";
 
 // The debug UI (side panel + on-canvas overlay layer) is code-split into
@@ -132,16 +133,15 @@ function App({
   // Foundation hooks
   const scene = useWasmScene();
   const render = useRenderClient();
-  // Chrome-free capture surface for `dataset montage` / `viewer render`:
-  // `?render=1` hides all UI chrome and lets the canvas fill the viewport so a
-  // headless screenshot is pure data. Parsed once — the URL is stable per capture.
-  const renderMode = useMemo(
-    () =>
-      typeof window !== "undefined" &&
-      new URLSearchParams(window.location.search).get("render") === "1",
-    [],
-  );
-  const layout = useLayout({ loopRef: render.loopRef, renderMode });
+  // Chrome-free capture surface for `dataset montage` / `viewer render` / the
+  // headless trace driver: `?render=1` hides all UI chrome and lets the canvas
+  // fill the viewport so a headless screenshot is pure data, AND suppresses
+  // every persisted write (#923). Both halves of the rule, and what still needs
+  // gating if you add a write, live in `captureSurface.ts` — read it before
+  // wiring anything new into this component. Parsed once: the URL is stable per
+  // capture.
+  const captureSurface = useMemo(() => isCaptureSurface(), []);
+  const layout = useLayout({ loopRef: render.loopRef, captureSurface });
 
   // Shared refs used by multiple hooks
   const datasetsRef = useRef<Map<string, DatasetState>>(new Map());
@@ -381,7 +381,12 @@ function App({
     fetchViewerProfile: fetchWorkspaceViewerProfile,
     fetchLastView: fetchWorkspaceLastView,
     persistLastView: persistWorkspaceLastView,
-    allowDocumentLayoutMutation: canEditWorkspace,
+    // The capture surface reads views but never writes one back (#923).
+    captureSurface,
+    // Restoring a view can change the shared active layout. A capture applies
+    // it to its own scene only, so the picture is right and nobody else's is
+    // touched; without edit rights the restore refuses and says so.
+    layoutMutation: captureSurface ? "local" : canEditWorkspace ? "broadcast" : "refuse",
   });
 
   // The three callback-ref population sites below (savedViewHooksRef,
@@ -1129,12 +1134,12 @@ function App({
   // suspicious; they are intentional and load-bearing here.
   /* eslint-disable react-hooks/refs */
   return (
-    <div className={renderMode ? "app render-mode" : "app"}>
+    <div className={captureSurface ? "app render-mode" : "app"}>
       {/* ProfileMenu floats over the bottom-left corner of the app
           chrome. Absolute-positioning keeps it out of the existing
           flex layout so the LayerPanel + canvas geometry is untouched.
           Gated out of the chrome-free render surface. */}
-      {!renderMode && <ProfileMenu />}
+      {!captureSurface && <ProfileMenu />}
       <LayerPanel
         layers={layers.layerInfos}
         selectedLayerId={selectedDatasetId}
