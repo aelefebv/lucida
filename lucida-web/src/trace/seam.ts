@@ -34,6 +34,14 @@ export interface LucidaTraceSeam {
    */
   readonly quiescence: QuiescenceState | null;
   /**
+   * How long `quiescent` must hold before the run closes itself (ADR 0051).
+   * A driver that exports the moment the boolean first goes true closes the
+   * run as `explicit` instead, losing the one field that says the page
+   * settled — so the wait belongs to whoever polls, and this is the number
+   * they have to wait.
+   */
+  readonly quiescenceHoldMs: number;
+  /**
    * The merged trace document. Closes the run in progress as `explicit`:
    * every run carries an end reason, and asking for the document concludes
    * the interval being asked about.
@@ -68,6 +76,9 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
     schemaVersion: TRACE_SCHEMA_VERSION,
     get quiescence() {
       return traceRecorder.quiescence;
+    },
+    get quiescenceHoldMs() {
+      return traceRecorder.holdMs;
     },
     exportTrace: () => traceRecorder.exportDocument(),
     exportChromeTrace: () => toChromeTraceJson(traceRecorder.exportDocument()),

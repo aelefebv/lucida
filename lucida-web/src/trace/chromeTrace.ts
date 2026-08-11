@@ -24,9 +24,9 @@
  *   against 3.9 MB, because a complete event is one object rather than two.
  *
  * "Thread" here is a *display track*, not a real thread — and not a request
- * lane either, which is what `lane` means everywhere else in lucida. That is a lie the
- * format requires and it is worth paying: the alternative is a viewer nobody
- * can read.
+ * lane either, which is what `lane` means everywhere else in lucida. That is a
+ * lie the format requires and it is worth paying: the alternative is a viewer
+ * nobody can read.
  *
  * What borrowing cannot do, and what the native surfaces are therefore for:
  * append (so this is never the live view), load quickly (about 25 s for
@@ -46,6 +46,7 @@ import {
   type Phase,
   type TraceDocument,
   type TraceRun,
+  type TraceRow,
   type TraceServerRow,
   type UnplacedReason,
 } from "./types.ts";
@@ -95,21 +96,32 @@ const COUNTER_SERIES = [
 ] as const;
 
 /**
- * How a reader should discount what they are looking at. Every value in the
- * file is measured; these are the ones assembled at export rather than
- * recorded as such, and a borrowed viewer has nowhere else to say so. Repeated
- * by every surface that hands the file over.
+ * How a reader should discount what they are looking at: measured values that
+ * the export assembles rather than records as such. A borrowed viewer has
+ * nowhere else to say this, so it says it here and every surface that hands the
+ * file over repeats it. Values that are not measurements at all are in
+ * {@link SYNTHETIC_VALUE_NOTES}.
  */
 export const DERIVED_VALUE_NOTES: readonly string[] = [
   "Phase spans are fanned out at export from the lifecycle row's boundary stamps.",
-  "A phase a row entered and never left is drawn from its last stamped boundary to run end, and is tagged `unfinished`; a retired row's open phase is not drawn at all.",
-  "Server spans are positioned inside the browser's bracket for the same request, centred within it. `gapUs` is the unattributed network and socket-queue remainder — read it, not the position.",
-  "Counter series are sampled once per tick, and a tick only happens when the page has work; a flat stretch is an idle page, not a frozen counter.",
+  "A retired row's open phase is not drawn at all — a span there would invent a stall the run did not have.",
+  "Counter series are sampled once per tick, and a tick only happens when the page has work; a flat stretch is an idle page, not a frozen counter. `readingsDropped` in the header says how many readings the ring wrapped over, so a long run's counters cover its tail.",
   "Concurrent chunks put overlapping spans on one phase track. Perfetto reports these as `slice_spill_overlapping_complete_event` and stacks them within the track; nothing is dropped.",
 ];
 
-/** No value in this file is injected or synthetic. Stated, not implied. */
-export const SYNTHETIC_VALUE_NOTES: readonly string[] = [];
+/**
+ * Positions and durations in this file that were **constructed at export
+ * rather than measured**. Two of them, and a timeline cannot show a span
+ * without committing to a position, so the honest move is to name them rather
+ * than to claim the file contains no invented numbers.
+ *
+ * Every other value in the file is a measurement; the assembly the export does
+ * on top of measured values is in {@link DERIVED_VALUE_NOTES}.
+ */
+export const SYNTHETIC_VALUE_NOTES: readonly string[] = [
+  "A server span's DURATION is the server's own measurement, but its POSITION is not measured: it is centred inside the browser's bracket for the same request, which splits the unattributed remainder evenly between the outbound and inbound legs because nothing measures them apart. Read `gapUs`, not the position.",
+  "An `unfinished` span's END is run end, not an observation. The row was still in flight when the run closed, so the phase has no end stamp; the span says where the row got stuck and for at least how long, never exactly how long.",
+];
 
 /**
  * Project the document. Runs are laid end to end on one timeline, offset by
@@ -168,6 +180,7 @@ export function chromeTraceOtherData(doc: TraceDocument): Record<string, unknown
       eventsDropped: run.eventsDropped,
       serverRowsDropped: run.serverRowsDropped,
       unplacedServerRows: countUnplaced(run.serverRows),
+      undrawableInFlightRows: countUndrawableInFlight(run.rows),
     })),
   };
 }
@@ -203,24 +216,9 @@ function emitRun(events: ChromeTraceEvent[], run: TraceRun, baseUs: number): voi
       if (!timing) continue;
       lastEndUs = timing.endUs;
       lastPhaseIndex = p;
-      events.push({
-        name: PHASES[p],
-        cat: `chunk,${row.lane},${row.residencyTier}`,
-        ph: "X",
-        ts: baseUs + timing.startUs,
-        dur: Math.max(1, timing.durationUs),
-        pid: PID_BROWSER,
-        tid: phaseTid(PHASES[p]),
-        args: {
-          key: row.chunkKey,
-          dataset: row.datasetId,
-          entity: row.entityId,
-          lane: row.lane,
-          tier: row.residencyTier,
-          level: row.level,
-          rid: row.connectionGeneration === 0 ? null : row.rid,
-        },
-      });
+      events.push(
+        chunkSpan(row, PHASES[p], baseUs + timing.startUs, timing.durationUs, false),
+      );
     }
 
     // A row still open when the run closed is the whole point of the
@@ -229,23 +227,14 @@ function emitRun(events: ChromeTraceEvent[], run: TraceRun, baseUs: number): voi
     // it would invent a stall the run did not have.
     if (row.outcome !== "in-flight") continue;
     const stuck = PHASES[lastPhaseIndex + 1];
+    // A row in flight with nothing stamped at all has no position to draw
+    // from, and guessing one would put the rows that stalled *earliest* at
+    // whatever time the guess picked. Counted in the header instead, because
+    // silently omitting them makes the emptiest phase look the healthiest.
     if (lastEndUs === null || stuck === undefined) continue;
-    events.push({
-      name: stuck,
-      cat: `chunk,${row.lane},${row.residencyTier},unfinished`,
-      ph: "X",
-      ts: baseUs + lastEndUs,
-      dur: Math.max(1, header.durationUs - lastEndUs),
-      pid: PID_BROWSER,
-      tid: phaseTid(stuck),
-      args: {
-        key: row.chunkKey,
-        dataset: row.datasetId,
-        lane: row.lane,
-        tier: row.residencyTier,
-        unfinishedAtRunEnd: true,
-      },
-    });
+    events.push(
+      chunkSpan(row, stuck, baseUs + lastEndUs, header.durationUs - lastEndUs, true),
+    );
   }
 
   for (const serverRow of run.serverRows) {
@@ -312,6 +301,22 @@ export function phaseTid(phase: Phase): number {
   return PHASE_TID_BASE + PHASES.indexOf(phase);
 }
 
+/**
+ * Rows still in flight with no boundary stamped at all, and so with nowhere on
+ * the timeline to be drawn. These are the rows that stalled *earliest* — the
+ * ones a reader most needs to know about — so the count is in the header
+ * rather than left as an absence.
+ */
+function countUndrawableInFlight(rows: readonly TraceRow[]): number {
+  let count = 0;
+  for (const row of rows) {
+    if (row.outcome !== "in-flight") continue;
+    if (PHASES.some(phase => row.phases[phase] !== undefined)) continue;
+    count++;
+  }
+  return count;
+}
+
 function countUnplaced(rows: readonly TraceServerRow[]): Record<UnplacedReason, number> {
   const counts: Record<UnplacedReason, number> = {
     "no-browser-row": 0,
@@ -322,6 +327,41 @@ function countUnplaced(rows: readonly TraceServerRow[]): Record<UnplacedReason, 
     if (row.unplacedReason) counts[row.unplacedReason]++;
   }
   return counts;
+}
+
+/**
+ * One phase's span for one chunk. Both the measured spans and the unfinished
+ * one go through here, so the two cannot drift into describing the same chunk
+ * differently — `unfinished` is a flag on one shape, not a second shape.
+ */
+function chunkSpan(
+  row: TraceRow,
+  phase: Phase,
+  tsUs: number,
+  durationUs: number,
+  unfinished: boolean,
+): ChromeTraceEvent {
+  return {
+    name: phase,
+    cat: `chunk,${row.lane},${row.residencyTier}${unfinished ? ",unfinished" : ""}`,
+    ph: "X",
+    ts: tsUs,
+    // Perfetto drops a zero-duration complete event; a phase that finished
+    // inside one clock tick is still a phase that happened.
+    dur: Math.max(1, durationUs),
+    pid: PID_BROWSER,
+    tid: phaseTid(phase),
+    args: {
+      key: row.chunkKey,
+      dataset: row.datasetId,
+      entity: row.entityId,
+      lane: row.lane,
+      tier: row.residencyTier,
+      level: row.level,
+      rid: row.connectionGeneration === 0 ? null : row.rid,
+      ...(unfinished ? { unfinishedAtRunEnd: true } : {}),
+    },
+  };
 }
 
 function processName(pid: number, name: string): ChromeTraceEvent {

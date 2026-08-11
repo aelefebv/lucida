@@ -210,6 +210,16 @@ export class TraceRecorder {
     return this.open !== null;
   }
 
+  /**
+   * How long `quiescent` must hold before a run closes itself. Readable from
+   * outside because a driver that exports the moment the boolean first goes
+   * true pre-empts that close, and every run it takes lands as `explicit`
+   * when it settled.
+   */
+  get holdMs(): number {
+    return this.quiescenceHoldMs;
+  }
+
   /** The last state the page published, or null before the first publication. */
   get quiescence(): QuiescenceState | null {
     return this.lastQuiescence;

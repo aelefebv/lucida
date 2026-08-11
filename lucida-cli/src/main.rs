@@ -3516,10 +3516,10 @@ fn format_chrome_trace_human(output_path: &str, capture: &TraceCapture) -> Strin
         human.push_str("\nThe page never published quiescent before the deadline; the run was closed explicitly.");
     }
     if capture.synthetic_values.is_empty() {
-        human.push_str("\nInjected or synthetic values: none.");
+        human.push_str("\nConstructed rather than measured: nothing.");
     } else {
         for value in &capture.synthetic_values {
-            human.push_str(&format!("\nSynthetic: {value}"));
+            human.push_str(&format!("\nConstructed, not measured: {value}"));
         }
     }
     for value in &capture.derived_values {
@@ -3570,15 +3570,37 @@ async fn capture_chrome_trace(
     .await
 }
 
-/// Poll the page's published quiescence. Never inferred from outside — a
-/// stalled pipeline and a finished one both stop drawing, so watching the
-/// frame counter would call the interesting case settled.
+/// Poll the page's published quiescence until it has *held*, and let the page
+/// close its own run.
+///
+/// Never inferred from outside — a stalled pipeline and a finished one both
+/// stop drawing, so watching the frame counter would call the interesting case
+/// settled. And never exported on the first `true`: the recorder closes a run
+/// as `quiescent` only once the boolean has held for its own hold window, so a
+/// driver that exports the instant it flips pre-empts that close and every run
+/// it takes records `explicit` — losing the one field that says the page
+/// settled. The hold window comes from the page rather than a constant here,
+/// because it is baked into every duration the run reports.
 async fn wait_for_quiescent(page: &mut browser::Page, wait: Duration) -> Result<bool, CliError> {
     let deadline = tokio::time::Instant::now() + wait;
+    let hold = page
+        .evaluate(QUIESCENCE_HOLD_PROBE, wait)
+        .await?
+        .as_f64()
+        .filter(|value| *value > 0.0)
+        .unwrap_or(DEFAULT_QUIESCENCE_HOLD_MS);
+    // Past the hold itself, so the recorder's timer has fired and the run is
+    // closed before the export asks for it.
+    let settle_for = Duration::from_millis(hold as u64) + Duration::from_millis(250);
+
     loop {
-        let quiescent = page.evaluate(QUIESCENT_PROBE, wait).await?;
-        if quiescent.as_bool().unwrap_or(false) {
-            return Ok(true);
+        if page.evaluate(QUIESCENT_PROBE, wait).await?.as_bool() == Some(true) {
+            tokio::time::sleep(settle_for).await;
+            // Still settled after the hold, or the page found more work and
+            // the wait starts again.
+            if page.evaluate(QUIESCENT_PROBE, wait).await?.as_bool() == Some(true) {
+                return Ok(true);
+            }
         }
         if tokio::time::Instant::now() >= deadline {
             return Ok(false);
@@ -3603,12 +3625,12 @@ fn summarise_chrome_trace(json: &str, settled: bool) -> Result<TraceCapture, Cli
             .map(Vec::len)
             .unwrap_or(0),
         bytes: json.len(),
-        synthetic_values: string_list(&parsed, "syntheticValues"),
-        derived_values: string_list(&parsed, "derivedValues"),
+        synthetic_values: other_data_strings(&parsed, "syntheticValues"),
+        derived_values: other_data_strings(&parsed, "derivedValues"),
     })
 }
 
-fn string_list(parsed: &Value, key: &str) -> Vec<String> {
+fn other_data_strings(parsed: &Value, key: &str) -> Vec<String> {
     parsed
         .get("otherData")
         .and_then(|value| value.get(key))
@@ -3624,6 +3646,12 @@ fn string_list(parsed: &Value, key: &str) -> Vec<String> {
 
 const QUIESCENT_PROBE: &str = "!!(window.lucidaTrace && window.lucidaTrace.quiescence \
      && window.lucidaTrace.quiescence.quiescent)";
+
+/// Only used when the page is too old to publish one; the page's own value wins.
+const DEFAULT_QUIESCENCE_HOLD_MS: f64 = 500.0;
+
+const QUIESCENCE_HOLD_PROBE: &str =
+    "window.lucidaTrace ? window.lucidaTrace.quiescenceHoldMs : null";
 
 const TRACE_EXPORT_EXPRESSION: &str =
     "window.lucidaTrace ? window.lucidaTrace.exportChromeTrace() : null";
@@ -5545,7 +5573,7 @@ mod tests {
         let human = format_chrome_trace_human("/tmp/run.json", &capture);
         assert!(human.contains("/tmp/run.json"));
         assert!(human.contains("ui.perfetto.dev"));
-        assert!(human.contains("Injected or synthetic values: none."));
+        assert!(human.contains("Constructed rather than measured: nothing."));
         assert!(human.contains("Phase spans are fanned out at export."));
         // A path, not rows.
         assert!(!human.contains("\"ph\""));

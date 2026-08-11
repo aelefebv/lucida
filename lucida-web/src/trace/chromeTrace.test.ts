@@ -181,6 +181,20 @@ describe("the Chrome Trace Event projection", () => {
     expect(wire[0].args).toMatchObject({ unfinishedAtRunEnd: true });
   });
 
+  /**
+   * A row in flight with nothing stamped stalled *earliest*. It has no
+   * position to be drawn from, so it is counted rather than left as an
+   * absence — an omitted row makes the emptiest phase look the healthiest.
+   */
+  it("counts an in-flight row it cannot place instead of dropping it silently", () => {
+    const document = doc(run({ rows: [row({ outcome: "in-flight", phases: {} })] }));
+
+    expect(toChromeTraceEvents(document).filter(e => e.ph === "X" && e.cat?.startsWith("chunk")))
+      .toHaveLength(0);
+    const [header] = chromeTraceOtherData(document).runs as Record<string, unknown>[];
+    expect(header.undrawableInFlightRows).toBe(1);
+  });
+
   it("draws nothing extra for a retired row, which would invent a stall", () => {
     const events = toChromeTraceEvents(doc(run({ rows: [row({ outcome: "retired" })] })));
     expect(named(events, "wire")).toHaveLength(0);
@@ -326,7 +340,13 @@ describe("the Chrome Trace Event projection", () => {
     expect(file.displayTimeUnit).toBe("ms");
     expect(file.otherData.rowsOutsideRun).toBe(4);
     expect(file.otherData.serverRowsOutsideRun).toBe(1);
-    expect(file.otherData.syntheticValues).toEqual([]);
+    // A timeline cannot draw a span without committing to a position, and two
+    // of the positions here are constructed rather than measured. Declaring
+    // "none" while inventing them is the failure this list exists to prevent.
+    const synthetic = file.otherData.syntheticValues as string[];
+    expect(synthetic).toHaveLength(2);
+    expect(synthetic.join(" ")).toContain("centred inside the browser's bracket");
+    expect(synthetic.join(" ")).toContain("run end, not an observation");
     expect((file.otherData.derivedValues as string[]).length).toBeGreaterThan(0);
     const [header] = file.otherData.runs as Record<string, unknown>[];
     expect(header).toMatchObject({ runId: "run-1", devicePixelRatio: 2, ticksDropped: 7 });
