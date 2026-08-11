@@ -108,11 +108,34 @@ pub struct ComposedView {
 pub struct ServerWarmth {
     /// Whether the server already had this dataset open when the run started.
     pub dataset_open_before_run: bool,
+    /// Whether this command opened it on the server to make the run possible.
+    /// Recorded rather than hidden: it is the difference between measuring a
+    /// server that happened to be warm and one this command warmed.
+    #[serde(default)]
+    pub opened_by_driver: bool,
     /// The server's source cache for this dataset, when it had one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_cache: Option<DatasetSourceCacheStats>,
     /// One line a reader can put beside a duration.
     pub summary: String,
+}
+
+impl ServerWarmth {
+    /// Record that the driver put the dataset into the workspace itself.
+    ///
+    /// A dataset that is not a member of the workspace never reaches a scene in
+    /// the page, so the composed view has nothing to apply to and the run
+    /// measures an empty viewer. Opening it first is what makes a first-time
+    /// dataset measurable at all — and it warms the server, which is exactly
+    /// the thing this block exists to disclose. The browser stays cold: it is a
+    /// fresh profile with an empty cache either way.
+    pub fn note_driver_open(&mut self) {
+        self.opened_by_driver = true;
+        self.summary =
+            "server warmed by this command: the dataset was not in the workspace, so the driver \
+             opened it before the run (the browser is still cold)"
+                .to_string();
+    }
 }
 
 /// What only the driver knows. The page's own header carries everything it can
@@ -212,6 +235,7 @@ pub fn summarise_server_warmth(dataset_url: &str, health: &[DatasetSourceHealth]
     match entry {
         None => ServerWarmth {
             dataset_open_before_run: false,
+            opened_by_driver: false,
             source_cache: None,
             summary: "server cold for this dataset (not open before the run)".to_string(),
         },
@@ -225,6 +249,7 @@ pub fn summarise_server_warmth(dataset_url: &str, health: &[DatasetSourceHealth]
             };
             ServerWarmth {
                 dataset_open_before_run: true,
+                opened_by_driver: false,
                 source_cache: dataset.source_cache.clone(),
                 summary,
             }
@@ -454,7 +479,7 @@ pub async fn drive_run(
     facts: &DriverFacts,
 ) -> Result<TraceRunFile, CliError> {
     browser::with_browser(viewport, wait, async |browser| {
-        let mut page = browser.open_page(url, token, wait).await?;
+        let mut page = browser.open_page_unrendered(url, token, wait).await?;
         let settled = wait_for_quiescent(&mut page, wait).await?;
         if !settled {
             page.evaluate(CLOSE_AS_TIMEOUT, wait).await?;
@@ -729,6 +754,7 @@ mod tests {
     fn cold() -> ServerWarmth {
         ServerWarmth {
             dataset_open_before_run: false,
+            opened_by_driver: false,
             source_cache: None,
             summary: "server cold for this dataset (not open before the run)".to_string(),
         }
@@ -836,6 +862,21 @@ mod tests {
         assert!(!cold.dataset_open_before_run);
         assert!(cold.source_cache.is_none());
         assert!(cold.summary.contains("cold"));
+    }
+
+    /// A dataset the workspace does not have yet cannot reach a scene, so the
+    /// driver opens it — and says so, because that warms the server it is about
+    /// to measure against.
+    #[test]
+    fn a_driver_opened_dataset_says_so_in_the_warmth_it_reports() {
+        let mut warmth = summarise_server_warmth("gs://bucket/set.zarr", &[]);
+        assert!(!warmth.opened_by_driver);
+        warmth.note_driver_open();
+
+        assert!(warmth.opened_by_driver);
+        assert!(!warmth.dataset_open_before_run);
+        assert!(warmth.summary.contains("driver opened it before the run"));
+        assert!(warmth.summary.contains("browser is still cold"));
     }
 
     /// Spelling is not warmth: the same dataset typed two legal ways is one

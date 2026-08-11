@@ -227,6 +227,11 @@ enum Command {
     /// `lucida trace <dataset>` drives the run; the subcommands read a run it
     /// wrote. Top level rather than a verb under `dataset` because it drives a
     /// run, and its follow-up depths take a run id rather than a dataset.
+    ///
+    /// The page loads the whole selected workspace, so a workspace holding
+    /// other datasets measures opening those too — the run header lists every
+    /// dataset it actually loaded. Measure one dataset in a workspace that has
+    /// only that dataset.
     #[command(args_conflicts_with_subcommands = true)]
     Trace {
         /// Dataset URL in canonical form, or an id the server already has open
@@ -3632,7 +3637,19 @@ async fn run_trace(
     let dataset_client = DatasetWorkspaceClient::new(target.ws_url.clone(), token.cloned());
     let (_seq, health) = dataset_client.health(None, wait).await?;
     let dataset_url = dataset_source_url(dataset, &health);
-    let warmth = trace::summarise_server_warmth(&dataset_url, &health);
+    let mut warmth = trace::summarise_server_warmth(&dataset_url, &health);
+
+    // A dataset the workspace does not have yet never reaches a scene in the
+    // page — the composed view has nothing to apply to, and the run measures an
+    // empty viewer until the deadline. Opening it here is what makes a
+    // first-time dataset measurable; the warmth block says the driver did it,
+    // because it warms the server the run is about to be measured against.
+    if !warmth.dataset_open_before_run {
+        DatasetOpenClient::new(target.ws_url.clone(), token.cloned())
+            .open(&dataset_url, &workspace.id, wait)
+            .await?;
+        warmth.note_driver_open();
+    }
 
     let view = trace::compose_dataset_view(&dataset_url, args.width, args.height);
     let url = montage::with_render_param(&viewer_inline_view_web_url(target, &view)?);
@@ -3651,7 +3668,11 @@ async fn run_trace(
         workspace_id: workspace.id.clone(),
     };
     let viewport = Viewport::new(args.width, args.height, args.device_pixel_ratio);
-    let file = trace::drive_run(&url, token, viewport, wait, &facts).await?;
+    // A drive that fails says what it drove: the composed URL is the whole
+    // workload, and without it a timeout is unreproducible by hand.
+    let file = trace::drive_run(&url, token, viewport, wait, &facts)
+        .await
+        .map_err(|error| error.with_context("url", &url))?;
     let path = trace::write_run_file(&file, trace_dir, args.output.as_deref()).await?;
     let gate = if args.gate {
         trace::gate_failure(&file)
