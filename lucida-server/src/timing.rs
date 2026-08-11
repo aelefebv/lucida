@@ -14,7 +14,11 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use lucida_protocol::{MetadataReadPhase, ServerTimingBatch, TimingRowFamily, TimingRowOutcome};
+use lucida_protocol::{
+    LABEL_NONE, MetadataReadPhase, PHASE_MAX_US, PHASE_UNSET, SERVER_PHASES, ServerPhase,
+    ServerTimingBatch, TimingRowFamily, TimingRowOutcome,
+};
+use lucida_store::cache::SourceReadTiming;
 use lucida_store::metadata_reads::{MetadataRead, MetadataReadObserver};
 use tokio::sync::Notify;
 
@@ -49,24 +53,40 @@ pub enum RowKey {
     Open(Arc<str>),
 }
 
-/// One unit of served work, as the server saw it.
+/// One unit of served work, as the server saw it: how long it spent in each
+/// [`ServerPhase`], plus how it ended.
+///
+/// Durations rather than absolute instants, all of them relative to this
+/// request's own arrival. Phases the request never entered stay
+/// [`PHASE_UNSET`], because a generated chunk that never touched the source
+/// store and a source read that took no measurable time are different facts.
 ///
 /// A chunk row and a metadata-read row are the same shape with different
 /// slots filled. That is what a fixed-width row is for: the family says
 /// which key and which columns to read, and a second table would buy
-/// nothing but a second thing to route.
+/// nothing but a second thing to route. A metadata read has no dispatch,
+/// decompress or encode to fill the phase array with, so it leaves the
+/// array unset and states its span in the two columns below instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServedRow {
     pub key: RowKey,
     pub family: TimingRowFamily,
-    /// Arrival → start of serve. On a metadata read, the open's arrival →
-    /// the start of that read.
-    pub dispatch_offset_us: u32,
-    /// Start of serve → handoff to the outbound queue. On a metadata read,
-    /// the read itself: the round trip, the wait on a leader, or the local
-    /// lookup.
-    pub duration_us: u32,
     pub outcome: TimingRowOutcome,
+    /// One slot per phase, indexed by [`ServerPhase`]'s discriminant. Unset
+    /// throughout on a metadata-read row.
+    pub phases: [u32; SERVER_PHASES.len()],
+    /// The label of the read this request waited on, for a single-flight
+    /// follower; [`LABEL_NONE`] otherwise.
+    pub coalesced_onto: u32,
+    /// The open's arrival → the start of this read, on a metadata-read row
+    /// and zero elsewhere. Its own column because the phase array holds
+    /// durations and this is a position: it is what lets the exporter lay
+    /// hundreds of reads out across the open rather than stacking them at
+    /// its midpoint.
+    pub dispatch_offset_us: u32,
+    /// The read itself on a metadata-read row — the round trip, the wait on
+    /// a leader, or the local lookup — and zero elsewhere.
+    pub duration_us: u32,
     /// Set on metadata-read rows and nowhere else.
     pub metadata_phase: Option<MetadataReadPhase>,
 }
@@ -85,6 +105,13 @@ impl ServedRow {
             RowKey::Open(id) => Some(id.to_string()),
         }
     }
+}
+
+/// A phase's slot in a row. The enum's discriminant *is* the index, so this
+/// is a cast rather than a lookup — recording a phase sits under ADR 0049's
+/// marginal-cost ceiling and has no business searching a table.
+fn phase_index(phase: ServerPhase) -> usize {
+    phase as usize
 }
 
 #[derive(Default)]
@@ -155,7 +182,12 @@ impl TimingBuffer {
             dispatch_offset_us: Vec::with_capacity(rows.len()),
             duration_us: Vec::with_capacity(rows.len()),
             outcome: Vec::with_capacity(rows.len()),
+            ..ServerTimingBatch::default()
         };
+        for phase in SERVER_PHASES {
+            batch.column_mut(phase).reserve(rows.len());
+        }
+        batch.coalesced_onto.reserve(rows.len());
         for row in rows {
             batch.rid.push(row.rid());
             batch.request_id.push(row.request_id());
@@ -164,6 +196,10 @@ impl TimingBuffer {
             batch.dispatch_offset_us.push(row.dispatch_offset_us);
             batch.duration_us.push(row.duration_us);
             batch.outcome.push(row.outcome);
+            batch.coalesced_onto.push(row.coalesced_onto);
+            for (slot, phase) in row.phases.iter().zip(SERVER_PHASES) {
+                batch.column_mut(phase).push(*slot);
+            }
         }
         Some(batch)
     }
@@ -176,32 +212,41 @@ impl TimingBuffer {
     }
 }
 
-/// Times one served request from its arrival and files the row on drop of
-/// the serve — via [`RequestProbe::finish`], which every exit path calls, so
-/// an outcome is stated rather than inferred from a missing row.
+/// Times one served request phase by phase, from the instant its frame came
+/// off the socket, and files the row via [`RequestProbe::finish`] — which
+/// every exit path calls, so an outcome is stated rather than inferred from
+/// a missing row.
+///
+/// A cursor, not a set of stopwatches: [`mark`](Self::mark) closes whatever
+/// has elapsed since the previous boundary and files it under the named
+/// phase. Phases are contiguous by construction, so nothing between two
+/// marks can go unattributed, and a serve that exits early simply leaves the
+/// phases it never reached unset.
 pub struct RequestProbe {
     rid: u32,
     family: TimingRowFamily,
-    dispatch_offset_us: u32,
-    dispatched_at: Instant,
+    /// Start of the phase currently being timed.
+    cursor: Instant,
+    phases: [u32; SERVER_PHASES.len()],
+    coalesced_onto: u32,
     buffer: Arc<TimingBuffer>,
 }
 
 impl RequestProbe {
-    /// Open the probe at the moment the serve begins; `arrival` is when the
-    /// request was parsed off the socket.
-    pub fn dispatched(
+    /// Open the probe at `arrival` — the instant the frame came off the
+    /// socket, before it was parsed or routed.
+    pub fn arrived(
         rid: u32,
         family: TimingRowFamily,
         arrival: Instant,
         buffer: Arc<TimingBuffer>,
     ) -> Self {
-        let dispatched_at = Instant::now();
         Self {
             rid,
             family,
-            dispatch_offset_us: micros(dispatched_at.saturating_duration_since(arrival)),
-            dispatched_at,
+            cursor: arrival,
+            phases: [PHASE_UNSET; SERVER_PHASES.len()],
+            coalesced_onto: LABEL_NONE,
             buffer,
         }
     }
@@ -210,16 +255,60 @@ impl RequestProbe {
         self.rid
     }
 
-    /// Close the row at handoff. Socket write time is excluded — it happens
-    /// in a separate task behind an unbounded queue and is not observable
-    /// from the serve path.
+    /// Close the phase that has been running and record it as `phase`. The
+    /// next phase starts here.
+    pub fn mark(&mut self, phase: ServerPhase) {
+        let now = Instant::now();
+        self.phases[phase_index(phase)] = micros(now.saturating_duration_since(self.cursor));
+        self.cursor = now;
+    }
+
+    /// Close the read: the waits the store measured, and — as
+    /// [`ServerPhase::CacheLookup`] — whatever else the read spent inside the
+    /// cache.
+    ///
+    /// The store measures the waits itself because only it knows which side
+    /// of the single flight this request landed on, and that distinction is
+    /// what keeps a sum over the read column equal to the number of round
+    /// trips actually made (ADR 0050). Everything else the call took — the
+    /// LRU probe, the single-flight election, the insert and its evictions —
+    /// is the remainder, and it goes to `cache-lookup` rather than nowhere.
+    /// Dropping it would leave server time inside the browser's bracket with
+    /// no phase against it, and the exporter would read that silence as
+    /// network.
+    pub fn record_read(&mut self, timing: SourceReadTiming) {
+        let now = Instant::now();
+        let elapsed = now.saturating_duration_since(self.cursor).as_micros() as u64;
+        for (phase, value) in [
+            (ServerPhase::PermitWait, timing.permit_wait_us),
+            (ServerPhase::BackendRead, timing.backend_read_us),
+            (ServerPhase::CoalescedWait, timing.coalesced_wait_us),
+        ] {
+            if let Some(value) = value {
+                self.phases[phase_index(phase)] = value;
+            }
+        }
+        self.phases[phase_index(ServerPhase::CacheLookup)] =
+            clamp_us(elapsed.saturating_sub(timing.measured_us()));
+        if let Some(leader) = timing.coalesced_onto {
+            self.coalesced_onto = leader.0;
+        }
+        self.cursor = now;
+    }
+
+    /// File the row. Socket write time is excluded — it happens in a
+    /// separate task behind an unbounded queue and is not observable from
+    /// the serve path, which is why [`ServerPhase::Handoff`] is terminal.
     pub fn finish(self, outcome: TimingRowOutcome) {
         self.buffer.record(ServedRow {
             key: RowKey::Label(self.rid),
             family: self.family,
-            dispatch_offset_us: self.dispatch_offset_us,
-            duration_us: micros(self.dispatched_at.elapsed()),
             outcome,
+            phases: self.phases,
+            coalesced_onto: self.coalesced_onto,
+            // A chunk or asset row states its span in the phase array.
+            dispatch_offset_us: 0,
+            duration_us: 0,
             metadata_phase: None,
         });
     }
@@ -272,13 +361,25 @@ impl MetadataReadObserver for MetadataReadSink {
             } else {
                 TimingRowOutcome::Delivered
             },
+            phases: [PHASE_UNSET; SERVER_PHASES.len()],
+            coalesced_onto: LABEL_NONE,
             metadata_phase: Some(read.phase),
         });
     }
 }
 
 fn micros(d: Duration) -> u32 {
-    u32::try_from(d.as_micros()).unwrap_or(u32::MAX)
+    clamp_us(u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
+}
+
+/// Clamp to [`PHASE_MAX_US`], never onto [`PHASE_UNSET`]: a phase that ran
+/// for over 71 minutes must report as very long, not as never having
+/// happened. Saturating onto the sentinel would blank out the worst stall in
+/// the trace — the one row anybody opened the monitor for.
+fn clamp_us(micros: u64) -> u32 {
+    u32::try_from(micros)
+        .unwrap_or(PHASE_MAX_US)
+        .min(PHASE_MAX_US)
 }
 
 #[cfg(test)]
@@ -287,12 +388,17 @@ mod tests {
     use std::sync::Arc;
 
     fn row(rid: u32) -> ServedRow {
+        let mut phases = [PHASE_UNSET; SERVER_PHASES.len()];
+        phases[phase_index(ServerPhase::Arrival)] = 10;
+        phases[phase_index(ServerPhase::Handoff)] = 20;
         ServedRow {
             key: RowKey::Label(rid),
             family: TimingRowFamily::Chunk,
-            dispatch_offset_us: 10,
-            duration_us: 20,
             outcome: TimingRowOutcome::Delivered,
+            phases,
+            coalesced_onto: LABEL_NONE,
+            dispatch_offset_us: 0,
+            duration_us: 0,
             metadata_phase: None,
         }
     }
@@ -325,6 +431,14 @@ mod tests {
         );
         assert_eq!(batch.dropped, 0);
         assert_eq!(batch.len(), 2);
+        // Every phase is a column of the same length, unset where the row
+        // never entered it.
+        for phase in SERVER_PHASES {
+            assert_eq!(batch.column(phase).len(), 2, "{phase:?} column");
+        }
+        assert_eq!(batch.arrival_us, vec![10, 10]);
+        assert_eq!(batch.handoff_us, vec![20, 20]);
+        assert_eq!(batch.backend_read_us, vec![PHASE_UNSET, PHASE_UNSET]);
 
         assert!(buffer.take_batch().is_none(), "a flush drains the buffer");
     }
@@ -469,7 +583,7 @@ mod tests {
     #[test]
     fn a_probe_files_exactly_one_row_with_its_outcome() {
         let buffer = Arc::new(TimingBuffer::new());
-        let probe = RequestProbe::dispatched(
+        let probe = RequestProbe::arrived(
             77,
             TimingRowFamily::Chunk,
             Instant::now(),
@@ -481,5 +595,167 @@ mod tests {
         let batch = buffer.take_batch().expect("the probe filed a row");
         assert_eq!(batch.rid, vec![77]);
         assert_eq!(batch.outcome, vec![TimingRowOutcome::Failed]);
+    }
+
+    /// Phases are contiguous: each mark closes what has elapsed since the
+    /// previous one, so no time between two boundaries goes unattributed.
+    #[test]
+    fn marks_close_contiguous_phases_and_leave_the_rest_unset() {
+        let buffer = Arc::new(TimingBuffer::new());
+        let arrival = Instant::now();
+        let mut probe =
+            RequestProbe::arrived(1, TimingRowFamily::Chunk, arrival, Arc::clone(&buffer));
+
+        std::thread::sleep(Duration::from_millis(2));
+        probe.mark(ServerPhase::Arrival);
+        std::thread::sleep(Duration::from_millis(2));
+        probe.mark(ServerPhase::BindingLookup);
+        let total_before_finish = arrival.elapsed();
+        probe.finish(TimingRowOutcome::Delivered);
+
+        let batch = buffer.take_batch().expect("a row");
+        assert!(batch.arrival_us[0] >= 2_000);
+        assert!(batch.binding_lookup_us[0] >= 2_000);
+        assert!(
+            batch.arrival_us[0] + batch.binding_lookup_us[0]
+                <= total_before_finish.as_micros() as u32,
+            "marked phases must not overlap"
+        );
+        // The serve never got as far as a read, and says so rather than
+        // reporting an instant one.
+        assert_eq!(batch.cache_lookup_us, vec![PHASE_UNSET]);
+        assert_eq!(batch.permit_wait_us, vec![PHASE_UNSET]);
+        assert_eq!(batch.handoff_us, vec![PHASE_UNSET]);
+    }
+
+    /// A leader's row owns the permit wait and the round trip; a follower's
+    /// owns neither. Reading a follower's wait as a backend read is the
+    /// mis-diagnosis this split exists to prevent.
+    #[test]
+    fn a_read_lands_on_the_phases_the_store_measured() {
+        let buffer = Arc::new(TimingBuffer::new());
+
+        let mut leader =
+            RequestProbe::arrived(1, TimingRowFamily::Chunk, Instant::now(), buffer.clone());
+        leader.record_read(SourceReadTiming {
+            permit_wait_us: Some(3_100_000),
+            backend_read_us: Some(120_000),
+            ..SourceReadTiming::default()
+        });
+        leader.finish(TimingRowOutcome::Delivered);
+
+        let mut follower =
+            RequestProbe::arrived(2, TimingRowFamily::Chunk, Instant::now(), buffer.clone());
+        follower.record_read(SourceReadTiming {
+            coalesced_wait_us: Some(400_000),
+            coalesced_onto: Some(lucida_store::source_limiter::RequestLabel(1)),
+            ..SourceReadTiming::default()
+        });
+        follower.finish(TimingRowOutcome::Delivered);
+
+        let batch = buffer.take_batch().expect("two rows");
+        assert_eq!(batch.permit_wait_us, vec![3_100_000, PHASE_UNSET]);
+        assert_eq!(batch.backend_read_us, vec![120_000, PHASE_UNSET]);
+        assert_eq!(batch.coalesced_wait_us, vec![PHASE_UNSET, 400_000]);
+        // The follower says which read it waited on, so the join to the
+        // leader's row is a plain equi-join and the coalescing count is a
+        // group-by over this column.
+        assert_eq!(batch.coalesced_onto, vec![LABEL_NONE, 1]);
+    }
+
+    /// Time inside the read that the store did not measure — the LRU probe,
+    /// the election, the insert — lands on `cache-lookup` rather than
+    /// vanishing. The exporter sums the phases and calls the remainder of
+    /// the browser's bracket network, so server time with no phase against
+    /// it would be read as network time.
+    #[test]
+    fn the_unmeasured_remainder_of_a_read_is_attributed_not_dropped() {
+        let buffer = Arc::new(TimingBuffer::new());
+        let mut probe =
+            RequestProbe::arrived(1, TimingRowFamily::Chunk, Instant::now(), buffer.clone());
+        probe.mark(ServerPhase::Dispatch);
+        std::thread::sleep(Duration::from_millis(5));
+        probe.record_read(SourceReadTiming {
+            permit_wait_us: Some(1_000),
+            backend_read_us: Some(1_000),
+            ..SourceReadTiming::default()
+        });
+        probe.finish(TimingRowOutcome::Delivered);
+
+        let batch = buffer.take_batch().expect("a row");
+        // ~5 ms elapsed, 2 ms of it measured by the store: the remaining
+        // ~3 ms is the cache's own work and is filed as such.
+        assert!(
+            batch.cache_lookup_us[0] >= 2_000,
+            "the remainder was dropped: {} µs",
+            batch.cache_lookup_us[0]
+        );
+    }
+
+    /// A phase longer than the slot can hold must read as very long, not as
+    /// never having happened — that row is the one the monitor was opened
+    /// for.
+    #[test]
+    fn an_enormous_phase_saturates_below_the_unset_sentinel() {
+        assert_eq!(clamp_us(u64::from(PHASE_UNSET)), PHASE_MAX_US);
+        assert_eq!(clamp_us(u64::MAX), PHASE_MAX_US);
+        assert_ne!(clamp_us(u64::MAX), PHASE_UNSET);
+    }
+
+    /// The client's own permit wait is reported; nothing about anyone else
+    /// is. The batch carries durations and a label, and there is nowhere in
+    /// it for queue depth, a peer's rate or a peer's dataset to appear.
+    #[test]
+    fn a_row_carries_its_own_wait_and_nothing_about_other_tenants() {
+        let buffer = Arc::new(TimingBuffer::new());
+        let mut probe =
+            RequestProbe::arrived(5, TimingRowFamily::Chunk, Instant::now(), buffer.clone());
+        probe.record_read(SourceReadTiming {
+            permit_wait_us: Some(3_100_000),
+            backend_read_us: Some(90_000),
+            ..SourceReadTiming::default()
+        });
+        probe.finish(TimingRowOutcome::Delivered);
+
+        let batch = buffer.take_batch().expect("a row");
+        assert_eq!(batch.permit_wait_us, vec![3_100_000]);
+
+        let json = serde_json::to_value(&batch).expect("the batch serialises");
+        let mut keys: Vec<&str> = json
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "arrival_us",
+                "backend_read_us",
+                "binding_lookup_us",
+                "cache_lookup_us",
+                "coalesced_onto",
+                "coalesced_wait_us",
+                "decompress_us",
+                // The metadata-read family's own columns. A read's position
+                // inside the open that asked for it, its duration, its phase
+                // and that open's own identifier: all four are this client's
+                // numbers about this client's open.
+                "dispatch_offset_us",
+                "dispatch_us",
+                "dropped",
+                "duration_us",
+                "family",
+                "handoff_us",
+                "metadata_phase",
+                "outcome",
+                "permit_wait_us",
+                "request_id",
+                "rid",
+                "slice_encode_us",
+            ],
+            "a new column here is a new thing a client learns about the server",
+        );
     }
 }

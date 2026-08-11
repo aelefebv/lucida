@@ -235,6 +235,62 @@ enum ReadPermit<'a> {
 /// (cheap, reference-counted clones); failure carries a [`SharedError`].
 type ShareResult = Result<Bytes, SharedError>;
 
+/// How one read through the cache spent its time, split so a caller can say
+/// *which* wait it was.
+///
+/// The split follows the single flight, because that is what makes the
+/// arithmetic honest. A follower performs no backend read and takes no
+/// permit: its wait belongs to `coalesced_wait_us` and nothing else, so a
+/// sum over `backend_read_us` counts each real round trip exactly once
+/// (ADR 0050). Reporting a follower's wait as a backend read would tell a
+/// reader the store is slow when the truth is that the same object was
+/// already being read.
+///
+/// Both a coalesced wait and a read appear on one timing in exactly one
+/// case: a follower whose leader vanished mid-flight falls back to its own
+/// read, and it really did perform one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SourceReadTiming {
+    /// Queued behind the concurrency cap, for the caller that did the read.
+    pub permit_wait_us: Option<u32>,
+    /// The backend round trip, for the caller that did the read.
+    pub backend_read_us: Option<u32>,
+    /// Parked on another caller's in-flight read of the same object.
+    pub coalesced_wait_us: Option<u32>,
+    /// The label of the request whose read this one waited on. Set only for
+    /// a follower, and it is what turns "this request waited 400 ms" into
+    /// "it waited on *that* read" — the join ADR 0050 asks a follower row to
+    /// carry. Labels are per connection, so a leader from another connection
+    /// joins to nothing on this client's side; that is the honest answer,
+    /// and it is also why no peer identity travels with it.
+    pub coalesced_onto: Option<RequestLabel>,
+}
+
+/// There is no time to report for a stretch that never happened; the whole
+/// [`SourceReadTiming`] is `None` on every arm.
+impl SourceReadTiming {
+    /// Everything the store measured, so a caller can attribute the rest of
+    /// its own elapsed time honestly rather than losing it.
+    pub fn measured_us(&self) -> u64 {
+        u64::from(self.permit_wait_us.unwrap_or(0))
+            + u64::from(self.backend_read_us.unwrap_or(0))
+            + u64::from(self.coalesced_wait_us.unwrap_or(0))
+    }
+}
+
+/// A read plus how it spent its time. The timing is returned whatever the
+/// read answered: a failed read still waited, and a wait that vanishes from
+/// the trace when the read fails hides the case most worth seeing.
+#[derive(Debug)]
+pub struct TimedRead {
+    pub result: Result<Bytes, object_store::Error>,
+    pub timing: SourceReadTiming,
+}
+
+fn micros(elapsed: std::time::Duration) -> u32 {
+    u32::try_from(elapsed.as_micros()).unwrap_or(u32::MAX)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheStats {
     pub max_bytes: usize,
@@ -267,7 +323,7 @@ pub struct CachedStore {
     /// In-flight backend reads keyed by object path. Concurrent misses for
     /// the same path subscribe to the leader's broadcast instead of each
     /// hitting the backend.
-    in_flight: Mutex<HashMap<String, broadcast::Sender<ShareResult>>>,
+    in_flight: InFlight,
     /// Paths [`CachedStore::get_optional_metadata_bytes`] has found absent, so a
     /// repeated probe for the same optional object costs no round trip.
     ///
@@ -303,8 +359,16 @@ struct LruState {
     source_read_nanos: u128,
 }
 
+/// One in-flight read, as a follower finds it: the channel to wait on, and
+/// who is doing the reading. The label is kept so a follower's row can say
+/// which read it waited on rather than only how long (ADR 0050).
+struct InFlightRead {
+    tx: broadcast::Sender<ShareResult>,
+    leader: RequestLabel,
+}
+
 /// The shared in-flight registry keyed by object path.
-type InFlight = Mutex<HashMap<String, broadcast::Sender<ShareResult>>>;
+type InFlight = Mutex<HashMap<String, InFlightRead>>;
 
 /// RAII owner of a leader's in-flight entry.
 ///
@@ -342,7 +406,7 @@ impl<'a> LeaderGuard<'a> {
     /// in-flight entry. Called exactly once on the normal-completion path.
     fn complete(&mut self, result: &Result<Bytes, object_store::Error>) {
         let mut in_flight = self.in_flight.lock().unwrap();
-        if let Some(tx) = in_flight.remove(&self.key) {
+        if let Some(InFlightRead { tx, .. }) = in_flight.remove(&self.key) {
             let payload: ShareResult = match result {
                 Ok(bytes) => Ok(bytes.clone()),
                 Err(error) => Err(SharedError::capture(error)),
@@ -484,12 +548,7 @@ impl CachedStore {
     /// `label` is the requesting browser's correlation label for this chunk,
     /// carried across the hop so a permit wait can be attributed to a request
     /// rather than only to a client (ADR 0048).
-    pub async fn get_bytes(
-        &self,
-        path: &Path,
-        reader: ReaderId,
-        label: RequestLabel,
-    ) -> Result<Bytes, object_store::Error> {
+    pub async fn get_bytes(&self, path: &Path, reader: ReaderId, label: RequestLabel) -> TimedRead {
         self.get_bytes_as(path, ReadClass::Chunk, reader, label)
             .await
     }
@@ -506,6 +565,7 @@ impl CachedStore {
             RequestLabel::UNATTRIBUTED,
         )
         .await
+        .result
     }
 
     /// Answer whether an object exists without transferring its body.
@@ -593,13 +653,15 @@ impl CachedStore {
         class: ReadClass,
         reader: ReaderId,
         label: RequestLabel,
-    ) -> Result<Bytes, object_store::Error> {
+    ) -> TimedRead {
         let key = path.to_string();
         // Only metadata reads are watched, and only they pay for the clock
         // read: the chunk path is timed at the request boundary instead.
         let started = class.is_metadata().then(std::time::Instant::now);
 
-        // Cache hit — served without touching the backend or a permit.
+        // Cache hit — served without touching the backend or a permit, and
+        // reporting neither. A hit that showed up as a fast backend read
+        // would understate how often the store is not touched at all.
         {
             let mut state = self.cache.lock().unwrap();
             if let Some(bytes) = state.lru.get(&key) {
@@ -609,26 +671,32 @@ impl CachedStore {
                 if let Some(started) = started {
                     metadata_reads::record(MetadataReadPhase::CacheHit, started, false);
                 }
-                return Ok(bytes);
+                return TimedRead {
+                    result: Ok(bytes),
+                    timing: SourceReadTiming::default(),
+                };
             }
             state.misses += 1;
         }
 
         // Single-flight: claim leadership by registering a broadcast sender,
-        // or subscribe to an existing leader's channel as a follower.
-        let follower_rx: Option<broadcast::Receiver<ShareResult>> = {
+        // or subscribe to an existing leader's channel as a follower — taking
+        // the leader's label with the subscription, so the wait can be
+        // attributed to the read it is waiting on.
+        let joined: Option<(broadcast::Receiver<ShareResult>, RequestLabel)> = {
             let mut in_flight = self.in_flight.lock().unwrap();
             match in_flight.get(&key) {
-                Some(tx) => Some(tx.subscribe()),
+                Some(existing) => Some((existing.tx.subscribe(), existing.leader)),
                 None => {
                     let (tx, _rx) = broadcast::channel::<ShareResult>(1);
-                    in_flight.insert(key.clone(), tx);
+                    in_flight.insert(key.clone(), InFlightRead { tx, leader: label });
                     None
                 }
             }
         };
 
-        if let Some(mut rx) = follower_rx {
+        if let Some((mut rx, leader)) = joined {
+            let parked = std::time::Instant::now();
             return match rx.recv().await {
                 // Served by the leader — count the coalesce and surface the
                 // leader's outcome, reconstructed with the leader's error
@@ -651,15 +719,31 @@ impl CachedStore {
                             shared.is_err(),
                         );
                     }
-                    shared.map_err(SharedError::into_object_store_error)
+                    TimedRead {
+                        result: shared.map_err(SharedError::into_object_store_error),
+                        // The whole wait, and only the wait: the leader owns
+                        // the permit and the round trip.
+                        timing: SourceReadTiming {
+                            coalesced_wait_us: Some(micros(parked.elapsed())),
+                            coalesced_onto: Some(leader),
+                            ..SourceReadTiming::default()
+                        },
+                    }
                 }
                 // Leader vanished without broadcasting (dropped/cancelled/
                 // panicked). The guard has removed the in-flight entry, so
                 // fall back to a direct backend read: this waiter still gets a
                 // real answer and the path is not wedged.
                 Err(_) => {
-                    self.fetch_from_backend(path, &key, class, reader, label, started)
-                        .await
+                    let coalesced_wait_us = micros(parked.elapsed());
+                    let mut read = self
+                        .fetch_from_backend(path, &key, class, reader, label, started)
+                        .await;
+                    // This one row carries both: the follower waited on a
+                    // flight that died, and then really did perform a read.
+                    read.timing.coalesced_wait_us = Some(coalesced_wait_us);
+                    read.timing.coalesced_onto = Some(leader);
+                    read
                 }
             };
         }
@@ -670,11 +754,11 @@ impl CachedStore {
         // completion `complete` removes the entry and broadcasts the result
         // exactly once; the guard's `Drop` is then a no-op.
         let mut guard = LeaderGuard::new(&self.in_flight, key.clone());
-        let result = self
+        let read = self
             .fetch_from_backend(path, &key, class, reader, label, started)
             .await;
-        guard.complete(&result);
-        result
+        guard.complete(&read.result);
+        read
     }
 
     /// Read an object that may legitimately not exist, remembering absence.
@@ -716,6 +800,7 @@ impl CachedStore {
                 RequestLabel::UNATTRIBUTED,
             )
             .await
+            .result
         {
             Ok(bytes) => Ok(Some(bytes)),
             Err(object_store::Error::NotFound { .. }) => {
@@ -741,11 +826,16 @@ impl CachedStore {
         // is what makes the two comparable at all; the cache's own counters
         // keep their own clock below.
         called_at: Option<std::time::Instant>,
-    ) -> Result<Bytes, object_store::Error> {
+    ) -> TimedRead {
         // Timed from here, before the permit is acquired: queueing behind our
         // own concurrency cap is part of what a caller waits for, and leaving
         // it out would understate the read by roughly half on a remote store.
+        // The cumulative counter keeps that combined number; the two halves
+        // are reported apart per read, because "waited for a permit" and
+        // "waited for the backend" have different fixes.
         let started = std::time::Instant::now();
+        // Assigned by whichever arm of the class match takes a permit.
+        let permit_wait: std::time::Duration;
         let fetch = {
             // Bound concurrent backend reads process-wide. Scoped to just the
             // GET + body read so the permit is released before the (fast,
@@ -756,30 +846,41 @@ impl CachedStore {
             let _permit = match class {
                 ReadClass::Chunk => {
                     let permit = ReadPermit::Chunk(self.source_read.acquire(reader).await);
+                    permit_wait = started.elapsed();
                     // The wait behind the cap is the rate-setter on a remote
                     // store, and it is only diagnosable if it can be named
                     // per request rather than per client.
                     tracing::trace!(
                         rid = label.0,
                         reader = reader.0,
-                        wait_us = started.elapsed().as_micros() as u64,
+                        wait_us = permit_wait.as_micros() as u64,
                         "store.chunk_read.permit_acquired"
                     );
                     permit
                 }
-                ReadClass::Metadata | ReadClass::OptionalMetadata => ReadPermit::Metadata(
-                    self.metadata_read
-                        .acquire()
-                        .await
-                        .expect("metadata-read semaphore is never closed"),
-                ),
+                ReadClass::Metadata | ReadClass::OptionalMetadata => {
+                    let permit = ReadPermit::Metadata(
+                        self.metadata_read
+                            .acquire()
+                            .await
+                            .expect("metadata-read semaphore is never closed"),
+                    );
+                    permit_wait = started.elapsed();
+                    permit
+                }
             };
             match self.inner.get(path).await {
                 Ok(object) => object.bytes().await,
                 Err(error) => Err(error),
             }
         };
-        let elapsed_nanos = started.elapsed().as_nanos();
+        let elapsed = started.elapsed();
+        let elapsed_nanos = elapsed.as_nanos();
+        let timing = SourceReadTiming {
+            permit_wait_us: Some(micros(permit_wait)),
+            backend_read_us: Some(micros(elapsed.saturating_sub(permit_wait))),
+            ..SourceReadTiming::default()
+        };
 
         if let Some(called_at) = called_at {
             // An optional object that is simply not there answered the
@@ -805,7 +906,11 @@ impl CachedStore {
                 }
                 state.source_reads += 1;
                 state.source_read_nanos += elapsed_nanos;
-                return Err(error);
+                drop(state);
+                return TimedRead {
+                    result: Err(error),
+                    timing,
+                };
             }
         };
 
@@ -815,7 +920,12 @@ impl CachedStore {
             state.source_reads += 1;
             state.source_read_nanos += elapsed_nanos;
             if let Some(existing) = state.lru.get(key) {
-                return Ok(existing.clone());
+                let existing = existing.clone();
+                drop(state);
+                return TimedRead {
+                    result: Ok(existing),
+                    timing,
+                };
             }
             let new_size = bytes.len();
 
@@ -833,7 +943,10 @@ impl CachedStore {
             state.lru.put(key.to_string(), bytes.clone());
         }
 
-        Ok(bytes)
+        TimedRead {
+            result: Ok(bytes),
+            timing,
+        }
     }
 }
 
@@ -868,8 +981,8 @@ mod tests {
         let cached = CachedStore::new(inner, 1024);
 
         let path = Path::from("chunk1");
-        let first = cached.get_bytes(&path, READER, LABEL).await.unwrap();
-        let second = cached.get_bytes(&path, READER, LABEL).await.unwrap();
+        let first = cached.get_bytes(&path, READER, LABEL).await.result.unwrap();
+        let second = cached.get_bytes(&path, READER, LABEL).await.result.unwrap();
         assert_eq!(first, second);
         assert_eq!(&first[..], b"hello world");
         let stats = cached.stats();
@@ -933,8 +1046,8 @@ mod tests {
         let pa = Path::from("a");
         let pb = Path::from("b");
 
-        let _a = cached.get_bytes(&pa, READER, LABEL).await.unwrap();
-        let _b = cached.get_bytes(&pb, READER, LABEL).await.unwrap();
+        let _a = cached.get_bytes(&pa, READER, LABEL).await.result.unwrap();
+        let _b = cached.get_bytes(&pb, READER, LABEL).await.result.unwrap();
 
         // "a" should have been evicted to make room for "b"
         {
@@ -957,7 +1070,8 @@ mod tests {
 
         let result = cached
             .get_bytes(&Path::from("nonexistent"), READER, LABEL)
-            .await;
+            .await
+            .result;
         assert!(result.is_err());
         let stats = cached.stats();
         assert_eq!(stats.backend_errors, 1);
@@ -1111,7 +1225,7 @@ mod tests {
         }
 
         for handle in handles {
-            let bytes = handle.await.unwrap().unwrap();
+            let bytes = handle.await.unwrap().result.unwrap();
             assert_eq!(&bytes[..], b"payload");
         }
 
@@ -1121,6 +1235,108 @@ mod tests {
         let stats = cached.stats();
         assert_eq!(stats.coalesced, waiters - 1);
         assert_eq!(stats.entry_count, 1);
+    }
+
+    /// The assertion the trace's arithmetic rests on: two concurrent readers
+    /// of one object path produce exactly one backend read and exactly one
+    /// coalesced wait. If a follower reported the leader's read as its own, a
+    /// sum over the read column would report thousands of round trips for an
+    /// open that made hundreds (ADR 0050).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_readers_of_one_path_yield_one_read_and_one_coalesced_wait() {
+        let delay_ms = 50;
+        let store = Arc::new(CountingStore::new(delay_ms));
+        store.seed("chunk", b"payload").await;
+        let get_count = store.get_count.clone();
+
+        let cached = Arc::new(CachedStore::with_source_limiter(
+            store,
+            1024,
+            SourceReadLimiter::new(64),
+        ));
+
+        // Two labels, because the point of the row is which read a wait was
+        // spent on, and one label could not tell them apart.
+        const LEADER_LABEL: RequestLabel = RequestLabel(11);
+        const FOLLOWER_LABEL: RequestLabel = RequestLabel(12);
+        let leader = {
+            let cached = cached.clone();
+            tokio::spawn(async move {
+                cached
+                    .get_bytes(&Path::from("chunk"), READER, LEADER_LABEL)
+                    .await
+            })
+        };
+        // Long enough that the leader has registered its in-flight entry and
+        // is inside the delayed backend read.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let follower = {
+            let cached = cached.clone();
+            tokio::spawn(async move {
+                cached
+                    .get_bytes(&Path::from("chunk"), READER, FOLLOWER_LABEL)
+                    .await
+            })
+        };
+
+        let leader = leader.await.unwrap();
+        let follower = follower.await.unwrap();
+        assert_eq!(&leader.result.unwrap()[..], b"payload");
+        assert_eq!(&follower.result.unwrap()[..], b"payload");
+
+        assert_eq!(get_count.load(Ordering::SeqCst), 1, "one backend read");
+
+        // The leader owns the permit and the round trip.
+        assert!(leader.timing.permit_wait_us.is_some());
+        assert!(
+            leader.timing.backend_read_us.unwrap() >= (delay_ms * 1_000) as u32,
+            "the leader's read covers the backend delay"
+        );
+        assert_eq!(leader.timing.coalesced_wait_us, None);
+        assert_eq!(leader.timing.coalesced_onto, None, "the leader led");
+
+        // The follower owns only its wait, and it is diagnosed as waiting on
+        // an in-flight read rather than as a slow backend.
+        assert_eq!(follower.timing.permit_wait_us, None);
+        assert_eq!(follower.timing.backend_read_us, None);
+        assert!(
+            follower.timing.coalesced_wait_us.expect("a coalesced wait") > 0,
+            "the follower's wait is recorded under the coalesced phase"
+        );
+        // And it says *which* read it waited on, not merely that it waited.
+        assert_eq!(follower.timing.coalesced_onto, Some(LEADER_LABEL));
+        assert_eq!(cached.stats().coalesced, 1);
+    }
+
+    /// A read the LRU answers costs neither a permit nor a round trip, and
+    /// says so — a cache hit must not appear in the trace as a fast backend.
+    #[tokio::test]
+    async fn a_cache_hit_reports_only_a_lookup() {
+        let store = Arc::new(CountingStore::new(0));
+        store.seed("chunk", b"payload").await;
+        let cached = CachedStore::new(store, 1024);
+
+        let path = Path::from("chunk");
+        cached.get_bytes(&path, READER, LABEL).await.result.unwrap();
+        let hit = cached.get_bytes(&path, READER, LABEL).await;
+
+        assert!(hit.result.is_ok());
+        assert_eq!(hit.timing.permit_wait_us, None);
+        assert_eq!(hit.timing.backend_read_us, None);
+        assert_eq!(hit.timing.coalesced_wait_us, None);
+    }
+
+    /// A read that fails still waited, and the wait is the interesting part.
+    #[tokio::test]
+    async fn a_failed_read_still_reports_its_permit_wait_and_round_trip() {
+        let store = Arc::new(CountingStore::new(20));
+        store.fail.store(true, Ordering::SeqCst);
+        let cached = CachedStore::new(store, 1024);
+
+        let read = cached.get_bytes(&Path::from("a"), READER, LABEL).await;
+        assert!(read.result.is_err());
+        assert!(read.timing.permit_wait_us.is_some());
+        assert!(read.timing.backend_read_us.unwrap() >= 20_000);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1148,7 +1364,7 @@ mod tests {
             }));
         }
         for handle in handles {
-            assert!(handle.await.unwrap().is_err());
+            assert!(handle.await.unwrap().result.is_err());
         }
 
         assert_eq!(get_count.load(Ordering::SeqCst), 1);
@@ -1167,6 +1383,7 @@ mod tests {
         let bytes = cached
             .get_bytes(&Path::from("chunk"), READER, LABEL)
             .await
+            .result
             .unwrap();
         assert_eq!(&bytes[..], b"payload");
         assert_eq!(get_count.load(Ordering::SeqCst), 2);
@@ -1200,6 +1417,7 @@ mod tests {
                 cached
                     .get_bytes(&Path::from(format!("chunk-{i}")), READER, LABEL)
                     .await
+                    .result
             }));
         }
         for handle in handles {
@@ -1315,6 +1533,7 @@ mod tests {
         )
         .await
         .expect("subsequent request must not be wedged")
+        .result
         .expect("subsequent request should succeed");
         assert_eq!(&bytes[..], b"payload");
     }
@@ -1356,6 +1575,7 @@ mod tests {
             .await
             .expect("follower must not be wedged")
             .expect("follower task panicked")
+            .result
             .expect("follower fetch should succeed");
         assert_eq!(&bytes[..], b"payload");
     }
@@ -1373,15 +1593,18 @@ mod tests {
         cached
             .get_bytes(&Path::from("a"), READER, LABEL)
             .await
+            .result
             .unwrap();
         cached
             .get_bytes(&Path::from("b"), READER, LABEL)
             .await
+            .result
             .unwrap();
         // A hit costs no backend read and no read time.
         cached
             .get_bytes(&Path::from("a"), READER, LABEL)
             .await
+            .result
             .unwrap();
 
         let stats = cached.stats();
@@ -1567,6 +1790,7 @@ mod tests {
             cached
                 .get_bytes(&Path::from("chunk"), READER, LABEL)
                 .await
+                .result
                 .unwrap();
         })
         .await;
@@ -1588,6 +1812,7 @@ mod tests {
         first
             .get_bytes(&Path::from("zarr.json"), READER, LABEL)
             .await
+            .result
             .unwrap();
 
         // A second open of the same source reads what the first one cached.
@@ -1596,6 +1821,7 @@ mod tests {
         second
             .get_bytes(&Path::from("zarr.json"), READER, LABEL)
             .await
+            .result
             .unwrap();
         assert_eq!(get_count.load(Ordering::SeqCst), 1);
 
@@ -1605,6 +1831,7 @@ mod tests {
         other
             .get_bytes(&Path::from("zarr.json"), READER, LABEL)
             .await
+            .result
             .unwrap();
         assert_eq!(get_count.load(Ordering::SeqCst), 2);
 
@@ -1616,6 +1843,7 @@ mod tests {
         reopened
             .get_bytes(&Path::from("zarr.json"), READER, LABEL)
             .await
+            .result
             .unwrap();
         assert_eq!(get_count.load(Ordering::SeqCst), 3);
     }
@@ -1651,8 +1879,20 @@ mod tests {
         // An absent chunk is data, not shape: `get_bytes` keeps asking, so a
         // sparse region that later has content is never stuck reading empty.
         let sparse = Path::from("0/c/0/0/0/0/0");
-        assert!(cached.get_bytes(&sparse, READER, LABEL).await.is_err());
-        assert!(cached.get_bytes(&sparse, READER, LABEL).await.is_err());
+        assert!(
+            cached
+                .get_bytes(&sparse, READER, LABEL)
+                .await
+                .result
+                .is_err()
+        );
+        assert!(
+            cached
+                .get_bytes(&sparse, READER, LABEL)
+                .await
+                .result
+                .is_err()
+        );
         assert_eq!(get_count.load(Ordering::SeqCst), 3);
     }
 
@@ -1725,6 +1965,7 @@ mod tests {
             cached
                 .get_bytes(&Path::from("a"), READER, LABEL)
                 .await
+                .result
                 .is_err()
         );
 

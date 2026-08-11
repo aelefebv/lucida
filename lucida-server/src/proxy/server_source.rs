@@ -412,6 +412,10 @@ pub(crate) async fn fetch_volume_region(
                         RequestLabel::UNATTRIBUTED,
                     )
                     .await
+                    // Generation has no browser bracket to nest inside, so
+                    // its read timing has nowhere to be placed and is
+                    // dropped here rather than filed against a label.
+                    .result
                 {
                     Ok(bytes) => bytes,
                     Err(e) if is_not_found(&e) => {

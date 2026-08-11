@@ -531,13 +531,17 @@ mod tests {
                     None,
                     Some(lucida_protocol::MetadataReadPhase::BackendRead),
                 ],
-                dispatch_offset_us: vec![120, 340, 1_204],
-                duration_us: vec![8_100, 22_000, 63_441],
+                dispatch_offset_us: vec![0, 0, 1_204],
+                duration_us: vec![0, 0, 63_441],
                 outcome: vec![
                     lucida_protocol::TimingRowOutcome::Delivered,
                     lucida_protocol::TimingRowOutcome::NotReady,
                     lucida_protocol::TimingRowOutcome::Delivered,
                 ],
+                arrival_us: vec![120, 340],
+                handoff_us: vec![8_100, 22_000],
+                coalesced_onto: vec![lucida_protocol::LABEL_NONE; 2],
+                ..Default::default()
             },
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -552,7 +556,10 @@ mod tests {
             ServerMessage::TimingBatch { batch } => {
                 assert_eq!(batch.len(), 3);
                 assert_eq!(batch.dropped, 2);
-                assert_eq!(batch.duration_us, vec![8_100, 22_000, 63_441]);
+                assert_eq!(batch.handoff_us, vec![8_100, 22_000]);
+                // The metadata row states its span in its own two columns:
+                // the phase array has no slot a metadata read can fill.
+                assert_eq!(batch.duration_us, vec![0, 0, 63_441]);
                 assert_eq!(
                     batch.metadata_phase[2],
                     Some(lucida_protocol::MetadataReadPhase::BackendRead)
