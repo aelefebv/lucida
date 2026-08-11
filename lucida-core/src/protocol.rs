@@ -530,6 +530,7 @@ mod tests {
                 ],
                 arrival_us: vec![120, 340],
                 handoff_us: vec![8_100, 22_000],
+                coalesced_onto: vec![lucida_protocol::LABEL_NONE; 2],
                 ..Default::default()
             },
         };

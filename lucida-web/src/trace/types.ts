@@ -427,22 +427,26 @@ export const SERVER_PHASES = [
 export type ServerPhase = (typeof SERVER_PHASES)[number];
 
 /**
- * The wire column each phase arrives in, in {@link SERVER_PHASES} order.
- * Rust spells these snake_case; the document spells multi-word names
- * kebab-case, the same disagreement the outcome vocabulary already has.
+ * The wire column each phase arrives in. Rust spells these snake_case; the
+ * document spells multi-word names kebab-case, the same disagreement the
+ * outcome vocabulary already has.
+ *
+ * A map rather than a second array in the same order: two parallel arrays
+ * would let a reordering of either silently swap two columns, with nothing
+ * to catch it.
  */
-export const SERVER_PHASE_WIRE_KEYS = [
-  "arrival_us",
-  "binding_lookup_us",
-  "dispatch_us",
-  "cache_lookup_us",
-  "permit_wait_us",
-  "backend_read_us",
-  "coalesced_wait_us",
-  "decompress_us",
-  "slice_encode_us",
-  "handoff_us",
-] as const;
+export const SERVER_PHASE_WIRE_KEY: Record<ServerPhase, string> = {
+  arrival: "arrival_us",
+  "binding-lookup": "binding_lookup_us",
+  dispatch: "dispatch_us",
+  "cache-lookup": "cache_lookup_us",
+  "permit-wait": "permit_wait_us",
+  "backend-read": "backend_read_us",
+  "coalesced-wait": "coalesced_wait_us",
+  decompress: "decompress_us",
+  "slice-encode": "slice_encode_us",
+  handoff: "handoff_us",
+};
 
 /**
  * A phase the request never entered. Durations are microseconds in a
@@ -453,6 +457,12 @@ export const PHASE_UNSET = 0xffffffff;
 
 /** How long a row spent in each phase it entered. Absent means unentered. */
 export type ServerPhaseDurations = Partial<Record<ServerPhase, number>>;
+
+/**
+ * The label column's "this row led its own read" value, mirroring the
+ * server's `LABEL_NONE`.
+ */
+export const LABEL_NONE = 0xffffffff;
 
 /**
  * How the server's work for a label ended. `not-ready` is the one that
@@ -522,6 +532,16 @@ export interface TraceServerRow extends WireLabel {
    * absent, not zero.
    */
   phases: ServerPhaseDurations;
+  /**
+   * For a single-flight follower, the label of the read it waited on; null
+   * for every other row. It is what turns a coalesced wait from "it waited"
+   * into "it waited on that read", and the server-side coalescing count is
+   * a group-by over it.
+   *
+   * Labels are per connection, so a leader on another connection joins to
+   * nothing here — which is also why this carries no peer identity.
+   */
+  coalescedOnto: number | null;
   placement: ServerPlacement | null;
   unplacedReason: UnplacedReason | null;
 }

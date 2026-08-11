@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { serverRowTotalUs, ServerRowTable, type ServerTimingBatch } from "./serverRowTable.ts";
-import { PHASE_UNSET } from "./types.ts";
+import { LABEL_NONE, PHASE_UNSET } from "./types.ts";
 
 /**
  * Two rows: a source chunk that led its own read, and a generated chunk
@@ -24,6 +24,7 @@ function batch(overrides: Partial<ServerTimingBatch> = {}): ServerTimingBatch {
     decompress_us: [20, PHASE_UNSET],
     slice_encode_us: [4, PHASE_UNSET],
     handoff_us: [3, 9],
+    coalesced_onto: [LABEL_NONE, LABEL_NONE],
     ...overrides,
   };
 }
@@ -40,6 +41,7 @@ describe("ServerRowTable", () => {
         connectionGeneration: 3,
         family: "chunk",
         outcome: "delivered",
+        coalescedOnto: null,
         phases: {
           arrival: 10,
           "binding-lookup": 5,
@@ -57,6 +59,7 @@ describe("ServerRowTable", () => {
         connectionGeneration: 3,
         family: "asset",
         outcome: "not-ready",
+        coalescedOnto: null,
         // Unentered phases are absent, not zero: a stage that never ran and
         // one that ran instantly are different facts.
         phases: { arrival: 20, "binding-lookup": 6, dispatch: 8, "cache-lookup": 2, handoff: 9 },
@@ -89,6 +92,7 @@ describe("ServerRowTable", () => {
         decompress_us: [10],
         slice_encode_us: [1],
         handoff_us: [1],
+        coalesced_onto: [4_321],
       }),
       1,
     );
@@ -98,6 +102,9 @@ describe("ServerRowTable", () => {
     expect(follower.phases["coalesced-wait"]).toBe(400_000);
     expect(follower.phases["backend-read"]).toBeUndefined();
     expect(follower.phases["permit-wait"]).toBeUndefined();
+    // And it names the read it waited on, so the wait joins to the row that
+    // owns the round trip.
+    expect(follower.coalescedOnto).toBe(4_321);
   });
 
   it("translates the wire vocabulary and refuses to read a strange word as success", () => {

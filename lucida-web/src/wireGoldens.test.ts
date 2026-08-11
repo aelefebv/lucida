@@ -87,7 +87,7 @@ import {
 } from "./pipeline/assetCatalog.ts";
 import { ProxiedContentSource } from "./pipeline/fetch/contentSource.ts";
 import { ServerRowTable, serverRowTotalUs } from "./trace/serverRowTable.ts";
-import { PHASE_UNSET } from "./trace/types.ts";
+import { LABEL_NONE, PHASE_UNSET } from "./trace/types.ts";
 import { COLORMAP_NAMES } from "./colormaps.ts";
 import {
   type ArcballCamera,
@@ -1323,6 +1323,7 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
         decompress_us: [4512, PHASE_UNSET],
         slice_encode_us: [903, PHASE_UNSET],
         handoff_us: [61, 55],
+        coalesced_onto: [LABEL_NONE, LABEL_NONE],
       },
     });
 

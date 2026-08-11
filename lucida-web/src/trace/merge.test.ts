@@ -31,6 +31,7 @@ function serverRow(overrides: Partial<StoredServerRow> & { rid: number }): Store
     connectionGeneration: overrides.connectionGeneration ?? 1,
     family: overrides.family ?? "chunk",
     outcome: overrides.outcome ?? "delivered",
+    coalescedOnto: overrides.coalescedOnto ?? null,
     // 6,000 µs of server time, spread over the phases a source chunk
     // passes through.
     phases: overrides.phases ?? {

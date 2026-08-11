@@ -1922,6 +1922,7 @@ mod tests {
             family: TimingRowFamily::Chunk,
             outcome: TimingRowOutcome::Delivered,
             phases,
+            coalesced_onto: lucida_protocol::LABEL_NONE,
         });
 
         assert!(flush_timings(&buffer, &mut socket).await);

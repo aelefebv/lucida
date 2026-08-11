@@ -15,7 +15,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use lucida_protocol::{
-    PHASE_UNSET, SERVER_PHASES, ServerPhase, ServerTimingBatch, TimingRowFamily, TimingRowOutcome,
+    LABEL_NONE, PHASE_MAX_US, PHASE_UNSET, SERVER_PHASES, ServerPhase, ServerTimingBatch,
+    TimingRowFamily, TimingRowOutcome,
 };
 use lucida_store::cache::SourceReadTiming;
 use tokio::sync::Notify;
@@ -51,22 +52,18 @@ pub struct ServedRow {
     pub rid: u32,
     pub family: TimingRowFamily,
     pub outcome: TimingRowOutcome,
-    /// One slot per phase, indexed by position in [`SERVER_PHASES`].
+    /// One slot per phase, indexed by [`ServerPhase`]'s discriminant.
     pub phases: [u32; SERVER_PHASES.len()],
+    /// The label of the read this request waited on, for a single-flight
+    /// follower; [`LABEL_NONE`] otherwise.
+    pub coalesced_onto: u32,
 }
 
-impl ServedRow {
-    pub fn phase(&self, phase: ServerPhase) -> Option<u32> {
-        let slot = self.phases[phase_index(phase)];
-        (slot != PHASE_UNSET).then_some(slot)
-    }
-}
-
+/// A phase's slot in a row. The enum's discriminant *is* the index, so this
+/// is a cast rather than a lookup — recording a phase sits under ADR 0049's
+/// marginal-cost ceiling and has no business searching a table.
 fn phase_index(phase: ServerPhase) -> usize {
-    SERVER_PHASES
-        .iter()
-        .position(|candidate| *candidate == phase)
-        .expect("every phase is in SERVER_PHASES")
+    phase as usize
 }
 
 #[derive(Default)]
@@ -138,10 +135,12 @@ impl TimingBuffer {
         for phase in SERVER_PHASES {
             batch.column_mut(phase).reserve(rows.len());
         }
+        batch.coalesced_onto.reserve(rows.len());
         for row in rows {
             batch.rid.push(row.rid);
             batch.family.push(row.family);
             batch.outcome.push(row.outcome);
+            batch.coalesced_onto.push(row.coalesced_onto);
             for (slot, phase) in row.phases.iter().zip(SERVER_PHASES) {
                 batch.column_mut(phase).push(*slot);
             }
@@ -173,6 +172,7 @@ pub struct RequestProbe {
     /// Start of the phase currently being timed.
     cursor: Instant,
     phases: [u32; SERVER_PHASES.len()],
+    coalesced_onto: u32,
     buffer: std::sync::Arc<TimingBuffer>,
 }
 
@@ -190,6 +190,7 @@ impl RequestProbe {
             family,
             cursor: arrival,
             phases: [PHASE_UNSET; SERVER_PHASES.len()],
+            coalesced_onto: LABEL_NONE,
             buffer,
         }
     }
@@ -206,16 +207,22 @@ impl RequestProbe {
         self.cursor = now;
     }
 
-    /// Record the store's own account of a read: its cache lookup, and then
-    /// either the permit wait and round trip it performed or the in-flight
-    /// read it waited on.
+    /// Close the read: the waits the store measured, and — as
+    /// [`ServerPhase::CacheLookup`] — whatever else the read spent inside the
+    /// cache.
     ///
-    /// The store measures these itself because only it knows which side of
-    /// the single flight this request landed on, and that distinction is
+    /// The store measures the waits itself because only it knows which side
+    /// of the single flight this request landed on, and that distinction is
     /// what keeps a sum over the read column equal to the number of round
-    /// trips actually made (ADR 0050).
+    /// trips actually made (ADR 0050). Everything else the call took — the
+    /// LRU probe, the single-flight election, the insert and its evictions —
+    /// is the remainder, and it goes to `cache-lookup` rather than nowhere.
+    /// Dropping it would leave server time inside the browser's bracket with
+    /// no phase against it, and the exporter would read that silence as
+    /// network.
     pub fn record_read(&mut self, timing: SourceReadTiming) {
-        self.phases[phase_index(ServerPhase::CacheLookup)] = timing.cache_lookup_us;
+        let now = Instant::now();
+        let elapsed = now.saturating_duration_since(self.cursor).as_micros() as u64;
         for (phase, value) in [
             (ServerPhase::PermitWait, timing.permit_wait_us),
             (ServerPhase::BackendRead, timing.backend_read_us),
@@ -225,7 +232,12 @@ impl RequestProbe {
                 self.phases[phase_index(phase)] = value;
             }
         }
-        self.cursor = Instant::now();
+        self.phases[phase_index(ServerPhase::CacheLookup)] =
+            clamp_us(elapsed.saturating_sub(timing.measured_us()));
+        if let Some(leader) = timing.coalesced_onto {
+            self.coalesced_onto = leader.0;
+        }
+        self.cursor = now;
     }
 
     /// File the row. Socket write time is excluded — it happens in a
@@ -237,12 +249,23 @@ impl RequestProbe {
             family: self.family,
             outcome,
             phases: self.phases,
+            coalesced_onto: self.coalesced_onto,
         });
     }
 }
 
 fn micros(d: Duration) -> u32 {
-    u32::try_from(d.as_micros()).unwrap_or(u32::MAX)
+    clamp_us(u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
+}
+
+/// Clamp to [`PHASE_MAX_US`], never onto [`PHASE_UNSET`]: a phase that ran
+/// for over 71 minutes must report as very long, not as never having
+/// happened. Saturating onto the sentinel would blank out the worst stall in
+/// the trace — the one row anybody opened the monitor for.
+fn clamp_us(micros: u64) -> u32 {
+    u32::try_from(micros)
+        .unwrap_or(PHASE_MAX_US)
+        .min(PHASE_MAX_US)
 }
 
 #[cfg(test)]
@@ -259,6 +282,7 @@ mod tests {
             family: TimingRowFamily::Chunk,
             outcome: TimingRowOutcome::Delivered,
             phases,
+            coalesced_onto: LABEL_NONE,
         }
     }
 
@@ -410,20 +434,18 @@ mod tests {
         let mut leader =
             RequestProbe::arrived(1, TimingRowFamily::Chunk, Instant::now(), buffer.clone());
         leader.record_read(SourceReadTiming {
-            cache_lookup_us: 3,
             permit_wait_us: Some(3_100_000),
             backend_read_us: Some(120_000),
-            coalesced_wait_us: None,
+            ..SourceReadTiming::default()
         });
         leader.finish(TimingRowOutcome::Delivered);
 
         let mut follower =
             RequestProbe::arrived(2, TimingRowFamily::Chunk, Instant::now(), buffer.clone());
         follower.record_read(SourceReadTiming {
-            cache_lookup_us: 2,
-            permit_wait_us: None,
-            backend_read_us: None,
             coalesced_wait_us: Some(400_000),
+            coalesced_onto: Some(lucida_store::source_limiter::RequestLabel(1)),
+            ..SourceReadTiming::default()
         });
         follower.finish(TimingRowOutcome::Delivered);
 
@@ -431,6 +453,49 @@ mod tests {
         assert_eq!(batch.permit_wait_us, vec![3_100_000, PHASE_UNSET]);
         assert_eq!(batch.backend_read_us, vec![120_000, PHASE_UNSET]);
         assert_eq!(batch.coalesced_wait_us, vec![PHASE_UNSET, 400_000]);
+        // The follower says which read it waited on, so the join to the
+        // leader's row is a plain equi-join and the coalescing count is a
+        // group-by over this column.
+        assert_eq!(batch.coalesced_onto, vec![LABEL_NONE, 1]);
+    }
+
+    /// Time inside the read that the store did not measure — the LRU probe,
+    /// the election, the insert — lands on `cache-lookup` rather than
+    /// vanishing. The exporter sums the phases and calls the remainder of
+    /// the browser's bracket network, so server time with no phase against
+    /// it would be read as network time.
+    #[test]
+    fn the_unmeasured_remainder_of_a_read_is_attributed_not_dropped() {
+        let buffer = Arc::new(TimingBuffer::new());
+        let mut probe =
+            RequestProbe::arrived(1, TimingRowFamily::Chunk, Instant::now(), buffer.clone());
+        probe.mark(ServerPhase::Dispatch);
+        std::thread::sleep(Duration::from_millis(5));
+        probe.record_read(SourceReadTiming {
+            permit_wait_us: Some(1_000),
+            backend_read_us: Some(1_000),
+            ..SourceReadTiming::default()
+        });
+        probe.finish(TimingRowOutcome::Delivered);
+
+        let batch = buffer.take_batch().expect("a row");
+        // ~5 ms elapsed, 2 ms of it measured by the store: the remaining
+        // ~3 ms is the cache's own work and is filed as such.
+        assert!(
+            batch.cache_lookup_us[0] >= 2_000,
+            "the remainder was dropped: {} µs",
+            batch.cache_lookup_us[0]
+        );
+    }
+
+    /// A phase longer than the slot can hold must read as very long, not as
+    /// never having happened — that row is the one the monitor was opened
+    /// for.
+    #[test]
+    fn an_enormous_phase_saturates_below_the_unset_sentinel() {
+        assert_eq!(clamp_us(u64::from(PHASE_UNSET)), PHASE_MAX_US);
+        assert_eq!(clamp_us(u64::MAX), PHASE_MAX_US);
+        assert_ne!(clamp_us(u64::MAX), PHASE_UNSET);
     }
 
     /// The client's own permit wait is reported; nothing about anyone else
@@ -442,10 +507,9 @@ mod tests {
         let mut probe =
             RequestProbe::arrived(5, TimingRowFamily::Chunk, Instant::now(), buffer.clone());
         probe.record_read(SourceReadTiming {
-            cache_lookup_us: 1,
             permit_wait_us: Some(3_100_000),
             backend_read_us: Some(90_000),
-            coalesced_wait_us: None,
+            ..SourceReadTiming::default()
         });
         probe.finish(TimingRowOutcome::Delivered);
 
@@ -467,6 +531,7 @@ mod tests {
                 "backend_read_us",
                 "binding_lookup_us",
                 "cache_lookup_us",
+                "coalesced_onto",
                 "coalesced_wait_us",
                 "decompress_us",
                 "dispatch_us",

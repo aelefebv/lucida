@@ -122,10 +122,10 @@ use lucida_protocol::{
     DatasetOpenProgressDiagnostic, DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened,
     DatasetSourceCacheStats, DatasetSourceHealth, DirectFetchDescriptor, DirectImageSpec,
     FetchSource, GeneratedAvailabilityDelta, GeneratedAvailabilitySnapshot, GeneratedChunkStatus,
-    GeneratedChunkStatusUpdate, GeneratedLevelAvailability, GeneratedLevelSummary, LevelAddress,
-    LocalFetchDescriptor, PHASE_UNSET, ProxiedFetchDescriptor, ProxiedImageSpec, ProxyAvailability,
-    ProxyFootprint, ProxyKind, ServerTimingBatch, SourceChunkStatus, TimingRowFamily,
-    TimingRowOutcome, WireFormat,
+    GeneratedChunkStatusUpdate, GeneratedLevelAvailability, GeneratedLevelSummary, LABEL_NONE,
+    LevelAddress, LocalFetchDescriptor, PHASE_UNSET, ProxiedFetchDescriptor, ProxiedImageSpec,
+    ProxyAvailability, ProxyFootprint, ProxyKind, ServerTimingBatch, SourceChunkStatus,
+    TimingRowFamily, TimingRowOutcome, WireFormat,
 };
 
 const REGEN_HINT: &str = "fixture out of date with the Rust wire types. If the wire change is \
@@ -1804,6 +1804,7 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                     decompress_us: vec![4_512, PHASE_UNSET],
                     slice_encode_us: vec![903, PHASE_UNSET],
                     handoff_us: vec![61, 55],
+                    coalesced_onto: vec![LABEL_NONE, LABEL_NONE],
                 },
             },
             req(
@@ -1825,6 +1826,7 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                     "/batch/decompress_us",
                     "/batch/slice_encode_us",
                     "/batch/handoff_us",
+                    "/batch/coalesced_onto",
                 ],
             ),
         ),

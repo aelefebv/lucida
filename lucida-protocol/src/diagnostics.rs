@@ -197,46 +197,51 @@ pub enum TimingRowOutcome {
 /// left [`PHASE_UNSET`] rather than zero — a stage that did not happen and a
 /// stage that took no measurable time are different facts.
 ///
+/// The discriminants are the column order and the row's slot indices, which
+/// is why they are written out: a phase's position is data, not an accident
+/// of declaration order.
+///
 /// [ADR 0047]: `wiki/decisions/0047-trace-model-phases-runs-and-lifecycle-rows.md`
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
 pub enum ServerPhase {
     /// Frame off the socket → the request is recognised and its binding
     /// lookup begins. Routing a text frame tries each message shape in turn,
     /// and under a burst of thousands of chunk requests that parse is a real
     /// cost that nothing measured before.
-    Arrival,
+    Arrival = 0,
     /// Resolving the dataset's server binding. It earns a slot despite
     /// looking free: it takes the shared session mutex, so every chunk
     /// request from every client in the workspace serialises there.
-    BindingLookup,
+    BindingLookup = 1,
     /// Binding in hand → the serve task is running and about to do its work.
     /// Covers the task spawn and whatever the runtime made it wait.
-    Dispatch,
+    Dispatch = 2,
     /// Deciding what the serve can answer locally: the source cache's LRU
     /// probe and its single-flight election, or the generated-chunk cache's
     /// lookup.
-    CacheLookup,
+    CacheLookup = 3,
     /// Queued behind the source-read cap. Leader rows only — a follower
     /// performs no read and takes no permit.
-    PermitWait,
+    PermitWait = 4,
     /// The backend round trip itself. Leader rows only, so a sum over this
     /// column counts each round trip exactly once.
-    BackendRead,
+    BackendRead = 5,
     /// Parked on another request's in-flight read of the same object. This
     /// is the follower's whole wait, and naming it apart is what stops a
     /// coalesced 400 ms reading as a slow backend.
-    CoalescedWait,
+    CoalescedWait = 6,
     /// Storage codec decode.
-    Decompress,
+    Decompress = 7,
     /// Turning the stored bytes into the wire frame: the (t, c) slice and
     /// the frame envelope. For the asset family, producing the asset and
     /// its frame — that family has no separate generation slot, and it is
     /// due for deletion under ADR 0043.
-    SliceEncode,
+    SliceEncode = 8,
     /// Handing the frame to this connection's outbound queue. Terminal:
     /// socket write time happens in a separate task behind an unbounded
     /// queue and is not observable from the serve path (ADR 0047).
-    Handoff,
+    Handoff = 9,
 }
 
 /// Every phase, in the order a request passes through them.
@@ -257,6 +262,16 @@ pub const SERVER_PHASES: [ServerPhase; 10] = [
 /// zero is a legitimate duration, so the sentinel is the top of the range —
 /// the same choice the browser's stamp slots make.
 pub const PHASE_UNSET: u32 = u32::MAX;
+
+/// The longest duration a slot can hold: one below the sentinel, so a phase
+/// that ran for over ~71 minutes reports as very long rather than as never
+/// having happened. Saturating onto the sentinel would turn the worst stall
+/// in the trace into a blank.
+pub const PHASE_MAX_US: u32 = PHASE_UNSET - 1;
+
+/// The label column's "this row led its own read" value. Followers carry the
+/// label of the read they waited on; everyone else carries this.
+pub const LABEL_NONE: u32 = u32::MAX;
 
 /// One flush window of the server's lifecycle table, pushed to the client
 /// that caused the rows (ADR 0050). Parallel column arrays rather than an
@@ -295,6 +310,15 @@ pub struct ServerTimingBatch {
     pub decompress_us: Vec<u32>,
     pub slice_encode_us: Vec<u32>,
     pub handoff_us: Vec<u32>,
+    /// For a single-flight follower, the label of the read it waited on;
+    /// [`LABEL_NONE`] for every other row. This is what turns a coalesced
+    /// wait from "it waited" into "it waited on that read", and it makes the
+    /// server-side coalescing count a group-by rather than a new counter.
+    ///
+    /// Labels are per connection, so a leader on another connection joins to
+    /// nothing here — the honest answer, and the reason this reveals no peer
+    /// identity, rate or dataset.
+    pub coalesced_onto: Vec<u32>,
 }
 
 impl ServerTimingBatch {
