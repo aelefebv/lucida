@@ -123,6 +123,10 @@ WORKDIR /web
 # `"lucida-core": "file:../lucida-core/pkg"` is a relative path).
 COPY lucida-web/ ./lucida-web/
 COPY --from=rust-builder /workspace/lucida-core/pkg ./lucida-core/pkg
+# The release version, which `vite.config.ts` reads and stamps into every
+# trace run's header. A container build is exactly where a field report
+# comes from, so it must carry a real version rather than a placeholder.
+COPY .release-please-manifest.json ./.release-please-manifest.json
 
 WORKDIR /web/lucida-web
 
