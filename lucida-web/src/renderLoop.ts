@@ -3,7 +3,6 @@ import type { DatasetManifest } from "./manifestTypes.ts";
 import type { TickContext, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
 import { RESIDENCY_RENDER_INTERVAL_MS } from "./renderLoopTypes.ts";
 import type { SceneEpochs } from "./pipeline/epochs.ts";
-import { debugStats, resetFrameStats } from "./debug/debugStats.ts";
 import { debugLog } from "./debug/logging.ts";
 import { type SliceState, createSliceState, tickSlice, clearSliceForDataset, clearSliceForMembers } from "./slicePath.ts";
 import { type VolumeState, createVolumeState, tickVolume, clearVolumeForDataset, clearVolumeForMembers, resetVolumeState } from "./volumePath.ts";
@@ -62,11 +61,6 @@ export class RenderLoop implements TraceEnvironment {
   private throttleSkipPending = 0;
   private lastThrottleEmit = Number.NEGATIVE_INFINITY;
   private static readonly THROTTLE_EMIT_INTERVAL_MS = 1000;
-  // Ring buffer of recent ticks. Powers FPS, sticky-max times, and the
-  // "ms since last render" indicator on the DebugPanel. Bounded to
-  // SAMPLE_BUFFER_LIMIT entries; oldest evicted on push.
-  private frameSamples: Array<{ t: number; frame: number; plan: number; upload: number; passes: number; rendered: boolean }> = [];
-  private static readonly SAMPLE_BUFFER_LIMIT = 120;
   private renderedFrameCount = 0;
   /** Main-thread time of the last tick, for the trace's frame-time reading. */
   private lastFrameTimeUs = 0;
@@ -471,16 +465,10 @@ export class RenderLoop implements TraceEnvironment {
     }
   }
 
-  private recordFrameSample(t: number, frame: number, plan: number, upload: number, passes: number, rendered: boolean): void {
-    this.frameSamples.push({ t, frame, plan, upload, passes, rendered });
-    if (this.frameSamples.length > RenderLoop.SAMPLE_BUFFER_LIMIT) {
-      this.frameSamples.shift();
-    }
-  }
-
   /**
-   * Snapshot of render-loop internals for the DebugPanel "Render" tab.
-   * Computed on demand from the ring buffer; cheap (O(SAMPLE_BUFFER_LIMIT)).
+   * Snapshot of render-loop dirty state, polled by the debug panel's
+   * remaining Render rows. Frame timings are the recorder's (ADR 0049),
+   * not this snapshot's.
    */
   getDebugSnapshot(): {
     interactiveDirty: boolean;
@@ -488,53 +476,8 @@ export class RenderLoop implements TraceEnvironment {
     msSinceInteractiveDirty: number | null;
     msSinceResidencyDirty: number | null;
     throttleSkipsPending: number;
-    msSinceLastRender: number | null;
-    fps: number | null;
-    maxFrameMs: number;
-    maxPlanMs: number;
-    maxUploadMs: number;
-    maxPasses: number;
   } {
     const now = performance.now();
-    const samples = this.frameSamples;
-    // Window FPS / max stats to the last ~2 seconds. Otherwise FPS keeps
-    // reporting "60" long after the loop has gone idle, because the ring
-    // buffer still holds samples from earlier active bursts.
-    const FPS_WINDOW_MS = 2000;
-    const windowCutoff = now - FPS_WINDOW_MS;
-    const recent = samples.filter(s => s.t >= windowCutoff);
-    const rendered = recent.filter(s => s.rendered);
-
-    let fps: number | null = null;
-    if (rendered.length >= 2) {
-      const first = rendered[0].t;
-      const last = rendered[rendered.length - 1].t;
-      const span = last - first;
-      if (span > 0) {
-        fps = +((rendered.length - 1) / (span / 1000)).toFixed(1);
-      }
-    }
-
-    // For "last render age" use the full buffer (not windowed) so a 5s
-    // idle period still tells you how long it's been.
-    const lastRenderedFull = samples.filter(s => s.rendered).pop();
-    const msSinceLastRender = lastRenderedFull ? Math.round(now - lastRenderedFull.t) : null;
-
-    // If we couldn't compute fps from the window AND it's been >1s since
-    // the last render, the loop is genuinely idle — report 0 instead of
-    // null so the panel shows "FPS: 0" instead of "—".
-    if (fps === null && (msSinceLastRender === null || msSinceLastRender > 1000)) {
-      fps = 0;
-    }
-
-    let maxFrameMs = 0, maxPlanMs = 0, maxUploadMs = 0, maxPasses = 0;
-    for (const s of recent) {
-      if (s.frame > maxFrameMs) maxFrameMs = s.frame;
-      if (s.plan > maxPlanMs) maxPlanMs = s.plan;
-      if (s.upload > maxUploadMs) maxUploadMs = s.upload;
-      if (s.passes > maxPasses) maxPasses = s.passes;
-    }
-
     return {
       interactiveDirty: this.interactiveDirty,
       residencyDirty: this.residencyDirty,
@@ -545,12 +488,6 @@ export class RenderLoop implements TraceEnvironment {
         ? null
         : Math.round(now - this.lastResidencyDirtyAt),
       throttleSkipsPending: this.throttleSkipPending,
-      msSinceLastRender,
-      fps,
-      maxFrameMs: +maxFrameMs.toFixed(1),
-      maxPlanMs: +maxPlanMs.toFixed(1),
-      maxUploadMs: +maxUploadMs.toFixed(1),
-      maxPasses,
     };
   }
 
@@ -620,10 +557,6 @@ export class RenderLoop implements TraceEnvironment {
     }
 
     const now = performance.now();
-    if (debugStats.enabled) {
-      resetFrameStats();
-      debugStats.mode = this.mode;
-    }
     let shouldRender = false;
 
     if (this.interactiveDirty) {
@@ -687,16 +620,9 @@ export class RenderLoop implements TraceEnvironment {
       this.setDirty("interactive", "pending_residency_rebuild");
     }
 
-    // Measured whether or not the debug panel is on: recording is
-    // unconditional (ADR 0049), and one subtraction is not a cost worth
-    // gating. The panel's own copy still rides behind its flag.
-    const frameMs = performance.now() - now;
-    this.lastFrameTimeUs = frameMs * 1000;
-
-    if (debugStats.enabled) {
-      debugStats.frameTimeMs = frameMs;
-      this.recordFrameSample(now, debugStats.frameTimeMs, debugStats.planTimeMs, debugStats.uploadTimeMs, debugStats.renderPasses.total, shouldRender);
-    }
+    // Recording is unconditional (ADR 0049), and one subtraction is not a
+    // cost worth gating.
+    this.lastFrameTimeUs = (performance.now() - now) * 1000;
 
     if (shouldRender) {
       this.publishRenderedCaptureReady();

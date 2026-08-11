@@ -11,7 +11,6 @@ import type { SceneSettings } from "./tickCommon.ts";
 import type { SceneEpochs } from "./pipeline/epochs.ts";
 import type { TickCoordinator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/tickCoordinator.ts";
 import type { Uploader } from "./pipeline/upload/uploader.ts";
-import { debugStats } from "./debug/debugStats.ts";
 import { traceRecorder } from "./trace/recorder.ts";
 
 export type SliceState = Record<string, never>;
@@ -354,9 +353,7 @@ function uploadAndRenderSlice(
   const cy = centerArr[1];
 
   const layers: SliceLayerParams[] = [];
-  const passesByDataset: Record<string, number> = {};
   for (const dsId of layerOrder) {
-    const layersBefore = layers.length;
     const ds = datasets.get(dsId);
     if (!ds) continue;
     const dsSettings = allSettings[dsId];
@@ -415,13 +412,6 @@ function uploadAndRenderSlice(
       }
     }
     pushLabelLayers(layers, ds.manifest, members, dsSettings.label_settings, labelMemberPositions);
-
-    const added = layers.length - layersBefore;
-    if (added > 0) passesByDataset[dsId] = added;
-  }
-
-  if (debugStats.enabled) {
-    debugStats.renderPasses = { total: layers.length, byDataset: passesByDataset };
   }
 
   client.resize(canvasW, canvasH);
@@ -459,9 +449,7 @@ export function tickSlice(
   const canvasH = Math.round(canvas.clientHeight * dpr);
   scene.set_viewport(canvasW, canvasH);
 
-  const t0 = debugStats.enabled ? performance.now() : 0;
   const orchResult = tickCoordinator.planAndFetch(ctx, minimapPendingFetch);
-  if (debugStats.enabled) debugStats.planTimeMs = performance.now() - t0;
   if (!orchResult) return false;
 
   const vpCenter = scene.center();
@@ -475,9 +463,7 @@ export function tickSlice(
     entityIndexByDataset: orchResult.entityIndexByDataset,
   };
 
-  const t1 = debugStats.enabled ? performance.now() : 0;
   const result = uploadAndRenderSlice(ctx, uploader, sliceZ, sliceT, sliceC, planResult, shouldRender);
-  if (debugStats.enabled) debugStats.uploadTimeMs = performance.now() - t1;
   return result;
 }
 

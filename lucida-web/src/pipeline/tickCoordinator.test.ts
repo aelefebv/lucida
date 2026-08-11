@@ -11,7 +11,6 @@ import { Uploader } from "./upload/uploader.ts";
 import { plan } from "./planning/index.ts";
 import { bumpSettingsGeneration } from "../tickCommon.ts";
 import { configStore } from "./planning/configStore.ts";
-import { debugStats } from "../debug/debugStats.ts";
 import { traceRecorder } from "../trace/recorder.ts";
 
 // Planner-only tests: epoch caching + multi-dataset planning state.
@@ -28,11 +27,9 @@ import { traceRecorder } from "../trace/recorder.ts";
 // Because injection means the describes now share the real module singletons
 // (no per-test module reset), reset the ones tests mutate after every test so
 // order can't leak: configStore (which persists `coarseDetailEnabled` to
-// happy-dom localStorage), debugStats (`enabled`/`orch`), and localStorage.
+// happy-dom localStorage) and localStorage.
 afterEach(() => {
   configStore.__resetForTesting();
-  debugStats.enabled = false;
-  debugStats.orch = null;
   if (typeof localStorage !== "undefined") localStorage.clear();
 });
 
@@ -222,26 +219,6 @@ function createMockContent(): DatasetManifest {
   } as unknown as DatasetManifest;
 }
 
-/** Scene with `n` visible tiles (`tile-0` … `tile-{n-1}`) laid out in a row. */
-function createMockSceneWithTiles(n: number) {
-  const rows: MockSceneConfig["viewQuery"]["visible_entities"] = [];
-  const memberPositions: Record<string, [number, number]> = {};
-  for (let i = 0; i < n; i++) {
-    rows.push({
-      entity_id: `tile-${i}`,
-      image_id: `img-${i}`,
-      kind: "Tile",
-      visible: true,
-      projected_diagonal_px: 100,
-      projected_area_px2: 10000,
-      centroid_world: [i * 1024, 0, 0],
-      ideal_target_lod: 0,
-      importance: 1.0,
-    });
-    memberPositions[`tile-${i}`] = [i * 1024, 0];
-  }
-  return createMockScene({ viewQuery: { visible_entities: rows }, memberPositions });
-}
 
 /** Manifest matching {@link createMockSceneWithTiles}: one group, `n` tiles. */
 function createMockContentWithTiles(n: number): DatasetManifest {
@@ -339,10 +316,9 @@ describe("epoch caching", () => {
     expect(planSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("records a per-tick trace aggregate even with the debug panel disabled", () => {
+  it("records a per-tick trace aggregate with no debug surface open", () => {
     const { scene, datasets } = makeTickCoordinatorDeps();
     const orch = makeOrch();
-    debugStats.enabled = false;
     traceRecorder.reset();
     traceRecorder.setEnvironment({
       captureWarmth: () => ({
@@ -371,9 +347,26 @@ describe("epoch caching", () => {
 
     const [run] = traceRecorder.exportDocument().runs;
     expect(run.ticks.length).toBeGreaterThan(0);
-    expect(debugStats.planning.byDataset).toEqual({});
     traceRecorder.reset();
     traceRecorder.setEnvironment(null);
+  });
+
+  it("never takes the panel's per-rebuild cache snapshot", () => {
+    // `snapshot()` walks every resident entity in the chunk and overview
+    // stores. It existed for the debug panel's planning/entityDiag rows and
+    // ran only while the panel was open. Recording is unconditional
+    // (ADR 0049), so there is no longer a gate that could keep this walk off
+    // a rebuild — which means the walk itself has to be gone, not merely
+    // ungated. The trace reads counts the cache already keeps instead.
+    const { scene, datasets } = makeTickCoordinatorDeps();
+    const orch = makeOrch();
+    const cpuCache = createMockCpuCache();
+    const ctx = makeCtx(scene, datasets);
+    ctx.cpuCache = cpuCache;
+
+    orch.planAndFetch(ctx, emptyMinimap);
+
+    expect(cpuCache.snapshot).not.toHaveBeenCalled();
   });
 
   it("returns cached result when epochs are unchanged", () => {
@@ -682,9 +675,6 @@ describe("epoch caching", () => {
   });
 
   it("submits only budget-admitted legacy proxies while preserving detail requests", () => {
-    const previousDebugEnabled = debugStats.enabled;
-    debugStats.enabled = true;
-    debugStats.orch = null;
     configStore.set("coarseDetailEnabled", false);
     const { scene, datasets } = makeTickCoordinatorDeps();
     const orch = makeOrch();
@@ -714,14 +704,8 @@ describe("epoch caching", () => {
       expect(submitted.proxyRequests).toEqual([]);
       const cold = coldState.mock.calls[0][0] as ColdStateMessage;
       expect(cold.desiredProxyKeys).toEqual([]);
-      const orchDebug = debugStats.orch as { proxyResidency?: unknown } | null;
-      expect(orchDebug?.proxyResidency).toMatchObject({
-        desiredProxyCount: 0,
-        skippedProxyCount: 2,
-        admittedBytes: 0,
-      });
     } finally {
-      debugStats.enabled = previousDebugEnabled;
+      configStore.__resetForTesting();
     }
   });
 
@@ -1774,301 +1758,6 @@ describe("incremental delta fold", () => {
       expect(byImage.has("img-0")).toBe(false);
     } finally {
       vi.useRealTimers();
-    }
-  });
-});
-
-// ===========================================================================
-// 3. Cache-occupancy telemetry
-// ===========================================================================
-
-describe("cache occupancy telemetry", () => {
-  // `CpuCache.snapshot()` walks every resident entity in the chunk and
-  // overview stores, so a rebuild must take at most ONE snapshot — and
-  // none at all while no debug surface consumes it. These tests pin
-  // both the call count and the entityDiag content derived from it.
-
-  let TickCoordinator: typeof import("./tickCoordinator.ts").TickCoordinator;
-  let Uploader: typeof import("./upload/uploader.ts").Uploader;
-  let debugStats: typeof import("../debug/debugStats.ts").debugStats;
-
-  beforeEach(async () => {
-    // Fresh module registry so the module-global debugStats sink can't
-    // leak panel state between tests.
-    vi.resetModules();
-    TickCoordinator = (await import("./tickCoordinator.ts")).TickCoordinator;
-    Uploader = (await import("./upload/uploader.ts")).Uploader;
-    debugStats = (await import("../debug/debugStats.ts")).debugStats;
-  });
-
-  function makeCtx(
-    scene: unknown,
-    datasets: Map<string, DatasetEntry>,
-    cpuCache: CpuCache,
-  ): TickContext {
-    return {
-      scene,
-      datasets,
-      client: { coldState: vi.fn(), coldStateDisplay: vi.fn(), coldStateSelection: vi.fn(), coldStateDelta: vi.fn(), viewHotState: vi.fn() } as unknown as TickContext["client"],
-      canvas: { clientWidth: 800, clientHeight: 600 } as unknown as HTMLCanvasElement,
-      mode: "slice",
-      renderScale: 1,
-      cpuCache,
-      assetCatalog: createMockAssetCatalog(),
-    } as unknown as TickContext;
-  }
-
-  const emptyMinimap = new Map<string, never[]>();
-  const N = 6; // > 5 so the entityDiag cap is exercised too.
-
-  function makeDeps() {
-    const scene = createMockSceneWithTiles(N);
-    const datasets = new Map<string, DatasetEntry>([
-      ["ds1", { manifest: createMockContentWithTiles(N) }],
-    ]);
-    return { scene, datasets };
-  }
-
-  it("never snapshots the cpu cache while debug stats are off", () => {
-    const { scene, datasets } = makeDeps();
-    const cpuCache = createMockCpuCache();
-    const orch = new TickCoordinator(new Uploader());
-
-    expect(debugStats.enabled).toBe(false);
-    orch.planAndFetch(makeCtx(scene, datasets, cpuCache), emptyMinimap);
-
-    expect(cpuCache.snapshot).not.toHaveBeenCalled();
-  });
-
-  it("snapshots the cpu cache at most once per rebuild while debug stats are on", () => {
-    const { scene, datasets } = makeDeps();
-    const cpuCache = createMockCpuCache();
-    const orch = new TickCoordinator(new Uploader());
-
-    debugStats.enabled = true;
-    debugStats.orch = null;
-    try {
-      orch.planAndFetch(makeCtx(scene, datasets, cpuCache), emptyMinimap);
-
-      expect(vi.mocked(cpuCache.snapshot).mock.calls.length).toBeLessThanOrEqual(1);
-    } finally {
-      debugStats.enabled = false;
-    }
-  });
-
-  it("reports per-entity cached-key counts in entityDiag from the snapshot", () => {
-    const { scene, datasets } = makeDeps();
-    const cpuCache = createMockCpuCache();
-    vi.mocked(cpuCache.snapshot).mockReturnValue({
-      cached: new Map([
-        ["tile-0", new Set(["0/0.0.0.0.0", "0/0.0.0.1.0"])],
-        ["tile-2", new Set(["0/0.0.0.0.1"])],
-      ]),
-      inFlight: new Map(),
-    });
-    const orch = new TickCoordinator(new Uploader());
-
-    debugStats.enabled = true;
-    debugStats.orch = null;
-    try {
-      orch.planAndFetch(makeCtx(scene, datasets, cpuCache), emptyMinimap);
-
-      // `debugStats.orch = null` above narrows the property to `null`;
-      // planAndFetch repopulates it, so widen back for the read.
-      const orchDebug = debugStats.orch as {
-        entityDiag: Array<{ entityId: string; cachedKeys: number }>;
-      } | null;
-      const diag = orchDebug?.entityDiag ?? [];
-      // Capped at 5 entries even though 6 entities are visible.
-      expect(diag).toHaveLength(5);
-      expect(diag.map((e) => [e.entityId, e.cachedKeys])).toEqual([
-        ["tile-0", 2],
-        ["tile-1", 0],
-        ["tile-2", 1],
-        ["tile-3", 0],
-        ["tile-4", 0],
-      ]);
-    } finally {
-      debugStats.enabled = false;
-    }
-  });
-});
-
-// ===========================================================================
-// 4. Debug-stat row bounds on wide member sets
-// ===========================================================================
-
-describe("debug stat row bounds", () => {
-  // The panel consumes per-member arrays every poll and renders rows from
-  // them; on a wide collection an unbounded build (tens of thousands of
-  // rows per rebuild) freezes the page for seconds. The arrays must stay
-  // capped while the scalar totals keep reporting the full population.
-
-  let TickCoordinator: typeof import("./tickCoordinator.ts").TickCoordinator;
-  let Uploader: typeof import("./upload/uploader.ts").Uploader;
-  let debugStats: typeof import("../debug/debugStats.ts").debugStats;
-  let DEBUG_MEMBER_ROW_CAP: number;
-
-  beforeEach(async () => {
-    vi.resetModules();
-    TickCoordinator = (await import("./tickCoordinator.ts")).TickCoordinator;
-    Uploader = (await import("./upload/uploader.ts")).Uploader;
-    const dbg = await import("../debug/debugStats.ts");
-    debugStats = dbg.debugStats;
-    DEBUG_MEMBER_ROW_CAP = dbg.DEBUG_MEMBER_ROW_CAP;
-  });
-
-  function makeCtx(scene: unknown, datasets: Map<string, DatasetEntry>): TickContext {
-    return {
-      scene,
-      datasets,
-      client: { coldState: vi.fn(), coldStateDisplay: vi.fn(), coldStateSelection: vi.fn(), coldStateDelta: vi.fn(), viewHotState: vi.fn() } as unknown as TickContext["client"],
-      canvas: { clientWidth: 800, clientHeight: 600 } as unknown as HTMLCanvasElement,
-      mode: "slice",
-      renderScale: 1,
-      cpuCache: createMockCpuCache(),
-      assetCatalog: createMockAssetCatalog(),
-    } as unknown as TickContext;
-  }
-
-  it("caps per-member debug arrays while totals report the full population", () => {
-    const N = 150; // wider than the row cap
-    const scene = createMockSceneWithTiles(N);
-    const datasets = new Map<string, DatasetEntry>([
-      ["ds1", { manifest: createMockContentWithTiles(N) }],
-    ]);
-    const orch = new TickCoordinator(new Uploader());
-
-    debugStats.enabled = true;
-    debugStats.orch = null;
-    try {
-      orch.planAndFetch(makeCtx(scene, datasets), new Map());
-
-      expect(DEBUG_MEMBER_ROW_CAP).toBeGreaterThan(0);
-      expect(debugStats.memberStats.length).toBeLessThanOrEqual(DEBUG_MEMBER_ROW_CAP);
-      expect(debugStats.totalMembers).toBe(N);
-
-      const orchDebug = debugStats.orch as {
-        activeSet: unknown[];
-        activeSetTotal: number;
-      } | null;
-      expect(orchDebug).not.toBeNull();
-      expect(orchDebug!.activeSet.length).toBeLessThanOrEqual(DEBUG_MEMBER_ROW_CAP);
-      expect(orchDebug!.activeSetTotal).toBe(N);
-    } finally {
-      debugStats.enabled = false;
-    }
-  });
-});
-
-describe("debug member stats honesty", () => {
-  // The Per-Member panel header and the sent/needed columns must report
-  // real state on every tick — including the epoch-hit (idle) ticks
-  // that replay the last rebuild's rows.
-
-  let TickCoordinator: typeof import("./tickCoordinator.ts").TickCoordinator;
-  let Uploader: typeof import("./upload/uploader.ts").Uploader;
-  let debugStats: typeof import("../debug/debugStats.ts").debugStats;
-  let resetFrameStats: typeof import("../debug/debugStats.ts").resetFrameStats;
-
-  beforeEach(async () => {
-    vi.resetModules();
-    TickCoordinator = (await import("./tickCoordinator.ts")).TickCoordinator;
-    Uploader = (await import("./upload/uploader.ts")).Uploader;
-    const dbg = await import("../debug/debugStats.ts");
-    debugStats = dbg.debugStats;
-    resetFrameStats = dbg.resetFrameStats;
-  });
-
-  function makeCtx(
-    scene: unknown,
-    datasets: Map<string, DatasetEntry>,
-    cpuCache?: CpuCache,
-  ): TickContext {
-    return {
-      scene,
-      datasets,
-      client: { coldState: vi.fn(), coldStateDisplay: vi.fn(), coldStateSelection: vi.fn(), coldStateDelta: vi.fn(), viewHotState: vi.fn() } as unknown as TickContext["client"],
-      canvas: { clientWidth: 800, clientHeight: 600 } as unknown as HTMLCanvasElement,
-      mode: "slice",
-      renderScale: 1,
-      cpuCache: cpuCache ?? createMockCpuCache(),
-      assetCatalog: createMockAssetCatalog(),
-    } as unknown as TickContext;
-  }
-
-  function makeDeps(n: number) {
-    const scene = createMockSceneWithTiles(n);
-    const datasets = new Map<string, DatasetEntry>([
-      ["ds1", { manifest: createMockContentWithTiles(n) }],
-    ]);
-    return { scene, datasets };
-  }
-
-  it("replays the uncapped active-member total on epoch-hit ticks", () => {
-    const { scene, datasets } = makeDeps(3);
-    const orch = new TickCoordinator(new Uploader());
-    debugStats.enabled = true;
-    try {
-      const ctx = makeCtx(scene, datasets);
-      orch.planAndFetch(ctx, new Map());
-      const total = debugStats.memberStatsActiveTotal;
-      const rows = debugStats.memberStats.length;
-      expect(total).toBeGreaterThan(0);
-      expect(rows).toBeGreaterThan(0);
-
-      // Idle tick: the render loop resets per-frame stats, then the
-      // epoch fast-path replays the last rebuild's member snapshot.
-      resetFrameStats();
-      orch.planAndFetch(ctx, new Map());
-      expect(debugStats.memberStats.length).toBe(rows);
-      expect(debugStats.memberStatsActiveTotal).toBe(total);
-    } finally {
-      debugStats.enabled = false;
-    }
-  });
-
-  it("computes per-member sent counts from the cache's delivery ledger", () => {
-    const { scene, datasets } = makeDeps(2);
-    const orch = new TickCoordinator(new Uploader());
-    const cpuCache = createMockCpuCache();
-    vi.mocked(cpuCache.isChunkSent).mockReturnValue(true);
-    debugStats.enabled = true;
-    try {
-      orch.planAndFetch(makeCtx(scene, datasets, cpuCache), new Map());
-      expect(debugStats.memberStats.length).toBeGreaterThan(0);
-      for (const row of debugStats.memberStats) {
-        expect(row.chunksNeeded).toBeGreaterThan(0);
-        expect(row.chunksSent).toBe(row.chunksNeeded);
-      }
-    } finally {
-      debugStats.enabled = false;
-    }
-  });
-
-  it("refreshes sent counts on epoch-hit ticks as idle deliveries land", () => {
-    const { scene, datasets } = makeDeps(2);
-    const orch = new TickCoordinator(new Uploader());
-    const cpuCache = createMockCpuCache();
-    debugStats.enabled = true;
-    try {
-      const ctx = makeCtx(scene, datasets, cpuCache);
-      orch.planAndFetch(ctx, new Map());
-      expect(debugStats.memberStats.length).toBeGreaterThan(0);
-      for (const row of debugStats.memberStats) {
-        expect(row.chunksSent).toBe(0);
-      }
-
-      // Deliveries land while the camera is idle; the next replayed
-      // tick must show the progress instead of the rebuild-time zeros.
-      vi.mocked(cpuCache.isChunkSent).mockReturnValue(true);
-      resetFrameStats();
-      orch.planAndFetch(ctx, new Map());
-      for (const row of debugStats.memberStats) {
-        expect(row.chunksSent).toBe(row.chunksNeeded);
-      }
-    } finally {
-      debugStats.enabled = false;
     }
   });
 });

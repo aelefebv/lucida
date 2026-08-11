@@ -9,7 +9,6 @@ import { resolveVisibleLabels, type LabelViewSetting } from "./pipeline/planning
 import { labelModelMatrices } from "./renderer/labelLayout.ts";
 import { getActiveChannels, compositeKey } from "./tickCommon.ts";
 import type { DatasetSettings } from "./tickCommon.ts";
-import { debugStats } from "./debug/debugStats.ts";
 import { traceRecorder } from "./trace/recorder.ts";
 import type { TickCoordinator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/tickCoordinator.ts";
 import type { Uploader } from "./pipeline/upload/uploader.ts";
@@ -142,9 +141,7 @@ function uploadAndRenderVolume(
   const clipMode = clipModeStr === "sphere" ? 1 : 0;
 
   const layers: VolumeLayerParams[] = [];
-  const passesByDataset: Record<string, number> = {};
   for (const dsId of layerOrder) {
-    const layersBefore = layers.length;
     const dsVol = datasets.get(dsId);
     if (!dsVol) continue;
     const dsSettings = allSettings[dsId];
@@ -226,13 +223,6 @@ function uploadAndRenderVolume(
       canvasH,
       dsSettings.label_settings,
     );
-
-    const added = layers.length - layersBefore;
-    if (added > 0) passesByDataset[dsId] = added;
-  }
-
-  if (debugStats.enabled) {
-    debugStats.renderPasses = { total: layers.length, byDataset: passesByDataset };
   }
 
   client.volumeRenderMultiPass(layers, invVP, eye, canvasW, canvasH, fullW, fullH, plan.epochs, viewProj, camForward, clipDistance, clipMode);
@@ -266,22 +256,13 @@ export function tickVolume(
   const canvasW = Math.round(fullW * ctx.renderScale);
   const canvasH = Math.round(fullH * ctx.renderScale);
 
-  const t0 = debugStats.enabled ? performance.now() : 0;
   const orchResult = tickCoordinator.planAndFetch(ctx, minimapPendingFetch);
-  if (debugStats.enabled) debugStats.planTimeMs = performance.now() - t0;
   if (!orchResult) return false;
 
   // Volume-specific rendering state. Camera position drives ray-marching
   // in the shader (different from `rayHitLocal`, which is residency-only
   // and emitted by the tickCoordinator on viewEpoch advance).
   const eye = new Float32Array(scene.eye_position());
-
-  if (debugStats.enabled) {
-    debugStats.effectiveZoom = scene.debug_effective_zoom();
-    debugStats.activeChannels = orchResult.multiChannel
-      ? getActiveChannels(orchResult.settings.allSettings[orchResult.settings.layerOrder[0]]).length
-      : 1;
-  }
 
   const viewT = scene.t();
   const viewC = scene.c();
@@ -295,9 +276,7 @@ export function tickVolume(
     entityIndexByDataset: orchResult.entityIndexByDataset,
   };
 
-  const t1 = debugStats.enabled ? performance.now() : 0;
   const result = uploadAndRenderVolume(ctx, uploader, planResult, shouldRender);
-  if (debugStats.enabled) debugStats.uploadTimeMs = performance.now() - t1;
   return result;
 }
 

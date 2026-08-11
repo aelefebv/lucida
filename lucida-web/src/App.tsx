@@ -36,7 +36,6 @@ import { annotationAuthorId } from "./annotationIdentity.ts";
 import { deriveMentionCandidates } from "./components/annotationParticipants.ts";
 import { ProfileMenu } from "./auth/ProfileMenu.tsx";
 import { useAuthSession } from "./auth/AuthSession.ts";
-import { debugStats } from "./debug/debugStats.ts";
 import {
   DEBUG_OVERLAYS,
   getRenderRadiusPreviewTier,
@@ -1079,10 +1078,7 @@ function App({
   const [lastClickScreen, setLastClickScreen] = useState<[number, number] | null>(null);
   // eslint-disable-next-line react-hooks/preserve-manual-memoization
   const handleDebugToggle = useCallback(() => {
-    setShowDebug(prev => {
-      debugStats.enabled = !prev;
-      return !prev;
-    });
+    setShowDebug(prev => !prev);
     requestRender(render.loopRef.current, "debug_toggle");
   }, [render.loopRef]);
   const handleDebugClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {

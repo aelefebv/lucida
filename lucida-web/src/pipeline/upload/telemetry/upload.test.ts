@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { UploadTelemetry } from "./upload.ts";
 import {
-  debugStats,
   emptyUploadTickStats,
   type UploadTickStats,
+  type UploadRollingStats,
 } from "../../../debug/debugStats.ts";
 // The `debug` category set lives in `localStorage`, which is undefined in the
 // default vitest node environment. The detector tests stub a minimal
@@ -26,21 +26,6 @@ function makeTickStats(over: Partial<UploadTickStats> = {}): UploadTickStats {
   return { ...emptyUploadTickStats(), ...over };
 }
 
-/**
- * Toggle `debugStats.enabled` for each test so `publish` actually
- * writes to the shared `debugStats.upload` tile (mirrors the
- * orchestrator's existing test harness setup).
- */
-let previousEnabled = false;
-beforeEach(() => {
-  previousEnabled = debugStats.enabled;
-  debugStats.enabled = true;
-  debugStats.upload = { tick: null, rolling: null };
-});
-afterEach(() => {
-  debugStats.enabled = previousEnabled;
-});
-
 // ---------------------------------------------------------------------------
 // recordEvent + cumulative counters + size sketch
 // ---------------------------------------------------------------------------
@@ -52,8 +37,7 @@ describe("UploadTelemetry — recordEvent + counters", () => {
     tel.recordEvent(110, 2000);
     tel.recordEvent(120, 4000);
     // No publish yet — push a no-op tick to materialize rolling.
-    tel.publish(120, makeTickStats());
-    const rolling = debugStats.upload.rolling!;
+    const rolling = tel.publish(120, makeTickStats());
     expect(rolling.totalBytes).toBe(7000);
     expect(rolling.totalUploads).toBe(3);
   });
@@ -63,8 +47,7 @@ describe("UploadTelemetry — recordEvent + counters", () => {
     tel.recordEvent(10_000, 500);
     tel.recordEvent(10_200, 700, "proxy");
     tel.recordEvent(10_400, 800);
-    tel.publish(10_500, makeTickStats());
-    const rolling = debugStats.upload.rolling!;
+    const rolling = tel.publish(10_500, makeTickStats());
     // Window = UPLOAD_WINDOW_MS = 1000ms, so bytesInWindow == bytesPerSec.
     expect(rolling.bytesPerSec).toBe(2000);
     expect(rolling.uploadsPerSec).toBe(3);
@@ -78,8 +61,7 @@ describe("UploadTelemetry — recordEvent + counters", () => {
     tel.recordEvent(100, 500);
     // Publish at time t such that the t=0 event falls outside the window.
     const t = UPLOAD_WINDOW_MS + 50;
-    tel.publish(t, makeTickStats());
-    const rolling = debugStats.upload.rolling!;
+    const rolling = tel.publish(t, makeTickStats());
     // Only the t=100 event remains in the window.
     expect(rolling.uploadsPerSec).toBe(1);
     expect(rolling.bytesPerSec).toBe(500);
@@ -95,12 +77,12 @@ describe("UploadTelemetry — recordEvent + counters", () => {
     const perTick = 128;
     const tickMs = 16;
     const ticks = 200;
+    let rolling!: UploadRollingStats;
     for (let i = 0; i < ticks; i++) {
       const now = 100_000 + i * tickMs;
       for (let e = 0; e < perTick; e++) tel.recordEvent(now, 10);
-      tel.publish(now, makeTickStats());
+      rolling = tel.publish(now, makeTickStats());
     }
-    const rolling = debugStats.upload.rolling!;
     // Events stamped at or after `now - 1000` survive: ceil(1000/16) = 63 ticks
     // (the current tick plus the 62 preceding ones inside the window).
     const ticksInWindow = Math.floor(UPLOAD_WINDOW_MS / tickMs) + 1;
@@ -165,8 +147,7 @@ describe("UploadTelemetry — recordEvent + counters", () => {
     const tel = new UploadTelemetry();
     // Build a known distribution: 1,2,3,...,10.
     for (let i = 1; i <= 10; i++) tel.recordEvent(10_000 + i, i * 100);
-    tel.publish(10_100, makeTickStats());
-    const rolling = debugStats.upload.rolling!;
+    const rolling = tel.publish(10_100, makeTickStats());
     // Math.floor(10 * 0.5) = 5 → sorted[5] = 600.
     expect(rolling.uploadSizeP50).toBe(600);
     // Math.floor(10 * 0.95) = 9 → sorted[9] = 1000.
@@ -177,8 +158,7 @@ describe("UploadTelemetry — recordEvent + counters", () => {
     const tel = new UploadTelemetry();
     const n = UPLOAD_SIZE_SAMPLES * 2;
     for (let i = 1; i <= n; i++) tel.recordEvent(10_000, i * 100);
-    tel.publish(10_000, makeTickStats());
-    const rolling = debugStats.upload.rolling!;
+    const rolling = tel.publish(10_000, makeTickStats());
     // Retained window is i = SAMPLES+1 .. 2*SAMPLES, sorted ascending.
     const retained = Array.from(
       { length: UPLOAD_SIZE_SAMPLES },
@@ -200,7 +180,7 @@ describe("UploadTelemetry — recordEvent + counters", () => {
 describe("UploadTelemetry — tick aggregation", () => {
   it("aggregates skip causes from per-tick stats into the rolling window", () => {
     const tel = new UploadTelemetry();
-    tel.publish(
+    const rolling = tel.publish(
       10_000,
       makeTickStats({
         drainedChunks: 10,
@@ -211,7 +191,6 @@ describe("UploadTelemetry — tick aggregation", () => {
         skippedOverview: 0,
       }),
     );
-    const rolling = debugStats.upload.rolling!;
     // drainedUploadBound = drainedChunks - prefetch - overview = 10 - 2 - 0 = 8
     // skippedUploadBound = wrongLod + alreadySent + noMeta = 4 + 1 + 0 = 5
     // filterRatio = 5 / 8 = 0.625
@@ -222,35 +201,14 @@ describe("UploadTelemetry — tick aggregation", () => {
     const tel = new UploadTelemetry();
     tel.publish(10_000, makeTickStats({ budgetExhausted: true }));
     tel.publish(10_100, makeTickStats({ budgetExhausted: false }));
-    tel.publish(10_200, makeTickStats({ budgetExhausted: true }));
-    const rolling = debugStats.upload.rolling!;
+    const rolling = tel.publish(10_200, makeTickStats({ budgetExhausted: true }));
     expect(rolling.budgetExhaustedTicksLastSecond).toBe(2);
   });
 
   it("returns NaN ratios when the relevant denominator is 0", () => {
     const tel = new UploadTelemetry();
-    tel.publish(10_000, makeTickStats());
-    const rolling = debugStats.upload.rolling!;
+    const rolling = tel.publish(10_000, makeTickStats());
     expect(rolling.filterRatio).toBeNaN();
-  });
-
-  it("publishes a snapshot of the per-tick stats to debugStats.upload.tick", () => {
-    const tel = new UploadTelemetry();
-    const stats = makeTickStats({
-      drainedChunks: 7,
-      uploadedChunks: 5,
-      bytesUploaded: 12345,
-      bytesBudget: 99999,
-    });
-    tel.publish(10_000, stats);
-    const published = debugStats.upload.tick!;
-    expect(published.drainedChunks).toBe(7);
-    expect(published.uploadedChunks).toBe(5);
-    expect(published.bytesUploaded).toBe(12345);
-    expect(published.bytesBudget).toBe(99999);
-    // Tick is a copy, not a reference — mutating the source shouldn't leak.
-    stats.uploadedChunks = 999;
-    expect(published.uploadedChunks).toBe(5);
   });
 });
 
@@ -360,7 +318,7 @@ describe("UploadTelemetry — shape regression", () => {
     const tel = new UploadTelemetry();
     tel.recordEvent(10_000, 512);
     tel.recordEvent(10_100, 1024);
-    tel.publish(
+    const rolling = tel.publish(
       10_200,
       makeTickStats({
         drainedChunks: 5,
@@ -374,7 +332,6 @@ describe("UploadTelemetry — shape regression", () => {
         skippedWrongLod: 1,
       }),
     );
-    const rolling = debugStats.upload.rolling!;
     expect(Object.keys(rolling).sort()).toEqual(
       [
         "bytesPerSec",

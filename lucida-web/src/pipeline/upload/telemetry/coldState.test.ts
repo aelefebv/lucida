@@ -1,100 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { ColdStateTelemetry, type ColdStateCauseKey } from "./coldState.ts";
-import {
-  COLD_STATE_CHURN_SUSTAIN_MS,
-  COLD_STATE_DURATION_SAMPLES,
-  COLD_STATE_WINDOW_MS,
-} from "../constants.ts";
+import { COLD_STATE_CHURN_SUSTAIN_MS } from "../constants.ts";
 
 // ---------------------------------------------------------------------------
 // recordHit / recordRebuild basics
 // ---------------------------------------------------------------------------
 
-describe("ColdStateTelemetry — basics", () => {
-  it("recordHit bumps cumulative hits + window hits but no rebuild tiles", () => {
-    const tel = new ColdStateTelemetry();
-    tel.recordHit(1000);
-    tel.recordHit(1100);
-    const snap = tel.publish();
-    expect(snap.cacheHits).toBe(2);
-    expect(snap.rebuilds).toBe(0);
-    expect(snap.hitsLastSecond).toBe(2);
-    expect(snap.rebuildsLastSecond).toBe(0);
-    expect(snap.hitRate).toBeCloseTo(1.0);
-    expect(snap.lastRebuildMs).toBeNull();
-    expect(snap.lastRebuildAt).toBe(0);
-  });
-
-  it("recordRebuild attributes per-epoch causes and records the duration", () => {
-    const tel = new ColdStateTelemetry();
-    tel.recordRebuild(1000, ["content", "view"], 7.5);
-    tel.recordRebuild(1100, ["selection"], 2.5);
-    const snap = tel.publish();
-    expect(snap.rebuilds).toBe(2);
-    expect(snap.cacheHits).toBe(0);
-    expect(snap.rebuildsLastSecond).toBe(2);
-    expect(snap.causeLastSecond).toEqual({
-      content: 1,
-      layout: 0,
-      view: 1,
-      selection: 1,
-      asset: 0,
-    });
-    expect(snap.lastRebuildMs).toBe(2.5);
-    expect(snap.lastRebuildAt).toBe(1100);
-  });
-
-  it("prunes events older than COLD_STATE_WINDOW_MS from window counts (cumulative survives)", () => {
-    const tel = new ColdStateTelemetry();
-    tel.recordHit(0);
-    tel.recordRebuild(100, ["content"], 1.0);
-    // Push events to the right and force the prune (window cutoff =
-    // now - COLD_STATE_WINDOW_MS strictly above the t=0 / t=100 events).
-    tel.recordRebuild(COLD_STATE_WINDOW_MS + 200, ["view"], 1.5);
-    const snap = tel.publish();
-    // Cumulative survives the prune.
-    expect(snap.cacheHits).toBe(1);
-    expect(snap.rebuilds).toBe(2);
-    // Only the most-recent rebuild is in the window.
-    expect(snap.rebuildsLastSecond).toBe(1);
-    expect(snap.hitsLastSecond).toBe(0);
-    expect(snap.causeLastSecond).toEqual({
-      content: 0,
-      layout: 0,
-      view: 1,
-      selection: 0,
-      asset: 0,
-    });
-  });
-
-  it("derives p50 / p95 from the rebuild duration sample buffer (bounded by COLD_STATE_DURATION_SAMPLES)", () => {
-    const tel = new ColdStateTelemetry();
-    // Record more than the buffer can hold to verify the FIFO bound.
-    const n = COLD_STATE_DURATION_SAMPLES + 5;
-    for (let i = 0; i < n; i++) {
-      // Use ascending durations so the oldest (smallest) get dropped.
-      tel.recordRebuild(i, ["content"], (i + 1) * 10);
-    }
-    const snap = tel.publish();
-    // After pruning, only the last DURATION_SAMPLES survive (durations
-    // 60..640 in steps of 10 — i.e. (5+1)*10 .. (n)*10).
-    // sorted = [60, 70, ..., 640]
-    // p50 → floor(60 * 0.5) = 30 → 60 + 30*10 = 360.
-    // p95 → floor(60 * 0.95) = 57 → 60 + 57*10 = 630.
-    expect(snap.rebuildP50Ms).toBe(360);
-    expect(snap.rebuildP95Ms).toBe(630);
-  });
-
-  it("hitRate is hits / (hits + rebuilds) over the rolling window", () => {
-    const tel = new ColdStateTelemetry();
-    tel.recordHit(1000);
-    tel.recordHit(1100);
-    tel.recordHit(1200);
-    tel.recordRebuild(1300, ["view"], 5);
-    const snap = tel.publish();
-    expect(snap.hitRate).toBeCloseTo(3 / 4);
-  });
-});
 
 // ---------------------------------------------------------------------------
 // Churn detector (sustained-non-view rebuild rate)

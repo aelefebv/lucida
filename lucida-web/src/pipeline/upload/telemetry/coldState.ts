@@ -1,20 +1,20 @@
 /**
  * Cold-state rebuild telemetry. Owns a rolling 1s ring buffer of
- * hit/rebuild events, cumulative + windowed counters, per-epoch cause
- * attribution, a p50/p95 duration sketch, and a non-view-churn detector.
+ * hit/rebuild events, cumulative counters, and a non-view-churn detector.
+ *
+ * It also used to keep a windowed rates/percentiles snapshot for the debug
+ * panel's Orch tab. That reader is gone with ADR 0049's gate and nothing
+ * replaced it, so the snapshot went too rather than being recomputed on every
+ * rebuild for nobody — the churn detector below is what survives, and it
+ * counts what it needs itself. See the recorder-cost ledger for the
+ * absorption ADR 0052 promised those rates and the trace does not yet carry.
  */
 
-import {
-  emptyColdStateDebug,
-  type ColdStateCauseCounts,
-  type ColdStateDebug,
-} from "../../../debug/debugStats.ts";
 import { debugLog } from "../../../debug/logging.ts";
 import {
   COLD_STATE_CHURN_LOG_RATE_LIMIT_MS,
   COLD_STATE_CHURN_SUSTAIN_MS,
   COLD_STATE_CHURN_THRESHOLD_PER_SEC,
-  COLD_STATE_DURATION_SAMPLES,
   COLD_STATE_WINDOW_MS,
 } from "../constants.ts";
 import { SustainedCondition } from "./sustained.ts";
@@ -39,12 +39,6 @@ export class ColdStateTelemetry {
   private coldStateEvents: ColdStateEvent[] = [];
   private coldStateRebuildCount = 0;
   private coldStateHitCount = 0;
-  /** FIFO sample buffer for p50/p95 rebuild duration. */
-  private coldStateRebuildDurations: number[] = [];
-  private coldStateLastRebuildAt = 0;
-  private coldStateLastRebuildMs: number | null = null;
-  /** Recomputed on every `record*` call so `publish()` is a cheap return. */
-  private coldStateDebug: ColdStateDebug = emptyColdStateDebug();
 
   /**
    * Non-view churn detector. Camera motion legitimately bumps `view` at
@@ -62,7 +56,6 @@ export class ColdStateTelemetry {
     this.coldStateHitCount++;
     this.coldStateEvents.push({ at: now, kind: "hit", causes: [] });
     this.pruneWindow(now);
-    this.refreshSnapshot();
   }
 
   recordRebuild(
@@ -71,21 +64,9 @@ export class ColdStateTelemetry {
     durationMs: number,
   ): void {
     this.coldStateRebuildCount++;
-    this.coldStateLastRebuildAt = now;
-    this.coldStateLastRebuildMs = durationMs;
-    this.coldStateRebuildDurations.push(durationMs);
-    if (this.coldStateRebuildDurations.length > COLD_STATE_DURATION_SAMPLES) {
-      this.coldStateRebuildDurations.shift();
-    }
     this.coldStateEvents.push({ at: now, kind: "rebuild", causes, durationMs });
     this.pruneWindow(now);
     this.checkChurn(now);
-    this.refreshSnapshot();
-  }
-
-  /** O(1) — the underlying snapshot is recomputed on every `record*`. */
-  publish(): ColdStateDebug {
-    return this.coldStateDebug;
   }
 
   private pruneWindow(now: number): void {
@@ -126,45 +107,4 @@ export class ColdStateTelemetry {
     });
   }
 
-  private refreshSnapshot(): void {
-    let rebuilds = 0;
-    let hits = 0;
-    const causeLastSecond: ColdStateCauseCounts = {
-      content: 0,
-      layout: 0,
-      view: 0,
-      selection: 0,
-      asset: 0,
-    };
-    for (const e of this.coldStateEvents) {
-      if (e.kind === "rebuild") {
-        rebuilds++;
-        for (const c of e.causes) causeLastSecond[c]++;
-      } else {
-        hits++;
-      }
-    }
-    const total = rebuilds + hits;
-
-    let p50: number | null = null;
-    let p95: number | null = null;
-    if (this.coldStateRebuildDurations.length > 0) {
-      const sorted = [...this.coldStateRebuildDurations].sort((a, b) => a - b);
-      p50 = sorted[Math.floor(sorted.length * 0.5)];
-      p95 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))];
-    }
-
-    this.coldStateDebug = {
-      rebuilds: this.coldStateRebuildCount,
-      cacheHits: this.coldStateHitCount,
-      hitRate: total > 0 ? hits / total : NaN,
-      rebuildsLastSecond: rebuilds,
-      hitsLastSecond: hits,
-      causeLastSecond,
-      lastRebuildMs: this.coldStateLastRebuildMs,
-      rebuildP50Ms: p50,
-      rebuildP95Ms: p95,
-      lastRebuildAt: this.coldStateLastRebuildAt,
-    };
-  }
 }
