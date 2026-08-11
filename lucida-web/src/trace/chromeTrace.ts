@@ -41,6 +41,7 @@
  * encodings that avoid it are the ones this shape was chosen over.
  */
 
+import { outageWindow } from "./coverage.ts";
 import {
   PHASES,
   type Phase,
@@ -179,6 +180,7 @@ export function chromeTraceOtherData(doc: TraceDocument): Record<string, unknown
       readingsDropped: run.readingsDropped,
       eventsDropped: run.eventsDropped,
       serverRowsDropped: run.serverRowsDropped,
+      serverRowsDiscarded: run.serverRowsDiscarded,
       unplacedServerRows: countUnplaced(run.serverRows),
       undrawableInFlightRows: countUndrawableInFlight(run.rows),
     })),
@@ -207,6 +209,24 @@ function emitRun(events: ChromeTraceEvent[], run: TraceRun, baseUs: number): voi
     tid: RUN_TID,
     args: { ...header },
   });
+
+  // The socket outages the run spanned, drawn on the run's own track so a
+  // wall of rows that stops for two seconds has the reason sitting next to
+  // it rather than in a block a reader has to go and find.
+  for (const connection of header.connections) {
+    const window = outageWindow(connection, header.durationUs);
+    if (!window) continue;
+    events.push({
+      name: `socket outage → generation ${connection.generation}`,
+      cat: "run,connection",
+      ph: "X",
+      ts: baseUs + window.startUs,
+      dur: window.endUs - window.startUs,
+      pid: PID_BROWSER,
+      tid: RUN_TID,
+      args: { ...connection },
+    });
+  }
 
   for (const row of run.rows) {
     let lastEndUs: number | null = null;

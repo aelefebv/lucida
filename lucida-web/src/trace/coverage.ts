@@ -20,6 +20,7 @@
 
 import {
   COUNTED_PHASES,
+  type ConnectionRecord,
   type CountedPhase,
   type CoverageGap,
   type CoverageGapKind,
@@ -64,12 +65,16 @@ const GAP_STATEMENTS: Record<CoverageGapKind, string> = {
     "Wall clock after the last recorded phase boundary. The run stayed open past the last thing it measured.",
   truncated:
     "The run hit its per-run byte cap and stopped recording. Everything after this offset is unknown, and the record says how much it went on to miss.",
+  "connection-gap":
+    "The socket dropped and the browser reconnected. Requests in flight were lost, correlation labels restarted, and any rows the server had buffered for the dead connection were discarded rather than replayed. This names why a stretch of the run is empty, so it overlaps whatever interval gap covers the same wall clock rather than adding to it.",
   "ticks-dropped":
     "The per-tick aggregate ring wrapped and overwrote its oldest samples. Elapsed time is unaffected; the early planning detail is gone.",
   "events-dropped":
     "The point-event ring wrapped and overwrote its oldest events. Elapsed time is unaffected; early evictions, retries and failures are gone.",
   "server-rows-dropped":
-    "The server declared rows it dropped before sending. Those requests are still bracketed by the browser, but their server-side half is missing.",
+    "The server declared rows it dropped before sending: its pre-flush buffer filled past two flush windows and it stopped accumulating rather than block the pipeline it measures. Those requests are still bracketed by the browser, but their server-side half is missing.",
+  "server-rows-discarded":
+    "Server rows this side refused, because they named a label this interval never minted or an open it never bracketed — a request from before this interval, from a previous connection, or one this build gives no browser bracket at all. Nothing here could have placed them.",
 };
 
 /**
@@ -124,7 +129,12 @@ export interface CoverageInput {
   truncation: TruncationRecord | null;
   ticksDropped: number;
   eventsDropped: number;
+  /** Rows the server declared it dropped before sending. */
   serverRowsDropped: number;
+  /** Rows this side refused because nothing here could place them. */
+  serverRowsDiscarded: number;
+  /** Every socket the interval spanned, oldest first. */
+  connections: readonly ConnectionRecord[];
 }
 
 export function computeCoverage(input: CoverageInput): TraceCoverage {
@@ -157,10 +167,23 @@ export function computeCoverage(input: CoverageInput): TraceCoverage {
     });
   }
 
+  // An outage is elapsed time nothing could have been served in, and the
+  // browser is the only side that knows it happened — the server sees a
+  // socket close and a stranger connect.
+  // Clamped to the same scan end as the interval gaps: past a truncation the
+  // run stopped looking, and the truncation already declares that remainder
+  // as unbounded rather than as a list of things that happened in it.
+  for (const record of input.connections) {
+    const window = outageWindow(record, scanEndUs);
+    if (!window) continue;
+    gaps.push(intervalGap("connection-gap", window.startUs, window.endUs, wallClockUs));
+  }
+
   for (const [kind, records] of [
     ["ticks-dropped", input.ticksDropped],
     ["events-dropped", input.eventsDropped],
     ["server-rows-dropped", input.serverRowsDropped],
+    ["server-rows-discarded", input.serverRowsDiscarded],
   ] as const) {
     if (records <= 0) continue;
     gaps.push({
@@ -184,6 +207,25 @@ export function computeCoverage(input: CoverageInput): TraceCoverage {
     countedPhases: sumCounted(input.ticks),
     limits: STRUCTURAL_LIMITS,
   };
+}
+
+/**
+ * Where a connection's outage sits on this interval's clock, or null when it
+ * had none or none of it fell inside the interval.
+ *
+ * An outage can predate the interval that reports it — the socket dropped
+ * during the pan before the run opened. Its full length stays on the
+ * connection record; what this returns is the part of the interval's own wall
+ * clock it consumed, which is the only part any surface can draw.
+ */
+export function outageWindow(
+  connection: ConnectionRecord,
+  intervalDurationUs: number,
+): { startUs: number; endUs: number } | null {
+  if (connection.gapUs === null || connection.openedAtUs === null) return null;
+  const endUs = Math.min(connection.openedAtUs, intervalDurationUs);
+  const startUs = Math.max(0, endUs - connection.gapUs);
+  return endUs > startUs ? { startUs, endUs } : null;
 }
 
 /**
