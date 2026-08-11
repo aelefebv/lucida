@@ -3,15 +3,16 @@
  * persisted in `localStorage.debug` as a comma-separated list (or `*` for
  * all). See `wiki/decisions/0012-logging-conventions.md`.
  *
+ * There is no UI over the categories: `localStorage.debug = 'bridge,cache'`
+ * plus a reload is the interface (ADR 0012, as amended by ADR 0052).
+ *
  * The persisted set is read ONCE at module init and cached in
  * `enabledCategories`; the per-call gate (`isDebugEnabled`) sits on hot
  * paths — every `bridgeLog`, cache/upload telemetry event, and render-loop
  * dirty log routes through it — so it must never do a synchronous
- * `localStorage` read per call. The cache stays current through:
- *   - `setDebugEnabled` (the DebugPanel Logging-tab path), and
- *   - the window `storage` event (writes from other tabs).
- * A same-tab write that bypasses `setDebugEnabled` (DevTools console)
- * doesn't fire `storage` in the writing tab; call
+ * `localStorage` read per call. The cache stays current through the
+ * window `storage` event (writes from other tabs). A same-tab write
+ * (DevTools console) doesn't fire `storage` in the writing tab; call
  * `refreshDebugCategories()` afterwards, or reload.
  */
 
@@ -30,20 +31,6 @@ let enabledCategories: Set<string> = readEnabled();
 
 export function isDebugEnabled(category: DebugCategory): boolean {
   return enabledCategories.has(category);
-}
-
-export function setDebugEnabled(category: DebugCategory, enabled: boolean): void {
-  if (typeof localStorage === "undefined") return;
-  const current = new Set(enabledCategories);
-  if (enabled) current.add(category);
-  else current.delete(category);
-  if (current.size === 0) {
-    localStorage.removeItem("debug");
-  } else {
-    localStorage.setItem("debug", Array.from(current).join(","));
-  }
-  enabledCategories = current;
-  notifyListeners();
 }
 
 /**

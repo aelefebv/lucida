@@ -7,16 +7,6 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { debugStats, type DebugStats } from "./debugStats.ts";
-import {
-  DEBUG_CATEGORIES,
-  isDebugEnabled,
-  setDebugEnabled,
-  type DebugCategory,
-  DEBUG_OVERLAYS,
-  isOverlayEnabled,
-  setOverlayEnabled,
-  type DebugOverlay,
-} from "./logging.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import type { WasmScene } from "lucida-core";
 import type { DatasetState } from "../types.ts";
@@ -24,18 +14,9 @@ import type { CacheTelemetry } from "../pipeline/fetch/index.ts";
 import type { GeneratedStatusCountsByDataset } from "../pipeline/generatedAvailability.ts";
 import type { Session } from "../session.ts";
 import type { DatasetHealthStatus, DatasetSourceHealth } from "../bridge.ts";
-import { ConfigTab } from "./ConfigTab.tsx";
 import "./DebugPanel.css";
 
 const POLL_INTERVAL_MS = 200;
-
-/**
- * The Cache tab's budget/fetch-limit inputs write live CpuCache config
- * (`cpuCache.updateConfig`). Like the planning knobs in ConfigTab, that
- * is a dev-build control surface; production builds render the values
- * read-only so the panel inspects without steering the fetch pipeline.
- */
-const CACHE_CONFIG_EDITABLE: boolean = import.meta.env.DEV;
 
 /** Short label for an EntityMode in the active-set rendering. */
 function modeLabel(mode: string): string {
@@ -65,24 +46,7 @@ function modeColor(mode: string): string {
   }
 }
 
-type TabId = "render" | "scene" | "pick" | "planning" | "cache" | "health" | "orch" | "catalog" | "config" | "logging";
-
-const LOGGING_CATEGORY_DESCRIPTIONS: Record<DebugCategory, string> = {
-  bridge: "WebSocket send/receive and dataset-open lifecycle",
-  wasm: "Scene mutations inside the Rust WASM module (scene.* events)",
-  render: "Render loop lifecycle, dirty-flag attribution, throttle skips",
-  cache: "CPU cache backpressure, failure bursts, eviction bursts",
-  orch: "TickCoordinator events — cold-state rebuild churn, upload budget exhaustion, resend storm, delivery waste",
-};
-
-const OVERLAY_DESCRIPTIONS: Record<DebugOverlay, string> = {
-  groupModes: "Per-group badge over the canvas: detail/coarse chunks available from the worker or CPU cache (Davailable/wanted Cavailable/wanted).",
-  chunkGrid: "LOD chunk grid for every visible tile, color-coded by status (cached / in-flight / planned). Capped at ~600 cells per tick.",
-  chunkTier: "Sub-color tile chunks by displayed render tier (detail = green, coarse = yellow, missing = red). Requires chunkGrid.",
-  renderRadius: "Draw the active detail/coarse render-radius boundary. 2D shows circles; 3D shows projected sphere/ellipsoid rings.",
-  cachedTier: "Sub-color cached chunks by eviction tier (active = bright green, demoted = pale sage, prefetch = teal). Requires chunkGrid.",
-  plannedRank: "Sub-color planned chunks by queue rank (top of queue = bright orange, bottom = dim red, gray = not in pending). Requires chunkGrid.",
-};
+type TabId = "render" | "scene" | "pick" | "planning" | "cache" | "health" | "orch" | "catalog";
 
 interface CatalogSnap {
   assetEpoch: number;
@@ -681,19 +645,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
     { id: "health", label: "Health" },
     { id: "orch", label: "Orch" },
     { id: "catalog", label: "Catalog" },
-    { id: "config", label: "Config" },
-    { id: "logging", label: "Logging" },
   ];
-
-  const [loggingTick, setLoggingTick] = useState(0);
-  const toggleCategory = (cat: DebugCategory) => {
-    setDebugEnabled(cat, !isDebugEnabled(cat));
-    setLoggingTick(t => t + 1);
-  };
-  const toggleOverlay = (name: DebugOverlay) => {
-    setOverlayEnabled(name, !isOverlayEnabled(name));
-    setLoggingTick(t => t + 1);
-  };
 
   // Cold-state header pulse: bright orange while a rebuild was within the
   // last poll interval, dim after that, gray when idle. The 500ms afterglow
@@ -1122,73 +1074,6 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                     p95: {fmt(cacheTelemetry.decodeP95Ms, 2)}ms
                     {" · "}
                     avg: {fmt(cacheTelemetry.avgDecodeMs, 2)}ms
-                  </div>
-                </div>
-
-                {/* Config */}
-                <div className="debug-section">
-                  <div className="debug-title">Config</div>
-                  {!CACHE_CONFIG_EDITABLE && (
-                    <div style={{ color: "#888", fontSize: "0.75rem", marginBottom: 6 }} role="note">
-                      Read-only in this build: live cache budgets shown for
-                      inspection; editing is a dev-build capability.
-                    </div>
-                  )}
-                  <div className="debug-config-row">
-                    <span>Main budget (MB)</span>
-                    <input
-                      className="debug-config-input"
-                      type="number"
-                      value={Math.round(cacheTelemetry.mainBudget / (1024 * 1024))}
-                      disabled={!CACHE_CONFIG_EDITABLE}
-                      onChange={e => {
-                        if (!CACHE_CONFIG_EDITABLE) return;
-                        const mb = Number(e.target.value);
-                        if (mb > 0) sessionRef?.current?.cpuCache.updateConfig({ mainBudgetBytes: mb * 1024 * 1024 });
-                      }}
-                    />
-                  </div>
-                  <div className="debug-config-row">
-                    <span>Overview budget (MB)</span>
-                    <input
-                      className="debug-config-input"
-                      type="number"
-                      value={Math.round(cacheTelemetry.overviewBudget / (1024 * 1024))}
-                      disabled={!CACHE_CONFIG_EDITABLE}
-                      onChange={e => {
-                        if (!CACHE_CONFIG_EDITABLE) return;
-                        const mb = Number(e.target.value);
-                        if (mb > 0) sessionRef?.current?.cpuCache.updateConfig({ overviewBudgetBytes: mb * 1024 * 1024 });
-                      }}
-                    />
-                  </div>
-                  <div className="debug-config-row">
-                    <span>Max fetches</span>
-                    <input
-                      className="debug-config-input"
-                      type="number"
-                      value={cacheTelemetry.maxConcurrentFetches}
-                      disabled={!CACHE_CONFIG_EDITABLE}
-                      onChange={e => {
-                        if (!CACHE_CONFIG_EDITABLE) return;
-                        const v = Number(e.target.value);
-                        if (v > 0) sessionRef?.current?.cpuCache.updateConfig({ maxConcurrentFetches: v });
-                      }}
-                    />
-                  </div>
-                  <div className="debug-config-row">
-                    <span>Max in-flight (MB)</span>
-                    <input
-                      className="debug-config-input"
-                      type="number"
-                      value={Math.round(cacheTelemetry.maxBytesInFlight / (1024 * 1024))}
-                      disabled={!CACHE_CONFIG_EDITABLE}
-                      onChange={e => {
-                        if (!CACHE_CONFIG_EDITABLE) return;
-                        const mb = Number(e.target.value);
-                        if (mb > 0) sessionRef?.current?.cpuCache.updateConfig({ maxBytesInFlight: mb * 1024 * 1024 });
-                      }}
-                    />
                   </div>
                 </div>
               </>
@@ -1882,82 +1767,6 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                 </div>
               </div>
             )}
-          </>
-        )}
-
-        {activeTab === "config" && <ConfigTab />}
-
-        {activeTab === "logging" && (
-          <>
-            <div className="debug-section" key={`cats-${loggingTick}`}>
-              <div className="debug-title">Categories</div>
-              <div style={{ color: "#888", fontSize: "0.75rem", marginBottom: 6 }}>
-                Toggles persist in localStorage.debug. Most events fire after the
-                page boots; for startup events, enable then reload.
-              </div>
-              {DEBUG_CATEGORIES.map(cat => {
-                const on = isDebugEnabled(cat);
-                return (
-                  <label
-                    key={cat}
-                    style={{
-                      display: "flex",
-                      alignItems: "flex-start",
-                      gap: 8,
-                      padding: "4px 0",
-                      cursor: "pointer",
-                    }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={on}
-                      onChange={() => toggleCategory(cat)}
-                      style={{ marginTop: 2 }}
-                    />
-                    <div>
-                      <div style={{ fontFamily: "monospace" }}>{cat}</div>
-                      <div style={{ color: "#888", fontSize: "0.75rem" }}>
-                        {LOGGING_CATEGORY_DESCRIPTIONS[cat]}
-                      </div>
-                    </div>
-                  </label>
-                );
-              })}
-            </div>
-            <div className="debug-section" key={`ovs-${loggingTick}`}>
-              <div className="debug-title">Overlays</div>
-              <div style={{ color: "#888", fontSize: "0.75rem", marginBottom: 6 }}>
-                Visual layers drawn over the canvas. Slice + volume modes both work.
-              </div>
-              {DEBUG_OVERLAYS.map(name => {
-                const on = isOverlayEnabled(name);
-                return (
-                  <label
-                    key={name}
-                    style={{
-                      display: "flex",
-                      alignItems: "flex-start",
-                      gap: 8,
-                      padding: "4px 0",
-                      cursor: "pointer",
-                    }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={on}
-                      onChange={() => toggleOverlay(name)}
-                      style={{ marginTop: 2 }}
-                    />
-                    <div>
-                      <div style={{ fontFamily: "monospace" }}>{name}</div>
-                      <div style={{ color: "#888", fontSize: "0.75rem" }}>
-                        {OVERLAY_DESCRIPTIONS[name]}
-                      </div>
-                    </div>
-                  </label>
-                );
-              })}
-            </div>
           </>
         )}
       </div>

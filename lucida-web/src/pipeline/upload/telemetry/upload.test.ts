@@ -5,7 +5,7 @@ import {
   emptyUploadTickStats,
   type UploadTickStats,
 } from "../../../debug/debugStats.ts";
-// `setDebugEnabled` writes to `localStorage`, which is undefined in the
+// The `debug` category set lives in `localStorage`, which is undefined in the
 // default vitest node environment. The detector tests stub a minimal
 // in-memory `localStorage` shim before importing so the gate opens.
 import {
@@ -272,7 +272,7 @@ describe("UploadTelemetry — sustained anomaly detectors", () => {
   let priorLocalStorage: unknown;
 
   beforeEach(async () => {
-    // In-memory localStorage shim so `setDebugEnabled` (and the
+    // In-memory localStorage shim so the `debug` category write (and the
     // subsequent `readEnabled()` inside `debugLog`) can persist a value.
     const store = new Map<string, string>();
     priorLocalStorage = (globalThis as Record<string, unknown>).localStorage;
@@ -283,12 +283,14 @@ describe("UploadTelemetry — sustained anomaly detectors", () => {
       clear: () => store.clear(),
     };
     consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-    const { setDebugEnabled } = await import("../../../debug/logging.ts");
-    setDebugEnabled("orch", true);
+    const { refreshDebugCategories } = await import("../../../debug/logging.ts");
+    localStorage.setItem("debug", "orch");
+    refreshDebugCategories();
   });
   afterEach(async () => {
-    const { setDebugEnabled } = await import("../../../debug/logging.ts");
-    setDebugEnabled("orch", false);
+    const { refreshDebugCategories } = await import("../../../debug/logging.ts");
+    localStorage.removeItem("debug");
+    refreshDebugCategories();
     consoleLogSpy.mockRestore();
     (globalThis as Record<string, unknown>).localStorage = priorLocalStorage;
   });

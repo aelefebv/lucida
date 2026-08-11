@@ -885,6 +885,11 @@ export class CpuCache {
     };
   }
 
+  /** Live config, for surfaces that edit it (Dev controls) — read-only. */
+  getConfig(): Readonly<CpuCacheConfig> {
+    return this.config;
+  }
+
   updateConfig(partial: Partial<CpuCacheConfig>): void {
     Object.assign(this.config, partial);
     if (partial.now) this.now = partial.now;
