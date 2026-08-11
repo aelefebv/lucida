@@ -54,6 +54,8 @@ const BOTTLENECK_SHARE = 0.1;
 
 /** Constant per kind: the numbers live in the gap's own fields, not in prose. */
 const GAP_STATEMENTS: Record<CoverageGapKind, string> = {
+  "nothing-recorded":
+    "No recorded phase covers any part of this run. Whatever it spent its time on, this build did not time it — read no verdict off it at all.",
   "unrecorded-prefix":
     "Wall clock before the first recorded phase boundary. Page boot and any work that ran before the first lifecycle row existed happened here and is on no row.",
   "unaccounted-interior":
@@ -138,14 +140,7 @@ export function computeCoverage(input: CoverageInput): TraceCoverage {
   for (const [startUs, endUs] of uncovered(covered, scanEndUs)) {
     const durationUs = endUs - startUs;
     if (durationUs < MIN_REPORTED_GAP_US) continue;
-    gaps.push(
-      intervalGap(
-        startUs === 0 ? "unrecorded-prefix" : endUs >= scanEndUs ? "unrecorded-suffix" : "unaccounted-interior",
-        startUs,
-        endUs,
-        wallClockUs,
-      ),
-    );
+    gaps.push(intervalGap(intervalKind(startUs, endUs, scanEndUs), startUs, endUs, wallClockUs));
   }
 
   if (input.truncation) {
@@ -154,7 +149,7 @@ export function computeCoverage(input: CoverageInput): TraceCoverage {
       startUs: scanEndUs,
       endUs: wallClockUs,
       durationUs: Math.max(0, wallClockUs - scanEndUs),
-      records: input.truncation.rowsUnrecorded,
+      records: unrecordedRecords(input.truncation),
       // Unconditionally: the run stopped looking, so the remainder is not
       // merely unmeasured, it is unbounded.
       couldHideBottleneck: true,
@@ -189,6 +184,27 @@ export function computeCoverage(input: CoverageInput): TraceCoverage {
     countedPhases: sumCounted(input.ticks),
     limits: STRUCTURAL_LIMITS,
   };
+}
+
+/**
+ * A hole that starts at the run's start and reaches its end is not a prefix —
+ * calling it one reads as "boot", when what happened is that nothing was
+ * measured at all. That is a different piece of news and gets a different
+ * word.
+ */
+function intervalKind(startUs: number, endUs: number, scanEndUs: number): CoverageGapKind {
+  if (startUs === 0) return endUs >= scanEndUs ? "nothing-recorded" : "unrecorded-prefix";
+  return endUs >= scanEndUs ? "unrecorded-suffix" : "unaccounted-interior";
+}
+
+/** Everything the truncation swallowed, across tiers. The breakdown stays on the record. */
+function unrecordedRecords(truncation: TruncationRecord): number {
+  return (
+    truncation.rowsUnrecorded +
+    truncation.ticksUnrecorded +
+    truncation.eventsUnrecorded +
+    truncation.serverRowsUnrecorded
+  );
 }
 
 function intervalGap(

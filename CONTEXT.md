@@ -142,7 +142,10 @@ _Avoid_: session, capture, trial
 **Steady-state interval**:
 The unlabelled interval between runs. The same object as a run with no cause, so
 the pan that preceded a stall is retained rather than discarded, and it is
-retained under the same resident cap.
+retained under the same resident cap. It rotates rather than truncates when it
+reaches the per-run cap: a run's beginning is its diagnostic payload, but steady
+state has no privileged start, and truncating it would delete the most recent
+work — the very thing it is kept for.
 _Avoid_: idle interval, gap, background run (a *gap* is a hole in coverage)
 
 **Lifecycle row**:
@@ -158,10 +161,11 @@ Published by the page as a boolean, never inferred from the outside.
 _Avoid_: idle, settled, done, ready (`ready` already means "a frame was drawn")
 
 **End reason**:
-Why a run closed — `quiescent`, `timeout`, or `explicit`, plus `run-opened` for a
-steady-state interval that ended because a labelled run began. A required field: a
-run that never settled is still a run, and the reason is the difference between a
-result and a missing one.
+Why a run closed — `quiescent`, `timeout`, or `explicit`, plus two that belong to
+a steady-state interval alone: `run-opened` when a labelled run began, and
+`rotated` when the interval reached the per-run cap and handed over to a fresh
+one. A required field: a run that never settled is still a run, and the reason is
+the difference between a result and a missing one.
 _Avoid_: status, outcome
 
 **Truncation record**:

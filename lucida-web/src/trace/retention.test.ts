@@ -8,7 +8,7 @@
 import { describe, it, expect } from "vitest";
 
 import { TraceRecorder } from "./recorder.ts";
-import { CAP_DERIVATION, PER_RUN_CAP_BYTES, RESIDENT_CAP_BYTES } from "./retention.ts";
+import { CAP_DERIVATION, CAP_UNIT, PER_RUN_CAP_BYTES, RESIDENT_CAP_BYTES } from "./retention.ts";
 import { PointEvent, type RunCause, type TraceDocument } from "./types.ts";
 
 const CAUSE: RunCause = { epoch: "content", dirtyKind: "interactive", source: "dataset_added" };
@@ -135,7 +135,8 @@ describe("the resident cap", () => {
 
     expect(doc.retention.residentCapBytes).toBe(RESIDENT_CAP_BYTES);
     expect(doc.retention.perRunCapBytes).toBe(PER_RUN_CAP_BYTES);
-    expect(doc.retention.derivedAt).toBe(CAP_DERIVATION);
+    expect(doc.retention.derivedFrom).toBe(CAP_DERIVATION);
+    expect(doc.retention.capUnit).toBe(CAP_UNIT);
   });
 });
 
@@ -190,6 +191,29 @@ describe("the per-run cap", () => {
     // Complete, not thinned: the beginning of the run is the diagnostic
     // payload, so degradation is a declared stop rather than a quiet sample.
     expect(new Set(run.rows.map(row => row.outcome))).toEqual(new Set(["in-flight"]));
+  });
+
+  it("rotates the steady-state interval instead of truncating it", () => {
+    const { recorder } = makeRecorder();
+    // No run is open, so everything here lands in the unlabelled interval.
+    // Comfortably past the cap, which the assertions below confirm it crossed
+    // — a row handle never comes back -1, because steady state never refuses.
+    for (let n = 0; n < 40_000; n++) {
+      expect(recorder.beginChunkRow(CHUNK, 0)).toBeGreaterThanOrEqual(0);
+    }
+
+    const doc = recorder.exportDocument();
+    expect(doc.steadyState.length).toBeGreaterThan(1);
+    expect(doc.steadyState.map(interval => interval.header.endReason)).toEqual([
+      ...doc.steadyState.slice(0, -1).map(() => "rotated"),
+      "explicit",
+    ]);
+    // Rotation is not degradation: no interval is marked truncated, and the
+    // most recent work — the pan before a stall — is the part that survives.
+    for (const interval of doc.steadyState) {
+      expect(interval.header.truncation).toBeNull();
+      expect(interval.rows.length).toBeGreaterThan(0);
+    }
   });
 
   it("truncates the run rather than first evicting the history around it", () => {
@@ -252,6 +276,6 @@ describe("the coverage block", () => {
 
     const { coverage } = recorder.exportDocument().steadyState[0];
     expect(coverage.wallClockUs).toBe(400_000);
-    expect(coverage.gaps.map(gap => gap.kind)).toContain("unrecorded-prefix");
+    expect(coverage.gaps.map(gap => gap.kind)).toContain("nothing-recorded");
   });
 });

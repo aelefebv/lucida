@@ -34,6 +34,22 @@ export const RESIDENT_CAP_BYTES = 8 * 1024 * 1024;
 export const PER_RUN_CAP_BYTES = 2 * 1024 * 1024;
 
 /**
+ * Both caps are measured in **allocated** bytes, not bytes in use. That is
+ * the honest unit for a memory cap — a doubled buffer is resident whether or
+ * not its second half is filled — but it has a consequence worth stating
+ * rather than discovering.
+ *
+ * The per-chunk table grows by doubling, so the doubling that crosses the cap
+ * is the one that trips truncation, and the interval stops holding roughly
+ * half the cap in rows: about 16,000 of them. That is still six times the
+ * expensive measured case, which is why it is documented rather than
+ * engineered around. A workload that needs the other half should re-derive
+ * the cap, which is the same obligation {@link CAP_DERIVATION} already
+ * carries.
+ */
+export const CAP_UNIT = "allocated bytes";
+
+/**
  * The workload the two caps above were derived at, carried in every document.
  * They are derived, not universal: a workload an order of magnitude larger
  * would truncate more often and should have them re-derived rather than be

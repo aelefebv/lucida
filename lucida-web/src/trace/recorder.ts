@@ -16,7 +16,7 @@
 import { buildIdentity } from "./buildInfo.ts";
 import { computeCoverage } from "./coverage.ts";
 import { placeServerRows } from "./merge.ts";
-import { CAP_DERIVATION, PER_RUN_CAP_BYTES, RESIDENT_CAP_BYTES } from "./retention.ts";
+import { CAP_DERIVATION, CAP_UNIT, PER_RUN_CAP_BYTES, RESIDENT_CAP_BYTES } from "./retention.ts";
 import { ServerRowTable, type ServerTimingBatch } from "./serverRowTable.ts";
 import type { QuiescenceState } from "./quiescence.ts";
 import { tableSinkFactory, type TraceSink, type TraceSinkFactory } from "./sink.ts";
@@ -118,7 +118,7 @@ export interface TraceRecorderOptions {
  * (ADR 0047) — which is why steady state is retained rather than thrown away:
  * the pan before a stall is often the thing that explains it.
  */
-interface OpenRun {
+interface OpenInterval {
   runId: string;
   /** Null for the unlabelled steady-state interval. */
   cause: RunCause | null;
@@ -142,7 +142,7 @@ interface OpenRun {
   truncation: TruncationRecord | null;
 }
 
-interface ClosedRun {
+interface ClosedInterval {
   header: RunHeader;
   sink: TraceSink;
   serverRows: ServerRowTable;
@@ -163,8 +163,8 @@ export class TraceRecorder {
   private environment: TraceEnvironment | null = null;
   private gpu: GpuIdentity | null = null;
 
-  private open: OpenRun | null = null;
-  private closed: ClosedRun[] = [];
+  private open: OpenInterval | null = null;
+  private closed: ClosedInterval[] = [];
   /** Running sum over {@link closed}, so the resident cap is a comparison, not a walk. */
   private closedBytes = 0;
   private intervalsEvicted = 0;
@@ -303,19 +303,21 @@ export class TraceRecorder {
    * it kept.
    */
   beginChunkRow(src: ChunkRowSource, tier: 0 | 1): number {
-    const run = this.open;
+    const run = this.intervalForRecording();
     if (!run) {
-      this.rowsOutsideRun++;
-      return -1;
-    }
-    if (run.truncation) {
-      run.truncation.rowsUnrecorded++;
+      this.countRefusedRow();
       return -1;
     }
     const index = run.sink.append(src, tier);
     if (index < 0) return -1;
-    this.enforceCaps(run);
     return run.generation * GENERATION_STRIDE + index;
+  }
+
+  /** A row nobody kept is counted either way, so coverage is never overstated. */
+  private countRefusedRow(): void {
+    const truncation = this.open?.truncation;
+    if (truncation) truncation.rowsUnrecorded++;
+    else this.rowsOutsideRun++;
   }
 
   /**
@@ -434,19 +436,16 @@ export class TraceRecorder {
    * keeping it would spend budget on nothing.
    */
   ingestServerBatch(batch: ServerTimingBatch, connectionGeneration: number): void {
-    const run = this.open;
+    const run = this.intervalForRecording();
+    // Dropped but still counted, on whichever side: silently not counting one
+    // side of the join would overstate coverage asymmetrically.
     if (!run) {
-      this.serverRowsOutsideRun += batch.rid.length;
-      return;
-    }
-    // Dropped but still counted: silently not counting one side of the join
-    // would overstate coverage asymmetrically.
-    if (run.truncation) {
-      run.truncation.serverRowsUnrecorded += batch.rid.length;
+      const truncation = this.open?.truncation;
+      if (truncation) truncation.serverRowsUnrecorded += batch.rid.length;
+      else this.serverRowsOutsideRun += batch.rid.length;
       return;
     }
     run.serverRows.ingest(batch, connectionGeneration);
-    this.enforceCaps(run);
   }
 
   /** Stamp a phase boundary as a microsecond offset from run start. */
@@ -487,10 +486,12 @@ export class TraceRecorder {
   commitTick(): void {
     if (!this.tickInProgress) return;
     this.tickInProgress = false;
-    const run = this.open;
-    if (!run) return;
-    if (run.truncation) run.truncation.ticksUnrecorded++;
-    else run.sink.appendTick(this.offsetUs(run, this.now()), this.tickScratch, this.countedPhases);
+    const run = this.intervalForRecording();
+    if (run) {
+      run.sink.appendTick(this.offsetUs(run, this.now()), this.tickScratch, this.countedPhases);
+    } else if (this.open?.truncation) {
+      this.open.truncation.ticksUnrecorded++;
+    }
     // Either way the tallies belong to the interval just ended, not the next
     // one: carrying them forward would publish two intervals' counts as one.
     this.countedPhases.fill(0);
@@ -517,10 +518,9 @@ export class TraceRecorder {
     chunk: ChunkEventSource | null = null,
     tier: 0 | 1 = 0,
   ): void {
-    const run = this.open;
-    if (!run) return;
-    if (run.truncation) {
-      run.truncation.eventsUnrecorded++;
+    const run = this.intervalForRecording();
+    if (!run) {
+      if (this.open?.truncation) this.open.truncation.eventsUnrecorded++;
       return;
     }
     run.sink.appendEvent(this.offsetUs(run, this.now()), kind, reason, chunk, tier);
@@ -542,7 +542,8 @@ export class TraceRecorder {
         perRunCapBytes: PER_RUN_CAP_BYTES,
         residentBytes: this.closedBytes + (this.open ? intervalBytes(this.open) : 0),
         intervalsEvicted: this.intervalsEvicted,
-        derivedAt: CAP_DERIVATION,
+        derivedFrom: CAP_DERIVATION,
+        capUnit: CAP_UNIT,
       },
       instrumentedPhases: [...INSTRUMENTED_PHASES],
       countedPhases: [...COUNTED_PHASES],
@@ -648,7 +649,13 @@ export class TraceRecorder {
   }
 
   /**
-   * The two rungs, in the order they bite. The per-run cap truncates the
+   * The interval a new record belongs in, once the caps have had their say —
+   * or null when there is nowhere to put it.
+   *
+   * Checked before the write rather than after it, so a rotation hands the
+   * caller a live interval instead of a handle into one that just closed.
+   *
+   * The two rungs, in the order they bite. The per-run cap acts on the
    * interval in progress; the resident cap discards completed intervals
    * oldest-first. There is deliberately no third rung: no sampling, no
    * coarsening, no downsample to aggregates. Reaching the per-run cap means
@@ -656,21 +663,40 @@ export class TraceRecorder {
    * pathology better than a quietly coarsened trace that still looks
    * complete (ADR 0049).
    */
-  private enforceCaps(run: OpenRun): void {
+  private intervalForRecording(): OpenInterval | null {
+    const run = this.open;
+    if (!run || run.truncation) return null;
+
     const openBytes = intervalBytes(run);
-    if (!run.truncation && openBytes > PER_RUN_CAP_BYTES) {
-      run.truncation = {
-        reason: "per-run-cap",
-        atUs: this.offsetUs(run, this.now()),
-        capBytes: PER_RUN_CAP_BYTES,
-        rowsRecorded: run.sink.length,
-        rowsUnrecorded: 0,
-        ticksUnrecorded: 0,
-        eventsUnrecorded: 0,
-        serverRowsUnrecorded: 0,
-      };
+    if (openBytes <= PER_RUN_CAP_BYTES) {
+      this.evictToResidentCap(openBytes);
+      return run;
     }
+
+    // A run truncates because the beginning of a run is its diagnostic
+    // payload. Steady state has no privileged start — it is the same kind of
+    // stream the tick and event rings drop the oldest of — so truncating it
+    // would delete the most recent pan, which is the one thing it is retained
+    // for. It hands over to a fresh interval instead, and the old one ages
+    // out under the resident cap like any other completed interval.
+    if (run.cause === null) {
+      this.finishInterval("rotated");
+      this.beginInterval(null);
+      return this.open;
+    }
+
+    run.truncation = {
+      reason: "per-run-cap",
+      atUs: this.offsetUs(run, this.now()),
+      capBytes: PER_RUN_CAP_BYTES,
+      rowsRecorded: run.sink.length,
+      rowsUnrecorded: 0,
+      ticksUnrecorded: 0,
+      eventsUnrecorded: 0,
+      serverRowsUnrecorded: 0,
+    };
     this.evictToResidentCap(openBytes);
+    return null;
   }
 
   /**
@@ -687,7 +713,7 @@ export class TraceRecorder {
     }
   }
 
-  private serialiseInterval(interval: ClosedRun): TraceRun {
+  private serialiseInterval(interval: ClosedInterval): TraceRun {
     const rows = interval.sink.serialise();
     const ticks = interval.sink.serialiseTicks();
     const ticksDropped = interval.sink.ticksDropped;
@@ -716,7 +742,7 @@ export class TraceRecorder {
     };
   }
 
-  private offsetUs(run: OpenRun, atMs: number): number {
+  private offsetUs(run: OpenInterval, atMs: number): number {
     return clampStamp(Math.round((atMs - run.startedAtMs) * 1000));
   }
 
@@ -739,7 +765,7 @@ export class TraceRecorder {
     return bestStart;
   }
 
-  private resolve(handle: number): OpenRun | null {
+  private resolve(handle: number): OpenInterval | null {
     if (handle < 0) return null;
     const run = this.open;
     if (!run) return null;
@@ -754,7 +780,7 @@ export class TraceRecorder {
 }
 
 /** Every tier an interval holds. Allocated bytes, because the cap is on memory. */
-function intervalBytes(interval: { sink: TraceSink; serverRows: ServerRowTable }): number {
+function intervalBytes(interval: Pick<OpenInterval, "sink" | "serverRows">): number {
   return interval.sink.byteLength + interval.serverRows.byteLength;
 }
 

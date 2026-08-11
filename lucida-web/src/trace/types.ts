@@ -176,10 +176,15 @@ export interface RunCause {
 
 /**
  * Why a run closed. Required on every run — a run that never settled is still
- * a run. `run-opened` belongs to the unlabelled steady-state interval alone:
- * it ended because a labelled run began, which is not a settling event.
+ * a run.
+ *
+ * The last two belong to the unlabelled steady-state interval alone.
+ * `run-opened` means a labelled run began, which is not a settling event.
+ * `rotated` means the interval reached the per-run cap: steady state has no
+ * privileged start, so it hands over to a fresh interval rather than
+ * truncating and losing the most recent work.
  */
-export type EndReason = "quiescent" | "timeout" | "explicit" | "run-opened";
+export type EndReason = "quiescent" | "timeout" | "explicit" | "run-opened" | "rotated";
 
 export interface Viewport {
   cssWidth: number;
@@ -651,6 +656,7 @@ export interface TracePointEvent {
  * dropped, which cost detail without hiding elapsed time.
  */
 export const COVERAGE_GAP_KINDS = [
+  "nothing-recorded",
   "unrecorded-prefix",
   "unaccounted-interior",
   "unrecorded-suffix",
@@ -668,7 +674,11 @@ export interface CoverageGap {
   endUs: number | null;
   /** Zero for a stream loss: it cost records, not elapsed time. */
   durationUs: number;
-  /** Records the gap swallowed. Zero for an interval gap, which has no record count. */
+  /**
+   * Records the gap swallowed, across every tier it swallowed them from.
+   * Zero for an interval gap, which has no record count; the per-tier
+   * breakdown for a truncation is on {@link TruncationRecord}.
+   */
   records: number;
   /**
    * Whether the run's bottleneck could be inside this gap. A caveat that only
@@ -760,8 +770,9 @@ export interface RetentionRecord {
   residentBytes: number;
   /** Completed intervals discarded oldest-first to stay under the resident cap. */
   intervalsEvicted: number;
-  /** The workload the caps were derived at. */
-  derivedAt: string;
+  /** The workload the caps were derived from, and the unit they are measured in. */
+  derivedFrom: string;
+  capUnit: string;
 }
 
 export interface TraceDocument {
@@ -782,12 +793,17 @@ export interface TraceDocument {
    * Their counts live on the per-tick samples.
    */
   countedPhases: CountedPhase[];
+  /** Chronological. Interleave with {@link steadyState} on `startedAtEpochMs`. */
   runs: TraceRun[];
   /**
-   * The unlabelled intervals between runs. Recording is continuous, so steady
-   * state is retained under the same cap rather than thrown away — the pan
-   * that preceded a stall is often the thing that explains it. Same shape as
-   * a run; its header carries a null cause.
+   * The unlabelled intervals between runs, chronological. Recording is
+   * continuous, so steady state is retained under the same cap rather than
+   * thrown away — the pan that preceded a stall is often the thing that
+   * explains it. Same shape as a run; its header carries a null cause.
+   *
+   * Kept in its own array rather than mixed into {@link runs} so that a
+   * reader looking for a run cannot accidentally analyse an interval that has
+   * no cause, no settle and no verdict as though it were one.
    */
   steadyState: TraceRun[];
   /**

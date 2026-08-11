@@ -88,11 +88,14 @@ describe("accounted wall clock", () => {
     expect(coverage.unaccountedUs).toBe(0);
   });
 
-  it("reports a run that timed nothing as wholly unaccounted", () => {
+  it("reports a run that timed nothing as wholly unaccounted, and says so in those words", () => {
     const coverage = coverageOf({ wallClockUs: 300 * MS });
 
     expect(coverage.accountedUs).toBe(0);
     expect(coverage.unaccountedUs).toBe(300 * MS);
+    // Not `unrecorded-prefix`, which would read as boot: nothing was measured
+    // at any point, which is different news.
+    expect(kinds(coverage.gaps)).toEqual(["nothing-recorded"]);
   });
 });
 
@@ -166,7 +169,8 @@ describe("truncation", () => {
       startUs: 400 * MS,
       endUs: 1_000 * MS,
       durationUs: 600 * MS,
-      records: 45_412,
+      // Every tier the tail swallowed, not just the rows.
+      records: 45_412 + 3 + 0 + 12,
       couldHideBottleneck: true,
     });
   });
