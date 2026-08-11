@@ -838,7 +838,6 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
               <div className="debug-title">Members</div>
               <div>Visible: {snap.visibleMembers} / {snap.totalMembers}</div>
               <div>Channels: {snap.activeChannels}</div>
-              <div>Cache: {snap.planCacheHits}h / {snap.planCacheMisses}m</div>
             </div>
 
             {snap.memberStats.length > 0 && (() => {
@@ -1204,19 +1203,6 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
           <>
             {snap.orch ? (
               <>
-                {/* Mixed levels warning */}
-                {snap.orch.hasMixedLevels && (
-                  <div className="debug-section" style={{ background: "#4a1111" }}>
-                    <div className="debug-warn" style={{ fontSize: 12 }}>
-                      MIXED LEVELS IN needed[]
-                    </div>
-                    <div style={{ fontSize: 10, color: "#f88" }}>
-                      Upload path uses needed[0].level for atlas config.
-                      Chunks at other levels will render at wrong scale or be dropped.
-                    </div>
-                  </div>
-                )}
-
                 {/* Cold state — epoch fast-path stats, rebuild rate,
                     per-epoch cause attribution, and rebuild timing. The
                     pulse next to the title is a visceral activity
@@ -1327,7 +1313,6 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                         t.skippedAlreadySent > 0 && `alreadySent:${t.skippedAlreadySent}`,
                         t.skippedNoMeta > 0 && `noMeta:${t.skippedNoMeta}`,
                       ].filter(Boolean) as string[];
-                      const resendUploads = t.resendChunkUploads + t.resendProxyUploads;
                       const bytePct = t.bytesBudget > 0
                         ? Math.min(100, Math.round((t.bytesUploaded / t.bytesBudget) * 100))
                         : 0;
@@ -1362,20 +1347,6 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                               background: t.budgetExhausted ? "#f44" : "#4f4",
                             }} />
                           </div>
-                          {(resendUploads > 0
-                            || t.resendChunksConsidered > 0
-                            || t.resendProxiesConsidered > 0) && (
-                            <div style={{ marginTop: 4, fontSize: 11 }}>
-                              <span style={{ color: "#888" }}>resend: </span>
-                              <span style={{ color: resendUploads > 0 ? "#fb4" : "#666" }}>
-                                {resendUploads} uploaded
-                              </span>{" "}
-                              <span style={{ color: "#888" }}>
-                                ({t.resendChunkUploads}c / {t.resendProxyUploads}p,{" "}
-                                {t.resendChunksConsidered + t.resendProxiesConsidered} considered)
-                              </span>
-                            </div>
-                          )}
                         </>
                       );
                     })()}
@@ -1423,7 +1394,6 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                       const r = snap.upload.rolling;
                       const fmtRatio = (n: number) =>
                         Number.isNaN(n) ? "—" : `${(n * 100).toFixed(0)}%`;
-                      const resendBad = !Number.isNaN(r.resendRatio) && r.resendRatio > 0.5;
                       const filterBad = !Number.isNaN(r.filterRatio) && r.filterRatio > 0.5;
                       return (
                         <>
@@ -1434,10 +1404,6 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                             {r.chunkUploadsPerSec} chunks/s · {r.proxyUploadsPerSec} proxies/s
                           </div>
                           <div>
-                            <span style={{ color: resendBad ? "#fb4" : "#888" }}>
-                              resend: {fmtRatio(r.resendRatio)}
-                            </span>
-                            {" · "}
                             <span style={{ color: filterBad ? "#fb4" : "#888" }}>
                               filtered: {fmtRatio(r.filterRatio)}
                             </span>
@@ -1564,33 +1530,6 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                       ))}
                   </div>
                 </div>
-
-                {/* Per-member adapter output */}
-                {snap.orch.members.length > 0 && (
-                  <div className="debug-section">
-                    <div className="debug-title">Members (adapter output, {snap.orch.membersTotal} total)</div>
-                    <div className="debug-member-list">
-                      {snap.orch.members.slice(0, 10).map((m, i) => (
-                        <div key={`${m.imageId}-${i}`} className="debug-member-row" style={{
-                          background: m.mixedLevels ? "#4a1111" : undefined,
-                        }}>
-                          <span className="debug-member-id" title={m.imageId}>
-                            {m.imageId.length > 14 ? "..." + m.imageId.slice(-12) : m.imageId}
-                          </span>
-                          <span>uploadL{m.uploadLevel ?? "?"}</span>
-                          <span>n:{m.neededCount} p:{m.prefetchCount}</span>
-                          <span title={`Levels: ${JSON.stringify(m.chunksByLevel)}`}>
-                            {Object.entries(m.chunksByLevel).map(([l, c]) => `L${l}:${c}`).join(" ")}
-                          </span>
-                          {m.mixedLevels && <span style={{ color: "#f44" }}>MIX</span>}
-                        </div>
-                      ))}
-                      {snap.orch.membersTotal > 10 && (
-                        <div className="debug-more">+{snap.orch.membersTotal - 10} more</div>
-                      )}
-                    </div>
-                  </div>
-                )}
 
                 {/* Top requests */}
                 {snap.orch.topRequests.length > 0 && (

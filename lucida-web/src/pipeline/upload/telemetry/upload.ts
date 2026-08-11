@@ -1,7 +1,7 @@
 /**
  * Upload-phase telemetry. Owns rolling 1s ring buffers (events +
  * per-tick aggregates), a bounded size sketch, cumulative counters, and
- * three sustained-anomaly detectors. `publish` aggregates, derives
+ * two sustained-anomaly detectors. `publish` aggregates, derives
  * `UploadRollingStats`, fires anomaly logs, and writes to `debugStats.upload`.
  */
 
@@ -16,7 +16,6 @@ import {
   UPLOAD_FILTER_RATIO_THRESHOLD,
   UPLOAD_LOG_RATE_LIMIT_MS,
   UPLOAD_LOG_SUSTAIN_MS,
-  UPLOAD_RESEND_RATIO_THRESHOLD,
   UPLOAD_SIZE_SAMPLES,
   UPLOAD_WINDOW_MS,
 } from "../constants.ts";
@@ -44,7 +43,6 @@ interface TickWindowEntry {
 interface EventEntry {
   at: number;
   bytes: number;
-  isResend: boolean;
   kind: "chunk" | "proxy";
 }
 
@@ -68,12 +66,6 @@ export class UploadTelemetry {
     log: (payload) =>
       debugLog("orch", "upload.budget_exhausted_sustained", payload as Record<string, unknown>),
   });
-  private readonly resendStormDetector = new SustainedCondition({
-    sustainMs: UPLOAD_LOG_SUSTAIN_MS,
-    rateLimitMs: UPLOAD_LOG_RATE_LIMIT_MS,
-    log: (payload) =>
-      debugLog("orch", "upload.resend_storm", payload as Record<string, unknown>),
-  });
   private readonly drainWasteDetector = new SustainedCondition({
     sustainMs: UPLOAD_LOG_SUSTAIN_MS,
     rateLimitMs: UPLOAD_LOG_RATE_LIMIT_MS,
@@ -84,10 +76,9 @@ export class UploadTelemetry {
   recordEvent(
     now: number,
     bytes: number,
-    isResend: boolean,
     kind: "chunk" | "proxy" = "chunk",
   ): void {
-    this.uploadEvents.push({ at: now, bytes, isResend, kind });
+    this.uploadEvents.push({ at: now, bytes, kind });
     this.uploadSizeSamples[this.uploadSizeCursor] = bytes;
     this.uploadSizeCursor = (this.uploadSizeCursor + 1) % UPLOAD_SIZE_SAMPLES;
     if (this.uploadSizeCount < UPLOAD_SIZE_SAMPLES) this.uploadSizeCount += 1;
@@ -128,13 +119,11 @@ export class UploadTelemetry {
     let uploadsInWindow = 0;
     let chunkUploadsInWindow = 0;
     let proxyUploadsInWindow = 0;
-    let resendUploads = 0;
     this.uploadEvents.forEach((e) => {
       bytesInWindow += e.bytes;
       uploadsInWindow += 1;
       if (e.kind === "proxy") proxyUploadsInWindow += 1;
       else chunkUploadsInWindow += 1;
-      if (e.isResend) resendUploads += 1;
     });
 
     let drainedInWindow = 0;
@@ -187,7 +176,6 @@ export class UploadTelemetry {
       uploadsPerSec: uploadsInWindow,
       chunkUploadsPerSec: chunkUploadsInWindow,
       proxyUploadsPerSec: proxyUploadsInWindow,
-      resendRatio: uploadsInWindow > 0 ? resendUploads / uploadsInWindow : NaN,
       filterRatio:
         drainedUploadBoundInWindow > 0
           ? skippedUploadBoundInWindow / drainedUploadBoundInWindow
@@ -218,9 +206,7 @@ export class UploadTelemetry {
   /**
    * Detectors:
    * 1. `upload.budget_exhausted_sustained` — CPU→GPU pipe saturated.
-   * 2. `upload.resend_storm` — worker evicting faster than decodes fill
-   *    (pool capacity vs working set mismatch).
-   * 3. `upload.drain_waste` — decoded chunks unwanted by GPU
+   * 2. `upload.drain_waste` — decoded chunks unwanted by GPU
    *    (planning / wanted-set sync issue).
    */
   private runAnomalyDetectors(
@@ -250,15 +236,6 @@ export class UploadTelemetry {
         bytesBudget: stats.bytesBudget,
       }),
     );
-
-    const resendCondition =
-      !Number.isNaN(rolling.resendRatio) &&
-      rolling.resendRatio > UPLOAD_RESEND_RATIO_THRESHOLD;
-    this.resendStormDetector.tick(now, resendCondition, (sustainedMs) => ({
-      resendRatio: rolling.resendRatio,
-      uploadsPerSec: rolling.uploadsPerSec,
-      sustainedMs: Math.round(sustainedMs),
-    }));
 
     const drainCondition =
       !Number.isNaN(rolling.filterRatio) &&

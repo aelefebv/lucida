@@ -63,7 +63,8 @@ export function buildPlanningDatasetDebug(
   cacheSnap: CacheStateSnapshot,
   config: PlanningConfig,
 ): PlanningDatasetDebug {
-  const lanes = { minimap: 0, detail: 0, coarse: 0, proxy: 0, prefetch: 0, overview: 0 };
+  const lanes = { minimap: 0, detail: 0, coarse: 0, prefetch: 0, overview: 0 };
+  // Local only: feeds the per-LOD `planned` column below.
   const chunksByLevel: Record<number, number> = {};
   for (const r of result.requests) {
     lanes[r.lane]++;
@@ -210,7 +211,6 @@ export function buildPlanningDatasetDebug(
     lanes,
     proxyCount: result.proxyRequests.length,
     totalChunks: result.requests.length,
-    chunksByLevel,
     lodBreakdown,
     culling: result.stats.culling,
     catalogDegradations: result.stats.catalogDegradations,
