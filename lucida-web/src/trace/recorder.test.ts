@@ -58,13 +58,51 @@ function makeRecorder(overrides: Partial<ConstructorParameters<typeof TraceRecor
 }
 
 describe("TraceRecorder run lifecycle", () => {
-  it("records nothing into a run until one is open, but counts what it saw", () => {
+  it("keeps work seen before the first run as an unlabelled steady-state interval", () => {
     const { recorder } = makeRecorder();
+    expect(recorder.beginChunkRow(CHUNK, 0)).toBeGreaterThanOrEqual(0);
+
+    const doc = recorder.exportDocument();
+    expect(doc.runs).toHaveLength(0);
+    expect(doc.steadyState).toHaveLength(1);
+    expect(doc.steadyState[0].header.cause).toBeNull();
+    expect(doc.steadyState[0].rows).toHaveLength(1);
+    expect(doc.rowsOutsideRun).toBe(0);
+  });
+
+  it("counts, without keeping, what it saw with no page to say what conditions applied", () => {
+    const { recorder } = makeRecorder();
+    recorder.setEnvironment(null);
     expect(recorder.beginChunkRow(CHUNK, 0)).toBe(-1);
 
     const doc = recorder.exportDocument();
     expect(doc.runs).toHaveLength(0);
+    expect(doc.steadyState).toHaveLength(0);
     expect(doc.rowsOutsideRun).toBe(1);
+  });
+
+  it("hands the steady state before a run over as its own interval", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.beginChunkRow(CHUNK, 0);
+    advance(200);
+    recorder.openRun(OPEN_CAUSE);
+    recorder.beginChunkRow(CHUNK, 0);
+    recorder.closeRun("explicit");
+
+    const doc = recorder.exportDocument();
+    expect(doc.steadyState.map(interval => interval.header.endReason)).toEqual(["run-opened"]);
+    expect(doc.runs).toHaveLength(1);
+    expect(doc.runs[0].rows).toHaveLength(1);
+  });
+
+  it("discards an unlabelled interval that recorded nothing", () => {
+    const { recorder } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    recorder.closeRun("explicit");
+
+    const doc = recorder.exportDocument();
+    expect(doc.runs).toHaveLength(1);
+    expect(doc.steadyState).toEqual([]);
   });
 
   it("does not open a run before the page can say what conditions it ran under", () => {
@@ -378,13 +416,24 @@ describe("TraceRecorder server rows", () => {
     expect(run.serverRowsDropped).toBe(2);
   });
 
-  it("counts server rows that arrive between runs instead of keeping them", () => {
+  it("keeps server rows that arrive between runs in the steady-state interval", () => {
     const { recorder } = makeRecorder();
     recorder.ingestServerBatch(BATCH, 1);
     const doc = recorder.exportDocument();
 
-    expect(doc.serverRowsOutsideRun).toBe(1);
+    expect(doc.serverRowsOutsideRun).toBe(0);
     expect(doc.runs).toHaveLength(0);
+    expect(doc.steadyState[0].serverRows).toHaveLength(1);
+  });
+
+  it("counts server rows that arrive with no interval to put them in", () => {
+    const { recorder } = makeRecorder();
+    recorder.setEnvironment(null);
+    recorder.ingestServerBatch(BATCH, 1);
+    const doc = recorder.exportDocument();
+
+    expect(doc.serverRowsOutsideRun).toBe(1);
+    expect(doc.steadyState).toHaveLength(0);
   });
 
   it("gives every coalesced row the same label, so the join is a group-by", () => {
