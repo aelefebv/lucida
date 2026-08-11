@@ -39,13 +39,6 @@ export class ColdStateTelemetry {
   private coldStateEvents: ColdStateEvent[] = [];
   private coldStateRebuildCount = 0;
   private coldStateHitCount = 0;
-  private coldStateCauseTotal: ColdStateCauseCounts = {
-    content: 0,
-    layout: 0,
-    view: 0,
-    selection: 0,
-    asset: 0,
-  };
   /** FIFO sample buffer for p50/p95 rebuild duration. */
   private coldStateRebuildDurations: number[] = [];
   private coldStateLastRebuildAt = 0;
@@ -78,7 +71,6 @@ export class ColdStateTelemetry {
     durationMs: number,
   ): void {
     this.coldStateRebuildCount++;
-    for (const c of causes) this.coldStateCauseTotal[c]++;
     this.coldStateLastRebuildAt = now;
     this.coldStateLastRebuildMs = durationMs;
     this.coldStateRebuildDurations.push(durationMs);
@@ -169,7 +161,6 @@ export class ColdStateTelemetry {
       rebuildsLastSecond: rebuilds,
       hitsLastSecond: hits,
       causeLastSecond,
-      causeTotal: { ...this.coldStateCauseTotal },
       lastRebuildMs: this.coldStateLastRebuildMs,
       rebuildP50Ms: p50,
       rebuildP95Ms: p95,

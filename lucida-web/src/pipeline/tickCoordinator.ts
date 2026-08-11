@@ -1186,50 +1186,17 @@ export class TickCoordinator {
           groupAsProxy: 0,
           tilesProxyFallback: 0,
           tilesDetail: 0,
-          invisible: 0,
         },
         laneCount: { detail: 0, coarse: 0, prefetch: 0, overview: 0 },
         chunksByLevel: {},
         topRequests: [],
-        members: [],
-        membersTotal: 0,
-        hasMixedLevels: false,
         epochCacheHit: false,
-        proxyResidency: {
-          ...proxyResidency.stats,
-          topDecisions: proxyResidency.decisions.slice(0, 20).map((decision) => ({
-            datasetId: decision.datasetId,
-            groupId: decision.groupId,
-            representation: decision.representation,
-            proxyCount: decision.proxyKeys.length,
-            bytes: decision.bytes,
-            reason: decision.reason,
-          })),
-        },
+        proxyResidency: { ...proxyResidency.stats },
         // Replaced after `coldStateTelemetry.recordRebuild` below.
         coldState: this.uploader.coldStateTelemetry.publish(),
         visibleRegion: null,
         entityDiag: [],
       };
-
-      // Aggregate from member roster. Rows are capped (wide collections
-      // have tens of thousands of members); `membersTotal` carries the
-      // full count for the panel's "+N more" line.
-      for (const [_key, entries] of memberRoster) {
-        for (const m of entries) {
-          orchDebug.membersTotal++;
-          if (orchDebug.members.length >= DEBUG_MEMBER_ROW_CAP) continue;
-          orchDebug.members.push({
-            imageId: m.imageId,
-            position: m.position,
-            neededCount: 0,
-            prefetchCount: 0,
-            uploadLevel: undefined,
-            chunksByLevel: {},
-            mixedLevels: false,
-          });
-        }
-      }
 
       // Aggregate per-dataset active sets from `previousActiveSet`
       // (the active set produced by the most recent `plan()` call).
@@ -1243,12 +1210,12 @@ export class TickCoordinator {
           orchDebug.activeSetTotal++;
           if (entry.kind === "group-as-proxy") {
             modeCounts.groupAsProxy++;
-          } else if (entry.kind === "invisible") {
-            modeCounts.invisible++;
-          } else if (entry.mode === "tiles-with-proxy-fallback") {
-            modeCounts.tilesProxyFallback++;
-          } else {
-            modeCounts.tilesDetail++;
+          } else if (entry.kind === "tile") {
+            if (entry.mode === "tiles-with-proxy-fallback") {
+              modeCounts.tilesProxyFallback++;
+            } else {
+              modeCounts.tilesDetail++;
+            }
           }
           if (orchDebug.activeSet.length >= DEBUG_MEMBER_ROW_CAP) continue;
           if (entry.kind === "group-as-proxy") {
@@ -1256,7 +1223,6 @@ export class TickCoordinator {
               entityId: entry.entityId,
               mode: "group-as-proxy",
               targetLod: 0,
-              coarsestDetailLod: 0,
               detailOwnedLodRange: [0, 0],
             });
           } else if (entry.kind === "tile") {
@@ -1264,7 +1230,6 @@ export class TickCoordinator {
               entityId: entry.entityId,
               mode: entry.mode,
               targetLod: entry.targetLod,
-              coarsestDetailLod: entry.coarsestDetailLod,
               detailOwnedLodRange: entry.detailOwnedLodRange,
             });
           } else {
@@ -1273,7 +1238,6 @@ export class TickCoordinator {
               entityId: entry.entityId,
               mode: "invisible",
               targetLod: entry.coarsestLod,
-              coarsestDetailLod: entry.coarsestLod,
               detailOwnedLodRange: [entry.coarsestLod, entry.coarsestLod],
             });
           }
@@ -1290,9 +1254,7 @@ export class TickCoordinator {
           orchDebug.chunksByLevel[r.level] = (orchDebug.chunksByLevel[r.level] ?? 0) + 1;
         }
         orchDebug.topRequests = this._lastRequests.slice(0, 20).map(r => ({
-          entityId: r.entityId,
           level: r.level,
-          t: r.t, c: r.c, z: r.z, y: r.y, x: r.x,
           lane: r.lane,
           priority: r.priority,
           chunkKey: r.chunkKey,

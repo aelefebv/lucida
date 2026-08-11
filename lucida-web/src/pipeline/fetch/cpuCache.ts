@@ -850,8 +850,6 @@ export class CpuCache {
       overviewBudget: this.config.overviewBudgetBytes,
       proxyBytes: this.proxyStore.bytes,
       proxyBudget: this.config.proxyBudgetBytes,
-      maxConcurrentFetches: this.config.maxConcurrentFetches,
-      maxBytesInFlight: this.config.maxBytesInFlight,
       inFlightCount: this.chunkScheduler.inFlightSize,
       inFlightBytes: this.chunkScheduler.inFlightBytes,
       inFlightProxyCount: this.proxyScheduler.inFlightSize,
@@ -883,6 +881,11 @@ export class CpuCache {
         coarseBytes: this.overviewStore.budgetBytes,
       },
     };
+  }
+
+  /** Live config, for surfaces that edit it (Dev controls) — read-only. */
+  getConfig(): Readonly<CpuCacheConfig> {
+    return this.config;
   }
 
   updateConfig(partial: Partial<CpuCacheConfig>): void {

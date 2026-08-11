@@ -33,9 +33,6 @@ export const UPLOAD_SIZE_SAMPLES = 120;
 /** Consecutive ticks of `budgetExhausted=true` before logging. */
 export const UPLOAD_BUDGET_EXHAUSTED_STREAK_THRESHOLD = 3;
 
-/** Resend ratio above which `upload.resend_storm` arms (atlas thrashing). */
-export const UPLOAD_RESEND_RATIO_THRESHOLD = 0.5;
-
 /** Filter ratio above which `upload.drain_waste` arms (decoded chunks unwanted). */
 export const UPLOAD_FILTER_RATIO_THRESHOLD = 0.5;
 

@@ -1910,14 +1910,10 @@ describe("debug stat row bounds", () => {
       expect(debugStats.totalMembers).toBe(N);
 
       const orchDebug = debugStats.orch as {
-        members: unknown[];
-        membersTotal: number;
         activeSet: unknown[];
         activeSetTotal: number;
       } | null;
       expect(orchDebug).not.toBeNull();
-      expect(orchDebug!.members.length).toBeLessThanOrEqual(DEBUG_MEMBER_ROW_CAP);
-      expect(orchDebug!.membersTotal).toBe(N);
       expect(orchDebug!.activeSet.length).toBeLessThanOrEqual(DEBUG_MEMBER_ROW_CAP);
       expect(orchDebug!.activeSetTotal).toBe(N);
     } finally {

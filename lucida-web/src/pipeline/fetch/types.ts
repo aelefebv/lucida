@@ -208,8 +208,6 @@ export interface CacheTelemetry {
   /** Proxy tier bytes / budget. */
   proxyBytes: number;
   proxyBudget: number;
-  maxConcurrentFetches: number;
-  maxBytesInFlight: number;
   inFlightCount: number;
   inFlightBytes: number;
   /** In-flight proxy fetches (count, estimated bytes). */
