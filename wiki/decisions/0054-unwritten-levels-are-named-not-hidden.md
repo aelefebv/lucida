@@ -3,7 +3,7 @@ type: Decision
 title: "Unwritten levels are named, not hidden"
 description: "A declared pyramid level with no chunks written is detected by a relative origin-chunk probe, kept in the pyramid, and reported as a warning that degrades dataset health."
 tags: [lucida, decision]
-source_path: wiki/decisions/0053-unwritten-levels-are-named-not-hidden.md
+source_path: wiki/decisions/0054-unwritten-levels-are-named-not-hidden.md
 created: 2026-08-10
 modified: 2026-08-10
 ---

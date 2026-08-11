@@ -7,6 +7,7 @@ pub mod import_types;
 pub mod ingest;
 pub mod layout;
 pub(crate) mod parse;
+pub mod source_limiter;
 pub(crate) mod unwritten;
 
 /// The canonical 5D axis names in order.
