@@ -226,6 +226,69 @@ describe("TraceRecorder rows", () => {
   });
 });
 
+describe("TraceRecorder server rows", () => {
+  const BATCH = {
+    dropped: 2,
+    rid: [5],
+    family: ["chunk" as const],
+    dispatch_offset_us: [100],
+    duration_us: [2_900],
+    outcome: ["delivered" as const],
+  };
+
+  it("places a server row inside the bracket the browser measured", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    const row = recorder.beginChunkRow(CHUNK, 0);
+    recorder.labelRow(row, { rid: 5, connectionGeneration: 2 });
+    recorder.stamp(row, Boundary.WireStart);
+    advance(8);
+    recorder.stamp(row, Boundary.DecodeStart);
+    recorder.finishRow(row, RowOutcome.Complete);
+    recorder.ingestServerBatch(BATCH, 2);
+    recorder.closeRun("explicit");
+
+    const run = recorder.exportDocument().runs[0];
+    expect(run.rows[0].rid).toBe(5);
+    expect(run.rows[0].connectionGeneration).toBe(2);
+    expect(run.serverRows).toHaveLength(1);
+    // 8 ms bracket, 3 ms of server: the rest is network and socket queue and
+    // is named rather than folded into either side.
+    expect(run.serverRows[0].placement?.gapUs).toBe(5_000);
+    expect(run.serverRowsDropped).toBe(2);
+  });
+
+  it("counts server rows that arrive between runs instead of keeping them", () => {
+    const { recorder } = makeRecorder();
+    recorder.ingestServerBatch(BATCH, 1);
+    const doc = recorder.exportDocument();
+
+    expect(doc.serverRowsOutsideRun).toBe(1);
+    expect(doc.runs).toHaveLength(0);
+  });
+
+  it("gives every coalesced row the same label, so the join is a group-by", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    const label = { rid: 5, connectionGeneration: 2 };
+    const first = recorder.beginChunkRow(CHUNK, 0);
+    const second = recorder.beginChunkRow(CHUNK, 1);
+    for (const row of [first, second]) {
+      recorder.labelRow(row, label);
+      recorder.stamp(row, Boundary.WireStart);
+    }
+    advance(8);
+    for (const row of [first, second]) recorder.stamp(row, Boundary.DecodeStart);
+    recorder.ingestServerBatch(BATCH, 2);
+    recorder.closeRun("explicit");
+
+    const run = recorder.exportDocument().runs[0];
+    expect(run.rows.map(r => r.rid)).toEqual([5, 5]);
+    expect(run.serverRows).toHaveLength(1);
+    expect(run.serverRows[0].placement).not.toBeNull();
+  });
+});
+
 describe("TraceRecorder sink injection", () => {
   it("keeps no rows with a no-op sink while the call sites stay live", () => {
     const { recorder } = makeRecorder({ sinkFactory: noopRowSinkFactory });

@@ -19,7 +19,7 @@ use lucida_content::{
 };
 use lucida_proxy::{ProxyKind, ProxySourceData, ProxySpec, SourceError, TileVolume};
 use lucida_store::cache::CachedStore;
-use lucida_store::source_limiter::ReaderId;
+use lucida_store::source_limiter::{ReaderId, RequestLabel};
 use object_store::path::Path;
 
 use crate::binding::ChunkResolver;
@@ -406,7 +406,11 @@ pub(crate) async fn fetch_volume_region(
                 // background population, however many clients are waiting on
                 // it.
                 let storage_bytes = match store
-                    .get_bytes(&Path::from(object_path.as_str()), ReaderId::UNATTRIBUTED)
+                    .get_bytes(
+                        &Path::from(object_path.as_str()),
+                        ReaderId::UNATTRIBUTED,
+                        RequestLabel::UNATTRIBUTED,
+                    )
                     .await
                 {
                     Ok(bytes) => bytes,
