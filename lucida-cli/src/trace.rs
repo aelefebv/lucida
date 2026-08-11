@@ -45,12 +45,6 @@ pub const DEFAULT_DEVICE_PIXEL_RATIO: f64 = 2.0;
 /// Only used when the page is too old to publish one; the page's own value wins.
 pub const DEFAULT_QUIESCENCE_HOLD_MS: f64 = 500.0;
 
-const QUIESCENT_PROBE: &str = "!!(window.lucidaTrace && window.lucidaTrace.quiescence \
-     && window.lucidaTrace.quiescence.quiescent)";
-
-const QUIESCENCE_HOLD_PROBE: &str =
-    "window.lucidaTrace ? window.lucidaTrace.quiescenceHoldMs : null";
-
 const CHROME_TRACE_EXPORT_EXPRESSION: &str =
     "window.lucidaTrace ? window.lucidaTrace.exportChromeTrace() : null";
 
@@ -60,27 +54,65 @@ const CHROME_TRACE_EXPORT_EXPRESSION: &str =
 const CLOSE_AS_TIMEOUT: &str =
     "window.lucidaTrace ? (window.lucidaTrace.closeRun('timeout'), true) : false";
 
+/// Whether a labelled run is open, and how many have closed. Read every poll,
+/// and never by exporting — an export closes the run being asked about.
+const RUN_STATE_PROBE: &str =
+    "window.lucidaTrace ? JSON.stringify(window.lucidaTrace.runState) : null";
+
 /// One evaluation for the whole artifact: the merged document, the diagnostic
-/// derived from it and both renderings of that diagnostic. Taking them together
-/// keeps them describing one run — a second round trip would export again after
-/// the page had moved on.
+/// derived from it, and every rendering of that diagnostic anyone can later
+/// ask for. Taking them together keeps them describing one run — a second round
+/// trip would export again after the page had moved on — and taking the deeper
+/// depths *now* is the only chance to: the browser that can render them is dead
+/// by the time the file is read.
 const RUN_EXPORT_EXPRESSION: &str = r#"(() => {
   const seam = window.lucidaTrace;
   if (!seam) return null;
+  // The run the driver waited for, named before the export closes an interval
+  // of its own — "the newest run" would be that empty interval.
+  const waited = window.__lucidaTraceRunId || seam.runState.lastConcludedRunId;
   const trace = seam.exportTrace();
   const runs = trace.runs || [];
-  const runId = runs.length > 0 ? runs[runs.length - 1].header.runId : undefined;
+  const run =
+    (waited ? runs.find(r => r.header.runId === waited) : null) ||
+    (runs.length > 0 ? runs[runs.length - 1] : null);
+  const runId = run ? run.header.runId : null;
+  const diagnostic = runId ? seam.diagnose(runId) : null;
+  const perPhase = {};
+  if (runId && diagnostic) {
+    for (const phase of diagnostic.phases || []) {
+      perPhase[phase.id] = seam.diagnoseText(runId, { depth: 'phase', phase: phase.id });
+    }
+  }
   return JSON.stringify({
     schemaVersion: seam.schemaVersion,
-    runId: runId || null,
+    runId,
     quiescenceHoldMs: seam.quiescenceHoldMs,
-    endReason: runId ? runs[runs.length - 1].header.endReason : null,
-    diagnostic: runId ? seam.diagnose(runId) : null,
+    endReason: run ? run.header.endReason : null,
+    diagnostic,
     summary: runId ? seam.diagnoseText(runId) : null,
     phases: runId ? seam.diagnoseText(runId, { depth: 'phases' }) : null,
+    perPhase,
     trace
   });
 })()"#;
+
+/// The same export with the run's Perfetto projection alongside it, composed
+/// rather than written out twice. Only for a caller who asked for the raw-span
+/// file: the projection is megabytes nobody else should pay to move. The
+/// projection is taken after the export has closed the run, so both describe
+/// the same closed run.
+fn run_export_expression(with_chrome_trace: bool) -> String {
+    if !with_chrome_trace {
+        return RUN_EXPORT_EXPRESSION.to_string();
+    }
+    format!(
+        "(() => {{ const inner = {RUN_EXPORT_EXPRESSION}; if (inner === null) return null; \
+         const parsed = JSON.parse(inner); \
+         parsed.chromeTrace = window.lucidaTrace.exportChromeTrace(); \
+         return JSON.stringify(parsed); }})()"
+    )
+}
 
 /// The window the run was driven in, recorded because "cold open of dataset X"
 /// is not a reproducible workload without it.
@@ -165,6 +197,11 @@ pub struct TraceRunHeader {
 pub struct TraceRenderings {
     pub summary: String,
     pub phases: String,
+    /// One reading per phase, keyed by phase id — the "shape behind X" depth
+    /// the default rendering names. Taken at export because the renderer lives
+    /// on a page that no longer exists when the file is read.
+    #[serde(default)]
+    pub per_phase: std::collections::BTreeMap<String, String>,
 }
 
 /// The artifact. The driver kills its browser at teardown, taking the resident
@@ -192,6 +229,11 @@ struct SeamExport {
     diagnostic: Option<Value>,
     summary: Option<String>,
     phases: Option<String>,
+    #[serde(default)]
+    per_phase: std::collections::BTreeMap<String, String>,
+    /// Present only when the caller asked for the raw-span file.
+    #[serde(default)]
+    chrome_trace: Option<String>,
     trace: Value,
 }
 
@@ -261,17 +303,18 @@ pub fn summarise_server_warmth(dataset_url: &str, health: &[DatasetSourceHealth]
 // Where a run lands
 // ---------------------------------------------------------------------------
 
-/// The directory runs are written to when the caller does not name a file.
-/// Beside the config rather than in the working directory: the follow-up
-/// commands take a run id, and a run id has to resolve from anywhere.
-pub fn default_trace_dir(config_path: &Path) -> PathBuf {
-    if let Some(dir) = std::env::var_os("LUCIDA_TRACE_DIR") {
-        return PathBuf::from(dir);
+/// Where runs land: what the caller asked for, or beside the config.
+///
+/// Beside the config rather than in the working directory, because the
+/// follow-up commands take a run id and a run id has to resolve from anywhere.
+pub fn resolve_trace_dir(asked_for: Option<&Path>, config_path: &Path) -> PathBuf {
+    match asked_for {
+        Some(dir) => dir.to_path_buf(),
+        None => config_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("traces"),
     }
-    config_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("traces")
 }
 
 /// A run's file, named by the id the default rendering prints.
@@ -377,88 +420,23 @@ pub fn render_show(file: &TraceRunFile, depth: &ShowDepth) -> String {
     match depth {
         ShowDepth::Summary => file.renderings.summary.clone(),
         ShowDepth::Phases => file.renderings.phases.clone(),
-        ShowDepth::Phase(id) => render_one_phase(file, id),
+        ShowDepth::Phase(id) => file
+            .renderings
+            .per_phase
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| {
+                format!(
+                    "phase {id} is not in this run; the run carries: {}",
+                    file.renderings
+                        .per_phase
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }),
     }
-}
-
-fn render_one_phase(file: &TraceRunFile, id: &str) -> String {
-    let mut out = Vec::new();
-    let phase = file
-        .diagnostic
-        .get("phases")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .find(|phase| phase.get("id").and_then(Value::as_str) == Some(id));
-
-    match phase {
-        None => out.push(format!("phase {id} is not in this run")),
-        Some(phase) => {
-            out.push(format!(
-                "phase     {id} ({})",
-                phase
-                    .get("class")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unclassed")
-            ));
-            out.push(format!(
-                "          n={} p50 {} ms p95 {} ms max {} ms total {} ms {}x concurrent",
-                number(phase, "n"),
-                number(phase, "p50Ms"),
-                number(phase, "p95Ms"),
-                number(phase, "maxMs"),
-                number(phase, "totalMs"),
-                number(phase, "concurrencyFactor"),
-            ));
-        }
-    }
-
-    let findings: Vec<&Value> = file
-        .diagnostic
-        .get("findings")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|finding| finding.get("subject").and_then(Value::as_str) == Some(id))
-        .collect();
-    if findings.is_empty() {
-        out.push("findings  none against this phase".to_string());
-    } else {
-        for finding in findings {
-            out.push(format!(
-                "finding   {} [{}] — {}",
-                finding
-                    .get("severity")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown"),
-                finding
-                    .get("rule")
-                    .and_then(Value::as_str)
-                    .unwrap_or("no rule"),
-                finding
-                    .get("threshold")
-                    .and_then(|threshold| threshold.get("why"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("no rationale"),
-            ));
-            if let Some(why) = finding
-                .get("attribution")
-                .and_then(|attribution| attribution.get("why"))
-                .and_then(Value::as_str)
-            {
-                out.push(format!("          why: {why}"));
-            }
-        }
-    }
-    out.push("raw spans are never inlined at any depth; use lucida trace perfetto".to_string());
-    out.join("\n")
-}
-
-fn number(value: &Value, key: &str) -> String {
-    value
-        .get(key)
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "?".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -477,29 +455,52 @@ pub async fn drive_run(
     viewport: Viewport,
     wait: Duration,
     facts: &DriverFacts,
+    perfetto_path: Option<&str>,
 ) -> Result<TraceRunFile, CliError> {
+    // Both artifacts come out of one drive when they are both wanted. The
+    // default rendering points at Perfetto for raw spans, and a second drive
+    // would send the reader to a different run than the one they were reading.
+    let export_expression = run_export_expression(perfetto_path.is_some());
+    let json = drive_and_export(url, token, viewport, wait, &export_expression).await?;
+    let export: SeamExport = serde_json::from_str(&json).map_err(|error| {
+        CliError::new(
+            ErrorKind::Protocol,
+            format!("the page returned a trace this CLI cannot read: {error}"),
+        )
+    })?;
+    if let (Some(path), Some(projection)) = (perfetto_path, export.chrome_trace.as_deref()) {
+        write_beside_its_parents(Path::new(path), projection.as_bytes()).await?;
+    }
+    Ok(assemble_run_file(export, facts))
+}
+
+/// Drive one run and hand back whatever `export` evaluated to.
+///
+/// The two exports — the document and its Perfetto projection — differ only in
+/// that expression, so the launch, the settle wait, the timeout close and the
+/// teardown live here once. Readiness is observed rather than demanded: a page
+/// that never draws is a run this command still has to report.
+async fn drive_and_export(
+    url: &str,
+    token: Option<&EffectiveToken>,
+    viewport: Viewport,
+    wait: Duration,
+    export: &str,
+) -> Result<String, CliError> {
     browser::with_browser(viewport, wait, async |browser| {
         let mut page = browser.open_page_unrendered(url, token, wait).await?;
-        let settled = wait_for_quiescent(&mut page, wait).await?;
-        if !settled {
+        if !wait_for_settled_run(&mut page, wait).await? {
             page.evaluate(CLOSE_AS_TIMEOUT, wait).await?;
+            let closed = read_run_state(&mut page, wait).await?;
+            pin_run(&mut page, closed.last_concluded_run_id.as_deref(), wait).await?;
         }
-
-        let value = page.evaluate(RUN_EXPORT_EXPRESSION, wait).await?;
-        let json = value.as_str().ok_or_else(|| {
+        let value = page.evaluate(export, wait).await?;
+        value.as_str().map(str::to_string).ok_or_else(|| {
             CliError::new(
                 ErrorKind::Protocol,
                 "the page did not return a trace; window.lucidaTrace was missing or threw",
             )
-        })?;
-        let export: SeamExport = serde_json::from_str(json).map_err(|error| {
-            CliError::new(
-                ErrorKind::Protocol,
-                format!("the page returned a trace this CLI cannot read: {error}"),
-            )
-        })?;
-
-        Ok(assemble_run_file(export, settled, facts))
+        })
     })
     .await
 }
@@ -516,7 +517,11 @@ pub struct DriverFacts {
 
 /// Fold what the page returned together with what only the driver knows. Split
 /// from the drive so the assembly is assertable without a browser.
-fn assemble_run_file(export: SeamExport, settled: bool, facts: &DriverFacts) -> TraceRunFile {
+fn assemble_run_file(export: SeamExport, facts: &DriverFacts) -> TraceRunFile {
+    // The run says whether it settled; the driver does not get an opinion. Its
+    // own "quiescent held" observation would call a page that never opened a
+    // run settled, because an idle page trivially satisfies the predicate.
+    let settled = export.end_reason.as_deref() == Some("quiescent");
     TraceRunFile {
         file_version: RUN_FILE_VERSION,
         header: TraceRunHeader {
@@ -536,6 +541,7 @@ fn assemble_run_file(export: SeamExport, settled: bool, facts: &DriverFacts) -> 
                 .summary
                 .unwrap_or_else(|| NO_RUN_RECORDED.to_string()),
             phases: export.phases.unwrap_or_else(|| NO_RUN_RECORDED.to_string()),
+            per_phase: export.per_phase,
         },
         diagnostic: export.diagnostic.unwrap_or(Value::Null),
         trace: export.trace,
@@ -563,59 +569,107 @@ pub async fn write_run_file(
                 .unwrap_or("run-with-no-recorded-id"),
         ),
     };
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    tokio::fs::write(&path, serde_json::to_vec(file)?).await?;
+    write_beside_its_parents(&path, &serde_json::to_vec(file)?).await?;
     Ok(path)
 }
 
-/// Poll the page's published quiescence until it has *held*, and let the page
-/// close its own run.
+/// Wait until the page has closed a run, and let it decide when that is.
 ///
-/// Never inferred from outside — a stalled pipeline and a finished one both
-/// stop drawing, so watching the frame counter would call the interesting case
-/// settled. And never exported on the first `true`: the recorder closes a run
-/// as `quiescent` only once the boolean has held for its own hold window, so a
-/// driver that exports the instant it flips pre-empts that close and every run
-/// it takes records `explicit` — losing the one field that says the page
-/// settled. The hold window comes from the page rather than a constant here,
-/// because it is baked into every duration the run reports.
-pub async fn wait_for_quiescent(
-    page: &mut browser::Page,
-    wait: Duration,
-) -> Result<bool, CliError> {
+/// The definition of settled is the page's: it publishes `quiescent`, holds it
+/// for its own hold window, and closes the run itself. So the driver waits for
+/// a *closed run* rather than for the boolean. Two traps make the boolean alone
+/// the wrong thing to watch, and both are silent:
+///
+/// - **Before a run opens the predicate is trivially true.** Nothing is dirty
+///   and nothing is wanted, so a driver polling `quiescent` can declare a cold
+///   remote open settled while the page is still shaking hands, and export a
+///   trace with no run in it.
+/// - **Exporting on the first `true` pre-empts the page's own close**, so every
+///   run it takes lands as `explicit` when it settled.
+///
+/// A third trap sits behind the second: a page torn down and rebuilt — which
+/// a development bundle does on every mount — hands back a run that lived under
+/// a millisecond and closed `explicit`. So the wait is for a run that concluded
+/// *on its own*, by settling or by timing out.
+///
+/// Returns whether one did, inside the deadline. It does not say *how* — the
+/// run's own end reason does, and the recorder's own timeout can conclude a run
+/// without this wait ever reaching its deadline.
+async fn wait_for_settled_run(page: &mut browser::Page, wait: Duration) -> Result<bool, CliError> {
     let deadline = tokio::time::Instant::now() + wait;
-    let hold = read_hold_ms(page, wait).await?;
-    // Past the hold itself, so the recorder's timer has fired and the run is
-    // closed before the export asks for it.
-    let settle_for = Duration::from_millis(hold as u64) + Duration::from_millis(250);
+    let concluded_before = read_run_state(page, wait).await?.concluded;
 
     loop {
-        if page.evaluate(QUIESCENT_PROBE, wait).await?.as_bool() == Some(true) {
-            tokio::time::sleep(settle_for).await;
-            // Still settled after the hold, or the page found more work and
-            // the wait starts again.
-            if page.evaluate(QUIESCENT_PROBE, wait).await?.as_bool() == Some(true) {
-                return Ok(true);
-            }
+        let state = read_run_state(page, wait).await?;
+        if state.concluded > concluded_before {
+            pin_run(page, state.last_concluded_run_id.as_deref(), wait).await?;
+            return Ok(true);
         }
         if tokio::time::Instant::now() >= deadline {
             return Ok(false);
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
-async fn read_hold_ms(page: &mut browser::Page, wait: Duration) -> Result<f64, CliError> {
-    Ok(page
-        .evaluate(QUIESCENCE_HOLD_PROBE, wait)
-        .await?
-        .as_f64()
-        .filter(|value| *value > 0.0)
-        .unwrap_or(DEFAULT_QUIESCENCE_HOLD_MS))
+/// Leave the waited-for run's id on the page for the export to read.
+///
+/// A page can carry several runs — a workspace reload opens one, a later
+/// dirty epoch opens another — so the export has to name the one the wait
+/// observed rather than take the last in the list.
+async fn pin_run(
+    page: &mut browser::Page,
+    run_id: Option<&str>,
+    wait: Duration,
+) -> Result<(), CliError> {
+    let Some(run_id) = run_id else { return Ok(()) };
+    page.evaluate(
+        &format!(
+            "(window.__lucidaTraceRunId = {}, true)",
+            json_string(run_id)
+        ),
+        wait,
+    )
+    .await?;
+    Ok(())
+}
+
+/// A JS string literal for `value`, quoted by the JSON encoder rather than by
+/// hand — a run id reaches this from the page, and hand-quoting is how an
+/// injected expression happens.
+fn json_string(value: &str) -> String {
+    Value::String(value.to_string()).to_string()
+}
+
+/// The page's run state, or a no-run stand-in when the seam is not there yet —
+/// a page still loading its bundle is a page worth waiting for, not a failure.
+async fn read_run_state(page: &mut browser::Page, wait: Duration) -> Result<RunState, CliError> {
+    let value = page.evaluate(RUN_STATE_PROBE, wait).await?;
+    let Some(json) = value.as_str() else {
+        return Ok(RunState {
+            open: false,
+            concluded: 0,
+            last_concluded_run_id: None,
+        });
+    };
+    serde_json::from_str(json).map_err(|error| {
+        CliError::new(
+            ErrorKind::Protocol,
+            format!("the page returned a run state this CLI cannot read: {error}"),
+        )
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RunState {
+    #[allow(dead_code)]
+    open: bool,
+    concluded: u64,
+    /// The run the wait was waiting for. Named to the export, because the
+    /// export closes an interval of its own and "newest" would be that one.
+    #[serde(default)]
+    last_concluded_run_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -625,9 +679,11 @@ async fn read_hold_ms(page: &mut browser::Page, wait: Duration) -> Result<f64, C
 /// A Chrome Trace Event capture, summarised from the file it just wrote.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ChromeTraceCapture {
-    /// Whether the page ever published `quiescent`. Recorded rather than
-    /// enforced: the run that never settles is still exported.
+    /// Whether the run ended by settling. Recorded rather than enforced: the
+    /// run that never settles is still exported.
     pub settled: bool,
+    /// The run's own end reason, when the projection carried one.
+    pub end_reason: Option<String>,
     pub events: usize,
     pub bytes: usize,
     /// Repeated from the file's own header, so the surface says what the
@@ -648,34 +704,42 @@ pub async fn capture_chrome_trace(
     viewport: Viewport,
     wait: Duration,
 ) -> Result<ChromeTraceCapture, CliError> {
-    browser::with_browser(viewport, wait, async |browser| {
-        let mut page = browser.open_page(url, token, wait).await?;
-        let settled = wait_for_quiescent(&mut page, wait).await?;
-        if !settled {
-            page.evaluate(CLOSE_AS_TIMEOUT, wait).await?;
-        }
+    let json = drive_and_export(url, token, viewport, wait, CHROME_TRACE_EXPORT_EXPRESSION).await?;
+    write_beside_its_parents(Path::new(output_path), json.as_bytes()).await?;
+    summarise_chrome_trace(&json, chrome_trace_end_reason(&json))
+}
 
-        let value = page.evaluate(CHROME_TRACE_EXPORT_EXPRESSION, wait).await?;
-        let json = value.as_str().ok_or_else(|| {
-            CliError::new(
-                ErrorKind::Protocol,
-                "the page did not return a trace; window.lucidaTrace was missing or threw",
-            )
-        })?;
+/// The end reason the projection carries in its own header, so the surface
+/// reports what the file says rather than what the driver guessed.
+fn chrome_trace_end_reason(json: &str) -> Option<String> {
+    serde_json::from_str::<Value>(json)
+        .ok()?
+        .get("otherData")?
+        .get("runs")?
+        .as_array()?
+        .last()?
+        .get("endReason")?
+        .as_str()
+        .map(str::to_string)
+}
 
-        if let Some(parent) = Path::new(output_path).parent()
-            && !parent.as_os_str().is_empty()
-        {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        tokio::fs::write(output_path, json).await?;
-        summarise_chrome_trace(json, settled)
-    })
-    .await
+/// Write `bytes` to `path`, making the directory the caller named.
+async fn write_beside_its_parents(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::write(path, bytes).await?;
+    Ok(())
 }
 
 /// Read back what the file says about itself, rather than restating it.
-fn summarise_chrome_trace(json: &str, settled: bool) -> Result<ChromeTraceCapture, CliError> {
+fn summarise_chrome_trace(
+    json: &str,
+    end_reason: Option<String>,
+) -> Result<ChromeTraceCapture, CliError> {
+    let settled = end_reason.as_deref() == Some("quiescent");
     let parsed: Value = serde_json::from_str(json).map_err(|error| {
         CliError::new(
             ErrorKind::Protocol,
@@ -684,6 +748,7 @@ fn summarise_chrome_trace(json: &str, settled: bool) -> Result<ChromeTraceCaptur
     })?;
     Ok(ChromeTraceCapture {
         settled,
+        end_reason,
         events: parsed
             .get("traceEvents")
             .and_then(|value| value.as_array())
@@ -740,6 +805,7 @@ mod tests {
     use super::*;
     use lucida_protocol::{DatasetHealthComponent, DatasetHealthStatus};
     use serde_json::json;
+    use std::collections::BTreeMap;
 
     fn composed() -> ComposedView {
         ComposedView {
@@ -785,6 +851,10 @@ mod tests {
             renderings: TraceRenderings {
                 summary: "lucida trace run-1-1 — VERDICT: clear".to_string(),
                 phases: "CRITICAL PATH\nRULESET v3".to_string(),
+                per_phase: BTreeMap::from([(
+                    "browser.wire".to_string(),
+                    "PHASE     browser.wire\nFINDINGS  none against browser.wire.".to_string(),
+                )]),
             },
             diagnostic,
             trace: json!({ "runs": [] }),
@@ -941,6 +1011,9 @@ mod tests {
         assert!(!human.contains("\"runs\""));
     }
 
+    /// Every depth is the page's rendering, taken at export. The browser that
+    /// could render another one is dead by the time this file is read, so a
+    /// depth the CLI cannot find is a depth it says it cannot find.
     #[test]
     fn the_depths_print_the_pages_own_renderings() {
         let file = run_file(json!({}), true, "quiescent");
@@ -952,36 +1025,14 @@ mod tests {
             render_show(&file, &ShowDepth::Phases),
             file.renderings.phases
         );
-    }
-
-    #[test]
-    fn one_phase_reads_its_already_computed_numbers_out_of_the_document() {
-        let file = run_file(
-            json!({
-                "phases": [
-                    { "id": "wire", "class": "timed", "n": 21, "p50Ms": 4, "p95Ms": 90,
-                      "maxMs": 120, "totalMs": 900, "concurrencyFactor": 3 }
-                ],
-                "findings": [
-                    { "id": 1, "subject": "wire", "severity": "stall", "rule": "phase-share",
-                      "threshold": { "why": "a phase over a third of the chain" },
-                      "attribution": { "why": "the reads were queued behind the admission window" } }
-                ]
-            }),
-            true,
-            "quiescent",
+        assert_eq!(
+            render_show(&file, &ShowDepth::Phase("browser.wire".to_string())),
+            file.renderings.per_phase["browser.wire"]
         );
 
-        let text = render_show(&file, &ShowDepth::Phase("wire".to_string()));
-        assert!(text.contains("phase     wire (timed)"));
-        assert!(text.contains("n=21"));
-        assert!(text.contains("p95 90 ms"));
-        assert!(text.contains("stall [phase-share]"));
-        assert!(text.contains("queued behind the admission window"));
-        assert!(text.contains("lucida trace perfetto"));
-
-        let missing = render_show(&file, &ShowDepth::Phase("decode".to_string()));
-        assert!(missing.contains("phase decode is not in this run"));
+        let missing = render_show(&file, &ShowDepth::Phase("browser.decode".to_string()));
+        assert!(missing.contains("browser.decode is not in this run"));
+        assert!(missing.contains("browser.wire"));
     }
 
     /// A run that never settled is still an artifact, and the driver's own
@@ -1003,7 +1054,7 @@ mod tests {
         )
         .unwrap();
 
-        let file = assemble_run_file(export, false, &facts());
+        let file = assemble_run_file(export, &facts());
 
         assert_eq!(file.header.run_id.as_deref(), Some("run-7-2"));
         assert_eq!(file.header.end_reason.as_deref(), Some("timeout"));
@@ -1013,6 +1064,9 @@ mod tests {
     }
 
     /// A page that recorded no run is a result, not a crash.
+    /// A page that recorded nothing is trivially quiescent — nothing dirty,
+    /// nothing wanted — so a run file must not call that settled. It is the
+    /// cold-remote-open failure this command exists to measure.
     #[test]
     fn a_page_with_no_run_still_produces_a_readable_file() {
         let export: SeamExport = serde_json::from_str(
@@ -1023,11 +1077,12 @@ mod tests {
         )
         .unwrap();
 
-        let file = assemble_run_file(export, true, &facts());
+        let file = assemble_run_file(export, &facts());
         assert!(file.renderings.summary.contains("no run was recorded"));
         assert_eq!(file.header.quiescence_hold_ms, DEFAULT_QUIESCENCE_HOLD_MS);
-        // Nothing to gate on: the absence of a run is not a stall verdict.
-        assert_eq!(gate_failure(&file), None);
+        // A run that never happened did not settle, and a gate says so.
+        assert!(!file.header.settled);
+        assert!(gate_failure(&file).unwrap().contains("never settled"));
     }
 
     #[test]
@@ -1044,9 +1099,16 @@ mod tests {
     }
 
     #[test]
-    fn the_trace_directory_sits_beside_the_config() {
-        let dir = default_trace_dir(Path::new("/home/me/.config/lucida/config.json"));
-        assert_eq!(dir, PathBuf::from("/home/me/.config/lucida/traces"));
+    fn the_trace_directory_sits_beside_the_config_unless_asked_otherwise() {
+        let config = Path::new("/home/me/.config/lucida/config.json");
+        assert_eq!(
+            resolve_trace_dir(None, config),
+            PathBuf::from("/home/me/.config/lucida/traces")
+        );
+        assert_eq!(
+            resolve_trace_dir(Some(Path::new("/runs")), config),
+            PathBuf::from("/runs")
+        );
     }
 
     #[test]
@@ -1077,11 +1139,28 @@ mod tests {
         })
         .to_string();
 
-        let capture = summarise_chrome_trace(&json, false).unwrap();
+        let capture = summarise_chrome_trace(&json, Some("timeout".to_string())).unwrap();
         assert_eq!(capture.events, 2);
         assert_eq!(capture.synthetic_values, vec!["upload end".to_string()]);
+        assert!(!capture.settled);
         let human = format_chrome_trace_human("out.json", &capture);
         assert!(human.contains("ui.perfetto.dev"));
         assert!(human.contains("closed as a timeout"));
+
+        // The end reason comes out of the projection's own header.
+        let settled = json!({
+            "traceEvents": [],
+            "otherData": { "runs": [{ "endReason": "quiescent" }] }
+        })
+        .to_string();
+        assert_eq!(
+            chrome_trace_end_reason(&settled).as_deref(),
+            Some("quiescent")
+        );
+        assert!(
+            summarise_chrome_trace(&settled, chrome_trace_end_reason(&settled))
+                .unwrap()
+                .settled
+        );
     }
 }

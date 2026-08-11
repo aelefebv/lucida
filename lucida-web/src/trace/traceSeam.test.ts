@@ -362,6 +362,64 @@ describe("the trace seam", () => {
     expect(phases).toContain("RULESET v");
   });
 
+  /**
+   * "The shape behind X" is a depth of the page's renderer too, so the CLI
+   * that prints it never becomes a second renderer with its own opinions.
+   */
+  it("renders one phase through the same renderer", async () => {
+    installTraceSeam();
+    const source = new ControlledSource();
+    const cache = new CpuCache(source, makeDecode());
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    cache.submit(makePlan([makeRequest()]));
+    await flush();
+
+    const wire = window.lucidaTrace!.diagnoseText(undefined, {
+      depth: "phase",
+      phase: "browser.wire",
+    });
+    expect(wire).toContain("PHASE     browser.wire");
+    expect(wire).not.toContain("browser.decode  ");
+
+    const absent = window.lucidaTrace!.diagnoseText(undefined, {
+      depth: "phase",
+      phase: "nonsense",
+    });
+    expect(absent).toContain("not in this run");
+  });
+
+  /**
+   * Before a run opens, nothing is dirty and nothing is wanted — so the
+   * predicate is trivially true. A driver has to be able to tell that apart
+   * from a run that finished, without exporting (which would close it). And
+   * a run somebody closed is not a run that concluded: a page torn down and
+   * rebuilt hands back a sub-millisecond `explicit` run, and a driver that
+   * took it would measure the teardown.
+   */
+  it("says which run concluded on its own, without exporting", () => {
+    const seam = installTraceSeam();
+    expect(seam.runState).toEqual({ open: false, concluded: 0, lastConcludedRunId: null });
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    expect(seam.runState.open).toBe(true);
+    expect(seam.runState.concluded).toBe(0);
+
+    seam.closeRun();
+    expect(seam.runState.concluded).toBe(0);
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    seam.closeRun("timeout");
+    expect(seam.runState.concluded).toBe(1);
+    const concluded = seam.runState.lastConcludedRunId;
+    expect(concluded).not.toBeNull();
+
+    // Reading it concluded nothing: both runs are still there to export.
+    const runs = seam.exportTrace().runs;
+    expect(runs).toHaveLength(2);
+    expect(runs.map(run => run.header.runId)).toContain(concluded);
+  });
+
   it("stops a run without exporting it", () => {
     const seam = installTraceSeam();
     traceRecorder.openRun(OPEN_CAUSE);

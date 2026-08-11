@@ -45,6 +45,19 @@ export interface LucidaTraceSeam {
    */
   readonly quiescenceHoldMs: number;
   /**
+   * Whether a labelled run is open right now, and how many have concluded on
+   * their own — both readable without exporting, which would close the run
+   * being asked about.
+   *
+   * A driver needs this to read {@link quiescence} honestly. Before a run
+   * begins nothing is dirty and nothing is wanted, so the predicate is
+   * trivially true; a driver watching only the boolean would call a run that
+   * has not started a run that has finished. `lastConcludedRunId` names the
+   * run it waited for, so the export that follows reads that run rather than
+   * the empty interval the export itself just closed.
+   */
+  readonly runState: { open: boolean; concluded: number; lastConcludedRunId: string | null };
+  /**
    * The merged trace document. Closes the run in progress as `explicit`:
    * every run carries an end reason, and asking for the document concludes
    * the interval being asked about.
@@ -80,10 +93,11 @@ export interface LucidaTraceSeam {
    * answer.
    *
    * `depth` selects the rendering, not a different derivation: a driver that
-   * has to archive the deeper depth reads it here rather than growing a second
-   * renderer outside the page, where it would drift.
+   * has to archive a deeper depth reads it here rather than growing a second
+   * renderer outside the page, where it would drift. `depth: "phase"` takes
+   * the phase id in `phase`.
    */
-  diagnoseText(runId?: string, options?: { depth?: RenderDepth }): string;
+  diagnoseText(runId?: string, options?: { depth?: RenderDepth; phase?: string }): string;
   /**
    * Close the run in progress without exporting — the *Stop & analyse* path.
    *
@@ -113,12 +127,21 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
     get quiescenceHoldMs() {
       return traceRecorder.holdMs;
     },
+    get runState() {
+      const concluded = traceRecorder.concludedRuns;
+      return {
+        open: traceRecorder.isRunOpen,
+        concluded: concluded.count,
+        lastConcludedRunId: concluded.lastId,
+      };
+    },
     exportTrace: () => traceRecorder.exportDocument(),
     exportChromeTrace: () => toChromeTraceJson(traceRecorder.exportDocument()),
     diagnose: (runId?: string) => diagnoseDocument(traceRecorder.exportDocument(), { runId }),
-    diagnoseText: (runId?: string, options?: { depth?: RenderDepth }) =>
+    diagnoseText: (runId?: string, options?: { depth?: RenderDepth; phase?: string }) =>
       renderDiagnostic(diagnoseDocument(traceRecorder.exportDocument(), { runId }), {
         depth: options?.depth,
+        phase: options?.phase,
       }).text,
     closeRun: (endReason: "explicit" | "timeout" = "explicit") =>
       traceRecorder.closeRun(endReason),

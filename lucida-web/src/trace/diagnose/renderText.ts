@@ -24,7 +24,20 @@ import type { DiagnosticDocument, Finding } from "./types.ts";
 export const DEFAULT_MAX_LINES = 30;
 export const DEFAULT_MAX_BYTES = 3_072;
 
-export type RenderDepth = "summary" | "phases";
+/**
+ * `phase` is one phase's reading, named by {@link RenderOptions.phase} — the
+ * depth #893's "the shape behind X" follow-up prints. It renders here rather
+ * than in whoever asked, so a CLI never grows a second renderer.
+ */
+export type RenderDepth = "summary" | "phases" | "phase";
+
+export interface RenderOptions {
+  depth?: RenderDepth;
+  /** Which phase `depth: "phase"` is about. */
+  phase?: string;
+  maxLines?: number;
+  maxBytes?: number;
+}
 
 /** One number, as printed and as it exists in the document. */
 export interface Provenance {
@@ -62,7 +75,7 @@ interface Line {
 
 export function renderDiagnostic(
   document: DiagnosticDocument,
-  options: { depth?: RenderDepth; maxLines?: number; maxBytes?: number } = {},
+  options: RenderOptions = {},
 ): RenderedDiagnostic {
   const depth = options.depth ?? "summary";
   const provenance: Provenance[] = [];
@@ -122,12 +135,34 @@ export function renderDiagnostic(
     );
   });
 
+  // --- the phase this reading is about --------------------------------------
+  const onlyPhase = depth === "phase" ? (options.phase ?? "") : null;
+  const phases =
+    onlyPhase === null ? document.phases : document.phases.filter((phase) => phase.id === onlyPhase);
+  if (onlyPhase !== null) {
+    push(
+      LEAD_FINDING,
+      phases.length === 0
+        ? `PHASE     ${onlyPhase} — not in this run; --phases lists the ones that are`
+        : `PHASE     ${onlyPhase}`,
+    );
+  }
+
   // --- findings ------------------------------------------------------------
-  const shown = depth === "summary" ? document.findings.slice(0, 3) : document.findings;
+  const ranked =
+    onlyPhase === null
+      ? document.findings
+      : document.findings.filter((finding) => finding.subject === onlyPhase);
+  const shown = depth === "summary" ? ranked.slice(0, 3) : ranked;
   if (shown.length === 0) {
-    push(LEAD_FINDING, "FINDINGS  none — no threshold crossed.");
+    push(
+      LEAD_FINDING,
+      onlyPhase === null
+        ? "FINDINGS  none — no threshold crossed."
+        : `FINDINGS  none against ${onlyPhase}.`,
+    );
   } else {
-    push(LEAD_FINDING, `FINDINGS (${p("findings.length", document.findings.length)})`);
+    push(LEAD_FINDING, `FINDINGS (${p("findings.length", ranked.length)})`);
     shown.forEach((finding, index) => {
       const band = index === 0 ? LEAD_FINDING : MORE_FINDINGS;
       push(
@@ -145,7 +180,7 @@ export function renderDiagnostic(
         );
       }
     });
-    if (depth === "summary" && document.findings.length > shown.length) {
+    if (depth === "summary" && ranked.length > shown.length) {
       push(
         MORE_FINDINGS,
         `  ... ranked findings above; the run carries ${p("findings.length", document.findings.length)} in total (see --phases)`,
@@ -181,7 +216,7 @@ export function renderDiagnostic(
       DETAIL,
       "STAGES  (totals overlap: rows run concurrently, so a total is not a share of the wall clock)",
     );
-    for (const phase of document.phases) {
+    for (const phase of phases) {
       push(
         DETAIL,
         `   ${phase.id.padEnd(24)} ${phase.class.padEnd(8)} n=${String(phase.n).padStart(6)} ` +

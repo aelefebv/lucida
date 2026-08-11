@@ -1187,6 +1187,12 @@ struct TraceRunArgs {
     /// Write the run here instead of the trace directory beside the config
     #[arg(long, short, value_name = "PATH")]
     output: Option<String>,
+    /// Directory runs are written to and read back from
+    #[arg(long, value_name = "DIR", env = "LUCIDA_TRACE_DIR")]
+    trace_dir: Option<PathBuf>,
+    /// Also write this run's raw spans as Chrome Trace Event JSON, for Perfetto
+    #[arg(long, value_name = "PATH")]
+    perfetto: Option<String>,
     /// Seconds to wait for the page to load and settle
     #[arg(long, default_value_t = 120)]
     timeout_seconds: u64,
@@ -1212,6 +1218,9 @@ enum TraceCommand {
         /// One phase's numbers and the findings against it
         #[arg(long, value_name = "PHASE", conflicts_with = "phases")]
         phase: Option<String>,
+        /// Directory runs are read back from
+        #[arg(long, value_name = "DIR", env = "LUCIDA_TRACE_DIR")]
+        trace_dir: Option<PathBuf>,
     },
     /// Write the page's trace as Chrome Trace Event JSON, for ui.perfetto.dev
     Perfetto {
@@ -1225,13 +1234,13 @@ enum TraceCommand {
         #[arg(long, default_value_t = 120)]
         timeout_seconds: u64,
         /// Viewport width in CSS pixels
-        #[arg(long, default_value_t = 1440)]
+        #[arg(long, default_value_t = trace::DEFAULT_WIDTH)]
         width: u32,
         /// Viewport height in CSS pixels
-        #[arg(long, default_value_t = 900)]
+        #[arg(long, default_value_t = trace::DEFAULT_HEIGHT)]
         height: u32,
         /// Device pixel ratio to drive the page at
-        #[arg(long, default_value_t = 2.0, value_name = "RATIO")]
+        #[arg(long, default_value_t = trace::DEFAULT_DEVICE_PIXEL_RATIO, value_name = "RATIO")]
         device_pixel_ratio: f64,
     },
 }
@@ -3512,7 +3521,7 @@ async fn emit_trace_command(
     )
     .await?;
     let target = target_for(&server.url, &workspace)?;
-    let trace_dir = trace::default_trace_dir(ConfigStore::default_path()?.as_path());
+    let config_path = ConfigStore::default_path()?;
 
     match (dataset, command) {
         (Some(dataset), _) => {
@@ -3523,7 +3532,7 @@ async fn emit_trace_command(
                 token.as_ref(),
                 dataset,
                 trace_args,
-                &trace_dir,
+                &trace::resolve_trace_dir(trace_args.trace_dir.as_deref(), &config_path),
                 Duration::from_secs(trace_args.timeout_seconds),
             )
             .await?;
@@ -3544,8 +3553,17 @@ async fn emit_trace_command(
                 return Err(CliError::new(ErrorKind::GateFailed, reason));
             }
         }
-        (None, Some(TraceCommand::Show { run, phases, phase })) => {
-            let path = trace::resolve_run_file(&trace_dir, run);
+        (
+            None,
+            Some(TraceCommand::Show {
+                run,
+                phases,
+                phase,
+                trace_dir,
+            }),
+        ) => {
+            let dir = trace::resolve_trace_dir(trace_dir.as_deref(), &config_path);
+            let path = trace::resolve_run_file(&dir, run);
             let file = trace::read_run_file(&path)?;
             let depth = match (phase, phases) {
                 (Some(phase), _) => trace::ShowDepth::Phase(phase.clone()),
@@ -3636,7 +3654,7 @@ async fn run_trace(
 ) -> Result<TraceRunOutcome, CliError> {
     let dataset_client = DatasetWorkspaceClient::new(target.ws_url.clone(), token.cloned());
     let (_seq, health) = dataset_client.health(None, wait).await?;
-    let dataset_url = dataset_source_url(dataset, &health);
+    let dataset_url = dataset_source_url(dataset, &health)?;
     let mut warmth = trace::summarise_server_warmth(&dataset_url, &health);
 
     // A dataset the workspace does not have yet never reaches a scene in the
@@ -3661,6 +3679,7 @@ async fn run_trace(
         device_pixel_ratio: args.device_pixel_ratio,
     };
 
+    let perfetto = args.perfetto.clone();
     let facts = trace::DriverFacts {
         composed_view: composed,
         server_warmth: warmth,
@@ -3670,7 +3689,7 @@ async fn run_trace(
     let viewport = Viewport::new(args.width, args.height, args.device_pixel_ratio);
     // A drive that fails says what it drove: the composed URL is the whole
     // workload, and without it a timeout is unreproducible by hand.
-    let file = trace::drive_run(&url, token, viewport, wait, &facts)
+    let file = trace::drive_run(&url, token, viewport, wait, &facts, perfetto.as_deref())
         .await
         .map_err(|error| error.with_context("url", &url))?;
     let path = trace::write_run_file(&file, trace_dir, args.output.as_deref()).await?;
@@ -3686,15 +3705,34 @@ async fn run_trace(
 /// server already has open — the form the diagnostic's own follow-up commands
 /// print. An id resolves through the health snapshot, which is the one place
 /// that knows a workspace dataset's source URL.
-fn dataset_source_url(dataset: &str, health: &[DatasetSourceHealth]) -> String {
+///
+/// An id is exact, so it wins outright. A name is a convenience and two
+/// datasets can share one: measuring whichever came back first would be a coin
+/// flip in a command whose whole output is a comparison.
+fn dataset_source_url(dataset: &str, health: &[DatasetSourceHealth]) -> Result<String, CliError> {
     if let Some(found) = health
         .iter()
-        .find(|entry| entry.workspace_dataset_id.0 == dataset || entry.name == dataset)
+        .find(|entry| entry.workspace_dataset_id.0 == dataset)
         && let Some(source_url) = &found.source_url
     {
-        return source_url.clone();
+        return Ok(source_url.clone());
     }
-    dataset.to_string()
+
+    let by_name: Vec<&DatasetSourceHealth> = health
+        .iter()
+        .filter(|entry| entry.name == dataset && entry.source_url.is_some())
+        .collect();
+    match by_name.as_slice() {
+        [only] => Ok(only.source_url.clone().unwrap_or_default()),
+        [] => Ok(dataset.to_string()),
+        many => Err(CliError::new(
+            ErrorKind::AmbiguousName,
+            format!(
+                "{} datasets are named {dataset:?}; name one by id or by source URL",
+                many.len()
+            ),
+        )),
+    }
 }
 
 async fn emit_debug_command(
@@ -5585,7 +5623,10 @@ mod tests {
         match parse(&["trace", "show", "run-17-3", "--phases"]).command {
             Command::Trace {
                 dataset,
-                command: Some(TraceCommand::Show { run, phases, phase }),
+                command:
+                    Some(TraceCommand::Show {
+                        run, phases, phase, ..
+                    }),
                 ..
             } => {
                 assert_eq!(dataset, None);
@@ -5668,12 +5709,24 @@ mod tests {
             messages: Vec::new(),
         }];
 
-        assert_eq!(dataset_source_url("ds-1", &health), "gs://bucket/set.zarr");
-        assert_eq!(dataset_source_url("set", &health), "gs://bucket/set.zarr");
         assert_eq!(
-            dataset_source_url("gs://bucket/other.zarr", &health),
+            dataset_source_url("ds-1", &health).unwrap(),
+            "gs://bucket/set.zarr"
+        );
+        assert_eq!(
+            dataset_source_url("set", &health).unwrap(),
+            "gs://bucket/set.zarr"
+        );
+        assert_eq!(
+            dataset_source_url("gs://bucket/other.zarr", &health).unwrap(),
             "gs://bucket/other.zarr"
         );
+
+        // Two datasets under one name is a refusal, not whichever came first.
+        let mut twins = health.clone();
+        twins.push(twins[0].clone());
+        let error = dataset_source_url("set", &twins).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::AmbiguousName);
     }
 
     #[test]
