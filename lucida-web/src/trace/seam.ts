@@ -18,6 +18,7 @@
  * ```
  */
 
+import { toChromeTraceJson } from "./chromeTrace.ts";
 import { traceRecorder } from "./recorder.ts";
 import type { QuiescenceState } from "./quiescence.ts";
 import { TRACE_SCHEMA_VERSION, type GpuIdentity, type TraceDocument } from "./types.ts";
@@ -38,6 +39,16 @@ export interface LucidaTraceSeam {
    * the interval being asked about.
    */
   exportTrace(): TraceDocument;
+  /**
+   * The same document projected into Chrome Trace Event JSON, ready to open
+   * in Perfetto (#934). A string rather than an object: every caller writes
+   * it to a file or a blob, and handing a driver a 13,000-slice object graph
+   * to re-serialise over CDP would cost more than the projection.
+   *
+   * Closes the run in progress, exactly as {@link exportTrace} does — it is
+   * the same export, in the other format.
+   */
+  exportChromeTrace(): string;
   /** Close the run in progress without exporting — the *Stop & analyse* path. */
   closeRun(): void;
 }
@@ -59,6 +70,7 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
       return traceRecorder.quiescence;
     },
     exportTrace: () => traceRecorder.exportDocument(),
+    exportChromeTrace: () => toChromeTraceJson(traceRecorder.exportDocument()),
     closeRun: () => traceRecorder.closeRun("explicit"),
   };
   target.lucidaTrace = seam;

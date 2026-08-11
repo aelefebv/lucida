@@ -9,11 +9,12 @@
  * build-time flag that dead-code-eliminates the recorder was rejected as
  * the opt-out wearing a lab coat.
  *
- * One sink holds all three browser tiers a run records: the complete
- * per-chunk table, the per-tick aggregate ring, and the point-event ring.
+ * One sink holds every browser tier a run records: the complete per-chunk
+ * table, the per-tick aggregate ring, the reading ring, and the point-event ring.
  */
 
 import { EventRing } from "./eventRing.ts";
+import { ReadingRing } from "./readingRing.ts";
 import { RowTable } from "./rowTable.ts";
 import { TickRing, type TickScratch } from "./tickRing.ts";
 import type {
@@ -22,6 +23,7 @@ import type {
   PointEventIndex,
   PointEventReason,
   RowOutcomeValue,
+  TraceReading,
   TracePointEvent,
   TraceRow,
   TraceTick,
@@ -38,6 +40,9 @@ export interface TraceSink {
   /** `counted` is the counted-not-timed phase tally since the previous tick. */
   appendTick(atUs: number, scratch: TickScratch, counted: Uint32Array): void;
   serialiseTicks(): TraceTick[];
+  /** `values` is one reading, in `READING_NAMES` order. */
+  appendReading(atUs: number, values: Float64Array): void;
+  serialiseReadings(): TraceReading[];
   appendEvent(
     atUs: number,
     kind: PointEventIndex,
@@ -49,6 +54,7 @@ export interface TraceSink {
   readonly length: number;
   readonly byteLength: number;
   readonly ticksDropped: number;
+  readonly readingsDropped: number;
   readonly eventsDropped: number;
 }
 
@@ -80,6 +86,12 @@ export class NoopTraceSink implements TraceSink {
     return [];
   }
 
+  appendReading(): void {}
+
+  serialiseReadings(): TraceReading[] {
+    return [];
+  }
+
   appendEvent(): void {}
 
   serialiseEvents(): TracePointEvent[] {
@@ -98,6 +110,10 @@ export class NoopTraceSink implements TraceSink {
     return 0;
   }
 
+  get readingsDropped(): number {
+    return 0;
+  }
+
   get eventsDropped(): number {
     return 0;
   }
@@ -107,6 +123,7 @@ export class NoopTraceSink implements TraceSink {
 export class TableTraceSink implements TraceSink {
   private readonly rows = new RowTable();
   private readonly ticks = new TickRing();
+  private readonly readings = new ReadingRing();
   private readonly events = new EventRing();
 
   append(src: ChunkRowSource, tier: 0 | 1): number {
@@ -137,6 +154,14 @@ export class TableTraceSink implements TraceSink {
     return this.ticks.serialise();
   }
 
+  appendReading(atUs: number, values: Float64Array): void {
+    this.readings.append(atUs, values);
+  }
+
+  serialiseReadings(): TraceReading[] {
+    return this.readings.serialise();
+  }
+
   appendEvent(
     atUs: number,
     kind: PointEventIndex,
@@ -157,11 +182,20 @@ export class TableTraceSink implements TraceSink {
 
   /** Every tier a run holds, because the resident cap in ADR 0049 is on the run. */
   get byteLength(): number {
-    return this.rows.byteLength + this.ticks.byteLength + this.events.byteLength;
+    return (
+      this.rows.byteLength +
+      this.ticks.byteLength +
+      this.readings.byteLength +
+      this.events.byteLength
+    );
   }
 
   get ticksDropped(): number {
     return this.ticks.dropped;
+  }
+
+  get readingsDropped(): number {
+    return this.readings.dropped;
   }
 
   get eventsDropped(): number {

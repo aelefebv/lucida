@@ -343,6 +343,45 @@ export const TickCounter = {
 } as const;
 
 /**
+ * The process-wide readings, sampled once per tick.
+ *
+ * A counter is what happened over an interval; a reading is what was true at an
+ * instant, which is why these are their own tier rather than more
+ * {@link TICK_COUNTER_NAMES}. They are the four series a timeline reader asks
+ * for first — how deep is the queue, how much is out, how long is a frame
+ * taking, how much is resident.
+ *
+ * **Tick cadence, not planning cadence.** A tick sample is published per
+ * planning pass, and planning passes cluster at the start of a run: the
+ * planner's epoch cache means a run can fetch for seconds without re-planning
+ * once. Readings carried on those samples came out as one cluster in
+ * the first few milliseconds — technically a series, useless as one. These
+ * ride the tick instead, which is also the only moment they can change.
+ *
+ * Held as doubles: resident bytes outgrow a uint32 and a frame time is
+ * fractional.
+ */
+export const READING_NAMES = ["queueDepth", "inFlight", "frameTimeUs", "residentBytes"] as const;
+export type ReadingName = (typeof READING_NAMES)[number];
+
+/**
+ * Column indices, derived from the names rather than written beside them —
+ * two lists in the same order with nothing checking that they are.
+ */
+export const ReadingColumn = {
+  QueueDepth: READING_NAMES.indexOf("queueDepth"),
+  InFlight: READING_NAMES.indexOf("inFlight"),
+  FrameTimeUs: READING_NAMES.indexOf("frameTimeUs"),
+  ResidentBytes: READING_NAMES.indexOf("residentBytes"),
+} as const;
+
+/** One reading. */
+export interface TraceReading extends Record<ReadingName, number> {
+  /** Microseconds from run start. */
+  atUs: number;
+}
+
+/**
  * How many pyramid levels a tick sample carries planned / cached / in-flight
  * counts for. A fixed span keeps the sample fixed-width; deeper levels are
  * counted in `levelsDropped` rather than folded into the last slot, because a
@@ -617,6 +656,10 @@ export interface TraceRun {
   ticks: TraceTick[];
   /** Tick samples the ring dropped, so a wrapped ring is visible rather than inferred. */
   ticksDropped: number;
+  /** Readings, oldest-first, one per tick. Also a drop-oldest ring. */
+  readings: TraceReading[];
+  /** Readings the ring dropped. */
+  readingsDropped: number;
   events: TracePointEvent[];
   /** Point events the ring dropped. */
   eventsDropped: number;

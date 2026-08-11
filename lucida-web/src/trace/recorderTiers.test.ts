@@ -89,6 +89,38 @@ describe("per-tick aggregates", () => {
     expect(run.ticksDropped).toBe(0);
   });
 
+  /**
+   * The reading tier rides the tick, not the planning pass — a run can fetch for
+   * seconds without re-planning once, and a series that samples only when the
+   * planner runs is a cluster of readings at run start and silence after.
+   */
+  it("keeps a reading per tick, independent of the planning cadence", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+
+    advance(16);
+    recorder.noteReading(1_204, 12, 16_700, 5_000_000_000);
+    advance(16);
+    recorder.noteReading(1_180, 12, 16_100, 5_100_000_000);
+    // One planning pass across two ticks: the readings must not be tied to it.
+    recorder.beginTick("ds-a");
+    recorder.commitTick();
+
+    const [run] = recorder.exportDocument().runs;
+    expect(run.ticks).toHaveLength(1);
+    expect(run.readings).toEqual([
+      { atUs: 16_000, queueDepth: 1_204, inFlight: 12, frameTimeUs: 16_700, residentBytes: 5_000_000_000 },
+      { atUs: 32_000, queueDepth: 1_180, inFlight: 12, frameTimeUs: 16_100, residentBytes: 5_100_000_000 },
+    ]);
+    expect(run.readingsDropped).toBe(0);
+  });
+
+  it("records no reading while no run is open", () => {
+    const { recorder } = makeRecorder();
+    recorder.noteReading(5, 5, 5, 5);
+    expect(recorder.exportDocument().runs).toHaveLength(0);
+  });
+
   it("hands out no scratch while no run is open", () => {
     const { recorder } = makeRecorder();
     expect(recorder.beginTick("ds")).toBeNull();

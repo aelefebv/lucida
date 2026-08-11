@@ -176,6 +176,25 @@ drop-oldest ring, unlike the per-chunk tier, because a steady-state stream has n
 privileged start.
 _Avoid_: snapshot, stats, gauge (a gauge has no memory of when)
 
+**Display track**:
+A row in the exported Chrome Trace Event file: one per phase, plus the run, point
+event and counter rows. The format calls it a thread and the export lies to it
+about that, because complete events on one named thread id per phase are what
+renders as a readable timeline. It is never an OS thread and never a request
+lane.
+_Avoid_: thread, lane (a lane is the request lane — minimap, detail, coarse,
+prefetch, overview)
+
+**Reading**:
+One timestamped sample of the four process-wide quantities a timeline needs as
+counter tracks — queue depth, in-flight, tick time, resident bytes. Taken once
+per tick, not once per planning pass, because the planner's epoch cache lets a
+run fetch for seconds without re-planning and a series sampled on that cadence is
+a cluster of points at run start and silence after. Kept on its own drop-oldest
+ring.
+_Avoid_: gauge (see the per-tick aggregate above — the point of the trace is that
+a gauge has no memory of when, and a reading does), metric, sample (unqualified)
+
 **Counted phase**:
 A phase below the platform's 100 µs clock floor — cache admission, worker
 dispatch, coalesce attach. Counted on the per-tick aggregate, never timed, so a

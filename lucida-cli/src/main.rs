@@ -217,6 +217,17 @@ enum Command {
         #[command(subcommand)]
         command: PlanCommand,
     },
+    /// Export pipeline traces from a driven viewer page
+    Trace {
+        /// Durable headless viewer profile to open
+        #[arg(long, default_value = "default", value_name = "NAME")]
+        viewer_profile: String,
+        /// Seconds to wait for the page to load and settle
+        #[arg(long, default_value_t = 120)]
+        timeout_seconds: u64,
+        #[command(subcommand)]
+        command: TraceCommand,
+    },
     /// Inspect read-only workspace and viewer diagnostics
     Debug {
         /// Durable headless viewer profile to inspect when --from-peer is omitted
@@ -1142,6 +1153,25 @@ enum PlanCommand {
     VisibleChunks {
         /// Optional workspace-local dataset id or unambiguous dataset name
         dataset: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TraceCommand {
+    /// Write the page's trace as Chrome Trace Event JSON, for ui.perfetto.dev
+    Perfetto {
+        /// File to write the trace to
+        #[arg(long, short, value_name = "PATH", default_value = "lucida-trace.json")]
+        output: String,
+        /// Viewport width in CSS pixels
+        #[arg(long, default_value_t = 1440)]
+        width: u32,
+        /// Viewport height in CSS pixels
+        #[arg(long, default_value_t = 900)]
+        height: u32,
+        /// Device pixel ratio to drive the page at
+        #[arg(long, default_value_t = 2.0, value_name = "RATIO")]
+        device_pixel_ratio: f64,
     },
 }
 
@@ -2482,6 +2512,21 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             )
             .await?;
         }
+        Command::Trace {
+            viewer_profile,
+            timeout_seconds,
+            command,
+        } => {
+            emit_trace_command(
+                &cli,
+                &config,
+                output,
+                command,
+                viewer_profile,
+                *timeout_seconds,
+            )
+            .await?;
+        }
         Command::Debug {
             viewer_profile,
             from_peer,
@@ -3386,6 +3431,203 @@ async fn emit_plan_command(
     Ok(())
 }
 
+/// What driving a page for its trace produced. Counts and labels only — the
+/// rows themselves are in the file, and the CLI prints a path rather than
+/// inlining thousands of spans.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TraceCapture {
+    /// Whether the page published `quiescent` before the deadline. A run that
+    /// never settles is still exported: it is the most diagnostic sample there
+    /// is, and a monitor that emits nothing on it is the wrong tool.
+    settled: bool,
+    events: usize,
+    bytes: usize,
+    /// Repeated from the file's own header, so the surface says what the
+    /// artifact says rather than asserting a cleanliness of its own.
+    synthetic_values: Vec<String>,
+    derived_values: Vec<String>,
+}
+
+async fn emit_trace_command(
+    cli: &Cli,
+    config: &CliConfig,
+    output: Output,
+    command: &TraceCommand,
+    viewer_profile: &str,
+    timeout_seconds: u64,
+) -> Result<(), CliError> {
+    let server = resolve_server(cli.server.as_deref(), config)?;
+    let token = resolve_token(&server.url, config);
+    let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
+    let workspace = resolve_workspace_record(
+        &workspace_client,
+        cli.workspace.as_deref(),
+        config,
+        &server.url,
+        WorkspaceLookupMode::ActiveOnly,
+    )
+    .await?;
+    let target = target_for(&server.url, &workspace)?;
+    let wait = Duration::from_secs(timeout_seconds);
+
+    match command {
+        TraceCommand::Perfetto {
+            output: output_path,
+            width,
+            height,
+            device_pixel_ratio,
+        } => {
+            let url = viewer_profile_web_url(&target, viewer_profile)?;
+            let viewport = Viewport::new(*width, *height, *device_pixel_ratio);
+            let capture =
+                capture_chrome_trace(&url, token.as_ref(), output_path, viewport, wait).await?;
+            let payload = serde_json::json!({
+                "server": server,
+                "workspace": workspace,
+                "target": target,
+                "url": url,
+                "output": output_path,
+                "format": "chrome-trace-event",
+                "events": capture.events,
+                "bytes": capture.bytes,
+                "settled": capture.settled,
+                "devicePixelRatio": device_pixel_ratio,
+                "syntheticValues": capture.synthetic_values,
+                "derivedValues": capture.derived_values,
+            });
+            output.print_either(&payload, || {
+                format_chrome_trace_human(output_path, &capture)
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
+/// The human rendering: a path, not rows. Perfetto is the raw-span surface;
+/// this command's job is to hand it a file and say what the file is.
+fn format_chrome_trace_human(output_path: &str, capture: &TraceCapture) -> String {
+    let mut human = format!(
+        "Wrote Chrome Trace Event JSON: {output_path}\n\
+         {} events, {} bytes. Open it at https://ui.perfetto.dev (File → Open trace file).",
+        capture.events, capture.bytes
+    );
+    if !capture.settled {
+        human.push_str("\nThe page never published quiescent before the deadline; the run was closed explicitly.");
+    }
+    if capture.synthetic_values.is_empty() {
+        human.push_str("\nInjected or synthetic values: none.");
+    } else {
+        for value in &capture.synthetic_values {
+            human.push_str(&format!("\nSynthetic: {value}"));
+        }
+    }
+    for value in &capture.derived_values {
+        human.push_str(&format!("\nDerived at export: {value}"));
+    }
+    human
+}
+
+/// Drive `url`, wait for the page to settle, and write its trace projected as
+/// Chrome Trace Event JSON.
+///
+/// The projection lives on the page, behind the same export seam the monitor
+/// uses, so no surface carries a privately shaped copy of the trace. This
+/// fetches nothing from the server: the server pushes its rows to the browser
+/// and the document handed back is already merged.
+///
+/// Device pixel ratio is the caller's, and `lucida trace` defaults it to 2 —
+/// unlike the image-producing captures, where DPR decides an output image's
+/// size, here it decides the workload the renderer is put under, and DPR-1-only
+/// verification has hidden whole defect classes in this project.
+async fn capture_chrome_trace(
+    url: &str,
+    token: Option<&EffectiveToken>,
+    output_path: &str,
+    viewport: Viewport,
+    wait: Duration,
+) -> Result<TraceCapture, CliError> {
+    browser::with_browser(viewport, wait, async |browser| {
+        let mut page = browser.open_page(url, token, wait).await?;
+        let settled = wait_for_quiescent(&mut page, wait).await?;
+
+        let value = page.evaluate(TRACE_EXPORT_EXPRESSION, wait).await?;
+        let json = value.as_str().ok_or_else(|| {
+            CliError::new(
+                ErrorKind::Protocol,
+                "the page did not return a trace; window.lucidaTrace was missing or threw",
+            )
+        })?;
+
+        if let Some(parent) = Path::new(output_path).parent()
+            && !parent.as_os_str().is_empty()
+        {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(output_path, json).await?;
+        summarise_chrome_trace(json, settled)
+    })
+    .await
+}
+
+/// Poll the page's published quiescence. Never inferred from outside — a
+/// stalled pipeline and a finished one both stop drawing, so watching the
+/// frame counter would call the interesting case settled.
+async fn wait_for_quiescent(page: &mut browser::Page, wait: Duration) -> Result<bool, CliError> {
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        let quiescent = page.evaluate(QUIESCENT_PROBE, wait).await?;
+        if quiescent.as_bool().unwrap_or(false) {
+            return Ok(true);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(false);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// Read back what the file says about itself, rather than restating it.
+fn summarise_chrome_trace(json: &str, settled: bool) -> Result<TraceCapture, CliError> {
+    let parsed: Value = serde_json::from_str(json).map_err(|error| {
+        CliError::new(
+            ErrorKind::Protocol,
+            format!("the page returned a trace that is not JSON: {error}"),
+        )
+    })?;
+    Ok(TraceCapture {
+        settled,
+        events: parsed
+            .get("traceEvents")
+            .and_then(|value| value.as_array())
+            .map(Vec::len)
+            .unwrap_or(0),
+        bytes: json.len(),
+        synthetic_values: string_list(&parsed, "syntheticValues"),
+        derived_values: string_list(&parsed, "derivedValues"),
+    })
+}
+
+fn string_list(parsed: &Value, key: &str) -> Vec<String> {
+    parsed
+        .get("otherData")
+        .and_then(|value| value.get(key))
+        .and_then(|value| value.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+const QUIESCENT_PROBE: &str = "!!(window.lucidaTrace && window.lucidaTrace.quiescence \
+     && window.lucidaTrace.quiescence.quiescent)";
+
+const TRACE_EXPORT_EXPRESSION: &str =
+    "window.lucidaTrace ? window.lucidaTrace.exportChromeTrace() : null";
+
 async fn emit_debug_command(
     cli: &Cli,
     config: &CliConfig,
@@ -3827,6 +4069,7 @@ mod tests {
         assert!(help.contains("channel"));
         assert!(help.contains("peer"));
         assert!(help.contains("plan"));
+        assert!(help.contains("trace"));
         assert!(help.contains("debug"));
         assert!(help.contains("layout"));
         assert!(help.contains("saved-view"));
@@ -5224,6 +5467,107 @@ mod tests {
             }
             _ => panic!("expected debug state"),
         }
+    }
+
+    /// DPR 2 is the default because that is the condition the defects this
+    /// trace exists to find actually appear at.
+    #[test]
+    fn trace_perfetto_defaults_to_a_retina_workload_and_a_file() {
+        let trace = parse(&["trace", "perfetto"]);
+        match trace.command {
+            Command::Trace {
+                viewer_profile,
+                timeout_seconds,
+                command:
+                    TraceCommand::Perfetto {
+                        output,
+                        width,
+                        height,
+                        device_pixel_ratio,
+                    },
+            } => {
+                assert_eq!(viewer_profile, "default");
+                assert_eq!(timeout_seconds, 120);
+                assert_eq!(output, "lucida-trace.json");
+                assert_eq!((width, height), (1440, 900));
+                assert_eq!(device_pixel_ratio, 2.0);
+            }
+            _ => panic!("expected trace perfetto"),
+        }
+
+        let explicit = parse(&[
+            "trace",
+            "--viewer-profile",
+            "analysis",
+            "perfetto",
+            "--output",
+            "/tmp/run.json",
+            "--device-pixel-ratio",
+            "1",
+        ]);
+        match explicit.command {
+            Command::Trace {
+                viewer_profile,
+                command:
+                    TraceCommand::Perfetto {
+                        output,
+                        device_pixel_ratio,
+                        ..
+                    },
+                ..
+            } => {
+                assert_eq!(viewer_profile, "analysis");
+                assert_eq!(output, "/tmp/run.json");
+                assert_eq!(device_pixel_ratio, 1.0);
+            }
+            _ => panic!("expected trace perfetto"),
+        }
+    }
+
+    #[test]
+    fn trace_summary_reads_the_files_own_labelling() {
+        let json = serde_json::json!({
+            "traceEvents": [{ "ph": "X" }, { "ph": "C" }],
+            "displayTimeUnit": "ms",
+            "otherData": {
+                "syntheticValues": [],
+                "derivedValues": ["Phase spans are fanned out at export."],
+            },
+        })
+        .to_string();
+
+        let capture = summarise_chrome_trace(&json, true).unwrap();
+        assert_eq!(capture.events, 2);
+        assert_eq!(capture.bytes, json.len());
+        assert!(capture.synthetic_values.is_empty());
+        assert_eq!(capture.derived_values.len(), 1);
+
+        let human = format_chrome_trace_human("/tmp/run.json", &capture);
+        assert!(human.contains("/tmp/run.json"));
+        assert!(human.contains("ui.perfetto.dev"));
+        assert!(human.contains("Injected or synthetic values: none."));
+        assert!(human.contains("Phase spans are fanned out at export."));
+        // A path, not rows.
+        assert!(!human.contains("\"ph\""));
+    }
+
+    /// A run that never settled is the most diagnostic sample there is, so it
+    /// is still written — and the surface says so rather than implying calm.
+    #[test]
+    fn trace_summary_says_when_the_page_never_settled() {
+        let json = serde_json::json!({ "traceEvents": [], "otherData": {} }).to_string();
+        let capture = summarise_chrome_trace(&json, false).unwrap();
+
+        assert!(!capture.settled);
+        assert!(
+            format_chrome_trace_human("run.json", &capture).contains("never published quiescent")
+        );
+    }
+
+    #[test]
+    fn trace_summary_rejects_a_page_that_did_not_return_json() {
+        let error = summarise_chrome_trace("not json", true).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Protocol);
     }
 
     #[test]

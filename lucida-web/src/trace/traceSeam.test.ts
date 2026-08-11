@@ -293,6 +293,29 @@ describe("the trace seam", () => {
     expect(traceRecorder.isRunOpen).toBe(false);
   });
 
+  /**
+   * The borrowed path goes through the same seam as the native one, so no
+   * surface gets a privately shaped copy of the trace (#934).
+   */
+  it("offers the same run projected for Perfetto, closing it the same way", async () => {
+    installTraceSeam();
+    const source = new ControlledSource();
+    const cache = new CpuCache(source, makeDecode());
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    cache.submit(makePlan([makeRequest()]));
+    await flush();
+
+    const file = JSON.parse(window.lucidaTrace!.exportChromeTrace());
+    expect(traceRecorder.isRunOpen).toBe(false);
+    expect(file.displayTimeUnit).toBe("ms");
+    expect(file.otherData.runs[0].endReason).toBe("explicit");
+    const tracks = file.traceEvents
+      .filter((e: { ph: string; name: string }) => e.ph === "M" && e.name === "thread_name")
+      .map((e: { args: { name: string } }) => e.args.name);
+    expect(tracks).toEqual(expect.arrayContaining(["plan", "queue", "wire", "serve"]));
+  });
+
   it("stops a run without exporting it", () => {
     const seam = installTraceSeam();
     traceRecorder.openRun(OPEN_CAUSE);

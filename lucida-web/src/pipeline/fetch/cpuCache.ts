@@ -965,6 +965,16 @@ export class CpuCache {
     return this.levelResidencyScratch;
   }
 
+  /**
+   * Every byte the CPU cache holds, across all three stores. Separate from
+   * {@link telemetry} because the trace samples this per planning pass and
+   * `telemetry()` builds a whole report — including a materialised deliverable
+   * list — to answer it.
+   */
+  residentBytes(): number {
+    return this.chunkStore.bytes + this.overviewStore.bytes + this.proxyStore.bytes;
+  }
+
   telemetry(): CacheTelemetry {
     const now = performance.now();
     const counters = this.counters.snapshot(now);
