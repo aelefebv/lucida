@@ -657,8 +657,8 @@ function nextSteps(run: TraceRun, findings: Finding[], attribution: Attribution)
   }
   if (INCONCLUSIVE.includes(attribution.confidence)) {
     steps.push({
-      why: "the attribution is not conclusive; a second run makes the comparison possible",
-      command: `lucida trace ${run.header.datasetIds[0] ?? "<dataset>"} --compare ${runId}`,
+      why: `the attribution is not conclusive; a second run to compare against ${runId}`,
+      command: `lucida trace ${run.header.datasetIds[0] ?? "<dataset>"}`,
     });
   }
   steps.push({

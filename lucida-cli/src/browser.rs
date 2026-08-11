@@ -170,6 +170,34 @@ impl HeadlessBrowser {
         token: Option<&EffectiveToken>,
         wait: Duration,
     ) -> Result<Page, CliError> {
+        let mut page = self.navigate(url, token, wait).await?;
+        page.wait_for_document(wait).await?;
+        page.wait_for_capture_ready(wait).await?;
+        Ok(page)
+    }
+
+    /// Load `url` and hand back the page as soon as it is navigated, without
+    /// requiring the viewer to have rendered anything.
+    ///
+    /// The trace driver wants the page in whatever state it reaches. A viewer
+    /// that never draws a frame is the most diagnostic sample there is, and a
+    /// driver that errors out on it instead of exporting throws that sample
+    /// away — so readiness is something it observes, not something it demands.
+    pub async fn open_page_unrendered(
+        &self,
+        url: &str,
+        token: Option<&EffectiveToken>,
+        wait: Duration,
+    ) -> Result<Page, CliError> {
+        self.navigate(url, token, wait).await
+    }
+
+    async fn navigate(
+        &self,
+        url: &str,
+        token: Option<&EffectiveToken>,
+        wait: Duration,
+    ) -> Result<Page, CliError> {
         let mut page = Page::attach(&self.endpoint, wait).await?;
         // Only when there is a header to set. An enabled Network domain
         // mirrors every WebSocket frame the page receives back over CDP —
@@ -194,8 +222,6 @@ impl HeadlessBrowser {
         page.call("Page.enable", json!({}), wait).await?;
         page.call("Page.navigate", json!({ "url": url }), wait)
             .await?;
-        page.wait_for_document(wait).await?;
-        page.wait_for_capture_ready(wait).await?;
         Ok(page)
     }
 

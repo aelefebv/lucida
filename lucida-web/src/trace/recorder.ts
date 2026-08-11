@@ -286,6 +286,34 @@ export class TraceRecorder {
   }
 
   /**
+   * The labelled runs that concluded **on their own** — by settling or by
+   * timing out — with the id of the most recent one.
+   *
+   * Readable without exporting, because exporting closes the run being asked
+   * about. This is what a driver waits for, and each part of it earns its
+   * place:
+   *
+   * - *Labelled*, because steady state has nothing to conclude.
+   * - *On their own*, because an `explicit` close came from somebody asking.
+   *   A page torn down and rebuilt hands back a run that lived under a
+   *   millisecond, and a driver waiting for "a run closed" would take it.
+   * - *By id*, because the export closes an interval of its own, so "the
+   *   newest run in the document" is the export's artifact rather than the
+   *   run that was waited for.
+   */
+  get concludedRuns(): { count: number; lastId: string | null } {
+    let count = 0;
+    let lastId: string | null = null;
+    for (const interval of this.closed) {
+      const { cause, endReason, runId } = interval.header;
+      if (!cause || (endReason !== "quiescent" && endReason !== "timeout")) continue;
+      count += 1;
+      lastId = runId;
+    }
+    return { count, lastId };
+  }
+
+  /**
    * How long `quiescent` must hold before a run closes itself. Readable from
    * outside because a driver that exports the moment the boolean first goes
    * true pre-empts that close, and every run it takes lands as `explicit`
