@@ -70,7 +70,8 @@ describe("per-tick aggregates", () => {
     advance(10);
     const a = recorder.beginTick("ds-a");
     a!.counters[TickCounter.LaneDetail] = 9;
-    a!.addLevel(1, 9, 4, 2);
+    for (let i = 0; i < 9; i++) a!.addPlanned(1);
+    a!.setResidency(1, 4, 2);
     recorder.commitTick();
 
     const b = recorder.beginTick("ds-b");

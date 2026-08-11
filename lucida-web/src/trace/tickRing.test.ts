@@ -13,7 +13,8 @@ function scratchFor(datasetId: string, detailLane: number): TickScratch {
 describe("TickScratch", () => {
   it("resets every column so a reused scratch cannot leak the previous tick", () => {
     const scratch = scratchFor("ds", 7);
-    scratch.addLevel(2, 1, 2, 3);
+    scratch.addPlanned(2);
+    scratch.setResidency(2, 2, 3);
     scratch.reset("other");
 
     expect(scratch.datasetId).toBe("other");
@@ -24,8 +25,8 @@ describe("TickScratch", () => {
 
   it("counts levels past the fixed span instead of folding them into a slot", () => {
     const scratch = scratchFor("ds", 0);
-    scratch.addLevel(TICK_LEVEL_SLOTS, 5, 5, 5);
-    scratch.addLevel(TICK_LEVEL_SLOTS + 3, 5, 5, 5);
+    scratch.addPlanned(TICK_LEVEL_SLOTS);
+    scratch.setResidency(TICK_LEVEL_SLOTS + 3, 5, 5);
 
     expect(scratch.levelsDropped).toBe(2);
     expect(scratch.levels.every(v => v === 0)).toBe(true);
@@ -37,8 +38,8 @@ describe("TickRing", () => {
     const ring = new TickRing(4);
     const scratch = scratchFor("ds-a", 12);
     scratch.counters[TickCounter.CullingConsidered] = 90;
-    scratch.addLevel(0, 4, 2, 1);
-    scratch.addLevel(3, 0, 0, 0);
+    for (let i = 0; i < 4; i++) scratch.addPlanned(0);
+    scratch.setResidency(0, 2, 1);
     const counted = new Uint32Array(3);
     counted[CountedPhaseIndex.CacheAdmission] = 6;
 

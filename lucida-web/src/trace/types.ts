@@ -266,25 +266,33 @@ export const TICK_COUNTER_NAMES = [
 ] as const;
 export type TickCounterName = (typeof TICK_COUNTER_NAMES)[number];
 
+/**
+ * Column indices, derived from the names rather than written out beside them.
+ * Sixteen hand-numbered constants next to sixteen strings is two lists that
+ * must stay in the same order with nothing checking that they do.
+ */
+function counterIndex(name: TickCounterName): number {
+  return TICK_COUNTER_NAMES.indexOf(name);
+}
+
 export const TickCounter = {
-  LaneMinimap: 0,
-  LaneDetail: 1,
-  LaneCoarse: 2,
-  LanePrefetch: 3,
-  LaneOverview: 4,
-  ProxyRequests: 5,
-  PlannedChunks: 6,
-  CullingConsidered: 7,
-  CullingAfterXyBounds: 8,
-  CullingAfterZRange: 9,
-  CullingAfterFrustum: 10,
-  CatalogDegradations: 11,
-  ActiveSetTotal: 12,
-  ActiveSetGroupAsProxy: 13,
-  ActiveSetTilesProxyFallback: 14,
-  ActiveSetTilesDetail: 15,
+  LaneMinimap: counterIndex("laneMinimap"),
+  LaneDetail: counterIndex("laneDetail"),
+  LaneCoarse: counterIndex("laneCoarse"),
+  LanePrefetch: counterIndex("lanePrefetch"),
+  LaneOverview: counterIndex("laneOverview"),
+  ProxyRequests: counterIndex("proxyRequests"),
+  PlannedChunks: counterIndex("plannedChunks"),
+  CullingConsidered: counterIndex("cullingConsidered"),
+  CullingAfterXyBounds: counterIndex("cullingAfterXyBounds"),
+  CullingAfterZRange: counterIndex("cullingAfterZRange"),
+  CullingAfterFrustum: counterIndex("cullingAfterFrustum"),
+  CatalogDegradations: counterIndex("catalogDegradations"),
+  ActiveSetTotal: counterIndex("activeSetTotal"),
+  ActiveSetGroupAsProxy: counterIndex("activeSetGroupAsProxy"),
+  ActiveSetTilesProxyFallback: counterIndex("activeSetTilesProxyFallback"),
+  ActiveSetTilesDetail: counterIndex("activeSetTilesDetail"),
 } as const;
-export type TickCounterIndex = (typeof TickCounter)[keyof typeof TickCounter];
 
 /**
  * How many pyramid levels a tick sample carries planned / cached / in-flight
@@ -417,7 +425,12 @@ export interface TraceTick {
   atUs: number;
   datasetId: string;
   counters: Record<TickCounterName, number>;
-  /** The counted-not-timed phases, over the interval since the previous tick. */
+  /**
+   * The counted-not-timed phases over the interval since the previous sample.
+   * Process-wide, not per dataset: a cache admission belongs to the pipeline,
+   * not to whichever dataset's sample happens to publish the interval. Sum
+   * across samples for a run total; do not read one sample as a dataset's own.
+   */
   counted: Record<CountedPhase, number>;
   /** Only levels with a non-zero column; a level absent here had nothing on it. */
   levels: TraceTickLevel[];

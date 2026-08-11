@@ -460,6 +460,9 @@ describe("Uploader worker feedback", () => {
       1,
       ["0/0/1/0/0/0"],
       ["0/0/1/0/0/1"],
+      // The renderer's reason, forwarded rather than re-derived; the worker
+      // left it unset on this message.
+      undefined,
     );
   });
 

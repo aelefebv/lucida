@@ -194,6 +194,33 @@ describe("cache point events", () => {
     expect(evictions[0].chunk?.chunkKey).toBe("0/0/0/0/0/0");
   });
 
+  it("carries the renderer's own reason on a worker-reported eviction", async () => {
+    openRun();
+    const { cache } = createCache(64);
+
+    cache.submit(makePlan([makeRequest()]));
+    await flush();
+    cache.markChunkEvicted("image-1", 0, ["0/0/0/0/0/0"], [], "stale");
+
+    const evictions = eventsOfKind(exportedEvents(), "eviction");
+    expect(evictions.map(e => e.reason)).toEqual(["stale"]);
+    expect(evictions[0].chunk?.chunkKey).toBe("0/0/0/0/0/0");
+  });
+
+  it("reads the residency tier off the chunk rather than assuming detail", async () => {
+    openRun();
+    const { cache } = createCache(64);
+
+    // A coarse-lane chunk lives under the coarse residency tier, and its
+    // event has to say so — a chunk key is not unique across the two.
+    cache.submit(makePlan([makeRequest({ lane: "coarse" })]));
+    await flush();
+    cache.markChunkEvicted("image-1", 0, ["0/0/0/0/0/0"], [], "evicted");
+
+    const evictions = eventsOfKind(exportedEvents(), "eviction");
+    expect(evictions[0].chunk?.residencyTier).toBe("coarse");
+  });
+
   it("records a rejection under the renderer's own reason code", () => {
     openRun();
     const { cache } = createCache(64);

@@ -38,6 +38,7 @@ import { Scheduler, type SchedulableRequest } from "./scheduler.ts";
 import { traceRecorder } from "../../trace/recorder.ts";
 import { Boundary, CountedPhaseIndex, PointEvent, RowOutcome } from "../../trace/types.ts";
 import { parseChunkKey } from "../../renderer/chunkKeys.ts";
+import type { ChunkFeedbackReason } from "../../renderer/workerProtocol.ts";
 import type { CacheQuiescenceInputs } from "../../trace/quiescence.ts";
 import {
   classifyFetchError,
@@ -54,6 +55,7 @@ import type {
   CpuCacheConfig,
   EvictionTier,
   Lane,
+  LevelResidency,
   ReadyChunkDelivery,
   ReadyDelivery,
   ReadyProxyDelivery,
@@ -180,6 +182,16 @@ interface InFlightProxyMeta {
   epochs: SceneEpochs;
 }
 
+/**
+ * The residency tier a point event carries, read off the entry rather than
+ * assumed from the store it came out of. Row identity includes the tier
+ * because a chunk key legitimately exists under both, so an event that
+ * guessed it could not be joined to its own lifecycle row.
+ */
+function eventTier(entry: CacheEntry): 0 | 1 {
+  return entry.residencyTier === "coarse" ? 1 : 0;
+}
+
 export class CpuCache {
   private source: ContentSource;
   private decode: DecodePool;
@@ -285,6 +297,9 @@ export class CpuCache {
    */
   private rejectionTracker = new RejectionTracker();
 
+  /** Reused by {@link levelResidency}; see its note on lifetime. */
+  private readonly levelResidencyScratch: LevelResidency = { cached: [], inFlight: [] };
+
   private listeners: (() => void)[] = [];
 
   private currentEpochs: SceneEpochs = {
@@ -316,7 +331,7 @@ export class CpuCache {
       evictionTier: (entry) => entry.tier,
       recordEviction: (tier, entry) => {
         this.counters.recordEviction(tier);
-        traceRecorder.recordPointEvent(PointEvent.Eviction, "evicted", entry, 0);
+        traceRecorder.recordPointEvent(PointEvent.Eviction, "evicted", entry, eventTier(entry));
       },
       onEvictionBurst: ({ removed, bytesFreed, bytesNeeded }) => {
         debugLog("cache", "cache.eviction_burst", {
@@ -334,7 +349,7 @@ export class CpuCache {
       evictionTier: () => "overview",
       recordEviction: (tier, entry) => {
         this.counters.recordEviction(tier);
-        traceRecorder.recordPointEvent(PointEvent.Eviction, "evicted", entry, 1);
+        traceRecorder.recordPointEvent(PointEvent.Eviction, "evicted", entry, eventTier(entry));
       },
     });
     this.proxyStore = new ProxyStore({
@@ -697,7 +712,9 @@ export class CpuCache {
       this.chunkStore.get(entityId, chunkKey) ?? this.overviewStore.get(entityId, chunkKey);
     const coords = resident ? null : parseChunkKey(chunkKey);
     if (resident) {
-      traceRecorder.recordPointEvent(PointEvent.Rejection, "atlas-policy", resident, 0);
+      traceRecorder.recordPointEvent(
+        PointEvent.Rejection, "atlas-policy", resident, eventTier(resident),
+      );
     } else if (coords) {
       traceRecorder.recordPointEvent(
         PointEvent.Rejection,
@@ -818,14 +835,26 @@ export class CpuCache {
     );
   }
 
+  /**
+   * `reason` is the renderer's own account of why the chunks came back — its
+   * chunk feedback vocabulary, forwarded rather than re-derived, so the trace
+   * can distinguish an atlas eviction from a stale epoch or a radius filter.
+   */
   markChunkEvicted(
     imageId: string,
     c: number,
     evicted: string[],
     skipped: string[],
+    reason: ChunkFeedbackReason = "evicted",
   ): void {
     for (const key of evicted) {
       this.deliveryState.clearChunkSent(imageId, c, key);
+      const entry =
+        this.chunkStore.findByImageChunk(imageId, c, key) ??
+        this.overviewStore.findByImageChunk(imageId, c, key);
+      if (entry) {
+        traceRecorder.recordPointEvent(PointEvent.Eviction, reason, entry, eventTier(entry));
+      }
     }
     for (const key of skipped) {
       this.deliveryState.clearChunkSent(imageId, c, key);
@@ -883,9 +912,15 @@ export class CpuCache {
    * Counts every resident chunk, not only the active set's: an aggregate that
    * quietly excluded demoted or prefetched residency would understate what
    * the cache is actually holding.
+   *
+   * Returns the cache's own reused arrays, valid until the next call —
+   * recording is unconditional and per tick, so this may not allocate.
    */
-  levelResidency(): { cached: readonly number[]; inFlight: readonly number[] } {
-    const cached: number[] = [];
+  levelResidency(): LevelResidency {
+    const { cached, inFlight } = this.levelResidencyScratch;
+    cached.fill(0);
+    inFlight.fill(0);
+
     for (const store of [this.chunkStore, this.overviewStore]) {
       const counts = store.levelResidency();
       for (let level = 0; level < counts.length; level++) {
@@ -895,7 +930,6 @@ export class CpuCache {
       }
     }
 
-    const inFlight: number[] = [];
     for (const [, entry] of this.chunkScheduler.inFlightEntries()) {
       const level = entry.request.level;
       if (!Number.isInteger(level) || level < 0) continue;
@@ -903,7 +937,7 @@ export class CpuCache {
       inFlight[level]++;
     }
 
-    return { cached, inFlight };
+    return this.levelResidencyScratch;
   }
 
   telemetry(): CacheTelemetry {

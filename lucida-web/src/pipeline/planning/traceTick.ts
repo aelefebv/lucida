@@ -12,12 +12,20 @@
 import { traceRecorder, type TraceRecorder } from "../../trace/recorder.ts";
 import { TickCounter } from "../../trace/types.ts";
 import type { RequestPlan } from "./types.ts";
+import type { Lane, LevelResidency } from "../fetch/types.ts";
 
-/** Resident and in-flight chunk counts per level, indexed by level. */
-export interface LevelResidency {
-  cached: readonly number[];
-  inFlight: readonly number[];
-}
+/**
+ * Which counter each lane feeds. A map rather than a switch, so adding a lane
+ * is a compile error here instead of silently landing in whichever branch the
+ * default happened to be.
+ */
+const LANE_COUNTERS: Record<Lane, number> = {
+  minimap: TickCounter.LaneMinimap,
+  detail: TickCounter.LaneDetail,
+  coarse: TickCounter.LaneCoarse,
+  prefetch: TickCounter.LanePrefetch,
+  overview: TickCounter.LaneOverview,
+};
 
 /**
  * Record one dataset's planning aggregate for this tick. A no-op when no run
@@ -32,19 +40,9 @@ export function recordPlanningTick(
   const tick = recorder.beginTick(datasetId);
   if (!tick) return;
 
-  const planned: number[] = [];
   for (const request of plan.requests) {
-    switch (request.lane) {
-      case "minimap": tick.counters[TickCounter.LaneMinimap]++; break;
-      case "detail": tick.counters[TickCounter.LaneDetail]++; break;
-      case "coarse": tick.counters[TickCounter.LaneCoarse]++; break;
-      case "prefetch": tick.counters[TickCounter.LanePrefetch]++; break;
-      default: tick.counters[TickCounter.LaneOverview]++; break;
-    }
-    const level = request.level;
-    if (!Number.isInteger(level) || level < 0) continue;
-    while (planned.length <= level) planned.push(0);
-    planned[level]++;
+    tick.counters[LANE_COUNTERS[request.lane]]++;
+    tick.addPlanned(request.level);
   }
 
   tick.counters[TickCounter.PlannedChunks] = plan.requests.length;
@@ -71,13 +69,12 @@ export function recordPlanningTick(
     }
   }
 
-  const levels = Math.max(planned.length, residency.cached.length, residency.inFlight.length);
+  const levels = Math.max(residency.cached.length, residency.inFlight.length);
   for (let level = 0; level < levels; level++) {
-    const p = planned[level] ?? 0;
     const cached = residency.cached[level] ?? 0;
     const inFlight = residency.inFlight[level] ?? 0;
-    if (p === 0 && cached === 0 && inFlight === 0) continue;
-    tick.addLevel(level, p, cached, inFlight);
+    if (cached === 0 && inFlight === 0) continue;
+    tick.setResidency(level, cached, inFlight);
   }
 
   recorder.commitTick();

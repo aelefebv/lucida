@@ -70,6 +70,16 @@ export type ResidencyTier = "detail" | "coarse";
 export type Lane = "minimap" | "detail" | "coarse" | "prefetch" | "overview";
 
 /**
+ * Resident and in-flight chunk counts per pyramid level, indexed by level.
+ * Sparse levels read as zero. The cache reuses one of these across calls, so
+ * a reader consumes it before the next tick rather than holding onto it.
+ */
+export interface LevelResidency {
+  cached: number[];
+  inFlight: number[];
+}
+
+/**
  * Eviction tier label stamped on each main-store entry. Drives the
  * tier-walk eviction order in {@link import("./eviction.ts").TieredPolicy}.
  * Overview-store entries carry `prefetch` cosmetically; the active /

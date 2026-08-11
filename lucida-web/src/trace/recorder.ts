@@ -23,7 +23,6 @@ import {
   TRACE_SCHEMA_VERSION,
   type ChunkEventSource,
   type ChunkRowSource,
-  type CountedPhase,
   type CountedPhaseIndexValue,
   type EndReason,
   type CacheWarmth,
@@ -47,12 +46,6 @@ import {
  */
 export const INSTRUMENTED_PHASES: readonly Phase[] = ["wire"];
 
-/**
- * Phases that never carry a timing because they sit below the platform's
- * clock floor. They surface as per-tick counts instead, so a reader sees they
- * happened without being shown quantisation noise as if it were data.
- */
-export const COUNTED_PHASE_NAMES: readonly CountedPhase[] = COUNTED_PHASES;
 
 /**
  * How long `quiescent` must hold before a run closes on its own. Clears the
@@ -347,7 +340,7 @@ export class TraceRecorder {
       schemaVersion: TRACE_SCHEMA_VERSION,
       exportedAtEpochMs: this.epochNow(),
       instrumentedPhases: [...INSTRUMENTED_PHASES],
-      countedPhases: [...COUNTED_PHASE_NAMES],
+      countedPhases: [...COUNTED_PHASES],
       runs: this.closed.map<TraceRun>(run => ({
         header: run.header,
         rows: run.sink.serialise(),

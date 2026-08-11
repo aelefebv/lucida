@@ -13,6 +13,7 @@
  * dropped so a wrapped ring is visible rather than inferred.
  */
 
+import { RingSlots } from "./ring.ts";
 import { StringPool } from "./stringPool.ts";
 import {
   POINT_EVENT_KINDS,
@@ -43,6 +44,7 @@ export class EventRing {
   static readonly BYTES_PER_EVENT = (3 + COORDS_PER_EVENT + 1) * 4 + 3;
 
   private readonly strings = new StringPool();
+  private readonly slots: RingSlots;
   private readonly capacity: number;
   private readonly atUs: Uint32Array;
   private readonly datasetIds: Uint32Array;
@@ -55,10 +57,9 @@ export class EventRing {
   /** Zero when the event is not about one chunk. */
   private readonly hasChunk: Uint8Array;
 
-  private written = 0;
-
   constructor(capacity = DEFAULT_EVENT_CAPACITY) {
-    this.capacity = Math.max(1, capacity);
+    this.slots = new RingSlots(capacity);
+    this.capacity = this.slots.capacity;
     this.atUs = new Uint32Array(this.capacity);
     this.datasetIds = new Uint32Array(this.capacity);
     this.entityIds = new Uint32Array(this.capacity);
@@ -71,11 +72,11 @@ export class EventRing {
   }
 
   get dropped(): number {
-    return Math.max(0, this.written - this.capacity);
+    return this.slots.dropped;
   }
 
   get length(): number {
-    return Math.min(this.written, this.capacity);
+    return this.slots.length;
   }
 
   get byteLength(): number {
@@ -89,8 +90,7 @@ export class EventRing {
     chunk: ChunkEventSource | null,
     tier: 0 | 1,
   ): void {
-    const slot = this.written % this.capacity;
-    this.written++;
+    const slot = this.slots.claim();
 
     this.atUs[slot] = atUs;
     this.kinds[slot] = kind;
@@ -121,9 +121,7 @@ export class EventRing {
   /** Oldest-first, matching the tick ring. */
   serialise(): TracePointEvent[] {
     const out: TracePointEvent[] = [];
-    const first = this.written > this.capacity ? this.written - this.capacity : 0;
-    for (let n = first; n < this.written; n++) {
-      const slot = n % this.capacity;
+    for (const slot of this.slots.ordered()) {
       const c = slot * COORDS_PER_EVENT;
       const level = this.coords[c];
       const t = this.coords[c + 1];
