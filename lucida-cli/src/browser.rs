@@ -2,9 +2,10 @@
 //!
 //! One owner for the three things every browser-driving command needs: the
 //! headless launch, CDP evaluation against a loaded page, and waiting until the
-//! viewer has actually rendered. `viewer screenshot`, `dataset montage` (both
-//! its capture pass and its auto-contrast pre-pass) and the trace driver all
-//! route through here rather than carrying a copy each.
+//! viewer has actually rendered. `viewer screenshot` and `dataset montage`
+//! (both its capture pass and its auto-contrast pre-pass) route through here
+//! rather than carrying a copy each, and the trace driver joins them as a
+//! caller rather than a fourth copy.
 //!
 //! Viewport and device pixel ratio are [`Viewport`] parameters, not constants
 //! baked into the launch: screenshot and montage want scale factor 1 because
@@ -17,12 +18,11 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use futures_util::stream::{SplitSink, SplitStream};
-use futures_util::{Sink, SinkExt, Stream, StreamExt};
+use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::process::{Child, Command as TokioCommand};
-use tokio_tungstenite::tungstenite::Error as WebSocketError;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
@@ -188,6 +188,19 @@ impl HeadlessBrowser {
     }
 }
 
+/// Launch a headless browser, run `body` against it, and tear it down whatever
+/// `body` did. Every caller wants this shape, and the teardown is the part that
+/// is easy to forget: a leaked Chrome keeps a throwaway profile on disk.
+pub async fn with_browser<F, T>(viewport: Viewport, wait: Duration, body: F) -> Result<T, CliError>
+where
+    F: AsyncFnOnce(&HeadlessBrowser) -> Result<T, CliError>,
+{
+    let browser = HeadlessBrowser::launch(viewport, wait).await?;
+    let result = body(&browser).await;
+    browser.close().await;
+    result
+}
+
 /// A CDP session attached to one loaded page.
 pub struct Page {
     write: SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
@@ -210,7 +223,7 @@ impl Page {
         };
 
         let created = page
-            .call_raw(
+            .send(
                 None,
                 "Target.createTarget",
                 json!({ "url": "about:blank" }),
@@ -223,7 +236,7 @@ impl Page {
             .ok_or_else(|| CliError::new(ErrorKind::Protocol, "CDP targetId was missing"))?
             .to_string();
         let attached = page
-            .call_raw(
+            .send(
                 None,
                 "Target.attachToTarget",
                 json!({ "targetId": target_id, "flatten": true }),
@@ -238,6 +251,7 @@ impl Page {
         Ok(page)
     }
 
+    /// Send `method` to this page's session and await its reply.
     async fn call(
         &mut self,
         method: &str,
@@ -245,31 +259,93 @@ impl Page {
         wait: Duration,
     ) -> Result<Value, CliError> {
         let session_id = self.session_id.clone();
-        self.call_raw(Some(&session_id), method, params, wait).await
+        self.send(Some(&session_id), method, params, wait).await
     }
 
-    async fn call_raw(
+    /// Send one CDP request and await the reply carrying its id, skipping the
+    /// events that interleave with it. `session_id` is `None` only for the
+    /// browser-level calls that set this page up.
+    async fn send(
         &mut self,
         session_id: Option<&str>,
         method: &str,
         params: Value,
         wait: Duration,
     ) -> Result<Value, CliError> {
-        cdp_call(
-            &mut self.write,
-            &mut self.read,
-            &mut self.next_id,
-            session_id,
-            method,
-            params,
-            wait,
-        )
+        let request_id = self.next_id;
+        self.next_id += 1;
+        let mut message = json!({
+            "id": request_id,
+            "method": method,
+            "params": params,
+        });
+        if let Some(session_id) = session_id {
+            message["sessionId"] = json!(session_id);
+        }
+        self.write
+            .send(Message::Text(message.to_string().into()))
+            .await
+            .map_err(|error| CliError::new(ErrorKind::SessionDisconnect, error.to_string()))?;
+
+        let read = &mut self.read;
+        tokio::time::timeout(wait, async {
+            while let Some(message) = read.next().await {
+                let Message::Text(text) = message.map_err(|error| {
+                    CliError::new(ErrorKind::SessionDisconnect, error.to_string())
+                })?
+                else {
+                    continue;
+                };
+                let value: Value = serde_json::from_str(&text).map_err(|error| {
+                    CliError::new(ErrorKind::Protocol, format!("invalid CDP message: {error}"))
+                })?;
+                if value.get("id").and_then(|value| value.as_u64()) != Some(request_id) {
+                    continue;
+                }
+                if let Some(error) = value.get("error") {
+                    return Err(CliError::new(
+                        ErrorKind::Protocol,
+                        format!("CDP {method} failed: {error}"),
+                    ));
+                }
+                return Ok(value.get("result").cloned().unwrap_or_else(|| json!({})));
+            }
+            Err(CliError::new(
+                ErrorKind::SessionDisconnect,
+                "browser DevTools connection closed",
+            ))
+        })
         .await
+        .map_err(|_| {
+            CliError::new(
+                ErrorKind::SessionDisconnect,
+                format!(
+                    "timed out waiting for CDP {method} after {}s",
+                    wait.as_secs()
+                ),
+            )
+        })?
     }
 
     /// Evaluate `expression` in the page and return its value (JSON `null` when
-    /// the expression produced nothing).
+    /// the expression evaluated to null).
     pub async fn evaluate(&mut self, expression: &str, wait: Duration) -> Result<Value, CliError> {
+        Ok(self
+            .evaluate_value(expression, wait)
+            .await?
+            .unwrap_or(Value::Null))
+    }
+
+    /// Evaluate `expression` and return its value, `None` when the reply
+    /// carried no value at all. The distinction matters to the readiness
+    /// probes: an expression that evaluates to null is a page that has not
+    /// answered yet and is worth re-polling, while a reply with no value is a
+    /// broken evaluation.
+    async fn evaluate_value(
+        &mut self,
+        expression: &str,
+        wait: Duration,
+    ) -> Result<Option<Value>, CliError> {
         let evaluated = self
             .call(
                 "Runtime.evaluate",
@@ -280,8 +356,7 @@ impl Page {
         Ok(evaluated
             .get("result")
             .and_then(|value| value.get("value"))
-            .cloned()
-            .unwrap_or(Value::Null))
+            .cloned())
     }
 
     /// Capture the page as a PNG.
@@ -311,12 +386,12 @@ impl Page {
         let deadline = tokio::time::Instant::now() + wait;
         loop {
             let ready = self
-                .evaluate(
+                .evaluate_value(
                     "document.readyState === 'complete' && !!document.querySelector('canvas')",
                     wait,
                 )
                 .await?;
-            if ready.as_bool().unwrap_or(false) {
+            if ready.as_ref().and_then(Value::as_bool).unwrap_or(false) {
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 return Ok(());
             }
@@ -338,8 +413,8 @@ impl Page {
     async fn wait_for_capture_ready(&mut self, wait: Duration) -> Result<(), CliError> {
         let deadline = tokio::time::Instant::now() + wait;
         loop {
-            let value = self.evaluate(CAPTURE_READY_PROBE, wait).await?;
-            let probe = capture_ready_probe_from_value(&value)?;
+            let value = self.evaluate_value(CAPTURE_READY_PROBE, wait).await?;
+            let probe = capture_ready_probe_from_value(value.as_ref())?;
             if probe.ready {
                 return Ok(());
             }
@@ -509,13 +584,13 @@ struct CaptureReadyProbe {
     mode: Option<String>,
 }
 
-fn capture_ready_probe_from_value(probe: &Value) -> Result<CaptureReadyProbe, CliError> {
-    if probe.is_null() {
-        return Err(CliError::new(
+fn capture_ready_probe_from_value(probe: Option<&Value>) -> Result<CaptureReadyProbe, CliError> {
+    let probe = probe.ok_or_else(|| {
+        CliError::new(
             ErrorKind::Protocol,
             "capture-ready probe result was missing",
-        ));
-    }
+        )
+    })?;
     Ok(CaptureReadyProbe {
         ready: probe
             .get("ready")
@@ -571,72 +646,6 @@ fn ensure_png_signature(bytes: &[u8]) -> Result<(), CliError> {
     ))
 }
 
-async fn cdp_call<W, S>(
-    write: &mut W,
-    read: &mut S,
-    id: &mut u64,
-    session_id: Option<&str>,
-    method: &str,
-    params: Value,
-    wait: Duration,
-) -> Result<Value, CliError>
-where
-    W: Sink<Message, Error = WebSocketError> + Unpin,
-    S: Stream<Item = Result<Message, WebSocketError>> + Unpin,
-{
-    let request_id = *id;
-    *id += 1;
-    let mut message = json!({
-        "id": request_id,
-        "method": method,
-        "params": params,
-    });
-    if let Some(session_id) = session_id {
-        message["sessionId"] = json!(session_id);
-    }
-    write
-        .send(Message::Text(message.to_string().into()))
-        .await
-        .map_err(|error| CliError::new(ErrorKind::SessionDisconnect, error.to_string()))?;
-
-    tokio::time::timeout(wait, async {
-        while let Some(message) = read.next().await {
-            let Message::Text(text) = message
-                .map_err(|error| CliError::new(ErrorKind::SessionDisconnect, error.to_string()))?
-            else {
-                continue;
-            };
-            let value: Value = serde_json::from_str(&text).map_err(|error| {
-                CliError::new(ErrorKind::Protocol, format!("invalid CDP message: {error}"))
-            })?;
-            if value.get("id").and_then(|value| value.as_u64()) != Some(request_id) {
-                continue;
-            }
-            if let Some(error) = value.get("error") {
-                return Err(CliError::new(
-                    ErrorKind::Protocol,
-                    format!("CDP {method} failed: {error}"),
-                ));
-            }
-            return Ok(value.get("result").cloned().unwrap_or_else(|| json!({})));
-        }
-        Err(CliError::new(
-            ErrorKind::SessionDisconnect,
-            "browser DevTools connection closed",
-        ))
-    })
-    .await
-    .map_err(|_| {
-        CliError::new(
-            ErrorKind::SessionDisconnect,
-            format!(
-                "timed out waiting for CDP {method} after {}s",
-                wait.as_secs()
-            ),
-        )
-    })?
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -665,7 +674,7 @@ mod tests {
 
     #[test]
     fn capture_ready_probe_parser_distinguishes_ready_and_waiting_results() {
-        let ready = capture_ready_probe_from_value(&json!({
+        let ready = capture_ready_probe_from_value(Some(&json!({
             "ready": true,
             "reason": "rendered",
             "frame_count": 12,
@@ -673,13 +682,13 @@ mod tests {
             "canvas_width": 512,
             "canvas_height": 512,
             "mode": "2d"
-        }))
+        })))
         .unwrap();
         assert!(ready.ready);
         assert_eq!(ready.reason, "rendered");
         assert_eq!(ready.frame_count, 12);
 
-        let waiting = capture_ready_probe_from_value(&json!({
+        let waiting = capture_ready_probe_from_value(Some(&json!({
             "ready": false,
             "reason": "dataset_added_waiting_for_render",
             "frame_count": 0,
@@ -687,17 +696,24 @@ mod tests {
             "canvas_width": 512,
             "canvas_height": 512,
             "mode": null
-        }))
+        })))
         .unwrap();
         assert!(!waiting.ready);
         assert_eq!(waiting.mode, None);
         assert!(capture_ready_probe_summary(&waiting).contains("dataset_added_waiting_for_render"));
     }
 
+    /// A reply with no value at all is a broken evaluation, but an expression
+    /// that evaluated to null is a page that has not answered yet — the
+    /// readiness wait must keep polling rather than abort.
     #[test]
-    fn capture_ready_probe_parser_rejects_a_missing_result() {
-        let error = capture_ready_probe_from_value(&Value::Null).unwrap_err();
-        assert!(error.to_string().contains("capture-ready probe"));
+    fn capture_ready_probe_parser_separates_a_missing_reply_from_a_null_one() {
+        let error = capture_ready_probe_from_value(None).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Protocol);
+
+        let null_probe = capture_ready_probe_from_value(Some(&Value::Null)).unwrap();
+        assert!(!null_probe.ready);
+        assert_eq!(null_probe.reason, "unknown");
     }
 
     #[test]

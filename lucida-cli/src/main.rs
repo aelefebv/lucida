@@ -38,7 +38,7 @@ use crate::admin::{
 use crate::auth::{
     AuthClient, LoginResult, PollOutcome, generate_raw_token, open_browser, poll_interval,
 };
-use crate::browser::{HeadlessBrowser, Viewport};
+use crate::browser::Viewport;
 use crate::config::{CliConfig, ConfigStore, normalize_server_base_url, resolve_server};
 use crate::credentials::{EffectiveToken, clear_local_token, resolve_token, store_local_token};
 use crate::dataset::{
@@ -3533,8 +3533,7 @@ async fn capture_viewer_screenshot(
         ));
     }
 
-    let browser = HeadlessBrowser::launch(capture_viewport(width, height), wait).await?;
-    let result = async {
+    browser::with_browser(capture_viewport(width, height), wait, async |browser| {
         let mut page = browser.open_page(url, token, wait).await?;
         let png = page.screenshot_png(wait).await?;
         if let Some(parent) = Path::new(output_path).parent()
@@ -3543,12 +3542,9 @@ async fn capture_viewer_screenshot(
             tokio::fs::create_dir_all(parent).await?;
         }
         tokio::fs::write(output_path, png).await?;
-        Ok::<(), CliError>(())
-    }
-    .await;
-
-    browser.close().await;
-    result
+        Ok(())
+    })
+    .await
 }
 
 /// Viewport for the image-producing captures (`viewer screenshot`,
@@ -3571,19 +3567,15 @@ async fn capture_montage_pngs(
     if urls.is_empty() {
         return Err(CliError::config("montage has no cells to render"));
     }
-    let browser = HeadlessBrowser::launch(capture_viewport(width, height), wait).await?;
-    let result = async {
+    browser::with_browser(capture_viewport(width, height), wait, async |browser| {
         let mut pngs = Vec::with_capacity(urls.len());
         for url in urls {
             let mut page = browser.open_page(url, token, wait).await?;
             pngs.push(page.screenshot_png(wait).await?);
         }
-        Ok::<Vec<Vec<u8>>, CliError>(pngs)
-    }
-    .await;
-
-    browser.close().await;
-    result
+        Ok(pngs)
+    })
+    .await
 }
 
 /// Reads back the dataset's auto-contrast data window, which the web app
@@ -3610,16 +3602,12 @@ async fn probe_montage_auto_contrast(
     height: u32,
     wait: Duration,
 ) -> Result<Option<[f64; 2]>, CliError> {
-    let browser = HeadlessBrowser::launch(capture_viewport(width, height), wait).await?;
-    let result = async {
+    browser::with_browser(capture_viewport(width, height), wait, async |browser| {
         let mut page = browser.open_page(url, token, wait).await?;
         let value = page.evaluate(AUTO_CONTRAST_PROBE, wait).await?;
-        Ok::<Option<[f64; 2]>, CliError>(parse_auto_contrast_window(&value))
-    }
-    .await;
-
-    browser.close().await;
-    result
+        Ok(parse_auto_contrast_window(&value))
+    })
+    .await
 }
 
 async fn emit_layout_command(
