@@ -63,17 +63,6 @@ export interface ProxyStoreOptions {
   recordEviction: () => void;
 }
 
-/** Per-entry dump record (mirrors `getProxyCacheDump`). */
-export interface ProxyStoreDumpEntry {
-  datasetId: string;
-  entityId: string;
-  proxyKind: "GroupProxy3D" | "TileProxy3D";
-  t: number;
-  c: number;
-  bytes: number;
-  insertedAt: number;
-}
-
 /**
  * Compose the inner proxy cache key. Entries are partitioned per-dataset
  * (outer Map) so dataset removal can drop the whole subtree at once.
@@ -204,25 +193,6 @@ export class ProxyStore {
   reset(): void {
     this.store.clear();
     this.bytesCounter = 0;
-  }
-
-  /** Per-entry dump for the DebugPanel. */
-  dump(): ProxyStoreDumpEntry[] {
-    const out: ProxyStoreDumpEntry[] = [];
-    for (const [datasetId, inner] of this.store) {
-      for (const e of inner.values()) {
-        out.push({
-          datasetId,
-          entityId: e.entityId,
-          proxyKind: e.proxyKind,
-          t: e.t,
-          c: e.c,
-          bytes: e.bytes,
-          insertedAt: e.insertedAt,
-        });
-      }
-    }
-    return out;
   }
 
   /** Aggregate `{count, bytes}` — used by telemetry's `tierResidency.proxy`. */

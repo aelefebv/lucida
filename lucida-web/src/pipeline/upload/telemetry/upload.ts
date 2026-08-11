@@ -3,12 +3,13 @@
  * per-tick aggregates), a bounded size sketch, cumulative counters, and
  * two sustained-anomaly detectors. `publish` aggregates, derives
  * `UploadRollingStats` and fires anomaly logs.
+ *
+ * The two window shapes below used to live in `debug/debugStats.ts`
+ * beside the sink a debug panel polled. Both are gone (ADR 0049's gate,
+ * then ADR 0052's teardown) and the shapes came here, to the module that
+ * derives them; their remaining consumer is the `orch` log category.
  */
 
-import type {
-  UploadTickStats,
-  UploadRollingStats,
-} from "../../../debug/debugStats.ts";
 import { debugLog } from "../../../debug/logging.ts";
 import {
   UPLOAD_BUDGET_EXHAUSTED_STREAK_THRESHOLD,
@@ -23,6 +24,85 @@ import {
   SustainedCondition,
 } from "./sustained.ts";
 import { TimeWindow } from "./timeWindow.ts";
+
+/**
+ * Per-tick `deliverToWorker` snapshot. Resets at the start of each
+ * call; published at the end.
+ */
+export interface UploadTickStats {
+  /** Deliverable items considered from `cpuCache.getDeliverable()` this tick. */
+  drainedChunks: number;
+  drainedProxies: number;
+  /** Items actually posted to the worker this tick. */
+  uploadedChunks: number;
+  uploadedProxies: number;
+  /** Bytes actually posted (from delivery `data.byteLength`). */
+  bytesUploaded: number;
+  /** Upload byte budget passed in by the caller. */
+  bytesBudget: number;
+  /**
+   * Upload stopped early because remaining budget hit zero. NOT a
+   * function of bytesUploaded reaching bytesBudget: a single chunk
+   * larger than remaining will still be uploaded and trigger this.
+   */
+  budgetExhausted: boolean;
+  // Skip reasons during the delivery pass (one entry per considered item):
+  /** Lane was `prefetch` — pre-cached for future timepoint. */
+  skippedPrefetch: number;
+  /** Lane was `overview` — minimap path owns these. */
+  skippedOverview: number;
+  /** Chunk level didn't match `targetLevelByImage[imageId]`. Stale plan. */
+  skippedWrongLod: number;
+  /** Chunk already in CpuCache delivery sent state for the worker memberId. */
+  skippedAlreadySent: number;
+  /** Couldn't resolve dataset/imageSpec/level meta — should be ~0; bug indicator. */
+  skippedNoMeta: number;
+}
+
+/**
+ * 1s rolling upload stats. Computed by pruning a per-event log to a
+ * 1s window. NaN ratios mean "no events in window".
+ */
+export interface UploadRollingStats {
+  /** Bytes/sec across all uploads in the last 1s. */
+  bytesPerSec: number;
+  /** Uploads/sec (chunks + proxies). */
+  uploadsPerSec: number;
+  /** Chunk uploads/sec in the last 1s. */
+  chunkUploadsPerSec: number;
+  /** Proxy uploads/sec in the last 1s. */
+  proxyUploadsPerSec: number;
+  /**
+   * Ratio of *upload-bound* considered chunks that were filtered out:
+   * `(skippedWrongLod + skippedAlreadySent + skippedNoMeta) /
+   *  (drainedChunks − skippedPrefetch − skippedOverview)`.
+   *
+   * Excludes prefetch (cache-only by design), overview (minimap path),
+   * and proxies (separate atlas, never skipped). High = real
+   * planning / wanted-set sync issue — chunks the orch *meant* to
+   * upload to the main GPU atlas got filtered.
+   */
+  filterRatio: number;
+  /** p50 / p95 of upload byte sizes over the last N samples. */
+  uploadSizeP50: number | null;
+  uploadSizeP95: number | null;
+  // Cumulative since session start
+  totalBytes: number;
+  totalUploads: number;
+  /** Number of `deliverToWorker` calls in window where budgetExhausted=true. */
+  budgetExhaustedTicksLastSecond: number;
+}
+
+export function emptyUploadTickStats(): UploadTickStats {
+  return {
+    drainedChunks: 0, drainedProxies: 0,
+    uploadedChunks: 0, uploadedProxies: 0,
+    bytesUploaded: 0, bytesBudget: 0,
+    budgetExhausted: false,
+    skippedPrefetch: 0, skippedOverview: 0, skippedWrongLod: 0,
+    skippedAlreadySent: 0, skippedNoMeta: 0,
+  };
+}
 
 /** Per-tick aggregate stored in the rolling window. */
 interface TickWindowEntry {

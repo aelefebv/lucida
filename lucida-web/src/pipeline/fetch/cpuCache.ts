@@ -850,17 +850,6 @@ export class CpuCache {
   }
 
   /**
-   * Whether a planned chunk has already been posted to the worker (per
-   * the optimistic delivery ledger) for its residency tier. Feeds the
-   * per-member sent counts in the debug panel.
-   */
-  isChunkSent(req: ChunkRequest): boolean {
-    return this.deliveryState.wasChunkSent(
-      req.imageId, req.c, req.chunkKey, this.requestResidencyTier(req),
-    );
-  }
-
-  /**
    * `reason` is the renderer's own account of why the chunks came back — its
    * chunk feedback vocabulary, forwarded rather than re-derived, so the trace
    * can distinguish an atlas eviction from a stale epoch or a radius filter.
@@ -1149,65 +1138,6 @@ export class CpuCache {
 
   getPendingProxySnapshot(): readonly ProxyRequest[] {
     return this.proxyScheduler.pendingSnapshot();
-  }
-
-  getCacheDump(): Array<{
-    entityId: string;
-    cache: "main" | "overview";
-    level: number;
-    tier: EvictionTier;
-    bytes: number;
-    chunkKey: string;
-    insertedAt: number;
-  }> {
-    return [
-      ...this.chunkStore.dump().map(e => ({ ...e, cache: "main" as const })),
-      ...this.overviewStore.dump().map(e => ({ ...e, cache: "overview" as const })),
-    ];
-  }
-
-  getProxyCacheDump(): Array<{
-    datasetId: string;
-    entityId: string;
-    proxyKind: "GroupProxy3D" | "TileProxy3D";
-    t: number;
-    c: number;
-    bytes: number;
-    insertedAt: number;
-  }> {
-    return this.proxyStore.dump();
-  }
-
-  /**
-   * Per-entry state for the starvation panel.
-   *
-   * `admitted` distinguishes the scheduler's admission window from the
-   * backlog behind it (ADR 0044). Only admitted entries carry an
-   * admission timestamp, so `ageMs` is `null` — not zero — for backlog
-   * entries: they have been waiting at least as long as the oldest
-   * admitted one, and reporting 0 would paint a deeply oversubscribed
-   * queue as a healthy one on exactly the case the panel exists for.
-   */
-  getPendingDump(): Array<{
-    chunkKey: string;
-    entityId: string;
-    lane: Lane;
-    priority: number;
-    ageMs: number | null;
-    admitted: boolean;
-  }> {
-    const now = performance.now();
-    return this.chunkScheduler.pendingSnapshot().map(r => {
-      const enq = this.chunkScheduler.enqueueTimeFor(this.inFlightKey(r));
-      return {
-        chunkKey: r.chunkKey,
-        entityId: r.entityId,
-        lane: r.lane,
-        priority: r.priority,
-        ageMs: enq !== undefined ? now - enq : null,
-        admitted: enq !== undefined,
-      };
-    });
   }
 
   subscribe(listener: () => void): () => void {

@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { UploadTelemetry } from "./upload.ts";
 import {
+  UploadTelemetry,
   emptyUploadTickStats,
   type UploadTickStats,
   type UploadRollingStats,
-} from "../../../debug/debugStats.ts";
+} from "./upload.ts";
 // The `debug` category set lives in `localStorage`, which is undefined in the
 // default vitest node environment. The detector tests stub a minimal
 // in-memory `localStorage` shim before importing so the gate opens.
@@ -311,8 +311,8 @@ describe("UploadTelemetry — shape regression", () => {
    * Run a known sequence of recordEvent + publish calls and assert the
    * produced `UploadRollingStats` shape (every key, in order) matches
    * the expected snapshot. Safety net: if the module starts dropping or
-   * renaming a tile, this test catches it before downstream consumers
-   * (the debug panel) break.
+   * renaming a tile, this test catches it before the `orch` log
+   * category — its remaining consumer — starts lying.
    */
   it("preserves the full UploadRollingStats key set", () => {
     const tel = new UploadTelemetry();

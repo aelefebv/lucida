@@ -34,6 +34,12 @@ const width = req.width || 1600, height = req.height || 1000, dpr = req.device_s
 const readyWaitMs = req.ready_wait_ms || 240000;
 const settleMs = req.settle_ms || 8000;
 const windowMs = req.window_ms || 10000;
+// 'frames' counts rendered frames (the sink A/B). 'heap' additionally reports
+// post-GC live JS heap at the end of the same drive — the net non-regression
+// ledger's measurement 2, whose arms are the tree before the debug-surface
+// teardown against the tree after it. Heap is what settles that one because
+// the 1.05 MB floor it is compared against is a heap figure.
+const mode = req.mode || 'frames';
 
 function readyProbe() {
   const canvas = document.querySelector('canvas');
@@ -88,6 +94,21 @@ async function drive(page, ms) {
   return t;
 }
 
+// Post-GC live JS heap, read over CDP rather than `performance.memory`:
+// `Runtime.getHeapUsage` reports exact bytes where `usedJSHeapSize` is
+// quantised to 100 kB, and the figure being compared is a few hundred kB.
+// Collected three times and reduced to the minimum — one collection can leave
+// objects a second pass reclaims, and the floor is the live set.
+async function liveHeapBytes(cdp) {
+  const samples = [];
+  for (let i = 0; i < 3; i++) {
+    await cdp.send('HeapProfiler.collectGarbage');
+    const usage = await cdp.send('Runtime.getHeapUsage');
+    samples.push(Number(usage.usedSize));
+  }
+  return { used_bytes: Math.min(...samples), samples };
+}
+
 (async () => {
   const messages = [];
   let browser = null;
@@ -136,6 +157,7 @@ async function drive(page, ms) {
     }
     result.trace_seam_schema = await page.evaluate(seam);
 
+    result.mode = mode;
     const before = await page.evaluate(frames);
     const t0 = Date.now();
     result.drag_target = await drive(page, windowMs);
@@ -145,6 +167,12 @@ async function drive(page, ms) {
     result.frames = after - before;
     result.elapsed_ms = elapsed;
     result.fps = (after - before) / (elapsed / 1000);
+
+    if (mode === 'heap') {
+      const cdp = await context.newCDPSession(page);
+      await cdp.send('HeapProfiler.enable');
+      result.heap = await liveHeapBytes(cdp);
+    }
     await page.screenshot({ path: outDir + '/' + arm + '.png' });
     fs.writeFileSync(outDir + '/' + arm + '-console.log', messages.join('\n'));
     result.ok = true;

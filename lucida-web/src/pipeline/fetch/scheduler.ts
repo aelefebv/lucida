@@ -189,6 +189,13 @@ export class Scheduler<Req extends SchedulableRequest> {
     return now - oldest;
   }
 
+  /**
+   * The admission stamp for one key, or `undefined` for a backlog entry
+   * that has never been admitted (ADR 0044). No production caller since
+   * the debug panel's pending dump went with it (ADR 0052) — this is the
+   * seam the admission-window tests observe `enqueuedAt` through, which
+   * `oldestPendingAgeMs` and `admittedSize` only aggregate.
+   */
   enqueueTimeFor(key: string): number | undefined {
     return this.enqueuedAt.get(key);
   }

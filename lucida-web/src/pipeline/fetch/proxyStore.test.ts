@@ -272,27 +272,4 @@ describe("ProxyStore residency reporting", () => {
     expect(store.totalResidency()).toEqual({ count: 3, bytes: 250 });
   });
 
-  it("dump returns one entry per cached proxy with the expected shape", () => {
-    const { store } = makeStore();
-    store.insert("ds-1", "e-1|TileProxy3D|0|0", makeProxyEntry({
-      bytes: 256,
-      datasetId: "ds-1",
-      entityId: "e-1",
-      proxyKind: "TileProxy3D",
-      t: 0,
-      c: 0,
-      insertedAt: 42,
-    }));
-    const dump = store.dump();
-    expect(dump).toHaveLength(1);
-    expect(dump[0]).toEqual({
-      datasetId: "ds-1",
-      entityId: "e-1",
-      proxyKind: "TileProxy3D",
-      t: 0,
-      c: 0,
-      bytes: 256,
-      insertedAt: 42,
-    });
-  });
 });

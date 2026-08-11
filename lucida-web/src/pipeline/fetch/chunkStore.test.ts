@@ -344,23 +344,6 @@ describe("ChunkStore residency reporting", () => {
     expect(store.totalResidency()).toEqual({ count: 2, bytes: 100 });
   });
 
-  it("dump returns one entry per cached chunk with the expected shape", () => {
-    const { store } = makeMainStore();
-    store.insert(makeEntry({
-      sizeBytes: 64, entityId: "e-1", chunkKey: "k-1",
-      level: 2, tier: "active-detail", insertedAt: 5,
-    }));
-    const dump = store.dump();
-    expect(dump).toHaveLength(1);
-    expect(dump[0]).toEqual({
-      entityId: "e-1",
-      level: 2,
-      tier: "active-detail",
-      bytes: 64,
-      chunkKey: "k-1",
-      insertedAt: 5,
-    });
-  });
 });
 
 // ---------------------------------------------------------------------------
