@@ -272,11 +272,7 @@ export function tickVolume(
   const eye = new Float32Array(scene.eye_position());
 
   if (debugStats.enabled) {
-    const firstDsId = orchResult.settings.layerOrder[0];
-    if (firstDsId) {
-      const lodInfo = scene.debug_lod_info(firstDsId);
-      debugStats.effectiveZoom = lodInfo[0];
-    }
+    debugStats.effectiveZoom = scene.debug_effective_zoom();
     debugStats.activeChannels = orchResult.multiChannel
       ? getActiveChannels(orchResult.settings.allSettings[orchResult.settings.layerOrder[0]]).length
       : 1;

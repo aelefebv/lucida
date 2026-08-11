@@ -16,7 +16,7 @@ export interface MemberStat {
 
 /**
  * Upper bound on rows in any per-member debug ARRAY (`memberStats`,
- * `orch.members`, `orch.activeSet`). A wide collection has tens of
+ * `orch.activeSet`). A wide collection has tens of
  * thousands of members; building (and letting the panel copy/render)
  * unbounded per-member rows freezes the page for seconds. Scalar totals
  * next to each array keep reporting the full population.
@@ -111,7 +111,11 @@ export interface OrchDebug {
   }>;
   /** Full active-set size (the `activeSet` array above is row-capped). */
   activeSetTotal: number;
-  /** Mode tallies over the FULL active set (not just the capped rows). */
+  /**
+   * Mode tallies over the FULL active set (not just the capped rows).
+   * Invisible entries have no promotion mode and are counted in none of
+   * these, so the three sum to at most `activeSetTotal`.
+   */
   activeSetModeCounts: {
     groupAsProxy: number;
     tilesProxyFallback: number;
