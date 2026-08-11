@@ -186,8 +186,12 @@ pub enum TimingRowFamily {
 ///   different open from one whose reads are mostly round trips.
 /// - [`CoalescedWait`](Self::CoalescedWait) — this read attached to another
 ///   reader's in-flight read and performed none of its own. The round trip
-///   belongs to the leader's row, so summing the round trips over a family
-///   filtered to this phase's complement counts each one exactly once.
+///   belongs to the leader's row, so counting an open's round trips means
+///   counting its [`BackendRead`](Self::BackendRead) rows. Note what that
+///   number is: the trips *this open* performed. A leader can be another
+///   open, or a caller that is no open at all, in which case a wait here
+///   has no trip anywhere in this open's rows — the read still happened,
+///   it was simply not this open that paid for it.
 /// - [`BackendRead`](Self::BackendRead) — this read performed the round
 ///   trip, and waited behind the metadata-read cap to do it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

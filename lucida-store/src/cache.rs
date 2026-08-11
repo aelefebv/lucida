@@ -658,7 +658,7 @@ impl CachedStore {
                 // fall back to a direct backend read: this waiter still gets a
                 // real answer and the path is not wedged.
                 Err(_) => {
-                    self.fetch_from_backend(path, &key, class, reader, label)
+                    self.fetch_from_backend(path, &key, class, reader, label, started)
                         .await
                 }
             };
@@ -671,7 +671,7 @@ impl CachedStore {
         // exactly once; the guard's `Drop` is then a no-op.
         let mut guard = LeaderGuard::new(&self.in_flight, key.clone());
         let result = self
-            .fetch_from_backend(path, &key, class, reader, label)
+            .fetch_from_backend(path, &key, class, reader, label, started)
             .await;
         guard.complete(&result);
         result
@@ -736,6 +736,11 @@ impl CachedStore {
         class: ReadClass,
         reader: ReaderId,
         label: RequestLabel,
+        // When the *caller* asked, for a metadata read's row. A leader row
+        // and a follower row are then measured from the same origin, which
+        // is what makes the two comparable at all; the cache's own counters
+        // keep their own clock below.
+        called_at: Option<std::time::Instant>,
     ) -> Result<Bytes, object_store::Error> {
         // Timed from here, before the permit is acquired: queueing behind our
         // own concurrency cap is part of what a caller waits for, and leaving
@@ -776,7 +781,7 @@ impl CachedStore {
         };
         let elapsed_nanos = started.elapsed().as_nanos();
 
-        if class.is_metadata() {
+        if let Some(called_at) = called_at {
             // An optional object that is simply not there answered the
             // question it was asked, so it is not a failed read — the same
             // rule the backend-error counter below applies.
@@ -784,7 +789,7 @@ impl CachedStore {
                 && matches!(fetch, Err(object_store::Error::NotFound { .. }));
             metadata_reads::record(
                 MetadataReadPhase::BackendRead,
-                started,
+                called_at,
                 fetch.is_err() && !absent_as_expected,
             );
         }

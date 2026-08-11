@@ -307,7 +307,12 @@ export class TraceRecorder {
   noteQuiescence(state: QuiescenceState): void {
     this.lastQuiescence = state;
     if (!this.open) return;
-    if (!state.quiescent) {
+    // An unsettled dataset open holds the run open, whatever the page's
+    // predicate says. Before the first chunk exists the pipeline is
+    // trivially quiescent — nothing dirty, nothing wanted — so a cold open
+    // would otherwise close its own run 500 ms in and discard the metadata
+    // reads it is still waiting on, which is the whole of a cold open.
+    if (!state.quiescent || this.hasUnsettledOpen()) {
       this.clearHoldTimer();
       return;
     }
@@ -481,6 +486,21 @@ export class TraceRecorder {
     // stray progress frame — must not move an end that already happened.
     if (!open || open.endUs !== null) return;
     open.endUs = this.offsetUs(run, this.now());
+    // The open was the only thing holding the run; re-read the page's last
+    // published state so a run that has been quiescent all along can now
+    // start its hold rather than waiting for the next tick that may never
+    // come.
+    if (this.lastQuiescence) this.noteQuiescence(this.lastQuiescence);
+  }
+
+  /** Whether any open this run brackets is still in flight. */
+  private hasUnsettledOpen(): boolean {
+    const run = this.open;
+    if (!run) return false;
+    for (const open of run.datasetOpens.values()) {
+      if (open.endUs === null) return true;
+    }
+    return false;
   }
 
   /**

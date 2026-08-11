@@ -495,6 +495,58 @@ describe("TraceRecorder dataset opens", () => {
     expect(run.datasetOpensDropped).toBe(6);
   });
 
+  it("holds the run open while an open is unsettled, or a cold open discards its own rows", () => {
+    vi.useFakeTimers();
+    try {
+      const { recorder, advance } = makeRecorder();
+      recorder.noteOpenSent("req-1");
+      // Before the first chunk exists the pipeline is trivially quiescent:
+      // nothing dirty, nothing wanted, nothing in flight. The server is
+      // several seconds into reading metadata.
+      recorder.noteQuiescence(evaluateQuiescence(inputs(), 1_000));
+      advance(4_000);
+      vi.advanceTimersByTime(4_000);
+      expect(recorder.isRunOpen).toBe(true);
+
+      recorder.ingestServerBatch(metadataBatch(3_000_000, 900_000), 1);
+      recorder.noteOpenSettled("req-1");
+      // Settling re-reads the page's last published state, so the hold
+      // starts here rather than at the next tick, which may never come.
+      vi.advanceTimersByTime(500);
+      expect(recorder.isRunOpen).toBe(false);
+
+      const [run] = recorder.exportDocument().runs;
+      expect(run.header.endReason).toBe("quiescent");
+      // The rows the open produced are inside the run, which is the point.
+      expect(run.serverRows).toHaveLength(1);
+      expect(run.serverRows[0].placement?.startUs).toBe(3_000_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still times out a run whose open never settles", () => {
+    vi.useFakeTimers();
+    try {
+      const { recorder } = makeRecorder();
+      recorder.noteOpenSent("req-1");
+      recorder.noteQuiescence(evaluateQuiescence(inputs(), 1_000));
+      // An unsettled open holds off quiescence, not the timeout: a run that
+      // never finishes is the most diagnostic one there is, and it has to
+      // be emitted rather than held open forever.
+      vi.advanceTimersByTime(4_999);
+      expect(recorder.isRunOpen).toBe(true);
+      vi.advanceTimersByTime(1);
+      expect(recorder.isRunOpen).toBe(false);
+
+      const [run] = recorder.exportDocument().runs;
+      expect(run.header.endReason).toBe("timeout");
+      expect(run.datasetOpens[0].endUs).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("ignores a second settle, so a straggler cannot move an end that happened", () => {
     const { recorder, advance } = makeRecorder();
     recorder.noteOpenSent("req-1");
