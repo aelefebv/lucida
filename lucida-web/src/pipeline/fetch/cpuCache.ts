@@ -35,6 +35,9 @@ import {
   type ProxyEvictable,
 } from "./proxyStore.ts";
 import { Scheduler, type SchedulableRequest } from "./scheduler.ts";
+import { traceRecorder } from "../../trace/recorder.ts";
+import { Boundary, RowOutcome } from "../../trace/types.ts";
+import type { CacheQuiescenceInputs } from "../../trace/quiescence.ts";
 import {
   classifyFetchError,
   NeverRetry,
@@ -92,6 +95,14 @@ export const CHUNK_FAILURE_STREAK_THRESHOLD = 10;
  *  persists — an aggregate signal, never per-chunk spam. */
 export const CHUNK_FAILURE_NOTIFY_INTERVAL_MS = 15_000;
 export const INTERACTION_MODE_WINDOW = 10;
+/**
+ * How deep the pending queue may be before {@link CpuCache.quiescenceInputs}
+ * stops classifying it by lane. The predicate runs on the tick path and an
+ * oversubscribed remote collection queues tens of thousands of requests, so
+ * the scan is bounded; past this depth the answer is "not quiescent",
+ * declared rather than guessed.
+ */
+const QUIESCENCE_PENDING_SCAN_CAP = 4096;
 const SPARSE_DETAIL_MIN_DESIRED_CHUNKS = 4;
 const SPARSE_DETAIL_COVERAGE_RATIO = 0.25;
 const SPARSE_DETAIL_STREAK_THRESHOLD = 3;
@@ -246,7 +257,15 @@ export class CpuCache {
 
   /** Plan-rebuild generation stamped onto wanted cache entries. */
   private currentSubmitTick = 0;
+  /**
+   * Detail keys the VIEW asked for this tick. Speculative prefetch-lane
+   * demand is deliberately not counted here — it lands in
+   * {@link speculativeDetailKeysThisTick} instead — so both detail coverage
+   * and the quiescence predicate measure what is actually being looked at.
+   */
   private desiredDetailKeysThisTick = new Set<string>();
+  /** Prefetch-lane detail demand: future timepoints nobody is looking at yet. */
+  private speculativeDetailKeysThisTick = new Set<string>();
   private desiredCoarseKeysThisTick = new Set<string>();
   /**
    * Keys demanded by the VIEW's own coarse lane this tick (a strict
@@ -416,7 +435,11 @@ export class CpuCache {
       tiers[i] = tier;
       if (unwantedInFlightKeys.size > 0) unwantedInFlightKeys.delete(key);
       if (tier === "detail") {
-        this.desiredDetailKeysThisTick.add(key);
+        if (req.lane === "prefetch") {
+          this.speculativeDetailKeysThisTick.add(key);
+        } else {
+          this.desiredDetailKeysThisTick.add(key);
+        }
       } else if (tier === "coarse") {
         this.desiredCoarseKeysThisTick.add(key);
         if (req.lane === "coarse") this.viewCoarseKeysThisTick.add(key);
@@ -699,6 +722,7 @@ export class CpuCache {
     this.activeEntityIdsThisRebuild = new Set();
     this.currentSubmitTick++;
     this.desiredDetailKeysThisTick.clear();
+    this.speculativeDetailKeysThisTick.clear();
     this.desiredCoarseKeysThisTick.clear();
     this.viewCoarseKeysThisTick.clear();
     this.sparseDetailStreak = 0;
@@ -885,6 +909,51 @@ export class CpuCache {
     };
   }
 
+  /**
+   * The cache's half of the published quiescence predicate (ADR 0051):
+   * everything the view asked for is resident, with nothing pending or in
+   * flight. Speculative prefetch is reported separately and never counted
+   * against the predicate — the prefetch lane keeps requesting future
+   * timepoints, so on a timeseries a naive "queues empty" test may never go
+   * true — but what is still outstanding is reported rather than hidden.
+   *
+   * `pendingUnclassified` is set when the pending queue is deeper than
+   * {@link QUIESCENCE_PENDING_SCAN_CAP}. That bounds the scan to the tick it
+   * runs in, and reads as *not* quiescent, so a deep queue keeps a run open
+   * rather than closing one early on a guess.
+   */
+  quiescenceInputs(): CacheQuiescenceInputs {
+    const demand = this.computeTierDemandTelemetry();
+
+    let inFlight = this.proxyScheduler.inFlightSize;
+    let speculativeInFlight = 0;
+    for (const [, entry] of this.chunkScheduler.inFlightEntries()) {
+      if (entry.request.lane === "prefetch") speculativeInFlight++;
+      else inFlight++;
+    }
+
+    const speculativePending = this.chunkScheduler.countPending(
+      req => req.lane === "prefetch",
+      QUIESCENCE_PENDING_SCAN_CAP,
+    );
+    const pending =
+      speculativePending === null
+        ? null
+        : this.chunkScheduler.pendingSize - speculativePending + this.proxyScheduler.pendingSize;
+
+    return {
+      desiredDetailChunks: demand.desired.detailChunks,
+      residentDetailChunks: demand.resident.detailChunks,
+      desiredCoarseChunks: demand.desired.coarseChunks,
+      residentCoarseChunks: demand.resident.coarseChunks,
+      pending: pending ?? this.chunkScheduler.pendingSize + this.proxyScheduler.pendingSize,
+      inFlight,
+      speculativePending: speculativePending ?? 0,
+      speculativeInFlight,
+      pendingUnclassified: speculativePending === null,
+    };
+  }
+
   updateConfig(partial: Partial<CpuCacheConfig>): void {
     Object.assign(this.config, partial);
     if (partial.now) this.now = partial.now;
@@ -1021,6 +1090,7 @@ export class CpuCache {
 
     this.activeEntityIds.clear();
     this.activeEntityIdsThisRebuild.clear();
+    this.speculativeDetailKeysThisTick.clear();
     this.viewCoarseKeysThisTick.clear();
     this.interactionDetector.reset();
     this.permanentFailures.clear();
@@ -1053,6 +1123,16 @@ export class CpuCache {
     startedEpochs: SceneEpochs = { ...this.currentEpochs },
     fedStreak = false,
   ): Promise<void> {
+    // The `wire` phase: request sent → bytes in hand. One row per attempt,
+    // so an in-fetch retry retires its row and the next attempt opens a
+    // fresh one rather than overwriting the first attempt's timings. This
+    // is the bracket the server's own rows nest inside once they arrive.
+    const traceRow = traceRecorder.beginChunkRow(
+      req,
+      this.requestResidencyTier(req) === "coarse" ? 1 : 0,
+    );
+    traceRecorder.stamp(traceRow, Boundary.WireStart);
+
     let result: FetchResult;
     try {
       result = await this.source.fetch(
@@ -1060,6 +1140,7 @@ export class CpuCache {
         controller.signal,
       );
     } catch (err: unknown) {
+      traceRecorder.finishRow(traceRow, RowOutcome.Retired);
       const fe = classifyFetchError(err);
 
       if (fe.kind === "abort" || fe.kind === "pending") {
@@ -1118,6 +1199,12 @@ export class CpuCache {
       }
       return;
     }
+
+    // Boundary 3 closes `wire` and opens `decode` — adjacent phases share
+    // the slot between them. `decode` itself is unstamped until #925, so the
+    // row completes at its last instrumented boundary.
+    traceRecorder.stamp(traceRow, Boundary.DecodeStart);
+    traceRecorder.finishRow(traceRow, RowOutcome.Complete);
 
     this.counters.recordCompletedFetch(result.bytes.byteLength);
     // Correct the in-flight byte estimate only while this settle still owns

@@ -160,6 +160,21 @@ export class Scheduler<Req extends SchedulableRequest> {
     return [...this.pending];
   }
 
+  /**
+   * How many pending entries match `predicate`, without copying the queue.
+   * Returns `null` when the queue is deeper than `cap`: the caller runs this
+   * on the tick path, so the scan is bounded rather than proportional to a
+   * backlog that can be tens of thousands deep (issue #900).
+   */
+  countPending(predicate: (req: Req) => boolean, cap: number): number | null {
+    if (this.pending.length > cap) return null;
+    let count = 0;
+    for (let i = 0; i < this.pending.length; i++) {
+      if (predicate(this.pending[i])) count++;
+    }
+    return count;
+  }
+
   /** Age (ms) of the longest-waiting pending entry; 0 when empty. */
   oldestPendingAgeMs(now: number): number {
     if (this.enqueuedAt.size === 0) return 0;

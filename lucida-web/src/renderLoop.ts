@@ -14,6 +14,9 @@ import type { CpuCache } from "./pipeline/fetch/index.ts";
 import { identityMatrix } from "./pipeline/upload/coldState/identity.ts";
 import type { Session } from "./session.ts";
 import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap, markMinimapOverviewSeeded, clearMinimapForDataset } from "./minimapPath.ts";
+import { traceRecorder, type TraceEnvironment } from "./trace/recorder.ts";
+import { evaluateQuiescence } from "./trace/quiescence.ts";
+import type { CacheWarmth, Outstanding, RunConditions } from "./trace/types.ts";
 
 // Re-export types so downstream imports stay unchanged
 export type { DatasetEntry, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
@@ -35,7 +38,7 @@ declare global {
   }
 }
 
-export class RenderLoop {
+export class RenderLoop implements TraceEnvironment {
   private session: Session;
   private datasets: Map<string, { manifest: DatasetManifest }>;
   private client: RenderLoopOptions["client"];
@@ -115,6 +118,25 @@ export class RenderLoop {
       this.setDirty("interactive", "planning_config_changed");
     });
     this.publishCaptureReady(false, "initializing");
+    // The render loop is the one place that holds the canvas, the mode, the
+    // dataset set and the CPU cache at once, so it is what the recorder asks
+    // for a run's conditions.
+    traceRecorder.setEnvironment(this);
+    // A workspace reload hands the loop its datasets up front rather than
+    // through `addDataset`, and that path is the cold open the monitor
+    // exists to explain — so it opens a run too, under its own cause.
+    if (this.datasets.size > 0) this.openDatasetRun("loop_start");
+    this.publishQuiescence();
+  }
+
+  /**
+   * Open a dataset-open run. The cause is drawn from the vocabulary the code
+   * already has: a `content` epoch, and the render loop's own typed
+   * dirty-set attribution for the source. A no-op while a run is open, so a
+   * collection's members are one run rather than one run each.
+   */
+  private openDatasetRun(source: string): void {
+    traceRecorder.openRun({ epoch: "content", dirtyKind: "interactive", source });
   }
 
   start(): void {
@@ -180,6 +202,7 @@ export class RenderLoop {
   addDataset(id: string, manifest: DatasetManifest): void {
     this.datasets.set(id, { manifest });
     this.publishCaptureReady(false, "dataset_added_waiting_for_render");
+    this.openDatasetRun("dataset_added");
     this.setDirty("interactive", "dataset_added");
   }
 
@@ -259,6 +282,82 @@ export class RenderLoop {
       datasetCount: this.datasets.size,
       canvasWidth: this.canvas.width || Math.round(this.canvas.clientWidth),
       canvasHeight: this.canvas.height || Math.round(this.canvas.clientHeight),
+    };
+  }
+
+  /**
+   * Publish the page's quiescence (ADR 0051). Called at the end of every
+   * tick, which is also the only moment it can change: every arrival,
+   * eviction and view change dirties a flag, and a dirty flag schedules a
+   * tick. Nothing polls — an idle viewer publishes nothing because an idle
+   * viewer does not tick.
+   *
+   * `frameInFlight` reads the RAF handle after the tick has had its chance
+   * to reschedule, so a loop with work left to do never looks settled.
+   */
+  private publishQuiescence(): void {
+    traceRecorder.noteQuiescence(
+      evaluateQuiescence(
+        {
+          interactiveDirty: this.interactiveDirty,
+          residencyDirty: this.residencyDirty,
+          frameInFlight: this.rafId !== null,
+          ...this.session.cpuCache.quiescenceInputs(),
+        },
+        performance.now(),
+      ),
+    );
+  }
+
+  /** {@link TraceEnvironment}: what was already resident when the run opened. */
+  captureWarmth(): CacheWarmth {
+    const telemetry = this.session.cpuCache.telemetry();
+    const tiers = telemetry.tierResidency;
+    return {
+      detailChunks: tiers.activeDetail.count + tiers.demotedDetail.count + tiers.prefetch.count,
+      detailBytes: telemetry.mainBytes,
+      coarseChunks: tiers.overview.count,
+      coarseBytes: telemetry.overviewBytes,
+      proxyBytes: telemetry.proxyBytes,
+    };
+  }
+
+  /**
+   * {@link TraceEnvironment}: the conditions a run happened under, read at
+   * close. At open the canvas still carries its default backing-store size
+   * and a collection's members have not all arrived, so an at-open reading
+   * would describe a page that does not exist yet.
+   */
+  captureConditions(): RunConditions {
+    const location = typeof window === "undefined" ? null : window.location;
+    return {
+      datasetIds: [...this.datasets.keys()],
+      composedView: {
+        url: location ? `${location.pathname}${location.search}${location.hash}` : "",
+        mode: this.mode,
+      },
+      devicePixelRatio: typeof window === "undefined" ? 1 : window.devicePixelRatio,
+      viewport: {
+        cssWidth: this.canvas.clientWidth,
+        cssHeight: this.canvas.clientHeight,
+        deviceWidth: this.canvas.width,
+        deviceHeight: this.canvas.height,
+      },
+    };
+  }
+
+  /** {@link TraceEnvironment}: what was still outstanding when the run closed. */
+  captureOutstanding(): Outstanding {
+    const inputs = this.session.cpuCache.quiescenceInputs();
+    return {
+      pending: inputs.pending,
+      inFlight: inputs.inFlight,
+      speculativePending: inputs.speculativePending,
+      speculativeInFlight: inputs.speculativeInFlight,
+      desiredDetailChunks: inputs.desiredDetailChunks,
+      residentDetailChunks: inputs.residentDetailChunks,
+      desiredCoarseChunks: inputs.desiredCoarseChunks,
+      residentCoarseChunks: inputs.residentCoarseChunks,
     };
   }
 
@@ -600,5 +699,7 @@ export class RenderLoop {
 
     // If work remains (budget exhausted or chunks pending), schedule another frame
     this.scheduleIfNeeded();
+
+    this.publishQuiescence();
   };
 }
