@@ -215,10 +215,12 @@ describe("the trace seam", () => {
       source.deliver("0/0/0/0/0/0");
       await settle();
 
-      const { counted } = window.lucidaTrace!.exportTrace().runs[0];
-      expect(counted.coalesceAttach).toBe(1);
-      expect(counted.workerDispatch).toBe(1);
-      expect(counted.cacheAdmission).toBe(1);
+      traceRecorder.beginTick("ds-1");
+      traceRecorder.commitTick();
+      const { counted } = window.lucidaTrace!.exportTrace().runs[0].ticks[0];
+      expect(counted["coalesce-attach"]).toBe(1);
+      expect(counted["worker-dispatch"]).toBe(1);
+      expect(counted["cache-admission"]).toBe(1);
     } finally {
       vi.unstubAllGlobals();
     }

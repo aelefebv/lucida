@@ -36,7 +36,9 @@ import {
 } from "./proxyStore.ts";
 import { Scheduler, type SchedulableRequest } from "./scheduler.ts";
 import { traceRecorder } from "../../trace/recorder.ts";
-import { Boundary, RowOutcome } from "../../trace/types.ts";
+import { Boundary, CountedPhaseIndex, PointEvent, RowOutcome } from "../../trace/types.ts";
+import { parseChunkKey } from "../../renderer/chunkKeys.ts";
+import type { ChunkFeedbackReason } from "../../renderer/workerProtocol.ts";
 import type { CacheQuiescenceInputs } from "../../trace/quiescence.ts";
 import {
   classifyFetchError,
@@ -53,6 +55,7 @@ import type {
   CpuCacheConfig,
   EvictionTier,
   Lane,
+  LevelResidency,
   ReadyChunkDelivery,
   ReadyDelivery,
   ReadyProxyDelivery,
@@ -179,6 +182,16 @@ interface InFlightProxyMeta {
   epochs: SceneEpochs;
 }
 
+/**
+ * The residency tier a point event carries, read off the entry rather than
+ * assumed from the store it came out of. Row identity includes the tier
+ * because a chunk key legitimately exists under both, so an event that
+ * guessed it could not be joined to its own lifecycle row.
+ */
+function eventTier(entry: CacheEntry): 0 | 1 {
+  return entry.residencyTier === "coarse" ? 1 : 0;
+}
+
 export class CpuCache {
   private source: ContentSource;
   private decode: DecodePool;
@@ -284,6 +297,9 @@ export class CpuCache {
    */
   private rejectionTracker = new RejectionTracker();
 
+  /** Reused by {@link levelResidency}; see its note on lifetime. */
+  private readonly levelResidencyScratch: LevelResidency = { cached: [], inFlight: [] };
+
   private listeners: (() => void)[] = [];
 
   private currentEpochs: SceneEpochs = {
@@ -313,7 +329,10 @@ export class CpuCache {
       policy: mainPolicy,
       budgetBytes: this.config.mainBudgetBytes,
       evictionTier: (entry) => entry.tier,
-      recordEviction: (tier) => this.counters.recordEviction(tier),
+      recordEviction: (tier, entry) => {
+        this.counters.recordEviction(tier);
+        traceRecorder.recordPointEvent(PointEvent.Eviction, "evicted", entry, eventTier(entry));
+      },
       onEvictionBurst: ({ removed, bytesFreed, bytesNeeded }) => {
         debugLog("cache", "cache.eviction_burst", {
           cache: "main",
@@ -328,7 +347,10 @@ export class CpuCache {
       policy: new LRUPolicy<CacheEntry>(),
       budgetBytes: this.config.overviewBudgetBytes,
       evictionTier: () => "overview",
-      recordEviction: (tier) => this.counters.recordEviction(tier),
+      recordEviction: (tier, entry) => {
+        this.counters.recordEviction(tier);
+        traceRecorder.recordPointEvent(PointEvent.Eviction, "evicted", entry, eventTier(entry));
+      },
     });
     this.proxyStore = new ProxyStore({
       policy: new LRUPolicy<ProxyEvictable>(),
@@ -476,9 +498,9 @@ export class CpuCache {
 
       if (this.chunkScheduler.hasInFlight(key)) {
         // A second demand attaching to a fetch already on the wire. The
-        // attach itself is below the clock floor, so it is counted; the one
-        // fetch keeps the one row.
-        traceRecorder.countCoalesceAttach();
+        // attach itself is below the clock floor, so it is counted per tick
+        // (ADR 0047); the one fetch keeps the one row.
+        traceRecorder.countPhase(CountedPhaseIndex.CoalesceAttach);
         this.rememberInFlightChunk(key, req, { ...this.currentEpochs });
         continue;
       }
@@ -496,7 +518,7 @@ export class CpuCache {
       // urgent occurrence — plans arrive priority-sorted — keeps the
       // queue slot.
       if (pendingKeys.has(key)) {
-        traceRecorder.countCoalesceAttach();
+        traceRecorder.countPhase(CountedPhaseIndex.CoalesceAttach);
         continue;
       }
       pendingKeys.add(key);
@@ -695,6 +717,36 @@ export class CpuCache {
     const wasNew = this.rejectionTracker.mark(entityId, chunkKey);
     if (!wasNew) return;
 
+    // The renderer's own reason for a skip: the atlas was full and the
+    // incoming chunk was farther out than everything already in it. The
+    // resident copy carries the image id when there is one; a chunk rejected
+    // before it ever arrived is still worth a point event, so the coordinates
+    // come off the key instead.
+    const resident =
+      this.chunkStore.get(entityId, chunkKey) ?? this.overviewStore.get(entityId, chunkKey);
+    const coords = resident ? null : parseChunkKey(chunkKey);
+    if (resident) {
+      traceRecorder.recordPointEvent(
+        PointEvent.Rejection, "atlas-policy", resident, eventTier(resident),
+      );
+    } else if (coords) {
+      traceRecorder.recordPointEvent(
+        PointEvent.Rejection,
+        "atlas-policy",
+        {
+          entityId,
+          imageId: "",
+          level: coords.level,
+          t: coords.t,
+          c: coords.c,
+          z: coords.z,
+          y: coords.y,
+          x: coords.x,
+        },
+        0,
+      );
+    }
+
     const cancelled = this.chunkScheduler.cancelWhere((entry) => (
       entry.request.entityId === entityId &&
       entry.request.chunkKey === chunkKey
@@ -808,14 +860,26 @@ export class CpuCache {
     );
   }
 
+  /**
+   * `reason` is the renderer's own account of why the chunks came back — its
+   * chunk feedback vocabulary, forwarded rather than re-derived, so the trace
+   * can distinguish an atlas eviction from a stale epoch or a radius filter.
+   */
   markChunkEvicted(
     imageId: string,
     c: number,
     evicted: string[],
     skipped: string[],
+    reason: ChunkFeedbackReason = "evicted",
   ): void {
     for (const key of evicted) {
       this.deliveryState.clearChunkSent(imageId, c, key);
+      const entry =
+        this.chunkStore.findByImageChunk(imageId, c, key) ??
+        this.overviewStore.findByImageChunk(imageId, c, key);
+      if (entry) {
+        traceRecorder.recordPointEvent(PointEvent.Eviction, reason, entry, eventTier(entry));
+      }
     }
     for (const key of skipped) {
       this.deliveryState.clearChunkSent(imageId, c, key);
@@ -859,6 +923,46 @@ export class CpuCache {
     }
 
     return { cached, inFlight };
+  }
+
+  /**
+   * Resident and in-flight chunk counts per pyramid level, for the trace's
+   * per-tick aggregates. Deliberately not {@link snapshot}: that one
+   * allocates a Set per entity and walks every resident chunk, which is
+   * affordable once per rebuild behind a debug toggle and not affordable on
+   * every tick with recording always on. Both stores keep their level counts
+   * incrementally, and the in-flight map holds only dispatched fetches — a
+   * few dozen — so this is a short walk over small numbers.
+   *
+   * Counts every resident chunk, not only the active set's: an aggregate that
+   * quietly excluded demoted or prefetched residency would understate what
+   * the cache is actually holding.
+   *
+   * Returns the cache's own reused arrays, valid until the next call —
+   * recording is unconditional and per tick, so this may not allocate.
+   */
+  levelResidency(): LevelResidency {
+    const { cached, inFlight } = this.levelResidencyScratch;
+    cached.fill(0);
+    inFlight.fill(0);
+
+    for (const store of [this.chunkStore, this.overviewStore]) {
+      const counts = store.levelResidency();
+      for (let level = 0; level < counts.length; level++) {
+        if (counts[level] === 0) continue;
+        while (cached.length <= level) cached.push(0);
+        cached[level] += counts[level];
+      }
+    }
+
+    for (const [, entry] of this.chunkScheduler.inFlightEntries()) {
+      const level = entry.request.level;
+      if (!Number.isInteger(level) || level < 0) continue;
+      while (inFlight.length <= level) inFlight.push(0);
+      inFlight[level]++;
+    }
+
+    return this.levelResidencyScratch;
   }
 
   telemetry(): CacheTelemetry {
@@ -1160,10 +1264,8 @@ export class CpuCache {
     // tick's wanted-set computation) and `queue` (admitted to the scheduler →
     // dispatched). `wire` — request sent → bytes in hand — starts now, and is
     // the bracket the server's own rows nest inside once they arrive.
-    const traceRow = traceRecorder.beginChunkRow(
-      req,
-      this.requestResidencyTier(req) === "coarse" ? 1 : 0,
-    );
+    const rowTier = this.requestResidencyTier(req) === "coarse" ? 1 : 0;
+    const traceRow = traceRecorder.beginChunkRow(req, rowTier);
     traceRecorder.stampAdmission(traceRow, admittedAtMs);
     traceRecorder.stamp(traceRow, Boundary.WireStart);
 
@@ -1213,6 +1315,7 @@ export class CpuCache {
       }
 
       if (this.chunkRetryPolicy.shouldRetry(fe, retryCount)) {
+        traceRecorder.recordPointEvent(PointEvent.Retry, fe.kind, req, rowTier);
         await new Promise(r => setTimeout(r, this.chunkRetryPolicy.delayMs(retryCount)));
         if (!this.chunkScheduler.hasInFlight(key)) return; // cancelled during wait
         return this.fetchAndDecode(
@@ -1236,6 +1339,7 @@ export class CpuCache {
         this.recordFailure(key, isPermanent);
         this.counters.recordFetchFailure(isPermanent, fe.message);
         this.recordFailureForBurstDetection(isPermanent, fe.message);
+        traceRecorder.recordPointEvent(PointEvent.Failure, fe.kind, req, rowTier);
       }
       return;
     }
@@ -1274,6 +1378,10 @@ export class CpuCache {
         this.recordFailure(key, false);
         this.counters.recordFetchFailure(false, streakMessage);
         this.recordFailureForBurstDetection(false, streakMessage);
+        // Bytes that arrived and could not be decoded fail the delivery just
+        // as a dead fetch does, and self-heal the same way, so they borrow
+        // the same `transient` code rather than inventing a decode reason.
+        traceRecorder.recordPointEvent(PointEvent.Failure, "transient", req, rowTier);
       }
       return;
     }
@@ -1348,8 +1456,9 @@ export class CpuCache {
       }
       this.chunkStore.insert(cacheEntry);
     }
-    // Admission is below the platform's clock floor: counted, not timed.
-    traceRecorder.countCacheAdmission();
+    // Cache admission: the moment decoded bytes become resident. Counted, not
+    // timed — the insert is well under the platform's clock floor.
+    traceRecorder.countPhase(CountedPhaseIndex.CacheAdmission);
 
     this.notifyListeners();
 

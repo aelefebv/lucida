@@ -8,6 +8,9 @@
  * and *end reason* is why a run closed.
  */
 
+import type { FetchErrorKind } from "../pipeline/fetch/retry.ts";
+import type { ChunkFeedbackReason } from "../renderer/workerProtocol.ts";
+
 /**
  * Bumped whenever the document shape changes incompatibly. One integer for
  * the whole file (ADR 0047): traces outlive the code that wrote them, and a
@@ -265,35 +268,96 @@ export interface RunHeader extends RunConditions {
   outstandingAtSettle: Outstanding;
 }
 
+/**
+ * Phases that sit below the platform's 100 µs clock floor — cache admission,
+ * worker dispatch, coalesce attach. Timing them would show quantisation noise
+ * wearing the costume of data, so they are counted per tick instead and never
+ * appear on a lifecycle row.
+ */
+export const COUNTED_PHASES = ["cache-admission", "worker-dispatch", "coalesce-attach"] as const;
+export type CountedPhase = (typeof COUNTED_PHASES)[number];
+
+export const CountedPhaseIndex = {
+  CacheAdmission: 0,
+  WorkerDispatch: 1,
+  CoalesceAttach: 2,
+} as const;
+export type CountedPhaseIndexValue = (typeof CountedPhaseIndex)[keyof typeof CountedPhaseIndex];
+
+/**
+ * The per-tick aggregate columns. A closed enum for the same reason the phase
+ * inventory is closed: every name here widens a fixed-width tick sample.
+ *
+ * These are the shapes the debug panel carries today — lane counts, the
+ * culling funnel, active-set tallies — recorded with a timestamp instead of
+ * being polled off a flat sink, and recorded whether or not anybody is
+ * looking. Per-level planned / cached / in-flight is variable-length and rides
+ * in its own slots rather than here.
+ */
+export const TICK_COUNTER_NAMES = [
+  "laneMinimap",
+  "laneDetail",
+  "laneCoarse",
+  "lanePrefetch",
+  "laneOverview",
+  "proxyRequests",
+  "plannedChunks",
+  "cullingConsidered",
+  "cullingAfterXyBounds",
+  "cullingAfterZRange",
+  "cullingAfterFrustum",
+  "catalogDegradations",
+  "activeSetTotal",
+  "activeSetGroupAsProxy",
+  "activeSetTilesProxyFallback",
+  "activeSetTilesDetail",
+] as const;
+export type TickCounterName = (typeof TICK_COUNTER_NAMES)[number];
+
+/**
+ * Column indices, derived from the names rather than written out beside them.
+ * Sixteen hand-numbered constants next to sixteen strings is two lists that
+ * must stay in the same order with nothing checking that they do.
+ */
+function counterIndex(name: TickCounterName): number {
+  return TICK_COUNTER_NAMES.indexOf(name);
+}
+
+export const TickCounter = {
+  LaneMinimap: counterIndex("laneMinimap"),
+  LaneDetail: counterIndex("laneDetail"),
+  LaneCoarse: counterIndex("laneCoarse"),
+  LanePrefetch: counterIndex("lanePrefetch"),
+  LaneOverview: counterIndex("laneOverview"),
+  ProxyRequests: counterIndex("proxyRequests"),
+  PlannedChunks: counterIndex("plannedChunks"),
+  CullingConsidered: counterIndex("cullingConsidered"),
+  CullingAfterXyBounds: counterIndex("cullingAfterXyBounds"),
+  CullingAfterZRange: counterIndex("cullingAfterZRange"),
+  CullingAfterFrustum: counterIndex("cullingAfterFrustum"),
+  CatalogDegradations: counterIndex("catalogDegradations"),
+  ActiveSetTotal: counterIndex("activeSetTotal"),
+  ActiveSetGroupAsProxy: counterIndex("activeSetGroupAsProxy"),
+  ActiveSetTilesProxyFallback: counterIndex("activeSetTilesProxyFallback"),
+  ActiveSetTilesDetail: counterIndex("activeSetTilesDetail"),
+} as const;
+
+/**
+ * How many pyramid levels a tick sample carries planned / cached / in-flight
+ * counts for. A fixed span keeps the sample fixed-width; deeper levels are
+ * counted in `levelsDropped` rather than folded into the last slot, because a
+ * fold would silently overstate whichever level it landed on.
+ */
+export const TICK_LEVEL_SLOTS = 16;
+
+/** Planned / cached / in-flight per level, the three columns of a level slot. */
+export const LEVEL_COLUMNS = 3;
+
 /** A phase that carries real timings on a row. Absent when the boundary pair was never stamped. */
 export interface PhaseTiming {
   startUs: number;
   endUs: number;
   durationUs: number;
-}
-
-/**
- * Stages that happen too fast to time and are counted instead.
- *
- * The platform's clock floor is 100 µs. Cache admission, worker dispatch and
- * coalesce attach all land below it, so timing them would show quantisation
- * noise wearing the costume of data. A count is the honest measurement: it
- * says how often the stage happened without claiming to know how long it
- * took.
- *
- * Zero here is not a health signal, and a reader must not take it as one.
- */
-export interface CountedEvents {
-  /** Fetched bytes admitted into a CPU-cache store. */
-  cacheAdmission: number;
-  /** Decodes handed to a pool worker. */
-  workerDispatch: number;
-  /** Second and later demands that attached to an in-flight or already-queued fetch. */
-  coalesceAttach: number;
-}
-
-export function emptyCountedEvents(): CountedEvents {
-  return { cacheAdmission: 0, workerDispatch: 0, coalesceAttach: 0 };
 }
 
 /**
@@ -412,11 +476,150 @@ export interface TraceRow extends WireLabel {
   phases: Partial<Record<Phase, PhaseTiming>>;
 }
 
+/**
+ * The four rare things worth a point in time rather than a column: a chunk
+ * left the cache, the renderer refused one, a fetch was retried, a fetch gave
+ * up. Nobody has caught the last three happening — #899 observed zero retries
+ * and zero real failures across 3,781 remote reads — so they share one shape
+ * and their diagnostic value is simply that they appear at all.
+ */
+export const POINT_EVENT_KINDS = ["eviction", "rejection", "retry", "failure"] as const;
+export type PointEventKind = (typeof POINT_EVENT_KINDS)[number];
+
+export const PointEvent = {
+  Eviction: 0,
+  Rejection: 1,
+  Retry: 2,
+  Failure: 3,
+} as const;
+export type PointEventIndex = (typeof PointEvent)[keyof typeof PointEvent];
+
+/**
+ * Reason codes are borrowed whole from the two taxonomies the pipeline
+ * already has — the typed fetch error kinds and the renderer's chunk feedback
+ * reasons — so a trace and a log line name the same failure the same way. The
+ * `satisfies` clauses below make this a checked borrowing rather than a copy
+ * that drifts; the two assignments underneath fail to compile if either
+ * taxonomy grows a member this list has not picked up.
+ */
+const FETCH_ERROR_REASONS = [
+  "permanent",
+  "transient",
+  "pending",
+  "abort",
+] as const satisfies readonly FetchErrorKind[];
+
+const CHUNK_FEEDBACK_REASONS = [
+  "evicted",
+  "stale",
+  "wrong-slice",
+  "missing-pool",
+  "missing-entity-meta",
+  "missing-lod-meta",
+  "radius-filter",
+  "atlas-policy",
+] as const satisfies readonly ChunkFeedbackReason[];
+
+export const POINT_EVENT_REASONS = [
+  ...FETCH_ERROR_REASONS,
+  ...CHUNK_FEEDBACK_REASONS,
+] as const;
+export type PointEventReason = (typeof POINT_EVENT_REASONS)[number];
+
+const _coversFetchErrors: FetchErrorKind extends PointEventReason ? true : never = true;
+const _coversChunkFeedback: ChunkFeedbackReason extends PointEventReason ? true : never = true;
+void _coversFetchErrors;
+void _coversChunkFeedback;
+
+/**
+ * The identity a point event copies off whatever it happened to — a planned
+ * request or a resident cache entry. `datasetId` is optional because a cache
+ * entry is keyed by entity and does not carry one; the remaining fields are a
+ * structural subset of both, so an emit site passes the object it already
+ * holds and the recorder allocates nothing.
+ */
+export interface ChunkEventSource {
+  datasetId?: string;
+  entityId: string;
+  imageId: string;
+  level: number;
+  t: number;
+  c: number;
+  z: number;
+  y: number;
+  x: number;
+}
+
+/**
+ * Per-level planning and residency counts, fanned out at serialisation.
+ *
+ * `planned` belongs to the sample's dataset. `cached` and `inFlight` are
+ * cache-wide: the CPU cache is one shared budget across the workspace, not
+ * one per dataset, so its residency is not a per-dataset quantity and
+ * splitting it would invent an attribution the cache does not have.
+ */
+export interface TraceTickLevel {
+  level: number;
+  planned: number;
+  cached: number;
+  inFlight: number;
+}
+
+/** One per-tick aggregate sample, for one dataset planned on that tick. */
+export interface TraceTick {
+  /** Microseconds from run start. */
+  atUs: number;
+  datasetId: string;
+  counters: Record<TickCounterName, number>;
+  /**
+   * The counted-not-timed phases over the interval since the previous sample.
+   * Process-wide, not per dataset: a cache admission belongs to the pipeline,
+   * not to whichever dataset's sample happens to publish the interval. Sum
+   * across samples for a run total; do not read one sample as a dataset's own.
+   */
+  counted: Record<CountedPhase, number>;
+  /** Only levels with a non-zero column; a level absent here had nothing on it. */
+  levels: TraceTickLevel[];
+  /** Levels past {@link TICK_LEVEL_SLOTS} that this sample could not carry. */
+  levelsDropped: number;
+}
+
+/** One point event. Every kind shares this shape. */
+export interface TracePointEvent {
+  /** Microseconds from run start. */
+  atUs: number;
+  kind: PointEventKind;
+  reason: PointEventReason;
+  /** Null when the event is not about one chunk — a proxy asset eviction, say. */
+  chunk: {
+    datasetId: string;
+    entityId: string;
+    imageId: string;
+    residencyTier: ResidencyTierName;
+    level: number;
+    t: number;
+    c: number;
+    z: number;
+    y: number;
+    x: number;
+    chunkKey: string;
+  } | null;
+}
+
 export interface TraceRun {
   header: RunHeader;
   rows: TraceRow[];
-  /** The stages below the clock floor. Counted, never timed. */
-  counted: CountedEvents;
+  /**
+   * Per-tick aggregates, oldest-first. Unlike the per-chunk tier this is a
+   * drop-oldest ring: a steady-state stream has no privileged start, and the
+   * ticks worth reading during a stall are the recent ones.
+   */
+  ticks: TraceTick[];
+  /** Tick samples the ring dropped, so a wrapped ring is visible rather than inferred. */
+  ticksDropped: number;
+  events: TracePointEvent[];
+  /** Point events the ring dropped. */
+  eventsDropped: number;
   /**
    * The server's rows for this run's requests, placed against the browser's
    * brackets. The browser owns the merged trace: these arrived over the
@@ -443,6 +646,12 @@ export interface TraceDocument {
    * measured anywhere.
    */
   instrumentedPhases: Phase[];
+  /**
+   * Phases that are counted rather than timed, stated alongside the timed
+   * ones so a reader never looks for a duration that was never measurable.
+   * Their counts live on the per-tick samples.
+   */
+  countedPhases: CountedPhase[];
   runs: TraceRun[];
   /**
    * Rows the recorder saw while no run was open. Counted, not kept: the

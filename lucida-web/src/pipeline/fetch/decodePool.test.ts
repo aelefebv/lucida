@@ -144,12 +144,14 @@ describe("DecodePool", () => {
     // Reply to the SECOND decode only, so a reply landing on the wrong row
     // would be visible rather than coincidentally right.
     worker.reply(worker.posted[1].id, new ArrayBuffer(16));
+    traceRecorder.beginTick("ds-1");
+    traceRecorder.commitTick();
     traceRecorder.closeRun("explicit");
 
-    const rows = traceRecorder.exportDocument().runs[0].rows;
-    expect(rows.filter(r => r.phases.decode !== undefined).map(r => r.x)).toEqual([2]);
-    // Dispatch is below the clock floor: counted, not timed.
-    expect(traceRecorder.exportDocument().runs[0].counted.workerDispatch).toBe(2);
+    const [run] = traceRecorder.exportDocument().runs;
+    expect(run.rows.filter(r => r.phases.decode !== undefined).map(r => r.x)).toEqual([2]);
+    // Dispatch is below the clock floor: counted per tick, not timed.
+    expect(run.ticks[0].counted["worker-dispatch"]).toBe(2);
 
     pool.terminate();
     await expect(firstDecode).rejects.toThrow("DecodePool terminated");

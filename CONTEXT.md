@@ -169,6 +169,19 @@ A rare occurrence recorded as a single timestamped record rather than a phase
 boundary: eviction, rejection, retry, failure.
 _Avoid_: incident, error (a point event is not necessarily a failure)
 
+**Per-tick aggregate**:
+One sample per planning tick per dataset — lane counts, the culling funnel,
+active-set tallies, per-level planned against cached and in-flight. Kept on a
+drop-oldest ring, unlike the per-chunk tier, because a steady-state stream has no
+privileged start.
+_Avoid_: snapshot, stats, gauge (a gauge has no memory of when)
+
+**Counted phase**:
+A phase below the platform's 100 µs clock floor — cache admission, worker
+dispatch, coalesce attach. Counted on the per-tick aggregate, never timed, so a
+reader is not shown quantisation noise wearing the costume of data.
+_Avoid_: untimed phase, fast phase
+
 **Correlation label** (`rid`):
 The `u32` that joins a browser-side lifecycle row to the server-side row for the
 same wire request. Client-minted, outbound-only, and monotonic across one

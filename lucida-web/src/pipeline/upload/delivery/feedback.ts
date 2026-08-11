@@ -53,7 +53,7 @@ export class WorkerFeedback {
     for (const chunkKey of skipped) collect(chunkKey, "skipped");
 
     for (const [c, group] of byChannel) {
-      cpuCache.markChunkEvicted(parsed.imageId, c, group.evicted, group.skipped);
+      cpuCache.markChunkEvicted(parsed.imageId, c, group.evicted, group.skipped, reason);
     }
 
     if (evicted.length > 0 || skipped.length > 0) {

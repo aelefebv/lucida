@@ -176,6 +176,7 @@ function makeCpuCache(deliveries: ReadyDelivery[] = []): CpuCache {
     markChunkMissing: vi.fn(),
     markProxyMissing: vi.fn(),
     snapshot: vi.fn(() => ({ cached: new Map(), inFlight: new Map() })),
+    levelResidency: vi.fn(() => ({ cached: [], inFlight: [] })),
     getCachedChunk: vi.fn(() => null),
     getCachedProxy: vi.fn(() => null),
     telemetry: vi.fn(),
@@ -459,6 +460,9 @@ describe("Uploader worker feedback", () => {
       1,
       ["0/0/1/0/0/0"],
       ["0/0/1/0/0/1"],
+      // The renderer's reason, forwarded rather than re-derived; the worker
+      // left it unset on this message.
+      undefined,
     );
   });
 

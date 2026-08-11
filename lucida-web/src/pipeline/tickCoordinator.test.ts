@@ -12,6 +12,7 @@ import { plan } from "./planning/index.ts";
 import { bumpSettingsGeneration } from "../tickCommon.ts";
 import { configStore } from "./planning/configStore.ts";
 import { debugStats } from "../debug/debugStats.ts";
+import { traceRecorder } from "../trace/recorder.ts";
 
 // Planner-only tests: epoch caching + multi-dataset planning state.
 // Upload-side describes live in `upload/uploader.test.ts`.
@@ -55,6 +56,7 @@ function createMockCpuCache(): CpuCache {
     getDeliverable: vi.fn(function* () {}),
     markSent: vi.fn(),
     snapshot: vi.fn(() => ({ cached: new Map(), inFlight: new Map() })),
+    levelResidency: vi.fn(() => ({ cached: [], inFlight: [] })),
     getCachedChunk: vi.fn(() => null),
     isChunkSent: vi.fn(() => false),
     telemetry: vi.fn(),
@@ -335,6 +337,43 @@ describe("epoch caching", () => {
     orch.planAndFetch(makeCtx(scene, datasets), emptyMinimap);
 
     expect(planSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("records a per-tick trace aggregate even with the debug panel disabled", () => {
+    const { scene, datasets } = makeTickCoordinatorDeps();
+    const orch = makeOrch();
+    debugStats.enabled = false;
+    traceRecorder.reset();
+    traceRecorder.setEnvironment({
+      captureWarmth: () => ({
+        detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0, proxyBytes: 0,
+      }),
+      captureConditions: () => ({
+        datasetIds: ["ds"],
+        composedView: { url: "/w/ws-1", mode: "slice" },
+        devicePixelRatio: 2,
+        viewport: { cssWidth: 800, cssHeight: 600, deviceWidth: 1600, deviceHeight: 1200 },
+      }),
+      captureOutstanding: () => ({
+        pending: 0,
+        inFlight: 0,
+        speculativePending: 0,
+        speculativeInFlight: 0,
+        desiredDetailChunks: 0,
+        residentDetailChunks: 0,
+        desiredCoarseChunks: 0,
+        residentCoarseChunks: 0,
+      }),
+    });
+    traceRecorder.openRun({ epoch: "content", dirtyKind: "interactive", source: "test" });
+
+    orch.planAndFetch(makeCtx(scene, datasets), emptyMinimap);
+
+    const [run] = traceRecorder.exportDocument().runs;
+    expect(run.ticks.length).toBeGreaterThan(0);
+    expect(debugStats.planning.byDataset).toEqual({});
+    traceRecorder.reset();
+    traceRecorder.setEnvironment(null);
   });
 
   it("returns cached result when epochs are unchanged", () => {

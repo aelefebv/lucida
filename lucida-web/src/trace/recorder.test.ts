@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 
 import { TraceRecorder } from "./recorder.ts";
-import { noopRowSinkFactory } from "./sink.ts";
+import { noopSinkFactory } from "./sink.ts";
 import { createQuiescenceState, evaluateQuiescence, type QuiescenceState } from "./quiescence.ts";
 import { Boundary, RowOutcome, TRACE_SCHEMA_VERSION } from "./types.ts";
 
@@ -344,36 +344,6 @@ describe("TraceRecorder upload and present", () => {
   });
 });
 
-describe("TraceRecorder counted stages", () => {
-  it("counts the stages below the clock floor instead of timing them", () => {
-    const { recorder } = makeRecorder();
-    recorder.openRun(OPEN_CAUSE);
-    recorder.countCacheAdmission();
-    recorder.countCacheAdmission();
-    recorder.countWorkerDispatch();
-    recorder.countCoalesceAttach();
-    recorder.countCoalesceAttach();
-    recorder.countCoalesceAttach();
-    recorder.closeRun("explicit");
-
-    expect(recorder.exportDocument().runs[0].counted)
-      .toEqual({ cacheAdmission: 2, workerDispatch: 1, coalesceAttach: 3 });
-  });
-
-  it("keeps each run's counts to itself", () => {
-    const { recorder } = makeRecorder();
-    recorder.openRun(OPEN_CAUSE);
-    recorder.countCacheAdmission();
-    recorder.closeRun("explicit");
-    recorder.openRun({ ...OPEN_CAUSE, source: "second" });
-    recorder.closeRun("explicit");
-
-    const doc = recorder.exportDocument();
-    expect(doc.runs[0].counted.cacheAdmission).toBe(1);
-    expect(doc.runs[1].counted.cacheAdmission).toBe(0);
-  });
-});
-
 describe("TraceRecorder server rows", () => {
   const BATCH = {
     dropped: 2,
@@ -439,7 +409,7 @@ describe("TraceRecorder server rows", () => {
 
 describe("TraceRecorder sink injection", () => {
   it("keeps no rows with a no-op sink while the call sites stay live", () => {
-    const { recorder } = makeRecorder({ sinkFactory: noopRowSinkFactory });
+    const { recorder } = makeRecorder({ sinkFactory: noopSinkFactory });
     recorder.openRun(OPEN_CAUSE);
     const row = recorder.beginChunkRow(CHUNK, 0);
     recorder.stamp(row, Boundary.WireStart);

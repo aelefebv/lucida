@@ -7,7 +7,7 @@
 
 import type { WireFormat } from "../../manifestTypes.ts";
 import { traceRecorder } from "../../trace/recorder.ts";
-import { Boundary } from "../../trace/types.ts";
+import { Boundary, CountedPhaseIndex } from "../../trace/types.ts";
 
 export const MIN_DECODE_WORKERS = 2;
 export const DECODE_POOL_HEADROOM = 1;
@@ -94,7 +94,7 @@ export class DecodePool {
       best.activeCount++;
       // Dispatch itself is below the platform's clock floor, so it is counted
       // rather than timed.
-      traceRecorder.countWorkerDispatch();
+      traceRecorder.countPhase(CountedPhaseIndex.WorkerDispatch);
       best.worker.postMessage({ id, bytes, wireFormat }, [bytes]);
     });
   }
