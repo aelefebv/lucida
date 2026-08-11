@@ -86,6 +86,7 @@ import {
   type WireAssetCatalogDelta,
 } from "./pipeline/assetCatalog.ts";
 import { ProxiedContentSource } from "./pipeline/fetch/contentSource.ts";
+import { ServerRowTable } from "./trace/serverRowTable.ts";
 import { COLORMAP_NAMES } from "./colormaps.ts";
 import {
   type ArcballCamera,
@@ -1299,6 +1300,41 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     });
   });
 
+  it("timing_batch reaches the recorder's table as columns", () => {
+    const raw = fixtureRaw("session/server_timing_batch.json");
+    COVERED_FIXTURES.add("session/server_timing_batch.json");
+    expect(JSON.parse(raw)).toStrictEqual({
+      type: "timing_batch",
+      batch: {
+        dropped: 3,
+        rid: [2558, 2559],
+        family: ["chunk", "asset"],
+        dispatch_offset_us: [142, 96],
+        duration_us: [8137, 214902],
+        outcome: ["delivered", "not_ready"],
+      },
+    });
+
+    const onTimingBatch = vi.fn();
+    const { ws } = openBridge({ onTimingBatch });
+    deliver(ws, raw);
+
+    expect(onTimingBatch).toHaveBeenCalledTimes(1);
+    const [batch, generation] = onTimingBatch.mock.calls[0];
+    // The generation is the browser's, stamped on arrival: the server has no
+    // idea connections are numbered.
+    expect(generation).toBe(1);
+
+    // Consumption path: the columns copy straight into the table.
+    const table = new ServerRowTable();
+    table.ingest(batch, generation);
+    expect(table.droppedCount).toBe(3);
+    expect(table.serialise().map(row => [row.rid, row.family, row.durationUs])).toEqual([
+      [2558, "chunk", 8137],
+      [2559, "asset", 214902],
+    ]);
+  });
+
   it("bookmark_changed fans out to handler and subscribers", () => {
     const raw = fixtureRaw("session/server_bookmark_changed.json");
     COVERED_FIXTURES.add("session/server_bookmark_changed.json");
@@ -1616,15 +1652,21 @@ describe("wire goldens: client messages through Bridge senders", () => {
 // ---------------------------------------------------------------------------
 
 describe("wire goldens: content-source request envelopes", () => {
-  it("fetch() sends the chunk_request envelope", async () => {
+  /**
+   * Both envelopes come off ONE source, in order, because the goldens carry
+   * consecutive correlation labels from one shared counter. Two sources
+   * would each mint `rid: 0` and the shared-counter half of the contract
+   * would go untested.
+   */
+  it("fetch() then fetchProxy() send the labelled request envelopes", async () => {
     const sent: string[] = [];
     const source = new ProxiedContentSource((json) => sent.push(json));
     source.registerImage("multiscale-0", { Zstd: { data_type: "Uint16" } });
 
-    const controller = new AbortController();
-    const pending = source.fetch(
+    const chunkController = new AbortController();
+    const pendingChunk = source.fetch(
       { datasetId: "wds-0f3a", imageId: "multiscale-0", chunkKey: "1/2/1/12/3/4" },
-      controller.signal,
+      chunkController.signal,
     );
 
     expect(sent).toHaveLength(1);
@@ -1632,16 +1674,8 @@ describe("wire goldens: content-source request envelopes", () => {
       coveredFixture("session/chunk_request.json"),
     );
 
-    controller.abort();
-    await expect(pending).rejects.toThrow(/aborted/i);
-  });
-
-  it("fetchProxy() sends the asset_request envelope", async () => {
-    const sent: string[] = [];
-    const source = new ProxiedContentSource((json) => sent.push(json));
-
-    const controller = new AbortController();
-    const pending = source.fetchProxy(
+    const assetController = new AbortController();
+    const pendingAsset = source.fetchProxy(
       {
         datasetId: "wds-collection-77",
         entityId: "tile-A1-f0",
@@ -1649,16 +1683,18 @@ describe("wire goldens: content-source request envelopes", () => {
         t: 0,
         c: 2,
       },
-      controller.signal,
+      assetController.signal,
     );
 
-    expect(sent).toHaveLength(1);
-    expect(JSON.parse(sent[0])).toStrictEqual(
+    expect(sent).toHaveLength(2);
+    expect(JSON.parse(sent[1])).toStrictEqual(
       coveredFixture("session/asset_request.json"),
     );
 
-    controller.abort();
-    await expect(pending).rejects.toThrow(/aborted/i);
+    chunkController.abort();
+    assetController.abort();
+    await expect(pendingChunk).rejects.toThrow(/aborted/i);
+    await expect(pendingAsset).rejects.toThrow(/aborted/i);
   });
 });
 

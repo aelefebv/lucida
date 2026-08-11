@@ -117,6 +117,87 @@ describe("ProxiedContentSource.fetch", () => {
     expect(a.bytes).not.toBe(b.bytes);
   });
 
+  it("labels each wire request from one connection counter shared with assets", () => {
+    const labels: number[] = [];
+    source.fetch(
+      { datasetId: "ds-1", imageId: "image-1", chunkKey: "0/0/0/0/0/0" },
+      new AbortController().signal,
+      label => labels.push(label.rid),
+    );
+    source.fetchProxy(
+      { datasetId: "ds-1", entityId: "tile-A1", kind: "TileProxy3D", t: 0, c: 0 },
+      new AbortController().signal,
+      label => labels.push(label.rid),
+    );
+    source.fetch(
+      { datasetId: "ds-1", imageId: "image-1", chunkKey: "0/0/0/0/0/1" },
+      new AbortController().signal,
+      label => labels.push(label.rid),
+    );
+
+    // One sequence across both families: a label that is ambiguous until you
+    // also know the message type would not be a join key.
+    expect(labels).toEqual([0, 1, 2]);
+    expect(sentMessages.map(m => JSON.parse(m).rid)).toEqual([0, 1, 2]);
+  });
+
+  it("gives every coalesced caller the first sender's label", () => {
+    const labels: number[] = [];
+    const req = { datasetId: "ds-1", imageId: "image-1", chunkKey: "0/0/0/0/0/0" };
+    source.fetch(req, new AbortController().signal, l => labels.push(l.rid));
+    source.fetch(req, new AbortController().signal, l => labels.push(l.rid));
+    source.fetch(req, new AbortController().signal, l => labels.push(l.rid));
+
+    expect(sentMessages).toHaveLength(1);
+    // Three rows, one wire request, one label: the join stays a plain
+    // equi-join and the coalescing count is a group-by over it.
+    expect(labels).toEqual([0, 0, 0]);
+  });
+
+  it("restarts the counter per connection and stamps the generation", async () => {
+    const labels: { rid: number; connectionGeneration: number }[] = [];
+    source.resetConnection(1);
+    const dropped = source.fetch(
+      { datasetId: "ds-1", imageId: "image-1", chunkKey: "0/0/0/0/0/0" },
+      new AbortController().signal,
+      l => labels.push(l),
+    );
+    source.rejectAll();
+    await expect(dropped).rejects.toThrow("Bridge disconnected");
+
+    source.resetConnection(2);
+    source.fetch(
+      { datasetId: "ds-1", imageId: "image-1", chunkKey: "0/0/0/0/0/0" },
+      new AbortController().signal,
+      l => labels.push(l),
+    );
+
+    // The same rid either side of a reconnect: only the generation tells
+    // the two requests apart.
+    expect(labels).toEqual([
+      { rid: 0, connectionGeneration: 1 },
+      { rid: 0, connectionGeneration: 2 },
+    ]);
+  });
+
+  it("keeps the label with the group when one coalesced caller leaves", async () => {
+    const labels: number[] = [];
+    const req = { datasetId: "ds-1", imageId: "image-1", chunkKey: "0/0/0/0/0/0" };
+    const leaving = new AbortController();
+    const first = source.fetch(req, leaving.signal, l => labels.push(l.rid));
+    source.fetch(req, new AbortController().signal, l => labels.push(l.rid));
+
+    leaving.abort();
+    await expect(first).rejects.toThrow();
+
+    // The wire request the departed caller sent is still in flight, so a
+    // late joiner points at it rather than minting a second label for bytes
+    // nobody is going to ask for again.
+    source.fetch(req, new AbortController().signal, l => labels.push(l.rid));
+    expect(sentMessages).toHaveLength(1);
+    expect(labels).toEqual([0, 0, 0]);
+  });
+
   it("rejects synchronously when the image's wire format is not registered", async () => {
     const ctrl = new AbortController();
     await expect(

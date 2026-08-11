@@ -11,11 +11,12 @@
  */
 
 import { RowTable } from "./rowTable.ts";
-import type { ChunkRowSource, RowOutcomeValue, TraceRow } from "./types.ts";
+import type { ChunkRowSource, RowOutcomeValue, TraceRow, WireLabel } from "./types.ts";
 
 export interface RowSink {
   /** Returns the row's index within this sink. */
   append(src: ChunkRowSource, tier: 0 | 1): number;
+  setLabel(index: number, label: WireLabel): void;
   stamp(index: number, boundary: number, offsetUs: number): void;
   setOutcome(index: number, outcome: RowOutcomeValue): void;
   serialise(): TraceRow[];
@@ -34,6 +35,8 @@ export class NoopRowSink implements RowSink {
   append(): number {
     return this.rows++;
   }
+
+  setLabel(): void {}
 
   stamp(): void {}
 

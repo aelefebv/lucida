@@ -18,6 +18,7 @@ futures-util = "0.3"
 bytes = "1"
 lru = "0.16"
 regex = "1"
+tracing = "0.1"
 lucida-content = { path = "../lucida-content" }
 lucida-protocol = { path = "../lucida-protocol" }
 

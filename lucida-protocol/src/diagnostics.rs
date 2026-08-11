@@ -155,6 +155,73 @@ pub struct DatasetGeneratedCoarseHealth {
     pub recent_failures: Vec<DatasetGeneratedCoarseFailure>,
 }
 
+/// Which labelled request family a server timing row describes. One column
+/// rather than one table per family: a correlation label is unique across
+/// the connection, not within a family (ADR 0048), so the family is an
+/// attribute of the row and not part of its identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimingRowFamily {
+    Chunk,
+    Asset,
+}
+
+/// How the server's work for a labelled request ended.
+///
+/// `NotReady` is the asymmetry to hold onto: a generated chunk that is still
+/// being produced gets an honest status answer and no binary frame, so the
+/// browser's bracket for that label never closes. A reader must not spend
+/// that open bracket on the server (ADR 0050).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimingRowOutcome {
+    /// Bytes were handed to this client's outbound queue.
+    Delivered,
+    /// The server answered with a status instead of bytes; nothing will arrive.
+    NotReady,
+    /// The serve failed; the client was told, or the request was dropped.
+    Failed,
+}
+
+/// One flush window of the server's lifecycle table, pushed to the client
+/// that caused the rows (ADR 0050). Parallel column arrays rather than an
+/// array of objects: the receiving recorder copies columns straight into its
+/// own table, where an array of objects would hand it thousands of
+/// short-lived objects to parse and discard.
+///
+/// Every column has the same length; `dropped` is the batch header.
+///
+/// No absolute wall clock appears anywhere here. Each row's numbers are
+/// relative to that row's own arrival at the server, and the browser places
+/// them by nesting inside the bracket it measured on its own clock — so the
+/// server's clock is never trusted and skew cannot produce a wrong picture.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerTimingBatch {
+    /// Rows the server refused to buffer since the previous batch, because
+    /// the pre-flush buffer was full. Declared rather than silently absorbed:
+    /// a monitor that under-reports its own losses overstates its coverage.
+    pub dropped: u32,
+    /// The correlation label each row belongs to.
+    pub rid: Vec<u32>,
+    pub family: Vec<TimingRowFamily>,
+    /// Microseconds from the request's arrival to the start of its serve.
+    pub dispatch_offset_us: Vec<u32>,
+    /// Microseconds the serve itself took, ending at handoff to the outbound
+    /// queue. Socket write time is deliberately excluded (ADR 0047).
+    pub duration_us: Vec<u32>,
+    pub outcome: Vec<TimingRowOutcome>,
+}
+
+impl ServerTimingBatch {
+    pub fn len(&self) -> usize {
+        self.rid.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rid.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DatasetSourceHealth {
     pub workspace_dataset_id: DatasetId,

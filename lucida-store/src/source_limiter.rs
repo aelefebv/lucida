@@ -35,6 +35,22 @@ impl ReaderId {
     pub const UNATTRIBUTED: ReaderId = ReaderId(u64::MAX);
 }
 
+/// The correlation label of the request a read is being performed for.
+///
+/// Distinct from [`ReaderId`], and both are needed: the reader is the
+/// fairness class (a client), the label is the individual request. Fair
+/// sharing only ever needs the class, but attributing a permit wait — the
+/// rate-setter on a remote store — needs the request.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct RequestLabel(pub u32);
+
+impl RequestLabel {
+    /// Reads with no requesting client behind them: metadata imports, CLI
+    /// work, and the proxy's own generation. Nothing joins these to a
+    /// browser row, so they carry no label rather than a borrowed one.
+    pub const UNATTRIBUTED: RequestLabel = RequestLabel(u32::MAX);
+}
+
 /// Bounds concurrent backend source reads process-wide and decides, under
 /// contention, whose read goes next.
 pub struct SourceReadLimiter {

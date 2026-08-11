@@ -15,7 +15,7 @@ use object_store::path::Path;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Semaphore, broadcast};
 
-use crate::source_limiter::{ReaderId, SourceReadLimiter};
+use crate::source_limiter::{ReaderId, RequestLabel, SourceReadLimiter};
 
 /// Default cap on concurrent backend source reads when no operator override
 /// is supplied.
@@ -470,12 +470,18 @@ impl CachedStore {
     /// client's leader is admitted on that client's share. That is the right
     /// answer — the work happens once and someone has to own it — and it can
     /// only ever make a follower faster than its own share would.
+    ///
+    /// `label` is the requesting browser's correlation label for this chunk,
+    /// carried across the hop so a permit wait can be attributed to a request
+    /// rather than only to a client (ADR 0048).
     pub async fn get_bytes(
         &self,
         path: &Path,
         reader: ReaderId,
+        label: RequestLabel,
     ) -> Result<Bytes, object_store::Error> {
-        self.get_bytes_as(path, ReadClass::Chunk, reader).await
+        self.get_bytes_as(path, ReadClass::Chunk, reader, label)
+            .await
     }
 
     /// Read a metadata object (a `zarr.json` and friends) through the same
@@ -483,8 +489,13 @@ impl CachedStore {
     /// See [`DEFAULT_METADATA_READ_CONCURRENCY`] for why the two classes are
     /// counted apart.
     pub async fn get_metadata_bytes(&self, path: &Path) -> Result<Bytes, object_store::Error> {
-        self.get_bytes_as(path, ReadClass::Metadata, ReaderId::UNATTRIBUTED)
-            .await
+        self.get_bytes_as(
+            path,
+            ReadClass::Metadata,
+            ReaderId::UNATTRIBUTED,
+            RequestLabel::UNATTRIBUTED,
+        )
+        .await
     }
 
     /// Answer whether an object exists without transferring its body.
@@ -555,6 +566,7 @@ impl CachedStore {
         path: &Path,
         class: ReadClass,
         reader: ReaderId,
+        label: RequestLabel,
     ) -> Result<Bytes, object_store::Error> {
         let key = path.to_string();
 
@@ -600,7 +612,10 @@ impl CachedStore {
                 // panicked). The guard has removed the in-flight entry, so
                 // fall back to a direct backend read: this waiter still gets a
                 // real answer and the path is not wedged.
-                Err(_) => self.fetch_from_backend(path, &key, class, reader).await,
+                Err(_) => {
+                    self.fetch_from_backend(path, &key, class, reader, label)
+                        .await
+                }
             };
         }
 
@@ -610,7 +625,9 @@ impl CachedStore {
         // completion `complete` removes the entry and broadcasts the result
         // exactly once; the guard's `Drop` is then a no-op.
         let mut guard = LeaderGuard::new(&self.in_flight, key.clone());
-        let result = self.fetch_from_backend(path, &key, class, reader).await;
+        let result = self
+            .fetch_from_backend(path, &key, class, reader, label)
+            .await;
         guard.complete(&result);
         result
     }
@@ -640,7 +657,12 @@ impl CachedStore {
         }
 
         match self
-            .get_bytes_as(path, ReadClass::OptionalMetadata, ReaderId::UNATTRIBUTED)
+            .get_bytes_as(
+                path,
+                ReadClass::OptionalMetadata,
+                ReaderId::UNATTRIBUTED,
+                RequestLabel::UNATTRIBUTED,
+            )
             .await
         {
             Ok(bytes) => Ok(Some(bytes)),
@@ -661,6 +683,7 @@ impl CachedStore {
         key: &str,
         class: ReadClass,
         reader: ReaderId,
+        label: RequestLabel,
     ) -> Result<Bytes, object_store::Error> {
         // Timed from here, before the permit is acquired: queueing behind our
         // own concurrency cap is part of what a caller waits for, and leaving
@@ -674,7 +697,19 @@ impl CachedStore {
             // has contention to arbitrate, while metadata reads take a plain
             // permit from their own cap.
             let _permit = match class {
-                ReadClass::Chunk => ReadPermit::Chunk(self.source_read.acquire(reader).await),
+                ReadClass::Chunk => {
+                    let permit = ReadPermit::Chunk(self.source_read.acquire(reader).await);
+                    // The wait behind the cap is the rate-setter on a remote
+                    // store, and it is only diagnosable if it can be named
+                    // per request rather than per client.
+                    tracing::trace!(
+                        rid = label.0,
+                        reader = reader.0,
+                        wait_us = started.elapsed().as_micros() as u64,
+                        "store.chunk_read.permit_acquired"
+                    );
+                    permit
+                }
                 ReadClass::Metadata | ReadClass::OptionalMetadata => ReadPermit::Metadata(
                     self.metadata_read
                         .acquire()
@@ -742,6 +777,8 @@ mod tests {
     /// they all read as one reader. Fairness has its own tests in
     /// [`crate::source_limiter`].
     const READER: ReaderId = ReaderId(1);
+    /// Tests exercise the read path, not the join, so one label serves.
+    const LABEL: RequestLabel = RequestLabel(7);
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir()
@@ -761,8 +798,8 @@ mod tests {
         let cached = CachedStore::new(inner, 1024);
 
         let path = Path::from("chunk1");
-        let first = cached.get_bytes(&path, READER).await.unwrap();
-        let second = cached.get_bytes(&path, READER).await.unwrap();
+        let first = cached.get_bytes(&path, READER, LABEL).await.unwrap();
+        let second = cached.get_bytes(&path, READER, LABEL).await.unwrap();
         assert_eq!(first, second);
         assert_eq!(&first[..], b"hello world");
         let stats = cached.stats();
@@ -826,8 +863,8 @@ mod tests {
         let pa = Path::from("a");
         let pb = Path::from("b");
 
-        let _a = cached.get_bytes(&pa, READER).await.unwrap();
-        let _b = cached.get_bytes(&pb, READER).await.unwrap();
+        let _a = cached.get_bytes(&pa, READER, LABEL).await.unwrap();
+        let _b = cached.get_bytes(&pb, READER, LABEL).await.unwrap();
 
         // "a" should have been evicted to make room for "b"
         {
@@ -848,7 +885,9 @@ mod tests {
         let inner = crate::backend::open(dir.to_str().unwrap()).unwrap();
         let cached = CachedStore::new(inner, 1024);
 
-        let result = cached.get_bytes(&Path::from("nonexistent"), READER).await;
+        let result = cached
+            .get_bytes(&Path::from("nonexistent"), READER, LABEL)
+            .await;
         assert!(result.is_err());
         let stats = cached.stats();
         assert_eq!(stats.backend_errors, 1);
@@ -997,7 +1036,7 @@ mod tests {
         for _ in 0..waiters {
             let cached = cached.clone();
             handles.push(tokio::spawn(async move {
-                cached.get_bytes(&Path::from("chunk"), READER).await
+                cached.get_bytes(&Path::from("chunk"), READER, LABEL).await
             }));
         }
 
@@ -1035,7 +1074,7 @@ mod tests {
         for _ in 0..waiters {
             let cached = cached.clone();
             handles.push(tokio::spawn(async move {
-                cached.get_bytes(&Path::from("chunk"), READER).await
+                cached.get_bytes(&Path::from("chunk"), READER, LABEL).await
             }));
         }
         for handle in handles {
@@ -1056,7 +1095,7 @@ mod tests {
         // A later read re-attempts the backend and now succeeds.
         fail.store(false, Ordering::SeqCst);
         let bytes = cached
-            .get_bytes(&Path::from("chunk"), READER)
+            .get_bytes(&Path::from("chunk"), READER, LABEL)
             .await
             .unwrap();
         assert_eq!(&bytes[..], b"payload");
@@ -1089,7 +1128,7 @@ mod tests {
             let cached = cached.clone();
             handles.push(tokio::spawn(async move {
                 cached
-                    .get_bytes(&Path::from(format!("chunk-{i}")), READER)
+                    .get_bytes(&Path::from(format!("chunk-{i}")), READER, LABEL)
                     .await
             }));
         }
@@ -1181,7 +1220,7 @@ mod tests {
         // read, then is cancelled by the timeout before it can broadcast.
         let cancelled = tokio::time::timeout(
             Duration::from_millis(20),
-            cached.get_bytes(&Path::from("chunk"), READER),
+            cached.get_bytes(&Path::from("chunk"), READER, LABEL),
         )
         .await;
         assert!(
@@ -1202,7 +1241,7 @@ mod tests {
         // awaiting a broadcast that will never come.
         let bytes = tokio::time::timeout(
             Duration::from_secs(5),
-            cached.get_bytes(&Path::from("chunk"), READER),
+            cached.get_bytes(&Path::from("chunk"), READER, LABEL),
         )
         .await
         .expect("subsequent request must not be wedged")
@@ -1224,14 +1263,14 @@ mod tests {
         // Leader claims the path and starts its slow read.
         let leader = {
             let cached = cached.clone();
-            tokio::spawn(async move { cached.get_bytes(&Path::from("chunk"), READER).await })
+            tokio::spawn(async move { cached.get_bytes(&Path::from("chunk"), READER, LABEL).await })
         };
         tokio::time::sleep(Duration::from_millis(40)).await;
 
         // Follower subscribes to the leader's in-flight channel and parks.
         let follower = {
             let cached = cached.clone();
-            tokio::spawn(async move { cached.get_bytes(&Path::from("chunk"), READER).await })
+            tokio::spawn(async move { cached.get_bytes(&Path::from("chunk"), READER, LABEL).await })
         };
         tokio::time::sleep(Duration::from_millis(40)).await;
 
@@ -1261,10 +1300,19 @@ mod tests {
         store.seed("b", b"bbbb").await;
 
         let cached = CachedStore::with_source_limiter(store, 1024, SourceReadLimiter::new(1));
-        cached.get_bytes(&Path::from("a"), READER).await.unwrap();
-        cached.get_bytes(&Path::from("b"), READER).await.unwrap();
+        cached
+            .get_bytes(&Path::from("a"), READER, LABEL)
+            .await
+            .unwrap();
+        cached
+            .get_bytes(&Path::from("b"), READER, LABEL)
+            .await
+            .unwrap();
         // A hit costs no backend read and no read time.
-        cached.get_bytes(&Path::from("a"), READER).await.unwrap();
+        cached
+            .get_bytes(&Path::from("a"), READER, LABEL)
+            .await
+            .unwrap();
 
         let stats = cached.stats();
         assert_eq!(stats.source_reads, 2, "one backend read per distinct path");
@@ -1325,7 +1373,7 @@ mod tests {
 
         let first = CachedStore::shared_for_source("src-a", store.clone(), 1024);
         first
-            .get_bytes(&Path::from("zarr.json"), READER)
+            .get_bytes(&Path::from("zarr.json"), READER, LABEL)
             .await
             .unwrap();
 
@@ -1333,7 +1381,7 @@ mod tests {
         let second = CachedStore::shared_for_source("src-a", store.clone(), 1024);
         assert!(Arc::ptr_eq(&first, &second));
         second
-            .get_bytes(&Path::from("zarr.json"), READER)
+            .get_bytes(&Path::from("zarr.json"), READER, LABEL)
             .await
             .unwrap();
         assert_eq!(get_count.load(Ordering::SeqCst), 1);
@@ -1342,7 +1390,7 @@ mod tests {
         let other = CachedStore::shared_for_source("src-b", store.clone(), 1024);
         assert!(!Arc::ptr_eq(&first, &other));
         other
-            .get_bytes(&Path::from("zarr.json"), READER)
+            .get_bytes(&Path::from("zarr.json"), READER, LABEL)
             .await
             .unwrap();
         assert_eq!(get_count.load(Ordering::SeqCst), 2);
@@ -1353,7 +1401,7 @@ mod tests {
         drop(second);
         let reopened = CachedStore::shared_for_source("src-a", store.clone(), 1024);
         reopened
-            .get_bytes(&Path::from("zarr.json"), READER)
+            .get_bytes(&Path::from("zarr.json"), READER, LABEL)
             .await
             .unwrap();
         assert_eq!(get_count.load(Ordering::SeqCst), 3);
@@ -1390,8 +1438,8 @@ mod tests {
         // An absent chunk is data, not shape: `get_bytes` keeps asking, so a
         // sparse region that later has content is never stuck reading empty.
         let sparse = Path::from("0/c/0/0/0/0/0");
-        assert!(cached.get_bytes(&sparse, READER).await.is_err());
-        assert!(cached.get_bytes(&sparse, READER).await.is_err());
+        assert!(cached.get_bytes(&sparse, READER, LABEL).await.is_err());
+        assert!(cached.get_bytes(&sparse, READER, LABEL).await.is_err());
         assert_eq!(get_count.load(Ordering::SeqCst), 3);
     }
 
@@ -1460,7 +1508,12 @@ mod tests {
         store.fail.store(true, Ordering::SeqCst);
         let cached = CachedStore::new(store, 1024);
 
-        assert!(cached.get_bytes(&Path::from("a"), READER).await.is_err());
+        assert!(
+            cached
+                .get_bytes(&Path::from("a"), READER, LABEL)
+                .await
+                .is_err()
+        );
 
         let stats = cached.stats();
         assert_eq!(

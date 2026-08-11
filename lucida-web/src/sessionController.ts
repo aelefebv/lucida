@@ -33,6 +33,7 @@ import { invalidateDisplaySettings } from "./invalidation.ts";
 import { syncSceneViewState, type SceneViewStateSetters } from "./hooks/sceneViewState.ts";
 import { shouldAutoFitOnOpen, isOpenerOf } from "./hooks/autoFit.ts";
 import { classifySceneError, guardedSceneCall, observeSceneCalls } from "./sceneGuard.ts";
+import { traceRecorder } from "./trace/recorder.ts";
 
 /** Consecutive scene-mutation failures (local, remote, or snapshot — every
  *  mutation reports through the scene-call guard) before the scene is
@@ -1285,11 +1286,17 @@ export class SessionController {
       onSourceChunkStatus: (datasetId, imageId, key, status, message) => {
         this.contentSource.handleSourceChunkStatus(datasetId, imageId, key, status, message);
       },
-      onConnected: () => {
+      onConnected: (generation) => {
         // Chunk failures accumulated against a dropped transport (or its
         // reconnect window) say nothing about the restored connection.
         this.cpuCache.resetChunkFailureStreak();
+        // Correlation labels are per connection: the counter restarts here
+        // and the generation goes on every row minted from now on.
+        this.contentSource.resetConnection(generation);
         this.deps.events.onConnectedChanged(true);
+      },
+      onTimingBatch: (batch, generation) => {
+        traceRecorder.ingestServerBatch(batch, generation);
       },
       onWorkspaceArchived: () => {
         this.deps.events.onConnectedChanged(false);
