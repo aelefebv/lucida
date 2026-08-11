@@ -487,6 +487,69 @@ impl CachedStore {
             .await
     }
 
+    /// Answer whether an object exists without transferring its body.
+    ///
+    /// This is a HEAD, not a GET: the caller wants presence, and a chunk body
+    /// can be megabytes. Bounded by the metadata cap, since the question is
+    /// asked about the shape of a dataset rather than about its data, and a
+    /// not-found is the answer rather than a fault — so it never counts as a
+    /// backend error. Absence is remembered in the same store as
+    /// [`get_optional_metadata_bytes`], and a body already resident in the LRU
+    /// answers `true` locally.
+    ///
+    /// [`get_optional_metadata_bytes`]: Self::get_optional_metadata_bytes
+    pub async fn probe_exists(&self, path: &Path) -> Result<bool, object_store::Error> {
+        let key = path.to_string();
+        {
+            let mut absent = self.absent.lock().unwrap();
+            if absent.get(&key).is_some() {
+                drop(absent);
+                let mut state = self.cache.lock().unwrap();
+                state.hits += 1;
+                return Ok(false);
+            }
+        }
+        {
+            let mut state = self.cache.lock().unwrap();
+            if state.lru.get(&key).is_some() {
+                state.hits += 1;
+                return Ok(true);
+            }
+            state.misses += 1;
+        }
+
+        let started = std::time::Instant::now();
+        let head = {
+            let _permit = self
+                .metadata_read
+                .acquire()
+                .await
+                .expect("source-read semaphore is never closed");
+            self.inner.head(path).await
+        };
+        let elapsed_nanos = started.elapsed().as_nanos();
+
+        // The round trip happened whatever it answered, so it is counted once
+        // here rather than in each arm below.
+        {
+            let mut state = self.cache.lock().unwrap();
+            state.source_reads += 1;
+            state.source_read_nanos += elapsed_nanos;
+            if !matches!(head, Ok(_) | Err(object_store::Error::NotFound { .. })) {
+                state.backend_errors += 1;
+            }
+        }
+
+        match head {
+            Ok(_) => Ok(true),
+            Err(object_store::Error::NotFound { .. }) => {
+                self.absent.lock().unwrap().put(key, ());
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     async fn get_bytes_as(
         &self,
         path: &Path,
@@ -707,6 +770,45 @@ mod tests {
         assert_eq!(stats.misses, 1);
         assert_eq!(stats.entry_count, 1);
         assert_eq!(stats.current_bytes, b"hello world".len());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn probe_exists_answers_presence_without_caching_the_body() {
+        let dir = temp_dir("probe_exists");
+        fs::write(dir.join("present"), vec![7u8; 4096]).unwrap();
+
+        let inner = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let cached = CachedStore::new(inner, 1_000_000);
+
+        assert!(cached.probe_exists(&Path::from("present")).await.unwrap());
+        assert!(!cached.probe_exists(&Path::from("missing")).await.unwrap());
+
+        // A HEAD must not pull the body into the cache: probing is about the
+        // shape of a dataset, and a real chunk body can be megabytes.
+        let stats = cached.stats();
+        assert_eq!(stats.entry_count, 0);
+        assert_eq!(stats.current_bytes, 0);
+        // A clean not-found is the answer, not a fault.
+        assert_eq!(stats.backend_errors, 0);
+        assert_eq!(stats.source_reads, 2);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn probe_exists_remembers_absence() {
+        let dir = temp_dir("probe_absent");
+        let inner = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let cached = CachedStore::new(inner, 1024);
+
+        let path = Path::from("never-written");
+        assert!(!cached.probe_exists(&path).await.unwrap());
+        assert!(!cached.probe_exists(&path).await.unwrap());
+
+        // The second probe is served locally — one backend round trip total.
+        assert_eq!(cached.stats().source_reads, 1);
 
         let _ = fs::remove_dir_all(&dir);
     }

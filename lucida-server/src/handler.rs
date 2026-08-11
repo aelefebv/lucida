@@ -17,6 +17,7 @@ use lucida_protocol::{
 };
 use lucida_proxy::{ProxyAsset, ProxyKind, ProxySpec};
 use lucida_store::cache::CachedStore;
+use lucida_store::import_types::ImportWarningKind;
 use lucida_store::source_limiter::ReaderId;
 use object_store::path::Path;
 use tokio::sync::{Mutex, broadcast, mpsc};
@@ -842,7 +843,10 @@ fn dataset_health_snapshot(sess: &Session, filter: Option<&DatasetId>) -> Vec<Da
         .collect()
 }
 
-fn dataset_health_for_manifest(sess: &Session, manifest: &DatasetManifest) -> DatasetSourceHealth {
+pub(crate) fn dataset_health_for_manifest(
+    sess: &Session,
+    manifest: &DatasetManifest,
+) -> DatasetSourceHealth {
     let dataset_id = manifest.dataset_id.clone();
     let binding = sess.server_bindings.get(&dataset_id);
     let runtime = sess.binding_runtime.get(&dataset_id);
@@ -885,8 +889,19 @@ fn dataset_health_for_manifest(sess: &Session, manifest: &DatasetManifest) -> Da
         .or_else(|| runtime.map(|state| state.source_url.clone()));
     let backend = source_url.as_deref().map(backend_kind_for_url);
     let mut messages = Vec::new();
+    // A level the export never wrote reads as fill and renders as an all-zero
+    // image, so a dataset carrying one is not healthy however well the server
+    // is serving it — reporting `healthy` over a black viewport is exactly the
+    // mis-read this is here to prevent. Other import warnings stay
+    // informational and leave the status alone.
+    let mut import_status = DatasetHealthStatus::Healthy;
     if let Some(binding) = binding {
-        messages.extend(binding.import_warnings.iter().cloned());
+        for warning in &binding.import_warnings {
+            if warning.kind == ImportWarningKind::UnwrittenLevel {
+                import_status = DatasetHealthStatus::Degraded;
+            }
+            messages.push(warning.message.clone());
+        }
     }
     if binding.is_none() {
         messages.push(
@@ -949,8 +964,11 @@ fn dataset_health_for_manifest(sess: &Session, manifest: &DatasetManifest) -> Da
         workspace_dataset_id: dataset_id,
         name: manifest.name.clone(),
         status: combine_health(
-            combine_health(binding_component.status, source_cache_status),
-            generated.status,
+            combine_health(
+                combine_health(binding_component.status, source_cache_status),
+                generated.status,
+            ),
+            import_status,
         ),
         source_url,
         backend,
@@ -1107,13 +1125,16 @@ fn cache_used_percent(current_bytes: u64, max_bytes: Option<u64>) -> Option<u8> 
     )
 }
 
-fn combine_health(
-    binding: DatasetHealthStatus,
-    generated: DatasetHealthStatus,
-) -> DatasetHealthStatus {
-    if binding == DatasetHealthStatus::Unavailable {
+/// The worse of two component statuses.
+///
+/// Symmetric on purpose, so folding several components together cannot lose
+/// one: the earlier form only looked for `Degraded` in its right-hand
+/// argument, which meant a degraded source cache folded against a healthy
+/// generated-coarse reported the dataset healthy.
+fn combine_health(a: DatasetHealthStatus, b: DatasetHealthStatus) -> DatasetHealthStatus {
+    if a == DatasetHealthStatus::Unavailable || b == DatasetHealthStatus::Unavailable {
         DatasetHealthStatus::Unavailable
-    } else if generated == DatasetHealthStatus::Degraded {
+    } else if a == DatasetHealthStatus::Degraded || b == DatasetHealthStatus::Degraded {
         DatasetHealthStatus::Degraded
     } else {
         DatasetHealthStatus::Healthy
@@ -1730,6 +1751,23 @@ async fn send_open_failed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Health is a worst-of fold, and no component may be lost to argument
+    /// order. The earlier form only looked for `Degraded` on the right, so
+    /// `combine(Degraded, Healthy)` wrongly answered `Healthy` — which
+    /// silently swallowed a degraded source cache.
+    #[test]
+    fn combine_health_is_symmetric_worst_of() {
+        use DatasetHealthStatus::{Degraded, Healthy, Unavailable};
+
+        assert_eq!(combine_health(Healthy, Healthy), Healthy);
+        assert_eq!(combine_health(Degraded, Healthy), Degraded);
+        assert_eq!(combine_health(Healthy, Degraded), Degraded);
+        assert_eq!(combine_health(Unavailable, Healthy), Unavailable);
+        assert_eq!(combine_health(Healthy, Unavailable), Unavailable);
+        assert_eq!(combine_health(Degraded, Unavailable), Unavailable);
+        assert_eq!(combine_health(Unavailable, Degraded), Unavailable);
+    }
     use crate::test_fixtures::single_image_manifest;
     use lucida_content::EntityId;
     use lucida_proxy::{ProxyDtype, ProxyHeader};
