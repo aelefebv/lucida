@@ -2420,8 +2420,8 @@ mod tests {
         // backlog first would cost.
         tokio::time::timeout(std::time::Duration::from_millis(READ_MS * 10), newcomer)
             .await
-        .expect("the newcomer waited behind the whole backlog")
-        .expect("the newcomer's task ran");
+            .expect("the newcomer waited behind the whole backlog")
+            .expect("the newcomer's task ran");
 
         assert!(
             newcomer_rx.recv().await.is_some(),

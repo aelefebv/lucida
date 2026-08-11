@@ -559,7 +559,10 @@ impl CachedStore {
             }
         }
 
-        match self.get_bytes_as(path, ReadClass::OptionalMetadata, ReaderId::UNATTRIBUTED).await {
+        match self
+            .get_bytes_as(path, ReadClass::OptionalMetadata, ReaderId::UNATTRIBUTED)
+            .await
+        {
             Ok(bytes) => Ok(Some(bytes)),
             Err(object_store::Error::NotFound { .. }) => {
                 self.absent.lock().unwrap().put(key, ());
@@ -937,7 +940,10 @@ mod tests {
 
         // A later read re-attempts the backend and now succeeds.
         fail.store(false, Ordering::SeqCst);
-        let bytes = cached.get_bytes(&Path::from("chunk"), READER).await.unwrap();
+        let bytes = cached
+            .get_bytes(&Path::from("chunk"), READER)
+            .await
+            .unwrap();
         assert_eq!(&bytes[..], b"payload");
         assert_eq!(get_count.load(Ordering::SeqCst), 2);
         assert_eq!(cached.stats().entry_count, 1);
@@ -967,7 +973,9 @@ mod tests {
         for i in 0..distinct {
             let cached = cached.clone();
             handles.push(tokio::spawn(async move {
-                cached.get_bytes(&Path::from(format!("chunk-{i}")), READER).await
+                cached
+                    .get_bytes(&Path::from(format!("chunk-{i}")), READER)
+                    .await
             }));
         }
         for handle in handles {
@@ -1201,18 +1209,27 @@ mod tests {
         let get_count = store.get_count.clone();
 
         let first = CachedStore::shared_for_source("src-a", store.clone(), 1024);
-        first.get_bytes(&Path::from("zarr.json"), READER).await.unwrap();
+        first
+            .get_bytes(&Path::from("zarr.json"), READER)
+            .await
+            .unwrap();
 
         // A second open of the same source reads what the first one cached.
         let second = CachedStore::shared_for_source("src-a", store.clone(), 1024);
         assert!(Arc::ptr_eq(&first, &second));
-        second.get_bytes(&Path::from("zarr.json"), READER).await.unwrap();
+        second
+            .get_bytes(&Path::from("zarr.json"), READER)
+            .await
+            .unwrap();
         assert_eq!(get_count.load(Ordering::SeqCst), 1);
 
         // A different source is a different cache.
         let other = CachedStore::shared_for_source("src-b", store.clone(), 1024);
         assert!(!Arc::ptr_eq(&first, &other));
-        other.get_bytes(&Path::from("zarr.json"), READER).await.unwrap();
+        other
+            .get_bytes(&Path::from("zarr.json"), READER)
+            .await
+            .unwrap();
         assert_eq!(get_count.load(Ordering::SeqCst), 2);
 
         // Once nothing holds the source's cache, its budget is released
@@ -1220,7 +1237,10 @@ mod tests {
         drop(first);
         drop(second);
         let reopened = CachedStore::shared_for_source("src-a", store.clone(), 1024);
-        reopened.get_bytes(&Path::from("zarr.json"), READER).await.unwrap();
+        reopened
+            .get_bytes(&Path::from("zarr.json"), READER)
+            .await
+            .unwrap();
         assert_eq!(get_count.load(Ordering::SeqCst), 3);
     }
 

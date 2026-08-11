@@ -333,7 +333,10 @@ mod tests {
         for task in tasks {
             let _ = task.await;
         }
-        let (a, b) = (a_reads.load(Ordering::SeqCst), b_reads.load(Ordering::SeqCst));
+        let (a, b) = (
+            a_reads.load(Ordering::SeqCst),
+            b_reads.load(Ordering::SeqCst),
+        );
         assert_eq!(a + b, 400);
         assert_eq!(a, 200);
         assert_eq!(b, 200);
