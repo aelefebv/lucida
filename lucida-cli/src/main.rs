@@ -12,11 +12,12 @@ mod output;
 mod saved_view;
 mod session;
 mod status;
+mod trace;
 mod view;
 mod workspace;
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -24,9 +25,10 @@ use clap::{Parser, Subcommand, ValueEnum};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use lucida_core::command::ViewportCommand;
-use lucida_core::saved_view::SavedView;
+use lucida_core::saved_view::{SavedView, normalize_dataset_url};
 use lucida_core::scene::{BlendMode, Colormap, RenderMode};
 use lucida_core::view_transform::{ExplorationSidecar, ViewExtent, default_view};
+use lucida_protocol::DatasetSourceHealth;
 use serde_json::Value;
 
 use crate::admin::{
@@ -39,7 +41,9 @@ use crate::auth::{
     AuthClient, LoginResult, PollOutcome, generate_raw_token, open_browser, poll_interval,
 };
 use crate::browser::Viewport;
-use crate::config::{CliConfig, ConfigStore, normalize_server_base_url, resolve_server};
+use crate::config::{
+    CliConfig, ConfigStore, EffectiveServer, normalize_server_base_url, resolve_server,
+};
 use crate::credentials::{EffectiveToken, clear_local_token, resolve_token, store_local_token};
 use crate::dataset::{
     DatasetBrowseOutput, DatasetHealthOutput, DatasetHttpClient, DatasetInfoOutput,
@@ -48,6 +52,7 @@ use crate::dataset::{
     format_dataset_health_human, format_dataset_info_human, format_dataset_list_human,
     format_dataset_open_human, format_dataset_remove_human, format_dataset_retry_human,
 };
+
 use crate::error::{CliError, ErrorKind};
 use crate::layout::{
     LayoutActiveOutput, LayoutListOutput, LayoutSetOutput, LayoutWorkspaceClient,
@@ -75,10 +80,10 @@ use crate::view::{
 use crate::workspace::{
     WorkspaceClient, WorkspaceLifecycleOutput, WorkspaceLinkAccess, WorkspaceListOutput,
     WorkspaceLookupMode, WorkspaceMemberOutput, WorkspaceOpenOutput, WorkspaceOutput,
-    WorkspacePinOutput, WorkspaceRole, WorkspaceSharingOutput, WorkspaceTarget, WorkspaceUseOutput,
-    format_workspace_human, format_workspace_lifecycle_human, format_workspace_list_human,
-    format_workspace_member_human, format_workspace_pin_human, format_workspace_sharing_human,
-    resolve_workspace_record, target_for,
+    WorkspacePinOutput, WorkspaceRecord, WorkspaceRole, WorkspaceSharingOutput, WorkspaceTarget,
+    WorkspaceUseOutput, format_workspace_human, format_workspace_lifecycle_human,
+    format_workspace_list_human, format_workspace_member_human, format_workspace_pin_human,
+    format_workspace_sharing_human, resolve_workspace_record, target_for,
 };
 
 #[derive(Parser, Debug)]
@@ -217,16 +222,25 @@ enum Command {
         #[command(subcommand)]
         command: PlanCommand,
     },
-    /// Export pipeline traces from a driven viewer page
+    /// Measure a headless open and read the page's own diagnostic
+    ///
+    /// `lucida trace <dataset>` drives the run; the subcommands read a run it
+    /// wrote. Top level rather than a verb under `dataset` because it drives a
+    /// run, and its follow-up depths take a run id rather than a dataset.
+    ///
+    /// The page loads the whole selected workspace, so a workspace holding
+    /// other datasets measures opening those too — the run header lists every
+    /// dataset it actually loaded. Measure one dataset in a workspace that has
+    /// only that dataset.
+    #[command(args_conflicts_with_subcommands = true)]
     Trace {
-        /// Durable headless viewer profile to open
-        #[arg(long, default_value = "default", value_name = "NAME")]
-        viewer_profile: String,
-        /// Seconds to wait for the page to load and settle
-        #[arg(long, default_value_t = 120)]
-        timeout_seconds: u64,
+        /// Dataset URL in canonical form, or an id the server already has open
+        #[arg(value_name = "DATASET")]
+        dataset: Option<String>,
+        #[command(flatten)]
+        run: TraceRunArgs,
         #[command(subcommand)]
-        command: TraceCommand,
+        command: Option<TraceCommand>,
     },
     /// Inspect read-only workspace and viewer diagnostics
     Debug {
@@ -1156,21 +1170,77 @@ enum PlanCommand {
     },
 }
 
+/// The run's own arguments. Flattened onto `trace` rather than hung off a
+/// `run` subcommand, because the command an agent is told to run — by the
+/// diagnostic's own follow-up lines — is `lucida trace <dataset>`.
+#[derive(clap::Args, Debug, Clone)]
+struct TraceRunArgs {
+    /// Viewport width in CSS pixels
+    #[arg(long, default_value_t = trace::DEFAULT_WIDTH)]
+    width: u32,
+    /// Viewport height in CSS pixels
+    #[arg(long, default_value_t = trace::DEFAULT_HEIGHT)]
+    height: u32,
+    /// Device pixel ratio to drive the page at
+    #[arg(long, default_value_t = trace::DEFAULT_DEVICE_PIXEL_RATIO, value_name = "RATIO")]
+    device_pixel_ratio: f64,
+    /// Write the run here instead of the trace directory beside the config
+    #[arg(long, short, value_name = "PATH")]
+    output: Option<String>,
+    /// Directory runs are written to and read back from
+    #[arg(long, value_name = "DIR", env = "LUCIDA_TRACE_DIR")]
+    trace_dir: Option<PathBuf>,
+    /// Also write this run's raw spans as Chrome Trace Event JSON, for Perfetto
+    #[arg(long, value_name = "PATH")]
+    perfetto: Option<String>,
+    /// Seconds to wait for the page to load and settle
+    #[arg(long, default_value_t = 120)]
+    timeout_seconds: u64,
+    /// Fail (non-zero) on a stall verdict or a run that never settled
+    ///
+    /// Opt-in, because every other non-zero exit in this CLI means the command
+    /// itself failed. Never fires on coverage: most of a healthy cold open is
+    /// pre-instrument boot, so a coverage gate fires on every green run.
+    #[arg(long)]
+    gate: bool,
+}
+
 #[derive(Subcommand, Debug)]
 enum TraceCommand {
+    /// Print a persisted run at a chosen depth
+    Show {
+        /// Run id, or a path to a run file written with --output
+        #[arg(value_name = "RUN")]
+        run: String,
+        /// Every phase, one row each, with the critical path and the ruleset
+        #[arg(long)]
+        phases: bool,
+        /// One phase's numbers and the findings against it
+        #[arg(long, value_name = "PHASE", conflicts_with = "phases")]
+        phase: Option<String>,
+        /// Directory runs are read back from
+        #[arg(long, value_name = "DIR", env = "LUCIDA_TRACE_DIR")]
+        trace_dir: Option<PathBuf>,
+    },
     /// Write the page's trace as Chrome Trace Event JSON, for ui.perfetto.dev
     Perfetto {
         /// File to write the trace to
         #[arg(long, short, value_name = "PATH", default_value = "lucida-trace.json")]
         output: String,
+        /// Durable headless viewer profile to open
+        #[arg(long, default_value = "default", value_name = "NAME")]
+        viewer_profile: String,
+        /// Seconds to wait for the page to load and settle
+        #[arg(long, default_value_t = 120)]
+        timeout_seconds: u64,
         /// Viewport width in CSS pixels
-        #[arg(long, default_value_t = 1440)]
+        #[arg(long, default_value_t = trace::DEFAULT_WIDTH)]
         width: u32,
         /// Viewport height in CSS pixels
-        #[arg(long, default_value_t = 900)]
+        #[arg(long, default_value_t = trace::DEFAULT_HEIGHT)]
         height: u32,
         /// Device pixel ratio to drive the page at
-        #[arg(long, default_value_t = 2.0, value_name = "RATIO")]
+        #[arg(long, default_value_t = trace::DEFAULT_DEVICE_PIXEL_RATIO, value_name = "RATIO")]
         device_pixel_ratio: f64,
     },
 }
@@ -2513,17 +2583,17 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             .await?;
         }
         Command::Trace {
-            viewer_profile,
-            timeout_seconds,
+            dataset,
+            run,
             command,
         } => {
             emit_trace_command(
                 &cli,
                 &config,
                 output,
-                command,
-                viewer_profile,
-                *timeout_seconds,
+                dataset.as_deref(),
+                command.as_ref(),
+                run,
             )
             .await?;
         }
@@ -3431,30 +3501,13 @@ async fn emit_plan_command(
     Ok(())
 }
 
-/// What driving a page for its trace produced. Counts and labels only — the
-/// rows themselves are in the file, and the CLI prints a path rather than
-/// inlining thousands of spans.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct TraceCapture {
-    /// Whether the page published `quiescent` before the deadline. A run that
-    /// never settles is still exported: it is the most diagnostic sample there
-    /// is, and a monitor that emits nothing on it is the wrong tool.
-    settled: bool,
-    events: usize,
-    bytes: usize,
-    /// Repeated from the file's own header, so the surface says what the
-    /// artifact says rather than asserting a cleanliness of its own.
-    synthetic_values: Vec<String>,
-    derived_values: Vec<String>,
-}
-
 async fn emit_trace_command(
     cli: &Cli,
     config: &CliConfig,
     output: Output,
-    command: &TraceCommand,
-    viewer_profile: &str,
-    timeout_seconds: u64,
+    dataset: Option<&str>,
+    command: Option<&TraceCommand>,
+    trace_args: &TraceRunArgs,
 ) -> Result<(), CliError> {
     let server = resolve_server(cli.server.as_deref(), config)?;
     let token = resolve_token(&server.url, config);
@@ -3468,19 +3521,85 @@ async fn emit_trace_command(
     )
     .await?;
     let target = target_for(&server.url, &workspace)?;
-    let wait = Duration::from_secs(timeout_seconds);
+    let config_path = ConfigStore::default_path()?;
 
-    match command {
-        TraceCommand::Perfetto {
-            output: output_path,
-            width,
-            height,
-            device_pixel_ratio,
-        } => {
+    match (dataset, command) {
+        (Some(dataset), _) => {
+            let outcome = run_trace(
+                &server,
+                &workspace,
+                &target,
+                token.as_ref(),
+                dataset,
+                trace_args,
+                &trace::resolve_trace_dir(trace_args.trace_dir.as_deref(), &config_path),
+                Duration::from_secs(trace_args.timeout_seconds),
+            )
+            .await?;
+            let payload = serde_json::json!({
+                "server": server,
+                "workspace": workspace,
+                "target": target,
+                "runFile": outcome.path,
+                "header": outcome.file.header,
+                "verdict": outcome.file.diagnostic.get("verdict"),
+                "text": outcome.file.renderings.summary,
+                "gate": outcome.gate,
+            });
+            output.print_either(&payload, || {
+                trace::format_run_human(&outcome.file, &outcome.path)
+            })?;
+            if let Some(reason) = outcome.gate {
+                return Err(CliError::new(ErrorKind::GateFailed, reason));
+            }
+        }
+        (
+            None,
+            Some(TraceCommand::Show {
+                run,
+                phases,
+                phase,
+                trace_dir,
+            }),
+        ) => {
+            let dir = trace::resolve_trace_dir(trace_dir.as_deref(), &config_path);
+            let path = trace::resolve_run_file(&dir, run);
+            let file = trace::read_run_file(&path)?;
+            let depth = match (phase, phases) {
+                (Some(phase), _) => trace::ShowDepth::Phase(phase.clone()),
+                (None, true) => trace::ShowDepth::Phases,
+                (None, false) => trace::ShowDepth::Summary,
+            };
+            let text = trace::render_show(&file, &depth);
+            let payload = serde_json::json!({
+                "runFile": path,
+                "header": file.header,
+                "diagnostic": file.diagnostic,
+                "text": text,
+            });
+            output.print_either(&payload, || text.clone())?;
+        }
+        (
+            None,
+            Some(TraceCommand::Perfetto {
+                output: output_path,
+                viewer_profile,
+                timeout_seconds,
+                width,
+                height,
+                device_pixel_ratio,
+            }),
+        ) => {
             let url = viewer_profile_web_url(&target, viewer_profile)?;
             let viewport = Viewport::new(*width, *height, *device_pixel_ratio);
-            let capture =
-                capture_chrome_trace(&url, token.as_ref(), output_path, viewport, wait).await?;
+            let capture = trace::capture_chrome_trace(
+                &url,
+                token.as_ref(),
+                output_path,
+                viewport,
+                Duration::from_secs(*timeout_seconds),
+            )
+            .await?;
             let payload = serde_json::json!({
                 "server": server,
                 "workspace": workspace,
@@ -3496,165 +3615,125 @@ async fn emit_trace_command(
                 "derivedValues": capture.derived_values,
             });
             output.print_either(&payload, || {
-                format_chrome_trace_human(output_path, &capture)
+                trace::format_chrome_trace_human(output_path, &capture)
             })?;
+        }
+        (None, None) => {
+            return Err(CliError::config(
+                "lucida trace takes a dataset URL to measure, or a subcommand (show, perfetto)",
+            ));
         }
     }
 
     Ok(())
 }
 
-/// The human rendering: a path, not rows. Perfetto is the raw-span surface;
-/// this command's job is to hand it a file and say what the file is.
-fn format_chrome_trace_human(output_path: &str, capture: &TraceCapture) -> String {
-    let mut human = format!(
-        "Wrote Chrome Trace Event JSON: {output_path}\n\
-         {} events, {} bytes. Open it at https://ui.perfetto.dev (File → Open trace file).",
-        capture.events, capture.bytes
-    );
-    if !capture.settled {
-        human.push_str("\nThe page never published quiescent before the deadline; the run was closed explicitly.");
-    }
-    if capture.synthetic_values.is_empty() {
-        human.push_str("\nConstructed rather than measured: nothing.");
-    } else {
-        for value in &capture.synthetic_values {
-            human.push_str(&format!("\nConstructed, not measured: {value}"));
-        }
-    }
-    for value in &capture.derived_values {
-        human.push_str(&format!("\nDerived at export: {value}"));
-    }
-    human
+/// A driven run, its file, and whether an opt-in gate should fail on it.
+struct TraceRunOutcome {
+    file: trace::TraceRunFile,
+    path: PathBuf,
+    gate: Option<String>,
 }
 
-/// Drive `url`, wait for the page to settle, and write its trace projected as
-/// Chrome Trace Event JSON.
+/// Drive one run: read the server's warmth, compose the view, take the trace,
+/// persist it.
 ///
-/// The projection lives on the page, behind the same export seam the monitor
-/// uses, so no surface carries a privately shaped copy of the trace. This
-/// fetches nothing from the server: the server pushes its rows to the browser
-/// and the document handed back is already merged.
-///
-/// Device pixel ratio is the caller's, and `lucida trace` defaults it to 2 —
-/// unlike the image-producing captures, where DPR decides an output image's
-/// size, here it decides the workload the renderer is put under, and DPR-1-only
-/// verification has hidden whole defect classes in this project.
-async fn capture_chrome_trace(
-    url: &str,
+/// The server is required, as it is for montage — spawning one is a different
+/// command — and reading its warmth first is also how that requirement is felt:
+/// a run measured against a server nobody can reach is not a measurement.
+#[allow(clippy::too_many_arguments)]
+async fn run_trace(
+    server: &EffectiveServer,
+    workspace: &WorkspaceRecord,
+    target: &WorkspaceTarget,
     token: Option<&EffectiveToken>,
-    output_path: &str,
-    viewport: Viewport,
+    dataset: &str,
+    args: &TraceRunArgs,
+    trace_dir: &Path,
     wait: Duration,
-) -> Result<TraceCapture, CliError> {
-    browser::with_browser(viewport, wait, async |browser| {
-        let mut page = browser.open_page(url, token, wait).await?;
-        let settled = wait_for_quiescent(&mut page, wait).await?;
+) -> Result<TraceRunOutcome, CliError> {
+    let dataset_client = DatasetWorkspaceClient::new(target.ws_url.clone(), token.cloned());
+    let (_seq, health) = dataset_client.health(None, wait).await?;
+    let dataset_url = dataset_source_url(dataset, &health)?;
+    let mut warmth = trace::summarise_server_warmth(&dataset_url, &health);
 
-        let value = page.evaluate(TRACE_EXPORT_EXPRESSION, wait).await?;
-        let json = value.as_str().ok_or_else(|| {
-            CliError::new(
-                ErrorKind::Protocol,
-                "the page did not return a trace; window.lucidaTrace was missing or threw",
-            )
-        })?;
+    // A dataset the workspace does not have yet never reaches a scene in the
+    // page — the composed view has nothing to apply to, and the run measures an
+    // empty viewer until the deadline. Opening it here is what makes a
+    // first-time dataset measurable; the warmth block says the driver did it,
+    // because it warms the server the run is about to be measured against.
+    if !warmth.dataset_open_before_run {
+        DatasetOpenClient::new(target.ws_url.clone(), token.cloned())
+            .open(&dataset_url, &workspace.id, wait)
+            .await?;
+        warmth.note_driver_open();
+    }
 
-        if let Some(parent) = Path::new(output_path).parent()
-            && !parent.as_os_str().is_empty()
-        {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        tokio::fs::write(output_path, json).await?;
-        summarise_chrome_trace(json, settled)
-    })
-    .await
+    let view = trace::compose_dataset_view(&dataset_url, args.width, args.height);
+    let url = montage::with_render_param(&viewer_inline_view_web_url(target, &view)?);
+    let composed = trace::ComposedView {
+        dataset: normalize_dataset_url(&dataset_url),
+        url: url.clone(),
+        width: args.width,
+        height: args.height,
+        device_pixel_ratio: args.device_pixel_ratio,
+    };
+
+    let perfetto = args.perfetto.clone();
+    let facts = trace::DriverFacts {
+        composed_view: composed,
+        server_warmth: warmth,
+        server_url: server.url.clone(),
+        workspace_id: workspace.id.clone(),
+    };
+    let viewport = Viewport::new(args.width, args.height, args.device_pixel_ratio);
+    // A drive that fails says what it drove: the composed URL is the whole
+    // workload, and without it a timeout is unreproducible by hand.
+    let file = trace::drive_run(&url, token, viewport, wait, &facts, perfetto.as_deref())
+        .await
+        .map_err(|error| error.with_context("url", &url))?;
+    let path = trace::write_run_file(&file, trace_dir, args.output.as_deref()).await?;
+    let gate = if args.gate {
+        trace::gate_failure(&file)
+    } else {
+        None
+    };
+    Ok(TraceRunOutcome { file, path, gate })
 }
 
-/// Poll the page's published quiescence until it has *held*, and let the page
-/// close its own run.
+/// A dataset argument is a URL in canonical form, or the id of a dataset the
+/// server already has open — the form the diagnostic's own follow-up commands
+/// print. An id resolves through the health snapshot, which is the one place
+/// that knows a workspace dataset's source URL.
 ///
-/// Never inferred from outside — a stalled pipeline and a finished one both
-/// stop drawing, so watching the frame counter would call the interesting case
-/// settled. And never exported on the first `true`: the recorder closes a run
-/// as `quiescent` only once the boolean has held for its own hold window, so a
-/// driver that exports the instant it flips pre-empts that close and every run
-/// it takes records `explicit` — losing the one field that says the page
-/// settled. The hold window comes from the page rather than a constant here,
-/// because it is baked into every duration the run reports.
-async fn wait_for_quiescent(page: &mut browser::Page, wait: Duration) -> Result<bool, CliError> {
-    let deadline = tokio::time::Instant::now() + wait;
-    let hold = page
-        .evaluate(QUIESCENCE_HOLD_PROBE, wait)
-        .await?
-        .as_f64()
-        .filter(|value| *value > 0.0)
-        .unwrap_or(DEFAULT_QUIESCENCE_HOLD_MS);
-    // Past the hold itself, so the recorder's timer has fired and the run is
-    // closed before the export asks for it.
-    let settle_for = Duration::from_millis(hold as u64) + Duration::from_millis(250);
+/// An id is exact, so it wins outright. A name is a convenience and two
+/// datasets can share one: measuring whichever came back first would be a coin
+/// flip in a command whose whole output is a comparison.
+fn dataset_source_url(dataset: &str, health: &[DatasetSourceHealth]) -> Result<String, CliError> {
+    if let Some(found) = health
+        .iter()
+        .find(|entry| entry.workspace_dataset_id.0 == dataset)
+        && let Some(source_url) = &found.source_url
+    {
+        return Ok(source_url.clone());
+    }
 
-    loop {
-        if page.evaluate(QUIESCENT_PROBE, wait).await?.as_bool() == Some(true) {
-            tokio::time::sleep(settle_for).await;
-            // Still settled after the hold, or the page found more work and
-            // the wait starts again.
-            if page.evaluate(QUIESCENT_PROBE, wait).await?.as_bool() == Some(true) {
-                return Ok(true);
-            }
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Ok(false);
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+    let by_name: Vec<&DatasetSourceHealth> = health
+        .iter()
+        .filter(|entry| entry.name == dataset && entry.source_url.is_some())
+        .collect();
+    match by_name.as_slice() {
+        [only] => Ok(only.source_url.clone().unwrap_or_default()),
+        [] => Ok(dataset.to_string()),
+        many => Err(CliError::new(
+            ErrorKind::AmbiguousName,
+            format!(
+                "{} datasets are named {dataset:?}; name one by id or by source URL",
+                many.len()
+            ),
+        )),
     }
 }
-
-/// Read back what the file says about itself, rather than restating it.
-fn summarise_chrome_trace(json: &str, settled: bool) -> Result<TraceCapture, CliError> {
-    let parsed: Value = serde_json::from_str(json).map_err(|error| {
-        CliError::new(
-            ErrorKind::Protocol,
-            format!("the page returned a trace that is not JSON: {error}"),
-        )
-    })?;
-    Ok(TraceCapture {
-        settled,
-        events: parsed
-            .get("traceEvents")
-            .and_then(|value| value.as_array())
-            .map(Vec::len)
-            .unwrap_or(0),
-        bytes: json.len(),
-        synthetic_values: other_data_strings(&parsed, "syntheticValues"),
-        derived_values: other_data_strings(&parsed, "derivedValues"),
-    })
-}
-
-fn other_data_strings(parsed: &Value, key: &str) -> Vec<String> {
-    parsed
-        .get("otherData")
-        .and_then(|value| value.get(key))
-        .and_then(|value| value.as_array())
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(|value| value.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-const QUIESCENT_PROBE: &str = "!!(window.lucidaTrace && window.lucidaTrace.quiescence \
-     && window.lucidaTrace.quiescence.quiescent)";
-
-/// Only used when the page is too old to publish one; the page's own value wins.
-const DEFAULT_QUIESCENCE_HOLD_MS: f64 = 500.0;
-
-const QUIESCENCE_HOLD_PROBE: &str =
-    "window.lucidaTrace ? window.lucidaTrace.quiescenceHoldMs : null";
-
-const TRACE_EXPORT_EXPRESSION: &str =
-    "window.lucidaTrace ? window.lucidaTrace.exportChromeTrace() : null";
 
 async fn emit_debug_command(
     cli: &Cli,
@@ -5498,36 +5577,85 @@ mod tests {
     }
 
     /// DPR 2 is the default because that is the condition the defects this
-    /// trace exists to find actually appear at.
+    /// trace exists to find actually appear at, and the viewport is a window
+    /// rather than a capture cell.
     #[test]
-    fn trace_perfetto_defaults_to_a_retina_workload_and_a_file() {
-        let trace = parse(&["trace", "perfetto"]);
+    fn trace_defaults_to_a_retina_workload_at_a_representative_window() {
+        let trace = parse(&["trace", "gs://bucket/set.zarr"]);
         match trace.command {
             Command::Trace {
-                viewer_profile,
-                timeout_seconds,
-                command:
-                    TraceCommand::Perfetto {
-                        output,
-                        width,
-                        height,
-                        device_pixel_ratio,
-                    },
+                dataset,
+                run,
+                command,
             } => {
-                assert_eq!(viewer_profile, "default");
-                assert_eq!(timeout_seconds, 120);
-                assert_eq!(output, "lucida-trace.json");
-                assert_eq!((width, height), (1440, 900));
-                assert_eq!(device_pixel_ratio, 2.0);
+                assert_eq!(dataset.as_deref(), Some("gs://bucket/set.zarr"));
+                assert!(command.is_none());
+                assert_eq!(run.timeout_seconds, 120);
+                assert_eq!((run.width, run.height), (1440, 900));
+                assert_eq!(run.device_pixel_ratio, 2.0);
+                assert_eq!(run.output, None);
+                // A stall exits zero unless the call site asks otherwise.
+                assert!(!run.gate);
             }
-            _ => panic!("expected trace perfetto"),
+            _ => panic!("expected a trace run"),
         }
 
+        let gated = parse(&[
+            "trace",
+            "/data/set.zarr",
+            "--gate",
+            "--output",
+            "/tmp/r.json",
+        ]);
+        match gated.command {
+            Command::Trace { run, .. } => {
+                assert!(run.gate);
+                assert_eq!(run.output.as_deref(), Some("/tmp/r.json"));
+            }
+            _ => panic!("expected a trace run"),
+        }
+    }
+
+    /// The follow-up depths the diagnostic prints have to parse, or the default
+    /// rendering names commands that do not run.
+    #[test]
+    fn trace_show_takes_a_run_id_and_a_depth() {
+        match parse(&["trace", "show", "run-17-3", "--phases"]).command {
+            Command::Trace {
+                dataset,
+                command:
+                    Some(TraceCommand::Show {
+                        run, phases, phase, ..
+                    }),
+                ..
+            } => {
+                assert_eq!(dataset, None);
+                assert_eq!(run, "run-17-3");
+                assert!(phases);
+                assert_eq!(phase, None);
+            }
+            _ => panic!("expected trace show"),
+        }
+
+        match parse(&["trace", "show", "run-17-3", "--phase", "wire"]).command {
+            Command::Trace {
+                command: Some(TraceCommand::Show { phase, .. }),
+                ..
+            } => assert_eq!(phase.as_deref(), Some("wire")),
+            _ => panic!("expected trace show"),
+        }
+
+        // One depth at a time: the two flags would otherwise both apply.
+        assert!(try_parse(&["trace", "show", "r", "--phases", "--phase", "wire"]).is_err());
+    }
+
+    #[test]
+    fn trace_perfetto_keeps_its_own_flags() {
         let explicit = parse(&[
             "trace",
+            "perfetto",
             "--viewer-profile",
             "analysis",
-            "perfetto",
             "--output",
             "/tmp/run.json",
             "--device-pixel-ratio",
@@ -5535,13 +5663,13 @@ mod tests {
         ]);
         match explicit.command {
             Command::Trace {
-                viewer_profile,
                 command:
-                    TraceCommand::Perfetto {
+                    Some(TraceCommand::Perfetto {
                         output,
+                        viewer_profile,
                         device_pixel_ratio,
                         ..
-                    },
+                    }),
                 ..
             } => {
                 assert_eq!(viewer_profile, "analysis");
@@ -5552,50 +5680,53 @@ mod tests {
         }
     }
 
+    /// An id the server already has open is what the diagnostic's own follow-up
+    /// line names, so it has to reach the same dataset a URL would.
     #[test]
-    fn trace_summary_reads_the_files_own_labelling() {
-        let json = serde_json::json!({
-            "traceEvents": [{ "ph": "X" }, { "ph": "C" }],
-            "displayTimeUnit": "ms",
-            "otherData": {
-                "syntheticValues": [],
-                "derivedValues": ["Phase spans are fanned out at export."],
+    fn a_dataset_argument_resolves_an_open_id_to_its_source_url() {
+        let health = vec![lucida_protocol::DatasetSourceHealth {
+            workspace_dataset_id: lucida_core::DatasetId("ds-1".to_string()),
+            name: "set".to_string(),
+            status: lucida_protocol::DatasetHealthStatus::Healthy,
+            source_url: Some("gs://bucket/set.zarr".to_string()),
+            backend: None,
+            binding: lucida_protocol::DatasetHealthComponent {
+                status: lucida_protocol::DatasetHealthStatus::Healthy,
+                message: None,
             },
-        })
-        .to_string();
+            source_cache: None,
+            generated_coarse: lucida_protocol::DatasetGeneratedCoarseHealth {
+                status: lucida_protocol::DatasetHealthStatus::Healthy,
+                level_count: 0,
+                ready_chunks: 0,
+                pending_chunks: 0,
+                failed_chunks: 0,
+                unavailable_chunks: 0,
+                message: None,
+                cache: None,
+                recent_failures: Vec::new(),
+            },
+            messages: Vec::new(),
+        }];
 
-        let capture = summarise_chrome_trace(&json, true).unwrap();
-        assert_eq!(capture.events, 2);
-        assert_eq!(capture.bytes, json.len());
-        assert!(capture.synthetic_values.is_empty());
-        assert_eq!(capture.derived_values.len(), 1);
-
-        let human = format_chrome_trace_human("/tmp/run.json", &capture);
-        assert!(human.contains("/tmp/run.json"));
-        assert!(human.contains("ui.perfetto.dev"));
-        assert!(human.contains("Constructed rather than measured: nothing."));
-        assert!(human.contains("Phase spans are fanned out at export."));
-        // A path, not rows.
-        assert!(!human.contains("\"ph\""));
-    }
-
-    /// A run that never settled is the most diagnostic sample there is, so it
-    /// is still written — and the surface says so rather than implying calm.
-    #[test]
-    fn trace_summary_says_when_the_page_never_settled() {
-        let json = serde_json::json!({ "traceEvents": [], "otherData": {} }).to_string();
-        let capture = summarise_chrome_trace(&json, false).unwrap();
-
-        assert!(!capture.settled);
-        assert!(
-            format_chrome_trace_human("run.json", &capture).contains("never published quiescent")
+        assert_eq!(
+            dataset_source_url("ds-1", &health).unwrap(),
+            "gs://bucket/set.zarr"
         );
-    }
+        assert_eq!(
+            dataset_source_url("set", &health).unwrap(),
+            "gs://bucket/set.zarr"
+        );
+        assert_eq!(
+            dataset_source_url("gs://bucket/other.zarr", &health).unwrap(),
+            "gs://bucket/other.zarr"
+        );
 
-    #[test]
-    fn trace_summary_rejects_a_page_that_did_not_return_json() {
-        let error = summarise_chrome_trace("not json", true).unwrap_err();
-        assert_eq!(error.kind, ErrorKind::Protocol);
+        // Two datasets under one name is a refusal, not whichever came first.
+        let mut twins = health.clone();
+        twins.push(twins[0].clone());
+        let error = dataset_source_url("set", &twins).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::AmbiguousName);
     }
 
     #[test]
