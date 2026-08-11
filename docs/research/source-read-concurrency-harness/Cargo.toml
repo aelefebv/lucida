@@ -1,0 +1,18 @@
+# Its own workspace root, so the repo's workspace never picks it up.
+[workspace]
+
+[package]
+name = "source-read-sweep"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Deliberately outside the workspace (`exclude` in the root Cargo.toml): this is
+# measurement tooling for issue #901, not product code. It pins the same
+# object_store version lucida-store uses so the transport behaviour it measures
+# is the transport behaviour production gets.
+
+[dependencies]
+object_store = { version = "0.12", features = ["gcp"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+futures-util = "0.3"

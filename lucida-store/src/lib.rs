@@ -1,5 +1,6 @@
 pub mod backend;
 pub mod cache;
+pub mod source_limiter;
 pub(crate) mod coarse;
 pub mod codec;
 pub mod import;

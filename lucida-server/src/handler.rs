@@ -17,6 +17,7 @@ use lucida_protocol::{
 };
 use lucida_proxy::{ProxyAsset, ProxyKind, ProxySpec};
 use lucida_store::cache::CachedStore;
+use lucida_store::source_limiter::ReaderId;
 use object_store::path::Path;
 use tokio::sync::{Mutex, broadcast, mpsc};
 
@@ -1325,7 +1326,9 @@ async fn serve_chunk_from_store(
 
     tracing::trace!(dataset = %dataset_id, image = %image_id, key = chunk_key, path = object_path, "serving chunk");
     let obj_path = Path::from(object_path);
-    let mut bytes: Vec<u8> = match cache.get_bytes(&obj_path).await {
+    // Charged to the requesting client, so one client's collection-sized
+    // backlog cannot delay another client's first chunk (#901).
+    let mut bytes: Vec<u8> = match cache.get_bytes(&obj_path, ReaderId(client_id)).await {
         Ok(storage_bytes) => {
             // Decode storage compression → raw bytes (WireFormat::Raw for phase 1).
             // Shared with the proxy generator via [`crate::decode::decode_storage_bytes`].
@@ -2260,5 +2263,181 @@ mod tests {
             }
             _ => panic!("expected GeneratedChunkStatus"),
         }
+    }
+
+    /// An `ObjectStore` whose every read takes a fixed time and then reports
+    /// the object absent. Absent is enough: a not-found read still costs a
+    /// full round trip and a full permit, which is exactly what is being
+    /// queued for here.
+    #[derive(Debug)]
+    struct SlowAbsentStore {
+        delay: std::time::Duration,
+    }
+
+    impl std::fmt::Display for SlowAbsentStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "SlowAbsentStore")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl object_store::ObjectStore for SlowAbsentStore {
+        async fn put_opts(
+            &self,
+            _location: &Path,
+            _payload: object_store::PutPayload,
+            _opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            unimplemented!("reads only")
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            _location: &Path,
+            _opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            unimplemented!("reads only")
+        }
+
+        async fn get_opts(
+            &self,
+            location: &Path,
+            _options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            tokio::time::sleep(self.delay).await;
+            Err(object_store::Error::NotFound {
+                path: location.to_string(),
+                source: "absent".to_string().into(),
+            })
+        }
+
+        async fn delete(&self, _location: &Path) -> object_store::Result<()> {
+            unimplemented!("reads only")
+        }
+
+        fn list(
+            &self,
+            _prefix: Option<&Path>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            futures_util::stream::empty().boxed()
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            _prefix: Option<&Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            unimplemented!("reads only")
+        }
+
+        async fn copy(&self, _from: &Path, _to: &Path) -> object_store::Result<()> {
+            unimplemented!("reads only")
+        }
+
+        async fn copy_if_not_exists(&self, _from: &Path, _to: &Path) -> object_store::Result<()> {
+            unimplemented!("reads only")
+        }
+    }
+
+    /// #901's acceptance criterion, guarded at the seam that decides it: the
+    /// chunk handler must charge each read to its own client. A client opening
+    /// a large collection queues thousands of reads at once, and a second
+    /// client arriving mid-open must not wait behind that whole backlog.
+    ///
+    /// This is a test about *who* the permit goes to, so it asserts on
+    /// ordering rather than on a stopwatch: the newcomer's chunk must arrive
+    /// while the backlog is still draining, and the wait is bounded by the
+    /// handful of in-flight reads ahead of it, not by the backlog's length.
+    #[tokio::test]
+    async fn one_clients_backlog_does_not_delay_another_clients_chunk() {
+        const READ_MS: u64 = 100;
+        const PERMITS: usize = 2;
+        const BACKLOG: usize = 200;
+
+        let routes: UnicastRoutes = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let (busy_tx, mut busy_rx) = mpsc::unbounded_channel();
+        let (newcomer_tx, mut newcomer_rx) = mpsc::unbounded_channel();
+        routes.lock().await.insert(1, busy_tx);
+        routes.lock().await.insert(2, newcomer_tx);
+
+        let limiter = lucida_store::source_limiter::SourceReadLimiter::new(PERMITS);
+        let store = Arc::new(SlowAbsentStore {
+            delay: std::time::Duration::from_millis(READ_MS),
+        }) as Arc<dyn object_store::ObjectStore>;
+        let cache = Arc::new(CachedStore::with_source_limiter(
+            store,
+            1024 * 1024,
+            limiter.clone(),
+        ));
+
+        // Client 1 opens something large: a backlog of distinct chunks, all
+        // wanted at once.
+        for index in 0..BACKLOG {
+            let cache = cache.clone();
+            let routes = routes.clone();
+            tokio::spawn(async move {
+                serve_chunk_from_store(
+                    1,
+                    &DatasetId("ds1".into()),
+                    &ImageId("img1".into()),
+                    "0/0/0/0/0/0",
+                    Some(&format!("busy-{index}")),
+                    Some(tiny_level_info()),
+                    &cache,
+                    &routes,
+                )
+                .await;
+            });
+        }
+        // Let the backlog reach the limiter before the newcomer arrives, so
+        // this really is the "second client shows up last" case.
+        while limiter.queued_reads() < BACKLOG - PERMITS {
+            tokio::task::yield_now().await;
+        }
+
+        // Client 2 arrives wanting one chunk.
+        let newcomer = tokio::spawn({
+            let cache = cache.clone();
+            let routes = routes.clone();
+            async move {
+                serve_chunk_from_store(
+                    2,
+                    &DatasetId("ds1".into()),
+                    &ImageId("img1".into()),
+                    "0/0/0/0/0/0",
+                    Some("newcomer"),
+                    Some(tiny_level_info()),
+                    &cache,
+                    &routes,
+                )
+                .await;
+            }
+        });
+
+        // The fair answer is one permit turnaround; the budget is ten, which
+        // is generous against a loaded machine and still an order of magnitude
+        // under the 10 s (BACKLOG / PERMITS * READ_MS) that draining client 1's
+        // backlog first would cost.
+        tokio::time::timeout(std::time::Duration::from_millis(READ_MS * 10), newcomer)
+            .await
+        .expect("the newcomer waited behind the whole backlog")
+        .expect("the newcomer's task ran");
+
+        assert!(
+            newcomer_rx.recv().await.is_some(),
+            "the newcomer received its chunk"
+        );
+
+        // And the backlog really was still backed up — otherwise the test
+        // would pass for the wrong reason.
+        let mut delivered = 0;
+        while busy_rx.try_recv().is_ok() {
+            delivered += 1;
+        }
+        assert!(
+            delivered < BACKLOG,
+            "client 1's backlog had already drained ({delivered}/{BACKLOG}), so the \
+             newcomer never actually had to be let in ahead of it"
+        );
     }
 }
