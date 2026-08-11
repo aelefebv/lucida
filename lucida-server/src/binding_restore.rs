@@ -125,7 +125,7 @@ async fn restore_one_workspace_binding(
         "workspace.binding_restore.import_complete"
     );
 
-    let import_warnings: Vec<String> = result.warnings.iter().map(|w| w.message.clone()).collect();
+    let import_warnings = result.warnings.clone();
     for warning in &result.warnings {
         tracing::warn!(
             dataset_id = %dataset_id,

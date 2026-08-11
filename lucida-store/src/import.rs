@@ -19,6 +19,8 @@ use crate::codec::parse_codec_chain;
 use crate::import_types::*;
 use crate::layout::compute_chunk_byte_layout;
 use crate::parse;
+use crate::parse::LevelEntry;
+use crate::unwritten;
 
 /// Import a dataset from an OME-Zarr store.
 ///
@@ -122,6 +124,8 @@ async fn import_single_image(
     // exists (or errors) without yielding names is surfaced as a warning so
     // possibly-incomplete discovery never passes silently.
     let mut warnings: Vec<ImportWarning> = Vec::new();
+    warnings.extend(unwritten_level_warning(store, "", id, &level_entries, &axes_names).await);
+
     let mut label_budget = LabelBudget::new();
     let probed = probe_labels_for_image(store, "").await;
     if probed.index == LabelIndexState::Unusable {
@@ -373,6 +377,10 @@ fn unreadable_tile_geometry_warning(
 /// share one multiscale, so a single readable tile's axes, levels, geometry, and
 /// channel metadata apply to every tile.
 struct SharedTileGeometry {
+    /// The representative tile the geometry was read from. Kept so later
+    /// store-shape questions — such as whether a level was ever written — can
+    /// be asked once, against the same tile, instead of once per member.
+    tile_prefix: String,
     axes_names: Vec<String>,
     level_entries: Vec<parse::LevelEntry>,
     channel_infos: Vec<ChannelInfo>,
@@ -393,6 +401,7 @@ async fn read_tile_geometry(
     let channel_infos = parse::parse_omero_channels(&tile_json);
     let level_metas = parse::read_level_metas(store, tile_prefix, &parsed.level_entries).await?;
     Ok(SharedTileGeometry {
+        tile_prefix: tile_prefix.to_string(),
         axes_names: parsed.axes_names,
         level_entries: parsed.level_entries,
         channel_infos,
@@ -727,6 +736,7 @@ async fn import_collection(
     let (shared_geometry, unreadable_representatives) =
         select_shared_tile_geometry(store, representative_prefixes).await;
     let SharedTileGeometry {
+        tile_prefix: geometry_tile_prefix,
         axes_names,
         level_entries,
         channel_infos,
@@ -734,6 +744,20 @@ async fn import_collection(
     } = shared_geometry.ok_or_else(|| {
         StoreError::Metadata("collection has no tile with readable geometry".into())
     })?;
+
+    // Every tile of a collection shares one multiscale, and whether an export
+    // wrote a level is a property of the export — so this is asked once, of
+    // the representative, not once per tile.
+    warnings.extend(
+        unwritten_level_warning(
+            store,
+            &geometry_tile_prefix,
+            id,
+            &level_entries,
+            &axes_names,
+        )
+        .await,
+    );
 
     // The collection opened. If selection had to fall forward past unreadable
     // representatives, surface them as one aggregated warning; the common case
@@ -1381,6 +1405,26 @@ enum LabelIndexState {
 /// per tile would drown the open result. `examples` are the affected
 /// `labels/` prefixes; only the first
 /// [`UNUSABLE_INDEX_WARNING_EXAMPLES`] are named in the message.
+/// Probe the declared levels of one multiscale geometry and warn about any
+/// that were never written. Costs one HEAD per level, all in flight at once.
+///
+/// Called once per *geometry* rather than once per member: whether an export
+/// stopped short is a property of how the store was written, so re-asking it
+/// for every tile of a wide collection would multiply the open's request count
+/// for an answer that cannot differ.
+async fn unwritten_level_warning(
+    store: &Arc<CachedStore>,
+    base_prefix: &str,
+    target: &str,
+    level_entries: &[LevelEntry],
+    axes_names: &[String],
+) -> Option<ImportWarning> {
+    let probes =
+        unwritten::probe_level_origins(store, base_prefix, level_entries, axes_names.len()).await;
+    let indices = unwritten::unwritten_level_indices(&probes);
+    unwritten::unwritten_levels_warning(target, level_entries, &indices)
+}
+
 fn unusable_label_index_warning(
     dataset_id: &str,
     unusable: usize,
@@ -5520,6 +5564,144 @@ mod tests {
         assert!(
             message.contains(EXHAUSTIVE_LABEL_DISCOVERY_ENV),
             "{message}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A two-level single image. `written` names the level paths that get an
+    /// origin chunk on disk; every other level is declared but left bare, the
+    /// shape of the partially-written export in issue #904.
+    fn create_two_level_fixture(dir: &std::path::Path, written: &[&str]) {
+        fs::create_dir_all(dir).unwrap();
+
+        let root = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": { "ome": {
+                "version": "0.5",
+                "multiscales": [{
+                    "version": "0.5",
+                    "name": "image",
+                    "axes": [
+                        {"name": "t", "type": "time"},
+                        {"name": "c", "type": "channel"},
+                        {"name": "z", "type": "space"},
+                        {"name": "y", "type": "space"},
+                        {"name": "x", "type": "space"}
+                    ],
+                    "datasets": [
+                        {"path": "0", "coordinateTransformations": [
+                            {"type": "scale", "scale": [1.0, 1.0, 1.0, 1.0, 1.0]}]},
+                        {"path": "1", "coordinateTransformations": [
+                            {"type": "scale", "scale": [1.0, 1.0, 1.0, 2.0, 2.0]}]}
+                    ]
+                }]
+            }}
+        });
+        fs::write(
+            dir.join("zarr.json"),
+            serde_json::to_string_pretty(&root).unwrap(),
+        )
+        .unwrap();
+
+        for (path, edge) in [("0", 64u64), ("1", 32u64)] {
+            let level_dir = dir.join(path);
+            fs::create_dir_all(&level_dir).unwrap();
+            let arr = serde_json::json!({
+                "zarr_format": 3,
+                "node_type": "array",
+                "shape": [1, 1, 1, edge, edge],
+                "data_type": "uint16",
+                "chunk_grid": {
+                    "name": "regular",
+                    "configuration": { "chunk_shape": [1, 1, 1, edge, edge] }
+                },
+                "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
+                "fill_value": 0
+            });
+            fs::write(
+                level_dir.join("zarr.json"),
+                serde_json::to_string_pretty(&arr).unwrap(),
+            )
+            .unwrap();
+
+            if written.contains(&path) {
+                // Origin chunk: Zarr v3 `c/` prefix, one 0 per on-disk axis.
+                let chunk_dir = level_dir.join("c").join("0").join("0").join("0").join("0");
+                fs::create_dir_all(&chunk_dir).unwrap();
+                fs::write(chunk_dir.join("0"), vec![0u8; (edge * edge * 2) as usize]).unwrap();
+            }
+        }
+    }
+
+    fn unwritten_warnings(result: &ImportResult) -> Vec<&ImportWarning> {
+        result
+            .warnings
+            .iter()
+            .filter(|w| w.kind == ImportWarningKind::UnwrittenLevel)
+            .collect()
+    }
+
+    /// Issue #904: level 0 is declared with no chunks written while level 1 is
+    /// populated. The level is kept — dropping it would misalign chunk keys —
+    /// but the import says so instead of letting fill pass for signal.
+    #[tokio::test]
+    async fn import_warns_when_a_declared_level_has_no_chunks_written() {
+        let dir = temp_dir("import_unwritten_level");
+        create_two_level_fixture(&dir, &["1"]);
+        let store = cached_store(dir.to_str().unwrap());
+
+        let result = import_dataset(&store, "ds", "Partial Export")
+            .await
+            .unwrap();
+
+        let warnings = unwritten_warnings(&result);
+        assert_eq!(warnings.len(), 1, "warnings: {:?}", result.warnings);
+        let message = &warnings[0].message;
+        assert!(message.contains("level 0"), "{message}");
+        assert!(message.contains("no chunks written"), "{message}");
+
+        // The pyramid keeps both levels: level index doubles as the on-disk
+        // directory name, so a dropped level would renumber the rest.
+        assert_eq!(result.manifest.images()[0].multiscale.levels.len(), 2);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A fully written pyramid says nothing.
+    #[tokio::test]
+    async fn import_is_quiet_when_every_level_has_chunks() {
+        let dir = temp_dir("import_written_levels");
+        create_two_level_fixture(&dir, &["0", "1"]);
+        let store = cached_store(dir.to_str().unwrap());
+
+        let result = import_dataset(&store, "ds", "Full Export").await.unwrap();
+
+        assert!(
+            unwritten_warnings(&result).is_empty(),
+            "warnings: {:?}",
+            result.warnings
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// No chunks at any origin is not evidence of a partial write — it is what
+    /// a metadata-only store looks like, including most fixtures in this file.
+    /// Accusing a level here would make the warning worthless.
+    #[tokio::test]
+    async fn import_is_quiet_when_no_level_has_an_origin_chunk() {
+        let dir = temp_dir("import_metadata_only");
+        create_two_level_fixture(&dir, &[]);
+        let store = cached_store(dir.to_str().unwrap());
+
+        let result = import_dataset(&store, "ds", "Metadata Only").await.unwrap();
+
+        assert!(
+            unwritten_warnings(&result).is_empty(),
+            "warnings: {:?}",
+            result.warnings
         );
 
         let _ = fs::remove_dir_all(&dir);

@@ -62,6 +62,16 @@ The key the wire routes responses on.
 One resolution step of an image's multiscale pyramid, `0` being finest.
 _Avoid_: LOD, scale, zoom level, resolution
 
+**Unwritten level**:
+A level a store declares but never wrote chunks for. Legal — every read returns
+`fill_value` — so it renders as an all-zero image rather than failing. Say
+"unwritten", not "empty": an unwritten level is a partially-written export, while
+an empty *region* is data that is legitimately zero, and the whole point is that
+the two look identical on screen. See
+[ADR 0053](wiki/decisions/0053-unwritten-levels-are-named-not-hidden.md) for how
+one is told from the other.
+_Avoid_: empty level, missing level, blank level
+
 **Proxy asset**:
 A small low-resolution placeholder volume standing in for a tile or a group of
 tiles, so the renderer can show something before detail chunks arrive. Always
