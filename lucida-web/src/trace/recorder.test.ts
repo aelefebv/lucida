@@ -273,7 +273,12 @@ describe("TraceRecorder rows", () => {
 });
 
 describe("TraceRecorder plan and queue", () => {
-  it("dates plan from the pass that enqueued the request and queue from its admission", () => {
+  it("births a row at dispatch, dating plan and queue from the pass that enqueued it", () => {
+    // A row is born at dispatch, so the one call that makes it also closes
+    // `plan`, brackets `queue` and opens `wire` (#949). Three recorder calls
+    // per chunk was three times the event count ADR 0049's tick ceiling was
+    // derived from, and two of them were handle round-trips — a `resolve`, a
+    // generation divide and a modulo — buying nothing.
     const { recorder, advance } = makeRecorder();
     recorder.openRun(OPEN_CAUSE);
 
@@ -282,29 +287,6 @@ describe("TraceRecorder plan and queue", () => {
     advance(20);
     recorder.notePlanEnqueue(1_020);   // admitted here
     advance(80);                       // queued for 80 ms
-    const row = recorder.beginChunkRow(CHUNK, 0, 1_020);
-    expect(row).toBeGreaterThanOrEqual(0);
-    recorder.closeRun("explicit");
-
-    const [serialised] = recorder.exportDocument().runs[0].rows;
-    expect(serialised.phases.plan).toEqual({ startUs: 0, endUs: 20_000, durationUs: 20_000 });
-    expect(serialised.phases.queue)
-      .toEqual({ startUs: 20_000, endUs: 100_000, durationUs: 80_000 });
-  });
-
-  it("births a row at dispatch with the two phases behind it already stamped", () => {
-    // The whole of #949: a row is born at dispatch, so the one call that
-    // makes it also closes `plan`, brackets `queue` and opens `wire`. Three
-    // recorder calls per chunk was three times the event count ADR 0049's
-    // tick ceiling was derived from, and two of them were handle round-trips
-    // — a `resolve`, a generation divide and a modulo — buying nothing.
-    const { recorder, advance } = makeRecorder();
-    recorder.openRun(OPEN_CAUSE);
-    recorder.markPlanStart();          // t = 1_000
-    advance(20);
-    recorder.notePlanEnqueue(1_020);
-    advance(80);
-
     const row = recorder.beginChunkRow(CHUNK, 0, 1_020);
     advance(35);
     recorder.stamp(row, Boundary.DecodeStart);
@@ -333,8 +315,7 @@ describe("TraceRecorder plan and queue", () => {
     recorder.notePlanEnqueue(1_105);
     advance(20);
 
-    const row = recorder.beginChunkRow(CHUNK, 0, 1_010);
-    expect(row).toBeGreaterThanOrEqual(0);
+    recorder.beginChunkRow(CHUNK, 0, 1_010);
     recorder.closeRun("explicit");
 
     const [serialised] = recorder.exportDocument().runs[0].rows;
@@ -346,8 +327,7 @@ describe("TraceRecorder plan and queue", () => {
     const { recorder, advance } = makeRecorder();
     recorder.openRun(OPEN_CAUSE);
     advance(30);
-    const row = recorder.beginChunkRow(CHUNK, 0, 1_030);
-    expect(row).toBeGreaterThanOrEqual(0);
+    recorder.beginChunkRow(CHUNK, 0, 1_030);
     recorder.closeRun("explicit");
 
     const [serialised] = recorder.exportDocument().runs[0].rows;
@@ -364,8 +344,7 @@ describe("TraceRecorder plan and queue", () => {
     advance(200);
 
     // No admission stamp: ADR 0044 keeps them for the admission window only.
-    const row = recorder.beginChunkRow(CHUNK, 0, undefined);
-    expect(row).toBeGreaterThanOrEqual(0);
+    recorder.beginChunkRow(CHUNK, 0, undefined);
     recorder.closeRun("explicit");
 
     const [serialised] = recorder.exportDocument().runs[0].rows;

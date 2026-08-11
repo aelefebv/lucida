@@ -9,6 +9,7 @@ Issue [#928], under the [#921] spec, enforcing [ADR 0049][0049].
 [#921]: https://github.com/aelefebv/lucida/issues/921
 [#928]: https://github.com/aelefebv/lucida/issues/928
 [#949]: https://github.com/aelefebv/lucida/issues/949
+[#962]: https://github.com/aelefebv/lucida/issues/962
 [0049]: ../../../wiki/decisions/0049-unconditional-recording-under-a-design-budget.md
 [0052]: ../../../wiki/decisions/0052-debug-surface-dispositions.md
 
@@ -312,7 +313,8 @@ of its time, which says the remaining cost is the writes themselves rather
 than the call overhead around them.
 
 So this half of the obligation stays open, and it now has no candidate
-explanation attached to it. What would settle it is deciding whether a
+explanation attached to it. It is tracked as [#962] rather than left here as
+an obligation with no owner. What would settle it is deciding whether a
 whole-lifecycle-in-one-tick microbenchmark is the right thing to hold against
 a floor [#888] measured on real ticks at all — the two may simply not be the
 same quantity.

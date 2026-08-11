@@ -43,7 +43,15 @@ export interface LiveTally {
   complete: number;
   retired: number;
   inFlight: number;
-  /** Of the in-flight rows, how many have reached no boundary at all. */
+  /**
+   * Of the in-flight rows, how many have reached no boundary at all.
+   *
+   * Structurally zero for anything the recorder made — since #949 a chunk row
+   * is born at dispatch with `queue` stamped (`TraceRecorder.beginChunkRow`).
+   * It is the walk's residual rather than a state the pipeline produces: this
+   * table's own `append` makes an unstamped row, so the count is what stops
+   * one going missing between `inFlight` and the phase vector.
+   */
   unstamped: number;
 }
 

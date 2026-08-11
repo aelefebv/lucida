@@ -48,7 +48,18 @@ export interface LiveView {
   unrecorded: string | null;
 }
 
-/** Rows that exist but have stamped no boundary — planned, not yet admitted. */
+/**
+ * Rows that exist but have stamped no boundary.
+ *
+ * Kept although the recorder can no longer produce one: since #949 a chunk row
+ * is born at dispatch with `queue` stamped and `wire` open, so every row the
+ * pipeline makes is already in a phase. This is the bar's residual — what
+ * makes its segments sum to the in-flight count — and dropping it would turn
+ * a row the bar cannot place from a visible segment into a silent shortfall
+ * between the bar and the counter above it. The table underneath the recorder
+ * can still hold an unstamped row (`RowTable.append` makes one), so the
+ * residual is a real branch, not a hypothetical.
+ */
 const PLANNED_SEGMENT = "planned";
 
 export function buildLiveView(progress: LiveProgress): LiveView {
