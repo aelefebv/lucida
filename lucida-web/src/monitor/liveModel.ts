@@ -14,13 +14,17 @@
  */
 
 import type { LiveProgress } from "../trace/liveProgress.ts";
-import { formatMs } from "./monitorModel.ts";
+import { formatCause, formatMs } from "./monitorModel.ts";
 
 export interface LiveCounter {
   label: string;
   value: string;
-  /** What the number means, so a count is never read as a rate or a verdict. */
-  note: string;
+  /**
+   * What the number counts, so it is never read as a rate or a verdict. Not
+   * `note` — that word belongs to a finding that is not a stall, and the two
+   * would sit on the same surface.
+   */
+  meaning: string;
 }
 
 export interface LiveBarSegment {
@@ -35,8 +39,8 @@ export interface LiveView {
   runId: string;
   cause: string;
   elapsed: string;
-  /** The page's own predicate, in its own words. */
-  settling: string;
+  /** The page's own quiescence predicate, in its own words. */
+  quiescence: string;
   counters: LiveCounter[];
   /** Empty when nothing is in flight — a bar of zeroes is not a shape. */
   bar: LiveBarSegment[];
@@ -59,29 +63,31 @@ export function buildLiveView(progress: LiveProgress): LiveView {
 
   return {
     runId: progress.runId,
-    cause: `${progress.cause.epoch ?? "none"} / ${progress.cause.dirtyKind} / ${progress.cause.source}`,
+    cause: formatCause(progress.cause),
     elapsed: formatMs(progress.elapsedMs),
-    settling: progress.quiescent ? "settled — the run closes when it holds" : progress.quiescenceReason,
+    quiescence: progress.quiescent
+      ? "quiescent — the run closes once that holds"
+      : progress.quiescenceReason,
     counters: [
       {
         label: "planned",
         value: count(progress.planned),
-        note: "chunks this run has asked for",
+        meaning: "chunks this run has asked for",
       },
       {
         label: "visible",
         value: count(progress.visible),
-        note: "drawn in a frame",
+        meaning: "drawn in a frame",
       },
       {
         label: "in flight",
         value: count(progress.inFlight),
-        note: "still going",
+        meaning: "still going",
       },
       {
         label: "retired",
         value: count(progress.retired),
-        note: "abandoned — the view moved on, or the fetch failed",
+        meaning: "abandoned — the view moved on, or the fetch failed",
       },
     ],
     bar: segments,

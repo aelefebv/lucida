@@ -525,7 +525,80 @@ describe("recorder cost contract", () => {
 
     rig.recorder.reset();
   });
+
+  /**
+   * The live view's read (#937), which is the one place a *reader* spends the
+   * pipeline's main thread rather than the writer.
+   *
+   * It costs a walk over every row the run has made, twice a second, while
+   * the monitor is open — so the shape that matters is linearity. A walk that
+   * went quadratic in rows would turn watching a run into perturbing it, and
+   * the surface's "observation only" claim with it. Per-row cost is gated
+   * across a 10x population rather than in absolute microseconds, for the
+   * reason this file's doc gives: absolute timings on a CI runner measure the
+   * runner.
+   */
+  it("reads a run in progress in time linear in its rows", () => {
+    // The upper figure is past the per-run cap on purpose: it lands the walk
+    // on the largest row population a run can ever hold.
+    const populations = [2_000, 40_000] as const;
+    const readings = populations.map((rows) => {
+      const rig = makeRig(1);
+      for (let i = 0; i < rows; i++) {
+        const handle = rig.recorder.beginChunkRow(
+          { datasetId: "ds", entityId: "m", imageId: "i", lane: "detail",
+            level: i % 5, t: 0, c: 0, z: i % 7, y: (i / 16) | 0, x: i % 16 },
+          0,
+        );
+        // Rows spread across the phases, so the backward boundary scan is not
+        // measured at its best case on every row.
+        if (i % 4 !== 0) stampTo(rig.recorder, handle, i % 4);
+      }
+
+      // What the run actually holds, not what was asked for: the per-run cap
+      // truncates a run long before an unbounded number of rows, which is
+      // also what bounds this walk in the product.
+      const recorded = rig.recorder.liveProgress!.planned;
+
+      // Read into a total the assertion below can see, so nothing here is
+      // dead code an optimiser is free to skip.
+      let planned = 0;
+      const read = () => {
+        planned += rig.recorder.liveProgress?.planned ?? 0;
+      };
+      const samples: number[] = [];
+      for (let i = 0; i < 20; i++) read();
+      for (let i = 0; i < 200; i++) {
+        const t0 = performance.now();
+        read();
+        samples.push(performance.now() - t0);
+      }
+      expect(planned).toBe(recorded * 220);
+      const stats = summarise(samples);
+      rig.recorder.reset();
+      return { asked: rows, rows: recorded, p50Us: stats.p50 * 1000, perRowNs: (stats.p50 * 1e6) / recorded };
+    });
+
+    for (const r of readings) {
+      console.log(
+        `[#937] live read: rows=${String(r.rows).padStart(6)} | ` +
+          `p50=${r.p50Us.toFixed(1)}µs | ${r.perRowNs.toFixed(1)} ns/row`,
+      );
+    }
+
+    const [small, large] = readings;
+    expect(
+      large.perRowNs,
+      `${large.perRowNs.toFixed(1)} ns/row at ${large.rows} rows against ` +
+        `${small.perRowNs.toFixed(1)} at ${small.rows}`,
+    ).toBeLessThan(small.perRowNs * FLATNESS_GROWTH_GATE);
+  });
 });
+
+/** Stamp a row forward to `boundary`, so it reads as sitting in that phase. */
+function stampTo(recorder: TraceRecorder, handle: number, boundary: number): void {
+  for (let b = 0; b <= boundary; b++) recorder.stamp(handle, b);
+}
 
 /**
  * V8's `gc()`, without requiring the runner to pass `--expose-gc`. Returns

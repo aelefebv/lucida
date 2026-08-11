@@ -162,7 +162,10 @@ export class RowTable {
    * that happens while a run is still open. It is a walk rather than counters
    * kept on the write path deliberately: the write path is the pipeline's
    * hottest, and nobody is watching most of the time. The cost lands on the
-   * reader, once per poll, and is bounded by the per-run cap.
+   * reader, once per poll, and is bounded by the per-run cap — ~76 ns a row,
+   * so ~1.3 ms at the 16,385 rows a truncated run holds, twice a second while
+   * somebody is watching. Gated for linearity in `recorderCost.perf.test.ts`:
+   * a walk that went quadratic would turn watching a run into perturbing it.
    *
    * `occupancy` is the caller's vector, in {@link PHASES} order, zeroed here:
    * a poll reads this instant, not a sum of every poll before it. It is

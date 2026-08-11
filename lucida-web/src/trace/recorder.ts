@@ -252,8 +252,11 @@ export class TraceRecorder {
   /** One vector, refilled per tick, for the same reason as the scratch above. */
   private readonly readingColumns = new Float64Array(READING_NAMES.length);
   /**
-   * The live view's phase-occupancy vector, refilled per poll. Held here so a
-   * surface polling twice a second allocates nothing on the pipeline's thread.
+   * The live view's phase-occupancy vector, refilled per poll rather than
+   * allocated per poll — the walk that fills it runs over every row the run
+   * has made, and that is not the place to hand the collector a buffer. The
+   * reading it produces is a fresh object by design: it is a snapshot handed
+   * to a surface, not something the recorder keeps.
    */
   private readonly occupancyScratch = new Uint32Array(PHASES.length);
   private tickInProgress = false;

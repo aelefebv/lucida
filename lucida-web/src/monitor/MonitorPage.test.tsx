@@ -294,6 +294,32 @@ describe("a run that is still open (#937)", () => {
     }
   });
 
+  it("offers a run that opens later rather than taking the page from a verdict", () => {
+    // A second open behind this page is worth knowing about, but switching to
+    // it under somebody reading a verdict they asked for would be exactly the
+    // auto-following this view exists without.
+    vi.useFakeTimers();
+    try {
+      read.value = { ok: true, document: diagnoseRun(coldRemoteOpen()) };
+      render(<MonitorPage onClose={() => {}} />);
+      expect(screen.getByRole("heading", { name: "Verdict" })).toBeTruthy();
+
+      live.value = progress({ runId: "run-later" });
+      act(() => {
+        vi.advanceTimersByTime(600);
+      });
+
+      // Still the verdict, plus an offer.
+      expect(screen.getByRole("heading", { name: "Verdict" })).toBeTruthy();
+      fireEvent.click(screen.getByTestId("monitor-watch-next"));
+
+      expect(screen.getByTestId("monitor-live-counters")).toBeTruthy();
+      expect(screen.getByTestId("monitor-run-id").textContent).toBe("run-later");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("counts from run start rather than following a window", () => {
     // The counters are cumulative, so the first seconds of an open are still
     // on screen minutes later — the prototype's auto-following window scrolled

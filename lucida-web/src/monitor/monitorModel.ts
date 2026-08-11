@@ -20,6 +20,7 @@ import type {
   PhaseRollup,
   PhaseSide,
 } from "../trace/diagnose/types.ts";
+import type { RunCause } from "../trace/types.ts";
 
 /** One figure, already formatted, with the word that names it. */
 export interface MonitorNumber {
@@ -184,11 +185,19 @@ export function buildMonitorView(diagnostic: DiagnosticDocument): MonitorView {
   };
 }
 
+/**
+ * Why a run opened, in one line. Shared with the live view, which shows the
+ * same run before it closes — two spellings of one cause would read as two
+ * different runs.
+ */
+export function formatCause(cause: RunCause | null): string {
+  if (!cause) return "steady state";
+  return `${cause.epoch ?? "none"} / ${cause.dirtyKind} / ${cause.source}`;
+}
+
 function identityOf(diagnostic: DiagnosticDocument): MonitorNumber[] {
   const run = diagnostic.run;
-  const cause = run.cause
-    ? `${run.cause.epoch ?? "none"} / ${run.cause.dirtyKind} / ${run.cause.source}`
-    : "steady state";
+  const cause = formatCause(run.cause);
   return [
     { label: "dataset", value: run.datasetIds.join(", ") || "none" },
     { label: "cause", value: cause },

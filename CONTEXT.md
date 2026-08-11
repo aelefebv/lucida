@@ -394,9 +394,9 @@ _Avoid_: profiler, debug panel, dashboard
 **Live view**:
 What the monitor shows while a run is still open: progress counters and the
 phase bar, cumulative from run start, and no verdict. A verdict needs a closed
-interval, so the monitor withholds one until the run ends — by settling, by
-timing out, or through *Stop & analyse*, which closes it with `explicit` as the
-end reason.
+interval, so the monitor withholds one until the run ends — by going quiescent,
+by timing out, or through *Stop & analyse*, which closes it with `explicit` as
+the end reason.
 _Avoid_: real-time view, following window (there is no window), live verdict
 
 **Dev controls**:

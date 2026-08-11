@@ -8,6 +8,7 @@
 
 import { describe, expect, it } from "vitest";
 import { buildLiveView } from "./liveModel.ts";
+import { formatCause } from "./monitorModel.ts";
 import type { LiveProgress } from "../trace/liveProgress.ts";
 import { PHASES } from "../trace/types.ts";
 
@@ -90,7 +91,15 @@ describe("the phase bar", () => {
 
 describe("what it withholds", () => {
   it("reports the page's own predicate rather than deciding whether the run is healthy", () => {
-    expect(buildLiveView(progress()).settling).toBe("chunks_in_flight");
-    expect(buildLiveView(progress({ quiescent: true })).settling).toContain("settled");
+    expect(buildLiveView(progress()).quiescence).toBe("chunks_in_flight");
+    expect(buildLiveView(progress({ quiescent: true })).quiescence).toContain("quiescent");
+  });
+
+  it("spells the cause the way the closed-run report spells it", () => {
+    // Two spellings of one cause would read as two different runs across the
+    // handover from watching to reading.
+    expect(buildLiveView(progress()).cause).toBe(
+      formatCause({ epoch: "content", dirtyKind: "interactive", source: "dataset_open_request" }),
+    );
   });
 });
