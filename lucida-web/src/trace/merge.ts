@@ -13,7 +13,7 @@
  * does not know.
  */
 
-import type { StoredServerRow } from "./serverRowTable.ts";
+import { serverRowTotalUs, type StoredServerRow } from "./serverRowTable.ts";
 import type { ServerPlacement, TraceRow, TraceServerRow, UnplacedReason } from "./types.ts";
 
 interface Bracket {
@@ -73,7 +73,9 @@ export function placeServerRows(
 
 function place(row: StoredServerRow, bracket: Bracket): ServerPlacement {
   const bracketUs = Math.max(0, bracket.endUs - bracket.startUs);
-  const serverUs = row.dispatchOffsetUs + row.durationUs;
+  // The phases are contiguous from arrival to handoff, so their sum is the
+  // server's whole time on this request.
+  const serverUs = serverRowTotalUs(row.phases);
 
   // The server reporting more than the bracket holds is a disagreement
   // between two clocks, not a longer server. The bracket wins — it is the

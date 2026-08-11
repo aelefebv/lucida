@@ -31,8 +31,20 @@ function serverRow(overrides: Partial<StoredServerRow> & { rid: number }): Store
     connectionGeneration: overrides.connectionGeneration ?? 1,
     family: overrides.family ?? "chunk",
     outcome: overrides.outcome ?? "delivered",
-    dispatchOffsetUs: overrides.dispatchOffsetUs ?? 200,
-    durationUs: overrides.durationUs ?? 5_800,
+    coalescedOnto: overrides.coalescedOnto ?? null,
+    // 6,000 µs of server time, spread over the phases a source chunk
+    // passes through.
+    phases: overrides.phases ?? {
+      arrival: 100,
+      "binding-lookup": 100,
+      dispatch: 200,
+      "cache-lookup": 100,
+      "permit-wait": 3_000,
+      "backend-read": 2_000,
+      decompress: 400,
+      "slice-encode": 50,
+      handoff: 50,
+    },
   };
 }
 
@@ -56,7 +68,7 @@ describe("placeServerRows", () => {
     // is not a longer server, and the browser's is the one we trust.
     const [placed] = placeServerRows(
       [browserRow({ rid: 7 })],
-      [serverRow({ rid: 7, durationUs: 20_000 })],
+      [serverRow({ rid: 7, phases: { "permit-wait": 20_000 } })],
     );
 
     const placement = placed.placement!;
@@ -65,7 +77,7 @@ describe("placeServerRows", () => {
     expect(placement.gapUs).toBe(0);
     // The size of the disagreement, not just its existence: 3 µs and 3 s
     // are not the same news.
-    expect(placement.overshootUs).toBe(10_200);
+    expect(placement.overshootUs).toBe(10_000);
   });
 
   it("joins on the generation as well as the label", () => {
@@ -110,13 +122,13 @@ describe("placeServerRows", () => {
     // has no end would charge the server for a wait it is not having.
     const [placed] = placeServerRows(
       [browserRow({ rid: 7, phases: {}, outcome: "in-flight" })],
-      [serverRow({ rid: 7, outcome: "not-ready", durationUs: 300 })],
+      [serverRow({ rid: 7, outcome: "not-ready", phases: { arrival: 300 } })],
     );
 
     expect(placed.placement).toBeNull();
     expect(placed.unplacedReason).toBe("answered-without-delivery");
     // The server's own numbers survive: it did do 300 µs of honest work.
-    expect(placed.durationUs).toBe(300);
+    expect(placed.phases.arrival).toBe(300);
   });
 
   it("never joins an unlabelled row, whose rid 0 is not a label", () => {

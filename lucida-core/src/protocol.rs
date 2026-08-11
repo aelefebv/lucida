@@ -524,12 +524,14 @@ mod tests {
                     lucida_protocol::TimingRowFamily::Chunk,
                     lucida_protocol::TimingRowFamily::Asset,
                 ],
-                dispatch_offset_us: vec![120, 340],
-                duration_us: vec![8_100, 22_000],
                 outcome: vec![
                     lucida_protocol::TimingRowOutcome::Delivered,
                     lucida_protocol::TimingRowOutcome::NotReady,
                 ],
+                arrival_us: vec![120, 340],
+                handoff_us: vec![8_100, 22_000],
+                coalesced_onto: vec![lucida_protocol::LABEL_NONE; 2],
+                ..Default::default()
             },
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -541,7 +543,7 @@ mod tests {
             ServerMessage::TimingBatch { batch } => {
                 assert_eq!(batch.len(), 2);
                 assert_eq!(batch.dropped, 2);
-                assert_eq!(batch.duration_us, vec![8_100, 22_000]);
+                assert_eq!(batch.handoff_us, vec![8_100, 22_000]);
             }
             _ => panic!("expected TimingBatch"),
         }

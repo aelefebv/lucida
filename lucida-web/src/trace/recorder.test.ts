@@ -3,7 +3,13 @@ import { describe, it, expect, vi } from "vitest";
 import { TraceRecorder } from "./recorder.ts";
 import { noopSinkFactory } from "./sink.ts";
 import { createQuiescenceState, evaluateQuiescence, type QuiescenceState } from "./quiescence.ts";
-import { Boundary, RowOutcome, TRACE_SCHEMA_VERSION } from "./types.ts";
+import {
+  Boundary,
+  LABEL_NONE,
+  PHASE_UNSET,
+  RowOutcome,
+  TRACE_SCHEMA_VERSION,
+} from "./types.ts";
 
 const OPEN_CAUSE = { epoch: "content", dirtyKind: "interactive", source: "dataset_added" } as const;
 
@@ -387,9 +393,18 @@ describe("TraceRecorder server rows", () => {
     dropped: 2,
     rid: [5],
     family: ["chunk" as const],
-    dispatch_offset_us: [100],
-    duration_us: [2_900],
     outcome: ["delivered" as const],
+    arrival_us: [100],
+    binding_lookup_us: [PHASE_UNSET],
+    dispatch_us: [PHASE_UNSET],
+    cache_lookup_us: [PHASE_UNSET],
+    permit_wait_us: [2_000],
+    backend_read_us: [900],
+    coalesced_wait_us: [PHASE_UNSET],
+    decompress_us: [PHASE_UNSET],
+    slice_encode_us: [PHASE_UNSET],
+    handoff_us: [PHASE_UNSET],
+    coalesced_onto: [LABEL_NONE],
   };
 
   it("places a server row inside the bracket the browser measured", () => {
