@@ -23,13 +23,28 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::process::{Child, Command as TokioCommand};
-use tokio_tungstenite::tungstenite::protocol::Message;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
+use tokio_tungstenite::tungstenite::protocol::{Message, WebSocketConfig};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_config};
 
 use crate::credentials::EffectiveToken;
 use crate::error::{CliError, ErrorKind};
 
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+
+/// How large a single CDP reply may be.
+///
+/// The default 16 MiB is a denial-of-service guard for a socket facing the
+/// internet; this one faces a browser we launched. It is not a theoretical
+/// limit either: a trace export of a warm open on a real dataset came back at
+/// 22 MB and was refused, and a screenshot of a large retina viewport is the
+/// same shape of problem.
+const MAX_CDP_MESSAGE_BYTES: usize = 512 << 20;
+
+fn cdp_socket_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_message_size(Some(MAX_CDP_MESSAGE_BYTES))
+        .max_frame_size(Some(MAX_CDP_MESSAGE_BYTES))
+}
 
 /// The window a driven page renders into.
 ///
@@ -156,8 +171,13 @@ impl HeadlessBrowser {
         wait: Duration,
     ) -> Result<Page, CliError> {
         let mut page = Page::attach(&self.endpoint, wait).await?;
-        page.call("Network.enable", json!({}), wait).await?;
+        // Only when there is a header to set. An enabled Network domain
+        // mirrors every WebSocket frame the page receives back over CDP —
+        // megabytes of chunk payload per second on a real dataset — which
+        // costs main-thread time in the page being measured and once
+        // overflowed the CDP message limit outright.
         if let Some(token) = token {
+            page.call("Network.enable", json!({}), wait).await?;
             page.call(
                 "Network.setExtraHTTPHeaders",
                 json!({ "headers": { "Authorization": format!("Bearer {}", token.token) } }),
@@ -211,9 +231,13 @@ pub struct Page {
 
 impl Page {
     async fn attach(browser_ws_url: &str, wait: Duration) -> Result<Self, CliError> {
-        let (socket, _response) = connect_async(browser_ws_url)
-            .await
-            .map_err(|error| CliError::new(ErrorKind::SessionDisconnect, error.to_string()))?;
+        let (socket, _response) = connect_async_with_config(
+            browser_ws_url,
+            Some(cdp_socket_config()),
+            /* disable_nagle */ false,
+        )
+        .await
+        .map_err(|error| CliError::new(ErrorKind::SessionDisconnect, error.to_string()))?;
         let (write, read) = socket.split();
         let mut page = Self {
             write,
