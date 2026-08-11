@@ -9,7 +9,13 @@ import { describe, it, expect } from "vitest";
 
 import { TraceRecorder } from "./recorder.ts";
 import { CAP_DERIVATION, CAP_UNIT, PER_RUN_CAP_BYTES, RESIDENT_CAP_BYTES } from "./retention.ts";
-import { PointEvent, type RunCause, type TraceDocument } from "./types.ts";
+import {
+  LABEL_NONE,
+  PHASE_UNSET,
+  PointEvent,
+  type RunCause,
+  type TraceDocument,
+} from "./types.ts";
 
 const CAUSE: RunCause = { epoch: "content", dirtyKind: "interactive", source: "dataset_added" };
 
@@ -156,9 +162,18 @@ describe("the per-run cap", () => {
         dropped: 0,
         rid: [1],
         family: ["chunk"],
-        dispatch_offset_us: [1],
-        duration_us: [2],
         outcome: ["delivered"],
+        arrival_us: [1],
+        binding_lookup_us: [PHASE_UNSET],
+        dispatch_us: [PHASE_UNSET],
+        cache_lookup_us: [PHASE_UNSET],
+        permit_wait_us: [PHASE_UNSET],
+        backend_read_us: [2],
+        coalesced_wait_us: [PHASE_UNSET],
+        decompress_us: [PHASE_UNSET],
+        slice_encode_us: [PHASE_UNSET],
+        handoff_us: [PHASE_UNSET],
+        coalesced_onto: [LABEL_NONE],
       },
       1,
     );
