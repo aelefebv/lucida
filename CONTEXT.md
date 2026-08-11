@@ -198,7 +198,7 @@ _Avoid_: debug panel, config tab, dev tools, inspector
 
 **Debug panel**:
 The retired ten-tab observation-and-mutation surface (`DebugPanel.tsx`),
-dismantled by `wiki/decisions/0051-debug-surface-dispositions.md`. Historical
+dismantled by `wiki/decisions/0052-debug-surface-dispositions.md`. Historical
 only — never use it for the surviving surface.
 _Avoid_: using this term for anything current; say monitor or dev controls
 

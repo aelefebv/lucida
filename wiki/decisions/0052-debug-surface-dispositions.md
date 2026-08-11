@@ -3,7 +3,7 @@ type: Decision
 title: "Debug surface dispositions"
 description: "The ten-tab debug panel is dismantled: observation moves to the monitor where it is temporal and to the trace where it is a per-tick count, is deleted where it is neither, and mutation keeps one small dev-only surface."
 tags: [lucida, decision]
-source_path: wiki/decisions/0051-debug-surface-dispositions.md
+source_path: wiki/decisions/0052-debug-surface-dispositions.md
 created: 2026-08-10
 modified: 2026-08-10
 ---

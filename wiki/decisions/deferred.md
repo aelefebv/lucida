@@ -83,7 +83,7 @@ demand for "multi-user without OAuth" surfaces.
 ## One lifetime for the dev-controls surface
 
 The surviving mutation surface after
-[ADR 0051](0051-debug-surface-dispositions.md) holds knobs with two different
+[ADR 0052](0052-debug-surface-dispositions.md) holds knobs with two different
 lifetimes. The planning knobs are backed by `configStore` and persist to
 `localStorage`, surviving reload and continuing to steer the planner in
 production builds — which is why "Reset all to defaults" stays enabled there.
@@ -104,7 +104,7 @@ value would then follow a user across sessions into a hot fetch path, so the
 bounds need to be enforced in the store rather than trusted from the input.
 
 **Why deferred.** Reworking a hot fetch path's configuration lifetime inside a
-debug-surface disposition would expand ADR 0051 well past what it decides. The
+debug-surface disposition would expand ADR 0052 well past what it decides. The
 lifetime split is honest and visible in the meantime; unifying it is a cleanup
 with no user-visible payoff, best done when `CpuCacheConfig` is next opened for
 another reason.
