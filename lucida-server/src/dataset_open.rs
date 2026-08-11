@@ -932,6 +932,7 @@ mod tests {
     use super::*;
     use crate::test_fixtures::single_image_manifest;
     use lucida_content::DataType;
+    use lucida_protocol::DatasetHealthStatus;
     use std::fs;
     use std::path::Path;
 
@@ -1561,18 +1562,53 @@ mod tests {
             .expect("open");
 
         let sess = ctx.session.lock().await;
-        let binding = sess
-            .server_bindings
+        let manifest = sess
+            .document
+            .manifests
             .values()
             .next()
-            .expect("one binding was built");
+            .expect("one manifest");
+        let health = crate::handler::dataset_health_for_manifest(&sess, manifest);
+
+        // The headline: the durable surface stops saying `healthy`.
+        assert_eq!(health.status, DatasetHealthStatus::Degraded);
+        // …and it says why, in the same breath.
         assert!(
-            binding
-                .import_warnings
+            health
+                .messages
                 .iter()
-                .any(|w| w.kind == lucida_store::import_types::ImportWarningKind::UnwrittenLevel),
-            "warnings: {:?}",
-            binding.import_warnings
+                .any(|m| m.contains("level 0") && m.contains("no chunks written")),
+            "messages: {:?}",
+            health.messages
         );
+        // The degradation comes from the import, not from a sick server.
+        assert_eq!(health.binding.status, DatasetHealthStatus::Healthy);
+    }
+
+    /// A fully written pyramid is still reported healthy — the check above
+    /// would pass just as well if everything degraded.
+    #[tokio::test]
+    async fn dataset_health_stays_healthy_when_every_level_has_chunks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("whole.zarr");
+        fs::create_dir_all(&data_dir).unwrap();
+        write_minimal_zarr(&data_dir);
+        let url = data_dir.to_str().unwrap().to_string();
+
+        let ctx = test_context(tmp.path());
+        let (progress_tx, _progress_rx) = mpsc::unbounded_channel();
+        open_dataset(13, &url, &ctx, &progress_tx)
+            .await
+            .expect("open");
+
+        let sess = ctx.session.lock().await;
+        let manifest = sess
+            .document
+            .manifests
+            .values()
+            .next()
+            .expect("one manifest");
+        let health = crate::handler::dataset_health_for_manifest(&sess, manifest);
+        assert_eq!(health.status, DatasetHealthStatus::Healthy);
     }
 }

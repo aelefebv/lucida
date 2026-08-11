@@ -842,7 +842,10 @@ fn dataset_health_snapshot(sess: &Session, filter: Option<&DatasetId>) -> Vec<Da
         .collect()
 }
 
-fn dataset_health_for_manifest(sess: &Session, manifest: &DatasetManifest) -> DatasetSourceHealth {
+pub(crate) fn dataset_health_for_manifest(
+    sess: &Session,
+    manifest: &DatasetManifest,
+) -> DatasetSourceHealth {
     let dataset_id = manifest.dataset_id.clone();
     let binding = sess.server_bindings.get(&dataset_id);
     let runtime = sess.binding_runtime.get(&dataset_id);
@@ -1745,6 +1748,23 @@ async fn send_open_failed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Health is a worst-of fold, and no component may be lost to argument
+    /// order. The earlier form only looked for `Degraded` on the right, so
+    /// `combine(Degraded, Healthy)` wrongly answered `Healthy` — which
+    /// silently swallowed a degraded source cache.
+    #[test]
+    fn combine_health_is_symmetric_worst_of() {
+        use DatasetHealthStatus::{Degraded, Healthy, Unavailable};
+
+        assert_eq!(combine_health(Healthy, Healthy), Healthy);
+        assert_eq!(combine_health(Degraded, Healthy), Degraded);
+        assert_eq!(combine_health(Healthy, Degraded), Degraded);
+        assert_eq!(combine_health(Unavailable, Healthy), Unavailable);
+        assert_eq!(combine_health(Healthy, Unavailable), Unavailable);
+        assert_eq!(combine_health(Degraded, Unavailable), Unavailable);
+        assert_eq!(combine_health(Unavailable, Degraded), Unavailable);
+    }
     use crate::test_fixtures::single_image_manifest;
     use lucida_content::EntityId;
     use lucida_proxy::{ProxyDtype, ProxyHeader};

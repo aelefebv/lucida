@@ -465,29 +465,24 @@ impl CachedStore {
         };
         let elapsed_nanos = started.elapsed().as_nanos();
 
-        match head {
-            Ok(_) => {
-                let mut state = self.cache.lock().unwrap();
-                state.source_reads += 1;
-                state.source_read_nanos += elapsed_nanos;
-                Ok(true)
+        // The round trip happened whatever it answered, so it is counted once
+        // here rather than in each arm below.
+        {
+            let mut state = self.cache.lock().unwrap();
+            state.source_reads += 1;
+            state.source_read_nanos += elapsed_nanos;
+            if !matches!(head, Ok(_) | Err(object_store::Error::NotFound { .. })) {
+                state.backend_errors += 1;
             }
+        }
+
+        match head {
+            Ok(_) => Ok(true),
             Err(object_store::Error::NotFound { .. }) => {
-                {
-                    let mut state = self.cache.lock().unwrap();
-                    state.source_reads += 1;
-                    state.source_read_nanos += elapsed_nanos;
-                }
                 self.absent.lock().unwrap().put(key, ());
                 Ok(false)
             }
-            Err(error) => {
-                let mut state = self.cache.lock().unwrap();
-                state.source_reads += 1;
-                state.source_read_nanos += elapsed_nanos;
-                state.backend_errors += 1;
-                Err(error)
-            }
+            Err(error) => Err(error),
         }
     }
 

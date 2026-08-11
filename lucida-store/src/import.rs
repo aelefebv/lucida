@@ -19,7 +19,6 @@ use crate::codec::parse_codec_chain;
 use crate::import_types::*;
 use crate::layout::compute_chunk_byte_layout;
 use crate::parse;
-use crate::parse::LevelEntry;
 use crate::unwritten;
 
 /// Import a dataset from an OME-Zarr store.
@@ -82,6 +81,7 @@ async fn import_single_image(
     warn_pinned_axes(id, &layout.pinned);
     let axes = build_axes(&layout.canonical_names);
     let levels = build_level_geometries(&level_entries, &level_metas, &axes_names)?;
+    let probe_targets = build_probe_targets(&level_entries, &level_metas, &levels);
     let coarse_level_index =
         select_source_coarse_level(&levels, data_type, SourceCoarseConfig::default());
     let level_bindings = build_level_binding_infos(
@@ -124,7 +124,7 @@ async fn import_single_image(
     // exists (or errors) without yielding names is surfaced as a warning so
     // possibly-incomplete discovery never passes silently.
     let mut warnings: Vec<ImportWarning> = Vec::new();
-    warnings.extend(unwritten_level_warning(store, "", id, &level_entries, &axes_names).await);
+    warnings.extend(unwritten::warn_unwritten_levels(store, "", id, &probe_targets).await);
 
     let mut label_budget = LabelBudget::new();
     let probed = probe_labels_for_image(store, "").await;
@@ -745,20 +745,6 @@ async fn import_collection(
         StoreError::Metadata("collection has no tile with readable geometry".into())
     })?;
 
-    // Every tile of a collection shares one multiscale, and whether an export
-    // wrote a level is a property of the export — so this is asked once, of
-    // the representative, not once per tile.
-    warnings.extend(
-        unwritten_level_warning(
-            store,
-            &geometry_tile_prefix,
-            id,
-            &level_entries,
-            &axes_names,
-        )
-        .await,
-    );
-
     // The collection opened. If selection had to fall forward past unreadable
     // representatives, surface them as one aggregated warning; the common case
     // — the leading representative read cleanly — records nothing.
@@ -781,6 +767,20 @@ async fn import_collection(
     warn_pinned_axes(id, &layout.pinned);
     let axes = build_axes(&layout.canonical_names);
     let levels = build_level_geometries(&level_entries, &level_metas, &axes_names)?;
+
+    // Every tile of a collection shares one multiscale, and whether an export
+    // wrote a level is a property of the export — so this is asked once, of
+    // the representative the geometry came from, not once per tile.
+    warnings.extend(
+        unwritten::warn_unwritten_levels(
+            store,
+            &geometry_tile_prefix,
+            id,
+            &build_probe_targets(&level_entries, &level_metas, &levels),
+        )
+        .await,
+    );
+
     let level_bindings = build_level_binding_infos(
         &axes_names,
         &level_metas,
@@ -1297,6 +1297,35 @@ fn build_axes(axes_names: &[String]) -> Vec<Axis> {
 /// panic). This keeps untrusted array metadata — a label's or an image's
 /// `chunk_shape` — from aborting the process: a bad label surfaces as an `Err`
 /// the caller skips, and a bad source array fails the import loudly.
+/// Describe each declared level for the unwritten-level probe: where its
+/// origin chunk lives, how many coordinates that key carries, and how much
+/// source space the chunk spans.
+///
+/// The key's coordinate count comes from the level's **own** array rank rather
+/// than the multiscale axes list, since the on-disk key has one coordinate per
+/// axis of the array it addresses. The footprint is the level's chunk extent
+/// scaled into the shared coordinate space, which is what lets an absent
+/// origin be compared against a populated one it contains — see
+/// [`crate::unwritten`].
+fn build_probe_targets(
+    level_entries: &[parse::LevelEntry],
+    level_metas: &[parse::ArrayMeta],
+    levels: &[LevelGeometry],
+) -> Vec<unwritten::ProbeTarget> {
+    level_entries
+        .iter()
+        .zip(level_metas.iter())
+        .zip(levels.iter())
+        .map(|((entry, meta), geometry)| unwritten::ProbeTarget {
+            path: entry.path.clone(),
+            axis_count: meta.shape.len(),
+            origin_footprint: std::array::from_fn(|d| {
+                geometry.chunk_shape[d] as f64 * geometry.scale[d]
+            }),
+        })
+        .collect()
+}
+
 fn build_level_geometries(
     level_entries: &[parse::LevelEntry],
     level_metas: &[parse::ArrayMeta],
@@ -1405,26 +1434,6 @@ enum LabelIndexState {
 /// per tile would drown the open result. `examples` are the affected
 /// `labels/` prefixes; only the first
 /// [`UNUSABLE_INDEX_WARNING_EXAMPLES`] are named in the message.
-/// Probe the declared levels of one multiscale geometry and warn about any
-/// that were never written. Costs one HEAD per level, all in flight at once.
-///
-/// Called once per *geometry* rather than once per member: whether an export
-/// stopped short is a property of how the store was written, so re-asking it
-/// for every tile of a wide collection would multiply the open's request count
-/// for an answer that cannot differ.
-async fn unwritten_level_warning(
-    store: &Arc<CachedStore>,
-    base_prefix: &str,
-    target: &str,
-    level_entries: &[LevelEntry],
-    axes_names: &[String],
-) -> Option<ImportWarning> {
-    let probes =
-        unwritten::probe_level_origins(store, base_prefix, level_entries, axes_names.len()).await;
-    let indices = unwritten::unwritten_level_indices(&probes);
-    unwritten::unwritten_levels_warning(target, level_entries, &indices)
-}
-
 fn unusable_label_index_warning(
     dataset_id: &str,
     unusable: usize,
