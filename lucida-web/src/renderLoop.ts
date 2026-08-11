@@ -107,7 +107,7 @@ export class RenderLoop {
     this.cpuCacheUnsub = this.session.cpuCache.subscribe(() => {
       this.setDirty("residency", "cache_subscribe");
     });
-    // Bridge planning-config tweaks (Config tab in DebugPanel) into the
+    // Bridge planning-config tweaks (the dev-controls surface) into the
     // render loop. The orchestrator separately invalidates its own
     // epoch cache from a configStore subscription; this listener just
     // ensures a frame happens promptly so the user sees the change.

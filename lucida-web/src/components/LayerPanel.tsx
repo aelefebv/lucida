@@ -90,6 +90,8 @@ interface Props {
   viewModeToggle: { label: string; onClick: () => void } | null;
   cameraModeToggle: { label: string; onClick: () => void } | null;
   debugToggle?: { label: string; active: boolean; onClick: () => void };
+  /** Opens the dev-controls surface (planning knobs, overlays, cache knobs). */
+  devControlsToggle?: { label: string; active: boolean; onClick: () => void };
   layoutRegistry: LayoutRegistry | null;
   sendCommand: (json: string) => void;
   onLayoutChange?: () => void;
@@ -130,6 +132,7 @@ export function LayerPanel({
   viewModeToggle,
   cameraModeToggle,
   debugToggle,
+  devControlsToggle,
   layoutRegistry,
   sendCommand,
   onLayoutChange,
@@ -211,6 +214,16 @@ export function LayerPanel({
               style={debugToggle.active ? { background: "#4a9eff", color: "#fff" } : undefined}
             >
               {debugToggle.label}
+            </button>
+          )}
+          {devControlsToggle && (
+            <button
+              aria-label={devControlsToggle.label}
+              onClick={devControlsToggle.onClick}
+              title="Toggle dev controls"
+              style={devControlsToggle.active ? { background: "#4a9eff", color: "#fff" } : undefined}
+            >
+              {devControlsToggle.label}
             </button>
           )}
           <button aria-label="Add layer" onClick={onAddLayer}>+ Add</button>

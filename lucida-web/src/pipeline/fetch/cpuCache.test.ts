@@ -3536,8 +3536,6 @@ describe("CpuCache", () => {
         overviewBudget: expect.any(Number),
         proxyBytes: expect.any(Number),
         proxyBudget: expect.any(Number),
-        maxConcurrentFetches: expect.any(Number),
-        maxBytesInFlight: expect.any(Number),
         inFlightCount: expect.any(Number),
         inFlightBytes: expect.any(Number),
         inFlightProxyCount: expect.any(Number),

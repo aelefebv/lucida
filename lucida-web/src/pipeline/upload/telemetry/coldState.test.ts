@@ -119,12 +119,14 @@ describe("ColdStateTelemetry — churn detector", () => {
       clear: () => store.clear(),
     };
     consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-    const { setDebugEnabled } = await import("../../../debug/logging.ts");
-    setDebugEnabled("orch", true);
+    const { refreshDebugCategories } = await import("../../../debug/logging.ts");
+    localStorage.setItem("debug", "orch");
+    refreshDebugCategories();
   });
   afterEach(async () => {
-    const { setDebugEnabled } = await import("../../../debug/logging.ts");
-    setDebugEnabled("orch", false);
+    const { refreshDebugCategories } = await import("../../../debug/logging.ts");
+    localStorage.removeItem("debug");
+    refreshDebugCategories();
     consoleLogSpy.mockRestore();
     (globalThis as Record<string, unknown>).localStorage = priorLocalStorage;
   });
