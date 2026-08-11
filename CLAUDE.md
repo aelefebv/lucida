@@ -10,6 +10,8 @@ Pick a real fixture, not a toy one: lucida loads OME-Zarr lazily in chunks, so m
 
 When verifying anything the viewer renders, test at `devicePixelRatio` 2 (retina), not just 1 — headless browsers default to 1 and it has hidden whole defect classes.
 
+If `tsc` reports a missing method on a `Wasm*` type, `lucida-core/pkg` is stale — rebuild it with `pnpm build:wasm` from `lucida-web/`.
+
 Keep everything domain-neutral. Do NOT use biology- or science-specific terms anywhere — code, identifiers, comments, docs, commits, PRs, issues, or test fixtures. lucida is a general n-dimensional array/image viewer, and the vocabulary should stay generalized across domains. Prefer neutral wording (e.g. "channel", "dataset", "volume", "sample", "label") over domain-loaded jargon.
 
 ## Agent skills
