@@ -175,7 +175,7 @@ type CacheKnobField =
  * current config, write a partial back. Narrow on purpose — Dev controls
  * has no business with the rest of the cache.
  */
-export interface SessionCacheKnobs {
+export interface LiveCacheKnobs {
   getConfig(): Readonly<Pick<CpuCacheConfig, CacheKnobField>>;
   updateConfig(partial: Partial<CpuCacheConfig>): void;
 }
@@ -449,22 +449,27 @@ function OverlayToggles({ editable }: { editable: boolean }) {
  * The section says so on screen — the lifetime boundary has to be
  * visible, not just true in the code.
  *
- * The displayed values are read straight off the live config — this
- * surface is the only writer, so a bump-on-edit re-render shows the
- * result back without copying the config into React state (which would
- * only be able to go stale).
+ * The displayed values are read straight off the live config rather than
+ * copied into React state, which could only go stale. The cache arrives
+ * with the session, which attaches (and can be replaced) independently of
+ * this surface, so it comes in as a getter re-read on a slow tick — the
+ * same reason the panel this replaced polled.
  */
+const CACHE_POLL_INTERVAL_MS = 1000;
+
 function SessionCacheKnobs({
-  cpuCache,
+  getCpuCache,
   editable,
 }: {
-  cpuCache: SessionCacheKnobs | null;
+  getCpuCache: () => LiveCacheKnobs | null;
   editable: boolean;
 }) {
-  const [, bumpAfterEdit] = useReducer((n: number) => n + 1, 0);
-  // Reading the live cache during render is the point: `updateConfig`
-  // mutates it in place and this component is the only thing that calls
-  // `updateConfig`, so the read is always current.
+  const [, refresh] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => {
+    const id = setInterval(refresh, CACHE_POLL_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, []);
+  const cpuCache = getCpuCache();
   const values = cpuCache?.getConfig() ?? null;
 
   return (
@@ -493,7 +498,7 @@ function SessionCacheKnobs({
                   const shown = Number(e.target.value);
                   if (!(shown > 0)) return;
                   cpuCache.updateConfig({ [knob.field]: shown * divisor });
-                  bumpAfterEdit();
+                  refresh();
                 }}
               />
             </div>
@@ -505,12 +510,12 @@ function SessionCacheKnobs({
 }
 
 export function DevControls({
-  cpuCache = null,
+  getCpuCache = () => null,
   editable = import.meta.env.DEV,
   style,
 }: {
   /** Live cache for the session-scoped knobs; null when no session is up. */
-  cpuCache?: SessionCacheKnobs | null;
+  getCpuCache?: () => LiveCacheKnobs | null;
   /** Whether the knobs accept edits. Defaults to dev-build-only. */
   editable?: boolean;
   style?: React.CSSProperties;
@@ -648,7 +653,7 @@ export function DevControls({
 
         <OverlayToggles editable={editable} />
 
-        <SessionCacheKnobs cpuCache={cpuCache} editable={editable} />
+        <SessionCacheKnobs getCpuCache={getCpuCache} editable={editable} />
       </div>
     </div>
   );

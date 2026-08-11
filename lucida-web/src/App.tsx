@@ -37,7 +37,13 @@ import { deriveMentionCandidates } from "./components/annotationParticipants.ts"
 import { ProfileMenu } from "./auth/ProfileMenu.tsx";
 import { useAuthSession } from "./auth/AuthSession.ts";
 import { debugStats } from "./debug/debugStats.ts";
-import { DEBUG_OVERLAYS, isOverlayEnabled, onOverlaysChanged } from "./debug/logging.ts";
+import {
+  DEBUG_OVERLAYS,
+  getRenderRadiusPreviewTier,
+  isOverlayEnabled,
+  onOverlaysChanged,
+  onRenderRadiusPreviewChanged,
+} from "./debug/logging.ts";
 import type { DatasetState } from "./types.ts";
 import { useWasmScene } from "./hooks/useWasmScene.ts";
 import { useRenderClient } from "./hooks/useRenderClient.ts";
@@ -67,11 +73,11 @@ import "./App.css";
 // The debug UI (side panel + dev-controls panel + on-canvas overlay
 // layer) is code-split into its own on-demand chunk: each panel loads on
 // the first click of its toolbar button, the overlay layer only when an
-// overlay toggle is persisted on (or Dev controls is open, since its
-// radius sliders preview through that layer). A session that never opens
-// any of them never downloads the code — the main bundle keeps only the
-// tiny gate/stat modules (debug/logging.ts, debug/debugStats.ts) that
-// production code paths already share.
+// overlay toggle is persisted on or a render-radius preview is being
+// dragged. A session that never opens any of them never downloads the
+// code — the main bundle keeps only the tiny gate/stat modules
+// (debug/logging.ts, debug/debugStats.ts) that production code paths
+// already share.
 const DebugPanel = lazy(() =>
   import("./debug/DebugPanel.tsx").then((m) => ({ default: m.DebugPanel })),
 );
@@ -956,14 +962,21 @@ function App({
   const [showDebug, setShowDebug] = useState(false);
   const [showDevControls, setShowDevControls] = useState(false);
   // Whether any on-canvas debug overlay is toggled on (persisted in
-  // localStorage `debug.overlays`, independent of any panel). Drives the
+  // localStorage `debug.overlays`, independent of every panel). Drives the
   // mount of the code-split DebugOverlays layer: with every overlay off
-  // and Dev controls closed there is nothing it could draw, so the chunk
-  // isn't fetched. Dev controls being open also mounts it — its
-  // radius-slider drag previews render through the overlay layer.
+  // there is nothing it could draw, so the chunk isn't fetched.
   const anyOverlayEnabled = useSyncExternalStore(
     onOverlaysChanged,
     () => DEBUG_OVERLAYS.some((o) => isOverlayEnabled(o)),
+    () => false,
+  );
+  // A held render-radius slider in Dev controls draws its preview through
+  // the same layer, so it mounts the layer for the duration of the drag
+  // even with every overlay off. This is the layer's only other input —
+  // no panel-open flag reaches it.
+  const radiusPreviewActive = useSyncExternalStore(
+    onRenderRadiusPreviewChanged,
+    () => getRenderRadiusPreviewTier() !== null,
     () => false,
   );
   const [showBookmarkSidebar, setShowBookmarkSidebar] = useState(true);
@@ -1421,7 +1434,7 @@ function App({
             {render.clientReady && render.clientRef.current && (
               <Minimap client={render.clientRef.current} activeLoop={render.activeLoop} />
             )}
-            {(showDevControls || anyOverlayEnabled) && (
+            {(anyOverlayEnabled || radiusPreviewActive) && (
               <Suspense fallback={null}>
                 <DebugOverlays
                   wasmSceneRef={scene.wasmSceneRef}
@@ -1540,7 +1553,10 @@ function App({
           {showDevControls && (
             <Suspense fallback={null}>
               <DevControls
-                cpuCache={bridge.sessionRef.current?.cpuCache ?? null}
+                // Deferred ref read (never during render): the session can
+                // attach or be replaced while the surface is open, and the
+                // surface re-reads on its own tick.
+                getCpuCache={() => bridge.sessionRef.current?.cpuCache ?? null}
                 style={{ height: layout.canvasHeight }}
               />
             </Suspense>

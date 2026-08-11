@@ -850,8 +850,6 @@ export class CpuCache {
       overviewBudget: this.config.overviewBudgetBytes,
       proxyBytes: this.proxyStore.bytes,
       proxyBudget: this.config.proxyBudgetBytes,
-      maxConcurrentFetches: this.config.maxConcurrentFetches,
-      maxBytesInFlight: this.config.maxBytesInFlight,
       inFlightCount: this.chunkScheduler.inFlightSize,
       inFlightBytes: this.chunkScheduler.inFlightBytes,
       inFlightProxyCount: this.proxyScheduler.inFlightSize,

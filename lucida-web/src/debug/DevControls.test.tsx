@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { DevControls, type SessionCacheKnobs } from "./DevControls.tsx";
+import { DevControls, type LiveCacheKnobs } from "./DevControls.tsx";
 import { configStore } from "../pipeline/planning/configStore.ts";
 import { DEFAULT_PLANNING_CONFIG } from "../pipeline/planning/config.ts";
 import {
@@ -29,7 +29,7 @@ afterEach(() => {
 });
 
 /** Stand-in for the live `CpuCache`, which Dev controls only reads config from. */
-function fakeCache(overrides: Partial<ReturnType<SessionCacheKnobs["getConfig"]>> = {}) {
+function fakeCache(overrides: Partial<ReturnType<LiveCacheKnobs["getConfig"]>> = {}) {
   const config = {
     mainBudgetBytes: 512 * 1024 * 1024,
     overviewBudgetBytes: 128 * 1024 * 1024,
@@ -355,7 +355,7 @@ describe("DevControls — overlay toggles", () => {
 
 describe("DevControls — session-scoped cache knobs", () => {
   it("shows the live cache config and marks the section as session-scoped", () => {
-    render(<DevControls cpuCache={fakeCache()} />);
+    render(<DevControls getCpuCache={() => fakeCache()} />);
 
     expect(screen.getAllByText(/session-scoped/i).length).toBeGreaterThan(0);
     expect((screen.getByLabelText(/Main budget \(MB\)/i) as HTMLInputElement).value).toBe("512");
@@ -366,7 +366,7 @@ describe("DevControls — session-scoped cache knobs", () => {
 
   it("writes each knob through to the live cache", () => {
     const cache = fakeCache();
-    render(<DevControls cpuCache={cache} />);
+    render(<DevControls getCpuCache={() => cache} />);
 
     fireEvent.change(screen.getByLabelText(/Main budget \(MB\)/i), { target: { value: "256" } });
     fireEvent.change(screen.getByLabelText(/Overview budget \(MB\)/i), { target: { value: "64" } });
@@ -383,21 +383,21 @@ describe("DevControls — session-scoped cache knobs", () => {
 
   it("shows the edited value back without waiting for a telemetry poll", () => {
     const cache = fakeCache();
-    render(<DevControls cpuCache={cache} />);
+    render(<DevControls getCpuCache={() => cache} />);
     fireEvent.change(screen.getByLabelText(/Main budget \(MB\)/i), { target: { value: "256" } });
     expect((screen.getByLabelText(/Main budget \(MB\)/i) as HTMLInputElement).value).toBe("256");
   });
 
   it("ignores non-positive values rather than starving the cache", () => {
     const cache = fakeCache();
-    render(<DevControls cpuCache={cache} />);
+    render(<DevControls getCpuCache={() => cache} />);
     fireEvent.change(screen.getByLabelText(/Max fetches/i), { target: { value: "0" } });
     expect(cache.updateConfig).not.toHaveBeenCalled();
   });
 
   it("disables the knobs in read-only builds", () => {
     const cache = fakeCache();
-    render(<DevControls cpuCache={cache} editable={false} />);
+    render(<DevControls getCpuCache={() => cache} editable={false} />);
     const input = screen.getByLabelText(/Main budget \(MB\)/i) as HTMLInputElement;
     expect(input.disabled).toBe(true);
     fireEvent.change(input, { target: { value: "256" } });
@@ -405,8 +405,27 @@ describe("DevControls — session-scoped cache knobs", () => {
   });
 
   it("explains the absence of the knobs when no session is connected", () => {
-    render(<DevControls cpuCache={null} />);
+    render(<DevControls getCpuCache={() => null} />);
     expect(screen.queryByLabelText(/Main budget \(MB\)/i)).toBeNull();
     expect(screen.getByText(/no session/i)).toBeTruthy();
+  });
+
+  it("picks up a session that attaches after the surface is already open", async () => {
+    // The session arrives independently of this surface (and can be
+    // replaced), so an open surface must not stay stuck on "no session".
+    vi.useFakeTimers();
+    try {
+      let cache: ReturnType<typeof fakeCache> | null = null;
+      render(<DevControls getCpuCache={() => cache} />);
+      expect(screen.queryByLabelText(/Main budget \(MB\)/i)).toBeNull();
+
+      cache = fakeCache({ mainBudgetBytes: 384 * 1024 * 1024 });
+      await act(async () => {
+        vi.advanceTimersByTime(1100);
+      });
+      expect((screen.getByLabelText(/Main budget \(MB\)/i) as HTMLInputElement).value).toBe("384");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
