@@ -174,8 +174,12 @@ export interface RunCause {
   source: string;
 }
 
-/** Why a run closed. Required on every run — a run that never settled is still a run. */
-export type EndReason = "quiescent" | "timeout" | "explicit";
+/**
+ * Why a run closed. Required on every run — a run that never settled is still
+ * a run. `run-opened` belongs to the unlabelled steady-state interval alone:
+ * it ended because a labelled run began, which is not a settling event.
+ */
+export type EndReason = "quiescent" | "timeout" | "explicit" | "run-opened";
 
 export interface Viewport {
   cssWidth: number;
@@ -250,12 +254,44 @@ export interface RunConditions {
   viewport: Viewport;
 }
 
+/**
+ * What a run stopped recording, and how much it went on to miss.
+ *
+ * A boolean would be the cheap version and the useless one. A truncated run
+ * stops storing rows but keeps counting them, which turns "truncated at
+ * 18,000 rows" into "truncated at 18,000 of an eventual 63,412" — the
+ * difference between a trace nobody can trust and a trace that states it
+ * covered the first 28% of the run (ADR 0049).
+ */
+export interface TruncationRecord {
+  /** One rung, one reason. There is no sampling or coarsening rung to name. */
+  reason: "per-run-cap";
+  /** Microseconds from run start at which recording stopped. */
+  atUs: number;
+  /** The cap that was hit, so the number is readable without the build. */
+  capBytes: number;
+  /** Lifecycle rows stored before the cap. */
+  rowsRecorded: number;
+  /** Lifecycle rows the run saw afterwards and refused. */
+  rowsUnrecorded: number;
+  ticksUnrecorded: number;
+  eventsUnrecorded: number;
+  /** Server rows dropped after truncation — counted, so coverage is not overstated on one side only. */
+  serverRowsUnrecorded: number;
+}
+
 export interface RunHeader extends RunConditions {
   cacheWarmth: CacheWarmth;
   schemaVersion: number;
   runId: string;
-  cause: RunCause;
+  /**
+   * Why the run opened, or null for the unlabelled steady-state interval
+   * between runs. Same object, differing only by label (ADR 0047).
+   */
+  cause: RunCause | null;
   endReason: EndReason;
+  /** Null on a run that recorded everything it saw. */
+  truncation: TruncationRecord | null;
   build: BuildIdentity;
   gpu: GpuIdentity | null;
   /** Wall-clock epoch milliseconds at run start, so an archived run has a date. */
@@ -606,8 +642,82 @@ export interface TracePointEvent {
   } | null;
 }
 
+/**
+ * The kinds of hole a run can have. A closed enum, because a reader deciding
+ * whether to trust a verdict needs to know the list is exhaustive.
+ *
+ * The first three are wall clock no recorded phase covers. The fourth is the
+ * per-run cap. The last three are stream losses: records a ring or the server
+ * dropped, which cost detail without hiding elapsed time.
+ */
+export const COVERAGE_GAP_KINDS = [
+  "unrecorded-prefix",
+  "unaccounted-interior",
+  "unrecorded-suffix",
+  "truncated",
+  "ticks-dropped",
+  "events-dropped",
+  "server-rows-dropped",
+] as const;
+export type CoverageGapKind = (typeof COVERAGE_GAP_KINDS)[number];
+
+export interface CoverageGap {
+  kind: CoverageGapKind;
+  /** Run-relative microseconds, or null when the gap is a stream loss rather than an interval. */
+  startUs: number | null;
+  endUs: number | null;
+  /** Zero for a stream loss: it cost records, not elapsed time. */
+  durationUs: number;
+  /** Records the gap swallowed. Zero for an interval gap, which has no record count. */
+  records: number;
+  /**
+   * Whether the run's bottleneck could be inside this gap. A caveat that only
+   * a careful reader would derive is a caveat most readers will miss, so the
+   * gap carries the judgement rather than leaving it to each surface.
+   */
+  couldHideBottleneck: boolean;
+  /** Why this gap exists, in one sentence. Constant per kind; the numbers live in the fields. */
+  statement: string;
+}
+
+/**
+ * A limit of the instrument itself rather than of this run. Emitted on every
+ * run, identically, because they never go away: a reader who knows a run is
+ * clean still has to know what a clean run cannot tell them.
+ */
+export interface CoverageLimit {
+  id: string;
+  statement: string;
+}
+
+/**
+ * What the run measured and what it did not. On every run, including clean
+ * ones — "no stall found" is only worth anything next to how much of the run
+ * was actually instrumented.
+ */
+export interface TraceCoverage {
+  /** The run's whole duration, the denominator for everything else here. */
+  wallClockUs: number;
+  /** Wall clock covered by at least one recorded phase span, counting overlap once. */
+  accountedUs: number;
+  /** The remainder. Exact, including gaps too short to be worth listing. */
+  unaccountedUs: number;
+  /**
+   * The holes worth naming, ordered as they occurred and then by stream.
+   * Interval gaps below the reporting floor are counted in
+   * {@link unaccountedUs} but not listed, because a hundred sub-millisecond
+   * entries would bury the one that matters.
+   */
+  gaps: CoverageGap[];
+  /** Run totals for the phases that are counted rather than timed, summed off the tick samples. */
+  countedPhases: Record<CountedPhase, number>;
+  limits: readonly CoverageLimit[];
+}
+
 export interface TraceRun {
   header: RunHeader;
+  /** What this run measured and what it did not. Present on clean runs too. */
+  coverage: TraceCoverage;
   rows: TraceRow[];
   /**
    * Per-tick aggregates, oldest-first. Unlike the per-chunk tier this is a
@@ -635,9 +745,29 @@ export interface TraceRun {
   serverRowsDropped: number;
 }
 
+/**
+ * The retention policy the document was produced under, and what it cost.
+ *
+ * Recorded rather than assumed because the caps are derived, not universal:
+ * they come from measured volumes at a 384-member collection, and a workload
+ * an order of magnitude larger should have them re-derived rather than be
+ * quietly truncated against numbers that never fit it (ADR 0049).
+ */
+export interface RetentionRecord {
+  residentCapBytes: number;
+  perRunCapBytes: number;
+  /** Bytes the recorder holds right now, across every retained interval. */
+  residentBytes: number;
+  /** Completed intervals discarded oldest-first to stay under the resident cap. */
+  intervalsEvicted: number;
+  /** The workload the caps were derived at. */
+  derivedAt: string;
+}
+
 export interface TraceDocument {
   schemaVersion: number;
   exportedAtEpochMs: number;
+  retention: RetentionRecord;
   /**
    * Which phases this build instruments. A document-level statement, not a
    * per-row guarantee: a row still omits any phase whose boundaries it did
@@ -654,14 +784,23 @@ export interface TraceDocument {
   countedPhases: CountedPhase[];
   runs: TraceRun[];
   /**
-   * Rows the recorder saw while no run was open. Counted, not kept: the
-   * unlabelled steady-state interval and its retention are #927.
+   * The unlabelled intervals between runs. Recording is continuous, so steady
+   * state is retained under the same cap rather than thrown away — the pan
+   * that preceded a stall is often the thing that explains it. Same shape as
+   * a run; its header carries a null cause.
+   */
+  steadyState: TraceRun[];
+  /**
+   * Rows the recorder saw with no interval to put them in — before the page
+   * registered an environment, or after it withdrew one. A run whose
+   * conditions cannot be recorded is not a comparable artifact, so these are
+   * counted rather than kept.
    */
   rowsOutsideRun: number;
   /**
-   * Server rows that arrived while no run was open. Counted, not kept: an
-   * unjoinable server row is not a diagnostic, but a silently uncounted one
-   * would make the document claim coverage it does not have.
+   * Server rows that arrived with no interval to put them in. Counted, not
+   * kept: an unjoinable server row is not a diagnostic, but a silently
+   * uncounted one would make the document claim coverage it does not have.
    */
   serverRowsOutsideRun: number;
 }

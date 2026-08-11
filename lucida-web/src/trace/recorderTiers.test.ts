@@ -89,11 +89,22 @@ describe("per-tick aggregates", () => {
     expect(run.ticksDropped).toBe(0);
   });
 
-  it("hands out no scratch while no run is open", () => {
+  it("samples into the unlabelled interval while no run is open", () => {
     const { recorder } = makeRecorder();
+    expect(recorder.beginTick("ds")).not.toBeNull();
+    recorder.commitTick();
+
+    const doc = recorder.exportDocument();
+    expect(doc.runs).toHaveLength(0);
+    expect(doc.steadyState[0].ticks).toHaveLength(1);
+  });
+
+  it("hands out no scratch with no page to say what conditions applied", () => {
+    const { recorder } = makeRecorder();
+    recorder.setEnvironment(null);
     expect(recorder.beginTick("ds")).toBeNull();
     recorder.commitTick();
-    expect(recorder.exportDocument().runs).toHaveLength(0);
+    expect(recorder.exportDocument().steadyState).toHaveLength(0);
   });
 
   it("carries the counted-not-timed phases and resets them each sample", () => {
