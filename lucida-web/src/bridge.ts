@@ -228,8 +228,8 @@ function membershipDatasetId(
 }
 
 /**
- * Gated debug logger for bridge events. Toggle via the DebugPanel "Logging"
- * tab, or from the console via `localStorage.setItem("debug", "bridge")`
+ * Gated debug logger for bridge events. Toggle from the console via
+ * `localStorage.setItem("debug", "bridge")`
  * followed by `refreshDebugCategories()` (the gate is cached at module
  * init; a raw same-tab setItem alone isn't seen until reload). See
  * `wiki/decisions/0012-logging-conventions.md`.

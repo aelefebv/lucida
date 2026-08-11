@@ -5,8 +5,7 @@
  * It is a sibling of {@link DimensionControls} (same `dim-control` row
  * shape) and lives in the dimension-controls row, shown only in 3-D mode
  * (the bias is meaningless in a 2-D slice). It is the ONE discoverable
- * home for the control — a scientist reaches it without opening the
- * Debug panel.
+ * home for the control — it is reachable without any debug surface.
  *
  * Source of truth is {@link configStore} `depthBiasView` (range -1..1,
  * default 0 = centered). The control reads + writes that field directly

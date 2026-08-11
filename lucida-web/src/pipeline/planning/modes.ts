@@ -297,8 +297,8 @@ export function assignModes(
   }
 
   // Pass-through: invisible entities still need to appear so that
-  // downstream consumers (CpuCache eviction tier, debug panels, etc.)
-  // can see them. They live in a dedicated `InvisibleEntry` variant
+  // downstream consumers (CpuCache eviction tier, the trace's per-tick
+  // tallies) can see them. They live in a dedicated `InvisibleEntry` variant
   // and contribute no chunk requests (the planner's lane emitters
   // skip them).
   for (const entity of entities) {

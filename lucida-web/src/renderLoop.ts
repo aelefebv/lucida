@@ -64,12 +64,6 @@ export class RenderLoop implements TraceEnvironment {
   private renderedFrameCount = 0;
   /** Main-thread time of the last tick, for the trace's frame-time reading. */
   private lastFrameTimeUs = 0;
-  // Last-set timestamps for each dirty flag. Lets the panel show a brief
-  // "afterglow" so transient flips (e.g. an interactive flag that gets
-  // cleared within one RAF) are visible at the 200ms polling rate.
-  private lastInteractiveDirtyAt: number | null = null;
-  private lastResidencyDirtyAt: number | null = null;
-
   /**
    * Reused across every publication. The predicate is evaluated once per
    * tick, and ADR 0049 asks the monitor for zero steady-state allocation.
@@ -466,45 +460,16 @@ export class RenderLoop implements TraceEnvironment {
   }
 
   /**
-   * Snapshot of render-loop dirty state, polled by the debug panel's
-   * remaining Render rows. Frame timings are the recorder's (ADR 0049),
-   * not this snapshot's.
-   */
-  getDebugSnapshot(): {
-    interactiveDirty: boolean;
-    residencyDirty: boolean;
-    msSinceInteractiveDirty: number | null;
-    msSinceResidencyDirty: number | null;
-    throttleSkipsPending: number;
-  } {
-    const now = performance.now();
-    return {
-      interactiveDirty: this.interactiveDirty,
-      residencyDirty: this.residencyDirty,
-      msSinceInteractiveDirty: this.lastInteractiveDirtyAt === null
-        ? null
-        : Math.round(now - this.lastInteractiveDirtyAt),
-      msSinceResidencyDirty: this.lastResidencyDirtyAt === null
-        ? null
-        : Math.round(now - this.lastResidencyDirtyAt),
-      throttleSkipsPending: this.throttleSkipPending,
-    };
-  }
-
-  /**
    * Set a dirty flag with attribution. The `source` string flows into
    * the gated `render_loop.dirty_set` event so a debugger can answer
    * "what woke up the loop just now?". Identical (kind, source) calls
    * within DIRTY_EMIT_INTERVAL_MS collapse into one log + a count.
    */
   private setDirty(kind: "interactive" | "residency", source: string): void {
-    const tNow = performance.now();
     if (kind === "interactive") {
       this.interactiveDirty = true;
-      this.lastInteractiveDirtyAt = tNow;
     } else {
       this.residencyDirty = true;
-      this.lastResidencyDirtyAt = tNow;
     }
     this.scheduleIfNeeded();
 

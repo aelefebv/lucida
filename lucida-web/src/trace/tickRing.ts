@@ -8,7 +8,7 @@
  * how many samples it wrapped over.
  *
  * A sample is one planning pass's aggregate for one dataset: the shapes the
- * debug panel carries today, recorded with a timestamp and recorded whether
+ * debug panel used to carry, recorded with a timestamp and recorded whether
  * or not anybody is looking. A tick that hits the planner's epoch cache
  * produces no plan and so no sample — gaps in the stream are cache hits, and
  * the counted phases that accrued during them ride on the next sample.

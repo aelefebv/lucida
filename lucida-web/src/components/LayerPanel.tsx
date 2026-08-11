@@ -89,7 +89,6 @@ interface Props {
   onLabelSetOpacity?: (id: string, label: number, opacity: number) => void;
   viewModeToggle: { label: string; onClick: () => void } | null;
   cameraModeToggle: { label: string; onClick: () => void } | null;
-  debugToggle?: { label: string; active: boolean; onClick: () => void };
   /** Opens the dev-controls surface (planning knobs, overlays, cache knobs). */
   devControlsToggle?: { label: string; active: boolean; onClick: () => void };
   layoutRegistry: LayoutRegistry | null;
@@ -131,7 +130,6 @@ export function LayerPanel({
   onLabelSetOpacity,
   viewModeToggle,
   cameraModeToggle,
-  debugToggle,
   devControlsToggle,
   layoutRegistry,
   sendCommand,
@@ -204,16 +202,6 @@ export function LayerPanel({
               title="Toggle camera mode (F)"
             >
               {cameraModeToggle.label}
-            </button>
-          )}
-          {debugToggle && (
-            <button
-              aria-label={debugToggle.label}
-              onClick={debugToggle.onClick}
-              title="Toggle debug overlay"
-              style={debugToggle.active ? { background: "#4a9eff", color: "#fff" } : undefined}
-            >
-              {debugToggle.label}
             </button>
           )}
           {devControlsToggle && (
