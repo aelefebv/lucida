@@ -7,6 +7,7 @@ pub mod import_types;
 pub mod ingest;
 pub mod layout;
 pub(crate) mod parse;
+pub mod source_limiter;
 
 /// The canonical 5D axis names in order.
 const ALL_DIMS: [&str; 5] = ["t", "c", "z", "y", "x"];

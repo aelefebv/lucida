@@ -19,6 +19,7 @@ use lucida_content::{
 };
 use lucida_proxy::{ProxyKind, ProxySourceData, ProxySpec, SourceError, TileVolume};
 use lucida_store::cache::CachedStore;
+use lucida_store::source_limiter::ReaderId;
 use object_store::path::Path;
 
 use crate::binding::ChunkResolver;
@@ -397,7 +398,17 @@ pub(crate) async fn fetch_volume_region(
                 let object_path = resolver
                     .resolve(&image.image_id, &key)
                     .ok_or_else(|| BuildSourceError::UnknownImage(image.image_id.clone()))?;
-                let storage_bytes = match store.get_bytes(&Path::from(object_path.as_str())).await {
+                // Charged to the background class, not to a client: proxy
+                // generation is coalesced across every client that asked for
+                // the same spec, so there is no one client whose share it
+                // should come out of. It competes for one fair share against
+                // the interactive readers, which is what it is — one
+                // background population, however many clients are waiting on
+                // it.
+                let storage_bytes = match store
+                    .get_bytes(&Path::from(object_path.as_str()), ReaderId::UNATTRIBUTED)
+                    .await
+                {
                     Ok(bytes) => bytes,
                     Err(e) if is_not_found(&e) => {
                         continue;
