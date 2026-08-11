@@ -68,6 +68,8 @@ export class RenderLoop implements TraceEnvironment {
   private frameSamples: Array<{ t: number; frame: number; plan: number; upload: number; passes: number; rendered: boolean }> = [];
   private static readonly SAMPLE_BUFFER_LIMIT = 120;
   private renderedFrameCount = 0;
+  /** Main-thread time of the last tick, for the trace's frame-time reading. */
+  private lastFrameTimeUs = 0;
   // Last-set timestamps for each dirty flag. Lets the panel show a brief
   // "afterglow" so transient flips (e.g. an interactive flag that gets
   // cleared within one RAF) are visible at the 200ms polling rate.
@@ -308,6 +310,17 @@ export class RenderLoop implements TraceEnvironment {
     state.residencyDirty = this.residencyDirty;
     state.frameInFlight = this.rafId !== null;
     traceRecorder.noteQuiescence(evaluateQuiescence(state, performance.now()));
+
+    // The reading tier rides the same moment (#934). Queue depth and in-flight
+    // come off the reading just taken rather than a second scan, and both
+    // include speculative prefetch: the queue is as deep as it is, whatever
+    // the settle predicate chooses to ignore.
+    traceRecorder.noteReading(
+      state.pending + state.speculativePending,
+      state.inFlight + state.speculativeInFlight,
+      this.lastFrameTimeUs,
+      this.session.cpuCache.residentBytes(),
+    );
   }
 
   /** {@link TraceEnvironment}: what was already resident when the run opened. */
@@ -674,8 +687,14 @@ export class RenderLoop implements TraceEnvironment {
       this.setDirty("interactive", "pending_residency_rebuild");
     }
 
+    // Measured whether or not the debug panel is on: recording is
+    // unconditional (ADR 0049), and one subtraction is not a cost worth
+    // gating. The panel's own copy still rides behind its flag.
+    const frameMs = performance.now() - now;
+    this.lastFrameTimeUs = frameMs * 1000;
+
     if (debugStats.enabled) {
-      debugStats.frameTimeMs = performance.now() - now;
+      debugStats.frameTimeMs = frameMs;
       this.recordFrameSample(now, debugStats.frameTimeMs, debugStats.planTimeMs, debugStats.uploadTimeMs, debugStats.renderPasses.total, shouldRender);
     }
 

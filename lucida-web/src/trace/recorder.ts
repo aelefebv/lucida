@@ -25,6 +25,8 @@ import {
   Boundary,
   clampStamp,
   COUNTED_PHASES,
+  READING_NAMES,
+  ReadingColumn,
   RowOutcome,
   TRACE_SCHEMA_VERSION,
   type ChunkEventSource,
@@ -219,6 +221,8 @@ export class TraceRecorder {
    */
   private readonly tickScratch = new TickScratch();
   private readonly countedPhases = new Uint32Array(COUNTED_PHASES.length);
+  /** One vector, refilled per tick, for the same reason as the scratch above. */
+  private readonly readingColumns = new Float64Array(READING_NAMES.length);
   private tickInProgress = false;
 
   private holdTimer: ReturnType<typeof setTimeout> | null = null;
@@ -253,6 +257,16 @@ export class TraceRecorder {
   /** Whether a *labelled* run is open. The unlabelled interval is not one. */
   get isRunOpen(): boolean {
     return this.open?.cause != null;
+  }
+
+  /**
+   * How long `quiescent` must hold before a run closes itself. Readable from
+   * outside because a driver that exports the moment the boolean first goes
+   * true pre-empts that close, and every run it takes lands as `explicit`
+   * when it settled.
+   */
+  get holdMs(): number {
+    return this.quiescenceHoldMs;
   }
 
   /** The last state the page published, or null before the first publication. */
@@ -575,6 +589,31 @@ export class TraceRecorder {
   }
 
   /**
+   * Record the process-wide readings: queue depth, in-flight, the tick's own
+   * main-thread time, and resident bytes (#934).
+   *
+   * Pushed by the render loop once per tick, next to the published
+   * quiescence, rather than pulled when a tick sample is committed. A tick
+   * sample is per planning pass, and the planner's epoch cache means a run
+   * can fetch for seconds without re-planning once — readings on that cadence
+   * are a cluster of readings at run start and silence after.
+   */
+  noteReading(
+    queueDepth: number,
+    inFlight: number,
+    frameTimeUs: number,
+    residentBytes: number,
+  ): void {
+    const run = this.open;
+    if (!run) return;
+    this.readingColumns[ReadingColumn.QueueDepth] = queueDepth;
+    this.readingColumns[ReadingColumn.InFlight] = inFlight;
+    this.readingColumns[ReadingColumn.FrameTimeUs] = frameTimeUs;
+    this.readingColumns[ReadingColumn.ResidentBytes] = residentBytes;
+    run.sink.appendReading(this.offsetUs(run, this.now()), this.readingColumns);
+  }
+
+  /**
    * Count one occurrence of a phase too short to time. Silent outside a run,
    * like every other tier: a count with no interval to belong to cannot be
    * read as a rate.
@@ -816,6 +855,8 @@ export class TraceRecorder {
       rows,
       ticks,
       ticksDropped,
+      readings: interval.sink.serialiseReadings(),
+      readingsDropped: interval.sink.readingsDropped,
       events: interval.sink.serialiseEvents(),
       eventsDropped,
       // Placement happens here, at export, because it needs both tables
