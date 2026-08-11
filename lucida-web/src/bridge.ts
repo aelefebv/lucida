@@ -20,6 +20,7 @@
  */
 import { isDebugEnabled } from "./debug/logging.ts";
 import type { SourceChunkStatus } from "./pipeline/fetch/contentSource.ts";
+import type { ServerTimingBatch } from "./trace/serverRowTable.ts";
 import type {
   GeneratedChunkStatus,
   WireGeneratedAvailabilityByDataset,
@@ -351,8 +352,18 @@ export interface BridgeHandlers {
    * from `onSnapshot` (the application-level "session established" signal):
    * a frame sent between `onConnected` and the first snapshot still reaches
    * the server. Fires on every (re)connect's `onopen`.
+   *
+   * `generation` counts this bridge's connections from 1. Correlation
+   * labels restart at zero on each one, so only `(generation, rid)` is
+   * unique across a run that outlived a socket.
    */
-  onConnected?: () => void;
+  onConnected?: (generation: number) => void;
+  /**
+   * One flush window of the server's lifecycle rows for this client's own
+   * requests. Pushed on the server's ticker; nothing here is polled and
+   * there is no server-side trace store to poll.
+   */
+  onTimingBatch?: (batch: ServerTimingBatch, generation: number) => void;
   onDisconnect?: () => void;
 }
 
@@ -376,6 +387,8 @@ export class Bridge {
   private handlers: BridgeHandlers;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private destroyed = false;
+  /** Sockets this bridge has opened. The other half of the trace's join key. */
+  private connectionGeneration = 0;
   private presenceTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingPresence: string | null = null;
   private datasetPresenceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -456,7 +469,8 @@ export class Bridge {
       // The socket is OPEN: `send` will no longer silently drop. Notify the
       // app so readiness-gated work (e.g. the #697 seed open) can fire against
       // a transport that actually carries it, instead of a CONNECTING socket.
-      this.handlers.onConnected?.();
+      this.connectionGeneration += 1;
+      this.handlers.onConnected?.(this.connectionGeneration);
     };
 
     ws.onmessage = (event) => {
@@ -662,6 +676,16 @@ export class Bridge {
           case "workspace_archived":
             this.handlers.onWorkspaceArchived?.(msg.workspace_id ?? "");
             this.destroy();
+            break;
+          case "timing_batch":
+            // Stamped with the generation it arrived on, not the one it was
+            // requested under: rows buffered for a dead connection are
+            // discarded server-side, so anything arriving here belongs to
+            // the socket it came in on.
+            this.handlers.onTimingBatch?.(
+              msg.batch as ServerTimingBatch,
+              this.connectionGeneration,
+            );
             break;
         }
       } catch (e) {

@@ -14,6 +14,8 @@
  */
 
 import { buildIdentity } from "./buildInfo.ts";
+import { placeServerRows } from "./merge.ts";
+import { ServerRowTable, type ServerTimingBatch } from "./serverRowTable.ts";
 import type { QuiescenceState } from "./quiescence.ts";
 import { tableRowSinkFactory, type RowSink, type RowSinkFactory } from "./sink.ts";
 import {
@@ -35,6 +37,7 @@ import {
   type RunHeader,
   type TraceDocument,
   type TraceRun,
+  type WireLabel,
 } from "./types.ts";
 
 /**
@@ -113,6 +116,7 @@ interface OpenRun {
   startedAtMs: number;
   startedAtEpochMs: number;
   sink: RowSink;
+  serverRows: ServerRowTable;
   generation: number;
   counted: CountedEvents;
 }
@@ -121,6 +125,7 @@ interface ClosedRun {
   header: RunHeader;
   sink: RowSink;
   counted: CountedEvents;
+  serverRows: ServerRowTable;
 }
 
 /** Row indices are packed with the run generation so a stale handle is inert. */
@@ -141,6 +146,7 @@ export class TraceRecorder {
   private generation = 0;
   private runSeq = 0;
   private rowsOutsideRun = 0;
+  private serverRowsOutsideRun = 0;
 
   /**
    * Recent plan passes as (start, end) wall pairs. Preallocated and
@@ -213,6 +219,7 @@ export class TraceRecorder {
       startedAtMs,
       startedAtEpochMs,
       sink: this.sinkFactory(),
+      serverRows: new ServerRowTable(),
       generation: this.generation,
       counted: emptyCountedEvents(),
     };
@@ -235,6 +242,7 @@ export class TraceRecorder {
     this.closed.push({
       sink: run.sink,
       counted: run.counted,
+      serverRows: run.serverRows,
       header: {
         ...run.environment.captureConditions(),
         cacheWarmth: run.cacheWarmth,
@@ -402,6 +410,32 @@ export class TraceRecorder {
     if (this.open) this.open.counted.coalesceAttach++;
   }
 
+  /**
+   * Record which wire request a row's chunk rode on. Called for the sender
+   * and for every caller that coalesced onto it, which is what makes the
+   * join to the server's table a plain equi-join.
+   */
+  labelRow(handle: number, label: WireLabel): void {
+    const run = this.resolve(handle);
+    if (!run) return;
+    run.sink.setLabel(handle % GENERATION_STRIDE, label);
+  }
+
+  /**
+   * Take a flush window of the server's rows. They belong to the run that is
+   * open when they arrive; rows that arrive between runs are counted and
+   * dropped, because an unjoinable server row is not a diagnostic and
+   * keeping it would spend budget on nothing.
+   */
+  ingestServerBatch(batch: ServerTimingBatch, connectionGeneration: number): void {
+    const run = this.open;
+    if (!run) {
+      this.serverRowsOutsideRun += batch.rid.length;
+      return;
+    }
+    run.serverRows.ingest(batch, connectionGeneration);
+  }
+
   /** Stamp a phase boundary as a microsecond offset from run start. */
   stamp(handle: number, boundary: number): void {
     const run = this.resolve(handle);
@@ -430,12 +464,20 @@ export class TraceRecorder {
       schemaVersion: TRACE_SCHEMA_VERSION,
       exportedAtEpochMs: this.epochNow(),
       instrumentedPhases: [...INSTRUMENTED_PHASES],
-      runs: this.closed.map<TraceRun>(run => ({
-        header: run.header,
-        rows: run.sink.serialise(),
-        counted: run.counted,
-      })),
+      runs: this.closed.map<TraceRun>(run => {
+        const rows = run.sink.serialise();
+        return {
+          header: run.header,
+          rows,
+          counted: run.counted,
+          // Placement happens here, at export, because it needs both tables
+          // — and because the in-memory model stays a table.
+          serverRows: placeServerRows(rows, run.serverRows.serialise()),
+          serverRowsDropped: run.serverRows.droppedCount,
+        };
+      }),
       rowsOutsideRun: this.rowsOutsideRun,
+      serverRowsOutsideRun: this.serverRowsOutsideRun,
     };
   }
 
@@ -448,6 +490,7 @@ export class TraceRecorder {
     this.closeRun("explicit");
     this.closed = [];
     this.rowsOutsideRun = 0;
+    this.serverRowsOutsideRun = 0;
     this.lastQuiescence = null;
     this.planSpanCount = 0;
     this.openPlanStartMs = null;

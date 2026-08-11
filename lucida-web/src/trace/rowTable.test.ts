@@ -38,11 +38,13 @@ describe("RowTable", () => {
   });
 
   it("pins the row width, because the memory caps are derived from it", () => {
-    // 3 interned identity ids + 6 chunk coordinates + 7 boundary slots, all
-    // uint32, plus a residency-tier byte, a lane byte and an outcome byte.
-    // #927 derives its resident and per-run caps from this figure, so a
-    // change here is a change to how much of a run fits.
-    expect(RowTable.BYTES_PER_ROW).toBe(67);
+    // 3 interned identity ids + 6 chunk coordinates + 7 boundary slots + the
+    // two-part wire label, all uint32, plus a residency-tier byte, a lane
+    // byte and an outcome byte. #927 derives its resident and per-run caps
+    // from this figure, so a change here is a change to how much of a run
+    // fits — the label costs 8 B a row, and buys the join to the server's
+    // table.
+    expect(RowTable.BYTES_PER_ROW).toBe(75);
   });
 
   it("carries lane as a column, not as a phase", () => {

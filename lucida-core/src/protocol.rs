@@ -6,7 +6,7 @@ use lucida_content::{DatasetId, ImageId};
 use lucida_protocol::{
     AssetCatalogDelta, DatasetOpenFailureDiagnostic, DatasetOpenProgressDiagnostic,
     DatasetOpenSuccessDiagnostic, DatasetSourceHealth, GeneratedAvailabilityDelta,
-    GeneratedAvailabilitySnapshot, GeneratedChunkStatus, SourceChunkStatus,
+    GeneratedAvailabilitySnapshot, GeneratedChunkStatus, ServerTimingBatch, SourceChunkStatus,
 };
 
 use crate::camera::Camera;
@@ -346,6 +346,23 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },
+    /// One flush window of the server's own lifecycle table, pushed to the
+    /// client whose requests produced the rows (ADR 0050).
+    ///
+    /// Push rather than pull: a run is a client-side interval and the server
+    /// has no idea runs exist, so it cannot detect "the end" a pull would
+    /// wait for. Batched rather than per-row: a peak burst is thousands of
+    /// chunk requests, and one message each would roughly double
+    /// server-to-client traffic on the exact path the monitor exists to
+    /// explain.
+    ///
+    /// A client receives only rows keyed to itself. There is no
+    /// process-wide aggregate, no server-side trace store, and no
+    /// server-side trace endpoint — the browser owns the merged trace.
+    ///
+    /// Variant added at the end so the serde tag positions of older
+    /// variants don't shift.
+    TimingBatch { batch: ServerTimingBatch },
 }
 
 /// The kind of mutation a `BookmarkChanged` describes. Wire encoding is
@@ -365,6 +382,17 @@ pub enum BookmarkAction {
 pub enum ChunkMessage {
     /// Viewer -> Server: request a chunk from the dataset's data source.
     ChunkRequest {
+        /// Correlation label: the join key between this client's lifecycle
+        /// row and the server's row for the same wire request (ADR 0048).
+        /// Minted by the client from one per-connection monotonic counter
+        /// shared with `AssetRequest`, so `(connection, rid)` is unique.
+        ///
+        /// Required, not optional: `#[serde(default)]` would let a client
+        /// that stopped sending it degrade silently to `rid: 0` on every
+        /// row, and a join key whose failure mode is invisible is worse
+        /// than no join at all. Eleven bytes on a ~95-byte message is not
+        /// what anyone opts out of.
+        rid: u32,
         dataset_id: DatasetId,
         image_id: ImageId,
         key: String,
@@ -372,6 +400,10 @@ pub enum ChunkMessage {
     /// Server -> Data source: fetch this chunk and send it to `client_id`.
     ChunkFetch {
         client_id: u64,
+        /// The requesting client's correlation label, carried across the
+        /// server-to-data-source hop so a permit wait behind the source-read
+        /// cap can be attributed to a request rather than only to a client.
+        rid: u32,
         dataset_id: DatasetId,
         image_id: ImageId,
         key: String,
@@ -418,6 +450,7 @@ mod tests {
     #[test]
     fn chunk_request_round_trips() {
         let msg = ChunkMessage::ChunkRequest {
+            rid: 7,
             dataset_id: DatasetId("ds1".into()),
             image_id: ImageId("img1".into()),
             key: "0/0/0/0/0/0".into(),
@@ -427,10 +460,12 @@ mod tests {
         let parsed: ChunkMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ChunkMessage::ChunkRequest {
+                rid,
                 dataset_id,
                 image_id,
                 key,
             } => {
+                assert_eq!(rid, 7);
                 assert_eq!(dataset_id, DatasetId("ds1".into()));
                 assert_eq!(image_id, ImageId("img1".into()));
                 assert_eq!(key, "0/0/0/0/0/0");
@@ -443,6 +478,7 @@ mod tests {
     fn chunk_fetch_round_trips() {
         let msg = ChunkMessage::ChunkFetch {
             client_id: 42,
+            rid: 9,
             dataset_id: DatasetId("ds1".into()),
             image_id: ImageId("img1".into()),
             key: "1/0/0/2/3/4".into(),
@@ -453,16 +489,61 @@ mod tests {
         match parsed {
             ChunkMessage::ChunkFetch {
                 client_id,
+                rid,
                 dataset_id,
                 image_id,
                 key,
             } => {
                 assert_eq!(client_id, 42);
+                assert_eq!(rid, 9);
                 assert_eq!(dataset_id, DatasetId("ds1".into()));
                 assert_eq!(image_id, ImageId("img1".into()));
                 assert_eq!(key, "1/0/0/2/3/4");
             }
             _ => panic!("expected ChunkFetch"),
+        }
+    }
+
+    /// A missing label must be a parse failure. `#[serde(default)]` here
+    /// would turn a client that stopped labelling into `rid: 0` on every
+    /// row — a join that still produces rows, just wrong ones.
+    #[test]
+    fn chunk_request_without_label_fails_to_parse() {
+        let json =
+            r#"{"type":"chunk_request","dataset_id":"ds1","image_id":"img1","key":"0/0/0/0/0/0"}"#;
+        assert!(serde_json::from_str::<ChunkMessage>(json).is_err());
+    }
+
+    #[test]
+    fn timing_batch_round_trips_as_columns() {
+        let msg = ServerMessage::TimingBatch {
+            batch: ServerTimingBatch {
+                dropped: 2,
+                rid: vec![4, 9],
+                family: vec![
+                    lucida_protocol::TimingRowFamily::Chunk,
+                    lucida_protocol::TimingRowFamily::Asset,
+                ],
+                dispatch_offset_us: vec![120, 340],
+                duration_us: vec![8_100, 22_000],
+                outcome: vec![
+                    lucida_protocol::TimingRowOutcome::Delivered,
+                    lucida_protocol::TimingRowOutcome::NotReady,
+                ],
+            },
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"timing_batch\""));
+        // Columns, not an array of objects.
+        assert!(json.contains("\"rid\":[4,9]"));
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::TimingBatch { batch } => {
+                assert_eq!(batch.len(), 2);
+                assert_eq!(batch.dropped, 2);
+                assert_eq!(batch.duration_us, vec![8_100, 22_000]);
+            }
+            _ => panic!("expected TimingBatch"),
         }
     }
 

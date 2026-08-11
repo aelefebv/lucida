@@ -296,8 +296,104 @@ export function emptyCountedEvents(): CountedEvents {
   return { cacheAdmission: 0, workerDispatch: 0, coalesceAttach: 0 };
 }
 
+/**
+ * The identity of one wire request, as both sides know it.
+ *
+ * `rid` is minted per connection and restarts at zero on the next one, so
+ * the generation is not decoration: a run can outlive a socket, and without
+ * it one run holds two `rid: 0` rows meaning different requests.
+ */
+export interface WireLabel {
+  rid: number;
+  /**
+   * Connections count from 1, so **generation 0 means no wire request** —
+   * the transport had no socket, the message was dropped before it was
+   * sent, and there is nothing on the server to join to. That is what makes
+   * {@link UNLABELLED} distinguishable from a genuine `rid: 0`, which every
+   * connection's first request legitimately has.
+   */
+  connectionGeneration: number;
+}
+
+/** No wire request was sent for this row — see {@link WireLabel.connectionGeneration}. */
+export const UNLABELLED: WireLabel = { rid: 0, connectionGeneration: 0 };
+
+/** Which labelled request family a server row describes. */
+export type ServerRowFamily = "chunk" | "asset";
+export const SERVER_ROW_FAMILIES: readonly ServerRowFamily[] = ["chunk", "asset"];
+
+/**
+ * How the server's work for a label ended. `not-ready` is the one that
+ * changes a reading: the server answered honestly and no bytes will follow,
+ * so the browser's bracket for that label stays open through no fault of
+ * the server.
+ */
+export type ServerRowOutcome = "delivered" | "not-ready" | "failed";
+export const SERVER_ROW_OUTCOMES: readonly ServerRowOutcome[] = [
+  "delivered",
+  "not-ready",
+  "failed",
+];
+
+/**
+ * Where a server row sits on the browser's clock.
+ *
+ * The server's own clock is never trusted. The browser stamped the send and
+ * the receipt of this label, the server's work is strictly nested inside
+ * that bracket, and the placement is derived from those two facts alone — so
+ * clock skew cannot produce a wrong picture.
+ */
+export interface ServerPlacement {
+  /** Run-relative microseconds, inside the browser's bracket for this label. */
+  startUs: number;
+  endUs: number;
+  /**
+   * The unattributed remainder of the bracket: network plus socket queue.
+   * Named rather than absorbed — a confidently-wrong merged timeline is a
+   * failure, not a win.
+   *
+   * The gap is measured; where inside the bracket it falls is not. The span
+   * is centred, which splits the gap evenly between the outbound and inbound
+   * legs because nothing here measures them apart. Read `gapUs`, not the
+   * position, for how much is unaccounted for.
+   */
+  gapUs: number;
+  /**
+   * How far the server's own numbers exceeded the browser's bracket, in
+   * microseconds. Non-zero means the two clocks disagree; the span is
+   * clamped to the bracket, because the bracket is the one measured on a
+   * single clock. Reported as a size rather than a flag — a disagreement
+   * of 3 µs and one of 3 s are not the same news.
+   */
+  overshootUs: number;
+}
+
+/** Why a server row could not be placed on the browser's timeline. */
+export type UnplacedReason =
+  /** No browser row carries this label — the request predates the run, or its row was dropped. */
+  | "no-browser-row"
+  /** The bracket never closed and never will: the server answered without bytes. */
+  | "answered-without-delivery"
+  /** The bracket is still open for another reason; the row is not evidence of a server stall. */
+  | "bracket-open";
+
+/**
+ * The server's half of a request's life, as the browser received it.
+ * Durations are the server's; the position is the browser's.
+ */
+export interface TraceServerRow extends WireLabel {
+  family: ServerRowFamily;
+  outcome: ServerRowOutcome;
+  /** Server-side arrival → start of serve. */
+  dispatchOffsetUs: number;
+  /** Start of serve → handoff to the outbound queue. */
+  durationUs: number;
+  placement: ServerPlacement | null;
+  unplacedReason: UnplacedReason | null;
+}
+
 /** A lifecycle row, fanned out at serialisation. Spans exist only at export. */
-export interface TraceRow {
+export interface TraceRow extends WireLabel {
   datasetId: string;
   entityId: string;
   imageId: string;
@@ -321,6 +417,19 @@ export interface TraceRun {
   rows: TraceRow[];
   /** The stages below the clock floor. Counted, never timed. */
   counted: CountedEvents;
+  /**
+   * The server's rows for this run's requests, placed against the browser's
+   * brackets. The browser owns the merged trace: these arrived over the
+   * existing socket and were never fetched from a server-side store, of
+   * which there is none.
+   */
+  serverRows: TraceServerRow[];
+  /**
+   * Server rows the server itself declared it dropped before sending. The
+   * coverage story has two sources of loss once the server can be one of
+   * them, and reporting only ours would overstate coverage.
+   */
+  serverRowsDropped: number;
 }
 
 export interface TraceDocument {
@@ -340,4 +449,10 @@ export interface TraceDocument {
    * unlabelled steady-state interval and its retention are #927.
    */
   rowsOutsideRun: number;
+  /**
+   * Server rows that arrived while no run was open. Counted, not kept: an
+   * unjoinable server row is not a diagnostic, but a silently uncounted one
+   * would make the document claim coverage it does not have.
+   */
+  serverRowsOutsideRun: number;
 }

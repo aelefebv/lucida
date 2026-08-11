@@ -1172,6 +1172,10 @@ export class CpuCache {
       result = await this.source.fetch(
         { datasetId: req.datasetId, imageId: req.imageId, chunkKey: req.chunkKey },
         controller.signal,
+        // The label the transport sent this chunk under — the first
+        // sender's when this fetch coalesced onto one already in flight, so
+        // every row that waited on a request points at that request.
+        label => traceRecorder.labelRow(traceRow, label),
       );
     } catch (err: unknown) {
       traceRecorder.finishRow(traceRow, RowOutcome.Retired);

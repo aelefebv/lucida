@@ -1,0 +1,26 @@
+{
+  "type": "timing_batch",
+  "batch": {
+    "dropped": 3,
+    "rid": [
+      2558,
+      2559
+    ],
+    "family": [
+      "chunk",
+      "asset"
+    ],
+    "dispatch_offset_us": [
+      142,
+      96
+    ],
+    "duration_us": [
+      8137,
+      214902
+    ],
+    "outcome": [
+      "delivered",
+      "not_ready"
+    ]
+  }
+}

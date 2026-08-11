@@ -6,6 +6,7 @@ import type { GeneratedChunkStatus } from "../generatedAvailability.ts";
 import type { ProxyKind } from "../assetCatalog.ts";
 import { parseProxyHeader, proxyResponseKey, type ProxyHeaderJs } from "./wireProtocol.ts";
 import { FetchError } from "./retry.ts";
+import type { WireLabel } from "../../trace/types.ts";
 
 export type { ProxyHeaderJs } from "./wireProtocol.ts";
 
@@ -46,8 +47,12 @@ export interface FetchProxyResult {
 }
 
 export interface ContentSource {
-  fetch(request: FetchRequest, signal: AbortSignal): Promise<FetchResult>;
-  fetchProxy(request: FetchProxyRequest, signal: AbortSignal): Promise<FetchProxyResult>;
+  fetch(request: FetchRequest, signal: AbortSignal, onLabel?: LabelSink): Promise<FetchResult>;
+  fetchProxy(
+    request: FetchProxyRequest,
+    signal: AbortSignal,
+    onLabel?: LabelSink,
+  ): Promise<FetchProxyResult>;
   /** Owns the chunk-vs-proxy dispatch so the transport stays generic. */
   handleBinary(key: string, data: ArrayBuffer): void;
 }
@@ -65,6 +70,23 @@ export const DEFAULT_TIMEOUT_MS = 10_000;
 /** Proxies can take longer to generate than chunks. */
 const DEFAULT_PROXY_TIMEOUT_MS = 60_000;
 
+/**
+ * Told the correlation label the request rode on, synchronously at fetch
+ * time. Synchronous and up front because a request that times out or fails
+ * still needs to be joinable — the label is identity, not a result.
+ */
+export type LabelSink = (label: WireLabel) => void;
+
+/** One composite key's in-flight fetch, and the label it was sent under. */
+interface PendingGroup {
+  /**
+   * The first sender's label, handed to every caller that coalesces onto
+   * this group. One wire request, one label, however many rows point at it.
+   */
+  label: WireLabel;
+  entries: PendingRequest[];
+}
+
 interface PendingRequest {
   resolve: (data: ArrayBuffer) => void;
   // Accepts `FetchError` (rejectDataset/rejectAll) and
@@ -81,7 +103,16 @@ interface PendingProxyRequest {
 }
 
 export class ProxiedContentSource implements ContentSource {
-  private pending = new Map<string, PendingRequest[]>();
+  private pending = new Map<string, PendingGroup>();
+  /**
+   * The connection's label counter, shared by chunk and asset requests.
+   * Uniqueness is across the connection, not within a family: a label that
+   * is ambiguous until you also know the message type is not a join key.
+   * Gaps in either family's sequence are harmless — nothing derives order
+   * from contiguity.
+   */
+  private nextRid = 0;
+  private connectionGeneration = 0;
   private pendingProxy = new Map<string, PendingProxyRequest>();
   private imageWireFormats = new Map<string, WireFormat>();
 
@@ -97,6 +128,16 @@ export class ProxiedContentSource implements ContentSource {
     this.sendMessage = sendMessage;
     this.timeoutMs = timeoutMs;
     this.proxyTimeoutMs = proxyTimeoutMs;
+  }
+
+  /**
+   * Start a new connection's label sequence. The counter restarts because
+   * labels are per connection; the generation is what keeps two `rid: 0`
+   * requests on either side of a reconnect from looking like one.
+   */
+  resetConnection(generation: number): void {
+    this.connectionGeneration = generation;
+    this.nextRid = 0;
   }
 
   registerImage(imageId: string, wireFormat: WireFormat): void {
@@ -206,10 +247,10 @@ export class ProxiedContentSource implements ContentSource {
   /** Treated as `abort` downstream; matches caller-driven cancellation. */
   rejectDataset(datasetId: string): void {
     const prefix = datasetId + "/";
-    for (const [key, entries] of this.pending) {
+    for (const [key, group] of this.pending) {
       if (key.startsWith(prefix)) {
         this.pending.delete(key);
-        for (const entry of entries) {
+        for (const entry of group.entries) {
           clearTimeout(entry.timeoutId);
           entry.reject(new FetchError("Dataset removed", { kind: "abort" }));
         }
@@ -220,8 +261,8 @@ export class ProxiedContentSource implements ContentSource {
 
   /** Transient so the cache's `OnceTransientRetry` covers the reconnect. */
   rejectAll(): void {
-    for (const [, entries] of this.pending) {
-      for (const entry of entries) {
+    for (const [, group] of this.pending) {
+      for (const entry of group.entries) {
         clearTimeout(entry.timeoutId);
         entry.reject(new FetchError("Bridge disconnected", { kind: "transient" }));
       }
@@ -234,7 +275,7 @@ export class ProxiedContentSource implements ContentSource {
     this.pendingProxy.clear();
   }
 
-  fetch(request: FetchRequest, signal: AbortSignal): Promise<FetchResult> {
+  fetch(request: FetchRequest, signal: AbortSignal, onLabel?: LabelSink): Promise<FetchResult> {
     const { datasetId, imageId, chunkKey } = request;
     const compositeKey = `${datasetId}/${imageId}/${chunkKey}`;
     const wireFormat = this.imageWireFormats.get(imageId);
@@ -258,10 +299,12 @@ export class ProxiedContentSource implements ContentSource {
         }, this.timeoutMs),
       };
 
-      const shouldSend = this.addPending(compositeKey, pendingEntry);
-      if (shouldSend) {
+      const { label, send } = this.addPending(compositeKey, pendingEntry);
+      onLabel?.(label);
+      if (send) {
         this.sendMessage(JSON.stringify({
           type: "chunk_request",
+          rid: label.rid,
           dataset_id: datasetId,
           image_id: imageId,
           key: chunkKey,
@@ -278,7 +321,11 @@ export class ProxiedContentSource implements ContentSource {
   }
 
   /** First 64 bytes are the header; rest is the u16 voxel payload. */
-  fetchProxy(request: FetchProxyRequest, signal: AbortSignal): Promise<FetchProxyResult> {
+  fetchProxy(
+    request: FetchProxyRequest,
+    signal: AbortSignal,
+    onLabel?: LabelSink,
+  ): Promise<FetchProxyResult> {
     const { datasetId, entityId, kind, t, c } = request;
     const responseKey = proxyResponseKey(entityId, kind, t, c);
 
@@ -312,8 +359,13 @@ export class ProxiedContentSource implements ContentSource {
         timeoutId,
       });
 
+      // Assets draw from the same counter as chunks, so the label is unique
+      // across the connection rather than within a family.
+      const label = this.mintLabel();
+      onLabel?.(label);
       this.sendMessage(JSON.stringify({
         type: "asset_request",
+        rid: label.rid,
         dataset_id: datasetId,
         entity_id: entityId,
         kind,
@@ -329,31 +381,47 @@ export class ProxiedContentSource implements ContentSource {
     });
   }
 
-  private addPending(key: string, entry: PendingRequest): boolean {
-    const entries = this.pending.get(key);
-    if (entries) {
-      entries.push(entry);
-      return false;
+  /**
+   * Attach to the in-flight fetch for `key`, or open one. Returns the label
+   * this caller's row carries: a fresh one when it is the sender, the first
+   * sender's when it is coalescing onto an existing request.
+   */
+  private addPending(key: string, entry: PendingRequest): { label: WireLabel; send: boolean } {
+    const group = this.pending.get(key);
+    if (group) {
+      group.entries.push(entry);
+      return { label: group.label, send: false };
     }
-    this.pending.set(key, [entry]);
-    return true;
+    const label = this.mintLabel();
+    this.pending.set(key, { label, entries: [entry] });
+    return { label, send: true };
   }
 
   private removePending(key: string, entry: PendingRequest): void {
-    const entries = this.pending.get(key);
-    if (!entries) return;
-    const next = entries.filter((candidate) => candidate !== entry);
+    const group = this.pending.get(key);
+    if (!group) return;
+    const next = group.entries.filter((candidate) => candidate !== entry);
     if (next.length === 0) {
       this.pending.delete(key);
     } else {
-      this.pending.set(key, next);
+      // The label stays with the group: the wire request it names is still
+      // in flight even though this caller has left.
+      this.pending.set(key, { label: group.label, entries: next });
     }
   }
 
   private takePending(key: string): PendingRequest[] {
-    const entries = this.pending.get(key) ?? [];
+    const group = this.pending.get(key);
     this.pending.delete(key);
-    return entries;
+    return group?.entries ?? [];
+  }
+
+  private mintLabel(): WireLabel {
+    // u32 on the wire; wrapping is unreachable on one connection, but a
+    // silently negative or float label would be worse than a wrap.
+    const rid = this.nextRid;
+    this.nextRid = (this.nextRid + 1) >>> 0;
+    return { rid, connectionGeneration: this.connectionGeneration };
   }
 }
 

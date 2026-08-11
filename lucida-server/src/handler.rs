@@ -14,11 +14,12 @@ use lucida_protocol::{
     DatasetOpenFailureDiagnostic, DatasetOpenFailureKind, DatasetOpenProgressDiagnostic,
     DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened, DatasetSourceCacheStats,
     DatasetSourceHealth, GeneratedAvailabilitySnapshot, GeneratedChunkStatus, SourceChunkStatus,
+    TimingRowFamily, TimingRowOutcome,
 };
 use lucida_proxy::{ProxyAsset, ProxyKind, ProxySpec};
 use lucida_store::cache::CachedStore;
 use lucida_store::import_types::ImportWarningKind;
-use lucida_store::source_limiter::ReaderId;
+use lucida_store::source_limiter::{ReaderId, RequestLabel};
 use object_store::path::Path;
 use tokio::sync::{Mutex, broadcast, mpsc};
 
@@ -33,6 +34,7 @@ use crate::open_diagnostics::{
 };
 use crate::proxy::{PROXY_TARGET_LONG_AXIS, ProxyGenerator};
 use crate::session::Session;
+use crate::timing::{FLUSH_INTERVAL, RequestProbe, TimingBuffer};
 use crate::workspace::{CommandApplyError, LiveWorkspace, WorkspaceError, WorkspaceManager};
 use crate::{BroadcastItem, ProxyConfig, UnicastRoutes};
 
@@ -107,6 +109,12 @@ async fn handle_client_inner(
     let (unicast_tx, mut unicast_rx) = mpsc::unbounded_channel::<Message>();
     unicast_routes.lock().await.insert(id, unicast_tx);
 
+    // This connection's server-side lifecycle rows. Scoped to the connection
+    // rather than the process, so a client can only ever be handed rows its
+    // own requests produced (ADR 0050) — no queue depth, no peer rates, no
+    // peer dataset identities.
+    let timings = Arc::new(TimingBuffer::new());
+
     // Presentational identity for this peer's cursor (#540), authored from
     // the connection's authenticated principal. The non-workspace `/ws`
     // path has no principal, so anonymous peers join with `None` and render
@@ -160,11 +168,27 @@ async fn handle_client_inner(
         json: peer_joined_json,
     });
 
-    // Outbound: forward broadcast + unicast messages to this client.
+    // Outbound: forward broadcast + unicast messages to this client, and
+    // flush its buffered timing rows on the ticker.
     let outbound_session = Arc::clone(&session);
+    let outbound_timings = Arc::clone(&timings);
     let outbound = tokio::spawn(async move {
+        let mut flush_tick = tokio::time::interval(FLUSH_INTERVAL);
+        // A tick missed while the socket was busy is not worth catching up
+        // on: the next tick carries whatever accumulated meanwhile.
+        flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
+                _ = flush_tick.tick() => {
+                    if !flush_timings(&outbound_timings, &mut ws_tx).await {
+                        break;
+                    }
+                }
+                _ = outbound_timings.wait_for_early_flush() => {
+                    if !flush_timings(&outbound_timings, &mut ws_tx).await {
+                        break;
+                    }
+                }
                 result = rx.recv() => {
                     match result {
                         Ok(item) => {
@@ -645,8 +669,11 @@ async fn handle_client_inner(
 
                 // Try as ChunkMessage.
                 if let Ok(chunk_msg) = serde_json::from_str::<ChunkMessage>(&json) {
+                    // Every offset this request reports is relative to here.
+                    let arrival = Instant::now();
                     match chunk_msg {
                         ChunkMessage::ChunkRequest {
+                            rid,
                             dataset_id,
                             image_id,
                             key,
@@ -684,7 +711,14 @@ async fn handle_client_inner(
                                     cache,
                                 }) => {
                                     let unicast_routes_clone = Arc::clone(&unicast_routes);
+                                    let timings_clone = Arc::clone(&timings);
                                     tokio::spawn(async move {
+                                        let probe = RequestProbe::dispatched(
+                                            rid,
+                                            TimingRowFamily::Chunk,
+                                            arrival,
+                                            timings_clone,
+                                        );
                                         serve_chunk_from_store(
                                             id,
                                             &dataset_id,
@@ -694,6 +728,7 @@ async fn handle_client_inner(
                                             level_info,
                                             &cache,
                                             &unicast_routes_clone,
+                                            probe,
                                         )
                                         .await;
                                     });
@@ -704,7 +739,14 @@ async fn handle_client_inner(
                                     generated_service,
                                 }) => {
                                     let unicast_routes_clone = Arc::clone(&unicast_routes);
+                                    let timings_clone = Arc::clone(&timings);
                                     tokio::spawn(async move {
+                                        let probe = RequestProbe::dispatched(
+                                            rid,
+                                            TimingRowFamily::Chunk,
+                                            arrival,
+                                            timings_clone,
+                                        );
                                         generated_service
                                             .enqueue_chunk_request(&image_id, level, &key)
                                             .await;
@@ -716,6 +758,7 @@ async fn handle_client_inner(
                                             &key,
                                             &derived_chunks,
                                             &unicast_routes_clone,
+                                            probe,
                                         )
                                         .await;
                                     });
@@ -724,6 +767,18 @@ async fn handle_client_inner(
                                     eprintln!(
                                         "server: no binding for dataset {dataset_id} (chunk {key} dropped)"
                                     );
+                                    // A dropped request still gets a row: the
+                                    // browser's bracket for this label will
+                                    // never close, and an unexplained open
+                                    // bracket is the reading this exists to
+                                    // prevent.
+                                    RequestProbe::dispatched(
+                                        rid,
+                                        TimingRowFamily::Chunk,
+                                        arrival,
+                                        Arc::clone(&timings),
+                                    )
+                                    .finish(TimingRowOutcome::Failed);
                                 }
                             }
                         }
@@ -736,8 +791,10 @@ async fn handle_client_inner(
 
                 // Try as AssetMessage (proxy asset request).
                 if let Ok(asset_msg) = serde_json::from_str::<AssetMessage>(&json) {
+                    let arrival = Instant::now();
                     match asset_msg {
                         AssetMessage::AssetRequest {
+                            rid,
                             dataset_id,
                             entity_id,
                             kind,
@@ -754,10 +811,24 @@ async fn handle_client_inner(
                                 eprintln!(
                                     "server: no binding for dataset {dataset_id} (asset {entity_id:?}/{kind:?} dropped)"
                                 );
+                                RequestProbe::dispatched(
+                                    rid,
+                                    TimingRowFamily::Asset,
+                                    arrival,
+                                    Arc::clone(&timings),
+                                )
+                                .finish(TimingRowOutcome::Failed);
                                 continue;
                             };
                             let unicast_routes_clone = Arc::clone(&unicast_routes);
+                            let timings_clone = Arc::clone(&timings);
                             tokio::spawn(async move {
+                                let probe = RequestProbe::dispatched(
+                                    rid,
+                                    TimingRowFamily::Asset,
+                                    arrival,
+                                    timings_clone,
+                                );
                                 serve_asset_request(
                                     id,
                                     entity_id,
@@ -766,6 +837,7 @@ async fn handle_client_inner(
                                     c,
                                     &generator,
                                     &unicast_routes_clone,
+                                    probe,
                                 )
                                 .await;
                             });
@@ -1258,6 +1330,25 @@ async fn handle_open_remote_dataset(
     }
 }
 
+/// Send this connection's buffered timing rows, if any. Returns `false` when
+/// the socket is gone, which ends the outbound loop exactly as a failed
+/// broadcast send does.
+///
+/// Rows buffered for a connection that dies are discarded, never replayed:
+/// replay would need retention across connections — the thing batching
+/// deletes — and re-identification of a returning client. The browser knows
+/// it reconnected, so the browser declares the gap.
+async fn flush_timings<S>(buffer: &TimingBuffer, ws_tx: &mut S) -> bool
+where
+    S: SinkExt<Message> + Unpin,
+{
+    let Some(batch) = buffer.take_batch() else {
+        return true;
+    };
+    let json = serde_json::to_string(&ServerMessage::TimingBatch { batch }).unwrap();
+    ws_tx.send(Message::Text(json.into())).await.is_ok()
+}
+
 enum ChunkDispatch {
     Source {
         resolved: Option<String>,
@@ -1320,6 +1411,7 @@ async fn serve_chunk_from_store(
     level_info: Option<crate::binding::LevelInfo>,
     cache: &Arc<CachedStore>,
     unicast_routes: &UnicastRoutes,
+    probe: RequestProbe,
 ) {
     let object_path = match object_path {
         Some(p) => p,
@@ -1327,6 +1419,7 @@ async fn serve_chunk_from_store(
             eprintln!(
                 "server: unknown image_id {image_id} for dataset {dataset_id}, key {chunk_key}"
             );
+            probe.finish(TimingRowOutcome::Failed);
             return;
         }
     };
@@ -1349,7 +1442,13 @@ async fn serve_chunk_from_store(
     let obj_path = Path::from(object_path);
     // Charged to the requesting client, so one client's collection-sized
     // backlog cannot delay another client's first chunk (#901).
-    let mut bytes: Vec<u8> = match cache.get_bytes(&obj_path, ReaderId(client_id)).await {
+    // The label crosses into the store with the read, so a wait behind the
+    // source-read cap is attributable to a request rather than only to a
+    // client (ADR 0048).
+    let mut bytes: Vec<u8> = match cache
+        .get_bytes(&obj_path, ReaderId(client_id), RequestLabel(probe.rid()))
+        .await
+    {
         Ok(storage_bytes) => {
             // Decode storage compression → raw bytes (WireFormat::Raw for phase 1).
             // Shared with the proxy generator via [`crate::decode::decode_storage_bytes`].
@@ -1366,6 +1465,7 @@ async fn serve_chunk_from_store(
                 }
                 Err(e) => {
                     eprintln!("server: decode failed for {chunk_key}: {e}");
+                    probe.finish(TimingRowOutcome::Failed);
                     return;
                 }
             }
@@ -1390,6 +1490,7 @@ async fn serve_chunk_from_store(
                 unicast_routes,
             )
             .await;
+            probe.finish(TimingRowOutcome::Failed);
             return;
         }
     };
@@ -1415,8 +1516,13 @@ async fn serve_chunk_from_store(
     if let Some(sender) = senders.get(&client_id) {
         let _ = sender.send(Message::Binary(buf.into()));
     }
+    // Handoff is terminal: the socket write happens in another task behind
+    // an unbounded queue and is not observable from here.
+    probe.finish(TimingRowOutcome::Delivered);
 }
 
+// Internal helper threading per-request state from the dispatch site.
+#[allow(clippy::too_many_arguments)]
 async fn serve_generated_chunk_request(
     client_id: ClientId,
     dataset_id: &DatasetId,
@@ -1425,6 +1531,7 @@ async fn serve_generated_chunk_request(
     chunk_key: &str,
     derived_chunks: &Arc<DerivedChunkCache>,
     unicast_routes: &UnicastRoutes,
+    probe: RequestProbe,
 ) {
     match derived_chunks.lookup(image_id, level, chunk_key) {
         DerivedChunkLookup::Ready(bytes) => {
@@ -1433,6 +1540,7 @@ async fn serve_generated_chunk_request(
             if let Some(sender) = senders.get(&client_id) {
                 let _ = sender.send(Message::Binary(buf.into()));
             }
+            probe.finish(TimingRowOutcome::Delivered);
         }
         DerivedChunkLookup::Status { status, message } => {
             send_generated_chunk_status(
@@ -1445,6 +1553,11 @@ async fn serve_generated_chunk_request(
                 unicast_routes,
             )
             .await;
+            // The row ends honestly and no chunk ever arrives, so this
+            // label's browser row terminates without a delivery. `NotReady`
+            // is what stops a reader charging that open bracket to the
+            // server as a stall.
+            probe.finish(TimingRowOutcome::NotReady);
         }
     }
 }
@@ -1541,6 +1654,8 @@ fn encode_chunk_frame(
 /// variant names of [`ProxyKind`]). The `proxy/` prefix lets the client
 /// distinguish proxy frames from chunk frames, which use
 /// `{dataset_id}/{image_id}/{chunk_key}`.
+// Internal helper threading per-request state from the dispatch site.
+#[allow(clippy::too_many_arguments)]
 async fn serve_asset_request(
     client_id: ClientId,
     entity_id: lucida_content::EntityId,
@@ -1549,6 +1664,7 @@ async fn serve_asset_request(
     c: u32,
     generator: &Arc<ProxyGenerator>,
     unicast_routes: &UnicastRoutes,
+    probe: RequestProbe,
 ) {
     let spec = ProxySpec {
         entity_id: entity_id.clone(),
@@ -1570,6 +1686,7 @@ async fn serve_asset_request(
         Ok(a) => a,
         Err(e) => {
             eprintln!("server: proxy generation failed for {entity_id:?}/{kind:?}/T{t}_C{c}: {e}");
+            probe.finish(TimingRowOutcome::Failed);
             return;
         }
     };
@@ -1578,6 +1695,7 @@ async fn serve_asset_request(
         Ok(b) => b,
         Err(e) => {
             eprintln!("server: proxy frame encode failed: {e}");
+            probe.finish(TimingRowOutcome::Failed);
             return;
         }
     };
@@ -1586,6 +1704,7 @@ async fn serve_asset_request(
     if let Some(sender) = senders.get(&client_id) {
         let _ = sender.send(Message::Binary(buf.into()));
     }
+    probe.finish(TimingRowOutcome::Delivered);
 }
 
 /// Build the binary proxy response frame. See [`serve_asset_request`] for
@@ -1751,6 +1870,53 @@ async fn send_open_failed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A probe wired to a buffer the test can read back, so what a serve path
+    /// *declares* about its own outcome is asserted rather than assumed.
+    fn test_probe(rid: u32, buffer: &Arc<TimingBuffer>) -> RequestProbe {
+        RequestProbe::dispatched(
+            rid,
+            TimingRowFamily::Chunk,
+            Instant::now(),
+            Arc::clone(buffer),
+        )
+    }
+
+    /// The outcome of the one row a serve filed.
+    fn sole_outcome(buffer: &TimingBuffer) -> TimingRowOutcome {
+        let batch = buffer.take_batch().expect("the serve filed a row");
+        assert_eq!(batch.len(), 1, "one served request is one row");
+        batch.outcome[0]
+    }
+
+    #[tokio::test]
+    async fn a_flush_sends_one_columnar_message_and_a_quiet_tick_sends_nothing() {
+        let buffer = TimingBuffer::new();
+        let mut socket: Vec<Message> = Vec::new();
+
+        assert!(flush_timings(&buffer, &mut socket).await);
+        assert!(socket.is_empty(), "an empty tick puts nothing on the wire");
+
+        buffer.record(crate::timing::ServedRow {
+            rid: 41,
+            family: TimingRowFamily::Chunk,
+            dispatch_offset_us: 5,
+            duration_us: 900,
+            outcome: TimingRowOutcome::Delivered,
+        });
+
+        assert!(flush_timings(&buffer, &mut socket).await);
+        assert_eq!(socket.len(), 1, "a flush window is one message");
+        let Message::Text(json) = &socket[0] else {
+            panic!("timing batches travel as text");
+        };
+        let parsed: ServerMessage = serde_json::from_str(json).unwrap();
+        let ServerMessage::TimingBatch { batch } = parsed else {
+            panic!("expected a timing batch");
+        };
+        assert_eq!(batch.rid, vec![41]);
+        assert_eq!(batch.duration_us, vec![900]);
+    }
 
     /// Health is a worst-of fold, and no component may be lost to argument
     /// order. The earlier form only looked for `Degraded` on the right, so
@@ -2009,6 +2175,7 @@ mod tests {
             },
         };
 
+        let timings = Arc::new(TimingBuffer::new());
         serve_chunk_from_store(
             5,
             &DatasetId("ds1".into()),
@@ -2018,8 +2185,15 @@ mod tests {
             Some(level_info),
             &cache,
             &routes,
+            test_probe(1, &timings),
         )
         .await;
+
+        assert_eq!(
+            sole_outcome(&timings),
+            TimingRowOutcome::Delivered,
+            "a zero-filled sparse chunk is a delivery, not a failure"
+        );
 
         let msg = rx.recv().await.expect("message");
         let Message::Binary(buf) = msg else {
@@ -2146,6 +2320,7 @@ mod tests {
         let store = Arc::new(FailingStore(failure)) as Arc<dyn object_store::ObjectStore>;
         let cache = Arc::new(CachedStore::new(store, 1024));
 
+        let timings = Arc::new(TimingBuffer::new());
         serve_chunk_from_store(
             7,
             &DatasetId("ds1".into()),
@@ -2155,8 +2330,11 @@ mod tests {
             Some(tiny_level_info()),
             &cache,
             &routes,
+            test_probe(1, &timings),
         )
         .await;
+
+        assert_eq!(sole_outcome(&timings), TimingRowOutcome::Failed);
 
         let msg = rx.recv().await.expect("status frame");
         let Message::Text(json) = msg else {
@@ -2184,6 +2362,7 @@ mod tests {
             1024,
         ));
 
+        let timings = Arc::new(TimingBuffer::new());
         serve_chunk_from_store(
             5,
             &DatasetId("ds1".into()),
@@ -2193,8 +2372,15 @@ mod tests {
             Some(tiny_level_info()),
             &cache,
             &routes,
+            test_probe(1, &timings),
         )
         .await;
+
+        assert_eq!(
+            sole_outcome(&timings),
+            TimingRowOutcome::Delivered,
+            "the served bytes are handed off"
+        );
 
         let msg = rx.recv().await.expect("message");
         let Message::Binary(buf) = msg else {
@@ -2249,6 +2435,7 @@ mod tests {
             vec![9, 8, 7, 6],
         );
 
+        let timings = Arc::new(TimingBuffer::new());
         serve_generated_chunk_request(
             5,
             &DatasetId("ds1".into()),
@@ -2257,8 +2444,15 @@ mod tests {
             "2/0/0/0/0/0",
             &cache,
             &routes,
+            test_probe(1, &timings),
         )
         .await;
+
+        assert_eq!(
+            sole_outcome(&timings),
+            TimingRowOutcome::Delivered,
+            "a ready generated chunk is delivered"
+        );
 
         let msg = rx.recv().await.expect("message");
         let Message::Binary(buf) = msg else {
@@ -2271,6 +2465,38 @@ mod tests {
         let key = std::str::from_utf8(&buf[6..6 + key_len]).unwrap();
         assert_eq!(key, "ds1/img1/2/0/0/0/0/0");
         assert_eq!(&buf[6 + key_len..], &[9, 8, 7, 6]);
+    }
+
+    /// The generated-chunk asymmetry: the server answers with a status, no
+    /// binary frame ever arrives, and the requester's bracket stays open. The
+    /// row has to say so — read as an ordinary unfinished serve it would look
+    /// like the server stalled, which is the one mis-attribution a tool whose
+    /// job is attributing stalls to a side cannot afford.
+    #[tokio::test]
+    async fn a_not_ready_generated_answer_is_recorded_as_not_ready() {
+        let routes: UnicastRoutes = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        routes.lock().await.insert(5, tx);
+        let cache = Arc::new(DerivedChunkCache::default());
+
+        let timings = Arc::new(TimingBuffer::new());
+        serve_generated_chunk_request(
+            5,
+            &DatasetId("ds1".into()),
+            &ImageId("img1".into()),
+            2,
+            "2/0/0/0/0/0",
+            &cache,
+            &routes,
+            test_probe(1, &timings),
+        )
+        .await;
+
+        assert_eq!(sole_outcome(&timings), TimingRowOutcome::NotReady);
+        assert!(
+            matches!(rx.recv().await, Some(Message::Text(_))),
+            "a status frame, not bytes"
+        );
     }
 
     #[tokio::test]
@@ -2423,6 +2649,7 @@ mod tests {
                     Some(tiny_level_info()),
                     &cache,
                     &routes,
+                    test_probe(1, &Arc::new(TimingBuffer::new())),
                 )
                 .await;
             });
@@ -2447,6 +2674,7 @@ mod tests {
                     Some(tiny_level_info()),
                     &cache,
                     &routes,
+                    test_probe(2, &Arc::new(TimingBuffer::new())),
                 )
                 .await;
             }
