@@ -15,16 +15,23 @@
 
 import { buildIdentity } from "./buildInfo.ts";
 import type { QuiescenceState } from "./quiescence.ts";
-import { tableRowSinkFactory, type RowSink, type RowSinkFactory } from "./sink.ts";
+import { tableSinkFactory, type TraceSink, type TraceSinkFactory } from "./sink.ts";
+import { TickScratch } from "./tickRing.ts";
 import {
   clampStamp,
+  COUNTED_PHASES,
   TRACE_SCHEMA_VERSION,
+  type ChunkEventSource,
   type ChunkRowSource,
+  type CountedPhase,
+  type CountedPhaseIndexValue,
   type EndReason,
   type CacheWarmth,
   type GpuIdentity,
   type Outstanding,
   type Phase,
+  type PointEventIndex,
+  type PointEventReason,
   type RowOutcomeValue,
   type RunCause,
   type RunConditions,
@@ -39,6 +46,13 @@ import {
  * what it did not measure.
  */
 export const INSTRUMENTED_PHASES: readonly Phase[] = ["wire"];
+
+/**
+ * Phases that never carry a timing because they sit below the platform's
+ * clock floor. They surface as per-tick counts instead, so a reader sees they
+ * happened without being shown quantisation noise as if it were data.
+ */
+export const COUNTED_PHASE_NAMES: readonly CountedPhase[] = COUNTED_PHASES;
 
 /**
  * How long `quiescent` must hold before a run closes on its own. Clears the
@@ -70,7 +84,7 @@ export interface TraceEnvironment {
 }
 
 export interface TraceRecorderOptions {
-  sinkFactory?: RowSinkFactory;
+  sinkFactory?: TraceSinkFactory;
   /** Monotonic milliseconds. Injectable so a test can drive run durations. */
   now?: () => number;
   /** Wall-clock epoch milliseconds, so an archived run has a date. */
@@ -90,20 +104,20 @@ interface OpenRun {
   cacheWarmth: CacheWarmth;
   startedAtMs: number;
   startedAtEpochMs: number;
-  sink: RowSink;
+  sink: TraceSink;
   generation: number;
 }
 
 interface ClosedRun {
   header: RunHeader;
-  sink: RowSink;
+  sink: TraceSink;
 }
 
 /** Row indices are packed with the run generation so a stale handle is inert. */
 const GENERATION_STRIDE = 0x1000000;
 
 export class TraceRecorder {
-  private readonly sinkFactory: RowSinkFactory;
+  private readonly sinkFactory: TraceSinkFactory;
   private readonly now: () => number;
   private readonly epochNow: () => number;
   private readonly quiescenceHoldMs: number;
@@ -118,12 +132,22 @@ export class TraceRecorder {
   private runSeq = 0;
   private rowsOutsideRun = 0;
 
+  /**
+   * One scratch sample and one counter vector for the whole process, refilled
+   * per tick. A fresh object per tick would allocate on the pipeline's
+   * hottest path, and an allocating recorder produces GC pauses that appear
+   * as stalls in its own trace.
+   */
+  private readonly tickScratch = new TickScratch();
+  private readonly countedPhases = new Uint32Array(COUNTED_PHASES.length);
+  private tickInProgress = false;
+
   private holdTimer: ReturnType<typeof setTimeout> | null = null;
   private timeoutTimer: ReturnType<typeof setTimeout> | null = null;
   private lastQuiescence: QuiescenceState | null = null;
 
   constructor(options: TraceRecorderOptions = {}) {
-    this.sinkFactory = options.sinkFactory ?? tableRowSinkFactory;
+    this.sinkFactory = options.sinkFactory ?? tableSinkFactory;
     this.now = options.now ?? (() => performance.now());
     this.epochNow = options.epochNow ?? (() => Date.now());
     this.quiescenceHoldMs = options.quiescenceHoldMs ?? DEFAULT_QUIESCENCE_HOLD_MS;
@@ -182,6 +206,10 @@ export class TraceRecorder {
       this.timeoutTimer = null;
     }
     this.open = null;
+    // A tick half-filled when the run closed belongs to no run, and the
+    // counts behind it belong to no interval.
+    this.tickInProgress = false;
+    this.countedPhases.fill(0);
 
     this.closed.push({
       sink: run.sink,
@@ -242,17 +270,70 @@ export class TraceRecorder {
   stamp(handle: number, boundary: number): void {
     const run = this.resolve(handle);
     if (!run) return;
-    run.sink.stamp(
-      handle % GENERATION_STRIDE,
-      boundary,
-      clampStamp(Math.round((this.now() - run.startedAtMs) * 1000)),
-    );
+    run.sink.stamp(handle % GENERATION_STRIDE, boundary, this.offsetUs(run.startedAtMs));
   }
 
   finishRow(handle: number, outcome: RowOutcomeValue): void {
     const run = this.resolve(handle);
     if (!run) return;
     run.sink.setOutcome(handle % GENERATION_STRIDE, outcome);
+  }
+
+  /**
+   * Start a per-tick aggregate sample for one dataset, returning the scratch
+   * to fill in place, or null when no run is open. Every caller must reach
+   * {@link commitTick} — a sample abandoned half-filled would be published on
+   * the next tick with a mixture of two ticks' counts.
+   *
+   * One sample per dataset planned, not one per tick: lane counts and the
+   * per-level breakdown both vary per dataset, and summing them across a
+   * multi-dataset workspace would produce a total that describes nothing.
+   */
+  beginTick(datasetId: string): TickScratch | null {
+    if (!this.open) return null;
+    this.tickScratch.reset(datasetId);
+    this.tickInProgress = true;
+    return this.tickScratch;
+  }
+
+  /**
+   * Publish the sample {@link beginTick} handed out. The counted-not-timed
+   * phase tallies ride along and reset here, so each sample carries the
+   * counts since the previous published sample rather than since run start.
+   */
+  commitTick(): void {
+    if (!this.tickInProgress) return;
+    this.tickInProgress = false;
+    const run = this.open;
+    if (!run) return;
+    run.sink.appendTick(this.offsetUs(run.startedAtMs), this.tickScratch, this.countedPhases);
+    this.countedPhases.fill(0);
+  }
+
+  /**
+   * Count one occurrence of a phase too short to time. Silent outside a run,
+   * like every other tier: a count with no interval to belong to cannot be
+   * read as a rate.
+   */
+  countPhase(phase: CountedPhaseIndexValue, times = 1): void {
+    if (!this.open) return;
+    this.countedPhases[phase] += times;
+  }
+
+  /**
+   * Record one point event. `chunk` is whatever the emit site already holds —
+   * a planned request or a resident cache entry — or null when the event is
+   * not about a single chunk.
+   */
+  recordPointEvent(
+    kind: PointEventIndex,
+    reason: PointEventReason,
+    chunk: ChunkEventSource | null = null,
+    tier: 0 | 1 = 0,
+  ): void {
+    const run = this.open;
+    if (!run) return;
+    run.sink.appendEvent(this.offsetUs(run.startedAtMs), kind, reason, chunk, tier);
   }
 
   /**
@@ -266,7 +347,15 @@ export class TraceRecorder {
       schemaVersion: TRACE_SCHEMA_VERSION,
       exportedAtEpochMs: this.epochNow(),
       instrumentedPhases: [...INSTRUMENTED_PHASES],
-      runs: this.closed.map<TraceRun>(run => ({ header: run.header, rows: run.sink.serialise() })),
+      countedPhases: [...COUNTED_PHASE_NAMES],
+      runs: this.closed.map<TraceRun>(run => ({
+        header: run.header,
+        rows: run.sink.serialise(),
+        ticks: run.sink.serialiseTicks(),
+        ticksDropped: run.sink.ticksDropped,
+        events: run.sink.serialiseEvents(),
+        eventsDropped: run.sink.eventsDropped,
+      })),
       rowsOutsideRun: this.rowsOutsideRun,
     };
   }
@@ -281,6 +370,11 @@ export class TraceRecorder {
     this.closed = [];
     this.rowsOutsideRun = 0;
     this.lastQuiescence = null;
+  }
+
+  /** Microseconds since the run started, clamped into a uint32 slot. */
+  private offsetUs(startedAtMs: number): number {
+    return clampStamp(Math.round((this.now() - startedAtMs) * 1000));
   }
 
   private resolve(handle: number): OpenRun | null {

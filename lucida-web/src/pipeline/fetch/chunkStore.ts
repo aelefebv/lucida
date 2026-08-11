@@ -39,7 +39,12 @@ export interface ChunkStoreOptions {
   budgetBytes: number;
   /** Main store reports `entry.tier`; overview store reports `"overview"`. */
   evictionTier: (entry: CacheEntry) => EvictionRecordTier;
-  recordEviction: (tier: EvictionRecordTier) => void;
+  /**
+   * The evicted entry rides along so a caller can name the chunk that left,
+   * not just how many did. It is the live entry, already unlinked from the
+   * store; treat it as read-only.
+   */
+  recordEviction: (tier: EvictionRecordTier, entry: CacheEntry) => void;
   /** Eviction-burst log is main-cache only; overview leaves this unset. */
   onEvictionBurst?: (info: EvictionBurstInfo) => void;
 }
@@ -52,7 +57,14 @@ export class ChunkStore {
   private budgetBytesCounter: number;
   private readonly policy: EvictionPolicy<CacheEntry>;
   private readonly evictionTier: (entry: CacheEntry) => EvictionRecordTier;
-  private readonly recordEviction: (tier: EvictionRecordTier) => void;
+  private readonly recordEviction: (tier: EvictionRecordTier, entry: CacheEntry) => void;
+  /**
+   * Resident chunks per pyramid level, maintained incrementally because the
+   * trace samples it every tick. Counting it by walking the store would be
+   * O(resident chunks) per tick — tens of thousands on a wide collection —
+   * which is exactly the cost that made the old debug stats opt-in.
+   */
+  private readonly levelCounts: number[] = [];
   private readonly onEvictionBurst?: (info: EvictionBurstInfo) => void;
   /** Exposed so tests can assert against the same constant. */
   static readonly evictionBurstThreshold = EVICTION_BURST_THRESHOLD;
@@ -87,8 +99,22 @@ export class ChunkStore {
       entityMap = new Map();
       this.store.set(entry.entityId, entityMap);
     }
+    const replaced = entityMap.get(entry.chunkKey);
     entityMap.set(entry.chunkKey, entry);
     this.bytesCounter += entry.sizeBytes;
+    if (replaced) this.countLevel(replaced.level, -1);
+    this.countLevel(entry.level, 1);
+  }
+
+  /** Resident chunks per level, indexed by level. Sparse levels read as zero. */
+  levelResidency(): readonly number[] {
+    return this.levelCounts;
+  }
+
+  private countLevel(level: number, delta: number): void {
+    if (!Number.isInteger(level) || level < 0) return;
+    while (this.levelCounts.length <= level) this.levelCounts.push(0);
+    this.levelCounts[level] = Math.max(0, this.levelCounts[level] + delta);
   }
 
   private evictIfNeeded(incomingBytes: number): void {
@@ -120,7 +146,8 @@ export class ChunkStore {
     entityMap.delete(chunkKey);
     if (entityMap.size === 0) this.store.delete(entityId);
     this.bytesCounter -= entry.sizeBytes;
-    this.recordEviction(this.evictionTier(entry));
+    this.countLevel(entry.level, -1);
+    this.recordEviction(this.evictionTier(entry), entry);
     return true;
   }
 
@@ -131,7 +158,8 @@ export class ChunkStore {
     entityMap.delete(entry.chunkKey);
     if (entityMap.size === 0) this.store.delete(entry.entityId);
     this.bytesCounter -= entry.sizeBytes;
-    this.recordEviction(this.evictionTier(entry));
+    this.countLevel(entry.level, -1);
+    this.recordEviction(this.evictionTier(entry), entry);
   }
 
   /**
@@ -198,6 +226,7 @@ export class ChunkStore {
       if (!entityMap) continue;
       for (const entry of entityMap.values()) {
         this.bytesCounter -= entry.sizeBytes;
+        this.countLevel(entry.level, -1);
       }
       this.store.delete(entityId);
     }
@@ -206,6 +235,7 @@ export class ChunkStore {
   reset(): void {
     this.store.clear();
     this.bytesCounter = 0;
+    this.levelCounts.length = 0;
   }
 
   private collectEntries(): CacheEntry[] {

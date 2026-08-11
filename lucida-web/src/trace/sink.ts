@@ -8,19 +8,46 @@
  * real sink against no-op sink, same call sites — rather than a claim. A
  * build-time flag that dead-code-eliminates the recorder was rejected as
  * the opt-out wearing a lab coat.
+ *
+ * One sink holds all three browser tiers a run records: the complete
+ * per-chunk table, the per-tick aggregate ring, and the point-event ring.
  */
 
+import { EventRing } from "./eventRing.ts";
 import { RowTable } from "./rowTable.ts";
-import type { ChunkRowSource, RowOutcomeValue, TraceRow } from "./types.ts";
+import { TickRing, type TickScratch } from "./tickRing.ts";
+import type {
+  ChunkEventSource,
+  ChunkRowSource,
+  PointEventIndex,
+  PointEventReason,
+  RowOutcomeValue,
+  TracePointEvent,
+  TraceRow,
+  TraceTick,
+} from "./types.ts";
 
-export interface RowSink {
+export interface TraceSink {
   /** Returns the row's index within this sink. */
   append(src: ChunkRowSource, tier: 0 | 1): number;
   stamp(index: number, boundary: number, offsetUs: number): void;
   setOutcome(index: number, outcome: RowOutcomeValue): void;
   serialise(): TraceRow[];
+  /** `counted` is the counted-not-timed phase tally since the previous tick. */
+  appendTick(atUs: number, scratch: TickScratch, counted: Uint32Array): void;
+  serialiseTicks(): TraceTick[];
+  appendEvent(
+    atUs: number,
+    kind: PointEventIndex,
+    reason: PointEventReason,
+    chunk: ChunkEventSource | null,
+    tier: 0 | 1,
+  ): void;
+  serialiseEvents(): TracePointEvent[];
   readonly length: number;
   readonly byteLength: number;
+  readonly ticksDropped: number;
+  readonly eventsDropped: number;
 }
 
 /**
@@ -28,7 +55,7 @@ export interface RowSink {
  * increasing indices so the emit path takes exactly the branches it takes
  * with the real sink.
  */
-export class NoopRowSink implements RowSink {
+export class NoopTraceSink implements TraceSink {
   private rows = 0;
 
   append(): number {
@@ -43,6 +70,18 @@ export class NoopRowSink implements RowSink {
     return [];
   }
 
+  appendTick(): void {}
+
+  serialiseTicks(): TraceTick[] {
+    return [];
+  }
+
+  appendEvent(): void {}
+
+  serialiseEvents(): TracePointEvent[] {
+    return [];
+  }
+
   get length(): number {
     return this.rows;
   }
@@ -50,10 +89,79 @@ export class NoopRowSink implements RowSink {
   get byteLength(): number {
     return 0;
   }
+
+  get ticksDropped(): number {
+    return 0;
+  }
+
+  get eventsDropped(): number {
+    return 0;
+  }
 }
 
-export type RowSinkFactory = () => RowSink;
+/** The real sink: the per-chunk table plus the two steady-state rings. */
+export class TableTraceSink implements TraceSink {
+  private readonly rows = new RowTable();
+  private readonly ticks = new TickRing();
+  private readonly events = new EventRing();
 
-/** The real sink: one fixed-width row per chunk in a growable columnar table. */
-export const tableRowSinkFactory: RowSinkFactory = () => new RowTable();
-export const noopRowSinkFactory: RowSinkFactory = () => new NoopRowSink();
+  append(src: ChunkRowSource, tier: 0 | 1): number {
+    return this.rows.append(src, tier);
+  }
+
+  stamp(index: number, boundary: number, offsetUs: number): void {
+    this.rows.stamp(index, boundary, offsetUs);
+  }
+
+  setOutcome(index: number, outcome: RowOutcomeValue): void {
+    this.rows.setOutcome(index, outcome);
+  }
+
+  serialise(): TraceRow[] {
+    return this.rows.serialise();
+  }
+
+  appendTick(atUs: number, scratch: TickScratch, counted: Uint32Array): void {
+    this.ticks.append(atUs, scratch, counted);
+  }
+
+  serialiseTicks(): TraceTick[] {
+    return this.ticks.serialise();
+  }
+
+  appendEvent(
+    atUs: number,
+    kind: PointEventIndex,
+    reason: PointEventReason,
+    chunk: ChunkEventSource | null,
+    tier: 0 | 1,
+  ): void {
+    this.events.append(atUs, kind, reason, chunk, tier);
+  }
+
+  serialiseEvents(): TracePointEvent[] {
+    return this.events.serialise();
+  }
+
+  get length(): number {
+    return this.rows.length;
+  }
+
+  /** Every tier a run holds, because the resident cap in ADR 0049 is on the run. */
+  get byteLength(): number {
+    return this.rows.byteLength + this.ticks.byteLength + this.events.byteLength;
+  }
+
+  get ticksDropped(): number {
+    return this.ticks.dropped;
+  }
+
+  get eventsDropped(): number {
+    return this.events.dropped;
+  }
+}
+
+export type TraceSinkFactory = () => TraceSink;
+
+export const tableSinkFactory: TraceSinkFactory = () => new TableTraceSink();
+export const noopSinkFactory: TraceSinkFactory = () => new NoopTraceSink();

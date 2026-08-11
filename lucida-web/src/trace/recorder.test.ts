@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 
 import { TraceRecorder } from "./recorder.ts";
-import { noopRowSinkFactory } from "./sink.ts";
+import { noopSinkFactory } from "./sink.ts";
 import { createQuiescenceState, evaluateQuiescence, type QuiescenceState } from "./quiescence.ts";
 import { Boundary, RowOutcome, TRACE_SCHEMA_VERSION } from "./types.ts";
 
@@ -228,7 +228,7 @@ describe("TraceRecorder rows", () => {
 
 describe("TraceRecorder sink injection", () => {
   it("keeps no rows with a no-op sink while the call sites stay live", () => {
-    const { recorder } = makeRecorder({ sinkFactory: noopRowSinkFactory });
+    const { recorder } = makeRecorder({ sinkFactory: noopSinkFactory });
     recorder.openRun(OPEN_CAUSE);
     const row = recorder.beginChunkRow(CHUNK, 0);
     recorder.stamp(row, Boundary.WireStart);

@@ -49,6 +49,8 @@ import { WorkerResourceTracker } from "./delivery/resources.ts";
 import { UploadTelemetry } from "./telemetry/upload.ts";
 import { ColdStateTelemetry } from "./telemetry/coldState.ts";
 import { orchTelemetryActive } from "./telemetry/active.ts";
+import { traceRecorder } from "../../trace/recorder.ts";
+import { CountedPhaseIndex } from "../../trace/types.ts";
 
 export class Uploader {
   private readonly workerFeedback = new WorkerFeedback();
@@ -393,6 +395,7 @@ export class Uploader {
       }
       this.workerResources.recordMember(label.memberId);
       this.currentUploadStats.uploadedChunks++;
+      traceRecorder.countPhase(CountedPhaseIndex.WorkerDispatch);
       return label.bytes;
     }
 
@@ -407,6 +410,10 @@ export class Uploader {
     );
     this.workerResources.recordMember(memberId);
     this.currentUploadStats.uploadedChunks++;
+    // Worker dispatch: chunk bytes handed to the GPU worker. Counted, not
+    // timed — the post itself is below the platform's clock floor, and what
+    // happens after it belongs to the `upload` phase.
+    traceRecorder.countPhase(CountedPhaseIndex.WorkerDispatch);
     return delivery.data.byteLength;
   }
 

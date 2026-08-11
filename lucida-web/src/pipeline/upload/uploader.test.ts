@@ -176,6 +176,7 @@ function makeCpuCache(deliveries: ReadyDelivery[] = []): CpuCache {
     markChunkMissing: vi.fn(),
     markProxyMissing: vi.fn(),
     snapshot: vi.fn(() => ({ cached: new Map(), inFlight: new Map() })),
+    levelResidency: vi.fn(() => ({ cached: [], inFlight: [] })),
     getCachedChunk: vi.fn(() => null),
     getCachedProxy: vi.fn(() => null),
     telemetry: vi.fn(),

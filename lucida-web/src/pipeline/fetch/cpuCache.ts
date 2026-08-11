@@ -36,7 +36,8 @@ import {
 } from "./proxyStore.ts";
 import { Scheduler, type SchedulableRequest } from "./scheduler.ts";
 import { traceRecorder } from "../../trace/recorder.ts";
-import { Boundary, RowOutcome } from "../../trace/types.ts";
+import { Boundary, CountedPhaseIndex, PointEvent, RowOutcome } from "../../trace/types.ts";
+import { parseChunkKey } from "../../renderer/chunkKeys.ts";
 import type { CacheQuiescenceInputs } from "../../trace/quiescence.ts";
 import {
   classifyFetchError,
@@ -313,7 +314,10 @@ export class CpuCache {
       policy: mainPolicy,
       budgetBytes: this.config.mainBudgetBytes,
       evictionTier: (entry) => entry.tier,
-      recordEviction: (tier) => this.counters.recordEviction(tier),
+      recordEviction: (tier, entry) => {
+        this.counters.recordEviction(tier);
+        traceRecorder.recordPointEvent(PointEvent.Eviction, "evicted", entry, 0);
+      },
       onEvictionBurst: ({ removed, bytesFreed, bytesNeeded }) => {
         debugLog("cache", "cache.eviction_burst", {
           cache: "main",
@@ -328,7 +332,10 @@ export class CpuCache {
       policy: new LRUPolicy<CacheEntry>(),
       budgetBytes: this.config.overviewBudgetBytes,
       evictionTier: () => "overview",
-      recordEviction: (tier) => this.counters.recordEviction(tier),
+      recordEviction: (tier, entry) => {
+        this.counters.recordEviction(tier);
+        traceRecorder.recordPointEvent(PointEvent.Eviction, "evicted", entry, 1);
+      },
     });
     this.proxyStore = new ProxyStore({
       policy: new LRUPolicy<ProxyEvictable>(),
@@ -475,6 +482,9 @@ export class CpuCache {
       }
 
       if (this.chunkScheduler.hasInFlight(key)) {
+        // Coalesce attach: a second demand for a chunk already being fetched.
+        // Too short to time, so the trace counts it (ADR 0047).
+        traceRecorder.countPhase(CountedPhaseIndex.CoalesceAttach);
         this.rememberInFlightChunk(key, req, { ...this.currentEpochs });
         continue;
       }
@@ -678,6 +688,34 @@ export class CpuCache {
     const wasNew = this.rejectionTracker.mark(entityId, chunkKey);
     if (!wasNew) return;
 
+    // The renderer's own reason for a skip: the atlas was full and the
+    // incoming chunk was farther out than everything already in it. The
+    // resident copy carries the image id when there is one; a chunk rejected
+    // before it ever arrived is still worth a point event, so the coordinates
+    // come off the key instead.
+    const resident =
+      this.chunkStore.get(entityId, chunkKey) ?? this.overviewStore.get(entityId, chunkKey);
+    const coords = resident ? null : parseChunkKey(chunkKey);
+    if (resident) {
+      traceRecorder.recordPointEvent(PointEvent.Rejection, "atlas-policy", resident, 0);
+    } else if (coords) {
+      traceRecorder.recordPointEvent(
+        PointEvent.Rejection,
+        "atlas-policy",
+        {
+          entityId,
+          imageId: "",
+          level: coords.level,
+          t: coords.t,
+          c: coords.c,
+          z: coords.z,
+          y: coords.y,
+          x: coords.x,
+        },
+        0,
+      );
+    }
+
     const cancelled = this.chunkScheduler.cancelWhere((entry) => (
       entry.request.entityId === entityId &&
       entry.request.chunkKey === chunkKey
@@ -828,6 +866,41 @@ export class CpuCache {
       const set = inFlight.get(entityId) ?? new Set();
       set.add(entry.request.chunkKey);
       inFlight.set(entityId, set);
+    }
+
+    return { cached, inFlight };
+  }
+
+  /**
+   * Resident and in-flight chunk counts per pyramid level, for the trace's
+   * per-tick aggregates. Deliberately not {@link snapshot}: that one
+   * allocates a Set per entity and walks every resident chunk, which is
+   * affordable once per rebuild behind a debug toggle and not affordable on
+   * every tick with recording always on. Both stores keep their level counts
+   * incrementally, and the in-flight map holds only dispatched fetches — a
+   * few dozen — so this is a short walk over small numbers.
+   *
+   * Counts every resident chunk, not only the active set's: an aggregate that
+   * quietly excluded demoted or prefetched residency would understate what
+   * the cache is actually holding.
+   */
+  levelResidency(): { cached: readonly number[]; inFlight: readonly number[] } {
+    const cached: number[] = [];
+    for (const store of [this.chunkStore, this.overviewStore]) {
+      const counts = store.levelResidency();
+      for (let level = 0; level < counts.length; level++) {
+        if (counts[level] === 0) continue;
+        while (cached.length <= level) cached.push(0);
+        cached[level] += counts[level];
+      }
+    }
+
+    const inFlight: number[] = [];
+    for (const [, entry] of this.chunkScheduler.inFlightEntries()) {
+      const level = entry.request.level;
+      if (!Number.isInteger(level) || level < 0) continue;
+      while (inFlight.length <= level) inFlight.push(0);
+      inFlight[level]++;
     }
 
     return { cached, inFlight };
@@ -1126,10 +1199,8 @@ export class CpuCache {
     // so an in-fetch retry retires its row and the next attempt opens a
     // fresh one rather than overwriting the first attempt's timings. This
     // is the bracket the server's own rows nest inside once they arrive.
-    const traceRow = traceRecorder.beginChunkRow(
-      req,
-      this.requestResidencyTier(req) === "coarse" ? 1 : 0,
-    );
+    const rowTier = this.requestResidencyTier(req) === "coarse" ? 1 : 0;
+    const traceRow = traceRecorder.beginChunkRow(req, rowTier);
     traceRecorder.stamp(traceRow, Boundary.WireStart);
 
     let result: FetchResult;
@@ -1174,6 +1245,7 @@ export class CpuCache {
       }
 
       if (this.chunkRetryPolicy.shouldRetry(fe, retryCount)) {
+        traceRecorder.recordPointEvent(PointEvent.Retry, fe.kind, req, rowTier);
         await new Promise(r => setTimeout(r, this.chunkRetryPolicy.delayMs(retryCount)));
         if (!this.chunkScheduler.hasInFlight(key)) return; // cancelled during wait
         return this.fetchAndDecode(req, controller, key, retryCount + 1, startedEpochs, fed);
@@ -1195,6 +1267,7 @@ export class CpuCache {
         this.recordFailure(key, isPermanent);
         this.counters.recordFetchFailure(isPermanent, fe.message);
         this.recordFailureForBurstDetection(isPermanent, fe.message);
+        traceRecorder.recordPointEvent(PointEvent.Failure, fe.kind, req, rowTier);
       }
       return;
     }
@@ -1233,6 +1306,10 @@ export class CpuCache {
         this.recordFailure(key, false);
         this.counters.recordFetchFailure(false, streakMessage);
         this.recordFailureForBurstDetection(false, streakMessage);
+        // Bytes that arrived and could not be decoded fail the delivery just
+        // as a dead fetch does, and self-heal the same way, so they borrow
+        // the same `transient` code rather than inventing a decode reason.
+        traceRecorder.recordPointEvent(PointEvent.Failure, "transient", req, rowTier);
       }
       return;
     }
@@ -1299,6 +1376,9 @@ export class CpuCache {
       }
       this.chunkStore.insert(cacheEntry);
     }
+    // Cache admission: the moment decoded bytes become resident. Counted, not
+    // timed — the insert is well under the platform's clock floor.
+    traceRecorder.countPhase(CountedPhaseIndex.CacheAdmission);
 
     this.notifyListeners();
 

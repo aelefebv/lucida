@@ -37,6 +37,7 @@ import {
 } from "./planning/snapshotDelta.ts";
 import type { WasmScene } from "lucida-core";
 import { buildPlanningDatasetDebug } from "./planning/debug.ts";
+import { recordPlanningTick } from "./planning/traceTick.ts";
 import { computeLabelChunkRequests } from "./planning/labelRequests.ts";
 import type {
   ActiveSetEntry,
@@ -906,6 +907,11 @@ export class TickCoordinator {
       this._lastVisibleRegion.set(dsId, visibleRegion);
       this._lastEntities.set(dsId, entities);
       emitViewerInterestHint(ctx, dsId, selection, visibleRegion, result.requests, this.requestEpoch);
+
+      // The trace's per-tick aggregate, recorded from the same plan and
+      // before the same side-effects — but unconditionally, because
+      // recording does not wait for somebody to open a panel (ADR 0049).
+      recordPlanningTick(dsId, result, ctx.cpuCache.levelResidency());
 
       // Built before downstream side-effects so the panel reflects what
       // `plan()` produced, not the post-LOD-filter upload-path view.
