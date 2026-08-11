@@ -9,7 +9,7 @@
 // Mocks `lucida-core`'s `dataset_id_for_url` so the hook can construct
 // without a wasm init (mirrors applier.test.ts's injected fakeIdForUrl).
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { act, render } from "@testing-library/react";
 
@@ -113,9 +113,20 @@ interface HarnessProps {
   outRef: Captured;
   loopRef: React.RefObject<RenderLoop | null>;
   initial?: { z?: number; c?: number; t?: number; viewMode?: "2d" | "3d" };
+  persistLastView?: (view: SavedView) => Promise<unknown>;
+  lastViewDebounceMs?: number;
+  captureSurface?: boolean;
 }
 
-function HookHarness({ scene, outRef, loopRef, initial }: HarnessProps) {
+function HookHarness({
+  scene,
+  outRef,
+  loopRef,
+  initial,
+  persistLastView,
+  lastViewDebounceMs,
+  captureSurface,
+}: HarnessProps) {
   const [z, setZ] = useState(initial?.z ?? 0);
   const [c, setC] = useState(initial?.c ?? 0);
   const [t, setT] = useState(initial?.t ?? 0);
@@ -143,6 +154,13 @@ function HookHarness({ scene, outRef, loopRef, initial }: HarnessProps) {
     setMultiChannel,
     autoContrastMapRef,
     setAutoContrastMap,
+    persistLastView,
+    lastViewDebounceMs,
+    captureSurface,
+    // Keep the per-user toggle out of these tests: the localStorage-backed
+    // default is on, but pin it so a test machine's storage can't disarm the
+    // capture we're asserting about.
+    restoreLastViewEnabled: () => true,
   });
   useEffect(() => {
     outRef.current = { handle, z, c, t, viewMode, multiChannel };
@@ -213,6 +231,93 @@ describe("useSavedViewSync — exposes notifyChange (Bug #1)", () => {
       expect(replaceCalls.some((c) => (c.url ?? "").includes("#view="))).toBe(true);
     } finally {
       window.history.replaceState = originalReplace;
+    }
+  });
+});
+
+describe("useSavedViewSync — capture surface writes no user state (#923)", () => {
+  let scene: MockScene;
+  let outRef: Captured;
+
+  // Fake timers here on purpose: these assert about a 3-second debounce, and
+  // sleeping on the real clock to prove "nothing happened" is both slow and
+  // the kind of test that flakes on a loaded CI runner.
+  beforeEach(() => {
+    scene = makeMockScene();
+    outRef = { current: null };
+    window.history.replaceState(null, "", "/");
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("persists the last view on an interactive session (behavior is unchanged)", async () => {
+    const loop = makeMockLoop();
+    const persisted: SavedView[] = [];
+    await act(async () => {
+      render(
+        <HookHarness
+          scene={scene}
+          outRef={outRef}
+          loopRef={loop.ref}
+          persistLastView={async (v) => { persisted.push(v); }}
+          lastViewDebounceMs={3000}
+        />,
+      );
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3100);
+    });
+    expect(persisted.length).toBe(1);
+  });
+
+  it("persists nothing on the capture surface, however long the run", async () => {
+    const loop = makeMockLoop();
+    const persisted: SavedView[] = [];
+    await act(async () => {
+      render(
+        <HookHarness
+          scene={scene}
+          outRef={outRef}
+          loopRef={loop.ref}
+          captureSurface
+          persistLastView={async (v) => { persisted.push(v); }}
+          lastViewDebounceMs={3000}
+        />,
+      );
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600_000);
+    });
+    expect(persisted).toEqual([]);
+  });
+
+  it("schedules no timer at all on the capture surface, so there is no wall-clock floor", async () => {
+    const loop = makeMockLoop();
+    const realSetTimeout = window.setTimeout;
+    const delays: number[] = [];
+    window.setTimeout = ((fn: TimerHandler, ms?: number, ...rest: unknown[]) => {
+      delays.push(ms ?? 0);
+      return realSetTimeout(fn, ms, ...rest);
+    }) as typeof window.setTimeout;
+    try {
+      await act(async () => {
+        render(
+          <HookHarness
+            scene={scene}
+            outRef={outRef}
+            loopRef={loop.ref}
+            captureSurface
+            persistLastView={async () => {}}
+            lastViewDebounceMs={30_000}
+          />,
+        );
+      });
+      expect(delays).not.toContain(30_000);
+    } finally {
+      window.setTimeout = realSetTimeout;
     }
   });
 });

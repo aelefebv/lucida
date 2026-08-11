@@ -20,7 +20,7 @@ import {
 import { UrlSync } from "../savedView/urlSync.ts";
 import { buildCapture } from "../savedView/captureBuilder.ts";
 import { getRestoreLastViewEnabled } from "../lastViewPreference.ts";
-import type { DatasetReferenceMode, SavedView, ViewState } from "../savedView/types.ts";
+import type { DatasetReferenceMode, LayoutMutationMode, SavedView, ViewState } from "../savedView/types.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import { invalidateAfterViewRestore } from "../invalidation.ts";
 import { syncSceneViewState } from "./sceneViewState.ts";
@@ -100,7 +100,16 @@ interface Params {
   /** Debounce for the last-view capture (#700). A few seconds so a burst of
    *  pans coalesces into one write. Default 3000ms; overridable for tests. */
   lastViewDebounceMs?: number;
-  allowDocumentLayoutMutation?: boolean;
+  /** True on the chrome-free capture surface (`?render=1`), which writes no
+   *  persisted state — see `captureSurface.ts` for the rule and why. Here that
+   *  means the last-view capture is never scheduled: not deferred, not
+   *  cancelled at fire time, never armed. A headless run therefore neither
+   *  overwrites the user's remembered view nor carries the debounce as a floor
+   *  on its wall clock. Restore is untouched — reading a view is fine. */
+  captureSurface?: boolean;
+  /** What a restore may do to the shared active layout — see
+   *  `LayoutMutationMode`. Defaults to broadcasting, as an editor does. */
+  layoutMutation?: LayoutMutationMode;
 }
 
 interface SyncBundle {
@@ -135,7 +144,8 @@ export function useSavedViewSync({
   persistLastView,
   restoreLastViewEnabled,
   lastViewDebounceMs = 3000,
-  allowDocumentLayoutMutation = true,
+  captureSurface = false,
+  layoutMutation = "broadcast",
 }: Params): {
   applier: SavedViewApplier;
   captureBuilder: () => SavedView | null;
@@ -221,7 +231,7 @@ export function useSavedViewSync({
       dataset_id_for_url,
       30_000,
       datasetReferenceMode,
-      allowDocumentLayoutMutation,
+      layoutMutation,
       // Read the resolver from the ref at call time so updates to the
       // recipient's manifest-derived extents take effect across applies.
       (datasetId) => dimensionExtentsForRef.current?.(datasetId) ?? {},
@@ -314,6 +324,10 @@ export function useSavedViewSync({
   // persist a view the recipient is mid-applying rather than one the user
   // navigated to.
   useEffect(() => {
+    // The capture surface writes no user state (#923). Returning before the
+    // `setTimeout` is the whole point: an armed-then-cancelled timer would
+    // still make a headless run wait out the debounce before it could quit.
+    if (captureSurface) return;
     // Cheap setup gate: skip scheduling entirely when capture can't apply
     // (no callback = auth-off, or toggle off). The authoritative checks run
     // again at fire time below, since both can change during the debounce.
@@ -335,7 +349,7 @@ export function useSavedViewSync({
       });
     }, lastViewDebounceMs);
     return () => clearTimeout(timer);
-  }, [bundle.applier, captureBuilder, changeTick, lastViewDebounceMs]);
+  }, [bundle.applier, captureBuilder, changeTick, lastViewDebounceMs, captureSurface]);
 
   // Selected-dataset wrinkle (option c): subscribe to the applier's
   // post-apply summary and forward to the parent so it can re-target

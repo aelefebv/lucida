@@ -120,6 +120,22 @@ export type LayoutId = string;
 export type DatasetReferenceMode = "source-url" | "workspace-dataset-id";
 
 /**
+ * What a restore may do when the view it applies names a different active
+ * layout than the document currently has. The active layout is *document*
+ * state — shared with every peer and persisted by the server — so who is
+ * allowed to change it, and how, is not one boolean:
+ *
+ * - `broadcast` — apply locally and send the command. An editor restoring a
+ *   view is making the change everyone agreed to see.
+ * - `local` — apply to this page's scene only, silently. The chrome-free
+ *   capture surface renders the layout the view asked for without recording
+ *   that anyone chose it (#923, see `captureSurface.ts`).
+ * - `refuse` — skip, and warn into the apply result. A viewer without edit
+ *   rights should be told the picture differs, not silently shown a lie.
+ */
+export type LayoutMutationMode = "broadcast" | "local" | "refuse";
+
+/**
  * Capture record for the URL-as-app-state saved-views feature. Spans both
  * tiers of the document/viewport split: `datasets` + `active_layouts` are
  * the document surface; the rest mirrors `PresenceState`.

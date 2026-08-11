@@ -227,6 +227,16 @@ where on screen. Spatial, where the monitor is temporal; the two never merge.
 _Avoid_: overlay image (an integer-valued image whose values name regions is a
 label, see above), heads-up display
 
+**Capture surface**:
+The chrome-free viewer page (`?render=1`) that `dataset montage`, `viewer
+render` and the trace driver point a headless browser at: all UI hidden, canvas
+filling the viewport, and — equally binding — no user state written, so a
+headless run neither overwrites anyone's view nor waits out a persistence
+debounce (`lucida-web/src/captureSurface.ts`). Not a *run* (which is an interval
+in the recording, see above) and not a saved-view *capture* (which is the act of
+building a `SavedView`).
+_Avoid_: render mode, screenshot page, headless mode
+
 **Trace driver**:
 The `lucida trace` command: it launches its own headless browser, opens a
 dataset, waits for the run to become quiescent, and writes the trace. One of two
