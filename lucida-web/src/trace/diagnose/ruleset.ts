@@ -105,6 +105,11 @@ export const PHASE_CLASSES: Record<string, PhaseClass> = {
   "server.decompress": "compute",
   "server.slice-encode": "compute",
   "server.handoff": "compute",
+  // The open bracket rather than a recorded phase: the reads nest inside it,
+  // and it is classed as I/O because that is what it spends itself on. No
+  // absolute ceiling — an open's length is a property of the dataset, not of
+  // the pipeline's health.
+  "metadata.dataset-open": "io",
   "metadata.cache-hit": "compute",
   "metadata.coalesced-wait": "queue",
   "metadata.backend-read": "io",

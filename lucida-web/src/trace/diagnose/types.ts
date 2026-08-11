@@ -60,6 +60,27 @@ export interface PhaseRollup {
   totalMs: number;
   /** `totalMs` over the run's wall clock: how many of this phase ran at once, on average. */
   concurrencyFactor: number;
+  /**
+   * The stretch of the run's clock this phase occupied, and how many of its
+   * rows carried a position at all.
+   *
+   * Null when none did. A phase can be measured and unplaceable — a server row
+   * the merge could not nest has a duration and no position (ADR 0050) — and a
+   * timeline track drawn at the origin for one of those is the same class of
+   * lie as drawing silence over a cold open's metadata reads.
+   *
+   * This is what a timeline track is drawn from. `p95` cannot place anything,
+   * and the monitor is not allowed to reach past this document for a number.
+   */
+  extent: { firstStartMs: number; lastEndMs: number; positionedN: number } | null;
+  /**
+   * The row behind {@link maxMs}, named. A drill-down carries a phase scope and
+   * the worst row rather than a time coordinate, so the identity has to exist
+   * here: a chunk key on the browser side, the `(rid, connection generation)`
+   * join key on the server side (ADR 0048), and the open plus label on a
+   * metadata read.
+   */
+  worst: { label: string; ms: number } | null;
 }
 
 /**

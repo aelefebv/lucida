@@ -104,6 +104,8 @@ interface AppProps {
    *  case, so this is a no-op there. */
   initialDatasetUrls?: readonly string[];
   onBackToDashboard: () => void;
+  /** Leave for the pipeline monitor (#936) — a separate page, not an overlay. */
+  onOpenMonitor: () => void;
   onRenameWorkspace: (name: string) => Promise<void>;
   onSetDefaultSavedView: (savedViewId: string | null) => Promise<void>;
   /** Create a NEW workspace from dataset(s) chosen in the in-viewer file
@@ -120,6 +122,7 @@ function App({
   canRenameWorkspace,
   initialDatasetUrls,
   onBackToDashboard,
+  onOpenMonitor,
   onRenameWorkspace,
   onSetDefaultSavedView,
   onCreateWorkspaceFromDatasets,
@@ -1246,6 +1249,12 @@ function App({
             </div>
           )}
           <div className="workspace-chrome-actions">
+            {/* The monitor is a separate page (#936), so this leaves the
+                viewer. The run it reads is a closed interval that outlives the
+                canvas that produced it. */}
+            <button type="button" onClick={onOpenMonitor} data-testid="open-monitor">
+              Monitor
+            </button>
             {canRenameWorkspace && (
               <button type="button" onClick={() => setShowWorkspaceSharing(true)}>
                 Share Workspace

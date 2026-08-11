@@ -350,6 +350,7 @@ function renderApp() {
         defaultSavedViewId={null}
         canRenameWorkspace={false}
         onBackToDashboard={() => {}}
+        onOpenMonitor={() => {}}
         onRenameWorkspace={async () => {}}
         onSetDefaultSavedView={async () => {}}
       />

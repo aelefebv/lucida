@@ -308,9 +308,11 @@ describe("the document", () => {
     const small = JSON.stringify(diagnoseRun(rowCountRun(20))).length;
     const large = JSON.stringify(diagnoseRun(rowCountRun(4_000))).length;
 
-    // Twenty rows against four thousand. Row counts and one named chunk key
-    // move; nothing else does.
-    expect(large).toBeLessThan(small + 200);
+    // Twenty rows against four thousand: two hundred times the rows for a few
+    // hundred bytes. What moves is the width of a count and of a named chunk
+    // key — the rollup now names the worst row per phase (#936), so there are
+    // a handful of those rather than one, and still no per-row list anywhere.
+    expect(large).toBeLessThan(small + 400);
   });
 
   it("carries the run's identity and the counters that are not health signals", () => {

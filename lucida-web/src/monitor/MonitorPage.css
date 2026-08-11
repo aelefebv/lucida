@@ -1,0 +1,323 @@
+/*
+ * The monitor page.
+ *
+ * Laid out in DOM, not on a canvas: track geometry is percentages of the run's
+ * wall clock, so it is resolution-independent and reads the same at device
+ * pixel ratio 1 and 2 without a redraw. #862 and #864 both hid behind
+ * DPR-1-only verification; a surface with no pixel buffer of its own cannot
+ * repeat that.
+ */
+
+.monitor-page {
+  flex: 1;
+  min-width: 0;
+  padding: 16px 20px 48px;
+  overflow-y: auto;
+  color: #e6e6e6;
+  background: #141414;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.monitor-chrome {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #333;
+}
+
+.monitor-chrome h1 {
+  font-size: 16px;
+  margin: 0;
+}
+
+.monitor-run-id {
+  font-family: "SF Mono", "Menlo", "Monaco", monospace;
+  color: #9aa0a6;
+}
+
+.monitor-chrome-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+}
+
+.monitor-observation-only,
+.monitor-note {
+  color: #9aa0a6;
+  margin: 8px 0;
+}
+
+.monitor-saved {
+  color: #8fd18f;
+  margin: 8px 0;
+}
+
+.monitor-empty {
+  margin: 24px 0;
+  color: #c9a227;
+}
+
+/* --- banners: truncation and coverage lead, they do not footnote ---------- */
+
+.monitor-banners {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 12px 0 20px;
+}
+
+.monitor-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-left: 3px solid #555;
+  background: #1c1c1c;
+}
+
+.monitor-banner span {
+  color: #9aa0a6;
+}
+
+.monitor-banner-severe {
+  border-left-color: #c9a227;
+  background: #241f10;
+}
+
+.monitor-banner-truncation {
+  border-left-color: #d1665b;
+  background: #2a1614;
+}
+
+/* --- callouts: the verdict, then the ranked findings ---------------------- */
+
+.monitor-section {
+  margin: 24px 0;
+}
+
+.monitor-section h2 {
+  font-size: 14px;
+  margin: 0 0 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #9aa0a6;
+}
+
+.monitor-callouts {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.monitor-callout {
+  padding: 12px 14px;
+  border: 1px solid #333;
+  border-left-width: 3px;
+  background: #1c1c1c;
+}
+
+.monitor-callout h3 {
+  margin: 0 0 6px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.monitor-callout-verdict {
+  border-left-color: #6f8fd1;
+}
+
+.monitor-callout-stall {
+  border-left-color: #d1665b;
+}
+
+.monitor-callout-saturated {
+  border-left-color: #c9a227;
+}
+
+.monitor-callout-note {
+  border-left-color: #555;
+}
+
+.monitor-confidence {
+  margin: 0 0 6px;
+  display: flex;
+  gap: 6px;
+}
+
+.monitor-chip {
+  padding: 1px 6px;
+  border: 1px solid #444;
+  border-radius: 2px;
+  font-size: 11px;
+  color: #b9bcc0;
+}
+
+.monitor-chip-rule {
+  font-family: "SF Mono", "Menlo", "Monaco", monospace;
+}
+
+.monitor-numbers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+  font-family: "SF Mono", "Menlo", "Monaco", monospace;
+}
+
+.monitor-dim {
+  color: #7d8288;
+}
+
+.monitor-detail {
+  margin: 0 0 8px;
+  color: #b9bcc0;
+}
+
+/* --- drill-down ----------------------------------------------------------- */
+
+.monitor-drill-panel {
+  padding: 12px 14px;
+  border: 1px solid #444;
+  background: #1c1c1c;
+}
+
+.monitor-question {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* --- tracks ---------------------------------------------------------------- */
+
+.monitor-track-band {
+  margin: 0 0 16px;
+}
+
+.monitor-track-band h3 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.monitor-track {
+  display: grid;
+  grid-template-columns: 210px 1fr 260px;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 0;
+}
+
+.monitor-track-label,
+.monitor-track-note {
+  font-family: "SF Mono", "Menlo", "Monaco", monospace;
+  font-size: 11px;
+  color: #b9bcc0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-track-note {
+  color: #7d8288;
+}
+
+.monitor-track-gutter {
+  position: relative;
+  display: block;
+  height: 14px;
+  background: #202020;
+  border: 1px solid #2c2c2c;
+}
+
+.monitor-track-bar {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  min-width: 2px;
+  background: #6f8fd1;
+}
+
+.monitor-track-bar-io {
+  background: #6f8fd1;
+}
+
+.monitor-track-bar-queue {
+  background: #c9a227;
+}
+
+.monitor-track-bar-compute {
+  background: #7fb07f;
+}
+
+.monitor-track-bar-unrecorded {
+  background: #555;
+}
+
+.monitor-track-unplaced {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  padding-left: 6px;
+  font-size: 10px;
+  color: #7d8288;
+}
+
+/* --- tables --------------------------------------------------------------- */
+
+.monitor-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: "SF Mono", "Menlo", "Monaco", monospace;
+  font-size: 11px;
+}
+
+.monitor-table caption {
+  text-align: left;
+  color: #7d8288;
+  padding: 6px 0;
+  font-family: system-ui, sans-serif;
+}
+
+.monitor-table th,
+.monitor-table td {
+  text-align: left;
+  padding: 3px 8px 3px 0;
+  border-bottom: 1px solid #262626;
+  white-space: nowrap;
+}
+
+.monitor-table thead th {
+  color: #7d8288;
+  font-weight: 500;
+}
+
+.monitor-row-scoped {
+  background: #23272e;
+}
+
+.monitor-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 4px 20px;
+  margin: 0;
+}
+
+.monitor-fact {
+  display: flex;
+  gap: 8px;
+}
+
+.monitor-fact dt {
+  color: #7d8288;
+  min-width: 140px;
+}
+
+.monitor-fact dd {
+  margin: 0;
+  font-family: "SF Mono", "Menlo", "Monaco", monospace;
+}
