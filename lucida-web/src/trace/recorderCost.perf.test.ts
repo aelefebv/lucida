@@ -75,6 +75,14 @@ const WORST_TICK_CEILING_US = 250;
  */
 const CI_SLACK = 4;
 
+/**
+ * How much more the largest burst may cost per event than the cheapest. Wide,
+ * because the small bursts amortise a tick's fixed cost over very few events
+ * and a tight bound would flake; narrow enough that the `Array.shift()` shape
+ * — three orders of magnitude between 1 and 128 events — cannot hide in it.
+ */
+const FLATNESS_GROWTH_GATE = 4;
+
 /** #888's burst sizes: one, a small tick, the panel-era failure point, the worst case. */
 const BURSTS = [1, 8, 128, 2943] as const;
 
@@ -106,11 +114,19 @@ const OUTSTANDING = {
  */
 const CALLS_PER_CHUNK = 8;
 
-/** Per-row work inside `noteFrameDispatched`: two present stamps and a finish. */
+/**
+ * Per-row work inside `noteFrameDispatched`: two present stamps and a finish.
+ * Counted per row rather than as the one call it arrives as, because it is a
+ * loop over rows and counting it once would understate the events a tick
+ * records — which would flatter every per-event figure below.
+ */
 const FRAME_CALLS_PER_CHUNK = 3;
 
 /** Per-tick fixed calls: plan open/close, tick open/commit, one point event. */
 const FIXED_CALLS_PER_TICK = 5;
+
+/** The same, on the burst path, which records no point event. */
+const BURST_FIXED_CALLS_PER_TICK = 4;
 
 function eventsPerTick(chunks: number): number {
   return chunks * (CALLS_PER_CHUNK + FRAME_CALLS_PER_CHUNK) + FIXED_CALLS_PER_TICK;
@@ -132,20 +148,24 @@ const BURST_CALLS_PER_CHUNK = 3;
  * so what the loop measures is the recorder's write path rather than the
  * harness building arguments for it.
  */
-function makeRig(chunks: number) {
+function makeRig(chunks: number, calls?: { count: number }) {
   let sink: TableTraceSink | null = null;
-  const recorder = new TraceRecorder({
+  const real = new TraceRecorder({
     sinkFactory: () => (sink = new TableTraceSink()),
     // Far beyond any measurement window: a run closing mid-loop would stop
     // the write path dead and measure the early-out instead.
     timeoutMs: 3_600_000,
   });
-  recorder.setEnvironment({
+  real.setEnvironment({
     captureWarmth: () => WARMTH,
     captureConditions: () => CONDITIONS,
     captureOutstanding: () => OUTSTANDING,
   });
-  recorder.openRun(OPEN_CAUSE);
+  real.openRun(OPEN_CAUSE);
+
+  // Setup happens on the recorder itself; only the drive below goes through
+  // the counting wrapper, so a count describes one tick and nothing else.
+  const recorder = calls ? countingRecorder(real, calls) : real;
 
   const sources: ChunkRowSource[] = [];
   for (let i = 0; i < chunks; i++) {
@@ -219,7 +239,26 @@ function makeRig(chunks: number) {
     recorder.commitTick();
   }
 
-  return { recorder, tick, burstTick, sink: () => sink };
+  return { recorder: real, tick, burstTick, sink: () => sink };
+}
+
+/**
+ * The recorder, counting the write calls made through it. The per-event
+ * figures below are a tick's cost divided by a hand-written model of how many
+ * calls a tick makes; this is what stops that model going stale when an emit
+ * site is added, by letting a test compare the model against the real count.
+ */
+function countingRecorder(target: TraceRecorder, calls: { count: number }): TraceRecorder {
+  return new Proxy(target, {
+    get(obj, prop, receiver) {
+      const value = Reflect.get(obj, prop, receiver);
+      if (typeof value !== "function") return value;
+      return (...args: unknown[]) => {
+        calls.count++;
+        return (value as (...a: unknown[]) => unknown).apply(obj, args);
+      };
+    },
+  });
 }
 
 /** Median, p95 and max of a sample set, in the order a log line wants them. */
@@ -241,12 +280,16 @@ function summarise(samples: number[]) {
 function measure(chunks: number, kind: "lifecycle" | "burst" = "lifecycle") {
   const events = kind === "lifecycle"
     ? eventsPerTick(chunks)
-    : chunks * BURST_CALLS_PER_CHUNK + FIXED_CALLS_PER_TICK - 1;
+    : chunks * BURST_CALLS_PER_CHUNK + BURST_FIXED_CALLS_PER_TICK;
   const iterations = Math.max(20, Math.min(2000, Math.round(600_000 / events)));
   const rig = makeRig(chunks);
   const drive = kind === "lifecycle" ? rig.tick : rig.burstTick;
 
-  // Warm past first-call JIT and past the row table's early doublings.
+  // Warm past first-call JIT. The row table's doublings are *not* warmed
+  // past — rows accumulate for a run's whole life, so a doubling can land in
+  // any window, including in the product. They show up in the logged max and
+  // leave the p50 the gates read alone, which is the honest split: a doubling
+  // is a real cost the recorder pays, and it is not the per-event cost.
   for (let i = 0; i < Math.min(iterations, 20); i++) drive();
 
   const samples: number[] = [];
@@ -282,15 +325,20 @@ describe("recorder cost contract", () => {
     }
 
     const flat = results.map(r => r.perEventNs);
-    const growth = Math.max(...flat) / Math.min(...flat);
+    const cheapest = Math.min(...flat);
+    const growth = flat[flat.length - 1] / cheapest;
     console.log(
       `[#928] flatness: ns/event ${flat.map(n => n.toFixed(1)).join(" -> ")} ` +
-        `across bursts ${BURSTS.join(", ")} (spread ${growth.toFixed(2)}x, logged not asserted — ` +
-        `a ratio gate flakes on shared runners; the absolute ceiling below is the gate)`,
+        `across bursts ${BURSTS.join(", ")} | largest burst is ${growth.toFixed(2)}x the ` +
+        `cheapest (gate ${FLATNESS_GROWTH_GATE}x)`,
     );
 
-    // The flatness gate. A per-event cost that grows with the burst — the
-    // Array.shift()-in-a-loop shape — clears this at N=1 and fails at N=2,943.
+    // Two gates, because either alone can be cleared by the failure this
+    // exists to catch.
+    //
+    // The absolute one: a per-event cost that grows with the burst clears the
+    // ceiling at N=1 and blows it at N=2,943. `UploadTelemetry.publish` at 128
+    // events per tick cost 8.8 µs *per event*.
     for (const r of results) {
       expect(
         r.perEventNs,
@@ -298,7 +346,31 @@ describe("recorder cost contract", () => {
       ).toBeLessThan(PER_EVENT_CEILING_NS * CI_SLACK);
     }
 
-    expect(results[results.length - 1].chunks).toBe(2943);
+    // The comparative one, which is what "flat" actually means: the largest
+    // burst must not cost meaningfully more per event than the cheapest.
+    // Deliberately wide — the small bursts carry the per-tick fixed cost over
+    // few events, so some spread is expected and a tight ratio would flake —
+    // but it still fails on any growth with N worth the name.
+    expect(
+      growth,
+      `2,943 events/tick cost ${growth.toFixed(2)}x the cheapest burst per event`,
+    ).toBeLessThan(FLATNESS_GROWTH_GATE);
+  });
+
+  it("counts the write calls the per-event figures are divided by", () => {
+    // The ns/event numbers are a tick's cost over a hand-written model of how
+    // many calls a tick makes. Add an emit call to the drive and forget the
+    // model, and every ceiling silently loosens — so the model is checked
+    // against the real count rather than trusted.
+    const lifecycle = { count: 0 };
+    makeRig(64, lifecycle).tick();
+    const burst = { count: 0 };
+    makeRig(64, burst).burstTick();
+
+    // `noteFrameDispatched` arrives as one call and is modelled per row, so
+    // the lifecycle tick makes one more call than the fixed term names.
+    expect(lifecycle.count).toBe(64 * CALLS_PER_CHUNK + FIXED_CALLS_PER_TICK + 1);
+    expect(burst.count).toBe(64 * BURST_CALLS_PER_CHUNK + BURST_FIXED_CALLS_PER_TICK);
   });
 
   it("bounds the worst tick #888 measured against the 250 µs ceiling", () => {
@@ -341,7 +413,7 @@ describe("recorder cost contract", () => {
     // deliberate spend rather than a regression against this floor.
     const typical = measure(8);
     const rig = makeRig(64);
-    // #888's typical run: 2,559 chunks, at ~123 kB of rows apiece.
+    // #888's typical run: 2,559 chunks, which ADR 0047 sizes at ~123 kB.
     for (let i = 0; i < 40; i++) rig.tick();
     const liveBytes = rig.sink()!.byteLength;
     rig.recorder.reset();
@@ -358,24 +430,37 @@ describe("recorder cost contract", () => {
   });
 
   it("allocates nothing in steady state after warmup", () => {
-    // Steady state is the write path over buffers that already exist: stamps
-    // into a live row, the two drop-oldest rings wrapping, the counted-phase
-    // vector, and the frame hand-off swapping its two lists. The per-chunk
-    // table's growth-by-doubling is explicitly allowed by ADR 0049 and is
-    // excluded here by holding the row count still.
+    // Steady state is the write path over buffers that already exist: row
+    // births into spare capacity, stamps into a live row, the two drop-oldest
+    // rings wrapping, the counted-phase vector, and the frame hand-off
+    // swapping its two lists.
+    //
+    // Row appends are inside the window on purpose, and the window is sized to
+    // fit inside the capacity the warmup grew. Leaving them out would make the
+    // buffer-identity check below unfalsifiable — nothing else in the recorder
+    // can reallocate — and growth-by-doubling is the one allocation ADR 0049
+    // permits, so the thing worth asserting is that it does not happen where
+    // there is room.
     const chunks = 128;
     const rig = makeRig(chunks);
-    for (let i = 0; i < 200; i++) rig.tick();
+    for (let i = 0; i < 400; i++) rig.tick();
 
     const sink = rig.sink();
     expect(sink).not.toBeNull();
     const bytesBefore = sink!.byteLength;
+    // The table grows only by doubling from 1,024 rows, so its capacity — and
+    // therefore the room left before the next doubling — follows from the row
+    // count. Half of that room, so the window cannot reach the doubling even
+    // if the growth policy is off by one.
+    const capacity = 1 << Math.ceil(Math.log2(Math.max(1024, sink!.length)));
+    const appends = Math.floor((capacity - sink!.length) / 2);
+    expect(appends).toBeGreaterThan(1000);
 
-    const handle = rig.recorder.beginChunkRow(
-      { datasetId: "ds", entityId: "m", imageId: "i", lane: "detail",
-        level: 0, t: 0, c: 0, z: 0, y: 0, x: 0 },
-      0,
-    );
+    const source: ChunkRowSource = {
+      datasetId: "ds", entityId: "m", imageId: "i", lane: "detail",
+      level: 0, t: 0, c: 0, z: 0, y: 0, x: 0,
+    };
+    const handle = rig.recorder.beginChunkRow(source, 0);
 
     const ops = 400_000;
     const gc = resolveGc();
@@ -383,6 +468,7 @@ describe("recorder cost contract", () => {
     const heapBefore = process.memoryUsage().heapUsed;
 
     for (let i = 0; i < ops; i++) {
+      if (i < appends) rig.recorder.beginChunkRow(source, 0);
       rig.recorder.stamp(handle, Boundary.WireStart);
       rig.recorder.countPhase(CountedPhaseIndex.CacheAdmission);
       rig.recorder.recordPointEvent(PointEvent.Rejection, "atlas-policy", null, 0);
@@ -394,21 +480,25 @@ describe("recorder cost contract", () => {
     gc?.();
     const heapAfter = process.memoryUsage().heapUsed;
     const grown = heapAfter - heapBefore;
-    const perOp = grown / (ops * 6);
+    const calls = ops * 6 + appends;
     console.log(
-      `[#928] steady state: ${ops * 6} write calls grew the heap by ` +
-        `${(grown / 1024).toFixed(1)} kB (${perOp.toFixed(3)} B/call, ` +
-        `gc ${gc ? "forced" : "unavailable — heap figure is advisory"}) | ` +
+      `[#928] steady state: ${calls} write calls (${appends} of them row births ` +
+        `into spare capacity) grew the heap by ${(grown / 1024).toFixed(1)} kB ` +
+        `(${(grown / calls).toFixed(3)} B/call, gc ${gc ? "forced" : "unavailable"}) | ` +
         `sink held ${(bytesBefore / 1024).toFixed(1)} kB throughout`,
     );
 
-    // The deterministic half: no buffer anywhere in the sink was reallocated.
+    // The deterministic half: nothing in the sink was reallocated, including
+    // the row table, which had room and so must not have doubled.
     expect(sink!.byteLength).toBe(bytesBefore);
 
-    // The heap half, loose by design — 512 kB over 2.4M calls is 0.2 B/call,
-    // far below the tens of bytes even one small object per call would cost,
-    // and far above the noise of a runner's background allocation.
-    if (gc) expect(grown).toBeLessThan(512 * 1024);
+    // The heap half. 512 kB over ~2.4M calls is 0.2 B/call, far below the tens
+    // of bytes even one small object per call would cost and far above a
+    // runner's background noise. Without a forced gc the same bound would read
+    // uncollected garbage as growth, so the ungated fallback is loose enough to
+    // survive that and still catch per-call allocation, which would be tens of
+    // megabytes.
+    expect(grown).toBeLessThan(gc ? 512 * 1024 : 8 * 1024 * 1024);
 
     rig.recorder.reset();
   });

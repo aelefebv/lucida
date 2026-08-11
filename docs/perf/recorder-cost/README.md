@@ -8,6 +8,7 @@ Issue [#928], under the [#921] spec, enforcing [ADR 0049][0049].
 [#919]: https://github.com/aelefebv/lucida/issues/919
 [#921]: https://github.com/aelefebv/lucida/issues/921
 [#928]: https://github.com/aelefebv/lucida/issues/928
+[#949]: https://github.com/aelefebv/lucida/issues/949
 [0049]: ../../../wiki/decisions/0049-unconditional-recording-under-a-design-budget.md
 
 Recording is unconditional and there is no toggle at any scope, so the
@@ -19,6 +20,13 @@ by construction.
 
 Three of the four gates run on every CI job. The fourth needs a GPU, a server
 and a real fixture, so it lives here as a harness.
+
+This lives under `docs/perf/` rather than beside the `docs/research/*-harness/`
+directories it borrows its shape from. Those are snapshots: tooling that
+produced one document's numbers, quarantined patch and all, and not expected to
+run again. This one is a standing obligation — it is re-run whenever the
+recorder's write path changes shape, and it carries a ledger that outlives the
+issue that created it.
 
 ## The gates that run in CI
 
@@ -66,7 +74,7 @@ one breath in `cpuCache.fetchAndDecode` — because the row is born at dispatch
 with the two phases behind it already over. Three times 2,943 times ~61 ns is
 ~540 µs.
 
-Two ways out, neither of which belongs to [#928]:
+Tracked as [#949]. Two ways out, neither of which belongs to [#928]:
 
 1. **Collapse the dispatch calls.** `beginChunkRow` could take the admission
    stamp and the wire-start boundary directly, making row birth one call
@@ -89,6 +97,23 @@ than quietly encoded as passing.
 sink against a no-op sink. [#888] ran that exact shape against the debug panel
 over a warm re-open at devicePixelRatio 2 and measured **1,148 rendered frames
 in ten seconds either way**. That is the number to beat.
+
+### Measured, 2026-08-11
+
+| Arm | Frames in 10 s | fps | Warm first render |
+| --- | --- | --- | --- |
+| real sink | 1,133 | 112.9 | 148 ms |
+| no-op sink | 1,144 | 114.2 | 207 ms |
+
+**1.0% apart, inside the 5% band — the recorder is not visible in frame
+throughput**, and both arms sit within 1.3% of [#888]'s 1,148. Driven at
+devicePixelRatio 2 over a warm re-open of a 251 MB local OME-Zarr dataset,
+release server, system Chrome with WebGPU, on an M-series laptop.
+
+The two arms are the same tree twice, differing only by the patch below; the
+no-op arm keeps the branch, the argument evaluation and the seam, which is the
+cost a user actually pays. Re-run it when the recorder's write path changes
+shape — collapsing the dispatch calls in [#949] would be such a change.
 
 There is no runtime switch to flip, by design, so the two arms are two builds:
 the tree as it is, and the tree with `noop-sink.patch` applied. The patch
@@ -154,7 +179,8 @@ existing numbers rather than a fresh measurement campaign.
 | Today's floor, per tick | ≈ 1–3 µs | [#888] |
 | Recorder, live state, one 2,560-chunk run | 623 kB | the CI gate, logged each run |
 | Recorder, typical tick (8 chunks) | ~2.9 µs | the CI gate, logged each run |
-| Recorder, worst tick (2,943-chunk burst) | ~540 µs | the CI gate, logged each run |
+| Recorder, worst tick (2,943-chunk burst) | ~540 µs, over ceiling ([#949]) | the CI gate, logged each run |
+| Recorder, frame throughput at DPR 2 | −1.0% vs a no-op sink, inside noise | the A/B above, 2026-08-11 |
 | Retention, resident cap | 8 MB | [ADR 0049][0049], a separate granted budget |
 
 Two notes on reading that table:
