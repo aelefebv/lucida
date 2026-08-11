@@ -35,6 +35,10 @@ export function placeServerRows(
 ): TraceServerRow[] {
   const brackets = new Map<string, Bracket | null>();
   for (const row of browserRows) {
+    // Generation 0 is "no wire request was sent", not a label. Letting it
+    // into the map would make an unlabelled row indistinguishable from a
+    // connection's genuine first request, which really is `rid: 0`.
+    if (row.connectionGeneration === 0) continue;
     const key = labelKey(row.connectionGeneration, row.rid);
     const wire = row.phases.wire;
     const existing = brackets.get(key);
@@ -73,25 +77,26 @@ function place(row: StoredServerRow, bracket: Bracket): ServerPlacement {
 
   // The server reporting more than the bracket holds is a disagreement
   // between two clocks, not a longer server. The bracket wins — it is the
-  // one measured on a single clock — and the disagreement is declared.
+  // one measured on a single clock — and the disagreement is reported at
+  // its actual size.
   if (serverUs >= bracketUs) {
     return {
       startUs: bracket.startUs,
       endUs: bracket.endUs,
       gapUs: 0,
-      gapSplit: "even",
-      clamped: serverUs > bracketUs,
+      overshootUs: serverUs - bracketUs,
     };
   }
 
+  // Centred: the gap is measured, its split between the outbound and
+  // inbound legs is not.
   const gapUs = bracketUs - serverUs;
   const startUs = bracket.startUs + Math.floor(gapUs / 2);
   return {
     startUs,
     endUs: startUs + serverUs,
     gapUs,
-    gapSplit: "even",
-    clamped: false,
+    overshootUs: 0,
   };
 }
 

@@ -233,10 +233,17 @@ export interface PhaseTiming {
  */
 export interface WireLabel {
   rid: number;
+  /**
+   * Connections count from 1, so **generation 0 means no wire request** —
+   * the transport had no socket, the message was dropped before it was
+   * sent, and there is nothing on the server to join to. That is what makes
+   * {@link UNLABELLED} distinguishable from a genuine `rid: 0`, which every
+   * connection's first request legitimately has.
+   */
   connectionGeneration: number;
 }
 
-/** No wire request was ever sent for this row (or none had been yet). */
+/** No wire request was sent for this row — see {@link WireLabel.connectionGeneration}. */
 export const UNLABELLED: WireLabel = { rid: 0, connectionGeneration: 0 };
 
 /** Which labelled request family a server row describes. */
@@ -272,20 +279,21 @@ export interface ServerPlacement {
    * The unattributed remainder of the bracket: network plus socket queue.
    * Named rather than absorbed — a confidently-wrong merged timeline is a
    * failure, not a win.
+   *
+   * The gap is measured; where inside the bracket it falls is not. The span
+   * is centred, which splits the gap evenly between the outbound and inbound
+   * legs because nothing here measures them apart. Read `gapUs`, not the
+   * position, for how much is unaccounted for.
    */
   gapUs: number;
   /**
-   * How the gap was distributed around the server's span. `even` because
-   * nothing here measures the outbound and inbound legs apart; the total is
-   * measured, the split is not.
+   * How far the server's own numbers exceeded the browser's bracket, in
+   * microseconds. Non-zero means the two clocks disagree; the span is
+   * clamped to the bracket, because the bracket is the one measured on a
+   * single clock. Reported as a size rather than a flag — a disagreement
+   * of 3 µs and one of 3 s are not the same news.
    */
-  gapSplit: "even";
-  /**
-   * The server reported more time than the browser's bracket contains — a
-   * measurement disagreement, not a longer server. The span is clamped to
-   * the bracket and the fact is stated rather than hidden.
-   */
-  clamped: boolean;
+  overshootUs: number;
 }
 
 /** Why a server row could not be placed on the browser's timeline. */

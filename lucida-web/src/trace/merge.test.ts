@@ -46,7 +46,7 @@ describe("placeServerRows", () => {
     expect(placement.endUs).toBe(9_000);
     expect(placement.startUs).toBeGreaterThanOrEqual(1_000);
     expect(placement.endUs).toBeLessThanOrEqual(11_000);
-    expect(placement.clamped).toBe(false);
+    expect(placement.overshootUs).toBe(0);
     expect(placed.unplacedReason).toBeNull();
   });
 
@@ -62,7 +62,9 @@ describe("placeServerRows", () => {
     expect(placement.startUs).toBe(1_000);
     expect(placement.endUs).toBe(11_000);
     expect(placement.gapUs).toBe(0);
-    expect(placement.clamped).toBe(true);
+    // The size of the disagreement, not just its existence: 3 µs and 3 s
+    // are not the same news.
+    expect(placement.overshootUs).toBe(10_200);
   });
 
   it("joins on the generation as well as the label", () => {
@@ -114,6 +116,17 @@ describe("placeServerRows", () => {
     expect(placed.unplacedReason).toBe("answered-without-delivery");
     // The server's own numbers survive: it did do 300 µs of honest work.
     expect(placed.durationUs).toBe(300);
+  });
+
+  it("never joins an unlabelled row, whose rid 0 is not a label", () => {
+    // Generation 0 means no wire request went out. A connection's genuine
+    // first request is also rid 0, so treating the two alike would place a
+    // server row inside a bracket that belongs to nothing.
+    const [placed] = placeServerRows(
+      [browserRow({ rid: 0, connectionGeneration: 0 })],
+      [serverRow({ rid: 0, connectionGeneration: 1 })],
+    );
+    expect(placed.unplacedReason).toBe("no-browser-row");
   });
 
   it("distinguishes an open bracket from a label the browser never recorded", () => {

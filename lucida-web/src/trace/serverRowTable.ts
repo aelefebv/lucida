@@ -18,19 +18,11 @@ import {
 } from "./types.ts";
 
 /**
- * The wire vocabulary, which is Rust's `snake_case` rather than the
- * document's kebab-case. Mirrored rather than reused so the two can be
- * compared: the wire form is locked by the goldens, the document form is
- * what a reader sees, and the translation between them is one table here
- * instead of an assumption spread over both.
+ * The one word where the wire and the document disagree: Rust spells it
+ * `not_ready`, the document spells every multi-word name kebab-case. The
+ * families need no translation, so they have none.
  */
-export type WireRowFamily = "chunk" | "asset";
 export type WireRowOutcome = "delivered" | "not_ready" | "failed";
-
-const FAMILY_FROM_WIRE: Record<WireRowFamily, ServerRowFamily> = {
-  chunk: "chunk",
-  asset: "asset",
-};
 
 const OUTCOME_FROM_WIRE: Record<WireRowOutcome, ServerRowOutcome> = {
   delivered: "delivered",
@@ -42,7 +34,7 @@ const OUTCOME_FROM_WIRE: Record<WireRowOutcome, ServerRowOutcome> = {
 export interface ServerTimingBatch {
   dropped: number;
   rid: number[];
-  family: WireRowFamily[];
+  family: ServerRowFamily[];
   dispatch_offset_us: number[];
   duration_us: number[];
   outcome: WireRowOutcome[];
@@ -122,12 +114,10 @@ export class ServerRowTable {
       this.dispatchOffsets[index] = batch.dispatch_offset_us[i];
       this.durations[index] = batch.duration_us[i];
       // An unrecognised vocabulary word means the two sides have drifted,
-      // which the goldens exist to prevent. It resolves to `failed` rather
-      // than `delivered`: a word we cannot read must not be able to hide a
+      // which the goldens exist to prevent. An unreadable outcome resolves
+      // to `failed`: a word we cannot read must not be able to hide a
       // request that never landed.
-      this.families[index] = SERVER_ROW_FAMILIES.indexOf(
-        FAMILY_FROM_WIRE[batch.family[i]] ?? "chunk",
-      );
+      this.families[index] = Math.max(0, SERVER_ROW_FAMILIES.indexOf(batch.family[i]));
       this.outcomes[index] = SERVER_ROW_OUTCOMES.indexOf(
         OUTCOME_FROM_WIRE[batch.outcome[i]] ?? "failed",
       );
