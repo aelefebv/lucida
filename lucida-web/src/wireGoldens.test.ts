@@ -86,7 +86,8 @@ import {
   type WireAssetCatalogDelta,
 } from "./pipeline/assetCatalog.ts";
 import { ProxiedContentSource } from "./pipeline/fetch/contentSource.ts";
-import { ServerRowTable } from "./trace/serverRowTable.ts";
+import { ServerRowTable, serverRowTotalUs } from "./trace/serverRowTable.ts";
+import { PHASE_UNSET } from "./trace/types.ts";
 import { COLORMAP_NAMES } from "./colormaps.ts";
 import {
   type ArcballCamera,
@@ -1309,9 +1310,19 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
         dropped: 3,
         rid: [2558, 2559],
         family: ["chunk", "asset"],
-        dispatch_offset_us: [142, 96],
-        duration_us: [8137, 214902],
         outcome: ["delivered", "not_ready"],
+        arrival_us: [142, 96],
+        binding_lookup_us: [37, 41],
+        dispatch_us: [88, 74],
+        cache_lookup_us: [2, 3],
+        // The second row never touched the source store, so its store
+        // phases are unset rather than zero.
+        permit_wait_us: [3100000, PHASE_UNSET],
+        backend_read_us: [211400, PHASE_UNSET],
+        coalesced_wait_us: [PHASE_UNSET, PHASE_UNSET],
+        decompress_us: [4512, PHASE_UNSET],
+        slice_encode_us: [903, PHASE_UNSET],
+        handoff_us: [61, 55],
       },
     });
 
@@ -1329,9 +1340,11 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     const table = new ServerRowTable();
     table.ingest(batch, generation);
     expect(table.droppedCount).toBe(3);
-    expect(table.serialise().map(row => [row.rid, row.family, row.durationUs])).toEqual([
-      [2558, "chunk", 8137],
-      [2559, "asset", 214902],
+    expect(
+      table.serialise().map(row => [row.rid, row.family, serverRowTotalUs(row.phases)]),
+    ).toEqual([
+      [2558, "chunk", 142 + 37 + 88 + 2 + 3100000 + 211400 + 4512 + 903 + 61],
+      [2559, "asset", 96 + 41 + 74 + 3 + 55],
     ]);
   });
 

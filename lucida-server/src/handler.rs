@@ -13,8 +13,8 @@ use lucida_protocol::{
     DatasetGeneratedCoarseHealth, DatasetHealthComponent, DatasetHealthStatus,
     DatasetOpenFailureDiagnostic, DatasetOpenFailureKind, DatasetOpenProgressDiagnostic,
     DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened, DatasetSourceCacheStats,
-    DatasetSourceHealth, GeneratedAvailabilitySnapshot, GeneratedChunkStatus, SourceChunkStatus,
-    TimingRowFamily, TimingRowOutcome,
+    DatasetSourceHealth, GeneratedAvailabilitySnapshot, GeneratedChunkStatus, ServerPhase,
+    SourceChunkStatus, TimingRowFamily, TimingRowOutcome,
 };
 use lucida_proxy::{ProxyAsset, ProxyKind, ProxySpec};
 use lucida_store::cache::CachedStore;
@@ -294,6 +294,13 @@ async fn handle_client_inner(
     while let Some(Ok(msg)) = ws_rx.next().await {
         match msg {
             Message::Text(text) => {
+                // Every offset a labelled request reports is relative to
+                // here — the frame off the socket, before it is parsed or
+                // routed. Routing tries each message shape in turn, and
+                // under a burst of thousands of chunk requests that parse is
+                // a real cost, so it sits inside the row rather than before
+                // it (`ServerPhase::Arrival`).
+                let arrival = Instant::now();
                 let json = text.to_string();
 
                 // Try as ClientMessage (new protocol).
@@ -669,8 +676,6 @@ async fn handle_client_inner(
 
                 // Try as ChunkMessage.
                 if let Ok(chunk_msg) = serde_json::from_str::<ChunkMessage>(&json) {
-                    // Every offset this request reports is relative to here.
-                    let arrival = Instant::now();
                     match chunk_msg {
                         ChunkMessage::ChunkRequest {
                             rid,
@@ -685,6 +690,17 @@ async fn handle_client_inner(
                             // serve_chunk_from_store will fail-fast at
                             // resolve time.
                             let level = parse_level_from_chunk_key(&key);
+                            let mut probe = RequestProbe::arrived(
+                                rid,
+                                TimingRowFamily::Chunk,
+                                arrival,
+                                Arc::clone(&timings),
+                            );
+                            probe.mark(ServerPhase::Arrival);
+                            // The lookup takes the shared session mutex, so
+                            // every chunk request from every client in the
+                            // workspace serialises here. It looks free and is
+                            // not, which is why it earns a slot (ADR 0050).
                             let dispatch = {
                                 let sess = session.lock().await;
                                 sess.server_bindings.get(&dataset_id).map(|b| {
@@ -704,6 +720,7 @@ async fn handle_client_inner(
                                     }
                                 })
                             };
+                            probe.mark(ServerPhase::BindingLookup);
                             match dispatch {
                                 Some(ChunkDispatch::Source {
                                     resolved,
@@ -711,14 +728,7 @@ async fn handle_client_inner(
                                     cache,
                                 }) => {
                                     let unicast_routes_clone = Arc::clone(&unicast_routes);
-                                    let timings_clone = Arc::clone(&timings);
                                     tokio::spawn(async move {
-                                        let probe = RequestProbe::dispatched(
-                                            rid,
-                                            TimingRowFamily::Chunk,
-                                            arrival,
-                                            timings_clone,
-                                        );
                                         serve_chunk_from_store(
                                             id,
                                             &dataset_id,
@@ -739,14 +749,7 @@ async fn handle_client_inner(
                                     generated_service,
                                 }) => {
                                     let unicast_routes_clone = Arc::clone(&unicast_routes);
-                                    let timings_clone = Arc::clone(&timings);
                                     tokio::spawn(async move {
-                                        let probe = RequestProbe::dispatched(
-                                            rid,
-                                            TimingRowFamily::Chunk,
-                                            arrival,
-                                            timings_clone,
-                                        );
                                         generated_service
                                             .enqueue_chunk_request(&image_id, level, &key)
                                             .await;
@@ -771,14 +774,9 @@ async fn handle_client_inner(
                                     // browser's bracket for this label will
                                     // never close, and an unexplained open
                                     // bracket is the reading this exists to
-                                    // prevent.
-                                    RequestProbe::dispatched(
-                                        rid,
-                                        TimingRowFamily::Chunk,
-                                        arrival,
-                                        Arc::clone(&timings),
-                                    )
-                                    .finish(TimingRowOutcome::Failed);
+                                    // prevent. The phases past the lookup
+                                    // stay unset — it never reached them.
+                                    probe.finish(TimingRowOutcome::Failed);
                                 }
                             }
                         }
@@ -791,7 +789,6 @@ async fn handle_client_inner(
 
                 // Try as AssetMessage (proxy asset request).
                 if let Ok(asset_msg) = serde_json::from_str::<AssetMessage>(&json) {
-                    let arrival = Instant::now();
                     match asset_msg {
                         AssetMessage::AssetRequest {
                             rid,
@@ -801,34 +798,29 @@ async fn handle_client_inner(
                             t,
                             c,
                         } => {
+                            let mut probe = RequestProbe::arrived(
+                                rid,
+                                TimingRowFamily::Asset,
+                                arrival,
+                                Arc::clone(&timings),
+                            );
+                            probe.mark(ServerPhase::Arrival);
                             let generator = {
                                 let sess = session.lock().await;
                                 sess.server_bindings.get(&dataset_id).and_then(|b| {
                                     b.legacy_proxy_enabled.then(|| b.proxy_generator.clone())
                                 })
                             };
+                            probe.mark(ServerPhase::BindingLookup);
                             let Some(generator) = generator else {
                                 eprintln!(
                                     "server: no binding for dataset {dataset_id} (asset {entity_id:?}/{kind:?} dropped)"
                                 );
-                                RequestProbe::dispatched(
-                                    rid,
-                                    TimingRowFamily::Asset,
-                                    arrival,
-                                    Arc::clone(&timings),
-                                )
-                                .finish(TimingRowOutcome::Failed);
+                                probe.finish(TimingRowOutcome::Failed);
                                 continue;
                             };
                             let unicast_routes_clone = Arc::clone(&unicast_routes);
-                            let timings_clone = Arc::clone(&timings);
                             tokio::spawn(async move {
-                                let probe = RequestProbe::dispatched(
-                                    rid,
-                                    TimingRowFamily::Asset,
-                                    arrival,
-                                    timings_clone,
-                                );
                                 serve_asset_request(
                                     id,
                                     entity_id,
@@ -1411,7 +1403,7 @@ async fn serve_chunk_from_store(
     level_info: Option<crate::binding::LevelInfo>,
     cache: &Arc<CachedStore>,
     unicast_routes: &UnicastRoutes,
-    probe: RequestProbe,
+    mut probe: RequestProbe,
 ) {
     let object_path = match object_path {
         Some(p) => p,
@@ -1440,15 +1432,20 @@ async fn serve_chunk_from_store(
 
     tracing::trace!(dataset = %dataset_id, image = %image_id, key = chunk_key, path = object_path, "serving chunk");
     let obj_path = Path::from(object_path);
+    // Everything from the serve task starting to the read being issued.
+    probe.mark(ServerPhase::Dispatch);
     // Charged to the requesting client, so one client's collection-sized
     // backlog cannot delay another client's first chunk (#901).
     // The label crosses into the store with the read, so a wait behind the
     // source-read cap is attributable to a request rather than only to a
     // client (ADR 0048).
-    let mut bytes: Vec<u8> = match cache
+    let read = cache
         .get_bytes(&obj_path, ReaderId(client_id), RequestLabel(probe.rid()))
-        .await
-    {
+        .await;
+    // The store owns this stretch of the row: only it knows whether this
+    // request led the single flight or waited on someone else's read.
+    probe.record_read(read.timing);
+    let mut bytes: Vec<u8> = match read.result {
         Ok(storage_bytes) => {
             // Decode storage compression → raw bytes (WireFormat::Raw for phase 1).
             // Shared with the proxy generator via [`crate::decode::decode_storage_bytes`].
@@ -1461,10 +1458,12 @@ async fn serve_chunk_from_store(
                         compression = ?level_info.compression,
                         "chunk decoded"
                     );
+                    probe.mark(ServerPhase::Decompress);
                     raw
                 }
                 Err(e) => {
                     eprintln!("server: decode failed for {chunk_key}: {e}");
+                    probe.mark(ServerPhase::Decompress);
                     probe.finish(TimingRowOutcome::Failed);
                     return;
                 }
@@ -1490,6 +1489,7 @@ async fn serve_chunk_from_store(
                 unicast_routes,
             )
             .await;
+            probe.mark(ServerPhase::Handoff);
             probe.finish(TimingRowOutcome::Failed);
             return;
         }
@@ -1511,6 +1511,7 @@ async fn serve_chunk_from_store(
     }
 
     let buf = encode_chunk_frame(client_id, dataset_id, image_id, chunk_key, &bytes);
+    probe.mark(ServerPhase::SliceEncode);
 
     let senders = unicast_routes.lock().await;
     if let Some(sender) = senders.get(&client_id) {
@@ -1518,6 +1519,7 @@ async fn serve_chunk_from_store(
     }
     // Handoff is terminal: the socket write happens in another task behind
     // an unbounded queue and is not observable from here.
+    probe.mark(ServerPhase::Handoff);
     probe.finish(TimingRowOutcome::Delivered);
 }
 
@@ -1531,15 +1533,22 @@ async fn serve_generated_chunk_request(
     chunk_key: &str,
     derived_chunks: &Arc<DerivedChunkCache>,
     unicast_routes: &UnicastRoutes,
-    probe: RequestProbe,
+    mut probe: RequestProbe,
 ) {
-    match derived_chunks.lookup(image_id, level, chunk_key) {
+    // A generated chunk never touches the source store, so its permit,
+    // read and decompress slots stay unset rather than reading as zero.
+    probe.mark(ServerPhase::Dispatch);
+    let lookup = derived_chunks.lookup(image_id, level, chunk_key);
+    probe.mark(ServerPhase::CacheLookup);
+    match lookup {
         DerivedChunkLookup::Ready(bytes) => {
             let buf = encode_chunk_frame(client_id, dataset_id, image_id, chunk_key, &bytes);
+            probe.mark(ServerPhase::SliceEncode);
             let senders = unicast_routes.lock().await;
             if let Some(sender) = senders.get(&client_id) {
                 let _ = sender.send(Message::Binary(buf.into()));
             }
+            probe.mark(ServerPhase::Handoff);
             probe.finish(TimingRowOutcome::Delivered);
         }
         DerivedChunkLookup::Status { status, message } => {
@@ -1557,6 +1566,7 @@ async fn serve_generated_chunk_request(
             // label's browser row terminates without a delivery. `NotReady`
             // is what stops a reader charging that open bracket to the
             // server as a stall.
+            probe.mark(ServerPhase::Handoff);
             probe.finish(TimingRowOutcome::NotReady);
         }
     }
@@ -1664,7 +1674,7 @@ async fn serve_asset_request(
     c: u32,
     generator: &Arc<ProxyGenerator>,
     unicast_routes: &UnicastRoutes,
-    probe: RequestProbe,
+    mut probe: RequestProbe,
 ) {
     let spec = ProxySpec {
         entity_id: entity_id.clone(),
@@ -1682,10 +1692,12 @@ async fn serve_asset_request(
         "serving proxy asset"
     );
 
+    probe.mark(ServerPhase::Dispatch);
     let asset = match generator.request(spec, 1).await {
         Ok(a) => a,
         Err(e) => {
             eprintln!("server: proxy generation failed for {entity_id:?}/{kind:?}/T{t}_C{c}: {e}");
+            probe.mark(ServerPhase::SliceEncode);
             probe.finish(TimingRowOutcome::Failed);
             return;
         }
@@ -1695,15 +1707,21 @@ async fn serve_asset_request(
         Ok(b) => b,
         Err(e) => {
             eprintln!("server: proxy frame encode failed: {e}");
+            probe.mark(ServerPhase::SliceEncode);
             probe.finish(TimingRowOutcome::Failed);
             return;
         }
     };
+    // Producing the asset and encoding its frame share one slot: this
+    // family has no generation phase of its own, and it is due for deletion
+    // under ADR 0043 rather than for a wider enum.
+    probe.mark(ServerPhase::SliceEncode);
 
     let senders = unicast_routes.lock().await;
     if let Some(sender) = senders.get(&client_id) {
         let _ = sender.send(Message::Binary(buf.into()));
     }
+    probe.mark(ServerPhase::Handoff);
     probe.finish(TimingRowOutcome::Delivered);
 }
 
@@ -1874,7 +1892,7 @@ mod tests {
     /// A probe wired to a buffer the test can read back, so what a serve path
     /// *declares* about its own outcome is asserted rather than assumed.
     fn test_probe(rid: u32, buffer: &Arc<TimingBuffer>) -> RequestProbe {
-        RequestProbe::dispatched(
+        RequestProbe::arrived(
             rid,
             TimingRowFamily::Chunk,
             Instant::now(),
@@ -1897,12 +1915,13 @@ mod tests {
         assert!(flush_timings(&buffer, &mut socket).await);
         assert!(socket.is_empty(), "an empty tick puts nothing on the wire");
 
+        let mut phases = [lucida_protocol::PHASE_UNSET; lucida_protocol::SERVER_PHASES.len()];
+        phases[0] = 5;
         buffer.record(crate::timing::ServedRow {
             rid: 41,
             family: TimingRowFamily::Chunk,
-            dispatch_offset_us: 5,
-            duration_us: 900,
             outcome: TimingRowOutcome::Delivered,
+            phases,
         });
 
         assert!(flush_timings(&buffer, &mut socket).await);
@@ -1915,7 +1934,7 @@ mod tests {
             panic!("expected a timing batch");
         };
         assert_eq!(batch.rid, vec![41]);
-        assert_eq!(batch.duration_us, vec![900]);
+        assert_eq!(batch.arrival_us, vec![5]);
     }
 
     /// Health is a worst-of fold, and no component may be lost to argument

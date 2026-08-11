@@ -11,8 +11,12 @@
  */
 
 import {
+  PHASE_UNSET,
+  SERVER_PHASES,
+  SERVER_PHASE_WIRE_KEYS,
   SERVER_ROW_FAMILIES,
   SERVER_ROW_OUTCOMES,
+  type ServerPhaseDurations,
   type ServerRowFamily,
   type ServerRowOutcome,
 } from "./types.ts";
@@ -30,34 +34,49 @@ const OUTCOME_FROM_WIRE: Record<WireRowOutcome, ServerRowOutcome> = {
   failed: "failed",
 };
 
-/** The wire shape of one flush window, as `ServerMessage::TimingBatch` carries it. */
+/**
+ * The wire shape of one flush window, as `ServerMessage::TimingBatch` carries
+ * it: one column per server phase (see `SERVER_PHASES`), in microseconds,
+ * {@link PHASE_UNSET} where the row never entered that phase.
+ */
 export interface ServerTimingBatch {
   dropped: number;
   rid: number[];
   family: ServerRowFamily[];
-  dispatch_offset_us: number[];
-  duration_us: number[];
   outcome: WireRowOutcome[];
+  arrival_us: number[];
+  binding_lookup_us: number[];
+  dispatch_us: number[];
+  cache_lookup_us: number[];
+  permit_wait_us: number[];
+  backend_read_us: number[];
+  coalesced_wait_us: number[];
+  decompress_us: number[];
+  slice_encode_us: number[];
+  handoff_us: number[];
 }
 
-/** A row as stored: the server's numbers plus the connection it arrived on. */
+/**
+ * A row as stored: the server's numbers plus the connection it arrived on.
+ * Phases the request never entered are absent from `phases` rather than
+ * zero — an unentered stage and an instant one are different facts.
+ */
 export interface StoredServerRow {
   rid: number;
   connectionGeneration: number;
   family: ServerRowFamily;
   outcome: ServerRowOutcome;
-  dispatchOffsetUs: number;
-  durationUs: number;
+  phases: ServerPhaseDurations;
 }
 
 export class ServerRowTable {
-  /** 2 label + 2 duration columns as uint32, plus two enum bytes. */
-  static readonly BYTES_PER_ROW = 4 * 4 + 2;
+  /** 2 label columns + one column per phase as uint32, plus two enum bytes. */
+  static readonly BYTES_PER_ROW = (2 + SERVER_PHASES.length) * 4 + 2;
 
   private rids: Uint32Array;
   private connectionGenerations: Uint32Array;
-  private dispatchOffsets: Uint32Array;
-  private durations: Uint32Array;
+  /** One column per phase, in {@link SERVER_PHASES} order. */
+  private phaseColumns: Uint32Array[];
   private families: Uint8Array;
   private outcomes: Uint8Array;
 
@@ -69,8 +88,7 @@ export class ServerRowTable {
     this.capacity = Math.max(1, initialCapacity);
     this.rids = new Uint32Array(this.capacity);
     this.connectionGenerations = new Uint32Array(this.capacity);
-    this.dispatchOffsets = new Uint32Array(this.capacity);
-    this.durations = new Uint32Array(this.capacity);
+    this.phaseColumns = SERVER_PHASES.map(() => new Uint32Array(this.capacity));
     this.families = new Uint8Array(this.capacity);
     this.outcomes = new Uint8Array(this.capacity);
   }
@@ -99,20 +117,18 @@ export class ServerRowTable {
    */
   ingest(batch: ServerTimingBatch, connectionGeneration: number): void {
     this.droppedByServer += batch.dropped ?? 0;
-    const count = Math.min(
-      batch.rid.length,
-      batch.family.length,
-      batch.dispatch_offset_us.length,
-      batch.duration_us.length,
-      batch.outcome.length,
-    );
+    let count = Math.min(batch.rid.length, batch.family.length, batch.outcome.length);
+    for (const key of SERVER_PHASE_WIRE_KEYS) {
+      count = Math.min(count, batch[key]?.length ?? 0);
+    }
     for (let i = 0; i < count; i++) {
       if (this.rows === this.capacity) this.grow();
       const index = this.rows++;
       this.rids[index] = batch.rid[i];
       this.connectionGenerations[index] = connectionGeneration;
-      this.dispatchOffsets[index] = batch.dispatch_offset_us[i];
-      this.durations[index] = batch.duration_us[i];
+      for (let p = 0; p < SERVER_PHASES.length; p++) {
+        this.phaseColumns[p][index] = batch[SERVER_PHASE_WIRE_KEYS[p]][i];
+      }
       // An unrecognised vocabulary word means the two sides have drifted,
       // which the goldens exist to prevent. An unreadable outcome resolves
       // to `failed`: a word we cannot read must not be able to hide a
@@ -127,13 +143,17 @@ export class ServerRowTable {
   serialise(): StoredServerRow[] {
     const out: StoredServerRow[] = [];
     for (let i = 0; i < this.rows; i++) {
+      const phases: ServerPhaseDurations = {};
+      for (let p = 0; p < SERVER_PHASES.length; p++) {
+        const value = this.phaseColumns[p][i];
+        if (value !== PHASE_UNSET) phases[SERVER_PHASES[p]] = value;
+      }
       out.push({
         rid: this.rids[i],
         connectionGeneration: this.connectionGenerations[i],
         family: SERVER_ROW_FAMILIES[this.families[i]],
         outcome: SERVER_ROW_OUTCOMES[this.outcomes[i]],
-        dispatchOffsetUs: this.dispatchOffsets[i],
-        durationUs: this.durations[i],
+        phases,
       });
     }
     return out;
@@ -143,12 +163,20 @@ export class ServerRowTable {
     const next = this.capacity * 2;
     this.rids = copyInto(this.rids, new Uint32Array(next));
     this.connectionGenerations = copyInto(this.connectionGenerations, new Uint32Array(next));
-    this.dispatchOffsets = copyInto(this.dispatchOffsets, new Uint32Array(next));
-    this.durations = copyInto(this.durations, new Uint32Array(next));
+    this.phaseColumns = this.phaseColumns.map(column => copyInto(column, new Uint32Array(next)));
     this.families = copyInto(this.families, new Uint8Array(next));
     this.outcomes = copyInto(this.outcomes, new Uint8Array(next));
     this.capacity = next;
   }
+}
+
+/** The server's total time on a request: the phases it actually entered. */
+export function serverRowTotalUs(phases: ServerPhaseDurations): number {
+  let total = 0;
+  for (const phase of SERVER_PHASES) {
+    total += phases[phase] ?? 0;
+  }
+  return total;
 }
 
 function copyInto<T extends Uint8Array | Uint32Array>(src: T, next: T): T {

@@ -387,6 +387,74 @@ export type ServerRowFamily = "chunk" | "asset";
 export const SERVER_ROW_FAMILIES: readonly ServerRowFamily[] = ["chunk", "asset"];
 
 /**
+ * The server's phase enum, wider than the browser's because its clock is
+ * finer: ADR 0047's 100 µs floor was a browser-platform measurement (#897)
+ * and Rust's `Instant` has no such floor, so the rule is clock-relative.
+ * Comparing a server phase against a browser phase by resolution is a
+ * category error.
+ *
+ * - `arrival`         frame off the socket → the request is recognised.
+ * - `binding-lookup`  resolving the dataset binding, behind the shared
+ *                     session mutex every client in the workspace takes.
+ * - `dispatch`        binding in hand → the serve task is doing work.
+ * - `cache-lookup`    the source cache's LRU probe and single-flight
+ *                     election, or the generated cache's lookup.
+ * - `permit-wait`     queued behind the source-read cap. Leader rows only.
+ * - `backend-read`    the round trip. Leader rows only, so a sum over this
+ *                     phase counts each real read exactly once.
+ * - `coalesced-wait`  parked on another request's in-flight read of the
+ *                     same object. A follower's whole wait lives here, so
+ *                     it is diagnosed as waiting on a read in flight rather
+ *                     than as a slow backend.
+ * - `decompress`      storage codec decode.
+ * - `slice-encode`    the (t, c) slice and the wire frame.
+ * - `handoff`         onto the outbound queue. Terminal: socket write time
+ *                     is excluded, as it happens in a separate task behind
+ *                     an unbounded queue.
+ */
+export const SERVER_PHASES = [
+  "arrival",
+  "binding-lookup",
+  "dispatch",
+  "cache-lookup",
+  "permit-wait",
+  "backend-read",
+  "coalesced-wait",
+  "decompress",
+  "slice-encode",
+  "handoff",
+] as const;
+export type ServerPhase = (typeof SERVER_PHASES)[number];
+
+/**
+ * The wire column each phase arrives in, in {@link SERVER_PHASES} order.
+ * Rust spells these snake_case; the document spells multi-word names
+ * kebab-case, the same disagreement the outcome vocabulary already has.
+ */
+export const SERVER_PHASE_WIRE_KEYS = [
+  "arrival_us",
+  "binding_lookup_us",
+  "dispatch_us",
+  "cache_lookup_us",
+  "permit_wait_us",
+  "backend_read_us",
+  "coalesced_wait_us",
+  "decompress_us",
+  "slice_encode_us",
+  "handoff_us",
+] as const;
+
+/**
+ * A phase the request never entered. Durations are microseconds in a
+ * uint32 and zero is a legitimate duration, so the sentinel is the top of
+ * the range — the same choice {@link UNSET_STAMP} makes for boundaries.
+ */
+export const PHASE_UNSET = 0xffffffff;
+
+/** How long a row spent in each phase it entered. Absent means unentered. */
+export type ServerPhaseDurations = Partial<Record<ServerPhase, number>>;
+
+/**
  * How the server's work for a label ended. `not-ready` is the one that
  * changes a reading: the server answered honestly and no bytes will follow,
  * so the browser's bracket for that label stays open through no fault of
@@ -448,10 +516,12 @@ export type UnplacedReason =
 export interface TraceServerRow extends WireLabel {
   family: ServerRowFamily;
   outcome: ServerRowOutcome;
-  /** Server-side arrival → start of serve. */
-  dispatchOffsetUs: number;
-  /** Start of serve → handoff to the outbound queue. */
-  durationUs: number;
+  /**
+   * How long the server spent in each phase it entered, from the frame
+   * coming off the socket to the handoff. A phase it never entered is
+   * absent, not zero.
+   */
+  phases: ServerPhaseDurations;
   placement: ServerPlacement | null;
   unplacedReason: UnplacedReason | null;
 }

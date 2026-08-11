@@ -14,7 +14,10 @@
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use lucida_protocol::{ServerTimingBatch, TimingRowFamily, TimingRowOutcome};
+use lucida_protocol::{
+    PHASE_UNSET, SERVER_PHASES, ServerPhase, ServerTimingBatch, TimingRowFamily, TimingRowOutcome,
+};
+use lucida_store::cache::SourceReadTiming;
 use tokio::sync::Notify;
 
 /// How often a connection's buffered rows are flushed to it.
@@ -36,16 +39,34 @@ pub const EARLY_FLUSH_ROWS: usize = 512;
 /// blocks the pipeline it measures is worse than one that admits a gap.
 pub const BUFFER_CAP_ROWS: usize = EARLY_FLUSH_ROWS * 2;
 
-/// One served request, as the server saw it.
+/// One served request, as the server saw it: how long it spent in each
+/// [`ServerPhase`], plus how it ended.
+///
+/// Durations rather than absolute instants, all of them relative to this
+/// request's own arrival. Phases the request never entered stay
+/// [`PHASE_UNSET`], because a generated chunk that never touched the source
+/// store and a source read that took no measurable time are different facts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ServedRow {
     pub rid: u32,
     pub family: TimingRowFamily,
-    /// Arrival → start of serve.
-    pub dispatch_offset_us: u32,
-    /// Start of serve → handoff to the outbound queue.
-    pub duration_us: u32,
     pub outcome: TimingRowOutcome,
+    /// One slot per phase, indexed by position in [`SERVER_PHASES`].
+    pub phases: [u32; SERVER_PHASES.len()],
+}
+
+impl ServedRow {
+    pub fn phase(&self, phase: ServerPhase) -> Option<u32> {
+        let slot = self.phases[phase_index(phase)];
+        (slot != PHASE_UNSET).then_some(slot)
+    }
+}
+
+fn phase_index(phase: ServerPhase) -> usize {
+    SERVER_PHASES
+        .iter()
+        .position(|candidate| *candidate == phase)
+        .expect("every phase is in SERVER_PHASES")
 }
 
 #[derive(Default)]
@@ -111,16 +132,19 @@ impl TimingBuffer {
             dropped,
             rid: Vec::with_capacity(rows.len()),
             family: Vec::with_capacity(rows.len()),
-            dispatch_offset_us: Vec::with_capacity(rows.len()),
-            duration_us: Vec::with_capacity(rows.len()),
             outcome: Vec::with_capacity(rows.len()),
+            ..ServerTimingBatch::default()
         };
+        for phase in SERVER_PHASES {
+            batch.column_mut(phase).reserve(rows.len());
+        }
         for row in rows {
             batch.rid.push(row.rid);
             batch.family.push(row.family);
-            batch.dispatch_offset_us.push(row.dispatch_offset_us);
-            batch.duration_us.push(row.duration_us);
             batch.outcome.push(row.outcome);
+            for (slot, phase) in row.phases.iter().zip(SERVER_PHASES) {
+                batch.column_mut(phase).push(*slot);
+            }
         }
         Some(batch)
     }
@@ -133,32 +157,39 @@ impl TimingBuffer {
     }
 }
 
-/// Times one served request from its arrival and files the row on drop of
-/// the serve — via [`RequestProbe::finish`], which every exit path calls, so
-/// an outcome is stated rather than inferred from a missing row.
+/// Times one served request phase by phase, from the instant its frame came
+/// off the socket, and files the row via [`RequestProbe::finish`] — which
+/// every exit path calls, so an outcome is stated rather than inferred from
+/// a missing row.
+///
+/// A cursor, not a set of stopwatches: [`mark`](Self::mark) closes whatever
+/// has elapsed since the previous boundary and files it under the named
+/// phase. Phases are contiguous by construction, so nothing between two
+/// marks can go unattributed, and a serve that exits early simply leaves the
+/// phases it never reached unset.
 pub struct RequestProbe {
     rid: u32,
     family: TimingRowFamily,
-    dispatch_offset_us: u32,
-    dispatched_at: Instant,
+    /// Start of the phase currently being timed.
+    cursor: Instant,
+    phases: [u32; SERVER_PHASES.len()],
     buffer: std::sync::Arc<TimingBuffer>,
 }
 
 impl RequestProbe {
-    /// Open the probe at the moment the serve begins; `arrival` is when the
-    /// request was parsed off the socket.
-    pub fn dispatched(
+    /// Open the probe at `arrival` — the instant the frame came off the
+    /// socket, before it was parsed or routed.
+    pub fn arrived(
         rid: u32,
         family: TimingRowFamily,
         arrival: Instant,
         buffer: std::sync::Arc<TimingBuffer>,
     ) -> Self {
-        let dispatched_at = Instant::now();
         Self {
             rid,
             family,
-            dispatch_offset_us: micros(dispatched_at.saturating_duration_since(arrival)),
-            dispatched_at,
+            cursor: arrival,
+            phases: [PHASE_UNSET; SERVER_PHASES.len()],
             buffer,
         }
     }
@@ -167,16 +198,45 @@ impl RequestProbe {
         self.rid
     }
 
-    /// Close the row at handoff. Socket write time is excluded — it happens
-    /// in a separate task behind an unbounded queue and is not observable
-    /// from the serve path.
+    /// Close the phase that has been running and record it as `phase`. The
+    /// next phase starts here.
+    pub fn mark(&mut self, phase: ServerPhase) {
+        let now = Instant::now();
+        self.phases[phase_index(phase)] = micros(now.saturating_duration_since(self.cursor));
+        self.cursor = now;
+    }
+
+    /// Record the store's own account of a read: its cache lookup, and then
+    /// either the permit wait and round trip it performed or the in-flight
+    /// read it waited on.
+    ///
+    /// The store measures these itself because only it knows which side of
+    /// the single flight this request landed on, and that distinction is
+    /// what keeps a sum over the read column equal to the number of round
+    /// trips actually made (ADR 0050).
+    pub fn record_read(&mut self, timing: SourceReadTiming) {
+        self.phases[phase_index(ServerPhase::CacheLookup)] = timing.cache_lookup_us;
+        for (phase, value) in [
+            (ServerPhase::PermitWait, timing.permit_wait_us),
+            (ServerPhase::BackendRead, timing.backend_read_us),
+            (ServerPhase::CoalescedWait, timing.coalesced_wait_us),
+        ] {
+            if let Some(value) = value {
+                self.phases[phase_index(phase)] = value;
+            }
+        }
+        self.cursor = Instant::now();
+    }
+
+    /// File the row. Socket write time is excluded — it happens in a
+    /// separate task behind an unbounded queue and is not observable from
+    /// the serve path, which is why [`ServerPhase::Handoff`] is terminal.
     pub fn finish(self, outcome: TimingRowOutcome) {
         self.buffer.record(ServedRow {
             rid: self.rid,
             family: self.family,
-            dispatch_offset_us: self.dispatch_offset_us,
-            duration_us: micros(self.dispatched_at.elapsed()),
             outcome,
+            phases: self.phases,
         });
     }
 }
@@ -191,12 +251,14 @@ mod tests {
     use std::sync::Arc;
 
     fn row(rid: u32) -> ServedRow {
+        let mut phases = [PHASE_UNSET; SERVER_PHASES.len()];
+        phases[phase_index(ServerPhase::Arrival)] = 10;
+        phases[phase_index(ServerPhase::Handoff)] = 20;
         ServedRow {
             rid,
             family: TimingRowFamily::Chunk,
-            dispatch_offset_us: 10,
-            duration_us: 20,
             outcome: TimingRowOutcome::Delivered,
+            phases,
         }
     }
 
@@ -228,6 +290,14 @@ mod tests {
         );
         assert_eq!(batch.dropped, 0);
         assert_eq!(batch.len(), 2);
+        // Every phase is a column of the same length, unset where the row
+        // never entered it.
+        for phase in SERVER_PHASES {
+            assert_eq!(batch.column(phase).len(), 2, "{phase:?} column");
+        }
+        assert_eq!(batch.arrival_us, vec![10, 10]);
+        assert_eq!(batch.handoff_us, vec![20, 20]);
+        assert_eq!(batch.backend_read_us, vec![PHASE_UNSET, PHASE_UNSET]);
 
         assert!(buffer.take_batch().is_none(), "a flush drains the buffer");
     }
@@ -285,7 +355,7 @@ mod tests {
     #[test]
     fn a_probe_files_exactly_one_row_with_its_outcome() {
         let buffer = Arc::new(TimingBuffer::new());
-        let probe = RequestProbe::dispatched(
+        let probe = RequestProbe::arrived(
             77,
             TimingRowFamily::Chunk,
             Instant::now(),
@@ -297,5 +367,118 @@ mod tests {
         let batch = buffer.take_batch().expect("the probe filed a row");
         assert_eq!(batch.rid, vec![77]);
         assert_eq!(batch.outcome, vec![TimingRowOutcome::Failed]);
+    }
+
+    /// Phases are contiguous: each mark closes what has elapsed since the
+    /// previous one, so no time between two boundaries goes unattributed.
+    #[test]
+    fn marks_close_contiguous_phases_and_leave_the_rest_unset() {
+        let buffer = Arc::new(TimingBuffer::new());
+        let arrival = Instant::now();
+        let mut probe =
+            RequestProbe::arrived(1, TimingRowFamily::Chunk, arrival, Arc::clone(&buffer));
+
+        std::thread::sleep(Duration::from_millis(2));
+        probe.mark(ServerPhase::Arrival);
+        std::thread::sleep(Duration::from_millis(2));
+        probe.mark(ServerPhase::BindingLookup);
+        let total_before_finish = arrival.elapsed();
+        probe.finish(TimingRowOutcome::Delivered);
+
+        let batch = buffer.take_batch().expect("a row");
+        assert!(batch.arrival_us[0] >= 2_000);
+        assert!(batch.binding_lookup_us[0] >= 2_000);
+        assert!(
+            batch.arrival_us[0] + batch.binding_lookup_us[0]
+                <= total_before_finish.as_micros() as u32,
+            "marked phases must not overlap"
+        );
+        // The serve never got as far as a read, and says so rather than
+        // reporting an instant one.
+        assert_eq!(batch.cache_lookup_us, vec![PHASE_UNSET]);
+        assert_eq!(batch.permit_wait_us, vec![PHASE_UNSET]);
+        assert_eq!(batch.handoff_us, vec![PHASE_UNSET]);
+    }
+
+    /// A leader's row owns the permit wait and the round trip; a follower's
+    /// owns neither. Reading a follower's wait as a backend read is the
+    /// mis-diagnosis this split exists to prevent.
+    #[test]
+    fn a_read_lands_on_the_phases_the_store_measured() {
+        let buffer = Arc::new(TimingBuffer::new());
+
+        let mut leader =
+            RequestProbe::arrived(1, TimingRowFamily::Chunk, Instant::now(), buffer.clone());
+        leader.record_read(SourceReadTiming {
+            cache_lookup_us: 3,
+            permit_wait_us: Some(3_100_000),
+            backend_read_us: Some(120_000),
+            coalesced_wait_us: None,
+        });
+        leader.finish(TimingRowOutcome::Delivered);
+
+        let mut follower =
+            RequestProbe::arrived(2, TimingRowFamily::Chunk, Instant::now(), buffer.clone());
+        follower.record_read(SourceReadTiming {
+            cache_lookup_us: 2,
+            permit_wait_us: None,
+            backend_read_us: None,
+            coalesced_wait_us: Some(400_000),
+        });
+        follower.finish(TimingRowOutcome::Delivered);
+
+        let batch = buffer.take_batch().expect("two rows");
+        assert_eq!(batch.permit_wait_us, vec![3_100_000, PHASE_UNSET]);
+        assert_eq!(batch.backend_read_us, vec![120_000, PHASE_UNSET]);
+        assert_eq!(batch.coalesced_wait_us, vec![PHASE_UNSET, 400_000]);
+    }
+
+    /// The client's own permit wait is reported; nothing about anyone else
+    /// is. The batch carries durations and a label, and there is nowhere in
+    /// it for queue depth, a peer's rate or a peer's dataset to appear.
+    #[test]
+    fn a_row_carries_its_own_wait_and_nothing_about_other_tenants() {
+        let buffer = Arc::new(TimingBuffer::new());
+        let mut probe =
+            RequestProbe::arrived(5, TimingRowFamily::Chunk, Instant::now(), buffer.clone());
+        probe.record_read(SourceReadTiming {
+            cache_lookup_us: 1,
+            permit_wait_us: Some(3_100_000),
+            backend_read_us: Some(90_000),
+            coalesced_wait_us: None,
+        });
+        probe.finish(TimingRowOutcome::Delivered);
+
+        let batch = buffer.take_batch().expect("a row");
+        assert_eq!(batch.permit_wait_us, vec![3_100_000]);
+
+        let json = serde_json::to_value(&batch).expect("the batch serialises");
+        let mut keys: Vec<&str> = json
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "arrival_us",
+                "backend_read_us",
+                "binding_lookup_us",
+                "cache_lookup_us",
+                "coalesced_wait_us",
+                "decompress_us",
+                "dispatch_us",
+                "dropped",
+                "family",
+                "handoff_us",
+                "outcome",
+                "permit_wait_us",
+                "rid",
+                "slice_encode_us",
+            ],
+            "a new column here is a new thing a client learns about the server",
+        );
     }
 }

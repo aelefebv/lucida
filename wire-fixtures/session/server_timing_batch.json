@@ -10,17 +10,49 @@
       "chunk",
       "asset"
     ],
-    "dispatch_offset_us": [
-      142,
-      96
-    ],
-    "duration_us": [
-      8137,
-      214902
-    ],
     "outcome": [
       "delivered",
       "not_ready"
+    ],
+    "arrival_us": [
+      142,
+      96
+    ],
+    "binding_lookup_us": [
+      37,
+      41
+    ],
+    "dispatch_us": [
+      88,
+      74
+    ],
+    "cache_lookup_us": [
+      2,
+      3
+    ],
+    "permit_wait_us": [
+      3100000,
+      4294967295
+    ],
+    "backend_read_us": [
+      211400,
+      4294967295
+    ],
+    "coalesced_wait_us": [
+      4294967295,
+      4294967295
+    ],
+    "decompress_us": [
+      4512,
+      4294967295
+    ],
+    "slice_encode_us": [
+      903,
+      4294967295
+    ],
+    "handoff_us": [
+      61,
+      55
     ]
   }
 }
