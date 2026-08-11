@@ -6,7 +6,9 @@ function batch(overrides: Partial<ServerTimingBatch> = {}): ServerTimingBatch {
   return {
     dropped: 0,
     rid: [1, 2],
+    request_id: [null, null],
     family: ["chunk", "asset"],
+    metadata_phase: [null, null],
     dispatch_offset_us: [10, 20],
     duration_us: [1_000, 2_000],
     outcome: ["delivered", "not_ready"],
@@ -28,6 +30,8 @@ describe("ServerRowTable", () => {
         outcome: "delivered",
         dispatchOffsetUs: 10,
         durationUs: 1_000,
+        requestId: null,
+        metadataPhase: null,
       },
       {
         rid: 2,
@@ -36,6 +40,8 @@ describe("ServerRowTable", () => {
         outcome: "not-ready",
         dispatchOffsetUs: 20,
         durationUs: 2_000,
+        requestId: null,
+        metadataPhase: null,
       },
     ]);
   });
@@ -45,7 +51,9 @@ describe("ServerRowTable", () => {
     table.ingest(
       batch({
         rid: [1],
+        request_id: [null],
         family: ["chunk"],
+        metadata_phase: [null],
         dispatch_offset_us: [1],
         duration_us: [1],
         outcome: ["sideways" as never],
@@ -72,6 +80,72 @@ describe("ServerRowTable", () => {
     // Better one row short than a row assembled from another row's numbers.
     expect(table.length).toBe(1);
     expect(table.serialise()[0].durationUs).toBe(1_000);
+  });
+
+  it("keys a metadata read on its open and translates the phase vocabulary", () => {
+    const table = new ServerRowTable();
+    table.ingest(
+      batch({
+        rid: [0, 0],
+        request_id: ["web-open-4c1a", "web-open-4c1a"],
+        family: ["metadata_read", "metadata_read"],
+        metadata_phase: ["backend_read", "coalesced_wait"],
+        dispatch_offset_us: [1_204, 1_990],
+        duration_us: [63_441, 400],
+        outcome: ["delivered", "delivered"],
+      }),
+      1,
+    );
+
+    const rows = table.serialise();
+    expect(rows.map(row => [row.family, row.requestId, row.metadataPhase])).toEqual([
+      ["metadata-read", "web-open-4c1a", "backend-read"],
+      ["metadata-read", "web-open-4c1a", "coalesced-wait"],
+    ]);
+  });
+
+  it("interns the open id, so one open's hundreds of reads hold one string", () => {
+    const table = new ServerRowTable();
+    for (let i = 0; i < 4; i++) {
+      table.ingest(
+        batch({
+          rid: [0],
+          request_id: ["web-open-4c1a"],
+          family: ["metadata_read"],
+          metadata_phase: ["cache_hit"],
+          dispatch_offset_us: [i],
+          duration_us: [1],
+          outcome: ["delivered"],
+        }),
+        1,
+      );
+    }
+    const ids = new Set(table.serialise().map(row => row.requestId));
+    expect(ids).toEqual(new Set(["web-open-4c1a"]));
+    // The first pool entry is index 0, and a row that is not keyed on an
+    // open must still read as unkeyed rather than borrowing it.
+    table.ingest(batch({ rid: [9], request_id: [null], family: ["chunk"], metadata_phase: [null],
+      dispatch_offset_us: [1], duration_us: [1], outcome: ["delivered"] }), 1);
+    expect(table.serialise().at(-1)?.requestId).toBeNull();
+  });
+
+  it("leaves an unreadable phase unset rather than guessing at one", () => {
+    const table = new ServerRowTable();
+    table.ingest(
+      batch({
+        rid: [0],
+        request_id: ["web-open-4c1a"],
+        family: ["metadata_read"],
+        metadata_phase: ["sideways" as never],
+        dispatch_offset_us: [1],
+        duration_us: [1],
+        outcome: ["delivered"],
+      }),
+      1,
+    );
+    // A wrong guess would report a coalesced wait as a backend round trip,
+    // which is a different diagnosis with a different fix.
+    expect(table.serialise()[0].metadataPhase).toBeNull();
   });
 
   it("grows by doubling rather than reallocating per row", () => {

@@ -28,6 +28,7 @@ import {
   type ChunkEventSource,
   type ChunkRowSource,
   type CountedPhaseIndexValue,
+  type DatasetOpenBracket,
   type EndReason,
   type CacheWarmth,
   type GpuIdentity,
@@ -87,6 +88,17 @@ export const DEFAULT_QUIESCENCE_HOLD_MS = 500;
 export const DEFAULT_RUN_TIMEOUT_MS = 60_000;
 
 /**
+ * How many dataset opens one run brackets.
+ *
+ * A page opens a handful — a workspace reload opens its members, a person
+ * opens one at a time — so this is a backstop against a page that loops,
+ * not a budget anyone spends. Opens past it are counted rather than
+ * bracketed, because their metadata rows then arrive unplaceable and a
+ * silent cap would read as a server that stopped reporting.
+ */
+export const MAX_TRACKED_OPENS = 64;
+
+/**
  * What the page can tell the recorder about the conditions a run ran under.
  * Supplied by the render loop, which is the one place that holds the canvas,
  * the mode, the dataset set and the CPU cache at once.
@@ -122,6 +134,9 @@ interface OpenRun {
   startedAtEpochMs: number;
   sink: TraceSink;
   serverRows: ServerRowTable;
+  /** Keyed by `request_id`, which is what the server's metadata rows join on. */
+  datasetOpens: Map<string, DatasetOpenBracket>;
+  datasetOpensDropped: number;
   generation: number;
 }
 
@@ -129,6 +144,8 @@ interface ClosedRun {
   header: RunHeader;
   sink: TraceSink;
   serverRows: ServerRowTable;
+  datasetOpens: DatasetOpenBracket[];
+  datasetOpensDropped: number;
 }
 
 /** Row indices are packed with the run generation so a stale handle is inert. */
@@ -233,6 +250,8 @@ export class TraceRecorder {
       startedAtEpochMs,
       sink: this.sinkFactory(),
       serverRows: new ServerRowTable(),
+      datasetOpens: new Map(),
+      datasetOpensDropped: 0,
       generation: this.generation,
     };
     this.timeoutTimer = setTimeout(() => this.closeRun("timeout"), this.timeoutMs);
@@ -258,6 +277,10 @@ export class TraceRecorder {
     this.closed.push({
       sink: run.sink,
       serverRows: run.serverRows,
+      // An open still in flight keeps its null end rather than being
+      // dropped or given the run's close as an end it never reached.
+      datasetOpens: [...run.datasetOpens.values()],
+      datasetOpensDropped: run.datasetOpensDropped,
       header: {
         ...run.environment.captureConditions(),
         cacheWarmth: run.cacheWarmth,
@@ -421,6 +444,46 @@ export class TraceRecorder {
   }
 
   /**
+   * A dataset-open request went out. Opens the run if none is open: this
+   * *is* the start of the cold open the monitor exists to explain, and a
+   * run that began when the first chunk arrived would leave the reads that
+   * decided the dataset's shape outside every run there was.
+   *
+   * The bracket is what the server's metadata-read rows nest inside, so an
+   * open that is never noted here files rows nobody can place.
+   */
+  noteOpenSent(requestId: string): void {
+    this.openRun({ epoch: "content", dirtyKind: "interactive", source: "dataset_open_request" });
+    const run = this.open;
+    if (!run) return;
+    if (run.datasetOpens.has(requestId)) return;
+    if (run.datasetOpens.size >= MAX_TRACKED_OPENS) {
+      run.datasetOpensDropped++;
+      return;
+    }
+    run.datasetOpens.set(requestId, {
+      requestId,
+      startUs: this.offsetUs(run, this.now()),
+      endUs: null,
+    });
+  }
+
+  /**
+   * The open settled, either way. A failed open closes its bracket exactly
+   * as a successful one does — its reads are the ones most worth reading,
+   * and dropping them here would lose them in the case that needs them.
+   */
+  noteOpenSettled(requestId: string): void {
+    const run = this.open;
+    if (!run) return;
+    const open = run.datasetOpens.get(requestId);
+    // A second terminal frame for one open — a failure after a warning, a
+    // stray progress frame — must not move an end that already happened.
+    if (!open || open.endUs !== null) return;
+    open.endUs = this.offsetUs(run, this.now());
+  }
+
+  /**
    * Take a flush window of the server's rows. They belong to the run that is
    * open when they arrive; rows that arrive between runs are counted and
    * dropped, because an unjoinable server row is not a diagnostic and
@@ -528,7 +591,9 @@ export class TraceRecorder {
           eventsDropped: run.sink.eventsDropped,
           // Placement happens here, at export, because it needs both tables
           // — and because the in-memory model stays a table.
-          serverRows: placeServerRows(rows, run.serverRows.serialise()),
+          serverRows: placeServerRows(rows, run.serverRows.serialise(), run.datasetOpens),
+          datasetOpens: run.datasetOpens,
+          datasetOpensDropped: run.datasetOpensDropped,
           serverRowsDropped: run.serverRows.droppedCount,
         };
       }),

@@ -1154,6 +1154,9 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     const { ws } = openBridge({ onOpenDatasetFailed });
     deliver(ws, raw);
     expect(onOpenDatasetFailed).toHaveBeenCalledWith(
+      // The open's own id comes back with the failure: the trace closes a
+      // failed open's bracket exactly as it closes a successful one's.
+      "web-81c09b",
       "gs://lucida-fixtures/missing.zarr",
       "object not found",
     );
@@ -1307,11 +1310,13 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
       type: "timing_batch",
       batch: {
         dropped: 3,
-        rid: [2558, 2559],
-        family: ["chunk", "asset"],
-        dispatch_offset_us: [142, 96],
-        duration_us: [8137, 214902],
-        outcome: ["delivered", "not_ready"],
+        rid: [2558, 2559, 0],
+        request_id: [null, null, "web-open-4c1a"],
+        family: ["chunk", "asset", "metadata_read"],
+        metadata_phase: [null, null, "backend_read"],
+        dispatch_offset_us: [142, 96, 1204],
+        duration_us: [8137, 214902, 63441],
+        outcome: ["delivered", "not_ready", "delivered"],
       },
     });
 
@@ -1329,9 +1334,15 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     const table = new ServerRowTable();
     table.ingest(batch, generation);
     expect(table.droppedCount).toBe(3);
-    expect(table.serialise().map(row => [row.rid, row.family, row.durationUs])).toEqual([
-      [2558, "chunk", 8137],
-      [2559, "asset", 214902],
+    expect(
+      table
+        .serialise()
+        .map(row => [row.rid, row.family, row.durationUs, row.requestId, row.metadataPhase]),
+    ).toEqual([
+      [2558, "chunk", 8137, null, null],
+      [2559, "asset", 214902, null, null],
+      // The metadata read keys on the open, not on a correlation label.
+      [0, "metadata-read", 63441, "web-open-4c1a", "backend-read"],
     ]);
   });
 

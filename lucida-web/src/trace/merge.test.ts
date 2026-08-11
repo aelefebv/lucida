@@ -33,6 +33,8 @@ function serverRow(overrides: Partial<StoredServerRow> & { rid: number }): Store
     outcome: overrides.outcome ?? "delivered",
     dispatchOffsetUs: overrides.dispatchOffsetUs ?? 200,
     durationUs: overrides.durationUs ?? 5_800,
+    requestId: overrides.requestId ?? null,
+    metadataPhase: overrides.metadataPhase ?? null,
   };
 }
 
@@ -128,6 +130,90 @@ describe("placeServerRows", () => {
       [serverRow({ rid: 0, connectionGeneration: 1 })],
     );
     expect(placed.unplacedReason).toBe("no-browser-row");
+  });
+
+  it("lays an open's metadata reads out across the open's own bracket", () => {
+    const open = { requestId: "web-open-4c1a", startUs: 1_000, endUs: 5_000_000 };
+    const [first, second] = placeServerRows(
+      [],
+      [
+        serverRow({
+          rid: 0,
+          family: "metadata-read",
+          requestId: "web-open-4c1a",
+          metadataPhase: "backend-read",
+          dispatchOffsetUs: 200_000,
+          durationUs: 63_000,
+        }),
+        serverRow({
+          rid: 0,
+          family: "metadata-read",
+          requestId: "web-open-4c1a",
+          metadataPhase: "cache-hit",
+          dispatchOffsetUs: 900_000,
+          durationUs: 2,
+        }),
+      ],
+      [open],
+    );
+
+    // Each read sits where inside the open it happened. Centring them, as a
+    // labelled row is centred in its bracket, would stack every read of a
+    // cold open at one instant and say nothing about where the time went.
+    expect(first.placement).toEqual({
+      startUs: 201_000,
+      endUs: 264_000,
+      gapUs: 0,
+      overshootUs: 0,
+    });
+    expect(second.placement?.startUs).toBe(901_000);
+  });
+
+  it("places a still-running open's reads, and clamps one that outruns the bracket", () => {
+    const [running] = placeServerRows(
+      [],
+      [
+        serverRow({
+          rid: 0,
+          family: "metadata-read",
+          requestId: "web-open-4c1a",
+          dispatchOffsetUs: 10,
+          durationUs: 90,
+        }),
+      ],
+      [{ requestId: "web-open-4c1a", startUs: 1_000, endUs: null }],
+    );
+    // A run that closed over an open still going is exactly the run someone
+    // is reading, so its reads are placed rather than withheld.
+    expect(running.placement).toEqual({ startUs: 1_010, endUs: 1_100, gapUs: 0, overshootUs: 0 });
+
+    const [overrun] = placeServerRows(
+      [],
+      [
+        serverRow({
+          rid: 0,
+          family: "metadata-read",
+          requestId: "web-open-4c1a",
+          dispatchOffsetUs: 10,
+          durationUs: 90,
+        }),
+      ],
+      [{ requestId: "web-open-4c1a", startUs: 1_000, endUs: 1_050 }],
+    );
+    // The bracket is the one measured on a single clock, so it wins and the
+    // disagreement is reported at its actual size.
+    expect(overrun.placement?.endUs).toBe(1_050);
+    expect(overrun.placement?.overshootUs).toBe(50);
+  });
+
+  it("says an open it never saw sent, rather than blaming a missing browser row", () => {
+    const [placed] = placeServerRows(
+      [],
+      [serverRow({ rid: 0, family: "metadata-read", requestId: "web-open-older" })],
+      [{ requestId: "web-open-4c1a", startUs: 1_000, endUs: 2_000 }],
+    );
+    expect(placed.placement).toBeNull();
+    expect(placed.unplacedReason).toBe("no-open-bracket");
   });
 
   it("distinguishes an open bracket from a label the browser never recorded", () => {

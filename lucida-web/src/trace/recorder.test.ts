@@ -348,6 +348,8 @@ describe("TraceRecorder server rows", () => {
   const BATCH = {
     dropped: 2,
     rid: [5],
+    request_id: [null],
+    metadata_phase: [null],
     family: ["chunk" as const],
     dispatch_offset_us: [100],
     duration_us: [2_900],
@@ -418,5 +420,89 @@ describe("TraceRecorder sink injection", () => {
 
     expect(row).toBeGreaterThanOrEqual(0);
     expect(recorder.exportDocument().runs[0].rows).toHaveLength(0);
+  });
+});
+
+describe("TraceRecorder dataset opens", () => {
+  function metadataBatch(offsetUs: number, durationUs: number, requestId = "req-1") {
+    return {
+      dropped: 0,
+      rid: [0],
+      request_id: [requestId],
+      family: ["metadata_read" as const],
+      metadata_phase: ["backend_read" as const],
+      dispatch_offset_us: [offsetUs],
+      duration_us: [durationUs],
+      outcome: ["delivered" as const],
+    };
+  }
+
+  it("opens a run at the open request, so a cold open's reads land inside one", () => {
+    const { recorder, advance } = makeRecorder();
+    // No run is open, and the first chunk does not exist yet — the reads
+    // about to arrive have nowhere else to go.
+    expect(recorder.isRunOpen).toBe(false);
+    recorder.noteOpenSent("req-1");
+    expect(recorder.isRunOpen).toBe(true);
+
+    advance(2_000);
+    recorder.ingestServerBatch(metadataBatch(150_000, 63_000), 1);
+    recorder.noteOpenSettled("req-1");
+
+    const run = recorder.exportDocument().runs[0];
+    expect(run.datasetOpens).toEqual([{ requestId: "req-1", startUs: 0, endUs: 2_000_000 }]);
+    expect(run.serverRows[0].placement).toEqual({
+      startUs: 150_000,
+      endUs: 213_000,
+      gapUs: 0,
+      overshootUs: 0,
+    });
+  });
+
+  it("keeps a failed open's rows, which is the case that needs them", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.noteOpenSent("req-1");
+    advance(800);
+    // The reads arrived on the timing ticker while the open was running;
+    // the open then failed and settled with no dataset.
+    recorder.ingestServerBatch(metadataBatch(10_000, 500_000), 1);
+    recorder.noteOpenSettled("req-1");
+
+    const run = recorder.exportDocument().runs[0];
+    expect(run.serverRows).toHaveLength(1);
+    expect(run.serverRows[0].unplacedReason).toBeNull();
+    expect(run.datasetOpens[0].endUs).toBe(800_000);
+  });
+
+  it("carries an open that never settled with a null end", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.noteOpenSent("req-1");
+    advance(400);
+    recorder.ingestServerBatch(metadataBatch(1_000, 2_000), 1);
+
+    const run = recorder.exportDocument().runs[0];
+    expect(run.datasetOpens[0].endUs).toBeNull();
+    // Placement needs only the start, so the reads are still readable.
+    expect(run.serverRows[0].placement?.startUs).toBe(1_000);
+  });
+
+  it("counts the opens it declined to bracket rather than dropping them silently", () => {
+    const { recorder } = makeRecorder();
+    for (let i = 0; i < 70; i++) recorder.noteOpenSent(`req-${i}`);
+
+    const run = recorder.exportDocument().runs[0];
+    expect(run.datasetOpens).toHaveLength(64);
+    expect(run.datasetOpensDropped).toBe(6);
+  });
+
+  it("ignores a second settle, so a straggler cannot move an end that happened", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.noteOpenSent("req-1");
+    advance(100);
+    recorder.noteOpenSettled("req-1");
+    advance(900);
+    recorder.noteOpenSettled("req-1");
+
+    expect(recorder.exportDocument().runs[0].datasetOpens[0].endUs).toBe(100_000);
   });
 });
