@@ -374,13 +374,13 @@ export class CpuCache {
         },
       },
       (req) => this.inFlightKey(req),
-      (req, controller, _estimate, key) => {
+      (req, controller, _estimate, key, admittedAtMs) => {
         const startedEpochs = { ...this.currentEpochs };
         this.rememberInFlightChunk(key, req, startedEpochs);
         // `fetchAndDecode` handles fetch/decode failures internally (retry,
         // failure map, streak surfacing); anything escaping here is an
         // unexpected pipeline error — keep it out of the void.
-        this.fetchAndDecode(req, controller, key, 0, startedEpochs).catch((err: unknown) => {
+        this.fetchAndDecode(req, controller, key, 0, startedEpochs, false, admittedAtMs).catch((err: unknown) => {
           console.warn("[CpuCache] unexpected chunk pipeline error:", err);
         });
       },
@@ -497,8 +497,9 @@ export class CpuCache {
       }
 
       if (this.chunkScheduler.hasInFlight(key)) {
-        // Coalesce attach: a second demand for a chunk already being fetched.
-        // Too short to time, so the trace counts it (ADR 0047).
+        // A second demand attaching to a fetch already on the wire. The
+        // attach itself is below the clock floor, so it is counted per tick
+        // (ADR 0047); the one fetch keeps the one row.
         traceRecorder.countPhase(CountedPhaseIndex.CoalesceAttach);
         this.rememberInFlightChunk(key, req, { ...this.currentEpochs });
         continue;
@@ -516,11 +517,24 @@ export class CpuCache {
       // residency tier + key); one fetch serves both, and the most
       // urgent occurrence — plans arrive priority-sorted — keeps the
       // queue slot.
-      if (pendingKeys.has(key)) continue;
+      if (pendingKeys.has(key)) {
+        traceRecorder.countPhase(CountedPhaseIndex.CoalesceAttach);
+        continue;
+      }
       pendingKeys.add(key);
       pendingChunks.push(req);
       pendingTiers.push(tiers[i]);
     }
+    // Closes the plan phase at the exact instant the scheduler took the
+    // requests, so a row's plan end and its queue start are one number rather
+    // than two readings of the clock that nearly agree.
+    //
+    // Only when this submit actually enqueued something. A submit that
+    // enqueues no chunks has no row to attribute, and one arriving from
+    // outside a tick — `requestTestProxy` is the only such caller — would
+    // otherwise close a plan pass that a tick opened long ago and publish the
+    // gap between them as plan time.
+    if (pendingChunks.length > 0) traceRecorder.notePlanEnqueue(enqueueNow);
     this.chunkScheduler.enqueue(
       orderChunkRequestsForTierAllocation(pendingChunks, pendingTiers),
       enqueueNow,
@@ -816,6 +830,17 @@ export class CpuCache {
 
   markSent(delivery: ReadyDelivery): void {
     if (delivery.kind === "chunk") {
+      // Handed to the renderer. The row's `upload` phase runs until the next
+      // frame proves the worker has written it; the handle is cleared off the
+      // entry so a re-delivery after an eviction cannot re-stamp a row whose
+      // life is already over.
+      if ((delivery.traceRow ?? -1) >= 0) {
+        traceRecorder.noteHandedToRenderer(delivery.traceRow!);
+        const entry =
+          this.chunkStore.get(delivery.entityId, delivery.chunkKey) ??
+          this.overviewStore.get(delivery.entityId, delivery.chunkKey);
+        if (entry) entry.traceRow = -1;
+      }
       this.deliveryState.markChunkSent(
         delivery.imageId, delivery.c, delivery.chunkKey, delivery.residencyTier,
       );
@@ -1228,13 +1253,20 @@ export class CpuCache {
     retryCount = 0,
     startedEpochs: SceneEpochs = { ...this.currentEpochs },
     fedStreak = false,
+    admittedAtMs?: number,
   ): Promise<void> {
-    // The `wire` phase: request sent → bytes in hand. One row per attempt,
-    // so an in-fetch retry retires its row and the next attempt opens a
-    // fresh one rather than overwriting the first attempt's timings. This
-    // is the bracket the server's own rows nest inside once they arrive.
+    // One row per fetch attempt, so an in-fetch retry retires its row and the
+    // next attempt opens a fresh one rather than overwriting the first
+    // attempt's timings.
+    //
+    // Three boundaries are stamped here in one go, because the row is opened
+    // at dispatch and the two phases behind it are already over: `plan` (the
+    // tick's wanted-set computation) and `queue` (admitted to the scheduler →
+    // dispatched). `wire` — request sent → bytes in hand — starts now, and is
+    // the bracket the server's own rows nest inside once they arrive.
     const rowTier = this.requestResidencyTier(req) === "coarse" ? 1 : 0;
     const traceRow = traceRecorder.beginChunkRow(req, rowTier);
+    traceRecorder.stampAdmission(traceRow, admittedAtMs);
     traceRecorder.stamp(traceRow, Boundary.WireStart);
 
     let result: FetchResult;
@@ -1242,6 +1274,10 @@ export class CpuCache {
       result = await this.source.fetch(
         { datasetId: req.datasetId, imageId: req.imageId, chunkKey: req.chunkKey },
         controller.signal,
+        // The label the transport sent this chunk under — the first
+        // sender's when this fetch coalesced onto one already in flight, so
+        // every row that waited on a request points at that request.
+        label => traceRecorder.labelRow(traceRow, label),
       );
     } catch (err: unknown) {
       traceRecorder.finishRow(traceRow, RowOutcome.Retired);
@@ -1282,7 +1318,9 @@ export class CpuCache {
         traceRecorder.recordPointEvent(PointEvent.Retry, fe.kind, req, rowTier);
         await new Promise(r => setTimeout(r, this.chunkRetryPolicy.delayMs(retryCount)));
         if (!this.chunkScheduler.hasInFlight(key)) return; // cancelled during wait
-        return this.fetchAndDecode(req, controller, key, retryCount + 1, startedEpochs, fed);
+        return this.fetchAndDecode(
+          req, controller, key, retryCount + 1, startedEpochs, fed, admittedAtMs,
+        );
       }
 
       const isPermanent = fe.kind === "permanent";
@@ -1306,11 +1344,10 @@ export class CpuCache {
       return;
     }
 
-    // Boundary 3 closes `wire` and opens `decode` — adjacent phases share
-    // the slot between them. `decode` itself is unstamped until #925, so the
-    // row completes at its last instrumented boundary.
+    // Closes `wire` and opens `decode` — adjacent phases share the slot
+    // between them. The pool closes `decode` on its own onmessage, and the
+    // row completes when a frame has drawn the chunk.
     traceRecorder.stamp(traceRow, Boundary.DecodeStart);
-    traceRecorder.finishRow(traceRow, RowOutcome.Complete);
 
     this.counters.recordCompletedFetch(result.bytes.byteLength);
     // Correct the in-flight byte estimate only while this settle still owns
@@ -1322,9 +1359,10 @@ export class CpuCache {
     let decoded: ArrayBuffer;
     try {
       const t0 = performance.now();
-      decoded = await this.decode.decode(result.bytes, result.wireFormat);
+      decoded = await this.decode.decode(result.bytes, result.wireFormat, traceRow);
       this.counters.recordDecode(performance.now() - t0);
     } catch (err: unknown) {
+      traceRecorder.finishRow(traceRow, RowOutcome.Retired);
       const message = err instanceof Error ? err.message : String(err);
       // A fetch that completes but cannot be decoded (wrong wire format,
       // corrupted bytes, an intercepting proxy answering with garbage) is a
@@ -1394,17 +1432,25 @@ export class CpuCache {
       residencyTier: this.requestResidencyTier(effectiveReq),
       priority: stale ? Number.MAX_SAFE_INTEGER : effectiveReq.priority,
       lastSeenTick,
+      // Carries the chunk's lifecycle row the rest of the way, so `upload`
+      // and `present` land on the same row as `wire` and `decode`.
+      traceRow,
     };
 
     // minimap/overview/coarse route to the overview/coarse bucket (ADR 0023 + coarse/detail bridge).
     if (lane === "overview" || lane === "minimap" || lane === "coarse") {
       if (stale && this.overviewStore.bytes + cacheEntry.sizeBytes > this.overviewStore.budgetBytes) {
+        // Decoded and then dropped on the floor: the row ends here, and
+        // saying so is the difference between a chunk that stalled and one
+        // that was never going to arrive.
+        traceRecorder.finishRow(traceRow, RowOutcome.Retired);
         this.drainSchedulers();
         return;
       }
       this.overviewStore.insert(cacheEntry);
     } else {
       if (stale && this.chunkStore.bytes + cacheEntry.sizeBytes > this.chunkStore.budgetBytes) {
+        traceRecorder.finishRow(traceRow, RowOutcome.Retired);
         this.drainSchedulers();
         return;
       }
@@ -1776,6 +1822,7 @@ export class CpuCache {
       lane: entry.lane,
       residencyTier: entry.residencyTier,
       priority: entry.priority,
+      traceRow: entry.traceRow,
     };
   }
 

@@ -78,6 +78,20 @@ export interface SchedulerDump<Req extends SchedulableRequest> {
   pending: SchedulerDumpEntry<Req>[];
 }
 
+/**
+ * Starts one request. `admittedAtMs` is when the request entered the
+ * admission window, or `undefined` when it went straight from the backlog to
+ * in-flight — the queue wait a caller can attribute, rather than one it has
+ * to reconstruct from a map the scheduler deliberately does not keep.
+ */
+export type StartFn<Req extends SchedulableRequest> = (
+  req: Req,
+  controller: AbortController,
+  estimatedBytes: number,
+  key: string,
+  admittedAtMs: number | undefined,
+) => void;
+
 export class Scheduler<Req extends SchedulableRequest> {
   private pending: Req[] = [];
   private inFlight = new Map<string, InFlightEntry<Req>>();
@@ -96,22 +110,12 @@ export class Scheduler<Req extends SchedulableRequest> {
 
   private readonly config: SchedulerConfig;
   private readonly keyFn: (req: Req) => string;
-  private readonly startFn: (
-    req: Req,
-    controller: AbortController,
-    estimatedBytes: number,
-    key: string,
-  ) => void;
+  private readonly startFn: StartFn<Req>;
 
   constructor(
     config: SchedulerConfig,
     keyFn: (req: Req) => string,
-    startFn: (
-      req: Req,
-      controller: AbortController,
-      estimatedBytes: number,
-      key: string,
-    ) => void,
+    startFn: StartFn<Req>,
   ) {
     this.config = config;
     this.keyFn = keyFn;
@@ -229,9 +233,10 @@ export class Scheduler<Req extends SchedulableRequest> {
     while (this.pending.length > 0 && this.canStartMore()) {
       const req = this.pending.shift()!;
       const key = this.keyFn(req);
+      const admittedAtMs = this.enqueuedAt.get(key);
       this.enqueuedAt.delete(key);
       const estimate = estimateBytes(req);
-      this.startInFlight(req, key, estimate);
+      this.startInFlight(req, key, estimate, admittedAtMs);
       this.promoteIntoWindow(now);
     }
 
@@ -289,7 +294,12 @@ export class Scheduler<Req extends SchedulableRequest> {
     );
   }
 
-  private startInFlight(req: Req, key: string, estimate: number): void {
+  private startInFlight(
+    req: Req,
+    key: string,
+    estimate: number,
+    admittedAtMs?: number,
+  ): void {
     const controller = new AbortController();
     const entry: InFlightEntry<Req> = {
       request: req,
@@ -298,7 +308,7 @@ export class Scheduler<Req extends SchedulableRequest> {
     };
     this.inFlightBytesCounter += estimate;
     this.inFlight.set(key, entry);
-    this.startFn(req, controller, estimate, key);
+    this.startFn(req, controller, estimate, key, admittedAtMs);
   }
 
   /** No-op if the key was cancelled between fetch start and response. */

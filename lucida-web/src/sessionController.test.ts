@@ -43,6 +43,7 @@ vi.mock("./pipeline/fetch/index.ts", () => {
   class MockProxiedContentSource {
     static instances: MockProxiedContentSource[] = [];
     rejectAll = vi.fn();
+    resetConnection = vi.fn();
     rejectDataset = vi.fn();
     registerImage = vi.fn();
     handleBinary = vi.fn();
@@ -95,6 +96,7 @@ const MockedContentSource = ProxiedContentSource as unknown as {
   instances: Array<{
     registerImage: ReturnType<typeof vi.fn>;
     rejectAll: ReturnType<typeof vi.fn>;
+    resetConnection: ReturnType<typeof vi.fn>;
     handleSourceChunkStatus: ReturnType<typeof vi.fn>;
   }>;
 };
@@ -721,8 +723,11 @@ describe("SessionController error recovery and precedence", () => {
 
   it("reconnect resets the cache chunk-failure streak", () => {
     const { handlers } = makeHarness();
-    handlers.onConnected?.();
+    handlers.onConnected?.(1);
     expect(MockedCpuCache.instances[0].resetChunkFailureStreak).toHaveBeenCalledTimes(1);
+    // Labels are per connection, so the reconnect restarts the counter and
+    // stamps the new generation on everything minted from here.
+    expect(MockedContentSource.instances[0].resetConnection).toHaveBeenCalledWith(1);
   });
 });
 

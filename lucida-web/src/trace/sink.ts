@@ -25,11 +25,13 @@ import type {
   TracePointEvent,
   TraceRow,
   TraceTick,
+  WireLabel,
 } from "./types.ts";
 
 export interface TraceSink {
   /** Returns the row's index within this sink. */
   append(src: ChunkRowSource, tier: 0 | 1): number;
+  setLabel(index: number, label: WireLabel): void;
   stamp(index: number, boundary: number, offsetUs: number): void;
   setOutcome(index: number, outcome: RowOutcomeValue): void;
   serialise(): TraceRow[];
@@ -61,6 +63,8 @@ export class NoopTraceSink implements TraceSink {
   append(): number {
     return this.rows++;
   }
+
+  setLabel(): void {}
 
   stamp(): void {}
 
@@ -107,6 +111,10 @@ export class TableTraceSink implements TraceSink {
 
   append(src: ChunkRowSource, tier: 0 | 1): number {
     return this.rows.append(src, tier);
+  }
+
+  setLabel(index: number, label: WireLabel): void {
+    this.rows.setLabel(index, label);
   }
 
   stamp(index: number, boundary: number, offsetUs: number): void {

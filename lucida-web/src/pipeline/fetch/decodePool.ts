@@ -6,6 +6,8 @@
  */
 
 import type { WireFormat } from "../../manifestTypes.ts";
+import { traceRecorder } from "../../trace/recorder.ts";
+import { Boundary, CountedPhaseIndex } from "../../trace/types.ts";
 
 export const MIN_DECODE_WORKERS = 2;
 export const DECODE_POOL_HEADROOM = 1;
@@ -18,6 +20,15 @@ export function defaultPoolSize(): number {
 interface PendingEntry {
   resolve: (data: ArrayBuffer) => void;
   reject: (err: Error) => void;
+  /**
+   * The caller's lifecycle-row handle for the chunk these bytes belong to.
+   *
+   * The pool's own `id` is a slot number that means nothing outside the pool,
+   * and the chunk key survives only in the caller's promise closure — so
+   * without this the one stage in the pipeline with no identity at all stays
+   * unjoinable. -1 when the caller holds no row (no run open).
+   */
+  traceRow: number;
 }
 
 interface PoolWorker {
@@ -44,6 +55,10 @@ export class DecodePool {
         if (p) {
           pending.delete(id);
           entry.activeCount--;
+          // Closes `decode` and opens `upload` — adjacent phases share the
+          // boundary between them. Stamped for a failed decode too: the round
+          // trip happened, and the caller retires the row.
+          traceRecorder.stamp(p.traceRow, Boundary.UploadStart);
           if (error) {
             p.reject(new Error(error));
           } else {
@@ -55,8 +70,17 @@ export class DecodePool {
     });
   }
 
-  /** Decode raw wire-format bytes. Returns data in its native format (uint8 stays uint8). */
-  decode(bytes: ArrayBuffer, wireFormat: WireFormat): Promise<ArrayBuffer> {
+  /**
+   * Decode raw wire-format bytes. Returns data in its native format (uint8
+   * stays uint8).
+   *
+   * `traceRow` correlates the decode with the chunk that asked for it. The
+   * `decode` phase is the whole round trip — postMessage out to onmessage in,
+   * queue wait included — and is named for the round trip so no reader
+   * mistakes it for worker CPU time. Nothing in the worker timestamps itself;
+   * both ends are read on the main thread off one clock.
+   */
+  decode(bytes: ArrayBuffer, wireFormat: WireFormat, traceRow = -1): Promise<ArrayBuffer> {
     if (this.pool.length === 0) {
       return Promise.reject(new Error("DecodePool terminated"));
     }
@@ -66,8 +90,11 @@ export class DecodePool {
       for (let i = 1; i < this.pool.length; i++) {
         if (this.pool[i].activeCount < best.activeCount) best = this.pool[i];
       }
-      best.pending.set(id, { resolve, reject });
+      best.pending.set(id, { resolve, reject, traceRow });
       best.activeCount++;
+      // Dispatch itself is below the platform's clock floor, so it is counted
+      // rather than timed.
+      traceRecorder.countPhase(CountedPhaseIndex.WorkerDispatch);
       best.worker.postMessage({ id, bytes, wireFormat }, [bytes]);
     });
   }

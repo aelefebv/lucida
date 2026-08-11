@@ -21,6 +21,7 @@ pub mod session;
 pub mod static_serve;
 #[cfg(test)]
 pub(crate) mod test_fixtures;
+pub mod timing;
 pub mod workspace;
 
 use std::collections::HashMap;

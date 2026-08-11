@@ -10,6 +10,7 @@ import { labelModelMatrices } from "./renderer/labelLayout.ts";
 import { getActiveChannels, compositeKey } from "./tickCommon.ts";
 import type { DatasetSettings } from "./tickCommon.ts";
 import { debugStats } from "./debug/debugStats.ts";
+import { traceRecorder } from "./trace/recorder.ts";
 import type { TickCoordinator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/tickCoordinator.ts";
 import type { Uploader } from "./pipeline/upload/uploader.ts";
 import type { SceneEpochs } from "./pipeline/epochs.ts";
@@ -235,6 +236,10 @@ function uploadAndRenderVolume(
   }
 
   client.volumeRenderMultiPass(layers, invVP, eye, canvasW, canvasH, fullW, fullH, plan.epochs, viewProj, camForward, clipDistance, clipMode);
+  // The worker is FIFO, so every chunk posted above is written before this
+  // render runs: `upload` closes here and `present` opens. Rows that opened
+  // `present` at the previous frame are drawn by now and close here too.
+  traceRecorder.noteFrameDispatched();
 
   return budgetExhausted;
 }

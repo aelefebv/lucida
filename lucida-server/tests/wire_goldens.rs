@@ -124,7 +124,8 @@ use lucida_protocol::{
     FetchSource, GeneratedAvailabilityDelta, GeneratedAvailabilitySnapshot, GeneratedChunkStatus,
     GeneratedChunkStatusUpdate, GeneratedLevelAvailability, GeneratedLevelSummary, LevelAddress,
     LocalFetchDescriptor, ProxiedFetchDescriptor, ProxiedImageSpec, ProxyAvailability,
-    ProxyFootprint, ProxyKind, SourceChunkStatus, WireFormat,
+    ProxyFootprint, ProxyKind, ServerTimingBatch, SourceChunkStatus, TimingRowFamily,
+    TimingRowOutcome, WireFormat,
 };
 
 const REGEN_HINT: &str = "fixture out of date with the Rust wire types. If the wire change is \
@@ -305,6 +306,7 @@ fn server_message_fixture_paths(msg: &ServerMessage) -> &'static [&'static str] 
             &["session/server_generated_chunk_status.json"]
         }
         ServerMessage::SourceChunkStatus { .. } => &["session/server_source_chunk_status.json"],
+        ServerMessage::TimingBatch { .. } => &["session/server_timing_batch.json"],
         ServerMessage::BookmarkChanged { .. } => &["session/server_bookmark_changed.json"],
         ServerMessage::WorkspaceArchived { .. } => &["session/server_workspace_archived.json"],
     }
@@ -1782,6 +1784,32 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
             req("", &["/type", "/id", "/action", "/dataset_urls"]),
         ),
         (
+            "session/server_timing_batch.json",
+            ServerMessage::TimingBatch {
+                batch: ServerTimingBatch {
+                    dropped: 3,
+                    rid: vec![2558, 2559],
+                    family: vec![TimingRowFamily::Chunk, TimingRowFamily::Asset],
+                    dispatch_offset_us: vec![142, 96],
+                    duration_us: vec![8_137, 214_902],
+                    outcome: vec![TimingRowOutcome::Delivered, TimingRowOutcome::NotReady],
+                },
+            },
+            req(
+                "",
+                &[
+                    "/type",
+                    "/batch",
+                    "/batch/dropped",
+                    "/batch/rid",
+                    "/batch/family",
+                    "/batch/dispatch_offset_us",
+                    "/batch/duration_us",
+                    "/batch/outcome",
+                ],
+            ),
+        ),
+        (
             "session/server_workspace_archived.json",
             ServerMessage::WorkspaceArchived {
                 workspace_id: "workspace-2ac8".into(),
@@ -2079,8 +2107,15 @@ const REQUEST_FILES: &[&str] = &["session/chunk_request.json", "session/asset_re
 
 const VOCAB_FILES: &[&str] = &["vocab/enum_vocabulary.json"];
 
+/// The two request goldens carry consecutive labels from ONE counter — `0`
+/// then `1` — because that is what a connection's first chunk request and
+/// first asset request actually get: the counter is shared across families
+/// and starts at zero. The vitest mirror reproduces both from a real
+/// `ProxiedContentSource`, so the shared counter is locked, not just the
+/// field's presence.
 fn chunk_request_golden() -> ChunkMessage {
     ChunkMessage::ChunkRequest {
+        rid: 0,
         dataset_id: DatasetId(SINGLE_DATASET_ID.into()),
         image_id: ImageId(SINGLE_IMAGE_ID.into()),
         key: "1/2/1/12/3/4".into(),
@@ -2089,6 +2124,7 @@ fn chunk_request_golden() -> ChunkMessage {
 
 fn asset_request_golden() -> AssetMessage {
     AssetMessage::AssetRequest {
+        rid: 1,
         dataset_id: DatasetId("wds-collection-77".into()),
         entity_id: EntityId("tile-A1-f0".into()),
         kind: ProxyKind::TileProxy3D,
@@ -2143,7 +2179,7 @@ fn request_envelopes_match_goldens() {
     check(
         "session/chunk_request.json",
         &chunk,
-        &req("", &["/type", "/dataset_id", "/image_id", "/key"]),
+        &req("", &["/type", "/rid", "/dataset_id", "/image_id", "/key"]),
         &mut failures,
     );
 
@@ -2154,7 +2190,15 @@ fn request_envelopes_match_goldens() {
         &asset,
         &req(
             "",
-            &["/type", "/dataset_id", "/entity_id", "/kind", "/t", "/c"],
+            &[
+                "/type",
+                "/rid",
+                "/dataset_id",
+                "/entity_id",
+                "/kind",
+                "/t",
+                "/c",
+            ],
         ),
         &mut failures,
     );

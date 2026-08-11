@@ -1,6 +1,37 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { DecodePool } from "./decodePool.ts";
 import type { WireFormat } from "../../manifestTypes.ts";
+import { traceRecorder } from "../../trace/recorder.ts";
+import { Boundary } from "../../trace/types.ts";
+import { createQuiescenceState } from "../../trace/quiescence.ts";
+
+const OPEN_CAUSE = { epoch: "content", dirtyKind: "interactive", source: "test" } as const;
+
+const CHUNK = {
+  datasetId: "ds",
+  entityId: "member-1",
+  imageId: "image-1",
+  lane: "detail" as const,
+  level: 0,
+  t: 0,
+  c: 0,
+  z: 0,
+  y: 0,
+  x: 0,
+};
+
+const ENVIRONMENT = {
+  captureWarmth: () => ({
+    detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0, proxyBytes: 0,
+  }),
+  captureConditions: () => ({
+    datasetIds: ["ds"],
+    composedView: { url: "/w/ws-1", mode: "slice" as const },
+    devicePixelRatio: 2,
+    viewport: { cssWidth: 800, cssHeight: 600, deviceWidth: 1600, deviceHeight: 1200 },
+  }),
+  captureOutstanding: () => createQuiescenceState(),
+};
 
 /**
  * Stand-in for the browser Worker so the pool's dispatch/teardown logic is
@@ -91,5 +122,39 @@ describe("DecodePool", () => {
 
     await expect(promise).resolves.toBe(decoded);
     expect(pool.activeCount()).toBe(0);
+  });
+
+  it("brackets each decode's round trip against the row that asked for it", async () => {
+    traceRecorder.reset();
+    traceRecorder.setEnvironment(ENVIRONMENT);
+    traceRecorder.openRun(OPEN_CAUSE);
+
+    // Two chunks in flight on one worker. The pool's own ids are slot
+    // numbers; only the correlation id says which chunk a reply belongs to.
+    const first = traceRecorder.beginChunkRow({ ...CHUNK, x: 1 }, 0);
+    const second = traceRecorder.beginChunkRow({ ...CHUNK, x: 2 }, 0);
+    traceRecorder.stamp(first, Boundary.DecodeStart);
+    traceRecorder.stamp(second, Boundary.DecodeStart);
+
+    const pool = new DecodePool(1);
+    const firstDecode = pool.decode(new ArrayBuffer(8), wireFormat, first);
+    pool.decode(new ArrayBuffer(8), wireFormat, second);
+
+    const worker = FakeWorker.instances[0];
+    // Reply to the SECOND decode only, so a reply landing on the wrong row
+    // would be visible rather than coincidentally right.
+    worker.reply(worker.posted[1].id, new ArrayBuffer(16));
+    traceRecorder.beginTick("ds-1");
+    traceRecorder.commitTick();
+    traceRecorder.closeRun("explicit");
+
+    const [run] = traceRecorder.exportDocument().runs;
+    expect(run.rows.filter(r => r.phases.decode !== undefined).map(r => r.x)).toEqual([2]);
+    // Dispatch is below the clock floor: counted per tick, not timed.
+    expect(run.ticks[0].counted["worker-dispatch"]).toBe(2);
+
+    pool.terminate();
+    await expect(firstDecode).rejects.toThrow("DecodePool terminated");
+    traceRecorder.reset();
   });
 });

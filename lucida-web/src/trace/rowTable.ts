@@ -13,24 +13,31 @@
 import { StringPool } from "./stringPool.ts";
 import {
   BOUNDARY_COUNT,
+  LANE_NAMES,
+  laneIndex,
   RESIDENCY_TIER_NAMES,
   ROW_OUTCOME_NAMES,
   RowOutcome,
   UNSET_STAMP,
   PHASES,
+  UNLABELLED,
   type ChunkRowSource,
   type PhaseTiming,
   type Phase,
   type RowOutcomeValue,
   type TraceRow,
+  type WireLabel,
 } from "./types.ts";
 
 /** Six coordinate columns per row: level, t, c, z, y, x. */
 const COORDS_PER_ROW = 6;
 
 export class RowTable {
-  /** 3 interned ids + 6 coordinates + 7 boundary slots, all uint32, plus two bytes. */
-  static readonly BYTES_PER_ROW = (3 + COORDS_PER_ROW + BOUNDARY_COUNT) * 4 + 2;
+  /**
+   * 3 interned ids + 6 coordinates + 7 boundary slots + the two-part wire
+   * label, all uint32, plus three bytes.
+   */
+  static readonly BYTES_PER_ROW = (3 + COORDS_PER_ROW + BOUNDARY_COUNT + 2) * 4 + 3;
 
   private readonly strings = new StringPool();
 
@@ -39,7 +46,10 @@ export class RowTable {
   private imageIds: Uint32Array;
   private coords: Uint32Array;
   private stamps: Uint32Array;
+  private rids: Uint32Array;
+  private connectionGenerations: Uint32Array;
   private tiers: Uint8Array;
+  private lanes: Uint8Array;
   private outcomes: Uint8Array;
 
   private rows = 0;
@@ -52,7 +62,10 @@ export class RowTable {
     this.imageIds = new Uint32Array(this.capacity);
     this.coords = new Uint32Array(this.capacity * COORDS_PER_ROW);
     this.stamps = new Uint32Array(this.capacity * BOUNDARY_COUNT);
+    this.rids = new Uint32Array(this.capacity);
+    this.connectionGenerations = new Uint32Array(this.capacity);
     this.tiers = new Uint8Array(this.capacity);
+    this.lanes = new Uint8Array(this.capacity);
     this.outcomes = new Uint8Array(this.capacity);
   }
 
@@ -82,7 +95,10 @@ export class RowTable {
     this.entityIds[index] = this.strings.intern(src.entityId);
     this.imageIds[index] = this.strings.intern(src.imageId);
     this.tiers[index] = tier;
+    this.lanes[index] = laneIndex(src.lane);
     this.outcomes[index] = RowOutcome.InFlight;
+    this.rids[index] = UNLABELLED.rid;
+    this.connectionGenerations[index] = UNLABELLED.connectionGeneration;
 
     const c = index * COORDS_PER_ROW;
     this.coords[c] = src.level;
@@ -94,6 +110,17 @@ export class RowTable {
 
     this.stamps.fill(UNSET_STAMP, index * BOUNDARY_COUNT, (index + 1) * BOUNDARY_COUNT);
     return index;
+  }
+
+  /**
+   * Record which wire request this row's chunk rode on. Several rows can
+   * carry the same label — the transport coalesces duplicate in-flight
+   * fetches onto the first sender's request — so the join to the server's
+   * table is a plain equi-join and the coalescing count is a group-by.
+   */
+  setLabel(index: number, label: WireLabel): void {
+    this.rids[index] = label.rid;
+    this.connectionGenerations[index] = label.connectionGeneration;
   }
 
   stamp(index: number, boundary: number, offsetUs: number): void {
@@ -133,9 +160,12 @@ export class RowTable {
       }
 
       out.push({
+        rid: this.rids[i],
+        connectionGeneration: this.connectionGenerations[i],
         datasetId: this.strings.get(this.datasetIds[i]),
         entityId: this.strings.get(this.entityIds[i]),
         imageId: this.strings.get(this.imageIds[i]),
+        lane: LANE_NAMES[this.lanes[i]],
         residencyTier: RESIDENCY_TIER_NAMES[this.tiers[i]],
         level,
         t,
@@ -158,7 +188,10 @@ export class RowTable {
     this.imageIds = copyInto(this.imageIds, new Uint32Array(next));
     this.coords = copyInto(this.coords, new Uint32Array(next * COORDS_PER_ROW));
     this.stamps = copyInto(this.stamps, new Uint32Array(next * BOUNDARY_COUNT));
+    this.rids = copyInto(this.rids, new Uint32Array(next));
+    this.connectionGenerations = copyInto(this.connectionGenerations, new Uint32Array(next));
     this.tiers = copyInto(this.tiers, new Uint8Array(next));
+    this.lanes = copyInto(this.lanes, new Uint8Array(next));
     this.outcomes = copyInto(this.outcomes, new Uint8Array(next));
     this.capacity = next;
   }

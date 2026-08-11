@@ -14,12 +14,16 @@
  */
 
 import { buildIdentity } from "./buildInfo.ts";
+import { placeServerRows } from "./merge.ts";
+import { ServerRowTable, type ServerTimingBatch } from "./serverRowTable.ts";
 import type { QuiescenceState } from "./quiescence.ts";
 import { tableSinkFactory, type TraceSink, type TraceSinkFactory } from "./sink.ts";
 import { TickScratch } from "./tickRing.ts";
 import {
+  Boundary,
   clampStamp,
   COUNTED_PHASES,
+  RowOutcome,
   TRACE_SCHEMA_VERSION,
   type ChunkEventSource,
   type ChunkRowSource,
@@ -37,14 +41,33 @@ import {
   type RunHeader,
   type TraceDocument,
   type TraceRun,
+  type WireLabel,
 } from "./types.ts";
 
 /**
- * Phases whose boundaries are stamped today. `wire` is the whole of #924;
- * #925 fills in the rest. Declared rather than inferred so a document says
- * what it did not measure.
+ * Phases whose boundaries are stamped today. The whole enum, as of #925.
+ * Declared rather than inferred so a document says what it did not measure
+ * even when every phase happens to be missing from a given row.
  */
-export const INSTRUMENTED_PHASES: readonly Phase[] = ["wire"];
+export const INSTRUMENTED_PHASES: readonly Phase[] = [
+  "plan",
+  "queue",
+  "wire",
+  "decode",
+  "upload",
+  "present",
+];
+
+/**
+ * How many recent plan passes the recorder can attribute a queue entry to.
+ *
+ * A fixed ring rather than a map: a request is admitted either during the
+ * enqueue that ends a plan pass or shortly after, when the drain promotes it
+ * out of the backlog, so the pass it belongs to is always one of the last
+ * few. Sixteen covers roughly three seconds of replanning at the observed
+ * cadence, and costs 256 bytes that never move.
+ */
+const PLAN_SPAN_RING = 16;
 
 
 /**
@@ -98,12 +121,14 @@ interface OpenRun {
   startedAtMs: number;
   startedAtEpochMs: number;
   sink: TraceSink;
+  serverRows: ServerRowTable;
   generation: number;
 }
 
 interface ClosedRun {
   header: RunHeader;
   sink: TraceSink;
+  serverRows: ServerRowTable;
 }
 
 /** Row indices are packed with the run generation so a stale handle is inert. */
@@ -124,6 +149,28 @@ export class TraceRecorder {
   private generation = 0;
   private runSeq = 0;
   private rowsOutsideRun = 0;
+  private serverRowsOutsideRun = 0;
+
+  /**
+   * Recent plan passes as (start, end) wall pairs. Preallocated and
+   * overwritten in place — the recorder allocates nothing in steady state,
+   * because its own GC pauses would show up as stalls in its own trace.
+   */
+  private readonly planStartsMs = new Float64Array(PLAN_SPAN_RING);
+  private readonly planEndsMs = new Float64Array(PLAN_SPAN_RING);
+  private planSpanCount = 0;
+  private openPlanStartMs: number | null = null;
+
+  /**
+   * Rows handed to the renderer but not yet covered by a frame, and rows
+   * covered by the frame before this one. Two arrays swapped rather than
+   * reallocated. The GPU worker is FIFO, so a chunk posted before a render
+   * message has been written to its texture by the time that render runs —
+   * which is what makes residency observable from the main thread without
+   * the worker timestamping anything.
+   */
+  private awaitingResident: number[] = [];
+  private awaitingDrawn: number[] = [];
 
   /**
    * One scratch sample and one counter vector for the whole process, refilled
@@ -185,6 +232,7 @@ export class TraceRecorder {
       startedAtMs,
       startedAtEpochMs,
       sink: this.sinkFactory(),
+      serverRows: new ServerRowTable(),
       generation: this.generation,
     };
     this.timeoutTimer = setTimeout(() => this.closeRun("timeout"), this.timeoutMs);
@@ -204,8 +252,12 @@ export class TraceRecorder {
     this.tickInProgress = false;
     this.countedPhases.fill(0);
 
+    this.awaitingResident.length = 0;
+    this.awaitingDrawn.length = 0;
+
     this.closed.push({
       sink: run.sink,
+      serverRows: run.serverRows,
       header: {
         ...run.environment.captureConditions(),
         cacheWarmth: run.cacheWarmth,
@@ -259,11 +311,135 @@ export class TraceRecorder {
     return run.generation * GENERATION_STRIDE + index;
   }
 
+  /**
+   * Open the `plan` phase: the tick's wanted-set computation, including the
+   * synchronous wasm calls inside it. Not a separate timing source — the same
+   * clock and the same recorder as every other phase, so plan time is
+   * comparable with the phases downstream of it rather than living in its own
+   * units on its own track.
+   *
+   * Recording is continuous, so this is called on every tick whether a run is
+   * open or not; a span nobody claims simply ages out of the ring.
+   */
+  markPlanStart(): void {
+    this.openPlanStartMs = this.now();
+  }
+
+  /**
+   * Close the plan pass at the moment its requests were handed to the
+   * scheduler. The caller passes the timestamp it enqueued with rather than
+   * letting the recorder read the clock again, so a row's plan end and its
+   * queue start are the same number and the phases meet exactly.
+   */
+  notePlanEnqueue(enqueuedAtMs: number): void {
+    const startMs = this.openPlanStartMs;
+    if (startMs === null) return;
+    this.openPlanStartMs = null;
+    const slot = this.planSpanCount % PLAN_SPAN_RING;
+    this.planStartsMs[slot] = startMs;
+    this.planEndsMs[slot] = enqueuedAtMs;
+    this.planSpanCount++;
+  }
+
+  /**
+   * Stamp the boundary the `plan` and `queue` phases share: the moment the
+   * scheduler admitted this request.
+   *
+   * `admittedAtMs` is the scheduler's own admission stamp when it has one
+   * (ADR 0044 keeps them for the admission window only). Behind the window
+   * the scheduler deliberately keeps no per-key bookkeeping — on a large
+   * remote collection the backlog is tens of thousands of entries replanned
+   * several times a second — so a row admitted straight off the backlog dates
+   * its queue from the plan pass that enqueued it. Queue time before the
+   * window is therefore a floor, not a total.
+   *
+   * `plan` is attributed to the last pass that ended at or before admission.
+   * With no such pass in the ring the plan slot stays unset, which reads as
+   * "not measured" rather than as a phase that took no time.
+   */
+  stampAdmission(handle: number, admittedAtMs: number | undefined): void {
+    const run = this.resolve(handle);
+    if (!run) return;
+    const index = handle % GENERATION_STRIDE;
+    const admittedMs = admittedAtMs ?? this.latestPlanEndMs() ?? this.now();
+
+    const planStartMs = this.planStartAtOrBefore(admittedMs);
+    if (planStartMs !== null) {
+      run.sink.stamp(index, Boundary.PlanStart, this.offsetUs(run, planStartMs));
+    }
+    run.sink.stamp(index, Boundary.QueueStart, this.offsetUs(run, admittedMs));
+  }
+
+  /**
+   * The chunk has been handed to the render worker. It becomes resident when
+   * the worker gets to it, which the main thread learns by ordering rather
+   * than by asking: the next render message cannot be processed before the
+   * upload ahead of it.
+   *
+   * A row exists only for a chunk this page fetched. A chunk re-delivered
+   * from the CPU cache — evicted from the GPU and sent again within the same
+   * page — carries no row and so contributes no second `upload`. Its first
+   * delivery is recorded; the re-delivery is not.
+   */
+  noteHandedToRenderer(handle: number): void {
+    if (handle < 0 || !this.resolve(handle)) return;
+    this.awaitingResident.push(handle);
+  }
+
+  /**
+   * A frame was dispatched to the render worker. Everything handed over since
+   * the previous frame is resident as of now, and everything resident as of
+   * the previous frame has been drawn.
+   */
+  noteFrameDispatched(): void {
+    const drawn = this.awaitingDrawn;
+    for (let i = 0; i < drawn.length; i++) {
+      this.stamp(drawn[i], Boundary.PresentEnd);
+      this.finishRow(drawn[i], RowOutcome.Complete);
+    }
+    drawn.length = 0;
+
+    const resident = this.awaitingResident;
+    for (let i = 0; i < resident.length; i++) {
+      this.stamp(resident[i], Boundary.PresentStart);
+    }
+    // Swap rather than reallocate: the drained list becomes the next
+    // frame's pending list.
+    this.awaitingResident = drawn;
+    this.awaitingDrawn = resident;
+  }
+
+  /**
+   * Record which wire request a row's chunk rode on. Called for the sender
+   * and for every caller that coalesced onto it, which is what makes the
+   * join to the server's table a plain equi-join.
+   */
+  labelRow(handle: number, label: WireLabel): void {
+    const run = this.resolve(handle);
+    if (!run) return;
+    run.sink.setLabel(handle % GENERATION_STRIDE, label);
+  }
+
+  /**
+   * Take a flush window of the server's rows. They belong to the run that is
+   * open when they arrive; rows that arrive between runs are counted and
+   * dropped, because an unjoinable server row is not a diagnostic and
+   * keeping it would spend budget on nothing.
+   */
+  ingestServerBatch(batch: ServerTimingBatch, connectionGeneration: number): void {
+    const run = this.open;
+    if (!run) {
+      this.serverRowsOutsideRun += batch.rid.length;
+      return;
+    }
+    run.serverRows.ingest(batch, connectionGeneration);
+  }
+
   /** Stamp a phase boundary as a microsecond offset from run start. */
   stamp(handle: number, boundary: number): void {
     const run = this.resolve(handle);
     if (!run) return;
-    run.sink.stamp(handle % GENERATION_STRIDE, boundary, this.offsetUs(run.startedAtMs));
+    run.sink.stamp(handle % GENERATION_STRIDE, boundary, this.offsetUs(run, this.now()));
   }
 
   finishRow(handle: number, outcome: RowOutcomeValue): void {
@@ -299,7 +475,7 @@ export class TraceRecorder {
     this.tickInProgress = false;
     const run = this.open;
     if (!run) return;
-    run.sink.appendTick(this.offsetUs(run.startedAtMs), this.tickScratch, this.countedPhases);
+    run.sink.appendTick(this.offsetUs(run, this.now()), this.tickScratch, this.countedPhases);
     this.countedPhases.fill(0);
   }
 
@@ -326,7 +502,7 @@ export class TraceRecorder {
   ): void {
     const run = this.open;
     if (!run) return;
-    run.sink.appendEvent(this.offsetUs(run.startedAtMs), kind, reason, chunk, tier);
+    run.sink.appendEvent(this.offsetUs(run, this.now()), kind, reason, chunk, tier);
   }
 
   /**
@@ -341,15 +517,23 @@ export class TraceRecorder {
       exportedAtEpochMs: this.epochNow(),
       instrumentedPhases: [...INSTRUMENTED_PHASES],
       countedPhases: [...COUNTED_PHASES],
-      runs: this.closed.map<TraceRun>(run => ({
-        header: run.header,
-        rows: run.sink.serialise(),
-        ticks: run.sink.serialiseTicks(),
-        ticksDropped: run.sink.ticksDropped,
-        events: run.sink.serialiseEvents(),
-        eventsDropped: run.sink.eventsDropped,
-      })),
+      runs: this.closed.map<TraceRun>(run => {
+        const rows = run.sink.serialise();
+        return {
+          header: run.header,
+          rows,
+          ticks: run.sink.serialiseTicks(),
+          ticksDropped: run.sink.ticksDropped,
+          events: run.sink.serialiseEvents(),
+          eventsDropped: run.sink.eventsDropped,
+          // Placement happens here, at export, because it needs both tables
+          // — and because the in-memory model stays a table.
+          serverRows: placeServerRows(rows, run.serverRows.serialise()),
+          serverRowsDropped: run.serverRows.droppedCount,
+        };
+      }),
       rowsOutsideRun: this.rowsOutsideRun,
+      serverRowsOutsideRun: this.serverRowsOutsideRun,
     };
   }
 
@@ -362,12 +546,33 @@ export class TraceRecorder {
     this.closeRun("explicit");
     this.closed = [];
     this.rowsOutsideRun = 0;
+    this.serverRowsOutsideRun = 0;
     this.lastQuiescence = null;
+    this.planSpanCount = 0;
+    this.openPlanStartMs = null;
   }
 
-  /** Microseconds since the run started, clamped into a uint32 slot. */
-  private offsetUs(startedAtMs: number): number {
-    return clampStamp(Math.round((this.now() - startedAtMs) * 1000));
+  private offsetUs(run: OpenRun, atMs: number): number {
+    return clampStamp(Math.round((atMs - run.startedAtMs) * 1000));
+  }
+
+  private latestPlanEndMs(): number | null {
+    if (this.planSpanCount === 0) return null;
+    return this.planEndsMs[(this.planSpanCount - 1) % PLAN_SPAN_RING];
+  }
+
+  /** The start of the newest plan pass that had already enqueued by `atMs`. */
+  private planStartAtOrBefore(atMs: number): number | null {
+    const spans = Math.min(this.planSpanCount, PLAN_SPAN_RING);
+    let bestEnd = -Infinity;
+    let bestStart: number | null = null;
+    for (let i = 0; i < spans; i++) {
+      const end = this.planEndsMs[i];
+      if (end > atMs || end <= bestEnd) continue;
+      bestEnd = end;
+      bestStart = this.planStartsMs[i];
+    }
+    return bestStart;
   }
 
   private resolve(handle: number): OpenRun | null {
