@@ -5,7 +5,7 @@ description: "The pipeline performance monitor records always, with no opt-out; 
 tags: [lucida, decision]
 source_path: wiki/decisions/0049-unconditional-recording-under-a-design-budget.md
 created: 2026-08-10
-modified: 2026-08-10
+modified: 2026-08-11
 ---
 
 # Unconditional recording under a design budget
@@ -23,6 +23,7 @@ telemetry floor), [#897] (clock resolution) and [#899] (remote rates).
 [#897]: https://github.com/aelefebv/lucida/issues/897
 [#898]: https://github.com/aelefebv/lucida/issues/898
 [#899]: https://github.com/aelefebv/lucida/issues/899
+[#962]: https://github.com/aelefebv/lucida/issues/962
 [0047]: 0047-trace-model-phases-runs-and-lifecycle-rows.md
 
 ## The situation
@@ -113,9 +114,21 @@ The numbers, each derived rather than chosen:
 The budget is stated as **marginal** — the recorder alone — so that the number
 does not move when the debug panel is dismantled. Separately, a **net
 non-regression** obligation: once that dismantling lands, total observability
-cost must be no higher than the floor [#888] measured today, ≈1.05 MB of live
-state and ≈1–3 µs per tick. Stating only the marginal number would let the map
-ship "always-on is free" while doubling the floor.
+cost must be no higher than the floor [#888] measured today — ≈1.05 MB of live
+state, and per tick no more than that same instrumentation costs *on the same
+tick*. Stating only the marginal number would let the map ship "always-on is
+free" while doubling the floor.
+
+> **Amended 2026-08-11 ([#962]).** The per-tick term above read "≈1–3 µs per
+> tick" until that issue found the figure to be [#888]'s cost for a single
+> `UploadTelemetry.publish` *read* at 1–8 events/tick, not a tick's total, and
+> not the write path — which [#888] costed separately at 0.8–50 ns/event, the
+> range the 100 ns ceiling above was already derived from. Since `publish` is
+> quadratic in events per tick and the recorder is flat, no single µs/tick
+> figure can express the obligation; it is now stated as a comparison on a
+> matched tick shape and asserted that way in CI. Both halves are met — 663 kB
+> live, and 0.67–0.72× the floor per tick. The derivation is in
+> `docs/perf/recorder-cost/README.md`.
 
 ## Retention is bounded in bytes and evicted a run at a time
 

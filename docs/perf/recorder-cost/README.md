@@ -40,7 +40,8 @@ issue that created it.
 | Flat in events-per-tick | 1, 8, 128, 2,943 events/tick | the same per-event ceiling at every size |
 | Worst-case tick | ≤ 250 µs for a 2,943-chunk submit | < 4,000 µs, i.e. 16× the ceiling itself |
 | Zero steady-state allocation | no reallocation after warmup | sink buffers identical + gc-bracketed heap delta |
-| Net non-regression | ≤ 1.05 MB live, ≤ 1–3 µs/tick | a 2,560-chunk run's live bytes and a typical tick |
+| Net non-regression, live state | ≤ 1.05 MB live | a 2,560-chunk run's live bytes |
+| Net non-regression, per tick | ≤ the floor on the same tick | a matched-shape tick against [#888]'s per-call table |
 
 **They are tripwires, not benchmarks.** Absolute timings vary widely across
 machines and CI runners, and a ratio-based perf assertion in this repo already
@@ -213,9 +214,10 @@ existing numbers rather than a fresh measurement campaign.
 | Term | Figure | Source |
 | --- | --- | --- |
 | Today's floor, live state | ≈ 1.05 MB | [#888] |
-| Today's floor, per tick | ≈ 1–3 µs | [#888] |
-| Recorder, live state, one 2,560-chunk run | 623 kB | the CI gate, logged each run |
-| Recorder, typical tick (8 chunks) | ~2.9 µs | the CI gate, logged each run |
+| Today's floor, per tick, on a matched shape | 2.31 µs | derived from [#888]'s per-call table — see [#962] below |
+| Recorder, live state, one 2,560-chunk run | 663 kB | the CI gate, logged each run |
+| Recorder, matched-shape tick | 1.54–1.67 µs, 0.67–0.72× the floor | the CI gate, logged each run |
+| Recorder, whole-lifecycle tick (8 chunks) — a pessimistic bound, not the floor comparison | ~3.5 µs | the CI gate, logged each run |
 | Recorder, worst tick (2,943-chunk burst) | ~26 µs, 9.7× under the ceiling | the CI gate, logged each run |
 | Recorder, frame throughput at DPR 2 | −1.0% vs a no-op sink, inside noise | the A/B above, 2026-08-11 |
 | Retention, resident cap | 8 MB | [ADR 0049][0049], a separate granted budget |
@@ -235,16 +237,18 @@ Two notes on reading that table:
 (`debugStats.enabled` and its read sites) and [#919] (`DebugPanel.tsx`) land,
 re-run the two measurements below and record the result here:
 
-1. `pnpm test` — read the `[#928] floor check` line for the recorder's live
-   state and typical tick.
+1. `pnpm test` — read the `[#928] floor check` and `[#962] matched-shape tick`
+   lines for the recorder's live state and its per-tick cost against the floor.
 2. The A/B above, with the arms redefined as *before the teardown* against
    *after it*, comparing total live JS heap at the same point in a warm
    re-open. The floor's 1.05 MB is a heap figure, so heap is what settles it.
 
 The obligation is met when recorder + whatever observability survives the
-teardown is ≤ 1.05 MB live and ≤ 1–3 µs per typical tick. It is *not* met by
-the marginal gates alone, which is why this ledger exists rather than a comment
-in the test file.
+teardown is ≤ 1.05 MB live and no more per tick than the floor costs on the
+same tick. It is *not* met by the marginal gates alone, which is why this
+ledger exists rather than a comment in the test file. The per-tick half was
+stated as "≤ 1–3 µs" until [#962] found that figure to be a `publish` read
+rather than a tick's cost; the sections below carry that in full.
 
 **Step 1 recorded, [#918] landed (2026-08-11).** `[#928] floor check: typical
 tick (8 chunks, 93 write calls) p50=3.38 µs | one 2,560-chunk run holds 663 kB
@@ -284,40 +288,92 @@ question.
 > #888's 1–3 µs/tick floor | one 2,560-chunk run holds 663 kB live vs the
 > 1.05 MB floor (retention's 8 MB cap is a separate, granted budget)`
 
-**Half met, and the half that fails is not the teardown's.** Live state is
-**under** the floor: 663 kB against ≈1.05 MB, with the panel's 1.04 MB
-returned on top. The typical tick is **over** it — 3.50 µs against a 1–3 µs
-band — so by the criterion stated above ("≤ 1.05 MB live **and** ≤ 1–3 µs per
-typical tick") the obligation is **not** fully discharged, and saying otherwise
-here would be the same "preserved" label over lost ground that [ADR 0052][0052]
-exists to refuse.
+Live state was **under** the floor — 663 kB against ≈1.05 MB, with the panel's
+1.04 MB returned on top — and the tick figure read as **over** it. The tick
+half was left open, first attributed to [#949]'s three-writes-per-chunk
+dispatch and then, when collapsing those calls moved the lifecycle tick by
+~6% while moving the burst tick by 2.8×, left with no candidate cause at all.
 
-The tick overage is not this teardown's: deleting a reader cannot move it,
-because nothing the panel did was on the write path. Read the recorded tick
-figures as one noisy quantity, not a trend: ~2.9 µs at [#928], 3.38 µs at
-[#918], 3.50 µs here, all on a few-microsecond microbenchmark whose spread
-across hosts is ~45× (see the 16× note above), all on the pessimistic
-whole-lifecycle-in-one-tick shape the real pipeline never produces.
+### Settled, [#962] (2026-08-11): the two numbers were never the same quantity
 
-**It was not [#949]'s either, and that is a correction to what this section
-used to say.** The attribution here was that the figure was "~3× its own
-premise" because dispatch emitted three writes per chunk, so closing [#949]
-would close this ledger. It did not. Collapsing those calls took the
-*lifecycle* tick from ~3.7 µs to 3.46–3.54 µs — a few percent, inside the
-noise — while taking the *burst* tick down 2.8×. The two respond differently
-because they are different shapes: the burst is nothing but dispatch, so
-removing two of its three calls per chunk removes two thirds of it, whereas a
-lifecycle tick spends most of itself in sink writes and the frame hand-off
-that [#949] did not touch. Removing 25% of a lifecycle tick's calls bought ~6%
-of its time, which says the remaining cost is the writes themselves rather
-than the call overhead around them.
+They are **not comparable**, and the fix was to make a comparison that is,
+not to optimise the write path until a mismatched benchmark came in under a
+mismatched number. Three independent mismatches, each of which alone would
+sink it:
 
-So this half of the obligation stays open, and it now has no candidate
-explanation attached to it. It is tracked as [#962] rather than left here as
-an obligation with no owner. What would settle it is deciding whether a
-whole-lifecycle-in-one-tick microbenchmark is the right thing to hold against
-a floor [#888] measured on real ticks at all — the two may simply not be the
-same quantity.
+1. **Opposite sides of the path.** [#888]'s per-tick figure is its own words —
+   "≈1–3 µs/tick **of publish work**". It is a single `UploadTelemetry.publish`
+   *read* that aggregates a ring, timed at 1,361 ns (1 event/tick) and 2,901 ns
+   (8). It was being held against ~77–93 recorder *write* calls. [#888] costed
+   the write path in a different unit entirely — **0.8–50 ns/event** — and
+   never multiplied it out to a tick, so there was no measured per-tick write
+   figure on the floor's side to compare against.
+2. **Different tick shapes.** The gate's "typical tick" drove plan, queue,
+   wire, decode, upload, present and retire through *one* tick. The pipeline
+   never does that: a chunk's phases land across many ticks as its fetch
+   settles, and [#888]'s ticks were real ones. This file already called that
+   drive "the pessimistic whole-lifecycle-in-one-tick shape the real pipeline
+   never produces" — it just went on comparing it anyway.
+3. **Different points on different curves.** "1–3 µs" is `publish` evaluated
+   at 1 and 8 events per tick, which is the flattest stretch of a curve that
+   reaches **1,133,388 ns at 128 events** — the `Array.shift()` quadratic
+   [#888] filed as [#898]. The recorder is flat. A single µs/tick figure could
+   therefore never have settled this **in either direction**, because which
+   side is cheaper depends entirely on where on the curve you stand.
+
+There is a fourth thing worth recording, which does *not* invalidate the
+comparison but does change how the floor should be read: every call in
+[#888]'s per-tick figure — `publish`, `UploadTelemetry.recordEvent`,
+`ColdStateTelemetry.recordHit` and `recordRebuild` — sits behind
+`isDebugEnabled("orch")` (`pipeline/upload/telemetry/active.ts`, gated at
+`5846137` on 2026-07-04, a month before [#888] measured). The only always-on
+instrumentation was `TelemetryCounters`. Both halves of [#888]'s floor are
+therefore measured with the channel **on**, which is self-consistent — the
+live-state half sums the same three classes at saturation — and it is the
+baseline [ADR 0049][0049] chose: instrumentation doing its job, compared
+against a recorder that is always doing its job.
+
+**The comparison, made on one shape.** Both sides evaluated at the same rates:
+[#888]'s peak per-second figures on fixture C over its ~120 ticks/s ceiling,
+giving the busiest *real* tick it observed — 17 rows born, 7 wires closed, 7
+decodes, 3 uploads, 5 evictions, each chunk in a different phase. The
+recorder's side is measured; the floor's side is arithmetic on [#888]'s
+per-call table, which keeps this a ledger entry rather than a new campaign.
+
+| Term | Per tick |
+| --- | --- |
+| Floor — `publish` at 3 uploads/tick | 1.80 µs |
+| Floor — `ColdStateTelemetry`, 96% hits / 4% rebuilds | 0.19 µs |
+| Floor — `UploadTelemetry.recordEvent` × 3 | 0.15 µs |
+| Floor — `TelemetryCounters` ×4 calls (**the always-on part**) | 0.17 µs |
+| **Floor, total** | **2.31 µs** |
+| **Recorder, measured on the same tick** (62 write calls) | **1.54–1.67 µs** |
+
+**Both halves of the obligation are met.** The recorder costs **0.67–0.72× the
+floor** on a matched tick, at **25–27 ns/event** — inside [#888]'s measured
+0.8–50 ns/event write path, and ~4× under [ADR 0049][0049]'s own 100 ns
+ceiling, which the ADR derived to sit "at the top of the 0.8–50 ns range" for
+exactly this comparison. Live state is 663 kB against ≈1.05 MB. Nothing is
+outstanding.
+
+Two honest caveats, stated rather than buried. The recorder's cost is
+unconditional and 78% of the floor it beats was not: against the *always-on*
+part alone (0.17 µs) the recorder is ~9× more expensive per tick. That is [ADR
+0049][0049]'s deliberate trade — "recording is unconditional and there is no
+toggle at any scope" — not a regression discovered here, and the ADR's net
+obligation is explicitly against the floor [#888] measured, which is the
+channel-on one. And the ordering flips with tick size in the recorder's
+favour, not against it: at 128 events/tick the floor's `publish` alone is
+1,133 µs against the recorder's whole tick at ~7 µs.
+
+**What replaced the mismatched assertion.** The gate no longer holds a
+whole-lifecycle tick against a hardcoded 1–3 µs. It drives the matched shape
+above and asserts against `FLOOR_TICK_NS`, derived in the test file from
+[#888]'s per-call constants so the derivation is auditable rather than a magic
+number. The lifecycle drive stays as the worst-case *shape* it always was, and
+its figure is still logged — it is a pessimistic bound on the marginal
+per-tick cost, which is a useful thing to watch and never was the floor
+comparison. Read the `[#962]` lines in the test output.
 
 Note what the panel's 1.04 MB was *not*: by [#918] it no longer held a
 pipeline-fed sink, so this is a reader's own working set — polled snapshots,
