@@ -214,10 +214,10 @@ existing numbers rather than a fresh measurement campaign.
 | Term | Figure | Source |
 | --- | --- | --- |
 | Today's floor, live state | ≈ 1.05 MB | [#888] |
-| Today's floor, per tick, on a matched shape | 2.31 µs | derived from [#888]'s per-call table — see [#962] below |
+| Today's floor, per tick, on a matched shape | 1.77 µs | derived from [#888]'s per-call table — see [#962] below |
 | Recorder, live state, one 2,560-chunk run | 663 kB | the CI gate, logged each run |
-| Recorder, matched-shape tick | 1.54–1.67 µs, 0.67–0.72× the floor | the CI gate, logged each run |
-| Recorder, whole-lifecycle tick (8 chunks) — a pessimistic bound, not the floor comparison | ~3.5 µs | the CI gate, logged each run |
+| Recorder, matched-shape tick | 1.42–1.54 µs, 0.80–0.87× the floor | the CI gate, logged each run |
+| Recorder, whole-lifecycle tick (8 chunks) — a pessimistic bound, not the floor comparison | ~3.5 µs | the CI gate, logged each run as the second `[#962]` line |
 | Recorder, worst tick (2,943-chunk burst) | ~26 µs, 9.7× under the ceiling | the CI gate, logged each run |
 | Recorder, frame throughput at DPR 2 | −1.0% vs a no-op sink, inside noise | the A/B above, 2026-08-11 |
 | Retention, resident cap | 8 MB | [ADR 0049][0049], a separate granted budget |
@@ -334,46 +334,63 @@ baseline [ADR 0049][0049] chose: instrumentation doing its job, compared
 against a recorder that is always doing its job.
 
 **The comparison, made on one shape.** Both sides evaluated at the same rates:
-[#888]'s peak per-second figures on fixture C over its ~120 ticks/s ceiling,
-giving the busiest *real* tick it observed — 17 rows born, 7 wires closed, 7
-decodes, 3 uploads, 5 evictions, each chunk in a different phase. The
-recorder's side is measured; the floor's side is arithmetic on [#888]'s
-per-call table, which keeps this a ledger entry rather than a new campaign.
+**one row** of [#888]'s rate table — fixture C's 2D pan — over the tick rate
+measured beside it, 120/s. That gives 17 rows born, 7 wires closed, 7 decodes,
+1 upload, 5 evictions, each chunk in a different phase. One row rather than a
+column-wise maximum, because the biggest number in each column comes from a
+different phase: fixture C's 3D orbit uploads 6× faster but ticks at 58/s, and
+splicing its upload rate into pan's tick rate would inflate the floor's
+dominant term against a tick no run produces. Pan is the right row — it peaks
+the tick rate and four of the five other columns. The recorder's side is
+measured; the floor's side is arithmetic on [#888]'s per-call table, which
+keeps this a ledger entry rather than a new campaign.
 
 | Term | Per tick |
 | --- | --- |
-| Floor — `publish` at 3 uploads/tick | 1.80 µs |
+| Floor — `publish` at 1 upload/tick | 1.36 µs |
 | Floor — `ColdStateTelemetry`, 96% hits / 4% rebuilds | 0.19 µs |
-| Floor — `UploadTelemetry.recordEvent` × 3 | 0.15 µs |
+| Floor — `UploadTelemetry.recordEvent` × 1 | 0.05 µs |
 | Floor — `TelemetryCounters` ×4 calls (**the always-on part**) | 0.17 µs |
-| **Floor, total** | **2.31 µs** |
-| **Recorder, measured on the same tick** (62 write calls) | **1.54–1.67 µs** |
+| **Floor, total** | **1.77 µs** |
+| **Recorder, measured on the same tick** (52 write calls) | **1.42–1.54 µs** |
 
-**Both halves of the obligation are met.** The recorder costs **0.67–0.72× the
-floor** on a matched tick, at **25–27 ns/event** — inside [#888]'s measured
-0.8–50 ns/event write path, and ~4× under [ADR 0049][0049]'s own 100 ns
+The `publish` term is [#888]'s **measured** 1-event reading, not a fit. That
+matters: `publish` is convex, so a straight line drawn between its 1-event and
+8-event readings sits *above* the real curve, and interpolating would have
+inflated the floor in the recorder's favour. At 1 upload/tick the measurement
+is exact, and for any count in 1–8 it is a lower bound, since the curve rises
+monotonically. Understating the floor biases the comparison *against* the
+recorder, which is the safe direction for a gate whose job is to catch the
+recorder getting expensive. The gate asserts the upload count stays inside
+that bracket rather than assuming it.
+
+**Both halves of the obligation are met.** The recorder costs **0.80–0.87× the
+floor** on a matched tick, at **27–30 ns/event** — inside [#888]'s measured
+0.8–50 ns/event write path, and ~3× under [ADR 0049][0049]'s own 100 ns
 ceiling, which the ADR derived to sit "at the top of the 0.8–50 ns range" for
 exactly this comparison. Live state is 663 kB against ≈1.05 MB. Nothing is
 outstanding.
 
 Two honest caveats, stated rather than buried. The recorder's cost is
-unconditional and 78% of the floor it beats was not: against the *always-on*
+unconditional and 90% of the floor it beats was not: against the *always-on*
 part alone (0.17 µs) the recorder is ~9× more expensive per tick. That is [ADR
 0049][0049]'s deliberate trade — "recording is unconditional and there is no
 toggle at any scope" — not a regression discovered here, and the ADR's net
 obligation is explicitly against the floor [#888] measured, which is the
 channel-on one. And the ordering flips with tick size in the recorder's
 favour, not against it: at 128 events/tick the floor's `publish` alone is
-1,133 µs against the recorder's whole tick at ~7 µs.
+1,133 µs against the recorder's whole tick at ~8 µs.
 
 **What replaced the mismatched assertion.** The gate no longer holds a
 whole-lifecycle tick against a hardcoded 1–3 µs. It drives the matched shape
 above and asserts against `FLOOR_TICK_NS`, derived in the test file from
 [#888]'s per-call constants so the derivation is auditable rather than a magic
 number. The lifecycle drive stays as the worst-case *shape* it always was, and
-its figure is still logged — it is a pessimistic bound on the marginal
-per-tick cost, which is a useful thing to watch and never was the floor
-comparison. Read the `[#962]` lines in the test output.
+its figure is still logged on its own `[#962]` line, labelled as the
+pessimistic bound it is — a useful thing to watch, and never the floor
+comparison. Read the three `[#962]` lines in the test output: the matched-shape
+comparison, that bound, and the crossover that shows why one figure could not
+have settled this.
 
 Note what the panel's 1.04 MB was *not*: by [#918] it no longer held a
 pipeline-fed sink, so this is a reader's own working set — polled snapshots,

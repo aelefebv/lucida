@@ -127,7 +127,7 @@ free" while doubling the floor.
 > quadratic in events per tick and the recorder is flat, no single µs/tick
 > figure can express the obligation; it is now stated as a comparison on a
 > matched tick shape and asserted that way in CI. Both halves are met — 663 kB
-> live, and 0.67–0.72× the floor per tick. The derivation is in
+> live, and 0.80–0.87× the floor per tick. The derivation is in
 > `docs/perf/recorder-cost/README.md`.
 
 ## Retention is bounded in bytes and evicted a run at a time
