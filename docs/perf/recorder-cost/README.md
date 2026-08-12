@@ -9,6 +9,7 @@ Issue [#928], under the [#921] spec, enforcing [ADR 0049][0049].
 [#921]: https://github.com/aelefebv/lucida/issues/921
 [#928]: https://github.com/aelefebv/lucida/issues/928
 [#949]: https://github.com/aelefebv/lucida/issues/949
+[#962]: https://github.com/aelefebv/lucida/issues/962
 [0049]: ../../../wiki/decisions/0049-unconditional-recording-under-a-design-budget.md
 [0052]: ../../../wiki/decisions/0052-debug-surface-dispositions.md
 
@@ -37,7 +38,7 @@ issue that created it.
 | --- | --- | --- |
 | Amortised per-event cost | ≤ 100 ns | < 1,600 ns at every burst size |
 | Flat in events-per-tick | 1, 8, 128, 2,943 events/tick | the same per-event ceiling at every size |
-| Worst-case tick | ≤ 250 µs for a 2,943-chunk submit | < 9,600 µs, i.e. 16× the ~600 µs measured (see the finding below) |
+| Worst-case tick | ≤ 250 µs for a 2,943-chunk submit | < 4,000 µs, i.e. 16× the ceiling itself |
 | Zero steady-state allocation | no reallocation after warmup | sink buffers identical + gc-bracketed heap delta |
 | Net non-regression | ≤ 1.05 MB live, ≤ 1–3 µs/tick | a 2,560-chunk run's live bytes and a typical tick |
 
@@ -49,16 +50,18 @@ test output for the numbers. The assertions fire on a change of complexity
 class, not on a slow runner.
 
 **On that 16×.** The width is a finding rather than a fudge: the 2,943-chunk
-burst measures **75 µs on an idle workstation and 3.4 ms on a GitHub runner**,
+burst measured **75 µs on an idle workstation and 3.4 ms on a GitHub runner**,
 a ~45× spread on identical code — a microbenchmark of a few-microsecond tick
 is dominated by whatever else the host is doing. At the 4× this shipped with,
 the worst-tick and net-non-regression gates failed on every CI run: a gate
 reporting the runner rather than the code, which is the #906 flake this file
-says it must not become. The worst-tick gate is also based on the ~600 µs the
-tick actually costs rather than on the 250 µs ceiling it knowingly exceeds,
-because a gate has to be able to pass on a green build. 16× still catches the
-shape these gates exist for by two orders of magnitude — the `Array.shift()`
-regression was ~800×.
+says it must not become. 16× still catches the shape these gates exist for by
+two orders of magnitude — the `Array.shift()` regression was ~800×.
+
+Both of those host figures were three write calls per chunk. [#949] made
+it one, so the same burst now costs roughly a third of each, and the
+worst-tick gate is keyed to the 250 µs ceiling itself rather than to a
+measured stand-in for it.
 
 Flatness is asserted by holding *every* burst size to the same per-event
 ceiling rather than by comparing sizes to each other. That is deliberate: a
@@ -74,34 +77,42 @@ Run them alone, with figures:
 cd lucida-web && npx vitest run src/trace/recorderCost.perf.test.ts --reporter=verbose
 ```
 
-### Finding: the tick ceiling assumed one write per chunk
+### Finding, resolved: the tick ceiling assumed one write per chunk
 
-Measured on an M-series laptop under Node 22, the 2,943-chunk submit burst
-costs **~540 µs**, against [ADR 0049][0049]'s 250 µs ceiling. The per-event
-number is *inside* budget at ~61 ns; what is over is the number of events.
+[ADR 0049][0049] derived the tick ceiling as `2,943 chunk requests × 100 ns`,
+i.e. **one recorded event per chunk**. The dispatch path as first built emitted
+**three** write calls per chunk — `beginChunkRow`, `stampAdmission`,
+`stamp(WireStart)`, all in one breath in `cpuCache.fetchAndDecode` — because
+the row is born at dispatch with the two phases behind it already over. That
+was correct behaviour costed against a ceiling derived from a third of its
+events, and it put the worst tick at ~540 µs against a 250 µs ceiling. The
+per-event number was never the problem: it was inside budget at ~61 ns
+throughout.
 
-The ADR derived the tick ceiling as `2,943 chunk requests × 100 ns`, i.e. one
-recorded event per chunk. The dispatch path as built emits **three** write
-calls per chunk — `beginChunkRow`, `stampAdmission`, `stamp(WireStart)`, all in
-one breath in `cpuCache.fetchAndDecode` — because the row is born at dispatch
-with the two phases behind it already over. Three times 2,943 times ~61 ns is
-~540 µs.
+[#949] took the first of the two ways out — **collapse the dispatch
+calls** rather than re-derive the ceiling — because the ceiling's arithmetic
+was sound and it was the implementation that had drifted from it.
+`beginChunkRow` now takes the admission stamp and opens `wire` itself, so row
+birth is one call carrying three boundaries, and the two handle round-trips it
+used to spend (`resolve`, a generation divide, a modulo, per chunk, to reach a
+row the same frame had just made) are gone.
 
-Tracked as [#949]. Two ways out, neither of which belongs to [#928]:
+Measured on an M-series laptop under Node 22, same tree, one variable:
 
-1. **Collapse the dispatch calls.** `beginChunkRow` could take the admission
-   stamp and the wire-start boundary directly, making row birth one call
-   instead of three and removing two handle round-trips (`resolve`, the
-   generation divide, the modulo) per chunk. That is an emit-site change in
-   `cpuCache`, and it would land the tick near the derived ceiling.
-2. **Re-derive the ceiling.** 250 µs was arithmetic on an event model that the
-   implementation did not adopt. Three writes per chunk against the ~120
-   ticks/s ceiling is ~6.5% of a tick rather than 3%.
+| | Write calls | Worst tick (p50) | Per call |
+| --- | --- | --- | --- |
+| three calls per chunk | 8,833 | 73–76 µs | ~8.4 ns |
+| one call per chunk | 2,947 | 25.7–26.2 µs | ~8.8 ns |
 
-Until one of those happens, the run prints its ratio against the 250 µs
-ceiling on every CI job — `OVER the 250µs ceiling by N.Nx` wherever the host is
-slow enough to show it — so the breach is loud rather than quietly encoded as
-passing.
+**2.8× off the worst tick, and 3× off the event count.** The per-call figure is
+flat across the two, which is the tell that the win is calls removed rather
+than work skipped — the same four sink writes happen either way.
+
+That machine is an idle workstation, so it sat under the ceiling even at three
+calls per chunk (the breach shows on a loaded host — see the ~45× spread
+above); what changed is that the implementation and the ADR now count the same
+events, so the gate is keyed to the 250 µs ceiling itself. There is no longer a
+measured stand-in constant, and no `OVER the ceiling` line to print.
 
 ## The A/B that cannot run in CI
 
@@ -127,7 +138,19 @@ release server, system Chrome with WebGPU, on an M-series laptop.
 The two arms are the same tree twice, differing only by the patch below; the
 no-op arm keeps the branch, the argument evaluation and the seam, which is the
 cost a user actually pays. Re-run it when the recorder's write path changes
-shape — collapsing the dispatch calls in [#949] would be such a change.
+shape.
+
+**Not re-run for [#949], deliberately.** Those figures predate the dispatch
+collapse, so they are a *conservative* reading of it rather than a stale one:
+[#949] only removed work from the write path — two calls, two handle
+round-trips and a clock read per chunk, adding nothing — so the real arm can
+only have moved toward the no-op arm, and the standing verdict of "inside
+noise" is an upper bound on the recorder's visibility that the change cannot
+have loosened. What a re-run would buy is a tighter number for a gap already
+measured at 1.0%, against a 5% band, on a harness that needs a GPU, a release
+server and a real fixture. Worth doing when something *adds* to the write
+path; not worth a build campaign to confirm a bound in the direction it
+already holds.
 
 There is no runtime switch to flip, by design, so the two arms are two builds:
 the tree as it is, and the tree with `noop-sink.patch` applied. The patch
@@ -193,7 +216,7 @@ existing numbers rather than a fresh measurement campaign.
 | Today's floor, per tick | ≈ 1–3 µs | [#888] |
 | Recorder, live state, one 2,560-chunk run | 623 kB | the CI gate, logged each run |
 | Recorder, typical tick (8 chunks) | ~2.9 µs | the CI gate, logged each run |
-| Recorder, worst tick (2,943-chunk burst) | ~540 µs, over ceiling ([#949]) | the CI gate, logged each run |
+| Recorder, worst tick (2,943-chunk burst) | ~26 µs, 9.7× under the ceiling | the CI gate, logged each run |
 | Recorder, frame throughput at DPR 2 | −1.0% vs a no-op sink, inside noise | the A/B above, 2026-08-11 |
 | Retention, resident cap | 8 MB | [ADR 0049][0049], a separate granted budget |
 
@@ -269,14 +292,32 @@ typical tick") the obligation is **not** fully discharged, and saying otherwise
 here would be the same "preserved" label over lost ground that [ADR 0052][0052]
 exists to refuse.
 
-The tick overage is [#949], not this teardown: the ceiling was derived from one
-write per chunk and dispatch emits three, so the figure is ~3× its own
-premise. Deleting a reader cannot move it — nothing the panel did was on the
-write path. Read the three recorded tick figures as one noisy quantity, not a
-trend: ~2.9 µs at [#928], 3.38 µs at [#918], 3.50 µs here, all on a
-few-microsecond microbenchmark whose spread across hosts is ~45× (see the 16×
-note above), all on the pessimistic whole-lifecycle-in-one-tick shape the real
-pipeline never produces. Closing [#949] closes this ledger.
+The tick overage is not this teardown's: deleting a reader cannot move it,
+because nothing the panel did was on the write path. Read the recorded tick
+figures as one noisy quantity, not a trend: ~2.9 µs at [#928], 3.38 µs at
+[#918], 3.50 µs here, all on a few-microsecond microbenchmark whose spread
+across hosts is ~45× (see the 16× note above), all on the pessimistic
+whole-lifecycle-in-one-tick shape the real pipeline never produces.
+
+**It was not [#949]'s either, and that is a correction to what this section
+used to say.** The attribution here was that the figure was "~3× its own
+premise" because dispatch emitted three writes per chunk, so closing [#949]
+would close this ledger. It did not. Collapsing those calls took the
+*lifecycle* tick from ~3.7 µs to 3.46–3.54 µs — a few percent, inside the
+noise — while taking the *burst* tick down 2.8×. The two respond differently
+because they are different shapes: the burst is nothing but dispatch, so
+removing two of its three calls per chunk removes two thirds of it, whereas a
+lifecycle tick spends most of itself in sink writes and the frame hand-off
+that [#949] did not touch. Removing 25% of a lifecycle tick's calls bought ~6%
+of its time, which says the remaining cost is the writes themselves rather
+than the call overhead around them.
+
+So this half of the obligation stays open, and it now has no candidate
+explanation attached to it. It is tracked as [#962] rather than left here as
+an obligation with no owner. What would settle it is deciding whether a
+whole-lifecycle-in-one-tick microbenchmark is the right thing to hold against
+a floor [#888] measured on real ticks at all — the two may simply not be the
+same quantity.
 
 Note what the panel's 1.04 MB was *not*: by [#918] it no longer held a
 pipeline-fed sink, so this is a reader's own working set — polled snapshots,

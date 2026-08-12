@@ -10,14 +10,13 @@
  * - **≤ 100 ns per event, amortised.** The primary number, because it
  *   composes: any burst size multiplied by it gives the tick cost.
  * - **≤ 250 µs worst-case tick.** #888's largest observed burst is 2,943 chunk
- *   requests inside one `cpuCache.submit()`. As built, that tick is measurably
- *   *over* this ceiling — the ADR derived it as one recorded event per chunk
- *   request, and the dispatch path emits three write calls per chunk (row
- *   birth, admission, wire start). The per-event number is inside budget; the
- *   event count per chunk is what is not. The gate below therefore trips at
- *   {@link CI_SLACK}× and the run logs the breach loudly rather than passing
- *   in silence; `docs/perf/recorder-cost/README.md` carries the finding and
- *   the two ways out of it.
+ *   requests inside one `cpuCache.submit()`. The ADR derived this ceiling as
+ *   one recorded event per chunk request, and the dispatch path now emits
+ *   exactly that: the row birth carries the admission stamp and opens `wire`
+ *   itself. It emitted three — row birth, admission, wire start — until #949,
+ *   which put the tick over a ceiling derived from one third of its events.
+ *   Keeping {@link BURST_CALLS_PER_CHUNK} at 1 is what keeps the two counting
+ *   the same thing; `docs/perf/recorder-cost/README.md` carries the history.
  * - **Flat in events-per-tick, not merely small at one event.** This is the
  *   gate most worth having: `UploadTelemetry.publish` in this repo went from
  *   1.4 µs to 1.13 ms between 1 and 128 events per tick because it pruned with
@@ -68,18 +67,6 @@ const PER_EVENT_CEILING_NS = 100;
 const WORST_TICK_CEILING_US = 250;
 
 /**
- * The worst-case tick as measured, rather than as specified: 540–580 µs on
- * the machine this was written on, for the reason the module doc gives —
- * three write calls per chunk request rather than the one ADR 0049 derived
- * {@link WORST_TICK_CEILING_US} from (#949).
- *
- * The gate is based on this rather than on the ceiling because a gate must
- * be able to pass on a green build. The ceiling is what the run *reports*
- * the breach against; this is the figure a complexity regression moves.
- */
-const WORST_TICK_MEASURED_US = 600;
-
-/**
  * How far above the measured figure a gate trips.
  *
  * Sixteen, and the width is the finding rather than a fudge: the same burst
@@ -90,7 +77,8 @@ const WORST_TICK_MEASURED_US = 600;
  * code, which is precisely the #906 flake this file's doc says it must not
  * become.
  *
- * Sixteen clears the worst CI figure observed by ~2.8× and still catches the
+ * Sixteen clears the worst CI figure observed by ~3.5× — that 3.4 ms was
+ * three write calls per chunk, and #949 made it one — and still catches the
  * shape these gates exist for by two orders of magnitude: `Array.shift()`
  * pruning took `UploadTelemetry.publish` from 1.4 µs to 1.13 ms (#888/#898),
  * ~800×. Read the logged figure for the real number — the assertion only
@@ -129,13 +117,14 @@ const OUTSTANDING = {
 
 /**
  * Recorder write calls per chunk on the real emit path, counted from the call
- * sites in `cpuCache.fetchAndDecode` (row birth, admission, wire, label,
- * decode), `decodePool` (upload boundary + the counted worker dispatch) and
- * the render loop's hand-off. Excludes the two present stamps and the row
- * retirement, which `noteFrameDispatched` does in bulk and which
- * {@link eventsPerTick} counts separately.
+ * sites in `cpuCache.fetchAndDecode` (row birth — which carries admission and
+ * wire start with it since #949 — then label and decode), `decodePool` (upload
+ * boundary + the counted worker dispatch) and the render loop's hand-off.
+ * Excludes the two present stamps and the row retirement, which
+ * `noteFrameDispatched` does in bulk and which {@link eventsPerTick} counts
+ * separately.
  */
-const CALLS_PER_CHUNK = 8;
+const CALLS_PER_CHUNK = 6;
 
 /**
  * Per-row work inside `noteFrameDispatched`: two present stamps and a finish.
@@ -156,13 +145,19 @@ function eventsPerTick(chunks: number): number {
 }
 
 /**
- * Recorder calls per chunk on the burst path alone: the row is born at
- * dispatch and the two boundaries behind it are stamped in the same breath
- * (`cpuCache.fetchAndDecode`). Everything downstream — wire close, decode,
- * upload, present — lands on later ticks as the fetches settle, which is why
- * the worst-case tick is this and not a whole lifecycle.
+ * Recorder calls per chunk on the burst path alone: **one**, the row birth in
+ * `cpuCache.fetchAndDecode`, which carries the admission stamp and opens
+ * `wire` itself. Everything downstream — wire close, decode, upload, present —
+ * lands on later ticks as the fetches settle, which is why the worst-case tick
+ * is this and not a whole lifecycle.
+ *
+ * This being 1 is what #949 fixed and what this file exists to keep fixed. It
+ * was 3 — row birth, admission, wire start, in one breath at dispatch — which
+ * is three times the event count ADR 0049 derived
+ * {@link WORST_TICK_CEILING_US} from, and the reason the worst tick sat over
+ * that ceiling.
  */
-const BURST_CALLS_PER_CHUNK = 3;
+const BURST_CALLS_PER_CHUNK = 1;
 
 /**
  * One recorder wired to a real sink, plus the pre-built inputs a tick needs.
@@ -223,10 +218,8 @@ function makeRig(chunks: number, calls?: { count: number }) {
     for (let i = 0; i < chunks; i++) {
       const src = sources[i];
       const tier = src.lane === "coarse" ? 1 : 0;
-      const handle = recorder.beginChunkRow(src, tier);
+      const handle = recorder.beginChunkRow(src, tier, enqueuedAtMs);
       handles[i] = handle;
-      recorder.stampAdmission(handle, enqueuedAtMs);
-      recorder.stamp(handle, Boundary.WireStart);
       label.rid = i;
       recorder.labelRow(handle, label);
       recorder.stamp(handle, Boundary.DecodeStart);
@@ -255,9 +248,7 @@ function makeRig(chunks: number, calls?: { count: number }) {
     recorder.notePlanEnqueue(enqueuedAtMs);
     for (let i = 0; i < chunks; i++) {
       const src = sources[i];
-      const handle = recorder.beginChunkRow(src, src.lane === "coarse" ? 1 : 0);
-      recorder.stampAdmission(handle, enqueuedAtMs);
-      recorder.stamp(handle, Boundary.WireStart);
+      recorder.beginChunkRow(src, src.lane === "coarse" ? 1 : 0, enqueuedAtMs);
     }
     recorder.commitTick();
   }
@@ -407,20 +398,25 @@ describe("recorder cost contract", () => {
     const ratio = burst.tickUs.p50 / WORST_TICK_CEILING_US;
     const verdict = ratio <= 1
       ? `${(1 / ratio).toFixed(1)}x under the ceiling`
-      : `OVER the ${WORST_TICK_CEILING_US}µs ceiling by ${ratio.toFixed(1)}x — see ` +
-        `docs/perf/recorder-cost/README.md, "the tick ceiling assumed one write per chunk"`;
+      : `OVER the ${WORST_TICK_CEILING_US}µs ceiling by ${ratio.toFixed(1)}x`;
     console.log(
       `[#928] worst tick: 2,943-chunk submit burst = ${burst.events} write calls | ` +
         `p50=${burst.tickUs.p50.toFixed(1)}µs p95=${burst.tickUs.p95.toFixed(1)}µs ` +
         `max=${burst.tickUs.max.toFixed(1)}µs x${burst.iterations} | ` +
         `${burst.perEventNs.toFixed(1)} ns/call | ${verdict}, gate ` +
-        `${WORST_TICK_MEASURED_US * CI_SLACK}µs`,
+        `${WORST_TICK_CEILING_US * CI_SLACK}µs`,
     );
 
+    // Gated on the spec ceiling itself rather than on a measured stand-in.
+    // It was the latter while the dispatch path emitted three write calls per
+    // chunk against a ceiling derived from one, which put the tick over the
+    // ceiling on a green build — a gate that cannot pass on green is not a
+    // gate. #949 collapsed those three into one, so the implementation and
+    // the ADR now count the same events and the ceiling is the honest bound.
     expect(
       burst.tickUs.p50,
       `worst-case tick p50 ${burst.tickUs.p50.toFixed(1)} µs`,
-    ).toBeLessThan(WORST_TICK_MEASURED_US * CI_SLACK);
+    ).toBeLessThan(WORST_TICK_CEILING_US * CI_SLACK);
   });
 
   it("holds one run inside the observability floor the teardown must not raise", () => {
