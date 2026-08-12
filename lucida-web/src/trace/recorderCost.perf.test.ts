@@ -36,11 +36,26 @@
  * figure and its headroom. Read the logged line for the actual number; the
  * assertion only fires on a change of complexity class, not on a slow runner.
  *
+ * ## The floor comparison is pinned to a tick shape (#962)
+ *
+ * ADR 0049's *net* obligation is that total observability cost be no higher
+ * than the floor #888 measured. Its per-tick half was checked against #888's
+ * "≈1–3 µs/tick" for a while, and that was a category error: #888's figure is
+ * a single `publish` *read* at 1–8 events per tick, and it was being held
+ * against a whole chunk lifecycle's worth of recorder *writes* forced into
+ * one tick. The two are neither the same side of the path, the same tick
+ * shape, nor the same point on a curve — the floor's dominant term is
+ * quadratic in events per tick and the recorder's is flat, so no single
+ * µs/tick figure could have settled it in either direction.
+ *
+ * So the comparison is made on one shape, with both sides at the same rates:
+ * see {@link MATCHED_TICK} and {@link FLOOR_TICK_NS}.
+ *
  * The fourth gate ADR 0049 requires — an A/B frame-throughput comparison of
  * real sink against no-op sink over a warm re-open at devicePixelRatio 2 —
  * needs a GPU, a server and a real fixture, none of which a CI runner has. It
  * lives as a harness at `docs/perf/recorder-cost/`, alongside the net
- * non-regression ledger this repo owes once the debug panel is dismantled.
+ * non-regression ledger this file's gates feed.
  */
 
 import process from "node:process";
@@ -116,6 +131,116 @@ const OUTSTANDING = {
 };
 
 /**
+ * #888's peak per-second rates, and the tick rate it measured alongside them.
+ *
+ * **One row of #888's table, not a column-wise maximum.** Fixture C's 2D pan,
+ * which is the phase that peaks the tick rate (120/s), the cache submits, the
+ * fetches, the decodes and the evictions. Taking the biggest number from each
+ * column would describe a tick no run ever produces — fixture C's 3D orbit
+ * uploads 6× faster but ticks at 58/s, so mixing its upload rate into pan's
+ * tick rate would inflate the floor's dominant term against a tick shape that
+ * does not exist.
+ *
+ * These are the peak seconds *of that phase*, so the tick they describe is
+ * the busiest pan produces rather than an average. Both sides of the floor
+ * comparison in {@link FLOOR_TICK_NS} are evaluated at these same rates, so
+ * the comparison is a bound rather than an estimate.
+ */
+const PEAK_PAN = {
+  ticksPerSec: 120,
+  submitsPerSec: 2_083,
+  fetchedPerSec: 894,
+  decodedPerSec: 881,
+  uploadedPerSec: 65,
+  evictedPerSec: 653,
+  /** 48 full rebuilds over 1,199 ticks in ~10 s — ~4% of ticks. */
+  rebuildsPerSec: 5,
+} as const;
+
+const perTick = (perSec: number) => Math.round(perSec / PEAK_PAN.ticksPerSec);
+
+/**
+ * The shape of one peak pan tick, in the units the write path emits. A cache
+ * submit that misses becomes a fetch, so hits are the difference.
+ */
+const MATCHED_TICK = {
+  rowsBorn: perTick(PEAK_PAN.submitsPerSec),
+  cacheHits: perTick(PEAK_PAN.submitsPerSec - PEAK_PAN.fetchedPerSec),
+  wiresClosed: perTick(PEAK_PAN.fetchedPerSec),
+  decodes: perTick(PEAK_PAN.decodedPerSec),
+  uploads: perTick(PEAK_PAN.uploadedPerSec),
+  evictions: perTick(PEAK_PAN.evictedPerSec),
+  /** Fractional by nature: ~5 rebuilds/s against ~120 ticks/s. */
+  rebuildShare: PEAK_PAN.rebuildsPerSec / PEAK_PAN.ticksPerSec,
+} as const;
+
+/**
+ * What the instrumentation this recorder replaces cost on that same tick, in
+ * nanoseconds — the floor comparison, made comparable.
+ *
+ * Every per-call figure is #888's, measured against the real classes. #888
+ * summarised them as "≈1–3 µs/tick of publish work"; this is that summary
+ * made composable, by multiplying each call by how often
+ * {@link MATCHED_TICK} makes it instead of quoting one call's cost as a
+ * tick's.
+ */
+const FLOOR_CALL_NS = {
+  recordRequest: 0.8,
+  recordHit: 2.4,
+  recordEviction: 8.7,
+  recordDecode: 12.7,
+  uploadRecordEvent: 49.6,
+  coldStateRecordHit: 158.6,
+  coldStateRecordRebuild: 968.2,
+} as const;
+
+/**
+ * #888's two measured `publish` readings at the low end of its curve, and the
+ * one at the top. Kept as measurements rather than fitted, because the curve
+ * is quadratic (`Array.shift()` pruning, #898) and a straight line drawn
+ * between two points on a convex curve sits *above* it — which here would
+ * inflate the floor in the recorder's favour.
+ */
+const FLOOR_PUBLISH_NS_AT = { 1: 1_361, 8: 2_901, 128: 1_133_388 } as const;
+
+/**
+ * The publish term, taken as #888's 1-event reading — a *lower* bound on what
+ * publish costs at {@link MATCHED_TICK}'s upload count, since the curve rises
+ * monotonically from there. Understating the floor biases the comparison
+ * against the recorder, which is the safe direction for a gate whose job is
+ * to catch the recorder getting expensive. The bracket is asserted below.
+ */
+const FLOOR_PUBLISH_NS = FLOOR_PUBLISH_NS_AT[1];
+
+/**
+ * Which of these the floor pays unconditionally. Only `TelemetryCounters` —
+ * every other call above sits behind `isDebugEnabled("orch")`
+ * (`upload/telemetry/active.ts`, gated since 2026-07-04, a month before #888
+ * measured). So #888's floor describes instrumentation *doing its job*, which
+ * is the right baseline for a recorder that is always doing its job, but it
+ * is not what a default session paid.
+ */
+const FLOOR_ALWAYS_ON_NS =
+  FLOOR_CALL_NS.recordRequest * MATCHED_TICK.rowsBorn +
+  FLOOR_CALL_NS.recordHit * MATCHED_TICK.cacheHits +
+  FLOOR_CALL_NS.recordEviction * MATCHED_TICK.evictions +
+  FLOOR_CALL_NS.recordDecode * MATCHED_TICK.decodes;
+
+const FLOOR_TICK_NS =
+  FLOOR_ALWAYS_ON_NS +
+  FLOOR_CALL_NS.uploadRecordEvent * MATCHED_TICK.uploads +
+  FLOOR_CALL_NS.coldStateRecordHit * (1 - MATCHED_TICK.rebuildShare) +
+  FLOOR_CALL_NS.coldStateRecordRebuild * MATCHED_TICK.rebuildShare +
+  FLOOR_PUBLISH_NS;
+
+/**
+ * Depth of each phase ring in {@link makeRig}'s matched-shape drive.
+ * Comfortably past the per-tick counts, so the drop is a backstop for the
+ * plan-more-than-you-fetch surplus rather than something the window trips on.
+ */
+const RING = 4_096;
+
+/**
  * Recorder write calls per chunk on the real emit path, counted from the call
  * sites in `cpuCache.fetchAndDecode` (row birth — which carries admission and
  * wire start with it since #949 — then label and decode), `decodePool` (upload
@@ -143,6 +268,22 @@ const BURST_FIXED_CALLS_PER_TICK = 4;
 function eventsPerTick(chunks: number): number {
   return chunks * (CALLS_PER_CHUNK + FRAME_CALLS_PER_CHUNK) + FIXED_CALLS_PER_TICK;
 }
+
+/**
+ * Write calls in one peak steady-state tick: a row birth per submit, a label
+ * per wire close, a stamp and a counted phase per decode, a stamp and a
+ * hand-off per upload, three frame calls per uploaded row, a point event per
+ * eviction, and the four fixed calls (plan open/close, tick open/commit).
+ * Asserted against the real count below, like the lifecycle model is.
+ */
+const MATCHED_EVENTS_PER_TICK =
+  MATCHED_TICK.rowsBorn +
+  MATCHED_TICK.wiresClosed +
+  MATCHED_TICK.decodes * 2 +
+  MATCHED_TICK.uploads * 2 +
+  MATCHED_TICK.uploads * FRAME_CALLS_PER_CHUNK +
+  MATCHED_TICK.evictions +
+  4;
 
 /**
  * Recorder calls per chunk on the burst path alone: **one**, the row birth in
@@ -253,7 +394,80 @@ function makeRig(chunks: number, calls?: { count: number }) {
     recorder.commitTick();
   }
 
-  return { recorder: real, tick, burstTick, sink: () => sink };
+  /**
+   * One peak steady-state tick of the shape #888 measured: rows are born
+   * here, and the rows that close a wire, decode or upload on this tick were
+   * born on earlier ones. That is the difference from {@link tick}, which
+   * drives a whole lifecycle through a single tick and so is a pessimistic
+   * bound rather than a shape the pipeline produces.
+   *
+   * Phases advance through fixed-capacity rings with drop-oldest, which is
+   * also what the pipeline does: it plans more than it fetches, and the
+   * remainder is cancelled or evicted rather than carried forever. A dropped
+   * handle is simply never stamped again, and a stale one is inert by
+   * construction (row indices are packed with the run generation).
+   */
+  const phaseRings = [
+    new Int32Array(RING),
+    new Int32Array(RING),
+    new Int32Array(RING),
+  ];
+  const heads = [0, 0, 0];
+  const tails = [0, 0, 0];
+  const push = (phase: number, handle: number) => {
+    phaseRings[phase][tails[phase] % RING] = handle;
+    tails[phase]++;
+    if (tails[phase] - heads[phase] > RING) heads[phase] = tails[phase] - RING;
+  };
+  const take = (phase: number): number => {
+    if (heads[phase] === tails[phase]) return -1;
+    return phaseRings[phase][heads[phase]++ % RING];
+  };
+
+  let born = 0;
+  function matchedShapeTick(): void {
+    recorder.markPlanStart();
+    const scratch = recorder.beginTick("ds");
+    if (scratch) {
+      scratch.counters[TickCounter.PlannedChunks] = MATCHED_TICK.rowsBorn;
+      scratch.setResidency(2, MATCHED_TICK.rowsBorn, 0);
+    }
+    const enqueuedAtMs = performance.now();
+    recorder.notePlanEnqueue(enqueuedAtMs);
+
+    for (let i = 0; i < MATCHED_TICK.rowsBorn; i++) {
+      const src = sources[born++ % sources.length];
+      push(0, recorder.beginChunkRow(src, src.lane === "coarse" ? 1 : 0, enqueuedAtMs));
+    }
+    for (let i = 0; i < MATCHED_TICK.wiresClosed; i++) {
+      const handle = take(0);
+      if (handle < 0) break;
+      label.rid = handle;
+      recorder.labelRow(handle, label);
+      push(1, handle);
+    }
+    for (let i = 0; i < MATCHED_TICK.decodes; i++) {
+      const handle = take(1);
+      if (handle < 0) break;
+      recorder.stamp(handle, Boundary.DecodeStart);
+      recorder.countPhase(CountedPhaseIndex.WorkerDispatch);
+      push(2, handle);
+    }
+    for (let i = 0; i < MATCHED_TICK.uploads; i++) {
+      const handle = take(2);
+      if (handle < 0) break;
+      recorder.stamp(handle, Boundary.UploadStart);
+      recorder.noteHandedToRenderer(handle);
+    }
+
+    recorder.noteFrameDispatched();
+    for (let i = 0; i < MATCHED_TICK.evictions; i++) {
+      recorder.recordPointEvent(PointEvent.Eviction, "evicted", sources[i], 0);
+    }
+    recorder.commitTick();
+  }
+
+  return { recorder: real, tick, burstTick, matchedShapeTick, sink: () => sink };
 }
 
 /**
@@ -286,18 +500,38 @@ function summarise(samples: number[]) {
 }
 
 /**
+ * The three tick shapes this file measures, each paired with the model of how
+ * many write calls it makes. One record rather than a cascade per property, so
+ * a fourth shape cannot be added to the drive and forgotten in the count.
+ */
+const DRIVES = {
+  lifecycle: (rig: Rig, chunks: number) => ({
+    events: eventsPerTick(chunks),
+    drive: rig.tick,
+  }),
+  burst: (rig: Rig, chunks: number) => ({
+    events: chunks * BURST_CALLS_PER_CHUNK + BURST_FIXED_CALLS_PER_TICK,
+    drive: rig.burstTick,
+  }),
+  matched: (rig: Rig) => ({
+    events: MATCHED_EVENTS_PER_TICK,
+    drive: rig.matchedShapeTick,
+  }),
+} satisfies Record<string, (rig: Rig, chunks: number) => { events: number; drive: () => void }>;
+
+type DriveKind = keyof typeof DRIVES;
+type Rig = ReturnType<typeof makeRig>;
+
+/**
  * Drive `chunks` events per tick and return the per-tick timings. Iterations
  * scale down with burst size so every burst measures a comparable ~300k events
  * — enough samples to have a median at N=2,943 without spending a minute of CI
  * on the small ones.
  */
-function measure(chunks: number, kind: "lifecycle" | "burst" = "lifecycle") {
-  const events = kind === "lifecycle"
-    ? eventsPerTick(chunks)
-    : chunks * BURST_CALLS_PER_CHUNK + BURST_FIXED_CALLS_PER_TICK;
-  const iterations = Math.max(20, Math.min(2000, Math.round(600_000 / events)));
+function measure(chunks: number, kind: DriveKind = "lifecycle") {
   const rig = makeRig(chunks);
-  const drive = kind === "lifecycle" ? rig.tick : rig.burstTick;
+  const { events, drive } = DRIVES[kind](rig, chunks);
+  const iterations = Math.max(20, Math.min(2000, Math.round(600_000 / events)));
 
   // Warm past first-call JIT. The row table's doublings are *not* warmed
   // past — rows accumulate for a run's whole life, so a doubling can land in
@@ -385,6 +619,18 @@ describe("recorder cost contract", () => {
     // the lifecycle tick makes one more call than the fixed term names.
     expect(lifecycle.count).toBe(64 * CALLS_PER_CHUNK + FIXED_CALLS_PER_TICK + 1);
     expect(burst.count).toBe(64 * BURST_CALLS_PER_CHUNK + BURST_FIXED_CALLS_PER_TICK);
+
+    // The realistic drive's first tick has nothing in its rings yet, so only
+    // the row births and the fixed calls land — which is exactly what makes
+    // the count worth checking on a *later* tick, once each phase has rows to
+    // advance. The frame hand-off's per-row work is modelled rather than
+    // called, so the real count is the model less those.
+    const realistic = { count: 0 };
+    const rig = makeRig(MATCHED_TICK.rowsBorn, realistic);
+    for (let i = 0; i < 8; i++) rig.matchedShapeTick();
+    expect(realistic.count / 8).toBe(
+      MATCHED_EVENTS_PER_TICK - MATCHED_TICK.uploads * FRAME_CALLS_PER_CHUNK + 1,
+    );
   });
 
   it("bounds the worst tick #888 measured against the 250 µs ceiling", () => {
@@ -420,17 +666,14 @@ describe("recorder cost contract", () => {
   });
 
   it("holds one run inside the observability floor the teardown must not raise", () => {
-    // ADR 0049's *net* obligation, as far as it can be checked before the
-    // debug panel is dismantled (#918, #919): the recorder's marginal cost is
-    // measured here against the floor #888 found — ≈1.05 MB of live state and
-    // ≈1–3 µs per tick — so that when the panel goes, the subtraction is
-    // arithmetic on two recorded numbers rather than a new measurement
-    // campaign. `docs/perf/recorder-cost/README.md` carries the ledger.
+    // ADR 0049's *net* obligation (#962 settled its per-tick half): once the
+    // debug panel is dismantled (#918, #919), total observability cost must
+    // be no higher than the floor #888 measured — ≈1.05 MB of live state, and
+    // per tick the figure derived in FLOOR_TICK_NS.
     //
     // Live state is the run's buffers, not the retained history: ADR 0049
     // grants retention its own separate 8 MB resident cap, which is a
     // deliberate spend rather than a regression against this floor.
-    const typical = measure(8);
     const rig = makeRig(64);
     // #888's typical run: 2,559 chunks, which ADR 0047 sizes at ~123 kB.
     for (let i = 0; i < 40; i++) rig.tick();
@@ -438,14 +681,101 @@ describe("recorder cost contract", () => {
     rig.recorder.reset();
 
     console.log(
-      `[#928] floor check: typical tick (8 chunks, ${typical.events} write calls) ` +
-        `p50=${typical.tickUs.p50.toFixed(2)}µs vs #888's 1–3 µs/tick floor | ` +
-        `one 2,560-chunk run holds ${(liveBytes / 1024).toFixed(0)} kB live vs the ` +
-        `1.05 MB floor (retention's 8 MB cap is a separate, granted budget)`,
+      `[#928] floor check: one 2,560-chunk run holds ${(liveBytes / 1024).toFixed(0)} kB ` +
+        `live vs the 1.05 MB floor (retention's 8 MB cap is a separate, granted budget)`,
     );
 
-    expect(typical.tickUs.p50).toBeLessThan(3 * CI_SLACK);
     expect(liveBytes).toBeLessThan(1.05 * 1024 * 1024);
+  });
+
+  it("costs less per tick than the instrumentation it replaces, on the same tick", () => {
+    // #962. The per-tick half of ADR 0049's net obligation used to be checked
+    // by holding a *whole chunk lifecycle forced into one tick* against
+    // #888's "≈1–3 µs/tick", and the two are not the same quantity — three
+    // ways, all of which had to be fixed for the comparison to mean anything:
+    //
+    //   1. **Sides of the path.** #888's per-tick figure is `publish` work: a
+    //      single *read* call that aggregates a ring. It was being compared
+    //      against ~77 recorder *write* calls. #888 costed the write path in
+    //      its own unit — 0.8–50 ns/event — and never multiplied it out to a
+    //      tick, so there was no measured per-tick write figure to compare to.
+    //   2. **Tick shape.** The lifecycle drive puts plan, wire, decode,
+    //      upload, present and retire on one tick. The real pipeline never
+    //      does: a chunk's phases land across many ticks as its fetch settles,
+    //      and #888's ticks were real ones.
+    //   3. **Rate.** "1–3 µs" is `publish` at 1 and 8 events per tick — the
+    //      flattest stretch of a curve that reaches 1.13 ms at 128. A single
+    //      µs/tick figure could not have settled this in either direction,
+    //      because the floor is a point on a quadratic and the recorder is a
+    //      point on a flat line.
+    //
+    // So the comparison is made on one tick shape, with both sides evaluated
+    // at the same rates: MATCHED_TICK, one row of #888's rate table over the
+    // tick rate measured beside it. The recorder's side is measured; the
+    // floor's side is arithmetic on #888's per-call table, which is what keeps
+    // this a ledger entry rather than a fresh measurement campaign.
+    //
+    // The floor's publish term is #888's 1-event reading used as a lower
+    // bound, which only holds while the tick's upload count is inside the
+    // bracket #888 measured. Asserted rather than assumed, because a future
+    // edit to PEAK_PAN could walk it off the end of that bracket and the
+    // arithmetic would quietly stop being conservative.
+    expect(MATCHED_TICK.uploads).toBeGreaterThanOrEqual(1);
+    expect(MATCHED_TICK.uploads).toBeLessThanOrEqual(8);
+
+    const real = measure(MATCHED_TICK.rowsBorn, "matched");
+    const floorUs = FLOOR_TICK_NS / 1000;
+    const ratio = real.tickUs.p50 / floorUs;
+
+    console.log(
+      `[#962] matched-shape tick: ${real.events} write calls at #888's peak pan rates ` +
+        `(${MATCHED_TICK.rowsBorn} born, ${MATCHED_TICK.wiresClosed} wire, ${MATCHED_TICK.decodes} decode, ` +
+        `${MATCHED_TICK.uploads} upload, ${MATCHED_TICK.evictions} evict) | ` +
+        `recorder p50=${real.tickUs.p50.toFixed(2)}µs p95=${real.tickUs.p95.toFixed(2)}µs | ` +
+        `${real.perEventNs.toFixed(1)} ns/event vs #888's 0.8–50 ns/event write path | ` +
+        `floor on the same tick = ${floorUs.toFixed(2)}µs ` +
+        `(${(FLOOR_PUBLISH_NS / FLOOR_TICK_NS * 100).toFixed(0)}% of it publish, ` +
+        `${(FLOOR_ALWAYS_ON_NS / 1000).toFixed(2)}µs of it always-on) | ` +
+        `recorder is ${ratio.toFixed(2)}x the floor`,
+    );
+
+    // The shape this replaced, kept because it is still worth watching: a
+    // whole chunk lifecycle in one tick is a pessimistic bound on the marginal
+    // per-tick cost. It is logged here, next to the comparison it is not, so
+    // the ledger's two rows can be read off one place.
+    const pessimistic = measure(8);
+    console.log(
+      `[#962] pessimistic bound, not the floor comparison: whole lifecycle of ` +
+        `8 chunks forced into one tick (${pessimistic.events} write calls) ` +
+        `p50=${pessimistic.tickUs.p50.toFixed(2)}µs — a shape the pipeline never produces`,
+    );
+
+    // Why the comparison had to be pinned to a shape at all: the floor's
+    // dominant term is quadratic in events per tick and the recorder's is
+    // flat, so the two orderings are different at different tick sizes.
+    const lifecycle = measure(128);
+    console.log(
+      `[#962] and why one figure could not settle it: at 128 events/tick the floor's ` +
+        `publish alone costs ${(FLOOR_PUBLISH_NS_AT[128] / 1000).toFixed(0)}µs against the ` +
+        `recorder's whole ${lifecycle.events}-call tick at ` +
+        `${lifecycle.tickUs.p50.toFixed(1)}µs — ` +
+        `${(FLOOR_PUBLISH_NS_AT[128] / 1000 / lifecycle.tickUs.p50).toFixed(0)}x the other way`,
+    );
+
+    // Gated at CI_SLACK for the reason every timing gate in this file is: a
+    // few-microsecond microbenchmark measures the runner as much as the code.
+    // Read the logged ratio for the real figure.
+    expect(
+      real.tickUs.p50,
+      `matched-shape tick p50 ${real.tickUs.p50.toFixed(2)} µs against a ` +
+        `${floorUs.toFixed(2)} µs floor`,
+    ).toBeLessThan(floorUs * CI_SLACK);
+
+    // The per-event comparison, which is the one #888 actually measured the
+    // write path in. This is the assertion that would catch the write path
+    // getting more expensive per call — the tick figure above would absorb it
+    // silently if the tick simply made fewer calls.
+    expect(real.perEventNs).toBeLessThan(PER_EVENT_CEILING_NS * CI_SLACK);
   });
 
   it("allocates nothing in steady state after warmup", () => {
