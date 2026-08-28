@@ -144,11 +144,7 @@ pub async fn cli_auth_start(
     };
     if let Err(e) = state.cli_store.create(row).await {
         error!(error = %e, "auth.cli.start.create_failed");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": "internal" })),
-        )
-            .into_response();
+        return internal_error();
     }
 
     info!(request_id = %request_id, "auth.cli.start");
@@ -174,7 +170,7 @@ pub async fn cli_auth_approve_page(
     let row = match load_cli_request(&state, &request_id).await {
         Ok(Some(row)) => row,
         Ok(None) => return html_response(StatusCode::NOT_FOUND, cli_auth_missing_html()),
-        Err(response) => return response,
+        Err(CliRequestLoadFailed) => return internal_error(),
     };
 
     let now = Utc::now();
@@ -208,7 +204,7 @@ pub async fn cli_auth_approve_submit(
     let row = match load_cli_request(&state, &request_id).await {
         Ok(Some(row)) => row,
         Ok(None) => return html_response(StatusCode::NOT_FOUND, cli_auth_missing_html()),
-        Err(response) => return response,
+        Err(CliRequestLoadFailed) => return internal_error(),
     };
     let now = Utc::now();
     if row.is_expired_at(now) {
@@ -255,11 +251,7 @@ pub async fn cli_auth_approve_submit(
             error = %e,
             "auth.cli.approve.mark_failed",
         );
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": "internal" })),
-        )
-            .into_response();
+        return internal_error();
     }
 
     info!(
@@ -300,11 +292,7 @@ pub async fn cli_auth_poll(
         }
         Err(e) => {
             error!(request_id = %request_id, error = %e, "auth.cli.poll.failed");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": "internal" })),
-            )
-                .into_response();
+            return internal_error();
         }
     };
 
@@ -372,26 +360,23 @@ pub async fn revoke_current_bearer_token(
             .into_response(),
         Err(e) => {
             error!(error = %e, "auth.bearer.revoke_current.failed");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": "internal" })),
-            )
-                .into_response()
+            internal_error()
         }
     }
 }
 
+/// The lookup failed and the cause is already logged; callers answer with
+/// `internal_error()`. Carrying the `Response` itself here makes the `Err`
+/// variant large enough to trip `clippy::result_large_err`.
+struct CliRequestLoadFailed;
+
 async fn load_cli_request(
     state: &CliAuthState,
     request_id: &str,
-) -> Result<Option<CliTokenAuthorization>, Response> {
+) -> Result<Option<CliTokenAuthorization>, CliRequestLoadFailed> {
     state.cli_store.get(request_id).await.map_err(|e| {
         error!(request_id = %request_id, error = %e, "auth.cli.request_load_failed");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": "internal" })),
-        )
-            .into_response()
+        CliRequestLoadFailed
     })
 }
 
@@ -436,6 +421,14 @@ fn random_url_secret() -> String {
 fn random_user_code() -> String {
     let raw: u32 = rand::random();
     format!("{:04X}-{:04X}", raw >> 16, raw & 0xFFFF)
+}
+
+fn internal_error() -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "error": "internal" })),
+    )
+        .into_response()
 }
 
 fn bad_request(detail: impl Into<String>) -> Response {
@@ -813,11 +806,7 @@ pub async fn auth_start(
         .await
     {
         error!(error = %e, "auth.signin.start.pending_insert_failed");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": "internal" })),
-        )
-            .into_response();
+        return internal_error();
     }
 
     let prompt = had_signed_out_marker.then_some(Prompt::SelectAccount);

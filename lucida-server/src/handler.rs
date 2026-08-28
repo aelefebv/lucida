@@ -2240,8 +2240,11 @@ mod tests {
         let voxel_bytes = &buf[key_end + 64..];
         assert_eq!(voxel_bytes.len(), asset.voxels.len() * 2);
         let parsed: Vec<u16> = voxel_bytes
-            .chunks_exact(2)
-            .map(|p| u16::from_le_bytes([p[0], p[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .copied()
+            .map(u16::from_le_bytes)
             .collect();
         assert_eq!(parsed, asset.voxels);
     }
