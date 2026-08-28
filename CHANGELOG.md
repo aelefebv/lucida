@@ -1,5 +1,78 @@
 # Changelog
 
+## [0.11.0](https://github.com/aelefebv/lucida/compare/v0.10.0...v0.11.0) (2026-08-28)
+
+
+### Features
+
+* **cli:** lucida trace drives a headless open and prints the page's diagnostic ([e7b2ba5](https://github.com/aelefebv/lucida/commit/e7b2ba5a884517825fffbd8d4304e720d1701c9d)), closes [#935](https://github.com/aelefebv/lucida/issues/935)
+* **monitor:** the monitor page ([00af17a](https://github.com/aelefebv/lucida/commit/00af17af2d9936d65d51313fec790c2468640e41)), closes [#936](https://github.com/aelefebv/lucida/issues/936)
+* **monitor:** watch a run while it is still open ([a5009fc](https://github.com/aelefebv/lucida/commit/a5009fc50b4891e982987394afede85694519ab2)), closes [#937](https://github.com/aelefebv/lucida/issues/937)
+* **store:** fair-share source-read admission sized by measurement ([7259705](https://github.com/aelefebv/lucida/commit/725970542db42979d21da93395f252dc96dd6417)), closes [#901](https://github.com/aelefebv/lucida/issues/901)
+* **store:** name pyramid levels that were never written ([65a36ca](https://github.com/aelefebv/lucida/commit/65a36ca4c652a7007ea570560390290164e7fa29)), closes [#904](https://github.com/aelefebv/lucida/issues/904)
+* **trace:** correlation label, server lifecycle table, and the timing batch ([0c191dd](https://github.com/aelefebv/lucida/commit/0c191dda88a328d29f6a9064a8011fff48801019))
+* **trace:** declare the reconnect gap and both drop sources ([7422f83](https://github.com/aelefebv/lucida/commit/7422f83ae583a7fdf300f3e52edfbdbbbaac7844)), closes [#932](https://github.com/aelefebv/lucida/issues/932)
+* **trace:** derive a diagnostic from a trace, read by both surfaces ([1d8f508](https://github.com/aelefebv/lucida/commit/1d8f508e2863ab458294a269e7647ff26dc646cc))
+* **trace:** file dataset-open metadata reads as their own server timing family ([1eb8c27](https://github.com/aelefebv/lucida/commit/1eb8c279233f4786b445e8646941abcc231d3508))
+* **trace:** full server phase enum and the leader/follower split ([7981c5a](https://github.com/aelefebv/lucida/commit/7981c5aeb4562df727b35d1a50a8facc7c7b418b))
+* **trace:** nest an open's metadata reads inside the browser's open bracket ([4174075](https://github.com/aelefebv/lucida/commit/41740756bcc598b2a9e9efbc016f090222eaf3a6))
+* **trace:** per-tick aggregates and point events ([109d288](https://github.com/aelefebv/lucida/commit/109d288e5333b0790b43d0de8b917a81f62f3b53)), closes [#926](https://github.com/aelefebv/lucida/issues/926)
+* **trace:** project the trace into Chrome Trace Event JSON for Perfetto ([61b8232](https://github.com/aelefebv/lucida/commit/61b8232b04b71a648267d7fdc288df5709db0b9f))
+* **trace:** record the whole browser phase enum, not just the wire ([e193ae3](https://github.com/aelefebv/lucida/commit/e193ae30717ea8689e5199cb0678eaae6e67ff81)), closes [#925](https://github.com/aelefebv/lucida/issues/925)
+* **trace:** retention, the truncation record, and the coverage block ([1cd4e32](https://github.com/aelefebv/lucida/commit/1cd4e325d6bd88b95be6d27b31dcb251463d47cc))
+* **trace:** trace core, run lifecycle, published quiescent, and the export seam ([387eed8](https://github.com/aelefebv/lucida/commit/387eed8f5cffa9bc590f43edf480c46ca98bd3db)), closes [#924](https://github.com/aelefebv/lucida/issues/924)
+* **web:** decouple debug overlays and lift config into Dev controls ([3845282](https://github.com/aelefebv/lucida/commit/3845282b1b097d745df1a3efb18aa0325deba58b)), closes [#917](https://github.com/aelefebv/lucida/issues/917)
+
+
+### Bug Fixes
+
+* **cli:** make a first-time dataset measurable, and export a page that never renders ([be156d9](https://github.com/aelefebv/lucida/commit/be156d902d56b0002e0b222e15c2bc32a7a5efa7))
+* **fetch:** report backlog entries as ageless, not age-zero, in the pending dump ([52ce430](https://github.com/aelefebv/lucida/commit/52ce430f91c7c3a9bff08622a049a65150335bb3)), closes [#900](https://github.com/aelefebv/lucida/issues/900)
+* **server:** satisfy the clippy lints new in Rust 1.98 ([2fde43e](https://github.com/aelefebv/lucida/commit/2fde43e4048df006cadbf96c23f4a5373991a4ec))
+* **store:** an absent optional metadata object is not a backend error ([42ab50c](https://github.com/aelefebv/lucida/commit/42ab50cd41f338c05844cc37e9e21a64c2398d6c))
+* **store:** compare origin-chunk footprints before accusing a level ([dc3876f](https://github.com/aelefebv/lucida/commit/dc3876fe6811354d0dad9fba38eb7a5edcdab535)), closes [#904](https://github.com/aelefebv/lucida/issues/904)
+* **store:** read OME attributes from the 0.4-style top-level placement ([054eddd](https://github.com/aelefebv/lucida/commit/054eddd91eca64a45b9df57dde4a62ce503e28b9)), closes [#903](https://github.com/aelefebv/lucida/issues/903)
+* **trace:** answer the review of the matched-shape floor comparison ([a94a7c9](https://github.com/aelefebv/lucida/commit/a94a7c963af0a4dfb9c11ace266e986280369aea))
+* **trace:** correct the demand basis, the stamp clamp, and the publish path ([ba88f42](https://github.com/aelefebv/lucida/commit/ba88f422472ac06f5b26a2ce9855a02199bd7ab8)), closes [#924](https://github.com/aelefebv/lucida/issues/924)
+* **trace:** give the container build the release manifest it stamps ([70173dd](https://github.com/aelefebv/lucida/commit/70173ddcdd07766c3d9a193d716e21c137731c57)), closes [#924](https://github.com/aelefebv/lucida/issues/924)
+* **trace:** hold a run open while a dataset open is unsettled ([5c03578](https://github.com/aelefebv/lucida/commit/5c03578950bc8a75ce152e56a7c0409092599820))
+* **trace:** let the run settle before export, and label the constructed positions ([fad9d39](https://github.com/aelefebv/lucida/commit/fad9d3956e1798657712f5a8cc35a1a2979192be))
+* **trace:** read the residency tier off the chunk, not the store ([c708f18](https://github.com/aelefebv/lucida/commit/c708f185c3bae9fa69603d47fff5e38ce48105bb)), closes [#926](https://github.com/aelefebv/lucida/issues/926)
+* **trace:** settle the ledger's per-tick half against a matched tick shape ([a1e088a](https://github.com/aelefebv/lucida/commit/a1e088ad23d94fc73205362b8b9c011d9d14cbba))
+* **trace:** teach the diagnose fixtures the reconnect fields ([41e09d0](https://github.com/aelefebv/lucida/commit/41e09d04b565f43bc7bb615b455a885bd459ac7b))
+* **web:** replace UploadTelemetry shift() prunes with a ring buffer ([e7e7aae](https://github.com/aelefebv/lucida/commit/e7e7aaec92bc7a91c8dca2cc5c086b560e245310)), closes [#898](https://github.com/aelefebv/lucida/issues/898)
+* **web:** stop the capture surface writing user state ([9851cd1](https://github.com/aelefebv/lucida/commit/9851cd17a0a03036cc57c9ffd1c35635a3811269)), closes [#923](https://github.com/aelefebv/lucida/issues/923)
+
+
+### Performance
+
+* **fetch:** bound the scheduler admission window and derive submit keys once ([4933218](https://github.com/aelefebv/lucida/commit/4933218f7357b5ee8881afe210ac3874a105303f)), closes [#900](https://github.com/aelefebv/lucida/issues/900)
+* **store:** read dataset-open metadata through the source cache ([597d48f](https://github.com/aelefebv/lucida/commit/597d48f68b04aa152659228a23ef3cf141f4cba3)), closes [#902](https://github.com/aelefebv/lucida/issues/902)
+* **trace:** collapse the recorder's three dispatch writes into one ([71e9bf9](https://github.com/aelefebv/lucida/commit/71e9bf93b20bd75691ca7bf8e0b3ba58d798d279)), closes [#949](https://github.com/aelefebv/lucida/issues/949)
+
+
+### Refactors
+
+* **cli:** extract the headless browser driver into one module ([620020c](https://github.com/aelefebv/lucida/commit/620020ca91d4bb7394be596caee9f4176e24d3bf)), closes [#922](https://github.com/aelefebv/lucida/issues/922)
+* **cli:** fold the CDP call into Page and add with_browser ([a276c5f](https://github.com/aelefebv/lucida/commit/a276c5f7da9047606aab7ccac36152e8355d1ef3)), closes [#922](https://github.com/aelefebv/lucida/issues/922)
+* **debug:** delete dead debugStats fields and their write sites ([4d2059a](https://github.com/aelefebv/lucida/commit/4d2059abf34741b2ede94ff4ad53c35cef22d9f2)), closes [#916](https://github.com/aelefebv/lucida/issues/916)
+* **debug:** delete DebugPanel.tsx ([c278b3e](https://github.com/aelefebv/lucida/commit/c278b3efc40a79dbb710a9cd4f61ec0634fa0e50)), closes [#919](https://github.com/aelefebv/lucida/issues/919)
+* **debug:** delete debugStats.enabled with the recorder's landing ([5df3f1f](https://github.com/aelefebv/lucida/commit/5df3f1f3a78e94e6b1e36ef460e9748c22cb1666)), closes [#918](https://github.com/aelefebv/lucida/issues/918)
+* **debug:** drop the cold-state snapshot the gate's removal orphaned ([7acf50b](https://github.com/aelefebv/lucida/commit/7acf50b8a4b22af470f75ca64398b929c5f69d42)), closes [#918](https://github.com/aelefebv/lucida/issues/918)
+* **debug:** retire the dead half of debug_lod_info ([8f537c1](https://github.com/aelefebv/lucida/commit/8f537c1522f8b3566f411c5a7eb8623469aa61c0))
+* **monitor:** answer the review of the live view ([a225bbd](https://github.com/aelefebv/lucida/commit/a225bbde0051d56cee245708e623b36669bc89f4))
+* **store:** resolve the OME attribute scope once per group ([79c4adc](https://github.com/aelefebv/lucida/commit/79c4adcb61d271e12b4687e55e0c8eb18bddb4bf))
+* **store:** tighten limiter invariants and correct the sizing docs ([5bb825e](https://github.com/aelefebv/lucida/commit/5bb825e3dbce4aa5736aa1d817d118b66b216b5c)), closes [#901](https://github.com/aelefebv/lucida/issues/901)
+* **trace:** address review of the correlation label and timing batch ([f321adb](https://github.com/aelefebv/lucida/commit/f321adb688579ca1aa87b33ebe0a11e972f93eed))
+* **trace:** answer the review of the dispatch collapse ([084c269](https://github.com/aelefebv/lucida/commit/084c269a037f65df54eb8d3b9c6ad7e8ac0e23e0))
+* **trace:** carry the leader's label and close the row's remainder ([a9acf19](https://github.com/aelefebv/lucida/commit/a9acf198cc7974c84ae522fc2d3562b0629ac61d))
+* **trace:** review follow-ups on the metadata-read family ([0e65964](https://github.com/aelefebv/lucida/commit/0e65964c4fdd4e0914157ff7f0085bf7406852f5))
+* **trace:** rotate steady state at the cap, and sharpen the coverage words ([5660671](https://github.com/aelefebv/lucida/commit/566067161f5d497e330e3e254b01d60a1cca9097))
+* **trace:** speak the glossary's vocabulary in the derivation ([3519caa](https://github.com/aelefebv/lucida/commit/3519caa9af8c98f22653051834f018ceb9f25bf8))
+* **trace:** the phase depth renders on the page, and the wait is for a concluded run ([42e5ef0](https://github.com/aelefebv/lucida/commit/42e5ef0306d5b749920b76f5e34cb35f2064a299))
+* **trace:** tighten the lane type and the plan-pass boundary ([40ded83](https://github.com/aelefebv/lucida/commit/40ded83169c80c5c0b5fb185bdd2780fa2944098))
+* **trace:** tighten the refusal rule and the outage window ([fe0c99f](https://github.com/aelefebv/lucida/commit/fe0c99f83dcc9f7e9fe55e9249d5217950f812a3))
+* **web:** address review of the Dev controls lift ([73d7068](https://github.com/aelefebv/lucida/commit/73d7068128a2f0aa470d7de92928a9967e2043a5))
 ## [0.10.0](https://github.com/aelefebv/lucida/compare/v0.9.0...v0.10.0) (2026-07-13)
 
 
