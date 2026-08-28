@@ -5,7 +5,9 @@ name: Release image
 # end: Conventional Commit on main -> release-please opens release PR ->
 # maintainer merges -> tag is pushed -> this workflow builds the multi-
 # arch image, generates SBOM + provenance, scans with Trivy, and pushes
-# to ghcr.io/aelefebv/lucida:<tag> (and :latest).
+# to ghcr.io/<owner>/<repo>:<tag> (and :latest). Every push target is
+# ghcr.io/${{ github.repository }}, so a fork publishes to its own
+# namespace, never to this one.
 #
 # Architecture: per-arch jobs build on NATIVE runners (no QEMU), push
 # the built image by digest, then a merge job assembles the multi-arch
@@ -27,9 +29,15 @@ permissions:
   packages: write
   id-token: write
 
+# Every job is guarded to this repository. Forks and downstream mirrors
+# inherit this workflow and its v* trigger, so without the guard their
+# own release tags start a second, pointless multi-arch build that
+# pushes to their ghcr.io namespace. Guarding rather than deleting keeps
+# the file identical downstream, so merges from here stay clean.
 jobs:
   build:
     name: Build ${{ matrix.platform }}
+    if: github.repository == 'aelefebv/lucida'
     strategy:
       fail-fast: false
       matrix:
@@ -100,6 +108,7 @@ jobs:
 
   merge:
     name: Merge per-arch manifests
+    if: github.repository == 'aelefebv/lucida'
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -151,6 +160,7 @@ jobs:
 
   scan:
     name: Trivy scan (block on CRITICAL)
+    if: github.repository == 'aelefebv/lucida'
     needs: merge
     runs-on: ubuntu-latest
     timeout-minutes: 10
