@@ -17,9 +17,14 @@ concurrency:
   group: release-please-${{ github.ref }}
   cancel-in-progress: false
 
+# Guarded to this repository. Forks and downstream mirrors that version
+# on their own scheme inherit this workflow and its push-to-main
+# trigger. Guarding rather than deleting keeps the file identical
+# downstream, so merges from here stay clean.
 jobs:
   release-please:
     name: Open or update the Release vX.Y.Z PR
+    if: github.repository == 'aelefebv/lucida'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
