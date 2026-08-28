@@ -3168,8 +3168,11 @@ mod tests {
 
         let bytes = encode_generated_chunk_bytes(&output, &level, 0, 1, 1, DataType::Uint16);
         let values: Vec<u16> = bytes
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .copied()
+            .map(u16::from_le_bytes)
             .collect();
 
         assert_eq!(values, vec![9, 0, 0, 0]);
@@ -3188,8 +3191,11 @@ mod tests {
 
         let bytes = encode_generated_chunk_bytes(&output, &level, 0, 0, 0, DataType::Float32);
         let values: Vec<f32> = bytes
-            .chunks_exact(4)
-            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .copied()
+            .map(f32::from_le_bytes)
             .collect();
 
         assert_eq!(bytes.len(), 16);
@@ -3426,8 +3432,11 @@ mod tests {
         match cache.lookup(&ImageId("img-1".into()), 1, "1/0/0/0/0/0") {
             DerivedChunkLookup::Ready(bytes) => {
                 let values: Vec<u16> = bytes
-                    .chunks_exact(2)
-                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .copied()
+                    .map(u16::from_le_bytes)
                     .collect();
                 assert_eq!(values, vec![5, 7, 13, 15]);
             }
@@ -3505,8 +3514,11 @@ mod tests {
         match cache.lookup(&ImageId("img-1".into()), 1, "1/0/0/0/0/0") {
             DerivedChunkLookup::Ready(bytes) => {
                 let values: Vec<u16> = bytes
-                    .chunks_exact(2)
-                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .copied()
+                    .map(u16::from_le_bytes)
                     .collect();
                 assert_eq!(values, vec![10, 20, 30, 40]);
             }
@@ -3575,8 +3587,11 @@ mod tests {
         match cache.lookup(&ImageId("img-1".into()), 1, "1/0/0/0/0/0") {
             DerivedChunkLookup::Ready(bytes) => {
                 let values: Vec<f32> = bytes
-                    .chunks_exact(4)
-                    .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .copied()
+                    .map(f32::from_le_bytes)
                     .collect();
                 assert!((values[0] - 0.0).abs() < 0.00001);
                 assert!((values[1] - 0.5).abs() < 0.00002);
@@ -3644,8 +3659,11 @@ mod tests {
         match cache.lookup(&ImageId("img-1".into()), 1, "1/0/0/0/0/0") {
             DerivedChunkLookup::Ready(bytes) => {
                 let values: Vec<u16> = bytes
-                    .chunks_exact(2)
-                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .copied()
+                    .map(u16::from_le_bytes)
                     .collect();
                 assert_eq!(values, vec![0]);
             }

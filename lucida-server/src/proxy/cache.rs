@@ -288,11 +288,13 @@ fn sanitize_segment(s: &str) -> String {
 fn read_u16_voxels<R: Read>(r: &mut R, count: usize) -> io::Result<Vec<u16>> {
     let mut bytes = vec![0u8; count * 2];
     r.read_exact(&mut bytes)?;
-    let mut out = vec![0u16; count];
-    for (i, chunk) in bytes.chunks_exact(2).enumerate() {
-        out[i] = u16::from_le_bytes([chunk[0], chunk[1]]);
-    }
-    Ok(out)
+    Ok(bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .copied()
+        .map(u16::from_le_bytes)
+        .collect())
 }
 
 fn write_u16_voxels<W: Write>(w: &mut W, voxels: &[u16]) -> io::Result<()> {
