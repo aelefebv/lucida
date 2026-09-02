@@ -22,7 +22,6 @@ use super::store::normalize_email;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tower::ServiceExt;
 
@@ -31,14 +30,13 @@ use crate::auth::{
     MemorySessionStore, hash_bearer_token,
 };
 use crate::auth::{DualCredentialExtractor, PrincipalExtractor};
+use crate::storage::SqliteStorageBackend;
 
 use super::*;
 mod access;
 mod datasets;
 mod duplicate;
 mod saved_views;
-
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 pub fn principal(email: &str, is_admin: bool) -> AuthPrincipal {
     AuthPrincipal {
@@ -58,15 +56,8 @@ async fn fresh_store() -> SqliteWorkspaceStore {
 /// errors) — e.g. to prove that a failed role lookup is reported as
 /// infrastructure trouble, not as an authorization verdict.
 async fn fresh_store_with_pool() -> (SqliteWorkspaceStore, sqlx::sqlite::SqlitePool) {
-    let opts = SqliteConnectOptions::new()
-        .filename(":memory:")
-        .create_if_missing(true);
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(opts)
-        .await
-        .unwrap();
-    MIGRATOR.run(&pool).await.unwrap();
+    let backend = SqliteStorageBackend::open_in_memory().await.unwrap();
+    let pool = backend.pool().clone();
     (SqliteWorkspaceStore::new(pool.clone()), pool)
 }
 

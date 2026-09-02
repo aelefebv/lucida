@@ -154,8 +154,9 @@ COPY --from=web-builder  /web/lucida-web/dist                    /usr/share/luci
 
 # /var/lib/lucida is the canonical writable directory the k8s
 # manifests mount a PVC at. Defaulting WORKDIR here keeps
-# CWD-relative defaults (e.g. LUCIDA_DB_PATH=./lucida.db) landing in
-# the right place when an adopter doesn't override.
+# CWD-relative defaults, such as the default LUCIDA_DB_URL of
+# sqlite://lucida.db, landing in the right place when an adopter
+# doesn't override.
 WORKDIR /var/lib/lucida
 
 # The dist path is image-internal (not adopter-tunable) so we bake it

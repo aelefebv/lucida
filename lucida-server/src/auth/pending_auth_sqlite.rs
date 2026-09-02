@@ -1,8 +1,7 @@
 //! SQLite-backed `PendingAuthStore`.
 //!
-//! Sits next to `SqliteSessionStore`, shares the same SQLite file and
-//! pool. Construction reuses the same migrator, so opening either
-//! store advances the schema to the latest migration.
+//! Shares the SQLite file and pool that [`crate::storage`] opened, as
+//! every SQLite store does.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -10,19 +9,18 @@ use sqlx::{Row, SqlitePool};
 
 use super::pending_auth::{PendingAuth, PendingAuthStore, PendingAuthStoreError};
 
-/// Production pending-auth store. Holds a `SqlitePool` clone so it's
-/// cheap to share with the session store; in `main.rs` both stores
-/// derive from the same pool.
+/// Production pending-auth store. Holds a `SqlitePool` clone, so it is
+/// cheap to build and cheap to share.
 #[derive(Debug, Clone)]
 pub struct SqlitePendingAuthStore {
     pool: SqlitePool,
 }
 
 impl SqlitePendingAuthStore {
-    /// Build the store from an already-opened pool. We don't rerun the
-    /// migrator here — the session store opens it once at boot and
-    /// every store from then on rides the same connection pool.
-    pub fn new(pool: SqlitePool) -> Self {
+    /// Build the store from an already-opened pool. The migrator does
+    /// not run here: the storage backend runs it once, before any store
+    /// exists.
+    pub(crate) fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 }
@@ -94,17 +92,14 @@ impl PendingAuthStore for SqlitePendingAuthStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::session_store_sqlite::SqliteSessionStore;
+    use crate::storage::SqliteStorageBackend;
     use chrono::Duration as ChronoDuration;
 
-    /// Open both stores against the same in-memory pool. Mirrors what
-    /// `main.rs` will do: SqliteSessionStore::open_in_memory runs the
-    /// migrator, then we derive a SqlitePendingAuthStore from the same
-    /// pool. Tests reuse the helper through this constructor.
-    async fn fresh_store() -> (SqliteSessionStore, SqlitePendingAuthStore) {
-        let session = SqliteSessionStore::open_in_memory().await.unwrap();
-        let pending = SqlitePendingAuthStore::new(session.pool().clone());
-        (session, pending)
+    /// A store over a migrated in-memory database, opened the way
+    /// production opens one.
+    async fn fresh_store() -> SqlitePendingAuthStore {
+        let backend = SqliteStorageBackend::open_in_memory().await.unwrap();
+        SqlitePendingAuthStore::new(backend.pool().clone())
     }
 
     fn sample(token: &str, path: &str, hash: &str, now: DateTime<Utc>) -> PendingAuth {
@@ -118,7 +113,7 @@ mod tests {
 
     #[tokio::test]
     async fn insert_then_consume_returns_row() {
-        let (_session, store) = fresh_store().await;
+        let store = fresh_store().await;
         let now = Utc::now();
         store
             .insert(sample("tok1", "/foo", "#bar", now))
@@ -133,7 +128,7 @@ mod tests {
 
     #[tokio::test]
     async fn second_consume_of_same_token_returns_none() {
-        let (_session, store) = fresh_store().await;
+        let store = fresh_store().await;
         let now = Utc::now();
         store.insert(sample("once", "/", "", now)).await.unwrap();
         assert!(store.consume("once").await.unwrap().is_some());
@@ -142,13 +137,13 @@ mod tests {
 
     #[tokio::test]
     async fn consume_unknown_token_returns_none() {
-        let (_session, store) = fresh_store().await;
+        let store = fresh_store().await;
         assert!(store.consume("ghost").await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn duplicate_insert_errors() {
-        let (_session, store) = fresh_store().await;
+        let store = fresh_store().await;
         let now = Utc::now();
         store.insert(sample("dupe", "/", "", now)).await.unwrap();
         let res = store.insert(sample("dupe", "/x", "", now)).await;
@@ -157,7 +152,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_expired_removes_only_old_rows() {
-        let (_session, store) = fresh_store().await;
+        let store = fresh_store().await;
         let now = Utc::now();
         store
             .insert(sample("old", "/", "", now - ChronoDuration::minutes(15)))

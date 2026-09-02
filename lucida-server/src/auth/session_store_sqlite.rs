@@ -1,39 +1,19 @@
 //! SQLite-backed `LoginSessionStore`.
 //!
-//! Opens — and creates if missing — the lucida database file, runs the
-//! bundled migrations, and serves session reads/writes from it. The
-//! schema and indexes are defined in
-//! `migrations/20260508000001_create_login_sessions.sql`; the migration
-//! is run idempotently at startup via `sqlx::migrate!`.
+//! Serves session reads and writes from the pool the SQLite storage
+//! backend opened. The schema and indexes are defined in
+//! `migrations/20260508000001_create_login_sessions.sql`.
 //!
-//! Connection-pool sizing: a single SQLite file is the bottleneck
-//! anyway; the default pool of 5 is plenty for the loopback-only
-//! deployment shape.
-
-use std::path::Path;
+//! Connecting and migrating belong to [`crate::storage`], not here. A
+//! store that opened its own database would be the only one that could,
+//! and the other five would have to borrow its pool — which is the
+//! arrangement the storage backend replaced.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
-use thiserror::Error;
 
 use super::session_store::{LoginSession, LoginSessionStore, SessionStoreError};
-
-/// Migrations bundled into the binary at compile time. Adding a new
-/// `.sql` file to `migrations/` and rebuilding picks it up.
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
-
-/// Errors from opening the database. Distinct from `SessionStoreError`
-/// because they only occur during startup; the boot path needs them
-/// before the store handle exists.
-#[derive(Debug, Error)]
-pub enum StoreOpenError {
-    #[error("failed to open SQLite at {0}: {1}")]
-    Connect(String, sqlx::Error),
-    #[error("migration failed: {0}")]
-    Migrate(sqlx::migrate::MigrateError),
-}
 
 /// Production session store. Wraps a `SqlitePool` and runs queries
 /// against it. The pool is `Clone` so this struct is cheap to share.
@@ -43,59 +23,8 @@ pub struct SqliteSessionStore {
 }
 
 impl SqliteSessionStore {
-    /// Open (or create) a SQLite file at `path`, run any pending
-    /// migrations, and return a ready-to-use store. Idempotent: calling
-    /// twice on the same file is harmless.
-    pub async fn open(path: &Path) -> Result<Self, StoreOpenError> {
-        let path_str = path.display().to_string();
-        let opts = SqliteConnectOptions::new()
-            .filename(path)
-            .create_if_missing(true)
-            // WAL keeps readers and the touch-writer non-blocking
-            // relative to each other; the touch fire-and-forget would
-            // otherwise occasionally serialize behind a long read.
-            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(5)
-            .connect_with(opts)
-            .await
-            .map_err(|e| StoreOpenError::Connect(path_str, e))?;
-
-        MIGRATOR.run(&pool).await.map_err(StoreOpenError::Migrate)?;
-
-        Ok(Self { pool })
-    }
-
-    /// Tests construct an in-memory pool by passing `":memory:"` as the
-    /// path. `:memory:` databases are scoped to the connection that
-    /// opened them, so we cap the pool at 1 and disable idle eviction
-    /// (`min_connections = 1`) so the schema persists for the lifetime
-    /// of the store.
-    pub async fn open_in_memory() -> Result<Self, StoreOpenError> {
-        let opts = SqliteConnectOptions::new()
-            .filename(":memory:")
-            .create_if_missing(true);
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .min_connections(1)
-            .idle_timeout(None)
-            .max_lifetime(None)
-            .connect_with(opts)
-            .await
-            .map_err(|e| StoreOpenError::Connect(":memory:".into(), e))?;
-
-        MIGRATOR.run(&pool).await.map_err(StoreOpenError::Migrate)?;
-
-        Ok(Self { pool })
-    }
-
-    /// Borrow the underlying connection pool. `SqlitePendingAuthStore`
-    /// is derived from the same pool so both stores share a single
-    /// SQLite file + connection budget.
-    pub fn pool(&self) -> &SqlitePool {
-        &self.pool
+    pub(crate) fn new(pool: SqlitePool) -> Self {
+        Self { pool }
     }
 }
 
@@ -184,7 +113,15 @@ impl LoginSessionStore for SqliteSessionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::SqliteStorageBackend;
     use chrono::Duration as ChronoDuration;
+
+    /// A store over a migrated in-memory database, opened the way
+    /// production opens one.
+    async fn fresh_store() -> SqliteSessionStore {
+        let backend = SqliteStorageBackend::open_in_memory().await.unwrap();
+        SqliteSessionStore::new(backend.pool().clone())
+    }
 
     fn sample(id: &str, now: DateTime<Utc>, expires_in_hours: i64) -> LoginSession {
         LoginSession {
@@ -200,7 +137,7 @@ mod tests {
 
     #[tokio::test]
     async fn migrations_run_and_roundtrip_works() {
-        let store = SqliteSessionStore::open_in_memory().await.unwrap();
+        let store = fresh_store().await;
         let now = Utc::now();
         let s = sample("uuid-a", now, 24);
         store.create(s.clone()).await.unwrap();
@@ -218,7 +155,7 @@ mod tests {
 
     #[tokio::test]
     async fn touch_last_used_updates_row() {
-        let store = SqliteSessionStore::open_in_memory().await.unwrap();
+        let store = fresh_store().await;
         let now = Utc::now();
         store.create(sample("a", now, 24)).await.unwrap();
 
@@ -230,7 +167,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_expired_removes_only_past_rows() {
-        let store = SqliteSessionStore::open_in_memory().await.unwrap();
+        let store = fresh_store().await;
         let now = Utc::now();
         store.create(sample("dead", now, -1)).await.unwrap();
         store.create(sample("alive", now, 24)).await.unwrap();
@@ -243,7 +180,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_is_idempotent() {
-        let store = SqliteSessionStore::open_in_memory().await.unwrap();
+        let store = fresh_store().await;
         let now = Utc::now();
         store.create(sample("a", now, 1)).await.unwrap();
         store.delete("a").await.unwrap();
@@ -257,7 +194,7 @@ mod tests {
     /// `create()` with a fresh UUID per call.)
     #[tokio::test]
     async fn parallel_inserts_produce_distinct_ids() {
-        let store = SqliteSessionStore::open_in_memory().await.unwrap();
+        let store = fresh_store().await;
         let now = Utc::now();
 
         let mut handles = Vec::new();

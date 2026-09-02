@@ -106,12 +106,13 @@ spec:
                   name: lucida-google-oauth
                   key: client_secret
 
-            # ---- Required: where SQLite + the proxy cache live ----
-            # Absolute path under the PVC mount below. The default
-            # CWD-relative `./lucida.db` is brittle in containers; set
-            # an absolute path explicitly.
-            - name: LUCIDA_DB_PATH
-              value: "/var/lib/lucida/lucida.db"
+            # ---- Required: where the database + the proxy cache live ----
+            # The scheme of LUCIDA_DB_URL picks the storage backend.
+            # Give SQLite an absolute path under the PVC mount below:
+            # anything outside it, including the default `./lucida.db`,
+            # is lost on restart.
+            - name: LUCIDA_DB_URL
+              value: "sqlite:///var/lib/lucida/lucida.db"
             - name: LUCIDA_PROXY_CACHE_DIR
               value: "/var/lib/lucida/proxy-cache"
             - name: LUCIDA_DATA_DIR

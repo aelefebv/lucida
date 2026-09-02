@@ -5,12 +5,12 @@ description: "Two coupled architectural shifts to support named, persistent save
 tags: [lucida, decision]
 source_path: wiki/decisions/0015-server-stored-bookmarks-and-auth-seam.md
 created: 2026-05-07
-modified: 2026-07-06
+modified: 2026-09-02
 ---
 
 # Server-Stored Bookmarks and the AuthPrincipal Seam
 
-> Status: Accepted (implemented in PRs #479, #480, #481 — landed 2026-05-08). Auth seam realized via the existing `SessionCookieExtractor` rather than the originally-sketched `StubPrincipalExtractor` (auth landed first, so the stub was never wired).
+> Status: Accepted (implemented in PRs #479, #480, #481 — landed 2026-05-08). Auth seam realized via the existing `SessionCookieExtractor` rather than the originally-sketched `StubPrincipalExtractor` (auth landed first, so the stub was never wired). Superseded on the choice of database by [The storage backend is selected by a connection string](0055-storage-backend-selected-by-connection-string.md) — the rejection of Postgres below was conditional on a deployment scale that no longer holds everywhere. Everything else here stands, SQLite included.
 
 ## Decision
 
@@ -51,7 +51,7 @@ Server-stored is the only path that delivers cross-user discovery and durable ow
 
 Considered:
 - **`sled`** — KV-only; relational queries (any-overlap, filter-by-creator) would require building secondary indexes by hand. More complexity for the use case.
-- **Postgres** — overkill for the deployment scale; adds operational burden.
+- **Postgres** — overkill for the deployment scale; adds operational burden. (Superseded by [ADR 0055](0055-storage-backend-selected-by-connection-string.md): the scale this weighed against was one process on one machine, and lucida also runs where that is not true.)
 - **In-memory + JSON-on-disk snapshots** — write fragility, no real query language, hard to evolve schema. Anti-pattern for anything beyond the trivial.
 
 ### Why an AuthPrincipal seam

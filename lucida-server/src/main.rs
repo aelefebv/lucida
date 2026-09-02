@@ -19,6 +19,7 @@ use lucida_server::bookmarks;
 use lucida_server::health;
 use lucida_server::session::Session;
 use lucida_server::static_serve;
+use lucida_server::storage;
 use lucida_server::{
     AppState, BroadcastItem, ProxyConfig, UnicastRoutes, browse, handler, workspace,
 };
@@ -279,7 +280,8 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         mode = %mode_str,
         bind = %auth_config.bind_addr,
         cookie = %auth_config.cookie_name,
-        db = %auth_config.db_path.display(),
+        db = %auth_config.db_url.redacted(),
+        db_backend = %auth_config.db_url.scheme(),
         idle_timeout_s = auth_config.idle_timeout.as_secs(),
         hard_cap_s = auth_config.hard_cap.as_secs(),
         "auth.startup",
@@ -316,25 +318,19 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
             "auth.google.configured",
         );
     }
-    let session_store = match auth::SqliteSessionStore::open(&auth_config.db_path).await {
-        Ok(s) => Arc::new(s),
+    // The only place the server picks a database. Nothing downstream
+    // knows which one it got.
+    let storage = match storage::open(&auth_config.db_url).await {
+        Ok(s) => s,
         Err(e) => {
-            tracing::error!(error = %e, "auth.startup.session_store_open_failed");
+            tracing::error!(error = %e, "storage.startup.open_failed");
             return Err(std::io::Error::other(e.to_string()));
         }
     };
-    let session_store_dyn: Arc<dyn auth::LoginSessionStore> = session_store.clone();
-    let bearer_token_store: Arc<dyn auth::BearerTokenStore> = Arc::new(
-        auth::SqliteBearerTokenStore::new(session_store.pool().clone()),
-    );
-    let cli_authorization_store: Arc<dyn auth::CliTokenAuthorizationStore> = Arc::new(
-        auth::SqliteCliTokenAuthorizationStore::new(session_store.pool().clone()),
-    );
-    // Pending-auth store rides the same SQLite pool the session store
-    // opened (one DB, one migration system, one connection budget).
-    let pending_store: Arc<dyn auth::PendingAuthStore> = Arc::new(
-        auth::SqlitePendingAuthStore::new(session_store.pool().clone()),
-    );
+    let session_store_dyn = storage.login_sessions();
+    let bearer_token_store = storage.bearer_tokens();
+    let cli_authorization_store = storage.cli_token_authorizations();
+    let pending_store = storage.pending_auth();
 
     let extractor = auth::middleware::build_extractor(
         Arc::clone(&auth_config),
@@ -378,14 +374,10 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
             post(auth::handlers::logout).with_state(logout_state),
         );
 
-    // Server-stored bookmarks share the same SQLite pool as the auth
-    // stores; the bookmarks router lands on the protected half so every
+    // The bookmarks router lands on the protected half, so every
     // handler sees an `AuthPrincipal` in extensions.
-    let bookmark_store = std::sync::Arc::new(bookmarks::SqliteBookmarkStore::new(
-        session_store.pool().clone(),
-    ));
     let bookmarks_state = bookmarks::handlers::BookmarksState {
-        store: bookmark_store as std::sync::Arc<dyn bookmarks::BookmarkStore>,
+        store: storage.bookmarks(),
         // Plumb the live session + unicast routes so handlers can
         // broadcast `BookmarkChanged` to clients with overlapping
         // loaded datasets after every successful CUD operation.
@@ -394,9 +386,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     };
     let bookmarks_router: Router<()> = bookmarks::routes::router(bookmarks_state);
 
-    let workspace_store = Arc::new(workspace::SqliteWorkspaceStore::new(
-        session_store.pool().clone(),
-    ));
+    let workspace_store = storage.workspaces();
     let workspace_runtime_config = workspace::WorkspaceRuntimeConfig {
         idle_ttl: Duration::from_secs(args.workspace_idle_ttl_secs),
         idle_sweep_interval: Duration::from_secs(args.workspace_idle_sweep_secs.max(1)),
@@ -407,7 +397,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         "workspace.runtime.config"
     );
     let workspace_manager = Arc::new(workspace::WorkspaceManager::new_with_runtime_config(
-        workspace_store as Arc<dyn workspace::WorkspaceStore>,
+        workspace_store,
         proxy_config.clone(),
         workspace_runtime_config,
     ));

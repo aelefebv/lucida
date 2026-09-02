@@ -384,6 +384,34 @@ are judged by this and never by a per-chunk ceiling, which at the observed
 spread would fire on every row or on none.
 _Avoid_: queue depth (depth alone is not the signal), wait time, latency
 
+## Server state
+
+**Storage backend**:
+The one database the server keeps its own records in, together with the code
+that opens it and migrates it. Which backend runs is settled by configuration at
+startup, not at build time. Distinct from an object store, which holds the array
+data the server reads and never the server's own records. See
+[ADR 0055](wiki/decisions/0055-storage-backend-selected-by-connection-string.md)
+for why the choice is configuration rather than compilation.
+_Avoid_: database driver, persistence layer, store (narrower — see below),
+backend (ambiguous — say which one)
+
+**Store**:
+The reader and writer for one kind of record: login sessions, pending
+authentications, bearer tokens, CLI token authorizations, bookmarks, workspaces.
+A store opens no connection of its own and runs no migration; it works through
+the storage backend that handed it out. Six of them exist, one per kind. See
+[ADR 0055](wiki/decisions/0055-storage-backend-selected-by-connection-string.md)
+for why the connection moved out of the stores.
+_Avoid_: repository, table, model, DAO, object store (a different thing — see
+above)
+
+**Object store**:
+Where the array data lives — local files, or a bucket reached over the network.
+Read-only to the server, addressed by URL, and never the place server records
+go.
+_Avoid_: store (unqualified), bucket, blob store, storage backend
+
 ## Surfaces
 
 **Monitor**:

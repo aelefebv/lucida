@@ -110,15 +110,15 @@ pub trait BookmarkStore: Send + Sync + 'static {
     async fn delete(&self, id: &str) -> Result<Option<Bookmark>, StoreError>;
 }
 
-/// Production store. Wraps a shared `SqlitePool` (cloned from the auth
-/// session store so all three tables ride the same connection budget).
+/// Production store. Wraps the `SqlitePool` the storage backend opened,
+/// so every table rides one connection budget.
 #[derive(Debug, Clone)]
 pub struct SqliteBookmarkStore {
     pool: SqlitePool,
 }
 
 impl SqliteBookmarkStore {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub(crate) fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 }
@@ -503,28 +503,13 @@ impl BookmarkStore for MemoryBookmarkStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use crate::storage::SqliteStorageBackend;
 
-    static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
-
-    /// Open a fresh in-memory SQLite, run the migrator, return the
-    /// store. Mirrors the production open path but capped at one
-    /// connection (`:memory:` databases are scoped to the connection
-    /// that opened them).
+    /// A store over a migrated in-memory database, opened the way
+    /// production opens one.
     async fn fresh_sqlite() -> SqliteBookmarkStore {
-        let opts = SqliteConnectOptions::new()
-            .filename(":memory:")
-            .create_if_missing(true);
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .min_connections(1)
-            .idle_timeout(None)
-            .max_lifetime(None)
-            .connect_with(opts)
-            .await
-            .unwrap();
-        MIGRATOR.run(&pool).await.unwrap();
-        SqliteBookmarkStore::new(pool)
+        let backend = SqliteStorageBackend::open_in_memory().await.unwrap();
+        SqliteBookmarkStore::new(backend.pool().clone())
     }
 
     fn sample_view(viewport: [u32; 2]) -> SavedView {

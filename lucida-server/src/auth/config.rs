@@ -1,6 +1,6 @@
 //! Auth subsystem runtime configuration.
 //!
-//! Covers cookie name, SQLite database path, idle timeout, hard cap,
+//! Covers cookie name, the database connection string, idle timeout, hard cap,
 //! the `LUCIDA_AUTH` mode selector and Google OAuth credentials, the
 //! `LUCIDA_BIND` socket, and the auto-detect-by-bind policy from
 //! ADR-0018: when `LUCIDA_AUTH` is unset, the auth mode is inferred
@@ -19,8 +19,9 @@
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::time::Duration;
+
+use crate::storage::{DatabaseUrl, DatabaseUrlError};
 
 /// Default cookie name. Overridable via `LUCIDA_COOKIE_NAME`.
 pub const DEFAULT_COOKIE_NAME: &str = "lucida_session";
@@ -34,11 +35,6 @@ pub const DEFAULT_IDLE_TIMEOUT_HOURS: u64 = 168;
 /// the session is unconditionally dead, regardless of activity.
 /// Overridable via `LUCIDA_SESSION_HARD_CAP_HOURS`.
 pub const DEFAULT_HARD_CAP_HOURS: u64 = 720;
-
-/// Default SQLite file. Resolves to `./lucida.db` so a fresh `cargo
-/// run` produces a database in the working directory; production
-/// deployments override via `LUCIDA_DB_PATH`.
-pub const DEFAULT_DB_FILENAME: &str = "lucida.db";
 
 /// Production Google authorization endpoint. Overridable via
 /// `LUCIDA_GOOGLE_AUTH_URI` so integration tests can point at a mock.
@@ -177,6 +173,10 @@ pub enum AuthConfigError {
          (set it to acknowledge that the server will be exposed without authentication)"
     )]
     InsecureRequiresOptIn { bind: SocketAddr },
+    /// `LUCIDA_DB_URL` is not a connection string this build can use.
+    /// The inner error names the variable and says which schemes work.
+    #[error(transparent)]
+    DatabaseUrl(#[from] DatabaseUrlError),
 }
 
 /// All knobs the auth subsystem reads at startup.
@@ -190,7 +190,9 @@ pub struct AuthConfig {
     pub secure_mode: SecureCookieMode,
     pub idle_timeout: Duration,
     pub hard_cap: Duration,
-    pub db_path: PathBuf,
+    /// Which database to open, and how. The scheme picks the storage
+    /// backend; see [`crate::storage`].
+    pub db_url: DatabaseUrl,
     pub mode: AuthMode,
     /// Populated iff `mode == AuthMode::Google`. Validated for
     /// presence-of-required-fields in `from_env` so handlers can
@@ -301,9 +303,10 @@ impl AuthConfig {
                 .unwrap_or_else(|| Duration::from_secs(DEFAULT_IDLE_TIMEOUT_HOURS * 3600)),
             hard_cap: parse_hours(&read, "LUCIDA_SESSION_HARD_CAP_HOURS")
                 .unwrap_or_else(|| Duration::from_secs(DEFAULT_HARD_CAP_HOURS * 3600)),
-            db_path: read("LUCIDA_DB_PATH")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(DEFAULT_DB_FILENAME)),
+            db_url: match nonempty("LUCIDA_DB_URL") {
+                Some(raw) => DatabaseUrl::parse(&raw)?,
+                None => DatabaseUrl::default_sqlite(),
+            },
             mode,
             google,
             allowed_hosted_domains: parse_allowed_hosted_domains(
@@ -316,16 +319,16 @@ impl AuthConfig {
     }
 
     /// Test-friendly config: short timeouts, in-process cookie name,
-    /// in-memory database path placeholder. Tests substitute the store
-    /// directly so `db_path` is unused; we still provide one to keep
-    /// the type closed.
+    /// in-memory database. Tests substitute the store directly so
+    /// `db_url` is unused; we still provide one to keep the type
+    /// closed.
     pub fn for_tests() -> Self {
         Self {
             cookie_name: DEFAULT_COOKIE_NAME.to_string(),
             secure_mode: SecureCookieMode::Auto,
             idle_timeout: Duration::from_secs(DEFAULT_IDLE_TIMEOUT_HOURS * 3600),
             hard_cap: Duration::from_secs(DEFAULT_HARD_CAP_HOURS * 3600),
-            db_path: PathBuf::from(":memory:"),
+            db_url: DatabaseUrl::in_memory(),
             mode: AuthMode::Disabled,
             google: None,
             allowed_hosted_domains: HashSet::new(),
@@ -611,6 +614,58 @@ mod tests {
             ("LUCIDA_GOOGLE_CLIENT_SECRET", "secret"),
             ("LUCIDA_OAUTH_REDIRECT_URI", "https://app/cb"),
         ]
+    }
+
+    // -- LUCIDA_DB_URL --------------------------------------------------
+
+    #[test]
+    fn an_unset_db_url_defaults_to_a_local_sqlite_file() {
+        let cfg = AuthConfig::from_env_map(reader(&[])).unwrap();
+        assert_eq!(cfg.db_url, DatabaseUrl::default_sqlite());
+        assert_eq!(cfg.db_url.scheme(), crate::storage::Scheme::Sqlite);
+    }
+
+    #[test]
+    fn an_empty_db_url_falls_back_to_the_default() {
+        let cfg = AuthConfig::from_env_map(reader(&[("LUCIDA_DB_URL", "  ")])).unwrap();
+        assert_eq!(cfg.db_url, DatabaseUrl::default_sqlite());
+    }
+
+    #[test]
+    fn a_db_url_is_taken_as_given() {
+        let cfg =
+            AuthConfig::from_env_map(reader(&[("LUCIDA_DB_URL", "sqlite:///data/lucida.db")]))
+                .unwrap();
+        assert_eq!(cfg.db_url.as_str(), "sqlite:///data/lucida.db");
+    }
+
+    #[test]
+    fn an_unsupported_db_url_scheme_fails_startup() {
+        let err = AuthConfig::from_env_map(reader(&[("LUCIDA_DB_URL", "postgres://host/lucida")]))
+            .unwrap_err();
+        assert!(matches!(err, AuthConfigError::DatabaseUrl(_)));
+        let message = err.to_string();
+        assert!(message.contains("LUCIDA_DB_URL"), "{message}");
+        assert!(message.contains("sqlite"), "{message}");
+    }
+
+    #[test]
+    fn a_bare_path_in_db_url_fails_startup() {
+        // The old `LUCIDA_DB_PATH` value, copied across verbatim.
+        // Accepting it would boot the server against the wrong database.
+        let err =
+            AuthConfig::from_env_map(reader(&[("LUCIDA_DB_URL", "/var/lib/lucida/lucida.db")]))
+                .unwrap_err();
+        assert!(matches!(err, AuthConfigError::DatabaseUrl(_)));
+        assert!(err.to_string().contains("LUCIDA_DB_URL"));
+    }
+
+    #[test]
+    fn the_retired_db_path_variable_is_ignored() {
+        let cfg =
+            AuthConfig::from_env_map(reader(&[("LUCIDA_DB_PATH", "/var/lib/lucida/lucida.db")]))
+                .unwrap();
+        assert_eq!(cfg.db_url, DatabaseUrl::default_sqlite());
     }
 
     #[test]

@@ -56,9 +56,10 @@ services:
       # Do NOT inline the secret value here.
       LUCIDA_GOOGLE_CLIENT_SECRET: "${LUCIDA_GOOGLE_CLIENT_SECRET}"
 
-      # ---- Required: where SQLite + the proxy cache live ----
-      # Absolute paths under the bind-mounted volume below.
-      LUCIDA_DB_PATH: "/var/lib/lucida/lucida.db"
+      # ---- Required: where the database + the proxy cache live ----
+      # Absolute paths under the bind-mounted volume below. The scheme
+      # of LUCIDA_DB_URL picks the storage backend.
+      LUCIDA_DB_URL: "sqlite:///var/lib/lucida/lucida.db"
       LUCIDA_PROXY_CACHE_DIR: "/var/lib/lucida/proxy-cache"
       LUCIDA_DATA_DIR: "/var/lib/lucida/data"
 

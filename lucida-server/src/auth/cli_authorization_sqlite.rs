@@ -14,7 +14,7 @@ pub struct SqliteCliTokenAuthorizationStore {
 }
 
 impl SqliteCliTokenAuthorizationStore {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub(crate) fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 }
@@ -143,7 +143,7 @@ impl CliTokenAuthorizationStore for SqliteCliTokenAuthorizationStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::session_store_sqlite::SqliteSessionStore;
+    use crate::storage::SqliteStorageBackend;
 
     fn sample() -> CliTokenAuthorization {
         let now = Utc::now();
@@ -164,8 +164,8 @@ mod tests {
 
     #[tokio::test]
     async fn sqlite_roundtrip_poll_and_approve() {
-        let session_store = SqliteSessionStore::open_in_memory().await.unwrap();
-        let store = SqliteCliTokenAuthorizationStore::new(session_store.pool().clone());
+        let backend = SqliteStorageBackend::open_in_memory().await.unwrap();
+        let store = SqliteCliTokenAuthorizationStore::new(backend.pool().clone());
         store.create(sample()).await.unwrap();
 
         assert!(

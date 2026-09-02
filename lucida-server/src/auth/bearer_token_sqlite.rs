@@ -12,7 +12,7 @@ pub struct SqliteBearerTokenStore {
 }
 
 impl SqliteBearerTokenStore {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub(crate) fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 }
@@ -122,7 +122,7 @@ impl BearerTokenStore for SqliteBearerTokenStore {
 mod tests {
     use super::*;
     use crate::auth::bearer_token::hash_bearer_token;
-    use crate::auth::session_store_sqlite::SqliteSessionStore;
+    use crate::storage::SqliteStorageBackend;
 
     fn sample(id: &str) -> BearerToken {
         let now = Utc::now();
@@ -142,8 +142,8 @@ mod tests {
 
     #[tokio::test]
     async fn sqlite_roundtrip_touch_and_revoke() {
-        let session_store = SqliteSessionStore::open_in_memory().await.unwrap();
-        let store = SqliteBearerTokenStore::new(session_store.pool().clone());
+        let backend = SqliteStorageBackend::open_in_memory().await.unwrap();
+        let store = SqliteBearerTokenStore::new(backend.pool().clone());
         let token = sample("tok-a");
         let hash = token.token_hash.clone();
         store.create(token).await.unwrap();
