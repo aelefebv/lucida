@@ -3,15 +3,15 @@
 //! Module map:
 //!
 //! - `config` — runtime knobs read from env at boot (cookie name,
-//!   timeouts, db path, secure-cookie mode, auth mode + Google
-//!   credentials).
+//!   timeouts, database connection string, secure-cookie mode, auth
+//!   mode + Google credentials).
 //! - `cookie` — cookie reading + Set-Cookie building. One source of
 //!   truth for the `lucida_session` cookie's attribute set.
 //! - `dev` — disabled-auth identity switch cookie for local multi-user
 //!   testing. Not used by Google/production auth.
 //! - `session_store` — `LoginSessionStore` trait + the row type.
 //! - `session_store_sqlite` — production `SqliteSessionStore` backed by
-//!   `sqlx`. Runs migrations from `migrations/` on open.
+//!   `sqlx`. Connecting and migrating belong to [`crate::storage`].
 //! - `session_store_memory` — `MemorySessionStore` for tests.
 //! - `bearer_token` / `bearer_token_sqlite` / `bearer_token_memory` —
 //!   opaque CLI/Python credentials stored as hashes and resolved to
@@ -95,4 +95,4 @@ pub use principal::{
 };
 pub use session_store::{LoginSession, LoginSessionStore, SessionStoreError};
 pub use session_store_memory::MemorySessionStore;
-pub use session_store_sqlite::{SqliteSessionStore, StoreOpenError};
+pub use session_store_sqlite::SqliteSessionStore;

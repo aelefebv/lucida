@@ -5,7 +5,7 @@ lifecycle is the explicit contract here:
 
     build (or reuse a pointed-at binary)
       -> allocate a free port + a temp DB under a temp dir
-      -> spawn with LUCIDA_BIND / LUCIDA_DB_PATH / LUCIDA_AUTH=disabled,
+      -> spawn with LUCIDA_BIND / LUCIDA_DB_URL / LUCIDA_AUTH=disabled,
          streaming stdout+stderr into DIR/server.log
       -> wait for GET /healthz
       -> (caller does its work)
@@ -245,7 +245,7 @@ class ServerProcess:
     def _build_env(self) -> dict[str, str]:
         env = dict(os.environ)
         env["LUCIDA_BIND"] = f"{self._host}:{self._port}"
-        env["LUCIDA_DB_PATH"] = str(self._db_path)
+        env["LUCIDA_DB_URL"] = f"sqlite://{self._db_path}"
         env["LUCIDA_AUTH"] = "disabled"
         # Be explicit: drop any inherited overrides that would point the server
         # at a non-loopback bind (which would then demand LUCIDA_INSECURE) or at

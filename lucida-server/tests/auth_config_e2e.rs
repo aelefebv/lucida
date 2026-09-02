@@ -16,7 +16,7 @@
 //! - Picks a unique loopback port via `pick_loopback_port`.
 //! - Wipes the parent process env with `env_clear` so the test
 //!   environment can't smuggle in `LUCIDA_*` overrides.
-//! - Sets a tempdir-scoped `LUCIDA_DB_PATH` so the SQLite store
+//! - Sets a tempdir-scoped `LUCIDA_DB_URL` so the SQLite store
 //!   doesn't write `lucida.db` into the workspace root.
 
 use std::io::Read;
@@ -53,7 +53,10 @@ fn server_command(tmp_db: &std::path::Path, env: &[(&str, &str)]) -> Command {
         // some hosts; HOME for any default-cache-dir lookups.
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", std::env::var("HOME").unwrap_or_default())
-        .env("LUCIDA_DB_PATH", tmp_db.to_str().expect("utf-8"))
+        .env(
+            "LUCIDA_DB_URL",
+            format!("sqlite://{}", tmp_db.to_str().expect("utf-8")),
+        )
         // Force trace level off / quiet so stderr stays scannable.
         .env("RUST_LOG", "lucida_server=warn");
     for (k, v) in env {

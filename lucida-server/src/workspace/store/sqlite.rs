@@ -31,7 +31,7 @@ pub struct SqliteWorkspaceStore {
 }
 
 impl SqliteWorkspaceStore {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub(crate) fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 
