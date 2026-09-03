@@ -27,7 +27,11 @@ use crate::workspace::{SqliteWorkspaceStore, WorkspaceStore};
 /// Migrations bundled into the binary at compile time. One baseline
 /// creates the whole schema; a later change is another `.sql` file beside
 /// it, picked up by rebuilding.
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+///
+/// Each backend has its own directory under `migrations/`, because a
+/// schema cannot be written once for two engines that do not agree on
+/// what a timestamp is. See ADR-0058.
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/sqlite");
 
 /// Connections for a file-backed database. A single SQLite file
 /// serializes writes anyway, so a small pool is all the parallelism

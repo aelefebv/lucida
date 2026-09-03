@@ -34,10 +34,17 @@ rand = "0.8"
 thiserror = "1"
 bytemuck = "1"
 async-trait = "0.1"
-# SQLite-backed session store. Pin runtime-tokio-rustls to match tokio's
-# runtime; sqlite + macros for query helpers; chrono for the schema's
-# timestamp columns.
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "macros", "chrono", "migrate"] }
+# Storage backends. Pin runtime-tokio-rustls to match tokio's runtime;
+# macros for query helpers; chrono for the schema's timestamp columns.
+#
+# Both drivers are compiled unconditionally rather than put behind a
+# cargo feature. SQLite is the only backend `storage::open` can select,
+# so the PostgreSQL driver is carried for the conformance suite alone —
+# but a suite that is only compiled under a feature flag is a suite most
+# people never run, and the point of the PostgreSQL cases is that they
+# announce themselves as skipped on a machine with no database. See
+# ADR-0058.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "postgres", "macros", "chrono", "migrate"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 uuid = { version = "1", features = ["v4"] }
 # Cookie parsing/serialization. We use the bare `cookie` crate for

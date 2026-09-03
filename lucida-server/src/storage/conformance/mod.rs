@@ -5,7 +5,8 @@
 //! implementation of that trait. Five of the six traits ship an in-memory
 //! store beside the SQLite one, and both must answer the same way; the
 //! workspace store has only the SQLite one, so its suite runs against
-//! that until a second arrives.
+//! that until a second arrives. The pending-authentication trait has a
+//! third, on PostgreSQL, which runs when a PostgreSQL is reachable.
 //!
 //! A case asserts only what a caller can observe through the trait: what
 //! you write comes back, what you delete is gone, what should conflict
@@ -19,6 +20,9 @@
 //! `conformance_suite!` list, and it then runs everywhere. Adding an
 //! implementation is one factory plus one name in the `over:` list, and
 //! every case then runs against it.
+//!
+//! An implementation that needs something the machine may not have goes
+//! in `when_available:` instead, and its factory returns an `Option`.
 
 use chrono::{DateTime, Utc};
 
@@ -30,10 +34,28 @@ use chrono::{DateTime, Utc};
 /// module the generated tests land in, so a failure reads
 /// `bookmarks::sqlite::delete_hands_back_the_row_it_removed`: the behavior
 /// and the store that broke it.
+///
+/// A `when_available:` implementation runs the same cases, but its
+/// factory returns `Option<_>` and a `None` skips the case rather than
+/// failing it. That is for a store needing a database the machine may
+/// not have; the factory is the one place that decides, and it says on
+/// stderr why it decided so.
 macro_rules! conformance_suite {
     (cases: $cases:tt, over: [$($implementation:ident),+ $(,)?] $(,)?) => {
         $(
             conformance_cases!($implementation, $cases);
+        )+
+    };
+    (
+        cases: $cases:tt,
+        over: [$($implementation:ident),+ $(,)?],
+        when_available: [$($optional:ident),+ $(,)?] $(,)?
+    ) => {
+        $(
+            conformance_cases!($implementation, $cases);
+        )+
+        $(
+            conformance_cases_when_available!($optional, $cases);
         )+
     };
 }
@@ -49,6 +71,25 @@ macro_rules! conformance_cases {
                 #[tokio::test]
                 async fn $case() {
                     super::$case(super::$implementation().await).await;
+                }
+            )+
+        }
+    };
+}
+
+/// The same cross product for an implementation whose store may not be
+/// reachable. Split from `conformance_cases!` rather than folded into it
+/// so the ordinary implementations keep a factory that cannot answer
+/// "not today".
+macro_rules! conformance_cases_when_available {
+    ($implementation:ident, [$($case:ident),+ $(,)?]) => {
+        mod $implementation {
+            $(
+                #[tokio::test]
+                async fn $case() {
+                    if let Some(store) = super::$implementation().await {
+                        super::$case(store).await;
+                    }
                 }
             )+
         }

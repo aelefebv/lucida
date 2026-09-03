@@ -163,11 +163,13 @@ impl fmt::Display for DatabaseUrl {
 /// Replace the `user:password@` portion of a connection string with a
 /// placeholder.
 ///
-/// A SQLite URL never carries credentials, so this is a no-op today.
-/// It exists now because the startup log prints the connection string,
-/// and the first network backend to land would otherwise put a password
-/// in the logs of every deployment that upgrades to it.
-fn redact(raw: &str) -> Cow<'_, str> {
+/// A SQLite URL never carries credentials, so this does nothing for the
+/// backend [`open`](super::open) selects. It exists because the startup
+/// log prints the connection string, and a network backend would
+/// otherwise put a password in the logs of every deployment that adopts
+/// it. [`PostgresStorageBackend`](super::PostgresStorageBackend) calls it
+/// directly, which is why it reaches beyond this module.
+pub(super) fn redact(raw: &str) -> Cow<'_, str> {
     // Search from the right: a password may itself contain an `@`, and
     // the last one is the delimiter the host follows.
     let Some(at) = raw.rfind('@') else {

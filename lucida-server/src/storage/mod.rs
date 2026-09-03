@@ -18,7 +18,10 @@
 //!
 //! - `url` — [`DatabaseUrl`], the parsed connection string, and the
 //!   [`Scheme`] enum that [`open`] dispatches on.
-//! - `sqlite` — [`SqliteStorageBackend`], the only backend today.
+//! - `sqlite` — [`SqliteStorageBackend`], the only backend [`open`] can
+//!   select.
+//! - `postgres` — [`PostgresStorageBackend`], which serves one of the six
+//!   stores and is reached only by tests. See ADR-0058.
 //! - `conformance` (tests) — one suite per store trait, run against
 //!   every implementation of that trait.
 //! - `test_support` (tests) — how a test opens a database, written once.
@@ -27,11 +30,13 @@
 
 #[cfg(test)]
 mod conformance;
+mod postgres;
 mod sqlite;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod url;
 
+pub use postgres::PostgresStorageBackend;
 pub use sqlite::SqliteStorageBackend;
 pub use url::{DatabaseUrl, DatabaseUrlError, Scheme};
 
