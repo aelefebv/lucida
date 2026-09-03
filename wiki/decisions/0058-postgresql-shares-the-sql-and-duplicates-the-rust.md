@@ -1,7 +1,7 @@
 ---
 type: Decision
 title: "PostgreSQL shares the SQL and duplicates the Rust"
-description: "A second backend costs one more Rust implementation per store trait and no second copy of the SQL, because numbered placeholders mean the same thing on both engines; the schema is the one thing that has to be written twice."
+description: "A second backend costs one more Rust implementation per store trait and no second copy of the SQL, because numbered placeholders mean the same thing on both engines. Only the schema is written twice."
 tags: [lucida, decision]
 source_path: wiki/decisions/0058-postgresql-shares-the-sql-and-duplicates-the-rust.md
 created: 2026-09-03
@@ -38,8 +38,8 @@ remaining five stores land.
 ## What the port measured
 
 The pending-authentication store is the smallest of the six: three methods, and
-68 lines of code before this change. The counts below are what the port cost
-when it landed, not a claim about the code as it stands later.
+68 lines of code before this change. The counts are what the port cost when it
+landed, not a running description of the files.
 
 | | Straight port | After sharing |
 | --- | --- | --- |
@@ -49,9 +49,8 @@ when it landed, not a claim about the code as it stands later.
 | Of those, lines carrying SQL | 3 | 0 |
 
 The six lines that still differ are the pool type and the type name. Nothing
-else about the two implementations is distinguishable. What they share is one
-module of 13 lines: three statements and the function that turns a driver error
-into a store error.
+else tells the two apart. What they share is one module of 13 lines: three
+statements, and the function that turns a driver error into a store error.
 
 When the port started, the six SQLite implementations held 2,494 lines of code,
 86 queries, and 245 `?` placeholders between them. Sharing the SQL is what keeps
@@ -73,11 +72,11 @@ it. `numbered_placeholders_bind_by_number`, beside the SQLite backend, writes a
 row and reads it back through placeholders given out of order, which matches only
 if the numbers won over the positions.
 
-The alternative was a rewriter: keep `?` in the shared text and renumber it at
-the PostgreSQL call site. That needs a SQL lexer to be correct, because a `?` can
-sit inside a string literal, and because `?`, `?|`, and `?&` are PostgreSQL's
-JSON containment operators. The baseline just gave five columns the `JSONB` type,
-so those operators are the natural next query rather than a hypothetical one.
+The alternative was a rewriter that keeps `?` in the shared text and renumbers it
+at the PostgreSQL call site. Getting that right needs a SQL lexer, because a `?`
+can sit inside a string literal, and because `?`, `?|`, and `?&` are PostgreSQL's
+JSON containment operators. The baseline gives five columns the `JSONB` type, so
+those operators are the natural next query rather than a hypothetical one.
 
 Writing one implementation generic over the engine was the other alternative.
 sqlx offers `Any`, which erases the driver at runtime, but its type mapping is
@@ -102,8 +101,8 @@ paragraph covers `JSONB` in place of `TEXT` with a `json_valid` check.
 
 Two files can drift, so tests read a migrated database on each side and compare
 what the two declare: the columns, whether each one accepts null, and the named
-indexes. Column types are left out on purpose, being the one thing the
-translation is allowed to change.
+indexes. The comparison skips column types on purpose, because a type is exactly
+what the translation is allowed to change.
 
 ## Consequences
 
@@ -115,15 +114,15 @@ translation is allowed to change.
 - **A `JSONB` column will not accept a bound Rust `String`.** PostgreSQL refuses
   a `text` parameter for a `jsonb` column outright, and every store that writes a
   serialized payload binds exactly that today. A test records the refusal,
-  because it is the one Rust-side cost the remaining ports all pay. The fix is a
-  `sqlx::types::Json` bind rather than a `$6::jsonb` cast: `::` is PostgreSQL
-  syntax that SQLite rejects, so casting would end the sharing for that
-  statement while rebinding leaves the text alone.
+  because it is the Rust-side cost every remaining port pays. The fix is a
+  `sqlx::types::Json` bind rather than a `$6::jsonb` cast. SQLite rejects `::`
+  outright, so casting would end the sharing for that statement, and rebinding
+  leaves the text alone.
 - **Nothing else in the six stores is SQLite-flavored.** `ON CONFLICT ... DO
   UPDATE` appears nine times and is standard on both. `DELETE ... RETURNING`
   works on both. Grouping by a primary key while selecting columns it determines
-  is legal on both. The one dialect-typed construct is a `QueryBuilder<Sqlite>`
-  in the workspace admin search, and a `QueryBuilder<Postgres>` writes its own
+  is legal on both. What is left is a single `QueryBuilder<Sqlite>` in the
+  workspace admin search, and a `QueryBuilder<Postgres>` writes its own
   placeholders, so that is a type parameter rather than a rewrite.
 - **Concurrent migration needed no new code.** sqlx wraps a PostgreSQL migration
   run in `pg_advisory_lock`, keyed on the database name, so two replicas starting
@@ -133,10 +132,11 @@ translation is allowed to change.
   contention two processes would produce. With the lock turned off that test
   fails on a duplicate object.
 - **A developer with no PostgreSQL still runs the whole suite.**
-  `LUCIDA_TEST_POSTGRES_URL` names the database. Unset, unreachable, or refusing
-  the role a schema of its own, the PostgreSQL cases skip and the reason goes to
-  the process's own stderr rather than through the test harness, which would
-  capture it and show it only on the failure it will never accompany.
+  `LUCIDA_TEST_POSTGRES_URL` names the database. The PostgreSQL cases skip when
+  it is unset, when nothing answers, and when the role cannot create a schema of
+  its own. The reason goes to the process's own stderr rather than through the
+  test harness, which would capture it and show it only on the failure it never
+  accompanies.
 - **Continuous integration cannot skip by accident.**
   `LUCIDA_TEST_POSTGRES_REQUIRED` turns a skip into a failure, and the workflow
   sets it beside the connection string. Without it, a service container that

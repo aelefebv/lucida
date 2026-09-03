@@ -18,11 +18,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
-    # The PostgreSQL store's conformance cases need a real PostgreSQL, and
-    # skip themselves when LUCIDA_TEST_POSTGRES_URL names none — which is
-    # what lets a developer with no PostgreSQL run the suite. CI is the
-    # place that must not skip, so it runs one. Match the major version to
-    # what a deployment runs; the schema is written against 17.
+    # The PostgreSQL conformance cases skip themselves when no server is
+    # reachable, which is what lets a developer without PostgreSQL run the
+    # suite. CI is the place that must not skip, so it runs one. Pin the
+    # major version to what a deployment runs; the schema targets 17.
     services:
       postgres:
         image: postgres:17
@@ -32,8 +31,8 @@ jobs:
           POSTGRES_DB: lucida_test
         ports:
           - 5432:5432
-        # Without a health check the job races the server's startup and
-        # the cases skip on a connect failure, silently passing.
+        # Without this the job races the server's startup, and a connect
+        # failure fails the run rather than waiting for it.
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
@@ -57,9 +56,8 @@ jobs:
       - name: cargo test
         env:
           LUCIDA_TEST_POSTGRES_URL: postgres://lucida:lucida@localhost:5432/lucida_test
-          # Turn the skip into a failure here. Without it, a service
-          # container that never came up or a typo in the URL above would
-          # skip the PostgreSQL cases and report green.
+          # Turn a skip into a failure: a container that never came up, or
+          # a typo in the URL above, would otherwise report green.
           LUCIDA_TEST_POSTGRES_REQUIRED: '1'
         run: cargo test --locked --workspace --all-features
 

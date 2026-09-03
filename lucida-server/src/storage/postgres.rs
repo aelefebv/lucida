@@ -317,8 +317,7 @@ mod tests {
             return;
         };
         // The harness already migrated this schema, and the race worth
-        // testing is the one where every starter finds work to do. Empty
-        // it out and let them all start from nothing.
+        // testing is the one where every starter finds work to do.
         for statement in [
             format!(r#"DROP SCHEMA "{}" CASCADE"#, db.schema),
             format!(r#"CREATE SCHEMA "{}""#, db.schema),

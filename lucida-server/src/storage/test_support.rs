@@ -110,8 +110,7 @@ pub(crate) async fn postgres_backend() -> Option<PostgresTestDatabase> {
     admin.close().await;
     if let Err(e) = created {
         // A database the role cannot write is as good as no database, so
-        // it skips rather than failing. Under POSTGRES_REQUIRED_VAR it
-        // still fails, which is what keeps a misconfigured CI honest.
+        // this skips rather than failing.
         return skip_postgres_cases(&format!(
             "the PostgreSQL named by {POSTGRES_URL_VAR} refused a test schema: {e}"
         ));
@@ -154,9 +153,8 @@ fn scoped_to_schema(base: &str, schema: &str) -> String {
 /// Best effort. A failure here means a database that is filling up, not a
 /// test that should fail, and the case about to run does not depend on it.
 async fn reclaim_stale_schemas(admin: &sqlx::PgPool) {
-    // The timestamp is read back out of the name with the same pattern
-    // that recognizes the name, so the two cannot disagree about where in
-    // it the seconds sit.
+    // One pattern both recognizes the name and extracts the seconds, so
+    // the two cannot disagree about where in the name they sit.
     let pattern = format!("^{SCHEMA_PREFIX}_([0-9]+)_[0-9a-f]+$");
     let stale: Vec<String> = sqlx::query_scalar(
         r#"
@@ -190,11 +188,10 @@ fn skip_postgres_cases(reason: &str) -> Option<PostgresTestDatabase> {
 
     static ANNOUNCED: std::sync::Once = std::sync::Once::new();
     ANNOUNCED.call_once(|| {
-        // Not `eprintln!`: the test harness captures what that macro
-        // writes and shows it only for a failing case, which is the one
-        // outcome this message will never accompany. Writing to the
-        // process's stderr handle goes around the capture, so the skip
-        // is visible on the green run it is reporting on.
+        // Not `eprintln!`: the test harness captures that and shows it
+        // only for a failing case, which is the one outcome this message
+        // never accompanies. Writing to the process's stderr handle goes
+        // around the capture.
         let _ = writeln!(
             std::io::stderr(),
             "SKIPPED: the PostgreSQL cases did not run. {reason}"

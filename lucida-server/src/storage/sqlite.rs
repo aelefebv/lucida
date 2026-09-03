@@ -274,9 +274,9 @@ mod tests {
         .await
         .unwrap();
 
-        // The placeholders are out of order, so this matches the row only
-        // if the numbers won over the positions. Assigning by position
-        // would look for a token spelled `#v=1`.
+        // The placeholders are out of order, so this matches only if the
+        // numbers won over the positions: by position, the driver would
+        // look for a token spelled `#v=1`.
         let by_number: Option<String> = sqlx::query_scalar(
             "SELECT intended_path FROM pending_auth \
              WHERE intended_hash = $2 AND state_token = $1",

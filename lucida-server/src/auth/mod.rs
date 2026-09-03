@@ -70,8 +70,6 @@ pub mod middleware;
 pub mod pending_auth;
 pub mod pending_auth_memory;
 pub mod pending_auth_postgres;
-// Not `pub`: the shared statements are how the two SQL stores are
-// written, not something a caller of the trait has any use for.
 pub(crate) mod pending_auth_sql;
 pub mod pending_auth_sqlite;
 pub mod principal;
