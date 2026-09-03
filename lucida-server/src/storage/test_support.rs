@@ -15,7 +15,7 @@ use std::io::Write as _;
 
 use sqlx::SqlitePool;
 
-use super::{PostgresStorageBackend, SqliteStorageBackend};
+use super::{DatabaseUrl, PostgresStorageBackend, SqliteStorageBackend};
 
 /// A migrated in-memory SQLite backend.
 pub(crate) async fn sqlite_backend() -> SqliteStorageBackend {
@@ -58,6 +58,15 @@ const SCHEMA_LIFETIME_SECONDS: i64 = 3600;
 /// on it, so it lives here rather than being spelled twice.
 const SCHEMA_PREFIX: &str = "lucida_test";
 
+/// An empty PostgreSQL schema, private to one test, and the connection
+/// string that reaches it.
+pub(crate) struct PostgresTestSchema {
+    pub(crate) schema: String,
+    /// Scoped to [`Self::schema`], and handed to [`super::open`] the way
+    /// a deployment hands over `LUCIDA_DB_URL`.
+    pub(crate) url: DatabaseUrl,
+}
+
 /// A migrated PostgreSQL, private to one test.
 pub(crate) struct PostgresTestDatabase {
     /// The backend, migrated into [`Self::schema`].
@@ -66,11 +75,11 @@ pub(crate) struct PostgresTestDatabase {
     pub(crate) schema: String,
     /// The connection string that reaches that schema, for a test that
     /// wants to open a second backend over the same database.
-    pub(crate) url: String,
+    pub(crate) url: DatabaseUrl,
 }
 
-/// A migrated PostgreSQL backend in a schema of its own, or `None` when
-/// no PostgreSQL was offered.
+/// An empty schema of this test's own on the offered PostgreSQL, or
+/// `None` when none was offered.
 ///
 /// Every case gets its own schema, so cases that write the same key run
 /// in parallel without colliding. Nothing drops the schema afterwards: a
@@ -82,7 +91,10 @@ pub(crate) struct PostgresTestDatabase {
 ///
 /// A `None` says so on the process's stderr, or fails the case outright
 /// where [`POSTGRES_REQUIRED_VAR`] says a skip is not acceptable.
-pub(crate) async fn postgres_backend() -> Option<PostgresTestDatabase> {
+///
+/// Separate from [`postgres_backend`] for the cases that are about
+/// bringing a backend up: they need a database nothing has migrated yet.
+pub(crate) async fn postgres_schema() -> Option<PostgresTestSchema> {
     let base = match std::env::var(POSTGRES_URL_VAR) {
         Ok(base) if !base.trim().is_empty() => base,
         _ => {
@@ -116,7 +128,17 @@ pub(crate) async fn postgres_backend() -> Option<PostgresTestDatabase> {
         ));
     }
 
-    let url = scoped_to_schema(&base, &schema);
+    let url = DatabaseUrl::parse(&scoped_to_schema(&base, &schema)).unwrap_or_else(|e| {
+        panic!("{POSTGRES_URL_VAR} must be a connection string this build can open: {e}")
+    });
+    Some(PostgresTestSchema { schema, url })
+}
+
+/// A migrated PostgreSQL backend in a schema of its own, or `None` when
+/// no PostgreSQL was offered. See [`postgres_schema`] for how the schema
+/// is made and reclaimed.
+pub(crate) async fn postgres_backend() -> Option<PostgresTestDatabase> {
+    let PostgresTestSchema { schema, url } = postgres_schema().await?;
     let backend = PostgresStorageBackend::open(&url)
         .await
         .expect("a reachable PostgreSQL should migrate a fresh schema");
@@ -180,7 +202,7 @@ async fn reclaim_stale_schemas(admin: &sqlx::PgPool) {
 ///
 /// Panics instead where [`POSTGRES_REQUIRED_VAR`] is set. Otherwise the
 /// reason goes out once per test process and the caller gets `None`.
-fn skip_postgres_cases(reason: &str) -> Option<PostgresTestDatabase> {
+fn skip_postgres_cases<T>(reason: &str) -> Option<T> {
     assert!(
         std::env::var_os(POSTGRES_REQUIRED_VAR).is_none(),
         "{POSTGRES_REQUIRED_VAR} is set, so the PostgreSQL cases must run: {reason}"

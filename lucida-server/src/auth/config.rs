@@ -640,13 +640,26 @@ mod tests {
     }
 
     #[test]
+    fn a_postgres_db_url_selects_the_postgresql_backend() {
+        for raw in [
+            "postgres://lucida@db:5432/lucida",
+            "postgresql://lucida@db:5432/lucida",
+        ] {
+            let cfg = AuthConfig::from_env_map(reader(&[("LUCIDA_DB_URL", raw)])).unwrap();
+            assert_eq!(cfg.db_url.scheme(), crate::storage::Scheme::Postgres);
+            assert_eq!(cfg.db_url.as_str(), "postgres://lucida@db:5432/lucida");
+        }
+    }
+
+    #[test]
     fn an_unsupported_db_url_scheme_fails_startup() {
-        let err = AuthConfig::from_env_map(reader(&[("LUCIDA_DB_URL", "postgres://host/lucida")]))
+        let err = AuthConfig::from_env_map(reader(&[("LUCIDA_DB_URL", "mysql://host/lucida")]))
             .unwrap_err();
         assert!(matches!(err, AuthConfigError::DatabaseUrl(_)));
         let message = err.to_string();
         assert!(message.contains("LUCIDA_DB_URL"), "{message}");
         assert!(message.contains("sqlite"), "{message}");
+        assert!(message.contains("postgres"), "{message}");
     }
 
     #[test]

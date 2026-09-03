@@ -111,6 +111,17 @@ spec:
             # Give SQLite an absolute path under the PVC mount below:
             # anything outside it, including the default `./lucida.db`,
             # is lost on restart.
+            #
+            # PostgreSQL is the other backend, spelled `postgres://` or
+            # `postgresql://`. Take its password from a Secret rather
+            # than inlining it here. Either backend is migrated at
+            # startup, and the server refuses to serve if it cannot.
+            #
+            # A single SQLite file cannot serve a second replica, so
+            # PostgreSQL is a prerequisite for scaling past
+            # `replicas: 1`, and not the only one: the PVC below is
+            # ReadWriteOnce and also holds the proxy cache and the data
+            # directory, so plan those too before raising the count.
             - name: LUCIDA_DB_URL
               value: "sqlite:///var/lib/lucida/lucida.db"
             - name: LUCIDA_PROXY_CACHE_DIR

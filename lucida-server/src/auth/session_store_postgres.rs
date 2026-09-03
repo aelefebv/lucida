@@ -102,6 +102,7 @@ impl LoginSessionStore for PostgresSessionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::StorageBackend as _;
     use crate::storage::test_support::postgres_backend;
     use chrono::TimeZone;
     use sqlx::postgres::PgPoolOptions;
@@ -152,7 +153,7 @@ mod tests {
                     Ok(())
                 })
             })
-            .connect(&db.url)
+            .connect(db.url.as_str())
             .await
             .expect("the harness already opened this database");
         let zone: String = sqlx::query_scalar("SHOW TimeZone")

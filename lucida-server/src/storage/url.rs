@@ -27,6 +27,7 @@ const IN_MEMORY_DB_URL: &str = "sqlite::memory:";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scheme {
     Sqlite,
+    Postgres,
 }
 
 impl Scheme {
@@ -37,15 +38,37 @@ impl Scheme {
     /// and what it advertises cannot drift apart. Adding a backend is
     /// two edits: a variant, which stops [`Self::as_str`] compiling
     /// until it is named, and an entry here.
-    pub const ALL: &'static [Scheme] = &[Scheme::Sqlite];
+    pub const ALL: &'static [Scheme] = &[Scheme::Sqlite, Scheme::Postgres];
 
     fn parse(raw: &str) -> Option<Self> {
-        Self::ALL.iter().copied().find(|s| s.as_str() == raw)
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|s| s.as_str() == raw || s.aliases().contains(&raw))
     }
 
+    /// The one spelling a scheme is known by everywhere past parsing:
+    /// in [`super::open`]'s dispatch, in the startup log, and in the
+    /// connection string handed to the backend.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Sqlite => "sqlite",
+            Self::Postgres => "postgres",
+        }
+    }
+
+    /// Other spellings a deployer may write, accepted and then
+    /// forgotten: [`DatabaseUrl::parse`] rewrites the string to
+    /// [`Self::as_str`], so an alias never reaches a backend and never
+    /// becomes a second thing to match on.
+    ///
+    /// `postgresql` is here because libpq and PostgreSQL's own
+    /// documentation use both spellings, so a connection string copied
+    /// from anywhere may carry either.
+    fn aliases(&self) -> &'static [&'static str] {
+        match self {
+            Self::Sqlite => &[],
+            Self::Postgres => &["postgresql"],
         }
     }
 
@@ -117,11 +140,13 @@ impl DatabaseUrl {
             });
         };
         Ok(Self {
-            // Hand the backend a lowercased scheme. Schemes are
-            // case-insensitive, so `SQLITE://lucida.db` has to be
-            // accepted, but a backend strips the prefix by literal
-            // match and would take the whole string as a filename.
-            raw: format!("{lowered}:{rest}"),
+            // Hand the backend the canonical spelling. Schemes are
+            // case-insensitive and one of them answers to two names, so
+            // `SQLITE://lucida.db` and `postgresql://host/lucida` both
+            // have to be accepted — but a backend strips the prefix by
+            // literal match, and would take `SQLITE://lucida.db` whole
+            // as a filename.
+            raw: format!("{}:{rest}", scheme.as_str()),
             scheme,
         })
     }
@@ -160,37 +185,79 @@ impl fmt::Display for DatabaseUrl {
     }
 }
 
-/// Replace the `user:password@` portion of a connection string with a
-/// placeholder.
+const REDACTED: &str = "<redacted>";
+
+/// Remove every secret a connection string can carry.
 ///
-/// A SQLite URL never carries credentials, so this does nothing for the
-/// backend [`open`](super::open) selects. It exists because the startup
-/// log prints the connection string, and a network backend would
-/// otherwise put a password in the logs of every deployment that adopts
-/// it. [`PostgresStorageBackend`](super::PostgresStorageBackend) calls it
-/// directly, which is why it reaches beyond this module.
-pub(super) fn redact(raw: &str) -> Cow<'_, str> {
-    // Search from the right: a password may itself contain an `@`, and
-    // the last one is the delimiter the host follows.
-    let Some(at) = raw.rfind('@') else {
-        return Cow::Borrowed(raw);
-    };
-    let credentials_start = match raw.find("://") {
+/// The startup log prints the connection string, as does every
+/// [`StorageError`] that reports a database the server could not bring
+/// up. A SQLite URL carries no secret; a `postgres://` one usually does.
+///
+/// Two places hold them, and a string can use either or both. The
+/// userinfo before the `@` is the familiar one. The other is the query
+/// string: sqlx reads `user`, `password`, and `dbname` from it, so
+/// `postgres://db/lucida?user=lucida&password=hunter2` connects with the
+/// password nowhere near an `@`.
+///
+/// [`StorageError`]: super::StorageError
+fn redact(raw: &str) -> Cow<'_, str> {
+    let redacted = redact_query(&redact_userinfo(raw));
+    if redacted == raw {
+        Cow::Borrowed(raw)
+    } else {
+        Cow::Owned(redacted)
+    }
+}
+
+/// Replace the `user:password@` portion of the authority.
+fn redact_userinfo(raw: &str) -> String {
+    let authority_start = match raw.find("://") {
         Some(i) => i + "://".len(),
         None => match raw.find(':') {
             Some(i) => i + 1,
             None => 0,
         },
     };
-    if credentials_start > at {
-        // The `@` sits inside the scheme, so there is no userinfo to hide.
-        return Cow::Borrowed(raw);
-    }
-    Cow::Owned(format!(
-        "{}<redacted>{}",
-        &raw[..credentials_start],
-        &raw[at..]
-    ))
+    // The authority ends where the path, query, or fragment begins. An
+    // `@` past that point belongs to a query parameter, so bounding the
+    // search is what keeps the host in the message.
+    let authority_end = raw[authority_start..]
+        .find(['/', '?', '#'])
+        .map_or(raw.len(), |i| authority_start + i);
+    // Search from the right within the authority: a password may itself
+    // contain an `@`, and the last one is the delimiter the host follows.
+    let Some(at) = raw[authority_start..authority_end].rfind('@') else {
+        return raw.to_string();
+    };
+    let at = authority_start + at;
+    format!("{}{REDACTED}{}", &raw[..authority_start], &raw[at..])
+}
+
+/// Replace the value of every query parameter that carries a secret.
+///
+/// Matched on the name containing `password`, which covers libpq's
+/// `password` and `sslpassword` without this having to track the list
+/// sqlx accepts.
+fn redact_query(raw: &str) -> String {
+    let Some(query_start) = raw.find('?').map(|i| i + 1) else {
+        return raw.to_string();
+    };
+    let (before, query) = raw.split_at(query_start);
+    let (query, fragment) = match query.find('#') {
+        Some(i) => query.split_at(i),
+        None => (query, ""),
+    };
+    let scrubbed = query
+        .split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((name, _)) if name.to_ascii_lowercase().contains("password") => {
+                format!("{name}={REDACTED}")
+            }
+            _ => pair.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    format!("{before}{scrubbed}{fragment}")
 }
 
 #[cfg(test)]
@@ -212,6 +279,12 @@ mod tests {
             DatabaseUrl::parse("sqlite://lucida.db").unwrap().scheme(),
             Scheme::Sqlite
         );
+        assert_eq!(
+            DatabaseUrl::parse("postgres://host/lucida")
+                .unwrap()
+                .scheme(),
+            Scheme::Postgres
+        );
     }
 
     #[test]
@@ -219,6 +292,37 @@ mod tests {
         let url = DatabaseUrl::parse("SQLite://lucida.db").unwrap();
         assert_eq!(url.scheme(), Scheme::Sqlite);
         assert_eq!(url.as_str(), "sqlite://lucida.db");
+    }
+
+    #[test]
+    fn postgresql_is_the_same_backend_as_postgres() {
+        let url = DatabaseUrl::parse("postgresql://host/lucida").unwrap();
+        assert_eq!(url.scheme(), Scheme::Postgres);
+    }
+
+    /// Past `parse` one backend has one name, so the dispatch matches a
+    /// single variant, the startup log prints one spelling, and the
+    /// backend gets a string it can compare literally.
+    #[test]
+    fn an_alias_does_not_survive_parsing() {
+        let url = DatabaseUrl::parse("PostgreSQL://user@host:5432/lucida").unwrap();
+        assert_eq!(url.as_str(), "postgres://user@host:5432/lucida");
+        assert_eq!(url.scheme().to_string(), "postgres");
+    }
+
+    /// Two schemes sharing a spelling would make [`Scheme::parse`]
+    /// answer by list order, which is nobody's intended decision.
+    #[test]
+    fn no_spelling_names_two_backends() {
+        let mut seen = std::collections::HashMap::new();
+        for scheme in Scheme::ALL {
+            for spelling in std::iter::once(scheme.as_str()).chain(scheme.aliases().iter().copied())
+            {
+                if let Some(other) = seen.insert(spelling, scheme) {
+                    panic!("{spelling} names both {other} and {scheme}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -246,7 +350,9 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("LUCIDA_DB_URL"), "{message}");
         assert!(message.contains("mysql"), "{message}");
-        assert!(message.contains("sqlite"), "{message}");
+        for scheme in Scheme::ALL {
+            assert!(message.contains(scheme.as_str()), "{message}");
+        }
     }
 
     #[test]
@@ -277,22 +383,70 @@ mod tests {
 
     #[test]
     fn credentials_never_survive_redaction() {
-        // Not a scheme this build accepts, so drive `redact` directly.
-        let redacted = redact("postgres://lucida:hunter2@10.0.0.1:5432/lucida");
-        assert_eq!(redacted, "postgres://<redacted>@10.0.0.1:5432/lucida");
-        assert!(!redacted.contains("hunter2"));
+        let url = DatabaseUrl::parse("postgres://lucida:hunter2@10.0.0.1:5432/lucida").unwrap();
+        assert_eq!(url.redacted(), "postgres://<redacted>@10.0.0.1:5432/lucida");
+        assert!(!url.redacted().contains("hunter2"));
+        // The raw string still carries the password: that is what the
+        // backend connects with, and the point of the two accessors.
+        assert!(url.as_str().contains("hunter2"));
     }
 
     #[test]
     fn redaction_survives_an_at_sign_inside_the_password() {
-        let redacted = redact("postgres://lucida:p@ss@10.0.0.1/lucida");
-        assert_eq!(redacted, "postgres://<redacted>@10.0.0.1/lucida");
-        assert!(!redacted.contains("p@ss"));
+        let url = DatabaseUrl::parse("postgres://lucida:p@ss@10.0.0.1/lucida").unwrap();
+        assert_eq!(url.redacted(), "postgres://<redacted>@10.0.0.1/lucida");
+        assert!(!url.redacted().contains("p@ss"));
+    }
+
+    /// The string below connects, and looking only for an `@` would
+    /// print its password verbatim.
+    #[test]
+    fn a_password_in_the_query_string_is_redacted_too() {
+        let url =
+            DatabaseUrl::parse("postgres://10.0.0.1:5432/lucida?user=lucida&password=hunter2")
+                .unwrap();
+        assert_eq!(
+            url.redacted(),
+            "postgres://10.0.0.1:5432/lucida?user=lucida&password=<redacted>"
+        );
+    }
+
+    #[test]
+    fn every_password_parameter_is_redacted() {
+        for raw in [
+            "postgres://db/lucida?password=hunter2",
+            "postgres://db/lucida?sslpassword=hunter2",
+            "postgres://db/lucida?PASSWORD=hunter2",
+            "postgres://lucida:hunter2@db/lucida?sslpassword=hunter2",
+        ] {
+            let redacted = DatabaseUrl::parse(raw).unwrap().redacted().into_owned();
+            assert!(!redacted.contains("hunter2"), "{raw} → {redacted}");
+        }
+    }
+
+    /// Treating an `@` in a query parameter as a userinfo delimiter used
+    /// to swallow the host, the one thing the operator needs to read.
+    #[test]
+    fn an_at_sign_outside_the_authority_leaves_the_host_alone() {
+        let url =
+            DatabaseUrl::parse("postgres://10.0.0.1:5432/lucida?application_name=a@b").unwrap();
+        assert_eq!(
+            url.redacted(),
+            "postgres://10.0.0.1:5432/lucida?application_name=a@b"
+        );
     }
 
     #[test]
     fn display_shows_the_redacted_form() {
         let url = DatabaseUrl::parse("sqlite://lucida.db").unwrap();
         assert_eq!(url.to_string(), "sqlite://lucida.db");
+
+        // The case the trait exists for: a `DatabaseUrl` interpolated
+        // into a message with `{}` cannot leak a password.
+        let credentialed = DatabaseUrl::parse("postgres://lucida:hunter2@db:5432/lucida").unwrap();
+        assert_eq!(
+            credentialed.to_string(),
+            "postgres://<redacted>@db:5432/lucida"
+        );
     }
 }
