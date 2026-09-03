@@ -394,7 +394,7 @@ fn missing_principal_500(event: &str) -> Response {
 mod tests {
     use super::*;
     use crate::bookmarks::routes::router;
-    use crate::bookmarks::store::MemoryBookmarkStore;
+    use crate::bookmarks::store_memory::MemoryBookmarkStore;
     use axum::Router;
     use axum::body::{Body, to_bytes};
     use axum::http::Request;

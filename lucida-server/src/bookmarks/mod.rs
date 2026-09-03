@@ -8,8 +8,9 @@
 //!
 //! Module layout:
 //!
-//! - [`store`] — `BookmarkStore` trait + `SqliteBookmarkStore` (production) +
-//!   `MemoryBookmarkStore` (tests). Two-table schema: `bookmarks` for the
+//! - [`store`] — the `BookmarkStore` trait, with one module per
+//!   implementation beside it: [`store_sqlite`] (production),
+//!   [`store_memory`] (tests). Two-table schema: `bookmarks` for the
 //!   rows, `bookmark_datasets` for the side index that powers the
 //!   any-overlap query the sidebar runs. ADR-0015 §"Why SQLite" covers the
 //!   choice.
@@ -31,6 +32,10 @@ pub mod broadcast;
 pub mod handlers;
 pub mod routes;
 pub mod store;
+pub mod store_memory;
+pub mod store_sqlite;
 
 pub use broadcast::{BroadcastSummary, broadcast_bookmark_change};
-pub use store::{Bookmark, BookmarkStore, MemoryBookmarkStore, SqliteBookmarkStore, StoreError};
+pub use store::{Bookmark, BookmarkStore, StoreError};
+pub use store_memory::MemoryBookmarkStore;
+pub use store_sqlite::SqliteBookmarkStore;
