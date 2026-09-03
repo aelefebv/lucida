@@ -1,9 +1,11 @@
 //! Workspace persistence: the `WorkspaceStore` trait plus the shared
-//! error type and normalization helpers its implementation uses.
+//! error type and normalization helpers its implementations use.
 //!
 //! The trait is the seam between `WorkspaceManager` and storage — the
 //! manager holds `Arc<dyn WorkspaceStore>`, so authorization and live-session
-//! logic never see SQL. The production backend is [`SqliteWorkspaceStore`].
+//! logic never see SQL. The production backend is [`SqliteWorkspaceStore`];
+//! [`PostgresWorkspaceStore`] is the same store on the other engine, and
+//! the two run the statements in [`sql`] between them. See ADR-0058.
 
 use async_trait::async_trait;
 use lucida_content::DatasetId;
@@ -18,8 +20,11 @@ use super::types::{
     WorkspaceSharingSettings, WorkspaceSummary, WorkspaceUserState, WorkspaceViewerProfile,
 };
 
+mod postgres;
+mod sql;
 mod sqlite;
 
+pub use postgres::PostgresWorkspaceStore;
 pub use sqlite::SqliteWorkspaceStore;
 
 #[derive(Debug, Error)]

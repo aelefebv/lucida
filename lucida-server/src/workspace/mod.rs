@@ -11,8 +11,9 @@
 //!   visibility enums and the record/summary structs every other layer
 //!   exchanges.
 //! - [`store`] — the `WorkspaceStore` trait (the persistence seam the
-//!   manager programs against) and `SqliteWorkspaceStore`, the production
-//!   SQLite backend with its row mappers.
+//!   manager programs against), `SqliteWorkspaceStore` and
+//!   `PostgresWorkspaceStore` with their row mappers, and the statements
+//!   the two share.
 //! - [`manager`] — `LiveWorkspace` + `WorkspaceManager`: live-session
 //!   lifecycle (lazy restore, idle eviction), membership/link
 //!   authorization, saved views and their approval flow, viewer profiles,
@@ -40,7 +41,7 @@ pub use http::{
 pub use manager::{
     CommandApplyError, LiveWorkspace, WorkspaceError, WorkspaceManager, WorkspaceRuntimeConfig,
 };
-pub use store::{SqliteWorkspaceStore, StoreError, WorkspaceStore};
+pub use store::{PostgresWorkspaceStore, SqliteWorkspaceStore, StoreError, WorkspaceStore};
 pub use types::{
     SavedViewVisibility, WorkspaceAdminDetails, WorkspaceAdminSummary, WorkspaceDatasetSource,
     WorkspaceLinkAccess, WorkspaceMember, WorkspaceRecord, WorkspaceRole, WorkspaceSavedView,
