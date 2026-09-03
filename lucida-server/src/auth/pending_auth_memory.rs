@@ -1,8 +1,8 @@
 //! In-memory `PendingAuthStore`, used by tests.
 //!
-//! Mirrors `MemorySessionStore`: lock + HashMap, methods deliberately
-//! match the SQLite semantics (single-use consume, idempotent
-//! delete_expired, NULL-vs-empty hash treated as `String::default()`).
+//! Mirrors `MemorySessionStore`: lock + HashMap. The `PendingAuthStore`
+//! conformance suite in [`crate::storage`] runs against this store and
+//! the SQLite one, so the two answer alike.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -60,59 +60,5 @@ impl PendingAuthStore for MemoryPendingAuthStore {
         let before = rows.len();
         rows.retain(|_, row| row.created_at >= older_than);
         Ok((before - rows.len()) as u64)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::Duration as ChronoDuration;
-
-    fn sample(token: &str, path: &str, hash: &str, now: DateTime<Utc>) -> PendingAuth {
-        PendingAuth {
-            state_token: token.to_string(),
-            intended_path: path.to_string(),
-            intended_hash: hash.to_string(),
-            created_at: now,
-        }
-    }
-
-    #[tokio::test]
-    async fn consume_is_one_shot() {
-        let store = MemoryPendingAuthStore::new();
-        let now = Utc::now();
-        store.insert(sample("t", "/", "", now)).await.unwrap();
-        assert!(store.consume("t").await.unwrap().is_some());
-        assert!(store.consume("t").await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn duplicate_insert_errors() {
-        let store = MemoryPendingAuthStore::new();
-        let now = Utc::now();
-        store.insert(sample("dupe", "/", "", now)).await.unwrap();
-        let res = store.insert(sample("dupe", "/x", "", now)).await;
-        assert!(res.is_err());
-    }
-
-    #[tokio::test]
-    async fn delete_expired_strict_less_than_boundary() {
-        let store = MemoryPendingAuthStore::new();
-        let now = Utc::now();
-        // exactly at the boundary: must NOT be removed
-        store
-            .insert(sample("boundary", "/", "", now))
-            .await
-            .unwrap();
-        // strictly older: removed
-        store
-            .insert(sample("old", "/", "", now - ChronoDuration::seconds(1)))
-            .await
-            .unwrap();
-
-        let removed = store.delete_expired(now).await.unwrap();
-        assert_eq!(removed, 1);
-        assert!(store.consume("boundary").await.unwrap().is_some());
-        assert!(store.consume("old").await.unwrap().is_none());
     }
 }

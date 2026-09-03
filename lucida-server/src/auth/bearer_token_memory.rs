@@ -1,4 +1,7 @@
 //! In-memory bearer-token store for tests.
+//!
+//! The `BearerTokenStore` conformance suite in [`crate::storage`] runs
+//! against this store and the SQLite one, so the two answer alike.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -34,6 +37,13 @@ impl MemoryBearerTokenStore {
 impl BearerTokenStore for MemoryBearerTokenStore {
     async fn create(&self, token: BearerToken) -> Result<(), BearerTokenStoreError> {
         let mut rows = self.rows.lock().expect("memory store mutex poisoned");
+        // Both uniqueness rules the SQL schema carries: one token per id,
+        // one identity per hash.
+        if rows.contains_key(&token.id) {
+            return Err(BearerTokenStoreError::Backend(
+                "duplicate bearer token id".to_string(),
+            ));
+        }
         if rows.values().any(|row| row.token_hash == token.token_hash) {
             return Err(BearerTokenStoreError::Backend(
                 "duplicate bearer token hash".to_string(),
@@ -79,47 +89,5 @@ impl BearerTokenStore for MemoryBearerTokenStore {
             row.revoked_at = Some(now);
         }
         Ok(Some(row.clone()))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::auth::bearer_token::hash_bearer_token;
-
-    fn sample(id: &str) -> BearerToken {
-        let now = Utc::now();
-        BearerToken {
-            id: id.to_string(),
-            token_hash: hash_bearer_token(id),
-            name: "test token".to_string(),
-            email: "dev@local".to_string(),
-            display_name: "Local Dev".to_string(),
-            picture_url: None,
-            created_at: now,
-            last_used_at: None,
-            expires_at: now + chrono::Duration::hours(1),
-            revoked_at: None,
-        }
-    }
-
-    #[tokio::test]
-    async fn roundtrip_lookup_touch_and_revoke() {
-        let store = MemoryBearerTokenStore::new();
-        let token = sample("tok-a");
-        let hash = token.token_hash.clone();
-        store.create(token).await.unwrap();
-
-        let row = store.get_by_hash(&hash).await.unwrap().unwrap();
-        assert_eq!(row.email, "dev@local");
-
-        let touched = Utc::now();
-        store.touch_last_used(&row.id, touched).await.unwrap();
-        let row = store.get_by_hash(&hash).await.unwrap().unwrap();
-        assert_eq!(row.last_used_at, Some(touched));
-
-        let revoked = Utc::now();
-        let row = store.revoke_by_hash(&hash, revoked).await.unwrap().unwrap();
-        assert_eq!(row.revoked_at, Some(revoked));
     }
 }

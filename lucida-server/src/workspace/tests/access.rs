@@ -1,20 +1,6 @@
 use super::*;
 
 #[tokio::test]
-async fn create_lists_owner_workspace() {
-    let store = fresh_store().await;
-    let p = principal("Alice@Example.com", false);
-
-    let workspace = store.create_workspace(&p, None).await.unwrap();
-    assert_eq!(workspace.name, "Untitled workspace");
-
-    let rows = store.list_workspaces(&p).await.unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].id, workspace.id);
-    assert_eq!(rows[0].role, WorkspaceRole::Owner);
-}
-
-#[tokio::test]
 async fn duplicate_route_returns_201_for_member_and_404_for_non_member() {
     let store = fresh_store().await;
     let owner = principal("owner@example.com", false);
@@ -441,21 +427,6 @@ async fn admin_can_recover_orphaned_workspace_owner() {
         .await
         .unwrap_err();
     assert!(matches!(err, WorkspaceError::BadRequest(_)));
-}
-
-#[tokio::test]
-async fn non_member_cannot_see_role_but_admin_can() {
-    let store = fresh_store().await;
-    let owner = principal("owner@example.com", false);
-    let other = principal("other@example.com", false);
-    let admin = principal("admin@example.com", true);
-    let workspace = store.create_workspace(&owner, Some("Demo")).await.unwrap();
-
-    assert_eq!(store.role_for(&workspace.id, &other).await.unwrap(), None,);
-    assert_eq!(
-        store.role_for(&workspace.id, &admin).await.unwrap(),
-        Some(WorkspaceRole::Owner),
-    );
 }
 
 #[tokio::test]

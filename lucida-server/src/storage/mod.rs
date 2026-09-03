@@ -19,10 +19,17 @@
 //! - `url` — [`DatabaseUrl`], the parsed connection string, and the
 //!   [`Scheme`] enum that [`open`] dispatches on.
 //! - `sqlite` — [`SqliteStorageBackend`], the only backend today.
+//! - `conformance` (tests) — one suite per store trait, run against
+//!   every implementation of that trait.
+//! - `test_support` (tests) — how a test opens a database, written once.
 //!
 //! See ADR-0055 for why the seam exists.
 
+#[cfg(test)]
+mod conformance;
 mod sqlite;
+#[cfg(test)]
+pub(crate) mod test_support;
 mod url;
 
 pub use sqlite::SqliteStorageBackend;

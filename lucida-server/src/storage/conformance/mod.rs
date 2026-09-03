@@ -1,0 +1,75 @@
+//! Conformance suites: what every implementation of a store trait owes
+//! its callers.
+//!
+//! One suite per store trait, written once and run against every
+//! implementation of that trait. Five of the six traits ship an in-memory
+//! store beside the SQLite one, and both must answer the same way; the
+//! workspace store has only the SQLite one, so its suite runs against
+//! that until a second arrives.
+//!
+//! A case asserts only what a caller can observe through the trait: what
+//! you write comes back, what you delete is gone, what should conflict
+//! does conflict, what should cascade does cascade, what should be
+//! ordered is ordered, and what is written together becomes visible
+//! together. Nothing here names a table, a column, a query plan, or which
+//! implementation is running. A test that needs one of those is an
+//! implementation test and belongs beside that implementation.
+//!
+//! Adding a case is one `async fn` plus one name in the suite's
+//! `conformance_suite!` list, and it then runs everywhere. Adding an
+//! implementation is one factory plus one name in the `over:` list, and
+//! every case then runs against it.
+
+use chrono::{DateTime, Utc};
+
+/// Expand one `#[tokio::test]` per case-and-implementation pair.
+///
+/// The suite module supplies an `async fn` per case, taking the store
+/// under test, and an `async fn` per implementation, returning a fresh
+/// one. Both lists are names, and the implementation name doubles as the
+/// module the generated tests land in, so a failure reads
+/// `bookmarks::sqlite::delete_hands_back_the_row_it_removed`: the behavior
+/// and the store that broke it.
+macro_rules! conformance_suite {
+    (cases: $cases:tt, over: [$($implementation:ident),+ $(,)?] $(,)?) => {
+        $(
+            conformance_cases!($implementation, $cases);
+        )+
+    };
+}
+
+/// One implementation's worth of the cross product. Separate from
+/// `conformance_suite!` only because a `macro_rules!` metavariable cannot
+/// be expanded inside another one's repetition; the case list crosses the
+/// boundary as an unexamined token tree.
+macro_rules! conformance_cases {
+    ($implementation:ident, [$($case:ident),+ $(,)?]) => {
+        mod $implementation {
+            $(
+                #[tokio::test]
+                async fn $case() {
+                    super::$case(super::$implementation().await).await;
+                }
+            )+
+        }
+    };
+}
+
+mod bearer_tokens;
+mod bookmarks;
+mod cli_token_authorizations;
+mod login_sessions;
+mod pending_auth;
+mod workspaces;
+
+/// A fixed instant, `offset_seconds` away from an arbitrary base.
+///
+/// Cases that write a timestamp and read it back name the value they
+/// expect rather than comparing against whatever the clock said. The base
+/// carries a fractional second so a store that rounds to whole seconds
+/// fails the round-trip instead of passing by luck.
+fn instant(offset_seconds: i64) -> DateTime<Utc> {
+    let base = DateTime::parse_from_rfc3339("2026-01-02T03:04:05.250Z")
+        .expect("the base instant is a literal and parses");
+    base.with_timezone(&Utc) + chrono::Duration::seconds(offset_seconds)
+}
