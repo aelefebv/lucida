@@ -1,8 +1,8 @@
 //! SQLite-backed `LoginSessionStore`.
 //!
 //! Serves session reads and writes from the pool the SQLite storage
-//! backend opened. The schema and indexes are defined in
-//! `migrations/20260508000001_create_login_sessions.sql`.
+//! backend opened. The `login_sessions` table and its indexes are defined
+//! in the baseline migration.
 //!
 //! Connecting and migrating belong to [`crate::storage`], not here. A
 //! store that opened its own database would be the only one that could,

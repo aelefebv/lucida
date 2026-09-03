@@ -412,6 +412,14 @@ Read-only to the server, addressed by URL, and never the place server records
 go.
 _Avoid_: store (unqualified), bucket, blob store, storage backend
 
+**Baseline**:
+The one migration that creates the whole schema a storage backend serves —
+every table, index, and constraint, with no earlier version to arrive from. A
+later change is a migration beside it, not an edit to it. See
+[ADR 0057](wiki/decisions/0057-one-baseline-schema-with-honest-column-types.md)
+for what the baseline replaced and the column conventions it settles.
+_Avoid_: initial migration, schema dump, bootstrap migration, snapshot
+
 **Conformance suite**:
 The cases that say what any implementation of one store trait must answer,
 written against the trait and run against every implementation of it. A case

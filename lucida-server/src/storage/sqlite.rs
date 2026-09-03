@@ -24,8 +24,9 @@ use crate::auth::{
 use crate::bookmarks::{BookmarkStore, SqliteBookmarkStore};
 use crate::workspace::{SqliteWorkspaceStore, WorkspaceStore};
 
-/// Migrations bundled into the binary at compile time. Adding a `.sql`
-/// file to `migrations/` and rebuilding picks it up.
+/// Migrations bundled into the binary at compile time. One baseline
+/// creates the whole schema; a later change is another `.sql` file beside
+/// it, picked up by rebuilding.
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// Connections for a file-backed database. A single SQLite file
@@ -71,17 +72,25 @@ impl SqliteStorageBackend {
             })?;
         let in_memory = wants_memory(url.as_str());
 
+        let base_options = parsed
+            .create_if_missing(true)
+            // SQLite ignores foreign keys unless a connection asks for
+            // them, and the schema declares every cascade, so asking is
+            // what makes those declarations load-bearing. Set here rather
+            // than left to the driver: sqlx turns this on by default
+            // today, but a default is not a guarantee, and it would lose
+            // to a connection string that spelled `foreign_keys=off`.
+            .foreign_keys(true);
+
         let opts = if in_memory {
-            parsed.create_if_missing(true)
+            base_options
         } else {
-            parsed
-                .create_if_missing(true)
-                // Write-ahead logging keeps readers and the
-                // fire-and-forget session touch-writer from blocking
-                // each other. An in-memory database has no journal to
-                // write, so it is skipped there rather than set and
-                // quietly ignored.
-                .journal_mode(SqliteJournalMode::Wal)
+            // Write-ahead logging keeps readers and the
+            // fire-and-forget session touch-writer from blocking
+            // each other. An in-memory database has no journal to
+            // write, so it is skipped there rather than set and
+            // quietly ignored.
+            base_options.journal_mode(SqliteJournalMode::Wal)
         };
 
         // sqlx reaches an in-memory database through a shared cache, so
@@ -196,6 +205,62 @@ mod tests {
             .fetch_optional(backend.pool())
             .await
             .unwrap();
+    }
+
+    /// The schema states its cascades, and SQLite honors them only on a
+    /// connection that asked. A row whose parent never existed is the
+    /// cheapest thing to ask for: it can only be refused when enforcement
+    /// is on.
+    #[tokio::test]
+    async fn every_connection_enforces_foreign_keys() {
+        let backend = SqliteStorageBackend::open_in_memory().await.unwrap();
+        let orphaned =
+            sqlx::query("INSERT INTO bookmark_datasets (bookmark_id, dataset_url) VALUES (?, ?)")
+                .bind("no-such-bookmark")
+                .bind("file:///data/a.zarr")
+                .execute(backend.pool())
+                .await;
+        assert!(
+            orphaned.is_err(),
+            "a child row with no parent must be refused",
+        );
+
+        // A file-backed database takes a different options path, and its
+        // pool hands out more than one connection. Hold them all at once
+        // so the pragma is read on each rather than on whichever one the
+        // pool happened to reuse.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lucida.db");
+        let url = DatabaseUrl::parse(&format!("sqlite://{}", path.display())).unwrap();
+        let on_disk = SqliteStorageBackend::open(&url).await.unwrap();
+        let mut held = Vec::new();
+        for _ in 0..FILE_MAX_CONNECTIONS {
+            let mut connection = on_disk.pool().acquire().await.unwrap();
+            let enforced: bool = sqlx::query_scalar("PRAGMA foreign_keys")
+                .fetch_one(&mut *connection)
+                .await
+                .unwrap();
+            assert!(enforced, "every pooled connection enforces foreign keys");
+            held.push(connection);
+        }
+    }
+
+    /// A JSON column carries JSON. SQLite has no type that says so, so the
+    /// schema says it with a check, and the check is only worth writing if
+    /// it refuses something.
+    #[tokio::test]
+    async fn a_json_column_refuses_text_that_is_not_json() {
+        let backend = SqliteStorageBackend::open_in_memory().await.unwrap();
+        let refused = sqlx::query(
+            r#"
+            INSERT INTO bookmarks
+                (id, name, created_by, created_by_name, created_at, view_json)
+            VALUES ('b', 'Bookmark', 'dev@example.com', 'Dev', '2026-01-02T03:04:05Z', 'not json')
+            "#,
+        )
+        .execute(backend.pool())
+        .await;
+        assert!(refused.is_err(), "view_json must hold JSON, not any text");
     }
 
     #[tokio::test]
