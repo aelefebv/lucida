@@ -710,3 +710,103 @@ pub(crate) const SET_USER_LAST_VIEW: &str = r#"
         updated_at = excluded.updated_at,
         last_view_json = excluded.last_view_json
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::{Postgres, Sqlite};
+
+    /// The statement with every placeholder replaced by one marker, so two
+    /// engines' output can be compared on everything except how a bound
+    /// value is spelled.
+    fn placeholders_masked(sql: &str) -> String {
+        let mut masked = String::with_capacity(sql.len());
+        let mut chars = sql.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '?' => masked.push('@'),
+                '$' => {
+                    masked.push('@');
+                    while chars.peek().is_some_and(char::is_ascii_digit) {
+                        chars.next();
+                    }
+                }
+                _ => masked.push(c),
+            }
+        }
+        masked
+    }
+
+    /// Every other statement in this module is one text both engines run,
+    /// so a conformance case that passes on both has already checked its
+    /// syntax. The admin search is assembled by a `QueryBuilder`, which
+    /// writes the placeholders itself, and that is the one thing the two
+    /// engines do not spell the same way.
+    ///
+    /// So: the same query, twice, differing in nothing but how the bound
+    /// values are named. Needs no server, which is the point — a builder
+    /// misused on the engine the developer is not running would otherwise
+    /// only surface in continuous integration.
+    #[test]
+    fn the_admin_search_differs_between_engines_only_in_its_placeholders() {
+        for (query, bound_values) in [(Some("demo"), 5), (None, 1)] {
+            let sqlite = admin_search_query::<Sqlite>(query, false, 10);
+            let postgres = admin_search_query::<Postgres>(query, false, 10);
+
+            assert_eq!(
+                placeholders_masked(sqlite.sql()),
+                placeholders_masked(postgres.sql()),
+                "the two engines must be assembling the same query",
+            );
+
+            assert_eq!(
+                sqlite.sql().matches('?').count(),
+                bound_values,
+                "SQLite takes the anonymous form from the builder: {}",
+                sqlite.sql(),
+            );
+            assert!(
+                !postgres.sql().contains('?'),
+                "PostgreSQL has no anonymous placeholder: {}",
+                postgres.sql(),
+            );
+            assert!(
+                postgres.sql().contains(&format!("${bound_values}")),
+                "PostgreSQL numbers its placeholders through to the last: {}",
+                postgres.sql(),
+            );
+        }
+    }
+
+    /// The archived filter is the only fragment that is a bare `push`,
+    /// with no bound value to give it away, so this is where its presence
+    /// and absence are pinned. Matching the fragment itself rather than
+    /// the column: the `ORDER BY` sorts on `archived_at` either way.
+    #[test]
+    fn the_admin_search_asks_for_live_workspaces_only_by_default() {
+        assert!(
+            admin_search_query::<Sqlite>(None, false, 10)
+                .sql()
+                .contains(ADMIN_SEARCH_LIVE_ONLY),
+        );
+        assert!(
+            !admin_search_query::<Sqlite>(None, true, 10)
+                .sql()
+                .contains(ADMIN_SEARCH_LIVE_ONLY),
+        );
+    }
+
+    /// A query of nothing but whitespace is not a query. Both stores hand
+    /// the caller's string straight through, so the trim happens here or
+    /// nowhere.
+    #[test]
+    fn a_blank_query_filters_nothing() {
+        let blank = admin_search_query::<Sqlite>(Some("   "), false, 10);
+        assert!(!blank.sql().contains("LIKE"), "{}", blank.sql());
+        assert_eq!(
+            blank.sql().matches('?').count(),
+            1,
+            "the limit, and no more"
+        );
+    }
+}
