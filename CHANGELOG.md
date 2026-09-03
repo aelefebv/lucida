@@ -1,23 +1,5 @@
 # Changelog
 
-## [1.0.0](https://github.com/aelefebv/lucida/compare/v0.11.0...v1.0.0) (2026-09-03)
-
-
-### ⚠ BREAKING CHANGES
-
-* **server:** the schema is one baseline and no earlier database upgrades into it. sqlx compares the migrations it finds against the ones the database recorded and reports a mismatch, so an existing database has to be replaced with a fresh one rather than migrated.
-* **server:** LUCIDA_DB_PATH is removed with no alias. Set LUCIDA_DB_URL instead, so LUCIDA_DB_PATH=/x/y.db becomes LUCIDA_DB_URL=sqlite:///x/y.db. Leaving it unset still opens sqlite://lucida.db, so a default install needs no change. A bare path in the new variable fails startup rather than silently opening the wrong database.
-
-### Features
-
-* **server:** collapse the schema to one baseline ([#973](https://github.com/aelefebv/lucida/issues/973)) ([dd4dcd4](https://github.com/aelefebv/lucida/commit/dd4dcd4c7e4c5f0943c76554b8e1ce67ec36ce57))
-* **server:** make PostgreSQL selectable at runtime ([#978](https://github.com/aelefebv/lucida/issues/978)) ([0441e98](https://github.com/aelefebv/lucida/commit/0441e98bb068735457b7f7466c0d93ce5de81301))
-* **server:** run the bookmark store on PostgreSQL ([#976](https://github.com/aelefebv/lucida/issues/976)) ([02bc56a](https://github.com/aelefebv/lucida/commit/02bc56aa14081520db38057ec7b1fe78f4b4f5aa))
-* **server:** run the pending-authentication store on PostgreSQL ([#974](https://github.com/aelefebv/lucida/issues/974)) ([88fa60b](https://github.com/aelefebv/lucida/commit/88fa60b3e14c2fc23282829096381368b2c5d160))
-* **server:** run the remaining authentication stores on PostgreSQL ([#975](https://github.com/aelefebv/lucida/issues/975)) ([1a2e5bd](https://github.com/aelefebv/lucida/commit/1a2e5bdb69741e7874c4ad28efca89aa0c84fbf3))
-* **server:** run the workspace store on PostgreSQL ([#977](https://github.com/aelefebv/lucida/issues/977)) ([5af57a8](https://github.com/aelefebv/lucida/commit/5af57a8670caa4c8114c08a390f8ffcf2e5c25a5))
-* **server:** select the storage backend from a connection string ([#970](https://github.com/aelefebv/lucida/issues/970)) ([861ca44](https://github.com/aelefebv/lucida/commit/861ca44c9bcbf5e1d73ec068b4b51d9b9e116cf3))
-
 ## [0.11.0](https://github.com/aelefebv/lucida/compare/v0.10.0...v0.11.0) (2026-08-28)
 
 
