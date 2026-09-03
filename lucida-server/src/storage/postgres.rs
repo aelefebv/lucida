@@ -3,7 +3,7 @@
 //! Connects to the server named by a `postgres:` connection string, runs
 //! the bundled PostgreSQL migrations, and serves all six stores. A
 //! deployer selects it with `LUCIDA_DB_URL=postgres://…`, or with the
-//! `postgresql://` spelling of the same thing; ADR-0058 records the
+//! `postgresql://` spelling of the same thing. ADR-0058 records the
 //! pattern each store implementation followed.
 //!
 //! This module is the only place in the server that names a PostgreSQL
@@ -95,16 +95,15 @@ impl PostgresStorageBackend {
         Ok(Self { pool })
     }
 
-    /// The pool behind the store, for tests that drive SQL directly.
     #[cfg(test)]
     pub(crate) fn pool(&self) -> &PgPool {
         &self.pool
     }
 }
 
-/// Every accessor builds a fresh handle over the shared pool, exactly as
-/// the SQLite backend does: the stores hold nothing but that handle, so
-/// this costs a pool clone and the handles are interchangeable.
+/// Every accessor builds a fresh handle over the shared pool, as the
+/// SQLite backend does: a store holds nothing but that handle, so this
+/// costs a pool clone and the handles are interchangeable.
 impl StorageBackend for PostgresStorageBackend {
     fn login_sessions(&self) -> Arc<dyn LoginSessionStore> {
         Arc::new(PostgresSessionStore::new(self.pool.clone()))
@@ -392,13 +391,13 @@ mod tests {
     }
 
     /// A database whose recorded migration no longer matches the one in
-    /// this build — the deployment that rolled back a release, or the
-    /// developer who edited an applied migration in place. sqlx refuses
-    /// rather than guessing, and the refusal has to reach the operator
-    /// as a migrate failure naming the database, not as a panic.
+    /// this build — a rolled-back release, or an applied migration
+    /// edited in place. sqlx refuses rather than guessing, and the
+    /// refusal has to reach the operator as a migrate failure naming the
+    /// database, not as a panic.
     ///
-    /// Tampering with the recorded checksum is how the state is reached
-    /// without shipping a second, deliberately broken migration.
+    /// Tampering with the recorded checksum reaches that state without
+    /// shipping a second, deliberately broken migration.
     #[tokio::test]
     async fn a_migration_that_no_longer_matches_is_reported_as_a_migrate_failure() {
         let Some(db) = postgres_backend().await else {
@@ -414,8 +413,6 @@ mod tests {
         let StorageError::Migrate { target, .. } = &err else {
             panic!("expected a migrate failure, got {err:?}");
         };
-        // Whatever the connection string carried, what the operator
-        // reads is the redacted form of it.
         assert_eq!(target, &db.url.redacted());
         assert!(err.to_string().contains("cannot migrate"), "{err}");
     }

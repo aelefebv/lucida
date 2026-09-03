@@ -16,15 +16,14 @@ Status: Accepted.
 
 `Scheme` gains a `Postgres` variant, `Scheme::ALL` gains its entry, and
 `storage::open` gains its arm. [ADR 0055](0055-storage-backend-selected-by-connection-string.md)
-described this as the bounded change adding a backend costs, and this is that
-change: `PostgresStorageBackend` already had six accessors shaped like the
-trait, so it became a `StorageBackend` without moving a query.
+described this as the bounded change adding a backend costs, and it was.
+`PostgresStorageBackend` already had six accessors shaped like the trait, so it
+became a `StorageBackend` without a query moving.
 
-**`postgresql` is a second accepted spelling of one scheme, not a second
-scheme.** `DatabaseUrl::parse` rewrites the connection string to the canonical
-`postgres` on the way through. Past that point one backend has one name: the
-dispatch matches a single variant, the startup log prints one spelling, and the
-backend compares a prefix it knows.
+**One scheme answers to two spellings.** `DatabaseUrl::parse` rewrites
+`postgresql` to the canonical `postgres` on the way through. Past that point one
+backend has one name: the dispatch matches a single variant, the startup log
+prints one spelling, and the backend compares a prefix it knows.
 
 ## Why accept two spellings
 
@@ -61,23 +60,22 @@ message that names what the server tried to reach:
 - The connection string is a backend this build does not have. Configuration
   refuses it, names `LUCIDA_DB_URL`, and lists the schemes that work.
 - The server is unreachable, or refuses the credentials. `storage::open`
-  returns a connect failure after three seconds, which is the pool's acquire
-  timeout rather than sqlx's thirty-second default: the platform restarting
-  the process is the retry loop, and a long in-process one delays the message
-  an operator is waiting for.
+  returns a connect failure after three seconds, the pool's acquire timeout
+  rather than sqlx's thirty-second default. The platform restarting the process
+  is the retry loop, and a long in-process one only delays the message an
+  operator is waiting for.
 - The migrations cannot run. `storage::open` returns a migrate failure, and no
   request is ever served against a half-built schema.
 
 Every one of them carries the redacted connection string, never the raw one.
-That was written into `StorageError` by ADR 0055 before any backend needed it,
-and PostgreSQL is the backend it was written for.
+ADR 0055 put that in `StorageError` before any backend needed it, and
+PostgreSQL is the backend it was written for.
 
-**Redaction now has two places to look, because a PostgreSQL string has two
-places to put a password.** The userinfo before the `@` is the familiar one.
-The query string is the other: sqlx reads `user` and `password` out of it, so a
-connection string with no `@` at all can still carry a secret. A redaction that
-only knew about userinfo would print that one verbatim in the startup log of
-every deployment that wrote it that way.
+**Redaction has two places to look, because a PostgreSQL string has two places
+to put a password.** The userinfo before the `@` is the familiar one. The other
+is the query string, where sqlx reads `user` and `password`, so a connection
+string with no `@` in it at all can still carry a secret. Looking only at
+userinfo prints that password in the startup log.
 
 ## Consequences
 
@@ -86,7 +84,7 @@ every deployment that wrote it that way.
   comes up rather than one that merely compiles. A backend that needs a server
   cannot be opened where there is none, so that case skips PostgreSQL on a
   developer's laptop. `LUCIDA_TEST_POSTGRES_REQUIRED` in continuous
-  integration is what keeps the promise from quietly becoming a claim about
+  integration is what keeps the promise from shrinking into a claim about
   SQLite alone.
 - **The PostgreSQL driver stops being dead weight.** [ADR 0058](0058-postgresql-shares-the-sql-and-duplicates-the-rust.md)
   noted that compiling it into every build bought only the conformance cases,
@@ -95,15 +93,14 @@ every deployment that wrote it that way.
 - **SQLite is untouched and stays the default.** An unset `LUCIDA_DB_URL` still
   means `sqlite://lucida.db`. Nothing about the SQLite path was edited to make
   room for the second backend.
-- **A deployment on PostgreSQL survives a restart, which is the point.** ADR
-  0055 took the decision because a container platform gives a process an
-  ephemeral filesystem, and a single-writer file cannot serve two replicas.
-  Neither is worth anything unless the state is still there afterwards, so a
-  restart is a claim this decision has to keep rather than a property it
-  inherits.
+- **Surviving a restart is a claim, not a property.** ADR 0055 took the
+  decision because a container platform gives a process an ephemeral
+  filesystem, and a single-writer file cannot serve two replicas. Both reasons
+  assume the state is still there when the process comes back, so that is
+  something this decision owes rather than something it inherits.
 - **Concurrent starts were already handled.** ADR 0058 pinned sqlx's
   `pg_advisory_lock` around a migration run. Two replicas rolling out at once
-  is now something that happens rather than something a test simulates, and
+  are now something that happens rather than something a test simulates, and
   nothing had to change for it.
 
 ## Related

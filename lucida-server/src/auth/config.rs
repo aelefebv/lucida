@@ -639,8 +639,6 @@ mod tests {
         assert_eq!(cfg.db_url.as_str(), "sqlite:///data/lucida.db");
     }
 
-    /// Both spellings of the PostgreSQL scheme select it, and the
-    /// configuration hands the backend one of them.
     #[test]
     fn a_postgres_db_url_selects_the_postgresql_backend() {
         for raw in [

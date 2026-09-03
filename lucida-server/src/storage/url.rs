@@ -62,9 +62,9 @@ impl Scheme {
     /// [`Self::as_str`], so an alias never reaches a backend and never
     /// becomes a second thing to match on.
     ///
-    /// `postgresql` is here because PostgreSQL's own documentation uses
-    /// both spellings and libpq accepts both, so a connection string
-    /// copied from anywhere has an even chance of carrying either.
+    /// `postgresql` is here because libpq and PostgreSQL's own
+    /// documentation use both spellings, so a connection string copied
+    /// from anywhere may carry either.
     fn aliases(&self) -> &'static [&'static str] {
         match self {
             Self::Sqlite => &[],
@@ -185,21 +185,19 @@ impl fmt::Display for DatabaseUrl {
     }
 }
 
-/// The placeholder a removed secret leaves behind.
 const REDACTED: &str = "<redacted>";
 
 /// Remove every secret a connection string can carry.
 ///
-/// A SQLite URL never carries one, so this does nothing for the default
-/// backend. A `postgres://` one usually does, and the startup log prints
-/// the connection string, as does every [`StorageError`] that reports a
-/// database the server could not bring up.
+/// The startup log prints the connection string, as does every
+/// [`StorageError`] that reports a database the server could not bring
+/// up. A SQLite URL carries no secret; a `postgres://` one usually does.
 ///
-/// There are two places to look, and a string can use either or both.
-/// The userinfo before the `@` is the familiar one. The query string is
-/// the other: sqlx reads `user`, `password`, and `dbname` from it, so
-/// `postgres://db/lucida?user=lucida&password=hunter2` is a working
-/// connection string with the password nowhere near an `@`.
+/// Two places hold them, and a string can use either or both. The
+/// userinfo before the `@` is the familiar one. The other is the query
+/// string: sqlx reads `user`, `password`, and `dbname` from it, so
+/// `postgres://db/lucida?user=lucida&password=hunter2` connects with the
+/// password nowhere near an `@`.
 ///
 /// [`StorageError`]: super::StorageError
 fn redact(raw: &str) -> Cow<'_, str> {
@@ -221,9 +219,8 @@ fn redact_userinfo(raw: &str) -> String {
         },
     };
     // The authority ends where the path, query, or fragment begins. An
-    // `@` past that point belongs to a query parameter and is not a
-    // userinfo delimiter, so bounding the search is what keeps the host
-    // in the message.
+    // `@` past that point belongs to a query parameter, so bounding the
+    // search is what keeps the host in the message.
     let authority_end = raw[authority_start..]
         .find(['/', '?', '#'])
         .map_or(raw.len(), |i| authority_start + i);
@@ -297,19 +294,15 @@ mod tests {
         assert_eq!(url.as_str(), "sqlite://lucida.db");
     }
 
-    /// Both spellings of the PostgreSQL scheme are in common use, and
-    /// libpq takes either, so a connection string copied from anywhere
-    /// has to work.
     #[test]
     fn postgresql_is_the_same_backend_as_postgres() {
         let url = DatabaseUrl::parse("postgresql://host/lucida").unwrap();
         assert_eq!(url.scheme(), Scheme::Postgres);
     }
 
-    /// An alias is spent at the door. Past `parse`, one backend has one
-    /// name: the dispatch matches on a single variant, the startup log
-    /// prints one spelling, and the backend is handed a connection
-    /// string it can compare literally.
+    /// Past `parse` one backend has one name, so the dispatch matches a
+    /// single variant, the startup log prints one spelling, and the
+    /// backend gets a string it can compare literally.
     #[test]
     fn an_alias_does_not_survive_parsing() {
         let url = DatabaseUrl::parse("PostgreSQL://user@host:5432/lucida").unwrap();
@@ -317,9 +310,8 @@ mod tests {
         assert_eq!(url.scheme().to_string(), "postgres");
     }
 
-    /// Every spelling names exactly one backend. Two schemes sharing one
-    /// would make [`Scheme::parse`] answer by list order, which is not a
-    /// decision anyone would have meant to take.
+    /// Two schemes sharing a spelling would make [`Scheme::parse`]
+    /// answer by list order, which is nobody's intended decision.
     #[test]
     fn no_spelling_names_two_backends() {
         let mut seen = std::collections::HashMap::new();
@@ -406,9 +398,8 @@ mod tests {
         assert!(!url.redacted().contains("p@ss"));
     }
 
-    /// The other place a password hides. sqlx reads `user`, `password`,
-    /// and `dbname` out of the query string, so this connects, and
-    /// looking only for an `@` would print the password verbatim.
+    /// The string below connects, and looking only for an `@` would
+    /// print its password verbatim.
     #[test]
     fn a_password_in_the_query_string_is_redacted_too() {
         let url =
@@ -420,9 +411,6 @@ mod tests {
         );
     }
 
-    /// One parameter name, spelled several ways by libpq. Matching on
-    /// the name rather than an exact list is what keeps `sslpassword`
-    /// out of the log without anyone having to remember it.
     #[test]
     fn every_password_parameter_is_redacted() {
         for raw in [
@@ -436,9 +424,8 @@ mod tests {
         }
     }
 
-    /// An `@` in a query parameter is not a userinfo delimiter. Treating
-    /// it as one used to swallow the host, which is the one thing the
-    /// operator reading the message needs.
+    /// Treating an `@` in a query parameter as a userinfo delimiter used
+    /// to swallow the host, the one thing the operator needs to read.
     #[test]
     fn an_at_sign_outside_the_authority_leaves_the_host_alone() {
         let url =
@@ -455,8 +442,7 @@ mod tests {
         assert_eq!(url.to_string(), "sqlite://lucida.db");
 
         // The case the trait exists for: a `DatabaseUrl` interpolated
-        // into a message by someone who reached for `{}` cannot leak a
-        // password.
+        // into a message with `{}` cannot leak a password.
         let credentialed = DatabaseUrl::parse("postgres://lucida:hunter2@db:5432/lucida").unwrap();
         assert_eq!(
             credentialed.to_string(),

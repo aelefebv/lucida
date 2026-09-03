@@ -107,8 +107,6 @@ mod tests {
     async fn empty_database(scheme: Scheme) -> Option<DatabaseUrl> {
         match scheme {
             Scheme::Sqlite => Some(DatabaseUrl::in_memory()),
-            // Needs a server, so it answers `None` where there is none,
-            // and says so on stderr.
             Scheme::Postgres => Some(postgres_schema().await?.url),
         }
     }

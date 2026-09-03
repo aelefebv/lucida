@@ -1,26 +1,23 @@
 //! The whole server against one backend, twice over the same database.
 //!
 //! Every other test here asks whether a store answers correctly. This
-//! one asks the question a deployer asks: does a connection string in
+//! one asks what a deployer asks: does a connection string in
 //! `LUCIDA_DB_URL` produce a server that signs people in, keeps what
 //! they make, and still has it after a restart? Nothing below names a
 //! backend type — it goes through [`super::open`] and the routers
 //! `main` builds, so the answer is about the seam rather than about
 //! PostgreSQL.
 //!
-//! **Restart is the reason there are two passes.** A process restart is
-//! a second [`super::open`] against the same database: the first pass
-//! writes through the HTTP surface, drops everything it built, and the
-//! second reads it all back through a freshly built one. That is also
-//! what proves the migrations are idempotent, since the second open
-//! migrates a database the first one already did.
+//! The two passes are the restart: a second [`super::open`] against the
+//! same database is what a restarted process does, which also proves the
+//! migrations are idempotent.
 //!
-//! It lives beside the backends rather than in `tests/` because it needs
-//! [`test_support`](super::test_support), which is crate-private: a test
-//! that reached for its own pool and its own migrator would stop being
-//! evidence about how the server opens a database. Its counterpart is
-//! `tests/storage_boot_e2e.rs`, which runs the server binary to cover
-//! the boots that fail, and needs no database server to do it.
+//! It lives beside the backends rather than in `tests/` because
+//! [`test_support`](super::test_support) is crate-private, and a test
+//! with its own pool and its own migrator would stop being evidence
+//! about how the server opens a database. Its counterpart,
+//! `tests/storage_boot_e2e.rs`, runs the server binary to cover the
+//! boots that fail, and needs no database server to do it.
 
 use std::sync::Arc;
 
@@ -42,18 +39,15 @@ use crate::auth::{
 use crate::bookmarks::handlers::BookmarksState;
 use crate::workspace::WorkspaceManager;
 
-/// The signed-in operator every request below belongs to.
 const EMAIL: &str = "operator@example.com";
 /// The session id, which doubles as the cookie value.
 const SESSION: &str = "session-across-the-restart";
-/// The bearer token as a client sends it; the store keeps its hash.
+/// The bearer token as a client sends it. The store keeps only its hash.
 const TOKEN: &str = "lucida_pat_across_the_restart";
 
 /// The routers `main` puts behind the auth middleware, over one backend.
-///
-/// Both credential paths are live: the cookie extractor reads the
-/// login-session store and the bearer extractor reads the bearer-token
-/// store, which is the production wiring for `LUCIDA_AUTH=google`.
+/// Both credential paths stay live, which is the wiring
+/// `LUCIDA_AUTH=google` produces.
 fn app_over(storage: &Arc<dyn StorageBackend>) -> Router {
     let config = Arc::new(AuthConfig {
         mode: AuthMode::Google,
@@ -88,8 +82,8 @@ fn as_browser(request: axum::http::request::Builder) -> axum::http::request::Bui
     with_session(request, SESSION)
 }
 
-/// A session cookie naming `session`, under the name the extractor
-/// reads from the same config, so the two cannot drift.
+/// A session cookie under the name the extractor reads from the same
+/// config, so the two cannot drift.
 fn with_session(
     request: axum::http::request::Builder,
     session: &str,
@@ -135,11 +129,10 @@ fn view() -> Value {
     })
 }
 
-/// [`view`] as the store holds it: a `SavedView` decoded and encoded
-/// again, which fills in the fields the request left to their defaults.
-/// The store keeps the payload whole, so this is what has to come back —
-/// asking for the request body verbatim would be asking the store to
-/// undo a normalization it never did.
+/// [`view`] as the store holds it: decoded and re-encoded, so the
+/// defaults the request omitted are filled in. Comparing against the
+/// request body verbatim would demand a normalization the store never
+/// does.
 fn stored_view() -> Value {
     let decoded: SavedView =
         serde_json::from_value(view()).expect("the request body is a valid saved view");
@@ -163,8 +156,7 @@ struct Written {
 }
 
 /// Bring a server up on `url` and use it the way a deployment's first
-/// day does: sign in, make a Workspace, share it, save a view, keep a
-/// bookmark, and authorize a command-line client.
+/// day does.
 async fn write_everything(url: &DatabaseUrl) -> Written {
     let storage = super::open(url)
         .await
@@ -203,10 +195,10 @@ async fn write_everything(url: &DatabaseUrl) -> Written {
         .await
         .unwrap();
 
-    // The two stores with no HTTP surface of their own outside the
-    // OAuth and device-authorization flows. Both are mid-flight state,
-    // which is exactly the state a rolling restart interrupts, so both
-    // are written here and completed on the far side.
+    // The two stores with no HTTP surface of their own outside the OAuth
+    // and device-authorization flows. Both hold mid-flight state, which
+    // is what a rolling restart interrupts, so both are written here and
+    // completed on the far side.
     storage
         .pending_auth()
         .insert(PendingAuth {
@@ -237,9 +229,8 @@ async fn write_everything(url: &DatabaseUrl) -> Written {
 
     let app = app_over(&storage);
 
-    // Authentication, from the server's side: a cookie naming a session
-    // the store has is a principal, and one it does not have is a 401.
-    // The second half is what says the store was consulted at all.
+    // A cookie naming a session the store does not have is a 401, which
+    // is what says the store was consulted at all.
     let (status, _) = send(
         &app,
         with_session(Request::builder().uri("/api/workspaces"), "never-signed-in")
@@ -353,8 +344,8 @@ async fn read_everything_back(url: &DatabaseUrl, written: &Written) {
         bookmark_id,
     } = written;
 
-    // Still signed in: the cookie from before the restart resolves to a
-    // principal, because the session row outlived the process.
+    // The cookie from before the restart still resolves to a principal,
+    // because the session row outlived the process.
     let (status, listed) = send(
         &app,
         as_browser(Request::builder().uri("/api/workspaces"))
@@ -423,9 +414,8 @@ async fn read_everything_back(url: &DatabaseUrl, written: &Written) {
     .await;
     assert_eq!(status, StatusCode::OK, "{listed}");
 
-    // And the two mid-flight rows complete on the far side of the
-    // restart, which is the whole point of storing them rather than
-    // holding them in memory.
+    // The two mid-flight rows complete on the far side, which is the
+    // point of storing them rather than holding them in memory.
     let pending = storage
         .pending_auth()
         .consume("state-across-the-restart")

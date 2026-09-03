@@ -8,12 +8,11 @@
 //! panic that happens to print something similar.
 //!
 //! Every case here fails before the socket is bound, except the last,
-//! which is the one that has to come up. None of them needs a database
-//! server: the failing connection strings point at a port nothing
-//! answers on, and the migration case is a SQLite file this test writes,
-//! which is what makes them deterministic. The PostgreSQL path that
-//! succeeds is covered where a real server is available, by
-//! `storage::end_to_end` beside the storage backends.
+//! which has to come up. None needs a database server, which is what
+//! makes them deterministic: the failing connection strings point at a
+//! port nothing answers on, and the migration case is a SQLite file this
+//! test writes. The PostgreSQL path that succeeds is covered by
+//! `storage::end_to_end`, where a real server is available.
 
 use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
@@ -29,9 +28,9 @@ const UNREACHABLE: &str = "postgres://lucida:hunter2@127.0.0.1:1/lucida";
 /// the server prints.
 const PASSWORD: &str = "hunter2";
 
-/// How long the SQLite default gets to create its file before the case
-/// gives up. Generous: the process has a whole startup to get through,
-/// and a slow machine failing this would be a false alarm.
+/// How long the SQLite default gets to come up and answer before the
+/// case gives up. Generous, because a slow machine failing this would be
+/// a false alarm rather than a defect.
 const STARTUP_BUDGET: Duration = Duration::from_secs(30);
 
 /// The server binary, with the environment pinned so a variable set in
@@ -93,11 +92,9 @@ fn an_unreachable_database_stops_the_boot() {
     );
 }
 
-/// The `postgresql://` spelling selects the same backend as `postgres://`.
-///
-/// No server is needed to see it: an unsupported scheme is refused
-/// during configuration and never reaches a backend, so a *connect*
-/// failure is proof the alias was understood. The message shows the
+/// An unsupported scheme is refused during configuration and never
+/// reaches a backend, so a *connect* failure is proof the alias was
+/// understood, and no server is needed to see it. The message shows the
 /// canonical spelling, because the alias is spent at the door.
 #[test]
 fn the_postgresql_spelling_reaches_the_same_backend() {
@@ -109,8 +106,6 @@ fn the_postgresql_spelling_reaches_the_same_backend() {
     assert!(!stderr.contains(PASSWORD), "{stderr}");
 }
 
-/// A backend this build does not have is refused during configuration,
-/// naming the variable and the schemes that would have worked.
 #[test]
 fn an_unsupported_scheme_stops_the_boot_naming_the_alternatives() {
     let (code, stderr) = boot_failure("mysql://lucida@127.0.0.1:1/lucida");
@@ -186,13 +181,11 @@ fn record_a_migration_from_the_future(database: &Path) {
         });
 }
 
-/// The default is unchanged: no `LUCIDA_DB_URL` still means a SQLite
-/// file in the working directory, and the server comes up on it and
-/// answers.
+/// No `LUCIDA_DB_URL` still means a SQLite file in the working
+/// directory, and the server comes up on it and answers.
 ///
-/// This is the regression the rest of this file risks — a new backend
-/// is only worth having if the deployment that never asked for one
-/// keeps working.
+/// This is the regression a second backend risks: the deployment that
+/// never asked for one has to keep working.
 #[test]
 fn an_unset_connection_string_still_starts_on_sqlite() {
     let directory = tempfile::tempdir().unwrap();
@@ -247,10 +240,10 @@ fn wait_for_health(port: u16) -> bool {
     false
 }
 
-/// A port nothing is listening on right now. The kernel hands it back
-/// once the listener is dropped. Losing the race to another process
-/// between the two is a failed bind rather than a wrong answer, so the
-/// case that uses this fails loudly rather than passing by accident.
+/// A port nothing is listening on right now, which the kernel hands
+/// back once the listener is dropped. Losing the race to another process
+/// costs a failed bind, not a wrong answer, so the case that uses this
+/// fails loudly rather than passing by accident.
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
         .expect("a loopback port is available")

@@ -61,10 +61,9 @@ const SCHEMA_PREFIX: &str = "lucida_test";
 /// An empty PostgreSQL schema, private to one test, and the connection
 /// string that reaches it.
 pub(crate) struct PostgresTestSchema {
-    /// The schema, created and empty.
     pub(crate) schema: String,
-    /// The connection string scoped to it, which a test hands to
-    /// [`super::open`] the way a deployment hands over `LUCIDA_DB_URL`.
+    /// Scoped to [`Self::schema`], and handed to [`super::open`] the way
+    /// a deployment hands over `LUCIDA_DB_URL`.
     pub(crate) url: DatabaseUrl,
 }
 
