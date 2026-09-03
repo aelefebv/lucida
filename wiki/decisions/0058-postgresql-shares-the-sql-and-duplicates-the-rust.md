@@ -38,23 +38,24 @@ remaining five stores land.
 ## What the port measured
 
 The pending-authentication store is the smallest of the six: three methods, and
-68 lines of code before this change. Porting it, then reading the two
-implementations side by side:
+68 lines of code before this change. The counts below are what the port cost
+when it landed, not a claim about the code as it stands later.
 
-| | Before sharing the SQL | After |
+| | Straight port | After sharing |
 | --- | --- | --- |
-| Lines per implementation | 68 | 58 |
-| Lines identical between them | 59 | 52 |
+| Lines per implementation | 68 | 55 |
+| Lines identical between them | 59 | 49 |
 | Lines that differ | 9 | 6 |
 | Of those, lines carrying SQL | 3 | 0 |
 
 The six lines that still differ are the pool type and the type name. Nothing
-else about the two implementations is distinguishable. The three statements they
-share are 10 lines in one module.
+else about the two implementations is distinguishable. What they share is one
+module of 13 lines: three statements and the function that turns a driver error
+into a store error.
 
-Across all six stores, the SQLite implementations hold 2,494 lines of code, 86
-queries, and 245 `?` placeholders. Sharing the SQL is what keeps that second
-number from being paid twice.
+When the port started, the six SQLite implementations held 2,494 lines of code,
+86 queries, and 245 `?` placeholders between them. Sharing the SQL is what keeps
+that last number from being paid a second time.
 
 ## Why numbered placeholders travel
 
@@ -63,8 +64,14 @@ difference the spike existed to settle. The numbered form is the one that works
 on both. sqlx's SQLite driver reads the number out of the parameter name and
 binds argument N to `$N`, so a statement written PostgreSQL's way runs unchanged
 on SQLite — including a placeholder used twice, and placeholders out of order.
-Both are checked. SQLite's bare `?` has no PostgreSQL counterpart, so the
-translation only runs one way.
+SQLite's bare `?` has no PostgreSQL counterpart, so the translation only runs one
+way.
+
+That behavior is now load-bearing for the SQLite path that ships, and it belongs
+to sqlx rather than to SQLite, so a test pins it rather than a comment claiming
+it. `numbered_placeholders_bind_by_number`, beside the SQLite backend, writes a
+row and reads it back through placeholders given out of order, which matches only
+if the numbers won over the positions.
 
 The alternative was a rewriter: keep `?` in the shared text and renumber it at
 the PostgreSQL call site. That needs a SQL lexer to be correct, because a `?` can
@@ -93,10 +100,10 @@ the column type belongs to the backend and the Rust type is the portable
 contract, so this is that decision applied rather than a new one. The same
 paragraph covers `JSONB` in place of `TEXT` with a `json_valid` check.
 
-Two files can drift, so a test reads the tables and columns out of a migrated
-database on each side and compares them. Column types are left out of that
-comparison on purpose: they are the one thing the translation is allowed to
-change.
+Two files can drift, so tests read a migrated database on each side and compare
+what the two declare: the columns, whether each one accepts null, and the named
+indexes. Column types are left out on purpose, being the one thing the
+translation is allowed to change.
 
 ## Consequences
 
@@ -106,10 +113,12 @@ change.
   which is where the placeholder question gets answered once per store instead
   of once per query.
 - **A `JSONB` column will not accept a bound Rust `String`.** PostgreSQL refuses
-  a `text` parameter for a `jsonb` column outright, so each of the five stores
-  that writes a serialized payload binds `sqlx::types::Json` or casts the
-  placeholder. This is a bind-type change in the Rust, not a second SQL text, so
-  the shared statement survives it.
+  a `text` parameter for a `jsonb` column outright, and every store that writes a
+  serialized payload binds exactly that today. A test records the refusal,
+  because it is the one Rust-side cost the remaining ports all pay. The fix is a
+  `sqlx::types::Json` bind rather than a `$6::jsonb` cast: `::` is PostgreSQL
+  syntax that SQLite rejects, so casting would end the sharing for that
+  statement while rebinding leaves the text alone.
 - **Nothing else in the six stores is SQLite-flavored.** `ON CONFLICT ... DO
   UPDATE` appears nine times and is standard on both. `DELETE ... RETURNING`
   works on both. Grouping by a primary key while selecting columns it determines
@@ -118,14 +127,16 @@ change.
   placeholders, so that is a type parameter rather than a rewrite.
 - **Concurrent migration needed no new code.** sqlx wraps a PostgreSQL migration
   run in `pg_advisory_lock`, keyed on the database name, so two replicas starting
-  at once serialize and the second finds nothing to apply. A test opens four
-  backends against one empty database and asserts the baseline is applied once;
-  with the lock turned off the same test fails on a duplicate object.
+  at once serialize and the second finds nothing to apply. The lock is
+  session-scoped, and a pool is a session, so a test opens four backends against
+  one empty database and asserts the baseline is applied once — the same
+  contention two processes would produce. With the lock turned off that test
+  fails on a duplicate object.
 - **A developer with no PostgreSQL still runs the whole suite.**
-  `LUCIDA_TEST_POSTGRES_URL` names the database. Unset or unreachable, the
-  PostgreSQL cases skip and the reason goes to the process's own stderr rather
-  than through the test harness, which would capture it and show it only on the
-  failure it will never accompany.
+  `LUCIDA_TEST_POSTGRES_URL` names the database. Unset, unreachable, or refusing
+  the role a schema of its own, the PostgreSQL cases skip and the reason goes to
+  the process's own stderr rather than through the test harness, which would
+  capture it and show it only on the failure it will never accompany.
 - **Continuous integration cannot skip by accident.**
   `LUCIDA_TEST_POSTGRES_REQUIRED` turns a skip into a failure, and the workflow
   sets it beside the connection string. Without it, a service container that

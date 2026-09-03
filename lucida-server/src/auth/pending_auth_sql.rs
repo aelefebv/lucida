@@ -1,4 +1,5 @@
-//! The SQL that both `PendingAuthStore` backends run.
+//! What both SQL-backed `PendingAuthStore` implementations share: the
+//! statements they run, and how a driver error becomes a store error.
 //!
 //! One text, two engines. The statements below are valid SQLite and
 //! valid PostgreSQL, so the SQLite and PostgreSQL stores execute the
@@ -44,3 +45,12 @@ pub(crate) const CONSUME: &str = r#"
 
 /// Drop every intent older than the cutoff, for the periodic sweep.
 pub(crate) const DELETE_EXPIRED: &str = "DELETE FROM pending_auth WHERE created_at < $1";
+
+/// A driver error, as the trait reports it.
+///
+/// One function rather than one per store: `sqlx::Error` is the same type
+/// whichever driver produced it, so a second copy would only be a second
+/// place for the two to disagree.
+pub(crate) fn map_err(e: sqlx::Error) -> super::pending_auth::PendingAuthStoreError {
+    super::pending_auth::PendingAuthStoreError::Backend(e.to_string())
+}

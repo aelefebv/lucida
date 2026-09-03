@@ -5,14 +5,17 @@
 //!
 //! The statements come from [`super::pending_auth_sql`], which the
 //! PostgreSQL store runs too, so this module holds the binding and the
-//! row mapping and no SQL of its own.
+//! row mapping and no SQL of its own. The numbered placeholders in those
+//! statements are PostgreSQL's spelling, and
+//! `numbered_placeholders_bind_by_number` in [`crate::storage`] is what
+//! pins sqlx's SQLite driver to reading them the same way.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::{Row, SqlitePool};
 
 use super::pending_auth::{PendingAuth, PendingAuthStore, PendingAuthStoreError};
-use super::pending_auth_sql as sql;
+use super::pending_auth_sql::{self as sql, map_err};
 
 /// Production pending-auth store. Holds a `SqlitePool` clone, so it is
 /// cheap to build and cheap to share.
@@ -28,10 +31,6 @@ impl SqlitePendingAuthStore {
     pub(crate) fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
-}
-
-fn map_err(e: sqlx::Error) -> PendingAuthStoreError {
-    PendingAuthStoreError::Backend(e.to_string())
 }
 
 #[async_trait]

@@ -36,7 +36,7 @@ pub(crate) async fn sqlite_pool() -> SqlitePool {
 /// integration must run the PostgreSQL cases, and a developer with no
 /// PostgreSQL must still be able to run `cargo test`. Set and reachable
 /// means run; unset or unreachable means skip.
-pub(crate) const POSTGRES_URL_VAR: &str = "LUCIDA_TEST_POSTGRES_URL";
+const POSTGRES_URL_VAR: &str = "LUCIDA_TEST_POSTGRES_URL";
 
 /// Set alongside [`POSTGRES_URL_VAR`] where skipping is not an acceptable
 /// outcome, which turns every skip into a failure.
@@ -52,6 +52,11 @@ const POSTGRES_REQUIRED_VAR: &str = "LUCIDA_TEST_POSTGRES_REQUIRED";
 /// it. Long enough that no live run can be swept out from under itself,
 /// short enough that a developer's database does not fill up.
 const SCHEMA_LIFETIME_SECONDS: i64 = 3600;
+
+/// What marks a schema as one of these tests', and nobody else's.
+/// [`fresh_schema_name`] writes it and [`reclaim_stale_schemas`] matches
+/// on it, so it lives here rather than being spelled twice.
+const SCHEMA_PREFIX: &str = "lucida_test";
 
 /// A migrated PostgreSQL, private to one test.
 pub(crate) struct PostgresTestDatabase {
@@ -88,7 +93,6 @@ pub(crate) async fn postgres_backend() -> Option<PostgresTestDatabase> {
         }
     };
 
-    let schema = fresh_schema_name();
     let admin = match sqlx::PgPool::connect(&base).await {
         Ok(admin) => admin,
         Err(e) => {
@@ -99,11 +103,19 @@ pub(crate) async fn postgres_backend() -> Option<PostgresTestDatabase> {
     };
 
     reclaim_stale_schemas(&admin).await;
-    sqlx::query(&format!(r#"CREATE SCHEMA "{schema}""#))
+    let schema = fresh_schema_name();
+    let created = sqlx::query(&format!(r#"CREATE SCHEMA "{schema}""#))
         .execute(&admin)
-        .await
-        .expect("a reachable PostgreSQL should let a test create its own schema");
+        .await;
     admin.close().await;
+    if let Err(e) = created {
+        // A database the role cannot write is as good as no database, so
+        // it skips rather than failing. Under POSTGRES_REQUIRED_VAR it
+        // still fails, which is what keeps a misconfigured CI honest.
+        return skip_postgres_cases(&format!(
+            "the PostgreSQL named by {POSTGRES_URL_VAR} refused a test schema: {e}"
+        ));
+    }
 
     let url = scoped_to_schema(&base, &schema);
     let backend = PostgresStorageBackend::open(&url)
@@ -120,7 +132,7 @@ pub(crate) async fn postgres_backend() -> Option<PostgresTestDatabase> {
 /// A schema name no other test holds, carrying the second it was made.
 fn fresh_schema_name() -> String {
     format!(
-        "lucida_test_{}_{}",
+        "{SCHEMA_PREFIX}_{}_{}",
         chrono::Utc::now().timestamp(),
         uuid::Uuid::new_v4().simple()
     )
@@ -142,14 +154,18 @@ fn scoped_to_schema(base: &str, schema: &str) -> String {
 /// Best effort. A failure here means a database that is filling up, not a
 /// test that should fail, and the case about to run does not depend on it.
 async fn reclaim_stale_schemas(admin: &sqlx::PgPool) {
+    // The timestamp is read back out of the name with the same pattern
+    // that recognizes the name, so the two cannot disagree about where in
+    // it the seconds sit.
+    let pattern = format!("^{SCHEMA_PREFIX}_([0-9]+)_[0-9a-f]+$");
     let stale: Vec<String> = sqlx::query_scalar(
         r#"
         SELECT nspname::text
         FROM pg_namespace
-        WHERE nspname ~ '^lucida_test_[0-9]+_[0-9a-f]+$'
-          AND split_part(nspname, '_', 3)::bigint < extract(epoch FROM now()) - $1
+        WHERE substring(nspname FROM $1)::bigint < extract(epoch FROM now()) - $2
         "#,
     )
+    .bind(&pattern)
     .bind(SCHEMA_LIFETIME_SECONDS)
     .fetch_all(admin)
     .await

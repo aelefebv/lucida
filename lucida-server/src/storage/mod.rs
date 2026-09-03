@@ -36,6 +36,11 @@ mod sqlite;
 pub(crate) mod test_support;
 mod url;
 
+// Exported like its SQLite sibling even though `open` cannot select it
+// and only tests construct it. Narrowing the export to the crate makes
+// the type dead code in a release build, and the alternative — compiling
+// the module only under `cfg(test)` — is the same mistake as hiding the
+// PostgreSQL cases behind a cargo feature.
 pub use postgres::PostgresStorageBackend;
 pub use sqlite::SqliteStorageBackend;
 pub use url::{DatabaseUrl, DatabaseUrlError, Scheme};

@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 
 use super::pending_auth::{PendingAuth, PendingAuthStore, PendingAuthStoreError};
-use super::pending_auth_sql as sql;
+use super::pending_auth_sql::{self as sql, map_err};
 
 /// PostgreSQL pending-auth store. Holds a `PgPool` clone, so it is cheap
 /// to build and cheap to share.
@@ -30,10 +30,6 @@ impl PostgresPendingAuthStore {
     pub(crate) fn new(pool: PgPool) -> Self {
         Self { pool }
     }
-}
-
-fn map_err(e: sqlx::Error) -> PendingAuthStoreError {
-    PendingAuthStoreError::Backend(e.to_string())
 }
 
 #[async_trait]

@@ -46,13 +46,14 @@ const MAX_CONNECTIONS: u32 = 10;
 /// How long [`PostgresStorageBackend::open`] waits for its first
 /// connection.
 ///
-/// A pool does not give up on a refused connection; it retries until this
-/// deadline. sqlx's default is thirty seconds, which is the wrong shape
-/// for a startup that reports a storage failure and exits: the platform
-/// restarting the process is the retry loop, and a long in-process one
-/// only delays the message an operator is waiting for. Five seconds
-/// absorbs a database still accepting its first connections.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// A pool does not give up on a refused connection; it retries with
+/// backoff until this deadline. sqlx's default is thirty seconds, which
+/// is the wrong shape for a startup that reports a storage failure and
+/// exits: the platform restarting the process is the retry loop, and a
+/// long in-process one only delays the message an operator is waiting
+/// for. Three seconds absorbs a database that is up and busy, and is
+/// also what an unreachable one costs before it is reported.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone)]
 pub struct PostgresStorageBackend {
@@ -116,42 +117,81 @@ mod tests {
     use crate::storage::test_support::{PostgresTestDatabase, postgres_backend};
     use std::collections::BTreeSet;
 
-    /// Every table and column the SQLite baseline declares, as
-    /// `table.column`, read back from a migrated database.
-    async fn sqlite_schema_shape() -> BTreeSet<String> {
+    /// Every column the SQLite baseline declares, as `table.column`, with
+    /// `!` appended where the column cannot be null. A primary key counts
+    /// as not-null: SQLite records that separately, and PostgreSQL folds
+    /// it into the same answer.
+    async fn sqlite_columns() -> BTreeSet<String> {
         let pool = crate::storage::test_support::sqlite_pool().await;
-        sqlx::query_scalar::<_, String>(
+        query_set(
             r#"
             SELECT m.name || '.' || p.name
+                 || CASE WHEN p."notnull" = 1 OR p.pk > 0 THEN '!' ELSE '' END
             FROM sqlite_master m
             JOIN pragma_table_info(m.name) p
             WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%'
                   AND m.name <> '_sqlx_migrations'
             "#,
+            &pool,
         )
-        .fetch_all(&pool)
         .await
-        .expect("the SQLite baseline is readable through sqlite_master")
-        .into_iter()
-        .collect()
     }
 
     /// The same, from a migrated PostgreSQL database, restricted to the
     /// schema this test owns.
-    async fn postgres_schema_shape(db: &PostgresTestDatabase) -> BTreeSet<String> {
-        sqlx::query_scalar::<_, String>(
+    async fn postgres_columns(db: &PostgresTestDatabase) -> BTreeSet<String> {
+        query_set_in_schema(
             r#"
             SELECT table_name || '.' || column_name
+                 || CASE WHEN is_nullable = 'NO' THEN '!' ELSE '' END
             FROM information_schema.columns
             WHERE table_schema = $1 AND table_name <> '_sqlx_migrations'
             "#,
+            db,
         )
-        .bind(&db.schema)
-        .fetch_all(db.backend.pool())
         .await
-        .expect("the PostgreSQL baseline is readable through information_schema")
-        .into_iter()
-        .collect()
+    }
+
+    /// The indexes the SQLite baseline names. SQLite's implicit indexes
+    /// are `sqlite_autoindex_…`, so filtering them out leaves the ones
+    /// the schema asked for by name.
+    async fn sqlite_indexes() -> BTreeSet<String> {
+        let pool = crate::storage::test_support::sqlite_pool().await;
+        query_set(
+            "SELECT name FROM sqlite_master \
+             WHERE type = 'index' AND name NOT LIKE 'sqlite_%'",
+            &pool,
+        )
+        .await
+    }
+
+    /// The same on PostgreSQL, where the implicit ones carry the
+    /// constraint's name rather than the `idx_` prefix the schema uses.
+    async fn postgres_indexes(db: &PostgresTestDatabase) -> BTreeSet<String> {
+        query_set_in_schema(
+            r"SELECT indexname FROM pg_indexes WHERE schemaname = $1 AND indexname LIKE 'idx\_%'",
+            db,
+        )
+        .await
+    }
+
+    async fn query_set(sql: &str, pool: &sqlx::SqlitePool) -> BTreeSet<String> {
+        sqlx::query_scalar::<_, String>(sql)
+            .fetch_all(pool)
+            .await
+            .expect("the SQLite baseline is readable through sqlite_master")
+            .into_iter()
+            .collect()
+    }
+
+    async fn query_set_in_schema(sql: &str, db: &PostgresTestDatabase) -> BTreeSet<String> {
+        sqlx::query_scalar::<_, String>(sql)
+            .bind(&db.schema)
+            .fetch_all(db.backend.pool())
+            .await
+            .expect("the PostgreSQL baseline is readable through the catalog")
+            .into_iter()
+            .collect()
     }
 
     #[tokio::test]
@@ -168,41 +208,100 @@ mod tests {
 
     /// The two baselines are separate files, so nothing but a test stops
     /// one from gaining a column the other never hears about. Column
-    /// types are deliberately not compared: they are the one thing the
-    /// translation is allowed to change.
+    /// types are deliberately left out of the comparison: they are the
+    /// one thing the translation is allowed to change. Nullability is
+    /// not, so it is compared.
     #[tokio::test]
-    async fn the_two_baselines_declare_the_same_tables_and_columns() {
+    async fn the_two_baselines_declare_the_same_columns() {
         let Some(db) = postgres_backend().await else {
             return;
         };
-        let sqlite = sqlite_schema_shape().await;
-        let postgres = postgres_schema_shape(&db).await;
-
+        let sqlite = sqlite_columns().await;
         assert!(!sqlite.is_empty(), "the SQLite baseline declares columns");
         assert_eq!(
-            sqlite, postgres,
-            "the PostgreSQL baseline must declare the same tables and columns as the SQLite one",
+            sqlite,
+            postgres_columns(&db).await,
+            "the PostgreSQL baseline must declare the same columns as the SQLite one",
+        );
+    }
+
+    /// An index dropped from one baseline turns a hot read into a scan on
+    /// that backend alone, which no conformance case can see.
+    #[tokio::test]
+    async fn the_two_baselines_declare_the_same_indexes() {
+        let Some(db) = postgres_backend().await else {
+            return;
+        };
+        let sqlite = sqlite_indexes().await;
+        assert!(!sqlite.is_empty(), "the SQLite baseline declares indexes");
+        assert_eq!(
+            sqlite,
+            postgres_indexes(&db).await,
+            "the PostgreSQL baseline must declare the same indexes as the SQLite one",
         );
     }
 
     /// The SQLite baseline spends a `json_valid` check to get this far.
     /// PostgreSQL parses the value into `JSONB`, so the refusal comes
     /// from the type rather than from a constraint anyone had to write.
+    ///
+    /// The accepted row comes first, or a renamed column would pass the
+    /// refusal for the wrong reason.
     #[tokio::test]
     async fn a_json_column_refuses_text_that_is_not_json() {
         let Some(db) = postgres_backend().await else {
             return;
         };
-        let refused = sqlx::query(
-            r#"
-            INSERT INTO bookmarks
-                (id, name, created_by, created_by_name, created_at, view_json)
-            VALUES ('b', 'Bookmark', 'dev@example.com', 'Dev', '2026-01-02T03:04:05Z', 'not json')
-            "#,
-        )
+
+        insert_bookmark(&db, "well-formed", r#"{"v":1}"#, "$2::jsonb")
+            .await
+            .expect("a JSON payload is accepted");
+        assert!(
+            insert_bookmark(&db, "malformed", "not json", "$2::jsonb")
+                .await
+                .is_err(),
+            "view_json must hold JSON, not any text",
+        );
+    }
+
+    /// What a `JSONB` column costs the Rust, for the five stores still to
+    /// port. Every store serializes its payload with `serde_json` and
+    /// binds the resulting `String`, which a `TEXT` column takes and a
+    /// `JSONB` column refuses.
+    ///
+    /// The way out is a `sqlx::types::Json` bind rather than the
+    /// `$2::jsonb` cast the case above uses, because `::` is PostgreSQL
+    /// syntax that SQLite rejects outright: casting would end the sharing
+    /// for that statement, and rebinding leaves the text alone.
+    #[tokio::test]
+    async fn a_json_column_will_not_take_a_bound_string() {
+        let Some(db) = postgres_backend().await else {
+            return;
+        };
+        assert!(
+            insert_bookmark(&db, "bound-string", r#"{"v":1}"#, "$2")
+                .await
+                .is_err(),
+            "a bound String reaches a jsonb column as text and is refused",
+        );
+    }
+
+    async fn insert_bookmark(
+        db: &PostgresTestDatabase,
+        id: &str,
+        payload: &str,
+        view_json_placeholder: &str,
+    ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error> {
+        sqlx::query(&format!(
+            "INSERT INTO bookmarks \
+             (id, name, created_by, created_by_name, created_at, view_json) \
+             VALUES ($1, 'Bookmark', 'dev@example.com', 'Dev', '2026-01-02T03:04:05Z', \
+             {view_json_placeholder})"
+        ))
+        .bind(id)
+        .bind(payload)
         .execute(db.backend.pool())
-        .await;
-        assert!(refused.is_err(), "view_json must hold JSON, not any text");
+        .await
     }
 
     /// Two replicas rolling out at once both migrate on startup. sqlx

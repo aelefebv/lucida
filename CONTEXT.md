@@ -415,8 +415,9 @@ _Avoid_: store (unqualified), bucket, blob store, storage backend
 **Baseline**:
 The one migration that creates the whole schema a storage backend serves —
 every table, index, and constraint, with no earlier version to arrive from. A
-later change is a migration beside it, not an edit to it. Each backend has a
-baseline of its own, stating the same schema in the types its engine offers. See
+later change is a migration beside it, not an edit to it. Each storage backend
+has a baseline of its own, stating the same schema in the types its engine
+offers. See
 [ADR 0057](wiki/decisions/0057-one-baseline-schema-with-honest-column-types.md)
 for what the baseline replaced and the column conventions it settles, and
 [ADR 0058](wiki/decisions/0058-postgresql-shares-the-sql-and-duplicates-the-rust.md)
