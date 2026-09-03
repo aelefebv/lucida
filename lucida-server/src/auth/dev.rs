@@ -1,9 +1,12 @@
 //! Disabled-auth developer identity switching.
 //!
-//! This module is intentionally only meaningful when `LUCIDA_AUTH=disabled`.
-//! The cookie is not a security boundary; it is a local-dev convenience so
-//! different browser profiles can exercise viewer/editor/owner behavior
-//! without configuring OAuth.
+//! This module is only meaningful when `LUCIDA_AUTH=disabled` and the
+//! server is bound to loopback. The cookie is not a security boundary.
+//! It is a local-dev convenience, so different browser profiles can
+//! exercise viewer, editor, and owner behavior without configuring
+//! OAuth. That is why the routes that write it are off wherever
+//! anything but this machine can reach the server. See
+//! [`crate::auth::handlers::DevAuthState::new`].
 
 use axum::http::header::COOKIE;
 use axum::http::request::Parts;
@@ -27,12 +30,18 @@ struct DevPrincipalCookie {
     is_admin: bool,
 }
 
+/// The identity disabled mode hands to a caller who presents nothing.
+///
+/// It carries no admin rights. Every request in disabled mode resolves
+/// to this principal by default, so anything it can do, anyone who
+/// reaches the server can do. Admin rights take a deliberate switch,
+/// which only a loopback bind offers.
 pub fn default_dev_principal() -> AuthPrincipal {
     AuthPrincipal {
         email: "dev@local".to_string(),
         display_name: "Local Dev".to_string(),
         picture_url: None,
-        is_admin: true,
+        is_admin: false,
     }
 }
 
@@ -156,6 +165,13 @@ mod tests {
             .unwrap();
         let (parts, _) = req.into_parts();
         parts
+    }
+
+    #[test]
+    fn default_dev_principal_holds_no_admin_rights() {
+        let principal = default_dev_principal();
+        assert_eq!(principal.email, "dev@local");
+        assert!(!principal.is_admin);
     }
 
     #[test]

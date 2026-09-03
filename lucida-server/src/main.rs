@@ -410,10 +410,11 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     // the public router so the auth middleware never wraps it (the
     // user is unauthenticated by definition when they're being told
     // to retry sign-in).
-    let dev_auth_state = auth::handlers::DevAuthState {
-        config: Arc::clone(&auth_config),
-        enabled: auth_config.mode == auth::AuthMode::Disabled,
-    };
+    //
+    // The dev identity routes mount unconditionally and gate on
+    // `DevAuthState::new`: elsewhere `/auth/dev/status` reports
+    // `enabled: false` and `/auth/dev/login` 404s.
+    let dev_auth_state = auth::handlers::DevAuthState::new(Arc::clone(&auth_config));
     let mut public_auth_router: Router<()> = Router::new()
         .route("/auth/error", get(auth::error_page::auth_error))
         .route(
@@ -427,13 +428,11 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         .route(
             "/auth/dev/status",
             get(auth::handlers::dev_status).with_state(dev_auth_state.clone()),
-        );
-    if auth_config.mode == auth::AuthMode::Disabled {
-        public_auth_router = public_auth_router.route(
+        )
+        .route(
             "/auth/dev/login",
-            post(auth::handlers::dev_login).with_state(dev_auth_state.clone()),
+            post(auth::handlers::dev_login).with_state(dev_auth_state),
         );
-    }
     if let Some(g) = auth_config.google.clone() {
         let google_client = match auth::GoogleOAuthClient::new(Arc::new(g)).await {
             Ok(c) => Arc::new(c),
