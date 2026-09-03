@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.13.0](https://github.com/aelefebv/lucida/compare/v0.12.0...v0.13.0) (2026-09-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* **server:** a deployment that runs `LUCIDA_AUTH=disabled` on a non-loopback bind loses `/auth/dev/login`, which now answers 404. That was its only route to an administrator-gated endpoint. `/auth/dev/status` reports `enabled: false` there, so the app hides the switcher and otherwise serves as before.
+
+### Features
+
+* **auth:** read the identity Identity-Aware Proxy established ([#985](https://github.com/aelefebv/lucida/issues/985)) ([972cff3](https://github.com/aelefebv/lucida/commit/972cff3560ac3a28bdbc37fec66abacc43aeec4c))
+
+
+### Bug Fixes
+
+* **auth:** give each auth mode its own sign-out URL ([#984](https://github.com/aelefebv/lucida/issues/984)) ([ee4ab97](https://github.com/aelefebv/lucida/commit/ee4ab9772c2ccb2a5658268fae46548cb3f20f12))
+* **server:** stop disabled mode from handing out admin identities ([#982](https://github.com/aelefebv/lucida/issues/982)) ([01f2c3f](https://github.com/aelefebv/lucida/commit/01f2c3f5b31bc8c45936b950d27bf92f5540b58d))
+
 ## [0.12.0](https://github.com/aelefebv/lucida/compare/v0.11.0...v0.12.0) (2026-09-03)
 
 
