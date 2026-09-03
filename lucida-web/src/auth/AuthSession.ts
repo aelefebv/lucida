@@ -17,7 +17,9 @@ export interface AuthSession {
   principal: AuthPrincipal;
   /** Re-run /auth/whoami and publish the latest principal. */
   refresh: () => Promise<void>;
-  signOut: () => Promise<void>;
+  /** Null when the configured auth mode declares no sign-out URL.
+   *  Consumers draw their sign-out control only when it is set. */
+  signOut: (() => Promise<void>) | null;
 }
 
 export const AuthSessionContext = createContext<AuthSession | null>(null);

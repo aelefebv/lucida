@@ -5,6 +5,10 @@
 // `AuthSessionContext` rather than props, so dropping it anywhere
 // inside the authed subtree works without rewiring the host.
 //
+// A non-null `signOut` means the auth mode declared a sign-out URL.
+// Disabled mode declares none, so the menu leaves the item out rather
+// than offering one that clears nothing.
+//
 // Avatar: uses `picture_url` when present (real OAuth); falls back to
 // a coloured circle showing the first letter of the display name.
 // Dev sessions arrive with `picture_url = null`, so the fallback
@@ -66,7 +70,7 @@ export function ProfileMenu() {
   }, [open]);
 
   const handleSignOut = useCallback(async () => {
-    if (pending) return;
+    if (pending || !signOut) return;
     setPending(true);
     try {
       await signOut();
@@ -275,19 +279,21 @@ export function ProfileMenu() {
               </button>
             </form>
           )}
-          <button
-            type="button"
-            role="menuitem"
-            onClick={handleSignOut}
-            disabled={pending}
-            style={{
-              ...menuButtonStyle,
-              color: pending ? "#888" : "#eee",
-              cursor: pending ? "default" : "pointer",
-            }}
-          >
-            {pending ? "Signing out..." : "Sign out"}
-          </button>
+          {signOut && (
+            <button
+              type="button"
+              role="menuitem"
+              onClick={handleSignOut}
+              disabled={pending}
+              style={{
+                ...menuButtonStyle,
+                color: pending ? "#888" : "#eee",
+                cursor: pending ? "default" : "pointer",
+              }}
+            >
+              {pending ? "Signing out..." : "Sign out"}
+            </button>
+          )}
         </div>
       )}
     </div>

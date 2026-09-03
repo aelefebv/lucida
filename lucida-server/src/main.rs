@@ -370,7 +370,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
             post(auth::handlers::revoke_current_bearer_token).with_state(cli_auth_state.clone()),
         )
         .route(
-            "/auth/logout",
+            auth::LOGOUT_PATH,
             post(auth::handlers::logout).with_state(logout_state),
         );
 
@@ -417,6 +417,10 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     let dev_auth_state = auth::handlers::DevAuthState::new(Arc::clone(&auth_config));
     let mut public_auth_router: Router<()> = Router::new()
         .route("/auth/error", get(auth::error_page::auth_error))
+        .route(
+            "/auth/mode",
+            get(auth::handlers::auth_mode).with_state(Arc::clone(&auth_config)),
+        )
         .route(
             "/auth/cli/start",
             post(auth::handlers::cli_auth_start).with_state(cli_auth_state.clone()),

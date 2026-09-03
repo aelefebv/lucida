@@ -20,7 +20,7 @@ const PRINCIPAL: AuthPrincipal = {
 let session: {
   principal: AuthPrincipal;
   refresh: () => Promise<void>;
-  signOut: () => Promise<void>;
+  signOut: (() => Promise<void>) | null;
 } = {
   principal: PRINCIPAL,
   refresh: async () => {},
@@ -108,6 +108,16 @@ describe("ProfileMenu", () => {
     await act(async () => {
       resolveSignOut();
     });
+  });
+
+  it("leaves Sign out out of the menu when the mode declares no sign-out URL", () => {
+    // Absent, not present-and-inert.
+    session = { principal: PRINCIPAL, refresh: async () => {}, signOut: null };
+    render(<ProfileMenu />);
+    fireEvent.click(screen.getByRole("button", { name: /account menu/i }));
+
+    expect(screen.getByText("dev@local")).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: /sign out/i })).toBeNull();
   });
 
   it("renders an <img> avatar when picture_url is set", () => {
