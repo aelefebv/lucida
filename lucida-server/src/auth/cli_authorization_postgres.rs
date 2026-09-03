@@ -1,12 +1,18 @@
-//! SQLite-backed CLI authorization request store.
+//! PostgreSQL-backed CLI authorization request store.
+//!
+//! Shares the PostgreSQL pool that [`crate::storage`] opened, as every
+//! PostgreSQL store does.
 //!
 //! The statements come from [`super::cli_authorization_sql`], which the
-//! PostgreSQL store runs too, so this module holds the binding and the
-//! row mapping and no SQL of its own.
+//! SQLite store runs too, so this module holds the binding and the row
+//! mapping and no SQL of its own. Read it beside
+//! `cli_authorization_sqlite`: the two differ in the pool type, the row
+//! type, and the type name, and nowhere else. ADR-0058 records why the
+//! SQL is shared and the Rust is not.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sqlx::{Row, SqlitePool};
+use sqlx::{PgPool, Row};
 
 use super::cli_authorization::{
     CliTokenAuthorization, CliTokenAuthorizationStore, CliTokenAuthorizationStoreError,
@@ -14,17 +20,20 @@ use super::cli_authorization::{
 use super::cli_authorization_sql::{self as sql, map_err};
 
 #[derive(Debug, Clone)]
-pub struct SqliteCliTokenAuthorizationStore {
-    pool: SqlitePool,
+pub struct PostgresCliTokenAuthorizationStore {
+    pool: PgPool,
 }
 
-impl SqliteCliTokenAuthorizationStore {
-    pub(crate) fn new(pool: SqlitePool) -> Self {
+impl PostgresCliTokenAuthorizationStore {
+    /// Build the store from an already-opened pool. The migrator does not
+    /// run here: the storage backend runs it once, before any store
+    /// exists.
+    pub(crate) fn new(pool: PgPool) -> Self {
         Self { pool }
     }
 }
 
-fn row_to_request(row: sqlx::sqlite::SqliteRow) -> CliTokenAuthorization {
+fn row_to_request(row: sqlx::postgres::PgRow) -> CliTokenAuthorization {
     CliTokenAuthorization {
         id: row.get("id"),
         poll_token_hash: row.get("poll_token_hash"),
@@ -41,7 +50,7 @@ fn row_to_request(row: sqlx::sqlite::SqliteRow) -> CliTokenAuthorization {
 }
 
 #[async_trait]
-impl CliTokenAuthorizationStore for SqliteCliTokenAuthorizationStore {
+impl CliTokenAuthorizationStore for PostgresCliTokenAuthorizationStore {
     async fn create(
         &self,
         request: CliTokenAuthorization,

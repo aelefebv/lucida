@@ -2,10 +2,10 @@
 
 use std::sync::Arc;
 
-use super::instant;
+use super::{at, instant};
 use crate::auth::{BearerToken, BearerTokenStore, MemoryBearerTokenStore, hash_bearer_token};
 use crate::storage::StorageBackend;
-use crate::storage::test_support::sqlite_backend;
+use crate::storage::test_support::{postgres_backend, sqlite_backend};
 
 conformance_suite! {
     cases: [
@@ -18,8 +18,10 @@ conformance_suite! {
         revoke_stamps_the_row_and_hands_it_back,
         revoke_keeps_the_first_stamp,
         revoking_an_absent_hash_is_none,
+        an_expiry_reads_back_exact_at_its_own_boundary,
     ],
     over: [memory, sqlite],
+    when_available: [postgres],
 }
 
 async fn memory() -> Arc<dyn BearerTokenStore> {
@@ -28,6 +30,12 @@ async fn memory() -> Arc<dyn BearerTokenStore> {
 
 async fn sqlite() -> Arc<dyn BearerTokenStore> {
     sqlite_backend().await.bearer_tokens()
+}
+
+/// `None` when no PostgreSQL was offered. The harness says so once, on
+/// stderr, rather than letting the cases pass without running.
+async fn postgres() -> Option<Arc<dyn BearerTokenStore>> {
+    Some(postgres_backend().await?.backend.bearer_tokens())
 }
 
 fn token(id: &str) -> BearerToken {
@@ -166,5 +174,33 @@ async fn revoking_an_absent_hash_is_none(store: Arc<dyn BearerTokenStore>) {
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+/// Nothing compares a bearer token's expiry in SQL: the store hands the
+/// row back and [`BearerToken::is_active_at`] decides. That puts the
+/// whole of expiry on the round trip being exact, so this is where the
+/// round trip is checked against a boundary rather than against a value
+/// the same case wrote a moment ago.
+///
+/// The expiry is a whole second — the shape a store keeping RFC 3339 text
+/// writes without a fractional part — named from five and three quarter
+/// hours east, and the two instants it is judged against are named from
+/// eight hours west, where they fall on the day before.
+async fn an_expiry_reads_back_exact_at_its_own_boundary(store: Arc<dyn BearerTokenStore>) {
+    let mut written = token("token-a");
+    written.expires_at = at("2026-01-02T08:49:05+05:45");
+    store.create(written.clone()).await.unwrap();
+
+    let read = store
+        .get_by_hash(&written.token_hash)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(read.expires_at, written.expires_at);
+    assert!(read.is_active_at(at("2026-01-01T19:04:04.999999-08:00")));
+    assert!(
+        !read.is_active_at(at("2026-01-01T19:04:05-08:00")),
+        "a credential is spent the moment it expires, not a tick later",
     );
 }

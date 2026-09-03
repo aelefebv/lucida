@@ -10,20 +10,24 @@
 //! - `dev` — disabled-auth identity switch cookie for local multi-user
 //!   testing. Not used by Google/production auth.
 //! - `session_store` — `LoginSessionStore` trait + the row type.
-//! - `session_store_sqlite` — production `SqliteSessionStore` backed by
+//! - `session_store_sqlite` / `session_store_postgres` — production
+//!   `SqliteSessionStore` and `PostgresSessionStore`, both backed by
 //!   `sqlx`. Connecting and migrating belong to [`crate::storage`].
 //! - `session_store_memory` — `MemorySessionStore` for tests.
-//! - `bearer_token` / `bearer_token_sqlite` / `bearer_token_memory` —
-//!   opaque CLI/Python credentials stored as hashes and resolved to
-//!   the same `AuthPrincipal` boundary as cookie sessions.
+//! - `bearer_token` / `bearer_token_sqlite` / `bearer_token_postgres` /
+//!   `bearer_token_memory` — opaque CLI/Python credentials stored as
+//!   hashes and resolved to the same `AuthPrincipal` boundary as cookie
+//!   sessions.
 //! - `cli_authorization` / `cli_authorization_sqlite` /
-//!   `cli_authorization_memory` — short-lived browser approval rows
-//!   for `lucida auth login`.
+//!   `cli_authorization_postgres` / `cli_authorization_memory` —
+//!   short-lived browser approval rows for `lucida auth login`.
 //! - `pending_auth` / `pending_auth_sqlite` / `pending_auth_postgres` /
 //!   `pending_auth_memory` — one-shot OAuth-intent rows: state token →
-//!   intended path/hash. The PostgreSQL one is the only store with a
-//!   second SQL implementation, and `pending_auth_sql` holds the
-//!   statements the two run; see ADR-0058.
+//!   intended path/hash.
+//!
+//! Each store with two SQL implementations keeps its statements in a
+//! `*_sql` module the two run, rather than in a second copy of the SQL.
+//! See ADR-0058.
 //! - `google_oauth` — Google integration: authorization URL, code
 //!   exchange, JWKS cache + refresh, JWT validation. The deepest piece.
 //! - `principal` — `PrincipalExtractor` trait plus the three
@@ -54,10 +58,14 @@
 mod audit_event_tests;
 pub mod bearer_token;
 pub mod bearer_token_memory;
+pub mod bearer_token_postgres;
+pub(crate) mod bearer_token_sql;
 pub mod bearer_token_sqlite;
 pub mod cleanup;
 pub mod cli_authorization;
 pub mod cli_authorization_memory;
+pub mod cli_authorization_postgres;
+pub(crate) mod cli_authorization_sql;
 pub mod cli_authorization_sqlite;
 pub mod config;
 pub mod cookie;
@@ -75,17 +83,21 @@ pub mod pending_auth_sqlite;
 pub mod principal;
 pub mod session_store;
 pub mod session_store_memory;
+pub mod session_store_postgres;
+pub(crate) mod session_store_sql;
 pub mod session_store_sqlite;
 pub mod unauth_landing;
 
 pub use bearer_token::{BearerToken, BearerTokenStore, BearerTokenStoreError, hash_bearer_token};
 pub use bearer_token_memory::MemoryBearerTokenStore;
+pub use bearer_token_postgres::PostgresBearerTokenStore;
 pub use bearer_token_sqlite::SqliteBearerTokenStore;
 pub use cleanup::{CleanupState, spawn as spawn_cleanup};
 pub use cli_authorization::{
     CliTokenAuthorization, CliTokenAuthorizationStore, CliTokenAuthorizationStoreError,
 };
 pub use cli_authorization_memory::MemoryCliTokenAuthorizationStore;
+pub use cli_authorization_postgres::PostgresCliTokenAuthorizationStore;
 pub use cli_authorization_sqlite::SqliteCliTokenAuthorizationStore;
 pub use config::{AuthConfig, AuthConfigError, AuthMode, GoogleOAuthConfig};
 pub use extractors::AdminRequired;
@@ -101,4 +113,5 @@ pub use principal::{
 };
 pub use session_store::{LoginSession, LoginSessionStore, SessionStoreError};
 pub use session_store_memory::MemorySessionStore;
+pub use session_store_postgres::PostgresSessionStore;
 pub use session_store_sqlite::SqliteSessionStore;

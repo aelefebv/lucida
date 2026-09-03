@@ -2,12 +2,12 @@
 
 use std::sync::Arc;
 
-use super::instant;
+use super::{at, instant};
 use crate::auth::{
     CliTokenAuthorization, CliTokenAuthorizationStore, MemoryCliTokenAuthorizationStore,
 };
 use crate::storage::StorageBackend;
-use crate::storage::test_support::sqlite_backend;
+use crate::storage::test_support::{postgres_backend, sqlite_backend};
 
 conformance_suite! {
     cases: [
@@ -22,8 +22,10 @@ conformance_suite! {
         approval_stamps_the_row,
         approval_keeps_the_first_approver,
         approving_an_absent_id_is_silent,
+        an_expiry_reads_back_exact_at_its_own_boundary,
     ],
     over: [memory, sqlite],
+    when_available: [postgres],
 }
 
 async fn memory() -> Arc<dyn CliTokenAuthorizationStore> {
@@ -32,6 +34,12 @@ async fn memory() -> Arc<dyn CliTokenAuthorizationStore> {
 
 async fn sqlite() -> Arc<dyn CliTokenAuthorizationStore> {
     sqlite_backend().await.cli_token_authorizations()
+}
+
+/// `None` when no PostgreSQL was offered. The harness says so once, on
+/// stderr, rather than letting the cases pass without running.
+async fn postgres() -> Option<Arc<dyn CliTokenAuthorizationStore>> {
+    Some(postgres_backend().await?.backend.cli_token_authorizations())
 }
 
 fn request(id: &str) -> CliTokenAuthorization {
@@ -173,6 +181,32 @@ async fn approval_keeps_the_first_approver(store: Arc<dyn CliTokenAuthorizationS
         "a second approval must not re-point an already-approved request at another credential",
     );
     assert_eq!(approved.approved_email.as_deref(), Some("dev@example.com"));
+}
+
+/// Nothing compares an approval request's expiry in SQL: the store hands
+/// the row back and [`CliTokenAuthorization::is_expired_at`] decides.
+/// That puts the whole of expiry on the round trip being exact, so this
+/// is where the round trip is checked against a boundary rather than
+/// against a value the same case wrote a moment ago.
+///
+/// The expiry is a whole second — the shape a store keeping RFC 3339 text
+/// writes without a fractional part — named from five and three quarter
+/// hours east, and the two instants it is judged against are named from
+/// eight hours west, where they fall on the day before.
+async fn an_expiry_reads_back_exact_at_its_own_boundary(
+    store: Arc<dyn CliTokenAuthorizationStore>,
+) {
+    let mut written = request("req-a");
+    written.expires_at = at("2026-01-02T08:49:05+05:45");
+    store.create(written.clone()).await.unwrap();
+
+    let read = store.get("req-a").await.unwrap().unwrap();
+    assert_eq!(read.expires_at, written.expires_at);
+    assert!(!read.is_expired_at(at("2026-01-01T19:04:04.999999-08:00")));
+    assert!(
+        read.is_expired_at(at("2026-01-01T19:04:05-08:00")),
+        "a window that has run out is shut, not shutting",
+    );
 }
 
 async fn approving_an_absent_id_is_silent(store: Arc<dyn CliTokenAuthorizationStore>) {
