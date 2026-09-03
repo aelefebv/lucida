@@ -427,10 +427,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         include_archived: bool,
         limit: usize,
     ) -> Result<Vec<WorkspaceAdminSummary>, StoreError> {
-        let limit = limit.clamp(1, 100) as i64;
-        let trimmed_query = query.map(str::trim).filter(|q| !q.is_empty());
-
-        let mut builder = sql::admin_search_query::<Sqlite>(trimmed_query, include_archived, limit);
+        let mut builder = sql::admin_search_query::<Sqlite>(query, include_archived, limit);
         let rows = builder
             .build()
             .fetch_all(&self.pool)

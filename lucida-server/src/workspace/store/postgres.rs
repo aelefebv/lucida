@@ -5,18 +5,16 @@
 //!
 //! The statements come from [`super::sql`], which the SQLite store runs
 //! too, so this module holds the binding, the row mapping, and nothing
-//! else. Read it beside `sqlite`. Three things tell the two apart, and
-//! only three:
+//! else. Read it beside `sqlite`; what differs is the pool and row types,
+//! the JSON columns, and the clock.
 //!
-//! - **The pool and row types.** `PgPool` and `PgRow` where the other has
-//!   `SqlitePool` and `SqliteRow`.
-//! - **JSON columns.** The baseline gives four of this store's columns the
-//!   `JSONB` type, and PostgreSQL refuses a bound Rust `String` for one
-//!   outright. Every payload goes in as a [`sqlx::types::Json`] and comes
-//!   back as a [`serde_json::Value`]. A `$n::jsonb` cast would have kept
-//!   the `String` bind, but `::` is syntax SQLite rejects, so it would end
-//!   the sharing for those statements.
-//! - **The clock.** See [`now`].
+//! The baseline gives four of this store's columns the `JSONB` type, and
+//! PostgreSQL refuses a bound Rust `String` for one of those outright, so
+//! every payload goes in as a [`sqlx::types::Json`] and comes back as a
+//! [`serde_json::Value`]. A `$n::jsonb` cast would have kept the `String`
+//! bind, but `::` is syntax SQLite rejects, so casting would end the
+//! sharing for those statements. The clock is [`now`], and the note there
+//! says why it is not `Utc::now`.
 //!
 //! ADR-0058 records why the text is shared and the Rust is not.
 
@@ -466,11 +464,7 @@ impl WorkspaceStore for PostgresWorkspaceStore {
         include_archived: bool,
         limit: usize,
     ) -> Result<Vec<WorkspaceAdminSummary>, StoreError> {
-        let limit = limit.clamp(1, 100) as i64;
-        let trimmed_query = query.map(str::trim).filter(|q| !q.is_empty());
-
-        let mut builder =
-            sql::admin_search_query::<Postgres>(trimmed_query, include_archived, limit);
+        let mut builder = sql::admin_search_query::<Postgres>(query, include_archived, limit);
         let rows = builder
             .build()
             .fetch_all(&self.pool)

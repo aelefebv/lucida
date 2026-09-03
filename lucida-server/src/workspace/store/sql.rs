@@ -21,15 +21,21 @@
 //! **One placeholder per bound argument, numbered in the order they
 //! appear.** A number may legally repeat — the driver takes one argument
 //! for it on either engine — but nothing here does, so a caller's bind
-//! list reads straight down the statement. Two statements pass the same
-//! value twice under two numbers rather than sharing one, which costs a
-//! bind and buys an implementation that can be checked by eye.
+//! list reads straight down the statement. Several statements pass one
+//! value twice under two numbers rather than sharing one number, which
+//! costs a bind and buys an implementation that can be checked by eye.
 //!
 //! A backend is free to run a statement of its own where the engines
-//! genuinely differ. Nothing in this store needs one: the nine
-//! `ON CONFLICT ... DO UPDATE` clauses, the `COALESCE` in an upsert's
-//! update list, and the correlated subquery that appends a dataset to the
-//! end of a workspace's order are all standard on both.
+//! genuinely differ. Nothing in this store needs one. The seven
+//! `ON CONFLICT ... DO UPDATE` clauses and the one `DO NOTHING`, the
+//! `COALESCE` over `excluded` in an upsert's update list, and the
+//! correlated subquery that appends a dataset to the end of a workspace's
+//! order are all standard on both.
+//!
+//! Two things here are not what they were before the port, and both are
+//! portable rather than a divergence: the `GROUP BY` of the four workspace
+//! listings, which the note above them explains, and
+//! [`admin_search_query`], the query this store assembles at runtime.
 
 use sqlx::{Database, Encode, QueryBuilder, Type};
 
@@ -244,6 +250,9 @@ const ADMIN_SEARCH_TAIL: &str = r#"
     LIMIT
 "#;
 
+/// The widest result set the admin console will ask for in one call.
+const ADMIN_SEARCH_MAX_ROWS: usize = 100;
+
 /// The one query in this store assembled at runtime rather than written
 /// out: the admin console's workspace search, whose shape depends on
 /// whether a query string and archived workspaces were asked for.
@@ -251,10 +260,11 @@ const ADMIN_SEARCH_TAIL: &str = r#"
 /// Generic over the engine because a `QueryBuilder` writes its own
 /// placeholders — `?` for SQLite, `$1` and up for PostgreSQL — which is
 /// the one place the numbered-placeholder rule above cannot reach. Both
-/// stores call this, so the fragments and the order they go in are still
-/// written once; only the two `Encode` bounds are the price. The
-/// alternative was two copies of the same thirty lines of `push`, which is
-/// exactly the shape a typo hides in.
+/// stores call this, so the fragments, the order they go in, and how the
+/// arguments are shaped on the way past are still written once; the two
+/// `Encode` bounds are the price. The alternative was two copies of the
+/// same thirty lines of `push`, which is exactly the shape a typo hides
+/// in.
 ///
 /// **The search scans, and that is the decision.** Every term is matched
 /// with `LOWER(column) LIKE '%term%'`, and a leading wildcard rules out an
@@ -264,10 +274,11 @@ const ADMIN_SEARCH_TAIL: &str = r#"
 /// same named indexes by `the_two_baselines_declare_the_same_indexes`, and
 /// `pg_trgm` is an extension a deployment has to be allowed to install
 /// rather than a line in a schema file. Against that, this is an
-/// admin-only query over one row per workspace, capped at a hundred rows.
-/// If the workspace table ever reaches a size where the scan is felt, the
-/// index is worth its deployment step — and it arrives with a second
-/// decision about what the SQLite side does instead.
+/// admin-only query over one row per workspace, capped at
+/// [`ADMIN_SEARCH_MAX_ROWS`]. If the workspace table ever reaches a size
+/// where the scan is felt, the index is worth its deployment step, and it
+/// arrives with a second decision about what the SQLite side does
+/// instead.
 ///
 /// **`LOWER` folds a different alphabet on each engine.** SQLite's is
 /// ASCII-only; PostgreSQL's follows the database locale and folds the rest
@@ -277,10 +288,16 @@ const ADMIN_SEARCH_TAIL: &str = r#"
 /// normalized to lowercase ASCII on the way in — and no portable spelling
 /// closes it, because the folding belongs to the engine. The conformance
 /// suite pins the ASCII behavior, which is what both engines agree on.
+///
+/// A backslash in the query is the same story in miniature: PostgreSQL
+/// reads it as `LIKE`'s escape character and SQLite has no default escape,
+/// so `a\b` matches on one engine and not the other. An `ESCAPE '\'`
+/// clause would settle it, at the cost of changing what the SQLite search
+/// has always done with a backslash, which is not this port's to trade.
 pub(crate) fn admin_search_query<DB>(
     query: Option<&str>,
     include_archived: bool,
-    limit: i64,
+    limit: usize,
 ) -> QueryBuilder<'static, DB>
 where
     DB: Database,
@@ -293,7 +310,7 @@ where
         builder.push(ADMIN_SEARCH_LIVE_ONLY);
     }
 
-    if let Some(query) = query {
+    if let Some(query) = query.map(str::trim).filter(|q| !q.is_empty()) {
         let like = format!("%{}%", query.to_ascii_lowercase());
         builder
             .push(" AND (LOWER(w.id) LIKE ")
@@ -315,7 +332,9 @@ where
     }
 
     builder.push(ADMIN_SEARCH_TAIL);
-    builder.push_bind(limit);
+    // A caller asking for no rows gets one rather than an empty answer,
+    // and one asking for the world gets the cap.
+    builder.push_bind(limit.clamp(1, ADMIN_SEARCH_MAX_ROWS) as i64);
     builder
 }
 

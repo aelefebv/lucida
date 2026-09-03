@@ -272,10 +272,10 @@ mod tests {
         );
     }
 
-    /// What a `JSONB` column costs the Rust, for the five stores still to
-    /// port. Every store serializes its payload with `serde_json` and
-    /// binds the resulting `String`, which a `TEXT` column takes and a
-    /// `JSONB` column refuses.
+    /// What a `JSONB` column costs the Rust, for every store still to
+    /// port. Each one serializes its payload with `serde_json` and binds
+    /// the resulting `String`, which a `TEXT` column takes and a `JSONB`
+    /// column refuses.
     ///
     /// The way out is a `sqlx::types::Json` bind rather than the
     /// `$2::jsonb` cast the case above uses, because `::` is PostgreSQL
