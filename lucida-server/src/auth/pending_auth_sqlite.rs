@@ -2,12 +2,17 @@
 //!
 //! Shares the SQLite file and pool that [`crate::storage`] opened, as
 //! every SQLite store does.
+//!
+//! The statements come from [`super::pending_auth_sql`], which the
+//! PostgreSQL store runs too, so this module holds the binding and the
+//! row mapping and no SQL of its own.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::{Row, SqlitePool};
 
 use super::pending_auth::{PendingAuth, PendingAuthStore, PendingAuthStoreError};
+use super::pending_auth_sql as sql;
 
 /// Production pending-auth store. Holds a `SqlitePool` clone, so it is
 /// cheap to build and cheap to share.
@@ -32,19 +37,14 @@ fn map_err(e: sqlx::Error) -> PendingAuthStoreError {
 #[async_trait]
 impl PendingAuthStore for SqlitePendingAuthStore {
     async fn insert(&self, row: PendingAuth) -> Result<(), PendingAuthStoreError> {
-        sqlx::query(
-            r#"
-            INSERT INTO pending_auth (state_token, intended_path, intended_hash, created_at)
-            VALUES (?, ?, ?, ?)
-            "#,
-        )
-        .bind(&row.state_token)
-        .bind(&row.intended_path)
-        .bind(&row.intended_hash)
-        .bind(row.created_at)
-        .execute(&self.pool)
-        .await
-        .map_err(map_err)?;
+        sqlx::query(sql::INSERT)
+            .bind(&row.state_token)
+            .bind(&row.intended_path)
+            .bind(&row.intended_hash)
+            .bind(row.created_at)
+            .execute(&self.pool)
+            .await
+            .map_err(map_err)?;
         Ok(())
     }
 
@@ -52,21 +52,11 @@ impl PendingAuthStore for SqlitePendingAuthStore {
         &self,
         state_token: &str,
     ) -> Result<Option<PendingAuth>, PendingAuthStoreError> {
-        // SQLite supports DELETE ... RETURNING since 3.35; sqlx ships
-        // with a recent-enough libsqlite. Fetch_optional returns the
-        // pre-delete row in the deletion's atomic step, which is the
-        // single-use guarantee the trait promises.
-        let row = sqlx::query(
-            r#"
-            DELETE FROM pending_auth
-            WHERE state_token = ?
-            RETURNING state_token, intended_path, intended_hash, created_at
-            "#,
-        )
-        .bind(state_token)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(map_err)?;
+        let row = sqlx::query(sql::CONSUME)
+            .bind(state_token)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_err)?;
 
         Ok(row.map(|r| PendingAuth {
             state_token: r.get("state_token"),
@@ -80,7 +70,7 @@ impl PendingAuthStore for SqlitePendingAuthStore {
         &self,
         older_than: DateTime<Utc>,
     ) -> Result<u64, PendingAuthStoreError> {
-        let result = sqlx::query("DELETE FROM pending_auth WHERE created_at < ?")
+        let result = sqlx::query(sql::DELETE_EXPIRED)
             .bind(older_than)
             .execute(&self.pool)
             .await

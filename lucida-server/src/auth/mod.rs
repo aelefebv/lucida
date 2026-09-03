@@ -22,7 +22,8 @@
 //! - `pending_auth` / `pending_auth_sqlite` / `pending_auth_postgres` /
 //!   `pending_auth_memory` — one-shot OAuth-intent rows: state token →
 //!   intended path/hash. The PostgreSQL one is the only store with a
-//!   second SQL implementation; see ADR-0058.
+//!   second SQL implementation, and `pending_auth_sql` holds the
+//!   statements the two run; see ADR-0058.
 //! - `google_oauth` — Google integration: authorization URL, code
 //!   exchange, JWKS cache + refresh, JWT validation. The deepest piece.
 //! - `principal` — `PrincipalExtractor` trait plus the three
@@ -69,6 +70,9 @@ pub mod middleware;
 pub mod pending_auth;
 pub mod pending_auth_memory;
 pub mod pending_auth_postgres;
+// Not `pub`: the shared statements are how the two SQL stores are
+// written, not something a caller of the trait has any use for.
+pub(crate) mod pending_auth_sql;
 pub mod pending_auth_sqlite;
 pub mod principal;
 pub mod session_store;
