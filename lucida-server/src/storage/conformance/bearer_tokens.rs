@@ -2,10 +2,10 @@
 
 use std::sync::Arc;
 
-use super::instant;
+use super::{at, instant};
 use crate::auth::{BearerToken, BearerTokenStore, MemoryBearerTokenStore, hash_bearer_token};
 use crate::storage::StorageBackend;
-use crate::storage::test_support::sqlite_backend;
+use crate::storage::test_support::{postgres_backend, sqlite_backend};
 
 conformance_suite! {
     cases: [
@@ -18,8 +18,10 @@ conformance_suite! {
         revoke_stamps_the_row_and_hands_it_back,
         revoke_keeps_the_first_stamp,
         revoking_an_absent_hash_is_none,
+        a_whole_second_expiry_reads_back_exact,
     ],
     over: [memory, sqlite],
+    when_available: [postgres],
 }
 
 async fn memory() -> Arc<dyn BearerTokenStore> {
@@ -28,6 +30,12 @@ async fn memory() -> Arc<dyn BearerTokenStore> {
 
 async fn sqlite() -> Arc<dyn BearerTokenStore> {
     sqlite_backend().await.bearer_tokens()
+}
+
+/// `None` when no PostgreSQL was offered. The harness says so once, on
+/// stderr, rather than letting the cases pass without running.
+async fn postgres() -> Option<Arc<dyn BearerTokenStore>> {
+    Some(postgres_backend().await?.backend.bearer_tokens())
 }
 
 fn token(id: &str) -> BearerToken {
@@ -166,5 +174,19 @@ async fn revoking_an_absent_hash_is_none(store: Arc<dyn BearerTokenStore>) {
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+/// A whole second is the one expiry shape no other case writes, since
+/// every [`instant`] carries a fraction. Nothing in this trait compares
+/// an expiry, so an exact round trip is all a store owes here.
+async fn a_whole_second_expiry_reads_back_exact(store: Arc<dyn BearerTokenStore>) {
+    let mut written = token("token-a");
+    written.expires_at = at("2026-01-02T03:04:05Z");
+    store.create(written.clone()).await.unwrap();
+
+    assert_eq!(
+        store.get_by_hash(&written.token_hash).await.unwrap(),
+        Some(written),
     );
 }

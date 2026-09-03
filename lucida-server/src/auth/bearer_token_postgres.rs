@@ -1,28 +1,36 @@
-//! SQLite-backed bearer-token store.
+//! PostgreSQL-backed bearer-token store.
 //!
-//! The statements come from [`super::bearer_token_sql`], which the
-//! PostgreSQL store runs too, so this module holds the binding and the
-//! row mapping and no SQL of its own.
+//! Shares the PostgreSQL pool that [`crate::storage`] opened, as every
+//! PostgreSQL store does.
+//!
+//! The statements come from [`super::bearer_token_sql`], which the SQLite
+//! store runs too, so this module holds the binding and the row mapping
+//! and no SQL of its own. Read it beside `bearer_token_sqlite`: the two
+//! differ in the pool type, the row type, and the type name, and nowhere
+//! else. ADR-0058 records why the SQL is shared and the Rust is not.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sqlx::{Row, SqlitePool};
+use sqlx::{PgPool, Row};
 
 use super::bearer_token::{BearerToken, BearerTokenStore, BearerTokenStoreError};
 use super::bearer_token_sql::{self as sql, map_err};
 
 #[derive(Debug, Clone)]
-pub struct SqliteBearerTokenStore {
-    pool: SqlitePool,
+pub struct PostgresBearerTokenStore {
+    pool: PgPool,
 }
 
-impl SqliteBearerTokenStore {
-    pub(crate) fn new(pool: SqlitePool) -> Self {
+impl PostgresBearerTokenStore {
+    /// Build the store from an already-opened pool. The migrator does not
+    /// run here: the storage backend runs it once, before any store
+    /// exists.
+    pub(crate) fn new(pool: PgPool) -> Self {
         Self { pool }
     }
 }
 
-fn row_to_token(row: sqlx::sqlite::SqliteRow) -> BearerToken {
+fn row_to_token(row: sqlx::postgres::PgRow) -> BearerToken {
     BearerToken {
         id: row.get("id"),
         token_hash: row.get("token_hash"),
@@ -38,7 +46,7 @@ fn row_to_token(row: sqlx::sqlite::SqliteRow) -> BearerToken {
 }
 
 #[async_trait]
-impl BearerTokenStore for SqliteBearerTokenStore {
+impl BearerTokenStore for PostgresBearerTokenStore {
     async fn create(&self, token: BearerToken) -> Result<(), BearerTokenStoreError> {
         sqlx::query(sql::INSERT)
             .bind(&token.id)

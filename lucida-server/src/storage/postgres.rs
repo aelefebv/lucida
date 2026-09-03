@@ -1,19 +1,15 @@
 //! PostgreSQL storage backend.
 //!
 //! Connects to the server named by a `postgres:` connection string, runs
-//! the bundled PostgreSQL migrations, and serves the stores that have
-//! been ported.
+//! the bundled PostgreSQL migrations, and serves all six stores.
 //!
-//! **Not all six stores, so this is not a [`StorageBackend`] yet.** The
-//! trait hands out all six, [`super::open`] promises that every entry in
-//! [`Scheme::ALL`] reaches a backend that comes up, and a partial set
-//! cannot honor either. So there is no `Scheme::Postgres`, nothing outside
-//! the tests constructs this type, and `LUCIDA_DB_URL=postgres://…` still
-//! fails at startup naming the schemes that work. What exists here is the
-//! evidence that the remaining ports are ordinary work: the schema
-//! translates, the driver connects, the conformance suites pass, and
-//! concurrent migration is safe. ADR-0058 records what the first port
-//! cost.
+//! **Reached only by tests, so this is not a [`StorageBackend`] yet.**
+//! [`super::open`] promises that every entry in [`Scheme::ALL`] reaches a
+//! backend that comes up, so there is no `Scheme::Postgres`, nothing
+//! outside the tests constructs this type, and `LUCIDA_DB_URL=postgres://…`
+//! still fails at startup naming the schemes that work. Every store is
+//! ported now, so what remains is the wiring rather than another port.
+//! ADR-0058 records the pattern each one followed.
 //!
 //! This module is the only place in the server that names a PostgreSQL
 //! type. Everything above it works through the store traits.
@@ -29,7 +25,12 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
 use super::StorageError;
 use super::url::redact;
-use crate::auth::{PendingAuthStore, PostgresPendingAuthStore};
+use crate::auth::{
+    BearerTokenStore, CliTokenAuthorizationStore, LoginSessionStore, PendingAuthStore,
+    PostgresBearerTokenStore, PostgresCliTokenAuthorizationStore, PostgresPendingAuthStore,
+    PostgresSessionStore,
+};
+use crate::bookmarks::{BookmarkStore, PostgresBookmarkStore};
 use crate::workspace::{PostgresWorkspaceStore, WorkspaceStore};
 
 /// Migrations bundled into the binary at compile time, from the
@@ -100,14 +101,28 @@ impl PostgresStorageBackend {
         Ok(Self { pool })
     }
 
-    /// One of the stores this backend serves. Shaped like the
-    /// [`StorageBackend`](super::StorageBackend) accessor it will become:
-    /// a fresh handle over the shared pool, costing a pool clone.
+    // Each accessor mirrors the `StorageBackend` accessor it will become,
+    // in that trait's order, and costs one pool clone.
+    pub fn login_sessions(&self) -> Arc<dyn LoginSessionStore> {
+        Arc::new(PostgresSessionStore::new(self.pool.clone()))
+    }
+
     pub fn pending_auth(&self) -> Arc<dyn PendingAuthStore> {
         Arc::new(PostgresPendingAuthStore::new(self.pool.clone()))
     }
 
-    /// The workspace store, on the same terms.
+    pub fn bearer_tokens(&self) -> Arc<dyn BearerTokenStore> {
+        Arc::new(PostgresBearerTokenStore::new(self.pool.clone()))
+    }
+
+    pub fn cli_token_authorizations(&self) -> Arc<dyn CliTokenAuthorizationStore> {
+        Arc::new(PostgresCliTokenAuthorizationStore::new(self.pool.clone()))
+    }
+
+    pub fn bookmarks(&self) -> Arc<dyn BookmarkStore> {
+        Arc::new(PostgresBookmarkStore::new(self.pool.clone()))
+    }
+
     pub fn workspaces(&self) -> Arc<dyn WorkspaceStore> {
         Arc::new(PostgresWorkspaceStore::new(self.pool.clone()))
     }

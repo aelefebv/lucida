@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 
-use super::instant;
+use super::{at, instant};
 use crate::auth::{LoginSession, LoginSessionStore, MemorySessionStore};
 use crate::storage::StorageBackend;
-use crate::storage::test_support::sqlite_backend;
+use crate::storage::test_support::{postgres_backend, sqlite_backend};
 
 conformance_suite! {
     cases: [
@@ -18,9 +18,11 @@ conformance_suite! {
         touching_an_absent_session_is_silent,
         delete_removes_the_session_and_repeats_harmlessly,
         the_sweep_removes_sessions_expired_at_the_cutoff,
+        the_sweep_reads_an_expiry_as_an_instant,
         concurrent_creates_all_land,
     ],
     over: [memory, sqlite],
+    when_available: [postgres],
 }
 
 async fn memory() -> Arc<dyn LoginSessionStore> {
@@ -29,6 +31,12 @@ async fn memory() -> Arc<dyn LoginSessionStore> {
 
 async fn sqlite() -> Arc<dyn LoginSessionStore> {
     sqlite_backend().await.login_sessions()
+}
+
+/// `None` when no PostgreSQL was offered. The harness says so once, on
+/// stderr, rather than letting the cases pass without running.
+async fn postgres() -> Option<Arc<dyn LoginSessionStore>> {
+    Some(postgres_backend().await?.backend.login_sessions())
 }
 
 fn session(id: &str, expires_at: DateTime<Utc>) -> LoginSession {
@@ -137,6 +145,41 @@ async fn the_sweep_removes_sessions_expired_at_the_cutoff(store: Arc<dyn LoginSe
         store.delete_expired(instant(0)).await.unwrap(),
         0,
         "the count is what this sweep removed, not what is already gone",
+    );
+}
+
+/// The sweep answers by instant, however the instant is written.
+///
+/// The three expiries sit a microsecond apart around a whole second, and
+/// the cutoff is that whole second written from eight hours west, where
+/// it falls on the day before. `DateTime<Utc>` erases the offset before
+/// any store sees it, so no store can get that half wrong. The fractional
+/// second is the half it can.
+async fn the_sweep_reads_an_expiry_as_an_instant(store: Arc<dyn LoginSessionStore>) {
+    store
+        .create(session("just-before", at("2026-01-02T03:04:04.999999Z")))
+        .await
+        .unwrap();
+    store
+        .create(session("on-the-second", at("2026-01-02T03:04:05Z")))
+        .await
+        .unwrap();
+    store
+        .create(session("just-after", at("2026-01-02T03:04:05.000001Z")))
+        .await
+        .unwrap();
+
+    let removed = store
+        .delete_expired(at("2026-01-01T19:04:05-08:00"))
+        .await
+        .unwrap();
+
+    assert_eq!(removed, 2, "the cutoff takes the expiry that lands on it");
+    assert!(store.get("just-before").await.unwrap().is_none());
+    assert!(store.get("on-the-second").await.unwrap().is_none());
+    assert!(
+        store.get("just-after").await.unwrap().is_some(),
+        "and spares the one a microsecond past it",
     );
 }
 

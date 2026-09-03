@@ -8,11 +8,11 @@
 //!
 //! Module layout:
 //!
-//! - [`store`] — `BookmarkStore` trait + `SqliteBookmarkStore` (production) +
-//!   `MemoryBookmarkStore` (tests). Two-table schema: `bookmarks` for the
-//!   rows, `bookmark_datasets` for the side index that powers the
-//!   any-overlap query the sidebar runs. ADR-0015 §"Why SQLite" covers the
-//!   choice.
+//! - [`store`] — the `BookmarkStore` trait and the record it hands out,
+//!   with one module per implementation beside it: [`store_sqlite`]
+//!   (production), [`store_postgres`], [`store_memory`] (tests), and
+//!   [`store_sql`] for what the two SQL ones share. ADR-0015 §"Why
+//!   SQLite" covers the choice of storage.
 //! - [`handlers`] — REST handlers under `/api/bookmarks`. Mounted on the
 //!   protected (post-auth-middleware) router half so every handler sees an
 //!   `AuthPrincipal` in request extensions.
@@ -31,6 +31,13 @@ pub mod broadcast;
 pub mod handlers;
 pub mod routes;
 pub mod store;
+pub mod store_memory;
+pub mod store_postgres;
+pub(crate) mod store_sql;
+pub mod store_sqlite;
 
 pub use broadcast::{BroadcastSummary, broadcast_bookmark_change};
-pub use store::{Bookmark, BookmarkStore, MemoryBookmarkStore, SqliteBookmarkStore, StoreError};
+pub use store::{Bookmark, BookmarkStore, StoreError};
+pub use store_memory::MemoryBookmarkStore;
+pub use store_postgres::PostgresBookmarkStore;
+pub use store_sqlite::SqliteBookmarkStore;
