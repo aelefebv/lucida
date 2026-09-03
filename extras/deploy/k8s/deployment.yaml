@@ -93,12 +93,22 @@ spec:
               value: "/usr/share/lucida/web"
 
             # ---- Required: auth mode ----
-            # `google` is the v1 supported provider. `disabled` is for
-            # closed-network deployments (and requires LUCIDA_INSECURE=1
-            # when LUCIDA_BIND is non-loopback — which is always true in
+            # `google` runs lucida's own sign-in. `iap` reads the
+            # identity a Google Cloud Identity-Aware Proxy already
+            # established, and needs LUCIDA_IAP_AUDIENCE instead of the
+            # OAuth client below. `disabled` is for closed-network
+            # deployments (and requires LUCIDA_INSECURE=1 when
+            # LUCIDA_BIND is non-loopback — which is always true in
             # k8s). See ../RUNBOOK.md.
             - name: LUCIDA_AUTH
               value: "google"
+
+            # ---- Required when LUCIDA_AUTH=iap ----
+            # The exact `aud` claim your IAP mints, read off the backend
+            # service your load balancer uses. Not a secret, and never
+            # assembled by hand.
+            # - name: LUCIDA_IAP_AUDIENCE
+            #   value: "/projects/<YOUR-PROJECT-NUMBER>/global/backendServices/<YOUR-SERVICE-ID>"
 
             # ---- Required when LUCIDA_AUTH=google ----
             # The OAuth client ID is not a secret; the secret is below.

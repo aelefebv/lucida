@@ -5,7 +5,7 @@ description: "The auth implementation (and, by extension, all subsequent feature
 tags: [lucida, decision]
 source_path: wiki/decisions/0017-configurable-from-day-one-for-oss-release.md
 created: 2026-05-08
-modified: 2026-06-25
+modified: 2026-09-03
 ---
 
 # Configurable From Day One for OSS Release
@@ -19,7 +19,7 @@ The auth implementation (and, by extension, all subsequent features that consume
 Concretely:
 - **Allowed hosted domain(s)** — `LUCIDA_ALLOWED_HOSTED_DOMAINS` (comma-separated; empty = no domain restriction). a hosted deployment sets e.g. `example.com`; an OSS user might use their own org's domain or leave it empty.
 - **OAuth provider configuration** — `LUCIDA_GOOGLE_CLIENT_ID`, `LUCIDA_GOOGLE_CLIENT_SECRET`, `LUCIDA_OAUTH_REDIRECT_URI`. No Google-Workspace-specific or organization-specific values are baked in.
-- **Auth mode** — `LUCIDA_AUTH={google,disabled}` (with future values like `microsoft`, `okta`, `oidc` as contributors add providers).
+- **Auth mode** — `LUCIDA_AUTH={google,iap,disabled}` (with future values like `microsoft`, `okta`, `oidc` as contributors add providers). `iap` arrived through exactly the path this section describes: a new `PrincipalExtractor`, a new required variable, and no change to anything that consumes identity. See [ADR 0060](0060-iap-mode-reads-the-identity-the-perimeter-established.md).
 - **Admin allowlist** — `LUCIDA_ADMIN_EMAILS` (comma-separated). OSS self-hoster sets their own; an operator sets the bootstrap admin set.
 - **Cookie configuration** — `LUCIDA_COOKIE_NAME`, `LUCIDA_COOKIE_SECURE`. Defaults are sensible; overrides exist for unusual deployments.
 - **Provider extensibility** — `PrincipalExtractor` is the documented OSS extension point. New providers (Microsoft, Okta, GitHub, generic OIDC, Authentik, etc.) are added by implementing the trait, not by refactoring auth-using code.

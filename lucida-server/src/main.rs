@@ -269,11 +269,12 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     // Operator-facing startup line: mode + bind together so a glance
     // at the boot log answers "is this server reachable, and is it
     // protected?" Per ADR-0018 both signals should be visible together.
-    // Stable string mode tag (`"google"` / `"disabled"`) lands cleanly
-    // in audit pipelines that key off the exact string rather than the
-    // Debug-formatted variant.
+    // Stable string mode tag (`"google"` / `"iap"` / `"disabled"`)
+    // lands cleanly in audit pipelines that key off the exact string
+    // rather than the Debug-formatted variant.
     let mode_str = match auth_config.mode {
         auth::AuthMode::Google => "google",
+        auth::AuthMode::Iap => "iap",
         auth::AuthMode::Disabled => "disabled",
     };
     tracing::info!(
@@ -318,6 +319,17 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
             "auth.google.configured",
         );
     }
+    if let Some(i) = auth_config.iap.as_ref() {
+        // The audience is logged unredacted. It is not a secret, and an
+        // operator chasing a wrong-audience rejection needs to read the
+        // value the server is comparing against.
+        tracing::info!(
+            audience = %i.audience,
+            issuer = %i.issuer,
+            jwks_uri = %i.jwks_uri,
+            "auth.iap.configured",
+        );
+    }
     // The only place the server picks a database. Nothing downstream
     // knows which one it got.
     let storage = match storage::open(&auth_config.db_url).await {
@@ -332,11 +344,19 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     let cli_authorization_store = storage.cli_token_authorizations();
     let pending_store = storage.pending_auth();
 
-    let extractor = auth::middleware::build_extractor(
+    let extractor = match auth::middleware::build_extractor(
         Arc::clone(&auth_config),
         Arc::clone(&session_store_dyn),
         Arc::clone(&bearer_token_store),
-    );
+    )
+    .await
+    {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::error!(error = %e, "auth.startup.iap_key_set_unavailable");
+            return Err(std::io::Error::other(e.to_string()));
+        }
+    };
 
     let logout_state = auth::handlers::LogoutState {
         config: Arc::clone(&auth_config),

@@ -51,9 +51,11 @@ You will need:
   step 3: the string carries the password, so it belongs in a Secret rather
   than in a manifest. For which backend to run, see
   [Choose a storage backend](#choose-a-storage-backend) later on this page.
-- **A Google Cloud project** if you intend to use `LUCIDA_AUTH=google` (the
-  v1 supported provider). You do not need any GCP-managed services for this
-  flow other than the OAuth client; the OAuth client itself is free.
+- **A Google Cloud project** if you intend to use `LUCIDA_AUTH=google`. You do
+  not need any GCP-managed services for this flow other than the OAuth client;
+  the OAuth client itself is free. `LUCIDA_AUTH=iap` is the other supported
+  provider: it needs no OAuth client, and instead assumes a Google Cloud
+  Identity-Aware Proxy already fronts the deployment.
 - **A DNS-resolvable hostname** that you control, pointing (eventually) at
   your ingress controller's external IP. Examples: `lucida.example.com`,
   `viewer.internal.example.com`. This runbook calls it
@@ -140,9 +142,10 @@ code that consumes identity. For more information, see
 
 ## 2. Provision an OAuth client
 
-Lucida's authenticated flow uses Google OAuth (`LUCIDA_AUTH=google`). The
+Lucida's own sign-in flow uses Google OAuth (`LUCIDA_AUTH=google`). The
 OAuth client identifies your deployment to Google; the secret authenticates
-the deployment to Google's token exchange.
+the deployment to Google's token exchange. Behind Identity-Aware Proxy the
+sign-in has already happened, so skip to the note at the end of this section.
 
 1. Go to the Google Cloud Console -> APIs & Services -> Credentials.
 2. Click **Create Credentials** -> **OAuth client ID**.
@@ -160,6 +163,25 @@ If you want to restrict sign-in to one or more Google Workspace domains,
 note the workspace domain(s) now (e.g., `example.com`). You will use them as
 `LUCIDA_ALLOWED_HOSTED_DOMAINS` (comma-separated). Empty / unset = anyone
 with a verified Google account can sign in (the OSS-permissive default).
+
+### Skip this step if Identity-Aware Proxy fronts the deployment
+
+`LUCIDA_AUTH=iap` needs no OAuth client, no client secret, and no redirect
+URI, because IAP runs the sign-in and lucida only reads the result. It needs
+one variable instead:
+
+- `LUCIDA_IAP_AUDIENCE` — the exact `aud` claim your IAP mints, of the form
+  `/projects/PROJECT_NUMBER/global/backendServices/SERVICE_ID`. Read it off
+  the backend service your load balancer uses; lucida compares it byte for
+  byte and never derives it. There is no default and no way to skip the
+  check. Unset, the server stops at boot naming the variable. Set to
+  another service's value, every request is refused with a 401 rather
+  than a 500, and the first refusal is logged at warning level as
+  `auth.iap.assertion.rejected.first` with the reason.
+
+`LUCIDA_ADMIN_EMAILS` works the same as in every other mode.
+`LUCIDA_ALLOWED_HOSTED_DOMAINS` does nothing here — IAP's IAM policy is what
+decides who reaches the server.
 
 ## 3. Create the Kubernetes Secrets
 
@@ -414,6 +436,14 @@ fail-fast startup errors:
 - `LUCIDA_GOOGLE_CLIENT_ID is required` — Secret not found / wrong key /
   wrong Secret name. Verify with
   `kubectl -n <YOUR-NAMESPACE> get secret lucida-google-oauth -o yaml`.
+- `LUCIDA_AUTH=iap requires LUCIDA_IAP_AUDIENCE` — the audience is unset.
+  The server will not start without it, because the check it drives is what
+  distinguishes an assertion minted for this deployment from one minted for
+  any other IAP-protected service.
+- `IAP key set fetch failed` — the server could not read
+  `https://www.gstatic.com/iap/verify/public_key-jwk` at startup. Check
+  egress from the pod; there is nothing to authenticate against until it
+  succeeds.
 - File-permission errors on `/var/lib/lucida/lucida.db` (SQLite) — your
   PodSecurity profile + the runtime image's user are mismatched. The
   `debian:bookworm-slim` runtime runs as root by default; if your cluster

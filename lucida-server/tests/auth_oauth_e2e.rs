@@ -297,7 +297,9 @@ async fn build_lucida_app_with_allowed_domains(mock_base: &str, allowed: &[&str]
         Arc::clone(&arc_config),
         Arc::clone(&session_store) as Arc<dyn LoginSessionStore>,
         Arc::clone(&token_store) as Arc<dyn BearerTokenStore>,
-    );
+    )
+    .await
+    .expect("only IAP mode can fail to build an extractor");
 
     // Authed half: only `/auth/whoami` here so tests can probe it.
     let authed = Router::new()

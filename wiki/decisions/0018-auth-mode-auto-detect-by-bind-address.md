@@ -39,6 +39,14 @@ admin-gated endpoint. The default `dev@local` principal also dropped
 its admin rights, for the same reason. It is the identity a caller gets
 for presenting nothing.
 
+**Implementation note (2026-09-03):** `LUCIDA_AUTH` now takes a third value,
+`iap` ([ADR 0060](0060-iap-mode-reads-the-identity-the-perimeter-established.md)),
+and the auto-detect below never picks it. A bind address answers "can anything
+but this machine reach the server"; it cannot answer "is there a perimeter in
+front of it", and guessing wrong in that direction would mean expecting an
+assertion nobody attaches. So IAP is explicit-only, and a public bind with
+`LUCIDA_AUTH` unset still means Google.
+
 ## Decision
 
 When `LUCIDA_AUTH` is unset, `lucida-server` infers the default from the bind address:

@@ -92,10 +92,12 @@ export async function fetchSignOutUrl(fetchImpl: FetchLike = fetch): Promise<str
 /**
  * POST the sign-out URL `fetchSignOutUrl` returned. Under Google that
  * is `/auth/logout`, which clears the session row and replies 302 →
- * `/`. We pass `redirect: "manual"` so the browser doesn't actually
- * navigate the SPA — the hook calls `fetchAuthState` after this
- * resolves, which flips us into the unauth branch without a full page
- * reload.
+ * `/`. Under IAP it is the perimeter's own cookie-clearing URL, which
+ * this server never sees. Either way we pass `redirect: "manual"` so
+ * the browser doesn't actually navigate the SPA — the cookie the
+ * response clears still lands, and the hook calls `fetchAuthState`
+ * after this resolves, which flips us into the unauth branch without a
+ * full page reload.
  *
  * Resolves once the server has acknowledged. Swallows network
  * errors: even a network blip shouldn't leave the user stuck logged

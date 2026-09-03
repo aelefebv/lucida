@@ -80,3 +80,4 @@ rsa = { version = "0.9", features = ["sha2"] }
 # import it without a workspace round-trip.
 urlencoding = "2"
 tokio-tungstenite = "0.29"
+p256 = { version = "0.13", features = ["pkcs8", "ecdsa"] }

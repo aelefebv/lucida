@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use super::config::AuthConfig;
 use super::cookie::resolve_secure;
+use super::principal::{display_name_from_email, normalize_email};
 
 pub const DEV_PRINCIPAL_COOKIE_NAME: &str = "lucida_dev_principal";
 const DEV_PRINCIPAL_TTL_SECS: i64 = 60 * 60 * 24 * 30;
@@ -50,16 +51,13 @@ pub fn normalize_dev_principal(
     display_name: Option<&str>,
     is_admin: bool,
 ) -> Result<AuthPrincipal, String> {
-    let email = email.trim().to_ascii_lowercase();
-    if email.is_empty() || !email.contains('@') {
-        return Err("dev user email is invalid".to_string());
-    }
+    let email = normalize_email(email).ok_or_else(|| "dev user email is invalid".to_string())?;
 
     let display_name = display_name
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|s| s.chars().take(120).collect::<String>())
-        .unwrap_or_else(|| fallback_display_name(&email));
+        .unwrap_or_else(|| display_name_from_email(&email));
 
     Ok(AuthPrincipal {
         email,
@@ -130,26 +128,6 @@ fn decode_dev_principal(value: &str) -> Option<AuthPrincipal> {
         payload.is_admin,
     )
     .ok()
-}
-
-fn fallback_display_name(email: &str) -> String {
-    let local = email.split('@').next().unwrap_or(email).trim();
-    if local.is_empty() {
-        email.to_string()
-    } else {
-        local
-            .split(['.', '_', '-'])
-            .filter(|part| !part.is_empty())
-            .map(|part| {
-                let mut chars = part.chars();
-                match chars.next() {
-                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-                    None => String::new(),
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
 }
 
 #[cfg(test)]

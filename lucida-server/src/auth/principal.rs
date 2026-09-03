@@ -1,16 +1,18 @@
-//! `PrincipalExtractor` trait + its three production implementations.
+//! `PrincipalExtractor` trait + its production implementations.
 //!
 //! The trait is the OSS extension point (per ADR 0017): a self-hoster
 //! adding a new auth provider implements this trait once and wires it
 //! into the middleware. Saved-views, admin endpoints, and any future
 //! per-user feature consume the resulting `AuthPrincipal` and never
-//! see provider-specific details.
+//! see provider-specific details. [`super::iap`] is the most recent
+//! one to arrive that way.
 //!
 //! The production protected surface uses [`DualCredentialExtractor`]:
 //! explicit `Authorization: Bearer ...` credentials are resolved through
-//! [`BearerTokenExtractor`], while browser requests without an
-//! Authorization header fall back to [`SessionCookieExtractor`].
-//! Disabled auth still uses [`StubPrincipalExtractor`]. The older
+//! [`BearerTokenExtractor`], while requests without an Authorization
+//! header fall through to whatever the mode accepts —
+//! [`SessionCookieExtractor`] under Google, the IAP assertion under
+//! IAP. Disabled auth still uses [`StubPrincipalExtractor`]. The older
 //! [`GoogleJwtPrincipalExtractor`] remains available for tests and
 //! integrations that validate Google ID tokens directly.
 
@@ -88,6 +90,54 @@ impl AuthError {
 #[async_trait]
 pub trait PrincipalExtractor: Send + Sync + 'static {
     async fn extract(&self, req: &Parts) -> Result<AuthPrincipal, AuthError>;
+
+    /// Whether this server has a sign-in flow to send an
+    /// unauthenticated browser to.
+    ///
+    /// The middleware asks before serving the unauth landing page,
+    /// which bounces to `/auth/start`. That route exists only where a
+    /// provider runs its own sign-in, and a provider that authenticates
+    /// at a perimeter does not — so answering yes there would bounce
+    /// the browser into the SPA catch-all and straight back around.
+    /// Defaults to yes, which is right for every provider that mints
+    /// its own sessions.
+    fn offers_sign_in(&self) -> bool {
+        true
+    }
+}
+
+/// The one email normalization. Trims, lowercases, and refuses
+/// anything that is not an address.
+///
+/// Every provider runs its claim through this, so which provider a
+/// principal arrived through cannot change whether
+/// `LUCIDA_ADMIN_EMAILS` matches it. `None` means the value was blank
+/// or had no `@`, which callers treat as "this credential names
+/// nobody" rather than substituting a guess.
+pub(crate) fn normalize_email(raw: &str) -> Option<String> {
+    let email = raw.trim().to_ascii_lowercase();
+    (!email.is_empty() && email.contains('@')).then_some(email)
+}
+
+/// A display name for a provider that supplies none, built from the
+/// local part of the email: `test.viewer@example.com` → `Test Viewer`.
+pub(crate) fn display_name_from_email(email: &str) -> String {
+    let local = email.split('@').next().unwrap_or(email).trim();
+    if local.is_empty() {
+        return email.to_string();
+    }
+    local
+        .split(['.', '_', '-'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Read an RFC 6750-style bearer token from an Authorization header.
@@ -316,26 +366,44 @@ impl PrincipalExtractor for BearerTokenExtractor {
     }
 }
 
-/// Cookie + bearer extractor used by protected app routes.
+/// Bearer token first, then whatever else the mode accepts.
 ///
 /// If the request carries any Authorization header, treat it as an
-/// explicit bearer-auth attempt. This prevents a bad bearer token from
-/// silently falling back to an unrelated browser cookie.
+/// explicit bearer-auth attempt and answer on that alone. This prevents
+/// a bad bearer token from silently falling back to an unrelated
+/// browser credential — a caller who names a token and gets in as
+/// somebody else has been lied to.
+///
+/// Google mode falls back to the session cookie; IAP mode falls back to
+/// the assertion its perimeter attached. The order lives here once so
+/// the two modes cannot come to different conclusions about which
+/// credential wins, and so the command-line client keeps working under
+/// either without a per-mode branch.
 pub struct DualCredentialExtractor {
-    cookie: SessionCookieExtractor,
+    fallback: Arc<dyn PrincipalExtractor>,
     bearer: BearerTokenExtractor,
 }
 
 impl DualCredentialExtractor {
+    /// Bearer in front of the session cookie: the Google-mode pairing.
     pub fn new(
         config: Arc<AuthConfig>,
         session_store: Arc<dyn LoginSessionStore>,
         token_store: Arc<dyn BearerTokenStore>,
     ) -> Self {
-        Self {
-            cookie: SessionCookieExtractor::new(Arc::clone(&config), session_store),
-            bearer: BearerTokenExtractor::new(config, token_store),
-        }
+        let cookie = SessionCookieExtractor::new(Arc::clone(&config), session_store);
+        Self::with_fallback(
+            Arc::new(cookie),
+            BearerTokenExtractor::new(config, token_store),
+        )
+    }
+
+    /// Bearer in front of any other extractor.
+    pub fn with_fallback(
+        fallback: Arc<dyn PrincipalExtractor>,
+        bearer: BearerTokenExtractor,
+    ) -> Self {
+        Self { fallback, bearer }
     }
 }
 
@@ -345,8 +413,15 @@ impl PrincipalExtractor for DualCredentialExtractor {
         if req.headers.contains_key(axum::http::header::AUTHORIZATION) {
             self.bearer.extract(req).await
         } else {
-            self.cookie.extract(req).await
+            self.fallback.extract(req).await
         }
+    }
+
+    /// Whatever the fallback says. A browser never reaches the bearer
+    /// half, so the second position is the one that answers for the
+    /// mode.
+    fn offers_sign_in(&self) -> bool {
+        self.fallback.offers_sign_in()
     }
 }
 
