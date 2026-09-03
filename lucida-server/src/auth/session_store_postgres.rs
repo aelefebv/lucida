@@ -68,8 +68,6 @@ impl LoginSessionStore for PostgresSessionStore {
     }
 
     async fn touch_last_used(&self, id: &str, now: DateTime<Utc>) -> Result<(), SessionStoreError> {
-        // Affecting 0 rows is fine: the session might have been deleted
-        // between extractor lookup and this update. Race-and-tolerate.
         sqlx::query(sql::TOUCH_LAST_USED)
             .bind(now)
             .bind(id)
@@ -128,25 +126,22 @@ mod tests {
 
     /// A server whose `TimeZone` is not UTC keeps the same instants.
     ///
-    /// `TIMESTAMPTZ` is an instant, not a wall clock, but `TimeZone` is a
-    /// server setting a deployment is free to have set to anything, and a
-    /// value that travelled as text would come back shifted by it. The
-    /// zone here is fourteen hours from UTC and the expiry sits half an
-    /// hour before midnight, so a leak would move the row to the next day
-    /// and the sweep with it.
+    /// `TIMESTAMPTZ` is an instant, not a wall clock, but a deployment is
+    /// free to set `TimeZone` to anything, and a value that travelled as
+    /// text would come back shifted by it. The zone here is 14 hours from
+    /// UTC and the expiry sits half an hour before midnight, so a leak
+    /// would move the row to the next day and the sweep with it.
     ///
-    /// One store carries this for all of them: every PostgreSQL store
-    /// binds and reads `DateTime<Utc>` through the same driver, so the
-    /// zone either reaches all of them or none.
+    /// One store covers all of them: every PostgreSQL store binds and
+    /// reads `DateTime<Utc>` through the same driver.
     #[tokio::test]
     async fn a_server_time_zone_does_not_move_an_instant() {
         let Some(db) = postgres_backend().await else {
             return;
         };
 
-        // Set on connect rather than on the pool's first connection: the
-        // setting is per-session, and only a hook reaches every session
-        // the pool opens.
+        // `SET TIME ZONE` is per-session, so only an after-connect hook
+        // reaches every connection the pool opens.
         let pool = PgPoolOptions::new()
             .max_connections(1)
             .after_connect(|connection, _| {
@@ -186,16 +181,15 @@ mod tests {
         );
     }
 
-    /// A `TIMESTAMPTZ` is whole microseconds, so anything below one is
-    /// dropped on the way in.
+    /// A `TIMESTAMPTZ` is whole microseconds, so it drops anything finer
+    /// on the way in.
     ///
-    /// This is the one place the two engines genuinely part company: the
-    /// SQLite store keeps every digit chrono wrote, which
-    /// `a_sub_microsecond_expiry_survives` beside it pins. Nothing in the
-    /// server compares a timestamp against one it did not read back, and
-    /// no expiry policy is measured in nanoseconds, so the difference
-    /// costs nothing — but it is the one value that does not survive both
-    /// stores unchanged.
+    /// This is the one value the two engines disagree on: the SQLite
+    /// store keeps every digit chrono wrote, which
+    /// `a_sub_microsecond_expiry_survives` pins. Nothing in the server
+    /// compares a timestamp against one it did not read back, and no
+    /// expiry policy is measured in nanoseconds, so the difference costs
+    /// nothing.
     #[tokio::test]
     async fn a_sub_microsecond_expiry_is_truncated() {
         let Some(db) = postgres_backend().await else {

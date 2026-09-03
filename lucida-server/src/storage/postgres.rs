@@ -1,8 +1,8 @@
 //! PostgreSQL storage backend.
 //!
 //! Connects to the server named by a `postgres:` connection string, runs
-//! the bundled PostgreSQL migrations, and serves the stores that have
-//! been ported to it.
+//! the bundled PostgreSQL migrations, and serves the stores ported to it
+//! so far.
 //!
 //! **Not all six stores yet, so this is not a [`StorageBackend`].** The
 //! trait hands out all six, [`super::open`] promises that every entry in
@@ -100,11 +100,8 @@ impl PostgresStorageBackend {
         Ok(Self { pool })
     }
 
-    // Each accessor below is shaped like the
-    // `StorageBackend` accessor it will become, and ordered as that trait
-    // orders them: a fresh handle over the shared pool, costing a pool
-    // clone. The stores still missing from the trait's six are the ones
-    // still to be ported.
+    // Each accessor mirrors the `StorageBackend` accessor it will become,
+    // in that trait's order, and costs one pool clone.
     pub fn login_sessions(&self) -> Arc<dyn LoginSessionStore> {
         Arc::new(PostgresSessionStore::new(self.pool.clone()))
     }

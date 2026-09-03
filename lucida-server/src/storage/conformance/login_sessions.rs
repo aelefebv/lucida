@@ -150,17 +150,11 @@ async fn the_sweep_removes_sessions_expired_at_the_cutoff(store: Arc<dyn LoginSe
 
 /// The sweep answers by instant, however the instant is written.
 ///
-/// One instant has more than one spelling: with a fractional second and
-/// without, and from any offset, which can put it on another date. A
-/// store that keeps an expiry as something other than an instant has to
-/// order those spellings the way the instants order.
-///
-/// So the three expiries here sit a microsecond apart around a whole
-/// second, and the cutoff is that whole second written from eight hours
-/// west, where it falls on the day before. `DateTime<Utc>` erases the
-/// offset before any store sees it, so that half is the contract on
-/// record rather than something a store could get wrong; the fractional
-/// second is the half a store can.
+/// The three expiries sit a microsecond apart around a whole second, and
+/// the cutoff is that whole second written from eight hours west, where
+/// it falls on the day before. `DateTime<Utc>` erases the offset before
+/// any store sees it, so no store can get that half wrong. The fractional
+/// second is the half it can.
 async fn the_sweep_reads_an_expiry_as_an_instant(store: Arc<dyn LoginSessionStore>) {
     store
         .create(session("just-before", at("2026-01-02T03:04:04.999999Z")))

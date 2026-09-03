@@ -22,8 +22,7 @@ pub(crate) const INSERT: &str = r#"
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 "#;
 
-/// Read one request by id, for the browser that is being asked to
-/// approve it.
+/// Read one request by id, for the browser being asked to approve it.
 pub(crate) const SELECT_BY_ID: &str = r#"
     SELECT id, poll_token_hash, token_hash, user_code, name,
            created_at, expires_at, token_expires_at,
@@ -34,7 +33,7 @@ pub(crate) const SELECT_BY_ID: &str = r#"
 
 /// Read one request for the client polling it.
 ///
-/// The poll secret is part of the lookup rather than checked afterwards,
+/// The lookup takes the poll secret rather than checking it afterwards,
 /// so the request id alone reveals nothing about the approval.
 pub(crate) const SELECT_FOR_POLL: &str = r#"
     SELECT id, poll_token_hash, token_hash, user_code, name,

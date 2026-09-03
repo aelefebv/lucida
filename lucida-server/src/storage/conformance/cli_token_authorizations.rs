@@ -194,8 +194,7 @@ async fn approving_an_absent_id_is_silent(store: Arc<dyn CliTokenAuthorizationSt
 
 /// A whole second is the one expiry shape no other case writes, since
 /// every [`instant`] carries a fraction. Nothing in this trait compares
-/// an expiry, so an exact round trip is the whole of what a store owes
-/// here — the caller reads the row and judges it against its own clock.
+/// an expiry, so an exact round trip is all a store owes here.
 async fn a_whole_second_expiry_reads_back_exact(store: Arc<dyn CliTokenAuthorizationStore>) {
     let mut written = request("req-a");
     written.expires_at = at("2026-01-02T03:04:05Z");

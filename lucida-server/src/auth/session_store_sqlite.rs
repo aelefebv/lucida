@@ -72,8 +72,6 @@ impl LoginSessionStore for SqliteSessionStore {
     }
 
     async fn touch_last_used(&self, id: &str, now: DateTime<Utc>) -> Result<(), SessionStoreError> {
-        // Affecting 0 rows is fine: the session might have been deleted
-        // between extractor lookup and this update. Race-and-tolerate.
         sqlx::query(sql::TOUCH_LAST_USED)
             .bind(now)
             .bind(id)
@@ -114,9 +112,8 @@ mod tests {
     ///
     /// The conformance suite cannot ask this, because the answer differs
     /// by engine: `a_sub_microsecond_expiry_is_truncated` beside the
-    /// PostgreSQL store is the other half, where a `TIMESTAMPTZ` drops
-    /// everything below the microsecond. This is the one value the two
-    /// stores do not agree on.
+    /// PostgreSQL store pins the other half, where a `TIMESTAMPTZ` drops
+    /// everything below the microsecond.
     #[tokio::test]
     async fn a_sub_microsecond_expiry_survives() {
         let expires_at = Utc
