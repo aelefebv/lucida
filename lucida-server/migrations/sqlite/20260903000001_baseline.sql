@@ -155,8 +155,8 @@ CREATE INDEX idx_bookmarks_created_by ON bookmarks(created_by);
 -- Which dataset URLs a bookmark is attached to. "Show me bookmarks for any
 -- of these URLs" is the sidebar's hot read, and a side table turns it into
 -- an index scan; the alternative — reaching into `view_json` — forces a
--- per-row JSON parse. `bookmarks::store::tests` reads the query plan to
--- prove the index is the one being used.
+-- per-row JSON parse. `bookmarks::store_sqlite::tests` reads the query
+-- plan to prove the index is the one being used.
 CREATE TABLE bookmark_datasets (
     bookmark_id TEXT NOT NULL REFERENCES bookmarks(id) ON DELETE CASCADE,
     dataset_url TEXT NOT NULL,

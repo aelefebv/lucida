@@ -31,6 +31,7 @@ use crate::auth::{
     PostgresBearerTokenStore, PostgresCliTokenAuthorizationStore, PostgresPendingAuthStore,
     PostgresSessionStore,
 };
+use crate::bookmarks::{BookmarkStore, PostgresBookmarkStore};
 
 /// Migrations bundled into the binary at compile time, from the
 /// PostgreSQL directory. The SQLite baseline is the same schema in the
@@ -116,6 +117,10 @@ impl PostgresStorageBackend {
 
     pub fn cli_token_authorizations(&self) -> Arc<dyn CliTokenAuthorizationStore> {
         Arc::new(PostgresCliTokenAuthorizationStore::new(self.pool.clone()))
+    }
+
+    pub fn bookmarks(&self) -> Arc<dyn BookmarkStore> {
+        Arc::new(PostgresBookmarkStore::new(self.pool.clone()))
     }
 
     /// The pool behind the store, for tests that drive SQL directly.

@@ -6,7 +6,7 @@ use lucida_core::saved_view::SavedView;
 
 use crate::bookmarks::{Bookmark, BookmarkStore, MemoryBookmarkStore};
 use crate::storage::StorageBackend;
-use crate::storage::test_support::sqlite_backend;
+use crate::storage::test_support::{postgres_backend, sqlite_backend};
 
 conformance_suite! {
     cases: [
@@ -25,6 +25,7 @@ conformance_suite! {
         concurrent_creates_all_land,
     ],
     over: [memory, sqlite],
+    when_available: [postgres],
 }
 
 async fn memory() -> Arc<dyn BookmarkStore> {
@@ -33,6 +34,12 @@ async fn memory() -> Arc<dyn BookmarkStore> {
 
 async fn sqlite() -> Arc<dyn BookmarkStore> {
     sqlite_backend().await.bookmarks()
+}
+
+/// `None` when no PostgreSQL was offered. The harness says so once, on
+/// stderr, rather than letting the cases pass without running.
+async fn postgres() -> Option<Arc<dyn BookmarkStore>> {
+    Some(postgres_backend().await?.backend.bookmarks())
 }
 
 /// Create a bookmark named `name` over `datasets`, with a view whose
