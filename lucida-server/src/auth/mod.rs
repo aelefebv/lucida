@@ -19,8 +19,11 @@
 //! - `cli_authorization` / `cli_authorization_sqlite` /
 //!   `cli_authorization_memory` — short-lived browser approval rows
 //!   for `lucida auth login`.
-//! - `pending_auth` / `pending_auth_sqlite` / `pending_auth_memory` —
-//!   one-shot OAuth-intent rows: state token → intended path/hash.
+//! - `pending_auth` / `pending_auth_sqlite` / `pending_auth_postgres` /
+//!   `pending_auth_memory` — one-shot OAuth-intent rows: state token →
+//!   intended path/hash. The PostgreSQL one is the only store with a
+//!   second SQL implementation, and `pending_auth_sql` holds the
+//!   statements the two run; see ADR-0058.
 //! - `google_oauth` — Google integration: authorization URL, code
 //!   exchange, JWKS cache + refresh, JWT validation. The deepest piece.
 //! - `principal` — `PrincipalExtractor` trait plus the three
@@ -66,6 +69,8 @@ pub mod handlers;
 pub mod middleware;
 pub mod pending_auth;
 pub mod pending_auth_memory;
+pub mod pending_auth_postgres;
+pub(crate) mod pending_auth_sql;
 pub mod pending_auth_sqlite;
 pub mod principal;
 pub mod session_store;
@@ -87,6 +92,7 @@ pub use extractors::AdminRequired;
 pub use google_oauth::{GoogleOAuthClient, OAuthError, VerifiedClaims};
 pub use pending_auth::{PendingAuth, PendingAuthStore, PendingAuthStoreError};
 pub use pending_auth_memory::MemoryPendingAuthStore;
+pub use pending_auth_postgres::PostgresPendingAuthStore;
 pub use pending_auth_sqlite::SqlitePendingAuthStore;
 pub use principal::{
     AuthError, BearerTokenExtractor, DualCredentialExtractor, GoogleJwtPrincipalExtractor,

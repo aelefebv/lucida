@@ -17,6 +17,28 @@ jobs:
     name: Rust workspace (test + clippy)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+
+    # The PostgreSQL conformance cases skip themselves when no server is
+    # reachable, which is what lets a developer without PostgreSQL run the
+    # suite. CI is the place that must not skip, so it runs one. Pin the
+    # major version to what a deployment runs; the schema targets 17.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: lucida
+          POSTGRES_PASSWORD: lucida
+          POSTGRES_DB: lucida_test
+        ports:
+          - 5432:5432
+        # Without this the job races the server's startup, and a connect
+        # failure fails the run rather than waiting for it.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - uses: actions/checkout@v4
 
@@ -32,6 +54,11 @@ jobs:
       # instead of silently re-resolving deps on the runner. Keeps CI
       # testing the same dep graph the Docker image builds from.
       - name: cargo test
+        env:
+          LUCIDA_TEST_POSTGRES_URL: postgres://lucida:lucida@localhost:5432/lucida_test
+          # Turn a skip into a failure: a container that never came up, or
+          # a typo in the URL above, would otherwise report green.
+          LUCIDA_TEST_POSTGRES_REQUIRED: '1'
         run: cargo test --locked --workspace --all-features
 
       # Format check: enforces `cargo fmt --all` consistency across the

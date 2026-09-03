@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use super::instant;
 use crate::auth::{MemoryPendingAuthStore, PendingAuth, PendingAuthStore};
 use crate::storage::StorageBackend;
-use crate::storage::test_support::sqlite_backend;
+use crate::storage::test_support::{postgres_backend, sqlite_backend};
 
 conformance_suite! {
     cases: [
@@ -20,6 +20,7 @@ conformance_suite! {
         concurrent_consumes_have_exactly_one_winner,
     ],
     over: [memory, sqlite],
+    when_available: [postgres],
 }
 
 async fn memory() -> Arc<dyn PendingAuthStore> {
@@ -28,6 +29,12 @@ async fn memory() -> Arc<dyn PendingAuthStore> {
 
 async fn sqlite() -> Arc<dyn PendingAuthStore> {
     sqlite_backend().await.pending_auth()
+}
+
+/// `None` when no PostgreSQL was offered. The harness says so once, on
+/// stderr, rather than letting seven cases pass without running.
+async fn postgres() -> Option<Arc<dyn PendingAuthStore>> {
+    Some(postgres_backend().await?.backend.pending_auth())
 }
 
 fn intent(state_token: &str, created_at: DateTime<Utc>) -> PendingAuth {

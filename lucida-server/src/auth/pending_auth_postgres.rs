@@ -1,40 +1,39 @@
-//! SQLite-backed `PendingAuthStore`.
+//! PostgreSQL-backed `PendingAuthStore`.
 //!
-//! Shares the SQLite file and pool that [`crate::storage`] opened, as
-//! every SQLite store does.
+//! Shares the PostgreSQL pool that [`crate::storage`] opened, as every
+//! PostgreSQL store does.
 //!
-//! The statements come from [`super::pending_auth_sql`], which the
-//! PostgreSQL store runs too, so this module holds the binding and the
-//! row mapping and no SQL of its own. The numbered placeholders in those
-//! statements are PostgreSQL's spelling, and
-//! `numbered_placeholders_bind_by_number` in [`crate::storage`] is what
-//! pins sqlx's SQLite driver to reading them the same way.
+//! The statements come from [`super::pending_auth_sql`], which the SQLite
+//! store runs too, so this module holds the binding and the row mapping
+//! and no SQL of its own. Read it beside `pending_auth_sqlite`: the two
+//! differ in the pool type and the type name, and nowhere else. ADR-0058
+//! records the measurement and what it means for the remaining stores.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sqlx::{Row, SqlitePool};
+use sqlx::{PgPool, Row};
 
 use super::pending_auth::{PendingAuth, PendingAuthStore, PendingAuthStoreError};
 use super::pending_auth_sql::{self as sql, map_err};
 
-/// Production pending-auth store. Holds a `SqlitePool` clone, so it is
-/// cheap to build and cheap to share.
+/// PostgreSQL pending-auth store. Holds a `PgPool` clone, so it is cheap
+/// to build and cheap to share.
 #[derive(Debug, Clone)]
-pub struct SqlitePendingAuthStore {
-    pool: SqlitePool,
+pub struct PostgresPendingAuthStore {
+    pool: PgPool,
 }
 
-impl SqlitePendingAuthStore {
+impl PostgresPendingAuthStore {
     /// Build the store from an already-opened pool. The migrator does
     /// not run here: the storage backend runs it once, before any store
     /// exists.
-    pub(crate) fn new(pool: SqlitePool) -> Self {
+    pub(crate) fn new(pool: PgPool) -> Self {
         Self { pool }
     }
 }
 
 #[async_trait]
-impl PendingAuthStore for SqlitePendingAuthStore {
+impl PendingAuthStore for PostgresPendingAuthStore {
     async fn insert(&self, row: PendingAuth) -> Result<(), PendingAuthStoreError> {
         sqlx::query(sql::INSERT)
             .bind(&row.state_token)

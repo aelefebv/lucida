@@ -27,7 +27,11 @@ use crate::workspace::{SqliteWorkspaceStore, WorkspaceStore};
 /// Migrations bundled into the binary at compile time. One baseline
 /// creates the whole schema; a later change is another `.sql` file beside
 /// it, picked up by rebuilding.
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+///
+/// Each backend has its own directory under `migrations/`, because a
+/// schema cannot be written once for two engines that do not agree on
+/// what a timestamp is. See ADR-0058.
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/sqlite");
 
 /// Connections for a file-backed database. A single SQLite file
 /// serializes writes anyway, so a small pool is all the parallelism
@@ -243,6 +247,58 @@ mod tests {
             assert!(enforced, "every pooled connection enforces foreign keys");
             held.push(connection);
         }
+    }
+
+    /// The one SQLite behavior the shared statements rest on.
+    ///
+    /// A statement that two backends run has to spell its placeholders
+    /// PostgreSQL's way, `$1` and up, because SQLite's bare `?` has no
+    /// counterpart. That works because sqlx's SQLite driver reads the
+    /// number out of the parameter name and binds argument N to `$N`
+    /// rather than assigning numbers in the order the placeholders
+    /// appear. Nothing in the shared statements exercises the difference
+    /// today — they number in order and repeat nothing — so this is where
+    /// the behavior is pinned. See ADR-0058.
+    #[tokio::test]
+    async fn numbered_placeholders_bind_by_number() {
+        let backend = SqliteStorageBackend::open_in_memory().await.unwrap();
+        sqlx::query(
+            "INSERT INTO pending_auth (state_token, intended_path, intended_hash, created_at) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind("token")
+        .bind("/w/demo")
+        .bind("#v=1")
+        .bind(Utc::now())
+        .execute(backend.pool())
+        .await
+        .unwrap();
+
+        // The placeholders are out of order, so this matches only if the
+        // numbers won over the positions: by position, the driver would
+        // look for a token spelled `#v=1`.
+        let by_number: Option<String> = sqlx::query_scalar(
+            "SELECT intended_path FROM pending_auth \
+             WHERE intended_hash = $2 AND state_token = $1",
+        )
+        .bind("token")
+        .bind("#v=1")
+        .fetch_optional(backend.pool())
+        .await
+        .unwrap();
+        assert_eq!(by_number.as_deref(), Some("/w/demo"));
+
+        // A placeholder used twice takes one argument, as it does on
+        // PostgreSQL, rather than consuming a second.
+        let repeated: Option<String> = sqlx::query_scalar(
+            "SELECT intended_path FROM pending_auth \
+             WHERE state_token = $1 OR intended_path = $1",
+        )
+        .bind("token")
+        .fetch_optional(backend.pool())
+        .await
+        .unwrap();
+        assert_eq!(repeated.as_deref(), Some("/w/demo"));
     }
 
     /// A JSON column carries JSON. SQLite has no type that says so, so the
