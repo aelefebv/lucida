@@ -26,9 +26,19 @@
 -- nothing here. It states the width the code uses, for the reader and for a
 -- backend that would take `INTEGER` to mean four bytes.
 --
--- **Every parent-child edge declares its own `ON DELETE`.** The SQLite
--- backend turns foreign-key enforcement on for every connection, so the
--- database performs the cascade and no caller writes one by hand.
+-- **Every foreign key declares its own `ON DELETE`.** The SQLite backend
+-- turns foreign-key enforcement on for every connection, so the database
+-- performs the cascade and no caller writes one by hand. One column names a
+-- row in another table without a foreign key, and says why where it is
+-- declared.
+--
+-- One edge is circular: `workspaces.default_saved_view_id` points at
+-- `workspace_saved_views`, which points back at `workspaces`. SQLite resolves
+-- a foreign-key target when a row is written rather than when the table is
+-- created, so the cycle loads from one file in this order. An engine that
+-- resolves targets at `CREATE TABLE` cannot, and reordering does not help a
+-- cycle: translate that one constraint into an `ALTER TABLE` issued after
+-- both tables exist.
 --
 -- See ADR-0057.
 
@@ -48,8 +58,8 @@ CREATE TABLE login_sessions (
     expires_at   TEXT NOT NULL
 );
 
-CREATE INDEX idx_login_sessions_expires_at ON login_sessions (expires_at);
-CREATE INDEX idx_login_sessions_email ON login_sessions (email);
+CREATE INDEX idx_login_sessions_expires_at ON login_sessions(expires_at);
+CREATE INDEX idx_login_sessions_email ON login_sessions(email);
 
 -- In-flight intent for one OAuth round trip. The web client captures
 -- `location.hash` (hashes never reach the server) and posts it with the
@@ -71,7 +81,7 @@ CREATE TABLE pending_auth (
     created_at    TEXT NOT NULL
 );
 
-CREATE INDEX idx_pending_auth_created_at ON pending_auth (created_at);
+CREATE INDEX idx_pending_auth_created_at ON pending_auth(created_at);
 
 -- Opaque bearer credentials for the CLI and Python clients. The raw token
 -- is generated client-side and never reaches the server; what is stored is
@@ -91,8 +101,8 @@ CREATE TABLE bearer_tokens (
     revoked_at   TEXT
 );
 
-CREATE INDEX idx_bearer_tokens_email ON bearer_tokens (email);
-CREATE INDEX idx_bearer_tokens_expires_at ON bearer_tokens (expires_at);
+CREATE INDEX idx_bearer_tokens_email ON bearer_tokens(email);
+CREATE INDEX idx_bearer_tokens_expires_at ON bearer_tokens(expires_at);
 
 -- Short-lived browser approvals for bearer tokens. The CLI mints the raw
 -- token and sends only `token_hash`; a signed-in browser approves the
@@ -118,7 +128,7 @@ CREATE TABLE cli_token_authorizations (
 );
 
 CREATE INDEX idx_cli_token_authorizations_expires_at
-    ON cli_token_authorizations (expires_at);
+    ON cli_token_authorizations(expires_at);
 
 -- Server-stored bookmarks: a saved view under a stable opaque id, so a
 -- `#b=<id>` URL reopens the same view across sessions and people. The
@@ -205,12 +215,13 @@ CREATE TABLE dataset_sources (
 -- here is a rename inside this workspace and leaves the shared source
 -- alone.
 --
--- Deleting the source is refused while a workspace still holds it, which is
--- the point of not giving this edge a cascade.
+-- Deleting the source is refused while a workspace still holds it, so this
+-- edge restricts rather than cascades.
 CREATE TABLE workspace_datasets (
     id                TEXT PRIMARY KEY NOT NULL,
     workspace_id      TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-    dataset_source_id TEXT NOT NULL REFERENCES dataset_sources(id),
+    dataset_source_id TEXT NOT NULL
+        REFERENCES dataset_sources(id) ON DELETE RESTRICT,
     display_name      TEXT NOT NULL,
     added_by          TEXT NOT NULL,
     added_at          TEXT NOT NULL,

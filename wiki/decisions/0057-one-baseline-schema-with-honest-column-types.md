@@ -108,6 +108,18 @@ being cleared by a follow-up `UPDATE`.
 - **Foreign-key enforcement is stated, not inherited.** sqlx turns the pragma on
   by default today. The backend sets it anyway, because a default is not a
   guarantee and a connection string can otherwise turn it off.
+- **One foreign key is circular, and is the one thing a translation cannot copy
+  line for line.** `workspaces.default_saved_view_id` points at
+  `workspace_saved_views`, which points back at `workspaces`. SQLite resolves a
+  foreign-key target when a row is written rather than when the table is
+  created, so the cycle loads from a single file in the order written. An engine
+  that resolves targets at `CREATE TABLE` rejects it, and reordering does not
+  help a cycle, so that constraint has to be added afterwards with `ALTER
+  TABLE`. The baseline says so at the point of declaration.
+- **A stale saved view id now fails at the write.** Pointing a workspace at a
+  saved view that no longer exists returns a backend error where it previously
+  stored an id matching nothing. The manager checks the view belongs to the
+  workspace first, so reaching this means racing a delete.
 - **A JSON column now refuses text that is not JSON.** Every writer serializes
   with `serde_json`, so nothing legitimate is affected. A write that would have
   stored a truncated or empty payload fails at the write instead of failing at

@@ -72,7 +72,7 @@ impl SqliteStorageBackend {
             })?;
         let in_memory = wants_memory(url.as_str());
 
-        let common = parsed
+        let base_options = parsed
             .create_if_missing(true)
             // SQLite ignores foreign keys unless a connection asks for
             // them, and the schema declares every cascade, so asking is
@@ -83,14 +83,14 @@ impl SqliteStorageBackend {
             .foreign_keys(true);
 
         let opts = if in_memory {
-            common
+            base_options
         } else {
             // Write-ahead logging keeps readers and the
             // fire-and-forget session touch-writer from blocking
             // each other. An in-memory database has no journal to
             // write, so it is skipped there rather than set and
             // quietly ignored.
-            common.journal_mode(SqliteJournalMode::Wal)
+            base_options.journal_mode(SqliteJournalMode::Wal)
         };
 
         // sqlx reaches an in-memory database through a shared cache, so
