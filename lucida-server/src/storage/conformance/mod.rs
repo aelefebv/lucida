@@ -5,8 +5,8 @@
 //! implementation of that trait. Five of the six traits ship an in-memory
 //! store beside the SQLite one, and both must answer the same way; the
 //! workspace store has only the SQLite one, so its suite runs against
-//! that until a second arrives. The pending-authentication trait has a
-//! third, on PostgreSQL, which runs when a PostgreSQL is reachable.
+//! that until a second arrives. Traits that have been ported to
+//! PostgreSQL have a third, which runs when a PostgreSQL is reachable.
 //!
 //! A case asserts only what a caller can observe through the trait: what
 //! you write comes back, what you delete is gone, what should conflict

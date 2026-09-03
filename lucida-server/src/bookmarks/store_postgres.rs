@@ -1,43 +1,42 @@
-//! SQLite-backed `BookmarkStore`.
+//! PostgreSQL-backed `BookmarkStore`.
 //!
-//! Shares the SQLite file and pool that [`crate::storage`] opened, as
-//! every SQLite store does.
+//! Shares the PostgreSQL pool that [`crate::storage`] opened, as every
+//! PostgreSQL store does.
 //!
-//! The statements come from [`super::store_sql`], which the PostgreSQL
-//! store runs too, so this module holds the binding and the row mapping
-//! and no SQL of its own. Read it beside `store_postgres`: what differs
-//! is the pool type, the type name, and how `view_json` is bound and
-//! decoded, because the column is `TEXT` here and `JSONB` there.
+//! The statements come from [`super::store_sql`], which the SQLite store
+//! runs too, so this module holds the binding and the row mapping and no
+//! SQL of its own. Read it beside `store_sqlite`: what differs is the
+//! pool type, the type name, and how `view_json` is bound and decoded,
+//! because the column is `JSONB` here and `TEXT` there. ADR-0058 records
+//! why the SQL is shared and the Rust is not.
 
 use async_trait::async_trait;
-use chrono::Utc;
-use sqlx::{Row, SqlitePool};
+use chrono::{DateTime, SubsecRound, Utc};
+use sqlx::types::Json;
+use sqlx::{PgPool, Row};
 
 use lucida_core::saved_view::SavedView;
 
 use super::store::{Bookmark, BookmarkStore, StoreError, attachment_set};
 use super::store_sql::{self as sql, map_err, map_stored_view};
 
-/// Production store. Wraps the `SqlitePool` the storage backend opened,
-/// so every table rides one connection budget.
+/// PostgreSQL bookmark store. Holds a `PgPool` clone, so it is cheap to
+/// build and cheap to share.
 #[derive(Debug, Clone)]
-pub struct SqliteBookmarkStore {
-    pool: SqlitePool,
+pub struct PostgresBookmarkStore {
+    pool: PgPool,
 }
 
-impl SqliteBookmarkStore {
+impl PostgresBookmarkStore {
     /// Build the store from an already-opened pool. The migrator does
     /// not run here: the storage backend runs it once, before any store
     /// exists.
-    pub(crate) fn new(pool: SqlitePool) -> Self {
+    pub(crate) fn new(pool: PgPool) -> Self {
         Self { pool }
     }
 
     /// Turn bookmark rows into records, fetching each one's attachments.
-    async fn gather(
-        &self,
-        rows: Vec<sqlx::sqlite::SqliteRow>,
-    ) -> Result<Vec<Bookmark>, StoreError> {
+    async fn gather(&self, rows: Vec<sqlx::postgres::PgRow>) -> Result<Vec<Bookmark>, StoreError> {
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
             let id: String = row.get("id");
@@ -48,15 +47,8 @@ impl SqliteBookmarkStore {
     }
 }
 
-/// A view that will not serialize. Nothing the caller sent can provoke
-/// it — `SavedView` is a plain struct — so it is a backend fault rather
-/// than a bad payload.
-fn map_outgoing_view(e: serde_json::Error) -> StoreError {
-    StoreError::Backend(format!("view_json serialize: {e}"))
-}
-
 #[async_trait]
-impl BookmarkStore for SqliteBookmarkStore {
+impl BookmarkStore for PostgresBookmarkStore {
     async fn create(
         &self,
         name: &str,
@@ -66,10 +58,11 @@ impl BookmarkStore for SqliteBookmarkStore {
         view: SavedView,
     ) -> Result<Bookmark, StoreError> {
         let id = uuid::Uuid::new_v4().to_string();
-        let created_at = Utc::now();
-        // A `TEXT` column takes the serialized view as a bound string.
-        // The PostgreSQL store cannot: see the note on its `create`.
-        let view_json = serde_json::to_string(&view).map_err(map_outgoing_view)?;
+        // `TIMESTAMPTZ` holds microseconds, and the clock offers
+        // nanoseconds. Round the value down before it is written, so the
+        // instant this call reports is the instant a later read reports
+        // rather than one the column could not keep.
+        let created_at = Utc::now().trunc_subsecs(6);
         let datasets = attachment_set(datasets);
 
         let mut tx = self.pool.begin().await.map_err(map_err)?;
@@ -79,7 +72,12 @@ impl BookmarkStore for SqliteBookmarkStore {
             .bind(created_by)
             .bind(created_by_name)
             .bind(created_at)
-            .bind(&view_json)
+            // A `JSONB` column refuses a bound `String`, which is what
+            // the SQLite store's `TEXT` column takes. `Json` sends the
+            // view as JSON instead. A `$6::jsonb` cast would do the same
+            // and would end the sharing for this statement, because
+            // SQLite rejects `::` outright.
+            .bind(Json(&view))
             .execute(&mut *tx)
             .await
             .map_err(map_err)?;
@@ -162,7 +160,7 @@ impl BookmarkStore for SqliteBookmarkStore {
         // without a second round-trip.
         //
         // Only `bookmarks` is deleted: `bookmark_datasets` declares
-        // `ON DELETE CASCADE` and the SQLite backend enforces it.
+        // `ON DELETE CASCADE` and PostgreSQL enforces it unconditionally.
         let mut tx = self.pool.begin().await.map_err(map_err)?;
         let row = sqlx::query(sql::SELECT_ONE)
             .bind(id)
@@ -197,7 +195,7 @@ impl BookmarkStore for SqliteBookmarkStore {
     }
 }
 
-async fn fetch_datasets_for(pool: &SqlitePool, id: &str) -> Result<Vec<String>, StoreError> {
+async fn fetch_datasets_for(pool: &PgPool, id: &str) -> Result<Vec<String>, StoreError> {
     let rows = sqlx::query(sql::SELECT_ATTACHMENTS)
         .bind(id)
         .fetch_all(pool)
@@ -207,17 +205,23 @@ async fn fetch_datasets_for(pool: &SqlitePool, id: &str) -> Result<Vec<String>, 
 }
 
 fn row_to_bookmark(
-    row: sqlx::sqlite::SqliteRow,
+    row: sqlx::postgres::PgRow,
     datasets: Vec<String>,
 ) -> Result<Bookmark, StoreError> {
-    let view_json: String = row.get("view_json");
-    let view: SavedView = serde_json::from_str(&view_json).map_err(map_stored_view)?;
+    // `JSONB` hands back a parsed value rather than the characters that
+    // were written, so the view is rebuilt from that rather than from
+    // text. What PostgreSQL keeps is the JSON document, not its
+    // spelling: key order, whitespace, and number form are all its own
+    // by the time it comes back. The store's contract is the decoded
+    // `SavedView`, which none of that changes.
+    let view_json: serde_json::Value = row.get("view_json");
+    let view: SavedView = serde_json::from_value(view_json).map_err(map_stored_view)?;
     Ok(Bookmark {
         id: row.get("id"),
         name: row.get("name"),
         created_by: row.get("created_by"),
         created_by_name: row.get("created_by_name"),
-        created_at: row.get("created_at"),
+        created_at: row.get::<DateTime<Utc>, _>("created_at"),
         datasets,
         view,
     })
@@ -226,42 +230,79 @@ fn row_to_bookmark(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::test_support::sqlite_pool;
+    use crate::storage::test_support::{PostgresTestDatabase, postgres_backend};
+
+    /// Bookmarks to seed before reading a query plan, and dataset URLs
+    /// per bookmark.
+    ///
+    /// PostgreSQL's planner weighs an index scan against the cost of
+    /// reading the whole table, and on a table of a few hundred rows the
+    /// scan honestly wins — so a plan read over a token row would assert
+    /// the opposite of what it means to. These counts put the attachment
+    /// table well past the size where that flips, with room to spare, and
+    /// each table is seeded by a single statement.
+    const SEEDED_BOOKMARKS: i64 = 2_000;
+    const SEEDED_URLS_EACH: i64 = 4;
+
+    fn store(db: &PostgresTestDatabase) -> PostgresBookmarkStore {
+        PostgresBookmarkStore::new(db.backend.pool().clone())
+    }
 
     /// The any-overlap SELECT must go through `idx_bookmark_datasets_url`.
     /// Drop the index from the migration and the query degrades to a full
     /// table scan, which no assertion about the rows it returns would
-    /// notice. So this one reads the plan, and it stays here rather than
-    /// in the conformance suite because a query plan belongs to an engine
-    /// and `EXPLAIN QUERY PLAN` is SQLite's own spelling. The PostgreSQL
-    /// store asserts the same guarantee its own way.
+    /// notice.
     ///
-    /// One seeded row is enough: SQLite's planner picks an index it can
-    /// use without weighing it against the table size.
+    /// The SQLite store asserts the same guarantee, and asserts it
+    /// differently: `EXPLAIN QUERY PLAN` is SQLite's own spelling and its
+    /// planner needs no statistics to prefer an index it can use. A query
+    /// plan belongs to an engine, so neither assertion can be a
+    /// conformance case, and the two are free to be shaped differently.
     #[tokio::test]
     async fn the_overlap_query_goes_through_the_dataset_url_index() {
-        let store = SqliteBookmarkStore::new(sqlite_pool().await);
-        store
-            .create(
-                "seed",
-                "author@example.com",
-                "Author",
-                vec!["file:///data/a.zarr".to_string()],
-                SavedView::empty([800, 600]),
-            )
-            .await
-            .unwrap();
+        let Some(db) = postgres_backend().await else {
+            return;
+        };
+        let pool = db.backend.pool();
 
-        let plan_rows = sqlx::query(&format!("EXPLAIN QUERY PLAN {}", sql::select_by_overlap(2)))
-            .bind("file:///data/a.zarr")
-            .bind("file:///data/b.zarr")
-            .fetch_all(&store.pool)
+        sqlx::query(
+            "INSERT INTO bookmarks \
+             SELECT 'seed-' || g, 'seed', 'author@example.com', 'Author', now(), '{}' \
+             FROM generate_series(1, $1) g",
+        )
+        .bind(SEEDED_BOOKMARKS)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO bookmark_datasets \
+             SELECT 'seed-' || g, 'file:///data/' || g || '-' || k || '.zarr' \
+             FROM generate_series(1, $1) g, generate_series(1, $2) k",
+        )
+        .bind(SEEDED_BOOKMARKS)
+        .bind(SEEDED_URLS_EACH)
+        .execute(pool)
+        .await
+        .unwrap();
+        // Without statistics the planner is guessing at the table size,
+        // and the seeded rows are exactly what it has to weigh.
+        for table in ["bookmarks", "bookmark_datasets"] {
+            sqlx::query(&format!("ANALYZE {table}"))
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+
+        let plan_rows = sqlx::query(&format!("EXPLAIN {}", sql::select_by_overlap(2)))
+            .bind("file:///data/1-1.zarr")
+            .bind("file:///data/2-1.zarr")
+            .fetch_all(pool)
             .await
             .unwrap();
 
         let plan = plan_rows
             .iter()
-            .map(|row| row.get::<String, _>("detail"))
+            .map(|row| row.get::<String, _>("QUERY PLAN"))
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
@@ -274,16 +315,13 @@ mod tests {
     /// cascade takes the attachments with it. Through the trait an
     /// orphaned attachment is invisible — the overlap query joins back to
     /// a bookmark that is gone — so the conformance suite cannot see one
-    /// and this counts the rows directly.
-    ///
-    /// SQLite only enforces a foreign key on a connection that asked it
-    /// to, which is a property of how this backend opens one rather than
-    /// of the schema, so the cascade is worth asserting here as well as
-    /// beside the PostgreSQL store.
+    /// and this counts the rows directly, as the SQLite store does.
     #[tokio::test]
     async fn deleting_a_bookmark_leaves_no_attachment_rows_behind() {
-        let pool = sqlite_pool().await;
-        let store = SqliteBookmarkStore::new(pool.clone());
+        let Some(db) = postgres_backend().await else {
+            return;
+        };
+        let store = store(&db);
         let created = store
             .create(
                 "doomed",
@@ -301,9 +339,42 @@ mod tests {
         store.delete(&created.id).await.unwrap();
 
         let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookmark_datasets")
-            .fetch_one(&pool)
+            .fetch_one(db.backend.pool())
             .await
             .unwrap();
         assert_eq!(remaining, 0, "the attachments went with the bookmark");
+    }
+
+    /// The written view reaches the column as JSON rather than as text.
+    /// A `JSONB` column refuses a bound `String`, so this is the one
+    /// binding the two SQL stores cannot share, and the refusal is silent
+    /// in the sense that nothing but a write proves the bind was right.
+    #[tokio::test]
+    async fn the_view_is_written_as_json_not_as_text() {
+        let Some(db) = postgres_backend().await else {
+            return;
+        };
+        let store = store(&db);
+        let created = store
+            .create(
+                "json",
+                "author@example.com",
+                "Author",
+                vec![],
+                SavedView::empty([800, 600]),
+            )
+            .await
+            .unwrap();
+
+        // `->>` reaches into the document, which only answers if the
+        // column holds a JSON object rather than a string that looks
+        // like one.
+        let version: Option<String> =
+            sqlx::query_scalar("SELECT view_json ->> 'v' FROM bookmarks WHERE id = $1")
+                .bind(&created.id)
+                .fetch_one(db.backend.pool())
+                .await
+                .unwrap();
+        assert_eq!(version.as_deref(), Some("1"), "the view is a JSON document");
     }
 }

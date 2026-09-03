@@ -5,8 +5,9 @@
 //! SQL-backed production stores and the in-memory test store without
 //! changing call sites.
 //!
-//! The implementations are siblings, one module each: [`store_sqlite`]
-//! and [`store_memory`].
+//! The implementations are siblings, one module each: [`store_sqlite`],
+//! [`store_postgres`], and [`store_memory`]. The two SQL ones run the
+//! statements in [`store_sql`] rather than each holding a copy.
 //!
 //! The production schema lives in the baseline migration. Two tables:
 //!
@@ -14,14 +15,16 @@
 //!   in `view_json`.
 //! - `bookmark_datasets` — side table mapping `(bookmark_id, dataset_url)`,
 //!   indexed on `dataset_url` to power the any-overlap SELECT the sidebar
-//!   runs. The SQL store reads its own query plan in tests so the index
+//!   runs. Each SQL store reads its own query plan in tests so the index
 //!   isn't silently dropped from the migration.
 //!
 //! Create is transactional across the two tables. Delete touches only
 //! `bookmarks`; the attachments go with it through the schema's cascade.
 //!
 //! [`store_sqlite`]: super::store_sqlite
+//! [`store_postgres`]: super::store_postgres
 //! [`store_memory`]: super::store_memory
+//! [`store_sql`]: super::store_sql
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
