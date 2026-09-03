@@ -432,6 +432,127 @@ to a table, a column, or a query plan is an implementation test instead. See
 [ADR 0056](wiki/decisions/0056-store-behavior-is-a-conformance-suite.md).
 _Avoid_: contract test, shared test, compliance suite, integration test
 
+## Identity and membership
+
+**Principal**:
+Who a request is from: an email address, how to display them, and whether the
+caller administers this server. Every mode resolves whatever credential
+arrived into one, and the code that records ownership or checks a permission
+reads the principal and never the credential behind it. See
+[ADR 0015](wiki/decisions/0015-server-stored-bookmarks-and-auth-seam.md).
+_Avoid_: user, account, caller, identity (a provider asserts an identity; a
+principal is what lucida resolved it to)
+
+**Auth mode**:
+Which of three ways this server learns who a caller is: `disabled` gives every
+caller the same local principal, `google` runs a sign-in of its own, and `iap`
+reads the identity a perimeter established. One mode is in force for the whole
+server, set by configuration or inferred from the bind address. See
+[ADR 0018](wiki/decisions/0018-auth-mode-auto-detect-by-bind-address.md) for how
+a mode is chosen and
+[ADR 0016](wiki/decisions/0016-backend-mediated-oauth-with-session-cookies.md)
+for the sign-in `google` runs.
+_Avoid_: auth backend, strategy, provider (a provider is one implementation a
+mode selects; the mode is the selection)
+
+**Perimeter**:
+An authenticating layer in front of lucida that decides who reaches the server
+at all. Not lucida's own authentication and no substitute for it. A caller the
+perimeter admits still holds whatever rights their principal carries, and no
+more. See
+[ADR 0060](wiki/decisions/0060-iap-mode-reads-the-identity-the-perimeter-established.md).
+_Avoid_: proxy (a proxy asset is a placeholder volume — see above — so say
+perimeter even where the thing in front is called a proxy), gateway, edge,
+front door, single sign-on
+
+**Assertion**:
+The signed statement a perimeter attaches to each request it forwards, naming
+the caller it authenticated. Something to verify, never something to trust. See
+[ADR 0060](wiki/decisions/0060-iap-mode-reads-the-identity-the-perimeter-established.md).
+_Avoid_: token (a caller holds and presents a token; an assertion is minted
+about them), header, ticket
+
+**Audience**:
+The part of an assertion that names which deployment it was minted for, matched
+exactly and with nothing that turns the check off. A perimeter signs every
+assertion it issues with the same keys, so a signature alone proves only that
+some perimeter minted this one. The audience is what narrows that to this
+deployment. See
+[ADR 0060](wiki/decisions/0060-iap-mode-reads-the-identity-the-perimeter-established.md).
+_Avoid_: recipient, scope, tenant, client id
+
+**Key set**:
+The published keys lucida checks an assertion's signature against. A
+perimeter's key set is its own, so checking against a different one either
+rejects everything or, worse, passes without meaning. See
+[ADR 0060](wiki/decisions/0060-iap-mode-reads-the-identity-the-perimeter-established.md).
+_Avoid_: JWKS (the format's name; in prose say key set), certificate, public
+key (a set holds several, and an assertion names which one signed it)
+
+**Sign-out URL**:
+Where a mode sends a caller who signs out, or the mode's statement that it has
+none. Every mode has to answer. A mode with no session to end answers that it
+has none, so the control disappears rather than clearing nothing. Where a
+perimeter established the identity, signing out is the perimeter's to perform
+and not this server's. See
+[ADR 0019](wiki/decisions/0019-post-logout-marker-cookie-and-prompt-select-account.md)
+and
+[ADR 0060](wiki/decisions/0060-iap-mode-reads-the-identity-the-perimeter-established.md).
+_Avoid_: logout endpoint (one mode's answer, not the concept), logout route,
+sign-out flow
+
+**Administrator**:
+A principal who administers this server. Server-wide, and unrelated to any
+authority inside a workspace: an owner runs one workspace, an administrator
+runs the server. A perimeter decides who reaches the server and holds no
+opinion about who administers it.
+_Avoid_: owner (an owner is a workspace role — see below), superuser, root,
+privileged user
+
+**Dev principal**:
+The principal disabled mode gives a caller who presents nothing, and any
+principal a developer puts in its place from the same browser. A
+local-development convenience and never a security boundary. The default holds
+no administrator rights, and replacing it is available only where nothing but
+the local machine can reach the server. See
+[ADR 0018](wiki/decisions/0018-auth-mode-auto-detect-by-bind-address.md).
+_Avoid_: test user, fake user, impersonation
+
+**Membership**:
+Who belongs to a workspace and with what authority: a list of email addresses,
+each carrying one role. A member is added, never inferred. Separate from a
+shareable link, which can reach people who are not members.
+_Avoid_: access list, permissions, collaborators, sharing (sharing is the act;
+membership is the record)
+
+**Role**:
+What one member may do in one workspace: `viewer`, `editor`, or `owner`. Three,
+exhaustively. Every member carries exactly one, and it is held per workspace
+rather than being a property of the person.
+_Avoid_: permission, access level, group, admin (an administrator is
+server-wide — see above)
+
+**Creator**:
+The principal who made a workspace or a saved view, recorded on it at creation.
+Distinct from an owner, which is a role a member holds now. Who created
+something does not change when roles do.
+_Avoid_: owner (see above), author, originator
+
+**Saved-view visibility**:
+Whether a workspace's saved view is `shared`, `personal`, or `proposed`. A
+personal view belongs to one member, and nobody else sees it, owners included.
+A proposed view is a viewer's bid to share: still theirs, and also offered to
+editors for review.
+_Avoid_: private (say personal), draft, pending, published
+
+**Per-member state**:
+What a workspace records for one member rather than for everyone: which
+workspaces they pinned, which they opened recently, and the view they last had
+open. Keyed per member, so nobody else sees it, and never a stand-in for the
+workspace-wide default view.
+_Avoid_: preferences, user settings, session state, personal view (a personal
+saved view is a different thing — see above)
+
 ## Surfaces
 
 **Monitor**:
