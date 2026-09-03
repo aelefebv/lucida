@@ -48,9 +48,8 @@ You will need:
   manifests already claim. PostgreSQL needs a server the cluster can reach,
   an empty database, a role that can create tables in it, and room for up
   to 10 connections per replica. Have its connection string ready before
-  step 3:
-  the string carries the password, so it belongs in a Secret rather than in
-  a manifest. For which backend to run, see
+  step 3: the string carries the password, so it belongs in a Secret rather
+  than in a manifest. For which backend to run, see
   [Choose a storage backend](#choose-a-storage-backend) later on this page.
 - **A Google Cloud project** if you intend to use `LUCIDA_AUTH=google` (the
   v1 supported provider). You do not need any GCP-managed services for this
@@ -112,9 +111,9 @@ starts on an empty database and whatever the old one held stays where it is.
 | `sqlite:///var/lib/lucida/lucida.db` | SQLite at an absolute path. Three slashes: two from the scheme, one from the root. |
 | `postgres://<DB-USER>:<DB-PASSWORD>@<DB-HOST>:5432/<DB-NAME>` | PostgreSQL. `postgresql://` is accepted as a second spelling of the same scheme. |
 
-Lucida migrates whichever database it opens, at startup, and a server that
-cannot migrate exits rather than answering requests against a half-built
-schema. It prints the connection string with the credentials replaced by
+Lucida migrates whichever database it opens, at startup. A server that
+cannot migrate exits, so no request ever reaches a half-built schema. It
+prints the connection string with the credentials replaced by
 `<redacted>` — in the startup log and in every storage error — so a
 PostgreSQL password does not reach your log aggregator.
 
@@ -247,12 +246,12 @@ ReadWriteOnce PVC holding the database beside the proxy cache, and a
 lucida at PostgreSQL and none of that is load-bearing any more, because the
 state a pod had to keep to itself now lives on the database server.
 
-The shape is documented here rather than shipped as a second set of files.
+The shape lives here as prose, not as a second set of files.
 `kubectl apply -f k8s/` applies the whole directory, so a second Deployment
 sitting in it would be applied by accident, and a copy of a 200-line
-manifest drifts from the one it varies. Keeping cluster-shaped variants in
-prose is what [ADR-0021](../../wiki/decisions/0021-deployment-artifacts-as-reference-templates.md)
-already asks for.
+manifest drifts from the one it varies. Documenting a deployment variant as
+text is what [ADR-0021](../../wiki/decisions/0021-deployment-artifacts-as-reference-templates.md)
+already asks for, and it is how this runbook handles per-cloud identity too.
 
 Three changes, starting from the customized manifests:
 
@@ -293,9 +292,9 @@ Three changes, starting from the customized manifests:
 
 Two consequences worth planning for. The proxy cache is per-pod under
 `emptyDir`, so each replica warms its own and every restart starts cold.
-Size the `sizeLimit` above for one pod's cache rather than the whole
-deployment's; the 20Gi is a starting point, and without any limit the cache
-draws on the node's ephemeral storage until the kubelet evicts the pod. And
+Size the `sizeLimit` above for one pod's cache, not the whole deployment's;
+the 20Gi is a starting point, and without any limit the cache draws on the
+node's ephemeral storage until the kubelet evicts the pod. And
 `LUCIDA_DATA_DIR` points into that same empty directory, so drop the
 variable unless you mount datasets separately — a ReadOnlyMany volume, or a
 bucket URL that needs no volume at all.
@@ -427,8 +426,8 @@ fail-fast startup errors:
   NetworkPolicy between the pod and the database.
 - `cannot migrate the database at …` — lucida connected and could not build
   the schema. The usual cause is a role that cannot create tables in the
-  target database. No request is served against a half-built schema, so the
-  pod stays down until the grant is fixed.
+  target database. The pod stays down until the role has the grant it
+  needs.
 
 **Sign-in flow.** Visit `https://<YOUR-EXTERNAL-HOSTNAME>` in a browser.
 Click sign-in. You should be redirected to Google, complete the consent
@@ -480,8 +479,8 @@ the pod's disk is authoritative. Back the database up the way you back up
 any other database on that server. Lucida adds no requirement of its own.
 
 Under both, the **proxy on-disk cache** at `LUCIDA_PROXY_CACHE_DIR` is
-recomputable from the sources it mirrors, so backing it up saves re-fetching
-rather than preventing loss. And `/var/lib/lucida/data/`, if you set
+recomputable from the sources it mirrors, so backing it up only saves you
+the re-fetch. And `/var/lib/lucida/data/`, if you set
 `LUCIDA_DATA_DIR`, is your dataset directory: lucida only reads from it, so
 back it up however your dataset workflow handles bulk data.
 
