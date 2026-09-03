@@ -1,16 +1,15 @@
 //! PostgreSQL storage backend.
 //!
 //! Connects to the server named by a `postgres:` connection string, runs
-//! the bundled PostgreSQL migrations, and serves the stores ported to it
-//! so far.
+//! the bundled PostgreSQL migrations, and serves all six stores.
 //!
-//! **Not all six stores yet, so this is not a [`StorageBackend`].** The
-//! trait hands out all six, [`super::open`] promises that every entry in
-//! [`Scheme::ALL`] reaches a backend that comes up, and a partial backend
-//! honors neither. So there is no `Scheme::Postgres`, nothing outside the
-//! tests constructs this type, and `LUCIDA_DB_URL=postgres://…` still
-//! fails at startup naming the schemes that work. Runtime selection lands
-//! with the last store. ADR-0058 records the pattern each port follows.
+//! **Reached only by tests, so this is not a [`StorageBackend`] yet.**
+//! [`super::open`] promises that every entry in [`Scheme::ALL`] reaches a
+//! backend that comes up, so there is no `Scheme::Postgres`, nothing
+//! outside the tests constructs this type, and `LUCIDA_DB_URL=postgres://…`
+//! still fails at startup naming the schemes that work. Every store is
+//! ported now, so what remains is the wiring rather than another port.
+//! ADR-0058 records the pattern each one followed.
 //!
 //! This module is the only place in the server that names a PostgreSQL
 //! type. Everything above it works through the store traits.
@@ -32,6 +31,7 @@ use crate::auth::{
     PostgresSessionStore,
 };
 use crate::bookmarks::{BookmarkStore, PostgresBookmarkStore};
+use crate::workspace::{PostgresWorkspaceStore, WorkspaceStore};
 
 /// Migrations bundled into the binary at compile time, from the
 /// PostgreSQL directory. The SQLite baseline is the same schema in the
@@ -121,6 +121,10 @@ impl PostgresStorageBackend {
 
     pub fn bookmarks(&self) -> Arc<dyn BookmarkStore> {
         Arc::new(PostgresBookmarkStore::new(self.pool.clone()))
+    }
+
+    pub fn workspaces(&self) -> Arc<dyn WorkspaceStore> {
+        Arc::new(PostgresWorkspaceStore::new(self.pool.clone()))
     }
 
     /// The pool behind the store, for tests that drive SQL directly.
@@ -283,10 +287,10 @@ mod tests {
         );
     }
 
-    /// What a `JSONB` column costs the Rust, for the five stores still to
-    /// port. Every store serializes its payload with `serde_json` and
-    /// binds the resulting `String`, which a `TEXT` column takes and a
-    /// `JSONB` column refuses.
+    /// What a `JSONB` column costs the Rust, for every store still to
+    /// port. Each one serializes its payload with `serde_json` and binds
+    /// the resulting `String`, which a `TEXT` column takes and a `JSONB`
+    /// column refuses.
     ///
     /// The way out is a `sqlx::types::Json` bind rather than the
     /// `$2::jsonb` cast the case above uses, because `::` is PostgreSQL

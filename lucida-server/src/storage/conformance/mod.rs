@@ -4,9 +4,9 @@
 //! One suite per store trait, written once and run against every
 //! implementation of that trait. Five of the six traits ship an in-memory
 //! store beside the SQLite one, and both must answer the same way; the
-//! workspace store has only the SQLite one, so its suite runs against
-//! that until a second arrives. A trait already ported to PostgreSQL has
-//! a third, which runs when a PostgreSQL is reachable.
+//! workspace store has no in-memory implementation, so its suite runs
+//! against the SQL ones. Every trait also has a PostgreSQL
+//! implementation, which runs when a PostgreSQL is reachable.
 //!
 //! A case asserts only what a caller can observe through the trait: what
 //! you write comes back, what you delete is gone, what should conflict

@@ -1,23 +1,34 @@
-//! `SqliteWorkspaceStore`: the production SQLite backend for
-//! [`WorkspaceStore`], including the row mappers that decode persisted
-//! rows back into the domain structs.
+//! PostgreSQL-backed [`WorkspaceStore`].
 //!
-//! The statements come from [`super::sql`], which the PostgreSQL store
-//! runs too, so this module holds the binding and the row mapping and no
-//! SQL of its own. Read it beside `postgres`: what differs is the pool
-//! type, the row type, and how a JSON column is bound and decoded — a
-//! `TEXT` column here takes the serialized string, where a `JSONB` column
-//! there refuses it. ADR-0058 records why the text is shared and the Rust
-//! is not.
+//! Shares the PostgreSQL pool that [`crate::storage`] opened, as every
+//! PostgreSQL store does.
+//!
+//! The statements come from [`super::sql`], which the SQLite store runs
+//! too, so this module holds the binding, the row mapping, and nothing
+//! else. Read it beside `sqlite`; what differs is the pool and row types,
+//! the JSON columns, and the clock.
+//!
+//! The baseline gives four of this store's columns the `JSONB` type, and
+//! PostgreSQL refuses a bound Rust `String` for one of those outright, so
+//! every payload goes in as a [`sqlx::types::Json`] and comes back as a
+//! [`serde_json::Value`]. A `$n::jsonb` cast would have kept the `String`
+//! bind, but `::` is syntax SQLite rejects, so casting would end the
+//! sharing for those statements. The clock is [`now`], and the note there
+//! says why it is not `Utc::now`.
+//!
+//! ADR-0058 records why the text is shared and the Rust is not.
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, Utc};
+use async_trait::async_trait;
+use chrono::{DateTime, SubsecRound, Utc};
 use lucida_content::DatasetId;
 use lucida_core::auth_principal::AuthPrincipal;
 use lucida_core::saved_view::SavedView;
 use lucida_core::scene::DocumentState;
-use sqlx::{Row, Sqlite, SqlitePool};
+use sqlx::postgres::PgRow;
+use sqlx::types::Json;
+use sqlx::{PgPool, Postgres, Row};
 
 use crate::workspace::types::{
     SavedViewVisibility, WorkspaceAdminDetails, WorkspaceAdminSummary, WorkspaceDatasetSource,
@@ -30,15 +41,47 @@ use super::{
     map_json_out, map_saved_view_json_in, map_saved_view_json_out, map_sql, normalize_email, sql,
 };
 
-use async_trait::async_trait;
-
-#[derive(Clone)]
-pub struct SqliteWorkspaceStore {
-    pool: SqlitePool,
+/// The instant a write is stamped with.
+///
+/// Truncated to microseconds because that is `TIMESTAMPTZ`'s resolution:
+/// a store method returns the record it just wrote without reading it
+/// back, so the value it hands the caller has to be the value the next
+/// read will find. `Utc::now()` carries nanoseconds, and the difference is
+/// invisible until a caller compares what was returned against what comes
+/// back — which the conformance suite does. Truncating rather than
+/// rounding leaves a value PostgreSQL stores verbatim.
+fn now() -> DateTime<Utc> {
+    Utc::now().trunc_subsecs(6)
 }
 
-impl SqliteWorkspaceStore {
-    pub(crate) fn new(pool: SqlitePool) -> Self {
+/// A document on its way into a `JSONB` column.
+///
+/// Serialized to a [`serde_json::Value`] first rather than encoded
+/// straight from the struct, so a serialization failure is the same
+/// [`StoreError`] the SQLite store reports for it.
+fn document_payload(document: &DocumentState) -> Result<Json<serde_json::Value>, StoreError> {
+    serde_json::to_value(document)
+        .map(Json)
+        .map_err(map_json_out)
+}
+
+/// The same for a saved view, which has its own error variant.
+fn view_payload(view: &SavedView) -> Result<Json<serde_json::Value>, StoreError> {
+    serde_json::to_value(view)
+        .map(Json)
+        .map_err(map_saved_view_json_out)
+}
+
+#[derive(Debug, Clone)]
+pub struct PostgresWorkspaceStore {
+    pool: PgPool,
+}
+
+impl PostgresWorkspaceStore {
+    /// Build the store from an already-opened pool. The migrator does not
+    /// run here: the storage backend runs it once, before any store
+    /// exists.
+    pub(crate) fn new(pool: PgPool) -> Self {
         Self { pool }
     }
 
@@ -110,7 +153,7 @@ impl SqliteWorkspaceStore {
 }
 
 async fn touch_workspace(
-    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    tx: &mut sqlx::Transaction<'_, Postgres>,
     workspace_id: &str,
     now: DateTime<Utc>,
 ) -> Result<(), StoreError> {
@@ -123,26 +166,23 @@ async fn touch_workspace(
     Ok(())
 }
 
-/// Insert a brand-new, owner-only workspace row plus its owner membership row
-/// inside `tx`. Shared by `create_workspace` and `duplicate_workspace` so the
-/// "blank owned workspace" shape is defined in exactly one place.
+/// Insert a brand-new, owner-only workspace row plus its owner membership
+/// row inside `tx`. Shared by `create_workspace` and `duplicate_workspace`
+/// so the "blank owned workspace" shape is defined in exactly one place.
 ///
-/// `link_access` / `link_role` are deliberately NOT bound: the `workspaces`
-/// columns take their table defaults ('restricted' / 'viewer'), i.e. link
-/// access OFF. A duplicate therefore never inherits the source's sharing, and a
-/// freshly created workspace starts private — the security-critical invariant.
-/// Keeping the INSERT in one place hardens that link-off guarantee against
-/// future drift (a column added with a non-OFF default would otherwise have to
-/// be remembered at every call site). Callers pass pre-normalized values
-/// (`owner_email`, `name`, serialized `document_json`, `now`) so this is a pure
-/// persistence step with no policy of its own; `seq` is initialized to 0.
+/// `link_access` / `link_role` are deliberately NOT bound: the
+/// `workspaces` columns take their table defaults ('restricted' /
+/// 'viewer'), i.e. link access OFF. A duplicate therefore never inherits
+/// the source's sharing, and a freshly created workspace starts private —
+/// the security-critical invariant. Keeping the INSERT in one place
+/// hardens that link-off guarantee against future drift.
 async fn insert_blank_owned_workspace(
-    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    tx: &mut sqlx::Transaction<'_, Postgres>,
     id: &str,
     owner_email: &str,
     owner_display_name: &str,
     name: &str,
-    document_json: &str,
+    document: Json<serde_json::Value>,
     now: DateTime<Utc>,
 ) -> Result<(), StoreError> {
     sqlx::query(sql::INSERT_WORKSPACE)
@@ -151,7 +191,7 @@ async fn insert_blank_owned_workspace(
         .bind(owner_email)
         .bind(now)
         .bind(now)
-        .bind(document_json)
+        .bind(document)
         .execute(&mut **tx)
         .await
         .map_err(map_sql)?;
@@ -169,18 +209,18 @@ async fn insert_blank_owned_workspace(
 }
 
 #[async_trait]
-impl WorkspaceStore for SqliteWorkspaceStore {
+impl WorkspaceStore for PostgresWorkspaceStore {
     async fn create_workspace(
         &self,
         owner: &AuthPrincipal,
         name: Option<&str>,
     ) -> Result<WorkspaceRecord, StoreError> {
         let id = uuid::Uuid::new_v4().to_string();
-        let now = Utc::now();
+        let now = now();
         let owner_email = normalize_email(&owner.email);
         let name = default_workspace_name(name);
         let document = DocumentState::default();
-        let document_json = serde_json::to_string(&document).map_err(map_json_out)?;
+        let payload = document_payload(&document)?;
 
         let mut tx = self.pool.begin().await.map_err(map_sql)?;
         insert_blank_owned_workspace(
@@ -189,7 +229,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             &owner_email,
             &owner.display_name,
             &name,
-            &document_json,
+            payload,
             now,
         )
         .await?;
@@ -215,7 +255,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         name: &str,
     ) -> Result<Option<WorkspaceRecord>, StoreError> {
         let new_id = uuid::Uuid::new_v4().to_string();
-        let now = Utc::now();
+        let now = now();
         let owner_email = normalize_email(&owner.email);
         let name = default_workspace_name(Some(name));
 
@@ -261,11 +301,10 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         }
 
         // --- Document: remap every dataset-id reference onto the copy's ids. ---
-        let source_document_json: String = source_row.get("document_json");
         let mut document: DocumentState =
-            serde_json::from_str(&source_document_json).map_err(map_json_in)?;
+            serde_json::from_value(source_row.get("document_json")).map_err(map_json_in)?;
         document.remap_dataset_ids(&remap);
-        let document_json = serde_json::to_string(&document).map_err(map_json_out)?;
+        let document_payload = document_payload(&document)?;
 
         // New workspace row + owner-only membership. Shared with
         // `create_workspace` via `insert_blank_owned_workspace`, which also owns
@@ -279,7 +318,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             &owner_email,
             &owner.display_name,
             &name,
-            &document_json,
+            document_payload,
             now,
         )
         .await?;
@@ -313,9 +352,8 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         for row in &source_view_rows {
             let old_view_id: String = row.get("id");
             let view_name: String = row.get("name");
-            let view_json: String = row.get("view_json");
             let mut view: SavedView =
-                serde_json::from_str(&view_json).map_err(map_saved_view_json_in)?;
+                serde_json::from_value(row.get("view_json")).map_err(map_saved_view_json_in)?;
             view.remap_dataset_ids(&remap);
             // Copy-point defense: the manager's create/update paths run
             // `workspace_saved_view_payload` (which clears `datasets`), but a
@@ -325,8 +363,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             // (decision 0014). `remap_dataset_ids` intentionally leaves
             // URL-keyed `datasets` alone; this is the explicit strip.
             view.clear_source_urls();
-            let remapped_view_json =
-                serde_json::to_string(&view).map_err(map_saved_view_json_out)?;
+            let remapped_view = view_payload(&view)?;
             let new_view_id = uuid::Uuid::new_v4().to_string();
 
             sqlx::query(sql::INSERT_COPIED_SAVED_VIEW)
@@ -337,7 +374,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
                 .bind(&owner.display_name)
                 .bind(now)
                 .bind(now)
-                .bind(&remapped_view_json)
+                .bind(remapped_view)
                 .execute(&mut *tx)
                 .await
                 .map_err(map_sql)?;
@@ -427,7 +464,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         include_archived: bool,
         limit: usize,
     ) -> Result<Vec<WorkspaceAdminSummary>, StoreError> {
-        let mut builder = sql::admin_search_query::<Sqlite>(query, include_archived, limit);
+        let mut builder = sql::admin_search_query::<Postgres>(query, include_archived, limit);
         let rows = builder
             .build()
             .fetch_all(&self.pool)
@@ -572,7 +609,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         name: &str,
     ) -> Result<Option<WorkspaceRecord>, StoreError> {
         let name = default_workspace_name(Some(name));
-        let now = Utc::now();
+        let now = now();
         let result = sqlx::query(sql::RENAME_WORKSPACE)
             .bind(name)
             .bind(now)
@@ -590,7 +627,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         &self,
         workspace_id: &str,
     ) -> Result<Option<WorkspaceRecord>, StoreError> {
-        let now = Utc::now();
+        let now = now();
         let result = sqlx::query(sql::ARCHIVE_WORKSPACE)
             .bind(now)
             .bind(now)
@@ -608,7 +645,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         &self,
         workspace_id: &str,
     ) -> Result<Option<WorkspaceRecord>, StoreError> {
-        let now = Utc::now();
+        let now = now();
         let result = sqlx::query(sql::RESTORE_WORKSPACE)
             .bind(now)
             .bind(workspace_id)
@@ -627,11 +664,11 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         seq: u64,
         document: &DocumentState,
     ) -> Result<(), StoreError> {
-        let document_json = serde_json::to_string(document).map_err(map_json_out)?;
-        let now = Utc::now();
+        let payload = document_payload(document)?;
+        let now = now();
         sqlx::query(sql::PERSIST_DOCUMENT)
             .bind(seq as i64)
-            .bind(document_json)
+            .bind(payload)
             .bind(now)
             .bind(workspace_id)
             .execute(&self.pool)
@@ -652,8 +689,8 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         seq: u64,
         document: &DocumentState,
     ) -> Result<(), StoreError> {
-        let now = Utc::now();
-        let document_json = serde_json::to_string(document).map_err(map_json_out)?;
+        let now = now();
+        let payload = document_payload(document)?;
         let mut tx = self.pool.begin().await.map_err(map_sql)?;
         sqlx::query(sql::UPSERT_DATASET_SOURCE)
             .bind(dataset_source_id)
@@ -679,7 +716,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
 
         sqlx::query(sql::PERSIST_DOCUMENT)
             .bind(seq as i64)
-            .bind(document_json)
+            .bind(payload)
             .bind(now)
             .bind(workspace_id)
             .execute(&mut *tx)
@@ -697,8 +734,8 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         seq: u64,
         document: &DocumentState,
     ) -> Result<(), StoreError> {
-        let now = Utc::now();
-        let document_json = serde_json::to_string(document).map_err(map_json_out)?;
+        let now = now();
+        let payload = document_payload(document)?;
         let mut tx = self.pool.begin().await.map_err(map_sql)?;
         sqlx::query(sql::DELETE_WORKSPACE_DATASET)
             .bind(workspace_id)
@@ -708,7 +745,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             .map_err(map_sql)?;
         sqlx::query(sql::PERSIST_DOCUMENT)
             .bind(seq as i64)
-            .bind(document_json)
+            .bind(payload)
             .bind(now)
             .bind(workspace_id)
             .execute(&mut *tx)
@@ -726,8 +763,8 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         seq: u64,
         document: &DocumentState,
     ) -> Result<(), StoreError> {
-        let now = Utc::now();
-        let document_json = serde_json::to_string(document).map_err(map_json_out)?;
+        let now = now();
+        let payload = document_payload(document)?;
         let mut tx = self.pool.begin().await.map_err(map_sql)?;
         sqlx::query(sql::RENAME_WORKSPACE_DATASET)
             .bind(display_name)
@@ -738,7 +775,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             .map_err(map_sql)?;
         sqlx::query(sql::PERSIST_DOCUMENT)
             .bind(seq as i64)
-            .bind(document_json)
+            .bind(payload)
             .bind(now)
             .bind(workspace_id)
             .execute(&mut *tx)
@@ -828,7 +865,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             return Ok(None);
         }
 
-        let now = Utc::now();
+        let now = now();
         let mut tx = self.pool.begin().await.map_err(map_sql)?;
         sqlx::query(sql::UPSERT_MEMBER)
             .bind(workspace_id)
@@ -858,7 +895,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
 
         let email = normalize_email(email);
         let display_name = default_member_display_name(&email, display_name);
-        let now = Utc::now();
+        let now = now();
         let mut tx = self.pool.begin().await.map_err(map_sql)?;
         sqlx::query(sql::UPSERT_OWNER_MEMBER)
             .bind(workspace_id)
@@ -882,7 +919,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         role: WorkspaceRole,
     ) -> Result<Option<WorkspaceMember>, StoreError> {
         let email = normalize_email(email);
-        let now = Utc::now();
+        let now = now();
         let mut tx = self.pool.begin().await.map_err(map_sql)?;
         let result = sqlx::query(sql::UPDATE_MEMBER_ROLE)
             .bind(role.as_str())
@@ -905,7 +942,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
 
     async fn remove_member(&self, workspace_id: &str, email: &str) -> Result<bool, StoreError> {
         let email = normalize_email(email);
-        let now = Utc::now();
+        let now = now();
         let mut tx = self.pool.begin().await.map_err(map_sql)?;
         let result = sqlx::query(sql::DELETE_MEMBER)
             .bind(workspace_id)
@@ -930,7 +967,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         link_access: WorkspaceLinkAccess,
         link_role: WorkspaceRole,
     ) -> Result<Option<WorkspaceSharingSettings>, StoreError> {
-        let now = Utc::now();
+        let now = now();
         let result = sqlx::query(sql::UPDATE_LINK_ACCESS)
             .bind(link_access.as_str())
             .bind(link_role.as_str())
@@ -992,8 +1029,8 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         }
 
         let id = uuid::Uuid::new_v4().to_string();
-        let now = Utc::now();
-        let view_json = serde_json::to_string(&view).map_err(map_saved_view_json_out)?;
+        let now = now();
+        let payload = view_payload(&view)?;
         let created_by_email = normalize_email(&created_by.email);
 
         let mut tx = self.pool.begin().await.map_err(map_sql)?;
@@ -1006,7 +1043,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             .bind(now)
             .bind(now)
             .bind(visibility.as_str())
-            .bind(&view_json)
+            .bind(payload)
             .execute(&mut *tx)
             .await
             .map_err(map_sql)?;
@@ -1037,17 +1074,15 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             return Ok(None);
         }
 
-        let now = Utc::now();
-        let view_json = view
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(map_saved_view_json_out)?;
+        let now = now();
+        // An absent payload reaches `COALESCE` as a NULL of the column's
+        // own type, so the column keeps what it had.
+        let payload = view.as_ref().map(view_payload).transpose()?;
 
         let mut tx = self.pool.begin().await.map_err(map_sql)?;
         let result = sqlx::query(sql::UPDATE_SAVED_VIEW)
             .bind(name)
-            .bind(view_json)
+            .bind(payload)
             .bind(now)
             .bind(workspace_id)
             .bind(saved_view_id)
@@ -1074,7 +1109,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             return Ok(false);
         }
 
-        let now = Utc::now();
+        let now = now();
         let mut tx = self.pool.begin().await.map_err(map_sql)?;
         let result = sqlx::query(sql::DELETE_SAVED_VIEW)
             .bind(workspace_id)
@@ -1103,7 +1138,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             return Ok(None);
         }
 
-        let now = Utc::now();
+        let now = now();
         let mut tx = self.pool.begin().await.map_err(map_sql)?;
         let result = sqlx::query(sql::SET_SAVED_VIEW_VISIBILITY)
             .bind(visibility.as_str())
@@ -1129,7 +1164,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         workspace_id: &str,
         saved_view_id: Option<&str>,
     ) -> Result<Option<WorkspaceRecord>, StoreError> {
-        let now = Utc::now();
+        let now = now();
         let result = sqlx::query(sql::SET_DEFAULT_SAVED_VIEW)
             .bind(saved_view_id)
             .bind(now)
@@ -1175,8 +1210,8 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         }
 
         let email = normalize_email(&principal.email);
-        let now = Utc::now();
-        let view_json = serde_json::to_string(&view).map_err(map_saved_view_json_out)?;
+        let now = now();
+        let payload = view_payload(&view)?;
         sqlx::query(sql::UPSERT_VIEWER_PROFILE)
             .bind(workspace_id)
             .bind(&email)
@@ -1184,7 +1219,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             .bind(now)
             .bind(now)
             .bind(seed_source)
-            .bind(&view_json)
+            .bind(payload)
             .execute(&self.pool)
             .await
             .map_err(map_sql)?;
@@ -1198,7 +1233,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         principal: &AuthPrincipal,
     ) -> Result<WorkspaceUserState, StoreError> {
         let email = normalize_email(&principal.email);
-        let now = Utc::now();
+        let now = now();
         sqlx::query(sql::RECORD_WORKSPACE_OPEN)
             .bind(&email)
             .bind(workspace_id)
@@ -1219,7 +1254,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         pinned: bool,
     ) -> Result<WorkspaceUserState, StoreError> {
         let email = normalize_email(&principal.email);
-        let now = Utc::now();
+        let now = now();
         if pinned {
             sqlx::query(sql::PIN_WORKSPACE)
                 .bind(&email)
@@ -1258,14 +1293,14 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         view: SavedView,
     ) -> Result<WorkspaceUserState, StoreError> {
         let email = normalize_email(&principal.email);
-        let now = Utc::now();
-        let view_json = serde_json::to_string(&view).map_err(map_saved_view_json_out)?;
+        let now = now();
+        let payload = view_payload(&view)?;
         sqlx::query(sql::SET_USER_LAST_VIEW)
             .bind(&email)
             .bind(workspace_id)
             .bind(now)
             .bind(now)
-            .bind(&view_json)
+            .bind(payload)
             .execute(&self.pool)
             .await
             .map_err(map_sql)?;
@@ -1283,7 +1318,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
     }
 }
 
-fn row_to_dataset_source(row: sqlx::sqlite::SqliteRow) -> WorkspaceDatasetSource {
+fn row_to_dataset_source(row: PgRow) -> WorkspaceDatasetSource {
     WorkspaceDatasetSource {
         workspace_dataset_id: DatasetId(row.get::<String, _>("workspace_dataset_id")),
         dataset_source_id: row.get("dataset_source_id"),
@@ -1292,7 +1327,7 @@ fn row_to_dataset_source(row: sqlx::sqlite::SqliteRow) -> WorkspaceDatasetSource
     }
 }
 
-fn row_to_summary(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceSummary, StoreError> {
+fn row_to_summary(row: PgRow) -> Result<WorkspaceSummary, StoreError> {
     let seq: i64 = row.get("seq");
     Ok(WorkspaceSummary {
         id: row.get("id"),
@@ -1310,7 +1345,7 @@ fn row_to_summary(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceSummary, Stor
     })
 }
 
-fn row_to_admin_summary(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceAdminSummary, StoreError> {
+fn row_to_admin_summary(row: PgRow) -> Result<WorkspaceAdminSummary, StoreError> {
     let seq: i64 = row.get("seq");
     Ok(WorkspaceAdminSummary {
         id: row.get("id"),
@@ -1329,9 +1364,8 @@ fn row_to_admin_summary(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceAdminSu
     })
 }
 
-fn row_to_record(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceRecord, StoreError> {
+fn row_to_record(row: PgRow) -> Result<WorkspaceRecord, StoreError> {
     let seq: i64 = row.get("seq");
-    let document_json: String = row.get("document_json");
     Ok(WorkspaceRecord {
         id: row.get("id"),
         name: row.get("name"),
@@ -1341,11 +1375,11 @@ fn row_to_record(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceRecord, StoreE
         archived_at: row.get("archived_at"),
         seq: seq.max(0) as u64,
         default_saved_view_id: row.get("default_saved_view_id"),
-        document: serde_json::from_str(&document_json).map_err(map_json_in)?,
+        document: serde_json::from_value(row.get("document_json")).map_err(map_json_in)?,
     })
 }
 
-fn row_to_member(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceMember, StoreError> {
+fn row_to_member(row: PgRow) -> Result<WorkspaceMember, StoreError> {
     Ok(WorkspaceMember {
         email: row.get("email"),
         role: WorkspaceRole::try_from(row.get::<String, _>("role").as_str())?,
@@ -1354,8 +1388,7 @@ fn row_to_member(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceMember, StoreE
     })
 }
 
-fn row_to_saved_view(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceSavedView, StoreError> {
-    let view_json: String = row.get("view_json");
+fn row_to_saved_view(row: PgRow) -> Result<WorkspaceSavedView, StoreError> {
     Ok(WorkspaceSavedView {
         id: row.get("id"),
         workspace_id: row.get("workspace_id"),
@@ -1365,14 +1398,11 @@ fn row_to_saved_view(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceSavedView,
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         visibility: SavedViewVisibility::try_from(row.get::<String, _>("visibility").as_str())?,
-        view: serde_json::from_str(&view_json).map_err(map_saved_view_json_in)?,
+        view: serde_json::from_value(row.get("view_json")).map_err(map_saved_view_json_in)?,
     })
 }
 
-fn row_to_viewer_profile(
-    row: sqlx::sqlite::SqliteRow,
-) -> Result<WorkspaceViewerProfile, StoreError> {
-    let view_json: String = row.get("view_json");
+fn row_to_viewer_profile(row: PgRow) -> Result<WorkspaceViewerProfile, StoreError> {
     Ok(WorkspaceViewerProfile {
         workspace_id: row.get("workspace_id"),
         user_email: row.get("user_email"),
@@ -1380,11 +1410,11 @@ fn row_to_viewer_profile(
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         seed_source: row.get("seed_source"),
-        view: serde_json::from_str(&view_json).map_err(map_saved_view_json_in)?,
+        view: serde_json::from_value(row.get("view_json")).map_err(map_saved_view_json_in)?,
     })
 }
 
-fn row_to_user_workspace_state(row: sqlx::sqlite::SqliteRow) -> WorkspaceUserState {
+fn row_to_user_workspace_state(row: PgRow) -> WorkspaceUserState {
     WorkspaceUserState {
         workspace_id: row.get("workspace_id"),
         last_opened_at: row.get("last_opened_at"),
@@ -1394,16 +1424,13 @@ fn row_to_user_workspace_state(row: sqlx::sqlite::SqliteRow) -> WorkspaceUserSta
 }
 
 /// Decode the persisted `last_view_json` (#700). `None` for the common
-/// "never set" case (NULL/empty). A malformed payload (e.g. from a future
-/// schema or a partial write) degrades to `None` rather than erroring the
-/// whole user-state read — the member simply gets no restored view and
-/// falls back to the default, never a broken workspace open.
-fn parse_opt_saved_view(raw: Option<String>) -> Option<SavedView> {
+/// "never set" case. A malformed payload (e.g. from a future schema)
+/// degrades to `None` rather than erroring the whole user-state read — the
+/// member simply gets no restored view and falls back to the default,
+/// never a broken workspace open.
+fn parse_opt_saved_view(raw: Option<serde_json::Value>) -> Option<SavedView> {
     let raw = raw?;
-    if raw.is_empty() {
-        return None;
-    }
-    match serde_json::from_str(&raw) {
+    match serde_json::from_value(raw) {
         Ok(view) => Some(view),
         Err(e) => {
             tracing::warn!("workspace.last_view_json_decode_failed: {e}");

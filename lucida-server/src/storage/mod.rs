@@ -20,8 +20,8 @@
 //!   [`Scheme`] enum that [`open`] dispatches on.
 //! - `sqlite` — [`SqliteStorageBackend`], the only backend [`open`] can
 //!   select.
-//! - `postgres` — [`PostgresStorageBackend`], which serves one of the six
-//!   stores and is reached only by tests. See ADR-0058.
+//! - `postgres` — [`PostgresStorageBackend`], which serves the stores
+//!   that have been ported and is reached only by tests. See ADR-0058.
 //! - `conformance` (tests) — one suite per store trait, run against
 //!   every implementation of that trait.
 //! - `test_support` (tests) — how a test opens a database, written once.
