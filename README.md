@@ -32,6 +32,22 @@ Drops the `127.0.0.1:` prefix so the host port-forward listens on every interfac
 
 For any production-shape deployment — multi-user identity, proper admin gating, internet-reachable hostname — sign-in is required. The click-by-click Google Cloud Console setup (provision an OAuth client, configure the redirect URI, supply the credentials to the container) lives in [`extras/deploy/RUNBOOK.md`](extras/deploy/RUNBOOK.md) §2 alongside the Kubernetes manifests in [`extras/deploy/k8s/`](extras/deploy/k8s/) and the single-host docker-compose alternative in [`extras/deploy/docker-compose.yml`](extras/deploy/docker-compose.yml). The RUNBOOK also covers the conceptual model: env-var contract, the choice between the SQLite and PostgreSQL storage backends, persistence and backups, OAuth provider extensibility, and per-cloud identity wiring.
 
+### Run behind Identity-Aware Proxy
+
+If a Google Cloud Identity-Aware Proxy already fronts your deployment, set `LUCIDA_AUTH=iap` and let it do the signing in. Lucida runs no sign-in flow of its own: it verifies the assertion IAP attaches to each request and reads the caller's email address out of it.
+
+```bash
+docker run --rm -p 9876:9876 \
+  -e LUCIDA_BIND=0.0.0.0:9876 \
+  -e LUCIDA_AUTH=iap \
+  -e LUCIDA_IAP_AUDIENCE=/projects/PROJECT_NUMBER/global/backendServices/SERVICE_ID \
+  ghcr.io/aelefebv/lucida:latest
+```
+
+`LUCIDA_IAP_AUDIENCE` is required and has no default. It is the exact `aud` claim your IAP mints, matched byte for byte. Read it off your load balancer's backend service rather than assembling it by hand. Leave it unset and the server stops at boot and tells you to set it. Point it at another service and every request is refused with a 401 rather than a 500, and the first refusal is logged at warning level with the reason.
+
+Sign-out points at IAP's own `?gcp-iap-mode=CLEAR_LOGIN_COOKIE`, which clears the IAP cookie but does not sign the user out of the identity provider behind it. Admin rights still come from `LUCIDA_ADMIN_EMAILS`, and a lucida bearer token still works, so the CLI reaches an IAP-fronted server unchanged.
+
 ### Develop on it
 
 Prerequisites: rust + cargo, pnpm, wasm-pack, node — your package manager equivalent.

@@ -323,6 +323,11 @@ impl GoogleOAuthClient {
         let issuers: Vec<&str> = self.config.issuers.iter().map(String::as_str).collect();
         validation.set_issuer(&issuers);
         validation.set_audience(&[&self.config.client_id]);
+        // `set_issuer` and `set_audience` constrain a claim that is present
+        // and say nothing about one that is missing, and the default
+        // required set is `exp` alone. Without this, a token that omits
+        // `aud` skips the audience check instead of failing it.
+        validation.set_required_spec_claims(&["exp", "iss", "aud"]);
 
         let data = decode::<GoogleClaims>(token, &key, &validation)
             .map_err(|e| OAuthError::JwtInvalid(e.to_string()))?;

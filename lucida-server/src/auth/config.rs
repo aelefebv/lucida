@@ -1,7 +1,8 @@
 //! Auth subsystem runtime configuration.
 //!
 //! Covers cookie name, the database connection string, idle timeout, hard cap,
-//! the `LUCIDA_AUTH` mode selector and Google OAuth credentials, the
+//! the `LUCIDA_AUTH` mode selector with the Google OAuth credentials and the
+//! IAP audience each of those modes needs, the
 //! `LUCIDA_BIND` socket, and the auto-detect-by-bind policy from
 //! ADR-0018: when `LUCIDA_AUTH` is unset, the auth mode is inferred
 //! from whether the bind address is loopback (→ `Disabled`) or public
@@ -59,6 +60,26 @@ pub const DEFAULT_GOOGLE_ISSUERS: &[&str] = &["https://accounts.google.com", "ac
 /// [`AuthMode::sign_out_url`] cannot drift apart.
 pub const LOGOUT_PATH: &str = "/auth/logout";
 
+/// Identity-Aware Proxy's key set, in JWK form. IAP signs assertions
+/// with ES256 keys published here. This is *not* the general Google
+/// OAuth JWKS above: the two key sets share neither keys nor
+/// algorithm, and validating an IAP assertion against the OAuth JWKS
+/// would be a signature check that passes without meaning.
+/// Overridable via `LUCIDA_IAP_JWKS_URI` so tests can point at a mock.
+pub const DEFAULT_IAP_JWKS_URI: &str = "https://www.gstatic.com/iap/verify/public_key-jwk";
+
+/// The `iss` claim IAP mints. Overridable via `LUCIDA_IAP_ISSUER` for
+/// test harnesses that sign with an issuer of their own.
+pub const DEFAULT_IAP_ISSUER: &str = "https://cloud.google.com/iap";
+
+/// Where the web client's sign-out control points under IAP. Nothing
+/// on this server issued the caller's identity, so there is no lucida
+/// session to clear and sign-out belongs to the perimeter. Google
+/// documents this query parameter as the way to clear the IAP login
+/// cookie. The path is the app's own root, so the URL stays correct
+/// whatever hostname the deployment answers on.
+pub const IAP_CLEAR_LOGIN_COOKIE_URL: &str = "/?gcp-iap-mode=CLEAR_LOGIN_COOKIE";
+
 /// Default listen address. ADR-0018: loopback-by-default makes the
 /// auto-detect-by-bind safety property hold for the zero-config dev
 /// path (`cargo run --bin lucida-server` → localhost-only, auth off).
@@ -109,6 +130,11 @@ pub enum AuthMode {
     /// Google. Requires `LUCIDA_GOOGLE_CLIENT_ID`,
     /// `LUCIDA_GOOGLE_CLIENT_SECRET`, `LUCIDA_OAUTH_REDIRECT_URI`.
     Google,
+    /// Identity established by Google Cloud's Identity-Aware Proxy in
+    /// front of this server. Lucida runs no sign-in flow of its own:
+    /// it reads the signed assertion IAP attaches to each request.
+    /// Requires `LUCIDA_IAP_AUDIENCE`.
+    Iap,
 }
 
 impl AuthMode {
@@ -119,6 +145,7 @@ impl AuthMode {
     pub fn parse(raw: &str) -> Result<Self, UnknownAuthMode> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "google" => Ok(Self::Google),
+            "iap" => Ok(Self::Iap),
             "disabled" => Ok(Self::Disabled),
             other => Err(UnknownAuthMode(other.to_string())),
         }
@@ -143,6 +170,10 @@ impl AuthMode {
         match self {
             Self::Disabled => None,
             Self::Google => Some(LOGOUT_PATH),
+            // Clearing the IAP cookie does not sign the user out of the
+            // identity provider behind it, so an account still signed in
+            // there can be waved straight back through.
+            Self::Iap => Some(IAP_CLEAR_LOGIN_COOKIE_URL),
         }
     }
 }
@@ -171,6 +202,27 @@ pub struct GoogleOAuthConfig {
     pub issuers: Vec<String>,
 }
 
+/// Identity-Aware Proxy settings. Present only when
+/// `LUCIDA_AUTH=iap`; absent otherwise.
+#[derive(Debug, Clone)]
+pub struct IapConfig {
+    /// The `aud` claim this deployment's IAP mints, matched byte for
+    /// byte. IAP signs every assertion it issues, anywhere, with the
+    /// same key, so the signature proves only that *some* IAP minted
+    /// the token. The audience is what proves it was this one.
+    ///
+    /// Treated as an opaque string: lucida never parses it and never
+    /// rebuilds it from parts, because a value assembled from a
+    /// project number and a service ID this server guessed at is a
+    /// value nobody checked.
+    pub audience: String,
+    /// Where the ES256 key set lives. Defaults to
+    /// [`DEFAULT_IAP_JWKS_URI`].
+    pub jwks_uri: String,
+    /// The accepted `iss` claim. Defaults to [`DEFAULT_IAP_ISSUER`].
+    pub issuer: String,
+}
+
 /// Why startup fail-fasted in `from_env`. Each variant names the
 /// concrete `LUCIDA_*` env var the operator must set (or the offending
 /// value, for the parse-failure variants).
@@ -182,7 +234,18 @@ pub enum AuthConfigError {
     MissingClientSecret,
     #[error("LUCIDA_AUTH=google requires LUCIDA_OAUTH_REDIRECT_URI")]
     MissingRedirectUri,
-    #[error("LUCIDA_AUTH={0:?} is not a recognized value (expected `google` or `disabled`)")]
+    /// Without the audience, the assertion check would accept a token
+    /// minted for any other IAP-protected service on the internet.
+    /// There is no default and no way to skip it, so the only safe
+    /// answer to an unset value is to refuse to start.
+    #[error(
+        "LUCIDA_AUTH=iap requires LUCIDA_IAP_AUDIENCE (the exact `aud` claim this deployment's \
+         IAP mints, of the form /projects/PROJECT_NUMBER/global/backendServices/SERVICE_ID)"
+    )]
+    MissingIapAudience,
+    #[error(
+        "LUCIDA_AUTH={0:?} is not a recognized value (expected `google`, `iap`, or `disabled`)"
+    )]
     UnknownAuthMode(String),
     #[error("LUCIDA_BIND={value:?} is not a valid socket address ({reason})")]
     InvalidBindAddr { value: String, reason: String },
@@ -220,6 +283,10 @@ pub struct AuthConfig {
     /// presence-of-required-fields in `from_env` so handlers can
     /// `unwrap()` it without rechecking.
     pub google: Option<GoogleOAuthConfig>,
+    /// Populated iff `mode == AuthMode::Iap`. The audience is
+    /// validated for presence in `from_env`, so the extractor can
+    /// `unwrap()` it without rechecking.
+    pub iap: Option<IapConfig>,
     /// When non-empty, callbacks reject any JWT whose `hd` claim isn't
     /// in this set. Empty = no restriction (the OSS-permissive default;
     /// matches "any verified Google email"). Both this set and the
@@ -327,6 +394,12 @@ impl AuthConfig {
             None
         };
 
+        let iap = if matches!(mode, AuthMode::Iap) {
+            Some(iap_from_reader(&nonempty)?)
+        } else {
+            None
+        };
+
         Ok(Self {
             cookie_name: read("LUCIDA_COOKIE_NAME")
                 .unwrap_or_else(|| DEFAULT_COOKIE_NAME.to_string()),
@@ -343,6 +416,7 @@ impl AuthConfig {
             },
             mode,
             google,
+            iap,
             allowed_hosted_domains: parse_allowed_hosted_domains(
                 read("LUCIDA_ALLOWED_HOSTED_DOMAINS").as_deref(),
             ),
@@ -365,6 +439,7 @@ impl AuthConfig {
             db_url: DatabaseUrl::in_memory(),
             mode: AuthMode::Disabled,
             google: None,
+            iap: None,
             allowed_hosted_domains: HashSet::new(),
             admin_emails: HashSet::new(),
             bind_addr: DEFAULT_BIND_ADDR.parse().expect("default bind parses"),
@@ -386,6 +461,28 @@ impl AuthConfig {
             token_uri: format!("{mock_base}/token"),
             jwks_uri: format!("{mock_base}/certs"),
             issuers: vec!["https://test-issuer".to_string()],
+        });
+        cfg
+    }
+
+    /// Test-friendly config in IAP mode, with the key set pointed at a
+    /// mock server. Same shape as [`for_tests_google`]: production
+    /// reaches `gstatic.com`, tests reach an axum app on an ephemeral
+    /// port, and the code under test cannot tell the difference
+    /// because both addresses come from config.
+    ///
+    /// The issuer is deliberately not the production one, so a test
+    /// that passes proves the check reads config rather than a
+    /// constant compiled into the validator.
+    ///
+    /// [`for_tests_google`]: AuthConfig::for_tests_google
+    pub fn for_tests_iap(audience: &str, mock_base: &str) -> Self {
+        let mut cfg = Self::for_tests();
+        cfg.mode = AuthMode::Iap;
+        cfg.iap = Some(IapConfig {
+            audience: audience.to_string(),
+            jwks_uri: format!("{mock_base}/iap-keys"),
+            issuer: "https://test-iap-issuer".to_string(),
         });
         cfg
     }
@@ -430,6 +527,20 @@ where
                     .map(|s| s.to_string())
                     .collect()
             }),
+    })
+}
+
+fn iap_from_reader<F>(nonempty: &F) -> Result<IapConfig, AuthConfigError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let audience = nonempty("LUCIDA_IAP_AUDIENCE").ok_or(AuthConfigError::MissingIapAudience)?;
+
+    Ok(IapConfig {
+        audience,
+        jwks_uri: nonempty("LUCIDA_IAP_JWKS_URI")
+            .unwrap_or_else(|| DEFAULT_IAP_JWKS_URI.to_string()),
+        issuer: nonempty("LUCIDA_IAP_ISSUER").unwrap_or_else(|| DEFAULT_IAP_ISSUER.to_string()),
     })
 }
 
@@ -509,6 +620,9 @@ mod tests {
         assert_eq!(AuthMode::parse(" google ").unwrap(), AuthMode::Google);
         assert_eq!(AuthMode::parse("disabled").unwrap(), AuthMode::Disabled);
         assert_eq!(AuthMode::parse("DISABLED").unwrap(), AuthMode::Disabled);
+        assert_eq!(AuthMode::parse("iap").unwrap(), AuthMode::Iap);
+        assert_eq!(AuthMode::parse("IAP").unwrap(), AuthMode::Iap);
+        assert_eq!(AuthMode::parse(" iap ").unwrap(), AuthMode::Iap);
     }
 
     #[test]
@@ -528,6 +642,10 @@ mod tests {
         // the test pins the URL the web client receives.
         assert_eq!(AuthMode::Google.sign_out_url(), Some("/auth/logout"));
         assert_eq!(AuthMode::Disabled.sign_out_url(), None);
+        assert_eq!(
+            AuthMode::Iap.sign_out_url(),
+            Some("/?gcp-iap-mode=CLEAR_LOGIN_COOKIE"),
+        );
     }
 
     #[test]
@@ -540,6 +658,101 @@ mod tests {
         assert_eq!(g.auth_uri, "https://mock/oauth2/v2/auth");
         assert_eq!(g.token_uri, "https://mock/token");
         assert_eq!(g.jwks_uri, "https://mock/certs");
+    }
+
+    // -- LUCIDA_AUTH=iap -------------------------------------------------
+
+    #[test]
+    fn iap_mode_requires_an_audience() {
+        let err = AuthConfig::from_env_map(reader(&[("LUCIDA_AUTH", "iap")]))
+            .expect_err("iap mode without an audience should fail");
+        assert!(
+            matches!(err, AuthConfigError::MissingIapAudience),
+            "got {err:?}"
+        );
+        let message = err.to_string();
+        assert!(message.contains("LUCIDA_IAP_AUDIENCE"), "{message}");
+        assert!(message.contains("backendServices"), "{message}");
+    }
+
+    #[test]
+    fn iap_mode_defaults_to_the_published_key_set_and_issuer() {
+        let cfg = AuthConfig::from_env_map(reader(&[
+            ("LUCIDA_AUTH", "iap"),
+            (
+                "LUCIDA_IAP_AUDIENCE",
+                "/projects/000000000000/global/backendServices/0000000000000000000",
+            ),
+        ]))
+        .expect("audience is the only required value");
+        assert_eq!(cfg.mode, AuthMode::Iap);
+        let iap = cfg.iap.expect("IAP block");
+        assert_eq!(
+            iap.audience,
+            "/projects/000000000000/global/backendServices/0000000000000000000",
+        );
+        assert_eq!(iap.jwks_uri, DEFAULT_IAP_JWKS_URI);
+        assert_eq!(iap.issuer, DEFAULT_IAP_ISSUER);
+    }
+
+    #[test]
+    fn iap_key_set_and_issuer_are_overridable() {
+        let cfg = AuthConfig::from_env_map(reader(&[
+            ("LUCIDA_AUTH", "iap"),
+            (
+                "LUCIDA_IAP_AUDIENCE",
+                "/projects/1/global/backendServices/2",
+            ),
+            ("LUCIDA_IAP_JWKS_URI", "http://127.0.0.1:1/iap-keys"),
+            ("LUCIDA_IAP_ISSUER", "https://test-iap-issuer"),
+        ]))
+        .unwrap();
+        let iap = cfg.iap.expect("IAP block");
+        assert_eq!(iap.jwks_uri, "http://127.0.0.1:1/iap-keys");
+        assert_eq!(iap.issuer, "https://test-iap-issuer");
+    }
+
+    #[test]
+    fn iap_mode_needs_no_google_credentials() {
+        let cfg = AuthConfig::from_env_map(reader(&[
+            ("LUCIDA_AUTH", "iap"),
+            ("LUCIDA_BIND", "0.0.0.0:9876"),
+            (
+                "LUCIDA_IAP_AUDIENCE",
+                "/projects/1/global/backendServices/2",
+            ),
+        ]))
+        .expect("iap on a public bind needs no OAuth client");
+        assert!(cfg.google.is_none());
+    }
+
+    #[test]
+    fn other_modes_carry_no_iap_block() {
+        let mut entries = vec![("LUCIDA_AUTH", "google")];
+        entries.extend(google_creds());
+        // An audience left over from an earlier mode must not leak into a
+        // config that no longer checks one.
+        entries.push((
+            "LUCIDA_IAP_AUDIENCE",
+            "/projects/1/global/backendServices/2",
+        ));
+        let cfg = AuthConfig::from_env_map(reader(&entries)).unwrap();
+        assert!(cfg.iap.is_none());
+
+        let cfg = AuthConfig::from_env_map(reader(&[("LUCIDA_AUTH", "disabled")])).unwrap();
+        assert!(cfg.iap.is_none());
+    }
+
+    #[test]
+    fn for_tests_iap_points_the_key_set_at_the_mock() {
+        let cfg = AuthConfig::for_tests_iap("/projects/1/global/backendServices/2", "https://mock");
+        assert_eq!(cfg.mode, AuthMode::Iap);
+        let iap = cfg.iap.expect("IAP block");
+        assert_eq!(iap.jwks_uri, "https://mock/iap-keys");
+        assert_ne!(
+            iap.jwks_uri, DEFAULT_IAP_JWKS_URI,
+            "tests must never reach the real key set",
+        );
     }
 
     // -- LUCIDA_ALLOWED_HOSTED_DOMAINS parsing --------------------------

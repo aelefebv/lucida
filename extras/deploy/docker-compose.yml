@@ -45,9 +45,15 @@ services:
       LUCIDA_WEB_DIST: "/usr/share/lucida/web"
 
       # ---- Required: auth mode ----
-      # Use `disabled` + LUCIDA_INSECURE=1 for closed-network labs;
-      # `google` for everything else.
+      # Use `disabled` + LUCIDA_INSECURE=1 for closed-network labs,
+      # `iap` behind a Google Cloud Identity-Aware Proxy, and `google`
+      # for everything else.
       LUCIDA_AUTH: "google"
+
+      # ---- Required when LUCIDA_AUTH=iap ----
+      # The exact `aud` claim your IAP mints. Not a secret, and never
+      # assembled by hand.
+      # LUCIDA_IAP_AUDIENCE: "/projects/<YOUR-PROJECT-NUMBER>/global/backendServices/<YOUR-SERVICE-ID>"
 
       # ---- Required when LUCIDA_AUTH=google ----
       LUCIDA_GOOGLE_CLIENT_ID: "<YOUR-OAUTH-CLIENT-ID>"

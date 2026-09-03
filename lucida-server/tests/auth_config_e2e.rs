@@ -251,6 +251,21 @@ fn explicit_google_without_credentials_fails() {
 }
 
 #[test]
+fn explicit_iap_without_an_audience_fails() {
+    let _guard = serial_test_lock();
+    let port = pick_loopback_port();
+    let bind = format!("127.0.0.1:{port}");
+    let stderr = assert_server_fails(
+        &[("LUCIDA_BIND", &bind), ("LUCIDA_AUTH", "iap")],
+        "LUCIDA_IAP_AUDIENCE",
+    );
+    assert!(
+        stderr.contains("backendServices"),
+        "the message should show the shape of the value; got=\n{stderr}",
+    );
+}
+
+#[test]
 fn unknown_auth_mode_fails() {
     let _guard = serial_test_lock();
     let port = pick_loopback_port();

@@ -1183,7 +1183,9 @@ mod tests {
             Arc::clone(&config),
             Arc::clone(&session_store) as Arc<dyn LoginSessionStore>,
             Arc::clone(&token_store) as Arc<dyn BearerTokenStore>,
-        );
+        )
+        .await
+        .expect("only IAP mode can fail to build an extractor");
         let authed = Router::new()
             .route("/auth/whoami", get(whoami))
             .route(
@@ -1295,6 +1297,11 @@ mod tests {
             advertised_sign_out_url(AuthMode::Disabled).await,
             serde_json::Value::Null,
             "disabled mode has no session to end, so it offers no sign-out",
+        );
+        assert_eq!(
+            advertised_sign_out_url(AuthMode::Iap).await,
+            json!("/?gcp-iap-mode=CLEAR_LOGIN_COOKIE"),
+            "IAP mode points sign-out at the perimeter that issued the identity",
         );
     }
 

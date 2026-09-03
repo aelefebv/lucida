@@ -30,15 +30,20 @@
 //!   intended path/hash.
 //! - `google_oauth` — Google integration: authorization URL, code
 //!   exchange, JWKS cache + refresh, JWT validation. The deepest piece.
-//! - `principal` — `PrincipalExtractor` trait plus the three
-//!   implementations: `SessionCookieExtractor` (Google-mode cookie
-//!   path), `GoogleJwtPrincipalExtractor` (Bearer-token validator),
-//!   and `StubPrincipalExtractor` (disabled-mode canned principal).
-//!   Also `principal_from_claims`, the adapter the callback uses.
+//! - `iap` — Identity-Aware Proxy integration: ES256 key-set cache +
+//!   refresh, assertion validation, and the extractor that reads the
+//!   identity IAP established. No sign-in flow; the perimeter ran one.
+//! - `principal` — `PrincipalExtractor` trait plus the implementations:
+//!   `SessionCookieExtractor` (Google-mode cookie path),
+//!   `GoogleJwtPrincipalExtractor` (Bearer-token validator), and
+//!   `StubPrincipalExtractor` (disabled-mode canned principal).
+//!   `DualCredentialExtractor` composes the bearer path in front of
+//!   whichever of those a mode uses. Also `principal_from_claims`, the
+//!   adapter the callback uses, and `normalize_email`, the one email
+//!   normalization every provider shares.
 //! - `middleware` — axum middleware that runs the extractor and
 //!   attaches the resulting principal to request extensions.
-//!   `build_extractor` picks between the three implementations based
-//!   on `AuthMode`.
+//!   `build_extractor` picks the implementation based on `AuthMode`.
 //! - `handlers` — `/auth/whoami`, `/auth/logout`, `/auth/mode`,
 //!   `/auth/start`, `/auth/callback`, and `/auth/error`.
 //! - `unauth_landing` — small inline HTML the middleware serves on an
@@ -74,6 +79,7 @@ pub mod error_page;
 pub mod extractors;
 pub mod google_oauth;
 pub mod handlers;
+pub mod iap;
 pub mod middleware;
 pub mod pending_auth;
 pub mod pending_auth_memory;
@@ -99,9 +105,12 @@ pub use cli_authorization::{
 pub use cli_authorization_memory::MemoryCliTokenAuthorizationStore;
 pub use cli_authorization_postgres::PostgresCliTokenAuthorizationStore;
 pub use cli_authorization_sqlite::SqliteCliTokenAuthorizationStore;
-pub use config::{AuthConfig, AuthConfigError, AuthMode, GoogleOAuthConfig, LOGOUT_PATH};
+pub use config::{
+    AuthConfig, AuthConfigError, AuthMode, GoogleOAuthConfig, IapConfig, LOGOUT_PATH,
+};
 pub use extractors::AdminRequired;
 pub use google_oauth::{GoogleOAuthClient, OAuthError, VerifiedClaims};
+pub use iap::{IapAssertionExtractor, IapError, IapVerifier, VerifiedAssertion};
 pub use pending_auth::{PendingAuth, PendingAuthStore, PendingAuthStoreError};
 pub use pending_auth_memory::MemoryPendingAuthStore;
 pub use pending_auth_postgres::PostgresPendingAuthStore;

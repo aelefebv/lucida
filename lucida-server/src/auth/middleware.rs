@@ -33,8 +33,10 @@ use serde_json::json;
 use crate::auth::bearer_token::BearerTokenStore;
 use crate::auth::config::{AuthConfig, AuthMode};
 use crate::auth::cookie::read_signed_out_marker;
+use crate::auth::iap::{IapAssertionExtractor, IapError, IapVerifier};
 use crate::auth::principal::{
-    AuthError, DualCredentialExtractor, PrincipalExtractor, StubPrincipalExtractor,
+    AuthError, BearerTokenExtractor, DualCredentialExtractor, PrincipalExtractor,
+    StubPrincipalExtractor,
 };
 use crate::auth::session_store::LoginSessionStore;
 use crate::auth::unauth_landing::{SIGNED_OUT_LANDING_HTML, UNAUTH_LANDING_HTML};
@@ -65,7 +67,7 @@ pub async fn auth_middleware(
         }
         Err(err) => {
             let headers = parts.headers;
-            unauthenticated_response(&err, &headers)
+            unauthenticated_response(&err, &headers, extractor.offers_sign_in())
         }
     }
 }
@@ -82,6 +84,14 @@ pub async fn auth_middleware(
 /// "internal error" without context is worse than a 500 that the
 /// browser renders as plain text.
 ///
+/// A mode whose extractor answers no to
+/// [`PrincipalExtractor::offers_sign_in`] gets the JSON 401 whatever it
+/// asked for. The landing page's only move is to bounce to
+/// `/auth/start`, and where no provider registered that route the
+/// bounce lands on the SPA catch-all, which serves the app, which polls
+/// whoami, which 401s, which bounces again. ADR-0018 records the last
+/// time that loop shipped.
+///
 /// On HTML routes the page also branches on the `lucida_signed_out`
 /// marker cookie (set by `/auth/logout`). When present, the user just
 /// explicitly logged out — serve the static `SIGNED_OUT_LANDING_HTML`
@@ -96,8 +106,12 @@ pub async fn auth_middleware(
 /// "Signed out — Sign in again" card instead of auto-bouncing back
 /// through Google. (HttpOnly cookie ⇒ JS can't read the marker
 /// directly; this signal is the SPA's only window into it.)
-fn unauthenticated_response(err: &AuthError, headers: &HeaderMap) -> Response {
-    if matches!(err, AuthError::Unauthenticated) && accepts_html(headers) {
+fn unauthenticated_response(
+    err: &AuthError,
+    headers: &HeaderMap,
+    offers_sign_in: bool,
+) -> Response {
+    if matches!(err, AuthError::Unauthenticated) && accepts_html(headers) && offers_sign_in {
         let body = if read_signed_out_marker(headers) {
             SIGNED_OUT_LANDING_HTML
         } else {
@@ -147,23 +161,44 @@ pub fn accepts_html(headers: &HeaderMap) -> bool {
 /// existing — without it the cookie extractor would 401 every request
 /// and the SPA would loop into a `/auth/start` that isn't registered.
 ///
-/// `Google` → [`SessionCookieExtractor`]: read the `lucida_session`
-/// cookie, look up the row, enforce idle + hard-cap, derive `is_admin`
-/// from the configured allowlist. The OAuth callback handler mints
-/// rows into the same store this extractor reads from.
+/// `Google` → [`SessionCookieExtractor`] behind the bearer path: read
+/// the `lucida_session` cookie, look up the row, enforce idle +
+/// hard-cap, derive `is_admin` from the configured allowlist. The OAuth
+/// callback handler mints rows into the same store this extractor reads
+/// from.
+///
+/// `Iap` → [`IapAssertionExtractor`] behind the bearer path: verify the
+/// assertion the perimeter attached and read its `email` claim. Nothing
+/// here mints a session, because nothing here ran a sign-in.
+///
+/// Fallible because IAP mode reads its key set before serving a single
+/// request (ADR-0060), and a key set it cannot read is a server that
+/// can never authenticate anybody. The other two modes cannot fail.
 ///
 /// The match is exhaustive so adding a new `AuthMode` variant later
 /// will fail-compile here rather than silently falling through to the
 /// wrong extractor.
-pub fn build_extractor(
+pub async fn build_extractor(
     config: Arc<AuthConfig>,
     store: Arc<dyn LoginSessionStore>,
     token_store: Arc<dyn BearerTokenStore>,
-) -> SharedExtractor {
-    match config.mode {
+) -> Result<SharedExtractor, IapError> {
+    Ok(match config.mode {
         AuthMode::Disabled => Arc::new(StubPrincipalExtractor),
         AuthMode::Google => Arc::new(DualCredentialExtractor::new(config, store, token_store)),
-    }
+        AuthMode::Iap => {
+            let iap_config = config
+                .iap
+                .clone()
+                .expect("from_env guarantees an IAP block in IAP mode");
+            let verifier = Arc::new(IapVerifier::new(Arc::new(iap_config)).await?);
+            let assertion = IapAssertionExtractor::new(Arc::clone(&config), verifier);
+            Arc::new(DualCredentialExtractor::with_fallback(
+                Arc::new(assertion),
+                BearerTokenExtractor::new(config, token_store),
+            ))
+        }
+    })
 }
 
 #[cfg(test)]
@@ -178,7 +213,10 @@ mod tests {
     use lucida_core::auth_principal::AuthPrincipal;
     use tower::ServiceExt;
 
+    use crate::auth::bearer_token::{BearerToken, hash_bearer_token};
     use crate::auth::bearer_token_memory::MemoryBearerTokenStore;
+    use crate::auth::iap::IAP_ASSERTION_HEADER;
+    use crate::auth::iap::test_support::{TEST_AUDIENCE, TestKey, spawn_mock_key_set, test_claims};
     use crate::auth::principal::{AuthError, PrincipalExtractor, SessionCookieExtractor};
     use crate::auth::session_store::LoginSession;
     use crate::auth::session_store_memory::MemorySessionStore;
@@ -326,7 +364,9 @@ mod tests {
             config,
             store as Arc<dyn LoginSessionStore>,
             token_store as Arc<dyn BearerTokenStore>,
-        );
+        )
+        .await
+        .expect("disabled mode cannot fail to build");
         let app = router_with_extractor(extractor);
 
         let req = Request::builder().uri("/echo").body(Body::empty()).unwrap();
@@ -341,6 +381,126 @@ mod tests {
             !p.is_admin,
             "the principal the middleware attaches for free is not an admin",
         );
+    }
+
+    // -- IAP mode wiring --------------------------------------------------
+    //
+    // `build_extractor` is the only place that decides a mode gets the IAP
+    // provider, so these run through it rather than building the extractor
+    // directly.
+
+    /// Config, stores, and a mock key set for an IAP-mode router.
+    /// Returns the app and the signing key the test mints assertions
+    /// with.
+    async fn iap_app(admin_emails: &[&str], seeded_token: Option<&str>) -> (Router, TestKey) {
+        let key = TestKey::generate("kid-1");
+        let (base, _mock) = spawn_mock_key_set(key.jwks_json.clone()).await;
+        let mut config = AuthConfig::for_tests_iap(TEST_AUDIENCE, &base);
+        config.admin_emails = admin_emails.iter().map(|s| s.to_string()).collect();
+
+        let store = Arc::new(MemorySessionStore::new());
+        let token_store = Arc::new(MemoryBearerTokenStore::new());
+        if let Some(raw) = seeded_token {
+            let now = Utc::now();
+            token_store
+                .create(BearerToken {
+                    id: "bearer-1".into(),
+                    token_hash: hash_bearer_token(raw),
+                    name: "laptop".into(),
+                    email: "cli@example.com".into(),
+                    display_name: "CLI User".into(),
+                    picture_url: None,
+                    created_at: now,
+                    last_used_at: None,
+                    expires_at: now + ChronoDuration::hours(1),
+                    revoked_at: None,
+                })
+                .await
+                .unwrap();
+        }
+
+        let extractor = build_extractor(
+            Arc::new(config),
+            store as Arc<dyn LoginSessionStore>,
+            token_store as Arc<dyn BearerTokenStore>,
+        )
+        .await
+        .expect("the mock key set primes");
+        (router_with_extractor(extractor), key)
+    }
+
+    #[tokio::test]
+    async fn build_extractor_iap_mode_attaches_the_principal_the_assertion_names() {
+        let (app, key) = iap_app(&["admin@example.com"], None).await;
+
+        let req = Request::builder()
+            .uri("/echo")
+            .header(
+                IAP_ASSERTION_HEADER,
+                key.sign(&test_claims("admin@example.com")),
+            )
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let bytes = to_bytes(res.into_body(), 64 * 1024).await.unwrap();
+        let p: AuthPrincipal = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(p.email, "admin@example.com");
+        assert!(
+            p.is_admin,
+            "admin rights still come from the configured list"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_extractor_iap_mode_401s_a_request_carrying_no_credential() {
+        let (app, _) = iap_app(&[], None).await;
+
+        let req = Request::builder().uri("/echo").body(Body::empty()).unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn build_extractor_iap_mode_does_not_bounce_a_browser_into_a_sign_in_it_lacks() {
+        let (app, _) = iap_app(&[], None).await;
+
+        let req = Request::builder()
+            .uri("/echo")
+            .header(header::ACCEPT, "text/html,application/xhtml+xml")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+        let bytes = to_bytes(res.into_body(), 64 * 1024).await.unwrap();
+        let body = std::str::from_utf8(&bytes).unwrap();
+        assert!(!body.contains("/auth/start"), "no bounce: {body}");
+    }
+
+    #[tokio::test]
+    async fn build_extractor_iap_mode_resolves_a_bearer_token_ahead_of_the_assertion() {
+        // The command-line client reaches lucida through IAP holding a
+        // lucida token, so both credentials arrive together.
+        let raw = "lucida_pat_through_iap";
+        let (app, key) = iap_app(&[], Some(raw)).await;
+
+        let req = Request::builder()
+            .uri("/echo")
+            .header("authorization", format!("Bearer {raw}"))
+            .header(
+                IAP_ASSERTION_HEADER,
+                key.sign(&test_claims("alice@example.com")),
+            )
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let bytes = to_bytes(res.into_body(), 64 * 1024).await.unwrap();
+        let p: AuthPrincipal = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(p.email, "cli@example.com");
     }
 
     #[test]
