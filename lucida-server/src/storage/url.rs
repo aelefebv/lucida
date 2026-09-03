@@ -185,37 +185,82 @@ impl fmt::Display for DatabaseUrl {
     }
 }
 
-/// Replace the `user:password@` portion of a connection string with a
-/// placeholder.
+/// The placeholder a removed secret leaves behind.
+const REDACTED: &str = "<redacted>";
+
+/// Remove every secret a connection string can carry.
 ///
-/// A SQLite URL never carries credentials, so this does nothing for the
-/// default backend. A `postgres://` one usually does, and the startup
-/// log prints the connection string, as does every [`StorageError`]
-/// that reports a database the server could not bring up.
+/// A SQLite URL never carries one, so this does nothing for the default
+/// backend. A `postgres://` one usually does, and the startup log prints
+/// the connection string, as does every [`StorageError`] that reports a
+/// database the server could not bring up.
+///
+/// There are two places to look, and a string can use either or both.
+/// The userinfo before the `@` is the familiar one. The query string is
+/// the other: sqlx reads `user`, `password`, and `dbname` from it, so
+/// `postgres://db/lucida?user=lucida&password=hunter2` is a working
+/// connection string with the password nowhere near an `@`.
 ///
 /// [`StorageError`]: super::StorageError
 fn redact(raw: &str) -> Cow<'_, str> {
-    // Search from the right: a password may itself contain an `@`, and
-    // the last one is the delimiter the host follows.
-    let Some(at) = raw.rfind('@') else {
-        return Cow::Borrowed(raw);
-    };
-    let credentials_start = match raw.find("://") {
+    let redacted = redact_query(&redact_userinfo(raw));
+    if redacted == raw {
+        Cow::Borrowed(raw)
+    } else {
+        Cow::Owned(redacted)
+    }
+}
+
+/// Replace the `user:password@` portion of the authority.
+fn redact_userinfo(raw: &str) -> String {
+    let authority_start = match raw.find("://") {
         Some(i) => i + "://".len(),
         None => match raw.find(':') {
             Some(i) => i + 1,
             None => 0,
         },
     };
-    if credentials_start > at {
-        // The `@` sits inside the scheme, so there is no userinfo to hide.
-        return Cow::Borrowed(raw);
-    }
-    Cow::Owned(format!(
-        "{}<redacted>{}",
-        &raw[..credentials_start],
-        &raw[at..]
-    ))
+    // The authority ends where the path, query, or fragment begins. An
+    // `@` past that point belongs to a query parameter and is not a
+    // userinfo delimiter, so bounding the search is what keeps the host
+    // in the message.
+    let authority_end = raw[authority_start..]
+        .find(['/', '?', '#'])
+        .map_or(raw.len(), |i| authority_start + i);
+    // Search from the right within the authority: a password may itself
+    // contain an `@`, and the last one is the delimiter the host follows.
+    let Some(at) = raw[authority_start..authority_end].rfind('@') else {
+        return raw.to_string();
+    };
+    let at = authority_start + at;
+    format!("{}{REDACTED}{}", &raw[..authority_start], &raw[at..])
+}
+
+/// Replace the value of every query parameter that carries a secret.
+///
+/// Matched on the name containing `password`, which covers libpq's
+/// `password` and `sslpassword` without this having to track the list
+/// sqlx accepts.
+fn redact_query(raw: &str) -> String {
+    let Some(query_start) = raw.find('?').map(|i| i + 1) else {
+        return raw.to_string();
+    };
+    let (before, query) = raw.split_at(query_start);
+    let (query, fragment) = match query.find('#') {
+        Some(i) => query.split_at(i),
+        None => (query, ""),
+    };
+    let scrubbed = query
+        .split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((name, _)) if name.to_ascii_lowercase().contains("password") => {
+                format!("{name}={REDACTED}")
+            }
+            _ => pair.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    format!("{before}{scrubbed}{fragment}")
 }
 
 #[cfg(test)]
@@ -359,6 +404,49 @@ mod tests {
         let url = DatabaseUrl::parse("postgres://lucida:p@ss@10.0.0.1/lucida").unwrap();
         assert_eq!(url.redacted(), "postgres://<redacted>@10.0.0.1/lucida");
         assert!(!url.redacted().contains("p@ss"));
+    }
+
+    /// The other place a password hides. sqlx reads `user`, `password`,
+    /// and `dbname` out of the query string, so this connects, and
+    /// looking only for an `@` would print the password verbatim.
+    #[test]
+    fn a_password_in_the_query_string_is_redacted_too() {
+        let url =
+            DatabaseUrl::parse("postgres://10.0.0.1:5432/lucida?user=lucida&password=hunter2")
+                .unwrap();
+        assert_eq!(
+            url.redacted(),
+            "postgres://10.0.0.1:5432/lucida?user=lucida&password=<redacted>"
+        );
+    }
+
+    /// One parameter name, spelled several ways by libpq. Matching on
+    /// the name rather than an exact list is what keeps `sslpassword`
+    /// out of the log without anyone having to remember it.
+    #[test]
+    fn every_password_parameter_is_redacted() {
+        for raw in [
+            "postgres://db/lucida?password=hunter2",
+            "postgres://db/lucida?sslpassword=hunter2",
+            "postgres://db/lucida?PASSWORD=hunter2",
+            "postgres://lucida:hunter2@db/lucida?sslpassword=hunter2",
+        ] {
+            let redacted = DatabaseUrl::parse(raw).unwrap().redacted().into_owned();
+            assert!(!redacted.contains("hunter2"), "{raw} → {redacted}");
+        }
+    }
+
+    /// An `@` in a query parameter is not a userinfo delimiter. Treating
+    /// it as one used to swallow the host, which is the one thing the
+    /// operator reading the message needs.
+    #[test]
+    fn an_at_sign_outside_the_authority_leaves_the_host_alone() {
+        let url =
+            DatabaseUrl::parse("postgres://10.0.0.1:5432/lucida?application_name=a@b").unwrap();
+        assert_eq!(
+            url.redacted(),
+            "postgres://10.0.0.1:5432/lucida?application_name=a@b"
+        );
     }
 
     #[test]

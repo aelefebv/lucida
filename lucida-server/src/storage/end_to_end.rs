@@ -18,7 +18,9 @@
 //! It lives beside the backends rather than in `tests/` because it needs
 //! [`test_support`](super::test_support), which is crate-private: a test
 //! that reached for its own pool and its own migrator would stop being
-//! evidence about how the server opens a database.
+//! evidence about how the server opens a database. Its counterpart is
+//! `tests/storage_boot_e2e.rs`, which runs the server binary to cover
+//! the boots that fail, and needs no database server to do it.
 
 use std::sync::Arc;
 
@@ -81,12 +83,19 @@ fn app_over(storage: &Arc<dyn StorageBackend>) -> Router {
         ))
 }
 
-/// What a signed-in browser sends: the session cookie by itself. The
-/// name comes from the same config the extractor reads, so the two
-/// cannot drift.
+/// What a signed-in browser sends: the session cookie by itself.
 fn as_browser(request: axum::http::request::Builder) -> axum::http::request::Builder {
+    with_session(request, SESSION)
+}
+
+/// A session cookie naming `session`, under the name the extractor
+/// reads from the same config, so the two cannot drift.
+fn with_session(
+    request: axum::http::request::Builder,
+    session: &str,
+) -> axum::http::request::Builder {
     let cookie = AuthConfig::for_tests().cookie_name;
-    request.header(header::COOKIE, format!("{cookie}={SESSION}"))
+    request.header(header::COOKIE, format!("{cookie}={session}"))
 }
 
 /// What the command-line client sends: a bearer token and no cookie.
@@ -233,9 +242,7 @@ async fn write_everything(url: &DatabaseUrl) -> Written {
     // The second half is what says the store was consulted at all.
     let (status, _) = send(
         &app,
-        Request::builder()
-            .uri("/api/workspaces")
-            .header(header::COOKIE, "lucida_session=never-signed-in")
+        with_session(Request::builder().uri("/api/workspaces"), "never-signed-in")
             .body(Body::empty())
             .unwrap(),
     )

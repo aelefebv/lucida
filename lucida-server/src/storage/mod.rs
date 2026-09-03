@@ -150,20 +150,4 @@ mod tests {
             backend.workspaces().get_workspace("absent").await.unwrap();
         }
     }
-
-    /// An unreachable database ends the boot with something an operator
-    /// can act on: which database, what went wrong, and no password.
-    ///
-    /// `main` turns this `Err` into a logged `storage.startup.open_failed`
-    /// and a non-zero exit; `tests/storage_boot_e2e.rs` runs the binary
-    /// to prove it.
-    #[tokio::test]
-    async fn an_unreachable_database_is_an_error_rather_than_a_panic() {
-        // Port 1 is unbindable without privileges, so nothing answers.
-        let url = DatabaseUrl::parse("postgres://lucida:hunter2@127.0.0.1:1/lucida").unwrap();
-        let err = open(&url).await.unwrap_err();
-        let message = err.to_string();
-        assert!(message.contains("127.0.0.1:1"), "{message}");
-        assert!(!message.contains("hunter2"), "{message}");
-    }
 }

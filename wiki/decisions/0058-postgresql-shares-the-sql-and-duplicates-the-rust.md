@@ -35,6 +35,10 @@ six stores and [ADR 0055](0055-storage-backend-selected-by-connection-string.md)
 promises that every scheme reaches a backend that comes up. That holds until the
 remaining five stores land.
 
+**Superseded on that one point by [ADR 0059](0059-postgresql-is-selectable-and-the-alias-stops-at-the-parser.md).**
+The five stores landed, so the condition this paragraph names has been met and
+PostgreSQL is selectable. Everything else here stands.
+
 ## What the port measured
 
 The pending-authentication store is the smallest of the six: three methods, and

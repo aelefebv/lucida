@@ -72,6 +72,13 @@ Every one of them carries the redacted connection string, never the raw one.
 That was written into `StorageError` by ADR 0055 before any backend needed it,
 and PostgreSQL is the backend it was written for.
 
+**Redaction now has two places to look, because a PostgreSQL string has two
+places to put a password.** The userinfo before the `@` is the familiar one.
+The query string is the other: sqlx reads `user` and `password` out of it, so a
+connection string with no `@` at all can still carry a secret. A redaction that
+only knew about userinfo would print that one verbatim in the startup log of
+every deployment that wrote it that way.
+
 ## Consequences
 
 - **`Scheme::ALL`'s promise now depends on the machine.** ADR 0055 named a test
@@ -86,19 +93,18 @@ and PostgreSQL is the backend it was written for.
   because nothing selected the backend. It is now the second thing a deployment
   can run on.
 - **SQLite is untouched and stays the default.** An unset `LUCIDA_DB_URL` still
-  means `sqlite://lucida.db`, and a test runs the server binary with the
-  variable unset to prove the file appears. Nothing about the SQLite path was
-  edited to make room for the second backend.
+  means `sqlite://lucida.db`. Nothing about the SQLite path was edited to make
+  room for the second backend.
 - **A deployment on PostgreSQL survives a restart, which is the point.** ADR
   0055 took the decision because a container platform gives a process an
-  ephemeral filesystem, and a single-writer file cannot serve two replicas. A
-  case opens a backend, drives the routers over HTTP, drops everything, opens a
-  second backend over the same database, and reads it all back through a
-  freshly built server.
+  ephemeral filesystem, and a single-writer file cannot serve two replicas.
+  Neither is worth anything unless the state is still there afterwards, so a
+  restart is a claim this decision has to keep rather than a property it
+  inherits.
 - **Concurrent starts were already handled.** ADR 0058 pinned sqlx's
   `pg_advisory_lock` around a migration run. Two replicas rolling out at once
-  is now a thing that happens rather than a thing a test simulates, and the
-  test that simulated it did not have to change.
+  is now something that happens rather than something a test simulates, and
+  nothing had to change for it.
 
 ## Related
 

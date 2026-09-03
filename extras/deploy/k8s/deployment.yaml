@@ -112,12 +112,17 @@ spec:
             # anything outside it, including the default `./lucida.db`,
             # is lost on restart.
             #
-            # SQLite is one writer in one file, so this manifest runs one
-            # replica. To run more, point LUCIDA_DB_URL at PostgreSQL
-            # instead — `postgres://` or `postgresql://`, either spelling
-            # — and take the password from a Secret rather than inlining
-            # it here. The server migrates the database at startup and
-            # refuses to serve if it cannot.
+            # PostgreSQL is the other backend: set this to `postgres://`
+            # or `postgresql://`, either spelling, and take the password
+            # from a Secret rather than inlining it here. The server
+            # migrates the database at startup and refuses to serve if
+            # it cannot, whichever backend it opened.
+            #
+            # A single SQLite file cannot serve a second replica at all,
+            # so PostgreSQL is a prerequisite for scaling this manifest
+            # past `replicas: 1`. It is not the only one: the PVC below
+            # is ReadWriteOnce and also holds the proxy cache and the
+            # data directory, so plan those too before raising the count.
             - name: LUCIDA_DB_URL
               value: "sqlite:///var/lib/lucida/lucida.db"
             - name: LUCIDA_PROXY_CACHE_DIR

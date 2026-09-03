@@ -9,11 +9,14 @@
 //!
 //! Every case here fails before the socket is bound, except the last,
 //! which is the one that has to come up. None of them needs a database
-//! server: the connection strings point at a port nothing answers on,
-//! which is what makes the failure deterministic. The PostgreSQL path
-//! that succeeds is covered where a real server is available, by the
-//! end-to-end case beside the storage backends.
+//! server: the failing connection strings point at a port nothing
+//! answers on, and the migration case is a SQLite file this test writes,
+//! which is what makes them deterministic. The PostgreSQL path that
+//! succeeds is covered where a real server is available, by
+//! `storage::end_to_end` beside the storage backends.
 
+use std::io::{Read as _, Write as _};
+use std::net::TcpStream;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -121,8 +124,71 @@ fn an_unsupported_scheme_stops_the_boot_naming_the_alternatives() {
     }
 }
 
+/// A database recording a migration this build does not have — what a
+/// rollback past a migration leaves behind. The migrations run at
+/// startup, so the server refuses rather than serving requests against
+/// a schema it cannot account for.
+///
+/// SQLite makes the point without a server, and the arm in `main` that
+/// reports it is the same one every backend returns through.
+#[test]
+fn a_migration_this_build_does_not_have_stops_the_boot() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("rolled-back.db");
+    record_a_migration_from_the_future(&database);
+
+    let (code, stderr) = boot_failure(&format!("sqlite://{}", database.display()));
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(
+        !stderr.contains("panicked"),
+        "a rollback is an operating condition, not a bug: {stderr}"
+    );
+    assert!(
+        stderr.contains("cannot migrate the database"),
+        "the message has to say the migrations were what failed: {stderr}"
+    );
+    assert!(
+        stderr.contains("rolled-back.db"),
+        "and which database it was: {stderr}"
+    );
+}
+
+/// Write the migration bookkeeping a newer build would have left, and
+/// nothing else. The version is far past anything this repo ships, so
+/// the migrator finds an applied migration it cannot resolve.
+fn record_a_migration_from_the_future(database: &Path) {
+    let url = format!("sqlite://{}?mode=rwc", database.display());
+    tokio::runtime::Runtime::new()
+        .expect("a test can start a runtime")
+        .block_on(async {
+            let pool = sqlx::SqlitePool::connect(&url)
+                .await
+                .expect("SQLite creates the file");
+            for statement in [
+                "CREATE TABLE _sqlx_migrations (
+                     version BIGINT PRIMARY KEY,
+                     description TEXT NOT NULL,
+                     installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                     success BOOLEAN NOT NULL,
+                     checksum BLOB NOT NULL,
+                     execution_time BIGINT NOT NULL
+                 )",
+                "INSERT INTO _sqlx_migrations
+                     (version, description, success, checksum, execution_time)
+                 VALUES (29990101000001, 'from a newer build', TRUE, X'00', 0)",
+            ] {
+                sqlx::query(statement)
+                    .execute(&pool)
+                    .await
+                    .expect("the bookkeeping table is ordinary SQL");
+            }
+            pool.close().await;
+        });
+}
+
 /// The default is unchanged: no `LUCIDA_DB_URL` still means a SQLite
-/// file in the working directory, and the server comes up on it.
+/// file in the working directory, and the server comes up on it and
+/// answers.
 ///
 /// This is the regression the rest of this file risks — a new backend
 /// is only worth having if the deployment that never asked for one
@@ -131,13 +197,14 @@ fn an_unsupported_scheme_stops_the_boot_naming_the_alternatives() {
 fn an_unset_connection_string_still_starts_on_sqlite() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("lucida.db");
+    let port = free_port();
 
-    let mut child = server(&format!("127.0.0.1:{}", free_port()))
+    let mut child = server(&format!("127.0.0.1:{port}"))
         .current_dir(directory.path())
         .spawn()
         .expect("the server binary runs");
 
-    let created = wait_for(&database);
+    let answered = wait_for_health(port);
     // Stop the server before reading its pipes: draining them runs to
     // end-of-file, and a running server never reaches one.
     let _ = child.kill();
@@ -147,18 +214,33 @@ fn an_unset_connection_string_still_starts_on_sqlite() {
         .unwrap_or_default();
 
     assert!(
-        created,
-        "an unset LUCIDA_DB_URL must open {}: {stderr}",
+        answered,
+        "an unset LUCIDA_DB_URL must reach a server that serves: {stderr}"
+    );
+    assert!(
+        database.exists(),
+        "and the database it opened must be {}: {stderr}",
         database.display()
     );
 }
 
-/// Wait for `path` to appear, up to [`STARTUP_BUDGET`].
-fn wait_for(path: &Path) -> bool {
+/// Poll `/healthz` until it answers, up to [`STARTUP_BUDGET`].
+///
+/// A bound socket is not enough: the storage step runs before the bind,
+/// so a server that answers is one that opened its database, migrated
+/// it, and built every router over the stores it handed out.
+fn wait_for_health(port: u16) -> bool {
     let deadline = Instant::now() + STARTUP_BUDGET;
     while Instant::now() < deadline {
-        if path.exists() {
-            return true;
+        if let Ok(mut socket) = TcpStream::connect(("127.0.0.1", port)) {
+            let request = format!("GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+            let mut status = [0u8; 15];
+            if socket.write_all(request.as_bytes()).is_ok()
+                && socket.read_exact(&mut status).is_ok()
+                && status.starts_with(b"HTTP/1.1 200")
+            {
+                return true;
+            }
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -166,9 +248,9 @@ fn wait_for(path: &Path) -> bool {
 }
 
 /// A port nothing is listening on right now. The kernel hands it back
-/// once the listener is dropped, and the case that uses it does not
-/// depend on getting it: the assertion is about a file, and a bind that
-/// lost a race to another process still opened the database first.
+/// once the listener is dropped. Losing the race to another process
+/// between the two is a failed bind rather than a wrong answer, so the
+/// case that uses this fails loudly rather than passing by accident.
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
         .expect("a loopback port is available")
