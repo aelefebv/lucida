@@ -5,7 +5,7 @@
 //!
 //! The statements come from [`super::store_sql`], which the SQLite store
 //! runs too, so this module holds the binding and the row mapping and no
-//! SQL of its own. Read it beside `store_sqlite`: what differs is the
+//! SQL of its own. Read it beside `store_sqlite`. What differs is the
 //! pool type, the type name, and how `view_json` is bound and decoded,
 //! because the column is `JSONB` here and `TEXT` there. ADR-0058 records
 //! why the SQL is shared and the Rust is not.
@@ -71,10 +71,9 @@ impl BookmarkStore for PostgresBookmarkStore {
         view: SavedView,
     ) -> Result<Bookmark, StoreError> {
         let id = uuid::Uuid::new_v4().to_string();
-        // `TIMESTAMPTZ` holds microseconds, and the clock offers
-        // nanoseconds. Round the value down before it is written, so the
-        // instant this call reports is the instant a later read reports
-        // rather than one the column could not keep.
+        // `TIMESTAMPTZ` holds microseconds and the clock offers
+        // nanoseconds, so round down before writing: the instant this
+        // call reports must be the instant a later read returns.
         let created_at = Utc::now().trunc_subsecs(6);
         let datasets = attachment_set(datasets);
 
@@ -85,11 +84,9 @@ impl BookmarkStore for PostgresBookmarkStore {
             .bind(created_by)
             .bind(created_by_name)
             .bind(created_at)
-            // A `JSONB` column refuses a bound `String`, which is what
-            // the SQLite store's `TEXT` column takes. `Json` sends the
-            // view as JSON instead. A `$6::jsonb` cast would do the same
-            // and would end the sharing for this statement, because
-            // SQLite rejects `::` outright.
+            // `JSONB` refuses a bound `String`, which is what the SQLite
+            // store's `TEXT` column takes. A `$6::jsonb` cast would work
+            // too, but SQLite rejects `::` and the statement is shared.
             .bind(Json(&view))
             .execute(&mut *tx)
             .await
@@ -166,15 +163,14 @@ impl BookmarkStore for PostgresBookmarkStore {
     }
 
     async fn delete(&self, id: &str) -> Result<Option<Bookmark>, StoreError> {
-        // The attachments are read first because the DELETE takes them:
-        // only `bookmarks` is deleted, and `bookmark_datasets` declares
-        // `ON DELETE CASCADE`, which PostgreSQL enforces unconditionally.
-        // They go back to the caller with the row, so the change
-        // broadcast can scope on them without a second round-trip.
-        //
-        // One transaction, so a bookmark removed by someone else between
-        // the two statements takes its attachments out of this answer too
-        // rather than leaving them stranded in it.
+        // Read the attachments before the DELETE takes them: only
+        // `bookmarks` is deleted, and PostgreSQL enforces the schema's
+        // `ON DELETE CASCADE` unconditionally. They ride back with the
+        // row so the change broadcast can scope on them without a second
+        // round-trip. Reading them early is safe because nothing but
+        // this delete can change them — and if someone else deletes the
+        // bookmark first, `RETURNING` hands back no row and the
+        // attachments are dropped with the answer.
         let mut tx = self.pool.begin().await.map_err(map_err)?;
         let dataset_rows = sqlx::query(sql::SELECT_ATTACHMENTS)
             .bind(id)
@@ -199,12 +195,10 @@ fn row_to_bookmark(
     row: sqlx::postgres::PgRow,
     datasets: Vec<String>,
 ) -> Result<Bookmark, StoreError> {
-    // `JSONB` hands back a parsed value rather than the characters that
-    // were written, so the view is rebuilt from that rather than from
-    // text. What PostgreSQL keeps is the JSON document, not its
-    // spelling: key order, whitespace, and number form are all its own
-    // by the time it comes back. The store's contract is the decoded
-    // `SavedView`, which none of that changes.
+    // `JSONB` keeps the parsed document, not the characters written, so
+    // the view decodes from a value rather than from text. Key order,
+    // whitespace, and number form come back PostgreSQL's own, which the
+    // decoded `SavedView` hides.
     let view_json: serde_json::Value = row.get("view_json");
     let view: SavedView = serde_json::from_value(view_json).map_err(map_stored_view)?;
     Ok(Bookmark {
@@ -228,10 +222,10 @@ mod tests {
     ///
     /// PostgreSQL's planner weighs an index scan against the cost of
     /// reading the whole table, and on a table of a few hundred rows the
-    /// scan honestly wins — so a plan read over a token row would assert
-    /// the opposite of what it means to. These counts put the attachment
-    /// table well past the size where that flips, with room to spare, and
-    /// each table is seeded by a single statement.
+    /// scan is the cheaper answer. A plan read over a token row would
+    /// prove the opposite of what this test means. These counts put the
+    /// attachment table well past where that flips, and each table is
+    /// seeded by one statement.
     const SEEDED_BOOKMARKS: i64 = 2_000;
     const SEEDED_URLS_EACH: i64 = 4;
 
@@ -244,11 +238,11 @@ mod tests {
     /// table scan, which no assertion about the rows it returns would
     /// notice.
     ///
-    /// The SQLite store asserts the same guarantee, and asserts it
-    /// differently: `EXPLAIN QUERY PLAN` is SQLite's own spelling and its
-    /// planner needs no statistics to prefer an index it can use. A query
-    /// plan belongs to an engine, so neither assertion can be a
-    /// conformance case, and the two are free to be shaped differently.
+    /// The SQLite store asserts the same guarantee its own way.
+    /// `EXPLAIN QUERY PLAN` is SQLite's spelling, and its planner reaches
+    /// for an index it can use without weighing statistics. A query plan
+    /// belongs to an engine, so neither assertion can be a conformance
+    /// case and the two need not match.
     #[tokio::test]
     async fn the_overlap_query_goes_through_the_dataset_url_index() {
         let Some(db) = postgres_backend().await else {
@@ -256,9 +250,6 @@ mod tests {
         };
         let pool = db.backend.pool();
 
-        // A real view, not a placeholder document: these rows outlive
-        // this test in the schema, and a later read through the store
-        // would report them as corrupt.
         sqlx::query(
             "INSERT INTO bookmarks \
              SELECT 'seed-' || g, 'seed', 'author@example.com', 'Author', now(), $2 \
@@ -279,8 +270,8 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
-        // Without statistics the planner is guessing at the table size,
-        // and the seeded rows are exactly what it has to weigh.
+        // The planner weighs the index against the table size, and it
+        // only learns that size from statistics.
         for table in ["bookmarks", "bookmark_datasets"] {
             sqlx::query(&format!("ANALYZE {table}"))
                 .execute(pool)

@@ -5,7 +5,7 @@
 //!
 //! The statements come from [`super::store_sql`], which the PostgreSQL
 //! store runs too, so this module holds the binding and the row mapping
-//! and no SQL of its own. Read it beside `store_postgres`: what differs
+//! and no SQL of its own. Read it beside `store_postgres`. What differs
 //! is the pool type, the type name, and how `view_json` is bound and
 //! decoded, because the column is `TEXT` here and `JSONB` there.
 
@@ -77,8 +77,6 @@ impl BookmarkStore for SqliteBookmarkStore {
     ) -> Result<Bookmark, StoreError> {
         let id = uuid::Uuid::new_v4().to_string();
         let created_at = Utc::now();
-        // A `TEXT` column takes the serialized view as a bound string.
-        // The PostgreSQL store cannot: see the note on its `create`.
         let view_json = serde_json::to_string(&view).map_err(map_outgoing_view)?;
         let datasets = attachment_set(datasets);
 
@@ -165,15 +163,13 @@ impl BookmarkStore for SqliteBookmarkStore {
     }
 
     async fn delete(&self, id: &str) -> Result<Option<Bookmark>, StoreError> {
-        // The attachments are read first because the DELETE takes them:
-        // only `bookmarks` is deleted, and `bookmark_datasets` declares
-        // `ON DELETE CASCADE`, which the SQLite backend enforces. They go
-        // back to the caller with the row, so the change broadcast can
-        // scope on them without a second round-trip.
-        //
-        // One transaction, so a bookmark removed by someone else between
-        // the two statements takes its attachments out of this answer too
-        // rather than leaving them stranded in it.
+        // Read the attachments before the DELETE takes them: only
+        // `bookmarks` is deleted, and the schema's `ON DELETE CASCADE`
+        // holds because the backend opens every connection with foreign
+        // keys on. They ride back with the row so the change broadcast
+        // can scope on them without a second round-trip, and one
+        // transaction keeps the two statements agreeing about a row a
+        // concurrent writer may have removed.
         let mut tx = self.pool.begin().await.map_err(map_err)?;
         let dataset_rows = sqlx::query(sql::SELECT_ATTACHMENTS)
             .bind(id)

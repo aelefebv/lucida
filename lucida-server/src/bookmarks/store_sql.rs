@@ -18,9 +18,8 @@
 //! error, so it returns a wrong answer rather than failing. Convert a
 //! statement whole or leave it alone.
 //!
-//! What the two implementations do *not* share is the binding, because
-//! `view_json` is `TEXT` on one engine and `JSONB` on the other. See
-//! ADR-0058.
+//! The binding is the one thing the two do not share. `view_json` is
+//! `TEXT` on one engine and `JSONB` on the other. See ADR-0058.
 
 use super::store::StoreError;
 
@@ -36,7 +35,7 @@ pub(crate) const INSERT: &str = r#"
 pub(crate) const ATTACH: &str =
     "INSERT INTO bookmark_datasets (bookmark_id, dataset_url) VALUES ($1, $2)";
 
-/// The columns a read hands back, for one bookmark. The attachments come
+/// The columns a read hands back for one bookmark. The attachments come
 /// from [`SELECT_ATTACHMENTS`].
 pub(crate) const SELECT_BY_ID: &str = r#"
     SELECT id, name, created_by, created_by_name, created_at, view_json
@@ -62,10 +61,10 @@ pub(crate) const RENAME: &str = "UPDATE bookmarks SET name = $1 WHERE id = $2";
 /// Remove the bookmark row and hand it back. The attachments go with it
 /// through the schema's `ON DELETE CASCADE`, which both engines enforce.
 ///
-/// `RETURNING` is what makes the row the caller gets the row that was
+/// `RETURNING` is what ties the row the caller gets to the row that was
 /// removed. Reading it first and deleting it after would be two
 /// statements, and PostgreSQL takes a fresh snapshot per statement under
-/// its default isolation, so a rename committing between them would hand
+/// its default isolation, so a rename committing in between would hand
 /// back a row that never existed. SQLite has had `RETURNING` since 3.35
 /// and PostgreSQL since 8.2.
 pub(crate) const DELETE: &str = r#"
@@ -82,8 +81,8 @@ pub(crate) const DELETE: &str = r#"
 /// on PostgreSQL and has no SQLite spelling, so this is one of the
 /// places sharing costs something.
 ///
-/// `DISTINCT` in the subquery is what keeps a bookmark matching several
-/// of the URLs from being listed several times.
+/// `DISTINCT` in the subquery stops a bookmark that matches more than
+/// one of the URLs from being listed more than once.
 pub(crate) fn select_by_overlap(url_count: usize) -> String {
     let placeholders = (1..=url_count)
         .map(|n| format!("${n}"))

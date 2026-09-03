@@ -1,4 +1,4 @@
-//! The `BookmarkStore` trait, and the record it hands out.
+//! The `BookmarkStore` trait and the record it hands out.
 //!
 //! The trait is the seam between handlers and storage. Handlers hold
 //! `Arc<dyn BookmarkStore>` so the same wiring can swap between the
@@ -77,10 +77,10 @@ pub trait BookmarkStore: Send + Sync + 'static {
     /// tables are written in a single transaction so partial writes
     /// can't surface a row without its dataset URLs.
     ///
-    /// The instant handed back is the instant a later read returns, but
-    /// its resolution belongs to the store: a backend whose column holds
-    /// less than the clock offers rounds down before writing rather than
-    /// reporting a value it cannot keep.
+    /// The instant handed back is the instant a later read returns. Its
+    /// resolution belongs to the store, though. A backend whose column
+    /// holds less than the clock offers rounds down before writing
+    /// rather than reporting a value it cannot keep.
     async fn create(
         &self,
         name: &str,
