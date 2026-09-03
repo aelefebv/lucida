@@ -2,12 +2,12 @@
 
 use std::sync::Arc;
 
-use super::instant;
+use super::{at, instant};
 use crate::auth::{
     CliTokenAuthorization, CliTokenAuthorizationStore, MemoryCliTokenAuthorizationStore,
 };
 use crate::storage::StorageBackend;
-use crate::storage::test_support::sqlite_backend;
+use crate::storage::test_support::{postgres_backend, sqlite_backend};
 
 conformance_suite! {
     cases: [
@@ -22,8 +22,10 @@ conformance_suite! {
         approval_stamps_the_row,
         approval_keeps_the_first_approver,
         approving_an_absent_id_is_silent,
+        a_whole_second_expiry_reads_back_exact,
     ],
     over: [memory, sqlite],
+    when_available: [postgres],
 }
 
 async fn memory() -> Arc<dyn CliTokenAuthorizationStore> {
@@ -32,6 +34,12 @@ async fn memory() -> Arc<dyn CliTokenAuthorizationStore> {
 
 async fn sqlite() -> Arc<dyn CliTokenAuthorizationStore> {
     sqlite_backend().await.cli_token_authorizations()
+}
+
+/// `None` when no PostgreSQL was offered. The harness says so once, on
+/// stderr, rather than letting the cases pass without running.
+async fn postgres() -> Option<Arc<dyn CliTokenAuthorizationStore>> {
+    Some(postgres_backend().await?.backend.cli_token_authorizations())
 }
 
 fn request(id: &str) -> CliTokenAuthorization {
@@ -182,4 +190,15 @@ async fn approving_an_absent_id_is_silent(store: Arc<dyn CliTokenAuthorizationSt
         .expect("a request that expired before the browser approved it is a race, not a failure");
 
     assert!(store.get("never-written").await.unwrap().is_none());
+}
+
+/// A whole second is the one expiry shape no other case writes, since
+/// every [`instant`] carries a fraction. Nothing in this trait compares
+/// an expiry, so an exact round trip is all a store owes here.
+async fn a_whole_second_expiry_reads_back_exact(store: Arc<dyn CliTokenAuthorizationStore>) {
+    let mut written = request("req-a");
+    written.expires_at = at("2026-01-02T03:04:05Z");
+    store.create(written.clone()).await.unwrap();
+
+    assert_eq!(store.get("req-a").await.unwrap(), Some(written));
 }
