@@ -6,8 +6,7 @@
 //! SQLite-backed production store and the in-memory test store without
 //! changing call sites.
 //!
-//! The production schema lives in
-//! `migrations/20260508000003_create_bookmarks.sql`. Two tables:
+//! The production schema lives in the baseline migration. Two tables:
 //!
 //! - `bookmarks` — one row per bookmark, with the serialized `SavedView`
 //!   stored as a JSON string in `view_json`.
@@ -16,8 +15,8 @@
 //!   runs. `EXPLAIN QUERY PLAN` is asserted in tests so the index isn't
 //!   silently dropped from the migration.
 //!
-//! Create / patch_name / delete are transactional across the two tables
-//! (insert into both, delete cascades via the FK).
+//! Create is transactional across the two tables. Delete touches only
+//! `bookmarks`; the attachments go with it through the schema's cascade.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -100,8 +99,7 @@ pub trait BookmarkStore: Send + Sync + 'static {
     async fn patch_name(&self, id: &str, new_name: &str) -> Result<Option<Bookmark>, StoreError>;
 
     /// Delete a bookmark and return the row that was removed. Returns
-    /// `Ok(None)` when the id doesn't match. The `bookmark_datasets`
-    /// side rows are cascaded via the FK.
+    /// `Ok(None)` when the id doesn't match. The attachments go with it.
     ///
     /// The broadcast helper needs the deleted bookmark's `dataset_urls`
     /// to scope its `BookmarkChanged { Deleted }` fanout, so returning
@@ -176,7 +174,7 @@ impl BookmarkStore for SqliteBookmarkStore {
         .bind(name)
         .bind(created_by)
         .bind(created_by_name)
-        .bind(created_at.to_rfc3339())
+        .bind(created_at)
         .bind(&view_json)
         .execute(&mut *tx)
         .await
@@ -296,16 +294,14 @@ impl BookmarkStore for SqliteBookmarkStore {
     }
 
     async fn delete(&self, id: &str) -> Result<Option<Bookmark>, StoreError> {
-        // `ON DELETE CASCADE` on bookmark_datasets requires
-        // `PRAGMA foreign_keys = ON` per-connection; sqlx doesn't enable
-        // it by default. Belt-and-braces: explicit DELETE on the side
-        // table inside a transaction keeps the rows in sync regardless.
+        // Read the row + datasets inside the same transaction as the
+        // DELETE so the returned `Bookmark` matches the row we removed
+        // even if a concurrent writer was racing. The row goes back to the
+        // caller so the change broadcast can scope on `dataset_urls`
+        // without a second round-trip.
         //
-        // Read the row + datasets inside the same transaction so the
-        // returned `Bookmark` matches the row we removed even if a
-        // concurrent writer was racing. The row goes back to the caller
-        // so the slice-4 broadcast can scope on `dataset_urls` without
-        // a second round-trip.
+        // Only `bookmarks` is deleted: `bookmark_datasets` declares
+        // `ON DELETE CASCADE` and the SQLite backend enforces it.
         let mut tx = self.pool.begin().await.map_err(map_sql)?;
         let row = sqlx::query(
             r#"
@@ -333,11 +329,6 @@ impl BookmarkStore for SqliteBookmarkStore {
             .into_iter()
             .map(|r| r.get("dataset_url"))
             .collect();
-        sqlx::query("DELETE FROM bookmark_datasets WHERE bookmark_id = ?")
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .map_err(map_sql)?;
         let result = sqlx::query("DELETE FROM bookmarks WHERE id = ?")
             .bind(id)
             .execute(&mut *tx)
@@ -370,16 +361,12 @@ fn row_to_bookmark(
 ) -> Result<Bookmark, StoreError> {
     let view_json: String = row.get("view_json");
     let view: SavedView = serde_json::from_str(&view_json).map_err(map_json_in)?;
-    let created_at_str: String = row.get("created_at");
-    let created_at = DateTime::parse_from_rfc3339(&created_at_str)
-        .map_err(|e| StoreError::Backend(format!("created_at parse: {e}")))?
-        .with_timezone(&Utc);
     Ok(Bookmark {
         id: row.get("id"),
         name: row.get("name"),
         created_by: row.get("created_by"),
         created_by_name: row.get("created_by_name"),
-        created_at,
+        created_at: row.get("created_at"),
         datasets,
         view,
     })
@@ -556,5 +543,37 @@ mod tests {
             plan.contains("idx_bookmark_datasets_url"),
             "the overlap query must use idx_bookmark_datasets_url; the plan was:\n{plan}",
         );
+    }
+
+    /// Deleting a bookmark deletes only `bookmarks`, and the schema's
+    /// cascade takes the attachments with it. Through the trait an
+    /// orphaned attachment is invisible — the overlap query joins back to
+    /// a bookmark that is gone — so the conformance suite cannot see one
+    /// and this counts the rows directly.
+    #[tokio::test]
+    async fn deleting_a_bookmark_leaves_no_attachment_rows_behind() {
+        let pool = sqlite_pool().await;
+        let store = SqliteBookmarkStore::new(pool.clone());
+        let created = store
+            .create(
+                "doomed",
+                "author@example.com",
+                "Author",
+                vec![
+                    "file:///data/a.zarr".to_string(),
+                    "file:///data/b.zarr".to_string(),
+                ],
+                SavedView::empty([800, 600]),
+            )
+            .await
+            .unwrap();
+
+        store.delete(&created.id).await.unwrap();
+
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookmark_datasets")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 0, "the attachments went with the bookmark");
     }
 }

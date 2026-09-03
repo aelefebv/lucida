@@ -6,7 +6,6 @@
 //! logic never see SQL. The production backend is [`SqliteWorkspaceStore`].
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use lucida_content::DatasetId;
 use lucida_core::auth_principal::AuthPrincipal;
 use lucida_core::saved_view::SavedView;
@@ -57,16 +56,6 @@ fn map_saved_view_json_in(e: serde_json::Error) -> StoreError {
 
 fn map_saved_view_json_out(e: serde_json::Error) -> StoreError {
     StoreError::Backend(format!("view_json serialize: {e}"))
-}
-
-fn parse_dt(raw: String) -> Result<DateTime<Utc>, StoreError> {
-    DateTime::parse_from_rfc3339(&raw)
-        .map(|dt| dt.with_timezone(&Utc))
-        .map_err(|e| StoreError::Backend(format!("timestamp parse: {e}")))
-}
-
-fn parse_opt_dt(raw: Option<String>) -> Result<Option<DateTime<Utc>>, StoreError> {
-    raw.map(parse_dt).transpose()
 }
 
 pub(crate) fn normalize_email(email: &str) -> String {
