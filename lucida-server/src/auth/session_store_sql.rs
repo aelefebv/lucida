@@ -1,12 +1,10 @@
 //! What both SQL-backed `LoginSessionStore` implementations share: the
 //! statements they run, and how a driver error becomes a store error.
 //!
-//! One text, two engines. Placeholders are numbered, `$1` and up:
-//! PostgreSQL's spelling, which sqlx's SQLite driver binds by number, so
-//! the SQLite and PostgreSQL stores execute the same characters and a
-//! change to a query lands once. Never mix `$1` and `?` in one statement
-//! — that binds the same argument to both, reports no error, and returns
-//! a wrong answer. ADR-0058 has the reasoning.
+//! **Number the placeholders, `$1` and up, and never mix `$1` and `?` in
+//! one statement.** A mixed statement binds the same argument to both,
+//! reports no error, and returns a wrong answer. ADR-0058 has the
+//! reasoning and [`super::pending_auth_sql`] the longer note.
 
 /// Insert a freshly-minted session.
 ///
@@ -43,11 +41,9 @@ pub(crate) const DELETE: &str = "DELETE FROM login_sessions WHERE id = $1";
 /// sweep. A session expiring exactly at the cutoff has expired.
 pub(crate) const DELETE_EXPIRED: &str = "DELETE FROM login_sessions WHERE expires_at <= $1";
 
-/// A driver error, as the trait reports it.
-///
-/// One function rather than one per store: `sqlx::Error` is the same type
-/// whichever driver produced it, so a second copy would only be a second
-/// place for the two to disagree.
+/// A driver error, as the trait reports it. One function per store, not
+/// one per implementation: a second copy would only be a second place for
+/// the two to disagree.
 pub(crate) fn map_err(e: sqlx::Error) -> super::session_store::SessionStoreError {
     super::session_store::SessionStoreError::Backend(e.to_string())
 }

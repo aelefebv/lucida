@@ -101,3 +101,47 @@ impl LoginSessionStore for SqliteSessionStore {
         Ok(result.rows_affected())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::StorageBackend;
+    use crate::storage::test_support::sqlite_backend;
+    use chrono::TimeZone;
+
+    /// RFC 3339 text carries whatever chrono formatted, down to the
+    /// nanosecond.
+    ///
+    /// The conformance suite cannot ask this, because the answer differs
+    /// by engine: `a_sub_microsecond_expiry_is_truncated` beside the
+    /// PostgreSQL store is the other half, where a `TIMESTAMPTZ` drops
+    /// everything below the microsecond. This is the one value the two
+    /// stores do not agree on.
+    #[tokio::test]
+    async fn a_sub_microsecond_expiry_survives() {
+        let expires_at = Utc
+            .with_ymd_and_hms(2026, 1, 2, 3, 4, 0)
+            .single()
+            .expect("the test names a real instant")
+            + chrono::Duration::nanoseconds(1_500);
+
+        let store = sqlite_backend().await.login_sessions();
+        store
+            .create(LoginSession {
+                id: "session-a".to_string(),
+                email: "dev@example.com".to_string(),
+                display_name: "Dev".to_string(),
+                picture_url: None,
+                created_at: expires_at - chrono::Duration::hours(1),
+                last_used_at: expires_at - chrono::Duration::hours(1),
+                expires_at,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.get("session-a").await.unwrap().unwrap().expires_at,
+            expires_at,
+        );
+    }
+}

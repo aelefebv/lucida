@@ -22,7 +22,7 @@ conformance_suite! {
         approval_stamps_the_row,
         approval_keeps_the_first_approver,
         approving_an_absent_id_is_silent,
-        an_expiry_reads_back_exact_at_its_own_boundary,
+        a_whole_second_expiry_reads_back_exact,
     ],
     over: [memory, sqlite],
     when_available: [postgres],
@@ -183,32 +183,6 @@ async fn approval_keeps_the_first_approver(store: Arc<dyn CliTokenAuthorizationS
     assert_eq!(approved.approved_email.as_deref(), Some("dev@example.com"));
 }
 
-/// Nothing compares an approval request's expiry in SQL: the store hands
-/// the row back and [`CliTokenAuthorization::is_expired_at`] decides.
-/// That puts the whole of expiry on the round trip being exact, so this
-/// is where the round trip is checked against a boundary rather than
-/// against a value the same case wrote a moment ago.
-///
-/// The expiry is a whole second — the shape a store keeping RFC 3339 text
-/// writes without a fractional part — named from five and three quarter
-/// hours east, and the two instants it is judged against are named from
-/// eight hours west, where they fall on the day before.
-async fn an_expiry_reads_back_exact_at_its_own_boundary(
-    store: Arc<dyn CliTokenAuthorizationStore>,
-) {
-    let mut written = request("req-a");
-    written.expires_at = at("2026-01-02T08:49:05+05:45");
-    store.create(written.clone()).await.unwrap();
-
-    let read = store.get("req-a").await.unwrap().unwrap();
-    assert_eq!(read.expires_at, written.expires_at);
-    assert!(!read.is_expired_at(at("2026-01-01T19:04:04.999999-08:00")));
-    assert!(
-        read.is_expired_at(at("2026-01-01T19:04:05-08:00")),
-        "a window that has run out is shut, not shutting",
-    );
-}
-
 async fn approving_an_absent_id_is_silent(store: Arc<dyn CliTokenAuthorizationStore>) {
     store
         .mark_approved("never-written", "token-a", "dev@example.com", instant(60))
@@ -216,4 +190,16 @@ async fn approving_an_absent_id_is_silent(store: Arc<dyn CliTokenAuthorizationSt
         .expect("a request that expired before the browser approved it is a race, not a failure");
 
     assert!(store.get("never-written").await.unwrap().is_none());
+}
+
+/// A whole second is the one expiry shape no other case writes, since
+/// every [`instant`] carries a fraction. Nothing in this trait compares
+/// an expiry, so an exact round trip is the whole of what a store owes
+/// here — the caller reads the row and judges it against its own clock.
+async fn a_whole_second_expiry_reads_back_exact(store: Arc<dyn CliTokenAuthorizationStore>) {
+    let mut written = request("req-a");
+    written.expires_at = at("2026-01-02T03:04:05Z");
+    store.create(written.clone()).await.unwrap();
+
+    assert_eq!(store.get("req-a").await.unwrap(), Some(written));
 }

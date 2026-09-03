@@ -1,5 +1,9 @@
 //! Authentication subsystem.
 //!
+//! A store with two SQL implementations keeps its statements in a `*_sql`
+//! module the two run, rather than in a second copy of the SQL. See
+//! ADR-0058.
+//!
 //! Module map:
 //!
 //! - `config` — runtime knobs read from env at boot (cookie name,
@@ -24,10 +28,6 @@
 //! - `pending_auth` / `pending_auth_sqlite` / `pending_auth_postgres` /
 //!   `pending_auth_memory` — one-shot OAuth-intent rows: state token →
 //!   intended path/hash.
-//!
-//! Each store with two SQL implementations keeps its statements in a
-//! `*_sql` module the two run, rather than in a second copy of the SQL.
-//! See ADR-0058.
 //! - `google_oauth` — Google integration: authorization URL, code
 //!   exchange, JWKS cache + refresh, JWT validation. The deepest piece.
 //! - `principal` — `PrincipalExtractor` trait plus the three

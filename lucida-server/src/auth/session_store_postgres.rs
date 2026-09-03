@@ -99,13 +99,12 @@ impl LoginSessionStore for PostgresSessionStore {
 }
 
 /// What the `LoginSessionStore` conformance suite cannot ask, because a
-/// case may not name an engine: how far a `TIMESTAMPTZ` round trip is
-/// from the RFC 3339 text SQLite keeps.
+/// case may not name an engine: what a `TIMESTAMPTZ` round trip does with
+/// an instant, and what the server's own `TimeZone` does to it.
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::StorageBackend;
-    use crate::storage::test_support::{postgres_backend, sqlite_backend};
+    use crate::storage::test_support::postgres_backend;
     use chrono::TimeZone;
     use sqlx::postgres::PgPoolOptions;
 
@@ -135,6 +134,10 @@ mod tests {
     /// zone here is fourteen hours from UTC and the expiry sits half an
     /// hour before midnight, so a leak would move the row to the next day
     /// and the sweep with it.
+    ///
+    /// One store carries this for all of them: every PostgreSQL store
+    /// binds and reads `DateTime<Utc>` through the same driver, so the
+    /// zone either reaches all of them or none.
     #[tokio::test]
     async fn a_server_time_zone_does_not_move_an_instant() {
         let Some(db) = postgres_backend().await else {
@@ -183,37 +186,34 @@ mod tests {
         );
     }
 
-    /// Where the two engines genuinely part company.
+    /// A `TIMESTAMPTZ` is whole microseconds, so anything below one is
+    /// dropped on the way in.
     ///
-    /// PostgreSQL stores a `TIMESTAMPTZ` as whole microseconds and drops
-    /// what is below one. SQLite stores RFC 3339 text and keeps every
-    /// digit chrono wrote, down to the nanosecond. Nothing in the server
-    /// compares a timestamp against one it did not read back, and no
-    /// expiry policy is measured in nanoseconds, so the difference costs
-    /// nothing — but it is the one value that does not survive both
-    /// stores unchanged, and a test records that better than a comment.
+    /// This is the one place the two engines genuinely part company: the
+    /// SQLite store keeps every digit chrono wrote, which
+    /// `a_sub_microsecond_expiry_survives` beside it pins. Nothing in the
+    /// server compares a timestamp against one it did not read back, and
+    /// no expiry policy is measured in nanoseconds, so the difference
+    /// costs nothing — but it is the one value that does not survive both
+    /// stores unchanged.
     #[tokio::test]
-    async fn the_engines_part_company_below_the_microsecond() {
+    async fn a_sub_microsecond_expiry_is_truncated() {
         let Some(db) = postgres_backend().await else {
             return;
         };
         let whole_microsecond = utc(2026, 1, 2, 3, 4) + chrono::Duration::microseconds(1);
-        let written = whole_microsecond + chrono::Duration::nanoseconds(500);
 
-        let postgres = db.backend.login_sessions();
-        postgres.create(session(written)).await.unwrap();
+        let store = db.backend.login_sessions();
+        store
+            .create(session(
+                whole_microsecond + chrono::Duration::nanoseconds(500),
+            ))
+            .await
+            .unwrap();
+
         assert_eq!(
-            postgres.get("session-a").await.unwrap().unwrap().expires_at,
+            store.get("session-a").await.unwrap().unwrap().expires_at,
             whole_microsecond,
-            "PostgreSQL truncates to the microsecond it can store",
-        );
-
-        let sqlite = sqlite_backend().await.login_sessions();
-        sqlite.create(session(written)).await.unwrap();
-        assert_eq!(
-            sqlite.get("session-a").await.unwrap().unwrap().expires_at,
-            written,
-            "SQLite keeps the nanoseconds chrono formatted",
         );
     }
 }

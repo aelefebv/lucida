@@ -18,7 +18,7 @@ conformance_suite! {
         revoke_stamps_the_row_and_hands_it_back,
         revoke_keeps_the_first_stamp,
         revoking_an_absent_hash_is_none,
-        an_expiry_reads_back_exact_at_its_own_boundary,
+        a_whole_second_expiry_reads_back_exact,
     ],
     over: [memory, sqlite],
     when_available: [postgres],
@@ -177,30 +177,17 @@ async fn revoking_an_absent_hash_is_none(store: Arc<dyn BearerTokenStore>) {
     );
 }
 
-/// Nothing compares a bearer token's expiry in SQL: the store hands the
-/// row back and [`BearerToken::is_active_at`] decides. That puts the
-/// whole of expiry on the round trip being exact, so this is where the
-/// round trip is checked against a boundary rather than against a value
-/// the same case wrote a moment ago.
-///
-/// The expiry is a whole second — the shape a store keeping RFC 3339 text
-/// writes without a fractional part — named from five and three quarter
-/// hours east, and the two instants it is judged against are named from
-/// eight hours west, where they fall on the day before.
-async fn an_expiry_reads_back_exact_at_its_own_boundary(store: Arc<dyn BearerTokenStore>) {
+/// A whole second is the one expiry shape no other case writes, since
+/// every [`instant`] carries a fraction. Nothing in this trait compares
+/// an expiry, so an exact round trip is the whole of what a store owes
+/// here — the caller reads the row and judges it against its own clock.
+async fn a_whole_second_expiry_reads_back_exact(store: Arc<dyn BearerTokenStore>) {
     let mut written = token("token-a");
-    written.expires_at = at("2026-01-02T08:49:05+05:45");
+    written.expires_at = at("2026-01-02T03:04:05Z");
     store.create(written.clone()).await.unwrap();
 
-    let read = store
-        .get_by_hash(&written.token_hash)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(read.expires_at, written.expires_at);
-    assert!(read.is_active_at(at("2026-01-01T19:04:04.999999-08:00")));
-    assert!(
-        !read.is_active_at(at("2026-01-01T19:04:05-08:00")),
-        "a credential is spent the moment it expires, not a tick later",
+    assert_eq!(
+        store.get_by_hash(&written.token_hash).await.unwrap(),
+        Some(written),
     );
 }

@@ -100,9 +100,11 @@ impl PostgresStorageBackend {
         Ok(Self { pool })
     }
 
-    /// Each accessor is shaped like the
-    /// [`StorageBackend`](super::StorageBackend) accessor it will become:
-    /// a fresh handle over the shared pool, costing a pool clone.
+    // Each accessor below is shaped like the
+    // `StorageBackend` accessor it will become, and ordered as that trait
+    // orders them: a fresh handle over the shared pool, costing a pool
+    // clone. The stores still missing from the trait's six are the ones
+    // still to be ported.
     pub fn login_sessions(&self) -> Arc<dyn LoginSessionStore> {
         Arc::new(PostgresSessionStore::new(self.pool.clone()))
     }
