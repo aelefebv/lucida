@@ -64,8 +64,12 @@ You will need:
 
 You do NOT need:
 
-- A relational database (lucida uses SQLite on a PVC; see
-  [ADR-0015](../../wiki/decisions/0015-server-stored-bookmarks-and-auth-seam.md)).
+- A relational database. Lucida defaults to SQLite on a PVC; see
+  [ADR-0015](../../wiki/decisions/0015-server-stored-bookmarks-and-auth-seam.md).
+  PostgreSQL is the alternative, and it is what you need if you want more
+  than one replica: point `LUCIDA_DB_URL` at `postgres://…` and the server
+  migrates the database at startup. See
+  [ADR-0059](../../wiki/decisions/0059-postgresql-is-selectable-and-the-alias-stops-at-the-parser.md).
 - A Redis or other cache (the proxy cache is on the same PVC).
 - A separate static-asset host (lucida-server serves the SPA itself; see
   [ADR-0020](../../wiki/decisions/0020-single-image-with-servedir.md)).

@@ -111,6 +111,13 @@ spec:
             # Give SQLite an absolute path under the PVC mount below:
             # anything outside it, including the default `./lucida.db`,
             # is lost on restart.
+            #
+            # SQLite is one writer in one file, so this manifest runs one
+            # replica. To run more, point LUCIDA_DB_URL at PostgreSQL
+            # instead — `postgres://` or `postgresql://`, either spelling
+            # — and take the password from a Secret rather than inlining
+            # it here. The server migrates the database at startup and
+            # refuses to serve if it cannot.
             - name: LUCIDA_DB_URL
               value: "sqlite:///var/lib/lucida/lucida.db"
             - name: LUCIDA_PROXY_CACHE_DIR

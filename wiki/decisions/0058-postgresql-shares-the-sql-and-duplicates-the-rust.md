@@ -151,3 +151,4 @@ what the translation is allowed to change.
 - [The storage backend is selected by a connection string](0055-storage-backend-selected-by-connection-string.md) — the seam this backend plugs into, and the promise that keeps PostgreSQL out of `Scheme` for now
 - [Store behavior is a conformance suite](0056-store-behavior-is-a-conformance-suite.md) — the suite the PostgreSQL store had to pass, and the `when_available` list a backend that needs a server joins
 - [One baseline schema, with honest column types](0057-one-baseline-schema-with-honest-column-types.md) — the column conventions the PostgreSQL baseline translates, and the Rust-type-as-contract rule it follows
+- [PostgreSQL is selectable, and the alias stops at the parser](0059-postgresql-is-selectable-and-the-alias-stops-at-the-parser.md) — where the condition above is met and PostgreSQL joins `Scheme`

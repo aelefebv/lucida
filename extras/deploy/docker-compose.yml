@@ -58,7 +58,9 @@ services:
 
       # ---- Required: where the database + the proxy cache live ----
       # Absolute paths under the bind-mounted volume below. The scheme
-      # of LUCIDA_DB_URL picks the storage backend.
+      # of LUCIDA_DB_URL picks the storage backend. PostgreSQL is the
+      # other one — `postgres://` or `postgresql://`, either spelling —
+      # and the server migrates the database at startup either way.
       LUCIDA_DB_URL: "sqlite:///var/lib/lucida/lucida.db"
       LUCIDA_PROXY_CACHE_DIR: "/var/lib/lucida/proxy-cache"
       LUCIDA_DATA_DIR: "/var/lib/lucida/data"

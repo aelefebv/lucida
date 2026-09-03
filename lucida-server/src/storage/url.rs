@@ -27,6 +27,7 @@ const IN_MEMORY_DB_URL: &str = "sqlite::memory:";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scheme {
     Sqlite,
+    Postgres,
 }
 
 impl Scheme {
@@ -37,15 +38,37 @@ impl Scheme {
     /// and what it advertises cannot drift apart. Adding a backend is
     /// two edits: a variant, which stops [`Self::as_str`] compiling
     /// until it is named, and an entry here.
-    pub const ALL: &'static [Scheme] = &[Scheme::Sqlite];
+    pub const ALL: &'static [Scheme] = &[Scheme::Sqlite, Scheme::Postgres];
 
     fn parse(raw: &str) -> Option<Self> {
-        Self::ALL.iter().copied().find(|s| s.as_str() == raw)
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|s| s.as_str() == raw || s.aliases().contains(&raw))
     }
 
+    /// The one spelling a scheme is known by everywhere past parsing:
+    /// in [`super::open`]'s dispatch, in the startup log, and in the
+    /// connection string handed to the backend.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Sqlite => "sqlite",
+            Self::Postgres => "postgres",
+        }
+    }
+
+    /// Other spellings a deployer may write, accepted and then
+    /// forgotten: [`DatabaseUrl::parse`] rewrites the string to
+    /// [`Self::as_str`], so an alias never reaches a backend and never
+    /// becomes a second thing to match on.
+    ///
+    /// `postgresql` is here because PostgreSQL's own documentation uses
+    /// both spellings and libpq accepts both, so a connection string
+    /// copied from anywhere has an even chance of carrying either.
+    fn aliases(&self) -> &'static [&'static str] {
+        match self {
+            Self::Sqlite => &[],
+            Self::Postgres => &["postgresql"],
         }
     }
 
@@ -117,11 +140,13 @@ impl DatabaseUrl {
             });
         };
         Ok(Self {
-            // Hand the backend a lowercased scheme. Schemes are
-            // case-insensitive, so `SQLITE://lucida.db` has to be
-            // accepted, but a backend strips the prefix by literal
-            // match and would take the whole string as a filename.
-            raw: format!("{lowered}:{rest}"),
+            // Hand the backend the canonical spelling. Schemes are
+            // case-insensitive and one of them answers to two names, so
+            // `SQLITE://lucida.db` and `postgresql://host/lucida` both
+            // have to be accepted — but a backend strips the prefix by
+            // literal match, and would take `SQLITE://lucida.db` whole
+            // as a filename.
+            raw: format!("{}:{rest}", scheme.as_str()),
             scheme,
         })
     }
@@ -164,12 +189,12 @@ impl fmt::Display for DatabaseUrl {
 /// placeholder.
 ///
 /// A SQLite URL never carries credentials, so this does nothing for the
-/// backend [`open`](super::open) selects. It exists because the startup
-/// log prints the connection string, and a network backend would
-/// otherwise put a password in the logs of every deployment that adopts
-/// it. [`PostgresStorageBackend`](super::PostgresStorageBackend) calls it
-/// directly, which is why it reaches beyond this module.
-pub(super) fn redact(raw: &str) -> Cow<'_, str> {
+/// default backend. A `postgres://` one usually does, and the startup
+/// log prints the connection string, as does every [`StorageError`]
+/// that reports a database the server could not bring up.
+///
+/// [`StorageError`]: super::StorageError
+fn redact(raw: &str) -> Cow<'_, str> {
     // Search from the right: a password may itself contain an `@`, and
     // the last one is the delimiter the host follows.
     let Some(at) = raw.rfind('@') else {
@@ -212,6 +237,12 @@ mod tests {
             DatabaseUrl::parse("sqlite://lucida.db").unwrap().scheme(),
             Scheme::Sqlite
         );
+        assert_eq!(
+            DatabaseUrl::parse("postgres://host/lucida")
+                .unwrap()
+                .scheme(),
+            Scheme::Postgres
+        );
     }
 
     #[test]
@@ -219,6 +250,42 @@ mod tests {
         let url = DatabaseUrl::parse("SQLite://lucida.db").unwrap();
         assert_eq!(url.scheme(), Scheme::Sqlite);
         assert_eq!(url.as_str(), "sqlite://lucida.db");
+    }
+
+    /// Both spellings of the PostgreSQL scheme are in common use, and
+    /// libpq takes either, so a connection string copied from anywhere
+    /// has to work.
+    #[test]
+    fn postgresql_is_the_same_backend_as_postgres() {
+        let url = DatabaseUrl::parse("postgresql://host/lucida").unwrap();
+        assert_eq!(url.scheme(), Scheme::Postgres);
+    }
+
+    /// An alias is spent at the door. Past `parse`, one backend has one
+    /// name: the dispatch matches on a single variant, the startup log
+    /// prints one spelling, and the backend is handed a connection
+    /// string it can compare literally.
+    #[test]
+    fn an_alias_does_not_survive_parsing() {
+        let url = DatabaseUrl::parse("PostgreSQL://user@host:5432/lucida").unwrap();
+        assert_eq!(url.as_str(), "postgres://user@host:5432/lucida");
+        assert_eq!(url.scheme().to_string(), "postgres");
+    }
+
+    /// Every spelling names exactly one backend. Two schemes sharing one
+    /// would make [`Scheme::parse`] answer by list order, which is not a
+    /// decision anyone would have meant to take.
+    #[test]
+    fn no_spelling_names_two_backends() {
+        let mut seen = std::collections::HashMap::new();
+        for scheme in Scheme::ALL {
+            for spelling in std::iter::once(scheme.as_str()).chain(scheme.aliases().iter().copied())
+            {
+                if let Some(other) = seen.insert(spelling, scheme) {
+                    panic!("{spelling} names both {other} and {scheme}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -246,7 +313,9 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("LUCIDA_DB_URL"), "{message}");
         assert!(message.contains("mysql"), "{message}");
-        assert!(message.contains("sqlite"), "{message}");
+        for scheme in Scheme::ALL {
+            assert!(message.contains(scheme.as_str()), "{message}");
+        }
     }
 
     #[test]
@@ -277,22 +346,33 @@ mod tests {
 
     #[test]
     fn credentials_never_survive_redaction() {
-        // Not a scheme this build accepts, so drive `redact` directly.
-        let redacted = redact("postgres://lucida:hunter2@10.0.0.1:5432/lucida");
-        assert_eq!(redacted, "postgres://<redacted>@10.0.0.1:5432/lucida");
-        assert!(!redacted.contains("hunter2"));
+        let url = DatabaseUrl::parse("postgres://lucida:hunter2@10.0.0.1:5432/lucida").unwrap();
+        assert_eq!(url.redacted(), "postgres://<redacted>@10.0.0.1:5432/lucida");
+        assert!(!url.redacted().contains("hunter2"));
+        // The raw string still carries the password: that is what the
+        // backend connects with, and the point of the two accessors.
+        assert!(url.as_str().contains("hunter2"));
     }
 
     #[test]
     fn redaction_survives_an_at_sign_inside_the_password() {
-        let redacted = redact("postgres://lucida:p@ss@10.0.0.1/lucida");
-        assert_eq!(redacted, "postgres://<redacted>@10.0.0.1/lucida");
-        assert!(!redacted.contains("p@ss"));
+        let url = DatabaseUrl::parse("postgres://lucida:p@ss@10.0.0.1/lucida").unwrap();
+        assert_eq!(url.redacted(), "postgres://<redacted>@10.0.0.1/lucida");
+        assert!(!url.redacted().contains("p@ss"));
     }
 
     #[test]
     fn display_shows_the_redacted_form() {
         let url = DatabaseUrl::parse("sqlite://lucida.db").unwrap();
         assert_eq!(url.to_string(), "sqlite://lucida.db");
+
+        // The case the trait exists for: a `DatabaseUrl` interpolated
+        // into a message by someone who reached for `{}` cannot leak a
+        // password.
+        let credentialed = DatabaseUrl::parse("postgres://lucida:hunter2@db:5432/lucida").unwrap();
+        assert_eq!(
+            credentialed.to_string(),
+            "postgres://<redacted>@db:5432/lucida"
+        );
     }
 }

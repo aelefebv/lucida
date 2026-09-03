@@ -1,20 +1,14 @@
 //! PostgreSQL storage backend.
 //!
 //! Connects to the server named by a `postgres:` connection string, runs
-//! the bundled PostgreSQL migrations, and serves all six stores.
-//!
-//! **Reached only by tests, so this is not a [`StorageBackend`] yet.**
-//! [`super::open`] promises that every entry in [`Scheme::ALL`] reaches a
-//! backend that comes up, so there is no `Scheme::Postgres`, nothing
-//! outside the tests constructs this type, and `LUCIDA_DB_URL=postgres://…`
-//! still fails at startup naming the schemes that work. Every store is
-//! ported now, so what remains is the wiring rather than another port.
-//! ADR-0058 records the pattern each one followed.
+//! the bundled PostgreSQL migrations, and serves all six stores. A
+//! deployer selects it with `LUCIDA_DB_URL=postgres://…`, or with the
+//! `postgresql://` spelling of the same thing; ADR-0058 records the
+//! pattern each store implementation followed.
 //!
 //! This module is the only place in the server that names a PostgreSQL
-//! type. Everything above it works through the store traits.
-//!
-//! [`Scheme::ALL`]: super::Scheme::ALL
+//! type. Everything above it works through [`StorageBackend`] and the
+//! six store traits.
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -23,8 +17,8 @@ use std::time::Duration;
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
-use super::StorageError;
-use super::url::redact;
+use super::url::DatabaseUrl;
+use super::{StorageBackend, StorageError};
 use crate::auth::{
     BearerTokenStore, CliTokenAuthorizationStore, LoginSessionStore, PendingAuthStore,
     PostgresBearerTokenStore, PostgresCliTokenAuthorizationStore, PostgresPendingAuthStore,
@@ -42,9 +36,9 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/postgres
 ///
 /// A PostgreSQL server serves concurrent writers, so unlike the SQLite
 /// backend this number is not pinned by the storage engine. It is sqlx's
-/// own default, which is the right placeholder while nothing selects this
-/// backend; a deployment that does will want it set against the server's
-/// `max_connections` divided by the replica count.
+/// own default. A deployment that runs several replicas against one
+/// server should divide that server's `max_connections` by the replica
+/// count and check this against the result.
 const MAX_CONNECTIONS: u32 = 10;
 
 /// How long [`PostgresStorageBackend::open`] waits for its first
@@ -69,13 +63,13 @@ impl PostgresStorageBackend {
     /// Idempotent: opening the same database twice is harmless, and so is
     /// opening it twice at once — see `concurrent_opens_apply_the_baseline_once`.
     ///
-    /// Takes the connection string rather than a [`super::DatabaseUrl`],
-    /// because a `DatabaseUrl` can only name a backend [`super::open`]
-    /// can serve and this one is not yet among them.
-    pub async fn open(connection_string: &str) -> Result<Self, StorageError> {
-        let target = redact(connection_string).into_owned();
+    /// Every failure carries the redacted connection string, because the
+    /// operator reading it has nothing else to tell them which database
+    /// the server could not bring up.
+    pub async fn open(url: &DatabaseUrl) -> Result<Self, StorageError> {
+        let target = url.redacted().into_owned();
         let options =
-            PgConnectOptions::from_str(connection_string).map_err(|e| StorageError::Connect {
+            PgConnectOptions::from_str(url.as_str()).map_err(|e| StorageError::Connect {
                 target: target.clone(),
                 reason: e.to_string(),
             })?;
@@ -101,36 +95,39 @@ impl PostgresStorageBackend {
         Ok(Self { pool })
     }
 
-    // Each accessor mirrors the `StorageBackend` accessor it will become,
-    // in that trait's order, and costs one pool clone.
-    pub fn login_sessions(&self) -> Arc<dyn LoginSessionStore> {
-        Arc::new(PostgresSessionStore::new(self.pool.clone()))
-    }
-
-    pub fn pending_auth(&self) -> Arc<dyn PendingAuthStore> {
-        Arc::new(PostgresPendingAuthStore::new(self.pool.clone()))
-    }
-
-    pub fn bearer_tokens(&self) -> Arc<dyn BearerTokenStore> {
-        Arc::new(PostgresBearerTokenStore::new(self.pool.clone()))
-    }
-
-    pub fn cli_token_authorizations(&self) -> Arc<dyn CliTokenAuthorizationStore> {
-        Arc::new(PostgresCliTokenAuthorizationStore::new(self.pool.clone()))
-    }
-
-    pub fn bookmarks(&self) -> Arc<dyn BookmarkStore> {
-        Arc::new(PostgresBookmarkStore::new(self.pool.clone()))
-    }
-
-    pub fn workspaces(&self) -> Arc<dyn WorkspaceStore> {
-        Arc::new(PostgresWorkspaceStore::new(self.pool.clone()))
-    }
-
     /// The pool behind the store, for tests that drive SQL directly.
     #[cfg(test)]
     pub(crate) fn pool(&self) -> &PgPool {
         &self.pool
+    }
+}
+
+/// Every accessor builds a fresh handle over the shared pool, exactly as
+/// the SQLite backend does: the stores hold nothing but that handle, so
+/// this costs a pool clone and the handles are interchangeable.
+impl StorageBackend for PostgresStorageBackend {
+    fn login_sessions(&self) -> Arc<dyn LoginSessionStore> {
+        Arc::new(PostgresSessionStore::new(self.pool.clone()))
+    }
+
+    fn pending_auth(&self) -> Arc<dyn PendingAuthStore> {
+        Arc::new(PostgresPendingAuthStore::new(self.pool.clone()))
+    }
+
+    fn bearer_tokens(&self) -> Arc<dyn BearerTokenStore> {
+        Arc::new(PostgresBearerTokenStore::new(self.pool.clone()))
+    }
+
+    fn cli_token_authorizations(&self) -> Arc<dyn CliTokenAuthorizationStore> {
+        Arc::new(PostgresCliTokenAuthorizationStore::new(self.pool.clone()))
+    }
+
+    fn bookmarks(&self) -> Arc<dyn BookmarkStore> {
+        Arc::new(PostgresBookmarkStore::new(self.pool.clone()))
+    }
+
+    fn workspaces(&self) -> Arc<dyn WorkspaceStore> {
+        Arc::new(PostgresWorkspaceStore::new(self.pool.clone()))
     }
 }
 
@@ -383,9 +380,8 @@ mod tests {
     /// is unbindable without privileges, so nothing answers there.
     #[tokio::test]
     async fn an_unreachable_server_is_reported_as_a_connect_failure() {
-        let err = PostgresStorageBackend::open("postgres://lucida:hunter2@127.0.0.1:1/lucida")
-            .await
-            .unwrap_err();
+        let url = DatabaseUrl::parse("postgres://lucida:hunter2@127.0.0.1:1/lucida").unwrap();
+        let err = PostgresStorageBackend::open(&url).await.unwrap_err();
         assert!(
             matches!(err, StorageError::Connect { .. }),
             "expected a connect failure, got {err:?}"
@@ -393,5 +389,34 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("127.0.0.1:1"), "{message}");
         assert!(!message.contains("hunter2"), "{message}");
+    }
+
+    /// A database whose recorded migration no longer matches the one in
+    /// this build — the deployment that rolled back a release, or the
+    /// developer who edited an applied migration in place. sqlx refuses
+    /// rather than guessing, and the refusal has to reach the operator
+    /// as a migrate failure naming the database, not as a panic.
+    ///
+    /// Tampering with the recorded checksum is how the state is reached
+    /// without shipping a second, deliberately broken migration.
+    #[tokio::test]
+    async fn a_migration_that_no_longer_matches_is_reported_as_a_migrate_failure() {
+        let Some(db) = postgres_backend().await else {
+            return;
+        };
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = $1")
+            .bind(vec![0u8; 48])
+            .execute(db.backend.pool())
+            .await
+            .unwrap();
+
+        let err = PostgresStorageBackend::open(&db.url).await.unwrap_err();
+        let StorageError::Migrate { target, .. } = &err else {
+            panic!("expected a migrate failure, got {err:?}");
+        };
+        // Whatever the connection string carried, what the operator
+        // reads is the redacted form of it.
+        assert_eq!(target, &db.url.redacted());
+        assert!(err.to_string().contains("cannot migrate"), "{err}");
     }
 }

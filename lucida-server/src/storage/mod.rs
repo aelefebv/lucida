@@ -18,10 +18,12 @@
 //!
 //! - `url` — [`DatabaseUrl`], the parsed connection string, and the
 //!   [`Scheme`] enum that [`open`] dispatches on.
-//! - `sqlite` — [`SqliteStorageBackend`], the only backend [`open`] can
-//!   select.
-//! - `postgres` — [`PostgresStorageBackend`], which serves the stores
-//!   that have been ported and is reached only by tests. See ADR-0058.
+//! - `sqlite` — [`SqliteStorageBackend`], the default, selected by a
+//!   `sqlite:` connection string and by an unset `LUCIDA_DB_URL`.
+//! - `postgres` — [`PostgresStorageBackend`], selected by a `postgres:`
+//!   connection string. See ADR-0058.
+//! - `end_to_end` (tests) — one connection string, through the routers,
+//!   and back after a restart.
 //! - `conformance` (tests) — one suite per store trait, run against
 //!   every implementation of that trait.
 //! - `test_support` (tests) — how a test opens a database, written once.
@@ -30,15 +32,14 @@
 
 #[cfg(test)]
 mod conformance;
+#[cfg(test)]
+mod end_to_end;
 mod postgres;
 mod sqlite;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod url;
 
-// `pub` even though `open` cannot select this backend and only tests
-// construct it: anything narrower makes the type dead code in a release
-// build, and a `cfg(test)` module would drop it from the ordinary build.
 pub use postgres::PostgresStorageBackend;
 pub use sqlite::SqliteStorageBackend;
 pub use url::{DatabaseUrl, DatabaseUrlError, Scheme};
@@ -88,12 +89,29 @@ pub trait StorageBackend: Send + Sync + std::fmt::Debug {
 pub async fn open(url: &DatabaseUrl) -> Result<Arc<dyn StorageBackend>, StorageError> {
     match url.scheme() {
         Scheme::Sqlite => Ok(Arc::new(SqliteStorageBackend::open(url).await?)),
+        Scheme::Postgres => Ok(Arc::new(PostgresStorageBackend::open(url).await?)),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use test_support::postgres_schema;
+
+    /// An empty database for `scheme`, or `None` where this machine
+    /// cannot offer one.
+    ///
+    /// The match is exhaustive, so a scheme added without a way to open
+    /// one in a test stops this compiling rather than quietly going
+    /// untested.
+    async fn empty_database(scheme: Scheme) -> Option<DatabaseUrl> {
+        match scheme {
+            Scheme::Sqlite => Some(DatabaseUrl::in_memory()),
+            // Needs a server, so it answers `None` where there is none,
+            // and says so on stderr.
+            Scheme::Postgres => Some(postgres_schema().await?.url),
+        }
+    }
 
     /// Every scheme the configuration layer accepts must also be one
     /// `open` can serve. The dispatch arm is compiler-checked, but
@@ -101,8 +119,8 @@ mod tests {
     #[tokio::test]
     async fn open_serves_every_scheme() {
         for scheme in Scheme::ALL {
-            let url = match scheme {
-                Scheme::Sqlite => DatabaseUrl::in_memory(),
+            let Some(url) = empty_database(*scheme).await else {
+                continue;
             };
             open(&url)
                 .await
@@ -110,20 +128,42 @@ mod tests {
         }
     }
 
+    /// Each accessor runs a read against the migrated schema, which
+    /// proves the store is wired to a table that exists — on every
+    /// backend, because a missing table is a per-backend fault.
     #[tokio::test]
     async fn every_store_is_reachable_through_the_trait() {
-        let backend = open(&DatabaseUrl::in_memory()).await.unwrap();
-        // Each accessor runs a read against the migrated schema, which
-        // proves the store is wired to a table that exists.
-        backend.login_sessions().get("absent").await.unwrap();
-        backend.pending_auth().consume("absent").await.unwrap();
-        backend.bearer_tokens().get_by_hash("absent").await.unwrap();
-        backend
-            .cli_token_authorizations()
-            .get_for_poll("absent", "absent")
-            .await
-            .unwrap();
-        backend.bookmarks().get("absent").await.unwrap();
-        backend.workspaces().get_workspace("absent").await.unwrap();
+        for scheme in Scheme::ALL {
+            let Some(url) = empty_database(*scheme).await else {
+                continue;
+            };
+            let backend = open(&url).await.unwrap();
+            backend.login_sessions().get("absent").await.unwrap();
+            backend.pending_auth().consume("absent").await.unwrap();
+            backend.bearer_tokens().get_by_hash("absent").await.unwrap();
+            backend
+                .cli_token_authorizations()
+                .get_for_poll("absent", "absent")
+                .await
+                .unwrap();
+            backend.bookmarks().get("absent").await.unwrap();
+            backend.workspaces().get_workspace("absent").await.unwrap();
+        }
+    }
+
+    /// An unreachable database ends the boot with something an operator
+    /// can act on: which database, what went wrong, and no password.
+    ///
+    /// `main` turns this `Err` into a logged `storage.startup.open_failed`
+    /// and a non-zero exit; `tests/storage_boot_e2e.rs` runs the binary
+    /// to prove it.
+    #[tokio::test]
+    async fn an_unreachable_database_is_an_error_rather_than_a_panic() {
+        // Port 1 is unbindable without privileges, so nothing answers.
+        let url = DatabaseUrl::parse("postgres://lucida:hunter2@127.0.0.1:1/lucida").unwrap();
+        let err = open(&url).await.unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("127.0.0.1:1"), "{message}");
+        assert!(!message.contains("hunter2"), "{message}");
     }
 }
