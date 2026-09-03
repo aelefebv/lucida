@@ -30,7 +30,7 @@ Drops the `127.0.0.1:` prefix so the host port-forward listens on every interfac
 
 ### Run with sign-in (Google OAuth)
 
-For any production-shape deployment — multi-user identity, proper admin gating, internet-reachable hostname — sign-in is required. The click-by-click Google Cloud Console setup (provision an OAuth client, configure the redirect URI, supply the credentials to the container) lives in [`extras/deploy/RUNBOOK.md`](extras/deploy/RUNBOOK.md) §2 alongside the Kubernetes manifests in [`extras/deploy/k8s/`](extras/deploy/k8s/) and the single-host docker-compose alternative in [`extras/deploy/docker-compose.yml`](extras/deploy/docker-compose.yml). The RUNBOOK also covers the conceptual model: env-var contract, persistence layout, OAuth provider extensibility, and per-cloud identity wiring.
+For any production-shape deployment — multi-user identity, proper admin gating, internet-reachable hostname — sign-in is required. The click-by-click Google Cloud Console setup (provision an OAuth client, configure the redirect URI, supply the credentials to the container) lives in [`extras/deploy/RUNBOOK.md`](extras/deploy/RUNBOOK.md) §2 alongside the Kubernetes manifests in [`extras/deploy/k8s/`](extras/deploy/k8s/) and the single-host docker-compose alternative in [`extras/deploy/docker-compose.yml`](extras/deploy/docker-compose.yml). The RUNBOOK also covers the conceptual model: env-var contract, the choice between the SQLite and PostgreSQL storage backends, persistence and backups, OAuth provider extensibility, and per-cloud identity wiring.
 
 ### Develop on it
 

@@ -5,6 +5,10 @@
 # and the proxy cache is also single-writer. ReadWriteOnce is the
 # correct access mode and the most widely supported across CSI drivers.
 #
+# A deployment on PostgreSQL deletes this file: the database is on a
+# server, and the proxy cache is the only thing left on disk, which an
+# emptyDir holds. See ../RUNBOOK.md step 4.
+#
 # Why 50Gi: a starting point. The proxy cache dominates disk usage and
 # scales with the breadth of datasets the deployment serves. Adopters
 # with large datasets or long-tail workloads should resize upward; the
