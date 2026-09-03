@@ -7,16 +7,22 @@
 # reference for any target cluster.
 #
 # Why a single replica:
-#   - The session store and bookmark store are SQLite files on a PVC
-#     (see [[wiki/decisions/0015-server-stored-bookmarks-and-auth-seam]]).
-#     SQLite + WAL is single-writer; multi-replica would require a real
-#     RDBMS migration first.
+#   - This template ships the volume shape: every store lives in one
+#     SQLite file on the PVC, and SQLite + WAL is single-writer, so a
+#     second pod cannot share it.
 #   - The proxy on-disk cache (LUCIDA_PROXY_CACHE_DIR) is also on the
 #     PVC and is single-writer for the same reason.
 #   - Strategy is Recreate so the writer slot is never double-booked
 #     during rollouts (the new pod waits for the old pod to release the
 #     PVC). RollingUpdate would briefly run two writers against the
 #     same SQLite file.
+#
+# PostgreSQL lifts all three (ADR-0055), and ../RUNBOOK.md step 4
+# documents that shape — no PVC, an ephemeral cache, a RollingUpdate
+# rollout — as a diff against this file. It is prose rather than a
+# second manifest because `kubectl apply -f k8s/` would apply anything
+# sitting in this directory, including a Deployment you meant as an
+# alternative.
 #
 # Env vars: only LUCIDA_BIND, LUCIDA_LOG_FORMAT, LUCIDA_AUTH, and
 # LUCIDA_WEB_DIST are set unconditionally. Everything else lives in
@@ -114,7 +120,8 @@ spec:
             #
             # PostgreSQL is the other backend, spelled `postgres://` or
             # `postgresql://`. Take its password from a Secret rather
-            # than inlining it here. Either backend is migrated at
+            # than inlining it here, and take the rest of the shape
+            # from ../RUNBOOK.md step 4. Either backend is migrated at
             # startup, and the server refuses to serve if it cannot.
             #
             # A single SQLite file cannot serve a second replica, so
