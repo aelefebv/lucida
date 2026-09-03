@@ -337,7 +337,10 @@ mod tests {
         let p: AuthPrincipal = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(p.email, "dev@local");
         assert_eq!(p.display_name, "Local Dev");
-        assert!(p.is_admin);
+        assert!(
+            !p.is_admin,
+            "the principal the middleware attaches for free is not an admin",
+        );
     }
 
     #[test]

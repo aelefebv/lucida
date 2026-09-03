@@ -5,7 +5,7 @@ description: "Lucida's authentication uses backend-mediated OAuth 2.0 Authorizat
 tags: [lucida, decision]
 source_path: wiki/decisions/0016-backend-mediated-oauth-with-session-cookies.md
 created: 2026-05-08
-modified: 2026-06-25
+modified: 2026-09-03
 ---
 
 # Backend-Mediated OAuth with Session Cookies
@@ -76,7 +76,7 @@ The trade-off: if someone leaves the org mid-session, they retain access until t
 - `lucida-server::auth::session_store_memory::MemorySessionStore` — in-memory store used by unit and integration tests.
 - `lucida-server::auth::pending_auth*` — parallel trio for the in-flight OAuth `state` token (`PendingAuthStore` trait, SQLite + memory backends). `consume` is atomic single-use to prevent state replay.
 - `lucida-server::auth::middleware::auth_middleware` — axum layer that runs the configured `PrincipalExtractor`, attaches `AuthPrincipal` to request extensions on success, and returns either the unauth-landing HTML (browsers) or bare JSON 401 (API clients) on failure.
-- `lucida-server::auth::handlers` — `/auth/whoami`, `/auth/logout`, `/auth/start`, `/auth/callback`, `/auth/error` (slice 5 user-fixable rejection page), and the dev-only `/auth/dev/login` (slice 8 gates on `AuthMode::Disabled`).
+- `lucida-server::auth::handlers` — `/auth/whoami`, `/auth/logout`, `/auth/start`, `/auth/callback`, `/auth/error` (slice 5 user-fixable rejection page), and the dev-only `/auth/dev/login` (gated on disabled mode plus a loopback bind; see [Auth Mode Auto-Detect by Bind Address](0018-auth-mode-auto-detect-by-bind-address.md)).
 - `lucida-server::auth::google_oauth::GoogleOAuthClient` — authorization-URL builder, token-endpoint POST, JWKS cache (24 h TTL + on-validation-failure refresh), JWT validation. Slice 8 distinguishes `OAuthError::Network` from `OAuthError::CodeExchange` so the audit-log dashboard can split "Google rejected our code" from "we couldn't reach Google."
 - `lucida-server::auth::cookie` — single source of truth for the `Set-Cookie` attribute set (`HttpOnly`, `Secure` auto-detected, `SameSite=Lax`, `Path=/`, `Max-Age` matching the hard cap).
 - `lucida-server::auth::cleanup` — slice 8's hourly background sweep that drops expired session and pending-auth rows. Spawned at startup; warm-up of 60s before the first sweep.

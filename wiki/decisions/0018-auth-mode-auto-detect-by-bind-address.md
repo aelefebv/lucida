@@ -5,7 +5,7 @@ description: "slice-1 StubPrincipalExtractor without replacement, so disabled mo
 tags: [lucida, decision]
 source_path: wiki/decisions/0018-auth-mode-auto-detect-by-bind-address.md
 created: 2026-05-08
-modified: 2026-06-25
+modified: 2026-09-03
 ---
 
 
@@ -24,6 +24,20 @@ than removing it: `dev_status` and `dev_login` both still exist in
 `main.rs`, with `/auth/dev/login` registered only when
 `mode == AuthMode::Disabled`. See Authentication for the post-restoration
 extractor lineup.
+
+**Implementation note (2026-09-03):** disabled mode alone was the wrong
+gate for the dev-login machinery. `/auth/dev/login` mints whatever
+identity the request body names, admin included, so on a non-loopback
+bind it handed an administrator to anyone who could reach the server.
+`LUCIDA_INSECURE=1` acknowledges that sign-in is off. It does not ask
+for a route that grants privilege. The switcher now needs disabled mode
+*and* a loopback bind, decided once in `DevAuthState::new`. That
+narrows what the insecure opt-in buys. A deployment running disabled
+mode behind its own perimeter keeps the app and the shared `dev@local`
+identity, but loses the switcher, and with it any way to reach an
+admin-gated endpoint. The default `dev@local` principal also dropped
+its admin rights, for the same reason. It is the identity a caller gets
+for presenting nothing.
 
 ## Decision
 
@@ -78,10 +92,11 @@ Both are acceptable trade-offs given the safety win. Documented in the OSS quick
 
 ## How this decision shows up in code
 
-- `lucida-server::auth::config::AuthConfig::from_env_map` — performs the auto-detect logic. Reads `LUCIDA_BIND` first (default `127.0.0.1:9876`), then if `LUCIDA_AUTH` is unset infers the mode from `bind_addr.ip().is_loopback()`. The dangerous `Disabled + non-loopback` combination errors with `AuthConfigError::InsecureRequiresOptIn` unless `LUCIDA_INSECURE=1` is also set.
+- `lucida-server::auth::config::AuthConfig::from_env_map` — performs the auto-detect logic. Reads `LUCIDA_BIND` first (default `127.0.0.1:9876`), then if `LUCIDA_AUTH` is unset infers the mode from `bind_is_loopback(bind_addr)`. The dangerous `Disabled + non-loopback` combination errors with `AuthConfigError::InsecureRequiresOptIn` unless `LUCIDA_INSECURE=1` is also set.
 - `lucida-server::auth::config::AuthMode::parse` — fails on unknown values (e.g. `LUCIDA_AUTH=microsoft` is fatal at boot, not silently fallthrough).
 - `lucida-server::main::run_serve` — calls `AuthConfig::from_env`, emits `auth.startup` (info, with mode + bind), `auth.startup.config_error` (error, before fail-fast exit), and `auth.startup.insecure_mode` (warn, when `insecure_acknowledged`).
-- `lucida-server::main` — the dev-only `/auth/dev/login` route is gated inline (`if auth_config.mode == auth::AuthMode::Disabled` near `main.rs:441`), so it's registered only in disabled mode (was `cfg!(debug_assertions)` in slice 2). A release build with auto-detected disabled mode still gets the dev shortcut; a debug build with Google OAuth configured does not. (There is no `is_dev_mode` helper; the gate is the inline `mode` check.)
+- `lucida-server::auth::config::AuthConfig::bind_is_loopback` — the loopback answer, asked in one place so the auto-detect, the `LUCIDA_INSECURE` gate, and anything downstream cannot reach different conclusions.
+- `lucida-server::auth::handlers::DevAuthState::new` — decides whether the dev identity switcher exists: `mode == Disabled` and a loopback bind. A release build bound to loopback still gets the dev shortcut. A debug build on `0.0.0.0`, acknowledged or not, does not. Both dev routes stay registered either way, so `/auth/dev/login` answers a flat 404 where the switcher is off rather than falling through to the SPA catch-all, which replies 200 with the app shell. `/auth/dev/status` answers 200 everywhere and carries the verdict in `enabled`, which the SPA reads to decide whether to draw the switcher.
 - `lucida-server/tests/auth_config_e2e.rs` — exercises every from-env permutation (loopback default, public default → Google, public + disabled → error, public + disabled + insecure → ok with banner).
 
 ## Related

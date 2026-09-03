@@ -214,8 +214,8 @@ pub struct AuthConfig {
     pub admin_emails: HashSet<String>,
     /// The socket the server binds (ADR-0018). Default is loopback
     /// (`127.0.0.1:9876`); production deployments override via
-    /// `LUCIDA_BIND`. The auth mode auto-detect keys off
-    /// `bind_addr.ip().is_loopback()`.
+    /// `LUCIDA_BIND`. Ask [`AuthConfig::bind_is_loopback`] rather than
+    /// re-deriving the loopback answer from this field.
     pub bind_addr: SocketAddr,
     /// Explicit acknowledgment that the operator is intentionally
     /// running with auth disabled on a non-loopback bind (ADR-0018).
@@ -227,6 +227,18 @@ pub struct AuthConfig {
 }
 
 impl AuthConfig {
+    /// Whether the server is bound to loopback.
+    ///
+    /// ADR-0018 decides two things by this answer: the auth-mode
+    /// auto-detect and the `LUCIDA_INSECURE` gate. So does anything
+    /// else that is safe only while nothing but this machine can reach
+    /// the server. Boot calls the free function of the same name,
+    /// before there is a `Self` to call. Both read `bind_addr`, so
+    /// they cannot disagree.
+    pub fn bind_is_loopback(&self) -> bool {
+        bind_is_loopback(self.bind_addr)
+    }
+
     /// Read configuration from process env vars, applying documented
     /// defaults for anything missing. Fail-fast when `LUCIDA_AUTH=google`
     /// and any required Google credential is absent, when `LUCIDA_BIND`
@@ -259,7 +271,7 @@ impl AuthConfig {
                 reason: e.to_string(),
             }
         })?;
-        let bind_is_loopback = bind_addr.ip().is_loopback();
+        let bind_is_loopback = bind_is_loopback(bind_addr);
 
         // Auth mode: explicit override > auto-detect.
         let mode = match nonempty("LUCIDA_AUTH") {
@@ -355,6 +367,12 @@ impl AuthConfig {
         });
         cfg
     }
+}
+
+/// The loopback question, asked in one place so every decision that
+/// turns on it gets the same answer. See [`AuthConfig::bind_is_loopback`].
+fn bind_is_loopback(bind_addr: SocketAddr) -> bool {
+    bind_addr.ip().is_loopback()
 }
 
 fn google_from_reader<F>(nonempty: &F) -> Result<GoogleOAuthConfig, AuthConfigError>
@@ -679,6 +697,22 @@ mod tests {
             AuthConfig::from_env_map(reader(&[("LUCIDA_DB_PATH", "/var/lib/lucida/lucida.db")]))
                 .unwrap();
         assert_eq!(cfg.db_url, DatabaseUrl::default_sqlite());
+    }
+
+    #[test]
+    fn bind_is_loopback_matches_the_mode_the_auto_detect_picked() {
+        for (bind, extra, expect_loopback, expect_mode) in [
+            ("127.0.0.1:9876", vec![], true, AuthMode::Disabled),
+            ("127.0.0.5:8080", vec![], true, AuthMode::Disabled),
+            ("[::1]:9876", vec![], true, AuthMode::Disabled),
+            ("0.0.0.0:9876", google_creds(), false, AuthMode::Google),
+        ] {
+            let mut entries = vec![("LUCIDA_BIND", bind)];
+            entries.extend(extra);
+            let cfg = AuthConfig::from_env_map(reader(&entries)).unwrap();
+            assert_eq!(cfg.bind_is_loopback(), expect_loopback, "bind={bind}");
+            assert_eq!(cfg.mode, expect_mode, "bind={bind}");
+        }
     }
 
     #[test]

@@ -23,7 +23,7 @@ use lucida_core::auth_principal::AuthPrincipal;
 
 use super::bearer_token::{BearerToken, BearerTokenStore, hash_bearer_token};
 use super::cli_authorization::{CliTokenAuthorization, CliTokenAuthorizationStore};
-use super::config::AuthConfig;
+use super::config::{AuthConfig, AuthMode};
 use super::cookie::{
     build_clearing_cookie, build_clearing_signed_out_marker, build_session_cookie,
     build_signed_out_marker, read_session_cookie, read_signed_out_marker, request_is_https,
@@ -549,10 +549,29 @@ fn html_escape(raw: &str) -> String {
 }
 
 /// State for disabled-auth developer identity routes.
+///
+/// Both fields are private, so [`DevAuthState::new`] is the only way to
+/// build one. A future route cannot mount the switcher without running
+/// the check that decides whether it is safe.
 #[derive(Clone)]
 pub struct DevAuthState {
-    pub config: Arc<AuthConfig>,
-    pub enabled: bool,
+    config: Arc<AuthConfig>,
+    enabled: bool,
+}
+
+impl DevAuthState {
+    /// Decide whether the dev identity switcher is available.
+    ///
+    /// It needs `LUCIDA_AUTH=disabled` and a loopback bind. Disabled
+    /// mode alone is not enough. `/auth/dev/login` mints whatever
+    /// identity the request body names, admin included, so on any other
+    /// address it lets every caller make themselves an admin.
+    /// `LUCIDA_INSECURE=1` acknowledges running without sign-in
+    /// (ADR-0018). It does not ask for a route that hands out privilege.
+    pub fn new(config: Arc<AuthConfig>) -> Self {
+        let enabled = config.mode == AuthMode::Disabled && config.bind_is_loopback();
+        Self { config, enabled }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -569,6 +588,9 @@ pub struct DevLoginRequest {
     pub is_admin: bool,
 }
 
+/// `GET /auth/dev/status` — tells the SPA whether to draw the identity
+/// switcher. Registered on every deployment, and `enabled` carries the
+/// verdict.
 pub async fn dev_status(State(state): State<DevAuthState>) -> Response {
     Json(DevAuthStatus {
         enabled: state.enabled,
@@ -577,6 +599,12 @@ pub async fn dev_status(State(state): State<DevAuthState>) -> Response {
     .into_response()
 }
 
+/// `POST /auth/dev/login` — take on a local dev identity of the
+/// caller's choosing.
+///
+/// Registered on every deployment, and 404s unless the switcher is
+/// enabled. Leaving the path unregistered would hand it to the SPA
+/// catch-all, which replies 200 with `index.html`.
 pub async fn dev_login(
     State(state): State<DevAuthState>,
     req: Request<axum::body::Body>,
@@ -1217,11 +1245,40 @@ mod tests {
 
     // -- /auth/dev/* -----------------------------------------------------
 
+    fn dev_auth_config(mode: AuthMode, bind: &str) -> Arc<AuthConfig> {
+        let mut config = AuthConfig::for_tests();
+        config.mode = mode;
+        config.bind_addr = bind.parse().expect("test bind parses");
+        Arc::new(config)
+    }
+
+    #[test]
+    fn dev_switcher_needs_disabled_mode_and_a_loopback_bind() {
+        assert!(
+            DevAuthState::new(dev_auth_config(AuthMode::Disabled, "127.0.0.1:9876")).enabled,
+            "the local-dev path keeps the switcher",
+        );
+        assert!(
+            !DevAuthState::new(dev_auth_config(AuthMode::Disabled, "0.0.0.0:9876")).enabled,
+            "an exposed bind must not hand out identities, acknowledged or not",
+        );
+        assert!(
+            !DevAuthState::new(dev_auth_config(AuthMode::Google, "127.0.0.1:9876")).enabled,
+            "real sign-in leaves no room for the switcher",
+        );
+    }
+
+    /// Mount both dev routes the way `main.rs` does. `enabled` picks the
+    /// bind that produces it, so the routes under test are reachable only
+    /// through the same gate production goes through.
     fn dev_auth_app(enabled: bool) -> Router {
-        let state = DevAuthState {
-            config: Arc::new(AuthConfig::for_tests()),
-            enabled,
+        let bind = if enabled {
+            "127.0.0.1:9876"
+        } else {
+            "0.0.0.0:9876"
         };
+        let state = DevAuthState::new(dev_auth_config(AuthMode::Disabled, bind));
+        assert_eq!(state.enabled, enabled, "helper picked the wrong bind");
         Router::new()
             .route(
                 "/auth/dev/status",

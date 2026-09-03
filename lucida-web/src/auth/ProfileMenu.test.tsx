@@ -14,7 +14,7 @@ const PRINCIPAL: AuthPrincipal = {
   email: "dev@local",
   display_name: "Local Dev",
   picture_url: null,
-  is_admin: true,
+  is_admin: false,
 };
 
 let session: {

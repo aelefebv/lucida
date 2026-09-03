@@ -5,7 +5,7 @@ description: "Things we explored, decided not to ship today, and want to remembe
 tags: [lucida, decision]
 source_path: wiki/decisions/deferred.md
 created: 2026-05-14
-modified: 2026-07-06
+modified: 2026-09-03
 ---
 
 # Deferred — considered but not built yet
@@ -53,11 +53,11 @@ makes idle atlas slots cheaper than they are today.
 ## Per-browser anonymous identity in disabled-auth mode
 
 Today, [disabled-auth mode](0018-auth-mode-auto-detect-by-bind-address.md)
-defaults every browser to the same admin `dev@local` principal. A
-developer can now intentionally switch a browser to another local dev
-identity with `/auth/dev/login`, which is enough for manual role tests,
-but Lucida still does not auto-assign distinct identities to different
-browsers.
+defaults every browser to the same non-admin `dev@local` principal. On
+a loopback bind a developer can intentionally switch a browser to
+another local dev identity with `/auth/dev/login`, which is enough for
+manual role tests, but Lucida still does not auto-assign distinct
+identities to different browsers.
 
 **Sketch.** In disabled mode, when no session cookie is present, the
 extractor would auto-mint a session row with `email = anon-{uuid8}@local`

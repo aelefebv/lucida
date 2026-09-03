@@ -522,9 +522,11 @@ impl PrincipalExtractor for GoogleJwtPrincipalExtractor {
 /// `UnauthLanding` would bounce into a `/auth/start` that isn't
 /// registered → infinite redirect loop.
 ///
-/// The fallback `dev@local` has `is_admin: true`: "no auth" means no
-/// gating unless the developer intentionally switches this browser to
-/// a non-admin dev principal for role/manual-testing.
+/// The fallback `dev@local` has `is_admin: false`. It is the identity
+/// a caller gets for presenting nothing, so it holds the rights a
+/// stranger should hold. A developer who needs the admin paths
+/// switches this browser to an admin dev principal, which takes a
+/// deliberate act on a loopback bind.
 pub struct StubPrincipalExtractor;
 
 #[async_trait]
@@ -1115,7 +1117,10 @@ mod tests {
         assert_eq!(p.email, "dev@local");
         assert_eq!(p.display_name, "Local Dev");
         assert!(p.picture_url.is_none());
-        assert!(p.is_admin);
+        assert!(
+            !p.is_admin,
+            "an identity nobody had to ask for is not an admin"
+        );
     }
 
     #[tokio::test]
@@ -1129,6 +1134,22 @@ mod tests {
         assert_eq!(p.email, "dev@local");
         assert_eq!(p.display_name, "Local Dev");
         assert!(p.picture_url.is_none());
+        assert!(!p.is_admin);
+    }
+
+    #[tokio::test]
+    async fn stub_extractor_grants_admin_only_through_the_dev_cookie() {
+        let config = AuthConfig::for_tests();
+        let dev = normalize_dev_principal("Admin@Example.com", Some("Admin"), true).unwrap();
+        let set_cookie = build_dev_principal_cookie(&config, &dev, false);
+        let inbound_cookie = set_cookie.split(';').next().unwrap();
+
+        let p = StubPrincipalExtractor
+            .extract(&parts_with_raw_cookie(inbound_cookie))
+            .await
+            .unwrap();
+
+        assert_eq!(p.email, "admin@example.com");
         assert!(p.is_admin);
     }
 

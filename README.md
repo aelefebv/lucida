@@ -16,7 +16,7 @@ docker run --rm -p 127.0.0.1:9876:9876 \
   ghcr.io/aelefebv/lucida:latest
 ```
 
-Visit <http://localhost:9876>. The `127.0.0.1:` prefix on `-p` keeps the host's port forward bound to loopback so only your machine can reach it; the container itself still binds `0.0.0.0` internally (the Dockerfile defaults it that way), and `LUCIDA_INSECURE=1` acknowledges that auth is off (see [ADR-0018](wiki/decisions/0018-auth-mode-auto-detect-by-bind-address.md)).
+Visit <http://localhost:9876>. The `127.0.0.1:` prefix on `-p` keeps the host's port forward bound to loopback so only your machine can reach it; the container itself still binds `0.0.0.0` internally (the Dockerfile defaults it that way), and `LUCIDA_INSECURE=1` acknowledges that auth is off (see [ADR-0018](wiki/decisions/0018-auth-mode-auto-detect-by-bind-address.md)). You are `dev@local`, with no admin rights. The identity switcher that grants them depends on the server's own bind address, which is never loopback inside a container. If you need it, run the server directly, as the development section describes.
 
 ### Share with your LAN
 
@@ -26,7 +26,7 @@ docker run --rm -p 9876:9876 \
   ghcr.io/aelefebv/lucida:latest
 ```
 
-Drops the `127.0.0.1:` prefix so the host port-forward listens on every interface — anyone on the same LAN can reach <http://your-machine:9876>. Be aware of the auth-off posture: browsers default to the admin `dev@local` identity, the profile menu can switch a browser to a different local dev identity for manual role testing, and admin endpoints (`/admin/clear-proxy-cache`) are unprotected. If you want real per-user authentication, use the auth-enabled scenario below.
+Drops the `127.0.0.1:` prefix so the host port-forward listens on every interface — anyone on the same LAN can reach <http://your-machine:9876>. Be aware of the auth-off posture: every browser shares the same `dev@local` identity, so everyone sees and edits everyone else's work. That identity is not an admin, and admin endpoints (`/admin/clear-proxy-cache`) answer 403. The profile menu's identity switcher is off here. It appears only when the server itself is bound to loopback, because it mints whatever identity the caller asks for. If you want real per-user authentication, use the auth-enabled scenario below.
 
 ### Run with sign-in (Google OAuth)
 
