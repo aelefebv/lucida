@@ -5,8 +5,8 @@
 //! implementation of that trait. Five of the six traits ship an in-memory
 //! store beside the SQLite one, and both must answer the same way; the
 //! workspace store has only the SQLite one, so its suite runs against
-//! that until a second arrives. Traits that have been ported to
-//! PostgreSQL have a third, which runs when a PostgreSQL is reachable.
+//! that until a second arrives. A trait already ported to PostgreSQL has
+//! a third, which runs when a PostgreSQL is reachable.
 //!
 //! A case asserts only what a caller can observe through the trait: what
 //! you write comes back, what you delete is gone, what should conflict
@@ -110,7 +110,14 @@ mod workspaces;
 /// carries a fractional second so a store that rounds to whole seconds
 /// fails the round-trip instead of passing by luck.
 fn instant(offset_seconds: i64) -> DateTime<Utc> {
-    let base = DateTime::parse_from_rfc3339("2026-01-02T03:04:05.250Z")
-        .expect("the base instant is a literal and parses");
-    base.with_timezone(&Utc) + chrono::Duration::seconds(offset_seconds)
+    at("2026-01-02T03:04:05.250Z") + chrono::Duration::seconds(offset_seconds)
+}
+
+/// The instant an RFC 3339 literal names, whatever offset it is spelled
+/// in. A case that pins timestamp behavior spells one instant two ways,
+/// because a caller's clock is not always UTC.
+fn at(rfc3339: &str) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(rfc3339)
+        .expect("a case names an instant with a literal, and a literal parses")
+        .with_timezone(&Utc)
 }
