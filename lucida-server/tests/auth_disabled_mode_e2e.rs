@@ -197,6 +197,25 @@ async fn loopback_default_whoami_returns_dev_principal() {
     assert_whoami_returns_dev_principal(&server).await;
 }
 
+// The SPA draws its sign-out control off this answer, so disabled
+// mode ends up with no control rather than one that clears nothing.
+#[tokio::test]
+async fn disabled_mode_advertises_no_sign_out_url() {
+    let port = pick_loopback_port();
+    let bind = format!("127.0.0.1:{port}");
+    let server = spawn_server(&bind, &bind, &[]);
+
+    let mode: Value = http_client()
+        .get(format!("{}/auth/mode", server.base_url))
+        .send()
+        .await
+        .expect("GET /auth/mode")
+        .json()
+        .await
+        .expect("json body");
+    assert!(mode["sign_out_url"].is_null(), "got {mode}");
+}
+
 // Docker quickstart path: explicit LUCIDA_AUTH=disabled +
 // LUCIDA_INSECURE=1 on a non-loopback bind behaves identically.
 #[tokio::test]

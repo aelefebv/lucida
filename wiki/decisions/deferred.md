@@ -70,9 +70,11 @@ being multi-user.
 
 **Cost.** Reuses the existing session store and cookie machinery (no
 new persistence path). The new bits are: the auto-mint logic inside
-the disabled-mode extractor (replacing today's stateless stub), and a
+the disabled-mode extractor (replacing today's stateless stub), a
 display-name strategy ("Anon" + last 4 of uuid? a "Set your name"
-prompt on first visit?).
+prompt on first visit?), and a sign-out URL for disabled mode, which
+has none today because there is nothing to clear (see
+[Post-Logout Marker Cookie](0019-post-logout-marker-cookie-and-prompt-select-account.md)).
 
 **Why deferred.** PRD #527 prioritized restoring the documented
 shared-`dev@local` semantics first — it's the simpler model, fewer

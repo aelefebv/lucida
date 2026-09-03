@@ -1,6 +1,6 @@
 //! Auth HTTP handlers.
 //!
-//! Hosts `/auth/whoami`, `/auth/logout`, the OAuth flow
+//! Hosts `/auth/whoami`, `/auth/logout`, `/auth/mode`, the OAuth flow
 //! (`/auth/start` + `/auth/callback`), and the `/auth/error` page.
 //! Disabled mode bypasses these handlers by yielding the dev principal
 //! directly from [`crate::auth::principal::StubPrincipalExtractor`].
@@ -56,6 +56,28 @@ pub async fn whoami(principal: Option<Extension<AuthPrincipal>>) -> Response {
         )
             .into_response(),
     }
+}
+
+/// What the configured auth mode offers the web client.
+///
+/// It reports what the mode does, not which mode it is, so the client
+/// never grows a branch per mode.
+#[derive(Debug, Serialize)]
+pub struct AuthModeInfo {
+    /// Where the sign-out control points, or `null` when this mode has
+    /// nothing to sign out of. See [`AuthMode::sign_out_url`].
+    pub sign_out_url: Option<&'static str>,
+}
+
+/// `GET /auth/mode` — the sign-out URL, if this mode has one.
+///
+/// Public, like `/auth/dev/status`. It carries no identity, and the
+/// client asks for it while whoami is still in flight.
+pub async fn auth_mode(State(config): State<Arc<AuthConfig>>) -> Response {
+    Json(AuthModeInfo {
+        sign_out_url: config.mode.sign_out_url(),
+    })
+    .into_response()
 }
 
 // -- CLI/Python bearer credential provisioning ---------------------------
@@ -1241,6 +1263,39 @@ mod tests {
         let body = to_bytes(whoami_res.into_body(), 64 * 1024).await.unwrap();
         let principal: AuthPrincipal = serde_json::from_slice(&body).unwrap();
         assert_eq!(principal.email, "dev@local");
+    }
+
+    // -- /auth/mode ------------------------------------------------------
+
+    async fn advertised_sign_out_url(mode: AuthMode) -> serde_json::Value {
+        let mut config = AuthConfig::for_tests();
+        config.mode = mode;
+        let app = Router::new()
+            .route("/auth/mode", get(auth_mode))
+            .with_state(Arc::new(config));
+
+        let req = Request::builder()
+            .uri("/auth/mode")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = to_bytes(res.into_body(), 64 * 1024).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        payload["sign_out_url"].clone()
+    }
+
+    #[tokio::test]
+    async fn auth_mode_advertises_the_url_the_configured_mode_declares() {
+        assert_eq!(
+            advertised_sign_out_url(AuthMode::Google).await,
+            json!("/auth/logout"),
+        );
+        assert_eq!(
+            advertised_sign_out_url(AuthMode::Disabled).await,
+            serde_json::Value::Null,
+            "disabled mode has no session to end, so it offers no sign-out",
+        );
     }
 
     // -- /auth/dev/* -----------------------------------------------------

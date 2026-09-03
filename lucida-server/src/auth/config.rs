@@ -55,6 +55,10 @@ pub const DEFAULT_GOOGLE_JWKS_URI: &str = "https://www.googleapis.com/oauth2/v3/
 /// distinct issuer.
 pub const DEFAULT_GOOGLE_ISSUERS: &[&str] = &["https://accounts.google.com", "accounts.google.com"];
 
+/// Where `POST /auth/logout` is mounted. Named once so the router and
+/// [`AuthMode::sign_out_url`] cannot drift apart.
+pub const LOGOUT_PATH: &str = "/auth/logout";
+
 /// Default listen address. ADR-0018: loopback-by-default makes the
 /// auto-detect-by-bind safety property hold for the zero-config dev
 /// path (`cargo run --bin lucida-server` → localhost-only, auth off).
@@ -122,6 +126,24 @@ impl AuthMode {
 
     pub fn is_google(self) -> bool {
         matches!(self, Self::Google)
+    }
+
+    /// Where the web client's sign-out control points, or `None` when
+    /// this mode has nothing to sign out of.
+    ///
+    /// The client draws the control only for `Some`, so a mode that
+    /// answers `None` has no sign-out control at all. That is the
+    /// honest answer for `Disabled`. There is no session to end, and
+    /// a control that clears nothing is worse than no control.
+    ///
+    /// The match is exhaustive on purpose. A new mode does not compile
+    /// until it says where its sign-out goes, and a wildcard arm here
+    /// would let one inherit an answer meant for somebody else.
+    pub fn sign_out_url(self) -> Option<&'static str> {
+        match self {
+            Self::Disabled => None,
+            Self::Google => Some(LOGOUT_PATH),
+        }
     }
 }
 
@@ -498,6 +520,14 @@ mod tests {
         assert_eq!(err, UnknownAuthMode("microsoft".to_string()));
         let err = AuthMode::parse("").unwrap_err();
         assert_eq!(err, UnknownAuthMode("".to_string()));
+    }
+
+    #[test]
+    fn each_auth_mode_answers_where_its_sign_out_goes() {
+        // Spelled out rather than compared against `LOGOUT_PATH`, so
+        // the test pins the URL the web client receives.
+        assert_eq!(AuthMode::Google.sign_out_url(), Some("/auth/logout"));
+        assert_eq!(AuthMode::Disabled.sign_out_url(), None);
     }
 
     #[test]

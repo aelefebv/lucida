@@ -26,7 +26,7 @@ docker run --rm -p 9876:9876 \
   ghcr.io/aelefebv/lucida:latest
 ```
 
-Drops the `127.0.0.1:` prefix so the host port-forward listens on every interface — anyone on the same LAN can reach <http://your-machine:9876>. Be aware of the auth-off posture: every browser shares the same `dev@local` identity, so everyone sees and edits everyone else's work. That identity is not an admin, and admin endpoints (`/admin/clear-proxy-cache`) answer 403. The profile menu's identity switcher is off here. It appears only when the server itself is bound to loopback, because it mints whatever identity the caller asks for. If you want real per-user authentication, use the auth-enabled scenario below.
+Drops the `127.0.0.1:` prefix so the host port-forward listens on every interface — anyone on the same LAN can reach <http://your-machine:9876>. Be aware of the auth-off posture: every browser shares the same `dev@local` identity, so everyone sees and edits everyone else's work. That identity is not an admin, and admin endpoints (`/admin/clear-proxy-cache`) answer 403. The profile menu shows no sign-out, because there is no session to end, and its identity switcher is off too. The switcher appears only when the server itself is bound to loopback, because it mints whatever identity the caller asks for. If you want real per-user authentication, use the auth-enabled scenario below.
 
 ### Run with sign-in (Google OAuth)
 

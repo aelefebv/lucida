@@ -39,8 +39,8 @@
 //!   attaches the resulting principal to request extensions.
 //!   `build_extractor` picks between the three implementations based
 //!   on `AuthMode`.
-//! - `handlers` — `/auth/whoami`, `/auth/logout`, `/auth/start`,
-//!   `/auth/callback`, and `/auth/error`.
+//! - `handlers` — `/auth/whoami`, `/auth/logout`, `/auth/mode`,
+//!   `/auth/start`, `/auth/callback`, and `/auth/error`.
 //! - `unauth_landing` — small inline HTML the middleware serves on an
 //!   unauth HTML navigation; carries the JS shim that captures
 //!   `location.hash` before redirecting to `/auth/start`.
@@ -99,7 +99,7 @@ pub use cli_authorization::{
 pub use cli_authorization_memory::MemoryCliTokenAuthorizationStore;
 pub use cli_authorization_postgres::PostgresCliTokenAuthorizationStore;
 pub use cli_authorization_sqlite::SqliteCliTokenAuthorizationStore;
-pub use config::{AuthConfig, AuthConfigError, AuthMode, GoogleOAuthConfig};
+pub use config::{AuthConfig, AuthConfigError, AuthMode, GoogleOAuthConfig, LOGOUT_PATH};
 pub use extractors::AdminRequired;
 pub use google_oauth::{GoogleOAuthClient, OAuthError, VerifiedClaims};
 pub use pending_auth::{PendingAuth, PendingAuthStore, PendingAuthStoreError};

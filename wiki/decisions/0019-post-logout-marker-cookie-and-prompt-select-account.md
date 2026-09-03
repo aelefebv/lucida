@@ -5,12 +5,36 @@ description: "After explicit /auth/logout, lucida-server sets a short-lived"
 tags: [lucida, decision]
 source_path: wiki/decisions/0019-post-logout-marker-cookie-and-prompt-select-account.md
 created: 2026-05-08
-modified: 2026-05-08
+modified: 2026-09-03
 ---
 
 # Post-Logout Marker Cookie + `prompt=select_account`
 
 > Status: Implemented (2026-05-08).
+
+**Implementation note (2026-09-03):** this flow was the only sign-out
+flow, hardcoded into the web client. Disabled mode has no session to
+clear, so the control there posted `/auth/logout`, set a marker cookie
+nothing reads, and left the user exactly where they started. It looked
+like it worked.
+
+The auth mode now declares where its sign-out goes.
+`AuthMode::sign_out_url` returns an optional URL, `GET /auth/mode`
+publishes it, and the client draws the control only when there is one.
+The match is exhaustive with no wildcard arm, so a new mode has to
+answer before it compiles. A mode with no session answers that it has
+no sign-out at all.
+
+Google answers `/auth/logout`, so everything below still describes it:
+the same marker cookie, the same static landing, the same
+`prompt=select_account` on the way back in. Disabled mode answers with
+no URL, so the profile menu drops the item and nothing in the app
+posts `/auth/logout` any more.
+
+`/auth/logout` itself stays mounted in every mode, because what a mode
+declares and what the router serves are separate questions. It stays
+idempotent for any client that still posts it — a browser holding a
+bundle from before a rollout, for instance.
 
 ## Decision
 
@@ -39,9 +63,10 @@ The marker has a 10-minute TTL as a backstop. Cookie attributes mirror
 `lucida_session`: `HttpOnly`, `SameSite=Lax`, `Path=/`, `Secure`
 auto-detected.
 
-The SPA's `signOut()` is `await postLogout(); await refresh()`. The
-refresh hits the marker-aware whoami, gets `signedOut: true`, and
-`AuthGate` renders the static card.
+The SPA's `signOut()` is `await postSignOut(url); await refresh()`,
+where `url` is what the mode declared. The refresh hits the
+marker-aware whoami, gets `signedOut: true`, and `AuthGate` renders
+the static card.
 
 ## Why
 
@@ -192,8 +217,9 @@ on its own and the next fresh visit behaves like a cold visit.
   mandatory).
 - **SPA `AuthState` carries `signedOut?: boolean` populated from the
   enriched whoami response.** `useAuthState.signOut` is `await
-  postLogout(); await refresh()`. `UnauthLanding` branches: static
-  card when `signedOut`, auto-bounce otherwise.
+  postSignOut(url); await refresh()`, and is null when the mode
+  declared no URL. `UnauthLanding` branches: static card when
+  `signedOut`, auto-bounce otherwise.
 
 ## How this decision shows up in code
 
@@ -210,8 +236,17 @@ on its own and the next fresh visit behaves like a cold visit.
 - `lucida-server::auth::middleware::unauthenticated_response` — branches
   on `read_signed_out_marker(headers)` for both HTML (which landing
   HTML) and JSON (which 401 body shape).
+- `lucida-server::auth::config::AuthMode::sign_out_url` — the mode's
+  answer for where sign-out goes, or `None`. Exhaustive match, no
+  wildcard arm, so a new mode has to decide. `Google` answers
+  `LOGOUT_PATH`, the same constant `main::run_serve` mounts the route
+  on.
+- `lucida-server::auth::handlers::auth_mode` — `GET /auth/mode`,
+  public. Reports what the mode offers rather than which mode it is,
+  so the client never grows a branch per mode.
 - `lucida-server::auth::handlers::logout` — emits both clearing-
-  session and marker `Set-Cookie` headers via `AppendHeaders`.
+  session and marker `Set-Cookie` headers via `AppendHeaders`. Mounted
+  in every mode, whatever the mode declares.
 - `lucida-server::auth::handlers::auth_start` — reads marker, passes
   `Some(Prompt::SelectAccount)` when present. Does NOT clear the
   marker — that's `/auth/callback`'s job.
@@ -224,9 +259,17 @@ on its own and the next fresh visit behaves like a cold visit.
   localizes future `Login` / `Consent` additions.
 - `lucida-web::auth::whoami::fetchAuthState` — parses the enriched
   401 body and propagates `signedOut` onto `AuthState`.
-- `lucida-web::auth::useAuthState::signOut` — `await postLogout();
+- `lucida-web::auth::whoami::fetchSignOutUrl` — reads `/auth/mode`.
+  Answers `null` for a mode with no sign-out, and rejects when the
+  server did not answer, so a call that never landed cannot pass
+  itself off as the mode's verdict. `useAuthState` reads it once and
+  hides the control either way.
+- `lucida-web::auth::useAuthState::signOut` — `await postSignOut(url);
   await refresh();` — the refresh sees the enriched whoami and flips
-  state to `{ authenticated: false, signedOut: true }`.
+  state to `{ authenticated: false, signedOut: true }`. Null when
+  there is no URL.
+- `lucida-web::auth::ProfileMenu` — renders the Sign out item only
+  when `signOut` is non-null.
 - `lucida-web::auth::UnauthLanding` — branches on `signedOut`: static
   `SignedOutCard` when set, auto-bounce otherwise.
 
