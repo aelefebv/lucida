@@ -38,7 +38,7 @@ pub(crate) const ATTACH: &str =
 
 /// The columns a read hands back, for one bookmark. The attachments come
 /// from [`SELECT_ATTACHMENTS`].
-pub(crate) const SELECT_ONE: &str = r#"
+pub(crate) const SELECT_BY_ID: &str = r#"
     SELECT id, name, created_by, created_by_name, created_at, view_json
     FROM bookmarks
     WHERE id = $1
@@ -59,9 +59,20 @@ pub(crate) const SELECT_ATTACHMENTS: &str =
 /// Rename in place. Everything else about a bookmark is immutable.
 pub(crate) const RENAME: &str = "UPDATE bookmarks SET name = $1 WHERE id = $2";
 
-/// Remove the bookmark row. The attachments go with it through the
-/// schema's `ON DELETE CASCADE`, which both engines enforce.
-pub(crate) const DELETE: &str = "DELETE FROM bookmarks WHERE id = $1";
+/// Remove the bookmark row and hand it back. The attachments go with it
+/// through the schema's `ON DELETE CASCADE`, which both engines enforce.
+///
+/// `RETURNING` is what makes the row the caller gets the row that was
+/// removed. Reading it first and deleting it after would be two
+/// statements, and PostgreSQL takes a fresh snapshot per statement under
+/// its default isolation, so a rename committing between them would hand
+/// back a row that never existed. SQLite has had `RETURNING` since 3.35
+/// and PostgreSQL since 8.2.
+pub(crate) const DELETE: &str = r#"
+    DELETE FROM bookmarks
+    WHERE id = $1
+    RETURNING id, name, created_by, created_by_name, created_at, view_json
+"#;
 
 /// The any-overlap SELECT, with one placeholder per dataset URL.
 ///

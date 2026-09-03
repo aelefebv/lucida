@@ -76,6 +76,11 @@ pub trait BookmarkStore: Send + Sync + 'static {
     /// `created_at` timestamp; the caller passes everything else. Both
     /// tables are written in a single transaction so partial writes
     /// can't surface a row without its dataset URLs.
+    ///
+    /// The instant handed back is the instant a later read returns, but
+    /// its resolution belongs to the store: a backend whose column holds
+    /// less than the clock offers rounds down before writing rather than
+    /// reporting a value it cannot keep.
     async fn create(
         &self,
         name: &str,

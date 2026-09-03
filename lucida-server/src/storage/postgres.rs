@@ -4,8 +4,8 @@
 //! the bundled PostgreSQL migrations, and serves the stores that have
 //! been ported to it.
 //!
-//! **Not all six, so this is not a [`StorageBackend`] yet.** The trait
-//! hands out all six, [`super::open`] promises that every entry in
+//! **Not all six, so this is not a [`StorageBackend`] yet.** The
+//! trait hands out all six, [`super::open`] promises that every entry in
 //! [`Scheme::ALL`] reaches a backend that comes up, and a partial set
 //! cannot honor either. So there is no `Scheme::Postgres`, nothing
 //! outside the tests constructs this type, and
@@ -100,14 +100,14 @@ impl PostgresStorageBackend {
         Ok(Self { pool })
     }
 
-    /// One of the stores this backend serves. Shaped like the
+    /// A store this backend serves. Shaped like the
     /// [`StorageBackend`](super::StorageBackend) accessor it will become:
     /// a fresh handle over the shared pool, costing a pool clone.
     pub fn pending_auth(&self) -> Arc<dyn PendingAuthStore> {
         Arc::new(PostgresPendingAuthStore::new(self.pool.clone()))
     }
 
-    /// Another, shaped the same way.
+    /// The bookmark store, shaped the same way.
     pub fn bookmarks(&self) -> Arc<dyn BookmarkStore> {
         Arc::new(PostgresBookmarkStore::new(self.pool.clone()))
     }

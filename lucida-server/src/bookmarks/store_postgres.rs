@@ -36,14 +36,27 @@ impl PostgresBookmarkStore {
     }
 
     /// Turn bookmark rows into records, fetching each one's attachments.
-    async fn gather(&self, rows: Vec<sqlx::postgres::PgRow>) -> Result<Vec<Bookmark>, StoreError> {
+    async fn rows_to_bookmarks(
+        &self,
+        rows: Vec<sqlx::postgres::PgRow>,
+    ) -> Result<Vec<Bookmark>, StoreError> {
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
             let id: String = row.get("id");
-            let datasets = fetch_datasets_for(&self.pool, &id).await?;
+            let datasets = self.attachments_of(&id).await?;
             out.push(row_to_bookmark(row, datasets)?);
         }
         Ok(out)
+    }
+
+    /// The dataset URLs one bookmark is attached to.
+    async fn attachments_of(&self, id: &str) -> Result<Vec<String>, StoreError> {
+        let rows = sqlx::query(sql::SELECT_ATTACHMENTS)
+            .bind(id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_err)?;
+        Ok(rows.into_iter().map(|r| r.get("dataset_url")).collect())
     }
 }
 
@@ -104,14 +117,14 @@ impl BookmarkStore for PostgresBookmarkStore {
     }
 
     async fn get(&self, id: &str) -> Result<Option<Bookmark>, StoreError> {
-        let row = sqlx::query(sql::SELECT_ONE)
+        let row = sqlx::query(sql::SELECT_BY_ID)
             .bind(id)
             .fetch_optional(&self.pool)
             .await
             .map_err(map_err)?;
 
         let Some(row) = row else { return Ok(None) };
-        let datasets = fetch_datasets_for(&self.pool, id).await?;
+        let datasets = self.attachments_of(id).await?;
         Ok(Some(row_to_bookmark(row, datasets)?))
     }
 
@@ -128,7 +141,7 @@ impl BookmarkStore for PostgresBookmarkStore {
             query = query.bind(url);
         }
         let rows = query.fetch_all(&self.pool).await.map_err(map_err)?;
-        self.gather(rows).await
+        self.rows_to_bookmarks(rows).await
     }
 
     async fn list_all(&self) -> Result<Vec<Bookmark>, StoreError> {
@@ -136,7 +149,7 @@ impl BookmarkStore for PostgresBookmarkStore {
             .fetch_all(&self.pool)
             .await
             .map_err(map_err)?;
-        self.gather(rows).await
+        self.rows_to_bookmarks(rows).await
     }
 
     async fn patch_name(&self, id: &str, new_name: &str) -> Result<Option<Bookmark>, StoreError> {
@@ -153,24 +166,16 @@ impl BookmarkStore for PostgresBookmarkStore {
     }
 
     async fn delete(&self, id: &str) -> Result<Option<Bookmark>, StoreError> {
-        // Read the row + datasets inside the same transaction as the
-        // DELETE so the returned `Bookmark` matches the row we removed
-        // even if a concurrent writer was racing. The row goes back to the
-        // caller so the change broadcast can scope on `dataset_urls`
-        // without a second round-trip.
+        // The attachments are read first because the DELETE takes them:
+        // only `bookmarks` is deleted, and `bookmark_datasets` declares
+        // `ON DELETE CASCADE`, which PostgreSQL enforces unconditionally.
+        // They go back to the caller with the row, so the change
+        // broadcast can scope on them without a second round-trip.
         //
-        // Only `bookmarks` is deleted: `bookmark_datasets` declares
-        // `ON DELETE CASCADE` and PostgreSQL enforces it unconditionally.
+        // One transaction, so a bookmark removed by someone else between
+        // the two statements takes its attachments out of this answer too
+        // rather than leaving them stranded in it.
         let mut tx = self.pool.begin().await.map_err(map_err)?;
-        let row = sqlx::query(sql::SELECT_ONE)
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(map_err)?;
-        let Some(row) = row else {
-            tx.commit().await.map_err(map_err)?;
-            return Ok(None);
-        };
         let dataset_rows = sqlx::query(sql::SELECT_ATTACHMENTS)
             .bind(id)
             .fetch_all(&mut *tx)
@@ -180,28 +185,14 @@ impl BookmarkStore for PostgresBookmarkStore {
             .into_iter()
             .map(|r| r.get("dataset_url"))
             .collect();
-        let result = sqlx::query(sql::DELETE)
+        let row = sqlx::query(sql::DELETE)
             .bind(id)
-            .execute(&mut *tx)
+            .fetch_optional(&mut *tx)
             .await
             .map_err(map_err)?;
         tx.commit().await.map_err(map_err)?;
-        if result.rows_affected() == 0 {
-            // Theoretically the SELECT saw the row but the DELETE didn't;
-            // surface as None so the caller treats it as "not found".
-            return Ok(None);
-        }
-        Ok(Some(row_to_bookmark(row, datasets)?))
+        row.map(|row| row_to_bookmark(row, datasets)).transpose()
     }
-}
-
-async fn fetch_datasets_for(pool: &PgPool, id: &str) -> Result<Vec<String>, StoreError> {
-    let rows = sqlx::query(sql::SELECT_ATTACHMENTS)
-        .bind(id)
-        .fetch_all(pool)
-        .await
-        .map_err(map_err)?;
-    Ok(rows.into_iter().map(|r| r.get("dataset_url")).collect())
 }
 
 fn row_to_bookmark(
@@ -265,12 +256,16 @@ mod tests {
         };
         let pool = db.backend.pool();
 
+        // A real view, not a placeholder document: these rows outlive
+        // this test in the schema, and a later read through the store
+        // would report them as corrupt.
         sqlx::query(
             "INSERT INTO bookmarks \
-             SELECT 'seed-' || g, 'seed', 'author@example.com', 'Author', now(), '{}' \
+             SELECT 'seed-' || g, 'seed', 'author@example.com', 'Author', now(), $2 \
              FROM generate_series(1, $1) g",
         )
         .bind(SEEDED_BOOKMARKS)
+        .bind(Json(SavedView::empty([800, 600])))
         .execute(pool)
         .await
         .unwrap();
@@ -366,15 +361,15 @@ mod tests {
             .await
             .unwrap();
 
-        // `->>` reaches into the document, which only answers if the
-        // column holds a JSON object rather than a string that looks
-        // like one.
-        let version: Option<String> =
-            sqlx::query_scalar("SELECT view_json ->> 'v' FROM bookmarks WHERE id = $1")
+        let stored_type: String =
+            sqlx::query_scalar("SELECT jsonb_typeof(view_json) FROM bookmarks WHERE id = $1")
                 .bind(&created.id)
                 .fetch_one(db.backend.pool())
                 .await
                 .unwrap();
-        assert_eq!(version.as_deref(), Some("1"), "the view is a JSON document");
+        assert_eq!(
+            stored_type, "object",
+            "the view is a JSON document, not a string holding one",
+        );
     }
 }
