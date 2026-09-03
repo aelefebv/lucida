@@ -123,6 +123,20 @@ impl SqliteBookmarkStore {
     }
 }
 
+/// The dataset URLs a bookmark is attached to, deduplicated and sorted.
+///
+/// Attachment is a set: a caller passing `[a, a]` means one attachment,
+/// and the order they were passed in carries nothing. Reads return them
+/// in URL order, so creates hand back the same order rather than
+/// whatever the caller supplied.
+fn attachment_set(datasets: Vec<String>) -> Vec<String> {
+    datasets
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 fn map_sql(e: sqlx::Error) -> StoreError {
     StoreError::Backend(e.to_string())
 }
@@ -148,6 +162,7 @@ impl BookmarkStore for SqliteBookmarkStore {
         let id = uuid::Uuid::new_v4().to_string();
         let created_at = Utc::now();
         let view_json = serde_json::to_string(&view).map_err(map_json_out)?;
+        let datasets = attachment_set(datasets);
 
         let mut tx = self.pool.begin().await.map_err(map_sql)?;
         sqlx::query(
@@ -167,20 +182,13 @@ impl BookmarkStore for SqliteBookmarkStore {
         .await
         .map_err(map_sql)?;
 
-        // Deduplicate the URL list before insert so a caller passing
-        // `[a, a]` doesn't trip the (bookmark_id, dataset_url) PK.
-        let mut seen = std::collections::HashSet::new();
         for url in &datasets {
-            if seen.insert(url.as_str()) {
-                sqlx::query(
-                    "INSERT INTO bookmark_datasets (bookmark_id, dataset_url) VALUES (?, ?)",
-                )
+            sqlx::query("INSERT INTO bookmark_datasets (bookmark_id, dataset_url) VALUES (?, ?)")
                 .bind(&id)
                 .bind(url)
                 .execute(&mut *tx)
                 .await
                 .map_err(map_sql)?;
-            }
         }
         tx.commit().await.map_err(map_sql)?;
 
@@ -190,7 +198,7 @@ impl BookmarkStore for SqliteBookmarkStore {
             created_by: created_by.to_string(),
             created_by_name: created_by_name.to_string(),
             created_at,
-            datasets: seen.into_iter().map(str::to_string).collect(),
+            datasets,
             view,
         })
     }
@@ -381,6 +389,10 @@ fn row_to_bookmark(
 /// (not `cfg(test)`) so integration tests in `tests/` can construct it
 /// without dragging in SQLite. Mutex is uncontended in tests; the
 /// overhead is irrelevant.
+///
+/// The `BookmarkStore` conformance suite in [`crate::storage`] runs
+/// against this store and [`SqliteBookmarkStore`], so the two answer
+/// alike.
 #[derive(Debug, Default)]
 pub struct MemoryBookmarkStore {
     rows: Mutex<HashMap<String, Bookmark>>,
@@ -414,21 +426,13 @@ impl BookmarkStore for MemoryBookmarkStore {
         view: SavedView,
     ) -> Result<Bookmark, StoreError> {
         let id = uuid::Uuid::new_v4().to_string();
-        // Mirror SQLite dedupe so behavior is identical between backends.
-        let mut seen = std::collections::HashSet::new();
-        let mut deduped = Vec::with_capacity(datasets.len());
-        for url in datasets {
-            if seen.insert(url.clone()) {
-                deduped.push(url);
-            }
-        }
         let bookmark = Bookmark {
             id: id.clone(),
             name: name.to_string(),
             created_by: created_by.to_string(),
             created_by_name: created_by_name.to_string(),
             created_at: Utc::now(),
-            datasets: deduped,
+            datasets: attachment_set(datasets),
             view,
         };
         let mut rows = self
@@ -503,333 +507,28 @@ impl BookmarkStore for MemoryBookmarkStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::SqliteStorageBackend;
+    use crate::storage::test_support::sqlite_pool;
 
-    /// A store over a migrated in-memory database, opened the way
-    /// production opens one.
-    async fn fresh_sqlite() -> SqliteBookmarkStore {
-        let backend = SqliteStorageBackend::open_in_memory().await.unwrap();
-        SqliteBookmarkStore::new(backend.pool().clone())
-    }
-
-    fn sample_view(viewport: [u32; 2]) -> SavedView {
-        SavedView::empty(viewport)
-    }
-
-    // Each scenario below exercises both the SQLite and in-memory
-    // backends via an `impl BookmarkStore` helper — looping over
-    // `Vec<Box<dyn BookmarkStore>>` is awkward (lifetime juggling on
-    // the future returned by `create`).
-    async fn create_get_roundtrip<S: BookmarkStore>(store: &S) {
-        let view = sample_view([800, 600]);
-        let b = store
-            .create(
-                "Group B7 view",
-                "alice@calicolabs.com",
-                "Alice Example",
-                vec!["gs://bucket/a.zarr".to_string()],
-                view.clone(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(b.name, "Group B7 view");
-        assert_eq!(b.created_by, "alice@calicolabs.com");
-        assert_eq!(b.datasets, vec!["gs://bucket/a.zarr".to_string()]);
-        assert_eq!(b.view.v, view.v);
-        // UUID v4 string length = 36
-        assert_eq!(b.id.len(), 36);
-
-        let got = store.get(&b.id).await.unwrap().unwrap();
-        assert_eq!(got.id, b.id);
-        assert_eq!(got.name, b.name);
-        assert_eq!(got.datasets, b.datasets);
-    }
-
+    /// The any-overlap SELECT must go through `idx_bookmark_datasets_url`.
+    /// Drop the index from the migration and the query degrades to a full
+    /// table scan, which no assertion about the rows it returns would
+    /// notice. So this one reads the plan, and it stays here rather than
+    /// in the conformance suite because a query plan is a SQLite fact.
     #[tokio::test]
-    async fn create_then_get_roundtrips_sqlite() {
-        let s = fresh_sqlite().await;
-        create_get_roundtrip(&s).await;
-    }
-
-    #[tokio::test]
-    async fn create_then_get_roundtrips_memory() {
-        let s = MemoryBookmarkStore::new();
-        create_get_roundtrip(&s).await;
-    }
-
-    #[tokio::test]
-    async fn get_missing_returns_none_sqlite() {
-        let s = fresh_sqlite().await;
-        assert!(s.get("does-not-exist").await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn get_missing_returns_none_memory() {
-        let s = MemoryBookmarkStore::new();
-        assert!(s.get("does-not-exist").await.unwrap().is_none());
-    }
-
-    async fn make_three<S: BookmarkStore>(store: &S) -> (String, String, String) {
-        let b1 = store
-            .create(
-                "alpha",
-                "alice@x",
-                "Alice",
-                vec!["url-a".into(), "url-b".into()],
-                sample_view([1, 1]),
-            )
-            .await
-            .unwrap();
-        let b2 = store
-            .create(
-                "beta",
-                "alice@x",
-                "Alice",
-                vec!["url-b".into(), "url-c".into()],
-                sample_view([1, 1]),
-            )
-            .await
-            .unwrap();
-        let b3 = store
-            .create(
-                "gamma",
-                "bob@x",
-                "Bob",
-                vec!["url-d".into()],
-                sample_view([1, 1]),
-            )
-            .await
-            .unwrap();
-        (b1.id, b2.id, b3.id)
-    }
-
-    async fn list_by_dataset_overlap_scenarios<S: BookmarkStore>(store: &S) {
-        let (b1, b2, b3) = make_three(store).await;
-        // single-match: only b3 has url-d
-        let r = store
-            .list_by_dataset_overlap(&["url-d".into()])
-            .await
-            .unwrap();
-        let ids: std::collections::HashSet<&str> = r.iter().map(|b| b.id.as_str()).collect();
-        assert_eq!(ids, [b3.as_str()].into_iter().collect());
-
-        // multi-match: url-b matches b1 and b2
-        let r = store
-            .list_by_dataset_overlap(&["url-b".into()])
-            .await
-            .unwrap();
-        let ids: std::collections::HashSet<&str> = r.iter().map(|b| b.id.as_str()).collect();
-        assert_eq!(ids, [b1.as_str(), b2.as_str()].into_iter().collect());
-
-        // multiple URLs: union, deduplicated
-        let r = store
-            .list_by_dataset_overlap(&["url-a".into(), "url-d".into()])
-            .await
-            .unwrap();
-        let ids: std::collections::HashSet<&str> = r.iter().map(|b| b.id.as_str()).collect();
-        assert_eq!(ids, [b1.as_str(), b3.as_str()].into_iter().collect());
-
-        // no match
-        let r = store
-            .list_by_dataset_overlap(&["url-zzz".into()])
-            .await
-            .unwrap();
-        assert!(r.is_empty());
-
-        // empty input → all
-        let r = store.list_by_dataset_overlap(&[]).await.unwrap();
-        assert_eq!(r.len(), 3);
-    }
-
-    #[tokio::test]
-    async fn list_by_dataset_overlap_sqlite() {
-        let s = fresh_sqlite().await;
-        list_by_dataset_overlap_scenarios(&s).await;
-    }
-
-    #[tokio::test]
-    async fn list_by_dataset_overlap_memory() {
-        let s = MemoryBookmarkStore::new();
-        list_by_dataset_overlap_scenarios(&s).await;
-    }
-
-    async fn patch_updates_name<S: BookmarkStore>(store: &S) {
-        let b = store
-            .create(
-                "old",
-                "alice@x",
-                "Alice",
-                vec!["u1".into()],
-                sample_view([1, 1]),
-            )
-            .await
-            .unwrap();
-        let updated = store.patch_name(&b.id, "new").await.unwrap().unwrap();
-        assert_eq!(updated.name, "new");
-        // datasets, creator, view should be untouched
-        assert_eq!(updated.created_by, "alice@x");
-        assert_eq!(updated.datasets, vec!["u1".to_string()]);
-
-        let got = store.get(&b.id).await.unwrap().unwrap();
-        assert_eq!(got.name, "new");
-    }
-
-    #[tokio::test]
-    async fn patch_updates_name_sqlite() {
-        let s = fresh_sqlite().await;
-        patch_updates_name(&s).await;
-    }
-
-    #[tokio::test]
-    async fn patch_updates_name_memory() {
-        let s = MemoryBookmarkStore::new();
-        patch_updates_name(&s).await;
-    }
-
-    async fn patch_missing_returns_none<S: BookmarkStore>(store: &S) {
-        assert!(store.patch_name("nope", "x").await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn patch_missing_returns_none_sqlite() {
-        let s = fresh_sqlite().await;
-        patch_missing_returns_none(&s).await;
-    }
-
-    #[tokio::test]
-    async fn patch_missing_returns_none_memory() {
-        let s = MemoryBookmarkStore::new();
-        patch_missing_returns_none(&s).await;
-    }
-
-    async fn delete_removes_row<S: BookmarkStore>(store: &S) {
-        let b = store
-            .create(
-                "doomed",
-                "alice@x",
-                "Alice",
-                vec!["u1".into(), "u2".into()],
-                sample_view([1, 1]),
-            )
-            .await
-            .unwrap();
-        // delete returns the removed bookmark (datasets included) so the
-        // slice-4 broadcast can scope on `dataset_urls` without a second
-        // get round-trip.
-        let removed = store.delete(&b.id).await.unwrap().expect("row removed");
-        assert_eq!(removed.id, b.id);
-        assert_eq!(
-            removed
-                .datasets
-                .iter()
-                .cloned()
-                .collect::<std::collections::HashSet<_>>(),
-            ["u1".to_string(), "u2".to_string()].into_iter().collect(),
-        );
-        assert!(store.get(&b.id).await.unwrap().is_none());
-        // delete on missing returns None (idempotent-ish — the caller
-        // can tell whether their request actually removed something).
-        assert!(store.delete(&b.id).await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn delete_removes_row_sqlite() {
-        let s = fresh_sqlite().await;
-        delete_removes_row(&s).await;
-    }
-
-    #[tokio::test]
-    async fn delete_removes_row_memory() {
-        let s = MemoryBookmarkStore::new();
-        delete_removes_row(&s).await;
-    }
-
-    /// SQLite-only: the dataset side rows must be cleaned up so a
-    /// subsequent overlap query for the same URL doesn't surface a
-    /// dangling row pointer.
-    #[tokio::test]
-    async fn delete_cascades_dataset_rows_sqlite() {
-        let s = fresh_sqlite().await;
-        let b = s
-            .create(
-                "x",
-                "a@b",
-                "A",
-                vec!["only-this-bookmark.zarr".into()],
-                sample_view([1, 1]),
-            )
-            .await
-            .unwrap();
-        assert!(s.delete(&b.id).await.unwrap().is_some());
-        // No rows should overlap the now-deleted dataset URL.
-        let r = s
-            .list_by_dataset_overlap(&["only-this-bookmark.zarr".into()])
-            .await
-            .unwrap();
-        assert!(r.is_empty(), "side-table rows must be cleaned up on delete");
-    }
-
-    /// Concurrency smoke: 16 parallel inserts must produce 16 distinct
-    /// UUIDs and 16 surviving rows. Mirrors the auth store's parallel
-    /// insert test — same hot path now that bookmark POSTs land per
-    /// request.
-    #[tokio::test]
-    async fn parallel_inserts_produce_distinct_ids_sqlite() {
-        let store = fresh_sqlite().await;
-        let mut handles = Vec::new();
-        for i in 0..16 {
-            let store = store.clone();
-            handles.push(tokio::spawn(async move {
-                let b = store
-                    .create(
-                        &format!("name-{i}"),
-                        "a@b",
-                        "A",
-                        vec!["u".to_string()],
-                        sample_view([1, 1]),
-                    )
-                    .await
-                    .unwrap();
-                b.id
-            }));
-        }
-        let mut ids = std::collections::HashSet::new();
-        for h in handles {
-            ids.insert(h.await.unwrap());
-        }
-        assert_eq!(ids.len(), 16);
-        assert_eq!(store.list_all().await.unwrap().len(), 16);
-    }
-
-    /// Migrations apply cleanly to a fresh in-memory database — covers
-    /// the "smoke a brand-new lucida.db" boot path. `fresh_sqlite()`
-    /// already exercises this; the assertion makes the intent explicit.
-    #[tokio::test]
-    async fn migrations_apply_cleanly_to_fresh_db() {
-        let store = fresh_sqlite().await;
-        assert_eq!(store.list_all().await.unwrap().len(), 0);
-    }
-
-    /// The any-overlap SELECT MUST go through `idx_bookmark_datasets_url`
-    /// — if the migration ever drops the index, the query degrades to a
-    /// full-table scan and the sidebar's hot path balloons. Regression
-    /// guard for the index.
-    #[tokio::test]
-    async fn overlap_query_uses_index_sqlite() {
-        let store = fresh_sqlite().await;
-        // Seed a row so SQLite has stats to drive the planner choice;
-        // EXPLAIN QUERY PLAN works without rows but the fixture also
-        // confirms the index hit on real data.
+    async fn the_overlap_query_goes_through_the_dataset_url_index() {
+        let store = SqliteBookmarkStore::new(sqlite_pool().await);
+        // Seed a row so the planner is choosing over real data.
         store
             .create(
-                "n",
-                "a@b",
-                "A",
-                vec!["u-a".to_string()],
-                sample_view([1, 1]),
+                "seed",
+                "author@example.com",
+                "Author",
+                vec!["file:///data/a.zarr".to_string()],
+                SavedView::empty([800, 600]),
             )
             .await
             .unwrap();
+
         let plan_rows = sqlx::query(
             r#"
             EXPLAIN QUERY PLAN
@@ -842,19 +541,20 @@ mod tests {
             )
             "#,
         )
-        .bind("u-a")
-        .bind("u-b")
+        .bind("file:///data/a.zarr")
+        .bind("file:///data/b.zarr")
         .fetch_all(&store.pool)
         .await
         .unwrap();
-        let plan_text = plan_rows
+
+        let plan = plan_rows
             .iter()
-            .map(|r| r.get::<String, _>("detail"))
+            .map(|row| row.get::<String, _>("detail"))
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            plan_text.contains("idx_bookmark_datasets_url"),
-            "EXPLAIN QUERY PLAN must reference idx_bookmark_datasets_url; got:\n{plan_text}",
+            plan.contains("idx_bookmark_datasets_url"),
+            "the overlap query must use idx_bookmark_datasets_url; the plan was:\n{plan}",
         );
     }
 }

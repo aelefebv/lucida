@@ -30,7 +30,7 @@ use crate::auth::{
     MemorySessionStore, hash_bearer_token,
 };
 use crate::auth::{DualCredentialExtractor, PrincipalExtractor};
-use crate::storage::SqliteStorageBackend;
+use crate::storage::test_support::sqlite_pool;
 
 use super::*;
 mod access;
@@ -56,8 +56,7 @@ async fn fresh_store() -> SqliteWorkspaceStore {
 /// errors) — e.g. to prove that a failed role lookup is reported as
 /// infrastructure trouble, not as an authorization verdict.
 async fn fresh_store_with_pool() -> (SqliteWorkspaceStore, sqlx::sqlite::SqlitePool) {
-    let backend = SqliteStorageBackend::open_in_memory().await.unwrap();
-    let pool = backend.pool().clone();
+    let pool = sqlite_pool().await;
     (SqliteWorkspaceStore::new(pool.clone()), pool)
 }
 

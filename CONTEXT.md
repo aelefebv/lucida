@@ -412,6 +412,14 @@ Read-only to the server, addressed by URL, and never the place server records
 go.
 _Avoid_: store (unqualified), bucket, blob store, storage backend
 
+**Conformance suite**:
+The cases that say what any implementation of one store trait must answer,
+written against the trait and run against every implementation of it. A case
+asserts only what a caller sees through the trait; a test that reaches past it
+to a table, a column, or a query plan is an implementation test instead. See
+[ADR 0056](wiki/decisions/0056-store-behavior-is-a-conformance-suite.md).
+_Avoid_: contract test, shared test, compliance suite, integration test
+
 ## Surfaces
 
 **Monitor**:
