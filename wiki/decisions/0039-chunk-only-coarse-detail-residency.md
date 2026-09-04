@@ -5,12 +5,19 @@ description: "Lucida's fallback/residency model moves to two canonical chunk tie
 tags: [lucida, decision]
 source_path: wiki/decisions/0039-chunk-only-coarse-detail-residency.md
 created: 2026-05-18
-modified: 2026-07-06
+modified: 2026-09-04
 ---
 
 # Chunk-only coarse/detail residency
 
-Status: Accepted
+Status: Accepted. Superseded on the level-0 default by
+[Screen-chosen target level with resident coarser levels](0061-screen-chosen-target-level-with-resident-coarser-levels.md):
+detail follows the screen instead of defaulting to source level 0, an absent
+override means "follow the screen" rather than "level 0", the detail tier holds
+chunks from more than one level per entity, and the fallback order gains the
+coarser resident levels between detail and coarse. The chunk-only model, the
+coarse tier, per-tile residency, and the rule that memory pressure never lowers
+the level all stand.
 
 ## Decision
 
@@ -31,7 +38,10 @@ Detail defaults to source level 0, the highest-resolution source level. Users
 must explicitly choose a lower source detail level if they want less resolution
 or wider detail coverage. Memory pressure must not silently lower the detail
 LOD; under pressure, the system adapts by spatial coverage and eviction policy
-and reports sparse detail to the user.
+and reports sparse detail to the user. (Superseded by
+[ADR 0061](0061-screen-chosen-target-level-with-resident-coarser-levels.md):
+the default is now the screen-chosen target level. The memory-pressure rule
+stands.)
 
 Shader fallback order becomes selected detail, then coarse, then blank.
 `overview` may exist as a migration alias, but new concepts should use

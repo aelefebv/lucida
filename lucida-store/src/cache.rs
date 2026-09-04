@@ -2,16 +2,19 @@
 //!
 //! Caches chunk bytes fetched from an ObjectStore to reduce repeated reads
 //! when multiple Clients view the same region.
+//!
+//! An entry is one object or one byte range of one object. See [`ReadKey`].
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 
 use bytes::Bytes;
 use lru::LruCache;
-use object_store::ObjectStore;
 use object_store::path::Path;
+use object_store::{GetOptions, GetRange, ObjectStore};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Semaphore, broadcast};
 
@@ -235,6 +238,37 @@ enum ReadPermit<'a> {
 /// (cheap, reference-counted clones); failure carries a [`SharedError`].
 type ShareResult = Result<Bytes, SharedError>;
 
+/// The key of one cache entry and one in-flight read, and so of one
+/// coalescing group. An object path, plus the byte range when the read is
+/// partial.
+///
+/// The range is part of the identity, not a view onto a whole-object entry.
+/// The single flight hands a follower the leader's bytes verbatim, so a
+/// range read that coalesced onto an in-flight read of the whole object, or
+/// of a different range, would receive bytes it did not ask for. A range
+/// read and an object read of one path are therefore two keys, and two
+/// callers coalesce only when both parts match.
+///
+/// Nothing is derived across keys in either direction. A resident object
+/// does not answer a range, and a resident range does not answer the object.
+/// That costs a round trip when both are wanted, which is rare, and keeps
+/// every entry exactly what its caller was handed.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+struct ReadKey {
+    path: Path,
+    /// `None` is the whole object.
+    range: Option<Range<u64>>,
+}
+
+impl ReadKey {
+    fn new(path: &Path, range: Option<Range<u64>>) -> Self {
+        ReadKey {
+            path: path.clone(),
+            range,
+        }
+    }
+}
+
 /// How one read through the cache spent its time, split so a caller can say
 /// *which* wait it was.
 ///
@@ -320,8 +354,8 @@ pub struct CacheStats {
 pub struct CachedStore {
     inner: Arc<dyn ObjectStore>,
     cache: Mutex<LruState>,
-    /// In-flight backend reads keyed by object path. Concurrent misses for
-    /// the same path subscribe to the leader's broadcast instead of each
+    /// In-flight backend reads keyed by [`ReadKey`]. Concurrent misses for
+    /// the same key subscribe to the leader's broadcast instead of each
     /// hitting the backend.
     in_flight: InFlight,
     /// Paths [`CachedStore::get_optional_metadata_bytes`] has found absent, so a
@@ -335,6 +369,9 @@ pub struct CachedStore {
     /// of the dataset's shape, and re-probing it on every open is pure cost:
     /// on a wide remote collection these 404s are a large fraction of the
     /// open's reads.
+    ///
+    /// Keyed by path alone, unlike the byte cache. Absence is a property of
+    /// the object, not of any range of it, and only whole-object reads ask.
     absent: Mutex<LruCache<String, ()>>,
     /// Caps concurrent backend chunk reads and decides whose read goes next.
     /// Shared process-wide by default (see [`global_source_read_limiter`]); a
@@ -347,7 +384,7 @@ pub struct CachedStore {
 }
 
 struct LruState {
-    lru: LruCache<String, Bytes>,
+    lru: LruCache<ReadKey, Bytes>,
     current_bytes: usize,
     max_bytes: usize,
     hits: u64,
@@ -367,8 +404,8 @@ struct InFlightRead {
     leader: RequestLabel,
 }
 
-/// The shared in-flight registry keyed by object path.
-type InFlight = Mutex<HashMap<String, InFlightRead>>;
+/// The shared in-flight registry keyed by [`ReadKey`].
+type InFlight = Mutex<HashMap<ReadKey, InFlightRead>>;
 
 /// RAII owner of a leader's in-flight entry.
 ///
@@ -387,14 +424,14 @@ type InFlight = Mutex<HashMap<String, InFlightRead>>;
 ///   backend read, and a later request for the same key starts fresh.
 struct LeaderGuard<'a> {
     in_flight: &'a InFlight,
-    key: String,
+    key: ReadKey,
     /// Set once [`complete`](Self::complete) has removed the entry, so `Drop`
     /// does not remove it a second time.
     completed: bool,
 }
 
 impl<'a> LeaderGuard<'a> {
-    fn new(in_flight: &'a InFlight, key: String) -> Self {
+    fn new(in_flight: &'a InFlight, key: ReadKey) -> Self {
         LeaderGuard {
             in_flight,
             key,
@@ -549,8 +586,40 @@ impl CachedStore {
     /// carried across the hop so a permit wait can be attributed to a request
     /// rather than only to a client (ADR 0048).
     pub async fn get_bytes(&self, path: &Path, reader: ReaderId, label: RequestLabel) -> TimedRead {
-        self.get_bytes_as(path, ReadClass::Chunk, reader, label)
+        self.get_bytes_as(ReadKey::new(path, None), ReadClass::Chunk, reader, label)
             .await
+    }
+
+    /// Read one byte range of an object, keyed by the path and the range.
+    ///
+    /// A range read is a chunk read that happens to be partial. It takes a
+    /// permit from the same fair-share limiter as [`get_bytes`], is timed in
+    /// the same two phases, and counts as one source read. Only the key
+    /// differs. See [`ReadKey`] for why a range and the whole object are two
+    /// entries, and why two callers coalesce only on the same path *and*
+    /// range.
+    ///
+    /// `range` is half-open, in bytes, and goes to the backend as-is. The
+    /// store does not know an object's length, so a range past the end is
+    /// the backend's error to raise.
+    ///
+    /// `reader` and `label` mean what they mean for [`get_bytes`].
+    ///
+    /// [`get_bytes`]: Self::get_bytes
+    pub async fn get_range(
+        &self,
+        path: &Path,
+        range: Range<u64>,
+        reader: ReaderId,
+        label: RequestLabel,
+    ) -> TimedRead {
+        self.get_bytes_as(
+            ReadKey::new(path, Some(range)),
+            ReadClass::Chunk,
+            reader,
+            label,
+        )
+        .await
     }
 
     /// Read a metadata object (a `zarr.json` and friends) through the same
@@ -559,7 +628,7 @@ impl CachedStore {
     /// counted apart.
     pub async fn get_metadata_bytes(&self, path: &Path) -> Result<Bytes, object_store::Error> {
         self.get_bytes_as(
-            path,
+            ReadKey::new(path, None),
             ReadClass::Metadata,
             ReaderId::UNATTRIBUTED,
             RequestLabel::UNATTRIBUTED,
@@ -575,8 +644,8 @@ impl CachedStore {
     /// asked about the shape of a dataset rather than about its data, and a
     /// not-found is the answer rather than a fault — so it never counts as a
     /// backend error. Absence is remembered in the same store as
-    /// [`get_optional_metadata_bytes`], and a body already resident in the LRU
-    /// answers `true` locally.
+    /// [`get_optional_metadata_bytes`], and a whole object already resident in
+    /// the LRU answers `true` locally.
     ///
     /// [`get_optional_metadata_bytes`]: Self::get_optional_metadata_bytes
     pub async fn probe_exists(&self, path: &Path) -> Result<bool, object_store::Error> {
@@ -595,7 +664,7 @@ impl CachedStore {
         }
         {
             let mut state = self.cache.lock().unwrap();
-            if state.lru.get(&key).is_some() {
+            if state.lru.get(&ReadKey::new(path, None)).is_some() {
                 state.hits += 1;
                 drop(state);
                 metadata_reads::record(MetadataReadPhase::CacheHit, started, false);
@@ -649,12 +718,11 @@ impl CachedStore {
 
     async fn get_bytes_as(
         &self,
-        path: &Path,
+        key: ReadKey,
         class: ReadClass,
         reader: ReaderId,
         label: RequestLabel,
     ) -> TimedRead {
-        let key = path.to_string();
         // Only metadata reads are watched, and only they pay for the clock
         // read: the chunk path is timed at the request boundary instead.
         let started = class.is_metadata().then(std::time::Instant::now);
@@ -737,7 +805,7 @@ impl CachedStore {
                 Err(_) => {
                     let coalesced_wait_us = micros(parked.elapsed());
                     let mut read = self
-                        .fetch_from_backend(path, &key, class, reader, label, started)
+                        .fetch_from_backend(&key, class, reader, label, started)
                         .await;
                     // This one row carries both: the follower waited on a
                     // flight that died, and then really did perform a read.
@@ -755,7 +823,7 @@ impl CachedStore {
         // exactly once; the guard's `Drop` is then a no-op.
         let mut guard = LeaderGuard::new(&self.in_flight, key.clone());
         let read = self
-            .fetch_from_backend(path, &key, class, reader, label, started)
+            .fetch_from_backend(&key, class, reader, label, started)
             .await;
         guard.complete(&read.result);
         read
@@ -794,7 +862,7 @@ impl CachedStore {
 
         match self
             .get_bytes_as(
-                path,
+                ReadKey::new(path, None),
                 ReadClass::OptionalMetadata,
                 ReaderId::UNATTRIBUTED,
                 RequestLabel::UNATTRIBUTED,
@@ -816,8 +884,7 @@ impl CachedStore {
     /// the actual network I/O so cache hits and followers never consume one.
     async fn fetch_from_backend(
         &self,
-        path: &Path,
-        key: &str,
+        key: &ReadKey,
         class: ReadClass,
         reader: ReaderId,
         label: RequestLabel,
@@ -869,7 +936,11 @@ impl CachedStore {
                     permit
                 }
             };
-            match self.inner.get(path).await {
+            let options = GetOptions {
+                range: key.range.clone().map(GetRange::Bounded),
+                ..GetOptions::default()
+            };
+            match self.inner.get_opts(&key.path, options).await {
                 Ok(object) => object.bytes().await,
                 Err(error) => Err(error),
             }
@@ -940,7 +1011,7 @@ impl CachedStore {
             }
 
             state.current_bytes += new_size;
-            state.lru.put(key.to_string(), bytes.clone());
+            state.lru.put(key.clone(), bytes.clone());
         }
 
         TimedRead {
@@ -1975,6 +2046,282 @@ mod tests {
             "a failed read still cost a round trip"
         );
         assert!(stats.source_read_millis >= 20);
+    }
+
+    // --- Range reads ---
+    //
+    // Nothing calls `get_range` yet. These pin the contract the shard reader
+    // (#990) builds on.
+
+    #[tokio::test]
+    async fn a_range_read_returns_exactly_the_requested_bytes() {
+        let dir = temp_dir("range_bytes");
+        fs::write(dir.join("object"), b"0123456789abcdef").unwrap();
+
+        let inner = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let cached = CachedStore::new(inner, 1024);
+
+        let path = Path::from("object");
+        let first = cached
+            .get_range(&path, 4..10, READER, LABEL)
+            .await
+            .result
+            .unwrap();
+        assert_eq!(&first[..], b"456789");
+
+        let second = cached
+            .get_range(&path, 4..10, READER, LABEL)
+            .await
+            .result
+            .unwrap();
+        assert_eq!(first, second);
+        let stats = cached.stats();
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.misses, 1);
+        assert_eq!(stats.source_reads, 1);
+        assert_eq!(stats.entry_count, 1);
+        assert_eq!(
+            stats.current_bytes, 6,
+            "the entry is the range, not the object"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_range_read_takes_one_chunk_permit() {
+        let store = Arc::new(CountingStore::new(50));
+        store.seed("object", b"0123456789abcdef").await;
+        let get_count = store.get_count.clone();
+        let max_active = store.max_active.clone();
+
+        let cached = Arc::new(CachedStore::with_source_limiter(
+            store,
+            1024,
+            SourceReadLimiter::new(1),
+        ));
+
+        let ranges = 4u64;
+        let mut handles = Vec::new();
+        for i in 0..ranges {
+            let cached = cached.clone();
+            handles.push(tokio::spawn(async move {
+                cached
+                    .get_range(&Path::from("object"), (i * 4)..(i * 4 + 4), READER, LABEL)
+                    .await
+                    .result
+            }));
+        }
+        for handle in handles {
+            handle.await.unwrap().unwrap();
+        }
+
+        assert_eq!(get_count.load(Ordering::SeqCst), ranges as usize);
+        assert_eq!(
+            max_active.load(Ordering::SeqCst),
+            1,
+            "distinct range reads overlapped under a chunk cap of one"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_range_read_holding_the_chunk_cap_does_not_block_a_metadata_read() {
+        let store = Arc::new(CountingStore::new(50));
+        store.seed("object", b"0123456789abcdef").await;
+        store.seed("zarr.json", b"{}").await;
+        let max_active = store.max_active.clone();
+
+        let cached = Arc::new(CachedStore::with_source_limiter(
+            store,
+            1024,
+            SourceReadLimiter::new(1),
+        ));
+
+        let range = {
+            let cached = cached.clone();
+            tokio::spawn(async move {
+                cached
+                    .get_range(&Path::from("object"), 0..4, READER, LABEL)
+                    .await
+                    .result
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        cached
+            .get_metadata_bytes(&Path::from("zarr.json"))
+            .await
+            .unwrap();
+        range.await.unwrap().unwrap();
+
+        assert_eq!(
+            max_active.load(Ordering::SeqCst),
+            2,
+            "the metadata read queued behind the chunk permit a range read held"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_callers_for_one_path_and_range_coalesce_onto_one_backend_read() {
+        let store = Arc::new(CountingStore::new(50));
+        store.seed("object", b"0123456789abcdef").await;
+        let get_count = store.get_count.clone();
+
+        let cached = Arc::new(CachedStore::with_source_limiter(
+            store,
+            1024,
+            SourceReadLimiter::new(64),
+        ));
+
+        let waiters = 8;
+        let mut handles = Vec::new();
+        for _ in 0..waiters {
+            let cached = cached.clone();
+            handles.push(tokio::spawn(async move {
+                cached
+                    .get_range(&Path::from("object"), 8..12, READER, LABEL)
+                    .await
+            }));
+        }
+
+        let mut round_trips = 0;
+        let mut coalesced_waits = 0;
+        for handle in handles {
+            let read = handle.await.unwrap();
+            assert_eq!(&read.result.unwrap()[..], b"89ab");
+            if read.timing.backend_read_us.is_some() {
+                round_trips += 1;
+            }
+            if read.timing.coalesced_wait_us.is_some() {
+                coalesced_waits += 1;
+            }
+        }
+
+        assert_eq!(get_count.load(Ordering::SeqCst), 1, "one backend read");
+        // One row owns the round trip and every other row owns only its wait
+        // (ADR 0050).
+        assert_eq!(round_trips, 1);
+        assert_eq!(coalesced_waits, waiters - 1);
+        let stats = cached.stats();
+        assert_eq!(stats.coalesced, waiters - 1);
+        assert_eq!(stats.source_reads, 1);
+        assert_eq!(stats.entry_count, 1);
+    }
+
+    #[tokio::test]
+    async fn a_range_read_and_a_whole_object_read_of_one_path_are_distinct_entries() {
+        let store = Arc::new(CountingStore::new(0));
+        store.seed("object", b"0123456789").await;
+        let get_count = store.get_count.clone();
+        let cached = CachedStore::new(store, 1024);
+
+        let path = Path::from("object");
+        let head = cached
+            .get_range(&path, 0..4, READER, LABEL)
+            .await
+            .result
+            .unwrap();
+        let whole = cached.get_bytes(&path, READER, LABEL).await.result.unwrap();
+        let tail = cached
+            .get_range(&path, 4..8, READER, LABEL)
+            .await
+            .result
+            .unwrap();
+        assert_eq!(&head[..], b"0123");
+        assert_eq!(&whole[..], b"0123456789");
+        assert_eq!(&tail[..], b"4567");
+
+        assert_eq!(get_count.load(Ordering::SeqCst), 3);
+        let stats = cached.stats();
+        assert_eq!(stats.hits, 0);
+        assert_eq!(stats.misses, 3);
+        assert_eq!(stats.entry_count, 3);
+        assert_eq!(stats.current_bytes, 4 + 10 + 4);
+
+        let again = cached
+            .get_range(&path, 0..4, READER, LABEL)
+            .await
+            .result
+            .unwrap();
+        assert_eq!(&again[..], b"0123");
+        assert_eq!(get_count.load(Ordering::SeqCst), 3);
+        assert_eq!(cached.stats().hits, 1);
+    }
+
+    /// Coalescing is per key. A follower is handed the leader's bytes
+    /// verbatim, so a range read parked on an in-flight whole-object read
+    /// of the same path would come back with the whole object. That is the
+    /// one outcome a range read exists to avoid.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_range_and_whole_object_reads_of_one_path_do_not_coalesce() {
+        let store = Arc::new(CountingStore::new(50));
+        store.seed("object", b"0123456789").await;
+        let get_count = store.get_count.clone();
+
+        let cached = Arc::new(CachedStore::with_source_limiter(
+            store,
+            1024,
+            SourceReadLimiter::new(64),
+        ));
+
+        let whole = {
+            let cached = cached.clone();
+            tokio::spawn(
+                async move { cached.get_bytes(&Path::from("object"), READER, LABEL).await },
+            )
+        };
+        // Long enough that the whole-object read has registered in flight.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let range = {
+            let cached = cached.clone();
+            tokio::spawn(async move {
+                cached
+                    .get_range(&Path::from("object"), 2..6, READER, LABEL)
+                    .await
+            })
+        };
+
+        let whole = whole.await.unwrap();
+        let range = range.await.unwrap();
+        assert_eq!(&whole.result.unwrap()[..], b"0123456789");
+        assert_eq!(&range.result.unwrap()[..], b"2345");
+
+        assert_eq!(get_count.load(Ordering::SeqCst), 2, "two keys, two reads");
+        assert_eq!(range.timing.coalesced_wait_us, None);
+        assert_eq!(range.timing.coalesced_onto, None);
+        assert_eq!(cached.stats().coalesced, 0);
+    }
+
+    #[tokio::test]
+    async fn a_range_read_counts_as_one_source_read_with_a_permit_wait_and_a_round_trip() {
+        let delay_ms = 20;
+        let store = Arc::new(CountingStore::new(delay_ms));
+        store.seed("object", b"0123456789").await;
+        let cached = Arc::new(CachedStore::new(store, 1024));
+        let watcher = Arc::new(Watcher::default());
+
+        let read = crate::metadata_reads::observing(watcher.clone(), async {
+            cached
+                .get_range(&Path::from("object"), 0..4, READER, LABEL)
+                .await
+        })
+        .await;
+        assert!(read.result.is_ok());
+
+        assert!(read.timing.permit_wait_us.is_some());
+        assert!(read.timing.backend_read_us.unwrap() >= (delay_ms * 1_000) as u32);
+        assert_eq!(read.timing.coalesced_wait_us, None);
+        assert_eq!(read.timing.coalesced_onto, None);
+
+        let stats = cached.stats();
+        assert_eq!(stats.source_reads, 1);
+        assert_eq!(stats.misses, 1);
+        assert!(stats.source_read_millis >= delay_ms);
+        assert_eq!(stats.backend_errors, 0);
+
+        assert!(
+            watcher.phases().is_empty(),
+            "a range read is not a metadata read and must not appear in the open's rows",
+        );
     }
 
     #[test]
