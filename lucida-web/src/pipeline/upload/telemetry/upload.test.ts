@@ -190,11 +190,12 @@ describe("UploadTelemetry — recordEvent + counters", () => {
     // The default reporter drops this. The GitHub Actions reporter shows it
     // as a notice, so CI records the ratio on every run.
     await annotate(readout);
-    // Ratio of minimums observed on a 22-vCPU x86 VM, Node 24 and 26: 13.9x
-    // to 16.1x over 32 idle runs, 10.8x to 15.4x over 11 runs pinned to one
-    // hyperthread with its sibling busy, 12.5x with the semi-space forced
-    // down to 1 MB, and 0.95x to 0.97x with the ring swapped back to the
-    // shift() shape.
+    // Ratio of minimums observed. GitHub's ubuntu-latest runners, Node 24:
+    // 11.0x to 17.6x over 6 runs. A 22-vCPU x86 VM, Node 24 and 26: 13.9x to
+    // 16.1x over 32 idle runs, 10.8x to 15.4x over 11 runs pinned to one
+    // hyperthread with its sibling busy, and 12.5x with the semi-space forced
+    // down to 1 MB. The ring swapped back to the shift() shape: 0.95x to
+    // 0.97x.
     expect(shiftMs / ringMs, readout).toBeGreaterThan(ratioFloor);
   }, 20_000);
 
