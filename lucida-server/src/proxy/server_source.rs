@@ -20,10 +20,10 @@ use lucida_content::{
 use lucida_proxy::{ProxyKind, ProxySourceData, ProxySpec, SourceError, TileVolume};
 use lucida_store::cache::CachedStore;
 use lucida_store::source_limiter::{ReaderId, RequestLabel};
-use object_store::path::Path;
 
 use crate::binding::ChunkResolver;
-use crate::decode::{DecodeError, decode_storage_bytes};
+use crate::chunk_read::{ChunkRead, ChunkReadError, read_chunk};
+use crate::decode::DecodeError;
 
 /// In-memory pre-fetched volumes for a single `ProxyGenerator::request`.
 /// Implements [`ProxySourceData`] by lookup; never performs I/O.
@@ -134,8 +134,8 @@ impl ProxySourceData for ServerProxySource {
 /// For a `TileProxy3D` this fetches one image (the entity's image). For
 /// a `GroupProxy3D` it fetches one image per tile child. For each image
 /// we pick the same level [`lucida_proxy`] would (`pick_level`) and read
-/// every chunk in that level's grid for `(t, c)`, decompressing per
-/// `ChunkResolver::storage_compression`.
+/// every chunk in that level's grid for `(t, c)` through
+/// [`crate::chunk_read::read_chunk`], the same path a served chunk takes.
 pub async fn build_server_proxy_source(
     spec: &ProxySpec,
     content: &DatasetManifest,
@@ -371,79 +371,52 @@ pub(crate) async fn fetch_volume_region(
         .ok_or(BuildSourceError::TooLarge)?;
     let mut out = vec![0u16; total_voxels];
 
-    // Per-level compression + byte-slicing layout. Defensive: a missing
-    // level_info (older snapshot or test fixture without per-level info)
-    // falls back to no compression and no slicing.
-    let level_info = resolver
-        .level_info(&image.image_id, level as u32)
-        .unwrap_or(crate::binding::LevelInfo {
-            level_index: level as u32,
-            compression: crate::decode::StorageCompression::None,
-            chunk_shape: Vec::new(),
-            chunk_byte_layout: lucida_store::layout::ChunkByteLayout {
-                canonical_byte_size: 0,
-                on_disk_byte_size: 0,
-                byte_stride_t: 0,
-                byte_stride_c: 0,
-                chunk_size_t: 1,
-                chunk_size_c: 1,
-            },
-        });
-
     for gz in grid_z0..=grid_z1 {
         for gy in grid_y0..=grid_y1 {
             for gx in grid_x0..=grid_x1 {
                 // Canonical 5D chunk key: "{level}/{t}/{c}/{z}/{y}/{x}".
                 let key = format!("{level}/{t}/{c}/{gz}/{gy}/{gx}");
-                let object_path = resolver
-                    .resolve(&image.image_id, &key)
-                    .ok_or_else(|| BuildSourceError::UnknownImage(image.image_id.clone()))?;
                 // Charged to the background class, not to a client: proxy
                 // generation is coalesced across every client that asked for
                 // the same spec, so there is no one client whose share it
                 // should come out of. It competes for one fair share against
                 // the interactive readers, which is what it is — one
                 // background population, however many clients are waiting on
-                // it.
-                let storage_bytes = match store
-                    .get_bytes(
-                        &Path::from(object_path.as_str()),
-                        ReaderId::UNATTRIBUTED,
-                        RequestLabel::UNATTRIBUTED,
-                    )
-                    .await
-                    // Generation has no browser bracket to nest inside, so
-                    // its read timing has nowhere to be placed and is
-                    // dropped here rather than filed against a label.
-                    .result
-                {
-                    Ok(bytes) => bytes,
-                    Err(e) if is_not_found(&e) => {
-                        continue;
+                // it. No probe: generation has no browser bracket to nest
+                // inside, so its read timing is dropped.
+                let read = read_chunk(
+                    resolver,
+                    store,
+                    &image.image_id,
+                    &key,
+                    ReaderId::UNATTRIBUTED,
+                    RequestLabel::UNATTRIBUTED,
+                    None,
+                )
+                .await;
+                let raw = match read {
+                    Ok(ChunkRead::Present(raw)) => raw,
+                    // `out` is already fill, so an absent chunk has nothing
+                    // to copy.
+                    Ok(ChunkRead::Absent { .. }) => continue,
+                    Err(ChunkReadError::UnknownImage(image)) => {
+                        return Err(BuildSourceError::UnknownImage(image));
                     }
-                    Err(e) => {
+                    Err(ChunkReadError::ObjectStore(e)) => {
                         return Err(BuildSourceError::Fetch {
                             image: image.image_id.clone(),
-                            key: key.clone(),
+                            key,
                             message: e.to_string(),
                         });
                     }
+                    Err(ChunkReadError::Decode(source)) => {
+                        return Err(BuildSourceError::Decode {
+                            image: image.image_id.clone(),
+                            key,
+                            source,
+                        });
+                    }
                 };
-
-                let mut raw = decode_storage_bytes(&storage_bytes, level_info.compression)
-                    .map_err(|e| BuildSourceError::Decode {
-                        image: image.image_id.clone(),
-                        key: key.clone(),
-                        source: e,
-                    })?;
-                // Slice down to the canonical (1 t × 1 c × all z × all y × all x)
-                // byte range — see [`lucida_store::layout`]. The proxy
-                // generator iterates one (t, c) at a time, so wire t/c are the
-                // values it just wrote into the chunk key.
-                let (offset, size) = level_info.chunk_byte_layout.slice_range(t as u64, c as u64);
-                if size > 0 && offset.checked_add(size).is_some_and(|end| end <= raw.len()) {
-                    raw = raw[offset..offset + size].to_vec();
-                }
 
                 // Edge truncation: the last grid cell on each axis may be
                 // partial. Compute the in-bounds extent for this chunk.
@@ -594,12 +567,6 @@ fn unit_float_to_u16(value: f64) -> u16 {
         return 0;
     }
     (value.clamp(0.0, 1.0) * u16::MAX as f64).round() as u16
-}
-
-fn is_not_found(error: &object_store::Error) -> bool {
-    matches!(error, object_store::Error::NotFound { .. })
-        || error.to_string().contains("not found")
-        || error.to_string().contains("No such file or directory")
 }
 
 /// Errors from [`build_server_proxy_source`]. Mapped onto
