@@ -72,6 +72,23 @@ impl MultiscaleInfo {
             .filter(|level_index| !self.is_generated_level(*level_index))
             .collect()
     }
+
+    /// The level a pin to `requested` holds on this image. That is `requested`
+    /// when it is a selectable level, else the coarsest selectable level finer
+    /// than it, else the finest selectable level. `None` when no level is
+    /// selectable. The one clamp rule for a pin, at set time and at plan time.
+    pub fn pinned_level(&self, requested: u32) -> Option<u32> {
+        let levels = self.selectable_detail_levels();
+        if levels.contains(&requested) {
+            return Some(requested);
+        }
+        levels
+            .iter()
+            .copied()
+            .filter(|level| *level <= requested)
+            .max()
+            .or_else(|| levels.first().copied())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -325,5 +342,55 @@ mod tests {
         assert!(info.is_generated_level(1));
         assert_eq!(info.selectable_detail_levels(), vec![0]);
         assert_eq!(info.generated_levels[0].provenance.generator, "coarse-v1");
+    }
+
+    #[test]
+    fn a_pin_holds_the_requested_level_or_the_coarsest_selectable_level_finer_than_it() {
+        let level = |index: u32| LevelGeometry {
+            level_index: index,
+            shape: [1, 1, 1, 64 >> index, 64 >> index],
+            chunk_shape: [1, 1, 1, 8, 8],
+            grid_shape: [1, 1, 1, 1, 1],
+            scale: [1.0; 5],
+        };
+        let mut info = MultiscaleInfo {
+            axes: Vec::new(),
+            levels: vec![level(0), level(1), level(2), level(3)],
+            coarse_level_index: Some(3),
+            generated_levels: vec![GeneratedLevelInfo {
+                level_index: 3,
+                role: GeneratedLevelRole::Coarse,
+                provenance: GeneratedLevelProvenance::default(),
+            }],
+            data_type: DataType::Uint16,
+            pinned_axes: Vec::new(),
+            channel_infos: Vec::new(),
+        };
+        assert_eq!(info.pinned_level(0), Some(0));
+        assert_eq!(info.pinned_level(2), Some(2));
+        assert_eq!(
+            info.pinned_level(3),
+            Some(2),
+            "a generated level is never pinned"
+        );
+        assert_eq!(
+            info.pinned_level(9),
+            Some(2),
+            "a stale pin clamps to the coarsest"
+        );
+
+        info.generated_levels.push(GeneratedLevelInfo {
+            level_index: 0,
+            role: GeneratedLevelRole::Coarse,
+            provenance: GeneratedLevelProvenance::default(),
+        });
+        assert_eq!(
+            info.pinned_level(0),
+            Some(1),
+            "below the finest selectable level the pin rises to it"
+        );
+
+        info.levels.clear();
+        assert_eq!(info.pinned_level(0), None);
     }
 }

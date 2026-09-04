@@ -6,6 +6,7 @@ use lucida_protocol::DatasetOpened;
 use lucida_store::cache::CachedStore;
 use lucida_store::import_types::{ImportWarning, LevelBindingInfo, ServerBindingSeed};
 use object_store::ObjectStore;
+use object_store::path::Path;
 
 use crate::generated::{DerivedChunkCache, GeneratedCoarseService};
 use crate::proxy::{ProxyCache, ProxyGenerator};
@@ -42,11 +43,23 @@ pub struct ServerBinding {
     pub import_warnings: Vec<ImportWarning>,
 }
 
-/// Compiled key-to-path mapper. Built once at import from per-image binding seeds.
-/// Used per chunk request to resolve logical keys to object store paths and to
-/// look up the per-level compression + byte-slicing info.
+/// Compiled key-to-location mapper. Built once at import from per-image binding
+/// seeds. Used per chunk request to resolve chunk keys to their
+/// [`ChunkLocation`] and to look up the per-level compression + byte-slicing
+/// info.
 pub struct ChunkResolver {
     images: HashMap<ImageId, ImageResolver>,
+}
+
+/// Where one chunk lives in the object store.
+///
+/// The resolver is the only thing that builds one, so no caller formats or
+/// parses object paths itself. Today a chunk is a whole object; a position
+/// inside the object belongs here once it is not, and the callers stay as
+/// they are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkLocation {
+    pub path: Path,
 }
 
 struct ImageResolver {
@@ -88,12 +101,12 @@ impl ChunkResolver {
             .and_then(|img| img.levels.get(level as usize).cloned())
     }
 
-    /// Resolve a canonical chunk key to an object store path for a given
-    /// image. Uses the per-level chunk_shape to translate wire `t`/`c` voxel
-    /// coords into disk-grid coords. Falls back to all-1s if the level
-    /// isn't in the binding (e.g. malformed key) — preserves the legacy
-    /// "one wire chunk = one disk chunk" behaviour for those paths.
-    pub fn resolve(&self, image_id: &ImageId, key: &str) -> Option<String> {
+    /// Resolve a canonical chunk key to where the chunk lives for a given
+    /// image, or `None` if the image is not in the binding. Uses the
+    /// per-level chunk_shape to translate wire `t`/`c` voxel coords into
+    /// disk-grid coords. A level the binding does not describe, such as one
+    /// named by a malformed key, is treated as one wire chunk per disk chunk.
+    pub fn resolve(&self, image_id: &ImageId, key: &str) -> Option<ChunkLocation> {
         let img = self.images.get(image_id)?;
         let level = parse_level_from_chunk_key(key);
         let chunk_shape: Vec<u64> = img
@@ -102,10 +115,11 @@ impl ChunkResolver {
             .map(|l| l.chunk_shape.clone())
             .unwrap_or_else(|| vec![1; img.axes_names.len()]);
         let store_path = lucida_store::chunk_key_to_store_path(key, &img.axes_names, &chunk_shape);
-        Some(match &img.store_prefix {
-            Some(prefix) => format!("{prefix}/{store_path}"),
-            None => store_path,
-        })
+        let path = match &img.store_prefix {
+            Some(prefix) => Path::from(format!("{prefix}/{store_path}")),
+            None => Path::from(store_path),
+        };
+        Some(ChunkLocation { path })
     }
 }
 
@@ -123,12 +137,25 @@ impl ServerBinding {
 }
 
 /// Parse the level prefix from a canonical chunk key (`"{level}/t/c/z/y/x"`).
-/// Returns 0 if the key is malformed.
-fn parse_level_from_chunk_key(key: &str) -> u32 {
+/// Returns 0 if the key is malformed; such a key still resolves, to a
+/// location nothing is at, and reads as an absent chunk.
+pub(crate) fn parse_level_from_chunk_key(key: &str) -> u32 {
     key.split('/')
         .next()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0)
+}
+
+/// Parse the wire `(t, c)` voxel coordinates from a canonical chunk key
+/// (`"{level}/t/c/z/y/x"`). Returns `(0, 0)` if the key is malformed, which
+/// slices the first timepoint and channel out of whatever the key resolved
+/// to.
+pub(crate) fn parse_t_c_from_chunk_key(key: &str) -> (u64, u64) {
+    let mut parts = key.split('/');
+    let _level = parts.next();
+    let t = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let c = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    (t, c)
 }
 
 #[cfg(test)]
@@ -188,17 +215,17 @@ mod tests {
             None,
         )]);
         let resolver = ChunkResolver::new(&seed);
-        let path = resolver
+        let location = resolver
             .resolve(&ImageId("img1".into()), "2/0/1/5/3/2")
             .unwrap();
-        assert_eq!(path, "2/c/0/1/5/3/2");
+        assert_eq!(location.path, Path::from("2/c/0/1/5/3/2"));
     }
 
     #[test]
     fn resolve_3d_no_prefix() {
         let seed = make_seed(vec![make_image_seed("img1", vec!["z", "y", "x"], None)]);
         let resolver = ChunkResolver::new(&seed);
-        let path = resolver
+        let location = resolver
             .resolve(&ImageId("img1".into()), "2/0/0/5/3/2")
             .unwrap();
         let expected = lucida_store::chunk_key_to_store_path(
@@ -206,7 +233,7 @@ mod tests {
             &["z".to_string(), "y".to_string(), "x".to_string()],
             &[1, 1, 1],
         );
-        assert_eq!(path, expected);
+        assert_eq!(location.path, Path::from(expected));
     }
 
     #[test]
@@ -218,10 +245,10 @@ mod tests {
             vec![1, 5, 1, 1024, 1024],
         )]);
         let resolver = ChunkResolver::new(&seed);
-        let path = resolver
+        let location = resolver
             .resolve(&ImageId("lif".into()), "0/0/3/0/0/0")
             .unwrap();
-        assert_eq!(path, "0/c/0/0/0/0/0");
+        assert_eq!(location.path, Path::from("0/c/0/0/0/0/0"));
     }
 
     #[test]
@@ -232,10 +259,10 @@ mod tests {
             Some("A/1/0"),
         )]);
         let resolver = ChunkResolver::new(&seed);
-        let path = resolver
+        let location = resolver
             .resolve(&ImageId("img1".into()), "2/0/1/5/3/2")
             .unwrap();
-        assert!(path.starts_with("A/1/0/"));
+        assert_eq!(location.path, Path::from("A/1/0/2/c/0/1/5/3/2"));
     }
 
     #[test]
@@ -282,17 +309,20 @@ mod tests {
         // img2 should have prefix
         let path2 = resolver
             .resolve(&ImageId("img2".into()), "0/0/0/0/0/0")
-            .unwrap();
-        assert!(path2.starts_with("B/2/0/"));
+            .unwrap()
+            .path;
+        assert!(path2.as_ref().starts_with("B/2/0/"));
 
         // img1 and img3 should not have prefix
         let path1 = resolver
             .resolve(&ImageId("img1".into()), "0/0/0/0/0/0")
-            .unwrap();
+            .unwrap()
+            .path;
         let path3 = resolver
             .resolve(&ImageId("img3".into()), "0/0/0/0/0/0")
-            .unwrap();
-        assert!(!path1.contains("B/2/0"));
-        assert!(!path3.contains("B/2/0"));
+            .unwrap()
+            .path;
+        assert!(!path1.as_ref().contains("B/2/0"));
+        assert!(!path3.as_ref().contains("B/2/0"));
     }
 }

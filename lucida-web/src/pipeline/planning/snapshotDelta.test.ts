@@ -64,7 +64,7 @@ function row(overrides: Partial<ViewQueryEntityJson> = {}): ViewQueryEntityJson 
     projected_diagonal_px: 100,
     projected_area_px2: 10000,
     centroid_world: [0, 0, 0],
-    ideal_target_lod: 0,
+    target_level: 0,
     importance: 1,
     ...overrides,
   };
@@ -115,7 +115,7 @@ function projection(map: ReadonlyMap<string, EntitySnapshot>) {
     .map(([imageId, e]) => ({
       imageId,
       visible: e.visible,
-      idealTargetLod: e.idealTargetLod,
+      targetLevel: e.targetLevel,
       kind: e.kind,
       detailLevel: e.detailLevel,
       coarseLevel: e.coarseLevel,
@@ -167,7 +167,7 @@ describe("applyViewQueryDelta — Delta", () => {
     const next = applyViewQueryDelta(
       prev,
       delta(
-        [row({ image_id: "img-2", ideal_target_lod: 3 })],
+        [row({ image_id: "img-2", target_level: 3 })],
         ["img-0"],
         [row({ image_id: "img-1", visible: false })],
       ),
@@ -175,7 +175,7 @@ describe("applyViewQueryDelta — Delta", () => {
     );
     expect([...next.keys()].sort()).toEqual(["img-1", "img-2"]);
     expect(next.get("img-1")?.visible).toBe(false);
-    expect(next.get("img-2")?.idealTargetLod).toBe(3);
+    expect(next.get("img-2")?.targetLevel).toBe(3);
     // prev is not mutated.
     expect([...prev.keys()].sort()).toEqual(["img-0", "img-1"]);
     expect(prev.get("img-1")?.visible).toBe(true);
@@ -193,14 +193,14 @@ describe("applyViewQueryDelta — keying", () => {
     const next = applyViewQueryDelta(
       null,
       full([
-        row({ entity_id: "shared", image_id: "img-a", ideal_target_lod: 1 }),
-        row({ entity_id: "shared", image_id: "img-b", ideal_target_lod: 4 }),
+        row({ entity_id: "shared", image_id: "img-a", target_level: 1 }),
+        row({ entity_id: "shared", image_id: "img-b", target_level: 4 }),
       ]),
       deps,
     );
     expect(next.size).toBe(2);
-    expect(next.get("img-a")?.idealTargetLod).toBe(1);
-    expect(next.get("img-b")?.idealTargetLod).toBe(4);
+    expect(next.get("img-a")?.targetLevel).toBe(1);
+    expect(next.get("img-b")?.targetLevel).toBe(4);
   });
 });
 
@@ -223,11 +223,11 @@ describe("applyViewQueryDelta — equivalence over a sequence", () => {
       delta(
         [row({ image_id: "img-2" })],
         ["img-0"],
-        [row({ image_id: "img-1", ideal_target_lod: 2 })],
+        [row({ image_id: "img-1", target_level: 2 })],
       ),
       deps,
     );
-    oracleRows = [row({ image_id: "img-1", ideal_target_lod: 2 }), row({ image_id: "img-2" })];
+    oracleRows = [row({ image_id: "img-1", target_level: 2 }), row({ image_id: "img-2" })];
     expect(projection(folded)).toEqual(projection(freshBuild(oracleRows, deps)));
 
     // Step 2 — no quantized change (empty delta) — projection holds steady.
@@ -240,12 +240,12 @@ describe("applyViewQueryDelta — equivalence over a sequence", () => {
       delta(
         [row({ image_id: "img-3" })],
         ["img-2"],
-        [row({ image_id: "img-1", ideal_target_lod: 2, visible: false })],
+        [row({ image_id: "img-1", target_level: 2, visible: false })],
       ),
       deps,
     );
     oracleRows = [
-      row({ image_id: "img-1", ideal_target_lod: 2, visible: false }),
+      row({ image_id: "img-1", target_level: 2, visible: false }),
       row({ image_id: "img-3" }),
     ];
     expect(projection(folded)).toEqual(projection(freshBuild(oracleRows, deps)));

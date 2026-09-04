@@ -1156,26 +1156,13 @@ impl Scene {
     }
 
     fn clamp_detail_level_override(&self, dataset_id: &DatasetId, requested: u32) -> Option<u32> {
-        let levels = self
-            .document
+        self.document
             .manifests
             .get(dataset_id)?
             .images()
             .first()?
             .multiscale
-            .selectable_detail_levels();
-        if levels.is_empty() {
-            return None;
-        }
-        if levels.contains(&requested) {
-            return Some(requested);
-        }
-        levels
-            .iter()
-            .copied()
-            .filter(|level| *level <= requested)
-            .max()
-            .or_else(|| levels.first().copied())
+            .pinned_level(requested)
     }
 }
 

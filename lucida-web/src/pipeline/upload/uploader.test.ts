@@ -30,7 +30,7 @@ interface MockSceneConfig {
       projected_diagonal_px: number;
       projected_area_px2: number;
       centroid_world: [number, number, number];
-      ideal_target_lod: number;
+      target_level: number;
       importance: number;
     }[];
   };
@@ -63,7 +63,7 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
           projected_diagonal_px: 100,
           projected_area_px2: 10000,
           centroid_world: [0, 0, 0],
-          ideal_target_lod: 0,
+          target_level: 0,
           importance: 1,
         },
       ],

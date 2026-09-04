@@ -10,6 +10,7 @@ pub mod binding;
 pub mod binding_restore;
 pub mod bookmarks;
 pub mod browse;
+pub mod chunk_read;
 pub mod dataset_open;
 pub mod decode;
 pub mod generated;

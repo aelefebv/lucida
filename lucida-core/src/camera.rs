@@ -19,8 +19,8 @@ use crate::transform::VolumeTransform;
 ///   data's bounding sphere.
 pub use crate::framing::{FIT_MARGIN_2D, FIT_MARGIN_3D, FIT_PADDING};
 
-/// Axis-aligned bounding box in voxel space, plus effective zoom for LOD selection.
-/// This is what chunk planning needs — not a camera.
+/// Axis-aligned bounding box in voxel space, plus device pixels per sample at
+/// the focal plane. This is what chunk planning needs — not a camera.
 #[derive(Debug, Clone, Serialize)]
 pub struct VisibleRegion {
     /// [min_x, min_y, max_x, max_y] in voxel coordinates.
@@ -28,7 +28,9 @@ pub struct VisibleRegion {
     /// Voxel z range.
     #[serde(serialize_with = "serialize_range_as_array")]
     pub z_range: Range<u32>,
-    /// For LOD selection: screen pixels per world unit at the focal plane.
+    /// Device pixels per level-0 sample at the focal plane. A slice view
+    /// reports its zoom. A volume view reports the measure where the
+    /// center-screen ray meets the volume.
     pub effective_zoom: f64,
     /// Radius basis in voxels for view-relative render-radius controls.
     ///
@@ -309,6 +311,22 @@ impl Camera {
             Camera::Slice(v) => v.zoom,
             Camera::Arcball(v) => v.effective_zoom(),
             Camera::Fly(v) => v.effective_zoom(),
+        }
+    }
+
+    /// Device pixels per level-0 sample of a volume, the measure the target
+    /// level is chosen from.
+    ///
+    /// A volume view measures where the center-screen ray meets the volume and
+    /// along the axis with the most samples per world unit, the axis the
+    /// screen resolves finest, so the level errs coarse rather than fine. A
+    /// slice view has no depth. Its samples sit `zoom` device pixels apart
+    /// everywhere, so the slice arm ignores `transform` and `shape`.
+    pub fn pixels_per_sample(&self, transform: &VolumeTransform, shape: [u32; 3]) -> f64 {
+        match self {
+            Camera::Slice(v) => v.zoom,
+            Camera::Arcball(v) => v.pixels_per_sample_at_hit(Some(transform), shape),
+            Camera::Fly(v) => v.pixels_per_sample_at_hit(Some(transform), shape),
         }
     }
 
@@ -668,6 +686,49 @@ impl Slice {
     }
 }
 
+/// A volume transform's model and inverse-model matrices in `f64`, or the
+/// identity pair when there is none.
+fn model_matrices_f64(volume_transform: Option<&VolumeTransform>) -> ([f64; 16], [f64; 16]) {
+    const IDENTITY: [f64; 16] = [
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ];
+    match volume_transform {
+        Some(t) => (t.model.map(f64::from), t.inv_model.map(f64::from)),
+        None => (IDENTITY, IDENTITY),
+    }
+}
+
+/// Device pixels per level-0 sample at `hit_unit`, a point in the volume's
+/// unit cube, along the axis with the most samples per world unit.
+///
+/// `pixels_per_world_at_unit_distance` is the camera's perspective scale.
+/// Divided by the distance from `eye` to the hit it gives pixels per world
+/// unit at the surface being resolved, and divided again by the densest
+/// axis's samples per world unit it gives pixels per sample there. The
+/// densest axis is the conservative choice. It reports the smallest spacing,
+/// so the level chosen from it errs coarse. `shape` is `[z, y, x]`. The model
+/// matrix is axis-aligned, so its diagonal holds the per-axis world extents.
+fn pixels_per_sample_from_eye(
+    pixels_per_world_at_unit_distance: f64,
+    eye: [f64; 3],
+    hit_unit: [f64; 3],
+    model: &[f64; 16],
+    shape: [u32; 3],
+) -> f64 {
+    let hit_world = transform_point(hit_unit, model);
+    let dx = hit_world[0] - eye[0];
+    let dy = hit_world[1] - eye[1];
+    let dz = hit_world[2] - eye[2];
+    let distance = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-6);
+    let samples_per_world = [
+        shape[2] as f64 / model[0].abs().max(1e-12),
+        shape[1] as f64 / model[5].abs().max(1e-12),
+        shape[0] as f64 / model[10].abs().max(1e-12),
+    ];
+    let densest = samples_per_world.into_iter().fold(0.0, f64::max).max(1e-12);
+    pixels_per_world_at_unit_distance / distance / densest
+}
+
 // --- Arcball implementation ---
 
 impl Arcball {
@@ -816,6 +877,32 @@ impl Arcball {
         self.viewport[1] as f64 / (2.0 * self.distance * (self.fov / 2.0).tan())
     }
 
+    /// Screen pixels per world unit one unit from the eye. The viewport
+    /// height and field of view set this perspective scale, and distance
+    /// then divides it.
+    fn pixels_per_world_at_unit_distance(&self) -> f64 {
+        self.viewport[1] as f64 / (2.0 * (self.fov / 2.0).tan())
+    }
+
+    /// Device pixels per level-0 sample where the center-screen ray meets the
+    /// volume, along the axis with the most samples per world unit. See
+    /// [`Camera::pixels_per_sample`].
+    pub fn pixels_per_sample_at_hit(
+        &self,
+        volume_transform: Option<&VolumeTransform>,
+        shape: [u32; 3],
+    ) -> f64 {
+        let (model, inv_model) = model_matrices_f64(volume_transform);
+        let hit_unit = self.ray_hit_local(&inv_model);
+        pixels_per_sample_from_eye(
+            self.pixels_per_world_at_unit_distance(),
+            self.eye_position(),
+            hit_unit,
+            &model,
+            shape,
+        )
+    }
+
     /// Inverse view-projection matrix as f32 for the GPU.
     pub fn inv_view_proj(&self) -> [f32; 16] {
         let vp = self.view_proj_f64();
@@ -942,33 +1029,8 @@ impl Arcball {
             [m[3] - m[2], m[7] - m[6], m[11] - m[10], m[15] - m[14]],
         ];
 
-        // Convert effective_zoom from pixels-per-world-unit to pixels-per-voxel.
-        // The model matrix scales each axis: model[0]=sx, model[5]=sy, model[10]=sz.
-        // Voxels per world unit in each axis = shape[i] / model_scale[i].
-        // Use the max to get the most conservative (coarsest) LOD selection.
-        let (sx, sy, sz) = match volume_transform {
-            Some(t) => (t.model[0] as f64, t.model[5] as f64, t.model[10] as f64),
-            None => (1.0, 1.0, 1.0),
-        };
-        let vpw_x = shape_x / sx.abs().max(1e-12);
-        let vpw_y = shape_y / sy.abs().max(1e-12);
-        let vpw_z = shape_z / sz.abs().max(1e-12);
-        let max_vpw = vpw_x.max(vpw_y).max(vpw_z);
-
-        // Cast a ray from the eye toward the target to find where it hits the
-        // volume surface. Use distance to this hit point (not self.distance to
-        // the orbit target) for LOD — the surface is what we're resolving.
         let hit_unit = self.ray_hit_local(&inv_model);
-        let hit_world = transform_point(hit_unit, &model_f64);
-        let eye = self.eye_position();
-        let dx = hit_world[0] - eye[0];
-        let dy = hit_world[1] - eye[1];
-        let dz = hit_world[2] - eye[2];
-        let dist_to_surface = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-6);
-
-        // pixels-per-world-unit at the surface, then convert to pixels-per-voxel
-        let base_zoom = self.viewport[1] as f64 / (2.0 * (self.fov / 2.0).tan());
-        let zoom_per_voxel = (base_zoom / dist_to_surface) / max_vpw;
+        let zoom_per_voxel = self.pixels_per_sample_at_hit(volume_transform, shape);
 
         let sort_center = Some([
             hit_unit[0] * shape_x,
@@ -1212,6 +1274,25 @@ impl Fly {
         self.viewport[1] as f64 / (2.0 * (self.fov / 2.0).tan())
     }
 
+    /// Device pixels per level-0 sample where the center-screen ray meets the
+    /// volume, along the axis with the most samples per world unit. See
+    /// [`Camera::pixels_per_sample`].
+    pub fn pixels_per_sample_at_hit(
+        &self,
+        volume_transform: Option<&VolumeTransform>,
+        shape: [u32; 3],
+    ) -> f64 {
+        let (model, inv_model) = model_matrices_f64(volume_transform);
+        let hit_unit = self.ray_hit_local(&inv_model);
+        pixels_per_sample_from_eye(
+            self.effective_zoom(),
+            self.position,
+            hit_unit,
+            &model,
+            shape,
+        )
+    }
+
     /// View-projection matrix in f64.
     pub(crate) fn view_proj_f64(&self) -> [f64; 16] {
         let aspect = self.viewport[0] as f64 / self.viewport[1] as f64;
@@ -1336,34 +1417,8 @@ impl Fly {
             [m[3] - m[2], m[7] - m[6], m[11] - m[10], m[15] - m[14]],
         ];
 
-        let (sx, sy, sz) = match volume_transform {
-            Some(t) => (t.model[0] as f64, t.model[5] as f64, t.model[10] as f64),
-            None => (1.0, 1.0, 1.0),
-        };
-        let vpw_x = shape_x / sx.abs().max(1e-12);
-        let vpw_y = shape_y / sy.abs().max(1e-12);
-        let vpw_z = shape_z / sz.abs().max(1e-12);
-        let max_vpw = vpw_x.max(vpw_y).max(vpw_z);
-
-        // For the fly camera, effective_zoom() is a constant (no distance term).
-        // Compute the actual distance to the volume surface and factor it in,
-        // mirroring how the arcball divides by its target distance.
         let hit_unit = self.ray_hit_local(&inv_model);
-
-        let model_f64_for_hit: [f64; 16] = match volume_transform {
-            Some(t) => t.model.map(|v| v as f64),
-            None => [
-                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-            ],
-        };
-        let hit_world = transform_point(hit_unit, &model_f64_for_hit);
-        let dx = hit_world[0] - self.position[0];
-        let dy = hit_world[1] - self.position[1];
-        let dz = hit_world[2] - self.position[2];
-        let dist_to_surface = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-6);
-
-        // effective_zoom at distance d = base_zoom / d
-        let zoom_per_voxel = (self.effective_zoom() / dist_to_surface) / max_vpw;
+        let zoom_per_voxel = self.pixels_per_sample_at_hit(volume_transform, shape);
 
         let sort_center = Some([
             hit_unit[0] * shape_x,
@@ -2992,5 +3047,73 @@ mod tests {
         let once = cam.clone();
         cam.sanitize();
         assert_eq!(cam, once);
+    }
+
+    // --- pixels per sample at the hit ---
+
+    #[test]
+    fn slice_pixels_per_sample_is_the_zoom() {
+        let mut cam = Camera::new_2d([800, 600]);
+        if let Camera::Slice(v) = &mut cam {
+            v.set_zoom(0.37);
+        }
+        let t = crate::transform::compute_volume_transform([1, 512, 512], [1.0, 1.0, 1.0]);
+        assert_eq!(cam.pixels_per_sample(&t, [1, 512, 512]), 0.37);
+    }
+
+    #[test]
+    fn hit_measure_takes_the_axis_with_the_most_samples_per_world_unit() {
+        let cam = Arcball::new([800, 600]);
+        let iso = crate::transform::compute_volume_transform([256, 256, 256], [1.0, 1.0, 1.0]);
+        let dense_x =
+            crate::transform::compute_volume_transform([256, 256, 1024], [1.0, 1.0, 0.25]);
+        assert_eq!(
+            iso.model, dense_x.model,
+            "the boxes must coincide in world space"
+        );
+        let a = cam.pixels_per_sample_at_hit(Some(&iso), [256, 256, 256]);
+        let b = cam.pixels_per_sample_at_hit(Some(&dense_x), [256, 256, 1024]);
+        assert!(a > 0.0 && a.is_finite());
+        assert!((b - a / 4.0).abs() < 1e-9, "{b} vs {}", a / 4.0);
+    }
+
+    #[test]
+    fn hit_measure_scales_with_backing_pixels_and_falls_with_distance() {
+        let t = crate::transform::compute_volume_transform([256, 256, 256], [1.0, 1.0, 1.0]);
+        let shape = [256, 256, 256];
+        let near = Arcball::new([800, 600]);
+        let retina = Arcball::new([1600, 1200]);
+        let a = near.pixels_per_sample_at_hit(Some(&t), shape);
+        let b = retina.pixels_per_sample_at_hit(Some(&t), shape);
+        assert!(
+            (b - 2.0 * a).abs() < 1e-9,
+            "twice the device pixels: {b} vs {a}"
+        );
+
+        let mut far = Arcball::new([800, 600]);
+        far.distance *= 4.0;
+        assert!(far.pixels_per_sample_at_hit(Some(&t), shape) < a);
+
+        let fly = Fly::new([800, 600]);
+        let f = fly.pixels_per_sample_at_hit(Some(&t), shape);
+        assert!(f > 0.0 && f.is_finite());
+    }
+
+    #[test]
+    fn visible_region_reports_the_hit_measure_as_its_effective_zoom() {
+        let t = crate::transform::compute_volume_transform([256, 1024, 1024], [1.0, 1.0, 1.0]);
+        let shape = [256u32, 1024, 1024];
+        let arc = Arcball::new([800, 600]);
+        let region = Camera::Arcball(arc.clone()).visible_region(&(0..256), Some(&t), Some(&shape));
+        assert_eq!(
+            region.effective_zoom,
+            arc.pixels_per_sample_at_hit(Some(&t), shape)
+        );
+        let fly = Fly::new([800, 600]);
+        let region = Camera::Fly(fly.clone()).visible_region(&(0..256), Some(&t), Some(&shape));
+        assert_eq!(
+            region.effective_zoom,
+            fly.pixels_per_sample_at_hit(Some(&t), shape)
+        );
     }
 }

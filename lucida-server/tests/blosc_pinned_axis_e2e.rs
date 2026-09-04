@@ -26,8 +26,10 @@ use std::sync::Arc;
 
 use lucida_content::ImageId;
 use lucida_server::binding::ChunkResolver;
-use lucida_server::decode::decode_storage_bytes;
+use lucida_server::chunk_read::{ChunkRead, read_chunk};
 use lucida_store::import::import_dataset;
+use lucida_store::source_limiter::{ReaderId, RequestLabel};
+use object_store::path::Path;
 
 /// Single chunk for shape `[1,1,1,2,4,4]` uint16: 64 plaintext bytes (m=0
 /// has values 0..15, m=1 has 100..115). Compresses through blosc-zstd-
@@ -163,39 +165,36 @@ async fn six_d_with_m_blosc_decodes_to_canonical_m0_slice() {
     assert_eq!(layout.canonical_byte_size, EXPECTED_M0_BYTES.len());
     assert_eq!(layout.on_disk_byte_size, 2 * EXPECTED_M0_BYTES.len());
 
-    // Build the resolver and exercise the same fetch+decode+slice path
-    // serve_chunk_from_store uses (we skip the WebSocket layer because it
-    // requires a full session harness — the decoded bytes are what matter).
+    // Read through `read_chunk` rather than the WebSocket layer, which needs
+    // a full session harness; the served bytes are what matter.
     let resolver = Arc::new(ChunkResolver::new(&result.binding_seed));
     let image_id = ImageId("blosc-e2e".to_string());
     let canonical_key = "0/0/0/0/0/0";
-    let resolved_path = resolver.resolve(&image_id, canonical_key).unwrap();
+    let location = resolver.resolve(&image_id, canonical_key).unwrap();
     assert_eq!(
-        resolved_path, "0/c/0/0/0/0/0/0",
+        location.path,
+        Path::from("0/c/0/0/0/0/0/0"),
         "chunk path should have a 0 injected at the m position",
     );
-
-    let level_info = resolver.level_info(&image_id, 0).unwrap();
-
-    // Read the chunk file off disk (mirroring what CachedStore::get_bytes
-    // would do — this test just hits the local filesystem directly).
-    let chunk_bytes = fs::read(dir.join(&resolved_path)).unwrap();
-    assert_eq!(chunk_bytes, ENC_6D_BLOSC);
-
-    let mut decoded = decode_storage_bytes(&chunk_bytes, level_info.compression).unwrap();
     assert_eq!(
-        decoded.len(),
-        layout.on_disk_byte_size,
-        "decoded bytes should equal the on-disk byte size before slicing",
+        fs::read(dir.join(location.path.as_ref())).unwrap(),
+        ENC_6D_BLOSC
     );
 
-    // Slice down via slice_range. For pinned-axis-only fixtures
-    // (chunk_size 1 on t and c), this is `(0, canonical_byte_size)` —
-    // equivalent to the old `bytes.truncate(canonical_byte_size)`.
-    let (offset, size) = level_info.chunk_byte_layout.slice_range(0, 0);
-    if size > 0 && offset + size <= decoded.len() {
-        decoded = decoded[offset..offset + size].to_vec();
-    }
+    let read = read_chunk(
+        &resolver,
+        &store,
+        &image_id,
+        canonical_key,
+        ReaderId::UNATTRIBUTED,
+        RequestLabel::UNATTRIBUTED,
+        None,
+    )
+    .await
+    .unwrap();
+    let ChunkRead::Present(decoded) = read else {
+        panic!("the chunk is on disk");
+    };
 
     assert_eq!(
         decoded.len(),

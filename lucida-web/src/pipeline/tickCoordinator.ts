@@ -480,7 +480,7 @@ export class TickCoordinator {
    * # Why a per-record projection map
    *
    * A delta reports only the *quantized* projection
-   * (`{ membership, visible, ideal_target_lod, kind }`) of each record. The
+   * (`{ membership, visible, target_level, kind }`) of each record. The
    * fold is safe to feed the planner because the active set derives from
    * the view-independent `detailLevel`/`coarseLevel` + `visible`, the
    * quantized set the delta tracks, and never from the continuous
@@ -1530,7 +1530,7 @@ export class TickCoordinator {
    *
    * Correctness: the returned array reconstructs the SAME snapshot a fresh
    * full build produces, on the render-affecting projection
-   * ({@link EntitySnapshot} `visible` / `idealTargetLod` / `kind` /
+   * ({@link EntitySnapshot} `visible` / `targetLevel` / `kind` /
    * `detailLevel` / `coarseLevel` / `parentId`, keyed by `image_id`). Records
    * in `entered` / `changed` are freshly assembled this tick; a carried-over
    * record was assembled on a prior tick with a basis proven identical (scene

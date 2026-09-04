@@ -254,6 +254,9 @@ pub struct ActiveMemberDiagnostic {
 pub struct MemberVisibleChunksDiagnostic {
     pub image_id: String,
     pub position: [f64; 2],
+    /// The level the plan fetches for this member. It is the dataset's level
+    /// pin, or else the level the browser targets for this camera.
+    pub target_level: u32,
     pub needed_count: usize,
     pub prefetch_count: usize,
     pub tiers: Vec<ChunkTierDiagnostic>,
@@ -1223,10 +1226,11 @@ pub fn format_plan_visible_chunks_human(output: &PlanVisibleChunksOutput) -> Str
             ));
             for member in &dataset.member_plans {
                 lines.push(format!(
-                    "  member {} pos=({:.3}, {:.3}) visible={} prefetch={}",
+                    "  member {} pos=({:.3}, {:.3}) target_level={} visible={} prefetch={}",
                     member.image_id,
                     member.position[0],
                     member.position[1],
+                    member.target_level,
                     member.needed_count,
                     member.prefetch_count
                 ));
@@ -2313,6 +2317,7 @@ fn member_visible_chunks_diagnostic(
     MemberVisibleChunksDiagnostic {
         image_id: plan.image_id.0,
         position: plan.position,
+        target_level: plan.target_level,
         needed_count: plan.needed.len(),
         prefetch_count: plan.prefetch.len(),
         tiers,
@@ -2398,7 +2403,9 @@ fn generated_chunk_status_counts(
 fn plan_diagnostic_caveats() -> Vec<&'static str> {
     vec![
         "uses lucida-core Scene::chunk_plan_for for scene-visible source chunks",
-        "does not run the web planner's lane priorities, active-set carry-forward, minimap path, CPU-cache filtering, or generated-coarse tier selection",
+        "each member's level is the dataset's level pin, or else the target level lucida-core computes for this camera at its device pixel ratio, which is the level the browser targets",
+        "has no zoom history, so within a quarter octave of a level boundary the level can sit one away from a browser that zoomed there and still holds the previous level by hysteresis",
+        "does not run the web planner's lane priorities, active-set carry-forward, minimap path, CPU-cache filtering, or coarse-tier requests",
         "dataset visibility is applied before calling the scene chunk diagnostic",
     ]
 }
@@ -3248,6 +3255,174 @@ mod tests {
                 .iter()
                 .any(|tier| tier.tier == "visible")
         );
+    }
+
+    /// One dataset whose image has an irregular pyramid: level 1 is four
+    /// times coarser than level 0, level 2 twice coarser again.
+    fn document_with_pyramid() -> DocumentState {
+        let level = |index: u32, side: u64| {
+            serde_json::json!({
+                "level_index": index,
+                "shape": [1, 1, 1, side, side],
+                "chunk_shape": [1, 1, 1, 256, 256],
+                "grid_shape": [1, 1, 1, side.div_ceil(256), side.div_ceil(256)],
+                "scale": [1.0, 1.0, 1.0, 1.0, 1.0]
+            })
+        };
+        serde_json::from_value(serde_json::json!({
+            "manifests": {
+                "wds-pyramid": {
+                    "dataset_id": "wds-pyramid",
+                    "name": "pyramid.zarr",
+                    "kind": "Single",
+                    "entities": [
+                        {
+                            "id": "entity-p",
+                            "kind": "Image",
+                            "parent": null,
+                            "labels": { "name": "pyramid" }
+                        }
+                    ],
+                    "transforms": [],
+                    "images": [
+                        {
+                            "image_id": "image-p",
+                            "owner": "entity-p",
+                            "multiscale": {
+                                "axes": [],
+                                "levels": [level(0, 4096), level(1, 1024), level(2, 512)],
+                                "coarse_level_index": null,
+                                "generated_levels": [],
+                                "data_type": "Uint16",
+                                "pinned_axes": []
+                            }
+                        }
+                    ],
+                    "source_layouts": [],
+                    "default_layout_id": null
+                }
+            },
+            "registered_layouts": {},
+            "active_layout_ids": {},
+            "asset_catalogs": {}
+        }))
+        .unwrap()
+    }
+
+    /// A snapshot of the pyramid document with one peer looking at the
+    /// image's middle at `zoom` device pixels per level-0 sample.
+    fn pyramid_snapshot(zoom: f64) -> WorkspaceSnapshot {
+        let mut peer = presence(7, [2048.0, 2048.0]);
+        peer.camera = Camera::Slice(Slice {
+            center: [2048.0, 2048.0],
+            zoom,
+            viewport: [800, 600],
+        });
+        WorkspaceSnapshot {
+            seq: 14,
+            document: document_with_pyramid(),
+            peers: vec![peer],
+            your_id: 7,
+            generated_availability: HashMap::new(),
+        }
+    }
+
+    fn peer_source() -> DiagnosticViewSource {
+        DiagnosticViewSource {
+            kind: DiagnosticViewSourceKind::Peer,
+            client_id: Some(7),
+            profile: None,
+            user_email: None,
+            seed_source: None,
+        }
+    }
+
+    #[test]
+    fn plan_visible_chunks_reports_the_level_the_browser_targets() {
+        let snapshot = pyramid_snapshot(0.25);
+        let scene = scene_from_presence(&snapshot.document, &snapshot.peers[0]);
+        let result = plan_visible_chunks_result(&snapshot, peer_source(), &scene, None).unwrap();
+
+        // On this pyramid a quarter pixel per sample reaches level 1. A picker
+        // assuming a factor of two per level would say 2.
+        let browser = scene
+            .view_query(&DatasetId("wds-pyramid".to_string()))
+            .unwrap()
+            .visible_entities[0]
+            .target_level;
+        assert_eq!(browser, 1);
+
+        let member = &result.datasets[0].member_plans[0];
+        assert_eq!(member.target_level, browser);
+        assert!(!member.tiers.is_empty());
+        assert!(member.tiers.iter().all(|tier| tier.level_index == browser));
+
+        assert!(
+            result
+                .caveats
+                .iter()
+                .any(|caveat| caveat.contains("target level")),
+            "{:?}",
+            result.caveats
+        );
+    }
+
+    #[test]
+    fn plan_visible_chunks_honors_a_level_pin() {
+        let mut snapshot = pyramid_snapshot(4.0);
+        snapshot.peers[0].dataset_settings.insert(
+            DatasetId("wds-pyramid".to_string()),
+            DatasetDisplaySettings {
+                detail_level_override: Some(2),
+                ..Default::default()
+            },
+        );
+        let scene = scene_from_presence(&snapshot.document, &snapshot.peers[0]);
+        let result = plan_visible_chunks_result(&snapshot, peer_source(), &scene, None).unwrap();
+
+        let member = &result.datasets[0].member_plans[0];
+        assert_eq!(member.target_level, 2);
+        assert!(!member.tiers.is_empty());
+        assert!(member.tiers.iter().all(|tier| tier.level_index == 2));
+    }
+
+    #[test]
+    fn plan_visible_chunks_human_output_names_each_members_level() {
+        let snapshot = pyramid_snapshot(0.25);
+        let scene = scene_from_presence(&snapshot.document, &snapshot.peers[0]);
+        let result = plan_visible_chunks_result(&snapshot, peer_source(), &scene, None).unwrap();
+        let output = PlanVisibleChunksOutput {
+            server: EffectiveServer {
+                url: "http://localhost:9876".to_string(),
+                source: crate::config::ServerSource::Default,
+            },
+            workspace: WorkspaceRecord {
+                id: "w".to_string(),
+                name: "Workspace".to_string(),
+                role: WorkspaceRole::Owner,
+                created_by: "dev@local".to_string(),
+                created_at: "2026-06-07T00:00:00Z".to_string(),
+                updated_at: "2026-06-07T00:00:00Z".to_string(),
+                archived_at: None,
+                seq: 1,
+                default_saved_view_id: None,
+                last_opened_at: None,
+                pinned_at: None,
+            },
+            target: WorkspaceTarget {
+                id: "w".to_string(),
+                name: "Workspace".to_string(),
+                role: WorkspaceRole::Owner,
+                archived: false,
+                server_url: "http://localhost:9876".to_string(),
+                web_url: "http://localhost:9876/w/w".to_string(),
+                ws_url: "ws://localhost:9876/ws/workspaces/w".to_string(),
+            },
+            result,
+        };
+        let human = format_plan_visible_chunks_human(&output);
+        assert!(human.contains("member image-p"), "{human}");
+        assert!(human.contains("target_level=1"), "{human}");
     }
 
     #[test]
