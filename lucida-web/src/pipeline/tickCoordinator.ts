@@ -179,7 +179,7 @@ interface DatasetRebuildSignature {
   /**
    * Serialized dataset settings with only the pure intensity-display
    * fields removed. Any other field — visibility, blend mode, render mode,
-   * detail-level override, channel visibility, per-label state, or a field
+   * level pin, channel visibility, per-label state, or a field
    * added in the future — is retained, so it forces a rebuild by default
    * until proven display-only.
    */
@@ -248,7 +248,7 @@ function nonDisplayDatasetShape(ds: DatasetSettings): unknown {
  * Fingerprint of everything about a dataset's settings EXCEPT the pure
  * intensity-display fields. Equal fingerprints across two ticks prove no
  * non-display setting changed: `label_settings`, blend mode, render mode,
- * detail-level override, channel visibility, and dataset visibility are all
+ * level pin, channel visibility, and dataset visibility are all
  * retained. `opacity` is a per-fragment alpha with no effect on translucent
  * draw order (layer/quad order is fixed by roster + layer order, never
  * opacity), so it is treated as display; blend mode changes compositing, so
@@ -481,9 +481,11 @@ export class TickCoordinator {
    *
    * A delta reports only the *quantized* projection
    * (`{ membership, visible, target_level, kind }`) of each record. The
-   * fold is safe to feed the planner because the active set derives from
-   * the view-independent `detailLevel`/`coarseLevel` + `visible`, the
-   * quantized set the delta tracks, and never from the continuous
+   * fold is safe to feed the planner because every active-set input is
+   * either in that quantized set (`visible`, the screen's target level, so
+   * a zoom that moves a level arrives as a `changed` record) or in the
+   * cursor basis below (the level pin, the manifest join for `levels` and
+   * `coarseLevel`). The active set never reads the continuous
    * `projected_diagonal_px`, which the delta does NOT track.
    *
    * # Cursor lifecycle (silent-wrong-data guard)
@@ -495,13 +497,13 @@ export class TickCoordinator {
    *     change drops every entry — folding a delta against a foreign cursor
    *     would ship wrong tiles.
    *   - `basis`: the record shape a delta does NOT re-report depends on the
-   *     manifest join and the detail-level override. Both can move WITHOUT a
-   *     structural epoch bump (a progressively-merged level swaps the manifest
-   *     object; a detail-override edit bumps only the selection epoch), and
-   *     neither is a trigger for the Rust delta — so a record absent from the
-   *     delta would keep a stale `levels`/`detailLevel`/`coarseLevel`.
-   *     Invalidating the cursor when the basis changes forces a reseed from
-   *     the full query with the new basis.
+   *     manifest join and the level pin. Both can move WITHOUT a structural
+   *     epoch bump (a progressively-merged level swaps the manifest object; a
+   *     pin edit bumps only the selection epoch), and neither is a trigger
+   *     for the Rust delta, so a record absent from the delta would keep a
+   *     stale `levels`/`targetLevel`/`coarseLevel`. Invalidating the cursor
+   *     when the basis changes forces a reseed from the full query with the
+   *     new basis.
    * A dropped entry means the next fold has no prior; the fold then reseeds
    * from the full `view_query` at that same tick (matching the Rust cursor,
    * which the delta call just advanced), so a Delta is never folded against a
@@ -510,8 +512,8 @@ export class TickCoordinator {
   private readonly viewDeltaCursor = new Map<string, {
     /** Identity of the snapshot-inputs entry (manifest maps + placement). */
     basisInputs: object;
-    /** Detail-level override the records were assembled with (`null` = none). */
-    basisDetailOverride: number | null;
+    /** Level pin the records were assembled with (`null` = follow the screen). */
+    basisLevelPin: number | null;
     map: Map<string, EntitySnapshot>;
   }>();
   /**
@@ -788,10 +790,9 @@ export class TickCoordinator {
         this.snapshotInputCacheByDataset.set(dsId, snapshotInputs);
       }
 
-      // Fold the view delta instead of re-running `view_query`. The active
-      // set derives only from the quantized `detailLevel`/`coarseLevel` +
-      // `visible` that the delta tracks, so the fold matches a full parse
-      // at O(delta) rather than O(N members) on a camera move.
+      // Fold the view delta instead of re-running `view_query`: O(delta)
+      // rather than O(N members) on a camera move, a level change included.
+      // `viewDeltaCursor` documents why the fold matches a full parse.
       const deps: SnapshotEntityDeps = {
         imageSpecById: snapshotInputs.imageSpecById,
         parentByEntityId: snapshotInputs.parentByEntityId,
@@ -1168,7 +1169,7 @@ export class TickCoordinator {
 
     // Precheck (no side effects). For every planned dataset prove: still
     // visible; its non-display settings fingerprint (label state, blend
-    // mode, render mode, detail override, channel visibility, …) unchanged;
+    // mode, render mode, level pin, channel visibility, …) unchanged;
     // its full z-range unchanged; its visible-channel set unchanged. Only
     // then is a display difference safe to push as a patch. Fresh display
     // state is computed once and reused for the push.
@@ -1303,7 +1304,7 @@ export class TickCoordinator {
 
     // Per-dataset precheck (no side effects). Prove for every planned dataset:
     // still visible; non-display settings fingerprint unchanged (label state,
-    // blend mode, render mode, detail override, channel visibility, …);
+    // blend mode, render mode, level pin, channel visibility, …);
     // display state unchanged (a bundled display edit falls through so both
     // edits settle via the full rebuild); visible-channel set unchanged; and
     // the z-range WIDTH unchanged (a same-width shift is a plane move; a widen
@@ -1531,14 +1532,15 @@ export class TickCoordinator {
    * Correctness: the returned array reconstructs the SAME snapshot a fresh
    * full build produces, on the render-affecting projection
    * ({@link EntitySnapshot} `visible` / `targetLevel` / `kind` /
-   * `detailLevel` / `coarseLevel` / `parentId`, keyed by `image_id`). Records
-   * in `entered` / `changed` are freshly assembled this tick; a carried-over
-   * record was assembled on a prior tick with a basis proven identical (scene
-   * identity + `basisInputs` + `basisDetailOverride`), so its quantized and
-   * manifest-derived fields match a fresh build. Continuous fields
-   * (`importance` / `projectedDiagonalPx` / `projectedAreaPx2` /
-   * `centroidWorld`) may be stale on a carried-over record — intended, and
-   * never an active-set input.
+   * `coarseLevel` / `parentId`, keyed by `image_id`). Records in `entered` /
+   * `changed` are freshly assembled this tick, so a record whose screen level
+   * moved carries its new `targetLevel`; a carried-over record was assembled
+   * on a prior tick with a basis proven identical (scene identity +
+   * `basisInputs` + `basisLevelPin`), so its quantized and manifest-derived
+   * fields match a fresh build. Continuous fields (`importance` /
+   * `projectedDiagonalPx` / `projectedAreaPx2` / `centroidWorld`) may be
+   * stale on a carried-over record. That is intended, and they are never an
+   * active-set input.
    */
   private foldViewDeltaEntities(
     scene: TickContext["scene"],
@@ -1564,16 +1566,16 @@ export class TickCoordinator {
     }
     const delta = JSON.parse(deltaJson) as ViewQueryDeltaJson;
 
-    const detailOverride = deps.dsSettings?.detail_level_override ?? null;
+    const levelPin = deps.dsSettings?.detail_level_override ?? null;
     const existing = this.viewDeltaCursor.get(datasetId);
     // A cursor is a valid fold base only when its manifest/placement basis
-    // AND detail-level override still match — otherwise a carried-over record
-    // could hold a stale `levels`/`detailLevel`/`coarseLevel` (see the field
-    // doc). A mismatch forces a null prior, i.e. a reseed from the full query.
+    // AND level pin still match. Otherwise a carried-over record could hold
+    // a stale `levels`/`targetLevel`/`coarseLevel` (see the field doc). A
+    // mismatch forces a null prior and a reseed from the full query.
     const prev =
       existing &&
       existing.basisInputs === inputsRef &&
-      existing.basisDetailOverride === detailOverride
+      existing.basisLevelPin === levelPin
         ? existing.map
         : null;
 
@@ -1611,7 +1613,7 @@ export class TickCoordinator {
 
       this.viewDeltaCursor.set(datasetId, {
         basisInputs: inputsRef,
-        basisDetailOverride: detailOverride,
+        basisLevelPin: levelPin,
         map: next,
       });
       return [...next.values()];

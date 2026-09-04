@@ -37,6 +37,7 @@ import type {
 } from "../planning/index.ts";
 import type { SceneEpochs } from "../epochs.ts";
 import { emptyPlanStats } from "../planning/index.ts";
+import { createQuiescenceState } from "../../trace/quiescence.ts";
 
 // ---------------------------------------------------------------------------
 // Test Factories
@@ -3436,6 +3437,32 @@ describe("CpuCache", () => {
       });
       expect(demand.detailCoverageRatio).toBe(1);
       expect(demand.sparseDetail).toBe(false);
+    });
+
+    it("counts desired and resident detail at the level the plan asked for, not at levels left resident from before", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+      const at = (level: number, x: number) =>
+        makeRequest({ level, x, lane: "detail", tier: "detail", chunkKey: `${level}/0/0/0/0/${x}` });
+
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([at(2, 0), at(2, 1)]));
+      await flush();
+      let inputs = cache.quiescenceInputs(createQuiescenceState());
+      expect(inputs).toMatchObject({ desiredDetailChunks: 2, residentDetailChunks: 2 });
+
+      // The target moves to level 1. The coordinator opens every rebuild with
+      // `onPlanRebuildStart`, which is what retires the previous plan's demand.
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([at(1, 0)]));
+      inputs = cache.quiescenceInputs(createQuiescenceState());
+      expect(inputs).toMatchObject({ desiredDetailChunks: 1, residentDetailChunks: 0 });
+      // Still cached: the zero above is a level mismatch, not an eviction.
+      expect(cache.snapshot().cached.get("entity-1")?.has("2/0/0/0/0/0")).toBe(true);
+
+      await flush();
+      inputs = cache.quiescenceInputs(createQuiescenceState());
+      expect(inputs).toMatchObject({ desiredDetailChunks: 1, residentDetailChunks: 1 });
     });
 
     it("interleaves detail and coarse fetch starts when both tiers have demand", () => {
