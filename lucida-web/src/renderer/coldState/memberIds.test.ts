@@ -15,7 +15,7 @@
  * prefix. Today masked because group-as-proxy entries have empty
  * `levels[]` and the volume/slice pool loops short-circuit at the
  * targetLevel lookup. But the bad key would still get *registered* in
- * memberToPool if any caller bypassed the helper.
+ * memberSourcePools if any caller bypassed the helper.
  */
 
 import { describe, it, expect } from "vitest";
@@ -129,7 +129,7 @@ describe("Suite D — memberIdForColdEntry matrix", () => {
   it("single-channel group-as-proxy → entityId (NOT empty string)", () => {
     // Regression: the helper routes via `entry.kind === "group-as-proxy"`
     // and resolves to `entityId`. Inline `entry.imageId` construction
-    // in memberToPool / wantedSet would have produced "" here.
+    // in memberSourcePools / wantedSet would have produced "" here.
     const e = makeEntry({ entityId: "groupA", imageId: "", mode: "group-as-proxy" });
     expect(memberIdForColdEntry(e, 0, false)).toBe("groupA");
     expect(memberIdForColdEntry(e, 0, false)).not.toBe("");
@@ -210,7 +210,7 @@ describe("Suite D — memberIdForColdEntry matrix", () => {
 //
 // We assert against the cleanup contract directly rather than driving
 // the worker message loop: the contract is "every memberToDataset /
-// memberToPool entry whose value === datasetId is gone after
+// memberSourcePools entry owned by datasetId is gone after
 // removeLayerResources(datasetId), and so are this dataset's groups in
 // groupToTiles". The dispatcher implementation in gpu.worker.ts is a
 // tight transcription of this contract.
@@ -226,10 +226,10 @@ function removeMemberRoutingForDataset(state: RendererState, datasetId: string):
   for (const [memberId, dsId] of state.memberToDataset) {
     if (dsId === datasetId) {
       state.memberToDataset.delete(memberId);
-      state.memberToPool.delete(memberId);
+      state.memberSourcePools.delete(memberId);
     }
   }
-  state.currentEntityMetasByDataset.delete(datasetId);
+  state.currentSourcesByDataset.delete(datasetId);
   const groups = state.groupsByDataset.get(datasetId);
   if (groups) {
     for (const groupId of groups) state.groupToTiles.delete(groupId);
@@ -241,30 +241,30 @@ function removeMemberRoutingForDataset(state: RendererState, datasetId: string):
 }
 
 describe("Suite D — removeLayerResources cleanup", () => {
-  it("removeLayerResources clears memberToDataset / memberToPool entries for the dataset", () => {
+  it("removeLayerResources clears memberToDataset / memberSourcePools entries for the dataset", () => {
     const state = createInitialState();
     // Two datasets share the worker. Seed routing for each.
     state.memberToDataset.set("imgA", "ds1");
     state.memberToDataset.set("imgB", "ds1");
     state.memberToDataset.set("imgC", "ds2");
-    state.memberToPool.set("imgA", "ds1:64x64x32");
-    state.memberToPool.set("imgB", "ds1:64x64x32");
-    state.memberToPool.set("imgC", "ds2:64x64x32");
-    state.currentEntityMetasByDataset.set("ds1", new Map());
-    state.currentEntityMetasByDataset.set("ds2", new Map());
+    state.memberSourcePools.set("imgA", new Map([["detail:0", "ds1:64x64x32:detail"]]));
+    state.memberSourcePools.set("imgB", new Map([["detail:0", "ds1:64x64x32:detail"]]));
+    state.memberSourcePools.set("imgC", new Map([["detail:0", "ds2:64x64x32:detail"]]));
+    state.currentSourcesByDataset.set("ds1", new Map());
+    state.currentSourcesByDataset.set("ds2", new Map());
 
     removeMemberRoutingForDataset(state, "ds1");
 
     // ds1's entries are gone.
     expect(state.memberToDataset.has("imgA")).toBe(false);
     expect(state.memberToDataset.has("imgB")).toBe(false);
-    expect(state.memberToPool.has("imgA")).toBe(false);
-    expect(state.memberToPool.has("imgB")).toBe(false);
-    expect(state.currentEntityMetasByDataset.has("ds1")).toBe(false);
+    expect(state.memberSourcePools.has("imgA")).toBe(false);
+    expect(state.memberSourcePools.has("imgB")).toBe(false);
+    expect(state.currentSourcesByDataset.has("ds1")).toBe(false);
     // ds2's entries are untouched.
     expect(state.memberToDataset.get("imgC")).toBe("ds2");
-    expect(state.memberToPool.get("imgC")).toBe("ds2:64x64x32");
-    expect(state.currentEntityMetasByDataset.has("ds2")).toBe(true);
+    expect(state.memberSourcePools.get("imgC")?.get("detail:0")).toBe("ds2:64x64x32:detail");
+    expect(state.currentSourcesByDataset.has("ds2")).toBe(true);
   });
 
   it("removeLayerResources clears group→tiles entries owned by the dataset", () => {

@@ -114,7 +114,7 @@ export function handleMinimapRender(ctx: WorkerCtx, msg: MinimapRenderMessage): 
     // mode (where the main view is the slice renderer). Set it BEFORE setVolume,
     // since setVolume rebuilds the bind group from the current LUT.
     renderer.setColormapTexture(ctx.getOrCreateLUT(layer.colormap));
-    renderer.setVolume(overview.texture, overview.width, overview.height, overview.depth);
+    renderer.setVolume(overview.texture);
     renderer.setMatrices(msg.invViewProj, msg.eye);
     // Bind a transient single-entity descriptor so the shader's
     // descriptor reads return the minimap layer's model matrix, single
@@ -169,7 +169,7 @@ export function handleThumbnailRender(ctx: WorkerCtx, msg: ThumbnailRenderMessag
     // reads this layer's model matrix + contrast/gamma over the full overview.
     renderer.setProxyTextures(null, null);
     renderer.setColormapTexture(ctx.getOrCreateLUT(layer.colormap));
-    renderer.setVolume(overview.texture, overview.width, overview.height, overview.depth);
+    renderer.setVolume(overview.texture);
     renderer.setMatrices(msg.invViewProj, msg.eye);
     renderer.setTransientDescriptor(
       layer.modelMatrix, layer.invModelMatrix,

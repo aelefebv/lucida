@@ -19,8 +19,8 @@ use crate::transform::VolumeTransform;
 ///   data's bounding sphere.
 pub use crate::framing::{FIT_MARGIN_2D, FIT_MARGIN_3D, FIT_PADDING};
 
-/// Axis-aligned bounding box in voxel space, plus effective zoom for LOD selection.
-/// This is what chunk planning needs — not a camera.
+/// Axis-aligned bounding box in voxel space, plus device pixels per sample at
+/// the focal plane. This is what chunk planning needs — not a camera.
 #[derive(Debug, Clone, Serialize)]
 pub struct VisibleRegion {
     /// [min_x, min_y, max_x, max_y] in voxel coordinates.
@@ -28,7 +28,9 @@ pub struct VisibleRegion {
     /// Voxel z range.
     #[serde(serialize_with = "serialize_range_as_array")]
     pub z_range: Range<u32>,
-    /// For LOD selection: screen pixels per world unit at the focal plane.
+    /// Device pixels per level-0 sample at the focal plane. A slice view
+    /// reports its zoom. A volume view reports the measure where the
+    /// center-screen ray meets the volume.
     pub effective_zoom: f64,
     /// Radius basis in voxels for view-relative render-radius controls.
     ///

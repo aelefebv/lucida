@@ -1,15 +1,18 @@
 /**
- * Partition a cold state's active set into per-(channel, chunkDims) pool
- * groups. Pure function — no GPU side effects, no state mutation.
+ * Partition a cold state's active set into per-(tier, channel, chunkDims)
+ * pool groups. Pure function — no GPU side effects, no state mutation.
  * Parameterised by `mode` so the same logic serves 3D (volume) and 2D
  * (slice) callers; only chunk-dim arity differs.
  *
- * Each tile entry contributes one source per detail-tier level plus one
- * for its coarse level. `group-as-proxy` entries contribute none, because
- * they carry `levels: []` and have no chunks to upload. The orchestrator
- * still registers them in `memberToDataset` through
- * {@link iterateColdMembers}; they have no chunk pool, so they do not
- * appear here.
+ * Each tile entry contributes one detail-tier section per level in
+ * {@link detailTierLevels} (the target level and the coarser levels kept
+ * resident under it) plus one for its coarse level. A level lands in the
+ * pool whose chunk shape matches its own, so levels of one entity spread
+ * across pools when their chunk shapes differ. `group-as-proxy` entries
+ * contribute none, because they carry `levels: []` and have no chunks to
+ * upload. The orchestrator still registers them in `memberToDataset`
+ * through {@link iterateColdMembers}; they have no chunk pool, so they do
+ * not appear here.
  */
 
 import type { ResidencyTier } from "../../pipeline/residencyTier.ts";
@@ -18,6 +21,7 @@ import type {
   ColdStateActiveEntry,
 } from "../workerProtocol.ts";
 import { memberIdForColdEntry } from "../descriptorBuffer.ts";
+import { detailTierLevels } from "../entitySources.ts";
 import { chunkTierPoolKey } from "../poolKeys.ts";
 
 /**
@@ -32,10 +36,10 @@ import { chunkTierPoolKey } from "../poolKeys.ts";
 export interface PoolGroup {
   poolKey: string;
   tier: ResidencyTier;
-  level: number;
   channel: number;
   /** `[Z, Y, X]`. For slice mode `Z = 1`. */
   chunkDims: [number, number, number];
+  /** One entry per (member, level) section the pool holds. */
   entries: Array<{ entry: ColdStateActiveEntry; memberId: string; tier: ResidencyTier; level: number }>;
 }
 
@@ -44,7 +48,7 @@ export interface PoolGroup {
  *
  * Iteration order matches the worker's previous inline code: channel
  * outer, entry inner. The resulting Map preserves insertion order so
- * downstream code that builds entityMetas with sequential offsets sees
+ * downstream code that builds sections with sequential offsets sees
  * entries in the same order the worker did before extraction.
  */
 export function groupEntriesByPool(
@@ -76,7 +80,7 @@ export function groupEntriesByPool(
 
         let group = groups.get(poolKey);
         if (!group) {
-          group = { poolKey, tier: source.tier, level: source.level, channel, chunkDims: dims, entries: [] };
+          group = { poolKey, tier: source.tier, channel, chunkDims: dims, entries: [] };
           groups.set(poolKey, group);
         }
         group.entries.push({ entry, memberId, tier: source.tier, level: source.level });
@@ -86,12 +90,13 @@ export function groupEntriesByPool(
   return groups;
 }
 
+/** The (tier, level) sections a tile entry holds: detail levels finest first, then the coarse level. */
 function tierSourcesForEntry(
   entry: ColdStateActiveEntry,
 ): Array<{ tier: ResidencyTier; level: number }> {
   if (entry.kind === "group-as-proxy") return [];
   const sources: Array<{ tier: ResidencyTier; level: number }> =
-    entry.detailLevels.map(level => ({ tier: "detail", level }));
+    detailTierLevels(entry).map(level => ({ tier: "detail", level }));
   if (entry.coarseLevel !== null) {
     sources.push({ tier: "coarse", level: entry.coarseLevel });
   }

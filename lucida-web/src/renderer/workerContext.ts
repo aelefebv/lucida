@@ -36,8 +36,6 @@ export interface WorkerCtx {
   getCompositor(): LayerCompositor;
   getCursorRenderer(): CursorRenderer;
   ensureOffscreenPool(count: number, w: number, h: number): GPUTexture[];
-  getDummyTexture(): GPUTexture;
-  getDummy3DTexture(): GPUTexture;
   getOrCreateLUT(name: string): GPUTexture;
   /**
    * Post a message to the main thread. `transfer` moves transferable objects

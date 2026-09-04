@@ -92,8 +92,7 @@ describe("worker dispatch upload feedback", () => {
 
   it("does not route coarse chunk uploads through the detail pool fallback", async () => {
     const { ctx, posts } = makeCtx();
-    ctx.state.memberToPool.set("img-0", "detail-pool");
-    ctx.state.memberTierToPool.set("img-0|detail", "detail-pool");
+    ctx.state.memberSourcePools.set("img-0", new Map([["detail:2", "detail-pool"]]));
     ctx.state.volumeAtlases.set("detail-pool", {
       chunkX: 1,
       chunkY: 1,
@@ -126,6 +125,65 @@ describe("worker dispatch upload feedback", () => {
         skipped: [],
         reason: "missing-pool",
       },
+    ]);
+  });
+
+  it("routes a detail upload by its level, not just its tier", async () => {
+    // Level 0 and level 2 of one member live in different detail pools
+    // (their chunk shapes differ). A level-2 upload must reach level 2's
+    // pool, and a level with no section is requeued as missing-pool.
+    const { ctx, posts } = makeCtx();
+    ctx.state.memberSourcePools.set("img-0", new Map([
+      ["detail:0", "fine-pool"],
+      ["detail:2", "small-chunk-pool"],
+    ]));
+    ctx.state.volumeAtlases.set("fine-pool", {
+      chunkX: 32, chunkY: 32, chunkZ: 32,
+      entityMetas: new Map([["img-0", [{ level: 0, gridDims: [1, 1, 1], chunkDims: [32, 32, 32], levelDims: [32, 32, 32], offset: 0 }]]]),
+    } as never);
+    const smallChunkPool = {
+      chunkX: 8, chunkY: 8, chunkZ: 8,
+      slots: new Map<string, number>(),
+      slotGridIdx: new Int32Array(1).fill(-1),
+      freeSlots: [0],
+      totalSlots: 1,
+      slotsX: 1, slotsY: 1, slotsZ: 1,
+      indirectionData: new Uint32Array(1).fill(0xffffffff),
+      indirectionBuf: {} as GPUBuffer,
+      texture: {} as GPUTexture,
+      entityMetas: new Map([["img-0", [{ level: 2, gridDims: [1, 1, 1], chunkDims: [8, 8, 8], levelDims: [8, 8, 8], offset: 0 }]]]),
+      t: 0, c: 0,
+      intensityMin: 65535, intensityMax: 0,
+      indirectionDirty: false,
+    };
+    ctx.state.volumeAtlases.set("small-chunk-pool", smallChunkPool as never);
+    (ctx as unknown as { device: unknown }).device = { queue: { writeTexture() {}, writeBuffer() {} } };
+
+    const upload = (level: number, chunk: number) => dispatchMessage(ctx, {
+      type: "volumeChunkData",
+      tier: "detail",
+      memberId: "img-0",
+      chunks: [{ data: new Uint16Array(chunk * chunk * chunk).buffer, dataType: "uint16", x: 0, y: 0, z: 0, key: `${level}/0/0/0/0/0` }],
+      level,
+      t: 0,
+      c: 0,
+      levelWidth: chunk,
+      levelHeight: chunk,
+      levelDepth: chunk,
+      chunkX: chunk,
+      chunkY: chunk,
+      chunkZ: chunk,
+      epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+    });
+
+    await upload(2, 8);
+    expect(smallChunkPool.slots.has("img-0|2/0/0/0/0/0")).toBe(true);
+
+    await upload(1, 16);
+    // The first upload also posts an intensity-range update; only the
+    // feedback messages matter here.
+    expect(posts.filter((p) => p.type === "chunksEvicted")).toEqual([
+      expect.objectContaining({ type: "chunksEvicted", memberId: "img-0", keys: ["1/0/0/0/0/0"], reason: "missing-pool" }),
     ]);
   });
 

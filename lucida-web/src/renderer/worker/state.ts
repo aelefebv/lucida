@@ -16,22 +16,27 @@
 
 import type { SceneEpochs } from "../../pipeline/epochs.ts";
 import type { ColdStateMessage } from "../workerProtocol.ts";
-import type { AtlasState, LabelVolumePool, LodIndirectionMeta } from "../volume/atlas.ts";
+import type { AtlasState, LabelVolumePool } from "../volume/atlas.ts";
 import type { SliceAtlasState, LabelSlicePool } from "../slice/atlas.ts";
 import type { ProxyAtlasState } from "../proxyAtlas.ts";
 import type { EntityProxyDescriptor } from "../workerContext.ts";
 import type { EntityDescriptorIndex } from "../descriptorBuffer.ts";
+import type { EntitySource } from "../entitySources.ts";
 
 export interface RendererState {
   // ── Cold-state routing ────────────────────────────────────────────
   /** memberId → datasetId (canonical: imageId or imageId:chN; group-as-proxy resolves to entityId). */
   memberToDataset: Map<string, string>;
-  /** memberId → detail pool key. Legacy compatibility for callers that have not become tier-aware. */
-  memberToPool: Map<string, string>;
-  /** `${memberId}|${tier}` → pool key encoding (datasetId, channel, tier, chunkDims). */
-  memberTierToPool: Map<string, string>;
-  /** Per-dataset entityMetas snapshot captured during the most recent cold state. */
-  currentEntityMetasByDataset: Map<string, Map<string, LodIndirectionMeta[]>>;
+  /**
+   * memberId → (`sourceKey(tier, level)` → pool key): the pool each
+   * indirection section a member holds lives in. Chunk uploads and the
+   * wanted set route by (member, tier, level) through this map, since
+   * the detail tier holds several levels per member and levels with
+   * different chunk shapes live in different pools.
+   */
+  memberSourcePools: Map<string, Map<string, string>>;
+  /** Per-dataset sections snapshot captured during the most recent cold state. */
+  currentSourcesByDataset: Map<string, Map<string, EntitySource[]>>;
   /** groupId → set of child tileEntityIds (used for GroupProxy3D fan-out). */
   groupToTiles: Map<string, Set<string>>;
   /**
@@ -106,9 +111,8 @@ export interface RendererState {
 export function createInitialState(): RendererState {
   return {
     memberToDataset: new Map(),
-    memberToPool: new Map(),
-    memberTierToPool: new Map(),
-    currentEntityMetasByDataset: new Map(),
+    memberSourcePools: new Map(),
+    currentSourcesByDataset: new Map(),
     groupToTiles: new Map(),
     groupsByDataset: new Map(),
     proxyPoolsByDataset: new Map(),

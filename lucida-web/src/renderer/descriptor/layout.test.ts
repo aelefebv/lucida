@@ -15,30 +15,27 @@
 import { describe, it, expect } from "vitest";
 import sliceSrc from "../slice.wgsl?raw";
 import volumeSrc from "../volume.wgsl?raw";
+import { SLICE_UNIFORM_OFFSETS, SLICE_UNIFORM_SIZE } from "../sliceRenderer.ts";
+import { VOLUME_UNIFORM_OFFSETS, VOLUME_UNIFORM_SIZE } from "../volumeRenderer.ts";
 import {
-  DESCRIPTOR_LOD_INFO_SIZE,
-  DESCRIPTOR_LODS_OFFSET,
+  DESCRIPTOR_ENTRY_SIZE,
+  DESCRIPTOR_LEVEL_SOURCES_OFFSET,
+  DESCRIPTOR_MAX_LEVEL_SOURCES,
   DESCRIPTOR_TIER_SOURCE_SIZE,
-  LOD_OFFSET_CHUNK_DIMS,
-  LOD_OFFSET_GRID_DIMS,
-  LOD_OFFSET_INDIRECTION_OFFSET,
-  LOD_OFFSET_LEVEL,
-  LOD_OFFSET_LEVEL_DIMS,
   OFFSET_CHANNEL_MASK,
   OFFSET_COARSE_SOURCE,
   OFFSET_COLORMAP_LUT_INDEX,
   OFFSET_COLORMAP_MODE,
   OFFSET_CONTRAST_MAX,
   OFFSET_CONTRAST_MIN,
-  OFFSET_DETAIL_SOURCE,
   OFFSET_LABEL_OPACITY,
+  OFFSET_LEVEL_SOURCES,
+  OFFSET_LEVEL_SOURCE_COUNT,
   OFFSET_TILE_PROXY_DIMS,
   OFFSET_TILE_PROXY_POOL_INDEX,
   OFFSET_TILE_PROXY_SLOT_INDEX,
   OFFSET_GAMMA,
   OFFSET_INV_MODEL_MATRIX,
-  OFFSET_LOD_COUNT,
-  OFFSET_LODS,
   OFFSET_MODEL_MATRIX,
   OFFSET_OPACITY,
   OFFSET_GROUP_PROXY_DIMS,
@@ -49,7 +46,9 @@ import {
   SOURCE_OFFSET_INDIRECTION_OFFSET,
   SOURCE_OFFSET_LEVEL,
   SOURCE_OFFSET_LEVEL_DIMS,
+  SOURCE_OFFSET_POOL_INDEX,
   SOURCE_OFFSET_VALID,
+  levelSourceOffset,
 } from "./layout.ts";
 
 // ---------------------------------------------------------------------------
@@ -68,8 +67,8 @@ function extractStruct(src: string, structName: string): string {
 
 function parseFields(body: string): WgslField[] {
   // Strip `//` line comments, then split on `,` / `;` outside of any
-  // `<>` brackets (so `array<LodInfo, 8>` stays one field), and parse
-  // `name: type`.
+  // `<>` brackets (so `array<ChunkTierSource, 4>` stays one field), and
+  // parse `name: type`.
   const noComments = body.replace(/\/\/[^\n]*/g, "");
   const parts: string[] = [];
   let depth = 0;
@@ -96,22 +95,29 @@ function parseFields(body: string): WgslField[] {
   return out;
 }
 
+/** `array<ChunkTierSource, N>` → N, or null for any other type. */
+function levelSourceArrayLength(type: string): number | null {
+  const m = type.match(/^array<\s*ChunkTierSource\s*,\s*(\d+)\s*>$/);
+  return m ? Number(m[1]) : null;
+}
+
+/** `array<T, N>` → `[T, N]`, or null for any other type. */
+function fixedArray(type: string): [string, number] | null {
+  const m = type.match(/^array<\s*([^,>\s]+)\s*,\s*(\d+)\s*>$/);
+  return m ? [m[1], Number(m[2])] : null;
+}
+
 function fieldSize(type: string): number {
   if (type === "u32" || type === "f32" || type === "i32") return 4;
   if (type === "mat4x4f" || type === "mat4x4<f32>") return 64;
   if (type.startsWith("vec3")) return 12;
   if (type.startsWith("vec4")) return 16;
-  if (type.startsWith("array<")) {
-    // array<LodInfo, 8> — only used as the final `lods` field. Stride
-    // matches DESCRIPTOR_LOD_INFO_SIZE (= sizeof(LodInfo) under WGSL).
-    const m = type.match(/^array<\s*([^,>\s]+)\s*,\s*(\d+)\s*>$/);
-    if (!m) throw new Error(`unsupported array type: ${type}`);
-    const innerName = m[1];
-    const count = Number(m[2]);
-    if (innerName !== "LodInfo") {
-      throw new Error(`unsupported array element type: ${innerName}`);
-    }
-    return DESCRIPTOR_LOD_INFO_SIZE * count;
+  const arr = fixedArray(type);
+  if (arr) {
+    // Array stride is the element size rounded up to its alignment; the
+    // two element types here (vec4, ChunkTierSource) are already 16-aligned.
+    const [elem, count] = arr;
+    return fieldSize(elem) * count;
   }
   if (type === "ChunkTierSource") return DESCRIPTOR_TIER_SOURCE_SIZE;
   throw new Error(`unknown type: ${type}`);
@@ -139,6 +145,14 @@ function computeOffsets(fields: WgslField[]): Record<string, number> {
   return out;
 }
 
+function structSize(fields: WgslField[]): number {
+  const offsets = computeOffsets(fields);
+  const last = fields[fields.length - 1];
+  const end = offsets[last.name] + fieldSize(last.type);
+  // Struct alignment is the max member alignment (16 here).
+  return Math.ceil(end / 16) * 16;
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -154,14 +168,18 @@ describe("EntityDescriptor WGSL ↔ TS layout agreement", () => {
       .toBe(extractStruct(volumeSrc, "EntityDescriptor"));
   });
 
-  it("slice.wgsl and volume.wgsl declare an identical LodInfo struct", () => {
-    expect(extractStruct(sliceSrc, "LodInfo"))
-      .toBe(extractStruct(volumeSrc, "LodInfo"));
-  });
-
   it("slice.wgsl and volume.wgsl declare an identical ChunkTierSource struct", () => {
     expect(extractStruct(sliceSrc, "ChunkTierSource"))
       .toBe(extractStruct(volumeSrc, "ChunkTierSource"));
+  });
+
+  it("neither shader carries the legacy LodInfo array any more", () => {
+    for (const src of [sliceSrc, volumeSrc]) {
+      expect(src).not.toMatch(/struct\s+LodInfo/);
+      expect(src).not.toMatch(/\blods\b/);
+      expect(src).not.toMatch(/\blodCount\b/);
+      expect(src).not.toMatch(/\blodParams\b/);
+    }
   });
 
   it("WGSL EntityDescriptor field offsets match TS layout constants", () => {
@@ -182,24 +200,53 @@ describe("EntityDescriptor WGSL ↔ TS layout agreement", () => {
     expect(offsets.gamma).toBe(OFFSET_GAMMA);
     expect(offsets.opacity).toBe(OFFSET_OPACITY);
     expect(offsets.colormapLutIndex).toBe(OFFSET_COLORMAP_LUT_INDEX);
-    expect(offsets.lodCount).toBe(OFFSET_LOD_COUNT);
+    expect(offsets.levelSourceCount).toBe(OFFSET_LEVEL_SOURCE_COUNT);
     expect(offsets.colormapMode).toBe(OFFSET_COLORMAP_MODE);
     expect(offsets.labelOpacity).toBe(OFFSET_LABEL_OPACITY);
-    expect(offsets.lods).toBe(OFFSET_LODS);
-    expect(offsets.lods).toBe(DESCRIPTOR_LODS_OFFSET);
-    expect(offsets.detailSource).toBe(OFFSET_DETAIL_SOURCE);
+    expect(offsets.levelSources).toBe(OFFSET_LEVEL_SOURCES);
+    expect(offsets.levelSources).toBe(DESCRIPTOR_LEVEL_SOURCES_OFFSET);
     expect(offsets.coarseSource).toBe(OFFSET_COARSE_SOURCE);
+    expect(structSize(fields)).toBe(DESCRIPTOR_ENTRY_SIZE);
   });
 
-  it("WGSL LodInfo field offsets match TS LOD_OFFSET_* constants", () => {
-    const fields = parseFields(extractStruct(volumeSrc, "LodInfo"));
-    const offsets = computeOffsets(fields);
+  it("the level source array is bounded by DESCRIPTOR_MAX_LEVEL_SOURCES in both shaders", () => {
+    for (const src of [sliceSrc, volumeSrc]) {
+      const fields = parseFields(extractStruct(src, "EntityDescriptor"));
+      const levelSources = fields.find((f) => f.name === "levelSources");
+      expect(levelSources).toBeDefined();
+      expect(levelSourceArrayLength(levelSources!.type)).toBe(DESCRIPTOR_MAX_LEVEL_SOURCES);
+    }
+    for (let i = 0; i < DESCRIPTOR_MAX_LEVEL_SOURCES; i++) {
+      expect(levelSourceOffset(i)).toBe(OFFSET_LEVEL_SOURCES + i * DESCRIPTOR_TIER_SOURCE_SIZE);
+    }
+    expect(levelSourceOffset(DESCRIPTOR_MAX_LEVEL_SOURCES)).toBe(OFFSET_COARSE_SOURCE);
+  });
 
-    expect(offsets.level).toBe(LOD_OFFSET_LEVEL);
-    expect(offsets.indirectionOffset).toBe(LOD_OFFSET_INDIRECTION_OFFSET);
-    expect(offsets.gridDims).toBe(LOD_OFFSET_GRID_DIMS);
-    expect(offsets.chunkDims).toBe(LOD_OFFSET_CHUNK_DIMS);
-    expect(offsets.levelDims).toBe(LOD_OFFSET_LEVEL_DIMS);
+  it("each renderer's uniform writer offsets and buffer size match its shader's Uniforms struct", () => {
+    const sliceFields = parseFields(extractStruct(sliceSrc, "Uniforms"));
+    expect(computeOffsets(sliceFields)).toEqual(SLICE_UNIFORM_OFFSETS);
+    expect(structSize(sliceFields)).toBe(SLICE_UNIFORM_SIZE);
+    const volumeFields = parseFields(extractStruct(volumeSrc, "Uniforms"));
+    expect(computeOffsets(volumeFields)).toEqual(VOLUME_UNIFORM_OFFSETS);
+    expect(structSize(volumeFields)).toBe(VOLUME_UNIFORM_SIZE);
+  });
+
+  it("both shaders carry one slot-dims entry per level pool binding in their Uniforms", () => {
+    for (const src of [sliceSrc, volumeSrc]) {
+      const fields = parseFields(extractStruct(src, "Uniforms"));
+      const slotDims = fields.find((f) => f.name === "levelAtlasSlotDims");
+      expect(fixedArray(slotDims?.type ?? "")).toEqual(["vec4u", DESCRIPTOR_MAX_LEVEL_SOURCES]);
+    }
+  });
+
+  it("both shaders bind one level texture and one indirection buffer per level source slot", () => {
+    for (const src of [sliceSrc, volumeSrc]) {
+      for (let i = 0; i < DESCRIPTOR_MAX_LEVEL_SOURCES; i++) {
+        expect(src).toMatch(new RegExp(`@binding\\(\\d+\\)\\s+var\\s+levelTex${i}\\b`));
+        expect(src).toMatch(new RegExp(`@binding\\(\\d+\\)\\s+var<storage,\\s*read>\\s+levelIndirection${i}\\b`));
+      }
+      expect(src).not.toMatch(new RegExp(`\\blevelTex${DESCRIPTOR_MAX_LEVEL_SOURCES}\\b`));
+    }
   });
 
   it("WGSL ChunkTierSource field offsets match TS SOURCE_OFFSET_* constants", () => {
@@ -209,8 +256,10 @@ describe("EntityDescriptor WGSL ↔ TS layout agreement", () => {
     expect(offsets.valid).toBe(SOURCE_OFFSET_VALID);
     expect(offsets.level).toBe(SOURCE_OFFSET_LEVEL);
     expect(offsets.indirectionOffset).toBe(SOURCE_OFFSET_INDIRECTION_OFFSET);
+    expect(offsets.poolIndex).toBe(SOURCE_OFFSET_POOL_INDEX);
     expect(offsets.gridDims).toBe(SOURCE_OFFSET_GRID_DIMS);
     expect(offsets.chunkDims).toBe(SOURCE_OFFSET_CHUNK_DIMS);
     expect(offsets.levelDims).toBe(SOURCE_OFFSET_LEVEL_DIMS);
+    expect(structSize(fields)).toBe(DESCRIPTOR_TIER_SOURCE_SIZE);
   });
 });

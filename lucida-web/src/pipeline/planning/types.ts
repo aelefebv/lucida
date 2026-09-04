@@ -28,20 +28,19 @@ export interface BaseEntitySnapshot {
   projectedAreaPx2: number;
   centroidWorld: [number, number, number];
   /**
-   * The pyramid level the screen calls for. The core's target-level rule in
-   * `lucida-core/src/target_level.rs` chooses it from the camera and the level
-   * geometry as the coarsest level that still places at least one sample under
-   * every device pixel, and holds it across a boundary by hysteresis. Part of
-   * the quantized set the view-query delta tracks, so a change arrives as a
-   * `changed` record.
+   * The target level: the level the detail tier requests for this entity.
+   * The dataset's level pin when it has one, otherwise the level the core's
+   * rule in `lucida-core/src/target_level.rs` chooses from the camera and
+   * the level geometry, the coarsest level that still places at least one
+   * sample under every device pixel, held across a boundary by hysteresis.
+   * Always one of the image's source levels; a generated coarse level is
+   * never a target. Resolved once, in `snapshotDelta.ts`.
+   *
+   * The screen's level is part of the quantized set the view-query delta
+   * tracks, so a zoom that moves it arrives as a `changed` record, and the
+   * pin is part of the fold cursor's basis. Memory pressure is not an input.
    */
   targetLevel: number;
-  /**
-   * Source pyramid level selected for the detail tier. Defaults to level
-   * 0 unless the dataset settings carry an explicit lower-resolution
-   * override. Generated coarse levels are not valid detail choices.
-   */
-  detailLevel: number;
   /**
    * Pyramid level selected for the coarse tier. Null means this image
    * has no currently usable coarse level. The first bridge only emits
@@ -381,10 +380,13 @@ export interface TileEntry {
   /** Per-tile mode. See {@link EntityMode}. */
   mode: EntityMode;
   /**
-   * Levels the detail tier holds for this entity, finest first. The one
-   * description of the detail tier's levels from the planner through
-   * cold state to the worker. Today it holds one level: the dataset's
-   * level pin, or level 0 when none is set.
+   * Levels the detail tier requests for this entity, the target level
+   * first. The one description of the detail tier's levels from the
+   * planner through cold state to the worker. Today it holds one level,
+   * the entity's target level: the dataset's level pin, or the level the
+   * screen calls for when none is set. The worker reads `detailLevels[0]`
+   * as the target: it keeps sections for the target and the coarser
+   * levels under it, and never samples a level finer than it.
    */
   detailLevels: number[];
   /**

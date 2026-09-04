@@ -141,10 +141,10 @@ function makeCollectionEntities(
 // ---------------------------------------------------------------------------
 
 describe("buildActiveSet", () => {
-  it("gives every visible image a tile entry holding its pinned level", () => {
+  it("gives every visible image a tile entry holding its target level", () => {
     const entity = createSyntheticEntity({
       kind: "Image",
-      detailLevel: 1,
+      targetLevel: 1,
       coarseLevel: null,
       levels: makeStubLevels(4),
     });
@@ -159,21 +159,10 @@ describe("buildActiveSet", () => {
     expect(f.groupProxyAvailable).toBe(false);
   });
 
-  it("clamps the pinned level to the pyramid", () => {
-    const entity = createSyntheticEntity({
-      kind: "Image",
-      detailLevel: 9,
-      levels: makeStubLevels(3),
-    });
-
-    const [result] = buildActiveSet([entity]);
-    expect(asTile(result).detailLevels).toEqual([2]);
-  });
-
   it("handles single-level images", () => {
     const entity = createSyntheticEntity({
       kind: "Image",
-      detailLevel: 0,
+      targetLevel: 0,
       levels: makeStubLevels(1),
     });
 
@@ -181,10 +170,10 @@ describe("buildActiveSet", () => {
     expect(asTile(result).detailLevels).toEqual([0]);
   });
 
-  it("keeps a coarse level that is at least as coarse as the pinned level", () => {
+  it("keeps a coarse level that is at least as coarse as the target level", () => {
     const entity = createSyntheticEntity({
       kind: "Image",
-      detailLevel: 1,
+      targetLevel: 1,
       coarseLevel: 3,
       levels: makeStubLevels(4),
     });
@@ -193,10 +182,10 @@ describe("buildActiveSet", () => {
     expect(asTile(result).coarseLevel).toBe(3);
   });
 
-  it("drops a coarse level finer than the pinned level", () => {
+  it("drops a coarse level finer than the target level", () => {
     const entity = createSyntheticEntity({
       kind: "Image",
-      detailLevel: 2,
+      targetLevel: 2,
       coarseLevel: 1,
       levels: makeStubLevels(4),
     });
@@ -592,7 +581,6 @@ describe("request scheduling", () => {
       kind: "Image",
       projectedDiagonalPx: 200,
       targetLevel: 0,
-      detailLevel: 0,
       coarseLevel: 1,
       levels: [level0, level1],
       importance: 1.0,
@@ -876,7 +864,7 @@ describe("plan()", () => {
       imageId: "img-large",
       kind: "Image",
       projectedDiagonalPx: 200,
-      detailLevel: 0,
+      targetLevel: 0,
       coarseLevel: 1,
       levels: [level0, level1],
       importance: 0.8,
@@ -887,7 +875,7 @@ describe("plan()", () => {
       imageId: "img-small",
       kind: "Image",
       projectedDiagonalPx: 20,
-      detailLevel: 0,
+      targetLevel: 0,
       coarseLevel: 1,
       levels: [level0, level1],
       importance: 0.5,
@@ -1077,7 +1065,7 @@ describe("plan() — detail and coarse tiers", () => {
       kind: "Image",
       projectedDiagonalPx: 40,
       levels: [level0, level1],
-      detailLevel: 0,
+      targetLevel: 0,
       coarseLevel: 1,
     });
     const snapshot = createSyntheticSnapshot({
@@ -1098,7 +1086,7 @@ describe("plan() — detail and coarse tiers", () => {
     expect(result.requests.some((request) => request.lane === "overview")).toBe(false);
   });
 
-  it("emits the pinned level plus the coarse level and no proxy or overview work", () => {
+  it("emits the target level plus the coarse level and no proxy or overview work", () => {
     const level0 = makeLevelGeo(0, [1, 1, 1, 1024, 1024], [1, 1, 1, 256, 256]);
     const level1 = makeLevelGeo(1, [1, 1, 1, 512, 512], [1, 1, 1, 256, 256]);
     const level2 = makeLevelGeo(2, [1, 1, 1, 256, 256], [1, 1, 1, 256, 256]);
@@ -1108,7 +1096,7 @@ describe("plan() — detail and coarse tiers", () => {
       kind: "Image",
       projectedDiagonalPx: 40,
       levels: [level0, level1, level2],
-      detailLevel: 0,
+      targetLevel: 0,
       coarseLevel: 2,
       layoutPositionVox: [0, 0],
     });
@@ -1139,7 +1127,7 @@ describe("plan() — detail and coarse tiers", () => {
     expect(coarse[0]).toMatchObject({ level: 2, tier: "coarse" });
   });
 
-  it("uses a lower pinned level while keeping the coarse tier separate", () => {
+  it("uses a coarser target level while keeping the coarse tier separate", () => {
     const level0 = makeLevelGeo(0, [1, 1, 1, 1024, 1024], [1, 1, 1, 256, 256]);
     const level1 = makeLevelGeo(1, [1, 1, 1, 512, 512], [1, 1, 1, 256, 256]);
     const level2 = makeLevelGeo(2, [1, 1, 1, 256, 256], [1, 1, 1, 256, 256]);
@@ -1148,7 +1136,7 @@ describe("plan() — detail and coarse tiers", () => {
       imageId: "img-a",
       kind: "Image",
       levels: [level0, level1, level2],
-      detailLevel: 1,
+      targetLevel: 1,
       coarseLevel: 2,
     });
     const snapshot = createSyntheticSnapshot({
@@ -1169,7 +1157,7 @@ describe("plan() — detail and coarse tiers", () => {
     expect(new Set(coarse.map((r) => r.level))).toEqual(new Set([2]));
   });
 
-  it("keeps the coarse lane when the pinned level is also the coarse level", () => {
+  it("keeps the coarse lane when the target level is also the coarse level", () => {
     const level0 = makeLevelGeo(0, [1, 1, 1, 1024, 1024], [1, 1, 1, 256, 256]);
     const level1 = makeLevelGeo(1, [1, 1, 1, 512, 512], [1, 1, 1, 256, 256]);
     const entity = createSyntheticEntity({
@@ -1177,7 +1165,7 @@ describe("plan() — detail and coarse tiers", () => {
       imageId: "img-a",
       kind: "Image",
       levels: [level0, level1],
-      detailLevel: 1,
+      targetLevel: 1,
       coarseLevel: 1,
     });
     const snapshot = createSyntheticSnapshot({
@@ -1217,7 +1205,7 @@ describe("plan() — detail and coarse tiers", () => {
       imageId: "img-a",
       kind: "Image",
       levels: [level0, level1, level2],
-      detailLevel: 0,
+      targetLevel: 0,
       coarseLevel: 1,
       layoutPositionVox: [0, 0],
     });
@@ -1239,6 +1227,127 @@ describe("plan() — detail and coarse tiers", () => {
 
     expect(result.requests.filter((r) => r.lane === "detail")).toHaveLength(4);
     expect(result.requests.filter((r) => r.lane === "coarse")).toHaveLength(4);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The detail lane follows the target level (#998, ADR 0061)
+// ---------------------------------------------------------------------------
+
+describe("plan() — the detail lane follows the target level", () => {
+  function makePyramid(depth: number, base: number, chunk: number): LevelGeometry[] {
+    const levels: LevelGeometry[] = [];
+    for (let i = 0; i < depth; i++) {
+      const side = base >> i;
+      const c = Math.min(chunk, side);
+      levels.push(makeLevelGeo(i, [1, 1, 1, side, side], [1, 1, 1, c, c]));
+    }
+    return levels;
+  }
+
+  it("emits detail requests at the target level and nothing else, following the target as it moves", () => {
+    const levels = makePyramid(3, 1024, 256);
+    const planAt = (targetLevel: number) =>
+      plan(
+        createSyntheticSnapshot({
+          entities: [
+            createSyntheticEntity({ kind: "Image", levels, targetLevel, coarseLevel: 2 }),
+          ],
+          visibleRegion: makeVisibleRegion({ xyBoundsVox: [0, 0, 1024, 1024] }),
+          selection: makeSelection(),
+        }),
+        createSyntheticState(),
+        mergeConfig({ prefetchDepth: 0 }),
+      );
+
+    const expectedCountByLevel: Array<[number, number]> = [[0, 16], [1, 4], [2, 1]];
+    for (const [targetLevel, expectedCount] of expectedCountByLevel) {
+      const result = planAt(targetLevel);
+      expect(asTile(result.activeSet[0]).detailLevels).toEqual([targetLevel]);
+
+      const detail = result.requests.filter((r) => r.lane === "detail");
+      expect(detail).toHaveLength(expectedCount);
+      expect(new Set(detail.map((r) => r.level))).toEqual(new Set([targetLevel]));
+      expect(detail.every((r) => r.tier === "detail")).toBe(true);
+
+      const coarse = result.requests.filter((r) => r.lane === "coarse");
+      expect(coarse.map((r) => r.level)).toEqual([2]);
+    }
+  });
+
+  it("bounds a zoomed-out 200-member collection's visible detail set by the viewport, not the collection", () => {
+    const cols = 20;
+    const rows = 10;
+    const tileSide = 4096;
+    const chunkSide = 128;
+    const levels = makePyramid(6, tileSide, chunkSide);
+
+    // An 800 × 600 window at device pixel ratio 2, zoomed out until the
+    // collection's full width fits.
+    const viewportPx: [number, number] = [1600, 1200];
+    const pixelsPerSample = viewportPx[0] / (cols * tileSide);
+    // The core's rule at that zoom: z ≈ 0.0195 device pixels per level-0
+    // sample, and the largest L with z · 2^L ≤ 1 is 5 (32 · 0.0195 ≈ 0.63;
+    // 64 · 0.0195 ≈ 1.25).
+    const targetLevel = 5;
+
+    const tiles = (level: number): EntitySnapshot[] => {
+      const out: EntitySnapshot[] = [
+        createSyntheticEntity({ kind: "Group", entityId: "collection", imageId: "", levels: [] }),
+      ];
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          out.push(
+            createSyntheticEntity({
+              kind: "Tile",
+              parentId: "collection",
+              entityId: `tile-${r}-${c}`,
+              imageId: `img-${r}-${c}`,
+              levels,
+              targetLevel: level,
+              layoutPositionVox: [c * tileSide, r * tileSide],
+            }),
+          );
+        }
+      }
+      return out;
+    };
+
+    const regionW = viewportPx[0] / pixelsPerSample;
+    const regionH = viewportPx[1] / pixelsPerSample;
+    const collectionH = rows * tileSide;
+    const visibleRegion = makeVisibleRegion({
+      xyBoundsVox: [0, (collectionH - regionH) / 2, regionW, (collectionH + regionH) / 2],
+      effectiveZoom: pixelsPerSample,
+    });
+    const planWithTarget = (level: number) =>
+      plan(
+        createSyntheticSnapshot({ entities: tiles(level), visibleRegion, selection: makeSelection() }),
+        createSyntheticState(),
+        mergeConfig({ prefetchDepth: 0 }),
+      );
+
+    const detail = planWithTarget(targetLevel).requests.filter((r) => r.lane === "detail");
+    expect(new Set(detail.map((r) => r.level))).toEqual(new Set([targetLevel]));
+
+    // ADR 0061's bound: the viewport area over one target-level chunk's
+    // on-screen footprint, plus the partly covered chunks along each
+    // visible tile's border.
+    const ratio = 2 ** targetLevel;
+    const footprintPx = (chunkSide * pixelsPerSample * ratio) ** 2;
+    const chunksPerTileSide = Math.ceil(tileSide / ratio / chunkSide);
+    const visibleTiles = cols * rows;
+    const border = visibleTiles * (2 * chunksPerTileSide + 1);
+    const bound = (viewportPx[0] * viewportPx[1]) / footprintPx + border;
+    expect(detail.length).toBeLessThanOrEqual(bound);
+    // One 128² chunk per tile at level 5.
+    expect(detail).toHaveLength(visibleTiles);
+
+    // Pinned to level 0 the same view asks for every level-0 chunk of every
+    // visible tile, a set that grows with the collection and not the screen.
+    const level0 = planWithTarget(0).requests.filter((r) => r.lane === "detail");
+    expect(level0).toHaveLength(visibleTiles * (tileSide / chunkSide) ** 2);
+    expect(level0.length).toBeGreaterThan(bound);
   });
 });
 
@@ -1979,7 +2088,7 @@ describe("plan() honors config tunables", () => {
       entityId: "e0",
       kind: "Image",
       projectedDiagonalPx: 200,
-      detailLevel: 0,
+      targetLevel: 0,
       coarseLevel: 0,
       levels: [level0],
       importance: 1.0,
@@ -2273,7 +2382,6 @@ describe("plan() — minimap lane", () => {
       kind: "Image",
       projectedDiagonalPx: 200,
       targetLevel: 0,
-      detailLevel: 0,
       coarseLevel: 3,
       levels: [level0, level3, level3, level3],
     });

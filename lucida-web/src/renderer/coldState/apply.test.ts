@@ -4,7 +4,8 @@
  * Locks the behavior of `applyColdState`. Covers single + multi
  * channel volume cold state, mixed `tiles-with-detail` +
  * `group-as-proxy` entries, tiles sharing chunk dims, tiles with
- * different chunk dims, slice mode with mixed LODs + Z retargeting,
+ * different chunk dims, the multi-level sections the detail tier holds
+ * under the target, slice mode with mixed levels + Z retargeting,
  * cold-state churn (replace), and empty active-set cold state.
  *
  * Mocks `WorkerCtx` + `GPUDevice` — no real GPU. The per-dataset atlas
@@ -40,6 +41,8 @@ import type {
   ColdStateMessage,
   ColdStateActiveEntry,
   ColdStateTileEntry,
+  SliceChunkDataMessage,
+  VolumeChunkDataMessage,
 } from "../workerProtocol.ts";
 import {
   allocateProxySlot,
@@ -48,6 +51,9 @@ import {
   proxySlotKey,
 } from "../proxyAtlas.ts";
 import { createInitialState, type RendererState } from "../worker/state.ts";
+import { findFarthestSlot, handleVolumeChunkData } from "../volume/index.ts";
+import { handleSliceChunkData } from "../slice/index.ts";
+import { sourceKey } from "../poolKeys.ts";
 
 // ---------------------------------------------------------------------------
 // Mock GPU device — texture + buffer creation only.
@@ -92,8 +98,6 @@ function makeCtx(device: GPUDevice): WorkerCtx {
     getCompositor: () => ({} as never),
     getCursorRenderer: () => ({} as never),
     ensureOffscreenPool: () => [],
-    getDummyTexture: () => ({} as GPUTexture),
-    getDummy3DTexture: () => ({} as GPUTexture),
     getOrCreateLUT: () => ({} as GPUTexture),
     post: () => {},
     postWantedSet: () => {},
@@ -194,6 +198,46 @@ function sli(state: RendererState) {
   return state.sliceAtlases;
 }
 
+/** Pool routing for one member's (tier, level) section. */
+function poolOf(state: RendererState, memberId: string, tier: "detail" | "coarse", level: number) {
+  return state.memberSourcePools.get(memberId)?.get(sourceKey(tier, level));
+}
+
+/**
+ * A four-level halving volume pyramid in [Z, Y, X] with one chunk shape,
+ * so every level lands in the same detail pool.
+ */
+const HALVING_PYRAMID: ColdStateTileEntry["levels"] = [
+  { level: 0, chunkShape: [32, 32, 32], gridShape: [2, 4, 4], levelDims: [64, 128, 128] },
+  { level: 1, chunkShape: [32, 32, 32], gridShape: [1, 2, 2], levelDims: [32, 64, 64] },
+  { level: 2, chunkShape: [32, 32, 32], gridShape: [1, 1, 1], levelDims: [32, 32, 32] },
+  { level: 3, chunkShape: [32, 32, 32], gridShape: [1, 1, 1], levelDims: [16, 16, 16] },
+];
+
+/** One 32³ uint16 chunk upload for `memberId` at `level`, grid cell (0,0,0). */
+function chunkUpload(memberId: string, level: number): VolumeChunkDataMessage {
+  const lm = HALVING_PYRAMID.find((l) => l.level === level)!;
+  const [levelD, levelH, levelW] = lm.levelDims;
+  const data = new Uint16Array(32 * 32 * 32);
+  data.fill(level + 1);
+  return {
+    type: "volumeChunkData",
+    epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 0 },
+    tier: "detail",
+    memberId,
+    chunks: [{ data: data.buffer, dataType: "uint16", x: 0, y: 0, z: 0, key: `${level}/0/0/0/0/0` }],
+    level,
+    t: 0,
+    c: 0,
+    levelWidth: levelW,
+    levelHeight: levelH,
+    levelDepth: levelD,
+    chunkX: 32,
+    chunkY: 32,
+    chunkZ: 32,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -214,10 +258,7 @@ describe("Suite A — applyColdState", () => {
 
     // memberToDataset populated for the single member.
     expect(ctx.state.memberToDataset.get("imgA")).toBe("ds1");
-    // memberToPool preserves the legacy detail alias; memberTierToPool is
-    // the canonical tier-aware routing table.
-    expect(ctx.state.memberToPool.get("imgA")).toBe("ds1:64x64x32:detail");
-    expect(ctx.state.memberTierToPool.get("imgA|detail")).toBe("ds1:64x64x32:detail");
+    expect(poolOf(ctx.state, "imgA", "detail", 0)).toBe("ds1:64x64x32:detail");
     // One pool created.
     expect(vol(ctx.state).size).toBe(1);
     const atlas = vol(ctx.state).get("ds1:64x64x32:detail")!;
@@ -229,7 +270,7 @@ describe("Suite A — applyColdState", () => {
     // Indirection sized to gridX*gridY*gridZ = 2*4*4 = 32.
     expect(atlas.indirectionData.length).toBe(32);
     // Snapshot captured for the dataset.
-    expect(ctx.state.currentEntityMetasByDataset.get("ds1")?.get("imgA")).toHaveLength(1);
+    expect(ctx.state.currentSourcesByDataset.get("ds1")?.get("imgA")).toHaveLength(1);
     // Descriptor buffer was built for the dataset.
     expect(ctx.state.descriptorBuffersByDataset.has("ds1")).toBe(true);
   });
@@ -256,10 +297,9 @@ describe("Suite A — applyColdState", () => {
     expect(ctx.state.memberToDataset.get("imgA:ch1")).toBe("ds1");
     expect(ctx.state.memberToDataset.get("imgA:ch2")).toBe("ds1");
     // Per-channel pool keys + memberIds.
-    expect(ctx.state.memberToPool.get("imgA:ch0")).toBe("ds1:ch0:64x64x32:detail");
-    expect(ctx.state.memberToPool.get("imgA:ch1")).toBe("ds1:ch1:64x64x32:detail");
-    expect(ctx.state.memberToPool.get("imgA:ch2")).toBe("ds1:ch2:64x64x32:detail");
-    expect(ctx.state.memberTierToPool.get("imgA:ch2|detail")).toBe("ds1:ch2:64x64x32:detail");
+    expect(poolOf(ctx.state, "imgA:ch0", "detail", 0)).toBe("ds1:ch0:64x64x32:detail");
+    expect(poolOf(ctx.state, "imgA:ch1", "detail", 0)).toBe("ds1:ch1:64x64x32:detail");
+    expect(poolOf(ctx.state, "imgA:ch2", "detail", 0)).toBe("ds1:ch2:64x64x32:detail");
     // 3 pool atlases — one per channel.
     expect(vol(ctx.state).size).toBe(3);
   });
@@ -288,9 +328,9 @@ describe("Suite A — applyColdState", () => {
     expect(ctx.state.memberToDataset.get("imgA")).toBe("ds1");
     expect(ctx.state.memberToDataset.get("groupA")).toBe("ds1");
     // Only the tile registers a pool (groupEntriesByPool skips
-    // entries with no targetLevel).
-    expect(ctx.state.memberToPool.has("imgA")).toBe(true);
-    expect(ctx.state.memberToPool.has("groupA")).toBe(false);
+    // entries with no detail levels).
+    expect(ctx.state.memberSourcePools.has("imgA")).toBe(true);
+    expect(ctx.state.memberSourcePools.has("groupA")).toBe(false);
     expect(vol(ctx.state).size).toBe(1);
   });
 
@@ -346,11 +386,11 @@ describe("Suite A — applyColdState", () => {
     expect(a.entityMetas.has("imgB")).toBe(false);
     expect(b.entityMetas.get("imgB")).toBeTruthy();
     expect(b.entityMetas.has("imgA")).toBe(false);
-    expect(ctx.state.memberToPool.get("imgA")).toBe("ds1:64x64x32:detail");
-    expect(ctx.state.memberToPool.get("imgB")).toBe("ds1:32x32x16:detail");
+    expect(poolOf(ctx.state, "imgA", "detail", 0)).toBe("ds1:64x64x32:detail");
+    expect(poolOf(ctx.state, "imgB", "detail", 0)).toBe("ds1:32x32x16:detail");
   });
 
-  it("source-backed detail and coarse levels get separate tier pools and descriptor metas", () => {
+  it("source-backed detail and coarse levels get separate tier pools and descriptor sections", () => {
     const ctx = makeCtx(makeMockDevice());
     const cold = makeCold([
       makeEntry({
@@ -366,8 +406,11 @@ describe("Suite A — applyColdState", () => {
 
     applyColdState(ctx, cold);
 
-    expect(ctx.state.memberTierToPool.get("imgA|detail")).toBe("ds1:64x64x32:detail");
-    expect(ctx.state.memberTierToPool.get("imgA|coarse")).toBe("ds1:128x128x8:coarse");
+    // Level 2 is a coarser resident level of the detail tier AND the
+    // coarse tier's level; the tiers keep separate pools at that shape.
+    expect(poolOf(ctx.state, "imgA", "detail", 0)).toBe("ds1:64x64x32:detail");
+    expect(poolOf(ctx.state, "imgA", "detail", 2)).toBe("ds1:128x128x8:detail");
+    expect(poolOf(ctx.state, "imgA", "coarse", 2)).toBe("ds1:128x128x8:coarse");
     expect(vol(ctx.state).get("ds1:64x64x32:detail")?.entityMetas.get("imgA")?.[0]).toMatchObject({
       level: 0,
       chunkDims: [32, 64, 64],
@@ -378,7 +421,17 @@ describe("Suite A — applyColdState", () => {
       chunkDims: [8, 128, 128],
       offset: 0,
     });
-    expect(ctx.state.currentEntityMetasByDataset.get("ds1")?.get("imgA")?.map((m) => m.level)).toEqual([0, 2]);
+    const sources = ctx.state.currentSourcesByDataset.get("ds1")?.get("imgA") ?? [];
+    expect(sources.map((s) => [s.tier, s.meta.level])).toEqual([
+      ["detail", 0],
+      ["detail", 2],
+      ["coarse", 2],
+    ]);
+    // The draw binds both detail pools (finest first) and the coarse pool.
+    expect(ctx.state.descriptorBuffersByDataset.get("ds1")?.sourceBindingByMember.get("imgA")).toEqual({
+      levelPoolKeys: ["ds1:64x64x32:detail", "ds1:128x128x8:detail"],
+      coarsePoolKey: "ds1:128x128x8:coarse",
+    });
   });
 
   it("source-backed detail and coarse tiers stay separate when they share the same level", () => {
@@ -396,8 +449,8 @@ describe("Suite A — applyColdState", () => {
 
     applyColdState(ctx, cold);
 
-    expect(ctx.state.memberTierToPool.get("imgA|detail")).toBe("ds1:64x64x32:detail");
-    expect(ctx.state.memberTierToPool.get("imgA|coarse")).toBe("ds1:64x64x32:coarse");
+    expect(poolOf(ctx.state, "imgA", "detail", 1)).toBe("ds1:64x64x32:detail");
+    expect(poolOf(ctx.state, "imgA", "coarse", 1)).toBe("ds1:64x64x32:coarse");
     expect(vol(ctx.state).get("ds1:64x64x32:detail")?.entityMetas.get("imgA")?.[0]).toMatchObject({
       level: 1,
       offset: 0,
@@ -406,13 +459,141 @@ describe("Suite A — applyColdState", () => {
       level: 1,
       offset: 0,
     });
-    expect(ctx.state.currentEntityMetasByDataset.get("ds1")?.get("imgA")?.map((m) => m.level)).toEqual([1, 1]);
+    const sources = ctx.state.currentSourcesByDataset.get("ds1")?.get("imgA") ?? [];
+    expect(sources.map((s) => [s.tier, s.meta.level])).toEqual([["detail", 1], ["coarse", 1]]);
   });
 
   // -------------------------------------------------------------------------
-  // 6. Slice mode cold state
+  // 6. Resident levels: the target and the coarser levels under it
   // -------------------------------------------------------------------------
-  it("slice mode → 2D pool key + entityMetas computed for 2D indirection", () => {
+  it("holds one section per level for the target and the next three coarser levels, none finer", () => {
+    const ctx = makeCtx(makeMockDevice());
+    const six: ColdStateTileEntry["levels"] = [0, 1, 2, 3, 4, 5].map((level) => ({
+      level,
+      chunkShape: [32, 32, 32],
+      gridShape: [1, 1, 1],
+      levelDims: [32, 32, 32],
+    }));
+    const cold = makeCold([
+      makeEntry({ entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail", detailLevels: [1], levels: six }),
+    ]);
+    applyColdState(ctx, cold);
+
+    const atlas = vol(ctx.state).get("ds1:32x32x32:detail")!;
+    expect(atlas.entityMetas.get("imgA")?.map((m) => [m.level, m.offset])).toEqual([
+      [1, 0], [2, 1], [3, 2], [4, 3],
+    ]);
+    expect(atlas.indirectionData.length).toBe(4);
+    for (const level of [1, 2, 3, 4]) {
+      expect(poolOf(ctx.state, "imgA", "detail", level)).toBe("ds1:32x32x32:detail");
+    }
+    expect(poolOf(ctx.state, "imgA", "detail", 0)).toBeUndefined();
+    expect(poolOf(ctx.state, "imgA", "detail", 5)).toBeUndefined();
+    expect(ctx.state.descriptorBuffersByDataset.get("ds1")?.sourceBindingByMember.get("imgA")).toEqual({
+      levelPoolKeys: ["ds1:32x32x32:detail"],
+      coarsePoolKey: null,
+    });
+  });
+
+  it("keeps coarser resident chunks mapped when the target moves finer, and unmaps them once they are finer than the target", () => {
+    const ctx = makeCtx(makeMockDevice());
+    const entryAt = (target: number) =>
+      makeEntry({ entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail", detailLevels: [target], levels: HALVING_PYRAMID });
+
+    // Target 2: sections for levels 2 and 3. A level-2 chunk arrives.
+    const coldCoarse = makeCold([entryAt(2)]);
+    ctx.state.currentColdState = coldCoarse;
+    ctx.state.currentEpochs = coldCoarse.epochs;
+    applyColdState(ctx, coldCoarse);
+    const poolKey = poolOf(ctx.state, "imgA", "detail", 2)!;
+    handleVolumeChunkData(ctx, chunkUpload("imgA", 2), coldCoarse.epochs, poolKey, "imgA");
+    const atlas = vol(ctx.state).get(poolKey)!;
+    const slot = atlas.slots.get("imgA|2/0/0/0/0/0");
+    expect(slot).toBeDefined();
+    expect(atlas.indirectionData[0]).toBe(slot);
+
+    // Target 0: sections for 0..3. The resident level-2 chunk stays mapped
+    // in level 2's section, so it fills the screen until level 0 arrives.
+    const coldFine = makeCold([entryAt(0)]);
+    ctx.state.currentColdState = coldFine;
+    applyColdState(ctx, coldFine);
+    expect(poolOf(ctx.state, "imgA", "detail", 0)).toBe(poolKey);
+    const metas = atlas.entityMetas.get("imgA")!;
+    expect(metas.map((m) => [m.level, m.offset])).toEqual([[0, 0], [1, 32], [2, 36], [3, 37]]);
+    expect(atlas.indirectionData[36]).toBe(slot);
+    expect(atlas.slotGridIdx[slot!]).toBe(36);
+
+    // Target 3: level 2 is now finer than the target. Its chunk stays in
+    // the pool but is unmapped, which makes it the first eviction victim.
+    const coldCoarsest = makeCold([entryAt(3)]);
+    ctx.state.currentColdState = coldCoarsest;
+    applyColdState(ctx, coldCoarsest);
+    expect(atlas.entityMetas.get("imgA")?.map((m) => m.level)).toEqual([3]);
+    expect(atlas.slots.has("imgA|2/0/0/0/0/0")).toBe(true);
+    expect(atlas.slotGridIdx[slot!]).toBe(-1);
+    expect(findFarthestSlot(ctx.state, atlas)).toEqual({ key: "imgA|2/0/0/0/0/0", dist: Infinity });
+  });
+
+  it("slice mode: a coarser level's plane stays mapped after the target moves finer, each level retargeting Z on its own depth", () => {
+    // A pyramid downsampled along Z too: level 0 is 32 deep in two 16-deep
+    // chunks, level 1 is 16 deep in one. At full-res Z = 20, level 0's
+    // plane lives in chunk z=1 while level 1's lives in chunk z=0.
+    const pyramid: ColdStateTileEntry["levels"] = [
+      { level: 0, chunkShape: [16, 64, 64], gridShape: [2, 4, 4], levelDims: [32, 256, 256] },
+      { level: 1, chunkShape: [16, 64, 64], gridShape: [1, 2, 2], levelDims: [16, 128, 128] },
+    ];
+    const entryAt = (target: number) =>
+      makeEntry({ entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail", detailLevels: [target], levels: pyramid });
+    const sliceUpload = (level: number, z: number): SliceChunkDataMessage => {
+      const lm = pyramid.find((l) => l.level === level)!;
+      const data = new Uint16Array(16 * 64 * 64).fill(level + 1);
+      return {
+        type: "sliceChunkData",
+        epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 0 },
+        tier: "detail",
+        memberId: "imgA",
+        chunks: [{ data: data.buffer, dataType: "uint16", x: 0, y: 0, z, key: `${level}/0/0/${z}/0/0` }],
+        level, z, t: 0, c: 0,
+        levelWidth: lm.levelDims[2], levelHeight: lm.levelDims[1],
+        chunkX: 64, chunkY: 64, chunkZ: 16,
+        fullResDepth: 32, levelDepth: lm.levelDims[0], fullResZ: 20,
+      };
+    };
+    const ctx = makeCtx(makeMockDevice());
+
+    // Target 1 at Z = 20: level 1's chunk z=0 arrives.
+    const coldCoarse = makeCold([entryAt(1)], { viewMode: "slice", currentZ: 20 });
+    ctx.state.currentColdState = coldCoarse;
+    ctx.state.currentEpochs = coldCoarse.epochs;
+    applyColdState(ctx, coldCoarse);
+    const poolKey = poolOf(ctx.state, "imgA", "detail", 1)!;
+    handleSliceChunkData(ctx, sliceUpload(1, 0), coldCoarse.epochs, poolKey, "imgA");
+    const atlas = sli(ctx.state).get(poolKey)!;
+    const slot1 = atlas.slots.get("imgA|1/0/0/0/0/0")!;
+    expect(atlas.indirectionData[0]).toBe(slot1);
+
+    // Target 0: level 1's plane stays mapped in its own section while
+    // level 0 has nothing yet.
+    const coldFine = makeCold([entryAt(0)], { viewMode: "slice", currentZ: 20 });
+    ctx.state.currentColdState = coldFine;
+    applyColdState(ctx, coldFine);
+    const metas = atlas.entityMetas.get("imgA")!;
+    expect(metas.map((m) => [m.level, m.offset])).toEqual([[0, 0], [1, 16]]);
+    expect(atlas.indirectionData[16]).toBe(slot1);
+
+    // Level 0's chunk for the same plane is z=1; both levels map at once,
+    // each against its own chunk-Z target.
+    handleSliceChunkData(ctx, sliceUpload(0, 1), coldFine.epochs, poolOf(ctx.state, "imgA", "detail", 0)!, "imgA");
+    const slot0 = atlas.slots.get("imgA|0/0/0/1/0/0")!;
+    applyColdState(ctx, coldFine);
+    expect(atlas.indirectionData[0]).toBe(slot0);
+    expect(atlas.indirectionData[16]).toBe(slot1);
+  });
+
+  // -------------------------------------------------------------------------
+  // 7. Slice mode cold state
+  // -------------------------------------------------------------------------
+  it("slice mode → 2D pool key + one 2D section per resident level", () => {
     const ctx = makeCtx(makeMockDevice());
     const cold = makeCold(
       [
@@ -432,17 +613,18 @@ describe("Suite A — applyColdState", () => {
     expect(sli(ctx.state).size).toBe(1);
     const atlas = sli(ctx.state).get("ds1:128x128:detail")!;
     expect(atlas).toBeTruthy();
-    expect(ctx.state.memberToPool.get("imgA")).toBe("ds1:128x128:detail");
+    expect(poolOf(ctx.state, "imgA", "detail", 0)).toBe("ds1:128x128:detail");
+    expect(poolOf(ctx.state, "imgA", "detail", 1)).toBe("ds1:128x128:detail");
+    // 2D sections: level 0 is 2*2 = 4 entries, level 1 is 1*1 = 1 entry.
     const metas = atlas.entityMetas.get("imgA")!;
-    expect(metas).toHaveLength(1);
-    expect(metas[0].offset).toBe(0);
-    expect(atlas.indirectionData.length).toBe(4);
+    expect(metas.map((m) => [m.level, m.offset])).toEqual([[0, 0], [1, 4]]);
+    expect(atlas.indirectionData.length).toBe(5);
   });
 
   // -------------------------------------------------------------------------
-  // 7. Cold-state churn (replace)
+  // 8. Cold-state churn (replace)
   // -------------------------------------------------------------------------
-  it("two cold states in a row → memberToPool is repopulated; descriptor buffer is destroyed + replaced", () => {
+  it("two cold states in a row → pool routing is repopulated; descriptor buffer is destroyed + replaced", () => {
     const ctx = makeCtx(makeMockDevice());
     const coldA = makeCold([
       makeEntry({
@@ -453,7 +635,7 @@ describe("Suite A — applyColdState", () => {
     applyColdState(ctx, coldA);
     const descA = ctx.state.descriptorBuffersByDataset.get("ds1")!;
     const descABuffer = descA.buffer as unknown as MockBuffer;
-    expect(ctx.state.memberToPool.get("imgA")).toBe("ds1:64x64x32:detail");
+    expect(poolOf(ctx.state, "imgA", "detail", 0)).toBe("ds1:64x64x32:detail");
 
     // Second cold state — different active set.
     const coldB = makeCold([
@@ -463,20 +645,19 @@ describe("Suite A — applyColdState", () => {
       }),
     ]);
     applyColdState(ctx, coldB);
-    // memberToPool for B is set.
-    expect(ctx.state.memberToPool.get("imgB")).toBe("ds1:32x32x16:detail");
+    // Routing for B is set.
+    expect(poolOf(ctx.state, "imgB", "detail", 0)).toBe("ds1:32x32x16:detail");
     // Old descriptor buffer was destroyed (the new one replaces it).
     expect(descABuffer.destroyed).toBe(true);
     // A new descriptor buffer was written.
     const descB = ctx.state.descriptorBuffersByDataset.get("ds1")!;
     expect(descB).not.toBe(descA);
     // Stale routing for A is cleared before B is registered.
-    expect(ctx.state.memberToPool.has("imgA")).toBe(false);
-    expect(ctx.state.memberTierToPool.has("imgA|detail")).toBe(false);
+    expect(ctx.state.memberSourcePools.has("imgA")).toBe(false);
   });
 
   // -------------------------------------------------------------------------
-  // 8. Empty active-set cold state
+  // 9. Empty active-set cold state
   // -------------------------------------------------------------------------
   it("empty active set → no pools, no panics, empty descriptor buffer still created", () => {
     const ctx = makeCtx(makeMockDevice());
@@ -484,12 +665,12 @@ describe("Suite A — applyColdState", () => {
     expect(() => applyColdState(ctx, cold)).not.toThrow();
     // No pools.
     expect(vol(ctx.state).size).toBe(0);
-    // No memberToPool entries.
-    expect(ctx.state.memberToPool.size).toBe(0);
+    // No routing entries.
+    expect(ctx.state.memberSourcePools.size).toBe(0);
     // No memberToDataset entries (iterateColdMembers yields nothing).
     expect(ctx.state.memberToDataset.size).toBe(0);
     // Snapshot recorded (empty) for the dataset.
-    expect(ctx.state.currentEntityMetasByDataset.get("ds1")?.size).toBe(0);
+    expect(ctx.state.currentSourcesByDataset.get("ds1")?.size).toBe(0);
     // Descriptor buffer was still built (empty buffer is fine — the
     // build path always runs).
     expect(ctx.state.descriptorBuffersByDataset.has("ds1")).toBe(true);
