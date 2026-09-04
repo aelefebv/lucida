@@ -88,14 +88,19 @@ Sample values are `uint16` in every fixture, and the codec chain is `bytes`
 `extras/verify_sharded_twins.py` proves the sharded store end to end. It
 writes two twin pairs with the generator, opens each dataset through the
 trace driver in its own workspace at device pixel ratio 2, and asserts that
-every run settled, that each pair's two frames are identical and not blank,
-that every backend read in a sharded run moved exactly one inner chunk, one
-shard index, or the two together, and that every read in an unsharded run
-moved one whole chunk object. The expected sizes come from the shard indexes
-on disk, so the comparison is exact. The second pair has a single source
-level too large to serve as the coarse tier, so the server generates coarse
-levels over the sharded source, and the check asserts that both runs
-requested those levels and still match.
+every run settled, that each pair's two frames are not blank and match to
+within one level of an 8-bit channel, that every backend read in a sharded
+run moved exactly one inner chunk, one shard index, or the two together, and
+that every read in an unsharded run moved one whole chunk object. The
+expected sizes come from the shard indexes on disk, so the read comparison
+is exact. The frame tolerance is what two page loads of one dataset differ
+by; a wrong inner chunk moves pixels by far more. The second pair has a
+single source level too large to serve as the coarse tier, so the server
+generates a coarse level over the sharded source, and the check asserts
+that both runs requested that level and still match. That pair is one image
+whose source grid stays under the 32 chunks the server generates on its own
+after an open, and the check waits for that fill before it opens the view,
+because a static view never asks for the rest (issue #1034).
 
 It needs a running server that serves a built web bundle, the `lucida` CLI,
 and Chrome. From the repository root:

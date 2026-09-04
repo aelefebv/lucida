@@ -10,16 +10,26 @@ each dataset through ``lucida trace`` in its own workspace, and then reads
 what came back:
 
 1. Every run settled: the page published quiescent and closed its own run.
-2. Each pair's two frames are not blank and are identical pixel for pixel,
-   so the layout of the store never changes what the viewer shows.
+2. Each pair's two frames are not blank and match to within one level of
+   an 8-bit channel, so the layout of the store never changes what the
+   viewer shows. Two runs of one dataset differ by that much: the renderer
+   is not bit-reproducible across page loads, and a wrong or missing inner
+   chunk moves pixels by far more than one level.
 3. In the sharded runs, every backend read the trace recorded moved exactly
    one inner chunk, one shard index, or the two together. Nothing read a
    shard whole. The expected sizes come from the shard indexes on disk, so
    the comparison is exact rather than a threshold.
 4. In the unsharded runs, every backend read moved exactly one chunk object.
 5. The second pair has one source level too large to serve as the coarse
-   tier, so the server generates coarse levels over it. Both runs request
-   and receive those generated levels, and the pair still matches.
+   tier, so the server generates a coarse level over it. Both runs request
+   and receive that generated level, and the pair still matches.
+
+The second pair is one image whose source grid holds fewer than the 32
+chunks the server generates on its own after an open, because a generated
+level has one chunk per source chunk and a static view does not ask for
+the rest (see issue #1034). The check opens each of the pair's datasets
+first and waits for that fill to finish, so the run measures a complete
+tier and not the fill.
 
 The trace carries the byte count of each backend read because the server's
 timing rows do (``backend_bytes``). A read the trace attributes to a
@@ -49,13 +59,14 @@ Options:
     --size Y,X           Level 0 size of each pyramid tile. Default 1024,1024.
     --channels C         Channels in the pyramid pair. Default 2.
     --levels N           Levels in the pyramid pair. Default 4.
-    --chunk S            Inner chunk edge, both pairs. Default 64.
+    --chunk S            Inner chunk edge of the pyramid pair. Default 64.
     --shard S            Shard edge, both pairs. Default 512.
-    --coarse-tiles N     Tiles in the generated-coarse pair. Default 2.
-    --coarse-size Y,X    Level 0 size of each generated-coarse tile, which
-                         is also its only level. Default 2304,2304. Keep the
-                         long axis above 2048 or the server serves the source
-                         level as the coarse tier and generates nothing.
+    --coarse-size Y,X    Size of the generated-coarse pair's one level.
+                         Default 768,2304. Keep the long axis above 2048 or
+                         the server serves the source level as the coarse
+                         tier and generates nothing.
+    --coarse-chunk S     Inner chunk edge of the generated-coarse pair.
+                         Default 256. Keep the source grid under 32 chunks.
 
 The exit status is 0 when every check passed and 1 otherwise. The report on
 stdout says which check failed and where the evidence is.
@@ -94,11 +105,24 @@ ABSENT_ENTRY = (2**64 - 1, 2**64 - 1)
 
 DEFAULT_SERVER = "http://127.0.0.1:9876"
 DEFAULT_TIMEOUT_SECONDS = 180
+# Every frame is taken at this ratio. It is the driver's default too, but
+# the check names it so a change to the default cannot quietly weaken it.
+DEVICE_PIXEL_RATIO = 2
 
 # The largest long axis the server serves from the source as the coarse
 # tier (`SourceCoarseConfig::default().max_long_axis` in lucida-store). A
 # single level above it is what makes the server generate coarse levels.
 SOURCE_COARSE_MAX_LONG_AXIS = 2048
+# How many generated chunks the server fills on its own after an open
+# (`GeneratedCoarseConfig::default().background_chunk_limit` in
+# lucida-server). The generated-coarse pair keeps its source grid under it.
+GENERATED_BACKGROUND_CHUNK_LIMIT = 32
+# The largest per-channel difference two frames may show and still match:
+# one level of an 8-bit channel, which is what two page loads of one
+# dataset differ by.
+FRAME_TOLERANCE = 1
+# How long to wait for the server's own generated fill after an open.
+GENERATED_FILL_TIMEOUT_SECONDS = 60
 
 
 # ---------------------------------------------------------------------------
@@ -391,14 +415,17 @@ class FrameComparison:
     height: int
     colors: tuple[int, int]
     differing_fraction: float
+    # The largest difference in any channel of any pixel; 255 for frames of
+    # different size.
+    max_delta: int
 
     @property
     def blank(self) -> bool:
         return min(self.colors) < 2
 
     @property
-    def identical(self) -> bool:
-        return self.differing_fraction == 0.0
+    def matches(self) -> bool:
+        return self.max_delta <= FRAME_TOLERANCE
 
 
 def load_frame(path: Path) -> np.ndarray:
@@ -412,20 +439,25 @@ def distinct_colors(frame: np.ndarray) -> int:
 
 
 def compare_frames(first: Path, second: Path, diff_out: Path | None = None) -> FrameComparison:
-    """Compare two frames pixel for pixel. Frames of different size never match."""
+    """Compare two frames pixel for pixel. Frames of different size never match.
+
+    ``diff_out`` gets a picture of the pixels that differ by more than the
+    tolerance, and nothing when there are none.
+    """
     a = load_frame(first)
     b = load_frame(second)
     colors = (distinct_colors(a), distinct_colors(b))
     if a.shape != b.shape:
-        return FrameComparison(a.shape[1], a.shape[0], colors, 1.0)
-    differing = np.any(a != b, axis=-1)
-    fraction = float(differing.mean())
-    if fraction > 0.0 and diff_out is not None:
+        return FrameComparison(a.shape[1], a.shape[0], colors, 1.0, 255)
+    delta = np.abs(a.astype(np.int16) - b.astype(np.int16)).max(axis=-1)
+    fraction = float((delta > 0).mean())
+    beyond = delta > FRAME_TOLERANCE
+    if beyond.any() and diff_out is not None:
         highlight = np.zeros_like(a)
         highlight[..., 3] = 255
-        highlight[differing] = (255, 0, 255, 255)
+        highlight[beyond] = (255, 0, 255, 255)
         Image.fromarray(highlight).save(diff_out)
-    return FrameComparison(a.shape[1], a.shape[0], colors, fraction)
+    return FrameComparison(a.shape[1], a.shape[0], colors, fraction, int(delta.max()))
 
 
 # ---------------------------------------------------------------------------
@@ -443,6 +475,9 @@ class TwinPair:
     # The levels the generator writes; anything the viewer requests above
     # this is a generated level.
     source_levels: int
+    # Whether the server generates the coarse tier over this pair, in which
+    # case the check waits for that fill before it opens the view.
+    generated_coarse: bool = False
 
     def unsharded_args(self, out: Path) -> list[str]:
         return [str(out / f"{self.name}-unsharded.ome.zarr"), *self.generator_args, "--overwrite"]
@@ -499,6 +534,12 @@ class Lucida:
     def create_workspace(self, name: str, timeout: float = 60.0) -> str:
         return self.json("workspace", "create", name, timeout=timeout)["workspace"]["id"]
 
+    def open_dataset(self, dataset: Path, workspace_id: str, timeout: float = 300.0) -> None:
+        self.json("--workspace", workspace_id, "dataset", "open", str(dataset), timeout=timeout)
+
+    def generated_ready_chunks(self, workspace_id: str, timeout: float = 60.0) -> int:
+        return ready_generated_chunks(self.json("--workspace", workspace_id, "dataset", "health", timeout=timeout))
+
     def trace(self, dataset: Path, workspace_id: str, out: Path, stem: str, timeout_seconds: int) -> DrivenRun:
         run_file = out / f"{stem}.run.json"
         screenshot = out / f"{stem}.png"
@@ -511,6 +552,8 @@ class Lucida:
             str(run_file),
             "--screenshot",
             str(screenshot),
+            "--device-pixel-ratio",
+            str(DEVICE_PIXEL_RATIO),
             "--timeout-seconds",
             str(timeout_seconds),
             timeout=timeout_seconds + 120,
@@ -526,6 +569,31 @@ class Lucida:
             end_reason=header.get("endReason"),
             verdict=verdict.get("kind"),
         )
+
+
+def ready_generated_chunks(health: dict) -> int:
+    """The generated chunks ``lucida dataset health`` reports ready, summed over the workspace's datasets."""
+    return sum(int(dataset["generated_coarse"]["ready_chunks"]) for dataset in health.get("datasets", []))
+
+
+def wait_for_generated_fill(lucida: Lucida, workspace_id: str, timeout_seconds: float) -> int:
+    """Wait until the server's own generated fill has stopped growing, and return its size.
+
+    The server fills a bounded number of generated chunks after an open and
+    then stops, so the fill is done when two readings a second apart agree
+    and at least one chunk is ready. A fill that has not started by the
+    deadline is reported as what it is: zero.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    previous = -1
+    while True:
+        ready = lucida.generated_ready_chunks(workspace_id)
+        if ready > 0 and ready == previous:
+            return ready
+        if time.monotonic() >= deadline:
+            return ready
+        previous = ready
+        time.sleep(1.0)
 
 
 def default_lucida_command() -> list[str]:
@@ -577,9 +645,10 @@ def check_pair(pair: TwinPair, unsharded: DrivenRun, sharded: DrivenRun, out: Pa
         f"{frames.colors[0]} and {frames.colors[1]} distinct colors)",
     )
     report.check(
-        frames.identical,
-        f"{pair.name}: frames identical"
-        + ("" if frames.identical else f" ({frames.differing_fraction:.2%} of pixels differ; see {diff})"),
+        frames.matches,
+        f"{pair.name}: frames match within {FRAME_TOLERANCE} level per channel "
+        f"(largest difference {frames.max_delta}, {frames.differing_fraction:.2%} of pixels differ at all)"
+        + ("" if frames.matches else f"; see {diff}"),
     )
 
     for run in (unsharded, sharded):
@@ -612,7 +681,7 @@ def check_generated_coarse(pair: TwinPair, unsharded: DrivenRun, sharded: Driven
         generated = sorted(level for level in levels_requested(run.run) if level >= pair.source_levels)
         report.check(
             bool(generated),
-            f"{pair.name}: {run.dataset.name} requested generated coarse levels {generated}",
+            f"{pair.name}: {run.dataset.name} requested the generated coarse level {generated}",
         )
 
 
@@ -632,8 +701,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--levels", type=int, default=4, metavar="N")
     parser.add_argument("--chunk", type=int, default=64, metavar="S")
     parser.add_argument("--shard", type=int, default=512, metavar="S")
-    parser.add_argument("--coarse-tiles", type=int, default=2, metavar="N")
-    parser.add_argument("--coarse-size", default="2304,2304", metavar="Y,X")
+    parser.add_argument("--coarse-size", default="768,2304", metavar="Y,X")
+    parser.add_argument("--coarse-chunk", type=int, default=256, metavar="S")
     return parser.parse_args(argv)
 
 
@@ -651,23 +720,32 @@ def twin_pairs(args: argparse.Namespace) -> list[TwinPair]:
         shard=args.shard,
         source_levels=args.levels,
     )
-    long_axis = max(int(v) for v in args.coarse_size.split(","))
-    if long_axis <= SOURCE_COARSE_MAX_LONG_AXIS:
+    coarse_size = [int(v) for v in args.coarse_size.split(",")]
+    if max(coarse_size) <= SOURCE_COARSE_MAX_LONG_AXIS:
         raise SystemExit(
-            f"--coarse-size long axis {long_axis} must exceed {SOURCE_COARSE_MAX_LONG_AXIS}, "
+            f"--coarse-size long axis {max(coarse_size)} must exceed {SOURCE_COARSE_MAX_LONG_AXIS}, "
             "or the server serves the source level as the coarse tier and generates nothing"
+        )
+    source_chunks = 1
+    for extent in coarse_size:
+        source_chunks *= -(-extent // args.coarse_chunk)
+    if source_chunks >= GENERATED_BACKGROUND_CHUNK_LIMIT:
+        raise SystemExit(
+            f"--coarse-size {args.coarse_size} in {args.coarse_chunk}-sample chunks is {source_chunks} chunks; "
+            f"keep it under {GENERATED_BACKGROUND_CHUNK_LIMIT}, or the server's own fill stops short of the "
+            "generated level and a static view never asks for the rest (issue #1034)"
         )
     coarse = TwinPair(
         name="coarse",
         generator_args=(
-            "--tiles", str(args.coarse_tiles),
             "--size", args.coarse_size,
             "--levels", "1",
-            "--chunk", str(args.chunk),
+            "--chunk", str(args.coarse_chunk),
             "--seed", "2",
         ),
         shard=args.shard,
         source_levels=1,
+        generated_coarse=True,
     )
     return [pyramid, coarse]
 
@@ -689,6 +767,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         for layout, generator_args in (("unsharded", pair.unsharded_args(out)), ("sharded", pair.sharded_args(out))):
             dataset = generate(generator_args)
             workspace_id = lucida.create_workspace(f"sharded-twins {stamp} {pair.name} {layout}")
+            if pair.generated_coarse:
+                lucida.open_dataset(dataset, workspace_id)
+                ready = wait_for_generated_fill(lucida, workspace_id, GENERATED_FILL_TIMEOUT_SECONDS)
+                report.say(f"generated fill for {dataset.name}: {ready} chunks ready")
             runs[(pair.name, layout)] = lucida.trace(
                 dataset, workspace_id, out, f"{pair.name}-{layout}", args.timeout_seconds
             )

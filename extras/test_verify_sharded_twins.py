@@ -188,7 +188,7 @@ def write_frame(path: Path, pixels: np.ndarray) -> Path:
     return path
 
 
-def test_frames_compare_pixel_for_pixel_and_a_single_color_is_blank(tmp_path: Path) -> None:
+def test_frames_match_within_one_level_and_a_single_color_is_blank(tmp_path: Path) -> None:
     height, width = 10, 10
     gradient = np.zeros((height, width, 4), dtype=np.uint8)
     gradient[..., 0] = np.arange(width, dtype=np.uint8) * 20
@@ -196,26 +196,40 @@ def test_frames_compare_pixel_for_pixel_and_a_single_color_is_blank(tmp_path: Pa
     first = write_frame(tmp_path / "a.png", gradient)
     same = write_frame(tmp_path / "b.png", gradient)
     identical = check.compare_frames(first, same, tmp_path / "diff.png")
-    assert identical.identical and not identical.blank
+    assert identical.matches and not identical.blank
+    assert identical.max_delta == 0 and identical.differing_fraction == 0.0
     assert (identical.width, identical.height) == (width, height)
     assert identical.colors == (10, 10)
     assert not (tmp_path / "diff.png").exists()
 
-    changed = gradient.copy()
+    # One level in one channel is what two page loads of one dataset differ
+    # by: reported, drawn nowhere, and a match.
+    nudged = gradient.copy()
+    nudged[2, 2, 1] += 1
+    within = check.compare_frames(first, write_frame(tmp_path / "n.png", nudged), tmp_path / "diff.png")
+    assert within.matches and within.max_delta == 1
+    assert within.differing_fraction == pytest.approx(0.01)
+    assert not (tmp_path / "diff.png").exists()
+
+    changed = nudged.copy()
     changed[3, 4] = (255, 255, 255, 255)
     other = write_frame(tmp_path / "c.png", changed)
     differing = check.compare_frames(first, other, tmp_path / "diff.png")
-    assert differing.differing_fraction == pytest.approx(0.01)
-    assert not differing.identical
+    assert differing.differing_fraction == pytest.approx(0.02)
+    assert differing.max_delta == 255
+    assert not differing.matches
+    # The picture of the difference shows only what lies beyond the tolerance.
     diff = np.asarray(Image.open(tmp_path / "diff.png").convert("RGBA"))
     assert tuple(diff[3, 4]) == (255, 0, 255, 255)
+    assert tuple(diff[2, 2]) == (0, 0, 0, 255)
     assert tuple(diff[0, 0]) == (0, 0, 0, 255)
 
     blank = write_frame(tmp_path / "blank.png", np.full((height, width, 4), (9, 9, 9, 255), dtype=np.uint8))
     assert check.compare_frames(blank, blank).blank
 
     smaller = write_frame(tmp_path / "small.png", gradient[:5, :5])
-    assert check.compare_frames(first, smaller).differing_fraction == 1.0
+    mismatched = check.compare_frames(first, smaller)
+    assert mismatched.differing_fraction == 1.0 and not mismatched.matches
 
 
 def test_the_run_file_yields_the_run_the_driver_waited_for(tmp_path: Path) -> None:
@@ -231,22 +245,46 @@ def test_the_run_file_yields_the_run_the_driver_waited_for(tmp_path: Path) -> No
         check.run_in_document(run_file)
 
 
-def test_twin_pairs_write_the_same_recipe_twice_and_refuse_a_coarse_size_the_source_would_serve(
+def test_twin_pairs_write_the_same_recipe_twice_and_refuse_a_coarse_pair_the_server_would_not_fill(
     tmp_path: Path,
 ) -> None:
     pairs = check.twin_pairs(check.parse_args([]))
     assert [pair.name for pair in pairs] == ["pyramid", "coarse"]
     pyramid, coarse = pairs
-    assert pyramid.source_levels == 4 and coarse.source_levels == 1
+    assert pyramid.source_levels == 4 and not pyramid.generated_coarse
     unsharded = pyramid.unsharded_args(tmp_path)
     sharded = pyramid.sharded_args(tmp_path)
     assert unsharded[0].endswith("pyramid-unsharded.ome.zarr")
     assert sharded[0].endswith("pyramid-sharded.ome.zarr")
     assert sharded[1:] == [*unsharded[1:-1], "--shard", "512", "--overwrite"]
-    assert "--levels" in coarse.generator_args and coarse.generator_args[coarse.generator_args.index("--levels") + 1] == "1"
 
+    # One image, one level, and a source grid the server's own fill covers:
+    # 768x2304 in 256-sample chunks is 3x9 = 27 chunks, under the limit of 32.
+    assert coarse.source_levels == 1 and coarse.generated_coarse
+    assert "--tiles" not in coarse.generator_args
+    args = coarse.generator_args
+    assert args[args.index("--levels") + 1] == "1"
+    assert args[args.index("--chunk") + 1] == "256"
+    assert args[args.index("--size") + 1] == "768,2304"
+
+    # A long axis the source would serve as the coarse tier generates nothing.
     with pytest.raises(SystemExit):
         check.twin_pairs(check.parse_args(["--coarse-size", "2048,2048"]))
+    # A grid the server's own fill cannot finish would stall on a static view.
+    with pytest.raises(SystemExit):
+        check.twin_pairs(check.parse_args(["--coarse-chunk", "64"]))
+    check.twin_pairs(check.parse_args(["--coarse-size", "2304,2304", "--coarse-chunk", "512"]))
+
+
+def test_ready_generated_chunks_sums_the_health_report_over_datasets() -> None:
+    health = {
+        "datasets": [
+            {"name": "a", "generated_coarse": {"status": "healthy", "ready_chunks": 27, "pending_chunks": 0}},
+            {"name": "b", "generated_coarse": {"status": "healthy", "ready_chunks": 5, "pending_chunks": 3}},
+        ]
+    }
+    assert check.ready_generated_chunks(health) == 32
+    assert check.ready_generated_chunks({"datasets": []}) == 0
 
 
 if __name__ == "__main__":
