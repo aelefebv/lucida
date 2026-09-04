@@ -19,6 +19,7 @@ use crate::codec::parse_codec_chain;
 use crate::import_types::*;
 use crate::layout::compute_chunk_byte_layout;
 use crate::parse;
+use crate::shard::ShardLayout;
 use crate::unwritten;
 
 /// Import a dataset from an OME-Zarr store.
@@ -80,16 +81,17 @@ async fn import_single_image(
     let layout = classify_axes(&axes_names, &level_metas[0].shape);
     warn_pinned_axes(id, &layout.pinned);
     let axes = build_axes(&layout.canonical_names);
-    let levels = build_level_geometries(&level_entries, &level_metas, &axes_names)?;
-    let probe_targets = build_probe_targets(&level_entries, &level_metas, &levels);
-    let coarse_level_index =
-        select_source_coarse_level(&levels, data_type, SourceCoarseConfig::default());
     let level_bindings = build_level_binding_infos(
         &axes_names,
         &level_metas,
         data_type_size(data_type),
         &layout.pinned,
     )?;
+    let levels =
+        build_level_geometries(&level_entries, &level_metas, &level_bindings, &axes_names)?;
+    let probe_targets = build_probe_targets(&level_entries, &level_metas, &levels);
+    let coarse_level_index =
+        select_source_coarse_level(&levels, data_type, SourceCoarseConfig::default());
 
     let entity_id = EntityId(id.to_string());
     let image_id = ImageId(id.to_string());
@@ -766,7 +768,14 @@ async fn import_collection(
     let layout = classify_axes(&axes_names, &level_metas[0].shape);
     warn_pinned_axes(id, &layout.pinned);
     let axes = build_axes(&layout.canonical_names);
-    let levels = build_level_geometries(&level_entries, &level_metas, &axes_names)?;
+    let level_bindings = build_level_binding_infos(
+        &axes_names,
+        &level_metas,
+        data_type_size(data_type),
+        &layout.pinned,
+    )?;
+    let levels =
+        build_level_geometries(&level_entries, &level_metas, &level_bindings, &axes_names)?;
 
     // Every tile of a collection shares one multiscale, and whether an export
     // wrote a level is a property of the export — so this is asked once, of
@@ -780,13 +789,6 @@ async fn import_collection(
         )
         .await,
     );
-
-    let level_bindings = build_level_binding_infos(
-        &axes_names,
-        &level_metas,
-        data_type_size(data_type),
-        &layout.pinned,
-    )?;
 
     let positioning_mode = if has_explicit_positions {
         PositioningMode::Explicit
@@ -1224,9 +1226,10 @@ fn data_type_size(dt: DataType) -> u8 {
 /// representative tile of a collection, since OME-Zarr collections require all tiles to
 /// share the same multiscale shape and codec chain).
 ///
-/// Each level is validated independently with [`parse_codec_chain`] and
-/// [`compute_chunk_byte_layout`]; any error is wrapped with the offending
-/// level index so the user can locate it in their dataset (e.g.
+/// Each level is validated independently with [`parse_codec_chain`] (or
+/// [`ShardLayout::from_codec_chain`] when the outer codec is the sharding
+/// codec) and [`compute_chunk_byte_layout`]; any error is wrapped with the
+/// offending level index so the user can locate it in their dataset (e.g.
 /// `"level 0: unsupported codec 'gzip' in storage chain"`). The first
 /// failing level short-circuits — we don't accumulate all failures.
 fn build_level_binding_infos(
@@ -1239,25 +1242,26 @@ fn build_level_binding_infos(
         .iter()
         .enumerate()
         .map(|(i, meta)| {
-            let compression = parse_codec_chain(&meta.codecs).map_err(|e| match e {
-                StoreError::Metadata(msg) => StoreError::Metadata(format!("level {i}: {msg}")),
-                other => other,
-            })?;
-            let chunk_byte_layout = compute_chunk_byte_layout(
-                axes_names,
-                &meta.chunk_grid.configuration.chunk_shape,
-                dtype_size,
-                pinned,
-            )
-            .map_err(|e| match e {
-                StoreError::Metadata(msg) => StoreError::Metadata(format!("level {i}: {msg}")),
-                other => other,
-            })?;
+            let at_level = |e: StoreError| e.in_context(format!("level {i}"));
+            let grid_chunk_shape = &meta.chunk_grid.configuration.chunk_shape;
+            let shard =
+                ShardLayout::from_codec_chain(&meta.codecs, grid_chunk_shape).map_err(at_level)?;
+            let (compression, chunk_shape) = match &shard {
+                Some(layout) => (layout.inner_compression, layout.inner_chunk_shape.clone()),
+                None => (
+                    parse_codec_chain(&meta.codecs).map_err(at_level)?,
+                    grid_chunk_shape.clone(),
+                ),
+            };
+            let chunk_byte_layout =
+                compute_chunk_byte_layout(axes_names, &chunk_shape, dtype_size, pinned)
+                    .map_err(at_level)?;
             Ok(LevelBindingInfo {
                 level_index: i as u32,
                 compression,
-                chunk_shape: meta.chunk_grid.configuration.chunk_shape.clone(),
+                chunk_shape,
                 chunk_byte_layout,
+                shard,
             })
         })
         .collect()
@@ -1291,6 +1295,10 @@ fn build_axes(axes_names: &[String]) -> Vec<Axis> {
 }
 
 /// Build per-level [`LevelGeometry`], normalizing shapes to canonical 5D.
+///
+/// The chunk shape comes from the level's binding, not its chunk grid, so a
+/// sharded level reports its inner chunk shape: the shape the planner, the
+/// wire, and the renderer work in.
 ///
 /// A zero chunk dimension is rejected with a [`StoreError`] rather than allowed
 /// to reach the `shape / chunk` grid computation (which would divide by zero and
@@ -1329,16 +1337,17 @@ fn build_probe_targets(
 fn build_level_geometries(
     level_entries: &[parse::LevelEntry],
     level_metas: &[parse::ArrayMeta],
+    level_bindings: &[LevelBindingInfo],
     axes_names: &[String],
 ) -> Result<Vec<LevelGeometry>, StoreError> {
     level_entries
         .iter()
         .zip(level_metas.iter())
+        .zip(level_bindings.iter())
         .enumerate()
-        .map(|(i, (entry, meta))| {
+        .map(|(i, ((entry, meta), binding))| {
             let shape = normalize_to_5d(&meta.shape, axes_names, 1);
-            let chunk_shape =
-                normalize_to_5d(&meta.chunk_grid.configuration.chunk_shape, axes_names, 1);
+            let chunk_shape = normalize_to_5d(&binding.chunk_shape, axes_names, 1);
             if chunk_shape.contains(&0) {
                 return Err(StoreError::Metadata(format!(
                     "level {i}: chunk_shape {chunk_shape:?} has a zero dimension"
@@ -1630,17 +1639,18 @@ async fn build_label(
     let layout = classify_axes(&axes_names, &level_metas[0].shape);
     warn_pinned_axes(&group_prefix, &layout.pinned);
     let axes = build_axes(&layout.canonical_names);
-    // A zero chunk dimension here returns Err, so the label is skipped by the
-    // caller rather than panicking the whole import.
-    let levels = build_level_geometries(&level_entries, &level_metas, &axes_names)?;
-    let coarse_level_index =
-        select_source_coarse_level(&levels, data_type, SourceCoarseConfig::default());
     let level_bindings = build_level_binding_infos(
         &axes_names,
         &level_metas,
         data_type_size(data_type),
         &layout.pinned,
     )?;
+    // A zero chunk dimension here returns Err, so the label is skipped by the
+    // caller rather than panicking the whole import.
+    let levels =
+        build_level_geometries(&level_entries, &level_metas, &level_bindings, &axes_names)?;
+    let coarse_level_index =
+        select_source_coarse_level(&levels, data_type, SourceCoarseConfig::default());
 
     let image_label = parse::parse_image_label(&group_json);
 
@@ -1925,18 +1935,128 @@ mod tests {
         }
     }
 
-    /// The shard module can read an inner chunk out of a shard, and import
-    /// does not yet let a sharded dataset in. Until the server serves inner
-    /// chunks, accepting the codec would open a dataset that renders blank. The
-    /// rejection names the codec so the reason is findable in the metadata.
+    /// Every level reports its inner chunk shape as its chunk shape, so the
+    /// planner, the wire, and the renderer see the same geometry from both
+    /// twins.
     #[tokio::test]
-    async fn committed_sharded_twin_is_still_rejected_at_import() {
+    async fn committed_sharded_twin_imports_in_inner_chunks() {
         let store = cached_store(&committed_fixture("twin-sharded.ome.zarr"));
-        let error = import_dataset(&store, "twin", "twin")
+        let result = import_dataset(&store, "twin", "twin").await.unwrap();
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+
+        let image = &result.manifest.images()[0];
+        let levels = &image.multiscale.levels;
+        assert_eq!(levels.len(), 3);
+        for (level, (extent, grid)) in levels.iter().zip([(40, 5), (20, 3), (10, 2)]) {
+            assert_eq!(level.shape, [1, 2, 1, extent, extent]);
+            assert_eq!(level.chunk_shape, [1, 1, 1, 8, 8]);
+            assert_eq!(level.grid_shape, [1, 2, 1, grid, grid]);
+        }
+
+        let seed = &result.binding_seed.images[0];
+        assert_eq!(seed.levels.len(), 3);
+        for level in &seed.levels {
+            assert_eq!(level.compression, crate::codec::StorageCompression::Zstd);
+            assert_eq!(level.chunk_shape, vec![1, 8, 8]);
+            assert_eq!(level.chunk_byte_layout.canonical_byte_size, 8 * 8 * 2);
+            let shard = level.shard.as_ref().expect("the level is sharded");
+            assert_eq!(shard.chunks_per_shard, [1, 2, 2]);
+        }
+    }
+
+    fn sharded_codecs_with(edit: impl FnOnce(&mut serde_json::Value)) -> Vec<serde_json::Value> {
+        let path = format!("{}/0/zarr.json", committed_fixture("twin-sharded.ome.zarr"));
+        let meta: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let mut codecs = meta["codecs"].as_array().unwrap().clone();
+        edit(&mut codecs[0]["configuration"]);
+        codecs
+    }
+
+    /// Import a one-level 64x64 dataset stored as one 64x64 chunk-grid cell
+    /// with `codecs` as its chain. Under a sharding codec that cell is one
+    /// shard.
+    async fn import_with_sharded_codecs(
+        name: &str,
+        codecs: Vec<serde_json::Value>,
+    ) -> Result<ImportResult, StoreError> {
+        let dir = temp_dir(name);
+        create_5d_fixture_with_per_level_codecs(&dir, &[codecs]);
+        let store = cached_store(dir.to_str().unwrap());
+        let result = import_dataset(&store, name, name).await;
+        let _ = fs::remove_dir_all(&dir);
+        result
+    }
+
+    /// The one-level fixture is 64x64 in one 64x64 shard, and the twin's 8x8
+    /// inner chunks tile it.
+    #[tokio::test]
+    async fn import_accepts_a_sharded_chain_with_an_allowed_inner_chain() {
+        let codecs = sharded_codecs_with(|config| {
+            config["chunk_shape"] = serde_json::json!([1, 1, 1, 8, 8]);
+        });
+        let result = import_with_sharded_codecs("sharded-accepted", codecs)
             .await
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("sharding_indexed"), "{error}");
+            .unwrap();
+        let level = &result.manifest.images()[0].multiscale.levels[0];
+        assert_eq!(level.chunk_shape, [1, 1, 1, 8, 8]);
+        assert_eq!(level.grid_shape, [1, 1, 1, 8, 8]);
+        let binding = &result.binding_seed.images[0].levels[0];
+        assert_eq!(binding.chunk_shape, [1, 1, 1, 8, 8]);
+        assert_eq!(binding.compression, crate::codec::StorageCompression::Zstd);
+        assert_eq!(
+            binding.shard.as_ref().unwrap().chunks_per_shard,
+            [1, 1, 1, 8, 8]
+        );
+    }
+
+    /// A sharded layout lucida cannot read fails at import, not at first
+    /// render. Each message names the sharding codec, so the open
+    /// diagnostics classify it as an unsupported codec, and names the value
+    /// that was refused, so it can be found in the metadata.
+    #[tokio::test]
+    async fn import_refuses_sharded_layouts_it_cannot_read_by_codec_and_by_value() {
+        type ConfigEdit = fn(&mut serde_json::Value);
+        let cases: [(&str, ConfigEdit, &str); 3] = [
+            (
+                "sharded-nested",
+                |config| {
+                    config["chunk_shape"] = serde_json::json!([1, 1, 1, 8, 8]);
+                    config["codecs"] = serde_json::json!([{
+                        "name": "sharding_indexed",
+                        "configuration": {}
+                    }]);
+                },
+                "nested",
+            ),
+            (
+                "sharded-inner-gzip",
+                |config| {
+                    config["chunk_shape"] = serde_json::json!([1, 1, 1, 8, 8]);
+                    config["codecs"][1] = serde_json::json!({"name": "gzip"});
+                },
+                "gzip",
+            ),
+            (
+                "sharded-index-middle",
+                |config| {
+                    config["chunk_shape"] = serde_json::json!([1, 1, 1, 8, 8]);
+                    config["index_location"] = serde_json::json!("middle");
+                },
+                "middle",
+            ),
+        ];
+        for (name, edit, refused) in cases {
+            let error = import_with_sharded_codecs(name, sharded_codecs_with(edit))
+                .await
+                .unwrap_err();
+            assert!(matches!(error, StoreError::Metadata(_)), "{name}: {error}");
+            let message = error.to_string();
+            assert!(message.contains("level 0"), "{name}: {message}");
+            assert!(message.contains("sharding_indexed"), "{name}: {message}");
+            assert!(message.contains("codec"), "{name}: {message}");
+            assert!(message.contains(refused), "{name}: {message}");
+        }
     }
 
     #[tokio::test]
