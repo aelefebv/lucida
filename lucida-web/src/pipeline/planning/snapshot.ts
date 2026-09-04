@@ -240,7 +240,7 @@ export function buildPlanningSnapshot(
   // 4. Snake-case → camelCase translation for every visible entity, via the
   //    shared per-row builder so the full path and the delta fold produce
   //    byte-identical records. Joins the WASM payload with the manifest for
-  //    `levels`, `detailLevel`, `coarseLevel`, and `parentId`, and with the
+  //    `levels`, `targetLevel`, `coarseLevel`, and `parentId`, and with the
   //    layout for `layoutPositionVox`. A `Tile` with no parent edge throws
   //    inside {@link makeEntitySnapshot}, surfacing the producer-invariant
   //    violation at assembly rather than later in `groupMembers`.

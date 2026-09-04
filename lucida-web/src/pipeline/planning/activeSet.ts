@@ -67,12 +67,15 @@ export function groupMembers(entities: EntitySnapshot[]): MemberGroup[] {
  * Build the active set, one entry per entity.
  *
  * Every visible image or tile becomes a tile entry. Its detail tier
- * holds one level, the dataset's level pin or level 0 when none is set,
- * clamped to the pyramid. Its coarse tier holds the source level the
- * coarse tier points at, when that level is no finer. Proxy assets and
- * projected size play no part, because the tier model renders from
- * chunks alone. A visible group entity gets no entry of its own; its
- * tiles carry its geometry.
+ * holds one level, the entity's target level. The snapshot already
+ * resolved that level from the level pin or the screen and clamped it to
+ * the image's source levels (see `snapshotDelta.ts`); nothing here
+ * chooses a level, and nothing here reads memory or residency. Its
+ * coarse tier holds the source level the coarse tier points at, when
+ * that level is no finer.
+ * Proxy assets and projected size play no part, because the tier model
+ * renders from chunks alone. A visible group entity gets no entry of its
+ * own; its tiles carry its geometry.
  *
  * Invisible entities still appear so downstream consumers (the CPU
  * cache's eviction tier mapping, the trace's per-tick tallies) can see
@@ -97,14 +100,13 @@ export function buildActiveSet(entities: EntitySnapshot[]): ActiveSetEntry[] {
 }
 
 function makeTileEntry(entity: EntitySnapshot): TileEntry {
-  const detailLevel = clampLevel(entity, entity.detailLevel);
   return {
     kind: "tile",
     entityId: entity.entityId,
     imageId: entity.imageId,
     mode: "tiles-with-detail",
-    detailLevels: [detailLevel],
-    coarseLevel: compatibleCoarseLevel(entity, detailLevel),
+    detailLevels: [entity.targetLevel],
+    coarseLevel: compatibleCoarseLevel(entity, entity.targetLevel),
     proxyKind: undefined,
     proxyAvailable: false,
     groupProxyAvailable: false,
@@ -119,11 +121,11 @@ function clampLevel(entity: EntitySnapshot, level: number): number {
 
 function compatibleCoarseLevel(
   entity: EntitySnapshot,
-  detailLevel: number,
+  targetLevel: number,
 ): number | null {
   if (entity.coarseLevel === null) return null;
   const coarseLevel = clampLevel(entity, entity.coarseLevel);
-  if (coarseLevel < detailLevel) return null;
+  if (coarseLevel < targetLevel) return null;
   return coarseLevel;
 }
 
