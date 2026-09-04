@@ -30,6 +30,7 @@ describe("worker dispatch upload feedback", () => {
 
     await dispatchMessage(ctx, {
       type: "sliceChunkData",
+      tier: "detail",
       memberId: "img-0:ch1",
       chunks: [{ data: new ArrayBuffer(8), dataType: "uint16", x: 0, y: 0, z: 0, key: "0/0/1/0/0/0" }],
       level: 0,
@@ -63,6 +64,7 @@ describe("worker dispatch upload feedback", () => {
 
     await dispatchMessage(ctx, {
       type: "volumeChunkData",
+      tier: "detail",
       memberId: "img-0",
       chunks: [{ data: new ArrayBuffer(8), dataType: "uint16", x: 0, y: 0, z: 0, key: "0/0/0/0/0/0" }],
       level: 0,

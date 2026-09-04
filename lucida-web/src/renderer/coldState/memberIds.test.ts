@@ -27,6 +27,7 @@ import {
 import type {
   ColdStateActiveEntry,
   ColdStateMessage,
+  ColdStateTileEntry,
 } from "../workerProtocol.ts";
 
 function identityMatrix(): Float32Array {
@@ -47,7 +48,7 @@ function defaultDisplay(): ColdStateActiveEntry["displayStateByChannel"][number]
 }
 
 function makeEntry(
-  opts: Partial<Omit<ColdStateActiveEntry, "kind">> & {
+  opts: Partial<Omit<ColdStateTileEntry, "kind" | "mode">> & {
     entityId: string;
     imageId: string;
     mode: ColdStateActiveEntry["mode"];
@@ -55,8 +56,6 @@ function makeEntry(
 ): ColdStateActiveEntry {
   const base = {
     entityId: opts.entityId,
-    targetLod: opts.targetLod ?? 0,
-    detailOwnedLodRange: opts.detailOwnedLodRange ?? [0, 0] as [number, number],
     levels: opts.levels ?? [
       { level: 0, chunkShape: [1, 64, 64] as [number, number, number], gridShape: [1, 4, 4] as [number, number, number], levelDims: [1, 256, 256] as [number, number, number] },
     ],
@@ -80,6 +79,8 @@ function makeEntry(
     kind: "tile",
     imageId: opts.imageId,
     mode: opts.mode,
+    detailLevels: opts.detailLevels ?? [0],
+    coarseLevel: opts.coarseLevel ?? null,
     parentGroupId: opts.parentGroupId ?? null,
   };
 }

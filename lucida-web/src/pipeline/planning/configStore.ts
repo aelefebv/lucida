@@ -5,7 +5,7 @@
  *
  * Persistence schema (`localStorage["lucida.planning.config"]`):
  *
- *     { "schemaVersion": 2, "config": { ...PlanningConfig } }
+ *     { "schemaVersion": 3, "config": { ...PlanningConfig } }
  *
  * Missing/unparseable/version-mismatch falls back to defaults with one
  * log line; partial configs merge over defaults.
@@ -20,8 +20,12 @@ import {
 /** localStorage key for the persisted config envelope. */
 const STORAGE_KEY = "lucida.planning.config";
 
-/** Schema version for the persisted envelope. Bump on breaking changes. */
-const SCHEMA_VERSION = 2;
+/**
+ * Schema version for the persisted envelope. Bump on breaking changes.
+ * Version 3 dropped the pre-tier planner's knobs (the mode thresholds,
+ * the overview lane offset, and the path toggle).
+ */
+const SCHEMA_VERSION = 3;
 
 type Listener = () => void;
 

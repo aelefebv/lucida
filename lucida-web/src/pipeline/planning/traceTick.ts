@@ -51,10 +51,9 @@ export function recordPlanningTick(
   tick.counters[TickCounter.CullingAfterXyBounds] = plan.stats.culling.afterXyBounds;
   tick.counters[TickCounter.CullingAfterZRange] = plan.stats.culling.afterZRange;
   tick.counters[TickCounter.CullingAfterFrustum] = plan.stats.culling.afterFrustum;
-  tick.counters[TickCounter.CatalogDegradations] = plan.stats.catalogDegradations;
 
   // Tallied over the whole active set, not the row-capped slice the panel
-  // renders. Invisible entries have no promotion mode and are counted in
+  // renders. Invisible entries carry no mode and are counted in
   // none of the three, so they sum to at most the total.
   tick.counters[TickCounter.ActiveSetTotal] = plan.activeSet.length;
   for (const entry of plan.activeSet) {

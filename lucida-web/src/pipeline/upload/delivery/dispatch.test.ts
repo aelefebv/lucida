@@ -90,6 +90,7 @@ function makeChunkDelivery(
     dataType: "uint16",
     epochs: EPOCHS,
     lane: "detail",
+    residencyTier: "detail",
     ...overrides,
   };
 }

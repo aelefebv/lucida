@@ -1,6 +1,6 @@
 /**
- * Top-level pure planner. Composes promotion + chunk iteration +
- * three-lane scheduling into a {@link RequestPlan}. See ADR 0029.
+ * Top-level pure planner. Composes active-set assignment + chunk
+ * iteration + lane scheduling into a {@link RequestPlan}. See ADR 0029.
  */
 
 import type { SceneEpochs } from "../epochs.ts";
@@ -9,10 +9,9 @@ import {
   emitCoarseLane,
   emitDetailLane,
   emitMinimapLane,
-  emitOverviewLane,
   emitPrefetchLane,
 } from "./emit.ts";
-import { assignCoarseDetailModes, assignModes } from "./modes.ts";
+import { buildActiveSet } from "./activeSet.ts";
 import {
   emptyPlanStats,
   type ActiveSetEntry,
@@ -62,14 +61,15 @@ function compareProxyRequests(a: ProxyRequest, b: ProxyRequest): number {
  * This is steps 2–7 of {@link plan} — every lane emission plus the final
  * priority sort — factored out so a caller that already holds a valid active
  * set can regenerate its requests for a changed selection (a T-scrub or
- * Z-plane move) WITHOUT re-resolving modes or rebuilding the snapshot. Pure in
- * `(activeSet, snapshot, config)`; mutates only the supplied `stats`.
+ * Z-plane move) WITHOUT re-assigning the active set or rebuilding the
+ * snapshot. Pure in `(activeSet, snapshot, config)`; mutates only the
+ * supplied `stats`.
  *
  * The requests are a pure function of the active set, the entities, the visible
  * region, and the selection, so reusing an unchanged active set with a snapshot
  * whose only difference is `selection.t` / `selection.z` (and, on a Z move,
  * `visibleRegion.zRangeVox`) yields exactly the requests a full {@link plan}
- * would produce for that selection — with none of `assignModes`' work.
+ * would produce for that selection — with none of `buildActiveSet`'s work.
  *
  * Postconditions match {@link plan}: `requests` and `proxyRequests` are sorted
  * ascending by priority; output objects are freshly allocated and carry
@@ -110,13 +110,8 @@ export function emitPlanRequests(
   // Step 4: Prefetch lane — for tile-mode entries only.
   emitPrefetchLane(activeSet, snapshot, entityById, stats, allRequests, config);
 
-  // Step 5: Context fallback lane. The bridge emits explicit coarse
-  // tier chunks; the legacy path keeps the old overview migration lane.
-  if (config.coarseDetailEnabled) {
-    emitCoarseLane(activeSet, snapshot, entityById, stats, allRequests, config);
-  } else {
-    emitOverviewLane(snapshot.entities, snapshot, stats, allRequests, config);
-  }
+  // Step 5: Coarse lane, the floor under the detail tier.
+  emitCoarseLane(activeSet, snapshot, entityById, stats, allRequests, config);
 
   // Step 6: Minimap lane (see ADR 0023). Small seed sets ride the
   // dedicated top lane (priority 0 — the sort puts them first, so the
@@ -174,17 +169,8 @@ export function plan(
 
   const stats = emptyPlanStats();
 
-  // Step 1: Resolve residency entries. The coarse/detail bridge bypasses
-  // proxy promotion while the legacy path preserves the three-tier model.
-  const activeSet = config.coarseDetailEnabled
-    ? assignCoarseDetailModes(snapshot.entities)
-    : assignModes(
-        snapshot.entities,
-        state.previousActiveSet,
-        snapshot.assetCatalog,
-        stats,
-        config,
-      );
+  // Step 1: Build the active set.
+  const activeSet = buildActiveSet(snapshot.entities);
 
   // Steps 2–7: emit + sort the request streams for the resolved active set.
   const { requests, proxyRequests } = emitPlanRequests(activeSet, snapshot, stats, config);

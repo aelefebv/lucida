@@ -136,8 +136,10 @@ a different population)
 
 **Lane**:
 Which concurrent stream of work a unit belongs to. The planner emits `detail`,
-`coarse`, `prefetch`, `minimap` and `overview`; the label path is its own stream
-again. Orthogonal to every other dimension — the same work happens in each lane.
+`coarse`, `prefetch`, and `minimap`. `overview` is historical: the coarsest-pass
+fallback lane from before the coarse tier, no longer emitted. The label path is
+its own stream again. Orthogonal to every other dimension — the same work
+happens in each lane.
 _Avoid_: track (a track is a timeline row), queue, channel
 
 **Wanted set**:

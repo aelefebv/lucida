@@ -7,7 +7,7 @@
 import { Axis } from "../../axes.ts";
 import type { VisibleRegion } from "../viewport.ts";
 import { chunkWithinRenderRadius } from "../renderRadius.ts";
-import { chunkWorldDims, iterateChunks, iterateChunksAtLodRange } from "./chunks.ts";
+import { chunkWorldDims, iterateChunks, iterateChunksAtLevels } from "./chunks.ts";
 import {
   MINIMAP_SEED_BULK_LANE_OFFSET,
   MINIMAP_SEED_FAST_MAX_CHUNKS,
@@ -26,7 +26,7 @@ import type {
 
 /**
  * Numeric priority for a chunk request. Lower = more urgent. Lane
- * offset separates lanes (detail < proxy < prefetch < overview);
+ * offset separates lanes (minimap < detail < proxy < prefetch < coarse);
  * importance and distance order within a lane.
  */
 function computePriority(
@@ -164,23 +164,14 @@ export function emitDetailLane(
     const entity = entityById.get(entry.entityId);
     if (entity === undefined) continue;
 
-    const chunks = entry.detailLevel !== undefined
-      ? iterateChunksAtLodRange(
-          entity,
-          [entry.detailLevel, entry.detailLevel],
-          snapshot.visibleRegion,
-          snapshot.selection,
-          stats,
-          datasetId,
-        )
-      : iterateChunks(
-          entity,
-          entry,
-          snapshot.visibleRegion,
-          snapshot.selection,
-          stats,
-          datasetId,
-        );
+    const chunks = iterateChunks(
+      entity,
+      entry,
+      snapshot.visibleRegion,
+      snapshot.selection,
+      stats,
+      datasetId,
+    );
     for (const req of chunks) {
       if (!requestWithinRenderRadius(req, snapshot.visibleRegion, entity, config.detailRenderRadiusView)) {
         continue;
@@ -270,23 +261,14 @@ export function emitPrefetchLane(
         t: nextT,
       };
 
-      const chunks = entry.detailLevel !== undefined
-        ? iterateChunksAtLodRange(
-            entity,
-            [entry.detailLevel, entry.detailLevel],
-            snapshot.visibleRegion,
-            prefetchSelection,
-            stats,
-            datasetId,
-          )
-        : iterateChunks(
-            entity,
-            entry,
-            snapshot.visibleRegion,
-            prefetchSelection,
-            stats,
-            datasetId,
-          );
+      const chunks = iterateChunks(
+        entity,
+        entry,
+        snapshot.visibleRegion,
+        prefetchSelection,
+        stats,
+        datasetId,
+      );
       for (const req of chunks) {
         if (!requestWithinRenderRadius(req, snapshot.visibleRegion, entity, config.detailRenderRadiusView)) {
           continue;
@@ -307,9 +289,9 @@ export function emitPrefetchLane(
 }
 
 /**
- * Coarse lane — source-backed chunk-only fallback. Emits exactly the
- * coarse level selected on each tile entry, independent of the detail
- * lane. Intermediate pyramid levels are intentionally skipped.
+ * The coarse lane is the source-backed floor under the detail tier. It
+ * emits exactly the coarse level on each tile entry, independent of the
+ * detail lane, and skips the levels between.
  */
 export function emitCoarseLane(
   activeSet: ActiveSetEntry[],
@@ -322,14 +304,14 @@ export function emitCoarseLane(
   const datasetId = snapshot.datasetId;
   for (const entry of activeSet) {
     if (entry.kind !== "tile") continue;
-    if (entry.coarseLevel === undefined || entry.coarseLevel === null) continue;
+    if (entry.coarseLevel === null) continue;
 
     const entity = entityById.get(entry.entityId);
     if (entity === undefined) continue;
 
-    const chunks = iterateChunksAtLodRange(
+    const chunks = iterateChunksAtLevels(
       entity,
-      [entry.coarseLevel, entry.coarseLevel],
+      [entry.coarseLevel],
       snapshot.visibleRegion,
       snapshot.selection,
       stats,
@@ -354,56 +336,12 @@ export function emitCoarseLane(
 }
 
 /**
- * Overview lane — for every entity in the snapshot (visible or not),
- * iterate the coarsest LOD's chunks via {@link iterateChunksAtLodRange}.
- * No active-set entry needed; the overview range is always
- * `[coarsest, coarsest]`. Removes the previous synthetic-entry
- * workaround that was in step 5 of `plan()`.
- *
- * Mutates `allRequests`.
- */
-export function emitOverviewLane(
-  entities: EntitySnapshot[],
-  snapshot: PlanningSnapshot,
-  stats: PlanStats,
-  allRequests: ChunkRequest[],
-  config: PlanningConfig,
-): void {
-  const datasetId = snapshot.datasetId;
-  for (const entity of entities) {
-    if (entity.levels.length === 0) continue;
-
-    const coarsest = Math.max(entity.levels.length - 1, 0);
-    const chunks = iterateChunksAtLodRange(
-      entity,
-      [coarsest, coarsest],
-      snapshot.visibleRegion,
-      snapshot.selection,
-      stats,
-      datasetId,
-    );
-    for (const req of chunks) {
-      const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity, config.depthBiasView);
-      req.lane = "overview";
-      req.tier = "coarse";
-      req.priority = computePriority(
-        config.overviewLaneOffset,
-        entity.importance,
-        dist,
-        config,
-      );
-      allRequests.push(req);
-    }
-  }
-}
-
-/**
  * Compute distance from a chunk's world-space center to the view center.
  *
  * Uses the visible region's sortCenter if available, otherwise the visible
  * region midpoint — offset by entity position to get local coordinates.
  * Converts grid indices to world-voxel positions using per-level chunk
- * world sizes so that distance is comparable across LODs.
+ * world sizes so that distance is comparable across levels.
  *
  * `depthBiasView` (issue #532) shifts the focal Z — the center-out
  * spawn origin along the near↔far axis — by a fraction of the visible

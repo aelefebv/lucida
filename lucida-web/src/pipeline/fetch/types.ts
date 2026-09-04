@@ -13,6 +13,7 @@
  */
 
 import type { SceneEpochs } from "../epochs.ts";
+import type { ResidencyTier } from "../residencyTier.ts";
 import type { ProxyHeaderJs } from "./contentSource.ts";
 import type { InteractionMode } from "./interactionMode.ts";
 
@@ -61,12 +62,12 @@ export interface CpuCacheConfig {
 }
 
 /**
- * Logical lane each request travels on. `minimap` and `overview` share
- * the overview store (see ADR 0023); `detail` and `prefetch` live in
- * the main chunk store.
+ * Logical lane each request travels on. `minimap`, `coarse`, and
+ * `overview` share the overview store (see ADR 0023). `detail` and
+ * `prefetch` live in the main chunk store. The planner no longer emits
+ * `overview`. The name stays because the trace's lane column and the
+ * store routing still know it.
  */
-export type ResidencyTier = "detail" | "coarse";
-
 export type Lane = "minimap" | "detail" | "coarse" | "prefetch" | "overview";
 
 /**
@@ -111,7 +112,7 @@ export interface ReadyChunkDelivery {
   dataType: string;
   epochs: SceneEpochs;
   lane: Lane;
-  residencyTier?: ResidencyTier;
+  residencyTier: ResidencyTier;
   /** Lower numbers are delivered first when present on CpuCache output. */
   priority?: number;
   /**
@@ -151,7 +152,7 @@ export interface CacheEntry {
   data: ArrayBuffer;
   sizeBytes: number;
   lane: Lane;
-  residencyTier?: ResidencyTier;
+  residencyTier: ResidencyTier;
   tier: EvictionTier;
   entityId: string;
   imageId: string;

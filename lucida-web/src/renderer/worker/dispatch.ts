@@ -71,7 +71,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
 
     case "sliceChunkData": {
       const memberId = msg.memberId;
-      const tier = msg.tier ?? "detail";
+      const tier = msg.tier;
       const poolKey =
         ctx.state.memberTierToPool.get(memberTierKey(memberId, tier)) ??
         (tier === "detail" ? ctx.state.memberToPool.get(memberId) : undefined);
@@ -106,7 +106,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
 
     case "volumeChunkData": {
       const memberId = msg.memberId;
-      const tier = msg.tier ?? "detail";
+      const tier = msg.tier;
       const poolKey =
         ctx.state.memberTierToPool.get(memberTierKey(memberId, tier)) ??
         (tier === "detail" ? ctx.state.memberToPool.get(memberId) : undefined);

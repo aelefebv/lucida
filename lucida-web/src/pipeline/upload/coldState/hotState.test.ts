@@ -14,15 +14,16 @@ import { describe, it, expect } from "vitest";
 import type {
   ColdStateActiveEntry,
   ColdStateMessage,
+  ColdStateTileEntry,
 } from "../../../renderer/workerProtocol.ts";
 import type { SceneEpochs } from "../../epochs.ts";
 import { buildViewHotState } from "./hotState.ts";
 
-function makeEntry(over: Partial<Omit<ColdStateActiveEntry, "kind">>): ColdStateActiveEntry {
+function makeEntry(
+  over: Partial<Omit<ColdStateTileEntry, "kind" | "mode">> & { mode?: ColdStateActiveEntry["mode"] },
+): ColdStateActiveEntry {
   const base = {
     entityId: over.entityId ?? "ent",
-    targetLod: over.targetLod ?? 0,
-    detailOwnedLodRange: over.detailOwnedLodRange ?? [0, 0] as [number, number],
     levels: over.levels ?? [],
     proxyKind: over.proxyKind,
     proxyAvailable: over.proxyAvailable ?? false,
@@ -47,6 +48,8 @@ function makeEntry(over: Partial<Omit<ColdStateActiveEntry, "kind">>): ColdState
     kind: "tile",
     imageId: over.imageId ?? "img",
     mode,
+    detailLevels: over.detailLevels ?? [0],
+    coarseLevel: over.coarseLevel ?? null,
     parentGroupId: over.parentGroupId ?? null,
   };
 }

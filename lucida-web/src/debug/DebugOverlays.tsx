@@ -35,6 +35,7 @@ import {
   visibleRegionCenterVox,
   type ChunkRadiusGeometry,
 } from "../pipeline/renderRadius.ts";
+import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type { VisibleRegion } from "../pipeline/viewport.ts";
 import type {
   CacheStateSnapshot,
@@ -48,7 +49,6 @@ import {
   onOverlaysChanged,
   onRenderRadiusPreviewChanged,
   type DebugOverlay,
-  type RenderRadiusPreviewTier,
 } from "./logging.ts";
 import { radiusSpecsForOverlay } from "./radiusPreview.ts";
 
@@ -88,8 +88,7 @@ interface GroupBadge {
   title: string;
 }
 
-type OverlayTier = "detail" | "coarse";
-type DisplayTier = OverlayTier | "missing";
+type DisplayTier = ResidencyTier | "missing";
 
 export interface TierCoverageCounts {
   /** Chunks requested by the current plan for this tier. */
@@ -141,7 +140,7 @@ interface ChunkRect {
 
 interface RadiusPath {
   key: string;
-  tier: OverlayTier;
+  tier: ResidencyTier;
   plane: "xy" | "xz" | "yz";
   d: string;
   title: string;
@@ -218,10 +217,10 @@ function emptyGroupTierCoverage(): GroupTierCoverage {
   };
 }
 
-function overlayTierForRequest(req: ChunkRequest): OverlayTier | null {
-  if (req.lane === "detail") return "detail";
-  if (req.lane === "coarse" || req.lane === "overview") return "coarse";
-  return null;
+/** The tier a request fills for the view. Speculative and minimap work is not coverage. */
+function overlayTierForRequest(req: ChunkRequest): ResidencyTier | null {
+  if (req.lane === "prefetch" || req.lane === "minimap") return null;
+  return req.tier;
 }
 
 // eslint-disable-next-line react-refresh/only-export-components
@@ -559,7 +558,7 @@ export function DebugOverlays({
   useEffect(() => {
     return onOverlaysChanged(() => setEnabled(readEnabled()));
   }, []);
-  const [radiusPreviewTier, setRadiusPreviewTier] = useState<RenderRadiusPreviewTier | null>(
+  const [radiusPreviewTier, setRadiusPreviewTier] = useState<ResidencyTier | null>(
     getRenderRadiusPreviewTier,
   );
   useEffect(() => {
@@ -797,17 +796,16 @@ export function DebugOverlays({
                 if (ent.parent === entry.entityId && ent.kind === "Tile") {
                   const img = ds.manifest.images.find(i => i.image_id === ent.id)
                     ?? ds.manifest.images[0];
-                  // group-as-proxy entries have no LOD bookkeeping —
-                  // surface `null` so the badge skips the LOD label.
+                  // group-as-proxy entries have no level bookkeeping, so the
+                  // badge shows no level.
                   if (img) addTile(entry.entityId, ent.id, img.image_id, "group-as-proxy", null);
                 }
               }
             } else if (entry.kind === "tile") {
               const groupId = parentByEntity.get(entry.entityId) ?? entry.entityId;
-              addTile(groupId, entry.entityId, entry.imageId, entry.mode, entry.targetLod);
+              addTile(groupId, entry.entityId, entry.imageId, entry.mode, entry.detailLevels[0] ?? null);
             }
-            // entry.kind === "invisible" — skipped (not rendered as a
-            // group badge; invisibles never had a promotion mode).
+            // Invisible entries get no badge.
           }
 
           for (const [groupId, agg] of groups) {
@@ -891,10 +889,7 @@ export function DebugOverlays({
           for (const entry of plan.activeSet) {
             if (out.length >= MAX_CHUNK_RECTS) break outer;
 
-            // Invisible entries don't contribute chunks or proxies —
-            // skip them entirely. They live in their own variant;
-            // reading mode/imageId/targetLod here would otherwise be
-            // a type error.
+            // Invisible entries contribute no chunks or proxy assets.
             if (entry.kind === "invisible") continue;
 
             // Group-as-proxy: there's no chunk grid because the group is
@@ -986,7 +981,7 @@ export function DebugOverlays({
 
             const residency = (
               key: string,
-              tier: OverlayTier,
+              tier: ResidencyTier,
               geometry: ChunkRadiusGeometry,
               chunk: { x: number; y: number; z: number },
             ): boolean => {
@@ -1049,7 +1044,7 @@ export function DebugOverlays({
               };
             };
 
-            const appendSource = (level: number, sourceTier: OverlayTier): void => {
+            const appendSource = (level: number, sourceTier: ResidencyTier): void => {
               const lvl = img.multiscale.levels[level];
               if (!lvl) return;
               const geometry = geometryForLevels(lvl0, lvl);
@@ -1133,7 +1128,7 @@ export function DebugOverlays({
             if (coarseLevel !== null) {
               appendSource(coarseLevel, "coarse");
             }
-            appendSource(entry.detailLevel ?? entry.targetLod, "detail");
+            for (const level of entry.detailLevels) appendSource(level, "detail");
           }
         }
         out.sort((a, b) => tierDrawOrder(a) - tierDrawOrder(b));
