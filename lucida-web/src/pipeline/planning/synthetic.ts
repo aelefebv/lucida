@@ -1,13 +1,14 @@
 /** Test fixtures for the planning module. */
 
-import type {
-  EntitySnapshot,
-  TileSnapshot,
-  ImageSnapshot,
-  MinimapChunkCoord,
-  PlanningSnapshot,
-  PlanningState,
-  GroupSnapshot,
+import {
+  initialPlanningState,
+  type EntitySnapshot,
+  type TileSnapshot,
+  type ImageSnapshot,
+  type MinimapChunkCoord,
+  type PlanningSnapshot,
+  type PlanningState,
+  type GroupSnapshot,
 } from "./index.ts";
 
 /**
@@ -26,6 +27,7 @@ export function createSyntheticEntity(
   overrides?: CreateSyntheticEntityOverrides,
 ): EntitySnapshot {
   const kind = overrides?.kind ?? "Image";
+  const levels = overrides?.levels ?? [];
   const base = {
     entityId: overrides?.entityId ?? "entity-0",
     imageId: overrides?.imageId ?? "image-0",
@@ -34,10 +36,12 @@ export function createSyntheticEntity(
     projectedAreaPx2: overrides?.projectedAreaPx2 ?? 10000,
     centroidWorld: overrides?.centroidWorld ?? [0, 0, 0],
     targetLevel: overrides?.targetLevel ?? 0,
+    levelPinned: overrides?.levelPinned ?? false,
+    sourceLevels: overrides?.sourceLevels ?? levels.map((_, index) => index),
     coarseLevel: overrides?.coarseLevel ?? null,
     importance: overrides?.importance ?? 1,
     layoutPositionVox: overrides?.layoutPositionVox ?? [0, 0],
-    levels: overrides?.levels ?? [],
+    levels,
   };
   if (kind === "Tile") {
     const tile: TileSnapshot = {
@@ -98,16 +102,16 @@ export function createSyntheticSnapshot(
 }
 
 /**
- * Construct a {@link PlanningState} for tests. v1 carries a single
- * tile — `previousActiveSet` — so the helper is a thin defaults +
- * spread. Use this when a test needs to feed a non-empty prev set
- * into `plan(snapshot, state)` (e.g. hysteresis carry-over).
+ * Construct a {@link PlanningState} for tests: the state before the
+ * first plan, with overrides spread over it. Use this when a test needs
+ * to feed a non-empty prev set or a remembered zoom into
+ * `plan(snapshot, state)`.
  */
 export function createSyntheticState(
   overrides?: Partial<PlanningState>,
 ): PlanningState {
   return {
-    previousActiveSet: [],
+    ...initialPlanningState(),
     ...overrides,
   };
 }

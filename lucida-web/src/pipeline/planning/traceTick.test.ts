@@ -5,6 +5,7 @@ import { emptyPlanStats } from "./index.ts";
 import type { ActiveSetEntry, ChunkRequest, RequestPlan } from "./types.ts";
 import { TraceRecorder } from "../../trace/recorder.ts";
 import type { TraceTick } from "../../trace/types.ts";
+import { createSyntheticState } from "./index.ts";
 
 const CAUSE = { epoch: "content", dirtyKind: "interactive", source: "test" } as const;
 
@@ -49,7 +50,7 @@ function makePlan(overrides: Partial<RequestPlan> = {}): RequestPlan {
     proxyRequests: [],
     epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
     stats: emptyPlanStats(),
-    nextState: { previousActiveSet: activeSet },
+    nextState: createSyntheticState({ previousActiveSet: activeSet }),
     ...overrides,
   };
 }
