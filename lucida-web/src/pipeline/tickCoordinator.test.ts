@@ -1,10 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { DatasetManifest } from "../manifestTypes.ts";
 import type { DatasetEntry } from "../renderLoopTypes.ts";
-import type { CpuCache } from "./fetch/index.ts";
+import { CpuCache } from "./fetch/index.ts";
+import type { ContentSource } from "./fetch/contentSource.ts";
+import type { DecodePool } from "./fetch/decodePool.ts";
 import type { TickContext } from "../renderLoopTypes.ts";
 import { AssetCatalog } from "./assetCatalog.ts";
-import type { ColdStateMessage } from "../renderer/workerProtocol.ts";
+import type { ColdStateDeltaMessage, ColdStateMessage } from "../renderer/workerProtocol.ts";
 import type { RequestPlan } from "./planning/index.ts";
 import { TickCoordinator } from "./tickCoordinator.ts";
 import { Uploader } from "./upload/uploader.ts";
@@ -219,12 +221,27 @@ function createMockContent(): DatasetManifest {
 }
 
 
-/** Manifest matching {@link createMockSceneWithTiles}: one group, `n` tiles. */
-function createMockContentWithTiles(n: number): DatasetManifest {
+/**
+ * Manifest matching {@link createMockSceneWithTiles}: one group, `n` tiles,
+ * each a pyramid of `levelCount` levels halving from 1024² with 256² chunks.
+ */
+function createMockContentWithTiles(n: number, levelCount = 1): DatasetManifest {
   const entities: Array<Record<string, unknown>> = [
     { id: "group-0", kind: "Group", parent: null, labels: {} },
   ];
   const images: Array<Record<string, unknown>> = [];
+  const levels: Array<Record<string, unknown>> = [];
+  for (let level = 0; level < levelCount; level++) {
+    const side = 1024 >> level;
+    const chunk = Math.min(256, side);
+    levels.push({
+      level_index: level,
+      shape: [1, 1, 1, side, side],
+      chunk_shape: [1, 1, 1, chunk, chunk],
+      grid_shape: [1, 1, 1, side / chunk, side / chunk],
+      scale: [1, 1, 1, 2 ** level, 2 ** level],
+    });
+  }
   for (let i = 0; i < n; i++) {
     entities.push({ id: `tile-${i}`, kind: "Tile", parent: "group-0", labels: {} });
     images.push({
@@ -233,15 +250,7 @@ function createMockContentWithTiles(n: number): DatasetManifest {
       multiscale: {
         axes: [],
         data_type: "uint16",
-        levels: [
-          {
-            level_index: 0,
-            shape: [1, 1, 1, 1024, 1024],
-            chunk_shape: [1, 1, 1, 256, 256],
-            grid_shape: [1, 1, 1, 4, 4],
-            scale: [1, 1, 1, 1, 1],
-          },
-        ],
+        levels,
       },
     });
   }
@@ -1596,7 +1605,7 @@ describe("incremental delta fold", () => {
     // consulted on the folding replan.
     vi.useFakeTimers({ toFake: ["performance"] });
     try {
-      const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContentWithTiles(4) }]]);
+      const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContentWithTiles(4, 3) }]]);
       const orch = makeOrch();
 
       const fold = makeFoldScene({
@@ -1657,7 +1666,7 @@ describe("incremental delta fold", () => {
     // change, the correct entered record.
     vi.useFakeTimers({ toFake: ["performance"] });
     try {
-      const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContentWithTiles(4) }]]);
+      const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContentWithTiles(4, 3) }]]);
       const orch = makeOrch();
 
       const fold = makeFoldScene({
@@ -1720,6 +1729,141 @@ describe("incremental delta fold", () => {
       expect([...byImage.keys()].sort()).toEqual(["img-1", "img-3"]);
       expect(byImage.get("img-1")?.targetLevel).toBe(2);
       expect(byImage.has("img-0")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("carries a target-level change through the fold as a cold-state delta, never a full rebuild", () => {
+    // A zoom is a quantized change, so the record arrives in the delta's
+    // `changed` list rather than forcing a full `view_query`.
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const datasets = new Map<string, DatasetEntry>([
+        ["ds1", { manifest: createMockContentWithTiles(1, 2) }],
+      ]);
+      const orch = makeOrch();
+      const fold = makeFoldScene({
+        fullRows: [foldRow({ target_level: 0 })],
+        deltaScript: [
+          fullPayload([foldRow({ target_level: 0 })]),
+          deltaPayload([], [], [foldRow({ target_level: 1 })]),
+        ],
+        memberPositions: { "tile-0": [0, 0] },
+      });
+      const cpuCache = createMockCpuCache();
+      const client = {
+        coldState: vi.fn(),
+        coldStateDisplay: vi.fn(),
+        coldStateSelection: vi.fn(),
+        coldStateDelta: vi.fn(),
+        viewHotState: vi.fn(),
+      };
+      const ctx = () =>
+        ({ ...(makeCtx(fold.scene, datasets) as object), client, cpuCache }) as unknown as TickContext;
+      const detailLevels = (p: RequestPlan) =>
+        p.requests.filter((r) => r.lane === "detail").map((r) => r.level);
+
+      // Tick 1: the full send at level 0.
+      orch.planAndFetch(ctx(), emptyMinimap);
+      expect(client.coldState).toHaveBeenCalledTimes(1);
+      const first = vi.mocked(cpuCache.submit).mock.calls[0][0] as RequestPlan;
+      expect(detailLevels(first)).toEqual(new Array(16).fill(0));
+      client.coldState.mockClear();
+      vi.mocked(cpuCache.submit).mockClear();
+      fold.viewQuery.mockClear();
+
+      // Tick 2: the zoom out, past the coalescing window.
+      vi.advanceTimersByTime(500);
+      fold.setView(2);
+      orch.planAndFetch(ctx(), emptyMinimap);
+
+      expect(fold.viewQuery).not.toHaveBeenCalled();
+      expect(client.coldState).not.toHaveBeenCalled();
+      expect(client.coldStateDelta).toHaveBeenCalledTimes(1);
+      const deltaMsg = client.coldStateDelta.mock.calls[0][0] as ColdStateDeltaMessage;
+      expect(
+        deltaMsg.upserts.map((u) => [u.entityId, u.kind === "tile" ? u.detailLevels : null]),
+      ).toEqual([["tile-0", [1]]]);
+
+      const second = vi.mocked(cpuCache.submit).mock.calls[0][0] as RequestPlan;
+      expect(detailLevels(second)).toEqual([1, 1, 1, 1]);
+      // No lane wants a level finer than the target.
+      expect(second.requests.some((r) => r.level === 0)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the target level under memory pressure: a cache evicting past its budget never lowers it", async () => {
+    // A real CPU cache with a 1.5-chunk budget, so delivering the four
+    // level-1 chunks evicts. Pressure changes coverage, never the level
+    // (ADR 0061).
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const chunkBytes = 100;
+      const source = {
+        fetch: () =>
+          Promise.resolve({
+            bytes: new ArrayBuffer(chunkBytes),
+            wireFormat: { Raw: { data_type: "uint16" } },
+            dataType: "uint16",
+          }),
+        fetchProxy: () => new Promise(() => {}),
+        handleBinary: () => {},
+      } as unknown as ContentSource;
+      const decode = {
+        decode: (bytes: ArrayBuffer) => Promise.resolve(bytes),
+        activeCount: () => 0,
+        get size() {
+          return 1;
+        },
+        terminate: () => {},
+      } as unknown as DecodePool;
+      const cache = new CpuCache(source, decode, {
+        mainBudgetBytes: chunkBytes + chunkBytes / 2,
+        overviewBudgetBytes: 0,
+      });
+      const submit = vi.spyOn(cache, "submit");
+      const flush = async () => {
+        await new Promise((r) => setTimeout(r, 0));
+        await new Promise((r) => setTimeout(r, 0));
+      };
+
+      const datasets = new Map<string, DatasetEntry>([
+        ["ds1", { manifest: createMockContentWithTiles(1, 2) }],
+      ]);
+      const rows = [foldRow({ target_level: 1 })];
+      const orch = makeOrch();
+      const tick = (view: number) => {
+        const scene = createMockScene({
+          epochs: { content: 1, layout: 1, view, selection: 1 },
+          viewQuery: { visible_entities: rows },
+        });
+        orch.planAndFetch(
+          { ...(makeCtx(scene, datasets) as object), cpuCache: cache } as unknown as TickContext,
+          emptyMinimap,
+        );
+      };
+      const detailLevels = (p: RequestPlan) =>
+        p.requests.filter((r) => r.lane === "detail").map((r) => r.level);
+
+      tick(1);
+      expect(detailLevels(submit.mock.calls[0][0])).toEqual([1, 1, 1, 1]);
+      await flush();
+
+      // Guard against a vacuous test: eviction happened.
+      expect(cache.telemetry().mainBytes).toBeLessThanOrEqual(chunkBytes + chunkBytes / 2);
+      expect(cache.snapshot().cached.get("tile-0")?.size ?? 0).toBeLessThan(4);
+
+      submit.mockClear();
+      vi.advanceTimersByTime(500);
+      tick(2);
+
+      const next = submit.mock.calls[0][0];
+      expect(detailLevels(next)).toEqual([1, 1, 1, 1]);
+      const entry = next.activeSet.find((e) => e.entityId === "tile-0");
+      expect(entry?.kind === "tile" ? entry.detailLevels : null).toEqual([1]);
     } finally {
       vi.useRealTimers();
     }

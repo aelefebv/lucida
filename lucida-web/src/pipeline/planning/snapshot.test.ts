@@ -241,7 +241,7 @@ describe("buildPlanningSnapshot — snake_case → camelCase", () => {
           projected_diagonal_px: 234.5,
           projected_area_px2: 5678,
           centroid_world: [1, 2, 3],
-          target_level: 4,
+          target_level: 1,
           importance: 0.42,
         },
       ],
@@ -255,7 +255,7 @@ describe("buildPlanningSnapshot — snake_case → camelCase", () => {
     expect(e.projectedDiagonalPx).toBe(234.5);
     expect(e.projectedAreaPx2).toBe(5678);
     expect(e.centroidWorld).toEqual([1, 2, 3]);
-    expect(e.targetLevel).toBe(4);
+    expect(e.targetLevel).toBe(1);
     expect(e.importance).toBeCloseTo(0.42);
   });
 });
@@ -444,13 +444,47 @@ describe("buildPlanningSnapshot — pass-through tiles", () => {
   });
 });
 
-describe("buildPlanningSnapshot — coarse/detail metadata", () => {
-  it("defaults detail to source level 0 when no override is present", () => {
-    const built = buildPlanningSnapshot(makeArgs());
-    expect(built!.entities[0].detailLevel).toBe(0);
+describe("buildPlanningSnapshot — target level", () => {
+  function sceneAtScreenLevel(screenLevel: number): WasmScene {
+    return makeStubScene({
+      visibleEntities: [
+        {
+          entity_id: "tile-0",
+          image_id: "img-0",
+          kind: "Tile",
+          visible: true,
+          projected_diagonal_px: 100,
+          projected_area_px2: 10000,
+          centroid_world: [10, 20, 30],
+          target_level: screenLevel,
+          importance: 0.7,
+        },
+      ],
+    });
+  }
+
+  it("follows the level the core reports for the screen when no level pin is set", () => {
+    expect(
+      buildPlanningSnapshot(makeArgs({ scene: sceneAtScreenLevel(0) }))!.entities[0].targetLevel,
+    ).toBe(0);
+    expect(
+      buildPlanningSnapshot(makeArgs({ scene: sceneAtScreenLevel(1) }))!.entities[0].targetLevel,
+    ).toBe(1);
   });
 
-  it("clamps stale detail overrides to selectable source levels", () => {
+  it("holds the target at the level pin regardless of what the screen reports", () => {
+    const pinned = makeDsSettings({ detail_level_override: 0 });
+    expect(
+      buildPlanningSnapshot(makeArgs({ scene: sceneAtScreenLevel(1), dsSettings: pinned }))!
+        .entities[0].targetLevel,
+    ).toBe(0);
+    expect(
+      buildPlanningSnapshot(makeArgs({ scene: sceneAtScreenLevel(0), dsSettings: pinned }))!
+        .entities[0].targetLevel,
+    ).toBe(0);
+  });
+
+  it("clamps a stale level pin to selectable source levels", () => {
     const levels = [
       ...makeLevels(),
       {
@@ -468,10 +502,10 @@ describe("buildPlanningSnapshot — coarse/detail metadata", () => {
       dataset,
       dsSettings: makeDsSettings({ detail_level_override: 99 }),
     }));
-    expect(built!.entities[0].detailLevel).toBe(2);
+    expect(built!.entities[0].targetLevel).toBe(2);
   });
 
-  it("excludes generated levels from detail selection and clamps below them", () => {
+  it("never targets a generated level, whether the pin or the screen names it", () => {
     const levels = [
       ...makeLevels(),
       {
@@ -490,11 +524,17 @@ describe("buildPlanningSnapshot — coarse/detail metadata", () => {
         }),
       ],
     });
-    const built = buildPlanningSnapshot(makeArgs({
+    const pinned = buildPlanningSnapshot(makeArgs({
       dataset,
       dsSettings: makeDsSettings({ detail_level_override: 2 }),
     }));
-    expect(built!.entities[0].detailLevel).toBe(1);
+    expect(pinned!.entities[0].targetLevel).toBe(1);
+
+    const screen = buildPlanningSnapshot(makeArgs({
+      dataset,
+      scene: sceneAtScreenLevel(2),
+    }));
+    expect(screen!.entities[0].targetLevel).toBe(1);
   });
 
   it("uses an explicit valid coarse pointer", () => {
@@ -523,7 +563,7 @@ describe("buildPlanningSnapshot — coarse/detail metadata", () => {
       dataset,
       dsSettings: makeDsSettings({ detail_level_override: 1 }),
     }));
-    expect(built!.entities[0].detailLevel).toBe(1);
+    expect(built!.entities[0].targetLevel).toBe(1);
   });
 });
 

@@ -117,7 +117,6 @@ function projection(map: ReadonlyMap<string, EntitySnapshot>) {
       visible: e.visible,
       targetLevel: e.targetLevel,
       kind: e.kind,
-      detailLevel: e.detailLevel,
       coarseLevel: e.coarseLevel,
       parentId: e.kind === "Tile" ? e.parentId : null,
     }))
@@ -167,7 +166,7 @@ describe("applyViewQueryDelta — Delta", () => {
     const next = applyViewQueryDelta(
       prev,
       delta(
-        [row({ image_id: "img-2", target_level: 3 })],
+        [row({ image_id: "img-2", target_level: 1 })],
         ["img-0"],
         [row({ image_id: "img-1", visible: false })],
       ),
@@ -175,7 +174,7 @@ describe("applyViewQueryDelta — Delta", () => {
     );
     expect([...next.keys()].sort()).toEqual(["img-1", "img-2"]);
     expect(next.get("img-1")?.visible).toBe(false);
-    expect(next.get("img-2")?.targetLevel).toBe(3);
+    expect(next.get("img-2")?.targetLevel).toBe(1);
     // prev is not mutated.
     expect([...prev.keys()].sort()).toEqual(["img-0", "img-1"]);
     expect(prev.get("img-1")?.visible).toBe(true);
@@ -193,14 +192,14 @@ describe("applyViewQueryDelta — keying", () => {
     const next = applyViewQueryDelta(
       null,
       full([
-        row({ entity_id: "shared", image_id: "img-a", target_level: 1 }),
-        row({ entity_id: "shared", image_id: "img-b", target_level: 4 }),
+        row({ entity_id: "shared", image_id: "img-a", target_level: 0 }),
+        row({ entity_id: "shared", image_id: "img-b", target_level: 1 }),
       ]),
       deps,
     );
     expect(next.size).toBe(2);
-    expect(next.get("img-a")?.targetLevel).toBe(1);
-    expect(next.get("img-b")?.targetLevel).toBe(4);
+    expect(next.get("img-a")?.targetLevel).toBe(0);
+    expect(next.get("img-b")?.targetLevel).toBe(1);
   });
 });
 
@@ -249,6 +248,63 @@ describe("applyViewQueryDelta — equivalence over a sequence", () => {
       row({ image_id: "img-3" }),
     ];
     expect(projection(folded)).toEqual(projection(freshBuild(oracleRows, deps)));
+  });
+});
+
+describe("makeEntitySnapshot — target level", () => {
+  it("follows the level the screen calls for when the dataset has no level pin", () => {
+    const deps = makeDeps(["img-0"], makeDsSettings());
+    expect(makeEntitySnapshot(row({ target_level: 0 }), deps).targetLevel).toBe(0);
+    expect(makeEntitySnapshot(row({ target_level: 1 }), deps).targetLevel).toBe(1);
+  });
+
+  it("holds the target at the level pin whatever the screen calls for", () => {
+    const pinnedFine = makeDeps(["img-0"], makeDsSettings({ detail_level_override: 0 }));
+    expect(makeEntitySnapshot(row({ target_level: 1 }), pinnedFine).targetLevel).toBe(0);
+
+    const pinnedCoarse = makeDeps(["img-0"], makeDsSettings({ detail_level_override: 1 }));
+    expect(makeEntitySnapshot(row({ target_level: 0 }), pinnedCoarse).targetLevel).toBe(1);
+  });
+
+  it("clamps a screen level beyond the pyramid to the coarsest source level", () => {
+    const deps = makeDeps(["img-0"], makeDsSettings());
+    expect(makeEntitySnapshot(row({ target_level: 7 }), deps).targetLevel).toBe(1);
+  });
+
+  it("never targets a generated level: a screen level naming one drops to the source level under it", () => {
+    const generated: LevelGeometry = {
+      level_index: 2,
+      shape: [1, 1, 1, 256, 256],
+      chunk_shape: [1, 1, 1, 256, 256],
+      grid_shape: [1, 1, 1, 1, 1],
+      scale: [1, 1, 1, 4, 4],
+    };
+    const spec = {
+      image_id: "img-0",
+      owner: "img-0",
+      multiscale: {
+        axes: [],
+        data_type: "uint16",
+        levels: [...makeLevels(), generated],
+        generated_levels: [{ level_index: 2, role: "coarse" }],
+      },
+    } as unknown as ImageSpec;
+    const deps: SnapshotEntityDeps = {
+      imageSpecById: new Map([["img-0", spec]]),
+      parentByEntityId: new Map(),
+      positions: {},
+      dsSettings: makeDsSettings(),
+    };
+    expect(makeEntitySnapshot(row({ target_level: 2 }), deps).targetLevel).toBe(1);
+    expect(makeEntitySnapshot(row({ target_level: 1 }), deps).targetLevel).toBe(1);
+  });
+
+  it("a changed record's new screen level lands on the folded snapshot", () => {
+    const deps = makeDeps(["img-0"], makeDsSettings());
+    const prev = freshBuild([row({ target_level: 0 })], deps);
+    const next = applyViewQueryDelta(prev, delta([], [], [row({ target_level: 1 })]), deps);
+    expect(next.get("img-0")?.targetLevel).toBe(1);
+    expect(prev.get("img-0")?.targetLevel).toBe(0);
   });
 });
 

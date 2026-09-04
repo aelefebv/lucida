@@ -2,9 +2,16 @@
  * Incremental per-entity snapshot assembly. Holds the single per-row
  * translation from a scene view-query record into an {@link EntitySnapshot}
  * (snake_case → camelCase plus the manifest join for `levels`,
- * `detailLevel`, `coarseLevel`, `parentId`, and `layoutPositionVox`), and
+ * `targetLevel`, `coarseLevel`, `parentId`, and `layoutPositionVox`), and
  * the fold that applies an incremental view-query delta on top of a prior
  * per-image snapshot map.
+ *
+ * # The target level is resolved here, once
+ *
+ * {@link resolveTargetLevel} combines the level pin and the core's screen
+ * level into one `targetLevel`; the planner reads it and chooses no level
+ * of its own. The fold covers both inputs: the screen level is quantized,
+ * and the pin is in the cursor basis the caller invalidates on.
  *
  * The full builder (`snapshot.ts`) and the fold below share
  * {@link makeEntitySnapshot} so a delta-reconstructed snapshot is identical,
@@ -26,9 +33,11 @@
  * are excluded, so a record that appears in no delta between two full
  * snapshots keeps its last-reported continuous values, which may be stale.
  * That staleness is the source of the O(delta) win: a small camera nudge that
- * shifts only continuous fields yields an empty delta and no rebuild. Any
- * consumer that turns a continuous field into a discrete decision must
- * recompute that decision itself rather than infer it from delta membership.
+ * shifts only continuous fields yields an empty delta and no rebuild. A zoom
+ * that moves a record's target level is a quantized change, so it arrives as
+ * a `changed` record and re-runs the row translation. Any consumer that turns
+ * a continuous field into a discrete decision must recompute that decision
+ * itself rather than infer it from delta membership.
  */
 
 import type { ImageSpec } from "../../manifestTypes.ts";
@@ -74,9 +83,9 @@ export type ViewQueryDeltaJson =
 /**
  * Camera-independent inputs to {@link makeEntitySnapshot}: the manifest
  * joins (`imageSpecById`, `parentByEntityId`) and the fixed layout placement
- * (`positions`), plus the per-dataset settings that supply the detail-level
- * override. All four are stable across a camera move, so a caller assembles
- * them once and reuses them for every record in a delta.
+ * (`positions`), plus the per-dataset settings that supply the level pin.
+ * All four are stable across a camera move, so a caller assembles them once
+ * and reuses them for every record in a delta.
  */
 export interface SnapshotEntityDeps {
   imageSpecById: Map<string, ImageSpec>;
@@ -91,7 +100,11 @@ function generatedLevelIndices(imgSpec: ImageSpec | undefined): Set<number> {
   );
 }
 
-function selectableDetailLevels(imgSpec: ImageSpec | undefined): number[] {
+/**
+ * Generated coarse levels belong to the coarse tier and are never a target
+ * (ADR 0040).
+ */
+function selectableSourceLevels(imgSpec: ImageSpec | undefined): number[] {
   if (!imgSpec) return [0];
   const generated = generatedLevelIndices(imgSpec);
   const sourceLevels = imgSpec.multiscale.levels
@@ -101,20 +114,23 @@ function selectableDetailLevels(imgSpec: ImageSpec | undefined): number[] {
   return sourceLevels.length > 0 ? sourceLevels : [0];
 }
 
-function resolveDetailLevel(
+/**
+ * Level pin when set, otherwise the core's screen level, both clamped the
+ * way `MultiscaleInfo::pinned_level` in `lucida-content` clamps a pin. The
+ * core's screen rule ranks every level the pyramid lists, generated ones
+ * included, so the clamp is what keeps the detail tier off a generated
+ * level. Memory and residency are not inputs (ADR 0061).
+ */
+function resolveTargetLevel(
   imgSpec: ImageSpec | undefined,
-  override: number | null | undefined,
+  levelPin: number | null | undefined,
+  screenLevel: number,
 ): number {
-  const selectable = selectableDetailLevels(imgSpec);
-  if (typeof override === "number" && selectable.includes(override)) {
-    return override;
-  }
-  if (typeof override === "number") {
-    const lowerOrEqual = selectable.filter((level) => level <= override).at(-1);
-    if (lowerOrEqual !== undefined) return lowerOrEqual;
-    return selectable[0] ?? 0;
-  }
-  return selectable.includes(0) ? 0 : selectable[0] ?? 0;
+  const selectable = selectableSourceLevels(imgSpec);
+  const requested = typeof levelPin === "number" ? levelPin : screenLevel;
+  if (selectable.includes(requested)) return requested;
+  const finerOrEqual = selectable.filter((level) => level <= requested).at(-1);
+  return finerOrEqual ?? selectable[0] ?? 0;
 }
 
 /**
@@ -133,7 +149,7 @@ export function resolveCoarseLevel(imgSpec: ImageSpec | undefined): number | nul
 
 /**
  * Translate one view-query record into an {@link EntitySnapshot}, joining the
- * scene payload with the manifest for `levels`, `detailLevel`, `coarseLevel`,
+ * scene payload with the manifest for `levels`, `targetLevel`, `coarseLevel`,
  * `parentId`, and `layoutPositionVox`.
  *
  * {@link EntitySnapshot} is a discriminated union: the record's `kind`
@@ -150,7 +166,11 @@ export function makeEntitySnapshot(
 ): EntitySnapshot {
   const imgSpec = deps.imageSpecById.get(row.image_id);
   const levels = imgSpec ? imgSpec.multiscale.levels : [];
-  const detailLevel = resolveDetailLevel(imgSpec, deps.dsSettings?.detail_level_override);
+  const targetLevel = resolveTargetLevel(
+    imgSpec,
+    deps.dsSettings?.detail_level_override,
+    row.target_level,
+  );
   const coarseLevel = resolveCoarseLevel(imgSpec);
   const layoutPositionVox =
     deps.positions[row.entity_id] ?? ([0, 0] as [number, number]);
@@ -161,8 +181,7 @@ export function makeEntitySnapshot(
     projectedDiagonalPx: row.projected_diagonal_px,
     projectedAreaPx2: row.projected_area_px2,
     centroidWorld: row.centroid_world,
-    targetLevel: row.target_level,
-    detailLevel,
+    targetLevel,
     coarseLevel,
     importance: row.importance,
     layoutPositionVox,
