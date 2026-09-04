@@ -27,7 +27,7 @@ import {
   DEFAULT_PLANNING_CONFIG,
   mergeConfig,
 } from "./planning/index.ts";
-import type { PlanningConfig } from "./planning/index.ts";
+import type { CreateSyntheticEntityOverrides, PlanningConfig } from "./planning/index.ts";
 import type {
   ActiveSetEntry,
   EntitySnapshot,
@@ -1642,6 +1642,157 @@ describe("plan() edge cases", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Prefetch lane — the next level in the zoom direction (#1000)
+// ---------------------------------------------------------------------------
+
+describe("prefetch lane — the next level in the zoom direction", () => {
+  // A three-level pyramid in 256² chunks, viewed whole at target level 1:
+  // level 0 is 1024² (4x4 = 16 chunks), level 1 is 512² (2x2 = 4), and
+  // level 2 is 256² (1 chunk). `timepoints` sets the T extent of every
+  // level; the default of one leaves the timepoint prefetch nothing to do.
+  function makeZoomEntity(
+    overrides: CreateSyntheticEntityOverrides = {},
+    timepoints = 1,
+  ): EntitySnapshot {
+    return createSyntheticEntity({
+      entityId: "e0",
+      imageId: "img0",
+      kind: "Image",
+      targetLevel: 1,
+      levels: [
+        makeLevelGeo(0, [timepoints, 1, 1, 1024, 1024], [1, 1, 1, 256, 256]),
+        makeLevelGeo(1, [timepoints, 1, 1, 512, 512], [1, 1, 1, 256, 256]),
+        makeLevelGeo(2, [timepoints, 1, 1, 256, 256], [1, 1, 1, 256, 256]),
+      ],
+      ...overrides,
+    });
+  }
+
+  function snapshotAtZoom(effectiveZoom: number, entity: EntitySnapshot): PlanningSnapshot {
+    return createSyntheticSnapshot({
+      entities: [entity],
+      visibleRegion: makeVisibleRegion({ effectiveZoom }),
+    });
+  }
+
+  function planAfterZoom(
+    from: number,
+    to: number,
+    entity: EntitySnapshot = makeZoomEntity(),
+    config: PlanningConfig = DEFAULT_PLANNING_CONFIG,
+  ) {
+    const first = plan(snapshotAtZoom(from, entity), createSyntheticState(), config);
+    return plan(snapshotAtZoom(to, entity), first.nextState, config);
+  }
+
+  const prefetchOf = (result: ReturnType<typeof plan>) =>
+    result.requests.filter((r) => r.lane === "prefetch");
+
+  it("prefetches the next finer level for the visible region after a zoom in", () => {
+    const prefetch = prefetchOf(planAfterZoom(1, 2));
+
+    expect(prefetch.length).toBeGreaterThan(0);
+    expect(new Set(prefetch.map((r) => r.level))).toEqual(new Set([0]));
+    expect(prefetch.every((r) => r.tier === "detail" && r.t === 0)).toBe(true);
+  });
+
+  it("prefetches the next coarser level for the visible region after a zoom out", () => {
+    const prefetch = prefetchOf(planAfterZoom(2, 1));
+
+    expect(prefetch).toHaveLength(1);
+    expect(prefetch[0].level).toBe(2);
+    expect(prefetch[0].tier).toBe("detail");
+  });
+
+  it("keeps the lane within its budget: prefetchDepth target-level sets, nearest the view first", () => {
+    // Four target-level chunks are in view and the depth is 2, so the lane
+    // may hold 8 requests. With no future timepoint the whole budget goes to
+    // the finer level, which has 16 chunks in view. The 8 nearest the view
+    // center win, so the 4 central chunks are in and the 4 corners are out.
+    const prefetch = prefetchOf(planAfterZoom(1, 2));
+
+    expect(prefetch).toHaveLength(2 * 4);
+    const cells = new Set(prefetch.map((r) => `${r.y},${r.x}`));
+    for (const central of ["1,1", "1,2", "2,1", "2,2"]) expect(cells.has(central)).toBe(true);
+    for (const corner of ["0,0", "0,3", "3,0", "3,3"]) expect(cells.has(corner)).toBe(false);
+  });
+
+  it("gives the level step the lane's last step and the timepoints the ones before it", () => {
+    // Two future timepoints and depth 2: T+1 keeps the first step, the finer
+    // level takes the second, and T+2 drops out.
+    const twoAhead = prefetchOf(planAfterZoom(1, 2, makeZoomEntity({}, 3)));
+    const timepoint = twoAhead.filter((r) => r.level === 1);
+    const level = twoAhead.filter((r) => r.level === 0);
+    expect(timepoint).toHaveLength(4);
+    expect(timepoint.every((r) => r.t === 1)).toBe(true);
+    expect(level).toHaveLength(4);
+    expect(level.every((r) => r.t === 0)).toBe(true);
+    expect(twoAhead).toHaveLength(8);
+  });
+
+  it("ranks the level step's lane offset behind the timepoint steps'", () => {
+    // Lane offsets are not bands (the distance term is unbounded and a
+    // finer chunk sits nearer the center), so zero the distance weight to
+    // assert the offsets alone.
+    const prefetch = prefetchOf(
+      planAfterZoom(1, 2, makeZoomEntity({}, 3), mergeConfig({ distanceWeight: 0 })),
+    );
+    const timepoint = prefetch.filter((r) => r.level === 1);
+    const level = prefetch.filter((r) => r.level === 0);
+    expect(Math.min(...level.map((r) => r.priority))).toBeGreaterThan(
+      Math.max(...timepoint.map((r) => r.priority)),
+    );
+  });
+
+  it("emits no level prefetch when the prefetch lane is off", () => {
+    const prefetch = prefetchOf(
+      planAfterZoom(1, 2, makeZoomEntity(), mergeConfig({ prefetchDepth: 0 })),
+    );
+    expect(prefetch).toHaveLength(0);
+  });
+
+  it("gives a pinned dataset no level prefetch, and its timepoints every step", () => {
+    expect(prefetchOf(planAfterZoom(1, 2, makeZoomEntity({ levelPinned: true })))).toHaveLength(0);
+
+    const timeseries = prefetchOf(planAfterZoom(1, 2, makeZoomEntity({ levelPinned: true }, 3)));
+    expect(timeseries).toHaveLength(2 * 4);
+    expect(timeseries.every((r) => r.level === 1 && (r.t === 1 || r.t === 2))).toBe(true);
+  });
+
+  it("knows no direction before the first zoom change", () => {
+    expect(prefetchOf(planAfterZoom(1, 1))).toHaveLength(0);
+  });
+
+  it("keeps the last zoom direction while the zoom is unchanged", () => {
+    const entity = makeZoomEntity();
+    const zoomedIn = planAfterZoom(1, 2, entity);
+    const panned = plan(snapshotAtZoom(2, entity), zoomedIn.nextState);
+
+    const prefetch = prefetchOf(panned);
+    expect(prefetch.length).toBeGreaterThan(0);
+    expect(prefetch.every((r) => r.level === 0)).toBe(true);
+  });
+
+  it("follows the latest zoom change when the direction reverses", () => {
+    const entity = makeZoomEntity();
+    const zoomedIn = planAfterZoom(1, 2, entity);
+    const zoomedOut = plan(snapshotAtZoom(1.5, entity), zoomedIn.nextState);
+
+    expect(prefetchOf(zoomedOut).map((r) => r.level)).toEqual([2]);
+  });
+
+  it("never prefetches a level outside the image's source levels", () => {
+    // Level 2 is a generated coarse level, so zooming out from target 1
+    // finds no coarser source level to prefetch.
+    const generatedCoarsest = makeZoomEntity({ sourceLevels: [0, 1] });
+    expect(prefetchOf(planAfterZoom(2, 1, generatedCoarsest))).toHaveLength(0);
+
+    const atFinest = makeZoomEntity({ targetLevel: 0 });
+    expect(prefetchOf(planAfterZoom(1, 2, atFinest))).toHaveLength(0);
+  });
+});
+
 describe("iterateChunks edge cases", () => {
   it("tile-mode entry with empty levels → empty result", () => {
     const entity = createSyntheticEntity({
@@ -1667,7 +1818,7 @@ describe("plan() with stale carry-forward state", () => {
     // entries pointing to ids that don't exist anymore. plan() should
     // not throw and the empty entities list should produce an empty
     // active set.
-    const stale: PlanningState = {
+    const stale: PlanningState = createSyntheticState({
       previousActiveSet: [
         { kind: "group-as-proxy", entityId: "ghost-group" },
         {
@@ -1682,7 +1833,7 @@ describe("plan() with stale carry-forward state", () => {
           groupProxyAvailable: false,
         },
       ],
-    };
+    });
     const snap = createSyntheticSnapshot({ entities: [] });
 
     expect(() => plan(snap, stale)).not.toThrow();
