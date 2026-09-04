@@ -110,7 +110,7 @@ function makeMatrices(): Map<string, { model: Float32Array; inv: Float32Array }>
 // ---------------------------------------------------------------------------
 
 describe("buildColdActiveEntry", () => {
-  it("maps a `tile` entry forwarding LOD + mode + proxy flags + parentGroupId", () => {
+  it("maps a `tile` entry forwarding tier levels + mode + proxy flags + parentGroupId", () => {
     const entityById = new Map([["ent-a", makeTile("ent-a", "img-a", "group-0")]]);
     const matricesByEntity = makeMatrices();
     const tileEntry: ActiveSetEntry = {
@@ -118,9 +118,8 @@ describe("buildColdActiveEntry", () => {
       entityId: "ent-a",
       imageId: "img-a",
       mode: "tiles-with-proxy-fallback",
-      targetLod: 1,
-      coarsestDetailLod: 3,
-      detailOwnedLodRange: [1, 3],
+      detailLevels: [1],
+      coarseLevel: 3,
       proxyKind: "TileProxy3D",
       proxyAvailable: true,
       groupProxyAvailable: false,
@@ -130,8 +129,9 @@ describe("buildColdActiveEntry", () => {
 
     expect(result.entityId).toBe("ent-a");
     expect(result.imageId).toBe("img-a");
-    expect(result.targetLod).toBe(1);
-    expect(result.detailOwnedLodRange).toEqual([1, 3]);
+    if (result.kind !== "tile") throw new Error("expected tile");
+    expect(result.detailLevels).toEqual([1]);
+    expect(result.coarseLevel).toBe(3);
     expect(result.mode).toBe("tiles-with-proxy-fallback");
     expect(result.proxyKind).toBe("TileProxy3D");
     expect(result.proxyAvailable).toBe(true);
@@ -150,7 +150,7 @@ describe("buildColdActiveEntry", () => {
     expect(result.invModelMatrix[5]).toBe(1);
   });
 
-  it("maps a `group-as-proxy` entry to mode group-as-proxy, targetLod 0, GroupProxy3D, etc.", () => {
+  it("maps a `group-as-proxy` entry to mode group-as-proxy, GroupProxy3D, etc.", () => {
     const matricesByEntity = new Map<string, { model: Float32Array; inv: Float32Array }>();
     const synthM = new Float32Array(16); synthM[0] = 30; synthM[5] = 30; synthM[10] = 30; synthM[15] = 1;
     const synthInv = new Float32Array(16); synthInv[0] = 1/30; synthInv[5] = 1/30; synthInv[10] = 1/30; synthInv[15] = 1;
@@ -165,8 +165,6 @@ describe("buildColdActiveEntry", () => {
     // Guard the assertion so the type narrows cleanly.
     if (result.kind !== "group-as-proxy") throw new Error("expected group-as-proxy");
     expect((result as unknown as Record<string, unknown>).imageId).toBeUndefined();
-    expect(result.targetLod).toBe(0);
-    expect(result.detailOwnedLodRange).toEqual([0, 0]);
     expect(result.mode).toBe("group-as-proxy");
     expect(result.proxyKind).toBe("GroupProxy3D");
     expect(result.proxyAvailable).toBe(true);
@@ -176,7 +174,7 @@ describe("buildColdActiveEntry", () => {
     expect(result.invModelMatrix[0]).toBeCloseTo(1 / 30);
   });
 
-  it("maps an `invisible` entry to legacy tiles-with-detail mode at coarsestLod", () => {
+  it("maps an `invisible` entry to a tiles-with-detail entry holding its coarsest level", () => {
     const entityById = new Map([["ent-x", makeTile("ent-x", "img-x", "group-0")]]);
     const entry: ActiveSetEntry = {
       kind: "invisible",
@@ -189,8 +187,9 @@ describe("buildColdActiveEntry", () => {
 
     expect(result.entityId).toBe("ent-x");
     expect(result.imageId).toBe("img-x");
-    expect(result.targetLod).toBe(3);
-    expect(result.detailOwnedLodRange).toEqual([3, 3]);
+    if (result.kind !== "tile") throw new Error("expected tile");
+    expect(result.detailLevels).toEqual([3]);
+    expect(result.coarseLevel).toBeNull();
     expect(result.mode).toBe("tiles-with-detail");
     expect(result.proxyKind).toBeUndefined();
     expect(result.proxyAvailable).toBe(false);
@@ -208,9 +207,8 @@ describe("buildColdState", () => {
         entityId: "ent-a",
         imageId: "img-a",
         mode: "tiles-with-detail",
-        targetLod: 0,
-        coarsestDetailLod: 0,
-        detailOwnedLodRange: [0, 0],
+        detailLevels: [0],
+        coarseLevel: null,
         proxyAvailable: false,
         groupProxyAvailable: false,
       } as ActiveSetEntry,
@@ -249,9 +247,8 @@ describe("buildColdState", () => {
         entityId: "ent-a",
         imageId: "img-a",
         mode: "tiles-with-detail",
-        targetLod: 0,
-        coarsestDetailLod: 0,
-        detailOwnedLodRange: [0, 0],
+        detailLevels: [0],
+        coarseLevel: null,
         proxyAvailable: true,
         proxyKind: "TileProxy3D",
         groupProxyAvailable: false,
@@ -288,9 +285,8 @@ describe("buildColdState", () => {
         entityId: "ent-a",
         imageId: "img-a",
         mode: "tiles-with-detail",
-        targetLod: 0,
-        coarsestDetailLod: 0,
-        detailOwnedLodRange: [0, 0],
+        detailLevels: [0],
+        coarseLevel: null,
         proxyAvailable: false,
         groupProxyAvailable: false,
       } as ActiveSetEntry,
@@ -352,9 +348,8 @@ describe("buildColdState", () => {
         entityId: "ent-a",
         imageId: "img-a",
         mode: "tiles-with-detail",
-        targetLod: 0,
-        coarsestDetailLod: 0,
-        detailOwnedLodRange: [0, 0],
+        detailLevels: [0],
+        coarseLevel: null,
         proxyAvailable: false,
         groupProxyAvailable: false,
       } as ActiveSetEntry,
@@ -376,8 +371,10 @@ describe("buildColdState", () => {
     expect(msg.activeSet).toHaveLength(3);
     expect(msg.activeSet[0].mode).toBe("group-as-proxy");
     expect(msg.activeSet[1].mode).toBe("tiles-with-detail");
-    expect(msg.activeSet[2].mode).toBe("tiles-with-detail"); // invisible legacy encoding
-    expect(msg.activeSet[2].targetLod).toBe(2);              // invisible @ coarsestLod
+    expect(msg.activeSet[2].mode).toBe("tiles-with-detail"); // invisible encoding
+    const invisible = msg.activeSet[2];
+    if (invisible.kind !== "tile") throw new Error("expected tile");
+    expect(invisible.detailLevels).toEqual([2]);             // invisible @ coarsestLod
   });
 
   it("empty active set → empty cold message activeSet", () => {
@@ -404,9 +401,8 @@ describe("buildColdState", () => {
         entityId: "ent-a",
         imageId: "img-a",
         mode: "tiles-with-detail",
-        targetLod: 0,
-        coarsestDetailLod: 0,
-        detailOwnedLodRange: [0, 0],
+        detailLevels: [0],
+        coarseLevel: null,
         proxyAvailable: false,
         groupProxyAvailable: false,
       } as ActiveSetEntry,
@@ -455,9 +451,8 @@ function tileEntry(over: Partial<Extract<ActiveSetEntry, { kind: "tile" }>>): Ac
     entityId: "ent",
     imageId: "img",
     mode: "tiles-with-detail",
-    targetLod: 0,
-    coarsestDetailLod: 0,
-    detailOwnedLodRange: [0, 0],
+    detailLevels: [0],
+    coarseLevel: null,
     proxyAvailable: false,
     groupProxyAvailable: false,
     ...over,
@@ -466,14 +461,14 @@ function tileEntry(over: Partial<Extract<ActiveSetEntry, { kind: "tile" }>>): Ac
 
 describe("activeEntryReuseKey", () => {
   it("is equal for two tile entries that produce a byte-identical descriptor", () => {
-    const a = tileEntry({ entityId: "a", imageId: "img-a", targetLod: 2, detailOwnedLodRange: [2, 4] });
-    const b = tileEntry({ entityId: "a", imageId: "img-a", targetLod: 2, detailOwnedLodRange: [2, 4] });
+    const a = tileEntry({ entityId: "a", imageId: "img-a", detailLevels: [2], coarseLevel: 4 });
+    const b = tileEntry({ entityId: "a", imageId: "img-a", detailLevels: [2], coarseLevel: 4 });
     expect(activeEntryReuseKey(a)).toBe(activeEntryReuseKey(b));
   });
 
-  it("differs when a descriptor-affecting field (targetLod) changes", () => {
-    const a = tileEntry({ entityId: "a", imageId: "img-a", targetLod: 2 });
-    const b = tileEntry({ entityId: "a", imageId: "img-a", targetLod: 3 });
+  it("differs when a descriptor-affecting field (detailLevels) changes", () => {
+    const a = tileEntry({ entityId: "a", imageId: "img-a", detailLevels: [2] });
+    const b = tileEntry({ entityId: "a", imageId: "img-a", detailLevels: [3] });
     expect(activeEntryReuseKey(a)).not.toBe(activeEntryReuseKey(b));
   });
 
@@ -537,14 +532,14 @@ describe("buildColdStateDelta", () => {
 
   it("carries only changed/added descriptors, removed ids, and the full order", () => {
     const prev: ActiveSetEntry[] = [
-      tileEntry({ entityId: "a", imageId: "img-a", targetLod: 1 }),
-      tileEntry({ entityId: "b", imageId: "img-b", targetLod: 1 }),
+      tileEntry({ entityId: "a", imageId: "img-a", detailLevels: [1] }),
+      tileEntry({ entityId: "b", imageId: "img-b", detailLevels: [1] }),
     ];
     const next: ActiveSetEntry[] = [
-      // a unchanged (reused), b LOD changed (upsert), c is new (upsert)
-      tileEntry({ entityId: "a", imageId: "img-a", targetLod: 1 }),
-      tileEntry({ entityId: "b", imageId: "img-b", targetLod: 2 }),
-      tileEntry({ entityId: "c", imageId: "img-c", targetLod: 0 }),
+      // a unchanged (reused), b level changed (upsert), c is new (upsert)
+      tileEntry({ entityId: "a", imageId: "img-a", detailLevels: [1] }),
+      tileEntry({ entityId: "b", imageId: "img-b", detailLevels: [2] }),
+      tileEntry({ entityId: "c", imageId: "img-c", detailLevels: [0] }),
     ];
     const delta = buildColdStateDelta(commonArgs(next, prev));
 
@@ -604,12 +599,8 @@ describe("reuse-key ⇔ descriptor contract", () => {
       entityId: "ent-a",
       imageId: "img-a",
       mode: "tiles-with-detail",
-      targetLod: 2,
-      coarsestDetailLod: 5,
-      detailOwnedLodRange: [2, 4],
-      detailLevel: 2,
+      detailLevels: [2, 3],
       coarseLevel: 4,
-      wantedLodLevels: [2, 3],
       proxyKind: "TileProxy3D",
       proxyAvailable: true,
       groupProxyAvailable: true,
@@ -621,12 +612,9 @@ describe("reuse-key ⇔ descriptor contract", () => {
   // regression this guards.
   const tileMutations: Array<[string, (t: Extract<ActiveSetEntry, { kind: "tile" }>) => void]> = [
     ["imageId", (t) => { t.imageId = "img-z"; }],
-    ["targetLod", (t) => { t.targetLod = 3; }],
-    ["detailOwnedLodRange[0]", (t) => { t.detailOwnedLodRange = [1, 4]; }],
-    ["detailOwnedLodRange[1]", (t) => { t.detailOwnedLodRange = [2, 6]; }],
-    ["detailLevel", (t) => { t.detailLevel = 3; }],
+    ["detailLevels (member)", (t) => { t.detailLevels = [3, 3]; }],
+    ["detailLevels (length)", (t) => { t.detailLevels = [2, 3, 4]; }],
     ["coarseLevel", (t) => { t.coarseLevel = null; }],
-    ["wantedLodLevels", (t) => { t.wantedLodLevels = [2, 3, 4]; }],
     ["mode", (t) => { t.mode = "tiles-with-proxy-fallback"; }],
     ["proxyKind", (t) => { t.proxyKind = undefined; }],
     ["proxyAvailable", (t) => { t.proxyAvailable = false; }],
@@ -653,14 +641,12 @@ describe("reuse-key ⇔ descriptor contract", () => {
   });
 
   it("(b) two tile entries with the same reuse key build byte-identical descriptors", () => {
-    // `a` and `b` are equal in every descriptor-affecting field but differ in a
-    // field the builder does NOT read (`coarsestDetailLod`) — so they share a key
-    // AND must produce identical descriptors. If a future descriptor field were
-    // read by the builder but omitted from the key, varying it here (or in a new
-    // mutation case above) would break one of these two properties.
+    // `a` and `b` are equal in every descriptor-affecting field, so they share
+    // a key and must produce identical descriptors. If a future descriptor field
+    // were read by the builder but omitted from the key, varying it in a new
+    // mutation case above would break property (a).
     const a = baseTile();
     const b = baseTile();
-    b.coarsestDetailLod = 999; // not a descriptor input, not in the key
     expect(activeEntryReuseKey(a)).toBe(activeEntryReuseKey(b));
 
     const entityById = new Map([["ent-a", makeTile("ent-a", "img-a", "group-0")]]);

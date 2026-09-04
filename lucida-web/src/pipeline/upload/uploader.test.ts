@@ -203,6 +203,7 @@ function makeChunkDelivery(overrides?: Partial<ReadyChunkDelivery>): ReadyChunkD
     dataType: "uint16",
     epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
     lane: "detail",
+    residencyTier: "detail",
     priority: 10,
     ...overrides,
   };
@@ -517,6 +518,7 @@ describe("Uploader worker feedback", () => {
     const missing: MissingChunk = {
       kind: "chunk",
       datasetId: "ds1",
+      tier: "detail",
       entityId: "tile-0",
       memberId: "img-0:ch2",
       c: 2,
@@ -529,6 +531,7 @@ describe("Uploader worker feedback", () => {
       "img-0",
       2,
       "0/0/2/0/0/0",
+      "detail",
     );
   });
 });

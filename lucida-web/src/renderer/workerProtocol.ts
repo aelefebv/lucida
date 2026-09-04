@@ -1,6 +1,7 @@
 /** Discriminated-union message types for main <-> render worker communication. */
 
 import type { SceneEpochs } from "../pipeline/epochs.ts";
+import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type { VisibleRegion } from "../pipeline/viewport.ts";
 
 /** Atlas budget for the fixed-size 3D volume atlas (per dataset). */
@@ -40,7 +41,7 @@ export interface Chunk {
 export interface SliceChunkDataMessage {
   type: "sliceChunkData";
   epochs: SceneEpochs;
-  tier?: "detail" | "coarse";
+  tier: ResidencyTier;
   /**
    * Worker-side member id (the per-channel chunk owner). Format:
    * `imageId` for single-channel layers, `imageId:chN` for
@@ -96,7 +97,7 @@ export interface LabelSliceChunkDataMessage {
 export interface VolumeChunkDataMessage {
   type: "volumeChunkData";
   epochs: SceneEpochs;
-  tier?: "detail" | "coarse";
+  tier: ResidencyTier;
   /** See {@link SliceChunkDataMessage.memberId}. */
   memberId: string;
   chunks: Chunk[];
@@ -449,11 +450,6 @@ interface ColdStateActiveEntryBase {
   entityId: string;
   /** Layout placement in full-resolution voxel coordinates. */
   layoutPositionVox?: [number, number];
-  targetLod: number;
-  detailOwnedLodRange: [number, number]; // [finest, coarsest]
-  detailLevel?: number;
-  coarseLevel?: number | null;
-  wantedLodLevels?: number[];
   levels: Array<{
     level: number;
     chunkShape: [number, number, number]; // [Z, Y, X]
@@ -527,6 +523,15 @@ export type ColdStateActiveEntry =
       imageId: string;
       mode: "tiles-with-detail" | "tiles-with-proxy-fallback";
       /**
+       * Levels the detail tier holds for this entity, finest first. This
+       * is the planner's `TileEntry.detailLevels`, carried through
+       * unchanged. The worker allocates one detail pool section per level
+       * and reports missing chunks at each.
+       */
+      detailLevels: number[];
+      /** Level the coarse tier holds for this entity, or `null` for none. */
+      coarseLevel: number | null;
+      /**
        * Parent group id for tile entries (so the worker can map a
        * tile's descriptor back to its parent's groupProxyHandle).
        * `null` for tiles that don't belong to a group. The orchestrator
@@ -547,6 +552,9 @@ export type ColdStateActiveEntry =
       /** Groups have no parent group. */
       parentGroupId: null;
     });
+
+/** The tile variant of {@link ColdStateActiveEntry}, the entries that carry chunks. */
+export type ColdStateTileEntry = Extract<ColdStateActiveEntry, { kind: "tile" }>;
 
 /**
  * Per-channel display state in cold state. The worker writes these
@@ -675,8 +683,8 @@ export interface ColdStateSelectionMessage {
  * carries only the delta against the dataset's most recent {@link ColdStateMessage}:
  *
  *   - `upserts` — descriptors for entities that are new to the active set or
- *     whose view-dependent fields (target LOD, LOD range, mode, proxy flags)
- *     changed. Built by the exact same `buildColdActiveEntry` path a full cold
+ *     whose view-dependent fields (detail levels, coarse level, mode, proxy
+ *     flags) changed. Built by the exact same `buildColdActiveEntry` path a full cold
  *     state uses, so they are byte-identical to what a full rebuild would emit.
  *   - `removedEntityIds` — entities that left the active set.
  *   - `activeSetOrder` — the full new active-set order, as entity ids. The
@@ -803,7 +811,7 @@ export interface ChunksEvictedMessage {
 export type MissingChunk = {
   kind: "chunk";
   datasetId: string;
-  tier?: "detail" | "coarse";
+  tier: ResidencyTier;
   entityId: string;
   /**
    * Worker-side member id that owns the missing chunk. Single-channel

@@ -13,12 +13,12 @@
  * dropped so a wrapped ring is visible rather than inferred.
  */
 
+import { RESIDENCY_TIERS } from "../pipeline/residencyTier.ts";
 import { RingSlots } from "./ring.ts";
 import { StringPool } from "./stringPool.ts";
 import {
   POINT_EVENT_KINDS,
   POINT_EVENT_REASONS,
-  RESIDENCY_TIER_NAMES,
   type ChunkEventSource,
   type PointEventIndex,
   type PointEventReason,
@@ -140,7 +140,7 @@ export class EventRing {
               datasetId: this.strings.get(this.datasetIds[slot]),
               entityId: this.strings.get(this.entityIds[slot]),
               imageId: this.strings.get(this.imageIds[slot]),
-              residencyTier: RESIDENCY_TIER_NAMES[this.tiers[slot]],
+              residencyTier: RESIDENCY_TIERS[this.tiers[slot]],
               level,
               t,
               c: ch,

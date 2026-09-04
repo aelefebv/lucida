@@ -9,8 +9,10 @@ import type {
   ColdStateActiveEntry,
   MissingChunk,
   MissingProxy,
+  ColdStateTileEntry,
 } from "./workerProtocol.ts";
 import type { SceneEpochs } from "../pipeline/epochs.ts";
+import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type { VisibleRegion } from "../pipeline/viewport.ts";
 
 /** Type-narrowing helper: only chunk-kind entries from a wanted-set. */
@@ -58,7 +60,9 @@ function makeVisibleRegion(
  * sites keep working unchanged (`mode: "group-as-proxy"` with
  * `imageId: ""` yields the group-as-proxy variant).
  */
-type WantedSetEntryOverrides = Partial<Omit<ColdStateActiveEntry, "kind">>;
+type WantedSetEntryOverrides = Partial<Omit<ColdStateTileEntry, "kind" | "mode">> & {
+  mode?: ColdStateActiveEntry["mode"];
+};
 function makeActiveEntry(
   overrides?: WantedSetEntryOverrides,
 ): ColdStateActiveEntry {
@@ -68,8 +72,6 @@ function makeActiveEntry(
   identity[0] = identity[5] = identity[10] = identity[15] = 1;
   const base = {
     entityId: overrides?.entityId ?? "entity-0",
-    targetLod: overrides?.targetLod ?? 0,
-    detailOwnedLodRange: overrides?.detailOwnedLodRange ?? [0, 0] as [number, number],
     levels: overrides?.levels ?? [
       {
         level: 0,
@@ -81,9 +83,6 @@ function makeActiveEntry(
     proxyKind: overrides?.proxyKind,
     proxyAvailable: overrides?.proxyAvailable ?? false,
     groupProxyAvailable: overrides?.groupProxyAvailable ?? false,
-    detailLevel: overrides?.detailLevel,
-    coarseLevel: overrides?.coarseLevel,
-    wantedLodLevels: overrides?.wantedLodLevels,
     modelMatrix: overrides?.modelMatrix ?? identity,
     invModelMatrix: overrides?.invModelMatrix ?? identity,
     displayStateByChannel: overrides?.displayStateByChannel ?? {
@@ -113,6 +112,8 @@ function makeActiveEntry(
     kind: "tile",
     imageId: overrides?.imageId ?? "img",
     mode,
+    detailLevels: overrides?.detailLevels ?? [0],
+    coarseLevel: overrides?.coarseLevel ?? null,
     parentGroupId: overrides?.parentGroupId ?? null,
   };
 }
@@ -165,7 +166,7 @@ function buildMemberToPool(volumeAtlases: Map<string, AtlasSnapshot>): Map<strin
   return m;
 }
 
-function tierPool(entries: Array<[memberId: string, tier: "detail" | "coarse", poolKey: string]>): Map<string, string> {
+function tierPool(entries: Array<[memberId: string, tier: ResidencyTier, poolKey: string]>): Map<string, string> {
   return new Map(entries.map(([memberId, tier, poolKey]) => [`${memberId}|${tier}`, poolKey]));
 }
 
@@ -371,9 +372,8 @@ describe("computeWantedSet", () => {
       }),
       activeSet: [
         makeActiveEntry({
-          detailLevel: 0,
+          detailLevels: [0],
           coarseLevel: 2,
-          wantedLodLevels: [0, 2],
           levels: [
             { level: 0, chunkShape: [32, 32, 32], gridShape: [2, 4, 4], levelDims: [64, 128, 128] },
             { level: 2, chunkShape: [32, 64, 64], gridShape: [2, 2, 2], levelDims: [64, 128, 128] },
@@ -416,9 +416,8 @@ describe("computeWantedSet", () => {
       }),
       activeSet: [
         makeActiveEntry({
-          detailLevel: 1,
+          detailLevels: [1],
           coarseLevel: 1,
-          wantedLodLevels: [1],
           levels: [
             { level: 1, chunkShape: [32, 32, 32], gridShape: [2, 4, 4], levelDims: [64, 128, 128] },
           ],
@@ -461,9 +460,8 @@ describe("computeWantedSet", () => {
       }),
       activeSet: [
         makeActiveEntry({
-          detailLevel: 0,
+          detailLevels: [0],
           coarseLevel: 1,
-          wantedLodLevels: [0, 1],
           levels: [
             { level: 0, chunkShape: [1, 256, 256], gridShape: [1, 4, 4], levelDims: [1, 1024, 1024] },
             { level: 1, chunkShape: [1, 256, 256], gridShape: [1, 2, 2], levelDims: [1, 512, 512] },
@@ -514,9 +512,8 @@ describe("computeWantedSet", () => {
       viewMode: "slice",
       activeSet: [
         makeActiveEntry({
-          detailLevel: 0,
+          detailLevels: [0],
           coarseLevel: 2,
-          wantedLodLevels: [0, 2],
           levels: [
             { level: 0, chunkShape: [8, 32, 32], gridShape: [4, 4, 4], levelDims: [32, 128, 128] },
             { level: 2, chunkShape: [16, 64, 64], gridShape: [2, 2, 2], levelDims: [32, 128, 128] },
@@ -578,8 +575,8 @@ describe("computeWantedSet", () => {
     expect(result.missing).toHaveLength(0);
   });
 
-  it("multi-LOD wanted-set: missing chunks across LODs 0, 1, 2", () => {
-    // Visible region covers 1x1 in XY, 1 in Z at each LOD
+  it("multi-level wanted-set: missing chunks across levels 0, 1, 2", () => {
+    // Visible region covers 1x1 in XY, 1 in Z at each level
     const coldState = makeColdState({
       visibleRegion: makeVisibleRegion({
         xyBoundsVox: [0, 0, 32, 32],
@@ -587,7 +584,7 @@ describe("computeWantedSet", () => {
       }),
       activeSet: [
         makeActiveEntry({
-          detailOwnedLodRange: [0, 2],
+          detailLevels: [0, 1, 2],
           levels: [
             { level: 0, chunkShape: [32, 32, 32], gridShape: [2, 4, 4], levelDims: [64, 128, 128] },
             { level: 1, chunkShape: [32, 32, 32], gridShape: [2, 4, 4], levelDims: [64, 128, 128] },
@@ -617,7 +614,7 @@ describe("computeWantedSet", () => {
     expect(onlyChunks[0].chunkKey).toBe("2/0/0/0/0/0");
   });
 
-  it("wantedLodLevels limits multi-LOD wanted-set to selected detail/coarse levels", () => {
+  it("asks only for the levels in detailLevels, not the levels between them", () => {
     const coldState = makeColdState({
       visibleRegion: makeVisibleRegion({
         xyBoundsVox: [0, 0, 32, 32],
@@ -625,8 +622,7 @@ describe("computeWantedSet", () => {
       }),
       activeSet: [
         makeActiveEntry({
-          detailOwnedLodRange: [0, 2],
-          wantedLodLevels: [0, 2],
+          detailLevels: [0, 2],
           levels: [
             { level: 0, chunkShape: [32, 32, 32], gridShape: [2, 4, 4], levelDims: [64, 128, 128] },
             { level: 1, chunkShape: [32, 32, 32], gridShape: [2, 4, 4], levelDims: [64, 128, 128] },
@@ -648,7 +644,7 @@ describe("computeWantedSet", () => {
     expect(keys).toEqual(["0/0/0/0/0/0", "2/0/0/0/0/0"]);
   });
 
-  it("single-LOD fallback: only target LOD in wanted-set", () => {
+  it("levels absent from the pool's entity metas are skipped", () => {
     const coldState = makeColdState({
       visibleRegion: makeVisibleRegion({
         xyBoundsVox: [0, 0, 32, 32],
@@ -656,7 +652,7 @@ describe("computeWantedSet", () => {
       }),
       activeSet: [
         makeActiveEntry({
-          detailOwnedLodRange: [0, 2],
+          detailLevels: [0, 1, 2],
           levels: [
             { level: 0, chunkShape: [32, 32, 32], gridShape: [2, 4, 4], levelDims: [64, 128, 128] },
             { level: 1, chunkShape: [32, 32, 32], gridShape: [2, 4, 4], levelDims: [64, 128, 128] },
@@ -665,7 +661,7 @@ describe("computeWantedSet", () => {
         }),
       ],
     });
-    // Pool's entityMeta for "img" only covers LOD 1 (chunk dims don't match across LODs)
+    // Pool's entityMeta for "img" only covers level 1 (chunk dims don't match across levels)
     const atlas = makeVolumePool("img", [
       { level: 1, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
     ]);
@@ -673,14 +669,14 @@ describe("computeWantedSet", () => {
 
     const result = computeWantedSet(coldState, volumeAtlases, new Map(), buildMemberToPool(volumeAtlases));
 
-    // Only LOD 1 is in entityMetas, so only LOD 1 chunks appear in wanted-set
+    // Only level 1 is in entityMetas, so only level 1 chunks appear in wanted-set
     expect(result.missing).toHaveLength(1);
     const onlyChunks = chunks(result.missing);
     expect(onlyChunks).toHaveLength(1);
     expect(onlyChunks[0].chunkKey).toMatch(/^1\//);
   });
 
-  it("coarser LODs have smaller grids: fewer chunks in wanted-set", () => {
+  it("coarser levels have smaller grids: fewer chunks in wanted-set", () => {
     // Large visible region to cover full grids
     const coldState = makeColdState({
       visibleRegion: makeVisibleRegion({
@@ -689,7 +685,7 @@ describe("computeWantedSet", () => {
       }),
       activeSet: [
         makeActiveEntry({
-          detailOwnedLodRange: [0, 1],
+          detailLevels: [0, 1],
           levels: [
             { level: 0, chunkShape: [32, 32, 32], gridShape: [1, 8, 8], levelDims: [32, 256, 256] },
             { level: 1, chunkShape: [32, 32, 32], gridShape: [1, 4, 4], levelDims: [32, 128, 128] },

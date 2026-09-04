@@ -1,4 +1,5 @@
 import { chunkWithinRenderRadius, RENDER_RADIUS_DISABLED } from "../pipeline/renderRadius.ts";
+import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type { RendererState } from "./worker/state.ts";
 import type { Chunk } from "./workerProtocol.ts";
 import { iterateColdMembers } from "./descriptorBuffer.ts";
@@ -6,12 +7,12 @@ import { iterateColdMembers } from "./descriptorBuffer.ts";
 export function chunkAllowedByCurrentRenderRadius(
   state: RendererState,
   memberId: string,
-  tier: "detail" | "coarse" | undefined,
+  tier: ResidencyTier,
   chunk: Pick<Chunk, "key" | "x" | "y" | "z"> & { level: number },
 ): boolean {
   const cold = state.currentColdState;
   if (!cold) return true;
-  const radiusView = cold.renderRadiusView?.[tier ?? "detail"] ?? RENDER_RADIUS_DISABLED;
+  const radiusView = cold.renderRadiusView?.[tier] ?? RENDER_RADIUS_DISABLED;
   const entry = findEntryForMember(state, memberId);
   if (!entry || entry.kind === "group-as-proxy") return true;
   const level = entry.levels.find((l) => l.level === chunk.level);

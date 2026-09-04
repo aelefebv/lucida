@@ -4,38 +4,39 @@
  * Parameterised by `mode` so the same logic serves 3D (volume) and 2D
  * (slice) callers; only chunk-dim arity differs.
  *
- * Skips entries whose `targetLod` is not in `entry.levels[]` — that
- * covers `group-as-proxy` entries (which carry `levels: []` because they
- * have no chunks to upload). Those still get registered in
- * `memberToDataset` via {@link iterateColdMembers} in the orchestrator;
- * they just don't appear here because there's no chunk pool to put them
- * in.
+ * Each tile entry contributes one source per detail-tier level plus one
+ * for its coarse level. `group-as-proxy` entries contribute none, because
+ * they carry `levels: []` and have no chunks to upload. The orchestrator
+ * still registers them in `memberToDataset` through
+ * {@link iterateColdMembers}; they have no chunk pool, so they do not
+ * appear here.
  */
 
+import type { ResidencyTier } from "../../pipeline/residencyTier.ts";
 import type {
   ColdStateMessage,
   ColdStateActiveEntry,
 } from "../workerProtocol.ts";
 import { memberIdForColdEntry } from "../descriptorBuffer.ts";
-import { chunkTierPoolKey, type ChunkTier } from "../poolKeys.ts";
+import { chunkTierPoolKey } from "../poolKeys.ts";
 
 /**
  * One pool's worth of entries from a cold state.
  *
  * `chunkDims` is captured as `[Z, Y, X]` for both modes so callers can
  * thread the same tuple through `getOrCreateVolumePool` (which takes
- * X/Y/Z) and `computeEntityMetas` (which compares against
+ * X/Y/Z) and `computeEntityTierMeta` (which compares against
  * `lm.chunkShape` — also `[Z, Y, X]`). Slice mode sets `Z = 1` since
  * the 2D pool ignores depth (the inline format string also dropped it).
  */
 export interface PoolGroup {
   poolKey: string;
-  tier: ChunkTier;
+  tier: ResidencyTier;
   level: number;
   channel: number;
   /** `[Z, Y, X]`. For slice mode `Z = 1`. */
   chunkDims: [number, number, number];
-  entries: Array<{ entry: ColdStateActiveEntry; memberId: string; tier: ChunkTier; level: number }>;
+  entries: Array<{ entry: ColdStateActiveEntry; memberId: string; tier: ResidencyTier; level: number }>;
 }
 
 /**
@@ -60,9 +61,9 @@ export function groupEntriesByPool(
     for (const entry of cold.activeSet) {
       const memberId = memberIdForColdEntry(entry, channel, isMultiCh);
       for (const source of tierSourcesForEntry(entry)) {
-        const targetLevel = entry.levels.find(l => l.level === source.level);
-        if (!targetLevel) continue; // group-as-proxy (no levels) skips here
-        const [chunkZ, chunkY, chunkX] = targetLevel.chunkShape;
+        const levelMeta = entry.levels.find(l => l.level === source.level);
+        if (!levelMeta) continue;
+        const [chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
         // `chunkTierPoolKey` takes `[X, Y, Z]` for volume / `[X, Y]` for
         // slice. Keep `chunkDims` on the group as `[Z, Y, X]` for
         // downstream callers.
@@ -85,13 +86,13 @@ export function groupEntriesByPool(
   return groups;
 }
 
-function tierSourcesForEntry(entry: ColdStateActiveEntry): Array<{ tier: ChunkTier; level: number }> {
+function tierSourcesForEntry(
+  entry: ColdStateActiveEntry,
+): Array<{ tier: ResidencyTier; level: number }> {
   if (entry.kind === "group-as-proxy") return [];
-  const detailLevel = entry.detailLevel ?? entry.targetLod;
-  const sources: Array<{ tier: ChunkTier; level: number }> = [
-    { tier: "detail", level: detailLevel },
-  ];
-  if (entry.coarseLevel !== undefined && entry.coarseLevel !== null) {
+  const sources: Array<{ tier: ResidencyTier; level: number }> =
+    entry.detailLevels.map(level => ({ tier: "detail", level }));
+  if (entry.coarseLevel !== null) {
     sources.push({ tier: "coarse", level: entry.coarseLevel });
   }
   return sources;

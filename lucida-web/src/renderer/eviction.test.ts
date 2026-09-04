@@ -142,6 +142,7 @@ function makeVolumeMsg(memberId: string, chunks: Chunk[], overrides?: Partial<Vo
   return {
     type: "volumeChunkData",
     epochs: epochs(),
+    tier: "detail",
     memberId,
     chunks,
     level: 0,
@@ -161,6 +162,7 @@ function makeSliceMsg(memberId: string, chunks: Chunk[], overrides?: Partial<Sli
   return {
     type: "sliceChunkData",
     epochs: epochs(),
+    tier: "detail",
     memberId,
     chunks,
     level: 0,

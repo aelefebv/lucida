@@ -5,6 +5,8 @@
  * `poolKeys.test.ts`.
  */
 
+import type { ResidencyTier } from "../pipeline/residencyTier.ts";
+
 export { proxyPoolKey } from "./proxyAtlas.ts";
 
 /**
@@ -27,8 +29,6 @@ export { proxyPoolKey } from "./proxyAtlas.ts";
  * (3D). The helper picks the arity from `chunkDims.length` and
  * throws on anything else — there's no use case for 1-D or 4-D pools.
  */
-export type ChunkTier = "detail" | "coarse";
-
 export function chunkPoolKey(
   datasetId: string,
   channel: number,
@@ -52,7 +52,7 @@ export function chunkPoolKey(
 
 export function chunkTierPoolKey(
   datasetId: string,
-  tier: ChunkTier,
+  tier: ResidencyTier,
   channel: number,
   chunkDims: number[],
   isMultiCh: boolean,
@@ -61,6 +61,6 @@ export function chunkTierPoolKey(
   return `${base}:${tier}`;
 }
 
-export function memberTierKey(memberId: string, tier: ChunkTier): string {
+export function memberTierKey(memberId: string, tier: ResidencyTier): string {
   return `${memberId}|${tier}`;
 }

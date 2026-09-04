@@ -8,15 +8,6 @@
  * {@link DEFAULT_PLANNING_CONFIG} without a circular dependency.
  */
 
-/** Far threshold (px). Below this, a group promotes to `group-as-proxy`. */
-export const FAR_THRESHOLD_PX = 80;
-
-/** Medium/Detail threshold (px). Above this, tiles use real detail chunks. */
-export const DETAIL_THRESHOLD_PX = 150;
-
-/** Hysteresis band (px) on either side of each threshold. */
-export const HYSTERESIS_PX = 5;
-
 /**
  * Minimap lane offset — highest urgency, dedicated lane at `0` so
  * whole-sample spatial context appears within ~1 s of dataset open.
@@ -68,14 +59,9 @@ export const DEFAULT_PROXY_RESIDENCY_BUDGET_BYTES = 128 * 1024 * 1024;
 export const PREFETCH_LANE_OFFSET = 1500;
 
 /**
- * Overview lane offset — per-entity coarsest pass that backstops the
- * shader's fallback chain. Lowest urgency.
- */
-export const OVERVIEW_LANE_OFFSET = 2500;
-
-/**
- * Coarse lane offset for the chunk-only bridge. Kept near the old
- * overview lane so minimap/detail stay ahead of whole-context fill.
+ * Coarse lane offset, the floor under the detail tier. The least urgent
+ * of the view lanes, so minimap and detail stay ahead of whole-context
+ * fill.
  */
 export const COARSE_LANE_OFFSET = 2400;
 
@@ -121,14 +107,6 @@ export const GROUP_PROXY_PRIORITY_BUMP = 100;
 
 /** Per-tick planning tunables threaded through {@link plan}. */
 export interface PlanningConfig {
-  // -- mode-decision thresholds ---------------------------------------
-  /** Below this projected diagonal (px) a group promotes to `group-as-proxy`. */
-  farThresholdPx: number;
-  /** Above this projected diagonal (px) tiles use real detail chunks. */
-  detailThresholdPx: number;
-  /** Hysteresis band (px) on either side of each threshold. */
-  hysteresisPx: number;
-
   // -- prefetch -------------------------------------------------------
   /** Number of future timepoints to prefetch (length of the prefetch lane). */
   prefetchDepth: number;
@@ -158,11 +136,6 @@ export interface PlanningConfig {
   proxyResidencyBudgetBytes: number;
 
   // -- residency model ------------------------------------------------
-  /**
-   * Internal bridge flag for chunk-only coarse/detail residency. False
-   * preserves the proxy-era planner until the new path reaches parity.
-   */
-  coarseDetailEnabled: boolean;
   /**
    * Detail render radius as a multiplier of the visible-region
    * half-diagonal. The default max value disables filtering.
@@ -198,24 +171,18 @@ export interface PlanningConfig {
   proxyLaneOffset: number;
   /** Prefetch (next-timepoint) requests. */
   prefetchLaneOffset: number;
-  /** Overview requests (lowest urgency). */
-  overviewLaneOffset: number;
-  /** Coarse requests for the chunk-only bridge. */
+  /** Coarse requests (lowest urgency of the view lanes). */
   coarseLaneOffset: number;
 }
 
 /** Canonical defaults. Sourced from the module-level constants so the two cannot drift. */
 export const DEFAULT_PLANNING_CONFIG: PlanningConfig = {
-  farThresholdPx: FAR_THRESHOLD_PX,
-  detailThresholdPx: DETAIL_THRESHOLD_PX,
-  hysteresisPx: HYSTERESIS_PX,
   prefetchDepth: PREFETCH_DEPTH,
   importanceWeight: IMPORTANCE_WEIGHT,
   distanceWeight: DISTANCE_WEIGHT,
   depthBiasView: DEPTH_BIAS_VIEW,
   groupProxyPriorityBump: GROUP_PROXY_PRIORITY_BUMP,
   proxyResidencyBudgetBytes: DEFAULT_PROXY_RESIDENCY_BUDGET_BYTES,
-  coarseDetailEnabled: true,
   detailRenderRadiusView: RENDER_RADIUS_DISABLED_VIEW,
   coarseRenderRadiusView: RENDER_RADIUS_DISABLED_VIEW,
   minimapLaneOffset: MINIMAP_LANE_OFFSET,
@@ -224,7 +191,6 @@ export const DEFAULT_PLANNING_CONFIG: PlanningConfig = {
   detailLaneOffset: DETAIL_LANE_OFFSET,
   proxyLaneOffset: PROXY_LANE_OFFSET,
   prefetchLaneOffset: PREFETCH_LANE_OFFSET,
-  overviewLaneOffset: OVERVIEW_LANE_OFFSET,
   coarseLaneOffset: COARSE_LANE_OFFSET,
 };
 

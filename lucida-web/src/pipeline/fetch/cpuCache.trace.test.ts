@@ -25,6 +25,7 @@ function makeRequest(overrides?: Partial<ChunkRequest>): ChunkRequest {
   const level = overrides?.level ?? 0;
   const y = overrides?.y ?? 0;
   const x = overrides?.x ?? 0;
+  const lane = overrides?.lane ?? "detail";
   return {
     datasetId: "ds-1",
     entityId: "entity-1",
@@ -35,7 +36,10 @@ function makeRequest(overrides?: Partial<ChunkRequest>): ChunkRequest {
     z: 0,
     y,
     x,
-    lane: "detail",
+    lane,
+    // Each planner lane stamps its own tier. Mirror that so a lane-only
+    // override still matches a real request.
+    tier: lane === "coarse" || lane === "overview" || lane === "minimap" ? "coarse" : "detail",
     priority: 0,
     chunkKey: `${level}/0/0/0/${y}/${x}`,
     ...overrides,
@@ -48,9 +52,8 @@ function makePlan(requests: ChunkRequest[]): RequestPlan {
     entityId: "entity-1",
     imageId: "image-1",
     mode: "tiles-with-detail",
-    targetLod: 0,
-    coarsestDetailLod: 2,
-    detailOwnedLodRange: [0, 2],
+    detailLevels: [0],
+    coarseLevel: null,
     proxyKind: undefined,
     proxyAvailable: false,
     groupProxyAvailable: false,

@@ -184,6 +184,7 @@ function createSyncDecode(): DecodePool {
 }
 
 function makeRequest(overrides?: Partial<ChunkRequest>): ChunkRequest {
+  const lane = overrides?.lane ?? "detail";
   return {
     datasetId: "entity-1",
     entityId: "entity-1",
@@ -194,7 +195,10 @@ function makeRequest(overrides?: Partial<ChunkRequest>): ChunkRequest {
     z: 0,
     y: 0,
     x: 0,
-    lane: "detail",
+    lane,
+    // Each planner lane stamps its own tier. Mirror that so a lane-only
+    // override still matches a real request.
+    tier: lane === "coarse" || lane === "overview" || lane === "minimap" ? "coarse" : "detail",
     priority: 0,
     chunkKey: `${overrides?.level ?? 0}/${overrides?.t ?? 0}/${overrides?.c ?? 0}/${overrides?.z ?? 0}/${overrides?.y ?? 0}/${overrides?.x ?? 0}`,
     ...overrides,
@@ -211,9 +215,8 @@ function makePlan(
     entityId: "entity-1",
     imageId: "image-1",
     mode: "tiles-with-detail",
-    targetLod: 0,
-    coarsestDetailLod: 2,
-    detailOwnedLodRange: [0, 2],
+    detailLevels: [0],
+    coarseLevel: null,
     proxyKind: undefined,
     proxyAvailable: false,
     groupProxyAvailable: false,
@@ -242,9 +245,8 @@ function makeActiveEntry(entityId: string, imageId?: string): ActiveSetEntry {
     entityId,
     imageId: imageId ?? entityId.replace("entity", "image"),
     mode: "tiles-with-detail",
-    targetLod: 0,
-    coarsestDetailLod: 2,
-    detailOwnedLodRange: [0, 2],
+    detailLevels: [0],
+    coarseLevel: null,
     proxyKind: undefined,
     proxyAvailable: false,
     groupProxyAvailable: false,

@@ -27,6 +27,7 @@ function makeEntry(overrides: Partial<CacheEntry> & {
     data: new ArrayBuffer(0),
     sizeBytes: 0,
     lane: "detail",
+    residencyTier: "detail",
     tier: "active-detail",
     entityId: "e-1",
     imageId: "img-1",
