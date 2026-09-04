@@ -27,13 +27,13 @@ function makePeer(
   };
 }
 
-function renderPeers(peers: Map<ClientId, PresenceState>) {
+function peersElement(peers: Map<ClientId, PresenceState>) {
   const cursorLabels: CursorLabel[] = Array.from(peers.keys()).map((id) => ({
     id,
     sx: 0,
     sy: 0,
   }));
-  return render(
+  return (
     <PeerCursors
       peers={peers}
       myId={0}
@@ -45,8 +45,12 @@ function renderPeers(peers: Map<ClientId, PresenceState>) {
       t={0}
       c={0}
       cursorLabels={cursorLabels}
-    />,
+    />
   );
+}
+
+function renderPeers(peers: Map<ClientId, PresenceState>) {
+  return render(peersElement(peers));
 }
 
 afterEach(() => cleanup());
@@ -105,6 +109,22 @@ describe("PeerCursors identity", () => {
     expect(screen.getByTestId("peer-cursor-initial").textContent).toBe("C");
     // The name pill still shows the name.
     expect(screen.getByText("Carol")).toBeTruthy();
+  });
+
+  it("retries the image when a peer's picture URL changes after a failure", () => {
+    const withPicture = (url: string) =>
+      new Map<ClientId, PresenceState>([
+        [5, makePeer(5, { display_name: "Carol", picture_url: url })],
+      ]);
+    const { rerender } = renderPeers(withPicture("https://example.com/gone.png"));
+    fireEvent.error(screen.getByTestId("peer-cursor-avatar"));
+    expect(screen.queryByTestId("peer-cursor-avatar")).toBeNull();
+
+    rerender(peersElement(withPicture("https://example.com/new.png")));
+
+    const avatar = screen.getByTestId("peer-cursor-avatar") as HTMLImageElement;
+    expect(avatar.getAttribute("src")).toBe("https://example.com/new.png");
+    expect(screen.queryByTestId("peer-cursor-initial")).toBeNull();
   });
 
   it("falls back to the numeric id (and a '?' chip) for a peer with no identity", () => {
