@@ -63,6 +63,13 @@ const PHASE_FROM_WIRE: Record<WireMetadataPhase, MetadataReadPhase> = {
 /** Stored in the phase column when a row is not a metadata read. */
 const NO_PHASE = 0xff;
 
+/**
+ * Stored in the bytes column when a row performed no backend read. The top
+ * of the range, as {@link PHASE_UNSET} is for a duration: zero is a real
+ * answer (a failed round trip returned nothing) and no chunk read is 4 GiB.
+ */
+const BYTES_UNSET = 0xffff_ffff;
+
 /** The wire shape of one flush window, as `ServerMessage::TimingBatch` carries it. */
 export interface ServerTimingBatch {
   dropped: number;
@@ -90,6 +97,12 @@ export interface ServerTimingBatch {
   slice_encode_us: number[];
   handoff_us: number[];
   /**
+   * The bytes the row's own backend round trips returned; null on a row
+   * that performed none. Set exactly when `backend_read_us` is, so a sum
+   * over the column is the bytes the backend moved for this client.
+   */
+  backend_bytes: (number | null)[];
+  /**
    * For a single-flight follower, the label of the read it waited on;
    * {@link LABEL_NONE} otherwise.
    */
@@ -109,6 +122,12 @@ export interface StoredServerRow {
   phases: ServerPhaseDurations;
   /** The read this one waited on, for a follower; null otherwise. */
   coalescedOnto: number | null;
+  /**
+   * The bytes this row's own backend round trips returned; null when it
+   * performed none. Absent rather than zero for the same reason a phase
+   * is: a read that returned nothing and no read are different facts.
+   */
+  backendBytes: number | null;
   dispatchOffsetUs: number;
   durationUs: number;
   /** The dataset open a metadata-read row keys on; null on every other family. */
@@ -130,19 +149,21 @@ export type AcceptServerRow = (
 
 export class ServerRowTable {
   /**
-   * 3 label columns + one column per phase as uint32, plus the two metadata
-   * columns and the interned open id, and three enum bytes. Request ids are
-   * interned rather than stored per row: an open has one and files hundreds
-   * of reads under it, so the column is an index and the pool stops growing
-   * after the first read of each open.
+   * 3 label columns + one column per phase as uint32, plus the bytes
+   * column, the two metadata columns and the interned open id, and three
+   * enum bytes. Request ids are interned rather than stored per row: an
+   * open has one and files hundreds of reads under it, so the column is an
+   * index and the pool stops growing after the first read of each open.
    */
-  static readonly BYTES_PER_ROW = (3 + SERVER_PHASES.length + 3) * 4 + 3;
+  static readonly BYTES_PER_ROW = (3 + SERVER_PHASES.length + 4) * 4 + 3;
 
   private rids: Uint32Array;
   private connectionGenerations: Uint32Array;
   private coalescedOnto: Uint32Array;
   /** One column per phase, in {@link SERVER_PHASES} order. */
   private phaseColumns: Uint32Array[];
+  /** What the row's own round trips returned; {@link BYTES_UNSET} when it made none. */
+  private backendBytes: Uint32Array;
   private families: Uint8Array;
   private outcomes: Uint8Array;
   private metadataPhases: Uint8Array;
@@ -162,6 +183,7 @@ export class ServerRowTable {
     this.connectionGenerations = new Uint32Array(this.capacity);
     this.coalescedOnto = new Uint32Array(this.capacity);
     this.phaseColumns = SERVER_PHASES.map(() => new Uint32Array(this.capacity));
+    this.backendBytes = new Uint32Array(this.capacity).fill(BYTES_UNSET);
     this.families = new Uint8Array(this.capacity);
     this.outcomes = new Uint8Array(this.capacity);
     this.metadataPhases = new Uint8Array(this.capacity).fill(NO_PHASE);
@@ -213,6 +235,7 @@ export class ServerRowTable {
       batch.dispatch_offset_us.length,
       batch.duration_us.length,
       batch.outcome.length,
+      batch.backend_bytes?.length ?? 0,
       batch.coalesced_onto?.length ?? 0,
     );
     for (const key of PHASE_COLUMNS) {
@@ -235,6 +258,8 @@ export class ServerRowTable {
       for (let p = 0; p < SERVER_PHASES.length; p++) {
         this.phaseColumns[p][index] = (batch[PHASE_COLUMNS[p]] as number[])[i];
       }
+      const bytes = batch.backend_bytes[i];
+      this.backendBytes[index] = bytes === null || bytes === undefined ? BYTES_UNSET : bytes;
       // An unrecognised vocabulary word means the two sides have drifted,
       // which the goldens exist to prevent. An unreadable outcome resolves
       // to `failed`: a word we cannot read must not be able to hide a
@@ -277,6 +302,7 @@ export class ServerRowTable {
         outcome: SERVER_ROW_OUTCOMES[this.outcomes[i]],
         phases,
         coalescedOnto: this.coalescedOnto[i] === LABEL_NONE ? null : this.coalescedOnto[i],
+        backendBytes: this.backendBytes[i] === BYTES_UNSET ? null : this.backendBytes[i],
         dispatchOffsetUs: this.dispatchOffsets[i],
         durationUs: this.durations[i],
         requestId: requestIndex === 0 ? null : this.openIds.get(requestIndex - 1),
@@ -292,6 +318,7 @@ export class ServerRowTable {
     this.connectionGenerations = copyInto(this.connectionGenerations, new Uint32Array(next));
     this.coalescedOnto = copyInto(this.coalescedOnto, new Uint32Array(next));
     this.phaseColumns = this.phaseColumns.map(column => copyInto(column, new Uint32Array(next)));
+    this.backendBytes = copyInto(this.backendBytes, new Uint32Array(next).fill(BYTES_UNSET));
     this.families = copyInto(this.families, new Uint8Array(next));
     this.outcomes = copyInto(this.outcomes, new Uint8Array(next));
     this.metadataPhases = copyInto(this.metadataPhases, new Uint8Array(next).fill(NO_PHASE));

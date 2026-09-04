@@ -75,6 +75,10 @@ pub struct ServedRow {
     /// One slot per phase, indexed by [`ServerPhase`]'s discriminant. Unset
     /// throughout on a metadata-read row.
     pub phases: [u32; SERVER_PHASES.len()],
+    /// The bytes this request's own backend round trips returned; `None`
+    /// when it performed none. Travels with [`ServerPhase::BackendRead`] and
+    /// obeys the same rule: a follower's row carries neither.
+    pub backend_bytes: Option<u32>,
     /// The label of the read this request waited on, for a single-flight
     /// follower; [`LABEL_NONE`] otherwise.
     pub coalesced_onto: u32,
@@ -187,6 +191,7 @@ impl TimingBuffer {
         for phase in SERVER_PHASES {
             batch.column_mut(phase).reserve(rows.len());
         }
+        batch.backend_bytes.reserve(rows.len());
         batch.coalesced_onto.reserve(rows.len());
         for row in rows {
             batch.rid.push(row.rid());
@@ -196,6 +201,7 @@ impl TimingBuffer {
             batch.dispatch_offset_us.push(row.dispatch_offset_us);
             batch.duration_us.push(row.duration_us);
             batch.outcome.push(row.outcome);
+            batch.backend_bytes.push(row.backend_bytes);
             batch.coalesced_onto.push(row.coalesced_onto);
             for (slot, phase) in row.phases.iter().zip(SERVER_PHASES) {
                 batch.column_mut(phase).push(*slot);
@@ -228,6 +234,7 @@ pub struct RequestProbe {
     /// Start of the phase currently being timed.
     cursor: Instant,
     phases: [u32; SERVER_PHASES.len()],
+    backend_bytes: Option<u32>,
     coalesced_onto: u32,
     buffer: Arc<TimingBuffer>,
 }
@@ -246,6 +253,7 @@ impl RequestProbe {
             family,
             cursor: arrival,
             phases: [PHASE_UNSET; SERVER_PHASES.len()],
+            backend_bytes: None,
             coalesced_onto: LABEL_NONE,
             buffer,
         }
@@ -290,6 +298,7 @@ impl RequestProbe {
         }
         self.phases[phase_index(ServerPhase::CacheLookup)] =
             clamp_us(elapsed.saturating_sub(timing.measured_us()));
+        self.backend_bytes = timing.backend_bytes;
         if let Some(leader) = timing.coalesced_onto {
             self.coalesced_onto = leader.0;
         }
@@ -305,6 +314,7 @@ impl RequestProbe {
             family: self.family,
             outcome,
             phases: self.phases,
+            backend_bytes: self.backend_bytes,
             coalesced_onto: self.coalesced_onto,
             // A chunk or asset row states its span in the phase array.
             dispatch_offset_us: 0,
@@ -362,6 +372,9 @@ impl MetadataReadObserver for MetadataReadSink {
                 TimingRowOutcome::Delivered
             },
             phases: [PHASE_UNSET; SERVER_PHASES.len()],
+            // A metadata read is timed by the observer, which sees the
+            // round trip and not its body.
+            backend_bytes: None,
             coalesced_onto: LABEL_NONE,
             metadata_phase: Some(read.phase),
         });
@@ -396,6 +409,7 @@ mod tests {
             family: TimingRowFamily::Chunk,
             outcome: TimingRowOutcome::Delivered,
             phases,
+            backend_bytes: None,
             coalesced_onto: LABEL_NONE,
             dispatch_offset_us: 0,
             duration_us: 0,
@@ -640,6 +654,7 @@ mod tests {
         leader.record_read(SourceReadTiming {
             permit_wait_us: Some(3_100_000),
             backend_read_us: Some(120_000),
+            backend_bytes: Some(131_072),
             ..SourceReadTiming::default()
         });
         leader.finish(TimingRowOutcome::Delivered);
@@ -656,6 +671,10 @@ mod tests {
         let batch = buffer.take_batch().expect("two rows");
         assert_eq!(batch.permit_wait_us, vec![3_100_000, PHASE_UNSET]);
         assert_eq!(batch.backend_read_us, vec![120_000, PHASE_UNSET]);
+        // The bytes travel with the round trip they came from, so a sum
+        // over the column is the bytes the backend moved and a follower
+        // adds nothing to it.
+        assert_eq!(batch.backend_bytes, vec![Some(131_072), None]);
         assert_eq!(batch.coalesced_wait_us, vec![PHASE_UNSET, 400_000]);
         // The follower says which read it waited on, so the join to the
         // leader's row is a plain equi-join and the coalescing count is a
@@ -732,6 +751,10 @@ mod tests {
             keys,
             vec![
                 "arrival_us",
+                // The bytes this client's own round trips moved. A size is
+                // as much this client's number as a duration is, and it
+                // says nothing about any other tenant's reads.
+                "backend_bytes",
                 "backend_read_us",
                 "binding_lookup_us",
                 "cache_lookup_us",

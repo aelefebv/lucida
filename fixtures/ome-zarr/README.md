@@ -75,11 +75,48 @@ Sample values are `uint16` in every fixture, and the codec chain is `bytes`
 
   ```sh
   uv run extras/synthetic_ome_zarr.py /tmp/big.ome.zarr --tiles 216 --size 2048,2048 --channels 3 --chunk 64 --shard 512
-  lucida trace /tmp/big.ome.zarr
+  lucida trace /tmp/big.ome.zarr --screenshot /tmp/big.png
   ```
 
-  A level-index pyramid opened the same way tells a screenshot check which
-  level the viewer chose, because the sample values are the level number.
+  `--screenshot` writes the frame the page shows once it has settled, at
+  the run's device pixel ratio. A level-index pyramid opened the same way
+  tells a screenshot check which level the viewer chose, because the sample
+  values are the level number.
+
+## The sharded twin check
+
+`extras/verify_sharded_twins.py` proves the sharded store end to end. It
+writes two twin pairs with the generator, opens each dataset through the
+trace driver in its own workspace at device pixel ratio 2, and asserts that
+every run settled, that each pair's two frames are identical and not blank,
+that every backend read in a sharded run moved exactly one inner chunk, one
+shard index, or the two together, and that every read in an unsharded run
+moved one whole chunk object. The expected sizes come from the shard indexes
+on disk, so the comparison is exact. The second pair has a single source
+level too large to serve as the coarse tier, so the server generates coarse
+levels over the sharded source, and the check asserts that both runs
+requested those levels and still match.
+
+It needs a running server that serves a built web bundle, the `lucida` CLI,
+and Chrome. From the repository root:
+
+```sh
+(cd lucida-web && pnpm run build)
+cargo run -p lucida-server &
+uv run extras/verify_sharded_twins.py
+```
+
+Pass `--server` for a server elsewhere, `--lucida` to name the CLI, and
+`--keep` to keep the datasets, frames, and run files. On failure they are
+always kept, and the report says where. `uv run
+extras/verify_sharded_twins.py --help` lists the generator options the two
+pairs use.
+
+The byte count each backend read moved travels in the server's timing rows
+as `backend_bytes`, which is how a trace can show that a shard was read by
+the inner chunk and never downloaded whole. The check's own tests run with
+`uv run extras/test_verify_sharded_twins.py` and need neither a server nor a
+browser.
 
 The Rust tests locate the fixtures relative to `CARGO_MANIFEST_DIR`, so they
 run from any working directory.

@@ -314,6 +314,13 @@ pub struct SourceReadTiming {
     pub permit_wait_us: Option<u32>,
     /// The backend round trip, for the caller that did the read.
     pub backend_read_us: Option<u32>,
+    /// The bytes that round trip returned, for the caller that did the read.
+    /// Set exactly when `backend_read_us` is, so a sum over the column is
+    /// the bytes the backend moved and a follower adds nothing to it. It is
+    /// the length of what was asked for: a whole object, or one range of it,
+    /// which is how a trace tells a shard read by the inner chunk from a
+    /// shard downloaded whole.
+    pub backend_bytes: Option<u32>,
     /// Parked on another caller's in-flight read of the same object.
     pub coalesced_wait_us: Option<u32>,
     /// The label of the request whose read this one waited on. Set only for
@@ -354,6 +361,7 @@ impl SourceReadTiming {
         SourceReadTiming {
             permit_wait_us: sum(self.permit_wait_us, next.permit_wait_us),
             backend_read_us: sum(self.backend_read_us, next.backend_read_us),
+            backend_bytes: sum(self.backend_bytes, next.backend_bytes),
             coalesced_wait_us: sum(self.coalesced_wait_us, next.coalesced_wait_us),
             coalesced_onto: next.coalesced_onto.or(self.coalesced_onto),
         }
@@ -1060,6 +1068,13 @@ impl CachedStore {
         let timing = SourceReadTiming {
             permit_wait_us: Some(micros(permit_wait)),
             backend_read_us: Some(micros(elapsed.saturating_sub(permit_wait))),
+            // A failed round trip moved nothing, and still was one.
+            backend_bytes: Some(
+                fetch
+                    .as_ref()
+                    .map(|bytes| u32::try_from(bytes.len()).unwrap_or(u32::MAX))
+                    .unwrap_or(0),
+            ),
             ..SourceReadTiming::default()
         };
 
@@ -1355,19 +1370,22 @@ mod tests {
 
         assert_eq!(get_count.load(Ordering::SeqCst), 1, "one backend read");
 
-        // The leader owns the permit and the round trip.
+        // The leader owns the permit, the round trip, and the bytes it moved.
         assert!(leader.timing.permit_wait_us.is_some());
         assert!(
             leader.timing.backend_read_us.unwrap() >= (delay_ms * 1_000) as u32,
             "the leader's read covers the backend delay"
         );
+        assert_eq!(leader.timing.backend_bytes, Some(b"payload".len() as u32));
         assert_eq!(leader.timing.coalesced_wait_us, None);
         assert_eq!(leader.timing.coalesced_onto, None, "the leader led");
 
         // The follower owns only its wait, and it is diagnosed as waiting on
-        // an in-flight read rather than as a slow backend.
+        // an in-flight read rather than as a slow backend. The bytes are the
+        // leader's too: a sum over the column counts each byte moved once.
         assert_eq!(follower.timing.permit_wait_us, None);
         assert_eq!(follower.timing.backend_read_us, None);
+        assert_eq!(follower.timing.backend_bytes, None);
         assert!(
             follower.timing.coalesced_wait_us.expect("a coalesced wait") > 0,
             "the follower's wait is recorded under the coalesced phase"
@@ -2046,10 +2064,39 @@ mod tests {
         assert!(stats.source_read_millis >= 20);
     }
 
+    /// Two reads that answer one request report their bytes as one sum, in
+    /// the same way as their durations, and a stretch neither read had stays
+    /// unset rather than becoming a zero-byte read.
+    #[test]
+    fn followed_by_sums_the_bytes_of_two_reads_and_leaves_none_unset() {
+        let index = SourceReadTiming {
+            backend_read_us: Some(10),
+            backend_bytes: Some(68),
+            ..SourceReadTiming::default()
+        };
+        let inner = SourceReadTiming {
+            backend_read_us: Some(20),
+            backend_bytes: Some(5),
+            ..SourceReadTiming::default()
+        };
+        assert_eq!(index.followed_by(inner).backend_bytes, Some(73));
+
+        let follower = SourceReadTiming {
+            coalesced_wait_us: Some(7),
+            ..SourceReadTiming::default()
+        };
+        assert_eq!(follower.followed_by(inner).backend_bytes, Some(5));
+        assert_eq!(
+            SourceReadTiming::default()
+                .followed_by(follower)
+                .backend_bytes,
+            None
+        );
+    }
+
     // --- Range reads ---
     //
-    // Nothing calls `get_range` yet. These pin the contract the shard reader
-    // (#990) builds on.
+    // These pin the contract the shard reader (#990) builds on.
 
     #[tokio::test]
     async fn a_range_read_returns_exactly_the_requested_bytes() {
@@ -2060,18 +2107,20 @@ mod tests {
         let cached = CachedStore::new(inner, 1024);
 
         let path = Path::from("object");
-        let first = cached
-            .get_range(&path, 4..10, READER, LABEL)
-            .await
-            .result
-            .unwrap();
+        let first = cached.get_range(&path, 4..10, READER, LABEL).await;
+        // The row reports the range's length, not the object's: that is
+        // what lets a trace say a shard was read by the inner chunk and not
+        // whole.
+        assert_eq!(first.timing.backend_bytes, Some(6));
+        let first = first.result.unwrap();
         assert_eq!(&first[..], b"456789");
 
-        let second = cached
-            .get_range(&path, 4..10, READER, LABEL)
-            .await
-            .result
-            .unwrap();
+        let second = cached.get_range(&path, 4..10, READER, LABEL).await;
+        assert_eq!(
+            second.timing.backend_bytes, None,
+            "a resident range moved no bytes from the backend"
+        );
+        let second = second.result.unwrap();
         assert_eq!(first, second);
         let stats = cached.stats();
         assert_eq!(stats.hits, 1);

@@ -368,6 +368,15 @@ pub struct ServerTimingBatch {
     pub decompress_us: Vec<u32>,
     pub slice_encode_us: Vec<u32>,
     pub handoff_us: Vec<u32>,
+    /// The bytes the row's own backend round trips returned, and `None` on
+    /// a row that performed none: a follower, a cache hit, a generated
+    /// chunk, a metadata read. Set exactly when `backend_read_us` is, so a
+    /// sum over this column is the bytes the backend moved for this client
+    /// and a follower adds nothing to it. An inner chunk read out of a shard
+    /// reports the range it asked for, plus the shard's index when that was
+    /// this row's read too, which is what lets a trace show a shard was read
+    /// by the inner chunk and never downloaded whole.
+    pub backend_bytes: Vec<Option<u32>>,
     /// For a single-flight follower, the label of the read it waited on;
     /// [`LABEL_NONE`] for every other row. This is what turns a coalesced
     /// wait from "it waited" into "it waited on that read", and it makes the

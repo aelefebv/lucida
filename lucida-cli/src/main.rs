@@ -1193,6 +1193,10 @@ struct TraceRunArgs {
     /// Also write this run's raw spans as Chrome Trace Event JSON, for Perfetto
     #[arg(long, value_name = "PATH")]
     perfetto: Option<String>,
+    /// Also write the frame the page shows once it has settled, as a PNG at
+    /// the run's device pixel ratio
+    #[arg(long, value_name = "PATH")]
+    screenshot: Option<PathBuf>,
     /// Seconds to wait for the page to load and settle
     #[arg(long, default_value_t = 120)]
     timeout_seconds: u64,
@@ -3541,6 +3545,7 @@ async fn emit_trace_command(
                 "workspace": workspace,
                 "target": target,
                 "runFile": outcome.path,
+                "screenshot": outcome.file.header.screenshot,
                 "header": outcome.file.header,
                 "verdict": outcome.file.diagnostic.get("verdict"),
                 "text": outcome.file.renderings.summary,
@@ -3685,6 +3690,7 @@ async fn run_trace(
         server_warmth: warmth,
         server_url: server.url.clone(),
         workspace_id: workspace.id.clone(),
+        screenshot: args.screenshot.clone(),
     };
     let viewport = Viewport::new(args.width, args.height, args.device_pixel_ratio);
     // A drive that fails says what it drove: the composed URL is the whole
@@ -5606,11 +5612,16 @@ mod tests {
             "--gate",
             "--output",
             "/tmp/r.json",
+            "--screenshot",
+            "/tmp/r.png",
         ]);
         match gated.command {
             Command::Trace { run, .. } => {
                 assert!(run.gate);
                 assert_eq!(run.output.as_deref(), Some("/tmp/r.json"));
+                // The frame rides the same drive, so a twin comparison is two
+                // commands and not four.
+                assert_eq!(run.screenshot.as_deref(), Some(Path::new("/tmp/r.png")));
             }
             _ => panic!("expected a trace run"),
         }

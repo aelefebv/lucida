@@ -256,5 +256,10 @@ async fn a_served_chunk_reports_every_phase_it_passed_through() {
     // follower does, and reading one here would double-count the round trip.
     assert_eq!(batch.coalesced_wait_us[index], PHASE_UNSET);
 
+    // The row says how many bytes that read moved: the whole chunk object,
+    // because this level is not sharded. On a sharded level the same column
+    // is what shows a shard was read by the inner chunk and not whole.
+    assert_eq!(batch.backend_bytes[index], Some((VOXELS * 2) as u32));
+
     let _ = fs::remove_dir_all(&root);
 }

@@ -177,6 +177,7 @@ describe("the per-run cap", () => {
         decompress_us: [PHASE_UNSET],
         slice_encode_us: [PHASE_UNSET],
         handoff_us: [PHASE_UNSET],
+        backend_bytes: [512],
         coalesced_onto: [LABEL_NONE],
       },
       1,

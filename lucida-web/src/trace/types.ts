@@ -706,6 +706,16 @@ export interface TraceServerRow extends WireLabel {
    */
   coalescedOnto: number | null;
   /**
+   * The bytes this row's own backend round trips returned, and null when it
+   * performed none. It travels with `backend-read` and obeys its rule: a
+   * follower carries neither, so a sum over the column is the bytes the
+   * backend moved. An inner chunk read out of a shard reports the range it
+   * asked for, plus the shard's index when that read was this row's too,
+   * which is how a trace shows a shard read by the inner chunk and never
+   * downloaded whole.
+   */
+  backendBytes: number | null;
+  /**
    * On a `metadata-read` row, the open's arrival → the start of that read,
    * which is what lets the reads be laid out across the open instead of
    * stacked at its midpoint. Zero on every other family.

@@ -1819,6 +1819,9 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                     decompress_us: vec![4_512, PHASE_UNSET, PHASE_UNSET],
                     slice_encode_us: vec![903, PHASE_UNSET, PHASE_UNSET],
                     handoff_us: vec![61, 55, PHASE_UNSET],
+                    // Only the row that led a round trip says what it
+                    // moved: one whole 256x256 uint16 chunk object here.
+                    backend_bytes: vec![Some(131_072), None, None],
                     coalesced_onto: vec![LABEL_NONE, LABEL_NONE, LABEL_NONE],
                     metadata_phase: vec![None, None, Some(MetadataReadPhase::BackendRead)],
                     dispatch_offset_us: vec![0, 0, 1_204],
@@ -1848,6 +1851,7 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                     "/batch/decompress_us",
                     "/batch/slice_encode_us",
                     "/batch/handoff_us",
+                    "/batch/backend_bytes",
                     "/batch/coalesced_onto",
                 ],
             ),

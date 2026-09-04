@@ -28,6 +28,7 @@ function batch(overrides: Partial<ServerTimingBatch> = {}): ServerTimingBatch {
     decompress_us: [20, PHASE_UNSET],
     slice_encode_us: [4, PHASE_UNSET],
     handoff_us: [3, 9],
+    backend_bytes: [4_096, null],
     coalesced_onto: [LABEL_NONE, LABEL_NONE],
     ...overrides,
   };
@@ -64,6 +65,8 @@ describe("ServerRowTable", () => {
           "slice-encode": 4,
           handoff: 3,
         },
+        // The bytes the round trip returned travel with it.
+        backendBytes: 4_096,
         dispatchOffsetUs: 0,
         durationUs: 0,
         requestId: null,
@@ -78,6 +81,9 @@ describe("ServerRowTable", () => {
         // Unentered phases are absent, not zero: a stage that never ran and
         // one that ran instantly are different facts.
         phases: { arrival: 20, "binding-lookup": 6, dispatch: 8, "cache-lookup": 2, handoff: 9 },
+        // No round trip, so no byte count either, rather than a zero that
+        // would read as an empty object.
+        backendBytes: null,
         dispatchOffsetUs: 0,
         durationUs: 0,
         requestId: null,
@@ -111,6 +117,7 @@ describe("ServerRowTable", () => {
         decompress_us: [10],
         slice_encode_us: [1],
         handoff_us: [1],
+        backend_bytes: [null],
         coalesced_onto: [4_321],
       }),
       1,
@@ -121,6 +128,9 @@ describe("ServerRowTable", () => {
     expect(follower.phases["coalesced-wait"]).toBe(400_000);
     expect(follower.phases["backend-read"]).toBeUndefined();
     expect(follower.phases["permit-wait"]).toBeUndefined();
+    // The bytes belong to the leader's row: summing the column must count
+    // each byte the backend moved exactly once.
+    expect(follower.backendBytes).toBeNull();
     // And it names the read it waited on, so the wait joins to the row that
     // owns the round trip.
     expect(follower.coalescedOnto).toBe(4_321);
@@ -182,6 +192,11 @@ describe("ServerRowTable", () => {
     // Better one row short than a row assembled from another row's numbers.
     expect(table.length).toBe(1);
     expect(table.serialise()[0].phases.handoff).toBe(1_000);
+
+    const short = new ServerRowTable();
+    ingest(short, batch({ backend_bytes: [7] }), 1);
+    expect(short.length).toBe(1);
+    expect(short.serialise()[0].backendBytes).toBe(7);
   });
 
   it("keys a metadata read on its open and translates the phase vocabulary", () => {

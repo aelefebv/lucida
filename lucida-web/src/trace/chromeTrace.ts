@@ -277,6 +277,7 @@ function emitRun(events: ChromeTraceEvent[], run: TraceRun, baseUs: number): voi
         outcome: serverRow.outcome,
         phases: serverRow.phases,
         coalescedOnto: serverRow.coalescedOnto,
+        backendBytes: serverRow.backendBytes,
         requestId: serverRow.requestId,
         metadataPhase: serverRow.metadataPhase,
         dispatchOffsetUs: serverRow.dispatchOffsetUs,

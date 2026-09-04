@@ -187,6 +187,12 @@ pub struct TraceRunHeader {
     pub server_warmth: ServerWarmth,
     pub server_url: String,
     pub workspace_id: String,
+    /// The settled frame, when the caller asked for one: a PNG of the page
+    /// at the composed view's device pixel ratio, taken after the wait and
+    /// before the export. A run that never settled still gets its frame,
+    /// because what the page showed at the deadline is part of the finding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screenshot: Option<PathBuf>,
 }
 
 /// Both renderings, taken at export time from the page's one renderer. The
@@ -396,11 +402,17 @@ pub fn gate_failure(file: &TraceRunFile) -> Option<String> {
 pub fn format_run_human(file: &TraceRunFile, path: &Path) -> String {
     let header = &file.header;
     let view = &header.composed_view;
+    let screenshot = header
+        .screenshot
+        .as_deref()
+        .map(|shot| format!("frame     {}\n", shot.display()))
+        .unwrap_or_default();
     format!(
         "view      {} @ {}x{} DPR {}\n\
          server    {}\n\
          hold      quiescent had to hold {} ms; every duration below is measured against that\n\
-         run file  {}\n\n\
+         run file  {}\n\
+         {screenshot}\n\
          {}",
         view.dataset,
         view.width,
@@ -461,7 +473,15 @@ pub async fn drive_run(
     // default rendering points at Perfetto for raw spans, and a second drive
     // would send the reader to a different run than the one they were reading.
     let export_expression = run_export_expression(perfetto_path.is_some());
-    let json = drive_and_export(url, token, viewport, wait, &export_expression).await?;
+    let json = drive_and_export(
+        url,
+        token,
+        viewport,
+        wait,
+        &export_expression,
+        facts.screenshot.as_deref(),
+    )
+    .await?;
     let export: SeamExport = serde_json::from_str(&json).map_err(|error| {
         CliError::new(
             ErrorKind::Protocol,
@@ -480,12 +500,18 @@ pub async fn drive_run(
 /// that expression, so the launch, the settle wait, the timeout close and the
 /// teardown live here once. Readiness is observed rather than demanded: a page
 /// that never draws is a run this command still has to report.
+///
+/// `screenshot` is where to write the frame the page shows once the wait is
+/// over, at the viewport's device pixel ratio. It is taken before the export
+/// because the export closes the run, and the frame is the run's own last
+/// state, not something that happened after it.
 async fn drive_and_export(
     url: &str,
     token: Option<&EffectiveToken>,
     viewport: Viewport,
     wait: Duration,
     export: &str,
+    screenshot: Option<&Path>,
 ) -> Result<String, CliError> {
     browser::with_browser(viewport, wait, async |browser| {
         let mut page = browser.open_page_unrendered(url, token, wait).await?;
@@ -493,6 +519,10 @@ async fn drive_and_export(
             page.evaluate(CLOSE_AS_TIMEOUT, wait).await?;
             let closed = read_run_state(&mut page, wait).await?;
             pin_run(&mut page, closed.last_concluded_run_id.as_deref(), wait).await?;
+        }
+        if let Some(path) = screenshot {
+            let png = page.screenshot_png(wait).await?;
+            write_beside_its_parents(path, &png).await?;
         }
         let value = page.evaluate(export, wait).await?;
         value.as_str().map(str::to_string).ok_or_else(|| {
@@ -513,6 +543,8 @@ pub struct DriverFacts {
     pub server_warmth: ServerWarmth,
     pub server_url: String,
     pub workspace_id: String,
+    /// Where to write the settled frame, when the caller wants one.
+    pub screenshot: Option<PathBuf>,
 }
 
 /// Fold what the page returned together with what only the driver knows. Split
@@ -535,6 +567,7 @@ fn assemble_run_file(export: SeamExport, facts: &DriverFacts) -> TraceRunFile {
             server_warmth: facts.server_warmth.clone(),
             server_url: facts.server_url.clone(),
             workspace_id: facts.workspace_id.clone(),
+            screenshot: facts.screenshot.clone(),
         },
         renderings: TraceRenderings {
             summary: export
@@ -704,7 +737,15 @@ pub async fn capture_chrome_trace(
     viewport: Viewport,
     wait: Duration,
 ) -> Result<ChromeTraceCapture, CliError> {
-    let json = drive_and_export(url, token, viewport, wait, CHROME_TRACE_EXPORT_EXPRESSION).await?;
+    let json = drive_and_export(
+        url,
+        token,
+        viewport,
+        wait,
+        CHROME_TRACE_EXPORT_EXPRESSION,
+        None,
+    )
+    .await?;
     write_beside_its_parents(Path::new(output_path), json.as_bytes()).await?;
     summarise_chrome_trace(&json, chrome_trace_end_reason(&json))
 }
@@ -832,6 +873,7 @@ mod tests {
             server_warmth: cold(),
             server_url: "http://host".to_string(),
             workspace_id: "ws".to_string(),
+            screenshot: None,
         }
     }
 
@@ -847,6 +889,7 @@ mod tests {
                 server_warmth: cold(),
                 server_url: "http://host".to_string(),
                 workspace_id: "ws".to_string(),
+                screenshot: None,
             },
             renderings: TraceRenderings {
                 summary: "lucida trace run-1-1 — VERDICT: clear".to_string(),
@@ -1061,6 +1104,41 @@ mod tests {
         assert!(!file.header.settled);
         assert_eq!(file.header.quiescence_hold_ms, 500.0);
         assert!(gate_failure(&file).is_some());
+    }
+
+    /// The frame is the driver's artifact, so the header names it beside the
+    /// composed view whose device pixel ratio it was taken at. A run driven
+    /// without one carries no key at all, rather than a null a reader has to
+    /// distinguish from "not written".
+    #[test]
+    fn the_header_names_the_screenshot_the_driver_wrote_and_omits_it_otherwise() {
+        let export = || -> SeamExport {
+            serde_json::from_str(
+                &json!({ "schemaVersion": 1, "runId": "run-3-1", "quiescenceHoldMs": 500,
+                         "endReason": "quiescent", "diagnostic": null, "summary": "ok",
+                         "phases": "ok", "trace": { "runs": [] } })
+                .to_string(),
+            )
+            .unwrap()
+        };
+
+        let with_frame = DriverFacts {
+            screenshot: Some(PathBuf::from("/tmp/twins/sharded.png")),
+            ..facts()
+        };
+        let file = assemble_run_file(export(), &with_frame);
+        assert_eq!(
+            file.header.screenshot.as_deref(),
+            Some(Path::new("/tmp/twins/sharded.png"))
+        );
+        let json = serde_json::to_value(&file).unwrap();
+        assert_eq!(json["header"]["screenshot"], "/tmp/twins/sharded.png");
+        assert!(format_run_human(&file, Path::new("run.json")).contains("/tmp/twins/sharded.png"));
+
+        let without = assemble_run_file(export(), &facts());
+        assert_eq!(without.header.screenshot, None);
+        let json = serde_json::to_value(&without).unwrap();
+        assert!(json["header"].get("screenshot").is_none());
     }
 
     /// A page that recorded no run is a result, not a crash.
