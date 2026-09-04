@@ -6,6 +6,8 @@
  *     by chunk + render handlers to look up which dataset a memberId
  *     belongs to and which pool each of its (tier, level) sections lives
  *     in.
+ *   - `targetLevelByMember` — each member's target level, read by pool
+ *     eviction so a chunk finer than the target leaves first.
  *   - `groupToTiles` — group → child-tile set, used so a `GroupProxy3D`
  *     upload can fan out to its child tiles' descriptors.
  *   - `groupsByDataset` — dataset → groups currently referenced in
@@ -30,7 +32,7 @@ import {
   destroyDescriptorBuffer,
   iterateColdMembers,
 } from "../descriptorBuffer.ts";
-import type { EntitySource } from "../entitySources.ts";
+import { targetLevelOf, type EntitySource } from "../entitySources.ts";
 import {
   getOrCreateVolumePool,
   resizeIndirection,
@@ -98,12 +100,15 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
     state.memberSourcePools.delete(memberId);
   }
 
-  // 2. Register member→dataset mappings for every (entry, channel)
-  // combo. Canonical iteration walks activeSet × visibleChannels and
-  // produces the same memberId scheme used elsewhere in the pipeline
-  // (imageId for tiles, entityId for group-as-proxy).
-  for (const { memberId } of iterateColdMembers(msg)) {
+  // 2. Register member→dataset mappings and target levels for every
+  // (entry, channel) combo. Canonical iteration walks activeSet ×
+  // visibleChannels and produces the same memberId scheme used elsewhere
+  // in the pipeline (imageId for tiles, entityId for group-as-proxy).
+  for (const { entry, memberId } of iterateColdMembers(msg)) {
     state.memberToDataset.set(memberId, msg.datasetId);
+    const target = targetLevelOf(entry);
+    if (target === undefined) state.targetLevelByMember.delete(memberId);
+    else state.targetLevelByMember.set(memberId, target);
   }
 
   // 3. Build pool groups (volume or slice) — partitions activeSet by

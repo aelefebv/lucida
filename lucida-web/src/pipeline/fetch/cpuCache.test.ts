@@ -253,6 +253,20 @@ function makeActiveEntry(entityId: string, imageId?: string): ActiveSetEntry {
   };
 }
 
+function tileAt(entityId: string, target: number): ActiveSetEntry {
+  return {
+    kind: "tile",
+    entityId,
+    imageId: entityId.replace("entity", "image"),
+    mode: "tiles-with-detail",
+    detailLevels: [target],
+    coarseLevel: null,
+    proxyKind: undefined,
+    proxyAvailable: false,
+    groupProxyAvailable: false,
+  };
+}
+
 function createTestCache(configOverrides?: Partial<CpuCacheConfig>) {
   const source = createMockContentSource();
   const decode = createSyncDecode();
@@ -1419,6 +1433,53 @@ describe("CpuCache", () => {
       snap = cache.snapshot();
       expect(snap.cached.has("entity-1")).toBe(false); // demoted, evicted
       expect(snap.cached.get("entity-2")?.size).toBe(2); // active, kept
+    });
+
+    it("evicts a chunk finer than its entity's target before a farther chunk at another entity's target", async () => {
+      const { cache, source } = createTestCache({ mainBudgetBytes: 256, overviewBudgetBytes: 0 });
+      source.autoResolveBytes = 100;
+
+      const e1Fine = makeRequest({ entityId: "entity-1", imageId: "image-1", priority: 0, chunkKey: "0/0/0/0/0/0" });
+      const e2Fine = makeRequest({ entityId: "entity-2", imageId: "image-2", priority: 100, chunkKey: "0/0/0/0/0/0" });
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([e1Fine, e2Fine], [tileAt("entity-1", 0), tileAt("entity-2", 0)]));
+      await flush();
+      expect(cache.snapshot().cached.get("entity-1")?.has("0/0/0/0/0/0")).toBe(true);
+
+      // Entity 1's target moves to level 2, and the level-2 chunk it now
+      // wants pushes the store over budget.
+      const e1Target = makeRequest({ entityId: "entity-1", imageId: "image-1", level: 2, chunkKey: "2/0/0/0/0/0" });
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([e1Target], [tileAt("entity-1", 2), tileAt("entity-2", 0)]));
+      await flush();
+
+      // The view-distance keys alone would take entity 2's distant chunk.
+      const snap = cache.snapshot();
+      expect(snap.cached.get("entity-1")).toEqual(new Set(["2/0/0/0/0/0"]));
+      expect(snap.cached.get("entity-2")).toEqual(new Set(["0/0/0/0/0/0"]));
+    });
+
+    it("leaves the coarse bucket's order alone: a coarse chunk finer than the target still goes by age", async () => {
+      const { cache, source } = createTestCache({ mainBudgetBytes: 0, overviewBudgetBytes: 256 });
+      source.autoResolveBytes = 100;
+      const coarse = (level: number, x: number) =>
+        makeRequest({ lane: "coarse", tier: "coarse", level, x, chunkKey: `${level}/0/0/0/0/${x}` });
+      const activeSet = [tileAt("entity-1", 2)];
+
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([coarse(3, 0)], activeSet));
+      await flush();
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([coarse(3, 0), coarse(0, 1)], activeSet));
+      await flush();
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([coarse(3, 0), coarse(0, 1), coarse(3, 2)], activeSet));
+      await flush();
+
+      const keys = cache.snapshot().cached.get("entity-1")!;
+      expect(keys.has("3/0/0/0/0/0")).toBe(false);
+      expect(keys.has("0/0/0/0/0/1")).toBe(true);
+      expect(keys.has("3/0/0/0/0/2")).toBe(true);
     });
   });
 
