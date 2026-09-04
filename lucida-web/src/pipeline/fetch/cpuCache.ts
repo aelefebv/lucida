@@ -217,6 +217,14 @@ export class CpuCache {
 
   private activeEntityIds = new Set<string>();
   private activeEntityIdsThisRebuild = new Set<string>();
+  /**
+   * Each tile entity's target level from its most recent plan. The detail
+   * store's eviction policy reads it so that a resident chunk finer than
+   * the target goes first (ADR 0061). The policy judges entries against
+   * this map at eviction time, so a target change costs no pass over the
+   * resident entries. An entity that left the view keeps its last target.
+   */
+  private targetLevelByEntity = new Map<string, number>();
 
   private interactionDetector = new InteractionModeDetector(INTERACTION_MODE_WINDOW);
 
@@ -323,7 +331,10 @@ export class CpuCache {
     this.now = config?.now ?? (() => performance.now());
     this.random = config?.random ?? Math.random;
 
-    const mainPolicy = new TieredPolicy(() => this.interactionDetector.current());
+    const mainPolicy = new TieredPolicy(
+      () => this.interactionDetector.current(),
+      (entityId) => this.targetLevelByEntity.get(entityId),
+    );
     this.chunkStore = new ChunkStore({
       policy: mainPolicy,
       budgetBytes: this.config.mainBudgetBytes,
@@ -418,8 +429,14 @@ export class CpuCache {
 
     this.interactionDetector.push(plan.epochs);
 
-    const newActiveIds = new Set(plan.activeSet.map(e => e.entityId));
-    for (const entityId of newActiveIds) this.activeEntityIdsThisRebuild.add(entityId);
+    const newActiveIds = new Set<string>();
+    for (const entry of plan.activeSet) {
+      newActiveIds.add(entry.entityId);
+      this.activeEntityIdsThisRebuild.add(entry.entityId);
+      if (entry.kind === "tile" && entry.detailLevels.length > 0) {
+        this.targetLevelByEntity.set(entry.entityId, entry.detailLevels[0]);
+      }
+    }
 
     // One pass over the request list builds every derived key exactly
     // once (issue #900). The planner hands `submit` the dataset's
@@ -698,6 +715,7 @@ export class CpuCache {
       }
       this.activeEntityIds.delete(entityId);
       this.activeEntityIdsThisRebuild.delete(entityId);
+      this.targetLevelByEntity.delete(entityId);
       this.deliveryState.clearChunksForImage(entityId);
     }
     const proxyPrefix = `${datasetId}|`;
@@ -1161,6 +1179,7 @@ export class CpuCache {
 
     this.activeEntityIds.clear();
     this.activeEntityIdsThisRebuild.clear();
+    this.targetLevelByEntity.clear();
     this.viewCoarseKeysThisTick.clear();
     this.interactionDetector.reset();
     this.permanentFailures.clear();

@@ -25,6 +25,7 @@ export function handleDestroy(ctx: WorkerCtx): void {
   state.currentColdState = null;
   state.memberToDataset.clear();
   state.memberSourcePools.clear();
+  state.targetLevelByMember.clear();
   state.currentSourcesByDataset.clear();
   // Tear down proxy atlas pools and descriptors.
   for (const dsPools of state.proxyPoolsByDataset.values()) {
