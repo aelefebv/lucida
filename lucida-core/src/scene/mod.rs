@@ -16,6 +16,7 @@ use crate::camera::Camera;
 use crate::chunk::{self, ChunkRequestPlan};
 use crate::epoch::SceneEpochs;
 use crate::query::{EntityQueryResult, ViewQueryDelta, ViewQueryResult};
+use crate::target_level::{self, IN_PLANE_AXES, VOLUME_AXES, level_shape_ratios};
 use crate::transform::{self, VolumeTransform};
 use crate::view::ViewState;
 
@@ -192,7 +193,7 @@ impl CameraModeKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct QuantizedEntity {
     visible: bool,
-    ideal_target_lod: u32,
+    target_level: u32,
     kind: EntityKind,
 }
 
@@ -200,7 +201,7 @@ impl QuantizedEntity {
     fn of(entry: &EntityQueryResult) -> Self {
         Self {
             visible: entry.visible,
-            ideal_target_lod: entry.ideal_target_lod,
+            target_level: entry.target_level,
             kind: entry.kind.clone(),
         }
     }
@@ -221,6 +222,18 @@ pub(crate) struct ViewQueryCursor {
     /// `image_id` (an entity can own several images, so `entity_id` is not a
     /// unique key).
     entries: HashMap<ImageId, QuantizedEntity>,
+}
+
+impl ViewQueryCursor {
+    /// Whether this snapshot still describes the current projection space,
+    /// meaning the same membership base and the same camera family. A
+    /// difference against any other snapshot means nothing.
+    fn matches(&self, epochs: &SceneEpochs, mode: CameraModeKind) -> bool {
+        self.content == epochs.content
+            && self.layout == epochs.layout
+            && self.asset == epochs.asset
+            && self.mode == mode
+    }
 }
 
 impl Scene {
@@ -1259,6 +1272,14 @@ impl Scene {
 
     /// Query the scene for geometric information about all entities in a dataset
     /// from the current camera viewpoint.
+    ///
+    /// Each record's `target_level` is [`crate::target_level::target_level`]
+    /// applied to the camera's [`Camera::pixels_per_sample`] measure and the
+    /// image's level geometry. The hysteresis history the rule takes is the
+    /// level this scene last reported for the record through
+    /// [`Scene::view_query_delta`], so a full query agrees with the delta a
+    /// caller is folding. A caller that only ever asks for full queries has no
+    /// history and gets the rule without hysteresis.
     pub fn view_query(&self, dataset_id: &DatasetId) -> Option<ViewQueryResult> {
         let derived = self.derived.get(dataset_id)?;
         let manifest = self.document.manifests.get(dataset_id)?;
@@ -1277,6 +1298,12 @@ impl Scene {
         let mut results = Vec::with_capacity(derived.members.len());
 
         let is_2d = matches!(self.camera, Camera::Slice(_));
+        let resolved_axes: &[usize] = if is_2d { &IN_PLANE_AXES } else { &VOLUME_AXES };
+        let previous_levels = self
+            .view_query_cursors
+            .get(dataset_id)
+            .filter(|c| c.matches(&self.epochs, CameraModeKind::of(&self.camera)))
+            .map(|c| &c.entries);
 
         for member in &derived.members {
             let pos = member.position;
@@ -1290,7 +1317,7 @@ impl Scene {
 
             let centroid;
 
-            if is_2d {
+            let pixels_per_sample = if is_2d {
                 let level0 = member.levels.first();
                 let (fw, fh, fd) = level0
                     .map(|l| (l.shape[4] as f64, l.shape[3] as f64, l.shape[2] as f64))
@@ -1311,8 +1338,9 @@ impl Scene {
                         any_visible = true;
                     }
                 }
+                self.camera.effective_zoom()
             } else {
-                let (rt, _) = self.rendering_transform(member);
+                let (rt, rt_inv) = self.rendering_transform(member);
                 let corners = rt.world_corners();
                 let rt_centroid = rt.world_centroid();
                 centroid = rt_centroid;
@@ -1325,7 +1353,18 @@ impl Scene {
                         any_visible = true;
                     }
                 }
-            }
+                // Measure against the box the renderer draws, not the member's
+                // raw transform.
+                let placed = VolumeTransform {
+                    model: rt.model,
+                    inv_model: rt_inv.inv_model,
+                    max_physical_extent: rt.max_physical_extent,
+                };
+                let shape = member.levels.first().map_or([1, 1, 1], |l| {
+                    [l.shape[2] as u32, l.shape[3] as u32, l.shape[4] as u32]
+                });
+                self.camera.pixels_per_sample(&placed, shape)
+            };
 
             // Check if screen rect overlaps viewport
             let visible = any_visible
@@ -1342,24 +1381,18 @@ impl Scene {
                 (0.0, 0.0)
             };
 
-            // Per-entity ideal LOD
-            let num_levels = member.levels.len() as u32;
-            let ideal_target_lod = if visible && projected_diagonal_px > 0.0 {
-                let level_0 = member.levels.first();
-                let voxel_diagonal = level_0
-                    .map(|l| {
-                        let sx = l.shape[4] as f64; // X
-                        let sy = l.shape[3] as f64; // Y
-                        let sz = l.shape[2] as f64; // Z
-                        (sx * sx + sy * sy + sz * sz).sqrt()
-                    })
-                    .unwrap_or(1.0);
-
-                let ppv = projected_diagonal_px / voxel_diagonal.max(1.0);
-                let raw = (-ppv.log2()).floor().max(0.0) as u32;
-                raw.min(num_levels.saturating_sub(1))
+            // An off-screen record parks at the coarsest level. A parked level
+            // is not hysteresis history, so a record coming back into view
+            // starts fresh.
+            let level = if visible {
+                let previous = previous_levels
+                    .and_then(|entries| entries.get(&member.image_id))
+                    .filter(|entry| entry.visible)
+                    .map(|entry| entry.target_level);
+                let ratios = level_shape_ratios(&member.levels, resolved_axes);
+                target_level::target_level(pixels_per_sample, &ratios, previous)
             } else {
-                num_levels.saturating_sub(1) // coarsest
+                (member.levels.len() as u32).saturating_sub(1)
             };
 
             // Distance from camera
@@ -1389,7 +1422,7 @@ impl Scene {
                 projected_diagonal_px,
                 projected_area_px2,
                 centroid_world: centroid,
-                ideal_target_lod,
+                target_level: level,
                 importance,
             });
         }
@@ -1450,9 +1483,10 @@ impl Scene {
         // or a camera-family change — forces a full resync. When in doubt, a
         // full snapshot is slow-but-correct; a delta computed across a changed
         // base could ship a wrong tile.
-        let can_delta = self.view_query_cursors.get(dataset_id).is_some_and(|c| {
-            c.content == content && c.layout == layout && c.asset == asset && c.mode == mode
-        });
+        let can_delta = self
+            .view_query_cursors
+            .get(dataset_id)
+            .is_some_and(|c| c.matches(&self.epochs, mode));
 
         let new_entries: HashMap<ImageId, QuantizedEntity> = result
             .visible_entities
@@ -1508,7 +1542,7 @@ impl Scene {
 /// Records are keyed by their unique `image_id`, never `entity_id` — an entity
 /// can own several images (each its own member/record with its own pyramid
 /// depth), so keying on `entity_id` would collapse distinct records and lose
-/// their individual `ideal_target_lod`.
+/// their individual `target_level`.
 ///
 /// - `entered`: a current record whose `image_id` is absent from `prev`.
 /// - `changed`: a current record whose `image_id` is in `prev` with a differing
@@ -1868,7 +1902,8 @@ pub(crate) mod test_helpers {
         }
     }
 
-    /// Create a DatasetOpened with specific shape and multiple levels.
+    /// Create a DatasetOpened with specific shape and `num_levels` regular
+    /// levels, each level halving z, y, and x.
     pub fn make_dataset_opened_with_shape(
         id: &str,
         name: &str,
@@ -1877,32 +1912,71 @@ pub(crate) mod test_helpers {
         chunk_shape: [u64; 5],
         num_levels: u32,
     ) -> DatasetOpened {
-        let entity_id = EntityId(format!("{id}-entity"));
-        let image_id = ImageId(format!("{id}-image"));
-
-        let mut levels = Vec::new();
-        for l in 0..num_levels {
-            let scale = 1u64 << l;
-            levels.push(LevelGeometry {
-                level_index: l,
-                shape: [
-                    shape[0],
-                    shape[1],
+        let level_shapes: Vec<[u64; 3]> = (0..num_levels)
+            .map(|l| {
+                let scale = 1u64 << l;
+                [
                     shape[2].div_ceil(scale),
                     shape[3].div_ceil(scale),
                     shape[4].div_ceil(scale),
-                ],
-                chunk_shape,
-                grid_shape: [
-                    shape[0].div_ceil(chunk_shape[0]),
-                    shape[1].div_ceil(chunk_shape[1]),
-                    shape[2].div_ceil(scale).div_ceil(chunk_shape[2]),
-                    shape[3].div_ceil(scale).div_ceil(chunk_shape[3]),
-                    shape[4].div_ceil(scale).div_ceil(chunk_shape[4]),
-                ],
-                scale: [1.0, 1.0, 1.0, 1.0, 1.0],
-            });
-        }
+                ]
+            })
+            .collect();
+        make_dataset_opened_with_named_level_shapes(
+            id,
+            name,
+            [shape[0], shape[1]],
+            &level_shapes,
+            chunk_shape,
+        )
+    }
+
+    /// Create a single-image DatasetOpened whose pyramid has exactly the given
+    /// `[z, y, x]` shape per level, so a test can describe an irregular or
+    /// anisotropic pyramid directly.
+    pub fn make_dataset_opened_with_level_shapes(
+        id: &str,
+        level_shapes: &[[u64; 3]],
+    ) -> DatasetOpened {
+        make_dataset_opened_with_named_level_shapes(
+            id,
+            id,
+            [1, 1],
+            level_shapes,
+            [1, 1, 1, 256, 256],
+        )
+    }
+
+    fn make_dataset_opened_with_named_level_shapes(
+        id: &str,
+        name: &str,
+        tc: [u64; 2],
+        level_shapes: &[[u64; 3]],
+        chunk_shape: [u64; 5],
+    ) -> DatasetOpened {
+        let entity_id = EntityId(format!("{id}-entity"));
+        let image_id = ImageId(format!("{id}-image"));
+
+        let levels = level_shapes
+            .iter()
+            .enumerate()
+            .map(|(l, &[z, y, x])| {
+                let shape = [tc[0], tc[1], z, y, x];
+                LevelGeometry {
+                    level_index: l as u32,
+                    shape,
+                    chunk_shape,
+                    grid_shape: [
+                        shape[0].div_ceil(chunk_shape[0]),
+                        shape[1].div_ceil(chunk_shape[1]),
+                        shape[2].div_ceil(chunk_shape[2]),
+                        shape[3].div_ceil(chunk_shape[3]),
+                        shape[4].div_ceil(chunk_shape[4]),
+                    ],
+                    scale: [1.0, 1.0, 1.0, 1.0, 1.0],
+                }
+            })
+            .collect();
 
         let manifest = DatasetManifest::new(
             DatasetId(id.to_string()),
@@ -4417,7 +4491,7 @@ mod tests {
             projected_diagonal_px: 1.0,
             projected_area_px2: 1.0,
             centroid_world: [0.0, 0.0, 0.0],
-            ideal_target_lod: lod,
+            target_level: lod,
             importance: 1.0,
         }
     }
@@ -4544,7 +4618,7 @@ mod tests {
             projected_diagonal_px: 1.0,
             projected_area_px2: 1.0,
             centroid_world: [0.0, 0.0, 0.0],
-            ideal_target_lod: lod,
+            target_level: lod,
             importance: 1.0,
         };
 
@@ -4635,7 +4709,7 @@ mod tests {
         let (entered, left, changed) = view_query_diff(&m1, &s2, &m2);
         assert_eq!(entered.len(), 1);
         assert_eq!(entered[0].entity_id.0, "a");
-        assert_eq!(entered[0].ideal_target_lod, 5);
+        assert_eq!(entered[0].target_level, 5);
         assert!(left.is_empty());
         assert!(changed.is_empty());
     }
