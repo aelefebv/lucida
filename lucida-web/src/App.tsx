@@ -53,6 +53,7 @@ import { useBridge } from "./hooks/useBridge.ts";
 import { useDatasets } from "./hooks/useDatasets.ts";
 import { useSeedDatasetOpens } from "./hooks/useSeedDatasetOpens.ts";
 import { useIntensityBatcher } from "./hooks/useIntensityBatcher.ts";
+import { useDatasetLevels } from "./hooks/useDatasetLevels.ts";
 import { useSavedViewSync } from "./hooks/useSavedViewSync.ts";
 import { useViewedMentions } from "./hooks/useViewedMentions.ts";
 import type { SavedView } from "./savedView/types.ts";
@@ -244,6 +245,11 @@ function App({
     loopRef: render.loopRef,
   });
 
+  const datasetLevels = useDatasetLevels({
+    clientReady: render.clientReady,
+    clientRef: render.clientRef,
+  });
+
   const layers = useDatasetSettings({
     wasmSceneRef: scene.wasmSceneRef,
     datasetsRef,
@@ -255,6 +261,7 @@ function App({
     datasetsVersion,
     remoteDocumentVersion,
     viewMode: dims.viewMode,
+    datasetLevels: datasetLevels.levels,
   });
 
   const bridge = useBridge({
@@ -793,6 +800,7 @@ function App({
       render.clientRef.current?.removeLayerResources(id);
       datasetsRef.current.delete(id);
       layers.cleanupLayerMaps(id);
+      datasetLevels.forget(id);
       setSelectedDatasetId(prev => {
         if (prev === id) {
           return datasetsRef.current.keys().next().value ?? null;
@@ -1153,7 +1161,7 @@ function App({
         onSetColormap={layers.handleLayerSetColormap}
         onSetBlendMode={layers.handleLayerSetBlendMode}
         onSetRenderMode={layers.handleLayerSetRenderMode}
-        onSetDetailLevelOverride={layers.handleLayerSetDetailLevelOverride}
+        onSetLevelPin={layers.handleLayerSetLevelPin}
         onAutoContrast={layers.handleLayerAutoContrast}
         onAutoContrastToggle={layers.handleLayerAutoContrastToggle}
         onFullRangeToggle={layers.handleLayerFullRangeToggle}

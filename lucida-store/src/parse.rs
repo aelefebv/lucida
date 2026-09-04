@@ -180,6 +180,10 @@ fn truncate_for_message(key: &str) -> String {
 pub(crate) struct ParsedMultiscales {
     pub axes_names: Vec<String>,
     pub level_entries: Vec<LevelEntry>,
+    /// The multiscale's `type`: the method the writer used to derive each
+    /// coarser level, kept verbatim. `None` when the writer declared none or
+    /// left it blank.
+    pub downsampling_method: Option<String>,
 }
 
 /// Parse OME multiscales from a root zarr.json value.
@@ -255,9 +259,17 @@ pub(crate) fn parse_multiscales(
         )));
     }
 
+    let downsampling_method = ms
+        .get("type")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
     Ok(ParsedMultiscales {
         axes_names,
         level_entries,
+        downsampling_method,
     })
 }
 
@@ -590,6 +602,46 @@ mod tests {
         assert_eq!(parsed.level_entries[0].scale, [1.0, 1.0, 2.0, 0.5, 0.5]);
         assert_eq!(parsed.level_entries[1].path, "1");
         assert_eq!(parsed.level_entries[1].scale, [1.0, 1.0, 4.0, 1.0, 1.0]);
+        assert_eq!(parsed.downsampling_method, None);
+    }
+
+    fn multiscales_with_type(type_value: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {
+                "ome": {
+                    "version": "0.5",
+                    "multiscales": [{
+                        "version": "0.5",
+                        "type": type_value,
+                        "axes": [
+                            {"name": "y", "type": "space"},
+                            {"name": "x", "type": "space"}
+                        ],
+                        "datasets": [{"path": "0"}]
+                    }]
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn parse_multiscales_keeps_the_declared_downsampling_method() {
+        let parsed = parse_multiscales(&multiscales_with_type("gaussian".into()), "").unwrap();
+        assert_eq!(parsed.downsampling_method.as_deref(), Some("gaussian"));
+    }
+
+    #[test]
+    fn parse_multiscales_trims_the_downsampling_method_and_drops_a_blank_one() {
+        let padded = parse_multiscales(&multiscales_with_type("  mean ".into()), "").unwrap();
+        assert_eq!(padded.downsampling_method.as_deref(), Some("mean"));
+
+        let blank = parse_multiscales(&multiscales_with_type("   ".into()), "").unwrap();
+        assert_eq!(blank.downsampling_method, None);
+
+        let not_a_string = parse_multiscales(&multiscales_with_type(7.into()), "").unwrap();
+        assert_eq!(not_a_string.downsampling_method, None);
     }
 
     #[test]
