@@ -18,6 +18,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use lucida_core::DatasetId;
 use lucida_core::saved_view::{SavedView, normalize_dataset_url};
 use lucida_protocol::{DatasetSourceCacheStats, DatasetSourceHealth};
 use serde::{Deserialize, Serialize};
@@ -262,10 +263,43 @@ pub enum ShowDepth {
 /// reproducible from the command that produced it. The camera is left at the
 /// default so the page's own fit-on-open decides the framing, exactly as it
 /// would for a person opening the same URL.
-pub fn compose_dataset_view(dataset_url: &str, width: u32, height: u32) -> SavedView {
+///
+/// `pin_contrast_for` names the dataset whose contrast window is to stay at
+/// its default rather than being fitted to the data as it arrives. The fit
+/// samples whatever is resident when it runs, so two runs of one dataset can
+/// draw the same data a level apart; a frame that is to be compared with
+/// another run's needs the window pinned.
+pub fn compose_dataset_view(
+    dataset_url: &str,
+    width: u32,
+    height: u32,
+    pin_contrast_for: Option<&DatasetId>,
+) -> SavedView {
     let mut view = SavedView::empty([width, height]);
     view.datasets = vec![normalize_dataset_url(dataset_url)];
+    if let Some(dataset_id) = pin_contrast_for {
+        view.auto_contrast.insert(dataset_id.clone(), false);
+    }
     view
+}
+
+/// The workspace's id for the dataset at `dataset_url`, out of a health
+/// snapshot, when the workspace holds it.
+pub fn dataset_id_for_source(
+    dataset_url: &str,
+    health: &[DatasetSourceHealth],
+) -> Option<DatasetId> {
+    let canonical = normalize_dataset_url(dataset_url);
+    health
+        .iter()
+        .find(|dataset| {
+            dataset
+                .source_url
+                .as_deref()
+                .map(|url| normalize_dataset_url(url) == canonical)
+                .unwrap_or(false)
+        })
+        .map(|dataset| dataset.workspace_dataset_id.clone())
 }
 
 /// Read the server's warmth for `dataset_url` out of a health snapshot taken
@@ -953,10 +987,42 @@ mod tests {
     /// canonical form, at the run's viewport, and no camera of its own.
     #[test]
     fn the_composed_view_carries_the_canonical_dataset_and_nothing_else() {
-        let view = compose_dataset_view("GS://Bucket/set.zarr", 1440, 900);
+        let view = compose_dataset_view("GS://Bucket/set.zarr", 1440, 900, None);
         assert_eq!(view.datasets, vec!["gs://Bucket/set.zarr".to_string()]);
         assert!(view.dataset_order.is_empty());
         assert!(view.active_layouts.is_empty());
+        assert!(view.auto_contrast.is_empty());
+    }
+
+    /// A pinned window is the one thing a composed view says about display:
+    /// the dataset's auto-contrast is off, so the page does not fit the window
+    /// to whatever happens to be resident, and two runs draw alike.
+    #[test]
+    fn the_composed_view_pins_the_contrast_window_only_when_asked() {
+        let id = DatasetId("wds-1".to_string());
+        let view = compose_dataset_view("gs://bucket/set.zarr", 1440, 900, Some(&id));
+        assert_eq!(view.auto_contrast.get(&id), Some(&false));
+        assert_eq!(view.auto_contrast.len(), 1);
+        assert_eq!(
+            view.dataset_settings.len(),
+            0,
+            "the window itself stays the default"
+        );
+    }
+
+    /// The pin needs the workspace's id for the dataset, which only the health
+    /// snapshot (or the open the driver just did) knows.
+    #[test]
+    fn the_dataset_id_comes_from_the_health_entry_for_the_canonical_url() {
+        let health = vec![health_entry("gs://bucket/set.zarr", None)];
+        assert_eq!(
+            dataset_id_for_source("GS://bucket/set.zarr", &health),
+            Some(DatasetId("ds".to_string()))
+        );
+        assert_eq!(
+            dataset_id_for_source("gs://bucket/other.zarr", &health),
+            None
+        );
     }
 
     /// A browser-cold open can run against an arbitrarily warm server, so the

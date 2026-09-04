@@ -79,29 +79,35 @@ Sample values are `uint16` in every fixture, and the codec chain is `bytes`
   ```
 
   `--screenshot` writes the frame the page shows once it has settled, at
-  the run's device pixel ratio. A level-index pyramid opened the same way
-  tells a screenshot check which level the viewer chose, because the sample
-  values are the level number.
+  the run's device pixel ratio. `--pin-contrast` keeps the dataset's
+  contrast window at its default instead of fitting it to the data as it
+  arrives; without it, two runs of one dataset can draw the same data a
+  level apart, because the fit samples whatever is resident when it runs.
+  A level-index pyramid opened the same way tells a screenshot check which
+  level the viewer chose, because the sample values are the level number.
 
 ## The sharded twin check
 
 `extras/verify_sharded_twins.py` proves the sharded store end to end. It
 writes two twin pairs with the generator, opens each dataset through the
 trace driver in its own workspace at device pixel ratio 2, and asserts that
-every run settled, that each pair's two frames are not blank and match to
-within one level of an 8-bit channel, that every backend read in a sharded
-run moved exactly the inner chunks it carried (one, or a contiguous run of
-one shard's inner chunks merged into one request), one shard index, or
-both, and that every read in an unsharded run moved one whole chunk object.
-The expected sizes come from the shard indexes on disk, so the read
-comparison is exact. The frame tolerance is what two page loads of one dataset differ
-by; a wrong inner chunk moves pixels by far more. The second pair has a
-single source level too large to serve as the coarse tier, so the server
-generates a coarse level over the sharded source, and the check asserts
-that both runs requested that level and still match. That pair is one image
-whose source grid stays under the 32 chunks the server generates on its own
-after an open, and the check waits for that fill before it opens the view,
-because a static view never asks for the rest (issue #1034).
+every run settled, that each pair's two frames are not blank and identical
+pixel for pixel, that every backend read in a sharded run moved exactly the
+inner chunks it carried (one, or a contiguous run of one shard's inner
+chunks merged into one request), one shard index, or both, and that every
+read in an unsharded run moved one whole chunk object. The expected sizes
+come from the shard indexes on disk, so the read comparison is exact. Every
+run is driven with `--pin-contrast`, because the default contrast fit
+samples whatever is resident when it runs and two runs of one dataset then
+draw the same data a level apart. The second pair has a single source level
+too large to serve as the coarse tier, so the server generates a coarse
+level over the sharded source, and the check asserts that both runs
+requested that level and still match. That pair is one image whose source
+grid stays under the 32 chunks the server generates on its own after an
+open, and the check waits for that fill before it opens the view, because a
+static view never asks for the rest (issue #1034). That fill reads the
+whole source, so the pair's own requests are answered from the server's
+cache; the read audit is the first pair's job.
 
 It needs a running server that serves a built web bundle, the `lucida` CLI,
 and Chrome. From the repository root:

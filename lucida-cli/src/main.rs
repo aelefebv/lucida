@@ -1202,6 +1202,10 @@ struct TraceRunArgs {
     /// the run's device pixel ratio
     #[arg(long, value_name = "PATH")]
     screenshot: Option<PathBuf>,
+    /// Keep the dataset's contrast window at its default instead of fitting it
+    /// to the data as it arrives, so frames of two runs can be compared
+    #[arg(long)]
+    pin_contrast: bool,
     /// Seconds to wait for the page to load and settle
     #[arg(long, default_value_t = 120)]
     timeout_seconds: u64,
@@ -3672,14 +3676,21 @@ async fn run_trace(
     // empty viewer until the deadline. Opening it here is what makes a
     // first-time dataset measurable; the warmth block says the driver did it,
     // because it warms the server the run is about to be measured against.
+    let mut dataset_id = trace::dataset_id_for_source(&dataset_url, &health);
     if !warmth.dataset_open_before_run {
-        DatasetOpenClient::new(target.ws_url.clone(), token.cloned())
+        let opened = DatasetOpenClient::new(target.ws_url.clone(), token.cloned())
             .open(&dataset_url, &workspace.id, wait)
             .await?;
+        dataset_id = Some(lucida_core::DatasetId(opened.workspace_dataset_id));
         warmth.note_driver_open();
     }
 
-    let view = trace::compose_dataset_view(&dataset_url, args.width, args.height);
+    let pin_contrast_for = if args.pin_contrast {
+        dataset_id.as_ref()
+    } else {
+        None
+    };
+    let view = trace::compose_dataset_view(&dataset_url, args.width, args.height, pin_contrast_for);
     let url = montage::with_render_param(&viewer_inline_view_web_url(target, &view)?);
     let composed = trace::ComposedView {
         dataset: normalize_dataset_url(&dataset_url),
@@ -5619,14 +5630,17 @@ mod tests {
             "/tmp/r.json",
             "--screenshot",
             "/tmp/r.png",
+            "--pin-contrast",
         ]);
         match gated.command {
             Command::Trace { run, .. } => {
                 assert!(run.gate);
                 assert_eq!(run.output.as_deref(), Some("/tmp/r.json"));
                 // The frame rides the same drive, so a twin comparison is two
-                // commands and not four.
+                // commands and not four, and the window it was drawn with is
+                // pinned so the two frames are comparable.
                 assert_eq!(run.screenshot.as_deref(), Some(Path::new("/tmp/r.png")));
+                assert!(run.pin_contrast);
             }
             _ => panic!("expected a trace run"),
         }

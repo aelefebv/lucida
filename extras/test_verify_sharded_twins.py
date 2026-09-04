@@ -276,7 +276,7 @@ def write_frame(path: Path, pixels: np.ndarray) -> Path:
     return path
 
 
-def test_frames_match_within_one_level_and_a_single_color_is_blank(tmp_path: Path) -> None:
+def test_frames_must_be_identical_and_a_single_color_is_blank(tmp_path: Path) -> None:
     height, width = 10, 10
     gradient = np.zeros((height, width, 4), dtype=np.uint8)
     gradient[..., 0] = np.arange(width, dtype=np.uint8) * 20
@@ -290,27 +290,24 @@ def test_frames_match_within_one_level_and_a_single_color_is_blank(tmp_path: Pat
     assert identical.colors == (10, 10)
     assert not (tmp_path / "diff.png").exists()
 
-    # One level in one channel is what two page loads of one dataset differ
-    # by: reported, drawn nowhere, and a match.
+    # One level in one channel of one pixel is a mismatch, and the report
+    # says how far off it was.
     nudged = gradient.copy()
     nudged[2, 2, 1] += 1
-    within = check.compare_frames(first, write_frame(tmp_path / "n.png", nudged), tmp_path / "diff.png")
-    assert within.matches and within.max_delta == 1
-    assert within.differing_fraction == pytest.approx(0.01)
-    assert not (tmp_path / "diff.png").exists()
+    nudge = check.compare_frames(first, write_frame(tmp_path / "n.png", nudged), tmp_path / "diff.png")
+    assert not nudge.matches and nudge.max_delta == 1
+    assert nudge.differing_fraction == pytest.approx(0.01)
+    diff = np.asarray(Image.open(tmp_path / "diff.png").convert("RGBA"))
+    assert tuple(diff[2, 2]) == (255, 0, 255, 255)
+    assert tuple(diff[0, 0]) == (0, 0, 0, 255)
 
-    changed = nudged.copy()
+    changed = gradient.copy()
     changed[3, 4] = (255, 255, 255, 255)
     other = write_frame(tmp_path / "c.png", changed)
     differing = check.compare_frames(first, other, tmp_path / "diff.png")
-    assert differing.differing_fraction == pytest.approx(0.02)
+    assert differing.differing_fraction == pytest.approx(0.01)
     assert differing.max_delta == 255
     assert not differing.matches
-    # The picture of the difference shows only what lies beyond the tolerance.
-    diff = np.asarray(Image.open(tmp_path / "diff.png").convert("RGBA"))
-    assert tuple(diff[3, 4]) == (255, 0, 255, 255)
-    assert tuple(diff[2, 2]) == (0, 0, 0, 255)
-    assert tuple(diff[0, 0]) == (0, 0, 0, 255)
 
     blank = write_frame(tmp_path / "blank.png", np.full((height, width, 4), (9, 9, 9, 255), dtype=np.uint8))
     assert check.compare_frames(blank, blank).blank

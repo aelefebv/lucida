@@ -10,11 +10,13 @@ each dataset through ``lucida trace`` in its own workspace, and then reads
 what came back:
 
 1. Every run settled: the page published quiescent and closed its own run.
-2. Each pair's two frames are not blank and match to within one level of
-   an 8-bit channel, so the layout of the store never changes what the
-   viewer shows. Two runs of one dataset differ by that much: the renderer
-   is not bit-reproducible across page loads, and a wrong or missing inner
-   chunk moves pixels by far more than one level.
+2. Each pair's two frames are not blank and are identical pixel for pixel,
+   so the layout of the store never changes what the viewer shows. Every
+   run is driven with the contrast window pinned (``lucida trace
+   --pin-contrast``), because the default fit samples whatever is resident
+   when it runs and two runs of one dataset then draw the same data a level
+   or two apart. The report names the largest difference it saw, so a
+   drift is measured rather than hidden.
 3. In the sharded runs, every backend read the trace recorded moved exactly
    the inner chunks it carried (one, or a contiguous run of one shard's
    inner chunks merged into one request), one shard index, or both. Nothing
@@ -30,7 +32,10 @@ chunks the server generates on its own after an open, because a generated
 level has one chunk per source chunk and a static view does not ask for
 the rest (see issue #1034). The check opens each of the pair's datasets
 first and waits for that fill to finish, so the run measures a complete
-tier and not the fill.
+tier and not the fill. The fill reads the whole source through the store,
+so the view's own requests are then answered from the server's cache and
+this pair's read audit meets no reads; the read audit is the first pair's
+job, and this pair's is the picture.
 
 The trace carries the byte count of each backend read because the server's
 timing rows do (``backend_bytes``). A read the trace attributes to a
@@ -118,10 +123,11 @@ SOURCE_COARSE_MAX_LONG_AXIS = 2048
 # (`GeneratedCoarseConfig::default().background_chunk_limit` in
 # lucida-server). The generated-coarse pair keeps its source grid under it.
 GENERATED_BACKGROUND_CHUNK_LIMIT = 32
-# The largest per-channel difference two frames may show and still match:
-# one level of an 8-bit channel, which is what two page loads of one
-# dataset differ by.
-FRAME_TOLERANCE = 1
+# The largest per-channel difference two frames may show and still match.
+# With the contrast window pinned, two runs of one dataset draw identical
+# frames, so nothing is allowed; the report still says how far off a
+# mismatch was.
+FRAME_TOLERANCE = 0
 # How long to wait for the server's own generated fill after an open.
 GENERATED_FILL_TIMEOUT_SECONDS = 60
 
@@ -629,6 +635,7 @@ class Lucida:
             str(screenshot),
             "--device-pixel-ratio",
             str(DEVICE_PIXEL_RATIO),
+            "--pin-contrast",
             "--timeout-seconds",
             str(timeout_seconds),
             timeout=timeout_seconds + 120,
@@ -721,8 +728,8 @@ def check_pair(pair: TwinPair, unsharded: DrivenRun, sharded: DrivenRun, out: Pa
     )
     report.check(
         frames.matches,
-        f"{pair.name}: frames match within {FRAME_TOLERANCE} level per channel "
-        f"(largest difference {frames.max_delta}, {frames.differing_fraction:.2%} of pixels differ at all)"
+        f"{pair.name}: frames identical "
+        f"(largest difference {frames.max_delta}, {frames.differing_fraction:.2%} of pixels differ)"
         + ("" if frames.matches else f"; see {diff}"),
     )
 
@@ -740,19 +747,24 @@ def check_pair(pair: TwinPair, unsharded: DrivenRun, sharded: DrivenRun, out: Pa
         for violation in audit.violations[:10]:
             report.say(f"       {violation}")
         # A read check that met no reads proves nothing: a run answered from
-        # the server's source cache looks perfect and shows nothing.
-        report.check(
-            bool(audit.by_kind),
-            f"{pair.name}: {run.dataset.name} read from the backend ({sum(audit.by_kind.values())} reads)",
-        )
+        # the server's source cache looks perfect and shows nothing. The
+        # generated-coarse pair is exempt, because its fill read the whole
+        # source through the store before the view opened; what it proves is
+        # the picture, and the read audit is the other pair's job.
+        if not pair.generated_coarse:
+            report.check(
+                bool(audit.by_kind),
+                f"{pair.name}: {run.dataset.name} read from the backend ({sum(audit.by_kind.values())} reads)",
+            )
         report.check(
             audit.ok, f"{pair.name}: every backend read in {run.dataset.name} is sized to the keys it carried"
         )
-    sharded_audit = audit_reads(sharded.dataset, sharded.run)
-    report.check(
-        sharded_audit.range_reads > 0,
-        f"{pair.name}: the sharded run read inner chunks by range ({sharded_audit.range_reads} reads)",
-    )
+    if not pair.generated_coarse:
+        sharded_audit = audit_reads(sharded.dataset, sharded.run)
+        report.check(
+            sharded_audit.range_reads > 0,
+            f"{pair.name}: the sharded run read inner chunks by range ({sharded_audit.range_reads} reads)",
+        )
 
 
 def check_generated_coarse(pair: TwinPair, unsharded: DrivenRun, sharded: DrivenRun, report: Report) -> None:
