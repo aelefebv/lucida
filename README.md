@@ -215,6 +215,10 @@ docker run --rm -p 127.0.0.1:9876:9876 \
 
 **GKE with Workload Identity** — annotate the KSA with the GSA email and lucida picks credentials up via the metadata server with no env config. Full walkthrough in [`extras/deploy/RUNBOOK.md`](extras/deploy/RUNBOOK.md) §5.
 
+## Writing data for lucida
+
+lucida reads OME-Zarr 0.5 stores lazily, one chunk at a time, so the chunk, shard, and pyramid layout a writer chooses decides how many reads a view costs. The [data layout guide](docs/data-layout.md) recommends a layout and says which viewer behavior each choice serves.
+
 ## Working with the codebase
 
 - **Rust changes in any `lucida-*` crate** → the SPA needs a fresh WASM build; `./scripts/dev.sh` rebuilds it automatically on restart, or rerun `(cd lucida-web && pnpm run build:wasm)` by hand
