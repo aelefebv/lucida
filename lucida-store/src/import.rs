@@ -1893,6 +1893,91 @@ mod tests {
         }
     }
 
+    /// `fixtures/ome-zarr/regenerate.sh` holds the command that wrote each
+    /// fixture. The tests below pin the geometry those commands declare, so a
+    /// regeneration that changes it fails here rather than in a test that
+    /// trusts the fixture.
+    fn committed_fixture(name: &str) -> String {
+        format!("{}/../fixtures/ome-zarr/{name}", env!("CARGO_MANIFEST_DIR"))
+    }
+
+    #[tokio::test]
+    async fn committed_unsharded_twin_imports_with_declared_geometry() {
+        let store = cached_store(&committed_fixture("twin-unsharded.ome.zarr"));
+        let result = import_dataset(&store, "twin", "twin").await.unwrap();
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        assert!(matches!(result.manifest.kind, DatasetKind::Single));
+
+        let image = &result.manifest.images()[0];
+        let levels = &image.multiscale.levels;
+        assert_eq!(levels.len(), 3);
+        for (level, (extent, scale)) in levels.iter().zip([(40, 1.0), (20, 2.0), (10, 4.0)]) {
+            assert_eq!(level.shape, [1, 2, 1, extent, extent]);
+            assert_eq!(level.chunk_shape, [1, 1, 1, 8, 8]);
+            assert_eq!(level.scale, [1.0, 1.0, 1.0, scale, scale]);
+        }
+
+        let seed = &result.binding_seed.images[0];
+        assert_eq!(seed.levels.len(), 3);
+        for level in &seed.levels {
+            assert_eq!(level.compression, crate::codec::StorageCompression::Zstd);
+            assert_eq!(level.chunk_shape, vec![1, 8, 8]);
+        }
+    }
+
+    #[tokio::test]
+    async fn committed_level_index_pyramid_imports_with_declared_geometry() {
+        let store = cached_store(&committed_fixture("level-index.ome.zarr"));
+        let result = import_dataset(&store, "level-index", "level-index")
+            .await
+            .unwrap();
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+
+        let image = &result.manifest.images()[0];
+        let levels = &image.multiscale.levels;
+        assert_eq!(levels.len(), 4);
+        for (index, level) in levels.iter().enumerate() {
+            let scale = (1u64 << index) as f64;
+            assert_eq!(level.level_index, index as u32);
+            assert_eq!(level.shape, [1, 1, 32 >> index, 64 >> index, 64 >> index]);
+            assert_eq!(level.chunk_shape, [1, 1, 16, 16, 16]);
+            assert_eq!(level.scale, [1.0, 1.0, scale, scale, scale]);
+        }
+    }
+
+    #[tokio::test]
+    async fn committed_collection_imports_with_declared_tiles_and_factors() {
+        let store = cached_store(&committed_fixture("collection-unsharded.ome.zarr"));
+        let result = import_dataset(&store, "collection", "collection")
+            .await
+            .unwrap();
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        assert!(matches!(
+            result.manifest.kind,
+            DatasetKind::Collection { .. }
+        ));
+        assert_eq!(result.manifest.images().len(), 3);
+        assert_eq!(result.binding_seed.images.len(), 3);
+
+        let prefixes: Vec<&str> = result
+            .binding_seed
+            .images
+            .iter()
+            .map(|image| image.store_prefix.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(prefixes, ["A/1/0", "A/2/0", "B/1/0"]);
+
+        for image in result.manifest.images() {
+            let levels = &image.multiscale.levels;
+            assert_eq!(levels.len(), 2);
+            assert_eq!(levels[0].shape, [1, 1, 1, 24, 24]);
+            assert_eq!(levels[0].scale, [1.0, 1.0, 1.0, 1.0, 1.0]);
+            assert_eq!(levels[1].shape, [1, 1, 1, 8, 12]);
+            assert_eq!(levels[1].scale, [1.0, 1.0, 1.0, 3.0, 2.0]);
+            assert_eq!(levels[1].chunk_shape, [1, 1, 1, 8, 8]);
+        }
+    }
+
     #[test]
     fn unsupported_data_type() {
         assert!(parse_data_type("complex128").is_err());

@@ -352,3 +352,10 @@ jobs:
           uv sync --python 3.12
           uv run maturin develop
           uv run pytest -q
+
+      # The generator declares its dependencies inline, so `uv run` on the
+      # test file gives it its own environment rather than lucida-py's. The
+      # suite also regenerates the committed fixtures and compares samples, so
+      # a generator change that would alter them fails here.
+      - name: Synthetic fixture generator tests
+        run: uv run extras/test_synthetic_ome_zarr.py
