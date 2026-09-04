@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::body::Body;
-use axum::extract::{Request, State};
+use axum::extract::{FromRef, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -33,6 +33,7 @@ use serde_json::json;
 use crate::auth::bearer_token::BearerTokenStore;
 use crate::auth::config::{AuthConfig, AuthMode};
 use crate::auth::cookie::read_signed_out_marker;
+use crate::auth::directory::{self, ProfileDirectory};
 use crate::auth::iap::{IapAssertionExtractor, IapError, IapVerifier};
 use crate::auth::principal::{
     AuthError, BearerTokenExtractor, DualCredentialExtractor, PrincipalExtractor,
@@ -46,28 +47,90 @@ use crate::auth::unauth_landing::{SIGNED_OUT_LANDING_HTML, UNAUTH_LANDING_HTML};
 /// dedicated app-state field for every variant.
 pub type SharedExtractor = Arc<dyn PrincipalExtractor>;
 
-/// Axum middleware that runs the extractor and attaches the principal
-/// to request extensions for downstream handlers to read via
+/// Everything the auth middleware needs: the mode's extractor, which
+/// decides who a caller is, and the profile directory, which decides
+/// only how they are shown and is absent unless configured.
+///
+/// Wire it with `from_fn_with_state(state, auth_middleware)`. A bare
+/// [`SharedExtractor`] is accepted in the same position and means "no
+/// directory", so every router that predates the directory is wired
+/// exactly as it was.
+#[derive(Clone)]
+pub struct AuthMiddlewareState {
+    pub extractor: SharedExtractor,
+    pub directory: Option<Arc<ProfileDirectory>>,
+}
+
+impl AuthMiddlewareState {
+    /// The production composition: the extractor for the configured
+    /// mode, then the directory when `LUCIDA_DIRECTORY_URL` is set,
+    /// loaded once. Fallible only for the reason
+    /// [`build_extractor`] is; the directory never fails a boot.
+    pub async fn build(
+        config: Arc<AuthConfig>,
+        store: Arc<dyn LoginSessionStore>,
+        token_store: Arc<dyn BearerTokenStore>,
+    ) -> Result<Self, IapError> {
+        let extractor = build_extractor(Arc::clone(&config), store, token_store).await?;
+        let directory = match config.directory.clone() {
+            Some(directory_config) => directory::load_at_boot(directory_config).await,
+            None => None,
+        };
+        Ok(Self {
+            extractor,
+            directory,
+        })
+    }
+}
+
+impl From<SharedExtractor> for AuthMiddlewareState {
+    fn from(extractor: SharedExtractor) -> Self {
+        Self {
+            extractor,
+            directory: None,
+        }
+    }
+}
+
+/// Lets `State<AuthMiddlewareState>` be extracted from a router whose
+/// state is a bare `SharedExtractor`, which is how every test router
+/// and every pre-directory caller is wired.
+impl FromRef<SharedExtractor> for AuthMiddlewareState {
+    fn from_ref(extractor: &SharedExtractor) -> Self {
+        Self::from(Arc::clone(extractor))
+    }
+}
+
+/// Axum middleware that runs the extractor, enriches the principal
+/// from the profile directory when one is configured, and attaches the
+/// result to request extensions for downstream handlers to read via
 /// `req.extensions().get::<AuthPrincipal>()`.
 ///
-/// Wire it with `axum::middleware::from_fn_with_state(extractor, auth_middleware)`.
+/// The directory runs after extraction and before attachment, and
+/// nowhere else: this is the single seam ADR-0063 names. It is given
+/// the principal the mode resolved, so the email it keys on is one no
+/// request header chose, and it may write the display name and the
+/// picture and nothing more.
 pub async fn auth_middleware(
-    State(extractor): State<SharedExtractor>,
+    State(auth): State<AuthMiddlewareState>,
     req: Request,
     next: Next,
 ) -> Response {
     let (parts, body) = req.into_parts();
-    let outcome = extractor.extract(&parts).await;
+    let outcome = auth.extractor.extract(&parts).await;
 
     match outcome {
-        Ok(principal) => {
+        Ok(mut principal) => {
+            if let Some(directory) = &auth.directory {
+                directory.apply(&mut principal);
+            }
             let mut req = Request::from_parts(parts, body);
             req.extensions_mut().insert(principal);
             next.run(req).await
         }
         Err(err) => {
             let headers = parts.headers;
-            unauthenticated_response(&err, &headers, extractor.offers_sign_in())
+            unauthenticated_response(&err, &headers, auth.extractor.offers_sign_in())
         }
     }
 }
@@ -501,6 +564,348 @@ mod tests {
         let bytes = to_bytes(res.into_body(), 64 * 1024).await.unwrap();
         let p: AuthPrincipal = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(p.email, "cli@example.com");
+    }
+
+    // -- Profile directory wiring ------------------------------------------
+    //
+    // These go through `AuthMiddlewareState::build` and the real
+    // `/auth/whoami` handler, as main wires them, so they cover the
+    // production path in every mode rather than `apply` alone.
+
+    use crate::auth::config::DirectoryConfig;
+    use crate::auth::dev::{build_dev_principal_cookie, normalize_dev_principal};
+    use crate::auth::directory::test_support::{spawn_failing_listing, spawn_mock_listing};
+    use crate::auth::handlers::whoami;
+    use serde_json::{Value, json};
+
+    /// The listing most of these serve: one person, spelled with a
+    /// capital and a trailing space to prove the key is normalized, and
+    /// carrying an administrator flag nothing should read.
+    fn listing() -> Value {
+        json!([{
+            "email": "Alice@Example.com ",
+            "name": "Alice Example",
+            "picture": "https://pictures.example/alice.png",
+            "is_admin": true,
+        }])
+    }
+
+    fn whoami_router(state: AuthMiddlewareState) -> Router {
+        Router::new()
+            .route("/auth/whoami", get(whoami))
+            .layer(from_fn_with_state(state, auth_middleware))
+    }
+
+    /// The production composition for a mode whose credential is not
+    /// read from a store: IAP's assertion, or disabled mode's cookie.
+    async fn state_over_empty_stores(config: Arc<AuthConfig>) -> AuthMiddlewareState {
+        AuthMiddlewareState::build(
+            config,
+            Arc::new(MemorySessionStore::new()) as Arc<dyn LoginSessionStore>,
+            Arc::new(MemoryBearerTokenStore::new()) as Arc<dyn BearerTokenStore>,
+        )
+        .await
+        .expect("the state builds")
+    }
+
+    fn whoami_request(session: &str) -> Request<Body> {
+        Request::builder()
+            .uri("/auth/whoami")
+            .header("cookie", format!("lucida_session={session}"))
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    async fn body_of(app: Router, req: Request<Body>) -> (StatusCode, Vec<u8>) {
+        let res = app.oneshot(req).await.unwrap();
+        let status = res.status();
+        let bytes = to_bytes(res.into_body(), 64 * 1024).await.unwrap();
+        (status, bytes.to_vec())
+    }
+
+    async fn whoami_of(app: Router, req: Request<Body>) -> AuthPrincipal {
+        let (status, bytes) = body_of(app, req).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// Google-mode config with two sessions seeded: `alice`, whom the
+    /// listing knows, with a name and picture of her own from sign-in, and
+    /// `bob`, whom it does not.
+    async fn google_state(
+        directory: Option<DirectoryConfig>,
+        admin_emails: &[&str],
+    ) -> AuthMiddlewareState {
+        let mut config = AuthConfig::for_tests();
+        config.mode = AuthMode::Google;
+        config.admin_emails = admin_emails.iter().map(|s| s.to_string()).collect();
+        config.directory = directory;
+
+        let store = Arc::new(MemorySessionStore::new());
+        let now = Utc::now();
+        for (id, email, name, picture) in [
+            (
+                "alice-session",
+                "alice@example.com",
+                "Alice From Sign-In",
+                Some("https://sign-in.example/alice.png"),
+            ),
+            ("bob-session", "bob@example.com", "Bob From Sign-In", None),
+        ] {
+            store
+                .create(LoginSession {
+                    id: id.into(),
+                    email: email.into(),
+                    display_name: name.into(),
+                    picture_url: picture.map(str::to_string),
+                    created_at: now,
+                    last_used_at: now,
+                    expires_at: now + ChronoDuration::hours(24),
+                })
+                .await
+                .unwrap();
+        }
+        let token_store = Arc::new(MemoryBearerTokenStore::new());
+        AuthMiddlewareState::build(
+            Arc::new(config),
+            store as Arc<dyn LoginSessionStore>,
+            token_store as Arc<dyn BearerTokenStore>,
+        )
+        .await
+        .expect("google mode builds")
+    }
+
+    #[tokio::test]
+    async fn whoami_with_the_directory_unset_is_byte_identical_to_the_bare_extractor() {
+        let state = google_state(None, &[]).await;
+        assert!(state.directory.is_none(), "unset means no directory at all");
+
+        let bare = Router::new()
+            .route("/auth/whoami", get(whoami))
+            .layer(from_fn_with_state(
+                Arc::clone(&state.extractor),
+                auth_middleware,
+            ));
+        let (bare_status, bare_bytes) = body_of(bare, whoami_request("alice-session")).await;
+        let (status, bytes) = body_of(whoami_router(state), whoami_request("alice-session")).await;
+        assert_eq!(bare_status, StatusCode::OK);
+        assert_eq!(status, bare_status);
+        assert_eq!(bytes, bare_bytes);
+        assert!(
+            String::from_utf8_lossy(&bytes).contains("Alice From Sign-In"),
+            "the name the mode resolved is what comes back",
+        );
+    }
+
+    #[tokio::test]
+    async fn an_email_in_the_listing_gets_the_listing_name_and_picture() {
+        let (url, _mock) = spawn_mock_listing(listing()).await;
+        let state = google_state(Some(DirectoryConfig::for_tests(&url)), &[]).await;
+
+        let p = whoami_of(whoami_router(state), whoami_request("alice-session")).await;
+        assert_eq!(
+            p.email, "alice@example.com",
+            "the mode's spelling, not the row's"
+        );
+        assert_eq!(p.display_name, "Alice Example");
+        assert_eq!(
+            p.picture_url.as_deref(),
+            Some("https://pictures.example/alice.png")
+        );
+        assert!(!p.is_admin, "the row's flag is not consulted");
+    }
+
+    #[tokio::test]
+    async fn an_email_not_in_the_listing_keeps_the_values_the_mode_resolved() {
+        let (url, _mock) = spawn_mock_listing(listing()).await;
+        let state = google_state(Some(DirectoryConfig::for_tests(&url)), &[]).await;
+
+        let p = whoami_of(whoami_router(state), whoami_request("bob-session")).await;
+        assert_eq!(p.email, "bob@example.com");
+        assert_eq!(p.display_name, "Bob From Sign-In");
+        assert!(p.picture_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn two_spellings_of_one_email_in_the_listing_are_one_row() {
+        let (url, _mock) = spawn_mock_listing(json!([
+            {"email": "ALICE@EXAMPLE.COM", "name": "Earlier Spelling"},
+            {"email": "  alice@example.com", "name": "Later Spelling"},
+        ]))
+        .await;
+        let state = google_state(Some(DirectoryConfig::for_tests(&url)), &[]).await;
+        let directory = Arc::clone(state.directory.as_ref().expect("configured"));
+
+        let p = whoami_of(whoami_router(state), whoami_request("alice-session")).await;
+        assert_eq!(p.display_name, "Later Spelling");
+        assert_eq!(
+            directory.load().await.expect("the mock serves").rows,
+            1,
+            "one person, however spelled, is one row",
+        );
+    }
+
+    /// The row names a different address under the key the auth
+    /// modes use, and claims administrator rights. The principal keeps
+    /// the email the mode resolved and the rights the configured list
+    /// grants, and takes only the name.
+    #[tokio::test]
+    async fn a_row_that_disagrees_about_the_email_or_the_admin_flag_changes_neither() {
+        let (url, _mock) = spawn_mock_listing(json!([
+            {
+                "address": "alice@example.com",
+                "email": "mallory@example.com",
+                "name": "Alice Example",
+                "is_admin": true,
+            },
+            {
+                "address": "bob@example.com",
+                "email": "bob@example.com",
+                "name": "Bob Example",
+                "is_admin": false,
+            },
+        ]))
+        .await;
+        let mut directory = DirectoryConfig::for_tests(&url);
+        directory.email_field = "address".into();
+        let state = google_state(Some(directory), &["bob@example.com"]).await;
+        let app = whoami_router(state);
+
+        let alice = whoami_of(app.clone(), whoami_request("alice-session")).await;
+        assert_eq!(alice.email, "alice@example.com");
+        assert_eq!(alice.display_name, "Alice Example");
+        assert!(!alice.is_admin, "a row cannot promote");
+
+        let bob = whoami_of(app, whoami_request("bob-session")).await;
+        assert_eq!(bob.email, "bob@example.com");
+        assert_eq!(bob.display_name, "Bob Example");
+        assert!(bob.is_admin, "a row cannot demote");
+    }
+
+    #[tokio::test]
+    async fn a_name_built_from_two_fields_is_joined_by_one_space() {
+        let (url, _mock) = spawn_mock_listing(json!([
+            {"email": "alice@example.com", "first_name": "Alice", "last_name": "Example"},
+        ]))
+        .await;
+        let mut directory = DirectoryConfig::for_tests(&url);
+        directory.name_fields = vec!["first_name".into(), "last_name".into()];
+        let state = google_state(Some(directory), &[]).await;
+
+        let p = whoami_of(whoami_router(state), whoami_request("alice-session")).await;
+        assert_eq!(p.display_name, "Alice Example");
+    }
+
+    #[tokio::test]
+    async fn a_listing_that_fails_at_startup_leaves_the_server_serving_the_modes_values() {
+        let (url, mock) = spawn_failing_listing(StatusCode::INTERNAL_SERVER_ERROR).await;
+        let state = google_state(Some(DirectoryConfig::for_tests(&url)), &[]).await;
+        assert!(
+            state.directory.is_some(),
+            "configured, loaded nothing, still there"
+        );
+        assert_eq!(mock.fetch_count().await, 1, "one load was attempted");
+
+        let p = whoami_of(whoami_router(state), whoami_request("alice-session")).await;
+        assert_eq!(p.display_name, "Alice From Sign-In");
+        assert_eq!(
+            p.picture_url.as_deref(),
+            Some("https://sign-in.example/alice.png")
+        );
+    }
+
+    /// IAP mode is where the directory matters most: the assertion
+    /// carries only an email, so without a row the name is derived from
+    /// the address and there is no picture.
+    #[tokio::test]
+    async fn iap_mode_takes_the_listing_name_and_picture_and_keeps_admin_from_config() {
+        let key = TestKey::generate("kid-1");
+        let (key_set_base, _key_set) = spawn_mock_key_set(key.jwks_json.clone()).await;
+        let (url, _listing) = spawn_mock_listing(json!([
+            {
+                "email": "alice@example.com",
+                "name": "Alice Example",
+                "picture": "https://pictures.example/alice.png",
+                "is_admin": false,
+            },
+        ]))
+        .await;
+        let mut config = AuthConfig::for_tests_iap(TEST_AUDIENCE, &key_set_base);
+        config.admin_emails = ["alice@example.com".to_string()].into_iter().collect();
+        config.directory = Some(DirectoryConfig::for_tests(&url));
+        let app = whoami_router(state_over_empty_stores(Arc::new(config)).await);
+
+        let assertion = |email: &str| {
+            Request::builder()
+                .uri("/auth/whoami")
+                .header(IAP_ASSERTION_HEADER, key.sign(&test_claims(email)))
+                .body(Body::empty())
+                .unwrap()
+        };
+        let alice = whoami_of(app.clone(), assertion("alice@example.com")).await;
+        assert_eq!(alice.email, "alice@example.com");
+        assert_eq!(alice.display_name, "Alice Example");
+        assert_eq!(
+            alice.picture_url.as_deref(),
+            Some("https://pictures.example/alice.png")
+        );
+        assert!(alice.is_admin, "rights come from the configured list");
+
+        let carol = whoami_of(app, assertion("carol.example@example.com")).await;
+        assert_eq!(carol.display_name, "Carol Example", "derived, as before");
+        assert!(carol.picture_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn disabled_mode_leaves_the_dev_principal_unchanged_because_it_has_no_row() {
+        let (url, _mock) = spawn_mock_listing(listing()).await;
+        let mut config = AuthConfig::for_tests();
+        config.directory = Some(DirectoryConfig::for_tests(&url));
+        let state = state_over_empty_stores(Arc::new(config)).await;
+
+        let req = Request::builder()
+            .uri("/auth/whoami")
+            .body(Body::empty())
+            .unwrap();
+        let p = whoami_of(whoami_router(state), req).await;
+        assert_eq!(p.email, "dev@local");
+        assert_eq!(p.display_name, "Local Dev");
+        assert!(p.picture_url.is_none());
+        assert!(!p.is_admin);
+    }
+
+    /// The directory is not tied to a mode. A dev principal switched to
+    /// an address the listing knows is shown the way the listing says.
+    #[tokio::test]
+    async fn disabled_mode_applies_a_row_to_a_switched_dev_principal() {
+        let (url, _mock) = spawn_mock_listing(listing()).await;
+        let mut config = AuthConfig::for_tests();
+        config.directory = Some(DirectoryConfig::for_tests(&url));
+        let config = Arc::new(config);
+        let state = state_over_empty_stores(Arc::clone(&config)).await;
+
+        let switched =
+            normalize_dev_principal("alice@example.com", Some("Alice Dev"), false).unwrap();
+        let set_cookie = build_dev_principal_cookie(&config, &switched, false);
+        let cookie = set_cookie.split(';').next().unwrap().to_string();
+        let req = Request::builder()
+            .uri("/auth/whoami")
+            .header("cookie", cookie)
+            .body(Body::empty())
+            .unwrap();
+        let p = whoami_of(whoami_router(state), req).await;
+        assert_eq!(p.email, "alice@example.com");
+        assert_eq!(p.display_name, "Alice Example");
+        assert_eq!(
+            p.picture_url.as_deref(),
+            Some("https://pictures.example/alice.png")
+        );
+        assert!(!p.is_admin);
     }
 
     #[test]

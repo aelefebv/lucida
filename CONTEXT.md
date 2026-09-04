@@ -597,6 +597,16 @@ the local machine can reach the server. See
 [ADR 0018](wiki/decisions/0018-auth-mode-auto-detect-by-bind-address.md).
 _Avoid_: test user, fake user, impersonation
 
+**Profile directory**:
+An optional source, named by configuration, that supplies a display name and a
+picture for an email address. Applied after an auth mode resolves a principal
+and keyed on the email it resolved, so a row changes how a person is shown and
+nothing about who they are: not the email, not whether they administer the
+server, not what they may do. Unset means off. See
+[ADR 0063](wiki/decisions/0063-a-profile-directory-enriches-the-principal-and-never-authenticates-it.md).
+_Avoid_: user directory, address book, identity provider (a provider decides who
+a caller is; the directory only decorates the answer), people service, roster
+
 **Membership**:
 Who belongs to a workspace and with what authority: a list of email addresses,
 each carrying one role. A member is added, never inferred. Separate from a

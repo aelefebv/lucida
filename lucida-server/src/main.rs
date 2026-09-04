@@ -344,14 +344,14 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     let cli_authorization_store = storage.cli_token_authorizations();
     let pending_store = storage.pending_auth();
 
-    let extractor = match auth::middleware::build_extractor(
+    let auth_state = match auth::middleware::AuthMiddlewareState::build(
         Arc::clone(&auth_config),
         Arc::clone(&session_store_dyn),
         Arc::clone(&bearer_token_store),
     )
     .await
     {
-        Ok(e) => e,
+        Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, "auth.startup.iap_key_set_unavailable");
             return Err(std::io::Error::other(e.to_string()));
@@ -528,7 +528,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         .merge(bookmarks_router)
         .merge(workspaces_router)
         .layer(axum::middleware::from_fn_with_state(
-            extractor,
+            auth_state,
             auth::middleware::auth_middleware,
         ));
 
