@@ -69,7 +69,7 @@ def test_an_unsharded_key_costs_its_whole_object() -> None:
     assert shape is not None
     assert not shape.sharded
     assert shape.object_bytes == (UNSHARDED / "0" / "c" / "0" / "0" / "0").stat().st_size
-    assert shape.allowed == {shape.object_bytes: "object"}
+    assert shape.allowed() == {shape.object_bytes: "object"}
 
 
 def test_a_sharded_key_costs_its_index_entry_and_the_index() -> None:
@@ -85,19 +85,47 @@ def test_a_sharded_key_costs_its_index_entry_and_the_index() -> None:
     assert shape.index_bytes == TWIN_INDEX_BYTES
     twin_object = (UNSHARDED / "0" / "c" / "1" / "2" / "3").stat().st_size
     assert shape.inner_bytes == twin_object
-    assert shape.allowed == {
+    assert shape.position == 1 and len(shape.entries) == 4
+    # Alone, the key allows its own chunk, the index, or both.
+    assert shape.allowed() == {
         TWIN_INDEX_BYTES: "index",
         twin_object: "inner-chunk",
         twin_object + TWIN_INDEX_BYTES: "index+inner-chunk",
     }
-    # A shard read whole is never an allowed size.
-    assert shape.path.stat().st_size not in shape.allowed
+    # With every position wanted, a run of neighbours is allowed too, and a
+    # run of all four plus the index is the shard's length: that is two
+    # requests the view asked for, not a shard downloaded for one chunk.
+    everything = shape.allowed(range(4))
+    assert set(everything.values()) == {
+        "index", "inner-chunk", "index+inner-chunk", "inner-chunks-merged", "index+inner-chunks-merged",
+    }
+    assert everything[shape.path.stat().st_size] == "index+inner-chunks-merged"
+    # Wanting the key alone, the shard's length is never an allowed size.
+    assert shape.path.stat().st_size not in shape.allowed()
+
+
+def test_contiguous_runs_follow_byte_offsets_and_skip_absent_entries() -> None:
+    absent = check.ABSENT_ENTRY
+    # Written in the order 0, 2, 1 with entry 3 absent: positions 0 and 2
+    # are neighbours in the object, and position 1 comes after both.
+    entries = [(0, 10), (30, 5), (10, 20), absent]
+    assert sorted(check.contiguous_runs_through(entries, 0)) == [(1, 10), (2, 30), (3, 35)]
+    assert sorted(check.contiguous_runs_through(entries, 2)) == [(1, 20), (2, 25), (2, 30), (3, 35)]
+    assert sorted(check.contiguous_runs_through(entries, 1)) == [(1, 5), (2, 25), (3, 35)]
+    assert check.contiguous_runs_through(entries, 3) == []
+    # A gap in the object ends a run.
+    gapped = [(0, 10), (11, 5)]
+    assert check.contiguous_runs_through(gapped, 0) == [(1, 10)]
+    assert check.contiguous_runs_through(gapped, 1) == [(1, 5)]
+    # A neighbour the run never asked for is not part of any run.
+    assert sorted(check.contiguous_runs_through(entries, 0, {0, 1})) == [(1, 10)]
+    assert sorted(check.contiguous_runs_through(entries, 0, {0, 2})) == [(1, 10), (2, 30)]
 
 
 def test_an_absent_inner_chunk_and_a_missing_shard_cost_an_index_read_at_most() -> None:
     absent = check.read_shape(SPARSE, "sparse", "0/0/0/0/0/1")
     assert absent is not None and not absent.written
-    assert absent.allowed == {TWIN_INDEX_BYTES: "index"}
+    assert absent.allowed() == {TWIN_INDEX_BYTES: "index"}
 
     unwritten_level = check.read_shape(SPARSE, "sparse", "2/0/0/0/0/0")
     assert unwritten_level is not None and not unwritten_level.written
@@ -118,12 +146,19 @@ def browser_row(rid: int, chunk_key: str, image_id: str = "twin", generation: in
     }
 
 
-def server_row(rid: int, backend_bytes: int | None, generation: int = 1, family: str = "chunk") -> dict:
+def server_row(
+    rid: int,
+    backend_bytes: int | None,
+    generation: int = 1,
+    family: str = "chunk",
+    coalesced_onto: int | None = None,
+) -> dict:
     return {
         "rid": rid,
         "connectionGeneration": generation,
         "family": family,
         "backendBytes": backend_bytes,
+        "coalescedOnto": coalesced_onto,
     }
 
 
@@ -169,6 +204,59 @@ def test_audit_accepts_the_sizes_a_shard_read_can_produce_and_flags_the_rest() -
     assert len(audit.violations) == 2
     assert f"read {shard_bytes} bytes" in audit.violations[0]
     assert "generated level" in audit.violations[1]
+
+
+def test_audit_accepts_a_merged_read_of_neighbours_and_nothing_between_sizes() -> None:
+    """Neighbours of one shard queued together come back on one row.
+
+    The leader's row reports the run it carried; the carried read's row
+    names its leader and moves no bytes of its own. Which inner chunks are
+    neighbours is a matter of where the writer put them, so the test reads
+    the index for two entries that touch.
+    """
+    layout = check.ArrayLayout.read(SHARDED / "0")
+    shard = SHARDED / "0" / "c" / "1" / "1" / "1"
+    entries = check.read_shard_index(shard, layout)
+    by_offset = sorted(range(len(entries)), key=lambda i: entries[i][0])
+    first, second = by_offset[0], by_offset[1]
+    assert entries[first][0] + entries[first][1] == entries[second][0], "the first two entries touch"
+    # Shard (1, 1, 1) holds c=1, y=2..3, x=2..3; position p is (y=2+p//2, x=2+p%2).
+    key = lambda p: f"0/0/1/0/{2 + p // 2}/{2 + p % 2}"  # noqa: E731
+    merged = entries[first][1] + entries[second][1]
+
+    run = {
+        "rows": [
+            browser_row(10, key(first)),
+            browser_row(11, key(second)),
+            browser_row(20, key(second)),
+            browser_row(21, key(first)),
+            browser_row(30, key(first)),
+        ],
+        "serverRows": [
+            # A cold shard: the leader read the index and then both chunks.
+            server_row(10, merged + TWIN_INDEX_BYTES),
+            server_row(11, None, coalesced_onto=10),
+            # A warm index, led from the other end of the run.
+            server_row(20, merged),
+            server_row(21, None, coalesced_onto=20),
+            # Its inner chunk carried by a neighbour after it read the index.
+            server_row(30, TWIN_INDEX_BYTES, coalesced_onto=20),
+        ],
+    }
+    audit = check.audit_reads(SHARDED, run)
+    assert audit.ok, audit.violations
+    assert audit.by_kind == {"index+inner-chunks-merged": 1, "inner-chunks-merged": 1, "index": 1}
+    assert audit.range_reads == 2
+    assert audit.no_read == 2
+
+    # A size between one chunk and two is no read the store makes.
+    run["serverRows"][2] = server_row(20, merged - 1)
+    assert not check.audit_reads(SHARDED, run).ok
+
+    # A run the view did not ask for is not one either: with only the first
+    # key requested, the merged size is a violation.
+    alone = {"rows": [browser_row(40, key(first))], "serverRows": [server_row(40, merged)]}
+    assert not check.audit_reads(SHARDED, alone).ok
 
 
 def test_audit_of_an_unsharded_run_accepts_only_the_whole_object() -> None:

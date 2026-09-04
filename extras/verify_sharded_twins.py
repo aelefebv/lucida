@@ -16,9 +16,10 @@ what came back:
    is not bit-reproducible across page loads, and a wrong or missing inner
    chunk moves pixels by far more than one level.
 3. In the sharded runs, every backend read the trace recorded moved exactly
-   one inner chunk, one shard index, or the two together. Nothing read a
-   shard whole. The expected sizes come from the shard indexes on disk, so
-   the comparison is exact rather than a threshold.
+   the inner chunks it carried (one, or a contiguous run of one shard's
+   inner chunks merged into one request), one shard index, or both. Nothing
+   read a shard whole. The expected sizes come from the shard indexes on
+   disk, so the comparison is exact rather than a threshold.
 4. In the unsharded runs, every backend read moved exactly one chunk object.
 5. The second pair has one source level too large to serve as the coarse
    tier, so the server generates a coarse level over it. Both runs request
@@ -86,7 +87,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Sequence
+from typing import Iterable, Sequence
 
 import numpy as np
 from PIL import Image
@@ -237,39 +238,89 @@ class ReadShape:
     ``object_bytes`` is the whole chunk object of an unsharded level.
     ``inner_bytes`` is the inner chunk's range inside its shard and
     ``index_bytes`` the shard's index; a row that read both in one request
-    reports their sum. ``written`` is false for an inner chunk the index
-    marks absent, which costs an index read and nothing more.
+    reports their sum. ``entries`` is the shard's whole index, because one
+    request may carry this inner chunk together with the neighbours that
+    follow or precede it in the object. ``written`` is false for an inner
+    chunk the index marks absent, which costs an index read and nothing
+    more.
     """
 
     path: Path
     object_bytes: int | None = None
     inner_bytes: int | None = None
     index_bytes: int | None = None
+    entries: tuple[tuple[int, int], ...] = ()
+    position: int = 0
     written: bool = True
 
     @property
     def sharded(self) -> bool:
         return self.index_bytes is not None
 
-    @property
-    def allowed(self) -> dict[int, str]:
-        """Each byte count a row may report for this key, and what it means."""
+    def allowed(self, wanted: Iterable[int] | None = None) -> dict[int, str]:
+        """Each byte count one backend read may report for this key, and what it means.
+
+        A request carries the key's whole object, or its inner chunk alone,
+        or its inner chunk together with the neighbours that sit next to it
+        in the shard when they were queued for a permit together and merged
+        into one range. ``wanted`` is every position of this shard the run
+        asked for; a neighbour the run never asked for is never a
+        legitimate part of a read, which is what keeps a shard downloaded
+        whole for one inner chunk a violation even though its length is the
+        sum of its parts. The shard's index rides the same row when that
+        read was the row's too, or stands alone when the inner chunk was
+        carried by a neighbour's request.
+        """
         if not self.sharded:
             assert self.object_bytes is not None
             return {self.object_bytes: "object"}
         assert self.index_bytes is not None
         allowed = {self.index_bytes: "index"}
-        if self.written and self.inner_bytes is not None:
-            allowed[self.inner_bytes] = "inner-chunk"
-            allowed[self.inner_bytes + self.index_bytes] = "index+inner-chunk"
+        if not self.written:
+            return allowed
+        runs = contiguous_runs_through(self.entries, self.position, set(wanted or ()) | {self.position})
+        for count, run_bytes in runs:
+            kind = "inner-chunk" if count == 1 else "inner-chunks-merged"
+            allowed.setdefault(run_bytes, kind)
+            allowed.setdefault(run_bytes + self.index_bytes, f"index+{kind}")
         return allowed
 
 
-def read_shape(root: Path, image_id: str, chunk_key: str) -> ReadShape | None:
-    """The bytes a read of ``chunk_key`` should move, or None for a level the store does not hold.
+def contiguous_runs_through(
+    entries: Sequence[tuple[int, int]], position: int, wanted: set[int] | None = None
+) -> list[tuple[int, int]]:
+    """Every run of entries contiguous in the object that includes ``position``.
 
-    A level with no array on disk is a generated level: the server derives
-    it and a request for it never reads the source on the request's path.
+    Returns ``(count, bytes)`` per run. Entries are laid out in the order
+    they were written, which need not be grid order, so runs follow byte
+    offsets rather than positions. A run holds only written entries, and
+    only positions in ``wanted`` when that is given.
+    """
+    written = sorted(
+        (offset, nbytes, index)
+        for index, (offset, nbytes) in enumerate(entries)
+        if (offset, nbytes) != ABSENT_ENTRY and (wanted is None or index in wanted)
+    )
+    ordinal = next((i for i, (_, _, index) in enumerate(written) if index == position), None)
+    if ordinal is None:
+        return []
+    runs = []
+    for start in range(ordinal, -1, -1):
+        if start < ordinal and written[start][0] + written[start][1] != written[start + 1][0]:
+            break
+        for end in range(ordinal, len(written)):
+            if end > ordinal and written[end - 1][0] + written[end - 1][1] != written[end][0]:
+                break
+            runs.append((end - start + 1, sum(nbytes for _, nbytes, _ in written[start : end + 1])))
+    return runs
+
+
+def locate_chunk(root: Path, image_id: str, chunk_key: str) -> tuple[ArrayLayout, Path, int] | None:
+    """The object a chunk key lives in and its position inside it, or None for a generated level.
+
+    An unsharded key is its own object at position 0. A level with no array
+    on disk is a generated level: the server derives it and a request for
+    it never reads the source on the request's path.
     """
     level = chunk_key.split("/", 1)[0]
     level_dir = root / image_prefix(image_id) / level
@@ -278,20 +329,36 @@ def read_shape(root: Path, image_id: str, chunk_key: str) -> ReadShape | None:
     layout = ArrayLayout.read(level_dir)
     _, coords = grid_coords(chunk_key, layout)
     if not layout.sharded:
-        path = level_dir.joinpath("c", *map(str, coords))
-        return ReadShape(path=path, object_bytes=path.stat().st_size if path.is_file() else 0)
+        return layout, level_dir.joinpath("c", *map(str, coords)), 0
     shard_coords = []
     position = 0
     for coord, per_shard in zip(coords, layout.chunks_per_shard):
         shard_coords.append(coord // per_shard)
         position = position * per_shard + coord % per_shard
-    shard_path = level_dir.joinpath("c", *map(str, shard_coords))
+    return layout, level_dir.joinpath("c", *map(str, shard_coords)), position
+
+
+def read_shape(root: Path, image_id: str, chunk_key: str) -> ReadShape | None:
+    """The bytes a read of ``chunk_key`` should move, or None for a level the store does not hold."""
+    located = locate_chunk(root, image_id, chunk_key)
+    if located is None:
+        return None
+    layout, shard_path, position = located
+    if not layout.sharded:
+        return ReadShape(path=shard_path, object_bytes=shard_path.stat().st_size if shard_path.is_file() else 0)
     if not shard_path.is_file():
         return ReadShape(path=shard_path, index_bytes=layout.index_bytes, written=False)
-    entry = read_shard_index(shard_path, layout)[position]
+    entries = tuple(read_shard_index(shard_path, layout))
+    entry = entries[position]
     if entry == ABSENT_ENTRY:
         return ReadShape(path=shard_path, index_bytes=layout.index_bytes, written=False)
-    return ReadShape(path=shard_path, inner_bytes=entry[1], index_bytes=layout.index_bytes)
+    return ReadShape(
+        path=shard_path,
+        inner_bytes=entry[1],
+        index_bytes=layout.index_bytes,
+        entries=entries,
+        position=position,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -340,6 +407,15 @@ def audit_reads(root: Path, run: dict) -> ReadAudit:
         label = (row["connectionGeneration"], row["rid"])
         keys_by_label.setdefault(label, set()).add((row["imageId"], row["chunkKey"]))
 
+    # Every position of every shard the run asked for: the only neighbours a
+    # merged read may legitimately carry.
+    wanted: dict[Path, set[int]] = {}
+    for keys in keys_by_label.values():
+        for image_id, chunk_key in keys:
+            located = locate_chunk(root, image_id, chunk_key)
+            if located is not None:
+                wanted.setdefault(located[1], set()).add(located[2])
+
     for row in run.get("serverRows", []):
         if row.get("family") != "chunk":
             continue
@@ -349,7 +425,7 @@ def audit_reads(root: Path, run: dict) -> ReadAudit:
         if not keys:
             audit.unlabelled += 1
             continue
-        shapes = {key: read_shape(root, *key) for key in keys}
+        shapes = {key: read_shape(root, *key) for key in sorted(keys)}
         if all(shape is None for shape in shapes.values()):
             audit.generated += 1
             if bytes_moved is not None:
@@ -362,22 +438,21 @@ def audit_reads(root: Path, run: dict) -> ReadAudit:
             continue
         audit.largest_read = max(audit.largest_read, bytes_moved)
         matched = None
-        for (image_id, chunk_key), shape in shapes.items():
+        for shape in shapes.values():
             if shape is None:
                 continue
-            if shape.sharded:
-                shard_bytes = shape.path.stat().st_size if shape.path.is_file() else None
-                if shard_bytes is not None:
-                    audit.smallest_shard = (
-                        shard_bytes if audit.smallest_shard is None else min(audit.smallest_shard, shard_bytes)
-                    )
-            kind = shape.allowed.get(bytes_moved)
+            if shape.sharded and shape.path.is_file():
+                shard_bytes = shape.path.stat().st_size
+                audit.smallest_shard = (
+                    shard_bytes if audit.smallest_shard is None else min(audit.smallest_shard, shard_bytes)
+                )
+            kind = shape.allowed(wanted.get(shape.path)).get(bytes_moved)
             if kind is not None:
                 matched = kind
                 break
         if matched is None:
             expected = "; ".join(
-                f"{image_id} {chunk_key}: {sorted(shape.allowed.items())}"
+                f"{image_id} {chunk_key}: {sorted(shape.allowed(wanted.get(shape.path)).items())}"
                 for (image_id, chunk_key), shape in shapes.items()
                 if shape is not None
             )
@@ -479,12 +554,12 @@ class TwinPair:
     # case the check waits for that fill before it opens the view.
     generated_coarse: bool = False
 
-    def unsharded_args(self, out: Path) -> list[str]:
-        return [str(out / f"{self.name}-unsharded.ome.zarr"), *self.generator_args, "--overwrite"]
+    def unsharded_args(self, datasets: Path) -> list[str]:
+        return [str(datasets / f"{self.name}-unsharded.ome.zarr"), *self.generator_args, "--overwrite"]
 
-    def sharded_args(self, out: Path) -> list[str]:
+    def sharded_args(self, datasets: Path) -> list[str]:
         return [
-            str(out / f"{self.name}-sharded.ome.zarr"),
+            str(datasets / f"{self.name}-sharded.ome.zarr"),
             *self.generator_args,
             "--shard",
             str(self.shard),
@@ -664,15 +739,19 @@ def check_pair(pair: TwinPair, unsharded: DrivenRun, sharded: DrivenRun, out: Pa
             )
         for violation in audit.violations[:10]:
             report.say(f"       {violation}")
-        report.check(audit.ok, f"{pair.name}: every backend read in {run.dataset.name} is sized to its key")
-
-
-def check_pyramid(pair: TwinPair, sharded: DrivenRun, report: Report) -> None:
-    """A read check that met no reads proves nothing, so the pyramid pair must have some."""
-    audit = audit_reads(sharded.dataset, sharded.run)
+        # A read check that met no reads proves nothing: a run answered from
+        # the server's source cache looks perfect and shows nothing.
+        report.check(
+            bool(audit.by_kind),
+            f"{pair.name}: {run.dataset.name} read from the backend ({sum(audit.by_kind.values())} reads)",
+        )
+        report.check(
+            audit.ok, f"{pair.name}: every backend read in {run.dataset.name} is sized to the keys it carried"
+        )
+    sharded_audit = audit_reads(sharded.dataset, sharded.run)
     report.check(
-        audit.range_reads > 0,
-        f"{pair.name}: the sharded run read at least one inner chunk by range ({audit.range_reads} reads)",
+        sharded_audit.range_reads > 0,
+        f"{pair.name}: the sharded run read inner chunks by range ({sharded_audit.range_reads} reads)",
     )
 
 
@@ -762,9 +841,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     pairs = twin_pairs(args)
     stamp = time.strftime("%Y%m%d-%H%M%S")
+    # The server caches what it read from a path for as long as it runs, so
+    # a dataset regenerated at a path an earlier run used would be served
+    # from that cache and the run would read nothing. Every run writes its
+    # datasets under its own name.
+    datasets = out / f"datasets-{stamp}"
     runs: dict[tuple[str, str], DrivenRun] = {}
     for pair in pairs:
-        for layout, generator_args in (("unsharded", pair.unsharded_args(out)), ("sharded", pair.sharded_args(out))):
+        for layout, generator_args in (
+            ("unsharded", pair.unsharded_args(datasets)),
+            ("sharded", pair.sharded_args(datasets)),
+        ):
             dataset = generate(generator_args)
             workspace_id = lucida.create_workspace(f"sharded-twins {stamp} {pair.name} {layout}")
             if pair.generated_coarse:
@@ -779,9 +866,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         unsharded = runs[(pair.name, "unsharded")]
         sharded = runs[(pair.name, "sharded")]
         check_pair(pair, unsharded, sharded, out, report)
-        if pair.source_levels > 1:
-            check_pyramid(pair, sharded, report)
-        else:
+        if pair.generated_coarse:
             check_generated_coarse(pair, unsharded, sharded, report)
 
     if report.failures:

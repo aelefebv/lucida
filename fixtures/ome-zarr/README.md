@@ -90,10 +90,11 @@ writes two twin pairs with the generator, opens each dataset through the
 trace driver in its own workspace at device pixel ratio 2, and asserts that
 every run settled, that each pair's two frames are not blank and match to
 within one level of an 8-bit channel, that every backend read in a sharded
-run moved exactly one inner chunk, one shard index, or the two together, and
-that every read in an unsharded run moved one whole chunk object. The
-expected sizes come from the shard indexes on disk, so the read comparison
-is exact. The frame tolerance is what two page loads of one dataset differ
+run moved exactly the inner chunks it carried (one, or a contiguous run of
+one shard's inner chunks merged into one request), one shard index, or
+both, and that every read in an unsharded run moved one whole chunk object.
+The expected sizes come from the shard indexes on disk, so the read
+comparison is exact. The frame tolerance is what two page loads of one dataset differ
 by; a wrong inner chunk moves pixels by far more. The second pair has a
 single source level too large to serve as the coarse tier, so the server
 generates a coarse level over the sharded source, and the check asserts

@@ -710,9 +710,9 @@ export interface TraceServerRow extends WireLabel {
    * performed none. It travels with `backend-read` and obeys its rule: a
    * follower carries neither, so a sum over the column is the bytes the
    * backend moved. An inner chunk read out of a shard reports the range it
-   * asked for, plus the shard's index when that read was this row's too,
-   * which is how a trace shows a shard read by the inner chunk and never
-   * downloaded whole.
+   * asked for, or every range a merged request carried, plus the shard's
+   * index when that read was this row's too, which is how a trace shows a
+   * shard read by the inner chunk and never downloaded whole.
    */
   backendBytes: number | null;
   /**
