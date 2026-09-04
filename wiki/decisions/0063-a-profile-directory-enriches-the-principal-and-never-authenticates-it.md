@@ -3,7 +3,7 @@ type: Decision
 title: "A profile directory enriches the principal and never authenticates it"
 description: "An optional listing of display names and pictures, keyed by email, is applied in the auth middleware after the mode resolves a principal. A row may change how a person is shown and nothing about who they are. An unreachable listing is survived, and malformed configuration is refused at boot."
 tags: [lucida, decision]
-source_path: wiki/decisions/0062-a-profile-directory-enriches-the-principal-and-never-authenticates-it.md
+source_path: wiki/decisions/0063-a-profile-directory-enriches-the-principal-and-never-authenticates-it.md
 created: 2026-09-04
 modified: 2026-09-04
 ---

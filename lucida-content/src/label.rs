@@ -151,6 +151,7 @@ mod tests {
                     generated_levels: Vec::new(),
                     data_type: DataType::Uint32,
                     pinned_axes: Vec::new(),
+                    downsampling_method: None,
                     channel_infos: Vec::new(),
                 },
             },

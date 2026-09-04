@@ -1068,55 +1068,12 @@ pub fn format_dataset_presence_human(output: &DatasetPresenceOutput) -> String {
             format_source(&output.result.source)
         );
     }
-    let layers = output
-        .result
-        .layers
-        .iter()
-        .map(|layer| {
-            let detail = layer
-                .detail_level_override
-                .map(|level| level.to_string())
-                .unwrap_or_else(|| "auto".to_string());
-            let channels = layer
-                .channels
-                .iter()
-                .map(|channel| {
-                    format!(
-                        "  ch{} visible={} colormap={:?} contrast={:.3}..{:.3} gamma={:.3}",
-                        channel.channel,
-                        channel.visible,
-                        channel.colormap,
-                        channel.contrast_min,
-                        channel.contrast_max,
-                        channel.gamma
-                    )
-                })
-                .collect::<Vec<_>>();
-            let mut line = format!(
-                "{}  {}  visible={} opacity={:.3} blend={:?} render={:?} detail={} channels={}",
-                layer.workspace_dataset_id,
-                layer.name,
-                layer.visible,
-                layer.opacity,
-                layer.blend_mode,
-                layer.render_mode,
-                detail,
-                layer.channel_count
-            );
-            if !channels.is_empty() {
-                line.push('\n');
-                line.push_str(&channels.join("\n"));
-            }
-            line
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
     format!(
         "{header}\nWorkspace: {} ({})\nSource: {}\nMulti-channel: {multi}\n{}",
         output.workspace.name,
         output.workspace.id,
         format_source(&output.result.source),
-        layers
+        format_layers(&output.result.layers)
     )
 }
 
@@ -1356,14 +1313,20 @@ pub fn format_viewer_source_human(output: &ViewerSourceOutput) -> String {
     lines.join("\n")
 }
 
+/// The level pin as the human output names it. An absent pin means the
+/// target level follows the screen, and the line says so instead of
+/// printing a placeholder.
+fn format_level_pin(level_pin: Option<u32>) -> String {
+    match level_pin {
+        Some(level) => format!("level_pin={level}"),
+        None => "level_pin=none (follows the screen)".to_string(),
+    }
+}
+
 fn format_layers(layers: &[LayerState]) -> String {
     layers
         .iter()
         .map(|layer| {
-            let detail = layer
-                .detail_level_override
-                .map(|level| level.to_string())
-                .unwrap_or_else(|| "auto".to_string());
             let channels = layer
                 .channels
                 .iter()
@@ -1380,14 +1343,14 @@ fn format_layers(layers: &[LayerState]) -> String {
                 })
                 .collect::<Vec<_>>();
             let mut line = format!(
-                "{}  {}  visible={} opacity={:.3} blend={:?} render={:?} detail={} channels={}",
+                "{}  {}  visible={} opacity={:.3} blend={:?} render={:?} {} channels={}",
                 layer.workspace_dataset_id,
                 layer.name,
                 layer.visible,
                 layer.opacity,
                 layer.blend_mode,
                 layer.render_mode,
-                detail,
+                format_level_pin(layer.detail_level_override),
                 layer.channel_count
             );
             if !channels.is_empty() {
@@ -2752,7 +2715,7 @@ fn viewport_command_label(command: &ViewportCommand) -> &'static str {
         ViewportCommand::SetDatasetGamma { .. } => "layer gamma",
         ViewportCommand::SetDatasetBlendMode { .. } => "layer blend-mode",
         ViewportCommand::SetDatasetRenderMode { .. } => "layer render-mode",
-        ViewportCommand::SetDatasetDetailLevelOverride { .. } => "layer detail-level",
+        ViewportCommand::SetDatasetDetailLevelOverride { .. } => "layer level-pin",
         ViewportCommand::SetMultiChannel { .. } => "channel mode",
         ViewportCommand::SetChannelVisible { .. } => "channel visibility",
         ViewportCommand::SetChannelColormap { .. } => "channel colormap",
@@ -3365,6 +3328,38 @@ mod tests {
             "{:?}",
             result.caveats
         );
+    }
+
+    fn layer_state(level_pin: Option<u32>) -> LayerState {
+        LayerState {
+            workspace_dataset_id: "wds-1".to_string(),
+            name: "volume".to_string(),
+            visible: true,
+            opacity: 1.0,
+            contrast_min: 0.0,
+            contrast_max: 65535.0,
+            gamma: 1.0,
+            blend_mode: BlendMode::Alpha,
+            render_mode: RenderMode::Translucent,
+            detail_level_override: level_pin,
+            channel_blend_mode: BlendMode::Additive,
+            channel_count: 0,
+            channels: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn human_layer_line_says_an_absent_level_pin_follows_the_screen() {
+        let unpinned = format_layers(&[layer_state(None)]);
+        assert!(
+            unpinned.contains("level_pin=none (follows the screen)"),
+            "{unpinned}"
+        );
+
+        // Level 0 is a pin like any other, never a stand-in for absent.
+        let pinned = format_layers(&[layer_state(Some(0))]);
+        assert!(pinned.contains("level_pin=0 "), "{pinned}");
+        assert!(!pinned.contains("follows the screen"), "{pinned}");
     }
 
     #[test]

@@ -8,7 +8,7 @@
 //! those two fields in from a listing the operator names, and does
 //! nothing else: it never changes the email, never changes the
 //! administrator flag, and never stands in for a credential. See
-//! ADR-0062.
+//! ADR-0063.
 //!
 //! One operation matters to the rest of the server: [`ProfileDirectory::apply`],
 //! which the middleware calls after the mode's extractor resolved a

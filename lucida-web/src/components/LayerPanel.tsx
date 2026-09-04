@@ -3,6 +3,8 @@ import { ContrastControls } from "./ContrastControls.tsx";
 import { ColormapSelector } from "./ColormapSelector.tsx";
 import { LayoutSwitcher } from "./LayoutSwitcher.tsx";
 import type { LayoutRegistry } from "../pipeline/layoutRegistry.ts";
+import type { LevelRange } from "../renderer/workerProtocol.ts";
+import { displayedLevelNotice, levelNumbers } from "./levelReadout.ts";
 import type { BlendMode, Colormap, RenderMode } from "../savedView/types.ts";
 import "./LayerPanel.css";
 
@@ -45,8 +47,30 @@ export interface LayerInfo {
    */
   labelRows?: { index: number; name: string; visible: boolean; opacity: number; disabledReason?: string }[];
   channelBlendMode: string;
-  detailLevelOverride: number | null;
-  detailLevelOptions: { level: number; label: string }[];
+  /** The dataset's level pin; `null` means the target level follows the screen. */
+  levelPin: number | null;
+  /**
+   * The levels a pin may hold, finest first, level 0 included, as the scene
+   * reports them (`pinnable_levels`), each with a display label. Empty when
+   * the scene knows no pyramid for the dataset, which hides the control.
+   */
+  levelPinOptions: { level: number; label: string }[];
+  /**
+   * The target level across the dataset's visible entities: the level pin,
+   * or the level the screen calls for. A range for a collection whose tiles
+   * differ. `null` until the render worker has reported one.
+   */
+  targetLevel: LevelRange | null;
+  /**
+   * The finest and coarsest level actually on screen for the dataset, or
+   * `null` while nothing is resident yet. Equals `targetLevel` once the
+   * target is resident everywhere it is visible.
+   */
+  displayedLevel: LevelRange | null;
+  /** True while some visible pixel comes from a level coarser than its entity's target. */
+  displayedCoarserThanTarget: boolean;
+  /** The multiscale metadata's downsampling method, or `null` when it declares none. */
+  downsamplingMethod: string | null;
 }
 
 interface Props {
@@ -63,7 +87,7 @@ interface Props {
   onSetColormap: (id: string, colormap: Colormap) => void;
   onSetBlendMode: (id: string, mode: BlendMode) => void;
   onSetRenderMode: (id: string, mode: RenderMode) => void;
-  onSetDetailLevelOverride: (id: string, level: number | null) => void;
+  onSetLevelPin: (id: string, level: number | null) => void;
   onAutoContrast: (id: string) => void;
   onAutoContrastToggle: (id: string) => void;
   onFullRangeToggle: (id: string) => void;
@@ -111,7 +135,7 @@ export function LayerPanel({
   onSetColormap,
   onSetBlendMode,
   onSetRenderMode,
-  onSetDetailLevelOverride,
+  onSetLevelPin,
   onAutoContrast,
   onAutoContrastToggle,
   onFullRangeToggle,
@@ -224,6 +248,7 @@ export function LayerPanel({
         {layers.map((layer, index) => {
           const isSelected = layer.id === selectedLayerId;
           const isExpanded = layer.id === expandedLayerId;
+          const levelNotice = displayedLevelNotice(layer);
 
           return (
             <div
@@ -593,19 +618,56 @@ export function LayerPanel({
                       <option value="max_intensity">Max Intensity</option>
                     </select>
                   </div>
-                  {layer.detailLevelOptions.length > 0 && (
+                  {layer.targetLevel && (
                     <div className="layer-detail-row">
-                      <label>Detail</label>
+                      <label>Level</label>
+                      <span
+                        className="layer-level-readout"
+                        aria-label={`${layer.name} target level`}
+                        title="The level the screen calls for, or the pinned level"
+                      >
+                        {levelNumbers(layer.targetLevel)}
+                      </span>
+                      {levelNotice && layer.displayedLevel && (
+                        <span
+                          className="layer-level-readout layer-level-displayed"
+                          aria-label={`${layer.name} displayed level`}
+                          title="The level on screen until the target is resident"
+                        >
+                          displaying {levelNumbers(layer.displayedLevel)}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  {layer.downsamplingMethod && (
+                    <div className="layer-detail-row">
+                      <label>Downsampling</label>
+                      <span
+                        className="layer-level-readout"
+                        aria-label={`${layer.name} downsampling method`}
+                      >
+                        {layer.downsamplingMethod}
+                      </span>
+                    </div>
+                  )}
+                  {levelNotice && (
+                    <div className="layer-level-notice" role="status">
+                      {levelNotice}
+                    </div>
+                  )}
+                  {layer.levelPinOptions.length > 0 && (
+                    <div className="layer-detail-row">
+                      <label>Level</label>
                       <select
-                        aria-label={`${layer.name} detail level`}
-                        value={layer.detailLevelOverride ?? ""}
+                        aria-label={`${layer.name} level pin`}
+                        value={layer.levelPin ?? ""}
                         onChange={(e) => {
                           const value = e.target.value;
-                          onSetDetailLevelOverride(layer.id, value === "" ? null : Number(value));
+                          onSetLevelPin(layer.id, value === "" ? null : Number(value));
                         }}
                       >
-                        <option value="">Highest res</option>
-                        {layer.detailLevelOptions.map((option) => (
+                        <option value="">Follow the screen</option>
+                        {layer.levelPinOptions.map((option) => (
                           <option key={option.level} value={option.level}>
                             {option.label}
                           </option>

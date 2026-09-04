@@ -4,6 +4,12 @@
 //! when multiple Clients view the same region.
 //!
 //! An entry is one object or one byte range of one object. See [`ReadKey`].
+//!
+//! Range reads of one object that are waiting for a permit together — the
+//! neighbouring inner chunks of a shard that one pan asked for — reach the
+//! backend as one request when their byte ranges are contiguous. The merge
+//! lives at the permit queue and nowhere else. See
+//! [`CachedStore::lead_range_read`].
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -267,6 +273,16 @@ impl ReadKey {
             range,
         }
     }
+
+    /// The bounded range this key reads, when it reads one. Only these can
+    /// be merged: a whole object is its own request, and a suffix has no
+    /// known offset to be adjacent to.
+    fn bounded(&self) -> Option<&Range<u64>> {
+        match &self.range {
+            Some(ByteRange::Bounded(range)) => Some(range),
+            _ => None,
+        }
+    }
 }
 
 /// The part of an object one partial read asks for.
@@ -305,9 +321,14 @@ impl From<ByteRange> for GetRange {
 /// reader the store is slow when the truth is that the same object was
 /// already being read.
 ///
-/// Both a coalesced wait and a read appear on one timing in exactly one
-/// case: a follower whose leader vanished mid-flight falls back to its own
-/// read, and it really did perform one.
+/// A read carried in a neighbour's merged request is a follower of that
+/// request in every respect that matters here: no permit, no round trip of
+/// its own, and a wait attributed to the request that made the trip.
+///
+/// Both a coalesced wait and a read appear on one timing only when the read
+/// a caller was waiting on vanished mid-flight — its single-flight leader,
+/// or the neighbour carrying it — and the caller then really did perform
+/// one of its own.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SourceReadTiming {
     /// Queued behind the concurrency cap, for the caller that did the read.
@@ -382,8 +403,9 @@ pub struct CacheStats {
     pub misses: u64,
     pub evictions: u64,
     pub backend_errors: u64,
-    /// Single-flight followers served a leader's result without issuing
-    /// their own backend read.
+    /// Reads served without a backend read of their own: single-flight
+    /// followers handed a leader's result, and range reads carried in a
+    /// neighbour's merged request.
     pub coalesced: u64,
     /// Backend round trips actually performed (successes and failures).
     /// Distinct from `misses`: a miss that coalesces behind a leader, or one
@@ -402,9 +424,8 @@ pub struct CacheStats {
 pub struct CachedStore {
     inner: Arc<dyn ObjectStore>,
     cache: Mutex<LruState>,
-    /// In-flight backend reads keyed by [`ReadKey`]. Concurrent misses for
-    /// the same key subscribe to the leader's broadcast instead of each
-    /// hitting the backend.
+    /// In-flight backend reads, and the range reads queued for a permit that
+    /// a neighbour's request can carry. See [`Flights`].
     in_flight: InFlight,
     /// Paths the optional metadata reads and [`CachedStore::probe_exists`]
     /// have found absent, so a repeated probe for the same optional object
@@ -446,60 +467,272 @@ struct LruState {
     source_read_nanos: u128,
 }
 
-/// One in-flight read, as a follower finds it: the channel to wait on, and
-/// who is doing the reading. The label is kept so a follower's row can say
-/// which read it waited on rather than only how long (ADR 0050).
+/// What a leader broadcasts to the callers waiting on its read.
+///
+/// The label travels with it because a waiter cannot always know it when it
+/// subscribes. A range read carried in a neighbour's merged request is
+/// delivered by a leader it never lined up behind, and its row is meant to
+/// name the request that made the round trip, not the one it first found in
+/// flight (ADR 0050).
+#[derive(Clone)]
+enum Delivery {
+    /// The outcome, and whose request made the round trip.
+    Done {
+        result: ShareResult,
+        leader: RequestLabel,
+    },
+    /// The leader went away before it had read. Its waiters start again,
+    /// and their rows still name the request they waited on.
+    Abandoned { leader: RequestLabel },
+}
+
+/// Identifies one [`LeaderGuard`], so an in-flight entry can change hands
+/// and a guard only ever removes entries that are its own.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct FlightId(u64);
+
+/// One in-flight read, as a follower finds it: the channel to wait on, who
+/// is doing the reading, and which guard answers for the entry. The label is
+/// kept so a follower's row can say which read it waited on rather than only
+/// how long (ADR 0050).
 struct InFlightRead {
-    tx: broadcast::Sender<ShareResult>,
+    tx: broadcast::Sender<Delivery>,
     leader: RequestLabel,
+    /// Starts as the registering caller's guard and moves to a neighbour's
+    /// when that neighbour carries the read in its merged request.
+    owner: FlightId,
 }
 
-/// The shared in-flight registry keyed by [`ReadKey`].
-type InFlight = Mutex<HashMap<ReadKey, InFlightRead>>;
-
-/// RAII owner of a leader's in-flight entry.
-///
-/// The broadcast sender lives in the shared `in_flight` map, not on the
-/// leader's stack, so if the leader future is dropped, cancelled, or panics
-/// between registering the entry and broadcasting its result, nothing would
-/// otherwise remove the entry or drop the sender — every current follower and
-/// every future caller taking the single-flight path for that key would await
-/// `rx.recv()` forever (a permanent wedge). This guard, held on the leader's
-/// stack from the moment the entry is registered, closes that gap:
-///
-/// - On normal completion the leader calls [`LeaderGuard::complete`], which
-///   removes the entry and broadcasts the result exactly once.
-/// - On any early exit (drop/cancel/panic) `Drop` removes the entry and drops
-///   the sender, so followers observe a `RecvError` and fall back to their own
-///   backend read, and a later request for the same key starts fresh.
-struct LeaderGuard<'a> {
-    in_flight: &'a InFlight,
+/// A bounded chunk-range read that has registered in flight and is waiting
+/// for a permit.
+struct QueuedRange {
     key: ReadKey,
-    /// Set once [`complete`](Self::complete) has removed the entry, so `Drop`
-    /// does not remove it a second time.
-    completed: bool,
+    owner: FlightId,
 }
 
-impl<'a> LeaderGuard<'a> {
-    fn new(in_flight: &'a InFlight, key: ReadKey) -> Self {
-        LeaderGuard {
-            in_flight,
-            key,
-            completed: false,
+impl QueuedRange {
+    fn range(&self) -> &Range<u64> {
+        self.key.bounded().expect("only bounded ranges are queued")
+    }
+}
+
+/// The single flight and the merge, under one lock.
+#[derive(Default)]
+struct Flights {
+    /// In-flight reads keyed by [`ReadKey`]. Concurrent misses for the same
+    /// key subscribe to the leader's broadcast instead of each hitting the
+    /// backend.
+    reads: HashMap<ReadKey, InFlightRead>,
+    /// The bounded chunk-range reads waiting for a permit, by object. These
+    /// are the reads a pan across a sharded dataset produces — neighbouring
+    /// inner chunks of one shard, admitted in one scheduling window — and
+    /// when one of them is admitted, this is where it finds the neighbours
+    /// it can carry in its request.
+    queued_ranges: HashMap<Path, Vec<QueuedRange>>,
+    next_flight: u64,
+}
+
+type InFlight = Mutex<Flights>;
+
+/// Where a caller landed when it looked for its key in flight.
+enum Placement<'a> {
+    /// Nobody was reading the key; this caller leads it. `delivery` is the
+    /// leader's own subscription, on which a neighbour's merged request may
+    /// deliver the read before the leader ever takes a permit.
+    Lead {
+        guard: LeaderGuard<'a>,
+        delivery: broadcast::Receiver<Delivery>,
+    },
+    /// Another caller is already reading the key.
+    Follow {
+        delivery: broadcast::Receiver<Delivery>,
+        leader: RequestLabel,
+    },
+}
+
+impl Flights {
+    /// Find `key` in flight, or register it under a new guard. A mergeable
+    /// key is also queued by object, where a neighbour admitted first can
+    /// find it.
+    fn place<'a>(
+        &mut self,
+        in_flight: &'a InFlight,
+        key: &ReadKey,
+        label: RequestLabel,
+        mergeable: bool,
+    ) -> Placement<'a> {
+        if let Some(existing) = self.reads.get(key) {
+            return Placement::Follow {
+                delivery: existing.tx.subscribe(),
+                leader: existing.leader,
+            };
+        }
+        self.next_flight += 1;
+        let flight = FlightId(self.next_flight);
+        let (tx, delivery) = broadcast::channel::<Delivery>(1);
+        self.reads.insert(
+            key.clone(),
+            InFlightRead {
+                tx,
+                leader: label,
+                owner: flight,
+            },
+        );
+        let queued_at = match key.bounded() {
+            Some(_) if mergeable => {
+                self.queued_ranges
+                    .entry(key.path.clone())
+                    .or_default()
+                    .push(QueuedRange {
+                        key: key.clone(),
+                        owner: flight,
+                    });
+                Some(key.path.clone())
+            }
+            _ => None,
+        };
+        Placement::Lead {
+            guard: LeaderGuard {
+                in_flight,
+                flight,
+                label,
+                keys: vec![key.clone()],
+                queued_at,
+                completed: false,
+            },
+            delivery,
         }
     }
 
-    /// Publish the leader's outcome to all current followers and remove the
-    /// in-flight entry. Called exactly once on the normal-completion path.
-    fn complete(&mut self, result: &Result<Bytes, object_store::Error>) {
-        let mut in_flight = self.in_flight.lock().unwrap();
-        if let Some(InFlightRead { tx, .. }) = in_flight.remove(&self.key) {
-            let payload: ShareResult = match result {
-                Ok(bytes) => Ok(bytes.clone()),
-                Err(error) => Err(SharedError::capture(error)),
-            };
-            let _ = tx.send(payload);
+    /// The group the read `guard` leads carries in its one request: its own
+    /// range, and every queued range of the same object whose bytes run on
+    /// from it or into it. The neighbours' in-flight entries become the
+    /// guard's, and every member leaves the queue.
+    ///
+    /// `None` when a neighbour admitted first has already carried the
+    /// guard's own range; that neighbour delivers it.
+    fn claim_group(&mut self, guard: &mut LeaderGuard<'_>) -> Option<Vec<ReadKey>> {
+        let path = guard.queued_at.take()?;
+        let queue = self.queued_ranges.get_mut(&path)?;
+        queue.sort_by_key(|queued| queued.range().start);
+        let own = queue
+            .iter()
+            .position(|queued| queued.owner == guard.flight)?;
+
+        // Never across a gap: the bytes between would be fetched and dropped,
+        // since the cache has no key to file them under, and on a shard they
+        // are whole inner chunks (docs/research/merged-range-reads.md has the
+        // cost). A contiguous group is one fetch under any gap object_store's
+        // multi-range read merges on, so one permit stays one request.
+        let touches = |end: u64, next: &QueuedRange| next.range().start <= end;
+        let mut first = 0;
+        let mut end = queue[0].range().end;
+        for (rank, queued) in queue.iter().enumerate().take(own + 1).skip(1) {
+            if touches(end, queued) {
+                end = end.max(queued.range().end);
+            } else {
+                first = rank;
+                end = queued.range().end;
+            }
         }
+        let mut last = own;
+        while last + 1 < queue.len() && touches(end, &queue[last + 1]) {
+            last += 1;
+            end = end.max(queue[last].range().end);
+        }
+
+        let mut keys = Vec::with_capacity(last - first + 1);
+        for queued in &mut queue[first..=last] {
+            if queued.owner != guard.flight {
+                let read = self
+                    .reads
+                    .get_mut(&queued.key)
+                    .expect("a queued range is registered in flight");
+                read.owner = guard.flight;
+                read.leader = guard.label;
+                queued.owner = guard.flight;
+                guard.keys.push(queued.key.clone());
+            }
+            keys.push(queued.key.clone());
+        }
+        queue.retain(|queued| queued.owner != guard.flight);
+        if queue.is_empty() {
+            self.queued_ranges.remove(&path);
+        }
+        Some(keys)
+    }
+
+    /// Remove `key`'s entry, if `owner` still answers for it.
+    fn take_owned(&mut self, key: &ReadKey, owner: FlightId) -> Option<InFlightRead> {
+        if self.reads.get(key)?.owner != owner {
+            return None;
+        }
+        self.reads.remove(key)
+    }
+
+    /// Forget the queued range `owner` registered, if it is still queued.
+    fn dequeue(&mut self, path: &Path, owner: FlightId) {
+        if let Some(queue) = self.queued_ranges.get_mut(path) {
+            queue.retain(|queued| queued.owner != owner);
+            if queue.is_empty() {
+                self.queued_ranges.remove(path);
+            }
+        }
+    }
+}
+
+/// RAII owner of a leader's in-flight entries: the key it registered, plus
+/// any it took over from neighbours to carry in one request.
+///
+/// The broadcast senders live in the shared `in_flight` table, not on the
+/// leader's stack, so if the leader future is dropped, cancelled, or panics
+/// between registering and broadcasting, nothing would otherwise remove the
+/// entries or drop the senders — every current follower and every future
+/// caller taking the single-flight path for those keys would await
+/// `recv()` forever (a permanent wedge). This guard, held on the leader's
+/// stack from the moment the entry is registered, closes that gap:
+///
+/// - On normal completion the leader calls [`LeaderGuard::complete`], which
+///   removes its entries and broadcasts each result exactly once.
+/// - On any early exit (drop/cancel/panic) `Drop` removes the entries that
+///   are still its own and tells their waiters, so followers and carried
+///   reads start again, and a later request for the same key starts fresh.
+///
+/// Entries are matched by owner. One that a neighbour has taken over is that
+/// neighbour's to complete or abandon, and this guard leaves it alone.
+struct LeaderGuard<'a> {
+    in_flight: &'a InFlight,
+    flight: FlightId,
+    /// The request this guard reads for, named to every waiter it answers.
+    label: RequestLabel,
+    /// The key registered first, then any taken over from neighbours.
+    keys: Vec<ReadKey>,
+    /// The object under which the guard's own range is queued, while it is.
+    queued_at: Option<Path>,
+    /// Set once the guard has handed off or completed everything it owned,
+    /// so `Drop` does not take the lock for nothing.
+    completed: bool,
+}
+
+impl LeaderGuard<'_> {
+    /// Publish each outcome to everyone waiting on it and remove the
+    /// entries. Called exactly once on the normal-completion path.
+    fn complete(&mut self, outcomes: impl IntoIterator<Item = (ReadKey, ShareResult)>) {
+        let mut flights = self.in_flight.lock().unwrap();
+        for (key, result) in outcomes {
+            if let Some(read) = flights.take_owned(&key, self.flight) {
+                let _ = read.tx.send(Delivery::Done {
+                    result,
+                    leader: self.label,
+                });
+            }
+        }
+        self.completed = true;
+    }
+
+    /// Drop the guard without touching the table: a neighbour took over its
+    /// entry and has delivered or abandoned it.
+    fn disarm(mut self) {
         self.completed = true;
     }
 }
@@ -510,11 +743,15 @@ impl Drop for LeaderGuard<'_> {
             return;
         }
         // Leader vanished before broadcasting (dropped/cancelled/panicked).
-        // Remove the entry and let the sender drop so every current and future
-        // waiter observes `RecvError` and falls back to its own fetch, rather
-        // than awaiting a result that will never be sent.
-        let mut in_flight = self.in_flight.lock().unwrap();
-        in_flight.remove(&self.key);
+        let mut flights = self.in_flight.lock().unwrap();
+        for key in &self.keys {
+            if let Some(read) = flights.take_owned(key, self.flight) {
+                let _ = read.tx.send(Delivery::Abandoned { leader: self.label });
+            }
+        }
+        if let Some(path) = &self.queued_at {
+            flights.dequeue(path, self.flight);
+        }
     }
 }
 
@@ -589,7 +826,7 @@ impl CachedStore {
                 source_reads: 0,
                 source_read_nanos: 0,
             }),
-            in_flight: Mutex::new(HashMap::new()),
+            in_flight: Mutex::new(Flights::default()),
             absent: Mutex::new(LruCache::new(
                 std::num::NonZeroUsize::new(ABSENT_MEMO_CAPACITY).expect("capacity is non-zero"),
             )),
@@ -648,6 +885,12 @@ impl CachedStore {
     /// differs. See [`ReadKey`] for why a range and the whole object are two
     /// entries, and why two callers coalesce only on the same path *and*
     /// range.
+    ///
+    /// Range reads of one object that queue for a permit together may reach
+    /// the backend as one request when their byte ranges are contiguous.
+    /// Each still lands in its own entry, and each row still
+    /// tells the truth: the read that was admitted first owns the permit
+    /// and the round trip, and the reads it carried own only a wait on it.
     ///
     /// `range` is half-open, in bytes, and goes to the backend as-is. The
     /// store does not know an object's length, so a range past the end is
@@ -807,50 +1050,80 @@ impl CachedStore {
         // read: the chunk path is timed at the request boundary instead.
         let started = class.is_metadata().then(std::time::Instant::now);
 
-        // Cache hit — served without touching the backend or a permit, and
-        // reporting neither. A hit that showed up as a fast backend read
-        // would understate how often the store is not touched at all.
-        {
-            let mut state = self.cache.lock().unwrap();
-            if let Some(bytes) = state.lru.get(&key) {
-                let bytes = bytes.clone();
-                state.hits += 1;
-                drop(state);
-                if let Some(started) = started {
-                    metadata_reads::record(MetadataReadPhase::CacheHit, started, false);
-                }
-                return TimedRead {
-                    result: Ok(bytes),
-                    timing: SourceReadTiming::default(),
-                };
-            }
-            state.misses += 1;
-        }
+        let mergeable = class == ReadClass::Chunk && key.bounded().is_some();
 
-        // Single-flight: claim leadership by registering a broadcast sender,
-        // or subscribe to an existing leader's channel as a follower — taking
-        // the leader's label with the subscription, so the wait can be
-        // attributed to the read it is waiting on.
-        let joined: Option<(broadcast::Receiver<ShareResult>, RequestLabel)> = {
-            let mut in_flight = self.in_flight.lock().unwrap();
-            match in_flight.get(&key) {
-                Some(existing) => Some((existing.tx.subscribe(), existing.leader)),
-                None => {
-                    let (tx, _rx) = broadcast::channel::<ShareResult>(1);
-                    in_flight.insert(key.clone(), InFlightRead { tx, leader: label });
-                    None
+        // A waiter whose leader or carrier dies before delivering goes round
+        // again, and its row reports that wait together with whatever the
+        // next attempt costs.
+        let mut waited = SourceReadTiming::default();
+        let mut first_attempt = true;
+        loop {
+            // Cache hit — served without touching the backend or a permit,
+            // and reporting neither. A hit that showed up as a fast backend
+            // read would understate how often the store is not touched at
+            // all. The miss is counted once per call, not once per attempt.
+            {
+                let mut state = self.cache.lock().unwrap();
+                if let Some(bytes) = state.lru.get(&key) {
+                    let bytes = bytes.clone();
+                    state.hits += 1;
+                    drop(state);
+                    if let Some(started) = started {
+                        metadata_reads::record(MetadataReadPhase::CacheHit, started, false);
+                    }
+                    return TimedRead {
+                        result: Ok(bytes),
+                        timing: waited,
+                    };
                 }
+                if first_attempt {
+                    state.misses += 1;
+                }
+                first_attempt = false;
             }
-        };
 
-        if let Some((mut rx, leader)) = joined {
-            let parked = std::time::Instant::now();
-            return match rx.recv().await {
-                // Served by the leader — count the coalesce and surface the
-                // leader's outcome, reconstructed with the leader's error
-                // variant so it triages identically. A shared failure is not
-                // cached.
-                Ok(shared) => {
+            let placement = {
+                let mut flights = self.in_flight.lock().unwrap();
+                flights.place(&self.in_flight, &key, label, mergeable)
+            };
+
+            let (delivered, parked, leader) = match placement {
+                Placement::Follow {
+                    mut delivery,
+                    leader,
+                } => {
+                    let parked = std::time::Instant::now();
+                    (delivery.recv().await, parked, Some(leader))
+                }
+                Placement::Lead { guard, delivery } => {
+                    let led = if mergeable {
+                        self.lead_range_read(guard, delivery, &key, reader, label)
+                            .await
+                    } else {
+                        let mut guard = guard;
+                        let read = self
+                            .fetch_from_backend(&key, class, reader, label, started)
+                            .await;
+                        guard.complete([(key.clone(), share(&read.result))]);
+                        Led::Read(read)
+                    };
+                    match led {
+                        Led::Read(read) => {
+                            return TimedRead {
+                                result: read.result,
+                                timing: waited.followed_by(read.timing),
+                            };
+                        }
+                        // A carried read learns its carrier only from the delivery.
+                        Led::Carried(delivered, parked) => (delivered, parked, None),
+                    }
+                }
+            };
+
+            let abandoned_by = match delivered {
+                // The leader's outcome, with its error variant rebuilt so it
+                // triages identically. A shared failure is not cached.
+                Ok(Delivery::Done { result, leader }) => {
                     {
                         let mut state = self.cache.lock().unwrap();
                         state.coalesced += 1;
@@ -864,49 +1137,144 @@ impl CachedStore {
                         metadata_reads::record(
                             MetadataReadPhase::CoalescedWait,
                             started,
-                            shared.is_err(),
+                            result.is_err(),
                         );
                     }
-                    TimedRead {
-                        result: shared.map_err(SharedError::into_object_store_error),
+                    return TimedRead {
+                        result: result.map_err(SharedError::into_object_store_error),
                         // The whole wait, and only the wait: the leader owns
                         // the permit and the round trip.
-                        timing: SourceReadTiming {
+                        timing: waited.followed_by(SourceReadTiming {
                             coalesced_wait_us: Some(micros(parked.elapsed())),
                             coalesced_onto: Some(leader),
                             ..SourceReadTiming::default()
-                        },
-                    }
+                        }),
+                    };
                 }
-                // Leader vanished without broadcasting (dropped/cancelled/
-                // panicked). The guard has removed the in-flight entry, so
-                // fall back to a direct backend read: this waiter still gets a
-                // real answer and the path is not wedged.
-                Err(_) => {
-                    let coalesced_wait_us = micros(parked.elapsed());
-                    let mut read = self
-                        .fetch_from_backend(&key, class, reader, label, started)
-                        .await;
-                    // This one row carries both: the follower waited on a
-                    // flight that died, and then really did perform a read.
-                    read.timing.coalesced_wait_us = Some(coalesced_wait_us);
-                    read.timing.coalesced_onto = Some(leader);
-                    read
-                }
+                // The leader went away without reading. A closed channel is
+                // the same case from a guard that never got to say so, with
+                // the subscription-time label standing in. Go round again so
+                // this caller still gets a real answer.
+                Ok(Delivery::Abandoned { leader }) => Some(leader),
+                Err(_) => leader,
             };
+            waited = waited.followed_by(SourceReadTiming {
+                coalesced_wait_us: Some(micros(parked.elapsed())),
+                coalesced_onto: abandoned_by,
+                ..SourceReadTiming::default()
+            });
         }
+    }
 
-        // Leader path. Install the cancel-safe guard on the stack immediately
-        // — before the first `.await` — so a dropped/cancelled/panicking
-        // leader can never leave the in-flight entry stranded. On normal
-        // completion `complete` removes the entry and broadcasts the result
-        // exactly once; the guard's `Drop` is then a no-op.
-        let mut guard = LeaderGuard::new(&self.in_flight, key.clone());
-        let read = self
-            .fetch_from_backend(&key, class, reader, label, started)
-            .await;
-        guard.complete(&read.result);
-        read
+    /// Lead the read of one bounded chunk range: queue for a permit, and
+    /// once admitted carry every queued neighbour of the range in the one
+    /// request.
+    ///
+    /// The queue is the merge window. Reads that are waiting for a permit
+    /// together arrived together — a pan's worth of inner chunks of one
+    /// shard — and the first of them admitted takes the whole group on its
+    /// permit, as a single-flight leader takes its followers. A neighbour
+    /// admitted first may carry this read instead; then it is delivered on
+    /// the leader's own subscription and no permit is ever taken for it.
+    ///
+    /// A group is contiguous bytes, so routing it through object_store's
+    /// multi-range read is one fetch whatever gap that read merges on. Each
+    /// range still lands in its own entry: the slices come back one per
+    /// range, and each is copied out so an entry owns exactly the bytes it
+    /// is charged for rather than a view onto the whole fetch.
+    async fn lead_range_read(
+        &self,
+        mut guard: LeaderGuard<'_>,
+        mut delivery: broadcast::Receiver<Delivery>,
+        key: &ReadKey,
+        reader: ReaderId,
+        label: RequestLabel,
+    ) -> Led {
+        let started = std::time::Instant::now();
+        let permit = tokio::select! {
+            permit = self.source_read.acquire(reader) => permit,
+            delivered = delivery.recv() => {
+                guard.disarm();
+                return Led::Carried(delivered, started);
+            }
+        };
+        let permit_wait = started.elapsed();
+        trace_permit_acquired(reader, label, permit_wait);
+
+        let keys = {
+            let mut flights = self.in_flight.lock().unwrap();
+            flights.claim_group(&mut guard)
+        };
+        let Some(keys) = keys else {
+            // A neighbour claimed this range between the permit grant and this claim.
+            drop(permit);
+            guard.disarm();
+            return Led::Carried(delivery.recv().await, started);
+        };
+
+        let fetch = if keys.len() == 1 {
+            self.request(key).await.map(|bytes| vec![bytes])
+        } else {
+            let ranges: Vec<Range<u64>> = keys
+                .iter()
+                .map(|key| {
+                    key.bounded()
+                        .expect("a claimed key is a bounded range")
+                        .clone()
+                })
+                .collect();
+            self.inner
+                .get_ranges(&key.path, &ranges)
+                .await
+                .map(|slices| {
+                    slices
+                        .iter()
+                        .map(|slice| Bytes::copy_from_slice(slice))
+                        .collect()
+                })
+        };
+        drop(permit);
+        let elapsed = started.elapsed();
+        let timing = permit_and_read(permit_wait, elapsed);
+
+        let result = match fetch {
+            Ok(slices) => {
+                let mut state = self.cache.lock().unwrap();
+                state.count_round_trip(elapsed, false);
+                let mut own = None;
+                let mut outcomes = Vec::with_capacity(keys.len());
+                for (member, bytes) in keys.iter().zip(slices) {
+                    let bytes = state.insert(member, bytes);
+                    if member == key {
+                        own = Some(bytes.clone());
+                    }
+                    outcomes.push((member.clone(), Ok(bytes)));
+                }
+                drop(state);
+                guard.complete(outcomes);
+                Ok(own.expect("the leader's own range is in its group"))
+            }
+            Err(error) => {
+                self.cache.lock().unwrap().count_round_trip(elapsed, true);
+                let shared = SharedError::capture(&error);
+                guard.complete(
+                    keys.iter()
+                        .map(|member| (member.clone(), Err(shared.clone()))),
+                );
+                Err(error)
+            }
+        };
+        Led::Read(TimedRead { result, timing })
+    }
+
+    /// One backend request for `key`: the whole object, or the range or
+    /// suffix the key names.
+    async fn request(&self, key: &ReadKey) -> Result<Bytes, object_store::Error> {
+        let options = GetOptions {
+            range: key.range.clone().map(GetRange::from),
+            ..GetOptions::default()
+        };
+        self.inner.get_opts(&key.path, options).await?.bytes().await
     }
 
     /// Read an object that may legitimately not exist, remembering absence.
@@ -1024,15 +1392,7 @@ impl CachedStore {
                 ReadClass::Chunk => {
                     let permit = ReadPermit::Chunk(self.source_read.acquire(reader).await);
                     permit_wait = started.elapsed();
-                    // The wait behind the cap is the rate-setter on a remote
-                    // store, and it is only diagnosable if it can be named
-                    // per request rather than per client.
-                    tracing::trace!(
-                        rid = label.0,
-                        reader = reader.0,
-                        wait_us = permit_wait.as_micros() as u64,
-                        "store.chunk_read.permit_acquired"
-                    );
+                    trace_permit_acquired(reader, label, permit_wait);
                     permit
                 }
                 ReadClass::Metadata | ReadClass::OptionalMetadata => {
@@ -1046,29 +1406,17 @@ impl CachedStore {
                     permit
                 }
             };
-            let options = GetOptions {
-                range: key.range.clone().map(GetRange::from),
-                ..GetOptions::default()
-            };
-            match self.inner.get_opts(&key.path, options).await {
-                Ok(object) => object.bytes().await,
-                Err(error) => Err(error),
-            }
+            self.request(key).await
         };
         let elapsed = started.elapsed();
-        let elapsed_nanos = elapsed.as_nanos();
-        let timing = SourceReadTiming {
-            permit_wait_us: Some(micros(permit_wait)),
-            backend_read_us: Some(micros(elapsed.saturating_sub(permit_wait))),
-            ..SourceReadTiming::default()
-        };
+        let timing = permit_and_read(permit_wait, elapsed);
 
+        // An optional object that is not there answered the question it was
+        // asked, so it is not a failed read, for the open's row and the
+        // backend-error counter alike.
+        let absent_as_expected = class == ReadClass::OptionalMetadata
+            && matches!(fetch, Err(object_store::Error::NotFound { .. }));
         if let Some(called_at) = called_at {
-            // An optional object that is simply not there answered the
-            // question it was asked, so it is not a failed read — the same
-            // rule the backend-error counter below applies.
-            let absent_as_expected = class == ReadClass::OptionalMetadata
-                && matches!(fetch, Err(object_store::Error::NotFound { .. }));
             metadata_reads::record(
                 MetadataReadPhase::BackendRead,
                 called_at,
@@ -1076,58 +1424,89 @@ impl CachedStore {
             );
         }
 
-        let bytes = match fetch {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                let mut state = self.cache.lock().unwrap();
-                let absent_as_expected = class == ReadClass::OptionalMetadata
-                    && matches!(error, object_store::Error::NotFound { .. });
-                if !absent_as_expected {
-                    state.backend_errors += 1;
-                }
-                state.source_reads += 1;
-                state.source_read_nanos += elapsed_nanos;
-                drop(state);
-                return TimedRead {
-                    result: Err(error),
-                    timing,
-                };
-            }
-        };
-
-        // Insert into cache, evicting LRU entries to stay within budget.
-        {
+        let result = {
             let mut state = self.cache.lock().unwrap();
-            state.source_reads += 1;
-            state.source_read_nanos += elapsed_nanos;
-            if let Some(existing) = state.lru.get(key) {
-                let existing = existing.clone();
-                drop(state);
-                return TimedRead {
-                    result: Ok(existing),
-                    timing,
-                };
-            }
-            let new_size = bytes.len();
+            state.count_round_trip(elapsed, fetch.is_err() && !absent_as_expected);
+            fetch.map(|bytes| state.insert(key, bytes))
+        };
+        TimedRead { result, timing }
+    }
+}
 
-            while state.current_bytes + new_size > state.max_bytes {
-                match state.lru.pop_lru() {
-                    Some((_, evicted)) => {
-                        state.current_bytes -= evicted.len();
-                        state.evictions += 1;
-                    }
-                    None => break,
+/// How a leader's attempt at a bounded range read came out.
+enum Led {
+    /// This caller made the request, or failed to.
+    Read(TimedRead),
+    /// A neighbour carried the read: what it delivered, and when this
+    /// caller began waiting.
+    Carried(
+        Result<Delivery, broadcast::error::RecvError>,
+        std::time::Instant,
+    ),
+}
+
+/// The wait behind the cap is the rate-setter on a remote store, and it is
+/// only diagnosable if it can be named per request rather than per client.
+fn trace_permit_acquired(reader: ReaderId, label: RequestLabel, wait: std::time::Duration) {
+    tracing::trace!(
+        rid = label.0,
+        reader = reader.0,
+        wait_us = wait.as_micros() as u64,
+        "store.chunk_read.permit_acquired"
+    );
+}
+
+/// The two timed stretches of a read that took a permit: queued behind the
+/// cap, then the round trip.
+fn permit_and_read(
+    permit_wait: std::time::Duration,
+    elapsed: std::time::Duration,
+) -> SourceReadTiming {
+    SourceReadTiming {
+        permit_wait_us: Some(micros(permit_wait)),
+        backend_read_us: Some(micros(elapsed.saturating_sub(permit_wait))),
+        ..SourceReadTiming::default()
+    }
+}
+
+/// A read's outcome in the shape the broadcast carries.
+fn share(result: &Result<Bytes, object_store::Error>) -> ShareResult {
+    match result {
+        Ok(bytes) => Ok(bytes.clone()),
+        Err(error) => Err(SharedError::capture(error)),
+    }
+}
+
+impl LruState {
+    /// Count one backend round trip, however it answered.
+    fn count_round_trip(&mut self, elapsed: std::time::Duration, failed: bool) {
+        self.source_reads += 1;
+        self.source_read_nanos += elapsed.as_nanos();
+        if failed {
+            self.backend_errors += 1;
+        }
+    }
+
+    /// Make `bytes` resident under `key`, evicting from the LRU end to stay
+    /// within budget. A key that became resident meanwhile keeps what it
+    /// has, and that is what the caller gets back.
+    fn insert(&mut self, key: &ReadKey, bytes: Bytes) -> Bytes {
+        if let Some(existing) = self.lru.get(key) {
+            return existing.clone();
+        }
+        let new_size = bytes.len();
+        while self.current_bytes + new_size > self.max_bytes {
+            match self.lru.pop_lru() {
+                Some((_, evicted)) => {
+                    self.current_bytes -= evicted.len();
+                    self.evictions += 1;
                 }
+                None => break,
             }
-
-            state.current_bytes += new_size;
-            state.lru.put(key.clone(), bytes.clone());
         }
-
-        TimedRead {
-            result: Ok(bytes),
-            timing,
-        }
+        self.current_bytes += new_size;
+        self.lru.put(key.clone(), bytes.clone());
+        bytes
     }
 }
 
@@ -1587,9 +1966,9 @@ mod tests {
 
         // The guard cleared the in-flight entry rather than leaking it.
         {
-            let in_flight = cached.in_flight.lock().unwrap();
+            let flights = cached.in_flight.lock().unwrap();
             assert!(
-                in_flight.is_empty(),
+                flights.reads.is_empty(),
                 "cancelled leader left a stranded in-flight entry"
             );
         }
@@ -2131,10 +2510,17 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// Four range reads of four objects: nothing to merge, so each is its own
+    /// round trip, and each holds a chunk permit for it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_range_read_takes_one_chunk_permit() {
         let store = Arc::new(CountingStore::new(50));
-        store.seed("object", b"0123456789abcdef").await;
+        let objects = 4u64;
+        for i in 0..objects {
+            store
+                .seed(&format!("object-{i}"), b"0123456789abcdef")
+                .await;
+        }
         let get_count = store.get_count.clone();
         let max_active = store.max_active.clone();
 
@@ -2144,13 +2530,12 @@ mod tests {
             SourceReadLimiter::new(1),
         ));
 
-        let ranges = 4u64;
         let mut handles = Vec::new();
-        for i in 0..ranges {
+        for i in 0..objects {
             let cached = cached.clone();
             handles.push(tokio::spawn(async move {
                 cached
-                    .get_range(&Path::from("object"), (i * 4)..(i * 4 + 4), READER, LABEL)
+                    .get_range(&Path::from(format!("object-{i}")), 4..8, READER, LABEL)
                     .await
                     .result
             }));
@@ -2159,7 +2544,7 @@ mod tests {
             handle.await.unwrap().unwrap();
         }
 
-        assert_eq!(get_count.load(Ordering::SeqCst), ranges as usize);
+        assert_eq!(get_count.load(Ordering::SeqCst), objects as usize);
         assert_eq!(
             max_active.load(Ordering::SeqCst),
             1,
@@ -2473,5 +2858,390 @@ mod tests {
         unsafe {
             std::env::remove_var(SOURCE_READ_CONCURRENCY_ENV);
         }
+    }
+
+    // --- Merged range reads ---
+    //
+    // Each test holds the only permit while it spawns a group, so the group
+    // is queued together by construction rather than by timing.
+
+    /// Spawned readers register asynchronously, so a test that needs a group
+    /// queued together waits until the limiter actually holds them.
+    async fn wait_for_queued(limiter: &Arc<SourceReadLimiter>, count: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while limiter.queued_reads() < count {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("readers queued");
+    }
+
+    /// The backend has begun serving `count` requests, so a leader has been
+    /// admitted, has claimed its group, and is inside the delayed request.
+    async fn wait_for_requests(get_count: &std::sync::atomic::AtomicUsize, count: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while get_count.load(Ordering::SeqCst) < count {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a request reached the backend");
+    }
+
+    /// A permit held by a reader outside the test's group, so the group
+    /// queues behind it. Dropping it is what admits the first of them.
+    const OUTSIDER: ReaderId = ReaderId(99);
+
+    /// Sixteen bytes in four adjacent ranges of four.
+    const SHARD_BYTES: &[u8] = b"0123456789abcdef";
+
+    fn spawn_range_read(
+        cached: &Arc<CachedStore>,
+        path: &str,
+        range: Range<u64>,
+        label: RequestLabel,
+    ) -> tokio::task::JoinHandle<TimedRead> {
+        let cached = cached.clone();
+        let path = Path::from(path);
+        tokio::spawn(async move { cached.get_range(&path, range, READER, label).await })
+    }
+
+    /// Four adjacent ranges of one object, queued together behind the one
+    /// permit, cost the backend one request — and each range is still its
+    /// own entry, so a later read of any one of them is a hit.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn adjacent_range_reads_queued_together_share_one_backend_request() {
+        let store = Arc::new(CountingStore::new(0));
+        store.seed("shard", SHARD_BYTES).await;
+        let get_count = store.get_count.clone();
+        let limiter = SourceReadLimiter::new(1);
+        let cached = Arc::new(CachedStore::with_source_limiter(
+            store,
+            1024,
+            limiter.clone(),
+        ));
+
+        let held = limiter.acquire(OUTSIDER).await;
+        let handles: Vec<_> = (0..4u64)
+            .map(|i| spawn_range_read(&cached, "shard", i * 4..i * 4 + 4, RequestLabel(i as u32)))
+            .collect();
+        wait_for_queued(&limiter, 4).await;
+        drop(held);
+
+        for (i, handle) in handles.into_iter().enumerate() {
+            let bytes = handle.await.unwrap().result.unwrap();
+            assert_eq!(&bytes[..], &SHARD_BYTES[i * 4..i * 4 + 4], "range {i}");
+        }
+        assert_eq!(
+            get_count.load(Ordering::SeqCst),
+            1,
+            "four adjacent ranges queued together are one request"
+        );
+
+        let stats = cached.stats();
+        assert_eq!(
+            stats.entry_count, 4,
+            "one entry per range, not one per request"
+        );
+        assert_eq!(stats.current_bytes, SHARD_BYTES.len());
+        assert_eq!(stats.source_reads, 1);
+        assert_eq!(stats.misses, 4);
+
+        for i in 0..4u64 {
+            let again = cached
+                .get_range(&Path::from("shard"), i * 4..i * 4 + 4, READER, LABEL)
+                .await
+                .result
+                .unwrap();
+            assert_eq!(&again[..], &SHARD_BYTES[i as usize * 4..i as usize * 4 + 4]);
+        }
+        assert_eq!(cached.stats().hits, 4, "every merged range is a later hit");
+        assert_eq!(get_count.load(Ordering::SeqCst), 1);
+    }
+
+    /// The merged request is one permit and one round trip, and the rows say
+    /// so: the read that led it owns the permit wait and the backend read,
+    /// and each read it carried owns only a wait, attributed to the leader's
+    /// label. A sum over the backend column still counts one trip (ADR 0050).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_merged_read_takes_one_permit_and_the_reads_it_carried_report_a_wait_on_its_leader() {
+        let delay_ms = 30;
+        let store = Arc::new(CountingStore::new(delay_ms));
+        store.seed("shard", SHARD_BYTES).await;
+        let max_active = store.max_active.clone();
+        let limiter = SourceReadLimiter::new(1);
+        let cached = Arc::new(CachedStore::with_source_limiter(
+            store,
+            1024,
+            limiter.clone(),
+        ));
+
+        let held = limiter.acquire(OUTSIDER).await;
+        let handles: Vec<_> = (0..4u64)
+            .map(|i| spawn_range_read(&cached, "shard", i * 4..i * 4 + 4, RequestLabel(i as u32)))
+            .collect();
+        wait_for_queued(&limiter, 4).await;
+        drop(held);
+
+        let mut reads = Vec::new();
+        for (i, handle) in handles.into_iter().enumerate() {
+            reads.push((RequestLabel(i as u32), handle.await.unwrap()));
+        }
+
+        let leaders: Vec<_> = reads
+            .iter()
+            .filter(|(_, read)| read.timing.backend_read_us.is_some())
+            .collect();
+        assert_eq!(leaders.len(), 1, "exactly one row owns the round trip");
+        let (leader_label, leader) = leaders[0];
+        assert!(leader.timing.permit_wait_us.is_some());
+        assert!(leader.timing.backend_read_us.unwrap() >= (delay_ms * 1_000) as u32);
+        assert_eq!(leader.timing.coalesced_wait_us, None);
+        assert_eq!(leader.timing.coalesced_onto, None);
+
+        for (label, carried) in reads.iter().filter(|(label, _)| label != leader_label) {
+            assert_eq!(
+                carried.timing.permit_wait_us, None,
+                "{label:?} took no permit"
+            );
+            assert_eq!(
+                carried.timing.backend_read_us, None,
+                "{label:?} made no trip"
+            );
+            assert!(
+                carried
+                    .timing
+                    .coalesced_wait_us
+                    .expect("a carried read waited")
+                    > 0,
+                "{label:?}"
+            );
+            assert_eq!(carried.timing.coalesced_onto, Some(*leader_label));
+        }
+
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
+        let stats = cached.stats();
+        assert_eq!(stats.source_reads, 1);
+        assert_eq!(
+            stats.coalesced, 3,
+            "the reads it carried are followers of the merged read"
+        );
+    }
+
+    /// Only contiguous ranges merge: ranges of one object with a byte
+    /// between them, ranges of different objects, and a suffix read beside
+    /// a bounded one each cost their own request.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn range_reads_that_are_not_contiguous_are_not_merged() {
+        let store = Arc::new(CountingStore::new(0));
+        store.seed("gapped", SHARD_BYTES).await;
+        store.seed("a", SHARD_BYTES).await;
+        store.seed("b", SHARD_BYTES).await;
+        let get_count = store.get_count.clone();
+        let limiter = SourceReadLimiter::new(1);
+        let cached = Arc::new(CachedStore::with_source_limiter(
+            store,
+            1024,
+            limiter.clone(),
+        ));
+
+        // One byte apart: two requests, and neither fetched the byte between.
+        let held = limiter.acquire(OUTSIDER).await;
+        let head = spawn_range_read(&cached, "gapped", 0..7, RequestLabel(1));
+        let tail = spawn_range_read(&cached, "gapped", 8..16, RequestLabel(2));
+        wait_for_queued(&limiter, 2).await;
+        drop(held);
+        assert_eq!(&head.await.unwrap().result.unwrap()[..], &SHARD_BYTES[0..7]);
+        assert_eq!(
+            &tail.await.unwrap().result.unwrap()[..],
+            &SHARD_BYTES[8..16]
+        );
+        assert_eq!(get_count.load(Ordering::SeqCst), 2, "a gap of one byte");
+        assert_eq!(cached.stats().current_bytes, 15);
+
+        let held = limiter.acquire(OUTSIDER).await;
+        let a = spawn_range_read(&cached, "a", 0..8, RequestLabel(3));
+        let b = spawn_range_read(&cached, "b", 0..8, RequestLabel(4));
+        wait_for_queued(&limiter, 2).await;
+        drop(held);
+        a.await.unwrap().result.unwrap();
+        b.await.unwrap().result.unwrap();
+        assert_eq!(get_count.load(Ordering::SeqCst), 4, "two objects");
+
+        let held = limiter.acquire(OUTSIDER).await;
+        let bounded = spawn_range_read(&cached, "a", 8..16, RequestLabel(5));
+        let suffix = {
+            let cached = cached.clone();
+            tokio::spawn(async move {
+                cached
+                    .get_suffix(&Path::from("a"), 8, READER, RequestLabel(6))
+                    .await
+            })
+        };
+        wait_for_queued(&limiter, 2).await;
+        drop(held);
+        assert_eq!(
+            &bounded.await.unwrap().result.unwrap()[..],
+            &SHARD_BYTES[8..]
+        );
+        assert_eq!(
+            &suffix.await.unwrap().result.unwrap()[..],
+            &SHARD_BYTES[8..]
+        );
+        assert_eq!(
+            get_count.load(Ordering::SeqCst),
+            6,
+            "a suffix beside a range"
+        );
+
+        assert_eq!(cached.stats().coalesced, 0);
+    }
+
+    /// Within one reader the limiter admits in queue order, so a read queued
+    /// alone before its neighbours is the one that leads their merged read.
+    async fn queue_leader_then_neighbours(
+        cached: &Arc<CachedStore>,
+        limiter: &Arc<SourceReadLimiter>,
+    ) -> [tokio::task::JoinHandle<TimedRead>; 3] {
+        let held = limiter.acquire(OUTSIDER).await;
+        let first = spawn_range_read(cached, "shard", 0..4, RequestLabel(1));
+        wait_for_queued(limiter, 1).await;
+        let second = spawn_range_read(cached, "shard", 4..8, RequestLabel(2));
+        let third = spawn_range_read(cached, "shard", 8..12, RequestLabel(3));
+        wait_for_queued(limiter, 3).await;
+        drop(held);
+        [first, second, third]
+    }
+
+    fn no_flight_is_left_behind(cached: &CachedStore) {
+        let flights = cached.in_flight.lock().unwrap();
+        assert!(flights.reads.is_empty(), "an in-flight entry was stranded");
+        assert!(
+            flights.queued_ranges.is_empty(),
+            "a queued range was stranded"
+        );
+    }
+
+    /// A leader cancelled mid-request leaves the reads it carried without a
+    /// result. They fall back to reads of their own rather than waiting on
+    /// a request that will never finish, and nothing is left registered.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn reads_carried_by_a_cancelled_leader_still_read_their_ranges() {
+        let store = Arc::new(CountingStore::new(200));
+        store.seed("shard", SHARD_BYTES).await;
+        let get_count = store.get_count.clone();
+        let limiter = SourceReadLimiter::new(1);
+        let cached = Arc::new(CachedStore::with_source_limiter(
+            store,
+            1024,
+            limiter.clone(),
+        ));
+
+        let [leader, second, third] = queue_leader_then_neighbours(&cached, &limiter).await;
+        wait_for_requests(&get_count, 1).await;
+        leader.abort();
+        let _ = leader.await;
+
+        let second = tokio::time::timeout(Duration::from_secs(5), second)
+            .await
+            .expect("a carried read must not wait on a dead leader")
+            .unwrap();
+        let third = tokio::time::timeout(Duration::from_secs(5), third)
+            .await
+            .expect("a carried read must not wait on a dead leader")
+            .unwrap();
+        assert_eq!(&second.result.unwrap()[..], &SHARD_BYTES[4..8]);
+        assert_eq!(&third.result.unwrap()[..], &SHARD_BYTES[8..12]);
+        assert!(second.timing.coalesced_wait_us.is_some());
+        assert!(third.timing.coalesced_wait_us.is_some());
+        assert!(
+            second.timing.backend_read_us.is_some() || third.timing.backend_read_us.is_some(),
+            "at least one carried read led the fallback read"
+        );
+
+        let requests = get_count.load(Ordering::SeqCst);
+        assert!(
+            (2..=3).contains(&requests),
+            "the cancelled request plus the carried reads' own: {requests}"
+        );
+        no_flight_is_left_behind(&cached);
+    }
+
+    /// A carried read cancelled while it waits changes nothing for the merged
+    /// request: the leader still completes, the other carried read is still
+    /// served, and the cancelled read's range still lands in the cache.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_cancelled_carried_read_does_not_disturb_the_merged_read() {
+        let store = Arc::new(CountingStore::new(100));
+        store.seed("shard", SHARD_BYTES).await;
+        let get_count = store.get_count.clone();
+        let limiter = SourceReadLimiter::new(1);
+        let cached = Arc::new(CachedStore::with_source_limiter(
+            store,
+            1024,
+            limiter.clone(),
+        ));
+
+        let [leader, second, third] = queue_leader_then_neighbours(&cached, &limiter).await;
+        wait_for_requests(&get_count, 1).await;
+        second.abort();
+        let _ = second.await;
+
+        let leader = leader.await.unwrap();
+        let third = third.await.unwrap();
+        assert_eq!(&leader.result.unwrap()[..], &SHARD_BYTES[0..4]);
+        assert_eq!(&third.result.unwrap()[..], &SHARD_BYTES[8..12]);
+        assert_eq!(third.timing.coalesced_onto, Some(RequestLabel(1)));
+
+        let orphaned = cached
+            .get_range(&Path::from("shard"), 4..8, READER, LABEL)
+            .await;
+        assert_eq!(&orphaned.result.unwrap()[..], &SHARD_BYTES[4..8]);
+        assert_eq!(orphaned.timing, SourceReadTiming::default(), "a hit");
+        assert_eq!(get_count.load(Ordering::SeqCst), 1);
+        no_flight_is_left_behind(&cached);
+    }
+
+    /// A merged request that fails fails every read it carried, with the
+    /// leader's error, and caches nothing — so the next read of any of the
+    /// ranges tries the backend again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_failed_merged_read_fails_every_read_it_carried_and_caches_nothing() {
+        let store = Arc::new(CountingStore::new(20));
+        store.seed("shard", SHARD_BYTES).await;
+        store.fail.store(true, Ordering::SeqCst);
+        let get_count = store.get_count.clone();
+        let fail = store.fail.clone();
+        let limiter = SourceReadLimiter::new(1);
+        let cached = Arc::new(CachedStore::with_source_limiter(
+            store,
+            1024,
+            limiter.clone(),
+        ));
+
+        let held = limiter.acquire(OUTSIDER).await;
+        let handles: Vec<_> = (0..3u64)
+            .map(|i| spawn_range_read(&cached, "shard", i * 4..i * 4 + 4, RequestLabel(i as u32)))
+            .collect();
+        wait_for_queued(&limiter, 3).await;
+        drop(held);
+        for handle in handles {
+            assert!(handle.await.unwrap().result.is_err());
+        }
+        assert_eq!(get_count.load(Ordering::SeqCst), 1);
+        let stats = cached.stats();
+        assert_eq!(stats.backend_errors, 1, "one failed round trip");
+        assert_eq!(stats.entry_count, 0);
+        no_flight_is_left_behind(&cached);
+
+        fail.store(false, Ordering::SeqCst);
+        let bytes = cached
+            .get_range(&Path::from("shard"), 4..8, READER, LABEL)
+            .await
+            .result
+            .unwrap();
+        assert_eq!(&bytes[..], &SHARD_BYTES[4..8]);
+        assert_eq!(get_count.load(Ordering::SeqCst), 2);
     }
 }

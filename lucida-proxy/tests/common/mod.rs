@@ -137,6 +137,7 @@ pub fn single_image_graph(
                 generated_levels: vec![],
                 data_type: DataType::Uint16,
                 pinned_axes: vec![],
+                downsampling_method: None,
                 channel_infos: vec![],
             },
         }],
@@ -203,6 +204,7 @@ pub fn group_graph_with_tiles(
                 generated_levels: vec![],
                 data_type: DataType::Uint16,
                 pinned_axes: vec![],
+                downsampling_method: None,
                 channel_infos: vec![],
             },
         });

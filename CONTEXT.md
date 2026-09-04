@@ -162,7 +162,10 @@ independent layers and the two must never be conflated: **request coalescing**
 folds several callers' demand for one composite key onto one wire request, and
 **read coalescing** folds several wire requests for one object, or for one byte
 range of it, onto one backend read, via a leader that performs it and followers
-that wait on the result.
+that wait on the result. A read carried in a merged read (see below) is not
+coalesced, since it wanted different bytes. It is still accounted as a
+follower of the request that carried it, because that accounting keeps the
+same arithmetic honest: one round trip counted once.
 _Avoid_: deduplication, batching (batching combines *different* work)
 
 **Reader**:
@@ -178,6 +181,17 @@ unit fairness is measured over)
 A read of one byte range of a stored object rather than the whole object. The
 read that fetches a shard index, or one inner chunk out of a shard.
 _Avoid_: partial read, byte-range request (the transport's name for it)
+
+**Merged read**:
+One backend request that serves several range reads of one object because
+they were queued for a permit together and their byte ranges are contiguous.
+Not coalescing: the reads want different bytes, so this combines different
+work, and each range keeps its own cache entry. The read admitted first is
+the merged read's leader, and a read it carried is accounted as a follower.
+Why the queue is the window and why nothing merges across a gap is in
+`wiki/decisions/0062-merged-range-reads-at-the-permit-queue.md`.
+_Avoid_: batched read, vectored read, coalesced ranges (coalescing is
+same-work), request merging (a request is the wire's unit, not the store's)
 
 ## Performance monitor
 
@@ -589,7 +603,7 @@ picture for an email address. Applied after an auth mode resolves a principal
 and keyed on the email it resolved, so a row changes how a person is shown and
 nothing about who they are: not the email, not whether they administer the
 server, not what they may do. Unset means off. See
-[ADR 0062](wiki/decisions/0062-a-profile-directory-enriches-the-principal-and-never-authenticates-it.md).
+[ADR 0063](wiki/decisions/0063-a-profile-directory-enriches-the-principal-and-never-authenticates-it.md).
 _Avoid_: user directory, address book, identity provider (a provider decides who
 a caller is; the directory only decorates the answer), people service, roster
 

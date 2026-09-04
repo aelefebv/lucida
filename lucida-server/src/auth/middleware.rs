@@ -107,7 +107,7 @@ impl FromRef<SharedExtractor> for AuthMiddlewareState {
 /// `req.extensions().get::<AuthPrincipal>()`.
 ///
 /// The directory runs after extraction and before attachment, and
-/// nowhere else: this is the single seam ADR-0062 names. It is given
+/// nowhere else: this is the single seam ADR-0063 names. It is given
 /// the principal the mode resolved, so the email it keys on is one no
 /// request header chose, and it may write the display name and the
 /// picture and nothing more.

@@ -16,7 +16,7 @@
 //! - `directory` — the profile directory: an optional listing of
 //!   display names and pictures keyed by email, held in memory and
 //!   applied by the middleware to whatever principal the mode
-//!   resolved. Enrichment only; never a credential. See ADR-0062.
+//!   resolved. Enrichment only; never a credential. See ADR-0063.
 //! - `session_store` — `LoginSessionStore` trait + the row type.
 //! - `session_store_sqlite` / `session_store_postgres` — production
 //!   `SqliteSessionStore` and `PostgresSessionStore`, both backed by
