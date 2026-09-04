@@ -373,10 +373,13 @@ export interface TileEntry {
   /** Per-tile mode. See {@link EntityMode}. */
   mode: EntityMode;
   /**
-   * Levels the detail tier holds for this entity, finest first. The one
-   * description of the detail tier's levels from the planner through
-   * cold state to the worker. Today it holds one level: the dataset's
-   * level pin, or level 0 when none is set.
+   * Levels the detail tier requests for this entity, the target level
+   * first. The one description of the detail tier's levels from the
+   * planner through cold state to the worker. Today it holds one level:
+   * the dataset's level pin, or level 0 when none is set. The worker
+   * reads `detailLevels[0]` as the target: it keeps sections for the
+   * target and the coarser levels under it, and never samples a level
+   * finer than it.
    */
   detailLevels: number[];
   /**

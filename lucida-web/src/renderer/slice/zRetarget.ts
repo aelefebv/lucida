@@ -1,6 +1,6 @@
 /**
- * Slice Z retargeting — pure helper that maps full-resolution Z to a
- * per-entity chunk-Z target.
+ * Slice Z retargeting — pure helper that maps full-resolution Z to the
+ * chunk-Z target of one (member, level) section.
  *
  * `staleSliceKeys` lives on the `SliceAtlasState` and is managed
  * inline in `slice/atlas.ts` (`getOrCreateSlicePool` populates it on Z
@@ -12,7 +12,7 @@
 
 import type { SliceEntityZInfo } from "./atlas.ts";
 
-/** Compute target chunk Z for an entity given current full-res Z. */
+/** Compute the target chunk Z of one level's section given the current full-res Z. */
 export function computeTargetChunkZ(zInfo: SliceEntityZInfo | undefined, currentZ: number): number | null {
   if (!zInfo || zInfo.chunkZ <= 0) return null;
   const levelZ = Math.min(

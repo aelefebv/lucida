@@ -6,16 +6,16 @@
  * slot-index back into a flat `indirectionData` Uint32Array at a
  * per-entity, per-LOD offset. They differ in exactly two ways:
  *
- *   1. **Z filter.** Slice mode passes a per-entity Z target (computed
- *      from `entityZInfo` + current full-res Z); only chunks whose
- *      `chunk.z` matches that target survive the filter. Volume has no
- *      Z filter — all chunks at the current (t, c) survive.
+ *   1. **Z filter.** Slice mode passes a per-(member, level) Z target
+ *      (computed from `entityZInfo` + current full-res Z); only chunks
+ *      whose `chunk.z` matches that target survive the filter. Volume
+ *      has no Z filter — all chunks at the current (t, c) survive.
  *
  *   2. **Global-index arithmetic.** Volume's per-entity section is laid
  *      out as `[z][y][x]` (`gridZ * gridY * gridX` per LOD). Slice's is
  *      `[y][x]` (one 2D plane per LOD). The Z multiplier is dropped in
  *      slice mode — implemented here by branching on
- *      `targetChunkZForMember != null` (slice mode signal).
+ *      `targetChunkZFor != null` (slice mode signal).
  *
  * The handlers keep their public function names (`remapIndirection` /
  * `remapSliceIndirection`); this module is the source of truth.
@@ -55,21 +55,21 @@ export interface RemapParams {
   renderRadiusView?: number;
   entryByMember?: Map<string, RemapEntryInfo>;
   /**
-   * Slice mode: per-entity target chunk-Z (computed from currentZ +
-   * the entity's Z metadata). Chunks whose `chunk.z !==` the returned
-   * value are skipped. Returning `null` from the callback disables the
-   * filter for that entity (no Z info yet).
+   * Slice mode: target chunk-Z for one (member, level), computed from
+   * currentZ + that level's Z metadata. Chunks whose `chunk.z !==` the
+   * returned value are skipped. Returning `null` disables the filter for
+   * that level (no Z info yet).
    *
    * Volume mode: pass `null` to disable the Z filter entirely *and*
    * select the volume index arithmetic (Z multiplier included).
    */
-  targetChunkZForMember: ((memberId: string) => number | null) | null;
+  targetChunkZFor: ((memberId: string, level: number) => number | null) | null;
 }
 
 /**
  * Walk the atlas's composite slot keys and rebuild the indirection
  * buffer so that only chunks matching `(currentT, currentC)` (and an
- * optional per-entity Z target) are visible to the shader.
+ * optional per-level Z target) are visible to the shader.
  *
  * Stale chunks (kept in `slots` for fast switch-back but not currently
  * relevant) remain in the slot pool with `slotGridIdx[slot] = -1`,
@@ -79,7 +79,7 @@ export function remapSharedIndirection(params: RemapParams): void {
   params.indirectionData.fill(0xFFFFFFFF);
   params.slotGridIdx.fill(-1);
 
-  const isVolumeMode = params.targetChunkZForMember == null;
+  const isVolumeMode = params.targetChunkZFor == null;
 
   for (const [compositeKey, slotIndex] of params.slots) {
     const parsedComp = parseCompositeKey(compositeKey);
@@ -93,9 +93,10 @@ export function remapSharedIndirection(params: RemapParams): void {
     if (chunk.t !== params.currentT) continue;
     if (chunk.c !== params.currentC) continue;
 
-    // Slice-mode per-entity Z filter.
-    if (params.targetChunkZForMember) {
-      const tz = params.targetChunkZForMember(parsedComp.memberId);
+    // Slice-mode Z filter, per level: the levels sharing a pool can
+    // differ in depth and chunk Z.
+    if (params.targetChunkZFor) {
+      const tz = params.targetChunkZFor(parsedComp.memberId, chunk.level);
       if (tz !== null && chunk.z !== tz) continue;
     }
 

@@ -2,7 +2,7 @@
  * Volume-mode indirection remap (thin wrapper).
  *
  * Delegates to the shared `remapSharedIndirection` kernel. Volume mode
- * passes `targetChunkZForMember: null` to (a) disable the Z filter and
+ * passes `targetChunkZFor: null` to (a) disable the Z filter and
  * (b) select volume index arithmetic (Z multiplier included).
  */
 
@@ -36,7 +36,7 @@ export function remapIndirection(
     visibleRegion: options.visibleRegion,
     renderRadiusView: options.renderRadiusView,
     entryByMember: options.entryByMember,
-    targetChunkZForMember: null,
+    targetChunkZFor: null,
   });
   atlas.indirectionDirty = true;
 }

@@ -523,10 +523,14 @@ export type ColdStateActiveEntry =
       imageId: string;
       mode: "tiles-with-detail" | "tiles-with-proxy-fallback";
       /**
-       * Levels the detail tier holds for this entity, finest first. This
-       * is the planner's `TileEntry.detailLevels`, carried through
-       * unchanged. The worker allocates one detail pool section per level
-       * and reports missing chunks at each.
+       * Levels the detail tier requests for this entity, the target level
+       * first. This is the planner's `TileEntry.detailLevels`, carried
+       * through unchanged. The worker reads `detailLevels[0]` as the
+       * target level: it allocates a detail pool section for the target
+       * and for the next coarser levels the pyramid has (see
+       * `entitySources.detailTierLevels`), reports missing chunks at the
+       * levels listed here, and samples the target first, then the
+       * coarser resident levels, never a finer one.
        */
       detailLevels: number[];
       /** Level the coarse tier holds for this entity, or `null` for none. */

@@ -1,19 +1,15 @@
 /**
- * Worker-process GPU resource caches: LUT texture cache, offscreen
- * target pool, and 1×1 / 1×1×1 dummy textures bound when no real
- * texture is available.
+ * Worker-process GPU resource caches: LUT texture cache and offscreen
+ * target pool.
  *
  * Module-scoped (not on {@link RendererState}) because they belong to
  * the worker process itself — per-device, not per-session.
  * `RendererState` is for per-session/per-dataset state that resets on
  * `destroy`.
  *
- * Per-renderer dummies (`dummyTexture` / `dummyIndirectionBuffer` /
- * `dummyProxyTexture` inside `SliceRenderer` and `VolumeRenderer`) and
- * per-atlas dummies (`dummyIndirectionBuf` in `volume/atlas.ts`,
- * `dummySliceIndirectionBuf` in `slice/atlas.ts`) stay where they are —
- * they're tightly coupled to bind-group construction and atlas-pool
- * lifecycle in those modules.
+ * The dummy textures and sentinel indirection buffers bound to unused
+ * pool slots live inside `SliceRenderer` and `VolumeRenderer`, next to
+ * the bind-group construction that needs them.
  */
 
 import { createOffscreenTarget } from "../gpuContext.ts";
@@ -62,41 +58,10 @@ export function ensureOffscreenPool(device: GPUDevice, count: number, w: number,
   return offscreenPool;
 }
 
-// ── 1×1 dummy 2D texture (r16uint, bound for unset 2D bindings) ────────
-let dummyTexture: GPUTexture | null = null;
-
-/** Get or lazily allocate the 1×1 r16uint dummy 2D texture. */
-export function getDummyTexture(device: GPUDevice): GPUTexture {
-  if (!dummyTexture) {
-    dummyTexture = device.createTexture({
-      size: [1, 1],
-      format: "r16uint",
-      usage: GPUTextureUsage.TEXTURE_BINDING,
-    });
-  }
-  return dummyTexture;
-}
-
-// ── 1×1×1 dummy 3D texture (r16uint, bound for unset 3D bindings) ─────
-let dummy3DTexture: GPUTexture | null = null;
-
-/** Get or lazily allocate the 1×1×1 r16uint dummy 3D texture. */
-export function getDummy3DTexture(device: GPUDevice): GPUTexture {
-  if (!dummy3DTexture) {
-    dummy3DTexture = device.createTexture({
-      size: [1, 1, 1],
-      format: "r16uint",
-      dimension: "3d",
-      usage: GPUTextureUsage.TEXTURE_BINDING,
-    });
-  }
-  return dummy3DTexture;
-}
-
 /**
  * Tear down every cached worker-process GPU resource. Called from the
- * `destroy` handler before `self.close()`. Per-renderer / per-atlas
- * dummies are torn down by their owning modules.
+ * `destroy` handler before `self.close()`. Per-renderer dummies are torn
+ * down by their owning modules.
  */
 export function destroyAllResources(): void {
   for (const tex of offscreenPool) tex.destroy();
@@ -105,8 +70,4 @@ export function destroyAllResources(): void {
   poolHeight = 0;
   for (const tex of lutCache.values()) tex.destroy();
   lutCache.clear();
-  dummyTexture?.destroy();
-  dummyTexture = null;
-  dummy3DTexture?.destroy();
-  dummy3DTexture = null;
 }

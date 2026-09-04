@@ -24,7 +24,7 @@ import {
   buildDescriptorBuffer,
   destroyDescriptorBuffer,
 } from "../descriptorBuffer.ts";
-import type { LodIndirectionMeta } from "../volume/index.ts";
+import type { EntitySource } from "../entitySources.ts";
 
 export function applyColdStateDisplay(
   ctx: WorkerCtx,
@@ -43,8 +43,8 @@ export function applyColdStateDisplay(
     entry.displayStateByChannel = msg.displayStateByChannel;
   }
 
-  const metas: Map<string, LodIndirectionMeta[]> =
-    state.currentEntityMetasByDataset.get(msg.datasetId) ?? new Map();
+  const sources: Map<string, EntitySource[]> =
+    state.currentSourcesByDataset.get(msg.datasetId) ?? new Map();
   const oldDesc = state.descriptorBuffersByDataset.get(msg.datasetId);
   if (oldDesc) destroyDescriptorBuffer(oldDesc);
   state.descriptorBuffersByDataset.set(
@@ -54,7 +54,7 @@ export function applyColdStateDisplay(
       cold,
       state.proxyDescriptorsByEntity,
       state.proxyPoolsByDataset,
-      metas,
+      sources,
     ),
   );
 }

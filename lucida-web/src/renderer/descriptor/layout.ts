@@ -15,57 +15,56 @@
  *   0:   modelMatrix         mat4x4<f32>     (64)
  *   64:  invModelMatrix      mat4x4<f32>     (64)
  *   128: channelMask         u32             (4)
- *   132: tileProxyPoolIndex u32             (4)
- *   136: tileProxySlotIndex u32             (4)
- *   140: groupProxyPoolIndex  u32             (4)
- *   144: groupProxySlotIndex  u32             (4)
+ *   132: tileProxyPoolIndex  u32             (4)
+ *   136: tileProxySlotIndex  u32             (4)
+ *   140: groupProxyPoolIndex u32             (4)
+ *   144: groupProxySlotIndex u32             (4)
  *   148: _pad_proxy0         u32             (4)
  *   152: _pad_proxy1         u32             (4)
  *   156: _pad_proxy2         u32             (4)
- *   160: tileProxyDims      vec3<u32>+pad   (16) — xyz=(Z,Y,X)
- *   176: groupProxyDims       vec3<u32>+pad   (16) — xyz=(Z,Y,X)
+ *   160: tileProxyDims       vec3<u32>+pad   (16) — xyz=(Z,Y,X)
+ *   176: groupProxyDims      vec3<u32>+pad   (16) — xyz=(Z,Y,X)
  *   192: contrastMin         f32             (4)
  *   196: contrastMax         f32             (4)
  *   200: gamma               f32             (4)
  *   204: opacity             f32             (4)
  *   208: colormapLutIndex    u32             (4)
- *   212: lodCount            u32             (4)
+ *   212: levelSourceCount    u32             (4) — populated `levelSources` slots
  *   216: colormapMode        u32             (4) — 0 = continuous ramp, 1 = categorical label
  *   220: labelOpacity        f32             (4) — overlay opacity in categorical mode
- *   224: lods                LodInfo[8]      (512)
+ *   224: levelSources        ChunkTierSource[4] (256) — resident levels, finest first
+ *   480: coarseSource        ChunkTierSource (64)
  *
- *   736: detailSource        ChunkTierSource (64)
- *   800: coarseSource        ChunkTierSource (64)
+ *   total = 544 bytes
  *
- *   total = 864 bytes
+ * `ChunkTierSource` (64B):
  *
- * `LodInfo` (64B):
- *
- *   0:  level             u32             (4)
- *   4:  indirectionOffset u32             (4)
- *   8:  _pad0             u32             (4)
- *   12: _pad1             u32             (4)
+ *   0:  valid             u32             (4)
+ *   4:  level             u32             (4)
+ *   8:  indirectionOffset u32             (4)
+ *   12: poolIndex         u32             (4) — draw-local pool binding slot (level sources only)
  *   16: gridDims          vec3<u32>+pad   (16) — xyz=(X,Y,Z)
  *   32: chunkDims         vec3<u32>+pad   (16) — xyz=(X,Y,Z)
  *   48: levelDims         vec3<u32>+pad   (16) — xyz=(X,Y,Z)
  */
 
-/** Maximum LOD slots packed per entity. Matches `LodInfo[8]` in WGSL. */
-export const DESCRIPTOR_MAX_LODS = 8;
-
-/** Per-LOD struct size in bytes (matches WGSL `LodInfo`). */
-export const DESCRIPTOR_LOD_INFO_SIZE = 64;
+/**
+ * The bound on resident levels per entity: how many level sources the
+ * descriptor carries and how many level pools one draw binds. Matches
+ * `array<ChunkTierSource, 4>` in WGSL and the `levelTex0..3` /
+ * `levelIndirection0..3` bindings.
+ */
+export const DESCRIPTOR_MAX_LEVEL_SOURCES = 4;
 
 /** Per explicit chunk-tier source struct size in bytes. */
 export const DESCRIPTOR_TIER_SOURCE_SIZE = 64;
 
-/** Byte offset of the `lods: array<LodInfo, 8>` field within the entry. */
-export const DESCRIPTOR_LODS_OFFSET = 224;
+/** Byte offset of the `levelSources: array<ChunkTierSource, 4>` field within the entry. */
+export const DESCRIPTOR_LEVEL_SOURCES_OFFSET = 224;
 
 export const DESCRIPTOR_ENTRY_SIZE =
-  DESCRIPTOR_LODS_OFFSET +
-  DESCRIPTOR_MAX_LODS * DESCRIPTOR_LOD_INFO_SIZE +
-  2 * DESCRIPTOR_TIER_SOURCE_SIZE;
+  DESCRIPTOR_LEVEL_SOURCES_OFFSET +
+  (DESCRIPTOR_MAX_LEVEL_SOURCES + 1) * DESCRIPTOR_TIER_SOURCE_SIZE;
 
 /** Shader-side sentinel for missing pool / slot. Matches `0xFFFFFFFFu`. */
 export const DESCRIPTOR_SENTINEL_INDEX = 0xffffffff;
@@ -88,34 +87,30 @@ export const OFFSET_CONTRAST_MAX = 196;          // f32
 export const OFFSET_GAMMA = 200;                 // f32
 export const OFFSET_OPACITY = 204;               // f32
 export const OFFSET_COLORMAP_LUT_INDEX = 208;    // u32
-export const OFFSET_LOD_COUNT = 212;             // u32
+/** Number of populated `levelSources` slots (0..4), packed finest first. */
+export const OFFSET_LEVEL_SOURCE_COUNT = 212;    // u32
 /** 0 = continuous colormap ramp (intensity images); 1 = categorical
  *  label overlay (id → distinct color, id 0 transparent). */
 export const OFFSET_COLORMAP_MODE = 216;         // u32
 /** Overlay opacity used when `colormapMode` is categorical. */
 export const OFFSET_LABEL_OPACITY = 220;         // f32
-/** Alias for {@link DESCRIPTOR_LODS_OFFSET}, kept for symmetry with the
- *  other `OFFSET_*` constants when reading layout side-by-side with the
- *  WGSL struct. */
-export const OFFSET_LODS = DESCRIPTOR_LODS_OFFSET;
-export const OFFSET_DETAIL_SOURCE =
-  DESCRIPTOR_LODS_OFFSET + DESCRIPTOR_MAX_LODS * DESCRIPTOR_LOD_INFO_SIZE;
-export const OFFSET_COARSE_SOURCE = OFFSET_DETAIL_SOURCE + DESCRIPTOR_TIER_SOURCE_SIZE;
-
-// Per-LOD field offsets within a LodInfo entry (relative to LodInfo start)
-export const LOD_OFFSET_LEVEL = 0;                // u32
-export const LOD_OFFSET_INDIRECTION_OFFSET = 4;   // u32
-export const LOD_OFFSET_PAD0 = 8;                 // u32 (pad)
-export const LOD_OFFSET_PAD1 = 12;                // u32 (pad)
-export const LOD_OFFSET_GRID_DIMS = 16;           // vec3<u32>+pad
-export const LOD_OFFSET_CHUNK_DIMS = 32;          // vec3<u32>+pad
-export const LOD_OFFSET_LEVEL_DIMS = 48;          // vec3<u32>+pad
+export const OFFSET_LEVEL_SOURCES = DESCRIPTOR_LEVEL_SOURCES_OFFSET;
+export const OFFSET_COARSE_SOURCE =
+  DESCRIPTOR_LEVEL_SOURCES_OFFSET + DESCRIPTOR_MAX_LEVEL_SOURCES * DESCRIPTOR_TIER_SOURCE_SIZE;
 
 // Per explicit chunk-tier source field offsets within a ChunkTierSource entry.
 export const SOURCE_OFFSET_VALID = 0;              // u32
 export const SOURCE_OFFSET_LEVEL = 4;              // u32
 export const SOURCE_OFFSET_INDIRECTION_OFFSET = 8; // u32
-export const SOURCE_OFFSET_PAD0 = 12;              // u32 (pad)
+/** Which of the draw's level pool bindings (`levelTex<i>` /
+ *  `levelIndirection<i>`) this source reads. Unused by the coarse source,
+ *  which has its own binding. */
+export const SOURCE_OFFSET_POOL_INDEX = 12;        // u32
 export const SOURCE_OFFSET_GRID_DIMS = 16;         // vec3<u32>+pad
 export const SOURCE_OFFSET_CHUNK_DIMS = 32;        // vec3<u32>+pad
 export const SOURCE_OFFSET_LEVEL_DIMS = 48;        // vec3<u32>+pad
+
+/** Byte offset of level source `i` within the entry. */
+export function levelSourceOffset(i: number): number {
+  return OFFSET_LEVEL_SOURCES + i * DESCRIPTOR_TIER_SOURCE_SIZE;
+}

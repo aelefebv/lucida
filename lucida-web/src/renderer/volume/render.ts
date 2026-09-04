@@ -1,20 +1,21 @@
 /**
  * Volume render-multipass orchestration.
  *
- * Per layer: resolve member→pool→datasetId, look up descriptor + atlas,
- * compute hasDetail, resolve proxy textures, bind, draw to offscreen,
- * composite. After the loop: cursor draw.
+ * Per layer: resolve member→dataset, look up the descriptor and the
+ * pools its level sources and coarse source name, resolve proxy
+ * textures, bind, draw to offscreen, composite. After the loop: cursor
+ * draw.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
 import type { VolumeLayerParams, VolumeRenderMultiPassMessage } from "../workerProtocol.ts";
+import type { VolumePoolBinding } from "../volumeRenderer.ts";
+import { resolveMemberPools } from "../descriptorBuffer.ts";
 import {
   type AtlasState,
   type LabelVolumePool,
-  type LodIndirectionMeta,
   ensureDepthTexture,
   getDepthTexture,
-  getDummyIndirection,
 } from "./atlas.ts";
 import { serializeTransientDescriptor } from "../descriptor/transient.ts";
 import { DESCRIPTOR_ENTRY_SIZE } from "../descriptor/layout.ts";
@@ -34,9 +35,9 @@ const DEFAULT_LABEL_OPACITY = 0.5;
  * The transient categorical descriptor for a label volume pool. The buffer
  * is allocated once and rewritten in place each frame (the model matrix can
  * change on a layout epoch, so — unlike the 2D label descriptor cached by
- * opacity — it isn't cached). Single-LOD carrying the level's chunk grid so
- * the shader walks the bricked slot-grid atlas via its indirection buffer,
- * `colormapMode == 1` to select the shader's first-hit branch.
+ * opacity — it isn't cached). One level source carrying the level's chunk
+ * grid so the shader walks the slot-grid atlas via its indirection
+ * buffer, `colormapMode == 1` to select the shader's first-hit branch.
  */
 function ensureLabelVolumeDescriptor(
   ctx: WorkerCtx,
@@ -50,9 +51,7 @@ function ensureLabelVolumeDescriptor(
     modelMatrix,
     invModelMatrix,
     volumeDims: [pool.width, pool.height, pool.depth],
-    // Bricked LOD 0: chunk grid + per-brick dims map each cell of the level
-    // to its atlas slot via the indirection buffer.
-    lod: {
+    chunkGrid: {
       gridDims: [pool.gridX, pool.gridY, pool.gridZ],
       chunkDims: [pool.chunkX, pool.chunkY, pool.chunkZ],
     },
@@ -108,11 +107,11 @@ function ensureLabelVolumePalette(
  * Draw one categorical label overlay from its r32uint volume pool as a
  * first-hit colored surface over the intensity volume already composited.
  *
- * A label pool is a bricked slot-grid 3D atlas covering the label's chosen
- * level, so a single-LOD transient descriptor carrying the level's chunk grid
- * walks it via the indirection buffer. It is placed by the SOURCE member's
- * model matrix (a label overlays its source's physical extent), so a coarser
- * label still covers the same region of the view.
+ * A label pool is a slot-grid 3D atlas covering the label's chosen level,
+ * so a transient descriptor with one level source carrying the level's
+ * chunk grid walks it via the indirection buffer. It is placed by
+ * the SOURCE member's model matrix (a label overlays its source's physical
+ * extent), so a coarser label still covers the same region of the view.
  * Declared OME colors are honored via the palette buffer; the rest use the
  * glasbey hash. Composited OVER the intensity (alpha blend, not first layer).
  * Returns true when a draw was issued, false when the pool has no resident
@@ -142,11 +141,9 @@ function renderLabelVolumeLayer(
   // Categorical shading computes color from the id in-shader; the LUT is
   // bound (a valid gray ramp) but unread on this path.
   renderer.setColormapTexture(ctx.getOrCreateLUT("gray"));
-  renderer.setAtlas(
-    pool.texture,
-    pool.indirectionBuf,
-    [pool.slotsX, pool.slotsY, pool.slotsZ],
-    [pool.width, pool.height, pool.depth],
+  renderer.setTierAtlases(
+    [{ texture: pool.texture, indirectionBuf: pool.indirectionBuf, slotsX: pool.slotsX, slotsY: pool.slotsY, slotsZ: pool.slotsZ }],
+    null,
   );
   renderer.setRenderMode(0);
   renderer.setMatrices(
@@ -169,14 +166,20 @@ function renderLabelVolumeLayer(
   return true;
 }
 
+/** An atlas as the renderer binds it. */
+function poolBinding(atlas: AtlasState): VolumePoolBinding {
+  return {
+    texture: atlas.texture,
+    indirectionBuf: atlas.indirectionBuf,
+    slotsX: atlas.slotsX,
+    slotsY: atlas.slotsY,
+    slotsZ: atlas.slotsZ,
+  };
+}
+
 export function handleVolumeRenderMultiPass(
   ctx: WorkerCtx,
   msg: VolumeRenderMultiPassMessage,
-  layerToPool: (memberId: string) => {
-    detailPoolKey: string | null;
-    coarsePoolKey: string | null;
-    datasetId: string | null;
-  } | null,
 ): void {
   const canvas = ctx.context.canvas as OffscreenCanvas;
   canvas.width = msg.canvasW;
@@ -203,33 +206,17 @@ export function handleVolumeRenderMultiPass(
       continue;
     }
 
-    const resolved = layerToPool(memberId);
-    if (!resolved) continue;
-
     // Descriptor buffer covers all members for this dataset; entity
     // index is computed by the orchestrator (and threaded into the
     // layer params) — both sides converge by construction.
-    const descIndex = resolved.datasetId
-      ? ctx.lookupEntityDescriptor(resolved.datasetId)
-      : null;
+    const datasetId = ctx.state.memberToDataset.get(memberId);
+    const descIndex = datasetId ? ctx.lookupEntityDescriptor(datasetId) : null;
     if (!descIndex) continue;
     const entityIndex = layer.entityIndex;
 
-    // Detect "no detail" via descriptor-derived state: the canonical
-    // signal that this entity has no chunks in the pool. Drives the
-    // dummy chunk atlas binding + skip-render guard below.
-    const detailAtlas: AtlasState | null = resolved.detailPoolKey
-      ? atlasMap.get(resolved.detailPoolKey) ?? null
-      : null;
-    const coarseAtlas: AtlasState | null = resolved.coarsePoolKey
-      ? atlasMap.get(resolved.coarsePoolKey) ?? null
-      : null;
-    const detailMetas: LodIndirectionMeta[] | null =
-      detailAtlas?.entityMetas.get(memberId) ?? null;
-    const coarseMetas: LodIndirectionMeta[] | null =
-      coarseAtlas?.entityMetas.get(memberId) ?? null;
-    const hasDetail = detailMetas != null && detailMetas.length > 0;
-    const hasCoarse = coarseMetas != null && coarseMetas.length > 0;
+    const pools = resolveMemberPools(atlasMap, descIndex, memberId);
+    const hasDetail = pools.levels.some((atlas) => atlas !== null);
+    const hasCoarse = pools.coarse !== null;
 
     // Colormap name lives in the descriptor's CPU mirror (set by cold
     // state). Resolve it per draw to bind the right LUT texture.
@@ -237,7 +224,7 @@ export function handleVolumeRenderMultiPass(
     const lutTex = ctx.getOrCreateLUT(colormapName);
     renderer.setColormapTexture(lutTex);
 
-    for (const atlas of [detailAtlas, coarseAtlas]) {
+    for (const atlas of [...pools.levels, pools.coarse]) {
       if (atlas && atlas.indirectionDirty) {
         ctx.device.queue.writeBuffer(atlas.indirectionBuf, 0, atlas.indirectionData);
         atlas.indirectionDirty = false;
@@ -253,61 +240,34 @@ export function handleVolumeRenderMultiPass(
     let tileProxySlotResident = false;
     let groupProxyTexture: GPUTexture | null = null;
     let groupProxySlotResident = false;
-    let proxySlotDimsForVolumeFallback: [number, number, number] = [1, 1, 1];
 
     if (desc) {
       if (desc.tileProxyHandle) {
         const poolIdx = descIndex.proxyPoolIndexByKey.get(desc.tileProxyHandle.poolKey);
         if (poolIdx !== undefined) {
-          const pool = descIndex.proxyPoolsByIndex[poolIdx];
-          tileProxyTexture = pool.texture;
+          tileProxyTexture = descIndex.proxyPoolsByIndex[poolIdx].texture;
           tileProxySlotResident = true;
-          proxySlotDimsForVolumeFallback = pool.slotDims;
         }
       }
       if (desc.groupProxyHandle) {
         const poolIdx = descIndex.proxyPoolIndexByKey.get(desc.groupProxyHandle.poolKey);
         if (poolIdx !== undefined) {
-          const pool = descIndex.proxyPoolsByIndex[poolIdx];
-          groupProxyTexture = pool.texture;
+          groupProxyTexture = descIndex.proxyPoolsByIndex[poolIdx].texture;
           groupProxySlotResident = true;
-          if (!tileProxySlotResident) {
-            proxySlotDimsForVolumeFallback = pool.slotDims;
-          }
         }
       }
     }
 
-    // Skip when the layer has nothing renderable: no detail/coarse chunks
-    // AND no resident proxy. Entities with either chunk tier or a resident
-    // proxy continue rendering; the shader fallback chain handles the rest.
+    // Anything resident is enough to draw; the shader's sampling chain
+    // covers what this member lacks.
     if (!hasDetail && !hasCoarse && !tileProxySlotResident && !groupProxySlotResident) {
       continue;
     }
 
     renderer.setProxyTextures(tileProxyTexture, groupProxyTexture);
-
-    const dimsMeta = detailMetas?.[0] ?? coarseMetas?.[0] ?? null;
-    const volumeDims: [number, number, number] = dimsMeta
-      ? [dimsMeta.levelDims[2], dimsMeta.levelDims[1], dimsMeta.levelDims[0]]
-      : [
-          proxySlotDimsForVolumeFallback[2],
-          proxySlotDimsForVolumeFallback[1],
-          proxySlotDimsForVolumeFallback[0],
-        ];
-    const fallbackTexture = detailAtlas?.texture ?? coarseAtlas?.texture ?? ctx.getDummy3DTexture();
-    const fallbackIndirection =
-      detailAtlas?.indirectionBuf ??
-      coarseAtlas?.indirectionBuf ??
-      getDummyIndirection(ctx.device);
     renderer.setTierAtlases(
-      hasDetail && detailAtlas ? detailAtlas.texture : fallbackTexture,
-      hasDetail && detailAtlas ? detailAtlas.indirectionBuf : fallbackIndirection,
-      hasDetail && detailAtlas ? [detailAtlas.slotsX, detailAtlas.slotsY, detailAtlas.slotsZ] : [0, 0, 0],
-      hasCoarse && coarseAtlas ? coarseAtlas.texture : null,
-      hasCoarse && coarseAtlas ? coarseAtlas.indirectionBuf : null,
-      hasCoarse && coarseAtlas ? [coarseAtlas.slotsX, coarseAtlas.slotsY, coarseAtlas.slotsZ] : [0, 0, 0],
-      volumeDims,
+      pools.levels.map((atlas) => (atlas ? poolBinding(atlas) : null)),
+      pools.coarse ? poolBinding(pools.coarse) : null,
     );
 
     renderer.setRenderMode(layer.renderMode === "max_intensity" ? 1 : 0);

@@ -1,6 +1,6 @@
 /**
  * Slice atlas state — pool allocation, indirection sizing, per-entity
- * Z metadata, stale-on-Z-change tracking, dummy indirection buffer.
+ * Z metadata, stale-on-Z-change tracking.
  *
  * Mutates the per-dataset registry on `ctx.state.sliceAtlases`. Composed
  * cleanups (`removeSliceResources`, `destroyAllSliceResources`) live in
@@ -196,29 +196,19 @@ export interface SliceAtlasState {
   slotsX: number; slotsY: number;
   /** Per-entity LOD sections (absolute offsets into the shared flat indirection buffer). */
   entityMetas: Map<string, LodIndirectionMeta[]>;
-  /** Per-entity Z info (chunkZ, fullResDepth, levelDepth) — set from first chunk arrival per entity. */
-  entityZInfo: Map<string, SliceEntityZInfo>;
+  /**
+   * memberId → level → Z geometry, set from the first chunk that arrives
+   * at that level. Per level, not per member: the levels sharing a pool
+   * can differ in depth and chunk Z, so each maps the current plane to
+   * its own chunk-Z target.
+   */
+  entityZInfo: Map<string, Map<number, SliceEntityZInfo>>;
   /** Current T, C, full-res Z — pool-wide. */
   z: number; t: number; c: number;
   /** Composite keys with stale 2D slice data after a Z change. */
   staleSliceKeys: Set<string> | null;
   intensityMin: number; intensityMax: number;
   indirectionDirty: boolean;
-}
-
-// Shared dummy 2D indirection buffer for group-as-proxy slice layers.
-// Stays at module scope: it's a per-device singleton, not per-session
-// state.
-let dummySliceIndirectionBuf: GPUBuffer | null = null;
-export function getDummySliceIndirection(device: GPUDevice): GPUBuffer {
-  if (!dummySliceIndirectionBuf) {
-    dummySliceIndirectionBuf = device.createBuffer({
-      size: 4,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    device.queue.writeBuffer(dummySliceIndirectionBuf, 0, new Uint32Array([0xFFFFFFFF]));
-  }
-  return dummySliceIndirectionBuf;
 }
 
 /** Create a shared slice pool. Indirection sized later from entityMetas. */
@@ -327,14 +317,12 @@ export function removeSliceAtlas(ctx: WorkerCtx, idOrMember: string): void {
 }
 
 /**
- * Destroy all slice atlases + the dummy indirection buffer. Composed
- * cleanup that also clears per-entity camera-UV state lives in
- * `slice/index.ts` as `destroyAllSliceResources`.
+ * Destroy all slice atlases. Composed cleanup that also clears
+ * per-entity camera-UV state lives in `slice/index.ts` as
+ * `destroyAllSliceResources`.
  */
 export function destroyAllSliceAtlasResources(ctx: WorkerCtx): void {
   const atlases = ctx.state.sliceAtlases;
   for (const atlas of atlases.values()) destroySliceAtlas(atlas);
   atlases.clear();
-  dummySliceIndirectionBuf?.destroy();
-  dummySliceIndirectionBuf = null;
 }

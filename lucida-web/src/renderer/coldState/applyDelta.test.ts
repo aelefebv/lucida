@@ -54,8 +54,6 @@ function makeCtx(): WorkerCtx {
     getCompositor: () => ({} as never),
     getCursorRenderer: () => ({} as never),
     ensureOffscreenPool: () => [],
-    getDummyTexture: () => ({} as GPUTexture),
-    getDummy3DTexture: () => ({} as GPUTexture),
     getOrCreateLUT: () => ({} as GPUTexture),
     post: () => {},
     postWantedSet: () => {},
@@ -169,8 +167,8 @@ describe("applyColdStateDelta", () => {
     // ghost tile. (Its pool routing is dropped and it never enters the rebuilt
     // descriptor buffer, exactly as a full rebuild on this worker would do.)
     expect(descDelta.indexByMember.has("img-b")).toBe(false);
-    expect(ctxDelta.state.memberToPool.has("img-b")).toBe(false);
-    expect(ctxDelta.state.currentEntityMetasByDataset.get("ds1")!.has("img-b")).toBe(false);
+    expect(ctxDelta.state.memberSourcePools.has("img-b")).toBe(false);
+    expect(ctxDelta.state.currentSourcesByDataset.get("ds1")!.has("img-b")).toBe(false);
     expect(descDelta.indexByMember.has("img-c")).toBe(true);
 
     // The delta re-pointed the retained cold state at the new view.
