@@ -110,9 +110,15 @@ export function handleSliceChunkData(
     return;
   }
 
-  // Store per-entity Z metadata on first arrival
-  if (!atlas.entityZInfo.has(memberId)) {
-    atlas.entityZInfo.set(memberId, { chunkZ, fullResDepth, levelDepth });
+  // Record this level's Z geometry on first arrival so the remap can
+  // retarget its chunks on a Z scrub.
+  let zInfoByLevel = atlas.entityZInfo.get(memberId);
+  if (!zInfoByLevel) {
+    zInfoByLevel = new Map();
+    atlas.entityZInfo.set(memberId, zInfoByLevel);
+  }
+  if (!zInfoByLevel.has(level)) {
+    zInfoByLevel.set(level, { chunkZ, fullResDepth, levelDepth });
   }
 
   const levelZ = Math.min(

@@ -14,7 +14,6 @@ export {
   destroyAllSliceAtlasResources,
   destroyAllLabelSlicePools,
   destroySliceAtlas,
-  getDummySliceIndirection,
   getOrCreateSlicePool,
   getOrCreateLabelSlicePool,
   removeLabelSlicePool,
@@ -66,7 +65,7 @@ export function removeSliceResources(ctx: WorkerCtx, idOrMember: string): void {
   clearCameraUVForMember(ctx.state, idOrMember);
 }
 
-/** Tear down every slice pool, the dummy indirection buffer, and all camera-UV state. */
+/** Tear down every slice pool and all camera-UV state. */
 export function destroyAllSliceResources(ctx: WorkerCtx): void {
   destroyAllSliceAtlasResources(ctx);
   destroyAllLabelSlicePools(ctx);

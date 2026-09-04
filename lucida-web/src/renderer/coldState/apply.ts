@@ -2,18 +2,19 @@
  * Cold-state ingestion orchestrator.
  *
  * Reads + writes per-worker registries via `ctx.state.*`:
- *   - `memberToDataset` / `memberToPool` — routing registries used by
- *     chunk + render handlers to look up which dataset / pool a
- *     memberId belongs to.
+ *   - `memberToDataset` / `memberSourcePools` — routing registries used
+ *     by chunk + render handlers to look up which dataset a memberId
+ *     belongs to and which pool each of its (tier, level) sections lives
+ *     in.
  *   - `groupToTiles` — group → child-tile set, used so a `GroupProxy3D`
  *     upload can fan out to its child tiles' descriptors.
  *   - `groupsByDataset` — dataset → groups currently referenced in
  *     groupToTiles; tracked so `removeLayerResources` can drop a
  *     dataset's entries without scanning every group.
- *   - `currentEntityMetasByDataset` — per-dataset entity-metas snapshot
- *     for the most recent cold state. The descriptor buffer build pulls
- *     from this so it doesn't pick up stale offsets from pools that
- *     belonged to earlier cold states with different levels.
+ *   - `currentSourcesByDataset` — per-dataset sections snapshot for the
+ *     most recent cold state. The descriptor buffer build pulls from
+ *     this so it doesn't pick up stale offsets from pools that belonged
+ *     to earlier cold states with different levels.
  *   - `descriptorBuffersByDataset` — per-dataset descriptor buffer
  *     (rebuilt fresh each cold state).
  *
@@ -29,6 +30,7 @@ import {
   destroyDescriptorBuffer,
   iterateColdMembers,
 } from "../descriptorBuffer.ts";
+import type { EntitySource } from "../entitySources.ts";
 import {
   getOrCreateVolumePool,
   resizeIndirection,
@@ -43,13 +45,14 @@ import {
 import { reconcileProxyResidency } from "../proxy/residency.ts";
 import { groupEntriesByPool } from "./groupEntries.ts";
 import { computeEntityTierMeta } from "./entityMetas.ts";
-import { memberTierKey } from "../poolKeys.ts";
+import { sourceKey } from "../poolKeys.ts";
 
 /**
  * Apply a cold-state message: refresh group→tiles, register
  * member→dataset mappings, build pool groups, allocate atlases, compute
- * + write entityMetas, resize + remap indirection, capture per-dataset
- * entity-metas snapshot, rebuild the descriptor buffer.
+ * + write one indirection section per (member, tier, level), resize +
+ * remap indirection, capture the per-dataset sections snapshot, rebuild
+ * the descriptor buffer.
  *
  * Caller is responsible for posting the wanted-set after this returns
  * (kept outside so this function has a single concern).
@@ -92,9 +95,7 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
 
   for (const [memberId, datasetId] of state.memberToDataset) {
     if (datasetId !== msg.datasetId) continue;
-    state.memberToPool.delete(memberId);
-    state.memberTierToPool.delete(memberTierKey(memberId, "detail"));
-    state.memberTierToPool.delete(memberTierKey(memberId, "coarse"));
+    state.memberSourcePools.delete(memberId);
   }
 
   // 2. Register member→dataset mappings for every (entry, channel)
@@ -113,14 +114,13 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
   const dimArity: 2 | 3 = mode === "volume" ? 3 : 2;
   const groups = groupEntriesByPool(msg, mode);
 
-  // Capture the entityMetas this cold state actually produces (across
+  // Capture the sections this cold state actually produces (across
   // pools), so the descriptor build sees only the offsets/dims of the
   // pool(s) this cold state populated.
-  const currentEntityMetas = new Map<string, LodIndirectionMeta[]>();
+  const currentSources = new Map<string, EntitySource[]>();
 
-  // 4. For each group: register memberToPool, alloc pool, compute
-  // entityMetas with sequential offsets within the group, resize +
-  // remap the pool's indirection buffer.
+  // 4. Per group: allocate the pool, lay out one section per (member,
+  // level) at sequential offsets, resize + remap its indirection.
   for (const group of groups.values()) {
     const [pcZ, pcY, pcX] = group.chunkDims;
     const newEntityMetas = new Map<string, LodIndirectionMeta[]>();
@@ -139,8 +139,6 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
         layoutPositionVox: entry.layoutPositionVox,
         levels: entry.levels,
       });
-      state.memberTierToPool.set(memberTierKey(memberId, tier), group.poolKey);
-      if (tier === "detail") state.memberToPool.set(memberId, group.poolKey);
       const { meta, nextOffset } = computeEntityTierMeta(
         entry,
         level,
@@ -149,9 +147,19 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
         dimArity,
       );
       if (meta) {
-        newEntityMetas.set(memberId, [meta]);
-        const existing = currentEntityMetas.get(memberId) ?? [];
-        currentEntityMetas.set(memberId, [...existing, meta]);
+        let pools = state.memberSourcePools.get(memberId);
+        if (!pools) {
+          pools = new Map();
+          state.memberSourcePools.set(memberId, pools);
+        }
+        pools.set(sourceKey(tier, level), group.poolKey);
+        const metas = newEntityMetas.get(memberId);
+        if (metas) metas.push(meta);
+        else newEntityMetas.set(memberId, [meta]);
+        const sources = currentSources.get(memberId);
+        const source: EntitySource = { tier, poolKey: group.poolKey, meta };
+        if (sources) sources.push(source);
+        else currentSources.set(memberId, [source]);
       }
       offset = nextOffset;
     }
@@ -179,17 +187,13 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
         entryByMember,
       });
     }
-
-    // `currentEntityMetas` was populated above so one member can carry both
-    // detail and coarse source metadata from different tier pools.
   }
 
-  // 5. Capture per-dataset entity-metas snapshot.
-  state.currentEntityMetasByDataset.set(msg.datasetId, currentEntityMetas);
+  state.currentSourcesByDataset.set(msg.datasetId, currentSources);
 
-  // 6. Rebuild per-dataset descriptor buffer. Replaces any previous
+  // 5. Rebuild per-dataset descriptor buffer. Replaces any previous
   // buffer for the same dataset (proxy pool index churn is acceptable —
-  // descriptors are rebuilt fresh each cold state, same as entityMetas).
+  // descriptors are rebuilt fresh each cold state, same as the sections).
   const oldDesc = state.descriptorBuffersByDataset.get(msg.datasetId);
   if (oldDesc) destroyDescriptorBuffer(oldDesc);
   state.descriptorBuffersByDataset.set(
@@ -199,7 +203,7 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
       msg,
       state.proxyDescriptorsByEntity,
       state.proxyPoolsByDataset,
-      currentEntityMetas,
+      currentSources,
     ),
   );
 }

@@ -8,9 +8,9 @@
  * instances that outlive any single session but stay tied to one
  * {@link WorkerCtx}, which is also recreated only on `init`.
  *
- * Cached worker-process GPU resources (LUT cache, offscreen pool, dummy
- * textures) live in `worker/resources.ts` as module-level state; this
- * module wires the ctx accessors to those resource helpers.
+ * Cached worker-process GPU resources (LUT cache, offscreen pool) live in
+ * `worker/resources.ts` as module-level state; this module wires the ctx
+ * accessors to those resource helpers.
  *
  * The `post` callback is supplied by the caller (the entry-point worker
  * file) so this module doesn't reach into `self.postMessage`.
@@ -29,13 +29,9 @@ import {
   destroyDescriptorBuffer,
 } from "../descriptorBuffer.ts";
 import { createInitialState } from "./state.ts";
-import {
-  ensureOffscreenPool,
-  getDummy3DTexture,
-  getDummyTexture,
-  getOrCreateLUT,
-} from "./resources.ts";
+import { ensureOffscreenPool, getOrCreateLUT } from "./resources.ts";
 import { proxyDescriptorKey } from "../workerContext.ts";
+import { sourceKey } from "../poolKeys.ts";
 
 /**
  * Bootstrap the worker: init the GPU, create a fresh {@link RendererState},
@@ -80,7 +76,8 @@ export async function bootstrapWorker(
       state.currentColdState,
       state.volumeAtlases,
       state.sliceAtlases,
-      state.memberTierToPool,
+      (memberId, tier, level) =>
+        state.memberSourcePools.get(memberId)?.get(sourceKey(tier, level)),
       proxySnap,
     );
     post({
@@ -113,8 +110,6 @@ export async function bootstrapWorker(
       return cursorRenderer;
     },
     ensureOffscreenPool: (count, w, h) => ensureOffscreenPool(device, count, w, h),
-    getDummyTexture: () => getDummyTexture(device),
-    getDummy3DTexture: () => getDummy3DTexture(device),
     getOrCreateLUT: (name) => getOrCreateLUT(device, name),
     post,
     postWantedSet,
@@ -156,7 +151,7 @@ export function rebuildDescriptorIfMatching(ctx: WorkerCtx, datasetId: string): 
       state.currentColdState,
       state.proxyDescriptorsByEntity,
       state.proxyPoolsByDataset,
-      state.currentEntityMetasByDataset.get(datasetId) ?? new Map(),
+      state.currentSourcesByDataset.get(datasetId) ?? new Map(),
     ),
   );
 }

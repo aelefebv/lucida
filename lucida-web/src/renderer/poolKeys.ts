@@ -61,6 +61,10 @@ export function chunkTierPoolKey(
   return `${base}:${tier}`;
 }
 
-export function memberTierKey(memberId: string, tier: ResidencyTier): string {
-  return `${memberId}|${tier}`;
+/**
+ * Key of one indirection section within a member's routing map
+ * (`RendererState.memberSourcePools`): the tier and level it serves.
+ */
+export function sourceKey(tier: ResidencyTier, level: number): string {
+  return `${tier}:${level}`;
 }

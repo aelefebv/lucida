@@ -1,9 +1,10 @@
 /**
  * Per-dataset entity descriptor buffer.
  *
- * Holds the geometric/LOD/proxy/display fields the shader reads per
- * sample: model matrix + inverse, per-LOD chunk/grid/level dims with
- * indirection offsets, proxy handles (pool index + slot index), proxy
+ * Holds the geometric/level/proxy/display fields the shader reads per
+ * sample: model matrix + inverse, up to four level sources (chunk/grid/
+ * level dims, indirection offset, and the level pool binding each reads)
+ * plus the coarse source, proxy handles (pool index + slot index), proxy
  * slot dims, and per-channel display state (contrast/gamma/opacity/
  * colormapLutIndex/channelMask).
  *
@@ -34,18 +35,15 @@ import {
 import type { ProxyAtlasState } from "./proxyAtlas.ts";
 import type { LodIndirectionMeta } from "./volume/atlas.ts";
 import {
+  selectEntitySources,
+  type EntitySource,
+  type EntitySourceSelection,
+} from "./entitySources.ts";
+import {
   DESCRIPTOR_ENTRY_SIZE,
-  DESCRIPTOR_LOD_INFO_SIZE,
-  DESCRIPTOR_LODS_OFFSET,
-  DESCRIPTOR_MAX_LODS,
+  DESCRIPTOR_MAX_LEVEL_SOURCES,
   DESCRIPTOR_SENTINEL_INDEX,
-  LOD_OFFSET_CHUNK_DIMS,
-  LOD_OFFSET_GRID_DIMS,
-  LOD_OFFSET_INDIRECTION_OFFSET,
-  LOD_OFFSET_LEVEL,
-  LOD_OFFSET_LEVEL_DIMS,
-  LOD_OFFSET_PAD0,
-  LOD_OFFSET_PAD1,
+  DESCRIPTOR_TIER_SOURCE_SIZE,
   OFFSET_CHANNEL_MASK,
   OFFSET_COLORMAP_LUT_INDEX,
   OFFSET_CONTRAST_MAX,
@@ -56,10 +54,9 @@ import {
   OFFSET_GAMMA,
   OFFSET_INV_MODEL_MATRIX,
   OFFSET_LABEL_OPACITY,
-  OFFSET_LOD_COUNT,
+  OFFSET_LEVEL_SOURCE_COUNT,
   OFFSET_COARSE_SOURCE,
   OFFSET_COLORMAP_MODE,
-  OFFSET_DETAIL_SOURCE,
   OFFSET_MODEL_MATRIX,
   OFFSET_OPACITY,
   OFFSET_PAD_PROXY0,
@@ -73,19 +70,20 @@ import {
   SOURCE_OFFSET_INDIRECTION_OFFSET,
   SOURCE_OFFSET_LEVEL,
   SOURCE_OFFSET_LEVEL_DIMS,
-  SOURCE_OFFSET_PAD0,
+  SOURCE_OFFSET_POOL_INDEX,
   SOURCE_OFFSET_VALID,
+  levelSourceOffset,
 } from "./descriptor/layout.ts";
 
-// Re-export size/sentinel constants so existing consumers don't break.
-// New code should import these from `./descriptor/layout.ts` directly.
-export {
-  DESCRIPTOR_ENTRY_SIZE,
-  DESCRIPTOR_LOD_INFO_SIZE,
-  DESCRIPTOR_LODS_OFFSET,
-  DESCRIPTOR_MAX_LODS,
-  DESCRIPTOR_SENTINEL_INDEX,
-} from "./descriptor/layout.ts";
+/**
+ * The pools a draw for one member binds: one level pool per binding slot
+ * (index = the `poolIndex` its level sources carry) and the coarse pool.
+ * The CPU mirror of what the member's descriptor entry names.
+ */
+export interface MemberSourceBinding {
+  levelPoolKeys: string[];
+  coarsePoolKey: string | null;
+}
 
 export interface EntityDescriptorIndex {
   buffer: GPUBuffer;
@@ -98,6 +96,8 @@ export interface EntityDescriptorIndex {
    * the quad record carries. 1:1 with `indexByMember` by construction.
    */
   memberByIndex: string[];
+  /** memberId → the level and coarse pools its descriptor entry samples. */
+  sourceBindingByMember: Map<string, MemberSourceBinding>;
   /** poolKey → dense pool index (matches GPU descriptor's *PoolIndex fields). */
   proxyPoolIndexByKey: Map<string, number>;
   /** Dense pool array indexed by proxy pool index, used by render handlers
@@ -190,15 +190,19 @@ export function computeMemberIndexMap(
  * `cold.activeSet × cold.visibleChannels` in canonical iteration order.
  * Proxy pool indices and colormap LUT indices are assigned dense from
  * the set of poolKeys / colormap names referenced by the active entries.
+ * `sourcesByMember` holds the indirection sections the worker allocated
+ * for each member in this cold state; {@link selectEntitySources} picks
+ * the level sources and the coarse source from them.
  */
 export function buildDescriptorBuffer(
   device: GPUDevice,
   cold: ColdStateMessage,
   proxyDescriptorsByEntity: Map<string, EntityProxyDescriptor>,
   proxyPoolsByDataset: Map<string, Map<string, ProxyAtlasState>>,
-  entityMetasByMember: Map<string, LodIndirectionMeta[]>,
+  sourcesByMember: Map<string, EntitySource[]>,
 ): EntityDescriptorIndex {
   const indexByMember = new Map<string, number>();
+  const sourceBindingByMember = new Map<string, MemberSourceBinding>();
   const proxyPoolIndexByKey = new Map<string, number>();
   const proxyPoolsByIndex: ProxyAtlasState[] = [];
   const colormapLutIndices = new Map<string, number>();
@@ -254,11 +258,16 @@ export function buildDescriptorBuffer(
     if (written.has(memberId)) continue;
     written.add(memberId);
     const eIdx = indexByMember.get(memberId)!;
+    const selection = selectEntitySources(entry, sourcesByMember.get(memberId) ?? []);
+    sourceBindingByMember.set(memberId, {
+      levelPoolKeys: selection.levelPoolKeys,
+      coarsePoolKey: selection.coarse?.poolKey ?? null,
+    });
     serializeEntityDescriptor(
       cpuBuffer,
       eIdx * DESCRIPTOR_ENTRY_SIZE,
       entry,
-      entityMetasByMember.get(memberId) ?? [],
+      selection,
       displayStateForChannel(entry, channel),
       proxyDescriptorsByEntity,
       proxyPoolIndexByKey,
@@ -278,6 +287,7 @@ export function buildDescriptorBuffer(
     buffer,
     indexByMember,
     memberByIndex,
+    sourceBindingByMember,
     proxyPoolIndexByKey,
     proxyPoolsByIndex,
     entityCount,
@@ -287,10 +297,47 @@ export function buildDescriptorBuffer(
   };
 }
 
+/** A member's pools resolved against current residency, ready to bind. */
+export interface ResolvedMemberPools<A> {
+  /** Level pools in binding-slot order; a slot is `null` when its pool holds no section for the member. */
+  levels: Array<A | null>;
+  /** The pool key behind each slot of {@link levels}. */
+  levelPoolKeys: string[];
+  coarse: A | null;
+  coarsePoolKey: string | null;
+}
+
+/**
+ * Resolve the pools a member's descriptor entry samples against the
+ * atlases the worker holds right now. A pool that exists but holds no
+ * section for the member resolves to `null`, so the draw binds a dummy
+ * there and the shader reads a miss.
+ */
+export function resolveMemberPools<A extends { entityMetas: Map<string, unknown[]> }>(
+  atlasMap: Map<string, A>,
+  descIndex: EntityDescriptorIndex,
+  memberId: string,
+): ResolvedMemberPools<A> {
+  const binding = descIndex.sourceBindingByMember.get(memberId);
+  const resident = (key: string | null): A | null => {
+    const atlas = key ? atlasMap.get(key) ?? null : null;
+    return atlas && (atlas.entityMetas.get(memberId)?.length ?? 0) > 0 ? atlas : null;
+  };
+  const levelPoolKeys = binding?.levelPoolKeys ?? [];
+  const coarsePoolKey = binding?.coarsePoolKey ?? null;
+  return {
+    levels: levelPoolKeys.map(resident),
+    levelPoolKeys,
+    coarse: resident(coarsePoolKey),
+    coarsePoolKey,
+  };
+}
+
 export function destroyDescriptorBuffer(idx: EntityDescriptorIndex): void {
   idx.buffer.destroy();
   idx.indexByMember.clear();
   idx.memberByIndex.length = 0;
+  idx.sourceBindingByMember.clear();
   idx.proxyPoolIndexByKey.clear();
   idx.proxyPoolsByIndex.length = 0;
   idx.colormapLutIndices.clear();
@@ -327,6 +374,11 @@ export function displayStateForChannel(
  * Serialize one EntityDescriptor into `target` at byte offset `offset`.
  * Exposed for tests so they can verify the byte layout without a GPU.
  *
+ * `selection` is what {@link selectEntitySources} chose for the entry:
+ * the level sources are written finest first into `levelSources[0..n)`
+ * with their pool binding slots, the remaining slots are zeroed, and the
+ * coarse section lands in `coarseSource`.
+ *
  * Display state (`channelMask`, `contrastMin/Max`, `gamma`, `opacity`,
  * `colormapLutIndex`) is sourced from a per-channel `displayState`
  * lookup against `entry.displayStateByChannel`. The orchestrator
@@ -336,7 +388,7 @@ export function serializeEntityDescriptor(
   target: ArrayBuffer,
   offset: number,
   entry: ColdStateActiveEntry,
-  lodMetas: LodIndirectionMeta[],
+  selection: EntitySourceSelection,
   displayState: ColdStateDisplayState,
   proxyDescriptorsByEntity: Map<string, EntityProxyDescriptor>,
   proxyPoolIndexByKey: Map<string, number>,
@@ -403,88 +455,38 @@ export function serializeEntityDescriptor(
   f32[OFFSET_OPACITY / 4]      = displayState.opacity;
   u32[OFFSET_COLORMAP_LUT_INDEX / 4] = lutIdx >>> 0;
 
-  // LODs and indirectionOffsets come from worker-built entityMetas — same
-  // source the pool's shared indirection buffer was sized from. Computing
-  // a per-entity local offset here would point every entity at entity 0's
-  // range in the shared buffer, so all fields would render the same data.
-  const lodCount = Math.min(lodMetas.length, DESCRIPTOR_MAX_LODS);
-  u32[OFFSET_LOD_COUNT / 4] = lodCount;
   // Categorical label overlays repurpose these two tail slots: a mode flag
   // and the overlay opacity. Intensity images leave them at 0 / 1.
   u32[OFFSET_COLORMAP_MODE / 4] = (displayState.colormapMode ?? 0) >>> 0;
   f32[OFFSET_LABEL_OPACITY / 4] = displayState.labelOpacity ?? 1;
 
-  const lodsBaseU32 = DESCRIPTOR_LODS_OFFSET / 4;
-  const lodStrideU32 = DESCRIPTOR_LOD_INFO_SIZE / 4;
-  for (let i = 0; i < DESCRIPTOR_MAX_LODS; i++) {
-    const slotBase = lodsBaseU32 + i * lodStrideU32;
-    if (i < lodCount) {
-      const m = lodMetas[i];
-      const [gZ, gY, gX] = m.gridDims;
-      const [cZ, cY, cX] = m.chunkDims;
-      const [lZ, lY, lX] = m.levelDims;
-      u32[slotBase + LOD_OFFSET_LEVEL / 4]              = m.level;
-      u32[slotBase + LOD_OFFSET_INDIRECTION_OFFSET / 4] = m.offset;
-      u32[slotBase + LOD_OFFSET_PAD0 / 4]               = 0;
-      u32[slotBase + LOD_OFFSET_PAD1 / 4]               = 0;
-      const gridBase = slotBase + LOD_OFFSET_GRID_DIMS / 4;
-      u32[gridBase + 0] = gX;
-      u32[gridBase + 1] = gY;
-      u32[gridBase + 2] = gZ;
-      u32[gridBase + 3] = 0;
-      const chunkBase = slotBase + LOD_OFFSET_CHUNK_DIMS / 4;
-      u32[chunkBase + 0] = cX;
-      u32[chunkBase + 1] = cY;
-      u32[chunkBase + 2] = cZ;
-      u32[chunkBase + 3] = 0;
-      const levelBase = slotBase + LOD_OFFSET_LEVEL_DIMS / 4;
-      u32[levelBase + 0] = lX;
-      u32[levelBase + 1] = lY;
-      u32[levelBase + 2] = lZ;
-      u32[levelBase + 3] = 0;
-    } else {
-      for (let s = 0; s < lodStrideU32; s++) {
-        u32[slotBase + s] = 0;
-      }
-    }
+  // Offsets come from the worker-built sections, the same source the
+  // pool's shared indirection buffer was sized from. A per-entity local
+  // offset computed here would point every entity at entity 0's range in
+  // the shared buffer, so all members would render the same data.
+  const levelCount = Math.min(selection.levels.length, DESCRIPTOR_MAX_LEVEL_SOURCES);
+  u32[OFFSET_LEVEL_SOURCE_COUNT / 4] = levelCount;
+  for (let i = 0; i < DESCRIPTOR_MAX_LEVEL_SOURCES; i++) {
+    const levelSource = i < levelCount ? selection.levels[i] : undefined;
+    writeChunkTierSource(
+      u32,
+      levelSourceOffset(i),
+      levelSource?.source.meta,
+      levelSource?.poolIndex ?? 0,
+    );
   }
-
-  // The descriptor has one source slot per tier, so the detail slot binds
-  // the finest detail level.
-  const detailLevel = entry.kind === "tile" ? entry.detailLevels[0] : undefined;
-  const coarseLevel = entry.kind === "tile" ? entry.coarseLevel : null;
-  const detailMeta = detailLevel !== undefined
-    ? findLodMeta(lodMetas, detailLevel)
-    : undefined;
-  const coarseMeta = coarseLevel !== null
-    ? findLodMeta(lodMetas, coarseLevel, "last")
-    : undefined;
-  writeChunkTierSource(u32, OFFSET_DETAIL_SOURCE, detailMeta);
-  writeChunkTierSource(u32, OFFSET_COARSE_SOURCE, coarseMeta);
-}
-
-function findLodMeta(
-  lodMetas: LodIndirectionMeta[],
-  level: number,
-  preference: "first" | "last" = "first",
-): LodIndirectionMeta | undefined {
-  if (preference === "first") {
-    return lodMetas.find((m) => m.level === level);
-  }
-  for (let i = lodMetas.length - 1; i >= 0; i--) {
-    if (lodMetas[i].level === level) return lodMetas[i];
-  }
-  return undefined;
+  writeChunkTierSource(u32, OFFSET_COARSE_SOURCE, selection.coarse?.meta, 0);
 }
 
 function writeChunkTierSource(
   u32: Uint32Array,
   offsetBytes: number,
   meta: LodIndirectionMeta | undefined,
+  poolIndex: number,
 ): void {
   const base = offsetBytes / 4;
   if (!meta) {
-    for (let i = 0; i < 16; i++) u32[base + i] = 0;
+    for (let i = 0; i < DESCRIPTOR_TIER_SOURCE_SIZE / 4; i++) u32[base + i] = 0;
     return;
   }
 
@@ -495,7 +497,7 @@ function writeChunkTierSource(
   u32[base + SOURCE_OFFSET_VALID / 4] = 1;
   u32[base + SOURCE_OFFSET_LEVEL / 4] = meta.level;
   u32[base + SOURCE_OFFSET_INDIRECTION_OFFSET / 4] = meta.offset;
-  u32[base + SOURCE_OFFSET_PAD0 / 4] = 0;
+  u32[base + SOURCE_OFFSET_POOL_INDEX / 4] = poolIndex >>> 0;
 
   const gridBase = base + SOURCE_OFFSET_GRID_DIMS / 4;
   u32[gridBase + 0] = gX;

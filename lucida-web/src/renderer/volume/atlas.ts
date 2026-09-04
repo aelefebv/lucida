@@ -1,6 +1,6 @@
 /**
  * Volume atlas state — pool allocation, indirection sizing, depth
- * texture, dummy indirection buffer.
+ * texture.
  *
  * Mutates the per-dataset registry on `ctx.state.volumeAtlases`. Composed
  * cleanups (`removeVolumeResources`, `destroyAllVolumeResources`) live in
@@ -506,20 +506,6 @@ let depthTexture: GPUTexture | null = null;
 let depthW = 0;
 let depthH = 0;
 
-// Shared dummy indirection buffer for `group-as-proxy` chunk bindings.
-// Same reasoning as `depthTexture`: not per-session state.
-let dummyIndirectionBuf: GPUBuffer | null = null;
-export function getDummyIndirection(device: GPUDevice): GPUBuffer {
-  if (!dummyIndirectionBuf) {
-    dummyIndirectionBuf = device.createBuffer({
-      size: 4,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    device.queue.writeBuffer(dummyIndirectionBuf, 0, new Uint32Array([0xFFFFFFFF]));
-  }
-  return dummyIndirectionBuf;
-}
-
 export function ensureDepthTexture(device: GPUDevice, w: number, h: number): GPUTexture {
   if (depthTexture && depthW === w && depthH === h) return depthTexture;
   depthTexture?.destroy();
@@ -647,9 +633,9 @@ export function removeVolumeAtlas(ctx: WorkerCtx, idOrMember: string): void {
 }
 
 /**
- * Destroy all atlas pools + the depth texture + the dummy indirection
- * buffer. Composed cleanup that also clears per-entity ray-pick state
- * lives in `volume/index.ts` as `destroyAllVolumeResources`.
+ * Destroy all atlas pools + the depth texture. Composed cleanup that
+ * also clears per-entity ray-pick state lives in `volume/index.ts` as
+ * `destroyAllVolumeResources`.
  */
 export function destroyAllVolumeAtlasResources(ctx: WorkerCtx): void {
   const atlases = ctx.state.volumeAtlases;
@@ -657,6 +643,4 @@ export function destroyAllVolumeAtlasResources(ctx: WorkerCtx): void {
   atlases.clear();
   depthTexture?.destroy();
   depthTexture = null;
-  dummyIndirectionBuf?.destroy();
-  dummyIndirectionBuf = null;
 }

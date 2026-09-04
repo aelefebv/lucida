@@ -16,7 +16,6 @@ export {
   destroyAtlas,
   ensureDepthTexture,
   getDepthTexture,
-  getDummyIndirection,
   getOrCreateLabelVolumePool,
   getOrCreateVolumePool,
   removeLabelVolumePool,
@@ -66,7 +65,7 @@ export function removeVolumeResources(ctx: WorkerCtx, idOrMember: string): void 
   clearRayHitForMember(ctx.state, idOrMember);
 }
 
-/** Tear down every volume pool, the label volume pools, the depth texture, the dummy indirection buffer, and all ray-pick state. */
+/** Tear down every volume pool, the label volume pools, the depth texture, and all ray-pick state. */
 export function destroyAllVolumeResources(ctx: WorkerCtx): void {
   destroyAllVolumeAtlasResources(ctx);
   destroyAllLabelVolumePools(ctx);

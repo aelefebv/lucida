@@ -134,6 +134,15 @@ coarse tier outside the count. See
 _Avoid_: level stack, mip chain, fallback levels, cached levels (the CPU cache is
 a different population)
 
+**Level source**:
+One slot of an entity's renderer descriptor naming a resident level the shader
+may sample: the level, its indirection section, and the level pool binding it
+reads. An entity carries at most four, finest first, beside one coarse source
+for the coarse tier. The bound on level sources is the bound on resident
+levels. See
+[ADR 0061](wiki/decisions/0061-screen-chosen-target-level-with-resident-coarser-levels.md).
+_Avoid_: LOD slot, detail source (one of several, not one detail tier), lod
+
 **Lane**:
 Which concurrent stream of work a unit belongs to. The planner emits `detail`,
 `coarse`, `prefetch`, and `minimap`. `overview` is historical: the coarsest-pass

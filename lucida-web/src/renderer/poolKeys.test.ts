@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { chunkPoolKey, chunkTierPoolKey, memberTierKey, proxyPoolKey } from "./poolKeys.ts";
+import { chunkPoolKey, chunkTierPoolKey, proxyPoolKey, sourceKey } from "./poolKeys.ts";
 
 describe("chunkPoolKey", () => {
   it("single-channel 3D volume", () => {
@@ -67,10 +67,12 @@ describe("chunkTierPoolKey", () => {
   });
 });
 
-describe("memberTierKey", () => {
-  it("separates detail and coarse routing for one member", () => {
-    expect(memberTierKey("img-0:ch2", "detail")).toBe("img-0:ch2|detail");
-    expect(memberTierKey("img-0:ch2", "coarse")).toBe("img-0:ch2|coarse");
+describe("sourceKey", () => {
+  it("separates the tiers and the levels of one member's sections", () => {
+    expect(sourceKey("detail", 0)).toBe("detail:0");
+    expect(sourceKey("detail", 2)).toBe("detail:2");
+    expect(sourceKey("coarse", 2)).toBe("coarse:2");
+    expect(sourceKey("detail", 2)).not.toBe(sourceKey("coarse", 2));
   });
 });
 

@@ -6,7 +6,5 @@ export { handleDestroy } from "./lifecycle.ts";
 export {
   destroyAllResources,
   ensureOffscreenPool,
-  getDummy3DTexture,
-  getDummyTexture,
   getOrCreateLUT,
 } from "./resources.ts";

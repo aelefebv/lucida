@@ -49,7 +49,7 @@ import {
 } from "../minimapHandlers.ts";
 import { rebuildDescriptorIfMatching } from "./bootstrap.ts";
 import { postChunksRequeued } from "../chunkUploadFeedback.ts";
-import { memberTierKey } from "../poolKeys.ts";
+import { sourceKey } from "../poolKeys.ts";
 
 /**
  * Dispatch one main-thread message. The caller is responsible for
@@ -71,10 +71,9 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
 
     case "sliceChunkData": {
       const memberId = msg.memberId;
-      const tier = msg.tier;
-      const poolKey =
-        ctx.state.memberTierToPool.get(memberTierKey(memberId, tier)) ??
-        (tier === "detail" ? ctx.state.memberToPool.get(memberId) : undefined);
+      const poolKey = ctx.state.memberSourcePools
+        .get(memberId)
+        ?.get(sourceKey(msg.tier, msg.level));
       if (!poolKey) {
         postChunksRequeued(ctx, memberId, msg.chunks, "missing-pool");
         return;
@@ -86,32 +85,17 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       handleLabelSliceChunkData(ctx, msg);
       return;
     case "sliceRenderMultiPass":
-      handleSliceRenderMultiPass(ctx, msg, (memberId) => {
-        const detailPoolKey =
-          ctx.state.memberTierToPool.get(memberTierKey(memberId, "detail")) ??
-          ctx.state.memberToPool.get(memberId) ??
-          null;
-        const coarsePoolKey =
-          ctx.state.memberTierToPool.get(memberTierKey(memberId, "coarse")) ?? null;
-        const datasetId = ctx.state.memberToDataset.get(memberId) ?? null;
-        if (!detailPoolKey && !coarsePoolKey) {
-          // No chunk pool — still report dataset so the handler can
-          // bind a dummy chunk atlas and proceed with proxy-only render
-          // (e.g. group-as-proxy entries).
-          return datasetId ? { detailPoolKey: null, coarsePoolKey: null, datasetId } : null;
-        }
-        return { detailPoolKey, coarsePoolKey, datasetId };
-      });
+      handleSliceRenderMultiPass(ctx, msg);
       return;
 
     case "volumeChunkData": {
       const memberId = msg.memberId;
-      const tier = msg.tier;
-      const poolKey =
-        ctx.state.memberTierToPool.get(memberTierKey(memberId, tier)) ??
-        (tier === "detail" ? ctx.state.memberToPool.get(memberId) : undefined);
+      const poolKey = ctx.state.memberSourcePools
+        .get(memberId)
+        ?.get(sourceKey(msg.tier, msg.level));
       if (!poolKey) {
-        // No pool registered yet (cold state hasn't arrived for this member)
+        // No section for this (tier, level): cold state hasn't arrived for
+        // this member, or the level is no longer a resident level.
         postChunksRequeued(ctx, memberId, msg.chunks, "missing-pool");
         return;
       }
@@ -122,22 +106,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       handleLabelVolumeChunkData(ctx, msg);
       return;
     case "volumeRenderMultiPass":
-      handleVolumeRenderMultiPass(ctx, msg, (memberId) => {
-        const detailPoolKey =
-          ctx.state.memberTierToPool.get(memberTierKey(memberId, "detail")) ??
-          ctx.state.memberToPool.get(memberId) ??
-          null;
-        const coarsePoolKey =
-          ctx.state.memberTierToPool.get(memberTierKey(memberId, "coarse")) ?? null;
-        const datasetId = ctx.state.memberToDataset.get(memberId) ?? null;
-        if (!detailPoolKey && !coarsePoolKey) {
-          // No chunk pool — still report datasetId so the handler can
-          // bind a dummy chunk atlas and proceed with a proxy-only
-          // render (group-as-proxy entries take this path).
-          return datasetId ? { detailPoolKey: null, coarsePoolKey: null, datasetId } : null;
-        }
-        return { detailPoolKey, coarsePoolKey, datasetId };
-      });
+      handleVolumeRenderMultiPass(ctx, msg);
       return;
 
     case "proxyAssetData": {
@@ -223,19 +192,17 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
         destroyDescriptorBuffer(desc);
         ctx.state.descriptorBuffersByDataset.delete(msg.datasetId);
       }
-      ctx.state.currentEntityMetasByDataset.delete(msg.datasetId);
+      ctx.state.currentSourcesByDataset.delete(msg.datasetId);
       ctx.state.coldStateByDataset.delete(msg.datasetId);
 
       // Clear member-id routing for entries owned by this dataset so
-      // dropped layers don't keep stale memberToDataset / memberToPool
-      // entries around (these maps would otherwise grow monotonically
-      // across the worker's lifetime).
+      // dropped layers don't keep stale memberToDataset /
+      // memberSourcePools entries around (these maps would otherwise
+      // grow monotonically across the worker's lifetime).
       for (const [memberId, dsId] of ctx.state.memberToDataset) {
         if (dsId === msg.datasetId) {
           ctx.state.memberToDataset.delete(memberId);
-          ctx.state.memberToPool.delete(memberId);
-          ctx.state.memberTierToPool.delete(memberTierKey(memberId, "detail"));
-          ctx.state.memberTierToPool.delete(memberTierKey(memberId, "coarse"));
+          ctx.state.memberSourcePools.delete(memberId);
         }
       }
       // Drop group→tiles entries owned by this dataset. Tracked via

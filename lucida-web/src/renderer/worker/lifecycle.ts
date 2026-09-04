@@ -24,9 +24,8 @@ export function handleDestroy(ctx: WorkerCtx): void {
   state.currentEpochs = null;
   state.currentColdState = null;
   state.memberToDataset.clear();
-  state.memberToPool.clear();
-  state.memberTierToPool.clear();
-  state.currentEntityMetasByDataset.clear();
+  state.memberSourcePools.clear();
+  state.currentSourcesByDataset.clear();
   // Tear down proxy atlas pools and descriptors.
   for (const dsPools of state.proxyPoolsByDataset.values()) {
     for (const pool of dsPools.values()) destroyProxyAtlas(pool);

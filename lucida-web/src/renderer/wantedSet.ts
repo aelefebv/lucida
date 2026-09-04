@@ -19,10 +19,9 @@ import {
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import { makeCompositeKey } from "./chunkKeys.ts";
 import { memberIdForColdEntry } from "./descriptorBuffer.ts";
-import { memberTierKey } from "./poolKeys.ts";
 
-/** Per-LOD metadata for an entity in a shared pool. */
-export interface AtlasLodMeta {
+/** One level's section metadata for a member in a shared pool. */
+export interface AtlasLevelMeta {
   level: number;
   gridDims: [number, number, number];   // [Z, Y, X]
   chunkDims: [number, number, number];  // [Z, Y, X]
@@ -32,12 +31,10 @@ export interface AtlasLodMeta {
 /** Minimal shared-pool atlas state for wanted-set computation. */
 export interface AtlasSnapshot {
   z?: number; // only for slice atlases
-  /** Slots keyed by composite "memberId|chunkKey" (volume) or plain chunkKey (slice). */
+  /** Slots keyed by composite "memberId|chunkKey". */
   slots: Map<string, number>;
-  /** Per-entity LOD sections (volume shared pool). */
-  entityMetas?: Map<string, AtlasLodMeta[]>;
-  /** Single-entity LOD metas (slice). */
-  lodMetas?: AtlasLodMeta[];
+  /** Per-entity level sections. */
+  entityMetas?: Map<string, AtlasLevelMeta[]>;
 }
 
 /**
@@ -60,13 +57,27 @@ export interface WantedSetResult {
 }
 
 /**
+ * Which pool holds a member's section for one (tier, level). Mirrors
+ * `RendererState.memberSourcePools`; `undefined` when the worker
+ * allocated no section for that level.
+ */
+export type SourcePoolResolver = (
+  memberId: string,
+  tier: ResidencyTier,
+  level: number,
+) => string | undefined;
+
+/**
  * Compute which chunks AND proxies the GPU worker is missing.
  *
  * Pure function — no side effects, no GPU dependencies.
  *
- * Chunk wanted-set rules: for each level a tier holds on each visible
- * channel, enumerate the visible-region grid cells and report any
- * whose composite slot key is missing.
+ * Chunk wanted-set rules: for each level a tier requests on each visible
+ * channel, enumerate the visible-region grid cells and report any whose
+ * composite slot key is missing from the pool that holds the level's
+ * section. The detail tier requests `detailLevels` only; the coarser
+ * levels the worker keeps sections for under the target are sampled
+ * when resident but never asked for here.
  *
  * Proxy wanted-set rules: for each cold-state active entry, walk its
  * `mode`:
@@ -89,7 +100,7 @@ export function computeWantedSet(
   coldState: ColdStateMessage,
   volumeAtlases: Map<string, AtlasSnapshot>,
   sliceAtlases: Map<string, AtlasSnapshot>,
-  memberTierToPool?: Map<string, string>,
+  poolFor: SourcePoolResolver,
   proxyAtlases?: Map<string, ProxyAtlasSnapshot>,
 ): WantedSetResult {
   const missing: Array<MissingChunk | MissingProxy> = [];
@@ -103,6 +114,7 @@ export function computeWantedSet(
   }
 
   const isMultiChannel = coldState.multiChannel;
+  const atlases = coldState.viewMode === "volume" ? volumeAtlases : sliceAtlases;
 
   // Dedup per (groupId, t, c) so multiple tile entries of the same
   // parent only emit one parent-group-proxy request.
@@ -215,33 +227,13 @@ export function computeWantedSet(
 
     for (const { memberId, channel } of members) {
       for (const source of chunkSourcesForEntry(entry)) {
-        let atlas: AtlasSnapshot | undefined;
-        let entityLodMetas: AtlasLodMeta[] | undefined;
-        let useCompositeKey = false;
-
-        const tierPoolKey =
-          memberTierToPool?.get(memberTierKey(memberId, source.tier)) ??
-          memberTierToPool?.get(memberId);
-        if (!tierPoolKey) continue;
-
-        if (coldState.viewMode === "volume") {
-          atlas = volumeAtlases.get(tierPoolKey);
-          if (atlas === undefined) continue;
-          entityLodMetas = atlas.entityMetas?.get(memberId);
-          if (entityLodMetas === undefined) continue;
-          useCompositeKey = true;
-        } else {
-          atlas = sliceAtlases.get(tierPoolKey);
-          if (atlas === undefined) continue;
-          entityLodMetas = atlas.entityMetas?.get(memberId);
-          if (entityLodMetas === undefined) continue;
-          useCompositeKey = true;
-        }
-
-        const atlasLodByLevel = new Map(entityLodMetas.map((m) => [m.level, m]));
-
         for (const lvl of source.levels) {
-          if (!atlasLodByLevel.has(lvl)) continue;
+          const poolKey = poolFor(memberId, source.tier, lvl);
+          if (!poolKey) continue;
+          const atlas = atlases.get(poolKey);
+          if (atlas === undefined) continue;
+          const sectionMeta = atlas.entityMetas?.get(memberId)?.find((m) => m.level === lvl);
+          if (sectionMeta === undefined) continue;
 
           const levelMeta = entry.levels.find((l) => l.level === lvl);
           if (levelMeta === undefined) continue;
@@ -309,7 +301,7 @@ export function computeWantedSet(
                   continue;
                 }
                 const chunkKey = `${lvl}/${coldState.currentT}/${channel}/${iz}/${iy}/${ix}`;
-                const slotKey = useCompositeKey ? makeCompositeKey(memberId, chunkKey) : chunkKey;
+                const slotKey = makeCompositeKey(memberId, chunkKey);
                 if (!atlas.slots.has(slotKey)) {
                   missing.push({
                     kind: "chunk",
@@ -339,7 +331,7 @@ function renderRadiusForTier(
   return coldState.renderRadiusView?.[tier] ?? RENDER_RADIUS_DISABLED;
 }
 
-/** The levels each tier holds for a tile entry, detail first. */
+/** The levels each tier requests for a tile entry, detail first. */
 function chunkSourcesForEntry(
   entry: Exclude<ColdStateMessage["activeSet"][number], { kind: "group-as-proxy" }>,
 ): Array<{ tier: ResidencyTier; levels: number[] }> {

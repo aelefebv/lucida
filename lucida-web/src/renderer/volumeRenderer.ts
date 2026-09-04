@@ -1,26 +1,38 @@
 /** WebGPU pipeline for volume ray marching. */
 import shaderSource from "./volume.wgsl?raw";
 import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
-import { DESCRIPTOR_ENTRY_SIZE } from "./descriptorBuffer.ts";
+import { DESCRIPTOR_ENTRY_SIZE, DESCRIPTOR_MAX_LEVEL_SOURCES } from "./descriptor/layout.ts";
 import { serializeTransientDescriptor } from "./descriptor/transient.ts";
 
-import type { LodIndirectionMeta } from "./volume/atlas.ts";
-
-// Uniform buffer layout (256 bytes):
-//   offset 0:   invViewProj     mat4x4f   (64B)
-//   offset 64:  cameraPos       vec4f     (16B)
-//   offset 80:  volumeDims      vec4f     (16B)
-//   offset 96:  stepInfo        vec4f     (16B) — x=opacityScale, y=stepSize, z=renderMode
-//   offset 112: detailAtlasSlotDims vec4u (16B)
-//   offset 128: coarseAtlasSlotDims vec4u (16B)
-//   offset 144: viewProj        mat4x4f   (64B)
-//   offset 208: camForward      vec4f     (16B)
-//   offset 224: clipParams      vec4f     (16B)
-//   offset 240: lodParams       vec4u     (16B) — x=targetLodIdx
-const UNIFORM_SIZE = 256;
+/**
+ * Byte offsets of the shader's `Uniforms` fields (volume.wgsl). The
+ * writer in {@link VolumeRenderer.renderTo} and descriptor/layout.test.ts
+ * both read this table, so a reordered struct fails the test instead of
+ * skewing the draw.
+ */
+export const VOLUME_UNIFORM_OFFSETS = {
+  invViewProj: 0,           // mat4x4f (64B)
+  cameraPos: 64,            // vec4f (16B)
+  stepInfo: 80,             // vec4f (16B) — x=opacityScale, y=renderMode
+  levelAtlasSlotDims: 96,   // array<vec4u, 4> (64B) — xyz=slots per axis per level pool binding
+  coarseAtlasSlotDims: 160, // vec4u (16B)
+  viewProj: 176,            // mat4x4f (64B)
+  camForward: 240,          // vec4f (16B)
+  clipParams: 256,          // vec4f (16B)
+} as const;
+export const VOLUME_UNIFORM_SIZE = 272;
 
 /** 16-byte uniform with the entity index for the current draw. */
 const ENTITY_REF_SIZE = 16;
+
+/** One chunk pool bound to a volume draw: its atlas texture, indirection buffer, and slot grid. */
+export interface VolumePoolBinding {
+  texture: GPUTexture;
+  indirectionBuf: GPUBuffer;
+  slotsX: number;
+  slotsY: number;
+  slotsZ: number;
+}
 
 export class VolumeRenderer {
   private device: GPUDevice;
@@ -35,15 +47,16 @@ export class VolumeRenderer {
   private currentLabelColorBuffer: GPUBuffer | null = null;
   private labelColorBuffer: GPUBuffer | null = null;
   private dummyLabelColorBuffer: GPUBuffer;
+  private dummyTexture: GPUTexture;
+  private dummyIndirectionBuffer: GPUBuffer;
   /** Single-entity descriptor used by minimap + other call sites that
    *  aren't backed by cold-state. Lazily allocated. */
   private transientDescriptorBuffer: GPUBuffer | null = null;
-  private volumeDims = [1, 1, 1];
   private renderMode = 0;
   private invViewProj: Float32Array<ArrayBufferLike> = new Float32Array(16);
   private eyePos: Float32Array<ArrayBufferLike> = new Float32Array(3);
-  private detailAtlasSlotDims: [number, number, number] = [0, 0, 0];
-  private coarseAtlasSlotDims: [number, number, number] = [0, 0, 0];
+  private levelBindings: Array<VolumePoolBinding | null> = [];
+  private coarseBinding: VolumePoolBinding | null = null;
   private viewProj: Float32Array<ArrayBufferLike> = new Float32Array(16);
   private camForward: Float32Array<ArrayBufferLike> = new Float32Array(3);
   private clipDistance = 0;
@@ -64,6 +77,20 @@ export class VolumeRenderer {
 
     const shaderModule = device.createShaderModule({ code: shaderSource });
 
+    const levelTextureEntries: GPUBindGroupLayoutEntry[] = [];
+    const levelIndirectionEntries: GPUBindGroupLayoutEntry[] = [];
+    for (let i = 0; i < DESCRIPTOR_MAX_LEVEL_SOURCES; i++) {
+      levelTextureEntries.push({
+        binding: 7 + i,
+        visibility: GPUShaderStage.FRAGMENT,
+        texture: { sampleType: "uint", viewDimension: "3d" },
+      });
+      levelIndirectionEntries.push({
+        binding: 7 + DESCRIPTOR_MAX_LEVEL_SOURCES + i,
+        visibility: GPUShaderStage.FRAGMENT,
+        buffer: { type: "read-only-storage" },
+      });
+    }
     this.bindGroupLayout = device.createBindGroupLayout({
       entries: [
         {
@@ -74,23 +101,24 @@ export class VolumeRenderer {
         {
           binding: 1,
           visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: "uint", viewDimension: "3d" },
+          texture: { sampleType: "float" },
         },
         {
           binding: 2,
           visibility: GPUShaderStage.FRAGMENT,
-          buffer: { type: "read-only-storage" },
+          sampler: { type: "filtering" },
         },
         {
           binding: 3,
           visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: "float" },
+          texture: { sampleType: "uint", viewDimension: "3d" },
         },
         {
           binding: 4,
           visibility: GPUShaderStage.FRAGMENT,
-          sampler: { type: "filtering" },
+          buffer: { type: "read-only-storage" },
         },
+        // Proxy textures (tileProxy + groupProxy)
         {
           binding: 5,
           visibility: GPUShaderStage.FRAGMENT,
@@ -99,19 +127,12 @@ export class VolumeRenderer {
         {
           binding: 6,
           visibility: GPUShaderStage.FRAGMENT,
-          buffer: { type: "read-only-storage" },
-        },
-        // Proxy textures (tileProxy + groupProxy)
-        {
-          binding: 7,
-          visibility: GPUShaderStage.FRAGMENT,
           texture: { sampleType: "uint", viewDimension: "3d" },
         },
-        {
-          binding: 8,
-          visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: "uint", viewDimension: "3d" },
-        },
+        // One level pool per resident-level slot: textures at 7..10,
+        // their indirection buffers at 11..14.
+        ...levelTextureEntries,
+        ...levelIndirectionEntries,
       ],
     });
 
@@ -159,7 +180,7 @@ export class VolumeRenderer {
     });
 
     this.uniformBuffer = device.createBuffer({
-      size: UNIFORM_SIZE,
+      size: VOLUME_UNIFORM_SIZE,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -167,6 +188,21 @@ export class VolumeRenderer {
       size: ENTITY_REF_SIZE,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
+
+    // 1×1×1 dummy chunk texture + sentinel indirection for unbound pool
+    // slots. Same r16uint format as the real atlases so the bind-group
+    // layout is satisfied; the shader's slot-dims guard never reads them.
+    this.dummyTexture = device.createTexture({
+      size: [1, 1, 1],
+      format: "r16uint",
+      dimension: "3d",
+      usage: GPUTextureUsage.TEXTURE_BINDING,
+    });
+    this.dummyIndirectionBuffer = device.createBuffer({
+      size: 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(this.dummyIndirectionBuffer, 0, new Uint32Array([0xFFFFFFFF]));
 
     // Dummy declared-palette buffer (one u32) for non-categorical draws;
     // the shader scans 0 pairs (count comes from the entity ref).
@@ -197,7 +233,7 @@ export class VolumeRenderer {
 
   setColormapTexture(texture: GPUTexture) {
     this.lutTexture = texture;
-    // Bind group will be rebuilt on the next setAtlas call
+    // Bind group will be rebuilt on the next setTierAtlases call
   }
 
   /** Lazily allocate the 1×1×1 dummy proxy texture used when no real
@@ -217,8 +253,8 @@ export class VolumeRenderer {
 
   /**
    * Configure proxy textures for the next draw. Slot indices and dims
-   * live in the per-entity descriptor; the shader's unified fallback
-   * chain decides per-fragment whether to consult them.
+   * live in the per-entity descriptor; the shader consults them only
+   * when the entity binds no chunk tier.
    */
   setProxyTextures(
     tileTexture: GPUTexture | null,
@@ -228,54 +264,39 @@ export class VolumeRenderer {
     this.groupProxyTexture = groupTexture;
   }
 
-  setAtlas(
-    texture: GPUTexture,
-    indirectionBuf: GPUBuffer,
-    atlasSlotDims: [number, number, number],
-    volumeDims: [number, number, number],
-    _lodMetas?: LodIndirectionMeta[],
-  ) {
-    this.setTierAtlases(
-      texture,
-      indirectionBuf,
-      atlasSlotDims,
-      null,
-      null,
-      [0, 0, 0],
-      volumeDims,
-    );
-  }
-
+  /**
+   * Bind the level pools a member's level sources name, in slot order
+   * (index = the descriptor's `poolIndex`), plus the coarse pool. `null`
+   * or a missing slot binds the dummy texture and sentinel indirection;
+   * the shader's slot-dims guard makes such a slot read as a miss.
+   */
   setTierAtlases(
-    detailTexture: GPUTexture,
-    detailIndirectionBuf: GPUBuffer,
-    detailAtlasSlotDims: [number, number, number],
-    coarseTexture: GPUTexture | null,
-    coarseIndirectionBuf: GPUBuffer | null,
-    coarseAtlasSlotDims: [number, number, number],
-    volumeDims: [number, number, number],
+    levels: ReadonlyArray<VolumePoolBinding | null>,
+    coarse: VolumePoolBinding | null,
   ) {
-    this.volumeDims = volumeDims;
-    this.detailAtlasSlotDims = detailAtlasSlotDims;
-    this.coarseAtlasSlotDims = coarseTexture && coarseIndirectionBuf ? coarseAtlasSlotDims : [0, 0, 0];
+    this.levelBindings = levels.slice(0, DESCRIPTOR_MAX_LEVEL_SOURCES);
+    this.coarseBinding = coarse;
     const dummyProxy = this.getDummyProxyTexture();
-    const tileProxyView = (this.tileProxyTexture ?? dummyProxy).createView();
-    const groupProxyView = (this.groupProxyTexture ?? dummyProxy).createView();
-    const coarseBindingTexture = coarseTexture ?? detailTexture;
-    const coarseBindingIndirection = coarseIndirectionBuf ?? detailIndirectionBuf;
+    const entries: GPUBindGroupEntry[] = [
+      { binding: 0, resource: { buffer: this.uniformBuffer } },
+      { binding: 1, resource: this.lutTexture.createView() },
+      { binding: 2, resource: this.lutSampler },
+      { binding: 3, resource: (coarse?.texture ?? this.dummyTexture).createView() },
+      { binding: 4, resource: { buffer: coarse?.indirectionBuf ?? this.dummyIndirectionBuffer } },
+      { binding: 5, resource: (this.tileProxyTexture ?? dummyProxy).createView() },
+      { binding: 6, resource: (this.groupProxyTexture ?? dummyProxy).createView() },
+    ];
+    for (let i = 0; i < DESCRIPTOR_MAX_LEVEL_SOURCES; i++) {
+      const b = this.levelBindings[i] ?? null;
+      entries.push({ binding: 7 + i, resource: (b?.texture ?? this.dummyTexture).createView() });
+      entries.push({
+        binding: 7 + DESCRIPTOR_MAX_LEVEL_SOURCES + i,
+        resource: { buffer: b?.indirectionBuf ?? this.dummyIndirectionBuffer },
+      });
+    }
     this.bindGroup = this.device.createBindGroup({
       layout: this.bindGroupLayout,
-      entries: [
-        { binding: 0, resource: { buffer: this.uniformBuffer } },
-        { binding: 1, resource: detailTexture.createView() },
-        { binding: 2, resource: { buffer: detailIndirectionBuf } },
-        { binding: 3, resource: this.lutTexture.createView() },
-        { binding: 4, resource: this.lutSampler },
-        { binding: 5, resource: coarseBindingTexture.createView() },
-        { binding: 6, resource: { buffer: coarseBindingIndirection } },
-        { binding: 7, resource: tileProxyView },
-        { binding: 8, resource: groupProxyView },
-      ],
+      entries,
     });
   }
 
@@ -320,8 +341,9 @@ export class VolumeRenderer {
   /**
    * Bind a single-entity transient descriptor for callers that don't
    * have a cold-state-backed descriptor buffer (minimap path). Writes
-   * `modelMatrix` + `invModelMatrix` and one LOD slot covering the
-   * full volume.
+   * `modelMatrix` + `invModelMatrix` and one level source covering the
+   * full volume from level pool binding 0; the ray march takes its step
+   * from that source's `volumeDims`.
    *
    * Callers also pass display state (contrast/gamma/opacity) since the
    * shader reads it from the descriptor. Minimap supplies its own
@@ -359,8 +381,8 @@ export class VolumeRenderer {
     this.setDescriptorBinding(this.transientDescriptorBuffer, 0);
   }
 
-  /** Wrap a monolithic texture as a single-slot atlas (used by minimap). */
-  setVolume(texture: GPUTexture, width: number, height: number, depth: number) {
+  /** Bind a monolithic texture as a single-slot atlas at level pool binding 0 (used by minimap). */
+  setVolume(texture: GPUTexture) {
     if (!this.singleSlotIndirectionBuf) {
       const data = new Uint32Array([0]);
       this.singleSlotIndirectionBuf = this.device.createBuffer({
@@ -369,8 +391,10 @@ export class VolumeRenderer {
       });
       this.device.queue.writeBuffer(this.singleSlotIndirectionBuf, 0, data);
     }
-    this.setAtlas(texture, this.singleSlotIndirectionBuf,
-      [1, 1, 1], [width, height, depth]);
+    this.setTierAtlases(
+      [{ texture, indirectionBuf: this.singleSlotIndirectionBuf, slotsX: 1, slotsY: 1, slotsZ: 1 }],
+      null,
+    );
   }
 
   setRenderMode(mode: number) {
@@ -422,36 +446,25 @@ export class VolumeRenderer {
   renderTo(target: GPUTextureView, encoder: GPUCommandEncoder, depthView?: GPUTextureView, isFirstLayer?: boolean, targetWidth?: number, targetHeight?: number, scissorRect?: [number, number, number, number]) {
     if (!this.bindGroup || !this.descriptorBindGroup) return;
 
-    // Compute step size based on volume dimensions
-    const maxDim = Math.max(...this.volumeDims);
-    const stepSize = 1.0 / (maxDim * 1.5);
+    const O = VOLUME_UNIFORM_OFFSETS;
+    const uniformData = new Float32Array(VOLUME_UNIFORM_SIZE / 4);
+    uniformData.set(this.invViewProj, O.invViewProj / 4);
+    uniformData.set([this.eyePos[0], this.eyePos[1], this.eyePos[2], 0], O.cameraPos / 4);
+    // stepInfo = (opacityScale, renderMode, _, _). The march step comes
+    // from the sampled level's dims in the descriptor.
+    uniformData.set([0.08, this.renderMode, 0, 0], O.stepInfo / 4);
 
-    const uniformData = new Float32Array(UNIFORM_SIZE / 4);
-    uniformData.set(this.invViewProj, 0);                       // mat4 at offset 0
-    uniformData.set([this.eyePos[0], this.eyePos[1], this.eyePos[2], 0], 16); // cameraPos at 64B = 16 floats
-    uniformData.set([this.volumeDims[0], this.volumeDims[1], this.volumeDims[2], 0], 20); // volumeDims at 80B = 20 floats
-    // stepInfo = (opacityScale, stepSize, renderMode, _). Per-entity
-    // contrast/gamma/opacity moved into the descriptor buffer.
-    uniformData.set([0.08, stepSize, this.renderMode, 0], 24); // stepInfo at 96B = 24 floats
-
-    // Atlas slot dims (u32 written via Uint32Array view)
     const u32View = new Uint32Array(uniformData.buffer);
-    u32View.set([this.detailAtlasSlotDims[0], this.detailAtlasSlotDims[1], this.detailAtlasSlotDims[2], 0], 28);
-    u32View.set([this.coarseAtlasSlotDims[0], this.coarseAtlasSlotDims[1], this.coarseAtlasSlotDims[2], 0], 32);
+    for (let i = 0; i < DESCRIPTOR_MAX_LEVEL_SOURCES; i++) {
+      const b = this.levelBindings[i] ?? null;
+      u32View.set(b ? [b.slotsX, b.slotsY, b.slotsZ, 0] : [0, 0, 0, 0], O.levelAtlasSlotDims / 4 + i * 4);
+    }
+    const c = this.coarseBinding;
+    u32View.set(c ? [c.slotsX, c.slotsY, c.slotsZ, 0] : [0, 0, 0, 0], O.coarseAtlasSlotDims / 4);
 
-    // viewProj at 144B = 36 floats
-    uniformData.set(this.viewProj, 36);
-
-    // camForward at 208B = 52 floats
-    uniformData.set([this.camForward[0], this.camForward[1], this.camForward[2], 0], 52);
-
-    // clipParams at 224B = 56 floats
-    uniformData.set([this.clipDistance, this.clipMode, 0, 0], 56);
-
-    // lodParams.x = targetLodIdx (always 0 — descriptor lods are
-    // already trimmed to start at finest LOD). lodCount comes from
-    // descriptor.
-    u32View.set([0, 0, 0, 0], 60); // lodParams at 240B = 60 u32s
+    uniformData.set(this.viewProj, O.viewProj / 4);
+    uniformData.set([this.camForward[0], this.camForward[1], this.camForward[2], 0], O.camForward / 4);
+    uniformData.set([this.clipDistance, this.clipMode, 0, 0], O.clipParams / 4);
 
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
 

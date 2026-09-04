@@ -64,7 +64,7 @@ function makeSliceAtlas(overrides?: Partial<SliceAtlasState> & { defaultMember?:
     for (const m of metas) totalIndirection += m.gridDims[1] * m.gridDims[2];
   }
   const entityZInfo = overrides?.entityZInfo ?? new Map([
-    [defaultMember, { chunkZ: 32, fullResDepth: 64, levelDepth: 64 }],
+    [defaultMember, new Map([[0, { chunkZ: 32, fullResDepth: 64, levelDepth: 64 }]])],
   ]);
   return {
     texture: null as unknown as GPUTexture,
