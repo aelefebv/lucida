@@ -60,6 +60,7 @@ export interface ViewQueryEntityJson {
   projected_area_px2: number;
   centroid_world: [number, number, number];
   target_level: number;
+  level_pinned: boolean;
   importance: number;
 }
 
@@ -91,6 +92,24 @@ export interface SnapshotEntityDeps {
   imageSpecById: Map<string, ImageSpec>;
   parentByEntityId: Map<string, string | null>;
   positions: Record<string, [number, number]>;
+}
+
+/**
+ * The image's source levels, ascending: every listed level except the
+ * generated coarse levels, which belong to the coarse tier (ADR 0040). The
+ * set the prefetch lane's level step stays inside. The target level arrives
+ * from the core already inside it, so nothing here clamps.
+ */
+function sourceLevelsOf(imgSpec: ImageSpec | undefined): number[] {
+  if (!imgSpec) return [0];
+  const generated = new Set(
+    (imgSpec.multiscale.generated_levels ?? []).map((level) => level.level_index),
+  );
+  const sourceLevels = imgSpec.multiscale.levels
+    .map((level, idx) => level.level_index ?? idx)
+    .filter((level) => !generated.has(level))
+    .sort((a, b) => a - b);
+  return sourceLevels.length > 0 ? sourceLevels : [0];
 }
 
 /**
@@ -138,6 +157,8 @@ export function makeEntitySnapshot(
     projectedAreaPx2: row.projected_area_px2,
     centroidWorld: row.centroid_world,
     targetLevel: row.target_level,
+    levelPinned: row.level_pinned,
+    sourceLevels: sourceLevelsOf(imgSpec),
     coarseLevel,
     importance: row.importance,
     layoutPositionVox,

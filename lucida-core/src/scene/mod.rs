@@ -194,6 +194,7 @@ impl CameraModeKind {
 struct QuantizedEntity {
     visible: bool,
     target_level: u32,
+    level_pinned: bool,
     kind: EntityKind,
 }
 
@@ -202,6 +203,7 @@ impl QuantizedEntity {
         Self {
             visible: entry.visible,
             target_level: entry.target_level,
+            level_pinned: entry.level_pinned,
             kind: entry.kind.clone(),
         }
     }
@@ -721,7 +723,7 @@ impl Scene {
                     .map(|planes| planes.map(|[a, b, c, d]| [a, b, c, d + a * pos_x + b * pos_y])),
             };
 
-            let level = self.member_target_level(
+            let (level, _) = self.member_target_level(
                 member,
                 multiscale_by_image[&member.image_id],
                 pin,
@@ -1361,7 +1363,8 @@ impl Scene {
             .and_then(|settings| settings.detail_level_override)
     }
 
-    /// The target level of `member`, the level its detail tier requests.
+    /// The target level of `member`, the level its detail tier requests, and
+    /// whether it is the pin rather than the screen's choice.
     ///
     /// The dataset's level pin wins when it has one. Otherwise it is the level
     /// the screen calls for, from [`Scene::screen_target_level`]. Either is
@@ -1385,12 +1388,15 @@ impl Scene {
         pin: Option<u32>,
         pixels_per_sample: f64,
         last_query: Option<&HashMap<ImageId, QuantizedEntity>>,
-    ) -> u32 {
+    ) -> (u32, bool) {
         if let Some(pinned) = pin.and_then(|pin| multiscale.clamp_to_source_levels(pin)) {
-            return pinned;
+            return (pinned, true);
         }
         let screen = self.screen_target_level(member, pixels_per_sample, last_query);
-        multiscale.clamp_to_source_levels(screen).unwrap_or(screen)
+        (
+            multiscale.clamp_to_source_levels(screen).unwrap_or(screen),
+            false,
+        )
     }
 
     /// The levels a level pin on `dataset_id` may hold: the source levels of
@@ -1505,7 +1511,7 @@ impl Scene {
                 (0.0, 0.0)
             };
 
-            let level = if visible {
+            let (level, level_pinned) = if visible {
                 self.member_target_level(
                     member,
                     multiscale_by_image[&member.image_id],
@@ -1514,7 +1520,7 @@ impl Scene {
                     last_query,
                 )
             } else {
-                (member.levels.len() as u32).saturating_sub(1)
+                ((member.levels.len() as u32).saturating_sub(1), false)
             };
 
             // Distance from camera
@@ -1545,6 +1551,7 @@ impl Scene {
                 projected_area_px2,
                 centroid_world: centroid,
                 target_level: level,
+                level_pinned,
                 importance,
             });
         }
@@ -3307,6 +3314,29 @@ mod tests {
     }
 
     #[test]
+    fn a_pin_set_to_the_screens_own_level_still_reports_a_changed_record() {
+        // The prefetch lane reads `level_pinned` off the record, so the flag
+        // has to reach it even when the level itself does not move.
+        let (mut scene, ds) = regular_slice_scene([512, 512]);
+        set_slice_zoom(&mut scene, 4.0);
+        let ViewQueryDelta::Full(full) = scene.view_query_delta(&ds).unwrap() else {
+            panic!("the first query must be a full snapshot");
+        };
+        assert_eq!(full.visible_entities[0].target_level, 0);
+        assert!(!full.visible_entities[0].level_pinned);
+
+        pin_level(&mut scene, &ds, Some(0));
+        match scene.view_query_delta(&ds).unwrap() {
+            ViewQueryDelta::Delta { changed, .. } => {
+                assert_eq!(changed.len(), 1);
+                assert_eq!(changed[0].target_level, 0);
+                assert!(changed[0].level_pinned);
+            }
+            ViewQueryDelta::Full(_) => panic!("a pin edit must not force a full resync"),
+        }
+    }
+
+    #[test]
     fn clearing_a_pin_resumes_the_screen_rule_from_the_pinned_level() {
         // At zoom 0.12 the raw rule names level 3, just inside the hysteresis
         // band past the 2/3 boundary at 0.125, so the history decides.
@@ -5047,6 +5077,7 @@ mod tests {
             projected_area_px2: 1.0,
             centroid_world: [0.0, 0.0, 0.0],
             target_level: lod,
+            level_pinned: false,
             importance: 1.0,
         }
     }
@@ -5174,6 +5205,7 @@ mod tests {
             projected_area_px2: 1.0,
             centroid_world: [0.0, 0.0, 0.0],
             target_level: lod,
+            level_pinned: false,
             importance: 1.0,
         };
 

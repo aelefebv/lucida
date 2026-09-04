@@ -21,6 +21,7 @@ import {
   plan,
   emitPlanRequests,
   emptyPlanStats,
+  initialPlanningState,
   planProxyResidencyForInputs,
   type PlanningConfig,
 } from "./planning/index.ts";
@@ -829,7 +830,7 @@ export class TickCoordinator {
       // Plan. Opaque carry-forward state travels via {@link PlanningState};
       // `nextState` is stored for the next tick.
       const planningStateForDataset = this.planningState.get(dsId)
-        ?? { previousActiveSet: [] };
+        ?? initialPlanningState();
       // Capture what the worker currently holds BEFORE `nextState` overwrites it
       // — the view-move delta diffs the fresh active set against this.
       const previousActiveSet = planningStateForDataset.previousActiveSet;
@@ -1312,7 +1313,7 @@ export class TickCoordinator {
       dsId: string;
       dsSettings: DatasetSettings | undefined;
       visibleChannels: number[];
-      activeSet: ActiveSetEntry[];
+      planningState: PlanningState;
       entities: EntitySnapshot[];
       cachedRegion: VisibleRegion;
       newZRange: [number, number];
@@ -1334,13 +1335,13 @@ export class TickCoordinator {
         anyScrub = true;
       }
 
-      const activeSet = this.planningState.get(dsId)?.previousActiveSet;
+      const planningState = this.planningState.get(dsId);
       const entities = this._lastEntities.get(dsId);
       const cachedRegion = this._lastVisibleRegion.get(dsId);
-      if (!activeSet || !entities || !cachedRegion) return false;
+      if (!planningState || !entities || !cachedRegion) return false;
 
       perDataset.push({
-        dsId, dsSettings, visibleChannels, activeSet, entities, cachedRegion,
+        dsId, dsSettings, visibleChannels, planningState, entities, cachedRegion,
         newZRange: zRange,
       });
     }
@@ -1367,7 +1368,7 @@ export class TickCoordinator {
       snapshot: PlanningSnapshot;
       visibleRegion: VisibleRegion;
       selection: SelectionState;
-      activeSet: ActiveSetEntry[];
+      planningState: PlanningState;
       requests: ChunkRequest[];
       proxyRequests: ProxyRequest[];
       stats: PlanStats;
@@ -1396,7 +1397,11 @@ export class TickCoordinator {
       };
       const stats = emptyPlanStats();
       const { requests, proxyRequests } = emitPlanRequests(
-        pd.activeSet, snapshot, stats, planningConfig,
+        pd.planningState.previousActiveSet,
+        snapshot,
+        stats,
+        planningConfig,
+        pd.planningState.zoomDirection,
       );
       return {
         dsId: pd.dsId,
@@ -1404,7 +1409,7 @@ export class TickCoordinator {
         snapshot,
         visibleRegion,
         selection,
-        activeSet: pd.activeSet,
+        planningState: pd.planningState,
         requests,
         proxyRequests,
         stats,
@@ -1415,7 +1420,7 @@ export class TickCoordinator {
     const proxyResidency = planProxyResidencyForInputs({
       inputs: planned.map((p) => ({
         snapshot: p.snapshot,
-        activeSet: p.activeSet,
+        activeSet: p.planningState.previousActiveSet,
         proxyRequests: p.proxyRequests,
       })),
       config: planningConfig,
@@ -1452,11 +1457,11 @@ export class TickCoordinator {
       const budgetedProxyRequests = proxyRequestsByDataset.get(p.dsId) ?? [];
       this._lastPlanByDataset.set(p.dsId, {
         requests: p.requests,
-        activeSet: p.activeSet,
+        activeSet: p.planningState.previousActiveSet,
         epochs: scrubEpochs,
         proxyRequests: budgetedProxyRequests,
         stats: p.stats,
-        nextState: { previousActiveSet: p.activeSet },
+        nextState: p.planningState,
       });
 
       // Categorical label overlays follow the plane/timepoint too — merge their
@@ -1476,11 +1481,11 @@ export class TickCoordinator {
 
       ctx.cpuCache.submit({
         requests: requestsWithLabels,
-        activeSet: p.activeSet,
+        activeSet: p.planningState.previousActiveSet,
         proxyRequests: budgetedProxyRequests,
         epochs: scrubEpochs,
         stats: p.stats,
-        nextState: { previousActiveSet: p.activeSet },
+        nextState: p.planningState,
       });
 
       this.uploader.sendColdStateSelection({
@@ -1718,7 +1723,7 @@ export class TickCoordinator {
       stats: emptyPlanStats(),
       // submit() doesn't read nextState; placeholder so the literal
       // satisfies RequestPlan's contract.
-      nextState: { previousActiveSet: [] },
+      nextState: initialPlanningState(),
     });
   }
 }

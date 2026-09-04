@@ -31,6 +31,7 @@ interface VisibleEntityRow {
   projected_area_px2: number;
   centroid_world: [number, number, number];
   target_level: number;
+  level_pinned: boolean;
   importance: number;
 }
 
@@ -64,6 +65,7 @@ function makeStubScene(overrides: Partial<StubSceneConfig> = {}): WasmScene {
         projected_area_px2: 10000,
         centroid_world: [10, 20, 30],
         target_level: 2,
+        level_pinned: false,
         importance: 0.7,
       },
     ],
@@ -242,6 +244,7 @@ describe("buildPlanningSnapshot — snake_case → camelCase", () => {
           projected_area_px2: 5678,
           centroid_world: [1, 2, 3],
           target_level: 1,
+          level_pinned: false,
           importance: 0.42,
         },
       ],
@@ -273,6 +276,7 @@ describe("buildPlanningSnapshot — parent-id stitching", () => {
           projected_area_px2: 9000,
           centroid_world: [0, 0, 0],
           target_level: 0,
+          level_pinned: false,
           importance: 1,
         },
       ],
@@ -319,6 +323,7 @@ describe("buildPlanningSnapshot — parent-id stitching", () => {
           projected_area_px2: 10000,
           centroid_world: [0, 0, 0],
           target_level: 0,
+          level_pinned: false,
           importance: 1,
         },
       ],
@@ -457,6 +462,7 @@ describe("buildPlanningSnapshot — target level", () => {
           projected_area_px2: 10000,
           centroid_world: [10, 20, 30],
           target_level: screenLevel,
+          level_pinned: false,
           importance: 0.7,
         },
       ],

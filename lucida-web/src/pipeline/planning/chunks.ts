@@ -14,6 +14,29 @@ import type {
   SelectionState,
 } from "./types.ts";
 
+/**
+ * The planner's request order: ascending priority (lower is more urgent),
+ * then a spatial-first, channel-second tiebreak so equal-priority
+ * multi-channel chunks interleave by cell instead of by channel.
+ */
+export function compareChunkRequests(a: ChunkRequest, b: ChunkRequest): number {
+  const priority = a.priority - b.priority;
+  if (priority !== 0) return priority;
+
+  const image = a.imageId.localeCompare(b.imageId);
+  if (image !== 0) return image;
+
+  return (
+    a.level - b.level ||
+    a.t - b.t ||
+    a.z - b.z ||
+    a.y - b.y ||
+    a.x - b.x ||
+    a.c - b.c ||
+    a.chunkKey.localeCompare(b.chunkKey)
+  );
+}
+
 /** Canonical chunk key: "level/t/c/z/y/x". */
 export function chunkKey(
   level: number,

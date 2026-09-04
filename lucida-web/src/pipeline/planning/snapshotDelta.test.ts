@@ -50,6 +50,7 @@ function row(overrides: Partial<ViewQueryEntityJson> = {}): ViewQueryEntityJson 
     projected_area_px2: 10000,
     centroid_world: [0, 0, 0],
     target_level: 0,
+    level_pinned: false,
     importance: 1,
     ...overrides,
   };
@@ -239,6 +240,39 @@ describe("makeEntitySnapshot — target level", () => {
     for (const level of [0, 1, 7]) {
       expect(makeEntitySnapshot(row({ target_level: level }), deps).targetLevel).toBe(level);
     }
+  });
+
+  it("says whether the target is the pin or the screen's choice, as the core reports it", () => {
+    const deps = makeDeps(["img-0"]);
+    expect(makeEntitySnapshot(row(), deps).levelPinned).toBe(false);
+    expect(makeEntitySnapshot(row({ level_pinned: true }), deps).levelPinned).toBe(true);
+  });
+
+  it("lists the source levels, leaving generated coarse levels out", () => {
+    const generated: LevelGeometry = {
+      level_index: 2,
+      shape: [1, 1, 1, 256, 256],
+      chunk_shape: [1, 1, 1, 256, 256],
+      grid_shape: [1, 1, 1, 1, 1],
+      scale: [1, 1, 1, 4, 4],
+    };
+    const spec = {
+      image_id: "img-0",
+      owner: "img-0",
+      multiscale: {
+        axes: [],
+        data_type: "uint16",
+        levels: [...makeLevels(), generated],
+        generated_levels: [{ level_index: 2, role: "coarse" }],
+      },
+    } as unknown as ImageSpec;
+    const deps: SnapshotEntityDeps = {
+      imageSpecById: new Map([["img-0", spec]]),
+      parentByEntityId: new Map(),
+      positions: {},
+    };
+    expect(makeEntitySnapshot(row(), deps).sourceLevels).toEqual([0, 1]);
+    expect(makeEntitySnapshot(row(), makeDeps(["img-0"])).sourceLevels).toEqual([0, 1]);
   });
 
   it("a changed record's new target level lands on the folded snapshot", () => {

@@ -128,6 +128,12 @@ pub struct EntityQueryResult {
     /// a generated coarse level. Off-screen records report the pyramid's last
     /// level, generated or not.
     pub target_level: u32,
+    /// True when `target_level` is the dataset's level pin rather than the
+    /// screen's choice. Part of the quantized state a delta tracks, so a pin
+    /// set to the level the screen already wanted still reaches a consumer.
+    /// False for off-screen records.
+    #[serde(default)]
+    pub level_pinned: bool,
     pub importance: f64,
 }
 
