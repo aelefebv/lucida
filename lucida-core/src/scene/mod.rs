@@ -2026,6 +2026,7 @@ pub(crate) mod test_helpers {
                     generated_levels: vec![],
                     data_type: DataType::Uint16,
                     pinned_axes: vec![],
+                    downsampling_method: None,
                     channel_infos: vec![],
                 },
             }],
@@ -2171,6 +2172,7 @@ pub(crate) mod test_helpers {
                     generated_levels: vec![],
                     data_type: DataType::Uint16,
                     pinned_axes: vec![],
+                    downsampling_method: None,
                     channel_infos: vec![],
                 },
             }],
@@ -2259,6 +2261,7 @@ pub(crate) mod test_helpers {
                         generated_levels: vec![],
                         data_type: dtype,
                         pinned_axes: vec![],
+                        downsampling_method: None,
                         channel_infos: vec![],
                     },
                 },
@@ -2380,6 +2383,7 @@ pub(crate) mod test_helpers {
                     generated_levels: vec![],
                     data_type: DataType::Uint16,
                     pinned_axes: vec![],
+                    downsampling_method: None,
                     channel_infos: vec![],
                 },
             });
@@ -2513,6 +2517,7 @@ pub(crate) mod test_helpers {
                     generated_levels: vec![],
                     data_type: DataType::Uint16,
                     pinned_axes: vec![],
+                    downsampling_method: None,
                     channel_infos: vec![],
                 },
             });
@@ -2642,6 +2647,7 @@ pub(crate) mod test_helpers {
                         generated_levels: vec![],
                         data_type: DataType::Uint16,
                         pinned_axes: vec![],
+                        downsampling_method: None,
                         channel_infos: vec![],
                     },
                 });

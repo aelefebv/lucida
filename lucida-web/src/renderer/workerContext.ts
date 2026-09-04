@@ -43,8 +43,13 @@ export interface WorkerCtx {
    * them — omit it for plain messages.
    */
   post(msg: WorkerToMainMessage, transfer?: Transferable[]): void;
-  /** Recompute and post wanted-set delta after eviction. */
-  postWantedSet(): void;
+  /**
+   * Recompute and post the wanted-set delta and level report for one
+   * dataset: the one named, else the dataset whose cold state arrived last.
+   * An upload names the dataset its member belongs to, so a workspace with
+   * several datasets keeps each one's report current.
+   */
+  postWantedSet(datasetId?: string): void;
   /**
    * Look up the proxy descriptor for an entity/time/channel. Returns
    * null if no proxy has been uploaded yet for that tuple.

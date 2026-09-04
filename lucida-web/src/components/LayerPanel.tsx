@@ -3,6 +3,8 @@ import { ContrastControls } from "./ContrastControls.tsx";
 import { ColormapSelector } from "./ColormapSelector.tsx";
 import { LayoutSwitcher } from "./LayoutSwitcher.tsx";
 import type { LayoutRegistry } from "../pipeline/layoutRegistry.ts";
+import type { LevelRange } from "../renderer/workerProtocol.ts";
+import { displayedLevelNotice, levelNumbers } from "./levelReadout.ts";
 import type { BlendMode, Colormap, RenderMode } from "../savedView/types.ts";
 import "./LayerPanel.css";
 
@@ -53,6 +55,22 @@ export interface LayerInfo {
    * the scene knows no pyramid for the dataset, which hides the control.
    */
   levelPinOptions: { level: number; label: string }[];
+  /**
+   * The target level across the dataset's visible entities: the level pin,
+   * or the level the screen calls for. A range for a collection whose tiles
+   * differ. `null` until the render worker has reported one.
+   */
+  targetLevel: LevelRange | null;
+  /**
+   * The finest and coarsest level actually on screen for the dataset, or
+   * `null` while nothing is resident yet. Equals `targetLevel` once the
+   * target is resident everywhere it is visible.
+   */
+  displayedLevel: LevelRange | null;
+  /** True while some visible pixel comes from a level coarser than its entity's target. */
+  displayedCoarserThanTarget: boolean;
+  /** The multiscale metadata's downsampling method, or `null` when it declares none. */
+  downsamplingMethod: string | null;
 }
 
 interface Props {
@@ -230,6 +248,7 @@ export function LayerPanel({
         {layers.map((layer, index) => {
           const isSelected = layer.id === selectedLayerId;
           const isExpanded = layer.id === expandedLayerId;
+          const levelNotice = displayedLevelNotice(layer);
 
           return (
             <div
@@ -599,6 +618,43 @@ export function LayerPanel({
                       <option value="max_intensity">Max Intensity</option>
                     </select>
                   </div>
+                  {layer.targetLevel && (
+                    <div className="layer-detail-row">
+                      <label>Level</label>
+                      <span
+                        className="layer-level-readout"
+                        aria-label={`${layer.name} target level`}
+                        title="The level the screen calls for, or the pinned level"
+                      >
+                        {levelNumbers(layer.targetLevel)}
+                      </span>
+                      {levelNotice && layer.displayedLevel && (
+                        <span
+                          className="layer-level-readout layer-level-displayed"
+                          aria-label={`${layer.name} displayed level`}
+                          title="The level on screen until the target is resident"
+                        >
+                          displaying {levelNumbers(layer.displayedLevel)}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  {layer.downsamplingMethod && (
+                    <div className="layer-detail-row">
+                      <label>Downsampling</label>
+                      <span
+                        className="layer-level-readout"
+                        aria-label={`${layer.name} downsampling method`}
+                      >
+                        {layer.downsamplingMethod}
+                      </span>
+                    </div>
+                  )}
+                  {levelNotice && (
+                    <div className="layer-level-notice" role="status">
+                      {levelNotice}
+                    </div>
+                  )}
                   {layer.levelPinOptions.length > 0 && (
                     <div className="layer-detail-row">
                       <label>Level</label>

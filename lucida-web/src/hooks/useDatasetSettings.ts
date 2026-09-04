@@ -12,6 +12,7 @@ import type { BlendMode, Colormap, RenderMode } from "../savedView/types.ts";
 import { invalidateDisplaySettings, requestRender } from "../invalidation.ts";
 import { Axis } from "../axes.ts";
 import { eligibleLabelInfos, volumeBudgetPrefix } from "../pipeline/planning/labelRequests.ts";
+import type { DatasetLevels } from "../pipeline/datasetLevels.ts";
 
 /** A per-label overlay row for the layer panel, keyed by manifest index. */
 interface PanelLabelRow {
@@ -172,6 +173,8 @@ export function buildLayerInfos(
     autoContrast: Map<string, boolean>;
     fullRange: Map<string, boolean>;
     dataRange: Map<string, { min: number; max: number }>;
+    /** The worker's per-dataset level readout; a dataset it has not reported yet is absent. */
+    levels: Map<string, DatasetLevels>;
   },
   viewMode: ViewMode = "2d",
 ): LayerInfo[] {
@@ -200,6 +203,7 @@ export function buildLayerInfos(
     // disabledReason so the panel never shows an "on" toggle that draws nothing.
     const rawLabelSettings = settings?.label_settings;
     const labelRows = ds ? buildLabelRows(ds.manifest, rawLabelSettings, viewMode) : [];
+    const levels = maps.levels.get(id) ?? null;
 
     return {
       id,
@@ -225,6 +229,10 @@ export function buildLayerInfos(
       channelBlendMode: settings?.channel_blend_mode ?? "additive",
       levelPin: settings?.detail_level_override ?? null,
       levelPinOptions: levelPinOptions(scene, id, ds),
+      targetLevel: levels?.target ?? null,
+      displayedLevel: levels?.displayed ?? null,
+      displayedCoarserThanTarget: levels?.coarserThanTarget ?? false,
+      downsamplingMethod: ds?.manifest.images[0]?.multiscale.downsampling_method ?? null,
     };
   });
 }
@@ -253,6 +261,8 @@ interface Params {
   /** Active view mode. Drives the label rows' eligibility caps (slice vs volume)
    *  so the panel marks labels that can't draw in the current mode as disabled. */
   viewMode: ViewMode;
+  /** The worker's per-dataset target and displayed levels (see `useDatasetLevels`). */
+  datasetLevels: Map<string, DatasetLevels>;
 }
 
 export function useDatasetSettings({
@@ -266,6 +276,7 @@ export function useDatasetSettings({
   datasetsVersion,
   remoteDocumentVersion,
   viewMode,
+  datasetLevels,
 }: Params) {
   const [autoContrastMap, setAutoContrastMap] = useState<Map<string, boolean>>(new Map());
   const [fullRangeMap, setFullRangeMap] = useState<Map<string, boolean>>(new Map());
@@ -616,6 +627,7 @@ export function useDatasetSettings({
         autoContrast: autoContrastMap,
         fullRange: fullRangeMap,
         dataRange: dataRangeMap,
+        levels: datasetLevels,
       }, viewMode)
     : [];
   void datasetsVersion;
