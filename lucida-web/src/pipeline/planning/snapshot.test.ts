@@ -30,7 +30,7 @@ interface VisibleEntityRow {
   projected_diagonal_px: number;
   projected_area_px2: number;
   centroid_world: [number, number, number];
-  ideal_target_lod: number;
+  target_level: number;
   importance: number;
 }
 
@@ -63,7 +63,7 @@ function makeStubScene(overrides: Partial<StubSceneConfig> = {}): WasmScene {
         projected_diagonal_px: 100,
         projected_area_px2: 10000,
         centroid_world: [10, 20, 30],
-        ideal_target_lod: 2,
+        target_level: 2,
         importance: 0.7,
       },
     ],
@@ -241,7 +241,7 @@ describe("buildPlanningSnapshot — snake_case → camelCase", () => {
           projected_diagonal_px: 234.5,
           projected_area_px2: 5678,
           centroid_world: [1, 2, 3],
-          ideal_target_lod: 4,
+          target_level: 4,
           importance: 0.42,
         },
       ],
@@ -255,7 +255,7 @@ describe("buildPlanningSnapshot — snake_case → camelCase", () => {
     expect(e.projectedDiagonalPx).toBe(234.5);
     expect(e.projectedAreaPx2).toBe(5678);
     expect(e.centroidWorld).toEqual([1, 2, 3]);
-    expect(e.idealTargetLod).toBe(4);
+    expect(e.targetLevel).toBe(4);
     expect(e.importance).toBeCloseTo(0.42);
   });
 });
@@ -272,7 +272,7 @@ describe("buildPlanningSnapshot — parent-id stitching", () => {
           projected_diagonal_px: 90,
           projected_area_px2: 9000,
           centroid_world: [0, 0, 0],
-          ideal_target_lod: 0,
+          target_level: 0,
           importance: 1,
         },
       ],
@@ -318,7 +318,7 @@ describe("buildPlanningSnapshot — parent-id stitching", () => {
           projected_diagonal_px: 100,
           projected_area_px2: 10000,
           centroid_world: [0, 0, 0],
-          ideal_target_lod: 0,
+          target_level: 0,
           importance: 1,
         },
       ],

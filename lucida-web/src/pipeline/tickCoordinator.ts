@@ -480,13 +480,11 @@ export class TickCoordinator {
    * # Why a per-record projection map
    *
    * A delta reports only the *quantized* projection
-   * (`{ membership, visible, ideal_target_lod, kind }`) of each record. The
-   * fold is safe to feed the planner ONLY under coarseDetail, where the
-   * active-set mode/LOD derives from the view-independent
-   * `detailLevel`/`coarseLevel` + `visible` — the quantized set the delta
-   * tracks. On the legacy path the mode is chosen from the continuous
-   * `projected_diagonal_px`, which the delta does NOT track, so that path
-   * uses the full `view_query` (see the gate in `planAndFetch`).
+   * (`{ membership, visible, target_level, kind }`) of each record. The
+   * fold is safe to feed the planner because the active set derives from
+   * the view-independent `detailLevel`/`coarseLevel` + `visible`, the
+   * quantized set the delta tracks, and never from the continuous
+   * `projected_diagonal_px`, which the delta does NOT track.
    *
    * # Cursor lifecycle (silent-wrong-data guard)
    *
@@ -790,40 +788,25 @@ export class TickCoordinator {
         this.snapshotInputCacheByDataset.set(dsId, snapshotInputs);
       }
 
-      // Reconstruct `entities` incrementally when it is safe. Under
-      // coarseDetail (the shipping default) the active-set mode/LOD derives
-      // from the view-independent `detailLevel`/`coarseLevel` + `visible` —
-      // exactly the quantized set `view_query_delta` tracks — so folding the
-      // delta yields the same render-affecting projection as a full parse at
-      // O(delta) instead of O(N-members) on a camera move. On the legacy path
-      // the mode is chosen from the continuous `projected_diagonal_px`, which
-      // the delta does NOT track, so the full `view_query` (below, via
-      // `buildPlanningSnapshot` with no override) is used — falling back to
-      // the full query is always correct. `visible_region` and `selection`
-      // are computed FRESH inside the builder regardless.
-      let entitiesOverride: EntitySnapshot[] | undefined;
-      if (planningConfig.coarseDetailEnabled) {
-        const deps: SnapshotEntityDeps = {
-          imageSpecById: snapshotInputs.imageSpecById,
-          parentByEntityId: snapshotInputs.parentByEntityId,
-          positions: snapshotInputs.positions,
-          dsSettings,
-        };
-        const folded = this.foldViewDeltaEntities(
-          ctx.scene, dsId, deps, snapshotInputs,
-        );
-        if (folded === "skip") continue;
-        entitiesOverride = folded;
-      }
+      // Fold the view delta instead of re-running `view_query`. The active
+      // set derives only from the quantized `detailLevel`/`coarseLevel` +
+      // `visible` that the delta tracks, so the fold matches a full parse
+      // at O(delta) rather than O(N members) on a camera move.
+      const deps: SnapshotEntityDeps = {
+        imageSpecById: snapshotInputs.imageSpecById,
+        parentByEntityId: snapshotInputs.parentByEntityId,
+        positions: snapshotInputs.positions,
+        dsSettings,
+      };
+      const entitiesOverride = this.foldViewDeltaEntities(
+        ctx.scene, dsId, deps, snapshotInputs,
+      );
+      if (entitiesOverride === "skip") continue;
 
-      // Build the planning snapshot from live WASM state. Returns null
-      // when `view_query` produces no visible entities (dataset not yet
-      // registered, etc.) — skip the dataset in that case. On the fold path
-      // the entity set is passed as `entitiesOverride`, so the builder skips
-      // the full `view_query` and only computes the fresh `visible_region` +
-      // `selection`. `minimapPendingFetch` flows through into the snapshot so
-      // the planner emits minimap-lane requests at the highest priority
-      // (see ADR 0023).
+      // The builder skips `view_query` when given `entitiesOverride` but
+      // still computes `visible_region` and `selection` fresh.
+      // `minimapPendingFetch` flows into the snapshot so the minimap lane
+      // plans first (ADR 0023).
       const built = buildPlanningSnapshot({
         scene: ctx.scene,
         datasetId: dsId,
@@ -1374,7 +1357,7 @@ export class TickCoordinator {
     // requests are re-emitted from the cached active set + a snapshot whose only
     // difference is the new selection (and, on a Z move, the new z-range read
     // via one cheap `visible_region` call). This skips the O(N)
-    // `view_query`/`member_positions` serde AND `assignModes` — the dominant
+    // `view_query`/`member_positions` serde AND `buildActiveSet` — the dominant
     // remaining boundary cost — while producing exactly the requests a full
     // `plan()` would for the new T/Z. `assetCatalog.snapshot()` is dataset-
     // agnostic, so one shared snapshot serves every dataset's proxy budgeting.
@@ -1540,15 +1523,14 @@ export class TickCoordinator {
    * dataset is not registered (the scene reports `null`, exactly as the full
    * `view_query` path skips it).
    *
-   * Called only from the full-rebuild path and only when coarseDetail is
-   * enabled (the caller's gate). `deps` is the same manifest/placement join
-   * the full builder uses; `inputsRef` is the identity of the cached
-   * snapshot-inputs entry `deps` came from (the cursor's manifest/placement
-   * basis).
+   * Called only from the full-rebuild path. `deps` is the same
+   * manifest/placement join the full builder uses; `inputsRef` is the
+   * identity of the cached snapshot-inputs entry `deps` came from (the
+   * cursor's manifest/placement basis).
    *
    * Correctness: the returned array reconstructs the SAME snapshot a fresh
    * full build produces, on the render-affecting projection
-   * ({@link EntitySnapshot} `visible` / `idealTargetLod` / `kind` /
+   * ({@link EntitySnapshot} `visible` / `targetLevel` / `kind` /
    * `detailLevel` / `coarseLevel` / `parentId`, keyed by `image_id`). Records
    * in `entered` / `changed` are freshly assembled this tick; a carried-over
    * record was assembled on a prior tick with a basis proven identical (scene
@@ -1556,7 +1538,7 @@ export class TickCoordinator {
    * manifest-derived fields match a fresh build. Continuous fields
    * (`importance` / `projectedDiagonalPx` / `projectedAreaPx2` /
    * `centroidWorld`) may be stale on a carried-over record — intended, and
-   * never a mode/LOD input under coarseDetail.
+   * never an active-set input.
    */
   private foldViewDeltaEntities(
     scene: TickContext["scene"],

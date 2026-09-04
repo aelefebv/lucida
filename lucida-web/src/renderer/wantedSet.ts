@@ -16,9 +16,10 @@ import {
   RENDER_RADIUS_DISABLED,
   chunkWithinRenderRadius,
 } from "../pipeline/renderRadius.ts";
+import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import { makeCompositeKey } from "./chunkKeys.ts";
 import { memberIdForColdEntry } from "./descriptorBuffer.ts";
-import { memberTierKey, type ChunkTier } from "./poolKeys.ts";
+import { memberTierKey } from "./poolKeys.ts";
 
 /** Per-LOD metadata for an entity in a shared pool. */
 export interface AtlasLodMeta {
@@ -63,7 +64,7 @@ export interface WantedSetResult {
  *
  * Pure function — no side effects, no GPU dependencies.
  *
- * Chunk wanted-set rules: for each detail-owned LOD on each visible
+ * Chunk wanted-set rules: for each level a tier holds on each visible
  * channel, enumerate the visible-region grid cells and report any
  * whose composite slot key is missing.
  *
@@ -333,37 +334,22 @@ export function computeWantedSet(
 
 function renderRadiusForTier(
   coldState: ColdStateMessage,
-  tier: ChunkTier,
+  tier: ResidencyTier,
 ): number {
   return coldState.renderRadiusView?.[tier] ?? RENDER_RADIUS_DISABLED;
 }
 
+/** The levels each tier holds for a tile entry, detail first. */
 function chunkSourcesForEntry(
   entry: Exclude<ColdStateMessage["activeSet"][number], { kind: "group-as-proxy" }>,
-): Array<{ tier: ChunkTier; levels: number[] }> {
-  if (entry.detailLevel === undefined) {
-    const levels = entry.wantedLodLevels && entry.wantedLodLevels.length > 0
-      ? [...new Set(entry.wantedLodLevels)].sort((a, b) => a - b)
-      : levelsFromRange(entry.detailOwnedLodRange);
-    return [{ tier: "detail", levels }];
-  }
-
-  const sources: Array<{ tier: ChunkTier; levels: number[] }> = [
-    { tier: "detail", levels: [entry.detailLevel] },
+): Array<{ tier: ResidencyTier; levels: number[] }> {
+  const sources: Array<{ tier: ResidencyTier; levels: number[] }> = [
+    { tier: "detail", levels: entry.detailLevels },
   ];
-  if (
-    entry.coarseLevel !== undefined &&
-    entry.coarseLevel !== null
-  ) {
+  if (entry.coarseLevel !== null) {
     sources.push({ tier: "coarse", levels: [entry.coarseLevel] });
   }
   return sources;
-}
-
-function levelsFromRange([finest, coarsest]: [number, number]): number[] {
-  const out: number[] = [];
-  for (let lvl = finest; lvl <= coarsest; lvl++) out.push(lvl);
-  return out;
 }
 
 /**

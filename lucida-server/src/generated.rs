@@ -2929,6 +2929,13 @@ mod tests {
         binding_seed_for_data_type(levels, DataType::Uint16)
     }
 
+    fn source_path(resolver: &ChunkResolver, key: &str) -> object_store::path::Path {
+        resolver
+            .resolve(&ImageId("img-1".into()), key)
+            .unwrap()
+            .path
+    }
+
     fn binding_seed_for_data_type(
         levels: &[LevelGeometry],
         data_type: DataType,
@@ -3381,7 +3388,6 @@ mod tests {
     async fn generated_coarse_materializes_from_fake_source_without_mutating_source() {
         use object_store::PutPayload;
         use object_store::memory::InMemory;
-        use object_store::path::Path;
         use tokio::sync::broadcast;
 
         let source_level = level(0, [1, 1, 1, 4, 4], [1, 1, 1, 4, 4]);
@@ -3400,7 +3406,7 @@ mod tests {
         let seed = binding_seed_for(&[source_level]);
         let resolver = Arc::new(ChunkResolver::new(&seed));
         let store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
-        let source_path = Path::from("0/c/0/0/0/0/0");
+        let source_path = source_path(&resolver, "0/0/0/0/0/0");
         let mut source_bytes = Vec::new();
         for value in 0_u16..16 {
             source_bytes.extend_from_slice(&value.to_le_bytes());
@@ -3458,7 +3464,6 @@ mod tests {
     async fn generated_coarse_materializes_one_chunk_without_fetching_full_source() {
         use object_store::PutPayload;
         use object_store::memory::InMemory;
-        use object_store::path::Path;
         use tokio::sync::broadcast;
 
         let source_level = level(0, [1, 1, 1, 4, 4], [1, 1, 1, 2, 2]);
@@ -3477,7 +3482,7 @@ mod tests {
         let seed = binding_seed_for(&[source_level]);
         let resolver = Arc::new(ChunkResolver::new(&seed));
         let store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
-        let source_path = Path::from("0/c/0/0/0/0/0");
+        let source_path = source_path(&resolver, "0/0/0/0/0/0");
         let mut source_bytes = Vec::new();
         for value in [10_u16, 20, 30, 40] {
             source_bytes.extend_from_slice(&value.to_le_bytes());
@@ -3532,7 +3537,6 @@ mod tests {
     async fn generated_coarse_materializes_float32_source_chunks() {
         use object_store::PutPayload;
         use object_store::memory::InMemory;
-        use object_store::path::Path;
         use tokio::sync::broadcast;
 
         let source_level = level(0, [1, 1, 1, 2, 2], [1, 1, 1, 2, 2]);
@@ -3551,7 +3555,7 @@ mod tests {
         let seed = binding_seed_for_data_type(&[source_level], DataType::Float32);
         let resolver = Arc::new(ChunkResolver::new(&seed));
         let store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
-        let source_path = Path::from("0/c/0/0/0/0/0");
+        let source_path = source_path(&resolver, "0/0/0/0/0/0");
         let mut source_bytes = Vec::new();
         for value in [0.0_f32, 0.5, 1.0, 2.0] {
             source_bytes.extend_from_slice(&value.to_le_bytes());
@@ -3608,7 +3612,6 @@ mod tests {
     async fn generated_coarse_treats_missing_source_chunks_as_zero_fill() {
         use object_store::PutPayload;
         use object_store::memory::InMemory;
-        use object_store::path::Path;
         use tokio::sync::broadcast;
 
         let source_level = level(0, [1, 1, 1, 2, 2], [1, 1, 1, 1, 1]);
@@ -3627,7 +3630,7 @@ mod tests {
         let seed = binding_seed_for(&[source_level]);
         let resolver = Arc::new(ChunkResolver::new(&seed));
         let store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
-        let source_path = Path::from("0/c/0/0/0/0/1");
+        let source_path = source_path(&resolver, "0/0/0/0/0/1");
         store
             .put(&source_path, PutPayload::from(7_u16.to_le_bytes().to_vec()))
             .await

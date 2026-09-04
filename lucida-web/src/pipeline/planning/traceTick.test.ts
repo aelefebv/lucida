@@ -20,6 +20,7 @@ function makeRequest(overrides?: Partial<ChunkRequest>): ChunkRequest {
     y: 0,
     x: 0,
     lane: "detail",
+    tier: "detail",
     priority: 0,
     chunkKey: "0/0/0/0/0/0",
     ...overrides,
@@ -32,9 +33,8 @@ function tileEntry(entityId: string, mode: "tiles-with-detail" | "tiles-with-pro
     entityId,
     imageId: "image-1",
     mode,
-    targetLod: 0,
-    coarsestDetailLod: 2,
-    detailOwnedLodRange: [0, 2],
+    detailLevels: [0],
+    coarseLevel: null,
     proxyKind: undefined,
     proxyAvailable: false,
     groupProxyAvailable: false,
@@ -118,13 +118,12 @@ describe("recordPlanningTick", () => {
     expect(tick.counters.plannedChunks).toBe(6);
   });
 
-  it("carries the culling funnel and the catalog degradations", () => {
+  it("carries the culling funnel", () => {
     const stats = emptyPlanStats();
     stats.culling.considered = 400;
     stats.culling.afterXyBounds = 200;
     stats.culling.afterZRange = 80;
     stats.culling.afterFrustum = 30;
-    stats.catalogDegradations = 2;
 
     recordPlanningTick("ds-1", makePlan({ stats }), NO_RESIDENCY, recorder);
 
@@ -133,7 +132,6 @@ describe("recordPlanningTick", () => {
     expect(tick.counters.cullingAfterXyBounds).toBe(200);
     expect(tick.counters.cullingAfterZRange).toBe(80);
     expect(tick.counters.cullingAfterFrustum).toBe(30);
-    expect(tick.counters.catalogDegradations).toBe(2);
   });
 
   it("tallies the active set by mode over the whole set", () => {

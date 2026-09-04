@@ -12,6 +12,17 @@ pub fn chunk_key(level: u32, t: u32, c: u32, z: u32, y: u32, x: u32) -> String {
     crate::chunk::chunk_key(level, t, c, z, y, x)
 }
 
+/// The level the screen calls for, from [`crate::target_level::target_level`],
+/// the rule every record of [`WasmScene::view_query`] applies.
+/// `pixels_per_sample` is device pixels per level-0 sample, `shape_ratios[L]`
+/// is how many times coarser level `L` is than level 0, and `previous` is the
+/// level the caller last received for the same image, or `undefined` for the
+/// rule without hysteresis.
+#[wasm_bindgen]
+pub fn target_level(pixels_per_sample: f64, shape_ratios: &[f64], previous: Option<u32>) -> u32 {
+    crate::target_level::target_level(pixels_per_sample, shape_ratios, previous)
+}
+
 /// GPU camera matrices for an off-screen render of an *arbitrary* camera, in the
 /// exact 35-float layout the volume renderer wants:
 /// `invViewProj[16] + eye[3] + viewProj[16]` — identical to

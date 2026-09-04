@@ -9,6 +9,7 @@
  */
 
 import type { FetchErrorKind } from "../pipeline/fetch/retry.ts";
+import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type { ChunkFeedbackReason } from "../renderer/workerProtocol.ts";
 
 /**
@@ -109,14 +110,6 @@ export type RowOutcomeValue = (typeof RowOutcome)[keyof typeof RowOutcome];
 export type RowOutcomeName = "in-flight" | "complete" | "retired";
 
 export const ROW_OUTCOME_NAMES: readonly RowOutcomeName[] = ["in-flight", "complete", "retired"];
-
-/**
- * Row identity carries the residency tier because `chunkKey` alone is not
- * unique: the same key legitimately exists twice under the two tiers, which
- * have separate budgets and separate eviction (ADR 0039, ADR 0041).
- */
-export type ResidencyTierName = "detail" | "coarse";
-export const RESIDENCY_TIER_NAMES: readonly ResidencyTierName[] = ["detail", "coarse"];
 
 /**
  * Which lane a request travelled on. An attribute of the row, not a phase of
@@ -735,7 +728,12 @@ export interface TraceRow extends WireLabel {
   imageId: string;
   /** An attribute, not a phase. */
   lane: LaneName;
-  residencyTier: ResidencyTierName;
+  /**
+   * Part of the row's identity. The same chunk key legitimately exists
+   * under both tiers, which have separate budgets and separate eviction
+   * (ADR 0039, ADR 0041), so the key alone is not unique.
+   */
+  residencyTier: ResidencyTier;
   level: number;
   t: number;
   c: number;
@@ -867,7 +865,7 @@ export interface TracePointEvent {
     datasetId: string;
     entityId: string;
     imageId: string;
-    residencyTier: ResidencyTierName;
+    residencyTier: ResidencyTier;
     level: number;
     t: number;
     c: number;

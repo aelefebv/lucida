@@ -71,17 +71,14 @@ function identityMatrix(): Float32Array {
   return m;
 }
 
-function tile(entityId: string, imageId: string, targetLod = 0): ColdStateActiveEntry {
+function tile(entityId: string, imageId: string, level = 0): ColdStateActiveEntry {
   return {
     kind: "tile",
     entityId,
     imageId,
     mode: "tiles-with-detail",
-    targetLod,
-    detailOwnedLodRange: [targetLod, targetLod],
-    detailLevel: targetLod,
+    detailLevels: [level],
     coarseLevel: null,
-    wantedLodLevels: [targetLod],
     levels: [
       { level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] },
     ],

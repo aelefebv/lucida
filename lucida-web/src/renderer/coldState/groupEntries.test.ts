@@ -12,6 +12,7 @@ import { groupEntriesByPool } from "./groupEntries.ts";
 import type {
   ColdStateMessage,
   ColdStateActiveEntry,
+  ColdStateTileEntry,
 } from "../workerProtocol.ts";
 
 function identityMatrix(): Float32Array {
@@ -32,7 +33,7 @@ function defaultDisplay(): ColdStateActiveEntry["displayStateByChannel"][number]
 }
 
 function makeEntry(
-  opts: Partial<Omit<ColdStateActiveEntry, "kind">> & {
+  opts: Partial<Omit<ColdStateTileEntry, "kind" | "mode">> & {
     entityId: string;
     imageId: string;
     mode: ColdStateActiveEntry["mode"];
@@ -40,11 +41,6 @@ function makeEntry(
 ): ColdStateActiveEntry {
   const base = {
     entityId: opts.entityId,
-    targetLod: opts.targetLod ?? 0,
-    detailOwnedLodRange: opts.detailOwnedLodRange ?? [0, 0] as [number, number],
-    detailLevel: opts.detailLevel,
-    coarseLevel: opts.coarseLevel,
-    wantedLodLevels: opts.wantedLodLevels,
     levels: opts.levels ?? [
       { level: 0, chunkShape: [1, 64, 64] as [number, number, number], gridShape: [1, 4, 4] as [number, number, number], levelDims: [1, 256, 256] as [number, number, number] },
     ],
@@ -68,6 +64,8 @@ function makeEntry(
     kind: "tile",
     imageId: opts.imageId,
     mode: opts.mode,
+    detailLevels: opts.detailLevels ?? [0],
+    coarseLevel: opts.coarseLevel ?? null,
     parentGroupId: opts.parentGroupId ?? null,
   };
 }
@@ -175,7 +173,7 @@ describe("groupEntriesByPool — volume", () => {
     const cold = makeCold([
       makeEntry({
         entityId: "groupA", imageId: "", mode: "group-as-proxy",
-        levels: [], detailOwnedLodRange: [0, 0],
+        levels: [],
       }),
       makeEntry({
         entityId: "imgB", imageId: "imgB", mode: "tiles-with-detail",
@@ -191,9 +189,8 @@ describe("groupEntriesByPool — volume", () => {
     const cold = makeCold([
       makeEntry({
         entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
-        detailLevel: 0,
+        detailLevels: [0],
         coarseLevel: 2,
-        wantedLodLevels: [0, 2],
         levels: [
           { level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] },
           { level: 2, chunkShape: [8, 128, 128], gridShape: [8, 2, 2], levelDims: [64, 256, 256] },
@@ -218,9 +215,8 @@ describe("groupEntriesByPool — volume", () => {
     const cold = makeCold([
       makeEntry({
         entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
-        detailLevel: 1,
+        detailLevels: [1],
         coarseLevel: 1,
-        wantedLodLevels: [1],
         levels: [
           { level: 1, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] },
         ],

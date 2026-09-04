@@ -51,13 +51,12 @@ import {
   SOURCE_OFFSET_LEVEL,
   SOURCE_OFFSET_LEVEL_DIMS,
   SOURCE_OFFSET_VALID,
-  DESCRIPTOR_TIER_SOURCE_SIZE,
 } from "./descriptor/layout.ts";
 import {
   proxyDescriptorKey,
   type EntityProxyDescriptor,
 } from "./workerContext.ts";
-import type { ColdStateActiveEntry, ColdStateMessage } from "./workerProtocol.ts";
+import type { ColdStateActiveEntry, ColdStateMessage, ColdStateTileEntry } from "./workerProtocol.ts";
 import type { ProxyAtlasState } from "./proxyAtlas.ts";
 import type { LodIndirectionMeta } from "./volume/atlas.ts";
 
@@ -128,7 +127,7 @@ function defaultDisplayState(): ColdStateActiveEntry["displayStateByChannel"][nu
  * entry. Hides the discriminated-union construction so test fixtures
  * don't have to know about it.
  */
-type MakeEntryOpts = Partial<Omit<ColdStateActiveEntry, "kind">> & {
+type MakeEntryOpts = Partial<Omit<ColdStateTileEntry, "kind" | "mode">> & {
   entityId: string;
   imageId: string;
   mode: ColdStateActiveEntry["mode"];
@@ -136,11 +135,6 @@ type MakeEntryOpts = Partial<Omit<ColdStateActiveEntry, "kind">> & {
 function makeEntry(opts: MakeEntryOpts): ColdStateActiveEntry {
   const base = {
     entityId: opts.entityId,
-    targetLod: opts.targetLod ?? 0,
-    detailOwnedLodRange: opts.detailOwnedLodRange ?? [0, 0] as [number, number],
-    detailLevel: opts.detailLevel,
-    coarseLevel: opts.coarseLevel,
-    wantedLodLevels: opts.wantedLodLevels,
     levels: opts.levels ?? [
       { level: 0, chunkShape: [1, 64, 64] as [number, number, number], gridShape: [1, 4, 4] as [number, number, number], levelDims: [1, 256, 256] as [number, number, number] },
     ],
@@ -164,6 +158,8 @@ function makeEntry(opts: MakeEntryOpts): ColdStateActiveEntry {
     kind: "tile",
     imageId: opts.imageId,
     mode: opts.mode,
+    detailLevels: opts.detailLevels ?? [0],
+    coarseLevel: opts.coarseLevel ?? null,
     parentGroupId: opts.parentGroupId ?? null,
   };
 }
@@ -194,14 +190,14 @@ function makeCold(
 }
 
 /** Build LodIndirectionMeta[] for an entry the way the worker builds them
- *  (per-entity offset accumulating in canonical detailOwnedLodRange order),
- *  for tests that need to seed the new descriptor `entityMetasByMember`
- *  argument with realistic absolute offsets. */
+ *  (per-entity offset accumulating in `detailLevels` order), for tests
+ *  that need to seed the descriptor `entityMetasByMember` argument with
+ *  realistic absolute offsets. */
 function metasFromEntry(entry: ColdStateActiveEntry): LodIndirectionMeta[] {
-  const [finest, coarsest] = entry.detailOwnedLodRange;
+  if (entry.kind !== "tile") return [];
   const out: LodIndirectionMeta[] = [];
   let offset = 0;
-  for (let lvl = finest; lvl <= coarsest; lvl++) {
+  for (const lvl of entry.detailLevels) {
     const lm = entry.levels.find(l => l.level === lvl);
     if (!lm) continue;
     const [cZ, cY, cX] = lm.chunkShape;
@@ -215,20 +211,6 @@ function metasFromEntry(entry: ColdStateActiveEntry): LodIndirectionMeta[] {
       offset,
     });
     offset += gX * gY * Math.max(gZ, 1);
-  }
-  if (out.length === 0) {
-    const lm = entry.levels.find(l => l.level === entry.targetLod);
-    if (!lm) return out;
-    const [cZ, cY, cX] = lm.chunkShape;
-    const [gZ, gY, gX] = lm.gridShape;
-    const [lD, lH, lW] = lm.levelDims;
-    out.push({
-      level: entry.targetLod,
-      gridDims: [gZ, gY, gX],
-      chunkDims: [cZ, cY, cX],
-      levelDims: [lD, lH, lW],
-      offset: 0,
-    });
   }
   return out;
 }
@@ -466,8 +448,7 @@ describe("EntityDescriptor byte layout", () => {
     const buf = new ArrayBuffer(DESCRIPTOR_ENTRY_SIZE);
     const entry = makeEntry({
       entityId: "e1", imageId: "img-0", mode: "tiles-with-detail",
-      detailOwnedLodRange: [0, 2],
-      targetLod: 0,
+      detailLevels: [0, 1, 2],
       levels: [
         { level: 0, chunkShape: [1, 64, 64], gridShape: [1, 4, 4], levelDims: [1, 256, 256] },
         { level: 1, chunkShape: [1, 32, 32], gridShape: [1, 2, 2], levelDims: [1, 128, 128] },
@@ -520,9 +501,8 @@ describe("EntityDescriptor byte layout", () => {
     const buf = new ArrayBuffer(DESCRIPTOR_ENTRY_SIZE);
     const entry = makeEntry({
       entityId: "e1", imageId: "img-0", mode: "tiles-with-detail",
-      detailLevel: 0,
+      detailLevels: [0],
       coarseLevel: 2,
-      wantedLodLevels: [0, 2],
       levels: [
         { level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] },
         { level: 2, chunkShape: [8, 128, 128], gridShape: [8, 2, 2], levelDims: [64, 256, 256] },
@@ -577,9 +557,8 @@ describe("EntityDescriptor byte layout", () => {
     const buf = new ArrayBuffer(DESCRIPTOR_ENTRY_SIZE);
     const entry = makeEntry({
       entityId: "e1", imageId: "img-0", mode: "tiles-with-detail",
-      detailLevel: 1,
+      detailLevels: [1],
       coarseLevel: 1,
-      wantedLodLevels: [1],
       levels: [
         { level: 1, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] },
       ],
@@ -611,15 +590,6 @@ describe("EntityDescriptor byte layout", () => {
     expect(u32[coarse + SOURCE_OFFSET_INDIRECTION_OFFSET / 4]).toBe(43);
   });
 
-  it("keeps tier sources invalid for legacy entries without detailLevel", () => {
-    const buf = new ArrayBuffer(DESCRIPTOR_ENTRY_SIZE);
-    const entry = makeEntry({ entityId: "e1", imageId: "img-0", mode: "tiles-with-detail" });
-    serializeEntityDescriptor(buf, 0, entry, metasFromEntry(entry), defaultDisplayState(), new Map(), new Map(), [], new Map());
-    const u32 = new Uint32Array(buf);
-    for (let i = 0; i < (2 * DESCRIPTOR_TIER_SOURCE_SIZE) / 4; i++) {
-      expect(u32[OFFSET_DETAIL_SOURCE / 4 + i]).toBe(0);
-    }
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -954,14 +924,13 @@ describe("transient descriptor matches canonical for equivalent params", () => {
     //   - colormap absent → lutIdx = 0 (matches transient writer which
     //     skips colormapLutIndex entirely → buffer-init zero)
     //   - channelMask = 0 (transient writer doesn't write it)
-    // `metasFromEntry` walks (entry.levels × entry.detailOwnedLodRange) in
+    // `metasFromEntry` walks (entry.levels × entry.detailLevels) in
     // X/Y/Z conventions that match `serializeEntityDescriptor` → the LOD
     // bytes line up with what the transient writer emits.
     const entry = makeEntry({
       entityId: "transient", imageId: "transient", mode: "tiles-with-detail",
       modelMatrix, invModelMatrix,
-      detailOwnedLodRange: [0, 0],
-      targetLod: 0,
+      detailLevels: [0],
       levels: [{
         level: 0,
         chunkShape: [volumeDims[2], volumeDims[1], volumeDims[0]], // (Z, Y, X)

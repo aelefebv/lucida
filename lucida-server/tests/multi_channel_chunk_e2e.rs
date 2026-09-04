@@ -29,8 +29,10 @@ use std::sync::Arc;
 
 use lucida_content::ImageId;
 use lucida_server::binding::ChunkResolver;
-use lucida_server::decode::decode_storage_bytes;
+use lucida_server::chunk_read::{ChunkRead, read_chunk};
 use lucida_store::import::import_dataset;
+use lucida_store::source_limiter::{ReaderId, RequestLabel};
+use object_store::path::Path;
 
 /// Single chunk for shape `[1,5,1,4,4]` uint16: 5 channels × 16 elements
 /// × 2 bytes = 160 plaintext bytes. Encoded with blosc-zstd-bitshuffle to
@@ -160,46 +162,48 @@ async fn five_channels_per_chunk_resolve_and_slice_independently() {
     assert_eq!(layout.byte_stride_c, 4 * 4 * 2);
     assert_eq!(layout.chunk_size_c, 5);
 
-    // Build the resolver and exercise the same fetch+decode+slice path
-    // serve_chunk_from_store uses, once per channel.
     let resolver = Arc::new(ChunkResolver::new(&result.binding_seed));
     let image_id = ImageId("multi-c-e2e".to_string());
-    let level_info = resolver.level_info(&image_id, 0).unwrap();
 
     let mut all_channels_bytes = Vec::with_capacity(5);
     for c in 0..5u16 {
         let canonical_key = format!("0/0/{c}/0/0/0");
-        let resolved_path = resolver.resolve(&image_id, &canonical_key).unwrap();
+        let location = resolver.resolve(&image_id, &canonical_key).unwrap();
         // All 5 channels resolve to the same on-disk chunk file
         // (chunk_shape[c] = 5 means c-axis-grid has only 1 chunk).
         assert_eq!(
-            resolved_path, "0/c/0/0/0/0/0",
+            location.path,
+            Path::from("0/c/0/0/0/0/0"),
             "wire c={c} should resolve to disk c-coord 0 (5 channels per chunk)",
         );
-
-        // Read the chunk file off disk and run it through the same decode
-        // + slice logic the handler uses.
-        let chunk_bytes = fs::read(dir.join(&resolved_path)).unwrap();
-        assert_eq!(chunk_bytes, ENC_5CH_BLOSC);
-        let decoded = decode_storage_bytes(&chunk_bytes, level_info.compression).unwrap();
         assert_eq!(
-            decoded.len(),
-            layout.on_disk_byte_size,
-            "decoded should be 160 bytes (all 5 channels)",
+            fs::read(dir.join(location.path.as_ref())).unwrap(),
+            ENC_5CH_BLOSC
         );
 
-        // The handler calls slice_range with the wire (t, c) values.
-        let (offset, size) = layout.slice_range(0, c as u64);
-        let sliced = &decoded[offset..offset + size];
+        let read = read_chunk(
+            &resolver,
+            &store,
+            &image_id,
+            &canonical_key,
+            ReaderId::UNATTRIBUTED,
+            RequestLabel::UNATTRIBUTED,
+            None,
+        )
+        .await
+        .unwrap();
+        let ChunkRead::Present(sliced) = read else {
+            panic!("chunk {canonical_key} is on disk");
+        };
         assert_eq!(sliced.len(), 32, "each channel slice should be 32 bytes");
         assert_eq!(
             sliced,
-            expected_channel_bytes(c).as_slice(),
+            expected_channel_bytes(c),
             "channel {c} bytes must match expected pattern (0x{:04x} × 16)",
             (c + 1) * 0x1111,
         );
 
-        all_channels_bytes.push(sliced.to_vec());
+        all_channels_bytes.push(sliced);
     }
 
     // Cross-check: all 5 channels return distinct bytes (catches "always

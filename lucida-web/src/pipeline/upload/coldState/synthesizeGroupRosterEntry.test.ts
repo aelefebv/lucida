@@ -58,7 +58,7 @@ function makeTile(
     projectedDiagonalPx: 100,
     projectedAreaPx2: 10000,
     centroidWorld: [0, 0, 0],
-    idealTargetLod: 0,
+    targetLevel: 0,
     importance: 1,
     layoutPositionVox: pos,
     levels: [

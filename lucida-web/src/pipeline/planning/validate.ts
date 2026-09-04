@@ -35,7 +35,7 @@ import type { ActiveSetEntry, EntitySnapshot, PlanningSnapshot, PlanningState } 
  * The snapshot only carries entities WASM's `view_query` returned this
  * tick — a visible tile can have an invisible parent group that doesn't
  * appear at all. The planner's `groupMembers` already handles this via a
- * `groupEntity: null` group (see `pipeline/planning/modes.ts`); treating
+ * `groupEntity: null` group (see `pipeline/planning/activeSet.ts`); treating
  * a missing parent as a violation would false-positive on every
  * legitimate tile-without-visible-parent snapshot the orchestrator
  * builds. This narrowed form catches the genuinely-broken case (parent
@@ -60,8 +60,8 @@ export function checkTileParentRefs(snapshot: PlanningSnapshot): void {
  * Check 2 — entityId uniqueness.
  *
  * Every `entityId` must be unique across `snapshot.entities`. Duplicate
- * ids cause `prevModeByGroup` (and other entity-keyed maps inside the
- * planner and downstream consumers) to silently drop earlier values.
+ * ids cause the entity-keyed maps inside the planner and downstream
+ * consumers to silently drop earlier values.
  */
 export function checkUniqueEntityIds(snapshot: PlanningSnapshot): void {
   const seen = new Set<string>();
@@ -175,8 +175,8 @@ export function checkVisibleRegionBounds(snapshot: PlanningSnapshot): void {
  * Check 8 — previousActiveSet has no duplicate entityIds.
  *
  * `state.previousActiveSet` must have no duplicate `entityId` entries.
- * Duplicates break `prevModeByGroup`'s last-write-wins indexing
- * downstream of the planner.
+ * Duplicates break the entity-keyed indexing the cold-state delta builds
+ * over it downstream of the planner.
  */
 export function checkPrevActiveSetUnique(state: PlanningState): void {
   const seen = new Set<string>();
@@ -204,7 +204,7 @@ export function checkPrevActiveSetUnique(state: PlanningState): void {
  *     non-collection datasets) so they go through the same tile-mode
  *     code path as collection tiles. The active-set entry it produces is
  *     therefore a `TileEntry` even though the entity itself is an
- *     `ImageSnapshot`. See `pipeline/planning/modes.ts::groupMembers`.
+ *     `ImageSnapshot`. See `pipeline/planning/activeSet.ts::groupMembers`.
  *   - `kind: "invisible"`     ⇒ NOT validated against entity kind. An
  *     entity can become invisible regardless of its kind, so the
  *     invisible variant is intentionally permissive.
