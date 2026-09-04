@@ -46,6 +46,9 @@ function tick(counted: Partial<TraceTick["counted"]>): TraceTick {
     counted: { "cache-admission": 0, "worker-dispatch": 0, "coalesce-attach": 0, ...counted },
     levels: [],
     levelsDropped: 0,
+    targetLevel: null,
+    levelPinned: false,
+    displayedLevel: null,
   };
 }
 

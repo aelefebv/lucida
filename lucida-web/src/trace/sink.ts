@@ -20,6 +20,7 @@ import { TickRing, type TickScratch } from "./tickRing.ts";
 import type {
   ChunkEventSource,
   ChunkRowSource,
+  LevelChangeReason,
   PointEventIndex,
   PointEventReason,
   RowOutcomeValue,
@@ -54,6 +55,16 @@ export interface TraceSink {
     reason: PointEventReason,
     chunk: ChunkEventSource | null,
     tier: 0 | 1,
+  ): void;
+  /** A `level-change` point event: the dataset's target moved from one range to another. */
+  appendLevelChange(
+    atUs: number,
+    reason: LevelChangeReason,
+    datasetId: string,
+    fromMin: number,
+    fromMax: number,
+    toMin: number,
+    toMax: number,
   ): void;
   serialiseEvents(): TracePointEvent[];
   readonly length: number;
@@ -109,6 +120,8 @@ export class NoopTraceSink implements TraceSink {
   }
 
   appendEvent(): void {}
+
+  appendLevelChange(): void {}
 
   serialiseEvents(): TracePointEvent[] {
     return [];
@@ -194,6 +207,18 @@ export class TableTraceSink implements TraceSink {
     tier: 0 | 1,
   ): void {
     this.events.append(atUs, kind, reason, chunk, tier);
+  }
+
+  appendLevelChange(
+    atUs: number,
+    reason: LevelChangeReason,
+    datasetId: string,
+    fromMin: number,
+    fromMax: number,
+    toMin: number,
+    toMax: number,
+  ): void {
+    this.events.appendLevelChange(atUs, reason, datasetId, fromMin, fromMax, toMin, toMax);
   }
 
   serialiseEvents(): TracePointEvent[] {

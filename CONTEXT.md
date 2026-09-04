@@ -290,14 +290,15 @@ _Avoid_: endpoint, hook, API
 
 **Point event**:
 A rare occurrence recorded as a single timestamped record rather than a phase
-boundary: eviction, rejection, retry, failure.
+boundary: eviction, rejection, retry, failure, and a *level change*, which is a
+dataset's target level moving and names the old and new level.
 _Avoid_: incident, error (a point event is not necessarily a failure)
 
 **Per-tick aggregate**:
 One sample per planning tick per dataset — lane counts, the culling funnel,
-active-set tallies, per-level planned against cached and in-flight. Kept on a
-drop-oldest ring, unlike the per-chunk tier, because a steady-state stream has no
-privileged start.
+active-set tallies, per-level planned against cached and in-flight, and the
+dataset's target and displayed level. Kept on a drop-oldest ring, unlike the
+per-chunk tier, because a steady-state stream has no privileged start.
 _Avoid_: snapshot, stats, gauge (a gauge has no memory of when)
 
 **Display track**:
