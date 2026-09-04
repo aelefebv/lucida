@@ -2,16 +2,18 @@
  * Incremental per-entity snapshot assembly. Holds the single per-row
  * translation from a scene view-query record into an {@link EntitySnapshot}
  * (snake_case → camelCase plus the manifest join for `levels`,
- * `targetLevel`, `coarseLevel`, `parentId`, and `layoutPositionVox`), and
- * the fold that applies an incremental view-query delta on top of a prior
- * per-image snapshot map.
+ * `coarseLevel`, `parentId`, and `layoutPositionVox`), and the fold that
+ * applies an incremental view-query delta on top of a prior per-image
+ * snapshot map.
  *
- * # The target level is resolved here, once
+ * # The target level arrives resolved
  *
- * {@link resolveTargetLevel} combines the level pin and the core's screen
- * level into one `targetLevel`; the planner reads it and chooses no level
- * of its own. The fold covers both inputs: the screen level is quantized,
- * and the pin is in the cursor basis the caller invalidates on.
+ * The core's view query reports each record's `targetLevel` with the
+ * dataset's level pin folded in and clamped to the image's source levels
+ * (`Scene::member_target_level`). This module copies it and the planner
+ * reads it. Neither chooses nor clamps a level, so the core stays the one
+ * home of that rule (ADR 0061). The level is in the quantized set the delta
+ * tracks, so a zoom or a pin edit arrives as a `changed` record.
  *
  * The full builder (`snapshot.ts`) and the fold below share
  * {@link makeEntitySnapshot} so a delta-reconstructed snapshot is identical,
@@ -41,7 +43,6 @@
  */
 
 import type { ImageSpec } from "../../manifestTypes.ts";
-import type { DatasetSettings } from "../../tickCommon.ts";
 import type { EntitySnapshot } from "./types.ts";
 import type { SceneEpochs } from "../epochs.ts";
 
@@ -83,54 +84,13 @@ export type ViewQueryDeltaJson =
 /**
  * Camera-independent inputs to {@link makeEntitySnapshot}: the manifest
  * joins (`imageSpecById`, `parentByEntityId`) and the fixed layout placement
- * (`positions`), plus the per-dataset settings that supply the level pin.
- * All four are stable across a camera move, so a caller assembles them once
- * and reuses them for every record in a delta.
+ * (`positions`). All three are stable across a camera move, so a caller
+ * assembles them once and reuses them for every record in a delta.
  */
 export interface SnapshotEntityDeps {
   imageSpecById: Map<string, ImageSpec>;
   parentByEntityId: Map<string, string | null>;
   positions: Record<string, [number, number]>;
-  dsSettings: DatasetSettings | undefined;
-}
-
-function generatedLevelIndices(imgSpec: ImageSpec | undefined): Set<number> {
-  return new Set(
-    (imgSpec?.multiscale.generated_levels ?? []).map((level) => level.level_index),
-  );
-}
-
-/**
- * Generated coarse levels belong to the coarse tier and are never a target
- * (ADR 0040).
- */
-function selectableSourceLevels(imgSpec: ImageSpec | undefined): number[] {
-  if (!imgSpec) return [0];
-  const generated = generatedLevelIndices(imgSpec);
-  const sourceLevels = imgSpec.multiscale.levels
-    .map((level, idx) => level.level_index ?? idx)
-    .filter((level) => !generated.has(level))
-    .sort((a, b) => a - b);
-  return sourceLevels.length > 0 ? sourceLevels : [0];
-}
-
-/**
- * Level pin when set, otherwise the core's screen level, both clamped the
- * way `MultiscaleInfo::pinned_level` in `lucida-content` clamps a pin. The
- * core's screen rule ranks every level the pyramid lists, generated ones
- * included, so the clamp is what keeps the detail tier off a generated
- * level. Memory and residency are not inputs (ADR 0061).
- */
-function resolveTargetLevel(
-  imgSpec: ImageSpec | undefined,
-  levelPin: number | null | undefined,
-  screenLevel: number,
-): number {
-  const selectable = selectableSourceLevels(imgSpec);
-  const requested = typeof levelPin === "number" ? levelPin : screenLevel;
-  if (selectable.includes(requested)) return requested;
-  const finerOrEqual = selectable.filter((level) => level <= requested).at(-1);
-  return finerOrEqual ?? selectable[0] ?? 0;
 }
 
 /**
@@ -149,8 +109,9 @@ export function resolveCoarseLevel(imgSpec: ImageSpec | undefined): number | nul
 
 /**
  * Translate one view-query record into an {@link EntitySnapshot}, joining the
- * scene payload with the manifest for `levels`, `targetLevel`, `coarseLevel`,
- * `parentId`, and `layoutPositionVox`.
+ * scene payload with the manifest for `levels`, `coarseLevel`, `parentId`,
+ * and `layoutPositionVox`. `targetLevel` is the record's own, as the core
+ * reported it.
  *
  * {@link EntitySnapshot} is a discriminated union: the record's `kind`
  * selects the variant. A `Tile` requires a non-null parent edge in the
@@ -166,11 +127,6 @@ export function makeEntitySnapshot(
 ): EntitySnapshot {
   const imgSpec = deps.imageSpecById.get(row.image_id);
   const levels = imgSpec ? imgSpec.multiscale.levels : [];
-  const targetLevel = resolveTargetLevel(
-    imgSpec,
-    deps.dsSettings?.detail_level_override,
-    row.target_level,
-  );
   const coarseLevel = resolveCoarseLevel(imgSpec);
   const layoutPositionVox =
     deps.positions[row.entity_id] ?? ([0, 0] as [number, number]);
@@ -181,7 +137,7 @@ export function makeEntitySnapshot(
     projectedDiagonalPx: row.projected_diagonal_px,
     projectedAreaPx2: row.projected_area_px2,
     centroidWorld: row.centroid_world,
-    targetLevel,
+    targetLevel: row.target_level,
     coarseLevel,
     importance: row.importance,
     layoutPositionVox,

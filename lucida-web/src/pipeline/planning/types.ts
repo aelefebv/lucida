@@ -34,11 +34,12 @@ export interface BaseEntitySnapshot {
    * the level geometry, the coarsest level that still places at least one
    * sample under every device pixel, held across a boundary by hysteresis.
    * Always one of the image's source levels; a generated coarse level is
-   * never a target. Resolved once, in `snapshotDelta.ts`.
+   * never a target. The core resolves and clamps it in its view query, and
+   * the browser copies it.
    *
-   * The screen's level is part of the quantized set the view-query delta
-   * tracks, so a zoom that moves it arrives as a `changed` record, and the
-   * pin is part of the fold cursor's basis. Memory pressure is not an input.
+   * The level is part of the quantized set the view-query delta tracks, so
+   * a zoom or a pin edit that moves it arrives as a `changed` record. Memory
+   * pressure is not an input.
    */
   targetLevel: number;
   /**

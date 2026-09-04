@@ -120,11 +120,13 @@ pub struct EntityQueryResult {
     pub projected_diagonal_px: f64,
     pub projected_area_px2: f64,
     pub centroid_world: [f64; 3],
-    /// The pyramid level the screen calls for, from
-    /// [`crate::target_level::target_level`]: the coarsest level that still
-    /// places at least one sample under every device pixel, held across a
-    /// level boundary by hysteresis. Off-screen records report the coarsest
-    /// level.
+    /// The target level. The dataset's level pin when it has one, else the
+    /// level the screen calls for from [`crate::target_level::target_level`],
+    /// the coarsest level that still places at least one sample under every
+    /// device pixel, held across a level boundary by hysteresis. Either is
+    /// clamped to the image's source levels, so a visible record never names
+    /// a generated coarse level. Off-screen records report the pyramid's last
+    /// level, generated or not.
     pub target_level: u32,
     pub importance: f64,
 }

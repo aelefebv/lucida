@@ -643,14 +643,13 @@ impl Scene {
     /// single-member-at-origin case this is a single element whose
     /// `needed`/`prefetch` lists are identical to the old flat plan.
     ///
-    /// Every chunk of a member is at one level. A level pin, clamped to the
-    /// member's selectable levels, wins. Otherwise the level is the one the
-    /// screen calls for, from the same measure and rule as
-    /// [`Scene::view_query`]'s `target_level`, so this plan and the browser
-    /// agree on the level for a camera. The hysteresis history is the scene's
-    /// own. A scene that never ran [`Scene::view_query_delta`] applies the
-    /// rule without it, and can sit one level away from a browser that zoomed
-    /// to the same camera through a level boundary.
+    /// Every chunk of a member is at the member's target level, from
+    /// [`Scene::member_target_level`]. That is the rule and the hysteresis
+    /// history [`Scene::view_query`] reports as `target_level`, so this plan
+    /// and the browser agree on the level for a camera. A scene that never
+    /// ran [`Scene::view_query_delta`] applies the rule without history, and
+    /// can sit one level away from a browser that zoomed to the same camera
+    /// through a level boundary.
     ///
     /// For multi-member datasets (collections), each member's AABB is checked
     /// against the visible region, and chunk planning is done in
@@ -661,15 +660,8 @@ impl Scene {
 
         let is_2d = matches!(self.camera, Camera::Slice(_));
         let last_query = self.last_query_entries(dataset_id);
-        let pin = self
-            .dataset_settings
-            .get(dataset_id)
-            .and_then(|settings| settings.detail_level_override);
-        let multiscale_by_image: HashMap<&ImageId, &MultiscaleInfo> = manifest
-            .images()
-            .iter()
-            .map(|image| (&image.image_id, &image.multiscale))
-            .collect();
+        let pin = self.level_pin(dataset_id);
+        let multiscale_by_image = multiscale_by_image(manifest);
 
         let mut plans = Vec::new();
         for member in &derived.members {
@@ -729,18 +721,13 @@ impl Scene {
                     .map(|planes| planes.map(|[a, b, c, d]| [a, b, c, d + a * pos_x + b * pos_y])),
             };
 
-            // The pin is clamped again per member: the command clamps it
-            // against the first image only, and settings imported from a peer
-            // or a saved view carry it as is.
-            let level = pin
-                .and_then(|pin| multiscale_by_image.get(&member.image_id)?.pinned_level(pin))
-                .unwrap_or_else(|| {
-                    self.screen_target_level(
-                        member,
-                        self.member_pixels_per_sample(member),
-                        last_query,
-                    )
-                });
+            let level = self.member_target_level(
+                member,
+                multiscale_by_image[&member.image_id],
+                pin,
+                self.member_pixels_per_sample(member),
+                last_query,
+            );
             let level_geo = &member.levels[level as usize];
 
             let t = self.view.t;
@@ -1366,21 +1353,78 @@ impl Scene {
         target_level::target_level(pixels_per_sample, &ratios, previous)
     }
 
+    /// The dataset's level pin, as stored. `None` means the target follows
+    /// the screen.
+    fn level_pin(&self, dataset_id: &DatasetId) -> Option<u32> {
+        self.dataset_settings
+            .get(dataset_id)
+            .and_then(|settings| settings.detail_level_override)
+    }
+
+    /// The target level of `member`, the level its detail tier requests.
+    ///
+    /// The dataset's level pin wins when it has one. Otherwise it is the level
+    /// the screen calls for, from [`Scene::screen_target_level`]. Either is
+    /// clamped to the member's source levels by the one rule,
+    /// [`MultiscaleInfo::clamp_to_source_levels`]. The clamp runs per member
+    /// for two reasons. The pin command clamps against the first image only,
+    /// and settings imported from a peer or a saved view arrive as they are.
+    /// The screen rule ranks every level the pyramid lists, so zoomed far out
+    /// it names a generated coarse level, which belongs to the coarse tier and
+    /// is never a target (ADR 0040).
+    ///
+    /// A pinned level is also the history the screen rule resumes from once
+    /// the pin is cleared. Clearing a pin one level away from the screen's
+    /// choice, with the measure inside the hysteresis band, therefore holds
+    /// the pinned level until the measure leaves the band, as a zoom to that
+    /// point would.
+    fn member_target_level(
+        &self,
+        member: &MemberState,
+        multiscale: &MultiscaleInfo,
+        pin: Option<u32>,
+        pixels_per_sample: f64,
+        last_query: Option<&HashMap<ImageId, QuantizedEntity>>,
+    ) -> u32 {
+        if let Some(pinned) = pin.and_then(|pin| multiscale.clamp_to_source_levels(pin)) {
+            return pinned;
+        }
+        let screen = self.screen_target_level(member, pixels_per_sample, last_query);
+        multiscale.clamp_to_source_levels(screen).unwrap_or(screen)
+    }
+
+    /// The levels a level pin on `dataset_id` may hold: the source levels of
+    /// its first image, level 0 included, with generated coarse levels left
+    /// out because they belong to the coarse tier. The same image the pin
+    /// command clamps against. Empty for an unknown dataset.
+    pub fn pinnable_levels(&self, dataset_id: &DatasetId) -> Vec<u32> {
+        self.document
+            .manifests
+            .get(dataset_id)
+            .and_then(|manifest| manifest.images().first())
+            .map(|image| image.multiscale.selectable_detail_levels())
+            .unwrap_or_default()
+    }
+
     /// Query the scene for geometric information about all entities in a dataset
     /// from the current camera viewpoint.
     ///
-    /// Each record's `target_level` is [`crate::target_level::target_level`]
-    /// applied to the camera's [`Camera::pixels_per_sample`] measure and the
-    /// image's level geometry. The hysteresis history the rule takes is the
-    /// level this scene last reported for the record through
-    /// [`Scene::view_query_delta`], so a full query agrees with the delta a
-    /// caller is folding. A caller that only ever asks for full queries has no
-    /// history and gets the rule without hysteresis.
+    /// Each record's `target_level` comes from [`Scene::member_target_level`],
+    /// the dataset's level pin when it has one and otherwise
+    /// [`crate::target_level::target_level`] applied to the camera's
+    /// [`Camera::pixels_per_sample`] measure and the image's level geometry,
+    /// either clamped to the image's source levels. The hysteresis history
+    /// the rule takes is the level this scene last reported for the record
+    /// through [`Scene::view_query_delta`], so a full query agrees with the
+    /// delta a caller is folding. A caller that only ever asks for full
+    /// queries has no history and gets the rule without hysteresis.
     pub fn view_query(&self, dataset_id: &DatasetId) -> Option<ViewQueryResult> {
         let derived = self.derived.get(dataset_id)?;
         let manifest = self.document.manifests.get(dataset_id)?;
         let vp = self.camera.viewport();
         let eye = self.camera.eye_position();
+        let pin = self.level_pin(dataset_id);
+        let multiscale_by_image = multiscale_by_image(manifest);
 
         // Entity id → kind, first occurrence winning (same entity a linear
         // front-to-back scan would find), so the per-member kind lookup below
@@ -1462,7 +1506,13 @@ impl Scene {
             };
 
             let level = if visible {
-                self.screen_target_level(member, pixels_per_sample, last_query)
+                self.member_target_level(
+                    member,
+                    multiscale_by_image[&member.image_id],
+                    pin,
+                    pixels_per_sample,
+                    last_query,
+                )
             } else {
                 (member.levels.len() as u32).saturating_sub(1)
             };
@@ -1606,6 +1656,17 @@ impl Scene {
             changed,
         })
     }
+}
+
+/// Each image's multiscale by image id, for the per-member level clamp. Every
+/// member of the dataset's derived state is built from one of these images,
+/// so a lookup by a member's image id always lands.
+fn multiscale_by_image(manifest: &DatasetManifest) -> HashMap<&ImageId, &MultiscaleInfo> {
+    manifest
+        .images()
+        .iter()
+        .map(|image| (&image.image_id, &image.multiscale))
+        .collect()
 }
 
 /// The `[z, y, x]` sample counts of `member` at level 0, or a unit box for a
@@ -3086,9 +3147,10 @@ mod tests {
         assert_eq!(scene.chunk_plan_for(&ds).unwrap()[0].target_level, 3);
     }
 
-    #[test]
-    fn chunk_plan_clamps_a_pin_past_a_members_pyramid_to_its_coarsest_level() {
-        // The command clamps the pin against the first image only.
+    /// A two-member collection whose members have pyramids of different
+    /// depths, both on screen, pinned to a level only the deeper one has. The
+    /// command clamps the pin against the first image only.
+    fn mixed_depth_scene_pinned_to_2() -> (Scene, DatasetId) {
         let mut scene = Scene::new([1024, 512]);
         let reg = test_helpers::make_collection_dataset_opened_with_level_counts(
             "mixed",
@@ -3102,6 +3164,12 @@ mod tests {
         set_slice_center(&mut scene, 256.0, 128.0);
         set_slice_zoom(&mut scene, 2.0);
         pin_level(&mut scene, &ds, Some(2));
+        (scene, ds)
+    }
+
+    #[test]
+    fn chunk_plan_clamps_a_pin_past_a_members_pyramid_to_its_coarsest_level() {
+        let (scene, ds) = mixed_depth_scene_pinned_to_2();
 
         let plans = scene.chunk_plan_for(&ds).unwrap();
         let by_image: HashMap<&str, &MemberChunkPlan> =
@@ -3117,8 +3185,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn chunk_plan_never_pins_to_a_generated_level() {
+    /// A 4096² image with three source levels and a generated coarse level 3,
+    /// viewed from its middle.
+    fn generated_coarse_scene() -> (Scene, DatasetId) {
         let mut scene = Scene::new([512, 512]);
         let mut reg = test_helpers::make_dataset_opened_with_shape(
             "gen",
@@ -3142,8 +3211,13 @@ mod tests {
                 },
             });
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
-        let ds = DatasetId::from("gen");
         set_slice_center(&mut scene, 2048.0, 2048.0);
+        (scene, DatasetId::from("gen"))
+    }
+
+    #[test]
+    fn chunk_plan_never_pins_to_a_generated_level() {
+        let (mut scene, ds) = generated_coarse_scene();
         set_slice_zoom(&mut scene, 4.0);
         // Written directly, as settings imported from a peer arrive, so the
         // command's clamp never runs.
@@ -3155,6 +3229,109 @@ mod tests {
 
         assert_eq!(planned_levels(&scene, &ds), vec![2]);
         assert_eq!(scene.chunk_plan_for(&ds).unwrap()[0].target_level, 2);
+        assert_eq!(queried_target(&scene, &ds), 2);
+    }
+
+    #[test]
+    fn view_query_reports_the_pinned_level_whatever_the_screen_calls_for() {
+        let (mut scene, ds) = regular_slice_scene([512, 512]);
+
+        set_slice_zoom(&mut scene, 4.0);
+        pin_level(&mut scene, &ds, Some(2));
+        assert_eq!(queried_target(&scene, &ds), 2);
+
+        set_slice_zoom(&mut scene, 0.01);
+        pin_level(&mut scene, &ds, Some(0));
+        assert_eq!(queried_target(&scene, &ds), 0);
+
+        pin_level(&mut scene, &ds, None);
+        assert_eq!(queried_target(&scene, &ds), 3);
+    }
+
+    #[test]
+    fn view_query_clamps_a_stale_pin_per_member() {
+        let (scene, ds) = mixed_depth_scene_pinned_to_2();
+
+        let result = scene.view_query(&ds).unwrap();
+        let by_image: HashMap<&str, &EntityQueryResult> = result
+            .visible_entities
+            .iter()
+            .map(|e| (e.image_id.0.as_str(), e))
+            .collect();
+        assert!(by_image["deep-image"].visible && by_image["shallow-image"].visible);
+        assert_eq!(by_image["deep-image"].target_level, 2);
+        assert_eq!(by_image["shallow-image"].target_level, 1);
+    }
+
+    #[test]
+    fn the_screen_never_targets_a_generated_level_in_the_query_or_the_plan() {
+        let (mut scene, ds) = generated_coarse_scene();
+        // Far enough out that the raw rule names the generated level 3.
+        set_slice_zoom(&mut scene, 0.01);
+        assert_eq!(queried_target(&scene, &ds), 2);
+        assert_eq!(planned_levels(&scene, &ds), vec![2]);
+        assert_eq!(scene.chunk_plan_for(&ds).unwrap()[0].target_level, 2);
+    }
+
+    #[test]
+    fn a_pin_change_arrives_through_the_view_query_delta_as_a_changed_record() {
+        let (mut scene, ds) = regular_slice_scene([512, 512]);
+        set_slice_zoom(&mut scene, 4.0);
+        assert!(matches!(
+            scene.view_query_delta(&ds).unwrap(),
+            ViewQueryDelta::Full(_)
+        ));
+
+        fn changed_level(scene: &mut Scene, ds: &DatasetId) -> Option<u32> {
+            match scene.view_query_delta(ds).unwrap() {
+                ViewQueryDelta::Delta {
+                    entered,
+                    left,
+                    changed,
+                    ..
+                } => {
+                    assert!(entered.is_empty() && left.is_empty());
+                    assert!(changed.len() <= 1);
+                    changed.first().map(|e| e.target_level)
+                }
+                ViewQueryDelta::Full(_) => panic!("a pin edit must not force a full resync"),
+            }
+        }
+
+        pin_level(&mut scene, &ds, Some(2));
+        assert_eq!(changed_level(&mut scene, &ds), Some(2));
+        assert_eq!(changed_level(&mut scene, &ds), None);
+
+        pin_level(&mut scene, &ds, None);
+        assert_eq!(changed_level(&mut scene, &ds), Some(0));
+    }
+
+    #[test]
+    fn clearing_a_pin_resumes_the_screen_rule_from_the_pinned_level() {
+        // At zoom 0.12 the raw rule names level 3, just inside the hysteresis
+        // band past the 2/3 boundary at 0.125, so the history decides.
+        let (mut scene, ds) = regular_slice_scene([512, 512]);
+        set_slice_zoom(&mut scene, 0.12);
+        assert_eq!(queried_target(&scene, &ds), 3);
+
+        pin_level(&mut scene, &ds, Some(2));
+        scene.view_query_delta(&ds).unwrap();
+        pin_level(&mut scene, &ds, None);
+        assert_eq!(queried_target(&scene, &ds), 2);
+
+        set_slice_zoom(&mut scene, 0.1);
+        assert_eq!(queried_target(&scene, &ds), 3);
+    }
+
+    #[test]
+    fn pinnable_levels_are_the_source_levels_including_zero() {
+        let (scene, ds) = generated_coarse_scene();
+        assert_eq!(scene.pinnable_levels(&ds), vec![0, 1, 2]);
+
+        let (scene, ds) = regular_slice_scene([512, 512]);
+        assert_eq!(scene.pinnable_levels(&ds), vec![0, 1, 2, 3]);
+
+        assert!(scene.pinnable_levels(&DatasetId::from("absent")).is_empty());
     }
 
     #[test]

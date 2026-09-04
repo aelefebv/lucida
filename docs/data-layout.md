@@ -15,8 +15,8 @@ it says about reading shards is what
 lands, import rejects the sharding codec, so write the unsharded form of this
 layout: the same inner chunks, one object each. Everything it says about the
 target level is what [issue #989](https://github.com/aelefebv/lucida/issues/989)
-adds. Today the detail level is the finest level unless you pick another by
-hand. The rest applies today.
+adds. The choice of level has landed already, so the target follows the screen
+unless a level pin holds it at one level. The rest applies today.
 
 ## How the viewer reads a store
 

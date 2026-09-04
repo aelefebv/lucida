@@ -185,6 +185,17 @@ describe("SavedView encoder", () => {
       expect(back.dataset_settings["ds-x"].detail_level_override).toBe(2);
     });
 
+    it("a level pin to level 0 survives the round trip and is not mistaken for absent", async () => {
+      const v = emptySliceView();
+      v.datasets = ["gs://x"];
+      v.dataset_order = ["ds-x"];
+      v.dataset_settings = {
+        "ds-x": { ...defaultDatasetSettings(1), detail_level_override: 0 },
+      };
+      const back = await decode(await encode(v));
+      expect(back.dataset_settings["ds-x"].detail_level_override).toBe(0);
+    });
+
     it("default null detail override strips as absent", async () => {
       const v = emptySliceView();
       v.datasets = ["gs://x"];

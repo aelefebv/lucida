@@ -463,78 +463,20 @@ describe("buildPlanningSnapshot — target level", () => {
     });
   }
 
-  it("follows the level the core reports for the screen when no level pin is set", () => {
-    expect(
-      buildPlanningSnapshot(makeArgs({ scene: sceneAtScreenLevel(0) }))!.entities[0].targetLevel,
-    ).toBe(0);
-    expect(
-      buildPlanningSnapshot(makeArgs({ scene: sceneAtScreenLevel(1) }))!.entities[0].targetLevel,
-    ).toBe(1);
-  });
-
-  it("holds the target at the level pin regardless of what the screen reports", () => {
+  it("reads the target level the core reports, pin folded in, and clamps nothing", () => {
+    // The browser neither applies the pin nor clamps. Level 7 is one the
+    // two-level manifest lacks.
+    for (const level of [0, 1, 7]) {
+      expect(
+        buildPlanningSnapshot(makeArgs({ scene: sceneAtScreenLevel(level) }))!.entities[0]
+          .targetLevel,
+      ).toBe(level);
+    }
     const pinned = makeDsSettings({ detail_level_override: 0 });
     expect(
       buildPlanningSnapshot(makeArgs({ scene: sceneAtScreenLevel(1), dsSettings: pinned }))!
         .entities[0].targetLevel,
-    ).toBe(0);
-    expect(
-      buildPlanningSnapshot(makeArgs({ scene: sceneAtScreenLevel(0), dsSettings: pinned }))!
-        .entities[0].targetLevel,
-    ).toBe(0);
-  });
-
-  it("clamps a stale level pin to selectable source levels", () => {
-    const levels = [
-      ...makeLevels(),
-      {
-        level_index: 2,
-        shape: [1, 1, 1, 256, 256],
-        chunk_shape: [1, 1, 1, 256, 256],
-        grid_shape: [1, 1, 1, 1, 1],
-        scale: [1, 1, 1, 4, 4],
-      },
-    ];
-    const dataset = makeDataset({
-      images: [makeImageSpec("img-0", { levels })],
-    });
-    const built = buildPlanningSnapshot(makeArgs({
-      dataset,
-      dsSettings: makeDsSettings({ detail_level_override: 99 }),
-    }));
-    expect(built!.entities[0].targetLevel).toBe(2);
-  });
-
-  it("never targets a generated level, whether the pin or the screen names it", () => {
-    const levels = [
-      ...makeLevels(),
-      {
-        level_index: 2,
-        shape: [1, 1, 1, 256, 256],
-        chunk_shape: [1, 1, 1, 256, 256],
-        grid_shape: [1, 1, 1, 1, 1],
-        scale: [1, 1, 1, 4, 4],
-      },
-    ];
-    const dataset = makeDataset({
-      images: [
-        makeImageSpec("img-0", {
-          levels,
-          generated_levels: [{ level_index: 2, role: "coarse" }],
-        }),
-      ],
-    });
-    const pinned = buildPlanningSnapshot(makeArgs({
-      dataset,
-      dsSettings: makeDsSettings({ detail_level_override: 2 }),
-    }));
-    expect(pinned!.entities[0].targetLevel).toBe(1);
-
-    const screen = buildPlanningSnapshot(makeArgs({
-      dataset,
-      scene: sceneAtScreenLevel(2),
-    }));
-    expect(screen!.entities[0].targetLevel).toBe(1);
+    ).toBe(1);
   });
 
   it("uses an explicit valid coarse pointer", () => {
@@ -553,17 +495,6 @@ describe("buildPlanningSnapshot — target level", () => {
   it("does not use an invalid coarse pointer", () => {
     const img = makeImageSpec("img-0", { coarse_level_index: 99 });
     expect(resolveCoarseLevel(img)).toBeNull();
-  });
-
-  it("treats absent generated metadata as an empty generated-level set", () => {
-    const dataset = makeDataset({
-      images: [makeImageSpec("img-0", { generated_levels: undefined })],
-    });
-    const built = buildPlanningSnapshot(makeArgs({
-      dataset,
-      dsSettings: makeDsSettings({ detail_level_override: 1 }),
-    }));
-    expect(built!.entities[0].targetLevel).toBe(1);
   });
 });
 
