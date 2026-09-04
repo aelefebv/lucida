@@ -1546,18 +1546,16 @@ mod tests {
         assert!(message.contains("no chunks written"), "{message}");
     }
 
-    /// …and the durable surface stops calling it healthy.
-    #[tokio::test]
-    async fn dataset_health_degrades_when_a_level_has_no_chunks_written() {
-        let tmp = tempfile::tempdir().unwrap();
-        let data_dir = tmp.path().join("partial-health.zarr");
-        fs::create_dir_all(&data_dir).unwrap();
-        write_partially_written_zarr(&data_dir);
-        let url = data_dir.to_str().unwrap().to_string();
-
-        let ctx = test_context(tmp.path());
+    /// Open `url` in a fresh context under `tmp` and read back what the
+    /// durable health surface says about it.
+    async fn health_after_open(
+        opener: ClientId,
+        url: &str,
+        tmp: &Path,
+    ) -> lucida_protocol::DatasetSourceHealth {
+        let ctx = test_context(tmp);
         let (progress_tx, _progress_rx) = mpsc::unbounded_channel();
-        open_dataset(12, &url, &ctx, &progress_tx)
+        open_dataset(opener, url, &ctx, &progress_tx)
             .await
             .expect("open");
 
@@ -1568,21 +1566,54 @@ mod tests {
             .values()
             .next()
             .expect("one manifest");
-        let health = crate::handler::dataset_health_for_manifest(&sess, manifest);
+        crate::handler::dataset_health_for_manifest(&sess, manifest)
+    }
 
-        // The headline: the durable surface stops saying `healthy`.
+    /// The import's warning, not a sick server, is what degrades health, and
+    /// the message names the level.
+    fn assert_degraded_by_unwritten_level(
+        health: &lucida_protocol::DatasetSourceHealth,
+        level_message: &str,
+    ) {
         assert_eq!(health.status, DatasetHealthStatus::Degraded);
-        // …and it says why, in the same breath.
         assert!(
-            health
-                .messages
-                .iter()
-                .any(|m| m.contains("level 0") && m.contains("no chunks written")),
+            health.messages.iter().any(|m| m.contains(level_message)),
             "messages: {:?}",
             health.messages
         );
-        // The degradation comes from the import, not from a sick server.
         assert_eq!(health.binding.status, DatasetHealthStatus::Healthy);
+    }
+
+    /// …and the durable surface stops calling it healthy.
+    #[tokio::test]
+    async fn dataset_health_degrades_when_a_level_has_no_chunks_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("partial-health.zarr");
+        fs::create_dir_all(&data_dir).unwrap();
+        write_partially_written_zarr(&data_dir);
+        let url = data_dir.to_str().unwrap().to_string();
+
+        let health = health_after_open(12, &url, tmp.path()).await;
+
+        assert_degraded_by_unwritten_level(&health, "level 0 has no chunks written");
+    }
+
+    /// The same surface names a sharded level whose shard was never
+    /// written: level 2 of the committed sparse sharded fixture, whose two
+    /// finer levels hold their origin inner chunk while it has no shard
+    /// object at all.
+    #[tokio::test]
+    async fn dataset_health_degrades_when_a_sharded_level_has_no_shard_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../fixtures/ome-zarr/sparse-sharded.ome.zarr")
+            .canonicalize()
+            .unwrap();
+        let url = fixture.to_str().unwrap().to_string();
+
+        let health = health_after_open(14, &url, tmp.path()).await;
+
+        assert_degraded_by_unwritten_level(&health, "level 2 has no chunks written");
     }
 
     /// A fully written pyramid is still reported healthy — the check above
@@ -1595,20 +1626,8 @@ mod tests {
         write_minimal_zarr(&data_dir);
         let url = data_dir.to_str().unwrap().to_string();
 
-        let ctx = test_context(tmp.path());
-        let (progress_tx, _progress_rx) = mpsc::unbounded_channel();
-        open_dataset(13, &url, &ctx, &progress_tx)
-            .await
-            .expect("open");
+        let health = health_after_open(13, &url, tmp.path()).await;
 
-        let sess = ctx.session.lock().await;
-        let manifest = sess
-            .document
-            .manifests
-            .values()
-            .next()
-            .expect("one manifest");
-        let health = crate::handler::dataset_health_for_manifest(&sess, manifest);
         assert_eq!(health.status, DatasetHealthStatus::Healthy);
     }
 }

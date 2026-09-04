@@ -172,12 +172,12 @@ async fn five_channels_per_chunk_resolve_and_slice_independently() {
         // All 5 channels resolve to the same on-disk chunk file
         // (chunk_shape[c] = 5 means c-axis-grid has only 1 chunk).
         assert_eq!(
-            location.path,
+            location.path().clone(),
             Path::from("0/c/0/0/0/0/0"),
             "wire c={c} should resolve to disk c-coord 0 (5 channels per chunk)",
         );
         assert_eq!(
-            fs::read(dir.join(location.path.as_ref())).unwrap(),
+            fs::read(dir.join(location.path().as_ref())).unwrap(),
             ENC_5CH_BLOSC
         );
 

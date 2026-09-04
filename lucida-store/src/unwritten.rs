@@ -9,13 +9,23 @@
 //!
 //! Proving a level is empty would mean listing its whole chunk prefix, which
 //! is far too many requests on the remote-first open path. What this module
-//! does instead is a **relative** test that costs one HEAD per level, issued
-//! concurrently so the whole check is a single round trip:
+//! does instead is a **relative** test that costs one small request per
+//! level, issued concurrently so the whole check is a single round trip:
 //!
 //! 1. probe the origin chunk (`.../c/0/0/…`) of every declared level, then
 //! 2. call a level unwritten only when its origin is absent **while some
 //!    sibling level whose origin chunk covers a smaller-or-equal patch of
 //!    source space has its origin present**.
+//!
+//! On an unsharded level the probe is a HEAD of the origin chunk's object.
+//! On a sharded level that object is the origin shard, and a shard can be
+//! there while the origin inner chunk inside it was never written. The probe
+//! reads the shard's index instead and asks it about the origin inner
+//! chunk. Stopping at the shard object would err both ways: a shard written
+//! everywhere but its first inner chunk would clear the level, and it would
+//! stand as a witness against a coarser level whose origin patch its data
+//! never reached. Either probe is a metadata read, because the question is
+//! about the dataset's shape and is asked while the open is resolving it.
 //!
 //! Step 2's footprint condition is what makes one probe trustworthy. Every
 //! level's origin chunk starts at the same corner, but they do not span the
@@ -40,6 +50,7 @@ use object_store::path::Path;
 
 use crate::cache::CachedStore;
 use crate::import_types::{ImportWarning, ImportWarningKind};
+use crate::shard::{self, ShardLayout};
 
 /// What the probe needs to know about one declared level.
 #[derive(Debug, Clone, PartialEq)]
@@ -52,8 +63,12 @@ pub(crate) struct ProbeTarget {
     pub axis_count: usize,
     /// How much source space this level's origin chunk spans, per canonical
     /// axis: the chunk's extent in voxels scaled into the shared coordinate
-    /// space all levels are expressed in.
+    /// space all levels are expressed in. On a sharded level the chunk is
+    /// the inner chunk, which is what the probe asks about.
     pub origin_footprint: [f64; 5],
+    /// How this level packs chunks into shards, or `None` when each chunk is
+    /// an object of its own.
+    pub shard: Option<ShardLayout>,
 }
 
 /// Whether a level's origin chunk is there.
@@ -70,7 +85,9 @@ pub(crate) enum OriginChunk {
 /// The store path of a level's origin chunk: one `0` per on-disk axis, under
 /// the Zarr v3 `c/` chunk prefix. Every coordinate is zero, so the wire's
 /// voxel-vs-grid distinction for `t`/`c` (see [`crate::chunk_key_to_store_path`])
-/// cannot change the answer and no chunk shape is needed here.
+/// cannot change the answer and no chunk shape is needed here. On a sharded
+/// level the same path names the origin shard, the one that holds the
+/// origin inner chunk at its first index position.
 fn origin_chunk_path(base_prefix: &str, level_path: &str, axis_count: usize) -> String {
     let coords = vec!["0"; axis_count].join("/");
     if base_prefix.is_empty() {
@@ -81,6 +98,8 @@ fn origin_chunk_path(base_prefix: &str, level_path: &str, axis_count: usize) -> 
 }
 
 /// Probe every level's origin chunk concurrently — N requests, one round trip.
+/// An unsharded level is a HEAD of the origin chunk; a sharded level is a
+/// read of the origin shard's index, for the reasons in the module doc.
 async fn probe_level_origins(
     store: &Arc<CachedStore>,
     base_prefix: &str,
@@ -93,8 +112,13 @@ async fn probe_level_origins(
             target.axis_count,
         ));
         let store = Arc::clone(store);
+        let shard = target.shard.as_ref();
         async move {
-            match store.probe_exists(&path).await {
+            let written = match shard {
+                None => store.probe_exists(&path).await,
+                Some(layout) => shard::inner_chunk_written(&store, layout, &path, 0).await,
+            };
+            match written {
                 Ok(true) => OriginChunk::Present,
                 Ok(false) => OriginChunk::Absent,
                 Err(_) => OriginChunk::Unknown,
@@ -210,6 +234,7 @@ mod tests {
             path: path.to_string(),
             axis_count,
             origin_footprint: [1.0, 1.0, 1.0, edge, edge],
+            shard: None,
         }
     }
 

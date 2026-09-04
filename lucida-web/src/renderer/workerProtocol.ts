@@ -800,7 +800,8 @@ export interface ChunksEvictedMessage {
   memberId: string;
   /**
    * Chunks that should be eligible for delivery again. Usually these
-   * were present and got evicted by closer chunks; stale-epoch and
+   * were present and got evicted, either as finer than their member's
+   * target level or because a closer chunk took their slot. Stale-epoch and
    * wrong-slice deliveries also use this path because they should clear
    * optimistic sent state without entering the rejection tracker.
    */

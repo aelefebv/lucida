@@ -369,6 +369,28 @@ describe("the Chrome Trace Event projection", () => {
 
     const instant = events.find(e => e.ph === "i");
     expect(instant).toMatchObject({ name: "eviction: evicted", ts: 2_500, tid: 2 });
+    expect(instant?.args).toEqual({ kind: "eviction", reason: "evicted", key: null, level: null });
+  });
+
+  it("names the chunk and its level on a point event about one chunk", () => {
+    const events = toChromeTraceEvents(
+      doc(
+        run({
+          events: [{
+            atUs: 10,
+            kind: "eviction",
+            reason: "evicted",
+            chunk: {
+              datasetId: "ds-1", entityId: "e-1", imageId: "img-1", residencyTier: "detail",
+              level: 3, t: 0, c: 0, z: 0, y: 1, x: 2, chunkKey: "3/0/0/0/1/2",
+            },
+          }],
+        }),
+      ),
+    );
+
+    const instant = events.find(e => e.ph === "i");
+    expect(instant?.args).toEqual({ kind: "eviction", reason: "evicted", key: "3/0/0/0/1/2", level: 3 });
   });
 
   /**

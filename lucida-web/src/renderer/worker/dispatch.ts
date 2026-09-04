@@ -203,6 +203,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
         if (dsId === msg.datasetId) {
           ctx.state.memberToDataset.delete(memberId);
           ctx.state.memberSourcePools.delete(memberId);
+          ctx.state.targetLevelByMember.delete(memberId);
         }
       }
       // Drop group→tiles entries owned by this dataset. Tracked via

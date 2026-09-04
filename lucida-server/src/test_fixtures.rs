@@ -24,6 +24,86 @@ pub(crate) fn four_byte_level() -> LevelInfo {
             chunk_size_t: 1,
             chunk_size_c: 1,
         },
+        shard: None,
+    }
+}
+
+/// An in-memory `ObjectStore` that sleeps `delay` before every read, so a
+/// test can tell one backend round trip from two by the time a row reports.
+#[derive(Debug)]
+pub(crate) struct DelayedStore {
+    inner: object_store::memory::InMemory,
+    delay: std::time::Duration,
+}
+
+impl DelayedStore {
+    pub(crate) fn new(delay: std::time::Duration) -> Self {
+        DelayedStore {
+            inner: object_store::memory::InMemory::new(),
+            delay,
+        }
+    }
+}
+
+impl std::fmt::Display for DelayedStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DelayedStore({:?})", self.delay)
+    }
+}
+
+#[async_trait::async_trait]
+impl object_store::ObjectStore for DelayedStore {
+    async fn put_opts(
+        &self,
+        location: &Path,
+        payload: object_store::PutPayload,
+        opts: object_store::PutOptions,
+    ) -> object_store::Result<object_store::PutResult> {
+        self.inner.put_opts(location, payload, opts).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &Path,
+        opts: object_store::PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+        self.inner.put_multipart_opts(location, opts).await
+    }
+
+    async fn get_opts(
+        &self,
+        location: &Path,
+        options: object_store::GetOptions,
+    ) -> object_store::Result<object_store::GetResult> {
+        tokio::time::sleep(self.delay).await;
+        self.inner.get_opts(location, options).await
+    }
+
+    async fn delete(&self, location: &Path) -> object_store::Result<()> {
+        self.inner.delete(location).await
+    }
+
+    fn list(
+        &self,
+        prefix: Option<&Path>,
+    ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+    {
+        self.inner.list(prefix)
+    }
+
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&Path>,
+    ) -> object_store::Result<object_store::ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+        self.inner.copy(from, to).await
+    }
+
+    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+        self.inner.copy_if_not_exists(from, to).await
     }
 }
 

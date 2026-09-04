@@ -51,17 +51,25 @@ Sample values are `uint16` in every fixture, and the codec chain is `bytes`
 
 ## How the tests use them
 
-- **Store.** `lucida-store/src/import.rs` imports `twin-unsharded.ome.zarr`,
+- **Store.** `lucida-store/src/import.rs` imports both twins,
   `level-index.ome.zarr`, and `collection-unsharded.ome.zarr` and asserts the
   level shapes, chunk shapes, scales, tiles, and codec the metadata declares.
+  The sharded twin reports its inner chunk shape, so the two twins import to
+  the same geometry. `lucida-store/src/shard.rs` reads every inner chunk of
+  the sharded twin through the shard index, and reads the missing inner
+  chunks and the unwritten level of `sparse-sharded.ome.zarr` the same way.
+  The import of `sparse-sharded.ome.zarr` names its unwritten level and
+  leaves the two sparse levels alone. The checkerboard always writes the
+  origin inner chunk, so an origin shard whose index leaves it out is a
+  hand-built sharded store in the same test module.
 - **Server.** `lucida-server/tests/synthetic_fixtures_e2e.rs` resolves chunk
   keys against the same fixtures and decodes the objects they name, checking
   that every sample of level L reads back as L and that the twin's channels
-  carry distinct pictures.
-- **Sharded fixtures.** `twin-sharded.ome.zarr` and `sparse-sharded.ome.zarr`
-  are the inputs for the shard reader that #990 specifies: twin equivalence
-  chunk by chunk, a missing inner chunk as fill, and the unwritten-level
-  probe on a level with no shard.
+  carry distinct pictures. `lucida-server/tests/sharded_fixtures_e2e.rs`
+  serves both twins through the chunk-read pipeline, through generated
+  coarse, and over a socket, and asserts identical bytes for every chunk
+  key. `lucida-server/src/dataset_open.rs` opens `sparse-sharded.ome.zarr`
+  and asserts that dataset health degrades and names the unwritten level.
 - **End to end.** Generate a large dataset on demand and open it with the
   trace driver, which drives the page at device pixel ratio 2 by default:
 

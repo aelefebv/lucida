@@ -32,6 +32,7 @@ import type { ContentSource, FetchRequest, FetchResult } from "./contentSource.t
 import type { DecodePool } from "./decodePool.ts";
 import type { ChunkRequest, RequestPlan, ActiveSetEntry } from "../planning/index.ts";
 import { emptyPlanStats } from "../planning/index.ts";
+import { createSyntheticState } from "../planning/index.ts";
 
 const MEMBERS = 21_400;
 
@@ -94,7 +95,7 @@ function makePlan(requests: ChunkRequest[]): RequestPlan {
     proxyRequests: [],
     epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
     stats: emptyPlanStats(),
-    nextState: { previousActiveSet: activeSet },
+    nextState: createSyntheticState({ previousActiveSet: activeSet }),
   };
 }
 

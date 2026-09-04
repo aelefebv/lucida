@@ -79,6 +79,12 @@ export interface RendererState {
   rayHitPerEntity: Map<string, [number, number, number]>;
   /** memberId → last known viewport center in entity-local [0,1]^2 (slice mode). */
   cameraUVPerEntity: Map<string, [number, number]>;
+  /**
+   * memberId → target level from the most recent cold state. Eviction
+   * takes a resident chunk finer than it first (ADR 0061). Absent for a
+   * member with no chunk levels.
+   */
+  targetLevelByMember: Map<string, number>;
 
   // ── Cold-state / epoch tracking ──────────────────────────────────
   /** Current scene epochs (replaced on every cold state). */
@@ -124,6 +130,7 @@ export function createInitialState(): RendererState {
     labelVolumePools: new Map(),
     rayHitPerEntity: new Map(),
     cameraUVPerEntity: new Map(),
+    targetLevelByMember: new Map(),
     currentEpochs: null,
     currentColdState: null,
     coldStateByDataset: new Map(),

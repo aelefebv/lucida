@@ -248,7 +248,7 @@ pub async fn build_single_tile_dataset(
                             .resolve(&image_id, &key)
                             .expect("resolver should map all keys");
                         let bytes = make_chunk_bytes(chunk_voxels, t, c, z, y, x);
-                        mem.put(&location.path, PutPayload::from(bytes))
+                        mem.put(location.path(), PutPayload::from(bytes))
                             .await
                             .expect("put");
                     }

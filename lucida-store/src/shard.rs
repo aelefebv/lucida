@@ -15,7 +15,7 @@ use object_store::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::backend::StoreError;
-use crate::cache::{CachedStore, SourceReadTiming, TimedRead};
+use crate::cache::{ByteRange, CachedStore, SourceReadTiming, TimedRead};
 use crate::codec::{StorageCompression, parse_codec_chain};
 use crate::source_limiter::{ReaderId, RequestLabel};
 
@@ -66,7 +66,10 @@ impl ShardLayout {
     /// codecs beside it, an inner chunk shape that does not tile the shard,
     /// a nested sharding codec, an inner chain outside the codec allowlist,
     /// an index codec chain other than `bytes` optionally followed by
-    /// `crc32c`, or an index location other than `start` or `end`.
+    /// `crc32c`, or an index location other than `start` or `end`. Every
+    /// such error opens by naming the sharding codec, so an import that
+    /// fails on one is classified as an unsupported codec and the layout it
+    /// refused is findable in the metadata.
     pub fn from_codec_chain(
         codecs: &[serde_json::Value],
         shard_shape: &[u64],
@@ -77,6 +80,18 @@ impl ShardLayout {
         if first.get("name").and_then(|n| n.as_str()) != Some(SHARDING_CODEC) {
             return Ok(None);
         }
+        Self::parse(first, codecs, shard_shape)
+            .map(Some)
+            .map_err(|e| e.in_context(format!("{SHARDING_CODEC} codec")))
+    }
+
+    /// Errors name only what was found; `from_codec_chain` prefixes the
+    /// codec.
+    fn parse(
+        first: &serde_json::Value,
+        codecs: &[serde_json::Value],
+        shard_shape: &[u64],
+    ) -> Result<Self, StoreError> {
         if codecs.len() != 1 {
             return Err(StoreError::Metadata(format!(
                 "the {SHARDING_CODEC} codec must be the only codec in the storage chain, got {} codecs",
@@ -112,10 +127,8 @@ impl ShardLayout {
                 "nested sharding is not supported: a {SHARDING_CODEC} codec inside another"
             )));
         }
-        let inner_compression = parse_codec_chain(inner_codecs).map_err(|e| match e {
-            StoreError::Metadata(msg) => StoreError::Metadata(format!("inner chunk codecs: {msg}")),
-            other => other,
-        })?;
+        let inner_compression =
+            parse_codec_chain(inner_codecs).map_err(|e| e.in_context("inner chunk codecs"))?;
 
         let index_codecs = config
             .get("index_codecs")
@@ -137,13 +150,13 @@ impl ShardLayout {
             }
         };
 
-        Ok(Some(ShardLayout {
+        Ok(ShardLayout {
             inner_chunk_shape,
             chunks_per_shard,
             inner_compression,
             index_location,
             index_checksum,
-        }))
+        })
     }
 
     /// Map an inner chunk key to the shard that holds it and its position
@@ -202,27 +215,28 @@ pub struct ShardLocation {
 /// Reads inner chunks out of shards, remembering what each shard's index
 /// says.
 ///
-/// One per binding. The indexes live as long as the binding does, so a
-/// shard's index is read once and every later inner chunk of that shard is
-/// one range read. A shard object that is not there is remembered the same
-/// way, so an unwritten shard costs one read rather than one per inner
-/// chunk. The cached store beneath still coalesces two callers who reach a
-/// cold shard together onto one index read, so the once-per-shard rule
-/// holds under concurrency as well as in sequence.
+/// One per binding, held beside the per-level layouts by the resolver that
+/// maps a chunk key to its location. The indexes live as long as the binding
+/// does, so a shard's index is read once and every later inner chunk of
+/// that shard is one range read. A shard object that is not there is
+/// remembered the same way, so an unwritten shard costs one read rather
+/// than one per inner chunk. The cached store beneath still coalesces two
+/// callers who reach a cold shard together onto one index read, so the
+/// once-per-shard rule holds under concurrency as well as in sequence.
+///
+/// The indexes are keyed by shard path alone, so every read through one
+/// cache must go to the one store its binding reads.
+#[derive(Default)]
 pub struct ShardIndexCache {
-    store: Arc<CachedStore>,
     indexes: Mutex<HashMap<Path, Arc<ShardIndex>>>,
 }
 
 impl ShardIndexCache {
-    pub fn new(store: Arc<CachedStore>) -> Self {
-        ShardIndexCache {
-            store,
-            indexes: Mutex::new(HashMap::new()),
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Read the inner chunk at `location`.
+    /// Read the inner chunk at `location` from `store`.
     ///
     /// The bytes come back as stored, for the caller to decode with
     /// [`ShardLayout::inner_compression`], exactly as [`CachedStore::get_bytes`]
@@ -237,13 +251,17 @@ impl ShardIndexCache {
     /// `reader` and `label` mean what they mean for [`CachedStore::get_bytes`].
     pub async fn read_inner_chunk(
         &self,
+        store: &CachedStore,
         layout: &ShardLayout,
         location: &ShardLocation,
         reader: ReaderId,
         label: RequestLabel,
     ) -> TimedRead {
         let shard = &location.path;
-        let (index, index_timing) = match self.resolve_index(layout, shard, reader, label).await {
+        let (index, index_timing) = match self
+            .resolve_index(store, layout, shard, reader, label)
+            .await
+        {
             Ok(found) => found,
             Err(failed) => return failed,
         };
@@ -262,7 +280,7 @@ impl ShardIndexCache {
                 };
             }
         };
-        let read = self.store.get_range(shard, range, reader, label).await;
+        let read = store.get_range(shard, range, reader, label).await;
         TimedRead {
             result: read.result,
             timing: index_timing.followed_by(read.timing),
@@ -276,6 +294,7 @@ impl ShardIndexCache {
     /// read that failed.
     async fn resolve_index(
         &self,
+        store: &CachedStore,
         layout: &ShardLayout,
         shard: &Path,
         reader: ReaderId,
@@ -287,8 +306,8 @@ impl ShardIndexCache {
 
         let len = layout.index_byte_len();
         let read = match layout.index_location {
-            IndexLocation::Start => self.store.get_range(shard, 0..len, reader, label).await,
-            IndexLocation::End => self.store.get_suffix(shard, len, reader, label).await,
+            IndexLocation::Start => store.get_range(shard, 0..len, reader, label).await,
+            IndexLocation::End => store.get_suffix(shard, len, reader, label).await,
         };
         let index = match read.result {
             Ok(bytes) => match ShardIndex::parse(&bytes, layout, shard) {
@@ -317,6 +336,32 @@ impl ShardIndexCache {
         );
         Ok((index, read.timing))
     }
+}
+
+/// Whether the inner chunk at `position` of `shard` was written, asked as a
+/// metadata read for the unwritten-level probe (see [`crate::unwritten`]).
+///
+/// The index comes through [`CachedStore::get_optional_metadata_range`], so
+/// the read takes no chunk permit and the cache serves the binding's first
+/// read of the same index later. A shard object that is not there holds no
+/// inner chunk, so it answers `false`. An index that cannot be read is an
+/// error for the caller to treat as no answer.
+pub(crate) async fn inner_chunk_written(
+    store: &CachedStore,
+    layout: &ShardLayout,
+    shard: &Path,
+    position: usize,
+) -> Result<bool, object_store::Error> {
+    let len = layout.index_byte_len();
+    let range = match layout.index_location {
+        IndexLocation::Start => ByteRange::Bounded(0..len),
+        IndexLocation::End => ByteRange::Suffix(len),
+    };
+    let Some(bytes) = store.get_optional_metadata_range(shard, range).await? else {
+        return Ok(false);
+    };
+    let index = ShardIndex::parse(&bytes, layout, shard)?;
+    Ok(index.entry(position)?.is_some())
 }
 
 /// The answer for an inner chunk nothing was written for, in the shape the
@@ -478,6 +523,43 @@ fn parse_index_codecs(codecs: &[serde_json::Value]) -> Result<bool, StoreError> 
     }
 }
 
+/// A shard object built by hand: `chunks` in position order, `None` for an
+/// inner chunk left out of the index, with the index where `location` says
+/// and a crc32c checksum after its entries. Offsets are absolute in the
+/// object, so an index at the start pushes every chunk past itself.
+///
+/// Shared with the import tests, which write sharded fixtures to disk.
+#[cfg(test)]
+pub(crate) fn build_shard(chunks: &[Option<&[u8]>], location: IndexLocation) -> Vec<u8> {
+    let index_len = chunks.len() * INDEX_ENTRY_BYTES as usize + CHECKSUM_BYTES as usize;
+    let mut body = Vec::new();
+    let mut entries = Vec::new();
+    let base = match location {
+        IndexLocation::Start => index_len as u64,
+        IndexLocation::End => 0,
+    };
+    for chunk in chunks {
+        match chunk {
+            Some(bytes) => {
+                entries.extend_from_slice(&(base + body.len() as u64).to_le_bytes());
+                entries.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+                body.extend_from_slice(bytes);
+            }
+            None => {
+                entries.extend_from_slice(&ABSENT.to_le_bytes());
+                entries.extend_from_slice(&ABSENT.to_le_bytes());
+            }
+        }
+    }
+    let checksum = crc32c::crc32c(&entries).to_le_bytes();
+    let mut index = entries;
+    index.extend_from_slice(&checksum);
+    match location {
+        IndexLocation::Start => [index, body].concat(),
+        IndexLocation::End => [body, index].concat(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -610,6 +692,7 @@ mod tests {
 
     async fn read_from_shard(
         shards: &ShardIndexCache,
+        store: &CachedStore,
         layout: &ShardLayout,
         key: &str,
     ) -> Result<Bytes, object_store::Error> {
@@ -617,7 +700,7 @@ mod tests {
             .locate_inner_chunk(key, &axes(&["c", "y", "x"]))
             .unwrap();
         shards
-            .read_inner_chunk(layout, &location, READER, LABEL)
+            .read_inner_chunk(store, layout, &location, READER, LABEL)
             .await
             .result
     }
@@ -630,7 +713,8 @@ mod tests {
     /// and 10 are not multiples of the 8-sample chunk either.
     #[tokio::test]
     async fn every_inner_chunk_of_the_sharded_twin_reads_as_the_unsharded_twins_object() {
-        let sharded = ShardIndexCache::new(cached_store("twin-sharded.ome.zarr"));
+        let sharded = cached_store("twin-sharded.ome.zarr");
+        let shards = ShardIndexCache::new();
         let unsharded = cached_store("twin-unsharded.ome.zarr");
         let cyx = axes(&["c", "y", "x"]);
 
@@ -638,7 +722,9 @@ mod tests {
         for level in 0..3 {
             let (layout, keys) = sharded_twin_keys(level);
             for key in keys {
-                let from_shard = read_from_shard(&sharded, &layout, &key).await.unwrap();
+                let from_shard = read_from_shard(&shards, &sharded, &layout, &key)
+                    .await
+                    .unwrap();
                 let object = crate::chunk_key_to_store_path(&key, &cyx, &layout.inner_chunk_shape);
                 let from_object = unsharded
                     .get_bytes(&Path::from(object), READER, LABEL)
@@ -653,10 +739,14 @@ mod tests {
         assert_eq!(compared, 2 * (25 + 9 + 4));
     }
 
-    fn fixture_layout_and_cache(name: &str, level: u32) -> (ShardLayout, ShardIndexCache) {
+    fn fixture_layout_and_cache(
+        name: &str,
+        level: u32,
+    ) -> (ShardLayout, ShardIndexCache, Arc<CachedStore>) {
         (
             fixture_layout(name, level).unwrap(),
-            ShardIndexCache::new(cached_store(name)),
+            ShardIndexCache::new(),
+            cached_store(name),
         )
     }
 
@@ -667,7 +757,7 @@ mod tests {
     /// nothing else was read.
     #[tokio::test]
     async fn an_inner_chunk_absent_from_the_index_reads_as_not_found_and_not_as_a_failure() {
-        let (layout, shards) = fixture_layout_and_cache("sparse-sharded.ome.zarr", 0);
+        let (layout, shards, store) = fixture_layout_and_cache("sparse-sharded.ome.zarr", 0);
         let yx = axes(&["y", "x"]);
         for (key, written) in [
             ("0/0/0/0/0/0", true),
@@ -677,7 +767,7 @@ mod tests {
         ] {
             let location = layout.locate_inner_chunk(key, &yx).unwrap();
             let read = shards
-                .read_inner_chunk(&layout, &location, READER, LABEL)
+                .read_inner_chunk(&store, &layout, &location, READER, LABEL)
                 .await;
             match (written, read.result) {
                 (true, Ok(bytes)) => assert!(!bytes.is_empty(), "{key}"),
@@ -685,7 +775,7 @@ mod tests {
                 (_, other) => panic!("{key}: expected written={written}, got {other:?}"),
             }
         }
-        assert_eq!(shards.store.stats().backend_errors, 0);
+        assert_eq!(store.stats().backend_errors, 0);
     }
 
     /// Level 2 of the sparse fixture is declared and never written, so its
@@ -694,12 +784,12 @@ mod tests {
     /// remembered, so after the first inner chunk the rest cost no read.
     #[tokio::test]
     async fn every_inner_chunk_of_a_missing_shard_object_reads_as_not_found_after_one_read() {
-        let (layout, shards) = fixture_layout_and_cache("sparse-sharded.ome.zarr", 2);
+        let (layout, shards, store) = fixture_layout_and_cache("sparse-sharded.ome.zarr", 2);
         let yx = axes(&["y", "x"]);
         for key in ["2/0/0/0/0/0", "2/0/0/0/0/1"] {
             let location = layout.locate_inner_chunk(key, &yx).unwrap();
             let read = shards
-                .read_inner_chunk(&layout, &location, READER, LABEL)
+                .read_inner_chunk(&store, &layout, &location, READER, LABEL)
                 .await;
             assert!(
                 matches!(read.result, Err(object_store::Error::NotFound { .. })),
@@ -708,44 +798,10 @@ mod tests {
             );
         }
         assert_eq!(
-            shards.store.stats().source_reads,
+            store.stats().source_reads,
             1,
             "one read answered for the whole shard"
         );
-    }
-
-    /// A shard object built by hand: `chunks` in position order, `None` for
-    /// an inner chunk left out of the index, with the index where `location`
-    /// says and a crc32c checksum after its entries. Offsets are absolute in
-    /// the object, so an index at the start pushes every chunk past itself.
-    fn build_shard(chunks: &[Option<&[u8]>], location: IndexLocation) -> Vec<u8> {
-        let index_len = chunks.len() * INDEX_ENTRY_BYTES as usize + CHECKSUM_BYTES as usize;
-        let mut body = Vec::new();
-        let mut entries = Vec::new();
-        let base = match location {
-            IndexLocation::Start => index_len as u64,
-            IndexLocation::End => 0,
-        };
-        for chunk in chunks {
-            match chunk {
-                Some(bytes) => {
-                    entries.extend_from_slice(&(base + body.len() as u64).to_le_bytes());
-                    entries.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-                    body.extend_from_slice(bytes);
-                }
-                None => {
-                    entries.extend_from_slice(&ABSENT.to_le_bytes());
-                    entries.extend_from_slice(&ABSENT.to_le_bytes());
-                }
-            }
-        }
-        let checksum = crc32c::crc32c(&entries).to_le_bytes();
-        let mut index = entries;
-        index.extend_from_slice(&checksum);
-        match location {
-            IndexLocation::Start => [index, body].concat(),
-            IndexLocation::End => [body, index].concat(),
-        }
     }
 
     /// A 2x2 shard of raw inner chunks with position 2 left unwritten.
@@ -762,12 +818,10 @@ mod tests {
         }
     }
 
-    /// An index cache over a counting store holding one hand-built shard at
-    /// `0/c/0/0`, with the index where `location` says.
     async fn hand_built_cache(
         location: IndexLocation,
         delay_ms: u64,
-    ) -> (ShardIndexCache, Arc<CountingStore>) {
+    ) -> (ShardIndexCache, Arc<CachedStore>, Arc<CountingStore>) {
         let store = Arc::new(CountingStore::new(delay_ms));
         store
             .seed("0/c/0/0", build_shard(&HAND_BUILT_CHUNKS, location))
@@ -777,11 +831,12 @@ mod tests {
             1024 * 1024,
             SourceReadLimiter::new(64),
         ));
-        (ShardIndexCache::new(cached), store)
+        (ShardIndexCache::new(), cached, store)
     }
 
     async fn read_position(
         shards: &ShardIndexCache,
+        store: &CachedStore,
         layout: &ShardLayout,
         position: usize,
     ) -> TimedRead {
@@ -790,7 +845,7 @@ mod tests {
             position,
         };
         shards
-            .read_inner_chunk(layout, &location, READER, LABEL)
+            .read_inner_chunk(store, layout, &location, READER, LABEL)
             .await
     }
 
@@ -803,21 +858,21 @@ mod tests {
     {
         for location in [IndexLocation::End, IndexLocation::Start] {
             let layout = hand_built_layout(location);
-            let (shards, store) = hand_built_cache(location, 0).await;
+            let (shards, cached, store) = hand_built_cache(location, 0).await;
             let gets = || store.get_count.load(Ordering::SeqCst);
             let heads = || store.head_count.load(Ordering::SeqCst);
 
-            let first = read_position(&shards, &layout, 0).await;
+            let first = read_position(&shards, &cached, &layout, 0).await;
             assert_eq!(&first.result.unwrap()[..], b"first", "{location:?}");
             assert_eq!(gets(), 2, "{location:?}: the index and the inner chunk");
             assert!(first.timing.backend_read_us.is_some());
             assert!(first.timing.permit_wait_us.is_some());
 
-            let second = read_position(&shards, &layout, 1).await;
+            let second = read_position(&shards, &cached, &layout, 1).await;
             assert_eq!(&second.result.unwrap()[..], b"second", "{location:?}");
             assert_eq!(gets(), 3, "{location:?}: one range read, no index");
 
-            let absent = read_position(&shards, &layout, 2).await;
+            let absent = read_position(&shards, &cached, &layout, 2).await;
             assert!(matches!(
                 absent.result,
                 Err(object_store::Error::NotFound { .. })
@@ -829,11 +884,11 @@ mod tests {
             );
             assert_eq!(absent.timing, SourceReadTiming::default());
 
-            let fourth = read_position(&shards, &layout, 3).await;
+            let fourth = read_position(&shards, &cached, &layout, 3).await;
             assert_eq!(&fourth.result.unwrap()[..], b"fourth", "{location:?}");
             assert_eq!(gets(), 4, "{location:?}");
 
-            let repeat = read_position(&shards, &layout, 0).await;
+            let repeat = read_position(&shards, &cached, &layout, 0).await;
             assert_eq!(&repeat.result.unwrap()[..], b"first", "{location:?}");
             assert_eq!(
                 gets(),
@@ -845,21 +900,70 @@ mod tests {
         }
     }
 
+    /// The probe's question, asked of a hand-built shard with the index at
+    /// either end: a written position, an absent one, and a shard object
+    /// that is not there. No HEAD is issued, and the index the probe read
+    /// serves the binding's first read of the same shard from the cache.
+    #[tokio::test]
+    async fn inner_chunk_written_reads_the_index_once_and_the_binding_reuses_it() {
+        for location in [IndexLocation::End, IndexLocation::Start] {
+            let layout = hand_built_layout(location);
+            let (shards, cached, store) = hand_built_cache(location, 0).await;
+            let gets = || store.get_count.load(Ordering::SeqCst);
+            let shard = Path::from("0/c/0/0");
+
+            assert!(
+                inner_chunk_written(&cached, &layout, &shard, 0)
+                    .await
+                    .unwrap(),
+                "{location:?}"
+            );
+            assert!(
+                !inner_chunk_written(&cached, &layout, &shard, 2)
+                    .await
+                    .unwrap(),
+                "{location:?}"
+            );
+            assert_eq!(gets(), 1, "{location:?}: one index read answers both");
+
+            assert!(
+                !inner_chunk_written(&cached, &layout, &Path::from("0/c/9/9"), 0)
+                    .await
+                    .unwrap(),
+                "{location:?}"
+            );
+            assert_eq!(gets(), 2, "{location:?}: a missing shard is one read");
+
+            let first = read_position(&shards, &cached, &layout, 0).await;
+            assert_eq!(&first.result.unwrap()[..], b"first", "{location:?}");
+            assert_eq!(
+                gets(),
+                3,
+                "{location:?}: the binding's index read was served from the cache"
+            );
+            assert_eq!(store.head_count.load(Ordering::SeqCst), 0);
+            assert_eq!(cached.stats().backend_errors, 0);
+        }
+    }
+
     /// Several callers reaching a cold shard together still read its index
     /// once, because they coalesce on the cached store. Each distinct inner
     /// chunk is read once between them.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_first_reads_of_one_shard_share_one_index_read() {
         let layout = Arc::new(hand_built_layout(IndexLocation::End));
-        let (shards, store) = hand_built_cache(IndexLocation::End, 20).await;
+        let (shards, cached, store) = hand_built_cache(IndexLocation::End, 20).await;
         let shards = Arc::new(shards);
 
         let mut handles = Vec::new();
         for position in [0usize, 1, 3, 0, 1, 3, 0, 3] {
             let shards = Arc::clone(&shards);
+            let cached = Arc::clone(&cached);
             let layout = Arc::clone(&layout);
             handles.push(tokio::spawn(async move {
-                read_position(&shards, &layout, position).await.result
+                read_position(&shards, &cached, &layout, position)
+                    .await
+                    .result
             }));
         }
         for handle in handles {
@@ -874,10 +978,13 @@ mod tests {
         assert_eq!(store.head_count.load(Ordering::SeqCst), 0);
     }
 
-    async fn cache_over_shard_bytes(shard: Vec<u8>) -> ShardIndexCache {
+    async fn cache_over_shard_bytes(shard: Vec<u8>) -> (ShardIndexCache, Arc<CachedStore>) {
         let store = Arc::new(CountingStore::new(0));
         store.seed("0/c/0/0", shard).await;
-        ShardIndexCache::new(Arc::new(CachedStore::new(store, 1024 * 1024)))
+        (
+            ShardIndexCache::new(),
+            Arc::new(CachedStore::new(store, 1024 * 1024)),
+        )
     }
 
     /// An index that does not match its checksum is not read around. The
@@ -891,9 +998,9 @@ mod tests {
         let mut shard = build_shard(&HAND_BUILT_CHUNKS, IndexLocation::End);
         let index_start = shard.len() - layout.index_byte_len() as usize;
         shard[index_start] ^= 0x01;
-        let shards = cache_over_shard_bytes(shard).await;
+        let (shards, store) = cache_over_shard_bytes(shard).await;
 
-        let read = read_position(&shards, &layout, 0).await;
+        let read = read_position(&shards, &store, &layout, 0).await;
         let error = read.result.unwrap_err();
         assert!(
             matches!(error, object_store::Error::Generic { .. }),
@@ -909,9 +1016,9 @@ mod tests {
     #[tokio::test]
     async fn a_shard_object_shorter_than_its_declared_index_is_an_error() {
         let layout = hand_built_layout(IndexLocation::Start);
-        let shards = cache_over_shard_bytes(b"too short".to_vec()).await;
+        let (shards, store) = cache_over_shard_bytes(b"too short".to_vec()).await;
 
-        let read = read_position(&shards, &layout, 0).await;
+        let read = read_position(&shards, &store, &layout, 0).await;
         let error = read.result.unwrap_err();
         assert!(
             matches!(error, object_store::Error::Generic { .. }),

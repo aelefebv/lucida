@@ -278,7 +278,7 @@ impl ReadKey {
 /// `object_store`'s own range type is not hashable, so it cannot key the
 /// cache directly.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
-enum ByteRange {
+pub(crate) enum ByteRange {
     /// Half-open, in bytes.
     Bounded(Range<u64>),
     /// The last `n` bytes of the object.
@@ -406,11 +406,12 @@ pub struct CachedStore {
     /// the same key subscribe to the leader's broadcast instead of each
     /// hitting the backend.
     in_flight: InFlight,
-    /// Paths [`CachedStore::get_optional_metadata_bytes`] has found absent, so a
-    /// repeated probe for the same optional object costs no round trip.
+    /// Paths the optional metadata reads and [`CachedStore::probe_exists`]
+    /// have found absent, so a repeated probe for the same optional object
+    /// costs no round trip.
     ///
-    /// Deliberately separate from the byte cache and consulted only by that
-    /// method: an absent *chunk* is legitimate sparse data whose absence is a
+    /// Deliberately separate from the byte cache and consulted only by those
+    /// methods: an absent *chunk* is legitimate sparse data whose absence is a
     /// property of the data, and remembering it would make a chunk that
     /// appears later read as empty. An absent *optional metadata object* — a
     /// `labels/zarr.json` that a dataset simply does not have — is a property
@@ -419,7 +420,8 @@ pub struct CachedStore {
     /// open's reads.
     ///
     /// Keyed by path alone, unlike the byte cache. Absence is a property of
-    /// the object, not of any range of it, and only whole-object reads ask.
+    /// the object, not of any range of it, so one entry answers a whole-object
+    /// read and a range read of the same object alike.
     absent: Mutex<LruCache<String, ()>>,
     /// Caps concurrent backend chunk reads and decides whose read goes next.
     /// Shared process-wide by default (see [`global_source_read_limiter`]); a
@@ -920,7 +922,37 @@ impl CachedStore {
         &self,
         path: &Path,
     ) -> Result<Option<Bytes>, object_store::Error> {
-        let key = path.to_string();
+        self.get_optional_metadata(ReadKey::new(path, None)).await
+    }
+
+    /// Read one byte range of an object that may legitimately not exist, as
+    /// a metadata read.
+    ///
+    /// The one range read in the metadata class. It exists for the
+    /// unwritten-level probe, which reads a shard's index while an open is
+    /// still resolving the dataset's shape. That is a question about the
+    /// shape, not the data, so the read queues behind the metadata cap
+    /// rather than a chunk permit and files a row in the open's metadata
+    /// family, as [`probe_exists`] does. Absence is answered and remembered
+    /// as [`get_optional_metadata_bytes`] answers and remembers it. An
+    /// object that is not there has no range either.
+    ///
+    /// [`probe_exists`]: Self::probe_exists
+    /// [`get_optional_metadata_bytes`]: Self::get_optional_metadata_bytes
+    pub(crate) async fn get_optional_metadata_range(
+        &self,
+        path: &Path,
+        range: ByteRange,
+    ) -> Result<Option<Bytes>, object_store::Error> {
+        self.get_optional_metadata(ReadKey::new(path, Some(range)))
+            .await
+    }
+
+    async fn get_optional_metadata(
+        &self,
+        read: ReadKey,
+    ) -> Result<Option<Bytes>, object_store::Error> {
+        let key = read.path.to_string();
         let started = std::time::Instant::now();
         {
             let mut absent = self.absent.lock().unwrap();
@@ -940,7 +972,7 @@ impl CachedStore {
 
         match self
             .get_bytes_as(
-                ReadKey::new(path, None),
+                read,
                 ReadClass::OptionalMetadata,
                 ReaderId::UNATTRIBUTED,
                 RequestLabel::UNATTRIBUTED,
@@ -2169,6 +2201,76 @@ mod tests {
             2,
             "the metadata read queued behind the chunk permit a range read held"
         );
+    }
+
+    /// The unwritten-level probe reads a shard's index while an open is
+    /// resolving the dataset's shape, so the read is metadata however it is
+    /// shaped. A chunk permit that a range read holds must not delay it, and
+    /// it files a row in the open's metadata family.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_optional_metadata_range_read_takes_no_chunk_permit_and_files_a_metadata_row() {
+        let store = Arc::new(CountingStore::new(50));
+        store.seed("object", b"0123456789abcdef").await;
+        store.seed("0/c/0/0", b"inner-chunks-then-index").await;
+        let max_active = store.max_active.clone();
+        let cached = Arc::new(CachedStore::with_source_limiter(
+            store,
+            1024,
+            SourceReadLimiter::new(1),
+        ));
+
+        let range = {
+            let cached = cached.clone();
+            tokio::spawn(async move {
+                cached
+                    .get_range(&Path::from("object"), 0..4, READER, LABEL)
+                    .await
+                    .result
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let watcher = Arc::new(Watcher::default());
+        let index = crate::metadata_reads::observing(watcher.clone(), async {
+            cached
+                .get_optional_metadata_range(&Path::from("0/c/0/0"), ByteRange::Suffix(5))
+                .await
+                .unwrap()
+        })
+        .await;
+        range.await.unwrap().unwrap();
+
+        assert_eq!(index.as_deref(), Some(&b"index"[..]));
+        assert_eq!(
+            max_active.load(Ordering::SeqCst),
+            2,
+            "the probe's range read queued behind the chunk permit a range read held"
+        );
+        assert_eq!(watcher.phases(), vec![MetadataReadPhase::BackendRead]);
+    }
+
+    /// A shard object that is not there is an answer, not a fault, and the
+    /// absence is remembered by path, so a second range of the same object
+    /// costs no round trip.
+    #[tokio::test]
+    async fn an_absent_optional_metadata_range_is_an_answer_and_is_remembered() {
+        let store = Arc::new(CountingStore::new(0));
+        let get_count = store.get_count.clone();
+        let cached = CachedStore::new(store, 1024);
+        let missing = Path::from("2/c/0/0");
+
+        let suffix = cached
+            .get_optional_metadata_range(&missing, ByteRange::Suffix(68))
+            .await
+            .unwrap();
+        let bounded = cached
+            .get_optional_metadata_range(&missing, ByteRange::Bounded(0..68))
+            .await
+            .unwrap();
+
+        assert_eq!(suffix, None);
+        assert_eq!(bounded, None);
+        assert_eq!(get_count.load(Ordering::SeqCst), 1);
+        assert_eq!(cached.stats().backend_errors, 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
