@@ -20,17 +20,17 @@ use lucida_proxy::{ProxyAsset, ProxyKind, ProxySpec};
 use lucida_store::cache::CachedStore;
 use lucida_store::import_types::ImportWarningKind;
 use lucida_store::source_limiter::{ReaderId, RequestLabel};
-use object_store::path::Path;
 use tokio::sync::{Mutex, broadcast, mpsc};
 
+use crate::binding::{ChunkResolver, parse_level_from_chunk_key};
+use crate::chunk_read::{ChunkReadError, read_chunk};
 use crate::dataset_open::{self, DatasetOpenContext, DatasetOpenOutcome, WorkspaceScope};
-use crate::decode::decode_storage_bytes;
 use crate::generated::{
     DerivedCacheStorage, DerivedCacheTelemetry, DerivedChunkCache, DerivedChunkLookup,
     GeneratedCoarseService,
 };
 use crate::open_diagnostics::{
-    backend_kind_for_url, is_not_found, open_failure, open_progress, store_error_status,
+    backend_kind_for_url, open_failure, open_progress, store_error_status,
 };
 use crate::proxy::{PROXY_TARGET_LONG_AXIS, ProxyGenerator};
 use crate::session::Session;
@@ -688,11 +688,6 @@ async fn handle_client_inner(
                             key,
                         } => {
                             // Look up the server binding for this dataset.
-                            // Parse the level prefix from the chunk key to
-                            // pick the right per-level compression + byte
-                            // layout. Malformed keys default to level 0 —
-                            // serve_chunk_from_store will fail-fast at
-                            // resolve time.
                             let level = parse_level_from_chunk_key(&key);
                             let mut probe = RequestProbe::arrived(
                                 rid,
@@ -715,22 +710,16 @@ async fn handle_client_inner(
                                             generated_service: b.generated_service.clone(),
                                         }
                                     } else {
-                                        let level_info = b.resolver.level_info(&image_id, level);
                                         ChunkDispatch::Source {
-                                            resolved: b.resolver.resolve(&image_id, &key),
-                                            level_info,
-                                            cache: b.cache.clone(),
+                                            resolver: Arc::clone(&b.resolver),
+                                            cache: Arc::clone(&b.cache),
                                         }
                                     }
                                 })
                             };
                             probe.mark(ServerPhase::BindingLookup);
                             match dispatch {
-                                Some(ChunkDispatch::Source {
-                                    resolved,
-                                    level_info,
-                                    cache,
-                                }) => {
+                                Some(ChunkDispatch::Source { resolver, cache }) => {
                                     let unicast_routes_clone = Arc::clone(&unicast_routes);
                                     tokio::spawn(async move {
                                         serve_chunk_from_store(
@@ -738,8 +727,7 @@ async fn handle_client_inner(
                                             &dataset_id,
                                             &image_id,
                                             &key,
-                                            resolved.as_deref(),
-                                            level_info,
+                                            &resolver,
                                             &cache,
                                             &unicast_routes_clone,
                                             probe,
@@ -1362,8 +1350,7 @@ where
 
 enum ChunkDispatch {
     Source {
-        resolved: Option<String>,
-        level_info: Option<crate::binding::LevelInfo>,
+        resolver: Arc<ChunkResolver>,
         cache: Arc<CachedStore>,
     },
     Generated {
@@ -1373,43 +1360,10 @@ enum ChunkDispatch {
     },
 }
 
-/// Parse the level prefix from a canonical chunk key (`"{level}/t/c/z/y/x"`).
-/// Returns `0` if the key is malformed or missing a numeric prefix — the
-/// caller's resolve step will turn that into a clean per-key failure.
-fn parse_level_from_chunk_key(key: &str) -> u32 {
-    key.split('/')
-        .next()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0)
-}
-
-/// Parse the wire `(t, c)` voxel coordinates from a canonical chunk key
-/// (`"{level}/t/c/z/y/x"`). Returns `(0, 0)` if the key is malformed —
-/// downstream slice math then yields the canonical prefix, which is the
-/// safe fallback for legacy paths.
-fn parse_t_c_from_chunk_key(key: &str) -> (u64, u64) {
-    let mut parts = key.split('/');
-    let _level = parts.next();
-    let t = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let c = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    (t, c)
-}
-
-/// Read a chunk from a CachedStore and send it to the requesting client.
-///
-/// `object_path` is the pre-resolved object store path from the ChunkResolver.
-/// If `None`, the image_id was unknown and the request is rejected.
-///
-/// `level_info` carries per-level compression, on-disk chunk_shape, and
-/// the canonical-byte slice layout. The wire `(t, c)` coords are parsed
-/// from `chunk_key` and reduced to intra-chunk indices via
-/// `wire_value % chunk_shape[axis]`; the resulting `(offset, size)` from
-/// [`ChunkByteLayout::slice_range`] picks the requested timepoint/channel
-/// out of the decompressed on-disk chunk.
-///
-/// A `None` `level_info` (unknown image or level — e.g. older snapshot)
-/// falls back to no-compression-no-slicing so legacy datasets keep
-/// working.
+/// Every exit files the probe's row. An absent chunk is delivered as fill
+/// like any other chunk, but an object store fault reaches the client as a
+/// status frame: from its side the alternative is a request timeout, which
+/// it has to treat as transient, so a dead source would never surface.
 // Internal helper threading per-request state from the dispatch site;
 // extracting a struct would just push the bundle one frame up.
 #[allow(clippy::too_many_arguments)]
@@ -1418,85 +1372,40 @@ async fn serve_chunk_from_store(
     dataset_id: &DatasetId,
     image_id: &ImageId,
     chunk_key: &str,
-    object_path: Option<&str>,
-    level_info: Option<crate::binding::LevelInfo>,
-    cache: &Arc<CachedStore>,
+    resolver: &ChunkResolver,
+    cache: &CachedStore,
     unicast_routes: &UnicastRoutes,
     mut probe: RequestProbe,
 ) {
-    let object_path = match object_path {
-        Some(p) => p,
-        None => {
+    // Charged to the requesting client, so one client's collection-sized
+    // backlog cannot delay another client's first chunk (#901), and labelled
+    // with the request, so a wait behind the source-read cap is attributable
+    // to it rather than only to a client (ADR 0048).
+    let read = read_chunk(
+        resolver,
+        cache,
+        image_id,
+        chunk_key,
+        ReaderId(client_id),
+        RequestLabel(probe.rid()),
+        Some(&mut probe),
+    )
+    .await;
+    let bytes = match read {
+        Ok(read) => read.into_bytes(),
+        Err(ChunkReadError::UnknownImage(_)) => {
             eprintln!(
                 "server: unknown image_id {image_id} for dataset {dataset_id}, key {chunk_key}"
             );
             probe.finish(TimingRowOutcome::Failed);
             return;
         }
-    };
-
-    let level_info = level_info.unwrap_or(crate::binding::LevelInfo {
-        level_index: 0,
-        compression: crate::decode::StorageCompression::None,
-        chunk_shape: Vec::new(),
-        chunk_byte_layout: lucida_store::layout::ChunkByteLayout {
-            canonical_byte_size: 0,
-            on_disk_byte_size: 0,
-            byte_stride_t: 0,
-            byte_stride_c: 0,
-            chunk_size_t: 1,
-            chunk_size_c: 1,
-        },
-    });
-
-    tracing::trace!(dataset = %dataset_id, image = %image_id, key = chunk_key, path = object_path, "serving chunk");
-    let obj_path = Path::from(object_path);
-    // Everything from the serve task starting to the read being issued.
-    probe.mark(ServerPhase::Dispatch);
-    // Charged to the requesting client, so one client's collection-sized
-    // backlog cannot delay another client's first chunk (#901).
-    // The label crosses into the store with the read, so a wait behind the
-    // source-read cap is attributable to a request rather than only to a
-    // client (ADR 0048).
-    let read = cache
-        .get_bytes(&obj_path, ReaderId(client_id), RequestLabel(probe.rid()))
-        .await;
-    // The store owns this stretch of the row: only it knows whether this
-    // request led the single flight or waited on someone else's read.
-    probe.record_read(read.timing);
-    let mut bytes: Vec<u8> = match read.result {
-        Ok(storage_bytes) => {
-            // Decode storage compression → raw bytes (WireFormat::Raw for phase 1).
-            // Shared with the proxy generator via [`crate::decode::decode_storage_bytes`].
-            match decode_storage_bytes(&storage_bytes, level_info.compression) {
-                Ok(raw) => {
-                    tracing::debug!(
-                        key = chunk_key,
-                        compressed = storage_bytes.len(),
-                        decompressed = raw.len(),
-                        compression = ?level_info.compression,
-                        "chunk decoded"
-                    );
-                    probe.mark(ServerPhase::Decompress);
-                    raw
-                }
-                Err(e) => {
-                    eprintln!("server: decode failed for {chunk_key}: {e}");
-                    probe.mark(ServerPhase::Decompress);
-                    probe.finish(TimingRowOutcome::Failed);
-                    return;
-                }
-            }
+        Err(ChunkReadError::Decode(e)) => {
+            eprintln!("server: decode failed for {chunk_key}: {e}");
+            probe.finish(TimingRowOutcome::Failed);
+            return;
         }
-        Err(e) if is_not_found(&e) => {
-            vec![0_u8; level_info.chunk_byte_layout.canonical_byte_size]
-        }
-        Err(e) => {
-            // A non-not-found store failure (revoked access, backend fault,
-            // unreachable service) must reach the requesting client as an
-            // explicit status frame: from its side the alternative is a
-            // request timeout, which it has to treat as transient, so a
-            // dead source would never surface.
+        Err(ChunkReadError::ObjectStore(e)) => {
             eprintln!("server: failed to read chunk {chunk_key} for {dataset_id}: {e}");
             send_source_chunk_status(
                 client_id,
@@ -1513,21 +1422,6 @@ async fn serve_chunk_from_store(
             return;
         }
     };
-
-    // Pick out the requested (t, c) slice from the decompressed on-disk
-    // chunk. For canonical 5D / chunk_size 1 datasets, slice_range returns
-    // (0, canonical_byte_size) and this is equivalent to the old prefix
-    // truncate. For chunk_size > 1 on t/c or pinned-axis bundling, the
-    // offset/size pick out exactly one timepoint/channel's bytes.
-    let (wire_t, wire_c) = parse_t_c_from_chunk_key(chunk_key);
-    let (offset, size) = level_info.chunk_byte_layout.slice_range(wire_t, wire_c);
-    if size > 0
-        && offset
-            .checked_add(size)
-            .is_some_and(|end| end <= bytes.len())
-    {
-        bytes = bytes[offset..offset + size].to_vec();
-    }
 
     let buf = encode_chunk_frame(client_id, dataset_id, image_id, chunk_key, &bytes);
     probe.mark(ServerPhase::SliceEncode);
@@ -2041,9 +1935,12 @@ mod tests {
         assert_eq!(combine_health(Degraded, Unavailable), Unavailable);
         assert_eq!(combine_health(Unavailable, Degraded), Unavailable);
     }
-    use crate::test_fixtures::single_image_manifest;
+    use crate::test_fixtures::{
+        FailingStore, StoreFailure, four_byte_level, image_seed, single_image_manifest,
+    };
     use lucida_content::EntityId;
     use lucida_proxy::{ProxyDtype, ProxyHeader};
+    use object_store::path::Path;
 
     #[test]
     fn dataset_health_reports_recorded_restore_failure() {
@@ -2271,19 +2168,6 @@ mod tests {
         let store =
             Arc::new(object_store::memory::InMemory::new()) as Arc<dyn object_store::ObjectStore>;
         let cache = Arc::new(CachedStore::new(store, 1024));
-        let level_info = crate::binding::LevelInfo {
-            level_index: 0,
-            compression: crate::decode::StorageCompression::None,
-            chunk_shape: vec![1, 1, 1, 1, 2],
-            chunk_byte_layout: lucida_store::layout::ChunkByteLayout {
-                canonical_byte_size: 4,
-                on_disk_byte_size: 4,
-                byte_stride_t: 0,
-                byte_stride_c: 0,
-                chunk_size_t: 1,
-                chunk_size_c: 1,
-            },
-        };
 
         let timings = Arc::new(TimingBuffer::new());
         serve_chunk_from_store(
@@ -2291,8 +2175,7 @@ mod tests {
             &DatasetId("ds1".into()),
             &ImageId("img1".into()),
             "0/0/0/0/0/0",
-            Some("missing"),
-            Some(level_info),
+            &tiny_resolver(),
             &cache,
             &routes,
             test_probe(1, &timings),
@@ -2316,109 +2199,37 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
-    /// Which error class [`FailingStore`] fabricates for every read.
-    #[derive(Debug, Clone, Copy)]
-    enum StoreFailure {
-        PermissionDenied,
-        Backend,
+    #[tokio::test]
+    async fn unknown_image_fails_the_row_and_sends_nothing() {
+        let routes: UnicastRoutes = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        routes.lock().await.insert(5, tx);
+        let store =
+            Arc::new(object_store::memory::InMemory::new()) as Arc<dyn object_store::ObjectStore>;
+        let cache = Arc::new(CachedStore::new(store, 1024));
+
+        let timings = Arc::new(TimingBuffer::new());
+        serve_chunk_from_store(
+            5,
+            &DatasetId("ds1".into()),
+            &ImageId("not-bound".into()),
+            "0/0/0/0/0/0",
+            &tiny_resolver(),
+            &cache,
+            &routes,
+            test_probe(1, &timings),
+        )
+        .await;
+
+        assert_eq!(sole_outcome(&timings), TimingRowOutcome::Failed);
+        assert!(
+            rx.try_recv().is_err(),
+            "no frame for a key with no location"
+        );
     }
 
-    /// An `ObjectStore` whose reads always fail with the configured error
-    /// class, standing in for a source whose credentials were revoked or
-    /// whose backend is down after a successful open.
-    #[derive(Debug)]
-    struct FailingStore(StoreFailure);
-
-    impl FailingStore {
-        fn error(&self) -> object_store::Error {
-            match self.0 {
-                StoreFailure::PermissionDenied => object_store::Error::PermissionDenied {
-                    path: "chunk".into(),
-                    source: "403 Forbidden".to_string().into(),
-                },
-                StoreFailure::Backend => object_store::Error::Generic {
-                    store: "failing-store",
-                    source: "503 Service Unavailable".to_string().into(),
-                },
-            }
-        }
-    }
-
-    impl std::fmt::Display for FailingStore {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "FailingStore({:?})", self.0)
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl object_store::ObjectStore for FailingStore {
-        async fn put_opts(
-            &self,
-            _location: &Path,
-            _payload: object_store::PutPayload,
-            _opts: object_store::PutOptions,
-        ) -> object_store::Result<object_store::PutResult> {
-            Err(self.error())
-        }
-
-        async fn put_multipart_opts(
-            &self,
-            _location: &Path,
-            _opts: object_store::PutMultipartOptions,
-        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
-            Err(self.error())
-        }
-
-        async fn get_opts(
-            &self,
-            _location: &Path,
-            _options: object_store::GetOptions,
-        ) -> object_store::Result<object_store::GetResult> {
-            Err(self.error())
-        }
-
-        async fn delete(&self, _location: &Path) -> object_store::Result<()> {
-            Err(self.error())
-        }
-
-        fn list(
-            &self,
-            _prefix: Option<&Path>,
-        ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
-        {
-            futures_util::stream::empty().boxed()
-        }
-
-        async fn list_with_delimiter(
-            &self,
-            _prefix: Option<&Path>,
-        ) -> object_store::Result<object_store::ListResult> {
-            Err(self.error())
-        }
-
-        async fn copy(&self, _from: &Path, _to: &Path) -> object_store::Result<()> {
-            Err(self.error())
-        }
-
-        async fn copy_if_not_exists(&self, _from: &Path, _to: &Path) -> object_store::Result<()> {
-            Err(self.error())
-        }
-    }
-
-    fn tiny_level_info() -> crate::binding::LevelInfo {
-        crate::binding::LevelInfo {
-            level_index: 0,
-            compression: crate::decode::StorageCompression::None,
-            chunk_shape: vec![1, 1, 1, 1, 2],
-            chunk_byte_layout: lucida_store::layout::ChunkByteLayout {
-                canonical_byte_size: 4,
-                on_disk_byte_size: 4,
-                byte_stride_t: 0,
-                byte_stride_c: 0,
-                chunk_size_t: 1,
-                chunk_size_c: 1,
-            },
-        }
+    fn tiny_resolver() -> ChunkResolver {
+        ChunkResolver::new(&image_seed("img1", vec![four_byte_level()]))
     }
 
     /// Drive `serve_chunk_from_store` against a [`FailingStore`] and return
@@ -2436,8 +2247,7 @@ mod tests {
             &DatasetId("ds1".into()),
             &ImageId("img1".into()),
             "0/0/0/0/0/0",
-            Some("some/object"),
-            Some(tiny_level_info()),
+            &tiny_resolver(),
             &cache,
             &routes,
             test_probe(1, &timings),
@@ -2460,9 +2270,13 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         routes.lock().await.insert(5, tx);
         let store = object_store::memory::InMemory::new();
+        let resolver = tiny_resolver();
+        let location = resolver
+            .resolve(&ImageId("img1".into()), "0/0/0/0/0/0")
+            .unwrap();
         object_store::ObjectStore::put(
             &store,
-            &Path::from("some/object"),
+            &location.path,
             object_store::PutPayload::from_static(&[1, 2, 3, 4]),
         )
         .await
@@ -2478,8 +2292,7 @@ mod tests {
             &DatasetId("ds1".into()),
             &ImageId("img1".into()),
             "0/0/0/0/0/0",
-            Some("some/object"),
-            Some(tiny_level_info()),
+            &resolver,
             &cache,
             &routes,
             test_probe(1, &timings),
@@ -2746,7 +2559,9 @@ mod tests {
 
         // Client 1 opens something large: a backlog of distinct chunks, all
         // wanted at once.
+        let resolver = Arc::new(tiny_resolver());
         for index in 0..BACKLOG {
+            let resolver = Arc::clone(&resolver);
             let cache = cache.clone();
             let routes = routes.clone();
             tokio::spawn(async move {
@@ -2754,9 +2569,8 @@ mod tests {
                     1,
                     &DatasetId("ds1".into()),
                     &ImageId("img1".into()),
-                    "0/0/0/0/0/0",
-                    Some(&format!("busy-{index}")),
-                    Some(tiny_level_info()),
+                    &format!("0/0/0/0/0/{index}"),
+                    &resolver,
                     &cache,
                     &routes,
                     test_probe(1, &Arc::new(TimingBuffer::new())),
@@ -2770,8 +2584,10 @@ mod tests {
             tokio::task::yield_now().await;
         }
 
-        // Client 2 arrives wanting one chunk.
+        // Client 2 arrives wanting a chunk none of the backlog asked for, so
+        // it cannot ride one of client 1's in-flight reads.
         let newcomer = tokio::spawn({
+            let resolver = Arc::clone(&resolver);
             let cache = cache.clone();
             let routes = routes.clone();
             async move {
@@ -2779,9 +2595,8 @@ mod tests {
                     2,
                     &DatasetId("ds1".into()),
                     &ImageId("img1".into()),
-                    "0/0/0/0/0/0",
-                    Some("newcomer"),
-                    Some(tiny_level_info()),
+                    "0/0/0/0/1/0",
+                    &resolver,
                     &cache,
                     &routes,
                     test_probe(2, &Arc::new(TimingBuffer::new())),
