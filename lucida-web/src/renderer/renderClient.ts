@@ -10,8 +10,8 @@ import type {
   ColdStateSelectionMessage,
   ColdStateDeltaMessage,
   ViewHotStateMessage,
-  EntityLevelReport,
 } from "./workerProtocol.ts";
+import { summarizeDatasetLevels, type DatasetLevels } from "../pipeline/datasetLevels.ts";
 import type { SceneEpochs } from "../pipeline/epochs.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type {
@@ -46,8 +46,19 @@ export class RenderClient implements UploadClient {
    * Consumers should match on `kind === "chunk"` to handle chunk gaps.
    */
   onWantedSetDelta: WantedSetHandler | null = null;
-  /** The worker's per-entity target and displayed levels for one dataset. */
-  onEntityLevels: ((datasetId: string, entities: EntityLevelReport[]) => void) | null = null;
+  /**
+   * The worker's level readout for one dataset changed: its target level
+   * and the level on screen, summarised across its entities. Null when the
+   * dataset reports no image-bearing entity.
+   */
+  onEntityLevels: ((datasetId: string, levels: DatasetLevels | null) => void) | null = null;
+
+  /**
+   * Summarised once per worker report, so the layer panel and the trace's
+   * per-tick aggregate read the same numbers without each walking the
+   * entities.
+   */
+  private readonly levelsByDataset = new Map<string, DatasetLevels>();
 
   constructor(canvas: HTMLCanvasElement) {
     const offscreen = canvas.transferControlToOffscreen();
@@ -104,8 +115,11 @@ export class RenderClient implements UploadClient {
       this.onChunksEvicted(msg.memberId, msg.keys, msg.skipped ?? [], msg.reason);
     } else if (msg.type === "wantedSetDelta" && this.onWantedSetDelta) {
       this.onWantedSetDelta(msg.datasetId, msg.epochs, msg.missing);
-    } else if (msg.type === "entityLevels" && this.onEntityLevels) {
-      this.onEntityLevels(msg.datasetId, msg.entities);
+    } else if (msg.type === "entityLevels") {
+      const levels = summarizeDatasetLevels(msg.entities);
+      if (levels === null) this.levelsByDataset.delete(msg.datasetId);
+      else this.levelsByDataset.set(msg.datasetId, levels);
+      this.onEntityLevels?.(msg.datasetId, levels);
     } else if (msg.type === "thumbnailResult") {
       const resolve = this.thumbnailPending.get(msg.id);
       if (resolve) {
@@ -477,7 +491,18 @@ export class RenderClient implements UploadClient {
   }
 
   removeLayerResources(datasetId: string) {
+    this.levelsByDataset.delete(datasetId);
     this.worker.postMessage({ type: "removeLayerResources", datasetId });
+  }
+
+  /**
+   * The worker's latest level readout for a dataset, or null before its first
+   * report. What the planning tick records as the displayed level, since the
+   * worker is the only side that knows which resident level each visible
+   * position samples from.
+   */
+  datasetLevels(datasetId: string): DatasetLevels | null {
+    return this.levelsByDataset.get(datasetId) ?? null;
   }
 
   /** Idempotent — a second call is a no-op. */

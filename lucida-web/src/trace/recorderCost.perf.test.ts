@@ -130,6 +130,9 @@ const OUTSTANDING = {
   desiredDetailChunks: 0, residentDetailChunks: 0, desiredCoarseChunks: 0, residentCoarseChunks: 0,
 };
 
+/** One object reused across ticks, as the emit site reuses the worker's report. */
+const DISPLAYED = { min: 2, max: 3 };
+
 /**
  * #888's peak per-second rates, and the tick rate it measured alongside them.
  *
@@ -352,6 +355,11 @@ function makeRig(chunks: number, calls?: { count: number }) {
     if (scratch) {
       scratch.counters[TickCounter.PlannedChunks] = chunks;
       scratch.setResidency(2, chunks, 0);
+      // A steady target, so the level-change comparison runs every tick and
+      // files nothing: the shape a pan has, and the one the allocation gate
+      // must see.
+      scratch.setTargetLevel(2, 2, false);
+      scratch.setDisplayedLevel(DISPLAYED);
     }
     const enqueuedAtMs = performance.now();
     recorder.notePlanEnqueue(enqueuedAtMs);
@@ -384,7 +392,11 @@ function makeRig(chunks: number, calls?: { count: number }) {
   function burstTick(): void {
     recorder.markPlanStart();
     const scratch = recorder.beginTick("ds");
-    if (scratch) scratch.counters[TickCounter.PlannedChunks] = chunks;
+    if (scratch) {
+      scratch.counters[TickCounter.PlannedChunks] = chunks;
+      scratch.setTargetLevel(2, 2, false);
+      scratch.setDisplayedLevel(DISPLAYED);
+    }
     const enqueuedAtMs = performance.now();
     recorder.notePlanEnqueue(enqueuedAtMs);
     for (let i = 0; i < chunks; i++) {

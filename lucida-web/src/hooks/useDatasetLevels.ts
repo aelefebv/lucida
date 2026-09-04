@@ -1,15 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import type { RenderClient } from "../renderer/renderClient.ts";
-import {
-  sameDatasetLevels,
-  summarizeDatasetLevels,
-  type DatasetLevels,
-} from "../pipeline/datasetLevels.ts";
+import { sameDatasetLevels, type DatasetLevels } from "../pipeline/datasetLevels.ts";
 
 /**
  * The per-dataset level readout the render worker reports: the target level
- * and the level actually on screen. The worker posts a report with every
- * wanted-set pass, so the map only changes identity when a dataset's summary
+ * and the level actually on screen. The client summarises every report as it
+ * arrives, so the map only changes identity when a dataset's summary
  * changes; React skips the re-render otherwise. `forget` drops a removed
  * dataset, which the worker stops reporting rather than reports as empty.
  */
@@ -25,8 +21,7 @@ export function useDatasetLevels({
   useEffect(() => {
     const client = clientRef.current;
     if (!clientReady || !client) return;
-    client.onEntityLevels = (datasetId, entities) => {
-      const next = summarizeDatasetLevels(entities);
+    client.onEntityLevels = (datasetId, next) => {
       setLevels((prev) => {
         if (sameDatasetLevels(prev.get(datasetId) ?? null, next)) return prev;
         const updated = new Map(prev);

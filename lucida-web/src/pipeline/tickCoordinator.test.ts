@@ -291,7 +291,14 @@ describe("epoch caching", () => {
     return {
       scene,
       datasets,
-      client: { coldState: vi.fn(), coldStateDisplay: vi.fn(), coldStateSelection: vi.fn(), coldStateDelta: vi.fn(), viewHotState: vi.fn() } as unknown as TickContext["client"],
+      client: {
+        coldState: vi.fn(),
+        coldStateDisplay: vi.fn(),
+        coldStateSelection: vi.fn(),
+        coldStateDelta: vi.fn(),
+        viewHotState: vi.fn(),
+        datasetLevels: vi.fn(() => null),
+      } as unknown as TickContext["client"],
       canvas: { clientWidth: 800, clientHeight: 600 } as unknown as HTMLCanvasElement,
       mode: "slice",
       renderScale: 1,
@@ -821,6 +828,7 @@ describe("display-only fast path", () => {
         coldStateSelection: over?.coldStateSelection ?? vi.fn(),
         coldStateDelta: over?.coldStateDelta ?? vi.fn(),
         viewHotState: vi.fn(),
+        datasetLevels: vi.fn(() => null),
       } as unknown as TickContext["client"],
       canvas: { clientWidth: 800, clientHeight: 600 } as unknown as HTMLCanvasElement,
       mode: "slice",
@@ -1452,7 +1460,14 @@ describe("multi-dataset planning", () => {
     return {
       scene,
       datasets,
-      client: { coldState: vi.fn(), coldStateDisplay: vi.fn(), coldStateSelection: vi.fn(), coldStateDelta: vi.fn(), viewHotState: vi.fn() } as unknown as TickContext["client"],
+      client: {
+        coldState: vi.fn(),
+        coldStateDisplay: vi.fn(),
+        coldStateSelection: vi.fn(),
+        coldStateDelta: vi.fn(),
+        viewHotState: vi.fn(),
+        datasetLevels: vi.fn(() => null),
+      } as unknown as TickContext["client"],
       canvas: { clientWidth: 800, clientHeight: 600 } as unknown as HTMLCanvasElement,
       mode: "slice",
       renderScale: 1,
@@ -1597,7 +1612,14 @@ describe("incremental delta fold", () => {
     return {
       scene,
       datasets,
-      client: { coldState: vi.fn(), coldStateDisplay: vi.fn(), coldStateSelection: vi.fn(), coldStateDelta: vi.fn(), viewHotState: vi.fn() } as unknown as TickContext["client"],
+      client: {
+        coldState: vi.fn(),
+        coldStateDisplay: vi.fn(),
+        coldStateSelection: vi.fn(),
+        coldStateDelta: vi.fn(),
+        viewHotState: vi.fn(),
+        datasetLevels: vi.fn(() => null),
+      } as unknown as TickContext["client"],
       canvas: { clientWidth: 800, clientHeight: 600 } as unknown as HTMLCanvasElement,
       mode: "slice",
       renderScale: 1,
@@ -1839,6 +1861,7 @@ describe("incremental delta fold", () => {
         coldStateSelection: vi.fn(),
         coldStateDelta: vi.fn(),
         viewHotState: vi.fn(),
+        datasetLevels: vi.fn(() => null),
       };
       const ctx = () =>
         ({ ...(makeCtx(fold.scene, datasets) as object), client, cpuCache }) as unknown as TickContext;
