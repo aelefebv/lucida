@@ -5,12 +5,19 @@ description: "The new coarse/detail renderer path binds and represents detail an
 tags: [lucida, decision]
 source_path: wiki/decisions/0041-clean-two-source-chunk-tier-renderer.md
 created: 2026-05-18
-modified: 2026-07-06
+modified: 2026-09-04
 ---
 
 # Clean two-source chunk-tier renderer
 
-Status: Accepted
+Status: Accepted. Superseded on the number of detail sources and on the
+sampling order by
+[Screen-chosen target level with resident coarser levels](0061-screen-chosen-target-level-with-resident-coarser-levels.md):
+the descriptor carries a bounded array of level sources rather than one detail
+source, and the renderer samples the finest resident level not finer than the
+target, then coarser resident levels, then coarse, then blank. Independent
+chunk geometry per source, one draw path, no blending, no proxy-asset names,
+and the explicit coarse source all stand.
 
 ## Decision
 
@@ -23,7 +30,10 @@ two explicit chunk tier sources:
 The shader uses one draw path with simultaneous access to both sources. Sampling
 order is exactly selected detail, then coarse, then blank. There is no blending,
 no separate coarse compositing pass, no tile-proxy or group-proxy fallback, and
-no implicit fallback to other source detail levels.
+no implicit fallback to other source detail levels. (Superseded by
+[ADR 0061](0061-screen-chosen-target-level-with-resident-coarser-levels.md):
+coarser resident levels now sit between the target and coarse in the sampling
+order.)
 
 The new path must not reuse proxy binding slots, proxy descriptor names, or
 proxy shader fallback branches for coarse. Descriptor state, worker protocol
@@ -54,7 +64,10 @@ behind detail" without changing visibility behavior.
 Lucida intentionally has two named tier sources rather than a generic N-tier
 renderer. ADR 0039 establishes a two-tier product model, and this renderer
 decision keeps that model concrete. Generalizing descriptors now would add
-indirection before Lucida has a third tier with clear semantics.
+indirection before Lucida has a third tier with clear semantics. (Superseded by
+[ADR 0061](0061-screen-chosen-target-level-with-resident-coarser-levels.md):
+the tiers stay two, and the detail tier carries a bounded array of level
+sources.)
 
 The decision follows
 [Principles — Planning Domain](../principles/planning.md#2-memory-is-the-binding-constraint) by keeping each tier's
