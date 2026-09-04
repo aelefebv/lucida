@@ -87,6 +87,38 @@ Which of the two independent residency populations a resident chunk belongs to:
 chunk in one is not the same resident as the same chunk in the other.
 _Avoid_: quality, priority, LOD tier
 
+**Target level**:
+The level the screen calls for in one image-bearing entity: the coarsest level
+that still places at least one sample under every device pixel, or the level a
+level pin names. A function of the camera and the level geometry alone, never
+of memory pressure or of what happens to be resident. Distinct from the
+displayed level, which is what the renderer sampled. See
+[ADR 0061](wiki/decisions/0061-screen-chosen-target-level-with-resident-coarser-levels.md).
+_Avoid_: ideal level, selected level, detail level (the detail tier holds
+several levels), LOD, zoom level
+
+**Displayed level**:
+The level the renderer sampled for an entity's pixels: the target level once its
+chunks are resident, and until then a coarser resident level or the coarse tier.
+The counterpart of the target level, and never a synonym for it.
+_Avoid_: rendered level, effective level, actual level, current level
+
+**Level pin**:
+A per-dataset choice that holds the target level at one level whatever the
+screen shows. Absent means the target follows the screen. Unrelated to pinning
+a workspace, which is per-member state. See
+[ADR 0061](wiki/decisions/0061-screen-chosen-target-level-with-resident-coarser-levels.md).
+_Avoid_: override (the field's old name), lock, fixed level, manual level
+
+**Resident levels**:
+The levels at which one image-bearing entity holds detail-tier chunks on the
+GPU: the target level, the coarser levels kept for sampling where the target is
+missing, and any finer level not yet evicted. Bounded per entity, with the
+coarse tier outside the count. See
+[ADR 0061](wiki/decisions/0061-screen-chosen-target-level-with-resident-coarser-levels.md).
+_Avoid_: level stack, mip chain, fallback levels, cached levels (the CPU cache is
+a different population)
+
 **Lane**:
 Which concurrent stream of work a unit belongs to. The planner emits `detail`,
 `coarse`, `prefetch`, `minimap` and `overview`; the label path is its own stream
