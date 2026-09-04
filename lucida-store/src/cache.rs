@@ -257,14 +257,39 @@ type ShareResult = Result<Bytes, SharedError>;
 struct ReadKey {
     path: Path,
     /// `None` is the whole object.
-    range: Option<Range<u64>>,
+    range: Option<ByteRange>,
 }
 
 impl ReadKey {
-    fn new(path: &Path, range: Option<Range<u64>>) -> Self {
+    fn new(path: &Path, range: Option<ByteRange>) -> Self {
         ReadKey {
             path: path.clone(),
             range,
+        }
+    }
+}
+
+/// The part of an object one partial read asks for.
+///
+/// A suffix is its own kind rather than a bounded range computed from the
+/// object's length, because the cached store never learns the length.
+/// Learning it would take a HEAD before every read of a shard index kept at
+/// the end of its object. The backend resolves the suffix itself, in the same round trip.
+/// `object_store`'s own range type is not hashable, so it cannot key the
+/// cache directly.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+enum ByteRange {
+    /// Half-open, in bytes.
+    Bounded(Range<u64>),
+    /// The last `n` bytes of the object.
+    Suffix(u64),
+}
+
+impl From<ByteRange> for GetRange {
+    fn from(range: ByteRange) -> Self {
+        match range {
+            ByteRange::Bounded(range) => GetRange::Bounded(range),
+            ByteRange::Suffix(n) => GetRange::Suffix(n),
         }
     }
 }
@@ -309,6 +334,29 @@ impl SourceReadTiming {
         u64::from(self.permit_wait_us.unwrap_or(0))
             + u64::from(self.backend_read_us.unwrap_or(0))
             + u64::from(self.coalesced_wait_us.unwrap_or(0))
+    }
+
+    /// This read's time and then `next`'s, for one answer that took two
+    /// reads, such as an inner chunk whose shard index had to be read first.
+    ///
+    /// Each stretch is the sum of the two reads' stretches, and a stretch
+    /// neither read had stays `None`. The sum keeps ADR 0050's arithmetic
+    /// honest. Both round trips were this caller's, so both belong on its
+    /// row, and a follower's wait on either read is still only a wait. The
+    /// leader a follower waited on is the later read's when both had one.
+    pub fn followed_by(self, next: SourceReadTiming) -> SourceReadTiming {
+        fn sum(first: Option<u32>, second: Option<u32>) -> Option<u32> {
+            match (first, second) {
+                (None, None) => None,
+                (first, second) => Some(first.unwrap_or(0).saturating_add(second.unwrap_or(0))),
+            }
+        }
+        SourceReadTiming {
+            permit_wait_us: sum(self.permit_wait_us, next.permit_wait_us),
+            backend_read_us: sum(self.backend_read_us, next.backend_read_us),
+            coalesced_wait_us: sum(self.coalesced_wait_us, next.coalesced_wait_us),
+            coalesced_onto: next.coalesced_onto.or(self.coalesced_onto),
+        }
     }
 }
 
@@ -614,7 +662,37 @@ impl CachedStore {
         label: RequestLabel,
     ) -> TimedRead {
         self.get_bytes_as(
-            ReadKey::new(path, Some(range)),
+            ReadKey::new(path, Some(ByteRange::Bounded(range))),
+            ReadClass::Chunk,
+            reader,
+            label,
+        )
+        .await
+    }
+
+    /// Read the last `len` bytes of an object, keyed by the path and the
+    /// suffix.
+    ///
+    /// The same read as [`get_range`] in every respect but the key: one
+    /// chunk permit, the same two timed phases, one source read. It exists
+    /// because a shard index kept at the end of its object is at an offset
+    /// the cached store cannot know without a HEAD, and the backend can
+    /// count back from the end itself. An object shorter than `len` answers with all of
+    /// its bytes.
+    ///
+    /// A suffix and the bounded range that covers the same bytes are two
+    /// entries, as [`ReadKey`] explains.
+    ///
+    /// [`get_range`]: Self::get_range
+    pub async fn get_suffix(
+        &self,
+        path: &Path,
+        len: u64,
+        reader: ReaderId,
+        label: RequestLabel,
+    ) -> TimedRead {
+        self.get_bytes_as(
+            ReadKey::new(path, Some(ByteRange::Suffix(len))),
             ReadClass::Chunk,
             reader,
             label,
@@ -937,7 +1015,7 @@ impl CachedStore {
                 }
             };
             let options = GetOptions {
-                range: key.range.clone().map(GetRange::Bounded),
+                range: key.range.clone().map(GetRange::from),
                 ..GetOptions::default()
             };
             match self.inner.get_opts(&key.path, options).await {
@@ -1152,126 +1230,14 @@ mod tests {
 
     // --- Single-flight, cap, and failure-sharing tests ---
     //
-    // These use a counting mock `ObjectStore` with a per-GET delay so
+    // These use a counting in-memory `ObjectStore` with a per-GET delay so
     // concurrent reads genuinely overlap. Assertions are on GET counts and
     // observed max concurrency, never wall-clock time.
 
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
-    use futures_util::stream::BoxStream;
-    use object_store::{
-        GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, PutMultipartOptions,
-        PutOptions, PutPayload, PutResult,
-    };
-
-    /// `ObjectStore` wrapper that counts `get_opts` calls, tracks peak
-    /// concurrency, sleeps before each read so overlaps are deterministic,
-    /// and can be toggled to fail every read.
-    #[derive(Debug)]
-    struct CountingStore {
-        inner: Arc<dyn ObjectStore>,
-        get_count: Arc<AtomicUsize>,
-        active: Arc<AtomicUsize>,
-        max_active: Arc<AtomicUsize>,
-        delay_ms: u64,
-        fail: Arc<AtomicBool>,
-    }
-
-    impl CountingStore {
-        fn new(delay_ms: u64) -> Self {
-            Self {
-                inner: Arc::new(object_store::memory::InMemory::new()),
-                get_count: Arc::new(AtomicUsize::new(0)),
-                active: Arc::new(AtomicUsize::new(0)),
-                max_active: Arc::new(AtomicUsize::new(0)),
-                delay_ms,
-                fail: Arc::new(AtomicBool::new(false)),
-            }
-        }
-
-        async fn seed(&self, path: &str, bytes: &'static [u8]) {
-            self.inner
-                .put(&Path::from(path), PutPayload::from_static(bytes))
-                .await
-                .unwrap();
-        }
-    }
-
-    impl std::fmt::Display for CountingStore {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "CountingStore({})", self.inner)
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ObjectStore for CountingStore {
-        async fn put_opts(
-            &self,
-            location: &Path,
-            payload: PutPayload,
-            opts: PutOptions,
-        ) -> object_store::Result<PutResult> {
-            self.inner.put_opts(location, payload, opts).await
-        }
-
-        async fn put_multipart_opts(
-            &self,
-            location: &Path,
-            opts: PutMultipartOptions,
-        ) -> object_store::Result<Box<dyn MultipartUpload>> {
-            self.inner.put_multipart_opts(location, opts).await
-        }
-
-        async fn get_opts(
-            &self,
-            location: &Path,
-            options: GetOptions,
-        ) -> object_store::Result<GetResult> {
-            self.get_count.fetch_add(1, Ordering::SeqCst);
-            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
-            self.max_active.fetch_max(active, Ordering::SeqCst);
-            if self.delay_ms > 0 {
-                tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
-            }
-            let result = if self.fail.load(Ordering::SeqCst) {
-                Err(object_store::Error::Generic {
-                    store: "counting",
-                    source: "injected failure".into(),
-                })
-            } else {
-                self.inner.get_opts(location, options).await
-            };
-            self.active.fetch_sub(1, Ordering::SeqCst);
-            result
-        }
-
-        async fn delete(&self, location: &Path) -> object_store::Result<()> {
-            self.inner.delete(location).await
-        }
-
-        fn list(
-            &self,
-            prefix: Option<&Path>,
-        ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
-            self.inner.list(prefix)
-        }
-
-        async fn list_with_delimiter(
-            &self,
-            prefix: Option<&Path>,
-        ) -> object_store::Result<ListResult> {
-            self.inner.list_with_delimiter(prefix).await
-        }
-
-        async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-            self.inner.copy(from, to).await
-        }
-
-        async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-            self.inner.copy_if_not_exists(from, to).await
-        }
-    }
+    use crate::test_support::CountingStore;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_same_path_misses_collapse_to_one_backend_get() {
@@ -2084,6 +2050,51 @@ mod tests {
             stats.current_bytes, 6,
             "the entry is the range, not the object"
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A shard's index sits at the end of an object whose length the cached
+    /// store does not know. A suffix read gets it in one round trip, where a
+    /// bounded range would first need a HEAD to find the end.
+    #[tokio::test]
+    async fn a_suffix_read_returns_the_last_bytes_as_its_own_entry() {
+        let dir = temp_dir("suffix_bytes");
+        fs::write(dir.join("object"), b"0123456789abcdef").unwrap();
+
+        let inner = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let cached = CachedStore::new(inner, 1024);
+
+        let path = Path::from("object");
+        let tail = cached
+            .get_suffix(&path, 6, READER, LABEL)
+            .await
+            .result
+            .unwrap();
+        assert_eq!(&tail[..], b"abcdef");
+
+        let again = cached
+            .get_suffix(&path, 6, READER, LABEL)
+            .await
+            .result
+            .unwrap();
+        assert_eq!(tail, again);
+        let stats = cached.stats();
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.misses, 1);
+        assert_eq!(stats.source_reads, 1);
+        assert_eq!(stats.entry_count, 1);
+        assert_eq!(stats.current_bytes, 6);
+
+        // The same bytes as a bounded range are a second entry: unifying the
+        // two keys would take the object's length, which is never fetched.
+        let bounded = cached
+            .get_range(&path, 10..16, READER, LABEL)
+            .await
+            .result
+            .unwrap();
+        assert_eq!(bounded, tail);
+        assert_eq!(cached.stats().entry_count, 2);
 
         let _ = fs::remove_dir_all(&dir);
     }
