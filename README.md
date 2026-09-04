@@ -48,6 +48,25 @@ docker run --rm -p 9876:9876 \
 
 Sign-out points at IAP's own `?gcp-iap-mode=CLEAR_LOGIN_COOKIE`, which clears the IAP cookie but does not sign the user out of the identity provider behind it. Admin rights still come from `LUCIDA_ADMIN_EMAILS`, and a lucida bearer token still works, so the CLI reaches an IAP-fronted server unchanged.
 
+### Show names and pictures from a profile directory
+
+Behind a perimeter the server learns only an email, so the profile menu shows a name derived from the address and no picture. If you have a JSON listing of people, point lucida at it and it fills both in for anyone with a row, in every auth mode:
+
+```bash
+docker run --rm -p 9876:9876 \
+  -e LUCIDA_BIND=0.0.0.0:9876 \
+  -e LUCIDA_AUTH=iap \
+  -e LUCIDA_IAP_AUDIENCE=/projects/PROJECT_NUMBER/global/backendServices/SERVICE_ID \
+  -e LUCIDA_DIRECTORY_URL=https://people.example/api/users \
+  -e LUCIDA_DIRECTORY_NAME_FIELDS="first_name last_name" \
+  -e LUCIDA_DIRECTORY_PICTURE_FIELD=photo_url \
+  ghcr.io/aelefebv/lucida:latest
+```
+
+The listing is a JSON array of objects. `LUCIDA_DIRECTORY_EMAIL_FIELD` (default `email`) names the key holding the address, `LUCIDA_DIRECTORY_NAME_FIELDS` (default `name`) one or more keys whose values are joined by a space, and `LUCIDA_DIRECTORY_PICTURE_FIELD` (default `picture`) the key holding the picture URL. `LUCIDA_DIRECTORY_HEADERS` adds fixed request headers as `Name: value` pairs separated by semicolons, for a listing that wants an API key. The listing is read once at startup with a ten-second timeout and held in memory, so a lookup adds no network round trip to a request. `LUCIDA_DIRECTORY_REFRESH_SECONDS` (default `21600`) is validated at startup and does not drive a refresh yet.
+
+A row changes how a person is shown and nothing else. The email stays the one the auth mode resolved, admin rights still come from `LUCIDA_ADMIN_EMAILS`, and a person with no row sees exactly what they see with the directory off. A malformed variable stops the boot and names itself. A listing that is down at startup does not: the server boots, logs `auth.directory.load_failed`, and shows the derived names. See [ADR-0062](wiki/decisions/0062-a-profile-directory-enriches-the-principal-and-never-authenticates-it.md).
+
 ### Develop on it
 
 Prerequisites: rust + cargo, pnpm, wasm-pack, node — your package manager equivalent.

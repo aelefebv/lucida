@@ -281,3 +281,65 @@ fn invalid_bind_address_fails() {
     let _guard = serial_test_lock();
     assert_server_fails(&[("LUCIDA_BIND", "not-a-socket-addr")], "LUCIDA_BIND");
 }
+
+// -- LUCIDA_DIRECTORY_* ------------------------------------------------
+//
+// Malformed directory configuration fails the boot like any other
+// `LUCIDA_*` value. An unreachable directory does not: that is an
+// outage to survive, not a typo to catch.
+
+#[test]
+fn a_malformed_directory_variable_stops_the_boot_naming_it() {
+    let _guard = serial_test_lock();
+    let port = pick_loopback_port();
+    let bind = format!("127.0.0.1:{port}");
+    assert_server_fails(
+        &[
+            ("LUCIDA_BIND", &bind),
+            ("LUCIDA_DIRECTORY_URL", "http://127.0.0.1:1/people"),
+            ("LUCIDA_DIRECTORY_NAME_FIELDS", ""),
+        ],
+        "LUCIDA_DIRECTORY_NAME_FIELDS",
+    );
+    assert_server_fails(
+        &[
+            ("LUCIDA_BIND", &bind),
+            ("LUCIDA_DIRECTORY_URL", "people.example/people"),
+        ],
+        "LUCIDA_DIRECTORY_URL",
+    );
+    assert_server_fails(
+        &[
+            ("LUCIDA_BIND", &bind),
+            ("LUCIDA_DIRECTORY_URL", "http://127.0.0.1:1/people"),
+            ("LUCIDA_DIRECTORY_HEADERS", "X-Requested-By lucida"),
+        ],
+        "LUCIDA_DIRECTORY_HEADERS",
+    );
+    assert_server_fails(
+        &[
+            ("LUCIDA_BIND", &bind),
+            ("LUCIDA_DIRECTORY_URL", "http://127.0.0.1:1/people"),
+            ("LUCIDA_DIRECTORY_REFRESH_SECONDS", "soon"),
+        ],
+        "LUCIDA_DIRECTORY_REFRESH_SECONDS",
+    );
+}
+
+#[test]
+fn an_unreachable_directory_does_not_stop_the_boot() {
+    let _guard = serial_test_lock();
+    let port = pick_loopback_port();
+    let bind = format!("127.0.0.1:{port}");
+    // Port 1 refuses at once, so the load fails without waiting out its
+    // timeout. The failed load logs to stdout, which this harness does
+    // not capture, so only the bind is checked here. The middleware
+    // tests pin what `whoami` serves meanwhile.
+    assert_server_starts(
+        port,
+        &[
+            ("LUCIDA_BIND", &bind),
+            ("LUCIDA_DIRECTORY_URL", "http://127.0.0.1:1/people"),
+        ],
+    );
+}

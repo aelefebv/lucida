@@ -13,6 +13,10 @@
 //!   truth for the `lucida_session` cookie's attribute set.
 //! - `dev` — disabled-auth identity switch cookie for local multi-user
 //!   testing. Not used by Google/production auth.
+//! - `directory` — the profile directory: an optional listing of
+//!   display names and pictures keyed by email, held in memory and
+//!   applied by the middleware to whatever principal the mode
+//!   resolved. Enrichment only; never a credential. See ADR-0062.
 //! - `session_store` — `LoginSessionStore` trait + the row type.
 //! - `session_store_sqlite` / `session_store_postgres` — production
 //!   `SqliteSessionStore` and `PostgresSessionStore`, both backed by
@@ -75,6 +79,7 @@ pub mod cli_authorization_sqlite;
 pub mod config;
 pub mod cookie;
 pub mod dev;
+pub mod directory;
 pub mod error_page;
 pub mod extractors;
 pub mod google_oauth;
@@ -106,8 +111,10 @@ pub use cli_authorization_memory::MemoryCliTokenAuthorizationStore;
 pub use cli_authorization_postgres::PostgresCliTokenAuthorizationStore;
 pub use cli_authorization_sqlite::SqliteCliTokenAuthorizationStore;
 pub use config::{
-    AuthConfig, AuthConfigError, AuthMode, GoogleOAuthConfig, IapConfig, LOGOUT_PATH,
+    AuthConfig, AuthConfigError, AuthMode, DirectoryConfig, GoogleOAuthConfig, IapConfig,
+    LOGOUT_PATH,
 };
+pub use directory::{DirectoryError, ProfileDirectory};
 pub use extractors::AdminRequired;
 pub use google_oauth::{GoogleOAuthClient, OAuthError, VerifiedClaims};
 pub use iap::{IapAssertionExtractor, IapError, IapVerifier, VerifiedAssertion};
