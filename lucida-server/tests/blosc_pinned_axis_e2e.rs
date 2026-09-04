@@ -172,12 +172,12 @@ async fn six_d_with_m_blosc_decodes_to_canonical_m0_slice() {
     let canonical_key = "0/0/0/0/0/0";
     let location = resolver.resolve(&image_id, canonical_key).unwrap();
     assert_eq!(
-        location.path,
+        location.path().clone(),
         Path::from("0/c/0/0/0/0/0/0"),
         "chunk path should have a 0 injected at the m position",
     );
     assert_eq!(
-        fs::read(dir.join(location.path.as_ref())).unwrap(),
+        fs::read(dir.join(location.path().as_ref())).unwrap(),
         ENC_6D_BLOSC
     );
 

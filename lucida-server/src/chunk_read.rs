@@ -2,11 +2,13 @@
 //! request is served.
 //!
 //! [`read_chunk`] resolves the chunk's location, reads it through the cached
-//! store, decodes the storage compression, fills an absent chunk, and slices
-//! the wire timepoint and channel out of the on-disk chunk. The interactive
-//! chunk handler and coarse generation both call it, and neither performs a
-//! step of the sequence itself, so what a location means and how its bytes
-//! become a wire chunk is decided here once.
+//! store, whole when the chunk is an object of its own and out of its shard
+//! when it is an inner chunk, decodes the storage compression, fills an
+//! absent chunk, and slices the wire timepoint and channel out of the
+//! on-disk chunk. The interactive chunk handler and coarse generation both
+//! call it, and neither performs a step of the sequence itself, so what a
+//! location means and how its bytes become a wire chunk is decided here
+//! once.
 
 use lucida_content::ImageId;
 use lucida_protocol::ServerPhase;
@@ -15,7 +17,7 @@ use lucida_store::layout::ChunkByteLayout;
 use lucida_store::source_limiter::{ReaderId, RequestLabel};
 
 use crate::binding::{
-    ChunkResolver, LevelInfo, parse_level_from_chunk_key, parse_t_c_from_chunk_key,
+    ChunkLocation, ChunkResolver, LevelInfo, parse_level_from_chunk_key, parse_t_c_from_chunk_key,
 };
 use crate::decode::{DecodeError, StorageCompression, decode_storage_bytes};
 use crate::open_diagnostics::is_not_found;
@@ -71,9 +73,11 @@ pub enum ChunkReadError {
 /// `probe` is the timing row of the request this read serves, when there is
 /// one. The read marks the row's dispatch, read, and decompress phases
 /// itself, because the boundaries fall inside this function and only the
-/// store knows how the read stretch was spent. A read with no browser
-/// bracket to nest inside, such as generation, passes `None` and its timing
-/// is dropped rather than filed against a label.
+/// store knows how the read stretch was spent. An inner chunk whose shard
+/// index was not yet remembered took two round trips, and its row's read
+/// stretches carry both; the next inner chunk of that shard carries one. A
+/// read with no browser bracket to nest inside, such as generation, passes
+/// `None` and its timing is dropped rather than filed against a label.
 pub async fn read_chunk(
     resolver: &ChunkResolver,
     store: &CachedStore,
@@ -90,11 +94,19 @@ pub async fn read_chunk(
         .level_info(image_id, parse_level_from_chunk_key(chunk_key))
         .unwrap_or_else(unsliced_level_info);
 
-    tracing::trace!(image = %image_id, key = chunk_key, path = %location.path, "reading chunk");
+    tracing::trace!(image = %image_id, key = chunk_key, path = %location.path(), "reading chunk");
     if let Some(probe) = probe.as_deref_mut() {
         probe.mark(ServerPhase::Dispatch);
     }
-    let read = store.get_bytes(&location.path, reader, label).await;
+    let read = match &location {
+        ChunkLocation::Object(path) => store.get_bytes(path, reader, label).await,
+        ChunkLocation::InnerChunk { layout, location } => {
+            resolver
+                .shard_indexes()
+                .read_inner_chunk(store, layout, location, reader, label)
+                .await
+        }
+    };
     if let Some(probe) = probe.as_deref_mut() {
         // The cached store owns this stretch of the row: only it knows whether
         // this request led the single flight or waited on someone else's read.
@@ -167,20 +179,25 @@ fn unsliced_level_info() -> LevelInfo {
             chunk_size_t: 1,
             chunk_size_c: 1,
         },
+        shard: None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use lucida_protocol::{PHASE_UNSET, TimingRowFamily, TimingRowOutcome};
     use lucida_store::import_types::ServerBindingSeed;
+    use lucida_store::shard::{IndexLocation, ShardLayout};
     use object_store::ObjectStore;
+    use object_store::path::Path;
 
     use super::*;
-    use crate::test_fixtures::{FailingStore, StoreFailure, four_byte_level, image_seed};
+    use crate::test_fixtures::{
+        DelayedStore, FailingStore, StoreFailure, four_byte_level, image_seed,
+    };
     use crate::timing::TimingBuffer;
 
     const IMAGE: &str = "img";
@@ -202,6 +219,80 @@ mod tests {
                 chunk_size_t: 1,
                 chunk_size_c: 2,
             },
+            shard: None,
+        }
+    }
+
+    /// Two timepoints of two samples per on-disk chunk: the same eight bytes
+    /// as [`channel_bundled_level`], bundled along `t` instead of `c`.
+    fn timepoint_bundled_level() -> LevelInfo {
+        LevelInfo {
+            chunk_shape: vec![2, 1, 1, 1, 2],
+            chunk_byte_layout: ChunkByteLayout {
+                byte_stride_t: 4,
+                byte_stride_c: 0,
+                chunk_size_t: 2,
+                chunk_size_c: 1,
+                ..channel_bundled_level().chunk_byte_layout
+            },
+            ..channel_bundled_level()
+        }
+    }
+
+    /// `level` packed two inner chunks to a shard along `x`, so a wire key's
+    /// `x` of 0 to 3 names shard `x / 2`, position `x % 2`.
+    fn sharded(level: LevelInfo) -> LevelInfo {
+        LevelInfo {
+            shard: Some(ShardLayout {
+                inner_chunk_shape: level.chunk_shape.clone(),
+                chunks_per_shard: vec![1, 1, 1, 1, 2],
+                inner_compression: StorageCompression::None,
+                index_location: IndexLocation::End,
+                index_checksum: false,
+            }),
+            ..level
+        }
+    }
+
+    /// A shard laid out as [`sharded`] declares: `chunks` in position order,
+    /// `None` for an inner chunk the index marks absent.
+    fn build_shard(chunks: &[Option<&[u8]>]) -> Vec<u8> {
+        let mut body = Vec::new();
+        let mut index = Vec::new();
+        for chunk in chunks {
+            let (offset, len) = match chunk {
+                Some(bytes) => {
+                    let offset = body.len() as u64;
+                    body.extend_from_slice(bytes);
+                    (offset, bytes.len() as u64)
+                }
+                None => (u64::MAX, u64::MAX),
+            };
+            index.extend_from_slice(&offset.to_le_bytes());
+            index.extend_from_slice(&len.to_le_bytes());
+        }
+        body.extend_from_slice(&index);
+        body
+    }
+
+    /// Shard 0 holds inner chunk `x = 0` and leaves `x = 1` unwritten; shard
+    /// 1 holds `x = 2` and `x = 3`. Each inner chunk is two four-byte
+    /// slices, one per bundled channel or timepoint.
+    async fn seed_bundled_shards(store: &impl ObjectStore) {
+        for (shard, chunks) in [
+            ("0/c/0/0/0/0/0", [Some(&[1, 2, 3, 4, 5, 6, 7, 8][..]), None]),
+            (
+                "0/c/0/0/0/0/1",
+                [
+                    Some(&[11, 12, 13, 14, 15, 16, 17, 18][..]),
+                    Some(&[21, 22, 23, 24, 25, 26, 27, 28][..]),
+                ],
+            ),
+        ] {
+            store
+                .put(&Path::from(shard), build_shard(&chunks).into())
+                .await
+                .unwrap();
         }
     }
 
@@ -221,7 +312,7 @@ mod tests {
     ) {
         let location = resolver.resolve(&image_id(), key).unwrap();
         store
-            .put(&location.path, bytes.to_vec().into())
+            .put(location.path(), bytes.to_vec().into())
             .await
             .unwrap();
     }
@@ -332,6 +423,59 @@ mod tests {
         assert_eq!(channel_1, ChunkRead::Present(vec![5, 6, 7, 8]));
     }
 
+    /// A bundled channel or timepoint is sliced out of a decoded inner chunk
+    /// exactly as out of an object, so bundling and sharding compose.
+    #[tokio::test]
+    async fn inner_chunk_is_read_out_of_its_shard_and_its_bundled_channel_or_timepoint_sliced() {
+        let bundles = [
+            (
+                "channel",
+                channel_bundled_level(),
+                ["0/0/0/0/0/0", "0/0/1/0/0/0", "0/0/0/0/0/2", "0/0/1/0/0/3"],
+            ),
+            (
+                "timepoint",
+                timepoint_bundled_level(),
+                ["0/0/0/0/0/0", "0/1/0/0/0/0", "0/0/0/0/0/2", "0/1/0/0/0/3"],
+            ),
+        ];
+        let expected = [
+            [1, 2, 3, 4],
+            [5, 6, 7, 8],
+            [11, 12, 13, 14],
+            [25, 26, 27, 28],
+        ];
+        for (bundle, level, keys) in bundles {
+            let resolver = resolver_with(vec![sharded(level)]);
+            let store = object_store::memory::InMemory::new();
+            seed_bundled_shards(&store).await;
+            let store = cached(store);
+
+            for (key, expected) in keys.iter().zip(expected) {
+                let read = read(&resolver, &store, key).await.unwrap();
+                assert_eq!(
+                    read,
+                    ChunkRead::Present(expected.to_vec()),
+                    "{bundle} bundle, key {key}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn inner_chunk_absent_from_the_index_reads_as_one_wire_chunk_of_fill() {
+        let resolver = resolver_with(vec![sharded(channel_bundled_level())]);
+        let store = object_store::memory::InMemory::new();
+        seed_bundled_shards(&store).await;
+        let store = cached(store);
+
+        for key in ["0/0/0/0/0/1", "0/0/1/0/0/1"] {
+            let read = read(&resolver, &store, key).await.unwrap();
+            assert_eq!(read, ChunkRead::Absent { len: 4 }, "{key}");
+        }
+        assert_eq!(store.stats().backend_errors, 0);
+    }
+
     #[tokio::test]
     async fn level_without_binding_info_passes_the_object_through() {
         let resolver = resolver_with(vec![]);
@@ -387,6 +531,35 @@ mod tests {
         ] {
             assert_ne!(batch.column(phase)[0], PHASE_UNSET, "{phase:?} is stamped");
         }
+    }
+
+    /// Every backend read is held for a fixed delay, so the two rows are told
+    /// apart by time. The lower bounds cannot fail, since a sleep never ends
+    /// early; the upper bound on the second read grants a whole delay again
+    /// to the overhead of one in-memory read.
+    #[tokio::test]
+    async fn first_read_from_a_shard_accounts_for_the_index_read_and_the_second_does_not() {
+        const DELAY: Duration = Duration::from_millis(100);
+        let resolver = resolver_with(vec![sharded(channel_bundled_level())]);
+        let store = DelayedStore::new(DELAY);
+        seed_bundled_shards(&store).await;
+        let store = cached(store);
+        let one_read = DELAY.as_micros() as u32;
+
+        let first = phases_for(&resolver, &store, "0/0/0/0/0/2").await;
+        let second = phases_for(&resolver, &store, "0/0/0/0/0/3").await;
+
+        let first_read = first.column(ServerPhase::BackendRead)[0];
+        let second_read = second.column(ServerPhase::BackendRead)[0];
+        assert!(
+            first_read >= 2 * one_read,
+            "the first read carries the index read and the inner chunk read: {first_read} us"
+        );
+        assert!(
+            (one_read..2 * one_read).contains(&second_read),
+            "the second read carries the inner chunk read alone: {second_read} us"
+        );
+        assert_eq!(store.stats().source_reads, 3);
     }
 
     #[tokio::test]

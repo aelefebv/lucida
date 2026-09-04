@@ -2933,7 +2933,8 @@ mod tests {
         resolver
             .resolve(&ImageId("img-1".into()), key)
             .unwrap()
-            .path
+            .path()
+            .clone()
     }
 
     fn binding_seed_for_data_type(
@@ -2965,6 +2966,7 @@ mod tests {
                             chunk_size_t: 1,
                             chunk_size_c: 1,
                         },
+                        shard: None,
                     })
                     .collect(),
             }],

@@ -5,6 +5,7 @@ use lucida_content::ImageId;
 use lucida_protocol::DatasetOpened;
 use lucida_store::cache::CachedStore;
 use lucida_store::import_types::{ImportWarning, LevelBindingInfo, ServerBindingSeed};
+use lucida_store::shard::{ShardIndexCache, ShardLayout, ShardLocation};
 use object_store::ObjectStore;
 use object_store::path::Path;
 
@@ -47,19 +48,44 @@ pub struct ServerBinding {
 /// seeds. Used per chunk request to resolve chunk keys to their
 /// [`ChunkLocation`] and to look up the per-level compression + byte-slicing
 /// info.
+///
+/// One per binding, and it also holds what the binding has learned about
+/// its shards: the [`ShardIndexCache`] that remembers each shard's index
+/// once read. That memory belongs beside the per-level shard layouts
+/// because both answer the same question, where an inner chunk's bytes
+/// are, and both live exactly as long as the binding does.
 pub struct ChunkResolver {
     images: HashMap<ImageId, ImageResolver>,
+    shard_indexes: ShardIndexCache,
 }
 
 /// Where one chunk lives in the object store.
 ///
 /// The resolver is the only thing that builds one, so no caller formats or
-/// parses object paths itself. Today a chunk is a whole object; a position
-/// inside the object belongs here once it is not, and the callers stay as
-/// they are.
+/// parses object paths itself, and no caller decides whether a key names a
+/// whole object or a piece of one.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChunkLocation {
-    pub path: Path,
+pub enum ChunkLocation<'a> {
+    /// The chunk is an object of its own: the object's bytes are the
+    /// chunk's.
+    Object(Path),
+    /// The chunk is an inner chunk of a shard object. The shard's index,
+    /// read with `layout` and remembered by the resolver, says which of the
+    /// object's bytes are its own.
+    InnerChunk {
+        layout: &'a ShardLayout,
+        location: ShardLocation,
+    },
+}
+
+impl ChunkLocation<'_> {
+    /// The object that holds the chunk: the chunk itself, or its shard.
+    pub fn path(&self) -> &Path {
+        match self {
+            ChunkLocation::Object(path) => path,
+            ChunkLocation::InnerChunk { location, .. } => &location.path,
+        }
+    }
 }
 
 struct ImageResolver {
@@ -69,6 +95,16 @@ struct ImageResolver {
     /// from the [`ImageBindingSeed`] at resolver build time so the
     /// chunk-fetch path doesn't need to re-validate codec chains.
     levels: Vec<LevelBindingInfo>,
+}
+
+impl ImageResolver {
+    /// A collection tile's chunks live under the tile's path.
+    fn prefixed(&self, store_path: impl std::fmt::Display) -> Path {
+        match &self.store_prefix {
+            Some(prefix) => Path::from(format!("{prefix}/{store_path}")),
+            None => Path::from(store_path.to_string()),
+        }
+    }
 }
 
 /// Re-exported alias kept for downstream chunk-fetch call sites that
@@ -89,7 +125,18 @@ impl ChunkResolver {
                 (img.image_id.clone(), resolver)
             })
             .collect();
-        ChunkResolver { images }
+        ChunkResolver {
+            images,
+            shard_indexes: ShardIndexCache::new(),
+        }
+    }
+
+    /// The binding's memory of its shards' indexes, for reading the bytes
+    /// an [`InnerChunk`] location names.
+    ///
+    /// [`InnerChunk`]: ChunkLocation::InnerChunk
+    pub fn shard_indexes(&self) -> &ShardIndexCache {
+        &self.shard_indexes
     }
 
     /// Look up per-level info (compression + byte layout + chunk shape) for
@@ -104,22 +151,26 @@ impl ChunkResolver {
     /// Resolve a canonical chunk key to where the chunk lives for a given
     /// image, or `None` if the image is not in the binding. Uses the
     /// per-level chunk_shape to translate wire `t`/`c` voxel coords into
-    /// disk-grid coords. A level the binding does not describe, such as one
-    /// named by a malformed key, is treated as one wire chunk per disk chunk.
-    pub fn resolve(&self, image_id: &ImageId, key: &str) -> Option<ChunkLocation> {
+    /// disk-grid coords. On a sharded level the key is read in the inner
+    /// chunk grid the same way, and the location names the shard and the
+    /// inner chunk's position in it. A level the binding does not describe,
+    /// such as one named by a malformed key, is treated as one wire chunk
+    /// per disk chunk, and a malformed key on a sharded level resolves the
+    /// same way: to an object nothing is at, so it reads as absent.
+    pub fn resolve(&self, image_id: &ImageId, key: &str) -> Option<ChunkLocation<'_>> {
         let img = self.images.get(image_id)?;
-        let level = parse_level_from_chunk_key(key);
-        let chunk_shape: Vec<u64> = img
-            .levels
-            .get(level as usize)
+        let level = img.levels.get(parse_level_from_chunk_key(key) as usize);
+        if let Some(layout) = level.and_then(|l| l.shard.as_ref())
+            && let Some(mut location) = layout.locate_inner_chunk(key, &img.axes_names)
+        {
+            location.path = img.prefixed(location.path);
+            return Some(ChunkLocation::InnerChunk { layout, location });
+        }
+        let chunk_shape: Vec<u64> = level
             .map(|l| l.chunk_shape.clone())
             .unwrap_or_else(|| vec![1; img.axes_names.len()]);
         let store_path = lucida_store::chunk_key_to_store_path(key, &img.axes_names, &chunk_shape);
-        let path = match &img.store_prefix {
-            Some(prefix) => Path::from(format!("{prefix}/{store_path}")),
-            None => Path::from(store_path),
-        };
-        Some(ChunkLocation { path })
+        Some(ChunkLocation::Object(img.prefixed(store_path)))
     }
 }
 
@@ -179,18 +230,19 @@ mod tests {
         }
     }
 
-    /// Build an image seed with one level whose `chunk_shape` is provided.
-    /// All other level fields are stub values — these tests only exercise
-    /// resolve(), not the slice path.
-    fn make_image_seed_with_chunk(
+    /// Every level field but `chunk_shape` and `shard` is a stub: these
+    /// tests exercise `resolve()`, not the slice path.
+    fn make_image_seed_with_level(
         id: &str,
         axes: Vec<&str>,
+        prefix: Option<&str>,
         chunk_shape: Vec<u64>,
+        shard: Option<ShardLayout>,
     ) -> ImageBindingSeed {
         ImageBindingSeed {
             image_id: ImageId(id.to_string()),
             axes_names: axes.into_iter().map(String::from).collect(),
-            store_prefix: None,
+            store_prefix: prefix.map(String::from),
             levels: vec![LevelBindingInfo {
                 level_index: 0,
                 compression: StorageCompression::None,
@@ -203,8 +255,70 @@ mod tests {
                     chunk_size_t: 1,
                     chunk_size_c: 1,
                 },
+                shard,
             }],
         }
+    }
+
+    fn sharded_layout() -> ShardLayout {
+        ShardLayout {
+            inner_chunk_shape: vec![1, 8, 8],
+            chunks_per_shard: vec![1, 2, 2],
+            inner_compression: StorageCompression::None,
+            index_location: lucida_store::shard::IndexLocation::End,
+            index_checksum: true,
+        }
+    }
+
+    #[test]
+    fn resolve_on_a_sharded_level_names_the_shard_and_the_position() {
+        let seed = make_seed(vec![make_image_seed_with_level(
+            "tile",
+            vec!["c", "y", "x"],
+            Some("A/1/0"),
+            vec![1, 8, 8],
+            Some(sharded_layout()),
+        )]);
+        let resolver = ChunkResolver::new(&seed);
+        // (c=1, y=2, x=3) in 1x2x2 shards: shard (1, 1, 1), position (0, 0, 1).
+        let location = resolver
+            .resolve(&ImageId("tile".into()), "0/0/1/0/2/3")
+            .unwrap();
+        assert_eq!(
+            location,
+            ChunkLocation::InnerChunk {
+                layout: &sharded_layout(),
+                location: ShardLocation {
+                    path: Path::from("A/1/0/0/c/1/1/1"),
+                    position: 1,
+                },
+            }
+        );
+        assert_eq!(location.path(), &Path::from("A/1/0/0/c/1/1/1"));
+    }
+
+    /// A key on a level the binding does not describe, or one too short to
+    /// name a chunk, is an object nothing is at, whether or not the level it
+    /// names is sharded.
+    #[test]
+    fn resolve_of_a_malformed_key_is_an_object_nothing_is_at() {
+        let seed = make_seed(vec![make_image_seed_with_level(
+            "tile",
+            vec!["c", "y", "x"],
+            None,
+            vec![1, 8, 8],
+            Some(sharded_layout()),
+        )]);
+        let resolver = ChunkResolver::new(&seed);
+        let image = ImageId("tile".into());
+        assert_eq!(
+            resolver.resolve(&image, "0/0/1").unwrap(),
+            ChunkLocation::Object(Path::from("0/0/1"))
+        );
+        assert_eq!(
+            resolver.resolve(&image, "7/0/1/0/2/3").unwrap(),
+            ChunkLocation::Object(Path::from("7/c/1/2/3"))
+        );
     }
 
     #[test]
@@ -218,7 +332,7 @@ mod tests {
         let location = resolver
             .resolve(&ImageId("img1".into()), "2/0/1/5/3/2")
             .unwrap();
-        assert_eq!(location.path, Path::from("2/c/0/1/5/3/2"));
+        assert_eq!(location.path(), &Path::from("2/c/0/1/5/3/2"));
     }
 
     #[test]
@@ -233,22 +347,24 @@ mod tests {
             &["z".to_string(), "y".to_string(), "x".to_string()],
             &[1, 1, 1],
         );
-        assert_eq!(location.path, Path::from(expected));
+        assert_eq!(location.path(), &Path::from(expected));
     }
 
     #[test]
     fn resolve_c_bundled_divides_channel() {
         // lif_test-shaped binding. Wire c=3 with chunk_c=5 → disk c=0.
-        let seed = make_seed(vec![make_image_seed_with_chunk(
+        let seed = make_seed(vec![make_image_seed_with_level(
             "lif",
             vec!["t", "c", "z", "y", "x"],
+            None,
             vec![1, 5, 1, 1024, 1024],
+            None,
         )]);
         let resolver = ChunkResolver::new(&seed);
         let location = resolver
             .resolve(&ImageId("lif".into()), "0/0/3/0/0/0")
             .unwrap();
-        assert_eq!(location.path, Path::from("0/c/0/0/0/0/0"));
+        assert_eq!(location.path(), &Path::from("0/c/0/0/0/0/0"));
     }
 
     #[test]
@@ -262,7 +378,7 @@ mod tests {
         let location = resolver
             .resolve(&ImageId("img1".into()), "2/0/1/5/3/2")
             .unwrap();
-        assert_eq!(location.path, Path::from("A/1/0/2/c/0/1/5/3/2"));
+        assert_eq!(location.path(), &Path::from("A/1/0/2/c/0/1/5/3/2"));
     }
 
     #[test]
@@ -306,23 +422,18 @@ mod tests {
                 .is_some()
         );
 
+        let path_of = |image: &str| {
+            resolver
+                .resolve(&ImageId(image.into()), "0/0/0/0/0/0")
+                .unwrap()
+                .path()
+                .to_string()
+        };
         // img2 should have prefix
-        let path2 = resolver
-            .resolve(&ImageId("img2".into()), "0/0/0/0/0/0")
-            .unwrap()
-            .path;
-        assert!(path2.as_ref().starts_with("B/2/0/"));
+        assert!(path_of("img2").starts_with("B/2/0/"));
 
         // img1 and img3 should not have prefix
-        let path1 = resolver
-            .resolve(&ImageId("img1".into()), "0/0/0/0/0/0")
-            .unwrap()
-            .path;
-        let path3 = resolver
-            .resolve(&ImageId("img3".into()), "0/0/0/0/0/0")
-            .unwrap()
-            .path;
-        assert!(!path1.as_ref().contains("B/2/0"));
-        assert!(!path3.as_ref().contains("B/2/0"));
+        assert!(!path_of("img1").contains("B/2/0"));
+        assert!(!path_of("img3").contains("B/2/0"));
     }
 }

@@ -9,14 +9,14 @@ The numbers here are starting points for measurement, not requirements. A
 store that uses different numbers still opens. Measure with your own data over
 your own link, then adjust. The last section says how.
 
-Two parts of this guide describe behavior that is still being built. Everything
-it says about reading shards is what
-[issue #990](https://github.com/aelefebv/lucida/issues/990) adds. Until that
-lands, import rejects the sharding codec, so write the unsharded form of this
-layout: the same inner chunks, one object each. Everything it says about the
-target level is what [issue #989](https://github.com/aelefebv/lucida/issues/989)
-adds. Today the detail level is the finest level unless you pick another by
-hand. The rest applies today.
+One part of this guide describes behavior that is still being built. Everything
+it says about the target level is what
+[issue #989](https://github.com/aelefebv/lucida/issues/989) adds. Today the
+detail level is the finest level unless you pick another by hand. The rest
+applies today. Import accepts the sharding codec and the viewer reads inner
+chunks out of shards, and what remains of
+[issue #990](https://github.com/aelefebv/lucida/issues/990) changes nothing
+about the layout to write.
 
 ## How the viewer reads a store
 
