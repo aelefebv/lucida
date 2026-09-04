@@ -366,6 +366,14 @@ impl WasmScene {
         serde_json::to_string(&map).unwrap()
     }
 
+    /// The levels a level pin on `dataset_id` may hold, finest first: every
+    /// source level including 0, never a generated coarse level. Empty for
+    /// an unknown dataset. See [`Scene::pinnable_levels`].
+    pub fn pinnable_levels(&self, dataset_id: &str) -> Vec<u32> {
+        self.inner
+            .pinnable_levels(&DatasetId(dataset_id.to_string()))
+    }
+
     /// Returns the full volume shape [Z, Y, X] for a dataset.
     pub fn dataset_volume_shape(&self, dataset_id: &str) -> Vec<u32> {
         let ds_id = DatasetId(dataset_id.to_string());

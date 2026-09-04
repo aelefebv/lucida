@@ -67,10 +67,10 @@ export function groupMembers(entities: EntitySnapshot[]): MemberGroup[] {
  * Build the active set, one entry per entity.
  *
  * Every visible image or tile becomes a tile entry. Its detail tier
- * holds one level, the entity's target level. The snapshot already
- * resolved that level from the level pin or the screen and clamped it to
- * the image's source levels (see `snapshotDelta.ts`); nothing here
- * chooses a level, and nothing here reads memory or residency. Its
+ * holds one level, the entity's target level. The core already resolved
+ * that level from the level pin or the screen and clamped it to the
+ * image's source levels. Nothing here chooses a level, and nothing here
+ * reads memory or residency. Its
  * coarse tier holds the source level the coarse tier points at, when
  * that level is no finer.
  * Proxy assets and projected size play no part, because the tier model

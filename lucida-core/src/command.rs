@@ -1162,7 +1162,7 @@ impl Scene {
             .images()
             .first()?
             .multiscale
-            .pinned_level(requested)
+            .clamp_to_source_levels(requested)
     }
 }
 

@@ -31,6 +31,7 @@ interface MockSceneConfig {
       projected_area_px2: number;
       centroid_world: [number, number, number];
       target_level: number;
+      level_pinned: boolean;
       importance: number;
     }[];
   };
@@ -64,6 +65,7 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
           projected_area_px2: 10000,
           centroid_world: [0, 0, 0],
           target_level: 0,
+          level_pinned: false,
           importance: 1,
         },
       ],

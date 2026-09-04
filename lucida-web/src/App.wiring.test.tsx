@@ -54,6 +54,9 @@ vi.mock("lucida-core", () => {
     dataset_ids() {
       return this.dataset_order();
     }
+    pinnable_levels() {
+      return Uint32Array.from([0]);
+    }
     all_dataset_settings() {
       const out: Record<string, unknown> = {};
       for (const id of Object.keys(this.doc.manifests ?? {})) {

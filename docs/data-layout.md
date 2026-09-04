@@ -11,10 +11,10 @@ your own link, then adjust. The last section says how.
 
 One part of this guide describes behavior that is still being built. Everything
 it says about the target level is what
-[issue #989](https://github.com/aelefebv/lucida/issues/989) adds. Today the
-detail level is the finest level unless you pick another by hand. The rest
-applies today. Import accepts the sharding codec and the viewer reads inner
-chunks out of shards, and what remains of
+[issue #989](https://github.com/aelefebv/lucida/issues/989) adds. The choice of
+level has landed already, so the target follows the screen unless a level pin
+holds it at one level. The rest applies today. Import accepts the sharding
+codec and the viewer reads inner chunks out of shards, and what remains of
 [issue #990](https://github.com/aelefebv/lucida/issues/990) changes nothing
 about the layout to write.
 

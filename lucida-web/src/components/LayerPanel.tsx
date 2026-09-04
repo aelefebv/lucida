@@ -45,8 +45,14 @@ export interface LayerInfo {
    */
   labelRows?: { index: number; name: string; visible: boolean; opacity: number; disabledReason?: string }[];
   channelBlendMode: string;
-  detailLevelOverride: number | null;
-  detailLevelOptions: { level: number; label: string }[];
+  /** The dataset's level pin; `null` means the target level follows the screen. */
+  levelPin: number | null;
+  /**
+   * The levels a pin may hold, finest first, level 0 included, as the scene
+   * reports them (`pinnable_levels`), each with a display label. Empty when
+   * the scene knows no pyramid for the dataset, which hides the control.
+   */
+  levelPinOptions: { level: number; label: string }[];
 }
 
 interface Props {
@@ -63,7 +69,7 @@ interface Props {
   onSetColormap: (id: string, colormap: Colormap) => void;
   onSetBlendMode: (id: string, mode: BlendMode) => void;
   onSetRenderMode: (id: string, mode: RenderMode) => void;
-  onSetDetailLevelOverride: (id: string, level: number | null) => void;
+  onSetLevelPin: (id: string, level: number | null) => void;
   onAutoContrast: (id: string) => void;
   onAutoContrastToggle: (id: string) => void;
   onFullRangeToggle: (id: string) => void;
@@ -111,7 +117,7 @@ export function LayerPanel({
   onSetColormap,
   onSetBlendMode,
   onSetRenderMode,
-  onSetDetailLevelOverride,
+  onSetLevelPin,
   onAutoContrast,
   onAutoContrastToggle,
   onFullRangeToggle,
@@ -593,19 +599,19 @@ export function LayerPanel({
                       <option value="max_intensity">Max Intensity</option>
                     </select>
                   </div>
-                  {layer.detailLevelOptions.length > 0 && (
+                  {layer.levelPinOptions.length > 0 && (
                     <div className="layer-detail-row">
-                      <label>Detail</label>
+                      <label>Level</label>
                       <select
-                        aria-label={`${layer.name} detail level`}
-                        value={layer.detailLevelOverride ?? ""}
+                        aria-label={`${layer.name} level pin`}
+                        value={layer.levelPin ?? ""}
                         onChange={(e) => {
                           const value = e.target.value;
-                          onSetDetailLevelOverride(layer.id, value === "" ? null : Number(value));
+                          onSetLevelPin(layer.id, value === "" ? null : Number(value));
                         }}
                       >
-                        <option value="">Highest res</option>
-                        {layer.detailLevelOptions.map((option) => (
+                        <option value="">Follow the screen</option>
+                        {layer.levelPinOptions.map((option) => (
                           <option key={option.level} value={option.level}>
                             {option.label}
                           </option>
