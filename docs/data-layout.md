@@ -89,7 +89,12 @@ read. A shard packs a fixed grid of inner chunks into one object with an index
 that says where each one lies. The object count falls by the shard's size while
 the read unit stays the inner chunk. The viewer reads the index once per shard,
 caches it for as long as the dataset is open, and then reads each inner chunk
-it needs as one range read from the same object.
+it needs as one range read from the same object. Range reads that wait for a
+source-read permit together and whose bytes lie next to each other in the
+shard go out as one request, so a run of neighbouring inner chunks costs one
+round trip when the link is busy. zarr-python writes a shard's inner chunks in
+position order, which puts a run along the last axis end to end; a writer that
+orders them another way keeps a working store and loses the merge.
 
 A shard of 64 inner chunks is about one screen. With the shapes in this guide, a
 2D shard covers 2048 × 2048 samples, close to one high-density display at the
