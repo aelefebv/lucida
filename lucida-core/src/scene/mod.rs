@@ -643,13 +643,33 @@ impl Scene {
     /// single-member-at-origin case this is a single element whose
     /// `needed`/`prefetch` lists are identical to the old flat plan.
     ///
+    /// Every chunk of a member is at one level. A level pin, clamped to the
+    /// member's selectable levels, wins. Otherwise the level is the one the
+    /// screen calls for, from the same measure and rule as
+    /// [`Scene::view_query`]'s `target_level`, so this plan and the browser
+    /// agree on the level for a camera. The hysteresis history is the scene's
+    /// own. A scene that never ran [`Scene::view_query_delta`] applies the
+    /// rule without it, and can sit one level away from a browser that zoomed
+    /// to the same camera through a level boundary.
+    ///
     /// For multi-member datasets (collections), each member's AABB is checked
     /// against the visible region, and chunk planning is done in
     /// member-local coordinates.
     pub fn chunk_plan_for(&self, dataset_id: &DatasetId) -> Option<Vec<MemberChunkPlan>> {
         let derived = self.derived.get(dataset_id)?;
+        let manifest = self.document.manifests.get(dataset_id)?;
 
         let is_2d = matches!(self.camera, Camera::Slice(_));
+        let last_query = self.last_query_entries(dataset_id);
+        let pin = self
+            .dataset_settings
+            .get(dataset_id)
+            .and_then(|settings| settings.detail_level_override);
+        let multiscale_by_image: HashMap<&ImageId, &MultiscaleInfo> = manifest
+            .images()
+            .iter()
+            .map(|image| (&image.image_id, &image.multiscale))
+            .collect();
 
         let mut plans = Vec::new();
         for member in &derived.members {
@@ -709,9 +729,18 @@ impl Scene {
                     .map(|planes| planes.map(|[a, b, c, d]| [a, b, c, d + a * pos_x + b * pos_y])),
             };
 
-            // Select level based on effective zoom
-            let level =
-                chunk::select_level(local_region.effective_zoom, member.levels.len() as u32);
+            // The pin is clamped again per member: the command clamps it
+            // against the first image only, and settings imported from a peer
+            // or a saved view carry it as is.
+            let level = pin
+                .and_then(|pin| multiscale_by_image.get(&member.image_id)?.pinned_level(pin))
+                .unwrap_or_else(|| {
+                    self.screen_target_level(
+                        member,
+                        self.member_pixels_per_sample(member),
+                        last_query,
+                    )
+                });
             let level_geo = &member.levels[level as usize];
 
             let t = self.view.t;
@@ -729,6 +758,7 @@ impl Scene {
             plans.push(MemberChunkPlan {
                 image_id: member.image_id.clone(),
                 position: member.position,
+                target_level: level,
                 needed,
                 prefetch,
             });
@@ -1270,6 +1300,72 @@ impl Scene {
         }
     }
 
+    /// The box the renderer draws for `member`, as one transform with both
+    /// directions filled in. [`Scene::rendering_transform`] returns the two
+    /// halves. The camera projects and measures against this.
+    fn placed_transform(&self, member: &MemberState) -> VolumeTransform {
+        let (forward, inverse) = self.rendering_transform(member);
+        VolumeTransform {
+            model: forward.model,
+            inv_model: inverse.inv_model,
+            max_physical_extent: forward.max_physical_extent,
+        }
+    }
+
+    /// Device pixels per level-0 sample of `member`, the measure its target
+    /// level is chosen from. A slice view spaces every sample `zoom` device
+    /// pixels apart. A volume view measures where the center-screen ray meets
+    /// the box the renderer draws for the member, so a scene-global placement
+    /// correction counts.
+    fn member_pixels_per_sample(&self, member: &MemberState) -> f64 {
+        match self.camera {
+            Camera::Slice(_) => self.camera.effective_zoom(),
+            _ => self
+                .camera
+                .pixels_per_sample(&self.placed_transform(member), level0_shape(member)),
+        }
+    }
+
+    /// The quantized record per image that the last [`Scene::view_query_delta`]
+    /// for `dataset_id` left behind, when it still describes the current
+    /// membership base and camera family. `None` without such a query.
+    fn last_query_entries(
+        &self,
+        dataset_id: &DatasetId,
+    ) -> Option<&HashMap<ImageId, QuantizedEntity>> {
+        self.view_query_cursors
+            .get(dataset_id)
+            .filter(|c| c.matches(&self.epochs, CameraModeKind::of(&self.camera)))
+            .map(|c| &c.entries)
+    }
+
+    /// The level the screen calls for in `member`. Applies
+    /// [`crate::target_level::target_level`] to `pixels_per_sample` and the
+    /// member's level geometry along the axes the camera resolves.
+    ///
+    /// `last_query` is [`Scene::last_query_entries`] for the member's dataset.
+    /// The level it holds for the member while on screen is the hysteresis
+    /// history. A parked off-screen level is not history, so a member coming
+    /// back into view starts fresh, as does a scene that never ran a delta
+    /// query.
+    fn screen_target_level(
+        &self,
+        member: &MemberState,
+        pixels_per_sample: f64,
+        last_query: Option<&HashMap<ImageId, QuantizedEntity>>,
+    ) -> u32 {
+        let previous = last_query
+            .and_then(|entries| entries.get(&member.image_id))
+            .filter(|entry| entry.visible)
+            .map(|entry| entry.target_level);
+        let axes: &[usize] = match self.camera {
+            Camera::Slice(_) => &IN_PLANE_AXES,
+            _ => &VOLUME_AXES,
+        };
+        let ratios = level_shape_ratios(&member.levels, axes);
+        target_level::target_level(pixels_per_sample, &ratios, previous)
+    }
+
     /// Query the scene for geometric information about all entities in a dataset
     /// from the current camera viewpoint.
     ///
@@ -1298,12 +1394,7 @@ impl Scene {
         let mut results = Vec::with_capacity(derived.members.len());
 
         let is_2d = matches!(self.camera, Camera::Slice(_));
-        let resolved_axes: &[usize] = if is_2d { &IN_PLANE_AXES } else { &VOLUME_AXES };
-        let previous_levels = self
-            .view_query_cursors
-            .get(dataset_id)
-            .filter(|c| c.matches(&self.epochs, CameraModeKind::of(&self.camera)))
-            .map(|c| &c.entries);
+        let last_query = self.last_query_entries(dataset_id);
 
         for member in &derived.members {
             let pos = member.position;
@@ -1340,10 +1431,9 @@ impl Scene {
                 }
                 self.camera.effective_zoom()
             } else {
-                let (rt, rt_inv) = self.rendering_transform(member);
-                let corners = rt.world_corners();
-                let rt_centroid = rt.world_centroid();
-                centroid = rt_centroid;
+                let placed = self.placed_transform(member);
+                let corners = placed.world_corners();
+                centroid = placed.world_centroid();
                 for corner in &corners {
                     if let Some([sx, sy]) = self.camera.project_to_screen(*corner) {
                         screen_min[0] = screen_min[0].min(sx);
@@ -1353,17 +1443,7 @@ impl Scene {
                         any_visible = true;
                     }
                 }
-                // Measure against the box the renderer draws, not the member's
-                // raw transform.
-                let placed = VolumeTransform {
-                    model: rt.model,
-                    inv_model: rt_inv.inv_model,
-                    max_physical_extent: rt.max_physical_extent,
-                };
-                let shape = member.levels.first().map_or([1, 1, 1], |l| {
-                    [l.shape[2] as u32, l.shape[3] as u32, l.shape[4] as u32]
-                });
-                self.camera.pixels_per_sample(&placed, shape)
+                self.camera.pixels_per_sample(&placed, level0_shape(member))
             };
 
             // Check if screen rect overlaps viewport
@@ -1381,16 +1461,8 @@ impl Scene {
                 (0.0, 0.0)
             };
 
-            // An off-screen record parks at the coarsest level. A parked level
-            // is not hysteresis history, so a record coming back into view
-            // starts fresh.
             let level = if visible {
-                let previous = previous_levels
-                    .and_then(|entries| entries.get(&member.image_id))
-                    .filter(|entry| entry.visible)
-                    .map(|entry| entry.target_level);
-                let ratios = level_shape_ratios(&member.levels, resolved_axes);
-                target_level::target_level(pixels_per_sample, &ratios, previous)
+                self.screen_target_level(member, pixels_per_sample, last_query)
             } else {
                 (member.levels.len() as u32).saturating_sub(1)
             };
@@ -1534,6 +1606,14 @@ impl Scene {
             changed,
         })
     }
+}
+
+/// The `[z, y, x]` sample counts of `member` at level 0, or a unit box for a
+/// member with no levels.
+fn level0_shape(member: &MemberState) -> [u32; 3] {
+    member.levels.first().map_or([1, 1, 1], |l| {
+        [l.shape[2] as u32, l.shape[3] as u32, l.shape[4] as u32]
+    })
 }
 
 /// Classify the current query against the prior snapshot into the delta
@@ -2122,11 +2202,36 @@ pub(crate) mod test_helpers {
         opened
     }
 
-    /// Create a DatasetOpened for a collection with multiple image members.
+    /// Create a DatasetOpened for a collection with multiple image members,
+    /// each a single-level image.
     pub fn make_collection_dataset_opened(
         id: &str,
         name: &str,
         members: Vec<(&str, [f64; 2])>,
+        image_shape: [u64; 5],
+        chunk_shape: [u64; 5],
+    ) -> DatasetOpened {
+        let members = members
+            .into_iter()
+            .map(|(member_id, position)| (member_id, position, 1))
+            .collect();
+        make_collection_dataset_opened_with_level_counts(
+            id,
+            name,
+            members,
+            image_shape,
+            chunk_shape,
+        )
+    }
+
+    /// Create a DatasetOpened for a collection whose members each carry a
+    /// regular pyramid of the given depth: `(member id, position, levels)`.
+    /// Every level halves each spatial axis of `image_shape` and keeps
+    /// `chunk_shape`.
+    pub fn make_collection_dataset_opened_with_level_counts(
+        id: &str,
+        name: &str,
+        members: Vec<(&str, [f64; 2], u32)>,
         image_shape: [u64; 5],
         chunk_shape: [u64; 5],
     ) -> DatasetOpened {
@@ -2137,7 +2242,7 @@ pub(crate) mod test_helpers {
         let mut placements = Vec::new();
         let mut fetch_images = Vec::new();
 
-        for (member_id, position) in &members {
+        for (member_id, position, level_count) in &members {
             let entity_id = EntityId(member_id.to_string());
             let image_id = ImageId(format!("{member_id}-image"));
 
@@ -2182,19 +2287,27 @@ pub(crate) mod test_helpers {
                             kind: AxisKind::Space,
                         },
                     ],
-                    levels: vec![LevelGeometry {
-                        level_index: 0,
-                        shape: image_shape,
-                        chunk_shape,
-                        grid_shape: [
-                            image_shape[0].div_ceil(chunk_shape[0]),
-                            image_shape[1].div_ceil(chunk_shape[1]),
-                            image_shape[2].div_ceil(chunk_shape[2]),
-                            image_shape[3].div_ceil(chunk_shape[3]),
-                            image_shape[4].div_ceil(chunk_shape[4]),
-                        ],
-                        scale: [1.0, 1.0, 1.0, 1.0, 1.0],
-                    }],
+                    levels: (0..*level_count)
+                        .map(|level| {
+                            let factor = 1u64 << level;
+                            let shape = [
+                                image_shape[0],
+                                image_shape[1],
+                                image_shape[2].div_ceil(factor),
+                                image_shape[3].div_ceil(factor),
+                                image_shape[4].div_ceil(factor),
+                            ];
+                            LevelGeometry {
+                                level_index: level,
+                                shape,
+                                chunk_shape,
+                                grid_shape: std::array::from_fn(|d| {
+                                    shape[d].div_ceil(chunk_shape[d])
+                                }),
+                                scale: [1.0, 1.0, 1.0, 1.0, 1.0],
+                            }
+                        })
+                        .collect(),
                     coarse_level_index: None,
                     generated_levels: vec![],
                     data_type: DataType::Uint16,
@@ -2777,6 +2890,271 @@ mod tests {
         let scene = Scene::new([512, 512]);
         let ds_id = DatasetId("nonexistent".into());
         assert!(scene.chunk_plan_for(&ds_id).is_none());
+    }
+
+    // --- the level a chunk plan fetches ---
+
+    fn set_slice_zoom(scene: &mut Scene, zoom: f64) {
+        if let Camera::Slice(s) = &mut scene.camera {
+            s.set_zoom(zoom);
+        }
+    }
+
+    fn set_slice_center(scene: &mut Scene, x: f64, y: f64) {
+        if let Camera::Slice(s) = &mut scene.camera {
+            s.set_center(x, y);
+        }
+    }
+
+    /// The distinct levels across every planned chunk of `ds`, needed and
+    /// prefetch alike, in ascending order.
+    fn planned_levels(scene: &Scene, ds: &DatasetId) -> Vec<u32> {
+        let mut levels: Vec<u32> = scene
+            .chunk_plan_for(ds)
+            .unwrap()
+            .iter()
+            .flat_map(|plan| plan.needed.iter().chain(&plan.prefetch))
+            .map(|chunk| chunk.level)
+            .collect();
+        levels.sort_unstable();
+        levels.dedup();
+        assert!(!levels.is_empty(), "the plan must hold at least one chunk");
+        levels
+    }
+
+    #[test]
+    fn chunk_plan_fetches_the_level_the_real_level_shapes_call_for() {
+        // Level 1 is four times coarser than level 0, so a picker assuming a
+        // factor of two per level would fetch level 2 at a quarter pixel per
+        // sample.
+        let mut scene = Scene::new([512, 512]);
+        let reg = test_helpers::make_dataset_opened_with_level_shapes(
+            "irregular",
+            &[
+                [1, 4096, 4096],
+                [1, 1024, 1024],
+                [1, 512, 512],
+                [1, 128, 128],
+            ],
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let ds = DatasetId::from("irregular");
+        set_slice_center(&mut scene, 2048.0, 2048.0);
+        for (zoom, level) in [(0.26, 0), (0.25, 1), (0.125, 2), (0.03, 3)] {
+            set_slice_zoom(&mut scene, zoom);
+            assert_eq!(planned_levels(&scene, &ds), vec![level], "zoom {zoom}");
+        }
+    }
+
+    #[test]
+    fn chunk_plan_in_a_slice_view_skips_a_level_that_only_downsamples_z() {
+        // A picker counting levels would fetch level 1 at half a pixel per
+        // sample.
+        let mut scene = Scene::new([512, 512]);
+        let reg = test_helpers::make_dataset_opened_with_level_shapes(
+            "aniso",
+            &[[64, 2048, 2048], [32, 2048, 2048], [32, 1024, 1024]],
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let ds = DatasetId::from("aniso");
+        set_slice_center(&mut scene, 1024.0, 1024.0);
+        set_slice_zoom(&mut scene, 0.9);
+        assert_eq!(planned_levels(&scene, &ds), vec![0]);
+        set_slice_zoom(&mut scene, 0.5);
+        assert_eq!(planned_levels(&scene, &ds), vec![2]);
+    }
+
+    /// The level the view query reports for the one image of `ds`.
+    fn queried_target(scene: &Scene, ds: &DatasetId) -> u32 {
+        let result = scene.view_query(ds).unwrap();
+        assert_eq!(result.visible_entities.len(), 1);
+        assert!(
+            result.visible_entities[0].visible,
+            "the image must be on screen"
+        );
+        result.visible_entities[0].target_level
+    }
+
+    /// A 4096² image with four regular levels, viewed from its middle in a
+    /// viewport of `viewport` device pixels.
+    fn regular_slice_scene(viewport: [u32; 2]) -> (Scene, DatasetId) {
+        let mut scene = Scene::new(viewport);
+        let reg = test_helpers::make_dataset_opened_with_shape(
+            "img",
+            "img",
+            1,
+            [1, 1, 1, 4096, 4096],
+            [1, 1, 1, 256, 256],
+            4,
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        set_slice_center(&mut scene, 2048.0, 2048.0);
+        (scene, DatasetId::from("img"))
+    }
+
+    #[test]
+    fn chunk_plan_fetches_the_level_the_view_query_targets_at_either_pixel_density() {
+        // At twice the pixel density the backing viewport and the zoom both
+        // double, so the same world extent is on screen and the target is one
+        // level finer.
+        let (mut dpr1, ds) = regular_slice_scene([400, 300]);
+        let (mut dpr2, _) = regular_slice_scene([800, 600]);
+        for (css_zoom, dpr1_level) in [(1.0, 0), (0.5, 1), (0.25, 2), (0.12, 3)] {
+            set_slice_zoom(&mut dpr1, css_zoom);
+            set_slice_zoom(&mut dpr2, css_zoom * 2.0);
+            assert_eq!(queried_target(&dpr1, &ds), dpr1_level, "zoom {css_zoom}");
+            assert_eq!(
+                planned_levels(&dpr1, &ds),
+                vec![dpr1_level],
+                "zoom {css_zoom}"
+            );
+            let dpr2_level = dpr1_level.saturating_sub(1);
+            assert_eq!(queried_target(&dpr2, &ds), dpr2_level, "zoom {css_zoom}");
+            assert_eq!(
+                planned_levels(&dpr2, &ds),
+                vec![dpr2_level],
+                "zoom {css_zoom}"
+            );
+        }
+    }
+
+    #[test]
+    fn chunk_plan_in_a_volume_view_fetches_the_level_the_view_query_targets() {
+        // Closer than half the fitted orbit the camera is inside the volume,
+        // and past twice the fit the plan is empty on this pyramid. Neither is
+        // about the level.
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened_with_shape(
+            "vol",
+            "vol",
+            1,
+            [1, 1, 256, 1024, 1024],
+            [1, 1, 64, 256, 256],
+            5,
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let ds = DatasetId::from("vol");
+        scene.set_mode_3d();
+        assert!(scene.fit_camera_to_dataset("vol"));
+        let Camera::Arcball(a) = &scene.camera else {
+            unreachable!()
+        };
+        let fitted = a.distance;
+
+        let mut levels = Vec::new();
+        for factor in [0.5, 0.75, 1.0] {
+            if let Camera::Arcball(a) = &mut scene.camera {
+                a.distance = fitted * factor;
+            }
+            let target = queried_target(&scene, &ds);
+            assert_eq!(planned_levels(&scene, &ds), vec![target], "factor {factor}");
+            levels.push(target);
+        }
+        assert_eq!(
+            levels,
+            vec![0, 0, 1],
+            "the walk must cross a level boundary"
+        );
+    }
+
+    fn pin_level(scene: &mut Scene, ds: &DatasetId, level: Option<u32>) {
+        scene.apply(
+            crate::command::ViewportCommand::SetDatasetDetailLevelOverride {
+                dataset_id: ds.0.clone(),
+                level,
+            }
+            .into(),
+        );
+    }
+
+    #[test]
+    fn chunk_plan_fetches_a_pinned_level_whatever_the_screen_calls_for() {
+        let (mut scene, ds) = regular_slice_scene([512, 512]);
+
+        set_slice_zoom(&mut scene, 4.0);
+        pin_level(&mut scene, &ds, Some(2));
+        assert_eq!(planned_levels(&scene, &ds), vec![2]);
+        assert_eq!(scene.chunk_plan_for(&ds).unwrap()[0].target_level, 2);
+
+        set_slice_zoom(&mut scene, 0.01);
+        pin_level(&mut scene, &ds, Some(0));
+        assert_eq!(planned_levels(&scene, &ds), vec![0]);
+        assert_eq!(scene.chunk_plan_for(&ds).unwrap()[0].target_level, 0);
+
+        pin_level(&mut scene, &ds, None);
+        assert_eq!(planned_levels(&scene, &ds), vec![3]);
+        assert_eq!(scene.chunk_plan_for(&ds).unwrap()[0].target_level, 3);
+    }
+
+    #[test]
+    fn chunk_plan_clamps_a_pin_past_a_members_pyramid_to_its_coarsest_level() {
+        // The command clamps the pin against the first image only.
+        let mut scene = Scene::new([1024, 512]);
+        let reg = test_helpers::make_collection_dataset_opened_with_level_counts(
+            "mixed",
+            "mixed",
+            vec![("deep", [0.0, 0.0], 3), ("shallow", [256.0, 0.0], 2)],
+            [1, 1, 1, 256, 256],
+            [1, 1, 1, 64, 64],
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let ds = DatasetId::from("mixed");
+        set_slice_center(&mut scene, 256.0, 128.0);
+        set_slice_zoom(&mut scene, 2.0);
+        pin_level(&mut scene, &ds, Some(2));
+
+        let plans = scene.chunk_plan_for(&ds).unwrap();
+        let by_image: HashMap<&str, &MemberChunkPlan> =
+            plans.iter().map(|p| (p.image_id.0.as_str(), p)).collect();
+        assert_eq!(by_image["deep-image"].target_level, 2);
+        assert!(by_image["deep-image"].needed.iter().all(|c| c.level == 2));
+        assert_eq!(by_image["shallow-image"].target_level, 1);
+        assert!(
+            by_image["shallow-image"]
+                .needed
+                .iter()
+                .all(|c| c.level == 1)
+        );
+    }
+
+    #[test]
+    fn chunk_plan_never_pins_to_a_generated_level() {
+        let mut scene = Scene::new([512, 512]);
+        let mut reg = test_helpers::make_dataset_opened_with_shape(
+            "gen",
+            "gen",
+            1,
+            [1, 1, 1, 4096, 4096],
+            [1, 1, 1, 256, 256],
+            4,
+        );
+        let multiscale = &mut reg.manifest.images_mut()[0].multiscale;
+        multiscale.coarse_level_index = Some(3);
+        multiscale
+            .generated_levels
+            .push(lucida_content::GeneratedLevelInfo {
+                level_index: 3,
+                role: lucida_content::GeneratedLevelRole::Coarse,
+                provenance: lucida_content::GeneratedLevelProvenance {
+                    generator: "test".into(),
+                    config_id: "coarse".into(),
+                    source_content_id: None,
+                },
+            });
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let ds = DatasetId::from("gen");
+        set_slice_center(&mut scene, 2048.0, 2048.0);
+        set_slice_zoom(&mut scene, 4.0);
+        // Written directly, as settings imported from a peer arrive, so the
+        // command's clamp never runs.
+        scene
+            .dataset_settings
+            .get_mut(&ds)
+            .unwrap()
+            .detail_level_override = Some(3);
+
+        assert_eq!(planned_levels(&scene, &ds), vec![2]);
+        assert_eq!(scene.chunk_plan_for(&ds).unwrap()[0].target_level, 2);
     }
 
     #[test]

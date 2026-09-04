@@ -1349,6 +1349,10 @@ impl DocumentState {
 pub struct MemberChunkPlan {
     pub image_id: lucida_content::ImageId,
     pub position: [f64; 2],
+    /// The level every chunk below is at. A level pin, clamped to this
+    /// member's selectable levels, wins over the level the screen calls for.
+    /// Unlike the view query's `target_level`, this one folds the pin in.
+    pub target_level: u32,
     pub needed: Vec<ChunkCoord>,
     pub prefetch: Vec<ChunkCoord>,
 }
