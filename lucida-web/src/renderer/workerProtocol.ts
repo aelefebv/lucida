@@ -856,10 +856,48 @@ export interface WantedSetDeltaMessage {
   missing: Array<MissingChunk | MissingProxy>;
 }
 
+/** A closed range of levels; `min === max` for a single level. */
+export interface LevelRange {
+  min: number;
+  max: number;
+}
+
+/**
+ * Which level one image-bearing entity's visible pixels come from, as the
+ * worker last computed it from the chunk positions its wanted set walks.
+ * `targetLevel` is the level pin or the level the screen calls for;
+ * `displayed` spans the finest and coarsest level the renderer samples
+ * for those positions today: the target level once resident, else the
+ * coarser resident sections, else the coarse tier. Every position is
+ * served by exactly one level, so `min === max` means the whole visible
+ * footprint comes from one level. `displayed` is `null` when no visible
+ * position has any resident level yet. `visible` is false when none of
+ * the entity's target-level chunks lies in the visible region, in which
+ * case `displayed` is `null` too.
+ */
+export interface EntityLevelReport {
+  entityId: string;
+  targetLevel: number;
+  visible: boolean;
+  displayed: LevelRange | null;
+}
+
+/**
+ * Posted alongside every {@link WantedSetDeltaMessage}: the wanted set walks
+ * the visible target-level chunks, and this is what those same chunks say
+ * about which level is on screen. Feeds the layer panel's level readout.
+ */
+export interface EntityLevelsMessage {
+  type: "entityLevels";
+  datasetId: string;
+  entities: EntityLevelReport[];
+}
+
 export type WorkerToMainMessage =
   | ReadyMessage
   | ErrorMessage
   | IntensityRangeMessage
   | ThumbnailResultMessage
   | ChunksEvictedMessage
-  | WantedSetDeltaMessage;
+  | WantedSetDeltaMessage
+  | EntityLevelsMessage;

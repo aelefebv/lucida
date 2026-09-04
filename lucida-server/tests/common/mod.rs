@@ -211,6 +211,7 @@ pub async fn build_single_tile_dataset(
                 generated_levels: vec![],
                 data_type: DataType::Uint16,
                 pinned_axes: vec![],
+                downsampling_method: None,
                 channel_infos: vec![],
             },
         }],

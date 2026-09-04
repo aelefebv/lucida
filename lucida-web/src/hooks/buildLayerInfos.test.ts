@@ -5,6 +5,7 @@ import type { WasmScene } from "lucida-core";
 import { buildLayerInfos } from "./useDatasetSettings.ts";
 import type { DatasetState } from "../types.ts";
 import type { DatasetManifest, ImageSpec, LabelSpec } from "../manifestTypes.ts";
+import type { DatasetLevels } from "../pipeline/datasetLevels.ts";
 
 // A single-level image with the given dtype + [Y, X] shape (chunked so a small
 // label's footprint fits the default caps).
@@ -78,6 +79,7 @@ const emptyMaps = {
   autoContrast: new Map<string, boolean>(),
   fullRange: new Map<string, boolean>(),
   dataRange: new Map<string, { min: number; max: number }>(),
+  levels: new Map<string, DatasetLevels>(),
 };
 
 // The full per-dataset settings shape the scene serializes, with the
@@ -339,5 +341,43 @@ describe("buildLayerInfos view-mode-aware label rows", () => {
     const rows = infos[0].labelRows!;
     expect(rows[2].visible).toBe(true);
     expect(rows[2].disabledReason).toBeUndefined();
+  });
+});
+
+describe("buildLayerInfos level readout", () => {
+  const scene = stubScene(["ds-0"], settingsWith([]));
+
+  it("carries the worker's target and displayed levels for the dataset", () => {
+    const infos = buildLayerInfos(scene, datasetsWith([]), {
+      ...emptyMaps,
+      levels: new Map([["ds-0", {
+        target: { min: 1, max: 1 },
+        displayed: { min: 1, max: 3 },
+        coarserThanTarget: true,
+      }]]),
+    });
+    expect(infos[0]).toMatchObject({
+      targetLevel: { min: 1, max: 1 },
+      displayedLevel: { min: 1, max: 3 },
+      displayedCoarserThanTarget: true,
+    });
+  });
+
+  it("leaves the levels null before the worker has reported the dataset", () => {
+    const infos = buildLayerInfos(scene, datasetsWith([]), { ...emptyMaps, levels: new Map() });
+    expect(infos[0]).toMatchObject({
+      targetLevel: null,
+      displayedLevel: null,
+      displayedCoarserThanTarget: false,
+    });
+  });
+
+  it("reads the downsampling method off the manifest, and null when it declares none", () => {
+    const withMethod = manifest([]);
+    withMethod.images[0].multiscale = { ...withMethod.images[0].multiscale, downsampling_method: "gaussian" };
+    const datasets = new Map([["ds-0", { manifest: withMethod } as unknown as DatasetState]]);
+    expect(buildLayerInfos(scene, datasets, emptyMaps)[0].downsamplingMethod).toBe("gaussian");
+
+    expect(buildLayerInfos(scene, datasetsWith([]), emptyMaps)[0].downsamplingMethod).toBeNull();
   });
 });

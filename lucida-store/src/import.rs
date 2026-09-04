@@ -70,6 +70,7 @@ async fn import_single_image(
     let parsed = parse::parse_multiscales(root_json, "")?;
     let axes_names = parsed.axes_names;
     let level_entries = parsed.level_entries;
+    let downsampling_method = parsed.downsampling_method;
 
     // Channel display names from the OME omero block (generic; optional).
     let channel_infos = parse::parse_omero_channels(root_json);
@@ -115,6 +116,7 @@ async fn import_single_image(
             data_type,
             pinned_axes: layout.pinned.clone(),
             channel_infos,
+            downsampling_method,
         },
     };
 
@@ -384,6 +386,7 @@ struct SharedTileGeometry {
     axes_names: Vec<String>,
     level_entries: Vec<parse::LevelEntry>,
     channel_infos: Vec<ChannelInfo>,
+    downsampling_method: Option<String>,
     level_metas: Vec<parse::ArrayMeta>,
 }
 
@@ -405,6 +408,7 @@ async fn read_tile_geometry(
         axes_names: parsed.axes_names,
         level_entries: parsed.level_entries,
         channel_infos,
+        downsampling_method: parsed.downsampling_method,
         level_metas,
     })
 }
@@ -740,6 +744,7 @@ async fn import_collection(
         axes_names,
         level_entries,
         channel_infos,
+        downsampling_method,
         level_metas,
     } = shared_geometry.ok_or_else(|| {
         StoreError::Metadata("collection has no tile with readable geometry".into())
@@ -1108,6 +1113,7 @@ async fn import_collection(
                     data_type,
                     pinned_axes: layout.pinned.clone(),
                     channel_infos: channel_infos.clone(),
+                    downsampling_method: downsampling_method.clone(),
                 },
             });
 
@@ -1659,6 +1665,7 @@ async fn build_label(
             data_type,
             pinned_axes: layout.pinned,
             channel_infos: Vec::new(),
+            downsampling_method: parsed.downsampling_method,
         },
     };
 

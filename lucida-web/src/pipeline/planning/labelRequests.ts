@@ -15,6 +15,7 @@
 
 import { Axis } from "../../axes.ts";
 import { labelDepthZ, labelFootprint, labelTimeIndex } from "../../renderer/labelLayout.ts";
+import { sliceLevelZ } from "../../renderer/slicePlane.ts";
 import { labelPaddedVolumeBytes } from "../../renderer/volume/atlas.ts";
 import { isUint32 } from "../../renderer/dataTypeUtil.ts";
 import type {
@@ -662,12 +663,7 @@ function appendLabelChunkRequests(
   const labelFullResZ = labelDepthZ(args.z, src0, lbl0);
   const label0Depth = label0.shape[Axis.Z];
   const levelDepth = lvl.shape[Axis.Z];
-  const levelZ = Math.min(
-    Math.floor(
-      (labelFullResZ / Math.max(label0Depth - 1, 1)) * Math.max(levelDepth - 1, 1),
-    ),
-    Math.max(levelDepth - 1, 0),
-  );
+  const levelZ = sliceLevelZ(labelFullResZ, label0Depth, levelDepth);
   const chunkZ = lvl.chunk_shape[Axis.Z] || 1;
   const targetChunkZ = Math.floor(levelZ / chunkZ);
 

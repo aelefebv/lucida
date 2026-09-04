@@ -207,7 +207,6 @@ export interface TierDemandTelemetry {
     coarseBytes: number;
   };
   detailCoverageRatio: number;
-  sparseDetail: boolean;
 }
 
 export interface TierQueueTelemetry {

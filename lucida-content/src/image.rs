@@ -40,6 +40,13 @@ pub struct MultiscaleInfo {
     /// keeps channel-less datasets from emitting it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub channel_infos: Vec<ChannelInfo>,
+    /// The method the writer used to derive each coarser level from the one
+    /// above it, as the OME multiscale `type` declares it (for example
+    /// `"gaussian"` or `"mean"`). Carried verbatim so a viewer can say how a
+    /// displayed level was downsampled. `None` when the source declares no
+    /// method; a viewer then shows nothing rather than guessing one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub downsampling_method: Option<String>,
 }
 
 /// Display metadata for a single channel, sourced from the OME `omero.channels`
@@ -248,6 +255,7 @@ mod tests {
             generated_levels: Vec::new(),
             data_type: DataType::Uint16,
             pinned_axes: Vec::new(),
+            downsampling_method: None,
             channel_infos,
         }
     }
@@ -364,6 +372,7 @@ mod tests {
             }],
             data_type: DataType::Uint16,
             pinned_axes: Vec::new(),
+            downsampling_method: None,
             channel_infos: Vec::new(),
         };
         assert_eq!(info.pinned_level(0), Some(0));

@@ -20,6 +20,7 @@ import { asUint16Slice, asUint32Slice } from "../dataTypeUtil.ts";
 import { parseCompositeKey, makeCompositeKey } from "../chunkKeys.ts";
 import { postChunksRejected, postChunksRequeued } from "../chunkUploadFeedback.ts";
 import { chunkAllowedByCurrentRenderRadius } from "../chunkRadius.ts";
+import { sliceLevelZ } from "../slicePlane.ts";
 import { cameraUVForMember, chunkDistSq2D, findFarthestSlot2D } from "./eviction.ts";
 import { getOrCreateLabelSlicePool } from "./atlas.ts";
 
@@ -121,10 +122,7 @@ export function handleSliceChunkData(
     zInfoByLevel.set(level, { chunkZ, fullResDepth, levelDepth });
   }
 
-  const levelZ = Math.min(
-    Math.floor((fullResZ / Math.max(fullResDepth - 1, 1)) * Math.max(levelDepth - 1, 1)),
-    levelDepth - 1,
-  );
+  const levelZ = sliceLevelZ(fullResZ, fullResDepth, levelDepth);
   const targetChunkZ = Math.floor(levelZ / chunkZ);
   const localZ = levelZ - targetChunkZ * chunkZ;
 
@@ -266,7 +264,7 @@ export function handleSliceChunkData(
         skippedKeys.map(key => ({ key })),
       );
     }
-    ctx.postWantedSet();
+    ctx.postWantedSet(ctx.state.memberToDataset.get(memberId));
   }
 
   if (intensityChanged) {

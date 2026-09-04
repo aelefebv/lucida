@@ -23,6 +23,10 @@ function layer(overrides: Partial<LayerInfo> = {}): LayerInfo {
     channelBlendMode: "additive",
     detailLevelOverride: null,
     detailLevelOptions: [],
+    targetLevel: null,
+    displayedLevel: null,
+    displayedCoarserThanTarget: false,
+    downsamplingMethod: null,
     ...overrides,
   };
 }
@@ -632,5 +636,66 @@ describe("LayerPanel labels", () => {
     expect(eye.getAttribute("aria-pressed")).toBe("true");
     fireEvent.click(eye);
     expect(onLabelSetVisible).toHaveBeenCalledWith("wds-1", 0, false);
+  });
+});
+
+describe("LayerPanel level readout", () => {
+  function levelProps(overrides: Partial<LayerInfo>) {
+    return {
+      ...baseProps(true, vi.fn()),
+      // Expanded so the detail rows render.
+      expandedLayerId: "wds-1" as string | null,
+      layers: [layer(overrides)],
+    };
+  }
+
+  it("shows the target level, and no notice, once the target is what is displayed", () => {
+    render(<LayerPanel {...levelProps({
+      targetLevel: { min: 2, max: 2 },
+      displayedLevel: { min: 2, max: 2 },
+    })} />);
+    expect(screen.getByLabelText("original.zarr target level").textContent).toBe("2");
+    expect(screen.queryByLabelText("original.zarr displayed level")).toBeNull();
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("shows both levels, and a notice naming them, while a coarser level is displayed", () => {
+    render(<LayerPanel {...levelProps({
+      targetLevel: { min: 1, max: 1 },
+      displayedLevel: { min: 3, max: 3 },
+      displayedCoarserThanTarget: true,
+    })} />);
+    expect(screen.getByLabelText("original.zarr target level").textContent).toBe("1");
+    expect(screen.getByLabelText("original.zarr displayed level").textContent).toBe("displaying 3");
+    expect(screen.getByRole("status").textContent).toBe(
+      "Displaying level 3 where level 1 is the target.",
+    );
+  });
+
+  it("shows ranges for a collection whose tiles differ", () => {
+    render(<LayerPanel {...levelProps({
+      targetLevel: { min: 1, max: 3 },
+      displayedLevel: { min: 1, max: 4 },
+      displayedCoarserThanTarget: true,
+    })} />);
+    expect(screen.getByLabelText("original.zarr target level").textContent).toBe("1-3");
+    expect(screen.getByRole("status").textContent).toBe(
+      "Displaying levels 1-4 where levels 1-3 are the target.",
+    );
+  });
+
+  it("shows no level row before the worker has reported one", () => {
+    render(<LayerPanel {...levelProps({})} />);
+    expect(screen.queryByLabelText("original.zarr target level")).toBeNull();
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("shows the downsampling method only when the metadata declares one", () => {
+    const { unmount } = render(<LayerPanel {...levelProps({ downsamplingMethod: "gaussian" })} />);
+    expect(screen.getByLabelText("original.zarr downsampling method").textContent).toBe("gaussian");
+    unmount();
+
+    render(<LayerPanel {...levelProps({ downsamplingMethod: null })} />);
+    expect(screen.queryByLabelText("original.zarr downsampling method")).toBeNull();
   });
 });

@@ -48,6 +48,13 @@ export interface MultiscaleInfo {
    * fall back per-index when an entry is missing.
    */
   channel_infos?: ChannelInfo[];
+  /**
+   * How each coarser level was derived from the one above it, as the OME
+   * multiscale `type` declares it (for example `"gaussian"`). Absent when the
+   * source declares none; the layer panel then shows no method rather than
+   * guessing one.
+   */
+  downsampling_method?: string;
 }
 
 /**

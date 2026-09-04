@@ -105,10 +105,6 @@ export const INTERACTION_MODE_WINDOW = 10;
  * declared rather than guessed.
  */
 const QUIESCENCE_PENDING_SCAN_CAP = 4096;
-const SPARSE_DETAIL_MIN_DESIRED_CHUNKS = 4;
-const SPARSE_DETAIL_COVERAGE_RATIO = 0.25;
-const SPARSE_DETAIL_STREAK_THRESHOLD = 3;
-const SPARSE_DETAIL_LOG_RATE_LIMIT_MS = 5000;
 
 /** Nominal (pre-jitter) first-attempt backoff before a transient failure
  *  is retried. */
@@ -277,8 +273,6 @@ export class CpuCache {
    * and overview demand). Feeds {@link resolveDemandLane}.
    */
   private viewCoarseKeysThisTick = new Set<string>();
-  private sparseDetailStreak = 0;
-  private lastSparseDetailLogAt = -Infinity;
 
   /**
    * Latest wanted metadata for in-flight fetches. The request object
@@ -780,7 +774,6 @@ export class CpuCache {
     this.desiredDetailKeysThisTick.clear();
     this.desiredCoarseKeysThisTick.clear();
     this.viewCoarseKeysThisTick.clear();
-    this.sparseDetailStreak = 0;
     this.rejectionTracker.clear();
     this.deliveryState.onPlanRebuildStart();
   }
@@ -982,7 +975,6 @@ export class CpuCache {
     const pendingOldestAgeMs = this.chunkScheduler.oldestPendingAgeMs(now);
     const tierDemand = this.computeTierDemandTelemetry();
     const tierQueues = this.computeTierQueueTelemetry();
-    this.maybeLogSparseDetail(now, tierDemand);
 
     return {
       mainBytes: this.chunkStore.bytes,
@@ -1867,14 +1859,6 @@ export class CpuCache {
     const desiredDetail = this.desiredDetailKeysThisTick.size;
     const detailCoverageRatio =
       desiredDetail > 0 ? residentDetailChunks / desiredDetail : 1;
-    const sparseDetail =
-      desiredDetail >= SPARSE_DETAIL_MIN_DESIRED_CHUNKS &&
-      detailCoverageRatio < SPARSE_DETAIL_COVERAGE_RATIO &&
-      (
-        this.chunkScheduler.pendingSize > 0 ||
-        this.chunkScheduler.inFlightSize > 0 ||
-        this.chunkStore.bytes >= this.config.mainBudgetBytes * 0.95
-      );
 
     return {
       desired: {
@@ -1888,7 +1872,6 @@ export class CpuCache {
         coarseBytes: residentCoarseBytes,
       },
       detailCoverageRatio,
-      sparseDetail,
     };
   }
 
@@ -1907,31 +1890,6 @@ export class CpuCache {
       queues[tier].inFlightBytes += entry.estimatedBytes;
     }
     return queues;
-  }
-
-  private maybeLogSparseDetail(
-    now: number,
-    tierDemand: CacheTelemetry["tierDemand"],
-  ): void {
-    if (!tierDemand.sparseDetail) {
-      this.sparseDetailStreak = 0;
-      return;
-    }
-    this.sparseDetailStreak++;
-    if (this.sparseDetailStreak < SPARSE_DETAIL_STREAK_THRESHOLD) return;
-    if (now - this.lastSparseDetailLogAt < SPARSE_DETAIL_LOG_RATE_LIMIT_MS) return;
-
-    this.lastSparseDetailLogAt = now;
-    debugLog("cache", "cache.sparse_detail", {
-      desiredDetailChunks: tierDemand.desired.detailChunks,
-      residentDetailChunks: tierDemand.resident.detailChunks,
-      detailCoverageRatio: tierDemand.detailCoverageRatio,
-      pendingChunks: this.chunkScheduler.pendingSize,
-      inFlightChunks: this.chunkScheduler.inFlightSize,
-      mainBytes: this.chunkStore.bytes,
-      mainBudget: this.config.mainBudgetBytes,
-      notice: "Detail coverage is budget-limited; lower the detail LOD explicitly for broader coverage.",
-    });
   }
 
   private inFlightKey(req: ChunkRequest): string {
