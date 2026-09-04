@@ -14,6 +14,7 @@ import { plan } from "./planning/index.ts";
 import { bumpSettingsGeneration } from "../tickCommon.ts";
 import { configStore } from "./planning/configStore.ts";
 import { traceRecorder } from "../trace/recorder.ts";
+import { initialPlanningState } from "./planning/index.ts";
 
 // Planner-only tests: epoch caching + multi-dataset planning state.
 // Upload-side describes live in `upload/uploader.test.ts`.
@@ -1013,6 +1014,82 @@ describe("display-only fast path", () => {
     }
   });
 
+  it("keeps the last zoom's level prefetch when a T scrub is served from the cached active set", () => {
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
+      const orch = makeOrch();
+      const cpuCache = createMockCpuCache();
+      const region = (effectiveZoom: number) => ({
+        xy_bounds: [0, 0, 1024, 1024] as [number, number, number, number],
+        z_range: [0, 1] as [number, number],
+        effective_zoom: effectiveZoom,
+        sort_center: null,
+        frustum_planes: null,
+      });
+      const submittedPrefetch = (call: number) => {
+        const submitted = vi.mocked(cpuCache.submit).mock.calls[call][0] as {
+          requests: { lane: string; level: number; t: number }[];
+        };
+        return submitted.requests.filter((r) => r.lane === "prefetch");
+      };
+
+      bumpSettingsGeneration();
+      orch.planAndFetch(
+        makeCtx(
+          createMockScene({ allSettings: baseSettings(), visibleRegion: region(1.0) }),
+          datasets,
+          { cpuCache },
+        ),
+        emptyMinimap,
+      );
+      // No zoom seen yet, and a single timepoint: nothing to prefetch.
+      expect(submittedPrefetch(0)).toHaveLength(0);
+
+      // A zoom out is a view-only rebuild, so plan() runs and records the direction.
+      vi.advanceTimersByTime(500);
+      orch.planAndFetch(
+        makeCtx(
+          createMockScene({
+            epochs: { content: 1, layout: 1, view: 2, selection: 1 },
+            allSettings: baseSettings(),
+            visibleRegion: region(0.5),
+          }),
+          datasets,
+          { cpuCache },
+        ),
+        emptyMinimap,
+      );
+      const zoomedOut = submittedPrefetch(1);
+      expect(zoomedOut.length).toBeGreaterThan(0);
+      expect(zoomedOut.every((r) => r.level === 1 && r.t === 0)).toBe(true);
+
+      // The T scrub skips plan(). Without the remembered direction, the level
+      // prefetch would vanish here.
+      vi.advanceTimersByTime(500);
+      planSpy.mockClear();
+      orch.planAndFetch(
+        makeCtx(
+          createMockScene({
+            epochs: { content: 1, layout: 1, view: 2, selection: 2 },
+            allSettings: baseSettings(),
+            visibleRegion: region(0.5),
+            t: 5,
+          }),
+          datasets,
+          { cpuCache },
+        ),
+        emptyMinimap,
+      );
+      expect(planSpy).not.toHaveBeenCalled();
+      const scrubbed = submittedPrefetch(2);
+      expect(scrubbed.length).toBe(zoomedOut.length);
+      expect(scrubbed.every((r) => r.level === 1 && r.t === 5)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("falls through to a full rebuild when a contrast edit rides the same T scrub", () => {
     // Compose with the display-only path: when a display edit and a T scrub
     // land in the same coalescing window, neither cheap path can prove its
@@ -1428,8 +1505,8 @@ describe("multi-dataset planning", () => {
     expect(planSpy).toHaveBeenCalledTimes(2);
     const tick1Ds1State = planSpy.mock.calls[0][1];
     const tick1Ds2State = planSpy.mock.calls[1][1];
-    expect(tick1Ds1State).toEqual({ previousActiveSet: [] });
-    expect(tick1Ds2State).toEqual({ previousActiveSet: [] });
+    expect(tick1Ds1State).toEqual(initialPlanningState());
+    expect(tick1Ds2State).toEqual(initialPlanningState());
     const tick1Ds1Result = planSpy.mock.results[0].value as ReturnType<
       typeof import("./planning/index.ts").plan
     >;

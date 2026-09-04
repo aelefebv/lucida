@@ -122,11 +122,10 @@ function selectableSourceLevels(imgSpec: ImageSpec | undefined): number[] {
  * level. Memory and residency are not inputs (ADR 0061).
  */
 function resolveTargetLevel(
-  imgSpec: ImageSpec | undefined,
+  selectable: readonly number[],
   levelPin: number | null | undefined,
   screenLevel: number,
 ): number {
-  const selectable = selectableSourceLevels(imgSpec);
   const requested = typeof levelPin === "number" ? levelPin : screenLevel;
   if (selectable.includes(requested)) return requested;
   const finerOrEqual = selectable.filter((level) => level <= requested).at(-1);
@@ -166,11 +165,9 @@ export function makeEntitySnapshot(
 ): EntitySnapshot {
   const imgSpec = deps.imageSpecById.get(row.image_id);
   const levels = imgSpec ? imgSpec.multiscale.levels : [];
-  const targetLevel = resolveTargetLevel(
-    imgSpec,
-    deps.dsSettings?.detail_level_override,
-    row.target_level,
-  );
+  const levelPin = deps.dsSettings?.detail_level_override;
+  const sourceLevels = selectableSourceLevels(imgSpec);
+  const targetLevel = resolveTargetLevel(sourceLevels, levelPin, row.target_level);
   const coarseLevel = resolveCoarseLevel(imgSpec);
   const layoutPositionVox =
     deps.positions[row.entity_id] ?? ([0, 0] as [number, number]);
@@ -182,6 +179,8 @@ export function makeEntitySnapshot(
     projectedAreaPx2: row.projected_area_px2,
     centroidWorld: row.centroid_world,
     targetLevel,
+    levelPinned: typeof levelPin === "number",
+    sourceLevels,
     coarseLevel,
     importance: row.importance,
     layoutPositionVox,

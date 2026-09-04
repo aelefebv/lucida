@@ -18,6 +18,7 @@ import type { ChunkRequest, RequestPlan, ActiveSetEntry } from "../planning/inde
 import { emptyPlanStats } from "../planning/index.ts";
 import { traceRecorder } from "../../trace/recorder.ts";
 import { CountedPhaseIndex, type TracePointEvent } from "../../trace/types.ts";
+import { createSyntheticState } from "../planning/index.ts";
 
 const CAUSE = { epoch: "content", dirtyKind: "interactive", source: "test" } as const;
 
@@ -64,7 +65,7 @@ function makePlan(requests: ChunkRequest[]): RequestPlan {
     proxyRequests: [],
     epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
     stats: emptyPlanStats(),
-    nextState: { previousActiveSet: activeSet },
+    nextState: createSyntheticState({ previousActiveSet: activeSet }),
   };
 }
 

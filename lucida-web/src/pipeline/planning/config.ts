@@ -55,7 +55,10 @@ export const PROXY_LANE_OFFSET = 1000;
 /** Default worker-global GPU proxy residency budget: 128 MiB. */
 export const DEFAULT_PROXY_RESIDENCY_BUDGET_BYTES = 128 * 1024 * 1024;
 
-/** Priority lane offset for prefetch (next-timepoint) requests. */
+/**
+ * Priority lane offset for prefetch requests: future timepoints, and the
+ * next level in the direction of the last zoom change.
+ */
 export const PREFETCH_LANE_OFFSET = 1500;
 
 /**
@@ -65,7 +68,11 @@ export const PREFETCH_LANE_OFFSET = 1500;
  */
 export const COARSE_LANE_OFFSET = 2400;
 
-/** Number of future timepoints to prefetch (length of the prefetch lane). */
+/**
+ * Steps the prefetch lane looks ahead, each one visible target-level set.
+ * Every step is a future timepoint until a zoom direction is known; then
+ * the next level in that direction takes the last step.
+ */
 export const PREFETCH_DEPTH = 2;
 
 /**
@@ -108,7 +115,7 @@ export const GROUP_PROXY_PRIORITY_BUMP = 100;
 /** Per-tick planning tunables threaded through {@link plan}. */
 export interface PlanningConfig {
   // -- prefetch -------------------------------------------------------
-  /** Number of future timepoints to prefetch (length of the prefetch lane). */
+  /** Steps the prefetch lane looks ahead. See {@link PREFETCH_DEPTH}. */
   prefetchDepth: number;
 
   // -- priority weights -----------------------------------------------
@@ -169,7 +176,7 @@ export interface PlanningConfig {
   detailLaneOffset: number;
   /** Proxy requests (group/tile proxy fallbacks). */
   proxyLaneOffset: number;
-  /** Prefetch (next-timepoint) requests. */
+  /** Prefetch requests: future timepoints and the next level in the zoom direction. */
   prefetchLaneOffset: number;
   /** Coarse requests (lowest urgency of the view lanes). */
   coarseLaneOffset: number;

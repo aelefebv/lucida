@@ -38,6 +38,7 @@ import type {
 import type { SceneEpochs } from "../epochs.ts";
 import { emptyPlanStats } from "../planning/index.ts";
 import { createQuiescenceState } from "../../trace/quiescence.ts";
+import { initialPlanningState, createSyntheticState } from "../planning/index.ts";
 
 // ---------------------------------------------------------------------------
 // Test Factories
@@ -236,7 +237,7 @@ function makePlan(
       ...epochs,
     },
     stats: emptyPlanStats(),
-    nextState: { previousActiveSet: resolvedActiveSet },
+    nextState: createSyntheticState({ previousActiveSet: resolvedActiveSet }),
   };
 }
 
@@ -1009,7 +1010,7 @@ describe("CpuCache", () => {
         proxyRequests: [proxyReq],
         epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
         stats: emptyPlanStats(),
-        nextState: { previousActiveSet: [] },
+        nextState: initialPlanningState(),
       });
       expect(cache.telemetry().inFlightProxyCount).toBe(1);
 
@@ -1053,7 +1054,7 @@ describe("CpuCache", () => {
           ...epochs,
         },
         stats: emptyPlanStats(),
-        nextState: { previousActiveSet: [] },
+        nextState: initialPlanningState(),
       };
     }
 
@@ -1118,7 +1119,7 @@ describe("CpuCache", () => {
         proxyRequests: [proxyReq],
         epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
         stats: emptyPlanStats(),
-        nextState: { previousActiveSet: [] },
+        nextState: initialPlanningState(),
       });
 
       // At least one request should be queued.
@@ -1250,7 +1251,7 @@ describe("CpuCache", () => {
         proxyRequests: [proxyA],
         epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
         stats: emptyPlanStats(),
-        nextState: { previousActiveSet: [] },
+        nextState: initialPlanningState(),
       });
       await flush();
 
@@ -1266,7 +1267,7 @@ describe("CpuCache", () => {
         proxyRequests: [proxyB],
         epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
         stats: emptyPlanStats(),
-        nextState: { previousActiveSet: [] },
+        nextState: initialPlanningState(),
       });
       await flush();
 
@@ -2939,7 +2940,7 @@ describe("CpuCache", () => {
           ...epochs,
         },
         stats: emptyPlanStats(),
-        nextState: { previousActiveSet: [] },
+        nextState: initialPlanningState(),
       };
     }
 

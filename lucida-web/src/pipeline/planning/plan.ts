@@ -12,6 +12,7 @@ import {
   emitPrefetchLane,
 } from "./emit.ts";
 import { buildActiveSet } from "./activeSet.ts";
+import { compareChunkRequests } from "./chunks.ts";
 import {
   emptyPlanStats,
   type ActiveSetEntry,
@@ -22,25 +23,17 @@ import {
   type PlanningState,
   type ProxyRequest,
   type RequestPlan,
+  type ZoomDirection,
 } from "./types.ts";
 import { validatePlanningInputs } from "./validate.ts";
 
-function compareChunkRequests(a: ChunkRequest, b: ChunkRequest): number {
-  const priority = a.priority - b.priority;
-  if (priority !== 0) return priority;
-
-  const image = a.imageId.localeCompare(b.imageId);
-  if (image !== 0) return image;
-
-  return (
-    a.level - b.level ||
-    a.t - b.t ||
-    a.z - b.z ||
-    a.y - b.y ||
-    a.x - b.x ||
-    a.c - b.c ||
-    a.chunkKey.localeCompare(b.chunkKey)
-  );
+function resolveZoomDirection(
+  state: PlanningState,
+  effectiveZoom: number,
+): ZoomDirection | null {
+  const previous = state.previousEffectiveZoom;
+  if (previous === null || effectiveZoom === previous) return state.zoomDirection;
+  return effectiveZoom > previous ? "in" : "out";
 }
 
 function compareProxyRequests(a: ProxyRequest, b: ProxyRequest): number {
@@ -62,14 +55,16 @@ function compareProxyRequests(a: ProxyRequest, b: ProxyRequest): number {
  * priority sort — factored out so a caller that already holds a valid active
  * set can regenerate its requests for a changed selection (a T-scrub or
  * Z-plane move) WITHOUT re-assigning the active set or rebuilding the
- * snapshot. Pure in `(activeSet, snapshot, config)`; mutates only the
- * supplied `stats`.
+ * snapshot. Pure in `(activeSet, snapshot, config, zoomDirection)`; mutates
+ * only the supplied `stats`.
  *
  * The requests are a pure function of the active set, the entities, the visible
- * region, and the selection, so reusing an unchanged active set with a snapshot
- * whose only difference is `selection.t` / `selection.z` (and, on a Z move,
- * `visibleRegion.zRangeVox`) yields exactly the requests a full {@link plan}
- * would produce for that selection — with none of `buildActiveSet`'s work.
+ * region, the selection, and the remembered zoom direction, so reusing an
+ * unchanged active set with a snapshot whose only difference is `selection.t`
+ * / `selection.z` (and, on a Z move, `visibleRegion.zRangeVox`) yields exactly
+ * the requests a full {@link plan} would produce for that selection — with none
+ * of `buildActiveSet`'s work. `zoomDirection` is the one the caller's stored
+ * {@link PlanningState} holds. A scrub is not a zoom, so it is unchanged.
  *
  * Postconditions match {@link plan}: `requests` and `proxyRequests` are sorted
  * ascending by priority; output objects are freshly allocated and carry
@@ -79,7 +74,8 @@ export function emitPlanRequests(
   activeSet: ActiveSetEntry[],
   snapshot: PlanningSnapshot,
   stats: PlanStats,
-  config: PlanningConfig = DEFAULT_PLANNING_CONFIG,
+  config: PlanningConfig,
+  zoomDirection: ZoomDirection | null,
 ): { requests: ChunkRequest[]; proxyRequests: ProxyRequest[] } {
   // Step 2: Build entity lookup.
   const entityById = new Map<string, EntitySnapshot>();
@@ -108,7 +104,7 @@ export function emitPlanRequests(
   );
 
   // Step 4: Prefetch lane — for tile-mode entries only.
-  emitPrefetchLane(activeSet, snapshot, entityById, stats, allRequests, config);
+  emitPrefetchLane(activeSet, snapshot, entityById, stats, allRequests, config, zoomDirection);
 
   // Step 5: Coarse lane, the floor under the detail tier.
   emitCoarseLane(activeSet, snapshot, entityById, stats, allRequests, config);
@@ -169,11 +165,15 @@ export function plan(
 
   const stats = emptyPlanStats();
 
-  // Step 1: Build the active set.
+  // Step 1: Build the active set and resolve the zoom direction.
   const activeSet = buildActiveSet(snapshot.entities);
+  const effectiveZoom = snapshot.visibleRegion.effectiveZoom;
+  const zoomDirection = resolveZoomDirection(state, effectiveZoom);
 
   // Steps 2–7: emit + sort the request streams for the resolved active set.
-  const { requests, proxyRequests } = emitPlanRequests(activeSet, snapshot, stats, config);
+  const { requests, proxyRequests } = emitPlanRequests(
+    activeSet, snapshot, stats, config, zoomDirection,
+  );
 
   // Step 8: Epoch propagation.
   const epochs: SceneEpochs = {
@@ -182,8 +182,11 @@ export function plan(
   };
 
   // Step 9: Return. `nextState` is the opaque pointer the caller will
-  // hand back on the next tick — today derived from `activeSet`, but
-  // future planner-internal state lands here without churning callers.
-  const nextState: PlanningState = { previousActiveSet: activeSet };
+  // hand back on the next tick.
+  const nextState: PlanningState = {
+    previousActiveSet: activeSet,
+    previousEffectiveZoom: effectiveZoom,
+    zoomDirection,
+  };
   return { requests, activeSet, epochs, proxyRequests, stats, nextState };
 }
