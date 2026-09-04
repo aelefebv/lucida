@@ -134,8 +134,9 @@ Collapsing several callers' demand for the same work onto one operation.
 Coalescing is normal and expected, not a defect to be removed. It happens at two
 independent layers and the two must never be conflated: **request coalescing**
 folds several callers' demand for one composite key onto one wire request, and
-**read coalescing** folds several wire requests for one object onto one backend
-read, via a leader that performs it and followers that wait on the result.
+**read coalescing** folds several wire requests for one object, or for one byte
+range of it, onto one backend read, via a leader that performs it and followers
+that wait on the result.
 _Avoid_: deduplication, batching (batching combines *different* work)
 
 **Reader**:
