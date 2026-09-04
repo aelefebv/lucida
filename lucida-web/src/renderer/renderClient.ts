@@ -12,6 +12,7 @@ import type {
   ViewHotStateMessage,
 } from "./workerProtocol.ts";
 import type { SceneEpochs } from "../pipeline/epochs.ts";
+import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type {
   UploadClient,
   ChunksEvictedHandler,
@@ -132,7 +133,7 @@ export class RenderClient implements UploadClient {
     chunkY: number,
     chunkZ: number,
     epochs: SceneEpochs,
-    tier?: "detail" | "coarse",
+    tier: ResidencyTier,
   ) {
     const transferList: ArrayBuffer[] = [];
     const workerChunks: Chunk[] = chunks.map(chunk => {
@@ -215,7 +216,7 @@ export class RenderClient implements UploadClient {
     levelDepth: number,
     fullResZ: number,
     epochs: SceneEpochs,
-    tier?: "detail" | "coarse",
+    tier: ResidencyTier,
   ) {
     const transferList: ArrayBuffer[] = [];
     const workerChunks: Chunk[] = chunks.map(chunk => {

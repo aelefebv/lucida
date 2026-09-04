@@ -449,13 +449,14 @@ export function serializeEntityDescriptor(
     }
   }
 
-  const detailLevel = entry.kind === "tile" ? entry.detailLevel : undefined;
-  const coarseLevel = entry.kind === "tile" ? entry.coarseLevel : undefined;
-  const hasTierSources = detailLevel !== undefined;
-  const detailMeta = hasTierSources
+  // The descriptor has one source slot per tier, so the detail slot binds
+  // the finest detail level.
+  const detailLevel = entry.kind === "tile" ? entry.detailLevels[0] : undefined;
+  const coarseLevel = entry.kind === "tile" ? entry.coarseLevel : null;
+  const detailMeta = detailLevel !== undefined
     ? findLodMeta(lodMetas, detailLevel)
     : undefined;
-  const coarseMeta = hasTierSources && coarseLevel !== undefined && coarseLevel !== null
+  const coarseMeta = coarseLevel !== null
     ? findLodMeta(lodMetas, coarseLevel, "last")
     : undefined;
   writeChunkTierSource(u32, OFFSET_DETAIL_SOURCE, detailMeta);

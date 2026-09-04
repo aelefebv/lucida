@@ -50,7 +50,7 @@ export function chunkOutsideFrustum(
 }
 
 /**
- * Per-axis world size of a chunk at a given LOD, expressed in level-0
+ * Per-axis world size of a chunk at a given level, expressed in level-0
  * voxel units. Returns `[x, y, z]`. Used by both spatial enumeration
  * (`iterateGridCells`) and distance scoring (`chunkDistanceFromCenter`)
  * so they agree on the same conversion.
@@ -73,10 +73,10 @@ export function chunkWorldDims(
 }
 
 /**
- * Enumerate chunk grid cells for a promoted entity, applying spatial culling
- * and cache filtering.  Iterates all LOD levels in the entry's owned range,
- * all visible channels, and the spatial grid cells that overlap the visible
- * region.
+ * Enumerate chunk grid cells for a tile entry's detail tier, applying
+ * spatial culling. Iterates every level in the entry's detail-tier list,
+ * all visible channels, and the spatial grid cells that overlap the
+ * visible region.
  *
  * Ported from Rust `visible_chunks()` in lucida-core/src/chunk.rs.
  *
@@ -92,8 +92,8 @@ export function chunkWorldDims(
  * don't model dataset ownership). The caller (`plan()`) finalises
  * `priority`/`lane` per lane before they leave the planner.
  *
- * Thin wrapper around {@link iterateChunksAtLodRange}: short-circuits
- * for non-tile entries and reads the LOD range from the tile entry.
+ * Thin wrapper around {@link iterateChunksAtLevels}: short-circuits for
+ * non-tile entries and forwards the tile entry's detail-tier levels.
  */
 export function iterateChunks(
   entity: EntitySnapshot,
@@ -104,9 +104,9 @@ export function iterateChunks(
   datasetId = "",
 ): ChunkRequest[] {
   if (entry.kind !== "tile") return [];
-  return iterateChunksAtLodRange(
+  return iterateChunksAtLevels(
     entity,
-    entry.detailOwnedLodRange,
+    entry.detailLevels,
     visibleRegion,
     selection,
     stats,
@@ -115,18 +115,17 @@ export function iterateChunks(
 }
 
 /**
- * Spatial enumeration primitive. Iterates the LOD range from coarsest
- * down to finest, all visible channels, and pushes one
- * {@link ChunkRequest} per surviving grid cell.
+ * Spatial enumeration primitive. Iterates the given levels in order, all
+ * visible channels, and pushes one {@link ChunkRequest} per surviving
+ * grid cell. It skips levels the entity's pyramid lacks.
  *
- * This is the form used directly by the overview lane (which doesn't
- * need an `ActiveSetEntry` to supply the range — it always wants the
- * coarsest level). The detail/prefetch lanes call {@link iterateChunks}
- * which forwards the range from the active-set entry.
+ * The coarse lane calls this with the entry's coarse level. The detail
+ * and prefetch lanes call {@link iterateChunks}, which forwards the
+ * entry's detail-tier levels.
  */
-export function iterateChunksAtLodRange(
+export function iterateChunksAtLevels(
   entity: EntitySnapshot,
-  lodRange: [number, number],
+  levels: readonly number[],
   visibleRegion: VisibleRegion,
   selection: SelectionState,
   stats: PlanStats | null = null,
@@ -134,19 +133,14 @@ export function iterateChunksAtLodRange(
 ): ChunkRequest[] {
   const requests: ChunkRequest[] = [];
 
-  if (entity.levels.length === 0) {
+  const level0 = entity.levels[0];
+  if (level0 === undefined) {
     return requests;
   }
 
-  const [finest, coarsest] = lodRange;
-
-  // Iterate from coarsest (seed) down to finest (target).
-  for (let level = coarsest; level >= finest; level--) {
+  for (const level of levels) {
     const levelGeo = entity.levels[level];
     if (levelGeo === undefined) continue;
-
-    const level0 = entity.levels[0];
-    if (level0 === undefined) continue;
 
     iterateGridCells(
       entity,

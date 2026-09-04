@@ -59,8 +59,8 @@ import type {
   ReadyChunkDelivery,
   ReadyDelivery,
   ReadyProxyDelivery,
-  ResidencyTier,
 } from "./types.ts";
+import type { ResidencyTier } from "../residencyTier.ts";
 
 // Re-exported so existing `./cpuCache.ts` imports keep working.
 export type {
@@ -72,7 +72,6 @@ export type {
   ReadyChunkDelivery,
   ReadyDelivery,
   ReadyProxyDelivery,
-  ResidencyTier,
   TierCounters,
   TierResidencyEntry,
 } from "./types.ts";
@@ -443,7 +442,7 @@ export class CpuCache {
     const unwantedInFlightKeys = this.activeInFlightChunkKeys(newActiveIds);
     for (let i = 0; i < requests.length; i++) {
       const req = requests[i];
-      const tier = this.requestResidencyTier(req);
+      const tier = req.tier;
       const key = chunkSchedulerKey(req, tier);
       keys[i] = key;
       tiers[i] = tier;
@@ -1208,7 +1207,7 @@ export class CpuCache {
     // One call rather than three: this loop runs up to 2,943 times in a single
     // submit, so the extra calls were three times the event count ADR 0049's
     // tick ceiling was derived from (#949).
-    const rowTier = this.requestResidencyTier(req) === "coarse" ? 1 : 0;
+    const rowTier = req.tier === "coarse" ? 1 : 0;
     const traceRow = traceRecorder.beginChunkRow(req, rowTier, admittedAtMs);
 
     let result: FetchResult;
@@ -1371,7 +1370,7 @@ export class CpuCache {
       insertedAt: this.lruCounter++,
       epochs: { ...metaEpochs },
       dataType: result.dataType,
-      residencyTier: this.requestResidencyTier(effectiveReq),
+      residencyTier: effectiveReq.tier,
       priority: stale ? Number.MAX_SAFE_INTEGER : effectiveReq.priority,
       lastSeenTick,
       // Carries the chunk's lifecycle row the rest of the way, so `upload`
@@ -1379,7 +1378,7 @@ export class CpuCache {
       traceRow,
     };
 
-    // minimap/overview/coarse route to the overview/coarse bucket (ADR 0023 + coarse/detail bridge).
+    // Coarse-tier lanes share the overview store (ADR 0023, ADR 0039).
     if (lane === "overview" || lane === "minimap" || lane === "coarse") {
       if (stale && this.overviewStore.bytes + cacheEntry.sizeBytes > this.overviewStore.budgetBytes) {
         // Decoded and then dropped on the floor: the row ends here, and
@@ -1844,13 +1843,6 @@ export class CpuCache {
     return "active-detail";
   }
 
-  private requestResidencyTier(req: ChunkRequest): ResidencyTier {
-    if (req.tier) return req.tier;
-    return req.lane === "coarse" || req.lane === "overview" || req.lane === "minimap"
-      ? "coarse"
-      : "detail";
-  }
-
   private computeTierDemandTelemetry(): CacheTelemetry["tierDemand"] {
     let residentDetailChunks = 0;
     let residentDetailBytes = 0;
@@ -1859,14 +1851,14 @@ export class CpuCache {
 
     for (const entry of this.chunkStore.allEntries()) {
       if (entry.lastSeenTick !== this.currentSubmitTick) continue;
-      if (entry.residencyTier === "detail" || entry.lane === "detail") {
+      if (entry.residencyTier === "detail") {
         residentDetailChunks++;
         residentDetailBytes += entry.sizeBytes;
       }
     }
     for (const entry of this.overviewStore.allEntries()) {
       if (entry.lastSeenTick !== this.currentSubmitTick) continue;
-      if (entry.residencyTier === "coarse" || entry.lane === "coarse") {
+      if (entry.residencyTier === "coarse") {
         residentCoarseChunks++;
         residentCoarseBytes += entry.sizeBytes;
       }
@@ -1907,10 +1899,10 @@ export class CpuCache {
     };
 
     for (const req of this.chunkScheduler.pendingSnapshot()) {
-      queues[this.requestResidencyTier(req)].pending++;
+      queues[req.tier].pending++;
     }
     for (const [, entry] of this.chunkScheduler.inFlightEntries()) {
-      const tier = this.requestResidencyTier(entry.request);
+      const tier = entry.request.tier;
       queues[tier].inFlight++;
       queues[tier].inFlightBytes += entry.estimatedBytes;
     }
@@ -1943,7 +1935,7 @@ export class CpuCache {
   }
 
   private inFlightKey(req: ChunkRequest): string {
-    return chunkSchedulerKey(req, this.requestResidencyTier(req));
+    return chunkSchedulerKey(req, req.tier);
   }
 }
 

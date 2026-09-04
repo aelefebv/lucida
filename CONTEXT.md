@@ -49,9 +49,24 @@ The unit of array data that is fetched, decoded, and made resident. Never a whol
 image.
 _Avoid_: tile (a tile is a layout cell in a collection), block, brick
 
+**Inner chunk**:
+The chunk inside a shard: what a chunk key addresses, and the chunk shape a
+level reports. A shard's own shape is never a chunk shape. In an unsharded
+store there is no shard, so chunk and inner chunk name the same thing.
+_Avoid_: sub-chunk, block, shard chunk, tile (a tile is a layout cell in a
+collection)
+
+**Shard**:
+One stored object holding a fixed grid of inner chunks and an index of where
+each lies. The unit an object store counts and lists, never the unit the viewer
+fetches, decodes, or makes resident.
+_Avoid_: chunk (a shard holds chunks and is not one), object (unqualified — a
+shard is one kind of object), file, container
+
 **Chunk key**:
-A chunk's address within one image, as `level/t/c/z/y/x`. Not unique on its own —
-the same key legitimately exists under two residency tiers.
+A chunk's address within one image, as `level/t/c/z/y/x`. Under sharding a key
+addresses an inner chunk; the shard it lies in never appears in a key. Not
+unique on its own — the same key legitimately exists under two residency tiers.
 _Avoid_: chunk id, coordinate
 
 **Composite key**:
@@ -87,10 +102,44 @@ Which of the two independent residency populations a resident chunk belongs to:
 chunk in one is not the same resident as the same chunk in the other.
 _Avoid_: quality, priority, LOD tier
 
+**Target level**:
+The level the screen calls for in one image-bearing entity: the coarsest level
+that still places at least one sample under every device pixel, or the level a
+level pin names. A function of the camera and the level geometry alone, never
+of memory pressure or of what happens to be resident. Distinct from the
+displayed level, which is what the renderer sampled. See
+[ADR 0061](wiki/decisions/0061-screen-chosen-target-level-with-resident-coarser-levels.md).
+_Avoid_: ideal level, selected level, detail level (the detail tier holds
+several levels), LOD, zoom level
+
+**Displayed level**:
+The level the renderer sampled for an entity's pixels: the target level once its
+chunks are resident, and until then a coarser resident level or the coarse tier.
+The counterpart of the target level, and never a synonym for it.
+_Avoid_: rendered level, effective level, actual level, current level
+
+**Level pin**:
+A per-dataset choice that holds the target level at one level whatever the
+screen shows. Absent means the target follows the screen. Unrelated to pinning
+a workspace, which is per-member state. See
+[ADR 0061](wiki/decisions/0061-screen-chosen-target-level-with-resident-coarser-levels.md).
+_Avoid_: override (the field's old name), lock, fixed level, manual level
+
+**Resident levels**:
+The levels at which one image-bearing entity holds detail-tier chunks on the
+GPU: the target level, the coarser levels kept for sampling where the target is
+missing, and any finer level not yet evicted. Bounded per entity, with the
+coarse tier outside the count. See
+[ADR 0061](wiki/decisions/0061-screen-chosen-target-level-with-resident-coarser-levels.md).
+_Avoid_: level stack, mip chain, fallback levels, cached levels (the CPU cache is
+a different population)
+
 **Lane**:
 Which concurrent stream of work a unit belongs to. The planner emits `detail`,
-`coarse`, `prefetch`, `minimap` and `overview`; the label path is its own stream
-again. Orthogonal to every other dimension — the same work happens in each lane.
+`coarse`, `prefetch`, and `minimap`. `overview` is historical: the coarsest-pass
+fallback lane from before the coarse tier, no longer emitted. The label path is
+its own stream again. Orthogonal to every other dimension — the same work
+happens in each lane.
 _Avoid_: track (a track is a timeline row), queue, channel
 
 **Wanted set**:
@@ -115,6 +164,11 @@ component and not a caller: two reads by one client are one reader, and the
 reasoning is in `wiki/decisions/0053-fair-share-source-read-admission.md`.
 _Avoid_: tenant, consumer, requester (a requester is any caller; a reader is the
 unit fairness is measured over)
+
+**Range read**:
+A read of one byte range of a stored object rather than the whole object. The
+read that fetches a shard index, or one inner chunk out of a shard.
+_Avoid_: partial read, byte-range request (the transport's name for it)
 
 ## Performance monitor
 

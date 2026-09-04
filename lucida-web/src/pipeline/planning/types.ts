@@ -6,6 +6,7 @@
 import type { LevelGeometry } from "../../manifestTypes.ts";
 import type { AssetCatalogSnapshot } from "../assetCatalog.ts";
 import type { SceneEpochs } from "../epochs.ts";
+import type { ResidencyTier } from "../residencyTier.ts";
 import type { VisibleRegion } from "../viewport.ts";
 
 /**
@@ -153,14 +154,10 @@ export interface PlanningSnapshot {
   visibleRegion: VisibleRegion;
   selection: SelectionState;
   /**
-   * Asset catalog snapshot for promotion. The orchestrator passes
-   * `ctx.assetCatalog.snapshot()` (always non-null); Planning consults
-   * it to decide whether `group-as-proxy` /
-   * `tiles-with-proxy-fallback` are reachable for each group.
-   *
-   * `null` is still accepted for callers that want to opt out — e.g.
-   * tests and `createSyntheticSnapshot`. Treated as an empty catalog →
-   * no proxies available → all groups degrade to `tiles-with-detail`.
+   * Asset catalog snapshot. The planner no longer reads it; the proxy
+   * residency planner still does, until ADR 0043 §C deletes the
+   * proxy-asset path as a whole. `null` is accepted for callers that opt
+   * out, such as tests and `createSyntheticSnapshot`.
    */
   assetCatalog: AssetCatalogSnapshot | null;
   /**
@@ -184,9 +181,9 @@ export interface PlanningSnapshot {
  * pointer returned in {@link RequestPlan.nextState} and threads it into
  * the next call to `plan`.
  *
- * v1 contains a single tile — the previous tick's active set — used by
- * `buildPrevModeByGroup` to drive promotion-mode hysteresis. The
- * container exists so future state (per-group stickiness counters,
+ * Today it carries one field, the previous tick's active set, which the
+ * dev-mode validator checks and the cold-state delta diffs against. The
+ * container exists so future state (per-entity level hysteresis,
  * anticipation hints, planner state machines) can be added without
  * churning {@link PlanningSnapshot}'s contract.
  *
@@ -205,10 +202,10 @@ export interface RequestPlan {
    */
   requests: ChunkRequest[];
   /**
-   * Promotion decisions: one entry per visible group (`group-as-proxy`)
-   * or per visible tile (tile modes), plus invisible-entity
-   * pass-throughs. Carries the resolved {@link EntityMode}, LOD range,
-   * and proxy availability flags consumed by orchestrator delivery.
+   * The active set: one entry per visible tile, plus invisible-entity
+   * pass-throughs. Carries the {@link EntityMode}, the levels each
+   * residency tier holds, and the proxy availability flags consumed by
+   * orchestrator delivery.
    */
   activeSet: ActiveSetEntry[];
   epochs: SceneEpochs;
@@ -242,11 +239,9 @@ export interface RequestPlan {
 
 /**
  * Per-plan accumulator. Counters are summed across all `iterateChunks`
- * calls (detail + prefetch + overview lanes) and across all entities.
+ * calls (detail, prefetch, and coarse lanes) and across all entities.
  */
 export interface PlanStats {
-  /** How many times catalog-aware promotion downgraded a group's mode. */
-  catalogDegradations: number;
   /** Frustum / visible-region culling stages. */
   culling: PlanCullingStats;
 }
@@ -265,7 +260,6 @@ export interface PlanCullingStats {
 /** Construct a fresh, zeroed PlanStats accumulator. */
 export function emptyPlanStats(): PlanStats {
   return {
-    catalogDegradations: 0,
     culling: { considered: 0, afterXyBounds: 0, afterZRange: 0, afterFrustum: 0 },
   };
 }
@@ -288,16 +282,11 @@ export interface ChunkRequest {
   /**
    * Which planning lane produced this request. `"minimap"` is the
    * highest priority — fetched first. The CPU cache and GPU upload
-   * paths route per-lane (see [[cpu-cache]] for the eviction-tier
-   * mapping).
+   * paths route per-lane.
    */
   lane: "minimap" | "detail" | "coarse" | "prefetch" | "overview";
-  /**
-   * Canonical residency tier this request fills. Kept optional for
-   * migration compatibility with older tests/helpers; the planner emits
-   * it on every request.
-   */
-  tier?: "detail" | "coarse";
+  /** Residency tier this request fills. */
+  tier: ResidencyTier;
   priority: number;
   /** Canonical key: "level/t/c/z/y/x" */
   chunkKey: string;
@@ -309,10 +298,9 @@ export interface ChunkRequest {
  * [`CpuCache.submit`] which routes it to
  * [`ContentSource.fetchProxy`].
  *
- * Populated from the three-tier promotion: `GroupProxy3D` for groups in
- * `group-as-proxy` and as a parent fallback for
- * `tiles-with-proxy-fallback`; `TileProxy3D` for tiles in
- * `tiles-with-proxy-fallback` and `tiles-with-detail`.
+ * The planner no longer emits these, because every tile entry it builds
+ * has `proxyAvailable: false`. The type and its consumers stay until ADR
+ * 0043 §C deletes the proxy-asset path as a whole.
  */
 export interface ProxyRequest {
   datasetId: string;
@@ -326,54 +314,33 @@ export interface ProxyRequest {
 }
 
 /**
- * Per-tile promotion mode for visible tile entries, selected by
- * `chooseEntityMode` from the group's projected diagonal (max of
- * constituent tiles, in pixels):
- *
- *   - `tiles-with-proxy-fallback` (mid range)  — request real tile detail
- *     chunks but also fetch `TileProxy3D` per visible tile and the
- *     parent's `GroupProxy3D` as a fast fallback while detail loads.
- *   - `tiles-with-detail`        (> `DETAIL_THRESHOLD_PX`)  — real
- *     tile detail chunks only; proxy is a stand-in fallback that the
- *     worker uses when chunks are missing.
- *
- * The third tier — group-as-proxy (< `FAR_THRESHOLD_PX`) — does not
- * live on this type. It's a separate {@link ActiveSetEntry} variant
- * ({@link GroupAsProxyEntry}) discriminated by `kind`, so per-variant
- * invariants (no LOD bookkeeping for group-as-proxy, no proxy
- * bookkeeping for invisible) are compile-time enforced rather than
- * JSDoc'd.
+ * Per-tile mode carried on {@link TileEntry}. The planner emits
+ * `tiles-with-detail` for every visible tile, because the tier model
+ * renders from chunks alone. `tiles-with-proxy-fallback` (chunks plus a proxy asset
+ * while detail loads) belongs to the proxy-asset path, which the planner
+ * no longer drives; the cold-state and worker consumers still accept it
+ * until ADR 0043 §C deletes that path as a whole.
  */
 export type EntityMode =
   | "tiles-with-proxy-fallback"
   | "tiles-with-detail";
 
 /**
- * The full per-group decision space — what `chooseEntityMode` and
- * `degradeForCatalog` return before the variant split. Includes
- * `group-as-proxy` because the per-group decision step still discriminates
- * on it before `assignModes` translates each result into the
- * matching {@link ActiveSetEntry} variant.
- *
- * Distinct from {@link EntityMode}, which is the narrower per-tile
- * mode that lives only on {@link TileEntry}.
- */
-export type ResolvedMode = EntityMode | "group-as-proxy";
-
-/**
- * Promotion decision for one visible group or visible tile, plus
- * pass-through entries for invisible entities. Discriminated by `kind`
+ * One active-set entry per visible tile, plus pass-through entries for
+ * invisible entities. Discriminated by `kind`
  * so each variant can declare only the tiles that make sense for it
  * (per-variant invariants compile-time enforced — see
  * [[principles/planning#4-planning-is-pure-carry-forward-state-is-explicit]]).
  *
  * Three variants:
- *   - {@link GroupAsProxyEntry} (`kind: "group-as-proxy"`) — one per
- *     group-as-proxy group; carries no LOD or imageId data.
- *   - {@link TileEntry} (`kind: "tile"`) — one per visible tile in
- *     a tile-mode group; carries LOD range, proxy availability flags.
+ *   - {@link GroupAsProxyEntry} (`kind: "group-as-proxy"`) — a group
+ *     rendered from its proxy asset; the planner no longer produces it
+ *     (ADR 0043 §C).
+ *   - {@link TileEntry} (`kind: "tile"`) — one per visible tile; carries
+ *     the levels each residency tier holds and the proxy availability
+ *     flags.
  *   - {@link InvisibleEntry} (`kind: "invisible"`) — one per invisible
- *     entity, carrying just the coarsest LOD for downstream eviction.
+ *     entity, carrying just the coarsest level for downstream eviction.
  *
  * Consumers narrow on `kind` before reading variant-specific tiles.
  */
@@ -381,7 +348,7 @@ export type ActiveSetEntry = GroupAsProxyEntry | TileEntry | InvisibleEntry;
 
 /**
  * Active-set entry for a group rendered as a single `GroupProxy3D`
- * asset — no tile chunks. Carries only the group's id; LOD bookkeeping
+ * asset — no tile chunks. Carries only the group's id; level bookkeeping
  * and proxy availability flags are implicit (the group-proxy IS the
  * one asset that gets fetched at `PROXY_LANE_OFFSET`).
  */
@@ -392,10 +359,10 @@ export interface GroupAsProxyEntry {
 }
 
 /**
- * Active-set entry for a visible tile — one per visible tile of a
- * group in a tile-mode promotion. Carries the tile's owning image
- * id, the planning LOD range, and proxy availability flags that drive
- * the fallback request emission.
+ * Active-set entry for a visible tile — one per visible tile of a group.
+ * Carries the tile's owning image id, the levels each residency tier
+ * holds, and the proxy availability flags that drive fallback request
+ * emission.
  */
 export interface TileEntry {
   kind: "tile";
@@ -403,22 +370,21 @@ export interface TileEntry {
   entityId: string;
   /** The tile's owning image id (matches `EntitySnapshot.imageId`). */
   imageId: string;
-  /** Per-tile promotion mode. See {@link EntityMode}. */
+  /** Per-tile mode. See {@link EntityMode}. */
   mode: EntityMode;
-  targetLod: number;
-  coarsestDetailLod: number;
-  /** [finest, coarsest] inclusive. */
-  detailOwnedLodRange: [number, number];
-  /** Explicit detail tier level for the chunk-only coarse/detail path. */
-  detailLevel?: number;
-  /** Explicit coarse tier level for the chunk-only coarse/detail path. */
-  coarseLevel?: number | null;
   /**
-   * When present, worker wanted-set should only ask for these LODs even
-   * if `detailOwnedLodRange` spans intermediate levels for shader
-   * fallback ordering.
+   * Levels the detail tier holds for this entity, finest first. The one
+   * description of the detail tier's levels from the planner through
+   * cold state to the worker. Today it holds one level: the dataset's
+   * level pin, or level 0 when none is set.
    */
-  wantedLodLevels?: number[];
+  detailLevels: number[];
+  /**
+   * Level the coarse tier holds for this entity, or `null` when the
+   * image has no coarse level that is at least as coarse as the detail
+   * level.
+   */
+  coarseLevel: number | null;
   /**
    * Which proxy kind this entry would prefer, if any. Always
    * `TileProxy3D` when set; `undefined` if the catalog has no tile
@@ -443,8 +409,8 @@ export interface TileEntry {
  * Active-set entry for an invisible entity — pass-through so the CPU
  * cache eviction tier mapping can still see it.
  * Carries only enough to identify the entity and its coarsest level
- * (used for overview-lane bookkeeping); no LOD range or proxy tiles,
- * since invisibles don't request chunks or proxies.
+ * (the level its cold-state entry lists); no tier levels or proxy
+ * fields, since invisibles don't request chunks or proxies.
  *
  * Distinct from a `tiles-with-detail` tile entry: keeping invisibles
  * as their own variant prevents `if (entry.mode === "tiles-with-detail")`
@@ -454,7 +420,7 @@ export interface InvisibleEntry {
   kind: "invisible";
   entityId: string;
   imageId: string;
-  /** The entity's coarsest LOD (= `levels.length - 1`, or 0 if empty). */
+  /** The entity's coarsest level (= `levels.length - 1`, or 0 if empty). */
   coarsestLod: number;
 }
 
@@ -468,6 +434,4 @@ export interface MemberGroup {
   groupEntity: EntitySnapshot | null;
   /** All visible tile entities whose `parentId === groupId`. */
   tiles: EntitySnapshot[];
-  /** Max projectedDiagonalPx across group + tiles. */
-  projectedDiagonalPx: number;
 }
