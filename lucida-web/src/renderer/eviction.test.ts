@@ -42,11 +42,13 @@ import {
   applyViewHotState,
   getOrCreateVolumePool,
   handleVolumeChunkData,
+  remapIndirection,
   type LodIndirectionMeta,
 } from "./volume/index.ts";
 import {
   getOrCreateSlicePool,
   handleSliceChunkData,
+  remapSliceIndirection,
 } from "./slice/index.ts";
 import type { WorkerCtx } from "./workerContext.ts";
 import { createInitialState } from "./worker/state.ts";
@@ -441,6 +443,58 @@ describe("handleVolumeChunkData — eviction policy", () => {
     expect(evictions[0].keys).toEqual([chunk.key]);
     expect(evictions[0].skipped).toEqual([]);
   });
+
+  it("after the target moves coarser, the old target's chunk goes first, ahead of an older stale chunk and the farthest mapped one", () => {
+    const { ctx, posts } = makeMockCtx();
+    const poolKey = "ds1";
+    const memberA = "imgA";
+
+    const atlas = getOrCreateVolumePool(ctx, poolKey, 32, 32, 32, 0, 0);
+    const level0 = makeVolumeMeta(2, 4, 4);
+    const level1: LodIndirectionMeta = {
+      level: 1, gridDims: [1, 2, 2], chunkDims: [32, 32, 32], levelDims: [32, 64, 64], offset: 2 * 4 * 4,
+    };
+    atlas.entityMetas.set(memberA, [level0, level1]);
+    atlas.indirectionData = new Uint32Array(2 * 4 * 4 + 2 * 2).fill(0xFFFFFFFF);
+    atlas.freeSlots = [2, 1, 0];
+    ctx.state.targetLevelByMember.set(memberA, 0);
+    applyViewHotState(ctx, {
+      type: "viewHotState",
+      epochs: epochs(),
+      datasetId: poolKey,
+      rayHitsByEntity: [[memberA, [0.0, 0.0, 0.0]]],
+    });
+    const level1Msg = (chunks: Chunk[], t = 0) =>
+      makeVolumeMsg(memberA, chunks, { level: 1, t, levelWidth: 64, levelHeight: 64, levelDepth: 32 });
+
+    // Residents in slot order: a level-1 chunk at t=1 (stale at view T 0),
+    // the level-0 chunk at the ray hit, and a far level-1 chunk.
+    handleVolumeChunkData(ctx, level1Msg([makeChunk(1, 1, 0, 0, 0, 0)], 1), epochs(), poolKey, memberA);
+    handleVolumeChunkData(ctx, makeVolumeMsg(memberA, [makeChunk(0, 0, 0, 0, 0, 0)]), epochs(), poolKey, memberA);
+    handleVolumeChunkData(ctx, level1Msg([makeChunk(1, 0, 0, 0, 1, 1)]), epochs(), poolKey, memberA);
+    expect(atlas.slots.size).toBe(3);
+
+    // The target moves to level 1: level 0 loses its section and the remap
+    // unmaps its chunk, as a cold state would.
+    atlas.entityMetas.set(memberA, [{ ...level1, offset: 0 }]);
+    atlas.indirectionData = new Uint32Array(2 * 2).fill(0xFFFFFFFF);
+    remapIndirection(atlas, 0, 0);
+    ctx.state.targetLevelByMember.set(memberA, 1);
+    expect(atlas.slotGridIdx[atlas.slots.get(`${memberA}|0/0/0/0/0/0`)!]).toBe(-1);
+
+    posts.length = 0;
+    handleVolumeChunkData(ctx, level1Msg([makeChunk(1, 0, 0, 0, 0, 1)]), epochs(), poolKey, memberA);
+
+    const evictions = (posts.filter(m => m.type === "chunksEvicted") as Array<Extract<WorkerToMainMessage, { type: "chunksEvicted" }>>)
+      .filter(e => e.keys.length > 0);
+    expect(evictions).toHaveLength(1);
+    expect(evictions[0].keys).toEqual([chunkKey(0, 0, 0, 0, 0, 0)]);
+    expect([...atlas.slots.keys()].sort()).toEqual([
+      `${memberA}|1/0/0/0/0/1`,
+      `${memberA}|1/0/0/0/1/1`,
+      `${memberA}|1/1/0/0/0/0`,
+    ]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -527,6 +581,49 @@ describe("handleSliceChunkData — Z-slice retargeting", () => {
     expect(evictions[0].keys).toEqual([chunk.key]);
     expect(evictions[0].skipped).toEqual([]);
   });
+
+  it("after the target moves coarser, the old target's plane goes first, ahead of an older stale plane and the farthest mapped one", () => {
+    const { ctx, posts } = makeMockCtx();
+    const poolKey = "ds1";
+    const memberA = "imgA";
+
+    const atlas = getOrCreateSlicePool(ctx, poolKey, 32, 32, 0, 0, 0);
+    const level0 = makeSliceMeta(4, 4);
+    const level1: LodIndirectionMeta = {
+      level: 1, gridDims: [1, 2, 2], chunkDims: [4, 32, 32], levelDims: [64, 64, 64], offset: 4 * 4,
+    };
+    atlas.entityMetas.set(memberA, [level0, level1]);
+    atlas.indirectionData = new Uint32Array(4 * 4 + 2 * 2).fill(0xFFFFFFFF);
+    atlas.freeSlots = [2, 1, 0];
+    ctx.state.targetLevelByMember.set(memberA, 0);
+    ctx.state.cameraUVPerEntity.set(memberA, [0.0, 0.0]);
+    const level1Msg = (chunks: Chunk[], t = 0) =>
+      makeSliceMsg(memberA, chunks, { level: 1, t, levelWidth: 64, levelHeight: 64 });
+
+    handleSliceChunkData(ctx, level1Msg([makeSliceChunk(1, 1, 0, 0, 0, 0)], 1), epochs(), poolKey, memberA);
+    handleSliceChunkData(ctx, makeSliceMsg(memberA, [makeSliceChunk(0, 0, 0, 0, 0, 0)]), epochs(), poolKey, memberA);
+    handleSliceChunkData(ctx, level1Msg([makeSliceChunk(1, 0, 0, 0, 1, 1)]), epochs(), poolKey, memberA);
+    expect(atlas.slots.size).toBe(3);
+
+    atlas.entityMetas.set(memberA, [{ ...level1, offset: 0 }]);
+    atlas.indirectionData = new Uint32Array(2 * 2).fill(0xFFFFFFFF);
+    remapSliceIndirection(atlas, 0, 0, 0);
+    ctx.state.targetLevelByMember.set(memberA, 1);
+    expect(atlas.slotGridIdx[atlas.slots.get(`${memberA}|0/0/0/0/0/0`)!]).toBe(-1);
+
+    posts.length = 0;
+    handleSliceChunkData(ctx, level1Msg([makeSliceChunk(1, 0, 0, 0, 0, 1)]), epochs(), poolKey, memberA);
+
+    const evictions = (posts.filter(m => m.type === "chunksEvicted") as Array<Extract<WorkerToMainMessage, { type: "chunksEvicted" }>>)
+      .filter(e => e.keys.length > 0);
+    expect(evictions).toHaveLength(1);
+    expect(evictions[0].keys).toEqual([chunkKey(0, 0, 0, 0, 0, 0)]);
+    expect([...atlas.slots.keys()].sort()).toEqual([
+      `${memberA}|1/0/0/0/0/1`,
+      `${memberA}|1/0/0/0/1/1`,
+      `${memberA}|1/1/0/0/0/0`,
+    ]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -578,6 +675,7 @@ describe("eviction kernel — findFarthestSlot", () => {
       slotGridIdx,
       entityMetas,
       cameraFor: () => [0.5, 0.5, 0.5] as [number, number, number],
+      targetLevelFor: () => 0,
       is3D: true,
     });
     expect(result.key).toBe(`memA|0/0/0/0/0/1`);
@@ -595,6 +693,7 @@ describe("eviction kernel — findFarthestSlot", () => {
       slotGridIdx,
       entityMetas,
       cameraFor: () => [0.5, 0.5, 0.5] as [number, number, number],
+      targetLevelFor: () => 0,
       is3D: true,
     });
     expect(result.key).toBe(`memGone|0/0/0/0/0/0`);
@@ -617,6 +716,7 @@ describe("eviction kernel — findFarthestSlot", () => {
       slotGridIdx,
       entityMetas,
       cameraFor: () => [0.0, 0.0, 0.0] as [number, number, number],
+      targetLevelFor: () => 0,
       is3D: true,
     });
     expect(result.key).toBe(`memA|0/0/0/1/3/3`);
@@ -638,10 +738,106 @@ describe("eviction kernel — findFarthestSlot", () => {
       slotGridIdx,
       entityMetas,
       cameraFor: () => [0.0, 0.0] as [number, number],
+      targetLevelFor: () => 0,
       is3D: false,
     });
     // First mapped key (slot 0) wins because the loop uses strict-greater;
     // both distances are equal in 2D mode.
     expect(result.key).toBe(`memA|0/0/0/0/2/2`);
+  });
+});
+
+/**
+ * A finer-than-target chunk is always unmapped, because the pool has
+ * sections for the target and coarser levels only. What ADR 0061 adds
+ * here is the order among unmapped chunks. Finer than the target goes
+ * ahead of every other one.
+ */
+describe("eviction kernel — finer-than-target first, then farthest", () => {
+  const level2: LodIndirectionMeta = {
+    level: 2, gridDims: [1, 2, 2], chunkDims: [32, 32, 32], levelDims: [32, 64, 64], offset: 0,
+  };
+  const level3: LodIndirectionMeta = {
+    level: 3, gridDims: [1, 1, 1], chunkDims: [32, 32, 32], levelDims: [32, 32, 32], offset: 4,
+  };
+  const corner = () => [0.0, 0.0, 0.0] as [number, number, number];
+
+  it("a chunk finer than the target goes first, ahead of every other stale chunk and the farthest mapped one", () => {
+    // Two other stale chunks and a far mapped one precede the finer chunk in
+    // slot order, so a first-stale-wins scan picks the wrong slot.
+    const slots = new Map<string, number>([
+      [`memA|2/1/0/0/0/0`, 0], // target level, another timepoint: unmapped
+      [`memA|5/0/0/0/0/0`, 1], // coarser than every resident level: unmapped
+      [`memA|2/0/0/0/1/1`, 2], // target level, mapped, far corner
+      [`memA|0/0/0/0/0/0`, 3], // finer than the target: unmapped
+    ]);
+    const slotGridIdx = new Int32Array([-1, -1, 3, -1]);
+    const entityMetas = new Map([["memA", [level2]]]);
+    const result = findFarthestSlot({
+      slots, slotGridIdx, entityMetas, cameraFor: corner, targetLevelFor: () => 2, is3D: true,
+    });
+    expect(result).toEqual({ key: `memA|0/0/0/0/0/0`, dist: Infinity });
+  });
+
+  it("among finer chunks, the finest level goes first", () => {
+    const slots = new Map<string, number>([
+      [`memA|1/0/0/0/0/0`, 0],
+      [`memA|0/0/0/0/0/0`, 1],
+    ]);
+    const slotGridIdx = new Int32Array([-1, -1]);
+    const entityMetas = new Map([["memA", [level2]]]);
+    const result = findFarthestSlot({
+      slots, slotGridIdx, entityMetas, cameraFor: corner, targetLevelFor: () => 2, is3D: true,
+    });
+    expect(result.key).toBe(`memA|0/0/0/0/0/0`);
+  });
+
+  it("a member with no known target has nothing finer: its unmapped chunks are stale in slot order", () => {
+    const slots = new Map<string, number>([
+      [`memA|2/1/0/0/0/0`, 0],
+      [`memA|0/0/0/0/0/0`, 1],
+    ]);
+    const slotGridIdx = new Int32Array([-1, -1]);
+    const entityMetas = new Map([["memA", [level2]]]);
+    const result = findFarthestSlot({
+      slots, slotGridIdx, entityMetas, cameraFor: corner, targetLevelFor: () => undefined, is3D: true,
+    });
+    expect(result).toEqual({ key: `memA|2/1/0/0/0/0`, dist: Infinity });
+  });
+
+  it("an unmapped chunk coarser than every resident level is stale, not finer, and still goes before a mapped one", () => {
+    const slots = new Map<string, number>([
+      [`memA|2/0/0/0/1/1`, 0],
+      [`memA|5/0/0/0/0/0`, 1],
+    ]);
+    const slotGridIdx = new Int32Array([3, -1]);
+    const entityMetas = new Map([["memA", [level2]]]);
+    const result = findFarthestSlot({
+      slots, slotGridIdx, entityMetas, cameraFor: corner, targetLevelFor: () => 2, is3D: true,
+    });
+    expect(result).toEqual({ key: `memA|5/0/0/0/0/0`, dist: Infinity });
+  });
+
+  it("among mapped chunks at or coarser than the target, the farthest goes first whatever its level", () => {
+    // From the corner: the level-2 chunk at (0,0) is 0.375 away, the level-3
+    // chunk 0.75, the level-2 chunk at (1,1) 1.375 (squared, normalized).
+    const entityMetas = new Map([["memA", [level2, level3]]]);
+    const targetLevelFor = () => 2;
+
+    const coarserIsFarther = findFarthestSlot({
+      slots: new Map([[`memA|2/0/0/0/0/0`, 0], [`memA|3/0/0/0/0/0`, 1]]),
+      slotGridIdx: new Int32Array([0, 4]),
+      entityMetas, cameraFor: corner, targetLevelFor, is3D: true,
+    });
+    expect(coarserIsFarther.key).toBe(`memA|3/0/0/0/0/0`);
+    expect(coarserIsFarther.dist).toBeCloseTo(0.75, 6);
+
+    const targetIsFarther = findFarthestSlot({
+      slots: new Map([[`memA|2/0/0/0/0/0`, 0], [`memA|3/0/0/0/0/0`, 1], [`memA|2/0/0/0/1/1`, 2]]),
+      slotGridIdx: new Int32Array([0, 4, 3]),
+      entityMetas, cameraFor: corner, targetLevelFor, is3D: true,
+    });
+    expect(targetIsFarther.key).toBe(`memA|2/0/0/0/1/1`);
+    expect(targetIsFarther.dist).toBeCloseTo(1.375, 6);
   });
 });

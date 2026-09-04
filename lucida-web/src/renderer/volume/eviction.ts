@@ -69,10 +69,11 @@ export function chunkDistSq(
 }
 
 /**
- * Find the best eviction candidate: prefer stale (unmapped) chunks,
- * then farthest mapped chunk. Distance reference is per-entity
- * (`ctx.state.rayHitPerEntity`). Delegates to the shared kernel with
- * `is3D: true`.
+ * Find the best eviction candidate: finer than the member's target
+ * first, then stale (unmapped) chunks, then the farthest mapped chunk.
+ * Distance reference (`ctx.state.rayHitPerEntity`) and target level
+ * (`ctx.state.targetLevelByMember`) are per entity. Delegates to the
+ * shared kernel with `is3D: true`.
  */
 export function findFarthestSlot(
   state: RendererState,
@@ -83,6 +84,7 @@ export function findFarthestSlot(
     slotGridIdx: atlas.slotGridIdx,
     entityMetas: atlas.entityMetas,
     cameraFor: (memberId) => state.rayHitPerEntity.get(memberId) ?? [0.5, 0.5, 0.5],
+    targetLevelFor: (memberId) => state.targetLevelByMember.get(memberId),
     is3D: true,
   });
 }

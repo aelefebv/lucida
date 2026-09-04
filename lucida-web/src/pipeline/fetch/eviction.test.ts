@@ -142,7 +142,7 @@ describe("getTierOrder", () => {
 
 describe("TieredPolicy", () => {
   function makePolicy(mode: InteractionMode): TieredPolicy {
-    return new TieredPolicy(() => mode);
+    return new TieredPolicy(() => mode, () => undefined);
   }
 
   it("returns empty when bytesNeeded is zero", () => {
@@ -326,7 +326,7 @@ describe("TieredPolicy", () => {
   it("reads the live interaction mode each call (modeProvider thunk)", () => {
     // Mode change between two eviction passes must be observed.
     let mode: InteractionMode = "panning";
-    const policy = new TieredPolicy(() => mode);
+    const policy = new TieredPolicy(() => mode, () => undefined);
     const prefetch = makeEntry({
       insertedAt: 0, sizeBytes: 50, tier: "prefetch", chunkKey: "p",
     });
@@ -342,5 +342,70 @@ describe("TieredPolicy", () => {
     expect(
       policy.selectVictims([prefetch, demoted], 50).map(v => v.chunkKey),
     ).toEqual(["d"]);
+  });
+
+  describe("finer than the entity's target goes first", () => {
+    const targets = new Map<string, number>([["e-1", 2], ["e-2", 0]]);
+    const policyFor = (mode: InteractionMode) =>
+      new TieredPolicy(() => mode, (entityId) => targets.get(entityId));
+
+    it("takes a finer-than-target chunk before every tier, in every mode", () => {
+      const prefetch = makeEntry({ insertedAt: 0, sizeBytes: 50, tier: "prefetch", chunkKey: "p", level: 2 });
+      const demoted = makeEntry({ insertedAt: 1, sizeBytes: 50, tier: "demoted-detail", chunkKey: "d", level: 2 });
+      const active = makeEntry({
+        insertedAt: 2, sizeBytes: 50, tier: "active-detail", chunkKey: "a", level: 2, lastSeenTick: 1,
+      });
+      // Freshly planned, focal, newest: every distance key says keep it.
+      const finer = makeEntry({
+        insertedAt: 99, sizeBytes: 50, tier: "active-detail", chunkKey: "f", level: 0, lastSeenTick: 10, priority: 0,
+      });
+      for (const mode of ["panning", "scrubbing", "idle"] as const) {
+        const victims = policyFor(mode).selectVictims([prefetch, demoted, active, finer], 50);
+        expect(victims.map(v => v.chunkKey)).toEqual(["f"]);
+      }
+    });
+
+    it("orders finer chunks finest level first, then by the view-distance keys", () => {
+      const level1Far = makeEntry({
+        insertedAt: 0, sizeBytes: 50, tier: "active-detail", chunkKey: "l1-far", level: 1, lastSeenTick: 1, priority: 100,
+      });
+      const level0Near = makeEntry({
+        insertedAt: 1, sizeBytes: 50, tier: "active-detail", chunkKey: "l0-near", level: 0, lastSeenTick: 1, priority: 0,
+      });
+      const level0Far = makeEntry({
+        insertedAt: 2, sizeBytes: 50, tier: "prefetch", chunkKey: "l0-far", level: 0, lastSeenTick: 1, priority: 100,
+      });
+      const level0Fresh = makeEntry({
+        insertedAt: 3, sizeBytes: 50, tier: "active-detail", chunkKey: "l0-fresh", level: 0, lastSeenTick: 5, priority: 100,
+      });
+      const victims = policyFor("panning").selectVictims([level1Far, level0Near, level0Far, level0Fresh], 200);
+      expect(victims.map(v => v.chunkKey)).toEqual(["l0-far", "l0-near", "l0-fresh", "l1-far"]);
+    });
+
+    it("a chunk at or coarser than the target follows the tier walk like any other", () => {
+      const prefetch = makeEntry({ insertedAt: 0, sizeBytes: 50, tier: "prefetch", chunkKey: "p", level: 2 });
+      const coarser = makeEntry({
+        insertedAt: 1, sizeBytes: 50, tier: "active-detail", chunkKey: "c", level: 3, lastSeenTick: 1,
+      });
+      const fresh = makeEntry({
+        insertedAt: 2, sizeBytes: 50, tier: "active-detail", chunkKey: "a", level: 2, lastSeenTick: 10,
+      });
+      const victims = policyFor("panning").selectVictims([fresh, coarser, prefetch], 100);
+      expect(victims.map(v => v.chunkKey)).toEqual(["p", "c"]);
+    });
+
+    it("judges finer against each entity's own target, and an entity without one has nothing finer", () => {
+      const other = makeEntry({
+        insertedAt: 0, sizeBytes: 50, tier: "active-detail", chunkKey: "e2", entityId: "e-2", level: 0, lastSeenTick: 1,
+      });
+      const unknown = makeEntry({
+        insertedAt: 1, sizeBytes: 50, tier: "active-detail", chunkKey: "e9", entityId: "e-9", level: 0, lastSeenTick: 1,
+      });
+      const finer = makeEntry({
+        insertedAt: 2, sizeBytes: 50, tier: "active-detail", chunkKey: "e1", entityId: "e-1", level: 1, lastSeenTick: 10,
+      });
+      const victims = policyFor("panning").selectVictims([other, unknown, finer], 50);
+      expect(victims.map(v => v.chunkKey)).toEqual(["e1"]);
+    });
   });
 });

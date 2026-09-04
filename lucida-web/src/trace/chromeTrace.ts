@@ -296,7 +296,12 @@ function emitRun(events: ChromeTraceEvent[], run: TraceRun, baseUs: number): voi
       pid: PID_BROWSER,
       tid: POINT_TID,
       s: "t",
-      args: { kind: event.kind, reason: event.reason, key: event.chunk?.chunkKey ?? null },
+      args: {
+        kind: event.kind,
+        reason: event.reason,
+        key: event.chunk?.chunkKey ?? null,
+        level: event.chunk?.level ?? null,
+      },
     });
   }
 

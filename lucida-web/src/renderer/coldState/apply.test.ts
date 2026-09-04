@@ -214,6 +214,33 @@ const HALVING_PYRAMID: ColdStateTileEntry["levels"] = [
   { level: 3, chunkShape: [32, 32, 32], gridShape: [1, 1, 1], levelDims: [16, 16, 16] },
 ];
 
+/**
+ * Apply a cold state and make it the worker's current one, as the
+ * dispatcher does, so the upload path's radius filter and the epoch
+ * check see it.
+ */
+function ingest(ctx: WorkerCtx, activeSet: ColdStateActiveEntry[]): ColdStateMessage {
+  const cold = makeCold(activeSet);
+  ctx.state.currentColdState = cold;
+  ctx.state.currentEpochs = cold.epochs;
+  applyColdState(ctx, cold);
+  return cold;
+}
+
+function mappedLevels(
+  atlas: { slots: Map<string, number>; slotGridIdx: Int32Array },
+  memberId: string,
+): number[] {
+  const levels = new Set<number>();
+  for (const [key, slot] of atlas.slots) {
+    if (atlas.slotGridIdx[slot] < 0) continue;
+    const [member, chunkKey] = key.split("|");
+    if (member !== memberId) continue;
+    levels.add(Number(chunkKey.split("/")[0]));
+  }
+  return [...levels].sort((a, b) => a - b);
+}
+
 /** One 32³ uint16 chunk upload for `memberId` at `level`, grid cell (0,0,0). */
 function chunkUpload(memberId: string, level: number): VolumeChunkDataMessage {
   const lm = HALVING_PYRAMID.find((l) => l.level === level)!;
@@ -531,6 +558,104 @@ describe("Suite A — applyColdState", () => {
     expect(atlas.entityMetas.get("imgA")?.map((m) => m.level)).toEqual([3]);
     expect(atlas.slots.has("imgA|2/0/0/0/0/0")).toBe(true);
     expect(atlas.slotGridIdx[slot!]).toBe(-1);
+    expect(findFarthestSlot(ctx.state, atlas)).toEqual({ key: "imgA|2/0/0/0/0/0", dist: Infinity });
+  });
+
+  it("records each member's target level for eviction, and drops it with the dataset", () => {
+    const ctx = makeCtx(makeMockDevice());
+    const cold = makeCold([
+      makeEntry({ entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail", detailLevels: [2], levels: HALVING_PYRAMID }),
+      makeEntry({ entityId: "grp", imageId: "grp", mode: "group-as-proxy" }),
+    ]);
+    applyColdState(ctx, cold);
+    expect(ctx.state.targetLevelByMember.get("imgA")).toBe(2);
+    expect(ctx.state.targetLevelByMember.has("grp")).toBe(false);
+
+    applyColdState(ctx, makeCold([
+      makeEntry({ entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail", detailLevels: [0], levels: HALVING_PYRAMID }),
+    ]));
+    expect(ctx.state.targetLevelByMember.get("imgA")).toBe(0);
+  });
+
+  // Pins the four-level bound from the eviction side. The bound itself is
+  // the section allocation (`detailTierLevels`). A level outside the
+  // resident levels has no section, so the upload path never maps it.
+  it("maps at most four levels per entity; the level furthest from the target is the one that drops out", () => {
+    const ctx = makeCtx(makeMockDevice());
+    const six: ColdStateTileEntry["levels"] = [0, 1, 2, 3, 4, 5].map((level) => ({
+      level,
+      chunkShape: [32, 32, 32],
+      gridShape: [1, 1, 1],
+      levelDims: [32, 32, 32],
+    }));
+    const entryAt = (target: number) =>
+      makeEntry({ entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail", detailLevels: [target], levels: six });
+    const uploadAt = (level: number): VolumeChunkDataMessage => ({
+      type: "volumeChunkData",
+      epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 0 },
+      tier: "detail",
+      memberId: "imgA",
+      chunks: [{ data: new Uint16Array(32 * 32 * 32).buffer, dataType: "uint16", x: 0, y: 0, z: 0, key: `${level}/0/0/0/0/0` }],
+      level, t: 0, c: 0,
+      levelWidth: 32, levelHeight: 32, levelDepth: 32,
+      chunkX: 32, chunkY: 32, chunkZ: 32,
+    });
+
+    const cold = ingest(ctx, [entryAt(1)]);
+    const poolKey = poolOf(ctx.state, "imgA", "detail", 1)!;
+    const atlas = vol(ctx.state).get(poolKey)!;
+    for (const level of [0, 1, 2, 3, 4, 5]) {
+      handleVolumeChunkData(ctx, uploadAt(level), cold.epochs, poolKey, "imgA");
+    }
+    expect([...atlas.slots.keys()].sort()).toEqual([1, 2, 3, 4].map((l) => `imgA|${l}/0/0/0/0/0`));
+    expect(mappedLevels(atlas, "imgA")).toEqual([1, 2, 3, 4]);
+
+    const coldMid = ingest(ctx, [entryAt(2)]);
+    expect(mappedLevels(atlas, "imgA")).toEqual([2, 3, 4]);
+    expect(findFarthestSlot(ctx.state, atlas)).toEqual({ key: "imgA|1/0/0/0/0/0", dist: Infinity });
+    handleVolumeChunkData(ctx, uploadAt(5), coldMid.epochs, poolKey, "imgA");
+    expect(mappedLevels(atlas, "imgA")).toEqual([2, 3, 4, 5]);
+
+    // Back at target 1, level 1's resident chunk maps again without a
+    // refetch, and level 5's stays resident but unmapped.
+    ingest(ctx, [entryAt(1)]);
+    expect(mappedLevels(atlas, "imgA")).toEqual([1, 2, 3, 4]);
+    expect(atlas.slots.has("imgA|5/0/0/0/0/0")).toBe(true);
+    expect(atlas.slotGridIdx[atlas.slots.get("imgA|5/0/0/0/0/0")!]).toBe(-1);
+  });
+
+  it("a coarser resident leaves only by distance after the target moves finer; the old target's chunks leave first after it moves coarser", () => {
+    const ctx = makeCtx(makeMockDevice());
+    const entryAt = (target: number) =>
+      makeEntry({ entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail", detailLevels: [target], levels: HALVING_PYRAMID });
+    const uploadAt = (level: number, z: number, y: number, x: number): VolumeChunkDataMessage => {
+      const base = chunkUpload("imgA", level);
+      return {
+        ...base,
+        chunks: [{ ...base.chunks[0], x, y, z, key: `${level}/0/0/${z}/${y}/${x}` }],
+      };
+    };
+    ctx.state.rayHitPerEntity.set("imgA", [0, 0, 0]);
+
+    const coldCoarse = ingest(ctx, [entryAt(2)]);
+    const poolKey = poolOf(ctx.state, "imgA", "detail", 2)!;
+    const atlas = vol(ctx.state).get(poolKey)!;
+    atlas.freeSlots = [1, 0];
+    handleVolumeChunkData(ctx, uploadAt(2, 0, 0, 0), coldCoarse.epochs, poolKey, "imgA");
+
+    const coldFine = ingest(ctx, [entryAt(0)]);
+    handleVolumeChunkData(ctx, uploadAt(0, 1, 3, 3), coldFine.epochs, poolKey, "imgA");
+    expect(atlas.slots.size).toBe(2);
+
+    // The far level-0 chunk goes, not the coarser resident nearer the view.
+    handleVolumeChunkData(ctx, uploadAt(0, 0, 0, 0), coldFine.epochs, poolKey, "imgA");
+    expect([...atlas.slots.keys()].sort()).toEqual(["imgA|0/0/0/0/0/0", "imgA|2/0/0/0/0/0"]);
+    expect(atlas.slotGridIdx[atlas.slots.get("imgA|2/0/0/0/0/0")!]).toBeGreaterThanOrEqual(0);
+
+    // Both residents are now finer than the target: the finest goes first.
+    const coldCoarsest = ingest(ctx, [entryAt(3)]);
+    handleVolumeChunkData(ctx, uploadAt(3, 0, 0, 0), coldCoarsest.epochs, poolKey, "imgA");
+    expect([...atlas.slots.keys()].sort()).toEqual(["imgA|2/0/0/0/0/0", "imgA|3/0/0/0/0/0"]);
     expect(findFarthestSlot(ctx.state, atlas)).toEqual({ key: "imgA|2/0/0/0/0/0", dist: Infinity });
   });
 
