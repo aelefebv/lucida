@@ -30,13 +30,9 @@
  * here — it lives in the main 3-D view UI
  * (components/FocalDepthControl.tsx) and stays writable in every build.
  *
- * Cross-constraint warnings (warn but allow):
- *   - `detailThresholdPx <= farThresholdPx + 2*hysteresisPx`: the
- *     middle band collapses; `tiles-with-proxy-fallback` becomes
- *     unreachable. Surfaced under the affected field.
- *   - Lane offsets that invert the canonical priority order
- *     (MINIMAP < DETAIL < PROXY < PREFETCH < OVERVIEW). Shown under the
- *     affected lane field.
+ * Cross-constraint warning (warn but allow): lane offsets that invert
+ * the canonical priority order (MINIMAP < DETAIL < PROXY < PREFETCH <
+ * COARSE), shown under the affected lane field.
  */
 
 import { useEffect, useReducer, useState, useSyncExternalStore } from "react";
@@ -46,6 +42,7 @@ import {
   type PlanningConfig,
 } from "../pipeline/planning/config.ts";
 import type { CpuCacheConfig } from "../pipeline/fetch/index.ts";
+import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import {
   DEBUG_OVERLAYS,
   isOverlayEnabled,
@@ -53,7 +50,6 @@ import {
   setOverlayEnabled,
   setRenderRadiusPreviewTier,
   type DebugOverlay,
-  type RenderRadiusPreviewTier,
 } from "./logging.ts";
 import "./DevControls.css";
 
@@ -64,30 +60,13 @@ import "./DevControls.css";
 interface TunableSpec {
   field: keyof PlanningConfig;
   label: string;
-  /** Static lower bound; the active min may be tightened (see `dynamicMin`). */
   min: number;
   max: number;
   step: number;
-  /**
-   * Optional dynamic-min hook so detailThresholdPx can stay above
-   * farThresholdPx without baking a hard constraint into the default
-   * `min`. Returns the runtime lower bound; the slider clamps to it.
-   */
-  dynamicMin?: (cfg: PlanningConfig) => number;
-  previewRadiusTier?: RenderRadiusPreviewTier;
+  previewRadiusTier?: ResidencyTier;
 }
 
-const MODE_THRESHOLDS: TunableSpec[] = [
-  { field: "farThresholdPx", label: "FAR threshold (px)", min: 20, max: 200, step: 1 },
-  {
-    field: "detailThresholdPx",
-    label: "DETAIL threshold (px)",
-    min: 30,
-    max: 500,
-    step: 1,
-    dynamicMin: (cfg) => cfg.farThresholdPx + 10,
-  },
-  { field: "hysteresisPx", label: "Hysteresis (px)", min: 0, max: 30, step: 1 },
+const PREFETCH: TunableSpec[] = [
   { field: "prefetchDepth", label: "Prefetch depth", min: 0, max: 5, step: 1 },
 ];
 
@@ -140,7 +119,6 @@ const LANE_OFFSETS: TunableSpec[] = [
   { field: "proxyLaneOffset", label: "PROXY lane offset", min: 0, max: 5000, step: 50 },
   { field: "prefetchLaneOffset", label: "PREFETCH lane offset", min: 0, max: 5000, step: 50 },
   { field: "coarseLaneOffset", label: "COARSE lane offset", min: 0, max: 5000, step: 50 },
-  { field: "overviewLaneOffset", label: "OVERVIEW lane offset", min: 0, max: 5000, step: 50 },
 ];
 
 // Canonical lane priority order, lowest offset (most urgent) first. Used
@@ -151,7 +129,6 @@ const LANE_ORDER: (keyof PlanningConfig)[] = [
   "proxyLaneOffset",
   "prefetchLaneOffset",
   "coarseLaneOffset",
-  "overviewLaneOffset",
 ];
 
 const OVERLAY_DESCRIPTIONS: Record<DebugOverlay, string> = {
@@ -195,24 +172,8 @@ const CACHE_KNOBS: CacheKnobSpec[] = [
 ];
 
 /**
- * Returns a human warning when the middle mode band collapses, i.e. the
- * upper hysteresis band of FAR overlaps the lower band of DETAIL and
- * `tiles-with-proxy-fallback` is no longer reachable. Surface under
- * either contributing field.
- */
-function modeBandWarning(cfg: PlanningConfig): string | null {
-  if (cfg.detailThresholdPx <= cfg.farThresholdPx + 2 * cfg.hysteresisPx) {
-    return (
-      "Middle band collapsed: tiles-with-proxy-fallback unreachable. " +
-      "Raise DETAIL or lower FAR/hysteresis."
-    );
-  }
-  return null;
-}
-
-/**
  * Returns a warning when a given lane offset breaks the canonical order
- * MINIMAP < DETAIL < PROXY < PREFETCH < OVERVIEW. The warning attaches
+ * MINIMAP < DETAIL < PROXY < PREFETCH < COARSE. The warning attaches
  * to the field whose value disagrees with its neighbour.
  */
 function laneOrderWarning(
@@ -239,7 +200,7 @@ function laneOrderWarning(
 
 function labelForField(field: keyof PlanningConfig): string {
   for (const spec of [
-    ...MODE_THRESHOLDS,
+    ...PREFETCH,
     ...PRIORITY_WEIGHTS,
     ...RESIDENCY_BUDGETS,
     ...LANE_OFFSETS,
@@ -270,42 +231,6 @@ function useOverlayVersion(): number {
   return version;
 }
 
-function CoarseDetailToggle({ cfg, editable }: { cfg: PlanningConfig; editable: boolean }) {
-  const dirty = cfg.coarseDetailEnabled !== DEFAULT_PLANNING_CONFIG.coarseDetailEnabled;
-  return (
-    <div className="dev-controls-tunable-row">
-      <label className="dev-controls-tunable-label" htmlFor="cfg-coarse-detail-enabled">
-        Coarse/detail path
-      </label>
-      <div className="dev-controls-tunable-controls">
-        <input
-          id="cfg-coarse-detail-enabled"
-          type="checkbox"
-          checked={cfg.coarseDetailEnabled}
-          disabled={!editable}
-          onChange={(e) => {
-            if (!editable) return;
-            configStore.set("coarseDetailEnabled", e.target.checked);
-          }}
-        />
-        {editable && dirty ? (
-          <button
-            type="button"
-            className="dev-controls-reset"
-            title="Reset to default"
-            aria-label="Reset coarse/detail path"
-            onClick={() => configStore.reset("coarseDetailEnabled")}
-          >
-            ↩
-          </button>
-        ) : (
-          <span className="dev-controls-reset-placeholder" aria-hidden="true" />
-        )}
-      </div>
-    </div>
-  );
-}
-
 /**
  * One tunable row: label + slider + number input + reset arrow (visible
  * only when the value differs from the default) + optional warning line.
@@ -326,14 +251,12 @@ function TunableRow({
 }) {
   const value = cfg[spec.field] as number;
   const def = DEFAULT_PLANNING_CONFIG[spec.field] as number;
-  const dynamicMin = spec.dynamicMin ? spec.dynamicMin(cfg) : spec.min;
-  const minActive = Math.max(spec.min, dynamicMin);
   const dirty = value !== def;
 
   const onChange = (next: number) => {
     if (!editable) return;
     if (Number.isNaN(next)) return;
-    const clamped = Math.min(spec.max, Math.max(minActive, next));
+    const clamped = Math.min(spec.max, Math.max(spec.min, next));
     configStore.set(spec.field, clamped as PlanningConfig[typeof spec.field]);
   };
 
@@ -356,7 +279,7 @@ function TunableRow({
         <input
           id={sliderId}
           type="range"
-          min={minActive}
+          min={spec.min}
           max={spec.max}
           step={spec.step}
           value={value}
@@ -368,7 +291,7 @@ function TunableRow({
         />
         <input
           type="number"
-          min={minActive}
+          min={spec.min}
           max={spec.max}
           step={spec.step}
           value={value}
@@ -526,19 +449,8 @@ export function DevControls({
   // expanded so the consequences are explicit.
   const [laneOffsetsExpanded, setLaneOffsetsExpanded] = useState(false);
 
-  const modeWarning = modeBandWarning(cfg);
-  // Mode-threshold warning attaches to detailThresholdPx (the field most
-  // people will recognize as the one to lower); also surface on FAR for
-  // discoverability.
-  const warningFor = (field: keyof PlanningConfig): string | null => {
-    if (field === "farThresholdPx" || field === "detailThresholdPx" || field === "hysteresisPx") {
-      return modeWarning;
-    }
-    if (LANE_ORDER.includes(field)) {
-      return laneOrderWarning(cfg, field);
-    }
-    return null;
-  };
+  const warningFor = (field: keyof PlanningConfig): string | null =>
+    LANE_ORDER.includes(field) ? laneOrderWarning(cfg, field) : null;
 
   const allDefaults = (Object.keys(DEFAULT_PLANNING_CONFIG) as (keyof PlanningConfig)[])
     .every((k) => cfg[k] === DEFAULT_PLANNING_CONFIG[k]);
@@ -576,8 +488,8 @@ export function DevControls({
         </div>
 
         <div className="dev-controls-section">
-          <div className="dev-controls-title">Mode thresholds</div>
-          {MODE_THRESHOLDS.map((spec) => (
+          <div className="dev-controls-title">Prefetch</div>
+          {PREFETCH.map((spec) => (
             <TunableRow
               key={spec.field}
               spec={spec}
@@ -606,7 +518,6 @@ export function DevControls({
           <div className="dev-controls-note">
             Render radius is a visible-view multiplier; max disables radius filtering.
           </div>
-          <CoarseDetailToggle cfg={cfg} editable={editable} />
           {RESIDENCY_BUDGETS.map((spec) => (
             <TunableRow
               key={spec.field}
@@ -636,7 +547,7 @@ export function DevControls({
               <div className="dev-controls-warn" role="note">
                 Structural knobs: changing lane offsets reorders the queue
                 priorities across the system. The canonical order is
-                MINIMAP &lt; DETAIL &lt; PROXY &lt; PREFETCH &lt; COARSE &lt; OVERVIEW.
+                MINIMAP &lt; DETAIL &lt; PROXY &lt; PREFETCH &lt; COARSE.
               </div>
               {LANE_OFFSETS.map((spec) => (
                 <TunableRow

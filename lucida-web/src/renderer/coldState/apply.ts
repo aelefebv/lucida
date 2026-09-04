@@ -13,7 +13,7 @@
  *   - `currentEntityMetasByDataset` — per-dataset entity-metas snapshot
  *     for the most recent cold state. The descriptor buffer build pulls
  *     from this so it doesn't pick up stale offsets from pools that
- *     belonged to earlier cold states with different target LODs.
+ *     belonged to earlier cold states with different levels.
  *   - `descriptorBuffersByDataset` — per-dataset descriptor buffer
  *     (rebuilt fresh each cold state).
  *
@@ -106,8 +106,8 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
   }
 
   // 3. Build pool groups (volume or slice) — partitions activeSet by
-  // (channel, chunkDims). Entries without a targetLevel (e.g.
-  // group-as-proxy with empty `levels[]`) are skipped here; they're
+  // (tier, channel, chunkDims). Entries with no chunk levels
+  // (group-as-proxy, with empty `levels[]`) are skipped here; they're
   // still in memberToDataset from step 2.
   const mode: "volume" | "slice" = msg.viewMode;
   const dimArity: 2 | 3 = mode === "volume" ? 3 : 2;

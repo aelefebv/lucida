@@ -313,9 +313,8 @@ describe("checkPrevActiveSetKindAgreement", () => {
           entityId: "tile-A1",
           imageId: "img-tile-A1",
           mode: "tiles-with-detail",
-          targetLod: 0,
-          coarsestDetailLod: 0,
-          detailOwnedLodRange: [0, 0],
+          detailLevels: [0],
+          coarseLevel: null,
           proxyAvailable: false,
           groupProxyAvailable: false,
         },
@@ -370,9 +369,8 @@ describe("checkPrevActiveSetKindAgreement", () => {
           entityId: "group-A", // Group, not Tile/Image
           imageId: "img-group-A",
           mode: "tiles-with-detail",
-          targetLod: 0,
-          coarsestDetailLod: 0,
-          detailOwnedLodRange: [0, 0],
+          detailLevels: [0],
+          coarseLevel: null,
           proxyAvailable: false,
           groupProxyAvailable: false,
         },
@@ -386,7 +384,7 @@ describe("checkPrevActiveSetKindAgreement", () => {
   it("passes when a tile entry references an Image entity (singleton case)", () => {
     // Image entities are treated as singleton "groups with one tile" by
     // groupMembers — the active-set entry is a TileEntry even though the
-    // entity is an ImageSnapshot. See modes.ts::groupMembers.
+    // entity is an ImageSnapshot. See activeSet.ts::groupMembers.
     const snap = createSyntheticSnapshot({
       datasetId: "ds-singleton",
       entities: [
@@ -404,9 +402,8 @@ describe("checkPrevActiveSetKindAgreement", () => {
           entityId: "img-only",
           imageId: "img-only-image",
           mode: "tiles-with-detail",
-          targetLod: 0,
-          coarsestDetailLod: 0,
-          detailOwnedLodRange: [0, 0],
+          detailLevels: [0],
+          coarseLevel: null,
           proxyAvailable: false,
           groupProxyAvailable: false,
         },

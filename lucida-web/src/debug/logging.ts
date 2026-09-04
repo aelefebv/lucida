@@ -16,6 +16,8 @@
  * `refreshDebugCategories()` afterwards, or reload.
  */
 
+import type { ResidencyTier } from "../pipeline/residencyTier.ts";
+
 export const DEBUG_CATEGORIES = ["bridge", "wasm", "render", "cache", "orch"] as const;
 export type DebugCategory = (typeof DEBUG_CATEGORIES)[number];
 
@@ -132,16 +134,14 @@ export function onOverlaysChanged(fn: () => void): () => void {
   };
 }
 
-export type RenderRadiusPreviewTier = "detail" | "coarse";
-
-let renderRadiusPreviewTier: RenderRadiusPreviewTier | null = null;
+let renderRadiusPreviewTier: ResidencyTier | null = null;
 const renderRadiusPreviewListeners = new Set<() => void>();
 
-export function getRenderRadiusPreviewTier(): RenderRadiusPreviewTier | null {
+export function getRenderRadiusPreviewTier(): ResidencyTier | null {
   return renderRadiusPreviewTier;
 }
 
-export function setRenderRadiusPreviewTier(tier: RenderRadiusPreviewTier | null): void {
+export function setRenderRadiusPreviewTier(tier: ResidencyTier | null): void {
   if (renderRadiusPreviewTier === tier) return;
   renderRadiusPreviewTier = tier;
   for (const fn of renderRadiusPreviewListeners) fn();

@@ -6,7 +6,8 @@
  * handles worker-feedback parsing.
  */
 
-import type { CpuCache, ReadyDelivery, ResidencyTier } from "../fetch/index.ts";
+import type { CpuCache, ReadyDelivery } from "../fetch/index.ts";
+import type { ResidencyTier } from "../residencyTier.ts";
 import type {
   ActiveSetEntry,
   EntitySnapshot,
@@ -416,11 +417,7 @@ export class Uploader {
   }
 
   private deliveryResidencyTier(delivery: ReadyDelivery): ResidencyTier | null {
-    if (delivery.kind !== "chunk") return null;
-    return delivery.residencyTier ??
-      (delivery.lane === "coarse" || delivery.lane === "overview" || delivery.lane === "minimap"
-        ? "coarse"
-        : "detail");
+    return delivery.kind === "chunk" ? delivery.residencyTier : null;
   }
 
   // Worker feedback (wired in renderLoop.start)

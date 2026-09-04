@@ -10,12 +10,12 @@
  * in its own trace.
  */
 
+import { RESIDENCY_TIERS } from "../pipeline/residencyTier.ts";
 import { StringPool } from "./stringPool.ts";
 import {
   BOUNDARY_COUNT,
   LANE_NAMES,
   laneIndex,
-  RESIDENCY_TIER_NAMES,
   ROW_OUTCOME_NAMES,
   RowOutcome,
   UNSET_STAMP,
@@ -238,7 +238,7 @@ export class RowTable {
         entityId: this.strings.get(this.entityIds[i]),
         imageId: this.strings.get(this.imageIds[i]),
         lane: LANE_NAMES[this.lanes[i]],
-        residencyTier: RESIDENCY_TIER_NAMES[this.tiers[i]],
+        residencyTier: RESIDENCY_TIERS[this.tiers[i]],
         level,
         t,
         c: ch,

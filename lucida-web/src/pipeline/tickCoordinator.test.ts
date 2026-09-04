@@ -26,8 +26,8 @@ import { traceRecorder } from "../trace/recorder.ts";
 //
 // Because injection means the describes now share the real module singletons
 // (no per-test module reset), reset the ones tests mutate after every test so
-// order can't leak: configStore (which persists `coarseDetailEnabled` to
-// happy-dom localStorage) and localStorage.
+// order can't leak: configStore (which persists planning knobs to happy-dom
+// localStorage) and localStorage.
 afterEach(() => {
   configStore.__resetForTesting();
   if (typeof localStorage !== "undefined") localStorage.clear();
@@ -670,41 +670,6 @@ describe("epoch caching", () => {
       expect(orch.hasPendingRebuild()).toBe(false);
     } finally {
       vi.useRealTimers();
-    }
-  });
-
-  it("submits only budget-admitted legacy proxies while preserving detail requests", () => {
-    configStore.set("coarseDetailEnabled", false);
-    const { scene, datasets } = makeTickCoordinatorDeps();
-    const orch = makeOrch();
-    const cpuCache = createMockCpuCache();
-    const coldState = vi.fn();
-    const ctx = makeCtx(scene, datasets);
-    ctx.cpuCache = cpuCache;
-    ctx.client = { coldState, coldStateDelta: vi.fn(), viewHotState: vi.fn() } as unknown as TickContext["client"];
-    ctx.assetCatalog = createMockAssetCatalog([
-      {
-        entity_id: "tile-0",
-        kinds: ["TileProxy3D"],
-        footprints: [{ kind: "TileProxy3D", dims: [1, 128, 128], bytes: 512 * 1024 * 1024 }],
-      },
-      {
-        entity_id: "group-0",
-        kinds: ["GroupProxy3D"],
-        footprints: [{ kind: "GroupProxy3D", dims: [1, 128, 128], bytes: 512 * 1024 * 1024 }],
-      },
-    ]);
-
-    try {
-      orch.planAndFetch(ctx, emptyMinimap);
-
-      const submitted = vi.mocked(cpuCache.submit).mock.calls[0][0] as RequestPlan;
-      expect(submitted.requests.length).toBeGreaterThan(0);
-      expect(submitted.proxyRequests).toEqual([]);
-      const cold = coldState.mock.calls[0][0] as ColdStateMessage;
-      expect(cold.desiredProxyKeys).toEqual([]);
-    } finally {
-      configStore.__resetForTesting();
     }
   });
 
