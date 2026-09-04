@@ -195,7 +195,7 @@ describe("LOD range", () => {
     const entity = createSyntheticEntity({
       kind: "Image",
       projectedDiagonalPx: 200,
-      idealTargetLod: 0,
+      targetLevel: 0,
       levels: makeStubLevels(5),
     });
 
@@ -211,7 +211,7 @@ describe("LOD range", () => {
     const entity = createSyntheticEntity({
       kind: "Image",
       projectedDiagonalPx: 200,
-      idealTargetLod: 3,
+      targetLevel: 3,
       levels: makeStubLevels(4),
     });
 
@@ -227,7 +227,7 @@ describe("LOD range", () => {
     const entity = createSyntheticEntity({
       kind: "Image",
       projectedDiagonalPx: 200,
-      idealTargetLod: 0,
+      targetLevel: 0,
       levels: makeStubLevels(1),
     });
 
@@ -348,7 +348,7 @@ function makeCollectionEntities(
         kind: "Tile",
         projectedDiagonalPx: f.px,
         levels: makeStubLevels(5),
-        idealTargetLod: 0,
+        targetLevel: 0,
         parentId: groupId,
       }),
     );
@@ -894,7 +894,7 @@ describe("request scheduling", () => {
       imageId: "img0",
       kind: "Image",
       projectedDiagonalPx: 200,
-      idealTargetLod: 0,
+      targetLevel: 0,
       levels: [level0],
       importance: 1.0,
       layoutPositionVox: [0, 0],
@@ -958,7 +958,7 @@ describe("request scheduling", () => {
       imageId: "img-high",
       kind: "Image",
       projectedDiagonalPx: 200,
-      idealTargetLod: 0,
+      targetLevel: 0,
       levels: [level0],
       importance: 1.0,
       layoutPositionVox: [0, 0],
@@ -968,7 +968,7 @@ describe("request scheduling", () => {
       imageId: "img-low",
       kind: "Image",
       projectedDiagonalPx: 200,
-      idealTargetLod: 0,
+      targetLevel: 0,
       levels: [level0],
       importance: 0.2,
       layoutPositionVox: [0, 0],
@@ -1053,7 +1053,7 @@ describe("plan()", () => {
       imageId: "img0",
       kind: "Image",
       projectedDiagonalPx: 200,
-      idealTargetLod: 0,
+      targetLevel: 0,
       levels: [level0],
       importance: 1.0,
       layoutPositionVox: [0, 0],
@@ -1098,7 +1098,7 @@ describe("plan()", () => {
       imageId: "img0",
       kind: "Image",
       projectedDiagonalPx: 200,
-      idealTargetLod: 0,
+      targetLevel: 0,
       levels: [level0],
       importance: 1.0,
       layoutPositionVox: [500, 0],
@@ -1172,7 +1172,7 @@ describe("plan()", () => {
       imageId: "img-detail",
       kind: "Image",
       projectedDiagonalPx: 200,
-      idealTargetLod: 0,
+      targetLevel: 0,
       levels: [level0A],
       importance: 0.8,
       layoutPositionVox: [0, 0],
@@ -1188,7 +1188,7 @@ describe("plan()", () => {
       imageId: "img-overview",
       kind: "Image",
       projectedDiagonalPx: 20,
-      idealTargetLod: 0,
+      targetLevel: 0,
       levels: [level0B],
       importance: 0.5,
       layoutPositionVox: [0, 0],
@@ -1266,7 +1266,7 @@ describe("plan() — depth-bias focal plane (#532)", () => {
       imageId: "img0",
       kind: "Image",
       projectedDiagonalPx: 200,
-      idealTargetLod: 0,
+      targetLevel: 0,
       levels: [level0],
       importance: 1.0,
       layoutPositionVox: [0, 0],
@@ -1578,7 +1578,7 @@ describe("plan() — proxy request emission", () => {
           kind: "Tile",
           projectedDiagonalPx: f.px,
           levels: [level0],
-          idealTargetLod: 0,
+          targetLevel: 0,
           parentId: opts.groupId,
         }),
       ),
@@ -2441,7 +2441,7 @@ describe("plan() honors config tunables", () => {
           imageId: "imgT1",
           kind: "Tile",
           projectedDiagonalPx: opts.px,
-          idealTargetLod: 0,
+          targetLevel: 0,
           levels: [level0],
           importance: opts.importance ?? 1.0,
           parentId: groupId,
@@ -2532,7 +2532,7 @@ describe("plan() honors config tunables", () => {
       entityId: "e0",
       kind: "Image",
       projectedDiagonalPx: 200,
-      idealTargetLod: 0,
+      targetLevel: 0,
       levels: [level0],
     });
     const snap = createSyntheticSnapshot({
@@ -2571,7 +2571,7 @@ describe("plan() honors config tunables", () => {
       imageId: "img-h",
       kind: "Image",
       projectedDiagonalPx: 200,
-      idealTargetLod: 0,
+      targetLevel: 0,
       levels: [level0],
       importance: 1.0,
     });
@@ -2580,7 +2580,7 @@ describe("plan() honors config tunables", () => {
       imageId: "img-l",
       kind: "Image",
       projectedDiagonalPx: 200,
-      idealTargetLod: 0,
+      targetLevel: 0,
       levels: [level0],
       importance: 0.0,
     });
@@ -2627,7 +2627,7 @@ describe("plan() honors config tunables", () => {
       entityId: "e0",
       kind: "Image",
       projectedDiagonalPx: 200,
-      idealTargetLod: 0,
+      targetLevel: 0,
       levels: [level0],
       importance: 1.0,
     });
@@ -2699,7 +2699,7 @@ describe("plan() honors config tunables", () => {
       entityId: "e0",
       kind: "Image",
       projectedDiagonalPx: 200,
-      idealTargetLod: 0,
+      targetLevel: 0,
       levels: [level0],
       importance: 1.0,
     });
@@ -2767,7 +2767,7 @@ describe("plan() honors config tunables", () => {
       entityId: "e0",
       kind: "Image",
       projectedDiagonalPx: 200,
-      idealTargetLod: 0,
+      targetLevel: 0,
       levels: [level0],
       importance: 1.0,
     });
@@ -2816,7 +2816,7 @@ describe("plan() honors config tunables", () => {
       entityId: "e0",
       kind: "Image",
       projectedDiagonalPx: 200,
-      idealTargetLod: 0,
+      targetLevel: 0,
       levels: [level0],
       importance: 1.0,
     });
@@ -2881,7 +2881,7 @@ describe("plan() — minimap lane", () => {
       imageId: "imgM",
       kind: "Image",
       projectedDiagonalPx: 200,
-      idealTargetLod: 0,
+      targetLevel: 0,
       levels: [level0],
       importance: opts?.importance ?? 1.0,
     });
@@ -3083,7 +3083,7 @@ describe("plan() — minimap lane", () => {
         imageId: "imgA",
         kind: "Image",
         projectedDiagonalPx: 200,
-        idealTargetLod: 0,
+        targetLevel: 0,
         levels: [level0],
       }),
       createSyntheticEntity({
@@ -3091,7 +3091,7 @@ describe("plan() — minimap lane", () => {
         imageId: "imgB",
         kind: "Image",
         projectedDiagonalPx: 200,
-        idealTargetLod: 0,
+        targetLevel: 0,
         levels: [level0],
       }),
     ];
@@ -3126,7 +3126,7 @@ describe("plan() — minimap lane", () => {
       imageId: "imgFar",
       kind: "Image",
       projectedDiagonalPx: 200,
-      idealTargetLod: 0,
+      targetLevel: 0,
       detailLevel: 0,
       coarseLevel: 3,
       levels: [level0, level3, level3, level3],

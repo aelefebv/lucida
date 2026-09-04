@@ -26,7 +26,15 @@ export interface BaseEntitySnapshot {
   projectedDiagonalPx: number;
   projectedAreaPx2: number;
   centroidWorld: [number, number, number];
-  idealTargetLod: number;
+  /**
+   * The pyramid level the screen calls for. The core's target-level rule in
+   * `lucida-core/src/target_level.rs` chooses it from the camera and the level
+   * geometry as the coarsest level that still places at least one sample under
+   * every device pixel, and holds it across a boundary by hysteresis. Part of
+   * the quantized set the view-query delta tracks, so a change arrives as a
+   * `changed` record.
+   */
+  targetLevel: number;
   /**
    * Source pyramid level selected for the detail tier. Defaults to level
    * 0 unless the dataset settings carry an explicit lower-resolution

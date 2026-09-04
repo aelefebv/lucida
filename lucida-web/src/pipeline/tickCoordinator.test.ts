@@ -75,7 +75,7 @@ interface MockSceneConfig {
       projected_diagonal_px: number;
       projected_area_px2: number;
       centroid_world: [number, number, number];
-      ideal_target_lod: number;
+      target_level: number;
       importance: number;
     }[];
   };
@@ -108,7 +108,7 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
           projected_diagonal_px: 100,
           projected_area_px2: 10000,
           centroid_world: [0, 0, 0],
-          ideal_target_lod: 0,
+          target_level: 0,
           importance: 1.0,
         },
       ],
@@ -1329,7 +1329,7 @@ describe("multi-dataset planning", () => {
             projected_diagonal_px: 100,
             projected_area_px2: 10000,
             centroid_world: [0, 0, 0],
-            ideal_target_lod: 0,
+            target_level: 0,
             importance: 1.0,
           },
         ],
@@ -1563,7 +1563,7 @@ describe("incremental delta fold", () => {
       projected_diagonal_px: 100,
       projected_area_px2: 10000,
       centroid_world: [0, 0, 0],
-      ideal_target_lod: 0,
+      target_level: 0,
       importance: 1.0,
       ...over,
     };
@@ -1649,7 +1649,7 @@ describe("incremental delta fold", () => {
           deltaPayload(
             [foldRow({ entity_id: "tile-2", image_id: "img-2" })],
             ["img-0"],
-            [foldRow({ entity_id: "tile-1", image_id: "img-1", ideal_target_lod: 2 })],
+            [foldRow({ entity_id: "tile-1", image_id: "img-1", target_level: 2 })],
           ),
         ],
         memberPositions: positions4,
@@ -1671,10 +1671,10 @@ describe("incremental delta fold", () => {
       expect(planSpy).toHaveBeenCalledTimes(1);
 
       const snapshot = planSpy.mock.calls[0][0] as {
-        entities: Array<{ imageId: string; idealTargetLod: number }>;
+        entities: Array<{ imageId: string; targetLevel: number }>;
       };
       const byImage = new Map(snapshot.entities.map((e) => [e.imageId, e]));
-      expect(byImage.get("img-1")?.idealTargetLod).toBe(2); // changed row applied
+      expect(byImage.get("img-1")?.targetLevel).toBe(2); // changed row applied
       expect(byImage.has("img-2")).toBe(true); // entered row present
       expect(byImage.has("img-0")).toBe(false); // left row absent
     } finally {
@@ -1700,7 +1700,7 @@ describe("incremental delta fold", () => {
         // img-2 + the orphan entered-then-left, img-1 changed to LOD 2,
         // img-3 entered).
         fullRows: [
-          foldRow({ entity_id: "tile-1", image_id: "img-1", ideal_target_lod: 2 }),
+          foldRow({ entity_id: "tile-1", image_id: "img-1", target_level: 2 }),
           foldRow({ entity_id: "tile-3", image_id: "img-3" }),
         ],
         deltaScript: [
@@ -1718,7 +1718,7 @@ describe("incremental delta fold", () => {
               foldRow({ entity_id: "tile-2", image_id: "img-2" }),
             ],
             ["img-0"],
-            [foldRow({ entity_id: "tile-1", image_id: "img-1", ideal_target_lod: 2 })],
+            [foldRow({ entity_id: "tile-1", image_id: "img-1", target_level: 2 })],
           ),
           // Tick 3 — a Delta the fold must NOT apply onto the pre-throw map.
           deltaPayload(
@@ -1747,13 +1747,13 @@ describe("incremental delta fold", () => {
 
       expect(planSpy).toHaveBeenCalledTimes(1);
       const snapshot = planSpy.mock.calls[0][0] as {
-        entities: Array<{ imageId: string; idealTargetLod: number }>;
+        entities: Array<{ imageId: string; targetLevel: number }>;
       };
       const byImage = new Map(snapshot.entities.map((e) => [e.imageId, e]));
       // Equals a fresh full build: no ghost left record (img-0), the change
       // applied (img-1 at its new LOD), the correct entered record (img-3).
       expect([...byImage.keys()].sort()).toEqual(["img-1", "img-3"]);
-      expect(byImage.get("img-1")?.idealTargetLod).toBe(2);
+      expect(byImage.get("img-1")?.targetLevel).toBe(2);
       expect(byImage.has("img-0")).toBe(false);
     } finally {
       vi.useRealTimers();

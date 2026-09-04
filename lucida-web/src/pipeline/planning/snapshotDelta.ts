@@ -15,13 +15,13 @@
  *
  * The snapshot map is keyed by `image_id`, the unique per-record identity. An
  * entity can own several images at different pyramid depths (distinct
- * `ideal_target_lod`); keying by `entity_id` would collapse those into one and
+ * `target_level`); keying by `entity_id` would collapse those into one and
  * lose a level. See `lucida-core/src/query.rs`.
  *
  * # What a delta does and does not carry
  *
  * A delta reports only the *quantized* projection of each record —
- * `{ membership, visible, ideal_target_lod, kind }`. The continuous fields
+ * `{ membership, visible, target_level, kind }`. The continuous fields
  * (`importance`, `projectedDiagonalPx`, `projectedAreaPx2`, `centroidWorld`)
  * are excluded, so a record that appears in no delta between two full
  * snapshots keeps its last-reported continuous values, which may be stale.
@@ -49,7 +49,7 @@ export interface ViewQueryEntityJson {
   projected_diagonal_px: number;
   projected_area_px2: number;
   centroid_world: [number, number, number];
-  ideal_target_lod: number;
+  target_level: number;
   importance: number;
 }
 
@@ -161,7 +161,7 @@ export function makeEntitySnapshot(
     projectedDiagonalPx: row.projected_diagonal_px,
     projectedAreaPx2: row.projected_area_px2,
     centroidWorld: row.centroid_world,
-    idealTargetLod: row.ideal_target_lod,
+    targetLevel: row.target_level,
     detailLevel,
     coarseLevel,
     importance: row.importance,

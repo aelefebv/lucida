@@ -351,7 +351,7 @@ function makeTileEntry(
   // does not filter the request stream to the target level, so
   // emitting a multi-level buffer would queue chunks the cache could
   // never use.
-  const targetLod = entity.idealTargetLod;
+  const targetLod = entity.targetLevel;
   const coarsestDetailLod = targetLod;
   const tileProxyAvailable =
     catalog !== null && snapshotHasProxy(catalog, entity.entityId, "TileProxy3D");
