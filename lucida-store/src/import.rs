@@ -89,7 +89,7 @@ async fn import_single_image(
     )?;
     let levels =
         build_level_geometries(&level_entries, &level_metas, &level_bindings, &axes_names)?;
-    let probe_targets = build_probe_targets(&level_entries, &level_metas, &levels);
+    let probe_targets = build_probe_targets(&level_entries, &level_metas, &level_bindings, &levels);
     let coarse_level_index =
         select_source_coarse_level(&levels, data_type, SourceCoarseConfig::default());
 
@@ -785,7 +785,7 @@ async fn import_collection(
             store,
             &geometry_tile_prefix,
             id,
-            &build_probe_targets(&level_entries, &level_metas, &levels),
+            &build_probe_targets(&level_entries, &level_metas, &level_bindings, &levels),
         )
         .await,
     );
@@ -1294,6 +1294,42 @@ fn build_axes(axes_names: &[String]) -> Vec<Axis> {
         .collect()
 }
 
+/// Describe each declared level for the unwritten-level probe: where its
+/// origin chunk lives, how many coordinates that key carries, how much
+/// source space the chunk spans, and how the level is sharded, if it is.
+///
+/// The key's coordinate count comes from the level's **own** array rank rather
+/// than the multiscale axes list, since the on-disk key has one coordinate per
+/// axis of the array it addresses. The footprint is the level's chunk extent
+/// scaled into the shared coordinate space, which is what lets an absent
+/// origin be compared against a populated one it contains — see
+/// [`crate::unwritten`]. On a sharded level the geometry's chunk is the inner
+/// chunk, so the footprint is the inner chunk's, which is what the probe asks
+/// the shard's index about.
+fn build_probe_targets(
+    level_entries: &[parse::LevelEntry],
+    level_metas: &[parse::ArrayMeta],
+    level_bindings: &[LevelBindingInfo],
+    levels: &[LevelGeometry],
+) -> Vec<unwritten::ProbeTarget> {
+    level_entries
+        .iter()
+        .zip(level_metas.iter())
+        .zip(level_bindings.iter())
+        .zip(levels.iter())
+        .map(
+            |(((entry, meta), binding), geometry)| unwritten::ProbeTarget {
+                path: entry.path.clone(),
+                axis_count: meta.shape.len(),
+                origin_footprint: std::array::from_fn(|d| {
+                    geometry.chunk_shape[d] as f64 * geometry.scale[d]
+                }),
+                shard: binding.shard.clone(),
+            },
+        )
+        .collect()
+}
+
 /// Build per-level [`LevelGeometry`], normalizing shapes to canonical 5D.
 ///
 /// The chunk shape comes from the level's binding, not its chunk grid, so a
@@ -1305,35 +1341,6 @@ fn build_axes(axes_names: &[String]) -> Vec<Axis> {
 /// panic). This keeps untrusted array metadata — a label's or an image's
 /// `chunk_shape` — from aborting the process: a bad label surfaces as an `Err`
 /// the caller skips, and a bad source array fails the import loudly.
-/// Describe each declared level for the unwritten-level probe: where its
-/// origin chunk lives, how many coordinates that key carries, and how much
-/// source space the chunk spans.
-///
-/// The key's coordinate count comes from the level's **own** array rank rather
-/// than the multiscale axes list, since the on-disk key has one coordinate per
-/// axis of the array it addresses. The footprint is the level's chunk extent
-/// scaled into the shared coordinate space, which is what lets an absent
-/// origin be compared against a populated one it contains — see
-/// [`crate::unwritten`].
-fn build_probe_targets(
-    level_entries: &[parse::LevelEntry],
-    level_metas: &[parse::ArrayMeta],
-    levels: &[LevelGeometry],
-) -> Vec<unwritten::ProbeTarget> {
-    level_entries
-        .iter()
-        .zip(level_metas.iter())
-        .zip(levels.iter())
-        .map(|((entry, meta), geometry)| unwritten::ProbeTarget {
-            path: entry.path.clone(),
-            axis_count: meta.shape.len(),
-            origin_footprint: std::array::from_fn(|d| {
-                geometry.chunk_shape[d] as f64 * geometry.scale[d]
-            }),
-        })
-        .collect()
-}
-
 fn build_level_geometries(
     level_entries: &[parse::LevelEntry],
     level_metas: &[parse::ArrayMeta],
@@ -5860,10 +5867,9 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// A two-level single image. `written` names the level paths that get an
-    /// origin chunk on disk; every other level is declared but left bare, the
-    /// shape of the partially-written export in issue #904.
-    fn create_two_level_fixture(dir: &std::path::Path, written: &[&str]) {
+    /// The root group of a two-level single image on five canonical axes,
+    /// level `1` at twice level `0`'s sample spacing.
+    fn write_two_level_root(dir: &std::path::Path) {
         fs::create_dir_all(dir).unwrap();
 
         let root = serde_json::json!({
@@ -5895,6 +5901,13 @@ mod tests {
             serde_json::to_string_pretty(&root).unwrap(),
         )
         .unwrap();
+    }
+
+    /// A two-level single image. `written` names the level paths that get an
+    /// origin chunk on disk; every other level is declared but left bare, the
+    /// shape of the partially-written export in issue #904.
+    fn create_two_level_fixture(dir: &std::path::Path, written: &[&str]) {
+        write_two_level_root(dir);
 
         for (path, edge) in [("0", 64u64), ("1", 32u64)] {
             let level_dir = dir.join(path);
@@ -5922,6 +5935,82 @@ mod tests {
                 let chunk_dir = level_dir.join("c").join("0").join("0").join("0").join("0");
                 fs::create_dir_all(&chunk_dir).unwrap();
                 fs::write(chunk_dir.join("0"), vec![0u8; (edge * edge * 2) as usize]).unwrap();
+            }
+        }
+    }
+
+    /// Samples on a side of every inner chunk in a hand-built sharded fixture.
+    const INNER_EDGE: u64 = 16;
+
+    /// One level of a hand-built sharded fixture: the level's edge in
+    /// samples, its shard's edge, and the shard objects to write, each as
+    /// its `(y, x)` shard coordinates with the positions of the inner chunks
+    /// its index holds. A shard not listed has no object.
+    struct ShardedLevel {
+        edge: u64,
+        shard_edge: u64,
+        shards: Vec<((u64, u64), Vec<usize>)>,
+    }
+
+    /// A two-level single image whose levels are sharded, on the same five
+    /// axes and scales as [`create_two_level_fixture`]. Every inner chunk is
+    /// [`INNER_EDGE`] samples on a side and stored raw, so the probe's
+    /// question is settled by each shard's index alone.
+    fn create_two_level_sharded_fixture(dir: &std::path::Path, levels: [ShardedLevel; 2]) {
+        write_two_level_root(dir);
+
+        for (path, level) in ["0", "1"].into_iter().zip(levels) {
+            let level_dir = dir.join(path);
+            fs::create_dir_all(&level_dir).unwrap();
+            let arr = serde_json::json!({
+                "zarr_format": 3,
+                "node_type": "array",
+                "shape": [1, 1, 1, level.edge, level.edge],
+                "data_type": "uint16",
+                "chunk_grid": {
+                    "name": "regular",
+                    "configuration": {
+                        "chunk_shape": [1, 1, 1, level.shard_edge, level.shard_edge]
+                    }
+                },
+                "codecs": [{
+                    "name": "sharding_indexed",
+                    "configuration": {
+                        "chunk_shape": [1, 1, 1, INNER_EDGE, INNER_EDGE],
+                        "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
+                        "index_codecs": [
+                            {"name": "bytes", "configuration": {"endian": "little"}},
+                            {"name": "crc32c"}
+                        ],
+                        "index_location": "end"
+                    }
+                }],
+                "fill_value": 0
+            });
+            fs::write(
+                level_dir.join("zarr.json"),
+                serde_json::to_string_pretty(&arr).unwrap(),
+            )
+            .unwrap();
+
+            let inner = vec![0u8; (INNER_EDGE * INNER_EDGE * 2) as usize];
+            let per_shard = ((level.shard_edge / INNER_EDGE).pow(2)) as usize;
+            for ((y, x), written) in &level.shards {
+                let chunks: Vec<Option<&[u8]>> = (0..per_shard)
+                    .map(|position| written.contains(&position).then_some(&inner[..]))
+                    .collect();
+                let shard_dir = level_dir
+                    .join("c")
+                    .join("0")
+                    .join("0")
+                    .join("0")
+                    .join(y.to_string());
+                fs::create_dir_all(&shard_dir).unwrap();
+                fs::write(
+                    shard_dir.join(x.to_string()),
+                    crate::shard::build_shard(&chunks, crate::shard::IndexLocation::End),
+                )
+                .unwrap();
             }
         }
     }
@@ -5994,6 +6083,182 @@ mod tests {
             "warnings: {:?}",
             result.warnings
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Level 2 of the committed sparse sharded fixture is declared and has
+    /// no shard object, while levels 0 and 1 hold their origin inner chunk.
+    /// A shard that is not there is an origin that is not there, so the
+    /// level is named exactly as an unsharded one is, and the two sparse
+    /// levels that do hold their origin are left alone.
+    #[tokio::test]
+    async fn import_warns_when_a_sharded_level_has_no_shard_written() {
+        let store = cached_store(&committed_fixture("sparse-sharded.ome.zarr"));
+
+        let result = import_dataset(&store, "ds", "Sparse Sharded")
+            .await
+            .unwrap();
+
+        let warnings = unwritten_warnings(&result);
+        assert_eq!(warnings.len(), 1, "warnings: {:?}", result.warnings);
+        let message = &warnings[0].message;
+        assert!(
+            message.contains("level 2 has no chunks written"),
+            "{message}"
+        );
+        assert_eq!(result.manifest.images()[0].multiscale.levels.len(), 3);
+    }
+
+    /// Level 1's origin shard object is there, but its index says the origin
+    /// inner chunk was never written, while level 0 holds the patch that
+    /// inner chunk covers. A probe that stopped at the shard object would
+    /// call level 1 populated. Asking the index names it.
+    #[tokio::test]
+    async fn import_warns_when_the_origin_shard_exists_but_its_origin_inner_chunk_is_absent() {
+        let dir = temp_dir("import_sharded_origin_inner_chunk_absent");
+        create_two_level_sharded_fixture(
+            &dir,
+            [
+                ShardedLevel {
+                    edge: 64,
+                    shard_edge: 32,
+                    shards: vec![((0, 0), vec![0, 1, 2, 3])],
+                },
+                ShardedLevel {
+                    edge: 32,
+                    shard_edge: 32,
+                    shards: vec![((0, 0), vec![1, 2, 3])],
+                },
+            ],
+        );
+        let store = cached_store(dir.to_str().unwrap());
+
+        let result = import_dataset(&store, "ds", "Partial Sharded Export")
+            .await
+            .unwrap();
+
+        let warnings = unwritten_warnings(&result);
+        assert_eq!(warnings.len(), 1, "warnings: {:?}", result.warnings);
+        let message = &warnings[0].message;
+        assert!(
+            message.contains("level 1 has no chunks written"),
+            "{message}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// An ordinary sparse sharded store. Level 0's origin shard is there with
+    /// the origin inner chunk left out of its index, and the shard's one
+    /// written inner chunk lies beyond the patch that level 1's origin inner
+    /// chunk covers, so level 1's origin shard was legitimately never written.
+    /// A probe that took the shard object for the inner chunk would hold
+    /// level 0 up as a witness and accuse level 1 on healthy data.
+    #[tokio::test]
+    async fn import_is_quiet_when_a_sparse_sharded_store_holds_no_origin_inner_chunk() {
+        let dir = temp_dir("import_sharded_sparse_origin_shard_is_no_witness");
+        create_two_level_sharded_fixture(
+            &dir,
+            [
+                ShardedLevel {
+                    edge: 64,
+                    shard_edge: 64,
+                    shards: vec![((0, 0), vec![15])],
+                },
+                ShardedLevel {
+                    edge: 32,
+                    shard_edge: 16,
+                    shards: vec![((1, 1), vec![0])],
+                },
+            ],
+        );
+        let store = cached_store(dir.to_str().unwrap());
+
+        let result = import_dataset(&store, "ds", "Sparse Sharded")
+            .await
+            .unwrap();
+
+        assert!(
+            unwritten_warnings(&result).is_empty(),
+            "warnings: {:?}",
+            result.warnings
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The converse of the accusation. Level 0's origin inner chunk is absent
+    /// from its shard's index while level 1's is written. Level 0's inner
+    /// chunk sits inside level 1's, so its absence is sparse data and proves
+    /// nothing about level 0.
+    #[tokio::test]
+    async fn import_is_quiet_when_a_sharded_origin_inner_chunk_is_absent_inside_a_populated_one() {
+        let dir = temp_dir("import_sharded_sparse_inside_populated");
+        create_two_level_sharded_fixture(
+            &dir,
+            [
+                ShardedLevel {
+                    edge: 64,
+                    shard_edge: 32,
+                    shards: vec![((0, 0), vec![1, 2, 3])],
+                },
+                ShardedLevel {
+                    edge: 32,
+                    shard_edge: 32,
+                    shards: vec![((0, 0), vec![0, 1, 2, 3])],
+                },
+            ],
+        );
+        let store = cached_store(dir.to_str().unwrap());
+
+        let result = import_dataset(&store, "ds", "Sparse Sharded")
+            .await
+            .unwrap();
+
+        assert!(
+            unwritten_warnings(&result).is_empty(),
+            "warnings: {:?}",
+            result.warnings
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A shard index that cannot be read answers nothing. The level is
+    /// neither accused nor held up as a witness, and the import still opens
+    /// the dataset.
+    #[tokio::test]
+    async fn import_is_quiet_when_the_origin_shard_index_cannot_be_read() {
+        let dir = temp_dir("import_sharded_unreadable_index");
+        create_two_level_sharded_fixture(
+            &dir,
+            [
+                ShardedLevel {
+                    edge: 64,
+                    shard_edge: 32,
+                    shards: vec![((0, 0), vec![0, 1, 2, 3])],
+                },
+                ShardedLevel {
+                    edge: 32,
+                    shard_edge: 32,
+                    shards: vec![],
+                },
+            ],
+        );
+        fs::write(dir.join("0/c/0/0/0/0/0"), b"not a shard").unwrap();
+        let store = cached_store(dir.to_str().unwrap());
+
+        let result = import_dataset(&store, "ds", "Unreadable Index")
+            .await
+            .unwrap();
+
+        assert!(
+            unwritten_warnings(&result).is_empty(),
+            "warnings: {:?}",
+            result.warnings
+        );
+        assert_eq!(result.manifest.images()[0].multiscale.levels.len(), 2);
 
         let _ = fs::remove_dir_all(&dir);
     }
