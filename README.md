@@ -63,9 +63,28 @@ docker run --rm -p 9876:9876 \
   ghcr.io/aelefebv/lucida:latest
 ```
 
-The listing is a JSON array of objects. `LUCIDA_DIRECTORY_EMAIL_FIELD` (default `email`) names the key holding the address, `LUCIDA_DIRECTORY_NAME_FIELDS` (default `name`) one or more keys whose values are joined by a space, and `LUCIDA_DIRECTORY_PICTURE_FIELD` (default `picture`) the key holding the picture URL. `LUCIDA_DIRECTORY_HEADERS` adds fixed request headers as `Name: value` pairs separated by semicolons, for a listing that wants an API key. The listing is read once at startup with a ten-second timeout and held in memory, so a lookup adds no network round trip to a request. `LUCIDA_DIRECTORY_REFRESH_SECONDS` (default `21600`) is validated at startup and does not drive a refresh yet.
+The listing is a JSON array of objects, one per person. Only the URL is required. Leaving it unset, or blank, turns the directory off.
 
-A row changes how a person is shown and nothing else. The email stays the one the auth mode resolved, admin rights still come from `LUCIDA_ADMIN_EMAILS`, and a person with no row sees exactly what they see with the directory off. A malformed variable stops the boot and names itself. A listing that is down at startup does not: the server boots, logs `auth.directory.load_failed`, and shows the derived names. See [ADR-0063](wiki/decisions/0063-a-profile-directory-enriches-the-principal-and-never-authenticates-it.md).
+| Variable | Default | What it sets |
+| --- | --- | --- |
+| `LUCIDA_DIRECTORY_URL` | unset: directory off | The listing, over `http` or `https`. |
+| `LUCIDA_DIRECTORY_EMAIL_FIELD` | `email` | The key holding the address. A row without a usable address is skipped and counted. |
+| `LUCIDA_DIRECTORY_NAME_FIELDS` | `name` | One or more keys, separated by spaces, whose values are joined by one space to form the display name. |
+| `LUCIDA_DIRECTORY_PICTURE_FIELD` | `picture` | The key holding the picture URL. |
+| `LUCIDA_DIRECTORY_HEADERS` | none | Fixed request headers, as `Name: value` pairs separated by semicolons, for a listing that wants an API key. |
+| `LUCIDA_DIRECTORY_REFRESH_SECONDS` | `21600` (6 hours) | How often the listing is read again. |
+
+A row changes how a person is shown and nothing else. The email stays the one the auth mode resolved, admin rights still come from `LUCIDA_ADMIN_EMAILS`, and a person with no row sees exactly what they see with the directory off. A malformed variable, including a field variable that is set but blank, stops the boot and names itself.
+
+The listing is read whole, held in memory, and read again by a background task, so a lookup never adds a network round trip to a request. Each read has a 10-second timeout. When the directory misbehaves, the server keeps serving and the log says what happened:
+
+- **Down at startup.** The server boots and shows the names the auth mode derives. It retries after 30 seconds, doubling the wait up to 10 minutes, until a load succeeds, and logs `auth.directory.load_failed` each time.
+- **Down later.** A refresh that fails keeps the last good snapshot and logs `auth.directory.refresh_failed` with the reason.
+- **Empty.** A listing with no usable rows never replaces a populated snapshot and does not count as the first load. The server logs `auth.directory.empty` and keeps its schedule.
+- **Slow.** A read that takes longer than 10 seconds is a failed read. Requests never wait on one.
+- **Stale.** A snapshot older than twice the refresh interval, 12 hours by default, is logged once as `auth.directory.stale`. The next successful refresh ends the episode.
+
+Log lines name the listing URL without its query string or userinfo, and never a person. See [ADR-0063](wiki/decisions/0063-a-profile-directory-enriches-the-principal-and-never-authenticates-it.md).
 
 ### Develop on it
 
