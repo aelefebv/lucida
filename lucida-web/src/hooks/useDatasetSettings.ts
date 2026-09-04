@@ -118,18 +118,21 @@ function applySettingsCommand(
   invalidateDisplaySettings(loop);
 }
 
-function detailLevelOptions(ds: DatasetState | undefined): { level: number; label: string }[] {
-  const multiscale = ds?.manifest.images[0]?.multiscale;
-  if (!multiscale) return [];
-  const generated = new Set(
-    (multiscale.generated_levels ?? []).map((level) => level.level_index),
-  );
-  return multiscale.levels
-    .filter((level) => level.level_index !== 0 && !generated.has(level.level_index))
-    .map((level) => ({
-      level: level.level_index,
-      label: `${level.shape[Axis.X]} x ${level.shape[Axis.Y]}`,
-    }));
+/**
+ * The scene owns which levels a pin may hold (`pinnable_levels`). The
+ * manifest only supplies each level's shape for the label.
+ */
+function levelPinOptions(
+  scene: WasmScene,
+  id: string,
+  ds: DatasetState | undefined,
+): { level: number; label: string }[] {
+  const levels = ds?.manifest.images[0]?.multiscale.levels ?? [];
+  return Array.from(scene.pinnable_levels(id), (level) => {
+    const geometry = levels.find((candidate) => candidate.level_index === level);
+    const shape = geometry ? ` (${geometry.shape[Axis.X]} x ${geometry.shape[Axis.Y]})` : "";
+    return { level, label: `Level ${level}${shape}` };
+  });
 }
 
 /** The per-dataset display settings shape `scene.all_dataset_settings()`
@@ -224,8 +227,8 @@ export function buildLayerInfos(
       // Per-label rows for the Labels subsection + count badge (drawable only).
       labelRows: labelRows.length > 0 ? labelRows : undefined,
       channelBlendMode: settings?.channel_blend_mode ?? "additive",
-      detailLevelOverride: settings?.detail_level_override ?? null,
-      detailLevelOptions: detailLevelOptions(ds),
+      levelPin: settings?.detail_level_override ?? null,
+      levelPinOptions: levelPinOptions(scene, id, ds),
       targetLevel: levels?.target ?? null,
       displayedLevel: levels?.displayed ?? null,
       displayedCoarserThanTarget: levels?.coarserThanTarget ?? false,
@@ -484,7 +487,9 @@ export function useDatasetSettings({
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
-  const handleLayerSetDetailLevelOverride = useCallback((id: string, level: number | null) => {
+  // The wire command keeps the field's old name. The core clamps the level
+  // to the pinnable levels.
+  const handleLayerSetLevelPin = useCallback((id: string, level: number | null) => {
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
@@ -661,7 +666,7 @@ export function useDatasetSettings({
     handleLabelSetOpacity,
     handleLayerSetBlendMode,
     handleLayerSetRenderMode,
-    handleLayerSetDetailLevelOverride,
+    handleLayerSetLevelPin,
     handleLayerAutoContrast,
     handleLayerAutoContrastToggle,
     handleLayerFullRangeToggle,

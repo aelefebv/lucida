@@ -835,21 +835,31 @@ class LayerResource:
         self._workspace = workspace
 
     def list(self, *, timeout: float = 30.0) -> list[dict[str, Any]]:
+        """Each dataset with its display settings, in this client's presence.
+
+        ``settings["detail_level_override"]`` is the dataset's level pin:
+        ``None`` means the target level follows the screen, and a number pins
+        it to that source level, 0 being the finest. ``level_pin`` says the
+        same thing in words.
+        """
         snapshot = self._workspace.snapshot(timeout=timeout)
         presence = own_presence(snapshot)
         summaries = dataset_summaries_from_document(snapshot.get("document", {}))
         settings = presence.get("dataset_settings") or {}
         order = presence.get("dataset_order") or [item["workspace_dataset_id"] for item in summaries]
-        return [
-            {
-                **summary,
-                "settings": settings.get(summary["workspace_dataset_id"], default_dataset_settings()),
-                "order_index": order.index(summary["workspace_dataset_id"])
-                if summary["workspace_dataset_id"] in order
-                else None,
-            }
-            for summary in summaries
-        ]
+        layers = []
+        for summary in summaries:
+            dataset_id = summary["workspace_dataset_id"]
+            layer_settings = settings.get(dataset_id, default_dataset_settings())
+            layers.append(
+                {
+                    **summary,
+                    "settings": layer_settings,
+                    "level_pin": level_pin_label(layer_settings),
+                    "order_index": order.index(dataset_id) if dataset_id in order else None,
+                }
+            )
+        return layers
 
     def order(self, datasets: list[str], *, timeout: float = 30.0) -> dict[str, Any]:
         def mutate(snapshot: dict[str, Any], presence: dict[str, Any]) -> None:
@@ -1369,6 +1379,14 @@ def set_z_range(view: dict[str, Any], start: int, end: int) -> None:
         view["z_range"] = [start, end]
     else:
         view["z_range"] = {"start": start, "end": end}
+
+
+def level_pin_label(settings: dict[str, Any]) -> str:
+    """How a dataset's level pin reads. An absent pin follows the screen."""
+    level = settings.get("detail_level_override")
+    if level is None:
+        return "follows the screen"
+    return f"pinned to level {level}"
 
 
 def default_dataset_settings(channel_count: int = 0) -> dict[str, Any]:

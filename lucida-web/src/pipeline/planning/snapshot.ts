@@ -240,10 +240,11 @@ export function buildPlanningSnapshot(
   // 4. Snake-case → camelCase translation for every visible entity, via the
   //    shared per-row builder so the full path and the delta fold produce
   //    byte-identical records. Joins the WASM payload with the manifest for
-  //    `levels`, `targetLevel`, `coarseLevel`, and `parentId`, and with the
-  //    layout for `layoutPositionVox`. A `Tile` with no parent edge throws
-  //    inside {@link makeEntitySnapshot}, surfacing the producer-invariant
-  //    violation at assembly rather than later in `groupMembers`.
+  //    `levels`, `coarseLevel`, and `parentId`, and with the layout for
+  //    `layoutPositionVox`. `targetLevel` is the payload's own. A `Tile` with
+  //    no parent edge throws inside {@link makeEntitySnapshot}, surfacing the
+  //    producer-invariant violation at assembly rather than later in
+  //    `groupMembers`.
   let entities: EntitySnapshot[];
   if (entitiesOverride) {
     entities = entitiesOverride;
@@ -266,12 +267,7 @@ export function buildPlanningSnapshot(
         parentByEntityId.set(ent.id, ent.parent ?? null);
       }
     }
-    const deps: SnapshotEntityDeps = {
-      imageSpecById,
-      parentByEntityId,
-      positions,
-      dsSettings,
-    };
+    const deps: SnapshotEntityDeps = { imageSpecById, parentByEntityId, positions };
     // `vq` is non-null here — the override branch is the only path that
     // leaves it null, and it's taken above.
     entities = vq!.visible_entities!.map((e) => makeEntitySnapshot(e, deps));

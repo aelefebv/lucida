@@ -16,6 +16,7 @@ from lucida.client import (  # noqa: E402
     LucidaError,
     WorkspaceResource,
     default_ws_connect,
+    level_pin_label,
     normalize_server_base_url,
     resolve_token,
 )
@@ -490,6 +491,28 @@ def test_layer_and_channel_commands_send_dataset_presence(tmp_path):
     assert sent["type"] == "dataset_presence"
     settings = sent["dataset_settings"]["wds-test"]
     assert settings["channel_settings"][1]["colormap"] == "green"
+
+
+def test_layer_list_labels_the_level_pin(tmp_path):
+    connector = FakeConnector([snapshot()])
+    client = LucidaClient(
+        "http://127.0.0.1:9988",
+        config_path=tmp_path / "config.json",
+        ws_connect=connector,
+    )
+    workspace = WorkspaceResource(client, workspace_record())
+
+    layers = workspace.layer.list()
+
+    assert layers[0]["settings"]["detail_level_override"] is None
+    assert layers[0]["level_pin"] == "follows the screen"
+
+
+def test_level_pin_label_names_a_pin_and_treats_level_zero_as_a_pin():
+    assert level_pin_label({"detail_level_override": None}) == "follows the screen"
+    assert level_pin_label({}) == "follows the screen"
+    assert level_pin_label({"detail_level_override": 2}) == "pinned to level 2"
+    assert level_pin_label({"detail_level_override": 0}) == "pinned to level 0"
 
 
 def saved_view_record(saved_view_id="sv-1", visibility="shared"):

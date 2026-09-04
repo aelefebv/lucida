@@ -80,11 +80,13 @@ impl MultiscaleInfo {
             .collect()
     }
 
-    /// The level a pin to `requested` holds on this image. That is `requested`
-    /// when it is a selectable level, else the coarsest selectable level finer
+    /// The source level a request for `requested` lands on: `requested` when
+    /// it is a selectable level, else the coarsest selectable level finer
     /// than it, else the finest selectable level. `None` when no level is
-    /// selectable. The one clamp rule for a pin, at set time and at plan time.
-    pub fn pinned_level(&self, requested: u32) -> Option<u32> {
+    /// selectable. The one clamp rule for a level pin, at set time and at
+    /// plan time, and for the level the screen calls for, so a generated
+    /// coarse level is never a target.
+    pub fn clamp_to_source_levels(&self, requested: u32) -> Option<u32> {
         let levels = self.selectable_detail_levels();
         if levels.contains(&requested) {
             return Some(requested);
@@ -375,15 +377,15 @@ mod tests {
             downsampling_method: None,
             channel_infos: Vec::new(),
         };
-        assert_eq!(info.pinned_level(0), Some(0));
-        assert_eq!(info.pinned_level(2), Some(2));
+        assert_eq!(info.clamp_to_source_levels(0), Some(0));
+        assert_eq!(info.clamp_to_source_levels(2), Some(2));
         assert_eq!(
-            info.pinned_level(3),
+            info.clamp_to_source_levels(3),
             Some(2),
             "a generated level is never pinned"
         );
         assert_eq!(
-            info.pinned_level(9),
+            info.clamp_to_source_levels(9),
             Some(2),
             "a stale pin clamps to the coarsest"
         );
@@ -394,12 +396,12 @@ mod tests {
             provenance: GeneratedLevelProvenance::default(),
         });
         assert_eq!(
-            info.pinned_level(0),
+            info.clamp_to_source_levels(0),
             Some(1),
             "below the finest selectable level the pin rises to it"
         );
 
         info.levels.clear();
-        assert_eq!(info.pinned_level(0), None);
+        assert_eq!(info.clamp_to_source_levels(0), None);
     }
 }
