@@ -1925,6 +1925,20 @@ mod tests {
         }
     }
 
+    /// The shard module can read an inner chunk out of a shard, and import
+    /// does not yet let a sharded dataset in. Until the server serves inner
+    /// chunks, accepting the codec would open a dataset that renders blank. The
+    /// rejection names the codec so the reason is findable in the metadata.
+    #[tokio::test]
+    async fn committed_sharded_twin_is_still_rejected_at_import() {
+        let store = cached_store(&committed_fixture("twin-sharded.ome.zarr"));
+        let error = import_dataset(&store, "twin", "twin")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("sharding_indexed"), "{error}");
+    }
+
     #[tokio::test]
     async fn committed_level_index_pyramid_imports_with_declared_geometry() {
         let store = cached_store(&committed_fixture("level-index.ome.zarr"));
