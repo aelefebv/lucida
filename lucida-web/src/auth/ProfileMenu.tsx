@@ -9,10 +9,10 @@
 // Disabled mode declares none, so the menu leaves the item out rather
 // than offering one that clears nothing.
 //
-// Avatar: uses `picture_url` when present (real OAuth); falls back to
-// a coloured circle showing the first letter of the display name.
-// Dev sessions arrive with `picture_url = null`, so the fallback
-// path is the visible default in development.
+// Avatar: the `picture_url` image when there is one (real OAuth) and it
+// loads, otherwise a colored circle with the first letter of the display
+// name. Dev sessions arrive with `picture_url = null`, so the fallback
+// is the visible default in development.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuthSession } from "./AuthSession.ts";
@@ -320,9 +320,12 @@ const devInputStyle = {
   font: "inherit",
 };
 
-// Avatar: image when `picture_url` is present, coloured initial circle
-// otherwise. Kept inline (rather than a separate file) because it
-// only ever renders inside the menu and has no other consumer.
+// Avatar: the picture when it loads, else a colored initial. The load
+// failure is keyed by URL rather than a boolean so a changed
+// `picture_url` retries by itself. A boolean would need setState in an
+// effect to reset it, which `react-hooks/set-state-in-effect` rejects.
+// Kept inline (rather than a separate file) because it only ever
+// renders inside the menu and has no other consumer.
 function Avatar({
   pictureUrl,
   displayName,
@@ -330,15 +333,17 @@ function Avatar({
   pictureUrl: string | null;
   displayName: string;
 }) {
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const initial = (displayName.trim().charAt(0) || "?").toUpperCase();
   const size = 24;
-  if (pictureUrl) {
+  if (pictureUrl && pictureUrl !== failedUrl) {
     return (
       <img
         src={pictureUrl}
         alt=""
         width={size}
         height={size}
+        onError={() => setFailedUrl(pictureUrl)}
         style={{ width: size, height: size, borderRadius: "50%", objectFit: "cover" }}
       />
     );

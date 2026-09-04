@@ -68,12 +68,16 @@ export async function bootstrapWorker(
     return snap;
   }
 
-  /** Compute and post wanted-set delta from current cold state + atlas state. */
-  function postWantedSet(): void {
-    if (!state.currentColdState || !state.currentEpochs) return;
-    const proxySnap = buildProxyAtlasSnapshot(state.currentColdState.datasetId);
+  /** See `WorkerCtx.postWantedSet`. */
+  function postWantedSet(datasetId?: string): void {
+    const cold = datasetId === undefined
+      ? state.currentColdState
+      : state.coldStateByDataset.get(datasetId) ?? null;
+    if (!cold) return;
+    const epochs = cold === state.currentColdState ? state.currentEpochs ?? cold.epochs : cold.epochs;
+    const proxySnap = buildProxyAtlasSnapshot(cold.datasetId);
     const result = computeWantedSet(
-      state.currentColdState,
+      cold,
       state.volumeAtlases,
       state.sliceAtlases,
       (memberId, tier, level) =>
@@ -82,9 +86,14 @@ export async function bootstrapWorker(
     );
     post({
       type: "wantedSetDelta",
-      datasetId: state.currentColdState.datasetId,
-      epochs: state.currentEpochs,
+      datasetId: cold.datasetId,
+      epochs,
       missing: result.missing,
+    });
+    post({
+      type: "entityLevels",
+      datasetId: cold.datasetId,
+      entities: result.levels,
     });
   }
 

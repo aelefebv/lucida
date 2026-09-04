@@ -4,7 +4,9 @@
 //! where each one sits. The viewer keeps addressing inner chunks, so the
 //! chunk key, the wire, and the renderer see no shard at all. Only how an
 //! inner chunk's bytes are found changes. The shard's index is read once,
-//! and each inner chunk is then one range read into the object.
+//! and each inner chunk is then one range read into the object, which the
+//! cached store may carry in a neighbour's request when the two lie end to
+//! end and are queued for a permit together.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -961,7 +963,9 @@ mod tests {
 
     /// Several callers reaching a cold shard together still read its index
     /// once, because they coalesce on the cached store. Each distinct inner
-    /// chunk is read once between them.
+    /// chunk is read at most once between them: neighbours admitted together
+    /// may share one request, so the bound is what the once-per-shard claim
+    /// rests on — an index read per caller would cost eight.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_first_reads_of_one_shard_share_one_index_read() {
         let layout = Arc::new(hand_built_layout(IndexLocation::End));
@@ -983,12 +987,82 @@ mod tests {
             handle.await.unwrap().unwrap();
         }
 
+        let requests = store.get_count.load(Ordering::SeqCst);
+        assert!(
+            (2..=1 + 3).contains(&requests),
+            "one index read and at most one read per distinct inner chunk, got {requests}"
+        );
         assert_eq!(
-            store.get_count.load(Ordering::SeqCst),
+            cached.stats().entry_count,
             1 + 3,
-            "one index read and one read per distinct inner chunk"
+            "the index and each distinct inner chunk are resident once"
         );
         assert_eq!(store.head_count.load(Ordering::SeqCst), 0);
+    }
+
+    /// The merge, seen from the shard: two inner chunks that lie end to end
+    /// in their shard, asked for while the only permit is held, reach the
+    /// backend as one range request once it frees, and the second is a
+    /// follower of the first.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn neighbouring_inner_chunks_queued_together_reach_the_backend_as_one_request() {
+        let layout = Arc::new(hand_built_layout(IndexLocation::End));
+        let store = Arc::new(CountingStore::new(0));
+        store
+            .seed(
+                "0/c/0/0",
+                build_shard(&HAND_BUILT_CHUNKS, IndexLocation::End),
+            )
+            .await;
+        let limiter = SourceReadLimiter::new(1);
+        let cached = Arc::new(CachedStore::with_source_limiter(
+            store.clone(),
+            1024 * 1024,
+            limiter.clone(),
+        ));
+        let shards = Arc::new(ShardIndexCache::new());
+
+        // Remember the index first, so the reads below are inner chunks only.
+        read_position(&shards, &cached, &layout, 3)
+            .await
+            .result
+            .unwrap();
+        let before = store.get_count.load(Ordering::SeqCst);
+
+        let held = limiter.acquire(ReaderId(99)).await;
+        let mut handles = Vec::new();
+        for position in [0usize, 1] {
+            let shards = Arc::clone(&shards);
+            let cached = Arc::clone(&cached);
+            let layout = Arc::clone(&layout);
+            handles.push(tokio::spawn(async move {
+                read_position(&shards, &cached, &layout, position).await
+            }));
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while limiter.queued_reads() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both inner chunk reads queued");
+        drop(held);
+
+        let first = handles.remove(0).await.unwrap();
+        let second = handles.remove(0).await.unwrap();
+        assert_eq!(&first.result.unwrap()[..], b"first");
+        assert_eq!(&second.result.unwrap()[..], b"second");
+        assert_eq!(
+            store.get_count.load(Ordering::SeqCst) - before,
+            1,
+            "inner chunks 0 and 1 lie end to end and were read together"
+        );
+        let round_trips = [&first.timing, &second.timing]
+            .iter()
+            .filter(|timing| timing.backend_read_us.is_some())
+            .count();
+        assert_eq!(round_trips, 1, "one row owns the round trip");
+        assert_eq!(cached.stats().coalesced, 1);
     }
 
     async fn cache_over_shard_bytes(shard: Vec<u8>) -> (ShardIndexCache, Arc<CachedStore>) {

@@ -258,7 +258,7 @@ export function handleVolumeChunkData(
         "radius-filter",
       );
     }
-    ctx.postWantedSet();
+    ctx.postWantedSet(ctx.state.memberToDataset.get(memberId));
   }
 
   if (intensityChanged) {

@@ -882,8 +882,13 @@ enum LayerCommand {
         dataset: String,
         mode: RenderModeValue,
     },
-    /// Set or clear selectable detail-level override
-    DetailLevel { dataset: String, level: Option<u32> },
+    /// Pin the dataset's target level to one source level, or clear the pin
+    /// so the target follows the screen
+    LevelPin {
+        dataset: String,
+        /// The level to pin, 0 being the finest. Omit it to follow the screen
+        level: Option<u32>,
+    },
 }
 
 impl LayerCommand {
@@ -957,7 +962,7 @@ impl LayerCommand {
                     render_mode: (*mode).into(),
                 })
             }
-            LayerCommand::DetailLevel { dataset, level } => {
+            LayerCommand::LevelPin { dataset, level } => {
                 Some(DatasetDisplayCommand::SetDatasetDetailLevelOverride {
                     selector: dataset.clone(),
                     level: *level,

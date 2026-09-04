@@ -12,6 +12,7 @@ import type { BlendMode, Colormap, RenderMode } from "../savedView/types.ts";
 import { invalidateDisplaySettings, requestRender } from "../invalidation.ts";
 import { Axis } from "../axes.ts";
 import { eligibleLabelInfos, volumeBudgetPrefix } from "../pipeline/planning/labelRequests.ts";
+import type { DatasetLevels } from "../pipeline/datasetLevels.ts";
 
 /** A per-label overlay row for the layer panel, keyed by manifest index. */
 interface PanelLabelRow {
@@ -117,18 +118,21 @@ function applySettingsCommand(
   invalidateDisplaySettings(loop);
 }
 
-function detailLevelOptions(ds: DatasetState | undefined): { level: number; label: string }[] {
-  const multiscale = ds?.manifest.images[0]?.multiscale;
-  if (!multiscale) return [];
-  const generated = new Set(
-    (multiscale.generated_levels ?? []).map((level) => level.level_index),
-  );
-  return multiscale.levels
-    .filter((level) => level.level_index !== 0 && !generated.has(level.level_index))
-    .map((level) => ({
-      level: level.level_index,
-      label: `${level.shape[Axis.X]} x ${level.shape[Axis.Y]}`,
-    }));
+/**
+ * The scene owns which levels a pin may hold (`pinnable_levels`). The
+ * manifest only supplies each level's shape for the label.
+ */
+function levelPinOptions(
+  scene: WasmScene,
+  id: string,
+  ds: DatasetState | undefined,
+): { level: number; label: string }[] {
+  const levels = ds?.manifest.images[0]?.multiscale.levels ?? [];
+  return Array.from(scene.pinnable_levels(id), (level) => {
+    const geometry = levels.find((candidate) => candidate.level_index === level);
+    const shape = geometry ? ` (${geometry.shape[Axis.X]} x ${geometry.shape[Axis.Y]})` : "";
+    return { level, label: `Level ${level}${shape}` };
+  });
 }
 
 /** The per-dataset display settings shape `scene.all_dataset_settings()`
@@ -169,6 +173,8 @@ export function buildLayerInfos(
     autoContrast: Map<string, boolean>;
     fullRange: Map<string, boolean>;
     dataRange: Map<string, { min: number; max: number }>;
+    /** The worker's per-dataset level readout; a dataset it has not reported yet is absent. */
+    levels: Map<string, DatasetLevels>;
   },
   viewMode: ViewMode = "2d",
 ): LayerInfo[] {
@@ -197,6 +203,7 @@ export function buildLayerInfos(
     // disabledReason so the panel never shows an "on" toggle that draws nothing.
     const rawLabelSettings = settings?.label_settings;
     const labelRows = ds ? buildLabelRows(ds.manifest, rawLabelSettings, viewMode) : [];
+    const levels = maps.levels.get(id) ?? null;
 
     return {
       id,
@@ -220,8 +227,12 @@ export function buildLayerInfos(
       // Per-label rows for the Labels subsection + count badge (drawable only).
       labelRows: labelRows.length > 0 ? labelRows : undefined,
       channelBlendMode: settings?.channel_blend_mode ?? "additive",
-      detailLevelOverride: settings?.detail_level_override ?? null,
-      detailLevelOptions: detailLevelOptions(ds),
+      levelPin: settings?.detail_level_override ?? null,
+      levelPinOptions: levelPinOptions(scene, id, ds),
+      targetLevel: levels?.target ?? null,
+      displayedLevel: levels?.displayed ?? null,
+      displayedCoarserThanTarget: levels?.coarserThanTarget ?? false,
+      downsamplingMethod: ds?.manifest.images[0]?.multiscale.downsampling_method ?? null,
     };
   });
 }
@@ -250,6 +261,8 @@ interface Params {
   /** Active view mode. Drives the label rows' eligibility caps (slice vs volume)
    *  so the panel marks labels that can't draw in the current mode as disabled. */
   viewMode: ViewMode;
+  /** The worker's per-dataset target and displayed levels (see `useDatasetLevels`). */
+  datasetLevels: Map<string, DatasetLevels>;
 }
 
 export function useDatasetSettings({
@@ -263,6 +276,7 @@ export function useDatasetSettings({
   datasetsVersion,
   remoteDocumentVersion,
   viewMode,
+  datasetLevels,
 }: Params) {
   const [autoContrastMap, setAutoContrastMap] = useState<Map<string, boolean>>(new Map());
   const [fullRangeMap, setFullRangeMap] = useState<Map<string, boolean>>(new Map());
@@ -473,7 +487,9 @@ export function useDatasetSettings({
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
-  const handleLayerSetDetailLevelOverride = useCallback((id: string, level: number | null) => {
+  // The wire command keeps the field's old name. The core clamps the level
+  // to the pinnable levels.
+  const handleLayerSetLevelPin = useCallback((id: string, level: number | null) => {
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
@@ -611,6 +627,7 @@ export function useDatasetSettings({
         autoContrast: autoContrastMap,
         fullRange: fullRangeMap,
         dataRange: dataRangeMap,
+        levels: datasetLevels,
       }, viewMode)
     : [];
   void datasetsVersion;
@@ -649,7 +666,7 @@ export function useDatasetSettings({
     handleLabelSetOpacity,
     handleLayerSetBlendMode,
     handleLayerSetRenderMode,
-    handleLayerSetDetailLevelOverride,
+    handleLayerSetLevelPin,
     handleLayerAutoContrast,
     handleLayerAutoContrastToggle,
     handleLayerFullRangeToggle,

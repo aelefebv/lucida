@@ -653,6 +653,7 @@ mod tests {
                     generated_levels: vec![],
                     data_type: DataType::Uint16,
                     pinned_axes: vec![],
+                    downsampling_method: None,
                     channel_infos: vec![],
                 },
             }],
@@ -725,6 +726,7 @@ mod tests {
                     generated_levels: vec![],
                     data_type: DataType::Uint32,
                     pinned_axes: vec![],
+                    downsampling_method: None,
                     channel_infos: vec![],
                 },
             },
@@ -819,6 +821,7 @@ mod tests {
             generated_levels: vec![],
             data_type: DataType::Uint16,
             pinned_axes: vec![],
+            downsampling_method: None,
             channel_infos: vec![
                 crate::image::ChannelInfo {
                     label: "Channel 0".to_string(),

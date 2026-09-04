@@ -265,6 +265,24 @@
   font-style: italic;
 }
 
+/* Read-only value beside a detail-row label (target level, downsampling method). */
+.layer-level-readout {
+  color: #ddd;
+  font-size: 0.75rem;
+}
+
+/* The level on screen, shown beside the target only while they differ. */
+.layer-level-displayed {
+  color: #e3a008;
+}
+
+/* Notice that the pixels on screen come from a coarser level than the target. */
+.layer-level-notice {
+  font-size: 0.7rem;
+  color: #e3a008;
+  font-style: italic;
+}
+
 /* Discoverability count pill on a layer row that carries segmentation labels. */
 .layer-label-badge {
   flex-shrink: 0;

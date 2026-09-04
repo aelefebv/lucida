@@ -293,6 +293,7 @@ const expectedManifestSingle: DatasetManifest = {
           { label: "Channel 0", color: "0000FF" },
           { label: "Channel 1" },
         ],
+        downsampling_method: "mean",
       },
     },
   ],

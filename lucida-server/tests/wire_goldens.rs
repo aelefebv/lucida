@@ -557,6 +557,7 @@ fn single_manifest() -> DatasetManifest {
                 color: None,
             },
         ],
+        downsampling_method: Some("mean".into()),
     };
 
     let label = LabelSpec {
@@ -591,6 +592,7 @@ fn single_manifest() -> DatasetManifest {
                 generated_levels: vec![],
                 data_type: DataType::Uint32,
                 pinned_axes: vec![],
+                downsampling_method: None,
                 channel_infos: vec![],
             },
         },
@@ -742,6 +744,7 @@ fn collection_dataset_opened() -> DatasetOpened {
         generated_levels: vec![],
         data_type: DataType::Uint8,
         pinned_axes: vec![],
+        downsampling_method: None,
         channel_infos: vec![],
     };
 

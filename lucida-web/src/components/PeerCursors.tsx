@@ -377,9 +377,11 @@ const AVATAR_SIZE = 16;
  * direct render when no `picture_url` was supplied (dev sessions) or when the
  * peer has no `identity` at all (anonymous/legacy peers).
  *
- * Broken remote images are handled with local `errored` state flipped from
- * the <img>'s onError, so one failed avatar degrades to its chip without
- * affecting cursor positioning or other peers.
+ * The load failure is local state keyed by URL. Local state keeps one
+ * broken avatar from disturbing cursor positioning or other peers. Keying
+ * by URL lets a changed `picture_url` retry by itself. A boolean would need
+ * setState in an effect to reset it, which `react-hooks/set-state-in-effect`
+ * rejects.
  */
 function PeerCursorAvatar({
   identity,
@@ -388,11 +390,11 @@ function PeerCursorAvatar({
   identity?: PeerIdentity | null;
   color: string;
 }) {
-  const [errored, setErrored] = useState(false);
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const pictureUrl = identity?.picture_url;
   const initial = peerInitial(identity);
 
-  if (pictureUrl && !errored) {
+  if (pictureUrl && pictureUrl !== failedUrl) {
     return (
       <img
         src={pictureUrl}
@@ -400,7 +402,7 @@ function PeerCursorAvatar({
         data-testid="peer-cursor-avatar"
         width={AVATAR_SIZE}
         height={AVATAR_SIZE}
-        onError={() => setErrored(true)}
+        onError={() => setFailedUrl(pictureUrl)}
         style={{
           width: AVATAR_SIZE,
           height: AVATAR_SIZE,

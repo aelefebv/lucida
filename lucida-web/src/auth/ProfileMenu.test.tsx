@@ -132,6 +132,40 @@ describe("ProfileMenu", () => {
     expect(img?.getAttribute("src")).toBe("https://example.com/me.png");
   });
 
+  it("falls back to the initial when the picture fails to load", () => {
+    session = {
+      principal: { ...PRINCIPAL, picture_url: "https://example.com/gone.png" },
+      refresh: async () => {},
+      signOut: async () => {},
+    };
+    const { container } = render(<ProfileMenu />);
+    fireEvent.error(container.querySelector("img") as HTMLImageElement);
+
+    expect(container.querySelector("img")).toBeNull();
+    expect(screen.getByText("L")).toBeTruthy();
+  });
+
+  it("retries the image when the picture URL changes after a failure", () => {
+    session = {
+      principal: { ...PRINCIPAL, picture_url: "https://example.com/gone.png" },
+      refresh: async () => {},
+      signOut: async () => {},
+    };
+    const { container, rerender } = render(<ProfileMenu />);
+    fireEvent.error(container.querySelector("img") as HTMLImageElement);
+    expect(container.querySelector("img")).toBeNull();
+
+    session = {
+      ...session,
+      principal: { ...PRINCIPAL, picture_url: "https://example.com/new.png" },
+    };
+    rerender(<ProfileMenu />);
+
+    expect(container.querySelector("img")?.getAttribute("src")).toBe(
+      "https://example.com/new.png",
+    );
+  });
+
   it("switches the local dev user when dev auth is enabled", async () => {
     fetchDevAuthStatus.mockResolvedValueOnce({
       enabled: true,

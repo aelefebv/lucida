@@ -11,13 +11,10 @@
  */
 
 import type { SliceEntityZInfo } from "./atlas.ts";
+import { sliceChunkZ } from "../slicePlane.ts";
 
 /** Compute the target chunk Z of one level's section given the current full-res Z. */
 export function computeTargetChunkZ(zInfo: SliceEntityZInfo | undefined, currentZ: number): number | null {
   if (!zInfo || zInfo.chunkZ <= 0) return null;
-  const levelZ = Math.min(
-    Math.floor((currentZ / Math.max(zInfo.fullResDepth - 1, 1)) * Math.max(zInfo.levelDepth - 1, 1)),
-    zInfo.levelDepth - 1,
-  );
-  return Math.floor(levelZ / zInfo.chunkZ);
+  return sliceChunkZ(currentZ, zInfo.fullResDepth, zInfo.levelDepth, zInfo.chunkZ);
 }
