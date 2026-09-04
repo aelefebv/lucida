@@ -14,8 +14,8 @@
  *     differ only in:
  *       * the dimensionality of the per-entity camera reference, and
  *       * whether `chunkDistSq` uses the Z term.
- *     Everything else (prefer-stale, parse composite key, lookup entity
- *     meta) is identical.
+ *     Everything else (finer-than-target first, then stale, then
+ *     farthest; parse composite key; lookup entity meta) is identical.
  *
  * The handlers keep their public function names; this module is the
  * source of truth for the algorithm.
@@ -72,6 +72,12 @@ export interface FindFarthestParams {
    */
   cameraFor: (memberId: string) => [number, number] | [number, number, number];
   /**
+   * Per-entity target level (`detailLevels[0]` of its cold-state entry),
+   * or `undefined` when the worker holds no cold state for the member. A
+   * resident chunk finer than it is the first to go.
+   */
+  targetLevelFor: (memberId: string) => number | undefined;
+  /**
    * Volume mode → use 3D distance (include the chunk's Z + camera's
    * Z). Slice mode → strip Z; the per-Z filter has already constrained
    * residency to a single Z plane.
@@ -82,38 +88,61 @@ export interface FindFarthestParams {
 /**
  * Find the best eviction candidate from an atlas's slot map.
  *
- * Policy:
- *   1. Prefer a stale slot (one whose `slotGridIdx < 0`, or whose
- *      member has been removed from the active set). Those are returned
- *      immediately with `dist = Infinity`.
- *   2. Otherwise pick the slot whose cached chunk is farthest from its
- *      member's camera reference.
+ * Order (ADR 0061):
+ *   1. A chunk finer than its member's target level, finest level first.
+ *      The pool holds no section for a level finer than the target, so
+ *      the shader never samples such a chunk, and it is the most
+ *      expensive resident. At the same target, a level-0 chunk covers a
+ *      quarter of the screen a level-1 chunk does. Returned with
+ *      `dist = Infinity`.
+ *   2. Otherwise a stale slot: unmapped (`slotGridIdx < 0`), or its
+ *      member has left the active set, or its level has no section.
+ *      Also `dist = Infinity`.
+ *   3. Otherwise the mapped chunk farthest from its member's camera
+ *      reference, whatever its level. A coarser resident chunk near the
+ *      view outlives a target-level chunk at the edge.
+ *
+ * The scan covers the whole slot map instead of stopping at the first
+ * stale slot, because a finer chunk later in the map outranks it. A
+ * level-0 chunk ends the scan early, because nothing is finer.
  *
  * The caller decides whether to actually evict by comparing the
  * incoming chunk's distance to the returned `dist`.
  */
 export function findFarthestSlot(params: FindFarthestParams): { key: string; dist: number } {
+  let finerKey = "";
+  let finerLevel = Infinity;
+  let staleKey = "";
   let farthestKey = "";
   let maxDist = -1;
 
   for (const [compositeKey, slotIdx] of params.slots) {
-    const gridIdx = params.slotGridIdx[slotIdx];
-    if (gridIdx < 0) {
-      // Stale chunk (not mapped in indirection) — always prefer for eviction.
-      return { key: compositeKey, dist: Infinity };
-    }
-
     const parsed = parseCompositeKey(compositeKey);
     if (!parsed) continue;
-    const lodMetas = params.entityMetas.get(parsed.memberId);
-    if (!lodMetas) {
-      // Entity gone from active set — prefer for eviction.
-      return { key: compositeKey, dist: Infinity };
-    }
     const chunk = parseChunkKey(parsed.chunkKey);
     if (!chunk) continue;
-    const lodMeta = lodMetas.find(m => m.level === chunk.level);
-    if (!lodMeta) continue;
+
+    const target = params.targetLevelFor(parsed.memberId);
+    if (target !== undefined && chunk.level < target) {
+      if (chunk.level < finerLevel) {
+        finerLevel = chunk.level;
+        finerKey = compositeKey;
+        if (finerLevel === 0) break;
+      }
+      continue;
+    }
+    // Once the scan holds a finer chunk, only a still-finer one can outrank it.
+    if (finerKey) continue;
+
+    const gridIdx = params.slotGridIdx[slotIdx];
+    const lodMeta = gridIdx < 0
+      ? undefined
+      : params.entityMetas.get(parsed.memberId)?.find(m => m.level === chunk.level);
+    if (!lodMeta) {
+      if (!staleKey) staleKey = compositeKey;
+      continue;
+    }
+    if (staleKey) continue;
 
     const cam = params.cameraFor(parsed.memberId);
     const dist = params.is3D
@@ -126,5 +155,7 @@ export function findFarthestSlot(params: FindFarthestParams): { key: string; dis
     }
   }
 
+  if (finerKey) return { key: finerKey, dist: Infinity };
+  if (staleKey) return { key: staleKey, dist: Infinity };
   return { key: farthestKey, dist: maxDist };
 }

@@ -116,6 +116,19 @@ impl fmt::Display for StoreError {
 
 impl std::error::Error for StoreError {}
 
+impl StoreError {
+    /// This error with `context` in front of its metadata message, so a
+    /// failure names where it was found: the level, or the codec whose
+    /// configuration held it. An error that is not about metadata passes
+    /// through unchanged.
+    pub fn in_context(self, context: impl fmt::Display) -> Self {
+        match self {
+            StoreError::Metadata(message) => StoreError::Metadata(format!("{context}: {message}")),
+            other => other,
+        }
+    }
+}
+
 impl From<object_store::Error> for StoreError {
     fn from(e: object_store::Error) -> Self {
         StoreError::ObjectStore(e)

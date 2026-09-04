@@ -265,6 +265,48 @@ mod tests {
         message.to_string().into()
     }
 
+    fn sharded_chain(inner: serde_json::Value, index_location: &str) -> Vec<serde_json::Value> {
+        vec![serde_json::json!({
+            "name": "sharding_indexed",
+            "configuration": {
+                "chunk_shape": [8, 8],
+                "codecs": inner,
+                "index_codecs": [
+                    {"name": "bytes", "configuration": {"endian": "little"}},
+                    {"name": "crc32c"}
+                ],
+                "index_location": index_location
+            }
+        })]
+    }
+
+    /// Whichever part of the layout was refused, the open is triaged as an
+    /// unsupported codec and not as malformed metadata.
+    #[test]
+    fn a_refused_sharded_layout_is_an_unsupported_codec() {
+        let bytes = serde_json::json!({"name": "bytes", "configuration": {"endian": "little"}});
+        let refused = [
+            sharded_chain(
+                serde_json::json!([{"name": "sharding_indexed", "configuration": {}}]),
+                "end",
+            ),
+            sharded_chain(serde_json::json!([bytes, {"name": "gzip"}]), "end"),
+            sharded_chain(serde_json::json!([bytes, {"name": "zstd"}]), "middle"),
+        ];
+        for chain in refused {
+            let error =
+                lucida_store::shard::ShardLayout::from_codec_chain(&chain, &[16, 16]).unwrap_err();
+            let diagnostic = import_failure(&error);
+            assert_eq!(
+                diagnostic.kind,
+                DatasetOpenFailureKind::UnsupportedCodec,
+                "{error}"
+            );
+            assert_eq!(diagnostic.stage, DatasetOpenStage::MetadataImport);
+            assert!(!diagnostic.retryable);
+        }
+    }
+
     #[test]
     fn permission_class_store_errors_are_permanent() {
         let denied = object_store::Error::PermissionDenied {

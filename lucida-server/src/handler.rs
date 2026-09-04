@@ -2276,7 +2276,7 @@ mod tests {
             .unwrap();
         object_store::ObjectStore::put(
             &store,
-            &location.path,
+            location.path(),
             object_store::PutPayload::from_static(&[1, 2, 3, 4]),
         )
         .await

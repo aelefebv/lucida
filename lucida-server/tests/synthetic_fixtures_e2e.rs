@@ -41,7 +41,7 @@ async fn import_fixture(name: &str, id: &str) -> (PathBuf, ImportResult) {
 fn decode_chunk(dir: &Path, resolver: &ChunkResolver, image_id: &ImageId, key: &str) -> Vec<u8> {
     let level: u32 = key.split('/').next().unwrap().parse().unwrap();
     let info = resolver.level_info(image_id, level).unwrap();
-    let path = resolver.resolve(image_id, key).unwrap().path;
+    let path = resolver.resolve(image_id, key).unwrap().path().clone();
     let bytes = fs::read(dir.join(path.as_ref())).unwrap_or_else(|e| panic!("{path}: {e}"));
     decode_storage_bytes(&bytes, info.compression).unwrap()
 }
