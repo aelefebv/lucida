@@ -23,6 +23,7 @@ import { installTraceSeam } from "./seam.ts";
 import { traceRecorder } from "./recorder.ts";
 import { createQuiescenceState } from "./quiescence.ts";
 import { TRACE_SCHEMA_VERSION } from "./types.ts";
+import { initialPlanningState } from "../pipeline/planning/index.ts";
 
 const OPEN_CAUSE = { epoch: "content", dirtyKind: "interactive", source: "dataset_added" } as const;
 
@@ -101,7 +102,7 @@ function makePlan(requests: ChunkRequest[]): RequestPlan {
     proxyRequests: [],
     epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
     stats: emptyPlanStats(),
-    nextState: { previousActiveSet: [] },
+    nextState: initialPlanningState(),
   };
 }
 

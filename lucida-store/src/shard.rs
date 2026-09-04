@@ -17,7 +17,7 @@ use object_store::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::backend::StoreError;
-use crate::cache::{CachedStore, SourceReadTiming, TimedRead};
+use crate::cache::{ByteRange, CachedStore, SourceReadTiming, TimedRead};
 use crate::codec::{StorageCompression, parse_codec_chain};
 use crate::source_limiter::{ReaderId, RequestLabel};
 
@@ -340,6 +340,32 @@ impl ShardIndexCache {
     }
 }
 
+/// Whether the inner chunk at `position` of `shard` was written, asked as a
+/// metadata read for the unwritten-level probe (see [`crate::unwritten`]).
+///
+/// The index comes through [`CachedStore::get_optional_metadata_range`], so
+/// the read takes no chunk permit and the cache serves the binding's first
+/// read of the same index later. A shard object that is not there holds no
+/// inner chunk, so it answers `false`. An index that cannot be read is an
+/// error for the caller to treat as no answer.
+pub(crate) async fn inner_chunk_written(
+    store: &CachedStore,
+    layout: &ShardLayout,
+    shard: &Path,
+    position: usize,
+) -> Result<bool, object_store::Error> {
+    let len = layout.index_byte_len();
+    let range = match layout.index_location {
+        IndexLocation::Start => ByteRange::Bounded(0..len),
+        IndexLocation::End => ByteRange::Suffix(len),
+    };
+    let Some(bytes) = store.get_optional_metadata_range(shard, range).await? else {
+        return Ok(false);
+    };
+    let index = ShardIndex::parse(&bytes, layout, shard)?;
+    Ok(index.entry(position)?.is_some())
+}
+
 /// The answer for an inner chunk nothing was written for, in the shape the
 /// fill path already handles.
 fn unwritten(shard: &Path, position: usize) -> object_store::Error {
@@ -496,6 +522,43 @@ fn parse_index_codecs(codecs: &[serde_json::Value]) -> Result<bool, StoreError> 
         _ => Err(StoreError::Metadata(format!(
             "index_codecs {names:?} not supported (expected bytes little-endian, optionally followed by crc32c)",
         ))),
+    }
+}
+
+/// A shard object built by hand: `chunks` in position order, `None` for an
+/// inner chunk left out of the index, with the index where `location` says
+/// and a crc32c checksum after its entries. Offsets are absolute in the
+/// object, so an index at the start pushes every chunk past itself.
+///
+/// Shared with the import tests, which write sharded fixtures to disk.
+#[cfg(test)]
+pub(crate) fn build_shard(chunks: &[Option<&[u8]>], location: IndexLocation) -> Vec<u8> {
+    let index_len = chunks.len() * INDEX_ENTRY_BYTES as usize + CHECKSUM_BYTES as usize;
+    let mut body = Vec::new();
+    let mut entries = Vec::new();
+    let base = match location {
+        IndexLocation::Start => index_len as u64,
+        IndexLocation::End => 0,
+    };
+    for chunk in chunks {
+        match chunk {
+            Some(bytes) => {
+                entries.extend_from_slice(&(base + body.len() as u64).to_le_bytes());
+                entries.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+                body.extend_from_slice(bytes);
+            }
+            None => {
+                entries.extend_from_slice(&ABSENT.to_le_bytes());
+                entries.extend_from_slice(&ABSENT.to_le_bytes());
+            }
+        }
+    }
+    let checksum = crc32c::crc32c(&entries).to_le_bytes();
+    let mut index = entries;
+    index.extend_from_slice(&checksum);
+    match location {
+        IndexLocation::Start => [index, body].concat(),
+        IndexLocation::End => [body, index].concat(),
     }
 }
 
@@ -743,40 +806,6 @@ mod tests {
         );
     }
 
-    /// A shard object built by hand: `chunks` in position order, `None` for
-    /// an inner chunk left out of the index, with the index where `location`
-    /// says and a crc32c checksum after its entries. Offsets are absolute in
-    /// the object, so an index at the start pushes every chunk past itself.
-    fn build_shard(chunks: &[Option<&[u8]>], location: IndexLocation) -> Vec<u8> {
-        let index_len = chunks.len() * INDEX_ENTRY_BYTES as usize + CHECKSUM_BYTES as usize;
-        let mut body = Vec::new();
-        let mut entries = Vec::new();
-        let base = match location {
-            IndexLocation::Start => index_len as u64,
-            IndexLocation::End => 0,
-        };
-        for chunk in chunks {
-            match chunk {
-                Some(bytes) => {
-                    entries.extend_from_slice(&(base + body.len() as u64).to_le_bytes());
-                    entries.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-                    body.extend_from_slice(bytes);
-                }
-                None => {
-                    entries.extend_from_slice(&ABSENT.to_le_bytes());
-                    entries.extend_from_slice(&ABSENT.to_le_bytes());
-                }
-            }
-        }
-        let checksum = crc32c::crc32c(&entries).to_le_bytes();
-        let mut index = entries;
-        index.extend_from_slice(&checksum);
-        match location {
-            IndexLocation::Start => [index, body].concat(),
-            IndexLocation::End => [body, index].concat(),
-        }
-    }
-
     /// A 2x2 shard of raw inner chunks with position 2 left unwritten.
     const HAND_BUILT_CHUNKS: [Option<&[u8]>; 4] =
         [Some(b"first"), Some(b"second"), None, Some(b"fourth")];
@@ -870,6 +899,52 @@ mod tests {
             );
 
             assert_eq!(heads(), 0, "{location:?}: no HEAD request");
+        }
+    }
+
+    /// The probe's question, asked of a hand-built shard with the index at
+    /// either end: a written position, an absent one, and a shard object
+    /// that is not there. No HEAD is issued, and the index the probe read
+    /// serves the binding's first read of the same shard from the cache.
+    #[tokio::test]
+    async fn inner_chunk_written_reads_the_index_once_and_the_binding_reuses_it() {
+        for location in [IndexLocation::End, IndexLocation::Start] {
+            let layout = hand_built_layout(location);
+            let (shards, cached, store) = hand_built_cache(location, 0).await;
+            let gets = || store.get_count.load(Ordering::SeqCst);
+            let shard = Path::from("0/c/0/0");
+
+            assert!(
+                inner_chunk_written(&cached, &layout, &shard, 0)
+                    .await
+                    .unwrap(),
+                "{location:?}"
+            );
+            assert!(
+                !inner_chunk_written(&cached, &layout, &shard, 2)
+                    .await
+                    .unwrap(),
+                "{location:?}"
+            );
+            assert_eq!(gets(), 1, "{location:?}: one index read answers both");
+
+            assert!(
+                !inner_chunk_written(&cached, &layout, &Path::from("0/c/9/9"), 0)
+                    .await
+                    .unwrap(),
+                "{location:?}"
+            );
+            assert_eq!(gets(), 2, "{location:?}: a missing shard is one read");
+
+            let first = read_position(&shards, &cached, &layout, 0).await;
+            assert_eq!(&first.result.unwrap()[..], b"first", "{location:?}");
+            assert_eq!(
+                gets(),
+                3,
+                "{location:?}: the binding's index read was served from the cache"
+            );
+            assert_eq!(store.head_count.load(Ordering::SeqCst), 0);
+            assert_eq!(cached.stats().backend_errors, 0);
         }
     }
 

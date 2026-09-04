@@ -10,6 +10,7 @@ import type {
   ColdStateSelectionMessage,
   ColdStateDeltaMessage,
   ViewHotStateMessage,
+  EntityLevelReport,
 } from "./workerProtocol.ts";
 import type { SceneEpochs } from "../pipeline/epochs.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
@@ -45,6 +46,8 @@ export class RenderClient implements UploadClient {
    * Consumers should match on `kind === "chunk"` to handle chunk gaps.
    */
   onWantedSetDelta: WantedSetHandler | null = null;
+  /** The worker's per-entity target and displayed levels for one dataset. */
+  onEntityLevels: ((datasetId: string, entities: EntityLevelReport[]) => void) | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     const offscreen = canvas.transferControlToOffscreen();
@@ -101,6 +104,8 @@ export class RenderClient implements UploadClient {
       this.onChunksEvicted(msg.memberId, msg.keys, msg.skipped ?? [], msg.reason);
     } else if (msg.type === "wantedSetDelta" && this.onWantedSetDelta) {
       this.onWantedSetDelta(msg.datasetId, msg.epochs, msg.missing);
+    } else if (msg.type === "entityLevels" && this.onEntityLevels) {
+      this.onEntityLevels(msg.datasetId, msg.entities);
     } else if (msg.type === "thumbnailResult") {
       const resolve = this.thumbnailPending.get(msg.id);
       if (resolve) {

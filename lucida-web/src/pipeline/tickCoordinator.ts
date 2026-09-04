@@ -21,6 +21,7 @@ import {
   plan,
   emitPlanRequests,
   emptyPlanStats,
+  initialPlanningState,
   planProxyResidencyForInputs,
   type PlanningConfig,
 } from "./planning/index.ts";
@@ -482,11 +483,12 @@ export class TickCoordinator {
    * A delta reports only the *quantized* projection
    * (`{ membership, visible, target_level, kind }`) of each record. The
    * fold is safe to feed the planner because every active-set input is
-   * either in that quantized set (`visible`, the screen's target level, so
-   * a zoom that moves a level arrives as a `changed` record) or in the
-   * cursor basis below (the level pin, the manifest join for `levels` and
-   * `coarseLevel`). The active set never reads the continuous
-   * `projected_diagonal_px`, which the delta does NOT track.
+   * either in that quantized set (`visible`, and the target level with the
+   * level pin folded in by the core, so a zoom or a pin edit that moves a
+   * level arrives as a `changed` record) or in the cursor basis below (the
+   * manifest join for `levels` and `coarseLevel`). The active set never
+   * reads the continuous `projected_diagonal_px`, which the delta does NOT
+   * track.
    *
    * # Cursor lifecycle (silent-wrong-data guard)
    *
@@ -497,13 +499,11 @@ export class TickCoordinator {
    *     change drops every entry — folding a delta against a foreign cursor
    *     would ship wrong tiles.
    *   - `basis`: the record shape a delta does NOT re-report depends on the
-   *     manifest join and the level pin. Both can move WITHOUT a structural
-   *     epoch bump (a progressively-merged level swaps the manifest object; a
-   *     pin edit bumps only the selection epoch), and neither is a trigger
-   *     for the Rust delta, so a record absent from the delta would keep a
-   *     stale `levels`/`targetLevel`/`coarseLevel`. Invalidating the cursor
-   *     when the basis changes forces a reseed from the full query with the
-   *     new basis.
+   *     manifest join, which can move WITHOUT a structural epoch bump (a
+   *     progressively-merged level swaps the manifest object) and is no
+   *     trigger for the Rust delta, so a record absent from the delta would
+   *     keep a stale `levels`/`coarseLevel`. Invalidating the cursor when the
+   *     basis changes forces a reseed from the full query with the new basis.
    * A dropped entry means the next fold has no prior; the fold then reseeds
    * from the full `view_query` at that same tick (matching the Rust cursor,
    * which the delta call just advanced), so a Delta is never folded against a
@@ -512,8 +512,6 @@ export class TickCoordinator {
   private readonly viewDeltaCursor = new Map<string, {
     /** Identity of the snapshot-inputs entry (manifest maps + placement). */
     basisInputs: object;
-    /** Level pin the records were assembled with (`null` = follow the screen). */
-    basisLevelPin: number | null;
     map: Map<string, EntitySnapshot>;
   }>();
   /**
@@ -797,7 +795,6 @@ export class TickCoordinator {
         imageSpecById: snapshotInputs.imageSpecById,
         parentByEntityId: snapshotInputs.parentByEntityId,
         positions: snapshotInputs.positions,
-        dsSettings,
       };
       const entitiesOverride = this.foldViewDeltaEntities(
         ctx.scene, dsId, deps, snapshotInputs,
@@ -833,7 +830,7 @@ export class TickCoordinator {
       // Plan. Opaque carry-forward state travels via {@link PlanningState};
       // `nextState` is stored for the next tick.
       const planningStateForDataset = this.planningState.get(dsId)
-        ?? { previousActiveSet: [] };
+        ?? initialPlanningState();
       // Capture what the worker currently holds BEFORE `nextState` overwrites it
       // — the view-move delta diffs the fresh active set against this.
       const previousActiveSet = planningStateForDataset.previousActiveSet;
@@ -1316,7 +1313,7 @@ export class TickCoordinator {
       dsId: string;
       dsSettings: DatasetSettings | undefined;
       visibleChannels: number[];
-      activeSet: ActiveSetEntry[];
+      planningState: PlanningState;
       entities: EntitySnapshot[];
       cachedRegion: VisibleRegion;
       newZRange: [number, number];
@@ -1338,13 +1335,13 @@ export class TickCoordinator {
         anyScrub = true;
       }
 
-      const activeSet = this.planningState.get(dsId)?.previousActiveSet;
+      const planningState = this.planningState.get(dsId);
       const entities = this._lastEntities.get(dsId);
       const cachedRegion = this._lastVisibleRegion.get(dsId);
-      if (!activeSet || !entities || !cachedRegion) return false;
+      if (!planningState || !entities || !cachedRegion) return false;
 
       perDataset.push({
-        dsId, dsSettings, visibleChannels, activeSet, entities, cachedRegion,
+        dsId, dsSettings, visibleChannels, planningState, entities, cachedRegion,
         newZRange: zRange,
       });
     }
@@ -1371,7 +1368,7 @@ export class TickCoordinator {
       snapshot: PlanningSnapshot;
       visibleRegion: VisibleRegion;
       selection: SelectionState;
-      activeSet: ActiveSetEntry[];
+      planningState: PlanningState;
       requests: ChunkRequest[];
       proxyRequests: ProxyRequest[];
       stats: PlanStats;
@@ -1400,7 +1397,11 @@ export class TickCoordinator {
       };
       const stats = emptyPlanStats();
       const { requests, proxyRequests } = emitPlanRequests(
-        pd.activeSet, snapshot, stats, planningConfig,
+        pd.planningState.previousActiveSet,
+        snapshot,
+        stats,
+        planningConfig,
+        pd.planningState.zoomDirection,
       );
       return {
         dsId: pd.dsId,
@@ -1408,7 +1409,7 @@ export class TickCoordinator {
         snapshot,
         visibleRegion,
         selection,
-        activeSet: pd.activeSet,
+        planningState: pd.planningState,
         requests,
         proxyRequests,
         stats,
@@ -1419,7 +1420,7 @@ export class TickCoordinator {
     const proxyResidency = planProxyResidencyForInputs({
       inputs: planned.map((p) => ({
         snapshot: p.snapshot,
-        activeSet: p.activeSet,
+        activeSet: p.planningState.previousActiveSet,
         proxyRequests: p.proxyRequests,
       })),
       config: planningConfig,
@@ -1456,11 +1457,11 @@ export class TickCoordinator {
       const budgetedProxyRequests = proxyRequestsByDataset.get(p.dsId) ?? [];
       this._lastPlanByDataset.set(p.dsId, {
         requests: p.requests,
-        activeSet: p.activeSet,
+        activeSet: p.planningState.previousActiveSet,
         epochs: scrubEpochs,
         proxyRequests: budgetedProxyRequests,
         stats: p.stats,
-        nextState: { previousActiveSet: p.activeSet },
+        nextState: p.planningState,
       });
 
       // Categorical label overlays follow the plane/timepoint too — merge their
@@ -1480,11 +1481,11 @@ export class TickCoordinator {
 
       ctx.cpuCache.submit({
         requests: requestsWithLabels,
-        activeSet: p.activeSet,
+        activeSet: p.planningState.previousActiveSet,
         proxyRequests: budgetedProxyRequests,
         epochs: scrubEpochs,
         stats: p.stats,
-        nextState: { previousActiveSet: p.activeSet },
+        nextState: p.planningState,
       });
 
       this.uploader.sendColdStateSelection({
@@ -1533,11 +1534,11 @@ export class TickCoordinator {
    * full build produces, on the render-affecting projection
    * ({@link EntitySnapshot} `visible` / `targetLevel` / `kind` /
    * `coarseLevel` / `parentId`, keyed by `image_id`). Records in `entered` /
-   * `changed` are freshly assembled this tick, so a record whose screen level
+   * `changed` are freshly assembled this tick, so a record whose target level
    * moved carries its new `targetLevel`; a carried-over record was assembled
    * on a prior tick with a basis proven identical (scene identity +
-   * `basisInputs` + `basisLevelPin`), so its quantized and manifest-derived
-   * fields match a fresh build. Continuous fields (`importance` /
+   * `basisInputs`), so its quantized and manifest-derived fields match a
+   * fresh build. Continuous fields (`importance` /
    * `projectedDiagonalPx` / `projectedAreaPx2` / `centroidWorld`) may be
    * stale on a carried-over record. That is intended, and they are never an
    * active-set input.
@@ -1566,18 +1567,11 @@ export class TickCoordinator {
     }
     const delta = JSON.parse(deltaJson) as ViewQueryDeltaJson;
 
-    const levelPin = deps.dsSettings?.detail_level_override ?? null;
     const existing = this.viewDeltaCursor.get(datasetId);
-    // A cursor is a valid fold base only when its manifest/placement basis
-    // AND level pin still match. Otherwise a carried-over record could hold
-    // a stale `levels`/`targetLevel`/`coarseLevel` (see the field doc). A
-    // mismatch forces a null prior and a reseed from the full query.
+    // Fold only onto a cursor with the same manifest/placement basis (see the
+    // field doc). Otherwise reseed from the full query.
     const prev =
-      existing &&
-      existing.basisInputs === inputsRef &&
-      existing.basisLevelPin === levelPin
-        ? existing.map
-        : null;
+      existing && existing.basisInputs === inputsRef ? existing.map : null;
 
     // Drop-on-throw invariant: `view_query_delta` above already advanced the
     // Rust cursor to this tick's state, but the map build below is fallible —
@@ -1611,11 +1605,7 @@ export class TickCoordinator {
         next = applyViewQueryDelta(prev, delta, deps);
       }
 
-      this.viewDeltaCursor.set(datasetId, {
-        basisInputs: inputsRef,
-        basisLevelPin: levelPin,
-        map: next,
-      });
+      this.viewDeltaCursor.set(datasetId, { basisInputs: inputsRef, map: next });
       return [...next.values()];
     } catch (e) {
       this.viewDeltaCursor.delete(datasetId);
@@ -1733,7 +1723,7 @@ export class TickCoordinator {
       stats: emptyPlanStats(),
       // submit() doesn't read nextState; placeholder so the literal
       // satisfies RequestPlan's contract.
-      nextState: { previousActiveSet: [] },
+      nextState: initialPlanningState(),
     });
   }
 }

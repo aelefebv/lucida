@@ -5,6 +5,8 @@
 
 export {
   emptyPlanStats,
+  initialPlanningState,
+  type ZoomDirection,
   type ActiveSetEntry,
   type AssetCatalogSnapshot,
   type BaseEntitySnapshot,
@@ -83,4 +85,5 @@ export {
   createSyntheticEntity,
   createSyntheticSnapshot,
   createSyntheticState,
+  type CreateSyntheticEntityOverrides,
 } from "./synthetic.ts";

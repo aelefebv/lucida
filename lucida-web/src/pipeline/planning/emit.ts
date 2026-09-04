@@ -7,7 +7,12 @@
 import { Axis } from "../../axes.ts";
 import type { VisibleRegion } from "../viewport.ts";
 import { chunkWithinRenderRadius } from "../renderRadius.ts";
-import { chunkWorldDims, iterateChunks, iterateChunksAtLevels } from "./chunks.ts";
+import {
+  chunkWorldDims,
+  compareChunkRequests,
+  iterateChunks,
+  iterateChunksAtLevels,
+} from "./chunks.ts";
 import {
   MINIMAP_SEED_BULK_LANE_OFFSET,
   MINIMAP_SEED_FAST_MAX_CHUNKS,
@@ -22,6 +27,8 @@ import type {
   PlanStats,
   ProxyRequest,
   SelectionState,
+  TileEntry,
+  ZoomDirection,
 } from "./types.ts";
 
 /**
@@ -40,6 +47,24 @@ function computePriority(
     (1.0 - importance) * config.importanceWeight +
     distanceFromCenter * config.distanceWeight
   );
+}
+
+function stampRequest(
+  req: ChunkRequest,
+  entity: EntitySnapshot,
+  snapshot: PlanningSnapshot,
+  config: PlanningConfig,
+  lane: ChunkRequest["lane"],
+  tier: ChunkRequest["tier"],
+  laneOffset: number,
+  radiusView: number,
+): boolean {
+  if (!requestWithinRenderRadius(req, snapshot.visibleRegion, entity, radiusView)) return false;
+  const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity, config.depthBiasView);
+  req.lane = lane;
+  req.tier = tier;
+  req.priority = computePriority(laneOffset, entity.importance, dist, config);
+  return true;
 }
 
 /**
@@ -173,19 +198,11 @@ export function emitDetailLane(
       datasetId,
     );
     for (const req of chunks) {
-      if (!requestWithinRenderRadius(req, snapshot.visibleRegion, entity, config.detailRenderRadiusView)) {
-        continue;
-      }
-      const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity, config.depthBiasView);
-      req.lane = "detail";
-      req.tier = "detail";
-      req.priority = computePriority(
-        config.detailLaneOffset,
-        entity.importance,
-        dist,
-        config,
+      const kept = stampRequest(
+        req, entity, snapshot, config,
+        "detail", "detail", config.detailLaneOffset, config.detailRenderRadiusView,
       );
-      allRequests.push(req);
+      if (kept) allRequests.push(req);
     }
 
     if (entry.proxyAvailable && entry.proxyKind === "TileProxy3D") {
@@ -232,8 +249,32 @@ export function emitDetailLane(
 }
 
 /**
- * Prefetch lane — for each tile-mode active entry, emit chunks for the
- * next `config.prefetchDepth` timepoints (bounded by the entity's max T).
+ * The target's neighbor among the source levels in the zoom direction. A
+ * pinned target never moves with the zoom, so it gets none. Generated coarse
+ * levels are absent from `sourceLevels`, so they are never returned (ADR 0040).
+ */
+function levelInZoomDirection(
+  entity: EntitySnapshot,
+  zoomDirection: ZoomDirection | null,
+): number | null {
+  if (zoomDirection === null || entity.levelPinned) return null;
+  const at = entity.sourceLevels.indexOf(entity.targetLevel);
+  if (at < 0) return null;
+  return entity.sourceLevels[zoomDirection === "in" ? at - 1 : at + 1] ?? null;
+}
+
+/**
+ * Prefetch lane — for each tile-mode active entry, chunks at future
+ * timepoints, and chunks at the next level in the direction of the last
+ * zoom change so that level is partly resident when the target crosses
+ * to it.
+ *
+ * The lane's budget per entity is `prefetchDepth` steps, each the visible
+ * target-level set. With no level to prefetch, every step is a future
+ * timepoint, as before. With one, the level step takes the lane's last
+ * step and the timepoint steps keep the ones before it. The level step
+ * also takes any step the timepoints cannot fill, nearest the view center
+ * first. The lane never exceeds the budget either way.
  *
  * Mutates `allRequests`.
  */
@@ -244,6 +285,7 @@ export function emitPrefetchLane(
   stats: PlanStats,
   allRequests: ChunkRequest[],
   config: PlanningConfig,
+  zoomDirection: ZoomDirection | null,
 ): void {
   const datasetId = snapshot.datasetId;
   for (const entry of activeSet) {
@@ -252,8 +294,11 @@ export function emitPrefetchLane(
     if (entity === undefined) continue;
     if (entity.levels.length === 0) continue;
 
+    const level = levelInZoomDirection(entity, zoomDirection);
+    const timepointStepsAllowed = level === null ? config.prefetchDepth : config.prefetchDepth - 1;
+    let timepointSteps = 0;
     const maxT = entity.levels[0]?.grid_shape[Axis.T] ?? 0;
-    for (let dt = 1; dt <= config.prefetchDepth; dt++) {
+    for (let dt = 1; dt <= timepointStepsAllowed; dt++) {
       const nextT = snapshot.selection.t + dt;
       if (nextT >= maxT) break;
       const prefetchSelection: SelectionState = {
@@ -270,22 +315,77 @@ export function emitPrefetchLane(
         datasetId,
       );
       for (const req of chunks) {
-        if (!requestWithinRenderRadius(req, snapshot.visibleRegion, entity, config.detailRenderRadiusView)) {
-          continue;
-        }
-        const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity, config.depthBiasView);
-        req.lane = "prefetch";
-        req.tier = "detail";
-        req.priority = computePriority(
-          config.prefetchLaneOffset + dt * 100,
-          entity.importance,
-          dist,
-          config,
+        const kept = stampRequest(
+          req, entity, snapshot, config,
+          "prefetch", "detail", config.prefetchLaneOffset + dt * 100, config.detailRenderRadiusView,
         );
-        allRequests.push(req);
+        if (kept) allRequests.push(req);
       }
+      timepointSteps++;
+    }
+
+    if (level === null) continue;
+    const stepsLeft = config.prefetchDepth - timepointSteps;
+    if (stepsLeft <= 0) continue;
+    const stepSize = countTargetLevelRequests(entity, entry, snapshot, config);
+    emitLevelPrefetch(entity, level, snapshot, stats, allRequests, config, stepsLeft * stepSize);
+  }
+}
+
+/** The size of one prefetch step: what the detail lane emits for the entry. */
+function countTargetLevelRequests(
+  entity: EntitySnapshot,
+  entry: TileEntry,
+  snapshot: PlanningSnapshot,
+  config: PlanningConfig,
+): number {
+  let count = 0;
+  for (const req of iterateChunks(entity, entry, snapshot.visibleRegion, snapshot.selection)) {
+    if (requestWithinRenderRadius(req, snapshot.visibleRegion, entity, config.detailRenderRadiusView)) {
+      count++;
     }
   }
+  return count;
+}
+
+/**
+ * The prefetch lane's level step: the `allowance` chunks at `level` nearest
+ * the view center. Within one entity and offset, priority order is distance
+ * order, so the sort picks them. The offset is the lane's last step slot, so
+ * the step ranks behind every timepoint step.
+ *
+ * Mutates `allRequests`.
+ */
+function emitLevelPrefetch(
+  entity: EntitySnapshot,
+  level: number,
+  snapshot: PlanningSnapshot,
+  stats: PlanStats,
+  allRequests: ChunkRequest[],
+  config: PlanningConfig,
+  allowance: number,
+): void {
+  if (allowance <= 0) return;
+  const candidates: ChunkRequest[] = [];
+  const chunks = iterateChunksAtLevels(
+    entity,
+    [level],
+    snapshot.visibleRegion,
+    snapshot.selection,
+    stats,
+    snapshot.datasetId,
+  );
+  for (const req of chunks) {
+    const kept = stampRequest(
+      req, entity, snapshot, config,
+      "prefetch", "detail",
+      config.prefetchLaneOffset + config.prefetchDepth * 100,
+      config.detailRenderRadiusView,
+    );
+    if (kept) candidates.push(req);
+  }
+  candidates.sort(compareChunkRequests);
+  for (const req of candidates.slice(0, allowance)) allRequests.push(req);
 }
 
 /**
@@ -318,19 +418,11 @@ export function emitCoarseLane(
       datasetId,
     );
     for (const req of chunks) {
-      if (!requestWithinRenderRadius(req, snapshot.visibleRegion, entity, config.coarseRenderRadiusView)) {
-        continue;
-      }
-      const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity, config.depthBiasView);
-      req.lane = "coarse";
-      req.tier = "coarse";
-      req.priority = computePriority(
-        config.coarseLaneOffset,
-        entity.importance,
-        dist,
-        config,
+      const kept = stampRequest(
+        req, entity, snapshot, config,
+        "coarse", "coarse", config.coarseLaneOffset, config.coarseRenderRadiusView,
       );
-      allRequests.push(req);
+      if (kept) allRequests.push(req);
     }
   }
 }

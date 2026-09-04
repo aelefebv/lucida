@@ -38,6 +38,7 @@ import type {
 import type { SceneEpochs } from "../epochs.ts";
 import { emptyPlanStats } from "../planning/index.ts";
 import { createQuiescenceState } from "../../trace/quiescence.ts";
+import { initialPlanningState, createSyntheticState } from "../planning/index.ts";
 
 // ---------------------------------------------------------------------------
 // Test Factories
@@ -236,7 +237,7 @@ function makePlan(
       ...epochs,
     },
     stats: emptyPlanStats(),
-    nextState: { previousActiveSet: resolvedActiveSet },
+    nextState: createSyntheticState({ previousActiveSet: resolvedActiveSet }),
   };
 }
 
@@ -1023,7 +1024,7 @@ describe("CpuCache", () => {
         proxyRequests: [proxyReq],
         epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
         stats: emptyPlanStats(),
-        nextState: { previousActiveSet: [] },
+        nextState: initialPlanningState(),
       });
       expect(cache.telemetry().inFlightProxyCount).toBe(1);
 
@@ -1067,7 +1068,7 @@ describe("CpuCache", () => {
           ...epochs,
         },
         stats: emptyPlanStats(),
-        nextState: { previousActiveSet: [] },
+        nextState: initialPlanningState(),
       };
     }
 
@@ -1132,7 +1133,7 @@ describe("CpuCache", () => {
         proxyRequests: [proxyReq],
         epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
         stats: emptyPlanStats(),
-        nextState: { previousActiveSet: [] },
+        nextState: initialPlanningState(),
       });
 
       // At least one request should be queued.
@@ -1264,7 +1265,7 @@ describe("CpuCache", () => {
         proxyRequests: [proxyA],
         epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
         stats: emptyPlanStats(),
-        nextState: { previousActiveSet: [] },
+        nextState: initialPlanningState(),
       });
       await flush();
 
@@ -1280,7 +1281,7 @@ describe("CpuCache", () => {
         proxyRequests: [proxyB],
         epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
         stats: emptyPlanStats(),
-        nextState: { previousActiveSet: [] },
+        nextState: initialPlanningState(),
       });
       await flush();
 
@@ -3000,7 +3001,7 @@ describe("CpuCache", () => {
           ...epochs,
         },
         stats: emptyPlanStats(),
-        nextState: { previousActiveSet: [] },
+        nextState: initialPlanningState(),
       };
     }
 
@@ -3436,7 +3437,6 @@ describe("CpuCache", () => {
         coarseBytes: 64,
       });
       expect(demand.detailCoverageRatio).toBe(1);
-      expect(demand.sparseDetail).toBe(false);
     });
 
     it("counts desired and resident detail at the level the plan asked for, not at levels left resident from before", async () => {
@@ -3483,32 +3483,6 @@ describe("CpuCache", () => {
       expect(queues.coarse.inFlight).toBe(1);
       expect(queues.detail.pending).toBe(1);
       expect(queues.coarse.pending).toBe(1);
-    });
-
-    it("logs sparse detail after sustained low coverage", () => {
-      vi.mocked(debugLog).mockClear();
-      const { cache } = createTestCache({ maxConcurrentFetches: 0 });
-      cache.submit(makePlan([
-        makeRequest({ x: 0, chunkKey: "0/0/0/0/0/0" }),
-        makeRequest({ x: 1, chunkKey: "0/0/0/0/0/1" }),
-        makeRequest({ x: 2, chunkKey: "0/0/0/0/0/2" }),
-        makeRequest({ x: 3, chunkKey: "0/0/0/0/0/3" }),
-      ]));
-
-      expect(cache.telemetry().tierDemand.sparseDetail).toBe(true);
-      cache.telemetry();
-      cache.telemetry();
-
-      expect(debugLog).toHaveBeenCalledWith(
-        "cache",
-        "cache.sparse_detail",
-        expect.objectContaining({
-          desiredDetailChunks: 4,
-          residentDetailChunks: 0,
-          pendingChunks: 4,
-          notice: expect.stringContaining("lower the detail LOD explicitly"),
-        }),
-      );
     });
 
     it("backpressure log fires at most once per second under sustained queue depth", () => {
@@ -3680,7 +3654,6 @@ describe("CpuCache", () => {
             coarseBytes: expect.any(Number),
           },
           detailCoverageRatio: expect.any(Number),
-          sparseDetail: expect.any(Boolean),
         },
         tierQueues: {
           detail: {

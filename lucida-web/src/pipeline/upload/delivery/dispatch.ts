@@ -10,6 +10,7 @@ import type { SceneEpochs } from "../../epochs.ts";
 import type { ManifestEntry } from "./manifestIndex.ts";
 import { Axis } from "../../../axes.ts";
 import { labelDepthZ } from "../../../renderer/labelLayout.ts";
+import { sliceLevelZ } from "../../../renderer/slicePlane.ts";
 
 export function workerMemberIdForChunk(
   delivery: ReadyChunkDelivery,
@@ -145,10 +146,7 @@ export function dispatchLabelChunkDelivery(
 
   // Which Z-plane the current view wants, in this level's coords.
   const labelFullResZ = labelDepthZ(sliceZ, meta.labelSourceLevel0, meta.labelLevel0);
-  const levelZ = Math.min(
-    Math.floor((labelFullResZ / Math.max(label0Depth - 1, 1)) * Math.max(levelDepth - 1, 1)),
-    Math.max(levelDepth - 1, 0),
-  );
+  const levelZ = sliceLevelZ(labelFullResZ, label0Depth, levelDepth);
   const cz = Math.max(chunkZ, 1);
   const targetChunkZ = Math.floor(levelZ / cz);
   // This chunk covers a different Z-chunk than the current view — the right

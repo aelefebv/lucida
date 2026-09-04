@@ -401,8 +401,9 @@ _Avoid_: end reason (that is the run's field), status, state
 
 **Speculative**:
 Work the pipeline started for a view nobody is looking at yet — today, the
-prefetch lane's future timepoints. Excluded from the quiescence predicate and from
-the view's demand, and reported at settle rather than hidden.
+prefetch lane's future timepoints and its next level in the direction of the last
+zoom. Excluded from the quiescence predicate and from the view's demand, and
+reported at settle rather than hidden.
 _Avoid_: background, idle, optional
 
 **Diagnostic**:

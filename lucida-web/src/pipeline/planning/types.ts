@@ -34,13 +34,27 @@ export interface BaseEntitySnapshot {
    * the level geometry, the coarsest level that still places at least one
    * sample under every device pixel, held across a boundary by hysteresis.
    * Always one of the image's source levels; a generated coarse level is
-   * never a target. Resolved once, in `snapshotDelta.ts`.
+   * never a target. The core resolves and clamps it in its view query, and
+   * the browser copies it.
    *
-   * The screen's level is part of the quantized set the view-query delta
-   * tracks, so a zoom that moves it arrives as a `changed` record, and the
-   * pin is part of the fold cursor's basis. Memory pressure is not an input.
+   * The level is part of the quantized set the view-query delta tracks, so
+   * a zoom or a pin edit that moves it arrives as a `changed` record. Memory
+   * pressure is not an input.
    */
   targetLevel: number;
+  /**
+   * True when {@link targetLevel} is the dataset's level pin rather than
+   * the screen's choice. A pinned target never moves with the zoom, so
+   * the prefetch lane requests no neighboring level for the entity.
+   */
+  levelPinned: boolean;
+  /**
+   * The levels the image's source stores, ascending: every index of
+   * {@link levels} except the generated coarse levels, which belong to the
+   * coarse tier (ADR 0040). The set a target level is chosen from and the
+   * set the prefetch lane's level step stays inside.
+   */
+  sourceLevels: number[];
   /**
    * Pyramid level selected for the coarse tier. Null means this image
    * has no currently usable coarse level. The first bridge only emits
@@ -188,17 +202,41 @@ export interface PlanningSnapshot {
  * pointer returned in {@link RequestPlan.nextState} and threads it into
  * the next call to `plan`.
  *
- * Today it carries one field, the previous tick's active set, which the
- * dev-mode validator checks and the cold-state delta diffs against. The
- * container exists so future state (per-entity level hysteresis,
- * anticipation hints, planner state machines) can be added without
- * churning {@link PlanningSnapshot}'s contract.
+ * It carries the previous tick's active set, which the dev-mode validator
+ * checks and the cold-state delta diffs against. It also carries what the
+ * planner remembers about zoom: the previous plan's zoom and the direction
+ * of the last change to it, which the prefetch lane reads to pick the next
+ * level. The container exists so further state (per-entity level
+ * hysteresis, planner state machines) can be added without churning
+ * {@link PlanningSnapshot}'s contract.
  *
  * Cited [[principles/planning#4-planning-is-pure-carry-forward-state-is-explicit]]
  * and ADR `0027-planning-state-as-the-carry-forward-seam.md`.
  */
 export interface PlanningState {
   previousActiveSet: ActiveSetEntry[];
+  /**
+   * `visibleRegion.effectiveZoom` as the previous plan saw it, or `null`
+   * before the first plan. The core reports device pixels per level-0
+   * sample here in both view modes, so a change in it is a change in
+   * the measure the target level is chosen from.
+   */
+  previousEffectiveZoom: number | null;
+  /**
+   * Direction of the last zoom change the planner observed, or `null`
+   * until it observes one. Kept across plans whose zoom is unchanged, so
+   * a pan or a scrub after a zoom still prefetches in the zoom's
+   * direction.
+   */
+  zoomDirection: ZoomDirection | null;
+}
+
+/** Which way the last zoom change moved: toward level 0 or away from it. */
+export type ZoomDirection = "in" | "out";
+
+/** The state before the first plan: nothing held, no zoom seen. */
+export function initialPlanningState(): PlanningState {
+  return { previousActiveSet: [], previousEffectiveZoom: null, zoomDirection: null };
 }
 
 export interface RequestPlan {

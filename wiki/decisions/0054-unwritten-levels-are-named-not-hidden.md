@@ -5,7 +5,7 @@ description: "A declared pyramid level with no chunks written is detected by a r
 tags: [lucida, decision]
 source_path: wiki/decisions/0054-unwritten-levels-are-named-not-hidden.md
 created: 2026-08-10
-modified: 2026-08-10
+modified: 2026-09-04
 ---
 
 # Unwritten levels are named, not hidden
@@ -124,6 +124,14 @@ not the exporter's.
 - A dataset with exactly one declared level is never checked, since there is no contained
   level to witness against. Accepted: with one level there is no coarser fallback to
   preserve, and the all-fill case is indistinguishable from an empty dataset.
+- On a sharded level (issue #1010) the origin object is a shard, which can exist while the
+  origin inner chunk inside it was never written, so the probe reads the shard's index and
+  judges the origin *inner* chunk. The footprint compared is the inner chunk's, which is
+  also the chunk shape the level reports. Asking only whether the shard object is there was
+  rejected because it errs both ways: it clears a level whose origin shard holds every inner
+  chunk but the first, and it lets a shard whose data lies beyond a coarser level's origin
+  patch stand as a witness against that level on healthy sparse data. The index read is a
+  metadata read, outside the chunk read cap, for the same reason the HEAD is.
 - **Label pyramids are not probed.** A label overlay has its own levels and would go just as
   blank, but probing them would add a round trip per label on a path that already samples
   label discovery to stay affordable. Left for when a blank label level is actually seen.
