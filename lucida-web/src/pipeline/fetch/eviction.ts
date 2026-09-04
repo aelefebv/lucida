@@ -4,12 +4,12 @@
  * Two policies share one {@link EvictionPolicy} interface:
  *  - {@link LRUPolicy} — pure insertion-order LRU. Used by the overview
  *    cache and the proxy cache (entries are sacrificial; oldest goes first).
- *  - {@link TieredPolicy} — tier-walked LRU with an active-detail
- *    tiebreaker. Used by the main (detail) cache. Walks tiers in
- *    {@link getTierOrder} for the current interaction mode; within
- *    active-detail it uses the `(lastSeenTick ↑, priority ↓, insertedAt ↑)`
- *    rule, so focal
- *    chunks aren't swept out by their own freshness.
+ *  - {@link TieredPolicy} — used by the main (detail) cache. A chunk finer
+ *    than its entity's target level goes first, whatever its tier (ADR
+ *    0061). Then it walks tiers in {@link getTierOrder} for the current
+ *    interaction mode, and within active-detail it uses the
+ *    `(lastSeenTick ↑, priority ↓, insertedAt ↑)` rule, so focal chunks
+ *    aren't swept out by their own freshness.
  *
  * Pure: policies take synthetic entries and return victims. The cache
  * owns the actual removal (it tracks per-cache byte budgets and emits
@@ -65,55 +65,86 @@ export class LRUPolicy<T extends EvictableEntry = CacheEntry> implements Evictio
 }
 
 /**
- * Tiered LRU for the detail cache. Walks {@link getTierOrder} for the
- * mode provided by `modeProvider`, accumulating victims tier-by-tier
- * until enough bytes are freed.
+ * The detail cache's policy. Two passes:
  *
- * Within each tier the order is pure LRU (`insertedAt` ascending),
- * EXCEPT for active-detail, which uses the
- * `(lastSeenTick ↑, priority ↓, insertedAt ↑)` tiebreaker so:
- *  - chunks absent from the most recent plan are picked first;
- *  - among present-this-tick entries, the highest priority *number*
- *    (= farthest from focal, lowest importance) goes first;
- *  - insertion order is the deterministic final tiebreaker.
+ *  1. Chunks finer than their entity's target level, whatever their tier
+ *     (ADR 0061). Planning requests the target level only, the renderer
+ *     never samples a finer level, and a finer level is the most
+ *     expensive resident, so zooming out releases these first. Finest
+ *     level first, then the view-distance keys below.
+ *  2. Everything else, walking {@link getTierOrder} for the mode provided
+ *     by `modeProvider`. Within each tier the order is pure LRU
+ *     (`insertedAt` ascending), EXCEPT for active-detail, which uses the
+ *     `(lastSeenTick ↑, priority ↓, insertedAt ↑)` tiebreaker so:
+ *      - chunks absent from the most recent plan are picked first;
+ *      - among present-this-tick entries, the highest priority *number*
+ *        (= farthest from focal, lowest importance) goes first;
+ *      - insertion order is the deterministic final tiebreaker.
  *
- * `modeProvider` is a thunk so the policy tracks the live detector
- * without having to be re-wired on each interaction-mode change.
+ * A chunk at or coarser than the target is not special. A coarser
+ * resident chunk stays until the tier walk reaches it.
+ *
+ * `modeProvider` and `targetLevelFor` are thunks so the policy reads the
+ * live detector and the live targets without being re-wired on each
+ * change. An entity with no known target has nothing finer.
  */
 export class TieredPolicy implements EvictionPolicy {
   private readonly modeProvider: () => InteractionMode;
+  private readonly targetLevelFor: (entityId: string) => number | undefined;
 
-  constructor(modeProvider: () => InteractionMode) {
+  constructor(
+    modeProvider: () => InteractionMode,
+    targetLevelFor: (entityId: string) => number | undefined,
+  ) {
     this.modeProvider = modeProvider;
+    this.targetLevelFor = targetLevelFor;
   }
 
   selectVictims(entries: readonly CacheEntry[], bytesNeeded: number): CacheEntry[] {
     if (bytesNeeded <= 0) return [];
-    const tierOrder = getTierOrder(this.modeProvider());
     const victims: CacheEntry[] = [];
     let freed = 0;
+    const take = (entry: CacheEntry): void => {
+      victims.push(entry);
+      freed += entry.sizeBytes;
+    };
 
-    for (const tier of tierOrder) {
+    const finer: CacheEntry[] = [];
+    const rest: CacheEntry[] = [];
+    for (const entry of entries) {
+      const target = this.targetLevelFor(entry.entityId);
+      (target !== undefined && entry.level < target ? finer : rest).push(entry);
+    }
+    finer.sort((a, b) => a.level - b.level || byDistanceFromView(a, b));
+    for (const entry of finer) {
+      if (freed >= bytesNeeded) return victims;
+      take(entry);
+    }
+
+    for (const tier of getTierOrder(this.modeProvider())) {
       if (freed >= bytesNeeded) break;
-      const tierEntries = entries.filter(e => e.tier === tier);
+      const tierEntries = rest.filter(e => e.tier === tier);
       if (tier === "active-detail") {
-        tierEntries.sort((a, b) =>
-          a.lastSeenTick - b.lastSeenTick      // oldest plan tick first
-          || b.priority - a.priority           // then highest priority number (= farthest from focal) first
-          || a.insertedAt - b.insertedAt,      // then oldest insertion as deterministic tiebreaker
-        );
+        tierEntries.sort(byDistanceFromView);
       } else {
         tierEntries.sort((a, b) => a.insertedAt - b.insertedAt);
       }
       for (const entry of tierEntries) {
         if (freed >= bytesNeeded) break;
-        victims.push(entry);
-        freed += entry.sizeBytes;
+        take(entry);
       }
     }
 
     return victims;
   }
+}
+
+function byDistanceFromView(a: CacheEntry, b: CacheEntry): number {
+  return (
+    a.lastSeenTick - b.lastSeenTick
+    || b.priority - a.priority
+    || a.insertedAt - b.insertedAt
+  );
 }
 
 /**

@@ -46,18 +46,24 @@ function makeRequest(overrides?: Partial<ChunkRequest>): ChunkRequest {
   };
 }
 
-function makePlan(requests: ChunkRequest[]): RequestPlan {
-  const activeSet: ActiveSetEntry[] = [{
+function tile(entityId: string, imageId: string, target: number): ActiveSetEntry {
+  return {
     kind: "tile",
-    entityId: "entity-1",
-    imageId: "image-1",
+    entityId,
+    imageId,
     mode: "tiles-with-detail",
-    detailLevels: [0],
+    detailLevels: [target],
     coarseLevel: null,
     proxyKind: undefined,
     proxyAvailable: false,
     groupProxyAvailable: false,
-  }];
+  };
+}
+
+function makePlan(
+  requests: ChunkRequest[],
+  activeSet: ActiveSetEntry[] = [tile("entity-1", "image-1", 0)],
+): RequestPlan {
   return {
     requests,
     activeSet,
@@ -195,19 +201,48 @@ describe("cache point events", () => {
     expect(evictions.length).toBeGreaterThanOrEqual(1);
     expect(evictions[0].reason).toBe("evicted");
     expect(evictions[0].chunk?.chunkKey).toBe("0/0/0/0/0/0");
+    expect(evictions[0].chunk?.level).toBe(0);
   });
 
-  it("carries the renderer's own reason on a worker-reported eviction", async () => {
+  it("evicts the level finer than the new target first, and the event names that level", async () => {
+    openRun();
+    const { cache } = createCache(64, { mainBudgetBytes: 150, overviewBudgetBytes: 0 });
+    const other = tile("entity-2", "image-2", 1);
+
+    cache.onPlanRebuildStart();
+    cache.submit(makePlan(
+      [
+        makeRequest({ level: 0, priority: 0 }),
+        makeRequest({ entityId: "entity-2", imageId: "image-2", level: 1, priority: 100 }),
+      ],
+      [tile("entity-1", "image-1", 0), other],
+    ));
+    await flush();
+
+    // Entity 1's target moves to level 2. The view-distance keys alone
+    // would take entity 2's distant chunk.
+    cache.onPlanRebuildStart();
+    cache.submit(makePlan([makeRequest({ level: 2 })], [tile("entity-1", "image-1", 2), other]));
+    await flush();
+
+    const evictions = eventsOfKind(exportedEvents(), "eviction");
+    expect(evictions.map(e => [e.reason, e.chunk?.entityId, e.chunk?.level])).toEqual([
+      ["evicted", "entity-1", 0],
+    ]);
+  });
+
+  it("carries the renderer's own reason and the chunk's level on a worker-reported eviction", async () => {
     openRun();
     const { cache } = createCache(64);
 
-    cache.submit(makePlan([makeRequest()]));
+    cache.submit(makePlan([makeRequest({ level: 1 })], [tile("entity-1", "image-1", 1)]));
     await flush();
-    cache.markChunkEvicted("image-1", 0, ["0/0/0/0/0/0"], [], "stale");
+    cache.markChunkEvicted("image-1", 0, ["1/0/0/0/0/0"], [], "stale");
 
     const evictions = eventsOfKind(exportedEvents(), "eviction");
-    expect(evictions.map(e => e.reason)).toEqual(["stale"]);
-    expect(evictions[0].chunk?.chunkKey).toBe("0/0/0/0/0/0");
+    expect(evictions.map(e => [e.reason, e.chunk?.chunkKey, e.chunk?.level])).toEqual([
+      ["stale", "1/0/0/0/0/0", 1],
+    ]);
   });
 
   it("reads the residency tier off the chunk rather than assuming detail", async () => {
