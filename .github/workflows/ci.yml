@@ -359,3 +359,8 @@ jobs:
       # a generator change that would alter them fails here.
       - name: Synthetic fixture generator tests
         run: uv run extras/test_synthetic_ome_zarr.py
+
+      # The whole sharded twin check needs a server and a browser. This runs
+      # only the parts that read an object store and a run file.
+      - name: Sharded twin check tests
+        run: uv run extras/test_verify_sharded_twins.py

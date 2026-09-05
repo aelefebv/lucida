@@ -82,6 +82,7 @@ export function makeServerRow(overrides: Partial<TraceServerRow> = {}): TraceSer
     outcome: "delivered",
     phases: {},
     coalescedOnto: null,
+    backendBytes: null,
     dispatchOffsetUs: 0,
     durationUs: 0,
     requestId: null,

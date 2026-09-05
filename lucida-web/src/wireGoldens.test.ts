@@ -1333,6 +1333,7 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
         decompress_us: [4512, PHASE_UNSET, PHASE_UNSET],
         slice_encode_us: [903, PHASE_UNSET, PHASE_UNSET],
         handoff_us: [61, 55, PHASE_UNSET],
+        backend_bytes: [131072, null, null],
         coalesced_onto: [LABEL_NONE, LABEL_NONE, LABEL_NONE],
       },
     });
@@ -1361,13 +1362,14 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
           row.durationUs,
           row.requestId,
           row.metadataPhase,
+          row.backendBytes,
         ]),
     ).toEqual([
-      [2558, "chunk", 142 + 37 + 88 + 2 + 3100000 + 211400 + 4512 + 903 + 61, 0, null, null],
-      [2559, "asset", 96 + 41 + 74 + 3 + 55, 0, null, null],
+      [2558, "chunk", 142 + 37 + 88 + 2 + 3100000 + 211400 + 4512 + 903 + 61, 0, null, null, 131072],
+      [2559, "asset", 96 + 41 + 74 + 3 + 55, 0, null, null, null],
       // The metadata read keys on the open, not on a correlation label, and
       // its span is in its own column rather than in any phase.
-      [0, "metadata-read", 0, 63441, "web-open-4c1a", "backend-read"],
+      [0, "metadata-read", 0, 63441, "web-open-4c1a", "backend-read", null],
     ]);
   });
 
