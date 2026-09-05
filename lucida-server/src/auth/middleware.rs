@@ -64,8 +64,9 @@ pub struct AuthMiddlewareState {
 impl AuthMiddlewareState {
     /// The production composition: the extractor for the configured
     /// mode, then the directory when `LUCIDA_DIRECTORY_URL` is set,
-    /// loaded once. Fallible only for the reason
-    /// [`build_extractor`] is; the directory never fails a boot.
+    /// loaded once here and kept loaded by its own schedule. Fallible
+    /// only for the reason [`build_extractor`] is; the directory never
+    /// fails a boot.
     pub async fn build(
         config: Arc<AuthConfig>,
         store: Arc<dyn LoginSessionStore>,
@@ -906,6 +907,148 @@ mod tests {
             Some("https://pictures.example/alice.png")
         );
         assert!(!p.is_admin);
+    }
+
+    // -- The schedule, as a person sees it ---------------------------------
+    //
+    // The loop itself is tested in `directory.rs`; these check what
+    // `whoami` answers while it runs.
+
+    use crate::auth::directory::test_support::{eventually, fast_schedule};
+    use std::time::{Duration, Instant};
+
+    /// Ask `whoami` for `session` until the answer satisfies `accept`,
+    /// or fail after the polling limit.
+    async fn whoami_until(
+        app: &Router,
+        session: &str,
+        what: &str,
+        accept: impl Fn(&AuthPrincipal) -> bool,
+    ) -> AuthPrincipal {
+        let mut last = None;
+        eventually(what, async || {
+            let p = whoami_of(app.clone(), whoami_request(session)).await;
+            let accepted = accept(&p);
+            last = Some(p);
+            accepted
+        })
+        .await;
+        last.expect("eventually returns only once accepted")
+    }
+
+    #[tokio::test]
+    async fn a_listing_that_is_down_at_startup_is_served_once_it_recovers_without_a_restart() {
+        let (url, mock) = spawn_failing_listing(StatusCode::SERVICE_UNAVAILABLE).await;
+        let app = whoami_router(google_state(Some(fast_schedule(&url)), &[]).await);
+
+        let p = whoami_of(app.clone(), whoami_request("alice-session")).await;
+        assert_eq!(p.display_name, "Alice From Sign-In");
+        mock.wait_for_fetches(3).await;
+
+        mock.serve(listing()).await;
+        let p = whoami_until(&app, "alice-session", "a retry loads the listing", |p| {
+            p.display_name == "Alice Example"
+        })
+        .await;
+        assert_eq!(
+            p.picture_url.as_deref(),
+            Some("https://pictures.example/alice.png")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_changed_listing_reaches_whoami_within_a_refresh() {
+        let (url, mock) = spawn_mock_listing(listing()).await;
+        let app = whoami_router(google_state(Some(fast_schedule(&url)), &[]).await);
+        let p = whoami_of(app.clone(), whoami_request("alice-session")).await;
+        assert_eq!(p.display_name, "Alice Example");
+
+        mock.serve(json!([{"email": "alice@example.com", "name": "Alice Renamed"}]))
+            .await;
+        whoami_until(
+            &app,
+            "alice-session",
+            "a refresh picks up the rename",
+            |p| p.display_name == "Alice Renamed",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_refresh_that_fails_leaves_whoami_answering_from_the_previous_snapshot() {
+        let (url, mock) = spawn_mock_listing(listing()).await;
+        let app = whoami_router(google_state(Some(fast_schedule(&url)), &[]).await);
+        mock.fail(StatusCode::BAD_GATEWAY).await;
+        mock.wait_for_fetches(4).await;
+
+        let p = whoami_of(app, whoami_request("alice-session")).await;
+        assert_eq!(p.display_name, "Alice Example");
+        assert_eq!(
+            p.picture_url.as_deref(),
+            Some("https://pictures.example/alice.png")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refresh_that_returns_an_empty_listing_leaves_the_previous_snapshot_in_place() {
+        let (url, mock) = spawn_mock_listing(listing()).await;
+        let app = whoami_router(google_state(Some(fast_schedule(&url)), &[]).await);
+        mock.serve(json!([])).await;
+        mock.wait_for_fetches(4).await;
+
+        let p = whoami_of(app, whoami_request("alice-session")).await;
+        assert_eq!(p.display_name, "Alice Example");
+        assert_eq!(
+            p.picture_url.as_deref(),
+            Some("https://pictures.example/alice.png")
+        );
+    }
+
+    /// The schedule alone decides when the listing is fetched. The
+    /// listing fails after the boot, so when the burst arrives the
+    /// snapshot is already older than the interval and a design that
+    /// refreshed on demand would fetch. This one adds nothing, and the
+    /// next fetch is the schedule's, an interval away.
+    #[tokio::test]
+    async fn a_burst_of_requests_after_the_interval_adds_no_fetches() {
+        let (url, mock) = spawn_mock_listing(listing()).await;
+        let mut cfg = DirectoryConfig::for_tests(&url);
+        cfg.refresh_interval = Duration::from_secs(2);
+        let app = whoami_router(google_state(Some(cfg), &[]).await);
+        mock.fail(StatusCode::BAD_GATEWAY).await;
+        mock.wait_for_fetches(2).await;
+
+        let mut burst = tokio::task::JoinSet::new();
+        for _ in 0..64 {
+            let app = app.clone();
+            burst.spawn(async move { whoami_of(app, whoami_request("alice-session")).await });
+        }
+        while let Some(p) = burst.join_next().await {
+            assert_eq!(p.expect("a request task").display_name, "Alice Example");
+        }
+        assert_eq!(mock.fetch_count().await, 2, "the burst fetched nothing");
+    }
+
+    /// A listing that accepts the connection and never answers costs
+    /// the schedule its timeout and costs a request nothing. `whoami`
+    /// reads the snapshot and never waits on a fetch.
+    #[tokio::test]
+    async fn a_listing_that_hangs_does_not_slow_whoami() {
+        let (url, mock) = spawn_mock_listing(listing()).await;
+        let app = whoami_router(google_state(Some(fast_schedule(&url)), &[]).await);
+        mock.hang().await;
+        mock.wait_for_fetches(2).await;
+
+        let started = Instant::now();
+        let p = whoami_of(app, whoami_request("alice-session")).await;
+        let took = started.elapsed();
+        assert_eq!(p.display_name, "Alice Example");
+        assert!(
+            took < directory::LOAD_TIMEOUT / 2,
+            "whoami took {took:?} while a fetch hangs for {:?}",
+            directory::LOAD_TIMEOUT
+        );
+        assert_eq!(mock.fetch_count().await, 2, "the fetch is still open");
     }
 
     #[test]

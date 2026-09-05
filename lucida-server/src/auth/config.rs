@@ -100,6 +100,35 @@ pub const DEFAULT_DIRECTORY_PICTURE_FIELD: &str = "picture";
 /// via `LUCIDA_DIRECTORY_REFRESH_SECONDS`.
 pub const DEFAULT_DIRECTORY_REFRESH_SECONDS: u64 = 6 * 60 * 60;
 
+/// How a first load of the profile directory that failed is retried:
+/// wait `first`, then twice as long each time, never longer than
+/// `cap`. Thirty seconds doubling to ten minutes catches a listing
+/// that is restarting within a minute and asks one that is down a few
+/// times an hour.
+///
+/// Not an operator setting, and no variable sets it. It is a field
+/// rather than a constant so that the one wiring path reads it beside
+/// the interval and a test can shorten it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Backoff {
+    pub first: Duration,
+    pub cap: Duration,
+}
+
+impl Backoff {
+    pub const DEFAULT: Self = Self {
+        first: Duration::from_secs(30),
+        cap: Duration::from_secs(10 * 60),
+    };
+
+    /// The delay before each retry, in order, without end.
+    pub fn delays(self) -> impl Iterator<Item = Duration> {
+        std::iter::successors(Some(self.first.min(self.cap)), move |delay| {
+            Some(delay.saturating_mul(2).min(self.cap))
+        })
+    }
+}
+
 /// How the `Secure` cookie attribute is chosen.
 ///
 /// `Auto` (the default) sets `Secure` iff the request scheme is
@@ -258,9 +287,11 @@ pub struct DirectoryConfig {
     /// Typed here so a bad name or value is refused at boot and the
     /// client that sends them has nothing left to check.
     pub headers: Vec<(HeaderName, HeaderValue)>,
-    /// How often the listing is re-read. Parsed and carried here; the
-    /// refresh loop that reads it is not part of the first load.
+    /// How often the listing is re-read once it has loaded. Twice this
+    /// is the age at which the snapshot is logged as stale.
     pub refresh_interval: Duration,
+    /// How a first load that failed is retried until one succeeds.
+    pub backoff: Backoff,
 }
 
 impl DirectoryConfig {
@@ -274,6 +305,7 @@ impl DirectoryConfig {
             picture_field: DEFAULT_DIRECTORY_PICTURE_FIELD.to_string(),
             headers: Vec::new(),
             refresh_interval: Duration::from_secs(DEFAULT_DIRECTORY_REFRESH_SECONDS),
+            backoff: Backoff::DEFAULT,
         }
     }
 }
@@ -723,6 +755,7 @@ where
         picture_field,
         headers,
         refresh_interval,
+        backoff: Backoff::DEFAULT,
     }))
 }
 
@@ -1487,5 +1520,27 @@ mod tests {
         assert_eq!(d.email_field, "email");
         assert_eq!(d.name_fields, vec!["name".to_string()]);
         assert_eq!(d.picture_field, "picture");
+    }
+
+    /// A first load that fails is retried on a schedule no variable
+    /// sets: thirty seconds, doubling, never longer than ten minutes.
+    #[test]
+    fn a_failed_first_load_is_retried_at_thirty_seconds_doubling_to_ten_minutes() {
+        let parsed = AuthConfig::from_env_map(reader(&[("LUCIDA_DIRECTORY_URL", DIRECTORY_URL)]))
+            .expect("the URL is the only required value")
+            .directory
+            .expect("directory block");
+        let delays: Vec<u64> = parsed
+            .backoff
+            .delays()
+            .take(8)
+            .map(|d| d.as_secs())
+            .collect();
+        assert_eq!(delays, [30, 60, 120, 240, 480, 600, 600, 600]);
+        assert_eq!(
+            DirectoryConfig::for_tests(DIRECTORY_URL).backoff,
+            parsed.backoff,
+            "tests start from the schedule production runs"
+        );
     }
 }

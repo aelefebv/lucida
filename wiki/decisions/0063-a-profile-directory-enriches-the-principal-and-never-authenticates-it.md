@@ -107,12 +107,21 @@ A URL is right or wrong at typing time. A host is up or down at runtime.
 
 ## Consequences
 
-- **A lookup costs no network round trip.** The listing is fetched whole, once, with
-  a ten-second timeout, and held in memory keyed by normalized email. Refreshing that
-  snapshot on an interval, keeping the last good one across a failed refresh, and
-  treating an empty listing as "not loaded yet" are the next decisions.
-  `ProfileDirectory::load` is the operation they repeat, and the interval is already
-  parsed and carried.
+- **A lookup costs no network round trip, and no request ever fetches.** The listing
+  is fetched whole, with a ten-second timeout, and held in memory keyed by normalized
+  email. One task owned by the directory does every fetch, one at a time. It retries
+  a first load that failed on a backoff, thirty seconds doubling to ten minutes, until
+  one succeeds, and then refreshes every `LUCIDA_DIRECTORY_REFRESH_SECONDS`, six hours
+  by default. A request reads the snapshot and nothing else, so a listing that is slow
+  or down shows up in the log and nowhere a person can see.
+- **The last good snapshot outlives a bad refresh.** A refresh that fails keeps the
+  snapshot and logs `auth.directory.refresh_failed` with the reason. A listing that
+  yields no rows, whether an empty array or entries without a usable email, never
+  replaces a populated snapshot and does not count as the first load, because a
+  directory can serve an empty list before its own first load. It logs
+  `auth.directory.empty` and the schedule continues unchanged. A snapshot older than
+  two intervals, twelve hours by default, is logged as `auth.directory.stale` once per
+  episode, by the task and never per request.
 - **A load reports what it kept and what it skipped.** A wrong endpoint or a wrong
   field name then shows up as zero rows or as most rows skipped, at boot rather than
   on the first complaint. The listing URL is logged without its query string or
@@ -146,6 +155,10 @@ A URL is right or wrong at typing time. A host is up or down at runtime.
   mistake it for one.
 - **Look the email up per request.** Rejected. A network round trip on every
   request, and an authentication path that stalls when a decorative dependency does.
+- **Refresh from the request that finds the snapshot old.** Rejected. It puts a
+  fetch, or a wait on one, back on a request path, and the first requests after an
+  outage arrive together, so single flight has to be added to keep them from becoming
+  a burst of fetches. A task on a timer has neither problem.
 - **Fail the boot when the listing cannot be loaded.** Rejected, for the reasons
   above: it promotes a display dependency to an availability dependency.
 - **Let a request header name the record.** Rejected, for the reason the lookup-key

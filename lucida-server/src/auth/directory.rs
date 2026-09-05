@@ -18,13 +18,20 @@
 //! shown.
 //!
 //! The listing is fetched whole and held in memory, so a lookup never
-//! adds a network round trip to a request. [`load_at_boot`] performs the
-//! one load the boot does. [`ProfileDirectory::load`] is the operation a
-//! refresh would repeat.
+//! adds a network round trip to a request. [`load_at_boot`] builds the
+//! directory, loads it once, and starts the schedule that keeps it
+//! loaded: a first load that failed is retried on a backoff until one
+//! succeeds, and a loaded snapshot is refreshed every interval. The
+//! schedule is the only thing that fetches. A refresh that fails, or
+//! that returns a listing with no rows, leaves the last good snapshot
+//! in place and says so in the log, and a snapshot that outlives two
+//! intervals is logged as stale once. No request performs, waits on,
+//! or triggers a fetch.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock, Weak};
+use std::time::{Duration, Instant};
 
 use axum::http::header::HeaderMap;
 use lucida_core::auth_principal::AuthPrincipal;
@@ -72,16 +79,38 @@ pub enum DirectoryError {
     Decode(String),
 }
 
-/// An in-memory snapshot of the listing, and the client that reads it.
+/// An in-memory snapshot of the listing, the client that reads it, and
+/// the schedule that keeps it read.
 pub struct ProfileDirectory {
     config: DirectoryConfig,
+    /// The listing URL as it may be logged, computed once.
+    shown_url: String,
     http: reqwest::Client,
-    rows: RwLock<Arc<HashMap<String, Profile>>>,
+    snapshot: RwLock<Snapshot>,
+    /// How many times a snapshot has been logged as stale. Counted so a
+    /// test can assert on the log's mechanism rather than its output.
+    stale_episodes: AtomicUsize,
 }
 
+/// What requests read, and what the schedule knows about its age.
+struct Snapshot {
+    rows: Arc<HashMap<String, Profile>>,
+    /// When `rows` last came from a listing. `None` until a load yields
+    /// a row, which an empty listing never does.
+    loaded_at: Option<Instant>,
+    /// Whether this snapshot's age has been logged. Cleared when the
+    /// snapshot is replaced, so each stale episode is logged once.
+    stale_logged: bool,
+}
+
+/// The age at which a snapshot is stale, as a multiple of the refresh
+/// interval: two missed refreshes in a row.
+const STALE_AFTER_INTERVALS: u32 = 2;
+
 impl ProfileDirectory {
-    /// Build the directory with an empty snapshot. Nothing is fetched
-    /// here; call [`load`](Self::load) for that.
+    /// Build the directory with an empty snapshot and no schedule.
+    /// Nothing is fetched here; [`load_at_boot`] does that and starts
+    /// the schedule, and a test calls [`load`](Self::load) by hand.
     pub fn new(config: DirectoryConfig) -> Result<Self, DirectoryError> {
         let mut headers = HeaderMap::new();
         for (name, value) in &config.headers {
@@ -93,22 +122,37 @@ impl ProfileDirectory {
             .build()
             .map_err(|e| DirectoryError::Client(e.to_string()))?;
         Ok(Self {
+            shown_url: redacted(&config.url),
             config,
             http,
-            rows: RwLock::new(Arc::new(HashMap::new())),
+            snapshot: RwLock::new(Snapshot {
+                rows: Arc::new(HashMap::new()),
+                loaded_at: None,
+                stale_logged: false,
+            }),
+            stale_episodes: AtomicUsize::new(0),
         })
     }
 
-    /// Fetch the listing once and replace the snapshot with what it
-    /// holds. On any error the snapshot is left as it was.
-    pub async fn load(&self) -> Result<LoadReport, DirectoryError> {
+    /// Fetch the listing once and, when it yields at least one row,
+    /// replace the snapshot with what it holds. A listing that yields
+    /// none is reported and leaves the snapshot as it was, because a
+    /// directory can serve an empty list before its own first load and
+    /// an empty answer is no reason to erase the names people already
+    /// see. On any error the snapshot is left as it was.
+    pub(crate) async fn load(&self) -> Result<LoadReport, DirectoryError> {
         let listing = fetch_listing(&self.http, &self.config.url).await?;
         let (rows, skipped) = rows_from_listing(&listing, &self.config)?;
         let report = LoadReport {
             rows: rows.len(),
             skipped,
         };
-        *self.rows.write().expect("directory snapshot lock") = Arc::new(rows);
+        if !rows.is_empty() {
+            let mut snapshot = self.snapshot.write().expect("directory snapshot lock");
+            snapshot.rows = Arc::new(rows);
+            snapshot.loaded_at = Some(Instant::now());
+            snapshot.stale_logged = false;
+        }
         Ok(report)
     }
 
@@ -117,9 +161,10 @@ impl ProfileDirectory {
     /// finds the same row.
     pub fn lookup(&self, email: &str) -> Option<Profile> {
         let key = normalize_email(email)?;
-        self.rows
+        self.snapshot
             .read()
             .expect("directory snapshot lock")
+            .rows
             .get(&key)
             .cloned()
     }
@@ -139,20 +184,133 @@ impl ProfileDirectory {
             principal.picture_url = Some(picture);
         }
     }
+
+    /// Whether any load has yielded a row. Decides which schedule the
+    /// task is on: retrying a first load, or refreshing a snapshot.
+    fn is_loaded(&self) -> bool {
+        self.snapshot
+            .read()
+            .expect("directory snapshot lock")
+            .loaded_at
+            .is_some()
+    }
+
+    /// One attempt, the boot's or the schedule's. It fetches, then logs
+    /// what happened, naming the listing and no one in it.
+    ///
+    /// A failure before the first load logs as `load_failed`, meaning
+    /// no names yet. A failure after it logs as `refresh_failed`,
+    /// meaning the names are getting older. Whoever watches the log
+    /// treats those differently, so they get different names.
+    async fn attempt(&self) {
+        let loaded_before = self.is_loaded();
+        match self.load().await {
+            Ok(report) if report.rows > 0 => info!(
+                url = %self.shown_url,
+                rows = report.rows,
+                skipped = report.skipped,
+                "auth.directory.loaded",
+            ),
+            Ok(report) => warn!(
+                url = %self.shown_url,
+                skipped = report.skipped,
+                "auth.directory.empty",
+            ),
+            Err(e) if loaded_before => {
+                warn!(url = %self.shown_url, error = %e, "auth.directory.refresh_failed");
+            }
+            Err(e) => warn!(url = %self.shown_url, error = %e, "auth.directory.load_failed"),
+        }
+        self.check_stale();
+    }
+
+    /// Log the snapshot as stale, once, when it has outlived two
+    /// refresh intervals. Runs after every attempt on the schedule and
+    /// never on a request, so the line appears once per episode rather
+    /// than once per person who happened to be looked up. A snapshot
+    /// that has just loaded is not stale, and one that never loaded
+    /// has no age.
+    fn check_stale(&self) {
+        let mut snapshot = self.snapshot.write().expect("directory snapshot lock");
+        let Some(loaded_at) = snapshot.loaded_at else {
+            return;
+        };
+        let age = loaded_at.elapsed();
+        let stale_after = self
+            .config
+            .refresh_interval
+            .saturating_mul(STALE_AFTER_INTERVALS);
+        if snapshot.stale_logged || age < stale_after {
+            return;
+        }
+        snapshot.stale_logged = true;
+        self.stale_episodes.fetch_add(1, Ordering::Relaxed);
+        warn!(
+            url = %self.shown_url,
+            age_s = age.as_secs(),
+            refresh_s = self.config.refresh_interval.as_secs(),
+            "auth.directory.stale",
+        );
+    }
+
+    /// How many stale episodes have been logged so far.
+    #[cfg(test)]
+    pub(crate) fn stale_episodes(&self) -> usize {
+        self.stale_episodes.load(Ordering::Relaxed)
+    }
 }
 
-/// Build the directory and load it once, at boot.
+/// The schedule: retry the first load on the backoff until one yields
+/// rows, then refresh every interval for the rest of the process.
+///
+/// This loop is the only caller of `load` outside tests, and it awaits
+/// each attempt before it sleeps, so one fetch is in flight at a time
+/// by construction and no request ever performs or waits on one. It
+/// holds the directory weakly and upgrades only around an attempt, so
+/// the directory owns the task. Dropping the last handle ends it at
+/// its next wake.
+async fn run_schedule(directory: Weak<ProfileDirectory>) {
+    let (mut retries, interval) = {
+        let Some(directory) = directory.upgrade() else {
+            return;
+        };
+        (
+            directory.config.backoff.delays(),
+            directory.config.refresh_interval,
+        )
+    };
+    loop {
+        let delay = {
+            let Some(directory) = directory.upgrade() else {
+                return;
+            };
+            if directory.is_loaded() {
+                interval
+            } else {
+                retries.next().expect("the backoff has no end")
+            }
+        };
+        tokio::time::sleep(delay).await;
+        let Some(directory) = directory.upgrade() else {
+            return;
+        };
+        directory.attempt().await;
+    }
+}
+
+/// Build the directory, load it once, and start the schedule that
+/// keeps it loaded.
 ///
 /// Never stops the boot. A listing that is down when the server starts
 /// is an outage to survive, not a configuration to refuse: the server
-/// comes up serving the names the auth mode derives, and says so once
-/// in the log. Malformed configuration was refused before this ran.
-/// `None` only when no HTTP client can be built at all, which is a
-/// property of the process rather than of the listing.
+/// comes up serving the names the auth mode derives, says so in the
+/// log, and the schedule keeps trying. Malformed configuration was
+/// refused before this ran. `None` only when no HTTP client can be
+/// built at all, which is a property of the process rather than of the
+/// listing.
 pub async fn load_at_boot(config: DirectoryConfig) -> Option<Arc<ProfileDirectory>> {
-    let url = redacted(&config.url);
     info!(
-        url = %url,
+        url = %redacted(&config.url),
         email_field = %config.email_field,
         name_fields = ?config.name_fields,
         picture_field = %config.picture_field,
@@ -167,15 +325,8 @@ pub async fn load_at_boot(config: DirectoryConfig) -> Option<Arc<ProfileDirector
             return None;
         }
     };
-    match directory.load().await {
-        Ok(report) => info!(
-            url = %url,
-            rows = report.rows,
-            skipped = report.skipped,
-            "auth.directory.loaded",
-        ),
-        Err(e) => warn!(url = %url, error = %e, "auth.directory.load_failed"),
-    }
+    directory.attempt().await;
+    tokio::spawn(run_schedule(Arc::downgrade(&directory)));
     Some(directory)
 }
 
@@ -284,6 +435,7 @@ pub(crate) mod test_support {
     //! counts fetches and keeps the headers of the last one.
 
     use std::sync::Arc;
+    use std::time::Duration;
 
     use axum::Router;
     use axum::extract::State;
@@ -293,9 +445,43 @@ pub(crate) mod test_support {
     use serde_json::Value;
     use tokio::sync::Mutex;
 
+    use crate::auth::config::{Backoff, DirectoryConfig};
+
+    /// How long a test waits for the schedule to do something, and how
+    /// often it looks. The schedules under test run in milliseconds.
+    /// The limit is for a loaded machine, not a design number.
+    pub const POLL_LIMIT: Duration = Duration::from_secs(10);
+    pub const POLL_STEP: Duration = Duration::from_millis(10);
+
+    /// Poll `condition` until it holds, or fail after [`POLL_LIMIT`].
+    pub async fn eventually(what: &str, mut condition: impl AsyncFnMut() -> bool) {
+        let started = std::time::Instant::now();
+        while !condition().await {
+            assert!(
+                started.elapsed() < POLL_LIMIT,
+                "still waiting after {POLL_LIMIT:?}: {what}"
+            );
+            tokio::time::sleep(POLL_STEP).await;
+        }
+    }
+
+    /// Config for `url` whose first-load retries and refreshes both run
+    /// in milliseconds, so a test can watch the schedule act.
+    pub fn fast_schedule(url: &str) -> DirectoryConfig {
+        let mut cfg = DirectoryConfig::for_tests(url);
+        cfg.backoff = Backoff {
+            first: Duration::from_millis(20),
+            cap: Duration::from_millis(80),
+        };
+        cfg.refresh_interval = Duration::from_millis(100);
+        cfg
+    }
+
     struct Served {
         status: StatusCode,
         body: String,
+        /// Hold every fetch open past the load timeout before answering.
+        hang: bool,
         fetches: usize,
         last_headers: HeaderMap,
     }
@@ -311,6 +497,7 @@ pub(crate) mod test_support {
             let mut guard = self.state.lock().await;
             guard.status = StatusCode::OK;
             guard.body = listing.to_string();
+            guard.hang = false;
         }
 
         /// Answer the next fetches with this status and an empty body.
@@ -318,10 +505,26 @@ pub(crate) mod test_support {
             let mut guard = self.state.lock().await;
             guard.status = status;
             guard.body.clear();
+            guard.hang = false;
+        }
+
+        /// Hold the next fetches open past the load timeout, the shape
+        /// of a listing that accepts connections and never answers.
+        pub async fn hang(&self) {
+            self.state.lock().await.hang = true;
         }
 
         pub async fn fetch_count(&self) -> usize {
             self.state.lock().await.fetches
+        }
+
+        /// Wait until at least this many fetches have arrived, or fail
+        /// after the polling limit.
+        pub async fn wait_for_fetches(&self, at_least: usize) {
+            eventually(&format!("at least {at_least} fetches"), async || {
+                self.fetch_count().await >= at_least
+            })
+            .await;
         }
 
         /// The value of one header on the most recent fetch, if it was
@@ -338,13 +541,21 @@ pub(crate) mod test_support {
     }
 
     async fn listing(State(mock): State<MockListing>, headers: HeaderMap) -> impl IntoResponse {
-        let mut guard = mock.state.lock().await;
-        guard.fetches += 1;
-        guard.last_headers = headers;
+        let (status, body, hang) = {
+            let mut guard = mock.state.lock().await;
+            guard.fetches += 1;
+            guard.last_headers = headers;
+            (guard.status, guard.body.clone(), guard.hang)
+        };
+        if hang {
+            // Sleep outside the lock so `fetch_count` keeps answering
+            // while this fetch is held past the client's timeout.
+            tokio::time::sleep(super::LOAD_TIMEOUT * 3).await;
+        }
         (
-            guard.status,
+            status,
             [(axum::http::header::CONTENT_TYPE, "application/json")],
-            guard.body.clone(),
+            body,
         )
     }
 
@@ -366,6 +577,7 @@ pub(crate) mod test_support {
             state: Arc::new(Mutex::new(Served {
                 status,
                 body,
+                hang: false,
                 fetches: 0,
                 last_headers: HeaderMap::new(),
             })),
@@ -612,6 +824,53 @@ mod tests {
         assert_eq!(mock.fetch_count().await, 2);
     }
 
+    /// A directory can serve an empty list before its own first load,
+    /// so an empty listing means "not loaded yet", never "nobody".
+    #[tokio::test]
+    async fn an_empty_listing_does_not_replace_a_populated_snapshot() {
+        let (url, mock) =
+            spawn_mock_listing(json!([{"email": "alice@example.com", "name": "Alice"}])).await;
+        let directory = loaded(config(&url)).await;
+
+        mock.serve(json!([])).await;
+        let report = directory
+            .load()
+            .await
+            .expect("an empty array is a listing, not an error");
+        assert_eq!(
+            report,
+            LoadReport {
+                rows: 0,
+                skipped: 0
+            }
+        );
+        assert!(
+            directory.lookup("alice@example.com").is_some(),
+            "the populated snapshot survives an empty listing"
+        );
+    }
+
+    /// The same holds for a listing that has entries and no usable
+    /// email in any of them: nothing to show is nothing to replace with.
+    #[tokio::test]
+    async fn a_listing_with_no_usable_row_does_not_replace_a_populated_snapshot() {
+        let (url, mock) =
+            spawn_mock_listing(json!([{"email": "alice@example.com", "name": "Alice"}])).await;
+        let directory = loaded(config(&url)).await;
+
+        mock.serve(json!([{"address": "alice@example.com", "name": "Alice"}]))
+            .await;
+        let report = directory.load().await.expect("an array parses");
+        assert_eq!(
+            report,
+            LoadReport {
+                rows: 0,
+                skipped: 1
+            }
+        );
+        assert!(directory.lookup("alice@example.com").is_some());
+    }
+
     #[tokio::test]
     async fn an_unreachable_listing_is_a_network_error() {
         // Port 1 on loopback refuses immediately, so this does not wait
@@ -630,5 +889,118 @@ mod tests {
         let before = p.clone();
         directory.apply(&mut p);
         assert_eq!(p, before);
+    }
+
+    // -- The schedule ------------------------------------------------------
+
+    /// Config whose first-load retries run in milliseconds while the
+    /// refresh interval stays at its six-hour default, so a load that
+    /// happens within a test can only have come from a retry.
+    fn config_retrying_fast(url: &str) -> DirectoryConfig {
+        let mut cfg = config(url);
+        cfg.backoff = fast_schedule(url).backoff;
+        cfg
+    }
+
+    fn name_of(directory: &ProfileDirectory, email: &str) -> Option<String> {
+        directory.lookup(email).and_then(|p| p.display_name)
+    }
+
+    #[tokio::test]
+    async fn a_first_load_that_fails_is_retried_until_the_listing_answers() {
+        let (url, mock) = spawn_failing_listing(StatusCode::SERVICE_UNAVAILABLE).await;
+        let directory = load_at_boot(config_retrying_fast(&url))
+            .await
+            .expect("a client builds");
+        assert!(directory.lookup("alice@example.com").is_none());
+        mock.wait_for_fetches(3).await;
+
+        mock.serve(json!([{"email": "alice@example.com", "name": "Alice"}]))
+            .await;
+        eventually("the retry loads the listing", async || {
+            directory.lookup("alice@example.com").is_some()
+        })
+        .await;
+    }
+
+    /// An empty listing at boot is not the first load. The schedule
+    /// stays on the retry backoff, in milliseconds here, rather than
+    /// moving to the interval, which is six hours here.
+    #[tokio::test]
+    async fn an_empty_listing_at_boot_is_not_a_load_and_the_retry_continues() {
+        let (url, mock) = spawn_mock_listing(json!([])).await;
+        let directory = load_at_boot(config_retrying_fast(&url))
+            .await
+            .expect("a client builds");
+        mock.wait_for_fetches(3).await;
+
+        mock.serve(json!([{"email": "alice@example.com", "name": "Alice"}]))
+            .await;
+        eventually("the retry loads the listing", async || {
+            directory.lookup("alice@example.com").is_some()
+        })
+        .await;
+    }
+
+    /// Once refreshes fail, the snapshot ages. At twice the interval
+    /// it is logged as stale, once, and a load that succeeds ends the
+    /// episode so the next one is logged again.
+    #[tokio::test]
+    async fn a_stale_snapshot_is_logged_once_per_episode() {
+        let (url, mock) =
+            spawn_mock_listing(json!([{"email": "alice@example.com", "name": "Alice"}])).await;
+        let directory = load_at_boot(fast_schedule(&url))
+            .await
+            .expect("a client builds");
+        assert_eq!(directory.stale_episodes(), 0);
+
+        mock.fail(StatusCode::INTERNAL_SERVER_ERROR).await;
+        mock.wait_for_fetches(6).await;
+        assert_eq!(
+            directory.stale_episodes(),
+            1,
+            "logged once, not per refresh"
+        );
+        assert_eq!(
+            name_of(&directory, "alice@example.com").as_deref(),
+            Some("Alice"),
+            "stale is still served"
+        );
+
+        mock.serve(json!([{"email": "alice@example.com", "name": "Alice Renamed"}]))
+            .await;
+        eventually("a refresh loads the new listing", async || {
+            name_of(&directory, "alice@example.com").as_deref() == Some("Alice Renamed")
+        })
+        .await;
+        let recovered_at = mock.fetch_count().await;
+        assert_eq!(directory.stale_episodes(), 1, "recovery is not an episode");
+
+        mock.fail(StatusCode::INTERNAL_SERVER_ERROR).await;
+        mock.wait_for_fetches(recovered_at + 5).await;
+        assert_eq!(directory.stale_episodes(), 2, "a second episode logs again");
+    }
+
+    /// The directory owns the schedule. Dropping the last handle ends
+    /// the task rather than leaving it fetching for the process's life.
+    #[tokio::test]
+    async fn dropping_the_directory_ends_the_schedule() {
+        let (url, mock) = spawn_failing_listing(StatusCode::SERVICE_UNAVAILABLE).await;
+        let directory = load_at_boot(config_retrying_fast(&url))
+            .await
+            .expect("a client builds");
+        mock.wait_for_fetches(3).await;
+
+        drop(directory);
+        // A wake that upgraded its handle before the drop still runs its
+        // attempt, so the baseline waits out the backoff cap first.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let after_drop = mock.fetch_count().await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert_eq!(
+            mock.fetch_count().await,
+            after_drop,
+            "no fetch after the drop"
+        );
     }
 }
