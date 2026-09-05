@@ -31,6 +31,22 @@ describe("TickScratch", () => {
     expect(scratch.levelsDropped).toBe(2);
     expect(scratch.levels.every(v => v === 0)).toBe(true);
   });
+
+  it("starts each tick with no target and no displayed level", () => {
+    const scratch = scratchFor("ds", 0);
+    scratch.setTargetLevel(1, 2, true);
+    scratch.setDisplayedLevel({ min: 2, max: 3 });
+    scratch.reset("other");
+
+    const ring = new TickRing(1);
+    ring.append(0, scratch, new Uint32Array(3));
+    expect(scratch.hasTarget).toBe(false);
+    expect(ring.serialise()[0]).toMatchObject({
+      targetLevel: null,
+      levelPinned: false,
+      displayedLevel: null,
+    });
+  });
 });
 
 describe("TickRing", () => {
@@ -54,6 +70,54 @@ describe("TickRing", () => {
     expect(tick.counted["worker-dispatch"]).toBe(0);
     expect(tick.levels).toEqual([{ level: 0, planned: 4, cached: 2, inFlight: 1 }]);
     expect(tick.levelsDropped).toBe(0);
+  });
+
+  it("carries the target and displayed level ranges beside the per-level counts", () => {
+    const ring = new TickRing(4);
+    const scratch = scratchFor("ds-a", 0);
+    scratch.setTargetLevel(1, 2, false);
+    scratch.setDisplayedLevel({ min: 2, max: 3 });
+
+    ring.append(10, scratch, new Uint32Array(3));
+    const [tick] = ring.serialise();
+
+    expect(tick.targetLevel).toEqual({ min: 1, max: 2 });
+    expect(tick.levelPinned).toBe(false);
+    expect(tick.displayedLevel).toEqual({ min: 2, max: 3 });
+  });
+
+  it("reads a pinned target as pinned", () => {
+    const ring = new TickRing(4);
+    const scratch = scratchFor("ds-a", 0);
+    scratch.setTargetLevel(0, 0, true);
+
+    ring.append(10, scratch, new Uint32Array(3));
+
+    expect(ring.serialise()[0]).toMatchObject({
+      targetLevel: { min: 0, max: 0 },
+      levelPinned: true,
+    });
+  });
+
+  it("serialises an absent target or displayed level as null rather than level 0", () => {
+    const ring = new TickRing(4);
+    ring.append(10, scratchFor("ds-a", 0), new Uint32Array(3));
+
+    const [tick] = ring.serialise();
+    expect(tick.targetLevel).toBeNull();
+    expect(tick.displayedLevel).toBeNull();
+    expect(tick.levelPinned).toBe(false);
+  });
+
+  it("treats an explicit null displayed level as absent", () => {
+    const ring = new TickRing(4);
+    const scratch = scratchFor("ds-a", 0);
+    scratch.setDisplayedLevel({ min: 1, max: 1 });
+    scratch.setDisplayedLevel(null);
+
+    ring.append(10, scratch, new Uint32Array(3));
+
+    expect(ring.serialise()[0].displayedLevel).toBeNull();
   });
 
   it("drops oldest and reports how many it dropped", () => {

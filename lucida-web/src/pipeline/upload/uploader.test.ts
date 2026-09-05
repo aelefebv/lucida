@@ -252,6 +252,7 @@ function makeCtx(args: {
       sliceChunkData: vi.fn(),
       volumeChunkData: vi.fn(),
       removeLayerResources: vi.fn(),
+      datasetLevels: vi.fn(() => null),
       onChunksEvicted: null,
       onWantedSetDelta: null,
       ...args.client,

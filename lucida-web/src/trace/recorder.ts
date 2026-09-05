@@ -261,6 +261,14 @@ export class TraceRecorder {
   private readonly occupancyScratch = new Uint32Array(PHASES.length);
   private tickInProgress = false;
 
+  /**
+   * The last target level range each dataset was sampled at, mutated in place
+   * so steady state allocates nothing. Page-scoped rather than interval-scoped
+   * on purpose: the zoom that moves the target is often the cause of the run
+   * that follows, and that run has to be able to say so.
+   */
+  private readonly lastTargetByDataset = new Map<string, { min: number; max: number }>();
+
   private holdTimer: ReturnType<typeof setTimeout> | null = null;
   private timeoutTimer: ReturnType<typeof setTimeout> | null = null;
   private lastQuiescence: QuiescenceState | null = null;
@@ -796,14 +804,50 @@ export class TraceRecorder {
     if (!this.tickInProgress) return;
     this.tickInProgress = false;
     const run = this.intervalForRecording();
+    const atUs = run ? this.offsetUs(run, this.now()) : 0;
+    this.noteTargetLevel(run, atUs);
     if (run) {
-      run.sink.appendTick(this.offsetUs(run, this.now()), this.tickScratch, this.countedPhases);
+      run.sink.appendTick(atUs, this.tickScratch, this.countedPhases);
     } else if (this.open?.truncation) {
       this.open.truncation.ticksUnrecorded++;
     }
     // Either way the tallies belong to the interval just ended, not the next
     // one: carrying them forward would publish two intervals' counts as one.
     this.countedPhases.fill(0);
+  }
+
+  /**
+   * Derived at commit rather than emitted by the planner, because this is the
+   * one place that sees a dataset's consecutive samples. A sample with no
+   * target leaves the memory alone, so a dataset that re-enters view at
+   * another level is reported then, against the level it was last seen at.
+   */
+  private noteTargetLevel(run: OpenInterval | null, atUs: number): void {
+    const scratch = this.tickScratch;
+    if (!scratch.hasTarget) return;
+    const min = scratch.targetMin;
+    const max = scratch.targetMax;
+    const last = this.lastTargetByDataset.get(scratch.datasetId);
+    if (!last) {
+      this.lastTargetByDataset.set(scratch.datasetId, { min, max });
+      return;
+    }
+    if (last.min === min && last.max === max) return;
+    if (run) {
+      run.sink.appendLevelChange(
+        atUs,
+        scratch.levelPinned ? "pin" : "screen",
+        scratch.datasetId,
+        last.min,
+        last.max,
+        min,
+        max,
+      );
+    } else if (this.open?.truncation) {
+      this.open.truncation.eventsUnrecorded++;
+    }
+    last.min = min;
+    last.max = max;
   }
 
   /**
@@ -904,6 +948,7 @@ export class TraceRecorder {
     this.lastQuiescence = null;
     this.planSpanCount = 0;
     this.openPlanStartMs = null;
+    this.lastTargetByDataset.clear();
     this.beginInterval(null);
   }
 

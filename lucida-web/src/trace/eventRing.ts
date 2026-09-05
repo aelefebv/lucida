@@ -19,13 +19,20 @@ import { StringPool } from "./stringPool.ts";
 import {
   POINT_EVENT_KINDS,
   POINT_EVENT_REASONS,
+  PointEvent,
   type ChunkEventSource,
+  type LevelChangeReason,
   type PointEventIndex,
   type PointEventReason,
   type TracePointEvent,
 } from "./types.ts";
 
-/** Six coordinate columns per event: level, t, c, z, y, x. */
+/**
+ * Six coordinate columns per event: level, t, c, z, y, x for a chunk event.
+ * A level change has no chunk, so its four bounds (from min, from max, to
+ * min, to max) reuse the first four rather than widening every event for a
+ * rare kind.
+ */
 const COORDS_PER_EVENT = 6;
 
 /**
@@ -40,8 +47,8 @@ const REASON_CODES = new Map<PointEventReason, number>(
 );
 
 export class EventRing {
-  /** 3 interned ids + 6 coordinates + timestamp, all uint32, plus three bytes. */
-  static readonly BYTES_PER_EVENT = (3 + COORDS_PER_EVENT + 1) * 4 + 3;
+  /** 3 interned ids + 6 coordinates + timestamp, all uint32, plus four bytes. */
+  static readonly BYTES_PER_EVENT = (3 + COORDS_PER_EVENT + 1) * 4 + 4;
 
   private readonly strings = new StringPool();
   private readonly slots: RingSlots;
@@ -90,32 +97,59 @@ export class EventRing {
     chunk: ChunkEventSource | null,
     tier: 0 | 1,
   ): void {
-    const slot = this.slots.claim();
-
-    this.atUs[slot] = atUs;
-    this.kinds[slot] = kind;
-    this.reasons[slot] = REASON_CODES.get(reason) ?? 0;
-    this.tiers[slot] = tier;
+    const slot = this.claim(atUs, kind, reason, tier);
     this.hasChunk[slot] = chunk === null ? 0 : 1;
-
-    const c = slot * COORDS_PER_EVENT;
-    if (chunk === null) {
-      this.datasetIds[slot] = 0;
-      this.entityIds[slot] = 0;
-      this.imageIds[slot] = 0;
-      this.coords.fill(0, c, c + COORDS_PER_EVENT);
-      return;
-    }
+    if (chunk === null) return;
 
     this.datasetIds[slot] = this.strings.intern(chunk.datasetId ?? "");
     this.entityIds[slot] = this.strings.intern(chunk.entityId);
     this.imageIds[slot] = this.strings.intern(chunk.imageId);
+    const c = slot * COORDS_PER_EVENT;
     this.coords[c] = chunk.level;
     this.coords[c + 1] = chunk.t;
     this.coords[c + 2] = chunk.c;
     this.coords[c + 3] = chunk.z;
     this.coords[c + 4] = chunk.y;
     this.coords[c + 5] = chunk.x;
+  }
+
+  /**
+   * A dataset's target level moved. Four bare integers rather than two range
+   * objects, so the recorder passes the columns it compared without
+   * allocating a record for the event.
+   */
+  appendLevelChange(
+    atUs: number,
+    reason: LevelChangeReason,
+    datasetId: string,
+    fromMin: number,
+    fromMax: number,
+    toMin: number,
+    toMax: number,
+  ): void {
+    const slot = this.claim(atUs, PointEvent.LevelChange, reason, 0);
+    this.hasChunk[slot] = 0;
+    this.datasetIds[slot] = this.strings.intern(datasetId);
+    const c = slot * COORDS_PER_EVENT;
+    this.coords[c] = fromMin;
+    this.coords[c + 1] = fromMax;
+    this.coords[c + 2] = toMin;
+    this.coords[c + 3] = toMax;
+  }
+
+  /** Clears every column, so a wrapped slot cannot leak an older event's fields. */
+  private claim(atUs: number, kind: PointEventIndex, reason: PointEventReason, tier: 0 | 1): number {
+    const slot = this.slots.claim();
+    this.atUs[slot] = atUs;
+    this.kinds[slot] = kind;
+    this.reasons[slot] = REASON_CODES.get(reason) ?? 0;
+    this.tiers[slot] = tier;
+    this.datasetIds[slot] = 0;
+    this.entityIds[slot] = 0;
+    this.imageIds[slot] = 0;
+    const c = slot * COORDS_PER_EVENT;
+    this.coords.fill(0, c, c + COORDS_PER_EVENT);
+    return slot;
   }
 
   /** Oldest-first, matching the tick ring. */
@@ -148,6 +182,13 @@ export class EventRing {
               y,
               x,
               chunkKey: `${level}/${t}/${ch}/${z}/${y}/${x}`,
+            },
+        levelChange: this.kinds[slot] !== PointEvent.LevelChange
+          ? null
+          : {
+              datasetId: this.strings.get(this.datasetIds[slot]),
+              from: { min: this.coords[c], max: this.coords[c + 1] },
+              to: { min: this.coords[c + 2], max: this.coords[c + 3] },
             },
       });
     }

@@ -70,7 +70,7 @@ const GAP_STATEMENTS: Record<CoverageGapKind, string> = {
   "ticks-dropped":
     "The per-tick aggregate ring wrapped and overwrote its oldest samples. Elapsed time is unaffected; the early planning detail is gone.",
   "events-dropped":
-    "The point-event ring wrapped and overwrote its oldest events. Elapsed time is unaffected; early evictions, retries and failures are gone.",
+    "The point-event ring wrapped and overwrote its oldest events. Elapsed time is unaffected; early evictions, retries, failures and level changes are gone.",
   "server-rows-dropped":
     "The server declared rows it dropped before sending: its pre-flush buffer filled past two flush windows and it stopped accumulating rather than block the pipeline it measures. Those requests are still bracketed by the browser, but their server-side half is missing.",
   "server-rows-discarded":
