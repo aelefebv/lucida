@@ -84,9 +84,9 @@ const RUN_EXPORT_EXPRESSION: &str = r#"(() => {
     (runs.length > 0 ? runs[runs.length - 1] : null);
   const runId = run ? run.header.runId : null;
   const diagnostic = runId ? seam.diagnose(runId) : null;
-  // A page that the workload has run out of memory can still hand over the
-  // document and the diagnostic while a text rendering fails to allocate.
-  // The document is the finding; a rendering that failed says so in its place.
+  // A page the workload has pushed out of memory can still hand over the
+  // document and the diagnostic while a text rendering fails to allocate, so
+  // a failed rendering reports itself in place instead of losing the run.
   const render = (make) => {
     try { return make(); } catch (error) { return 'rendering failed: ' + String(error); }
   };
@@ -144,13 +144,22 @@ pub struct ComposedView {
     pub camera: Option<ComposedCamera>,
 }
 
-/// Which camera the driver frames the dataset with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Which camera the driver frames the dataset with: the slice camera of the
+/// page's 2D mode, or the orbiting camera of its 3D mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum CameraKind {
     Slice,
     Arcball,
-    Fly,
+}
+
+impl std::fmt::Display for CameraKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            CameraKind::Slice => "slice",
+            CameraKind::Arcball => "arcball",
+        })
+    }
 }
 
 /// The finest and coarsest level across a dataset's visible image-bearing
@@ -501,7 +510,7 @@ pub fn compose_camera(
     crate::view::hydrate_scene_document_defaults(&mut scene);
     match request.kind {
         CameraKind::Slice => scene.set_mode_2d(),
-        CameraKind::Arcball | CameraKind::Fly => scene.set_mode_3d(),
+        CameraKind::Arcball => scene.set_mode_3d(),
     }
     if !scene.fit_camera_to_dataset(&dataset_id.0) {
         return Err(CliError::new(
@@ -517,9 +526,6 @@ pub fn compose_camera(
             Camera::Slice(slice) => slice.set_zoom(zoom),
             _ => realize_volume_zoom(&mut scene, dataset_id, zoom)?,
         }
-    }
-    if request.kind == CameraKind::Fly {
-        scene.set_mode_fly();
     }
 
     let zoom = measure_zoom(&scene, dataset_id).ok_or_else(|| {
@@ -792,12 +798,11 @@ pub fn format_run_human(file: &TraceRunFile, path: &Path) -> String {
         .as_ref()
         .map(|camera| {
             format!(
-                "camera    {:?} at {} device px per level-0 sample; the core calls for target level {}\n",
+                "camera    {} at {} device px per level-0 sample; the core calls for target level {}\n",
                 camera.mode,
                 camera.zoom,
                 format_level_range(camera.target_level)
             )
-            .to_lowercase()
         })
         .unwrap_or_default();
     let screenshot = header
@@ -1676,8 +1681,6 @@ mod tests {
         );
     }
 
-    // ---- the composed camera ----
-
     /// A 64 × 512 × 512 volume with four levels halving every axis, in 32³
     /// chunks: the shape of the level-index pyramid the end-to-end check
     /// generates.
@@ -1800,15 +1803,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_fly_camera_is_the_arcball_framing_converted() {
-        let framing = compose(CameraKind::Fly, Some(0.5));
-        assert!(matches!(framing.camera, Camera::Fly(_)));
-        assert!((framing.record.zoom - 0.5).abs() <= 0.5 * 1e-6);
-        assert_eq!(framing.record.mode, CameraKind::Fly);
-        assert_eq!(framing.record.target_level, LevelRange { min: 1, max: 1 });
-    }
-
     /// Without a zoom the camera is the fit the page would make, and the
     /// record still says what that framing measures and calls for.
     #[test]
@@ -1864,8 +1858,6 @@ mod tests {
             1
         );
     }
-
-    // ---- pinned display ----
 
     #[test]
     fn a_contrast_window_is_two_ordered_finite_numbers() {

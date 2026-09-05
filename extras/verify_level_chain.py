@@ -8,11 +8,11 @@
 The check writes a level-index pyramid with the generator beside this
 script and opens it four times through ``lucida trace``: zoomed in and
 zoomed out, in slice mode and in volume mode. Each run names the level it
-means to reach, and the check derives the camera for it — the middle of
-the band of zooms that level owns, in device pixels per level-0 sample,
-which is the one measure the target level is chosen from. Then it reads
-what came back and requires four independent answers to name the same
-level:
+means to reach, and the check derives the camera for it: a zoom squarely
+inside the band of zooms that level owns, in device pixels per level-0
+sample, which is the one measure the target level is chosen from. Then it
+reads what came back and requires four independent answers to name the
+same level:
 
 1. **The rule.** This script applies ADR 0061's rule to the level shapes
    on disk and the zoom it asked for: the coarsest level whose samples
@@ -22,17 +22,21 @@ level:
    computes for the camera it composed, in the run header.
 3. **The trace.** The run's last per-tick aggregate carries the target
    level the browser planned at, the level it displayed, and how many
-   chunks it planned at that level.
+   detail chunks each planning pass requested.
 4. **The screenshot.** Every sample at level L holds the value L, so the
-   settled frame is a flat gray that names the level it was drawn from.
-   The runs pin a gray colormap and a contrast window of −1 to the
+   frame the run leaves is a flat gray that names the level it was drawn
+   from. The runs pin a gray colormap and a contrast window of −1 to the
    coarsest level, so level L reads as ``(L + 1) / levels`` of white:
    evenly spaced, never black, and never the background.
 
-Each run must also settle, and the chunks it planned at the target level
-must fit the bound ADR 0061 states: the entity's on-screen area over the
-footprint of one target-level chunk, plus a chunk of border per axis, and
-in volume mode the depth of the frustum's cut in chunks again.
+Each run must also reach quiescence, and the detail chunks it requested
+per planning pass must fit the bound ADR 0061 states: the entity's
+on-screen area over the footprint of one target-level chunk, plus a chunk
+of border per axis, and in volume mode the depth of the frustum's cut in
+chunks again. The zoomed-in slice run places the image well past the
+viewport's edges, so its wanted set is bounded by the screen and not by
+the level; the other three runs fit on screen, where the bound is the
+level's own chunk grid plus the border.
 
 The volume runs stay off level 0. In a level-index pyramid every sample
 at level 0 is 0, and the volume ray march skips a zero sample as empty
@@ -42,10 +46,10 @@ property, not a level-selection fault, and the slice runs cover level 0
 where a zero sample draws normally.
 
 The displayed level is read when the trace carries one and reported when
-it does not. A local open this small settles inside a single planning
-pass, and the render worker's word on which level is on screen
+it does not. A local open this small reaches quiescence inside a single
+planning pass, and the render worker's word on which level is on screen
 necessarily arrives after it, so a run that never re-plans has no tick to
-carry it.
+carry it. The frame is the witness of what was displayed in that case.
 
 Prerequisites: a running lucida server that serves the web bundle, the
 ``lucida`` CLI on ``PATH`` or named with ``--lucida``, and Chrome. The
@@ -67,7 +71,8 @@ Options:
                          Default a fresh temporary directory.
     --keep               Keep the output directory on success. It is
                          always kept on failure, and its path is printed.
-    --timeout-seconds N  How long each run may take to settle. Default 180.
+    --timeout-seconds N  How long each run may take to reach quiescence.
+                         Default 180.
     --size Z,Y,X         Level 0 size of the pyramid. Default 64,512,512.
     --levels N           Levels in the pyramid. Default 4.
     --chunk S            Chunk edge. Default 32.
@@ -106,22 +111,21 @@ import synthetic_ome_zarr as gen  # noqa: E402
 DEFAULT_SERVER = "http://127.0.0.1:9876"
 DEFAULT_TIMEOUT_SECONDS = 180
 
-# Every frame is taken at this ratio. It is the driver's default too, but
-# the check names it so a change to the default cannot quietly weaken it.
+# The driver's own defaults, named here so a change to a default cannot
+# quietly move the bound or weaken the ratio.
 DEVICE_PIXEL_RATIO = 2
+VIEWPORT_CSS = (1440, 900)
 
-# A spatial shape is (z, y, x). A slice view resolves the two in-plane
-# axes; a volume view resolves all three.
+# Indices into a (z, y, x) spatial shape.
 IN_PLANE_AXES = (1, 2)
 VOLUME_AXES = (0, 1, 2)
 
-# How far off neutral a frame's center may be and still name a level. The
-# colormap ramp is sampled with linear filtering, so a count or two of
-# drift between channels is the texture and not the data.
+# The colormap ramp is sampled with linear filtering, so a count or two of
+# drift between channels is the texture, not the data.
 GRAY_TOLERANCE = 6
-# The side, in device pixels, of the square at the center of the frame the
-# level is read from. Large enough to outvote a stray pixel, small enough
-# to stay inside the data at the zoomed-out framings.
+# Side in device pixels of the center square the level is read from: large
+# enough to outvote a stray pixel, small enough to stay inside the data at
+# the zoomed-out framings.
 CENTER_PATCH = 21
 
 
@@ -130,28 +134,27 @@ CENTER_PATCH = 21
 # ---------------------------------------------------------------------------
 
 
-def level_shapes(dataset: Path) -> list[tuple[int, ...]]:
-    """Each level's spatial shape, in the order the multiscale metadata lists them."""
+def _level_arrays(dataset: Path) -> tuple[list[int], list[dict]]:
+    """The spatial axis indices and each level's array metadata, in multiscale order."""
     meta = json.loads((dataset / "zarr.json").read_text())
     multiscale = meta["attributes"]["ome"]["multiscales"][0]
     axes = [axis["name"].lower() for axis in multiscale["axes"]]
     spatial = [index for index, name in enumerate(axes) if name in ("z", "y", "x")]
-    shapes = []
-    for entry in multiscale["datasets"]:
-        level = json.loads((dataset / entry["path"] / "zarr.json").read_text())
-        shapes.append(tuple(level["shape"][index] for index in spatial))
-    return shapes
+    levels = [json.loads((dataset / entry["path"] / "zarr.json").read_text()) for entry in multiscale["datasets"]]
+    return spatial, levels
+
+
+def level_shapes(dataset: Path) -> list[tuple[int, ...]]:
+    """Each level's spatial shape, in the order the multiscale metadata lists them."""
+    spatial, levels = _level_arrays(dataset)
+    return [tuple(level["shape"][index] for index in spatial) for level in levels]
 
 
 def chunk_shapes(dataset: Path) -> list[tuple[int, ...]]:
     """Each level's inner chunk shape along the spatial axes."""
-    meta = json.loads((dataset / "zarr.json").read_text())
-    multiscale = meta["attributes"]["ome"]["multiscales"][0]
-    axes = [axis["name"].lower() for axis in multiscale["axes"]]
-    spatial = [index for index, name in enumerate(axes) if name in ("z", "y", "x")]
+    spatial, levels = _level_arrays(dataset)
     shapes = []
-    for entry in multiscale["datasets"]:
-        level = json.loads((dataset / entry["path"] / "zarr.json").read_text())
+    for level in levels:
         grid = tuple(level["chunk_grid"]["configuration"]["chunk_shape"])
         codecs = level["codecs"]
         if codecs and codecs[0]["name"] == "sharding_indexed":
@@ -190,22 +193,37 @@ def expected_target(zoom: float, ratios: Sequence[float]) -> int:
 def zoom_for_level(level: int, ratios: Sequence[float]) -> float:
     """A zoom squarely inside the band of zooms that ``level`` owns.
 
-    Level L is the target while the measure sits in ``(1 / ratio[L + 1],
-    1 / ratio[L]]``. The middle of that band on a log scale is the
-    geometric mean of its ends, which is the furthest a camera can be from
-    both boundaries: hysteresis holds the target across a boundary, so a
-    camera placed on one would make the level depend on where the view
-    came from. The coarsest level's band has no lower end, so it stands in
-    at two octaves below the upper one.
+    Level L is the target while the measure sits above ``1 / ratio`` of
+    the next finer level and at or below ``1 / ratio[L]``. The middle of
+    that band on a log scale is the geometric mean of its ends, which is
+    the furthest a camera can be from both boundaries: hysteresis holds the
+    target across a boundary, so a camera placed on one would make the
+    level depend on where the view came from. Level 0 owns everything
+    above its lower end, and the coarsest level everything below its upper
+    end; the missing end stands in at two octaves from the one there is.
     """
     if not ratios:
         raise ValueError("a pyramid with no levels has no zoom for a level")
     if not 0 <= level < len(ratios) or math.isinf(ratios[level]):
         raise ValueError(f"level {level} is not a level this pyramid can target")
     finer = [ratio for ratio in ratios[level + 1 :] if not math.isinf(ratio)]
-    high = 1.0 / ratios[level]
-    low = 1.0 / finer[0] if finer else high / 4.0
+    if level == 0:
+        low = 1.0 / finer[0] if finer else 1.0
+        high = low * 4.0
+    else:
+        high = 1.0 / ratios[level]
+        low = 1.0 / finer[0] if finer else high / 4.0
     return math.sqrt(low * high)
+
+
+def overflow_zoom(image_samples: tuple[int, int], viewport: tuple[int, int]) -> float:
+    """The zoom that places the image one octave past the viewport on both axes.
+
+    Below it the whole image fits on screen and the wanted set is the
+    level's own chunk grid; above it the set is cut by the screen, which is
+    the regime ADR 0061's bound is about.
+    """
+    return 2.0 * max(extent / samples for samples, extent in zip(image_samples, viewport))
 
 
 def wanted_set_bound(
@@ -284,17 +302,17 @@ def level_from_color(color: tuple[int, int, int], levels: int) -> int | None:
 
 
 @dataclass
-class TraceReading:
+class TraceLevels:
     """The levels one run's per-tick aggregates report, and its shape."""
 
     target: tuple[int, int] | None = None
     displayed: tuple[int, int] | None = None
-    # The most chunks any tick planned at the final target level. The
-    # largest is the honest one: later ticks plan only what is still
-    # missing, so reading the last would understate the wanted set.
-    wanted_at_target: int = 0
+    # The largest detail-lane wanted set any planning pass at the final target
+    # emitted. The largest is the honest one: later passes plan only what is
+    # still missing.
+    detail_per_rebuild: int = 0
     level_changes: list[tuple[tuple[int, int], tuple[int, int]]] = field(default_factory=list)
-    settle_seconds: float = 0.0
+    duration_seconds: float = 0.0
     ticks: int = 0
 
 
@@ -302,36 +320,34 @@ def _range(value: dict | None) -> tuple[int, int] | None:
     return None if value is None else (int(value["min"]), int(value["max"]))
 
 
-def read_levels(run: dict) -> TraceReading:
+def read_levels(run: dict) -> TraceLevels:
     """Read one run's levels off its per-tick aggregates and point events."""
     ticks = run.get("ticks", [])
-    reading = TraceReading(
-        settle_seconds=run["header"].get("durationUs", 0) / 1e6,
+    seen = TraceLevels(
+        duration_seconds=run["header"].get("durationUs", 0) / 1e6,
         ticks=len(ticks),
     )
-    reading.level_changes = [
+    seen.level_changes = [
         (_range(event["levelChange"]["from"]), _range(event["levelChange"]["to"]))
         for event in run.get("events", [])
         if event.get("kind") == "level-change" and event.get("levelChange")
     ]
     if not ticks:
-        return reading
+        return seen
 
-    reading.target = _range(ticks[-1].get("targetLevel"))
+    seen.target = _range(ticks[-1].get("targetLevel"))
     for tick in reversed(ticks):
         displayed = _range(tick.get("displayedLevel"))
         if displayed is not None:
-            reading.displayed = displayed
+            seen.displayed = displayed
             break
-    if reading.target is None:
-        return reading
     for tick in ticks:
-        if _range(tick.get("targetLevel")) != reading.target:
+        if _range(tick.get("targetLevel")) != seen.target:
             continue
-        for level in tick.get("levels", []):
-            if int(level["level"]) == reading.target[0]:
-                reading.wanted_at_target = max(reading.wanted_at_target, int(level["planned"]))
-    return reading
+        # ``laneDetail`` rather than the per-level planned counts, which also
+        # carry the coarse, prefetch, and minimap lanes the bound is not about.
+        seen.detail_per_rebuild = max(seen.detail_per_rebuild, int(tick.get("counters", {}).get("laneDetail", 0)))
+    return seen
 
 
 def run_in_document(run_file: Path) -> dict:
@@ -357,19 +373,22 @@ class DrivenRun:
     """What one ``lucida trace`` left behind."""
 
     name: str
-    mode: str
+    camera: str  # ``slice`` or ``arcball``
     zoom: float
     run_file: Path
     screenshot: Path
-    # The viewport in CSS pixels the view was composed at.
-    viewport: tuple[int, int]
-    # The target level lucida-core computed for the composed camera.
+    viewport: tuple[int, int]  # CSS pixels
+    # What lucida-core made of the composed camera: the target level it chose
+    # and the zoom it measured there, against the ``zoom`` asked for.
     core_target: tuple[int, int]
-    # What the camera actually measures, which the core rounds to a level.
     core_zoom: float
-    settled: bool
+    quiescent: bool
     end_reason: str | None
     verdict: str | None
+
+    @property
+    def volume(self) -> bool:
+        return self.camera != "slice"
 
     @property
     def device_viewport(self) -> tuple[int, int]:
@@ -396,8 +415,7 @@ class Lucida:
             raise RuntimeError(
                 f"{shlex.join(argv)} exited {completed.returncode}\n{completed.stdout}\n{completed.stderr}"
             )
-        # The CLI may print progress lines before the payload; the payload
-        # is the last JSON object on stdout.
+        # Progress lines may precede the payload, the last JSON object on stdout.
         text = completed.stdout.strip()
         start = text.rfind("\n{")
         return json.loads(text if start < 0 else text[start + 1 :])
@@ -414,7 +432,7 @@ class Lucida:
         workspace_id: str,
         out: Path,
         name: str,
-        mode: str,
+        camera: str,
         zoom: float,
         levels: int,
         timeout_seconds: int,
@@ -427,11 +445,11 @@ class Lucida:
             "trace",
             str(dataset),
             "--camera",
-            mode,
+            camera,
             "--zoom",
             repr(zoom),
-            # Level L is drawn at (L + 1) / levels of white: evenly
-            # spaced, never black, and never the background.
+            # With a window of -1..levels-1, level L draws at (L + 1) / levels
+            # of white: evenly spaced, never black, never the background.
             "--contrast",
             "-1",
             str(levels - 1),
@@ -441,6 +459,10 @@ class Lucida:
             # the level is the level, so the volume draws its level flat.
             "--render-mode",
             "max-intensity",
+            "--width",
+            str(VIEWPORT_CSS[0]),
+            "--height",
+            str(VIEWPORT_CSS[1]),
             "--device-pixel-ratio",
             str(DEVICE_PIXEL_RATIO),
             "--output",
@@ -453,18 +475,18 @@ class Lucida:
         )
         header = payload["header"]
         composed = header["composedView"]
-        camera = composed["camera"]
+        framing = composed["camera"]
         verdict = payload.get("verdict") or {}
         return DrivenRun(
             name=name,
-            mode=mode,
+            camera=camera,
             zoom=zoom,
             run_file=run_file,
             screenshot=screenshot,
             viewport=(int(composed["width"]), int(composed["height"])),
-            core_target=(int(camera["targetLevel"]["min"]), int(camera["targetLevel"]["max"])),
-            core_zoom=float(camera["zoom"]),
-            settled=bool(header.get("settled")),
+            core_target=(int(framing["targetLevel"]["min"]), int(framing["targetLevel"]["max"])),
+            core_zoom=float(framing["zoom"]),
+            quiescent=bool(header.get("settled")),
             end_reason=header.get("endReason"),
             verdict=verdict.get("kind"),
         )
@@ -508,6 +530,25 @@ class Report:
         print(line, flush=True)
 
 
+def run_bound(
+    run: DrivenRun,
+    shapes: Sequence[tuple[int, ...]],
+    chunks: Sequence[tuple[int, ...]],
+    level: int,
+    ratio: float,
+) -> int:
+    """The wanted-set bound for ``run`` with ``level`` as its target."""
+    depth_chunks = math.ceil(shapes[level][0] / chunks[level][0]) if run.volume else 1
+    return wanted_set_bound(
+        viewport=run.device_viewport,
+        image_samples=(shapes[0][2], shapes[0][1]),
+        zoom=run.core_zoom,
+        ratio=ratio,
+        chunk=max(chunks[level][1], chunks[level][2]),
+        depth_chunks=depth_chunks,
+    )
+
+
 def check_run(
     report: Report,
     run: DrivenRun,
@@ -516,25 +557,24 @@ def check_run(
 ) -> None:
     """Hold one run's four answers against each other and against the bound."""
     levels = len(shapes)
-    axes = IN_PLANE_AXES if run.mode == "slice" else VOLUME_AXES
-    ratios = level_ratios(shapes, axes)
+    ratios = level_ratios(shapes, VOLUME_AXES if run.volume else IN_PLANE_AXES)
     predicted = expected_target(run.core_zoom, ratios)
 
-    reading = read_levels(run_in_document(run.run_file))
+    seen = read_levels(run_in_document(run.run_file))
     color = center_color(run.screenshot)
     drawn = level_from_color(color, levels)
     width, height = frame_size(run.screenshot)
 
     report.say(
         f"  {run.name:16s} zoom {run.core_zoom:<8.4g} rule {predicted}  core "
-        f"{fmt_range(run.core_target)}  trace {fmt_range(reading.target)}  displayed "
-        f"{fmt_range(reading.displayed)}  frame {drawn} {color}  planned "
-        f"{reading.wanted_at_target}  {reading.settle_seconds:.1f} s"
+        f"{fmt_range(run.core_target)}  trace {fmt_range(seen.target)}  displayed "
+        f"{fmt_range(seen.displayed)}  frame {drawn} {color}  detail per rebuild "
+        f"{seen.detail_per_rebuild}  {seen.duration_seconds:.1f} s"
     )
 
     report.check(
-        run.settled,
-        f"{run.name}: the run ended as {run.end_reason} rather than settling; see {run.run_file}",
+        run.quiescent,
+        f"{run.name}: the run ended as {run.end_reason} rather than quiescent; see {run.run_file}",
     )
     report.check(
         (width, height) == run.device_viewport,
@@ -548,24 +588,23 @@ def check_run(
         f"level shapes on disk gives {predicted} at {run.core_zoom} device pixels per level-0 sample",
     )
     report.check(
-        reading.target == (predicted, predicted),
-        f"{run.name}: the trace planned at target {fmt_range(reading.target)}, not the predicted "
+        seen.target == (predicted, predicted),
+        f"{run.name}: the trace planned at target {fmt_range(seen.target)}, not the predicted "
         f"{predicted}; see {run.run_file}",
     )
-    if reading.displayed is None:
-        # The worker's word on which level is on screen reaches the
-        # aggregate on the next planning pass, and a local open this small
-        # settles inside the first one. Reported rather than failed: the
-        # frame is the stronger witness of what was displayed, and it is
-        # checked above.
+    if seen.displayed is None:
+        # The displayed level reaches the aggregate only on the planning pass
+        # after the worker reports it, and a local open this small reaches
+        # quiescence inside the first pass. A note, not a failure: the frame
+        # is the stronger witness and is checked below.
         report.note(
-            f"{run.name}: the run settled in {reading.settle_seconds:.1f} s over "
-            f"{reading.ticks} planning pass(es), so no tick carried a displayed level"
+            f"{run.name}: the run reached quiescence in {seen.duration_seconds:.1f} s over "
+            f"{seen.ticks} planning pass(es), so no tick carried a displayed level"
         )
     else:
         report.check(
-            reading.displayed == (predicted, predicted),
-            f"{run.name}: the trace displayed {fmt_range(reading.displayed)}, not the predicted "
+            seen.displayed == (predicted, predicted),
+            f"{run.name}: the trace displayed {fmt_range(seen.displayed)}, not the predicted "
             f"{predicted}; see {run.run_file}",
         )
     if report.check(
@@ -578,21 +617,11 @@ def check_run(
             f"see {run.screenshot}",
         )
 
-    depth_chunks = 1
-    if run.mode == "volume":
-        depth_chunks = math.ceil(shapes[predicted][0] / chunks[predicted][0])
-    bound = wanted_set_bound(
-        viewport=run.device_viewport,
-        image_samples=(shapes[0][2], shapes[0][1]),
-        zoom=run.core_zoom,
-        ratio=ratios[predicted],
-        chunk=max(chunks[predicted][1], chunks[predicted][2]),
-        depth_chunks=depth_chunks,
-    )
+    bound = run_bound(run, shapes, chunks, predicted, ratios[predicted])
     report.check(
-        0 < reading.wanted_at_target <= bound,
-        f"{run.name}: the trace planned {reading.wanted_at_target} chunks at level {predicted}, "
-        f"outside the 1 to {bound} the ADR bounds it to; see {run.run_file}",
+        0 < seen.detail_per_rebuild <= bound,
+        f"{run.name}: a planning pass requested {seen.detail_per_rebuild} detail chunks at level "
+        f"{predicted}, outside the 1 to {bound} the ADR bounds it to; see {run.run_file}",
     )
 
 
@@ -600,6 +629,29 @@ def fmt_range(value: tuple[int, int] | None) -> str:
     if value is None:
         return "none"
     return str(value[0]) if value[0] == value[1] else f"{value[0]}..{value[1]}"
+
+
+def plan_runs(
+    shapes: Sequence[tuple[int, ...]],
+    slice_levels: Sequence[int],
+    volume_levels: Sequence[int],
+) -> list[tuple[str, str, float]]:
+    """The four runs as (name, camera, zoom), zoomed in first for each camera.
+
+    A zoomed-in slice run that reaches level 0 is placed past the
+    viewport's edges, so at least one run holds the bound where the screen
+    and not the level is what cuts the wanted set.
+    """
+    device_viewport = (VIEWPORT_CSS[0] * DEVICE_PIXEL_RATIO, VIEWPORT_CSS[1] * DEVICE_PIXEL_RATIO)
+    runs = []
+    for prefix, camera, wanted in (("slice", "slice", slice_levels), ("volume", "arcball", volume_levels)):
+        ratios = level_ratios(shapes, IN_PLANE_AXES if camera == "slice" else VOLUME_AXES)
+        for position, level in enumerate(wanted):
+            zoom = zoom_for_level(level, ratios)
+            if camera == "slice" and position == 0 and level == 0:
+                zoom = max(zoom, overflow_zoom((shapes[0][2], shapes[0][1]), device_viewport))
+            runs.append((f"{prefix}-{'in' if position == 0 else 'out'}", camera, zoom))
+    return runs
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -647,22 +699,15 @@ def main(argv: list[str] | None = None) -> int:
     workspace_id = lucida.create_workspace(f"level-chain {stamp}")
     lucida.open_dataset(dataset, workspace_id)
 
-    cases = []
-    for mode, camera, wanted in (
-        ("slice", "slice", opts.slice_levels),
-        ("volume", "arcball", opts.volume_levels),
-    ):
-        ratios = level_ratios(shapes, IN_PLANE_AXES if camera == "slice" else VOLUME_AXES)
-        for position, level in enumerate(int(value) for value in wanted.split(",")):
-            name = f"{mode}-{'in' if position == 0 else 'out'}"
-            cases.append((name, camera, zoom_for_level(level, ratios)))
-
+    runs = plan_runs(
+        shapes,
+        [int(value) for value in opts.slice_levels.split(",")],
+        [int(value) for value in opts.volume_levels.split(",")],
+    )
     report.say("runs")
-    for name, mode, zoom in cases:
+    for name, camera, zoom in runs:
         try:
-            run = lucida.trace(
-                dataset, workspace_id, out, name, mode, zoom, len(shapes), opts.timeout_seconds
-            )
+            run = lucida.trace(dataset, workspace_id, out, name, camera, zoom, len(shapes), opts.timeout_seconds)
         except (RuntimeError, subprocess.TimeoutExpired) as error:
             report.check(False, f"{name}: the run did not complete: {error}")
             continue
@@ -680,7 +725,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nevidence kept in {out}", flush=True)
         return 1
 
-    print("\nPASSED: every run settled, and the rule, the core, the trace, and the frame agree.", flush=True)
+    print(
+        "\nPASSED: every run reached quiescence, and the rule, the core, the trace, and the frame agree.",
+        flush=True,
+    )
     if opts.keep or opts.out is not None:
         print(f"evidence in {out}", flush=True)
     else:

@@ -238,14 +238,18 @@ conditions.
 
 **The level a generated fixture reports.** A 64×512×512 level-index pyramid, four
 levels halving every axis in 32³ chunks, every sample at level *L* equal to *L*, opened
-four times with the camera in the middle of the zoom band each level owns. In every run
-the rule applied to the shapes on disk, the target `lucida-core` computed for the
-camera, the target on the trace's last planning pass, and the gray of the settled frame
-named the same level, and the chunks planned at that level sat inside the bound above.
+four times with the camera inside the zoom band each level owns. In every run the rule
+applied to the shapes on disk, the target `lucida-core` computed for the camera, the
+target on the trace's last planning pass, and the gray of the frame named the same
+level, and the detail chunks requested per planning pass sat inside the bound above.
+The zoomed-in slice run places the image past the viewport's edges, so its set is cut by
+the screen; the other three fit on screen, where the bound is the level's own chunk
+grid plus a border. Every run reached quiescence inside one planning pass, so no tick
+carried a displayed level; the frame is the witness of what was displayed.
 
-| run | device px per level-0 sample | level, all four ways | planned at target | bound | settled |
+| run | device px per level-0 sample | level, all four ways | detail chunks per pass | bound | quiescent after |
 | --- | --- | --- | --- | --- | --- |
-| slice, zoomed in | 0.707 | 0 | 256 | 289 | 0.6 s |
+| slice, zoomed in | 11.25 | 0 | 48 | 54 | 0.6 s |
 | slice, zoomed out | 0.177 | 2 | 16 | 25 | 0.6 s |
 | volume, zoomed in | 0.354 | 1 | 64 | 81 | 0.6 s |
 | volume, zoomed out | 0.177 | 2 | 16 | 25 | 0.6 s |
@@ -262,12 +266,11 @@ set per rebuild stays at the 21,000 of ADR 0044 either way. What the decision ch
 this collection is the bytes: 393 kB per tile, timepoint, and channel at level 0 against
 6 kB at level 1.
 
-The remote run itself did not happen on the day. The operator's application default
-credentials had expired and only an interactive login renews them, so the link speed on
-the day, and the remote fill time, are still to be taken; the harness README holds the
-one command. The numbers below come from a local twin with the same per-tile geometry,
-21,371 tiles of 3×256×256 with a 3×32×32 level 1, served from local disk, where the
-link was not the limit (the server read level-0 objects at about 480 per second).
+The remote run itself, and with it the link speed on the day and the remote fill time,
+is still pending; the harness README says why and holds the one command. The numbers
+below come from a local twin with the same per-tile geometry, 21,371 tiles of 3×256×256
+with a 3×32×32 level 1, served from local disk, where the link was not the limit (the
+server read level-0 objects at about 480 per second).
 
 **Before and after on the twin,** two rounds alternating, a fresh server and browser per
 run, the page's run capped at 60 s:
@@ -276,22 +279,23 @@ run, the page's run capped at 60 s:
 | --- | --- | --- |
 | target level | 0 | 1 |
 | detail requests per rebuild | 21,371 | 21,371 |
-| detail tiles resident at 60 s | 1,365 of 21,371 | 21,371 of 21,371 |
+| detail chunks resident at 60 s, one per tile | 1,365 of 21,371 | 21,371 of 21,371 |
 | resident bytes, and when they stopped growing | 603 MB at 29 to 44 s | 198 MB at 13.1 to 13.4 s |
 | objects the server read in 60 s | 21,682 and 37,692 (8 to 15 GB) | 21,383 (139 MB) |
 | queue depth at 60 s | 3,180 and 20,319 | 0 |
 | the frame | a central disc of filled tiles, the rest at the floor or blank | every tile filled |
 
-Pinned to level 0 the page can never hold the set: 1,365 tiles is the 512 MiB detail
-budget, so residency plateaus there while the queue stays thousands deep and the server
-reads the collection over again, 6% of the tiles on screen for 8 to 15 GB read. That is
-the memory half of the case ADR 0044 made from throughput. Following the screen, the
-whole detail tier is resident inside 13 s off 139 MB, and the frame shows every tile.
+Pinned to level 0 the page can never hold the set: 1,365 level-0 chunks is the 512 MiB
+detail budget, so residency plateaus there while the queue stays thousands deep and the
+server reads the collection over again, 6% of the tiles on screen for 8 to 15 GB read.
+That is the memory half of the case ADR 0044 made from throughput. Following the
+screen, the whole detail tier is resident inside 13 s off 139 MB, and the frame shows
+every tile.
 
 Neither run reaches quiescence, for different reasons. Before, the detail tier cannot
 complete. After, it does, and the only shortfall is the coarse floor, which the 64 MiB
-coarse budget caps at 10,922 of 21,371 tiles on this geometry; that is unchanged by this
-decision, holds for the pinned run too, and is filed as #1041. The measurement also
-found that a resident slot costs the level's declared chunk shape rather than the chunk's
-extent in the level (#1042), and that a run can never be observed settling past 60 s
-(#1043).
+coarse budget caps at 10,922 of the 21,371 chunks on this geometry; that is unchanged by
+this decision, holds for the pinned run too, and is filed as #1041. The measurement also
+found that a resident slot costs the level's declared chunk shape rather than the
+chunk's extent in the level (#1042), and that a run cannot be observed reaching
+quiescence past 60 s (#1043).

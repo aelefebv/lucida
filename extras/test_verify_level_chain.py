@@ -28,7 +28,6 @@ import verify_level_chain as check  # noqa: E402
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "ome-zarr"
 LEVEL_INDEX = FIXTURES_DIR / "level-index.ome.zarr"
 
-# The check's own fixture: four levels halving every axis.
 HALVING = [(64, 512, 512), (32, 256, 256), (16, 128, 128), (8, 64, 64)]
 
 
@@ -71,6 +70,11 @@ def test_the_zoom_for_a_level_sits_in_the_middle_of_the_band_that_level_owns() -
         assert check.expected_target(zoom * band, ratios) == level
         assert check.expected_target(zoom / band, ratios) == level
 
+    # Level 0 owns everything above 1 / ratio[1]; its zoom sits an octave
+    # above that end, and the coarsest level's an octave below its own.
+    assert check.zoom_for_level(0, ratios) == pytest.approx(1.0)
+    assert check.zoom_for_level(3, ratios) == pytest.approx(1 / 16)
+
     # A level that resolves no finer than the one before it is not a target.
     with pytest.raises(ValueError):
         check.zoom_for_level(1, [1.0, float("inf"), 2.0])
@@ -80,6 +84,26 @@ def test_the_zoom_for_a_level_sits_in_the_middle_of_the_band_that_level_owns() -
     assert check.expected_target(check.zoom_for_level(0, [1.0, float("inf"), 2.0]), [1.0, float("inf"), 2.0]) == 0
 
 
+def test_the_overflow_zoom_puts_the_image_an_octave_past_the_viewport() -> None:
+    # A 512-sample plane in a 2880 × 1800 viewport overflows x at 5.625
+    # device pixels per sample; one octave past that is 11.25.
+    assert check.overflow_zoom((512, 512), (2880, 1800)) == pytest.approx(11.25)
+    assert check.overflow_zoom((4096, 1024), (2880, 1800)) == pytest.approx(3.515625)
+
+
+def test_the_planned_runs_zoom_in_past_the_viewport_only_for_level_0_in_slice_mode() -> None:
+    runs = check.plan_runs(HALVING, [0, 2], [1, 2])
+    by_name = {name: (camera, zoom) for name, camera, zoom in runs}
+    assert list(by_name) == ["slice-in", "slice-out", "volume-in", "volume-out"]
+    assert by_name["slice-in"] == ("slice", pytest.approx(11.25))
+    assert by_name["slice-out"] == ("slice", pytest.approx(check.zoom_for_level(2, [1.0, 2.0, 4.0, 8.0])))
+    assert by_name["volume-in"] == ("arcball", pytest.approx(check.zoom_for_level(1, [1.0, 2.0, 4.0, 8.0])))
+    # A zoomed-in slice run that reaches a coarser level keeps the band middle.
+    assert dict((n, z) for n, _, z in check.plan_runs(HALVING, [1, 2], [1, 2]))["slice-in"] == pytest.approx(
+        check.zoom_for_level(1, [1.0, 2.0, 4.0, 8.0])
+    )
+
+
 def test_a_neutral_gray_names_its_level_and_anything_else_names_none() -> None:
     """The contrast window of −1 to levels−1 draws level L at (L + 1) / levels of white."""
     levels = 4
@@ -87,13 +111,11 @@ def test_a_neutral_gray_names_its_level_and_anything_else_names_none() -> None:
     assert check.level_from_color((128, 128, 128), levels) == 1
     assert check.level_from_color((191, 191, 191), levels) == 2
     assert check.level_from_color((255, 255, 255), levels) == 3
-    # A little off in any channel is still the level.
     assert check.level_from_color((130, 126, 128), levels) == 1
     # No level is black, so an entity drawing nothing is not mistaken for one.
     assert check.level_from_color((0, 0, 0), levels) is None
     # The compositor's background is not neutral, and reads as no level.
     assert check.level_from_color((13, 13, 20), levels) is None
-    # A gray between two levels is not a level either.
     assert check.level_from_color((96, 96, 96), levels) is None
 
 
@@ -101,7 +123,7 @@ def test_the_frame_is_read_at_its_center(tmp_path: Path) -> None:
     frame = np.zeros((40, 60, 3), dtype=np.uint8)
     frame[:, :] = (13, 13, 20)
     frame[18:23, 28:33] = (191, 191, 191)
-    # One stray pixel at the center must not sway the reading.
+    # One stray pixel at the center must not sway the color.
     frame[20, 30] = (255, 0, 0)
     path = tmp_path / "frame.png"
     Image.fromarray(frame).save(path)
@@ -130,10 +152,40 @@ def test_the_bound_counts_the_chunks_the_view_can_cover_plus_a_border() -> None:
     ) == 2 * 17 * 17
 
 
-def tick(at_us: int, target: int, planned: dict[int, int], displayed: int | None) -> dict:
+def driven(camera: str, zoom: float) -> check.DrivenRun:
+    return check.DrivenRun(
+        name=f"{camera}-run",
+        camera=camera,
+        zoom=zoom,
+        run_file=Path("run.json"),
+        screenshot=Path("frame.png"),
+        viewport=(1440, 900),
+        core_target=(0, 0),
+        core_zoom=zoom,
+        quiescent=True,
+        end_reason="quiescent",
+        verdict=None,
+    )
+
+
+def test_a_volume_runs_bound_carries_the_depth_of_the_level_in_chunks() -> None:
+    """The arcball camera is the volume view, so its bound is the slice bound times the depth."""
+    chunks = [(32, 32, 32)] * 4
+    # Level 1 of the halving pyramid is 32 deep: one chunk. Level 0 is two.
+    assert check.run_bound(driven("arcball", 0.354), HALVING, chunks, 1, 2.0) == check.run_bound(
+        driven("slice", 0.354), HALVING, chunks, 1, 2.0
+    )
+    assert check.run_bound(driven("arcball", 2.0), HALVING, chunks, 0, 1.0) == 2 * check.run_bound(
+        driven("slice", 2.0), HALVING, chunks, 0, 1.0
+    )
+    assert driven("arcball", 1.0).volume and not driven("slice", 1.0).volume
+
+
+def tick(at_us: int, target: int, detail: int, planned: dict[int, int], displayed: int | None) -> dict:
     return {
         "atUs": at_us,
         "datasetId": "wds-1",
+        "counters": {"laneDetail": detail, "laneCoarse": sum(planned.values()) - detail},
         "targetLevel": {"min": target, "max": target},
         "levelPinned": False,
         "displayedLevel": None if displayed is None else {"min": displayed, "max": displayed},
@@ -141,33 +193,34 @@ def tick(at_us: int, target: int, planned: dict[int, int], displayed: int | None
     }
 
 
-def test_the_trace_reading_takes_the_final_target_and_the_largest_plan_at_it() -> None:
+def test_the_trace_levels_take_the_final_target_and_the_largest_detail_plan_at_it() -> None:
     run = {
         "header": {"runId": "run-1", "endReason": "quiescent", "durationUs": 900_000},
         "ticks": [
             # The page's default camera plans level 0 before the composed one applies.
-            tick(10_000, 0, {0: 256, 3: 4}, None),
-            tick(40_000, 2, {2: 16, 3: 4}, None),
-            tick(200_000, 2, {2: 3}, 2),
-            tick(500_000, 2, {}, 2),
+            tick(10_000, 0, 256, {0: 256, 3: 4}, None),
+            # The per-level count at the target also carries the coarse lane.
+            tick(40_000, 2, 16, {2: 20, 3: 4}, None),
+            tick(200_000, 2, 3, {2: 3}, 2),
+            tick(500_000, 2, 0, {}, 2),
         ],
         "events": [
             {"kind": "level-change", "levelChange": {"datasetId": "wds-1", "from": {"min": 0, "max": 0}, "to": {"min": 2, "max": 2}}}
         ],
     }
-    reading = check.read_levels(run)
-    assert reading.target == (2, 2)
-    assert reading.displayed == (2, 2)
-    assert reading.wanted_at_target == 16
-    assert reading.level_changes == [((0, 0), (2, 2))]
-    assert reading.settle_seconds == pytest.approx(0.9)
+    seen = check.read_levels(run)
+    assert seen.target == (2, 2)
+    assert seen.displayed == (2, 2)
+    assert seen.detail_per_rebuild == 16
+    assert seen.level_changes == [((0, 0), (2, 2))]
+    assert seen.duration_seconds == pytest.approx(0.9)
 
 
 def test_a_run_with_no_tick_reads_as_no_target() -> None:
-    reading = check.read_levels({"header": {"runId": "run-2", "durationUs": 0}, "ticks": [], "events": []})
-    assert reading.target is None
-    assert reading.displayed is None
-    assert reading.wanted_at_target == 0
+    seen = check.read_levels({"header": {"runId": "run-2", "durationUs": 0}, "ticks": [], "events": []})
+    assert seen.target is None
+    assert seen.displayed is None
+    assert seen.detail_per_rebuild == 0
 
 
 def test_the_run_the_driver_waited_for_is_the_one_read(tmp_path: Path) -> None:

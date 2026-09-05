@@ -365,7 +365,8 @@ jobs:
       - name: Sharded twin check tests
         run: uv run extras/test_verify_sharded_twins.py
 
-      # Same split for the level chain check: the rule, the frame reader,
-      # and the run reader run here; the four driven runs need a server.
+      # Same split for the level chain check: the rule and the parts that
+      # read a frame or a run file run here; the four driven runs need a
+      # server.
       - name: Level chain check tests
         run: uv run extras/test_verify_level_chain.py

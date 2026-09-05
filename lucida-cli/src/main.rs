@@ -832,16 +832,6 @@ enum CameraMode {
     Fly,
 }
 
-impl From<CameraMode> for trace::CameraKind {
-    fn from(mode: CameraMode) -> Self {
-        match mode {
-            CameraMode::Slice => trace::CameraKind::Slice,
-            CameraMode::Arcball => trace::CameraKind::Arcball,
-            CameraMode::Fly => trace::CameraKind::Fly,
-        }
-    }
-}
-
 #[derive(Subcommand, Debug)]
 enum LayerCommand {
     /// List loaded dataset layers and display settings
@@ -1214,8 +1204,8 @@ struct TraceRunArgs {
     screenshot: Option<PathBuf>,
     /// Frame the dataset with this camera, fitted to the dataset, instead of
     /// leaving the framing to the page
-    #[arg(long, value_name = "MODE")]
-    camera: Option<CameraMode>,
+    #[arg(long, value_name = "CAMERA")]
+    camera: Option<trace::CameraKind>,
     /// Device pixels per level-0 sample at the center of the view, the
     /// measure the target level is chosen from. Implies --camera slice
     #[arg(long, value_name = "PIXELS")]
@@ -3738,7 +3728,6 @@ async fn run_trace(
     // one where the zoom is the whole framing.
     let camera_request = args
         .camera
-        .map(Into::into)
         .or(args.zoom.map(|_| trace::CameraKind::Slice))
         .map(|kind| trace::CameraRequest {
             kind,
@@ -3746,9 +3735,8 @@ async fn run_trace(
         });
     let mut composed_camera = None;
     if camera_request.is_some() || !pins.is_empty() {
-        // Everything the view says about the dataset is keyed by the
-        // workspace's id for it, and the framing reads the image geometry
-        // out of the document, so both come from the server.
+        // The document is a second socket round trip, so it is read only when
+        // a camera or a pin needs the image geometry it carries.
         let dataset_id = dataset_id.ok_or_else(|| {
             CliError::new(
                 ErrorKind::MissingResource,
@@ -5727,11 +5715,8 @@ mod tests {
             Command::Trace { run, .. } => {
                 assert!(run.gate);
                 assert_eq!(run.output.as_deref(), Some("/tmp/r.json"));
-                // The frame rides the same drive as the trace, and the camera
-                // and display pins name the framing a reader can hold the
-                // page to.
                 assert_eq!(run.screenshot.as_deref(), Some(Path::new("/tmp/r.png")));
-                assert!(matches!(run.camera, Some(CameraMode::Arcball)));
+                assert!(matches!(run.camera, Some(trace::CameraKind::Arcball)));
                 assert_eq!(run.zoom, Some(0.08));
                 assert_eq!(run.contrast.as_deref(), Some(&[0.0, 3.0][..]));
                 assert!(matches!(run.colormap, Some(ColormapValue::Gray)));
@@ -5740,7 +5725,6 @@ mod tests {
                     Some(RenderModeValue::MaxIntensity)
                 ));
                 assert_eq!(run.level_pin, Some(0));
-                assert_eq!(run.screenshot.as_deref(), Some(Path::new("/tmp/r.png")));
                 assert!(run.pin_contrast);
             }
             _ => panic!("expected a trace run"),

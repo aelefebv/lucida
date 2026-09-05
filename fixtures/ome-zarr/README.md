@@ -98,8 +98,10 @@ answers must then name the same level: the rule of ADR 0061 applied to the
 level shapes on disk, the target level `lucida-core` records for the
 composed camera, the target level on the trace's last planning pass, and
 the gray the frame shows, because every sample at level L holds the value
-L. Each run must also settle, and the chunks it planned at the target level
-must fit the wanted-set bound the ADR states.
+L. Each run must also reach quiescence, and the detail chunks it requested
+per planning pass must fit the wanted-set bound the ADR states. The
+zoomed-in slice run places the image past the viewport's edges, so its set
+is cut by the screen rather than by the level.
 
 The runs pin a gray colormap and a contrast window of −1 to the coarsest
 level, so level L draws as `(L + 1) / levels` of white and the frame is

@@ -26,10 +26,13 @@ each run file the harness reads:
 
 * whether the page reached quiescence, and after how long;
 * the target level the browser planned at, and whether it was pinned;
-* the most chunks any one planning pass planned at that level, which is
-  the visible detail wanted set per rebuild;
+* the most requests any one planning pass emitted on the detail lane and on
+  the coarse lane, which is the wanted set per rebuild split by tier;
+* the page's resident chunk counts against what it wanted when the run
+  closed, and the plateau its resident bytes reached and when;
 * the backend reads the server's timing rows record, their byte total, and
-  the read rate over the span they cover, which is the link on the day;
+  the read rate over the span they cover, which is the link on the day,
+  beside the server's own count of backend reads over the run;
 * the wall time of the dataset open, taken before the run.
 
 Prerequisites: a built ``lucida-server`` and ``lucida`` CLI, a built web
@@ -43,8 +46,8 @@ variables so those credentials win.
 Options:
 
     --rounds N           Rounds of the two runs. Default 2.
-    --timeout-seconds N  How long each run may take to settle. A run that
-                         has not settled by then is reported as such, with
+    --timeout-seconds N  How long each run may take to reach quiescence. A
+                         run that has not by then is reported as such, with
                          what it had planned and read. Default 300.
     --server-bin PATH    The server binary. Default target/release/lucida-server.
     --web-dist DIR       The web bundle. Default lucida-web/dist.
@@ -52,7 +55,6 @@ Options:
                          target/release/lucida, then ``lucida`` on PATH.
     --width W --height H The viewport in CSS pixels. Default 1440x900, which
                          is 2880x1800 device pixels at ratio 2.
-    --modes A,B          Which runs to take. Default pinned,screen.
 
 The report on stdout is a Markdown table, and ``summary.json`` in OUT_DIR
 holds the same numbers with the paths of every run file and frame.
@@ -66,7 +68,6 @@ import os
 import platform
 import shlex
 import shutil
-import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -78,8 +79,10 @@ sys.path.insert(0, str(REPO / "extras"))
 sys.path.insert(0, str(REPO / "extras" / "tryout"))
 
 from tryout.server import ServerProcess  # noqa: E402
-from verify_level_chain import DEVICE_PIXEL_RATIO, read_levels, run_in_document  # noqa: E402
+from verify_level_chain import DEVICE_PIXEL_RATIO, Lucida, fmt_range, read_levels, run_in_document  # noqa: E402
 
+# Level 0 pinned is the behavior before ADR 0061; following the screen is
+# the behavior after.
 MODES = {"pinned": ["--level-pin", "0"], "screen": []}
 
 
@@ -87,83 +90,55 @@ MODES = {"pinned": ["--level-pin", "0"], "screen": []}
 class RunSummary:
     round: int
     mode: str
-    run_file: str
-    screenshot: str
-    open_seconds: float
-    settled: bool
-    end_reason: str | None
-    duration_seconds: float
-    target_level: str
-    level_pinned: bool | None
-    planned_at_target: int
-    # The most requests any one planning pass emitted on the detail lane and
-    # on the coarse lane: the wanted set per rebuild, split by tier.
-    detail_per_rebuild: int
-    coarse_per_rebuild: int
-    ticks: int
-    detail_rows_at_target: int
-    # When every detail-lane row at the target level completed, the moment
-    # the last of them was presented: the time to a fully resident detail
-    # tier, whether or not the run went on to settle.
-    detail_filled_seconds: float | None
-    rows_truncated: bool
-    backend_reads: int
-    backend_bytes: int
-    read_span_seconds: float
-    reads_per_second: float
-    megabytes_per_second: float
-    # The server's own count of backend reads during the run, from its
-    # source cache statistics before and after. The trace's server rows are
-    # capped per run, so on a wide collection this is the whole figure and
-    # the rows are a sample.
-    server_reads: int | None
-    server_read_seconds: float | None
-    # Resident bytes on the GPU, sampled by the run's readings: the plateau
-    # they reach and when they first reach it. A plateau at a residency
-    # budget is a page that stopped growing, not one that finished.
-    resident_plateau_megabytes: float
-    resident_plateau_seconds: float
-    desired_detail_at_end: int | None
-    resident_detail_at_end: int | None
-    desired_coarse_at_end: int | None
-    resident_coarse_at_end: int | None
     error: str | None = None
-
-
-class Lucida:
-    """The CLI, bound to one server and a private config file."""
-
-    def __init__(self, command: Sequence[str], server: str, config_path: Path):
-        self.command = list(command)
-        self.server = server
-        self.env = dict(os.environ, LUCIDA_CONFIG_PATH=str(config_path))
-
-    def call(self, *args: str, timeout: float) -> dict:
-        argv = [*self.command, "--server", self.server, "--json", *args]
-        print("$", shlex.join(argv), flush=True)
-        completed = subprocess.run(argv, env=self.env, capture_output=True, text=True, timeout=timeout)
-        if completed.returncode != 0:
-            raise RuntimeError(
-                f"{shlex.join(argv)} exited {completed.returncode}\n{completed.stdout}\n{completed.stderr}"
-            )
-        text = completed.stdout.strip()
-        start = text.rfind("\n{")
-        return json.loads(text if start < 0 else text[start + 1 :])
+    run_file: str = ""
+    screenshot: str = ""
+    open_seconds: float = 0.0
+    quiescent: bool = False
+    end_reason: str | None = None
+    duration_seconds: float = 0.0
+    target_level: str = "none"
+    level_pinned: bool | None = None
+    # The largest detail-lane and coarse-lane wanted sets any one planning
+    # pass emitted.
+    detail_per_rebuild: int = 0
+    coarse_per_rebuild: int = 0
+    ticks: int = 0
+    detail_rows_at_target: int = 0
+    # When the last detail-lane row at the target level was presented: the
+    # time to a fully resident detail tier, whether or not the run reached
+    # quiescence.
+    detail_filled_seconds: float | None = None
+    rows_truncated: bool = False
+    backend_reads: int = 0
+    backend_bytes: int = 0
+    read_span_seconds: float = 0.0
+    reads_per_second: float = 0.0
+    megabytes_per_second: float = 0.0
+    # The server's own backend read count, from its source cache statistics
+    # before and after. The trace caps server rows per run, so on a wide
+    # collection this is the whole figure and the rows are a sample.
+    server_reads: int | None = None
+    server_read_seconds: float | None = None
+    # From the run's readings of resident GPU bytes. A plateau at a residency
+    # budget is a page that stopped growing, not one that finished.
+    resident_plateau_megabytes: float = 0.0
+    resident_plateau_seconds: float = 0.0
+    desired_detail_at_end: int | None = None
+    resident_detail_at_end: int | None = None
+    desired_coarse_at_end: int | None = None
+    resident_coarse_at_end: int | None = None
 
 
 def default_lucida_command() -> list[str]:
+    # A measurement wants the release build; the check beside this harness
+    # takes whatever is on PATH.
     built = REPO / "target" / "release" / "lucida"
     if built.is_file():
         return [str(built)]
     if shutil.which("lucida"):
         return ["lucida"]
     return ["cargo", "run", "-q", "--release", "-p", "lucida-cli", "--"]
-
-
-def fmt_range(value: tuple[int, int] | None) -> str:
-    if value is None:
-        return "none"
-    return str(value[0]) if value[0] == value[1] else f"{value[0]}..{value[1]}"
 
 
 def summarise(
@@ -177,7 +152,7 @@ def summarise(
 ) -> RunSummary:
     doc = json.loads(run_file.read_text())
     run = run_in_document(run_file)
-    reading = read_levels(run)
+    seen = read_levels(run)
     header = run["header"]
 
     server_reads = None
@@ -194,7 +169,7 @@ def summarise(
         0,
     )
 
-    target = reading.target
+    target = seen.target
     detail_per_rebuild = 0
     coarse_per_rebuild = 0
     for tick in run.get("ticks", []):
@@ -247,15 +222,14 @@ def summarise(
         run_file=str(run_file),
         screenshot=str(screenshot),
         open_seconds=round(open_seconds, 2),
-        settled=bool(doc["header"].get("settled")),
+        quiescent=bool(doc["header"].get("settled")),
         end_reason=header.get("endReason"),
         duration_seconds=round(header.get("durationUs", 0) / 1e6, 2),
         target_level=fmt_range(target),
         level_pinned=pinned,
-        planned_at_target=reading.wanted_at_target,
         detail_per_rebuild=detail_per_rebuild,
         coarse_per_rebuild=coarse_per_rebuild,
-        ticks=reading.ticks,
+        ticks=seen.ticks,
         detail_rows_at_target=detail_rows,
         detail_filled_seconds=detail_filled,
         rows_truncated=bool(header.get("truncation")) or bool(run.get("rowsDropped")),
@@ -341,7 +315,7 @@ def source_cache(lucida: Lucida, workspace_id: str, dataset: str) -> dict | None
 
 def table(runs: Sequence[RunSummary]) -> str:
     head = (
-        "| round | mode | open s | settled | run s | target | detail per rebuild | coarse per rebuild | "
+        "| round | mode | open s | quiescent | run s | target | detail per rebuild | coarse per rebuild | "
         "detail resident at end | coarse resident at end | resident plateau | server reads | "
         "traced reads | traced MB | reads/s | MB/s |\n"
         "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
@@ -351,7 +325,7 @@ def table(runs: Sequence[RunSummary]) -> str:
         if run.error:
             lines.append(f"| {run.round} | {run.mode} | failed: {run.error} |")
             continue
-        settled = "yes" if run.settled else f"no ({run.end_reason})"
+        quiescent = "yes" if run.quiescent else f"no ({run.end_reason})"
         target = run.target_level + (" (pin)" if run.level_pinned else "")
         detail_resident = f"{run.resident_detail_at_end} of {run.desired_detail_at_end}"
         coarse_resident = f"{run.resident_coarse_at_end} of {run.desired_coarse_at_end}"
@@ -359,7 +333,7 @@ def table(runs: Sequence[RunSummary]) -> str:
         server_reads = "unknown" if run.server_reads is None else str(run.server_reads)
         traced = str(run.backend_reads) + (" (capped)" if run.rows_truncated else "")
         lines.append(
-            f"| {run.round} | {run.mode} | {run.open_seconds} | {settled} | {run.duration_seconds} | {target} | "
+            f"| {run.round} | {run.mode} | {run.open_seconds} | {quiescent} | {run.duration_seconds} | {target} | "
             f"{run.detail_per_rebuild} | {run.coarse_per_rebuild} | {detail_resident} | {coarse_resident} | "
             f"{plateau} | {server_reads} | {traced} | {run.backend_bytes / 1e6:.1f} | "
             f"{run.reads_per_second} | {run.megabytes_per_second} |"
@@ -378,7 +352,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lucida", default=None)
     parser.add_argument("--width", type=int, default=1440)
     parser.add_argument("--height", type=int, default=900)
-    parser.add_argument("--modes", default="pinned,screen")
     opts = parser.parse_args(argv)
 
     for key in (
@@ -394,11 +367,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"missing: {path}", file=sys.stderr)
             return 2
     command = shlex.split(opts.lucida) if opts.lucida else default_lucida_command()
-    modes = [mode.strip() for mode in opts.modes.split(",") if mode.strip()]
-    unknown = [mode for mode in modes if mode not in MODES]
-    if unknown:
-        print(f"unknown mode(s) {unknown}; choose from {sorted(MODES)}", file=sys.stderr)
-        return 2
+    modes = list(MODES)
 
     opts.out.mkdir(parents=True, exist_ok=True)
     conditions = {
@@ -414,7 +383,7 @@ def main(argv: list[str] | None = None) -> int:
 
     runs: list[RunSummary] = []
     for round_index in range(1, opts.rounds + 1):
-        # Alternate the order each round, so neither side always runs first.
+        # Alternate so order effects do not favor one mode.
         order = modes if round_index % 2 == 1 else list(reversed(modes))
         for mode in order:
             try:
@@ -432,39 +401,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
             except Exception as error:  # noqa: BLE001 - one failed run must not end the round
                 (opts.out / f"round-{round_index}-{mode}" / "error.txt").write_text(str(error))
-                run = RunSummary(
-                    round=round_index,
-                    mode=mode,
-                    run_file="",
-                    screenshot="",
-                    open_seconds=0.0,
-                    settled=False,
-                    end_reason=None,
-                    duration_seconds=0.0,
-                    target_level="none",
-                    level_pinned=None,
-                    planned_at_target=0,
-                    detail_per_rebuild=0,
-                    coarse_per_rebuild=0,
-                    ticks=0,
-                    detail_rows_at_target=0,
-                    detail_filled_seconds=None,
-                    rows_truncated=False,
-                    backend_reads=0,
-                    backend_bytes=0,
-                    read_span_seconds=0.0,
-                    reads_per_second=0.0,
-                    megabytes_per_second=0.0,
-                    server_reads=None,
-                    server_read_seconds=None,
-                    resident_plateau_megabytes=0.0,
-                    resident_plateau_seconds=0.0,
-                    desired_detail_at_end=None,
-                    resident_detail_at_end=None,
-                    desired_coarse_at_end=None,
-                    resident_coarse_at_end=None,
-                    error=str(error).splitlines()[0] if str(error) else type(error).__name__,
-                )
+                first_line = str(error).splitlines()[0] if str(error) else type(error).__name__
+                run = RunSummary(round=round_index, mode=mode, error=first_line)
             runs.append(run)
             print(table([run]).splitlines()[-1], flush=True)
             (opts.out / "summary.json").write_text(
