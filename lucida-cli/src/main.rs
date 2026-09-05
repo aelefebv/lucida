@@ -832,6 +832,16 @@ enum CameraMode {
     Fly,
 }
 
+impl From<CameraMode> for trace::CameraKind {
+    fn from(mode: CameraMode) -> Self {
+        match mode {
+            CameraMode::Slice => trace::CameraKind::Slice,
+            CameraMode::Arcball => trace::CameraKind::Arcball,
+            CameraMode::Fly => trace::CameraKind::Fly,
+        }
+    }
+}
+
 #[derive(Subcommand, Debug)]
 enum LayerCommand {
     /// List loaded dataset layers and display settings
@@ -1198,6 +1208,32 @@ struct TraceRunArgs {
     /// Also write this run's raw spans as Chrome Trace Event JSON, for Perfetto
     #[arg(long, value_name = "PATH")]
     perfetto: Option<String>,
+    /// Also write the frame the page shows once it has settled, as a PNG at
+    /// the run's device pixel ratio
+    #[arg(long, value_name = "PATH")]
+    screenshot: Option<PathBuf>,
+    /// Frame the dataset with this camera, fitted to the dataset, instead of
+    /// leaving the framing to the page
+    #[arg(long, value_name = "MODE")]
+    camera: Option<CameraMode>,
+    /// Device pixels per level-0 sample at the center of the view, the
+    /// measure the target level is chosen from. Implies --camera slice
+    #[arg(long, value_name = "PIXELS")]
+    zoom: Option<f64>,
+    /// Pin the dataset's contrast window to MIN..MAX on every channel instead
+    /// of fitting it to the data as it arrives
+    #[arg(long, num_args = 2, value_names = ["MIN", "MAX"], allow_hyphen_values = true)]
+    contrast: Option<Vec<f64>>,
+    /// Pin every channel of the dataset to this colormap
+    #[arg(long, value_name = "NAME")]
+    colormap: Option<ColormapValue>,
+    /// Pin the dataset's volume render mode
+    #[arg(long, value_name = "MODE")]
+    render_mode: Option<RenderModeValue>,
+    /// Pin the dataset's target level instead of letting it follow the
+    /// screen. Pinning to 0 is the level-0 default ADR 0061 replaced
+    #[arg(long, value_name = "LEVEL")]
+    level_pin: Option<u32>,
     /// Seconds to wait for the page to load and settle
     #[arg(long, default_value_t = 120)]
     timeout_seconds: u64,
@@ -3546,6 +3582,7 @@ async fn emit_trace_command(
                 "workspace": workspace,
                 "target": target,
                 "runFile": outcome.path,
+                "screenshot": outcome.file.header.screenshot,
                 "header": outcome.file.header,
                 "verdict": outcome.file.diagnostic.get("verdict"),
                 "text": outcome.file.renderings.summary,
@@ -3667,14 +3704,60 @@ async fn run_trace(
     // empty viewer until the deadline. Opening it here is what makes a
     // first-time dataset measurable; the warmth block says the driver did it,
     // because it warms the server the run is about to be measured against.
+    let mut dataset_id = trace::dataset_id_for_source(&dataset_url, &health);
     if !warmth.dataset_open_before_run {
-        DatasetOpenClient::new(target.ws_url.clone(), token.cloned())
+        let opened = DatasetOpenClient::new(target.ws_url.clone(), token.cloned())
             .open(&dataset_url, &workspace.id, wait)
             .await?;
+        dataset_id = Some(lucida_core::DatasetId(opened.workspace_dataset_id));
         warmth.note_driver_open();
     }
 
-    let view = trace::compose_dataset_view(&dataset_url, args.width, args.height);
+    let mut view = trace::compose_dataset_view(&dataset_url, args.width, args.height);
+    let pins = trace::DisplayPins {
+        contrast: args
+            .contrast
+            .as_deref()
+            .map(trace::contrast_window)
+            .transpose()?,
+        colormap: args.colormap.map(Into::into),
+        render_mode: args.render_mode.map(Into::into),
+        level: args.level_pin,
+    };
+    // A zoom without a camera is a slice camera: the page's own mode, and the
+    // one where the zoom is the whole framing.
+    let camera_request = args
+        .camera
+        .map(Into::into)
+        .or(args.zoom.map(|_| trace::CameraKind::Slice))
+        .map(|kind| trace::CameraRequest {
+            kind,
+            zoom: args.zoom,
+        });
+    let mut composed_camera = None;
+    if camera_request.is_some() || !pins.is_empty() {
+        // Everything the view says about the dataset is keyed by the
+        // workspace's id for it, and the framing reads the image geometry
+        // out of the document, so both come from the server.
+        let dataset_id = dataset_id.ok_or_else(|| {
+            CliError::new(
+                ErrorKind::MissingResource,
+                format!("the server reports no workspace dataset for {dataset_url}"),
+            )
+        })?;
+        let document = trace::workspace_document(&target.ws_url, token, wait).await?;
+        if let Some(request) = camera_request {
+            let device_viewport = [
+                (args.width as f64 * args.device_pixel_ratio).round() as u32,
+                (args.height as f64 * args.device_pixel_ratio).round() as u32,
+            ];
+            let framing = trace::compose_camera(&document, &dataset_id, device_viewport, request)?;
+            view.camera = framing.camera;
+            composed_camera = Some(framing.record);
+        }
+        let channels = trace::channel_count(&document, &dataset_id);
+        trace::pin_display(&mut view, &dataset_id, channels, pins);
+    }
     let url = montage::with_render_param(&viewer_inline_view_web_url(target, &view)?);
     let composed = trace::ComposedView {
         dataset: normalize_dataset_url(&dataset_url),
@@ -3682,6 +3765,7 @@ async fn run_trace(
         width: args.width,
         height: args.height,
         device_pixel_ratio: args.device_pixel_ratio,
+        camera: composed_camera,
     };
 
     let perfetto = args.perfetto.clone();
@@ -3690,6 +3774,7 @@ async fn run_trace(
         server_warmth: warmth,
         server_url: server.url.clone(),
         workspace_id: workspace.id.clone(),
+        screenshot: args.screenshot.clone(),
     };
     let viewport = Viewport::new(args.width, args.height, args.device_pixel_ratio);
     // A drive that fails says what it drove: the composed URL is the whole
@@ -5611,11 +5696,39 @@ mod tests {
             "--gate",
             "--output",
             "/tmp/r.json",
+            "--screenshot",
+            "/tmp/r.png",
+            "--camera",
+            "arcball",
+            "--zoom",
+            "0.08",
+            "--contrast",
+            "0",
+            "3",
+            "--colormap",
+            "gray",
+            "--render-mode",
+            "max-intensity",
+            "--level-pin",
+            "0",
         ]);
         match gated.command {
             Command::Trace { run, .. } => {
                 assert!(run.gate);
                 assert_eq!(run.output.as_deref(), Some("/tmp/r.json"));
+                // The frame rides the same drive as the trace, and the camera
+                // and display pins name the framing a reader can hold the
+                // page to.
+                assert_eq!(run.screenshot.as_deref(), Some(Path::new("/tmp/r.png")));
+                assert!(matches!(run.camera, Some(CameraMode::Arcball)));
+                assert_eq!(run.zoom, Some(0.08));
+                assert_eq!(run.contrast.as_deref(), Some(&[0.0, 3.0][..]));
+                assert!(matches!(run.colormap, Some(ColormapValue::Gray)));
+                assert!(matches!(
+                    run.render_mode,
+                    Some(RenderModeValue::MaxIntensity)
+                ));
+                assert_eq!(run.level_pin, Some(0));
             }
             _ => panic!("expected a trace run"),
         }

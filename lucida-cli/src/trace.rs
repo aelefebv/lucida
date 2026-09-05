@@ -18,7 +18,12 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use futures_util::StreamExt;
+use lucida_core::DatasetId;
+use lucida_core::camera::Camera;
 use lucida_core::saved_view::{SavedView, normalize_dataset_url};
+use lucida_core::scene::{Colormap, DatasetDisplaySettings, DocumentState, RenderMode, Scene};
+use lucida_core::transform::VolumeTransform;
 use lucida_protocol::{DatasetSourceCacheStats, DatasetSourceHealth};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -26,6 +31,7 @@ use serde_json::Value;
 use crate::browser::{self, Viewport};
 use crate::credentials::EffectiveToken;
 use crate::error::{CliError, ErrorKind};
+use crate::session::{connect_workspace_socket, incoming_messages, wait_for_workspace_snapshot};
 
 /// The run file's own version, independent of the trace schema it carries.
 /// A reader that does not know this number should say so rather than guess.
@@ -126,6 +132,86 @@ pub struct ComposedView {
     pub width: u32,
     pub height: u32,
     pub device_pixel_ratio: f64,
+    /// The camera the driver composed, when the caller asked for one rather
+    /// than the page's own framing, and the level the core says it calls for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera: Option<ComposedCamera>,
+}
+
+/// Which camera the driver frames the dataset with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CameraKind {
+    Slice,
+    Arcball,
+    Fly,
+}
+
+/// The finest and coarsest level across a dataset's visible image-bearing
+/// entities, the shape the trace's per-tick aggregate reports it in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LevelRange {
+    pub min: u32,
+    pub max: u32,
+}
+
+/// A camera the driver composed, described by the one number the target
+/// level is chosen from.
+///
+/// Recorded so a reader can hold the page to it: the browser measures the
+/// same camera itself and reports its own target on every tick, and the two
+/// must agree, or the level rule has two homes after all.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComposedCamera {
+    pub mode: CameraKind,
+    /// Device pixels per level-0 sample where the center of the view meets
+    /// the data, the measure the target level is chosen from. A slice camera
+    /// spaces every sample this far apart; a volume camera measures it where
+    /// the center ray meets the volume.
+    pub zoom: f64,
+    /// The target level lucida-core computes for this camera, across the
+    /// dataset's visible image-bearing entities.
+    pub target_level: LevelRange,
+}
+
+/// What the caller asked the camera to be.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CameraRequest {
+    pub kind: CameraKind,
+    /// Device pixels per level-0 sample, or `None` to keep the fit.
+    pub zoom: Option<f64>,
+}
+
+/// The camera to put in the view, and the record of it for the header.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComposedFraming {
+    pub camera: Camera,
+    pub record: ComposedCamera,
+}
+
+/// Display settings the caller pins for the run instead of leaving to the
+/// page's defaults. Each is applied to every channel of the dataset.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct DisplayPins {
+    /// The contrast window, `(min, max)`. Pinning it also turns the page's
+    /// contrast fit off for the dataset.
+    pub contrast: Option<(f64, f64)>,
+    pub colormap: Option<Colormap>,
+    pub render_mode: Option<RenderMode>,
+    /// The level pin. Absent leaves the target following the screen, and a
+    /// number holds it at that level however the camera moves. Pinning to
+    /// level 0 is how a run measures the behavior ADR 0061 replaced.
+    pub level: Option<u32>,
+}
+
+impl DisplayPins {
+    pub fn is_empty(&self) -> bool {
+        self.contrast.is_none()
+            && self.colormap.is_none()
+            && self.render_mode.is_none()
+            && self.level.is_none()
+    }
 }
 
 /// What the *server* already held when the run started.
@@ -187,6 +273,12 @@ pub struct TraceRunHeader {
     pub server_warmth: ServerWarmth,
     pub server_url: String,
     pub workspace_id: String,
+    /// The settled frame, when the caller asked for one: a PNG of the page at
+    /// the composed view's device pixel ratio, taken after the wait and
+    /// before the export. A run that never settled still gets its frame,
+    /// because what the page showed at the deadline is part of the finding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screenshot: Option<PathBuf>,
 }
 
 /// Both renderings, taken at export time from the page's one renderer. The
@@ -260,6 +352,290 @@ pub fn compose_dataset_view(dataset_url: &str, width: u32, height: u32) -> Saved
     let mut view = SavedView::empty([width, height]);
     view.datasets = vec![normalize_dataset_url(dataset_url)];
     view
+}
+
+/// The workspace's id for the dataset at `dataset_url`, out of a health
+/// snapshot, when the workspace holds it. The composed view keys everything
+/// it says about a dataset's display and camera on this id.
+pub fn dataset_id_for_source(
+    dataset_url: &str,
+    health: &[DatasetSourceHealth],
+) -> Option<DatasetId> {
+    let canonical = normalize_dataset_url(dataset_url);
+    health
+        .iter()
+        .find(|dataset| {
+            dataset
+                .source_url
+                .as_deref()
+                .map(|url| normalize_dataset_url(url) == canonical)
+                .unwrap_or(false)
+        })
+        .map(|dataset| dataset.workspace_dataset_id.clone())
+}
+
+/// The workspace's document, read off the connect handshake. The driver
+/// needs it to frame a dataset: the fit and the level rule both read the
+/// image geometry, which only the document carries.
+pub async fn workspace_document(
+    ws_url: &str,
+    token: Option<&EffectiveToken>,
+    wait: Duration,
+) -> Result<DocumentState, CliError> {
+    let socket = connect_workspace_socket(ws_url, token.map(|token| token.token.as_str())).await?;
+    let (_write, read) = socket.split();
+    let mut incoming = incoming_messages(read);
+    Ok(wait_for_workspace_snapshot(&mut incoming, wait)
+        .await?
+        .document)
+}
+
+/// How many channels the dataset's first image has at level 0, or one when
+/// the document does not say. Every display pin is written per channel,
+/// because a channel's own settings win over the dataset's.
+pub fn channel_count(document: &DocumentState, dataset_id: &DatasetId) -> usize {
+    document
+        .manifests
+        .get(dataset_id)
+        .and_then(|manifest| manifest.images().first())
+        .and_then(|image| image.multiscale.levels.first())
+        .map_or(1, |level| level.shape[1] as usize)
+        .max(1)
+}
+
+/// A contrast window as the command line gives it: two finite numbers, the
+/// second larger than the first.
+pub fn contrast_window(values: &[f64]) -> Result<(f64, f64), CliError> {
+    match values {
+        [min, max] if min.is_finite() && max.is_finite() && min < max => Ok((*min, *max)),
+        _ => Err(CliError::config(format!(
+            "--contrast takes a window MIN MAX with MIN below MAX, not {values:?}"
+        ))),
+    }
+}
+
+/// Write `pins` into the view for `dataset_id`, on the dataset and on each
+/// of its `channel_count` channels.
+///
+/// A pinned window turns the page's contrast fit off for the dataset. The
+/// fit samples whatever is resident when it runs, so two runs of one dataset
+/// can otherwise draw the same data a level apart, and a frame that is to be
+/// read or compared needs the window held still. A channel the pins do not
+/// name keeps the colormap the page would have given it.
+pub fn pin_display(
+    view: &mut SavedView,
+    dataset_id: &DatasetId,
+    channel_count: usize,
+    pins: DisplayPins,
+) {
+    if pins.is_empty() {
+        return;
+    }
+    let mut settings = DatasetDisplaySettings::default();
+    if let Some((min, max)) = pins.contrast {
+        settings.contrast_min = min;
+        settings.contrast_max = max;
+        view.auto_contrast.insert(dataset_id.clone(), false);
+    }
+    if let Some(render_mode) = pins.render_mode {
+        settings.render_mode = render_mode;
+    }
+    settings.detail_level_override = pins.level;
+    if pins.contrast.is_some() || pins.colormap.is_some() {
+        for index in 0..channel_count.max(1) {
+            let channel = settings.ensure_channel(index);
+            channel.colormap = pins
+                .colormap
+                .unwrap_or_else(|| Colormap::default_for_channel(index));
+            if let Some((min, max)) = pins.contrast {
+                channel.contrast_min = min;
+                channel.contrast_max = max;
+            }
+        }
+    }
+    view.dataset_settings.insert(dataset_id.clone(), settings);
+}
+
+/// Frame `dataset_id` in `document` for a viewport of `device_viewport`
+/// device pixels, and say what the core makes of that framing.
+///
+/// The camera starts as the fit the page itself would make for the mode,
+/// and then, when a zoom is asked for, moves until the view's center
+/// measures exactly that many device pixels per level-0 sample. That is the
+/// one number the target level is chosen from, so asking for it directly is
+/// what lets a caller name the level they expect the page to reach. The
+/// composition runs through `lucida-core`'s own scene, so the recorded
+/// target is the rule's answer and not a restatement of it here.
+pub fn compose_camera(
+    document: &DocumentState,
+    dataset_id: &DatasetId,
+    device_viewport: [u32; 2],
+    request: CameraRequest,
+) -> Result<ComposedFraming, CliError> {
+    if let Some(zoom) = request.zoom
+        && !(zoom.is_finite() && zoom > 0.0)
+    {
+        return Err(CliError::config(format!(
+            "--zoom takes a positive number of device pixels per level-0 sample, not {zoom}"
+        )));
+    }
+    if !document.manifests.contains_key(dataset_id) {
+        return Err(CliError::new(
+            ErrorKind::MissingResource,
+            format!("the workspace does not hold dataset {}", dataset_id.0),
+        ));
+    }
+
+    let mut scene = Scene::new(device_viewport);
+    scene.document = document.clone();
+    crate::view::hydrate_scene_document_defaults(&mut scene);
+    match request.kind {
+        CameraKind::Slice => scene.set_mode_2d(),
+        CameraKind::Arcball | CameraKind::Fly => scene.set_mode_3d(),
+    }
+    if !scene.fit_camera_to_dataset(&dataset_id.0) {
+        return Err(CliError::new(
+            ErrorKind::MissingResource,
+            format!(
+                "dataset {} has no image with a level 0 to frame",
+                dataset_id.0
+            ),
+        ));
+    }
+    if let Some(zoom) = request.zoom {
+        match &mut scene.camera {
+            Camera::Slice(slice) => slice.set_zoom(zoom),
+            _ => realize_volume_zoom(&mut scene, dataset_id, zoom)?,
+        }
+    }
+    if request.kind == CameraKind::Fly {
+        scene.set_mode_fly();
+    }
+
+    let zoom = measure_zoom(&scene, dataset_id).ok_or_else(|| {
+        CliError::new(
+            ErrorKind::MissingResource,
+            format!("dataset {} has no image to measure", dataset_id.0),
+        )
+    })?;
+    let levels: Vec<u32> = scene
+        .view_query(dataset_id)
+        .map(|query| {
+            query
+                .visible_entities
+                .iter()
+                .filter(|entity| entity.visible)
+                .map(|entity| entity.target_level)
+                .collect()
+        })
+        .unwrap_or_default();
+    let (Some(&min), Some(&max)) = (levels.iter().min(), levels.iter().max()) else {
+        return Err(CliError::config(format!(
+            "the composed camera leaves no image of dataset {} on screen",
+            dataset_id.0
+        )));
+    };
+
+    Ok(ComposedFraming {
+        camera: scene.camera.clone(),
+        record: ComposedCamera {
+            mode: request.kind,
+            zoom,
+            target_level: LevelRange { min, max },
+        },
+    })
+}
+
+/// Device pixels per level-0 sample of the dataset's first image under the
+/// scene's camera: the measure the view query hands the level rule.
+fn measure_zoom(scene: &Scene, dataset_id: &DatasetId) -> Option<f64> {
+    let member = scene
+        .derived
+        .get(dataset_id)?
+        .members
+        .iter()
+        .find(|member| !member.levels.is_empty())?;
+    let level0 = &member.levels[0];
+    let (forward, inverse) = scene.rendering_transform(member);
+    let placed = VolumeTransform {
+        model: forward.model,
+        inv_model: inverse.inv_model,
+        max_physical_extent: forward.max_physical_extent,
+    };
+    Some(scene.camera.pixels_per_sample(
+        &placed,
+        [
+            level0.shape[2] as u32,
+            level0.shape[3] as u32,
+            level0.shape[4] as u32,
+        ],
+    ))
+}
+
+/// Move the arcball camera until the center ray meets the volume at `zoom`
+/// device pixels per level-0 sample.
+///
+/// The measure falls off as `k / (distance − t)`: the center ray enters the
+/// volume `t` world units in front of the orbit target whatever the distance,
+/// and `k` is the camera's perspective scale over the volume's sample
+/// density. Two measures pin `k` and `t`, and the third solves for the
+/// distance that gives the asked zoom. The clip planes are rebuilt around
+/// the new distance so the volume is neither clipped nor starved of depth.
+fn realize_volume_zoom(
+    scene: &mut Scene,
+    dataset_id: &DatasetId,
+    zoom: f64,
+) -> Result<(), CliError> {
+    let cannot = |why: String| {
+        CliError::config(format!(
+            "cannot place the volume camera at {zoom} device pixels per level-0 sample: {why}"
+        ))
+    };
+    let Camera::Arcball(arcball) = &scene.camera else {
+        return Err(cannot("the camera is not an arcball".to_string()));
+    };
+    let d1 = arcball.distance;
+    let d2 = d1 * 2.0;
+    let p1 = measure_zoom(scene, dataset_id)
+        .ok_or_else(|| cannot("the dataset has no image".to_string()))?;
+    if let Camera::Arcball(arcball) = &mut scene.camera {
+        arcball.distance = d2;
+    }
+    let p2 = measure_zoom(scene, dataset_id)
+        .ok_or_else(|| cannot("the dataset has no image".to_string()))?;
+    if !(p1.is_finite() && p2.is_finite() && p1 > p2 && p2 > 0.0) {
+        return Err(cannot(
+            "the center ray does not meet the volume".to_string(),
+        ));
+    }
+
+    let t = (p1 * d1 - p2 * d2) / (p1 - p2);
+    let k = p1 * (d1 - t);
+    let distance = t + k / zoom;
+    if !(distance.is_finite() && distance > t && distance > 0.0) {
+        return Err(cannot("no orbit distance reaches it".to_string()));
+    }
+    let radius = scene
+        .dataset_world_bounds(&dataset_id.0)
+        .map(|(min, max)| {
+            0.5 * ((max[0] - min[0]).powi(2)
+                + (max[1] - min[1]).powi(2)
+                + (max[2] - min[2]).powi(2))
+            .sqrt()
+        })
+        .unwrap_or(1.0);
+    if let Camera::Arcball(arcball) = &mut scene.camera {
+        arcball.distance = distance;
+        arcball.near = (distance - radius).max(distance * 1e-3).max(1e-4);
+        arcball.far = (distance + radius) * 1.05;
+    }
+
+    let realized = measure_zoom(scene, dataset_id)
+        .ok_or_else(|| cannot("the dataset has no image".to_string()))?;
+    if (realized - zoom).abs() > zoom * 1e-6 {
+        return Err(cannot(format!("the camera measures {realized} there")));
+    }
+    Ok(())
 }
 
 /// Read the server's warmth for `dataset_url` out of a health snapshot taken
@@ -396,11 +772,31 @@ pub fn gate_failure(file: &TraceRunFile) -> Option<String> {
 pub fn format_run_human(file: &TraceRunFile, path: &Path) -> String {
     let header = &file.header;
     let view = &header.composed_view;
+    let camera = view
+        .camera
+        .as_ref()
+        .map(|camera| {
+            format!(
+                "camera    {:?} at {} device px per level-0 sample; the core calls for target level {}\n",
+                camera.mode,
+                camera.zoom,
+                format_level_range(camera.target_level)
+            )
+            .to_lowercase()
+        })
+        .unwrap_or_default();
+    let screenshot = header
+        .screenshot
+        .as_deref()
+        .map(|shot| format!("frame     {}\n", shot.display()))
+        .unwrap_or_default();
     format!(
         "view      {} @ {}x{} DPR {}\n\
+         {camera}\
          server    {}\n\
          hold      quiescent had to hold {} ms; every duration below is measured against that\n\
-         run file  {}\n\n\
+         run file  {}\n\
+         {screenshot}\n\
          {}",
         view.dataset,
         view.width,
@@ -411,6 +807,14 @@ pub fn format_run_human(file: &TraceRunFile, path: &Path) -> String {
         path.display(),
         file.renderings.summary,
     )
+}
+
+fn format_level_range(range: LevelRange) -> String {
+    if range.min == range.max {
+        range.min.to_string()
+    } else {
+        format!("{}..{}", range.min, range.max)
+    }
 }
 
 /// A depth of a persisted run. `Summary` and `Phases` are the page's renderings
@@ -461,7 +865,15 @@ pub async fn drive_run(
     // default rendering points at Perfetto for raw spans, and a second drive
     // would send the reader to a different run than the one they were reading.
     let export_expression = run_export_expression(perfetto_path.is_some());
-    let json = drive_and_export(url, token, viewport, wait, &export_expression).await?;
+    let json = drive_and_export(
+        url,
+        token,
+        viewport,
+        wait,
+        &export_expression,
+        facts.screenshot.as_deref(),
+    )
+    .await?;
     let export: SeamExport = serde_json::from_str(&json).map_err(|error| {
         CliError::new(
             ErrorKind::Protocol,
@@ -480,12 +892,18 @@ pub async fn drive_run(
 /// that expression, so the launch, the settle wait, the timeout close and the
 /// teardown live here once. Readiness is observed rather than demanded: a page
 /// that never draws is a run this command still has to report.
+///
+/// `screenshot` is where to write the frame the page shows once the wait is
+/// over, at the viewport's device pixel ratio. It is taken before the export
+/// because the export closes the run, and the frame is the run's own last
+/// state, not something that happened after it.
 async fn drive_and_export(
     url: &str,
     token: Option<&EffectiveToken>,
     viewport: Viewport,
     wait: Duration,
     export: &str,
+    screenshot: Option<&Path>,
 ) -> Result<String, CliError> {
     browser::with_browser(viewport, wait, async |browser| {
         let mut page = browser.open_page_unrendered(url, token, wait).await?;
@@ -493,6 +911,10 @@ async fn drive_and_export(
             page.evaluate(CLOSE_AS_TIMEOUT, wait).await?;
             let closed = read_run_state(&mut page, wait).await?;
             pin_run(&mut page, closed.last_concluded_run_id.as_deref(), wait).await?;
+        }
+        if let Some(path) = screenshot {
+            let png = page.screenshot_png(wait).await?;
+            write_beside_its_parents(path, &png).await?;
         }
         let value = page.evaluate(export, wait).await?;
         value.as_str().map(str::to_string).ok_or_else(|| {
@@ -513,6 +935,8 @@ pub struct DriverFacts {
     pub server_warmth: ServerWarmth,
     pub server_url: String,
     pub workspace_id: String,
+    /// Where to write the settled frame, when the caller wants one.
+    pub screenshot: Option<PathBuf>,
 }
 
 /// Fold what the page returned together with what only the driver knows. Split
@@ -535,6 +959,7 @@ fn assemble_run_file(export: SeamExport, facts: &DriverFacts) -> TraceRunFile {
             server_warmth: facts.server_warmth.clone(),
             server_url: facts.server_url.clone(),
             workspace_id: facts.workspace_id.clone(),
+            screenshot: facts.screenshot.clone(),
         },
         renderings: TraceRenderings {
             summary: export
@@ -704,7 +1129,15 @@ pub async fn capture_chrome_trace(
     viewport: Viewport,
     wait: Duration,
 ) -> Result<ChromeTraceCapture, CliError> {
-    let json = drive_and_export(url, token, viewport, wait, CHROME_TRACE_EXPORT_EXPRESSION).await?;
+    let json = drive_and_export(
+        url,
+        token,
+        viewport,
+        wait,
+        CHROME_TRACE_EXPORT_EXPRESSION,
+        None,
+    )
+    .await?;
     write_beside_its_parents(Path::new(output_path), json.as_bytes()).await?;
     summarise_chrome_trace(&json, chrome_trace_end_reason(&json))
 }
@@ -814,6 +1247,7 @@ mod tests {
             width: DEFAULT_WIDTH,
             height: DEFAULT_HEIGHT,
             device_pixel_ratio: DEFAULT_DEVICE_PIXEL_RATIO,
+            camera: None,
         }
     }
 
@@ -832,6 +1266,7 @@ mod tests {
             server_warmth: cold(),
             server_url: "http://host".to_string(),
             workspace_id: "ws".to_string(),
+            screenshot: None,
         }
     }
 
@@ -847,6 +1282,7 @@ mod tests {
                 server_warmth: cold(),
                 server_url: "http://host".to_string(),
                 workspace_id: "ws".to_string(),
+                screenshot: None,
             },
             renderings: TraceRenderings {
                 summary: "lucida trace run-1-1 — VERDICT: clear".to_string(),
@@ -1162,5 +1598,373 @@ mod tests {
                 .unwrap()
                 .settled
         );
+    }
+
+    // ---- the composed camera ----
+
+    /// A 64 × 512 × 512 volume with four levels halving every axis, in 32³
+    /// chunks: the shape of the level-index pyramid the end-to-end check
+    /// generates.
+    fn document_with_volume() -> DocumentState {
+        let level = |index: u32, z: u64, yx: u64| {
+            json!({
+                "level_index": index,
+                "shape": [1, 1, z, yx, yx],
+                "chunk_shape": [1, 1, 32, 32, 32],
+                "grid_shape": [1, 1, z.div_ceil(32), yx.div_ceil(32), yx.div_ceil(32)],
+                "scale": [1.0, 1.0, 1.0, 1.0, 1.0]
+            })
+        };
+        serde_json::from_value(json!({
+            "manifests": {
+                "wds-vol": {
+                    "dataset_id": "wds-vol",
+                    "name": "volume.zarr",
+                    "kind": "Single",
+                    "entities": [
+                        { "id": "entity-v", "kind": "Image", "parent": null, "labels": { "name": "volume" } }
+                    ],
+                    "transforms": [],
+                    "images": [{
+                        "image_id": "image-v",
+                        "owner": "entity-v",
+                        "multiscale": {
+                            "axes": [],
+                            "levels": [level(0, 64, 512), level(1, 32, 256), level(2, 16, 128), level(3, 8, 64)],
+                            "coarse_level_index": null,
+                            "generated_levels": [],
+                            "data_type": "Uint16",
+                            "pinned_axes": []
+                        }
+                    }],
+                    "source_layouts": [],
+                    "default_layout_id": null
+                }
+            },
+            "registered_layouts": {},
+            "active_layout_ids": {},
+            "asset_catalogs": {}
+        }))
+        .unwrap()
+    }
+
+    /// The default viewport at device pixel ratio 2.
+    const RETINA: [u32; 2] = [2880, 1800];
+
+    fn volume_id() -> DatasetId {
+        DatasetId("wds-vol".to_string())
+    }
+
+    fn compose(kind: CameraKind, zoom: Option<f64>) -> ComposedFraming {
+        compose_camera(
+            &document_with_volume(),
+            &volume_id(),
+            RETINA,
+            CameraRequest { kind, zoom },
+        )
+        .unwrap()
+    }
+
+    /// A slice camera spaces its samples exactly `zoom` device pixels apart,
+    /// so the rule reads the zoom directly; the frame is the image's middle.
+    #[test]
+    fn a_slice_camera_frames_the_image_and_realizes_the_zoom() {
+        let framing = compose(CameraKind::Slice, Some(2.0));
+        let Camera::Slice(slice) = &framing.camera else {
+            panic!("expected a slice camera, got {:?}", framing.camera)
+        };
+        assert_eq!(slice.zoom, 2.0);
+        assert_eq!(slice.center, [256.0, 256.0]);
+        assert_eq!(
+            framing.record,
+            ComposedCamera {
+                mode: CameraKind::Slice,
+                zoom: 2.0,
+                target_level: LevelRange { min: 0, max: 0 },
+            }
+        );
+    }
+
+    /// Two pixels per sample oversamples level 0. At 0.177 pixels per sample
+    /// level 2 is the coarsest that still fills every pixel (0.177 × 4 ≤ 1 <
+    /// 0.177 × 8), and at 0.08 even level 3 does (0.08 × 8 ≤ 1).
+    #[test]
+    fn the_recorded_target_is_the_rules_answer_for_the_zoom() {
+        assert_eq!(
+            compose(CameraKind::Slice, Some(0.177)).record.target_level,
+            LevelRange { min: 2, max: 2 }
+        );
+        assert_eq!(
+            compose(CameraKind::Slice, Some(0.08)).record.target_level,
+            LevelRange { min: 3, max: 3 }
+        );
+    }
+
+    /// A volume camera has no zoom of its own. The driver moves the orbit
+    /// distance until the center ray meets the volume at the asked pixels
+    /// per sample, so the rule sees the same measure in either mode.
+    #[test]
+    fn an_arcball_camera_realizes_the_zoom_where_the_center_ray_meets_the_volume() {
+        for (zoom, level) in [(2.0, 0), (0.177, 2), (0.08, 3)] {
+            let framing = compose(CameraKind::Arcball, Some(zoom));
+            assert!(matches!(framing.camera, Camera::Arcball(_)));
+            assert!(
+                (framing.record.zoom - zoom).abs() <= zoom * 1e-6,
+                "zoom {zoom}: the camera measures {}",
+                framing.record.zoom
+            );
+            assert_eq!(
+                framing.record.target_level,
+                LevelRange {
+                    min: level,
+                    max: level
+                },
+                "zoom {zoom}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fly_camera_is_the_arcball_framing_converted() {
+        let framing = compose(CameraKind::Fly, Some(0.5));
+        assert!(matches!(framing.camera, Camera::Fly(_)));
+        assert!((framing.record.zoom - 0.5).abs() <= 0.5 * 1e-6);
+        assert_eq!(framing.record.mode, CameraKind::Fly);
+        assert_eq!(framing.record.target_level, LevelRange { min: 1, max: 1 });
+    }
+
+    /// Without a zoom the camera is the fit the page would make, and the
+    /// record still says what that framing measures and calls for.
+    #[test]
+    fn without_a_zoom_the_camera_is_the_fit_and_the_record_still_measures_it() {
+        let slice = compose(CameraKind::Slice, None);
+        let Camera::Slice(camera) = &slice.camera else {
+            panic!("expected a slice camera")
+        };
+        assert_eq!(camera.center, [256.0, 256.0]);
+        assert_eq!(slice.record.zoom, camera.zoom);
+        assert!(slice.record.zoom.is_finite() && slice.record.zoom > 0.0);
+
+        let arcball = compose(CameraKind::Arcball, None);
+        assert!(arcball.record.zoom.is_finite() && arcball.record.zoom > 0.0);
+        assert!(arcball.record.target_level.min <= arcball.record.target_level.max);
+        assert!(arcball.record.target_level.max <= 3);
+    }
+
+    #[test]
+    fn a_camera_needs_a_dataset_the_workspace_holds_and_a_positive_zoom() {
+        let missing = compose_camera(
+            &document_with_volume(),
+            &DatasetId("wds-none".to_string()),
+            RETINA,
+            CameraRequest {
+                kind: CameraKind::Slice,
+                zoom: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(missing.kind, ErrorKind::MissingResource);
+
+        for zoom in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let error = compose_camera(
+                &document_with_volume(),
+                &volume_id(),
+                RETINA,
+                CameraRequest {
+                    kind: CameraKind::Slice,
+                    zoom: Some(zoom),
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error.kind, ErrorKind::Config, "zoom {zoom}");
+        }
+    }
+
+    #[test]
+    fn the_channel_count_is_read_off_level_0() {
+        assert_eq!(channel_count(&document_with_volume(), &volume_id()), 1);
+        assert_eq!(
+            channel_count(&document_with_volume(), &DatasetId("wds-none".to_string())),
+            1
+        );
+    }
+
+    // ---- pinned display ----
+
+    #[test]
+    fn a_contrast_window_is_two_ordered_finite_numbers() {
+        assert_eq!(contrast_window(&[1.0, 3.0]).unwrap(), (1.0, 3.0));
+        for bad in [&[3.0, 1.0][..], &[2.0, 2.0], &[f64::NAN, 1.0], &[1.0]] {
+            assert_eq!(contrast_window(bad).unwrap_err().kind, ErrorKind::Config);
+        }
+    }
+
+    /// Pinning the window turns the page's fit off, because the fit samples
+    /// whatever is resident when it runs and would overwrite the pin, and it
+    /// writes every channel, because a channel's own window wins over the
+    /// dataset's.
+    #[test]
+    fn pinning_the_contrast_window_turns_auto_contrast_off_and_writes_every_channel() {
+        let id = volume_id();
+        let mut view = compose_dataset_view("gs://bucket/set.zarr", 1440, 900);
+        pin_display(
+            &mut view,
+            &id,
+            2,
+            DisplayPins {
+                contrast: Some((1.0, 3.0)),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(view.auto_contrast.get(&id), Some(&false));
+        let settings = &view.dataset_settings[&id];
+        assert_eq!((settings.contrast_min, settings.contrast_max), (1.0, 3.0));
+        assert_eq!(settings.channel_settings.len(), 2);
+        for (index, channel) in settings.channel_settings.iter().enumerate() {
+            assert_eq!((channel.contrast_min, channel.contrast_max), (1.0, 3.0));
+            assert_eq!(channel.colormap, Colormap::default_for_channel(index));
+        }
+        assert!(settings.visible);
+        assert_eq!(settings.render_mode, RenderMode::Translucent);
+        assert_eq!(settings.detail_level_override, None);
+    }
+
+    #[test]
+    fn a_colormap_and_a_render_mode_pin_without_touching_the_window() {
+        let id = volume_id();
+        let mut view = compose_dataset_view("gs://bucket/set.zarr", 1440, 900);
+        pin_display(
+            &mut view,
+            &id,
+            3,
+            DisplayPins {
+                colormap: Some(Colormap::Gray),
+                render_mode: Some(RenderMode::MaxIntensity),
+                ..Default::default()
+            },
+        );
+
+        let settings = &view.dataset_settings[&id];
+        assert_eq!(settings.render_mode, RenderMode::MaxIntensity);
+        assert_eq!(settings.channel_settings.len(), 3);
+        assert!(
+            settings
+                .channel_settings
+                .iter()
+                .all(|channel| channel.colormap == Colormap::Gray)
+        );
+        assert!(
+            settings
+                .channel_settings
+                .iter()
+                .all(|channel| (channel.contrast_min, channel.contrast_max) == (0.0, 65535.0))
+        );
+        assert!(
+            view.auto_contrast.is_empty(),
+            "the window still follows the data"
+        );
+    }
+
+    #[test]
+    fn empty_pins_leave_the_view_alone() {
+        let mut view = compose_dataset_view("gs://bucket/set.zarr", 1440, 900);
+        pin_display(&mut view, &volume_id(), 1, DisplayPins::default());
+        assert!(view.dataset_settings.is_empty());
+        assert!(view.auto_contrast.is_empty());
+    }
+
+    /// Level 0 is a pin like any other, and pinning to it is how a run
+    /// measures the level-0 default ADR 0061 replaced.
+    #[test]
+    fn a_level_pin_rides_the_view_and_level_0_is_one_of_them() {
+        let id = volume_id();
+        for level in [0, 2] {
+            let mut view = compose_dataset_view("gs://bucket/set.zarr", 1440, 900);
+            pin_display(
+                &mut view,
+                &id,
+                1,
+                DisplayPins {
+                    level: Some(level),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(
+                view.dataset_settings[&id].detail_level_override,
+                Some(level)
+            );
+        }
+    }
+
+    /// The pins and the camera key on the workspace's id for the dataset,
+    /// which only the health snapshot (or the open the driver just did) knows.
+    #[test]
+    fn the_dataset_id_comes_from_the_health_entry_for_the_canonical_url() {
+        let health = vec![health_entry("gs://bucket/set.zarr", None)];
+        assert_eq!(
+            dataset_id_for_source("GS://bucket/set.zarr", &health),
+            Some(DatasetId("ds".to_string()))
+        );
+        assert_eq!(
+            dataset_id_for_source("gs://bucket/other.zarr", &health),
+            None
+        );
+    }
+
+    /// The frame and the composed camera are the driver's facts, so the header
+    /// names them beside the view they belong to. A run driven without them
+    /// carries no key at all, rather than a null a reader has to distinguish
+    /// from "not written".
+    #[test]
+    fn the_header_names_the_screenshot_and_the_camera_and_omits_them_otherwise() {
+        let export = || -> SeamExport {
+            serde_json::from_str(
+                &json!({ "schemaVersion": 1, "runId": "run-3-1", "quiescenceHoldMs": 500,
+                         "endReason": "quiescent", "diagnostic": null, "summary": "ok",
+                         "phases": "ok", "trace": { "runs": [] } })
+                .to_string(),
+            )
+            .unwrap()
+        };
+        let camera = ComposedCamera {
+            mode: CameraKind::Arcball,
+            zoom: 0.08,
+            target_level: LevelRange { min: 3, max: 3 },
+        };
+
+        let with = DriverFacts {
+            composed_view: ComposedView {
+                camera: Some(camera.clone()),
+                ..composed()
+            },
+            screenshot: Some(PathBuf::from("/tmp/levels/volume-out.png")),
+            ..facts()
+        };
+        let file = assemble_run_file(export(), &with);
+        assert_eq!(
+            file.header.screenshot.as_deref(),
+            Some(Path::new("/tmp/levels/volume-out.png"))
+        );
+        assert_eq!(file.header.composed_view.camera, Some(camera));
+        let json = serde_json::to_value(&file).unwrap();
+        assert_eq!(json["header"]["screenshot"], "/tmp/levels/volume-out.png");
+        assert_eq!(json["header"]["composedView"]["camera"]["mode"], "arcball");
+        assert_eq!(json["header"]["composedView"]["camera"]["zoom"], 0.08);
+        assert_eq!(
+            json["header"]["composedView"]["camera"]["targetLevel"],
+            json!({ "min": 3, "max": 3 })
+        );
+        let human = format_run_human(&file, Path::new("run.json"));
+        assert!(human.contains("/tmp/levels/volume-out.png"), "{human}");
+        assert!(human.contains("arcball"), "{human}");
+        assert!(human.contains("target level 3"), "{human}");
+
+        let without = assemble_run_file(export(), &facts());
+        assert_eq!(without.header.screenshot, None);
+        assert_eq!(without.header.composed_view.camera, None);
+        let json = serde_json::to_value(&without).unwrap();
+        assert!(json["header"].get("screenshot").is_none());
+        assert!(json["header"]["composedView"].get("camera").is_none());
     }
 }
