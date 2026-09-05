@@ -1600,7 +1600,7 @@ fn active_layouts_from_document(
         .collect()
 }
 
-fn hydrate_scene_document_defaults(scene: &mut Scene) {
+pub(crate) fn hydrate_scene_document_defaults(scene: &mut Scene) {
     for id in scene.document.manifests.keys() {
         if !scene.dataset_order.contains(id) {
             scene.dataset_order.push(id.clone());

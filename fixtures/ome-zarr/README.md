@@ -14,11 +14,11 @@ uv run extras/synthetic_ome_zarr.py OUT.ome.zarr [options]
 
 Options choose a single image or a collection of N tiles, a 2D or 3D size,
 channel and timepoint counts, the number of levels, the scale factor per
-level, the chunk shape, the shard shape, a sparse pyramid, unwritten levels,
-and the level-index picture. A factor is one value, per-axis values such as
-`1,2,2`, or a different factor for each level. `uv run
-extras/synthetic_ome_zarr.py --help` and the docstring at the top of the
-script describe each flag.
+level, the chunk shape per level, the shard shape, a sparse pyramid,
+unwritten levels, and the level-index picture. A factor or a chunk shape is
+one value, per-axis values such as `1,2,2`, or a different one for each
+level. `uv run extras/synthetic_ome_zarr.py --help` and the docstring at the
+top of the script describe each flag.
 
 Two properties the tests rely on:
 
@@ -85,6 +85,45 @@ Sample values are `uint16` in every fixture, and the codec chain is `bytes`
   level apart, because the fit samples whatever is resident when it runs.
   A level-index pyramid opened the same way tells a screenshot check which
   level the viewer chose, because the sample values are the level number.
+
+## The level chain check
+
+`extras/verify_level_chain.py` proves the target level end to end. It
+writes a level-index pyramid with the generator and opens it four times
+through the trace driver at device pixel ratio 2: zoomed in and zoomed out,
+in slice mode and in volume mode. Each run names the level it must reach,
+and the check places the camera in the middle of the band of zooms that
+level owns, measured in device pixels per level-0 sample. Four independent
+answers must then name the same level: the rule of ADR 0061 applied to the
+level shapes on disk, the target level `lucida-core` records for the
+composed camera, the target level on the trace's last planning pass, and
+the gray the frame shows, because every sample at level L holds the value
+L. Each run must also reach quiescence, and the detail chunks it requested
+per planning pass must fit the wanted-set bound the ADR states. The
+zoomed-in slice run places the image past the viewport's edges, so its set
+is cut by the screen rather than by the level.
+
+The runs pin a gray colormap and a contrast window of −1 to the coarsest
+level, so level L draws as `(L + 1) / levels` of white and the frame is
+never black or the background color. The volume runs use the
+maximum-intensity render mode and stay off level 0, because the ray march
+skips a zero sample as empty space and every sample at level 0 is 0.
+
+It needs the same server, CLI, and Chrome as the sharded twin check:
+
+```sh
+(cd lucida-web && pnpm run build)
+cargo run -p lucida-server &
+uv run extras/verify_level_chain.py
+```
+
+`--slice-levels` and `--volume-levels` choose the levels the runs reach,
+`--size`, `--levels`, and `--chunk` shape the pyramid, and `--dataset`
+reuses a level-index pyramid already on disk. The check's own tests run
+with `uv run extras/test_verify_level_chain.py` and need neither a server
+nor a browser. The measurement that fills the ADR's numbers, a wide
+collection zoomed out with and without the level rule, is
+`docs/research/level-chain-harness/`.
 
 ## The sharded twin check
 
