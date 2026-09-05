@@ -10,7 +10,7 @@
 
 import type { FetchErrorKind } from "../pipeline/fetch/retry.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
-import type { ChunkFeedbackReason } from "../renderer/workerProtocol.ts";
+import type { ChunkFeedbackReason, LevelRange } from "../renderer/workerProtocol.ts";
 
 /**
  * Bumped whenever the document shape changes incompatibly. One integer for
@@ -757,13 +757,25 @@ export interface TraceRow extends WireLabel {
 }
 
 /**
- * The four rare things worth a point in time rather than a column: a chunk
+ * The five rare things worth a point in time rather than a column: a chunk
  * left the cache, the renderer refused one, a fetch was retried, a fetch gave
- * up. Nobody has caught the last three happening — #899 observed zero retries
- * and zero real failures across 3,781 remote reads — so they share one shape
- * and their diagnostic value is simply that they appear at all.
+ * up, a dataset's target level moved. Nobody has caught the middle three
+ * happening — #899 observed zero retries and zero real failures across 3,781
+ * remote reads — so they share one shape and their diagnostic value is simply
+ * that they appear at all.
+ *
+ * `level-change` is the one that is not about a chunk. The target level
+ * follows the screen (ADR 0061), so a zoom moves the whole wanted set to
+ * another level at one instant, and a stall that begins there is explained by
+ * it. It names the dataset and the old and new level; see {@link LevelChange}.
  */
-export const POINT_EVENT_KINDS = ["eviction", "rejection", "retry", "failure"] as const;
+export const POINT_EVENT_KINDS = [
+  "eviction",
+  "rejection",
+  "retry",
+  "failure",
+  "level-change",
+] as const;
 export type PointEventKind = (typeof POINT_EVENT_KINDS)[number];
 
 export const PointEvent = {
@@ -771,6 +783,7 @@ export const PointEvent = {
   Rejection: 1,
   Retry: 2,
   Failure: 3,
+  LevelChange: 4,
 } as const;
 export type PointEventIndex = (typeof PointEvent)[keyof typeof PointEvent];
 
@@ -800,9 +813,19 @@ const CHUNK_FEEDBACK_REASONS = [
   "atlas-policy",
 ] as const satisfies readonly ChunkFeedbackReason[];
 
+/**
+ * Why a target level moved: the screen chose another level, or the dataset's
+ * level pin did. The pin is the one input to the target that is not the
+ * camera (ADR 0061), so this is the whole vocabulary. Memory pressure never
+ * changes the target and so never needs a code here.
+ */
+const LEVEL_CHANGE_REASONS = ["screen", "pin"] as const;
+export type LevelChangeReason = (typeof LEVEL_CHANGE_REASONS)[number];
+
 export const POINT_EVENT_REASONS = [
   ...FETCH_ERROR_REASONS,
   ...CHUNK_FEEDBACK_REASONS,
+  ...LEVEL_CHANGE_REASONS,
 ] as const;
 export type PointEventReason = (typeof POINT_EVENT_REASONS)[number];
 
@@ -828,6 +851,26 @@ export interface ChunkEventSource {
   z: number;
   y: number;
   x: number;
+}
+
+/**
+ * What a `level-change` event names: the dataset whose target level moved,
+ * and from where to where.
+ *
+ * A range, not one level, because a dataset is the unit the per-tick
+ * aggregate samples and a collection's visible tiles can straddle a level
+ * boundary while a zoom is in progress. A single image reads `min === max`
+ * on both sides. The event is per dataset rather than per entity for the
+ * same reason the aggregate is: a 216-member collection crossing one
+ * boundary is one thing that happened, not 216. The flip side is that on a
+ * collection a pan that scrolls in a tile held at another level also moves
+ * the range and files an event; the plan's level set did change, and the
+ * requests that follow are at the new level, so the attribution still holds.
+ */
+export interface LevelChange {
+  datasetId: string;
+  from: LevelRange;
+  to: LevelRange;
 }
 
 /**
@@ -862,6 +905,33 @@ export interface TraceTick {
   levels: TraceTickLevel[];
   /** Levels past {@link TICK_LEVEL_SLOTS} that this sample could not carry. */
   levelsDropped: number;
+  /**
+   * The target level across the dataset's visible image-bearing entities on
+   * this planning pass, which is the level the `planned` counts above were
+   * emitted at. When none is in view it spans every such entity instead,
+   * the layer panel's fallback, so the two surfaces stay on the same
+   * numbers. A range because a collection's tiles can disagree near a
+   * boundary; `min === max` for a single image. Null only for a dataset with
+   * no image-bearing entity, which is not the same as level 0.
+   */
+  targetLevel: LevelRange | null;
+  /**
+   * True when {@link targetLevel} is the dataset's level pin rather than the
+   * screen's choice. The one fact that explains a target sitting still while
+   * the zoom moves (ADR 0061).
+   */
+  levelPinned: boolean;
+  /**
+   * The finest and coarsest level on screen across those entities, as the
+   * render worker last reported before this pass. Null while no visible
+   * position has any resident level.
+   *
+   * The worker knows this and the planner does not, so it necessarily lags
+   * the target by one report. It is sampled here, on the planning cadence,
+   * because that is the cadence the aggregate has: a fill that arrives with
+   * no re-plan is captured on the next pass, not as it lands.
+   */
+  displayedLevel: LevelRange | null;
 }
 
 /** One point event. Every kind shares this shape. */
@@ -884,6 +954,8 @@ export interface TracePointEvent {
     x: number;
     chunkKey: string;
   } | null;
+  /** Set on a `level-change` event and null on every other kind. */
+  levelChange: LevelChange | null;
 }
 
 /**

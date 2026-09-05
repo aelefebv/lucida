@@ -844,7 +844,13 @@ export class TickCoordinator {
       // The trace's per-tick aggregate, recorded from the same plan and
       // before the same side-effects — but unconditionally, because
       // recording does not wait for somebody to open a panel (ADR 0049).
-      recordPlanningTick(dsId, result, ctx.cpuCache.levelResidency());
+      recordPlanningTick(
+        dsId,
+        result,
+        ctx.cpuCache.levelResidency(),
+        entities,
+        ctx.client.datasetLevels(dsId)?.displayed ?? null,
+      );
 
 
       plannedDatasets.push({

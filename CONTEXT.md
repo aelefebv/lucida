@@ -304,14 +304,15 @@ _Avoid_: endpoint, hook, API
 
 **Point event**:
 A rare occurrence recorded as a single timestamped record rather than a phase
-boundary: eviction, rejection, retry, failure.
+boundary: eviction, rejection, retry, failure, and a *level change*, which is a
+dataset's target level moving and names the old and new level.
 _Avoid_: incident, error (a point event is not necessarily a failure)
 
 **Per-tick aggregate**:
 One sample per planning tick per dataset — lane counts, the culling funnel,
-active-set tallies, per-level planned against cached and in-flight. Kept on a
-drop-oldest ring, unlike the per-chunk tier, because a steady-state stream has no
-privileged start.
+active-set tallies, per-level planned against cached and in-flight, and the
+dataset's target and displayed level. Kept on a drop-oldest ring, unlike the
+per-chunk tier, because a steady-state stream has no privileged start.
 _Avoid_: snapshot, stats, gauge (a gauge has no memory of when)
 
 **Display track**:
@@ -596,6 +597,16 @@ no administrator rights, and replacing it is available only where nothing but
 the local machine can reach the server. See
 [ADR 0018](wiki/decisions/0018-auth-mode-auto-detect-by-bind-address.md).
 _Avoid_: test user, fake user, impersonation
+
+**Profile directory**:
+An optional source, named by configuration, that supplies a display name and a
+picture for an email address. Applied after an auth mode resolves a principal
+and keyed on the email it resolved, so a row changes how a person is shown and
+nothing about who they are: not the email, not whether they administer the
+server, not what they may do. Unset means off. See
+[ADR 0063](wiki/decisions/0063-a-profile-directory-enriches-the-principal-and-never-authenticates-it.md).
+_Avoid_: user directory, address book, identity provider (a provider decides who
+a caller is; the directory only decorates the answer), people service, roster
 
 **Membership**:
 Who belongs to a workspace and with what authority: a list of email addresses,

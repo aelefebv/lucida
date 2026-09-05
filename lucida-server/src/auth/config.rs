@@ -22,6 +22,8 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use axum::http::header::{HeaderName, HeaderValue};
+
 use crate::storage::{DatabaseUrl, DatabaseUrlError};
 
 /// Default cookie name. Overridable via `LUCIDA_COOKIE_NAME`.
@@ -86,6 +88,17 @@ pub const IAP_CLEAR_LOGIN_COOKIE_URL: &str = "/?gcp-iap-mode=CLEAR_LOGIN_COOKIE"
 /// Production deployments override via `LUCIDA_BIND=0.0.0.0:9876` (or
 /// the deployment-specific interface).
 pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1:9876";
+
+/// Field names the profile directory reads when the operator names
+/// none. Overridable via `LUCIDA_DIRECTORY_EMAIL_FIELD`,
+/// `LUCIDA_DIRECTORY_NAME_FIELDS`, and `LUCIDA_DIRECTORY_PICTURE_FIELD`.
+pub const DEFAULT_DIRECTORY_EMAIL_FIELD: &str = "email";
+pub const DEFAULT_DIRECTORY_NAME_FIELD: &str = "name";
+pub const DEFAULT_DIRECTORY_PICTURE_FIELD: &str = "picture";
+
+/// How often the profile directory is re-read: six hours. Overridable
+/// via `LUCIDA_DIRECTORY_REFRESH_SECONDS`.
+pub const DEFAULT_DIRECTORY_REFRESH_SECONDS: u64 = 6 * 60 * 60;
 
 /// How the `Secure` cookie attribute is chosen.
 ///
@@ -223,6 +236,48 @@ pub struct IapConfig {
     pub issuer: String,
 }
 
+/// Profile directory settings. Present only when `LUCIDA_DIRECTORY_URL`
+/// is set; absent means the directory is off and no principal is
+/// touched. Independent of the auth mode: the directory enriches
+/// whatever principal the mode resolved and never stands in for one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectoryConfig {
+    /// Where the listing lives: a JSON array of objects, one per person.
+    pub url: reqwest::Url,
+    /// The key holding the email address. Its value is normalized the
+    /// way every auth mode normalizes an email before it becomes the
+    /// lookup key.
+    pub email_field: String,
+    /// The keys whose values, joined by one space in this order, form
+    /// the display name. Never empty: the parser refuses a list that
+    /// names no field.
+    pub name_fields: Vec<String>,
+    /// The key holding the picture URL.
+    pub picture_field: String,
+    /// Fixed request headers sent on every fetch, in the order given.
+    /// Typed here so a bad name or value is refused at boot and the
+    /// client that sends them has nothing left to check.
+    pub headers: Vec<(HeaderName, HeaderValue)>,
+    /// How often the listing is re-read. Parsed and carried here; the
+    /// refresh loop that reads it is not part of the first load.
+    pub refresh_interval: Duration,
+}
+
+impl DirectoryConfig {
+    /// Test-friendly block pointing at a listing under test, with the
+    /// documented default field names and no headers.
+    pub fn for_tests(url: &str) -> Self {
+        Self {
+            url: reqwest::Url::parse(url).expect("test listing URL parses"),
+            email_field: DEFAULT_DIRECTORY_EMAIL_FIELD.to_string(),
+            name_fields: vec![DEFAULT_DIRECTORY_NAME_FIELD.to_string()],
+            picture_field: DEFAULT_DIRECTORY_PICTURE_FIELD.to_string(),
+            headers: Vec::new(),
+            refresh_interval: Duration::from_secs(DEFAULT_DIRECTORY_REFRESH_SECONDS),
+        }
+    }
+}
+
 /// Why startup fail-fasted in `from_env`. Each variant names the
 /// concrete `LUCIDA_*` env var the operator must set (or the offending
 /// value, for the parse-failure variants).
@@ -262,6 +317,35 @@ pub enum AuthConfigError {
     /// The inner error names the variable and says which schemes work.
     #[error(transparent)]
     DatabaseUrl(#[from] DatabaseUrlError),
+    /// The listing address is not something an HTTP client can fetch.
+    /// Caught at boot because a typo here would otherwise look exactly
+    /// like an outage: a directory that never loads and a server that
+    /// keeps serving the names the mode derives.
+    #[error("LUCIDA_DIRECTORY_URL={value:?} is not an http or https URL ({reason})")]
+    InvalidDirectoryUrl { value: String, reason: String },
+    /// A directory field variable is present but names no field. The
+    /// defaults apply when a variable is absent. One that is set and
+    /// blank is a deployment template that rendered nothing into it,
+    /// and reading the default out of it would hide that.
+    #[error(
+        "{variable} is set but names no field (unset it for the default, or name one or more \
+         fields separated by spaces)"
+    )]
+    EmptyDirectoryField { variable: &'static str },
+    /// The email or picture variable names several fields. Only the
+    /// name is a list; taking the first word here would silently read
+    /// the wrong key.
+    #[error("{variable}={value:?} must name exactly one field")]
+    DirectoryFieldNotSingle {
+        variable: &'static str,
+        value: String,
+    },
+    /// A header pair in `LUCIDA_DIRECTORY_HEADERS` is not `Name: value`,
+    /// or is not a header an HTTP client can send.
+    #[error("LUCIDA_DIRECTORY_HEADERS entry {entry:?} is not a `Name: value` pair ({reason})")]
+    InvalidDirectoryHeader { entry: String, reason: String },
+    #[error("LUCIDA_DIRECTORY_REFRESH_SECONDS={value:?} is not a positive whole number of seconds")]
+    InvalidDirectoryRefresh { value: String },
 }
 
 /// All knobs the auth subsystem reads at startup.
@@ -287,6 +371,10 @@ pub struct AuthConfig {
     /// validated for presence in `from_env`, so the extractor can
     /// `unwrap()` it without rechecking.
     pub iap: Option<IapConfig>,
+    /// Populated iff `LUCIDA_DIRECTORY_URL` is set, in any mode. `None`
+    /// means no principal is enriched and the middleware behaves as it
+    /// did before the directory existed.
+    pub directory: Option<DirectoryConfig>,
     /// When non-empty, callbacks reject any JWT whose `hd` claim isn't
     /// in this set. Empty = no restriction (the OSS-permissive default;
     /// matches "any verified Google email"). Both this set and the
@@ -400,6 +488,8 @@ impl AuthConfig {
             None
         };
 
+        let directory = directory_from_reader(&read, &nonempty)?;
+
         Ok(Self {
             cookie_name: read("LUCIDA_COOKIE_NAME")
                 .unwrap_or_else(|| DEFAULT_COOKIE_NAME.to_string()),
@@ -417,6 +507,7 @@ impl AuthConfig {
             mode,
             google,
             iap,
+            directory,
             allowed_hosted_domains: parse_allowed_hosted_domains(
                 read("LUCIDA_ALLOWED_HOSTED_DOMAINS").as_deref(),
             ),
@@ -440,6 +531,7 @@ impl AuthConfig {
             mode: AuthMode::Disabled,
             google: None,
             iap: None,
+            directory: None,
             allowed_hosted_domains: HashSet::new(),
             admin_emails: HashSet::new(),
             bind_addr: DEFAULT_BIND_ADDR.parse().expect("default bind parses"),
@@ -542,6 +634,121 @@ where
             .unwrap_or_else(|| DEFAULT_IAP_JWKS_URI.to_string()),
         issuer: nonempty("LUCIDA_IAP_ISSUER").unwrap_or_else(|| DEFAULT_IAP_ISSUER.to_string()),
     })
+}
+
+/// Read the `LUCIDA_DIRECTORY_*` block. `Ok(None)` when the URL is
+/// unset or blank, in which case nothing else is read: off means off,
+/// and a template that leaves the URL empty should not fail on a
+/// field variable nothing will apply.
+///
+/// Takes both readers because the two kinds of variable are read
+/// differently. The URL, the headers, and the interval treat blank as
+/// unset (`nonempty`), like the auth variables. The three field
+/// variables use the raw reader so that present-and-blank is told apart
+/// from absent: absent takes the default, blank is refused.
+fn directory_from_reader<R, N>(
+    read: &R,
+    nonempty: &N,
+) -> Result<Option<DirectoryConfig>, AuthConfigError>
+where
+    R: Fn(&str) -> Option<String>,
+    N: Fn(&str) -> Option<String>,
+{
+    let Some(raw_url) = nonempty("LUCIDA_DIRECTORY_URL") else {
+        return Ok(None);
+    };
+    let raw_url = raw_url.trim().to_string();
+    let url = reqwest::Url::parse(&raw_url).map_err(|e| AuthConfigError::InvalidDirectoryUrl {
+        value: raw_url.clone(),
+        reason: e.to_string(),
+    })?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(AuthConfigError::InvalidDirectoryUrl {
+            value: raw_url,
+            reason: format!("scheme {:?} cannot be fetched", url.scheme()),
+        });
+    }
+
+    let field_list =
+        |variable: &'static str, default: &str| -> Result<Vec<String>, AuthConfigError> {
+            let raw = read(variable).unwrap_or_else(|| default.to_string());
+            let fields: Vec<String> = raw.split_whitespace().map(str::to_string).collect();
+            if fields.is_empty() {
+                return Err(AuthConfigError::EmptyDirectoryField { variable });
+            }
+            Ok(fields)
+        };
+    let single_field = |variable: &'static str, default: &str| -> Result<String, AuthConfigError> {
+        let mut fields = field_list(variable, default)?;
+        if fields.len() != 1 {
+            return Err(AuthConfigError::DirectoryFieldNotSingle {
+                variable,
+                value: fields.join(" "),
+            });
+        }
+        Ok(fields.remove(0))
+    };
+
+    let email_field = single_field(
+        "LUCIDA_DIRECTORY_EMAIL_FIELD",
+        DEFAULT_DIRECTORY_EMAIL_FIELD,
+    )?;
+    let name_fields = field_list("LUCIDA_DIRECTORY_NAME_FIELDS", DEFAULT_DIRECTORY_NAME_FIELD)?;
+    let picture_field = single_field(
+        "LUCIDA_DIRECTORY_PICTURE_FIELD",
+        DEFAULT_DIRECTORY_PICTURE_FIELD,
+    )?;
+
+    let headers = match nonempty("LUCIDA_DIRECTORY_HEADERS") {
+        Some(raw) => parse_directory_headers(&raw)?,
+        None => Vec::new(),
+    };
+
+    let refresh_interval = match nonempty("LUCIDA_DIRECTORY_REFRESH_SECONDS") {
+        Some(raw) => match raw.trim().parse::<u64>() {
+            Ok(seconds) if seconds > 0 => Duration::from_secs(seconds),
+            _ => {
+                return Err(AuthConfigError::InvalidDirectoryRefresh {
+                    value: raw.trim().to_string(),
+                });
+            }
+        },
+        None => Duration::from_secs(DEFAULT_DIRECTORY_REFRESH_SECONDS),
+    };
+
+    Ok(Some(DirectoryConfig {
+        url,
+        email_field,
+        name_fields,
+        picture_field,
+        headers,
+        refresh_interval,
+    }))
+}
+
+/// `Name: value` pairs separated by semicolons. The split on the colon
+/// is on the first one only, so a value may hold colons of its own. A
+/// value may not hold a semicolon. Empty entries, such as the one a
+/// trailing semicolon leaves, are skipped.
+fn parse_directory_headers(raw: &str) -> Result<Vec<(HeaderName, HeaderValue)>, AuthConfigError> {
+    let mut headers = Vec::new();
+    for entry in raw.split(';').map(str::trim).filter(|e| !e.is_empty()) {
+        let invalid = |reason: &str| AuthConfigError::InvalidDirectoryHeader {
+            entry: entry.to_string(),
+            reason: reason.to_string(),
+        };
+        let (name, value) = entry.split_once(':').ok_or_else(|| invalid("no colon"))?;
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(invalid("empty header name"));
+        }
+        let name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|e| invalid(&format!("invalid header name: {e}")))?;
+        let value = HeaderValue::from_str(value.trim())
+            .map_err(|e| invalid(&format!("invalid header value: {e}")))?;
+        headers.push((name, value));
+    }
+    Ok(headers)
 }
 
 fn parse_hours<F>(read: &F, name: &str) -> Option<Duration>
@@ -1128,5 +1335,157 @@ mod tests {
         let cfg = AuthConfig::from_env_map(reader(&[("LUCIDA_AUTH", "")]))
             .expect("empty LUCIDA_AUTH = unset = auto-detect");
         assert_eq!(cfg.mode, AuthMode::Disabled);
+    }
+
+    // -- LUCIDA_DIRECTORY_* ---------------------------------------------
+
+    const DIRECTORY_URL: &str = "http://127.0.0.1:1/people";
+
+    #[test]
+    fn directory_is_off_when_its_url_is_unset() {
+        let cfg = AuthConfig::from_env_map(reader(&[])).expect("defaults");
+        assert!(cfg.directory.is_none());
+        assert!(AuthConfig::for_tests().directory.is_none());
+    }
+
+    #[test]
+    fn a_blank_directory_url_is_off_and_the_other_variables_are_not_read() {
+        let cfg = AuthConfig::from_env_map(reader(&[
+            ("LUCIDA_DIRECTORY_URL", "  "),
+            ("LUCIDA_DIRECTORY_NAME_FIELDS", ""),
+            ("LUCIDA_DIRECTORY_HEADERS", "no colon here"),
+            ("LUCIDA_DIRECTORY_REFRESH_SECONDS", "soon"),
+        ]))
+        .expect("a blank URL turns the directory off");
+        assert!(cfg.directory.is_none());
+    }
+
+    #[test]
+    fn a_directory_url_alone_turns_the_directory_on_with_documented_defaults() {
+        let cfg = AuthConfig::from_env_map(reader(&[("LUCIDA_DIRECTORY_URL", DIRECTORY_URL)]))
+            .expect("the URL is the only required value");
+        let d = cfg.directory.expect("directory block");
+        assert_eq!(d.url.as_str(), DIRECTORY_URL);
+        assert_eq!(d.email_field, "email");
+        assert_eq!(d.name_fields, vec!["name".to_string()]);
+        assert_eq!(d.picture_field, "picture");
+        assert!(d.headers.is_empty());
+        assert_eq!(
+            d.refresh_interval,
+            Duration::from_secs(DEFAULT_DIRECTORY_REFRESH_SECONDS)
+        );
+    }
+
+    #[test]
+    fn directory_fields_headers_and_interval_are_overridable() {
+        let cfg = AuthConfig::from_env_map(reader(&[
+            ("LUCIDA_DIRECTORY_URL", DIRECTORY_URL),
+            ("LUCIDA_DIRECTORY_EMAIL_FIELD", " address "),
+            ("LUCIDA_DIRECTORY_NAME_FIELDS", "  first_name   last_name "),
+            ("LUCIDA_DIRECTORY_PICTURE_FIELD", "photo"),
+            (
+                "LUCIDA_DIRECTORY_HEADERS",
+                "X-Requested-By: lucida; Authorization: Bearer a:b:c ;",
+            ),
+            ("LUCIDA_DIRECTORY_REFRESH_SECONDS", " 600 "),
+        ]))
+        .expect("every override parses");
+        let d = cfg.directory.expect("directory block");
+        assert_eq!(d.email_field, "address");
+        assert_eq!(
+            d.name_fields,
+            vec!["first_name".to_string(), "last_name".to_string()]
+        );
+        assert_eq!(d.picture_field, "photo");
+        // The colons in the bearer value and the trailing semicolon are
+        // deliberate.
+        assert_eq!(
+            d.headers,
+            vec![
+                (
+                    HeaderName::from_static("x-requested-by"),
+                    HeaderValue::from_static("lucida"),
+                ),
+                (
+                    HeaderName::from_static("authorization"),
+                    HeaderValue::from_static("Bearer a:b:c"),
+                ),
+            ]
+        );
+        assert_eq!(d.refresh_interval, Duration::from_secs(600));
+    }
+
+    /// Every malformed directory variable stops the boot with a message
+    /// that names it, the way `LUCIDA_IAP_AUDIENCE` does.
+    #[test]
+    fn each_malformed_directory_variable_fails_naming_itself() {
+        let cases: &[(&str, &str)] = &[
+            ("LUCIDA_DIRECTORY_URL", "not a url"),
+            ("LUCIDA_DIRECTORY_URL", "ftp://directory.example/people"),
+            ("LUCIDA_DIRECTORY_EMAIL_FIELD", ""),
+            ("LUCIDA_DIRECTORY_EMAIL_FIELD", "first_name last_name"),
+            ("LUCIDA_DIRECTORY_NAME_FIELDS", "   "),
+            ("LUCIDA_DIRECTORY_PICTURE_FIELD", " "),
+            ("LUCIDA_DIRECTORY_HEADERS", "X-Requested-By lucida"),
+            ("LUCIDA_DIRECTORY_HEADERS", ": no name"),
+            ("LUCIDA_DIRECTORY_HEADERS", "Bad Name: value"),
+            ("LUCIDA_DIRECTORY_REFRESH_SECONDS", "soon"),
+            ("LUCIDA_DIRECTORY_REFRESH_SECONDS", "0"),
+        ];
+        for (variable, value) in cases {
+            let mut env = vec![("LUCIDA_DIRECTORY_URL", DIRECTORY_URL)];
+            if *variable == "LUCIDA_DIRECTORY_URL" {
+                env = vec![(variable, value)];
+            } else {
+                env.push((variable, value));
+            }
+            let err = AuthConfig::from_env_map(reader(&env))
+                .expect_err(&format!("{variable}={value:?} should stop the boot"));
+            let message = err.to_string();
+            assert!(
+                message.contains(variable),
+                "{variable}={value:?}: message does not name the variable: {message}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_blank_directory_field_variable_is_malformed_not_unset() {
+        let err = AuthConfig::from_env_map(reader(&[
+            ("LUCIDA_DIRECTORY_URL", DIRECTORY_URL),
+            ("LUCIDA_DIRECTORY_NAME_FIELDS", ""),
+        ]))
+        .expect_err("an empty field list should stop the boot");
+        match err {
+            AuthConfigError::EmptyDirectoryField { variable } => {
+                assert_eq!(variable, "LUCIDA_DIRECTORY_NAME_FIELDS");
+            }
+            other => panic!("expected EmptyDirectoryField, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn blank_directory_headers_and_interval_mean_unset() {
+        let cfg = AuthConfig::from_env_map(reader(&[
+            ("LUCIDA_DIRECTORY_URL", DIRECTORY_URL),
+            ("LUCIDA_DIRECTORY_HEADERS", " "),
+            ("LUCIDA_DIRECTORY_REFRESH_SECONDS", ""),
+        ]))
+        .expect("blank optional values fall back to their defaults");
+        let d = cfg.directory.expect("directory block");
+        assert!(d.headers.is_empty());
+        assert_eq!(
+            d.refresh_interval,
+            Duration::from_secs(DEFAULT_DIRECTORY_REFRESH_SECONDS)
+        );
+    }
+
+    #[test]
+    fn directory_for_tests_points_at_the_given_listing() {
+        let d = DirectoryConfig::for_tests("http://127.0.0.1:1/people");
+        assert_eq!(d.url.as_str(), "http://127.0.0.1:1/people");
+        assert_eq!(d.email_field, "email");
+        assert_eq!(d.name_fields, vec!["name".to_string()]);
+        assert_eq!(d.picture_field, "picture");
     }
 }

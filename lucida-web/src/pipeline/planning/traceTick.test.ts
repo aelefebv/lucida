@@ -2,7 +2,13 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { recordPlanningTick } from "./traceTick.ts";
 import { emptyPlanStats } from "./index.ts";
-import type { ActiveSetEntry, ChunkRequest, RequestPlan } from "./types.ts";
+import type {
+  ActiveSetEntry,
+  ChunkRequest,
+  EntitySnapshot,
+  RequestPlan,
+  TileSnapshot,
+} from "./types.ts";
 import { TraceRecorder } from "../../trace/recorder.ts";
 import type { TraceTick } from "../../trace/types.ts";
 import { createSyntheticState } from "./index.ts";
@@ -40,6 +46,30 @@ function tileEntry(entityId: string, mode: "tiles-with-detail" | "tiles-with-pro
     proxyAvailable: false,
     groupProxyAvailable: false,
   };
+}
+
+type EntityOverrides = Partial<Omit<TileSnapshot, "kind">> & {
+  targetLevel: number;
+  kind?: EntitySnapshot["kind"];
+};
+
+function entity(overrides: EntityOverrides): EntitySnapshot {
+  return {
+    kind: "Image",
+    entityId: `e-${overrides.targetLevel}`,
+    imageId: "image-1",
+    visible: true,
+    projectedDiagonalPx: 100,
+    projectedAreaPx2: 10_000,
+    centroidWorld: [0, 0, 0],
+    levelPinned: false,
+    sourceLevels: [0, 1, 2, 3],
+    coarseLevel: 3,
+    importance: 1,
+    layoutPositionVox: [0, 0],
+    levels: [],
+    ...overrides,
+  } as EntitySnapshot;
 }
 
 function makePlan(overrides: Partial<RequestPlan> = {}): RequestPlan {
@@ -82,6 +112,7 @@ function makeRecorder(): TraceRecorder {
 }
 
 const NO_RESIDENCY = { cached: [], inFlight: [] };
+const NO_ENTITIES: EntitySnapshot[] = [];
 
 describe("recordPlanningTick", () => {
   let recorder: TraceRecorder;
@@ -108,7 +139,7 @@ describe("recordPlanningTick", () => {
       ],
     });
 
-    recordPlanningTick("ds-1", plan, NO_RESIDENCY, recorder);
+    recordPlanningTick("ds-1", plan, NO_RESIDENCY, NO_ENTITIES, null, recorder);
 
     const tick = firstTick();
     expect(tick.counters.laneMinimap).toBe(1);
@@ -126,7 +157,7 @@ describe("recordPlanningTick", () => {
     stats.culling.afterZRange = 80;
     stats.culling.afterFrustum = 30;
 
-    recordPlanningTick("ds-1", makePlan({ stats }), NO_RESIDENCY, recorder);
+    recordPlanningTick("ds-1", makePlan({ stats }), NO_RESIDENCY, NO_ENTITIES, null, recorder);
 
     const tick = firstTick();
     expect(tick.counters.cullingConsidered).toBe(400);
@@ -145,7 +176,7 @@ describe("recordPlanningTick", () => {
       ],
     });
 
-    recordPlanningTick("ds-1", plan, NO_RESIDENCY, recorder);
+    recordPlanningTick("ds-1", plan, NO_RESIDENCY, NO_ENTITIES, null, recorder);
 
     const tick = firstTick();
     expect(tick.counters.activeSetTotal).toBe(4);
@@ -163,7 +194,9 @@ describe("recordPlanningTick", () => {
       ],
     });
 
-    recordPlanningTick("ds-1", plan, { cached: [5, 0, 1], inFlight: [0, 0, 3] }, recorder);
+    recordPlanningTick(
+      "ds-1", plan, { cached: [5, 0, 1], inFlight: [0, 0, 3] }, NO_ENTITIES, null, recorder,
+    );
 
     expect(firstTick().levels).toEqual([
       { level: 0, planned: 2, cached: 5, inFlight: 0 },
@@ -171,9 +204,63 @@ describe("recordPlanningTick", () => {
     ]);
   });
 
+  it("ranges the target over the visible image-bearing entities and skips the rest", () => {
+    const entities = [
+      entity({ entityId: "a", kind: "Tile", parentId: "g", targetLevel: 1 }),
+      entity({ entityId: "b", kind: "Tile", parentId: "g", targetLevel: 2 }),
+      entity({ entityId: "c", targetLevel: 0, visible: false }),
+      entity({ entityId: "g", kind: "Group", targetLevel: 0 }),
+    ];
+
+    recordPlanningTick("ds-1", makePlan(), NO_RESIDENCY, entities, null, recorder);
+
+    const tick = firstTick();
+    expect(tick.targetLevel).toEqual({ min: 1, max: 2 });
+    expect(tick.levelPinned).toBe(false);
+  });
+
+  it("reads the pin off the entities", () => {
+    const entities = [entity({ targetLevel: 0, levelPinned: true })];
+
+    recordPlanningTick("ds-1", makePlan(), NO_RESIDENCY, entities, null, recorder);
+
+    expect(firstTick()).toMatchObject({ targetLevel: { min: 0, max: 0 }, levelPinned: true });
+  });
+
+  it("carries the displayed level the render worker last reported", () => {
+    const entities = [entity({ targetLevel: 1 })];
+
+    recordPlanningTick("ds-1", makePlan(), NO_RESIDENCY, entities, { min: 1, max: 3 }, recorder);
+
+    expect(firstTick().displayedLevel).toEqual({ min: 1, max: 3 });
+  });
+
+  /** The panel's fallback, so a pinned dataset scrolled out of view still reads its pin. */
+  it("falls back to every entity's target when nothing is in view, as the panel does", () => {
+    const entities = [
+      entity({ entityId: "a", targetLevel: 2, visible: false, levelPinned: true }),
+      entity({ entityId: "g", kind: "Group", targetLevel: 0, visible: false }),
+    ];
+
+    recordPlanningTick("ds-1", makePlan(), NO_RESIDENCY, entities, null, recorder);
+
+    const tick = firstTick();
+    expect(tick.targetLevel).toEqual({ min: 2, max: 2 });
+    expect(tick.levelPinned).toBe(true);
+    expect(tick.displayedLevel).toBeNull();
+  });
+
+  it("leaves both levels null for a dataset with no image-bearing entity", () => {
+    recordPlanningTick("ds-1", makePlan(), NO_RESIDENCY, NO_ENTITIES, null, recorder);
+
+    const tick = firstTick();
+    expect(tick.targetLevel).toBeNull();
+    expect(tick.displayedLevel).toBeNull();
+  });
+
   it("records nothing while no run is open", () => {
     const idle = makeRecorder();
-    recordPlanningTick("ds-1", makePlan(), NO_RESIDENCY, idle);
+    recordPlanningTick("ds-1", makePlan(), NO_RESIDENCY, NO_ENTITIES, null, idle);
     expect(idle.exportDocument().runs).toHaveLength(0);
   });
 });

@@ -17,6 +17,7 @@
  * a reusable {@link TickScratch}, so recording a tick allocates nothing.
  */
 
+import type { LevelRange } from "../renderer/workerProtocol.ts";
 import { RingSlots } from "./ring.ts";
 import { StringPool } from "./stringPool.ts";
 import {
@@ -34,6 +35,18 @@ const COUNTERS_PER_TICK = TICK_COUNTER_NAMES.length;
 const COUNTED_PER_TICK = COUNTED_PHASES.length;
 const LEVELS_PER_TICK = TICK_LEVEL_SLOTS * LEVEL_COLUMNS;
 
+const RANGE_COLUMNS = 4;
+
+/**
+ * Level 0 is a real level, so the absent marker is the top of the uint32
+ * range, as `UNSET_STAMP` is for a boundary never reached.
+ */
+const NO_LEVEL = 0xffffffff;
+
+function rangeOrNull(min: number, max: number): LevelRange | null {
+  return min === NO_LEVEL ? null : { min, max };
+}
+
 /**
  * How many samples a run keeps. A sample costs one planning pass, not one
  * frame — a tick that hit the epoch cache re-plans nothing — so this is
@@ -50,14 +63,53 @@ export const DEFAULT_TICK_CAPACITY = 1024;
 export class TickScratch {
   readonly counters = new Uint32Array(COUNTERS_PER_TICK);
   readonly levels = new Uint32Array(LEVELS_PER_TICK);
+  /** Target min, target max, displayed min, displayed max; {@link NO_LEVEL} when absent. */
+  readonly ranges = new Uint32Array(RANGE_COLUMNS).fill(NO_LEVEL);
   datasetId = "";
   levelsDropped = 0;
+  levelPinned = false;
 
   reset(datasetId: string): void {
     this.counters.fill(0);
     this.levels.fill(0);
+    this.ranges.fill(NO_LEVEL);
     this.datasetId = datasetId;
     this.levelsDropped = 0;
+    this.levelPinned = false;
+  }
+
+  /**
+   * The target level across the dataset's visible entities this pass, and
+   * whether it is the level pin's choice rather than the screen's. Two
+   * numbers rather than a range object, so the emit site's walk over the
+   * entities passes what it tallied without allocating.
+   */
+  setTargetLevel(min: number, max: number, pinned: boolean): void {
+    this.ranges[0] = min;
+    this.ranges[1] = max;
+    this.levelPinned = pinned;
+  }
+
+  /**
+   * What the render worker last said is on screen for the dataset, or null
+   * while nothing is resident. Takes the range the worker's report already
+   * holds, so nothing is copied per tick beyond two integers.
+   */
+  setDisplayedLevel(range: LevelRange | null): void {
+    this.ranges[2] = range === null ? NO_LEVEL : range.min;
+    this.ranges[3] = range === null ? NO_LEVEL : range.max;
+  }
+
+  get hasTarget(): boolean {
+    return this.ranges[0] !== NO_LEVEL;
+  }
+
+  get targetMin(): number {
+    return this.ranges[0];
+  }
+
+  get targetMax(): number {
+    return this.ranges[1];
   }
 
   /**
@@ -92,9 +144,12 @@ export class TickScratch {
 }
 
 export class TickRing {
-  /** One interned dataset id, one timestamp, one dropped-level count, plus the columns. */
+  /**
+   * One interned dataset id, one timestamp, one dropped-level count, the two
+   * level ranges, plus the columns, all uint32; and one byte for the pin.
+   */
   static readonly BYTES_PER_TICK =
-    (3 + COUNTERS_PER_TICK + COUNTED_PER_TICK + LEVELS_PER_TICK) * 4;
+    (3 + RANGE_COLUMNS + COUNTERS_PER_TICK + COUNTED_PER_TICK + LEVELS_PER_TICK) * 4 + 1;
 
   private readonly strings = new StringPool();
   private readonly slots: RingSlots;
@@ -105,6 +160,8 @@ export class TickRing {
   private readonly counters: Uint32Array;
   private readonly counted: Uint32Array;
   private readonly levels: Uint32Array;
+  private readonly ranges: Uint32Array;
+  private readonly levelPinned: Uint8Array;
 
   constructor(capacity = DEFAULT_TICK_CAPACITY) {
     this.slots = new RingSlots(capacity);
@@ -115,6 +172,8 @@ export class TickRing {
     this.counters = new Uint32Array(this.capacity * COUNTERS_PER_TICK);
     this.counted = new Uint32Array(this.capacity * COUNTED_PER_TICK);
     this.levels = new Uint32Array(this.capacity * LEVELS_PER_TICK);
+    this.ranges = new Uint32Array(this.capacity * RANGE_COLUMNS);
+    this.levelPinned = new Uint8Array(this.capacity);
   }
 
   get dropped(): number {
@@ -139,6 +198,8 @@ export class TickRing {
     this.counters.set(scratch.counters, slot * COUNTERS_PER_TICK);
     this.counted.set(counted, slot * COUNTED_PER_TICK);
     this.levels.set(scratch.levels, slot * LEVELS_PER_TICK);
+    this.ranges.set(scratch.ranges, slot * RANGE_COLUMNS);
+    this.levelPinned[slot] = scratch.levelPinned ? 1 : 0;
   }
 
   /** Oldest-first, so a reader walks the ring the way the run happened. */
@@ -165,6 +226,7 @@ export class TickRing {
         levels.push({ level, planned, cached, inFlight });
       }
 
+      const r = slot * RANGE_COLUMNS;
       out.push({
         atUs: this.atUs[slot],
         datasetId: this.strings.get(this.datasetIds[slot]),
@@ -172,6 +234,9 @@ export class TickRing {
         counted,
         levels,
         levelsDropped: this.levelsDropped[slot],
+        targetLevel: rangeOrNull(this.ranges[r], this.ranges[r + 1]),
+        levelPinned: this.levelPinned[slot] === 1,
+        displayedLevel: rangeOrNull(this.ranges[r + 2], this.ranges[r + 3]),
       });
     }
     return out;

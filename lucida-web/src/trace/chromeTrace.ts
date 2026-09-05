@@ -41,6 +41,7 @@
  * encodings that avoid it are the ones this shape was chosen over.
  */
 
+import type { LevelRange } from "../renderer/workerProtocol.ts";
 import { outageWindow } from "./coverage.ts";
 import {
   PHASES,
@@ -97,6 +98,13 @@ const COUNTER_SERIES = [
 ] as const;
 
 /**
+ * A counter track has no null, and holding the previous value would draw a
+ * level that was not on screen. Level 0 is a real level, so the absent marker
+ * sits below it.
+ */
+const NO_LEVEL_COUNTER = -1;
+
+/**
  * How a reader should discount what they are looking at: measured values that
  * the export assembles rather than records as such. A borrowed viewer has
  * nowhere else to say this, so it says it here and every surface that hands the
@@ -107,6 +115,7 @@ export const DERIVED_VALUE_NOTES: readonly string[] = [
   "Phase spans are fanned out at export from the lifecycle row's boundary stamps.",
   "A retired row's open phase is not drawn at all — a span there would invent a stall the run did not have.",
   "Counter series are sampled once per tick, and a tick only happens when the page has work; a flat stretch is an idle page, not a frozen counter. `readingsDropped` in the header says how many readings the ring wrapped over, so a long run's counters cover its tail.",
+  "The `target level` and `displayed level` counters, one pair per dataset, are sampled per planning pass rather than per tick. The target is the level that pass planned at. The displayed level is what the render worker had last reported when the pass ran, so a fill that lands with no re-plan shows up on the next pass, not as it arrives. A value of -1 is an absence: nothing in view for the target, nothing resident yet for the displayed level.",
   "Concurrent chunks put overlapping spans on one phase track. Perfetto reports these as `slice_spill_overlapping_complete_event` and stacks them within the track; nothing is dropped.",
 ];
 
@@ -300,8 +309,11 @@ function emitRun(events: ChromeTraceEvent[], run: TraceRun, baseUs: number): voi
       args: {
         kind: event.kind,
         reason: event.reason,
+        dataset: event.chunk?.datasetId ?? event.levelChange?.datasetId ?? null,
         key: event.chunk?.chunkKey ?? null,
         level: event.chunk?.level ?? null,
+        from: event.levelChange?.from ?? null,
+        to: event.levelChange?.to ?? null,
       },
     });
   }
@@ -320,6 +332,35 @@ function emitRun(events: ChromeTraceEvent[], run: TraceRun, baseUs: number): voi
       });
     }
   }
+
+  // Off the ticks rather than the readings: the target is per dataset and per
+  // planning pass, and the readings are process-wide. DERIVED_VALUE_NOTES
+  // tells the reader what that cadence implies.
+  for (const sample of run.ticks) {
+    events.push(
+      levelCounter(`target level (${sample.datasetId})`, sample.targetLevel, baseUs + sample.atUs),
+      levelCounter(
+        `displayed level (${sample.datasetId})`,
+        sample.displayedLevel,
+        baseUs + sample.atUs,
+      ),
+    );
+  }
+}
+
+function levelCounter(name: string, range: LevelRange | null, tsUs: number): ChromeTraceEvent {
+  return {
+    name,
+    cat: "counters,level",
+    ph: "C",
+    ts: tsUs,
+    pid: PID_BROWSER,
+    tid: COUNTER_TID,
+    args: {
+      finest: range?.min ?? NO_LEVEL_COUNTER,
+      coarsest: range?.max ?? NO_LEVEL_COUNTER,
+    },
+  };
 }
 
 /**

@@ -148,6 +148,9 @@ export function makeTick(atUs: number, counted: Partial<Record<CountedPhase, num
     },
     levels: [],
     levelsDropped: 0,
+    targetLevel: null,
+    levelPinned: false,
+    displayedLevel: null,
   };
 }
 

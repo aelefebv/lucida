@@ -88,7 +88,7 @@ function reading(atUs: number, values: Partial<Omit<TraceReading, "atUs">> = {})
   return { atUs, queueDepth: 0, inFlight: 0, frameTimeUs: 0, residentBytes: 0, ...values };
 }
 
-function tick(atUs: number): TraceTick {
+function tick(atUs: number, overrides: Partial<TraceTick> = {}): TraceTick {
   return {
     atUs,
     datasetId: "ds",
@@ -102,6 +102,10 @@ function tick(atUs: number): TraceTick {
     counted: { "cache-admission": 0, "worker-dispatch": 0, "coalesce-attach": 0 },
     levels: [],
     levelsDropped: 0,
+    targetLevel: null,
+    levelPinned: false,
+    displayedLevel: null,
+    ...overrides,
   };
 }
 
@@ -364,14 +368,18 @@ describe("the Chrome Trace Event projection", () => {
     const events = toChromeTraceEvents(
       doc(
         run({
-          events: [{ atUs: 2_500, kind: "eviction", reason: "evicted", chunk: null }],
+          events: [
+            { atUs: 2_500, kind: "eviction", reason: "evicted", chunk: null, levelChange: null },
+          ],
         }),
       ),
     );
 
     const instant = events.find(e => e.ph === "i");
     expect(instant).toMatchObject({ name: "eviction: evicted", ts: 2_500, tid: 2 });
-    expect(instant?.args).toEqual({ kind: "eviction", reason: "evicted", key: null, level: null });
+    expect(instant?.args).toEqual({
+      kind: "eviction", reason: "evicted", dataset: null, key: null, level: null, from: null, to: null,
+    });
   });
 
   it("names the chunk and its level on a point event about one chunk", () => {
@@ -386,13 +394,68 @@ describe("the Chrome Trace Event projection", () => {
               datasetId: "ds-1", entityId: "e-1", imageId: "img-1", residencyTier: "detail",
               level: 3, t: 0, c: 0, z: 0, y: 1, x: 2, chunkKey: "3/0/0/0/1/2",
             },
+            levelChange: null,
           }],
         }),
       ),
     );
 
     const instant = events.find(e => e.ph === "i");
-    expect(instant?.args).toEqual({ kind: "eviction", reason: "evicted", key: "3/0/0/0/1/2", level: 3 });
+    expect(instant?.args).toMatchObject({
+      kind: "eviction", reason: "evicted", dataset: "ds-1", key: "3/0/0/0/1/2", level: 3,
+    });
+  });
+
+  it("names the dataset and the old and new range on a level-change instant", () => {
+    const events = toChromeTraceEvents(
+      doc(
+        run({
+          events: [{
+            atUs: 3_000,
+            kind: "level-change",
+            reason: "screen",
+            chunk: null,
+            levelChange: { datasetId: "ds-1", from: { min: 1, max: 1 }, to: { min: 2, max: 2 } },
+          }],
+        }),
+      ),
+    );
+
+    const instant = events.find(e => e.ph === "i");
+    expect(instant).toMatchObject({ name: "level-change: screen", ts: 3_000, tid: 2 });
+    expect(instant?.args).toMatchObject({
+      dataset: "ds-1", from: { min: 1, max: 1 }, to: { min: 2, max: 2 }, key: null,
+    });
+  });
+
+  /** One pair per dataset, because a workspace's datasets can sit at different levels. */
+  it("draws the target and displayed level per dataset as counter tracks off the ticks", () => {
+    const events = toChromeTraceEvents(
+      doc(
+        run({
+          ticks: [
+            tick(1_000, { targetLevel: { min: 2, max: 2 }, displayedLevel: null }),
+            tick(9_000, {
+              targetLevel: { min: 1, max: 2 },
+              displayedLevel: { min: 2, max: 3 },
+            }),
+          ],
+        }),
+      ),
+    );
+
+    const target = events.filter(e => e.ph === "C" && e.name === "target level (ds)");
+    const displayed = events.filter(e => e.ph === "C" && e.name === "displayed level (ds)");
+    expect(target.map(e => [e.ts, e.args])).toEqual([
+      [1_000, { finest: 2, coarsest: 2 }],
+      [9_000, { finest: 1, coarsest: 2 }],
+    ]);
+    // -1: a counter has no null.
+    expect(displayed.map(e => [e.ts, e.args])).toEqual([
+      [1_000, { finest: -1, coarsest: -1 }],
+      [9_000, { finest: 2, coarsest: 3 }],
+    ]);
+    expect(target.every(e => e.pid === PID_BROWSER)).toBe(true);
   });
 
   /**
