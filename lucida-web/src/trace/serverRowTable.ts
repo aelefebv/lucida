@@ -65,8 +65,9 @@ const NO_PHASE = 0xff;
 
 /**
  * Stored in the bytes column when a row performed no backend read. The top
- * of the range, as {@link PHASE_UNSET} is for a duration: zero is a real
- * answer (a failed round trip returned nothing) and no chunk read is 4 GiB.
+ * of the range, as {@link PHASE_UNSET} is for a duration, because zero is a
+ * real answer: a failed round trip returned nothing. The server clamps a
+ * read's byte count to one below this (`BACKEND_BYTES_MAX`).
  */
 const BYTES_UNSET = 0xffff_ffff;
 
@@ -162,7 +163,6 @@ export class ServerRowTable {
   private coalescedOnto: Uint32Array;
   /** One column per phase, in {@link SERVER_PHASES} order. */
   private phaseColumns: Uint32Array[];
-  /** What the row's own round trips returned; {@link BYTES_UNSET} when it made none. */
   private backendBytes: Uint32Array;
   private families: Uint8Array;
   private outcomes: Uint8Array;
@@ -235,7 +235,7 @@ export class ServerRowTable {
       batch.dispatch_offset_us.length,
       batch.duration_us.length,
       batch.outcome.length,
-      batch.backend_bytes?.length ?? 0,
+      batch.backend_bytes.length,
       batch.coalesced_onto?.length ?? 0,
     );
     for (const key of PHASE_COLUMNS) {
@@ -259,7 +259,7 @@ export class ServerRowTable {
         this.phaseColumns[p][index] = (batch[PHASE_COLUMNS[p]] as number[])[i];
       }
       const bytes = batch.backend_bytes[i];
-      this.backendBytes[index] = bytes === null || bytes === undefined ? BYTES_UNSET : bytes;
+      this.backendBytes[index] = bytes === null ? BYTES_UNSET : bytes;
       // An unrecognised vocabulary word means the two sides have drifted,
       // which the goldens exist to prevent. An unreadable outcome resolves
       // to `failed`: a word we cannot read must not be able to hide a

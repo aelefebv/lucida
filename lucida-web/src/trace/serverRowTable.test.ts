@@ -65,7 +65,6 @@ describe("ServerRowTable", () => {
           "slice-encode": 4,
           handoff: 3,
         },
-        // The bytes the round trip returned travel with it.
         backendBytes: 4_096,
         dispatchOffsetUs: 0,
         durationUs: 0,
@@ -81,8 +80,6 @@ describe("ServerRowTable", () => {
         // Unentered phases are absent, not zero: a stage that never ran and
         // one that ran instantly are different facts.
         phases: { arrival: 20, "binding-lookup": 6, dispatch: 8, "cache-lookup": 2, handoff: 9 },
-        // No round trip, so no byte count either, rather than a zero that
-        // would read as an empty object.
         backendBytes: null,
         dispatchOffsetUs: 0,
         durationUs: 0,
@@ -128,8 +125,6 @@ describe("ServerRowTable", () => {
     expect(follower.phases["coalesced-wait"]).toBe(400_000);
     expect(follower.phases["backend-read"]).toBeUndefined();
     expect(follower.phases["permit-wait"]).toBeUndefined();
-    // The bytes belong to the leader's row: summing the column must count
-    // each byte the backend moved exactly once.
     expect(follower.backendBytes).toBeNull();
     // And it names the read it waited on, so the wait joins to the row that
     // owns the round trip.

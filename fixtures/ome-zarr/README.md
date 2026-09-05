@@ -88,34 +88,43 @@ Sample values are `uint16` in every fixture, and the codec chain is `bytes`
 
 ## The sharded twin check
 
-`extras/verify_sharded_twins.py` proves the sharded store end to end. It
-writes two twin pairs with the generator, opens each dataset through the
-trace driver in its own workspace at device pixel ratio 2, and asserts that
-every run settled, that each pair's two frames are not blank and identical
-pixel for pixel, that every backend read in a sharded run moved exactly the
-inner chunks it carried (one, or a contiguous run of one shard's inner
-chunks merged into one request), one shard index, or both, and that every
-read in an unsharded run moved one whole chunk object. The expected sizes
-come from the shard indexes on disk, so the read comparison is exact. Every
-run is driven with `--pin-contrast`, because the default contrast fit
-samples whatever is resident when it runs and two runs of one dataset then
-draw the same data a level apart. The second pair has a single source level
-too large to serve as the coarse tier, so the server generates a coarse
-level over the sharded source, and the check asserts that both runs
-requested that level and still match. That pair is one image whose source
-grid stays under the 32 chunks the server generates on its own after an
-open, and the check waits for that fill before it opens the view, because a
-static view never asks for the rest (issue #1034). That fill reads the
-whole source, so the pair's own requests are answered from the server's
-cache; the read audit is the first pair's job.
+`extras/verify_sharded_twins.py` proves reading a sharded dataset end to
+end. It writes two twin pairs with the generator and opens each dataset
+through the trace driver, in its own workspace, at device pixel ratio 2.
+Then it checks what came back. Every run reached quiescence. Each pair's
+two frames are the size the viewport makes at that ratio, not blank, and
+identical pixel for pixel. Every backend read in a sharded run waited on
+the chunk read cap and moved exactly the inner chunks it carried, one shard
+index, or both. A read may carry one inner chunk or a byte-contiguous
+stretch of one shard's inner chunks merged into one read. Every read in an
+unsharded run moved one whole chunk object.
+
+The expected sizes come from the shard indexes on disk, so the read
+comparison is exact. The check also asserts that the view wanted no shard
+whole. That is the one case where a shard downloaded whole has the same
+length as a legitimate merged read. Every run passes `--pin-contrast`,
+because the default contrast fit samples whatever is resident when it runs,
+and two runs of one dataset then draw the same data a level apart (issue
+#1037).
+
+The second pair has a single source level too large to serve as the coarse
+tier, so the server generates a coarse level over the sharded source. The
+check asserts that both runs requested that level and still match. The pair
+is one image whose source grid stays under the 32 chunks the server
+generates on its own after an open, and the check waits for that fill
+before it opens the view, because a static view never asks for the rest
+(issue #1034). The fill reads the whole source, so the server answers the
+pair's own requests from its cache and the read audit is the first pair's
+job. Point `--generated-cache-dir` at the server's generated coarse cache
+and the check compares the two generated tiers byte for byte as well.
 
 It needs a running server that serves a built web bundle, the `lucida` CLI,
 and Chrome. From the repository root:
 
 ```sh
 (cd lucida-web && pnpm run build)
-cargo run -p lucida-server &
-uv run extras/verify_sharded_twins.py
+LUCIDA_GENERATED_COARSE_CACHE_DIR=/tmp/lucida-coarse cargo run -p lucida-server &
+uv run extras/verify_sharded_twins.py --generated-cache-dir /tmp/lucida-coarse
 ```
 
 Pass `--server` for a server elsewhere, `--lucida` to name the CLI, and

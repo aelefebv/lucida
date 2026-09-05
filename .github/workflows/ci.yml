@@ -360,7 +360,7 @@ jobs:
       - name: Synthetic fixture generator tests
         run: uv run extras/test_synthetic_ome_zarr.py
 
-      # The sharded twin check needs a server and a browser to run whole; the
-      # parts that read a store and a run file are tested here without either.
+      # The whole sharded twin check needs a server and a browser. This runs
+      # only the parts that read an object store and a run file.
       - name: Sharded twin check tests
         run: uv run extras/test_verify_sharded_twins.py

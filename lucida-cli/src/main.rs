@@ -5636,9 +5636,6 @@ mod tests {
             Command::Trace { run, .. } => {
                 assert!(run.gate);
                 assert_eq!(run.output.as_deref(), Some("/tmp/r.json"));
-                // The frame rides the same drive, so a twin comparison is two
-                // commands and not four, and the window it was drawn with is
-                // pinned so the two frames are comparable.
                 assert_eq!(run.screenshot.as_deref(), Some(Path::new("/tmp/r.png")));
                 assert!(run.pin_contrast);
             }

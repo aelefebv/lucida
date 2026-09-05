@@ -372,8 +372,7 @@ impl MetadataReadObserver for MetadataReadSink {
                 TimingRowOutcome::Delivered
             },
             phases: [PHASE_UNSET; SERVER_PHASES.len()],
-            // A metadata read is timed by the observer, which sees the
-            // round trip and not its body.
+            // The observer times the round trip and never sees its body.
             backend_bytes: None,
             coalesced_onto: LABEL_NONE,
             metadata_phase: Some(read.phase),
@@ -671,9 +670,6 @@ mod tests {
         let batch = buffer.take_batch().expect("two rows");
         assert_eq!(batch.permit_wait_us, vec![3_100_000, PHASE_UNSET]);
         assert_eq!(batch.backend_read_us, vec![120_000, PHASE_UNSET]);
-        // The bytes travel with the round trip they came from, so a sum
-        // over the column is the bytes the backend moved and a follower
-        // adds nothing to it.
         assert_eq!(batch.backend_bytes, vec![Some(131_072), None]);
         assert_eq!(batch.coalesced_wait_us, vec![PHASE_UNSET, 400_000]);
         // The follower says which read it waited on, so the join to the
@@ -751,9 +747,8 @@ mod tests {
             keys,
             vec![
                 "arrival_us",
-                // The bytes this client's own round trips moved. A size is
-                // as much this client's number as a duration is, and it
-                // says nothing about any other tenant's reads.
+                // A byte count is this client's own number, as a duration is,
+                // and says nothing about another reader's reads.
                 "backend_bytes",
                 "backend_read_us",
                 "binding_lookup_us",

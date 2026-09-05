@@ -289,32 +289,27 @@ pub fn dataset_id_for_source(
     dataset_url: &str,
     health: &[DatasetSourceHealth],
 ) -> Option<DatasetId> {
-    let canonical = normalize_dataset_url(dataset_url);
-    health
-        .iter()
-        .find(|dataset| {
-            dataset
-                .source_url
-                .as_deref()
-                .map(|url| normalize_dataset_url(url) == canonical)
-                .unwrap_or(false)
-        })
-        .map(|dataset| dataset.workspace_dataset_id.clone())
+    health_entry_for(dataset_url, health).map(|dataset| dataset.workspace_dataset_id.clone())
 }
 
-/// Read the server's warmth for `dataset_url` out of a health snapshot taken
-/// before the run.
-pub fn summarise_server_warmth(dataset_url: &str, health: &[DatasetSourceHealth]) -> ServerWarmth {
+fn health_entry_for<'a>(
+    dataset_url: &str,
+    health: &'a [DatasetSourceHealth],
+) -> Option<&'a DatasetSourceHealth> {
     let canonical = normalize_dataset_url(dataset_url);
-    let entry = health.iter().find(|dataset| {
+    health.iter().find(|dataset| {
         dataset
             .source_url
             .as_deref()
             .map(|url| normalize_dataset_url(url) == canonical)
             .unwrap_or(false)
-    });
+    })
+}
 
-    match entry {
+/// Read the server's warmth for `dataset_url` out of a health snapshot taken
+/// before the run.
+pub fn summarise_server_warmth(dataset_url: &str, health: &[DatasetSourceHealth]) -> ServerWarmth {
+    match health_entry_for(dataset_url, health) {
         None => ServerWarmth {
             dataset_open_before_run: false,
             opened_by_driver: false,
@@ -535,10 +530,9 @@ pub async fn drive_run(
 /// teardown live here once. Readiness is observed rather than demanded: a page
 /// that never draws is a run this command still has to report.
 ///
-/// `screenshot` is where to write the frame the page shows once the wait is
-/// over, at the viewport's device pixel ratio. It is taken before the export
-/// because the export closes the run, and the frame is the run's own last
-/// state, not something that happened after it.
+/// `screenshot` is where to write the page's frame after the wait, at the
+/// viewport's device pixel ratio. It is taken before the export because the
+/// export closes the run: the frame is the run's last state.
 async fn drive_and_export(
     url: &str,
     token: Option<&EffectiveToken>,
@@ -994,9 +988,6 @@ mod tests {
         assert!(view.auto_contrast.is_empty());
     }
 
-    /// A pinned window is the one thing a composed view says about display:
-    /// the dataset's auto-contrast is off, so the page does not fit the window
-    /// to whatever happens to be resident, and two runs draw alike.
     #[test]
     fn the_composed_view_pins_the_contrast_window_only_when_asked() {
         let id = DatasetId("wds-1".to_string());
@@ -1010,8 +1001,8 @@ mod tests {
         );
     }
 
-    /// The pin needs the workspace's id for the dataset, which only the health
-    /// snapshot (or the open the driver just did) knows.
+    /// The pin is keyed on the workspace's dataset id, which only the health
+    /// snapshot or the driver's own open knows.
     #[test]
     fn the_dataset_id_comes_from_the_health_entry_for_the_canonical_url() {
         let health = vec![health_entry("gs://bucket/set.zarr", None)];
@@ -1172,10 +1163,8 @@ mod tests {
         assert!(gate_failure(&file).is_some());
     }
 
-    /// The frame is the driver's artifact, so the header names it beside the
-    /// composed view whose device pixel ratio it was taken at. A run driven
-    /// without one carries no key at all, rather than a null a reader has to
-    /// distinguish from "not written".
+    /// A run driven without a frame carries no `screenshot` key at all, rather
+    /// than a null a reader has to tell from "not written".
     #[test]
     fn the_header_names_the_screenshot_the_driver_wrote_and_omits_it_otherwise() {
         let export = || -> SeamExport {

@@ -869,9 +869,8 @@ mod tests {
             assert_eq!(gets(), 2, "{location:?}: the index and the inner chunk");
             assert!(first.timing.backend_read_us.is_some());
             assert!(first.timing.permit_wait_us.is_some());
-            // The bytes a cold shard's first inner chunk moved are the index
-            // and that one inner chunk, never the shard: that is the number a
-            // trace reads to tell a range read from a whole-object download.
+            // A cold shard's first read moves the index and one inner chunk,
+            // never the whole shard.
             assert_eq!(
                 first.timing.backend_bytes,
                 Some(layout.index_byte_len() as u32 + b"first".len() as u32),

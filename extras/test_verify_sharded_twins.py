@@ -65,7 +65,7 @@ def test_grid_coords_keep_only_the_axes_the_array_declares() -> None:
 
 
 def test_an_unsharded_key_costs_its_whole_object() -> None:
-    shape = check.read_shape(UNSHARDED, "twin", "0/0/0/0/0/0")
+    shape = check.read_cost(UNSHARDED, "twin", "0/0/0/0/0/0")
     assert shape is not None
     assert not shape.sharded
     assert shape.object_bytes == (UNSHARDED / "0" / "c" / "0" / "0" / "0").stat().st_size
@@ -78,7 +78,7 @@ def test_a_sharded_key_costs_its_index_entry_and_the_index() -> None:
     Key c=1, y=2, x=3 in 8-sample inner chunks lies in shard (1, 1, 1) at
     position 1 of its 2x2 inner grid.
     """
-    shape = check.read_shape(SHARDED, "twin", "0/0/1/0/2/3")
+    shape = check.read_cost(SHARDED, "twin", "0/0/1/0/2/3")
     assert shape is not None
     assert shape.sharded and shape.written
     assert shape.path == SHARDED / "0" / "c" / "1" / "1" / "1"
@@ -86,54 +86,50 @@ def test_a_sharded_key_costs_its_index_entry_and_the_index() -> None:
     twin_object = (UNSHARDED / "0" / "c" / "1" / "2" / "3").stat().st_size
     assert shape.inner_bytes == twin_object
     assert shape.position == 1 and len(shape.entries) == 4
-    # Alone, the key allows its own chunk, the index, or both.
     assert shape.allowed() == {
         TWIN_INDEX_BYTES: "index",
         twin_object: "inner-chunk",
         twin_object + TWIN_INDEX_BYTES: "index+inner-chunk",
     }
-    # With every position wanted, a run of neighbours is allowed too, and a
-    # run of all four plus the index is the shard's length: that is two
-    # requests the view asked for, not a shard downloaded for one chunk.
+    # With every position wanted, merged stretches are allowed too, and all
+    # four plus the index is the shard's length: a merged read of chunks the
+    # view asked for, not a shard downloaded for one.
     everything = shape.allowed(range(4))
     assert set(everything.values()) == {
         "index", "inner-chunk", "index+inner-chunk", "inner-chunks-merged", "index+inner-chunks-merged",
     }
     assert everything[shape.path.stat().st_size] == "index+inner-chunks-merged"
-    # Wanting the key alone, the shard's length is never an allowed size.
     assert shape.path.stat().st_size not in shape.allowed()
 
 
-def test_contiguous_runs_follow_byte_offsets_and_skip_absent_entries() -> None:
+def test_contiguous_stretches_follow_byte_offsets_and_skip_absent_entries() -> None:
     absent = check.ABSENT_ENTRY
     # Written in the order 0, 2, 1 with entry 3 absent: positions 0 and 2
     # are neighbours in the object, and position 1 comes after both.
     entries = [(0, 10), (30, 5), (10, 20), absent]
-    assert sorted(check.contiguous_runs_through(entries, 0)) == [(1, 10), (2, 30), (3, 35)]
-    assert sorted(check.contiguous_runs_through(entries, 2)) == [(1, 20), (2, 25), (2, 30), (3, 35)]
-    assert sorted(check.contiguous_runs_through(entries, 1)) == [(1, 5), (2, 25), (3, 35)]
-    assert check.contiguous_runs_through(entries, 3) == []
-    # A gap in the object ends a run.
+    assert sorted(check.contiguous_stretches_through(entries, 0)) == [(1, 10), (2, 30), (3, 35)]
+    assert sorted(check.contiguous_stretches_through(entries, 2)) == [(1, 20), (2, 25), (2, 30), (3, 35)]
+    assert sorted(check.contiguous_stretches_through(entries, 1)) == [(1, 5), (2, 25), (3, 35)]
+    assert check.contiguous_stretches_through(entries, 3) == []
     gapped = [(0, 10), (11, 5)]
-    assert check.contiguous_runs_through(gapped, 0) == [(1, 10)]
-    assert check.contiguous_runs_through(gapped, 1) == [(1, 5)]
-    # A neighbour the run never asked for is not part of any run.
-    assert sorted(check.contiguous_runs_through(entries, 0, {0, 1})) == [(1, 10)]
-    assert sorted(check.contiguous_runs_through(entries, 0, {0, 2})) == [(1, 10), (2, 30)]
+    assert check.contiguous_stretches_through(gapped, 0) == [(1, 10)]
+    assert check.contiguous_stretches_through(gapped, 1) == [(1, 5)]
+    assert sorted(check.contiguous_stretches_through(entries, 0, {0, 1})) == [(1, 10)]
+    assert sorted(check.contiguous_stretches_through(entries, 0, {0, 2})) == [(1, 10), (2, 30)]
 
 
 def test_an_absent_inner_chunk_and_a_missing_shard_cost_an_index_read_at_most() -> None:
-    absent = check.read_shape(SPARSE, "sparse", "0/0/0/0/0/1")
+    absent = check.read_cost(SPARSE, "sparse", "0/0/0/0/0/1")
     assert absent is not None and not absent.written
     assert absent.allowed() == {TWIN_INDEX_BYTES: "index"}
 
-    unwritten_level = check.read_shape(SPARSE, "sparse", "2/0/0/0/0/0")
+    unwritten_level = check.read_cost(SPARSE, "sparse", "2/0/0/0/0/0")
     assert unwritten_level is not None and not unwritten_level.written
     assert not unwritten_level.path.is_file()
 
 
 def test_a_level_the_store_does_not_hold_is_a_generated_level() -> None:
-    assert check.read_shape(SHARDED, "twin", "7/0/0/0/0/0") is None
+    assert check.read_cost(SHARDED, "twin", "7/0/0/0/0/0") is None
 
 
 def browser_row(rid: int, chunk_key: str, image_id: str = "twin", generation: int = 1) -> dict:
@@ -152,18 +148,22 @@ def server_row(
     generation: int = 1,
     family: str = "chunk",
     coalesced_onto: int | None = None,
+    permit_wait: bool = True,
 ) -> dict:
+    # A read that took a permit shows the wait, however short.
+    phases = {"permit-wait": 1, "backend-read": 5} if backend_bytes is not None and permit_wait else {}
     return {
         "rid": rid,
         "connectionGeneration": generation,
         "family": family,
         "backendBytes": backend_bytes,
         "coalescedOnto": coalesced_onto,
+        "phases": phases,
     }
 
 
 def test_audit_accepts_the_sizes_a_shard_read_can_produce_and_flags_the_rest() -> None:
-    inner = check.read_shape(SHARDED, "twin", "0/0/1/0/2/3")
+    inner = check.read_cost(SHARDED, "twin", "0/0/1/0/2/3")
     assert inner is not None and inner.inner_bytes is not None
     shard_bytes = inner.path.stat().st_size
     run = {
@@ -200,10 +200,32 @@ def test_audit_accepts_the_sizes_a_shard_read_can_produce_and_flags_the_rest() -
     assert audit.unlabelled == 1
     assert audit.largest_read == shard_bytes
     assert audit.smallest_shard == shard_bytes
+    assert audit.shards_wanted_whole == 0
     assert not audit.ok
     assert len(audit.violations) == 2
     assert f"read {shard_bytes} bytes" in audit.violations[0]
     assert "generated level" in audit.violations[1]
+
+
+def test_audit_requires_every_read_to_have_waited_on_the_chunk_read_cap() -> None:
+    size = (UNSHARDED / "0" / "c" / "0" / "0" / "0").stat().st_size
+    run = {
+        "rows": [browser_row(1, "0/0/0/0/0/0"), browser_row(2, "0/0/0/0/0/0")],
+        "serverRows": [server_row(1, size), server_row(2, size, permit_wait=False)],
+    }
+    audit = check.audit_reads(UNSHARDED, run)
+    assert audit.by_kind == {"object": 1}
+    assert len(audit.violations) == 1 and "chunk read cap" in audit.violations[0]
+
+
+def test_audit_counts_the_shards_the_run_wanted_whole() -> None:
+    """Shard (1, 1, 1) has four inner chunks; wanting all four is what the check refuses."""
+    keys = ["0/0/1/0/2/2", "0/0/1/0/2/3", "0/0/1/0/3/2", "0/0/1/0/3/3"]
+    rows = [browser_row(i, key) for i, key in enumerate(keys, start=1)]
+    whole = check.audit_reads(SHARDED, {"rows": rows, "serverRows": []})
+    assert whole.shards_wanted_whole == 1
+    part = check.audit_reads(SHARDED, {"rows": rows[:3], "serverRows": []})
+    assert part.shards_wanted_whole == 0
 
 
 def test_audit_accepts_a_merged_read_of_neighbours_and_nothing_between_sizes() -> None:
@@ -236,7 +258,7 @@ def test_audit_accepts_a_merged_read_of_neighbours_and_nothing_between_sizes() -
             # A cold shard: the leader read the index and then both chunks.
             server_row(10, merged + TWIN_INDEX_BYTES),
             server_row(11, None, coalesced_onto=10),
-            # A warm index, led from the other end of the run.
+            # A warm index, led by the other neighbour.
             server_row(20, merged),
             server_row(21, None, coalesced_onto=20),
             # Its inner chunk carried by a neighbour after it read the index.
@@ -249,12 +271,12 @@ def test_audit_accepts_a_merged_read_of_neighbours_and_nothing_between_sizes() -
     assert audit.range_reads == 2
     assert audit.no_read == 2
 
-    # A size between one chunk and two is no read the store makes.
+    # A size between one chunk and two is no read the server makes.
     run["serverRows"][2] = server_row(20, merged - 1)
     assert not check.audit_reads(SHARDED, run).ok
 
-    # A run the view did not ask for is not one either: with only the first
-    # key requested, the merged size is a violation.
+    # A stretch the view did not ask for is a violation too: with only the
+    # first key wanted, the merged size fails.
     alone = {"rows": [browser_row(40, key(first))], "serverRows": [server_row(40, merged)]}
     assert not check.audit_reads(SHARDED, alone).ok
 
@@ -284,18 +306,18 @@ def test_frames_must_be_identical_and_a_single_color_is_blank(tmp_path: Path) ->
     first = write_frame(tmp_path / "a.png", gradient)
     same = write_frame(tmp_path / "b.png", gradient)
     identical = check.compare_frames(first, same, tmp_path / "diff.png")
-    assert identical.matches and not identical.blank
+    assert identical.identical and not identical.blank
     assert identical.max_delta == 0 and identical.differing_fraction == 0.0
     assert (identical.width, identical.height) == (width, height)
     assert identical.colors == (10, 10)
     assert not (tmp_path / "diff.png").exists()
 
-    # One level in one channel of one pixel is a mismatch, and the report
-    # says how far off it was.
+    # One step in one channel of one pixel is a mismatch, and the report says
+    # how far off it was.
     nudged = gradient.copy()
     nudged[2, 2, 1] += 1
     nudge = check.compare_frames(first, write_frame(tmp_path / "n.png", nudged), tmp_path / "diff.png")
-    assert not nudge.matches and nudge.max_delta == 1
+    assert not nudge.identical and nudge.max_delta == 1
     assert nudge.differing_fraction == pytest.approx(0.01)
     diff = np.asarray(Image.open(tmp_path / "diff.png").convert("RGBA"))
     assert tuple(diff[2, 2]) == (255, 0, 255, 255)
@@ -307,14 +329,14 @@ def test_frames_must_be_identical_and_a_single_color_is_blank(tmp_path: Path) ->
     differing = check.compare_frames(first, other, tmp_path / "diff.png")
     assert differing.differing_fraction == pytest.approx(0.01)
     assert differing.max_delta == 255
-    assert not differing.matches
+    assert not differing.identical
 
     blank = write_frame(tmp_path / "blank.png", np.full((height, width, 4), (9, 9, 9, 255), dtype=np.uint8))
     assert check.compare_frames(blank, blank).blank
 
     smaller = write_frame(tmp_path / "small.png", gradient[:5, :5])
     mismatched = check.compare_frames(first, smaller)
-    assert mismatched.differing_fraction == 1.0 and not mismatched.matches
+    assert mismatched.differing_fraction == 1.0 and not mismatched.identical
 
 
 def test_the_run_file_yields_the_run_the_driver_waited_for(tmp_path: Path) -> None:
@@ -341,7 +363,7 @@ def test_twin_pairs_write_the_same_recipe_twice_and_refuse_a_coarse_pair_the_ser
     sharded = pyramid.sharded_args(tmp_path)
     assert unsharded[0].endswith("pyramid-unsharded.ome.zarr")
     assert sharded[0].endswith("pyramid-sharded.ome.zarr")
-    assert sharded[1:] == [*unsharded[1:-1], "--shard", "512", "--overwrite"]
+    assert sharded[1:] == [*unsharded[1:-1], "--shard", "1024", "--overwrite"]
 
     # One image, one level, and a source grid the server's own fill covers:
     # 768x2304 in 256-sample chunks is 3x9 = 27 chunks, under the limit of 32.
@@ -352,13 +374,32 @@ def test_twin_pairs_write_the_same_recipe_twice_and_refuse_a_coarse_pair_the_ser
     assert args[args.index("--chunk") + 1] == "256"
     assert args[args.index("--size") + 1] == "768,2304"
 
-    # A long axis the source would serve as the coarse tier generates nothing.
+    # A long axis the source can serve as the coarse tier generates nothing.
     with pytest.raises(SystemExit):
         check.twin_pairs(check.parse_args(["--coarse-size", "2048,2048"]))
-    # A grid the server's own fill cannot finish would stall on a static view.
+    # A grid the server's own fill cannot finish stalls on a static view.
     with pytest.raises(SystemExit):
         check.twin_pairs(check.parse_args(["--coarse-chunk", "64"]))
     check.twin_pairs(check.parse_args(["--coarse-size", "2304,2304", "--coarse-chunk", "512"]))
+
+
+def test_generated_tiers_are_matched_on_level_and_key_across_identities(tmp_path: Path) -> None:
+    cache = tmp_path / "cache"
+    for source, identity, dataset, payloads in (
+        ("aa", "generated-coarse-1", "wds-one", {"1_0_0_0_0_0": b"x", "1_0_0_0_0_1": b"y"}),
+        ("bb", "generated-coarse-2", "wds-two", {"1_0_0_0_0_0": b"x", "1_0_0_0_0_1": b"z"}),
+    ):
+        level = cache / source / identity / dataset / "L1"
+        level.mkdir(parents=True)
+        for key, payload in payloads.items():
+            (level / f"{key}.bin").write_bytes(payload)
+        (cache / source / identity / "manifest.json").write_text("{}")
+    one = check.generated_tier(cache, "wds-one")
+    two = check.generated_tier(cache, "wds-two")
+    assert set(one) == set(two) == {"L1/1_0_0_0_0_0.bin", "L1/1_0_0_0_0_1.bin"}
+    assert one["L1/1_0_0_0_0_0.bin"] == two["L1/1_0_0_0_0_0.bin"]
+    assert one["L1/1_0_0_0_0_1.bin"] != two["L1/1_0_0_0_0_1.bin"]
+    assert check.generated_tier(cache, "wds-none") == {}
 
 
 def test_ready_generated_chunks_sums_the_health_report_over_datasets() -> None:

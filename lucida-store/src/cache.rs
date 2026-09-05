@@ -339,8 +339,9 @@ pub struct SourceReadTiming {
     /// Set exactly when `backend_read_us` is, so a sum over the column is
     /// the bytes the backend moved and a follower adds nothing to it. It is
     /// the length of what was asked for: a whole object, one range of it, or
-    /// every range a merged request carried, which is how a trace tells a
-    /// shard read by the inner chunk from a shard downloaded whole.
+    /// every range a merged read carried, which is how a trace tells a shard
+    /// read by the inner chunk from a shard downloaded whole. Clamped to
+    /// [`BACKEND_BYTES_MAX`] so the value can never be the unset sentinel.
     pub backend_bytes: Option<u32>,
     /// Parked on another caller's in-flight read of the same object.
     pub coalesced_wait_us: Option<u32>,
@@ -1470,10 +1471,14 @@ fn trace_permit_acquired(reader: ReaderId, label: RequestLabel, wait: std::time:
     );
 }
 
+/// The largest byte count a row reports. `u32::MAX` is the browser's
+/// "no read" sentinel in its per-row column, as it is for a phase duration,
+/// so a read is clamped one below it.
+pub const BACKEND_BYTES_MAX: u32 = u32::MAX - 1;
+
 /// The two timed stretches of a read that took a permit: queued behind the
-/// cap, then the round trip. `bytes_moved` is what the round trip returned:
-/// the object, the range, or every range a merged request carried. A failed
-/// round trip moved nothing, and still was one.
+/// cap, then the round trip. A failed round trip moved nothing and still was
+/// one, so it reports zero bytes rather than no read.
 fn permit_and_read(
     permit_wait: std::time::Duration,
     elapsed: std::time::Duration,
@@ -1482,7 +1487,11 @@ fn permit_and_read(
     SourceReadTiming {
         permit_wait_us: Some(micros(permit_wait)),
         backend_read_us: Some(micros(elapsed.saturating_sub(permit_wait))),
-        backend_bytes: Some(u32::try_from(bytes_moved).unwrap_or(u32::MAX)),
+        backend_bytes: Some(
+            u32::try_from(bytes_moved)
+                .unwrap_or(BACKEND_BYTES_MAX)
+                .min(BACKEND_BYTES_MAX),
+        ),
         ..SourceReadTiming::default()
     }
 }
@@ -1764,7 +1773,7 @@ mod tests {
 
         // The follower owns only its wait, and it is diagnosed as waiting on
         // an in-flight read rather than as a slow backend. The bytes are the
-        // leader's too: a sum over the column counts each byte moved once.
+        // leader's too.
         assert_eq!(follower.timing.permit_wait_us, None);
         assert_eq!(follower.timing.backend_read_us, None);
         assert_eq!(follower.timing.backend_bytes, None);
@@ -2446,9 +2455,6 @@ mod tests {
         assert!(stats.source_read_millis >= 20);
     }
 
-    /// Two reads that answer one request report their bytes as one sum, in
-    /// the same way as their durations, and a stretch neither read had stays
-    /// unset rather than becoming a zero-byte read.
     #[test]
     fn followed_by_sums_the_bytes_of_two_reads_and_leaves_none_unset() {
         let index = SourceReadTiming {
@@ -2478,7 +2484,7 @@ mod tests {
 
     // --- Range reads ---
     //
-    // These pin the contract the shard reader (#990) builds on.
+    // These pin the contract the shard resolver (#990) builds on.
 
     #[tokio::test]
     async fn a_range_read_returns_exactly_the_requested_bytes() {
@@ -2490,9 +2496,7 @@ mod tests {
 
         let path = Path::from("object");
         let first = cached.get_range(&path, 4..10, READER, LABEL).await;
-        // The row reports the range's length, not the object's: that is
-        // what lets a trace say a shard was read by the inner chunk and not
-        // whole.
+        // The range's length, not the object's.
         assert_eq!(first.timing.backend_bytes, Some(6));
         let first = first.result.unwrap();
         assert_eq!(&first[..], b"456789");
@@ -3052,9 +3056,7 @@ mod tests {
         assert_eq!(leader.timing.coalesced_wait_us, None);
         assert_eq!(leader.timing.coalesced_onto, None);
 
-        // The leader's row carries every byte the merged request moved, so
-        // a trace reads four inner chunks off one row and nothing off the
-        // three it carried: the column still sums to the bytes moved.
+        // Every byte the merged read moved is on the leader's row.
         assert_eq!(leader.timing.backend_bytes, Some(16));
 
         for (label, carried) in reads.iter().filter(|(label, _)| label != leader_label) {

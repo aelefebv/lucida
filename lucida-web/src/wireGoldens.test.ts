@@ -1333,7 +1333,6 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
         decompress_us: [4512, PHASE_UNSET, PHASE_UNSET],
         slice_encode_us: [903, PHASE_UNSET, PHASE_UNSET],
         handoff_us: [61, 55, PHASE_UNSET],
-        // Only the row that led a round trip says what it moved.
         backend_bytes: [131072, null, null],
         coalesced_onto: [LABEL_NONE, LABEL_NONE, LABEL_NONE],
       },
