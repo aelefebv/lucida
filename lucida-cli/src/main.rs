@@ -1234,6 +1234,10 @@ struct TraceRunArgs {
     /// screen. Pinning to 0 is the level-0 default ADR 0061 replaced
     #[arg(long, value_name = "LEVEL")]
     level_pin: Option<u32>,
+    /// Keep the dataset's contrast window at its default instead of fitting it
+    /// to the data as it arrives, so frames of two runs can be compared
+    #[arg(long)]
+    pin_contrast: bool,
     /// Seconds to wait for the page to load and settle
     #[arg(long, default_value_t = 120)]
     timeout_seconds: u64,
@@ -3713,7 +3717,13 @@ async fn run_trace(
         warmth.note_driver_open();
     }
 
-    let mut view = trace::compose_dataset_view(&dataset_url, args.width, args.height);
+    let pin_contrast_for = if args.pin_contrast {
+        dataset_id.as_ref()
+    } else {
+        None
+    };
+    let mut view =
+        trace::compose_dataset_view(&dataset_url, args.width, args.height, pin_contrast_for);
     let pins = trace::DisplayPins {
         contrast: args
             .contrast
@@ -5711,6 +5721,7 @@ mod tests {
             "max-intensity",
             "--level-pin",
             "0",
+            "--pin-contrast",
         ]);
         match gated.command {
             Command::Trace { run, .. } => {
@@ -5729,6 +5740,8 @@ mod tests {
                     Some(RenderModeValue::MaxIntensity)
                 ));
                 assert_eq!(run.level_pin, Some(0));
+                assert_eq!(run.screenshot.as_deref(), Some(Path::new("/tmp/r.png")));
+                assert!(run.pin_contrast);
             }
             _ => panic!("expected a trace run"),
         }

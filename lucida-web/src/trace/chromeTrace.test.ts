@@ -315,6 +315,7 @@ describe("the Chrome Trace Event projection", () => {
               metadataPhase: null,
               dispatchOffsetUs: 0,
               durationUs: 0,
+              backendBytes: 131_072,
               placement: { startUs: 2_000, endUs: 2_900, gapUs: 2_100, overshootUs: 0 },
               unplacedReason: null,
             },
@@ -326,7 +327,7 @@ describe("the Chrome Trace Event projection", () => {
     const serve = events.filter(e => e.pid === PID_SERVER && e.ph === "X");
     expect(serve).toHaveLength(1);
     expect(serve[0]).toMatchObject({ ts: 2_000, dur: 900, tid: 10 });
-    expect(serve[0].args).toMatchObject({ rid: 3, gapUs: 2_100 });
+    expect(serve[0].args).toMatchObject({ rid: 3, gapUs: 2_100, backendBytes: 131_072 });
   });
 
   it("counts an unplaced server row in the header instead of inventing a position", () => {
@@ -340,6 +341,7 @@ describe("the Chrome Trace Event projection", () => {
             outcome: "not-ready",
             phases: { arrival: 10, handoff: 20 },
             coalescedOnto: null,
+            backendBytes: null,
             requestId: null,
             metadataPhase: null,
             dispatchOffsetUs: 0,

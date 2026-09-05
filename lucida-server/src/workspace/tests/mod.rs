@@ -36,6 +36,7 @@ use super::*;
 mod access;
 mod datasets;
 mod duplicate;
+mod profile_directory;
 mod saved_views;
 
 pub fn principal(email: &str, is_admin: bool) -> AuthPrincipal {

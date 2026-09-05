@@ -412,6 +412,7 @@ describe("TraceRecorder server rows", () => {
     decompress_us: [PHASE_UNSET],
     slice_encode_us: [PHASE_UNSET],
     handoff_us: [PHASE_UNSET],
+    backend_bytes: [65_536],
     coalesced_onto: [LABEL_NONE],
   };
 
@@ -691,6 +692,7 @@ describe("TraceRecorder dataset opens", () => {
       decompress_us: [PHASE_UNSET],
       slice_encode_us: [PHASE_UNSET],
       handoff_us: [PHASE_UNSET],
+      backend_bytes: [null],
       coalesced_onto: [LABEL_NONE],
     };
   }

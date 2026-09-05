@@ -869,10 +869,22 @@ mod tests {
             assert_eq!(gets(), 2, "{location:?}: the index and the inner chunk");
             assert!(first.timing.backend_read_us.is_some());
             assert!(first.timing.permit_wait_us.is_some());
+            // A cold shard's first read moves the index and one inner chunk,
+            // never the whole shard.
+            assert_eq!(
+                first.timing.backend_bytes,
+                Some(layout.index_byte_len() as u32 + b"first".len() as u32),
+                "{location:?}"
+            );
 
             let second = read_position(&shards, &cached, &layout, 1).await;
             assert_eq!(&second.result.unwrap()[..], b"second", "{location:?}");
             assert_eq!(gets(), 3, "{location:?}: one range read, no index");
+            assert_eq!(
+                second.timing.backend_bytes,
+                Some(b"second".len() as u32),
+                "{location:?}: a warm index costs no bytes"
+            );
 
             let absent = read_position(&shards, &cached, &layout, 2).await;
             assert!(matches!(

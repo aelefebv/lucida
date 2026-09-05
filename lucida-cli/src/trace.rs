@@ -273,8 +273,8 @@ pub struct TraceRunHeader {
     pub server_warmth: ServerWarmth,
     pub server_url: String,
     pub workspace_id: String,
-    /// The settled frame, when the caller asked for one: a PNG of the page at
-    /// the composed view's device pixel ratio, taken after the wait and
+    /// The settled frame, when the caller asked for one: a PNG of the page
+    /// at the composed view's device pixel ratio, taken after the wait and
     /// before the export. A run that never settled still gets its frame,
     /// because what the page showed at the deadline is part of the finding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -348,9 +348,23 @@ pub enum ShowDepth {
 /// reproducible from the command that produced it. The camera is left at the
 /// default so the page's own fit-on-open decides the framing, exactly as it
 /// would for a person opening the same URL.
-pub fn compose_dataset_view(dataset_url: &str, width: u32, height: u32) -> SavedView {
+///
+/// `pin_contrast_for` names the dataset whose contrast window is to stay at
+/// its default rather than being fitted to the data as it arrives. The fit
+/// samples whatever is resident when it runs, so two runs of one dataset can
+/// draw the same data a level apart; a frame that is to be compared with
+/// another run's needs the window pinned.
+pub fn compose_dataset_view(
+    dataset_url: &str,
+    width: u32,
+    height: u32,
+    pin_contrast_for: Option<&DatasetId>,
+) -> SavedView {
     let mut view = SavedView::empty([width, height]);
     view.datasets = vec![normalize_dataset_url(dataset_url)];
+    if let Some(dataset_id) = pin_contrast_for {
+        view.auto_contrast.insert(dataset_id.clone(), false);
+    }
     view
 }
 
@@ -361,17 +375,7 @@ pub fn dataset_id_for_source(
     dataset_url: &str,
     health: &[DatasetSourceHealth],
 ) -> Option<DatasetId> {
-    let canonical = normalize_dataset_url(dataset_url);
-    health
-        .iter()
-        .find(|dataset| {
-            dataset
-                .source_url
-                .as_deref()
-                .map(|url| normalize_dataset_url(url) == canonical)
-                .unwrap_or(false)
-        })
-        .map(|dataset| dataset.workspace_dataset_id.clone())
+    health_entry_for(dataset_url, health).map(|dataset| dataset.workspace_dataset_id.clone())
 }
 
 /// The workspace's document, read off the connect handshake. The driver
@@ -638,19 +642,24 @@ fn realize_volume_zoom(
     Ok(())
 }
 
-/// Read the server's warmth for `dataset_url` out of a health snapshot taken
-/// before the run.
-pub fn summarise_server_warmth(dataset_url: &str, health: &[DatasetSourceHealth]) -> ServerWarmth {
+fn health_entry_for<'a>(
+    dataset_url: &str,
+    health: &'a [DatasetSourceHealth],
+) -> Option<&'a DatasetSourceHealth> {
     let canonical = normalize_dataset_url(dataset_url);
-    let entry = health.iter().find(|dataset| {
+    health.iter().find(|dataset| {
         dataset
             .source_url
             .as_deref()
             .map(|url| normalize_dataset_url(url) == canonical)
             .unwrap_or(false)
-    });
+    })
+}
 
-    match entry {
+/// Read the server's warmth for `dataset_url` out of a health snapshot taken
+/// before the run.
+pub fn summarise_server_warmth(dataset_url: &str, health: &[DatasetSourceHealth]) -> ServerWarmth {
+    match health_entry_for(dataset_url, health) {
         None => ServerWarmth {
             dataset_open_before_run: false,
             opened_by_driver: false,
@@ -893,10 +902,9 @@ pub async fn drive_run(
 /// teardown live here once. Readiness is observed rather than demanded: a page
 /// that never draws is a run this command still has to report.
 ///
-/// `screenshot` is where to write the frame the page shows once the wait is
-/// over, at the viewport's device pixel ratio. It is taken before the export
-/// because the export closes the run, and the frame is the run's own last
-/// state, not something that happened after it.
+/// `screenshot` is where to write the page's frame after the wait, at the
+/// viewport's device pixel ratio. It is taken before the export because the
+/// export closes the run: the frame is the run's last state.
 async fn drive_and_export(
     url: &str,
     token: Option<&EffectiveToken>,
@@ -1346,10 +1354,39 @@ mod tests {
     /// canonical form, at the run's viewport, and no camera of its own.
     #[test]
     fn the_composed_view_carries_the_canonical_dataset_and_nothing_else() {
-        let view = compose_dataset_view("GS://Bucket/set.zarr", 1440, 900);
+        let view = compose_dataset_view("GS://Bucket/set.zarr", 1440, 900, None);
         assert_eq!(view.datasets, vec!["gs://Bucket/set.zarr".to_string()]);
         assert!(view.dataset_order.is_empty());
         assert!(view.active_layouts.is_empty());
+        assert!(view.auto_contrast.is_empty());
+    }
+
+    #[test]
+    fn the_composed_view_pins_the_contrast_window_only_when_asked() {
+        let id = DatasetId("wds-1".to_string());
+        let view = compose_dataset_view("gs://bucket/set.zarr", 1440, 900, Some(&id));
+        assert_eq!(view.auto_contrast.get(&id), Some(&false));
+        assert_eq!(view.auto_contrast.len(), 1);
+        assert_eq!(
+            view.dataset_settings.len(),
+            0,
+            "the window itself stays the default"
+        );
+    }
+
+    /// The pin is keyed on the workspace's dataset id, which only the health
+    /// snapshot or the driver's own open knows.
+    #[test]
+    fn the_dataset_id_comes_from_the_health_entry_for_the_canonical_url() {
+        let health = vec![health_entry("gs://bucket/set.zarr", None)];
+        assert_eq!(
+            dataset_id_for_source("GS://bucket/set.zarr", &health),
+            Some(DatasetId("ds".to_string()))
+        );
+        assert_eq!(
+            dataset_id_for_source("gs://bucket/other.zarr", &health),
+            None
+        );
     }
 
     /// A browser-cold open can run against an arbitrarily warm server, so the
@@ -1497,6 +1534,39 @@ mod tests {
         assert!(!file.header.settled);
         assert_eq!(file.header.quiescence_hold_ms, 500.0);
         assert!(gate_failure(&file).is_some());
+    }
+
+    /// A run driven without a frame carries no `screenshot` key at all, rather
+    /// than a null a reader has to tell from "not written".
+    #[test]
+    fn the_header_names_the_screenshot_the_driver_wrote_and_omits_it_otherwise() {
+        let export = || -> SeamExport {
+            serde_json::from_str(
+                &json!({ "schemaVersion": 1, "runId": "run-3-1", "quiescenceHoldMs": 500,
+                         "endReason": "quiescent", "diagnostic": null, "summary": "ok",
+                         "phases": "ok", "trace": { "runs": [] } })
+                .to_string(),
+            )
+            .unwrap()
+        };
+
+        let with_frame = DriverFacts {
+            screenshot: Some(PathBuf::from("/tmp/twins/sharded.png")),
+            ..facts()
+        };
+        let file = assemble_run_file(export(), &with_frame);
+        assert_eq!(
+            file.header.screenshot.as_deref(),
+            Some(Path::new("/tmp/twins/sharded.png"))
+        );
+        let json = serde_json::to_value(&file).unwrap();
+        assert_eq!(json["header"]["screenshot"], "/tmp/twins/sharded.png");
+        assert!(format_run_human(&file, Path::new("run.json")).contains("/tmp/twins/sharded.png"));
+
+        let without = assemble_run_file(export(), &facts());
+        assert_eq!(without.header.screenshot, None);
+        let json = serde_json::to_value(&without).unwrap();
+        assert!(json["header"].get("screenshot").is_none());
     }
 
     /// A page that recorded no run is a result, not a crash.
@@ -1806,7 +1876,7 @@ mod tests {
     #[test]
     fn pinning_the_contrast_window_turns_auto_contrast_off_and_writes_every_channel() {
         let id = volume_id();
-        let mut view = compose_dataset_view("gs://bucket/set.zarr", 1440, 900);
+        let mut view = compose_dataset_view("gs://bucket/set.zarr", 1440, 900, None);
         pin_display(
             &mut view,
             &id,
@@ -1833,7 +1903,7 @@ mod tests {
     #[test]
     fn a_colormap_and_a_render_mode_pin_without_touching_the_window() {
         let id = volume_id();
-        let mut view = compose_dataset_view("gs://bucket/set.zarr", 1440, 900);
+        let mut view = compose_dataset_view("gs://bucket/set.zarr", 1440, 900, None);
         pin_display(
             &mut view,
             &id,
@@ -1868,7 +1938,7 @@ mod tests {
 
     #[test]
     fn empty_pins_leave_the_view_alone() {
-        let mut view = compose_dataset_view("gs://bucket/set.zarr", 1440, 900);
+        let mut view = compose_dataset_view("gs://bucket/set.zarr", 1440, 900, None);
         pin_display(&mut view, &volume_id(), 1, DisplayPins::default());
         assert!(view.dataset_settings.is_empty());
         assert!(view.auto_contrast.is_empty());
@@ -1880,7 +1950,7 @@ mod tests {
     fn a_level_pin_rides_the_view_and_level_0_is_one_of_them() {
         let id = volume_id();
         for level in [0, 2] {
-            let mut view = compose_dataset_view("gs://bucket/set.zarr", 1440, 900);
+            let mut view = compose_dataset_view("gs://bucket/set.zarr", 1440, 900, None);
             pin_display(
                 &mut view,
                 &id,
@@ -1895,21 +1965,6 @@ mod tests {
                 Some(level)
             );
         }
-    }
-
-    /// The pins and the camera key on the workspace's id for the dataset,
-    /// which only the health snapshot (or the open the driver just did) knows.
-    #[test]
-    fn the_dataset_id_comes_from_the_health_entry_for_the_canonical_url() {
-        let health = vec![health_entry("gs://bucket/set.zarr", None)];
-        assert_eq!(
-            dataset_id_for_source("GS://bucket/set.zarr", &health),
-            Some(DatasetId("ds".to_string()))
-        );
-        assert_eq!(
-            dataset_id_for_source("gs://bucket/other.zarr", &health),
-            None
-        );
     }
 
     /// The frame and the composed camera are the driver's facts, so the header
