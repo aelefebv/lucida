@@ -112,6 +112,17 @@ class RunSummary:
     read_span_seconds: float
     reads_per_second: float
     megabytes_per_second: float
+    # The server's own count of backend reads during the run, from its
+    # source cache statistics before and after. The trace's server rows are
+    # capped per run, so on a wide collection this is the whole figure and
+    # the rows are a sample.
+    server_reads: int | None
+    server_read_seconds: float | None
+    # Resident bytes on the GPU, sampled by the run's readings: the plateau
+    # they reach and when they first reach it. A plateau at a residency
+    # budget is a page that stopped growing, not one that finished.
+    resident_plateau_megabytes: float
+    resident_plateau_seconds: float
     desired_detail_at_end: int | None
     resident_detail_at_end: int | None
     desired_coarse_at_end: int | None
@@ -155,11 +166,33 @@ def fmt_range(value: tuple[int, int] | None) -> str:
     return str(value[0]) if value[0] == value[1] else f"{value[0]}..{value[1]}"
 
 
-def summarise(run_file: Path, screenshot: Path, round_index: int, mode: str, open_seconds: float) -> RunSummary:
+def summarise(
+    run_file: Path,
+    screenshot: Path,
+    round_index: int,
+    mode: str,
+    open_seconds: float,
+    server_before: dict | None = None,
+    server_after: dict | None = None,
+) -> RunSummary:
     doc = json.loads(run_file.read_text())
     run = run_in_document(run_file)
     reading = read_levels(run)
     header = run["header"]
+
+    server_reads = None
+    server_read_seconds = None
+    if server_before and server_after:
+        server_reads = int(server_after.get("source_reads", 0)) - int(server_before.get("source_reads", 0))
+        millis = int(server_after.get("source_read_millis", 0)) - int(server_before.get("source_read_millis", 0))
+        server_read_seconds = round(millis / 1e3, 1)
+
+    readings = run.get("readings", [])
+    plateau_bytes = max((int(sample.get("residentBytes", 0)) for sample in readings), default=0)
+    plateau_us = next(
+        (int(sample["atUs"]) for sample in readings if int(sample.get("residentBytes", 0)) >= plateau_bytes * 0.999),
+        0,
+    )
 
     target = reading.target
     detail_per_rebuild = 0
@@ -231,6 +264,10 @@ def summarise(run_file: Path, screenshot: Path, round_index: int, mode: str, ope
         read_span_seconds=round(span, 2),
         reads_per_second=round(reads / span, 1) if span > 0 else 0.0,
         megabytes_per_second=round(total_bytes / span / 1e6, 2) if span > 0 else 0.0,
+        server_reads=server_reads,
+        server_read_seconds=server_read_seconds,
+        resident_plateau_megabytes=round(plateau_bytes / 1e6, 1),
+        resident_plateau_seconds=round(plateau_us / 1e6, 2),
         desired_detail_at_end=outstanding.get("desiredDetailChunks"),
         resident_detail_at_end=outstanding.get("residentDetailChunks"),
         desired_coarse_at_end=outstanding.get("desiredCoarseChunks"),
@@ -264,6 +301,7 @@ def drive(
         started = time.monotonic()
         lucida.call("--workspace", workspace_id, "dataset", "open", dataset, timeout=1800.0)
         open_seconds = time.monotonic() - started
+        server_before = source_cache(lucida, workspace_id, dataset)
 
         lucida.call(
             "--workspace",
@@ -287,15 +325,26 @@ def drive(
             str(timeout_seconds),
             timeout=timeout_seconds + 600,
         )
-    return summarise(run_file, screenshot, round_index, mode, open_seconds)
+        server_after = source_cache(lucida, workspace_id, dataset)
+    return summarise(run_file, screenshot, round_index, mode, open_seconds, server_before, server_after)
+
+
+def source_cache(lucida: Lucida, workspace_id: str, dataset: str) -> dict | None:
+    """The server's source cache statistics for ``dataset``, or None when it has none."""
+    payload = lucida.call("--workspace", workspace_id, "dataset", "health", timeout=60.0)
+    entries = payload.get("datasets") or []
+    match = next((entry for entry in entries if entry.get("source_url") == dataset), None) or (
+        entries[0] if entries else None
+    )
+    return None if match is None else match.get("source_cache")
 
 
 def table(runs: Sequence[RunSummary]) -> str:
     head = (
         "| round | mode | open s | settled | run s | target | detail per rebuild | coarse per rebuild | "
-        "detail filled s | detail resident at end | coarse resident at end | backend reads | MB read | "
-        "reads/s | MB/s |\n"
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+        "detail resident at end | coarse resident at end | resident plateau | server reads | "
+        "traced reads | traced MB | reads/s | MB/s |\n"
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
     )
     lines = [head]
     for run in runs:
@@ -304,15 +353,15 @@ def table(runs: Sequence[RunSummary]) -> str:
             continue
         settled = "yes" if run.settled else f"no ({run.end_reason})"
         target = run.target_level + (" (pin)" if run.level_pinned else "")
-        filled = "not all" if run.detail_filled_seconds is None else str(run.detail_filled_seconds)
-        if run.rows_truncated:
-            filled += " (rows truncated)"
         detail_resident = f"{run.resident_detail_at_end} of {run.desired_detail_at_end}"
         coarse_resident = f"{run.resident_coarse_at_end} of {run.desired_coarse_at_end}"
+        plateau = f"{run.resident_plateau_megabytes} MB at {run.resident_plateau_seconds} s"
+        server_reads = "unknown" if run.server_reads is None else str(run.server_reads)
+        traced = str(run.backend_reads) + (" (capped)" if run.rows_truncated else "")
         lines.append(
             f"| {run.round} | {run.mode} | {run.open_seconds} | {settled} | {run.duration_seconds} | {target} | "
-            f"{run.detail_per_rebuild} | {run.coarse_per_rebuild} | {filled} | {detail_resident} | "
-            f"{coarse_resident} | {run.backend_reads} | {run.backend_bytes / 1e6:.1f} | "
+            f"{run.detail_per_rebuild} | {run.coarse_per_rebuild} | {detail_resident} | {coarse_resident} | "
+            f"{plateau} | {server_reads} | {traced} | {run.backend_bytes / 1e6:.1f} | "
             f"{run.reads_per_second} | {run.megabytes_per_second} |"
         )
     return "\n".join(lines)
@@ -406,6 +455,10 @@ def main(argv: list[str] | None = None) -> int:
                     read_span_seconds=0.0,
                     reads_per_second=0.0,
                     megabytes_per_second=0.0,
+                    server_reads=None,
+                    server_read_seconds=None,
+                    resident_plateau_megabytes=0.0,
+                    resident_plateau_seconds=0.0,
                     desired_detail_at_end=None,
                     resident_detail_at_end=None,
                     desired_coarse_at_end=None,
