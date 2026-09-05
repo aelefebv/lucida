@@ -382,6 +382,7 @@ def main(argv: list[str] | None = None) -> int:
                     opts.timeout_seconds,
                 )
             except Exception as error:  # noqa: BLE001 - one failed run must not end the round
+                (opts.out / f"round-{round_index}-{mode}" / "error.txt").write_text(str(error))
                 run = RunSummary(
                     round=round_index,
                     mode=mode,

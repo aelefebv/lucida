@@ -25,7 +25,7 @@ gcloud auth application-default login
 uv run docs/research/level-chain-harness/lc_run.py /tmp/lc/remote gs://BUCKET/PATH.zarr --rounds 2
 
 # 4. a local twin of the same per-tile geometry, when the remote dataset is out of reach
-uv run extras/synthetic_ome_zarr.py /tmp/twin.ome.zarr --tiles 21371 --size 3,256,256 --levels 2 --factor 1,8,8 --chunk 3,256,256
+uv run extras/synthetic_ome_zarr.py /tmp/twin.ome.zarr --tiles 21371 --size 3,256,256 --levels 2 --factor 1,8,8 --chunk 3,256,256 --chunk 3,32,32
 uv run docs/research/level-chain-harness/lc_run.py /tmp/lc/twin /tmp/twin.ome.zarr --rounds 2
 ```
 

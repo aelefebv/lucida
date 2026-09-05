@@ -84,10 +84,16 @@ const RUN_EXPORT_EXPRESSION: &str = r#"(() => {
     (runs.length > 0 ? runs[runs.length - 1] : null);
   const runId = run ? run.header.runId : null;
   const diagnostic = runId ? seam.diagnose(runId) : null;
+  // A page that the workload has run out of memory can still hand over the
+  // document and the diagnostic while a text rendering fails to allocate.
+  // The document is the finding; a rendering that failed says so in its place.
+  const render = (make) => {
+    try { return make(); } catch (error) { return 'rendering failed: ' + String(error); }
+  };
   const perPhase = {};
   if (runId && diagnostic) {
     for (const phase of diagnostic.phases || []) {
-      perPhase[phase.id] = seam.diagnoseText(runId, { depth: 'phase', phase: phase.id });
+      perPhase[phase.id] = render(() => seam.diagnoseText(runId, { depth: 'phase', phase: phase.id }));
     }
   }
   return JSON.stringify({
@@ -96,8 +102,8 @@ const RUN_EXPORT_EXPRESSION: &str = r#"(() => {
     quiescenceHoldMs: seam.quiescenceHoldMs,
     endReason: run ? run.header.endReason : null,
     diagnostic,
-    summary: runId ? seam.diagnoseText(runId) : null,
-    phases: runId ? seam.diagnoseText(runId, { depth: 'phases' }) : null,
+    summary: runId ? render(() => seam.diagnoseText(runId)) : null,
+    phases: runId ? render(() => seam.diagnoseText(runId, { depth: 'phases' })) : null,
     perPhase,
     trace
   });
@@ -928,7 +934,7 @@ async fn drive_and_export(
         value.as_str().map(str::to_string).ok_or_else(|| {
             CliError::new(
                 ErrorKind::Protocol,
-                "the page did not return a trace; window.lucidaTrace was missing or threw",
+                "the page did not return a trace; window.lucidaTrace was missing",
             )
         })
     })

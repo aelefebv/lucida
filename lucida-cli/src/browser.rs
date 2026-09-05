@@ -390,7 +390,8 @@ impl Page {
     /// carried no value at all. The distinction matters to the readiness
     /// probes: an expression that evaluates to null is a page that has not
     /// answered yet and is worth re-polling, while a reply with no value is a
-    /// broken evaluation.
+    /// broken evaluation. An expression that threw is an error naming what
+    /// it threw, because a reply with no value would read as "not yet".
     async fn evaluate_value(
         &mut self,
         expression: &str,
@@ -403,6 +404,12 @@ impl Page {
                 wait,
             )
             .await?;
+        if let Some(details) = evaluated.get("exceptionDetails") {
+            return Err(CliError::new(
+                ErrorKind::Protocol,
+                format!("the page threw: {}", describe_exception(details)),
+            ));
+        }
         Ok(evaluated
             .get("result")
             .and_then(|value| value.get("value"))
@@ -696,9 +703,43 @@ fn ensure_png_signature(bytes: &[u8]) -> Result<(), CliError> {
     ))
 }
 
+/// The one line a CDP `exceptionDetails` object has to say: the thrown
+/// value's description when there is one, then the protocol's own text.
+fn describe_exception(details: &Value) -> String {
+    details
+        .get("exception")
+        .and_then(|exception| exception.get("description"))
+        .and_then(Value::as_str)
+        .or_else(|| details.get("text").and_then(Value::as_str))
+        .map(|text| text.lines().next().unwrap_or(text).to_string())
+        .unwrap_or_else(|| "an exception with no description".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_exception_is_described_by_its_first_line_or_the_protocols_text() {
+        let thrown = json!({
+            "text": "Uncaught",
+            "exception": {
+                "description": "RangeError: Array buffer allocation failed\n    at f (index.js:1:2)"
+            }
+        });
+        assert_eq!(
+            describe_exception(&thrown),
+            "RangeError: Array buffer allocation failed"
+        );
+        assert_eq!(
+            describe_exception(&json!({ "text": "Uncaught" })),
+            "Uncaught"
+        );
+        assert_eq!(
+            describe_exception(&json!({})),
+            "an exception with no description"
+        );
+    }
 
     #[test]
     fn launch_args_carry_the_viewport_and_profile_directory() {

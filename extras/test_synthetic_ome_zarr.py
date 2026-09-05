@@ -359,7 +359,7 @@ def test_parse_args_reads_every_option() -> None:
     assert opts.timepoints == 4
     assert opts.levels == 4
     assert opts.factors == ((1, 2, 2), (3, 3, 3))
-    assert opts.chunk == (4, 4, 4)
+    assert opts.chunks == ((4, 4, 4),)
     assert opts.shard == (8, 8, 8)
     assert opts.sparse is True
     assert opts.unwritten_levels == (1, 3)
@@ -376,7 +376,7 @@ def test_parse_args_defaults_describe_a_single_unsharded_image() -> None:
     assert opts.timepoints == 1
     assert opts.levels == 3
     assert opts.factors == ((2, 2),)
-    assert opts.chunk == (64, 64)
+    assert opts.chunks == ((64, 64),)
     assert opts.shard is None
     assert opts.sparse is False
     assert opts.unwritten_levels == ()
@@ -390,6 +390,7 @@ def test_parse_args_defaults_describe_a_single_unsharded_image() -> None:
         ["out.zarr", "--size", "2,3,4,5"],
         ["out.zarr", "--factor", "2,2,2"],
         ["out.zarr", "--chunk", "8", "--shard", "12"],
+        ["out.zarr", "--chunk", "8", "--chunk", "12", "--shard", "16"],
         ["out.zarr", "--chunk", "8,8", "--shard", "16,16,16"],
         ["out.zarr", "--levels", "2", "--unwritten-level", "2"],
         ["out.zarr", "--unwritten-level", "0"],
@@ -402,6 +403,7 @@ def test_parse_args_defaults_describe_a_single_unsharded_image() -> None:
         "size-too-many",
         "factor-arity",
         "shard-not-multiple",
+        "shard-not-multiple-of-a-later-chunk",
         "shard-arity",
         "unwritten-out-of-range",
         "unwritten-level-zero",
@@ -423,6 +425,19 @@ def test_main_refuses_to_overwrite_unless_asked(tmp_path: Path) -> None:
         gen.main(args)
     assert gen.main([*args, "--overwrite"]) == 0
     assert (out / "0" / "zarr.json").is_file()
+
+
+def test_each_level_takes_its_own_chunk_shape_and_the_last_repeats(tmp_path: Path) -> None:
+    """A pyramid whose coarser levels are one chunk each, as a wide collection's tiles are."""
+    out = generate(
+        tmp_path, "per-level.ome.zarr", "--size", "64,64", "--levels", "3", "--chunk", "16,16", "--chunk", "8", "--seed", "3"
+    )
+    declared = [json.loads((out / str(level) / "zarr.json").read_text())["chunk_grid"]["configuration"]["chunk_shape"] for level in range(3)]
+    assert declared == [[16, 16], [8, 8], [8, 8]]
+    # The chunk shape is layout, and layout never changes the samples.
+    flat = generate(tmp_path, "one-chunk.ome.zarr", "--size", "64,64", "--levels", "3", "--chunk", "16", "--seed", "3")
+    for level in range(3):
+        np.testing.assert_array_equal(level_array(out, level), level_array(flat, level))
 
 
 def test_chunk_grid_covers_partial_edges(tmp_path: Path) -> None:

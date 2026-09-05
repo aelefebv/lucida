@@ -14,11 +14,11 @@ uv run extras/synthetic_ome_zarr.py OUT.ome.zarr [options]
 
 Options choose a single image or a collection of N tiles, a 2D or 3D size,
 channel and timepoint counts, the number of levels, the scale factor per
-level, the chunk shape, the shard shape, a sparse pyramid, unwritten levels,
-and the level-index picture. A factor is one value, per-axis values such as
-`1,2,2`, or a different factor for each level. `uv run
-extras/synthetic_ome_zarr.py --help` and the docstring at the top of the
-script describe each flag.
+level, the chunk shape per level, the shard shape, a sparse pyramid,
+unwritten levels, and the level-index picture. A factor or a chunk shape is
+one value, per-axis values such as `1,2,2`, or a different one for each
+level. `uv run extras/synthetic_ome_zarr.py --help` and the docstring at the
+top of the script describe each flag.
 
 Two properties the tests rely on:
 

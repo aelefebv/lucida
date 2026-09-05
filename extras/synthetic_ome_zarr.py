@@ -35,7 +35,9 @@ Options:
                          Default 2.
     --chunk S | Y,X | Z,Y,X
                          Chunk shape in samples. The time and channel axes are
-                         always chunked at 1. Default 64.
+                         always chunked at 1. Repeat the flag to give each
+                         level its own chunk shape; the last one repeats for
+                         the remaining levels. Default 64.
     --shard S | Y,X | Z,Y,X
                          Shard shape in samples, a multiple of the chunk shape
                          on every axis. Its presence makes the dataset sharded:
@@ -107,8 +109,10 @@ AXIS_TYPES = {"t": "time", "c": "channel", "z": "space", "y": "space", "x": "spa
 class Options:
     """Everything the generator needs, as parsed from the command line.
 
-    Spatial tuples (``size``, ``factors``, ``chunk``, ``shard``) all share one
-    axis order: ``(y, x)`` for 2D and ``(z, y, x)`` for 3D.
+    Spatial tuples (``size``, ``factors``, ``chunks``, ``shard``) all share one
+    axis order: ``(y, x)`` for 2D and ``(z, y, x)`` for 3D. ``factors`` and
+    ``chunks`` are per level, and the last entry repeats for the levels past
+    it.
     """
 
     out: Path
@@ -118,7 +122,7 @@ class Options:
     timepoints: int = 1
     levels: int = DEFAULT_LEVELS
     factors: tuple[tuple[int, ...], ...] = ((DEFAULT_FACTOR, DEFAULT_FACTOR),)
-    chunk: tuple[int, ...] = (DEFAULT_CHUNK, DEFAULT_CHUNK)
+    chunks: tuple[tuple[int, ...], ...] = ((DEFAULT_CHUNK, DEFAULT_CHUNK),)
     shard: tuple[int, ...] | None = None
     sparse: bool = False
     unwritten_levels: tuple[int, ...] = ()
@@ -129,6 +133,10 @@ class Options:
     @property
     def ndim(self) -> int:
         return len(self.size)
+
+    def chunk_at(self, level: int) -> tuple[int, ...]:
+        """The chunk shape of ``level``: its own entry, or the last one given."""
+        return self.chunks[min(level, len(self.chunks) - 1)]
 
     @property
     def leading_axes(self) -> tuple[tuple[str, int], ...]:
@@ -187,7 +195,7 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
     parser.add_argument("--timepoints", type=int, default=1, metavar="T", help="timepoint count (default 1)")
     parser.add_argument("--levels", type=int, default=DEFAULT_LEVELS, metavar="N", help="pyramid levels (default 3)")
     parser.add_argument("--factor", type=_positive_ints, action="append", metavar="F|F,F[,F]", help="scale factor to the next level, one value or per axis; repeat for per-level factors (default 2)")
-    parser.add_argument("--chunk", type=_positive_ints, default=(DEFAULT_CHUNK,), metavar="S|S,S[,S]", help="chunk shape in samples (default 64)")
+    parser.add_argument("--chunk", type=_positive_ints, action="append", metavar="S|S,S[,S]", help="chunk shape in samples, one value or per axis; repeat for per-level chunk shapes (default 64)")
     parser.add_argument("--shard", type=_positive_ints, metavar="S|S,S[,S]", help="shard shape in samples, a multiple of --chunk; presence means sharded")
     parser.add_argument("--sparse", action="store_true", help="leave a checkerboard of chunks unwritten")
     parser.add_argument("--unwritten-level", type=int, action="append", default=[], metavar="L", help="declare level L but write no chunk for it; repeatable")
@@ -206,13 +214,14 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
         parser.error("--tiles must be at least 1")
 
     factors = tuple(_per_axis(f, ndim, "--factor", parser) for f in (args.factor or [(DEFAULT_FACTOR,)]))
-    chunk = _per_axis(args.chunk, ndim, "--chunk", parser)
+    chunks = tuple(_per_axis(c, ndim, "--chunk", parser) for c in (args.chunk or [(DEFAULT_CHUNK,)]))
     shard = None
     if args.shard is not None:
         shard = _per_axis(args.shard, ndim, "--shard", parser)
-        for axis, (s, c) in enumerate(zip(shard, chunk)):
-            if s % c != 0:
-                parser.error(f"--shard must be a multiple of --chunk on every axis; axis {axis} has {s} % {c} != 0")
+        for chunk in chunks:
+            for axis, (s, c) in enumerate(zip(shard, chunk)):
+                if s % c != 0:
+                    parser.error(f"--shard must be a multiple of every --chunk on every axis; axis {axis} has {s} % {c} != 0")
     unwritten = tuple(sorted(set(args.unwritten_level)))
     for level in unwritten:
         if level < 1 or level >= args.levels:
@@ -226,7 +235,7 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
         timepoints=args.timepoints,
         levels=args.levels,
         factors=factors,
-        chunk=chunk,
+        chunks=chunks,
         shard=shard,
         sparse=args.sparse,
         unwritten_levels=unwritten,
@@ -341,11 +350,12 @@ def write_image(store: zarr.storage.LocalStore, prefix: str, opts: Options, leve
 def write_level(store: zarr.storage.LocalStore, prefix: str, opts: Options, level: Level, tile: int) -> None:
     leading_shape = tuple(size for _, size in opts.leading_axes)
     leading_ones = (1,) * len(leading_shape)
+    chunk = opts.chunk_at(level.index)
     array = zarr.create_array(
         store=store,
         name=f"{prefix}/{level.index}" if prefix else str(level.index),
         shape=leading_shape + level.shape,
-        chunks=leading_ones + opts.chunk,
+        chunks=leading_ones + chunk,
         shards=(leading_ones + opts.shard) if opts.shard else None,
         dtype=DTYPE,
         fill_value=0,
@@ -363,7 +373,7 @@ def write_level(store: zarr.storage.LocalStore, prefix: str, opts: Options, leve
 
     # A sparse level is written one inner chunk at a time so the skipped
     # chunks never reach the shard and stay absent from its index.
-    unit = opts.shard if (opts.shard and not opts.sparse) else opts.chunk
+    unit = opts.shard if (opts.shard and not opts.sparse) else chunk
     grid = [range(math.ceil(s / u)) for s, u in zip(level.shape, unit)]
     for t in range(opts.timepoints):
         for c in range(opts.channels):
@@ -414,7 +424,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     layout = f"sharded {opts.shard}" if opts.shard else "unsharded"
     what = f"collection of {opts.tiles} tiles" if opts.tiles else "image"
     shapes = ", ".join("x".join(str(s) for s in level.shape) for level in levels)
-    print(f"wrote {opts.out}: {what}, {layout}, chunk {opts.chunk}, levels [{shapes}]")
+    chunks = ", ".join("x".join(str(s) for s in opts.chunk_at(level.index)) for level in levels)
+    print(f"wrote {opts.out}: {what}, {layout}, chunks [{chunks}], levels [{shapes}]")
     return 0
 
 
