@@ -220,3 +220,96 @@ describe("point events", () => {
     expect(recorder.exportDocument().runs).toHaveLength(0);
   });
 });
+
+describe("level-change events", () => {
+  function tickWithTarget(
+    recorder: TraceRecorder,
+    datasetId: string,
+    min: number,
+    max: number,
+    pinned = false,
+  ): void {
+    const scratch = recorder.beginTick(datasetId);
+    scratch!.setTargetLevel(min, max, pinned);
+    recorder.commitTick();
+  }
+
+  it("records the old and new range when a dataset's target moves between samples", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+
+    tickWithTarget(recorder, "ds", 1, 1);
+    advance(20);
+    tickWithTarget(recorder, "ds", 1, 1);
+    advance(20);
+    tickWithTarget(recorder, "ds", 2, 2);
+
+    const [run] = recorder.exportDocument().runs;
+    expect(run.events).toEqual([
+      {
+        atUs: 40_000,
+        kind: "level-change",
+        reason: "screen",
+        chunk: null,
+        levelChange: { datasetId: "ds", from: { min: 1, max: 1 }, to: { min: 2, max: 2 } },
+      },
+    ]);
+  });
+
+  it("names the pin as the reason when the new target is pinned", () => {
+    const { recorder } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+
+    tickWithTarget(recorder, "ds", 2, 2);
+    tickWithTarget(recorder, "ds", 0, 0, true);
+    tickWithTarget(recorder, "ds", 0, 0, true);
+    tickWithTarget(recorder, "ds", 2, 2);
+
+    const [run] = recorder.exportDocument().runs;
+    expect(run.events.map(e => [e.reason, e.levelChange?.to.min])).toEqual([
+      ["pin", 0],
+      ["screen", 2],
+    ]);
+  });
+
+  it("tracks each dataset on its own", () => {
+    const { recorder } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+
+    tickWithTarget(recorder, "ds-a", 1, 1);
+    tickWithTarget(recorder, "ds-b", 3, 3);
+    tickWithTarget(recorder, "ds-a", 1, 1);
+    tickWithTarget(recorder, "ds-b", 2, 2);
+
+    const [run] = recorder.exportDocument().runs;
+    expect(run.events.map(e => e.levelChange?.datasetId)).toEqual(["ds-b"]);
+  });
+
+  it("records nothing for the first target seen or for a sample with no target", () => {
+    const { recorder } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+
+    tickWithTarget(recorder, "ds", 1, 1);
+    recorder.beginTick("ds");
+    recorder.commitTick();
+    tickWithTarget(recorder, "ds", 1, 1);
+
+    expect(recorder.exportDocument().runs[0].events).toHaveLength(0);
+  });
+
+  it("compares across a run boundary and files the change in the run that saw it", () => {
+    const { recorder } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    tickWithTarget(recorder, "ds", 0, 0);
+    recorder.closeRun("explicit");
+
+    recorder.openRun(OPEN_CAUSE);
+    tickWithTarget(recorder, "ds", 1, 1);
+
+    const runs = recorder.exportDocument().runs;
+    expect(runs[0].events).toHaveLength(0);
+    expect(runs[1].events[0].levelChange).toEqual({
+      datasetId: "ds", from: { min: 0, max: 0 }, to: { min: 1, max: 1 },
+    });
+  });
+});
