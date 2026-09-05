@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.14.0](https://github.com/aelefebv/lucida/compare/v0.13.0...v0.14.0) (2026-09-05)
+
+
+### Features
+
+* **auth:** enrich the principal from a profile directory ([#1035](https://github.com/aelefebv/lucida/issues/1035)) ([3e8b0df](https://github.com/aelefebv/lucida/commit/3e8b0dfadc6d2ea30aeefb32cb0b4d57db61906e))
+* **auth:** keep the profile directory loaded on a background schedule ([#1040](https://github.com/aelefebv/lucida/issues/1040)) ([ab80cf3](https://github.com/aelefebv/lucida/commit/ab80cf3ea1840bedcbfc377d3b0e11f052db921c))
+* **core:** compute the target level in the core with hysteresis ([#1017](https://github.com/aelefebv/lucida/issues/1017)) ([15023a0](https://github.com/aelefebv/lucida/commit/15023a072e90885c4de12c3893cfe66391866149)), closes [#992](https://github.com/aelefebv/lucida/issues/992)
+* **core:** make level 0 pinnable and clamp pins with one rule ([#1029](https://github.com/aelefebv/lucida/issues/1029)) ([de5be07](https://github.com/aelefebv/lucida/commit/de5be07c3cd54045742d6b06b5b0dba0e1f50b14))
+* **core:** plan chunks at the target level the browser targets ([#1022](https://github.com/aelefebv/lucida/issues/1022)) ([1850bb6](https://github.com/aelefebv/lucida/commit/1850bb6cbf13f89193d9fd0a6f6a4ef385a13616)), closes [#996](https://github.com/aelefebv/lucida/issues/996)
+* **e2e:** verify a sharded collection end to end at device pixel ratio 2 ([#1039](https://github.com/aelefebv/lucida/issues/1039)) ([988cf55](https://github.com/aelefebv/lucida/commit/988cf5542a4a5fc77fb7fc4d9c0f85a599ead489))
+* **e2e:** verify the level chain at device pixel ratio 2 and measure ADR 0061 before and after ([#1044](https://github.com/aelefebv/lucida/issues/1044)) ([39cb0b0](https://github.com/aelefebv/lucida/commit/39cb0b03520ca3582e969c137ffeb02f02b5de23))
+* **extras:** generate synthetic OME-Zarr fixtures, sharded and unsharded ([#1018](https://github.com/aelefebv/lucida/issues/1018)) ([e0eb435](https://github.com/aelefebv/lucida/commit/e0eb435137960e7fc926d9064c893fbc189529f0)), closes [#1006](https://github.com/aelefebv/lucida/issues/1006)
+* **store:** accept the sharding codec at import and serve inner chunks ([#1025](https://github.com/aelefebv/lucida/issues/1025)) ([2a20325](https://github.com/aelefebv/lucida/commit/2a203257a03d50011e9a7bc6f8ea9740e8c0da08)), closes [#1009](https://github.com/aelefebv/lucida/issues/1009)
+* **store:** add range reads to the cached store ([#1014](https://github.com/aelefebv/lucida/issues/1014)) ([96bfc17](https://github.com/aelefebv/lucida/commit/96bfc176cc196ef0d0ff01367b5533ea4c6d17c5)), closes [#1005](https://github.com/aelefebv/lucida/issues/1005)
+* **store:** detect unwritten levels behind the sharding codec ([#1030](https://github.com/aelefebv/lucida/issues/1030)) ([847b0ea](https://github.com/aelefebv/lucida/commit/847b0ea768ba21e776d6b33d413303102769f1db)), closes [#1010](https://github.com/aelefebv/lucida/issues/1010)
+* **store:** merge contiguous range reads queued for a permit into one request ([#1033](https://github.com/aelefebv/lucida/issues/1033)) ([3ecb294](https://github.com/aelefebv/lucida/commit/3ecb2949013562a65392d837c1204cb158a73e33))
+* **store:** read an inner chunk from a shard ([#1021](https://github.com/aelefebv/lucida/issues/1021)) ([544a5c0](https://github.com/aelefebv/lucida/commit/544a5c01af7ac3ecf6023768f8fa42d41dca87df)), closes [#1008](https://github.com/aelefebv/lucida/issues/1008)
+* **web:** evict chunks finer than the target first, then farthest ([#1026](https://github.com/aelefebv/lucida/issues/1026)) ([aaffccf](https://github.com/aelefebv/lucida/commit/aaffccfcdc087df95c91e99933e1ce44a4abbcc0))
+* **web:** keep up to four resident levels per entity in the renderer ([#1024](https://github.com/aelefebv/lucida/issues/1024)) ([90813dd](https://github.com/aelefebv/lucida/commit/90813dd0f5ce293a6cfc787cbce06360ed2563d1)), closes [#995](https://github.com/aelefebv/lucida/issues/995)
+* **web:** plan detail requests at the target level, or the pin ([#1027](https://github.com/aelefebv/lucida/issues/1027)) ([5f948f3](https://github.com/aelefebv/lucida/commit/5f948f3e36f3ddd0a444d41b533a512cce6f0f0d)), closes [#998](https://github.com/aelefebv/lucida/issues/998)
+* **web:** prefetch the next level in the zoom direction ([#1028](https://github.com/aelefebv/lucida/issues/1028)) ([4591790](https://github.com/aelefebv/lucida/commit/4591790d45c36e9bd79371b88f7444f82f567e13)), closes [#1000](https://github.com/aelefebv/lucida/issues/1000)
+* **web:** record the target and displayed level in the trace ([#1036](https://github.com/aelefebv/lucida/issues/1036)) ([c3157f0](https://github.com/aelefebv/lucida/commit/c3157f0f7685c409bf56ddfb226b5eda8f1c9e09)), closes [#1002](https://github.com/aelefebv/lucida/issues/1002)
+* **web:** show the target and displayed level in the layer panel ([#1031](https://github.com/aelefebv/lucida/issues/1031)) ([645c3e9](https://github.com/aelefebv/lucida/commit/645c3e95fdea57cea8209c398632d46bd14be484)), closes [#1001](https://github.com/aelefebv/lucida/issues/1001)
+
+
+### Bug Fixes
+
+* **web:** fall back to the initial when an avatar image fails to load ([#1032](https://github.com/aelefebv/lucida/issues/1032)) ([fef823a](https://github.com/aelefebv/lucida/commit/fef823a16f588e61a9bf621378c2642399beadd7))
+
+
+### Refactors
+
+* **server:** read every source chunk through one pipeline ([#1020](https://github.com/aelefebv/lucida/issues/1020)) ([43f0001](https://github.com/aelefebv/lucida/commit/43f00014ac0eff616b0eabfa834ae7038654ab8d))
+* **web:** delete the legacy single-level planning path ([#1019](https://github.com/aelefebv/lucida/issues/1019)) ([55bd5b4](https://github.com/aelefebv/lucida/commit/55bd5b4efea1224caf207d2d0552f5dc87f9a78e))
+
 ## [0.13.0](https://github.com/aelefebv/lucida/compare/v0.12.0...v0.13.0) (2026-09-03)
 
 
