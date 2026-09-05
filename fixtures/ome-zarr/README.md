@@ -75,11 +75,69 @@ Sample values are `uint16` in every fixture, and the codec chain is `bytes`
 
   ```sh
   uv run extras/synthetic_ome_zarr.py /tmp/big.ome.zarr --tiles 216 --size 2048,2048 --channels 3 --chunk 64 --shard 512
-  lucida trace /tmp/big.ome.zarr
+  lucida trace /tmp/big.ome.zarr --screenshot /tmp/big.png
   ```
 
+  `--screenshot` writes the frame the page shows once it has settled, at
+  the run's device pixel ratio. `--pin-contrast` keeps the dataset's
+  contrast window at its default instead of fitting it to the data as it
+  arrives; without it, two runs of one dataset can draw the same data a
+  level apart, because the fit samples whatever is resident when it runs.
   A level-index pyramid opened the same way tells a screenshot check which
   level the viewer chose, because the sample values are the level number.
+
+## The sharded twin check
+
+`extras/verify_sharded_twins.py` proves reading a sharded dataset end to
+end. It writes two twin pairs with the generator and opens each dataset
+through the trace driver, in its own workspace, at device pixel ratio 2.
+Then it checks what came back. Every run reached quiescence. Each pair's
+two frames are the size the viewport makes at that ratio, not blank, and
+identical pixel for pixel. Every backend read in a sharded run waited on
+the chunk read cap and moved exactly the inner chunks it carried, one shard
+index, or both. A read may carry one inner chunk or a byte-contiguous
+stretch of one shard's inner chunks merged into one read. Every read in an
+unsharded run moved one whole chunk object.
+
+The expected sizes come from the shard indexes on disk, so the read
+comparison is exact. The check also asserts that the view wanted no shard
+whole. That is the one case where a shard downloaded whole has the same
+length as a legitimate merged read. Every run passes `--pin-contrast`,
+because the default contrast fit samples whatever is resident when it runs,
+and two runs of one dataset then draw the same data a level apart (issue
+#1037).
+
+The second pair has a single source level too large to serve as the coarse
+tier, so the server generates a coarse level over the sharded source. The
+check asserts that both runs requested that level and still match. The pair
+is one image whose source grid stays under the 32 chunks the server
+generates on its own after an open, and the check waits for that fill
+before it opens the view, because a static view never asks for the rest
+(issue #1034). The fill reads the whole source, so the server answers the
+pair's own requests from its cache and the read audit is the first pair's
+job. Point `--generated-cache-dir` at the server's generated coarse cache
+and the check compares the two generated tiers byte for byte as well.
+
+It needs a running server that serves a built web bundle, the `lucida` CLI,
+and Chrome. From the repository root:
+
+```sh
+(cd lucida-web && pnpm run build)
+LUCIDA_GENERATED_COARSE_CACHE_DIR=/tmp/lucida-coarse cargo run -p lucida-server &
+uv run extras/verify_sharded_twins.py --generated-cache-dir /tmp/lucida-coarse
+```
+
+Pass `--server` for a server elsewhere, `--lucida` to name the CLI, and
+`--keep` to keep the datasets, frames, and run files. On failure they are
+always kept, and the report says where. `uv run
+extras/verify_sharded_twins.py --help` lists the generator options the two
+pairs use.
+
+The byte count each backend read moved travels in the server's timing rows
+as `backend_bytes`, which is how a trace can show that a shard was read by
+the inner chunk and never downloaded whole. The check's own tests run with
+`uv run extras/test_verify_sharded_twins.py` and need neither a server nor a
+browser.
 
 The Rust tests locate the fixtures relative to `CARGO_MANIFEST_DIR`, so they
 run from any working directory.

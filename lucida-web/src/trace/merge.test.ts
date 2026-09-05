@@ -32,6 +32,7 @@ function serverRow(overrides: Partial<StoredServerRow> & { rid: number }): Store
     family: overrides.family ?? "chunk",
     outcome: overrides.outcome ?? "delivered",
     coalescedOnto: overrides.coalescedOnto ?? null,
+    backendBytes: overrides.backendBytes ?? null,
     // 6,000 µs of server time, spread over the phases a source chunk
     // passes through.
     phases: overrides.phases ?? {

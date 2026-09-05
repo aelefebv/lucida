@@ -18,6 +18,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use lucida_core::DatasetId;
 use lucida_core::saved_view::{SavedView, normalize_dataset_url};
 use lucida_protocol::{DatasetSourceCacheStats, DatasetSourceHealth};
 use serde::{Deserialize, Serialize};
@@ -187,6 +188,12 @@ pub struct TraceRunHeader {
     pub server_warmth: ServerWarmth,
     pub server_url: String,
     pub workspace_id: String,
+    /// The settled frame, when the caller asked for one: a PNG of the page
+    /// at the composed view's device pixel ratio, taken after the wait and
+    /// before the export. A run that never settled still gets its frame,
+    /// because what the page showed at the deadline is part of the finding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screenshot: Option<PathBuf>,
 }
 
 /// Both renderings, taken at export time from the page's one renderer. The
@@ -256,25 +263,53 @@ pub enum ShowDepth {
 /// reproducible from the command that produced it. The camera is left at the
 /// default so the page's own fit-on-open decides the framing, exactly as it
 /// would for a person opening the same URL.
-pub fn compose_dataset_view(dataset_url: &str, width: u32, height: u32) -> SavedView {
+///
+/// `pin_contrast_for` names the dataset whose contrast window is to stay at
+/// its default rather than being fitted to the data as it arrives. The fit
+/// samples whatever is resident when it runs, so two runs of one dataset can
+/// draw the same data a level apart; a frame that is to be compared with
+/// another run's needs the window pinned.
+pub fn compose_dataset_view(
+    dataset_url: &str,
+    width: u32,
+    height: u32,
+    pin_contrast_for: Option<&DatasetId>,
+) -> SavedView {
     let mut view = SavedView::empty([width, height]);
     view.datasets = vec![normalize_dataset_url(dataset_url)];
+    if let Some(dataset_id) = pin_contrast_for {
+        view.auto_contrast.insert(dataset_id.clone(), false);
+    }
     view
 }
 
-/// Read the server's warmth for `dataset_url` out of a health snapshot taken
-/// before the run.
-pub fn summarise_server_warmth(dataset_url: &str, health: &[DatasetSourceHealth]) -> ServerWarmth {
+/// The workspace's id for the dataset at `dataset_url`, out of a health
+/// snapshot, when the workspace holds it.
+pub fn dataset_id_for_source(
+    dataset_url: &str,
+    health: &[DatasetSourceHealth],
+) -> Option<DatasetId> {
+    health_entry_for(dataset_url, health).map(|dataset| dataset.workspace_dataset_id.clone())
+}
+
+fn health_entry_for<'a>(
+    dataset_url: &str,
+    health: &'a [DatasetSourceHealth],
+) -> Option<&'a DatasetSourceHealth> {
     let canonical = normalize_dataset_url(dataset_url);
-    let entry = health.iter().find(|dataset| {
+    health.iter().find(|dataset| {
         dataset
             .source_url
             .as_deref()
             .map(|url| normalize_dataset_url(url) == canonical)
             .unwrap_or(false)
-    });
+    })
+}
 
-    match entry {
+/// Read the server's warmth for `dataset_url` out of a health snapshot taken
+/// before the run.
+pub fn summarise_server_warmth(dataset_url: &str, health: &[DatasetSourceHealth]) -> ServerWarmth {
+    match health_entry_for(dataset_url, health) {
         None => ServerWarmth {
             dataset_open_before_run: false,
             opened_by_driver: false,
@@ -396,11 +431,17 @@ pub fn gate_failure(file: &TraceRunFile) -> Option<String> {
 pub fn format_run_human(file: &TraceRunFile, path: &Path) -> String {
     let header = &file.header;
     let view = &header.composed_view;
+    let screenshot = header
+        .screenshot
+        .as_deref()
+        .map(|shot| format!("frame     {}\n", shot.display()))
+        .unwrap_or_default();
     format!(
         "view      {} @ {}x{} DPR {}\n\
          server    {}\n\
          hold      quiescent had to hold {} ms; every duration below is measured against that\n\
-         run file  {}\n\n\
+         run file  {}\n\
+         {screenshot}\n\
          {}",
         view.dataset,
         view.width,
@@ -461,7 +502,15 @@ pub async fn drive_run(
     // default rendering points at Perfetto for raw spans, and a second drive
     // would send the reader to a different run than the one they were reading.
     let export_expression = run_export_expression(perfetto_path.is_some());
-    let json = drive_and_export(url, token, viewport, wait, &export_expression).await?;
+    let json = drive_and_export(
+        url,
+        token,
+        viewport,
+        wait,
+        &export_expression,
+        facts.screenshot.as_deref(),
+    )
+    .await?;
     let export: SeamExport = serde_json::from_str(&json).map_err(|error| {
         CliError::new(
             ErrorKind::Protocol,
@@ -480,12 +529,17 @@ pub async fn drive_run(
 /// that expression, so the launch, the settle wait, the timeout close and the
 /// teardown live here once. Readiness is observed rather than demanded: a page
 /// that never draws is a run this command still has to report.
+///
+/// `screenshot` is where to write the page's frame after the wait, at the
+/// viewport's device pixel ratio. It is taken before the export because the
+/// export closes the run: the frame is the run's last state.
 async fn drive_and_export(
     url: &str,
     token: Option<&EffectiveToken>,
     viewport: Viewport,
     wait: Duration,
     export: &str,
+    screenshot: Option<&Path>,
 ) -> Result<String, CliError> {
     browser::with_browser(viewport, wait, async |browser| {
         let mut page = browser.open_page_unrendered(url, token, wait).await?;
@@ -493,6 +547,10 @@ async fn drive_and_export(
             page.evaluate(CLOSE_AS_TIMEOUT, wait).await?;
             let closed = read_run_state(&mut page, wait).await?;
             pin_run(&mut page, closed.last_concluded_run_id.as_deref(), wait).await?;
+        }
+        if let Some(path) = screenshot {
+            let png = page.screenshot_png(wait).await?;
+            write_beside_its_parents(path, &png).await?;
         }
         let value = page.evaluate(export, wait).await?;
         value.as_str().map(str::to_string).ok_or_else(|| {
@@ -513,6 +571,8 @@ pub struct DriverFacts {
     pub server_warmth: ServerWarmth,
     pub server_url: String,
     pub workspace_id: String,
+    /// Where to write the settled frame, when the caller wants one.
+    pub screenshot: Option<PathBuf>,
 }
 
 /// Fold what the page returned together with what only the driver knows. Split
@@ -535,6 +595,7 @@ fn assemble_run_file(export: SeamExport, facts: &DriverFacts) -> TraceRunFile {
             server_warmth: facts.server_warmth.clone(),
             server_url: facts.server_url.clone(),
             workspace_id: facts.workspace_id.clone(),
+            screenshot: facts.screenshot.clone(),
         },
         renderings: TraceRenderings {
             summary: export
@@ -704,7 +765,15 @@ pub async fn capture_chrome_trace(
     viewport: Viewport,
     wait: Duration,
 ) -> Result<ChromeTraceCapture, CliError> {
-    let json = drive_and_export(url, token, viewport, wait, CHROME_TRACE_EXPORT_EXPRESSION).await?;
+    let json = drive_and_export(
+        url,
+        token,
+        viewport,
+        wait,
+        CHROME_TRACE_EXPORT_EXPRESSION,
+        None,
+    )
+    .await?;
     write_beside_its_parents(Path::new(output_path), json.as_bytes()).await?;
     summarise_chrome_trace(&json, chrome_trace_end_reason(&json))
 }
@@ -832,6 +901,7 @@ mod tests {
             server_warmth: cold(),
             server_url: "http://host".to_string(),
             workspace_id: "ws".to_string(),
+            screenshot: None,
         }
     }
 
@@ -847,6 +917,7 @@ mod tests {
                 server_warmth: cold(),
                 server_url: "http://host".to_string(),
                 workspace_id: "ws".to_string(),
+                screenshot: None,
             },
             renderings: TraceRenderings {
                 summary: "lucida trace run-1-1 — VERDICT: clear".to_string(),
@@ -910,10 +981,39 @@ mod tests {
     /// canonical form, at the run's viewport, and no camera of its own.
     #[test]
     fn the_composed_view_carries_the_canonical_dataset_and_nothing_else() {
-        let view = compose_dataset_view("GS://Bucket/set.zarr", 1440, 900);
+        let view = compose_dataset_view("GS://Bucket/set.zarr", 1440, 900, None);
         assert_eq!(view.datasets, vec!["gs://Bucket/set.zarr".to_string()]);
         assert!(view.dataset_order.is_empty());
         assert!(view.active_layouts.is_empty());
+        assert!(view.auto_contrast.is_empty());
+    }
+
+    #[test]
+    fn the_composed_view_pins_the_contrast_window_only_when_asked() {
+        let id = DatasetId("wds-1".to_string());
+        let view = compose_dataset_view("gs://bucket/set.zarr", 1440, 900, Some(&id));
+        assert_eq!(view.auto_contrast.get(&id), Some(&false));
+        assert_eq!(view.auto_contrast.len(), 1);
+        assert_eq!(
+            view.dataset_settings.len(),
+            0,
+            "the window itself stays the default"
+        );
+    }
+
+    /// The pin is keyed on the workspace's dataset id, which only the health
+    /// snapshot or the driver's own open knows.
+    #[test]
+    fn the_dataset_id_comes_from_the_health_entry_for_the_canonical_url() {
+        let health = vec![health_entry("gs://bucket/set.zarr", None)];
+        assert_eq!(
+            dataset_id_for_source("GS://bucket/set.zarr", &health),
+            Some(DatasetId("ds".to_string()))
+        );
+        assert_eq!(
+            dataset_id_for_source("gs://bucket/other.zarr", &health),
+            None
+        );
     }
 
     /// A browser-cold open can run against an arbitrarily warm server, so the
@@ -1061,6 +1161,39 @@ mod tests {
         assert!(!file.header.settled);
         assert_eq!(file.header.quiescence_hold_ms, 500.0);
         assert!(gate_failure(&file).is_some());
+    }
+
+    /// A run driven without a frame carries no `screenshot` key at all, rather
+    /// than a null a reader has to tell from "not written".
+    #[test]
+    fn the_header_names_the_screenshot_the_driver_wrote_and_omits_it_otherwise() {
+        let export = || -> SeamExport {
+            serde_json::from_str(
+                &json!({ "schemaVersion": 1, "runId": "run-3-1", "quiescenceHoldMs": 500,
+                         "endReason": "quiescent", "diagnostic": null, "summary": "ok",
+                         "phases": "ok", "trace": { "runs": [] } })
+                .to_string(),
+            )
+            .unwrap()
+        };
+
+        let with_frame = DriverFacts {
+            screenshot: Some(PathBuf::from("/tmp/twins/sharded.png")),
+            ..facts()
+        };
+        let file = assemble_run_file(export(), &with_frame);
+        assert_eq!(
+            file.header.screenshot.as_deref(),
+            Some(Path::new("/tmp/twins/sharded.png"))
+        );
+        let json = serde_json::to_value(&file).unwrap();
+        assert_eq!(json["header"]["screenshot"], "/tmp/twins/sharded.png");
+        assert!(format_run_human(&file, Path::new("run.json")).contains("/tmp/twins/sharded.png"));
+
+        let without = assemble_run_file(export(), &facts());
+        assert_eq!(without.header.screenshot, None);
+        let json = serde_json::to_value(&without).unwrap();
+        assert!(json["header"].get("screenshot").is_none());
     }
 
     /// A page that recorded no run is a result, not a crash.
