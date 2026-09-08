@@ -14,11 +14,11 @@
 //! test writes. The PostgreSQL path that succeeds is covered by
 //! `storage::end_to_end`, where a real server is available.
 
-use std::io::{Read as _, Write as _};
-use std::net::TcpStream;
+mod boot;
+
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+
+use boot::{exit_of, free_port, server, wait_for_health};
 
 /// A connection string with a password in it, pointed at a port nothing
 /// can answer on: binding port 1 needs privileges no test process has.
@@ -28,44 +28,10 @@ const UNREACHABLE: &str = "postgres://lucida:hunter2@127.0.0.1:1/lucida";
 /// the server prints.
 const PASSWORD: &str = "hunter2";
 
-/// How long the SQLite default gets to come up and answer before the
-/// case gives up. Generous, because a slow machine failing this would be
-/// a false alarm rather than a defect.
-const STARTUP_BUDGET: Duration = Duration::from_secs(30);
-
-/// The server binary, with the environment pinned so a variable set in
-/// the shell running `cargo test` cannot change the outcome.
-fn server(bind: &str) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_lucida-server"));
-    command
-        .env_remove("LUCIDA_DB_URL")
-        .env_remove("LUCIDA_AUTH")
-        .env_remove("LUCIDA_INSECURE")
-        // Loopback, so the auth mode auto-detects to disabled and no
-        // Google credentials are needed to reach the storage step.
-        .env("LUCIDA_BIND", bind)
-        .env("RUST_LOG", "lucida_server=info")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    command
-}
-
-/// Run the server to completion and return its exit code and stderr.
-/// Used only for the cases that fail before binding, so this cannot
-/// hang on a server that came up.
 fn boot_failure(db_url: &str) -> (Option<i32>, String) {
-    let output = server("127.0.0.1:1")
-        .env("LUCIDA_DB_URL", db_url)
-        .output()
-        .expect("the server binary runs");
-    assert!(
-        !output.status.success(),
-        "the server must not come up on {db_url}"
-    );
-    (
-        output.status.code(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
-    )
+    let (code, stderr) = exit_of(server("127.0.0.1:1").env("LUCIDA_DB_URL", db_url));
+    assert_ne!(code, Some(0), "the server must not come up on {db_url}");
+    (code, stderr)
 }
 
 /// An unreachable database is a reported failure, not a crash and not a
@@ -215,39 +181,4 @@ fn an_unset_connection_string_still_starts_on_sqlite() {
         "and the database it opened must be {}: {stderr}",
         database.display()
     );
-}
-
-/// Poll `/healthz` until it answers, up to [`STARTUP_BUDGET`].
-///
-/// A bound socket is not enough: the storage step runs before the bind,
-/// so a server that answers is one that opened its database, migrated
-/// it, and built every router over the stores it handed out.
-fn wait_for_health(port: u16) -> bool {
-    let deadline = Instant::now() + STARTUP_BUDGET;
-    while Instant::now() < deadline {
-        if let Ok(mut socket) = TcpStream::connect(("127.0.0.1", port)) {
-            let request = format!("GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
-            let mut status = [0u8; 15];
-            if socket.write_all(request.as_bytes()).is_ok()
-                && socket.read_exact(&mut status).is_ok()
-                && status.starts_with(b"HTTP/1.1 200")
-            {
-                return true;
-            }
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    false
-}
-
-/// A port nothing is listening on right now, which the kernel hands
-/// back once the listener is dropped. Losing the race to another process
-/// costs a failed bind, not a wrong answer, so the case that uses this
-/// fails loudly rather than passing by accident.
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("a loopback port is available")
-        .local_addr()
-        .expect("a bound listener has an address")
-        .port()
 }

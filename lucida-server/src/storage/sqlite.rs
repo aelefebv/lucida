@@ -11,11 +11,12 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 
 use super::url::DatabaseUrl;
-use super::{StorageBackend, StorageError};
+use super::{PingError, StorageBackend, StorageError};
 use crate::auth::{
     BearerTokenStore, CliTokenAuthorizationStore, LoginSessionStore, PendingAuthStore,
     SqliteBearerTokenStore, SqliteCliTokenAuthorizationStore, SqlitePendingAuthStore,
@@ -149,7 +150,16 @@ impl SqliteStorageBackend {
 /// Every accessor builds a fresh handle over the shared pool. The
 /// stores hold nothing but that handle, so this costs a pool clone and
 /// the handles are interchangeable.
+#[async_trait]
 impl StorageBackend for SqliteStorageBackend {
+    async fn ping(&self) -> Result<(), PingError> {
+        sqlx::query("SELECT 1")
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
+            .map_err(PingError::new)
+    }
+
     fn login_sessions(&self) -> Arc<dyn LoginSessionStore> {
         Arc::new(SqliteSessionStore::new(self.pool.clone()))
     }

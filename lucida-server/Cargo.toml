@@ -68,6 +68,9 @@ urlencoding = "2"
 [dev-dependencies]
 tempfile = "3"
 bytes = "1"
+# `tokio::time::pause`, so a test can wait out a timeout without spending
+# wall-clock time.
+tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 # Mock-Google harness: spins up an axum app on an ephemeral port that

@@ -86,6 +86,38 @@ The listing is read whole, held in memory, and read again by a background task, 
 
 Log lines name the listing URL without its query string or userinfo, and never a person. See [ADR-0063](wiki/decisions/0063-a-profile-directory-enriches-the-principal-and-never-authenticates-it.md).
 
+### Report the storage backend to an external monitor
+
+Every deployment answers `/healthz` (liveness), `/readyz` (readiness), and `/version` without a session. None of them says whether the storage backend is reachable. If an external monitor polls your services for the state of their dependencies, set a path and lucida adds a route that reports it:
+
+```bash
+docker run --rm -p 9876:9876 \
+  -e LUCIDA_BIND=0.0.0.0:9876 \
+  -e LUCIDA_AUTH=iap \
+  -e LUCIDA_IAP_AUDIENCE=/projects/PROJECT_NUMBER/global/backendServices/SERVICE_ID \
+  -e LUCIDA_DB_URL=postgres://lucida:PASSWORD@db.example:5432/lucida \
+  -e LUCIDA_STATUS_PATH=/status \
+  ghcr.io/aelefebv/lucida:latest
+```
+
+A `GET` on the path runs one trivial query through the storage backend, with a 2-second timeout, and answers `200 OK` with this body:
+
+```json
+{"details": {"dependencies": {"database": [
+  {"resource_name": "lucida", "connected": true, "message": "Success"}
+]}}}
+```
+
+When the query fails or times out, the status is still `200 OK`, `connected` is `false`, and `message` is `Failure`. The monitor reads a non-200 as a status it could not read, so an outage is reported in the body rather than in the status code.
+
+| Variable | Default | What it sets |
+| --- | --- | --- |
+| `LUCIDA_STATUS_PATH` | unset: route off | Where the route mounts. Must start with a slash, contain no whitespace or `?`, `#`, `{`, `}`, and differ from the three probe paths. |
+| `LUCIDA_STATUS_LABEL` | `database` | The key under `dependencies`, so the monitor groups the backend with the right kind of system. |
+| `LUCIDA_STATUS_RESOURCE_NAME` | the database name from `LUCIDA_DB_URL` | The `resource_name` in the body. |
+
+The body carries a resource name, a flag, and a fixed message, and nothing else. The default resource name is the database name alone: `lucida.db` for the SQLite default, and the path of a `postgres://` connection string. No scheme, host, user, or password reaches the body, which is why the route sits with the other probes on the public half of the router. A connection string that names no database has no default, and the boot stops until `LUCIDA_STATUS_RESOURCE_NAME` names one. A path the route cannot mount, or a label or resource name that is set but blank, stops the boot and names the variable. Startup logs one line with the path, the label, and the resource name; the route itself logs at debug level only. See [ADR-0064](wiki/decisions/0064-a-fixed-shape-status-route-answers-200-either-way.md).
+
 ### Develop on it
 
 Prerequisites: rust + cargo, pnpm, wasm-pack, node — your package manager equivalent.

@@ -19,6 +19,10 @@
 //! code now so the manifests (and any future drain logic) have stable
 //! URLs to point at.
 //!
+//! None of the three says whether the storage backend answers. That is
+//! the opt-in status route in [`crate::status`], mounted beside these
+//! when `LUCIDA_STATUS_PATH` is set.
+//!
 //! ## Auth interaction
 //!
 //! All three routes MUST land on the public router half — the kubelet
@@ -30,6 +34,16 @@
 use axum::Router;
 use axum::http::StatusCode;
 use axum::routing::get;
+
+pub const HEALTHZ_PATH: &str = "/healthz";
+pub const READYZ_PATH: &str = "/readyz";
+pub const VERSION_PATH: &str = "/version";
+
+/// Every path [`router`] mounts. A route configured to sit beside these,
+/// such as the status route, checks its path against this list at boot,
+/// where the message can name the variable, rather than letting the
+/// router panic on the collision.
+pub const PATHS: [&str; 3] = [HEALTHZ_PATH, READYZ_PATH, VERSION_PATH];
 
 /// Liveness probe handler. Always 200 today; the moment we have an
 /// "I should be killed" condition (e.g. fatal background-task failure)
@@ -61,9 +75,9 @@ async fn version() -> (StatusCode, &'static str) {
 /// monitoring can read /version without a session cookie.
 pub fn router() -> Router {
     Router::new()
-        .route("/healthz", get(healthz))
-        .route("/readyz", get(readyz))
-        .route("/version", get(version))
+        .route(HEALTHZ_PATH, get(healthz))
+        .route(READYZ_PATH, get(readyz))
+        .route(VERSION_PATH, get(version))
 }
 
 #[cfg(test)]

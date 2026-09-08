@@ -46,6 +46,8 @@ pub use url::{DatabaseUrl, DatabaseUrlError, Scheme};
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
+
 use crate::auth::{
     BearerTokenStore, CliTokenAuthorizationStore, LoginSessionStore, PendingAuthStore,
 };
@@ -65,12 +67,30 @@ pub enum StorageError {
     Migrate { target: String, reason: String },
 }
 
+/// Why a [`StorageBackend::ping`] got no answer. Carries the driver's
+/// reason and nothing about the connection string, so it can be logged
+/// without redaction.
+#[derive(Debug, thiserror::Error)]
+#[error("the database did not answer: {reason}")]
+pub struct PingError {
+    reason: String,
+}
+
+impl PingError {
+    pub(crate) fn new(reason: impl ToString) -> Self {
+        Self {
+            reason: reason.to_string(),
+        }
+    }
+}
+
 /// One database, and the six stores that read and write it.
 ///
 /// Implementations are constructed by [`open`] and shared as
 /// `Arc<dyn StorageBackend>`. Every accessor returns a handle over the
 /// same connection pool, so the stores share one connection budget and
 /// one transaction domain, and calling an accessor twice is cheap.
+#[async_trait]
 pub trait StorageBackend: Send + Sync + std::fmt::Debug {
     fn login_sessions(&self) -> Arc<dyn LoginSessionStore>;
     fn pending_auth(&self) -> Arc<dyn PendingAuthStore>;
@@ -78,6 +98,12 @@ pub trait StorageBackend: Send + Sync + std::fmt::Debug {
     fn cli_token_authorizations(&self) -> Arc<dyn CliTokenAuthorizationStore>;
     fn bookmarks(&self) -> Arc<dyn BookmarkStore>;
     fn workspaces(&self) -> Arc<dyn WorkspaceStore>;
+
+    /// Run one trivial query over the pool the stores share and report
+    /// whether the database answered. Goes through the same connections
+    /// the stores use, so the answer is about the database the server is
+    /// actually talking to. The caller decides how long to wait.
+    async fn ping(&self) -> Result<(), PingError>;
 }
 
 /// Connect to the database named by `url`, migrate it, and return the
@@ -147,5 +173,30 @@ mod tests {
             backend.bookmarks().get("absent").await.unwrap();
             backend.workspaces().get_workspace("absent").await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn every_backend_answers_a_ping() {
+        for scheme in Scheme::ALL {
+            let Some(url) = empty_database(*scheme).await else {
+                continue;
+            };
+            let backend = open(&url).await.unwrap();
+            backend
+                .ping()
+                .await
+                .unwrap_or_else(|e| panic!("{scheme} does not answer a ping: {e}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_backend_that_lost_its_database_fails_a_ping() {
+        let backend = test_support::sqlite_backend().await;
+        backend.pool().close().await;
+        let err = backend
+            .ping()
+            .await
+            .expect_err("a closed pool answers nothing");
+        assert!(!err.to_string().is_empty(), "the reason is reported");
     }
 }
