@@ -439,6 +439,17 @@ export interface DestroyMessage {
   type: "destroy";
 }
 
+/**
+ * Ask the worker for the frame on its canvas as a PNG, for the trace bundle
+ * (#1055). `id` correlates the {@link FrameCapturedMessage} reply. The
+ * worker reads the canvas it already presents to and draws nothing new, so
+ * the frame is whatever is on screen at the moment of the request.
+ */
+export interface CaptureFrameMessage {
+  type: "captureFrame";
+  id: number;
+}
+
 // --- Cold state (main → worker, per epoch change) ---
 
 /**
@@ -748,7 +759,8 @@ export type MainToWorkerMessage =
   | ColdStateDisplayMessage
   | ColdStateSelectionMessage
   | ColdStateDeltaMessage
-  | ViewHotStateMessage;
+  | ViewHotStateMessage
+  | CaptureFrameMessage;
 
 // --- Worker -> Main ---
 
@@ -907,6 +919,27 @@ export interface GpuPassTimeMessage {
   gpuPassUs: number;
 }
 
+/**
+ * Reply to a {@link CaptureFrameMessage}, correlated by `id`. `png` is the
+ * canvas encoded as PNG and transferred, or null when the canvas could not
+ * be read. `width` and `height` are the canvas's device pixels either way.
+ */
+export interface FrameCapturedMessage {
+  type: "frameCaptured";
+  id: number;
+  png: ArrayBuffer | null;
+  width: number;
+  height: number;
+}
+
+/** A frame the render worker read off its canvas, as the main thread resolves it. */
+export interface CapturedFrame {
+  png: ArrayBuffer;
+  /** Device pixels. */
+  width: number;
+  height: number;
+}
+
 export type WorkerToMainMessage =
   | ReadyMessage
   | ErrorMessage
@@ -915,4 +948,5 @@ export type WorkerToMainMessage =
   | ChunksEvictedMessage
   | WantedSetDeltaMessage
   | EntityLevelsMessage
-  | GpuPassTimeMessage;
+  | GpuPassTimeMessage
+  | FrameCapturedMessage;

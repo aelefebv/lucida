@@ -109,6 +109,37 @@ describe("RenderClient destroy", () => {
     await expect(pending).resolves.toBeNull();
   });
 
+  it("captureFrame resolves with the worker's PNG and device size, matched by id", async () => {
+    const { client, worker } = makeReadyClient();
+    const first = client.captureFrame();
+    const second = client.captureFrame();
+    const posted = worker.posted.filter(m => m.type === "captureFrame");
+    expect(posted.map(m => m.id)).toEqual([0, 1]);
+
+    const png = new Uint8Array([1, 2, 3]).buffer;
+    worker.emit({ type: "frameCaptured", id: 1, png, width: 2880, height: 1800 });
+    worker.emit({ type: "frameCaptured", id: 0, png: null, width: 2880, height: 1800 });
+
+    await expect(second).resolves.toEqual({ png, width: 2880, height: 1800 });
+    await expect(first).resolves.toBeNull();
+  });
+
+  it("destroy settles an in-flight frame capture with null", async () => {
+    const { client } = makeReadyClient();
+    const pending = client.captureFrame();
+    client.destroy();
+    await expect(pending).resolves.toBeNull();
+  });
+
+  it("captureFrame after destroy resolves null immediately and posts nothing", async () => {
+    const { client, worker } = makeReadyClient();
+    client.destroy();
+    const postedBefore = worker.posted.length;
+
+    await expect(client.captureFrame()).resolves.toBeNull();
+    expect(worker.posted.length).toBe(postedBefore);
+  });
+
   it("thumbnailRender after destroy resolves null immediately and posts nothing", async () => {
     const { client, worker } = makeReadyClient();
     client.destroy();

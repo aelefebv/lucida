@@ -69,6 +69,7 @@ import {
 } from "./workspaceApi.ts";
 import type { WorkspaceRole, WorkspaceMember } from "./workspaceApi.ts";
 import { isCaptureSurface } from "./captureSurface.ts";
+import { setBundleServices } from "./trace/bundle.ts";
 import "./App.css";
 
 // The debug UI (dev-controls panel + on-canvas overlay layer) is
@@ -849,6 +850,23 @@ function App({
       delete w.__lucidaOrch;
     };
   }, [render.activeLoop, bridge.sessionRef]);
+
+  // The two sections of a bundle the trace does not record, the server's
+  // dataset health and the frame on the canvas, come from the session socket
+  // and the render worker, which both live here. The seam owns the rest, and
+  // a page with neither registered still saves a bundle that says what is
+  // missing.
+  const liveBridge = bridge.bridge;
+  useEffect(() => {
+    setBundleServices({
+      requestDatasetHealth: () =>
+        liveBridge
+          ? liveBridge.requestDatasetHealth()
+          : Promise.reject(new Error("the session socket is not connected")),
+      captureFrame: () => render.clientRef.current?.captureFrame() ?? Promise.resolve(null),
+    });
+    return () => setBundleServices(null);
+  }, [liveBridge, render.clientRef]);
 
   useIntensityBatcher({
     clientReady: render.clientReady,

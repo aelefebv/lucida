@@ -4,8 +4,9 @@
  * Everything here goes through `window.lucidaTrace` — the page-level export
  * function ADR 0051 made public interface in every build. The monitor is a
  * third caller of the same seam the CLI and an agent driving its own browser
- * use, so no surface gets a privately shaped copy of the document and a run
- * saved from this page is byte-identical to one saved by `lucida trace`.
+ * use, so no surface gets a privately shaped copy of the document, a run
+ * saved from this page is byte-identical to one saved by `lucida trace`, and
+ * a bundle saved here is the bundle the driver writes.
  *
  * One export per read, deliberately. Exporting concludes the interval being
  * asked about, and the page needs both the diagnosis and the list of runs to
@@ -14,6 +15,7 @@
  * interval on the way to each answer.
  */
 
+import { bundleFilename } from "../trace/bundle.ts";
 import { diagnoseDocument } from "../trace/diagnose/diagnose.ts";
 import type { DiagnosticDocument } from "../trace/diagnose/types.ts";
 import type { LiveProgress } from "../trace/liveProgress.ts";
@@ -167,18 +169,44 @@ function newestRunId(document: TraceDocument): string {
   return document.runs[document.runs.length - 1]?.header.runId ?? "empty";
 }
 
-/** Hand the file to the browser's download path. The only DOM this module touches. */
+/** Hand the file to the browser's download path. */
 export function downloadTraceFile(
   kind: TraceFileKind,
   runId?: string,
   seam = window.lucidaTrace,
 ): string {
   const file = traceFile(kind, runId, seam);
+  downloadText(file);
+  return file.filename;
+}
+
+/**
+ * The bundle for the run on screen (#1055): the document, the settled frame,
+ * the view URL, the planning configuration, the pins, the server's health
+ * counters, and the replay header, in one file.
+ *
+ * Through the seam's own bundle function, which is the same one `lucida
+ * trace --bundle` calls, so the file this page saves and the file the driver
+ * writes are the same artifact. Asynchronous because the seam fetches the
+ * health and reads the frame off the render worker before it exports. The
+ * Perfetto projection stays out. **Save for Perfetto** is the control for
+ * that, and a bundle that always carried it would be megabytes nobody asked
+ * for.
+ */
+export async function downloadBundle(runId?: string, seam = window.lucidaTrace): Promise<string> {
+  if (!seam) throw new Error("no trace seam on this page");
+  const bundle = await seam.exportBundle({ runId });
+  const filename = bundleFilename(bundle);
+  downloadText({ filename, mime: "application/json", text: JSON.stringify(bundle) });
+  return filename;
+}
+
+/** The only DOM this module touches. */
+function downloadText(file: TraceFile): void {
   const url = URL.createObjectURL(new Blob([file.text], { type: file.mime }));
   const anchor = document.createElement("a");
   anchor.href = url;
   anchor.download = file.filename;
   anchor.click();
   URL.revokeObjectURL(url);
-  return file.filename;
 }
