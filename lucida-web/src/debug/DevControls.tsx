@@ -4,15 +4,18 @@
  * the toolbar. See `wiki/decisions/0052-debug-surface-dispositions.md`.
  *
  * It is named for mutation rather than for configuration because
- * configuration is only one of its three contents:
+ * configuration is only one of its contents:
  *
  *   1. the planning knobs backed by {@link configStore} (persisted to
- *      localStorage; the planner reads them on every tick),
- *   2. the six `debug.overlays` toggles for the on-canvas overlay layer
- *      (persisted to localStorage, read by App to mount the layer), and
- *   3. four `CpuCache` knobs that are **session-scoped**: they go
+ *      localStorage; the planner reads them on every tick), and
+ *   2. four `CpuCache` knobs that are **session-scoped**: they go
  *      through `updateConfig`, an `Object.assign` onto the live cache
  *      instance, and die on reload.
+ *
+ * The overlay toggles used to be a third content and now live in the HUD
+ * legend (`hud/HudLegend.tsx`), since the overlays are product surfaces
+ * togglable in every build. The render-radius drag preview on the sliders
+ * still mounts the overlay layer for the length of the drag.
  *
  * Those two lifetimes sit side by side, so the session-scoped section
  * says so on screen: controls that silently reset next to controls that
@@ -43,14 +46,7 @@ import {
 } from "../pipeline/planning/config.ts";
 import type { CpuCacheConfig } from "../pipeline/fetch/index.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
-import {
-  DEBUG_OVERLAYS,
-  isOverlayEnabled,
-  onOverlaysChanged,
-  setOverlayEnabled,
-  setRenderRadiusPreviewTier,
-  type DebugOverlay,
-} from "./logging.ts";
+import { setRenderRadiusPreviewTier } from "./logging.ts";
 import "./DevControls.css";
 
 // Single source of truth for the per-field UI metadata: label, slider
@@ -131,15 +127,6 @@ const LANE_ORDER: (keyof PlanningConfig)[] = [
   "coarseLaneOffset",
 ];
 
-const OVERLAY_DESCRIPTIONS: Record<DebugOverlay, string> = {
-  groupModes: "Per-group badge over the canvas: detail/coarse chunks available from the worker or CPU cache (Davailable/wanted Cavailable/wanted).",
-  chunkGrid: "LOD chunk grid for every visible tile, color-coded by status (cached / in-flight / planned). Capped at ~600 cells per tick.",
-  chunkTier: "Sub-color tile chunks by displayed render tier (detail = green, coarse = yellow, missing = red). Requires chunkGrid.",
-  renderRadius: "Draw the active detail/coarse render-radius boundary. 2D shows circles; 3D shows projected sphere/ellipsoid rings.",
-  cachedTier: "Sub-color cached chunks by eviction tier (active = bright green, demoted = pale sage, prefetch = teal). Requires chunkGrid.",
-  plannedRank: "Sub-color planned chunks by queue rank (top of queue = bright orange, bottom = dim red, gray = not in pending). Requires chunkGrid.",
-};
-
 /** The four session-scoped cache knobs, in display order. */
 type CacheKnobField =
   | "mainBudgetBytes"
@@ -216,19 +203,6 @@ function usePlanningConfig(): PlanningConfig {
     () => configStore.get(),
     () => configStore.get(),
   );
-}
-
-/**
- * Version counter over the overlay registry. The registry is a plain
- * module-level Set, so there is no stable snapshot object to hand
- * `useSyncExternalStore` — a bump-on-change counter is the honest shape,
- * and it also picks up flips from another tab (the `storage` listener in
- * logging.ts) and from the render-radius drag preview.
- */
-function useOverlayVersion(): number {
-  const [version, setVersion] = useState(0);
-  useEffect(() => onOverlaysChanged(() => setVersion((v) => v + 1)), []);
-  return version;
 }
 
 /**
@@ -322,45 +296,6 @@ function TunableRow({
           {warning}
         </div>
       )}
-    </div>
-  );
-}
-
-/**
- * The six on-canvas overlay toggles. They live here rather than beside
- * the log-category registry they used to share a tab with: the
- * categories are a console interface (`localStorage.debug` + reload),
- * the overlays are a layer this surface drives — including the
- * render-radius drag preview on the sliders above.
- */
-function OverlayToggles({ editable }: { editable: boolean }) {
-  // Read through the registry on every render; the version counter is
-  // what makes "every render" happen after an out-of-band flip.
-  useOverlayVersion();
-  return (
-    <div className="dev-controls-section">
-      <div className="dev-controls-title">Overlays</div>
-      <div className="dev-controls-note">
-        Visual layers drawn over the canvas. Slice + volume modes both work.
-      </div>
-      {DEBUG_OVERLAYS.map((name) => (
-        <label key={name} className="dev-controls-check-row">
-          <input
-            type="checkbox"
-            aria-label={name}
-            checked={isOverlayEnabled(name)}
-            disabled={!editable}
-            onChange={() => {
-              if (!editable) return;
-              setOverlayEnabled(name, !isOverlayEnabled(name));
-            }}
-          />
-          <div>
-            <div className="dev-controls-check-name">{name}</div>
-            <div className="dev-controls-note">{OVERLAY_DESCRIPTIONS[name]}</div>
-          </div>
-        </label>
-      ))}
     </div>
   );
 }
@@ -561,8 +496,6 @@ export function DevControls({
             </div>
           )}
         </div>
-
-        <OverlayToggles editable={editable} />
 
         <SessionCacheKnobs getCpuCache={getCpuCache} editable={editable} />
       </div>

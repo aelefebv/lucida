@@ -26,6 +26,7 @@ has not landed. Amends [0012](0012-logging-conventions.md).
 [#892]: https://github.com/aelefebv/lucida/issues/892
 [#896]: https://github.com/aelefebv/lucida/issues/896
 [#1048]: https://github.com/aelefebv/lucida/issues/1048
+[#1061]: https://github.com/aelefebv/lucida/issues/1061
 [0012]: 0012-logging-conventions.md
 [0043]: 0043-superseded-server-surfaces-sunset.md
 [0047]: 0047-trace-model-phases-runs-and-lifecycle-rows.md
@@ -139,6 +140,14 @@ a layer it owns. The three functions stay in `logging.ts`, untouched.
 > radius slider previews a boundary on an overlay that Dev controls no longer
 > owns, so the preview crosses a surface boundary again. Its disposition is
 > left to the change that moves the toggles.
+
+> **Amended 2026-09-09 ([#1061]).** The toggles moved, and the preview stays
+> as it was: a held radius slider in Dev controls still mounts the overlay
+> layer for the length of the drag and draws the boundary through it. That
+> is a dev-only control reaching into a product layer, accepted because the
+> alternative, a second boundary drawn by Dev controls itself, would be two
+> drawings of one thing that could disagree. The three functions stay in
+> `logging.ts`.
 
 ## The overlays survive, decoupled, and do not fold into the monitor
 
@@ -276,7 +285,7 @@ table must exist before step 4 retires the counts handed to it.
 | Logging tab, 5 category checkboxes | **Deleted** — `localStorage.debug` + reload is the interface |
 | Logging tab, 6 overlay toggles | **Dev controls** |
 | `DebugOverlays.tsx` (all 6) | **Kept**, decoupled from the panel |
-| `setRenderRadiusPreviewTier` | **Kept** — no longer crosses a surface boundary (amended 2026-09-09 by [#1048]: crosses one again once the toggles move to the HUD legend) |
+| `setRenderRadiusPreviewTier` | **Kept** — no longer crosses a surface boundary (amended 2026-09-09 by [#1048]: crosses one again once the toggles move to the HUD legend; kept anyway by [#1061]) |
 | 31 dead/inert `debugStats` fields | **Deleted** |
 | `debugStats.enabled` | **Deleted** with the recorder ([0049]) |
 | `DebugPanel.tsx` / `.css` | **Deleted** |
