@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.0](https://github.com/aelefebv/lucida/compare/v0.14.0...v0.15.0) (2026-09-09)
+
+
+### Features
+
+* **server:** expose a dependency status route for external monitors ([9d5c255](https://github.com/aelefebv/lucida/commit/9d5c25548f93a568f6f3c46d56a4d642436e7aea)), closes [#1045](https://github.com/aelefebv/lucida/issues/1045)
+
 ## [0.14.0](https://github.com/aelefebv/lucida/compare/v0.13.0...v0.14.0) (2026-09-05)
 
 
