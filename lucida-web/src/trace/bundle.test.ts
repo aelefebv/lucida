@@ -45,6 +45,11 @@ describe("what the bundle carries", () => {
     expect(Object.keys(bundle.renderings.perPhase).sort()).toEqual(
       bundle.diagnostic!.phases.map((phase) => phase.id).sort(),
     );
+    expect(bundle.renderings.spatial).toContain("SPATIAL");
+    expect(Object.keys(bundle.renderings.perChunk)).toEqual([bundle.diagnostic!.chunk.selector]);
+    expect(bundle.renderings.perChunk[bundle.diagnostic!.chunk.selector!].section).toEqual(
+      bundle.diagnostic!.chunk,
+    );
     expect(bundle.frame).toEqual({
       png: "iVBORw0KGgo=",
       width: 2880,

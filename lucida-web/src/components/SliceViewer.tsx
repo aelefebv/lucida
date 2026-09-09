@@ -166,7 +166,7 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
       breakFollow();
       applyViewportCommand(scene, { type: "pan", dx: pdx, dy: pdy });
       emitPresence();
-      loopRef.current?.markInteractiveDirty();
+      loopRef.current?.markInput("pan");
     },
     [dragging, scene, canvas, emitPresence, breakFollow, sendCursor, annotationDraftRef, eventToWorld],
   );
@@ -294,7 +294,7 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
       const newCy = worldY - (cursorY - canvasH / 2) / newZoom;
       applyViewportCommand(scene, { type: "set_center", x: newCx, y: newCy });
       emitPresence();
-      loopRef.current?.markInteractiveDirty();
+      loopRef.current?.markInput("zoom");
     },
     [scene, canvas, emitPresence, breakFollow],
   );

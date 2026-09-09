@@ -20,6 +20,7 @@ import type { Session } from "./session.ts";
 import type { DatasetManifest } from "./manifestTypes.ts";
 import { traceRecorder } from "./trace/recorder.ts";
 import { installTraceSeam } from "./trace/seam.ts";
+import { interactionCause } from "./trace/types.ts";
 
 function makeLoop() {
   const source = {
@@ -79,6 +80,27 @@ describe("render loop trace wiring", () => {
       dirtyKind: "interactive",
       source: "dataset_added",
     });
+  });
+
+  it("opens an interaction run on an input, under a cause that names the input", () => {
+    const { loop } = makeLoop();
+    loop.addDataset("ds-1", MANIFEST);
+    traceRecorder.closeRun("quiescent");
+    loop.markInput("orbit");
+
+    const doc = window.lucidaTrace!.exportTrace();
+    expect(doc.runs.map((run) => run.header.cause?.source)).toEqual(["dataset_added", "orbit"]);
+    expect(doc.runs[1].header.cause).toEqual(interactionCause("orbit"));
+  });
+
+  it("opens no run on an input over an empty page, so the open that follows keeps its cause", () => {
+    const { loop } = makeLoop();
+    loop.markInput("pan");
+    loop.addDataset("ds-1", MANIFEST);
+
+    const doc = window.lucidaTrace!.exportTrace();
+    expect(doc.runs).toHaveLength(1);
+    expect(doc.runs[0].header.cause?.source).toBe("dataset_added");
   });
 
   it("records the conditions that make two runs comparable", () => {

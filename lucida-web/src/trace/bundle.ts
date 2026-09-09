@@ -28,7 +28,7 @@ import type { Colormap, RenderMode, SavedView } from "../savedView/types.ts";
 import { toChromeTraceJson } from "./chromeTrace.ts";
 import { diagnoseRun } from "./diagnose/diagnose.ts";
 import { renderDiagnostic } from "./diagnose/renderText.ts";
-import type { DiagnosticDocument } from "./diagnose/types.ts";
+import type { ChunkLookup, DiagnosticDocument } from "./diagnose/types.ts";
 import type {
   BuildIdentity,
   CacheWarmth,
@@ -186,6 +186,14 @@ export interface BundleRenderings {
   phases: string;
   /** One rendering per phase, keyed by phase id. */
   perPhase: Record<string, string>;
+  /** What is where: rows by state and level with their boxes. */
+  spatial: string;
+  /**
+   * The chunk reading the document points at, keyed by its selector, with
+   * the section it was rendered from so a JSON reading names the same chunk.
+   * Any other chunk needs the page.
+   */
+  perChunk: Record<string, { text: string; section: ChunkLookup | null }>;
 }
 
 export interface TraceBundle {
@@ -476,11 +484,13 @@ const NO_RUN_RECORDED =
  * rendering that fails reports itself in place instead of losing the bundle.
  */
 function render(diagnosed: Diagnosed | null): BundleRenderings {
-  if (!diagnosed) return { summary: NO_RUN_RECORDED, phases: NO_RUN_RECORDED, perPhase: {} };
+  if (!diagnosed) {
+    return { summary: NO_RUN_RECORDED, phases: NO_RUN_RECORDED, perPhase: {}, spatial: NO_RUN_RECORDED, perChunk: {} };
+  }
   const document = diagnosed.document;
   if (!document) {
     const failure = diagnosed.failure ?? "diagnosis failed";
-    return { summary: failure, phases: failure, perPhase: {} };
+    return { summary: failure, phases: failure, perPhase: {}, spatial: failure, perChunk: {} };
   }
   const attempt = (make: () => string): string => {
     try {
@@ -495,10 +505,20 @@ function render(diagnosed: Diagnosed | null): BundleRenderings {
       () => renderDiagnostic(document, { depth: "phase", phase: phase.id }).text,
     );
   }
+  const perChunk: BundleRenderings["perChunk"] = {};
+  const selector = document.chunk.selector;
+  if (selector !== null) {
+    perChunk[selector] = {
+      text: attempt(() => renderDiagnostic(document, { depth: "chunk" }).text),
+      section: document.chunk,
+    };
+  }
   return {
     summary: attempt(() => renderDiagnostic(document).text),
     phases: attempt(() => renderDiagnostic(document, { depth: "phases" }).text),
     perPhase,
+    spatial: attempt(() => renderDiagnostic(document, { depth: "spatial" }).text),
+    perChunk,
   };
 }
 
