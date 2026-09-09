@@ -12,10 +12,12 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { diagnoseRun } from "../trace/diagnose/diagnose.ts";
+import { diagnoseDocument, diagnoseRun } from "../trace/diagnose/diagnose.ts";
 import {
   coldRemoteOpen,
   healthyLocalOpen,
+  lateStallOpen,
+  makeDocument,
   makeHeader,
   makeReading,
   makeReadingSeries,
@@ -28,9 +30,11 @@ import {
   TIMELINE_CHARTS,
   type LiveTimeline,
 } from "../trace/diagnose/timeline.ts";
-import { PHASES, type TraceReading, type TraceRun } from "../trace/types.ts";
+import { currentChunkSelection, publishChunkSelection } from "../trace/linkedSelection.ts";
+import { PHASES, type TraceDocument, type TraceReading, type TraceRun } from "../trace/types.ts";
 import type { LiveProgress } from "../trace/liveProgress.ts";
 import type { MonitorRead, MonitorRunSummary } from "./monitorSource.ts";
+import { buildTimelineDrawList, xAtMs } from "./timelineDraw.ts";
 
 /** A run in progress, as the recorder reports one. */
 function progress(overrides: Partial<LiveProgress> = {}): LiveProgress {
@@ -93,6 +97,7 @@ function liveCharts(): LiveTimeline {
 
 const read = vi.hoisted(() => ({ value: null as MonitorRead | null }));
 const runs = vi.hoisted(() => ({ value: [] as MonitorRunSummary[] }));
+const trace = vi.hoisted(() => ({ value: null as TraceDocument | null }));
 const live = vi.hoisted(() => ({ value: null as unknown }));
 const reading = vi.hoisted(() => ({ value: null as unknown }));
 const charts = vi.hoisted(() => ({ value: null as unknown }));
@@ -101,7 +106,9 @@ const downloadBundle = vi.hoisted(() => vi.fn(() => Promise.resolve("lucida-run-
 const sendReport = vi.hoisted(() =>
   vi.fn(() => Promise.resolve({ entryId: "5d1f0c2e-7b3a", expiresAt: "2026-09-23T14:05:00Z" })),
 );
-const readMonitor = vi.hoisted(() => vi.fn(() => ({ read: read.value, runs: runs.value })));
+const readMonitor = vi.hoisted(() =>
+  vi.fn(() => ({ read: read.value, runs: runs.value, trace: trace.value })),
+);
 const readProgress = vi.hoisted(() => vi.fn(() => live.value));
 const readProvisional = vi.hoisted(() => vi.fn(() => reading.value));
 const readLiveTimeline = vi.hoisted(() => vi.fn(() => charts.value));
@@ -113,7 +120,11 @@ const stopRun = vi.hoisted(() =>
   }),
 );
 
-vi.mock("./monitorSource.ts", () => ({
+// Only the reads that touch the seam are replaced. readWindow stays real: it
+// derives from the document the snapshot already holds, and the brush tests
+// assert what it derives.
+vi.mock("./monitorSource.ts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./monitorSource.ts")>()),
   readMonitor,
   downloadTraceFile,
   downloadBundle,
@@ -128,7 +139,24 @@ const { MonitorDock } = await import("./MonitorDock.tsx");
 
 function showing(run: TraceRun) {
   read.value = { ok: true, document: diagnoseRun(run) };
+  trace.value = makeDocument([run]);
   return render(<MonitorDock onClose={() => {}} />);
+}
+
+/**
+ * Drag across the axis from one instant of the run's clock to another. The
+ * canvas has no layout here, so its client rectangle sits at the origin and
+ * a CSS x on its own scale is the pointer's client x.
+ */
+function brush(run: TraceRun, startMs: number, endMs: number) {
+  const canvas = screen.getByTestId("monitor-timeline-canvas");
+  const { scale } = buildTimelineDrawList(diagnoseRun(run).timeline, {
+    width: parseFloat(canvas.style.width),
+    devicePixelRatio: 1,
+  });
+  fireEvent.pointerDown(canvas, { clientX: xAtMs(scale, startMs), clientY: 20, button: 0 });
+  fireEvent.pointerMove(document, { clientX: xAtMs(scale, endMs), clientY: 20 });
+  fireEvent.pointerUp(document, { clientX: xAtMs(scale, endMs), clientY: 20 });
 }
 
 beforeEach(() => {
@@ -145,6 +173,7 @@ beforeEach(() => {
   readLiveTimeline.mockClear();
   stopRun.mockClear();
   runs.value = [];
+  trace.value = null;
   live.value = null;
   reading.value = null;
   charts.value = null;
@@ -154,6 +183,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  publishChunkSelection(null);
 });
 
 describe("what leads", () => {
@@ -376,7 +406,7 @@ describe("observation only", () => {
     const labels = screen.getAllByRole("button").map((node) => node.textContent);
     for (const label of labels) {
       expect(label).toMatch(
-        /^(Close|Pop out|Read the newest run|Save run|Save for Perfetto|Save bundle|Send report|Start a watch stream|Show the rows behind .*|Close drill-down)$/,
+        /^(Close|Pop out|Read the newest run|Save run|Save for Perfetto|Save bundle|Send report|Start a watch stream|Show the rows behind .*|Close drill-down|Clear the brush)$/,
       );
     }
   });
@@ -472,6 +502,122 @@ describe("the timeline between the coverage and the verdict", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("brushing a window on the axis", () => {
+  it("scopes the report to the window and states it, with the show command that reads the same numbers", () => {
+    // The late-stall run: a decode stall over the whole run, clear over its
+    // first second.
+    const run = lateStallOpen();
+    showing(run);
+    expect(screen.getAllByTestId("monitor-callout-verdict")[0].textContent).toContain("browser.decode");
+
+    brush(run, 0, 1_000);
+
+    expect(screen.getByTestId("monitor-banner-window").textContent).toContain("0..1000 ms");
+    expect(screen.getAllByTestId("monitor-callout-verdict")[0].textContent).toContain("no stall");
+    expect(screen.getByTestId("monitor-brush-command").textContent).toBe(
+      "lucida trace show late-stall --window 0..1000",
+    );
+    expect(parseFloat(screen.getByTestId("monitor-brush").style.width)).toBeGreaterThan(0);
+    // The phase table on screen matches the derivation the CLI's window flag
+    // evaluates over the same window.
+    const flagged = diagnoseDocument(makeDocument([run]), {
+      runId: "late-stall",
+      window: { startMs: 0, endMs: 1_000 },
+    });
+    const decode = flagged.phases.find((phase) => phase.id === "browser.decode")!;
+    const table = screen.getByTestId("monitor-phase-table");
+    const row = within(table).getByText("browser.decode").closest("tr")!;
+    const cells = [...row.querySelectorAll("td")].map((cell) => cell.textContent);
+    expect(cells[1]).toBe(decode.n.toLocaleString());
+    expect(decode.n).toBe(60);
+  });
+
+  it("publishes the brushed chunk set, narrowed to the phase a drill-down scopes to", () => {
+    const run = lateStallOpen();
+    showing(run);
+    expect(currentChunkSelection()).toBeNull();
+
+    brush(run, 1_100, 2_000);
+
+    const published = currentChunkSelection();
+    expect(published).toMatchObject({ runId: "late-stall", phase: null, chunks: 40 });
+    expect(published?.window).toMatchObject({ startMs: 1_100, endMs: 2_000 });
+    expect(screen.getByTestId("monitor-brush-selection").textContent).toContain("40 chunks");
+
+    // The verdict inside this window names browser.decode, so drilling into
+    // it scopes the set to that phase.
+    fireEvent.click(screen.getByTestId("monitor-drill-verdict"));
+    expect(currentChunkSelection()).toMatchObject({ phase: "browser.decode", chunks: 40 });
+    expect(screen.getByTestId("monitor-brush-selection").textContent).toContain("browser.decode");
+
+    fireEvent.click(screen.getByText("Close drill-down"));
+    expect(currentChunkSelection()?.phase).toBeNull();
+  });
+
+  it("clears the brush from its control, restoring the whole-run report and clearing the set", () => {
+    const run = lateStallOpen();
+    showing(run);
+    brush(run, 0, 1_000);
+    expect(screen.getByTestId("monitor-banner-window")).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("monitor-brush-clear"));
+
+    expect(screen.queryByTestId("monitor-banner-window")).toBeNull();
+    expect(screen.queryByTestId("monitor-brush")).toBeNull();
+    expect(screen.getAllByTestId("monitor-callout-verdict")[0].textContent).toContain("browser.decode");
+    expect(currentChunkSelection()).toBeNull();
+  });
+
+  it("treats a click on the axis as clearing, never as a window", () => {
+    const run = lateStallOpen();
+    showing(run);
+    brush(run, 0, 1_000);
+
+    brush(run, 500, 500);
+
+    expect(screen.queryByTestId("monitor-banner-window")).toBeNull();
+    expect(currentChunkSelection()).toBeNull();
+  });
+
+  it("keeps the axis whole while brushed, and drops the brush when another run is read", () => {
+    const run = lateStallOpen();
+    showing(run);
+    brush(run, 1_100, 2_000);
+
+    expect(screen.getByTestId("monitor-timeline-statement").textContent).toContain("0..2000 ms");
+    fireEvent.click(screen.getByTestId("monitor-reread"));
+
+    expect(screen.queryByTestId("monitor-banner-window")).toBeNull();
+    expect(currentChunkSelection()).toBeNull();
+  });
+
+  it("clears the published set when the dock unmounts", () => {
+    const run = lateStallOpen();
+    const view = showing(run);
+    brush(run, 1_100, 2_000);
+    expect(currentChunkSelection()).not.toBeNull();
+
+    view.unmount();
+
+    expect(currentChunkSelection()).toBeNull();
+  });
+
+  it("offers no brush on the live picture, which is provisional and has no closed interval to scope", () => {
+    live.value = progress();
+    charts.value = liveCharts();
+    render(<MonitorDock onClose={() => {}} />);
+
+    const canvas = screen.getByTestId("monitor-timeline-canvas");
+    fireEvent.pointerDown(canvas, { clientX: 300, clientY: 20, button: 0 });
+    fireEvent.pointerMove(document, { clientX: 600, clientY: 20 });
+    fireEvent.pointerUp(document, { clientX: 600, clientY: 20 });
+
+    expect(screen.queryByTestId("monitor-brush")).toBeNull();
+    expect(screen.queryByTestId("monitor-brush-line")).toBeNull();
+    expect(currentChunkSelection()).toBeNull();
   });
 });
 

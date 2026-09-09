@@ -67,6 +67,7 @@
 }
 
 .monitor-timeline-canvas-wrap {
+  position: relative;
   width: 100%;
   overflow-x: auto;
 }
@@ -74,6 +75,32 @@
 .monitor-timeline-canvas {
   display: block;
   border: 1px solid #2c2c2c;
+}
+
+.monitor-timeline-canvas-brushable {
+  cursor: crosshair;
+  touch-action: none;
+}
+
+/* Placed in CSS pixels off the same scale the drag was read with, so it sits
+   on the axis at any pixel ratio. */
+.monitor-brush {
+  position: absolute;
+  top: 0;
+  pointer-events: none;
+  background: rgba(111, 143, 209, 0.18);
+  border-left: 1px solid #6f8fd1;
+  border-right: 1px solid #6f8fd1;
+  box-sizing: border-box;
+}
+
+.monitor-brush-line code {
+  font-family: "SF Mono", "Menlo", "Monaco", monospace;
+  color: #e6e6e6;
+}
+
+.monitor-brush-line button {
+  margin-left: 6px;
 }
 
 .monitor-timeline-legend {
@@ -183,6 +210,12 @@
 .monitor-banner-truncation {
   border-left-color: #d1665b;
   background: #2a1614;
+}
+
+/* The same blue as the brush on the axis. */
+.monitor-banner-window {
+  border-left-color: #6f8fd1;
+  background: #171c26;
 }
 
 /* --- callouts: the verdict, then the ranked findings ---------------------- */

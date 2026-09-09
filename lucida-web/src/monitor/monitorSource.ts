@@ -18,10 +18,11 @@
 
 import type { InboxReceipt } from "../bridge.ts";
 import { bundleFilename } from "../trace/bundle.ts";
+import { selectChunks, type ChunkSelection } from "../trace/diagnose/chunkSelection.ts";
 import { diagnoseDocument } from "../trace/diagnose/diagnose.ts";
 import type { ProvisionalReading } from "../trace/diagnose/provisional.ts";
 import type { LiveTimeline } from "../trace/diagnose/timeline.ts";
-import type { DiagnosticDocument } from "../trace/diagnose/types.ts";
+import type { DiagnosticDocument, WindowRequest } from "../trace/diagnose/types.ts";
 import type { LiveProgress } from "../trace/liveProgress.ts";
 import { sendBundle } from "../trace/reportInbox.ts";
 import type { LucidaTraceSeam } from "../trace/seam.ts";
@@ -51,6 +52,19 @@ export interface MonitorSnapshot {
    * monitor the newest interval can be the quiet tail rather than the open.
    */
   runs: MonitorRunSummary[];
+  /**
+   * The document the read came from, kept so a window brushed later is
+   * derived from it rather than from a second export, which would close
+   * another interval on the way to the same run. Null where there was no
+   * seam to export from.
+   */
+  trace: TraceDocument | null;
+}
+
+/** A run read over one window of its clock, and the chunk set the window selected. */
+export interface WindowedRead {
+  document: DiagnosticDocument;
+  selection: ChunkSelection;
 }
 
 /**
@@ -71,18 +85,53 @@ export function readMonitor(runId?: string, seam = window.lucidaTrace): MonitorS
         reason: "This page is not running a lucida build with the trace seam installed.",
       },
       runs: [],
+      trace: null,
     };
   }
   const document = seam.exportTrace();
   const runs = summariseRuns(document);
   try {
-    return { read: { ok: true, document: diagnoseDocument(document, { runId }) }, runs };
+    return {
+      read: { ok: true, document: diagnoseDocument(document, { runId }) },
+      runs,
+      trace: document,
+    };
   } catch (error) {
     return {
       read: { ok: false, reason: error instanceof Error ? error.message : String(error) },
       runs,
+      trace: document,
     };
   }
+}
+
+/**
+ * Read one run over a window of its clock: the report the brush scopes to,
+ * and the chunk set the brush publishes.
+ *
+ * Derived from the document already in hand and never from a fresh export,
+ * so brushing closes nothing. It is the derivation the seam's `diagnoseTrace`
+ * applies, and that is what `lucida trace show --window` evaluates on a
+ * page, so the numbers under a brush and under the flag are one computation.
+ * `phase` narrows the set to the rows that were in that phase during the
+ * window, and null takes every row the window can see. The document is the
+ * window's either way.
+ *
+ * Throws, as the derivation does, when the document has no such run or the
+ * window is empty once clamped to it.
+ */
+export function readWindow(
+  trace: TraceDocument,
+  runId: string,
+  window: WindowRequest,
+  phase: string | null,
+): WindowedRead {
+  const run = trace.runs.find((candidate) => candidate.header.runId === runId);
+  if (!run) throw new Error(`no run ${runId} in this trace document`);
+  return {
+    document: diagnoseDocument(trace, { runId, window }),
+    selection: selectChunks(run, window, phase),
+  };
 }
 
 /**

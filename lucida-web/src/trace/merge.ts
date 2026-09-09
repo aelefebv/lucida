@@ -156,6 +156,7 @@ function unplaced(row: StoredServerRow, reason: UnplacedReason): TraceServerRow 
   return { ...row, placement: null, unplacedReason: reason };
 }
 
-function labelKey(connectionGeneration: number, rid: number): string {
+/** The join key as one string, for any table that groups rows by wire label. */
+export function labelKey(connectionGeneration: number, rid: number): string {
   return `${connectionGeneration}:${rid}`;
 }

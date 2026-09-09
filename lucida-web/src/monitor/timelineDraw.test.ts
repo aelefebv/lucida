@@ -14,6 +14,7 @@ import { diagnoseRun } from "../trace/diagnose/diagnose.ts";
 import {
   coldRemoteOpen,
   healthyLocalOpen,
+  lateStallOpen,
   makeReading,
   makeRun,
   mainThreadOnlyOpen,
@@ -21,7 +22,15 @@ import {
 } from "../trace/diagnose/fixtures.ts";
 import { TIMELINE_BUCKETS, TIMELINE_CHARTS } from "../trace/diagnose/timeline.ts";
 import type { TimelineSection } from "../trace/diagnose/types.ts";
-import { buildTimelineDrawList, GUTTER_PX, ROW_PX, type DrawPrimitive } from "./timelineDraw.ts";
+import {
+  brushWindow,
+  buildTimelineDrawList,
+  GUTTER_PX,
+  msAtX,
+  ROW_PX,
+  xAtMs,
+  type DrawPrimitive,
+} from "./timelineDraw.ts";
 import { PHASE_COLORS, seriesColor } from "./timelinePalette.ts";
 
 const MS = 1_000;
@@ -157,6 +166,46 @@ describe("device pixel ratio", () => {
   it("never lays out narrower than the gutter and a readable plot", () => {
     const list = buildTimelineDrawList(diagnoseRun(coldRemoteOpen()).timeline, { width: 10, devicePixelRatio: 1 });
     expect(list.width).toBeGreaterThan(GUTTER_PX + 100);
+  });
+});
+
+describe("the axis scale", () => {
+  it("maps a CSS x on the plot to milliseconds on the run's clock and back, clamped to the axis", () => {
+    const list = buildTimelineDrawList(diagnoseRun(lateStallOpen()).timeline, { width: 1_000, devicePixelRatio: 1 });
+    const plotWidth = 1_000 - GUTTER_PX - 12;
+
+    expect(list.scale).toEqual({ plotX: GUTTER_PX, plotWidth, startMs: 0, spanMs: 2_000 });
+    expect(msAtX(list.scale, GUTTER_PX)).toBe(0);
+    expect(msAtX(list.scale, GUTTER_PX + plotWidth / 2)).toBe(1_000);
+    expect(msAtX(list.scale, GUTTER_PX + plotWidth)).toBe(2_000);
+    // The gutter and anything past the plot clamp to the axis's ends.
+    expect(msAtX(list.scale, 0)).toBe(0);
+    expect(msAtX(list.scale, 5_000)).toBe(2_000);
+    expect(xAtMs(list.scale, 1_000)).toBe(GUTTER_PX + plotWidth / 2);
+    expect(xAtMs(list.scale, 2_000)).toBe(GUTTER_PX + plotWidth);
+  });
+
+  it("follows the axis the section was derived over, so a windowed section maps its own stretch", () => {
+    const section = diagnoseRun(lateStallOpen(), { window: { startMs: 1_100, endMs: 2_000 } }).timeline;
+    const list = buildTimelineDrawList(section, { width: 1_000, devicePixelRatio: 1 });
+
+    expect(list.scale.startMs).toBe(1_100);
+    expect(list.scale.spanMs).toBe(900);
+    expect(msAtX(list.scale, GUTTER_PX)).toBe(1_100);
+  });
+
+  it("turns a drag into a window in whole milliseconds, whichever way it was dragged, and refuses a click", () => {
+    const list = buildTimelineDrawList(diagnoseRun(lateStallOpen()).timeline, { width: 1_000, devicePixelRatio: 1 });
+    const from = xAtMs(list.scale, 1_100.4);
+    const to = xAtMs(list.scale, 1_999.6);
+
+    expect(brushWindow(list.scale, from, to)).toEqual({ startMs: 1_100, endMs: 2_000 });
+    expect(brushWindow(list.scale, to, from)).toEqual({ startMs: 1_100, endMs: 2_000 });
+    // A drag that starts in the gutter or runs off the plot clamps to the axis.
+    expect(brushWindow(list.scale, 0, 5_000)).toEqual({ startMs: 0, endMs: 2_000 });
+    // A click, or a drag under a millisecond, brushes nothing.
+    expect(brushWindow(list.scale, from, from)).toBeNull();
+    expect(brushWindow(list.scale, from, from + 0.01)).toBeNull();
   });
 });
 

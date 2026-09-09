@@ -1,10 +1,11 @@
 // @vitest-environment happy-dom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { lateStallOpen, makeDocument } from "../trace/diagnose/fixtures.ts";
 import { installTraceSeam } from "../trace/seam.ts";
 import { traceRecorder } from "../trace/recorder.ts";
 import { createQuiescenceState } from "../trace/quiescence.ts";
-import { downloadBundle, readMonitor, readProvisional, traceFile } from "./monitorSource.ts";
+import { downloadBundle, readMonitor, readProvisional, readWindow, traceFile } from "./monitorSource.ts";
 
 /**
  * Stands in for the render loop, which registers the real one. A run cannot
@@ -89,7 +90,7 @@ describe("reading a run", () => {
     expect(snapshot.runs).toEqual([]);
   });
 
-  it("takes the diagnosis and the run list from one export", () => {
+  it("takes the diagnosis and the run list from one export, and keeps the document for a window", () => {
     // Exporting closes the run in progress. Asking twice for one answer would
     // close an interval on the way to each half of it.
     registerEnvironment();
@@ -97,9 +98,14 @@ describe("reading a run", () => {
     const exportTrace = vi.spyOn(seam, "exportTrace");
     traceRecorder.openRun(OPEN);
 
-    readMonitor(undefined, seam);
+    const snapshot = readMonitor(undefined, seam);
 
     expect(exportTrace).toHaveBeenCalledTimes(1);
+    expect(snapshot.trace?.runs.length).toBe(1);
+  });
+
+  it("keeps no document when there is no seam", () => {
+    expect(readMonitor(undefined, undefined).trace).toBeNull();
   });
 
   it("lists the runs the recording still holds, newest first, so a reader can pick one", () => {
@@ -121,6 +127,49 @@ describe("reading a run", () => {
     // And the older one is readable by id.
     const older = readMonitor(runs[1].runId, seam);
     expect(older.read.ok && older.read.document.runId).toBe(runs[1].runId);
+  });
+});
+
+describe("reading a window of a run", () => {
+  const trace = () => makeDocument([lateStallOpen()]);
+
+  it("derives the window from the document already in hand, and exports nothing", () => {
+    registerEnvironment();
+    const seam = installTraceSeam();
+    const exportTrace = vi.spyOn(seam, "exportTrace");
+
+    const windowed = readWindow(trace(), "late-stall", { startMs: 1_100, endMs: 2_000 }, null);
+
+    expect(exportTrace).not.toHaveBeenCalled();
+    expect(windowed.document.runId).toBe("late-stall");
+    expect(windowed.document.window).toMatchObject({ startMs: 1_100, endMs: 2_000, whole: false });
+    expect(windowed.selection).toMatchObject({ runId: "late-stall", phase: null, chunks: 40 });
+  });
+
+  it("reads the same document the seam hands the CLI for the same window", () => {
+    // `lucida trace show --window` evaluates `seam.diagnoseTrace` on a page,
+    // so that is the document the brush has to match.
+    const seam = installTraceSeam();
+    const document = trace();
+
+    const brushed = readWindow(document, "late-stall", { startMs: 1_100, endMs: 2_000 }, null);
+    const flagged = seam.diagnoseTrace(document, { runId: "late-stall", window: { startMs: 1_100, endMs: 2_000 } });
+
+    expect(brushed.document).toEqual(flagged);
+  });
+
+  it("narrows the published set to the phase the reader scoped to", () => {
+    const windowed = readWindow(trace(), "late-stall", { startMs: 1_100, endMs: 1_200 }, "browser.decode");
+
+    expect(windowed.selection.phase).toBe("browser.decode");
+    expect(windowed.selection.chunks).toBe(8);
+    // The phase narrows the set, not the document.
+    expect(windowed.document.window).toMatchObject({ startMs: 1_100, endMs: 1_200 });
+  });
+
+  it("refuses a run the document does not hold, and an empty window, with the derivation's words", () => {
+    expect(() => readWindow(trace(), "no-such-run", { startMs: 0, endMs: 1 }, null)).toThrow(/no run/);
+    expect(() => readWindow(trace(), "late-stall", { startMs: 500, endMs: 500 }, null)).toThrow(/empty/);
   });
 });
 
