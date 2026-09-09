@@ -5,7 +5,7 @@ description: "What the pipeline performance monitor records: a stage is a phase 
 tags: [lucida, decision]
 source_path: wiki/decisions/0047-trace-model-phases-runs-and-lifecycle-rows.md
 created: 2026-08-10
-modified: 2026-08-10
+modified: 2026-09-09
 ---
 
 # Trace model: phases, runs, and lifecycle rows
@@ -22,6 +22,7 @@ rates and volumes), [#899] (remote rates and latency), [#897]
 [#888]: https://github.com/aelefebv/lucida/issues/888
 [#897]: https://github.com/aelefebv/lucida/issues/897
 [#899]: https://github.com/aelefebv/lucida/issues/899
+[#1048]: https://github.com/aelefebv/lucida/issues/1048
 
 ## The situation
 
@@ -93,6 +94,21 @@ deliveries and every worker message.
 A rolling window with no run boundary was rejected: without an explicit end you
 cannot say "this open took 5.8 s", cannot diff run-over-run to prove a fix, and
 cannot give the agent surface a bounded thing to summarise.
+
+> **Amended 2026-09-09 ([#1048]).** The recorder that shipped under this model
+> opened a run on a content epoch only, so a pan, a zoom, an orbit, and a scrub
+> all landed in the steady-state interval, which no surface read. View and
+> selection epochs now open runs too. The cause carries the epoch kind and the
+> input kind, one of pan, zoom, orbit, scrub, or select, and the content cause
+> is unchanged. The gesture rule fixes the boundary: a run opens on the first
+> interactive dirty after quiescence, inputs while it is open extend it and
+> never open another, and it closes on quiescence after the last input under
+> the existing 500 ms hold. One continuous drag is therefore one run rather
+> than one run per input event, which is what gives a pan or an orbit a
+> duration, a bytes-sent figure, and a frame-time shape. The steady-state
+> interval keeps its
+> retention unchanged and gains a reader: the steady-state ruleset of that spec
+> walks it for the traffic that continues after a run has closed.
 
 ## The unit of record is a lifecycle row, in two tiers
 
