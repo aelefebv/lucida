@@ -36,6 +36,8 @@ export interface TraceSink {
   append(src: ChunkRowSource, tier: 0 | 1): number;
   setLabel(index: number, label: WireLabel): void;
   stamp(index: number, boundary: number, offsetUs: number): void;
+  /** The payload bytes the wire delivered for the row. */
+  setBytes(index: number, bytes: number): void;
   setOutcome(index: number, outcome: RowOutcomeValue): void;
   /**
    * The rows so far, tallied for the live view (#937). The one read that
@@ -55,6 +57,13 @@ export interface TraceSink {
    */
   appendReading(atUs: number, values: Float64Array, gpuPassUs: number | null): void;
   serialiseReadings(): TraceReading[];
+  /**
+   * The readings from `startUs` on, led by the one in force at that instant
+   * (#1057). The other read that happens while the interval is still open:
+   * a provisional reading over a trailing window is derived from these and
+   * from the live tally, and from no row.
+   */
+  serialiseReadingsFrom(startUs: number): TraceReading[];
   appendEvent(
     atUs: number,
     kind: PointEventIndex,
@@ -102,6 +111,8 @@ export class NoopTraceSink implements TraceSink {
 
   stamp(): void {}
 
+  setBytes(): void {}
+
   setOutcome(): void {}
 
   liveTally(occupancy: Uint32Array): LiveTally {
@@ -122,6 +133,10 @@ export class NoopTraceSink implements TraceSink {
   appendReading(): void {}
 
   serialiseReadings(): TraceReading[] {
+    return [];
+  }
+
+  serialiseReadingsFrom(): TraceReading[] {
     return [];
   }
 
@@ -177,6 +192,10 @@ export class TableTraceSink implements TraceSink {
     this.rows.stamp(index, boundary, offsetUs);
   }
 
+  setBytes(index: number, bytes: number): void {
+    this.rows.setBytes(index, bytes);
+  }
+
   setOutcome(index: number, outcome: RowOutcomeValue): void {
     this.rows.setOutcome(index, outcome);
   }
@@ -203,6 +222,10 @@ export class TableTraceSink implements TraceSink {
 
   serialiseReadings(): TraceReading[] {
     return this.readings.serialise();
+  }
+
+  serialiseReadingsFrom(startUs: number): TraceReading[] {
+    return this.readings.serialiseFrom(startUs);
   }
 
   appendEvent(

@@ -1247,7 +1247,7 @@ struct TraceRunArgs {
     /// Seconds to wait for the page to load and settle
     #[arg(long, default_value_t = 120)]
     timeout_seconds: u64,
-    /// Fail (non-zero) on a stall verdict or a run that never settled
+    /// Fail (non-zero) on a stall or steady-state verdict, or a run that never settled
     ///
     /// Opt-in, because every other non-zero exit in this CLI means the command
     /// itself failed. Never fires on coverage: most of a healthy cold open is

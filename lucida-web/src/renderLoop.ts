@@ -2,6 +2,7 @@
 import type { DatasetManifest } from "./manifestTypes.ts";
 import type { TickContext, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
 import { RESIDENCY_RENDER_INTERVAL_MS } from "./renderLoopTypes.ts";
+import { TickWake } from "./invalidation.ts";
 import type { SceneEpochs } from "./pipeline/epochs.ts";
 import { debugLog } from "./debug/logging.ts";
 import { type SliceState, createSliceState, tickSlice, clearSliceForDataset, clearSliceForMembers } from "./slicePath.ts";
@@ -46,6 +47,8 @@ export class RenderLoop implements TraceEnvironment {
 
   private interactiveDirty = true;
   private residencyDirty = false;
+  /** What has dirtied the loop since the tick before; the tick tells the recorder. */
+  private readonly wake = new TickWake();
   private lastResidencyRenderTime = 0;
   private rafId: number | null = null;
   private unsubs = new Map<string, () => void>();
@@ -489,6 +492,7 @@ export class RenderLoop implements TraceEnvironment {
     } else {
       this.residencyDirty = true;
     }
+    this.wake.note(source);
     this.scheduleIfNeeded();
 
     const key = `${kind}:${source}`;
@@ -538,6 +542,10 @@ export class RenderLoop implements TraceEnvironment {
       this.scheduleIfNeeded();
       return;
     }
+
+    // Before anything in this tick can dirty the loop again: what woke this
+    // one is what the samples it publishes carry.
+    traceRecorder.noteTickWake(this.wake.take());
 
     const now = performance.now();
     let shouldRender = false;

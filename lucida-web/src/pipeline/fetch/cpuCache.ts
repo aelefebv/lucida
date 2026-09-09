@@ -36,7 +36,7 @@ import {
 } from "./proxyStore.ts";
 import { Scheduler, type SchedulableRequest } from "./scheduler.ts";
 import { traceRecorder } from "../../trace/recorder.ts";
-import { Boundary, CountedPhaseIndex, PointEvent, RowOutcome } from "../../trace/types.ts";
+import { CountedPhaseIndex, PointEvent, RowOutcome } from "../../trace/types.ts";
 import { parseChunkKey } from "../../renderer/chunkKeys.ts";
 import type { ChunkFeedbackReason } from "../../renderer/workerProtocol.ts";
 import type { CacheQuiescenceInputs } from "../../trace/quiescence.ts";
@@ -1080,6 +1080,13 @@ export class CpuCache {
     out.residentDetailChunks = demand.resident.detailChunks;
     out.desiredCoarseChunks = demand.desired.coarseChunks;
     out.residentCoarseChunks = demand.resident.coarseChunks;
+    // The whole store against the budget eviction enforces, not the
+    // wanted-and-resident subset above: a tier is full when everything it
+    // holds fills it, whether or not the current plan asked for all of it.
+    out.detailBytes = this.chunkStore.bytes;
+    out.detailBudgetBytes = this.chunkStore.budgetBytes;
+    out.coarseBytes = this.overviewStore.bytes;
+    out.coarseBudgetBytes = this.overviewStore.budgetBytes;
     out.inFlight = inFlight;
     out.speculativeInFlight = speculativeInFlight;
     out.speculativePending = speculativePending ?? 0;
@@ -1297,9 +1304,10 @@ export class CpuCache {
     }
 
     // Closes `wire` and opens `decode` — adjacent phases share the slot
-    // between them. The pool closes `decode` on its own onmessage, and the
-    // row completes when a frame has drawn the chunk.
-    traceRecorder.stamp(traceRow, Boundary.DecodeStart);
+    // between them — and records what the wire delivered. The pool closes
+    // `decode` on its own onmessage, and the row completes when a frame has
+    // drawn the chunk.
+    traceRecorder.noteBytesReceived(traceRow, result.bytes.byteLength);
 
     this.counters.recordCompletedFetch(result.bytes.byteLength);
     // Correct the in-flight byte estimate only while this settle still owns

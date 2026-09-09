@@ -8,9 +8,9 @@
  * change rather than a silent one — a diagnostic read six months from now
  * states which numbers judged it.
  *
- * Three families, because one number provably cannot serve this pipeline:
- * #899 measured p50 network first byte at 98 ms and p50 scheduler queue wait
- * at 4,600 ms, two orders of magnitude apart.
+ * Three families judge the run, because one number provably cannot serve this
+ * pipeline: #899 measured p50 network first byte at 98 ms and p50 scheduler
+ * queue wait at 4,600 ms, two orders of magnitude apart.
  *
  * 1. **Absolute p95 ceilings** for I/O and compute phases, each set above the
  *    worst healthy p95 observed rather than at it.
@@ -24,6 +24,14 @@
  * reading rather than a phase: main-thread frame time over the run. It
  * replaces the share rule for that reading, because a gesture ticks every
  * frame and its main-thread share is near total by construction.
+ *
+ * The steady-state rules are a fourth family, and they judge what the run left
+ * behind rather than the run: sustained bytes received and sent, refetch of a
+ * chunk already fetched, and replans woken by availability alone, all over the
+ * unlabelled interval that opened when the run closed; plus a tier that cannot
+ * fit what the view wants, over the run's settle block. They answer "is this
+ * expected" about traffic after the view looks loaded, which no ceiling on a
+ * phase can, because a settled view has no stall to find.
  */
 
 import type { PhaseClass } from "./types.ts";
@@ -31,9 +39,9 @@ import type { PhaseClass } from "./types.ts";
 /**
  * Bumped whenever a threshold moves or a rule is added, so two diagnostics
  * are visibly comparable or visibly not. Version 2 added the interaction
- * frame-time ceiling.
+ * frame-time ceiling. Version 3 added the steady-state family.
  */
-export const RULESET_VERSION = 2;
+export const RULESET_VERSION = 3;
 
 export interface AbsoluteRule {
   id: string;
@@ -77,6 +85,57 @@ export interface CompareRule {
   why: string;
 }
 
+/**
+ * A rate held for long enough to be traffic rather than a tail. For bytes
+ * received, `minSeconds` counts the seconds of the interval that each carried
+ * `minBytesPerS`, so a burst that finishes in two seconds does not fire. For
+ * bytes sent it is the least span an interval needs before its average is
+ * judged, because sends ride the planning cadence and cannot be binned.
+ */
+export interface SustainedRule {
+  id: string;
+  minBytesPerS: number;
+  minSeconds: number;
+  why: string;
+}
+
+/** Chunks fetched more than once inside the interval, by row identity. */
+export interface RefetchRule {
+  id: string;
+  minChunks: number;
+  why: string;
+}
+
+/**
+ * A tier whose wanted set exceeds its budget: full to `minFillPct`, wanting
+ * more chunks than it holds, with nothing pending and nothing in flight.
+ */
+export interface BudgetBoundRule {
+  id: string;
+  minFillPct: number;
+  why: string;
+}
+
+/** Planning passes woken by an availability update and nothing else. */
+export interface ReplanRule {
+  id: string;
+  minPasses: number;
+  why: string;
+}
+
+/**
+ * The five steady-state rules. Each carries its floor and its rationale, as
+ * every other rule here does, so a finding prints the number that judged it
+ * and the reason that number was chosen.
+ */
+export interface SteadyStateRules {
+  received: SustainedRule;
+  refetch: RefetchRule;
+  budgetBound: BudgetBoundRule;
+  replans: ReplanRule;
+  sent: SustainedRule;
+}
+
 export interface Ruleset {
   version: number;
   note: string;
@@ -94,6 +153,11 @@ export interface Ruleset {
    * which has no per-item rows.
    */
   interaction: AbsoluteRule;
+  /**
+   * What the run left behind: four rules over the interval that opened when
+   * it closed, and one over its settle block. None of them judges the run.
+   */
+  steadyState: SteadyStateRules;
 }
 
 /**
@@ -234,7 +298,7 @@ const ABSOLUTE: readonly AbsoluteRule[] = [
 export const RULESET: Ruleset = {
   version: RULESET_VERSION,
   note:
-    "Three threshold families. One number cannot serve a pipeline whose p50 network first byte is 98 ms and whose p50 scheduler queue wait is 4,600 ms (#899 §1, §3). Every ceiling is provisional, derived from throwaway-instrumented research runs on one machine and one link; the first real traces should re-derive them.",
+    "Three threshold families over the run, and a fourth over the interval after it closed. One number cannot serve a pipeline whose p50 network first byte is 98 ms and whose p50 scheduler queue wait is 4,600 ms (#899 §1, §3). Every ceiling is provisional, derived from throwaway-instrumented research runs on one machine and one link; the first real traces should re-derive them.",
   absolute: ABSOLUTE,
   queuePhases: Object.entries(PHASE_CLASSES)
     .filter(([, cls]) => cls === "queue")
@@ -272,5 +336,34 @@ export const RULESET: Ruleset = {
     stat: "p95",
     ceilMs: 50,
     why: "An interaction run is judged on whether the gesture stayed smooth, not on how much of it the main thread held: a drag ticks every frame, so its main-thread share is near total on every gesture and says nothing. The reading is main-thread tick time and includes the plan pass, so the ceiling matches compute.plan's 50 ms rather than undercutting it — three dropped frames at 60 Hz, far above a healthy tick, and a run whose planning passed cannot fail here on planning alone. It is main-thread time only: a slow GPU pass shows here only as far as it holds the main thread.",
+  },
+  steadyState: {
+    received: {
+      id: "steady.received",
+      minBytesPerS: 32 * 1024,
+      minSeconds: 5,
+      why: "After the view settles the pipeline owes it nothing: prefetch and minimap seeding are finite and finish within a few seconds, and a settled view fetches nothing. 32 KiB/s is a tenth of one remote chunk a second at the 326 KiB per chunk the remote-rates research measured, so a second that carries it is a second the pipeline was still fetching. Five such seconds after settle is traffic rather than a tail. Seconds are counted one by one so a burst that finishes in two does not fire, and bytes are counted once per wire request so rows that coalesced onto one fetch do not multiply it. Provisional, like every floor here.",
+    },
+    refetch: {
+      id: "steady.refetch",
+      minChunks: 4,
+      why: "A chunk fetched twice in one interval with the view unchanged was evicted and wanted again. One or two are boundary cases: a speculative chunk dropped and re-requested, a level crossing under the view. A loop under budget pressure evicts in batches and so refetches many chunks at once. Four is above the boundary cases on a small view and well under the smallest loop, which cycles the whole wanted set. The window is the interval, and it is printed with the count because a count without a denominator is not a measurement.",
+    },
+    budgetBound: {
+      id: "steady.budget-bound",
+      minFillPct: 90,
+      why: "Eviction holds a tier under its budget by at most the chunk that did not fit, so a full tier reads a little under it. A tier holding nine tenths of its budget, wanting more chunks than it holds, with nothing pending and nothing in flight, has stopped asking because the rest cannot fit: it is budget-bound, and a run waiting on it cannot settle. Below that fill the same shortfall is something else, chunks the source could not serve yet or a queue that emptied for another reason, and is not blamed on the budget. The loss is stated in chunks of the wanted set, which is the coverage the screen goes without, rather than as the timeout it causes.",
+    },
+    replans: {
+      id: "steady.replans",
+      minPasses: 3,
+      why: "The server announces generated coarse chunks as they become ready, and a view whose coarse tier was waiting re-plans once to pick them up. A pass woken by nothing but such an update, three times in one interval with no input between, is the client and the server taking turns: each plan asks, each answer wakes another plan. The count is how many turns, so the loop is visible as one finding rather than as a rising row count.",
+    },
+    sent: {
+      id: "steady.sent",
+      minBytesPerS: 1024,
+      minSeconds: 5,
+      why: "Presence once a second and a pointer's cursor messages come to a few hundred bytes a second, which is the page's heartbeat. A kilobyte a second held over five seconds or more after the view settled is the socket not going quiet, and the type it is attributed to says what kept it open. An average over the interval rather than a count of busy seconds, because sends ride the planning cadence and cannot be binned by the second; the span is printed beside the rate.",
+    },
   },
 };

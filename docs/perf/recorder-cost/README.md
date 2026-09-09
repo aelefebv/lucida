@@ -10,6 +10,7 @@ Issue [#928], under the [#921] spec, enforcing [ADR 0049][0049].
 [#928]: https://github.com/aelefebv/lucida/issues/928
 [#949]: https://github.com/aelefebv/lucida/issues/949
 [#962]: https://github.com/aelefebv/lucida/issues/962
+[#1056]: https://github.com/aelefebv/lucida/issues/1056
 [0049]: ../../../wiki/decisions/0049-unconditional-recording-under-a-design-budget.md
 [0052]: ../../../wiki/decisions/0052-debug-surface-dispositions.md
 
@@ -229,7 +230,7 @@ existing numbers rather than a fresh measurement campaign.
 | --- | --- | --- |
 | Today's floor, live state | ≈ 1.05 MB | [#888] |
 | Today's floor, per tick, on a matched shape | 1.77 µs | derived from [#888]'s per-call table — see [#962] below |
-| Recorder, live state, one 2,560-chunk run | 663 kB | the CI gate, logged each run |
+| Recorder, live state, one 2,560-chunk run | 774 kB (663 kB when first measured) | the CI gate, logged each run |
 | Recorder, matched-shape tick | 1.42–1.54 µs, 0.80–0.87× the floor | the CI gate, logged each run |
 | Recorder, whole-lifecycle tick (8 chunks) — a pessimistic bound, not the floor comparison | ~3.5 µs | the CI gate, logged each run as the second `[#962]` line |
 | Recorder, worst tick (2,943-chunk burst) | ~26 µs, 9.7× under the ceiling | the CI gate, logged each run |
@@ -246,6 +247,26 @@ Two notes on reading that table:
   forced into one tick**, which the real pipeline never does — wire, decode,
   upload and present land on later ticks as fetches settle. They are therefore
   a pessimistic bound on the marginal per-tick cost, not an estimate of it.
+- **The live tally moved onto the write path (#1057).** The live view's read
+  was a walk over every row of the open run, gated for linearity; the
+  provisional reading, the watch stream and the HUD read at the tick cadence
+  and are forbidden a row walk by [ADR 0049][0049] as amended, so the row
+  table now keeps the per-phase occupancy and the outcome counts as it
+  writes. That is a few typed-array increments per boundary, spent from the
+  write budget above. Measured on one host, same code either side: the
+  2,943-chunk burst went from 5.8 to 6.5 ns/event, the matched-shape tick
+  from 3.3 to 3.8 µs, and the live read from 254 µs at 2,000 rows and 2.1 ms
+  at the cap to about 1 µs at either. The gates log the figures each run;
+  the provisional reading's own ceilings live in
+  `lucida-web/src/trace/provisionalCost.perf.test.ts`.
+- **Two columns bought the steady-state ruleset ([#1056]).** A lifecycle row
+  carries the bytes the wire delivered, and a per-tick sample carries whether
+  an availability update alone woke the pass. The row width went 76 → 80 B
+  and the tick width gained one byte, so the floor check's run costs
+  `4,096 rows × 4 B + 1,024 ticks × 1 B` = 17 kB more live state: 757 → 774 kB
+  against the 1.05 MB floor. The write path gained one typed-array store per
+  completed fetch, which replaced a second handle resolve rather than adding
+  one — the boundary stamp and the byte count are now a single call.
 
 **What has to happen for the obligation to be discharged.** When [#918]
 (`debugStats.enabled` and its read sites) and [#919] (`DebugPanel.tsx`) land,

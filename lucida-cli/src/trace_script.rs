@@ -693,10 +693,11 @@ pub struct StepVerdict {
     pub text: String,
 }
 
-/// Whether a verdict kind fails the gate: a stall, or a run that never
-/// settled. The kinds are the page's ruleset's.
+/// Whether a verdict kind fails the gate: a stall, a run that never
+/// settled, or a steady-state finding after the view settled. The kinds are
+/// the page's ruleset's.
 pub fn failing_verdict(kind: &str) -> bool {
-    kind == "stall" || kind == "unsettled"
+    kind == "stall" || kind == "unsettled" || kind == "steady-state"
 }
 
 /// One step and what it did. The step's own fields are flattened in, so the

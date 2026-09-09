@@ -34,6 +34,7 @@ function row(phases: Partial<Record<Phase, [number, number]>>): TraceRow {
     y: 0,
     x: 0,
     chunkKey: "0/0/0/0/0/0",
+    bytes: 0,
     outcome: "complete",
     phases: built,
   };
@@ -50,6 +51,7 @@ function tick(counted: Partial<TraceTick["counted"]>): TraceTick {
     levelsDropped: 0,
     targetLevel: null,
     levelPinned: false,
+    availabilityWoken: false,
     displayedLevel: null,
   };
 }

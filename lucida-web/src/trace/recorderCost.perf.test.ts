@@ -129,6 +129,7 @@ const WARMTH = {
 const OUTSTANDING = {
   pending: 0, inFlight: 0, speculativePending: 0, speculativeInFlight: 0,
   desiredDetailChunks: 0, residentDetailChunks: 0, desiredCoarseChunks: 0, residentCoarseChunks: 0,
+  detailBytes: 0, detailBudgetBytes: 0, coarseBytes: 0, coarseBudgetBytes: 0,
 };
 
 /** One object reused across ticks, as the emit site reuses the worker's report. */
@@ -872,13 +873,15 @@ describe("recorder cost contract", () => {
    * The live view's read (#937), which is the one place a *reader* spends the
    * pipeline's main thread rather than the writer.
    *
-   * It costs a walk over every row the run has made, twice a second, while
-   * the monitor is open — so the shape that matters is linearity. A walk that
-   * went quadratic in rows would turn watching a run into perturbing it, and
-   * the surface's "observation only" claim with it. Per-row cost is gated
-   * across a 10x population rather than in absolute microseconds, for the
-   * reason this file's doc gives: absolute timings on a CI runner measure the
-   * runner.
+   * It was a walk over every row the run has made, twice a second, while the
+   * monitor is open, and this gate held it to linear in rows: a walk that
+   * went quadratic would turn watching a run into perturbing it. Since #1057
+   * the tally is kept on the write path and the read is flat in rows, so it
+   * passes this gate by a wide margin. The gate stays to catch the read
+   * regressing to a walk, and `provisionalCost.perf.test.ts` asserts the
+   * flatness itself. Per-row cost is gated across a 10x population rather
+   * than in absolute microseconds, for the reason this file's doc gives:
+   * absolute timings on a CI runner measure the runner.
    */
   it("reads a run in progress in time linear in its rows", () => {
     // The upper figure is past the per-run cap on purpose: it lands the walk

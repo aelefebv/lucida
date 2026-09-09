@@ -13,6 +13,11 @@
  * back from, and a headline that changes as you read it is not one.
  */
 
+import {
+  describeProvisionalObservation,
+  type ProvisionalReading,
+} from "../trace/diagnose/provisional.ts";
+import type { FindingSeverity } from "../trace/diagnose/types.ts";
 import type { LiveProgress } from "../trace/liveProgress.ts";
 import { formatCause, formatMs } from "./monitorModel.ts";
 
@@ -115,4 +120,67 @@ function segment(id: string, rows: number, inFlight: number): LiveBarSegment {
 
 function count(value: number): string {
   return value.toLocaleString();
+}
+
+/** The top finding of a provisional reading, as the live view prints it. */
+export interface ProvisionalFindingView {
+  severity: FindingSeverity;
+  subject: string;
+  /** The observation in one phrase, spelled as the text rendering spells it. */
+  detail: string;
+  rule: string;
+  /** What the rule was judged from here, and what the verdict judges instead. */
+  basis: string;
+}
+
+/**
+ * A provisional reading as the live view shows it (#1057). Every field is a
+ * selection from the reading the seam returned; nothing here is computed,
+ * so the dock and the text an agent reads cannot disagree.
+ */
+export interface ProvisionalView {
+  /** The word every rendering carries, so a moving number is never read as a conclusion. */
+  label: "provisional";
+  statement: string;
+  /** The stretch of the run the reading covers, in words. */
+  window: string;
+  /** What was read of that stretch. */
+  readings: string;
+  /** The page's own predicate, in its own words. */
+  quiescence: string;
+  finding: ProvisionalFindingView | null;
+  /** The rows the reading did not see. */
+  rows: string;
+  /** Why this is not a verdict. */
+  caveat: string;
+}
+
+export const PROVISIONAL_CAVEAT =
+  "Not a verdict: this reading changes while you read it, and only the verdict of a closed run is one a gate trusts.";
+
+export function buildProvisionalView(reading: ProvisionalReading): ProvisionalView {
+  const window = reading.window;
+  const lead = reading.topFinding;
+  return {
+    label: "provisional",
+    statement: reading.statement,
+    window: window.wholeRun
+      ? `the run so far (${formatMs(window.spanMs)})`
+      : `the last ${formatMs(window.spanMs)} (${formatMs(window.startMs)} to ${formatMs(window.endMs)} of the run)`,
+    readings: reading.readings.statement,
+    quiescence: reading.quiescence.quiescent
+      ? "quiescent — the run closes once that holds"
+      : reading.quiescence.reason,
+    finding: lead
+      ? {
+          severity: lead.severity,
+          subject: lead.subject,
+          detail: describeProvisionalObservation(lead.observed),
+          rule: lead.rule,
+          basis: lead.basis,
+        }
+      : null,
+    rows: reading.rows.statement,
+    caveat: PROVISIONAL_CAVEAT,
+  };
 }
