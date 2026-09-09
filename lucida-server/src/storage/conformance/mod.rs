@@ -2,11 +2,12 @@
 //! its callers.
 //!
 //! One suite per store trait, written once and run against every
-//! implementation of that trait. Five of the six traits ship an in-memory
-//! store beside the SQLite one, and both must answer the same way; the
-//! workspace store has no in-memory implementation, so its suite runs
-//! against the SQL ones. Every trait also has a PostgreSQL
-//! implementation, which runs when a PostgreSQL is reachable.
+//! implementation of that trait. Five of the seven traits ship an
+//! in-memory store beside the SQLite one, and both must answer the same
+//! way; the workspace store and the inbox have no in-memory
+//! implementation, so their suites run against the SQL ones. Every trait
+//! also has a PostgreSQL implementation, which runs when a PostgreSQL is
+//! reachable.
 //!
 //! A case asserts only what a caller can observe through the trait: what
 //! you write comes back, what you delete is gone, what should conflict
@@ -99,6 +100,7 @@ macro_rules! conformance_cases_when_available {
 mod bearer_tokens;
 mod bookmarks;
 mod cli_token_authorizations;
+mod inbox;
 mod login_sessions;
 mod pending_auth;
 mod workspaces;

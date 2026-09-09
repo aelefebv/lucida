@@ -65,6 +65,9 @@ const live = vi.hoisted(() => ({ value: null as unknown }));
 const reading = vi.hoisted(() => ({ value: null as unknown }));
 const downloadTraceFile = vi.hoisted(() => vi.fn(() => "lucida-run-1.trace.json"));
 const downloadBundle = vi.hoisted(() => vi.fn(() => Promise.resolve("lucida-run-1.bundle.json")));
+const sendReport = vi.hoisted(() =>
+  vi.fn(() => Promise.resolve({ entryId: "5d1f0c2e-7b3a", expiresAt: "2026-09-23T14:05:00Z" })),
+);
 const readMonitor = vi.hoisted(() => vi.fn(() => ({ read: read.value, runs: runs.value })));
 const readProgress = vi.hoisted(() => vi.fn(() => live.value));
 const readProvisional = vi.hoisted(() => vi.fn(() => reading.value));
@@ -74,6 +77,7 @@ vi.mock("./monitorSource.ts", () => ({
   readMonitor,
   downloadTraceFile,
   downloadBundle,
+  sendReport,
   readProgress,
   readProvisional,
   stopRun,
@@ -90,6 +94,10 @@ beforeEach(() => {
   downloadTraceFile.mockClear();
   downloadBundle.mockClear();
   downloadBundle.mockImplementation(() => Promise.resolve("lucida-run-1.bundle.json"));
+  sendReport.mockClear();
+  sendReport.mockImplementation(() =>
+    Promise.resolve({ entryId: "5d1f0c2e-7b3a", expiresAt: "2026-09-23T14:05:00Z" }),
+  );
   readMonitor.mockClear();
   readProgress.mockClear();
   readProvisional.mockClear();
@@ -252,6 +260,48 @@ describe("saving a run", () => {
     expect(failed.textContent).toContain("no trace seam on this page");
     expect(screen.queryByTestId("monitor-saved")).toBeNull();
   });
+
+  /**
+   * The report goes somewhere the person who sent it cannot see, so the
+   * page hands back the one thing that reaches it again: the entry, and
+   * the command that fetches it (#1067).
+   */
+  it("sends the run to the workspace inbox and names the entry it landed in", async () => {
+    showing(coldRemoteOpen());
+
+    fireEvent.click(screen.getByTestId("monitor-send-report"));
+    expect(screen.getByTestId("monitor-send-report").textContent).toContain("Sending");
+    expect(screen.getByTestId("monitor-send-report")).toHaveProperty("disabled", true);
+
+    expect(sendReport).toHaveBeenCalledWith("remote-cold");
+    const sent = await screen.findByTestId("monitor-sent");
+    expect(sent.textContent).toContain("5d1f0c2e-7b3a");
+    expect(sent.textContent).toContain("2026-09-23T14:05:00Z");
+    expect(sent.textContent).toContain("lucida trace inbox fetch 5d1f0c2e-7b3a");
+    expect(screen.getByTestId("monitor-send-report").textContent).toBe("Send report");
+  });
+
+  it("shows why a report could not be sent, rather than looking sent", async () => {
+    sendReport.mockImplementation(() =>
+      Promise.reject(new Error("the bundle carries no header")),
+    );
+    showing(coldRemoteOpen());
+
+    fireEvent.click(screen.getByTestId("monitor-send-report"));
+
+    const failed = await screen.findByTestId("monitor-send-failed");
+    expect(failed.textContent).toContain("the bundle carries no header");
+    expect(screen.queryByTestId("monitor-sent")).toBeNull();
+  });
+
+  /** Nothing goes to the inbox until somebody presses the action. */
+  it("sends nothing while the page is opened and a run is read", () => {
+    showing(coldRemoteOpen());
+    fireEvent.click(screen.getByTestId("monitor-reread"));
+    fireEvent.click(screen.getByTestId("monitor-save-bundle"));
+
+    expect(sendReport).not.toHaveBeenCalled();
+  });
 });
 
 describe("nothing recorded yet", () => {
@@ -263,6 +313,7 @@ describe("nothing recorded yet", () => {
     expect(screen.queryByTestId("monitor-phase-table")).toBeNull();
     expect(screen.getByTestId("monitor-save-run")).toHaveProperty("disabled", true);
     expect(screen.getByTestId("monitor-save-bundle")).toHaveProperty("disabled", true);
+    expect(screen.getByTestId("monitor-send-report")).toHaveProperty("disabled", true);
   });
 });
 
@@ -270,11 +321,13 @@ describe("observation only", () => {
   it("offers no control that could change what the pipeline does", () => {
     showing(coldRemoteOpen());
 
-    // Every button on the page reads, saves, drills in or leaves. If a future
-    // change adds one that does not, this list is where it shows up.
+    // Every button on the page reads, saves, sends, drills in or leaves.
+    // Sending puts a copy of the recording somewhere else and changes
+    // nothing about the run it copied. If a future change adds a control
+    // that does not fit that list, this is where it shows up.
     const labels = screen.getAllByRole("button").map((node) => node.textContent);
     for (const label of labels) {
-      expect(label).toMatch(/^(Back|Read the newest run|Save run|Save for Perfetto|Save bundle|Show the rows behind .*|Close drill-down)$/);
+      expect(label).toMatch(/^(Back|Read the newest run|Save run|Save for Perfetto|Save bundle|Send report|Show the rows behind .*|Close drill-down)$/);
     }
   });
 

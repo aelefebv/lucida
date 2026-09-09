@@ -2,11 +2,11 @@
 //!
 //! Opens the database named by a `sqlite:` connection string, creating
 //! the file if it is missing, runs the bundled migrations, and serves
-//! all six stores from the one pool.
+//! all seven stores from the one pool.
 //!
 //! This module is the only place in the server that names a SQLite
 //! type. Everything above it works through [`StorageBackend`] and the
-//! six store traits.
+//! seven store traits.
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -23,6 +23,7 @@ use crate::auth::{
     SqliteSessionStore,
 };
 use crate::bookmarks::{BookmarkStore, SqliteBookmarkStore};
+use crate::inbox::{InboxStore, SqliteInboxStore};
 use crate::workspace::{SqliteWorkspaceStore, WorkspaceStore};
 
 /// Migrations bundled into the binary at compile time. One baseline
@@ -182,6 +183,10 @@ impl StorageBackend for SqliteStorageBackend {
 
     fn workspaces(&self) -> Arc<dyn WorkspaceStore> {
         Arc::new(SqliteWorkspaceStore::new(self.pool.clone()))
+    }
+
+    fn inbox(&self) -> Arc<dyn InboxStore> {
+        Arc::new(SqliteInboxStore::new(self.pool.clone()))
     }
 }
 

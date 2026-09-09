@@ -309,6 +309,8 @@ fn server_message_fixture_paths(msg: &ServerMessage) -> &'static [&'static str] 
         ServerMessage::TimingBatch { .. } => &["session/server_timing_batch.json"],
         ServerMessage::BookmarkChanged { .. } => &["session/server_bookmark_changed.json"],
         ServerMessage::WorkspaceArchived { .. } => &["session/server_workspace_archived.json"],
+        ServerMessage::ReportSent { .. } => &["session/server_report_sent.json"],
+        ServerMessage::ReportFailed { .. } => &["session/server_report_failed.json"],
     }
 }
 
@@ -339,6 +341,7 @@ fn client_message_fixture_paths(msg: &ClientMessage) -> &'static [&'static str] 
         ClientMessage::DatasetRetry { .. } => &["session/client_dataset_retry.json"],
         ClientMessage::ViewerInterest { .. } => &["session/client_viewer_interest.json"],
         ClientMessage::RequestSnapshot => &["session/client_request_snapshot.json"],
+        ClientMessage::SendReport { .. } => &["session/client_send_report.json"],
     }
 }
 
@@ -1866,7 +1869,72 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
             },
             req("", &["/type", "/workspace_id"]),
         ),
+        (
+            "session/server_report_sent.json",
+            ServerMessage::ReportSent {
+                request_id: "web-report-9c1d".into(),
+                entry_id: "5d1f0c2e-7b3a-4e8f-9a6b-0c1d2e3f4a5b".into(),
+                expires_at: "2026-09-23T14:05:00Z".into(),
+            },
+            req("", &["/type", "/request_id", "/entry_id", "/expires_at"]),
+        ),
+        (
+            "session/server_report_failed.json",
+            ServerMessage::ReportFailed {
+                request_id: "web-report-9c1d".into(),
+                error: "the bundle carries no header".into(),
+            },
+            req("", &["/type", "/request_id", "/error"]),
+        ),
     ]
+}
+
+/// The bundle a Send report carries, abbreviated, as the text the field
+/// holds.
+///
+/// The envelope is what this fixture locks. A bundle rides as text the
+/// server stores as it arrived, so it appears in the fixture escaped, on
+/// one line — which is what an opaque payload looks like on a wire that
+/// is not going to read it. The bundle's own shape is locked elsewhere,
+/// by `trace-fixtures/bundle-v1.json` on both sides. What is spelled out
+/// here is the header, because that is the one part the server reads.
+fn send_report_bundle() -> String {
+    serde_json::to_string(&serde_json::json!({
+        "format": "lucida-trace-bundle",
+        "bundleVersion": 1,
+        "schemaVersion": 2,
+        "header": {
+            "runId": "remote-cold",
+            "cause": {
+                "epoch": "content",
+                "dirtyKind": "interactive",
+                "source": "dataset_open_request"
+            },
+            "endReason": "quiescent",
+            "startedAtEpochMs": 1767225600000u64,
+            "durationUs": 4200000,
+            "savedAtEpochMs": 1767225700000u64,
+            "datasets": [{
+                "id": SINGLE_DATASET_ID,
+                "name": "sample volume",
+                "sourceUrl": "gs://lucida-fixtures/sample-volume.zarr"
+            }],
+            "viewUrl": "https://lucida.example/w/workspace-2ac8",
+            "mode": "volume",
+            "devicePixelRatio": 2,
+            "build": { "version": "0.2.0", "mode": "production", "dev": false },
+            "gpu": {
+                "vendor": "example",
+                "architecture": "gen-1",
+                "device": "adapter-01",
+                "description": "Example Adapter",
+                "fallback": false,
+                "timestampQueries": true
+            }
+        },
+        "trace": { "schemaVersion": 2, "runs": [] }
+    }))
+    .expect("the bundle fixture serializes")
 }
 
 /// The web-live `DocumentCommand`s, each as its client `Command` envelope
@@ -2135,6 +2203,14 @@ fn client_goldens() -> Vec<(&'static str, ClientMessage, Vec<String>)> {
                     "/interest/desired_keys/0/key",
                 ],
             ),
+        ),
+        (
+            "session/client_send_report.json",
+            ClientMessage::SendReport {
+                request_id: "web-report-9c1d".into(),
+                bundle: send_report_bundle(),
+            },
+            req("", &["/type", "/request_id", "/bundle"]),
         ),
     ]);
     goldens
