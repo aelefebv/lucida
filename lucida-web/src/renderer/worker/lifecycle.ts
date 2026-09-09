@@ -43,6 +43,7 @@ export function handleDestroy(ctx: WorkerCtx): void {
   destroyAllSliceResources(ctx);
   destroyAllVolumeResources(ctx);
   destroyAllMinimapResources();
+  ctx.passTimer.destroy();
   // Drop worker-process resource caches (LUT, offscreen pool, dummies).
   destroyAllResources();
   self.close();

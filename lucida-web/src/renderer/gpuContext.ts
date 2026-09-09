@@ -57,6 +57,9 @@ export async function initGPU(canvas: HTMLCanvasElement | OffscreenCanvas): Prom
   }
 
   const device = await adapter.requestDevice({
+    // `timestamp-query` lets the render worker read a GPU pass time back per
+    // frame for the trace. A device without it initializes untimed.
+    requiredFeatures: adapter.features.has("timestamp-query") ? ["timestamp-query"] : [],
     requiredLimits: {
       maxBufferSize: adapter.limits.maxBufferSize,
       maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,

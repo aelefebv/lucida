@@ -5,7 +5,7 @@ description: "The browser owns the merged trace; the server pushes its own rows 
 tags: [lucida, decision]
 source_path: wiki/decisions/0050-server-timings-reach-the-monitor.md
 created: 2026-08-10
-modified: 2026-08-10
+modified: 2026-09-09
 ---
 
 # How server-side timings reach the monitor
@@ -24,6 +24,7 @@ thresholds from [#893].
 [#891]: https://github.com/aelefebv/lucida/issues/891
 [#893]: https://github.com/aelefebv/lucida/issues/893
 [#899]: https://github.com/aelefebv/lucida/issues/899
+[#1048]: https://github.com/aelefebv/lucida/issues/1048
 
 ## The situation
 
@@ -53,6 +54,26 @@ settled that `lucida trace <dataset>` drives headless Chrome itself, so no agent
 path ever wants server rows without a browser in the loop, and an offline merge
 would give the live view nothing while [#885] requires the live view to be the
 in-progress recording.
+
+> **Amended 2026-09-09 ([#1048]).** Two opt-in push paths now leave the page,
+> and neither is the store or the endpoint this section rejects. The **inbox**
+> is a workspace-scoped store of bundles that people submit with **Send
+> report**: the server stores the bytes and the header, computes nothing,
+> keeps them for a fixed number of days, and lets the CLI list and fetch them.
+> It never writes a row of its own, and a bundle is there only because a
+> person sent it, so the browser still owns the merged trace and the server
+> still holds no trace of its own making. The CLI's inbox commands read a
+> bundle a person sent, never a table the server kept, which is the difference
+> between the inbox and the endpoint this section rejected. The **watch
+> stream** is a per-session toggle in the dock: while it is on, the page sends
+> its per-tick aggregate and its run boundaries over the session socket, the
+> server relays them to CLI subscribers and keeps a small ring for late
+> joiners. Rows never ride it. Both paths are opt-in by a visible action and
+> off by default. Their terms are in
+> [ADR 0051](0051-the-trace-driver-and-the-page-export-seam.md). What never
+> leaves the page on its own is unchanged: no row, no aggregate, and no header
+> departs without someone asking, and on the watch stream no row departs at
+> all.
 
 ## Batched push, because the server cannot know when to stop
 
@@ -255,6 +276,18 @@ caused it and never away from the user, so [0049]'s privacy argument is untouche
 The boundary is that the server buffers only its own rows, only for the connection
 that caused them, and only until the next flush — which the batching design makes
 true rather than merely promises.
+
+> **Amended 2026-09-09 ([#1048]).** Direction is still the distinguishing
+> property, and the two push paths described earlier in this record are the
+> asked-for exceptions to it. A bundle in the inbox flows away from the page
+> because a person sent it, and the watch stream flows away from the page
+> because a person turned it on. The server still computes nothing over
+> either: it stores bundle bytes as it received them and relays aggregates as
+> it received them, which is why [0049]'s privacy argument is untouched. The
+> watch toggle switches export, never recording, so the unconditional emission
+> above is unchanged too. The boundary stays where it was: the server holds
+> only what a person chose to send it, and only for as long as the inbox's
+> fixed retention or the relay's small ring says.
 
 ## Consequences
 

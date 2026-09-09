@@ -14,8 +14,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   coldRemoteOpen,
+  fallbackAdapterOpen,
+  gpuTimedOpen,
   healthyLocalOpen,
   interactionRun,
+  mainThreadOnlyOpen,
   makeRun,
   quietRun,
   saturatedReopen,
@@ -39,6 +42,9 @@ const RUNS = {
   interaction: interactionRun(),
   prefix: uninstrumentedPrefixOpen(),
   quiet: quietRun(),
+  gpuTimed: gpuTimedOpen(),
+  mainThreadOnly: mainThreadOnlyOpen(),
+  fallback: fallbackAdapterOpen(),
 };
 
 const DOCUMENTS = Object.fromEntries(
@@ -261,6 +267,40 @@ describe("the spatial depth", () => {
   });
 });
 
+describe("render timing and the adapter", () => {
+  function line(document: DiagnosticDocument, prefix: string): string {
+    const found = renderDiagnostic(document).text.split("\n").find((l) => l.startsWith(prefix));
+    expect(found, `${prefix} line`).toBeDefined();
+    return found!;
+  }
+
+  it("prints GPU pass time beside main-thread frame time, each named for its clock", () => {
+    const render = line(DOCUMENTS.gpuTimed, "render");
+    expect(render).toContain("main-thread frame p50 3.5 ms · p95 3.5 ms (n=12)");
+    expect(render).toContain("GPU pass p50 1.2 ms · p95 2.4 ms (n=11)");
+  });
+
+  it("calls frame time main-thread time and says why GPU time is missing, never printing a zero for it", () => {
+    const render = line(DOCUMENTS.mainThreadOnly, "render");
+    expect(render).toContain("main-thread frame p50 3.5 ms");
+    expect(render).toContain("GPU pass not recorded: the adapter offers no timestamp queries");
+    expect(render).not.toMatch(/GPU pass p\d+ /);
+  });
+
+  it("prints the adapter, its description, and its kind on the client line, in both states", () => {
+    expect(line(DOCUMENTS.fallback, "client")).toContain(
+      "generic software (software rasterizer) · software fallback adapter",
+    );
+    expect(line(DOCUMENTS.healthy, "client")).toContain("apple metal-3 · hardware adapter");
+  });
+
+  it("says so when no adapter was identified", () => {
+    const document = diagnoseRun(makeRun({ header: { gpu: null } }));
+    expect(line(document, "client")).toContain("unknown · adapter not identified");
+    expect(line(document, "render")).toContain("no adapter was identified");
+  });
+});
+
 describe("parity with the document", () => {
   it("prints no number that does not exist in the JSON", () => {
     for (const [name, document] of Object.entries(DOCUMENTS)) {
@@ -329,8 +369,10 @@ function sameContentAsText(document: DiagnosticDocument) {
       devicePixelRatio: document.run.devicePixelRatio,
       viewport: document.run.viewport,
       gpu: document.run.gpu,
+      adapter: document.run.adapter,
       build: document.run.build,
     },
+    renderTiming: document.renderTiming,
     coverage: {
       wallMs: document.coverage.wallMs,
       accountedMs: document.coverage.accountedMs,

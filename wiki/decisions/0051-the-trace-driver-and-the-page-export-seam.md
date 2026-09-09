@@ -5,7 +5,7 @@ description: "How lucida trace drives a headless run and gets the trace out: a p
 tags: [lucida, decision]
 source_path: wiki/decisions/0051-the-trace-driver-and-the-page-export-seam.md
 created: 2026-08-10
-modified: 2026-08-10
+modified: 2026-09-09
 ---
 
 # The trace driver and the page export seam
@@ -26,6 +26,7 @@ rows get to the browser) and the [#893] prototype (what the output says). Prior 
 [#895]: https://github.com/aelefebv/lucida/issues/895
 [#899]: https://github.com/aelefebv/lucida/issues/899
 [#902]: https://github.com/aelefebv/lucida/issues/902
+[#1048]: https://github.com/aelefebv/lucida/issues/1048
 
 ## The situation
 
@@ -62,6 +63,27 @@ bytes the CLI already has a channel to. That option's one real advantage — it
 could reach a human's already-open tab — buys little, because a human with an
 open tab has the monitor and a save-to-file button.
 
+> **Amended 2026-09-09 ([#1048]).** The pull stands as the primary path, and
+> the option this paragraph rejected is now taken in part, on purpose, for the
+> case it dismissed. The advantage it "buys little" for is reaching a session
+> the CLI did not start, and that is the field-report case: an agent cannot
+> open the reporter's tab, and a person with an open tab and a save button
+> still has to get the file to the agent. Two opt-in push paths join the
+> pull. With **Send report**, the dock posts a bundle to a workspace inbox
+> that the CLI lists and fetches. With the **watch** toggle, the page streams
+> its per-tick aggregate and its run boundaries over the session socket, the
+> server relays them, and a CLI command prints line-delimited JSON with a
+> provisional reading on a fixed interval, labelled provisional, which no gate
+> reads. The three costs this paragraph named are paid on purpose, and each is
+> bounded. The protocol variants are closed messages with goldens on both
+> sides. The size question is answered by what never travels: rows never ride
+> the watch stream, and a bundle is one file a person chose to send. Retention
+> is a fixed number of days for the inbox and a small ring of aggregates for
+> the relay, never a session of rows. Both paths are off by default and on
+> only by a visible action. The watch toggle is off again after a reconnect
+> and visible while on. Nothing leaves the page on either path without someone
+> asking, and on the watch stream no row leaves at all.
+
 ## The seam is a function on the page, not a transport
 
 [#885] requires that an agent already driving its own browser get the same bytes
@@ -85,6 +107,15 @@ from [#893] are computed behind the seam, and the CLI renders what it is handed.
 Putting them in the CLI would quietly make the second entry point a second-class
 citizen — the failure [surface parity](../principles/surface-parity.md) exists to
 prevent.
+
+> **Amended 2026-09-09 ([#1048]).** The seam gains callers and stays one
+> function. **Send report** in the dock and the trace driver both produce the
+> bundle through one function behind it, so the bundle a person sends and the
+> bundle the driver writes are the same artifact, and the header it carries is
+> sufficient to replay the view on another machine. The dock, the HUD, and the
+> overlays' phase and churn modes select from the same document the seam
+> returns and compute nothing of their own, which is the rule the CLI already
+> follows here.
 
 ## Nothing fetches the server half, because it is already in the page
 
@@ -222,6 +253,17 @@ traces are already reachable through the other entry point: an agent drives its
 own browser, does whatever it likes, and calls the seam. The two entry points end
 up complementary rather than one being a subset of the other, which is a better
 answer than a scripting language nobody has asked for yet.
+
+> **Amended 2026-09-09 ([#1048]).** Someone has now asked, and the reason is
+> the field report: an agent that can only measure a cold open cannot
+> reproduce a slow orbit. The driver gains a script of steps, every Dev
+> controls knob by the name the panel shows, replay from a bundle, and a diff
+> of two runs. Steps go through the page's own input handling, so a scripted
+> orbit measures the path a person's orbit takes, and the driver records the
+> view after each step so a step that did not land is visible rather than
+> silent. The division this section drew still holds where it matters: the
+> monitor stays observation only and gains no knob, and mutation lives on the
+> driver and in Dev controls.
 
 ## Consequences
 
