@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { installTraceSeam } from "../trace/seam.ts";
 import { traceRecorder } from "../trace/recorder.ts";
 import { createQuiescenceState } from "../trace/quiescence.ts";
-import { readMonitor, traceFile } from "./monitorSource.ts";
+import { downloadBundle, readMonitor, traceFile } from "./monitorSource.ts";
 
 /**
  * Stands in for the render loop, which registers the real one. A run cannot
@@ -145,5 +145,35 @@ describe("saving a run", () => {
 
     expect(spy).toHaveBeenCalled();
     expect(JSON.parse(file.text).traceEvents).toBeDefined();
+  });
+
+  /**
+   * The bundle goes through the seam's one bundle function (#1055), named
+   * for the run on screen and without the Perfetto projection, which has its
+   * own control.
+   */
+  it("saves the bundle through the seam's bundle function, named for the run being read", async () => {
+    registerEnvironment();
+    const seam = installTraceSeam();
+    const spy = vi.spyOn(seam, "exportBundle");
+    traceRecorder.openRun({ epoch: "content", dirtyKind: "interactive", source: "loop_start" });
+    traceRecorder.closeRun("quiescent");
+    traceRecorder.openRun({ epoch: "view", dirtyKind: "residency", source: "camera_moved" });
+    const { runs } = readMonitor(undefined, seam);
+    const older = runs[1].runId;
+    const clicked: string[] = [];
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+      clicked.push(this.download);
+    });
+    vi.stubGlobal("URL", { ...URL, createObjectURL: () => "blob:bundle", revokeObjectURL: () => {} });
+    try {
+      await expect(downloadBundle(older, seam)).resolves.toBe(`lucida-${older}.bundle.json`);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    }
+
+    expect(spy).toHaveBeenCalledWith({ runId: older });
+    expect(clicked).toEqual([`lucida-${older}.bundle.json`]);
   });
 });

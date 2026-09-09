@@ -30,6 +30,7 @@ import {
   type MonitorView,
 } from "./monitorModel.ts";
 import {
+  downloadBundle,
   downloadTraceFile,
   readMonitor,
   readProgress,
@@ -66,6 +67,11 @@ export function MonitorPage({ onClose }: MonitorPageProps) {
   );
   const [drill, setDrill] = useState<MonitorDrill | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
+  // The bundle is the one save that takes time. The seam asks the server for
+  // its health and the render worker for the frame before it exports. A
+  // failure shows where the file name would have been.
+  const [bundling, setBundling] = useState(false);
+  const [saveFailed, setSaveFailed] = useState<string | null>(null);
   const read = snapshot?.read;
   const runs = snapshot?.runs ?? [];
   const runId = read?.ok ? read.document.runId : undefined;
@@ -119,9 +125,24 @@ export function MonitorPage({ onClose }: MonitorPageProps) {
   // Named for the run on screen, so the file and the follow-up command that
   // names that run agree.
   const save = useCallback(
-    (kind: "trace" | "perfetto") => setSaved(downloadTraceFile(kind, runId)),
+    (kind: "trace" | "perfetto") => {
+      setSaveFailed(null);
+      setSaved(downloadTraceFile(kind, runId));
+    },
     [runId],
   );
+
+  const saveBundle = useCallback(() => {
+    setSaved(null);
+    setSaveFailed(null);
+    setBundling(true);
+    downloadBundle(runId)
+      .then(setSaved)
+      .catch((error: unknown) =>
+        setSaveFailed(error instanceof Error ? error.message : String(error)),
+      )
+      .finally(() => setBundling(false));
+  }, [runId]);
 
   return (
     <main className="monitor-page">
@@ -177,6 +198,14 @@ export function MonitorPage({ onClose }: MonitorPageProps) {
               >
                 Save for Perfetto
               </button>
+              <button
+                type="button"
+                onClick={saveBundle}
+                disabled={!read?.ok || bundling}
+                data-testid="monitor-save-bundle"
+              >
+                {bundling ? "Saving bundle…" : "Save bundle"}
+              </button>
             </>
           )}
         </div>
@@ -201,6 +230,11 @@ export function MonitorPage({ onClose }: MonitorPageProps) {
       {saved && (
         <p className="monitor-saved" data-testid="monitor-saved">
           Saved {saved}
+        </p>
+      )}
+      {saveFailed && (
+        <p className="monitor-save-failed" data-testid="monitor-save-failed">
+          Could not save the bundle: {saveFailed}
         </p>
       )}
 

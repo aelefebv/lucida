@@ -18,6 +18,8 @@
  * ```
  */
 
+import { configStore } from "../pipeline/planning/configStore.ts";
+import { bundleServices, exportBundle, type BundleOptions, type TraceBundle } from "./bundle.ts";
 import { toChromeTraceJson } from "./chromeTrace.ts";
 import { diagnoseDocument } from "./diagnose/diagnose.ts";
 import { renderDiagnostic, type RenderDepth } from "./diagnose/renderText.ts";
@@ -87,6 +89,20 @@ export interface LucidaTraceSeam {
    */
   exportChromeTrace(): string;
   /**
+   * The bundle (#1055): the trace document, the diagnostic with every text
+   * rendering, the settled frame, the view URL, the planning configuration,
+   * the pins, the server's dataset health counters, and a header sufficient
+   * to replay the run. The monitor's **Save bundle** and `lucida trace
+   * --bundle` are two callers of this one function, so the file a person
+   * saves and the file the driver writes are the same artifact.
+   *
+   * Asynchronous because the health is a socket round trip and the frame is
+   * read off the render worker's canvas. Closes the run in progress, exactly
+   * as {@link exportTrace} does: it is the same export with more around it.
+   * The Perfetto projection is included only when `perfetto` is set.
+   */
+  exportBundle(options?: BundleOptions): Promise<TraceBundle>;
+  /**
    * The trace read as a diagnostic (#933): thresholds, the attribution
    * back-walk, the coverage block and the verdict. Defaults to the newest run.
    *
@@ -151,6 +167,18 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
     progress: () => traceRecorder.liveProgress,
     exportTrace: () => traceRecorder.exportDocument(),
     exportChromeTrace: () => toChromeTraceJson(traceRecorder.exportDocument()),
+    exportBundle: (options?: BundleOptions) =>
+      exportBundle(
+        {
+          exportTrace: () => traceRecorder.exportDocument(),
+          services: bundleServices(),
+          planning: configStore.get(),
+          origin: target.location?.origin ?? null,
+          devicePixelRatio: target.devicePixelRatio ?? null,
+          now: Date.now(),
+        },
+        options,
+      ),
     diagnose: (runId?: string) => diagnoseDocument(traceRecorder.exportDocument(), { runId }),
     diagnoseText: (runId?: string, options?: { depth?: RenderDepth; phase?: string }) =>
       renderDiagnostic(diagnoseDocument(traceRecorder.exportDocument(), { runId }), {

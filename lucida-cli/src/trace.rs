@@ -37,6 +37,14 @@ use crate::session::{connect_workspace_socket, incoming_messages, wait_for_works
 /// A reader that does not know this number should say so rather than guess.
 pub const RUN_FILE_VERSION: u32 = 1;
 
+/// What a bundle file says it is (#1055), so `show` can tell it from a run
+/// file without guessing from the name.
+pub const BUNDLE_FORMAT: &str = "lucida-trace-bundle";
+
+/// The bundle's own version, independent of the trace schema and of the run
+/// file version. The page writes it, and this reader refuses any other.
+pub const BUNDLE_VERSION: u32 = 1;
+
 /// A representative window rather than a capture cell: the viewport is part of
 /// the workload, not an output-image size.
 pub const DEFAULT_WIDTH: u32 = 1440;
@@ -123,6 +131,26 @@ fn run_export_expression(with_chrome_trace: bool) -> String {
          const parsed = JSON.parse(inner); \
          parsed.chromeTrace = window.lucidaTrace.exportChromeTrace(); \
          return JSON.stringify(parsed); }})()"
+    )
+}
+
+/// One evaluation for the bundle (#1055). It calls the page's own bundle
+/// function with the run the driver waited for and the frame the driver took,
+/// so the file the driver writes is the file the monitor's **Save bundle**
+/// writes. Awaited, because the page asks the server for its health and the
+/// render worker for its canvas before it exports. The driver passes its own
+/// frame because its screenshot exists even when the render worker never came
+/// up, and a page that never drew is the finding.
+fn bundle_export_expression(frame: &BundleFrame, perfetto: bool) -> String {
+    let frame_json = serde_json::to_string(frame).unwrap_or_else(|_| "null".to_string());
+    format!(
+        r#"(async () => {{
+  const seam = window.lucidaTrace;
+  if (!seam || typeof seam.exportBundle !== 'function') return null;
+  const waited = window.__lucidaTraceRunId || seam.runState.lastConcludedRunId || undefined;
+  const bundle = await seam.exportBundle({{ runId: waited, frame: {frame_json}, perfetto: {perfetto} }});
+  return JSON.stringify(bundle);
+}})()"#
     )
 }
 
@@ -342,6 +370,289 @@ struct SeamExport {
     #[serde(default)]
     chrome_trace: Option<String>,
     trace: Value,
+}
+
+// ---------------------------------------------------------------------------
+// The bundle
+// ---------------------------------------------------------------------------
+
+/// A bundle (#1055) as the page writes it: the trace document, the diagnostic
+/// with its renderings, the settled frame, the server's dataset health, and a
+/// header sufficient to replay the run. This CLI reads it and adds nothing.
+/// The page is the one writer, whichever caller asked.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceBundle {
+    pub format: String,
+    pub bundle_version: u32,
+    /// The trace document's schema version.
+    pub schema_version: u32,
+    pub header: BundleHeader,
+    pub renderings: TraceRenderings,
+    /// The diagnostic exactly as the page derived it, or null when there was no run.
+    pub diagnostic: Value,
+    /// The full trace document.
+    pub trace: Value,
+    #[serde(default)]
+    pub frame: Option<BundleFrame>,
+    #[serde(default)]
+    pub health: Option<BundleHealth>,
+    /// Sections the page could not capture, each with its reason.
+    #[serde(default)]
+    pub absent: Vec<BundleAbsence>,
+    /// The Perfetto projection, only when the caller asked for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub perfetto: Option<String>,
+}
+
+/// The bundle's header. The replay fields are typed where the driver reads
+/// them and kept as values where it only carries them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleHeader {
+    pub run_id: Option<String>,
+    pub cause: Value,
+    pub end_reason: Option<String>,
+    pub started_at_epoch_ms: Option<f64>,
+    pub duration_us: Option<f64>,
+    pub quiescence_hold_ms: Option<f64>,
+    /// When the bundle was made. The planning configuration and the health were read then.
+    pub saved_at_epoch_ms: f64,
+    pub datasets: Vec<BundleDataset>,
+    /// The page the run happened on, absolute, view fragment and all.
+    pub view_url: Option<String>,
+    pub viewport: Option<BundleViewport>,
+    pub device_pixel_ratio: Option<f64>,
+    /// `slice` or `volume`.
+    pub mode: Option<String>,
+    /// The planning configuration, by the names the Dev controls panel shows.
+    pub planning: Value,
+    pub pins: Vec<DatasetPins>,
+    pub build: Option<BundleBuild>,
+    pub gpu: Option<BundleGpu>,
+    /// What the browser already held when the run opened.
+    pub cache_warmth: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleDataset {
+    pub id: String,
+    pub name: Option<String>,
+    /// The canonical source URL, the form `lucida trace <dataset>` takes.
+    pub source_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleViewport {
+    pub css_width: f64,
+    pub css_height: f64,
+    pub device_width: f64,
+    pub device_height: f64,
+}
+
+/// One dataset's pins in the run's view. Null means the view URL carried
+/// nothing for the dataset, not that nothing was pinned.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatasetPins {
+    pub dataset_id: String,
+    pub level: Option<u32>,
+    pub render_mode: Option<String>,
+    /// One window per channel.
+    pub contrast: Option<Vec<ContrastWindow>>,
+    /// One colormap per channel.
+    pub colormap: Option<Vec<String>>,
+    pub auto_contrast: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ContrastWindow {
+    pub min: f64,
+    pub max: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BundleBuild {
+    pub version: String,
+    pub mode: String,
+    pub dev: bool,
+}
+
+/// The adapter, as the page's header records it (ADR 0047 as amended).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleGpu {
+    pub vendor: String,
+    pub architecture: String,
+    pub device: String,
+    pub description: String,
+    /// True for a software fallback, false for hardware, null when the browser said neither.
+    pub fallback: Option<bool>,
+    pub timestamp_queries: bool,
+}
+
+/// The settled frame. The page takes its own through the render worker. The
+/// driver brings the screenshot it takes over the DevTools protocol, which
+/// exists even when the worker never came up. `captured_by` says which.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleFrame {
+    /// PNG bytes, base64.
+    pub png: String,
+    /// Device pixels.
+    pub width: u32,
+    pub height: u32,
+    /// The page's ratio when the frame was taken, or null where no page was there to say.
+    pub device_pixel_ratio: Option<f64>,
+    /// `page` or `driver`.
+    pub captured_by: String,
+}
+
+impl BundleFrame {
+    /// The driver's screenshot, at the ratio the driver drove the page at.
+    pub fn from_driver(png: &[u8], viewport: Viewport) -> Self {
+        use base64::Engine as _;
+        let scale = viewport.device_scale_factor;
+        Self {
+            png: base64::engine::general_purpose::STANDARD.encode(png),
+            width: (f64::from(viewport.width) * scale).round() as u32,
+            height: (f64::from(viewport.height) * scale).round() as u32,
+            device_pixel_ratio: Some(scale),
+            captured_by: "driver".to_string(),
+        }
+    }
+
+    /// The frame without its bytes, for a JSON rendering that should not
+    /// carry megabytes of base64 to say a frame exists.
+    pub fn describe(&self) -> Value {
+        let padding = self
+            .png
+            .bytes()
+            .rev()
+            .take_while(|byte| *byte == b'=')
+            .count();
+        serde_json::json!({
+            "width": self.width,
+            "height": self.height,
+            "devicePixelRatio": self.device_pixel_ratio,
+            "capturedBy": self.captured_by,
+            "pngBytes": self.png.len() / 4 * 3 - padding,
+        })
+    }
+}
+
+/// The server's dataset health when the bundle was made, for the run's
+/// datasets, in the same shape `lucida dataset health` reads.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleHealth {
+    pub fetched_at_epoch_ms: f64,
+    pub datasets: Vec<DatasetSourceHealth>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BundleAbsence {
+    pub section: String,
+    pub reason: String,
+}
+
+/// One thing the driver needs to replay a bundle, and the header field that
+/// carries it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplayInput {
+    /// The driver's input, in the words the spec uses.
+    pub input: &'static str,
+    /// The bundle header field that carries it.
+    pub field: &'static str,
+}
+
+/// What the driver needs from a bundle's header to replay the run (#1055),
+/// each named by the header field that carries it. The page keeps the same
+/// list beside its bundle function, and the golden bundle under
+/// `trace-fixtures/` is where a test holds the two to each other.
+pub const REPLAY_INPUTS: &[ReplayInput] = &[
+    ReplayInput {
+        input: "dataset",
+        field: "datasets",
+    },
+    ReplayInput {
+        input: "view URL",
+        field: "viewUrl",
+    },
+    ReplayInput {
+        input: "viewport",
+        field: "viewport",
+    },
+    ReplayInput {
+        input: "device pixel ratio",
+        field: "devicePixelRatio",
+    },
+    ReplayInput {
+        input: "slice or volume mode",
+        field: "mode",
+    },
+    ReplayInput {
+        input: "planning configuration",
+        field: "planning",
+    },
+    ReplayInput {
+        input: "level, render mode, contrast, and colormap pins",
+        field: "pins",
+    },
+    ReplayInput {
+        input: "build",
+        field: "build",
+    },
+    ReplayInput {
+        input: "adapter",
+        field: "gpu",
+    },
+    ReplayInput {
+        input: "cache warmth",
+        field: "cacheWarmth",
+    },
+];
+
+/// The replay inputs a bundle's header does not carry, by the spec's names.
+/// Empty for a bundle of a run with a view. A bundle saved from a page that
+/// recorded no run lacks most of them, and the text says which.
+pub fn missing_replay_inputs(header: &BundleHeader) -> Vec<&'static str> {
+    let value = serde_json::to_value(header).unwrap_or(Value::Null);
+    REPLAY_INPUTS
+        .iter()
+        .filter(|input| {
+            let field = value.get(input.field).unwrap_or(&Value::Null);
+            field.is_null() || field.as_array().is_some_and(Vec::is_empty)
+        })
+        .map(|input| input.input)
+        .collect()
+}
+
+/// What a follow-up command reads: the run file the driver writes, or the
+/// bundle either entry point writes. One reader, so `show` takes either at
+/// every depth. Boxed because both carry a whole trace document.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TraceArtifact {
+    Run(Box<TraceRunFile>),
+    Bundle(Box<TraceBundle>),
+}
+
+impl TraceArtifact {
+    pub fn renderings(&self) -> &TraceRenderings {
+        match self {
+            TraceArtifact::Run(file) => &file.renderings,
+            TraceArtifact::Bundle(bundle) => &bundle.renderings,
+        }
+    }
+
+    pub fn diagnostic(&self) -> &Value {
+        match self {
+            TraceArtifact::Run(file) => &file.diagnostic,
+            TraceArtifact::Bundle(bundle) => &bundle.diagnostic,
+        }
+    }
 }
 
 /// Which reading of a persisted run to print.
@@ -729,14 +1040,51 @@ pub fn resolve_run_file(dir: &Path, run: &str) -> PathBuf {
     run_file_path(dir, run)
 }
 
-pub fn read_run_file(path: &Path) -> Result<TraceRunFile, CliError> {
-    let text = std::fs::read_to_string(path).map_err(|error| {
+/// Read whichever artifact `path` holds. A bundle says what it is in its
+/// first field. Anything else is read as a run file, and the run file's own
+/// version check then says whether it is one.
+pub fn read_artifact(path: &Path) -> Result<TraceArtifact, CliError> {
+    let text = read_artifact_text(path)?;
+    let format = serde_json::from_str::<Value>(&text)
+        .ok()
+        .and_then(|value| value.get("format")?.as_str().map(str::to_string));
+    if format.as_deref() == Some(BUNDLE_FORMAT) {
+        return parse_bundle(&text, path).map(|bundle| TraceArtifact::Bundle(Box::new(bundle)));
+    }
+    parse_run_file(&text, path).map(|file| TraceArtifact::Run(Box::new(file)))
+}
+
+fn read_artifact_text(path: &Path) -> Result<String, CliError> {
+    std::fs::read_to_string(path).map_err(|error| {
         CliError::new(
             ErrorKind::MissingResource,
             format!("no trace run at {}: {error}", path.display()),
         )
+    })
+}
+
+fn parse_bundle(text: &str, path: &Path) -> Result<TraceBundle, CliError> {
+    let bundle: TraceBundle = serde_json::from_str(text).map_err(|error| {
+        CliError::new(
+            ErrorKind::Protocol,
+            format!("{} is not a lucida trace bundle: {error}", path.display()),
+        )
     })?;
-    let file: TraceRunFile = serde_json::from_str(&text).map_err(|error| {
+    if bundle.bundle_version != BUNDLE_VERSION {
+        return Err(CliError::new(
+            ErrorKind::Protocol,
+            format!(
+                "{} was written by bundle version {}, and this CLI reads version {BUNDLE_VERSION}",
+                path.display(),
+                bundle.bundle_version
+            ),
+        ));
+    }
+    Ok(bundle)
+}
+
+fn parse_run_file(text: &str, path: &Path) -> Result<TraceRunFile, CliError> {
+    let file: TraceRunFile = serde_json::from_str(text).map_err(|error| {
         CliError::new(
             ErrorKind::Protocol,
             format!("{} is not a lucida trace run file: {error}", path.display()),
@@ -789,10 +1137,14 @@ pub fn gate_failure(file: &TraceRunFile) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 /// The default rendering: the page's own text, under the three things the page
-/// could not know about its own run.
-pub fn format_run_human(file: &TraceRunFile, path: &Path) -> String {
+/// could not know about its own run. `bundle` is where the bundle went, when
+/// the caller asked for one.
+pub fn format_run_human(file: &TraceRunFile, path: &Path, bundle: Option<&Path>) -> String {
     let header = &file.header;
     let view = &header.composed_view;
+    let bundle = bundle
+        .map(|bundle| format!("bundle    {}\n", bundle.display()))
+        .unwrap_or_default();
     let camera = view
         .camera
         .as_ref()
@@ -816,6 +1168,7 @@ pub fn format_run_human(file: &TraceRunFile, path: &Path) -> String {
          server    {}\n\
          hold      quiescent had to hold {} ms; every duration below is measured against that\n\
          run file  {}\n\
+         {bundle}\
          {screenshot}\n\
          {}",
         view.dataset,
@@ -829,6 +1182,206 @@ pub fn format_run_human(file: &TraceRunFile, path: &Path) -> String {
     )
 }
 
+/// A bundle's header block, above whichever rendering `show` was asked for.
+///
+/// This is where the health counters and the replay conditions reach the
+/// text. The page's renderings are about the run. The bundle's header is
+/// about the conditions the run happened under and what the server held at
+/// the end. Every line reads a field of the file, and the one line that
+/// derives anything, `replay`, only says which replay inputs the header
+/// lacks. No verdict or threshold is computed here (ADR 0051).
+pub fn format_bundle_human(bundle: &TraceBundle, path: &Path, text: &str) -> String {
+    let header = &bundle.header;
+    let mut lines = vec![format!("bundle    {}", path.display())];
+    lines.push(format!(
+        "run       {} · ended: {} · saved at epoch ms {}",
+        header.run_id.as_deref().unwrap_or("no run recorded"),
+        header.end_reason.as_deref().unwrap_or("no end reason"),
+        header.saved_at_epoch_ms,
+    ));
+    for dataset in &header.datasets {
+        lines.push(format!(
+            "dataset   {} ({}{})",
+            dataset
+                .source_url
+                .as_deref()
+                .unwrap_or("source URL unknown"),
+            dataset.id,
+            dataset
+                .name
+                .as_deref()
+                .map(|name| format!(", {name}"))
+                .unwrap_or_default(),
+        ));
+    }
+    if let Some(url) = &header.view_url {
+        let viewport = header
+            .viewport
+            .map(|viewport| format!(" @ {}x{}", viewport.css_width, viewport.css_height))
+            .unwrap_or_default();
+        let dpr = header
+            .device_pixel_ratio
+            .map(|dpr| format!(" DPR {dpr}"))
+            .unwrap_or_default();
+        let mode = header
+            .mode
+            .as_deref()
+            .map(|mode| format!(" · {mode}"))
+            .unwrap_or_default();
+        lines.push(format!("view      {url}{viewport}{dpr}{mode}"));
+    }
+    for pins in &header.pins {
+        lines.push(format!("pins      {}", format_pins(pins)));
+    }
+    if let Some(gpu) = &header.gpu {
+        let name = if gpu.description.is_empty() {
+            format!("{} {}", gpu.vendor, gpu.architecture)
+        } else {
+            gpu.description.clone()
+        };
+        let fallback = match gpu.fallback {
+            Some(true) => "software fallback",
+            Some(false) => "hardware adapter",
+            None => "fallback status unknown",
+        };
+        lines.push(format!("adapter   {} · {fallback}", name.trim()));
+    }
+    if let Some(build) = &header.build {
+        lines.push(format!("build     {} {}", build.version, build.mode));
+    }
+    if !header.cache_warmth.is_null() {
+        lines.push(format!(
+            "warmth    browser held {}",
+            format_flat(&header.cache_warmth)
+        ));
+    }
+    if !header.planning.is_null() {
+        lines.push(format!("planning  {}", format_flat(&header.planning)));
+    }
+    match &bundle.health {
+        Some(health) => {
+            for entry in &health.datasets {
+                lines.push(format!("health    {}", format_health(entry)));
+            }
+        }
+        None => lines.push("health    not in this bundle".to_string()),
+    }
+    match &bundle.frame {
+        Some(frame) => {
+            let ratio = frame
+                .device_pixel_ratio
+                .map(|ratio| format!(" at DPR {ratio}"))
+                .unwrap_or_default();
+            lines.push(format!(
+                "frame     {}x{} PNG{ratio} (captured by {})",
+                frame.width, frame.height, frame.captured_by
+            ));
+        }
+        None => lines.push("frame     not in this bundle".to_string()),
+    }
+    for absence in &bundle.absent {
+        lines.push(format!("absent    {}: {}", absence.section, absence.reason));
+    }
+    if bundle.perfetto.is_some() {
+        lines.push("perfetto  projection included".to_string());
+    }
+    let missing = missing_replay_inputs(header);
+    if !missing.is_empty() {
+        lines.push(format!(
+            "replay    the header lacks: {}",
+            missing.join(", ")
+        ));
+    }
+    lines.push(String::new());
+    lines.push(text.to_string());
+    lines.join("\n")
+}
+
+fn format_pins(pins: &DatasetPins) -> String {
+    let level = match pins.level {
+        Some(level) => format!("level {level}"),
+        None => "level follows the screen".to_string(),
+    };
+    let render_mode = pins
+        .render_mode
+        .as_deref()
+        .map(|mode| format!(" · {mode}"))
+        .unwrap_or_default();
+    let contrast = pins
+        .contrast
+        .as_ref()
+        .map(|windows| {
+            let windows: Vec<String> = windows
+                .iter()
+                .map(|window| format!("{}..{}", window.min, window.max))
+                .collect();
+            format!(" · contrast {}", windows.join(", "))
+        })
+        .unwrap_or_default();
+    let colormap = pins
+        .colormap
+        .as_ref()
+        .map(|names| format!(" · colormap {}", names.join(", ")))
+        .unwrap_or_default();
+    let auto = match pins.auto_contrast {
+        Some(true) => " · auto-contrast on",
+        Some(false) => " · auto-contrast off",
+        None => "",
+    };
+    if pins.level.is_none()
+        && pins.render_mode.is_none()
+        && pins.contrast.is_none()
+        && pins.colormap.is_none()
+        && pins.auto_contrast.is_none()
+    {
+        return format!("{}: the view URL carries no pins", pins.dataset_id);
+    }
+    format!(
+        "{}: {level}{render_mode}{contrast}{colormap}{auto}",
+        pins.dataset_id
+    )
+}
+
+/// The counters the field report asks about first: whether the object store
+/// was read at all, and what the generated coarse levels have ready.
+fn format_health(entry: &DatasetSourceHealth) -> String {
+    let cache = entry
+        .source_cache
+        .as_ref()
+        .map(|cache| {
+            format!(
+                " · source reads {} · cache hits {} · misses {} · evictions {}",
+                cache.source_reads, cache.hits, cache.misses, cache.evictions
+            )
+        })
+        .unwrap_or_else(|| " · no source cache".to_string());
+    let coarse = &entry.generated_coarse;
+    // The status by its wire name, which is what `lucida dataset health` prints.
+    let status = serde_json::to_value(entry.status)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| format!("{:?}", entry.status));
+    format!(
+        "{}: {status}{cache} · generated coarse ready {} · pending {} · failed {}",
+        entry.workspace_dataset_id.0,
+        coarse.ready_chunks,
+        coarse.pending_chunks,
+        coarse.failed_chunks
+    )
+}
+
+/// A flat JSON object on one line, `key value` pairs in the file's order.
+fn format_flat(value: &Value) -> String {
+    match value.as_object() {
+        Some(object) => object
+            .iter()
+            .map(|(key, value)| format!("{key} {value}"))
+            .collect::<Vec<_>>()
+            .join(" · "),
+        None => value.to_string(),
+    }
+}
+
 fn format_level_range(range: LevelRange) -> String {
     if range.min == range.max {
         range.min.to_string()
@@ -837,29 +1390,25 @@ fn format_level_range(range: LevelRange) -> String {
     }
 }
 
-/// A depth of a persisted run. `Summary` and `Phases` are the page's renderings
-/// verbatim; `Phase` selects one phase's already-computed numbers out of the
-/// document rather than deriving anything.
-pub fn render_show(file: &TraceRunFile, depth: &ShowDepth) -> String {
+/// A depth of a persisted run or bundle. `Summary` and `Phases` are the page's
+/// renderings verbatim; `Phase` selects one phase's already-computed numbers
+/// out of the document rather than deriving anything. Both artifacts carry
+/// the same renderings, so one function reads either.
+pub fn render_show(renderings: &TraceRenderings, depth: &ShowDepth) -> String {
     match depth {
-        ShowDepth::Summary => file.renderings.summary.clone(),
-        ShowDepth::Phases => file.renderings.phases.clone(),
-        ShowDepth::Phase(id) => file
-            .renderings
-            .per_phase
-            .get(id)
-            .cloned()
-            .unwrap_or_else(|| {
-                format!(
-                    "phase {id} is not in this run; the run carries: {}",
-                    file.renderings
-                        .per_phase
-                        .keys()
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            }),
+        ShowDepth::Summary => renderings.summary.clone(),
+        ShowDepth::Phases => renderings.phases.clone(),
+        ShowDepth::Phase(id) => renderings.per_phase.get(id).cloned().unwrap_or_else(|| {
+            format!(
+                "phase {id} is not in this run; the run carries: {}",
+                renderings
+                    .per_phase
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }),
     }
 }
 
@@ -880,21 +1429,23 @@ pub async fn drive_run(
     wait: Duration,
     facts: &DriverFacts,
     perfetto_path: Option<&str>,
-) -> Result<TraceRunFile, CliError> {
-    // Both artifacts come out of one drive when they are both wanted. The
+    bundle: Option<&BundleRequest>,
+) -> Result<DrivenRun, CliError> {
+    // Every artifact comes out of one drive when several are wanted. The
     // default rendering points at Perfetto for raw spans, and a second drive
     // would send the reader to a different run than the one they were reading.
     let export_expression = run_export_expression(perfetto_path.is_some());
-    let json = drive_and_export(
+    let driven = drive_and_export(
         url,
         token,
         viewport,
         wait,
         &export_expression,
         facts.screenshot.as_deref(),
+        bundle,
     )
     .await?;
-    let export: SeamExport = serde_json::from_str(&json).map_err(|error| {
+    let export: SeamExport = serde_json::from_str(&driven.export).map_err(|error| {
         CliError::new(
             ErrorKind::Protocol,
             format!("the page returned a trace this CLI cannot read: {error}"),
@@ -903,7 +1454,39 @@ pub async fn drive_run(
     if let (Some(path), Some(projection)) = (perfetto_path, export.chrome_trace.as_deref()) {
         write_beside_its_parents(Path::new(path), projection.as_bytes()).await?;
     }
-    Ok(assemble_run_file(export, facts))
+    // Written as the page returned it: the driver adds nothing to a bundle,
+    // which is what makes it the same file the monitor saves.
+    let mut bundle_path = None;
+    if let (Some(request), Some(json)) = (bundle, driven.bundle_json.as_deref()) {
+        write_beside_its_parents(&request.path, json.as_bytes()).await?;
+        bundle_path = Some(request.path.clone());
+    }
+    Ok(DrivenRun {
+        file: assemble_run_file(export, facts),
+        bundle: bundle_path,
+    })
+}
+
+/// A driven run's file, and where its bundle went when one was asked for.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DrivenRun {
+    pub file: TraceRunFile,
+    pub bundle: Option<PathBuf>,
+}
+
+/// A bundle the caller asked the drive to write (#1055).
+#[derive(Debug, Clone, PartialEq)]
+pub struct BundleRequest {
+    pub path: PathBuf,
+    /// Include the Perfetto projection. Off by default.
+    pub perfetto: bool,
+}
+
+/// What one drive handed back: the run export, and the bundle's JSON when one
+/// was asked for.
+struct Driven {
+    export: String,
+    bundle_json: Option<String>,
 }
 
 /// Drive one run and hand back whatever `export` evaluated to.
@@ -915,7 +1498,8 @@ pub async fn drive_run(
 ///
 /// `screenshot` is where to write the page's frame after the wait, at the
 /// viewport's device pixel ratio. It is taken before the export because the
-/// export closes the run: the frame is the run's last state.
+/// export closes the run: the frame is the run's last state. A bundle takes
+/// the same frame, whether or not the caller also wanted it as a file.
 async fn drive_and_export(
     url: &str,
     token: Option<&EffectiveToken>,
@@ -923,7 +1507,8 @@ async fn drive_and_export(
     wait: Duration,
     export: &str,
     screenshot: Option<&Path>,
-) -> Result<String, CliError> {
+    bundle: Option<&BundleRequest>,
+) -> Result<Driven, CliError> {
     browser::with_browser(viewport, wait, async |browser| {
         let mut page = browser.open_page_unrendered(url, token, wait).await?;
         if !wait_for_settled_run(&mut page, wait).await? {
@@ -931,16 +1516,38 @@ async fn drive_and_export(
             let closed = read_run_state(&mut page, wait).await?;
             pin_run(&mut page, closed.last_concluded_run_id.as_deref(), wait).await?;
         }
-        if let Some(path) = screenshot {
+        let mut frame = None;
+        if screenshot.is_some() || bundle.is_some() {
             let png = page.screenshot_png(wait).await?;
-            write_beside_its_parents(path, &png).await?;
+            if let Some(path) = screenshot {
+                write_beside_its_parents(path, &png).await?;
+            }
+            frame = Some(BundleFrame::from_driver(&png, viewport));
         }
         let value = page.evaluate(export, wait).await?;
-        value.as_str().map(str::to_string).ok_or_else(|| {
+        let export = value.as_str().map(str::to_string).ok_or_else(|| {
             CliError::new(
                 ErrorKind::Protocol,
                 "the page did not return a trace; window.lucidaTrace was missing",
             )
+        })?;
+        // The bundle's document is the run export's plus the empty interval
+        // the run export itself closed, so the two files name the same run
+        // and differ by that interval and their export times.
+        let mut bundle_json = None;
+        if let (Some(request), Some(frame)) = (bundle, frame.as_ref()) {
+            let expression = bundle_export_expression(frame, request.perfetto);
+            let value = page.evaluate(&expression, wait).await?;
+            bundle_json = Some(value.as_str().map(str::to_string).ok_or_else(|| {
+                CliError::new(
+                    ErrorKind::Protocol,
+                    "the page did not return a bundle; window.lucidaTrace.exportBundle was missing",
+                )
+            })?);
+        }
+        Ok(Driven {
+            export,
+            bundle_json,
         })
     })
     .await
@@ -1155,8 +1762,10 @@ pub async fn capture_chrome_trace(
         wait,
         CHROME_TRACE_EXPORT_EXPRESSION,
         None,
+        None,
     )
-    .await?;
+    .await?
+    .export;
     write_beside_its_parents(Path::new(output_path), json.as_bytes()).await?;
     summarise_chrome_trace(&json, chrome_trace_end_reason(&json))
 }
@@ -1484,7 +2093,7 @@ mod tests {
             true,
             "quiescent",
         );
-        let human = format_run_human(&file, Path::new("/traces/run-1-1.json"));
+        let human = format_run_human(&file, Path::new("/traces/run-1-1.json"), None);
 
         assert!(human.contains("gs://bucket/set.zarr @ 1440x900 DPR 2"));
         assert!(human.contains("server cold for this dataset"));
@@ -1502,19 +2111,25 @@ mod tests {
     fn the_depths_print_the_pages_own_renderings() {
         let file = run_file(json!({}), true, "quiescent");
         assert_eq!(
-            render_show(&file, &ShowDepth::Summary),
+            render_show(&file.renderings, &ShowDepth::Summary),
             file.renderings.summary
         );
         assert_eq!(
-            render_show(&file, &ShowDepth::Phases),
+            render_show(&file.renderings, &ShowDepth::Phases),
             file.renderings.phases
         );
         assert_eq!(
-            render_show(&file, &ShowDepth::Phase("browser.wire".to_string())),
+            render_show(
+                &file.renderings,
+                &ShowDepth::Phase("browser.wire".to_string())
+            ),
             file.renderings.per_phase["browser.wire"]
         );
 
-        let missing = render_show(&file, &ShowDepth::Phase("browser.decode".to_string()));
+        let missing = render_show(
+            &file.renderings,
+            &ShowDepth::Phase("browser.decode".to_string()),
+        );
         assert!(missing.contains("browser.decode is not in this run"));
         assert!(missing.contains("browser.wire"));
     }
@@ -1572,7 +2187,9 @@ mod tests {
         );
         let json = serde_json::to_value(&file).unwrap();
         assert_eq!(json["header"]["screenshot"], "/tmp/twins/sharded.png");
-        assert!(format_run_human(&file, Path::new("run.json")).contains("/tmp/twins/sharded.png"));
+        assert!(
+            format_run_human(&file, Path::new("run.json"), None).contains("/tmp/twins/sharded.png")
+        );
 
         let without = assemble_run_file(export(), &facts());
         assert_eq!(without.header.screenshot, None);
@@ -1637,15 +2254,367 @@ mod tests {
         file.file_version = RUN_FILE_VERSION + 1;
         std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
 
-        let error = read_run_file(&path).unwrap_err();
+        let error = read_artifact(&path).unwrap_err();
         assert_eq!(error.kind, ErrorKind::Protocol);
         assert!(error.message.contains("run file version"));
 
         file.file_version = RUN_FILE_VERSION;
         std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
-        assert_eq!(read_run_file(&path).unwrap(), file);
+        assert_eq!(
+            read_artifact(&path).unwrap(),
+            TraceArtifact::Run(Box::new(file))
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The bundle the page writes from fixed inputs, checked in under
+    /// `trace-fixtures/` by the web suite. This side reads it and adds
+    /// nothing, so the golden is where the two sides are held together.
+    fn golden_bundle_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("trace-fixtures")
+            .join("bundle-v1.json")
+    }
+
+    fn golden_bundle() -> TraceBundle {
+        match read_artifact(&golden_bundle_path()).unwrap() {
+            TraceArtifact::Bundle(bundle) => *bundle,
+            TraceArtifact::Run(_) => panic!("the golden bundle read as a run file"),
+        }
+    }
+
+    /// `show` reads a bundle at every depth it reads a run, because the bundle
+    /// carries the same renderings, taken by the same page.
+    #[test]
+    fn the_golden_bundle_reads_as_a_bundle_and_prints_at_every_depth() {
+        let artifact = read_artifact(&golden_bundle_path()).unwrap();
+        let TraceArtifact::Bundle(bundle) = &artifact else {
+            panic!("expected a bundle");
+        };
+        assert_eq!(bundle.format, BUNDLE_FORMAT);
+        assert_eq!(bundle.bundle_version, BUNDLE_VERSION);
+        assert_eq!(bundle.header.run_id.as_deref(), Some("local-healthy"));
+        assert!(artifact.diagnostic().get("verdict").is_some());
+
+        let summary = render_show(artifact.renderings(), &ShowDepth::Summary);
+        assert!(summary.contains("local-healthy"), "{summary}");
+        let phases = render_show(artifact.renderings(), &ShowDepth::Phases);
+        assert!(phases.contains("browser.wire"), "{phases}");
+        let wire = render_show(
+            artifact.renderings(),
+            &ShowDepth::Phase("browser.wire".to_string()),
+        );
+        assert!(wire.contains("browser.wire"), "{wire}");
+        let missing = render_show(artifact.renderings(), &ShowDepth::Phase("nope".to_string()));
+        assert!(missing.contains("is not in this run"), "{missing}");
+    }
+
+    /// The header lists every field the replay needs, and the list is the
+    /// driver's own. Each replay input names the header field that carries
+    /// it, and the golden has a value under every one.
+    #[test]
+    fn the_golden_bundles_header_carries_every_replay_input() {
+        let text = std::fs::read_to_string(golden_bundle_path()).unwrap();
+        let value: Value = serde_json::from_str(&text).unwrap();
+        let header = value["header"].as_object().unwrap();
+        for input in REPLAY_INPUTS {
+            let field = header.get(input.field).unwrap_or_else(|| {
+                panic!(
+                    "{} ({}) is not in the bundle header",
+                    input.input, input.field
+                )
+            });
+            assert!(
+                !field.is_null(),
+                "{} ({}) is null in the golden",
+                input.input,
+                input.field
+            );
+        }
+        // The replay list and the identity fields partition the header, so a
+        // field the page adds to the header fails here until it is declared
+        // as one or the other. The page's own tests assert the same split.
+        let identity = [
+            "runId",
+            "cause",
+            "endReason",
+            "startedAtEpochMs",
+            "durationUs",
+            "quiescenceHoldMs",
+            "savedAtEpochMs",
+        ];
+        let mut declared: Vec<&str> = REPLAY_INPUTS.iter().map(|input| input.field).collect();
+        declared.extend(identity);
+        declared.sort_unstable();
+        let mut present: Vec<&str> = header.keys().map(String::as_str).collect();
+        present.sort_unstable();
+        assert_eq!(present, declared);
+
+        // The typed reading agrees with what the driver's flags write into
+        // the view: the dataset URL, the viewport and ratio, and the four pins.
+        let header = golden_bundle().header;
+        assert_eq!(
+            header.datasets[0].source_url.as_deref(),
+            Some("gs://bucket/sample.zarr")
+        );
+        assert!(header.view_url.as_deref().unwrap().contains("#view="));
+        assert_eq!(
+            header
+                .viewport
+                .map(|viewport| (viewport.css_width, viewport.css_height)),
+            Some((1440.0, 900.0))
+        );
+        assert_eq!(header.device_pixel_ratio, Some(2.0));
+        assert_eq!(header.mode.as_deref(), Some("slice"));
+        assert!(header.planning.get("prefetchDepth").is_some());
+        let pins = &header.pins[0];
+        assert_eq!(pins.dataset_id, "ds");
+        assert_eq!(pins.level, Some(2));
+        assert_eq!(pins.render_mode.as_deref(), Some("max_intensity"));
+        assert_eq!(
+            pins.contrast.as_deref(),
+            Some(
+                &[
+                    ContrastWindow {
+                        min: 100.0,
+                        max: 2000.0
+                    },
+                    ContrastWindow {
+                        min: 50.0,
+                        max: 900.0
+                    }
+                ][..]
+            )
+        );
+        assert_eq!(
+            pins.colormap.as_deref(),
+            Some(&["magenta".to_string(), "green".to_string()][..])
+        );
+        assert_eq!(pins.auto_contrast, Some(false));
+        assert_eq!(
+            header.build.as_ref().map(|build| build.version.as_str()),
+            Some("0.2.0")
+        );
+        assert_eq!(
+            header.gpu.as_ref().and_then(|gpu| gpu.fallback),
+            Some(false)
+        );
+        assert!(!header.cache_warmth.is_null());
+    }
+
+    /// The health counters at close are in the bundle and in the text, next
+    /// to the conditions a reader needs before the verdict means anything.
+    #[test]
+    fn the_bundles_text_carries_the_health_counters_and_the_replay_conditions() {
+        let bundle = golden_bundle();
+        let health = bundle.health.as_ref().unwrap();
+        assert_eq!(
+            health.datasets[0]
+                .source_cache
+                .as_ref()
+                .unwrap()
+                .source_reads,
+            12
+        );
+
+        let text = render_show(&bundle.renderings, &ShowDepth::Summary);
+        let human = format_bundle_human(
+            &bundle,
+            Path::new("lucida-local-healthy.bundle.json"),
+            &text,
+        );
+        assert!(human.contains("source reads 12"), "{human}");
+        assert!(human.contains("cache hits 40"), "{human}");
+        assert!(human.contains("misses 12"), "{human}");
+        assert!(human.contains("generated coarse ready 8"), "{human}");
+        assert!(human.contains("gs://bucket/sample.zarr"), "{human}");
+        assert!(human.contains("@ 1440x900 DPR 2 · slice"), "{human}");
+        assert!(human.contains("level 2 · max_intensity"), "{human}");
+        assert!(human.contains("contrast 100..2000, 50..900"), "{human}");
+        assert!(human.contains("hardware adapter"), "{human}");
+        assert!(human.contains("build     0.2.0 production"), "{human}");
+        assert!(human.contains("prefetchDepth 2"), "{human}");
+        assert!(
+            human.contains("2880x1800 PNG at DPR 2 (captured by page)"),
+            "{human}"
+        );
+        assert!(
+            human.ends_with(&text),
+            "the page's own rendering closes the text"
+        );
+        // The frame's bytes stay in the file. A header block is for reading.
+        assert!(!human.contains("iVBORw0KGgo="), "{human}");
+    }
+
+    #[test]
+    fn a_bundle_without_a_frame_or_health_says_so_in_the_text() {
+        let mut bundle = golden_bundle();
+        bundle.frame = None;
+        bundle.health = None;
+        bundle.absent = vec![
+            BundleAbsence {
+                section: "frame".to_string(),
+                reason: "the render worker could not read its canvas".to_string(),
+            },
+            BundleAbsence {
+                section: "health".to_string(),
+                reason: "the session socket is not connected".to_string(),
+            },
+        ];
+        bundle.header.pins[0] = DatasetPins {
+            dataset_id: "ds".to_string(),
+            level: None,
+            render_mode: None,
+            contrast: None,
+            colormap: None,
+            auto_contrast: None,
+        };
+
+        let human = format_bundle_human(&bundle, Path::new("b.json"), "text");
+        // The pins are still a field the replay reads; only their values are
+        // unknown, so the replay line stays quiet.
+        assert!(!human.contains("replay    "), "{human}");
+        assert!(human.contains("frame     not in this bundle"), "{human}");
+        assert!(human.contains("health    not in this bundle"), "{human}");
+        assert!(
+            human.contains("absent    frame: the render worker could not read its canvas"),
+            "{human}"
+        );
+        assert!(
+            human.contains("absent    health: the session socket is not connected"),
+            "{human}"
+        );
+        assert!(
+            human.contains("pins      ds: the view URL carries no pins"),
+            "{human}"
+        );
+    }
+
+    /// A follow-up command takes a run file or a bundle by the same argument,
+    /// and refuses what it cannot read with a reason instead of a half read.
+    #[test]
+    fn a_follow_up_command_reads_a_run_file_or_a_bundle_and_refuses_what_it_cannot() {
+        let dir =
+            std::env::temp_dir().join(format!("lucida-trace-artifact-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let run_path = dir.join("run.json");
+        let file = run_file(json!({}), true, "quiescent");
+        std::fs::write(&run_path, serde_json::to_vec(&file).unwrap()).unwrap();
+        assert_eq!(
+            read_artifact(&run_path).unwrap(),
+            TraceArtifact::Run(Box::new(file))
+        );
+
+        let bundle_path = dir.join("lucida-run.bundle.json");
+        let mut value: Value =
+            serde_json::from_str(&std::fs::read_to_string(golden_bundle_path()).unwrap()).unwrap();
+        std::fs::write(&bundle_path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(matches!(
+            read_artifact(&bundle_path).unwrap(),
+            TraceArtifact::Bundle(_)
+        ));
+
+        value["bundleVersion"] = json!(BUNDLE_VERSION + 1);
+        std::fs::write(&bundle_path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let error = read_artifact(&bundle_path).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Protocol);
+        assert!(
+            error.message.contains("bundle version"),
+            "{}",
+            error.message
+        );
+
+        let other_path = dir.join("other.json");
+        std::fs::write(&other_path, br#"{"hello": 1}"#).unwrap();
+        let error = read_artifact(&other_path).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Protocol);
+        assert!(
+            error.message.contains("not a lucida trace run file"),
+            "{}",
+            error.message
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The driver hands the page its own frame and asks for the run it
+    /// waited for. The frame rides as JSON the encoder quoted, and the
+    /// projection is off unless the caller asked.
+    #[test]
+    fn the_bundle_export_hands_the_page_the_drivers_frame_and_no_projection_by_default() {
+        let frame = BundleFrame::from_driver(&[1, 2, 3], Viewport::new(1440, 900, 2.0));
+        assert_eq!(frame.png, "AQID");
+        assert_eq!((frame.width, frame.height), (2880, 1800));
+        assert_eq!(frame.device_pixel_ratio, Some(2.0));
+        assert_eq!(frame.captured_by, "driver");
+        assert_eq!(frame.describe()["pngBytes"], 3);
+
+        let expression = bundle_export_expression(&frame, false);
+        assert!(expression.contains(r#""png":"AQID""#), "{expression}");
+        assert!(
+            expression.contains(r#""capturedBy":"driver""#),
+            "{expression}"
+        );
+        assert!(expression.contains("perfetto: false"), "{expression}");
+        assert!(expression.contains("__lucidaTraceRunId"), "{expression}");
+        assert!(expression.contains("seam.exportBundle("), "{expression}");
+        assert!(bundle_export_expression(&frame, true).contains("perfetto: true"));
+    }
+
+    /// A bundle from a page that recorded no run has a header with little in
+    /// it. The text names the replay inputs it lacks, by the spec's words.
+    #[test]
+    fn a_bundle_with_no_run_names_the_replay_inputs_its_header_lacks() {
+        let mut bundle = golden_bundle();
+        bundle.header.run_id = None;
+        bundle.header.datasets.clear();
+        bundle.header.view_url = None;
+        bundle.header.viewport = None;
+        bundle.header.device_pixel_ratio = None;
+        bundle.header.mode = None;
+        bundle.header.pins.clear();
+        bundle.header.build = None;
+        bundle.header.gpu = None;
+        bundle.header.cache_warmth = Value::Null;
+
+        assert_eq!(
+            missing_replay_inputs(&bundle.header),
+            vec![
+                "dataset",
+                "view URL",
+                "viewport",
+                "device pixel ratio",
+                "slice or volume mode",
+                "level, render mode, contrast, and colormap pins",
+                "build",
+                "adapter",
+                "cache warmth",
+            ]
+        );
+        assert!(missing_replay_inputs(&golden_bundle().header).is_empty());
+
+        let human = format_bundle_human(&bundle, Path::new("b.json"), "text");
+        assert!(human.contains("run       no run recorded"), "{human}");
+        assert!(
+            human.contains("replay    the header lacks: dataset, view URL, viewport"),
+            "{human}"
+        );
+    }
+
+    #[test]
+    fn the_default_rendering_names_the_bundle_when_one_was_written() {
+        let file = run_file(json!({}), true, "quiescent");
+        let with = format_run_human(
+            &file,
+            Path::new("run.json"),
+            Some(Path::new("/tmp/out.bundle.json")),
+        );
+        assert!(with.contains("bundle    /tmp/out.bundle.json"), "{with}");
+        let without = format_run_human(&file, Path::new("run.json"), None);
+        assert!(!without.contains("bundle    "), "{without}");
     }
 
     #[test]
@@ -2008,7 +2977,7 @@ mod tests {
             json["header"]["composedView"]["camera"]["targetLevel"],
             json!({ "min": 3, "max": 3 })
         );
-        let human = format_run_human(&file, Path::new("run.json"));
+        let human = format_run_human(&file, Path::new("run.json"), None);
         assert!(human.contains("/tmp/levels/volume-out.png"), "{human}");
         assert!(human.contains("arcball"), "{human}");
         assert!(human.contains("target level 3"), "{human}");

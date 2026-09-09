@@ -249,3 +249,44 @@ describe("worker dispatch upload feedback", () => {
     expect(harness.wantedSetPosts).toBe(1);
   });
 });
+
+describe("worker dispatch frame capture", () => {
+  function makeCanvasCtx(convertToBlob: () => Promise<Blob>): {
+    ctx: WorkerCtx;
+    posts: { msg: WorkerToMainMessage; transfer: Transferable[] | undefined }[];
+  } {
+    const posts: { msg: WorkerToMainMessage; transfer: Transferable[] | undefined }[] = [];
+    const ctx = {
+      state: createInitialState(),
+      context: { canvas: { width: 2880, height: 1800, convertToBlob } },
+      post(msg: WorkerToMainMessage, transfer?: Transferable[]) { posts.push({ msg, transfer }); },
+    } as unknown as WorkerCtx;
+    return { ctx, posts };
+  }
+
+  it("answers a captureFrame with the canvas encoded as PNG, transferred, and its device size", async () => {
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+    const { ctx, posts } = makeCanvasCtx(() => Promise.resolve(new Blob([bytes], { type: "image/png" })));
+
+    await dispatchMessage(ctx, { type: "captureFrame", id: 7 });
+
+    expect(posts).toHaveLength(1);
+    const { msg, transfer } = posts[0];
+    if (msg.type !== "frameCaptured") throw new Error(`expected frameCaptured, got ${msg.type}`);
+    expect(msg.id).toBe(7);
+    expect(msg.width).toBe(2880);
+    expect(msg.height).toBe(1800);
+    expect(new Uint8Array(msg.png!)).toEqual(bytes);
+    expect(transfer).toEqual([msg.png]);
+  });
+
+  it("answers with a null PNG when the canvas cannot be read, so the waiter is released", async () => {
+    const { ctx, posts } = makeCanvasCtx(() => Promise.reject(new Error("context lost")));
+
+    await dispatchMessage(ctx, { type: "captureFrame", id: 8 });
+
+    expect(posts).toEqual([
+      { msg: { type: "frameCaptured", id: 8, png: null, width: 2880, height: 1800 }, transfer: undefined },
+    ]);
+  });
+});

@@ -1202,6 +1202,17 @@ struct TraceRunArgs {
     /// the run's device pixel ratio
     #[arg(long, value_name = "PATH")]
     screenshot: Option<PathBuf>,
+    /// Also write the run as a bundle: the trace, the settled frame, the view
+    /// URL, the planning configuration, the pins, the server's dataset health
+    /// counters, and a header sufficient to replay the run, in one file that
+    /// `trace show` reads and the monitor's Save bundle also writes
+    #[arg(long, value_name = "PATH")]
+    bundle: Option<PathBuf>,
+    /// Include the Perfetto projection in the bundle. Off by default, because
+    /// it is megabytes a reader rarely needs, and --perfetto writes it on its
+    /// own
+    #[arg(long, requires = "bundle")]
+    bundle_perfetto: bool,
     /// Frame the dataset with this camera, fitted to the dataset, instead of
     /// leaving the framing to the page
     #[arg(long, value_name = "CAMERA")]
@@ -3577,13 +3588,14 @@ async fn emit_trace_command(
                 "target": target,
                 "runFile": outcome.path,
                 "screenshot": outcome.file.header.screenshot,
+                "bundle": outcome.bundle,
                 "header": outcome.file.header,
                 "verdict": outcome.file.diagnostic.get("verdict"),
                 "text": outcome.file.renderings.summary,
                 "gate": outcome.gate,
             });
             output.print_either(&payload, || {
-                trace::format_run_human(&outcome.file, &outcome.path)
+                trace::format_run_human(&outcome.file, &outcome.path, outcome.bundle.as_deref())
             })?;
             if let Some(reason) = outcome.gate {
                 return Err(CliError::new(ErrorKind::GateFailed, reason));
@@ -3600,20 +3612,38 @@ async fn emit_trace_command(
         ) => {
             let dir = trace::resolve_trace_dir(trace_dir.as_deref(), &config_path);
             let path = trace::resolve_run_file(&dir, run);
-            let file = trace::read_run_file(&path)?;
+            // A bundle carries the same renderings as a run file, so every depth reads either.
+            let artifact = trace::read_artifact(&path)?;
             let depth = match (phase, phases) {
                 (Some(phase), _) => trace::ShowDepth::Phase(phase.clone()),
                 (None, true) => trace::ShowDepth::Phases,
                 (None, false) => trace::ShowDepth::Summary,
             };
-            let text = trace::render_show(&file, &depth);
-            let payload = serde_json::json!({
-                "runFile": path,
-                "header": file.header,
-                "diagnostic": file.diagnostic,
-                "text": text,
-            });
-            output.print_either(&payload, || text.clone())?;
+            let text = trace::render_show(artifact.renderings(), &depth);
+            let (payload, human) = match &artifact {
+                trace::TraceArtifact::Run(file) => (
+                    serde_json::json!({
+                        "runFile": path,
+                        "header": file.header,
+                        "diagnostic": artifact.diagnostic(),
+                        "text": text,
+                    }),
+                    text.clone(),
+                ),
+                trace::TraceArtifact::Bundle(bundle) => (
+                    serde_json::json!({
+                        "bundle": path,
+                        "header": bundle.header,
+                        "health": bundle.health,
+                        "frame": bundle.frame.as_ref().map(trace::BundleFrame::describe),
+                        "absent": bundle.absent,
+                        "diagnostic": artifact.diagnostic(),
+                        "text": text,
+                    }),
+                    trace::format_bundle_human(bundle, &path, &text),
+                ),
+            };
+            output.print_either(&payload, || human.clone())?;
         }
         (
             None,
@@ -3664,10 +3694,12 @@ async fn emit_trace_command(
     Ok(())
 }
 
-/// A driven run, its file, and whether an opt-in gate should fail on it.
+/// A driven run, its file, where its bundle went when one was asked for, and
+/// whether an opt-in gate should fail on it.
 struct TraceRunOutcome {
     file: trace::TraceRunFile,
     path: PathBuf,
+    bundle: Option<PathBuf>,
     gate: Option<String>,
 }
 
@@ -3775,18 +3807,35 @@ async fn run_trace(
         screenshot: args.screenshot.clone(),
     };
     let viewport = Viewport::new(args.width, args.height, args.device_pixel_ratio);
+    let bundle = args.bundle.as_ref().map(|path| trace::BundleRequest {
+        path: path.clone(),
+        perfetto: args.bundle_perfetto,
+    });
     // A drive that fails says what it drove: the composed URL is the whole
     // workload, and without it a timeout is unreproducible by hand.
-    let file = trace::drive_run(&url, token, viewport, wait, &facts, perfetto.as_deref())
-        .await
-        .map_err(|error| error.with_context("url", &url))?;
-    let path = trace::write_run_file(&file, trace_dir, args.output.as_deref()).await?;
+    let driven = trace::drive_run(
+        &url,
+        token,
+        viewport,
+        wait,
+        &facts,
+        perfetto.as_deref(),
+        bundle.as_ref(),
+    )
+    .await
+    .map_err(|error| error.with_context("url", &url))?;
+    let path = trace::write_run_file(&driven.file, trace_dir, args.output.as_deref()).await?;
     let gate = if args.gate {
-        trace::gate_failure(&file)
+        trace::gate_failure(&driven.file)
     } else {
         None
     };
-    Ok(TraceRunOutcome { file, path, gate })
+    Ok(TraceRunOutcome {
+        file: driven.file,
+        path,
+        bundle: driven.bundle,
+        gate,
+    })
 }
 
 /// A dataset argument is a URL in canonical form, or the id of a dataset the
@@ -5726,8 +5775,97 @@ mod tests {
                 ));
                 assert_eq!(run.level_pin, Some(0));
                 assert!(run.pin_contrast);
+                assert_eq!(run.bundle, None);
+                assert!(!run.bundle_perfetto);
             }
             _ => panic!("expected a trace run"),
+        }
+    }
+
+    /// The bundle is opt-in like the other sidecars, and its Perfetto
+    /// projection is a second opt-in on top of it (#1055).
+    #[test]
+    fn trace_writes_a_bundle_only_when_asked_and_its_projection_only_on_top_of_that() {
+        match parse(&[
+            "trace",
+            "/data/set.zarr",
+            "--bundle",
+            "/tmp/report.bundle.json",
+            "--bundle-perfetto",
+        ])
+        .command
+        {
+            Command::Trace { run, .. } => {
+                assert_eq!(
+                    run.bundle.as_deref(),
+                    Some(Path::new("/tmp/report.bundle.json"))
+                );
+                assert!(run.bundle_perfetto);
+            }
+            _ => panic!("expected a trace run"),
+        }
+
+        match parse(&["trace", "/data/set.zarr", "--bundle", "/tmp/r.bundle.json"]).command {
+            Command::Trace { run, .. } => assert!(!run.bundle_perfetto),
+            _ => panic!("expected a trace run"),
+        }
+
+        assert!(try_parse(&["trace", "/data/set.zarr", "--bundle-perfetto"]).is_err());
+    }
+
+    /// The bundle header lists every field the replay needs (#1055): each
+    /// argument of `trace` that shapes the workload maps onto a header field
+    /// the replay list names, and the rest are the sidecars and the deadline.
+    /// An argument added to the command lands in one list or fails here.
+    #[test]
+    fn every_workload_argument_of_trace_has_a_bundle_header_field() {
+        use clap::CommandFactory;
+        use std::collections::{BTreeMap, BTreeSet};
+        let replayed_by: BTreeMap<&str, &str> = BTreeMap::from([
+            ("dataset", "datasets"),
+            ("width", "viewport"),
+            ("height", "viewport"),
+            ("device_pixel_ratio", "devicePixelRatio"),
+            ("camera", "viewUrl"),
+            ("zoom", "viewUrl"),
+            ("contrast", "pins"),
+            ("colormap", "pins"),
+            ("render_mode", "pins"),
+            ("level_pin", "pins"),
+            ("pin_contrast", "pins"),
+        ]);
+        let not_workload = [
+            "output",
+            "trace_dir",
+            "perfetto",
+            "screenshot",
+            "bundle",
+            "bundle_perfetto",
+            "timeout_seconds",
+            "gate",
+            "help",
+        ];
+
+        let command = Cli::command();
+        let trace = command
+            .find_subcommand("trace")
+            .expect("the trace command exists");
+        let fields: BTreeSet<&str> = trace::REPLAY_INPUTS
+            .iter()
+            .map(|input| input.field)
+            .collect();
+        for argument in trace.get_arguments() {
+            let id = argument.get_id().as_str();
+            match replayed_by.get(id) {
+                Some(field) => assert!(
+                    fields.contains(field),
+                    "{id} replays through {field}, which the replay list does not name"
+                ),
+                None => assert!(
+                    not_workload.contains(&id),
+                    "{id} is neither a workload argument with a header field nor a sidecar"
+                ),
+            }
         }
     }
 

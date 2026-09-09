@@ -19,6 +19,8 @@ import type { ContentSource, FetchRequest, FetchResult } from "../pipeline/fetch
 import { DecodePool } from "../pipeline/fetch/decodePool.ts";
 import type { ChunkRequest, RequestPlan } from "../pipeline/planning/index.ts";
 import { emptyPlanStats } from "../pipeline/planning/index.ts";
+import { configStore } from "../pipeline/planning/configStore.ts";
+import { setBundleServices } from "./bundle.ts";
 import { installTraceSeam, resolveGpuIdentity } from "./seam.ts";
 import { traceRecorder } from "./recorder.ts";
 import { createQuiescenceState } from "./quiescence.ts";
@@ -292,6 +294,58 @@ describe("the trace seam", () => {
     const doc = window.lucidaTrace!.exportTrace();
     expect(doc.runs[0].header.endReason).toBe("explicit");
     expect(traceRecorder.isRunOpen).toBe(false);
+  });
+
+  /**
+   * The bundle is the same export with more around it (#1055): one function
+   * behind the seam, so the monitor's save and the driver's file agree.
+   */
+  it("offers the run as a bundle, closing it the same way and naming what the page could not add", async () => {
+    installTraceSeam();
+    setBundleServices(null);
+    traceRecorder.openRun(OPEN_CAUSE);
+
+    const bundle = await window.lucidaTrace!.exportBundle();
+    expect(traceRecorder.isRunOpen).toBe(false);
+    expect(bundle.format).toBe("lucida-trace-bundle");
+    expect(bundle.header.runId).toBe(bundle.trace.runs[0].header.runId);
+    expect(bundle.header.endReason).toBe("explicit");
+    expect(bundle.header.viewUrl).toBe(`${window.location.origin}/w/ws-1`);
+    expect(bundle.header.devicePixelRatio).toBe(2);
+    expect(bundle.header.planning).toEqual(configStore.get());
+    // No viewer registered its services on this page, so the frame and the
+    // health are absent and say so, rather than the export failing.
+    expect(bundle.frame).toBeNull();
+    expect(bundle.health).toBeNull();
+    expect(bundle.absent.map(entry => entry.section)).toEqual(["frame", "health"]);
+    expect(bundle.perfetto).toBeNull();
+  });
+
+  it("carries the frame and the health the viewer registered, and the projection only when asked", async () => {
+    installTraceSeam();
+    setBundleServices({
+      requestDatasetHealth: () => Promise.resolve([]),
+      captureFrame: () => Promise.resolve({ png: new Uint8Array([1, 2, 3]).buffer, width: 4, height: 2 }),
+    });
+    try {
+      traceRecorder.openRun(OPEN_CAUSE);
+      const bundle = await window.lucidaTrace!.exportBundle({ perfetto: true });
+      // The frame is labelled with the page's ratio when it was taken, not
+      // the run's. The two agree on a page that stayed on one screen, and
+      // the frame says what it is when they do not.
+      expect(bundle.frame).toEqual({
+        png: "AQID",
+        width: 4,
+        height: 2,
+        devicePixelRatio: window.devicePixelRatio,
+        capturedBy: "page",
+      });
+      expect(bundle.health?.datasets).toEqual([]);
+      expect(bundle.absent).toEqual([]);
+      expect(JSON.parse(bundle.perfetto!).displayTimeUnit).toBe("ms");
+    } finally {
+      setBundleServices(null);
+    }
   });
 
   /**

@@ -40,11 +40,18 @@ const read = vi.hoisted(() => ({ value: null as MonitorRead | null }));
 const runs = vi.hoisted(() => ({ value: [] as MonitorRunSummary[] }));
 const live = vi.hoisted(() => ({ value: null as unknown }));
 const downloadTraceFile = vi.hoisted(() => vi.fn(() => "lucida-run-1.trace.json"));
+const downloadBundle = vi.hoisted(() => vi.fn(() => Promise.resolve("lucida-run-1.bundle.json")));
 const readMonitor = vi.hoisted(() => vi.fn(() => ({ read: read.value, runs: runs.value })));
 const readProgress = vi.hoisted(() => vi.fn(() => live.value));
 const stopRun = vi.hoisted(() => vi.fn(() => { live.value = null; }));
 
-vi.mock("./monitorSource.ts", () => ({ readMonitor, downloadTraceFile, readProgress, stopRun }));
+vi.mock("./monitorSource.ts", () => ({
+  readMonitor,
+  downloadTraceFile,
+  downloadBundle,
+  readProgress,
+  stopRun,
+}));
 
 const { MonitorPage } = await import("./MonitorPage.tsx");
 
@@ -55,6 +62,8 @@ function showing(run: TraceRun) {
 
 beforeEach(() => {
   downloadTraceFile.mockClear();
+  downloadBundle.mockClear();
+  downloadBundle.mockImplementation(() => Promise.resolve("lucida-run-1.bundle.json"));
   readMonitor.mockClear();
   readProgress.mockClear();
   stopRun.mockClear();
@@ -191,6 +200,30 @@ describe("saving a run", () => {
 
     expect(downloadTraceFile).toHaveBeenCalledWith("perfetto", "remote-cold");
   });
+
+  it("saves the run as a bundle through the seam's own bundle function, and says what it wrote", async () => {
+    showing(coldRemoteOpen());
+
+    fireEvent.click(screen.getByTestId("monitor-save-bundle"));
+    expect(screen.getByTestId("monitor-save-bundle").textContent).toContain("Saving");
+    expect(screen.getByTestId("monitor-save-bundle")).toHaveProperty("disabled", true);
+
+    expect(downloadBundle).toHaveBeenCalledWith("remote-cold");
+    await screen.findByTestId("monitor-saved");
+    expect(screen.getByTestId("monitor-saved").textContent).toContain(".bundle.json");
+    expect(screen.getByTestId("monitor-save-bundle").textContent).toBe("Save bundle");
+  });
+
+  it("shows why a bundle could not be saved, where the file name would have been", async () => {
+    downloadBundle.mockImplementation(() => Promise.reject(new Error("no trace seam on this page")));
+    showing(coldRemoteOpen());
+
+    fireEvent.click(screen.getByTestId("monitor-save-bundle"));
+
+    const failed = await screen.findByTestId("monitor-save-failed");
+    expect(failed.textContent).toContain("no trace seam on this page");
+    expect(screen.queryByTestId("monitor-saved")).toBeNull();
+  });
 });
 
 describe("nothing recorded yet", () => {
@@ -201,6 +234,7 @@ describe("nothing recorded yet", () => {
     expect(screen.getByTestId("monitor-empty").textContent).toContain("no run");
     expect(screen.queryByTestId("monitor-phase-table")).toBeNull();
     expect(screen.getByTestId("monitor-save-run")).toHaveProperty("disabled", true);
+    expect(screen.getByTestId("monitor-save-bundle")).toHaveProperty("disabled", true);
   });
 });
 
@@ -212,7 +246,7 @@ describe("observation only", () => {
     // change adds one that does not, this list is where it shows up.
     const labels = screen.getAllByRole("button").map((node) => node.textContent);
     for (const label of labels) {
-      expect(label).toMatch(/^(Back|Read the newest run|Save run|Save for Perfetto|Show the rows behind .*|Close drill-down)$/);
+      expect(label).toMatch(/^(Back|Read the newest run|Save run|Save for Perfetto|Save bundle|Show the rows behind .*|Close drill-down)$/);
     }
   });
 

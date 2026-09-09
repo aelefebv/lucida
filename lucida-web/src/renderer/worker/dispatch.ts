@@ -48,6 +48,7 @@ import {
   removeMinimapResources,
 } from "../minimapHandlers.ts";
 import { rebuildDescriptorIfMatching } from "./bootstrap.ts";
+import { handleCaptureFrame } from "./captureFrame.ts";
 import { postChunksRequeued } from "../chunkUploadFeedback.ts";
 import { sourceKey } from "../poolKeys.ts";
 
@@ -127,6 +128,9 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       return;
     case "thumbnailRender":
       handleThumbnailRender(ctx, msg);
+      return;
+    case "captureFrame":
+      await handleCaptureFrame(ctx, msg);
       return;
     case "minimapDestroy":
       handleMinimapDestroy();

@@ -397,10 +397,11 @@ impl Page {
         expression: &str,
         wait: Duration,
     ) -> Result<Option<Value>, CliError> {
+        // The bundle export evaluates to a promise. Plain values pass through unchanged.
         let evaluated = self
             .call(
                 "Runtime.evaluate",
-                json!({ "expression": expression, "returnByValue": true }),
+                json!({ "expression": expression, "returnByValue": true, "awaitPromise": true }),
                 wait,
             )
             .await?;
