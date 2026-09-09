@@ -70,6 +70,7 @@ import {
 import type { WorkspaceRole, WorkspaceMember } from "./workspaceApi.ts";
 import { isCaptureSurface } from "./captureSurface.ts";
 import { setBundleServices } from "./trace/bundle.ts";
+import { useHudKeyBinding } from "./hud/useHudKey.ts";
 import "./App.css";
 
 // The debug UI (dev-controls panel + on-canvas overlay layer) is
@@ -85,6 +86,8 @@ const DevControls = lazy(() =>
 const DebugOverlays = lazy(() =>
   import("./debug/DebugOverlays.tsx").then((m) => ({ default: m.DebugOverlays })),
 );
+// Code-split for the same reason: the HUD is in every build, and most sessions never show it.
+const Hud = lazy(() => import("./hud/Hud.tsx").then((m) => ({ default: m.Hud })));
 
 interface AppProps {
   workspaceId: string;
@@ -1007,6 +1010,9 @@ function App({
     () => getRenderRadiusPreviewTier() !== null,
     () => false,
   );
+  const [showHud, setShowHud] = useState(false);
+  const toggleHud = useCallback(() => setShowHud((v) => !v), []);
+  useHudKeyBinding(toggleHud);
   const [showBookmarkSidebar, setShowBookmarkSidebar] = useState(true);
   // Default the Explore panel CLOSED; it remains a user toggle. (It previously
   // opened on a fresh dataset open to surface the guided-exploration affordance.)
@@ -1463,6 +1469,15 @@ function App({
                 />
               </Suspense>
             )}
+            {showHud && !captureSurface && (
+              <Suspense fallback={null}>
+                <Hud
+                  canvasRef={render.canvasRef}
+                  datasets={datasetsRef.current}
+                  getCache={() => bridge.sessionRef.current?.cpuCache ?? null}
+                />
+              </Suspense>
+            )}
             <FpsCounter />
             <LoadingViewBanner applier={savedViewSync.applier} />
             {/* Durable, dismissible surface for non-fatal import warnings from
@@ -1706,6 +1721,21 @@ function App({
             }}
           >
             Explore
+          </button>
+          <button
+            onClick={toggleHud}
+            aria-pressed={showHud}
+            title={showHud ? "Hide the pipeline HUD (H)" : "Show the pipeline HUD (H)"}
+            data-testid="hud-toggle"
+            style={{
+              padding: "0.375rem 0.75rem",
+              fontSize: "0.875rem",
+              whiteSpace: "nowrap",
+              background: showHud ? "#646cff" : undefined,
+              color: showHud ? "#fff" : undefined,
+            }}
+          >
+            HUD
           </button>
         </div>
         {showFileBrowser && (

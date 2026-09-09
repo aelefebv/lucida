@@ -114,6 +114,18 @@ export class TickScratch {
     return this.ranges[1];
   }
 
+  get hasDisplayed(): boolean {
+    return this.ranges[2] !== NO_LEVEL;
+  }
+
+  get displayedMin(): number {
+    return this.ranges[2];
+  }
+
+  get displayedMax(): number {
+    return this.ranges[3];
+  }
+
   /**
    * Count one planned chunk against its level. Incremental rather than
    * assigned, so the caller walks the plan once and needs no tally array of

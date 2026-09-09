@@ -49,16 +49,19 @@ import {
 import { RejectionTracker } from "./rejection.ts";
 import { DeliveryState } from "./deliveryState.ts";
 import { debugLog } from "../../debug/logging.ts";
-import type {
-  CacheEntry,
-  CacheTelemetry,
-  CpuCacheConfig,
-  EvictionTier,
-  Lane,
-  LevelResidency,
-  ReadyChunkDelivery,
-  ReadyDelivery,
-  ReadyProxyDelivery,
+import {
+  LANES,
+  type CacheEntry,
+  type CacheTelemetry,
+  type CpuCacheConfig,
+  type EvictionTier,
+  type Lane,
+  type LaneOutstanding,
+  type LevelResidency,
+  type PoolResidencyReport,
+  type ReadyChunkDelivery,
+  type ReadyDelivery,
+  type ReadyProxyDelivery,
 } from "./types.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
 
@@ -972,6 +975,50 @@ export class CpuCache {
    */
   residentBytes(): number {
     return this.chunkStore.bytes + this.overviewStore.bytes + this.proxyStore.bytes;
+  }
+
+  /**
+   * Resident bytes against budget for each CPU-side pool. As cheap as
+   * {@link residentBytes}, and separate from {@link telemetry} for the same
+   * reason: the HUD reads this at its own cadence, and `telemetry()` builds
+   * a whole report to answer it.
+   */
+  poolResidency(): PoolResidencyReport {
+    return {
+      main: { bytes: this.chunkStore.bytes, budgetBytes: this.chunkStore.budgetBytes },
+      overview: { bytes: this.overviewStore.bytes, budgetBytes: this.overviewStore.budgetBytes },
+      proxy: { bytes: this.proxyStore.bytes, budgetBytes: this.proxyStore.budgetBytes },
+    };
+  }
+
+  /**
+   * What is in flight and what is queued, by lane, written into `out`.
+   *
+   * In flight is bounded by the concurrency cap, so it is always counted.
+   * Pending is scanned under the same cap as {@link quiescenceInputs}, and
+   * past it the per-lane counts stay at zero while `pendingUnclassified`
+   * says so, so a reader shows the total and states that the split is
+   * unknown rather than paying for a backlog tens of thousands deep.
+   */
+  laneOutstanding(out: LaneOutstanding): LaneOutstanding {
+    for (const lane of LANES) {
+      out.inFlight[lane] = 0;
+      out.pending[lane] = 0;
+    }
+    for (const [, entry] of this.chunkScheduler.inFlightEntries()) {
+      out.inFlight[entry.request.lane]++;
+    }
+    out.proxyInFlight = this.proxyScheduler.inFlightSize;
+    out.proxyPending = this.proxyScheduler.pendingSize;
+    out.pendingTotal = this.chunkScheduler.pendingSize + this.proxyScheduler.pendingSize;
+    out.pendingScanCap = QUIESCENCE_PENDING_SCAN_CAP;
+    out.pendingUnclassified = !this.chunkScheduler.forEachPending(
+      QUIESCENCE_PENDING_SCAN_CAP,
+      (req) => {
+        out.pending[req.lane]++;
+      },
+    );
+    return out;
   }
 
   telemetry(): CacheTelemetry {
