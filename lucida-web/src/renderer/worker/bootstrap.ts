@@ -30,6 +30,7 @@ import {
 } from "../descriptorBuffer.ts";
 import { createInitialState } from "./state.ts";
 import { ensureOffscreenPool, getOrCreateLUT } from "./resources.ts";
+import { createFrameTiming } from "../passTiming.ts";
 import { proxyDescriptorKey } from "../workerContext.ts";
 import { sourceKey } from "../poolKeys.ts";
 
@@ -45,6 +46,9 @@ export async function bootstrapWorker(
 ): Promise<WorkerCtx> {
   const { device, context, format } = await initGPU(canvas);
   const state = createInitialState();
+  const passTimer = createFrameTiming(device, (gpuPassUs) =>
+    post({ type: "gpuPassTime", gpuPassUs }),
+  );
 
   // Renderer-class singletons (lazy-init on first use). Persisted across
   // messages; not per-session state, so they stay in this closure rather
@@ -102,6 +106,7 @@ export async function bootstrapWorker(
     context,
     format,
     state,
+    passTimer,
     getSliceRenderer() {
       if (!sliceRenderer) sliceRenderer = new SliceRenderer(device);
       return sliceRenderer;

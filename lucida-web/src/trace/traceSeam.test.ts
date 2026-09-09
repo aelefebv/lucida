@@ -19,7 +19,7 @@ import type { ContentSource, FetchRequest, FetchResult } from "../pipeline/fetch
 import { DecodePool } from "../pipeline/fetch/decodePool.ts";
 import type { ChunkRequest, RequestPlan } from "../pipeline/planning/index.ts";
 import { emptyPlanStats } from "../pipeline/planning/index.ts";
-import { installTraceSeam } from "./seam.ts";
+import { installTraceSeam, resolveGpuIdentity } from "./seam.ts";
 import { traceRecorder } from "./recorder.ts";
 import { createQuiescenceState } from "./quiescence.ts";
 import { TRACE_SCHEMA_VERSION } from "./types.ts";
@@ -505,5 +505,72 @@ describe("the cache's half of the quiescence predicate", () => {
     // Demand stays on the cache's own prefetch-inclusive basis, so resident
     // and desired are counted the same way; the exclusion is in the queues.
     expect(inputs.desiredDetailChunks).toBe(2);
+  });
+});
+
+describe("the adapter identity the header carries", () => {
+  interface FakeAdapter {
+    info: Record<string, unknown>;
+    features: Set<string>;
+    isFallbackAdapter?: boolean;
+  }
+
+  function withAdapter(adapter: FakeAdapter | null | (() => never)): void {
+    Object.defineProperty(navigator, "gpu", {
+      configurable: true,
+      value: {
+        requestAdapter: () =>
+          typeof adapter === "function" ? adapter() : Promise.resolve(adapter),
+      },
+    });
+  }
+
+  function hardwareInfo(): Record<string, unknown> {
+    return { vendor: "v", architecture: "a", device: "d", description: "desc", isFallbackAdapter: false };
+  }
+
+  it("is null where there is no WebGPU at all", async () => {
+    Object.defineProperty(navigator, "gpu", { configurable: true, value: undefined });
+    expect(await resolveGpuIdentity()).toBeNull();
+  });
+
+  it("names the adapter and whether it offers timestamp queries", async () => {
+    withAdapter({ info: hardwareInfo(), features: new Set(["timestamp-query"]) });
+    expect(await resolveGpuIdentity()).toEqual({
+      vendor: "v",
+      architecture: "a",
+      device: "d",
+      description: "desc",
+      fallback: false,
+      timestampQueries: true,
+    });
+  });
+
+  it("records a software fallback from the adapter info", async () => {
+    withAdapter({ info: { ...hardwareInfo(), isFallbackAdapter: true }, features: new Set() });
+    const identity = await resolveGpuIdentity();
+    expect(identity?.fallback).toBe(true);
+    expect(identity?.timestampQueries).toBe(false);
+  });
+
+  it("falls back to the adapter's own flag where the info lacks one", async () => {
+    const info = hardwareInfo();
+    delete info.isFallbackAdapter;
+    withAdapter({ info, features: new Set(), isFallbackAdapter: true });
+    expect((await resolveGpuIdentity())?.fallback).toBe(true);
+  });
+
+  it("records an adapter that says nothing about fallback as saying nothing", async () => {
+    const info = hardwareInfo();
+    delete info.isFallbackAdapter;
+    withAdapter({ info, features: new Set() });
+    expect((await resolveGpuIdentity())?.fallback).toBeNull();
+  });
+
+  it("is null when the adapter request fails", async () => {
+    withAdapter(() => {
+      throw new Error("no adapter");
+    });
+    expect(await resolveGpuIdentity()).toBeNull();
   });
 });

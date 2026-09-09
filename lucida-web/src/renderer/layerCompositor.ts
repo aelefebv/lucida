@@ -1,5 +1,6 @@
 /** Composites offscreen layer textures onto the canvas with per-layer blend modes. */
 import shaderSource from "./compositor.wgsl?raw";
+import type { PassTiming } from "./passTiming.ts";
 
 export type BlendMode = "alpha" | "additive" | "max";
 
@@ -63,7 +64,8 @@ export class LayerCompositor {
     };
   }
 
-  composite(canvasView: GPUTextureView, layers: CompositeLayer[], encoder: GPUCommandEncoder, clearFirst: boolean = true): void {
+  /** `timing` stamps each pass for the trace's GPU pass time; viewport frames pass it, the minimap does not. */
+  composite(canvasView: GPUTextureView, layers: CompositeLayer[], encoder: GPUCommandEncoder, clearFirst: boolean = true, timing?: PassTiming): void {
     if (layers.length === 0) {
       if (clearFirst) {
         const pass = encoder.beginRenderPass({
@@ -73,6 +75,7 @@ export class LayerCompositor {
             storeOp: "store",
             clearValue: BG,
           }],
+          timestampWrites: timing?.nextPass(),
         });
         pass.end();
       }
@@ -88,6 +91,7 @@ export class LayerCompositor {
           storeOp: "store",
           ...((clearFirst && i === 0) ? { clearValue: BG } : {}),
         }],
+        timestampWrites: timing?.nextPass(),
       });
 
       const bg = this.device.createBindGroup({

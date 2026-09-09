@@ -5,6 +5,7 @@ import type { CursorRenderer } from "./cursorRenderer.ts";
 import type { WorkerToMainMessage } from "./workerProtocol.ts";
 import type { ProxyAtlasState, ProxyHandle } from "./proxyAtlas.ts";
 import type { EntityDescriptorIndex } from "./descriptorBuffer.ts";
+import type { FrameTiming } from "./passTiming.ts";
 import type { RendererState } from "./worker/state.ts";
 
 /**
@@ -31,6 +32,12 @@ export interface WorkerCtx {
    * it directly. See {@link RendererState} for the shape.
    */
   state: RendererState;
+  /**
+   * The GPU pass timing for viewport frames, a no-op on a device without
+   * timestamp queries. The frame handlers bracket each frame with it and hand
+   * it to every viewport pass; the minimap and thumbnail paths never touch it.
+   */
+  passTimer: FrameTiming;
   getSliceRenderer(): SliceRenderer;
   getVolumeRenderer(): VolumeRenderer;
   getCompositor(): LayerCompositor;

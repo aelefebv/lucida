@@ -60,6 +60,8 @@ export class RenderClient implements UploadClient {
    */
   private readonly levelsByDataset = new Map<string, DatasetLevels>();
 
+  private gpuPassUs: number | null = null;
+
   constructor(canvas: HTMLCanvasElement) {
     const offscreen = canvas.transferControlToOffscreen();
     this.worker = new Worker(
@@ -101,6 +103,18 @@ export class RenderClient implements UploadClient {
     return this.readyPromise;
   }
 
+  /**
+   * The GPU pass time that arrived since the last call, in microseconds, or
+   * null when none did. Taking it clears it, so each frame's figure lands on
+   * one reading and a tick that drew nothing carries no GPU figure rather
+   * than repeating the last one.
+   */
+  takeGpuPassUs(): number | null {
+    const gpuPassUs = this.gpuPassUs;
+    this.gpuPassUs = null;
+    return gpuPassUs;
+  }
+
   private onMessage = (e: MessageEvent<WorkerToMainMessage>) => {
     const msg = e.data;
     if (this.destroyed) {
@@ -120,6 +134,10 @@ export class RenderClient implements UploadClient {
       if (levels === null) this.levelsByDataset.delete(msg.datasetId);
       else this.levelsByDataset.set(msg.datasetId, levels);
       this.onEntityLevels?.(msg.datasetId, levels);
+    } else if (msg.type === "gpuPassTime") {
+      // Latest wins: when two frames land between ticks, the newer one is
+      // the frame on screen.
+      this.gpuPassUs = msg.gpuPassUs;
     } else if (msg.type === "thumbnailResult") {
       const resolve = this.thumbnailPending.get(msg.id);
       if (resolve) {
