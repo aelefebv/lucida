@@ -37,6 +37,8 @@ export interface DiagnoseScope {
   runId?: string;
   /** The interval of the run to read, in milliseconds from run start. The whole run when absent. */
   window?: WindowRequest;
+  /** The chunk the document's lookup is about, as `[entity/]level/t/c/z/y/x`. The worst row's when absent. */
+  chunk?: string;
 }
 
 /** A scope plus which rendering of it to produce. */
@@ -119,7 +121,9 @@ export interface LucidaTraceSeam {
    *
    * `window` scopes the reading to an interval of the run's clock: the phase
    * rollup, the findings and the critical path are then of that interval, and
-   * the document's header says so.
+   * the document's header says so. `chunk` names the chunk the document's
+   * lookup is about, as `[entity/]level/t/c/z/y/x`; left out, the lookup is
+   * the worst row's.
    */
   diagnose(runId?: string, scope?: Omit<DiagnoseScope, "runId">): DiagnosticDocument;
   /**
@@ -131,7 +135,9 @@ export interface LucidaTraceSeam {
    * `depth` selects the rendering, not a different derivation: a driver that
    * has to archive a deeper depth reads it here rather than growing a second
    * renderer outside the page, where it would drift. `depth: "phase"` takes
-   * the phase id in `phase`, and `window` scopes the reading as it does on
+   * the phase id in `phase`; `depth: "chunk"` renders the lookup for `chunk`,
+   * or for the worst row when none is named; `depth: "spatial"` renders what
+   * is where. `window` and `chunk` scope the reading as they do on
    * {@link diagnose}.
    */
   diagnoseText(runId?: string, options?: Omit<DiagnoseTextScope, "runId">): string;
@@ -172,7 +178,7 @@ declare global {
  */
 export function installTraceSeam(target: Window = window): LucidaTraceSeam {
   const diagnoseTrace = (document: TraceDocument, scope?: DiagnoseScope): DiagnosticDocument =>
-    diagnoseDocument(document, { runId: scope?.runId, window: scope?.window });
+    diagnoseDocument(document, { runId: scope?.runId, window: scope?.window, chunk: scope?.chunk });
   const diagnoseTraceText = (document: TraceDocument, options?: DiagnoseTextScope): string =>
     renderDiagnostic(diagnoseTrace(document, options), {
       depth: options?.depth,
@@ -214,6 +220,11 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
  * Record the adapter the page is running against, so two runs on different
  * hardware are visibly not comparable. Asking for an adapter does not create
  * a device and does not disturb the renderer's own.
+ *
+ * The render worker asks for the same default adapter, so what this reports
+ * about fallback status and timestamp queries is what the worker's device
+ * has: the worker enables timestamp queries exactly when the adapter offers
+ * them, and records a GPU pass time per frame only then.
  */
 export async function resolveGpuIdentity(): Promise<GpuIdentity | null> {
   const gpu = (navigator as Navigator & { gpu?: GPU }).gpu;
@@ -221,14 +232,28 @@ export async function resolveGpuIdentity(): Promise<GpuIdentity | null> {
   try {
     const adapter = await gpu.requestAdapter();
     const info = adapter?.info;
-    if (!info) return null;
+    if (!adapter || !info) return null;
     return {
       vendor: info.vendor,
       architecture: info.architecture,
       device: info.device,
       description: info.description,
+      fallback: isFallbackAdapter(adapter),
+      timestampQueries: adapter.features.has("timestamp-query"),
     };
   } catch {
     return null;
   }
+}
+
+/**
+ * `isFallbackAdapter` moved from the adapter to its info record. Read
+ * whichever the browser has, and answer null rather than hardware when it
+ * has neither.
+ */
+function isFallbackAdapter(adapter: GPUAdapter): boolean | null {
+  const onInfo = (adapter.info as { isFallbackAdapter?: boolean }).isFallbackAdapter;
+  if (typeof onInfo === "boolean") return onInfo;
+  const onAdapter = (adapter as { isFallbackAdapter?: boolean }).isFallbackAdapter;
+  return typeof onAdapter === "boolean" ? onAdapter : null;
 }

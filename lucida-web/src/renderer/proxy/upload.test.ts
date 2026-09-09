@@ -52,6 +52,7 @@ import type { ColdStateMessage, ProxyAssetDataMessage } from "../workerProtocol.
 import type { SceneEpochs } from "../../pipeline/epochs.ts";
 import { allocateProxySlot, proxySlotKey } from "../proxyAtlas.ts";
 import { createInitialState } from "../worker/state.ts";
+import { UNTIMED } from "../passTiming.ts";
 
 // ---------------------------------------------------------------------------
 // Mock GPU device — texture creation + writeTexture calls only.
@@ -92,6 +93,7 @@ function makeCtx(device: GPUDevice, currentEpochs: SceneEpochs | null = null): W
     context: {} as GPUCanvasContext,
     format: "bgra8unorm",
     state,
+    passTimer: UNTIMED,
     getSliceRenderer: () => ({} as never),
     getVolumeRenderer: () => ({} as never),
     getCompositor: () => ({} as never),

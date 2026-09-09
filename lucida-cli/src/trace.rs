@@ -91,10 +91,26 @@ const RUN_EXPORT_EXPRESSION: &str = r#"(() => {
     try { return make(); } catch (error) { return 'rendering failed: ' + String(error); }
   };
   const perPhase = {};
+  // Render a chunk reading now for every chunk the document points at: its
+  // own lookup, which the default text's follow-up names, and each browser
+  // phase's worst row. The page is gone by the time the file is read, so a
+  // chunk not rendered here cannot be read then.
+  const chunkSelectors = new Set();
   if (runId && diagnostic) {
     for (const phase of diagnostic.phases || []) {
       perPhase[phase.id] = render(() => seam.diagnoseText(runId, { depth: 'phase', phase: phase.id }));
+      if (phase.side === 'browser' && phase.worst && phase.worst.label) chunkSelectors.add(phase.worst.label);
     }
+    if (diagnostic.chunk && diagnostic.chunk.selector) chunkSelectors.add(diagnostic.chunk.selector);
+  }
+  const perChunk = {};
+  for (const selector of chunkSelectors) {
+    let section = null;
+    try { section = seam.diagnose(runId, { chunk: selector }).chunk; } catch (error) { section = null; }
+    perChunk[selector] = {
+      text: render(() => seam.diagnoseText(runId, { depth: 'chunk', chunk: selector })),
+      section
+    };
   }
   return JSON.stringify({
     schemaVersion: seam.schemaVersion,
@@ -105,6 +121,8 @@ const RUN_EXPORT_EXPRESSION: &str = r#"(() => {
     summary: runId ? render(() => seam.diagnoseText(runId)) : null,
     phases: runId ? render(() => seam.diagnoseText(runId, { depth: 'phases' })) : null,
     perPhase,
+    spatial: runId ? render(() => seam.diagnoseText(runId, { depth: 'spatial' })) : null,
+    perChunk,
     trace
   });
 })()"#;
@@ -354,6 +372,27 @@ pub struct TraceRenderings {
     /// on a page that no longer exists when the file is read.
     #[serde(default)]
     pub per_phase: std::collections::BTreeMap<String, String>,
+    /// What is where: rows by state and level with their boxes. Empty on a
+    /// file written before the reading existed.
+    #[serde(default)]
+    pub spatial: String,
+    /// One chunk reading per selector the document pointed at: its own
+    /// lookup, which the default text's follow-up names, and the worst row of
+    /// each browser phase. Any other chunk needs the page, and `render_show`
+    /// says so rather than guessing.
+    #[serde(default)]
+    pub per_chunk: std::collections::BTreeMap<String, ChunkReading>,
+}
+
+/// One chunk's reading, in both forms the page renders it: the text, and the
+/// document section the text was rendered from, so `--json` describes the
+/// same chunk the text does.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChunkReading {
+    pub text: String,
+    #[serde(default)]
+    pub section: Value,
 }
 
 impl TraceRenderings {
@@ -363,11 +402,15 @@ impl TraceRenderings {
         summary: Option<String>,
         phases: Option<String>,
         per_phase: std::collections::BTreeMap<String, String>,
+        spatial: Option<String>,
+        per_chunk: std::collections::BTreeMap<String, ChunkReading>,
     ) -> Self {
         Self {
             summary: summary.unwrap_or_else(|| NO_RUN_RECORDED.to_string()),
             phases: phases.unwrap_or_else(|| NO_RUN_RECORDED.to_string()),
             per_phase,
+            spatial: spatial.unwrap_or_else(|| NO_RUN_RECORDED.to_string()),
+            per_chunk,
         }
     }
 }
@@ -399,6 +442,10 @@ struct SeamExport {
     phases: Option<String>,
     #[serde(default)]
     per_phase: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    spatial: Option<String>,
+    #[serde(default)]
+    per_chunk: std::collections::BTreeMap<String, ChunkReading>,
     /// Present only when the caller asked for the raw-span file.
     #[serde(default)]
     chrome_trace: Option<String>,
@@ -412,6 +459,10 @@ pub enum ShowDepth {
     Phases,
     /// One phase, selected out of the document by id.
     Phase(String),
+    /// One chunk, as `[entity/]level/t/c/z/y/x`.
+    Chunk(String),
+    /// Rows by state and level, with their boxes.
+    Spatial,
 }
 
 /// An interval of a run's clock, as `show --window` takes it: `START..END`
@@ -484,7 +535,15 @@ fn windowed_run(export: WindowExport, window: WindowRequest) -> WindowedRun {
     WindowedRun {
         window,
         diagnostic: export.diagnostic,
-        renderings: TraceRenderings::from_export(export.summary, export.phases, export.per_phase),
+        // A windowed read renders the summary and the phases only; the chunk
+        // and spatial depths cannot be asked for beside a window.
+        renderings: TraceRenderings::from_export(
+            export.summary,
+            export.phases,
+            export.per_phase,
+            None,
+            std::collections::BTreeMap::new(),
+        ),
     }
 }
 
@@ -972,10 +1031,10 @@ fn format_level_range(range: LevelRange) -> String {
     }
 }
 
-/// A depth of a persisted run, out of a run file's renderings or a windowed
-/// reading's. `Summary` and `Phases` are the page's renderings verbatim;
-/// `Phase` selects one phase's already-rendered reading rather than deriving
-/// anything.
+/// A depth out of a set of renderings: a run file's, or a windowed reading's.
+/// Every depth is the page's rendering verbatim; nothing here derives a number.
+/// `Phase` and `Chunk` select a reading the page rendered for that id, and say
+/// when the renderings hold none.
 pub fn render_depth(renderings: &TraceRenderings, depth: &ShowDepth) -> String {
     match depth {
         ShowDepth::Summary => renderings.summary.clone(),
@@ -991,6 +1050,99 @@ pub fn render_depth(renderings: &TraceRenderings, depth: &ShowDepth) -> String {
                     .join(", ")
             )
         }),
+        ShowDepth::Chunk(selector) => renderings
+            .per_chunk
+            .get(selector)
+            .map(|reading| reading.text.clone())
+            .unwrap_or_else(|| format!("these renderings hold no reading for chunk {selector}")),
+        ShowDepth::Spatial => {
+            if renderings.spatial.is_empty() {
+                "this run file carries no spatial reading; it was written before one existed. \
+                 Drive the run again to get one."
+                    .to_string()
+            } else {
+                renderings.spatial.clone()
+            }
+        }
+    }
+}
+
+/// A depth of a persisted run. The run file's renderings, except that a chunk
+/// the file holds no reading for is told apart from a chunk that is not in the
+/// run by looking for the row, which is the one thing this side adds.
+pub fn render_show(file: &TraceRunFile, depth: &ShowDepth) -> String {
+    match depth {
+        ShowDepth::Chunk(selector) if !file.renderings.per_chunk.contains_key(selector) => {
+            chunk_reading_missing(file, selector)
+        }
+        _ => render_depth(&file.renderings, depth),
+    }
+}
+
+/// What to say about a chunk the file holds no reading for. The file holds
+/// every row, so it can say whether the chunk is in the run at all. It cannot
+/// read the chunk, because the renderer lives on the page and the page is
+/// gone, so the message names the seam call that can instead of deriving a
+/// reading here.
+fn chunk_reading_missing(file: &TraceRunFile, selector: &str) -> String {
+    if !run_has_chunk_row(file, selector) {
+        return format!("no lifecycle row in this run carries chunk {selector}");
+    }
+    let carried: Vec<&str> = file
+        .renderings
+        .per_chunk
+        .keys()
+        .map(String::as_str)
+        .collect();
+    let carried = if carried.is_empty() {
+        "no chunk".to_string()
+    } else {
+        carried.join(", ")
+    };
+    format!(
+        "chunk {selector} is in this run, but this run file holds a reading only for: {carried}. \
+         The page reads any chunk: window.lucidaTrace.diagnoseText(runId, {{ depth: 'chunk', \
+         chunk: '{selector}' }})."
+    )
+}
+
+/// Whether any lifecycle row of the file's run is the chunk `selector` names,
+/// as `level/t/c/z/y/x` or `entity/level/t/c/z/y/x`.
+fn run_has_chunk_row(file: &TraceRunFile, selector: &str) -> bool {
+    let Some(run_id) = file.header.run_id.as_deref() else {
+        return false;
+    };
+    file.trace
+        .get("runs")
+        .and_then(Value::as_array)
+        .and_then(|runs| {
+            runs.iter()
+                .find(|run| run["header"]["runId"].as_str() == Some(run_id))
+        })
+        .and_then(|run| run.get("rows"))
+        .and_then(Value::as_array)
+        .is_some_and(|rows| {
+            rows.iter().any(|row| {
+                let key = row["chunkKey"].as_str().unwrap_or_default();
+                key == selector
+                    || row["entityId"]
+                        .as_str()
+                        .is_some_and(|entity| format!("{entity}/{key}") == selector)
+            })
+        })
+}
+
+/// The JSON section behind a `Chunk` depth, so `--json` describes the same
+/// chunk the text does. None for every other depth, whose section is the
+/// document's own.
+pub fn chunk_section<'a>(file: &'a TraceRunFile, depth: &ShowDepth) -> Option<&'a Value> {
+    match depth {
+        ShowDepth::Chunk(selector) => file
+            .renderings
+            .per_chunk
+            .get(selector)
+            .map(|reading| &reading.section),
+        _ => None,
     }
 }
 
@@ -1180,7 +1332,13 @@ fn assemble_run_file(export: SeamExport, facts: &DriverFacts) -> TraceRunFile {
             workspace_id: facts.workspace_id.clone(),
             screenshot: facts.screenshot.clone(),
         },
-        renderings: TraceRenderings::from_export(export.summary, export.phases, export.per_phase),
+        renderings: TraceRenderings::from_export(
+            export.summary,
+            export.phases,
+            export.per_phase,
+            export.spatial,
+            export.per_chunk,
+        ),
         diagnostic: export.diagnostic.unwrap_or(Value::Null),
         trace: export.trace,
     }
@@ -1504,6 +1662,15 @@ mod tests {
                     "browser.wire".to_string(),
                     "PHASE     browser.wire\nFINDINGS  none against browser.wire.".to_string(),
                 )]),
+                spatial: "SPATIAL   120 rows · 1 group(s) · 1 level(s)".to_string(),
+                per_chunk: BTreeMap::from([(
+                    "member-7/1/0/0/0/119/0".to_string(),
+                    ChunkReading {
+                        text: "CHUNK     member-7/1/0/0/0/119/0 — the row that spent longest in browser.wire"
+                            .to_string(),
+                        section: json!({ "selector": "member-7/1/0/0/0/119/0", "rowCount": 1 }),
+                    },
+                )]),
             },
             diagnostic,
             trace: json!({ "runs": [] }),
@@ -1814,6 +1981,121 @@ mod tests {
         );
         assert_eq!(read.diagnostic["window"]["endMs"], 4120.0);
         assert_eq!(read.window.to_string(), "1200..4120");
+    }
+
+    /// The chunk and spatial depths are the page's readings too, taken at
+    /// export for the chunks the document pointed at.
+    #[test]
+    fn the_chunk_and_spatial_depths_print_the_pages_own_readings() {
+        let file = run_file(json!({}), true, "quiescent");
+        assert_eq!(
+            render_show(&file, &ShowDepth::Spatial),
+            file.renderings.spatial
+        );
+        assert_eq!(
+            render_show(
+                &file,
+                &ShowDepth::Chunk("member-7/1/0/0/0/119/0".to_string())
+            ),
+            file.renderings.per_chunk["member-7/1/0/0/0/119/0"].text
+        );
+
+        // A file from before the reading existed says so rather than printing nothing.
+        let mut older = file.clone();
+        older.renderings.spatial = String::new();
+        assert!(render_show(&older, &ShowDepth::Spatial).contains("carries no spatial reading"));
+    }
+
+    /// The file holds every row, so it can say whether a chunk is in the run;
+    /// what it cannot do is read a chunk the export did not render, and it
+    /// names the seam call that can rather than deriving one here.
+    #[test]
+    fn a_chunk_the_file_holds_no_reading_for_is_answered_from_the_rows_it_has() {
+        let mut file = run_file(json!({}), true, "quiescent");
+        file.trace = json!({
+            "runs": [
+                { "header": { "runId": "run-0-9" }, "rows": [
+                    { "entityId": "member-1", "chunkKey": "1/0/0/0/5/0" }
+                ] },
+                { "header": { "runId": "run-1-1" }, "rows": [
+                    { "entityId": "member-7", "chunkKey": "1/0/0/0/119/0" },
+                    { "entityId": "member-5", "chunkKey": "1/0/0/0/5/0" },
+                    { "entityId": "tile-a", "chunkKey": "1/0/0/0/0/0" },
+                    { "entityId": "tile-b", "chunkKey": "1/0/0/0/0/0" }
+                ] }
+            ]
+        });
+
+        let absent = render_show(&file, &ShowDepth::Chunk("1/0/0/0/999/0".to_string()));
+        assert_eq!(
+            absent,
+            "no lifecycle row in this run carries chunk 1/0/0/0/999/0"
+        );
+
+        // The key is in the run under another entity; member-1 carries it only
+        // in the other run.
+        let other_entity =
+            render_show(&file, &ShowDepth::Chunk("member-1/1/0/0/0/5/0".to_string()));
+        assert!(other_entity.starts_with("no lifecycle row in this run carries"));
+
+        // A selector that names no chunk matches no row, and says so the same way.
+        let not_a_chunk = render_show(&file, &ShowDepth::Chunk("wire".to_string()));
+        assert!(not_a_chunk.starts_with("no lifecycle row in this run carries chunk wire"));
+
+        // In the run, by bare key and by entity-qualified key, with no reading.
+        for selector in ["1/0/0/0/0/0", "tile-b/1/0/0/0/0/0", "member-5/1/0/0/0/5/0"] {
+            let unread = render_show(&file, &ShowDepth::Chunk(selector.to_string()));
+            assert!(
+                unread.starts_with(&format!("chunk {selector} is in this run")),
+                "{unread}"
+            );
+            assert!(unread.contains("holds a reading only for: member-7/1/0/0/0/119/0"));
+            assert!(unread.contains("window.lucidaTrace.diagnoseText"));
+            assert!(unread.contains(&format!("chunk: '{selector}'")));
+            // A number the document does not carry is not printed here.
+            assert!(!unread.contains("row(s)"));
+        }
+    }
+
+    /// The export carries the spatial reading and one reading per chunk the
+    /// document pointed at, text and section together, and both land in the
+    /// file beside the phases.
+    #[test]
+    fn the_run_file_keeps_the_spatial_and_chunk_readings_the_page_rendered() {
+        let export: SeamExport = serde_json::from_str(
+            &json!({
+                "schemaVersion": 1, "runId": "run-7-2", "quiescenceHoldMs": 500,
+                "endReason": "quiescent", "diagnostic": {}, "summary": "ok", "phases": "ok",
+                "spatial": "SPATIAL   40 rows",
+                "perChunk": { "tile-3/1/0/0/0/0/0": {
+                    "text": "CHUNK     tile-3/1/0/0/0/0/0",
+                    "section": { "selector": "tile-3/1/0/0/0/0/0", "rowCount": 1 }
+                } },
+                "trace": { "runs": [] }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let file = assemble_run_file(export, &facts());
+        assert_eq!(file.renderings.spatial, "SPATIAL   40 rows");
+        let depth = ShowDepth::Chunk("tile-3/1/0/0/0/0/0".to_string());
+        assert_eq!(render_show(&file, &depth), "CHUNK     tile-3/1/0/0/0/0/0");
+        assert_eq!(
+            chunk_section(&file, &depth),
+            Some(&json!({ "selector": "tile-3/1/0/0/0/0/0", "rowCount": 1 }))
+        );
+        // Every other depth's JSON is the document itself.
+        assert_eq!(chunk_section(&file, &ShowDepth::Spatial), None);
+        assert_eq!(
+            chunk_section(&file, &ShowDepth::Chunk("9/9/9/9/9/9".to_string())),
+            None
+        );
+
+        // The export expression asks the page for both, so the file can carry them.
+        assert!(RUN_EXPORT_EXPRESSION.contains("depth: 'spatial'"));
+        assert!(RUN_EXPORT_EXPRESSION.contains("depth: 'chunk'"));
+        assert!(RUN_EXPORT_EXPRESSION.contains("seam.diagnose(runId, { chunk: selector }).chunk"));
     }
 
     /// A run that never settled is still an artifact, and the driver's own

@@ -13,7 +13,19 @@
  * it.
  */
 
-import type { CoverageGap, CoverageLimit, EndReason, RunCause } from "../types.ts";
+import type { ResidencyTier } from "../../pipeline/residencyTier.ts";
+import type {
+  CoverageGap,
+  CoverageLimit,
+  EndReason,
+  GpuIdentity,
+  LaneName,
+  Phase,
+  PointEventKind,
+  PointEventReason,
+  RowOutcomeName,
+  RunCause,
+} from "../types.ts";
 import type { Ruleset } from "./ruleset.ts";
 
 /**
@@ -320,7 +332,27 @@ export interface RunIdentity {
   devicePixelRatio: number;
   viewport: string;
   build: string;
+  /**
+   * The adapter in one phrase: its vendor, architecture, and device, with the
+   * description when the browser gave one. "unknown" when the run closed
+   * before the page had identified an adapter.
+   */
   gpu: string;
+  /**
+   * The adapter as the header recorded it, including whether it is a software
+   * fallback and whether it offers timestamp queries. Null when the run closed
+   * before the page had identified one. Carried whole so a surface can name
+   * the description or warn about a fallback without reaching past the
+   * document.
+   */
+  adapter: GpuIdentity | null;
+  /**
+   * Which kind of adapter the run rendered on, with the phrase every surface
+   * prints for it. Both states are named, so a hardware adapter reads as
+   * hardware rather than as the absence of a warning, and a header that
+   * never recorded the kind reads as not recorded rather than as either.
+   */
+  adapterKind: { kind: AdapterKind; label: string };
   /** What the browser already held when the run opened, in one phrase. */
   warmth: string;
   /** What was still outstanding when the run closed. */
@@ -369,9 +401,206 @@ export interface DiagnosticWindow {
   whole: boolean;
 }
 
+/**
+ * Which kind of adapter a run rendered on. Four words rather than a boolean
+ * because two of the states are about the header rather than the adapter: a
+ * run can close before an adapter is identified, and a run recorded before
+ * the fallback flag existed never recorded it.
+ */
+export type AdapterKind = "hardware" | "software-fallback" | "not-identified" | "not-recorded";
+
+/** The shape of one per-tick timing across the run, in milliseconds. */
+export interface TimingSummary {
+  samples: number;
+  p50Ms: number;
+  p95Ms: number;
+  maxMs: number;
+}
+
+/**
+ * Why a run carries no GPU pass time. A closed set, because a surface that
+ * draws the GPU track has to draw its absence too and needs to know which
+ * absence it is drawing.
+ */
+export type GpuPassAbsenceReason =
+  /** The adapter offers no timestamp queries, so nothing could be measured on the device. */
+  | "no-timestamp-queries"
+  /** The adapter offers them, but no frame's read-back landed before the run closed. */
+  | "no-frame-read-back"
+  /** The run closed before the page had identified an adapter at all. */
+  | "adapter-unknown"
+  /** The header predates the field that says whether the adapter offers timestamp queries. */
+  | "not-recorded";
+
+/**
+ * The GPU pass time across the run, or the stated reason there is none.
+ * One value with two shapes rather than a summary beside a nullable reason,
+ * so no document can carry a missing figure with no reason or a figure with
+ * one.
+ */
+export type GpuPassTiming =
+  | ({ recorded: true } & TimingSummary)
+  | { recorded: false; reason: GpuPassAbsenceReason; statement: string };
+
+/**
+ * Where the run's render time went, on two clocks that must never be
+ * confused. `mainThread` is the tick's own main-thread time, from the
+ * readings. `gpuPass` is the GPU's pass time for a frame, read back through
+ * timestamp queries and present only on the readings that received one.
+ *
+ * An unrecorded `gpuPass` states its reason rather than implying one. It
+ * means unmeasured, never fast, and every surface that prints `mainThread`
+ * has to call it main-thread time so that one number is not mistaken for the
+ * other.
+ */
+export interface RenderTiming {
+  /** Null when no reading carried a frame time above the clock floor. */
+  mainThread: TimingSummary | null;
+  gpuPass: GpuPassTiming;
+}
+
 export interface NextStep {
   why: string;
   command: string;
+}
+
+/**
+ * Where a lifecycle row stood when the run closed: the phase it was sitting
+ * in, or how it ended. `unstamped` is a row that reached no boundary at all,
+ * which the recorder never makes but the table can hold.
+ */
+export type RowState = Phase | "complete" | "retired" | "unstamped";
+
+/** One phase of one row, in the diagnostic's units. */
+export interface RowPhaseReading {
+  phase: Phase;
+  startMs: number;
+  endMs: number;
+  durationMs: number;
+}
+
+/**
+ * Where a row stood in the queue, derived from the other rows rather than
+ * recorded: the scheduler keeps no per-key rank behind its admission window,
+ * so the trace carries none. Both counts are over recorded rows only. A row is
+ * born at dispatch, so a chunk that never dispatched has no row and is not
+ * counted, which makes every rank here a floor.
+ */
+export interface QueueRank {
+  /** Rows admitted before this one and still waiting when it was admitted. */
+  aheadAtAdmission: number;
+  /** Rows admitted at the same instant or later, and dispatched before it. */
+  overtaken: number;
+  /** Admission to dispatch, or to run close when the row never dispatched. */
+  waitedMs: number;
+  dispatched: boolean;
+}
+
+/**
+ * One lifecycle row as the chunk lookup reads it: its identity, its phase
+ * history, where it stood in the queue, and how long it has been alive.
+ */
+export interface ChunkRowReading {
+  /** Position in the lookup's list, 1-based, so a line can name a row. */
+  id: number;
+  datasetId: string;
+  entityId: string;
+  imageId: string;
+  lane: LaneName;
+  residencyTier: ResidencyTier;
+  rid: number;
+  connectionGeneration: number;
+  outcome: RowOutcomeName;
+  state: RowState;
+  /** Run-relative milliseconds of the row's first boundary; null when it reached none. */
+  firstSeenMs: number | null;
+  /**
+   * First boundary to last boundary for a row that ended, or to run close for
+   * one still in flight. Null when the row reached no boundary.
+   */
+  ageMs: number | null;
+  /** In phase order. A phase absent here was never entered on this row. */
+  phases: RowPhaseReading[];
+  /** Null when the row never entered the queue. */
+  queue: QueueRank | null;
+}
+
+/** One point event about the looked-up chunk. */
+export interface ChunkEventReading {
+  atMs: number;
+  kind: PointEventKind;
+  reason: PointEventReason;
+  entityId: string;
+  residencyTier: ResidencyTier;
+}
+
+/**
+ * One chunk, looked up by row identity: the answer to "why is this chunk not
+ * resident" in text. The one place the document is per-row, and by
+ * construction about a handful of rows: {@link rows} and {@link events} are
+ * capped, so the document never grows with the run.
+ */
+export interface ChunkLookup {
+  /** As given or chosen: `[entity/]level/t/c/z/y/x`. Null when nothing could be chosen. */
+  selector: string | null;
+  /** How the chunk was chosen, in one phrase: named by the caller, or the worst row. */
+  chosen: string;
+  /** Null when the selector did not parse as a chunk. */
+  chunkKey: string | null;
+  /** The entity the selector named, or null for a bare key. */
+  entityId: string | null;
+  /** Oldest first, capped. {@link rowCount} says how many matched in all. */
+  rows: ChunkRowReading[];
+  rowCount: number;
+  /** Distinct entities among the matched rows: a bare key matches one row per tile in a collection. */
+  entityCount: number;
+  events: ChunkEventReading[];
+  eventCount: number;
+  /** What the lookup found, in one sentence. */
+  statement: string;
+  /** What the lookup cannot see. Never empty. */
+  limits: string;
+}
+
+/** An inclusive bounding box over chunk indices, `[t, c, z, y, x]`. */
+export interface SpatialBox {
+  min: [number, number, number, number, number];
+  max: [number, number, number, number, number];
+}
+
+/** The rows of one dataset at one level in one tier that stood in one state. */
+export interface SpatialGroup {
+  /** Position in the summary's list, 1-based. */
+  id: number;
+  datasetId: string;
+  residencyTier: ResidencyTier;
+  level: number;
+  state: RowState;
+  n: number;
+  /** Distinct entities in the group. */
+  entityCount: number;
+  box: SpatialBox;
+  /** The longest any row in the group has been alive. */
+  oldestMs: number;
+}
+
+/**
+ * What is where: the run's rows grouped by state and level, each group with
+ * its bounding box. The text twin of the overlay, so an agent can read it
+ * without a screenshot. Bounded by the number of states times levels rather
+ * than by the row count.
+ */
+export interface SpatialSummary {
+  /** Rows the summary counted. */
+  rowCount: number;
+  /** Rows still in flight first, then complete, then retired; by level within a state. */
+  groups: SpatialGroup[];
+  groupCount: number;
+  levelCount: number;
+  /** The coordinate system every box is in. */
+  coordinates: string;
+  /** What the summary cannot show, one statement each. Never empty. */
+  cannotShow: string[];
 }
 
 export interface DiagnosticDocument {
@@ -399,6 +628,8 @@ export interface DiagnosticDocument {
   phases: PhaseRollup[];
   limiters: LimiterSummary[];
   aggregates: AggregateCandidate[];
+  /** Main-thread time and GPU pass time, or the stated reason the second is missing. */
+  renderTiming: RenderTiming;
   counts: {
     rows: number;
     serverRows: number;
@@ -406,6 +637,14 @@ export interface DiagnosticDocument {
     ticks: number;
     pointEvents: number;
   };
+  /**
+   * One chunk's phase history, queue rank and age. The caller's chunk when
+   * one was named, otherwise the worst row's, so the default text can point
+   * at it.
+   */
+  chunk: ChunkLookup;
+  /** Rows by state and level, each with a bounding box. */
+  spatial: SpatialSummary;
   /** Raw spans are never inlined at any depth: a warm re-open is 21,431 rows. */
   raw: { inlined: false; why: string; command: string };
   next: NextStep[];

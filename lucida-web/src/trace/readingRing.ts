@@ -26,19 +26,26 @@ const COLUMNS = READING_NAMES.length;
 export const DEFAULT_READING_CAPACITY = 1024;
 
 export class ReadingRing {
-  /** One timestamp plus the columns, all doubles. */
-  static readonly BYTES_PER_SAMPLE = (1 + COLUMNS) * 8;
+  /** One timestamp, the columns, and the optional GPU pass time, all doubles. */
+  static readonly BYTES_PER_SAMPLE = (1 + COLUMNS + 1) * 8;
 
   private readonly slots: RingSlots;
   private readonly capacity: number;
   private readonly atUs: Float64Array;
   private readonly values: Float64Array;
+  /**
+   * NaN where the reading has none. Its own column rather than a fifth
+   * {@link READING_NAMES} entry because the named readings are always present
+   * and this one is optional: `serialise` omits it rather than writing a zero.
+   */
+  private readonly gpuPassUs: Float64Array;
 
   constructor(capacity = DEFAULT_READING_CAPACITY) {
     this.slots = new RingSlots(capacity);
     this.capacity = this.slots.capacity;
     this.atUs = new Float64Array(this.capacity);
     this.values = new Float64Array(this.capacity * COLUMNS);
+    this.gpuPassUs = new Float64Array(this.capacity).fill(NaN);
   }
 
   get dropped(): number {
@@ -53,11 +60,16 @@ export class ReadingRing {
     return this.capacity * ReadingRing.BYTES_PER_SAMPLE;
   }
 
-  /** `values` is the reading in {@link READING_NAMES} order. */
-  append(atUs: number, values: Float64Array): void {
+  /**
+   * `values` is the reading in {@link READING_NAMES} order. `gpuPassUs` is
+   * the GPU pass time that arrived since the previous reading, or null when
+   * none did.
+   */
+  append(atUs: number, values: Float64Array, gpuPassUs: number | null): void {
     const slot = this.slots.claim();
     this.atUs[slot] = atUs;
     this.values.set(values, slot * COLUMNS);
+    this.gpuPassUs[slot] = gpuPassUs ?? NaN;
   }
 
   /** Oldest-first, so a reader walks the ring the way the run happened. */
@@ -68,6 +80,8 @@ export class ReadingRing {
       for (let i = 0; i < COLUMNS; i++) {
         sample[READING_NAMES[i]] = this.values[slot * COLUMNS + i];
       }
+      const gpuPassUs = this.gpuPassUs[slot];
+      if (!Number.isNaN(gpuPassUs)) sample.gpuPassUs = gpuPassUs;
       out.push(sample);
     }
     return out;
