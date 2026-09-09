@@ -226,7 +226,7 @@ export interface FindingObservation {
    * denominators, and printing both as "% of the run" would be wrong for one
    * of them.
    */
-  shareOf?: "chain" | "run";
+  shareOf?: "chain" | "run" | "window";
   n?: number;
   rows?: number;
   pending?: number;

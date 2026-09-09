@@ -33,6 +33,12 @@ import {
 const COORDS_PER_ROW = 6;
 
 /**
+ * The last-boundary column's value for a row that has stamped nothing. Not a
+ * boundary index, and above every real one, so the column can hold either.
+ */
+const NO_BOUNDARY = 0xff;
+
+/**
  * The rows of a run in progress, tallied by how they ended (#937).
  *
  * `inFlight` is the remainder rather than a fourth count: every row is
@@ -58,9 +64,9 @@ export interface LiveTally {
 export class RowTable {
   /**
    * 3 interned ids + 6 coordinates + 7 boundary slots + the two-part wire
-   * label, all uint32, plus three bytes.
+   * label, all uint32, plus four bytes: tier, lane, outcome, last boundary.
    */
-  static readonly BYTES_PER_ROW = (3 + COORDS_PER_ROW + BOUNDARY_COUNT + 2) * 4 + 3;
+  static readonly BYTES_PER_ROW = (3 + COORDS_PER_ROW + BOUNDARY_COUNT + 2) * 4 + 4;
 
   private readonly strings = new StringPool();
 
@@ -74,6 +80,32 @@ export class RowTable {
   private tiers: Uint8Array;
   private lanes: Uint8Array;
   private outcomes: Uint8Array;
+  /**
+   * The highest boundary each row has stamped, or {@link NO_BOUNDARY}. A row
+   * sits in the phase after its last boundary, so this one byte is what lets
+   * a stamp move the row between the counters below without re-reading its
+   * slots.
+   */
+  private lastBoundary: Uint8Array;
+
+  /**
+   * The live tally, kept as the rows are written (#937, #1057).
+   *
+   * It was a walk over the rows on every poll, on the argument that the
+   * write path is the pipeline's hottest and nobody is watching most of the
+   * time. That held while the only reader was a person polling twice a
+   * second. The provisional reading, the watch stream, and the HUD read an
+   * open run at the tick cadence, under the cost contract of ADR 0049 as
+   * amended, which forbids them a row walk. So the tally moved to the
+   * writer: a handful of typed-array increments per boundary, paid once,
+   * instead of a walk over tens of thousands of rows paid per reader per
+   * poll. The write path's cost is gated in `recorderCost.perf.test.ts`, and
+   * a read is now a copy of six integers.
+   */
+  private readonly occupancy = new Uint32Array(PHASES.length);
+  private complete = 0;
+  private retired = 0;
+  private unstamped = 0;
 
   private rows = 0;
   private capacity: number;
@@ -90,6 +122,7 @@ export class RowTable {
     this.tiers = new Uint8Array(this.capacity);
     this.lanes = new Uint8Array(this.capacity);
     this.outcomes = new Uint8Array(this.capacity);
+    this.lastBoundary = new Uint8Array(this.capacity);
   }
 
   get length(): number {
@@ -120,6 +153,8 @@ export class RowTable {
     this.tiers[index] = tier;
     this.lanes[index] = laneIndex(src.lane);
     this.outcomes[index] = RowOutcome.InFlight;
+    this.lastBoundary[index] = NO_BOUNDARY;
+    this.unstamped++;
     this.rids[index] = UNLABELLED.rid;
     this.connectionGenerations[index] = UNLABELLED.connectionGeneration;
 
@@ -146,8 +181,21 @@ export class RowTable {
     this.connectionGenerations[index] = label.connectionGeneration;
   }
 
+  /**
+   * Stamp a boundary. A row is in the phase after the highest boundary it
+   * has stamped, so a stamp past that boundary moves the row's place in the
+   * tally. A stamp at or below it is a late arrival for a slot already
+   * passed: it records the time and moves nothing. A finished row keeps its
+   * boundary up to date and stays out of every phase.
+   */
   stamp(index: number, boundary: number, offsetUs: number): void {
     this.stamps[index * BOUNDARY_COUNT + boundary] = offsetUs;
+    const previous = this.lastBoundary[index];
+    if (previous !== NO_BOUNDARY && boundary <= previous) return;
+    this.lastBoundary[index] = boundary;
+    if (this.outcomes[index] !== RowOutcome.InFlight) return;
+    this.leave(previous);
+    this.enter(boundary);
   }
 
   stampAt(index: number, boundary: number): number {
@@ -155,7 +203,15 @@ export class RowTable {
   }
 
   setOutcome(index: number, outcome: RowOutcomeValue): void {
+    const previous = this.outcomes[index];
+    if (previous === outcome) return;
     this.outcomes[index] = outcome;
+    if (previous === RowOutcome.InFlight) this.leave(this.lastBoundary[index]);
+    else if (previous === RowOutcome.Complete) this.complete--;
+    else this.retired--;
+    if (outcome === RowOutcome.InFlight) this.enter(this.lastBoundary[index]);
+    else if (outcome === RowOutcome.Complete) this.complete++;
+    else this.retired++;
   }
 
   outcomeAt(index: number): number {
@@ -163,52 +219,39 @@ export class RowTable {
   }
 
   /**
-   * One pass over the rows: how they ended, and where the unfinished ones are
-   * sitting right now (#937).
+   * How the rows ended, and where the unfinished ones are sitting right now
+   * (#937): the live view's counters and phase bar, read from the counters
+   * the write path keeps rather than by walking the rows. A read costs the
+   * same at ten rows and at the per-run cap, which is what lets the surfaces
+   * that read an open run do so at the tick cadence.
    *
-   * The live view's counters and phase bar, and the only read on this table
-   * that happens while a run is still open. It is a walk rather than counters
-   * kept on the write path deliberately: the write path is the pipeline's
-   * hottest, and nobody is watching most of the time. The cost lands on the
-   * reader, once per poll, and is bounded by the per-run cap — ~76 ns a row,
-   * so ~1.3 ms at the 16,385 rows a truncated run holds, twice a second while
-   * somebody is watching. Gated for linearity in `recorderCost.perf.test.ts`:
-   * a walk that went quadratic would turn watching a run into perturbing it.
-   *
-   * `occupancy` is the caller's vector, in {@link PHASES} order, zeroed here:
-   * a poll reads this instant, not a sum of every poll before it. It is
-   * passed in rather than returned so a page polling twice a second allocates
-   * nothing.
+   * `occupancy` is the caller's vector, in {@link PHASES} order, overwritten
+   * here: a poll reads this instant, not a sum of every poll before it. It is
+   * passed in rather than returned so a reader polling at the tick cadence
+   * allocates nothing.
    */
   liveTally(occupancy: Uint32Array): LiveTally {
-    occupancy.fill(0);
-    let complete = 0;
-    let retired = 0;
-    let unstamped = 0;
-    for (let i = 0; i < this.rows; i++) {
-      const outcome = this.outcomes[i];
-      if (outcome === RowOutcome.Complete) {
-        complete++;
-        continue;
-      }
-      if (outcome === RowOutcome.Retired) {
-        retired++;
-        continue;
-      }
-      // A row is in the phase after the last boundary it stamped. Scanning
-      // backwards finds it in one step for a row on the wire, which is where
-      // most rows are while a run is open.
-      let boundary = BOUNDARY_COUNT - 1;
-      while (boundary >= 0 && this.stamps[i * BOUNDARY_COUNT + boundary] === UNSET_STAMP) {
-        boundary--;
-      }
-      // Nothing stamped yet: the planner has asked for this chunk and no
-      // boundary has been reached. Not `plan` — that would invent time in a
-      // phase the row has not entered.
-      if (boundary < 0) unstamped++;
-      else if (boundary < PHASES.length) occupancy[boundary]++;
-    }
-    return { complete, retired, inFlight: this.rows - complete - retired, unstamped };
+    occupancy.set(this.occupancy);
+    return {
+      complete: this.complete,
+      retired: this.retired,
+      inFlight: this.rows - this.complete - this.retired,
+      unstamped: this.unstamped,
+    };
+  }
+
+  /** Take an in-flight row out of the place its last boundary put it. */
+  private leave(boundary: number): void {
+    if (boundary === NO_BOUNDARY) this.unstamped--;
+    // The boundary after the last phase is an end, not a phase: a row past
+    // it is in flight until its outcome says otherwise, and in no phase.
+    else if (boundary < PHASES.length) this.occupancy[boundary]--;
+  }
+
+  /** Put an in-flight row in the place its last boundary puts it. */
+  private enter(boundary: number): void {
+    if (boundary === NO_BOUNDARY) this.unstamped++;
+    else if (boundary < PHASES.length) this.occupancy[boundary]++;
   }
 
   /** Fans each row out into its phases. The only place that knows about spans. */
@@ -265,6 +308,7 @@ export class RowTable {
     this.tiers = copyInto(this.tiers, new Uint8Array(next));
     this.lanes = copyInto(this.lanes, new Uint8Array(next));
     this.outcomes = copyInto(this.outcomes, new Uint8Array(next));
+    this.lastBoundary = copyInto(this.lastBoundary, new Uint8Array(next));
     this.capacity = next;
   }
 }

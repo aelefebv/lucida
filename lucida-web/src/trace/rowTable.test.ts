@@ -40,11 +40,12 @@ describe("RowTable", () => {
   it("pins the row width, because the memory caps are derived from it", () => {
     // 3 interned identity ids + 6 chunk coordinates + 7 boundary slots + the
     // two-part wire label, all uint32, plus a residency-tier byte, a lane
-    // byte and an outcome byte. #927 derives its resident and per-run caps
-    // from this figure, so a change here is a change to how much of a run
-    // fits — the label costs 8 B a row, and buys the join to the server's
-    // table.
-    expect(RowTable.BYTES_PER_ROW).toBe(75);
+    // byte, an outcome byte and the byte that remembers the row's last
+    // boundary. #927 derives its resident and per-run caps from this figure,
+    // so a change here is a change to how much of a run fits — the label
+    // costs 8 B a row, and buys the join to the server's table; the boundary
+    // byte costs 1 B, and buys a live tally that walks no rows.
+    expect(RowTable.BYTES_PER_ROW).toBe(76);
   });
 
   it("carries lane as a column, not as a phase", () => {
@@ -189,5 +190,133 @@ describe("the live tally (#937)", () => {
     table.liveTally(occupancy);
 
     expect(occupancy[PHASES.indexOf("wire")]).toBe(1);
+  });
+});
+
+describe("the live tally is kept on the write path", () => {
+  /**
+   * The walk the tally used to be, kept as the oracle for the counters that
+   * replaced it: a row is in the phase after the last boundary it stamped,
+   * a finished row is in no phase, and a row that stamped nothing is
+   * unstamped.
+   */
+  function walk(table: RowTable) {
+    const occupancy = new Uint32Array(PHASES.length);
+    let complete = 0;
+    let retired = 0;
+    let unstamped = 0;
+    for (let i = 0; i < table.length; i++) {
+      const outcome = table.outcomeAt(i);
+      if (outcome === RowOutcome.Complete) {
+        complete++;
+        continue;
+      }
+      if (outcome === RowOutcome.Retired) {
+        retired++;
+        continue;
+      }
+      let boundary = BOUNDARY_COUNT - 1;
+      while (boundary >= 0 && table.stampAt(i, boundary) === UNSET_STAMP) boundary--;
+      if (boundary < 0) unstamped++;
+      else if (boundary < PHASES.length) occupancy[boundary]++;
+    }
+    return {
+      occupancy,
+      tally: { complete, retired, inFlight: table.length - complete - retired, unstamped },
+    };
+  }
+
+  function expectCountersToMatchWalk(table: RowTable): void {
+    const occupancy = new Uint32Array(PHASES.length);
+    const tally = table.liveTally(occupancy);
+    const oracle = walk(table);
+    expect(tally).toEqual(oracle.tally);
+    expect([...occupancy]).toEqual([...oracle.occupancy]);
+  }
+
+  it("agrees with a walk over the rows after any sequence of stamps and outcomes", () => {
+    // A small table, so the sequence crosses several doublings, driven by a
+    // fixed linear congruential sequence so a failure replays.
+    const table = new RowTable(4);
+    let seed = 0x2545f491;
+    const next = (bound: number): number => {
+      seed = (Math.imul(seed, 1_103_515_245) + 12_345) >>> 0;
+      return seed % bound;
+    };
+    for (let step = 0; step < 4_000; step++) {
+      const roll = next(10);
+      if (roll < 3 || table.length === 0) {
+        table.append(source(), 0);
+        continue;
+      }
+      const row = next(table.length);
+      if (roll < 8) {
+        // Boundaries in any order: a lower boundary stamped late must not
+        // move a row backwards.
+        table.stamp(row, next(BOUNDARY_COUNT), step);
+      } else if (roll < 9) {
+        table.setOutcome(row, RowOutcome.Complete);
+      } else {
+        table.setOutcome(row, RowOutcome.Retired);
+      }
+      if (step % 97 === 0) expectCountersToMatchWalk(table);
+    }
+    expectCountersToMatchWalk(table);
+  });
+
+  it("moves a finished row out of its phase, and a late stamp on it moves nothing", () => {
+    const table = new RowTable(2);
+    const occupancy = new Uint32Array(PHASES.length);
+    const row = table.append(source(), 0);
+    table.stamp(row, Boundary.WireStart, 10);
+    expect(table.liveTally(occupancy).inFlight).toBe(1);
+    expect(occupancy[PHASES.indexOf("wire")]).toBe(1);
+
+    table.setOutcome(row, RowOutcome.Retired);
+    // A decode that lands after the view moved on: the row is still retired
+    // and still in no phase.
+    table.stamp(row, Boundary.DecodeStart, 20);
+
+    expect(table.liveTally(occupancy)).toEqual({
+      complete: 0,
+      retired: 1,
+      inFlight: 0,
+      unstamped: 0,
+    });
+    expect([...occupancy]).toEqual([0, 0, 0, 0, 0, 0]);
+    expectCountersToMatchWalk(table);
+  });
+
+  it("counts a row that stamped nothing as unstamped until its first boundary or its end", () => {
+    const table = new RowTable(2);
+    const occupancy = new Uint32Array(PHASES.length);
+    const abandoned = table.append(source(), 0);
+    const admitted = table.append(source(), 0);
+    expect(table.liveTally(occupancy).unstamped).toBe(2);
+
+    table.setOutcome(abandoned, RowOutcome.Retired);
+    table.stamp(admitted, Boundary.QueueStart, 5);
+
+    expect(table.liveTally(occupancy)).toEqual({
+      complete: 0,
+      retired: 1,
+      inFlight: 1,
+      unstamped: 0,
+    });
+    expect(occupancy[PHASES.indexOf("queue")]).toBe(1);
+    expectCountersToMatchWalk(table);
+  });
+
+  it("keeps the counters across a growth of the table", () => {
+    const table = new RowTable(1);
+    const occupancy = new Uint32Array(PHASES.length);
+    for (let i = 0; i < 9; i++) {
+      const row = table.append(source(), 0);
+      table.stamp(row, Boundary.WireStart, i);
+    }
+    expect(table.capacityRows).toBe(16);
+    expect(table.liveTally(occupancy).inFlight).toBe(9);
+    expect(occupancy[PHASES.indexOf("wire")]).toBe(9);
+    expectCountersToMatchWalk(table);
   });
 });

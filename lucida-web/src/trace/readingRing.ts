@@ -75,15 +75,40 @@ export class ReadingRing {
   /** Oldest-first, so a reader walks the ring the way the run happened. */
   serialise(): TraceReading[] {
     const out: TraceReading[] = [];
-    for (const slot of this.slots.ordered()) {
-      const sample = { atUs: this.atUs[slot] } as TraceReading;
-      for (let i = 0; i < COLUMNS; i++) {
-        sample[READING_NAMES[i]] = this.values[slot * COLUMNS + i];
-      }
-      const gpuPassUs = this.gpuPassUs[slot];
-      if (!Number.isNaN(gpuPassUs)) sample.gpuPassUs = gpuPassUs;
-      out.push(sample);
-    }
+    for (const slot of this.slots.ordered()) out.push(this.sample(slot));
     return out;
+  }
+
+  /**
+   * The readings taken at or after `startUs`, oldest first, led by the last
+   * reading before it when the ring still holds one.
+   *
+   * The reading before the window is carried because a reading is what was
+   * true from its tick until the next: the window's first stretch is covered
+   * by the reading taken just before it, and a window with no tick inside it
+   * still has a state. It is the same convention the derivation's aggregate
+   * candidate applies when it charges a reading for the interval it covers.
+   *
+   * Read from the newest slot backwards and stopped at the first reading
+   * before the window, so the cost is the window's readings, not the ring's
+   * capacity, and never the run's rows.
+   */
+  serialiseFrom(startUs: number): TraceReading[] {
+    const out: TraceReading[] = [];
+    for (const slot of this.slots.newestFirst()) {
+      out.push(this.sample(slot));
+      if (this.atUs[slot] < startUs) break;
+    }
+    return out.reverse();
+  }
+
+  private sample(slot: number): TraceReading {
+    const sample = { atUs: this.atUs[slot] } as TraceReading;
+    for (let i = 0; i < COLUMNS; i++) {
+      sample[READING_NAMES[i]] = this.values[slot * COLUMNS + i];
+    }
+    const gpuPassUs = this.gpuPassUs[slot];
+    if (!Number.isNaN(gpuPassUs)) sample.gpuPassUs = gpuPassUs;
+    return sample;
   }
 }

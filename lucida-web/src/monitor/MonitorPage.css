@@ -167,6 +167,51 @@
   font-family: "SF Mono", "Menlo", "Monaco", monospace;
 }
 
+/* The provisional reading (#1057): a statement over a moving window, marked
+   as one wherever it appears, and never dressed as the verdict callout. */
+.monitor-chip-provisional {
+  margin-left: 6px;
+  border-color: #8a6d1f;
+  color: #e0b83a;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.monitor-provisional {
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border: 1px dashed #4a4a4a;
+  background: #1a1a1a;
+}
+
+.monitor-provisional h3 {
+  margin: 0 0 6px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.monitor-provisional-statement {
+  margin: 0 0 8px;
+}
+
+.monitor-provisional-finding {
+  margin: 0 0 8px;
+  padding: 6px 10px;
+  border-left: 3px solid #555;
+}
+
+.monitor-provisional-stall {
+  border-left-color: #d1665b;
+}
+
+.monitor-provisional-saturated {
+  border-left-color: #c9a227;
+}
+
+.monitor-provisional-note {
+  border-left-color: #555;
+}
+
 .monitor-numbers {
   display: flex;
   flex-wrap: wrap;
