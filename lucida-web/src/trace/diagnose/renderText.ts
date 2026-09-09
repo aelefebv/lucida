@@ -104,6 +104,21 @@ export function renderDiagnostic(
         `${p("coverage.truncated.recordedPct", truncated.recordedPct)}% of the run`,
     );
   }
+  // The window line goes before the coverage it qualifies: every number after
+  // it is of the window, not the run.
+  const window = document.window;
+  const clip = document.coverage.window;
+  if (window && clip) {
+    push(
+      REQUIRED,
+      `window    ${p("window.startMs", window.startMs)}..${p("window.endMs", window.endMs)} ms of the ` +
+        `${p("window.ofWallMs", window.ofWallMs)} ms run` +
+        (window.whole
+          ? " (the whole run)"
+          : ` · ${p("coverage.window.clippedRows", clip.clippedRows)} row(s) cross an edge and count for the part inside` +
+            ` · ${p("coverage.window.unplacedRows", clip.unplacedRows)} with no position left out`),
+    );
+  }
   push(
     REQUIRED,
     `coverage  ${p("coverage.accountedMs", document.coverage.accountedMs)} of ` +
@@ -198,10 +213,14 @@ export function renderDiagnostic(
 
   if (depth !== "summary") {
     push(DETAIL, "");
+    const from =
+      document.criticalPath.fromMs > 0
+        ? `from ${p("criticalPath.fromMs", document.criticalPath.fromMs)} ms `
+        : "";
     push(
       DETAIL,
       document.criticalPath.kind === "chain"
-        ? `CRITICAL PATH  to ${document.criticalPath.target} at ${document.criticalPath.targetAtMs} ms`
+        ? `CRITICAL PATH  ${from}to ${document.criticalPath.target} at ${p("criticalPath.targetAtMs", document.criticalPath.targetAtMs!)} ms`
         : `CRITICAL PATH  undefined — ${document.criticalPath.undefinedReason}`,
     );
     for (const segment of document.criticalPath.segments) {

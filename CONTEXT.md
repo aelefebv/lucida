@@ -413,6 +413,15 @@ the same diagnostic, so the agent text and the monitor's cards cannot disagree
 about which phase stalled. Distinct from the trace, which is what was recorded.
 _Avoid_: analysis, report, summary, insight
 
+**Window**:
+A time interval on the run's clock that a diagnostic is scoped to. The phase
+rollup, the findings, and the critical path are then of that interval, a row
+that crosses its edge counts for the part inside, and the document's header
+states it. Brushing in the monitor and the CLI's window flag are the same
+call. Not a bracket (one request's interval) and not the backlog rule's
+trailing second (a rate's denominator).
+_Avoid_: range, time slice, selection (a selection is a set of chunks)
+
 **Ruleset**:
 The versioned set of thresholds that produced a diagnostic, shipped inside the
 document with each rule's rationale. Three families, because one number cannot
@@ -665,7 +674,8 @@ phase bar, cumulative from run start, and no verdict. A verdict needs a closed
 interval, so the monitor withholds one until the run ends — by going quiescent,
 by timing out, or through *Stop & analyse*, which closes it with `explicit` as
 the end reason.
-_Avoid_: real-time view, following window (there is no window), live verdict
+_Avoid_: real-time view, following window (a window scopes a closed run, and
+the live view has none), live verdict
 
 **Dev controls**:
 The dev-only mutating surface: planning knobs, overlay toggles, and the

@@ -16,6 +16,7 @@ import {
   coldRemoteOpen,
   healthyLocalOpen,
   interactionRun,
+  lateStallOpen,
   makeRun,
   quietRun,
   saturatedReopen,
@@ -39,11 +40,19 @@ const RUNS = {
   interaction: interactionRun(),
   prefix: uninstrumentedPrefixOpen(),
   quiet: quietRun(),
+  lateStall: lateStallOpen(),
 };
 
-const DOCUMENTS = Object.fromEntries(
-  Object.entries(RUNS).map(([name, run]) => [name, diagnoseRun(run)]),
-) as Record<keyof typeof RUNS, DiagnosticDocument>;
+const DOCUMENTS = {
+  ...(Object.fromEntries(
+    Object.entries(RUNS).map(([name, run]) => [name, diagnoseRun(run)]),
+  ) as Record<keyof typeof RUNS, DiagnosticDocument>),
+  // Windowed readings sit beside the whole ones so every budget and parity
+  // case below covers the window line and the scoped follow-ups too.
+  firstHalf: diagnoseRun(lateStallOpen(), { window: { startMs: 0, endMs: 1_000 } }),
+  tail: diagnoseRun(coldRemoteOpen(), { window: { startMs: 3_700, endMs: 4_120 } }),
+  wholeWindow: diagnoseRun(saturatedReopen(), { window: { startMs: 0, endMs: 12_000 } }),
+};
 
 /** Numbers as the renderer prints them, with thousands separators removed. */
 function numericTokens(text: string): string[] {
@@ -150,6 +159,36 @@ describe("the default rendering", () => {
     expect(findingLines.length).toBeLessThanOrEqual(3);
     expect(text).toContain("lucida trace show");
     expect(text).toContain("lucida trace perfetto");
+    // A whole-run reading offers a narrower window too.
+    expect(text).toMatch(/lucida trace show remote-cold --window \d+\.\.\d+/);
+  });
+
+  it("names the window it read, before the coverage it qualifies", () => {
+    const lines = renderDiagnostic(DOCUMENTS.firstHalf).text.split("\n");
+    const windowLine = lines.findIndex((line) => line.startsWith("window    "));
+    const coverageLine = lines.findIndex((line) => line.startsWith("coverage  "));
+
+    expect(windowLine).toBeGreaterThanOrEqual(0);
+    expect(windowLine).toBeLessThan(coverageLine);
+    expect(lines[windowLine]).toContain("0..1000 ms of the 2000 ms run");
+    expect(lines[windowLine]).toContain("count for the part inside");
+    expect(lines[windowLine]).toContain("with no position left out");
+    expect(lines.some((line) => /--phases --window 0\.\.1000/.test(line))).toBe(true);
+
+    const whole = renderDiagnostic(DOCUMENTS.wholeWindow).text;
+    expect(whole).toContain("window    0..12000 ms of the 12000 ms run (the whole run)");
+    expect(renderDiagnostic(DOCUMENTS.saturated).text).not.toContain("window    ");
+  });
+
+  it("starts a windowed critical path where the window does", () => {
+    const { text } = renderDiagnostic(
+      diagnoseRun(healthyLocalOpen(), { window: { startMs: 100, endMs: 330 } }),
+      { depth: "phases" },
+    );
+    expect(text).toMatch(/CRITICAL PATH {2}from 100 ms to last chunk presented at \d+(\.\d+)? ms/);
+    expect(renderDiagnostic(DOCUMENTS.healthy, { depth: "phases" }).text).toMatch(
+      /CRITICAL PATH {2}to last chunk presented/,
+    );
   });
 
   it("inlines nothing per-row at either depth", () => {
@@ -221,6 +260,7 @@ function sameContentAsText(document: DiagnosticDocument) {
   return {
     runId: document.runId,
     verdict: document.verdict,
+    window: document.window,
     attribution: { confidence: document.attribution.confidence, degraded: document.attribution.degraded },
     run: {
       datasetIds: document.run.datasetIds,
@@ -240,6 +280,7 @@ function sameContentAsText(document: DiagnosticDocument) {
       gapCount: document.coverage.gapCount,
       incomplete: document.coverage.incomplete,
       truncated: document.coverage.truncated,
+      window: document.coverage.window,
       gaps: document.coverage.gaps.map((gap) => ({
         kind: gap.kind,
         durationMs: gap.durationMs,

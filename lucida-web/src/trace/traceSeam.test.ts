@@ -364,6 +364,59 @@ describe("the trace seam", () => {
   });
 
   /**
+   * A window is the same derivation over an interval of the run, reached
+   * through the same seam, so a brushed interval in the monitor and the
+   * CLI's window flag cannot disagree about it.
+   */
+  it("scopes the diagnostic to a window through the same derivation", async () => {
+    installTraceSeam();
+    const source = new ControlledSource();
+    const cache = new CpuCache(source, makeDecode());
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    cache.submit(makePlan([makeRequest()]));
+    await flush();
+
+    const windowed = window.lucidaTrace!.diagnose(undefined, {
+      window: { startMs: 0, endMs: 0.5 },
+    });
+    expect(windowed.window).toMatchObject({ startMs: 0, endMs: 0.5 });
+    expect(windowed.coverage.wallMs).toBe(0.5);
+    expect(window.lucidaTrace!.diagnoseText(windowed.runId, { window: { startMs: 0, endMs: 0.5 } })).toContain(
+      "window    0..0.5 ms",
+    );
+  });
+
+  /**
+   * A run file read back after its browser is gone carries the whole-run
+   * reading and no other, so the CLI hands the document back to a page and
+   * asks for the window there. The recorder is not involved: reading a
+   * document someone else recorded closes nothing here.
+   */
+  it("diagnoses a supplied trace document without touching the recording", async () => {
+    const seam = installTraceSeam();
+    const source = new ControlledSource();
+    const cache = new CpuCache(source, makeDecode());
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    cache.submit(makePlan([makeRequest()]));
+    await flush();
+    seam.closeRun("timeout");
+    const document = seam.exportTrace();
+    const runId = seam.runState.lastConcludedRunId!;
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    const diagnostic = seam.diagnoseTrace(document, { runId, window: { startMs: 0, endMs: 1 } });
+    const text = seam.diagnoseTraceText(document, { runId, depth: "phases" });
+    expect(traceRecorder.isRunOpen).toBe(true);
+
+    expect(diagnostic.runId).toBe(runId);
+    expect(diagnostic.window).toMatchObject({ startMs: 0, endMs: 1 });
+    expect(text).toContain(`lucida trace ${runId}`);
+    expect(text).toContain("CRITICAL PATH");
+  });
+
+  /**
    * "The shape behind X" is a depth of the page's renderer too, so the CLI
    * that prints it never becomes a second renderer with its own opinions.
    */

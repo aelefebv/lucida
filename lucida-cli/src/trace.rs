@@ -126,6 +126,51 @@ fn run_export_expression(with_chrome_trace: bool) -> String {
     )
 }
 
+/// The evaluation behind `show --window`: the run file's own document, handed
+/// back to a page's seam for the derivation over one interval, with every
+/// rendering this CLI can print taken in the same evaluation, as the driver's
+/// export does.
+///
+/// The file carries the whole-run reading and no other, and a window cannot
+/// be rendered at export because there is no finite set of them. So a page
+/// derives the reading, where the derivation lives, and this CLI still
+/// computes nothing (ADR 0051). The page's own recording is never read. The
+/// document is the file's, and the run is named so a document holding several
+/// reads the one the file is about.
+fn window_read_expression(trace: &Value, run_id: Option<&str>, window: WindowRequest) -> String {
+    let scope = serde_json::json!({
+        "runId": run_id,
+        "window": { "startMs": window.start_ms, "endMs": window.end_ms },
+    });
+    format!(
+        r#"(() => {{
+  const seam = window.lucidaTrace;
+  if (!seam || typeof seam.diagnoseTrace !== 'function') return null;
+  const trace = {trace};
+  const scope = {scope};
+  const render = (make) => {{
+    try {{ return make(); }} catch (error) {{ return 'rendering failed: ' + String(error); }}
+  }};
+  const diagnostic = seam.diagnoseTrace(trace, scope);
+  const perPhase = {{}};
+  for (const phase of diagnostic.phases || []) {{
+    perPhase[phase.id] = render(() => seam.diagnoseTraceText(trace, {{ ...scope, depth: 'phase', phase: phase.id }}));
+  }}
+  return JSON.stringify({{
+    diagnostic,
+    summary: render(() => seam.diagnoseTraceText(trace, scope)),
+    phases: render(() => seam.diagnoseTraceText(trace, {{ ...scope, depth: 'phases' }})),
+    perPhase
+  }});
+}})()"#
+    )
+}
+
+/// Whether the page can read a supplied document over a window. Null until
+/// the bundle has installed the seam; false on a page older than this flag.
+const WINDOWED_SEAM_PROBE: &str =
+    "window.lucidaTrace ? (typeof window.lucidaTrace.diagnoseTrace === 'function') : null";
+
 /// The window the run was driven in, recorded because "cold open of dataset X"
 /// is not a reproducible workload without it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -311,6 +356,22 @@ pub struct TraceRenderings {
     pub per_phase: std::collections::BTreeMap<String, String>,
 }
 
+impl TraceRenderings {
+    /// The page's renderings as it handed them over, with a page that recorded
+    /// no run saying so in place of each missing depth.
+    fn from_export(
+        summary: Option<String>,
+        phases: Option<String>,
+        per_phase: std::collections::BTreeMap<String, String>,
+    ) -> Self {
+        Self {
+            summary: summary.unwrap_or_else(|| NO_RUN_RECORDED.to_string()),
+            phases: phases.unwrap_or_else(|| NO_RUN_RECORDED.to_string()),
+            per_phase,
+        }
+    }
+}
+
 /// The artifact. The driver kills its browser at teardown, taking the resident
 /// buffer with it, so unless the run is persisted the follow-up commands the
 /// default rendering prints are unreachable from the path that produced them.
@@ -351,6 +412,80 @@ pub enum ShowDepth {
     Phases,
     /// One phase, selected out of the document by id.
     Phase(String),
+}
+
+/// An interval of a run's clock, as `show --window` takes it: `START..END`
+/// in milliseconds from run start. That is the unit every duration in the
+/// text is printed in, and the spelling the text's own follow-up commands use.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowRequest {
+    pub start_ms: f64,
+    pub end_ms: f64,
+}
+
+impl std::str::FromStr for WindowRequest {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let Some((start, end)) = text.split_once("..") else {
+            return Err(format!(
+                "a window is START..END in milliseconds from run start, not {text:?}"
+            ));
+        };
+        let offset = |part: &str, name: &str| -> Result<f64, String> {
+            let value: f64 = part.trim().parse().map_err(|_| {
+                format!("the window's {name} {part:?} is not a number of milliseconds")
+            })?;
+            if !value.is_finite() || value < 0.0 {
+                return Err(format!(
+                    "the window's {name} must be a finite offset at or after run start, not {part:?}"
+                ));
+            }
+            Ok(value)
+        };
+        let start_ms = offset(start, "start")?;
+        let end_ms = offset(end, "end")?;
+        if end_ms <= start_ms {
+            return Err(format!("window {text} is empty: END must be after START"));
+        }
+        Ok(Self { start_ms, end_ms })
+    }
+}
+
+impl std::fmt::Display for WindowRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}..{}", self.start_ms, self.end_ms)
+    }
+}
+
+/// What the page hands back for one window: the diagnostic over it and the
+/// same renderings a run file carries for the whole run.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WindowExport {
+    diagnostic: Value,
+    summary: Option<String>,
+    phases: Option<String>,
+    #[serde(default)]
+    per_phase: std::collections::BTreeMap<String, String>,
+}
+
+/// A persisted run read over one interval of its clock.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowedRun {
+    pub window: WindowRequest,
+    /// The diagnostic exactly as the page derived it over the window.
+    pub diagnostic: Value,
+    pub renderings: TraceRenderings,
+}
+
+fn windowed_run(export: WindowExport, window: WindowRequest) -> WindowedRun {
+    WindowedRun {
+        window,
+        diagnostic: export.diagnostic,
+        renderings: TraceRenderings::from_export(export.summary, export.phases, export.per_phase),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -837,29 +972,25 @@ fn format_level_range(range: LevelRange) -> String {
     }
 }
 
-/// A depth of a persisted run. `Summary` and `Phases` are the page's renderings
-/// verbatim; `Phase` selects one phase's already-computed numbers out of the
-/// document rather than deriving anything.
-pub fn render_show(file: &TraceRunFile, depth: &ShowDepth) -> String {
+/// A depth of a persisted run, out of a run file's renderings or a windowed
+/// reading's. `Summary` and `Phases` are the page's renderings verbatim;
+/// `Phase` selects one phase's already-rendered reading rather than deriving
+/// anything.
+pub fn render_depth(renderings: &TraceRenderings, depth: &ShowDepth) -> String {
     match depth {
-        ShowDepth::Summary => file.renderings.summary.clone(),
-        ShowDepth::Phases => file.renderings.phases.clone(),
-        ShowDepth::Phase(id) => file
-            .renderings
-            .per_phase
-            .get(id)
-            .cloned()
-            .unwrap_or_else(|| {
-                format!(
-                    "phase {id} is not in this run; the run carries: {}",
-                    file.renderings
-                        .per_phase
-                        .keys()
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            }),
+        ShowDepth::Summary => renderings.summary.clone(),
+        ShowDepth::Phases => renderings.phases.clone(),
+        ShowDepth::Phase(id) => renderings.per_phase.get(id).cloned().unwrap_or_else(|| {
+            format!(
+                "phase {id} is not in this run; the run carries: {}",
+                renderings
+                    .per_phase
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }),
     }
 }
 
@@ -946,6 +1077,75 @@ async fn drive_and_export(
     .await
 }
 
+/// Read `file` over `window`, through the page at `url`.
+///
+/// A headless page is opened purely to reach the derivation: the file
+/// carries the whole-run renderings, the browser that made them is gone, and
+/// this CLI holds no derivation of its own to scope. Nothing on the page is
+/// waited for except the seam, because the page's dataset work is not the
+/// subject, and the page's own recording is never read: the document is the
+/// file's. A window the derivation refuses (empty once clamped to the run)
+/// surfaces as the page's own error.
+pub async fn read_window(
+    url: &str,
+    token: Option<&EffectiveToken>,
+    wait: Duration,
+    file: &TraceRunFile,
+    window: WindowRequest,
+) -> Result<WindowedRun, CliError> {
+    let expression = window_read_expression(&file.trace, file.header.run_id.as_deref(), window);
+    let viewport = Viewport::new(DEFAULT_WIDTH, DEFAULT_HEIGHT, 1.0);
+    let json = browser::with_browser(viewport, wait, async |browser| {
+        let mut page = browser.open_page_unrendered(url, token, wait).await?;
+        wait_for_windowed_seam(&mut page, wait).await?;
+        let value = page.evaluate(&expression, wait).await?;
+        value.as_str().map(str::to_string).ok_or_else(|| {
+            CliError::new(
+                ErrorKind::Protocol,
+                "the page did not return a windowed reading; window.lucidaTrace was missing",
+            )
+        })
+    })
+    .await?;
+    let export: WindowExport = serde_json::from_str(&json).map_err(|error| {
+        CliError::new(
+            ErrorKind::Protocol,
+            format!("the page returned a windowed reading this CLI cannot read: {error}"),
+        )
+    })?;
+    Ok(windowed_run(export, window))
+}
+
+/// Wait for the bundle to install a seam that can read a supplied document.
+/// A page still loading is worth waiting for; a page whose seam predates the
+/// window flag is not, and says which build is behind.
+async fn wait_for_windowed_seam(page: &mut browser::Page, wait: Duration) -> Result<(), CliError> {
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        match page.evaluate(WINDOWED_SEAM_PROBE, wait).await?.as_bool() {
+            Some(true) => return Ok(()),
+            Some(false) => {
+                return Err(CliError::new(
+                    ErrorKind::Protocol,
+                    "this page's trace seam cannot read a document over a window; the server is \
+                     running a build older than this CLI",
+                ));
+            }
+            None => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(CliError::new(
+                ErrorKind::SessionDisconnect,
+                format!(
+                    "timed out after {}s waiting for the page's trace seam",
+                    wait.as_secs()
+                ),
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// What the driver knows and the page cannot: the workload it composed, the
 /// warmth it found on the server, and which server and workspace those were.
 #[derive(Debug, Clone, PartialEq)]
@@ -980,13 +1180,7 @@ fn assemble_run_file(export: SeamExport, facts: &DriverFacts) -> TraceRunFile {
             workspace_id: facts.workspace_id.clone(),
             screenshot: facts.screenshot.clone(),
         },
-        renderings: TraceRenderings {
-            summary: export
-                .summary
-                .unwrap_or_else(|| NO_RUN_RECORDED.to_string()),
-            phases: export.phases.unwrap_or_else(|| NO_RUN_RECORDED.to_string()),
-            per_phase: export.per_phase,
-        },
+        renderings: TraceRenderings::from_export(export.summary, export.phases, export.per_phase),
         diagnostic: export.diagnostic.unwrap_or(Value::Null),
         trace: export.trace,
     }
@@ -1501,22 +1695,125 @@ mod tests {
     #[test]
     fn the_depths_print_the_pages_own_renderings() {
         let file = run_file(json!({}), true, "quiescent");
+        let renderings = &file.renderings;
         assert_eq!(
-            render_show(&file, &ShowDepth::Summary),
-            file.renderings.summary
+            render_depth(renderings, &ShowDepth::Summary),
+            renderings.summary
         );
         assert_eq!(
-            render_show(&file, &ShowDepth::Phases),
-            file.renderings.phases
+            render_depth(renderings, &ShowDepth::Phases),
+            renderings.phases
         );
         assert_eq!(
-            render_show(&file, &ShowDepth::Phase("browser.wire".to_string())),
-            file.renderings.per_phase["browser.wire"]
+            render_depth(renderings, &ShowDepth::Phase("browser.wire".to_string())),
+            renderings.per_phase["browser.wire"]
         );
 
-        let missing = render_show(&file, &ShowDepth::Phase("browser.decode".to_string()));
+        let missing = render_depth(renderings, &ShowDepth::Phase("browser.decode".to_string()));
         assert!(missing.contains("browser.decode is not in this run"));
         assert!(missing.contains("browser.wire"));
+    }
+
+    /// The narrower-window follow-up the text prints has to parse back, in
+    /// the same spelling, and an empty or backwards window is refused here
+    /// rather than shipped to a page.
+    #[test]
+    fn a_window_is_two_ordered_millisecond_offsets() {
+        assert_eq!(
+            "1200..4120".parse::<WindowRequest>().unwrap(),
+            WindowRequest {
+                start_ms: 1200.0,
+                end_ms: 4120.0
+            }
+        );
+        assert_eq!(
+            "1.5..4".parse::<WindowRequest>().unwrap().to_string(),
+            "1.5..4"
+        );
+        assert_eq!(
+            WindowRequest {
+                start_ms: 60.0,
+                end_ms: 1911.0
+            }
+            .to_string(),
+            "60..1911"
+        );
+        for bad in [
+            "",
+            "1200",
+            "..",
+            "4120..1200",
+            "5..5",
+            "-1..5",
+            "a..b",
+            "1..inf",
+        ] {
+            assert!(bad.parse::<WindowRequest>().is_err(), "{bad:?} parsed");
+        }
+    }
+
+    /// The page derives the window over the file's own document, which the
+    /// CLI hands back rather than reads, and every depth comes out of the one
+    /// evaluation, as the driver's export does.
+    #[test]
+    fn the_window_expression_hands_the_files_document_back_to_the_seam() {
+        let trace = json!({ "runs": [{ "header": { "runId": "run-1-1" } }] });
+        let expression = window_read_expression(
+            &trace,
+            Some("run-1-1"),
+            WindowRequest {
+                start_ms: 1200.0,
+                end_ms: 4120.0,
+            },
+        );
+
+        assert!(expression.contains("seam.diagnoseTrace(trace, scope)"));
+        assert!(expression.contains("seam.diagnoseTraceText(trace, scope)"));
+        assert!(expression.contains(&trace.to_string()));
+        assert!(expression.contains(r#""runId":"run-1-1""#));
+        assert!(expression.contains(r#""startMs":1200.0"#));
+        assert!(expression.contains(r#""endMs":4120.0"#));
+        assert!(expression.contains("depth: 'phases'"));
+        assert!(expression.contains("depth: 'phase', phase: phase.id"));
+        // Null rather than a throw when the seam is missing, so read_window
+        // names the missing seam instead of a failed evaluation.
+        assert!(expression.contains("typeof seam.diagnoseTrace !== 'function'"));
+    }
+
+    /// A windowed reading prints at every depth a run file prints at, through
+    /// the same selection, so `--window` composes with `--phases` and
+    /// `--phase` rather than being a depth of its own.
+    #[test]
+    fn a_windowed_reading_prints_the_pages_renderings_at_every_depth() {
+        let export: WindowExport = serde_json::from_value(json!({
+            "diagnostic": { "window": { "startMs": 1200.0, "endMs": 4120.0 } },
+            "summary": "lucida trace run-1-1 — VERDICT: clear\nwindow    1200..4120 ms",
+            "phases": "CRITICAL PATH  from 1200 ms to last chunk presented at 4050 ms",
+            "perPhase": { "browser.wire": "PHASE     browser.wire" }
+        }))
+        .unwrap();
+        let read = windowed_run(
+            export,
+            WindowRequest {
+                start_ms: 1200.0,
+                end_ms: 4120.0,
+            },
+        );
+
+        assert_eq!(
+            render_depth(&read.renderings, &ShowDepth::Summary),
+            read.renderings.summary
+        );
+        assert!(render_depth(&read.renderings, &ShowDepth::Phases).contains("from 1200 ms"));
+        assert_eq!(
+            render_depth(
+                &read.renderings,
+                &ShowDepth::Phase("browser.wire".to_string())
+            ),
+            "PHASE     browser.wire"
+        );
+        assert_eq!(read.diagnostic["window"]["endMs"], 4120.0);
+        assert_eq!(read.window.to_string(), "1200..4120");
     }
 
     /// A run that never settled is still an artifact, and the driver's own

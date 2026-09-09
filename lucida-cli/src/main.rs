@@ -1253,6 +1253,16 @@ enum TraceCommand {
         /// One phase's numbers and the findings against it
         #[arg(long, value_name = "PHASE", conflicts_with = "phases")]
         phase: Option<String>,
+        /// Read only this interval of the run, START..END in milliseconds from
+        /// run start, as the text's own follow-up commands spell it. The run
+        /// file holds the whole-run reading only, so a window is derived by
+        /// the page's own derivation in a headless browser against the
+        /// configured server; nothing is re-recorded
+        #[arg(long, value_name = "START..END")]
+        window: Option<trace::WindowRequest>,
+        /// Seconds to wait for the page that derives a --window reading
+        #[arg(long, default_value_t = 60)]
+        timeout_seconds: u64,
         /// Directory runs are read back from
         #[arg(long, value_name = "DIR", env = "LUCIDA_TRACE_DIR")]
         trace_dir: Option<PathBuf>,
@@ -3595,6 +3605,8 @@ async fn emit_trace_command(
                 run,
                 phases,
                 phase,
+                window,
+                timeout_seconds,
                 trace_dir,
             }),
         ) => {
@@ -3606,11 +3618,36 @@ async fn emit_trace_command(
                 (None, true) => trace::ShowDepth::Phases,
                 (None, false) => trace::ShowDepth::Summary,
             };
-            let text = trace::render_show(&file, &depth);
+            // The page is opened on an empty inline view: it is there to reach
+            // the derivation, not to load anything.
+            let windowed = match window {
+                Some(window) => {
+                    let empty = SavedView::empty([trace::DEFAULT_WIDTH, trace::DEFAULT_HEIGHT]);
+                    let url =
+                        montage::with_render_param(&viewer_inline_view_web_url(&target, &empty)?);
+                    let read = trace::read_window(
+                        &url,
+                        token.as_ref(),
+                        Duration::from_secs(*timeout_seconds),
+                        &file,
+                        *window,
+                    )
+                    .await
+                    .map_err(|error| error.with_context("url", &url))?;
+                    Some(read)
+                }
+                None => None,
+            };
+            let (diagnostic, renderings) = match &windowed {
+                Some(read) => (&read.diagnostic, &read.renderings),
+                None => (&file.diagnostic, &file.renderings),
+            };
+            let text = trace::render_depth(renderings, &depth);
             let payload = serde_json::json!({
                 "runFile": path,
                 "header": file.header,
-                "diagnostic": file.diagnostic,
+                "window": window,
+                "diagnostic": diagnostic,
                 "text": text,
             });
             output.print_either(&payload, || text.clone())?;
@@ -5762,6 +5799,53 @@ mod tests {
 
         // One depth at a time: the two flags would otherwise both apply.
         assert!(try_parse(&["trace", "show", "r", "--phases", "--phase", "wire"]).is_err());
+    }
+
+    /// The narrower-window follow-up the text prints has to parse, and a
+    /// window composes with a depth: the window's phases are the phases asked
+    /// for.
+    #[test]
+    fn trace_show_takes_a_window_in_milliseconds() {
+        match parse(&["trace", "show", "run-17-3", "--window", "1200..4120"]).command {
+            Command::Trace {
+                command:
+                    Some(TraceCommand::Show {
+                        window,
+                        phases,
+                        timeout_seconds,
+                        ..
+                    }),
+                ..
+            } => {
+                assert_eq!(
+                    window,
+                    Some(trace::WindowRequest {
+                        start_ms: 1200.0,
+                        end_ms: 4120.0
+                    })
+                );
+                assert!(!phases);
+                assert_eq!(timeout_seconds, 60);
+            }
+            _ => panic!("expected trace show"),
+        }
+
+        match parse(&["trace", "show", "r", "--phases", "--window", "0..500"]).command {
+            Command::Trace {
+                command: Some(TraceCommand::Show { window, phases, .. }),
+                ..
+            } => {
+                assert!(phases);
+                assert_eq!(
+                    window.map(|window| window.to_string()).as_deref(),
+                    Some("0..500")
+                );
+            }
+            _ => panic!("expected trace show"),
+        }
+
+        assert!(try_parse(&["trace", "show", "r", "--window", "500..500"]).is_err());
+        assert!(try_parse(&["trace", "show", "r", "--window", "soon"]).is_err());
     }
 
     #[test]

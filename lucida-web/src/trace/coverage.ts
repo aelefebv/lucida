@@ -262,10 +262,32 @@ function intervalGap(
     endUs,
     durationUs,
     records: 0,
-    couldHideBottleneck:
-      durationUs >= BOTTLENECK_FLOOR_US && durationUs >= wallClockUs * BOTTLENECK_SHARE,
+    couldHideBottleneck: couldHideBottleneck(durationUs, wallClockUs),
     statement: GAP_STATEMENTS[kind],
   };
+}
+
+/**
+ * How much of `[startUs, endUs]` at least one recorded phase span covers,
+ * counting overlap once. A window's reading of `accountedUs`: the whole run's
+ * figure is a union, not a sum, so a window cannot take its part of it and
+ * has to be measured on its own.
+ */
+export function accountedWithin(rows: TraceRow[], startUs: number, endUs: number): number {
+  let total = 0;
+  for (const [spanStartUs, spanEndUs] of mergeSpans(rows, endUs)) {
+    total += Math.max(0, Math.min(spanEndUs, endUs) - Math.max(spanStartUs, startUs));
+  }
+  return total;
+}
+
+/**
+ * The judgement an interval gap carries, exposed so a window can re-judge a
+ * gap it clipped against its own span rather than inherit the run's verdict
+ * on the whole gap.
+ */
+export function couldHideBottleneck(durationUs: number, wallClockUs: number): boolean {
+  return durationUs >= BOTTLENECK_FLOOR_US && durationUs >= wallClockUs * BOTTLENECK_SHARE;
 }
 
 /**
