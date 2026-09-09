@@ -72,6 +72,16 @@ describe("RenderClient destroy", () => {
     await expect(client.ready()).resolves.toBeUndefined();
   });
 
+  it("hands over the worker's GPU pass time once, and null when none arrived", () => {
+    const { client, worker } = makeReadyClient();
+    expect(client.takeGpuPassUs()).toBeNull();
+
+    worker.emit({ type: "gpuPassTime", gpuPassUs: 1_800 });
+    worker.emit({ type: "gpuPassTime", gpuPassUs: 2_100 });
+    expect(client.takeGpuPassUs()).toBe(2_100);
+    expect(client.takeGpuPassUs()).toBeNull();
+  });
+
   it("destroy before init settles ready() with a rejection", async () => {
     const client = new RenderClient(makeCanvas());
     const ready = client.ready();

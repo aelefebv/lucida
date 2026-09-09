@@ -274,11 +274,34 @@ describe("the Chrome Trace Event projection", () => {
     expect(counters.map(e => e.name)).toEqual([
       "queue depth",
       "in flight",
-      "frame time (ms)",
+      "main-thread frame time (ms)",
       "resident bytes",
     ]);
     expect(counters.every(e => e.ts === 1_000 && e.pid === PID_BROWSER)).toBe(true);
     expect(counters.map(e => e.args?.value)).toEqual([1_204, 12, 16.7, 6_000_000_000]);
+  });
+
+  /**
+   * A counter track has no null, so the GPU series has a point only where a
+   * reading carries one, and a run without timestamp queries has no track
+   * rather than one pinned at zero.
+   */
+  it("draws a GPU pass counter only on the readings that carry one", () => {
+    const events = toChromeTraceEvents(
+      doc(
+        run({
+          readings: [
+            reading(1_000, { frameTimeUs: 4_000 }),
+            reading(17_000, { frameTimeUs: 4_000, gpuPassUs: 1_250 }),
+          ],
+        }),
+      ),
+    );
+    const gpu = events.filter(e => e.ph === "C" && e.name === "gpu pass time (ms)");
+    expect(gpu.map(e => [e.ts, e.args?.value])).toEqual([[17_000, 1.25]]);
+
+    const untimed = toChromeTraceEvents(doc(run({ readings: [reading(1_000)] })));
+    expect(untimed.some(e => e.name === "gpu pass time (ms)")).toBe(false);
   });
 
   /**

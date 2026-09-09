@@ -28,6 +28,7 @@ import type {
   ColdStateMessage,
 } from "../workerProtocol.ts";
 import { createInitialState } from "../worker/state.ts";
+import { UNTIMED } from "../passTiming.ts";
 
 function makeMockDevice(): GPUDevice {
   const createTexture = vi.fn((desc: GPUTextureDescriptor) => ({
@@ -49,6 +50,7 @@ function makeCtx(): WorkerCtx {
     context: {} as GPUCanvasContext,
     format: "bgra8unorm",
     state: createInitialState(),
+    passTimer: UNTIMED,
     getSliceRenderer: () => ({} as never),
     getVolumeRenderer: () => ({} as never),
     getCompositor: () => ({} as never),

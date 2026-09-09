@@ -159,9 +159,10 @@ function renderLabelVolumeLayer(
 
   const depth = ensureDepthTexture(ctx.device, msg.canvasW, msg.canvasH);
   const depthView = depth.createView();
+  const timing = ctx.passTimer;
   const encoder = ctx.device.createCommandEncoder();
-  renderer.renderTo(target.createView(), encoder, depthView, isFirstLayer, undefined, undefined, layer.scissorRect);
-  comp.composite(canvasView, [{ view: target.createView(), blendMode: layer.blendMode }], encoder, isFirstLayer);
+  renderer.renderTo(target.createView(), encoder, depthView, isFirstLayer, undefined, undefined, layer.scissorRect, timing);
+  comp.composite(canvasView, [{ view: target.createView(), blendMode: layer.blendMode }], encoder, isFirstLayer, timing);
   ctx.device.queue.submit([encoder.finish()]);
   return true;
 }
@@ -193,6 +194,9 @@ export function handleVolumeRenderMultiPass(
   const canvasView = ctx.context.getCurrentTexture().createView();
   let isFirstLayer = true;
   const atlasMap = ctx.state.volumeAtlases;
+
+  const timing = ctx.passTimer;
+  timing.beginFrame();
 
   for (const layer of msg.layers) {
     const memberId = layer.datasetId;
@@ -281,8 +285,8 @@ export function handleVolumeRenderMultiPass(
 
     // Render volume to single offscreen texture, then composite onto canvas
     const encoder = ctx.device.createCommandEncoder();
-    renderer.renderTo(pool[0].createView(), encoder, depthView, isFirstLayer, undefined, undefined, layer.scissorRect);
-    comp.composite(canvasView, [{ view: pool[0].createView(), blendMode: layer.blendMode }], encoder, isFirstLayer);
+    renderer.renderTo(pool[0].createView(), encoder, depthView, isFirstLayer, undefined, undefined, layer.scissorRect, timing);
+    comp.composite(canvasView, [{ view: pool[0].createView(), blendMode: layer.blendMode }], encoder, isFirstLayer, timing);
     ctx.device.queue.submit([encoder.finish()]);
 
     isFirstLayer = false;
@@ -291,7 +295,7 @@ export function handleVolumeRenderMultiPass(
   // If no layers were rendered, clear the canvas
   if (isFirstLayer) {
     const clearEncoder = ctx.device.createCommandEncoder();
-    comp.composite(canvasView, [], clearEncoder);
+    comp.composite(canvasView, [], clearEncoder, true, timing);
     ctx.device.queue.submit([clearEncoder.finish()]);
   }
 
@@ -299,7 +303,9 @@ export function handleVolumeRenderMultiPass(
   const depthTex = getDepthTexture();
   if (cr.hasData() && msg.viewProj && depthTex) {
     const cursorEncoder = ctx.device.createCommandEncoder();
-    cr.renderVolume(canvasView, depthTex.createView(), cursorEncoder, msg.viewProj, msg.fullW, msg.fullH);
+    cr.renderVolume(canvasView, depthTex.createView(), cursorEncoder, msg.viewProj, msg.fullW, msg.fullH, timing);
     ctx.device.queue.submit([cursorEncoder.finish()]);
   }
+
+  timing.endFrame();
 }

@@ -210,11 +210,33 @@ export interface BuildIdentity {
   dev: boolean;
 }
 
+/**
+ * The adapter the page renders on. Two runs from different machines are
+ * visibly not comparable only if the header names the hardware, and a slow
+ * orbit on a software adapter is a machine problem rather than a shader
+ * problem only if the header says which kind of adapter this was.
+ */
 export interface GpuIdentity {
   vendor: string;
   architecture: string;
   device: string;
   description: string;
+  /**
+   * True when the adapter is a software fallback rather than a hardware
+   * adapter, false when it is hardware, and null when the browser reported
+   * neither. The first fallback detection in the product lives on the
+   * trace, so a field report from such a machine says so in its header, and
+   * a browser that says nothing is recorded as saying nothing rather than
+   * as hardware.
+   */
+  fallback: boolean | null;
+  /**
+   * True when the adapter offers timestamp queries, which is what lets the
+   * render worker read a GPU pass time back per frame. When false, no
+   * reading carries {@link TraceReading.gpuPassUs} and every surface labels
+   * frame time as main-thread time.
+   */
+  timestampQueries: boolean;
 }
 
 /**
@@ -525,6 +547,20 @@ export const ReadingColumn = {
 export interface TraceReading extends Record<ReadingName, number> {
   /** Microseconds from run start. */
   atUs: number;
+  /**
+   * The GPU pass time of the most recent viewport frame whose timestamps
+   * were read back since the previous reading, in microseconds on the GPU's
+   * own clock: from the start of the frame's first render pass to the end of
+   * its last. Measured on the device through timestamp queries, so it is
+   * render cost rather than an inference from the main thread.
+   *
+   * Absent, never zero, when there is nothing to say: the adapter offers no
+   * timestamp queries ({@link GpuIdentity.timestampQueries}), the tick drew
+   * no frame, or the frame's read-back had not landed when the tick ended.
+   * It lags {@link READING_NAMES}'s `frameTimeUs` by a frame, because the
+   * read-back is asynchronous and the reading is taken at tick end.
+   */
+  gpuPassUs?: number;
 }
 
 /**

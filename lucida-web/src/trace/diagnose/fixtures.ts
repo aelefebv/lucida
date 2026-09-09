@@ -201,11 +201,16 @@ export function makeHeader(overrides: Partial<RunHeader> = {}): RunHeader {
       { generation: 1, openedAtUs: null, closedAtUs: null, gapUs: null, firstRid: null, lastRid: null },
     ],
     build: { version: "0.2.0", mode: "production", dev: false },
+    // No timestamp queries, so the default readings carry no GPU pass time.
+    // A fixture that adds GPU time must also declare an adapter that offers
+    // them.
     gpu: {
       vendor: "apple",
       architecture: "metal-3",
       device: "",
       description: "",
+      fallback: false,
+      timestampQueries: false,
     },
     startedAtEpochMs: 1_700_000_000_000,
     durationUs: 1_000_000,
@@ -547,6 +552,44 @@ export function sendHeavyIdleRun(): TraceRun {
 }
 
 /**
+ * A 2 s open whose first half is healthy and whose second half stalls: sixty
+ * fast rows, then forty whose decode runs eight times over its ceiling. The
+ * whole run reads as a decode stall; a window over the first half reads as
+ * clear. The fixture for the window scoping: the verdict has to move when the
+ * window excludes the stall, and stay put when it does not.
+ */
+export function lateStallOpen(): TraceRun {
+  const rows: TraceRow[] = [];
+  const fast = { plan: 400, queue: 2 * MS, wire: 18 * MS, decode: 900, upload: 1_200, present: 2 * MS };
+  for (let i = 0; i < 60; i += 1) {
+    rows.push(makeRow({ startUs: 40 * MS + i * 10 * MS, durations: fast, rid: i }, i));
+  }
+  for (let i = 0; i < 40; i += 1) {
+    rows.push(
+      makeRow(
+        {
+          startUs: 1_100 * MS + i * 10 * MS,
+          durations: { ...fast, decode: 400 * MS },
+          rid: 60 + i,
+        },
+        60 + i,
+      ),
+    );
+  }
+  return makeRun({
+    header: { runId: "late-stall", durationUs: 2_000 * MS },
+    rows,
+    // In-flight varies, so the one limiter is neither pinned nor backlogged
+    // and the windowed findings are the rows' alone.
+    readings: Array.from({ length: 20 }, (_, i) =>
+      makeReading(i * 100 * MS, { queueDepth: 0, inFlight: (i % 3) + 1, frameTimeUs: 3_000 }),
+    ),
+    datasetOpens: [{ requestId: "open-1", startUs: 5 * MS, endUs: 35 * MS }],
+    serverRows: [makeMetadataRow("open-1", 1 * MS, 4 * MS, "cache-hit")],
+  });
+}
+
+/**
  * The coverage regression fixture: a 3 s run whose first 2.6 s are before any
  * instrument existed. #893's critical path started at the first recorded row
  * and reported `100% accounted` for exactly this shape.
@@ -577,5 +620,76 @@ export function uninstrumentedPrefixOpen(): TraceRun {
     header: { runId: "prefix-heavy", durationUs: 3_000 * MS },
     rows,
     readings: [makeReading(2_700 * MS, { queueDepth: 2, inFlight: 4 })],
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Render timing and the adapter
+// ---------------------------------------------------------------------------
+
+/**
+ * The healthy open again, on an adapter that offers timestamp queries. Every
+ * reading after the first carries the GPU pass time of the frame before it:
+ * the read-back is asynchronous, so the first tick has nothing to report yet.
+ * One frame is slower than the rest so the percentiles are not all one number.
+ */
+export function gpuTimedOpen(): TraceRun {
+  const base = healthyLocalOpen();
+  return makeRun({
+    header: {
+      runId: "local-gpu-timed",
+      durationUs: base.header.durationUs,
+      gpu: { ...base.header.gpu!, timestampQueries: true },
+    },
+    rows: base.rows,
+    readings: base.readings.map((reading, i) =>
+      i === 0 ? reading : { ...reading, gpuPassUs: i === 7 ? 2_400 : 1_100 + i * 20 },
+    ),
+    datasetOpens: base.datasetOpens,
+    serverRows: base.serverRows,
+  });
+}
+
+/**
+ * The same open on an adapter without timestamp queries. No reading carries a
+ * GPU pass time, and the document has to say the render time it does have is
+ * main-thread time rather than let it pass for the GPU's.
+ */
+export function mainThreadOnlyOpen(): TraceRun {
+  const base = healthyLocalOpen();
+  return makeRun({
+    header: { runId: "local-main-thread-only", durationUs: base.header.durationUs },
+    rows: base.rows,
+    readings: base.readings,
+    datasetOpens: base.datasetOpens,
+    serverRows: base.serverRows,
+  });
+}
+
+/**
+ * A run on a software fallback adapter: the machine has no usable hardware
+ * adapter, frames are slow, and nothing about the shader is to blame. The
+ * header is the only place a reader can learn that, so it is the fixture's
+ * whole point.
+ */
+export function fallbackAdapterOpen(): TraceRun {
+  const base = healthyLocalOpen();
+  return makeRun({
+    header: {
+      runId: "local-fallback-adapter",
+      durationUs: base.header.durationUs,
+      gpu: {
+        vendor: "generic",
+        architecture: "software",
+        device: "",
+        description: "software rasterizer",
+        fallback: true,
+        timestampQueries: false,
+      },
+    },
+    rows: base.rows,
+    readings: base.readings.map((reading) => ({ ...reading, frameTimeUs: 42_000 })),
+    datasetOpens: base.datasetOpens,
+    serverRows: base.serverRows,
   });
 }

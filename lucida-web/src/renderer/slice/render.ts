@@ -138,7 +138,7 @@ function renderLabelLayer(
   renderer.setDescriptorBinding(descBuffer, 0, palette.count);
 
   const encoder = ctx.device.createCommandEncoder();
-  renderer.renderTo(target.createView(), encoder);
+  renderer.renderTo(target.createView(), encoder, ctx.passTimer);
   ctx.device.queue.submit([encoder.finish()]);
   return { view: target.createView(), blendMode: layer.blendMode };
 }
@@ -329,6 +329,9 @@ export function handleSliceRenderMultiPass(
     ctx.ensureOffscreenPool(idx + 1, msg.canvasW, msg.canvasH)[idx];
   const atlasMap = ctx.state.sliceAtlases;
 
+  const timing = ctx.passTimer;
+  timing.beginFrame();
+
   const renderedLayers: CompositeLayer[] = [];
 
   for (const layer of msg.layers) {
@@ -385,7 +388,7 @@ export function handleSliceRenderMultiPass(
         canvasH: msg.canvasH,
         dataW: layer.dataW,
         dataH: layer.dataH,
-      });
+      }, timing);
       ctx.device.queue.submit([aggEncoder.finish()]);
       renderedLayers.push({ view: aggTarget.createView(), blendMode: layer.blendMode });
       continue;
@@ -468,20 +471,22 @@ export function handleSliceRenderMultiPass(
     renderer.setDescriptorBinding(descIndex.buffer, entityIndex);
     const layerTarget = targetFor(idx);
     const layerEncoder = ctx.device.createCommandEncoder();
-    renderer.renderTo(layerTarget.createView(), layerEncoder);
+    renderer.renderTo(layerTarget.createView(), layerEncoder, timing);
     ctx.device.queue.submit([layerEncoder.finish()]);
     renderedLayers.push({ view: layerTarget.createView(), blendMode: layer.blendMode });
   }
 
   const canvasView = ctx.context.getCurrentTexture().createView();
   const compEncoder = ctx.device.createCommandEncoder();
-  comp.composite(canvasView, renderedLayers, compEncoder);
+  comp.composite(canvasView, renderedLayers, compEncoder, true, timing);
   ctx.device.queue.submit([compEncoder.finish()]);
 
   const cr = ctx.getCursorRenderer();
   if (cr.hasData()) {
     const cursorEncoder = ctx.device.createCommandEncoder();
-    cr.renderSlice(canvasView, cursorEncoder, msg.zoom, msg.cx, msg.cy, msg.canvasW, msg.canvasH);
+    cr.renderSlice(canvasView, cursorEncoder, msg.zoom, msg.cx, msg.cy, msg.canvasW, msg.canvasH, timing);
     ctx.device.queue.submit([cursorEncoder.finish()]);
   }
+
+  timing.endFrame();
 }
