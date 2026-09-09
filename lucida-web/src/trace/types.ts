@@ -1361,3 +1361,49 @@ export interface TraceDocument {
    */
   serverRowsOutsideRun: number;
 }
+
+// ---------------------------------------------------------------------------
+// What a reader of the row table asks for, and what it ranks against (#1062)
+// ---------------------------------------------------------------------------
+
+/**
+ * The columns that name one chunk: the dataset, the entity, the level and
+ * the five coordinates. A structural subset of {@link ChunkRowSource} and of
+ * the overlay's cell, so either is passed as it is.
+ */
+export type ChunkCoordinates = Pick<
+  ChunkRowSource,
+  "datasetId" | "entityId" | "level" | "t" | "c" | "z" | "y" | "x"
+>;
+
+/** The chunk key a set of coordinates spells, as a lifecycle row carries it. */
+export function chunkKeyOf(chunk: ChunkCoordinates): string {
+  return `${chunk.level}/${chunk.t}/${chunk.c}/${chunk.z}/${chunk.y}/${chunk.x}`;
+}
+
+/** One row that carries a looked-up chunk, with its index in the interval's table. */
+export interface MatchedRow {
+  row: TraceRow;
+  index: number;
+}
+
+/**
+ * When every row of an interval was admitted to the queue and when it left,
+ * by row index, for the chunk lookup's rank count. Two accessors rather than
+ * an array of records, so the row table answers them from its stamps without
+ * allocating a record per row, and a serialised run answers them from two
+ * precomputed columns.
+ */
+export interface AdmissionColumns {
+  readonly length: number;
+  /** Run-relative microseconds the row was admitted, or {@link NEVER_ADMITTED}. */
+  admittedUs(index: number): number;
+  /** Run-relative microseconds the row dispatched, or {@link NOT_DISPATCHED} while it has not. */
+  dispatchedUs(index: number): number;
+}
+
+/** The admission column's value for a row that never entered the queue. */
+export const NEVER_ADMITTED = -1;
+
+/** The dispatch column's value for a row still in the queue: later than any stamp. */
+export const NOT_DISPATCHED = Number.POSITIVE_INFINITY;

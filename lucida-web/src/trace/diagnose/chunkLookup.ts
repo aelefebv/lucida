@@ -13,8 +13,18 @@
  * cache carries no second row.
  */
 
-import { PHASES, type Phase, type TraceRow, type TraceRun } from "../types.ts";
-import { usToMs } from "./phaseRollup.ts";
+import {
+  NEVER_ADMITTED,
+  NOT_DISPATCHED,
+  PHASES,
+  type AdmissionColumns,
+  type MatchedRow,
+  type Phase,
+  type TracePointEvent,
+  type TraceRow,
+  type TraceRun,
+} from "../types.ts";
+import { nullableUsToMs, usToMs } from "./phaseRollup.ts";
 import { describeState, firstBoundaryUs, rowAgeUs, rowState } from "./rowState.ts";
 import type {
   ChunkEventReading,
@@ -140,46 +150,63 @@ export function lookupChunk(run: TraceRun, selector: string, chosen: string): Ch
     };
   }
   const { entityId, chunkKey } = parsed;
-  const closeUs = run.header.durationUs;
-
-  const matched: { row: TraceRow; index: number }[] = [];
+  const matched: MatchedRow[] = [];
   run.rows.forEach((row, index) => {
     if (row.chunkKey !== chunkKey) return;
     if (entityId !== null && row.entityId !== entityId) return;
     matched.push({ row, index });
   });
+  return readChunk({
+    selector,
+    chosen,
+    chunkKey,
+    entityId,
+    matched,
+    admissions: admissionColumnsOf(run.rows),
+    events: run.events,
+    closeUs: run.header.durationUs,
+  });
+}
+
+/** What the chunk lookup reads: the matched rows, the columns to rank them against, and the events. */
+export interface ChunkReadInput {
+  selector: string;
+  chosen: string;
+  chunkKey: string;
+  /** The entity the selector named, or null for a bare key. */
+  entityId: string | null;
+  /** Every row carrying the chunk, in table order. */
+  matched: MatchedRow[];
+  admissions: AdmissionColumns;
+  /** The interval's point events, from which the ones naming the chunk are kept. */
+  events: readonly TracePointEvent[];
+  /** The interval's clock at the reading: its close, or now for an interval still open. */
+  closeUs: number;
+}
+
+/**
+ * The lookup over rows already matched. `lookupChunk` matches over a
+ * serialised run; the recorder's live index matches over the open interval
+ * and hands its rows here, so the hover inspector and the text read one
+ * function.
+ */
+export function readChunk(input: ChunkReadInput): ChunkLookup {
+  const { selector, chosen, chunkKey, entityId, admissions, closeUs } = input;
   // Oldest first, so several rows read as one history; rows with no boundary go last.
-  matched.sort((a, b) => {
+  const matched = [...input.matched].sort((a, b) => {
     const first = firstBoundaryUs(a.row);
     const second = firstBoundaryUs(b.row);
     if (first === null || second === null) return first === null ? (second === null ? 0 : 1) : -1;
     return first - second;
   });
 
-  const admissions = run.rows.map(admissionOf);
-  const rows = matched.slice(0, MAX_CHUNK_ROWS).map(({ row, index }, position) => {
-    const admission = admissions[index];
-    return {
-      id: position + 1,
-      datasetId: row.datasetId,
-      entityId: row.entityId,
-      imageId: row.imageId,
-      lane: row.lane,
-      residencyTier: row.residencyTier,
-      rid: row.rid,
-      connectionGeneration: row.connectionGeneration,
-      outcome: row.outcome,
-      state: rowState(row),
-      firstSeenMs: nullableMs(firstBoundaryUs(row)),
-      ageMs: nullableMs(rowAgeUs(row, closeUs)),
-      phases: phaseHistory(row),
-      queue: admission ? queueRank(admission, index, admissions, closeUs) : null,
-    };
-  });
+  const rows = matched
+    .slice(0, MAX_CHUNK_ROWS)
+    .map(({ row, index }, position) => rowReading(row, index, position + 1, admissions, closeUs));
 
   const events: ChunkEventReading[] = [];
   let eventCount = 0;
-  for (const event of run.events) {
+  for (const event of input.events) {
     const chunk = event.chunk;
     if (!chunk || chunk.chunkKey !== chunkKey) continue;
     if (entityId !== null && chunk.entityId !== entityId) continue;
@@ -212,8 +239,46 @@ export function lookupChunk(run: TraceRun, selector: string, chosen: string): Ch
   };
 }
 
-function nullableMs(us: number | null): number | null {
-  return us === null ? null : usToMs(us);
+/** One row as the lookup lists it, ranked against the interval's other rows. */
+export function rowReading(
+  row: TraceRow,
+  index: number,
+  id: number,
+  admissions: AdmissionColumns,
+  closeUs: number,
+): ChunkRowReading {
+  return {
+    id,
+    datasetId: row.datasetId,
+    entityId: row.entityId,
+    imageId: row.imageId,
+    lane: row.lane,
+    residencyTier: row.residencyTier,
+    rid: row.rid,
+    connectionGeneration: row.connectionGeneration,
+    outcome: row.outcome,
+    state: rowState(row),
+    firstSeenMs: nullableUsToMs(firstBoundaryUs(row)),
+    ageMs: nullableUsToMs(rowAgeUs(row, closeUs)),
+    phases: phaseHistory(row),
+    queue: queueRankOf(index, admissions, closeUs),
+  };
+}
+
+/** The admission columns of serialised rows, read once so a lookup over many rows does not re-derive them. */
+export function admissionColumnsOf(rows: readonly TraceRow[]): AdmissionColumns {
+  const admitted = new Float64Array(rows.length);
+  const dispatched = new Float64Array(rows.length);
+  for (let i = 0; i < rows.length; i += 1) {
+    const admission = admissionOf(rows[i]);
+    admitted[i] = admission ? admission.admittedUs : NEVER_ADMITTED;
+    dispatched[i] = admission ? (admission.dispatchedUs ?? NOT_DISPATCHED) : NOT_DISPATCHED;
+  }
+  return {
+    length: rows.length,
+    admittedUs: (index) => admitted[index],
+    dispatchedUs: (index) => dispatched[index],
+  };
 }
 
 function phaseHistory(row: TraceRow): RowPhaseReading[] {
@@ -232,15 +297,20 @@ function phaseHistory(row: TraceRow): RowPhaseReading[] {
 }
 
 /** When a row was admitted to the queue, and when it left; null while it is still there. */
-interface Admission {
+export interface Admission {
   admittedUs: number;
   dispatchedUs: number | null;
 }
 
-function admissionOf(row: TraceRow): Admission | null {
+/**
+ * A row's admission, read off its phases. A row that finished `queue` was
+ * admitted when it started and dispatched when it ended. A row still in the
+ * queue has no queue phase yet; it was admitted when its plan phase ended.
+ * Any other row never entered the queue as far as the rows can show.
+ */
+export function admissionOf(row: TraceRow): Admission | null {
   const queue = row.phases.queue;
   if (queue) return { admittedUs: queue.startUs, dispatchedUs: queue.endUs };
-  // A row still in the queue has no queue phase yet; it was admitted when its plan phase ended.
   if (rowState(row) === "queue" && row.phases.plan) {
     return { admittedUs: row.phases.plan.endUs, dispatchedUs: null };
   }
@@ -251,33 +321,36 @@ function admissionOf(row: TraceRow): Admission | null {
  * The row's rank, counted over the other rows' admissions and dispatches.
  * Rows admitted at the same instant are neither ahead of nor behind the row,
  * unless they dispatched first, in which case they overtook it: that is the
- * scheduler's own ordering within one plan pass showing through.
+ * scheduler's own ordering within one plan pass showing through. Null when
+ * the row never entered the queue.
  */
-function queueRank(
-  target: Admission,
+export function queueRankOf(
   targetIndex: number,
-  admissions: (Admission | null)[],
+  admissions: AdmissionColumns,
   closeUs: number,
-): QueueRank {
-  const targetDispatched = target.dispatchedUs ?? Infinity;
+): QueueRank | null {
+  const targetAdmitted = admissions.admittedUs(targetIndex);
+  if (targetAdmitted === NEVER_ADMITTED) return null;
+  const targetDispatched = admissions.dispatchedUs(targetIndex);
   let ahead = 0;
   let overtaken = 0;
   for (let i = 0; i < admissions.length; i += 1) {
     if (i === targetIndex) continue;
-    const other = admissions[i];
-    if (!other) continue;
-    const dispatched = other.dispatchedUs ?? Infinity;
-    if (other.admittedUs < target.admittedUs) {
-      if (dispatched > target.admittedUs) ahead += 1;
+    const admitted = admissions.admittedUs(i);
+    if (admitted === NEVER_ADMITTED) continue;
+    const dispatched = admissions.dispatchedUs(i);
+    if (admitted < targetAdmitted) {
+      if (dispatched > targetAdmitted) ahead += 1;
     } else if (dispatched < targetDispatched) {
       overtaken += 1;
     }
   }
+  const dispatchedAtUs = targetDispatched === NOT_DISPATCHED ? closeUs : targetDispatched;
   return {
     aheadAtAdmission: ahead,
     overtaken,
-    waitedMs: usToMs((target.dispatchedUs ?? closeUs) - target.admittedUs),
-    dispatched: target.dispatchedUs !== null,
+    waitedMs: usToMs(dispatchedAtUs - targetAdmitted),
+    dispatched: targetDispatched !== NOT_DISPATCHED,
   };
 }
 

@@ -21,6 +21,7 @@
 
 import { RESIDENCY_TIERS, type ResidencyTier } from "../../pipeline/residencyTier.ts";
 import { UNLABELLED, type LaneName, type TraceRun } from "../types.ts";
+import { chunkIdentity } from "./chunkStates.ts";
 import { usToMs } from "./phaseRollup.ts";
 import { RULESET } from "./ruleset.ts";
 import { summariseSent } from "./sent.ts";
@@ -204,7 +205,7 @@ function summariseRefetch(interval: TraceRun): RefetchSummary {
   const fetches = new Map<string, number[]>();
   for (const row of interval.rows) {
     if (!row.phases.wire) continue;
-    const identity = `${row.datasetId}/${row.entityId}/${row.chunkKey}`;
+    const identity = chunkIdentity(row.datasetId, row.entityId, row.chunkKey);
     const seen = fetches.get(identity);
     if (seen) seen.push(row.bytes);
     else fetches.set(identity, [row.bytes]);

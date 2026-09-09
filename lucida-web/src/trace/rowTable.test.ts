@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest";
 
 import { RowTable } from "./rowTable.ts";
+import { admissionColumnsOf } from "./diagnose/chunkLookup.ts";
+import { chunkIdentity, deriveChunkStates } from "./diagnose/chunkStates.ts";
+import { makeRun } from "./diagnose/fixtures.ts";
 import { Boundary, PHASES, RowOutcome, UNSET_STAMP, BOUNDARY_COUNT } from "./types.ts";
 
 function source(overrides: Partial<Parameters<RowTable["append"]>[0]> = {}) {
@@ -46,8 +49,9 @@ describe("RowTable", () => {
     // costs 8 B a row, and buys the join to the server's table; the boundary
     // byte costs 1 B, and buys a live tally that walks no rows; the bytes
     // column costs 4 B, and buys the steady-state ruleset its received-bytes
-    // and refetch findings.
-    expect(RowTable.BYTES_PER_ROW).toBe(80);
+    // and refetch findings; the identity index costs 12 B, and buys the
+    // overlay a per-chunk reading of the open interval that walks no rows.
+    expect(RowTable.BYTES_PER_ROW).toBe(92);
   });
 
   it("carries the bytes the wire delivered, and zero until it did", () => {
@@ -331,5 +335,94 @@ describe("the live tally is kept on the write path", () => {
     expect(table.liveTally(occupancy).inFlight).toBe(9);
     expect(occupancy[PHASES.indexOf("wire")]).toBe(9);
     expectCountersToMatchWalk(table);
+  });
+});
+
+/** The chunk `source()` names, at one x, on one entity of one dataset. */
+function chunk(x: number, entityId = "member-1", datasetId = "ds") {
+  return { datasetId, entityId, level: 2, t: 3, c: 1, z: 4, y: 5, x };
+}
+
+describe("the identity index (#1062)", () => {
+  it("finds the newest row of a chunk in a table that holds several, and none for a chunk it never saw", () => {
+    const table = new RowTable(2);
+    const first = table.append(source({ x: 6 }), 0);
+    table.append(source({ x: 7 }), 0);
+    const again = table.append(source({ x: 6 }), 0);
+
+    expect(table.newestRowOf(chunk(6))).toBe(again);
+    expect(table.rowsOf(again)).toEqual([first, again]);
+    expect(table.newestRowOf(chunk(8))).toBe(-1);
+    expect(table.newestRowOf(chunk(6, "member-9"))).toBe(-1);
+    expect(table.newestRowOf(chunk(6, "member-1", "other"))).toBe(-1);
+  });
+
+  it("survives the table doubling, with every chain intact", () => {
+    const table = new RowTable(1);
+    const rows: number[] = [];
+    for (let i = 0; i < 50; i++) rows.push(table.append(source({ x: i % 7, entityId: `m-${i % 3}` }), 0));
+
+    for (let i = 0; i < 50; i++) {
+      const newest = table.newestRowOf(chunk(i % 7, `m-${i % 3}`));
+      const expected = rows.filter((_, j) => j % 3 === i % 3 && j % 7 === i % 7);
+      expect(table.rowsOf(newest)).toEqual(expected);
+    }
+  });
+
+  it("reads a chunk as the derivation reads its serialised rows, for every state a row can be in", () => {
+    const table = new RowTable(4);
+    // Complete, then fetched again and still on the wire.
+    const done = table.append(source({ x: 1 }), 0);
+    table.stamp(done, Boundary.PlanStart, 100);
+    table.stamp(done, Boundary.QueueStart, 200);
+    table.stamp(done, Boundary.WireStart, 300);
+    table.stamp(done, Boundary.DecodeStart, 900);
+    table.stamp(done, Boundary.UploadStart, 1_000);
+    table.stamp(done, Boundary.PresentStart, 1_100);
+    table.stamp(done, Boundary.PresentEnd, 1_300);
+    table.setOutcome(done, RowOutcome.Complete);
+    const onWire = table.append(source({ x: 1 }), 0);
+    table.stamp(onWire, Boundary.QueueStart, 2_000);
+    table.stamp(onWire, Boundary.WireStart, 2_100);
+    // Retired before its wire closed.
+    const retired = table.append(source({ x: 2 }), 0);
+    table.stamp(retired, Boundary.QueueStart, 2_500);
+    table.stamp(retired, Boundary.WireStart, 2_600);
+    table.setOutcome(retired, RowOutcome.Retired);
+    // Nothing stamped at all.
+    table.append(source({ x: 3 }), 0);
+    // Still in the queue.
+    const queued = table.append(source({ x: 4 }), 0);
+    table.stamp(queued, Boundary.PlanStart, 3_000);
+    table.stamp(queued, Boundary.QueueStart, 3_050);
+
+    const closeUs = 5_000;
+    const run = makeRun({ header: { durationUs: closeUs }, rows: table.serialise() });
+    const derived = deriveChunkStates(run);
+    for (const x of [1, 2, 3, 4]) {
+      const live = table.readChunk(chunk(x), closeUs);
+      expect(live).toEqual(derived.byIdentity.get(chunkIdentity("ds", "member-1", `2/3/1/4/5/${x}`)));
+    }
+    expect(table.readChunk(chunk(1), closeUs)).toEqual({
+      state: "wire",
+      rows: 2,
+      fetches: 1,
+      ageMs: 3,
+    });
+    expect(table.readChunk(chunk(3), closeUs)).toEqual({
+      state: "unstamped",
+      rows: 1,
+      fetches: 0,
+      ageMs: null,
+    });
+
+    // The admission columns agree with the serialised rule for every row.
+    const fromRows = admissionColumnsOf(run.rows);
+    const fromTable = table.admissionColumns();
+    expect(fromTable.length).toBe(fromRows.length);
+    for (let i = 0; i < fromRows.length; i++) {
+      expect(fromTable.admittedUs(i)).toBe(fromRows.admittedUs(i));
+      expect(fromTable.dispatchedUs(i)).toBe(fromRows.dispatchedUs(i));
+    }
   });
 });

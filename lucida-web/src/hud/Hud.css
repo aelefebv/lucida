@@ -43,3 +43,8 @@
 .hud-legend-toggle input {
   margin: 0;
 }
+
+/* The churn toggle's window label. */
+.hud-legend-window {
+  color: #9aa0a6;
+}
