@@ -234,42 +234,65 @@ export class TickRing {
   /** Oldest-first, so a reader walks the ring the way the run happened. */
   serialise(): TraceTick[] {
     const out: TraceTick[] = [];
-    for (const slot of this.slots.ordered()) {
-      const counters = {} as Record<TickCounterName, number>;
-      for (let i = 0; i < COUNTERS_PER_TICK; i++) {
-        counters[TICK_COUNTER_NAMES[i]] = this.counters[slot * COUNTERS_PER_TICK + i];
-      }
-
-      const counted = {} as Record<CountedPhase, number>;
-      for (let i = 0; i < COUNTED_PER_TICK; i++) {
-        counted[COUNTED_PHASES[i]] = this.counted[slot * COUNTED_PER_TICK + i];
-      }
-
-      const levels: TraceTickLevel[] = [];
-      for (let level = 0; level < TICK_LEVEL_SLOTS; level++) {
-        const base = slot * LEVELS_PER_TICK + level * LEVEL_COLUMNS;
-        const planned = this.levels[base];
-        const cached = this.levels[base + 1];
-        const inFlight = this.levels[base + 2];
-        if (planned === 0 && cached === 0 && inFlight === 0) continue;
-        levels.push({ level, planned, cached, inFlight });
-      }
-
-      const r = slot * RANGE_COLUMNS;
-      out.push({
-        atUs: this.atUs[slot],
-        datasetId: this.strings.get(this.datasetIds[slot]),
-        counters,
-        counted,
-        sent: sendTalliesFrom(this.sent, slot * SENDS_PER_TICK),
-        levels,
-        levelsDropped: this.levelsDropped[slot],
-        targetLevel: rangeOrNull(this.ranges[r], this.ranges[r + 1]),
-        levelPinned: this.levelPinned[slot] === 1,
-        displayedLevel: rangeOrNull(this.ranges[r + 2], this.ranges[r + 3]),
-        availabilityWoken: this.availabilityWoken[slot] === 1,
-      });
-    }
+    for (const slot of this.slots.ordered()) out.push(this.sample(slot));
     return out;
+  }
+
+  /**
+   * The samples taken at or after `startUs`, oldest first, led by the last
+   * sample before it when the ring still holds one.
+   *
+   * A sample's sends and counted phases cover the interval since the sample
+   * before it, so the first sample inside a window needs its predecessor to
+   * know where its interval began, and that predecessor is carried for the
+   * same reason the reading ring carries the reading in force at a window's
+   * start. Read from the newest slot backwards and stopped at the first
+   * sample before the window, so the cost is the window's samples and never
+   * the ring's capacity.
+   */
+  serialiseFrom(startUs: number): TraceTick[] {
+    const out: TraceTick[] = [];
+    for (const slot of this.slots.newestFirst()) {
+      out.push(this.sample(slot));
+      if (this.atUs[slot] < startUs) break;
+    }
+    return out.reverse();
+  }
+
+  private sample(slot: number): TraceTick {
+    const counters = {} as Record<TickCounterName, number>;
+    for (let i = 0; i < COUNTERS_PER_TICK; i++) {
+      counters[TICK_COUNTER_NAMES[i]] = this.counters[slot * COUNTERS_PER_TICK + i];
+    }
+
+    const counted = {} as Record<CountedPhase, number>;
+    for (let i = 0; i < COUNTED_PER_TICK; i++) {
+      counted[COUNTED_PHASES[i]] = this.counted[slot * COUNTED_PER_TICK + i];
+    }
+
+    const levels: TraceTickLevel[] = [];
+    for (let level = 0; level < TICK_LEVEL_SLOTS; level++) {
+      const base = slot * LEVELS_PER_TICK + level * LEVEL_COLUMNS;
+      const planned = this.levels[base];
+      const cached = this.levels[base + 1];
+      const inFlight = this.levels[base + 2];
+      if (planned === 0 && cached === 0 && inFlight === 0) continue;
+      levels.push({ level, planned, cached, inFlight });
+    }
+
+    const r = slot * RANGE_COLUMNS;
+    return {
+      atUs: this.atUs[slot],
+      datasetId: this.strings.get(this.datasetIds[slot]),
+      counters,
+      counted,
+      sent: sendTalliesFrom(this.sent, slot * SENDS_PER_TICK),
+      levels,
+      levelsDropped: this.levelsDropped[slot],
+      targetLevel: rangeOrNull(this.ranges[r], this.ranges[r + 1]),
+      levelPinned: this.levelPinned[slot] === 1,
+      displayedLevel: rangeOrNull(this.ranges[r + 2], this.ranges[r + 3]),
+      availabilityWoken: this.availabilityWoken[slot] === 1,
+    };
   }
 }

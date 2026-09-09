@@ -1,25 +1,110 @@
 /*
- * The monitor page.
+ * The dock.
  *
- * Laid out in DOM, not on a canvas: track geometry is percentages of the run's
- * wall clock, so it is resolution-independent and reads the same at device
- * pixel ratio 1 and 2 without a redraw. #862 and #864 both hid behind
- * DPR-1-only verification; a surface with no pixel buffer of its own cannot
- * repeat that.
+ * The report beneath the timeline is laid out in DOM, not on a canvas: track
+ * geometry is percentages of the run's wall clock, so it is
+ * resolution-independent and reads the same at device pixel ratio 1 and 2
+ * without a redraw. The timeline is the one canvas, and it sizes its backing
+ * store to the device pixel ratio for the same reason: #862 and #864 both
+ * hid behind DPR-1-only verification.
  */
 
-.monitor-page {
-  flex: 1;
+.monitor-dock {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  /* Under the dialogs, over the canvas and its overlays. */
+  z-index: 900;
+  display: flex;
+  flex-direction: column;
   min-width: 0;
-  /* The live view is a short page — without this the viewport shows the
-     document's background below it rather than the monitor's. */
-  min-height: 100vh;
-  padding: 16px 20px 48px;
-  overflow-y: auto;
   color: #e6e6e6;
   background: #141414;
+  border-top: 1px solid #333;
+  box-shadow: 0 -6px 18px rgba(0, 0, 0, 0.45);
   font-size: 13px;
   line-height: 1.5;
+}
+
+.monitor-dock-resize {
+  flex-shrink: 0;
+  height: 6px;
+  cursor: row-resize;
+  background: transparent;
+  transition: background 0.15s;
+}
+
+.monitor-dock-resize:hover,
+.monitor-dock-resize:active {
+  background: #646cff;
+}
+
+.monitor-dock-body {
+  flex: 1;
+  min-height: 0;
+  padding: 8px 20px 48px;
+  overflow-y: auto;
+}
+
+/* Popped out, the dock is the whole window rather than a strip of one. */
+.monitor-popout-body {
+  margin: 0;
+  background: #141414;
+}
+
+.monitor-dock-popout {
+  position: static;
+  min-height: 100vh;
+  padding: 16px 20px 48px;
+  border-top: none;
+  box-shadow: none;
+}
+
+/* --- the timeline ---------------------------------------------------------- */
+
+.monitor-timeline {
+  margin: 12px 0 20px;
+}
+
+.monitor-timeline-canvas-wrap {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.monitor-timeline-canvas {
+  display: block;
+  border: 1px solid #2c2c2c;
+}
+
+.monitor-timeline-legend {
+  margin-top: 6px;
+}
+
+.monitor-timeline-charts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 4px 20px;
+  margin: 0;
+  font-size: 11px;
+}
+
+.monitor-timeline-chart dt {
+  color: #9aa0a6;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 10px;
+}
+
+.monitor-timeline-chart dd {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  font-family: "SF Mono", "Menlo", "Monaco", monospace;
+}
+
+.monitor-timeline-absent {
+  color: #c9a227;
 }
 
 .monitor-chrome {
@@ -321,35 +406,8 @@
   background: #6f8fd1;
 }
 
-/* One colour per phase, in the order work moves through them: the planned and
-   queued ends are the waits, the middle is the wire, the far end is ours. */
-.monitor-live-bar-planned {
-  background: #4a4a4a;
-}
-
-.monitor-live-bar-plan {
-  background: #8a7fb0;
-}
-
-.monitor-live-bar-queue {
-  background: #c9a227;
-}
-
-.monitor-live-bar-wire {
-  background: #6f8fd1;
-}
-
-.monitor-live-bar-decode {
-  background: #7fb07f;
-}
-
-.monitor-live-bar-upload {
-  background: #d18f6f;
-}
-
-.monitor-live-bar-present {
-  background: #d1c46f;
-}
+/* The bar's segment colors come from timelinePalette.ts, so a phase is one
+   color in the bar and on the axis. */
 
 /* --- tracks ---------------------------------------------------------------- */
 

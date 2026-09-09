@@ -24,7 +24,14 @@
 import type { RunCause } from "../types.ts";
 import { SPATIAL_AXES } from "./spatialSummary.ts";
 import { describeState } from "./rowState.ts";
-import type { ChunkLookup, DiagnosticDocument, Finding, SpatialSummary } from "./types.ts";
+import type { LiveTimeline } from "./timeline.ts";
+import type {
+  ChunkLookup,
+  DiagnosticDocument,
+  Finding,
+  SpatialSummary,
+  TimelineSection,
+} from "./types.ts";
 
 export const DEFAULT_MAX_LINES = 30;
 export const DEFAULT_MAX_BYTES = 3_072;
@@ -38,8 +45,12 @@ export const DEFAULT_MAX_BYTES = 3_072;
  * rendered as text: the document's chunk lookup, and its spatial summary.
  * Which chunk the lookup is about is a derivation option, not a rendering
  * one; this renderer prints whichever chunk the document carries.
+ *
+ * `timeline` is the dock's charts as text: one line per chart of the closed
+ * set, naming each series' peak and newest value or the reason it is absent,
+ * so nothing is visible to a person and invisible to an agent.
  */
-export type RenderDepth = "summary" | "phases" | "phase" | "chunk" | "spatial";
+export type RenderDepth = "summary" | "phases" | "phase" | "chunk" | "spatial" | "timeline";
 
 const LEAD_CHUNK_ROWS = 3;
 const LEAD_SPATIAL_GROUPS = 8;
@@ -193,6 +204,7 @@ export function renderDiagnostic(
   const onlyPhase = depth === "phase" ? (options.phase ?? "") : null;
   if (depth === "chunk") renderChunk(document.chunk, document, push, p);
   else if (depth === "spatial") renderSpatial(document.spatial, document, push, p);
+  else if (depth === "timeline") renderTimeline(document.timeline, LEAD_FINDING, push, p);
   else renderFindings(document, depth, onlyPhase, push, p);
 
   // --- the anti-signal, unconditional --------------------------------------
@@ -272,8 +284,8 @@ export function renderDiagnostic(
   // why raw rows are never inlined, which is a rationale rather than a step.
   for (const step of document.next) push(NEXT, `   ${step.command.padEnd(52)} # ${step.why}`);
 
-  // The phase depths are where a reader goes when the budget was not enough,
-  // so they are unbudgeted.
+  // The phase depths and the timeline are where a reader goes when the budget
+  // was not enough, so they are unbudgeted.
   const budgeted = depth === "summary" || depth === "chunk" || depth === "spatial";
   const maxLines = options.maxLines ?? (budgeted ? DEFAULT_MAX_LINES : Infinity);
   const maxBytes = options.maxBytes ?? (budgeted ? DEFAULT_MAX_BYTES : Infinity);
@@ -513,6 +525,75 @@ function renderSpatial(
     );
   });
   for (const line of spatial.cannotShow) push(NEXT, `   cannot show: ${line}`);
+}
+
+/**
+ * One line per chart, naming what the canvas draws for it: each recorded
+ * series' peak and newest value, each absent series' reason. A test holds
+ * the closed set of charts to these lines.
+ */
+function renderTimeline(timeline: TimelineSection, band: number, push: PushLine, p: PrintNumber): void {
+  const axis = timeline.axis;
+  push(
+    band,
+    `TIMELINE  ${p("timeline.axis.startMs", axis.startMs)}..${p("timeline.axis.endMs", axis.endMs)} ms in ` +
+      `${p("timeline.axis.buckets", axis.buckets)} buckets of ${p("timeline.axis.bucketMs", axis.bucketMs)} ms · ` +
+      `${timeline.rowsWalked ? "rows walked" : "rows not walked"} · ${timeline.statement}`,
+  );
+  timeline.intervals.forEach((interval, index) => {
+    const base = `timeline.intervals[${index}]`;
+    push(
+      band,
+      `   band  ${interval.kind.padEnd(12)} ${interval.runId.padEnd(24)} ` +
+        `${p(`${base}.startMs`, interval.startMs)}..${p(`${base}.endMs`, interval.endMs)} ms · ` +
+        `${interval.cause ? formatCause(interval.cause) : "steady state"} · ` +
+        `${interval.endReason ?? "open"}${interval.current ? " (this run)" : ""}`,
+    );
+  });
+  timeline.charts.forEach((chart, index) => {
+    const base = `timeline.charts[${index}]`;
+    const series = chart.series
+      .map((entry, i) =>
+        entry.recorded
+          ? `${entry.label} max ${p(`${base}.series[${i}].max`, entry.max)}` +
+            (entry.last === null ? "" : ` last ${p(`${base}.series[${i}].last`, entry.last)}`) +
+            (entry.unsampled === 0
+              ? ""
+              : ` (${p(`${base}.series[${i}].unsampled`, entry.unsampled)} unsampled)`)
+          : `${entry.label} absent (${entry.statement})`,
+      )
+      .join(" · ");
+    push(
+      band,
+      `   ${chart.id.padEnd(20)} ${chart.kind.padEnd(8)} ${chart.recorded ? "recorded" : "absent  "}  ` +
+        (chart.recorded ? `${series} [${chart.unit}]` : chart.statement),
+    );
+  });
+}
+
+/**
+ * The live timeline as text, for the seam and the dock's text twin. Every
+ * line is a selection from the object {@link deriveLiveTimeline} returned,
+ * and the first word after the run id is the label every live rendering
+ * carries.
+ */
+export function renderLiveTimeline(live: LiveTimeline): string {
+  const lines: string[] = [];
+  const push: PushLine = (_band, text) => {
+    lines.push(text);
+  };
+  const p: PrintNumber = (_path, formatted) => String(formatted);
+  lines.push(`lucida trace ${live.runId} — PROVISIONAL TIMELINE: ${live.statement}`);
+  lines.push(
+    "          not a verdict: this timeline changes while you read it, and the charts read from the rows are absent until the run closes",
+  );
+  const window = live.window;
+  lines.push(
+    `window    ${window.wholeRun ? "the run so far" : `the last ${window.spanMs} ms`}: ` +
+      `${window.startMs}..${window.endMs} ms of the run`,
+  );
+  renderTimeline(live.timeline, REQUIRED, push, p);
+  return lines.join("\n");
 }
 
 /**

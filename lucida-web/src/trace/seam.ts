@@ -16,6 +16,7 @@
  * const doc = window.lucidaTrace.exportTrace();
  * window.lucidaTrace.quiescence.quiescent;  // has the page settled?
  * window.lucidaTrace.provisional();         // a labelled reading of the open run, closing nothing
+ * window.lucidaTrace.liveTimeline();        // the dock's live charts as fields, closing nothing
  * ```
  */
 
@@ -28,7 +29,8 @@ import {
   type ProvisionalOptions,
   type ProvisionalReading,
 } from "./diagnose/provisional.ts";
-import { renderDiagnostic, type RenderDepth } from "./diagnose/renderText.ts";
+import { renderDiagnostic, renderLiveTimeline, type RenderDepth } from "./diagnose/renderText.ts";
+import type { LiveTimeline, LiveTimelineOptions } from "./diagnose/timeline.ts";
 import type { DiagnosticDocument, WindowRequest } from "./diagnose/types.ts";
 import { traceRecorder } from "./recorder.ts";
 import type { LiveProgress } from "./liveProgress.ts";
@@ -129,6 +131,21 @@ export interface LucidaTraceSeam {
   provisional(options?: ProvisionalOptions): ProvisionalReading | null;
   /** {@link provisional} rendered as text, or null when no run is open. */
   provisionalText(options?: ProvisionalOptions): string | null;
+  /**
+   * The dock's live charts over a trailing window of the run in progress,
+   * as fields, or null when no run is open: the closed set of timeline
+   * charts binned over the window, drawn from the per-tick tiers alone.
+   * The charts read from the rows are absent here and say when they are
+   * read. Labelled provisional like {@link provisional}, for the same
+   * reason, and closing nothing. `windowMs` sets how far back it looks; the
+   * default is thirty seconds.
+   *
+   * The closed run's timeline is the `timeline` section of {@link diagnose},
+   * over the same closed set, with the row-derived charts filled in.
+   */
+  liveTimeline(options?: LiveTimelineOptions): LiveTimeline | null;
+  /** {@link liveTimeline} rendered as text, one line per chart, or null when no run is open. */
+  liveTimelineText(options?: LiveTimelineOptions): string | null;
   /**
    * The merged trace document. Closes the run in progress as `explicit`:
    * every run carries an end reason, and asking for the document concludes
@@ -295,6 +312,11 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
     provisionalText: (options?: ProvisionalOptions) => {
       const reading = traceRecorder.provisionalReading(options);
       return reading ? renderProvisional(reading) : null;
+    },
+    liveTimeline: (options?: LiveTimelineOptions) => traceRecorder.liveTimeline(options),
+    liveTimelineText: (options?: LiveTimelineOptions) => {
+      const live = traceRecorder.liveTimeline(options);
+      return live ? renderLiveTimeline(live) : null;
     },
     exportTrace: () => traceRecorder.exportDocument(),
     exportChromeTrace: () => toChromeTraceJson(traceRecorder.exportDocument()),

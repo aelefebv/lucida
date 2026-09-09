@@ -20,6 +20,7 @@ import type { InboxReceipt } from "../bridge.ts";
 import { bundleFilename } from "../trace/bundle.ts";
 import { diagnoseDocument } from "../trace/diagnose/diagnose.ts";
 import type { ProvisionalReading } from "../trace/diagnose/provisional.ts";
+import type { LiveTimeline } from "../trace/diagnose/timeline.ts";
 import type { DiagnosticDocument } from "../trace/diagnose/types.ts";
 import type { LiveProgress } from "../trace/liveProgress.ts";
 import { sendBundle } from "../trace/reportInbox.ts";
@@ -105,6 +106,16 @@ export function readProgress(seam = window.lucidaTrace): LiveProgress | null {
  */
 export function readProvisional(seam = window.lucidaTrace): ProvisionalReading | null {
   return seam?.provisional() ?? null;
+}
+
+/**
+ * The live charts over the run in progress, or null when none is open. The
+ * third read that leaves the recording alone: drawn from the per-tick tiers
+ * and never from a row, which is what lets the dock poll it while a run is
+ * open without perturbing the run it draws.
+ */
+export function readLiveTimeline(seam = window.lucidaTrace): LiveTimeline | null {
+  return seam?.liveTimeline() ?? null;
 }
 
 /**

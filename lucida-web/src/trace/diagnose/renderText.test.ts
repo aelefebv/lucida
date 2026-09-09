@@ -399,7 +399,7 @@ describe("parity with the document", () => {
   it("prints no number that does not exist in the JSON", () => {
     for (const [name, document] of Object.entries(DOCUMENTS)) {
       const inDocument = new Set(numericTokens(JSON.stringify(document)));
-      for (const depth of ["summary", "phases", "chunk", "spatial"] as const) {
+      for (const depth of ["summary", "phases", "chunk", "spatial", "timeline"] as const) {
         const { text } = renderDiagnostic(document, { depth });
         for (const token of numericTokens(text)) {
           expect(inDocument.has(token), `${name}/${depth}: ${token} is printed but not in the document`).toBe(

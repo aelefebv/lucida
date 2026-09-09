@@ -39,6 +39,7 @@ import {
 import { adapterKindOf, adapterName, deriveRenderTiming } from "./renderTiming.ts";
 import { summariseSent } from "./sent.ts";
 import { summariseSpace } from "./spatialSummary.ts";
+import { deriveTimeline, type TimelineRecording } from "./timeline.ts";
 import {
   describeSteadyStateFinding,
   deriveSteadyState,
@@ -110,6 +111,12 @@ export interface DiagnoseOptions {
    */
   chunk?: string;
   /**
+   * The recording the run came from, so the timeline can place the other
+   * retained intervals on this run's clock. Without it the axis carries this
+   * run alone. {@link diagnoseDocument} supplies it from the document.
+   */
+  recording?: TimelineRecording;
+  /**
    * The steady-state interval that opened when this run closed, for the
    * steady-state ruleset. {@link diagnoseDocument} finds it in the document;
    * a caller with one run and no document passes it here, or passes nothing
@@ -134,6 +141,7 @@ export function diagnoseDocument(
   if (!run) throw new Error(`no run ${options.runId ?? "(newest)"} in this trace document`);
   return diagnoseRun(run, {
     ...options,
+    recording: options.recording ?? { runs: document.runs, steadyState: document.steadyState },
     // An explicit null is a caller saying there is no interval, which is not
     // the same as not asking.
     steadyState:
@@ -229,6 +237,7 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
     },
     chunk,
     spatial: summariseSpace(run),
+    timeline: deriveTimeline(run, window, options.recording),
     raw: {
       inlined: false,
       why: "Raw spans are for a viewer, not a context window: a warm re-open is tens of thousands of rows, and nothing per-row appears at any depth here beyond the one chunk the lookup is about.",

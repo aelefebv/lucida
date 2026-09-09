@@ -21,7 +21,6 @@ interface CapturedAppProps {
   workspaceId: string;
   initialDatasetUrls?: readonly string[];
   onCreateWorkspaceFromDatasets?: (paths: string[]) => void;
-  onOpenMonitor?: () => void;
 }
 const lastAppProps: { current: CapturedAppProps | null } = { current: null };
 // Every `initialDatasetUrls` value the viewer was rendered with, in order — used
@@ -40,9 +39,6 @@ vi.mock("./App.tsx", () => ({
           }
         >
           in-viewer-create-from-datasets
-        </button>
-        <button type="button" onClick={() => props.onOpenMonitor?.()}>
-          in-viewer-open-monitor
         </button>
       </div>
     );
@@ -332,55 +328,5 @@ describe("WorkspaceRoot — create workspace from dataset(s) (#697)", () => {
     await screen.findByTestId("workspace-create-error");
     fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
     expect(screen.queryByTestId("workspace-create-error")).toBeNull();
-  });
-});
-
-describe("WorkspaceRoot — the monitor route (#936, #937)", () => {
-  it("renders the monitor at its own path, with no viewer to keep when none was left", () => {
-    window.history.replaceState({}, "", "/monitor");
-    render(<WorkspaceRoot />);
-
-    expect(screen.getByRole("heading", { name: "Pipeline monitor" })).toBeTruthy();
-    // Typed straight into the URL bar: there is no viewer to hold open, and a
-    // run outlives the viewer that produced it.
-    expect(screen.queryByTestId("app-mounted")).toBeNull();
-    expect(screen.queryByTestId("dashboard-mounted")).toBeNull();
-  });
-
-  it("keeps the viewer running offstage, so a run being watched is not torn down", async () => {
-    // #937: the monitor grew a live view, and unmounting the viewer to reach it
-    // would stop the very run somebody navigated here to watch. The viewer
-    // stays mounted and offstage instead — same instance, so the session, the
-    // socket and the render loop all survive the trip.
-    openWorkspaceMock.mockResolvedValue({
-      id: "ws-secret",
-      name: "Workspace",
-      role: "owner",
-      default_saved_view_id: null,
-    } as unknown as WorkspaceRecord);
-    render(<WorkspaceRoot />);
-    await screen.findByTestId("app-mounted");
-    const viewer = screen.getByTestId("app-mounted");
-
-    fireEvent.click(screen.getByText("in-viewer-open-monitor"));
-
-    expect(screen.getByRole("heading", { name: "Pipeline monitor" })).toBeTruthy();
-    expect(window.location.pathname).toBe("/monitor");
-    // The same node, not a remount — and hidden rather than unlaid-out, so the
-    // canvas keeps the size the run was planned for.
-    expect(screen.getByTestId("app-mounted")).toBe(viewer);
-    expect(viewer.closest(".route-offstage")).not.toBeNull();
-
-    fireEvent.click(screen.getByTestId("monitor-close"));
-    expect(screen.getByTestId("app-mounted")).toBe(viewer);
-    expect(viewer.closest(".route-offstage")).toBeNull();
-    expect(window.location.pathname).toBe("/w/ws-secret");
-  });
-
-  it("says there is nothing to read rather than failing when no run was recorded", () => {
-    window.history.replaceState({}, "", "/monitor");
-    render(<WorkspaceRoot />);
-
-    expect(screen.getByTestId("monitor-empty")).toBeTruthy();
   });
 });

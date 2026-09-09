@@ -15,7 +15,7 @@
  * than as whichever value the type's default would suggest.
  */
 
-import type { GpuIdentity, TraceRun } from "../types.ts";
+import type { GpuIdentity, TraceReading, TraceRun } from "../types.ts";
 import type { RunIdentity } from "./types.ts";
 import { percentile, usToMs } from "./phaseRollup.ts";
 import type { GpuPassAbsenceReason, GpuPassTiming, RenderTiming, TimingSummary } from "./types.ts";
@@ -50,8 +50,21 @@ export function deriveRenderTiming(run: TraceRun): RenderTiming {
 
   return {
     mainThread: summariseTiming(mainThreadUs),
-    gpuPass: gpuPass(gpuPassUs, run.header.gpu),
+    gpuPass: gpuPassTiming(gpuPassUs, run.header.gpu),
   };
+}
+
+/**
+ * The GPU pass time over a set of readings, or the stated reason there is
+ * none. Shared with the timeline, which draws the same absence for the same
+ * reason over an open run's readings.
+ */
+export function gpuPassOf(readings: TraceReading[], gpu: GpuIdentity | null): GpuPassTiming {
+  const gpuPassUs: number[] = [];
+  for (const reading of readings) {
+    if (reading.gpuPassUs != null) gpuPassUs.push(reading.gpuPassUs);
+  }
+  return gpuPassTiming(gpuPassUs, gpu);
 }
 
 /** The adapter named for a line that has room for one phrase. */
@@ -86,7 +99,7 @@ export function summariseTiming(us: number[]): TimingSummary | null {
   };
 }
 
-function gpuPass(us: number[], gpu: GpuIdentity | null): GpuPassTiming {
+function gpuPassTiming(us: number[], gpu: GpuIdentity | null): GpuPassTiming {
   const summary = summariseTiming(us);
   if (summary) return { recorded: true, ...summary };
   const reason: GpuPassAbsenceReason =
