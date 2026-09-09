@@ -11,6 +11,7 @@ Issue [#928], under the [#921] spec, enforcing [ADR 0049][0049].
 [#949]: https://github.com/aelefebv/lucida/issues/949
 [#962]: https://github.com/aelefebv/lucida/issues/962
 [#1056]: https://github.com/aelefebv/lucida/issues/1056
+[#1062]: https://github.com/aelefebv/lucida/issues/1062
 [0049]: ../../../wiki/decisions/0049-unconditional-recording-under-a-design-budget.md
 [0052]: ../../../wiki/decisions/0052-debug-surface-dispositions.md
 
@@ -286,6 +287,21 @@ Two notes on reading that table:
   against the 1.05 MB floor. The write path gained one typed-array store per
   completed fetch, which replaced a second handle resolve rather than adding
   one — the boundary stamp and the byte count are now a single call.
+- **An identity index bought the overlay a live per-chunk read ([#1062]).**
+  The row table keeps the newest row of every chunk in an open-addressing
+  table of two int32 slots per row of capacity, and links each row to the
+  previous row of the same chunk, so the overlay's phase color and churn tint
+  read one chunk in constant time while the interval is open and walk no
+  rows. The row width went 80 → 92 B, so the floor check's run holds
+  `4,096 rows × 12 B` = 48 kB more live state: 774 → 822 kB against the
+  1.05 MB floor. The doubling that trips truncation is unchanged: 16,384 rows
+  fit under the per-run cap at either width and 32,768 do not. The write path
+  gained one hash probe per row birth and no allocation; the steady-state
+  gate measured 0.026 B per call on this host with the index in place. The
+  read has a gate of its own in
+  `lucida-web/src/trace/chunkIndexCost.perf.test.ts`: 600 cells read over
+  40,000 rows in about 1 ms, 0.93x the time over 2,000, against a 4x
+  flatness gate.
 
 **What has to happen for the obligation to be discharged.** When [#918]
 (`debugStats.enabled` and its read sites) and [#919] (`DebugPanel.tsx`) land,

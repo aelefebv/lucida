@@ -17,6 +17,9 @@
 
 import { buildIdentity } from "./buildInfo.ts";
 import { computeCoverage } from "./coverage.ts";
+import { readChunk } from "./diagnose/chunkLookup.ts";
+import type { ChunkReading } from "./diagnose/chunkStates.ts";
+import type { ChunkLookup } from "./diagnose/types.ts";
 import {
   deriveProvisional,
   resolveLiveWindow,
@@ -51,6 +54,7 @@ import { tableSinkFactory, type TraceSink, type TraceSinkFactory } from "./sink.
 import { TickScratch } from "./tickRing.ts";
 import {
   Boundary,
+  chunkKeyOf,
   clampStamp,
   COUNTED_PHASES,
   interactionCause,
@@ -60,6 +64,7 @@ import {
   RowOutcome,
   SEND_COLUMNS,
   TRACE_SCHEMA_VERSION,
+  type ChunkCoordinates,
   type ChunkEventSource,
   type ChunkRowSource,
   type ClientMessageTypeIndexValue,
@@ -637,6 +642,60 @@ export class TraceRecorder {
     return this.closed.map((interval) =>
       intervalFrom(interval.header, interval.startedAtMs - run.startedAtMs, false),
     );
+  }
+
+  /**
+   * How long the interval in progress has been recording, labelled or not,
+   * or null when none is open. The window the overlay's churn tint states:
+   * its fetch counts are over the open interval, which is what the
+   * steady-state refetch rule counts over once the interval closes.
+   */
+  get openIntervalMs(): number | null {
+    const run = this.open;
+    return run ? this.now() - run.startedAtMs : null;
+  }
+
+  /**
+   * One chunk's reading from the interval in progress (#1062): where its
+   * newest row stands, how many rows it has, and how many of them fetched,
+   * with the newest row's age at this instant. What the overlay's phase
+   * color and churn tint paint, cell by cell, at their own cadence.
+   *
+   * The third read that leaves the recording alone. It walks no row: the
+   * row table keeps an identity index as the rows are written, so the read
+   * costs the same at ten rows and at the per-run cap, and it is gated so in
+   * `chunkIndexCost.perf.test.ts`. Null when no interval is open, or when the
+   * open one holds no row for the chunk: resident before it opened, still
+   * queued, or never wanted, which the surface says in those words.
+   */
+  readChunk(chunk: ChunkCoordinates): ChunkReading | null {
+    const run = this.open;
+    if (!run) return null;
+    return run.sink.readChunk(chunk, this.offsetUs(run, this.now()));
+  }
+
+  /**
+   * The chunk lookup over the interval in progress, for the hover inspector:
+   * the same section the diagnostic document carries for a closed run, read
+   * through the same function, so what the pointer shows and what the text
+   * prints cannot disagree. The rows come from the identity index. The rank
+   * is one pass over the interval's admission columns, which is why this is
+   * a read for a hover and not for a tick. Null when no interval is open.
+   */
+  lookupChunkLive(chunk: ChunkCoordinates): ChunkLookup | null {
+    const run = this.open;
+    if (!run) return null;
+    const chunkKey = chunkKeyOf(chunk);
+    return readChunk({
+      selector: `${chunk.entityId}/${chunkKey}`,
+      chosen: "under the pointer",
+      chunkKey,
+      entityId: chunk.entityId,
+      matched: run.sink.chunkRows(chunk),
+      admissions: run.sink.admissionColumns(),
+      events: run.sink.serialiseEvents(),
+      closeUs: this.offsetUs(run, this.now()),
+    });
   }
 
   /** The run's progress at one clock reading, so a sample taken with it shares that instant. */
