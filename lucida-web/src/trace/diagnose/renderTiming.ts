@@ -49,7 +49,7 @@ export function deriveRenderTiming(run: TraceRun): RenderTiming {
   }
 
   return {
-    mainThread: summarise(mainThreadUs),
+    mainThread: summariseTiming(mainThreadUs),
     gpuPass: gpuPass(gpuPassUs, run.header.gpu),
   };
 }
@@ -74,7 +74,8 @@ export function adapterKindOf(gpu: GpuIdentity | null): RunIdentity["adapterKind
   return { kind, label: ADAPTER_KIND_LABELS[kind] };
 }
 
-function summarise(us: number[]): TimingSummary | null {
+/** The shape of one per-tick timing across a set of samples, or null when there are none. */
+export function summariseTiming(us: number[]): TimingSummary | null {
   if (us.length === 0) return null;
   const sorted = [...us].sort((a, b) => a - b);
   return {
@@ -86,7 +87,7 @@ function summarise(us: number[]): TimingSummary | null {
 }
 
 function gpuPass(us: number[], gpu: GpuIdentity | null): GpuPassTiming {
-  const summary = summarise(us);
+  const summary = summariseTiming(us);
   if (summary) return { recorded: true, ...summary };
   const reason: GpuPassAbsenceReason =
     gpu === null

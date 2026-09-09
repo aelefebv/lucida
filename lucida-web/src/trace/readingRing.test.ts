@@ -59,6 +59,31 @@ describe("ReadingRing", () => {
     expect("gpuPassUs" in untimed).toBe(false);
   });
 
+  it("reads a trailing window newest-back, led by the reading just before it", () => {
+    const ring = new ReadingRing(8);
+    for (let i = 0; i < 6; i++) ring.append(i * 1_000, reading(i, 0), null);
+
+    // The reading at 2,000 covers the window's first stretch, so it leads.
+    const window = ring.serialiseFrom(2_500);
+    expect(window.map(sample => sample.atUs)).toEqual([2_000, 3_000, 4_000, 5_000]);
+
+    // A window that starts exactly on a reading still carries the one before
+    // it: up to that instant, the earlier reading is the one in force.
+    expect(ring.serialiseFrom(3_000).map(sample => sample.atUs)).toEqual([2_000, 3_000, 4_000, 5_000]);
+  });
+
+  it("carries nothing before a window that predates the oldest retained reading", () => {
+    const ring = new ReadingRing(2);
+    for (let i = 0; i < 5; i++) ring.append(i * 1_000, reading(i, 0), null);
+
+    // The ring holds only 3,000 and 4,000, so it cannot say what was true at
+    // 1,500. It returns what it holds, and `dropped` is how a reader learns
+    // that the window's start went unread.
+    expect(ring.serialiseFrom(1_500).map(sample => sample.atUs)).toEqual([3_000, 4_000]);
+    expect(ring.dropped).toBe(3);
+    expect(new ReadingRing(2).serialiseFrom(0)).toEqual([]);
+  });
+
   it("forgets a GPU pass time when its slot is reused", () => {
     const ring = new ReadingRing(2);
     ring.append(0, reading(0, 0), 900);

@@ -55,6 +55,13 @@ export interface TraceSink {
    */
   appendReading(atUs: number, values: Float64Array, gpuPassUs: number | null): void;
   serialiseReadings(): TraceReading[];
+  /**
+   * The readings from `startUs` on, led by the one in force at that instant
+   * (#1057). The other read that happens while the interval is still open:
+   * a provisional reading over a trailing window is derived from these and
+   * from the live tally, and from no row.
+   */
+  serialiseReadingsFrom(startUs: number): TraceReading[];
   appendEvent(
     atUs: number,
     kind: PointEventIndex,
@@ -122,6 +129,10 @@ export class NoopTraceSink implements TraceSink {
   appendReading(): void {}
 
   serialiseReadings(): TraceReading[] {
+    return [];
+  }
+
+  serialiseReadingsFrom(): TraceReading[] {
     return [];
   }
 
@@ -203,6 +214,10 @@ export class TableTraceSink implements TraceSink {
 
   serialiseReadings(): TraceReading[] {
     return this.readings.serialise();
+  }
+
+  serialiseReadingsFrom(startUs: number): TraceReading[] {
+    return this.readings.serialiseFrom(startUs);
   }
 
   appendEvent(

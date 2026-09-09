@@ -15,6 +15,7 @@
  * // From a console, or over CDP against a production page:
  * const doc = window.lucidaTrace.exportTrace();
  * window.lucidaTrace.quiescence.quiescent;  // has the page settled?
+ * window.lucidaTrace.provisional();         // a labelled reading of the open run, closing nothing
  * ```
  */
 
@@ -22,6 +23,11 @@ import { configStore } from "../pipeline/planning/configStore.ts";
 import { bundleServices, exportBundle, type BundleOptions, type TraceBundle } from "./bundle.ts";
 import { toChromeTraceJson } from "./chromeTrace.ts";
 import { diagnoseDocument } from "./diagnose/diagnose.ts";
+import {
+  renderProvisional,
+  type ProvisionalOptions,
+  type ProvisionalReading,
+} from "./diagnose/provisional.ts";
 import { renderDiagnostic, type RenderDepth } from "./diagnose/renderText.ts";
 import type { DiagnosticDocument, WindowRequest } from "./diagnose/types.ts";
 import { traceRecorder } from "./recorder.ts";
@@ -86,13 +92,32 @@ export interface LucidaTraceSeam {
    * open (#937): counts of the rows it has made, where the unfinished ones
    * are sitting, and how long it has been going.
    *
-   * The only read here that does **not** close the run — which is what makes
-   * a live view possible at all. It deliberately carries no verdict: the
-   * attribution back-walk needs an end to walk back from, and a headline that
-   * changes while you read it is not a headline. Poll it, then read
-   * {@link diagnose} for the run named in `runId` once it closes.
+   * One of the two reads here that do **not** close the run, which is what
+   * makes a live view possible at all. The other is {@link provisional}. It
+   * deliberately carries no verdict: the attribution back-walk needs an end
+   * to walk back from, and a headline that changes while you read it is not
+   * a headline. Poll it, then read {@link diagnose} for the run named in
+   * `runId` once it closes.
    */
   progress(): LiveProgress | null;
+  /**
+   * A provisional reading over a trailing window of the run in progress
+   * (#1057), or null when no run is open: the phase occupancy this instant,
+   * the top finding over the window, and the page's quiescence reason, with
+   * the window it read and the rows it did not see. Labelled provisional in
+   * the document and in every rendering, because it changes while you read
+   * it. It is not a verdict, it carries no `verdict` field, and a gate reads
+   * only the verdict of a closed run.
+   *
+   * Does **not** close the run, and walks no row: a session that never
+   * quiesces can be polled at the tick cadence without being perturbed. The
+   * live view draws from this object, the watch stream carries it, and an
+   * agent driving its own browser reads it as JSON. `windowMs` sets how far
+   * back it looks; the default is five seconds.
+   */
+  provisional(options?: ProvisionalOptions): ProvisionalReading | null;
+  /** {@link provisional} rendered as text, or null when no run is open. */
+  provisionalText(options?: ProvisionalOptions): string | null;
   /**
    * The merged trace document. Closes the run in progress as `explicit`:
    * every run carries an end reason, and asking for the document concludes
@@ -217,6 +242,11 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
       };
     },
     progress: () => traceRecorder.liveProgress,
+    provisional: (options?: ProvisionalOptions) => traceRecorder.provisionalReading(options),
+    provisionalText: (options?: ProvisionalOptions) => {
+      const reading = traceRecorder.provisionalReading(options);
+      return reading ? renderProvisional(reading) : null;
+    },
     exportTrace: () => traceRecorder.exportDocument(),
     exportChromeTrace: () => toChromeTraceJson(traceRecorder.exportDocument()),
     exportBundle: (options?: BundleOptions) =>
