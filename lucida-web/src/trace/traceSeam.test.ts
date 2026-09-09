@@ -21,6 +21,7 @@ import type { ChunkRequest, RequestPlan } from "../pipeline/planning/index.ts";
 import { emptyPlanStats } from "../pipeline/planning/index.ts";
 import { configStore } from "../pipeline/planning/configStore.ts";
 import { setBundleServices } from "./bundle.ts";
+import { setScriptControls } from "./steps.ts";
 import { installTraceSeam, resolveGpuIdentity } from "./seam.ts";
 import { traceRecorder } from "./recorder.ts";
 import { createQuiescenceState } from "./quiescence.ts";
@@ -535,6 +536,87 @@ describe("the trace seam", () => {
     const spatial = window.lucidaTrace!.diagnoseText(undefined, { depth: "spatial" });
     expect(spatial).toContain("SPATIAL");
     expect(spatial).toContain("chunk indices");
+  });
+
+  /**
+   * The driver's scripted steps (ADR 0051, as amended). Pan, zoom, and
+   * orbit arrive as synthesized pointer events and need nothing here. Scrub
+   * and select go through the handlers the viewer registers, because the
+   * capture surface hides the controls they would otherwise land on, and
+   * the view is read the same way before and after every step.
+   */
+  it("reads the view and takes a scrub or a select through the registered controls", () => {
+    const seam = installTraceSeam();
+    const calls: unknown[] = [];
+    const view = { v: 1, camera: { mode: "slice", center: [0, 0], zoom: 1, viewport: [8, 6] } };
+    setScriptControls({
+      view: () => view as never,
+      scrub: (axis, count) => {
+        calls.push(["scrub", axis, count]);
+        return { applied: true, reason: null };
+      },
+      select: (target, visible) => {
+        calls.push(["select", target, visible]);
+        return { applied: true, reason: null };
+      },
+    });
+    try {
+      expect(seam.view()).toBe(view);
+      expect(seam.viewSignature()).toEqual({
+        camera: { mode: "slice", center: [0, 0], zoom: 1 },
+        view: null,
+        visibility: {},
+      });
+      // The viewers' own constants, so the driver's pixels are the page's.
+      expect(seam.inputScale.orbitRadiansPerPixel).toBe(0.005);
+      expect(seam.inputScale.sliceZoomInPerNotch).toBe(1.1);
+      expect(seam.scrub("t", 3)).toEqual({ applied: true, reason: null });
+      expect(seam.select({ channel: 1 }, false)).toEqual({ applied: true, reason: null });
+      expect(seam.select({ layer: "ds-2" })).toEqual({ applied: true, reason: null });
+      expect(calls).toEqual([
+        ["scrub", "t", 3],
+        ["select", { channel: 1 }, false],
+        ["select", { layer: "ds-2" }, true],
+      ]);
+    } finally {
+      setScriptControls(null);
+    }
+  });
+
+  it("answers a step with nothing registered, and a malformed one, by saying so rather than throwing", () => {
+    const seam = installTraceSeam();
+    setScriptControls(null);
+    expect(seam.view()).toBeNull();
+    expect(seam.viewSignature()).toBeNull();
+    expect(seam.scrub("z", 1)).toEqual({
+      applied: false,
+      reason: "no viewer has registered its controls on this page",
+    });
+    expect(seam.select({ channel: 0 })).toEqual({
+      applied: false,
+      reason: "no viewer has registered its controls on this page",
+    });
+
+    setScriptControls({
+      view: () => null,
+      scrub: () => ({ applied: true, reason: null }),
+      select: () => ({ applied: true, reason: null }),
+    });
+    try {
+      // The arguments arrive over the DevTools protocol, so the seam checks
+      // them before any handler sees them.
+      expect(seam.scrub("q" as never, 1)).toEqual({ applied: false, reason: "no selector is called q" });
+      expect(seam.select({} as never)).toEqual({
+        applied: false,
+        reason: "a select names a channel index or a layer id",
+      });
+      expect(seam.select({ channel: -1 })).toEqual({
+        applied: false,
+        reason: "a channel is a whole number from 0, not -1",
+      });
+    } finally {
+      setScriptControls(null);
+    }
   });
 
   /**
