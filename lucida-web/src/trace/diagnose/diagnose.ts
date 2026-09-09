@@ -116,6 +116,7 @@ export interface DiagnoseOptions {
    * run alone. {@link diagnoseDocument} supplies it from the document.
    */
   recording?: TimelineRecording;
+  /**
    * The steady-state interval that opened when this run closed, for the
    * steady-state ruleset. {@link diagnoseDocument} finds it in the document;
    * a caller with one run and no document passes it here, or passes nothing
@@ -141,7 +142,6 @@ export function diagnoseDocument(
   return diagnoseRun(run, {
     ...options,
     recording: options.recording ?? { runs: document.runs, steadyState: document.steadyState },
-  });
     // An explicit null is a caller saying there is no interval, which is not
     // the same as not asking.
     steadyState:

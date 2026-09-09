@@ -83,6 +83,7 @@ const WARMTH = { detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 
 const OUTSTANDING = {
   pending: 0, inFlight: 0, speculativePending: 0, speculativeInFlight: 0,
   desiredDetailChunks: 0, residentDetailChunks: 0, desiredCoarseChunks: 0, residentCoarseChunks: 0,
+  detailBytes: 0, detailBudgetBytes: 0, coarseBytes: 0, coarseBudgetBytes: 0,
 };
 
 const CHUNK: ChunkRowSource = {
