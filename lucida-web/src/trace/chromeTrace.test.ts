@@ -17,6 +17,7 @@ import {
   toChromeTraceJson,
   type ChromeTraceEvent,
 } from "./chromeTrace.ts";
+import { emptySendTallies } from "./diagnose/fixtures.ts";
 import {
   PHASES,
   type RunHeader,
@@ -100,6 +101,7 @@ function tick(atUs: number, overrides: Partial<TraceTick> = {}): TraceTick {
       activeSetTilesDetail: 0,
     },
     counted: { "cache-admission": 0, "worker-dispatch": 0, "coalesce-attach": 0 },
+    sent: emptySendTallies(),
     levels: [],
     levelsDropped: 0,
     targetLevel: null,
@@ -123,6 +125,7 @@ function run(overrides: Partial<TraceRun> = {}): TraceRun {
     rows: [],
     ticks: [],
     ticksDropped: 0,
+    sent: emptySendTallies(),
     readings: [],
     readingsDropped: 0,
     events: [],

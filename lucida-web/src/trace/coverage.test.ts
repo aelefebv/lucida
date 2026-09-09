@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 
 import { computeCoverage, MIN_REPORTED_GAP_US, STRUCTURAL_LIMITS } from "./coverage.ts";
+import { emptySendTallies } from "./diagnose/fixtures.ts";
 import type {
   ConnectionRecord,
   CoverageGapKind,
@@ -44,6 +45,7 @@ function tick(counted: Partial<TraceTick["counted"]>): TraceTick {
     datasetId: "ds",
     counters: {} as TraceTick["counters"],
     counted: { "cache-admission": 0, "worker-dispatch": 0, "coalesce-attach": 0, ...counted },
+    sent: emptySendTallies(),
     levels: [],
     levelsDropped: 0,
     targetLevel: null,

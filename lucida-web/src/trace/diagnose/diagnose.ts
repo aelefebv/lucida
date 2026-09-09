@@ -13,7 +13,13 @@
  * fixture runs.
  */
 
-import type { TraceCoverage, TraceDocument, TraceRun } from "../types.ts";
+import {
+  CLIENT_MESSAGES,
+  TRACE_SCHEMA_VERSION,
+  type TraceCoverage,
+  type TraceDocument,
+  type TraceRun,
+} from "../types.ts";
 import { buildCriticalPath, UNRECORDED_PREFIX } from "./criticalPath.ts";
 import { backlogExceeded, isPinned, summariseLimiters } from "./limiters.ts";
 import { RULESET, type AbsoluteRule } from "./ruleset.ts";
@@ -30,6 +36,7 @@ import {
   type LimiterSummary,
   type RunIdentity,
   type PhaseRollup,
+  type SentSummary,
   type Verdict,
 } from "./types.ts";
 
@@ -81,6 +88,14 @@ export function diagnoseDocument(
 }
 
 export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): DiagnosticDocument {
+  // A run from another schema fails here, by name, rather than partway through
+  // the derivation on a field that schema never had (ADR 0047).
+  if (run.header.schemaVersion !== TRACE_SCHEMA_VERSION) {
+    throw new Error(
+      `run ${run.header.runId} was recorded under trace schema ${run.header.schemaVersion}; ` +
+        `this build reads schema ${TRACE_SCHEMA_VERSION}`,
+    );
+  }
   const phases = rollupPhases(run);
   const limiters = summariseLimiters(run);
   const aggregates = aggregateCandidates(run);
@@ -109,6 +124,7 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
     phases,
     limiters,
     aggregates,
+    sent: summariseSent(run),
     counts: {
       rows: run.rows.length,
       serverRows: run.serverRows.length - metadataReadRows(run.serverRows).length,
@@ -190,6 +206,24 @@ function deriveCoverage(run: TraceRun): DiagnosticCoverage {
 
 function countEvents(run: TraceRun, kind: string): number {
   return run.events.filter((event) => event.kind === kind).length;
+}
+
+// ---------------------------------------------------------------------------
+// The send side
+// ---------------------------------------------------------------------------
+
+function summariseSent(run: TraceRun): SentSummary {
+  const wallUs = Math.max(1, run.header.durationUs);
+  const perSecond = (bytes: number): number => Math.round((bytes * 1_000_000) / wallUs);
+  let messages = 0;
+  let bytes = 0;
+  const byType = CLIENT_MESSAGES.map(({ type, label }) => {
+    const tally = run.sent[type];
+    messages += tally.messages;
+    bytes += tally.bytes;
+    return { type, label, messages: tally.messages, bytes: tally.bytes, bytesPerS: perSecond(tally.bytes) };
+  });
+  return { messages, bytes, bytesPerS: perSecond(bytes), byType };
 }
 
 // ---------------------------------------------------------------------------
