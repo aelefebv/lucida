@@ -13,7 +13,19 @@
  * it.
  */
 
-import type { CoverageGap, CoverageLimit, EndReason, GpuIdentity, RunCause } from "../types.ts";
+import type { ResidencyTier } from "../../pipeline/residencyTier.ts";
+import type {
+  CoverageGap,
+  CoverageLimit,
+  EndReason,
+  GpuIdentity,
+  LaneName,
+  Phase,
+  PointEventKind,
+  PointEventReason,
+  RowOutcomeName,
+  RunCause,
+} from "../types.ts";
 import type { Ruleset } from "./ruleset.ts";
 
 /**
@@ -398,6 +410,145 @@ export interface NextStep {
   command: string;
 }
 
+/**
+ * Where a lifecycle row stood when the run closed: the phase it was sitting
+ * in, or how it ended. `unstamped` is a row that reached no boundary at all,
+ * which the recorder never makes but the table can hold.
+ */
+export type RowState = Phase | "complete" | "retired" | "unstamped";
+
+/** One phase of one row, in the diagnostic's units. */
+export interface RowPhaseReading {
+  phase: Phase;
+  startMs: number;
+  endMs: number;
+  durationMs: number;
+}
+
+/**
+ * Where a row stood in the queue, derived from the other rows rather than
+ * recorded: the scheduler keeps no per-key rank behind its admission window,
+ * so the trace carries none. Both counts are over recorded rows only. A row is
+ * born at dispatch, so a chunk that never dispatched has no row and is not
+ * counted, which makes every rank here a floor.
+ */
+export interface QueueRank {
+  /** Rows admitted before this one and still waiting when it was admitted. */
+  aheadAtAdmission: number;
+  /** Rows admitted at the same instant or later, and dispatched before it. */
+  overtaken: number;
+  /** Admission to dispatch, or to run close when the row never dispatched. */
+  waitedMs: number;
+  dispatched: boolean;
+}
+
+/**
+ * One lifecycle row as the chunk lookup reads it: its identity, its phase
+ * history, where it stood in the queue, and how long it has been alive.
+ */
+export interface ChunkRowReading {
+  /** Position in the lookup's list, 1-based, so a line can name a row. */
+  id: number;
+  datasetId: string;
+  entityId: string;
+  imageId: string;
+  lane: LaneName;
+  residencyTier: ResidencyTier;
+  rid: number;
+  connectionGeneration: number;
+  outcome: RowOutcomeName;
+  state: RowState;
+  /** Run-relative milliseconds of the row's first boundary; null when it reached none. */
+  firstSeenMs: number | null;
+  /**
+   * First boundary to last boundary for a row that ended, or to run close for
+   * one still in flight. Null when the row reached no boundary.
+   */
+  ageMs: number | null;
+  /** In phase order. A phase absent here was never entered on this row. */
+  phases: RowPhaseReading[];
+  /** Null when the row never entered the queue. */
+  queue: QueueRank | null;
+}
+
+/** One point event about the looked-up chunk. */
+export interface ChunkEventReading {
+  atMs: number;
+  kind: PointEventKind;
+  reason: PointEventReason;
+  entityId: string;
+  residencyTier: ResidencyTier;
+}
+
+/**
+ * One chunk, looked up by row identity: the answer to "why is this chunk not
+ * resident" in text. The one place the document is per-row, and by
+ * construction about a handful of rows: {@link rows} and {@link events} are
+ * capped, so the document never grows with the run.
+ */
+export interface ChunkLookup {
+  /** As given or chosen: `[entity/]level/t/c/z/y/x`. Null when nothing could be chosen. */
+  selector: string | null;
+  /** How the chunk was chosen, in one phrase: named by the caller, or the worst row. */
+  chosen: string;
+  /** Null when the selector did not parse as a chunk. */
+  chunkKey: string | null;
+  /** The entity the selector named, or null for a bare key. */
+  entityId: string | null;
+  /** Oldest first, capped. {@link rowCount} says how many matched in all. */
+  rows: ChunkRowReading[];
+  rowCount: number;
+  /** Distinct entities among the matched rows: a bare key matches one row per tile in a collection. */
+  entityCount: number;
+  events: ChunkEventReading[];
+  eventCount: number;
+  /** What the lookup found, in one sentence. */
+  statement: string;
+  /** What the lookup cannot see. Never empty. */
+  limits: string;
+}
+
+/** An inclusive bounding box over chunk indices, `[t, c, z, y, x]`. */
+export interface SpatialBox {
+  min: [number, number, number, number, number];
+  max: [number, number, number, number, number];
+}
+
+/** The rows of one dataset at one level in one tier that stood in one state. */
+export interface SpatialGroup {
+  /** Position in the summary's list, 1-based. */
+  id: number;
+  datasetId: string;
+  residencyTier: ResidencyTier;
+  level: number;
+  state: RowState;
+  n: number;
+  /** Distinct entities in the group. */
+  entityCount: number;
+  box: SpatialBox;
+  /** The longest any row in the group has been alive. */
+  oldestMs: number;
+}
+
+/**
+ * What is where: the run's rows grouped by state and level, each group with
+ * its bounding box. The text twin of the overlay, so an agent can read it
+ * without a screenshot. Bounded by the number of states times levels rather
+ * than by the row count.
+ */
+export interface SpatialSummary {
+  /** Rows the summary counted. */
+  rowCount: number;
+  /** Rows still in flight first, then complete, then retired; by level within a state. */
+  groups: SpatialGroup[];
+  groupCount: number;
+  levelCount: number;
+  /** The coordinate system every box is in. */
+  coordinates: string;
+  /** What the summary cannot show, one statement each. Never empty. */
+  cannotShow: string[];
+}
+
 export interface DiagnosticDocument {
   schemaVersion: number;
   runId: string;
@@ -426,6 +577,14 @@ export interface DiagnosticDocument {
     ticks: number;
     pointEvents: number;
   };
+  /**
+   * One chunk's phase history, queue rank and age. The caller's chunk when
+   * one was named, otherwise the worst row's, so the default text can point
+   * at it.
+   */
+  chunk: ChunkLookup;
+  /** Rows by state and level, each with a bounding box. */
+  spatial: SpatialSummary;
   /** Raw spans are never inlined at any depth: a warm re-open is 21,431 rows. */
   raw: { inlined: false; why: string; command: string };
   next: NextStep[];

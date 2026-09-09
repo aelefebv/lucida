@@ -433,6 +433,50 @@ describe("the document", () => {
     expect(diagnoseDocument(traceDocument, { runId: "local-healthy" }).runId).toBe("local-healthy");
   });
 
+  it("carries the worst row's chunk and the spatial summary, and names both as next steps", () => {
+    const doc = diagnoseRun(healthyLocalOpen());
+
+    // The healthy open's largest browser phase is the wire, and row 119 is the
+    // one that spent 240 ms on it.
+    expect(doc.chunk.selector).toBe("member-7/1/0/0/0/119/0");
+    expect(doc.chunk.chosen).toContain("browser.wire");
+    expect(doc.chunk.rows).toHaveLength(1);
+    expect(doc.chunk.rows[0].phases.map((phase) => phase.phase)).toHaveLength(6);
+    expect(doc.chunk.rows[0].queue).not.toBeNull();
+    expect(doc.chunk.rows[0].ageMs).toBe(246.5);
+    expect(doc.spatial.groupCount).toBe(1);
+    expect(doc.spatial.groups[0].n).toBe(120);
+
+    const commands = doc.next.map((step) => step.command);
+    expect(commands).toContain("lucida trace show local-healthy --chunk member-7/1/0/0/0/119/0");
+    expect(commands).toContain("lucida trace show local-healthy --spatial");
+  });
+
+  it("looks up the chunk the caller names, and still points the next step at the worst row", () => {
+    const named = diagnoseRun(healthyLocalOpen(), { chunk: "1/0/0/0/5/0" });
+    expect(named.chunk.chosen).toBe("named by the caller");
+    expect(named.chunk.rowCount).toBe(1);
+    expect(named.chunk.rows[0].entityId).toBe("member-5");
+    expect(named.next.map((step) => step.command)).toContain(
+      "lucida trace show local-healthy --chunk member-7/1/0/0/0/119/0",
+    );
+
+    const absent = diagnoseRun(healthyLocalOpen(), { chunk: "1/0/0/0/999/0" });
+    expect(absent.chunk.rowCount).toBe(0);
+    expect(absent.chunk.statement).toContain("not in this run");
+  });
+
+  it("has an empty lookup and no chunk step on a run with no rows, and a spatial step regardless", () => {
+    const doc = diagnoseRun(makeRun({ header: { runId: "empty", durationUs: 100 * MS } }));
+
+    expect(doc.chunk.selector).toBeNull();
+    expect(doc.chunk.rowCount).toBe(0);
+    expect(doc.spatial.rowCount).toBe(0);
+    const commands = doc.next.map((step) => step.command);
+    expect(commands.some((command) => command.includes("--chunk"))).toBe(false);
+    expect(commands).toContain("lucida trace show empty --spatial");
+  });
+
   it("leads with truncation rather than footnoting it", () => {
     const run = makeRun({
       header: {

@@ -391,6 +391,40 @@ describe("the trace seam", () => {
   });
 
   /**
+   * One chunk and what is where are readings of the document too, so an
+   * agent driving its own browser asks for them through the seam, and the
+   * chunk it names is the one the document is about.
+   */
+  it("looks up a chunk and summarises space through the same derivation", async () => {
+    installTraceSeam();
+    const source = new ControlledSource();
+    const cache = new CpuCache(source, makeDecode());
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    cache.submit(makePlan([makeRequest()]));
+    await flush();
+
+    const document = window.lucidaTrace!.diagnose();
+    expect(document.chunk.selector).not.toBeNull();
+    expect(document.spatial.rowCount).toBeGreaterThan(0);
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    const named = window.lucidaTrace!.diagnose(undefined, { chunk: "9/9/9/9/9/9" });
+    expect(named.chunk.chosen).toBe("named by the caller");
+    expect(named.chunk.statement).toContain("not in this run");
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    const text = window.lucidaTrace!.diagnoseText(undefined, { depth: "chunk", chunk: "9/9/9/9/9/9" });
+    expect(text).toContain("CHUNK     9/9/9/9/9/9");
+    expect(text).toContain("not in this run");
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    const spatial = window.lucidaTrace!.diagnoseText(undefined, { depth: "spatial" });
+    expect(spatial).toContain("SPATIAL");
+    expect(spatial).toContain("chunk indices");
+  });
+
+  /**
    * Before a run opens, nothing is dirty and nothing is wanted — so the
    * predicate is trivially true. A driver has to be able to tell that apart
    * from a run that finished, without exporting (which would close it). And
