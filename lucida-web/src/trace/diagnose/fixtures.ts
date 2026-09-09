@@ -19,8 +19,10 @@ import { computeCoverage } from "../coverage.ts";
 import { SEND_COLUMN_COUNT, sendTalliesFrom } from "../sendAccounting.ts";
 import {
   CLIENT_MESSAGE_TYPES,
+  interactionCause,
   PHASES,
   type CountedPhase,
+  type InputKind,
   type LaneName,
   type MetadataReadPhase,
   type Phase,
@@ -448,6 +450,24 @@ export function saturatedReopen(): TraceRun {
  * the non-path attribution mode is the only thing that can say anything.
  */
 export function interactionRun(): TraceRun {
+  return interactionRunFor("pan");
+}
+
+export interface InteractionRunSpec {
+  /**
+   * Main-thread time of each tick. The default holds the main thread most of
+   * every frame and still clears the frame-time ceiling. A value over the
+   * ceiling makes the run that ceiling exists for.
+   */
+  frameTimeUs?: number;
+}
+
+/**
+ * An interaction run under one of the five inputs, with the cause the recorder
+ * gives it. One reading per frame, each frame most of its own interval: the
+ * shape a gesture makes on the main thread.
+ */
+export function interactionRunFor(input: InputKind, spec: InteractionRunSpec = {}): TraceRun {
   const rows: TraceRow[] = [];
   for (let i = 0; i < 30; i += 1) {
     rows.push(
@@ -464,15 +484,17 @@ export function interactionRun(): TraceRun {
   }
   return makeRun({
     header: {
-      runId: "interaction-pan",
+      runId: `interaction-${input}`,
       durationUs: 2_000 * MS,
-      cause: { epoch: "view", dirtyKind: "interactive", source: "pan" },
+      cause: interactionCause(input),
     },
     rows,
-    // One reading per frame, each frame most of its own interval: the shape a
-    // main thread held by a per-tick phase makes.
     readings: Array.from({ length: 100 }, (_, i) =>
-      makeReading(i * 20 * MS, { queueDepth: 4, inFlight: 4, frameTimeUs: 18_000 }),
+      makeReading(i * 20 * MS, {
+        queueDepth: 4,
+        inFlight: 4,
+        frameTimeUs: spec.frameTimeUs ?? 18_000,
+      }),
     ),
   });
 }

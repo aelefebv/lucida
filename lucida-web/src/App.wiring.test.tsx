@@ -249,6 +249,7 @@ import { updateWorkspaceLastView } from "./workspaceApi.ts";
 import {
   invalidateDisplaySettings,
   invalidateAfterViewRestore,
+  invalidateSelection,
 } from "./invalidation.ts";
 
 const MockedBridge = Bridge as unknown as {
@@ -483,7 +484,8 @@ describe("App wiring: dataset-settings mutation canary", () => {
       dataset_id: "wds-1",
       visible: false,
     });
-    expect(vi.mocked(invalidateDisplaySettings)).toHaveBeenCalled();
+    // Hiding a dataset is a select, not a display-settings change.
+    expect(vi.mocked(invalidateSelection)).toHaveBeenCalled();
     const reread = getSceneSettings(scene as unknown as InstanceType<typeof WasmScene>);
     expect(reread).not.toBe(primed);
   });

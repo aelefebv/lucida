@@ -19,12 +19,21 @@
  *    load-bearing: without it a healthy 368 ms local open reported
  *    `STALL fetch.wire, 70% of the run`, because a fast run still spends most
  *    of itself somewhere.
+ *
+ * An interaction run adds one absolute ceiling of the first family on a
+ * reading rather than a phase: main-thread frame time over the run. It
+ * replaces the share rule for that reading, because a gesture ticks every
+ * frame and its main-thread share is near total by construction.
  */
 
 import type { PhaseClass } from "./types.ts";
 
-/** Bumped whenever a threshold moves, so two diagnostics are visibly comparable or visibly not. */
-export const RULESET_VERSION = 1;
+/**
+ * Bumped whenever a threshold moves or a rule is added, so two diagnostics
+ * are visibly comparable or visibly not. Version 2 added the interaction
+ * frame-time ceiling.
+ */
+export const RULESET_VERSION = 2;
 
 export interface AbsoluteRule {
   id: string;
@@ -79,6 +88,12 @@ export interface Ruleset {
   share: ShareRule;
   prefix: PrefixRule;
   compare: CompareRule;
+  /**
+   * The one ceiling an interaction run is judged by, on the frame-time
+   * reading rather than a phase. `phase` names the aggregate candidate,
+   * which has no per-item rows.
+   */
+  interaction: AbsoluteRule;
 }
 
 /**
@@ -250,5 +265,12 @@ export const RULESET: Ruleset = {
     id: "compare.regression",
     minRatio: 2,
     why: "#899 §0: two runs of the same fixture minutes apart differed about 2x in per-request latency. A comparative threshold below that spread reports weather as regression.",
+  },
+  interaction: {
+    id: "interaction.frame-time",
+    phase: "render.frame",
+    stat: "p95",
+    ceilMs: 50,
+    why: "An interaction run is judged on whether the gesture stayed smooth, not on how much of it the main thread held: a drag ticks every frame, so its main-thread share is near total on every gesture and says nothing. The reading is main-thread tick time and includes the plan pass, so the ceiling matches compute.plan's 50 ms rather than undercutting it — three dropped frames at 60 Hz, far above a healthy tick, and a run whose planning passed cannot fail here on planning alone. It is main-thread time only: a slow GPU pass shows here only as far as it holds the main thread.",
   },
 };

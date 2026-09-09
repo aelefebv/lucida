@@ -21,6 +21,7 @@
  * raw-row answer and the last line says so.
  */
 
+import type { RunCause } from "../types.ts";
 import { SPATIAL_AXES } from "./spatialSummary.ts";
 import { describeState } from "./rowState.ts";
 import type { ChunkLookup, DiagnosticDocument, Finding, SpatialSummary } from "./types.ts";
@@ -481,8 +482,18 @@ function byteLength(text: string): number {
 }
 
 function causeOf(document: DiagnosticDocument): string {
-  const cause = document.run.cause;
-  return cause ? `${cause.epoch ?? "none"}/${cause.dirtyKind}/${cause.source}` : "steady state";
+  return formatCause(document.run.cause);
+}
+
+/**
+ * Why a run opened, in one line: the epoch kind, the dirty kind, and the
+ * source, which for an interaction run is the input. The monitor's run
+ * selector and live view spell it the same way through this function, so a
+ * run reads as one run wherever it appears.
+ */
+export function formatCause(cause: RunCause | null): string {
+  if (!cause) return "steady state";
+  return `${cause.epoch ?? "none"}/${cause.dirtyKind}/${cause.source}`;
 }
 
 function renderTimingOf(document: DiagnosticDocument, p: PrintNumber): string {

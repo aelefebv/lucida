@@ -18,6 +18,7 @@ import {
   gpuTimedOpen,
   healthyLocalOpen,
   interactionRun,
+  interactionRunFor,
   lateStallOpen,
   mainThreadOnlyOpen,
   makeRun,
@@ -42,6 +43,7 @@ const RUNS = {
   cold: coldRemoteOpen(),
   saturated: saturatedReopen(),
   interaction: interactionRun(),
+  slowOrbit: interactionRunFor("orbit", { frameTimeUs: 80 * MS }),
   prefix: uninstrumentedPrefixOpen(),
   quiet: quietRun(),
   sendHeavy: sendHeavyIdleRun(),
@@ -158,6 +160,23 @@ describe("the default rendering", () => {
     const findingsLine = lines.findIndex((line) => line.startsWith("FINDINGS"));
     expect(truncationLine).toBeGreaterThanOrEqual(0);
     expect(truncationLine).toBeLessThan(findingsLine === -1 ? lines.length : findingsLine);
+  });
+
+  it("shows the cause of an interaction run, input and epoch both", () => {
+    expect(renderDiagnostic(diagnoseRun(interactionRunFor("orbit"))).text).toContain(
+      "cause=view/interactive/orbit",
+    );
+    expect(renderDiagnostic(diagnoseRun(interactionRunFor("scrub"))).text).toContain(
+      "cause=selection/interactive/scrub",
+    );
+  });
+
+  it("leads a slow gesture with the input and the ceiling it crossed", () => {
+    const { text } = renderDiagnostic(diagnoseRun(interactionRunFor("orbit", { frameTimeUs: 80 * MS })));
+    const [verdict] = text.split("\n");
+
+    expect(verdict).toContain("VERDICT: orbit ran at p95 80 ms");
+    expect(verdict).toContain("ceiling for an interaction run");
   });
 
   it("shows at most three findings and names the commands that go deeper", () => {

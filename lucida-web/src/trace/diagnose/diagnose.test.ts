@@ -18,6 +18,7 @@ import {
   gpuTimedOpen,
   healthyLocalOpen,
   interactionRun,
+  interactionRunFor,
   lateStallOpen,
   mainThreadOnlyOpen,
   makeHeader,
@@ -32,7 +33,14 @@ import {
 import { CONFIDENCE_WORDS, diagnoseDocument, diagnoseRun } from "./diagnose.ts";
 import { RULESET, RULESET_VERSION, PHASE_CLASSES } from "./ruleset.ts";
 import type { DiagnosticDocument } from "./types.ts";
-import { CLIENT_MESSAGE_TYPES, TRACE_SCHEMA_VERSION, type GpuIdentity, type TraceDocument } from "../types.ts";
+import {
+  CLIENT_MESSAGE_TYPES,
+  INPUT_KINDS,
+  interactionCause,
+  TRACE_SCHEMA_VERSION,
+  type GpuIdentity,
+  type TraceDocument,
+} from "../types.ts";
 
 const MS = 1_000;
 
@@ -279,6 +287,7 @@ describe("attribution", () => {
       diagnoseRun(coldRemoteOpen()),
       diagnoseRun(saturatedReopen()),
       diagnoseRun(interactionRun()),
+      diagnoseRun(interactionRunFor("orbit", { frameTimeUs: 80 * MS })),
       diagnoseRun(uninstrumentedPrefixOpen()),
       diagnoseRun(tiedChain()),
       diagnoseRun(rollupOnlyRun()),
@@ -291,6 +300,58 @@ describe("attribution", () => {
       seen.add(attribution.confidence);
     }
     expect([...seen].sort()).toEqual([...CONFIDENCE_WORDS].sort());
+  });
+});
+
+describe("interaction runs", () => {
+  it("carries the cause that names the input, for each of the five", () => {
+    for (const input of INPUT_KINDS) {
+      const doc = diagnoseRun(interactionRunFor(input));
+
+      expect(doc.run.cause, input).toEqual(interactionCause(input));
+      expect(doc.run.cause?.source, input).toBe(input);
+    }
+  });
+
+  it("does not call a gesture at a healthy frame rate a stall", () => {
+    // A drag ticks every frame, so its main-thread share is near total at any
+    // frame rate. The ceiling, not share, is the criterion.
+    for (const input of INPUT_KINDS) {
+      const doc = diagnoseRun(interactionRunFor(input));
+
+      expect(doc.verdict.kind, input).toBe("clear");
+      expect(doc.findings.filter((f) => f.severity !== "note"), input).toEqual([]);
+      expect(doc.attribution.confidence, input).toBe("unattributed");
+    }
+  });
+
+  it("fails a gesture whose frame time exceeds the ceiling, naming the input", () => {
+    const doc = diagnoseRun(interactionRunFor("orbit", { frameTimeUs: 80 * MS }));
+
+    expect(doc.verdict.kind).toBe("stall");
+    expect(doc.verdict.text).toContain("orbit");
+    expect(doc.verdict.text).toContain(`${RULESET.interaction.ceilMs} ms`);
+    const lead = doc.findings[0];
+    expect(lead.rule).toBe(RULESET.interaction.id);
+    expect(lead.subject).toBe(RULESET.interaction.phase);
+    expect(lead.observed.stat).toBe("p95");
+    expect(lead.observed.ms).toBe(80);
+    expect(lead.threshold).toEqual({
+      kind: "absolute",
+      value: RULESET.interaction.ceilMs,
+      why: RULESET.interaction.why,
+    });
+    expect(doc.attribution.confidence).toBe("aggregate-only");
+    expect(doc.attribution.cause).toBe(RULESET.interaction.phase);
+    expect(doc.attribution.why).toContain(`${RULESET.interaction.ceilMs} ms`);
+  });
+
+  it("applies the ceiling to interaction runs only", () => {
+    const open = interactionRunFor("orbit", { frameTimeUs: 80 * MS });
+    open.header.cause = { epoch: "content", dirtyKind: "interactive", source: "dataset_added" };
+    const doc = diagnoseRun(open);
+
+    expect(doc.findings.some((f) => f.rule === RULESET.interaction.id)).toBe(false);
   });
 });
 
@@ -382,6 +443,7 @@ describe("the document", () => {
       doc.ruleset.share,
       doc.ruleset.prefix,
       doc.ruleset.compare,
+      doc.ruleset.interaction,
     ]) {
       expect(rule.why).not.toBe("");
     }

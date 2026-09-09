@@ -19,6 +19,7 @@ import type { DiagnosticDocument } from "../trace/diagnose/types.ts";
 import type { LiveProgress } from "../trace/liveProgress.ts";
 import type { LucidaTraceSeam } from "../trace/seam.ts";
 import type { TraceDocument } from "../trace/types.ts";
+import { formatCause } from "./monitorModel.ts";
 
 export type MonitorRead =
   | { ok: true; document: DiagnosticDocument }
@@ -106,7 +107,9 @@ function summariseRuns(document: TraceDocument): MonitorRunSummary[] {
     .map((run) => ({
       runId: run.header.runId,
       datasetCount: run.header.datasetIds.length,
-      cause: run.header.cause?.source ?? "steady state",
+      // The whole cause, not the source alone. "pan" and "dataset_added"
+      // would otherwise read as the same kind of run.
+      cause: formatCause(run.header.cause),
       endReason: run.header.endReason,
       wallMs: Math.round(run.header.durationUs / 1_000),
     }))

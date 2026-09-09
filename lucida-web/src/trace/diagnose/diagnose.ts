@@ -18,6 +18,7 @@ import {
   CLIENT_MESSAGES,
   COUNTED_PHASES,
   TRACE_SCHEMA_VERSION,
+  isInteractionCause,
   type CountedPhase,
   type CoverageGap,
   type TraceCoverage,
@@ -139,13 +140,15 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
   const aggregates = aggregateCandidates(run, window);
   const path = buildCriticalPath(run, window);
   const coverage = deriveCoverage(run, window, rollup);
-  const attribution = attribute({ run, path, phases, limiters, aggregates, coverage });
+  const interaction = isInteractionCause(run.header.cause);
+  const attribution = attribute({ run, path, phases, limiters, aggregates, coverage, interaction });
   const findings = rankFindings({
     path,
     phases,
     limiters,
     aggregates,
     attribution,
+    interaction,
     baseline: options.baseline ?? null,
   });
   const worst = worstRowSelector(run, phases, findings);
@@ -354,6 +357,22 @@ interface AttributionInput {
   limiters: LimiterSummary[];
   aggregates: AggregateCandidate[];
   coverage: DiagnosticCoverage;
+  interaction: boolean;
+}
+
+/**
+ * The frame-time reading of an interaction run, judged by the ceiling rather
+ * than by share. A drag ticks every frame, so its main-thread share is near
+ * total by construction. Null on any other run, where the reading stays a
+ * share candidate like the rest.
+ */
+function frameTimeOf(
+  aggregates: AggregateCandidate[],
+  interaction: boolean,
+): { frame: AggregateCandidate; slow: boolean } | null {
+  if (!interaction) return null;
+  const frame = aggregates.find((candidate) => candidate.phase === RULESET.interaction.phase);
+  return frame ? { frame, slow: frame.p95Ms > RULESET.interaction.ceilMs } : null;
 }
 
 /** What every confidence, including the strongest, still cannot see. */
@@ -365,9 +384,22 @@ function passesShare(ms: number, sharePct: number): boolean {
 }
 
 function attribute(input: AttributionInput): Attribution {
-  const { path, phases, limiters, aggregates, coverage } = input;
+  const { path, phases, limiters, aggregates, coverage, interaction } = input;
   const saturated = limiters.find((limiter) => backlogExceeded(limiter));
-  const aggregate = aggregates.find((candidate) => passesShare(candidate.busyMs, candidate.sharePct));
+  const frameTime = frameTimeOf(aggregates, interaction);
+  const aggregate = aggregates.find(
+    (candidate) => candidate !== frameTime?.frame && passesShare(candidate.busyMs, candidate.sharePct),
+  );
+  const slowFrames: Attribution | null = frameTime?.slow
+    ? {
+        confidence: "aggregate-only",
+        cause: frameTime.frame.phase,
+        why: `${frameTime.frame.phase} p95 ${frameTime.frame.p95Ms} ms over the ${RULESET.interaction.ceilMs} ms ceiling for an interaction run, across ${frameTime.frame.samples.toLocaleString()} ticks`,
+        degraded:
+          "per-tick readings show that the main thread was held, not which phase held it, and the reading is main-thread time rather than GPU time",
+        runnerUp: null,
+      }
+    : null;
 
   if (path.kind === "undefined") {
     const reason = path.undefinedReason ?? "no critical path could be walked";
@@ -380,6 +412,7 @@ function attribute(input: AttributionInput): Attribution {
         runnerUp: null,
       };
     }
+    if (slowFrames) return { ...slowFrames, degraded: `${reason}; ${slowFrames.degraded}` };
     if (aggregate) {
       return {
         confidence: "aggregate-only",
@@ -424,6 +457,10 @@ function attribute(input: AttributionInput): Attribution {
       runnerUp: second ? { label: second.label, ms: second.ms } : null,
     };
   }
+
+  // On an interaction run the frame time is the question, so slow frames
+  // outrank the chain leader whatever its size.
+  if (slowFrames) return { ...slowFrames, runnerUp: { label: leader.label, ms: leader.ms } };
 
   // An aggregate phase large enough to rival the chain leader. It cannot be
   // placed on the path, only shown to overlap it — a weaker claim, said plainly.
@@ -523,6 +560,7 @@ interface FindingsInput {
   limiters: LimiterSummary[];
   aggregates: AggregateCandidate[];
   attribution: Attribution;
+  interaction: boolean;
   baseline: DiagnosticDocument | null;
 }
 
@@ -613,7 +651,9 @@ function rankFindings(input: FindingsInput): Finding[] {
     });
   }
 
+  const frameTime = frameTimeOf(input.aggregates, input.interaction);
   for (const candidate of input.aggregates) {
+    if (candidate === frameTime?.frame) continue;
     if (!passesShare(candidate.busyMs, candidate.sharePct)) continue;
     raw.push({
       severity: "stall",
@@ -627,6 +667,26 @@ function rankFindings(input: FindingsInput): Finding[] {
         tier: "per-tick readings",
       },
       threshold: { kind: "relative", value: RULESET.share.minPct, why: RULESET.share.why },
+    });
+  }
+
+  if (frameTime?.slow) {
+    raw.push({
+      severity: "stall",
+      rule: RULESET.interaction.id,
+      subject: frameTime.frame.phase,
+      observed: {
+        stat: RULESET.interaction.stat,
+        ms: frameTime.frame.p95Ms,
+        n: frameTime.frame.samples,
+        rows: 0,
+        tier: "per-tick readings",
+      },
+      threshold: {
+        kind: "absolute",
+        value: RULESET.interaction.ceilMs,
+        why: RULESET.interaction.why,
+      },
     });
   }
 
@@ -736,6 +796,18 @@ function buildVerdict(
     return {
       kind: "saturated",
       text: `saturated — ${lead.subject} held ${(lead.observed.pending ?? 0).toLocaleString()} requests behind a cap of ${lead.observed.inFlightCap}; ${eta}${caveat}`,
+      confidence: attribution.confidence,
+    };
+  }
+
+  // A gate's one line has to say which input was slow, not which reading
+  // measured it.
+  if (lead.rule === RULESET.interaction.id) {
+    return {
+      kind: "stall",
+      text:
+        `${run.header.cause?.source ?? "input"} ran at ${lead.observed.stat} ${lead.observed.ms} ms ` +
+        `per main-thread frame, over the ${lead.threshold.value} ms ceiling for an interaction run${caveat}`,
       confidence: attribution.confidence,
     };
   }

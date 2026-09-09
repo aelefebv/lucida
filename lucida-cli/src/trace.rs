@@ -959,6 +959,13 @@ pub fn read_run_file(path: &Path) -> Result<TraceRunFile, CliError> {
 /// share one flag. Coverage never fails a gate: 87% of a healthy local cold
 /// open is pre-instrument boot, so a gate that fires on coverage fires on every
 /// green run.
+///
+/// The gate reads closed runs only. A run file is written after the export
+/// closed the run, and a run that closed without going quiescent fails here
+/// before its verdict is consulted, so no reading taken while a run was still
+/// open can fail a build. An interaction run over the page's frame-time
+/// ceiling arrives as a stall verdict like any other. The ceiling and its
+/// rationale live in the page's ruleset, not here.
 pub fn gate_failure(file: &TraceRunFile) -> Option<String> {
     if !file.header.settled {
         return Some(format!(
@@ -1819,6 +1826,30 @@ mod tests {
             "timeout",
         );
         assert!(gate_failure(&unsettled).unwrap().contains("never settled"));
+    }
+
+    /// An interaction run over the frame-time ceiling reaches the gate as a
+    /// stall verdict naming the input, and only once the run has closed. A
+    /// run that never went quiescent fails as unsettled before its verdict is
+    /// read.
+    #[test]
+    fn the_gate_fails_a_slow_interaction_run_once_it_has_closed() {
+        let verdict = json!({
+            "verdict": {
+                "kind": "stall",
+                "text": "orbit ran at p95 80 ms per main-thread frame, over the 50 ms ceiling for an interaction run"
+            },
+            "run": { "cause": { "epoch": "view", "dirtyKind": "interactive", "source": "orbit" } }
+        });
+        let closed = run_file(verdict.clone(), true, "quiescent");
+        let reason = gate_failure(&closed).unwrap();
+        assert!(reason.contains("orbit"));
+        assert!(reason.contains("ceiling for an interaction run"));
+
+        let unsettled = run_file(verdict, false, "timeout");
+        let reason = gate_failure(&unsettled).unwrap();
+        assert!(reason.contains("never settled"));
+        assert!(!reason.contains("ceiling for an interaction run"));
     }
 
     /// 87% of a healthy local cold open is pre-instrument boot, so a gate that
