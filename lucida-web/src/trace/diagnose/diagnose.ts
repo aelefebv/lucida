@@ -14,10 +14,12 @@
  */
 
 import type { TraceCoverage, TraceDocument, TraceRun } from "../types.ts";
+import { emptyChunkLookup, lookupChunk, worstRowSelector, type WorstRow } from "./chunkLookup.ts";
 import { buildCriticalPath, UNRECORDED_PREFIX } from "./criticalPath.ts";
 import { backlogExceeded, isPinned, summariseLimiters } from "./limiters.ts";
 import { RULESET, type AbsoluteRule } from "./ruleset.ts";
 import { aggregateCandidates, metadataReadRows, rollupPhases, usToMs } from "./phaseRollup.ts";
+import { summariseSpace } from "./spatialSummary.ts";
 import {
   DIAGNOSTIC_SCHEMA_VERSION,
   type AggregateCandidate,
@@ -61,6 +63,11 @@ export interface DiagnoseOptions {
   baseline?: DiagnosticDocument | null;
   /** The run to read out of a trace document. Defaults to the newest. */
   runId?: string;
+  /**
+   * The chunk the document's lookup is about, as `[entity/]level/t/c/z/y/x`.
+   * Defaults to the worst row's chunk, so the default text has one to name.
+   */
+  chunk?: string;
 }
 
 /**
@@ -95,6 +102,13 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
     attribution,
     baseline: options.baseline ?? null,
   });
+  const worst = worstRowSelector(run, phases, findings);
+  const chunk =
+    options.chunk !== undefined
+      ? lookupChunk(run, options.chunk, "named by the caller")
+      : worst
+        ? lookupChunk(run, worst.selector, worst.chosen)
+        : emptyChunkLookup("no chunk row in this run to choose from");
 
   return {
     schemaVersion: DIAGNOSTIC_SCHEMA_VERSION,
@@ -116,12 +130,14 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
       ticks: run.ticks.length,
       pointEvents: run.events.length,
     },
+    chunk,
+    spatial: summariseSpace(run),
     raw: {
       inlined: false,
-      why: "Raw spans are for a viewer, not a context window: a warm re-open is tens of thousands of rows, and nothing per-row appears at any depth here.",
+      why: "Raw spans are for a viewer, not a context window: a warm re-open is tens of thousands of rows, and nothing per-row appears at any depth here beyond the one chunk the lookup is about.",
       command: "lucida trace perfetto",
     },
-    next: nextSteps(run, findings, attribution),
+    next: nextSteps(run, findings, attribution, worst),
     ruleset: RULESET,
   };
 }
@@ -643,7 +659,12 @@ const INCONCLUSIVE: readonly Confidence[] = [
  * diagnostic that prints a command which does not run is worse than one that
  * prints none, so if that ticket names them differently, it changes them here.
  */
-function nextSteps(run: TraceRun, findings: Finding[], attribution: Attribution): DiagnosticDocument["next"] {
+function nextSteps(
+  run: TraceRun,
+  findings: Finding[],
+  attribution: Attribution,
+  worst: WorstRow | null,
+): DiagnosticDocument["next"] {
   const runId = run.header.runId;
   const steps: DiagnosticDocument["next"] = [
     { why: "every phase, one row each", command: `lucida trace show ${runId} --phases` },
@@ -655,6 +676,19 @@ function nextSteps(run: TraceRun, findings: Finding[], attribution: Attribution)
       command: `lucida trace show ${runId} --phase ${lead.subject}`,
     });
   }
+  // The overlay's two readings, one chunk and what is where, as commands an
+  // agent can run. The chunk step names the worst row even when the caller
+  // named a different chunk for this document's lookup.
+  if (worst) {
+    steps.push({
+      why: `${worst.chosen}: its phase history, queue rank and age`,
+      command: `lucida trace show ${runId} --chunk ${worst.selector}`,
+    });
+  }
+  steps.push({
+    why: "what is where: rows by state and level, with their boxes",
+    command: `lucida trace show ${runId} --spatial`,
+  });
   if (INCONCLUSIVE.includes(attribution.confidence)) {
     steps.push({
       why: `the attribution is not conclusive; a second run to compare against ${runId}`,

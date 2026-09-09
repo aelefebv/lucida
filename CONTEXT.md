@@ -464,6 +464,25 @@ are judged by this and never by a per-chunk ceiling, which at the observed
 spread would fire on every row or on none.
 _Avoid_: queue depth (depth alone is not the signal), wait time, latency
 
+**Chunk lookup**:
+The diagnostic's section about one chunk, named as `[entity/]level/t/c/z/y/x`:
+every lifecycle row that carries it, oldest first, with each row's phase
+history, queue rank, and age, plus the point events that name it. The text
+answer to "why is this chunk not resident". The queue rank is derived from the
+other rows' admissions and dispatches, never recorded, and it counts recorded
+rows only, so it is a floor.
+_Avoid_: chunk inspector (the hover inspector is a surface that reads this),
+chunk trace, row lookup
+
+**Spatial summary**:
+The diagnostic's section that says what is where: the run's rows grouped by
+state and level, each group with its count and its bounding box in chunk
+indices at that level. The text twin of the overlay. It states what it cannot
+show — a chunk resident before the run or still queued at its close has no row
+and so no box.
+_Avoid_: heatmap, coverage map (coverage is what the run measured — see
+above), chunk map
+
 ## Server state
 
 **Storage backend**:

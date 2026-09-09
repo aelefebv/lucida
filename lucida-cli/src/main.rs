@@ -1253,6 +1253,12 @@ enum TraceCommand {
         /// One phase's numbers and the findings against it
         #[arg(long, value_name = "PHASE", conflicts_with = "phases")]
         phase: Option<String>,
+        /// One chunk's phase history, queue rank and age, as [entity/]level/t/c/z/y/x
+        #[arg(long, value_name = "CHUNK", conflicts_with_all = ["phases", "phase", "spatial"])]
+        chunk: Option<String>,
+        /// What is where: rows by state and level, each with its bounding box
+        #[arg(long, conflicts_with_all = ["phases", "phase"])]
+        spatial: bool,
         /// Directory runs are read back from
         #[arg(long, value_name = "DIR", env = "LUCIDA_TRACE_DIR")]
         trace_dir: Option<PathBuf>,
@@ -3595,22 +3601,30 @@ async fn emit_trace_command(
                 run,
                 phases,
                 phase,
+                chunk,
+                spatial,
                 trace_dir,
             }),
         ) => {
             let dir = trace::resolve_trace_dir(trace_dir.as_deref(), &config_path);
             let path = trace::resolve_run_file(&dir, run);
             let file = trace::read_run_file(&path)?;
-            let depth = match (phase, phases) {
-                (Some(phase), _) => trace::ShowDepth::Phase(phase.clone()),
-                (None, true) => trace::ShowDepth::Phases,
-                (None, false) => trace::ShowDepth::Summary,
+            let depth = match (phase, phases, chunk, spatial) {
+                (Some(phase), ..) => trace::ShowDepth::Phase(phase.clone()),
+                (None, true, ..) => trace::ShowDepth::Phases,
+                (None, false, Some(chunk), _) => trace::ShowDepth::Chunk(chunk.clone()),
+                (None, false, None, true) => trace::ShowDepth::Spatial,
+                (None, false, None, false) => trace::ShowDepth::Summary,
             };
             let text = trace::render_show(&file, &depth);
             let payload = serde_json::json!({
                 "runFile": path,
                 "header": file.header,
                 "diagnostic": file.diagnostic,
+                // `diagnostic` already carries a `chunk` section, but it is the
+                // worst row's. A chunk named with `--chunk` gets its section
+                // here, beside the text rendered from it.
+                "chunk": trace::chunk_section(&file, &depth),
                 "text": text,
             });
             output.print_either(&payload, || text.clone())?;
@@ -5760,8 +5774,51 @@ mod tests {
             _ => panic!("expected trace show"),
         }
 
-        // One depth at a time: the two flags would otherwise both apply.
+        match parse(&[
+            "trace",
+            "show",
+            "run-17-3",
+            "--chunk",
+            "member-7/1/0/0/0/119/0",
+        ])
+        .command
+        {
+            Command::Trace {
+                command: Some(TraceCommand::Show { chunk, spatial, .. }),
+                ..
+            } => {
+                assert_eq!(chunk.as_deref(), Some("member-7/1/0/0/0/119/0"));
+                assert!(!spatial);
+            }
+            _ => panic!("expected trace show"),
+        }
+        match parse(&["trace", "show", "run-17-3", "--spatial"]).command {
+            Command::Trace {
+                command: Some(TraceCommand::Show { chunk, spatial, .. }),
+                ..
+            } => {
+                assert_eq!(chunk, None);
+                assert!(spatial);
+            }
+            _ => panic!("expected trace show"),
+        }
+
+        // One depth at a time: two flags would otherwise both apply.
         assert!(try_parse(&["trace", "show", "r", "--phases", "--phase", "wire"]).is_err());
+        assert!(try_parse(&["trace", "show", "r", "--chunk", "1/0/0/0/0/0", "--spatial"]).is_err());
+        assert!(try_parse(&["trace", "show", "r", "--spatial", "--phases"]).is_err());
+        assert!(
+            try_parse(&[
+                "trace",
+                "show",
+                "r",
+                "--chunk",
+                "1/0/0/0/0/0",
+                "--phase",
+                "wire"
+            ])
+            .is_err()
+        );
     }
 
     #[test]

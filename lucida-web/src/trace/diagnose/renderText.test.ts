@@ -161,13 +161,111 @@ describe("the default rendering", () => {
       expect(large.length).toBeLessThan(small.length + 200);
     }
   });
+
+  it("names the worst row's chunk and the spatial summary among the commands", () => {
+    const { text } = renderDiagnostic(DOCUMENTS.healthy);
+    expect(text).toContain("lucida trace show local-healthy --chunk member-7/1/0/0/0/119/0");
+    expect(text).toContain("lucida trace show local-healthy --spatial");
+  });
+});
+
+describe("the chunk depth", () => {
+  it("prints the phase history, the queue rank and the age of the chunk", () => {
+    const { text } = renderDiagnostic(DOCUMENTS.healthy, { depth: "chunk" });
+
+    expect(text).toContain("CHUNK     member-7/1/0/0/0/119/0");
+    expect(text).toContain("the row that spent longest in browser.wire");
+    expect(text).toContain("plan 0.4 → queue 2 → wire 240 → decode 0.9 → upload 1.2 → present 2 ms");
+    expect(text).toContain("9 ahead at admission");
+    expect(text).toContain("waited 2 ms");
+    expect(text).toContain("age 246.5 ms");
+    expect(text).toContain("complete");
+    // The chunk reading replaces the findings block.
+    expect(text).not.toContain("FINDINGS");
+    expect(text).toContain("cannot see:");
+  });
+
+  it("says the chunk is not in the run", () => {
+    const document = diagnoseRun(RUNS.healthy, { chunk: "1/0/0/0/999/0" });
+    const { text } = renderDiagnostic(document, { depth: "chunk" });
+    expect(text).toContain("CHUNK     1/0/0/0/999/0");
+    expect(text).toContain("not in this run");
+    expect(text).toContain("never dispatched");
+  });
+
+  it("lists a chunk still in the queue with its rank now", () => {
+    const document = diagnoseRun(RUNS.saturated, { chunk: "1/0/0/0/300/0" });
+    const { text } = renderDiagnostic(document, { depth: "chunk" });
+    expect(text).toContain("in queue");
+    expect(text).toContain("170 ahead at admission");
+    expect(text).toContain("not dispatched");
+  });
+
+  it("fits the default budget on every fixture and when a key matches a whole collection", () => {
+    for (const [name, document] of Object.entries(DOCUMENTS)) {
+      const rendered = renderDiagnostic(document, { depth: "chunk" });
+      expect(rendered.text.split("\n").length, name).toBeLessThanOrEqual(DEFAULT_MAX_LINES);
+      expect(new TextEncoder().encode(rendered.text).length, name).toBeLessThanOrEqual(DEFAULT_MAX_BYTES);
+    }
+    const rendered = renderDiagnostic(diagnoseRun(collectionRun(), { chunk: "1/0/0/0/0/0" }), {
+      depth: "chunk",
+    });
+    expect(rendered.text.split("\n").length).toBeLessThanOrEqual(DEFAULT_MAX_LINES);
+    expect(rendered.droppedLines).toBeGreaterThan(0);
+    expect(rendered.text).toContain("name the entity");
+  });
+});
+
+describe("the spatial depth", () => {
+  it("prints counts and boxes per state and level", () => {
+    const { text } = renderDiagnostic(DOCUMENTS.saturated, { depth: "spatial" });
+
+    expect(text).toContain("SPATIAL   400 rows");
+    expect(text).toMatch(/queue\s+L1 detail\s+n=\s*140/);
+    expect(text).toMatch(/complete\s+L1 detail\s+n=\s*260/);
+    expect(text).toContain("y 260..399");
+    expect(text).toContain("y 0..259");
+    expect(text).toContain("chunk indices");
+    expect(text).toContain("cannot show:");
+    expect(text).not.toContain("FINDINGS");
+  });
+
+  it("names the dataset only when the run has more than one", () => {
+    const groupLines = (text: string) => text.split("\n").filter((line) => /^ {2,3}\d+ {2}/.test(line));
+
+    const one = renderDiagnostic(DOCUMENTS.healthy, { depth: "spatial" }).text;
+    expect(groupLines(one)).toHaveLength(1);
+    expect(groupLines(one)[0]).not.toContain(" ds ");
+
+    const rows = [
+      ...RUNS.healthy.rows.slice(0, 3),
+      ...RUNS.healthy.rows.slice(3, 6).map((row) => ({ ...row, datasetId: "other" })),
+    ];
+    const two = renderDiagnostic(
+      diagnoseRun(makeRun({ header: { durationUs: 330 * MS, datasetIds: ["ds", "other"] }, rows })),
+      { depth: "spatial" },
+    ).text;
+    expect(groupLines(two)).toHaveLength(2);
+    expect(groupLines(two)[0]).toContain(" ds ");
+    expect(groupLines(two)[1]).toContain(" other ");
+  });
+
+  it("stays under 30 lines when there are more groups than fit", () => {
+    const rendered = renderDiagnostic(diagnoseRun(manyGroupsRun()), { depth: "spatial" });
+    const lines = rendered.text.split("\n");
+    expect(lines.length).toBeLessThanOrEqual(DEFAULT_MAX_LINES);
+    expect(rendered.droppedLines).toBeGreaterThan(0);
+    expect(rendered.text).toContain("lines dropped to fit");
+    // In-flight groups sort first, so they survive the drop.
+    expect(rendered.text).toMatch(/\bwire\b/);
+  });
 });
 
 describe("parity with the document", () => {
   it("prints no number that does not exist in the JSON", () => {
     for (const [name, document] of Object.entries(DOCUMENTS)) {
       const inDocument = new Set(numericTokens(JSON.stringify(document)));
-      for (const depth of ["summary", "phases"] as const) {
+      for (const depth of ["summary", "phases", "chunk", "spatial"] as const) {
         const { text } = renderDiagnostic(document, { depth });
         for (const token of numericTokens(text)) {
           expect(inDocument.has(token), `${name}/${depth}: ${token} is printed but not in the document`).toBe(
@@ -258,6 +356,34 @@ function sameContentAsText(document: DiagnosticDocument) {
     })),
     next: document.next,
   };
+}
+
+/** One chunk key across forty tiles, the shape a bare key meets on a collection. */
+function collectionRun() {
+  const rows = Array.from({ length: 40 }, (_, i) => ({
+    ...healthyLocalOpen().rows[i],
+    entityId: `tile-${i}`,
+    y: 0,
+    chunkKey: "1/0/0/0/0/0",
+  }));
+  return makeRun({ header: { runId: "collection", durationUs: 330 * MS }, rows });
+}
+
+/** Rows in every state at six levels: more groups than thirty lines can hold. */
+function manyGroupsRun() {
+  const template = healthyLocalOpen().rows[0];
+  const rows = [];
+  for (let level = 0; level < 6; level += 1) {
+    for (const [outcome, phases] of [
+      ["complete", template.phases],
+      ["retired", { plan: template.phases.plan, queue: template.phases.queue }],
+      ["in-flight", { plan: template.phases.plan, queue: template.phases.queue }],
+      ["in-flight", { plan: template.phases.plan }],
+    ] as const) {
+      rows.push({ ...template, level, outcome, phases, chunkKey: `${level}/0/0/0/0/0` });
+    }
+  }
+  return makeRun({ header: { runId: "many-groups", durationUs: 330 * MS }, rows });
 }
 
 /** The same run at two row counts. Identical rows, so only the count moves. */
