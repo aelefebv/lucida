@@ -467,6 +467,44 @@ export function quietRun(): TraceRun {
 }
 
 /**
+ * A 2 s open whose first half is healthy and whose second half stalls: sixty
+ * fast rows, then forty whose decode runs eight times over its ceiling. The
+ * whole run reads as a decode stall; a window over the first half reads as
+ * clear. The fixture for the window scoping: the verdict has to move when the
+ * window excludes the stall, and stay put when it does not.
+ */
+export function lateStallOpen(): TraceRun {
+  const rows: TraceRow[] = [];
+  const fast = { plan: 400, queue: 2 * MS, wire: 18 * MS, decode: 900, upload: 1_200, present: 2 * MS };
+  for (let i = 0; i < 60; i += 1) {
+    rows.push(makeRow({ startUs: 40 * MS + i * 10 * MS, durations: fast, rid: i }, i));
+  }
+  for (let i = 0; i < 40; i += 1) {
+    rows.push(
+      makeRow(
+        {
+          startUs: 1_100 * MS + i * 10 * MS,
+          durations: { ...fast, decode: 400 * MS },
+          rid: 60 + i,
+        },
+        60 + i,
+      ),
+    );
+  }
+  return makeRun({
+    header: { runId: "late-stall", durationUs: 2_000 * MS },
+    rows,
+    // In-flight varies, so the one limiter is neither pinned nor backlogged
+    // and the windowed findings are the rows' alone.
+    readings: Array.from({ length: 20 }, (_, i) =>
+      makeReading(i * 100 * MS, { queueDepth: 0, inFlight: (i % 3) + 1, frameTimeUs: 3_000 }),
+    ),
+    datasetOpens: [{ requestId: "open-1", startUs: 5 * MS, endUs: 35 * MS }],
+    serverRows: [makeMetadataRow("open-1", 1 * MS, 4 * MS, "cache-hit")],
+  });
+}
+
+/**
  * The coverage regression fixture: a 3 s run whose first 2.6 s are before any
  * instrument existed. #893's critical path started at the first recorded row
  * and reported `100% accounted` for exactly this shape.

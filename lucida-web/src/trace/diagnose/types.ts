@@ -158,6 +158,12 @@ export interface CriticalPath {
   target: string;
   /** Run-relative milliseconds of the target, null when the run never reached one. */
   targetAtMs: number | null;
+  /**
+   * Where the chain begins on the run's clock: run start, or the start of the
+   * window the document reads. Every share below is of the stretch from here
+   * to the target.
+   */
+  fromMs: number;
   /** Why no chain could be built. Null on a chain. */
   undefinedReason: string | null;
   segments: PathSegment[];
@@ -294,6 +300,19 @@ export interface DiagnosticCoverage {
     rowsTotal: number;
     recordedPct: number;
   } | null;
+  /**
+   * What reading a window did to the rows, or null when the document reads
+   * the whole run. A row that crosses a window's edge counts for the part
+   * inside. A row with no position on the run's clock cannot be shown to be
+   * inside a narrower window at all and is left out. Both are stated here,
+   * next to the other things this reading could not measure, because a
+   * windowed rollup that looked like a whole one would be read as one.
+   */
+  window: {
+    clippedRows: number;
+    unplacedRows: number;
+    statement: string;
+  } | null;
   /** Limits of the instrument, not of this run. Identical on every run, including clean ones. */
   limits: readonly CoverageLimit[];
   /** Counted-not-timed phase totals, so nobody looks for a duration that was never measurable. */
@@ -345,6 +364,41 @@ export interface Verdict {
   kind: "clear" | "stall" | "saturated" | "unsettled";
   text: string;
   confidence: Confidence;
+}
+
+/**
+ * A window as a caller asks for it: run-relative milliseconds, start
+ * inclusive. The derivation clamps it to the run and states what it read in
+ * {@link DiagnosticWindow}, so a caller who asked past the end is told where
+ * the run ended rather than refused.
+ */
+export interface WindowRequest {
+  startMs: number;
+  endMs: number;
+}
+
+/**
+ * The stretch of the run's clock this document reads.
+ *
+ * A time interval on the run's clock, and nothing else: the phase rollup,
+ * the findings and the critical path are all of this interval, and the
+ * coverage block's denominator is its span rather than the run's. Brushing
+ * the interval in the monitor and the CLI's window flag both produce a
+ * document with this set, from the same derivation.
+ */
+export interface DiagnosticWindow {
+  startMs: number;
+  endMs: number;
+  /** `endMs - startMs`: the denominator behind every share and every concurrency factor. */
+  spanMs: number;
+  /** The run's own wall clock, so the window reads as a part of it. */
+  ofWallMs: number;
+  /**
+   * True when the window is the whole run. A whole-run window leaves nothing
+   * out and reads exactly as no window would. A narrower one cannot place a
+   * row that has no position, and says so in the coverage block.
+   */
+  whole: boolean;
 }
 
 /**
@@ -556,6 +610,12 @@ export interface DiagnosticDocument {
   traceSchemaVersion: number;
   verdict: Verdict;
   run: RunIdentity;
+  /**
+   * The interval of the run this document reads, or null for the whole run.
+   * Stated in the header because it changes what every number below means:
+   * a rollup over one second of a twelve-second run is not the run's rollup.
+   */
+  window: DiagnosticWindow | null;
   coverage: DiagnosticCoverage;
   /**
    * The run's one attribution, hoisted out of the lead finding. A run has a
