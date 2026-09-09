@@ -7,10 +7,12 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { buildLiveView } from "./liveModel.ts";
+import { buildLiveView, buildProvisionalView, PROVISIONAL_CAVEAT } from "./liveModel.ts";
 import { formatCause } from "./monitorModel.ts";
+import { makeReadingSeries } from "../trace/diagnose/fixtures.ts";
+import { deriveProvisional } from "../trace/diagnose/provisional.ts";
 import type { LiveProgress } from "../trace/liveProgress.ts";
-import { PHASES } from "../trace/types.ts";
+import { PHASES, type TraceReading } from "../trace/types.ts";
 
 function progress(overrides: Partial<LiveProgress> = {}): LiveProgress {
   return {
@@ -101,5 +103,73 @@ describe("what it withholds", () => {
     expect(buildLiveView(progress()).cause).toBe(
       formatCause({ epoch: "content", dirtyKind: "interactive", source: "dataset_open_request" }),
     );
+  });
+});
+
+describe("the provisional reading, as the live view shows it (#1057)", () => {
+  const readings = (fromUs: number, toUs: number, make: (i: number) => Partial<TraceReading>) =>
+    makeReadingSeries(fromUs, toUs, 100_000, make);
+
+  it("carries the label, the statement, the window and the rows it did not see", () => {
+    const reading = deriveProvisional({
+      progress: progress({ elapsedMs: 12_300 }),
+      atUs: 12_300_000,
+      readings: readings(7_000_000, 12_300_000, () => ({ inFlight: 24, queueDepth: 20_000 })),
+      readingsDropped: 0,
+    });
+
+    const view = buildProvisionalView(reading);
+
+    expect(view.label).toBe("provisional");
+    expect(view.statement).toBe(reading.statement);
+    expect(view.window).toBe("the last 5.0 s (7.3 s to 12.3 s of the run)");
+    expect(view.readings).toBe("51 reading(s) in the window");
+    expect(view.quiescence).toBe("chunks_in_flight");
+    expect(view.rows).toContain("walked none of the 1,000 rows");
+    expect(view.caveat).toBe(PROVISIONAL_CAVEAT);
+    expect(view.caveat).toContain("Not a verdict");
+  });
+
+  it("selects the top finding and spells its observation as the text does", () => {
+    const reading = deriveProvisional({
+      progress: progress(),
+      atUs: 12_300_000,
+      readings: readings(7_000_000, 12_300_000, () => ({ inFlight: 24, queueDepth: 20_000 })),
+      readingsDropped: 0,
+    });
+
+    const view = buildProvisionalView(reading);
+
+    expect(view.finding).toEqual({
+      severity: "saturated",
+      subject: "scheduler.admission",
+      detail: "20,000 pending · cap 24 · pinned 100% · net drain 0/s",
+      rule: "queue.backlog",
+      basis: reading.topFinding!.basis,
+    });
+  });
+
+  it("says the run so far when the window reaches back to run start, and has no finding to show on a quiet one", () => {
+    const reading = deriveProvisional({
+      progress: progress({ elapsedMs: 800 }),
+      atUs: 800_000,
+      readings: readings(0, 800_000, (i) => ({ inFlight: 1 + (i % 3), queueDepth: 0 })),
+      readingsDropped: 0,
+    });
+
+    const view = buildProvisionalView(reading);
+
+    expect(view.window).toBe("the run so far (800 ms)");
+    expect(view.finding).toBeNull();
+  });
+
+  it("reports the page's own predicate rather than deciding whether the run is healthy", () => {
+    const reading = deriveProvisional({
+      progress: progress({ quiescent: true, quiescenceReason: "quiescent" }),
+      atUs: 3_000_000,
+      readings: [],
+      readingsDropped: 0,
+    });
+    expect(buildProvisionalView(reading).quiescence).toContain("quiescent");
   });
 });

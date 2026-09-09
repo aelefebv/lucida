@@ -19,7 +19,12 @@
 
 import { useCallback, useEffect, useState } from "react";
 import "./MonitorPage.css";
-import { buildLiveView, type LiveView } from "./liveModel.ts";
+import {
+  buildLiveView,
+  buildProvisionalView,
+  type LiveView,
+  type ProvisionalView,
+} from "./liveModel.ts";
 import {
   buildMonitorView,
   formatMs,
@@ -33,10 +38,12 @@ import {
   downloadTraceFile,
   readMonitor,
   readProgress,
+  readProvisional,
   stopRun,
   type MonitorSnapshot,
 } from "./monitorSource.ts";
 import type { LiveProgress } from "../trace/liveProgress.ts";
+import type { ProvisionalReading } from "../trace/diagnose/provisional.ts";
 import type { PhaseRollup } from "../trace/diagnose/types.ts";
 
 export interface MonitorPageProps {
@@ -49,8 +56,9 @@ export interface MonitorPageProps {
  *
  * Not a frame cadence. The counters move in thousands and the bar changes
  * shape in tenths of a second, so twice a second is as fast as a reader can
- * use — and the read walks the run's rows, which is main-thread time taken
- * from the pipeline being watched.
+ * use. The read itself is a copy of the recorder's counters and the window's
+ * readings, and walks no row, so the cadence is set by the reader rather
+ * than by the cost.
  */
 const LIVE_POLL_MS = 500;
 
@@ -58,6 +66,11 @@ export function MonitorPage({ onClose }: MonitorPageProps) {
   // A run that is still open is watched, not read: reading closes the
   // interval, and what somebody came here to see is still happening.
   const [live, setLive] = useState<LiveProgress | null>(readProgress);
+  // The provisional reading over the same run (#1057), taken on the same
+  // poll, so the statement and the counters describe one instant.
+  const [reading, setReading] = useState<ProvisionalReading | null>(() =>
+    live ? readProvisional() : null,
+  );
   // Reading is what closes the run in progress, so the page does it once on
   // mount and once per control — not twice for one answer, and not at all
   // while a run is open.
@@ -76,6 +89,7 @@ export function MonitorPage({ onClose }: MonitorPageProps) {
     setDrill(null);
     setSaved(null);
     setLive(null);
+    setReading(null);
     setSnapshot(readMonitor(next));
   }, []);
 
@@ -88,8 +102,12 @@ export function MonitorPage({ onClose }: MonitorPageProps) {
     if (watchedRunId === null) return;
     const timer = setInterval(() => {
       const next = readProgress();
-      if (next && next.runId === watchedRunId) setLive(next);
-      else readRun(watchedRunId);
+      if (next && next.runId === watchedRunId) {
+        setLive(next);
+        setReading(readProvisional());
+      } else {
+        readRun(watchedRunId);
+      }
     }, LIVE_POLL_MS);
     return () => clearInterval(timer);
   }, [watchedRunId, readRun]);
@@ -109,6 +127,7 @@ export function MonitorPage({ onClose }: MonitorPageProps) {
     setDrill(null);
     setSaved(null);
     setLive(readProgress());
+    setReading(readProvisional());
   }, []);
 
   const stopAndAnalyse = useCallback(() => {
@@ -185,7 +204,7 @@ export function MonitorPage({ onClose }: MonitorPageProps) {
       <p className="monitor-observation-only">
         Observation only — nothing on this page changes what the pipeline does.{" "}
         {live
-          ? "This run is still open, so it is being watched rather than read: reading would close it, which is why saving and choosing another run are not offered until it ends. Watching costs a walk over the run's rows twice a second, on the same thread the run is using."
+          ? "This run is still open, so it is being watched rather than read: reading would close it, which is why saving and choosing another run are not offered until it ends. Watching reads the recorder's own counters and the last few seconds of per-tick readings twice a second, and walks none of the run's rows."
           : "Opening the monitor reads the recording, and reading closes the run in progress: an interval has to end before it can be analysed."}
       </p>
 
@@ -205,7 +224,10 @@ export function MonitorPage({ onClose }: MonitorPageProps) {
       )}
 
       {live ? (
-        <LiveReport view={buildLiveView(live)} />
+        <LiveReport
+          view={buildLiveView(live)}
+          reading={reading ? buildProvisionalView(reading) : null}
+        />
       ) : read?.ok ? (
         <MonitorReport view={buildMonitorView(read.document)} drill={drill} onDrill={setDrill} />
       ) : (
@@ -222,21 +244,25 @@ export function MonitorPage({ onClose }: MonitorPageProps) {
  *
  * What is here is what a run can honestly say before it ends: how much work
  * it has made, how much of it reached the screen, and where the rest is
- * sitting. What is deliberately absent is the whole report — a headline that
- * changes between two glances is not a headline, and the attribution
- * back-walk needs an end to walk back from.
+ * sitting, plus a provisional reading over a trailing window (#1057). The
+ * whole report is absent on purpose. A headline that changes between two
+ * glances is not a headline, and the attribution back-walk needs an end to
+ * walk back from.
  *
- * There is no window and no scrolling: every counter is cumulative from run
- * start, which is what stops the interesting part of an open going past
- * before anyone looks at it.
+ * The counters have no window and no scrolling: every one is cumulative
+ * from run start, which is what stops the interesting part of an open going
+ * past before anyone looks at it. The provisional reading is the one thing
+ * here with a window, and it says which.
  */
-function LiveReport({ view }: { view: LiveView }) {
+function LiveReport({ view, reading }: { view: LiveView; reading: ProvisionalView | null }) {
   return (
     <section className="monitor-section monitor-live" aria-labelledby="monitor-live-heading">
       <h2 id="monitor-live-heading">Run in progress</h2>
       <p className="monitor-note" data-testid="monitor-live-status">
         {view.cause} · running {view.elapsed} · {view.quiescence}
       </p>
+
+      <ProvisionalBlock reading={reading} />
 
       <dl className="monitor-live-counters" data-testid="monitor-live-counters">
         {view.counters.map((counter) => (
@@ -287,6 +313,65 @@ function LiveReport({ view }: { view: LiveView }) {
         let it reach quiescence, or stop it here.
       </p>
     </section>
+  );
+}
+
+/**
+ * The provisional reading (#1057), labelled provisional wherever it appears.
+ * It has no verdict callout on purpose: a moving number must never be read
+ * as a conclusion. Every line is a selection from the object the watch
+ * stream carries, so the dock and an agent cannot disagree.
+ */
+function ProvisionalBlock({ reading }: { reading: ProvisionalView | null }) {
+  return (
+    <div className="monitor-provisional" data-testid="monitor-provisional">
+      <h3>
+        Provisional reading{" "}
+        <span className="monitor-chip monitor-chip-provisional" data-testid="monitor-provisional-label">
+          provisional
+        </span>
+      </h3>
+      {reading ? (
+        <>
+          <p className="monitor-provisional-statement" data-testid="monitor-provisional-statement">
+            {reading.statement}
+          </p>
+          {reading.finding ? (
+            <p
+              className={`monitor-provisional-finding monitor-provisional-${reading.finding.severity}`}
+              data-testid="monitor-provisional-finding"
+            >
+              <span className="monitor-chip">{reading.finding.severity}</span>{" "}
+              <strong>{reading.finding.subject}</strong> {reading.finding.detail}{" "}
+              <span className="monitor-chip monitor-chip-rule">{reading.finding.rule}</span>
+              <span className="monitor-chip monitor-chip-provisional">provisional</span>
+              <br />
+              <span className="monitor-dim">basis: {reading.finding.basis}</span>
+            </p>
+          ) : (
+            <p className="monitor-note" data-testid="monitor-provisional-finding">
+              No threshold crossed in the window (provisional).
+            </p>
+          )}
+          <ul className="monitor-numbers" data-testid="monitor-provisional-facts">
+            <li>
+              <span className="monitor-dim">window</span> {reading.window} · {reading.readings}
+            </li>
+            <li>
+              <span className="monitor-dim">page</span> {reading.quiescence}
+            </li>
+            <li>
+              <span className="monitor-dim">rows</span> {reading.rows}
+            </li>
+          </ul>
+          <p className="monitor-note">{reading.caveat}</p>
+        </>
+      ) : (
+        <p className="monitor-note" data-testid="monitor-provisional-empty">
+          No provisional reading yet — it appears on the next poll.
+        </p>
+      )}
+    </div>
   );
 }
 

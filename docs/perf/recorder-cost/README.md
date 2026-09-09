@@ -232,6 +232,18 @@ Two notes on reading that table:
   forced into one tick**, which the real pipeline never does — wire, decode,
   upload and present land on later ticks as fetches settle. They are therefore
   a pessimistic bound on the marginal per-tick cost, not an estimate of it.
+- **The live tally moved onto the write path (#1057).** The live view's read
+  was a walk over every row of the open run, gated for linearity; the
+  provisional reading, the watch stream and the HUD read at the tick cadence
+  and are forbidden a row walk by [ADR 0049][0049] as amended, so the row
+  table now keeps the per-phase occupancy and the outcome counts as it
+  writes. That is a few typed-array increments per boundary, spent from the
+  write budget above. Measured on one host, same code either side: the
+  2,943-chunk burst went from 5.8 to 6.5 ns/event, the matched-shape tick
+  from 3.3 to 3.8 µs, and the live read from 254 µs at 2,000 rows and 2.1 ms
+  at the cap to about 1 µs at either. The gates log the figures each run;
+  the provisional reading's own ceilings live in
+  `lucida-web/src/trace/provisionalCost.perf.test.ts`.
 
 **What has to happen for the obligation to be discharged.** When [#918]
 (`debugStats.enabled` and its read sites) and [#919] (`DebugPanel.tsx`) land,

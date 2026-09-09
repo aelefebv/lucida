@@ -959,6 +959,13 @@ pub fn read_run_file(path: &Path) -> Result<TraceRunFile, CliError> {
 /// share one flag. Coverage never fails a gate: 87% of a healthy local cold
 /// open is pre-instrument boot, so a gate that fires on coverage fires on every
 /// green run.
+///
+/// The gate reads two things and nothing else: the header's settled flag and
+/// the closed run's verdict. A provisional reading, the statement the seam's
+/// `provisional()` makes over a moving window of an open run, is not one of
+/// them: it carries no verdict, and whatever it said while the run was open,
+/// a saturated limiter or a stall in its window, cannot fail a build. Only
+/// the verdict of a closed run is one the gate trusts.
 pub fn gate_failure(file: &TraceRunFile) -> Option<String> {
     if !file.header.settled {
         return Some(format!(
@@ -1834,6 +1841,39 @@ mod tests {
             "quiescent",
         );
         assert_eq!(gate_failure(&clear), None);
+    }
+
+    /// A provisional reading is a statement over a moving window of an open
+    /// run, and the gate trusts only the verdict of a closed one. No run
+    /// file carries a reading today; this pins that one riding beside a
+    /// clear verdict, whatever its window saw, changes nothing. The other
+    /// half of the proof is the recorder's: a window that reads saturated
+    /// closes to a clear verdict, which is the field this gate reads.
+    #[test]
+    fn the_gate_ignores_a_stall_in_a_provisional_window_beside_a_clear_verdict() {
+        let provisional = json!({
+            "provisional": true,
+            "window": { "startMs": 7300, "endMs": 12300, "spanMs": 5000 },
+            "topFinding": {
+                "severity": "saturated",
+                "rule": "queue.backlog",
+                "subject": "scheduler.admission"
+            },
+            "findings": [
+                { "severity": "stall", "rule": "share.dominant", "subject": "render.frame" },
+                { "severity": "saturated", "rule": "queue.backlog", "subject": "scheduler.admission" }
+            ],
+            "statement": "provisional — over the last 5000 ms, scheduler.admission held 19,800 requests behind a cap of 24 and the backlog is not shrinking"
+        });
+        let file = run_file(
+            json!({
+                "verdict": { "kind": "clear", "text": "no stall — nothing crossed a threshold" },
+                "provisional": provisional
+            }),
+            true,
+            "quiescent",
+        );
+        assert_eq!(gate_failure(&file), None);
     }
 
     /// The hold window is baked into every duration the run reports, so it

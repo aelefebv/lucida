@@ -21,7 +21,7 @@ import type { ChunkRequest, RequestPlan } from "../pipeline/planning/index.ts";
 import { emptyPlanStats } from "../pipeline/planning/index.ts";
 import { installTraceSeam, resolveGpuIdentity } from "./seam.ts";
 import { traceRecorder } from "./recorder.ts";
-import { createQuiescenceState } from "./quiescence.ts";
+import { createQuiescenceState, evaluateQuiescence } from "./quiescence.ts";
 import { TRACE_SCHEMA_VERSION } from "./types.ts";
 import { initialPlanningState } from "../pipeline/planning/index.ts";
 
@@ -535,6 +535,46 @@ describe("the trace seam", () => {
     seam.closeRun();
     expect(seam.progress()).toBeNull();
     expect(seam.diagnose(progress.runId).runId).toBe(progress.runId);
+  });
+
+  it("produces a provisional reading as JSON and as text without closing the run", async () => {
+    const seam = installTraceSeam();
+    expect(seam.provisional()).toBeNull();
+    expect(seam.provisionalText()).toBeNull();
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    const source = new ControlledSource();
+    const cache = new CpuCache(source, makeDecode());
+    cache.submit(makePlan([makeRequest()]));
+    await flush();
+    traceRecorder.noteReading(0, 1, 2_000, 8);
+    traceRecorder.noteQuiescence(
+      evaluateQuiescence(Object.assign(createQuiescenceState(), { inFlight: 1 }), performance.now()),
+    );
+
+    const reading = seam.provisional()!;
+    expect(reading.provisional).toBe(true);
+    expect(reading.runId).toBe(seam.progress()!.runId);
+    expect(reading.occupancy.inFlight).toBe(1);
+    expect(reading.rows.made).toBe(1);
+    expect(reading.rows.walked).toBe(0);
+    expect(reading.quiescence.reason).toBe("chunks_in_flight");
+    expect(reading.statement.startsWith("provisional")).toBe(true);
+    expect("verdict" in reading).toBe(false);
+    // An agent over CDP and the watch stream both get the JSON of this
+    // object, so the round trip must lose nothing.
+    expect(JSON.parse(JSON.stringify(reading))).toEqual(reading);
+
+    const text = seam.provisionalText()!;
+    expect(text.split("\n")[0]).toContain(`lucida trace ${reading.runId} — PROVISIONAL:`);
+    expect(text).toContain("not a verdict");
+
+    expect(seam.runState.open).toBe(true);
+    expect(seam.provisional({ windowMs: 1_000 })!.window.requestedMs).toBe(1_000);
+
+    seam.closeRun();
+    expect(seam.provisional()).toBeNull();
+    expect("provisional" in seam.diagnose(reading.runId)).toBe(false);
   });
 
   it("stops a run without exporting it", () => {

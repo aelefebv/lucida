@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { installTraceSeam } from "../trace/seam.ts";
 import { traceRecorder } from "../trace/recorder.ts";
 import { createQuiescenceState } from "../trace/quiescence.ts";
-import { readMonitor, traceFile } from "./monitorSource.ts";
+import { readMonitor, readProvisional, traceFile } from "./monitorSource.ts";
 
 /**
  * Stands in for the render loop, which registers the real one. A run cannot
@@ -39,6 +39,26 @@ beforeEach(() => {
 afterEach(() => {
   traceRecorder.reset();
   delete window.lucidaTrace;
+});
+
+describe("reading the run in progress", () => {
+  it("takes the provisional reading through the seam without closing the run (#1057)", () => {
+    registerEnvironment();
+    installTraceSeam();
+    expect(readProvisional()).toBeNull();
+
+    traceRecorder.openRun(OPEN);
+    const reading = readProvisional();
+
+    expect(reading?.provisional).toBe(true);
+    expect(traceRecorder.isRunOpen).toBe(true);
+    // The same object the seam hands an agent, so the two cannot disagree.
+    expect(reading?.runId).toBe(window.lucidaTrace!.provisional()!.runId);
+  });
+
+  it("reads null where there is no seam, as progress does", () => {
+    expect(readProvisional()).toBeNull();
+  });
 });
 
 describe("reading a run", () => {

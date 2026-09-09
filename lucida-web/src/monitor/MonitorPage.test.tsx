@@ -12,8 +12,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { diagnoseRun } from "../trace/diagnose/diagnose.ts";
-import { coldRemoteOpen, healthyLocalOpen, saturatedReopen } from "../trace/diagnose/fixtures.ts";
-import { PHASES, type TraceRun } from "../trace/types.ts";
+import {
+  coldRemoteOpen,
+  healthyLocalOpen,
+  makeReadingSeries,
+  saturatedReopen,
+} from "../trace/diagnose/fixtures.ts";
+import { deriveProvisional, type ProvisionalReading } from "../trace/diagnose/provisional.ts";
+import { PHASES, type TraceReading, type TraceRun } from "../trace/types.ts";
 import type { LiveProgress } from "../trace/liveProgress.ts";
 import type { MonitorRead, MonitorRunSummary } from "./monitorSource.ts";
 
@@ -36,15 +42,40 @@ function progress(overrides: Partial<LiveProgress> = {}): LiveProgress {
   };
 }
 
+/**
+ * A provisional reading over the run in progress, derived the way the
+ * recorder derives one: from the progress above and a window of readings
+ * pinned at a cap with a backlog that is not shrinking.
+ */
+function provisional(
+  overrides: Partial<LiveProgress> = {},
+  shape: (index: number) => Partial<TraceReading> = () => ({ inFlight: 24, queueDepth: 20_000 }),
+): ProvisionalReading {
+  return deriveProvisional({
+    progress: progress(overrides),
+    atUs: 4_200_000,
+    readings: makeReadingSeries(0, 4_200_000, 100_000, shape),
+    readingsDropped: 0,
+  });
+}
+
 const read = vi.hoisted(() => ({ value: null as MonitorRead | null }));
 const runs = vi.hoisted(() => ({ value: [] as MonitorRunSummary[] }));
 const live = vi.hoisted(() => ({ value: null as unknown }));
+const reading = vi.hoisted(() => ({ value: null as unknown }));
 const downloadTraceFile = vi.hoisted(() => vi.fn(() => "lucida-run-1.trace.json"));
 const readMonitor = vi.hoisted(() => vi.fn(() => ({ read: read.value, runs: runs.value })));
 const readProgress = vi.hoisted(() => vi.fn(() => live.value));
-const stopRun = vi.hoisted(() => vi.fn(() => { live.value = null; }));
+const readProvisional = vi.hoisted(() => vi.fn(() => reading.value));
+const stopRun = vi.hoisted(() => vi.fn(() => { live.value = null; reading.value = null; }));
 
-vi.mock("./monitorSource.ts", () => ({ readMonitor, downloadTraceFile, readProgress, stopRun }));
+vi.mock("./monitorSource.ts", () => ({
+  readMonitor,
+  downloadTraceFile,
+  readProgress,
+  readProvisional,
+  stopRun,
+}));
 
 const { MonitorPage } = await import("./MonitorPage.tsx");
 
@@ -57,9 +88,11 @@ beforeEach(() => {
   downloadTraceFile.mockClear();
   readMonitor.mockClear();
   readProgress.mockClear();
+  readProvisional.mockClear();
   stopRun.mockClear();
   runs.value = [];
   live.value = null;
+  reading.value = null;
 });
 
 afterEach(cleanup);
@@ -318,6 +351,68 @@ describe("a run that is still open (#937)", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("shows a provisional reading, labelled provisional, with its top finding and its window (#1057)", () => {
+    live.value = progress();
+    reading.value = provisional();
+    render(<MonitorPage onClose={() => {}} />);
+
+    expect(screen.getByTestId("monitor-provisional-label").textContent).toBe("provisional");
+    const statement = screen.getByTestId("monitor-provisional-statement").textContent ?? "";
+    expect(statement.startsWith("provisional")).toBe(true);
+    expect(statement).toContain("scheduler.admission held 20,000 requests behind a cap of 24");
+
+    const finding = screen.getByTestId("monitor-provisional-finding");
+    expect(finding.textContent).toContain("saturated");
+    expect(finding.textContent).toContain("scheduler.admission");
+    expect(finding.textContent).toContain("queue.backlog");
+    expect(finding.textContent).toContain("provisional");
+
+    const facts = screen.getByTestId("monitor-provisional-facts").textContent ?? "";
+    expect(facts).toContain("the run so far (4.2 s)");
+    expect(facts).toContain("walked none of the 1,000 rows");
+    expect(facts).toContain("chunks_in_flight");
+
+    const headings = screen.getAllByRole("heading", { level: 2 }).map((node) => node.textContent);
+    expect(headings).not.toContain("Verdict");
+    expect(screen.queryByTestId(/^monitor-callout-/)).toBeNull();
+    // Reading is what closes a run, so the page has not read.
+    expect(readMonitor).not.toHaveBeenCalled();
+  });
+
+  it("updates the provisional reading on the poll", () => {
+    vi.useFakeTimers();
+    try {
+      live.value = progress();
+      reading.value = provisional();
+      render(<MonitorPage onClose={() => {}} />);
+      expect(screen.getByTestId("monitor-provisional-finding").textContent).toContain("saturated");
+
+      // The backlog drains and in-flight wanders below its peak: the next
+      // poll reads a window with nothing over a threshold, and the finding
+      // goes with it.
+      reading.value = provisional({}, (i) => ({ inFlight: 1 + (i % 3), queueDepth: 0 }));
+      act(() => {
+        vi.advanceTimersByTime(600);
+      });
+
+      expect(readProvisional).toHaveBeenCalled();
+      expect(screen.getByTestId("monitor-provisional-finding").textContent).toContain(
+        "No threshold crossed in the window (provisional).",
+      );
+      expect(screen.getByTestId("monitor-provisional-label").textContent).toBe("provisional");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("says when no reading has been taken yet rather than showing an empty one", () => {
+    live.value = progress();
+    render(<MonitorPage onClose={() => {}} />);
+
+    expect(screen.getByTestId("monitor-provisional-empty")).toBeTruthy();
+    expect(screen.getByTestId("monitor-provisional-label").textContent).toBe("provisional");
   });
 
   it("counts from run start rather than following a window", () => {

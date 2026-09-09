@@ -15,6 +15,7 @@
  */
 
 import { diagnoseDocument } from "../trace/diagnose/diagnose.ts";
+import type { ProvisionalReading } from "../trace/diagnose/provisional.ts";
 import type { DiagnosticDocument } from "../trace/diagnose/types.ts";
 import type { LiveProgress } from "../trace/liveProgress.ts";
 import type { LucidaTraceSeam } from "../trace/seam.ts";
@@ -80,13 +81,24 @@ export function readMonitor(runId?: string, seam = window.lucidaTrace): MonitorS
 /**
  * The run in progress, or null when none is open (#937).
  *
- * The one read on this page that leaves the recording alone — polled while a
- * run is open, where every other read here would conclude the interval being
- * watched. A page with no seam on it has no run in progress either, so the
- * missing-seam case is the same null rather than a second shape.
+ * One of the two reads on this page that leave the recording alone. It is
+ * polled while a run is open, where every other read here would conclude the
+ * interval being watched. A page with no seam on it has no run in progress
+ * either, so the missing-seam case is the same null rather than a second
+ * shape.
  */
 export function readProgress(seam = window.lucidaTrace): LiveProgress | null {
   return seam?.progress() ?? null;
+}
+
+/**
+ * The provisional reading over the run in progress, or null when none is
+ * open (#1057). The other read that leaves the recording alone: the same
+ * object the watch stream carries and an agent reads over the seam, so the
+ * live view and the text an agent sees cannot disagree.
+ */
+export function readProvisional(seam = window.lucidaTrace): ProvisionalReading | null {
+  return seam?.provisional() ?? null;
 }
 
 /**

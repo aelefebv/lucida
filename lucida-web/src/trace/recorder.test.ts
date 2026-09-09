@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 
+import { diagnoseRun } from "./diagnose/diagnose.ts";
 import { TraceRecorder } from "./recorder.ts";
 import { noopSinkFactory } from "./sink.ts";
 import { createQuiescenceState, evaluateQuiescence, type QuiescenceState } from "./quiescence.ts";
@@ -936,5 +937,115 @@ describe("what a run in progress can say about itself (#937)", () => {
 
     expect(recorder.liveProgress!.quiescent).toBe(false);
     expect(recorder.liveProgress!.quiescenceReason).toBe("chunks_in_flight");
+  });
+});
+
+describe("the provisional reading over a trailing window (#1057)", () => {
+  it("says nothing while no labelled run is open", () => {
+    const { recorder } = makeRecorder();
+    expect(recorder.provisionalReading()).toBeNull();
+    recorder.beginChunkRow(CHUNK, 0);
+    recorder.noteReading(10, 4, 3_000, 1_000);
+    expect(recorder.provisionalReading()).toBeNull();
+  });
+
+  it("reads the window from the readings and the occupancy from the tally, and closes nothing", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    // A queue that will not drain: pinned at four in flight with a hundred pending.
+    for (let i = 0; i < 60; i++) {
+      recorder.noteReading(100, 4, 2_000, 1_000_000);
+      advance(100);
+    }
+    const onTheWire = recorder.beginChunkRow(CHUNK, 0);
+    const decoding = recorder.beginChunkRow(CHUNK, 0);
+    recorder.stamp(decoding, Boundary.DecodeStart);
+    recorder.noteQuiescence(evaluateQuiescence(inputs({ inFlight: 2, pending: 100 }), 7_000));
+
+    const reading = recorder.provisionalReading()!;
+
+    expect(reading.provisional).toBe(true);
+    expect(reading.runId).toBe(recorder.liveProgress!.runId);
+    expect(reading.window).toMatchObject({ startMs: 1_000, endMs: 6_000, spanMs: 5_000, wholeRun: false });
+    expect(reading.readings.n).toBe(50);
+    expect(reading.readings.carried).toBe(true);
+    expect(reading.limiter).toMatchObject({ cap: 4, pinnedPct: 100, pending: 100, backlogEtaS: null });
+    expect(reading.topFinding?.severity).toBe("saturated");
+    expect(reading.quiescence).toEqual({ quiescent: false, reason: "chunks_in_flight" });
+    expect(reading.occupancy.inFlight).toBe(2);
+    expect(reading.occupancy.phases.find(slot => slot.phase === "wire")?.rows).toBe(1);
+    expect(reading.occupancy.phases.find(slot => slot.phase === "decode")?.rows).toBe(1);
+    expect(reading.rows.made).toBe(2);
+    expect(reading.rows.walked).toBe(0);
+
+    expect(recorder.isRunOpen).toBe(true);
+    expect(recorder.concludedRuns.count).toBe(0);
+    expect(recorder.provisionalReading()!.runId).toBe(reading.runId);
+    recorder.stamp(onTheWire, Boundary.DecodeStart);
+    expect(recorder.provisionalReading()!.occupancy.phases.find(slot => slot.phase === "decode")?.rows).toBe(2);
+  });
+
+  it("takes a caller's window and clamps it to the run so far", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    for (let i = 0; i < 8; i++) {
+      recorder.noteReading(0, 1, 1_000, 0);
+      advance(100);
+    }
+
+    expect(recorder.provisionalReading({ windowMs: 300 })!.window).toMatchObject({
+      startMs: 500,
+      endMs: 800,
+      wholeRun: false,
+    });
+    expect(recorder.provisionalReading()!.window).toMatchObject({ startMs: 0, endMs: 800, wholeRun: true });
+    expect(() => recorder.provisionalReading({ windowMs: -1 })).toThrow(/positive number/);
+  });
+
+  it("leaves nothing of itself in the run it read, so the verdict cannot be reading it", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    for (let i = 0; i < 20; i++) {
+      recorder.noteReading(500, 8, 1_000, 0);
+      advance(100);
+    }
+    const reading = recorder.provisionalReading()!;
+    expect(reading.topFinding?.severity).toBe("saturated");
+    expect("verdict" in reading).toBe(false);
+
+    recorder.closeRun("timeout");
+    const run = recorder.exportDocument().runs[0];
+    expect(JSON.stringify(run)).not.toContain("provisional");
+    expect(run.readings).toHaveLength(20);
+  });
+
+  /**
+   * The gate's half of the proof lives with the gate: it reads a closed
+   * run's verdict and nothing else. This is the other half: a window that
+   * read saturated while the run was open closes to a clear verdict once
+   * the backlog has drained, because the verdict is derived from the closed
+   * run and not from any reading taken along the way.
+   */
+  it("does not follow the run into its verdict: a saturated window can close clear", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    // Pinned at eight in flight with five hundred pending and nothing draining.
+    for (let i = 0; i < 20; i++) {
+      recorder.noteReading(500, 8, 1_000, 0);
+      advance(100);
+    }
+    expect(recorder.provisionalReading()!.topFinding?.severity).toBe("saturated");
+
+    // The backlog drains and the page goes quiescent.
+    for (let i = 1; i <= 10; i++) {
+      recorder.noteReading(Math.max(0, 500 - i * 50), i < 10 ? 8 : 0, 1_000, 0);
+      advance(100);
+    }
+    expect(recorder.provisionalReading()!.topFinding?.severity).not.toBe("saturated");
+    recorder.closeRun("quiescent");
+
+    const document = diagnoseRun(recorder.exportDocument().runs[0]);
+    expect(document.verdict.kind).toBe("clear");
+    expect(document.findings.find(finding => finding.severity === "saturated")).toBeUndefined();
   });
 });

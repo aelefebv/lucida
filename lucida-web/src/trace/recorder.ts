@@ -15,6 +15,12 @@
 
 import { buildIdentity } from "./buildInfo.ts";
 import { computeCoverage } from "./coverage.ts";
+import {
+  deriveProvisional,
+  resolveLiveWindow,
+  type ProvisionalOptions,
+  type ProvisionalReading,
+} from "./diagnose/provisional.ts";
 import { placeServerRows } from "./merge.ts";
 import { CAP_DERIVATION, CAP_UNIT, PER_RUN_CAP_BYTES, RESIDENT_CAP_BYTES } from "./retention.ts";
 import {
@@ -253,10 +259,9 @@ export class TraceRecorder {
   private readonly readingColumns = new Float64Array(READING_NAMES.length);
   /**
    * The live view's phase-occupancy vector, refilled per poll rather than
-   * allocated per poll — the walk that fills it runs over every row the run
-   * has made, and that is not the place to hand the collector a buffer. The
-   * reading it produces is a fresh object by design: it is a snapshot handed
-   * to a surface, not something the recorder keeps.
+   * allocated per poll. The progress it produces is a fresh object by
+   * design: it is a copy handed to a surface, not something the recorder
+   * keeps.
    */
   private readonly occupancyScratch = new Uint32Array(PHASES.length);
   private tickInProgress = false;
@@ -350,18 +355,56 @@ export class TraceRecorder {
    * What the run in progress can say about itself, or null when no labelled
    * run is open (#937).
    *
-   * The one read that does not conclude the interval it describes. Everything
-   * else — the document, the Chrome projection, the diagnostic — closes the
-   * run, because a run without an end reason is not an artifact. This returns
-   * counts and occupancy rather than a verdict for the same reason: the
-   * attribution back-walk needs an end to walk back from.
+   * One of the two reads that do not conclude the interval they describe.
+   * The other is {@link provisionalReading}. Everything else closes the run,
+   * the document, the Chrome projection, and the diagnostic alike, because a
+   * run without an end reason is not an artifact. This returns counts and
+   * occupancy rather than a verdict for the same reason: the attribution
+   * back-walk needs an end to walk back from.
    *
-   * Costed on the reader, not the writer. It walks the rows the run has made
-   * so far, so a page nobody has opened pays nothing.
+   * Walks no row: the tally is kept as the rows are written, so a read costs
+   * the same at ten rows and at the per-run cap.
    */
   get liveProgress(): LiveProgress | null {
     const run = this.open;
     if (!run?.cause) return null;
+    return this.progressAt(run, run.cause, this.now());
+  }
+
+  /**
+   * A provisional reading over a trailing window of the run in progress, or
+   * null when no labelled run is open (#1057).
+   *
+   * What a live surface says while the run is still open: the occupancy
+   * this instant, the top finding over the window, and the page's quiescence
+   * reason, labelled provisional in every rendering because it changes while
+   * it is read. It is never a verdict and the gate never reads it. The dock's
+   * live view polls it, the watch stream carries it, and an agent driving a
+   * browser calls it on the seam; none of them closes the run by asking.
+   *
+   * Walks no row. The tally comes from the counters the row table keeps and
+   * the rest from the readings inside the window, read from the newest slot
+   * back, so the cost is bounded by the window and never by the run.
+   */
+  provisionalReading(options: ProvisionalOptions = {}): ProvisionalReading | null {
+    const run = this.open;
+    if (!run?.cause) return null;
+    const nowMs = this.now();
+    const atUs = this.offsetUs(run, nowMs);
+    const window = resolveLiveWindow(atUs, options.windowMs);
+    return deriveProvisional(
+      {
+        progress: this.progressAt(run, run.cause, nowMs),
+        atUs,
+        readings: run.sink.serialiseReadingsFrom(window.startUs),
+        readingsDropped: run.sink.readingsDropped,
+      },
+      options,
+    );
+  }
+
+  /** The run's progress at one clock reading, so a sample taken with it shares that instant. */
+  private progressAt(run: OpenInterval, cause: RunCause, nowMs: number): LiveProgress {
     const tally = run.sink.liveTally(this.occupancyScratch);
     const occupancy: LivePhaseOccupancy[] = [];
     for (let i = 0; i < PHASES.length; i++) {
@@ -369,8 +412,8 @@ export class TraceRecorder {
     }
     return {
       runId: run.runId,
-      cause: run.cause,
-      elapsedMs: this.now() - run.startedAtMs,
+      cause,
+      elapsedMs: nowMs - run.startedAtMs,
       planned: tally.complete + tally.retired + tally.inFlight,
       visible: tally.complete,
       inFlight: tally.inFlight,

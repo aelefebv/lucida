@@ -119,6 +119,24 @@ export function makeReading(atUs: number, overrides: Partial<TraceReading> = {})
   };
 }
 
+/**
+ * Readings every `stepUs` from `fromUs` to `toUs` inclusive, each shaped by
+ * `make` from its index and its time. The tick stream a window of a run
+ * holds, for the provisional reading and the surfaces that show it.
+ */
+export function makeReadingSeries(
+  fromUs: number,
+  toUs: number,
+  stepUs: number,
+  make: (index: number, atUs: number) => Partial<TraceReading> = () => ({}),
+): TraceReading[] {
+  const out: TraceReading[] = [];
+  for (let atUs = fromUs, index = 0; atUs <= toUs; atUs += stepUs, index += 1) {
+    out.push(makeReading(atUs, make(index, atUs)));
+  }
+  return out;
+}
+
 export function makeTick(atUs: number, counted: Partial<Record<CountedPhase, number>> = {}): TraceTick {
   return {
     atUs,
