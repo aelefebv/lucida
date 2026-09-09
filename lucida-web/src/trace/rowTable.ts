@@ -64,9 +64,10 @@ export interface LiveTally {
 export class RowTable {
   /**
    * 3 interned ids + 6 coordinates + 7 boundary slots + the two-part wire
-   * label, all uint32, plus four bytes: tier, lane, outcome, last boundary.
+   * label + the bytes the wire delivered, all uint32, plus four bytes: tier,
+   * lane, outcome, last boundary.
    */
-  static readonly BYTES_PER_ROW = (3 + COORDS_PER_ROW + BOUNDARY_COUNT + 2) * 4 + 4;
+  static readonly BYTES_PER_ROW = (3 + COORDS_PER_ROW + BOUNDARY_COUNT + 2 + 1) * 4 + 4;
 
   private readonly strings = new StringPool();
 
@@ -77,6 +78,7 @@ export class RowTable {
   private stamps: Uint32Array;
   private rids: Uint32Array;
   private connectionGenerations: Uint32Array;
+  private bytes: Uint32Array;
   private tiers: Uint8Array;
   private lanes: Uint8Array;
   private outcomes: Uint8Array;
@@ -119,6 +121,7 @@ export class RowTable {
     this.stamps = new Uint32Array(this.capacity * BOUNDARY_COUNT);
     this.rids = new Uint32Array(this.capacity);
     this.connectionGenerations = new Uint32Array(this.capacity);
+    this.bytes = new Uint32Array(this.capacity);
     this.tiers = new Uint8Array(this.capacity);
     this.lanes = new Uint8Array(this.capacity);
     this.outcomes = new Uint8Array(this.capacity);
@@ -157,6 +160,7 @@ export class RowTable {
     this.unstamped++;
     this.rids[index] = UNLABELLED.rid;
     this.connectionGenerations[index] = UNLABELLED.connectionGeneration;
+    this.bytes[index] = 0;
 
     const c = index * COORDS_PER_ROW;
     this.coords[c] = src.level;
@@ -196,6 +200,11 @@ export class RowTable {
     if (this.outcomes[index] !== RowOutcome.InFlight) return;
     this.leave(previous);
     this.enter(boundary);
+  }
+
+  /** The payload bytes the wire delivered for this row. */
+  setBytes(index: number, bytes: number): void {
+    this.bytes[index] = bytes;
   }
 
   stampAt(index: number, boundary: number): number {
@@ -289,6 +298,7 @@ export class RowTable {
         y,
         x,
         chunkKey: `${level}/${t}/${ch}/${z}/${y}/${x}`,
+        bytes: this.bytes[i],
         outcome: ROW_OUTCOME_NAMES[this.outcomes[i]],
         phases,
       });
@@ -305,6 +315,7 @@ export class RowTable {
     this.stamps = copyInto(this.stamps, new Uint32Array(next * BOUNDARY_COUNT));
     this.rids = copyInto(this.rids, new Uint32Array(next));
     this.connectionGenerations = copyInto(this.connectionGenerations, new Uint32Array(next));
+    this.bytes = copyInto(this.bytes, new Uint32Array(next));
     this.tiers = copyInto(this.tiers, new Uint8Array(next));
     this.lanes = copyInto(this.lanes, new Uint8Array(next));
     this.outcomes = copyInto(this.outcomes, new Uint8Array(next));

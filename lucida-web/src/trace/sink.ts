@@ -36,6 +36,8 @@ export interface TraceSink {
   append(src: ChunkRowSource, tier: 0 | 1): number;
   setLabel(index: number, label: WireLabel): void;
   stamp(index: number, boundary: number, offsetUs: number): void;
+  /** The payload bytes the wire delivered for the row. */
+  setBytes(index: number, bytes: number): void;
   setOutcome(index: number, outcome: RowOutcomeValue): void;
   /**
    * The rows so far, tallied for the live view (#937). The one read that
@@ -108,6 +110,8 @@ export class NoopTraceSink implements TraceSink {
   setLabel(): void {}
 
   stamp(): void {}
+
+  setBytes(): void {}
 
   setOutcome(): void {}
 
@@ -186,6 +190,10 @@ export class TableTraceSink implements TraceSink {
 
   stamp(index: number, boundary: number, offsetUs: number): void {
     this.rows.stamp(index, boundary, offsetUs);
+  }
+
+  setBytes(index: number, bytes: number): void {
+    this.rows.setBytes(index, bytes);
   }
 
   setOutcome(index: number, outcome: RowOutcomeValue): void {

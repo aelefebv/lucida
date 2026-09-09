@@ -34,6 +34,42 @@
 import { bumpSettingsGeneration } from "./tickCommon.ts";
 import type { InputKind } from "./trace/types.ts";
 
+/**
+ * The dirty source a generated-availability update from the server marks the
+ * loop under. Named once, because a tick woken by this source alone is one
+ * turn of the server and the client answering each other, and the loop tells
+ * the recorder so through {@link TickWake}.
+ */
+export const AVAILABILITY_UPDATE_SOURCE = "generated_availability_update";
+
+/**
+ * What has dirtied the loop since the tick before, reduced to the one
+ * question the trace asks: was it an availability update and nothing else?
+ * Two booleans rather than a set of sources, because the tick reads it once
+ * and the answer is one bit on the per-tick sample.
+ */
+export class TickWake {
+  private availability = false;
+  /** The first tick is the loop's own start, which nothing announced. */
+  private other = true;
+
+  note(source: string): void {
+    if (source === AVAILABILITY_UPDATE_SOURCE) this.availability = true;
+    else this.other = true;
+  }
+
+  /**
+   * True when availability alone woke the tick about to run. Clears both
+   * marks, so what the tick itself dirties counts toward the next one.
+   */
+  take(): boolean {
+    const alone = this.availability && !this.other;
+    this.availability = false;
+    this.other = false;
+    return alone;
+  }
+}
+
 /** The dirty-flag surface these intents drive. `RenderLoop` satisfies it
  *  structurally; tests can substitute a recording double. `null`/`undefined`
  *  is accepted (no loop mounted yet) — the generation bump still happens, so
