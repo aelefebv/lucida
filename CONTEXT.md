@@ -486,6 +486,15 @@ for why the connection moved out of the stores.
 _Avoid_: repository, table, model, DAO, object store (a different thing — see
 above)
 
+**Status route**:
+An optional route that reports whether the storage backend answers, in one
+fixed JSON shape an external monitor reads. Present only when configured with a
+path. Distinct from the liveness and readiness probes, which say nothing about
+the database, and from the performance monitor, which is a surface of this
+application rather than a poller outside it. See
+[ADR 0064](wiki/decisions/0064-a-fixed-shape-status-route-answers-200-either-way.md).
+_Avoid_: health check (the probes are those), dependency endpoint, heartbeat
+
 **Object store**:
 Where the array data lives — local files, or a bucket reached over the network.
 Read-only to the server, addressed by URL, and never the place server records

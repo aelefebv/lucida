@@ -175,6 +175,63 @@ impl DatabaseUrl {
     pub fn redacted(&self) -> Cow<'_, str> {
         redact(&self.raw)
     }
+
+    /// The database's own name, and nothing else from the connection
+    /// string: no scheme, host, port, user, password, or query string.
+    /// `None` when the string names no database, rather than the user
+    /// name libpq would fall back to.
+    ///
+    /// Narrower than [`Self::redacted`], which keeps the host so an
+    /// operator reading a log can tell which server was meant. This is
+    /// for a surface that must tell one deployment from another and may
+    /// reveal nothing about where either lives, which is what the status
+    /// route shows an external monitor.
+    ///
+    /// For SQLite the name is the file name. For PostgreSQL it is the
+    /// path, or the `dbname` query parameter sqlx also accepts.
+    pub fn database_name(&self) -> Option<String> {
+        // `parse` wrote the canonical scheme, so the prefix is literal.
+        let rest = &self.raw[self.scheme.as_str().len() + 1..];
+        let rest = rest.split_once('#').map_or(rest, |(before, _)| before);
+        let (before_query, query) = match rest.split_once('?') {
+            Some((before, query)) => (before, Some(query)),
+            None => (rest, None),
+        };
+        let name = match self.scheme {
+            // No authority in a SQLite URL: past the scheme and an
+            // optional `//`, everything is the path.
+            Scheme::Sqlite => {
+                let path = before_query.strip_prefix("//").unwrap_or(before_query);
+                last_segment(path)
+            }
+            Scheme::Postgres => {
+                let after_scheme = before_query.strip_prefix("//").unwrap_or(before_query);
+                let path = after_scheme
+                    .find('/')
+                    .map_or("", |i| &after_scheme[i + 1..]);
+                let from_path = last_segment(path);
+                if from_path.is_empty() {
+                    query.and_then(query_parameter_dbname).unwrap_or("")
+                } else {
+                    from_path
+                }
+            }
+        };
+        (!name.is_empty()).then(|| name.to_string())
+    }
+}
+
+fn last_segment(path: &str) -> &str {
+    path.rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or("")
+}
+
+fn query_parameter_dbname(query: &str) -> Option<&str> {
+    query.split('&').find_map(|pair| {
+        let (name, value) = pair.split_once('=')?;
+        (name.eq_ignore_ascii_case("dbname") && !value.is_empty()).then_some(value)
+    })
 }
 
 impl fmt::Display for DatabaseUrl {
@@ -434,6 +491,43 @@ mod tests {
             url.redacted(),
             "postgres://10.0.0.1:5432/lucida?application_name=a@b"
         );
+    }
+
+    #[test]
+    fn the_database_name_is_the_name_and_nothing_else() {
+        let cases = [
+            ("sqlite://lucida.db", "lucida.db"),
+            ("sqlite:lucida.db", "lucida.db"),
+            ("sqlite:///var/lib/lucida/lucida.db", "lucida.db"),
+            ("sqlite://lucida.db?mode=rwc", "lucida.db"),
+            ("sqlite::memory:", ":memory:"),
+            (
+                "postgres://lucida:hunter2@10.0.0.1:5432/lucida?password=hunter2&sslmode=require",
+                "lucida",
+            ),
+            ("postgresql://db.example/lucida_staging", "lucida_staging"),
+            ("postgres:///lucida?host=/var/run/postgresql", "lucida"),
+            (
+                "postgres://lucida:hunter2@db.example/?dbname=lucida",
+                "lucida",
+            ),
+        ];
+        for (raw, expected) in cases {
+            let url = DatabaseUrl::parse(raw).unwrap();
+            assert_eq!(url.database_name().as_deref(), Some(expected), "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_string_with_no_database_name_has_none() {
+        for raw in [
+            "postgres://lucida:hunter2@db.example:5432",
+            "postgres://lucida:hunter2@db.example:5432/",
+            "postgres://db.example/?sslmode=require",
+        ] {
+            let url = DatabaseUrl::parse(raw).unwrap();
+            assert_eq!(url.database_name(), None, "{raw}");
+        }
     }
 
     #[test]

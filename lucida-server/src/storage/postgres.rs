@@ -14,11 +14,12 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
 use super::url::DatabaseUrl;
-use super::{StorageBackend, StorageError};
+use super::{PingError, StorageBackend, StorageError};
 use crate::auth::{
     BearerTokenStore, CliTokenAuthorizationStore, LoginSessionStore, PendingAuthStore,
     PostgresBearerTokenStore, PostgresCliTokenAuthorizationStore, PostgresPendingAuthStore,
@@ -104,7 +105,16 @@ impl PostgresStorageBackend {
 /// Every accessor builds a fresh handle over the shared pool, as the
 /// SQLite backend does: a store holds nothing but that handle, so this
 /// costs a pool clone and the handles are interchangeable.
+#[async_trait]
 impl StorageBackend for PostgresStorageBackend {
+    async fn ping(&self) -> Result<(), PingError> {
+        sqlx::query("SELECT 1")
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
+            .map_err(PingError::new)
+    }
+
     fn login_sessions(&self) -> Arc<dyn LoginSessionStore> {
         Arc::new(PostgresSessionStore::new(self.pool.clone()))
     }

@@ -20,6 +20,7 @@ pub mod open_diagnostics;
 pub mod proxy;
 pub mod session;
 pub mod static_serve;
+pub mod status;
 pub mod storage;
 #[cfg(test)]
 pub(crate) mod test_fixtures;

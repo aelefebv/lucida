@@ -19,6 +19,7 @@ use lucida_server::bookmarks;
 use lucida_server::health;
 use lucida_server::session::Session;
 use lucida_server::static_serve;
+use lucida_server::status;
 use lucida_server::storage;
 use lucida_server::{
     AppState, BroadcastItem, ProxyConfig, UnicastRoutes, browse, handler, workspace,
@@ -266,6 +267,16 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
             return Err(std::io::Error::other(e.to_string()));
         }
     };
+    // Read before the database opens, so a bad value fails the boot with
+    // the other configuration errors rather than after a connection was
+    // made.
+    let status_config = match status::StatusRouteConfig::from_env(&auth_config.db_url) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "status.startup.config_error");
+            return Err(std::io::Error::other(e.to_string()));
+        }
+    };
     // Operator-facing startup line: mode + bind together so a glance
     // at the boot log answers "is this server reachable, and is it
     // protected?" Per ADR-0018 both signals should be visible together.
@@ -491,6 +502,20 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     // stop routing without the kubelet restarting the pod mid-drain.
     // See `lucida-server/src/health.rs`.
     public_auth_router = public_auth_router.merge(health::router());
+    // Public half, for the same reason as the probes: an external
+    // monitor presents no session. The startup line is the one place the
+    // route is logged above debug level. See `lucida-server/src/status.rs`
+    // and ADR-0064.
+    if let Some(status) = status_config.as_ref() {
+        tracing::info!(
+            path = %status.path,
+            label = %status.label,
+            resource_name = %status.resource_name,
+            "status.route.configured",
+        );
+    }
+    public_auth_router =
+        public_auth_router.merge(status::router(status_config, Arc::clone(&storage)));
 
     // ADR-0020: serve the SPA bundle from `LUCIDA_WEB_DIST` (default
     // `./lucida-web/dist`) via `tower-http::ServeDir`. Lands on the
