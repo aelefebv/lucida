@@ -18,6 +18,11 @@ export function usToMs(us: number): number {
   return Math.round(us / 100) / 10;
 }
 
+/** {@link usToMs} for a value that may be absent. */
+export function nullableUsToMs(us: number | null): number | null {
+  return us === null ? null : usToMs(us);
+}
+
 /**
  * The nearest-rank percentile of a sorted array. No interpolation: every value
  * here is a real observation and a percentile that reports a duration nothing

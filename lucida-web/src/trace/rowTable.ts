@@ -11,16 +11,24 @@
  */
 
 import { RESIDENCY_TIERS } from "../pipeline/residencyTier.ts";
+import type { ChunkReading } from "./diagnose/chunkStates.ts";
+import { nullableUsToMs } from "./diagnose/phaseRollup.ts";
+import type { RowState } from "./diagnose/types.ts";
 import { StringPool } from "./stringPool.ts";
 import {
+  Boundary,
   BOUNDARY_COUNT,
   LANE_NAMES,
   laneIndex,
+  NEVER_ADMITTED,
+  NOT_DISPATCHED,
   ROW_OUTCOME_NAMES,
   RowOutcome,
   UNSET_STAMP,
   PHASES,
   UNLABELLED,
+  type AdmissionColumns,
+  type ChunkCoordinates,
   type ChunkRowSource,
   type PhaseTiming,
   type Phase,
@@ -37,6 +45,12 @@ const COORDS_PER_ROW = 6;
  * boundary index, and above every real one, so the column can hold either.
  */
 const NO_BOUNDARY = 0xff;
+
+/** An empty slot in the identity index, and the end of a row's identity chain. */
+const NO_ROW = -1;
+
+const PLAN_PHASE = PHASES.indexOf("plan");
+const QUEUE_PHASE = PHASES.indexOf("queue");
 
 /**
  * The rows of a run in progress, tallied by how they ended (#937).
@@ -65,9 +79,11 @@ export class RowTable {
   /**
    * 3 interned ids + 6 coordinates + 7 boundary slots + the two-part wire
    * label + the bytes the wire delivered, all uint32, plus four bytes: tier,
-   * lane, outcome, last boundary.
+   * lane, outcome, last boundary. Plus the identity index: one int32 per row
+   * linking it to the previous row of the same chunk, and two int32 slots
+   * per row of capacity in the open-addressing table that finds the newest.
    */
-  static readonly BYTES_PER_ROW = (3 + COORDS_PER_ROW + BOUNDARY_COUNT + 2 + 1) * 4 + 4;
+  static readonly BYTES_PER_ROW = (3 + COORDS_PER_ROW + BOUNDARY_COUNT + 2 + 1) * 4 + 4 + 4 + 2 * 4;
 
   private readonly strings = new StringPool();
 
@@ -89,6 +105,25 @@ export class RowTable {
    * slots.
    */
   private lastBoundary: Uint8Array;
+
+  /**
+   * The identity index (#1062): the newest row of every chunk the table
+   * holds, so a surface that colors the chunks on screen reads each one in
+   * constant time while the interval is still open, and never walks the
+   * rows. `index` is an open-addressing table over a hash of the row's
+   * interned dataset and entity ids and its six coordinates, holding a row
+   * index or {@link NO_ROW}, at most half full. `prevSame` links each row to
+   * the previous row of the same chunk, so the rows behind an identity, and
+   * how many of them fetched, are a walk of that chain and no longer.
+   *
+   * Typed arrays, sized with the table and rebuilt at its doubling, so the
+   * index costs no allocation per row and is counted in the row width the
+   * caps derive from. No string per chunk is interned: the index compares
+   * columns, which is what `StringPool` declines to do for coordinates.
+   */
+  private index: Int32Array;
+  private indexMask: number;
+  private prevSame: Int32Array;
 
   /**
    * The live tally, kept as the rows are written (#937, #1057).
@@ -126,6 +161,9 @@ export class RowTable {
     this.lanes = new Uint8Array(this.capacity);
     this.outcomes = new Uint8Array(this.capacity);
     this.lastBoundary = new Uint8Array(this.capacity);
+    this.prevSame = new Int32Array(this.capacity);
+    this.index = new Int32Array(indexSizeFor(this.capacity)).fill(NO_ROW);
+    this.indexMask = this.index.length - 1;
   }
 
   get length(): number {
@@ -171,7 +209,198 @@ export class RowTable {
     this.coords[c + 5] = src.x;
 
     this.stamps.fill(UNSET_STAMP, index * BOUNDARY_COUNT, (index + 1) * BOUNDARY_COUNT);
+    this.link(index);
     return index;
+  }
+
+  private link(index: number): void {
+    const slot = this.slotFor(index);
+    this.prevSame[index] = this.index[slot];
+    this.index[slot] = index;
+  }
+
+  /**
+   * The index slot for a row's identity: the slot holding the newest row of
+   * the same chunk, or the empty slot where it would go. Linear probing; the
+   * table is at most half full, so a probe ends within a few slots.
+   */
+  private slotFor(index: number): number {
+    let slot = this.hashOf(index) & this.indexMask;
+    for (;;) {
+      const held = this.index[slot];
+      if (held === NO_ROW || this.sameIdentity(held, index)) return slot;
+      slot = (slot + 1) & this.indexMask;
+    }
+  }
+
+  private hashOf(index: number): number {
+    const c = index * COORDS_PER_ROW;
+    return hashIdentity(
+      this.datasetIds[index],
+      this.entityIds[index],
+      this.coords[c],
+      this.coords[c + 1],
+      this.coords[c + 2],
+      this.coords[c + 3],
+      this.coords[c + 4],
+      this.coords[c + 5],
+    );
+  }
+
+  private sameIdentity(a: number, b: number): boolean {
+    if (this.datasetIds[a] !== this.datasetIds[b] || this.entityIds[a] !== this.entityIds[b]) return false;
+    const ca = a * COORDS_PER_ROW;
+    const cb = b * COORDS_PER_ROW;
+    for (let i = 0; i < COORDS_PER_ROW; i++) if (this.coords[ca + i] !== this.coords[cb + i]) return false;
+    return true;
+  }
+
+  /**
+   * The newest row of one chunk, or -1 when the table holds none. A dataset
+   * or entity the pool never interned has no row, so the answer is given
+   * without hashing anything.
+   */
+  newestRowOf(chunk: ChunkCoordinates): number {
+    const datasetIndex = this.strings.lookup(chunk.datasetId);
+    const entityIndex = this.strings.lookup(chunk.entityId);
+    if (datasetIndex === undefined || entityIndex === undefined) return NO_ROW;
+    const { level, t, c, z, y, x } = chunk;
+    let slot = hashIdentity(datasetIndex, entityIndex, level, t, c, z, y, x) & this.indexMask;
+    for (;;) {
+      const held = this.index[slot];
+      if (held === NO_ROW) return NO_ROW;
+      const cc = held * COORDS_PER_ROW;
+      if (
+        this.datasetIds[held] === datasetIndex &&
+        this.entityIds[held] === entityIndex &&
+        this.coords[cc] === level &&
+        this.coords[cc + 1] === t &&
+        this.coords[cc + 2] === c &&
+        this.coords[cc + 3] === z &&
+        this.coords[cc + 4] === y &&
+        this.coords[cc + 5] === x
+      ) {
+        return held;
+      }
+      slot = (slot + 1) & this.indexMask;
+    }
+  }
+
+  /** Every row of the chunk whose newest row is `newest`, oldest first. */
+  rowsOf(newest: number): number[] {
+    const out: number[] = [];
+    for (let row = newest; row !== NO_ROW; row = this.prevSame[row]) out.push(row);
+    return out.reverse();
+  }
+
+  /**
+   * What one chunk's rows say about it, read from the index without a walk
+   * over the table: the newest row's state and age, and how many rows there
+   * are and how many of them fetched. The same reading `deriveChunkStates`
+   * makes from the serialised rows, for the interval still being written.
+   * Null when the table holds no row for the chunk.
+   */
+  readChunk(chunk: ChunkCoordinates, closeUs: number): ChunkReading | null {
+    const newest = this.newestRowOf(chunk);
+    if (newest === NO_ROW) return null;
+    let rows = 0;
+    let fetches = 0;
+    for (let row = newest; row !== NO_ROW; row = this.prevSame[row]) {
+      rows += 1;
+      if (this.fetched(row)) fetches += 1;
+    }
+    return {
+      state: this.stateAt(newest),
+      rows,
+      fetches,
+      ageMs: nullableUsToMs(this.ageUsAt(newest, closeUs)),
+    };
+  }
+
+  /** A fetch is a row whose wire closed, the rule `rowFetched` applies to a serialised row. */
+  private fetched(index: number): boolean {
+    const base = index * BOUNDARY_COUNT;
+    return (
+      this.stamps[base + Boundary.WireStart] !== UNSET_STAMP &&
+      this.stamps[base + Boundary.DecodeStart] !== UNSET_STAMP
+    );
+  }
+
+  private hasPhase(index: number, p: number): boolean {
+    const base = index * BOUNDARY_COUNT;
+    return this.stamps[base + p] !== UNSET_STAMP && this.stamps[base + p + 1] !== UNSET_STAMP;
+  }
+
+  /**
+   * Where the row stands, by the rule `rowState` applies to a serialised row:
+   * how it ended if it ended, otherwise the phase after the last one it
+   * finished, or `unstamped` when it finished none.
+   */
+  stateAt(index: number): RowState {
+    const outcome = this.outcomes[index];
+    if (outcome === RowOutcome.Complete) return "complete";
+    if (outcome === RowOutcome.Retired) return "retired";
+    let last = -1;
+    for (let p = 0; p < PHASES.length; p++) if (this.hasPhase(index, p)) last = p;
+    if (last < 0) return "unstamped";
+    return PHASES[Math.min(last + 1, PHASES.length - 1)];
+  }
+
+  /** Run-relative microseconds of the row's first stamped boundary, or null when it has none. */
+  firstBoundaryUsAt(index: number): number | null {
+    let first: number | null = null;
+    const base = index * BOUNDARY_COUNT;
+    for (let p = 0; p < PHASES.length; p++) {
+      if (!this.hasPhase(index, p)) continue;
+      const startUs = this.stamps[base + p];
+      if (first === null || startUs < first) first = startUs;
+    }
+    return first;
+  }
+
+  /**
+   * The row's age by the rule `rowAgeUs` applies to a serialised row: first
+   * boundary to last for a row that ended, first boundary to `closeUs` for
+   * one still in flight, and null for a row that finished no phase.
+   */
+  ageUsAt(index: number, closeUs: number): number | null {
+    const first = this.firstBoundaryUsAt(index);
+    if (first === null) return null;
+    let end = closeUs;
+    if (this.outcomes[index] !== RowOutcome.InFlight) {
+      const base = index * BOUNDARY_COUNT;
+      let last: number | null = null;
+      for (let p = 0; p < PHASES.length; p++) {
+        if (!this.hasPhase(index, p)) continue;
+        const endUs = this.stamps[base + p + 1];
+        if (last === null || endUs > last) last = endUs;
+      }
+      end = last ?? closeUs;
+    }
+    return Math.max(0, end - first);
+  }
+
+  /**
+   * The admission columns over the table's rows, by the rule `admissionOf`
+   * applies to a serialised row, answered from the stamps so ranking one row
+   * against thirty thousand allocates nothing.
+   */
+  admissionColumns(): AdmissionColumns {
+    const admittedUs = (index: number): number => {
+      const base = index * BOUNDARY_COUNT;
+      // A row that finished `queue`, or one still in it: admitted where its
+      // plan phase ended, which is the queue's start.
+      if (this.hasPhase(index, QUEUE_PHASE)) return this.stamps[base + Boundary.QueueStart];
+      if (this.stateAt(index) === "queue" && this.hasPhase(index, PLAN_PHASE)) {
+        return this.stamps[base + Boundary.QueueStart];
+      }
+      return NEVER_ADMITTED;
+    };
+    const dispatchedUs = (index: number): number =>
+      this.hasPhase(index, QUEUE_PHASE)
+        ? this.stamps[index * BOUNDARY_COUNT + Boundary.WireStart]
+        : NOT_DISPATCHED;
+    return { length: this.rows, admittedUs, dispatchedUs };
   }
 
   /**
@@ -263,47 +492,50 @@ export class RowTable {
     else if (boundary < PHASES.length) this.occupancy[boundary]++;
   }
 
-  /** Fans each row out into its phases. The only place that knows about spans. */
+  /** Fans every row out into its phases, through {@link rowAt}, the only place that knows about spans. */
   serialise(): TraceRow[] {
     const out: TraceRow[] = [];
-    for (let i = 0; i < this.rows; i++) {
-      const c = i * COORDS_PER_ROW;
-      const level = this.coords[c];
-      const t = this.coords[c + 1];
-      const ch = this.coords[c + 2];
-      const z = this.coords[c + 3];
-      const y = this.coords[c + 4];
-      const x = this.coords[c + 5];
-
-      const phases: Partial<Record<Phase, PhaseTiming>> = {};
-      for (let p = 0; p < PHASES.length; p++) {
-        const startUs = this.stamps[i * BOUNDARY_COUNT + p];
-        const endUs = this.stamps[i * BOUNDARY_COUNT + p + 1];
-        if (startUs === UNSET_STAMP || endUs === UNSET_STAMP) continue;
-        phases[PHASES[p]] = { startUs, endUs, durationUs: endUs - startUs };
-      }
-
-      out.push({
-        rid: this.rids[i],
-        connectionGeneration: this.connectionGenerations[i],
-        datasetId: this.strings.get(this.datasetIds[i]),
-        entityId: this.strings.get(this.entityIds[i]),
-        imageId: this.strings.get(this.imageIds[i]),
-        lane: LANE_NAMES[this.lanes[i]],
-        residencyTier: RESIDENCY_TIERS[this.tiers[i]],
-        level,
-        t,
-        c: ch,
-        z,
-        y,
-        x,
-        chunkKey: `${level}/${t}/${ch}/${z}/${y}/${x}`,
-        bytes: this.bytes[i],
-        outcome: ROW_OUTCOME_NAMES[this.outcomes[i]],
-        phases,
-      });
-    }
+    for (let i = 0; i < this.rows; i++) out.push(this.rowAt(i));
     return out;
+  }
+
+  /** One row, serialised on its own, for a reader that wants a handful of an open interval's rows. */
+  rowAt(i: number): TraceRow {
+    const c = i * COORDS_PER_ROW;
+    const level = this.coords[c];
+    const t = this.coords[c + 1];
+    const ch = this.coords[c + 2];
+    const z = this.coords[c + 3];
+    const y = this.coords[c + 4];
+    const x = this.coords[c + 5];
+
+    const phases: Partial<Record<Phase, PhaseTiming>> = {};
+    for (let p = 0; p < PHASES.length; p++) {
+      const startUs = this.stamps[i * BOUNDARY_COUNT + p];
+      const endUs = this.stamps[i * BOUNDARY_COUNT + p + 1];
+      if (startUs === UNSET_STAMP || endUs === UNSET_STAMP) continue;
+      phases[PHASES[p]] = { startUs, endUs, durationUs: endUs - startUs };
+    }
+
+    return {
+      rid: this.rids[i],
+      connectionGeneration: this.connectionGenerations[i],
+      datasetId: this.strings.get(this.datasetIds[i]),
+      entityId: this.strings.get(this.entityIds[i]),
+      imageId: this.strings.get(this.imageIds[i]),
+      lane: LANE_NAMES[this.lanes[i]],
+      residencyTier: RESIDENCY_TIERS[this.tiers[i]],
+      level,
+      t,
+      c: ch,
+      z,
+      y,
+      x,
+      chunkKey: `${level}/${t}/${ch}/${z}/${y}/${x}`,
+      bytes: this.bytes[i],
+      outcome: ROW_OUTCOME_NAMES[this.outcomes[i]],
+      phases,
+    };
   }
 
   private grow(): void {
@@ -320,11 +552,63 @@ export class RowTable {
     this.lanes = copyInto(this.lanes, new Uint8Array(next));
     this.outcomes = copyInto(this.outcomes, new Uint8Array(next));
     this.lastBoundary = copyInto(this.lastBoundary, new Uint8Array(next));
+    this.prevSame = copyInto(this.prevSame, new Int32Array(next));
     this.capacity = next;
+    this.rebuildIndex();
+  }
+
+  /**
+   * Re-place every row in an index sized for the new capacity. The chains
+   * are already right; only the head of each has to be found again, and
+   * rows are visited oldest first, so the last one placed for an identity
+   * is its newest.
+   */
+  private rebuildIndex(): void {
+    this.index = new Int32Array(indexSizeFor(this.capacity)).fill(NO_ROW);
+    this.indexMask = this.index.length - 1;
+    for (let row = 0; row < this.rows; row++) this.index[this.slotFor(row)] = row;
   }
 }
 
-function copyInto<T extends Uint8Array | Uint32Array>(src: T, next: T): T {
+/** Two slots per row of capacity, at a power of two, so the table is at most half full. */
+function indexSizeFor(capacity: number): number {
+  let size = 2;
+  while (size < capacity * 2) size *= 2;
+  return size;
+}
+
+/**
+ * Each column is folded in with a multiply and a shift, so rows that differ
+ * in one coordinate land apart.
+ */
+function hashIdentity(
+  datasetIndex: number,
+  entityIndex: number,
+  level: number,
+  t: number,
+  c: number,
+  z: number,
+  y: number,
+  x: number,
+): number {
+  let h = 0x811c9dc5;
+  h = fold(h, datasetIndex);
+  h = fold(h, entityIndex);
+  h = fold(h, level);
+  h = fold(h, t);
+  h = fold(h, c);
+  h = fold(h, z);
+  h = fold(h, y);
+  h = fold(h, x);
+  return h >>> 0;
+}
+
+function fold(h: number, value: number): number {
+  h = Math.imul(h ^ value, 0x9e3779b1);
+  return h ^ (h >>> 15);
+}
+
+function copyInto<T extends Uint8Array | Uint32Array | Int32Array>(src: T, next: T): T {
   next.set(src as never);
   return next;
 }

@@ -10,7 +10,7 @@
  */
 
 import type { ClientMessageType, LaneName, Phase } from "../trace/types.ts";
-import type { TimelineChartId } from "../trace/diagnose/types.ts";
+import type { RowState, TimelineChartId } from "../trace/diagnose/types.ts";
 import type { TimelineMark } from "../trace/diagnose/timeline.ts";
 
 /** One colour per phase, in the order work moves through them. */
@@ -25,6 +25,35 @@ export const PHASE_COLORS: Record<Phase, string> = {
 
 /** Rows that have stamped no boundary yet: planned, not admitted. */
 export const PLANNED_COLOR = "#4a4a4a";
+
+/**
+ * The two ways a row ends. Only the overlay paints them: the live bar and
+ * the occupancy chart show rows in flight, which a finished row has left.
+ */
+export const ENDING_COLORS = {
+  complete: "#4f8f5f",
+  retired: "#8f4f4f",
+} as const;
+
+/**
+ * One colour per row state, for the overlay's phase colour mode: the phases
+ * from {@link PHASE_COLORS}, the planned residual, and the two endings. The
+ * phases are the bar's and the occupancy chart's own entries, not copies, so
+ * a chunk in the wire phase is one colour in space and in time.
+ */
+export const ROW_STATE_COLORS: Record<RowState, string> = {
+  ...PHASE_COLORS,
+  unstamped: PLANNED_COLOR,
+  ...ENDING_COLORS,
+};
+
+/** A palette colour with an alpha, as `rgba(r, g, b, a)`, for a surface that paints over pixels. */
+export function withAlpha(hex: string, alpha: number): string {
+  const r = Number.parseInt(hex.slice(1, 3), 16);
+  const g = Number.parseInt(hex.slice(3, 5), 16);
+  const b = Number.parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
 
 export const LANE_COLORS: Record<LaneName, string> = {
   minimap: "#d1c46f",

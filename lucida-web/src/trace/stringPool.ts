@@ -23,6 +23,11 @@ export class StringPool {
     return this.values[id] ?? "";
   }
 
+  /** The id a value was interned under, or undefined when the pool has never seen it. */
+  lookup(value: string): number | undefined {
+    return this.ids.get(value);
+  }
+
   get size(): number {
     return this.values.length;
   }

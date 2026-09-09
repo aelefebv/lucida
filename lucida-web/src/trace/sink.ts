@@ -13,22 +13,28 @@
  * table, the per-tick aggregate ring, the reading ring, and the point-event ring.
  */
 
+import type { ChunkReading } from "./diagnose/chunkStates.ts";
 import { EventRing } from "./eventRing.ts";
 import { ReadingRing } from "./readingRing.ts";
 import { RowTable, type LiveTally } from "./rowTable.ts";
 import { TickRing, type TickScratch } from "./tickRing.ts";
-import type {
-  ChunkEventSource,
-  ChunkRowSource,
-  LevelChangeReason,
-  PointEventIndex,
-  PointEventReason,
-  RowOutcomeValue,
-  TraceReading,
-  TracePointEvent,
-  TraceRow,
-  TraceTick,
-  WireLabel,
+import {
+  NEVER_ADMITTED,
+  NOT_DISPATCHED,
+  type AdmissionColumns,
+  type ChunkCoordinates,
+  type ChunkEventSource,
+  type ChunkRowSource,
+  type LevelChangeReason,
+  type MatchedRow,
+  type PointEventIndex,
+  type PointEventReason,
+  type RowOutcomeValue,
+  type TraceReading,
+  type TracePointEvent,
+  type TraceRow,
+  type TraceTick,
+  type WireLabel,
 } from "./types.ts";
 
 export interface TraceSink {
@@ -90,6 +96,17 @@ export interface TraceSink {
   serialiseEvents(): TracePointEvent[];
   /** The point events from `startUs` on. A live read, for the same surface as {@link serialiseTicksFrom}. */
   serialiseEventsFrom(startUs: number): TracePointEvent[];
+  /**
+   * One chunk's reading from the row table's identity index (#1062): its
+   * newest row's state and age, its row count and its fetch count. The
+   * third read that happens while the interval is still open, and like the
+   * other two it walks no row. Null when the interval holds no row for it.
+   */
+  readChunk(chunk: ChunkCoordinates, closeUs: number): ChunkReading | null;
+  /** Every row of one chunk, oldest first, each with its index in the table. */
+  chunkRows(chunk: ChunkCoordinates): MatchedRow[];
+  /** The admission columns the chunk lookup ranks a row against. */
+  admissionColumns(): AdmissionColumns;
   readonly length: number;
   /**
    * Whether this sink recorded nothing at all, across every tier. An
@@ -162,6 +179,18 @@ export class NoopTraceSink implements TraceSink {
 
   serialiseEventsFrom(): TracePointEvent[] {
     return [];
+  }
+
+  readChunk(): ChunkReading | null {
+    return null;
+  }
+
+  chunkRows(): MatchedRow[] {
+    return [];
+  }
+
+  admissionColumns(): AdmissionColumns {
+    return { length: 0, admittedUs: () => NEVER_ADMITTED, dispatchedUs: () => NOT_DISPATCHED };
   }
 
   get length(): number {
@@ -276,6 +305,20 @@ export class TableTraceSink implements TraceSink {
 
   serialiseEventsFrom(startUs: number): TracePointEvent[] {
     return this.events.serialiseFrom(startUs);
+  }
+
+  readChunk(chunk: ChunkCoordinates, closeUs: number): ChunkReading | null {
+    return this.rows.readChunk(chunk, closeUs);
+  }
+
+  chunkRows(chunk: ChunkCoordinates): MatchedRow[] {
+    const newest = this.rows.newestRowOf(chunk);
+    if (newest < 0) return [];
+    return this.rows.rowsOf(newest).map((index) => ({ row: this.rows.rowAt(index), index }));
+  }
+
+  admissionColumns(): AdmissionColumns {
+    return this.rows.admissionColumns();
   }
 
   get length(): number {

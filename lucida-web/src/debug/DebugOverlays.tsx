@@ -4,11 +4,20 @@
  * Reads from existing scene + orchestrator + cache state — no new
  * production-side state added for it to work.
  *
- * Primary overlays, each gated by its own toggle in the Logging tab:
+ * Primary overlays, each gated by its own toggle in the HUD legend:
  *  - groupModes: per-group badge with detail/coarse worker-delivered coverage
  *  - chunkGrid: planned LOD chunk grid for every visible tile, colored
  *    by status or tier. Capped at MAX_CHUNK_RECTS per tick as a backstop for
  *    pathological cases.
+ *  - phaseColor and churnTint: the same grid colored from the trace rather
+ *    than the cache. Phase color is the phase each chunk's newest row is
+ *    in, in the timeline's palette, and churn tint is how many times the
+ *    open interval fetched it.
+ *    Both read the recorder's identity index cell by cell, which walks no
+ *    row, and both say in words what they cannot show. Hovering a cell
+ *    opens an inspector with the chunk's phase, queue rank and age from the
+ *    document's chunk lookup (#1062). The colors and the text come from
+ *    `overlayDrawList.ts`, which is pure; this file projects and mounts.
  *  - renderRadius: actual detail/coarse render-radius boundary, projected
  *    through the same voxel→world→screen path as chunk overlays.
  *
@@ -22,9 +31,10 @@
  * unit cube into normalized world space and bakes in the Y-flip and
  * physical-extent normalization the renderer applies.
  */
-import { useEffect, useState, type RefObject } from "react";
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
 import { Axis } from "../axes.ts";
+import { traceRecorder } from "../trace/recorder.ts";
 import type { DatasetState } from "../types.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import type { CpuCache } from "../pipeline/fetch/index.ts";
@@ -50,6 +60,16 @@ import {
   onRenderRadiusPreviewChanged,
   type DebugOverlay,
 } from "./logging.ts";
+import {
+  buildChunkDrawList,
+  describeHoverInspector,
+  hitTestChunk,
+  overlayAbsence,
+  type ChunkCell,
+  type ChunkDrawList,
+  type DisplayTier,
+  type InspectorView,
+} from "./overlayDrawList.ts";
 import { radiusSpecsForOverlay } from "./radiusPreview.ts";
 
 interface Props {
@@ -88,8 +108,6 @@ interface GroupBadge {
   title: string;
 }
 
-type DisplayTier = ResidencyTier | "missing";
-
 export interface TierCoverageCounts {
   /** Chunks requested by the current plan for this tier. */
   wanted: number;
@@ -110,34 +128,6 @@ export interface GroupTierCoverage {
   coarse: TierCoverageCounts;
 }
 
-interface ChunkRect {
-  key: string;
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  status: "cached" | "in-flight" | "planned";
-  /** Current render tier visible to the shader, or missing fallback. */
-  sourceTier?: DisplayTier;
-  /**
-   * For `status === "planned"`: zero-based rank in the pending fetch
-   * queue (0 = next to fetch). `undefined` means "in plan but not in
-   * the pending queue we sampled" — the chunk was deduped, dropped, or
-   * sampled between dequeue and fetch start. Useful debug signal: a
-   * gray cell where you'd expect a hot-orange one says "planning
-   * thinks this should fetch, scheduler doesn't have it queued."
-   */
-  priorityRank?: number;
-  /**
-   * For `status === "cached"`: which eviction tier the chunk is in.
-   * Surfaces eviction churn — `active-detail` won't evict under
-   * normal pressure, `demoted-detail` is next-to-go, `prefetch` is
-   * cheapest. `null` for cached chunks where the lookup failed
-   * (rare; treat as fallback green).
-   */
-  tier?: import("../pipeline/fetch/index.ts").EvictionTier | null;
-}
-
 interface RadiusPath {
   key: string;
   tier: ResidencyTier;
@@ -146,65 +136,21 @@ interface RadiusPath {
   title: string;
 }
 
-const SOLID_CACHED = "rgba(80, 220, 120, 0.30)";
-const SOLID_IN_FLIGHT = "rgba(240, 200, 70, 0.35)";
-const SOLID_PLANNED = "rgba(240, 90, 90, 0.30)";
-const TIER_DETAIL = "rgba(80, 220, 120, 0.36)";
-const TIER_COARSE = "rgba(245, 205, 70, 0.34)";
-const TIER_MISSING = "rgba(245, 70, 70, 0.38)";
 const RADIUS_DETAIL_STROKE = "rgba(80, 255, 130, 0.90)";
 const RADIUS_COARSE_STROKE = "rgba(255, 220, 70, 0.90)";
 const RADIUS_SAMPLE_COUNT = 96;
 
-function tierColor(tier: DisplayTier | undefined): string | null {
-  switch (tier) {
-    case "detail": return TIER_DETAIL;
-    case "coarse": return TIER_COARSE;
-    case "missing": return TIER_MISSING;
-    default: return null;
-  }
-}
-
-function tierDrawOrder(rect: ChunkRect): number {
-  if (rect.sourceTier === "missing") return 0;
-  if (rect.sourceTier === "coarse") return 0;
-  if (rect.sourceTier === "detail") return 1;
+function tierDrawOrder(cell: ChunkCell): number {
+  if (cell.sourceTier === "missing") return 0;
+  if (cell.sourceTier === "coarse") return 0;
+  if (cell.sourceTier === "detail") return 1;
   return 2;
 }
 
-/**
- * Color for a planned chunk based on its position in the pending fetch
- * queue. Rank 0 = next-to-fetch (bright orange); higher = colder.
- * Discrete bands (rather than smooth interpolation) keep the visual
- * easy to read at a glance: orange = imminent, red = soon, dim red =
- * way back.
- */
-function plannedColor(rank: number | undefined): string {
-  if (rank === undefined) return "rgba(140, 140, 140, 0.20)";
-  if (rank < 5) return "rgba(255, 180, 60, 0.50)";
-  if (rank < 20) return "rgba(245, 110, 70, 0.40)";
-  if (rank < 60) return "rgba(220, 70, 70, 0.32)";
-  return "rgba(160, 40, 40, 0.24)";
-}
+const EMPTY_DRAW_LIST: ChunkDrawList = { items: [], withRow: 0, churned: 0 };
 
-/**
- * Color for a cached chunk based on eviction tier. Stays in the green
- * family so "cached = green" reads at a glance, with hue shifts that
- * convey "how at-risk":
- *   active-detail  → bright green (safest)
- *   demoted-detail → pale sage    (will evict on memory pressure)
- *   prefetch       → teal         (cheapest to lose)
- */
-function cachedColor(
-  tier: import("../pipeline/fetch/index.ts").EvictionTier | null | undefined,
-): string {
-  switch (tier) {
-    case "active-detail":  return "rgba(80, 220, 120, 0.36)";
-    case "demoted-detail": return "rgba(150, 200, 140, 0.30)";
-    case "prefetch":       return "rgba(70, 200, 200, 0.32)";
-    default:               return SOLID_CACHED;
-  }
-}
+/** Where the inspector sits relative to the pointer, in CSS pixels. */
+const INSPECTOR_OFFSET = 14;
 
 function emptyTierCoverageCounts(): TierCoverageCounts {
   return { wanted: 0, shown: 0, ready: 0, inFlight: 0 };
@@ -566,11 +512,78 @@ export function DebugOverlays({
   }, []);
 
   const anyEnabled = DEBUG_OVERLAYS.some(o => enabled[o]) || radiusPreviewTier !== null;
+  // The trace-reading modes color the chunk grid, so turning one on shows
+  // the grid without a second toggle.
+  const showGrid = enabled.chunkGrid || enabled.phaseColor || enabled.churnTint;
 
   const [badges, setBadges] = useState<GroupBadge[]>([]);
-  const [chunks, setChunks] = useState<ChunkRect[]>([]);
+  const [drawList, setDrawList] = useState<ChunkDrawList>(EMPTY_DRAW_LIST);
+  const [windowMs, setWindowMs] = useState<number | null>(null);
   const [radiusPaths, setRadiusPaths] = useState<RadiusPath[]>([]);
   const [size, setSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
+
+  // The pointer and the latest draw list live in refs so a pointer move
+  // hit-tests without a render, and a tick refreshes the open inspector
+  // without a pointer move.
+  const drawListRef = useRef<ChunkDrawList>(EMPTY_DRAW_LIST);
+  const pointerRef = useRef<{ x: number; y: number } | null>(null);
+  const hoveredKeyRef = useRef<string | null>(null);
+  const [inspector, setInspector] = useState<{ left: number; top: number; view: InspectorView } | null>(null);
+
+  // One live lookup per hovered cell per tick, never per pointer move: the
+  // rank is a pass over the interval's rows, a cost a hover can pay and a
+  // frame cannot.
+  const refreshInspector = useCallback(() => {
+    const pointer = pointerRef.current;
+    const item = pointer ? hitTestChunk(drawListRef.current.items, pointer.x, pointer.y) : null;
+    if (!pointer || !item || item.cell.proxyAsset) {
+      hoveredKeyRef.current = null;
+      setInspector(null);
+      return;
+    }
+    const lookup = traceRecorder.lookupChunkLive(item.cell);
+    hoveredKeyRef.current = item.key;
+    setInspector({
+      left: pointer.x + INSPECTOR_OFFSET,
+      top: pointer.y + INSPECTOR_OFFSET,
+      view: describeHoverInspector(item, lookup, traceRecorder.openIntervalMs),
+    });
+  }, []);
+
+  const closeInspector = useCallback(() => {
+    pointerRef.current = null;
+    hoveredKeyRef.current = null;
+    setInspector(null);
+  }, []);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !showGrid) {
+      closeInspector();
+      return;
+    }
+    const onMove = (event: PointerEvent) => {
+      const bounds = canvas.getBoundingClientRect();
+      const x = event.clientX - bounds.left;
+      const y = event.clientY - bounds.top;
+      pointerRef.current = { x, y };
+      const item = hitTestChunk(drawListRef.current.items, x, y);
+      if (item && item.key === hoveredKeyRef.current) {
+        // Same cell: move the box without another lookup.
+        setInspector((open) => (open ? { ...open, left: x + INSPECTOR_OFFSET, top: y + INSPECTOR_OFFSET } : open));
+        return;
+      }
+      refreshInspector();
+    };
+    canvas.addEventListener("pointermove", onMove);
+    canvas.addEventListener("pointerleave", closeInspector);
+    canvas.addEventListener("pointerdown", closeInspector);
+    return () => {
+      canvas.removeEventListener("pointermove", onMove);
+      canvas.removeEventListener("pointerleave", closeInspector);
+      canvas.removeEventListener("pointerdown", closeInspector);
+    };
+  }, [canvasRef, showGrid, refreshInspector, closeInspector]);
 
   useEffect(() => {
     if (!anyEnabled) {
@@ -578,7 +591,8 @@ export function DebugOverlays({
       // to subscribe to, the toggle IS the state change we react to.
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setBadges([]);
-      setChunks([]);
+      drawListRef.current = EMPTY_DRAW_LIST;
+      setDrawList(EMPTY_DRAW_LIST);
       setRadiusPaths([]);
       return;
     }
@@ -850,8 +864,8 @@ export function DebugOverlays({
       // Chunk grid for every visible tile-mode entry.
       // (group-as-proxy entries don't iterate chunks — they're served by
       // a single proxy asset.)
-      if (enabled.chunkGrid && plans && cpuCache) {
-        const out: ChunkRect[] = [];
+      if (showGrid && plans && cpuCache) {
+        const out: ChunkCell[] = [];
         const t = ws.t();
         const c = ws.c();
         const planningConfig = configStore.get();
@@ -899,7 +913,7 @@ export function DebugOverlays({
             if (entry.kind === "group-as-proxy") {
               const cached = cpuCache.getCachedProxy(dsId, entry.entityId, "GroupProxy3D", t, c);
               const inFlight = cpuCache.isProxyInFlight(dsId, entry.entityId, "GroupProxy3D", t, c);
-              let status: ChunkRect["status"] = "planned";
+              let status: ChunkCell["status"] = "planned";
               let priorityRank: number | undefined;
               if (cached) {
                 status = "cached";
@@ -956,12 +970,22 @@ export function DebugOverlays({
               if (sxMax < xMin || syMax < yMin || sxMin > xMax || syMin > yMax) continue;
               out.push({
                 key: `${dsId}/${entry.entityId}/group-proxy`,
-                x: sxMin,
-                y: syMin,
-                w: sxMax - sxMin,
-                h: syMax - syMin,
+                datasetId: dsId,
+                entityId: entry.entityId,
+                chunkKey: "group-proxy",
+                level: -1,
+                t,
+                c,
+                z: 0,
+                y: 0,
+                x: 0,
+                left: sxMin,
+                top: syMin,
+                width: sxMax - sxMin,
+                height: syMax - syMin,
                 status,
                 priorityRank,
+                proxyAsset: true,
               });
               continue;
             }
@@ -1003,7 +1027,7 @@ export function DebugOverlays({
               return cpuCache.deliveryState.wasChunkSent(entry.imageId, c, key, tier);
             };
 
-            const statusFor = (key: string): Pick<ChunkRect, "status" | "priorityRank" | "tier"> => {
+            const statusFor = (key: string): Pick<ChunkCell, "status" | "priorityRank" | "tier"> => {
               if (cachedSet?.has(key)) {
                 return {
                   status: "cached",
@@ -1111,12 +1135,24 @@ export function DebugOverlays({
                       displayTier = "coarse";
                     }
 
+                    // The trace is read for the cell's own chunk, even when
+                    // its pixels come from the coarse chunk behind it: "why
+                    // is this chunk not here" is a question about this chunk.
                     out.push({
                       key: `${dsId}/${entry.entityId}/${sourceTier}/${key}`,
-                      x: rect.x,
-                      y: rect.y,
-                      w: rect.w,
-                      h: rect.h,
+                      datasetId: dsId,
+                      entityId: entry.entityId,
+                      chunkKey: key,
+                      level,
+                      t,
+                      c,
+                      z: iz,
+                      y: row,
+                      x: col,
+                      left: rect.x,
+                      top: rect.y,
+                      width: rect.w,
+                      height: rect.h,
                       sourceTier: displayTier,
                       ...statusFor(statusKey),
                     });
@@ -1132,9 +1168,21 @@ export function DebugOverlays({
           }
         }
         out.sort((a, b) => tierDrawOrder(a) - tierDrawOrder(b));
-        setChunks(out);
-      } else if (chunks.length > 0) {
-        setChunks([]);
+        const window = traceRecorder.openIntervalMs;
+        const list = buildChunkDrawList({
+          cells: out,
+          modes: enabled,
+          readingOf: (cell) => traceRecorder.readChunk(cell),
+          windowMs: window,
+        });
+        drawListRef.current = list;
+        setDrawList(list);
+        setWindowMs(window);
+        refreshInspector();
+      } else if (drawListRef.current.items.length > 0) {
+        drawListRef.current = EMPTY_DRAW_LIST;
+        setDrawList(EMPTY_DRAW_LIST);
+        refreshInspector();
       }
     };
 
@@ -1142,9 +1190,11 @@ export function DebugOverlays({
     const id = setInterval(tick, POLL_MS);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, radiusPreviewTier, viewMode, datasets, cpuCache, wasmSceneRef, canvasRef, renderLoopRef]);
+  }, [enabled, showGrid, radiusPreviewTier, viewMode, datasets, cpuCache, wasmSceneRef, canvasRef, renderLoopRef, refreshInspector]);
 
   if (!anyEnabled) return null;
+
+  const absence = overlayAbsence(enabled, drawList, windowMs);
 
   return (
     <div
@@ -1158,47 +1208,67 @@ export function DebugOverlays({
         overflow: "hidden",
       }}
     >
-      {enabled.chunkGrid && chunks.map(c => {
-        // Each color band gates on its own toggle so the simple
-        // 3-color view (cached/in-flight/planned) is recoverable by
-        // turning off both sub-toggles.
-        const tierBg = enabled.chunkTier ? tierColor(c.sourceTier) : null;
-        const bg =
-          tierBg ??
-          (c.status === "cached"
-            ? enabled.cachedTier ? cachedColor(c.tier) : SOLID_CACHED
-            : c.status === "in-flight"
-              ? SOLID_IN_FLIGHT
-              : enabled.plannedRank ? plannedColor(c.priorityRank) : SOLID_PLANNED);
-        const statusTooltip = c.status === "cached"
-          ? enabled.cachedTier && c.tier
-            ? `cached · tier ${c.tier}`
-            : "cached"
-          : c.status === "in-flight"
-            ? "in-flight"
-            : enabled.plannedRank && c.priorityRank !== undefined
-              ? `planned · queue rank ${c.priorityRank}`
-              : enabled.plannedRank
-                ? "planned · not in pending queue"
-                : "planned";
-        const tooltip = c.sourceTier ? `${c.sourceTier} · ${statusTooltip}` : statusTooltip;
-        return (
-          <div
-            key={c.key}
-            style={{
-              position: "absolute",
-              left: c.x,
-              top: c.y,
-              width: c.w,
-              height: c.h,
-              background: bg,
-              border: "1px solid rgba(255, 255, 255, 0.22)",
-              boxSizing: "border-box",
-            }}
-            title={tooltip}
-          />
-        );
-      })}
+      {showGrid && drawList.items.map(item => (
+        <div
+          key={item.key}
+          style={{
+            position: "absolute",
+            left: item.left,
+            top: item.top,
+            width: item.width,
+            height: item.height,
+            background: item.fill,
+            border: item.border,
+            boxSizing: "border-box",
+          }}
+          title={item.tooltip}
+        />
+      ))}
+      {showGrid && inspector && (
+        <div
+          data-testid="overlay-inspector"
+          role="tooltip"
+          style={{
+            position: "absolute",
+            left: inspector.left,
+            top: inspector.top,
+            maxWidth: 360,
+            padding: "4px 7px",
+            background: "rgba(12, 14, 18, 0.9)",
+            color: "#e6e6e6",
+            border: "1px solid rgba(255, 255, 255, 0.25)",
+            borderRadius: 4,
+            fontFamily: "ui-monospace, Menlo, Consolas, monospace",
+            fontSize: 11,
+            lineHeight: 1.35,
+            whiteSpace: "pre-wrap",
+          }}
+        >
+          <div style={{ color: "#fff" }}>{inspector.view.title}</div>
+          {inspector.view.lines.map((line, i) => (
+            <div key={i}>{line}</div>
+          ))}
+        </div>
+      )}
+      {absence && (
+        <div
+          data-testid="overlay-absence"
+          style={{
+            position: "absolute",
+            left: 8,
+            bottom: 8,
+            maxWidth: "70%",
+            padding: "3px 7px",
+            background: "rgba(12, 14, 18, 0.8)",
+            color: "#c8ccd0",
+            borderRadius: 4,
+            fontFamily: "ui-monospace, Menlo, Consolas, monospace",
+            fontSize: 11,
+          }}
+        >
+          {absence}
+        </div>
+      )}
       {(enabled.renderRadius || radiusPreviewTier !== null) && radiusPaths.length > 0 && (
         <svg
           width={size.w}
