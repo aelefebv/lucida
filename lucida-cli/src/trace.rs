@@ -32,6 +32,10 @@ use crate::browser::{self, Viewport};
 use crate::credentials::EffectiveToken;
 use crate::error::{CliError, ErrorKind};
 use crate::session::{connect_workspace_socket, incoming_messages, wait_for_workspace_snapshot};
+use crate::trace_script::{
+    Script, ScriptRecord, describe_script, failing_verdict, format_script_human, run_script,
+    script_gate_failure,
+};
 
 /// The run file's own version, independent of the trace schema it carries.
 /// A reader that does not know this number should say so rather than guess.
@@ -65,7 +69,7 @@ const CHROME_TRACE_EXPORT_EXPRESSION: &str =
 /// Close a run the driver gave up on as what it was. `explicit` would claim
 /// somebody asked for the document; the end reason is the field a later reader
 /// trusts about whether the page ever finished.
-const CLOSE_AS_TIMEOUT: &str =
+pub(crate) const CLOSE_AS_TIMEOUT: &str =
     "window.lucidaTrace ? (window.lucidaTrace.closeRun('timeout'), true) : false";
 
 /// Whether a labelled run is open, and how many have closed. Read every poll,
@@ -120,6 +124,26 @@ const RUN_EXPORT_EXPRESSION: &str = r#"(() => {
       section
     };
   }
+  // Each step that opened a run takes that run's header fields and verdict
+  // from the document just exported. Filled in place: the bundle export that
+  // follows reads the same object.
+  const script = window.__lucidaTraceScript || null;
+  if (script && Array.isArray(script.steps)) {
+    for (const step of script.steps) {
+      if (!step.runId) continue;
+      const stepRun = runs.find(r => r.header.runId === step.runId);
+      if (!stepRun) continue;
+      step.cause = stepRun.header.cause || null;
+      step.endReason = stepRun.header.endReason || null;
+      step.durationUs = typeof stepRun.header.durationUs === 'number' ? stepRun.header.durationUs : null;
+      try {
+        const verdict = seam.diagnoseTrace(trace, { runId: step.runId }).verdict;
+        step.verdict = verdict ? { kind: verdict.kind, text: verdict.text } : null;
+      } catch (error) {
+        step.verdict = { kind: 'unread', text: 'diagnosis failed: ' + String(error) };
+      }
+    }
+  }
   return JSON.stringify({
     schemaVersion: seam.schemaVersion,
     runId,
@@ -131,6 +155,7 @@ const RUN_EXPORT_EXPRESSION: &str = r#"(() => {
     perPhase,
     spatial: runId ? render(() => seam.diagnoseText(runId, { depth: 'spatial' })) : null,
     perChunk,
+    script,
     trace
   });
 })()"#;
@@ -158,7 +183,9 @@ fn run_export_expression(with_chrome_trace: bool) -> String {
 /// writes. Awaited, because the page asks the server for its health and the
 /// render worker for its canvas before it exports. The driver passes its own
 /// frame because its screenshot exists even when the render worker never came
-/// up, and a page that never drew is the finding.
+/// up, and a page that never drew is the finding. The script it ran, if any,
+/// rides along as the run export left it on the page, so the bundle's steps
+/// carry the same runs and verdicts the run file's do.
 fn bundle_export_expression(frame: &BundleFrame, perfetto: bool) -> String {
     let frame_json = serde_json::to_string(frame).unwrap_or_else(|_| "null".to_string());
     format!(
@@ -166,7 +193,8 @@ fn bundle_export_expression(frame: &BundleFrame, perfetto: bool) -> String {
   const seam = window.lucidaTrace;
   if (!seam || typeof seam.exportBundle !== 'function') return null;
   const waited = window.__lucidaTraceRunId || seam.runState.lastConcludedRunId || undefined;
-  const bundle = await seam.exportBundle({{ runId: waited, frame: {frame_json}, perfetto: {perfetto} }});
+  const script = window.__lucidaTraceScript || null;
+  const bundle = await seam.exportBundle({{ runId: waited, frame: {frame_json}, perfetto: {perfetto}, script }});
   return JSON.stringify(bundle);
 }})()"#
     )
@@ -384,6 +412,10 @@ pub struct TraceRunHeader {
     /// because what the page showed at the deadline is part of the finding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screenshot: Option<PathBuf>,
+    /// The script the driver ran and what each step did, when it ran one.
+    /// Absent for the driver's default: an open and nothing after it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script: Option<ScriptRecord>,
 }
 
 /// Both renderings, taken at export time from the page's one renderer. The
@@ -476,6 +508,9 @@ struct SeamExport {
     /// Present only when the caller asked for the raw-span file.
     #[serde(default)]
     chrome_trace: Option<String>,
+    /// The driver's script with each step's run filled in, when it ran one.
+    #[serde(default)]
+    script: Option<ScriptRecord>,
     trace: Value,
 }
 
@@ -510,6 +545,10 @@ pub struct TraceBundle {
     /// The Perfetto projection, only when the caller asked for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub perfetto: Option<String>,
+    /// The driver's script and what each step did, when the driver ran one.
+    /// Null for a bundle the monitor saved. Replay runs the same steps.
+    #[serde(default)]
+    pub script: Option<ScriptRecord>,
 }
 
 /// The bundle's header. The replay fields are typed where the driver reads
@@ -1352,16 +1391,25 @@ pub fn gate_failure(file: &TraceRunFile) -> Option<String> {
             file.header.end_reason.as_deref().unwrap_or("no end reason")
         ));
     }
-    let verdict = file.diagnostic.get("verdict")?;
-    let kind = verdict.get("kind").and_then(Value::as_str)?;
-    if kind == "stall" || kind == "unsettled" || kind == "steady-state" {
-        let text = verdict
-            .get("text")
+    if let Some(kind) = file
+        .diagnostic
+        .get("verdict")
+        .and_then(|verdict| verdict.get("kind"))
+        .and_then(Value::as_str)
+        && failing_verdict(kind)
+    {
+        let text = file
+            .diagnostic
+            .get("verdict")
+            .and_then(|verdict| verdict.get("text"))
             .and_then(Value::as_str)
             .unwrap_or("no verdict text");
         return Some(format!("{kind}: {text}"));
     }
-    None
+    // The file's run is the last step's. Every earlier step's run is read
+    // from the record the page filled at export, so a slow orbit fails the
+    // gate whether or not a scrub came after it.
+    file.header.script.as_ref().and_then(script_gate_failure)
 }
 
 // ---------------------------------------------------------------------------
@@ -1394,11 +1442,17 @@ pub fn format_run_human(file: &TraceRunFile, path: &Path, bundle: Option<&Path>)
         .as_deref()
         .map(|shot| format!("frame     {}\n", shot.display()))
         .unwrap_or_default();
+    let steps = header
+        .script
+        .as_ref()
+        .map(|script| format!("{}\n", format_script_human(script)))
+        .unwrap_or_default();
     format!(
         "view      {} @ {}x{} DPR {}\n\
          {camera}\
          server    {}\n\
          hold      quiescent had to hold {} ms; every duration below is measured against that\n\
+         {steps}\
          run file  {}\n\
          {bundle}\
          {screenshot}\n\
@@ -1464,6 +1518,9 @@ pub fn format_bundle_human(bundle: &TraceBundle, path: &Path, text: &str) -> Str
     }
     for pins in &header.pins {
         lines.push(format!("pins      {}", format_pins(pins)));
+    }
+    if let Some(script) = &bundle.script {
+        lines.push(format!("script    {}", describe_script(script)));
     }
     if let Some(gpu) = &header.gpu {
         let name = if gpu.description.is_empty() {
@@ -1759,13 +1816,17 @@ pub async fn drive_run(
     // default rendering points at Perfetto for raw spans, and a second drive
     // would send the reader to a different run than the one they were reading.
     let export_expression = run_export_expression(perfetto_path.is_some());
+    let request = DriveRequest {
+        screenshot: facts.screenshot.as_deref(),
+        script: (!facts.script.is_empty()).then_some(&facts.script),
+    };
     let driven = drive_and_export(
         url,
         token,
         viewport,
         wait,
         &export_expression,
-        facts.screenshot.as_deref(),
+        request,
         bundle,
     )
     .await?;
@@ -1813,6 +1874,14 @@ struct Driven {
     bundle_json: Option<String>,
 }
 
+/// What a drive does on the page beyond the export: the frame it writes,
+/// and the script it runs once the open has settled. Nothing, by default.
+#[derive(Debug, Clone, Copy, Default)]
+struct DriveRequest<'a> {
+    screenshot: Option<&'a Path>,
+    script: Option<&'a Script>,
+}
+
 /// Drive one run and hand back whatever `export` evaluated to.
 ///
 /// The two exports — the document and its Perfetto projection — differ only in
@@ -1820,25 +1889,34 @@ struct Driven {
 /// teardown live here once. Readiness is observed rather than demanded: a page
 /// that never draws is a run this command still has to report.
 ///
-/// `screenshot` is where to write the page's frame after the wait, at the
-/// viewport's device pixel ratio. It is taken before the export because the
-/// export closes the run: the frame is the run's last state. A bundle takes
-/// the same frame, whether or not the caller also wanted it as a file.
+/// `request.screenshot` is where to write the page's frame after the wait,
+/// at the viewport's device pixel ratio. It is taken before the export
+/// because the export closes the run: the frame is the run's last state. A
+/// bundle takes the same frame, whether or not the caller also wanted it as
+/// a file.
+///
+/// `request.script` runs once the open has settled or been given up on,
+/// step by step, each gesture settling before the next. The frame is then
+/// the last step's, and the run the export reads is the last step's run.
 async fn drive_and_export(
     url: &str,
     token: Option<&EffectiveToken>,
     viewport: Viewport,
     wait: Duration,
     export: &str,
-    screenshot: Option<&Path>,
+    request: DriveRequest<'_>,
     bundle: Option<&BundleRequest>,
 ) -> Result<Driven, CliError> {
+    let screenshot = request.screenshot;
     browser::with_browser(viewport, wait, async |browser| {
         let mut page = browser.open_page_unrendered(url, token, wait).await?;
         if !wait_for_settled_run(&mut page, wait).await? {
             page.evaluate(CLOSE_AS_TIMEOUT, wait).await?;
             let closed = read_run_state(&mut page, wait).await?;
             pin_run(&mut page, closed.last_concluded_run_id.as_deref(), wait).await?;
+        }
+        if let Some(script) = request.script {
+            run_script(&mut page, script, wait).await?;
         }
         let mut frame = None;
         if screenshot.is_some() || bundle.is_some() {
@@ -1957,6 +2035,8 @@ pub struct DriverFacts {
     pub workspace_id: String,
     /// Where to write the settled frame, when the caller wants one.
     pub screenshot: Option<PathBuf>,
+    /// The steps to run after the open settles. Empty for a cold open alone.
+    pub script: Script,
 }
 
 /// Fold what the page returned together with what only the driver knows. Split
@@ -1980,6 +2060,7 @@ fn assemble_run_file(export: SeamExport, facts: &DriverFacts) -> TraceRunFile {
             server_url: facts.server_url.clone(),
             workspace_id: facts.workspace_id.clone(),
             screenshot: facts.screenshot.clone(),
+            script: export.script,
         },
         renderings: TraceRenderings::from_export(
             export.summary,
@@ -2062,7 +2143,7 @@ async fn wait_for_settled_run(page: &mut browser::Page, wait: Duration) -> Resul
 /// A page can carry several runs — a workspace reload opens one, a later
 /// dirty epoch opens another — so the export has to name the one the wait
 /// observed rather than take the last in the list.
-async fn pin_run(
+pub(crate) async fn pin_run(
     page: &mut browser::Page,
     run_id: Option<&str>,
     wait: Duration,
@@ -2082,7 +2163,7 @@ async fn pin_run(
 /// A JS string literal for `value`, quoted by the JSON encoder rather than by
 /// hand — a run id reaches this from the page, and hand-quoting is how an
 /// injected expression happens.
-fn json_string(value: &str) -> String {
+pub(crate) fn json_string(value: &str) -> String {
     Value::String(value.to_string()).to_string()
 }
 
@@ -2107,14 +2188,15 @@ async fn read_run_state(page: &mut browser::Page, wait: Duration) -> Result<RunS
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct RunState {
-    #[allow(dead_code)]
-    open: bool,
-    concluded: u64,
+pub(crate) struct RunState {
+    /// Whether a labelled run is open. The script loop reads it to tell an
+    /// input that opened a run from one that landed on nothing.
+    pub(crate) open: bool,
+    pub(crate) concluded: u64,
     /// The run the wait was waiting for. Named to the export, because the
     /// export closes an interval of its own and "newest" would be that one.
     #[serde(default)]
-    last_concluded_run_id: Option<String>,
+    pub(crate) last_concluded_run_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2155,7 +2237,7 @@ pub async fn capture_chrome_trace(
         viewport,
         wait,
         CHROME_TRACE_EXPORT_EXPRESSION,
-        None,
+        DriveRequest::default(),
         None,
     )
     .await?
@@ -2289,6 +2371,7 @@ mod tests {
             server_url: "http://host".to_string(),
             workspace_id: "ws".to_string(),
             screenshot: None,
+            script: Script::default(),
         }
     }
 
@@ -2305,6 +2388,7 @@ mod tests {
                 server_url: "http://host".to_string(),
                 workspace_id: "ws".to_string(),
                 screenshot: None,
+                script: None,
             },
             renderings: TraceRenderings {
                 summary: "lucida trace run-1-1 — VERDICT: clear".to_string(),
@@ -3304,6 +3388,137 @@ mod tests {
         assert!(expression.contains("__lucidaTraceRunId"), "{expression}");
         assert!(expression.contains("seam.exportBundle("), "{expression}");
         assert!(bundle_export_expression(&frame, true).contains("perfetto: true"));
+        // The script the run export filled in on the page rides into the
+        // bundle, so both files carry the same steps.
+        assert!(
+            expression.contains("const script = window.__lucidaTraceScript || null;"),
+            "{expression}"
+        );
+        assert!(
+            expression.contains("perfetto: false, script }"),
+            "{expression}"
+        );
+    }
+
+    /// A driven script lands in the run file's header as the page filled it
+    /// in: each step's run, cause, end reason, and verdict come from the
+    /// export, and the gate reads every step, not only the last.
+    #[test]
+    fn the_run_file_carries_the_script_and_the_gate_reads_every_step() {
+        let step = |kind: &str, run_id: Option<&str>, verdict: Value| {
+            json!({
+                "kind": kind, "theta": 30, "phi": 0, "axis": "t", "count": 1,
+                "startedAtMs": 1000.0, "endedAtMs": 2400.0,
+                "runId": run_id,
+                "cause": run_id.map(|_| json!({ "epoch": "view", "dirtyKind": "interactive", "source": kind })),
+                "endReason": run_id.map(|_| "quiescent"),
+                "durationUs": run_id.map(|_| 1_300_000.0),
+                "verdict": verdict,
+                "timedOut": false,
+                "viewBefore": { "camera": { "mode": "arcball", "theta": 0.1 } },
+                "viewAfter": { "camera": { "mode": "arcball", "theta": 0.6 } },
+                "viewChanged": true
+            })
+        };
+        let export: SeamExport = serde_json::from_str(
+            &json!({
+                "schemaVersion": 1,
+                "runId": "run-7-4",
+                "quiescenceHoldMs": 500,
+                "endReason": "quiescent",
+                "diagnostic": { "verdict": { "kind": "clear", "text": "fine" } },
+                "summary": "lucida trace run-7-4 — VERDICT: fine",
+                "phases": "CRITICAL PATH",
+                "script": { "steps": [
+                    step("wait", None, Value::Null),
+                    step("orbit", Some("run-7-3"), json!({ "kind": "stall", "text": "frame time over the ceiling" })),
+                    step("scrub", Some("run-7-4"), json!({ "kind": "clear", "text": "fine" })),
+                ] },
+                "trace": { "runs": [] }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let file = assemble_run_file(export, &facts());
+        let script = file
+            .header
+            .script
+            .as_ref()
+            .expect("the header carries the script");
+        assert_eq!(script.steps.len(), 3);
+        assert_eq!(script.steps[1].run_id.as_deref(), Some("run-7-3"));
+        assert_eq!(script.steps[1].cause.as_ref().unwrap()["source"], "orbit");
+        assert_eq!(script.steps[1].end_reason.as_deref(), Some("quiescent"));
+        assert_eq!(script.last_run_id(), Some("run-7-4"));
+        assert!(file.header.settled);
+        assert_eq!(
+            gate_failure(&file).as_deref(),
+            Some("step 2 (orbit 30°,0°) stall: frame time over the ceiling")
+        );
+
+        let text = format_run_human(&file, Path::new("/tmp/run.json"), None);
+        assert!(text.contains("steps     3: wait, orbit, scrub\n"), "{text}");
+        assert!(text.contains("run run-7-3 (orbit) · quiescent"), "{text}");
+        assert!(text.contains("verdict stall"), "{text}");
+
+        let json = serde_json::to_string(&file).unwrap();
+        let back = parse_run_file(&json, Path::new("run.json")).unwrap();
+        assert_eq!(back.header.script, file.header.script);
+    }
+
+    /// A run driven without a script has no `script` key, so a reader never
+    /// has to tell an empty script from none, and a bundle the monitor saved
+    /// reads with `script: null`.
+    #[test]
+    fn a_run_without_a_script_omits_the_key_and_a_bundle_says_what_it_ran() {
+        let file = run_file(json!({ "verdict": { "kind": "clear" } }), true, "quiescent");
+        let json = serde_json::to_value(&file).unwrap();
+        assert!(json["header"].get("script").is_none());
+        assert!(!format_run_human(&file, Path::new("/tmp/run.json"), None).contains("steps"));
+
+        let mut bundle = golden_bundle();
+        assert!(bundle.script.is_none());
+        let text = format_bundle_human(&bundle, Path::new("/tmp/b.json"), "");
+        assert!(!text.contains("script    "), "{text}");
+
+        let scripted: ScriptRecord = serde_json::from_value(json!({ "steps": [
+            { "kind": "wait", "startedAtMs": 0.0, "endedAtMs": 1.0, "runId": null,
+              "timedOut": false, "viewBefore": null, "viewAfter": null, "viewChanged": false },
+            { "kind": "orbit", "theta": 30, "phi": 0, "startedAtMs": 1.0, "endedAtMs": 2.0,
+              "runId": "run-2", "timedOut": false, "viewBefore": null, "viewAfter": null, "viewChanged": true }
+        ] }))
+        .unwrap();
+        bundle.script = Some(scripted);
+        let text = format_bundle_human(&bundle, Path::new("/tmp/b.json"), "");
+        assert!(
+            text.contains("script    2 step(s): wait, orbit\n"),
+            "{text}"
+        );
+        let json = serde_json::to_string(&bundle).unwrap();
+        let back = parse_bundle(&json, Path::new("b.json")).unwrap();
+        assert_eq!(back.script, bundle.script);
+    }
+
+    #[test]
+    fn the_run_export_fills_each_steps_run_in_from_the_document_it_exported() {
+        let expression = run_export_expression(false);
+        assert!(
+            expression.contains("window.__lucidaTraceScript"),
+            "{expression}"
+        );
+        assert!(
+            expression.contains("runs.find(r => r.header.runId === step.runId)"),
+            "{expression}"
+        );
+        assert!(
+            expression.contains("seam.diagnoseTrace(trace, { runId: step.runId })"),
+            "{expression}"
+        );
+        assert!(
+            expression.contains("    script,\n    trace\n"),
+            "{expression}"
+        );
     }
 
     /// A bundle from a page that recorded no run has a header with little in

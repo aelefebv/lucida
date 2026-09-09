@@ -212,6 +212,22 @@ export interface TraceBundle {
   absent: BundleAbsence[];
   /** The Chrome Trace Event projection, only when asked for. Off by default. */
   perfetto: string | null;
+  /**
+   * The trace driver's script, when the driver ran one: its steps in order,
+   * each with the run it opened and the view before and after. The page
+   * carries it so a replay can run the same steps, and reads nothing from
+   * it. Null for a bundle the monitor saved or a driver run with no script.
+   */
+  script: BundleScript | null;
+}
+
+/**
+ * What the driver hands over about its script. The step shape is the
+ * driver's own and is kept as it arrived; a reader that wants the fields goes
+ * to the CLI, which writes and reads them.
+ */
+export interface BundleScript {
+  steps: Record<string, unknown>[];
 }
 
 /**
@@ -232,6 +248,8 @@ export interface BundleOptions {
   frame?: BundleFrame;
   /** Include the Chrome Trace Event projection. Off by default. */
   perfetto?: boolean;
+  /** The driver's script and what each step did. Carried as given. */
+  script?: BundleScript | null;
 }
 
 /** Everything `exportBundle` reads from the page, injectable so the assembly is assertable without one. */
@@ -317,6 +335,7 @@ export async function exportBundle(
       : null,
     absent,
     perfetto: options.perfetto ? toChromeTraceJson(trace) : null,
+    script: options.script ?? null,
   };
 }
 

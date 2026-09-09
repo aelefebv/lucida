@@ -1,5 +1,6 @@
 /** 3D volume viewer — delegates WebGPU rendering to a worker via RenderClient. */
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { ORBIT_RADIANS_PER_PIXEL, VOLUME_ZOOM_PER_WHEEL_DELTA } from "./inputScale.ts";
 import type { WasmScene } from "lucida-core";
 import { RenderClient } from "../renderer/renderClient.ts";
 import { RenderLoop, type DatasetEntry } from "../renderLoop.ts";
@@ -395,8 +396,8 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
       if (shiftDragRef.current) {
         applyViewportCommand(scene, { type: "arcball_pan", dx, dy });
       } else {
-        const dTheta = -dx * 0.005;
-        const dPhi = -dy * 0.005;
+        const dTheta = -dx * ORBIT_RADIANS_PER_PIXEL;
+        const dPhi = -dy * ORBIT_RADIANS_PER_PIXEL;
         applyViewportCommand(scene, { type: "arcball_rotate", d_theta: dTheta, d_phi: dPhi });
       }
       emitPresence();
@@ -475,7 +476,7 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
   const onArcballWheel = useCallback(
     (e: WheelEvent) => {
       e.preventDefault();
-      const delta = e.deltaY * 0.001;
+      const delta = e.deltaY * VOLUME_ZOOM_PER_WHEEL_DELTA;
       breakFollow();
       applyViewportCommand(scene, { type: "arcball_zoom", delta });
       emitPresence();

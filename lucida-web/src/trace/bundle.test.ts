@@ -61,6 +61,7 @@ describe("what the bundle carries", () => {
     expect(bundle.health?.fetchedAtEpochMs).toBe(1_700_000_200_000);
     expect(bundle.absent).toEqual([]);
     expect(bundle.perfetto).toBeNull();
+    expect(bundle.script).toBeNull();
   });
 
   it("names the file for the run it carries", async () => {
@@ -291,6 +292,20 @@ describe("the callers", () => {
     const file = JSON.parse(withProjection.perfetto!);
     expect(file.displayTimeUnit).toBe("ms");
     expect(file.otherData.runs[0].runId).toBe("local-healthy");
+  });
+
+  it("carries the driver's script as given, and null when there was none", async () => {
+    const without = await exportBundle(context());
+    expect(without.script).toBeNull();
+
+    const script = {
+      steps: [
+        { kind: "wait", runId: null, viewChanged: false },
+        { kind: "orbit", theta: 30, phi: 0, runId: "orbit-1", viewChanged: true },
+      ],
+    };
+    const withScript = await exportBundle(context(), { script });
+    expect(withScript.script).toEqual(script);
   });
 
   it("filters the health to the run's datasets when the run names any", async () => {

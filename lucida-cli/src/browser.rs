@@ -417,6 +417,21 @@ impl Page {
             .cloned())
     }
 
+    /// Synthesize one mouse event through the browser's own input pipeline:
+    /// `params` is the DevTools protocol's `Input.dispatchMouseEvent`
+    /// request, with `x` and `y` in CSS pixels. The page sees the pointer or
+    /// wheel event a person's mouse would raise, at the emulated device
+    /// pixel ratio, so a scripted gesture measures the path a person's takes
+    /// (ADR 0051, as amended).
+    pub async fn dispatch_mouse_event(
+        &mut self,
+        params: Value,
+        wait: Duration,
+    ) -> Result<(), CliError> {
+        self.call("Input.dispatchMouseEvent", params, wait).await?;
+        Ok(())
+    }
+
     /// Capture the page as a PNG.
     pub async fn screenshot_png(&mut self, wait: Duration) -> Result<Vec<u8>, CliError> {
         let captured = self

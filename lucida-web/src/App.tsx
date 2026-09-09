@@ -55,6 +55,7 @@ import { useSeedDatasetOpens } from "./hooks/useSeedDatasetOpens.ts";
 import { useIntensityBatcher } from "./hooks/useIntensityBatcher.ts";
 import { useDatasetLevels } from "./hooks/useDatasetLevels.ts";
 import { useSavedViewSync } from "./hooks/useSavedViewSync.ts";
+import { useScriptControls } from "./hooks/useScriptControls.ts";
 import { useViewedMentions } from "./hooks/useViewedMentions.ts";
 import type { SavedView } from "./savedView/types.ts";
 import { restoreAnnotationView } from "./savedView/restoreAnnotationView.ts";
@@ -880,6 +881,22 @@ function App({
       setReportSender(null);
     };
   }, [liveBridge, render.clientRef]);
+
+  useScriptControls({
+    selectors: {
+      z: dims.z, t: dims.t, c: dims.c,
+      dimZ: dims.dimZ, dimT: dims.dimT, dimC: dims.dimC,
+      viewMode: dims.viewMode,
+    },
+    setZ: dims.handleZChange,
+    setT: dims.handleTChange,
+    setC: dims.handleCChange,
+    setChannelVisible: layers.handleChannelSetVisible,
+    setLayerVisible: layers.handleLayerSetVisible,
+    captureView: savedViewSync.captureBuilder,
+    selectedDatasetId,
+    datasetsRef,
+  });
 
   useIntensityBatcher({
     clientReady: render.clientReady,
