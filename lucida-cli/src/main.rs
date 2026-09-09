@@ -6,6 +6,7 @@ mod credentials;
 mod dataset;
 mod error;
 mod http;
+mod inbox;
 mod layout;
 mod montage;
 mod output;
@@ -54,6 +55,10 @@ use crate::dataset::{
 };
 
 use crate::error::{CliError, ErrorKind};
+use crate::inbox::{
+    InboxClient, InboxFetchOutput, InboxListOutput, fetch_path, format_inbox_fetch_human,
+    format_inbox_list_human, resolve_entry,
+};
 use crate::layout::{
     LayoutActiveOutput, LayoutListOutput, LayoutSetOutput, LayoutWorkspaceClient,
     format_layout_active_human, format_layout_list_human, format_layout_set_human,
@@ -1288,6 +1293,11 @@ enum TraceCommand {
         #[arg(long, value_name = "DIR", env = "LUCIDA_TRACE_DIR")]
         trace_dir: Option<PathBuf>,
     },
+    /// List and fetch the reports people sent to this workspace's inbox
+    Inbox {
+        #[command(subcommand)]
+        command: TraceInboxCommand,
+    },
     /// Write the page's trace as Chrome Trace Event JSON, for ui.perfetto.dev
     Perfetto {
         /// File to write the trace to
@@ -1308,6 +1318,25 @@ enum TraceCommand {
         /// Device pixel ratio to drive the page at
         #[arg(long, default_value_t = trace::DEFAULT_DEVICE_PIXEL_RATIO, value_name = "RATIO")]
         device_pixel_ratio: f64,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TraceInboxCommand {
+    /// List the reports in the selected workspace's inbox, newest first
+    List,
+    /// Fetch one report to a file that `lucida trace show` reads
+    Fetch {
+        /// Inbox entry id, or enough of one to name a single report
+        #[arg(value_name = "ENTRY")]
+        entry: String,
+        /// File to write the bundle to, instead of naming it for its run
+        /// under the trace directory
+        #[arg(long, short, value_name = "PATH")]
+        output: Option<PathBuf>,
+        /// Directory fetched bundles land in, beside the driver's runs
+        #[arg(long, value_name = "DIR", env = "LUCIDA_TRACE_DIR")]
+        trace_dir: Option<PathBuf>,
     },
 }
 
@@ -3749,9 +3778,50 @@ async fn emit_trace_command(
                 trace::format_chrome_trace_human(output_path, &capture)
             })?;
         }
+        (None, Some(TraceCommand::Inbox { command })) => {
+            let inbox = InboxClient::new(server.url.clone(), token.clone());
+            let entries = inbox.list(&workspace).await?;
+            match command {
+                TraceInboxCommand::List => {
+                    let payload = InboxListOutput {
+                        server,
+                        workspace,
+                        entries,
+                    };
+                    output.print_either(&payload, || format_inbox_list_human(&payload))?;
+                }
+                TraceInboxCommand::Fetch {
+                    entry,
+                    output: output_path,
+                    trace_dir,
+                } => {
+                    // The listing first, so the report can be named by a
+                    // few characters of its id and the file by the run it
+                    // holds. Both need the entry, and the entry is only in
+                    // the listing.
+                    let entry = resolve_entry(&entries, entry)?.clone();
+                    let dir = trace::resolve_trace_dir(trace_dir.as_deref(), &config_path);
+                    let path = fetch_path(&dir, &entry, output_path.as_deref());
+                    // Written as the server handed it over: the file on
+                    // disk is the file the sender's page produced.
+                    let bundle = inbox.fetch(&workspace, &entry.id).await?;
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent).map_err(CliError::from)?;
+                    }
+                    std::fs::write(&path, bundle).map_err(CliError::from)?;
+                    let payload = InboxFetchOutput {
+                        server,
+                        workspace,
+                        entry,
+                        path,
+                    };
+                    output.print_either(&payload, || format_inbox_fetch_human(&payload))?;
+                }
+            }
+        }
         (None, None) => {
             return Err(CliError::config(
-                "lucida trace takes a dataset URL to measure, or a subcommand (show, perfetto)",
+                "lucida trace takes a dataset URL to measure, or a subcommand (show, inbox, perfetto)",
             ));
         }
     }
@@ -5876,6 +5946,73 @@ mod tests {
         }
 
         assert!(try_parse(&["trace", "/data/set.zarr", "--bundle-perfetto"]).is_err());
+    }
+
+    /// The inbox is two commands: what is there, and one of them to a
+    /// file. `fetch` names a report by id and takes the file name from
+    /// the run unless the caller says otherwise.
+    #[test]
+    fn trace_inbox_commands_parse_product_shape() {
+        match parse(&["trace", "inbox", "list"]).command {
+            Command::Trace {
+                command:
+                    Some(TraceCommand::Inbox {
+                        command: TraceInboxCommand::List,
+                    }),
+                ..
+            } => {}
+            other => panic!("expected an inbox listing, got {other:?}"),
+        }
+
+        match parse(&[
+            "trace",
+            "inbox",
+            "fetch",
+            "5d1f0c2e",
+            "--output",
+            "/tmp/report.bundle.json",
+            "--trace-dir",
+            "/runs",
+        ])
+        .command
+        {
+            Command::Trace {
+                command:
+                    Some(TraceCommand::Inbox {
+                        command:
+                            TraceInboxCommand::Fetch {
+                                entry,
+                                output,
+                                trace_dir,
+                            },
+                    }),
+                ..
+            } => {
+                assert_eq!(entry, "5d1f0c2e");
+                assert_eq!(
+                    output.as_deref(),
+                    Some(Path::new("/tmp/report.bundle.json"))
+                );
+                assert_eq!(trace_dir.as_deref(), Some(Path::new("/runs")));
+            }
+            other => panic!("expected an inbox fetch, got {other:?}"),
+        }
+
+        match parse(&["trace", "inbox", "fetch", "5d1f0c2e"]).command {
+            Command::Trace {
+                command:
+                    Some(TraceCommand::Inbox {
+                        command: TraceInboxCommand::Fetch { output, .. },
+                    }),
+                ..
+            } => assert_eq!(output, None, "the file is named for its run by default"),
+            other => panic!("expected an inbox fetch, got {other:?}"),
+        }
+
+        // A report to fetch is not optional: there is no newest-report
+        // default, because a listing is one command away and picking for
+        // somebody would fetch the wrong megabytes.
+        assert!(try_parse(&["trace", "inbox", "fetch"]).is_err());
     }
 
     /// The bundle header lists every field the replay needs (#1055): each

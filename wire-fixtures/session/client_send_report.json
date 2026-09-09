@@ -1,0 +1,5 @@
+{
+  "type": "send_report",
+  "request_id": "web-report-9c1d",
+  "bundle": "{\"bundleVersion\":1,\"format\":\"lucida-trace-bundle\",\"header\":{\"build\":{\"dev\":false,\"mode\":\"production\",\"version\":\"0.2.0\"},\"cause\":{\"dirtyKind\":\"interactive\",\"epoch\":\"content\",\"source\":\"dataset_open_request\"},\"datasets\":[{\"id\":\"wds-0f3a\",\"name\":\"sample volume\",\"sourceUrl\":\"gs://lucida-fixtures/sample-volume.zarr\"}],\"devicePixelRatio\":2,\"durationUs\":4200000,\"endReason\":\"quiescent\",\"gpu\":{\"architecture\":\"gen-1\",\"description\":\"Example Adapter\",\"device\":\"adapter-01\",\"fallback\":false,\"timestampQueries\":true,\"vendor\":\"example\"},\"mode\":\"volume\",\"runId\":\"remote-cold\",\"savedAtEpochMs\":1767225700000,\"startedAtEpochMs\":1767225600000,\"viewUrl\":\"https://lucida.example/w/workspace-2ac8\"},\"schemaVersion\":2,\"trace\":{\"runs\":[],\"schemaVersion\":2}}"
+}

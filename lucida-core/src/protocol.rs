@@ -150,6 +150,22 @@ pub enum ClientMessage {
     /// `seq`. Carries no fields: the snapshot is self-describing, and the
     /// client's seq discipline makes a redundant snapshot harmless.
     RequestSnapshot,
+    /// **Send report**: post a bundle to the workspace inbox, where the CLI
+    /// lists and fetches it. Sent only when a person presses the action in
+    /// the monitor; nothing sends it on a run's close or on any schedule.
+    ///
+    /// `bundle` is the bundle's JSON as text, not as a value. What the CLI
+    /// fetches has to be what the page produced, so the payload crosses
+    /// the wire, the store, and the fetch as the same bytes, and nothing
+    /// in between re-serializes it. The server reads out only the header
+    /// it needs to describe the entry: the inbox is a mailbox, not a
+    /// trace store (ADR 0050 as amended). The server answers the
+    /// requester with [`ServerMessage::ReportSent`] or
+    /// [`ServerMessage::ReportFailed`].
+    ///
+    /// Variant added at the end so the serde tag positions of older
+    /// variants don't shift.
+    SendReport { request_id: String, bundle: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -363,6 +379,25 @@ pub enum ServerMessage {
     /// Variant added at the end so the serde tag positions of older
     /// variants don't shift.
     TimingBatch { batch: ServerTimingBatch },
+    /// Sent to the requester when a [`ClientMessage::SendReport`] landed in
+    /// the workspace inbox. `entry_id` is what `lucida trace inbox fetch`
+    /// takes, and `expires_at` (RFC 3339) is when the inbox's fixed
+    /// retention drops the entry.
+    ///
+    /// Variant added at the end so the serde tag positions of older
+    /// variants don't shift.
+    ReportSent {
+        request_id: String,
+        entry_id: String,
+        expires_at: String,
+    },
+    /// Sent to the requester when a [`ClientMessage::SendReport`] could not
+    /// be stored: no workspace on this session, a bundle without a header
+    /// or over the size cap, or a store failure. Nothing was kept.
+    ///
+    /// Variant added at the end so the serde tag positions of older
+    /// variants don't shift.
+    ReportFailed { request_id: String, error: String },
 }
 
 /// The kind of mutation a `BookmarkChanged` describes. Wire encoding is

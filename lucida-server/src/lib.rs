@@ -16,6 +16,7 @@ pub mod decode;
 pub mod generated;
 pub mod handler;
 pub mod health;
+pub mod inbox;
 pub mod open_diagnostics;
 pub mod proxy;
 pub mod session;

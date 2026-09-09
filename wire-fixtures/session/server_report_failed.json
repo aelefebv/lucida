@@ -1,0 +1,5 @@
+{
+  "type": "report_failed",
+  "request_id": "web-report-9c1d",
+  "error": "the bundle carries no header"
+}

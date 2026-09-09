@@ -789,6 +789,20 @@ const expectedGeneratedDelta: WireGeneratedAvailabilityDelta = {
   ],
 };
 
+/**
+ * The bundle text a **Send report** carries, read out of the golden
+ * rather than restated here.
+ *
+ * A bundle rides as text: the server stores those bytes and the CLI
+ * fetches them back, so what the envelope has to lock is that the same
+ * characters go out, which a second spelling of the same object in this
+ * file could not check. The bundle's own shape is locked by
+ * `trace-fixtures/bundle-v1.json` on both sides.
+ */
+const expectedSendReportBundle = (
+  fixture("session/client_send_report.json") as { bundle: string }
+).bundle;
+
 const expectedSourceHealth: DatasetSourceHealth = {
   workspace_dataset_id: "wds-0f3a",
   name: "kidney-multiplex.zarr",
@@ -1185,6 +1199,49 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     // the bridge to resolve the right pending promise).
     deliver(ws, JSON.stringify({ ...envelope, request_id: sent.request_id }));
     await expect(pending).resolves.toStrictEqual([expectedSourceHealth]);
+  });
+
+  it("report_sent resolves a pending sendReport with the inbox entry and its expiry", async () => {
+    const raw = fixtureRaw("session/server_report_sent.json");
+    COVERED_FIXTURES.add("session/server_report_sent.json");
+    const envelope = JSON.parse(raw) as {
+      type: string;
+      request_id: string;
+      entry_id: string;
+      expires_at: string;
+    };
+    expect(envelope).toStrictEqual({
+      type: "report_sent",
+      request_id: "web-report-9c1d",
+      entry_id: "5d1f0c2e-7b3a-4e8f-9a6b-0c1d2e3f4a5b",
+      expires_at: "2026-09-23T14:05:00Z",
+    });
+
+    const { bridge, ws } = openBridge();
+    const pending = bridge.sendReport(expectedSendReportBundle);
+    const sent = lastSent(ws) as { request_id: string };
+    deliver(ws, JSON.stringify({ ...envelope, request_id: sent.request_id }));
+    await expect(pending).resolves.toStrictEqual({
+      entryId: "5d1f0c2e-7b3a-4e8f-9a6b-0c1d2e3f4a5b",
+      expiresAt: "2026-09-23T14:05:00Z",
+    });
+  });
+
+  it("report_failed rejects a pending sendReport with the server's reason", async () => {
+    const raw = fixtureRaw("session/server_report_failed.json");
+    COVERED_FIXTURES.add("session/server_report_failed.json");
+    const envelope = JSON.parse(raw) as { type: string; request_id: string; error: string };
+    expect(envelope).toStrictEqual({
+      type: "report_failed",
+      request_id: "web-report-9c1d",
+      error: "the bundle carries no header",
+    });
+
+    const { bridge, ws } = openBridge();
+    const pending = bridge.sendReport(expectedSendReportBundle);
+    const sent = lastSent(ws) as { request_id: string };
+    deliver(ws, JSON.stringify({ ...envelope, request_id: sent.request_id }));
+    await expect(pending).rejects.toThrow("the bundle carries no header");
   });
 
   it("asset_catalog_update: delta reaches the handler and the web AssetCatalog mirror", () => {
@@ -1642,6 +1699,21 @@ describe("wire goldens: client messages through Bridge senders", () => {
       request_id: string;
     };
     expect(sent).toStrictEqual({ ...golden, request_id: sent.request_id });
+  });
+
+  it("sendReport emits the send_report envelope with a fresh request id and the bundle as text", () => {
+    const { bridge, ws } = openBridge();
+    void bridge.sendReport(expectedSendReportBundle).catch(() => {});
+    const sent = lastSent(ws) as { request_id: string; bundle: string };
+    expect(sent.request_id).toMatch(/^web-report-/);
+    const golden = coveredFixture("session/client_send_report.json") as {
+      request_id: string;
+    };
+    expect(sent).toStrictEqual({ ...golden, request_id: sent.request_id });
+    // The payload is text on the wire and JSON to whoever opens it: the
+    // header the inbox reads out for its listing is in there, unaltered.
+    const bundle = JSON.parse(sent.bundle) as { header: { runId: string } };
+    expect(bundle.header.runId).toBe("remote-cold");
   });
 
   it("a persistent seq gap in the broadcast stream emits the request_snapshot envelope", () => {

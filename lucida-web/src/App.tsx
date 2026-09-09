@@ -70,6 +70,7 @@ import {
 import type { WorkspaceRole, WorkspaceMember } from "./workspaceApi.ts";
 import { isCaptureSurface } from "./captureSurface.ts";
 import { setBundleServices } from "./trace/bundle.ts";
+import { setReportSender } from "./trace/reportInbox.ts";
 import "./App.css";
 
 // The debug UI (dev-controls panel + on-canvas overlay layer) is
@@ -865,7 +866,16 @@ function App({
           : Promise.reject(new Error("the session socket is not connected")),
       captureFrame: () => render.clientRef.current?.captureFrame() ?? Promise.resolve(null),
     });
-    return () => setBundleServices(null);
+    // **Send report** goes over the same socket. Registered only while
+    // one exists, so a page with no session offers no send rather than a
+    // send that goes nowhere — and nothing but the action calls it.
+    setReportSender(
+      liveBridge ? (bundleJson: string) => liveBridge.sendReport(bundleJson) : null,
+    );
+    return () => {
+      setBundleServices(null);
+      setReportSender(null);
+    };
   }, [liveBridge, render.clientRef]);
 
   useIntensityBatcher({

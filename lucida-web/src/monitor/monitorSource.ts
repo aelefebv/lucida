@@ -1,5 +1,6 @@
 /**
- * Where the monitor gets its run, and how it writes one to a file.
+ * Where the monitor gets its run, and how it writes one to a file or
+ * sends one to the workspace inbox.
  *
  * Everything here goes through `window.lucidaTrace` — the page-level export
  * function ADR 0051 made public interface in every build. The monitor is a
@@ -15,11 +16,13 @@
  * interval on the way to each answer.
  */
 
+import type { InboxReceipt } from "../bridge.ts";
 import { bundleFilename } from "../trace/bundle.ts";
 import { diagnoseDocument } from "../trace/diagnose/diagnose.ts";
 import type { ProvisionalReading } from "../trace/diagnose/provisional.ts";
 import type { DiagnosticDocument } from "../trace/diagnose/types.ts";
 import type { LiveProgress } from "../trace/liveProgress.ts";
+import { sendBundle } from "../trace/reportInbox.ts";
 import type { LucidaTraceSeam } from "../trace/seam.ts";
 import type { TraceDocument } from "../trace/types.ts";
 import { formatCause } from "./monitorModel.ts";
@@ -211,6 +214,26 @@ export async function downloadBundle(runId?: string, seam = window.lucidaTrace):
   const filename = bundleFilename(bundle);
   downloadText({ filename, mime: "application/json", text: JSON.stringify(bundle) });
   return filename;
+}
+
+/**
+ * **Send report** (#1067): the bundle for the run on screen, posted to
+ * the workspace inbox, and the entry it landed in.
+ *
+ * The same bundle **Save bundle** writes, through the same seam function
+ * — one artifact, two destinations, so the report an agent fetches and
+ * the file a person saves cannot differ. What comes back is the entry's
+ * id and when the inbox's retention drops it, which is what the page
+ * shows and what `lucida trace inbox fetch` takes.
+ *
+ * This runs when somebody presses the action, and at no other time.
+ */
+export async function sendReport(
+  runId?: string,
+  seam = window.lucidaTrace,
+): Promise<InboxReceipt> {
+  if (!seam) throw new Error("no trace seam on this page");
+  return sendBundle(await seam.exportBundle({ runId }));
 }
 
 /** The only DOM this module touches. */

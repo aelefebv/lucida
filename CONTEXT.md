@@ -585,9 +585,10 @@ backend (ambiguous — say which one)
 
 **Store**:
 The reader and writer for one kind of record: login sessions, pending
-authentications, bearer tokens, CLI token authorizations, bookmarks, workspaces.
-A store opens no connection of its own and runs no migration; it works through
-the storage backend that handed it out. Six of them exist, one per kind. See
+authentications, bearer tokens, CLI token authorizations, bookmarks, workspaces,
+inbox entries. A store opens no connection of its own and runs no migration; it
+works through the storage backend that handed it out. Seven of them exist, one
+per kind. See
 [ADR 0055](wiki/decisions/0055-storage-backend-selected-by-connection-string.md)
 for why the connection moved out of the stores.
 _Avoid_: repository, table, model, DAO, object store (a different thing — see
