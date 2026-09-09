@@ -15,7 +15,7 @@ import type { Session } from "./session.ts";
 import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap, markMinimapOverviewSeeded, clearMinimapForDataset } from "./minimapPath.ts";
 import { traceRecorder, type TraceEnvironment } from "./trace/recorder.ts";
 import { createQuiescenceState, evaluateQuiescence, type QuiescenceState } from "./trace/quiescence.ts";
-import type { CacheWarmth, Outstanding, RunConditions } from "./trace/types.ts";
+import type { CacheWarmth, InputKind, Outstanding, RunConditions } from "./trace/types.ts";
 
 // Re-export types so downstream imports stay unchanged
 export type { DatasetEntry, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
@@ -402,6 +402,21 @@ export class RenderLoop implements TraceEnvironment {
 
   markInteractiveDirty(source: string = "external"): void {
     this.setDirty("interactive", source);
+  }
+
+  /**
+   * One of the five inputs landed: pan, zoom, orbit, scrub, or select. The
+   * recorder hears it by name, so the run it opens or extends carries the
+   * input as its cause, and the loop is dirtied under the same name.
+   *
+   * An input on a page with nothing open moves nothing through the pipeline
+   * and opens no run. The next thing that happens on such a page is a
+   * dataset open, and that run has to carry its own cause rather than
+   * inherit the label of a gesture made over an empty canvas.
+   */
+  markInput(input: InputKind): void {
+    if (this.datasets.size > 0) traceRecorder.noteInput(input);
+    this.setDirty("interactive", input);
   }
 
   markResidencyDirty(source: string = "external"): void {

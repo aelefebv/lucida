@@ -5,6 +5,8 @@ import { noopSinkFactory } from "./sink.ts";
 import { createQuiescenceState, evaluateQuiescence, type QuiescenceState } from "./quiescence.ts";
 import {
   Boundary,
+  INPUT_KINDS,
+  interactionCause,
   LABEL_NONE,
   PHASE_UNSET,
   RowOutcome,
@@ -196,6 +198,113 @@ describe("TraceRecorder run lifecycle", () => {
 
     const [run] = recorder.exportDocument().runs;
     expect(run.header.endReason).toBe("explicit");
+  });
+});
+
+describe("TraceRecorder gesture rule", () => {
+  it("opens a run on each of the five inputs, under a cause that names the input", () => {
+    for (const input of INPUT_KINDS) {
+      const { recorder } = makeRecorder();
+      recorder.noteInput(input);
+      recorder.closeRun("explicit");
+
+      const [run] = recorder.exportDocument().runs;
+      expect(run.header.cause).toEqual(interactionCause(input));
+      expect(run.header.cause?.source).toBe(input);
+    }
+  });
+
+  it("names the epoch the input moves: the camera inputs a view, the selectors a selection", () => {
+    expect(interactionCause("pan").epoch).toBe("view");
+    expect(interactionCause("zoom").epoch).toBe("view");
+    expect(interactionCause("orbit").epoch).toBe("view");
+    expect(interactionCause("scrub").epoch).toBe("selection");
+    expect(interactionCause("select").epoch).toBe("selection");
+  });
+
+  it("makes one run of a continuous drag, and a second run of the next gesture", () => {
+    vi.useFakeTimers();
+    try {
+      const { recorder } = makeRecorder();
+      // A drag. The page goes quiescent between two pointer events, and the
+      // second arrives before the hold from that publication has elapsed.
+      recorder.noteInput("pan");
+      recorder.noteQuiescence(evaluateQuiescence(inputs(), 1_000));
+      vi.advanceTimersByTime(400);
+      recorder.noteInput("pan");
+      // 800 ms after the first quiescent publication the run is still open.
+      // The hold counts from the last input, not the first.
+      vi.advanceTimersByTime(400);
+      expect(recorder.isRunOpen).toBe(true);
+      recorder.noteQuiescence(evaluateQuiescence(inputs(), 1_800));
+      vi.advanceTimersByTime(500);
+      expect(recorder.isRunOpen).toBe(false);
+
+      recorder.noteInput("zoom");
+      recorder.noteQuiescence(evaluateQuiescence(inputs(), 2_400));
+      vi.advanceTimersByTime(500);
+
+      const runs = recorder.exportDocument().runs;
+      expect(runs.map(run => run.header.cause?.source)).toEqual(["pan", "zoom"]);
+      expect(runs.map(run => run.header.endReason)).toEqual(["quiescent", "quiescent"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("extends an open dataset-open run rather than opening a second one", () => {
+    vi.useFakeTimers();
+    try {
+      const { recorder } = makeRecorder();
+      recorder.openRun(OPEN_CAUSE);
+      recorder.noteQuiescence(evaluateQuiescence(inputs(), 1_000));
+      vi.advanceTimersByTime(400);
+      recorder.noteInput("pan");
+      vi.advanceTimersByTime(400);
+      expect(recorder.isRunOpen).toBe(true);
+      recorder.closeRun("explicit");
+
+      const runs = recorder.exportDocument().runs;
+      expect(runs).toHaveLength(1);
+      expect(runs[0].header.cause).toEqual(OPEN_CAUSE);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not open a second run on a content epoch during an interaction run", () => {
+    const { recorder } = makeRecorder();
+    recorder.noteInput("orbit");
+    recorder.noteOpenSent("open-1");
+    recorder.openRun(OPEN_CAUSE);
+    recorder.noteOpenSettled("open-1");
+    recorder.closeRun("explicit");
+
+    const runs = recorder.exportDocument().runs;
+    expect(runs).toHaveLength(1);
+    expect(runs[0].header.cause).toEqual(interactionCause("orbit"));
+    expect(runs[0].datasetOpens).toHaveLength(1);
+  });
+
+  it("leaves the dataset-open cause as it was", () => {
+    const { recorder } = makeRecorder();
+    recorder.noteOpenSent("open-1");
+    recorder.closeRun("explicit");
+
+    expect(recorder.exportDocument().runs[0].header.cause).toEqual({
+      epoch: "content",
+      dirtyKind: "interactive",
+      source: "dataset_open_request",
+    });
+  });
+
+  it("opens nothing on an input before the page can say what conditions apply", () => {
+    const { recorder } = makeRecorder();
+    recorder.setEnvironment(null);
+    recorder.noteInput("pan");
+
+    expect(recorder.isRunOpen).toBe(false);
+    expect(recorder.exportDocument().runs).toHaveLength(0);
   });
 });
 

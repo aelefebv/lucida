@@ -10,7 +10,9 @@
  *
  * A run is a labelled interval within that recording (ADR 0047), opened by a
  * cause and closed by quiescence, timeout, or explicitly. An interaction run
- * and a dataset-open run are the same object, differing only by cause.
+ * and a dataset-open run are the same object, differing only by cause. A
+ * dataset open opens one when its request goes out, and an input opens one
+ * in {@link TraceRecorder.noteInput}.
  */
 
 import { buildIdentity } from "./buildInfo.ts";
@@ -30,6 +32,7 @@ import {
   Boundary,
   clampStamp,
   COUNTED_PHASES,
+  interactionCause,
   PHASES,
   READING_NAMES,
   ReadingColumn,
@@ -43,6 +46,7 @@ import {
   type EndReason,
   type CacheWarmth,
   type GpuIdentity,
+  type InputKind,
   type Outstanding,
   type Phase,
   type PointEventIndex,
@@ -397,6 +401,35 @@ export class TraceRecorder {
     // cause.
     this.finishInterval("run-opened");
     this.beginInterval(cause);
+  }
+
+  /**
+   * An input landed, one of the five that open an interaction run. One
+   * gesture is one run. The first input after quiescence opens a run under a
+   * cause that names the input, and an input while a run is open extends
+   * that run rather than opening another, whatever the pointer-event count.
+   *
+   * "After quiescence" means "no run open". A run also closes by timeout and
+   * explicitly, and after either of those the page may never go quiescent at
+   * all, so waiting for it would leave the next gesture unrecorded.
+   *
+   * Extending means re-arming the hold. The run closes on quiescence after
+   * the *last* input, so a hold that began before this input starts over
+   * from the page's next quiescent publication, which the tick this input
+   * dirties delivers. Without that, an input 300 ms into the 500 ms hold
+   * would close its run 200 ms later, and a slow drag would shatter into a
+   * run per pause.
+   *
+   * This extends a dataset-open run in progress the same way, and that run
+   * keeps its cause. Opening a dataset and panning while it loads is one
+   * interval, labelled for the thing that started it.
+   */
+  noteInput(input: InputKind): void {
+    if (this.isRunOpen) {
+      this.clearHoldTimer();
+      return;
+    }
+    this.openRun(interactionCause(input));
   }
 
   /**

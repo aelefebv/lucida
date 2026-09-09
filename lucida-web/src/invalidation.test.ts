@@ -3,16 +3,19 @@ import {
   invalidateDisplaySettings,
   invalidateResidency,
   invalidateAfterViewRestore,
+  invalidateSelection,
   requestRender,
 } from "./invalidation.ts";
 import { getSceneSettings } from "./tickCommon.ts";
 import type { WasmScene } from "lucida-core";
+import type { InputKind } from "./trace/types.ts";
 
 /** Recording double for the RenderLoop dirty-flag surface. */
 function makeSink() {
   return {
     markInteractiveDirty: vi.fn<(source?: string) => void>(),
     markResidencyDirty: vi.fn<(source?: string) => void>(),
+    markInput: vi.fn<(input: InputKind) => void>(),
   };
 }
 
@@ -68,6 +71,18 @@ describe("composed invalidation intents", () => {
     expect(sink.markResidencyDirty).toHaveBeenCalledExactlyOnceWith("savedview_apply");
   });
 
+  it("invalidateSelection bumps the settings generation and names the input", () => {
+    const sink = makeSink();
+    const { scene } = makeSettingsScene();
+
+    const before = getSceneSettings(scene);
+    invalidateSelection(sink);
+
+    expect(getSceneSettings(scene)).not.toBe(before);
+    expect(sink.markInput).toHaveBeenCalledExactlyOnceWith("select");
+    expect(sink.markInteractiveDirty).not.toHaveBeenCalled();
+  });
+
   it("requestRender marks interactive without touching the settings generation", () => {
     const sink = makeSink();
     const { scene } = makeSettingsScene();
@@ -94,6 +109,10 @@ describe("composed invalidation intents", () => {
 
     before = getSceneSettings(scene);
     expect(() => invalidateAfterViewRestore(null)).not.toThrow();
+    expect(getSceneSettings(scene)).not.toBe(before);
+
+    before = getSceneSettings(scene);
+    expect(() => invalidateSelection(null)).not.toThrow();
     expect(getSceneSettings(scene)).not.toBe(before);
 
     expect(() => requestRender(null)).not.toThrow();

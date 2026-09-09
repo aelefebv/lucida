@@ -160,11 +160,54 @@ export interface ChunkRowSource {
  * Why a run opened. Drawn from the vocabulary the code already has (ADR
  * 0047) rather than a new one: `epoch` is a scene epoch-diff cause, and
  * `dirtyKind` / `source` are the render loop's typed dirty-set attribution.
+ *
+ * Two families share the shape. A dataset-open run carries a `content`
+ * epoch and the emit site's name as its source. An interaction run carries
+ * the epoch the input moves, `view` for the camera or `selection` for the
+ * selectors, and the input itself as its source, one of {@link INPUT_KINDS}.
+ * The epoch says what kind of change it was, and the source says which
+ * input made it.
  */
 export interface RunCause {
   epoch: "content" | "layout" | "view" | "selection" | "asset" | null;
   dirtyKind: "interactive" | "residency";
   source: string;
+}
+
+/**
+ * The inputs that open an interaction run. A closed set, so a run's label is
+ * comparable across runs and across machines. Two orbits are two orbits.
+ *
+ * Pan, zoom and orbit move the camera and so bump the `view` epoch. Scrub
+ * moves a selector along an axis, and select shows or hides a channel, a
+ * dataset, or a label; both bump the `selection` epoch.
+ */
+export const INPUT_KINDS = ["pan", "zoom", "orbit", "scrub", "select"] as const;
+export type InputKind = (typeof INPUT_KINDS)[number];
+
+/** The cause an interaction run opens under. */
+export function interactionCause(input: InputKind): RunCause {
+  return {
+    epoch: input === "scrub" || input === "select" ? "selection" : "view",
+    dirtyKind: "interactive",
+    source: input,
+  };
+}
+
+/**
+ * Whether a cause is one {@link interactionCause} produced: an epoch an
+ * input moves, an interactive dirty, and one of the five inputs as its
+ * source. All three, so a synthetic view-epoch cause with a residency dirty
+ * kind is not judged as a gesture. The ruleset's frame-time ceiling reads
+ * this.
+ */
+export function isInteractionCause(cause: RunCause | null): boolean {
+  return (
+    cause !== null &&
+    (cause.epoch === "view" || cause.epoch === "selection") &&
+    cause.dirtyKind === "interactive" &&
+    (INPUT_KINDS as readonly string[]).includes(cause.source)
+  );
 }
 
 /**

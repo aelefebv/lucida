@@ -400,7 +400,7 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
         applyViewportCommand(scene, { type: "arcball_rotate", d_theta: dTheta, d_phi: dPhi });
       }
       emitPresence();
-      loopRef.current?.markInteractiveDirty();
+      loopRef.current?.markInput(shiftDragRef.current ? "pan" : "orbit");
     },
     [dragging, scene, canvas, emitPresence, breakFollow, sendCursor, annotationDraftRef],
   );
@@ -479,7 +479,7 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
       breakFollow();
       applyViewportCommand(scene, { type: "arcball_zoom", delta });
       emitPresence();
-      loopRef.current?.markInteractiveDirty();
+      loopRef.current?.markInput("zoom");
       setLowRes();
       scheduleFullRes();
     },

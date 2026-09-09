@@ -93,7 +93,10 @@ describe("reading a run", () => {
 
     const { runs } = readMonitor(undefined, seam);
 
-    expect(runs.map((run) => run.cause)).toEqual(["camera_moved", "loop_start"]);
+    expect(runs.map((run) => run.cause)).toEqual([
+      "view/residency/camera_moved",
+      "content/interactive/loop_start",
+    ]);
     expect(runs[1].endReason).toBe("quiescent");
     // And the older one is readable by id.
     const older = readMonitor(runs[1].runId, seam);
