@@ -70,6 +70,9 @@ export interface CpuCacheConfig {
  */
 export type Lane = "minimap" | "detail" | "coarse" | "prefetch" | "overview";
 
+/** Every lane, in the order a reader lists them: the view's own work first. */
+export const LANES = ["detail", "coarse", "minimap", "prefetch", "overview"] as const satisfies readonly Lane[];
+
 /**
  * Resident and in-flight chunk counts per pyramid level, indexed by level.
  * Sparse levels read as zero. The cache reuses one of these across calls, so
@@ -287,4 +290,42 @@ export interface CacheTelemetry {
     detailBytes: number;
     coarseBytes: number;
   };
+}
+
+/** Resident bytes against budget for one CPU-side pool. */
+export interface PoolResidency {
+  bytes: number;
+  /**
+   * The budget in force: the elastic one for the main and overview pools,
+   * since a pool that stopped growing stopped at that and not at the
+   * configured split, and the configured one for the proxy pool.
+   */
+  budgetBytes: number;
+}
+
+/** The three CPU-side pools, as `CpuCache.poolResidency()` reports them. */
+export interface PoolResidencyReport {
+  main: PoolResidency;
+  overview: PoolResidency;
+  proxy: PoolResidency;
+}
+
+/**
+ * Outstanding work by lane: what is in flight and what is queued, counted
+ * per lane, plus the proxy asset scheduler, which has no lane. Filled in
+ * place by `CpuCache.laneOutstanding()`.
+ */
+export interface LaneOutstanding {
+  inFlight: Record<Lane, number>;
+  pending: Record<Lane, number>;
+  proxyInFlight: number;
+  proxyPending: number;
+  /** Every pending entry, classified or not, across both schedulers. */
+  pendingTotal: number;
+  /**
+   * True when the chunk queue was deeper than {@link pendingScanCap}, so the
+   * per-lane pending counts are zero and only the total is known.
+   */
+  pendingUnclassified: boolean;
+  pendingScanCap: number;
 }
