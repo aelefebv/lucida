@@ -5,7 +5,7 @@ description: "The pipeline performance monitor records always, with no opt-out; 
 tags: [lucida, decision]
 source_path: wiki/decisions/0049-unconditional-recording-under-a-design-budget.md
 created: 2026-08-10
-modified: 2026-08-11
+modified: 2026-09-09
 ---
 
 # Unconditional recording under a design budget
@@ -24,6 +24,7 @@ telemetry floor), [#897] (clock resolution) and [#899] (remote rates).
 [#898]: https://github.com/aelefebv/lucida/issues/898
 [#899]: https://github.com/aelefebv/lucida/issues/899
 [#962]: https://github.com/aelefebv/lucida/issues/962
+[#1048]: https://github.com/aelefebv/lucida/issues/1048
 [0047]: 0047-trace-model-phases-runs-and-lifecycle-rows.md
 
 ## The situation
@@ -130,6 +131,25 @@ free" while doubling the floor.
 > live, and 0.80–0.87× the floor per tick. The derivation is in
 > `docs/perf/recorder-cost/README.md`.
 
+> **Amended 2026-09-09 ([#1048]).** The contract now covers the surfaces that
+> draw while a run is open as well as the recorder: the HUD in the viewport,
+> the overlays, and the dock's live charts. The reason is the one that put the
+> recorder under contract in the first place. A reading surface whose cost
+> shows up in the thing it reads is the perverse case, and "showing it is
+> free" has to be measured. Three rules follow. The HUD and the live charts
+> draw from the per-tick aggregate at the tick cadence and never from the
+> frame loop. The overlays' phase and churn modes read the row index the
+> recorder already keeps and the refetch counts the steady-state ruleset
+> computes, and derive nothing of their own. None of the three walks rows
+> while a run is open. The row walk that produces a verdict runs when the run
+> closes or when a person or the CLI asks. And each gets tripwire tests with
+> absolute ceilings and logged figures, in the style of the recorder's, plus a
+> documented A/B on a hardware adapter at device pixel ratio 2, which CI does
+> not have and so cannot run. Each surface's ceilings are stated in its own
+> tripwire test. The recorder's numbers above are its own and do not transfer:
+> a canvas draw per tick is a different shape of cost from a row write per
+> event.
+
 ## Retention is bounded in bytes and evicted a run at a time
 
 **A resident cap of 8 MB, discarding whole completed runs oldest-first, never
@@ -231,6 +251,19 @@ makes scoping the question out safe rather than merely convenient, and because
 it is a precondition for
 [agent-first access](../principles/agent-first-access.md) being a pull model:
 the agent asks for the trace, the trace is not pushed at anyone.
+
+> **Amended 2026-09-09 ([#1048]).** "Unless asked" now has two answers beside
+> the pull. **Send report** posts a bundle to a workspace inbox, and a
+> per-session **watch** toggle streams the per-tick aggregate and the run
+> boundaries over the session socket. Both are opt-in by a visible action and
+> off by default, the watch toggle is off again after a reconnect, and nothing
+> leaves the page on either path without someone asking. The invariant stands
+> as written. What changed is where an answer to "asked" can come from.
+> Neither is the toggle this decision deleted: that one would have switched
+> recording off, and these switch a departure on. Recording stays
+> unconditional under them. The paths themselves are recorded in
+> [ADR 0050](0050-server-timings-reach-the-monitor.md) and
+> [ADR 0051](0051-the-trace-driver-and-the-page-export-seam.md).
 
 ## Consequences
 
