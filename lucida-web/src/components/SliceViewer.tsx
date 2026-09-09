@@ -1,5 +1,6 @@
 /** 2D slice viewer — delegates WebGPU rendering to a worker via RenderClient. */
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
+import { SLICE_ZOOM_IN_PER_NOTCH, SLICE_ZOOM_OUT_PER_NOTCH } from "./inputScale.ts";
 import type { WasmScene } from "lucida-core";
 import { RenderClient } from "../renderer/renderClient.ts";
 import { RenderLoop, type DatasetEntry } from "../renderLoop.ts";
@@ -285,7 +286,7 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
       // inverse projection — read BEFORE the zoom changes the camera.
       const [worldX, worldY] = sceneEventToWorld(scene, canvas, e);
 
-      const factor = e.deltaY > 0 ? 0.9 : 1.1;
+      const factor = e.deltaY > 0 ? SLICE_ZOOM_OUT_PER_NOTCH : SLICE_ZOOM_IN_PER_NOTCH;
       breakFollow();
       applyViewportCommand(scene, { type: "zoom_by", factor });
       const newZoom = scene.zoom();

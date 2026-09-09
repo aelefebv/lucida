@@ -13,6 +13,7 @@ mod saved_view;
 mod session;
 mod status;
 mod trace;
+mod trace_script;
 mod view;
 mod workspace;
 
@@ -1253,6 +1254,10 @@ struct TraceRunArgs {
     /// pre-instrument boot, so a coverage gate fires on every green run.
     #[arg(long)]
     gate: bool,
+    /// The steps to run after the open settles, in command-line order, or a
+    /// script file of them. None by default: the driver measures the open.
+    #[command(flatten)]
+    script: trace_script::ScriptArgs,
 }
 
 #[derive(Subcommand, Debug)]
@@ -3785,6 +3790,9 @@ async fn run_trace(
     trace_dir: &Path,
     wait: Duration,
 ) -> Result<TraceRunOutcome, CliError> {
+    // Read first, so a script that cannot run fails before a server is
+    // reached or a dataset opened on its behalf.
+    let script = args.script.resolve()?;
     let dataset_client = DatasetWorkspaceClient::new(target.ws_url.clone(), token.cloned());
     let (_seq, health) = dataset_client.health(None, wait).await?;
     let dataset_url = dataset_source_url(dataset, &health)?;
@@ -3870,6 +3878,7 @@ async fn run_trace(
         server_url: server.url.clone(),
         workspace_id: workspace.id.clone(),
         screenshot: args.screenshot.clone(),
+        script,
     };
     let viewport = Viewport::new(args.width, args.height, args.device_pixel_ratio);
     let bundle = args.bundle.as_ref().map(|path| trace::BundleRequest {
@@ -5910,6 +5919,11 @@ mod tests {
             "gate",
             "help",
         ];
+        // The steps ride the bundle's own script section, which a replay runs
+        // again, rather than a header field the replay list names.
+        let carried_by_script = [
+            "script", "wait", "hold", "pan", "zoom_by", "orbit", "scrub", "select",
+        ];
 
         let command = Cli::command();
         let trace = command
@@ -5926,12 +5940,106 @@ mod tests {
                     fields.contains(field),
                     "{id} replays through {field}, which the replay list does not name"
                 ),
+                None if carried_by_script.contains(&id) => {}
                 None => assert!(
                     not_workload.contains(&id),
                     "{id} is neither a workload argument with a header field nor a sidecar"
                 ),
             }
         }
+    }
+
+    /// The steps run in the order they were typed, whatever their kinds, and
+    /// a run with none is the driver's default: an open and nothing after it.
+    #[test]
+    fn trace_runs_the_step_flags_in_command_line_order_and_none_by_default() {
+        use trace_script::{ScriptStep, ScrubAxis};
+        match parse(&[
+            "trace",
+            "/data/set.zarr",
+            "--camera",
+            "arcball",
+            "--wait",
+            "--orbit",
+            "30,15",
+            "--scrub",
+            "t:1",
+            "--select",
+            "channel:0=off",
+            "--zoom-by",
+            "2",
+            "--pan",
+            "-100,40",
+            "--hold",
+            "250",
+        ])
+        .command
+        {
+            Command::Trace { run, .. } => {
+                assert_eq!(
+                    run.script.steps,
+                    vec![
+                        ScriptStep::Wait,
+                        ScriptStep::Orbit {
+                            theta: 30.0,
+                            phi: 15.0
+                        },
+                        ScriptStep::Scrub {
+                            axis: ScrubAxis::T,
+                            count: 1
+                        },
+                        ScriptStep::Select {
+                            channel: Some(0),
+                            layer: None,
+                            visible: false
+                        },
+                        ScriptStep::Zoom {
+                            factor: 2.0,
+                            at: None
+                        },
+                        ScriptStep::Pan {
+                            dx: -100.0,
+                            dy: 40.0
+                        },
+                        ScriptStep::Hold { ms: 250 },
+                    ]
+                );
+                assert!(run.script.file.is_none());
+                // --zoom-by is a step, not the framing --zoom.
+                assert!(run.zoom.is_none());
+            }
+            _ => panic!("expected a trace run"),
+        }
+        match parse(&["trace", "/data/set.zarr"]).command {
+            Command::Trace { run, .. } => {
+                assert!(run.script.steps.is_empty());
+                assert!(run.script.resolve().unwrap().is_empty());
+            }
+            _ => panic!("expected a trace run"),
+        }
+    }
+
+    #[test]
+    fn trace_takes_a_script_file_in_place_of_step_flags() {
+        match parse(&["trace", "/data/set.zarr", "--script", "steps.json"]).command {
+            Command::Trace { run, .. } => {
+                assert_eq!(run.script.file, Some(PathBuf::from("steps.json")));
+                assert!(run.script.steps.is_empty());
+            }
+            _ => panic!("expected a trace run"),
+        }
+        assert!(
+            try_parse(&[
+                "trace",
+                "/data/set.zarr",
+                "--script",
+                "steps.json",
+                "--wait"
+            ])
+            .is_err()
+        );
+        assert!(try_parse(&["trace", "/data/set.zarr", "--scrub", "q:1"]).is_err());
+        assert!(try_parse(&["trace", "/data/set.zarr", "--orbit", "0,0"]).is_err());
     }
 
     /// The follow-up depths the diagnostic prints have to parse, or the default

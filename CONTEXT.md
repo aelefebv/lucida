@@ -842,9 +842,22 @@ _Avoid_: render mode, screenshot page, headless mode
 
 **Trace driver**:
 The `lucida trace` command: it launches its own headless browser, opens a
-dataset, waits for the run to become quiescent, and writes the trace. One of two
-entry points to the trace seam — the other is an agent driving a browser itself.
+dataset, waits for the run to become quiescent, runs the script of steps it
+was given, if any, and writes the trace. One of two entry points to the
+trace seam — the other is an agent driving a browser itself.
 _Avoid_: recorder, profiler run, headless mode
+
+**Script step**:
+One entry of the trace driver's script: wait for quiescence, hold for a
+duration, pan by a screen delta, zoom by a factor about a screen point,
+orbit by two angles, scrub a selector by a count, or select a channel or a
+layer. One gesture step is one interaction run, and every step carries the
+view before and after it. See
+[ADR 0051](wiki/decisions/0051-the-trace-driver-and-the-page-export-seam.md)
+as amended.
+_Avoid_: action, command (a command is what the page applies to the scene;
+a step is what the driver does to the page), event (one step is many),
+macro
 
 **Agent surface**:
 Any diagnostic path an LLM agent reads — the CLI, the Python client, the trace
