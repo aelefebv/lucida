@@ -120,6 +120,21 @@ export function renderDiagnostic(
         `${p("coverage.truncated.recordedPct", truncated.recordedPct)}% of the run`,
     );
   }
+  // The window line goes before the coverage it qualifies: every number after
+  // it is of the window, not the run.
+  const window = document.window;
+  const clip = document.coverage.window;
+  if (window && clip) {
+    push(
+      REQUIRED,
+      `window    ${p("window.startMs", window.startMs)}..${p("window.endMs", window.endMs)} ms of the ` +
+        `${p("window.ofWallMs", window.ofWallMs)} ms run` +
+        (window.whole
+          ? " (the whole run)"
+          : ` · ${p("coverage.window.clippedRows", clip.clippedRows)} row(s) cross an edge and count for the part inside` +
+            ` · ${p("coverage.window.unplacedRows", clip.unplacedRows)} with no position left out`),
+    );
+  }
   push(
     REQUIRED,
     `coverage  ${p("coverage.accountedMs", document.coverage.accountedMs)} of ` +
@@ -141,6 +156,26 @@ export function renderDiagnostic(
       `${document.run.gpu} · ${document.run.adapterKind.label} · build ${document.run.build}`,
   );
   push(IDENTITY, `render    ${renderTimingOf(document, p)}`);
+
+  // --- what the client sent -------------------------------------------------
+  // The identity line names only the types that sent anything. The SENT table
+  // at DETAIL lists the whole closed set, zeros included.
+  const sentTypes = document.sent.byType
+    .map((entry, index) => ({ entry, index }))
+    .filter(({ entry }) => entry.messages > 0);
+  push(
+    IDENTITY,
+    sentTypes.length === 0
+      ? "sent      nothing on the session socket"
+      : `sent      ${p("sent.bytesPerS", document.sent.bytesPerS.toLocaleString())} B/s · ` +
+          sentTypes
+            .map(
+              ({ entry, index }) =>
+                `${entry.label} ${p(`sent.byType[${index}].bytesPerS`, entry.bytesPerS.toLocaleString())} B/s ` +
+                `n=${p(`sent.byType[${index}].messages`, entry.messages.toLocaleString())}`,
+            )
+            .join(" · "),
+  );
 
   document.coverage.gaps.forEach((gap, index) => {
     push(
@@ -172,10 +207,14 @@ export function renderDiagnostic(
     const phases =
       onlyPhase === null ? document.phases : document.phases.filter((phase) => phase.id === onlyPhase);
     push(DETAIL, "");
+    const from =
+      document.criticalPath.fromMs > 0
+        ? `from ${p("criticalPath.fromMs", document.criticalPath.fromMs)} ms `
+        : "";
     push(
       DETAIL,
       document.criticalPath.kind === "chain"
-        ? `CRITICAL PATH  to ${document.criticalPath.target} at ${document.criticalPath.targetAtMs} ms`
+        ? `CRITICAL PATH  ${from}to ${document.criticalPath.target} at ${p("criticalPath.targetAtMs", document.criticalPath.targetAtMs!)} ms`
         : `CRITICAL PATH  undefined — ${document.criticalPath.undefinedReason}`,
     );
     for (const segment of document.criticalPath.segments) {
@@ -210,6 +249,19 @@ export function renderDiagnostic(
         );
       }
     }
+    push(DETAIL, "");
+    push(
+      DETAIL,
+      "SENT  (messages the page transmitted on the session socket, by client message type, over the run's wall clock)",
+    );
+    document.sent.byType.forEach((entry, index) => {
+      push(
+        DETAIL,
+        `   ${entry.label.padEnd(18)} n=${p(`sent.byType[${index}].messages`, entry.messages).padStart(7)} ` +
+          `${p(`sent.byType[${index}].bytes`, entry.bytes).padStart(11)} B ` +
+          `${p(`sent.byType[${index}].bytesPerS`, entry.bytesPerS).padStart(9)} B/s`,
+      );
+    });
     push(DETAIL, "");
     push(DETAIL, `RULESET v${document.ruleset.version} — ${document.ruleset.note}`);
   }

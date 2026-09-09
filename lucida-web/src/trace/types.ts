@@ -16,8 +16,11 @@ import type { ChunkFeedbackReason, LevelRange } from "../renderer/workerProtocol
  * Bumped whenever the document shape changes incompatibly. One integer for
  * the whole file (ADR 0047): traces outlive the code that wrote them, and a
  * file from two releases ago should either load or fail clearly.
+ *
+ * 2: the per-tick sample and the run carry the client's sends by message
+ * type (`sent`). A version 1 file has neither.
  */
-export const TRACE_SCHEMA_VERSION = 1;
+export const TRACE_SCHEMA_VERSION = 2;
 
 /**
  * The closed browser phase enum. Fixed by the #921 spec rather than grown
@@ -483,6 +486,72 @@ export const TickCounter = {
   ActiveSetTilesProxyFallback: counterIndex("activeSetTilesProxyFallback"),
   ActiveSetTilesDetail: counterIndex("activeSetTilesDetail"),
 } as const;
+
+/**
+ * The closed set of client message types the send side is accounted under.
+ *
+ * Every message the page transmits over the session socket counts against
+ * exactly one of these, by messages and by bytes, so the outbound half of
+ * what an operating system's network monitor shows has a name in the trace.
+ * Closed for the same reason the phase inventory is: every type
+ * widens the fixed-width tick sample. The six named wire types are the ones
+ * a viewer sends continuously. `command` covers every document command.
+ * `other` is the remainder: snapshot requests, dataset opens, health and
+ * retry requests, follow and steer, which are once-per-interaction messages
+ * rather than a traffic pattern, and any message whose type this build does
+ * not name.
+ *
+ * One table carries the whole set: the name the document uses, the wire
+ * `type` the bridge classifies on, null for the remainder, and the label a
+ * reader sees. Index order is the column order of the tick sample and must
+ * not be reordered.
+ */
+export const CLIENT_MESSAGES = [
+  { type: "chunkRequest", wire: "chunk_request", label: "chunk request" },
+  { type: "assetRequest", wire: "asset_request", label: "asset request" },
+  { type: "viewerInterest", wire: "viewer_interest", label: "viewer interest" },
+  { type: "presence", wire: "presence", label: "presence" },
+  { type: "datasetPresence", wire: "dataset_presence", label: "dataset presence" },
+  { type: "cursor", wire: "cursor", label: "cursor" },
+  { type: "command", wire: "command", label: "command" },
+  { type: "other", wire: null, label: "other" },
+] as const;
+export type ClientMessageType = (typeof CLIENT_MESSAGES)[number]["type"];
+
+/** The names alone, in column order. */
+export const CLIENT_MESSAGE_TYPES: readonly ClientMessageType[] = CLIENT_MESSAGES.map(
+  (message) => message.type,
+);
+
+/** Indices derived from the names, as {@link TickCounter} derives its own. */
+export const ClientMessageTypeIndex = {
+  ChunkRequest: CLIENT_MESSAGE_TYPES.indexOf("chunkRequest"),
+  AssetRequest: CLIENT_MESSAGE_TYPES.indexOf("assetRequest"),
+  ViewerInterest: CLIENT_MESSAGE_TYPES.indexOf("viewerInterest"),
+  Presence: CLIENT_MESSAGE_TYPES.indexOf("presence"),
+  DatasetPresence: CLIENT_MESSAGE_TYPES.indexOf("datasetPresence"),
+  Cursor: CLIENT_MESSAGE_TYPES.indexOf("cursor"),
+  Command: CLIENT_MESSAGE_TYPES.indexOf("command"),
+  Other: CLIENT_MESSAGE_TYPES.indexOf("other"),
+} as const;
+export type ClientMessageTypeIndexValue =
+  (typeof ClientMessageTypeIndex)[keyof typeof ClientMessageTypeIndex];
+
+/** Two columns per client message type: messages, then bytes. */
+export const SEND_COLUMNS = 2;
+
+/** How much the client sent under one message type. */
+export interface SendTally {
+  messages: number;
+  /**
+   * The UTF-8 length of the messages' payloads: the per-message size a
+   * network monitor shows. This does not count the socket's own framing bytes.
+   */
+  bytes: number;
+}
+
+/** One tally per client message type, every type present, zeros included. */
+export type SendTallies = Record<ClientMessageType, SendTally>;
 
 /**
  * The process-wide readings, sampled once per tick.
@@ -980,6 +1049,19 @@ export interface TraceTick {
    * across samples for a run total; do not read one sample as a dataset's own.
    */
   counted: Record<CountedPhase, number>;
+  /**
+   * What the client sent over the session socket since the previous sample,
+   * by message type. Process-wide like {@link counted}: the socket belongs to
+   * the page, not to whichever dataset's sample publishes the interval, so
+   * read no sample as a dataset's own.
+   *
+   * The sends ride this sample, on the planning cadence, rather than the
+   * reading tier on the tick cadence, because the monitor spec puts them on
+   * the per-tick aggregate table. The samples in order are the series, and a
+   * stretch that sends without re-planning lands on the next sample or on
+   * none. That is why {@link TraceRun.sent} carries the interval's total.
+   */
+  sent: SendTallies;
   /** Only levels with a non-zero column; a level absent here had nothing on it. */
   levels: TraceTickLevel[];
   /** Levels past {@link TICK_LEVEL_SLOTS} that this sample could not carry. */
@@ -1130,6 +1212,15 @@ export interface TraceRun {
   ticks: TraceTick[];
   /** Tick samples the ring dropped, so a wrapped ring is visible rather than inferred. */
   ticksDropped: number;
+  /**
+   * Everything the client sent during this interval, by message type,
+   * counted at the moment of each send. The tick samples carry the same
+   * counts as a series, but a sample is published only by a planning pass:
+   * sends after the last pass ride no sample, and a wrapped ring drops the
+   * oldest ones. These totals miss neither, so read a rate for the interval
+   * from here and never sum it off the ticks.
+   */
+  sent: SendTallies;
   /** Readings, oldest-first, one per tick. Also a drop-oldest ring. */
   readings: TraceReading[];
   /** Readings the ring dropped. */

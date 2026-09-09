@@ -17,6 +17,7 @@
 import type { TraceRun } from "../types.ts";
 import { RULESET } from "./ruleset.ts";
 import type { LimiterSummary } from "./types.ts";
+import { inWindow, resolveWindow, type RunWindow } from "./window.ts";
 
 /**
  * The one limiter a client can see from inside its own trace. ADR 0050 gives
@@ -25,8 +26,17 @@ import type { LimiterSummary } from "./types.ts";
  */
 const SCHEDULER_ADMISSION = "scheduler.admission";
 
-export function summariseLimiters(run: TraceRun): LimiterSummary[] {
-  const readings = run.readings;
+/**
+ * The limiter as one window of the run saw it: the cap and the pinned share
+ * from the readings inside it, the backlog from the last of them, and the
+ * drain over the trailing second *of the window*, so a window that ends before
+ * the run does is judged by how the queue was draining at its own end.
+ */
+export function summariseLimiters(
+  run: TraceRun,
+  window: RunWindow = resolveWindow(run),
+): LimiterSummary[] {
+  const readings = run.readings.filter((reading) => inWindow(reading.atUs, window));
   if (readings.length === 0) return [];
 
   // The cap is inferred, not declared: the trace carries in-flight counts and
@@ -42,12 +52,9 @@ export function summariseLimiters(run: TraceRun): LimiterSummary[] {
   // and manufacture a saturated verdict out of a healthy run.
   const pending = readings[readings.length - 1].queueDepth;
 
-  const windowUs = RULESET.backlog.windowMs * 1_000;
-  const windowStartUs = Math.max(0, run.header.durationUs - windowUs);
-  const windowSeconds = Math.max(
-    0.001,
-    (run.header.durationUs - windowStartUs) / 1_000_000,
-  );
+  const drainUs = RULESET.backlog.windowMs * 1_000;
+  const drainStartUs = Math.max(window.startUs, window.endUs - drainUs);
+  const drainSeconds = Math.max(0.001, (window.endUs - drainStartUs) / 1_000_000);
 
   // An admission completes when its row leaves `queue` — the moment the fetch
   // was dispatched, which is what the next chunk in line is waiting for.
@@ -55,13 +62,13 @@ export function summariseLimiters(run: TraceRun): LimiterSummary[] {
   for (const row of run.rows) {
     const queue = row.phases.queue;
     if (!queue) continue;
-    if (queue.endUs >= windowStartUs && queue.endUs <= run.header.durationUs) windowCompletions += 1;
+    if (queue.endUs >= drainStartUs && queue.endUs <= window.endUs) windowCompletions += 1;
   }
 
   // Rounded to tenths rather than to whole admissions. A queue draining at
   // 0.4/s is desperately slow and still draining; rounding it to zero would
   // report it as stopped, which is a different diagnosis.
-  const drainPerS = Math.round((windowCompletions / windowSeconds) * 10) / 10;
+  const drainPerS = Math.round((windowCompletions / drainSeconds) * 10) / 10;
   return [
     {
       id: SCHEDULER_ADMISSION,

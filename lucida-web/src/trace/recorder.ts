@@ -26,6 +26,7 @@ import {
 } from "./serverRowTable.ts";
 import type { LivePhaseOccupancy, LiveProgress } from "./liveProgress.ts";
 import type { QuiescenceState } from "./quiescence.ts";
+import { addSend, SEND_COLUMN_COUNT, sendTalliesFrom } from "./sendAccounting.ts";
 import { tableSinkFactory, type TraceSink, type TraceSinkFactory } from "./sink.ts";
 import { TickScratch } from "./tickRing.ts";
 import {
@@ -40,6 +41,7 @@ import {
   TRACE_SCHEMA_VERSION,
   type ChunkEventSource,
   type ChunkRowSource,
+  type ClientMessageTypeIndexValue,
   type ConnectionRecord,
   type CountedPhaseIndexValue,
   type DatasetOpenBracket,
@@ -55,6 +57,7 @@ import {
   type RunCause,
   type RunConditions,
   type RunHeader,
+  type SendTallies,
   type TraceDocument,
   type TraceRun,
   type TruncationRecord,
@@ -170,6 +173,12 @@ interface OpenInterval {
   connections: ConnectionRecord[];
   /** Server rows refused because nothing in this interval could place them. */
   serverRowsDiscarded: number;
+  /**
+   * Messages and bytes per client message type, counted at each send. A
+   * counter, not a record: it lives outside the sink and the caps, and it
+   * keeps counting past a truncation, as `rowsUnrecorded` does.
+   */
+  sent: Float64Array;
   generation: number;
   /**
    * Set once the interval crosses the per-run cap, and mutated from there on:
@@ -187,6 +196,7 @@ interface ClosedInterval {
   datasetOpens: DatasetOpenBracket[];
   datasetOpensDropped: number;
   serverRowsDiscarded: number;
+  sent: SendTallies;
   /** Frozen at close, so the resident total is a running sum rather than a walk. */
   byteLength: number;
 }
@@ -253,6 +263,11 @@ export class TraceRecorder {
    */
   private readonly tickScratch = new TickScratch();
   private readonly countedPhases = new Uint32Array(COUNTED_PHASES.length);
+  /**
+   * Sends since the previous tick sample: process-wide and reset per sample,
+   * like `countedPhases`.
+   */
+  private readonly sendSample = new Uint32Array(SEND_COLUMN_COUNT);
   /** One vector, refilled per tick, for the same reason as the scratch above. */
   private readonly readingColumns = new Float64Array(READING_NAMES.length);
   /**
@@ -840,13 +855,14 @@ export class TraceRecorder {
     const atUs = run ? this.offsetUs(run, this.now()) : 0;
     this.noteTargetLevel(run, atUs);
     if (run) {
-      run.sink.appendTick(atUs, this.tickScratch, this.countedPhases);
+      run.sink.appendTick(atUs, this.tickScratch, this.countedPhases, this.sendSample);
     } else if (this.open?.truncation) {
       this.open.truncation.ticksUnrecorded++;
     }
     // Either way the tallies belong to the interval just ended, not the next
     // one: carrying them forward would publish two intervals' counts as one.
     this.countedPhases.fill(0);
+    this.sendSample.fill(0);
   }
 
   /**
@@ -923,6 +939,33 @@ export class TraceRecorder {
   countPhase(phase: CountedPhaseIndexValue, times = 1): void {
     if (!this.open) return;
     this.countedPhases[phase] += times;
+  }
+
+  /**
+   * Count one message the bridge transmitted over the session socket, under
+   * exactly one client message type.
+   *
+   * Two tallies take it. The sample the next tick publishes, so the sends
+   * ride the per-tick aggregate as a series. And the interval's running
+   * total, because a sample is published only by a planning pass, and the
+   * sends this accounting exists to explain are the ones that go on after
+   * the last pass, when the view looks loaded and the socket does not go
+   * quiet. The total is what a rate for the interval is read from.
+   *
+   * Silent with no interval open, like every tier: a count with no interval
+   * to belong to cannot be read as a rate. That covers the page's first
+   * messages, sent before the render loop registers its environment. Not
+   * silenced by truncation: this is a counter, not a record, and it spends
+   * nothing from the cap. Retention is unchanged by it: an unlabelled
+   * interval that only sent is discarded with the other empty ones, so a
+   * pointer moving over an idle canvas does not retain an interval's worth
+   * of buffers, and its handful of cursor messages goes with it.
+   */
+  countSend(type: ClientMessageTypeIndexValue, bytes: number): void {
+    const run = this.open;
+    if (!run) return;
+    addSend(this.sendSample, type, bytes);
+    addSend(run.sent, type, bytes);
   }
 
   /**
@@ -1017,6 +1060,7 @@ export class TraceRecorder {
           ? [newConnection(this.connectionGeneration, null, null)]
           : [],
       serverRowsDiscarded: 0,
+      sent: new Float64Array(SEND_COLUMN_COUNT),
       generation: this.generation,
       truncation: null,
     };
@@ -1040,9 +1084,11 @@ export class TraceRecorder {
     }
     this.open = null;
     // A tick half-filled when the interval closed belongs to no interval, and
-    // the counts behind it belong to no interval either.
+    // the counts behind it belong to no interval either. The sends behind it
+    // are already in the interval's total.
     this.tickInProgress = false;
     this.countedPhases.fill(0);
+    this.sendSample.fill(0);
 
     this.awaitingResident.length = 0;
     this.awaitingDrawn.length = 0;
@@ -1061,6 +1107,7 @@ export class TraceRecorder {
       datasetOpens: [...run.datasetOpens.values()],
       datasetOpensDropped: run.datasetOpensDropped,
       serverRowsDiscarded: run.serverRowsDiscarded,
+      sent: sendTalliesFrom(run.sent),
       byteLength,
       header: {
         ...run.environment.captureConditions(),
@@ -1171,6 +1218,7 @@ export class TraceRecorder {
       rows,
       ticks,
       ticksDropped,
+      sent: interval.sent,
       readings: interval.sink.serialiseReadings(),
       readingsDropped: interval.sink.readingsDropped,
       events: interval.sink.serialiseEvents(),

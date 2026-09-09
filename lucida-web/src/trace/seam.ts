@@ -21,11 +21,32 @@
 import { toChromeTraceJson } from "./chromeTrace.ts";
 import { diagnoseDocument } from "./diagnose/diagnose.ts";
 import { renderDiagnostic, type RenderDepth } from "./diagnose/renderText.ts";
-import type { DiagnosticDocument } from "./diagnose/types.ts";
+import type { DiagnosticDocument, WindowRequest } from "./diagnose/types.ts";
 import { traceRecorder } from "./recorder.ts";
 import type { LiveProgress } from "./liveProgress.ts";
 import type { QuiescenceState } from "./quiescence.ts";
 import { TRACE_SCHEMA_VERSION, type GpuIdentity, type TraceDocument } from "./types.ts";
+
+/**
+ * What a reading of a trace can be scoped to: one run, and one interval of
+ * its clock. Brushing the interval in the monitor and the CLI's window flag
+ * both arrive here.
+ */
+export interface DiagnoseScope {
+  /** The run to read. The newest when absent. */
+  runId?: string;
+  /** The interval of the run to read, in milliseconds from run start. The whole run when absent. */
+  window?: WindowRequest;
+  /** The chunk the document's lookup is about, as `[entity/]level/t/c/z/y/x`. The worst row's when absent. */
+  chunk?: string;
+}
+
+/** A scope plus which rendering of it to produce. */
+export interface DiagnoseTextScope extends DiagnoseScope {
+  depth?: RenderDepth;
+  /** Which phase `depth: "phase"` is about. */
+  phase?: string;
+}
 
 export interface LucidaTraceSeam {
   /** The document's schema version, readable without exporting one. */
@@ -98,10 +119,13 @@ export interface LucidaTraceSeam {
    * Closes the run in progress, exactly as {@link exportTrace} does: asking
    * what a run means concludes the interval being asked about.
    *
-   * `chunk` names the chunk the document's lookup is about, as
-   * `[entity/]level/t/c/z/y/x`; left out, the lookup is the worst row's.
+   * `window` scopes the reading to an interval of the run's clock: the phase
+   * rollup, the findings and the critical path are then of that interval, and
+   * the document's header says so. `chunk` names the chunk the document's
+   * lookup is about, as `[entity/]level/t/c/z/y/x`; left out, the lookup is
+   * the worst row's.
    */
-  diagnose(runId?: string, options?: DiagnoseSeamOptions): DiagnosticDocument;
+  diagnose(runId?: string, scope?: Omit<DiagnoseScope, "runId">): DiagnosticDocument;
   /**
    * The same diagnostic rendered as the default text. One renderer, so every
    * number in the text exists in {@link diagnose}'s output — a caller drops to
@@ -113,12 +137,25 @@ export interface LucidaTraceSeam {
    * renderer outside the page, where it would drift. `depth: "phase"` takes
    * the phase id in `phase`; `depth: "chunk"` renders the lookup for `chunk`,
    * or for the worst row when none is named; `depth: "spatial"` renders what
-   * is where.
+   * is where. `window` and `chunk` scope the reading as they do on
+   * {@link diagnose}.
    */
-  diagnoseText(
-    runId?: string,
-    options?: DiagnoseSeamOptions & { depth?: RenderDepth; phase?: string },
-  ): string;
+  diagnoseText(runId?: string, options?: Omit<DiagnoseTextScope, "runId">): string;
+  /**
+   * The derivation over a trace document handed in, rather than over the
+   * page's own recording. For a run file read back after the browser that
+   * recorded it is gone: the file carries the whole-run reading and no
+   * other, and a window cannot be rendered at export because there is no
+   * finite set of them. `lucida trace show --window` opens a page and calls
+   * this, so the CLI stays free of the derivation it would otherwise have to
+   * restate.
+   *
+   * Reads nothing from and closes nothing in the recorder: the document is
+   * the caller's.
+   */
+  diagnoseTrace(document: TraceDocument, scope?: DiagnoseScope): DiagnosticDocument;
+  /** {@link diagnoseTrace} rendered as text, at any depth {@link diagnoseText} renders. */
+  diagnoseTraceText(document: TraceDocument, options?: DiagnoseTextScope): string;
   /**
    * Close the run in progress without exporting — the *Stop & analyse* path.
    *
@@ -127,12 +164,6 @@ export interface LucidaTraceSeam {
    * concluded by somebody asking for it rather than by running out of time.
    */
   closeRun(endReason?: "explicit" | "timeout"): void;
-}
-
-/** What a caller can ask the derivation for, beyond which run. */
-export interface DiagnoseSeamOptions {
-  /** The chunk the document's lookup is about. */
-  chunk?: string;
 }
 
 declare global {
@@ -146,6 +177,13 @@ declare global {
  * unconditional already, and an unread seam costs nothing.
  */
 export function installTraceSeam(target: Window = window): LucidaTraceSeam {
+  const diagnoseTrace = (document: TraceDocument, scope?: DiagnoseScope): DiagnosticDocument =>
+    diagnoseDocument(document, { runId: scope?.runId, window: scope?.window, chunk: scope?.chunk });
+  const diagnoseTraceText = (document: TraceDocument, options?: DiagnoseTextScope): string =>
+    renderDiagnostic(diagnoseTrace(document, options), {
+      depth: options?.depth,
+      phase: options?.phase,
+    }).text;
   const seam: LucidaTraceSeam = {
     schemaVersion: TRACE_SCHEMA_VERSION,
     get quiescence() {
@@ -165,16 +203,12 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
     progress: () => traceRecorder.liveProgress,
     exportTrace: () => traceRecorder.exportDocument(),
     exportChromeTrace: () => toChromeTraceJson(traceRecorder.exportDocument()),
-    diagnose: (runId?: string, options?: DiagnoseSeamOptions) =>
-      diagnoseDocument(traceRecorder.exportDocument(), { runId, chunk: options?.chunk }),
-    diagnoseText: (
-      runId?: string,
-      options?: DiagnoseSeamOptions & { depth?: RenderDepth; phase?: string },
-    ) =>
-      renderDiagnostic(
-        diagnoseDocument(traceRecorder.exportDocument(), { runId, chunk: options?.chunk }),
-        { depth: options?.depth, phase: options?.phase },
-      ).text,
+    diagnose: (runId?: string, scope?: Omit<DiagnoseScope, "runId">) =>
+      diagnoseTrace(traceRecorder.exportDocument(), { ...scope, runId }),
+    diagnoseText: (runId?: string, options?: Omit<DiagnoseTextScope, "runId">) =>
+      diagnoseTraceText(traceRecorder.exportDocument(), { ...options, runId }),
+    diagnoseTrace,
+    diagnoseTraceText,
     closeRun: (endReason: "explicit" | "timeout" = "explicit") =>
       traceRecorder.closeRun(endReason),
   };

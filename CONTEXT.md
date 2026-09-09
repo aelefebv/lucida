@@ -387,6 +387,15 @@ dispatch, coalesce attach. Counted on the per-tick aggregate, never timed, so a
 reader is not shown quantisation noise wearing the costume of data.
 _Avoid_: untimed phase, fast phase
 
+**Client message type**:
+The kind, from a closed set, that a message the page sends over the session
+socket counts under: chunk request, asset request, viewer interest, presence,
+dataset presence, cursor, command, or other. Every sent message counts under
+exactly one, by messages and by bytes, on the per-tick aggregate and as a
+run total. Distinct from a chunk's *sent state* in delivery, which is a chunk
+posted to the render worker and not a message on the wire.
+_Avoid_: frame type, send kind, outbound type
+
 **Correlation label** (`rid`):
 The `u32` that joins a browser-side lifecycle row to the server-side row for the
 same wire request. Client-minted, outbound-only, and monotonic across one
@@ -459,6 +468,15 @@ What a trace *means*, derived from it by one pure function. Both surfaces read
 the same diagnostic, so the agent text and the monitor's cards cannot disagree
 about which phase stalled. Distinct from the trace, which is what was recorded.
 _Avoid_: analysis, report, summary, insight
+
+**Window**:
+A time interval on the run's clock that a diagnostic is scoped to. The phase
+rollup, the findings, and the critical path are then of that interval, a row
+that crosses its edge counts for the part inside, and the document's header
+states it. Brushing in the monitor and the CLI's window flag are the same
+call. Not a bracket (one request's interval) and not the backlog rule's
+trailing second (a rate's denominator).
+_Avoid_: range, time slice, selection (a selection is a set of chunks)
 
 **Ruleset**:
 The versioned set of thresholds that produced a diagnostic, shipped inside the
@@ -776,7 +794,8 @@ per-tick aggregates, and a provisional reading over a rolling window, labelled
 as such. Still no verdict. A verdict needs a closed interval, so the monitor
 withholds one until the run ends — by going quiescent, by timing out, or
 through *Stop & analyse*, which closes it with `explicit` as the end reason.
-_Avoid_: real-time view, live verdict (a provisional reading is labelled for
+_Avoid_: real-time view, following window (a window scopes a closed run, and
+the live view has none), live verdict (a provisional reading is labelled for
 the reason that it is not one), counters view
 
 **Dev controls**:

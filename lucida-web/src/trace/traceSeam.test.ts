@@ -364,6 +364,65 @@ describe("the trace seam", () => {
   });
 
   /**
+   * A window is the same derivation over an interval of the run, reached
+   * through the same seam, so a brushed interval in the monitor and the
+   * CLI's window flag cannot disagree about it.
+   */
+  it("scopes the diagnostic to a window through the same derivation", async () => {
+    installTraceSeam();
+    const source = new ControlledSource();
+    const cache = new CpuCache(source, makeDecode());
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    cache.submit(makePlan([makeRequest()]));
+    await flush();
+
+    // The run's wall is whatever the test took, so a window past it is clamped
+    // to it. Either way the reading is scoped, and the text names the window.
+    const windowed = window.lucidaTrace!.diagnose(undefined, {
+      window: { startMs: 0, endMs: 0.5 },
+    });
+    expect(windowed.window).toMatchObject({ startMs: 0 });
+    expect(windowed.window!.endMs).toBeLessThanOrEqual(0.5);
+    expect(windowed.coverage.wallMs).toBeLessThanOrEqual(0.5);
+    expect(window.lucidaTrace!.diagnoseText(windowed.runId, { window: { startMs: 0, endMs: 0.5 } })).toContain(
+      `window    0..${windowed.window!.endMs} ms`,
+    );
+  });
+
+  /**
+   * A run file read back after its browser is gone carries the whole-run
+   * reading and no other, so the CLI hands the document back to a page and
+   * asks for the window there. The recorder is not involved: reading a
+   * document someone else recorded closes nothing here.
+   */
+  it("diagnoses a supplied trace document without touching the recording", async () => {
+    const seam = installTraceSeam();
+    const source = new ControlledSource();
+    const cache = new CpuCache(source, makeDecode());
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    cache.submit(makePlan([makeRequest()]));
+    await flush();
+    seam.closeRun("timeout");
+    const document = seam.exportTrace();
+    const runId = seam.runState.lastConcludedRunId!;
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    const diagnostic = seam.diagnoseTrace(document, { runId, window: { startMs: 0, endMs: 1 } });
+    const text = seam.diagnoseTraceText(document, { runId, depth: "phases" });
+    expect(traceRecorder.isRunOpen).toBe(true);
+
+    expect(diagnostic.runId).toBe(runId);
+    // Clamped to the run's own wall when the run took under a millisecond.
+    const wallMs = document.runs.find((run) => run.header.runId === runId)!.header.durationUs / 1_000;
+    expect(diagnostic.window).toMatchObject({ startMs: 0 });
+    expect([1, wallMs]).toContain(diagnostic.window!.endMs);
+    expect(text).toContain(`lucida trace ${runId}`);
+    expect(text).toContain("CRITICAL PATH");
+  });
+
+  /**
    * "The shape behind X" is a depth of the page's renderer too, so the CLI
    * that prints it never becomes a second renderer with its own opinions.
    */

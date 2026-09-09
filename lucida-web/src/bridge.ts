@@ -20,6 +20,8 @@
  */
 import { isDebugEnabled } from "./debug/logging.ts";
 import type { SourceChunkStatus } from "./pipeline/fetch/contentSource.ts";
+import { traceRecorder } from "./trace/recorder.ts";
+import { classifyClientMessage, utf8ByteLength } from "./trace/sendAccounting.ts";
 import type { ServerTimingBatch } from "./trace/serverRowTable.ts";
 import type {
   GeneratedChunkStatus,
@@ -1217,11 +1219,18 @@ export class Bridge {
   }
 
   /** Low-level send (raw JSON string). Drops the frame unless the socket is
-   *  OPEN; a destroyed bridge never transmits. */
+   *  OPEN; a destroyed bridge never transmits.
+   *
+   *  Every frame that does go out is counted on the trace, once, under one
+   *  client message type and at the bytes the socket carries. This is the one
+   *  path every client message takes, including the chunk and asset requests
+   *  the content source hands in, so nothing the page sends escapes the
+   *  accounting, and a frame dropped here was never a send. */
   send(json: string) {
     if (this.destroyed) return;
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(json);
+      traceRecorder.countSend(classifyClientMessage(json), utf8ByteLength(json));
     }
   }
 

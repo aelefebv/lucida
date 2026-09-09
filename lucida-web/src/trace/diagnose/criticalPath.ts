@@ -17,8 +17,15 @@
  */
 
 import type { TraceRow, TraceRun, TraceServerRow } from "../types.ts";
-import { metadataReadRows, percentile, phaseClassOf, usToMs } from "./phaseRollup.ts";
+import {
+  metadataReadRows,
+  metadataReadsWithin,
+  percentile,
+  phaseClassOf,
+  usToMs,
+} from "./phaseRollup.ts";
 import type { CriticalPath, PathSegment } from "./types.ts";
+import { clipSpan, inWindow, resolveWindow, windowLabel, type RunWindow } from "./window.ts";
 
 /** The chain's first link, and the only one nothing may be blamed for. */
 export const UNRECORDED_PREFIX = "unrecorded prefix";
@@ -34,54 +41,67 @@ export const PRE_PLAN = "browser.pre-plan";
 /** What the run finished on. A dataset open ends when its last chunk is drawn. */
 const TARGET_EVENT = "last chunk presented";
 
-export function buildCriticalPath(run: TraceRun): CriticalPath {
-  const terminal = terminalRow(run);
+/**
+ * Walk the chain for one window of the run. On the whole run the chain starts
+ * at run start; on a narrower window it starts at the window and ends on the
+ * last chunk presented inside it, and every segment counts for the part of
+ * itself inside. The row the window's target waited on may have been on the
+ * wire when the window opened, and that wire is where the window's chain
+ * begins.
+ */
+export function buildCriticalPath(run: TraceRun, window: RunWindow = resolveWindow(run)): CriticalPath {
+  const fromUs = window.startUs;
+  const terminal = terminalRow(run, window);
   if (!terminal) {
+    const where = window.whole ? "" : ` inside the window ${windowLabel(window)} ms`;
     return {
       kind: "undefined",
       target: TARGET_EVENT,
       targetAtMs: null,
+      fromMs: usToMs(fromUs),
       undefinedReason:
         run.header.endReason === "quiescent"
-          ? "no row reached a frame, so this run has no completion event to walk a critical path back from"
-          : `the run ended as ${run.header.endReason} and no row reached a frame, so there is no completion event to walk back from`,
+          ? `no row reached a frame${where}, so this run has no completion event to walk a critical path back from`
+          : `the run ended as ${run.header.endReason} and no row reached a frame${where}, so there is no completion event to walk back from`,
       segments: [],
       chainAccountedPct: 0,
     };
   }
 
   const targetUs = terminal.phases.present!.endUs;
+  const spanUs = Math.max(1, targetUs - fromUs);
   const segments: PathSegment[] = [];
-  const share = (us: number): number => Math.round((us / Math.max(1, targetUs)) * 100);
+  const share = (us: number): number => Math.round((us / spanUs) * 100);
   const add = (segment: Omit<PathSegment, "sharePct">): void => {
     if (segment.ms <= 0) return;
     segments.push({ ...segment, sharePct: share(segment.ms * 1_000) });
   };
 
-  const firstRecordedUs = firstRecorded(run, targetUs);
+  const firstRecordedUs = firstRecorded(run, window, targetUs);
   add({
     label: UNRECORDED_PREFIX,
     class: "unrecorded",
-    ms: usToMs(firstRecordedUs),
+    ms: usToMs(firstRecordedUs - fromUs),
     source: "derived — no row covers it",
     rows: 0,
   });
 
   let cursorUs = firstRecordedUs;
-  const openEndUs = openEnd(run, targetUs);
+  const openEndUs = openEnd(run, window, targetUs);
   if (openEndUs > cursorUs) {
+    const reads = metadataReadsInside(run, window);
     add({
       label: "open.metadata-read",
       class: "io",
       ms: usToMs(openEndUs - cursorUs),
       source: "dataset-open bracket",
-      rows: metadataReadRows(run.serverRows).length,
-      breakdown: metadataBreakdown(run.serverRows),
+      rows: reads.length,
+      breakdown: metadataBreakdown(reads),
     });
     cursorUs = openEndUs;
   }
 
-  const rowStartUs = rowStart(terminal);
+  const rowStartUs = Math.max(fromUs, rowStart(terminal));
   if (rowStartUs > cursorUs) {
     add({
       label: PRE_PLAN,
@@ -99,19 +119,25 @@ export function buildCriticalPath(run: TraceRun): CriticalPath {
       row.connectionGeneration === terminal.connectionGeneration,
   );
   for (const [phase, timing] of Object.entries(terminal.phases)) {
+    const span = clipSpan(timing.startUs, timing.endUs, window);
+    if (!span) continue;
     add({
       label: `browser.${phase}`,
       // The one inventory, not a second cascade beside it: a phase reclassified
       // in the ruleset and not here would judge one way in the rollup and
       // another on the chain, with nothing to catch the disagreement.
       class: phaseClassOf(`browser.${phase}`),
-      ms: usToMs(timing.durationUs),
+      ms: usToMs(span.us),
       source: "the row the run finished on",
       rows: 1,
       chunkKey: terminal.chunkKey,
       // A wire segment is a client-side bracket around the server's work. When
       // the server's row joined, split it rather than reporting an opaque total.
-      ...(phase === "wire" && serverRow ? { breakdown: serverBreakdown(serverRow) } : {}),
+      // Not when the window cut the bracket: the server's phases cannot be
+      // placed inside a part of it.
+      ...(phase === "wire" && serverRow && !span.clipped
+        ? { breakdown: serverBreakdown(serverRow) }
+        : {}),
     });
   }
 
@@ -120,18 +146,19 @@ export function buildCriticalPath(run: TraceRun): CriticalPath {
     kind: "chain",
     target: TARGET_EVENT,
     targetAtMs: usToMs(targetUs),
+    fromMs: usToMs(fromUs),
     undefinedReason: null,
     segments,
-    chainAccountedPct: Math.min(100, Math.round((chainUs / Math.max(1, targetUs)) * 100)),
+    chainAccountedPct: Math.min(100, Math.round((chainUs / spanUs) * 100)),
   };
 }
 
-/** The row the target waited on: the last one to reach a frame. */
-function terminalRow(run: TraceRun): TraceRow | null {
+/** The row the target waited on: the last one to reach a frame inside the window. */
+function terminalRow(run: TraceRun, window: RunWindow): TraceRow | null {
   let best: TraceRow | null = null;
   for (const row of run.rows) {
     const present = row.phases.present;
-    if (!present) continue;
+    if (!present || !inWindow(present.endUs, window)) continue;
     if (!best || present.endUs > best.phases.present!.endUs) best = row;
   }
   return best;
@@ -141,24 +168,61 @@ function rowStart(row: TraceRow): number {
   return Math.min(...Object.values(row.phases).map((timing) => timing.startUs));
 }
 
-/** The earliest thing any instrument saw. Everything before it is on no row. */
-function firstRecorded(run: TraceRun, targetUs: number): number {
-  let earliest = targetUs;
-  for (const row of run.rows) earliest = Math.min(earliest, rowStart(row));
-  for (const open of run.datasetOpens) earliest = Math.min(earliest, open.startUs);
-  return Math.max(0, earliest);
+function rowEnd(row: TraceRow): number {
+  return Math.max(...Object.values(row.phases).map((timing) => timing.endUs));
 }
 
 /**
- * When the last dataset open settled. An open still in flight at run close is
- * charged to the target rather than dropped — an open that never settled is
- * the most diagnostic segment there is, and silently omitting it would hand
- * its time to whatever came next.
+ * The earliest thing any instrument saw inside the window. Everything between
+ * the window's start and it is on no row. A row already running when the
+ * window opened makes that stretch zero: the window opened on recorded work.
  */
-function openEnd(run: TraceRun, targetUs: number): number {
-  let end = 0;
-  for (const open of run.datasetOpens) end = Math.max(end, open.endUs ?? targetUs);
+function firstRecorded(run: TraceRun, window: RunWindow, targetUs: number): number {
+  let earliest = targetUs;
+  for (const row of run.rows) {
+    if (rowEnd(row) <= window.startUs) continue;
+    earliest = Math.min(earliest, Math.max(window.startUs, rowStart(row)));
+  }
+  for (const open of run.datasetOpens) {
+    if ((open.endUs ?? targetUs) <= window.startUs) continue;
+    earliest = Math.min(earliest, Math.max(window.startUs, open.startUs));
+  }
+  return Math.max(window.startUs, earliest);
+}
+
+/**
+ * When the last dataset open that reaches into the window settled, no later
+ * than the target. An open still in flight at run close is charged to the
+ * target rather than dropped: an open that never settled is the most
+ * diagnostic segment there is, and silently omitting it would hand its time
+ * to whatever came next.
+ */
+function openEnd(run: TraceRun, window: RunWindow, targetUs: number): number {
+  let end = window.startUs;
+  for (const open of run.datasetOpens) {
+    const endUs = open.endUs ?? targetUs;
+    if (endUs <= window.startUs || open.startUs > targetUs) continue;
+    end = Math.max(end, Math.min(endUs, targetUs));
+  }
   return end;
+}
+
+/**
+ * The metadata reads the window can see, each counted for the part of itself
+ * inside, under the rollup's placement rule. A read with no position belongs
+ * to the whole run only.
+ */
+function metadataReadsInside(run: TraceRun, window: RunWindow): TraceServerRow[] {
+  const inside: TraceServerRow[] = [];
+  for (const { row, placed, span } of metadataReadsWithin(run, window)) {
+    if (!placed) {
+      if (window.whole) inside.push(row);
+      continue;
+    }
+    if (!span) continue;
+    inside.push(span.clipped ? { ...row, durationUs: span.us } : row);
+  }
+  return inside;
 }
 
 function metadataBreakdown(serverRows: TraceServerRow[]): Record<string, number> {
