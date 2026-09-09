@@ -20,6 +20,7 @@ use serde_json::json;
 use thiserror::Error;
 use tokio::sync::{Mutex, broadcast};
 
+use crate::inbox::InboxStore;
 use crate::session::Session;
 use crate::{BroadcastItem, ProxyConfig, UnicastRoutes};
 
@@ -88,6 +89,7 @@ impl Default for WorkspaceRuntimeConfig {
 
 pub struct WorkspaceManager {
     store: Arc<dyn WorkspaceStore>,
+    inbox: Option<Arc<dyn InboxStore>>,
     pub(crate) live: Mutex<HashMap<String, Arc<LiveWorkspace>>>,
     proxy_config: ProxyConfig,
     runtime_config: WorkspaceRuntimeConfig,
@@ -105,14 +107,33 @@ impl WorkspaceManager {
     ) -> Self {
         Self {
             store,
+            inbox: None,
             live: Mutex::new(HashMap::new()),
             proxy_config,
             runtime_config,
         }
     }
 
+    /// Attach the workspace inbox, so a **Send report** arriving on a
+    /// workspace socket has somewhere to land.
+    ///
+    /// Set beside the constructors rather than through them because the
+    /// inbox is not part of what makes a workspace work: a manager
+    /// without one serves every other message as it always did, and
+    /// tells a sender that this server keeps no inbox.
+    #[must_use]
+    pub fn with_inbox(mut self, inbox: Arc<dyn InboxStore>) -> Self {
+        self.inbox = Some(inbox);
+        self
+    }
+
     pub fn store(&self) -> Arc<dyn WorkspaceStore> {
         Arc::clone(&self.store)
+    }
+
+    /// The inbox this server keeps, or `None` where none was attached.
+    pub fn inbox(&self) -> Option<Arc<dyn InboxStore>> {
+        self.inbox.clone()
     }
 
     pub fn proxy_config(&self) -> ProxyConfig {

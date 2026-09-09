@@ -21,7 +21,9 @@ tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors", "fs"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `raw_value` lets the inbox lift a bundle's header out as the slice of
+# text the page wrote, rather than as something re-serialized.
+serde_json = { version = "1", features = ["raw_value"] }
 lz4_flex = "0.11"
 zstd = "0.13"
 tracing = "0.1"

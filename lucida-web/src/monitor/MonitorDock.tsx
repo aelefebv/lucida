@@ -21,8 +21,11 @@
  * to production while withholding the human one is exactly the asymmetry
  * surface parity forbids (ADR 0051, ADR 0052).
  *
- * **Observation only.** Every control here reads, saves, drills in, or moves
- * the dock. None of them changes what the pipeline does.
+ * **Observation only.** Every control here reads, saves, sends, drills in, or
+ * moves the dock. None of them changes what the pipeline does. *Send report*
+ * is the one that leaves the page, and it copies the run to the workspace
+ * inbox rather than touching the run: it happens when somebody presses it,
+ * never on a run's close and never on a schedule (ADR 0049 as amended).
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -39,9 +42,11 @@ import {
   readMonitor,
   readProgress,
   readProvisional,
+  sendReport,
   stopRun,
   type MonitorSnapshot,
 } from "./monitorSource.ts";
+import type { InboxReceipt } from "../bridge.ts";
 import { TimelineCanvas } from "./TimelineCanvas.tsx";
 import type { LiveProgress } from "../trace/liveProgress.ts";
 import type { ProvisionalReading } from "../trace/diagnose/provisional.ts";
@@ -97,6 +102,12 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
   // failure shows where the file name would have been.
   const [bundling, setBundling] = useState(false);
   const [saveFailed, setSaveFailed] = useState<string | null>(null);
+  // **Send report** is the one control here that puts anything outside the
+  // page, so it says what it did: the entry it landed in, and when the inbox
+  // stops keeping it.
+  const [sending, setSending] = useState(false);
+  const [sent, setSent] = useState<InboxReceipt | null>(null);
+  const [sendFailed, setSendFailed] = useState<string | null>(null);
   const read = snapshot?.read;
   const runs = snapshot?.runs ?? [];
   const runId = read?.ok ? read.document.runId : undefined;
@@ -178,6 +189,20 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
       .finally(() => setBundling(false));
   }, [runId]);
 
+  // The one control that leaves the page. Nothing sends on its own: no
+  // schedule, and no send when a run closes.
+  const send = useCallback(() => {
+    setSent(null);
+    setSendFailed(null);
+    setSending(true);
+    sendReport(runId)
+      .then(setSent)
+      .catch((error: unknown) =>
+        setSendFailed(error instanceof Error ? error.message : String(error)),
+      )
+      .finally(() => setSending(false));
+  }, [runId]);
+
   const { height, startResize } = useDockHeight();
   const { popout, popOut, dockBack, popoutFailed } = usePopout();
 
@@ -249,6 +274,15 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
               >
                 {bundling ? "Saving bundle…" : "Save bundle"}
               </button>
+              <button
+                type="button"
+                onClick={send}
+                disabled={!read?.ok || sending}
+                title="Post this run's bundle to the workspace inbox, where the CLI reads it"
+                data-testid="monitor-send-report"
+              >
+                {sending ? "Sending report…" : "Send report"}
+              </button>
             </>
           )}
           {popout ? (
@@ -296,6 +330,17 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
       {saveFailed && (
         <p className="monitor-save-failed" data-testid="monitor-save-failed">
           Could not save the bundle: {saveFailed}
+        </p>
+      )}
+      {sent && (
+        <p className="monitor-saved" data-testid="monitor-sent">
+          Sent to the workspace inbox as {sent.entryId}. It is kept until {sent.expiresAt}. Read it
+          with <code>lucida trace inbox fetch {sent.entryId}</code>.
+        </p>
+      )}
+      {sendFailed && (
+        <p className="monitor-save-failed" data-testid="monitor-send-failed">
+          Could not send the report: {sendFailed}
         </p>
       )}
 

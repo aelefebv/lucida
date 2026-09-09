@@ -1,14 +1,14 @@
 //! PostgreSQL storage backend.
 //!
 //! Connects to the server named by a `postgres:` connection string, runs
-//! the bundled PostgreSQL migrations, and serves all six stores. A
+//! the bundled PostgreSQL migrations, and serves all seven stores. A
 //! deployer selects it with `LUCIDA_DB_URL=postgres://…`, or with the
 //! `postgresql://` spelling of the same thing. ADR-0058 records the
 //! pattern each store implementation followed.
 //!
 //! This module is the only place in the server that names a PostgreSQL
 //! type. Everything above it works through [`StorageBackend`] and the
-//! six store traits.
+//! seven store traits.
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -26,6 +26,7 @@ use crate::auth::{
     PostgresSessionStore,
 };
 use crate::bookmarks::{BookmarkStore, PostgresBookmarkStore};
+use crate::inbox::{InboxStore, PostgresInboxStore};
 use crate::workspace::{PostgresWorkspaceStore, WorkspaceStore};
 
 /// Migrations bundled into the binary at compile time, from the
@@ -137,6 +138,10 @@ impl StorageBackend for PostgresStorageBackend {
 
     fn workspaces(&self) -> Arc<dyn WorkspaceStore> {
         Arc::new(PostgresWorkspaceStore::new(self.pool.clone()))
+    }
+
+    fn inbox(&self) -> Arc<dyn InboxStore> {
+        Arc::new(PostgresInboxStore::new(self.pool.clone()))
     }
 }
 
@@ -378,9 +383,13 @@ mod tests {
             .fetch_one(started[0].pool())
             .await
             .unwrap();
+        // Every migration bundled into the binary, and each of them once:
+        // counted rather than spelled, so a migration added beside the
+        // baseline does not read as a starter having applied one twice.
         assert_eq!(
-            applied, 1,
-            "the baseline is applied once, not once per starter"
+            applied,
+            MIGRATOR.iter().count() as i64,
+            "each migration is applied once, not once per starter"
         );
     }
 
