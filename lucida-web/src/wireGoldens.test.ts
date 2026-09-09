@@ -71,6 +71,19 @@ import {
   type LayoutSpec,
 } from "./manifestTypes.ts";
 import { dtypeMax } from "./types.ts";
+import { makeTick } from "./trace/diagnose/fixtures.ts";
+import {
+  CLIENT_MESSAGE_TYPES,
+  COUNTED_PHASES,
+  TICK_COUNTER_NAMES,
+  type TraceReading,
+  type TraceTick,
+} from "./trace/types.ts";
+import {
+  aggregateItem,
+  runBoundaryItem,
+  type WatchAggregateItem,
+} from "./trace/watchStream.ts";
 import {
   GeneratedAvailabilityCatalog,
   mergeGeneratedAvailabilityIntoManifest,
@@ -2084,6 +2097,124 @@ describe("wire goldens: enum vocabulary", () => {
       viewer_interaction_modes: ["idle", "panning", "zooming", "scrubbing"],
       viewer_interest_lanes: ["visible", "predicted", "background"],
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Watch stream: the items a toggled-on page publishes, and the relay envelope
+// ---------------------------------------------------------------------------
+
+/**
+ * The aggregate and the boundary the fixtures lock, built by the page's own
+ * item builders (`trace/watchStream.ts`).
+ *
+ * The fixtures carry one entry in each of the aggregate's closed maps rather
+ * than the whole set: they are exemplars of a vocabulary the trace owns and
+ * the enum-vocabulary fixture already inventories.
+ */
+describe("wire goldens: watch stream", () => {
+  const watchReading: TraceReading = {
+    atUs: 4_200_000,
+    queueDepth: 20_480,
+    inFlight: 24,
+    frameTimeUs: 8_300,
+    residentBytes: 402_653_184,
+    gpuPassUs: 2_100,
+  };
+
+  const watchTick: TraceTick = {
+    ...makeTick(4_199_000, { "cache-admission": 48 }, { chunkRequest: { messages: 12, bytes: 1_140 } }),
+    datasetId: "wds-0f3a",
+    counters: { ...makeTick(0).counters, laneDetail: 12 },
+    levels: [{ level: 1, planned: 48, cached: 40, inFlight: 8 }],
+    targetLevel: { min: 1, max: 1 },
+    displayedLevel: { min: 1, max: 2 },
+  };
+
+  const publishedAggregate = () =>
+    JSON.parse(
+      JSON.stringify({
+        type: "watch_publish",
+        item: aggregateItem(1_767_225_600_250, "run-3", watchReading, [watchTick]),
+      }),
+    ) as { type: string; item: WatchAggregateItem };
+
+  it("watch_subscribe: the bare tag the CLI subscribes with", () => {
+    // No web sender: the page publishes and the CLI subscribes. The fixture
+    // locks the tag the Rust client sends and the tag the Rust server routes
+    // on to one spelling.
+    expect(coveredFixture("session/client_watch_subscribe.json")).toStrictEqual({
+      type: "watch_subscribe",
+    });
+  });
+
+  it("watch_publish(aggregate): the page's item, field for field", () => {
+    const golden = coveredFixture("session/client_watch_publish_aggregate.json") as {
+      type: string;
+      item: WatchAggregateItem;
+    };
+    const frame = publishedAggregate();
+
+    expect(Object.keys(frame).sort()).toStrictEqual(Object.keys(golden).sort());
+    expect(Object.keys(frame.item).sort()).toStrictEqual(Object.keys(golden.item).sort());
+    expect(frame.item.kind).toBe("aggregate");
+    expect(frame.item.at_epoch_ms).toBe(golden.item.at_epoch_ms);
+    expect(frame.item.run_id).toBe(golden.item.run_id);
+    expect(frame.item.reading).toStrictEqual(golden.item.reading);
+
+    const [tick] = frame.item.ticks;
+    const [goldenTick] = golden.item.ticks;
+    expect(Object.keys(tick).sort()).toStrictEqual(Object.keys(goldenTick).sort());
+    for (const field of [
+      "atUs",
+      "datasetId",
+      "levels",
+      "levelsDropped",
+      "targetLevel",
+      "levelPinned",
+      "displayedLevel",
+    ] as const) {
+      expect(tick[field]).toStrictEqual(goldenTick[field]);
+    }
+
+    const maps = [
+      [tick.counters, goldenTick.counters as Record<string, unknown>, TICK_COUNTER_NAMES],
+      [frame.item.counted, golden.item.counted as Record<string, unknown>, COUNTED_PHASES],
+      [frame.item.sent, golden.item.sent as Record<string, unknown>, CLIENT_MESSAGE_TYPES],
+    ] as const;
+    for (const [emitted, exemplar, names] of maps) {
+      expect(Object.keys(emitted)).toStrictEqual([...names]);
+      for (const [name, value] of Object.entries(exemplar)) {
+        expect((emitted as Record<string, unknown>)[name]).toStrictEqual(value);
+      }
+    }
+  });
+
+  it("watch_publish(boundary): a run's end, with the reason and the cause", () => {
+    const item = runBoundaryItem(1_767_225_604_700, {
+      runId: "run-3",
+      cause: { epoch: "view", dirtyKind: "interactive", source: "orbit" },
+      endReason: "quiescent",
+      durationUs: 4_700_000,
+    });
+    expect(JSON.parse(JSON.stringify({ type: "watch_publish", item }))).toStrictEqual(
+      coveredFixture("session/client_watch_publish_boundary.json"),
+    );
+  });
+
+  it("watch_update: the relay names the publishing page and its sequence", () => {
+    const golden = coveredFixture("session/server_watch_update.json") as {
+      type: string;
+      client_id: number;
+      seq: number;
+      item: WatchAggregateItem;
+    };
+    expect(Object.keys(golden).sort()).toStrictEqual(["client_id", "item", "seq", "type"]);
+    expect(golden.client_id).toBe(3);
+    expect(golden.seq).toBe(42);
+    expect(golden.item).toStrictEqual(
+      (fixture("session/client_watch_publish_aggregate.json") as { item: WatchAggregateItem }).item,
+    );
   });
 });
 

@@ -368,14 +368,15 @@ describe("observation only", () => {
   it("offers no control that could change what the pipeline does", () => {
     showing(coldRemoteOpen());
 
-    // Every button in the dock reads, saves, sends, drills in, or moves the
-    // dock. Sending puts a copy of the recording somewhere else and changes
-    // nothing about the run it copied. If a future change adds a control that
+    // Every button in the dock reads, saves, sends, drills in, moves the dock,
+    // or decides where a reading goes. Sending puts a copy of the recording
+    // somewhere else, and *Start a watch stream* changes who can see it; neither
+    // changes what the pipeline does. If a future change adds a control that
     // does not fit that list, this is where it shows up.
     const labels = screen.getAllByRole("button").map((node) => node.textContent);
     for (const label of labels) {
       expect(label).toMatch(
-        /^(Close|Pop out|Read the newest run|Save run|Save for Perfetto|Save bundle|Send report|Show the rows behind .*|Close drill-down)$/,
+        /^(Close|Pop out|Read the newest run|Save run|Save for Perfetto|Save bundle|Send report|Start a watch stream|Show the rows behind .*|Close drill-down)$/,
       );
     }
   });
@@ -383,12 +384,13 @@ describe("observation only", () => {
   it("adds only one reading control while a run is open, and it ends the run rather than the work", () => {
     // *Stop & analyse* closes the recording's interval. The pipeline goes on
     // doing exactly what it was doing — what ends is the run's label, which is
-    // what makes it readable.
+    // what makes it readable. The watch toggle stands beside it because the
+    // stream carries an open run as readily as a closed one.
     live.value = progress();
     render(<MonitorDock onClose={() => {}} />);
 
     const labels = screen.getAllByRole("button").map((node) => node.textContent);
-    expect(labels).toEqual(["Stop & analyse", "Pop out", "Close"]);
+    expect(labels).toEqual(["Start a watch stream", "Stop & analyse", "Pop out", "Close"]);
   });
 });
 

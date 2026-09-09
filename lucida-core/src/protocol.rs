@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -166,6 +166,222 @@ pub enum ClientMessage {
     /// Variant added at the end so the serde tag positions of older
     /// variants don't shift.
     SendReport { request_id: String, bundle: String },
+    /// Subscribe this connection to the workspace's watch stream (ADR 0051
+    /// as amended). The server answers with the ring it keeps for late
+    /// joiners and then relays every item published from that point on, each
+    /// as a [`ServerMessage::WatchUpdate`].
+    ///
+    /// Carries no fields: a subscriber receives every publishing page's items
+    /// and filters by `client_id` itself, so the server holds no per-subscriber
+    /// state beyond the registration. Repeating it on a subscribed connection
+    /// replays the ring again and changes nothing else.
+    ///
+    /// Variant added at the end so the serde tag positions of older
+    /// variants don't shift.
+    WatchSubscribe,
+    /// One item of this page's watch stream, sent while its watch toggle is
+    /// on. The server appends it to the ring and relays it to subscribers; it
+    /// computes nothing over it and never writes an item of its own.
+    ///
+    /// Variant added at the end so the serde tag positions of older
+    /// variants don't shift.
+    WatchPublish { item: WatchItem },
+}
+
+/// One item on the watch stream (ADR 0051 as amended): what a page publishes
+/// while its watch toggle is on, and what the server relays to subscribers.
+///
+/// A closed set of three, and none of them is a lifecycle row. The aggregate
+/// carries the trace's per-tick sample and its newest reading, the boundary a
+/// run's edge, and the provisional item the page's own provisional reading.
+/// What a subscriber costs the page is bounded by the publish cadence and the
+/// dataset count, never by the chunk count.
+///
+/// Every key of every kind is always present, `null` included, so a reader
+/// can match on a fixed shape rather than on which keys survived.
+///
+/// Field naming: the stream's own fields follow the protocol's snake_case.
+/// The objects inside `reading`, `ticks`, `cause`, and the provisional
+/// reading are the trace's own, in the trace's camelCase, passed through
+/// unchanged. That is deliberate — what a watcher prints for a tick is what
+/// the trace document holds for it — and their vocabulary is versioned by the
+/// trace's schema integer rather than by this enum.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WatchItem {
+    /// What the page's per-tick aggregate did over the stretch since the
+    /// previous aggregate: the process-wide totals for the whole stretch, the
+    /// newest reading, and the newest planning sample per dataset.
+    ///
+    /// The trace keeps every tick; the stream samples them, so an aggregate's
+    /// size is set by how many datasets planned, not by how often. The split
+    /// below keeps that lossless. A dataset's counters are gauges of one
+    /// planning pass, so the newest is the current state and the passes before
+    /// it are superseded. The counted phases and the send tallies are deltas,
+    /// so they are summed over every sample in the stretch and carried here
+    /// rather than on a tick. Here is also where they belong: they are the
+    /// page's, not any one dataset's.
+    Aggregate {
+        /// Wall clock at publish, so a reader can place an item the ring
+        /// replayed long after it happened.
+        at_epoch_ms: u64,
+        /// The labelled run open at the sample, or null in the steady-state
+        /// interval between runs.
+        run_id: Option<String>,
+        /// The newest reading taken since the previous aggregate, or null
+        /// when the page did not tick in between.
+        reading: Option<WatchReading>,
+        /// The counted-not-timed phases over the stretch, process-wide.
+        counted: BTreeMap<String, u64>,
+        /// What the page sent over the session socket during the stretch, by
+        /// client message type, process-wide. Sum the stream's aggregates for
+        /// an interval's total.
+        sent: BTreeMap<String, WatchSendTally>,
+        /// At most one per dataset. Empty when nothing re-planned.
+        ticks: Vec<WatchTick>,
+    },
+    /// A run opened or closed, or the stream itself started or stopped. A
+    /// closed run carries its cause as well as its end, because a late joiner
+    /// may have missed the open.
+    Boundary {
+        at_epoch_ms: u64,
+        event: WatchBoundaryEvent,
+        /// The run the boundary is of. On the stream's own start and stop,
+        /// the labelled run open at that moment, or null.
+        run_id: Option<String>,
+        /// Why the run opened, as the trace records it. Null when no labelled
+        /// run is named.
+        cause: Option<WatchRunCause>,
+        /// Why the run closed, on `run_closed`; null otherwise.
+        end_reason: Option<String>,
+        /// How long the run lasted, on `run_closed`; null otherwise.
+        duration_us: Option<u64>,
+    },
+    /// The page's provisional reading over a trailing window of the open run,
+    /// on the page's fixed interval. Labelled provisional inside, as
+    /// everywhere: it is never a verdict and no gate reads it.
+    Provisional {
+        at_epoch_ms: u64,
+        /// The diagnostic document's own object, as the trace seam's
+        /// `provisional()` returned it, carried opaquely.
+        ///
+        /// Not restated as a Rust type on purpose. The derivation is the one
+        /// seam, its schema is versioned by the diagnostic's own integer, and
+        /// a mirror here would be a second definition of it that nothing on
+        /// this side reads — the relay forwards the frame without parsing it
+        /// and the watcher prints it. A provisional reading walks no row and
+        /// has no row-bearing field, which is what keeps a row out of this
+        /// variant.
+        ///
+        /// Named in full rather than as a bare `reading`, which the glossary
+        /// reserves for one counter-track sample — the thing the aggregate's
+        /// `reading` is. A subscriber that matched on the short name would
+        /// get a different concept per kind.
+        provisional_reading: serde_json::Value,
+    },
+}
+
+/// What a boundary marks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WatchBoundaryEvent {
+    /// The page turned its watch toggle on. Always a stream's first item, so
+    /// silence after it means a page with nothing to report rather than a
+    /// lost socket.
+    WatchStarted,
+    /// The page turned its watch toggle off. Not sent when the page loses its
+    /// socket: the toggle is off after a reconnect, and the new connection is
+    /// a new publisher.
+    WatchStopped,
+    RunOpened,
+    RunClosed,
+}
+
+/// Why a run opened, as the trace's run header records it: the epoch the
+/// input moved, the kind of dirty, and the input or emit site behind it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WatchRunCause {
+    pub epoch: Option<String>,
+    pub dirty_kind: String,
+    pub source: String,
+}
+
+/// One process-wide reading, as the trace's reading tier records it: the four
+/// counter-track quantities, plus the GPU pass time when the adapter gave
+/// one.
+///
+/// Fields the trace adds later ride through in `extra` rather than being
+/// dropped on the way to the watcher.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WatchReading {
+    /// Microseconds from the interval's start, on the page's clock.
+    pub at_us: f64,
+    pub queue_depth: f64,
+    pub in_flight: f64,
+    /// Main-thread frame time; every surface labels it that way.
+    pub frame_time_us: f64,
+    pub resident_bytes: f64,
+    /// Absent, never zero, when the adapter offers no timestamp queries or no
+    /// frame was read back since the previous reading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_pass_us: Option<f64>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// One dataset's planning state at one pass, as the trace's per-tick
+/// aggregate records it. The process-wide deltas that ride the same sample in
+/// the trace are summed onto the aggregate instead.
+///
+/// The counter names are the trace's closed set and ride as map keys rather
+/// than being restated here, so the trace stays the one place that names
+/// them. Fields the trace adds later ride through in `extra`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WatchTick {
+    /// Microseconds from the interval's start, on the page's clock.
+    pub at_us: u64,
+    pub dataset_id: String,
+    /// Lane counts, the culling funnel, and the active-set tallies.
+    pub counters: BTreeMap<String, u64>,
+    /// Only levels with a non-zero column.
+    pub levels: Vec<WatchTickLevel>,
+    pub levels_dropped: u64,
+    pub target_level: Option<WatchLevelRange>,
+    pub level_pinned: bool,
+    pub displayed_level: Option<WatchLevelRange>,
+    /// Whether an availability update alone woke the pass, as the trace's
+    /// per-tick sample records it. A page older than that field omits it.
+    #[serde(default)]
+    pub availability_woken: bool,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// How much the page sent under one client message type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WatchSendTally {
+    pub messages: u64,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WatchTickLevel {
+    pub level: u32,
+    pub planned: u64,
+    pub cached: u64,
+    pub in_flight: u64,
+}
+
+/// The finest and coarsest level a tick sample reports. `min == max` for a
+/// single image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WatchLevelRange {
+    pub min: u32,
+    pub max: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -398,6 +614,26 @@ pub enum ServerMessage {
     /// Variant added at the end so the serde tag positions of older
     /// variants don't shift.
     ReportFailed { request_id: String, error: String },
+    /// One item of a page's watch stream, relayed to a connection that sent
+    /// [`ClientMessage::WatchSubscribe`] (ADR 0051 as amended).
+    ///
+    /// `client_id` is the publishing page, so a subscriber can follow one
+    /// session in a workspace where several pages publish. `seq` is the
+    /// workspace's running count of relayed items, from 1: the ring a late
+    /// joiner receives and the live items that follow it share one sequence,
+    /// so a subscriber can see a gap where the ring wrapped and never sees an
+    /// item twice.
+    ///
+    /// The server computes nothing here. The item is the page's, as sent, and
+    /// no row rides it.
+    ///
+    /// Variant added at the end so the serde tag positions of older
+    /// variants don't shift.
+    WatchUpdate {
+        client_id: ClientId,
+        seq: u64,
+        item: WatchItem,
+    },
 }
 
 /// The kind of mutation a `BookmarkChanged` describes. Wire encoding is
@@ -1692,5 +1928,197 @@ mod tests {
             }
             _ => panic!("expected Presence"),
         }
+    }
+
+    fn watch_cause() -> WatchRunCause {
+        WatchRunCause {
+            epoch: Some("view".into()),
+            dirty_kind: "interactive".into(),
+            source: "pan".into(),
+        }
+    }
+
+    /// One item of each kind, as a page publishes them.
+    fn watch_items() -> Vec<WatchItem> {
+        vec![
+            WatchItem::Aggregate {
+                at_epoch_ms: 1_700_000_000_250,
+                run_id: Some("run-1".into()),
+                reading: Some(WatchReading {
+                    at_us: 4_200_000.0,
+                    queue_depth: 20_000.0,
+                    in_flight: 24.0,
+                    frame_time_us: 8_300.0,
+                    resident_bytes: 402_653_184.0,
+                    gpu_pass_us: Some(2_100.0),
+                    extra: BTreeMap::new(),
+                }),
+                counted: BTreeMap::from([("cache-admission".to_string(), 48)]),
+                sent: BTreeMap::from([(
+                    "chunkRequest".to_string(),
+                    WatchSendTally {
+                        messages: 12,
+                        bytes: 1_140,
+                    },
+                )]),
+                ticks: vec![WatchTick {
+                    at_us: 4_199_000,
+                    dataset_id: "wds-0f3a".into(),
+                    counters: BTreeMap::from([("laneDetail".to_string(), 12)]),
+                    levels: vec![WatchTickLevel {
+                        level: 1,
+                        planned: 48,
+                        cached: 40,
+                        in_flight: 8,
+                    }],
+                    levels_dropped: 0,
+                    target_level: Some(WatchLevelRange { min: 1, max: 1 }),
+                    level_pinned: false,
+                    displayed_level: Some(WatchLevelRange { min: 1, max: 2 }),
+                    availability_woken: false,
+                    extra: BTreeMap::new(),
+                }],
+            },
+            WatchItem::Boundary {
+                at_epoch_ms: 1_700_000_004_700,
+                event: WatchBoundaryEvent::RunClosed,
+                run_id: Some("run-1".into()),
+                cause: Some(watch_cause()),
+                end_reason: Some("quiescent".into()),
+                duration_us: Some(4_700_000),
+            },
+            WatchItem::Provisional {
+                at_epoch_ms: 1_700_000_002_000,
+                provisional_reading: serde_json::json!({
+                    "provisional": true,
+                    "runId": "run-1",
+                    "statement": "provisional — nothing crossed a threshold in the window",
+                }),
+            },
+        ]
+    }
+
+    #[test]
+    fn watch_items_round_trip_on_both_envelopes() {
+        for (item, tag) in watch_items()
+            .into_iter()
+            .zip(["aggregate", "boundary", "provisional"])
+        {
+            let published = ClientMessage::WatchPublish { item: item.clone() };
+            let json = serde_json::to_string(&published).unwrap();
+            assert!(
+                json.starts_with(r#"{"type":"watch_publish","item":{"kind":""#),
+                "{json}"
+            );
+            assert!(json.contains(&format!("\"kind\":\"{tag}\"")), "{json}");
+            match serde_json::from_str::<ClientMessage>(&json).unwrap() {
+                ClientMessage::WatchPublish { item: parsed } => assert_eq!(parsed, item),
+                other => panic!("expected WatchPublish, got {other:?}"),
+            }
+
+            let relayed = ServerMessage::WatchUpdate {
+                client_id: 3,
+                seq: 12,
+                item: item.clone(),
+            };
+            let json = serde_json::to_string(&relayed).unwrap();
+            assert!(
+                json.starts_with(r#"{"type":"watch_update","client_id":3,"seq":12,"#),
+                "{json}"
+            );
+            match serde_json::from_str::<ServerMessage>(&json).unwrap() {
+                ServerMessage::WatchUpdate {
+                    client_id,
+                    seq,
+                    item: parsed,
+                } => {
+                    assert_eq!((client_id, seq), (3, 12));
+                    assert_eq!(parsed, item);
+                }
+                other => panic!("expected WatchUpdate, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn watch_subscribe_is_a_bare_tag() {
+        let json = serde_json::to_string(&ClientMessage::WatchSubscribe).unwrap();
+        assert_eq!(json, r#"{"type":"watch_subscribe"}"#);
+        assert!(matches!(
+            serde_json::from_str::<ClientMessage>(&json).unwrap(),
+            ClientMessage::WatchSubscribe
+        ));
+    }
+
+    /// The stream's shape, held to a list: no chunk identity, no phase
+    /// stamps, no outcome, no fourth kind for a row to arrive under, and an
+    /// aggregate whose finest grain is a dataset rather than a chunk.
+    #[test]
+    fn watch_items_carry_no_lifecycle_rows() {
+        let expected_keys: [&[&str]; 3] = [
+            &[
+                "kind",
+                "at_epoch_ms",
+                "run_id",
+                "reading",
+                "counted",
+                "sent",
+                "ticks",
+            ],
+            &[
+                "kind",
+                "at_epoch_ms",
+                "event",
+                "run_id",
+                "cause",
+                "end_reason",
+                "duration_us",
+            ],
+            &["kind", "at_epoch_ms", "provisional_reading"],
+        ];
+        for (item, expected) in watch_items().into_iter().zip(expected_keys) {
+            let value = serde_json::to_value(&item).unwrap();
+            let mut keys: Vec<&str> = value
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            let mut expected: Vec<&str> = expected.to_vec();
+            expected.sort_unstable();
+            assert_eq!(keys, expected, "{value}");
+        }
+
+        let aggregate = serde_json::to_value(&watch_items()[0]).unwrap();
+        let tick = &aggregate["ticks"][0];
+        for row_field in [
+            "key", "chunk", "entityId", "imageId", "phases", "outcome", "rid",
+        ] {
+            assert!(tick.get(row_field).is_none(), "a tick carried {row_field}");
+        }
+
+        let row = r#"{"kind":"row","key":"0/0/0/0/0/0","phases":[]}"#;
+        assert!(serde_json::from_str::<WatchItem>(row).is_err());
+    }
+
+    #[test]
+    fn watch_payloads_keep_fields_the_trace_adds_later() {
+        let json = r#"{"kind":"aggregate","at_epoch_ms":1,"run_id":null,
+            "reading":{"atUs":1,"queueDepth":2,"inFlight":3,"frameTimeUs":4,"residentBytes":5,"bytesReceived":6},
+            "counted":{},"sent":{},"ticks":[]}"#;
+        let item: WatchItem = serde_json::from_str(json).unwrap();
+        let WatchItem::Aggregate {
+            reading: Some(reading),
+            ..
+        } = &item
+        else {
+            panic!("expected an aggregate with a reading");
+        };
+        assert_eq!(reading.gpu_pass_us, None);
+        assert_eq!(reading.extra["bytesReceived"], serde_json::json!(6));
+        let out = serde_json::to_value(&item).unwrap();
+        assert_eq!(out["reading"]["bytesReceived"], serde_json::json!(6));
+        assert!(out["reading"].get("gpuPassUs").is_none());
     }
 }

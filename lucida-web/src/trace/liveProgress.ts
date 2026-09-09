@@ -12,7 +12,7 @@
  * interval it is asked about, which is exactly what a live view must not do.
  */
 
-import type { Phase, RunCause } from "./types.ts";
+import type { EndReason, Phase, RunCause, TraceReading, TraceTick } from "./types.ts";
 
 export interface LiveProgress {
   /**
@@ -56,4 +56,52 @@ export interface LiveProgress {
 export interface LivePhaseOccupancy {
   phase: Phase;
   rows: number;
+}
+
+/**
+ * Where a reader of the steady-state tiers left off (#1068).
+ *
+ * An interval's clock starts at zero, so an offset alone is ambiguous the
+ * moment one interval hands over to the next. Carrying the interval the
+ * offset belongs to makes the handover visible: a sample taken against a
+ * cursor from a previous interval reads that interval from its start rather
+ * than from an offset that means nothing in it.
+ */
+export interface WatchCursor {
+  intervalId: string;
+  /** Microseconds from that interval's start. */
+  atUs: number;
+}
+
+/**
+ * One sample of the steady-state tiers, taken without closing the interval
+ * and without walking a row: the newest reading and the planning samples
+ * since the cursor.
+ *
+ * The third read that does not conclude the interval it describes, beside
+ * {@link LiveProgress} and the provisional reading. It exists because the
+ * watch stream publishes what happened since its last aggregate a few times
+ * a second, and every other way to those tiers serialises the whole ring.
+ */
+export interface WatchSample {
+  /** The interval sampled, labelled or not, and the cursor's other half. */
+  intervalId: string;
+  /** The labelled run open at the sample, or null in the steady state. */
+  runId: string | null;
+  /** Microseconds from the interval's start at the sample. */
+  atUs: number;
+  /** The newest reading taken since the cursor, or null when none was. */
+  reading: TraceReading | null;
+  /** The planning samples taken since the cursor, oldest first. */
+  ticks: TraceTick[];
+}
+
+/** An edge of a labelled run: the moment it opened, or the moment it ended. */
+export interface RunBoundary {
+  runId: string;
+  cause: RunCause;
+  /** Null on the opening edge. */
+  endReason: EndReason | null;
+  /** How long the run lasted, on the closing edge; null on the opening one. */
+  durationUs: number | null;
 }

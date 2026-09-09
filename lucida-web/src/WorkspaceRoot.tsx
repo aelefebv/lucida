@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import App from "./App.tsx";
+import { WatchStreamBanner } from "./monitor/WatchToggle.tsx";
 import { WorkspaceDashboard } from "./WorkspaceDashboard.tsx";
 import { createWorkspaceFromDatasets } from "./workspaceFromDataset.ts";
 import {
@@ -102,16 +103,23 @@ export function WorkspaceRoot() {
       ? pendingSeed.datasetUrls
       : undefined;
 
-  return workspaceId ? (
-    <WorkspaceViewerRoute
-      key={workspaceId}
-      workspaceId={workspaceId}
-      initialDatasetUrls={seedForThisWorkspace}
-      onBackToDashboard={() => navigate("/")}
-      onCreateWorkspaceFromDatasets={createWorkspaceFrom}
-    />
-  ) : (
-    <WorkspaceDashboard onOpenWorkspace={openWorkspaceById} />
+  return (
+    <>
+      {workspaceId ? (
+        <WorkspaceViewerRoute
+          key={workspaceId}
+          workspaceId={workspaceId}
+          initialDatasetUrls={seedForThisWorkspace}
+          onBackToDashboard={() => navigate("/")}
+          onCreateWorkspaceFromDatasets={createWorkspaceFrom}
+        />
+      ) : (
+        <WorkspaceDashboard onOpenWorkspace={openWorkspaceById} />
+      )}
+      {/* Above the routes, because the stream is per session and outlives the
+          dock the toggle lives in (#1068). */}
+      <WatchStreamBanner />
+    </>
   );
 }
 

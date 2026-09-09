@@ -1,0 +1,40 @@
+.monitor-watch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.monitor-watch-status {
+  color: #9aa0a6;
+  font-size: 12px;
+  max-width: 32ch;
+}
+
+.monitor-watch-on .monitor-watch-status {
+  color: #e8eaed;
+}
+
+.monitor-watch-on button {
+  border-color: #8ab4f8;
+  color: #8ab4f8;
+}
+
+/* Fixed and above every surface: a stream that is on has to be visible from
+   wherever somebody is, not only from where they started it. */
+.watch-stream-banner {
+  position: fixed;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3000;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 12px;
+  border: 1px solid #8ab4f8;
+  border-top: none;
+  border-radius: 0 0 6px 6px;
+  background: #1f2430;
+  color: #e8eaed;
+  font-size: 12px;
+}

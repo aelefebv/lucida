@@ -34,6 +34,7 @@ import { syncSceneViewState, type SceneViewStateSetters } from "./hooks/sceneVie
 import { shouldAutoFitOnOpen, isOpenerOf } from "./hooks/autoFit.ts";
 import { classifySceneError, guardedSceneCall, observeSceneCalls } from "./sceneGuard.ts";
 import { traceRecorder } from "./trace/recorder.ts";
+import { watchStream } from "./trace/watchStream.ts";
 
 /** Consecutive scene-mutation failures (local, remote, or snapshot — every
  *  mutation reports through the scene-call guard) before the scene is
@@ -383,6 +384,9 @@ export class SessionController {
     if (this.destroyed) return;
     this.destroyed = true;
     this.stopObservingSceneCalls();
+    // The stream's socket is going with the session, so the toggle goes off
+    // rather than pointing a successor controller's watcher at a dead bridge.
+    watchStream.detach();
     this.session.destroy();
     this.deps.datasets.clear();
     this.lastOpenSendTime = null;
@@ -1305,6 +1309,11 @@ export class SessionController {
         // browser is the only side that can say so — the server sees a close
         // and a stranger, and discards what it had buffered for the dead one.
         traceRecorder.noteConnected(generation);
+        // Attaching also turns the toggle off: the server forgot this page's
+        // stream when the old connection closed, and a page that resumed
+        // publishing on its own would be pushing without anyone having asked
+        // on this socket (ADR 0051 as amended).
+        watchStream.attach(this.session.bridge);
         this.deps.events.onConnectedChanged(true);
       },
       onTimingBatch: (batch, generation) => {
@@ -1335,6 +1344,7 @@ export class SessionController {
         // than inferred from a silence, because a silent socket and a dead
         // one look identical from the rows.
         traceRecorder.noteDisconnected();
+        watchStream.detach();
       },
     };
   }

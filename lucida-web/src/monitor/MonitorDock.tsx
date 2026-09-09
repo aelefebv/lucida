@@ -48,6 +48,7 @@ import {
 } from "./monitorSource.ts";
 import type { InboxReceipt } from "../bridge.ts";
 import { TimelineCanvas } from "./TimelineCanvas.tsx";
+import { WatchToggle } from "./WatchToggle.tsx";
 import type { LiveProgress } from "../trace/liveProgress.ts";
 import type { ProvisionalReading } from "../trace/diagnose/provisional.ts";
 import type { LiveTimeline } from "../trace/diagnose/timeline.ts";
@@ -223,6 +224,10 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
           {live?.runId ?? runId ?? "no run"}
         </span>
         <div className="monitor-chrome-actions">
+          {/* Offered whether or not a run is open: the stream carries the
+              steady-state interval's aggregates too, and a session that never
+              settles is the one somebody wants watched. */}
+          <WatchToggle />
           {/* While a run is open the only reading control offered is the one
               that ends it. Every other read here exports, and exporting would
               close the run being watched without saying that is what it did. */}

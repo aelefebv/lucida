@@ -38,7 +38,13 @@ import {
   type ServerTimingBatch,
   type WireRowFamily,
 } from "./serverRowTable.ts";
-import type { LivePhaseOccupancy, LiveProgress } from "./liveProgress.ts";
+import type {
+  LivePhaseOccupancy,
+  LiveProgress,
+  RunBoundary,
+  WatchCursor,
+  WatchSample,
+} from "./liveProgress.ts";
 import type { QuiescenceState } from "./quiescence.ts";
 import { addSend, SEND_COLUMN_COUNT, sendTalliesFrom } from "./sendAccounting.ts";
 import { tableSinkFactory, type TraceSink, type TraceSinkFactory } from "./sink.ts";
@@ -263,6 +269,7 @@ export class TraceRecorder {
   private gpuIdentity: GpuIdentity | null = null;
 
   private open: OpenInterval | null = null;
+  private readonly runBoundaryListeners = new Set<(boundary: RunBoundary) => void>();
   private closed: ClosedInterval[] = [];
   /** Running sum over {@link closed}, so the resident cap is a comparison, not a walk. */
   private closedBytes = 0;
@@ -518,6 +525,70 @@ export class TraceRecorder {
       },
       options,
     );
+  }
+
+  /**
+   * The steady-state tiers since `since`, or null before the page has an
+   * interval to sample (#1068).
+   *
+   * The third read that does not conclude the interval it describes. It walks
+   * no row and no whole ring: the readings and the tick samples are read from
+   * their newest slot backwards and stopped at the cursor, so a publisher on
+   * a fixed cadence costs the samples in that stretch.
+   *
+   * A cursor's offset means nothing once the interval it was taken in has
+   * handed over, so the two cases part here. With no cursor at all the sample
+   * is empty and only fixes where the next one starts: a reader that has just
+   * arrived is owed the present, not an interval's history. Across a
+   * handover the new interval is read from its start, which is at most one
+   * cadence back — that is the opening of the run somebody asked to watch,
+   * and reading from now instead would drop it.
+   */
+  watchSample(since: WatchCursor | null): WatchSample | null {
+    const interval = this.open;
+    if (!interval) return null;
+    const atUs = this.offsetUs(interval, this.now());
+    const fromUs =
+      since === null
+        ? atUs
+        : since.intervalId === interval.runId
+          ? since.atUs
+          : // Before the interval's first stamp, so a sample at offset zero
+            // is inside the stretch rather than on its edge.
+            -1;
+    // Strictly after the cursor: a sample the previous aggregate carried is
+    // not news.
+    const readings = interval.sink
+      .serialiseReadingsFrom(fromUs)
+      .filter((reading) => reading.atUs > fromUs);
+    return {
+      intervalId: interval.runId,
+      runId: interval.cause ? interval.runId : null,
+      atUs,
+      reading: readings.at(-1) ?? null,
+      ticks: interval.sink.serialiseTicksFrom(fromUs).filter((tick) => tick.atUs > fromUs),
+    };
+  }
+
+  /**
+   * Be told when a labelled run opens and when it ends (#1068).
+   *
+   * A pull cannot see an end reason: the run is gone by the time a poll
+   * notices, and `quiescent`, `timeout`, and `explicit` are the difference
+   * between a run that settled and one that never did. Only the unlabelled
+   * steady-state interval's edges go unannounced — it has no cause to name
+   * and its end is the next run's opening.
+   *
+   * A listener runs inside the close, so it must record or forward the
+   * boundary and not call back into the recorder.
+   */
+  onRunBoundary(listener: (boundary: RunBoundary) => void): () => void {
+    this.runBoundaryListeners.add(listener);
+    return () => this.runBoundaryListeners.delete(listener);
+  }
+
+  private announceRunBoundary(boundary: RunBoundary): void {
+    for (const listener of this.runBoundaryListeners) listener(boundary);
   }
 
   /**
@@ -1309,7 +1380,15 @@ export class TraceRecorder {
     this.evictToResidentCap(intervalBytes(this.open));
     // Only a labelled run can fail to settle. Steady state is what a settled
     // page records, so there is nothing for a timeout to declare about it.
-    if (cause) this.timeoutTimer = setTimeout(() => this.closeRun("timeout"), this.timeoutMs);
+    if (cause) {
+      this.timeoutTimer = setTimeout(() => this.closeRun("timeout"), this.timeoutMs);
+      this.announceRunBoundary({
+        runId: this.open.runId,
+        cause,
+        endReason: null,
+        durationUs: null,
+      });
+    }
   }
 
   private finishInterval(endReason: EndReason): void {
@@ -1330,6 +1409,19 @@ export class TraceRecorder {
 
     this.awaitingResident.length = 0;
     this.awaitingDrawn.length = 0;
+
+    const durationUs = clampStamp(Math.round((this.now() - run.startedAtMs) * 1000));
+    // Announced whether or not the interval is kept below: a run that was
+    // evicted still happened, and a watcher that heard it open has to hear
+    // it end.
+    if (run.cause) {
+      this.announceRunBoundary({
+        runId: run.runId,
+        cause: run.cause,
+        endReason,
+        durationUs,
+      });
+    }
 
     // An unlabelled interval that recorded nothing is not an artifact. A
     // labelled run that recorded nothing is — a run that saw no work is
@@ -1359,7 +1451,7 @@ export class TraceRecorder {
         build: buildIdentity(),
         gpu: this.gpuIdentity,
         startedAtEpochMs: run.startedAtEpochMs,
-        durationUs: clampStamp(Math.round((this.now() - run.startedAtMs) * 1000)),
+        durationUs,
         quiescenceHoldMs: this.quiescenceHoldMs,
         timeoutMs: this.timeoutMs,
         outstandingAtSettle: run.environment.captureOutstanding(),

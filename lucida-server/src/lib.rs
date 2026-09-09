@@ -26,6 +26,7 @@ pub mod storage;
 #[cfg(test)]
 pub(crate) mod test_fixtures;
 pub mod timing;
+pub mod watch;
 pub mod workspace;
 
 use std::collections::HashMap;
