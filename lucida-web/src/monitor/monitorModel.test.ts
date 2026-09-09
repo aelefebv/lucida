@@ -16,6 +16,7 @@ import {
   gpuTimedOpen,
   healthyLocalOpen,
   interactionRun,
+  interactionRunFor,
   mainThreadOnlyOpen,
   makeRow,
   makeRun,
@@ -141,8 +142,9 @@ describe("drill-down", () => {
 
   it("offers no drill-down for a phase that has no per-item rows", () => {
     // `render.frame` is per-tick readings. It can be shown to overlap the run
-    // and there is no row behind it to open.
-    const view = buildMonitorView(diagnoseRun(interactionRun()));
+    // and there is no row behind it to open. An interaction run over the
+    // frame-time ceiling is what puts it among the findings.
+    const view = buildMonitorView(diagnoseRun(interactionRunFor("orbit", { frameTimeUs: 80 * MS })));
     const aggregate = view.callouts.find((callout) => callout.subject === "render.frame")!;
 
     expect(aggregate.drill).toBeNull();

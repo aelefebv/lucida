@@ -18,11 +18,13 @@ import {
   gpuTimedOpen,
   healthyLocalOpen,
   interactionRun,
+  interactionRunFor,
   lateStallOpen,
   mainThreadOnlyOpen,
   makeRun,
   quietRun,
   saturatedReopen,
+  sendHeavyIdleRun,
   uninstrumentedPrefixOpen,
 } from "./fixtures.ts";
 import { diagnoseRun } from "./diagnose.ts";
@@ -41,8 +43,10 @@ const RUNS = {
   cold: coldRemoteOpen(),
   saturated: saturatedReopen(),
   interaction: interactionRun(),
+  slowOrbit: interactionRunFor("orbit", { frameTimeUs: 80 * MS }),
   prefix: uninstrumentedPrefixOpen(),
   quiet: quietRun(),
+  sendHeavy: sendHeavyIdleRun(),
   lateStall: lateStallOpen(),
   gpuTimed: gpuTimedOpen(),
   mainThreadOnly: mainThreadOnlyOpen(),
@@ -156,6 +160,23 @@ describe("the default rendering", () => {
     const findingsLine = lines.findIndex((line) => line.startsWith("FINDINGS"));
     expect(truncationLine).toBeGreaterThanOrEqual(0);
     expect(truncationLine).toBeLessThan(findingsLine === -1 ? lines.length : findingsLine);
+  });
+
+  it("shows the cause of an interaction run, input and epoch both", () => {
+    expect(renderDiagnostic(diagnoseRun(interactionRunFor("orbit"))).text).toContain(
+      "cause=view/interactive/orbit",
+    );
+    expect(renderDiagnostic(diagnoseRun(interactionRunFor("scrub"))).text).toContain(
+      "cause=selection/interactive/scrub",
+    );
+  });
+
+  it("leads a slow gesture with the input and the ceiling it crossed", () => {
+    const { text } = renderDiagnostic(diagnoseRun(interactionRunFor("orbit", { frameTimeUs: 80 * MS })));
+    const [verdict] = text.split("\n");
+
+    expect(verdict).toContain("VERDICT: orbit ran at p95 80 ms");
+    expect(verdict).toContain("ceiling for an interaction run");
   });
 
   it("shows at most three findings and names the commands that go deeper", () => {
@@ -340,6 +361,30 @@ describe("render timing and the adapter", () => {
   });
 });
 
+describe("the sent line", () => {
+  it("shows sent bytes per second by type for the run, naming only the types that sent", () => {
+    const line = renderDiagnostic(DOCUMENTS.sendHeavy).text.split("\n").find((l) => l.startsWith("sent"));
+
+    expect(line).toBe(
+      "sent      3,038 B/s · chunk request 118 B/s n=12 · viewer interest 120 B/s n=10 · " +
+        "presence 1,200 B/s n=40 · cursor 1,600 B/s n=400",
+    );
+  });
+
+  it("says so when a run sent nothing", () => {
+    const line = renderDiagnostic(DOCUMENTS.quiet).text.split("\n").find((l) => l.startsWith("sent"));
+    expect(line).toBe("sent      nothing on the session socket");
+  });
+
+  it("lists every type with its bytes at the phases depth, zeros included", () => {
+    const text = renderDiagnostic(DOCUMENTS.sendHeavy, { depth: "phases" }).text;
+    const block = text.slice(text.indexOf("SENT"));
+
+    expect(block).toMatch(/cursor\s+n=\s+400\s+16000 B\s+1600 B\/s/);
+    expect(block).toMatch(/asset request\s+n=\s+0\s+0 B\s+0 B\/s/);
+  });
+});
+
 describe("parity with the document", () => {
   it("prints no number that does not exist in the JSON", () => {
     for (const [name, document] of Object.entries(DOCUMENTS)) {
@@ -428,6 +473,12 @@ function sameContentAsText(document: DiagnosticDocument) {
         couldHideBottleneck: gap.couldHideBottleneck,
       })),
       notHealthSignals: document.coverage.notHealthSignals,
+    },
+    sent: {
+      bytesPerS: document.sent.bytesPerS,
+      byType: document.sent.byType
+        .filter((entry) => entry.messages > 0)
+        .map((entry) => ({ label: entry.label, messages: entry.messages, bytesPerS: entry.bytesPerS })),
     },
     findings: document.findings.slice(0, 3).map((finding) => ({
       id: finding.id,

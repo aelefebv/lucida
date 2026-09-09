@@ -9,7 +9,7 @@ import { applyDocumentCommand } from "../applyAndSend.ts";
 import { guardedSceneCall } from "../sceneGuard.ts";
 import type { ViewportCommand } from "../commands.ts";
 import type { BlendMode, Colormap, RenderMode } from "../savedView/types.ts";
-import { invalidateDisplaySettings, requestRender } from "../invalidation.ts";
+import { invalidateDisplaySettings, invalidateSelection, requestRender } from "../invalidation.ts";
 import { Axis } from "../axes.ts";
 import { eligibleLabelInfos, volumeBudgetPrefix } from "../pipeline/planning/labelRequests.ts";
 import type { DatasetLevels } from "../pipeline/datasetLevels.ts";
@@ -108,14 +108,24 @@ function buildLabelRows(
 
 /** Apply a display-settings command and signal the change: the planner's
  *  settings cache is invalidated and the render loop (when mounted) is asked
- *  for a frame, in one composed intent so neither tap can be forgotten. */
+ *  for a frame, in one composed intent so neither tap can be forgotten.
+ *  Showing or hiding a channel, a dataset, or a label is a select, so the
+ *  trace recorder opens an interaction run under that name. */
 function applySettingsCommand(
   scene: WasmScene,
   cmd: ViewportCommand,
   loop: RenderLoop | null,
 ): void {
   guardedSceneCall("apply_command", scene, () => scene.apply_command(JSON.stringify(cmd)));
-  invalidateDisplaySettings(loop);
+  if (
+    cmd.type === "set_dataset_visible" ||
+    cmd.type === "set_channel_visible" ||
+    cmd.type === "set_label_visible"
+  ) {
+    invalidateSelection(loop);
+  } else {
+    invalidateDisplaySettings(loop);
+  }
 }
 
 /**

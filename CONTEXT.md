@@ -319,8 +319,11 @@ _Avoid_: endpoint, hook, API
 One file holding everything a reader needs to read a run and everything the
 driver needs to replay it: the trace document, the settled frame as a PNG at
 the run's device pixel ratio, the view URL, the planning configuration, the
-level pins, and the header. Produced by **Send report** in the dock and by the
-trace driver, and the same file from either.
+level, render mode, contrast, and colormap pins, the server's dataset health
+counters at close, and the header.
+Produced by **Save bundle** in the monitor, by **Send report** in the dock,
+and by the trace driver, through one function behind the trace seam, so it is
+the same file from any of them.
 _Avoid_: report (the action is Send report; what it sends is a bundle),
 archive, zip, export (the act, not the file), attachment, run file (a saved
 run is the document alone)
@@ -386,6 +389,15 @@ A phase below the platform's 100 µs clock floor — cache admission, worker
 dispatch, coalesce attach. Counted on the per-tick aggregate, never timed, so a
 reader is not shown quantisation noise wearing the costume of data.
 _Avoid_: untimed phase, fast phase
+
+**Client message type**:
+The kind, from a closed set, that a message the page sends over the session
+socket counts under: chunk request, asset request, viewer interest, presence,
+dataset presence, cursor, command, or other. Every sent message counts under
+exactly one, by messages and by bytes, on the per-tick aggregate and as a
+run total. Distinct from a chunk's *sent state* in delivery, which is a chunk
+posted to the render worker and not a message on the wire.
+_Avoid_: frame type, send kind, outbound type
 
 **Correlation label** (`rid`):
 The `u32` that joins a browser-side lifecycle row to the server-side row for the

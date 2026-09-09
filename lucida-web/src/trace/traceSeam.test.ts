@@ -19,6 +19,8 @@ import type { ContentSource, FetchRequest, FetchResult } from "../pipeline/fetch
 import { DecodePool } from "../pipeline/fetch/decodePool.ts";
 import type { ChunkRequest, RequestPlan } from "../pipeline/planning/index.ts";
 import { emptyPlanStats } from "../pipeline/planning/index.ts";
+import { configStore } from "../pipeline/planning/configStore.ts";
+import { setBundleServices } from "./bundle.ts";
 import { installTraceSeam, resolveGpuIdentity } from "./seam.ts";
 import { traceRecorder } from "./recorder.ts";
 import { createQuiescenceState, evaluateQuiescence } from "./quiescence.ts";
@@ -295,6 +297,58 @@ describe("the trace seam", () => {
   });
 
   /**
+   * The bundle is the same export with more around it (#1055): one function
+   * behind the seam, so the monitor's save and the driver's file agree.
+   */
+  it("offers the run as a bundle, closing it the same way and naming what the page could not add", async () => {
+    installTraceSeam();
+    setBundleServices(null);
+    traceRecorder.openRun(OPEN_CAUSE);
+
+    const bundle = await window.lucidaTrace!.exportBundle();
+    expect(traceRecorder.isRunOpen).toBe(false);
+    expect(bundle.format).toBe("lucida-trace-bundle");
+    expect(bundle.header.runId).toBe(bundle.trace.runs[0].header.runId);
+    expect(bundle.header.endReason).toBe("explicit");
+    expect(bundle.header.viewUrl).toBe(`${window.location.origin}/w/ws-1`);
+    expect(bundle.header.devicePixelRatio).toBe(2);
+    expect(bundle.header.planning).toEqual(configStore.get());
+    // No viewer registered its services on this page, so the frame and the
+    // health are absent and say so, rather than the export failing.
+    expect(bundle.frame).toBeNull();
+    expect(bundle.health).toBeNull();
+    expect(bundle.absent.map(entry => entry.section)).toEqual(["frame", "health"]);
+    expect(bundle.perfetto).toBeNull();
+  });
+
+  it("carries the frame and the health the viewer registered, and the projection only when asked", async () => {
+    installTraceSeam();
+    setBundleServices({
+      requestDatasetHealth: () => Promise.resolve([]),
+      captureFrame: () => Promise.resolve({ png: new Uint8Array([1, 2, 3]).buffer, width: 4, height: 2 }),
+    });
+    try {
+      traceRecorder.openRun(OPEN_CAUSE);
+      const bundle = await window.lucidaTrace!.exportBundle({ perfetto: true });
+      // The frame is labelled with the page's ratio when it was taken, not
+      // the run's. The two agree on a page that stayed on one screen, and
+      // the frame says what it is when they do not.
+      expect(bundle.frame).toEqual({
+        png: "AQID",
+        width: 4,
+        height: 2,
+        devicePixelRatio: window.devicePixelRatio,
+        capturedBy: "page",
+      });
+      expect(bundle.health?.datasets).toEqual([]);
+      expect(bundle.absent).toEqual([]);
+      expect(JSON.parse(bundle.perfetto!).displayTimeUnit).toBe("ms");
+    } finally {
+      setBundleServices(null);
+    }
+  });
+
+  /**
    * The borrowed path goes through the same seam as the native one, so no
    * surface gets a privately shaped copy of the trace (#934).
    */
@@ -377,13 +431,16 @@ describe("the trace seam", () => {
     cache.submit(makePlan([makeRequest()]));
     await flush();
 
+    // The run's wall is whatever the test took, so a window past it is clamped
+    // to it. Either way the reading is scoped, and the text names the window.
     const windowed = window.lucidaTrace!.diagnose(undefined, {
       window: { startMs: 0, endMs: 0.5 },
     });
-    expect(windowed.window).toMatchObject({ startMs: 0, endMs: 0.5 });
-    expect(windowed.coverage.wallMs).toBe(0.5);
+    expect(windowed.window).toMatchObject({ startMs: 0 });
+    expect(windowed.window!.endMs).toBeLessThanOrEqual(0.5);
+    expect(windowed.coverage.wallMs).toBeLessThanOrEqual(0.5);
     expect(window.lucidaTrace!.diagnoseText(windowed.runId, { window: { startMs: 0, endMs: 0.5 } })).toContain(
-      "window    0..0.5 ms",
+      `window    0..${windowed.window!.endMs} ms`,
     );
   });
 
@@ -411,7 +468,10 @@ describe("the trace seam", () => {
     expect(traceRecorder.isRunOpen).toBe(true);
 
     expect(diagnostic.runId).toBe(runId);
-    expect(diagnostic.window).toMatchObject({ startMs: 0, endMs: 1 });
+    // Clamped to the run's own wall when the run took under a millisecond.
+    const wallMs = document.runs.find((run) => run.header.runId === runId)!.header.durationUs / 1_000;
+    expect(diagnostic.window).toMatchObject({ startMs: 0 });
+    expect([1, wallMs]).toContain(diagnostic.window!.endMs);
     expect(text).toContain(`lucida trace ${runId}`);
     expect(text).toContain("CRITICAL PATH");
   });

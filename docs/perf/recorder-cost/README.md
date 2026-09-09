@@ -153,6 +153,20 @@ server and a real fixture. Worth doing when something *adds* to the write
 path; not worth a build campaign to confirm a bound in the direction it
 already holds.
 
+**Not re-run for the send-side accounting, and it should be, on the next
+campaign.** That change adds to the write path: one `countSend` per message
+the bridge transmits, which is four integer increments into two preallocated
+vectors, and a tick sample 64 bytes wider for the per-type message and byte
+columns. The per-message cost sits on the bridge's send path, beside the
+`JSON.stringify` and the socket's own UTF-8 encode that each message already
+pays, and the bridge measures a message's bytes with one pass over its code
+units rather than by encoding a copy. The gates in this file cover the
+increments through the steady-state allocation window and the wider sample
+through the live-state figure. None of the timed drives include a send,
+because they drive the pipeline's emit sites and the bridge is not one. The
+A/B is the measurement that would see the per-message cost on a real orbit,
+and nobody has taken it for this change.
+
 There is no runtime switch to flip, by design, so the two arms are two builds:
 the tree as it is, and the tree with `noop-sink.patch` applied. The patch
 substitutes `noopSinkFactory` into the module singleton and nothing else — the

@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
 
+import { SEND_COLUMN_COUNT } from "./sendAccounting.ts";
 import { TickRing, TickScratch } from "./tickRing.ts";
-import { CountedPhaseIndex, TICK_LEVEL_SLOTS, TickCounter } from "./types.ts";
+import {
+  ClientMessageTypeIndex,
+  CountedPhaseIndex,
+  SEND_COLUMNS,
+  TICK_LEVEL_SLOTS,
+  TickCounter,
+} from "./types.ts";
 
 function scratchFor(datasetId: string, detailLane: number): TickScratch {
   const scratch = new TickScratch();
@@ -9,6 +16,9 @@ function scratchFor(datasetId: string, detailLane: number): TickScratch {
   scratch.counters[TickCounter.LaneDetail] = detailLane;
   return scratch;
 }
+
+/** A sample with nothing sent, the shape most planning passes carry. */
+const NOTHING_SENT = new Uint32Array(SEND_COLUMN_COUNT);
 
 describe("TickScratch", () => {
   it("resets every column so a reused scratch cannot leak the previous tick", () => {
@@ -39,7 +49,7 @@ describe("TickScratch", () => {
     scratch.reset("other");
 
     const ring = new TickRing(1);
-    ring.append(0, scratch, new Uint32Array(3));
+    ring.append(0, scratch, new Uint32Array(3), NOTHING_SENT);
     expect(scratch.hasTarget).toBe(false);
     expect(ring.serialise()[0]).toMatchObject({
       targetLevel: null,
@@ -59,7 +69,7 @@ describe("TickRing", () => {
     const counted = new Uint32Array(3);
     counted[CountedPhaseIndex.CacheAdmission] = 6;
 
-    ring.append(1_500, scratch, counted);
+    ring.append(1_500, scratch, counted, NOTHING_SENT);
     const [tick] = ring.serialise();
 
     expect(tick.atUs).toBe(1_500);
@@ -72,13 +82,34 @@ describe("TickRing", () => {
     expect(tick.levelsDropped).toBe(0);
   });
 
+  it("carries the client's sends since the previous sample, by message type", () => {
+    const ring = new TickRing(4);
+    const sent = new Uint32Array(SEND_COLUMN_COUNT);
+    sent[ClientMessageTypeIndex.ChunkRequest * SEND_COLUMNS] = 12;
+    sent[ClientMessageTypeIndex.ChunkRequest * SEND_COLUMNS + 1] = 1_176;
+    sent[ClientMessageTypeIndex.Cursor * SEND_COLUMNS] = 3;
+    sent[ClientMessageTypeIndex.Cursor * SEND_COLUMNS + 1] = 129;
+
+    ring.append(1_500, scratchFor("ds-a", 0), new Uint32Array(3), sent);
+    // The vector is copied at append, so the caller resetting it for the
+    // next sample cannot reach back into the ring.
+    sent.fill(0);
+    ring.append(2_000, scratchFor("ds-a", 0), new Uint32Array(3), sent);
+    const [first, second] = ring.serialise();
+
+    expect(first.sent.chunkRequest).toEqual({ messages: 12, bytes: 1_176 });
+    expect(first.sent.cursor).toEqual({ messages: 3, bytes: 129 });
+    expect(first.sent.presence).toEqual({ messages: 0, bytes: 0 });
+    expect(second.sent.chunkRequest).toEqual({ messages: 0, bytes: 0 });
+  });
+
   it("carries the target and displayed level ranges beside the per-level counts", () => {
     const ring = new TickRing(4);
     const scratch = scratchFor("ds-a", 0);
     scratch.setTargetLevel(1, 2, false);
     scratch.setDisplayedLevel({ min: 2, max: 3 });
 
-    ring.append(10, scratch, new Uint32Array(3));
+    ring.append(10, scratch, new Uint32Array(3), NOTHING_SENT);
     const [tick] = ring.serialise();
 
     expect(tick.targetLevel).toEqual({ min: 1, max: 2 });
@@ -91,7 +122,7 @@ describe("TickRing", () => {
     const scratch = scratchFor("ds-a", 0);
     scratch.setTargetLevel(0, 0, true);
 
-    ring.append(10, scratch, new Uint32Array(3));
+    ring.append(10, scratch, new Uint32Array(3), NOTHING_SENT);
 
     expect(ring.serialise()[0]).toMatchObject({
       targetLevel: { min: 0, max: 0 },
@@ -101,7 +132,7 @@ describe("TickRing", () => {
 
   it("serialises an absent target or displayed level as null rather than level 0", () => {
     const ring = new TickRing(4);
-    ring.append(10, scratchFor("ds-a", 0), new Uint32Array(3));
+    ring.append(10, scratchFor("ds-a", 0), new Uint32Array(3), NOTHING_SENT);
 
     const [tick] = ring.serialise();
     expect(tick.targetLevel).toBeNull();
@@ -115,7 +146,7 @@ describe("TickRing", () => {
     scratch.setDisplayedLevel({ min: 1, max: 1 });
     scratch.setDisplayedLevel(null);
 
-    ring.append(10, scratch, new Uint32Array(3));
+    ring.append(10, scratch, new Uint32Array(3), NOTHING_SENT);
 
     expect(ring.serialise()[0].displayedLevel).toBeNull();
   });
@@ -123,7 +154,7 @@ describe("TickRing", () => {
   it("drops oldest and reports how many it dropped", () => {
     const ring = new TickRing(2);
     const counted = new Uint32Array(3);
-    for (let i = 0; i < 5; i++) ring.append(i, scratchFor(`ds-${i}`, i), counted);
+    for (let i = 0; i < 5; i++) ring.append(i, scratchFor(`ds-${i}`, i), counted, NOTHING_SENT);
 
     expect(ring.dropped).toBe(3);
     expect(ring.serialise().map(t => t.datasetId)).toEqual(["ds-3", "ds-4"]);
@@ -132,7 +163,7 @@ describe("TickRing", () => {
   it("serialises oldest-first before it has wrapped", () => {
     const ring = new TickRing(4);
     const counted = new Uint32Array(3);
-    for (let i = 0; i < 3; i++) ring.append(i * 10, scratchFor(`ds-${i}`, i), counted);
+    for (let i = 0; i < 3; i++) ring.append(i * 10, scratchFor(`ds-${i}`, i), counted, NOTHING_SENT);
 
     expect(ring.dropped).toBe(0);
     expect(ring.serialise().map(t => t.atUs)).toEqual([0, 10, 20]);

@@ -15,6 +15,7 @@
 
 import type { ResidencyTier } from "../../pipeline/residencyTier.ts";
 import type {
+  ClientMessageType,
   CoverageGap,
   CoverageLimit,
   EndReason,
@@ -464,6 +465,37 @@ export interface NextStep {
   command: string;
 }
 
+/** What the client sent under one message type, and the rate it amounts to. */
+export interface SentByType {
+  type: ClientMessageType;
+  /** The type's name as a reader sees it, so no surface keeps a label table of its own. */
+  label: string;
+  messages: number;
+  bytes: number;
+  /** Whole bytes per second over the run's wall clock: the run's average, never a peak. */
+  bytesPerS: number;
+}
+
+/**
+ * The send side of the run: the "writing" half of the two numbers an
+ * operating system's network monitor shows, with lucida's names on it.
+ *
+ * Read from the run's totals rather than summed off the tick samples. A
+ * sample is published only by a planning pass, and the sends worth
+ * explaining are the ones after the last pass, when the view looks loaded
+ * and the socket does not go quiet.
+ */
+export interface SentSummary {
+  messages: number;
+  bytes: number;
+  bytesPerS: number;
+  /**
+   * Every type of the closed set, in its order, zeros included. A type that
+   * sent nothing is a fact about the run, not an omission from the list.
+   */
+  byType: SentByType[];
+}
+
 /**
  * Where a lifecycle row stood when the run closed: the phase it was sitting
  * in, or how it ended. `unstamped` is a row that reached no boundary at all,
@@ -630,6 +662,8 @@ export interface DiagnosticDocument {
   aggregates: AggregateCandidate[];
   /** Main-thread time and GPU pass time, or the stated reason the second is missing. */
   renderTiming: RenderTiming;
+  /** What the client sent during the run, by message type. */
+  sent: SentSummary;
   counts: {
     rows: number;
     serverRows: number;

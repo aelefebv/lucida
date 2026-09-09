@@ -10,7 +10,9 @@
  *
  * A run is a labelled interval within that recording (ADR 0047), opened by a
  * cause and closed by quiescence, timeout, or explicitly. An interaction run
- * and a dataset-open run are the same object, differing only by cause.
+ * and a dataset-open run are the same object, differing only by cause. A
+ * dataset open opens one when its request goes out, and an input opens one
+ * in {@link TraceRecorder.noteInput}.
  */
 
 import { buildIdentity } from "./buildInfo.ts";
@@ -30,12 +32,14 @@ import {
 } from "./serverRowTable.ts";
 import type { LivePhaseOccupancy, LiveProgress } from "./liveProgress.ts";
 import type { QuiescenceState } from "./quiescence.ts";
+import { addSend, SEND_COLUMN_COUNT, sendTalliesFrom } from "./sendAccounting.ts";
 import { tableSinkFactory, type TraceSink, type TraceSinkFactory } from "./sink.ts";
 import { TickScratch } from "./tickRing.ts";
 import {
   Boundary,
   clampStamp,
   COUNTED_PHASES,
+  interactionCause,
   PHASES,
   READING_NAMES,
   ReadingColumn,
@@ -43,12 +47,14 @@ import {
   TRACE_SCHEMA_VERSION,
   type ChunkEventSource,
   type ChunkRowSource,
+  type ClientMessageTypeIndexValue,
   type ConnectionRecord,
   type CountedPhaseIndexValue,
   type DatasetOpenBracket,
   type EndReason,
   type CacheWarmth,
   type GpuIdentity,
+  type InputKind,
   type Outstanding,
   type Phase,
   type PointEventIndex,
@@ -57,6 +63,7 @@ import {
   type RunCause,
   type RunConditions,
   type RunHeader,
+  type SendTallies,
   type TraceDocument,
   type TraceRun,
   type TruncationRecord,
@@ -172,6 +179,12 @@ interface OpenInterval {
   connections: ConnectionRecord[];
   /** Server rows refused because nothing in this interval could place them. */
   serverRowsDiscarded: number;
+  /**
+   * Messages and bytes per client message type, counted at each send. A
+   * counter, not a record: it lives outside the sink and the caps, and it
+   * keeps counting past a truncation, as `rowsUnrecorded` does.
+   */
+  sent: Float64Array;
   generation: number;
   /**
    * Set once the interval crosses the per-run cap, and mutated from there on:
@@ -189,6 +202,7 @@ interface ClosedInterval {
   datasetOpens: DatasetOpenBracket[];
   datasetOpensDropped: number;
   serverRowsDiscarded: number;
+  sent: SendTallies;
   /** Frozen at close, so the resident total is a running sum rather than a walk. */
   byteLength: number;
 }
@@ -255,6 +269,11 @@ export class TraceRecorder {
    */
   private readonly tickScratch = new TickScratch();
   private readonly countedPhases = new Uint32Array(COUNTED_PHASES.length);
+  /**
+   * Sends since the previous tick sample: process-wide and reset per sample,
+   * like `countedPhases`.
+   */
+  private readonly sendSample = new Uint32Array(SEND_COLUMN_COUNT);
   /** One vector, refilled per tick, for the same reason as the scratch above. */
   private readonly readingColumns = new Float64Array(READING_NAMES.length);
   /**
@@ -440,6 +459,35 @@ export class TraceRecorder {
     // cause.
     this.finishInterval("run-opened");
     this.beginInterval(cause);
+  }
+
+  /**
+   * An input landed, one of the five that open an interaction run. One
+   * gesture is one run. The first input after quiescence opens a run under a
+   * cause that names the input, and an input while a run is open extends
+   * that run rather than opening another, whatever the pointer-event count.
+   *
+   * "After quiescence" means "no run open". A run also closes by timeout and
+   * explicitly, and after either of those the page may never go quiescent at
+   * all, so waiting for it would leave the next gesture unrecorded.
+   *
+   * Extending means re-arming the hold. The run closes on quiescence after
+   * the *last* input, so a hold that began before this input starts over
+   * from the page's next quiescent publication, which the tick this input
+   * dirties delivers. Without that, an input 300 ms into the 500 ms hold
+   * would close its run 200 ms later, and a slow drag would shatter into a
+   * run per pause.
+   *
+   * This extends a dataset-open run in progress the same way, and that run
+   * keeps its cause. Opening a dataset and panning while it loads is one
+   * interval, labelled for the thing that started it.
+   */
+  noteInput(input: InputKind): void {
+    if (this.isRunOpen) {
+      this.clearHoldTimer();
+      return;
+    }
+    this.openRun(interactionCause(input));
   }
 
   /**
@@ -850,13 +898,14 @@ export class TraceRecorder {
     const atUs = run ? this.offsetUs(run, this.now()) : 0;
     this.noteTargetLevel(run, atUs);
     if (run) {
-      run.sink.appendTick(atUs, this.tickScratch, this.countedPhases);
+      run.sink.appendTick(atUs, this.tickScratch, this.countedPhases, this.sendSample);
     } else if (this.open?.truncation) {
       this.open.truncation.ticksUnrecorded++;
     }
     // Either way the tallies belong to the interval just ended, not the next
     // one: carrying them forward would publish two intervals' counts as one.
     this.countedPhases.fill(0);
+    this.sendSample.fill(0);
   }
 
   /**
@@ -933,6 +982,33 @@ export class TraceRecorder {
   countPhase(phase: CountedPhaseIndexValue, times = 1): void {
     if (!this.open) return;
     this.countedPhases[phase] += times;
+  }
+
+  /**
+   * Count one message the bridge transmitted over the session socket, under
+   * exactly one client message type.
+   *
+   * Two tallies take it. The sample the next tick publishes, so the sends
+   * ride the per-tick aggregate as a series. And the interval's running
+   * total, because a sample is published only by a planning pass, and the
+   * sends this accounting exists to explain are the ones that go on after
+   * the last pass, when the view looks loaded and the socket does not go
+   * quiet. The total is what a rate for the interval is read from.
+   *
+   * Silent with no interval open, like every tier: a count with no interval
+   * to belong to cannot be read as a rate. That covers the page's first
+   * messages, sent before the render loop registers its environment. Not
+   * silenced by truncation: this is a counter, not a record, and it spends
+   * nothing from the cap. Retention is unchanged by it: an unlabelled
+   * interval that only sent is discarded with the other empty ones, so a
+   * pointer moving over an idle canvas does not retain an interval's worth
+   * of buffers, and its handful of cursor messages goes with it.
+   */
+  countSend(type: ClientMessageTypeIndexValue, bytes: number): void {
+    const run = this.open;
+    if (!run) return;
+    addSend(this.sendSample, type, bytes);
+    addSend(run.sent, type, bytes);
   }
 
   /**
@@ -1027,6 +1103,7 @@ export class TraceRecorder {
           ? [newConnection(this.connectionGeneration, null, null)]
           : [],
       serverRowsDiscarded: 0,
+      sent: new Float64Array(SEND_COLUMN_COUNT),
       generation: this.generation,
       truncation: null,
     };
@@ -1050,9 +1127,11 @@ export class TraceRecorder {
     }
     this.open = null;
     // A tick half-filled when the interval closed belongs to no interval, and
-    // the counts behind it belong to no interval either.
+    // the counts behind it belong to no interval either. The sends behind it
+    // are already in the interval's total.
     this.tickInProgress = false;
     this.countedPhases.fill(0);
+    this.sendSample.fill(0);
 
     this.awaitingResident.length = 0;
     this.awaitingDrawn.length = 0;
@@ -1071,6 +1150,7 @@ export class TraceRecorder {
       datasetOpens: [...run.datasetOpens.values()],
       datasetOpensDropped: run.datasetOpensDropped,
       serverRowsDiscarded: run.serverRowsDiscarded,
+      sent: sendTalliesFrom(run.sent),
       byteLength,
       header: {
         ...run.environment.captureConditions(),
@@ -1181,6 +1261,7 @@ export class TraceRecorder {
       rows,
       ticks,
       ticksDropped,
+      sent: interval.sent,
       readings: interval.sink.serialiseReadings(),
       readingsDropped: interval.sink.readingsDropped,
       events: interval.sink.serialiseEvents(),

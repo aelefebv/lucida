@@ -32,6 +32,7 @@
  * planning and uploads — still runs every frame while it is set.
  */
 import { bumpSettingsGeneration } from "./tickCommon.ts";
+import type { InputKind } from "./trace/types.ts";
 
 /** The dirty-flag surface these intents drive. `RenderLoop` satisfies it
  *  structurally; tests can substitute a recording double. `null`/`undefined`
@@ -40,6 +41,8 @@ import { bumpSettingsGeneration } from "./tickCommon.ts";
 export interface InvalidationSink {
   markInteractiveDirty(source?: string): void;
   markResidencyDirty(source?: string): void;
+  /** An interactive dirty that the trace recorder hears by input name. */
+  markInput(input: InputKind): void;
 }
 
 /**
@@ -54,6 +57,17 @@ export function invalidateDisplaySettings(
 ): void {
   bumpSettingsGeneration();
   loop?.markInteractiveDirty(source);
+}
+
+/**
+ * A channel, a dataset, or a label was shown or hidden. For the planner this
+ * is a display-settings change like {@link invalidateDisplaySettings}. For
+ * the trace recorder it is a select, one of the five inputs that open an
+ * interaction run, so the loop hears it under that name.
+ */
+export function invalidateSelection(loop: InvalidationSink | null | undefined): void {
+  bumpSettingsGeneration();
+  loop?.markInput("select");
 }
 
 /**

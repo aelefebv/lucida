@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { WasmScene } from "lucida-core";
 import { Axis } from "../axes.ts";
 import { applyViewportCommand } from "../applyAndSend.ts";
-import { invalidateDisplaySettings } from "../invalidation.ts";
+import { invalidateSelection } from "../invalidation.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import type { DatasetState, ViewMode } from "../types.ts";
 import type { BridgeCallbacks } from "./useDatasetSettings.ts";
@@ -127,36 +127,43 @@ export function useDimensions({
     }
   }, [viewMode, wasmScene, selectedDatasetId, datasetsRef, bridgeCallbacksRef]);
 
+  // The recorder hears the scrub here, at the control, not where the value
+  // reaches the render loop. A saved-view apply and a followed peer move the
+  // same selectors, and neither is an input.
   const handleZChange = useCallback((v: number) => {
     setZ(v);
     bridgeCallbacksRef.current.breakFollow();
+    loopRef.current?.markInput("scrub");
     const scene = wasmSceneRef.current;
     if (scene) {
       applyViewportCommand(scene, { type: "set_z", z: v });
       bridgeCallbacksRef.current.emitPresence();
     }
-  }, [wasmSceneRef, bridgeCallbacksRef]);
+  }, [wasmSceneRef, bridgeCallbacksRef, loopRef]);
 
   const handleCChange = useCallback((v: number) => {
     setC(v);
     bridgeCallbacksRef.current.breakFollow();
+    loopRef.current?.markInput("scrub");
     const scene = wasmSceneRef.current;
     if (scene) {
       applyViewportCommand(scene, { type: "set_c", c: v });
       bridgeCallbacksRef.current.emitPresence();
     }
-  }, [wasmSceneRef, bridgeCallbacksRef]);
+  }, [wasmSceneRef, bridgeCallbacksRef, loopRef]);
 
   const handleTChange = useCallback((v: number) => {
     setT(v);
     bridgeCallbacksRef.current.breakFollow();
+    loopRef.current?.markInput("scrub");
     const scene = wasmSceneRef.current;
     if (scene) {
       applyViewportCommand(scene, { type: "set_t", t: v });
       bridgeCallbacksRef.current.emitPresence();
     }
-  }, [wasmSceneRef, bridgeCallbacksRef]);
+  }, [wasmSceneRef, bridgeCallbacksRef, loopRef]);
 
+  // Changes which channels are shown, so a select.
   const handleMultiChannelToggle = useCallback(() => {
     const next = !multiChannel;
     setMultiChannel(next);
@@ -164,7 +171,7 @@ export function useDimensions({
     const scene = wasmSceneRef.current;
     if (scene) {
       applyViewportCommand(scene, { type: "set_multi_channel", enabled: next });
-      invalidateDisplaySettings(loopRef.current, "multi_channel_toggle");
+      invalidateSelection(loopRef.current);
       bridgeCallbacksRef.current.emitPresence();
     }
   }, [multiChannel, wasmSceneRef, bridgeCallbacksRef, loopRef]);

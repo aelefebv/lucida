@@ -5,6 +5,7 @@ import type {
   SliceLayerParams,
   MinimapLayerParams,
   WorkerToMainMessage,
+  CapturedFrame,
   ColdStateMessage,
   ColdStateDisplayMessage,
   ColdStateSelectionMessage,
@@ -38,6 +39,11 @@ export class RenderClient implements UploadClient {
    *  Resolved when the matching `thumbnailResult` arrives. */
   private thumbnailPending = new Map<number, (bitmap: ImageBitmap | null) => void>();
   private thumbnailSeq = 0;
+
+  /** Pending `captureFrame` requests, keyed by the id sent to the worker.
+   *  Resolved when the matching `frameCaptured` arrives. */
+  private framePending = new Map<number, (frame: CapturedFrame | null) => void>();
+  private frameSeq = 0;
 
   onIntensityRange: ((datasetId: string, min: number, max: number) => void) | null = null;
   onChunksEvicted: ChunksEvictedHandler | null = null;
@@ -147,6 +153,12 @@ export class RenderClient implements UploadClient {
         // No waiter (e.g. the request was already settled/abandoned) — release
         // the GPU-backed bitmap rather than leak it.
         msg.bitmap.close();
+      }
+    } else if (msg.type === "frameCaptured") {
+      const resolve = this.framePending.get(msg.id);
+      if (resolve) {
+        this.framePending.delete(msg.id);
+        resolve(msg.png ? { png: msg.png, width: msg.width, height: msg.height } : null);
       }
     } else if (msg.type === "error") {
       console.error("Render worker error:", msg.message);
@@ -462,6 +474,20 @@ export class RenderClient implements UploadClient {
     });
   }
 
+  /**
+   * The frame on the worker's canvas as a PNG, for the trace bundle (#1055).
+   * Resolves null when the worker could not read its canvas, and immediately
+   * after destroy, so a bundle never hangs on a dead client.
+   */
+  captureFrame(): Promise<CapturedFrame | null> {
+    if (this.destroyed) return Promise.resolve(null);
+    const id = this.frameSeq++;
+    return new Promise<CapturedFrame | null>((resolve) => {
+      this.framePending.set(id, resolve);
+      this.worker.postMessage({ type: "captureFrame", id });
+    });
+  }
+
   minimapUploadOverviewChunksForLayer(
     datasetId: string,
     chunks: { data: Uint16Array; x: number; y: number; z: number; key: string }[],
@@ -531,6 +557,8 @@ export class RenderClient implements UploadClient {
     // after the worker is gone (the id-correlated path has no fire-and-forget).
     for (const resolve of this.thumbnailPending.values()) resolve(null);
     this.thumbnailPending.clear();
+    for (const resolve of this.framePending.values()) resolve(null);
+    this.framePending.clear();
     // Settle a still-pending init so `ready()` awaiters don't hang (no-op
     // once the worker has reported ready).
     this.readyReject(new Error("RenderClient destroyed"));

@@ -43,8 +43,11 @@ export interface TraceSink {
    */
   liveTally(occupancy: Uint32Array): LiveTally;
   serialise(): TraceRow[];
-  /** `counted` is the counted-not-timed phase tally since the previous tick. */
-  appendTick(atUs: number, scratch: TickScratch, counted: Uint32Array): void;
+  /**
+   * `counted` is the counted-not-timed phase tally since the previous tick,
+   * and `sent` the client's sends since then, by message type.
+   */
+  appendTick(atUs: number, scratch: TickScratch, counted: Uint32Array, sent: Uint32Array): void;
   serialiseTicks(): TraceTick[];
   /**
    * `values` is one reading, in `READING_NAMES` order. `gpuPassUs` is the GPU
@@ -197,8 +200,8 @@ export class TableTraceSink implements TraceSink {
     return this.rows.serialise();
   }
 
-  appendTick(atUs: number, scratch: TickScratch, counted: Uint32Array): void {
-    this.ticks.append(atUs, scratch, counted);
+  appendTick(atUs: number, scratch: TickScratch, counted: Uint32Array, sent: Uint32Array): void {
+    this.ticks.append(atUs, scratch, counted, sent);
   }
 
   serialiseTicks(): TraceTick[] {

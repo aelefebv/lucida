@@ -58,6 +58,11 @@
   margin: 8px 0;
 }
 
+.monitor-save-failed {
+  color: #f0a3a3;
+  margin: 8px 0;
+}
+
 .monitor-empty {
   margin: 24px 0;
   color: #c9a227;
