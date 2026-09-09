@@ -63,6 +63,10 @@ function makeRecorder(overrides: Partial<ConstructorParameters<typeof TraceRecor
       residentDetailChunks: 12,
       desiredCoarseChunks: 3,
       residentCoarseChunks: 3,
+      detailBytes: 0,
+      detailBudgetBytes: 0,
+      coarseBytes: 0,
+      coarseBudgetBytes: 0,
     }),
   });
   return { recorder, advance: (ms: number) => { clock += ms; } };
@@ -386,6 +390,19 @@ describe("TraceRecorder rows", () => {
     expect(serialised.phases.wire).toEqual({ startUs: 10_000, endUs: 50_000, durationUs: 40_000 });
     expect(serialised.outcome).toBe("complete");
     expect(serialised.chunkKey).toBe("1/0/0/0/2/3");
+  });
+
+  it("closes the wire with the bytes it delivered, in one call", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    const row = recorder.beginChunkRow(CHUNK, 0);
+    advance(40);
+    recorder.noteBytesReceived(row, 326_144);
+    recorder.closeRun("explicit");
+
+    const [serialised] = recorder.exportDocument().runs[0].rows;
+    expect(serialised.phases.wire?.durationUs).toBe(40_000);
+    expect(serialised.bytes).toBe(326_144);
   });
 
   it("ignores stamps for a row whose run has already closed", () => {

@@ -20,6 +20,7 @@ import {
   mainThreadOnlyOpen,
   makeRow,
   makeRun,
+  refetchLoopSteadyState,
   saturatedReopen,
 } from "../trace/diagnose/fixtures.ts";
 import { buildMonitorView, formatMs } from "./monitorModel.ts";
@@ -149,6 +150,24 @@ describe("drill-down", () => {
 
     expect(aggregate.drill).toBeNull();
     expect(aggregate.numbers.some((number) => number.label === "per-item rows")).toBe(true);
+  });
+
+  it("gives a steady-state finding a tone, a sentence and its numbers", () => {
+    // The interval after the run is not a phase, so this callout has no
+    // duration, no share and nothing to drill into. What it does have is the
+    // derivation's sentence and the window behind every count.
+    const view = buildMonitorView(
+      diagnoseRun(healthyLocalOpen(), { steadyState: refetchLoopSteadyState(healthyLocalOpen()) }),
+    );
+    const callout = view.callouts.find((entry) => entry.tone === "steady-state")!;
+
+    expect(callout.subject).toBe("refetch after settle");
+    expect(callout.headline).toContain("fetched again after the view settled");
+    expect(callout.drill).toBeNull();
+    const labels = callout.numbers.map((number) => number.label);
+    expect(labels).toContain("chunks fetched again");
+    expect(labels).toContain("refetches");
+    expect(labels).toContain("window");
   });
 
   it("resolves a drill-down to the phase's whole rollup row", () => {

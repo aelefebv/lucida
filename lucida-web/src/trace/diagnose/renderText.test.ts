@@ -13,6 +13,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  budgetBoundCoarseRun,
   coldRemoteOpen,
   fallbackAdapterOpen,
   gpuTimedOpen,
@@ -22,6 +23,7 @@ import {
   lateStallOpen,
   mainThreadOnlyOpen,
   makeRun,
+  prefetchSteadyState,
   quietRun,
   saturatedReopen,
   sendHeavyIdleRun,
@@ -62,6 +64,14 @@ const DOCUMENTS = {
   firstHalf: diagnoseRun(lateStallOpen(), { window: { startMs: 0, endMs: 1_000 } }),
   tail: diagnoseRun(coldRemoteOpen(), { window: { startMs: 3_700, endMs: 4_120 } }),
   wholeWindow: diagnoseRun(saturatedReopen(), { window: { startMs: 0, endMs: 12_000 } }),
+  // Two readings of what happened after the view settled: one interval that
+  // kept fetching, and one run whose coarse tier could not fit what the view
+  // wanted. Both carry steady-state findings, so the budget and the parity
+  // check cover the numbers those findings print.
+  prefetchAfterSettle: diagnoseRun(healthyLocalOpen(), {
+    steadyState: prefetchSteadyState(healthyLocalOpen()),
+  }),
+  budgetBound: diagnoseRun(budgetBoundCoarseRun()),
 };
 
 /** Numbers as the renderer prints them, with thousands separators removed. */

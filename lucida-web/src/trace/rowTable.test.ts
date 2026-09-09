@@ -44,8 +44,21 @@ describe("RowTable", () => {
     // boundary. #927 derives its resident and per-run caps from this figure,
     // so a change here is a change to how much of a run fits — the label
     // costs 8 B a row, and buys the join to the server's table; the boundary
-    // byte costs 1 B, and buys a live tally that walks no rows.
-    expect(RowTable.BYTES_PER_ROW).toBe(76);
+    // byte costs 1 B, and buys a live tally that walks no rows; the bytes
+    // column costs 4 B, and buys the steady-state ruleset its received-bytes
+    // and refetch findings.
+    expect(RowTable.BYTES_PER_ROW).toBe(80);
+  });
+
+  it("carries the bytes the wire delivered, and zero until it did", () => {
+    const table = new RowTable(2);
+    const delivered = table.append(source(), 0);
+    table.append(source(), 0);
+    table.setBytes(delivered, 326_144);
+
+    const rows = table.serialise();
+    expect(rows[0].bytes).toBe(326_144);
+    expect(rows[1].bytes).toBe(0);
   });
 
   it("carries lane as a column, not as a phase", () => {

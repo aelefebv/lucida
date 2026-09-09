@@ -274,6 +274,7 @@ export function renderDiagnostic(
           `${p(`sent.byType[${index}].bytesPerS`, entry.bytesPerS).padStart(9)} B/s`,
       );
     });
+    renderSteadyState(document, push, p);
     push(DETAIL, "");
     push(DETAIL, `RULESET v${document.ruleset.version} — ${document.ruleset.note}`);
   }
@@ -403,6 +404,89 @@ function renderChunk(
     );
   });
   push(NEXT, `   cannot see: ${chunk.limits}`);
+}
+
+/**
+ * The text twin of the ribbon the dock draws between two runs: what the
+ * pipeline did after the view settled, and the tiers as the run left them.
+ * Every steady-state finding's numbers are here whether the rule fired or
+ * not, so a quiet interval reads as measured rather than as unexamined.
+ */
+function renderSteadyState(document: DiagnosticDocument, push: PushLine, p: PrintNumber): void {
+  const steady = document.steadyState;
+  push(DETAIL, "");
+  push(
+    DETAIL,
+    "STEADY STATE  (the unlabelled interval that opened when the run closed; the tiers are the run's settle block)",
+  );
+  push(DETAIL, `   ${steady.statement}`);
+  const interval = steady.interval;
+  if (interval) {
+    push(
+      DETAIL,
+      `   interval   ${interval.id} · ${p("steadyState.interval.windowMs", interval.windowMs)} ms · ` +
+        `${p("steadyState.interval.rows", interval.rows.toLocaleString())} row(s) · ` +
+        `${p("steadyState.interval.passes", interval.passes.toLocaleString())} pass(es) · ended ${interval.endReason}`,
+    );
+  }
+  const received = steady.received;
+  if (received) {
+    push(
+      DETAIL,
+      `   received   ${p("steadyState.received.bytes", received.bytes.toLocaleString())} B over ` +
+        `${p("steadyState.received.requests", received.requests.toLocaleString())} request(s) · ` +
+        `${p("steadyState.received.bytesPerS", received.bytesPerS.toLocaleString())} B/s · ` +
+        `${p("steadyState.received.busySeconds", received.busySeconds)} busy second(s) at ` +
+        `${p("steadyState.received.busyBytesPerS", received.busyBytesPerS.toLocaleString())} B/s`,
+    );
+    received.byLane.forEach((lane, index) => {
+      push(
+        DETAIL,
+        `      lane ${lane.lane.padEnd(9)} ${p(`steadyState.received.byLane[${index}].bytes`, lane.bytes.toLocaleString()).padStart(11)} B ` +
+          `${p(`steadyState.received.byLane[${index}].requests`, lane.requests.toLocaleString()).padStart(7)} request(s) ` +
+          `${p(`steadyState.received.byLane[${index}].bytesPerS`, lane.bytesPerS.toLocaleString()).padStart(9)} B/s`,
+      );
+    });
+  }
+  const refetch = steady.refetch;
+  if (refetch) {
+    push(
+      DETAIL,
+      `   refetch    ${p("steadyState.refetch.chunks", refetch.chunks.toLocaleString())} chunk(s) fetched again · ` +
+        `${p("steadyState.refetch.refetches", refetch.refetches.toLocaleString())} refetch(es) · ` +
+        `${p("steadyState.refetch.bytes", refetch.bytes.toLocaleString())} B · ` +
+        `window ${p("steadyState.refetch.windowMs", refetch.windowMs.toLocaleString())} ms`,
+    );
+  }
+  const replans = steady.replans;
+  if (replans) {
+    push(
+      DETAIL,
+      `   replans    ${p("steadyState.replans.availabilityWoken", replans.availabilityWoken.toLocaleString())} of ` +
+        `${p("steadyState.replans.passes", replans.passes.toLocaleString())} pass(es) woken by an availability update alone`,
+    );
+  }
+  const sent = steady.sent;
+  if (sent) {
+    push(
+      DETAIL,
+      `   sent       ${p("steadyState.sent.bytes", sent.bytes.toLocaleString())} B over ` +
+        `${p("steadyState.sent.messages", sent.messages.toLocaleString())} message(s) · ` +
+        `${p("steadyState.sent.bytesPerS", sent.bytesPerS.toLocaleString())} B/s`,
+    );
+  }
+  steady.tiers.forEach((tier, index) => {
+    const base = `steadyState.tiers[${index}]`;
+    push(
+      DETAIL,
+      `   tier ${tier.tier.padEnd(6)} wants ${p(`${base}.wanted`, tier.wanted.toLocaleString())} · ` +
+        `holds ${p(`${base}.resident`, tier.resident.toLocaleString())} · ` +
+        `${p(`${base}.bytes`, tier.bytes.toLocaleString())} of ${p(`${base}.budgetBytes`, tier.budgetBytes.toLocaleString())} B ` +
+        `(${p(`${base}.fillPct`, tier.fillPct)}%) · loss ${p(`${base}.coverageLossChunks`, tier.coverageLossChunks.toLocaleString())} ` +
+        `(${p(`${base}.coverageLossPct`, tier.coverageLossPct)}%) · ` +
+        (tier.budgetBound ? "budget-bound" : "not budget-bound"),
+    );
+  });
 }
 
 /**
@@ -595,6 +679,7 @@ function renderTimingOf(document: DiagnosticDocument, p: PrintNumber): string {
 function describeObservation(finding: Finding, p: PrintNumber): string {
   const observed = finding.observed;
   const base = `findings[${finding.id - 1}].observed`;
+  if (finding.severity === "steady-state") return describeSteadyState(finding, p);
   if (observed.backlogEtaS != null || observed.pending != null) {
     const parts = [
       `${p(`${base}.pending`, (observed.pending ?? 0).toLocaleString())} pending`,
@@ -622,5 +707,62 @@ function describeObservation(finding: Finding, p: PrintNumber): string {
   }
   if (observed.n != null) parts.push(`n=${p(`${base}.n`, observed.n)}`);
   if (observed.rows === 0 && observed.tier) parts.push(`no per-item rows (${observed.tier})`);
+  return parts.join(" · ");
+}
+
+/**
+ * A steady-state observation: what the interval after the run carried, and
+ * the window it carried it over. Every finding here states its window,
+ * because a count without a denominator is not a measurement — except the
+ * budget-bound one, which reads the run's settle block, an instant rather
+ * than an interval.
+ */
+function describeSteadyState(finding: Finding, p: PrintNumber): string {
+  const observed = finding.observed;
+  const base = `findings[${finding.id - 1}].observed`;
+  const parts: string[] = [];
+  if (observed.bytesPerS != null) {
+    parts.push(`${p(`${base}.bytesPerS`, observed.bytesPerS.toLocaleString())} B/s`);
+  }
+  if (observed.seconds != null) parts.push(`over ${p(`${base}.seconds`, observed.seconds)} s`);
+  if (observed.chunks != null) {
+    parts.push(`${p(`${base}.chunks`, observed.chunks.toLocaleString())} chunk(s)`);
+  }
+  if (observed.refetches != null) {
+    parts.push(`${p(`${base}.refetches`, observed.refetches.toLocaleString())} refetch(es)`);
+  }
+  if (observed.bytes != null) {
+    parts.push(`${p(`${base}.bytes`, observed.bytes.toLocaleString())} B`);
+  }
+  if (observed.wokenPasses != null) {
+    parts.push(
+      `${p(`${base}.wokenPasses`, observed.wokenPasses.toLocaleString())} of ` +
+        `${p(`${base}.passes`, (observed.passes ?? 0).toLocaleString())} pass(es)`,
+    );
+  }
+  if (observed.fillPct != null) {
+    parts.push(
+      `${p(`${base}.residentBytes`, (observed.residentBytes ?? 0).toLocaleString())} of ` +
+        `${p(`${base}.budgetBytes`, (observed.budgetBytes ?? 0).toLocaleString())} B ` +
+        `(${p(`${base}.fillPct`, observed.fillPct)}% full)`,
+    );
+  }
+  if (observed.lossChunks != null) {
+    parts.push(
+      `coverage loss ${p(`${base}.lossChunks`, observed.lossChunks.toLocaleString())} of ` +
+        `${p(`${base}.wanted`, (observed.wanted ?? 0).toLocaleString())} wanted chunk(s) ` +
+        `(${p(`${base}.lossPct`, observed.lossPct ?? 0)}%)`,
+    );
+  }
+  if (observed.breakdown) {
+    parts.push(
+      Object.entries(observed.breakdown)
+        .map(([name, bytes]) => `${name} ${p(`${base}.breakdown.${name}`, bytes.toLocaleString())} B`)
+        .join(" "),
+    );
+  }
+  if (observed.windowMs != null) {
+    parts.push(`window ${p(`${base}.windowMs`, observed.windowMs.toLocaleString())} ms`);
+  }
   return parts.join(" · ");
 }

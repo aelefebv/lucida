@@ -125,6 +125,42 @@ nor a browser. The measurement that fills the ADR's numbers, a wide
 collection zoomed out with and without the level rule, is
 `docs/research/level-chain-harness/`.
 
+## The scripted run check
+
+`extras/verify_trace_script.py` proves the trace driver's scripted steps
+end to end. It uses the generator to write a synthetic dataset with a depth
+axis and four timepoints, then opens it once through the trace driver in
+volume mode at device pixel ratio 2 with a script file of five steps: wait,
+orbit, scrub the time selector by one, select a channel that is already
+shown, and scrub the Z selector, which the page disables in volume mode.
+The same steps are the flags
+`--wait --orbit 30,15 --scrub t:1 --select channel:0 --scrub z:1`.
+
+Then it reads the run file and the bundle back. Each gesture must have
+opened its own run under the cause that names its input, `orbit` on the
+`view` epoch and `scrub` and `select` on the `selection` epoch, and each run
+must have closed by settling. Every step must carry the view before and
+after it. The orbit turns the camera and the scrub moves the time index by
+one. The select and the refused scrub leave the view as it was and say so,
+and the refused one also carries the page's reason and no run. The run the
+file is about must be the last run a step opened, the bundle must carry the
+same steps with the same runs, and the frame must be the size the viewport
+makes at ratio 2.
+
+It needs the same server, CLI, and Chrome as the level chain check:
+
+```sh
+(cd lucida-web && pnpm run build)
+cargo run -p lucida-server &
+uv run extras/verify_trace_script.py
+```
+
+`--size` and `--timepoints` shape the dataset, and `--dataset` reuses one
+already on disk, which needs a depth axis and at least two timepoints. The
+check's own tests run with `uv run extras/test_verify_trace_script.py` and
+need neither a server nor a browser. The CLI's own parse tests cover the
+step kinds, their flags, and the script file's shape.
+
 ## The sharded twin check
 
 `extras/verify_sharded_twins.py` proves reading a sharded dataset end to

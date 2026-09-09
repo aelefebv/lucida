@@ -55,6 +55,7 @@ import { useSeedDatasetOpens } from "./hooks/useSeedDatasetOpens.ts";
 import { useIntensityBatcher } from "./hooks/useIntensityBatcher.ts";
 import { useDatasetLevels } from "./hooks/useDatasetLevels.ts";
 import { useSavedViewSync } from "./hooks/useSavedViewSync.ts";
+import { useScriptControls } from "./hooks/useScriptControls.ts";
 import { useViewedMentions } from "./hooks/useViewedMentions.ts";
 import type { SavedView } from "./savedView/types.ts";
 import { restoreAnnotationView } from "./savedView/restoreAnnotationView.ts";
@@ -70,6 +71,7 @@ import {
 import type { WorkspaceRole, WorkspaceMember } from "./workspaceApi.ts";
 import { isCaptureSurface } from "./captureSurface.ts";
 import { setBundleServices } from "./trace/bundle.ts";
+import { useHudKeyBinding } from "./hud/useHudKey.ts";
 import "./App.css";
 
 // The debug UI (dev-controls panel + on-canvas overlay layer) is
@@ -90,6 +92,8 @@ const DebugOverlays = lazy(() =>
 const MonitorDock = lazy(() =>
   import("./monitor/MonitorDock.tsx").then((m) => ({ default: m.MonitorDock })),
 );
+// Code-split for the same reason: the HUD is in every build, and most sessions never show it.
+const Hud = lazy(() => import("./hud/Hud.tsx").then((m) => ({ default: m.Hud })));
 
 interface AppProps {
   workspaceId: string;
@@ -870,6 +874,22 @@ function App({
     return () => setBundleServices(null);
   }, [liveBridge, render.clientRef]);
 
+  useScriptControls({
+    selectors: {
+      z: dims.z, t: dims.t, c: dims.c,
+      dimZ: dims.dimZ, dimT: dims.dimT, dimC: dims.dimC,
+      viewMode: dims.viewMode,
+    },
+    setZ: dims.handleZChange,
+    setT: dims.handleTChange,
+    setC: dims.handleCChange,
+    setChannelVisible: layers.handleChannelSetVisible,
+    setLayerVisible: layers.handleLayerSetVisible,
+    captureView: savedViewSync.captureBuilder,
+    selectedDatasetId,
+    datasetsRef,
+  });
+
   useIntensityBatcher({
     clientReady: render.clientReady,
     clientRef: render.clientRef,
@@ -1012,6 +1032,9 @@ function App({
     () => getRenderRadiusPreviewTier() !== null,
     () => false,
   );
+  const [showHud, setShowHud] = useState(false);
+  const toggleHud = useCallback(() => setShowHud((v) => !v), []);
+  useHudKeyBinding(toggleHud);
   const [showBookmarkSidebar, setShowBookmarkSidebar] = useState(true);
   // Default the Explore panel CLOSED; it remains a user toggle. (It previously
   // opened on a fresh dataset open to surface the guided-exploration affordance.)
@@ -1475,6 +1498,15 @@ function App({
                 />
               </Suspense>
             )}
+            {showHud && !captureSurface && (
+              <Suspense fallback={null}>
+                <Hud
+                  canvasRef={render.canvasRef}
+                  datasets={datasetsRef.current}
+                  getCache={() => bridge.sessionRef.current?.cpuCache ?? null}
+                />
+              </Suspense>
+            )}
             <FpsCounter />
             <LoadingViewBanner applier={savedViewSync.applier} />
             {/* Durable, dismissible surface for non-fatal import warnings from
@@ -1723,6 +1755,21 @@ function App({
             }}
           >
             Explore
+          </button>
+          <button
+            onClick={toggleHud}
+            aria-pressed={showHud}
+            title={showHud ? "Hide the pipeline HUD (H)" : "Show the pipeline HUD (H)"}
+            data-testid="hud-toggle"
+            style={{
+              padding: "0.375rem 0.75rem",
+              fontSize: "0.875rem",
+              whiteSpace: "nowrap",
+              background: showHud ? "#646cff" : undefined,
+              color: showHud ? "#fff" : undefined,
+            }}
+          >
+            HUD
           </button>
         </div>
         {showFileBrowser && (

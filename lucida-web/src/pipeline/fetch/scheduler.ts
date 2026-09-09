@@ -179,6 +179,18 @@ export class Scheduler<Req extends SchedulableRequest> {
     return count;
   }
 
+  /**
+   * Visit every pending entry without copying the queue, unless it is deeper
+   * than `cap`, in which case visit none and return false. Bounded for the
+   * same reason as {@link countPending}: a caller on a periodic path must not
+   * pay for a backlog tens of thousands deep.
+   */
+  forEachPending(cap: number, visit: (req: Req) => void): boolean {
+    if (this.pending.length > cap) return false;
+    for (let i = 0; i < this.pending.length; i++) visit(this.pending[i]);
+    return true;
+  }
+
   /** Age (ms) of the longest-waiting pending entry; 0 when empty. */
   oldestPendingAgeMs(now: number): number {
     if (this.enqueuedAt.size === 0) return 0;

@@ -192,6 +192,13 @@ vi.mock("./pipeline/fetch/index.ts", () => {
     reset = vi.fn();
     subscribe = vi.fn(() => () => {});
     cancelDataset = vi.fn();
+    // The HUD's two cache reads, so a shown HUD can tick over this double.
+    poolResidency = vi.fn(() => ({
+      main: { bytes: 0, budgetBytes: 1 },
+      overview: { bytes: 0, budgetBytes: 1 },
+      proxy: { bytes: 0, budgetBytes: 1 },
+    }));
+    laneOutstanding = vi.fn((out: unknown) => out);
     constructor(_source: unknown, _pool: unknown) {}
   }
   return {
@@ -513,5 +520,24 @@ describe("App wiring: dataset-settings mutation canary", () => {
     expect(vi.mocked(invalidateSelection)).toHaveBeenCalled();
     const reread = getSceneSettings(scene as unknown as InstanceType<typeof WasmScene>);
     expect(reread).not.toBe(primed);
+  });
+});
+
+describe("App wiring: the pipeline HUD (#1061)", () => {
+  it("shows on the toolbar control and hides on its key, with no dev gate", async () => {
+    await mountWithSnapshot(documentJson(["wds-1"]));
+    expect(screen.queryByTestId("hud")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("hud-toggle"));
+    // The HUD is code-split, so it mounts after the import resolves.
+    expect(await screen.findByTestId("hud")).toBeTruthy();
+    expect(screen.getByTestId("hud-toggle").getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByLabelText("chunkGrid")).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "h" });
+    });
+    expect(screen.queryByTestId("hud")).toBeNull();
+    expect(screen.getByTestId("hud-toggle").getAttribute("aria-pressed")).toBe("false");
   });
 });

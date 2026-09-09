@@ -145,6 +145,33 @@ export interface TraceEnvironment {
   captureOutstanding(): Outstanding;
 }
 
+/** Observes one committed per-tick aggregate sample. See {@link TraceRecorder.onTick}. */
+export type TickListener = (sample: TickScratch) => void;
+
+/**
+ * The most recent reading, as the recorder keeps it: one object overwritten
+ * per reading rather than a copy per reading, so a surface that samples at
+ * its own cadence reads it for nothing and never walks the ring.
+ */
+export interface LatestReading {
+  /**
+   * Counts up once per reading, so a reader can tell a fresh reading from
+   * the one it already saw. Zero before the first.
+   */
+  seq: number;
+  /** The recorder's clock at the reading. */
+  atMs: number;
+  queueDepth: number;
+  inFlight: number;
+  frameTimeUs: number;
+  residentBytes: number;
+  /**
+   * Null when the reading carried none: no frame was read back since the
+   * previous reading, or the adapter offers no timestamp queries.
+   */
+  gpuPassUs: number | null;
+}
+
 export interface TraceRecorderOptions {
   sinkFactory?: TraceSinkFactory;
   /** Monotonic milliseconds. Injectable so a test can drive run durations. */
@@ -233,7 +260,7 @@ export class TraceRecorder {
   private readonly timeoutMs: number;
 
   private environment: TraceEnvironment | null = null;
-  private gpu: GpuIdentity | null = null;
+  private gpuIdentity: GpuIdentity | null = null;
 
   private open: OpenInterval | null = null;
   private closed: ClosedInterval[] = [];
@@ -291,6 +318,8 @@ export class TraceRecorder {
   private readonly sendSample = new Uint32Array(SEND_COLUMN_COUNT);
   /** One vector, refilled per tick, for the same reason as the scratch above. */
   private readonly readingColumns = new Float64Array(READING_NAMES.length);
+  /** The loop's word on what woke the tick in progress; see {@link noteTickWake}. */
+  private availabilityWoken = false;
   /**
    * The live view's phase-occupancy vector, refilled per poll rather than
    * allocated per poll. The progress it produces is a fresh object by
@@ -311,6 +340,23 @@ export class TraceRecorder {
   private holdTimer: ReturnType<typeof setTimeout> | null = null;
   private timeoutTimer: ReturnType<typeof setTimeout> | null = null;
   private lastQuiescence: QuiescenceState | null = null;
+
+  private readonly tickListeners = new Set<TickListener>();
+  private readonly latest: LatestReading = {
+    seq: 0,
+    atMs: 0,
+    queueDepth: 0,
+    inFlight: 0,
+    frameTimeUs: 0,
+    residentBytes: 0,
+    gpuPassUs: null,
+  };
+  /**
+   * Never reset, unlike the per-interval send tallies, so a reader at any
+   * cadence takes a rate by differencing.
+   */
+  private sentBytesTotal = 0;
+  private receivedBytesTotal = 0;
 
   constructor(options: TraceRecorderOptions = {}) {
     this.sinkFactory = options.sinkFactory ?? tableSinkFactory;
@@ -334,7 +380,44 @@ export class TraceRecorder {
   }
 
   setGpu(gpu: GpuIdentity | null): void {
-    this.gpu = gpu;
+    this.gpuIdentity = gpu;
+  }
+
+  /** The adapter the page resolved, or null before it did or where there is no WebGPU. */
+  get gpu(): GpuIdentity | null {
+    return this.gpuIdentity;
+  }
+
+  /** Bytes the page has sent over the session socket since it loaded. */
+  get bytesSent(): number {
+    return this.sentBytesTotal;
+  }
+
+  /** Bytes the page has received over the session socket since it loaded. */
+  get bytesReceived(): number {
+    return this.receivedBytesTotal;
+  }
+
+  /** The most recent reading. `seq` is zero before the first. */
+  get latestReading(): Readonly<LatestReading> {
+    return this.latest;
+  }
+
+  /**
+   * Watch each per-tick aggregate sample as {@link commitTick} publishes it.
+   *
+   * The listener receives the recorder's reusable scratch, valid for the
+   * duration of the call: read it there and copy what you keep. It runs on
+   * the planning pass, so it must be a few field reads and no allocation.
+   * This is how a surface that draws at the tick cadence sees every
+   * dataset's sample without walking the ring: the ring stays the record,
+   * and this is a notification.
+   */
+  onTick(listener: TickListener): () => void {
+    this.tickListeners.add(listener);
+    return () => {
+      this.tickListeners.delete(listener);
+    };
   }
 
   /** Whether a *labelled* run is open. The unlabelled interval is not one. */
@@ -926,6 +1009,20 @@ export class TraceRecorder {
     run.sink.stamp(handle % GENERATION_STRIDE, boundary, this.offsetUs(run, this.now()));
   }
 
+  /**
+   * Bytes in hand: closes `wire`, opens `decode`, and records what the wire
+   * delivered, in one resolve. The bytes land on the row at the boundary
+   * they arrive at rather than through a second call, because this runs
+   * once per completed fetch and a handle round trip is the cost #949 cut.
+   */
+  noteBytesReceived(handle: number, bytes: number): void {
+    const run = this.resolve(handle);
+    if (!run) return;
+    const index = handle % GENERATION_STRIDE;
+    run.sink.stamp(index, Boundary.DecodeStart, this.offsetUs(run, this.now()));
+    run.sink.setBytes(index, bytes);
+  }
+
   finishRow(handle: number, outcome: RowOutcomeValue): void {
     const run = this.resolve(handle);
     if (!run) return;
@@ -945,8 +1042,21 @@ export class TraceRecorder {
   beginTick(datasetId: string): TickScratch | null {
     if (!this.open) return null;
     this.tickScratch.reset(datasetId);
+    this.tickScratch.availabilityWoken = this.availabilityWoken;
     this.tickInProgress = true;
     return this.tickScratch;
+  }
+
+  /**
+   * What woke the loop for the tick about to run: true when a
+   * generated-availability update was the only thing that dirtied it since
+   * the previous tick. The loop says so before each tick, every sample that
+   * tick publishes carries the answer, and the next tick's word replaces it.
+   * The loop owns the dirty sources, so the classification is its and the
+   * recorder keeps one boolean.
+   */
+  noteTickWake(availabilityOnly: boolean): void {
+    this.availabilityWoken = availabilityOnly;
   }
 
   /**
@@ -965,6 +1075,8 @@ export class TraceRecorder {
     } else if (this.open?.truncation) {
       this.open.truncation.ticksUnrecorded++;
     }
+    // Listeners fire whether the ring recorded the sample or only counted it.
+    for (const listener of this.tickListeners) listener(this.tickScratch);
     // Either way the tallies belong to the interval just ended, not the next
     // one: carrying them forward would publish two intervals' counts as one.
     this.countedPhases.fill(0);
@@ -1028,6 +1140,15 @@ export class TraceRecorder {
     residentBytes: number,
     gpuPassUs: number | null = null,
   ): void {
+    // Ahead of the run check: the latest reading is read with no run open.
+    const latest = this.latest;
+    latest.seq++;
+    latest.atMs = this.now();
+    latest.queueDepth = queueDepth;
+    latest.inFlight = inFlight;
+    latest.frameTimeUs = frameTimeUs;
+    latest.residentBytes = residentBytes;
+    latest.gpuPassUs = gpuPassUs;
     const run = this.open;
     if (!run) return;
     this.readingColumns[ReadingColumn.QueueDepth] = queueDepth;
@@ -1068,10 +1189,21 @@ export class TraceRecorder {
    * of buffers, and its handful of cursor messages goes with it.
    */
   countSend(type: ClientMessageTypeIndexValue, bytes: number): void {
+    this.sentBytesTotal += bytes;
     const run = this.open;
     if (!run) return;
     addSend(this.sendSample, type, bytes);
     addSend(run.sent, type, bytes);
+  }
+
+  /**
+   * Count bytes that arrived over the session socket. A page-scoped total
+   * and nothing else: on the receive side the trace's record is the
+   * per-chunk row, and what a surface needs from this is a rate, which it
+   * reads by differencing the total at its own cadence.
+   */
+  countReceive(bytes: number): void {
+    this.receivedBytesTotal += bytes;
   }
 
   /**
@@ -1225,7 +1357,7 @@ export class TraceRecorder {
         endReason,
         truncation: run.truncation,
         build: buildIdentity(),
-        gpu: this.gpu,
+        gpu: this.gpuIdentity,
         startedAtEpochMs: run.startedAtEpochMs,
         durationUs: clampStamp(Math.round((this.now() - run.startedAtMs) * 1000)),
         quiescenceHoldMs: this.quiescenceHoldMs,

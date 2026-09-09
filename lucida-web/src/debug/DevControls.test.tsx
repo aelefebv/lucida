@@ -8,7 +8,6 @@ import { configStore } from "../pipeline/planning/configStore.ts";
 import { DEFAULT_PLANNING_CONFIG } from "../pipeline/planning/config.ts";
 import {
   DEBUG_OVERLAYS,
-  isOverlayEnabled,
   getRenderRadiusPreviewTier,
   setRenderRadiusPreviewTier,
   setOverlayEnabled,
@@ -285,43 +284,13 @@ describe("DevControls — store subscription", () => {
 });
 
 describe("DevControls — overlay toggles", () => {
-  it("renders one checkbox per overlay, reflecting the persisted state", () => {
+  it("no longer shows them: the toggles live in the HUD legend", () => {
     setOverlayEnabled("chunkGrid", true);
     render(<DevControls />);
     for (const name of DEBUG_OVERLAYS) {
-      const box = screen.getByLabelText(name) as HTMLInputElement;
-      expect(box.checked).toBe(name === "chunkGrid");
+      expect(screen.queryByLabelText(name)).toBeNull();
     }
-  });
-
-  it("toggling a checkbox writes through to the overlay registry and re-renders", async () => {
-    const user = userEvent.setup();
-    render(<DevControls />);
-    const box = screen.getByLabelText("plannedRank") as HTMLInputElement;
-
-    await user.click(box);
-    expect(isOverlayEnabled("plannedRank")).toBe(true);
-    expect((screen.getByLabelText("plannedRank") as HTMLInputElement).checked).toBe(true);
-
-    await user.click(screen.getByLabelText("plannedRank"));
-    expect(isOverlayEnabled("plannedRank")).toBe(false);
-  });
-
-  it("reflects an overlay flipped from outside the surface", async () => {
-    render(<DevControls />);
-    expect((screen.getByLabelText("chunkGrid") as HTMLInputElement).checked).toBe(false);
-    await act(async () => {
-      setOverlayEnabled("chunkGrid", true);
-    });
-    expect((screen.getByLabelText("chunkGrid") as HTMLInputElement).checked).toBe(true);
-  });
-
-  it("disables the toggles in read-only builds", () => {
-    render(<DevControls editable={false} />);
-    const box = screen.getByLabelText("chunkGrid") as HTMLInputElement;
-    expect(box.disabled).toBe(true);
-    fireEvent.click(box);
-    expect(isOverlayEnabled("chunkGrid")).toBe(false);
+    expect(screen.queryByText("Overlays")).toBeNull();
   });
 });
 
