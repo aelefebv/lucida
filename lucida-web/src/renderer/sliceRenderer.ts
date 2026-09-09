@@ -2,6 +2,7 @@
 import shaderSource from "./slice.wgsl?raw";
 import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
 import type { BlendMode } from "./layerCompositor.ts";
+import type { PassTiming } from "./passTiming.ts";
 import { DESCRIPTOR_MAX_LEVEL_SOURCES } from "./descriptor/layout.ts";
 
 /**
@@ -507,7 +508,8 @@ export class SliceRenderer {
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
   }
 
-  renderTo(target: GPUTextureView, encoder: GPUCommandEncoder) {
+  /** `timing` stamps the pass for the trace's GPU pass time; viewport frames pass it, the minimap does not. */
+  renderTo(target: GPUTextureView, encoder: GPUCommandEncoder, timing?: PassTiming) {
     if (!this.bindGroup || !this.descriptorBindGroup) return;
 
     const pass = encoder.beginRenderPass({
@@ -519,6 +521,7 @@ export class SliceRenderer {
           clearValue: { r: 0, g: 0, b: 0, a: 0 },
         },
       ],
+      timestampWrites: timing?.nextPass(),
     });
 
     pass.setPipeline(this.pipeline);
@@ -549,6 +552,7 @@ export class SliceRenderer {
     target: GPUTextureView,
     encoder: GPUCommandEncoder,
     params: AggregateDrawParams,
+    timing?: PassTiming,
   ) {
     const { batches, quadData } = params;
     if (batches.length === 0 || quadData.byteLength === 0) return;
@@ -614,6 +618,7 @@ export class SliceRenderer {
           clearValue: { r: 0, g: 0, b: 0, a: 0 },
         },
       ],
+      timestampWrites: timing?.nextPass(),
     });
     pass.setPipeline(this.aggregatePipelines[params.blendMode]);
     pass.setBindGroup(1, quadBindGroup);

@@ -15,6 +15,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { EntityDescriptorIndex, MemberSourceBinding } from "../descriptorBuffer.ts";
 import type { WorkerCtx } from "../workerContext.ts";
+import { UNTIMED } from "../passTiming.ts";
 import type { VolumePoolBinding } from "../volumeRenderer.ts";
 import type { VolumeRenderMultiPassMessage } from "../workerProtocol.ts";
 import { createInitialState, type RendererState } from "../worker/state.ts";
@@ -115,6 +116,7 @@ function makeCtx(opts: {
       getCurrentTexture: () => ({ createView: () => ({}) }),
     },
     state: opts.state,
+    passTimer: UNTIMED,
     getVolumeRenderer: () => opts.renderer,
     getCompositor: () => ({ composite: opts.composite }),
     getCursorRenderer: () => ({ hasData: () => false }),

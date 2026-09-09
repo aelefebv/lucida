@@ -174,11 +174,16 @@ export function makeHeader(overrides: Partial<RunHeader> = {}): RunHeader {
       { generation: 1, openedAtUs: null, closedAtUs: null, gapUs: null, firstRid: null, lastRid: null },
     ],
     build: { version: "0.2.0", mode: "production", dev: false },
+    // No timestamp queries, so the default readings carry no GPU pass time.
+    // A fixture that adds GPU time must also declare an adapter that offers
+    // them.
     gpu: {
       vendor: "apple",
       architecture: "metal-3",
       device: "",
       description: "",
+      fallback: false,
+      timestampQueries: false,
     },
     startedAtEpochMs: 1_700_000_000_000,
     durationUs: 1_000_000,
@@ -514,5 +519,76 @@ export function uninstrumentedPrefixOpen(): TraceRun {
     header: { runId: "prefix-heavy", durationUs: 3_000 * MS },
     rows,
     readings: [makeReading(2_700 * MS, { queueDepth: 2, inFlight: 4 })],
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Render timing and the adapter
+// ---------------------------------------------------------------------------
+
+/**
+ * The healthy open again, on an adapter that offers timestamp queries. Every
+ * reading after the first carries the GPU pass time of the frame before it:
+ * the read-back is asynchronous, so the first tick has nothing to report yet.
+ * One frame is slower than the rest so the percentiles are not all one number.
+ */
+export function gpuTimedOpen(): TraceRun {
+  const base = healthyLocalOpen();
+  return makeRun({
+    header: {
+      runId: "local-gpu-timed",
+      durationUs: base.header.durationUs,
+      gpu: { ...base.header.gpu!, timestampQueries: true },
+    },
+    rows: base.rows,
+    readings: base.readings.map((reading, i) =>
+      i === 0 ? reading : { ...reading, gpuPassUs: i === 7 ? 2_400 : 1_100 + i * 20 },
+    ),
+    datasetOpens: base.datasetOpens,
+    serverRows: base.serverRows,
+  });
+}
+
+/**
+ * The same open on an adapter without timestamp queries. No reading carries a
+ * GPU pass time, and the document has to say the render time it does have is
+ * main-thread time rather than let it pass for the GPU's.
+ */
+export function mainThreadOnlyOpen(): TraceRun {
+  const base = healthyLocalOpen();
+  return makeRun({
+    header: { runId: "local-main-thread-only", durationUs: base.header.durationUs },
+    rows: base.rows,
+    readings: base.readings,
+    datasetOpens: base.datasetOpens,
+    serverRows: base.serverRows,
+  });
+}
+
+/**
+ * A run on a software fallback adapter: the machine has no usable hardware
+ * adapter, frames are slow, and nothing about the shader is to blame. The
+ * header is the only place a reader can learn that, so it is the fixture's
+ * whole point.
+ */
+export function fallbackAdapterOpen(): TraceRun {
+  const base = healthyLocalOpen();
+  return makeRun({
+    header: {
+      runId: "local-fallback-adapter",
+      durationUs: base.header.durationUs,
+      gpu: {
+        vendor: "generic",
+        architecture: "software",
+        device: "",
+        description: "software rasterizer",
+        fallback: true,
+        timestampQueries: false,
+      },
+    },
+    rows: base.rows,
+    readings: base.readings.map((reading) => ({ ...reading, frameTimeUs: 42_000 })),
+    datasetOpens: base.datasetOpens,
+    serverRows: base.serverRows,
   });
 }

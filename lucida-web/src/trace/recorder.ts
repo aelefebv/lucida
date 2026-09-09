@@ -885,19 +885,26 @@ export class TraceRecorder {
 
   /**
    * Record the process-wide readings: queue depth, in-flight, the tick's own
-   * main-thread time, and resident bytes (#934).
+   * main-thread time, and resident bytes (#934), plus the GPU pass time of
+   * the last frame the render worker read back, when it read one back.
    *
    * Pushed by the render loop once per tick, next to the published
    * quiescence, rather than pulled when a tick sample is committed. A tick
    * sample is per planning pass, and the planner's epoch cache means a run
    * can fetch for seconds without re-planning once — readings on that cadence
    * are a cluster of readings at run start and silence after.
+   *
+   * `gpuPassUs` is null, and the reading carries no GPU field, when nothing
+   * arrived since the previous reading. Null is the honest value on an
+   * adapter without timestamp queries and on a tick that drew no frame; a
+   * zero would read as a fast GPU.
    */
   noteReading(
     queueDepth: number,
     inFlight: number,
     frameTimeUs: number,
     residentBytes: number,
+    gpuPassUs: number | null = null,
   ): void {
     const run = this.open;
     if (!run) return;
@@ -905,7 +912,7 @@ export class TraceRecorder {
     this.readingColumns[ReadingColumn.InFlight] = inFlight;
     this.readingColumns[ReadingColumn.FrameTimeUs] = frameTimeUs;
     this.readingColumns[ReadingColumn.ResidentBytes] = residentBytes;
-    run.sink.appendReading(this.offsetUs(run, this.now()), this.readingColumns);
+    run.sink.appendReading(this.offsetUs(run, this.now()), this.readingColumns, gpuPassUs);
   }
 
   /**

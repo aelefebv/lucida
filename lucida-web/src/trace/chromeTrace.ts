@@ -93,9 +93,16 @@ const SERVE_TID = 10;
 const COUNTER_SERIES = [
   { name: "queue depth", reading: "queueDepth" },
   { name: "in flight", reading: "inFlight" },
-  { name: "frame time (ms)", reading: "frameTimeUs", scale: 1 / 1000 },
+  { name: "main-thread frame time (ms)", reading: "frameTimeUs", scale: 1 / 1000 },
   { name: "resident bytes", reading: "residentBytes" },
 ] as const;
+
+/**
+ * Kept out of `COUNTER_SERIES` because a counter track has no null. This
+ * series has a point only where the reading carries a GPU pass time, so a run
+ * without timestamp queries gets no track rather than one pinned at zero.
+ */
+const GPU_PASS_SERIES = "gpu pass time (ms)";
 
 /**
  * A counter track has no null, and holding the previous value would draw a
@@ -115,6 +122,7 @@ export const DERIVED_VALUE_NOTES: readonly string[] = [
   "Phase spans are fanned out at export from the lifecycle row's boundary stamps.",
   "A retired row's open phase is not drawn at all — a span there would invent a stall the run did not have.",
   "Counter series are sampled once per tick, and a tick only happens when the page has work; a flat stretch is an idle page, not a frozen counter. `readingsDropped` in the header says how many readings the ring wrapped over, so a long run's counters cover its tail.",
+  "`main-thread frame time (ms)` is the tick's own main-thread time and never GPU time. `gpu pass time (ms)` is the GPU's pass time for a frame, read back through timestamp queries, and has a point only on the readings that received one. A run on an adapter without timestamp queries has no such track at all rather than a track at zero.",
   "The `target level` and `displayed level` counters, one pair per dataset, are sampled per planning pass rather than per tick. The target is the level that pass planned at. The displayed level is what the render worker had last reported when the pass ran, so a fill that lands with no re-plan shows up on the next pass, not as it arrives. A value of -1 is an absence: nothing in view for the target, nothing resident yet for the displayed level.",
   "Concurrent chunks put overlapping spans on one phase track. Perfetto reports these as `slice_spill_overlapping_complete_event` and stacks them within the track; nothing is dropped.",
 ];
@@ -329,6 +337,17 @@ function emitRun(events: ChromeTraceEvent[], run: TraceRun, baseUs: number): voi
         pid: PID_BROWSER,
         tid: COUNTER_TID,
         args: { value: sample[series.reading] * scale },
+      });
+    }
+    if (sample.gpuPassUs != null) {
+      events.push({
+        name: GPU_PASS_SERIES,
+        cat: "counters",
+        ph: "C",
+        ts: baseUs + sample.atUs,
+        pid: PID_BROWSER,
+        tid: COUNTER_TID,
+        args: { value: sample.gpuPassUs / 1000 },
       });
     }
   }

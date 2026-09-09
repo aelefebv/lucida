@@ -46,8 +46,11 @@ export interface TraceSink {
   /** `counted` is the counted-not-timed phase tally since the previous tick. */
   appendTick(atUs: number, scratch: TickScratch, counted: Uint32Array): void;
   serialiseTicks(): TraceTick[];
-  /** `values` is one reading, in `READING_NAMES` order. */
-  appendReading(atUs: number, values: Float64Array): void;
+  /**
+   * `values` is one reading, in `READING_NAMES` order. `gpuPassUs` is the GPU
+   * pass time that arrived since the previous reading, or null when none did.
+   */
+  appendReading(atUs: number, values: Float64Array, gpuPassUs: number | null): void;
   serialiseReadings(): TraceReading[];
   appendEvent(
     atUs: number,
@@ -191,8 +194,8 @@ export class TableTraceSink implements TraceSink {
     return this.ticks.serialise();
   }
 
-  appendReading(atUs: number, values: Float64Array): void {
-    this.readings.append(atUs, values);
+  appendReading(atUs: number, values: Float64Array, gpuPassUs: number | null): void {
+    this.readings.append(atUs, values, gpuPassUs);
   }
 
   serialiseReadings(): TraceReading[] {

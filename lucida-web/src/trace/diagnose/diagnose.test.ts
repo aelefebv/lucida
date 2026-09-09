@@ -14,9 +14,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   coldRemoteOpen,
-  interactionRunFor,
+  fallbackAdapterOpen,
+  gpuTimedOpen,
   healthyLocalOpen,
   interactionRun,
+  interactionRunFor,
+  mainThreadOnlyOpen,
+  makeHeader,
   makeReading,
   makeRow,
   makeRun,
@@ -26,7 +30,7 @@ import {
 } from "./fixtures.ts";
 import { CONFIDENCE_WORDS, diagnoseDocument, diagnoseRun } from "./diagnose.ts";
 import { RULESET, RULESET_VERSION, PHASE_CLASSES } from "./ruleset.ts";
-import { INPUT_KINDS, interactionCause, type TraceDocument } from "../types.ts";
+import { INPUT_KINDS, interactionCause, type GpuIdentity, type TraceDocument } from "../types.ts";
 
 const MS = 1_000;
 
@@ -341,6 +345,82 @@ describe("interaction runs", () => {
   });
 });
 
+describe("render timing and the adapter", () => {
+  it("carries GPU pass time beside main-thread time when the adapter offers timestamp queries", () => {
+    const doc = diagnoseRun(gpuTimedOpen());
+
+    expect(doc.run.adapter?.timestampQueries).toBe(true);
+    expect(doc.renderTiming.mainThread).toEqual({ samples: 12, p50Ms: 3.5, p95Ms: 3.5, maxMs: 3.5 });
+    // Eleven, not twelve: the first tick's frame had not been read back yet.
+    expect(doc.renderTiming.gpuPass).toEqual({
+      recorded: true,
+      samples: 11,
+      p50Ms: 1.2,
+      p95Ms: 2.4,
+      maxMs: 2.4,
+    });
+  });
+
+  it("states why GPU time is absent instead of reporting a zero", () => {
+    const doc = diagnoseRun(mainThreadOnlyOpen());
+
+    expect(doc.renderTiming.mainThread?.samples).toBe(12);
+    expect(doc.renderTiming.gpuPass).toMatchObject({ recorded: false, reason: "no-timestamp-queries" });
+    expect(doc.renderTiming.gpuPass).toHaveProperty("statement", expect.stringContaining("main-thread time"));
+  });
+
+  it("tells an adapter that offers timestamp queries from one whose frames were never read back", () => {
+    const gpu = { ...makeHeader().gpu!, timestampQueries: true };
+    const doc = diagnoseRun(makeRun({ header: { gpu }, readings: [makeReading(10 * MS)] }));
+
+    expect(doc.renderTiming.gpuPass).toMatchObject({ recorded: false, reason: "no-frame-read-back" });
+  });
+
+  it("says the adapter is unknown when the run closed before one was identified", () => {
+    const doc = diagnoseRun(makeRun({ header: { gpu: null }, readings: [makeReading(10 * MS)] }));
+
+    expect(doc.run.adapter).toBeNull();
+    expect(doc.run.gpu).toBe("unknown");
+    expect(doc.run.adapterKind).toEqual({ kind: "not-identified", label: "adapter not identified" });
+    expect(doc.renderTiming.gpuPass).toMatchObject({ recorded: false, reason: "adapter-unknown" });
+  });
+
+  it("names the adapter's kind in the run identity, in both states", () => {
+    const fallback = diagnoseRun(fallbackAdapterOpen());
+    expect(fallback.run.adapter?.fallback).toBe(true);
+    expect(fallback.run.gpu).toBe("generic software (software rasterizer)");
+    expect(fallback.run.adapterKind).toEqual({
+      kind: "software-fallback",
+      label: "software fallback adapter",
+    });
+    expect(fallback.renderTiming.mainThread?.p95Ms).toBe(42);
+
+    const hardware = diagnoseRun(healthyLocalOpen());
+    expect(hardware.run.gpu).toBe("apple metal-3");
+    expect(hardware.run.adapterKind).toEqual({ kind: "hardware", label: "hardware adapter" });
+  });
+
+  it("reads a header that never recorded the new adapter facts as not having recorded them", () => {
+    // The shape of a run file written before the adapter record carried these fields.
+    const old = { vendor: "v", architecture: "a", device: "", description: "" } as GpuIdentity;
+    const doc = diagnoseRun(makeRun({ header: { gpu: old }, readings: [makeReading(10 * MS)] }));
+
+    expect(doc.run.adapterKind).toEqual({ kind: "not-recorded", label: "adapter kind not recorded" });
+    expect(doc.renderTiming.gpuPass).toMatchObject({ recorded: false, reason: "not-recorded" });
+
+    // A browser that reported neither fallback flag is the same answer.
+    const unsaid = { ...makeHeader().gpu!, fallback: null };
+    expect(diagnoseRun(makeRun({ header: { gpu: unsaid } })).run.adapterKind.kind).toBe("not-recorded");
+  });
+
+  it("has no main-thread figure either when the run recorded no readings", () => {
+    const doc = diagnoseRun(makeRun({ readings: [] }));
+
+    expect(doc.renderTiming.mainThread).toBeNull();
+    expect(doc.renderTiming.gpuPass.recorded).toBe(false);
+  });
+});
+
 describe("the document", () => {
   it("ships the versioned ruleset with every rationale", () => {
     const doc = diagnoseRun(healthyLocalOpen());
@@ -406,6 +486,50 @@ describe("the document", () => {
 
     expect(diagnoseDocument(traceDocument).runId).toBe("remote-cold");
     expect(diagnoseDocument(traceDocument, { runId: "local-healthy" }).runId).toBe("local-healthy");
+  });
+
+  it("carries the worst row's chunk and the spatial summary, and names both as next steps", () => {
+    const doc = diagnoseRun(healthyLocalOpen());
+
+    // The healthy open's largest browser phase is the wire, and row 119 is the
+    // one that spent 240 ms on it.
+    expect(doc.chunk.selector).toBe("member-7/1/0/0/0/119/0");
+    expect(doc.chunk.chosen).toContain("browser.wire");
+    expect(doc.chunk.rows).toHaveLength(1);
+    expect(doc.chunk.rows[0].phases.map((phase) => phase.phase)).toHaveLength(6);
+    expect(doc.chunk.rows[0].queue).not.toBeNull();
+    expect(doc.chunk.rows[0].ageMs).toBe(246.5);
+    expect(doc.spatial.groupCount).toBe(1);
+    expect(doc.spatial.groups[0].n).toBe(120);
+
+    const commands = doc.next.map((step) => step.command);
+    expect(commands).toContain("lucida trace show local-healthy --chunk member-7/1/0/0/0/119/0");
+    expect(commands).toContain("lucida trace show local-healthy --spatial");
+  });
+
+  it("looks up the chunk the caller names, and still points the next step at the worst row", () => {
+    const named = diagnoseRun(healthyLocalOpen(), { chunk: "1/0/0/0/5/0" });
+    expect(named.chunk.chosen).toBe("named by the caller");
+    expect(named.chunk.rowCount).toBe(1);
+    expect(named.chunk.rows[0].entityId).toBe("member-5");
+    expect(named.next.map((step) => step.command)).toContain(
+      "lucida trace show local-healthy --chunk member-7/1/0/0/0/119/0",
+    );
+
+    const absent = diagnoseRun(healthyLocalOpen(), { chunk: "1/0/0/0/999/0" });
+    expect(absent.chunk.rowCount).toBe(0);
+    expect(absent.chunk.statement).toContain("not in this run");
+  });
+
+  it("has an empty lookup and no chunk step on a run with no rows, and a spatial step regardless", () => {
+    const doc = diagnoseRun(makeRun({ header: { runId: "empty", durationUs: 100 * MS } }));
+
+    expect(doc.chunk.selector).toBeNull();
+    expect(doc.chunk.rowCount).toBe(0);
+    expect(doc.spatial.rowCount).toBe(0);
+    const commands = doc.next.map((step) => step.command);
+    expect(commands.some((command) => command.includes("--chunk"))).toBe(false);
+    expect(commands).toContain("lucida trace show empty --spatial");
   });
 
   it("leads with truncation rather than footnoting it", () => {

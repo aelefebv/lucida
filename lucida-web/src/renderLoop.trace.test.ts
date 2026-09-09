@@ -37,7 +37,7 @@ function makeLoop() {
   const loop = new RenderLoop({
     session: { cpuCache } as unknown as Session,
     datasets: new Map(),
-    client: {} as unknown as RenderClient,
+    client: { takeGpuPassUs: () => null } as unknown as RenderClient,
     canvas,
     mode: "slice",
   });

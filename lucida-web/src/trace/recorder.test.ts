@@ -313,7 +313,15 @@ describe("TraceRecorder run header", () => {
     const { recorder, advance } = makeRecorder();
     recorder.openRun(OPEN_CAUSE);
     advance(250);
-    recorder.setGpu({ vendor: "v", architecture: "a", device: "d", description: "desc" });
+    const gpu = {
+      vendor: "v",
+      architecture: "a",
+      device: "d",
+      description: "desc",
+      fallback: true,
+      timestampQueries: false,
+    };
+    recorder.setGpu(gpu);
     recorder.closeRun("explicit");
 
     const { header } = recorder.exportDocument().runs[0];
@@ -324,9 +332,28 @@ describe("TraceRecorder run header", () => {
     expect(header.viewport.deviceWidth).toBe(1600);
     expect(header.cacheWarmth.detailChunks).toBe(4);
     expect(header.build.version).toBeTypeOf("string");
-    expect(header.gpu).toEqual({ vendor: "v", architecture: "a", device: "d", description: "desc" });
+    expect(header.gpu).toEqual(gpu);
     expect(header.quiescenceHoldMs).toBe(500);
     expect(header.durationUs).toBe(250_000);
+  });
+
+  it("carries a GPU pass time on a reading only when one arrived", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    advance(10);
+    recorder.noteReading(3, 2, 4_000, 1_000, 1_200);
+    advance(10);
+    recorder.noteReading(3, 2, 4_000, 1_000);
+    advance(10);
+    recorder.noteReading(3, 2, 4_000, 1_000, null);
+    recorder.closeRun("explicit");
+
+    const { readings } = recorder.exportDocument().runs[0];
+    expect(readings).toHaveLength(3);
+    expect(readings[0].gpuPassUs).toBe(1_200);
+    expect(readings[0].frameTimeUs).toBe(4_000);
+    expect("gpuPassUs" in readings[1]).toBe(false);
+    expect("gpuPassUs" in readings[2]).toBe(false);
   });
 
   it("reports what was still outstanding at settle rather than hiding it", () => {

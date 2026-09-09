@@ -894,6 +894,19 @@ export interface EntityLevelsMessage {
   entities: EntityLevelReport[];
 }
 
+/**
+ * The GPU pass time of one viewport frame, in microseconds on the GPU's own
+ * clock: from the start of the frame's first render pass to the end of its
+ * last, read back through timestamp queries. Posted once per frame whose
+ * read-back landed, and never on a device without the `timestamp-query`
+ * feature, so a frame with no message is unmeasured rather than free. The
+ * minimap and thumbnail renders are not viewport frames and are never timed.
+ */
+export interface GpuPassTimeMessage {
+  type: "gpuPassTime";
+  gpuPassUs: number;
+}
+
 export type WorkerToMainMessage =
   | ReadyMessage
   | ErrorMessage
@@ -901,4 +914,5 @@ export type WorkerToMainMessage =
   | ThumbnailResultMessage
   | ChunksEvictedMessage
   | WantedSetDeltaMessage
-  | EntityLevelsMessage;
+  | EntityLevelsMessage
+  | GpuPassTimeMessage;

@@ -97,8 +97,11 @@ export interface LucidaTraceSeam {
    *
    * Closes the run in progress, exactly as {@link exportTrace} does: asking
    * what a run means concludes the interval being asked about.
+   *
+   * `chunk` names the chunk the document's lookup is about, as
+   * `[entity/]level/t/c/z/y/x`; left out, the lookup is the worst row's.
    */
-  diagnose(runId?: string): DiagnosticDocument;
+  diagnose(runId?: string, options?: DiagnoseSeamOptions): DiagnosticDocument;
   /**
    * The same diagnostic rendered as the default text. One renderer, so every
    * number in the text exists in {@link diagnose}'s output — a caller drops to
@@ -108,9 +111,14 @@ export interface LucidaTraceSeam {
    * `depth` selects the rendering, not a different derivation: a driver that
    * has to archive a deeper depth reads it here rather than growing a second
    * renderer outside the page, where it would drift. `depth: "phase"` takes
-   * the phase id in `phase`.
+   * the phase id in `phase`; `depth: "chunk"` renders the lookup for `chunk`,
+   * or for the worst row when none is named; `depth: "spatial"` renders what
+   * is where.
    */
-  diagnoseText(runId?: string, options?: { depth?: RenderDepth; phase?: string }): string;
+  diagnoseText(
+    runId?: string,
+    options?: DiagnoseSeamOptions & { depth?: RenderDepth; phase?: string },
+  ): string;
   /**
    * Close the run in progress without exporting — the *Stop & analyse* path.
    *
@@ -119,6 +127,12 @@ export interface LucidaTraceSeam {
    * concluded by somebody asking for it rather than by running out of time.
    */
   closeRun(endReason?: "explicit" | "timeout"): void;
+}
+
+/** What a caller can ask the derivation for, beyond which run. */
+export interface DiagnoseSeamOptions {
+  /** The chunk the document's lookup is about. */
+  chunk?: string;
 }
 
 declare global {
@@ -151,12 +165,16 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
     progress: () => traceRecorder.liveProgress,
     exportTrace: () => traceRecorder.exportDocument(),
     exportChromeTrace: () => toChromeTraceJson(traceRecorder.exportDocument()),
-    diagnose: (runId?: string) => diagnoseDocument(traceRecorder.exportDocument(), { runId }),
-    diagnoseText: (runId?: string, options?: { depth?: RenderDepth; phase?: string }) =>
-      renderDiagnostic(diagnoseDocument(traceRecorder.exportDocument(), { runId }), {
-        depth: options?.depth,
-        phase: options?.phase,
-      }).text,
+    diagnose: (runId?: string, options?: DiagnoseSeamOptions) =>
+      diagnoseDocument(traceRecorder.exportDocument(), { runId, chunk: options?.chunk }),
+    diagnoseText: (
+      runId?: string,
+      options?: DiagnoseSeamOptions & { depth?: RenderDepth; phase?: string },
+    ) =>
+      renderDiagnostic(
+        diagnoseDocument(traceRecorder.exportDocument(), { runId, chunk: options?.chunk }),
+        { depth: options?.depth, phase: options?.phase },
+      ).text,
     closeRun: (endReason: "explicit" | "timeout" = "explicit") =>
       traceRecorder.closeRun(endReason),
   };
@@ -168,6 +186,11 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
  * Record the adapter the page is running against, so two runs on different
  * hardware are visibly not comparable. Asking for an adapter does not create
  * a device and does not disturb the renderer's own.
+ *
+ * The render worker asks for the same default adapter, so what this reports
+ * about fallback status and timestamp queries is what the worker's device
+ * has: the worker enables timestamp queries exactly when the adapter offers
+ * them, and records a GPU pass time per frame only then.
  */
 export async function resolveGpuIdentity(): Promise<GpuIdentity | null> {
   const gpu = (navigator as Navigator & { gpu?: GPU }).gpu;
@@ -175,14 +198,28 @@ export async function resolveGpuIdentity(): Promise<GpuIdentity | null> {
   try {
     const adapter = await gpu.requestAdapter();
     const info = adapter?.info;
-    if (!info) return null;
+    if (!adapter || !info) return null;
     return {
       vendor: info.vendor,
       architecture: info.architecture,
       device: info.device,
       description: info.description,
+      fallback: isFallbackAdapter(adapter),
+      timestampQueries: adapter.features.has("timestamp-query"),
     };
   } catch {
     return null;
   }
+}
+
+/**
+ * `isFallbackAdapter` moved from the adapter to its info record. Read
+ * whichever the browser has, and answer null rather than hardware when it
+ * has neither.
+ */
+function isFallbackAdapter(adapter: GPUAdapter): boolean | null {
+  const onInfo = (adapter.info as { isFallbackAdapter?: boolean }).isFallbackAdapter;
+  if (typeof onInfo === "boolean") return onInfo;
+  const onAdapter = (adapter as { isFallbackAdapter?: boolean }).isFallbackAdapter;
+  return typeof onAdapter === "boolean" ? onAdapter : null;
 }

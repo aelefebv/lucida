@@ -51,6 +51,7 @@ import {
   proxySlotKey,
 } from "../proxyAtlas.ts";
 import { createInitialState, type RendererState } from "../worker/state.ts";
+import { UNTIMED } from "../passTiming.ts";
 import { findFarthestSlot, handleVolumeChunkData } from "../volume/index.ts";
 import { handleSliceChunkData } from "../slice/index.ts";
 import { sourceKey } from "../poolKeys.ts";
@@ -93,6 +94,7 @@ function makeCtx(device: GPUDevice): WorkerCtx {
     context: {} as GPUCanvasContext,
     format: "bgra8unorm",
     state: createInitialState(),
+    passTimer: UNTIMED,
     getSliceRenderer: () => ({} as never),
     getVolumeRenderer: () => ({} as never),
     getCompositor: () => ({} as never),
