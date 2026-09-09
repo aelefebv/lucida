@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import App from "./App.tsx";
 import { MonitorPage } from "./monitor/MonitorPage.tsx";
+import { WatchStreamBanner } from "./monitor/WatchToggle.tsx";
 import { WorkspaceDashboard } from "./WorkspaceDashboard.tsx";
 import { createWorkspaceFromDatasets } from "./workspaceFromDataset.ts";
 import {
@@ -161,6 +162,9 @@ export function WorkspaceRoot() {
           for someone who typed the URL: the monitor is reachable without a
           workspace, because a run outlives the viewer that produced it. */}
       {monitorOpen && <MonitorPage onClose={() => navigate(monitorReturnPath)} />}
+      {/* Above the routes, because the stream is per session and outlives the
+          monitor the toggle lives on (#1068). */}
+      <WatchStreamBanner />
     </>
   );
 }

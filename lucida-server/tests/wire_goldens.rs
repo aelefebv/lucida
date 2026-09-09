@@ -88,7 +88,7 @@
 //! (`DocumentState::manifests`, `SavedView::dataset_settings`, ...) preserve
 //! insertion order and may hold several.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::PathBuf;
 
@@ -107,7 +107,8 @@ use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{
     BookmarkAction, ChunkMessage, ClientMessage, PeerIdentity, PresenceState, ServerMessage,
     ViewerInteractionMode, ViewerInterestChunkKey, ViewerInterestHint, ViewerInterestLane,
-    ViewerInterestMode, ViewerInterestViewport,
+    ViewerInterestMode, ViewerInterestViewport, WatchBoundaryEvent, WatchItem, WatchLevelRange,
+    WatchReading, WatchRunCause, WatchSendTally, WatchTick, WatchTickLevel,
 };
 use lucida_core::saved_view::{SAVED_VIEW_VERSION, SavedView};
 use lucida_core::scene::{
@@ -309,6 +310,7 @@ fn server_message_fixture_paths(msg: &ServerMessage) -> &'static [&'static str] 
         ServerMessage::TimingBatch { .. } => &["session/server_timing_batch.json"],
         ServerMessage::BookmarkChanged { .. } => &["session/server_bookmark_changed.json"],
         ServerMessage::WorkspaceArchived { .. } => &["session/server_workspace_archived.json"],
+        ServerMessage::WatchUpdate { .. } => &["session/server_watch_update.json"],
     }
 }
 
@@ -339,6 +341,16 @@ fn client_message_fixture_paths(msg: &ClientMessage) -> &'static [&'static str] 
         ClientMessage::DatasetRetry { .. } => &["session/client_dataset_retry.json"],
         ClientMessage::ViewerInterest { .. } => &["session/client_viewer_interest.json"],
         ClientMessage::RequestSnapshot => &["session/client_request_snapshot.json"],
+        ClientMessage::WatchSubscribe => &["session/client_watch_subscribe.json"],
+        // One envelope fixture per watch-item kind that the criteria lock:
+        // the aggregate and the boundary. The provisional item carries the
+        // diagnostic document's own object, which is versioned by the
+        // diagnostic's schema integer and locked by the derivation's tests
+        // rather than restated here.
+        ClientMessage::WatchPublish { .. } => &[
+            "session/client_watch_publish_aggregate.json",
+            "session/client_watch_publish_boundary.json",
+        ],
     }
 }
 
@@ -1866,7 +1878,59 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
             },
             req("", &["/type", "/workspace_id"]),
         ),
+        (
+            "session/server_watch_update.json",
+            ServerMessage::WatchUpdate {
+                client_id: 3,
+                seq: 42,
+                item: watch_aggregate(),
+            },
+            req("", &["/type", "/client_id", "/seq", "/item"]),
+        ),
     ]
+}
+
+/// One watch-stream aggregate, in both directions: the page publishes this
+/// item and the server relays the same object inside a `watch_update`. Built
+/// once so the two fixtures cannot drift apart.
+fn watch_aggregate() -> WatchItem {
+    WatchItem::Aggregate {
+        at_epoch_ms: 1_767_225_600_250,
+        run_id: Some("run-3".into()),
+        reading: Some(WatchReading {
+            at_us: 4_200_000.0,
+            queue_depth: 20_480.0,
+            in_flight: 24.0,
+            frame_time_us: 8_300.0,
+            resident_bytes: 402_653_184.0,
+            gpu_pass_us: Some(2_100.0),
+            extra: BTreeMap::new(),
+        }),
+        counted: BTreeMap::from([("cache-admission".to_string(), 48)]),
+        sent: BTreeMap::from([(
+            "chunkRequest".to_string(),
+            WatchSendTally {
+                messages: 12,
+                bytes: 1_140,
+            },
+        )]),
+        ticks: vec![WatchTick {
+            at_us: 4_199_000,
+            dataset_id: SINGLE_DATASET_ID.into(),
+            counters: BTreeMap::from([("laneDetail".to_string(), 12)]),
+            levels: vec![WatchTickLevel {
+                level: 1,
+                planned: 48,
+                cached: 40,
+                in_flight: 8,
+            }],
+            levels_dropped: 0,
+            target_level: Some(WatchLevelRange { min: 1, max: 1 }),
+            level_pinned: false,
+            displayed_level: Some(WatchLevelRange { min: 1, max: 2 }),
+            extra: BTreeMap::new(),
+        }],
+    }
 }
 
 /// The web-live `DocumentCommand`s, each as its client `Command` envelope
@@ -2075,6 +2139,69 @@ fn client_goldens() -> Vec<(&'static str, ClientMessage, Vec<String>)> {
             "session/client_request_snapshot.json",
             ClientMessage::RequestSnapshot,
             req("", &["/type"]),
+        ),
+        (
+            "session/client_watch_subscribe.json",
+            ClientMessage::WatchSubscribe,
+            req("", &["/type"]),
+        ),
+        (
+            "session/client_watch_publish_aggregate.json",
+            ClientMessage::WatchPublish {
+                item: watch_aggregate(),
+            },
+            req(
+                "",
+                &[
+                    "/type",
+                    "/item",
+                    "/item/kind",
+                    "/item/at_epoch_ms",
+                    "/item/reading/atUs",
+                    "/item/reading/queueDepth",
+                    "/item/reading/inFlight",
+                    "/item/reading/frameTimeUs",
+                    "/item/reading/residentBytes",
+                    "/item/counted",
+                    "/item/sent",
+                    "/item/ticks",
+                    "/item/ticks/0/atUs",
+                    "/item/ticks/0/datasetId",
+                    "/item/ticks/0/counters",
+                    "/item/ticks/0/levels",
+                    "/item/ticks/0/levelsDropped",
+                    "/item/ticks/0/levelPinned",
+                ],
+            ),
+        ),
+        (
+            "session/client_watch_publish_boundary.json",
+            ClientMessage::WatchPublish {
+                item: WatchItem::Boundary {
+                    at_epoch_ms: 1_767_225_604_700,
+                    event: WatchBoundaryEvent::RunClosed,
+                    run_id: Some("run-3".into()),
+                    cause: Some(WatchRunCause {
+                        epoch: Some("view".into()),
+                        dirty_kind: "interactive".into(),
+                        source: "orbit".into(),
+                    }),
+                    end_reason: Some("quiescent".into()),
+                    duration_us: Some(4_700_000),
+                },
+            },
+            req(
+                "",
+                &[
+                    "/type",
+                    "/item",
+                    "/item/kind",
+                    "/item/at_epoch_ms",
+                    "/item/event",
+                    "/item/cause/dirtyKind",
+                    "/item/cause/source",
+                ],
+            ),
         ),
         (
             "session/client_viewer_interest.json",

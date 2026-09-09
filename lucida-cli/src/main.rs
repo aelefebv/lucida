@@ -14,6 +14,7 @@ mod session;
 mod status;
 mod trace;
 mod view;
+mod watch;
 mod workspace;
 
 use std::io::Write;
@@ -1287,6 +1288,25 @@ enum TraceCommand {
         /// Directory runs are read back from
         #[arg(long, value_name = "DIR", env = "LUCIDA_TRACE_DIR")]
         trace_dir: Option<PathBuf>,
+    },
+    /// Follow a live session's watch stream as line-delimited JSON
+    ///
+    /// Somebody in the workspace turns the watch toggle on in their monitor;
+    /// this prints what their page publishes — one JSON object per line, a
+    /// per-tick aggregate, a run boundary, or a provisional reading. No
+    /// per-chunk record ever rides the stream. Subscribing hands over the
+    /// server's small ring first, so a watch that starts mid-stall still sees
+    /// the recent past. Runs until the socket closes unless --seconds says
+    /// otherwise
+    Watch {
+        /// Follow one page by the client id its items carry. Every publishing
+        /// page in the workspace when absent
+        #[arg(long, value_name = "ID")]
+        client_id: Option<u64>,
+        /// Stop after this many seconds instead of following until the socket
+        /// closes
+        #[arg(long, value_name = "SECONDS")]
+        seconds: Option<u64>,
     },
     /// Write the page's trace as Chrome Trace Event JSON, for ui.perfetto.dev
     Perfetto {
@@ -3749,9 +3769,24 @@ async fn emit_trace_command(
                 trace::format_chrome_trace_human(output_path, &capture)
             })?;
         }
+        (None, Some(TraceCommand::Watch { client_id, seconds })) => {
+            // No trailing summary: the command's whole output is the stream it
+            // already printed, and a closing object would be a line a reader
+            // has to learn not to parse as an item.
+            watch::watch_workspace(
+                &target.ws_url,
+                token.as_ref().map(|token| token.token.as_str()),
+                output,
+                watch::WatchOptions {
+                    client_id: *client_id,
+                    duration: seconds.map(Duration::from_secs),
+                },
+            )
+            .await?;
+        }
         (None, None) => {
             return Err(CliError::config(
-                "lucida trace takes a dataset URL to measure, or a subcommand (show, perfetto)",
+                "lucida trace takes a dataset URL to measure, or a subcommand (show, watch, perfetto)",
             ));
         }
     }
@@ -6008,6 +6043,35 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    /// Both flags are optional, because the shape the command exists for is a
+    /// person's session on another machine that nobody can put a duration on.
+    #[test]
+    fn trace_watch_follows_the_workspace_until_asked_otherwise() {
+        match parse(&["trace", "watch"]).command {
+            Command::Trace {
+                dataset,
+                command: Some(TraceCommand::Watch { client_id, seconds }),
+                ..
+            } => {
+                assert_eq!(dataset, None);
+                assert_eq!(client_id, None);
+                assert_eq!(seconds, None);
+            }
+            _ => panic!("expected trace watch"),
+        }
+
+        match parse(&["trace", "watch", "--client-id", "3", "--seconds", "30"]).command {
+            Command::Trace {
+                command: Some(TraceCommand::Watch { client_id, seconds }),
+                ..
+            } => {
+                assert_eq!(client_id, Some(3));
+                assert_eq!(seconds, Some(30));
+            }
+            _ => panic!("expected trace watch"),
+        }
     }
 
     /// The narrower-window follow-up the text prints has to parse, and a

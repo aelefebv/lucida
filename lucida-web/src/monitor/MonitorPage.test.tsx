@@ -270,23 +270,26 @@ describe("observation only", () => {
   it("offers no control that could change what the pipeline does", () => {
     showing(coldRemoteOpen());
 
-    // Every button on the page reads, saves, drills in or leaves. If a future
-    // change adds one that does not, this list is where it shows up.
+    // Every button on the page reads, saves, drills in, leaves, or decides
+    // where a reading goes. *Start a watch stream* is the last of those: it
+    // changes who can see the recording, never what the pipeline does. A
+    // future button that does not fit shows up here.
     const labels = screen.getAllByRole("button").map((node) => node.textContent);
     for (const label of labels) {
-      expect(label).toMatch(/^(Back|Read the newest run|Save run|Save for Perfetto|Save bundle|Show the rows behind .*|Close drill-down)$/);
+      expect(label).toMatch(/^(Back|Read the newest run|Save run|Save for Perfetto|Save bundle|Start a watch stream|Show the rows behind .*|Close drill-down)$/);
     }
   });
 
   it("adds only one control while a run is open, and it ends the run rather than the work", () => {
     // *Stop & analyse* closes the recording's interval. The pipeline goes on
     // doing exactly what it was doing — what ends is the run's label, which is
-    // what makes it readable.
+    // what makes it readable. The watch toggle stands beside it because the
+    // stream carries an open run as readily as a closed one.
     live.value = progress();
     render(<MonitorPage onClose={() => {}} />);
 
     const labels = screen.getAllByRole("button").map((node) => node.textContent);
-    expect(labels).toEqual(["Back", "Stop & analyse"]);
+    expect(labels).toEqual(["Back", "Start a watch stream", "Stop & analyse"]);
   });
 });
 

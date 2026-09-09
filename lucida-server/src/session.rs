@@ -11,6 +11,7 @@ use lucida_protocol::{
 };
 
 use crate::binding::ServerBinding;
+use crate::watch::WatchRelay;
 
 const HISTORY_CAPACITY: usize = 256;
 
@@ -30,6 +31,12 @@ pub struct Session {
     pub generated_availability: HashMap<DatasetId, GeneratedAvailabilitySnapshot>,
     /// Per-client ephemeral presence state.
     pub clients: HashMap<ClientId, PresenceState>,
+    /// The workspace's watch stream: who is subscribed, and the ring of what
+    /// pages published (ADR 0051 as amended). Kept beside the session's other
+    /// live-connection state rather than in its own lock, so one lock orders
+    /// a publish against a subscribe and a late joiner cannot read the ring
+    /// and an item twice.
+    pub watch: WatchRelay,
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +63,7 @@ impl Session {
             binding_runtime: HashMap::new(),
             generated_availability: HashMap::new(),
             clients: HashMap::new(),
+            watch: WatchRelay::new(),
         }
     }
 

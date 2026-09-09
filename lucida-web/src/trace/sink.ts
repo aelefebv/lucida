@@ -50,6 +50,12 @@ export interface TraceSink {
   appendTick(atUs: number, scratch: TickScratch, counted: Uint32Array, sent: Uint32Array): void;
   serialiseTicks(): TraceTick[];
   /**
+   * The tick samples from `startUs` on (#1068). Read while the interval is
+   * still open, so the watch stream can publish what was planned since its
+   * previous aggregate without walking the ring or closing anything.
+   */
+  serialiseTicksFrom(startUs: number): TraceTick[];
+  /**
    * `values` is one reading, in `READING_NAMES` order. `gpuPassUs` is the GPU
    * pass time that arrived since the previous reading, or null when none did.
    */
@@ -123,6 +129,10 @@ export class NoopTraceSink implements TraceSink {
   appendTick(): void {}
 
   serialiseTicks(): TraceTick[] {
+    return [];
+  }
+
+  serialiseTicksFrom(): TraceTick[] {
     return [];
   }
 
@@ -206,6 +216,10 @@ export class TableTraceSink implements TraceSink {
 
   serialiseTicks(): TraceTick[] {
     return this.ticks.serialise();
+  }
+
+  serialiseTicksFrom(startUs: number): TraceTick[] {
+    return this.ticks.serialiseFrom(startUs);
   }
 
   appendReading(atUs: number, values: Float64Array, gpuPassUs: number | null): void {

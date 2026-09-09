@@ -19,6 +19,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import "./MonitorPage.css";
+import { WatchToggle } from "./WatchToggle.tsx";
 import {
   buildLiveView,
   buildProvisionalView,
@@ -174,6 +175,10 @@ export function MonitorPage({ onClose }: MonitorPageProps) {
           {live?.runId ?? runId ?? "no run"}
         </span>
         <div className="monitor-chrome-actions">
+          {/* Offered whether or not a run is open: the stream carries the
+              steady-state interval's aggregates too, and a session that never
+              settles is the one somebody wants watched. */}
+          <WatchToggle />
           {/* While a run is open the only control offered is the one that ends
               it. Every other read here exports, and exporting would close the
               run being watched without saying that is what it did. */}
