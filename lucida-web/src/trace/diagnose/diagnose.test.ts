@@ -26,12 +26,13 @@ import {
   makeRun,
   quietRun,
   saturatedReopen,
+  sendHeavyIdleRun,
   uninstrumentedPrefixOpen,
 } from "./fixtures.ts";
 import { CONFIDENCE_WORDS, diagnoseDocument, diagnoseRun } from "./diagnose.ts";
 import { RULESET, RULESET_VERSION, PHASE_CLASSES } from "./ruleset.ts";
 import type { DiagnosticDocument } from "./types.ts";
-import type { GpuIdentity, TraceDocument } from "../types.ts";
+import { CLIENT_MESSAGE_TYPES, TRACE_SCHEMA_VERSION, type GpuIdentity, type TraceDocument } from "../types.ts";
 
 const MS = 1_000;
 
@@ -411,9 +412,18 @@ describe("the document", () => {
     expect(doc.coverage.notHealthSignals.every((s) => s.value === 0)).toBe(true);
   });
 
+  it("refuses a run recorded under another trace schema, and says which", () => {
+    const old = TRACE_SCHEMA_VERSION - 1;
+    const run = makeRun({ header: { schemaVersion: old } });
+
+    expect(() => diagnoseRun(run)).toThrow(
+      new RegExp(`trace schema ${old}; this build reads schema ${TRACE_SCHEMA_VERSION}`),
+    );
+  });
+
   it("reads the newest run out of a trace document", () => {
     const traceDocument: TraceDocument = {
-      schemaVersion: 1,
+      schemaVersion: TRACE_SCHEMA_VERSION,
       exportedAtEpochMs: 1_700_000_000_000,
       retention: {
         residentCapBytes: 8_000_000,
@@ -502,6 +512,40 @@ describe("the document", () => {
     expect(doc.coverage.truncated!.rowsUnrecorded).toBe(45_412);
     expect(doc.coverage.truncated!.recordedPct).toBe(28);
     expect(doc.coverage.incomplete).toBe(true);
+  });
+});
+
+describe("the send side", () => {
+  it("carries the per-type totals of a send-heavy idle run as rates over the wall clock", () => {
+    const doc = diagnoseRun(sendHeavyIdleRun());
+
+    expect(doc.sent.messages).toBe(462);
+    expect(doc.sent.bytes).toBe(30_376);
+    expect(doc.sent.bytesPerS).toBe(3_038);
+    const byType = Object.fromEntries(doc.sent.byType.map((entry) => [entry.type, entry]));
+    expect(byType.cursor).toEqual({
+      type: "cursor", label: "cursor", messages: 400, bytes: 16_000, bytesPerS: 1_600,
+    });
+    expect(byType.presence).toMatchObject({ messages: 40, bytes: 12_000, bytesPerS: 1_200 });
+    expect(byType.viewerInterest).toMatchObject({ messages: 10, bytes: 1_200, bytesPerS: 120 });
+    expect(byType.chunkRequest).toMatchObject({ messages: 12, bytes: 1_176, bytesPerS: 118 });
+    expect(byType.assetRequest).toMatchObject({ messages: 0, bytes: 0, bytesPerS: 0 });
+  });
+
+  it("reads the run's totals rather than summing the tick samples", () => {
+    const run = sendHeavyIdleRun();
+    expect(run.ticks.every((tick) => tick.sent.cursor.messages === 0)).toBe(true);
+
+    const cursor = diagnoseRun(run).sent.byType.find((entry) => entry.type === "cursor");
+    expect(cursor?.messages).toBe(400);
+  });
+
+  it("names every type of the closed set, in its order, zeros included", () => {
+    const doc = diagnoseRun(quietRun());
+
+    expect(doc.sent.byType.map((entry) => entry.type)).toEqual([...CLIENT_MESSAGE_TYPES]);
+    expect(doc.sent.byType.every((entry) => entry.messages === 0 && entry.bytesPerS === 0)).toBe(true);
+    expect(doc.sent.bytesPerS).toBe(0);
   });
 });
 

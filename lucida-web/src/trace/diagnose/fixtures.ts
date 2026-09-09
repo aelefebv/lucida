@@ -16,13 +16,16 @@
  */
 
 import { computeCoverage } from "../coverage.ts";
+import { SEND_COLUMN_COUNT, sendTalliesFrom } from "../sendAccounting.ts";
 import {
+  CLIENT_MESSAGE_TYPES,
   PHASES,
   type CountedPhase,
   type LaneName,
   type MetadataReadPhase,
   type Phase,
   type RunHeader,
+  type SendTallies,
   type ServerPhaseDurations,
   type TraceReading,
   type TraceRow,
@@ -119,7 +122,16 @@ export function makeReading(atUs: number, overrides: Partial<TraceReading> = {})
   };
 }
 
-export function makeTick(atUs: number, counted: Partial<Record<CountedPhase, number>> = {}): TraceTick {
+/** Every client message type at zero: the send tallies of an interval that sent nothing. */
+export function emptySendTallies(): SendTallies {
+  return sendTalliesFrom(new Uint32Array(SEND_COLUMN_COUNT));
+}
+
+export function makeTick(
+  atUs: number,
+  counted: Partial<Record<CountedPhase, number>> = {},
+  sent: Partial<SendTallies> = {},
+): TraceTick {
   return {
     atUs,
     datasetId: "ds",
@@ -146,12 +158,29 @@ export function makeTick(atUs: number, counted: Partial<Record<CountedPhase, num
       "worker-dispatch": counted["worker-dispatch"] ?? 0,
       "coalesce-attach": counted["coalesce-attach"] ?? 0,
     },
+    sent: { ...emptySendTallies(), ...sent },
     levels: [],
     levelsDropped: 0,
     targetLevel: null,
     levelPinned: false,
     displayedLevel: null,
   };
+}
+
+/**
+ * The default run total: what the ticks carry. Only a default, because the
+ * recorder counts at send time and a real total can exceed the samples. A
+ * fixture that models that passes its own `sent`.
+ */
+function sumSent(ticks: TraceTick[]): SendTallies {
+  const total = emptySendTallies();
+  for (const tick of ticks) {
+    for (const type of CLIENT_MESSAGE_TYPES) {
+      total[type].messages += tick.sent[type].messages;
+      total[type].bytes += tick.sent[type].bytes;
+    }
+  }
+  return total;
 }
 
 export function makeHeader(overrides: Partial<RunHeader> = {}): RunHeader {
@@ -209,6 +238,8 @@ export interface RunSpec {
   serverRows?: TraceServerRow[];
   datasetOpens?: TraceRun["datasetOpens"];
   events?: TraceRun["events"];
+  /** The interval's send totals. Defaults to what the ticks carry. */
+  sent?: SendTallies;
   ticksDropped?: number;
   eventsDropped?: number;
   serverRowsDropped?: number;
@@ -236,6 +267,7 @@ export function makeRun(spec: RunSpec = {}): TraceRun {
     rows,
     ticks,
     ticksDropped: spec.ticksDropped ?? 0,
+    sent: spec.sent ?? sumSent(ticks),
     readings: spec.readings ?? [],
     readingsDropped: 0,
     events: spec.events ?? [],
@@ -462,6 +494,59 @@ export function quietRun(): TraceRun {
     rows,
     readings: Array.from({ length: 8 }, (_, i) =>
       makeReading(i * 200 * MS, { queueDepth: 0, inFlight: 2, frameTimeUs: 2_000 }),
+    ),
+  });
+}
+
+/**
+ * The field report's run: the view looks loaded, and the socket does not go
+ * quiet. A pan settles inside the first 100 ms, nothing re-plans afterwards,
+ * and for the rest of ten seconds the client keeps sending: cursor positions,
+ * presence, viewer interest. The person stops the run to read it.
+ *
+ * The regression fixture for send-side accounting. Only two planning passes
+ * exist, so the samples carry the chunk requests and one viewer-interest
+ * message and nothing of the idle stretch. The run's totals carry all of it,
+ * which is why the recorder counts totals at send time rather than summing
+ * the samples. The per-type totals here are what the text and the JSON have
+ * to agree on. The idle stretch is modelled inside a run rather than as a
+ * steady-state interval because a steady-state interval has no reading of
+ * its own: the run is the unit the text and the JSON are derived for.
+ */
+export function sendHeavyIdleRun(): TraceRun {
+  const rows = Array.from({ length: 12 }, (_, i) =>
+    makeRow(
+      {
+        startUs: 20 * MS + i * 2 * MS,
+        durations: { plan: 200, queue: 2 * MS, wire: 30 * MS, decode: 800, upload: 1_000, present: 2 * MS },
+        rid: i,
+      },
+      i,
+    ),
+  );
+  const ticks = [
+    makeTick(20 * MS, {}, { chunkRequest: { messages: 12, bytes: 1_176 } }),
+    makeTick(60 * MS, {}, { viewerInterest: { messages: 1, bytes: 120 } }),
+  ];
+  const sent: SendTallies = {
+    ...emptySendTallies(),
+    chunkRequest: { messages: 12, bytes: 1_176 },
+    viewerInterest: { messages: 10, bytes: 1_200 },
+    presence: { messages: 40, bytes: 12_000 },
+    cursor: { messages: 400, bytes: 16_000 },
+  };
+  return makeRun({
+    header: {
+      runId: "send-heavy-idle",
+      durationUs: 10_000 * MS,
+      endReason: "explicit",
+      cause: { epoch: "view", dirtyKind: "interactive", source: "pan" },
+    },
+    rows,
+    ticks,
+    sent,
+    readings: Array.from({ length: 4 }, (_, i) =>
+      makeReading(i * 25 * MS, { queueDepth: 0, inFlight: 2, frameTimeUs: 3_000 }),
     ),
   });
 }

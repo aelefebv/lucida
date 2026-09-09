@@ -19,6 +19,7 @@
 
 import type { LevelRange } from "../renderer/workerProtocol.ts";
 import { RingSlots } from "./ring.ts";
+import { SEND_COLUMN_COUNT, sendTalliesFrom } from "./sendAccounting.ts";
 import { StringPool } from "./stringPool.ts";
 import {
   COUNTED_PHASES,
@@ -34,6 +35,7 @@ import {
 const COUNTERS_PER_TICK = TICK_COUNTER_NAMES.length;
 const COUNTED_PER_TICK = COUNTED_PHASES.length;
 const LEVELS_PER_TICK = TICK_LEVEL_SLOTS * LEVEL_COLUMNS;
+const SENDS_PER_TICK = SEND_COLUMN_COUNT;
 
 const RANGE_COLUMNS = 4;
 
@@ -149,7 +151,9 @@ export class TickRing {
    * level ranges, plus the columns, all uint32; and one byte for the pin.
    */
   static readonly BYTES_PER_TICK =
-    (3 + RANGE_COLUMNS + COUNTERS_PER_TICK + COUNTED_PER_TICK + LEVELS_PER_TICK) * 4 + 1;
+    (3 + RANGE_COLUMNS + COUNTERS_PER_TICK + COUNTED_PER_TICK + LEVELS_PER_TICK + SENDS_PER_TICK) *
+      4 +
+    1;
 
   private readonly strings = new StringPool();
   private readonly slots: RingSlots;
@@ -162,6 +166,7 @@ export class TickRing {
   private readonly levels: Uint32Array;
   private readonly ranges: Uint32Array;
   private readonly levelPinned: Uint8Array;
+  private readonly sent: Uint32Array;
 
   constructor(capacity = DEFAULT_TICK_CAPACITY) {
     this.slots = new RingSlots(capacity);
@@ -174,6 +179,7 @@ export class TickRing {
     this.levels = new Uint32Array(this.capacity * LEVELS_PER_TICK);
     this.ranges = new Uint32Array(this.capacity * RANGE_COLUMNS);
     this.levelPinned = new Uint8Array(this.capacity);
+    this.sent = new Uint32Array(this.capacity * SENDS_PER_TICK);
   }
 
   get dropped(): number {
@@ -188,8 +194,11 @@ export class TickRing {
     return this.capacity * TickRing.BYTES_PER_TICK;
   }
 
-  /** `counted` is the counted-not-timed phase tally since the previous sample. */
-  append(atUs: number, scratch: TickScratch, counted: Uint32Array): void {
+  /**
+   * `counted` is the counted-not-timed phase tally since the previous sample,
+   * and `sent` the client's sends since then, both process-wide.
+   */
+  append(atUs: number, scratch: TickScratch, counted: Uint32Array, sent: Uint32Array): void {
     const slot = this.slots.claim();
 
     this.atUs[slot] = atUs;
@@ -200,6 +209,7 @@ export class TickRing {
     this.levels.set(scratch.levels, slot * LEVELS_PER_TICK);
     this.ranges.set(scratch.ranges, slot * RANGE_COLUMNS);
     this.levelPinned[slot] = scratch.levelPinned ? 1 : 0;
+    this.sent.set(sent, slot * SENDS_PER_TICK);
   }
 
   /** Oldest-first, so a reader walks the ring the way the run happened. */
@@ -232,6 +242,7 @@ export class TickRing {
         datasetId: this.strings.get(this.datasetIds[slot]),
         counters,
         counted,
+        sent: sendTalliesFrom(this.sent, slot * SENDS_PER_TICK),
         levels,
         levelsDropped: this.levelsDropped[slot],
         targetLevel: rangeOrNull(this.ranges[r], this.ranges[r + 1]),

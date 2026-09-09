@@ -156,6 +156,26 @@ export function renderDiagnostic(
   );
   push(IDENTITY, `render    ${renderTimingOf(document, p)}`);
 
+  // --- what the client sent -------------------------------------------------
+  // The identity line names only the types that sent anything. The SENT table
+  // at DETAIL lists the whole closed set, zeros included.
+  const sentTypes = document.sent.byType
+    .map((entry, index) => ({ entry, index }))
+    .filter(({ entry }) => entry.messages > 0);
+  push(
+    IDENTITY,
+    sentTypes.length === 0
+      ? "sent      nothing on the session socket"
+      : `sent      ${p("sent.bytesPerS", document.sent.bytesPerS.toLocaleString())} B/s · ` +
+          sentTypes
+            .map(
+              ({ entry, index }) =>
+                `${entry.label} ${p(`sent.byType[${index}].bytesPerS`, entry.bytesPerS.toLocaleString())} B/s ` +
+                `n=${p(`sent.byType[${index}].messages`, entry.messages.toLocaleString())}`,
+            )
+            .join(" · "),
+  );
+
   document.coverage.gaps.forEach((gap, index) => {
     push(
       GAPS,
@@ -228,6 +248,19 @@ export function renderDiagnostic(
         );
       }
     }
+    push(DETAIL, "");
+    push(
+      DETAIL,
+      "SENT  (messages the page transmitted on the session socket, by client message type, over the run's wall clock)",
+    );
+    document.sent.byType.forEach((entry, index) => {
+      push(
+        DETAIL,
+        `   ${entry.label.padEnd(18)} n=${p(`sent.byType[${index}].messages`, entry.messages).padStart(7)} ` +
+          `${p(`sent.byType[${index}].bytes`, entry.bytes).padStart(11)} B ` +
+          `${p(`sent.byType[${index}].bytesPerS`, entry.bytesPerS).padStart(9)} B/s`,
+      );
+    });
     push(DETAIL, "");
     push(DETAIL, `RULESET v${document.ruleset.version} — ${document.ruleset.note}`);
   }

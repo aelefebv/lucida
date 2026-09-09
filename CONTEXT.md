@@ -387,6 +387,15 @@ dispatch, coalesce attach. Counted on the per-tick aggregate, never timed, so a
 reader is not shown quantisation noise wearing the costume of data.
 _Avoid_: untimed phase, fast phase
 
+**Client message type**:
+The kind, from a closed set, that a message the page sends over the session
+socket counts under: chunk request, asset request, viewer interest, presence,
+dataset presence, cursor, command, or other. Every sent message counts under
+exactly one, by messages and by bytes, on the per-tick aggregate and as a
+run total. Distinct from a chunk's *sent state* in delivery, which is a chunk
+posted to the render worker and not a message on the wire.
+_Avoid_: frame type, send kind, outbound type
+
 **Correlation label** (`rid`):
 The `u32` that joins a browser-side lifecycle row to the server-side row for the
 same wire request. Client-minted, outbound-only, and monotonic across one

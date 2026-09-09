@@ -377,13 +377,16 @@ describe("the trace seam", () => {
     cache.submit(makePlan([makeRequest()]));
     await flush();
 
+    // The run's wall is whatever the test took, so a window past it is clamped
+    // to it. Either way the reading is scoped, and the text names the window.
     const windowed = window.lucidaTrace!.diagnose(undefined, {
       window: { startMs: 0, endMs: 0.5 },
     });
-    expect(windowed.window).toMatchObject({ startMs: 0, endMs: 0.5 });
-    expect(windowed.coverage.wallMs).toBe(0.5);
+    expect(windowed.window).toMatchObject({ startMs: 0 });
+    expect(windowed.window!.endMs).toBeLessThanOrEqual(0.5);
+    expect(windowed.coverage.wallMs).toBeLessThanOrEqual(0.5);
     expect(window.lucidaTrace!.diagnoseText(windowed.runId, { window: { startMs: 0, endMs: 0.5 } })).toContain(
-      "window    0..0.5 ms",
+      `window    0..${windowed.window!.endMs} ms`,
     );
   });
 
@@ -411,7 +414,10 @@ describe("the trace seam", () => {
     expect(traceRecorder.isRunOpen).toBe(true);
 
     expect(diagnostic.runId).toBe(runId);
-    expect(diagnostic.window).toMatchObject({ startMs: 0, endMs: 1 });
+    // Clamped to the run's own wall when the run took under a millisecond.
+    const wallMs = document.runs.find((run) => run.header.runId === runId)!.header.durationUs / 1_000;
+    expect(diagnostic.window).toMatchObject({ startMs: 0 });
+    expect([1, wallMs]).toContain(diagnostic.window!.endMs);
     expect(text).toContain(`lucida trace ${runId}`);
     expect(text).toContain("CRITICAL PATH");
   });
