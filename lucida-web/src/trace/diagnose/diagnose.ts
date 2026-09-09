@@ -18,6 +18,7 @@ import { buildCriticalPath, UNRECORDED_PREFIX } from "./criticalPath.ts";
 import { backlogExceeded, isPinned, summariseLimiters } from "./limiters.ts";
 import { RULESET, type AbsoluteRule } from "./ruleset.ts";
 import { aggregateCandidates, metadataReadRows, rollupPhases, usToMs } from "./phaseRollup.ts";
+import { adapterKindOf, adapterName, deriveRenderTiming } from "./renderTiming.ts";
 import {
   DIAGNOSTIC_SCHEMA_VERSION,
   type AggregateCandidate,
@@ -109,6 +110,7 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
     phases,
     limiters,
     aggregates,
+    renderTiming: deriveRenderTiming(run),
     counts: {
       rows: run.rows.length,
       serverRows: run.serverRows.length - metadataReadRows(run.serverRows).length,
@@ -611,7 +613,9 @@ function runIdentity(run: TraceRun): RunIdentity {
     devicePixelRatio: header.devicePixelRatio,
     viewport: `${header.viewport.deviceWidth}x${header.viewport.deviceHeight}px`,
     build: `${header.build.version} ${header.build.mode}`,
-    gpu: header.gpu ? `${header.gpu.vendor} ${header.gpu.architecture}`.trim() : "unknown",
+    gpu: adapterName(header.gpu),
+    adapter: header.gpu,
+    adapterKind: adapterKindOf(header.gpu),
     warmth:
       warmth.detailChunks + warmth.coarseChunks === 0
         ? "browser cache cold"

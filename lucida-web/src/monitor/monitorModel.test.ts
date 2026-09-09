@@ -12,8 +12,11 @@ import { describe, expect, it } from "vitest";
 import { diagnoseRun } from "../trace/diagnose/diagnose.ts";
 import {
   coldRemoteOpen,
+  fallbackAdapterOpen,
+  gpuTimedOpen,
   healthyLocalOpen,
   interactionRun,
+  mainThreadOnlyOpen,
   makeRow,
   makeRun,
   saturatedReopen,
@@ -250,6 +253,34 @@ describe("truncation and coverage lead", () => {
     const gaps = view.banners.filter((banner) => banner.kind === "gap");
 
     expect(gaps.length).toBe(diagnoseRun(coldRemoteOpen()).coverage.gapCount);
+  });
+});
+
+describe("render timing and the adapter", () => {
+  function identity(view: ReturnType<typeof buildMonitorView>, label: string): string {
+    const row = view.identity.find((number) => number.label === label);
+    expect(row, label).toBeDefined();
+    return row!.value;
+  }
+
+  it("names the adapter's kind in both states", () => {
+    expect(identity(buildMonitorView(diagnoseRun(fallbackAdapterOpen())), "gpu")).toBe(
+      "generic software (software rasterizer) · software fallback adapter",
+    );
+    expect(identity(buildMonitorView(diagnoseRun(healthyLocalOpen())), "gpu")).toBe(
+      "apple metal-3 · hardware adapter",
+    );
+  });
+
+  it("shows GPU pass time beside main-thread time, or the reason it is missing", () => {
+    const timed = identity(buildMonitorView(diagnoseRun(gpuTimedOpen())), "render timing");
+    expect(timed).toContain("main-thread frame p95");
+    expect(timed).toContain("GPU pass p95");
+
+    const untimed = identity(buildMonitorView(diagnoseRun(mainThreadOnlyOpen())), "render timing");
+    expect(untimed).toContain("main-thread frame p95");
+    expect(untimed).toContain("GPU pass not recorded: the adapter offers no timestamp queries");
+    expect(untimed).not.toContain("GPU pass p95");
   });
 });
 

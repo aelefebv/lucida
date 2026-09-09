@@ -792,9 +792,9 @@ describe("recorder cost contract", () => {
 
   it("allocates nothing in steady state after warmup", () => {
     // Steady state is the write path over buffers that already exist: row
-    // births into spare capacity, stamps into a live row, the two drop-oldest
-    // rings wrapping, the counted-phase vector, and the frame hand-off
-    // swapping its two lists.
+    // births into spare capacity, stamps into a live row, the three
+    // drop-oldest rings wrapping, the counted-phase vector, and the frame
+    // hand-off swapping its two lists.
     //
     // Row appends are inside the window on purpose, and the window is sized to
     // fit inside the capacity the warmup grew. Leaving them out would make the
@@ -834,6 +834,7 @@ describe("recorder cost contract", () => {
       rig.recorder.countPhase(CountedPhaseIndex.CacheAdmission);
       rig.recorder.recordPointEvent(PointEvent.Rejection, "atlas-policy", null, 0);
       rig.recorder.noteFrameDispatched();
+      rig.recorder.noteReading(3, 2, 4_000, 1_000_000, i % 2 === 0 ? 900 : null);
       rig.recorder.beginTick("ds");
       rig.recorder.commitTick();
     }
@@ -841,7 +842,7 @@ describe("recorder cost contract", () => {
     gc?.();
     const heapAfter = process.memoryUsage().heapUsed;
     const grown = heapAfter - heapBefore;
-    const calls = ops * 6 + appends;
+    const calls = ops * 7 + appends;
     console.log(
       `[#928] steady state: ${calls} write calls (${appends} of them row births ` +
         `into spare capacity) grew the heap by ${(grown / 1024).toFixed(1)} kB ` +

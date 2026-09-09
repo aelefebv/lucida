@@ -122,8 +122,9 @@ export function renderDiagnostic(
   push(
     IDENTITY,
     `client    DPR ${p("run.devicePixelRatio", document.run.devicePixelRatio)} · ${document.run.viewport} · ` +
-      `${document.run.gpu} · build ${document.run.build}`,
+      `${document.run.gpu} · ${document.run.adapterKind.label} · build ${document.run.build}`,
   );
+  push(IDENTITY, `render    ${renderTimingOf(document, p)}`);
 
   document.coverage.gaps.forEach((gap, index) => {
     push(
@@ -304,6 +305,24 @@ function byteLength(text: string): number {
 function causeOf(document: DiagnosticDocument): string {
   const cause = document.run.cause;
   return cause ? `${cause.epoch ?? "none"}/${cause.dirtyKind}/${cause.source}` : "steady state";
+}
+
+function renderTimingOf(
+  document: DiagnosticDocument,
+  p: (path: string, value: string | number) => string,
+): string {
+  const { mainThread, gpuPass } = document.renderTiming;
+  const main = mainThread
+    ? `main-thread frame p50 ${p("renderTiming.mainThread.p50Ms", mainThread.p50Ms)} ms · ` +
+      `p95 ${p("renderTiming.mainThread.p95Ms", mainThread.p95Ms)} ms ` +
+      `(n=${p("renderTiming.mainThread.samples", mainThread.samples)})`
+    : "main-thread frame time not sampled";
+  const gpu = gpuPass.recorded
+    ? `GPU pass p50 ${p("renderTiming.gpuPass.p50Ms", gpuPass.p50Ms)} ms · ` +
+      `p95 ${p("renderTiming.gpuPass.p95Ms", gpuPass.p95Ms)} ms ` +
+      `(n=${p("renderTiming.gpuPass.samples", gpuPass.samples)})`
+    : `GPU pass not recorded: ${gpuPass.statement}`;
+  return `${main} · ${gpu}`;
 }
 
 function describeObservation(finding: Finding, p: (path: string, value: string | number) => string): string {

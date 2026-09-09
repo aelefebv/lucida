@@ -302,12 +302,15 @@ export class RenderLoop implements TraceEnvironment {
     // The reading tier rides the same moment (#934). Queue depth and in-flight
     // come off the reading just taken rather than a second scan, and both
     // include speculative prefetch: the queue is as deep as it is, whatever
-    // the settle predicate chooses to ignore.
+    // the settle predicate chooses to ignore. The GPU pass time is whatever
+    // the render worker read back since the last tick, usually the previous
+    // tick's frame.
     traceRecorder.noteReading(
       state.pending + state.speculativePending,
       state.inFlight + state.speculativeInFlight,
       this.lastFrameTimeUs,
       this.session.cpuCache.residentBytes(),
+      this.client.takeGpuPassUs(),
     );
   }
 

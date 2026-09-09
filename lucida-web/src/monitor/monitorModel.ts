@@ -210,9 +210,21 @@ function identityOf(diagnostic: DiagnosticDocument): MonitorNumber[] {
     },
     { label: "device pixel ratio", value: String(run.devicePixelRatio) },
     { label: "viewport", value: run.viewport },
-    { label: "gpu", value: run.gpu },
+    { label: "gpu", value: `${run.gpu} · ${run.adapterKind.label}` },
+    { label: "render timing", value: renderTimingOf(diagnostic) },
     { label: "build", value: run.build },
   ];
+}
+
+function renderTimingOf(diagnostic: DiagnosticDocument): string {
+  const { mainThread, gpuPass } = diagnostic.renderTiming;
+  const main = mainThread
+    ? `main-thread frame p95 ${formatMs(mainThread.p95Ms)} (n=${formatCount(mainThread.samples)})`
+    : "main-thread frame time not sampled";
+  const gpu = gpuPass.recorded
+    ? `GPU pass p95 ${formatMs(gpuPass.p95Ms)} (n=${formatCount(gpuPass.samples)})`
+    : `GPU pass not recorded: ${gpuPass.statement}`;
+  return `${main} · ${gpu}`;
 }
 
 /**

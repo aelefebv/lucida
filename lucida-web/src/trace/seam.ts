@@ -168,6 +168,11 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
  * Record the adapter the page is running against, so two runs on different
  * hardware are visibly not comparable. Asking for an adapter does not create
  * a device and does not disturb the renderer's own.
+ *
+ * The render worker asks for the same default adapter, so what this reports
+ * about fallback status and timestamp queries is what the worker's device
+ * has: the worker enables timestamp queries exactly when the adapter offers
+ * them, and records a GPU pass time per frame only then.
  */
 export async function resolveGpuIdentity(): Promise<GpuIdentity | null> {
   const gpu = (navigator as Navigator & { gpu?: GPU }).gpu;
@@ -175,14 +180,28 @@ export async function resolveGpuIdentity(): Promise<GpuIdentity | null> {
   try {
     const adapter = await gpu.requestAdapter();
     const info = adapter?.info;
-    if (!info) return null;
+    if (!adapter || !info) return null;
     return {
       vendor: info.vendor,
       architecture: info.architecture,
       device: info.device,
       description: info.description,
+      fallback: isFallbackAdapter(adapter),
+      timestampQueries: adapter.features.has("timestamp-query"),
     };
   } catch {
     return null;
   }
+}
+
+/**
+ * `isFallbackAdapter` moved from the adapter to its info record. Read
+ * whichever the browser has, and answer null rather than hardware when it
+ * has neither.
+ */
+function isFallbackAdapter(adapter: GPUAdapter): boolean | null {
+  const onInfo = (adapter.info as { isFallbackAdapter?: boolean }).isFallbackAdapter;
+  if (typeof onInfo === "boolean") return onInfo;
+  const onAdapter = (adapter as { isFallbackAdapter?: boolean }).isFallbackAdapter;
+  return typeof onAdapter === "boolean" ? onAdapter : null;
 }

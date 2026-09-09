@@ -369,7 +369,11 @@ prefetch, overview)
 
 **Reading**:
 One timestamped sample of the four process-wide quantities a timeline needs as
-counter tracks — queue depth, in-flight, frame time, resident bytes. Taken once
+counter tracks — queue depth, in-flight, frame time, resident bytes — plus the
+GPU pass time of the last frame the render worker read back, on the readings
+that received one. Frame time is main-thread time, and every surface labels it
+that way. GPU pass time comes from the device through timestamp queries, and
+where the adapter offers none it is absent, never zero. Taken once
 per tick, not once per planning pass, because the planner's epoch cache lets a
 run fetch for seconds without re-planning and a series sampled on that cadence is
 a cluster of points at run start and silence after. Kept on its own drop-oldest

@@ -13,7 +13,7 @@
  * it.
  */
 
-import type { CoverageGap, CoverageLimit, EndReason, RunCause } from "../types.ts";
+import type { CoverageGap, CoverageLimit, EndReason, GpuIdentity, RunCause } from "../types.ts";
 import type { Ruleset } from "./ruleset.ts";
 
 /**
@@ -301,7 +301,27 @@ export interface RunIdentity {
   devicePixelRatio: number;
   viewport: string;
   build: string;
+  /**
+   * The adapter in one phrase: its vendor, architecture, and device, with the
+   * description when the browser gave one. "unknown" when the run closed
+   * before the page had identified an adapter.
+   */
   gpu: string;
+  /**
+   * The adapter as the header recorded it, including whether it is a software
+   * fallback and whether it offers timestamp queries. Null when the run closed
+   * before the page had identified one. Carried whole so a surface can name
+   * the description or warn about a fallback without reaching past the
+   * document.
+   */
+  adapter: GpuIdentity | null;
+  /**
+   * Which kind of adapter the run rendered on, with the phrase every surface
+   * prints for it. Both states are named, so a hardware adapter reads as
+   * hardware rather than as the absence of a warning, and a header that
+   * never recorded the kind reads as not recorded rather than as either.
+   */
+  adapterKind: { kind: AdapterKind; label: string };
   /** What the browser already held when the run opened, in one phrase. */
   warmth: string;
   /** What was still outstanding when the run closed. */
@@ -313,6 +333,64 @@ export interface Verdict {
   kind: "clear" | "stall" | "saturated" | "unsettled";
   text: string;
   confidence: Confidence;
+}
+
+/**
+ * Which kind of adapter a run rendered on. Four words rather than a boolean
+ * because two of the states are about the header rather than the adapter: a
+ * run can close before an adapter is identified, and a run recorded before
+ * the fallback flag existed never recorded it.
+ */
+export type AdapterKind = "hardware" | "software-fallback" | "not-identified" | "not-recorded";
+
+/** The shape of one per-tick timing across the run, in milliseconds. */
+export interface TimingSummary {
+  samples: number;
+  p50Ms: number;
+  p95Ms: number;
+  maxMs: number;
+}
+
+/**
+ * Why a run carries no GPU pass time. A closed set, because a surface that
+ * draws the GPU track has to draw its absence too and needs to know which
+ * absence it is drawing.
+ */
+export type GpuPassAbsenceReason =
+  /** The adapter offers no timestamp queries, so nothing could be measured on the device. */
+  | "no-timestamp-queries"
+  /** The adapter offers them, but no frame's read-back landed before the run closed. */
+  | "no-frame-read-back"
+  /** The run closed before the page had identified an adapter at all. */
+  | "adapter-unknown"
+  /** The header predates the field that says whether the adapter offers timestamp queries. */
+  | "not-recorded";
+
+/**
+ * The GPU pass time across the run, or the stated reason there is none.
+ * One value with two shapes rather than a summary beside a nullable reason,
+ * so no document can carry a missing figure with no reason or a figure with
+ * one.
+ */
+export type GpuPassTiming =
+  | ({ recorded: true } & TimingSummary)
+  | { recorded: false; reason: GpuPassAbsenceReason; statement: string };
+
+/**
+ * Where the run's render time went, on two clocks that must never be
+ * confused. `mainThread` is the tick's own main-thread time, from the
+ * readings. `gpuPass` is the GPU's pass time for a frame, read back through
+ * timestamp queries and present only on the readings that received one.
+ *
+ * An unrecorded `gpuPass` states its reason rather than implying one. It
+ * means unmeasured, never fast, and every surface that prints `mainThread`
+ * has to call it main-thread time so that one number is not mistaken for the
+ * other.
+ */
+export interface RenderTiming {
+  /** Null when no reading carried a frame time above the clock floor. */
+  mainThread: TimingSummary | null;
+  gpuPass: GpuPassTiming;
 }
 
 export interface NextStep {
@@ -339,6 +417,8 @@ export interface DiagnosticDocument {
   phases: PhaseRollup[];
   limiters: LimiterSummary[];
   aggregates: AggregateCandidate[];
+  /** Main-thread time and GPU pass time, or the stated reason the second is missing. */
+  renderTiming: RenderTiming;
   counts: {
     rows: number;
     serverRows: number;

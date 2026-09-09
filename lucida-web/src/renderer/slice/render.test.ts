@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { EntityDescriptorIndex, MemberSourceBinding } from "../descriptorBuffer.ts";
 import type { WorkerCtx } from "../workerContext.ts";
+import { UNTIMED } from "../passTiming.ts";
 import type { AggregateDrawParams, SlicePoolBinding } from "../sliceRenderer.ts";
 import type { SliceRenderMultiPassMessage } from "../workerProtocol.ts";
 import type { LodIndirectionMeta } from "../volume/atlas.ts";
@@ -153,6 +154,7 @@ function makeCtx(opts: {
       getCurrentTexture: () => ({ createView: () => ({}) }),
     },
     state: opts.state,
+    passTimer: UNTIMED,
     getSliceRenderer: () => opts.renderer,
     getCompositor: () => ({ composite: opts.composite }),
     getCursorRenderer: () => ({ hasData: () => false }),

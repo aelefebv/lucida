@@ -3,6 +3,7 @@ import shaderSource from "./volume.wgsl?raw";
 import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
 import { DESCRIPTOR_ENTRY_SIZE, DESCRIPTOR_MAX_LEVEL_SOURCES } from "./descriptor/layout.ts";
 import { serializeTransientDescriptor } from "./descriptor/transient.ts";
+import type { PassTiming } from "./passTiming.ts";
 
 /**
  * Byte offsets of the shader's `Uniforms` fields (volume.wgsl). The
@@ -443,7 +444,8 @@ export class VolumeRenderer {
     return this.transientDepthTex.createView();
   }
 
-  renderTo(target: GPUTextureView, encoder: GPUCommandEncoder, depthView?: GPUTextureView, isFirstLayer?: boolean, targetWidth?: number, targetHeight?: number, scissorRect?: [number, number, number, number]) {
+  /** `timing` stamps the pass for the trace's GPU pass time; viewport frames pass it, the minimap does not. */
+  renderTo(target: GPUTextureView, encoder: GPUCommandEncoder, depthView?: GPUTextureView, isFirstLayer?: boolean, targetWidth?: number, targetHeight?: number, scissorRect?: [number, number, number, number], timing?: PassTiming) {
     if (!this.bindGroup || !this.descriptorBindGroup) return;
 
     const O = VOLUME_UNIFORM_OFFSETS;
@@ -487,6 +489,7 @@ export class VolumeRenderer {
         depthStoreOp: "store",
         depthClearValue: 1.0,
       },
+      timestampWrites: timing?.nextPass(),
     };
 
     const pass = encoder.beginRenderPass(desc);

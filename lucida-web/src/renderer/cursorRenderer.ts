@@ -1,5 +1,6 @@
 /** WebGPU renderer for peer cursor crosshairs and rays. */
 import shaderSource from "./cursors.wgsl?raw";
+import type { PassTiming } from "./passTiming.ts";
 
 // Uniform layout: view_proj(64) + params(16) + camera_2d(16) + extra(16) = 112 bytes
 const UNIFORM_SIZE = 112;
@@ -105,12 +106,13 @@ export class CursorRenderer {
     return this.cursorCount > 0;
   }
 
-  /** Render crosshairs for 2D slice mode on top of an existing canvas. */
+  /** Render crosshairs for 2D slice mode on top of an existing canvas. `timing` stamps the pass for the trace's GPU pass time. */
   renderSlice(
     target: GPUTextureView,
     encoder: GPUCommandEncoder,
     zoom: number, cx: number, cy: number,
     canvasW: number, canvasH: number,
+    timing?: PassTiming,
   ): void {
     if (this.cursorCount === 0) return;
 
@@ -134,6 +136,7 @@ export class CursorRenderer {
         loadOp: "load" as const,
         storeOp: "store" as const,
       }],
+      timestampWrites: timing?.nextPass(),
     });
     pass.setPipeline(this.pipeline2D);
     pass.setBindGroup(0, this.bindGroup2D);
@@ -141,13 +144,14 @@ export class CursorRenderer {
     pass.end();
   }
 
-  /** Render rays for 3D volume mode. Samples depth texture for opacity dimming. */
+  /** Render rays for 3D volume mode. Samples depth texture for opacity dimming. `timing` stamps the pass for the trace's GPU pass time. */
   renderVolume(
     target: GPUTextureView,
     depthView: GPUTextureView,
     encoder: GPUCommandEncoder,
     viewProj: Float32Array,
     canvasW: number, canvasH: number,
+    timing?: PassTiming,
   ): void {
     if (this.cursorCount === 0) return;
 
@@ -178,6 +182,7 @@ export class CursorRenderer {
         loadOp: "load" as const,
         storeOp: "store" as const,
       }],
+      timestampWrites: timing?.nextPass(),
     });
     pass.setPipeline(this.pipeline3D);
     pass.setBindGroup(0, this.bindGroup3D);
