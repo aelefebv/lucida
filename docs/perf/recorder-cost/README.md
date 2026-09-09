@@ -258,6 +258,25 @@ Two notes on reading that table:
   at the cap to about 1 µs at either. The gates log the figures each run;
   the provisional reading's own ceilings live in
   `lucida-web/src/trace/provisionalCost.perf.test.ts`.
+- **The dock's live charts read the per-tick tiers and walk no row (#1064).**
+  The dock replaced the monitor route, and while a run is open it draws a
+  timeline from the readings, the tick samples, the point events and the
+  connection records, each read from the newest slot of its ring back to the
+  window's start. Nothing moved onto the write path for it: the tick and
+  event rings gained the same newest-back read the reading ring already had.
+  One poll is a derivation and a draw-list layout, both pure and both gated
+  in `lucida-web/src/trace/timelineCost.perf.test.ts`, flat in the run's
+  rows and under two milliseconds each at 16× slack. Measured on one host:
+  the derivation at about 0.5 ms warm over a thirty-second window holding
+  the reading ring's whole capacity, at 2,000 rows and past the per-run cap
+  alike, and the draw list at about 80 µs for a retina width. The canvas
+  replay of that list is bounded by its primitive count, a few hundred, and
+  is measured only by the A/B the amendment asks for: a hardware adapter at
+  device pixel ratio 2 over a large fixture, with the dock open against the
+  dock closed. **That A/B has not been run yet and is outstanding.** The
+  machine this landed from has no adapter and no browser, so the dock's
+  entry in this ledger is the two gated figures above and nothing about the
+  replay. The dock polls twice a second and never per tick or per frame.
 
 **What has to happen for the obligation to be discharged.** When [#918]
 (`debugStats.enabled` and its read sites) and [#919] (`DebugPanel.tsx`) land,

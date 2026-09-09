@@ -23,6 +23,14 @@ import {
   type ProvisionalOptions,
   type ProvisionalReading,
 } from "./diagnose/provisional.ts";
+import {
+  DEFAULT_LIVE_TIMELINE_WINDOW_MS,
+  deriveLiveTimeline,
+  intervalFrom,
+  type LiveTimeline,
+  type LiveTimelineOptions,
+} from "./diagnose/timeline.ts";
+import type { TimelineInterval } from "./diagnose/types.ts";
 import { placeServerRows } from "./merge.ts";
 import { CAP_DERIVATION, CAP_UNIT, PER_RUN_CAP_BYTES, RESIDENT_CAP_BYTES } from "./retention.ts";
 import {
@@ -44,6 +52,7 @@ import {
   READING_NAMES,
   ReadingColumn,
   RowOutcome,
+  SEND_COLUMNS,
   TRACE_SCHEMA_VERSION,
   type ChunkEventSource,
   type ChunkRowSource,
@@ -197,6 +206,12 @@ interface OpenInterval {
 
 interface ClosedInterval {
   header: RunHeader;
+  /**
+   * The recorder's own clock at the interval's start, so the live timeline
+   * can place a closed interval on the open run's clock without going
+   * through the header's epoch start.
+   */
+  startedAtMs: number;
   sink: TraceSink;
   serverRows: ServerRowTable;
   datasetOpens: DatasetOpenBracket[];
@@ -419,6 +434,54 @@ export class TraceRecorder {
         readingsDropped: run.sink.readingsDropped,
       },
       options,
+    );
+  }
+
+  /**
+   * The timeline of the run in progress over a trailing window, or null
+   * when no labelled run is open: the dock's live charts, as fields.
+   *
+   * The third read that does not conclude the interval it describes. It
+   * draws from the per-tick tiers alone, the readings, the tick samples, the
+   * point events and the connection records, each read from the newest slot
+   * back to the window's start, so the cost is bounded by the window and
+   * never by the run. The charts read from the rows are absent in it and say
+   * when they are read: at close, or when a verdict is asked for. That is
+   * the rule ADR 0049 as amended puts on every live surface.
+   */
+  liveTimeline(options: LiveTimelineOptions = {}): LiveTimeline | null {
+    const run = this.open;
+    if (!run?.cause) return null;
+    const atUs = this.offsetUs(run, this.now());
+    const window = resolveLiveWindow(atUs, options.windowMs ?? DEFAULT_LIVE_TIMELINE_WINDOW_MS);
+    return deriveLiveTimeline(
+      {
+        runId: run.runId,
+        cause: run.cause,
+        atUs,
+        readings: run.sink.serialiseReadingsFrom(window.startUs),
+        readingsDropped: run.sink.readingsDropped,
+        ticks: run.sink.serialiseTicksFrom(window.startUs),
+        ticksDropped: run.sink.ticksDropped,
+        events: run.sink.serialiseEventsFrom(window.startUs),
+        eventsDropped: run.sink.eventsDropped,
+        connections: run.connections,
+        gpu: this.gpu,
+        intervals: this.closedIntervalsOn(run),
+        sentTotalBytes: sentBytes(run.sent),
+      },
+      options,
+    );
+  }
+
+  /**
+   * Read off the closed intervals' headers alone; no tier of theirs is
+   * copied for this. An empty steady-state interval was never retained, so
+   * a quiet stretch between two runs draws as a gap between their bands.
+   */
+  private closedIntervalsOn(run: OpenInterval): TimelineInterval[] {
+    return this.closed.map((interval) =>
+      intervalFrom(interval.header, interval.startedAtMs - run.startedAtMs, false),
     );
   }
 
@@ -1143,6 +1206,7 @@ export class TraceRecorder {
 
     const byteLength = intervalBytes(run);
     this.closed.push({
+      startedAtMs: run.startedAtMs,
       sink: run.sink,
       serverRows: run.serverRows,
       // An open still in flight keeps its null end rather than being
@@ -1325,6 +1389,13 @@ function newConnection(
   gapUs: number | null,
 ): ConnectionRecord {
   return { generation, openedAtUs, closedAtUs: null, gapUs, firstRid: null, lastRid: null };
+}
+
+/** The bytes column of every type in a send-tally vector, summed. */
+function sentBytes(sent: Float64Array): number {
+  let total = 0;
+  for (let column = 1; column < sent.length; column += SEND_COLUMNS) total += sent[column];
+  return total;
 }
 
 /** Every tier an interval holds. Allocated bytes, because the cap is on memory. */

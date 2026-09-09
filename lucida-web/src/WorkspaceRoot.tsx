@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import App from "./App.tsx";
-import { MonitorPage } from "./monitor/MonitorPage.tsx";
 import { WorkspaceDashboard } from "./WorkspaceDashboard.tsx";
 import { createWorkspaceFromDatasets } from "./workspaceFromDataset.ts";
 import {
@@ -13,28 +12,6 @@ import {
 function currentPath(): string {
   return window.location.pathname || "/";
 }
-
-/**
- * The monitor's route (#936).
- *
- * A separate page rather than an overlay, and a client-side route rather than
- * a second document: the trace lives in this page's memory, so a full load
- * would open the monitor on an empty recorder.
- *
- * The viewer it was opened from stays **mounted and offstage** (#937). #936
- * unmounted it, which was right while the monitor only read closed runs and
- * wrong the moment it grew a live view: navigating here would have torn down
- * the session, the socket and the render loop, and the run somebody came to
- * watch would have sat at whatever counts it held when they left. Offstage is
- * `visibility: hidden` rather than `display: none` deliberately — the canvas
- * keeps its layout size, so the run being watched is the run that would have
- * happened anyway. What #936's decision asked for still holds: nothing the
- * monitor draws shares a frame with the viewer.
- *
- * Not gated on the build. Recording is unconditional already and a diagnostic
- * that only exists in development cannot explain a field report (ADR 0051).
- */
-export const MONITOR_PATH = "/monitor";
 
 function parseWorkspaceId(path: string): string | null {
   const match = path.match(/^\/w\/([^/]+)\/?$/);
@@ -73,16 +50,7 @@ export function WorkspaceRoot() {
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
 
-  // Where Back leaves the monitor for. Captured on the way in rather than
-  // walked back through history: the monitor is one hop off the viewer, and
-  // history.back() from a directly-typed URL leaves lucida entirely.
-  //
-  // State rather than a ref because the render reads it (#937): it also names
-  // the viewer to keep running offstage while the monitor is on screen.
-  const [monitorReturnPath, setMonitorReturnPath] = useState("/");
-
   const navigate = useCallback((nextPath: string) => {
-    if (nextPath === MONITOR_PATH) setMonitorReturnPath(currentPath());
     // Clear a stale seed when navigating ANYWHERE other than straight into the
     // workspace it was created for. `openWorkspaceById` sets the seed and then
     // calls navigate to that same `/w/<id>` (matched here, so the seed
@@ -125,11 +93,7 @@ export function WorkspaceRoot() {
     [openWorkspaceById],
   );
 
-  const monitorOpen = path === MONITOR_PATH;
-  // While the monitor is open the viewer is the one it was opened from: it
-  // stays mounted so the run the monitor is watching keeps running.
-  const viewerPath = monitorOpen ? monitorReturnPath : path;
-  const workspaceId = useMemo(() => parseWorkspaceId(viewerPath), [viewerPath]);
+  const workspaceId = useMemo(() => parseWorkspaceId(path), [path]);
 
   // Only forward the seed when it belongs to the workspace currently being
   // opened (guards against a stale seed from an earlier create).
@@ -138,30 +102,16 @@ export function WorkspaceRoot() {
       ? pendingSeed.datasetUrls
       : undefined;
 
-  // One slot for whatever is behind the monitor, always in the same place in
-  // the tree: moving the viewer between two positions would unmount and
-  // remount it, which is the teardown this arrangement exists to avoid.
-  return (
-    <>
-      <div className={monitorOpen ? "route-offstage" : "route-onstage"}>
-        {workspaceId ? (
-          <WorkspaceViewerRoute
-            key={workspaceId}
-            workspaceId={workspaceId}
-            initialDatasetUrls={seedForThisWorkspace}
-            onBackToDashboard={() => navigate("/")}
-            onOpenMonitor={() => navigate(MONITOR_PATH)}
-            onCreateWorkspaceFromDatasets={createWorkspaceFrom}
-          />
-        ) : (
-          !monitorOpen && <WorkspaceDashboard onOpenWorkspace={openWorkspaceById} />
-        )}
-      </div>
-      {/* Back goes wherever the monitor was opened from, and to the dashboard
-          for someone who typed the URL: the monitor is reachable without a
-          workspace, because a run outlives the viewer that produced it. */}
-      {monitorOpen && <MonitorPage onClose={() => navigate(monitorReturnPath)} />}
-    </>
+  return workspaceId ? (
+    <WorkspaceViewerRoute
+      key={workspaceId}
+      workspaceId={workspaceId}
+      initialDatasetUrls={seedForThisWorkspace}
+      onBackToDashboard={() => navigate("/")}
+      onCreateWorkspaceFromDatasets={createWorkspaceFrom}
+    />
+  ) : (
+    <WorkspaceDashboard onOpenWorkspace={openWorkspaceById} />
   );
 }
 
@@ -170,8 +120,6 @@ interface WorkspaceViewerRouteProps {
   /** Seed dataset URLs to auto-open (#697), forwarded to <App>. */
   initialDatasetUrls?: readonly string[];
   onBackToDashboard: () => void;
-  /** Leave for the pipeline monitor (#936). */
-  onOpenMonitor: () => void;
   /** Create a new workspace from datasets chosen in the viewer (#697). */
   onCreateWorkspaceFromDatasets: (paths: string[]) => Promise<void>;
 }
@@ -180,7 +128,6 @@ function WorkspaceViewerRoute({
   workspaceId,
   initialDatasetUrls,
   onBackToDashboard,
-  onOpenMonitor,
   onCreateWorkspaceFromDatasets,
 }: WorkspaceViewerRouteProps) {
   const [workspace, setWorkspace] = useState<WorkspaceRecord | null>(null);
@@ -276,7 +223,6 @@ function WorkspaceViewerRoute({
         canRenameWorkspace={workspace.role === "owner"}
         initialDatasetUrls={initialDatasetUrls}
         onBackToDashboard={onBackToDashboard}
-        onOpenMonitor={onOpenMonitor}
         onRenameWorkspace={handleRename}
         onSetDefaultSavedView={handleSetDefaultSavedView}
         onCreateWorkspaceFromDatasets={(paths) => {

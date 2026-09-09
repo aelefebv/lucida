@@ -85,6 +85,11 @@ const DevControls = lazy(() =>
 const DebugOverlays = lazy(() =>
   import("./debug/DebugOverlays.tsx").then((m) => ({ default: m.DebugOverlays })),
 );
+// Ships in every build, code-split so a session that never opens it never
+// downloads it.
+const MonitorDock = lazy(() =>
+  import("./monitor/MonitorDock.tsx").then((m) => ({ default: m.MonitorDock })),
+);
 
 interface AppProps {
   workspaceId: string;
@@ -102,8 +107,6 @@ interface AppProps {
    *  case, so this is a no-op there. */
   initialDatasetUrls?: readonly string[];
   onBackToDashboard: () => void;
-  /** Leave for the pipeline monitor (#936) — a separate page, not an overlay. */
-  onOpenMonitor: () => void;
   onRenameWorkspace: (name: string) => Promise<void>;
   onSetDefaultSavedView: (savedViewId: string | null) => Promise<void>;
   /** Create a NEW workspace from dataset(s) chosen in the in-viewer file
@@ -120,7 +123,6 @@ function App({
   canRenameWorkspace,
   initialDatasetUrls,
   onBackToDashboard,
-  onOpenMonitor,
   onRenameWorkspace,
   onSetDefaultSavedView,
   onCreateWorkspaceFromDatasets,
@@ -989,6 +991,9 @@ function App({
 
   const [showFileBrowser, setShowFileBrowser] = useState(false);
   const [showDevControls, setShowDevControls] = useState(false);
+  // The dock overlays the canvas rather than resizing it (ADR 0052 as
+  // amended), so opening it changes nothing the recorder sees.
+  const [showMonitor, setShowMonitor] = useState(false);
   // Whether any on-canvas debug overlay is toggled on (persisted in
   // localStorage `debug.overlays`, independent of every panel). Drives the
   // mount of the code-split DebugOverlays layer: with every overlay off
@@ -1256,10 +1261,17 @@ function App({
             </div>
           )}
           <div className="workspace-chrome-actions">
-            {/* The monitor is a separate page (#936), so this leaves the
-                viewer. The run it reads is a closed interval that outlives the
-                canvas that produced it. */}
-            <button type="button" onClick={onOpenMonitor} data-testid="open-monitor">
+            <button
+              type="button"
+              onClick={() => setShowMonitor((v) => !v)}
+              aria-pressed={showMonitor}
+              title={showMonitor ? "Close the pipeline monitor" : "Open the pipeline monitor"}
+              data-testid="open-monitor"
+              style={{
+                background: showMonitor ? "#646cff" : undefined,
+                color: showMonitor ? "#fff" : undefined,
+              }}
+            >
               Monitor
             </button>
             {canRenameWorkspace && (
@@ -1566,6 +1578,11 @@ function App({
             </Suspense>
           )}
         </div>
+        {showMonitor && (
+          <Suspense fallback={null}>
+            <MonitorDock onClose={() => setShowMonitor(false)} insetLeft={layout.sidebarWidth} />
+          </Suspense>
+        )}
         {datasetsVersion > 0 && (
           <div className="dimension-controls" style={{ maxWidth: layout.canvasWidth }}>
             <DimensionControls label="Z" value={dims.z} max={dims.dimZ} onChange={dims.handleZChange} disabled={dims.viewMode === "3d"} />

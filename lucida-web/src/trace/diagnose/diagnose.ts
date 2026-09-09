@@ -39,6 +39,7 @@ import {
 } from "./phaseRollup.ts";
 import { adapterKindOf, adapterName, deriveRenderTiming } from "./renderTiming.ts";
 import { summariseSpace } from "./spatialSummary.ts";
+import { deriveTimeline, type TimelineRecording } from "./timeline.ts";
 import {
   DIAGNOSTIC_SCHEMA_VERSION,
   type AggregateCandidate,
@@ -105,6 +106,12 @@ export interface DiagnoseOptions {
    * Defaults to the worst row's chunk, so the default text has one to name.
    */
   chunk?: string;
+  /**
+   * The recording the run came from, so the timeline can place the other
+   * retained intervals on this run's clock. Without it the axis carries this
+   * run alone. {@link diagnoseDocument} supplies it from the document.
+   */
+  recording?: TimelineRecording;
 }
 
 /**
@@ -121,7 +128,10 @@ export function diagnoseDocument(
     ? document.runs.find((candidate) => candidate.header.runId === options.runId)
     : document.runs[document.runs.length - 1];
   if (!run) throw new Error(`no run ${options.runId ?? "(newest)"} in this trace document`);
-  return diagnoseRun(run, options);
+  return diagnoseRun(run, {
+    ...options,
+    recording: options.recording ?? { runs: document.runs, steadyState: document.steadyState },
+  });
 }
 
 export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): DiagnosticDocument {
@@ -184,6 +194,7 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
     },
     chunk,
     spatial: summariseSpace(run),
+    timeline: deriveTimeline(run, window, options.recording),
     raw: {
       inlined: false,
       why: "Raw spans are for a viewer, not a context window: a warm re-open is tens of thousands of rows, and nothing per-row appears at any depth here beyond the one chunk the lookup is about.",

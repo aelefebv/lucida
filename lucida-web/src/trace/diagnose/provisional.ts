@@ -275,7 +275,7 @@ export function deriveProvisional(
     reason: progress.quiescenceReason,
   };
   const rows = describeRows(progress);
-  const described = describeWindow(window);
+  const described = describeLiveWindow(window);
 
   return {
     provisional: true,
@@ -306,7 +306,8 @@ export function deriveProvisional(
 // The window and what was read of it
 // ---------------------------------------------------------------------------
 
-function describeWindow(window: LiveWindow): ProvisionalWindow {
+/** The window as the document states it. Shared with the live timeline, which reads the same window. */
+export function describeLiveWindow(window: LiveWindow): ProvisionalWindow {
   return {
     startMs: usToMs(window.startUs),
     endMs: usToMs(window.endUs),

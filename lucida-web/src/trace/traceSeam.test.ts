@@ -637,6 +637,43 @@ describe("the trace seam", () => {
     expect("provisional" in seam.diagnose(reading.runId)).toBe(false);
   });
 
+  it("offers the open run's live timeline as JSON and as text without closing the run", async () => {
+    const seam = installTraceSeam();
+    expect(seam.liveTimeline()).toBeNull();
+    expect(seam.liveTimelineText()).toBeNull();
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    const source = new ControlledSource();
+    const cache = new CpuCache(source, makeDecode());
+    cache.submit(makePlan([makeRequest()]));
+    await flush();
+    traceRecorder.noteReading(0, 1, 2_000, 8);
+
+    const live = seam.liveTimeline()!;
+    expect(live.provisional).toBe(true);
+    expect(live.runId).toBe(seam.progress()!.runId);
+    expect(live.timeline.rowsWalked).toBe(false);
+    expect(live.timeline.charts.find((chart) => chart.id === "in-flight")?.recorded).toBe(true);
+    expect(live.timeline.charts.find((chart) => chart.id === "occupancy.browser")?.recorded).toBe(false);
+    // An agent over CDP gets the JSON of this object, so the round trip must lose nothing.
+    expect(JSON.parse(JSON.stringify(live))).toEqual(live);
+
+    const text = seam.liveTimelineText()!;
+    expect(text.split("\n")[0]).toContain(`lucida trace ${live.runId} — PROVISIONAL TIMELINE:`);
+    expect(text).toContain("not a verdict");
+    expect(seam.liveTimeline({ windowMs: 1_000 })!.window.requestedMs).toBe(1_000);
+
+    // Reading it changed nothing, and the closed run's timeline is the same
+    // closed set with the rows walked.
+    expect(seam.runState.open).toBe(true);
+    seam.closeRun();
+    expect(seam.liveTimeline()).toBeNull();
+    const closed = seam.diagnose(live.runId).timeline;
+    expect(closed.rowsWalked).toBe(true);
+    expect(closed.charts.map((chart) => chart.id)).toEqual(live.timeline.charts.map((chart) => chart.id));
+    expect(seam.diagnoseText(live.runId, { depth: "timeline" })).toContain("TIMELINE");
+  });
+
   it("stops a run without exporting it", () => {
     const seam = installTraceSeam();
     traceRecorder.openRun(OPEN_CAUSE);

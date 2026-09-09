@@ -635,6 +635,111 @@ export interface SpatialSummary {
   cannotShow: string[];
 }
 
+/**
+ * The closed set of charts the dock draws. Closed so a test can enumerate
+ * them and hold every one to a text twin: a chart that exists on the canvas
+ * and nowhere in the document is visible to a person and invisible to an
+ * agent.
+ */
+export type TimelineChartId =
+  | "occupancy.browser"
+  | "occupancy.server"
+  | "occupancy.metadata"
+  | "in-flight"
+  | "in-flight.lane"
+  | "planned.lane"
+  | "bytes.sent"
+  | "bytes.received"
+  | "resident"
+  | "events"
+  | "frame";
+
+/**
+ * How a chart's series are read. `density` is rows per bucket averaged over
+ * the bucket, `line` a reading held until the next one, `rate` an amount per
+ * second, `count` an amount per bucket, and `marks` point events and
+ * planning passes drawn as ticks where they happened.
+ */
+export type TimelineChartKind = "density" | "line" | "rate" | "count" | "marks";
+
+/** The stretch of the run's clock the charts span, and how it is divided. */
+export interface TimelineAxis {
+  startMs: number;
+  endMs: number;
+  spanMs: number;
+  buckets: number;
+  bucketMs: number;
+}
+
+/**
+ * One retained interval of the recording, placed on the clock of the run
+ * this document reads. A run draws as a labelled band and the steady state
+ * between runs as unlabelled ribbon, so an open, a pan and the quiet stretch
+ * after them read as annotations on one axis rather than as the only things
+ * on it.
+ */
+export interface TimelineInterval {
+  runId: string;
+  kind: "run" | "steady-state";
+  /** True for the run this document reads. */
+  current: boolean;
+  cause: RunCause | null;
+  /** Null while the interval is still open, which only the current run can be. */
+  endReason: EndReason | null;
+  /** Milliseconds on this run's clock; an earlier interval is negative. */
+  startMs: number;
+  endMs: number;
+}
+
+/**
+ * One series of a chart: a value per bucket, or the stated reason there is
+ * none. A null bucket had no sample, which a surface draws as a gap and never
+ * as zero.
+ */
+export type TimelineSeries =
+  | {
+      id: string;
+      label: string;
+      recorded: true;
+      values: (number | null)[];
+      min: number;
+      max: number;
+      /** The newest bucket's value, or null when no bucket has one. */
+      last: number | null;
+      /** How many records the series was read from: readings, rows, ticks or events. */
+      samples: number;
+      /** Buckets with no sample, which a surface draws as gaps and a legend counts. */
+      unsampled: number;
+    }
+  | { id: string; label: string; recorded: false; statement: string };
+
+export interface TimelineChart {
+  id: TimelineChartId;
+  title: string;
+  kind: TimelineChartKind;
+  unit: string;
+  /** True when at least one series is recorded. */
+  recorded: boolean;
+  series: TimelineSeries[];
+  /** What the chart draws from, or why it is absent. Never empty. */
+  statement: string;
+}
+
+/**
+ * The timeline: what the dock draws, as fields. Every chart is a reading of
+ * the run's tiers binned over the axis, so the picture and the text an agent
+ * reads come from one object. A run that is still open carries only the
+ * per-tick tiers here, and the row-derived charts say they are read at close.
+ */
+export interface TimelineSection {
+  axis: TimelineAxis;
+  intervals: TimelineInterval[];
+  charts: TimelineChart[];
+  /** False while the run is open: the row walk runs at close or on request. */
+  rowsWalked: boolean;
+  statement: string;
+}
+
 export interface DiagnosticDocument {
   schemaVersion: number;
   runId: string;
@@ -679,6 +784,8 @@ export interface DiagnosticDocument {
   chunk: ChunkLookup;
   /** Rows by state and level, each with a bounding box. */
   spatial: SpatialSummary;
+  /** The charts the dock draws, binned over the run's clock or the window's. */
+  timeline: TimelineSection;
   /** Raw spans are never inlined at any depth: a warm re-open is 21,431 rows. */
   raw: { inlined: false; why: string; command: string };
   next: NextStep[];

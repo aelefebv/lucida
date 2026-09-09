@@ -22,7 +22,7 @@
 // planner-visible effect through `getSceneSettings` cache identity.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 
 // ---------------------------------------------------------------------------
 // Boundary doubles. The WASM scene is a small stateful fake: it stores the
@@ -354,7 +354,6 @@ function renderApp() {
         defaultSavedViewId={null}
         canRenameWorkspace={false}
         onBackToDashboard={() => {}}
-        onOpenMonitor={() => {}}
         onRenameWorkspace={async () => {}}
         onSetDefaultSavedView={async () => {}}
       />
@@ -465,6 +464,32 @@ describe("App wiring: the capture surface writes no user state (#923)", () => {
       await vi.advanceTimersByTimeAsync(600_000);
     });
     expect(vi.mocked(updateWorkspaceLastView)).not.toHaveBeenCalled();
+  });
+});
+
+describe("App wiring: the toolbar opens the monitor's dock", () => {
+  // The dock is code-split and reads the page's trace seam, which this
+  // harness never installs, so what it shows is its "no seam" reason. The
+  // wiring under test is the toolbar toggle and the dock's own close.
+  it("toggles the dock from the Monitor button, and the dock closes itself", async () => {
+    await mountWithSnapshot(documentJson(["wds-1"]));
+    const toggle = screen.getByTestId("open-monitor");
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+    expect(screen.queryByTestId("monitor-dock")).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(toggle);
+    });
+
+    const dock = await screen.findByTestId("monitor-dock");
+    expect(toggle.getAttribute("aria-pressed")).toBe("true");
+    expect(within(dock).getByTestId("monitor-empty").textContent).toContain("trace seam");
+
+    await act(async () => {
+      fireEvent.click(within(dock).getByTestId("monitor-close"));
+    });
+    expect(screen.queryByTestId("monitor-dock")).toBeNull();
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
   });
 });
 

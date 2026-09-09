@@ -1,24 +1,33 @@
 // @vitest-environment happy-dom
 
 /**
- * The page, over the derivation's fixture runs.
+ * The dock, over the derivation's fixture runs.
  *
  * The document these render is the same object the agent surface renders, so
- * these cases are about *ordering and reachability* — what leads, what a click
- * carries — and never about a threshold. A test here that asserted a verdict
- * would be asserting the derivation through two layers of DOM.
+ * these cases are about ordering and reachability: what leads, what a click
+ * carries, where the dock draws. Never about a threshold. A test here that
+ * asserted a verdict would be asserting the derivation through two layers of
+ * DOM.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { diagnoseRun } from "../trace/diagnose/diagnose.ts";
 import {
   coldRemoteOpen,
   healthyLocalOpen,
+  makeHeader,
+  makeReading,
   makeReadingSeries,
+  makeTick,
   saturatedReopen,
 } from "../trace/diagnose/fixtures.ts";
 import { deriveProvisional, type ProvisionalReading } from "../trace/diagnose/provisional.ts";
+import {
+  deriveLiveTimeline,
+  TIMELINE_CHARTS,
+  type LiveTimeline,
+} from "../trace/diagnose/timeline.ts";
 import { PHASES, type TraceReading, type TraceRun } from "../trace/types.ts";
 import type { LiveProgress } from "../trace/liveProgress.ts";
 import type { MonitorRead, MonitorRunSummary } from "./monitorSource.ts";
@@ -59,16 +68,47 @@ function provisional(
   });
 }
 
+/** The live charts over the same run in progress: readings, one tick sample, and no rows. */
+function liveCharts(): LiveTimeline {
+  return deriveLiveTimeline({
+    runId: "run-open",
+    cause: { epoch: "content", dirtyKind: "interactive", source: "dataset_open_request" },
+    atUs: 4_200_000,
+    readings: Array.from({ length: 40 }, (_, i) =>
+      makeReading(i * 100_000, { queueDepth: 20_000, inFlight: 24, frameTimeUs: 6_000 }),
+    ),
+    readingsDropped: 0,
+    ticks: [makeTick(50_000, {}, { chunkRequest: { messages: 24, bytes: 2_400 } })],
+    ticksDropped: 0,
+    events: [],
+    eventsDropped: 0,
+    connections: [
+      { generation: 1, openedAtUs: null, closedAtUs: null, gapUs: null, firstRid: null, lastRid: null },
+    ],
+    gpu: makeHeader().gpu,
+    intervals: [],
+    sentTotalBytes: 2_400,
+  });
+}
+
 const read = vi.hoisted(() => ({ value: null as MonitorRead | null }));
 const runs = vi.hoisted(() => ({ value: [] as MonitorRunSummary[] }));
 const live = vi.hoisted(() => ({ value: null as unknown }));
 const reading = vi.hoisted(() => ({ value: null as unknown }));
+const charts = vi.hoisted(() => ({ value: null as unknown }));
 const downloadTraceFile = vi.hoisted(() => vi.fn(() => "lucida-run-1.trace.json"));
 const downloadBundle = vi.hoisted(() => vi.fn(() => Promise.resolve("lucida-run-1.bundle.json")));
 const readMonitor = vi.hoisted(() => vi.fn(() => ({ read: read.value, runs: runs.value })));
 const readProgress = vi.hoisted(() => vi.fn(() => live.value));
 const readProvisional = vi.hoisted(() => vi.fn(() => reading.value));
-const stopRun = vi.hoisted(() => vi.fn(() => { live.value = null; reading.value = null; }));
+const readLiveTimeline = vi.hoisted(() => vi.fn(() => charts.value));
+const stopRun = vi.hoisted(() =>
+  vi.fn(() => {
+    live.value = null;
+    reading.value = null;
+    charts.value = null;
+  }),
+);
 
 vi.mock("./monitorSource.ts", () => ({
   readMonitor,
@@ -76,14 +116,15 @@ vi.mock("./monitorSource.ts", () => ({
   downloadBundle,
   readProgress,
   readProvisional,
+  readLiveTimeline,
   stopRun,
 }));
 
-const { MonitorPage } = await import("./MonitorPage.tsx");
+const { MonitorDock } = await import("./MonitorDock.tsx");
 
 function showing(run: TraceRun) {
   read.value = { ok: true, document: diagnoseRun(run) };
-  return render(<MonitorPage onClose={() => {}} />);
+  return render(<MonitorDock onClose={() => {}} />);
 }
 
 beforeEach(() => {
@@ -93,13 +134,19 @@ beforeEach(() => {
   readMonitor.mockClear();
   readProgress.mockClear();
   readProvisional.mockClear();
+  readLiveTimeline.mockClear();
   stopRun.mockClear();
   runs.value = [];
   live.value = null;
   reading.value = null;
+  charts.value = null;
+  window.localStorage.removeItem("monitor.dock.height");
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 describe("what leads", () => {
   it("puts the verdict callout above the per-phase table", () => {
@@ -257,7 +304,7 @@ describe("saving a run", () => {
 describe("nothing recorded yet", () => {
   it("says so instead of rendering an empty report", () => {
     read.value = { ok: false, reason: "no run (newest) in this trace document" };
-    render(<MonitorPage onClose={() => {}} />);
+    render(<MonitorDock onClose={() => {}} />);
 
     expect(screen.getByTestId("monitor-empty").textContent).toContain("no run");
     expect(screen.queryByTestId("monitor-phase-table")).toBeNull();
@@ -270,30 +317,270 @@ describe("observation only", () => {
   it("offers no control that could change what the pipeline does", () => {
     showing(coldRemoteOpen());
 
-    // Every button on the page reads, saves, drills in or leaves. If a future
-    // change adds one that does not, this list is where it shows up.
+    // Every button in the dock reads, saves, drills in, or moves the dock. If
+    // a future change adds one that does not, this list is where it shows up.
     const labels = screen.getAllByRole("button").map((node) => node.textContent);
     for (const label of labels) {
-      expect(label).toMatch(/^(Back|Read the newest run|Save run|Save for Perfetto|Save bundle|Show the rows behind .*|Close drill-down)$/);
+      expect(label).toMatch(
+        /^(Close|Pop out|Read the newest run|Save run|Save for Perfetto|Save bundle|Show the rows behind .*|Close drill-down)$/,
+      );
     }
   });
 
-  it("adds only one control while a run is open, and it ends the run rather than the work", () => {
+  it("adds only one reading control while a run is open, and it ends the run rather than the work", () => {
     // *Stop & analyse* closes the recording's interval. The pipeline goes on
     // doing exactly what it was doing — what ends is the run's label, which is
     // what makes it readable.
     live.value = progress();
-    render(<MonitorPage onClose={() => {}} />);
+    render(<MonitorDock onClose={() => {}} />);
 
     const labels = screen.getAllByRole("button").map((node) => node.textContent);
-    expect(labels).toEqual(["Back", "Stop & analyse"]);
+    expect(labels).toEqual(["Stop & analyse", "Pop out", "Close"]);
+  });
+});
+
+describe("the timeline between the coverage and the verdict", () => {
+  it("draws one chart per entry of the closed set, in order, each with its legend", () => {
+    showing(coldRemoteOpen());
+
+    const timeline = screen.getByTestId("monitor-timeline");
+    const ids = TIMELINE_CHARTS.map((entry) => entry.id);
+    const rows = ids.map((id) => within(timeline).getByTestId(`monitor-chart-${id}`));
+    for (let i = 1; i < rows.length; i += 1) {
+      expect(rows[i - 1].compareDocumentPosition(rows[i]) & 4).toBeTruthy();
+    }
+    // Coverage and truncation lead the picture they qualify, and the verdict
+    // and the rest of the report follow it.
+    const coverage = screen.getByLabelText("Coverage");
+    const verdict = screen.getByRole("heading", { name: "Verdict" });
+    expect(coverage.compareDocumentPosition(timeline) & 4).toBeTruthy();
+    expect(timeline.compareDocumentPosition(verdict) & 4).toBeTruthy();
+    const canvas = screen.getByTestId("monitor-timeline-canvas") as HTMLCanvasElement;
+    expect(canvas.width).toBe(Math.round(parseFloat(canvas.style.width) * window.devicePixelRatio));
+  });
+
+  it("labels absent data as absent rather than drawing it at zero", () => {
+    showing(healthyLocalOpen());
+
+    // A chart this build does not record at all.
+    const received = screen.getByTestId("monitor-chart-bytes.received-absent");
+    expect(received.textContent).toMatch(/^absent — bytes received are not recorded/);
+    // A series absent inside a chart that is otherwise drawn.
+    const gpu = screen.getByTestId("monitor-series-frame-gpu-pass");
+    expect(gpu.textContent).toContain("absent: the adapter offers no timestamp queries");
+    expect(gpu.className).toContain("monitor-timeline-absent");
+    expect(screen.getByTestId("monitor-series-frame-main-thread").textContent).toContain("max 3.5");
+  });
+
+  it("keeps the closed-run report intact beneath the timeline", () => {
+    showing(coldRemoteOpen());
+
+    const headings = screen.getAllByRole("heading", { level: 2 }).map((node) => node.textContent);
+    expect(headings).toEqual(["Verdict", "Phases", "Critical path", "Limiters", "Run"]);
+    expect(screen.getByTestId("monitor-phase-table")).toBeTruthy();
+    expect(screen.getByTestId("monitor-banner-coverage")).toBeTruthy();
+  });
+
+  it("draws the live charts from the per-tick tiers while a run is open, and reads no run", () => {
+    live.value = progress();
+    charts.value = liveCharts();
+    render(<MonitorDock onClose={() => {}} />);
+
+    expect(readLiveTimeline).toHaveBeenCalled();
+    expect(readMonitor).not.toHaveBeenCalled();
+    expect(screen.getByTestId("monitor-timeline-provisional").textContent).toBe("provisional");
+    expect(screen.getByTestId("monitor-series-in-flight-in-flight").textContent).toContain("max 24");
+    // The run's status and its truncation lead the charts, and the counters follow.
+    const status = screen.getByTestId("monitor-live-status");
+    const timeline = screen.getByTestId("monitor-timeline");
+    expect(status.compareDocumentPosition(timeline) & 4).toBeTruthy();
+    expect(timeline.compareDocumentPosition(screen.getByTestId("monitor-live-counters")) & 4).toBeTruthy();
+    expect(screen.getByTestId("monitor-chart-occupancy.browser-absent").textContent).toContain(
+      "when the run closes",
+    );
+  });
+
+  it("re-reads the live charts on the poll, beside the counters and the provisional reading", () => {
+    vi.useFakeTimers();
+    try {
+      live.value = progress();
+      charts.value = liveCharts();
+      render(<MonitorDock onClose={() => {}} />);
+      readLiveTimeline.mockClear();
+
+      act(() => {
+        vi.advanceTimersByTime(600);
+      });
+
+      expect(readLiveTimeline).toHaveBeenCalledTimes(1);
+      expect(readProvisional).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("the dock in the viewer", () => {
+  it("sits over the canvas at the height it was given, and closes from its own control", () => {
+    const onClose = vi.fn();
+    showing(coldRemoteOpen());
+    cleanup();
+    read.value = { ok: true, document: diagnoseRun(coldRemoteOpen()) };
+    render(<MonitorDock onClose={onClose} insetLeft={280} />);
+
+    const dock = screen.getByTestId("monitor-dock");
+    expect(dock.style.left).toBe("280px");
+    expect(parseInt(dock.style.height, 10)).toBeGreaterThanOrEqual(160);
+
+    fireEvent.click(screen.getByTestId("monitor-close"));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("resizes from its top edge and remembers the height", () => {
+    showing(coldRemoteOpen());
+    const dock = screen.getByTestId("monitor-dock");
+    const before = parseInt(dock.style.height, 10);
+
+    fireEvent.pointerDown(screen.getByTestId("monitor-dock-resize"), { clientY: 500 });
+    fireEvent.pointerMove(document, { clientY: 400 });
+    fireEvent.pointerUp(document, { clientY: 400 });
+
+    expect(parseInt(dock.style.height, 10)).toBe(before + 100);
+    expect(window.localStorage.getItem("monitor.dock.height")).toBe(String(before + 100));
+
+    // A later mount starts at the remembered height.
+    cleanup();
+    read.value = { ok: true, document: diagnoseRun(coldRemoteOpen()) };
+    render(<MonitorDock onClose={() => {}} />);
+    expect(parseInt(screen.getByTestId("monitor-dock").style.height, 10)).toBe(before + 100);
+  });
+
+  it("never drags below its minimum height", () => {
+    showing(coldRemoteOpen());
+
+    fireEvent.pointerDown(screen.getByTestId("monitor-dock-resize"), { clientY: 100 });
+    fireEvent.pointerMove(document, { clientY: 5_000 });
+    fireEvent.pointerUp(document, { clientY: 5_000 });
+
+    expect(parseInt(screen.getByTestId("monitor-dock").style.height, 10)).toBe(160);
+  });
+});
+
+describe("popping out", () => {
+  interface FakePopup {
+    document: Document;
+    devicePixelRatio: number;
+    closed: boolean;
+    close: Mock<() => void>;
+    addEventListener: (type: string, listener: () => void) => void;
+    removeEventListener: (type: string, listener: () => void) => void;
+  }
+
+  /**
+   * The document borrows the test window as its view: DOM queries and events
+   * need one to reach a node inside it.
+   */
+  function fakePopup(): FakePopup {
+    const popupDocument = document.implementation.createHTMLDocument("popout");
+    Object.defineProperty(popupDocument, "defaultView", { value: window, configurable: true });
+    const listeners = new Map<string, Set<() => void>>();
+    const popup: FakePopup = {
+      document: popupDocument,
+      devicePixelRatio: 2,
+      closed: false,
+      close: vi.fn(() => {
+        popup.closed = true;
+        for (const listener of listeners.get("pagehide") ?? []) listener();
+      }),
+      addEventListener: (type, listener) => {
+        if (!listeners.has(type)) listeners.set(type, new Set());
+        listeners.get(type)!.add(listener);
+      },
+      removeEventListener: (type, listener) => {
+        listeners.get(type)?.delete(listener);
+      },
+    };
+    return popup;
+  }
+
+  function openingWindows(): FakePopup[] {
+    const opened: FakePopup[] = [];
+    vi.spyOn(window, "open").mockImplementation(() => {
+      const popup = fakePopup();
+      opened.push(popup);
+      return popup as unknown as Window;
+    });
+    return opened;
+  }
+
+  it("renders the whole dock in the other window and nothing of it in the viewer's tab", () => {
+    const opened = openingWindows();
+    showing(coldRemoteOpen());
+
+    fireEvent.click(screen.getByTestId("monitor-popout"));
+
+    expect(window.open).toHaveBeenCalledWith("", "lucida-monitor", expect.stringContaining("popup"));
+    const popupDocument = opened[0].document;
+    expect(screen.queryByTestId("monitor-dock")).toBeNull();
+    expect(screen.queryByTestId("monitor-timeline")).toBeNull();
+    expect(document.body.textContent).not.toContain("Verdict");
+    const popped = within(popupDocument.body);
+    expect(popped.getByTestId("monitor-dock").className).toContain("monitor-dock-popout");
+    expect(popped.getByTestId("monitor-timeline")).toBeTruthy();
+    expect(popped.getByRole("heading", { name: "Verdict" })).toBeTruthy();
+    expect(popped.getByTestId("monitor-phase-table")).toBeTruthy();
+    expect(popupDocument.title).toContain("monitor");
+    // The dock's controls still work there, through the opener's seam.
+    fireEvent.click(popped.getByTestId("monitor-save-run"));
+    expect(downloadTraceFile).toHaveBeenCalledWith("trace", "remote-cold");
+  });
+
+  it("docks back into the viewer when its window closes, and when asked to", () => {
+    const opened = openingWindows();
+    showing(coldRemoteOpen());
+
+    fireEvent.click(screen.getByTestId("monitor-popout"));
+    expect(screen.queryByTestId("monitor-dock")).toBeNull();
+
+    act(() => {
+      opened[0].close();
+    });
+    expect(screen.getByTestId("monitor-dock")).toBeTruthy();
+    expect(opened[0].document.body.textContent).toBe("");
+    expect(opened[0].close).toHaveBeenCalledTimes(1);
+
+    // The person asks to come back: the dock closes the window itself.
+    fireEvent.click(screen.getByTestId("monitor-popout"));
+    fireEvent.click(within(opened[1].document.body).getByTestId("monitor-dock-back"));
+    expect(opened[1].close).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("monitor-dock")).toBeTruthy();
+  });
+
+  it("says so when the browser blocked the window, and stays in the tab", () => {
+    vi.spyOn(window, "open").mockImplementation(() => null);
+    showing(coldRemoteOpen());
+
+    fireEvent.click(screen.getByTestId("monitor-popout"));
+
+    expect(screen.getByTestId("monitor-popout-failed").textContent).toContain("blocked");
+    expect(screen.getByTestId("monitor-dock")).toBeTruthy();
+  });
+
+  it("closes its window when the dock unmounts", () => {
+    const opened = openingWindows();
+    const view = showing(coldRemoteOpen());
+    fireEvent.click(screen.getByTestId("monitor-popout"));
+
+    view.unmount();
+
+    expect(opened[0].close).toHaveBeenCalledTimes(1);
   });
 });
 
 describe("a run that is still open (#937)", () => {
   it("shows the four progress counters and the phase bar", () => {
     live.value = progress();
-    render(<MonitorPage onClose={() => {}} />);
+    render(<MonitorDock onClose={() => {}} />);
 
     const counters = screen.getByTestId("monitor-live-counters");
     expect(counters.textContent).toContain("planned");
@@ -308,7 +595,7 @@ describe("a run that is still open (#937)", () => {
 
   it("renders no verdict while the run is open", () => {
     live.value = progress();
-    render(<MonitorPage onClose={() => {}} />);
+    render(<MonitorDock onClose={() => {}} />);
 
     const headings = screen.getAllByRole("heading", { level: 2 }).map((node) => node.textContent);
     expect(headings).not.toContain("Verdict");
@@ -322,7 +609,7 @@ describe("a run that is still open (#937)", () => {
   it("closes the run explicitly on Stop & analyse and shows that run's verdict, no reload", () => {
     live.value = progress();
     read.value = { ok: true, document: diagnoseRun(coldRemoteOpen()) };
-    render(<MonitorPage onClose={() => {}} />);
+    render(<MonitorDock onClose={() => {}} />);
 
     fireEvent.click(screen.getByTestId("monitor-stop"));
 
@@ -340,7 +627,7 @@ describe("a run that is still open (#937)", () => {
     try {
       live.value = progress();
       read.value = { ok: true, document: diagnoseRun(coldRemoteOpen()) };
-      render(<MonitorPage onClose={() => {}} />);
+      render(<MonitorDock onClose={() => {}} />);
       expect(screen.getByTestId("monitor-live-counters")).toBeTruthy();
 
       // The run settles: the recorder closes it, and progress reads null.
@@ -363,7 +650,7 @@ describe("a run that is still open (#937)", () => {
     vi.useFakeTimers();
     try {
       read.value = { ok: true, document: diagnoseRun(coldRemoteOpen()) };
-      render(<MonitorPage onClose={() => {}} />);
+      render(<MonitorDock onClose={() => {}} />);
       expect(screen.getByRole("heading", { name: "Verdict" })).toBeTruthy();
 
       live.value = progress({ runId: "run-later" });
@@ -385,7 +672,7 @@ describe("a run that is still open (#937)", () => {
   it("shows a provisional reading, labelled provisional, with its top finding and its window (#1057)", () => {
     live.value = progress();
     reading.value = provisional();
-    render(<MonitorPage onClose={() => {}} />);
+    render(<MonitorDock onClose={() => {}} />);
 
     expect(screen.getByTestId("monitor-provisional-label").textContent).toBe("provisional");
     const statement = screen.getByTestId("monitor-provisional-statement").textContent ?? "";
@@ -415,7 +702,7 @@ describe("a run that is still open (#937)", () => {
     try {
       live.value = progress();
       reading.value = provisional();
-      render(<MonitorPage onClose={() => {}} />);
+      render(<MonitorDock onClose={() => {}} />);
       expect(screen.getByTestId("monitor-provisional-finding").textContent).toContain("saturated");
 
       // The backlog drains and in-flight wanders below its peak: the next
@@ -438,7 +725,7 @@ describe("a run that is still open (#937)", () => {
 
   it("says when no reading has been taken yet rather than showing an empty one", () => {
     live.value = progress();
-    render(<MonitorPage onClose={() => {}} />);
+    render(<MonitorDock onClose={() => {}} />);
 
     expect(screen.getByTestId("monitor-provisional-empty")).toBeTruthy();
     expect(screen.getByTestId("monitor-provisional-label").textContent).toBe("provisional");
@@ -451,7 +738,7 @@ describe("a run that is still open (#937)", () => {
     vi.useFakeTimers();
     try {
       live.value = progress({ visible: 4, elapsedMs: 900 });
-      render(<MonitorPage onClose={() => {}} />);
+      render(<MonitorDock onClose={() => {}} />);
 
       live.value = progress({ visible: 950, elapsedMs: 30_000 });
       act(() => {
@@ -507,10 +794,13 @@ describe("it ships in production builds", () => {
     const { readFile } = await import("node:fs/promises");
     const sources = await Promise.all(
       [
-        "monitor/MonitorPage.tsx",
+        "monitor/MonitorDock.tsx",
+        "monitor/MonitorReport.tsx",
+        "monitor/LiveReport.tsx",
+        "monitor/TimelineCanvas.tsx",
+        "monitor/timelineDraw.ts",
         "monitor/monitorModel.ts",
         "monitor/monitorSource.ts",
-        "WorkspaceRoot.tsx",
       // Paths from the vitest root (`lucida-web`): happy-dom replaces the
       // global `URL`, so a file:// URL never reaches `readFile` intact here.
       ].map((path) => readFile(`${process.cwd()}/src/${path}`, "utf8")),
