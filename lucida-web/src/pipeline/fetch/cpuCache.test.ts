@@ -3465,6 +3465,24 @@ describe("CpuCache", () => {
       expect(inputs).toMatchObject({ desiredDetailChunks: 1, residentDetailChunks: 1 });
     });
 
+    it("reports each tier's resident bytes against the budget eviction holds it under", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([
+        makeRequest({ level: 2, x: 0, lane: "detail", tier: "detail", chunkKey: "2/0/0/0/0/0" }),
+        makeRequest({ level: 2, x: 1, lane: "detail", tier: "detail", chunkKey: "2/0/0/0/0/1" }),
+      ]));
+      await flush();
+
+      const inputs = cache.quiescenceInputs(createQuiescenceState());
+      const budgets = cache.telemetry().tierBudgets;
+      expect(inputs.detailBytes).toBe(128);
+      expect(inputs.detailBudgetBytes).toBe(budgets.detailBytes);
+      expect(inputs.coarseBytes).toBe(0);
+      expect(inputs.coarseBudgetBytes).toBe(budgets.coarseBytes);
+    });
+
     it("interleaves detail and coarse fetch starts when both tiers have demand", () => {
       const { cache, source } = createTestCache({ maxConcurrentFetches: 2 });
       cache.submit(makePlan([

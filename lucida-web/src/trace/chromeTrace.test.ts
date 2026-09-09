@@ -57,6 +57,10 @@ const HEADER: RunHeader = {
     residentDetailChunks: 0,
     desiredCoarseChunks: 0,
     residentCoarseChunks: 0,
+    detailBytes: 0,
+    detailBudgetBytes: 0,
+    coarseBytes: 0,
+    coarseBudgetBytes: 0,
   },
 };
 
@@ -76,6 +80,7 @@ function row(overrides: Partial<TraceRow> = {}): TraceRow {
     y: 2,
     x: 3,
     chunkKey: "1/0/0/0/2/3",
+    bytes: 0,
     outcome: "complete",
     phases: {
       plan: { startUs: 0, endUs: 1_000, durationUs: 1_000 },
@@ -106,6 +111,7 @@ function tick(atUs: number, overrides: Partial<TraceTick> = {}): TraceTick {
     levelsDropped: 0,
     targetLevel: null,
     levelPinned: false,
+    availabilityWoken: false,
     displayedLevel: null,
     ...overrides,
   };

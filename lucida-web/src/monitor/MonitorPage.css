@@ -145,6 +145,10 @@
   border-left-color: #c9a227;
 }
 
+.monitor-callout-steady-state {
+  border-left-color: #5fa8a0;
+}
+
 .monitor-callout-note {
   border-left-color: #555;
 }

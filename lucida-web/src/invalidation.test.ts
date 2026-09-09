@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
+  AVAILABILITY_UPDATE_SOURCE,
+  TickWake,
   invalidateDisplaySettings,
   invalidateResidency,
   invalidateAfterViewRestore,
@@ -116,5 +118,31 @@ describe("composed invalidation intents", () => {
     expect(getSceneSettings(scene)).not.toBe(before);
 
     expect(() => requestRender(null)).not.toThrow();
+  });
+});
+
+describe("TickWake", () => {
+  it("does not call the loop's first tick availability-woken", () => {
+    const wake = new TickWake();
+    wake.note(AVAILABILITY_UPDATE_SOURCE);
+    expect(wake.take()).toBe(false);
+  });
+
+  it("names a tick that only an availability update woke, and only that tick", () => {
+    const wake = new TickWake();
+    wake.take();
+    wake.note(AVAILABILITY_UPDATE_SOURCE);
+    wake.note(AVAILABILITY_UPDATE_SOURCE);
+    expect(wake.take()).toBe(true);
+    // Nothing dirtied the loop since, so the next tick is not one of these.
+    expect(wake.take()).toBe(false);
+  });
+
+  it("does not name a tick that an input or a continuation woke as well", () => {
+    const wake = new TickWake();
+    wake.take();
+    wake.note(AVAILABILITY_UPDATE_SOURCE);
+    wake.note("tick_slice_continuation");
+    expect(wake.take()).toBe(false);
   });
 });
