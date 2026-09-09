@@ -352,6 +352,10 @@ pub struct WatchTick {
     pub target_level: Option<WatchLevelRange>,
     pub level_pinned: bool,
     pub displayed_level: Option<WatchLevelRange>,
+    /// Whether an availability update alone woke the pass, as the trace's
+    /// per-tick sample records it. A page older than that field omits it.
+    #[serde(default)]
+    pub availability_woken: bool,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -1971,6 +1975,7 @@ mod tests {
                     target_level: Some(WatchLevelRange { min: 1, max: 1 }),
                     level_pinned: false,
                     displayed_level: Some(WatchLevelRange { min: 1, max: 2 }),
+                    availability_woken: false,
                     extra: BTreeMap::new(),
                 }],
             },

@@ -47,7 +47,8 @@
         "displayedLevel": {
           "min": 1,
           "max": 2
-        }
+        },
+        "availabilityWoken": false
       }
     ]
   }

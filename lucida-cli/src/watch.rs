@@ -167,6 +167,7 @@ mod tests {
                 target_level: None,
                 level_pinned: false,
                 displayed_level: None,
+                availability_woken: false,
                 extra: BTreeMap::new(),
             }],
         }

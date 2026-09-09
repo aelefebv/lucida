@@ -1948,6 +1948,7 @@ fn watch_aggregate() -> WatchItem {
             target_level: Some(WatchLevelRange { min: 1, max: 1 }),
             level_pinned: false,
             displayed_level: Some(WatchLevelRange { min: 1, max: 2 }),
+            availability_woken: false,
             extra: BTreeMap::new(),
         }],
     }
