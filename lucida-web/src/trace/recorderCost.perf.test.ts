@@ -129,6 +129,7 @@ const WARMTH = {
 const OUTSTANDING = {
   pending: 0, inFlight: 0, speculativePending: 0, speculativeInFlight: 0,
   desiredDetailChunks: 0, residentDetailChunks: 0, desiredCoarseChunks: 0, residentCoarseChunks: 0,
+  detailBytes: 0, detailBudgetBytes: 0, coarseBytes: 0, coarseBudgetBytes: 0,
 };
 
 /** One object reused across ticks, as the emit site reuses the worker's report. */

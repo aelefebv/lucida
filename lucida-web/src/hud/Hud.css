@@ -1,0 +1,45 @@
+.hud {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 11;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  pointer-events: none;
+}
+
+.hud-strip {
+  display: block;
+  border-radius: 6px;
+}
+
+.hud-legend {
+  pointer-events: auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 10px;
+  width: fit-content;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(12, 14, 18, 0.8);
+  color: #c8ccd0;
+  font: 11px ui-monospace, Menlo, Consolas, monospace;
+}
+
+.hud-legend-title {
+  color: #9aa0a6;
+}
+
+.hud-legend-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.hud-legend-toggle input {
+  margin: 0;
+}

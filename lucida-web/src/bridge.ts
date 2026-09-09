@@ -511,13 +511,17 @@ export class Bridge {
       // `workspace_archived` would navigate state outside this bridge's
       // owner).
       if (this.destroyed) return;
+      // Counted at the bytes the socket carried, mirroring `send`, so the
+      // received rate is comparable with a network monitor.
       // Binary message: chunk data relay
       if (event.data instanceof ArrayBuffer) {
+        traceRecorder.countReceive(event.data.byteLength);
         this.handleBinary(event.data);
         return;
       }
 
       if (typeof event.data !== "string") return;
+      traceRecorder.countReceive(utf8ByteLength(event.data));
       try {
         const msg = JSON.parse(event.data);
         switch (msg.type) {
