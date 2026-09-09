@@ -6,6 +6,7 @@ mod credentials;
 mod dataset;
 mod error;
 mod http;
+mod inbox;
 mod layout;
 mod montage;
 mod output;
@@ -13,6 +14,7 @@ mod saved_view;
 mod session;
 mod status;
 mod trace;
+mod trace_script;
 mod view;
 mod watch;
 mod workspace;
@@ -55,6 +57,10 @@ use crate::dataset::{
 };
 
 use crate::error::{CliError, ErrorKind};
+use crate::inbox::{
+    InboxClient, InboxFetchOutput, InboxListOutput, fetch_path, format_inbox_fetch_human,
+    format_inbox_list_human, resolve_entry,
+};
 use crate::layout::{
     LayoutActiveOutput, LayoutListOutput, LayoutSetOutput, LayoutWorkspaceClient,
     format_layout_active_human, format_layout_list_human, format_layout_set_human,
@@ -1247,13 +1253,17 @@ struct TraceRunArgs {
     /// Seconds to wait for the page to load and settle
     #[arg(long, default_value_t = 120)]
     timeout_seconds: u64,
-    /// Fail (non-zero) on a stall verdict or a run that never settled
+    /// Fail (non-zero) on a stall or steady-state verdict, or a run that never settled
     ///
     /// Opt-in, because every other non-zero exit in this CLI means the command
     /// itself failed. Never fires on coverage: most of a healthy cold open is
     /// pre-instrument boot, so a coverage gate fires on every green run.
     #[arg(long)]
     gate: bool,
+    /// The steps to run after the open settles, in command-line order, or a
+    /// script file of them. None by default: the driver measures the open.
+    #[command(flatten)]
+    script: trace_script::ScriptArgs,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1308,6 +1318,11 @@ enum TraceCommand {
         #[arg(long, value_name = "SECONDS")]
         seconds: Option<u64>,
     },
+    /// List and fetch the reports people sent to this workspace's inbox
+    Inbox {
+        #[command(subcommand)]
+        command: TraceInboxCommand,
+    },
     /// Write the page's trace as Chrome Trace Event JSON, for ui.perfetto.dev
     Perfetto {
         /// File to write the trace to
@@ -1328,6 +1343,25 @@ enum TraceCommand {
         /// Device pixel ratio to drive the page at
         #[arg(long, default_value_t = trace::DEFAULT_DEVICE_PIXEL_RATIO, value_name = "RATIO")]
         device_pixel_ratio: f64,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TraceInboxCommand {
+    /// List the reports in the selected workspace's inbox, newest first
+    List,
+    /// Fetch one report to a file that `lucida trace show` reads
+    Fetch {
+        /// Inbox entry id, or enough of one to name a single report
+        #[arg(value_name = "ENTRY")]
+        entry: String,
+        /// File to write the bundle to, instead of naming it for its run
+        /// under the trace directory
+        #[arg(long, short, value_name = "PATH")]
+        output: Option<PathBuf>,
+        /// Directory fetched bundles land in, beside the driver's runs
+        #[arg(long, value_name = "DIR", env = "LUCIDA_TRACE_DIR")]
+        trace_dir: Option<PathBuf>,
     },
 }
 
@@ -3784,9 +3818,50 @@ async fn emit_trace_command(
             )
             .await?;
         }
+        (None, Some(TraceCommand::Inbox { command })) => {
+            let inbox = InboxClient::new(server.url.clone(), token.clone());
+            let entries = inbox.list(&workspace).await?;
+            match command {
+                TraceInboxCommand::List => {
+                    let payload = InboxListOutput {
+                        server,
+                        workspace,
+                        entries,
+                    };
+                    output.print_either(&payload, || format_inbox_list_human(&payload))?;
+                }
+                TraceInboxCommand::Fetch {
+                    entry,
+                    output: output_path,
+                    trace_dir,
+                } => {
+                    // The listing first, so the report can be named by a
+                    // few characters of its id and the file by the run it
+                    // holds. Both need the entry, and the entry is only in
+                    // the listing.
+                    let entry = resolve_entry(&entries, entry)?.clone();
+                    let dir = trace::resolve_trace_dir(trace_dir.as_deref(), &config_path);
+                    let path = fetch_path(&dir, &entry, output_path.as_deref());
+                    // Written as the server handed it over: the file on
+                    // disk is the file the sender's page produced.
+                    let bundle = inbox.fetch(&workspace, &entry.id).await?;
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent).map_err(CliError::from)?;
+                    }
+                    std::fs::write(&path, bundle).map_err(CliError::from)?;
+                    let payload = InboxFetchOutput {
+                        server,
+                        workspace,
+                        entry,
+                        path,
+                    };
+                    output.print_either(&payload, || format_inbox_fetch_human(&payload))?;
+                }
+            }
+        }
         (None, None) => {
             return Err(CliError::config(
-                "lucida trace takes a dataset URL to measure, or a subcommand (show, watch, perfetto)",
+                "lucida trace takes a dataset URL to measure, or a subcommand (show, inbox, watch, perfetto)",
             ));
         }
     }
@@ -3820,6 +3895,9 @@ async fn run_trace(
     trace_dir: &Path,
     wait: Duration,
 ) -> Result<TraceRunOutcome, CliError> {
+    // Read first, so a script that cannot run fails before a server is
+    // reached or a dataset opened on its behalf.
+    let script = args.script.resolve()?;
     let dataset_client = DatasetWorkspaceClient::new(target.ws_url.clone(), token.cloned());
     let (_seq, health) = dataset_client.health(None, wait).await?;
     let dataset_url = dataset_source_url(dataset, &health)?;
@@ -3905,6 +3983,7 @@ async fn run_trace(
         server_url: server.url.clone(),
         workspace_id: workspace.id.clone(),
         screenshot: args.screenshot.clone(),
+        script,
     };
     let viewport = Viewport::new(args.width, args.height, args.device_pixel_ratio);
     let bundle = args.bundle.as_ref().map(|path| trace::BundleRequest {
@@ -5913,6 +5992,73 @@ mod tests {
         assert!(try_parse(&["trace", "/data/set.zarr", "--bundle-perfetto"]).is_err());
     }
 
+    /// The inbox is two commands: what is there, and one of them to a
+    /// file. `fetch` names a report by id and takes the file name from
+    /// the run unless the caller says otherwise.
+    #[test]
+    fn trace_inbox_commands_parse_product_shape() {
+        match parse(&["trace", "inbox", "list"]).command {
+            Command::Trace {
+                command:
+                    Some(TraceCommand::Inbox {
+                        command: TraceInboxCommand::List,
+                    }),
+                ..
+            } => {}
+            other => panic!("expected an inbox listing, got {other:?}"),
+        }
+
+        match parse(&[
+            "trace",
+            "inbox",
+            "fetch",
+            "5d1f0c2e",
+            "--output",
+            "/tmp/report.bundle.json",
+            "--trace-dir",
+            "/runs",
+        ])
+        .command
+        {
+            Command::Trace {
+                command:
+                    Some(TraceCommand::Inbox {
+                        command:
+                            TraceInboxCommand::Fetch {
+                                entry,
+                                output,
+                                trace_dir,
+                            },
+                    }),
+                ..
+            } => {
+                assert_eq!(entry, "5d1f0c2e");
+                assert_eq!(
+                    output.as_deref(),
+                    Some(Path::new("/tmp/report.bundle.json"))
+                );
+                assert_eq!(trace_dir.as_deref(), Some(Path::new("/runs")));
+            }
+            other => panic!("expected an inbox fetch, got {other:?}"),
+        }
+
+        match parse(&["trace", "inbox", "fetch", "5d1f0c2e"]).command {
+            Command::Trace {
+                command:
+                    Some(TraceCommand::Inbox {
+                        command: TraceInboxCommand::Fetch { output, .. },
+                    }),
+                ..
+            } => assert_eq!(output, None, "the file is named for its run by default"),
+            other => panic!("expected an inbox fetch, got {other:?}"),
+        }
+
+        // A report to fetch is not optional: there is no newest-report
+        // default, because a listing is one command away and picking for
+        // somebody would fetch the wrong megabytes.
+        assert!(try_parse(&["trace", "inbox", "fetch"]).is_err());
+    }
+
     /// The bundle header lists every field the replay needs (#1055): each
     /// argument of `trace` that shapes the workload maps onto a header field
     /// the replay list names, and the rest are the sidecars and the deadline.
@@ -5945,6 +6091,11 @@ mod tests {
             "gate",
             "help",
         ];
+        // The steps ride the bundle's own script section, which a replay runs
+        // again, rather than a header field the replay list names.
+        let carried_by_script = [
+            "script", "wait", "hold", "pan", "zoom_by", "orbit", "scrub", "select",
+        ];
 
         let command = Cli::command();
         let trace = command
@@ -5961,12 +6112,106 @@ mod tests {
                     fields.contains(field),
                     "{id} replays through {field}, which the replay list does not name"
                 ),
+                None if carried_by_script.contains(&id) => {}
                 None => assert!(
                     not_workload.contains(&id),
                     "{id} is neither a workload argument with a header field nor a sidecar"
                 ),
             }
         }
+    }
+
+    /// The steps run in the order they were typed, whatever their kinds, and
+    /// a run with none is the driver's default: an open and nothing after it.
+    #[test]
+    fn trace_runs_the_step_flags_in_command_line_order_and_none_by_default() {
+        use trace_script::{ScriptStep, ScrubAxis};
+        match parse(&[
+            "trace",
+            "/data/set.zarr",
+            "--camera",
+            "arcball",
+            "--wait",
+            "--orbit",
+            "30,15",
+            "--scrub",
+            "t:1",
+            "--select",
+            "channel:0=off",
+            "--zoom-by",
+            "2",
+            "--pan",
+            "-100,40",
+            "--hold",
+            "250",
+        ])
+        .command
+        {
+            Command::Trace { run, .. } => {
+                assert_eq!(
+                    run.script.steps,
+                    vec![
+                        ScriptStep::Wait,
+                        ScriptStep::Orbit {
+                            theta: 30.0,
+                            phi: 15.0
+                        },
+                        ScriptStep::Scrub {
+                            axis: ScrubAxis::T,
+                            count: 1
+                        },
+                        ScriptStep::Select {
+                            channel: Some(0),
+                            layer: None,
+                            visible: false
+                        },
+                        ScriptStep::Zoom {
+                            factor: 2.0,
+                            at: None
+                        },
+                        ScriptStep::Pan {
+                            dx: -100.0,
+                            dy: 40.0
+                        },
+                        ScriptStep::Hold { ms: 250 },
+                    ]
+                );
+                assert!(run.script.file.is_none());
+                // --zoom-by is a step, not the framing --zoom.
+                assert!(run.zoom.is_none());
+            }
+            _ => panic!("expected a trace run"),
+        }
+        match parse(&["trace", "/data/set.zarr"]).command {
+            Command::Trace { run, .. } => {
+                assert!(run.script.steps.is_empty());
+                assert!(run.script.resolve().unwrap().is_empty());
+            }
+            _ => panic!("expected a trace run"),
+        }
+    }
+
+    #[test]
+    fn trace_takes_a_script_file_in_place_of_step_flags() {
+        match parse(&["trace", "/data/set.zarr", "--script", "steps.json"]).command {
+            Command::Trace { run, .. } => {
+                assert_eq!(run.script.file, Some(PathBuf::from("steps.json")));
+                assert!(run.script.steps.is_empty());
+            }
+            _ => panic!("expected a trace run"),
+        }
+        assert!(
+            try_parse(&[
+                "trace",
+                "/data/set.zarr",
+                "--script",
+                "steps.json",
+                "--wait"
+            ])
+            .is_err()
+        );
+        assert!(try_parse(&["trace", "/data/set.zarr", "--scrub", "q:1"]).is_err());
+        assert!(try_parse(&["trace", "/data/set.zarr", "--orbit", "0,0"]).is_err());
     }
 
     /// The follow-up depths the diagnostic prints have to parse, or the default

@@ -15,7 +15,6 @@
 
 import { accountedWithin, couldHideBottleneck } from "../coverage.ts";
 import {
-  CLIENT_MESSAGES,
   COUNTED_PHASES,
   TRACE_SCHEMA_VERSION,
   isInteractionCause,
@@ -38,7 +37,14 @@ import {
   type WindowRollup,
 } from "./phaseRollup.ts";
 import { adapterKindOf, adapterName, deriveRenderTiming } from "./renderTiming.ts";
+import { summariseSent } from "./sent.ts";
 import { summariseSpace } from "./spatialSummary.ts";
+import { deriveTimeline, type TimelineRecording } from "./timeline.ts";
+import {
+  describeSteadyStateFinding,
+  deriveSteadyState,
+  type SteadyStateFinding,
+} from "./steadyState.ts";
 import {
   DIAGNOSTIC_SCHEMA_VERSION,
   type AggregateCandidate,
@@ -51,7 +57,6 @@ import {
   type LimiterSummary,
   type RunIdentity,
   type PhaseRollup,
-  type SentSummary,
   type Verdict,
   type WindowRequest,
 } from "./types.ts";
@@ -105,6 +110,19 @@ export interface DiagnoseOptions {
    * Defaults to the worst row's chunk, so the default text has one to name.
    */
   chunk?: string;
+  /**
+   * The recording the run came from, so the timeline can place the other
+   * retained intervals on this run's clock. Without it the axis carries this
+   * run alone. {@link diagnoseDocument} supplies it from the document.
+   */
+  recording?: TimelineRecording;
+  /**
+   * The steady-state interval that opened when this run closed, for the
+   * steady-state ruleset. {@link diagnoseDocument} finds it in the document;
+   * a caller with one run and no document passes it here, or passes nothing
+   * and gets a reading that says it had no interval to read.
+   */
+  steadyState?: TraceRun | null;
 }
 
 /**
@@ -121,7 +139,30 @@ export function diagnoseDocument(
     ? document.runs.find((candidate) => candidate.header.runId === options.runId)
     : document.runs[document.runs.length - 1];
   if (!run) throw new Error(`no run ${options.runId ?? "(newest)"} in this trace document`);
-  return diagnoseRun(run, options);
+  return diagnoseRun(run, {
+    ...options,
+    recording: options.recording ?? { runs: document.runs, steadyState: document.steadyState },
+    // An explicit null is a caller saying there is no interval, which is not
+    // the same as not asking.
+    steadyState:
+      options.steadyState !== undefined ? options.steadyState : intervalAfter(document, run),
+  });
+}
+
+/**
+ * The steady-state interval that opened when `run` closed: the earliest
+ * unlabelled one that starts no earlier than the run does.
+ *
+ * Both lists are chronological and only one interval is ever open, so the
+ * first match is the successor. An interval and the run that follows it can
+ * share a start millisecond only if the interval lasted less than one, and an
+ * interval that short has nothing in it to read.
+ */
+function intervalAfter(document: TraceDocument, run: TraceRun): TraceRun | null {
+  const openedAt = run.header.startedAtEpochMs;
+  return (
+    document.steadyState.find((interval) => interval.header.startedAtEpochMs >= openedAt) ?? null
+  );
 }
 
 export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): DiagnosticDocument {
@@ -142,6 +183,16 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
   const coverage = deriveCoverage(run, window, rollup);
   const interaction = isInteractionCause(run.header.cause);
   const attribution = attribute({ run, path, phases, limiters, aggregates, coverage, interaction });
+  // A window is an interval of the run's clock, and the steady state begins
+  // where that clock ends, so a narrower window cannot reach it and says so
+  // rather than reporting the whole interval as if the window had scoped it.
+  const steady = deriveSteadyState(
+    run,
+    window.whole ? (options.steadyState ?? null) : null,
+    window.whole
+      ? "no steady-state interval followed this run in the document"
+      : "this reading is scoped to a window of the run's clock, which ends where the run does",
+  );
   const findings = rankFindings({
     path,
     phases,
@@ -149,6 +200,7 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
     aggregates,
     attribution,
     interaction,
+    steadyState: steady.findings,
     baseline: options.baseline ?? null,
   });
   const worst = worstRowSelector(run, phases, findings);
@@ -174,7 +226,8 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
     limiters,
     aggregates,
     renderTiming: deriveRenderTiming(run),
-    sent: summariseSent(run),
+    sent: summariseSent(run.sent, run.header.durationUs),
+    steadyState: steady.reading,
     counts: {
       rows: run.rows.length,
       serverRows: run.serverRows.length - metadataReadRows(run.serverRows).length,
@@ -184,6 +237,7 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
     },
     chunk,
     spatial: summariseSpace(run),
+    timeline: deriveTimeline(run, window, options.recording),
     raw: {
       inlined: false,
       why: "Raw spans are for a viewer, not a context window: a warm re-open is tens of thousands of rows, and nothing per-row appears at any depth here beyond the one chunk the lookup is about.",
@@ -326,24 +380,6 @@ function countedWithin(run: TraceRun, window: RunWindow): Record<CountedPhase, n
     for (const phase of COUNTED_PHASES) totals[phase] += tick.counted[phase] ?? 0;
   }
   return totals;
-}
-
-// ---------------------------------------------------------------------------
-// The send side
-// ---------------------------------------------------------------------------
-
-function summariseSent(run: TraceRun): SentSummary {
-  const wallUs = Math.max(1, run.header.durationUs);
-  const perSecond = (bytes: number): number => Math.round((bytes * 1_000_000) / wallUs);
-  let messages = 0;
-  let bytes = 0;
-  const byType = CLIENT_MESSAGES.map(({ type, label }) => {
-    const tally = run.sent[type];
-    messages += tally.messages;
-    bytes += tally.bytes;
-    return { type, label, messages: tally.messages, bytes: tally.bytes, bytesPerS: perSecond(tally.bytes) };
-  });
-  return { messages, bytes, bytesPerS: perSecond(bytes), byType };
 }
 
 // ---------------------------------------------------------------------------
@@ -561,8 +597,22 @@ interface FindingsInput {
   aggregates: AggregateCandidate[];
   attribution: Attribution;
   interaction: boolean;
+  /** What the steady-state ruleset found, ranked here with the run's own. */
+  steadyState: SteadyStateFinding[];
   baseline: DiagnosticDocument | null;
 }
+
+/**
+ * Which findings outrank which. A stall or a saturation is about the run, so
+ * it leads; a steady-state finding is about the interval after it, so it
+ * follows; a note is worth a line rather than blame, so it comes last.
+ */
+const SEVERITY_RANK: Record<Finding["severity"], number> = {
+  stall: 2,
+  saturated: 2,
+  "steady-state": 1,
+  note: 0,
+};
 
 function rankFindings(input: FindingsInput): Finding[] {
   const raw: RawFinding[] = [];
@@ -691,13 +741,13 @@ function rankFindings(input: FindingsInput): Finding[] {
   }
 
   raw.push(...comparativeFindings(input));
+  raw.push(...input.steadyState);
 
   const seen = new Set<string>();
-  const weight = (finding: { severity: string }): number => (finding.severity === "note" ? 0 : 1);
-  return raw
+  const ranked = raw
     .sort(
       (a, b) =>
-        weight(b) - weight(a) ||
+        SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity] ||
         (b.observed.sharePct ?? 0) - (a.observed.sharePct ?? 0) ||
         (b.observed.ms ?? 0) - (a.observed.ms ?? 0),
     )
@@ -707,13 +757,17 @@ function rankFindings(input: FindingsInput): Finding[] {
       if (seen.has(finding.subject)) return false;
       seen.add(finding.subject);
       return true;
-    })
-    .map((finding, index) => ({
-      ...finding,
-      id: index + 1,
-      confidence: index === 0 ? input.attribution.confidence : ("observed" as const),
-      attribution: index === 0 ? input.attribution : null,
-    }));
+    });
+  // The attribution is the run's answer to "what was this waiting on", so it
+  // rides the leading finding about the run. A steady-state finding is about
+  // the interval after the run and carries the ruleset's rationale instead.
+  const leader = ranked.findIndex((finding) => finding.severity !== "steady-state");
+  return ranked.map((finding, index) => ({
+    ...finding,
+    id: index + 1,
+    confidence: index === leader ? input.attribution.confidence : ("observed" as const),
+    attribution: index === leader ? input.attribution : null,
+  }));
 }
 
 /**
@@ -784,6 +838,17 @@ function buildVerdict(
     return {
       kind: "clear",
       text: `no stall — nothing crossed a threshold; ${tail}${caveat}`,
+      confidence: attribution.confidence,
+    };
+  }
+
+  // Nothing about the run itself crossed a threshold, but something after it
+  // did. On a budget-bound tier this is also what replaces "the run timed
+  // out" with the coverage the screen went without, which is the news.
+  if (lead.severity === "steady-state") {
+    return {
+      kind: "steady-state",
+      text: `${describeSteadyStateFinding(lead)}${caveat}`,
       confidence: attribution.confidence,
     };
   }
@@ -887,7 +952,10 @@ function nextSteps(
     { why: "every phase, one row each", command: `lucida trace show ${runId} --phases${scope}` },
   ];
   const lead = findings.find((finding) => finding.severity !== "note");
-  if (lead) {
+  // Only a phase has a shape to show. A steady-state finding's subject is the
+  // interval after the run, and a command that does not run is worse than no
+  // command at all.
+  if (lead && phases.some((phase) => phase.id === lead.subject)) {
     steps.unshift({
       why: `the shape behind ${lead.subject}`,
       command: `lucida trace show ${runId} --phase ${lead.subject}${scope}`,

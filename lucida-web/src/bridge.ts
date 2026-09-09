@@ -123,6 +123,30 @@ interface PendingDatasetHealthRequest {
 }
 
 /**
+ * What the server answers a **Send report** with: where the bundle landed
+ * in the workspace inbox, and when the inbox's fixed retention drops it.
+ * `entryId` is what `lucida trace inbox fetch` takes.
+ */
+export interface InboxReceipt {
+  entryId: string;
+  /** RFC 3339. */
+  expiresAt: string;
+}
+
+interface PendingSendReport {
+  resolve: (receipt: InboxReceipt) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+/**
+ * How long a **Send report** waits for the server's receipt. A bundle is
+ * megabytes, and the socket carries it behind whatever else is queued, so
+ * this is longer than the health request's wait.
+ */
+const SEND_REPORT_TIMEOUT_MS = 60_000;
+
+/**
  * A sequenced message (`command_broadcast` or `ack`) held back while a
  * snapshot resync is in flight. `commandJson` is `null` for acks — an ack
  * only advances seq tracking (the sender already applied its own command
@@ -403,6 +427,7 @@ export class Bridge {
   private cursorTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingCursor: string | null = null;
   private pendingDatasetHealth = new Map<string, PendingDatasetHealthRequest>();
+  private pendingSendReports = new Map<string, PendingSendReport>();
   /** Bookmark-sidebar cross-peer subscribers. Owned on the bridge so
    *  feature code subscribes via a stable handle instead of wiring
    *  callbacks through React props. */
@@ -486,13 +511,17 @@ export class Bridge {
       // `workspace_archived` would navigate state outside this bridge's
       // owner).
       if (this.destroyed) return;
+      // Counted at the bytes the socket carried, mirroring `send`, so the
+      // received rate is comparable with a network monitor.
       // Binary message: chunk data relay
       if (event.data instanceof ArrayBuffer) {
+        traceRecorder.countReceive(event.data.byteLength);
         this.handleBinary(event.data);
         return;
       }
 
       if (typeof event.data !== "string") return;
+      traceRecorder.countReceive(utf8ByteLength(event.data));
       try {
         const msg = JSON.parse(event.data);
         switch (msg.type) {
@@ -632,6 +661,10 @@ export class Bridge {
           case "dataset_health":
             this.handleDatasetHealth(msg);
             break;
+          case "report_sent":
+          case "report_failed":
+            this.handleReportReceipt(msg);
+            break;
           case "asset_catalog_update":
             this.handlers.onAssetCatalogUpdate?.(
               msg.dataset_id,
@@ -763,6 +796,40 @@ export class Bridge {
       datasetCount: datasets.length,
     }, this.ws?.readyState);
     pending.resolve(datasets);
+  }
+
+  /**
+   * Settle the **Send report** the server is answering. `report_sent`
+   * carries the inbox entry; `report_failed` carries why nothing was kept.
+   */
+  private handleReportReceipt(msg: unknown) {
+    const obj = msg as {
+      type?: unknown;
+      request_id?: unknown;
+      entry_id?: unknown;
+      expires_at?: unknown;
+      error?: unknown;
+    };
+    const requestId = typeof obj.request_id === "string" ? obj.request_id : "";
+    if (!requestId) return;
+
+    const pending = this.pendingSendReports.get(requestId);
+    if (!pending) return;
+    this.pendingSendReports.delete(requestId);
+    clearTimeout(pending.timer);
+
+    if (obj.type === "report_sent" && typeof obj.entry_id === "string") {
+      const receipt: InboxReceipt = {
+        entryId: obj.entry_id,
+        expiresAt: typeof obj.expires_at === "string" ? obj.expires_at : "",
+      };
+      bridgeLog("send_report.sent", { requestId, entryId: receipt.entryId }, this.ws?.readyState);
+      pending.resolve(receipt);
+      return;
+    }
+    const error = typeof obj.error === "string" ? obj.error : "the server did not keep the report";
+    bridgeLog("send_report.failed", { requestId, error }, this.ws?.readyState);
+    pending.reject(new Error(error));
   }
 
   private handleDatasetOpenProgress(msg: unknown) {
@@ -1166,6 +1233,37 @@ export class Bridge {
     });
   }
 
+  /**
+   * **Send report**: post a bundle to the workspace inbox and resolve with
+   * the entry the server kept it under. Rejects with the server's reason
+   * when nothing was kept, and when the socket is not open, because a
+   * report that silently went nowhere is the one outcome this action must
+   * not have. Nothing calls this on a run's close: it is the action's own
+   * send and no other.
+   *
+   * `bundleJson` is the bundle already serialised, and it travels as
+   * text. The server stores those bytes and the CLI fetches them back,
+   * so the caller serialises once and nothing else re-encodes what it
+   * produced.
+   */
+  sendReport(bundleJson: string, timeoutMs = SEND_REPORT_TIMEOUT_MS): Promise<InboxReceipt> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new Error("WebSocket is not connected"));
+    }
+    const requestId = makeBridgeRequestId("web-report");
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingSendReports.delete(requestId);
+        reject(new Error("Timed out waiting for the inbox to confirm the report"));
+      }, timeoutMs);
+      this.pendingSendReports.set(requestId, { resolve, reject, timer });
+      bridgeLog("send_report.send", { requestId, bytes: bundleJson.length }, this.ws?.readyState);
+      this.send(
+        JSON.stringify({ type: "send_report", request_id: requestId, bundle: bundleJson }),
+      );
+    });
+  }
+
   sendDatasetRetry(datasetId: string) {
     const requestId = makeBridgeRequestId("web-retry");
     bridgeLog("dataset_retry.send", {
@@ -1260,6 +1358,11 @@ export class Bridge {
       pending.reject(new Error("Bridge destroyed"));
     }
     this.pendingDatasetHealth.clear();
+    for (const pending of this.pendingSendReports.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error("Bridge destroyed"));
+    }
+    this.pendingSendReports.clear();
     this.pendingSequenced = [];
     this.pendingLocalCommands = [];
     this.documentDatasetIds = null;

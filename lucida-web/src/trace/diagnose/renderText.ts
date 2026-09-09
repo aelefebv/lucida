@@ -24,7 +24,14 @@
 import type { RunCause } from "../types.ts";
 import { SPATIAL_AXES } from "./spatialSummary.ts";
 import { describeState } from "./rowState.ts";
-import type { ChunkLookup, DiagnosticDocument, Finding, SpatialSummary } from "./types.ts";
+import type { LiveTimeline } from "./timeline.ts";
+import type {
+  ChunkLookup,
+  DiagnosticDocument,
+  Finding,
+  SpatialSummary,
+  TimelineSection,
+} from "./types.ts";
 
 export const DEFAULT_MAX_LINES = 30;
 export const DEFAULT_MAX_BYTES = 3_072;
@@ -38,8 +45,12 @@ export const DEFAULT_MAX_BYTES = 3_072;
  * rendered as text: the document's chunk lookup, and its spatial summary.
  * Which chunk the lookup is about is a derivation option, not a rendering
  * one; this renderer prints whichever chunk the document carries.
+ *
+ * `timeline` is the dock's charts as text: one line per chart of the closed
+ * set, naming each series' peak and newest value or the reason it is absent,
+ * so nothing is visible to a person and invisible to an agent.
  */
-export type RenderDepth = "summary" | "phases" | "phase" | "chunk" | "spatial";
+export type RenderDepth = "summary" | "phases" | "phase" | "chunk" | "spatial" | "timeline";
 
 const LEAD_CHUNK_ROWS = 3;
 const LEAD_SPATIAL_GROUPS = 8;
@@ -193,6 +204,7 @@ export function renderDiagnostic(
   const onlyPhase = depth === "phase" ? (options.phase ?? "") : null;
   if (depth === "chunk") renderChunk(document.chunk, document, push, p);
   else if (depth === "spatial") renderSpatial(document.spatial, document, push, p);
+  else if (depth === "timeline") renderTimeline(document.timeline, LEAD_FINDING, push, p);
   else renderFindings(document, depth, onlyPhase, push, p);
 
   // --- the anti-signal, unconditional --------------------------------------
@@ -262,6 +274,7 @@ export function renderDiagnostic(
           `${p(`sent.byType[${index}].bytesPerS`, entry.bytesPerS).padStart(9)} B/s`,
       );
     });
+    renderSteadyState(document, push, p);
     push(DETAIL, "");
     push(DETAIL, `RULESET v${document.ruleset.version} — ${document.ruleset.note}`);
   }
@@ -271,8 +284,8 @@ export function renderDiagnostic(
   // why raw rows are never inlined, which is a rationale rather than a step.
   for (const step of document.next) push(NEXT, `   ${step.command.padEnd(52)} # ${step.why}`);
 
-  // The phase depths are where a reader goes when the budget was not enough,
-  // so they are unbudgeted.
+  // The phase depths and the timeline are where a reader goes when the budget
+  // was not enough, so they are unbudgeted.
   const budgeted = depth === "summary" || depth === "chunk" || depth === "spatial";
   const maxLines = options.maxLines ?? (budgeted ? DEFAULT_MAX_LINES : Infinity);
   const maxBytes = options.maxBytes ?? (budgeted ? DEFAULT_MAX_BYTES : Infinity);
@@ -394,6 +407,89 @@ function renderChunk(
 }
 
 /**
+ * The text twin of the ribbon the dock draws between two runs: what the
+ * pipeline did after the view settled, and the tiers as the run left them.
+ * Every steady-state finding's numbers are here whether the rule fired or
+ * not, so a quiet interval reads as measured rather than as unexamined.
+ */
+function renderSteadyState(document: DiagnosticDocument, push: PushLine, p: PrintNumber): void {
+  const steady = document.steadyState;
+  push(DETAIL, "");
+  push(
+    DETAIL,
+    "STEADY STATE  (the unlabelled interval that opened when the run closed; the tiers are the run's settle block)",
+  );
+  push(DETAIL, `   ${steady.statement}`);
+  const interval = steady.interval;
+  if (interval) {
+    push(
+      DETAIL,
+      `   interval   ${interval.id} · ${p("steadyState.interval.windowMs", interval.windowMs)} ms · ` +
+        `${p("steadyState.interval.rows", interval.rows.toLocaleString())} row(s) · ` +
+        `${p("steadyState.interval.passes", interval.passes.toLocaleString())} pass(es) · ended ${interval.endReason}`,
+    );
+  }
+  const received = steady.received;
+  if (received) {
+    push(
+      DETAIL,
+      `   received   ${p("steadyState.received.bytes", received.bytes.toLocaleString())} B over ` +
+        `${p("steadyState.received.requests", received.requests.toLocaleString())} request(s) · ` +
+        `${p("steadyState.received.bytesPerS", received.bytesPerS.toLocaleString())} B/s · ` +
+        `${p("steadyState.received.busySeconds", received.busySeconds)} busy second(s) at ` +
+        `${p("steadyState.received.busyBytesPerS", received.busyBytesPerS.toLocaleString())} B/s`,
+    );
+    received.byLane.forEach((lane, index) => {
+      push(
+        DETAIL,
+        `      lane ${lane.lane.padEnd(9)} ${p(`steadyState.received.byLane[${index}].bytes`, lane.bytes.toLocaleString()).padStart(11)} B ` +
+          `${p(`steadyState.received.byLane[${index}].requests`, lane.requests.toLocaleString()).padStart(7)} request(s) ` +
+          `${p(`steadyState.received.byLane[${index}].bytesPerS`, lane.bytesPerS.toLocaleString()).padStart(9)} B/s`,
+      );
+    });
+  }
+  const refetch = steady.refetch;
+  if (refetch) {
+    push(
+      DETAIL,
+      `   refetch    ${p("steadyState.refetch.chunks", refetch.chunks.toLocaleString())} chunk(s) fetched again · ` +
+        `${p("steadyState.refetch.refetches", refetch.refetches.toLocaleString())} refetch(es) · ` +
+        `${p("steadyState.refetch.bytes", refetch.bytes.toLocaleString())} B · ` +
+        `window ${p("steadyState.refetch.windowMs", refetch.windowMs.toLocaleString())} ms`,
+    );
+  }
+  const replans = steady.replans;
+  if (replans) {
+    push(
+      DETAIL,
+      `   replans    ${p("steadyState.replans.availabilityWoken", replans.availabilityWoken.toLocaleString())} of ` +
+        `${p("steadyState.replans.passes", replans.passes.toLocaleString())} pass(es) woken by an availability update alone`,
+    );
+  }
+  const sent = steady.sent;
+  if (sent) {
+    push(
+      DETAIL,
+      `   sent       ${p("steadyState.sent.bytes", sent.bytes.toLocaleString())} B over ` +
+        `${p("steadyState.sent.messages", sent.messages.toLocaleString())} message(s) · ` +
+        `${p("steadyState.sent.bytesPerS", sent.bytesPerS.toLocaleString())} B/s`,
+    );
+  }
+  steady.tiers.forEach((tier, index) => {
+    const base = `steadyState.tiers[${index}]`;
+    push(
+      DETAIL,
+      `   tier ${tier.tier.padEnd(6)} wants ${p(`${base}.wanted`, tier.wanted.toLocaleString())} · ` +
+        `holds ${p(`${base}.resident`, tier.resident.toLocaleString())} · ` +
+        `${p(`${base}.bytes`, tier.bytes.toLocaleString())} of ${p(`${base}.budgetBytes`, tier.budgetBytes.toLocaleString())} B ` +
+        `(${p(`${base}.fillPct`, tier.fillPct)}%) · loss ${p(`${base}.coverageLossChunks`, tier.coverageLossChunks.toLocaleString())} ` +
+        `(${p(`${base}.coverageLossPct`, tier.coverageLossPct)}%) · ` +
+        (tier.budgetBound ? "budget-bound" : "not budget-bound"),
+    );
+  });
+}
+
+/**
  * What the summary cannot show sits in the commands' band, so the budget
  * drops groups before it drops the caveats on the groups it keeps.
  */
@@ -429,6 +525,75 @@ function renderSpatial(
     );
   });
   for (const line of spatial.cannotShow) push(NEXT, `   cannot show: ${line}`);
+}
+
+/**
+ * One line per chart, naming what the canvas draws for it: each recorded
+ * series' peak and newest value, each absent series' reason. A test holds
+ * the closed set of charts to these lines.
+ */
+function renderTimeline(timeline: TimelineSection, band: number, push: PushLine, p: PrintNumber): void {
+  const axis = timeline.axis;
+  push(
+    band,
+    `TIMELINE  ${p("timeline.axis.startMs", axis.startMs)}..${p("timeline.axis.endMs", axis.endMs)} ms in ` +
+      `${p("timeline.axis.buckets", axis.buckets)} buckets of ${p("timeline.axis.bucketMs", axis.bucketMs)} ms · ` +
+      `${timeline.rowsWalked ? "rows walked" : "rows not walked"} · ${timeline.statement}`,
+  );
+  timeline.intervals.forEach((interval, index) => {
+    const base = `timeline.intervals[${index}]`;
+    push(
+      band,
+      `   band  ${interval.kind.padEnd(12)} ${interval.runId.padEnd(24)} ` +
+        `${p(`${base}.startMs`, interval.startMs)}..${p(`${base}.endMs`, interval.endMs)} ms · ` +
+        `${interval.cause ? formatCause(interval.cause) : "steady state"} · ` +
+        `${interval.endReason ?? "open"}${interval.current ? " (this run)" : ""}`,
+    );
+  });
+  timeline.charts.forEach((chart, index) => {
+    const base = `timeline.charts[${index}]`;
+    const series = chart.series
+      .map((entry, i) =>
+        entry.recorded
+          ? `${entry.label} max ${p(`${base}.series[${i}].max`, entry.max)}` +
+            (entry.last === null ? "" : ` last ${p(`${base}.series[${i}].last`, entry.last)}`) +
+            (entry.unsampled === 0
+              ? ""
+              : ` (${p(`${base}.series[${i}].unsampled`, entry.unsampled)} unsampled)`)
+          : `${entry.label} absent (${entry.statement})`,
+      )
+      .join(" · ");
+    push(
+      band,
+      `   ${chart.id.padEnd(20)} ${chart.kind.padEnd(8)} ${chart.recorded ? "recorded" : "absent  "}  ` +
+        (chart.recorded ? `${series} [${chart.unit}]` : chart.statement),
+    );
+  });
+}
+
+/**
+ * The live timeline as text, for the seam and the dock's text twin. Every
+ * line is a selection from the object {@link deriveLiveTimeline} returned,
+ * and the first word after the run id is the label every live rendering
+ * carries.
+ */
+export function renderLiveTimeline(live: LiveTimeline): string {
+  const lines: string[] = [];
+  const push: PushLine = (_band, text) => {
+    lines.push(text);
+  };
+  const p: PrintNumber = (_path, formatted) => String(formatted);
+  lines.push(`lucida trace ${live.runId} — PROVISIONAL TIMELINE: ${live.statement}`);
+  lines.push(
+    "          not a verdict: this timeline changes while you read it, and the charts read from the rows are absent until the run closes",
+  );
+  const window = live.window;
+  lines.push(
+    `window    ${window.wholeRun ? "the run so far" : `the last ${window.spanMs} ms`}: ` +
+      `${window.startMs}..${window.endMs} ms of the run`,
+  );
+  renderTimeline(live.timeline, REQUIRED, push, p);
+  return lines.join("\n");
 }
 
 /**
@@ -514,6 +679,7 @@ function renderTimingOf(document: DiagnosticDocument, p: PrintNumber): string {
 function describeObservation(finding: Finding, p: PrintNumber): string {
   const observed = finding.observed;
   const base = `findings[${finding.id - 1}].observed`;
+  if (finding.severity === "steady-state") return describeSteadyState(finding, p);
   if (observed.backlogEtaS != null || observed.pending != null) {
     const parts = [
       `${p(`${base}.pending`, (observed.pending ?? 0).toLocaleString())} pending`,
@@ -541,5 +707,62 @@ function describeObservation(finding: Finding, p: PrintNumber): string {
   }
   if (observed.n != null) parts.push(`n=${p(`${base}.n`, observed.n)}`);
   if (observed.rows === 0 && observed.tier) parts.push(`no per-item rows (${observed.tier})`);
+  return parts.join(" · ");
+}
+
+/**
+ * A steady-state observation: what the interval after the run carried, and
+ * the window it carried it over. Every finding here states its window,
+ * because a count without a denominator is not a measurement — except the
+ * budget-bound one, which reads the run's settle block, an instant rather
+ * than an interval.
+ */
+function describeSteadyState(finding: Finding, p: PrintNumber): string {
+  const observed = finding.observed;
+  const base = `findings[${finding.id - 1}].observed`;
+  const parts: string[] = [];
+  if (observed.bytesPerS != null) {
+    parts.push(`${p(`${base}.bytesPerS`, observed.bytesPerS.toLocaleString())} B/s`);
+  }
+  if (observed.seconds != null) parts.push(`over ${p(`${base}.seconds`, observed.seconds)} s`);
+  if (observed.chunks != null) {
+    parts.push(`${p(`${base}.chunks`, observed.chunks.toLocaleString())} chunk(s)`);
+  }
+  if (observed.refetches != null) {
+    parts.push(`${p(`${base}.refetches`, observed.refetches.toLocaleString())} refetch(es)`);
+  }
+  if (observed.bytes != null) {
+    parts.push(`${p(`${base}.bytes`, observed.bytes.toLocaleString())} B`);
+  }
+  if (observed.wokenPasses != null) {
+    parts.push(
+      `${p(`${base}.wokenPasses`, observed.wokenPasses.toLocaleString())} of ` +
+        `${p(`${base}.passes`, (observed.passes ?? 0).toLocaleString())} pass(es)`,
+    );
+  }
+  if (observed.fillPct != null) {
+    parts.push(
+      `${p(`${base}.residentBytes`, (observed.residentBytes ?? 0).toLocaleString())} of ` +
+        `${p(`${base}.budgetBytes`, (observed.budgetBytes ?? 0).toLocaleString())} B ` +
+        `(${p(`${base}.fillPct`, observed.fillPct)}% full)`,
+    );
+  }
+  if (observed.lossChunks != null) {
+    parts.push(
+      `coverage loss ${p(`${base}.lossChunks`, observed.lossChunks.toLocaleString())} of ` +
+        `${p(`${base}.wanted`, (observed.wanted ?? 0).toLocaleString())} wanted chunk(s) ` +
+        `(${p(`${base}.lossPct`, observed.lossPct ?? 0)}%)`,
+    );
+  }
+  if (observed.breakdown) {
+    parts.push(
+      Object.entries(observed.breakdown)
+        .map(([name, bytes]) => `${name} ${p(`${base}.breakdown.${name}`, bytes.toLocaleString())} B`)
+        .join(" "),
+    );
+  }
+  if (observed.windowMs != null) {
+    parts.push(`window ${p(`${base}.windowMs`, observed.windowMs.toLocaleString())} ms`);
+  }
   return parts.join(" · ");
 }

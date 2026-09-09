@@ -16,6 +16,7 @@
  * const doc = window.lucidaTrace.exportTrace();
  * window.lucidaTrace.quiescence.quiescent;  // has the page settled?
  * window.lucidaTrace.provisional();         // a labelled reading of the open run, closing nothing
+ * window.lucidaTrace.liveTimeline();        // the dock's live charts as fields, closing nothing
  * ```
  */
 
@@ -28,11 +29,23 @@ import {
   type ProvisionalOptions,
   type ProvisionalReading,
 } from "./diagnose/provisional.ts";
-import { renderDiagnostic, type RenderDepth } from "./diagnose/renderText.ts";
+import { renderDiagnostic, renderLiveTimeline, type RenderDepth } from "./diagnose/renderText.ts";
+import type { LiveTimeline, LiveTimelineOptions } from "./diagnose/timeline.ts";
 import type { DiagnosticDocument, WindowRequest } from "./diagnose/types.ts";
 import { traceRecorder } from "./recorder.ts";
 import type { LiveProgress } from "./liveProgress.ts";
 import type { QuiescenceState } from "./quiescence.ts";
+import {
+  SCRUB_AXES,
+  scriptControls,
+  viewSignature,
+  type ScrubAxis,
+  type SelectTarget,
+  type StepOutcome,
+  type ViewSignature,
+} from "./steps.ts";
+import { INPUT_SCALE, type InputScale } from "../components/inputScale.ts";
+import type { SavedView } from "../savedView/types.ts";
 import { TRACE_SCHEMA_VERSION, type GpuIdentity, type TraceDocument } from "./types.ts";
 
 /**
@@ -119,6 +132,21 @@ export interface LucidaTraceSeam {
   /** {@link provisional} rendered as text, or null when no run is open. */
   provisionalText(options?: ProvisionalOptions): string | null;
   /**
+   * The dock's live charts over a trailing window of the run in progress,
+   * as fields, or null when no run is open: the closed set of timeline
+   * charts binned over the window, drawn from the per-tick tiers alone.
+   * The charts read from the rows are absent here and say when they are
+   * read. Labelled provisional like {@link provisional}, for the same
+   * reason, and closing nothing. `windowMs` sets how far back it looks; the
+   * default is thirty seconds.
+   *
+   * The closed run's timeline is the `timeline` section of {@link diagnose},
+   * over the same closed set, with the row-derived charts filled in.
+   */
+  liveTimeline(options?: LiveTimelineOptions): LiveTimeline | null;
+  /** {@link liveTimeline} rendered as text, one line per chart, or null when no run is open. */
+  liveTimelineText(options?: LiveTimelineOptions): string | null;
+  /**
    * The merged trace document. Closes the run in progress as `explicit`:
    * every run carries an end reason, and asking for the document concludes
    * the interval being asked about.
@@ -198,6 +226,44 @@ export interface LucidaTraceSeam {
   /** {@link diagnoseTrace} rendered as text, at any depth {@link diagnoseText} renders. */
   diagnoseTraceText(document: TraceDocument, options?: DiagnoseTextScope): string;
   /**
+   * The view as the page would save it: camera, selectors, and every
+   * dataset's display settings. Null before a scene exists. The trace driver
+   * reads this before and after each scripted step and records both, so a
+   * step that did not land is a fact in the run rather than a silence.
+   */
+  view(): SavedView | null;
+  /**
+   * The part of {@link view} a scripted step is judged by: camera without
+   * its viewport, selectors, and what is shown. The driver compares the
+   * signature before and after a step to say whether the view changed, so
+   * the page and not the driver decides what counts, and a contrast refit
+   * during a hold is not a change of view.
+   */
+  viewSignature(): ViewSignature | null;
+  /**
+   * How far a drag or a wheel event moves the view, as the viewers apply
+   * it. The driver turns a scripted angle or factor into pixels and deltas
+   * with these, so a scripted orbit is the drag a person would make.
+   */
+  readonly inputScale: Readonly<InputScale>;
+  /**
+   * A scripted scrub: move the `z`, `t`, or `c` selector by `count`
+   * positions, through the handler the dimension control calls. A script's
+   * pan, zoom, and orbit reach the page as synthesized pointer events and
+   * need no such entry, but the capture surface hides the selectors, so a
+   * scrub has nothing to click. The recorder hears the input at the control,
+   * as it does for a person's. Refuses what the control would refuse, and
+   * says why.
+   */
+  scrub(axis: ScrubAxis, count: number): StepOutcome;
+  /**
+   * A scripted select: show or hide a channel of the dataset in hand or a
+   * layer by dataset id, through the handler the layer panel calls. Shows
+   * unless `visible` is false. The layer panel is hidden on the capture
+   * surface, which is why this entry exists beside {@link scrub}.
+   */
+  select(target: SelectTarget, visible?: boolean): StepOutcome;
+  /**
    * Close the run in progress without exporting — the *Stop & analyse* path.
    *
    * A driver that gave up on a run that never settled passes `"timeout"`:
@@ -247,6 +313,11 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
       const reading = traceRecorder.provisionalReading(options);
       return reading ? renderProvisional(reading) : null;
     },
+    liveTimeline: (options?: LiveTimelineOptions) => traceRecorder.liveTimeline(options),
+    liveTimelineText: (options?: LiveTimelineOptions) => {
+      const live = traceRecorder.liveTimeline(options);
+      return live ? renderLiveTimeline(live) : null;
+    },
     exportTrace: () => traceRecorder.exportDocument(),
     exportChromeTrace: () => toChromeTraceJson(traceRecorder.exportDocument()),
     exportBundle: (options?: BundleOptions) =>
@@ -267,11 +338,43 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
       diagnoseTraceText(traceRecorder.exportDocument(), { ...options, runId }),
     diagnoseTrace,
     diagnoseTraceText,
+    view: () => scriptControls()?.view() ?? null,
+    viewSignature: () => viewSignature(scriptControls()?.view() ?? null),
+    inputScale: INPUT_SCALE,
+    scrub: (axis: ScrubAxis, count: number) => {
+      const controls = scriptControls();
+      if (!controls) return noControls();
+      if (!SCRUB_AXES.includes(axis)) return refused(`no selector is called ${String(axis)}`);
+      return controls.scrub(axis, count);
+    },
+    select: (target: SelectTarget, visible: boolean = true) => {
+      const controls = scriptControls();
+      if (!controls) return noControls();
+      const named = target as Partial<{ channel: unknown; layer: unknown }> | null;
+      if (named && typeof named.channel === "number") {
+        if (!Number.isInteger(named.channel) || named.channel < 0) {
+          return refused(`a channel is a whole number from 0, not ${named.channel}`);
+        }
+        return controls.select({ channel: named.channel }, visible === true);
+      }
+      if (named && typeof named.layer === "string" && named.layer !== "") {
+        return controls.select({ layer: named.layer }, visible === true);
+      }
+      return refused("a select names a channel index or a layer id");
+    },
     closeRun: (endReason: "explicit" | "timeout" = "explicit") =>
       traceRecorder.closeRun(endReason),
   };
   target.lucidaTrace = seam;
   return seam;
+}
+
+function refused(reason: string): StepOutcome {
+  return { applied: false, reason };
+}
+
+function noControls(): StepOutcome {
+  return refused("no viewer has registered its controls on this page");
 }
 
 /**

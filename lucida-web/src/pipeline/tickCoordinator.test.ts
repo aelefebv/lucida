@@ -357,6 +357,10 @@ describe("epoch caching", () => {
         residentDetailChunks: 0,
         desiredCoarseChunks: 0,
         residentCoarseChunks: 0,
+        detailBytes: 0,
+        detailBudgetBytes: 0,
+        coarseBytes: 0,
+        coarseBudgetBytes: 0,
       }),
     });
     traceRecorder.openRun({ epoch: "content", dirtyKind: "interactive", source: "test" });

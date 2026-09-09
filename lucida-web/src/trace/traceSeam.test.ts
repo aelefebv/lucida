@@ -21,6 +21,7 @@ import type { ChunkRequest, RequestPlan } from "../pipeline/planning/index.ts";
 import { emptyPlanStats } from "../pipeline/planning/index.ts";
 import { configStore } from "../pipeline/planning/configStore.ts";
 import { setBundleServices } from "./bundle.ts";
+import { setScriptControls } from "./steps.ts";
 import { installTraceSeam, resolveGpuIdentity } from "./seam.ts";
 import { traceRecorder } from "./recorder.ts";
 import { createQuiescenceState, evaluateQuiescence } from "./quiescence.ts";
@@ -538,6 +539,87 @@ describe("the trace seam", () => {
   });
 
   /**
+   * The driver's scripted steps (ADR 0051, as amended). Pan, zoom, and
+   * orbit arrive as synthesized pointer events and need nothing here. Scrub
+   * and select go through the handlers the viewer registers, because the
+   * capture surface hides the controls they would otherwise land on, and
+   * the view is read the same way before and after every step.
+   */
+  it("reads the view and takes a scrub or a select through the registered controls", () => {
+    const seam = installTraceSeam();
+    const calls: unknown[] = [];
+    const view = { v: 1, camera: { mode: "slice", center: [0, 0], zoom: 1, viewport: [8, 6] } };
+    setScriptControls({
+      view: () => view as never,
+      scrub: (axis, count) => {
+        calls.push(["scrub", axis, count]);
+        return { applied: true, reason: null };
+      },
+      select: (target, visible) => {
+        calls.push(["select", target, visible]);
+        return { applied: true, reason: null };
+      },
+    });
+    try {
+      expect(seam.view()).toBe(view);
+      expect(seam.viewSignature()).toEqual({
+        camera: { mode: "slice", center: [0, 0], zoom: 1 },
+        view: null,
+        visibility: {},
+      });
+      // The viewers' own constants, so the driver's pixels are the page's.
+      expect(seam.inputScale.orbitRadiansPerPixel).toBe(0.005);
+      expect(seam.inputScale.sliceZoomInPerNotch).toBe(1.1);
+      expect(seam.scrub("t", 3)).toEqual({ applied: true, reason: null });
+      expect(seam.select({ channel: 1 }, false)).toEqual({ applied: true, reason: null });
+      expect(seam.select({ layer: "ds-2" })).toEqual({ applied: true, reason: null });
+      expect(calls).toEqual([
+        ["scrub", "t", 3],
+        ["select", { channel: 1 }, false],
+        ["select", { layer: "ds-2" }, true],
+      ]);
+    } finally {
+      setScriptControls(null);
+    }
+  });
+
+  it("answers a step with nothing registered, and a malformed one, by saying so rather than throwing", () => {
+    const seam = installTraceSeam();
+    setScriptControls(null);
+    expect(seam.view()).toBeNull();
+    expect(seam.viewSignature()).toBeNull();
+    expect(seam.scrub("z", 1)).toEqual({
+      applied: false,
+      reason: "no viewer has registered its controls on this page",
+    });
+    expect(seam.select({ channel: 0 })).toEqual({
+      applied: false,
+      reason: "no viewer has registered its controls on this page",
+    });
+
+    setScriptControls({
+      view: () => null,
+      scrub: () => ({ applied: true, reason: null }),
+      select: () => ({ applied: true, reason: null }),
+    });
+    try {
+      // The arguments arrive over the DevTools protocol, so the seam checks
+      // them before any handler sees them.
+      expect(seam.scrub("q" as never, 1)).toEqual({ applied: false, reason: "no selector is called q" });
+      expect(seam.select({} as never)).toEqual({
+        applied: false,
+        reason: "a select names a channel index or a layer id",
+      });
+      expect(seam.select({ channel: -1 })).toEqual({
+        applied: false,
+        reason: "a channel is a whole number from 0, not -1",
+      });
+    } finally {
+      setScriptControls(null);
+    }
+  });
+
+  /**
    * Before a run opens, nothing is dirty and nothing is wanted — so the
    * predicate is trivially true. A driver has to be able to tell that apart
    * from a run that finished, without exporting (which would close it). And
@@ -635,6 +717,43 @@ describe("the trace seam", () => {
     seam.closeRun();
     expect(seam.provisional()).toBeNull();
     expect("provisional" in seam.diagnose(reading.runId)).toBe(false);
+  });
+
+  it("offers the open run's live timeline as JSON and as text without closing the run", async () => {
+    const seam = installTraceSeam();
+    expect(seam.liveTimeline()).toBeNull();
+    expect(seam.liveTimelineText()).toBeNull();
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    const source = new ControlledSource();
+    const cache = new CpuCache(source, makeDecode());
+    cache.submit(makePlan([makeRequest()]));
+    await flush();
+    traceRecorder.noteReading(0, 1, 2_000, 8);
+
+    const live = seam.liveTimeline()!;
+    expect(live.provisional).toBe(true);
+    expect(live.runId).toBe(seam.progress()!.runId);
+    expect(live.timeline.rowsWalked).toBe(false);
+    expect(live.timeline.charts.find((chart) => chart.id === "in-flight")?.recorded).toBe(true);
+    expect(live.timeline.charts.find((chart) => chart.id === "occupancy.browser")?.recorded).toBe(false);
+    // An agent over CDP gets the JSON of this object, so the round trip must lose nothing.
+    expect(JSON.parse(JSON.stringify(live))).toEqual(live);
+
+    const text = seam.liveTimelineText()!;
+    expect(text.split("\n")[0]).toContain(`lucida trace ${live.runId} — PROVISIONAL TIMELINE:`);
+    expect(text).toContain("not a verdict");
+    expect(seam.liveTimeline({ windowMs: 1_000 })!.window.requestedMs).toBe(1_000);
+
+    // Reading it changed nothing, and the closed run's timeline is the same
+    // closed set with the rows walked.
+    expect(seam.runState.open).toBe(true);
+    seam.closeRun();
+    expect(seam.liveTimeline()).toBeNull();
+    const closed = seam.diagnose(live.runId).timeline;
+    expect(closed.rowsWalked).toBe(true);
+    expect(closed.charts.map((chart) => chart.id)).toEqual(live.timeline.charts.map((chart) => chart.id));
+    expect(seam.diagnoseText(live.runId, { depth: "timeline" })).toContain("TIMELINE");
   });
 
   it("stops a run without exporting it", () => {

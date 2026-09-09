@@ -83,6 +83,18 @@ describe("EventRing", () => {
     expect(ring.serialise().map(e => e.atUs)).toEqual([3, 4]);
   });
 
+  it("reads a trailing window newest-back and carries nothing from before it", () => {
+    const ring = new EventRing(8);
+    for (let i = 0; i < 6; i++) ring.append(i * 1_000, PointEvent.Eviction, "evicted", CHUNK, 0);
+
+    // An event is an instant, not a state in force, so the one before the
+    // window is not carried the way a reading or a tick sample is.
+    expect(ring.serialiseFrom(2_500).map(e => e.atUs)).toEqual([3_000, 4_000, 5_000]);
+    expect(ring.serialiseFrom(3_000).map(e => e.atUs)).toEqual([3_000, 4_000, 5_000]);
+    expect(ring.serialiseFrom(9_000)).toEqual([]);
+    expect(ring.serialiseFrom(2_500)[0].chunk?.chunkKey).toBe("2/1/0/5/3/4");
+  });
+
   it("round-trips every reason code in the borrowed taxonomies", () => {
     const ring = new EventRing(POINT_EVENT_REASONS.length);
     for (const reason of POINT_EVENT_REASONS) {

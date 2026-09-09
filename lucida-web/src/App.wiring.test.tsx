@@ -22,7 +22,7 @@
 // planner-visible effect through `getSceneSettings` cache identity.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 
 // ---------------------------------------------------------------------------
 // Boundary doubles. The WASM scene is a small stateful fake: it stores the
@@ -192,6 +192,13 @@ vi.mock("./pipeline/fetch/index.ts", () => {
     reset = vi.fn();
     subscribe = vi.fn(() => () => {});
     cancelDataset = vi.fn();
+    // The HUD's two cache reads, so a shown HUD can tick over this double.
+    poolResidency = vi.fn(() => ({
+      main: { bytes: 0, budgetBytes: 1 },
+      overview: { bytes: 0, budgetBytes: 1 },
+      proxy: { bytes: 0, budgetBytes: 1 },
+    }));
+    laneOutstanding = vi.fn((out: unknown) => out);
     constructor(_source: unknown, _pool: unknown) {}
   }
   return {
@@ -354,7 +361,6 @@ function renderApp() {
         defaultSavedViewId={null}
         canRenameWorkspace={false}
         onBackToDashboard={() => {}}
-        onOpenMonitor={() => {}}
         onRenameWorkspace={async () => {}}
         onSetDefaultSavedView={async () => {}}
       />
@@ -468,6 +474,32 @@ describe("App wiring: the capture surface writes no user state (#923)", () => {
   });
 });
 
+describe("App wiring: the toolbar opens the monitor's dock", () => {
+  // The dock is code-split and reads the page's trace seam, which this
+  // harness never installs, so what it shows is its "no seam" reason. The
+  // wiring under test is the toolbar toggle and the dock's own close.
+  it("toggles the dock from the Monitor button, and the dock closes itself", async () => {
+    await mountWithSnapshot(documentJson(["wds-1"]));
+    const toggle = screen.getByTestId("open-monitor");
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+    expect(screen.queryByTestId("monitor-dock")).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(toggle);
+    });
+
+    const dock = await screen.findByTestId("monitor-dock");
+    expect(toggle.getAttribute("aria-pressed")).toBe("true");
+    expect(within(dock).getByTestId("monitor-empty").textContent).toContain("trace seam");
+
+    await act(async () => {
+      fireEvent.click(within(dock).getByTestId("monitor-close"));
+    });
+    expect(screen.queryByTestId("monitor-dock")).toBeNull();
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+  });
+});
+
 describe("App wiring: dataset-settings mutation canary", () => {
   it("toggling a layer's visibility lands the planner-visible signal in the same task", async () => {
     const { scene } = await mountWithSnapshot(documentJson(["wds-1"]));
@@ -488,5 +520,24 @@ describe("App wiring: dataset-settings mutation canary", () => {
     expect(vi.mocked(invalidateSelection)).toHaveBeenCalled();
     const reread = getSceneSettings(scene as unknown as InstanceType<typeof WasmScene>);
     expect(reread).not.toBe(primed);
+  });
+});
+
+describe("App wiring: the pipeline HUD (#1061)", () => {
+  it("shows on the toolbar control and hides on its key, with no dev gate", async () => {
+    await mountWithSnapshot(documentJson(["wds-1"]));
+    expect(screen.queryByTestId("hud")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("hud-toggle"));
+    // The HUD is code-split, so it mounts after the import resolves.
+    expect(await screen.findByTestId("hud")).toBeTruthy();
+    expect(screen.getByTestId("hud-toggle").getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByLabelText("chunkGrid")).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "h" });
+    });
+    expect(screen.queryByTestId("hud")).toBeNull();
+    expect(screen.getByTestId("hud-toggle").getAttribute("aria-pressed")).toBe("false");
   });
 });

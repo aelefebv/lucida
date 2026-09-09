@@ -10,7 +10,9 @@ import {
   interactionCause,
   LABEL_NONE,
   PHASE_UNSET,
+  PointEvent,
   RowOutcome,
+  TickCounter,
   TRACE_SCHEMA_VERSION,
 } from "./types.ts";
 
@@ -61,6 +63,10 @@ function makeRecorder(overrides: Partial<ConstructorParameters<typeof TraceRecor
       residentDetailChunks: 12,
       desiredCoarseChunks: 3,
       residentCoarseChunks: 3,
+      detailBytes: 0,
+      detailBudgetBytes: 0,
+      coarseBytes: 0,
+      coarseBudgetBytes: 0,
     }),
   });
   return { recorder, advance: (ms: number) => { clock += ms; } };
@@ -384,6 +390,19 @@ describe("TraceRecorder rows", () => {
     expect(serialised.phases.wire).toEqual({ startUs: 10_000, endUs: 50_000, durationUs: 40_000 });
     expect(serialised.outcome).toBe("complete");
     expect(serialised.chunkKey).toBe("1/0/0/0/2/3");
+  });
+
+  it("closes the wire with the bytes it delivered, in one call", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    const row = recorder.beginChunkRow(CHUNK, 0);
+    advance(40);
+    recorder.noteBytesReceived(row, 326_144);
+    recorder.closeRun("explicit");
+
+    const [serialised] = recorder.exportDocument().runs[0].rows;
+    expect(serialised.phases.wire?.durationUs).toBe(40_000);
+    expect(serialised.bytes).toBe(326_144);
   });
 
   it("ignores stamps for a row whose run has already closed", () => {
@@ -1156,5 +1175,107 @@ describe("the provisional reading over a trailing window (#1057)", () => {
     const document = diagnoseRun(recorder.exportDocument().runs[0]);
     expect(document.verdict.kind).toBe("clear");
     expect(document.findings.find(finding => finding.severity === "saturated")).toBeUndefined();
+  });
+});
+
+describe("the live timeline over an open run", () => {
+  it("says nothing while no labelled run is open", () => {
+    const { recorder } = makeRecorder();
+    expect(recorder.liveTimeline()).toBeNull();
+    recorder.noteReading(10, 4, 3_000, 1_000);
+    expect(recorder.liveTimeline()).toBeNull();
+  });
+
+  it("draws the per-tick tiers of the window and walks no row, closing nothing", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    for (let i = 0; i < 40; i++) {
+      recorder.noteReading(100 - i, 4, 2_000 + (i % 5) * 1_000, 1_000_000 + i * 1_000);
+      if (i % 10 === 0) {
+        const scratch = recorder.beginTick("ds");
+        scratch!.counters[TickCounter.LaneDetail] = 3;
+        recorder.commitTick();
+      }
+      advance(100);
+    }
+    recorder.recordPointEvent(PointEvent.Eviction, "evicted", CHUNK, 0);
+    // Rows exist and are not walked: the row-derived charts say so.
+    recorder.beginChunkRow(CHUNK, 0);
+
+    const live = recorder.liveTimeline()!;
+
+    expect(live.provisional).toBe(true);
+    expect(live.runId).toBe(recorder.liveProgress!.runId);
+    expect(live.window).toMatchObject({ startMs: 0, endMs: 4_000, wholeRun: true });
+    expect(live.timeline.rowsWalked).toBe(false);
+    const charts = live.timeline.charts;
+    const inFlight = charts.find(chart => chart.id === "in-flight")!;
+    expect(inFlight.series[0]).toMatchObject({ id: "in-flight", recorded: true, max: 4, samples: 40 });
+    const planned = charts.find(chart => chart.id === "planned.lane")!;
+    expect(planned.series.find(series => series.id === "detail")).toMatchObject({ recorded: true, samples: 4 });
+    const events = charts.find(chart => chart.id === "events")!;
+    expect(events.series.find(series => series.id === "eviction")).toMatchObject({ recorded: true, samples: 1 });
+    expect(events.series.find(series => series.id === "plan")).toMatchObject({ recorded: true, samples: 4 });
+    for (const id of ["occupancy.browser", "occupancy.server", "occupancy.metadata", "in-flight.lane"]) {
+      const chart = charts.find(candidate => candidate.id === id)!;
+      expect(chart.recorded, id).toBe(false);
+      expect(chart.statement, id).toMatch(/closes/);
+    }
+    expect(live.timeline.intervals).toEqual([
+      expect.objectContaining({ runId: live.runId, current: true, endReason: null, startMs: 0, endMs: 4_000 }),
+    ]);
+
+    expect(recorder.isRunOpen).toBe(true);
+    expect(recorder.concludedRuns.count).toBe(0);
+  });
+
+  it("takes a caller's window, reads only its stretch of the rings, and places the closed intervals on the run's clock", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    advance(1_000);
+    recorder.closeRun("explicit");
+    advance(2_000);
+    recorder.openRun(OPEN_CAUSE);
+    for (let i = 0; i < 30; i++) {
+      recorder.noteReading(0, i < 20 ? 2 : 6, 1_000, 0);
+      advance(100);
+    }
+
+    const live = recorder.liveTimeline({ windowMs: 1_000 })!;
+
+    expect(live.window).toMatchObject({ startMs: 2_000, endMs: 3_000, wholeRun: false });
+    const inFlight = live.timeline.charts.find(chart => chart.id === "in-flight")!.series[0];
+    // Only the readings from the window's start on, led by the one before it.
+    expect(inFlight).toMatchObject({ recorded: true, samples: 11, min: 6, max: 6 });
+    // The first run closed 3 s before this one opened. The steady state
+    // between them recorded nothing, so it was never retained and the axis
+    // shows a gap there rather than a band.
+    expect(live.timeline.intervals.map(interval => [interval.kind, interval.startMs, interval.endMs])).toEqual([
+      ["run", -3_000, -2_000],
+      ["run", 0, 3_000],
+    ]);
+    expect(live.timeline.intervals[0]).toMatchObject({ current: false, endReason: "explicit" });
+    expect(live.timeline.intervals[1]).toMatchObject({ current: true, endReason: null });
+    expect(() => recorder.liveTimeline({ windowMs: 0 })).toThrow(/positive number/);
+  });
+
+  it("leaves nothing of itself in the run it read", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    for (let i = 0; i < 5; i++) {
+      recorder.noteReading(0, 1, 1_000, 0);
+      advance(100);
+    }
+    const live = recorder.liveTimeline()!;
+    expect("verdict" in live).toBe(false);
+
+    recorder.closeRun("quiescent");
+    const run = recorder.exportDocument().runs[0];
+    expect(JSON.stringify(run)).not.toContain("provisional");
+    expect(run.readings).toHaveLength(5);
+    // The closed run's timeline is the same closed set, with the rows walked.
+    const timeline = diagnoseRun(run).timeline;
+    expect(timeline.rowsWalked).toBe(true);
+    expect(timeline.charts.map(chart => chart.id)).toEqual(live.timeline.charts.map(chart => chart.id));
   });
 });

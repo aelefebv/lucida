@@ -13,6 +13,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  budgetBoundCoarseRun,
   coldRemoteOpen,
   fallbackAdapterOpen,
   gpuTimedOpen,
@@ -22,6 +23,7 @@ import {
   lateStallOpen,
   mainThreadOnlyOpen,
   makeRun,
+  prefetchSteadyState,
   quietRun,
   saturatedReopen,
   sendHeavyIdleRun,
@@ -62,6 +64,14 @@ const DOCUMENTS = {
   firstHalf: diagnoseRun(lateStallOpen(), { window: { startMs: 0, endMs: 1_000 } }),
   tail: diagnoseRun(coldRemoteOpen(), { window: { startMs: 3_700, endMs: 4_120 } }),
   wholeWindow: diagnoseRun(saturatedReopen(), { window: { startMs: 0, endMs: 12_000 } }),
+  // Two readings of what happened after the view settled: one interval that
+  // kept fetching, and one run whose coarse tier could not fit what the view
+  // wanted. Both carry steady-state findings, so the budget and the parity
+  // check cover the numbers those findings print.
+  prefetchAfterSettle: diagnoseRun(healthyLocalOpen(), {
+    steadyState: prefetchSteadyState(healthyLocalOpen()),
+  }),
+  budgetBound: diagnoseRun(budgetBoundCoarseRun()),
 };
 
 /** Numbers as the renderer prints them, with thousands separators removed. */
@@ -389,7 +399,7 @@ describe("parity with the document", () => {
   it("prints no number that does not exist in the JSON", () => {
     for (const [name, document] of Object.entries(DOCUMENTS)) {
       const inDocument = new Set(numericTokens(JSON.stringify(document)));
-      for (const depth of ["summary", "phases", "chunk", "spatial"] as const) {
+      for (const depth of ["summary", "phases", "chunk", "spatial", "timeline"] as const) {
         const { text } = renderDiagnostic(document, { depth });
         for (const token of numericTokens(text)) {
           expect(inDocument.has(token), `${name}/${depth}: ${token} is printed but not in the document`).toBe(

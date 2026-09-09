@@ -1,8 +1,8 @@
 //! Storage backends: where the server's persistent state lives.
 //!
 //! A **storage backend** owns one database connection, runs the
-//! migrations against it, and hands out the six stores the rest of the
-//! server programs against. A **store** is one of those six — it holds
+//! migrations against it, and hands out the seven stores the rest of the
+//! server programs against. A **store** is one of those seven — it holds
 //! a single kind of record and knows nothing about how the connection
 //! was made.
 //!
@@ -52,6 +52,7 @@ use crate::auth::{
     BearerTokenStore, CliTokenAuthorizationStore, LoginSessionStore, PendingAuthStore,
 };
 use crate::bookmarks::BookmarkStore;
+use crate::inbox::InboxStore;
 use crate::workspace::WorkspaceStore;
 
 /// Why a storage backend could not be brought up. Both variants are
@@ -84,7 +85,7 @@ impl PingError {
     }
 }
 
-/// One database, and the six stores that read and write it.
+/// One database, and the seven stores that read and write it.
 ///
 /// Implementations are constructed by [`open`] and shared as
 /// `Arc<dyn StorageBackend>`. Every accessor returns a handle over the
@@ -98,6 +99,7 @@ pub trait StorageBackend: Send + Sync + std::fmt::Debug {
     fn cli_token_authorizations(&self) -> Arc<dyn CliTokenAuthorizationStore>;
     fn bookmarks(&self) -> Arc<dyn BookmarkStore>;
     fn workspaces(&self) -> Arc<dyn WorkspaceStore>;
+    fn inbox(&self) -> Arc<dyn InboxStore>;
 
     /// Run one trivial query over the pool the stores share and report
     /// whether the database answered. Goes through the same connections
@@ -172,6 +174,11 @@ mod tests {
                 .unwrap();
             backend.bookmarks().get("absent").await.unwrap();
             backend.workspaces().get_workspace("absent").await.unwrap();
+            backend
+                .inbox()
+                .list("absent", chrono::Utc::now())
+                .await
+                .unwrap();
         }
     }
 

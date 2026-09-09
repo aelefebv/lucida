@@ -29,7 +29,7 @@ import type { WireAssetCatalog } from "./pipeline/assetCatalog.ts";
 import { Session } from "./session.ts";
 import type { RenderLoop } from "./renderLoop.ts";
 import { bumpSettingsGeneration } from "./tickCommon.ts";
-import { invalidateDisplaySettings } from "./invalidation.ts";
+import { AVAILABILITY_UPDATE_SOURCE, invalidateDisplaySettings } from "./invalidation.ts";
 import { syncSceneViewState, type SceneViewStateSetters } from "./hooks/sceneViewState.ts";
 import { shouldAutoFitOnOpen, isOpenerOf } from "./hooks/autoFit.ts";
 import { classifySceneError, guardedSceneCall, observeSceneCalls } from "./sceneGuard.ts";
@@ -969,7 +969,7 @@ export class SessionController {
     const loop = this.deps.getLoop();
     loop?.updateDatasetManifest(datasetId, merged);
     this.deps.events.onDatasetsChanged();
-    loop?.markResidencyDirty("generated_availability_update");
+    loop?.markResidencyDirty(AVAILABILITY_UPDATE_SOURCE);
   }
 
   // ---------------------------------------------------------------------

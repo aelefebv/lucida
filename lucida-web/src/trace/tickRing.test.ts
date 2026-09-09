@@ -42,6 +42,13 @@ describe("TickScratch", () => {
     expect(scratch.levels.every(v => v === 0)).toBe(true);
   });
 
+  it("starts each tick as woken by something other than availability alone", () => {
+    const scratch = scratchFor("ds", 0);
+    scratch.availabilityWoken = true;
+    scratch.reset("other");
+    expect(scratch.availabilityWoken).toBe(false);
+  });
+
   it("starts each tick with no target and no displayed level", () => {
     const scratch = scratchFor("ds", 0);
     scratch.setTargetLevel(1, 2, true);
@@ -80,6 +87,18 @@ describe("TickRing", () => {
     expect(tick.counted["worker-dispatch"]).toBe(0);
     expect(tick.levels).toEqual([{ level: 0, planned: 4, cached: 2, inFlight: 1 }]);
     expect(tick.levelsDropped).toBe(0);
+  });
+
+  it("carries whether the pass was woken by an availability update alone", () => {
+    const ring = new TickRing(4);
+    const woken = scratchFor("ds-a", 0);
+    woken.availabilityWoken = true;
+    ring.append(1_500, woken, new Uint32Array(3), NOTHING_SENT);
+    ring.append(2_000, scratchFor("ds-a", 0), new Uint32Array(3), NOTHING_SENT);
+
+    const [first, second] = ring.serialise();
+    expect(first.availabilityWoken).toBe(true);
+    expect(second.availabilityWoken).toBe(false);
   });
 
   it("carries the client's sends since the previous sample, by message type", () => {
@@ -167,5 +186,27 @@ describe("TickRing", () => {
 
     expect(ring.dropped).toBe(0);
     expect(ring.serialise().map(t => t.atUs)).toEqual([0, 10, 20]);
+  });
+
+  it("reads a trailing window newest-back, led by the sample just before it", () => {
+    const ring = new TickRing(8);
+    const counted = new Uint32Array(3);
+    for (let i = 0; i < 6; i++) ring.append(i * 1_000, scratchFor(`ds-${i}`, i), counted, NOTHING_SENT);
+
+    // The sample at 2,000 is where the first in-window sample's interval
+    // began, so it leads.
+    expect(ring.serialiseFrom(2_500).map(t => t.atUs)).toEqual([2_000, 3_000, 4_000, 5_000]);
+    expect(ring.serialiseFrom(3_000).map(t => t.atUs)).toEqual([2_000, 3_000, 4_000, 5_000]);
+    expect(ring.serialiseFrom(9_000).map(t => t.atUs)).toEqual([5_000]);
+    expect(new TickRing(2).serialiseFrom(0)).toEqual([]);
+  });
+
+  it("carries nothing before a window that predates the oldest retained sample", () => {
+    const ring = new TickRing(2);
+    const counted = new Uint32Array(3);
+    for (let i = 0; i < 5; i++) ring.append(i * 1_000, scratchFor(`ds-${i}`, i), counted, NOTHING_SENT);
+
+    expect(ring.serialiseFrom(1_500).map(t => t.datasetId)).toEqual(["ds-3", "ds-4"]);
+    expect(ring.dropped).toBe(3);
   });
 });

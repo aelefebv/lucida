@@ -155,43 +155,60 @@ export class EventRing {
   /** Oldest-first, matching the tick ring. */
   serialise(): TracePointEvent[] {
     const out: TracePointEvent[] = [];
-    for (const slot of this.slots.ordered()) {
-      const c = slot * COORDS_PER_EVENT;
-      const level = this.coords[c];
-      const t = this.coords[c + 1];
-      const ch = this.coords[c + 2];
-      const z = this.coords[c + 3];
-      const y = this.coords[c + 4];
-      const x = this.coords[c + 5];
-
-      out.push({
-        atUs: this.atUs[slot],
-        kind: POINT_EVENT_KINDS[this.kinds[slot]],
-        reason: POINT_EVENT_REASONS[this.reasons[slot]],
-        chunk: this.hasChunk[slot] === 0
-          ? null
-          : {
-              datasetId: this.strings.get(this.datasetIds[slot]),
-              entityId: this.strings.get(this.entityIds[slot]),
-              imageId: this.strings.get(this.imageIds[slot]),
-              residencyTier: RESIDENCY_TIERS[this.tiers[slot]],
-              level,
-              t,
-              c: ch,
-              z,
-              y,
-              x,
-              chunkKey: `${level}/${t}/${ch}/${z}/${y}/${x}`,
-            },
-        levelChange: this.kinds[slot] !== PointEvent.LevelChange
-          ? null
-          : {
-              datasetId: this.strings.get(this.datasetIds[slot]),
-              from: { min: this.coords[c], max: this.coords[c + 1] },
-              to: { min: this.coords[c + 2], max: this.coords[c + 3] },
-            },
-      });
-    }
+    for (const slot of this.slots.ordered()) out.push(this.event(slot));
     return out;
+  }
+
+  /**
+   * The events at or after `startUs`, oldest first. Nothing is carried from
+   * before the window: an event is an instant, not a state in force, so the
+   * one before the window says nothing about the window. Read from the
+   * newest slot backwards and stopped at the first event before the window.
+   */
+  serialiseFrom(startUs: number): TracePointEvent[] {
+    const out: TracePointEvent[] = [];
+    for (const slot of this.slots.newestFirst()) {
+      if (this.atUs[slot] < startUs) break;
+      out.push(this.event(slot));
+    }
+    return out.reverse();
+  }
+
+  private event(slot: number): TracePointEvent {
+    const c = slot * COORDS_PER_EVENT;
+    const level = this.coords[c];
+    const t = this.coords[c + 1];
+    const ch = this.coords[c + 2];
+    const z = this.coords[c + 3];
+    const y = this.coords[c + 4];
+    const x = this.coords[c + 5];
+
+    return {
+      atUs: this.atUs[slot],
+      kind: POINT_EVENT_KINDS[this.kinds[slot]],
+      reason: POINT_EVENT_REASONS[this.reasons[slot]],
+      chunk: this.hasChunk[slot] === 0
+        ? null
+        : {
+            datasetId: this.strings.get(this.datasetIds[slot]),
+            entityId: this.strings.get(this.entityIds[slot]),
+            imageId: this.strings.get(this.imageIds[slot]),
+            residencyTier: RESIDENCY_TIERS[this.tiers[slot]],
+            level,
+            t,
+            c: ch,
+            z,
+            y,
+            x,
+            chunkKey: `${level}/${t}/${ch}/${z}/${y}/${x}`,
+          },
+      levelChange: this.kinds[slot] !== PointEvent.LevelChange
+        ? null
+        : {
+            datasetId: this.strings.get(this.datasetIds[slot]),
+            from: { min: this.coords[c], max: this.coords[c + 1] },
+            to: { min: this.coords[c + 2], max: this.coords[c + 3] },
+          },
+    };
   }
 }

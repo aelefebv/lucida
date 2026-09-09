@@ -17,6 +17,7 @@ use lucida_server::admin::{self, admin_clear_proxy_cache};
 use lucida_server::auth;
 use lucida_server::bookmarks;
 use lucida_server::health;
+use lucida_server::inbox;
 use lucida_server::session::Session;
 use lucida_server::static_serve;
 use lucida_server::status;
@@ -427,12 +428,24 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         idle_sweep_secs = workspace_runtime_config.idle_sweep_interval.as_secs(),
         "workspace.runtime.config"
     );
-    let workspace_manager = Arc::new(workspace::WorkspaceManager::new_with_runtime_config(
-        workspace_store,
-        proxy_config.clone(),
-        workspace_runtime_config,
-    ));
+    let inbox_store = storage.inbox();
+    let workspace_manager = Arc::new(
+        workspace::WorkspaceManager::new_with_runtime_config(
+            workspace_store,
+            proxy_config.clone(),
+            workspace_runtime_config,
+        )
+        // A **Send report** arrives on a workspace socket, so the
+        // manager behind that socket is what holds the inbox.
+        .with_inbox(Arc::clone(&inbox_store)),
+    );
     let _workspace_idle_eviction_handle = workspace_manager.spawn_idle_eviction_loop();
+    // The inbox's own read routes, on the protected half beside the
+    // workspace ones: the CLI lists and fetches what people sent.
+    let inbox_router: Router<()> = inbox::router(inbox::InboxState {
+        manager: Arc::clone(&workspace_manager),
+        store: inbox_store,
+    });
     let workspaces_router: Router<()> = workspace::router(workspace_manager);
 
     // /auth/error is available regardless of auth mode — if the user
@@ -551,6 +564,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         .with_state(state)
         .merge(authed_auth_router)
         .merge(bookmarks_router)
+        .merge(inbox_router)
         .merge(workspaces_router)
         .layer(axum::middleware::from_fn_with_state(
             auth_state,

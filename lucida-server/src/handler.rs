@@ -29,6 +29,7 @@ use crate::generated::{
     DerivedCacheStorage, DerivedCacheTelemetry, DerivedChunkCache, DerivedChunkLookup,
     GeneratedCoarseService,
 };
+use crate::inbox::{self, InboxStore, Report as InboxReport};
 use crate::open_diagnostics::{
     backend_kind_for_url, open_failure, open_progress, store_error_status,
 };
@@ -699,6 +700,52 @@ async fn handle_client_inner(
                             // watch stream and computes nothing over it.
                             let mut sess = session.lock().await;
                             sess.watch.publish(id, item);
+                        }
+                        ClientMessage::SendReport { request_id, bundle } => {
+                            // Somebody pressed **Send report**. Nothing else
+                            // reaches this arm: no run closing, no schedule,
+                            // and no other message produces one (ADR 0050 as
+                            // amended).
+                            let Some(ctx) = workspace.as_ref() else {
+                                send_report_failed(
+                                    id,
+                                    request_id,
+                                    "this session is not in a workspace, so there is no inbox to send to"
+                                        .to_string(),
+                                    &unicast_routes,
+                                )
+                                .await;
+                                continue;
+                            };
+                            let Some(store) = ctx.manager.inbox() else {
+                                send_report_failed(
+                                    id,
+                                    request_id,
+                                    "this server keeps no inbox".to_string(),
+                                    &unicast_routes,
+                                )
+                                .await;
+                                continue;
+                            };
+                            // Off the inbound loop, as an open is: the
+                            // bundle is megabytes and the write is a real
+                            // one, and nothing else this client sends
+                            // should queue behind somebody's report.
+                            let workspace_id = ctx.live.workspace_id.clone();
+                            let principal = ctx.principal.clone();
+                            let unicast_routes_clone = Arc::clone(&unicast_routes);
+                            tokio::spawn(async move {
+                                store_report(
+                                    id,
+                                    request_id,
+                                    &bundle,
+                                    &workspace_id,
+                                    &principal,
+                                    store.as_ref(),
+                                    &unicast_routes_clone,
+                                )
+                                .await;
+                            });
                         }
                     }
                     continue;
@@ -1822,6 +1869,95 @@ async fn send_open_failed(
         diagnostic: Some(diagnostic),
     };
     let json = serde_json::to_string(&msg).unwrap();
+    let senders = unicast_routes.lock().await;
+    if let Some(sender) = senders.get(&client_id) {
+        let _ = sender.send(Message::Text(json.into()));
+    }
+}
+
+/// Put one **Send report**'s bundle in the workspace inbox and tell the
+/// sender where it landed, or why nothing was kept.
+///
+/// The sender always hears back. A report that silently went nowhere is
+/// the one outcome this action must not have: whoever pressed it is
+/// about to tell somebody the report is there.
+async fn store_report(
+    client_id: ClientId,
+    request_id: String,
+    bundle: &str,
+    workspace_id: &str,
+    principal: &AuthPrincipal,
+    store: &dyn InboxStore,
+    unicast_routes: &UnicastRoutes,
+) {
+    let report = InboxReport {
+        workspace_id,
+        sender_email: &principal.email,
+        sender_name: &principal.display_name,
+        // The text as it arrived. The inbox stores these bytes, so what
+        // the CLI fetches is what the page produced.
+        bundle_json: bundle,
+        now: chrono::Utc::now(),
+    };
+    match inbox::receive(store, report).await {
+        Ok(entry) => {
+            tracing::info!(
+                client_id = %client_id,
+                request_id = %request_id,
+                workspace_id = %workspace_id,
+                entry_id = %entry.id,
+                size_bytes = entry.size_bytes,
+                "inbox.report_stored"
+            );
+            let expires_at = entry
+                .expires_at
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            send_to_client(
+                client_id,
+                ServerMessage::ReportSent {
+                    request_id,
+                    entry_id: entry.id,
+                    expires_at,
+                },
+                unicast_routes,
+            )
+            .await;
+        }
+        Err(error) => {
+            send_report_failed(client_id, request_id, error.to_string(), unicast_routes).await;
+        }
+    }
+}
+
+/// Tell the sender nothing was kept, and why, in the sentence the
+/// monitor shows under the action.
+async fn send_report_failed(
+    client_id: ClientId,
+    request_id: String,
+    error: String,
+    unicast_routes: &UnicastRoutes,
+) {
+    tracing::warn!(
+        client_id = %client_id,
+        request_id = %request_id,
+        error = %error,
+        "inbox.report_failed"
+    );
+    send_to_client(
+        client_id,
+        ServerMessage::ReportFailed { request_id, error },
+        unicast_routes,
+    )
+    .await;
+}
+
+/// Send one message to one client's own connection.
+async fn send_to_client(
+    client_id: ClientId,
+    message: ServerMessage,
+    unicast_routes: &UnicastRoutes,
+) {
+    let json = serde_json::to_string(&message).unwrap();
     let senders = unicast_routes.lock().await;
     if let Some(sender) = senders.get(&client_id) {
         let _ = sender.send(Message::Text(json.into()));

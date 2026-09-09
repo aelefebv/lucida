@@ -36,6 +36,8 @@ export interface TraceSink {
   append(src: ChunkRowSource, tier: 0 | 1): number;
   setLabel(index: number, label: WireLabel): void;
   stamp(index: number, boundary: number, offsetUs: number): void;
+  /** The payload bytes the wire delivered for the row. */
+  setBytes(index: number, bytes: number): void;
   setOutcome(index: number, outcome: RowOutcomeValue): void;
   /**
    * The rows so far, tallied for the live view (#937). The one read that
@@ -50,9 +52,9 @@ export interface TraceSink {
   appendTick(atUs: number, scratch: TickScratch, counted: Uint32Array, sent: Uint32Array): void;
   serialiseTicks(): TraceTick[];
   /**
-   * The tick samples from `startUs` on (#1068). Read while the interval is
-   * still open, so the watch stream can publish what was planned since its
-   * previous aggregate without walking the ring or closing anything.
+   * The tick samples from `startUs` on, led by the one before it. A live
+   * read, like {@link serialiseReadingsFrom}: the dock's live charts draw the
+   * per-tick tiers of an open run from these and walk no row.
    */
   serialiseTicksFrom(startUs: number): TraceTick[];
   /**
@@ -86,6 +88,8 @@ export interface TraceSink {
     toMax: number,
   ): void;
   serialiseEvents(): TracePointEvent[];
+  /** The point events from `startUs` on. A live read, for the same surface as {@link serialiseTicksFrom}. */
+  serialiseEventsFrom(startUs: number): TracePointEvent[];
   readonly length: number;
   /**
    * Whether this sink recorded nothing at all, across every tier. An
@@ -114,6 +118,8 @@ export class NoopTraceSink implements TraceSink {
   setLabel(): void {}
 
   stamp(): void {}
+
+  setBytes(): void {}
 
   setOutcome(): void {}
 
@@ -151,6 +157,10 @@ export class NoopTraceSink implements TraceSink {
   appendLevelChange(): void {}
 
   serialiseEvents(): TracePointEvent[] {
+    return [];
+  }
+
+  serialiseEventsFrom(): TracePointEvent[] {
     return [];
   }
 
@@ -196,6 +206,10 @@ export class TableTraceSink implements TraceSink {
 
   stamp(index: number, boundary: number, offsetUs: number): void {
     this.rows.stamp(index, boundary, offsetUs);
+  }
+
+  setBytes(index: number, bytes: number): void {
+    this.rows.setBytes(index, bytes);
   }
 
   setOutcome(index: number, outcome: RowOutcomeValue): void {
@@ -258,6 +272,10 @@ export class TableTraceSink implements TraceSink {
 
   serialiseEvents(): TracePointEvent[] {
     return this.events.serialise();
+  }
+
+  serialiseEventsFrom(startUs: number): TracePointEvent[] {
+    return this.events.serialiseFrom(startUs);
   }
 
   get length(): number {

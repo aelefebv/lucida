@@ -55,6 +55,7 @@ import { useSeedDatasetOpens } from "./hooks/useSeedDatasetOpens.ts";
 import { useIntensityBatcher } from "./hooks/useIntensityBatcher.ts";
 import { useDatasetLevels } from "./hooks/useDatasetLevels.ts";
 import { useSavedViewSync } from "./hooks/useSavedViewSync.ts";
+import { useScriptControls } from "./hooks/useScriptControls.ts";
 import { useViewedMentions } from "./hooks/useViewedMentions.ts";
 import type { SavedView } from "./savedView/types.ts";
 import { restoreAnnotationView } from "./savedView/restoreAnnotationView.ts";
@@ -70,6 +71,8 @@ import {
 import type { WorkspaceRole, WorkspaceMember } from "./workspaceApi.ts";
 import { isCaptureSurface } from "./captureSurface.ts";
 import { setBundleServices } from "./trace/bundle.ts";
+import { setReportSender } from "./trace/reportInbox.ts";
+import { useHudKeyBinding } from "./hud/useHudKey.ts";
 import "./App.css";
 
 // The debug UI (dev-controls panel + on-canvas overlay layer) is
@@ -85,6 +88,13 @@ const DevControls = lazy(() =>
 const DebugOverlays = lazy(() =>
   import("./debug/DebugOverlays.tsx").then((m) => ({ default: m.DebugOverlays })),
 );
+// Ships in every build, code-split so a session that never opens it never
+// downloads it.
+const MonitorDock = lazy(() =>
+  import("./monitor/MonitorDock.tsx").then((m) => ({ default: m.MonitorDock })),
+);
+// Code-split for the same reason: the HUD is in every build, and most sessions never show it.
+const Hud = lazy(() => import("./hud/Hud.tsx").then((m) => ({ default: m.Hud })));
 
 interface AppProps {
   workspaceId: string;
@@ -102,8 +112,6 @@ interface AppProps {
    *  case, so this is a no-op there. */
   initialDatasetUrls?: readonly string[];
   onBackToDashboard: () => void;
-  /** Leave for the pipeline monitor (#936) — a separate page, not an overlay. */
-  onOpenMonitor: () => void;
   onRenameWorkspace: (name: string) => Promise<void>;
   onSetDefaultSavedView: (savedViewId: string | null) => Promise<void>;
   /** Create a NEW workspace from dataset(s) chosen in the in-viewer file
@@ -120,7 +128,6 @@ function App({
   canRenameWorkspace,
   initialDatasetUrls,
   onBackToDashboard,
-  onOpenMonitor,
   onRenameWorkspace,
   onSetDefaultSavedView,
   onCreateWorkspaceFromDatasets,
@@ -865,8 +872,33 @@ function App({
           : Promise.reject(new Error("the session socket is not connected")),
       captureFrame: () => render.clientRef.current?.captureFrame() ?? Promise.resolve(null),
     });
-    return () => setBundleServices(null);
+    // **Send report** goes over the same socket. Registered only while
+    // one exists, so a page with no session offers no send rather than a
+    // send that goes nowhere — and nothing but the action calls it.
+    setReportSender(
+      liveBridge ? (bundleJson: string) => liveBridge.sendReport(bundleJson) : null,
+    );
+    return () => {
+      setBundleServices(null);
+      setReportSender(null);
+    };
   }, [liveBridge, render.clientRef]);
+
+  useScriptControls({
+    selectors: {
+      z: dims.z, t: dims.t, c: dims.c,
+      dimZ: dims.dimZ, dimT: dims.dimT, dimC: dims.dimC,
+      viewMode: dims.viewMode,
+    },
+    setZ: dims.handleZChange,
+    setT: dims.handleTChange,
+    setC: dims.handleCChange,
+    setChannelVisible: layers.handleChannelSetVisible,
+    setLayerVisible: layers.handleLayerSetVisible,
+    captureView: savedViewSync.captureBuilder,
+    selectedDatasetId,
+    datasetsRef,
+  });
 
   useIntensityBatcher({
     clientReady: render.clientReady,
@@ -989,6 +1021,9 @@ function App({
 
   const [showFileBrowser, setShowFileBrowser] = useState(false);
   const [showDevControls, setShowDevControls] = useState(false);
+  // The dock overlays the canvas rather than resizing it (ADR 0052 as
+  // amended), so opening it changes nothing the recorder sees.
+  const [showMonitor, setShowMonitor] = useState(false);
   // Whether any on-canvas debug overlay is toggled on (persisted in
   // localStorage `debug.overlays`, independent of every panel). Drives the
   // mount of the code-split DebugOverlays layer: with every overlay off
@@ -1007,6 +1042,9 @@ function App({
     () => getRenderRadiusPreviewTier() !== null,
     () => false,
   );
+  const [showHud, setShowHud] = useState(false);
+  const toggleHud = useCallback(() => setShowHud((v) => !v), []);
+  useHudKeyBinding(toggleHud);
   const [showBookmarkSidebar, setShowBookmarkSidebar] = useState(true);
   // Default the Explore panel CLOSED; it remains a user toggle. (It previously
   // opened on a fresh dataset open to surface the guided-exploration affordance.)
@@ -1256,10 +1294,17 @@ function App({
             </div>
           )}
           <div className="workspace-chrome-actions">
-            {/* The monitor is a separate page (#936), so this leaves the
-                viewer. The run it reads is a closed interval that outlives the
-                canvas that produced it. */}
-            <button type="button" onClick={onOpenMonitor} data-testid="open-monitor">
+            <button
+              type="button"
+              onClick={() => setShowMonitor((v) => !v)}
+              aria-pressed={showMonitor}
+              title={showMonitor ? "Close the pipeline monitor" : "Open the pipeline monitor"}
+              data-testid="open-monitor"
+              style={{
+                background: showMonitor ? "#646cff" : undefined,
+                color: showMonitor ? "#fff" : undefined,
+              }}
+            >
               Monitor
             </button>
             {canRenameWorkspace && (
@@ -1463,6 +1508,15 @@ function App({
                 />
               </Suspense>
             )}
+            {showHud && !captureSurface && (
+              <Suspense fallback={null}>
+                <Hud
+                  canvasRef={render.canvasRef}
+                  datasets={datasetsRef.current}
+                  getCache={() => bridge.sessionRef.current?.cpuCache ?? null}
+                />
+              </Suspense>
+            )}
             <FpsCounter />
             <LoadingViewBanner applier={savedViewSync.applier} />
             {/* Durable, dismissible surface for non-fatal import warnings from
@@ -1566,6 +1620,11 @@ function App({
             </Suspense>
           )}
         </div>
+        {showMonitor && (
+          <Suspense fallback={null}>
+            <MonitorDock onClose={() => setShowMonitor(false)} insetLeft={layout.sidebarWidth} />
+          </Suspense>
+        )}
         {datasetsVersion > 0 && (
           <div className="dimension-controls" style={{ maxWidth: layout.canvasWidth }}>
             <DimensionControls label="Z" value={dims.z} max={dims.dimZ} onChange={dims.handleZChange} disabled={dims.viewMode === "3d"} />
@@ -1706,6 +1765,21 @@ function App({
             }}
           >
             Explore
+          </button>
+          <button
+            onClick={toggleHud}
+            aria-pressed={showHud}
+            title={showHud ? "Hide the pipeline HUD (H)" : "Show the pipeline HUD (H)"}
+            data-testid="hud-toggle"
+            style={{
+              padding: "0.375rem 0.75rem",
+              fontSize: "0.875rem",
+              whiteSpace: "nowrap",
+              background: showHud ? "#646cff" : undefined,
+              color: showHud ? "#fff" : undefined,
+            }}
+          >
+            HUD
           </button>
         </div>
         {showFileBrowser && (
