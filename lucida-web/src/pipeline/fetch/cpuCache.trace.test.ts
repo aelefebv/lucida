@@ -134,6 +134,10 @@ function openRun(): void {
       residentDetailChunks: 0,
       desiredCoarseChunks: 0,
       residentCoarseChunks: 0,
+      detailBytes: 0,
+      detailBudgetBytes: 0,
+      coarseBytes: 0,
+      coarseBudgetBytes: 0,
     }),
   });
   traceRecorder.openRun(CAUSE);

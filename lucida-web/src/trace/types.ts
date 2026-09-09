@@ -19,8 +19,13 @@ import type { ChunkFeedbackReason, LevelRange } from "../renderer/workerProtocol
  *
  * 2: the per-tick sample and the run carry the client's sends by message
  * type (`sent`). A version 1 file has neither.
+ *
+ * 3: a lifecycle row carries the bytes the wire delivered (`bytes`), a
+ * per-tick sample says whether an availability update alone woke the pass
+ * (`availabilityWoken`), and the settle block carries each tier's resident
+ * bytes and budget. The steady-state ruleset reads all three.
  */
-export const TRACE_SCHEMA_VERSION = 2;
+export const TRACE_SCHEMA_VERSION = 3;
 
 /**
  * The closed browser phase enum. Fixed by the #921 spec rather than grown
@@ -300,6 +305,18 @@ export interface Outstanding {
   residentDetailChunks: number;
   desiredCoarseChunks: number;
   residentCoarseChunks: number;
+  /**
+   * Each tier's resident bytes, and the budget eviction holds it under. The
+   * budget is the store's live figure, which the elastic split can raise
+   * above the configured one while the other tier has no demand. A tier
+   * near its budget that wants more chunks than it holds, with nothing
+   * pending or in flight, has stopped asking because the rest cannot fit,
+   * which is the budget-bound reading the steady-state ruleset names.
+   */
+  detailBytes: number;
+  detailBudgetBytes: number;
+  coarseBytes: number;
+  coarseBudgetBytes: number;
 }
 
 /**
@@ -900,6 +917,14 @@ export interface TraceRow extends WireLabel {
   x: number;
   /** Canonical `"level/t/c/z/y/x"`, rebuilt from the columns. */
   chunkKey: string;
+  /**
+   * The payload bytes the wire delivered for this row, recorded where `wire`
+   * closes, and zero until then. The "reading" half of what an operating
+   * system's network monitor shows, per chunk. Rows that coalesced onto one
+   * request each carry that request's bytes, so a sum over the wire counts
+   * a label once rather than a row once.
+   */
+  bytes: number;
   outcome: RowOutcomeName;
   phases: Partial<Record<Phase, PhaseTiming>>;
 }
@@ -1093,6 +1118,14 @@ export interface TraceTick {
    * no re-plan is captured on the next pass, not as it lands.
    */
   displayedLevel: LevelRange | null;
+  /**
+   * True when the only thing that woke the loop for this pass was a
+   * generated-availability update from the server: no input, no continuation,
+   * no delivery. A pass that re-plans on nothing but availability is one turn
+   * of the server and the client answering each other, and the steady-state
+   * ruleset counts those turns.
+   */
+  availabilityWoken: boolean;
 }
 
 /** One point event. Every kind shares this shape. */

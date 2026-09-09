@@ -59,6 +59,10 @@ function makeRecorder() {
       residentDetailChunks: 0,
       desiredCoarseChunks: 0,
       residentCoarseChunks: 0,
+      detailBytes: 0,
+      detailBudgetBytes: 0,
+      coarseBytes: 0,
+      coarseBudgetBytes: 0,
     }),
   });
   return { recorder, advance: (ms: number) => { clock += ms; } };
@@ -89,6 +93,27 @@ describe("per-tick aggregates", () => {
     expect(run.ticks[1].datasetId).toBe("ds-b");
     expect(run.ticks[1].counters.laneDetail).toBe(0);
     expect(run.ticksDropped).toBe(0);
+  });
+
+  /**
+   * The loop says what woke it before each tick; every sample the tick
+   * publishes carries the answer, and the next tick's word replaces it.
+   */
+  it("marks the samples of a pass woken by an availability update alone", () => {
+    const { recorder } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+
+    recorder.noteTickWake(true);
+    recorder.beginTick("ds-a");
+    recorder.commitTick();
+    recorder.beginTick("ds-b");
+    recorder.commitTick();
+    recorder.noteTickWake(false);
+    recorder.beginTick("ds-a");
+    recorder.commitTick();
+
+    const [run] = recorder.exportDocument().runs;
+    expect(run.ticks.map(tick => tick.availabilityWoken)).toEqual([true, true, false]);
   });
 
   /**

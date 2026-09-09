@@ -1323,11 +1323,20 @@ fn parse_run_file(text: &str, path: &Path) -> Result<TraceRunFile, CliError> {
 /// open is pre-instrument boot, so a gate that fires on coverage fires on every
 /// green run.
 ///
+/// A steady-state verdict fails too. It is the page saying the view settled
+/// and the pipeline went on — sustained traffic, a refetch loop, a
+/// feedback loop with the server, or a residency tier that cannot fit what the
+/// view wants — and a regression in any of those is as much a build failure as
+/// a stall. The verdict is derived only from closed intervals: the export
+/// closes the interval in progress before the page reads it, and a reading
+/// scoped to a window of the run's clock leaves the steady state out
+/// altogether.
+///
 /// The gate reads closed runs only. A run file is written after the export
 /// closed the run, and a run that closed without going quiescent fails here
 /// before its verdict is consulted, so no reading taken while a run was still
 /// open can fail a build. An interaction run over the page's frame-time
-/// ceiling arrives as a stall verdict like any other. The ceiling and its
+/// ceiling arrives as a stall verdict like any other. Every ceiling and its
 /// rationale live in the page's ruleset, not here.
 ///
 /// The gate reads two things and nothing else: the header's settled flag and
@@ -1345,7 +1354,7 @@ pub fn gate_failure(file: &TraceRunFile) -> Option<String> {
     }
     let verdict = file.diagnostic.get("verdict")?;
     let kind = verdict.get("kind").and_then(Value::as_str)?;
-    if kind == "stall" || kind == "unsettled" {
+    if kind == "stall" || kind == "unsettled" || kind == "steady-state" {
         let text = verdict
             .get("text")
             .and_then(Value::as_str)
@@ -2485,6 +2494,67 @@ mod tests {
         let reason = gate_failure(&unsettled).unwrap();
         assert!(reason.contains("never settled"));
         assert!(!reason.contains("ceiling for an interaction run"));
+    }
+
+    /// "The view settled and the pipeline went on" is a regression a build
+    /// should catch, so a steady-state verdict fails the gate as a stall
+    /// does — including the budget-bound reading, which is what a run that
+    /// could never settle says instead of reporting a timeout.
+    #[test]
+    fn the_gate_fails_on_a_steady_state_verdict() {
+        let refetching = run_file(
+            json!({
+                "verdict": {
+                    "kind": "steady-state",
+                    "text": "12 chunk(s) were fetched again after the view settled — 24 refetch(es) costing 49,152 B over the 8,000 ms window"
+                }
+            }),
+            true,
+            "quiescent",
+        );
+        let reason = gate_failure(&refetching).unwrap();
+        assert!(reason.contains("steady-state"));
+        assert!(reason.contains("fetched again after the view settled"));
+
+        let budget_bound = run_file(
+            json!({
+                "verdict": {
+                    "kind": "steady-state",
+                    "text": "the coarse tier is budget-bound at 62,914,560 B of 67,108,864 B (93% full) with nothing pending and nothing in flight, so 440 of 1,240 wanted chunk(s) cannot fit — a coverage loss of 35%, not a timeout"
+                }
+            }),
+            true,
+            "quiescent",
+        );
+        assert!(
+            gate_failure(&budget_bound)
+                .unwrap()
+                .contains("coverage loss of 35%")
+        );
+    }
+
+    /// The steady-state rules read closed intervals, and the gate reads the
+    /// closed run's verdict. A provisional reading that named a steady-state
+    /// finding over its moving window is not a verdict and cannot fail a
+    /// build, exactly as a provisional stall cannot.
+    #[test]
+    fn the_gate_ignores_a_steady_state_finding_in_a_provisional_window() {
+        let file = run_file(
+            json!({
+                "verdict": { "kind": "clear", "text": "no stall — nothing crossed a threshold" },
+                "provisional": {
+                    "provisional": true,
+                    "window": { "startMs": 7300, "endMs": 12300, "spanMs": 5000 },
+                    "findings": [
+                        { "severity": "steady-state", "rule": "steady.refetch", "subject": "refetch after settle" }
+                    ],
+                    "statement": "provisional — over the last 5000 ms, chunks were fetched again"
+                }
+            }),
+            true,
+            "quiescent",
+        );
+        assert_eq!(gate_failure(&file), None);
     }
 
     /// 87% of a healthy local cold open is pre-instrument boot, so a gate that

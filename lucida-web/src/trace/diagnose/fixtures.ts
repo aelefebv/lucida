@@ -29,6 +29,7 @@ import {
   type RunHeader,
   type SendTallies,
   type ServerPhaseDurations,
+  type TraceDocument,
   type TraceReading,
   type TraceRow,
   type TraceRun,
@@ -48,6 +49,8 @@ export interface RowSpec {
   lane?: LaneName;
   chunkKey?: string;
   outcome?: TraceRow["outcome"];
+  /** The bytes the wire delivered. Zero by default, as for a row whose wire never closed. */
+  bytes?: number;
 }
 
 export function makeRow(spec: RowSpec, index = 0): TraceRow {
@@ -74,6 +77,7 @@ export function makeRow(spec: RowSpec, index = 0): TraceRow {
     y: index,
     x: 0,
     chunkKey: spec.chunkKey ?? `1/0/0/0/${index}/0`,
+    bytes: spec.bytes ?? 0,
     outcome: spec.outcome ?? "complete",
     phases,
   };
@@ -184,6 +188,7 @@ export function makeTick(
     targetLevel: null,
     levelPinned: false,
     displayedLevel: null,
+    availabilityWoken: false,
   };
 }
 
@@ -245,6 +250,10 @@ export function makeHeader(overrides: Partial<RunHeader> = {}): RunHeader {
       residentDetailChunks: 0,
       desiredCoarseChunks: 0,
       residentCoarseChunks: 0,
+      detailBytes: 0,
+      detailBudgetBytes: 0,
+      coarseBytes: 0,
+      coarseBudgetBytes: 0,
     },
     ...overrides,
   };
@@ -449,6 +458,10 @@ export function saturatedReopen(): TraceRun {
         residentDetailChunks: 1_380,
         desiredCoarseChunks: 0,
         residentCoarseChunks: 0,
+        detailBytes: 0,
+        detailBudgetBytes: 0,
+        coarseBytes: 0,
+        coarseBudgetBytes: 0,
       },
     },
     rows,
@@ -732,4 +745,240 @@ export function fallbackAdapterOpen(): TraceRun {
     datasetOpens: base.datasetOpens,
     serverRows: base.serverRows,
   });
+}
+
+// ---------------------------------------------------------------------------
+// The steady state
+// ---------------------------------------------------------------------------
+
+export interface SteadySpec extends RunSpec {
+  /** How long the interval lasted, in milliseconds. */
+  spanMs: number;
+}
+
+/**
+ * The steady-state interval that opened when `run` closed: no cause, a clock
+ * of its own that starts at the run's close, and the export as its end. The
+ * rows, ticks, readings and sends are the caller's, so each fixture below
+ * models one kind of traffic after settle and nothing else, and the quiet
+ * one models the heartbeat alone.
+ */
+export function steadyStateAfter(run: TraceRun, spec: SteadySpec): TraceRun {
+  const { spanMs, header, ...rest } = spec;
+  return makeRun({
+    ...rest,
+    header: {
+      runId: `steady-after-${run.header.runId}`,
+      cause: null,
+      endReason: "explicit",
+      durationUs: spanMs * MS,
+      startedAtEpochMs: run.header.startedAtEpochMs + Math.round(run.header.durationUs / MS),
+      ...header,
+    },
+  });
+}
+
+/** A fetch after settle: bytes in hand at `endUs`, then decoded, uploaded and drawn. */
+function fetchedRow(
+  index: number,
+  endUs: number,
+  lane: LaneName,
+  bytes: number,
+  chunkKey?: string,
+): TraceRow {
+  return makeRow(
+    {
+      startUs: endUs - 30 * MS,
+      durations: { queue: 2 * MS, wire: 28 * MS, decode: MS, upload: MS, present: MS },
+      lane,
+      bytes,
+      chunkKey,
+      rid: index,
+    },
+    index,
+  );
+}
+
+/**
+ * Nothing after settle worth a finding: two prefetch chunks in the first
+ * second, presence once a second, one planning pass. The interval every
+ * steady-state rule has to stay quiet on.
+ */
+export function quietSteadyState(run: TraceRun): TraceRun {
+  return steadyStateAfter(run, {
+    spanMs: 10_000,
+    rows: [0, 1].map((i) => fetchedRow(i, 400 * MS + i * 200 * MS, "prefetch", 64 * 1024)),
+    ticks: [makeTick(50 * MS)],
+    readings: Array.from({ length: 5 }, (_, i) =>
+      makeReading(i * 2_000 * MS, { queueDepth: 0, inFlight: 0, frameTimeUs: 2_000 }),
+    ),
+    sent: { ...emptySendTallies(), presence: { messages: 10, bytes: 3_000 } },
+  });
+}
+
+/**
+ * The field report's reading half: the view settled and the prefetch lane
+ * kept fetching, eight chunks a second for twelve seconds, beside two
+ * detail chunks that arrived just after settle. Every second is busy, so
+ * the received rule fires and names prefetch.
+ */
+export function prefetchSteadyState(run: TraceRun): TraceRun {
+  const rows: TraceRow[] = [];
+  for (let second = 0; second < 12; second += 1) {
+    for (let i = 0; i < 8; i += 1) {
+      const index = second * 8 + i;
+      rows.push(fetchedRow(index, second * 1_000 * MS + 100 * MS + i * 100 * MS, "prefetch", 40 * 1024));
+    }
+  }
+  rows.push(fetchedRow(96, 500 * MS, "detail", 40 * 1024));
+  rows.push(fetchedRow(97, 600 * MS, "detail", 40 * 1024));
+  return steadyStateAfter(run, {
+    spanMs: 12_000,
+    rows,
+    ticks: [makeTick(20 * MS)],
+    readings: Array.from({ length: 12 }, (_, i) =>
+      makeReading(i * 1_000 * MS, { queueDepth: 8, inFlight: 4, frameTimeUs: 3_000 }),
+    ),
+  });
+}
+
+/**
+ * A refetch loop: a dozen chunks of one entity fetched three times each in
+ * three passes, two kilobytes a fetch. Small on purpose, so the bytes alone
+ * are no finding and the churn is what the ruleset has to see.
+ */
+export function refetchLoopSteadyState(run: TraceRun): TraceRun {
+  const rows: TraceRow[] = [];
+  for (let pass = 0; pass < 3; pass += 1) {
+    for (let chunk = 0; chunk < 12; chunk += 1) {
+      const index = pass * 12 + chunk;
+      rows.push({
+        ...fetchedRow(index, 500 * MS + pass * 2_500 * MS + chunk * 50 * MS, "detail", 2 * 1024, `1/0/0/0/${chunk}/0`),
+        entityId: "member-1",
+      });
+    }
+  }
+  return steadyStateAfter(run, {
+    spanMs: 8_000,
+    rows,
+    ticks: [makeTick(20 * MS)],
+    readings: Array.from({ length: 8 }, (_, i) =>
+      makeReading(i * 1_000 * MS, { queueDepth: 0, inFlight: 2, frameTimeUs: 3_000 }),
+    ),
+  });
+}
+
+/**
+ * The generated-coarse availability loop: ten planning passes in six seconds
+ * with no input between them, eight of which nothing but an availability
+ * update woke.
+ */
+export function availabilityLoopSteadyState(run: TraceRun): TraceRun {
+  return steadyStateAfter(run, {
+    spanMs: 6_000,
+    ticks: Array.from({ length: 10 }, (_, i) => ({
+      ...makeTick(200 * MS + i * 500 * MS),
+      availabilityWoken: i >= 2,
+    })),
+    readings: Array.from({ length: 6 }, (_, i) =>
+      makeReading(i * 1_000 * MS, { queueDepth: 0, inFlight: 0, frameTimeUs: 2_000 }),
+    ),
+  });
+}
+
+/**
+ * The field report's writing half after settle: cursor positions, presence
+ * and viewer interest for ten seconds with one planning pass. The interval's
+ * totals carry the sends, as the recorder's do; the one sample carries
+ * almost none of them.
+ */
+export function sendHeavySteadyState(run: TraceRun): TraceRun {
+  return steadyStateAfter(run, {
+    spanMs: 10_000,
+    ticks: [makeTick(20 * MS, {}, { viewerInterest: { messages: 1, bytes: 120 } })],
+    readings: Array.from({ length: 4 }, (_, i) =>
+      makeReading(i * 2_500 * MS, { queueDepth: 0, inFlight: 0, frameTimeUs: 2_000 }),
+    ),
+    sent: {
+      ...emptySendTallies(),
+      viewerInterest: { messages: 10, bytes: 1_200 },
+      presence: { messages: 40, bytes: 12_000 },
+      cursor: { messages: 400, bytes: 16_000 },
+    },
+  });
+}
+
+/**
+ * A run that can never settle: the coarse tier holds 60 MiB of a 64 MiB
+ * budget, wants 1,240 chunks and holds 800 of them, and has nothing queued
+ * or in flight, so the run times out. The budget-bound rule exists to name
+ * this as a coverage loss rather than as the timeout it causes.
+ */
+export function budgetBoundCoarseRun(): TraceRun {
+  const rows = Array.from({ length: 40 }, (_, i) => ({
+    ...makeRow(
+      {
+        startUs: 50 * MS + i * 20 * MS,
+        durations: { plan: 300, queue: 2 * MS, wire: 30 * MS, decode: MS, upload: MS, present: 2 * MS },
+        rid: i,
+        lane: "coarse",
+        bytes: 80 * 1024,
+      },
+      i,
+    ),
+    residencyTier: "coarse" as const,
+  }));
+  return makeRun({
+    header: {
+      runId: "coarse-budget-bound",
+      durationUs: 20_000 * MS,
+      endReason: "timeout",
+      outstandingAtSettle: {
+        pending: 0,
+        inFlight: 0,
+        speculativePending: 0,
+        speculativeInFlight: 0,
+        desiredDetailChunks: 0,
+        residentDetailChunks: 0,
+        desiredCoarseChunks: 1_240,
+        residentCoarseChunks: 800,
+        detailBytes: 0,
+        detailBudgetBytes: 512 * 1024 * 1024,
+        coarseBytes: 60 * 1024 * 1024,
+        coarseBudgetBytes: 64 * 1024 * 1024,
+      },
+    },
+    rows,
+    // In-flight varies, so the one limiter is neither pinned nor backlogged.
+    readings: Array.from({ length: 20 }, (_, i) =>
+      makeReading(i * 1_000 * MS, { queueDepth: 0, inFlight: (i % 3) + 1, frameTimeUs: 3_000 }),
+    ),
+  });
+}
+
+/**
+ * A trace document holding labelled runs and the unlabelled intervals between
+ * them, as the recorder's export splits them. The retention block and the
+ * phase inventories are the shape the recorder writes, so a reader that walks
+ * them finds what it expects.
+ */
+export function makeDocument(runs: TraceRun[], steadyState: TraceRun[] = []): TraceDocument {
+  return {
+    schemaVersion: TRACE_SCHEMA_VERSION,
+    exportedAtEpochMs: 1_700_000_100_000,
+    retention: {
+      residentCapBytes: 8_000_000,
+      perRunCapBytes: 2_000_000,
+      residentBytes: 100_000,
+      intervalsEvicted: 0,
+      derivedFrom: "384-member collection",
+      capUnit: "bytes",
+    },
+    instrumentedPhases: [...PHASES],
+    countedPhases: ["cache-admission", "worker-dispatch", "coalesce-attach"],
+    runs,
+    steadyState,
+    rowsOutsideRun: 0,
+    serverRowsOutsideRun: 0,
+  };
 }

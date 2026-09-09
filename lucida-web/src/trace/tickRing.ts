@@ -70,6 +70,8 @@ export class TickScratch {
   datasetId = "";
   levelsDropped = 0;
   levelPinned = false;
+  /** Set by the recorder from what the loop said woke the tick this pass belongs to. */
+  availabilityWoken = false;
 
   reset(datasetId: string): void {
     this.counters.fill(0);
@@ -78,6 +80,7 @@ export class TickScratch {
     this.datasetId = datasetId;
     this.levelsDropped = 0;
     this.levelPinned = false;
+    this.availabilityWoken = false;
   }
 
   /**
@@ -160,12 +163,13 @@ export class TickScratch {
 export class TickRing {
   /**
    * One interned dataset id, one timestamp, one dropped-level count, the two
-   * level ranges, plus the columns, all uint32; and one byte for the pin.
+   * level ranges, plus the columns, all uint32; one byte for the pin and one
+   * for the wake.
    */
   static readonly BYTES_PER_TICK =
     (3 + RANGE_COLUMNS + COUNTERS_PER_TICK + COUNTED_PER_TICK + LEVELS_PER_TICK + SENDS_PER_TICK) *
       4 +
-    1;
+    2;
 
   private readonly strings = new StringPool();
   private readonly slots: RingSlots;
@@ -178,6 +182,7 @@ export class TickRing {
   private readonly levels: Uint32Array;
   private readonly ranges: Uint32Array;
   private readonly levelPinned: Uint8Array;
+  private readonly availabilityWoken: Uint8Array;
   private readonly sent: Uint32Array;
 
   constructor(capacity = DEFAULT_TICK_CAPACITY) {
@@ -191,6 +196,7 @@ export class TickRing {
     this.levels = new Uint32Array(this.capacity * LEVELS_PER_TICK);
     this.ranges = new Uint32Array(this.capacity * RANGE_COLUMNS);
     this.levelPinned = new Uint8Array(this.capacity);
+    this.availabilityWoken = new Uint8Array(this.capacity);
     this.sent = new Uint32Array(this.capacity * SENDS_PER_TICK);
   }
 
@@ -221,6 +227,7 @@ export class TickRing {
     this.levels.set(scratch.levels, slot * LEVELS_PER_TICK);
     this.ranges.set(scratch.ranges, slot * RANGE_COLUMNS);
     this.levelPinned[slot] = scratch.levelPinned ? 1 : 0;
+    this.availabilityWoken[slot] = scratch.availabilityWoken ? 1 : 0;
     this.sent.set(sent, slot * SENDS_PER_TICK);
   }
 
@@ -260,6 +267,7 @@ export class TickRing {
         targetLevel: rangeOrNull(this.ranges[r], this.ranges[r + 1]),
         levelPinned: this.levelPinned[slot] === 1,
         displayedLevel: rangeOrNull(this.ranges[r + 2], this.ranges[r + 3]),
+        availabilityWoken: this.availabilityWoken[slot] === 1,
       });
     }
     return out;

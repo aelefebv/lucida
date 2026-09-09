@@ -303,6 +303,8 @@ export class TraceRecorder {
   private readonly sendSample = new Uint32Array(SEND_COLUMN_COUNT);
   /** One vector, refilled per tick, for the same reason as the scratch above. */
   private readonly readingColumns = new Float64Array(READING_NAMES.length);
+  /** The loop's word on what woke the tick in progress; see {@link noteTickWake}. */
+  private availabilityWoken = false;
   /**
    * The live view's phase-occupancy vector, refilled per poll rather than
    * allocated per poll. The progress it produces is a fresh object by
@@ -944,6 +946,20 @@ export class TraceRecorder {
     run.sink.stamp(handle % GENERATION_STRIDE, boundary, this.offsetUs(run, this.now()));
   }
 
+  /**
+   * Bytes in hand: closes `wire`, opens `decode`, and records what the wire
+   * delivered, in one resolve. The bytes land on the row at the boundary
+   * they arrive at rather than through a second call, because this runs
+   * once per completed fetch and a handle round trip is the cost #949 cut.
+   */
+  noteBytesReceived(handle: number, bytes: number): void {
+    const run = this.resolve(handle);
+    if (!run) return;
+    const index = handle % GENERATION_STRIDE;
+    run.sink.stamp(index, Boundary.DecodeStart, this.offsetUs(run, this.now()));
+    run.sink.setBytes(index, bytes);
+  }
+
   finishRow(handle: number, outcome: RowOutcomeValue): void {
     const run = this.resolve(handle);
     if (!run) return;
@@ -963,8 +979,21 @@ export class TraceRecorder {
   beginTick(datasetId: string): TickScratch | null {
     if (!this.open) return null;
     this.tickScratch.reset(datasetId);
+    this.tickScratch.availabilityWoken = this.availabilityWoken;
     this.tickInProgress = true;
     return this.tickScratch;
+  }
+
+  /**
+   * What woke the loop for the tick about to run: true when a
+   * generated-availability update was the only thing that dirtied it since
+   * the previous tick. The loop says so before each tick, every sample that
+   * tick publishes carries the answer, and the next tick's word replaces it.
+   * The loop owns the dirty sources, so the classification is its and the
+   * recorder keeps one boolean.
+   */
+  noteTickWake(availabilityOnly: boolean): void {
+    this.availabilityWoken = availabilityOnly;
   }
 
   /**

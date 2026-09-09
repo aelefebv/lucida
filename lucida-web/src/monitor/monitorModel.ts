@@ -16,11 +16,13 @@ import type {
   CriticalPath,
   DiagnosticDocument,
   Finding,
+  FindingSeverity,
   LimiterSummary,
   PhaseRollup,
   PhaseSide,
 } from "../trace/diagnose/types.ts";
 import { formatCause } from "../trace/diagnose/renderText.ts";
+import { describeSteadyStateFinding } from "../trace/diagnose/steadyState.ts";
 
 /** One figure, already formatted, with the word that names it. */
 export interface MonitorNumber {
@@ -49,7 +51,7 @@ export interface MonitorDrill {
 
 export interface MonitorCallout {
   id: string;
-  tone: "verdict" | "stall" | "saturated" | "note";
+  tone: "verdict" | "stall" | "saturated" | "steady-state" | "note";
   /** The phase, limiter or segment the callout is about. */
   subject: string;
   headline: string;
@@ -339,12 +341,23 @@ function phaseNumbers(phase: PhaseRollup): MonitorNumber[] {
   ];
 }
 
+/**
+ * One tone per severity, listed rather than derived, so a severity added to
+ * the derivation cannot quietly land in the stall colour.
+ */
+const CALLOUT_TONES: Record<FindingSeverity, MonitorCallout["tone"]> = {
+  stall: "stall",
+  saturated: "saturated",
+  "steady-state": "steady-state",
+  note: "note",
+};
+
 function calloutOf(finding: Finding, diagnostic: DiagnosticDocument): MonitorCallout {
   const phase = drillPhase(finding.subject, diagnostic.phases);
   const headline = headlineOf(finding);
   return {
     id: `finding-${finding.id}`,
-    tone: finding.severity === "saturated" ? "saturated" : finding.severity === "note" ? "note" : "stall",
+    tone: CALLOUT_TONES[finding.severity],
     subject: finding.subject,
     headline,
     confidence: finding.confidence,
@@ -367,6 +380,10 @@ function calloutOf(finding: Finding, diagnostic: DiagnosticDocument): MonitorCal
  */
 function headlineOf(finding: Finding): string {
   const observed = finding.observed;
+  // A steady-state finding is about the interval after the run, so it has
+  // neither a duration nor a share to lead with. Its sentence comes from the
+  // derivation, so the page and the agent text say the same thing.
+  if (finding.severity === "steady-state") return describeSteadyStateFinding(finding);
   if (observed.pending != null) {
     return `${finding.subject} held ${formatCount(observed.pending)} behind a cap of ${observed.inFlightCap ?? 0}`;
   }
@@ -409,6 +426,39 @@ function numbersOf(finding: Finding, phase: PhaseRollup | null): MonitorNumber[]
   }
   if (observed.rows === 0 && observed.tier) {
     numbers.push({ label: "per-item rows", value: `none (${observed.tier})` });
+  }
+  // The steady-state figures. Every one states its window where it has one,
+  // because a count without a denominator is not a measurement.
+  if (observed.bytesPerS != null) {
+    numbers.push({ label: "bytes per second", value: formatCount(observed.bytesPerS) });
+  }
+  if (observed.bytes != null) numbers.push({ label: "bytes", value: formatCount(observed.bytes) });
+  if (observed.chunks != null) {
+    numbers.push({ label: "chunks fetched again", value: formatCount(observed.chunks) });
+  }
+  if (observed.refetches != null) {
+    numbers.push({ label: "refetches", value: formatCount(observed.refetches) });
+  }
+  if (observed.wokenPasses != null) {
+    numbers.push({
+      label: "passes woken by availability",
+      value: `${formatCount(observed.wokenPasses)} of ${formatCount(observed.passes ?? 0)}`,
+    });
+  }
+  if (observed.fillPct != null) {
+    numbers.push({
+      label: "tier fill",
+      value: `${observed.fillPct}% of ${formatCount(observed.budgetBytes ?? 0)}`,
+    });
+  }
+  if (observed.lossChunks != null) {
+    numbers.push({
+      label: "coverage loss",
+      value: `${formatCount(observed.lossChunks)} of ${formatCount(observed.wanted ?? 0)} chunks (${observed.lossPct ?? 0}%)`,
+    });
+  }
+  if (observed.windowMs != null) {
+    numbers.push({ label: "window", value: formatMs(observed.windowMs) });
   }
   return numbers;
 }
