@@ -217,6 +217,19 @@ by quiescence or explicitly. A dataset-open run and an interaction run are the
 same object, differing only in cause.
 _Avoid_: session, capture, trial
 
+**Interaction run**:
+A run opened by a view or selection epoch. Its cause carries the epoch kind
+and the input kind: pan, zoom, orbit, scrub, or select. One gesture is one
+run: it opens on the first interactive dirty after quiescence, inputs while it
+is open extend it, and it closes on quiescence after the last input. A run
+like any other, so it has a duration, a bytes-sent figure, and a frame-time
+shape. See
+[ADR 0047](wiki/decisions/0047-trace-model-phases-runs-and-lifecycle-rows.md)
+as amended.
+_Avoid_: gesture (what a person did; the run is what was recorded of it),
+input event (one run spans many), interaction (unqualified, since the run is
+the interval and not the act)
+
 **Steady-state interval**:
 The unlabelled interval between runs. The same object as a run with no cause, so
 the pan that preceded a stall is retained rather than discarded, and it is
@@ -301,6 +314,36 @@ every reader goes — the CLI, an agent driving its own browser, the monitor's s
 button — so that no surface gets a privately-shaped copy. Public interface in
 every build, not a debug affordance.
 _Avoid_: endpoint, hook, API
+
+**Bundle**:
+One file holding everything a reader needs to read a run and everything the
+driver needs to replay it: the trace document, the settled frame as a PNG at
+the run's device pixel ratio, the view URL, the planning configuration, the
+level pins, and the header. Produced by **Send report** in the dock and by the
+trace driver, and the same file from either.
+_Avoid_: report (the action is Send report; what it sends is a bundle),
+archive, zip, export (the act, not the file), attachment, run file (a saved
+run is the document alone)
+
+**Inbox**:
+A workspace-scoped store of bundles that people sent with **Send report**,
+which the CLI lists and fetches. The server keeps the bytes and the header for
+a fixed number of days and computes nothing over them, and a bundle is there
+only because someone sent it. Why this is not the server-side trace store that
+record rejected:
+[ADR 0050](wiki/decisions/0050-server-timings-reach-the-monitor.md) as amended.
+_Avoid_: trace store, upload target, mailbox, queue, telemetry, server-side
+trace
+
+**Watch stream**:
+The page's per-tick aggregate and run boundaries, pushed over the session
+socket to CLI subscribers while a visible per-session toggle in the dock is
+on. Off by default, off again after a reconnect, and visible while on. Rows
+never ride it. See
+[ADR 0051](wiki/decisions/0051-the-trace-driver-and-the-page-export-seam.md)
+as amended.
+_Avoid_: live feed, tail, telemetry, broadcast, stream (unqualified),
+subscription (the CLI's end of it, not the stream)
 
 **Point event**:
 A rare occurrence recorded as a single timestamped record rather than a phase
@@ -427,10 +470,30 @@ The diagnostic's one-sentence answer, withheld until the run closes — a verdic
 that changes while you read it is not a verdict.
 _Avoid_: result, status, score, grade
 
+**Provisional reading**:
+What a live surface says while a run is still open, in the dock's live view or
+on the watch stream: a statement over a rolling window, labelled provisional in
+every rendering because it changes while you read it. Never a verdict, which
+needs a closed interval, and never trusted by a gate. Not a reading in the
+counter-track sense above: that is one sample, and this is a statement over a
+window of them.
+_Avoid_: live verdict, interim verdict, preliminary result, estimate, reading
+(unqualified, which is a counter sample)
+
 **Finding**:
 One rule firing on one subject, ranked against the others. A `note` is a finding
 that is not a stall: worth a line, not worth blame.
 _Avoid_: issue, warning, alert, violation
+
+**Churn**:
+How many times one chunk was fetched inside a stated window, counted by row
+identity, with the bytes those fetches cost. Always stated with its window,
+because a count without a denominator is not a measurement. One number read two
+ways: the overlay's churn tint paints it per chunk, and the steady-state
+ruleset's refetch finding counts the chunks fetched more than once, with their
+bytes.
+_Avoid_: thrash (the symptom churn measures), turnover, flapping, refetch rate
+(a rate hides the window), reload count
 
 **Attribution**:
 What the run was waiting on, and how much the derivation is willing to claim.
@@ -655,24 +718,53 @@ saved view is a different thing — see above)
 ## Surfaces
 
 **Monitor**:
-The pipeline performance surface — where and when the pipeline slowed down.
-Observation only.
-_Avoid_: profiler, debug panel, dashboard
+The pipeline performance surface: where and when the pipeline slowed down, read
+from the trace. It lives in the dock inside the viewer, with the HUD as its
+strip in the viewport and a text rendering of every chart for agents.
+Observation only: mutation lives in Dev controls and on the trace driver,
+never here.
+_Avoid_: profiler, debug panel, dashboard, monitor page (the separate route is
+retired)
+
+**Dock**:
+The monitor's home inside the viewer: a resizable panel carrying the timeline,
+the live charts, and the closed-run diagnostic, with a popout to a second
+window. Replaces the monitor route, so nobody leaves the picture to read
+about the picture. Temporal, where the overlay is spatial. The two link through
+a selection and do not merge. See
+[ADR 0052](wiki/decisions/0052-debug-surface-dispositions.md) as amended.
+_Avoid_: monitor page, monitor route, panel (unqualified), drawer, sidebar,
+timeline (what the dock draws, not the surface)
+
+**HUD**:
+The heads-up display: a canvas strip in the viewport, toggled by one key
+binding in every build, that shows what the pipeline is doing at the tick
+cadence: bytes each way, in-flight and pending by lane, resident bytes against
+budget, target and displayed level, frame time, quiescence with its reason,
+and the adapter with a warning when it is a software fallback. Its legend
+holds the overlay toggles. Drawn from the per-tick aggregate, never from the
+frame loop.
+_Avoid_: stats overlay, status bar, frame counter, overlay (an overlay is drawn
+in dataset coordinates; the HUD is not one)
 
 **Live view**:
-What the monitor shows while a run is still open: progress counters and the
-phase bar, cumulative from run start, and no verdict. A verdict needs a closed
-interval, so the monitor withholds one until the run ends — by going quiescent,
-by timing out, or through *Stop & analyse*, which closes it with `explicit` as
-the end reason.
-_Avoid_: real-time view, following window (there is no window), live verdict
+What the dock shows while a run is still open: the live charts drawn from the
+per-tick aggregates, and a provisional reading over a rolling window, labelled
+as such. Still no verdict. A verdict needs a closed interval, so the monitor
+withholds one until the run ends — by going quiescent, by timing out, or
+through *Stop & analyse*, which closes it with `explicit` as the end reason.
+_Avoid_: real-time view, live verdict (a provisional reading is labelled for
+the reason that it is not one), counters view
 
 **Dev controls**:
-The dev-only mutating surface: planning knobs, overlay toggles, and the
-session-scoped cache knobs. Deliberately separate from the monitor — observation
-and mutation are two different tools. Named for mutation, not for configuration,
+The dev-only mutating surface: the planning knobs and the session-scoped cache
+knobs. The overlay toggles live in the HUD legend, since the overlays are
+product surfaces. Deliberately separate from the monitor, because observation
+and mutation are two different tools. The trace driver sets every knob here by
+the same name the panel shows. Named for mutation, not for configuration,
 because configuration is only one of its contents.
-_Avoid_: debug panel, config tab, dev tools, inspector
+_Avoid_: debug panel, config tab, dev tools, inspector, overlay controls (the
+toggles live in the HUD legend)
 
 **Debug panel**:
 The retired ten-tab observation-and-mutation surface (`DebugPanel.tsx`),
@@ -680,11 +772,18 @@ dismantled by `wiki/decisions/0052-debug-surface-dispositions.md`. Historical
 only — never use it for the surviving surface.
 _Avoid_: using this term for anything current; say monitor or dev controls
 
-**Overlay** (debug):
+**Overlay**:
 The in-viewport layer drawn over the canvas in dataset coordinates — which chunk,
-where on screen. Spatial, where the monitor is temporal; the two never merge.
+where on screen, and in volume mode which chunk box. A product surface, toggled
+from the HUD legend in every build, with modes for the chunk grid, the tier,
+the planned rank, the render radius, phase colour in the timeline's palette,
+and churn tint over a stated window. Spatial, where the dock is temporal: a
+window selected on the dock's axis publishes a chunk set and the overlays
+highlight it, so the two link through a selection and do not merge into one
+surface.
 _Avoid_: overlay image (an integer-valued image whose values name regions is a
-label, see above), heads-up display
+label, see above), heads-up display (that is the HUD, drawn in screen
+coordinates), debug overlay (no longer dev-only)
 
 **Capture surface**:
 The chrome-free viewer page (`?render=1`) that `dataset montage`, `viewer

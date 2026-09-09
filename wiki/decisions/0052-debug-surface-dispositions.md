@@ -5,7 +5,7 @@ description: "The ten-tab debug panel is dismantled: observation moves to the mo
 tags: [lucida, decision]
 source_path: wiki/decisions/0052-debug-surface-dispositions.md
 created: 2026-08-10
-modified: 2026-08-10
+modified: 2026-09-09
 ---
 
 # Debug surface dispositions
@@ -25,6 +25,7 @@ has not landed. Amends [0012](0012-logging-conventions.md).
 [#889]: https://github.com/aelefebv/lucida/issues/889
 [#892]: https://github.com/aelefebv/lucida/issues/892
 [#896]: https://github.com/aelefebv/lucida/issues/896
+[#1048]: https://github.com/aelefebv/lucida/issues/1048
 [0012]: 0012-logging-conventions.md
 [0043]: 0043-superseded-server-surfaces-sunset.md
 [0047]: 0047-trace-model-phases-runs-and-lifecycle-rows.md
@@ -128,6 +129,17 @@ into an observe surface — **evaporates rather than needing mitigation**. With
 the overlay toggles moving into Dev controls, the preview is one surface driving
 a layer it owns. The three functions stay in `logging.ts`, untouched.
 
+> **Amended 2026-09-09 ([#1048]).** The overlay toggles leave Dev controls for
+> the HUD legend and become togglable in production builds, so a person in
+> the field can turn an overlay on without a dev build or a browser-storage
+> edit. Dev controls keeps the planning knobs and the session-scoped cache
+> knobs, stays dev-gated, and is still named for mutation. The toggles keep
+> the browser-storage key they have today, so an existing setting survives the
+> move. One claim in this section stops holding: with the toggles gone, the
+> radius slider previews a boundary on an overlay that Dev controls no longer
+> owns, so the preview crosses a surface boundary again. Its disposition is
+> left to the change that moves the toggles.
+
 ## The overlays survive, decoupled, and do not fold into the monitor
 
 `DebugOverlays.tsx` (1,267 lines) is the only part of the inventory the monitor
@@ -143,6 +155,28 @@ it. It is also *already* nearly independent: state lives in
 when nothing is enabled. The only work is severing the `showDebug` half of its
 mount condition (`App.tsx:1413`) so it outlives the panel. All six overlays are
 kept.
+
+> **Amended 2026-09-09 ([#1048]).** Two rules in this section are retired, and
+> the reason is the same for both: the monitor is no longer a separate page.
+> It is a dock inside the viewer, a resizable panel with a popout to a second
+> window, under the cost contract of
+> [0049](0049-unconditional-recording-under-a-design-budget.md) as amended by
+> the same spec. The separate route is retired because it made a person leave
+> the picture to read about the picture. The overlays had a different
+> problem: they were toggled through browser storage behind a Dev controls
+> panel that is read-only in production builds, so nobody in the field could
+> turn them on, which is why their toggles move to the HUD legend. With the
+> monitor in the viewer, the "never merge" rule loses its premise. The
+> category error was folding a spatial layer into a page. Linking a spatial
+> surface and a temporal one that share a viewport is not that: a window
+> brushed on the dock's axis publishes a chunk set, the overlays highlight it,
+> and a chunk in the wire phase wears the same colour in space and in time.
+> The two still do not merge into one surface. The overlay stays the spatial
+> surface, the dock stays the temporal one, and they link through a selection.
+> Two overlay modes are new, phase colour in the timeline's palette and a
+> churn tint over a stated window, and both read from the derivation the dock
+> draws from, so the picture in space and the picture in time cannot disagree.
+> The glossary's "the two never merge" is revised to match.
 
 ## The log stream keeps its console interface and loses its checkboxes
 
@@ -242,7 +276,7 @@ table must exist before step 4 retires the counts handed to it.
 | Logging tab, 5 category checkboxes | **Deleted** — `localStorage.debug` + reload is the interface |
 | Logging tab, 6 overlay toggles | **Dev controls** |
 | `DebugOverlays.tsx` (all 6) | **Kept**, decoupled from the panel |
-| `setRenderRadiusPreviewTier` | **Kept** — no longer crosses a surface boundary |
+| `setRenderRadiusPreviewTier` | **Kept** — no longer crosses a surface boundary (amended 2026-09-09 by [#1048]: crosses one again once the toggles move to the HUD legend) |
 | 31 dead/inert `debugStats` fields | **Deleted** |
 | `debugStats.enabled` | **Deleted** with the recorder ([0049]) |
 | `DebugPanel.tsx` / `.css` | **Deleted** |
@@ -273,6 +307,9 @@ table must exist before step 4 retires the counts handed to it.
   substantially inert.
 - **Fold the overlays into the monitor.** Rejected: the overlays' value is
   registration with the viewport pixels; a separate page cannot provide it.
+  (Amended 2026-09-09 by [#1048]: the premise is gone, since the monitor is a
+  dock in the viewer. The option stays rejected in its literal form, and the
+  two link through a selection instead.)
 - **Publish browser state over new wire so `lucida debug state` can carry the
   structural residue.** Rejected: new wire and new budget spend to preserve a
   gauge board with no demonstrated consumer, when the per-tick counts worth
