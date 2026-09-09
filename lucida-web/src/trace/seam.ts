@@ -23,6 +23,7 @@
 import { configStore } from "../pipeline/planning/configStore.ts";
 import { bundleServices, exportBundle, type BundleOptions, type TraceBundle } from "./bundle.ts";
 import { toChromeTraceJson } from "./chromeTrace.ts";
+import { compareTraces, renderComparison, type CompareSide, type RunComparison } from "./diagnose/compare.ts";
 import { diagnoseDocument } from "./diagnose/diagnose.ts";
 import {
   renderProvisional,
@@ -226,6 +227,21 @@ export interface LucidaTraceSeam {
   /** {@link diagnoseTrace} rendered as text, at any depth {@link diagnoseText} renders. */
   diagnoseTraceText(document: TraceDocument, options?: DiagnoseTextScope): string;
   /**
+   * Two runs compared (#1059): header differences with a warning when they
+   * make the runs incomparable, phase deltas, and finding deltas, every
+   * delta right minus left. The subtraction lives here, behind the seam, so
+   * `lucida trace diff` and any viewer surface that sets two runs side by
+   * side print the same deltas. Each side is a trace document handed in, as
+   * {@link diagnoseTrace} takes one, with what the caller knows about the
+   * conditions the document does not record: the planning configuration and
+   * the CPU cache knobs the run ran under.
+   *
+   * Reads nothing from and closes nothing in the recorder.
+   */
+  compareTraces(left: CompareSide, right: CompareSide): RunComparison;
+  /** {@link compareTraces} rendered as text. */
+  compareTracesText(left: CompareSide, right: CompareSide): string;
+  /**
    * The view as the page would save it: camera, selectors, and every
    * dataset's display settings. Null before a scene exists. The trace driver
    * reads this before and after each scripted step and records both, so a
@@ -338,6 +354,9 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
       diagnoseTraceText(traceRecorder.exportDocument(), { ...options, runId }),
     diagnoseTrace,
     diagnoseTraceText,
+    compareTraces,
+    compareTracesText: (left: CompareSide, right: CompareSide) =>
+      renderComparison(compareTraces(left, right)),
     view: () => scriptControls()?.view() ?? null,
     viewSignature: () => viewSignature(scriptControls()?.view() ?? null),
     inputScale: INPUT_SCALE,
