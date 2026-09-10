@@ -15,6 +15,7 @@ mod session;
 mod status;
 mod trace;
 mod trace_knobs;
+mod trace_replay;
 mod trace_script;
 mod view;
 mod watch;
@@ -1347,6 +1348,48 @@ enum TraceCommand {
         /// Directory runs are read back from
         #[arg(long, value_name = "DIR", env = "LUCIDA_TRACE_DIR")]
         trace_dir: Option<PathBuf>,
+    },
+    /// Replay a bundle: open its dataset, restore its view and knobs, run
+    /// its script, and diff the new run against it
+    ///
+    /// The header carries what the driver needs: the dataset, the view URL,
+    /// the viewport and device pixel ratio, the planning configuration, and
+    /// the pins. The build, the adapter, and the browser's cache warmth
+    /// cannot be restored, and the run records every input it could not.
+    /// A bundle without a script replays as a cold open. The diff is the
+    /// page's own, so it warns when the two runs are not comparable, as a
+    /// bundle from a different adapter is not.
+    Replay {
+        /// Path to a bundle, or the name of one under the trace directory
+        #[arg(value_name = "BUNDLE")]
+        original: String,
+        /// Write the run here instead of the trace directory beside the config
+        #[arg(long, short, value_name = "PATH")]
+        output: Option<String>,
+        /// Directory runs are written to and read back from
+        #[arg(long, value_name = "DIR", env = "LUCIDA_TRACE_DIR")]
+        trace_dir: Option<PathBuf>,
+        /// Also write the replay's raw spans as Chrome Trace Event JSON, for Perfetto
+        #[arg(long, value_name = "PATH")]
+        perfetto: Option<String>,
+        /// Also write the frame the page shows once the replay has settled,
+        /// as a PNG at the bundle's device pixel ratio
+        #[arg(long, value_name = "PATH")]
+        screenshot: Option<PathBuf>,
+        /// Also write the replay as a bundle of its own, the same file that
+        /// running a dataset with --bundle writes
+        #[arg(long, value_name = "PATH")]
+        bundle: Option<PathBuf>,
+        /// Include the Perfetto projection in the replay's bundle
+        #[arg(long, requires = "bundle")]
+        bundle_perfetto: bool,
+        /// Seconds to wait for the page to load and settle
+        #[arg(long, default_value_t = 120)]
+        timeout_seconds: u64,
+        /// Fail (non-zero) on a stall or steady-state verdict, or a replay
+        /// that never settled, as --gate does on a run
+        #[arg(long)]
+        gate: bool,
     },
     /// Write the page's trace as Chrome Trace Event JSON, for ui.perfetto.dev
     Perfetto {
@@ -3791,6 +3834,81 @@ async fn emit_trace_command(
         }
         (
             None,
+            Some(TraceCommand::Replay {
+                original,
+                output: run_output,
+                trace_dir,
+                perfetto,
+                screenshot,
+                bundle,
+                bundle_perfetto,
+                timeout_seconds,
+                gate,
+            }),
+        ) => {
+            let dir = trace::resolve_trace_dir(trace_dir.as_deref(), &config_path);
+            let original_path = trace::resolve_run_file(&dir, original);
+            let artifact = trace::read_artifact(&original_path)?;
+            let trace::TraceArtifact::Bundle(original) = &artifact else {
+                return Err(CliError::config(format!(
+                    "{} is a run file, not a bundle; replay reads the header a bundle carries, \
+                     which running a dataset with --bundle writes",
+                    original_path.display()
+                )));
+            };
+            let plan = trace_replay::ReplayPlan::from_bundle(original, &original_path)?;
+            let wait = Duration::from_secs(*timeout_seconds);
+            let sidecars = RunSidecars {
+                output: run_output.as_deref(),
+                perfetto: perfetto.as_deref(),
+                bundle: bundle.as_deref(),
+                bundle_perfetto: *bundle_perfetto,
+                gate: *gate,
+            };
+            let outcome = run_replay(
+                &server,
+                &workspace,
+                &target,
+                token.as_ref(),
+                plan,
+                screenshot.as_deref(),
+                &sidecars,
+                &dir,
+                wait,
+            )
+            .await?;
+            // Original on the left, so the deltas read as what replaying changed.
+            let comparison = diff_runs(
+                &target,
+                token.as_ref(),
+                wait,
+                &trace::CompareSide::from_artifact(&artifact, &original_path),
+                &trace::CompareSide::from_run_file(&outcome.file, &outcome.path),
+            )
+            .await?;
+            let mut payload = serde_json::Map::new();
+            payload.insert("server".to_string(), serde_json::json!(server));
+            payload.insert("workspace".to_string(), serde_json::json!(workspace));
+            payload.insert("target".to_string(), serde_json::json!(target));
+            payload.insert("original".to_string(), serde_json::json!(original_path));
+            payload.extend(run_payload(&outcome));
+            payload.insert("comparison".to_string(), comparison.comparison.clone());
+            payload.insert("text".to_string(), serde_json::json!(comparison.text));
+            output.print_either(&payload, || {
+                trace_replay::format_replay_human(
+                    &outcome.file,
+                    &outcome.path,
+                    outcome.bundle.as_deref(),
+                    &original_path,
+                    &comparison.text,
+                )
+            })?;
+            if let Some(reason) = outcome.gate {
+                return Err(CliError::new(ErrorKind::GateFailed, reason));
+            }
+        }
+        (
+            None,
             Some(TraceCommand::Show {
                 run,
                 phases,
@@ -3975,7 +4093,7 @@ async fn emit_trace_command(
         }
         (None, None) => {
             return Err(CliError::config(
-                "lucida trace takes a dataset URL to measure, or a subcommand (show, diff, inbox, watch, perfetto)",
+                "lucida trace takes a dataset URL to measure, or a subcommand (show, diff, replay, inbox, watch, perfetto)",
             ));
         }
     }
@@ -4148,27 +4266,60 @@ async fn run_trace(
         screenshot,
         script,
         knobs: knobs.clone(),
+        replay: None,
     };
     let viewport = Viewport::new(args.width, args.height, args.device_pixel_ratio);
-    let bundle = bundle_path.map(|path| trace::BundleRequest {
-        path,
-        perfetto: args.bundle_perfetto,
+    let sidecars = RunSidecars {
+        output: output_path.as_deref(),
+        perfetto: perfetto.as_deref(),
+        bundle: bundle_path.as_deref(),
+        bundle_perfetto: args.bundle_perfetto,
+        gate: args.gate,
+    };
+    drive_and_persist(&url, token, viewport, wait, &facts, &sidecars, trace_dir).await
+}
+
+/// The files a run writes besides its run file, and whether the gate reads
+/// it. The frame is not here because the driver's facts carry it: the run
+/// header names the screenshot, and the drive takes it before the export.
+struct RunSidecars<'a> {
+    output: Option<&'a str>,
+    perfetto: Option<&'a str>,
+    bundle: Option<&'a Path>,
+    bundle_perfetto: bool,
+    gate: bool,
+}
+
+/// Drive one run at `url` under `facts`, write it, and read the gate: the
+/// tail a run composed from the command line and a replay share.
+async fn drive_and_persist(
+    url: &str,
+    token: Option<&EffectiveToken>,
+    viewport: Viewport,
+    wait: Duration,
+    facts: &trace::DriverFacts,
+    sidecars: &RunSidecars<'_>,
+    trace_dir: &Path,
+) -> Result<TraceRunOutcome, CliError> {
+    let bundle = sidecars.bundle.map(|path| trace::BundleRequest {
+        path: path.to_path_buf(),
+        perfetto: sidecars.bundle_perfetto,
     });
     // A drive that fails says what it drove: the composed URL is the whole
     // workload, and without it a timeout is unreproducible by hand.
     let driven = trace::drive_run(
-        &url,
+        url,
         token,
         viewport,
         wait,
-        &facts,
-        perfetto.as_deref(),
+        facts,
+        sidecars.perfetto,
         bundle.as_ref(),
     )
     .await
-    .map_err(|error| error.with_context("url", &url))?;
-    let path = trace::write_run_file(&driven.file, trace_dir, output_path.as_deref()).await?;
-    let gate = if args.gate {
+    .map_err(|error| error.with_context("url", url))?;
+    let path = trace::write_run_file(&driven.file, trace_dir, sidecars.output).await?;
+    let gate = if sidecars.gate {
         trace::gate_failure(&driven.file)
     } else {
         None
@@ -4179,6 +4330,68 @@ async fn run_trace(
         bundle: driven.bundle,
         gate,
     })
+}
+
+/// Replay a bundle by its plan: have its datasets in the workspace, re-host
+/// its view on this workspace, and drive the run under its knobs and its
+/// script, with the replay record in the new run's header.
+///
+/// It reads the server's warmth first, as `run_trace` does, and opens every
+/// dataset the bundle names by URL before the page loads, for the reason a
+/// cold open opens its one: a dataset the workspace lacks never reaches a
+/// scene, and the restored view would have nothing to apply to.
+#[allow(clippy::too_many_arguments)]
+async fn run_replay(
+    server: &EffectiveServer,
+    workspace: &WorkspaceRecord,
+    target: &WorkspaceTarget,
+    token: Option<&EffectiveToken>,
+    plan: trace_replay::ReplayPlan,
+    screenshot: Option<&Path>,
+    sidecars: &RunSidecars<'_>,
+    trace_dir: &Path,
+    wait: Duration,
+) -> Result<TraceRunOutcome, CliError> {
+    let dataset_client = DatasetWorkspaceClient::new(target.ws_url.clone(), token.cloned());
+    let (_seq, health) = dataset_client.health(None, wait).await?;
+    let mut warmth = trace::summarise_server_warmth(&plan.dataset_url, &health);
+    for dataset_url in std::iter::once(&plan.dataset_url).chain(&plan.other_dataset_urls) {
+        if trace::dataset_id_for_source(dataset_url, &health).is_some() {
+            continue;
+        }
+        DatasetOpenClient::new(target.ws_url.clone(), token.cloned())
+            .open(dataset_url, &workspace.id, wait)
+            .await?;
+        warmth.note_driver_open();
+    }
+
+    let url = match &plan.view_fragment {
+        Some(fragment) => trace_replay::rehost_view(&target.web_url, fragment),
+        None => {
+            let view =
+                trace::compose_dataset_view(&plan.dataset_url, plan.width, plan.height, None);
+            montage::with_render_param(&viewer_inline_view_web_url(target, &view)?)
+        }
+    };
+    let facts = trace::DriverFacts {
+        composed_view: trace::ComposedView {
+            dataset: plan.dataset_url,
+            url: url.clone(),
+            width: plan.width,
+            height: plan.height,
+            device_pixel_ratio: plan.device_pixel_ratio,
+            camera: None,
+        },
+        server_warmth: warmth,
+        server_url: server.url.clone(),
+        workspace_id: workspace.id.clone(),
+        screenshot: screenshot.map(Path::to_path_buf),
+        script: plan.script,
+        knobs: plan.knobs,
+        replay: Some(plan.record),
+    };
+    let viewport = Viewport::new(plan.width, plan.height, plan.device_pixel_ratio);
+    drive_and_persist(&url, token, viewport, wait, &facts, sidecars, trace_dir).await
 }
 
 /// A dataset argument is a URL in canonical form, or the id of a dataset the
@@ -4340,7 +4553,13 @@ fn viewer_inline_view_web_url(
     Ok(url.to_string())
 }
 
-fn encode_saved_view_url_payload(saved_view: &SavedView) -> Result<String, CliError> {
+/// A view as the page carries one in a URL fragment: gzip, then base64url
+/// without padding. Generic so the trace driver can encode a view it holds
+/// as JSON, as the page handed it over, without reading it into a `SavedView`
+/// first and losing whatever fields this build does not know.
+pub(crate) fn encode_saved_view_url_payload<T: serde::Serialize + ?Sized>(
+    saved_view: &T,
+) -> Result<String, CliError> {
     let json = serde_json::to_vec(saved_view)?;
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(&json)?;
@@ -6123,6 +6342,88 @@ mod tests {
             }
             _ => panic!("expected a trace run"),
         }
+    }
+
+    /// A replay takes the bundle and the same sidecar opt-ins a run takes,
+    /// and nothing that would override the header: the viewport, the ratio,
+    /// the knobs, and the pins are the bundle's.
+    #[test]
+    fn trace_replay_takes_a_bundle_and_the_runs_sidecars() {
+        let replay = parse(&["trace", "replay", "field.bundle.json"]);
+        match replay.command {
+            Command::Trace {
+                dataset,
+                command:
+                    Some(TraceCommand::Replay {
+                        original,
+                        output,
+                        perfetto,
+                        screenshot,
+                        bundle,
+                        bundle_perfetto,
+                        timeout_seconds,
+                        gate,
+                        ..
+                    }),
+                ..
+            } => {
+                assert!(dataset.is_none());
+                assert_eq!(original, "field.bundle.json");
+                assert_eq!(output, None);
+                assert_eq!(perfetto, None);
+                assert_eq!(screenshot, None);
+                assert_eq!(bundle, None);
+                assert!(!bundle_perfetto);
+                assert_eq!(timeout_seconds, 120);
+                assert!(!gate);
+            }
+            _ => panic!("expected a trace replay"),
+        }
+
+        let with = parse(&[
+            "trace",
+            "replay",
+            "/inbox/report.bundle.json",
+            "--output",
+            "/tmp/again.json",
+            "--bundle",
+            "/tmp/again.bundle.json",
+            "--bundle-perfetto",
+            "--screenshot",
+            "/tmp/again.png",
+            "--timeout-seconds",
+            "30",
+            "--gate",
+        ]);
+        match with.command {
+            Command::Trace {
+                command:
+                    Some(TraceCommand::Replay {
+                        original,
+                        output,
+                        screenshot,
+                        bundle,
+                        bundle_perfetto,
+                        timeout_seconds,
+                        gate,
+                        ..
+                    }),
+                ..
+            } => {
+                assert_eq!(original, "/inbox/report.bundle.json");
+                assert_eq!(output.as_deref(), Some("/tmp/again.json"));
+                assert_eq!(screenshot.as_deref(), Some(Path::new("/tmp/again.png")));
+                assert_eq!(bundle.as_deref(), Some(Path::new("/tmp/again.bundle.json")));
+                assert!(bundle_perfetto);
+                assert_eq!(timeout_seconds, 30);
+                assert!(gate);
+            }
+            _ => panic!("expected a trace replay"),
+        }
+
+        // The projection rides the replay's bundle, so it needs one.
+        assert!(try_parse(&["trace", "replay", "b.json", "--bundle-perfetto"]).is_err());
+        assert!(try_parse(&["trace", "replay", "b.json", "--width", "800"]).is_err());
     }
 
     /// The bundle is opt-in like the other sidecars, and its Perfetto

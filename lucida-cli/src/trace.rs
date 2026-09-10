@@ -33,6 +33,7 @@ use crate::credentials::EffectiveToken;
 use crate::error::{CliError, ErrorKind};
 use crate::session::{connect_workspace_socket, incoming_messages, wait_for_workspace_snapshot};
 use crate::trace_knobs::KnobSettings;
+use crate::trace_replay::{ReplayRecord, format_replay_block};
 use crate::trace_script::{
     Script, ScriptRecord, describe_script, failing_verdict, format_script_human, run_script,
     script_gate_failure,
@@ -454,6 +455,11 @@ pub struct TraceRunHeader {
     /// nothing else could have steered the planner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub knobs: Option<KnobSettings>,
+    /// The bundle this run replayed, and which of its header's replay
+    /// inputs the driver restored and could not (#1060). Absent for a run
+    /// the driver composed from the command line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<ReplayRecord>,
 }
 
 /// Both renderings, taken at export time from the page's one renderer. The
@@ -1638,8 +1644,28 @@ pub fn gate_failure(file: &TraceRunFile) -> Option<String> {
 /// could not know about its own run. `bundle` is where the bundle went, when
 /// the caller asked for one.
 pub fn format_run_human(file: &TraceRunFile, path: &Path, bundle: Option<&Path>) -> String {
+    format!(
+        "{}\n{}",
+        format_run_facts(file, path, bundle),
+        file.renderings.summary
+    )
+}
+
+/// The lines of the default rendering above the page's summary: what the
+/// driver knows about the run and where its files went. A replay leads
+/// with what it replayed and what it could not restore, because the rest
+/// reads differently under those conditions.
+pub fn format_run_facts(file: &TraceRunFile, path: &Path, bundle: Option<&Path>) -> String {
     let header = &file.header;
     let view = &header.composed_view;
+    let replay = header
+        .replay
+        .as_ref()
+        .map(|record| {
+            let steps = header.script.as_ref().map(|script| script.steps.len());
+            format!("{}\n", format_replay_block(record, steps))
+        })
+        .unwrap_or_default();
     let bundle = bundle
         .map(|bundle| format!("bundle    {}\n", bundle.display()))
         .unwrap_or_default();
@@ -1671,7 +1697,8 @@ pub fn format_run_human(file: &TraceRunFile, path: &Path, bundle: Option<&Path>)
         .map(|knobs| format!("knobs     {}\n", knobs.describe()))
         .unwrap_or_default();
     format!(
-        "view      {} @ {}x{} DPR {}\n\
+        "{replay}\
+         view      {} @ {}x{} DPR {}\n\
          {camera}\
          server    {}\n\
          hold      quiescent had to hold {} ms; every duration below is measured against that\n\
@@ -1679,8 +1706,7 @@ pub fn format_run_human(file: &TraceRunFile, path: &Path, bundle: Option<&Path>)
          {steps}\
          run file  {}\n\
          {bundle}\
-         {screenshot}\n\
-         {}",
+         {screenshot}",
         view.dataset,
         view.width,
         view.height,
@@ -1688,7 +1714,6 @@ pub fn format_run_human(file: &TraceRunFile, path: &Path, bundle: Option<&Path>)
         header.server_warmth.summary,
         header.quiescence_hold_ms,
         path.display(),
-        file.renderings.summary,
     )
 }
 
@@ -1747,17 +1772,7 @@ pub fn format_bundle_human(bundle: &TraceBundle, path: &Path, text: &str) -> Str
         lines.push(format!("script    {}", describe_script(script)));
     }
     if let Some(gpu) = &header.gpu {
-        let name = if gpu.description.is_empty() {
-            format!("{} {}", gpu.vendor, gpu.architecture)
-        } else {
-            gpu.description.clone()
-        };
-        let fallback = match gpu.fallback {
-            Some(true) => "software fallback",
-            Some(false) => "hardware adapter",
-            None => "fallback status unknown",
-        };
-        lines.push(format!("adapter   {} · {fallback}", name.trim()));
+        lines.push(format!("adapter   {}", describe_adapter(gpu)));
     }
     if let Some(build) = &header.build {
         lines.push(format!("build     {} {}", build.version, build.mode));
@@ -1808,6 +1823,23 @@ pub fn format_bundle_human(bundle: &TraceBundle, path: &Path, text: &str) -> Str
     lines.push(String::new());
     lines.push(text.to_string());
     lines.join("\n")
+}
+
+/// The adapter in one phrase: its description, or its vendor and
+/// architecture when the browser gave none, and whether it is a software
+/// fallback. Every reading of a bundle's adapter uses this one.
+pub fn describe_adapter(gpu: &BundleGpu) -> String {
+    let name = if gpu.description.is_empty() {
+        format!("{} {}", gpu.vendor, gpu.architecture)
+    } else {
+        gpu.description.clone()
+    };
+    let fallback = match gpu.fallback {
+        Some(true) => "software fallback",
+        Some(false) => "hardware adapter",
+        None => "fallback status unknown",
+    };
+    format!("{} · {fallback}", name.trim())
 }
 
 fn format_pins(pins: &DatasetPins) -> String {
@@ -2299,6 +2331,9 @@ pub struct DriverFacts {
     pub script: Script,
     /// The Dev controls knobs to set before the page loads. Empty for the page's defaults.
     pub knobs: KnobSettings,
+    /// The bundle being replayed and what of it was restored, when this run
+    /// is a replay. None for a run composed from the command line.
+    pub replay: Option<ReplayRecord>,
 }
 
 /// Fold what the page returned together with what only the driver knows. Split
@@ -2324,6 +2359,7 @@ fn assemble_run_file(export: SeamExport, facts: &DriverFacts) -> TraceRunFile {
             screenshot: facts.screenshot.clone(),
             script: export.script,
             knobs: (!facts.knobs.is_empty()).then(|| facts.knobs.clone()),
+            replay: facts.replay.clone(),
         },
         renderings: TraceRenderings::from_export(
             export.summary,
@@ -2636,6 +2672,7 @@ mod tests {
             screenshot: None,
             script: Script::default(),
             knobs: KnobSettings::default(),
+            replay: None,
         }
     }
 
@@ -2654,6 +2691,7 @@ mod tests {
                 screenshot: None,
                 script: None,
                 knobs: None,
+                replay: None,
             },
             renderings: TraceRenderings {
                 summary: "lucida trace run-1-1 — VERDICT: clear".to_string(),

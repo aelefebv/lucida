@@ -8,7 +8,7 @@ import { describe, expect, it } from "vitest";
 
 import { DEFAULT_PLANNING_CONFIG } from "../../pipeline/planning/config.ts";
 import { compareTraces, renderComparison } from "./compare.ts";
-import { coldRemoteOpen, healthyLocalOpen, makeDocument, makeRun } from "./fixtures.ts";
+import { coldRemoteOpen, fallbackAdapterOpen, healthyLocalOpen, makeDocument, makeRun } from "./fixtures.ts";
 
 const MS = 1_000;
 
@@ -86,6 +86,25 @@ describe("compareTraces", () => {
       expect(finding.right).not.toBeNull();
       expect(finding.delta).not.toBeNull();
     }
+  });
+
+  it("warns that a run replayed on another adapter is not comparable, before any delta", () => {
+    const comparison = compareTraces(
+      { trace: healthyDocument(), label: "field.bundle.json" },
+      { trace: makeDocument([fallbackAdapterOpen()]), label: "replay.json" },
+    );
+
+    expect(comparison.comparable).toBe(false);
+    expect(comparison.warnings).toEqual([
+      "adapter apple metal-3 · hardware adapter vs generic software (software rasterizer) · software fallback adapter",
+    ]);
+    const adapter = comparison.header.find((field) => field.field === "adapter");
+    expect(adapter?.breaksComparability).toBe(true);
+    expect(adapter?.same).toBe(false);
+
+    const lines = renderComparison(comparison).split("\n");
+    expect(lines[3]).toMatch(/^NOT COMPARABLE {2}adapter /);
+    expect(lines[3]).toContain("the deltas below compare different conditions");
   });
 
   it("warns when a header field the runs must share differs, and stays quiet when only the experiment differs", () => {

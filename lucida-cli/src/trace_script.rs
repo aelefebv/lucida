@@ -236,6 +236,15 @@ impl Script {
         Ok(script)
     }
 
+    /// A script from steps already in hand: a bundle's, to run again.
+    /// Validated as a file's steps are, so a step that could never land is
+    /// refused before a browser is launched.
+    pub fn from_steps(steps: Vec<ScriptStep>) -> Result<Self, String> {
+        let script = Self { steps };
+        script.validate()?;
+        Ok(script)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.steps.is_empty()
     }
