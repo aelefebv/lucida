@@ -18,11 +18,13 @@ import { destroyAllSliceResources } from "../slice/index.ts";
 import { destroyAllVolumeResources } from "../volume/index.ts";
 import { destroyAllMinimapResources } from "../minimapHandlers.ts";
 import { destroyAllResources } from "./resources.ts";
+import { clearFrameCaptures } from "./captureFrame.ts";
 
 export function handleDestroy(ctx: WorkerCtx): void {
   const state = ctx.state;
   state.currentEpochs = null;
   state.currentColdState = null;
+  clearFrameCaptures(state);
   state.memberToDataset.clear();
   state.memberSourcePools.clear();
   state.targetLevelByMember.clear();

@@ -225,21 +225,21 @@ describe("what could not be captured", () => {
     expect(bundle.header.datasets).toEqual([{ id: "ds", name: null, sourceUrl: null }]);
   });
 
-  it("records a worker that could not read its canvas as an absent frame", async () => {
+  it("records a worker that could not read its canvas as an absent frame, with the worker's reason", async () => {
+    const reason =
+      "the render worker could not read its canvas: InvalidStateError: the canvas has no current texture";
     const bundle = await exportBundle(
-      context({ services: services({ captureFrame: () => Promise.resolve(null) }) }),
+      context({ services: services({ captureFrame: () => Promise.resolve({ frame: null, reason }) }) }),
     );
     expect(bundle.frame).toBeNull();
-    expect(bundle.absent).toEqual([
-      { section: "frame", reason: "the render worker could not read its canvas" },
-    ]);
+    expect(bundle.absent).toEqual([{ section: "frame", reason }]);
   });
 });
 
 describe("the callers", () => {
   it("uses the frame a caller brings, as the driver does, without asking the page for one", async () => {
     const captureFrame = vi.fn(() =>
-      Promise.resolve({ png: PNG_BYTES.buffer.slice(0), width: 1, height: 1 }),
+      Promise.resolve({ frame: { png: PNG_BYTES.buffer.slice(0), width: 1, height: 1 }, reason: null }),
     );
     const frame: BundleFrame = {
       png: "iVBORw0KGgo=",

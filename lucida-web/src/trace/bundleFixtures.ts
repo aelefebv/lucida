@@ -81,7 +81,10 @@ export function fixtureServices(overrides: Partial<BundleServices> = {}): Bundle
   return {
     requestDatasetHealth: () => Promise.resolve([fixtureHealth()]),
     captureFrame: () =>
-      Promise.resolve({ png: PNG_BYTES.buffer.slice(0), width: 2880, height: 1800 }),
+      Promise.resolve({
+        frame: { png: PNG_BYTES.buffer.slice(0), width: 2880, height: 1800 },
+        reason: null,
+      }),
     ...overrides,
   };
 }

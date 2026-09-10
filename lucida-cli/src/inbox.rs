@@ -26,6 +26,7 @@ use crate::config::EffectiveServer;
 use crate::credentials::EffectiveToken;
 use crate::error::{CliError, ErrorKind};
 use crate::http::{api_url, response_detail, send_json};
+use crate::trace::adapter_name;
 use crate::workspace::WorkspaceRecord;
 
 /// One entry as the server lists it: who sent it, when it goes, and the
@@ -97,9 +98,13 @@ impl InboxEntry {
                 .get("devicePixelRatio")
                 .filter(|ratio| !ratio.is_null())
                 .map(ToString::to_string),
-            adapter: gpu
-                .and_then(|gpu| text(gpu.get("description")))
-                .filter(|description| !description.is_empty()),
+            adapter: gpu.and_then(|gpu| {
+                adapter_name(
+                    &text(gpu.get("description")).unwrap_or_default(),
+                    &text(gpu.get("vendor")).unwrap_or_default(),
+                    &text(gpu.get("architecture")).unwrap_or_default(),
+                )
+            }),
             fallback_adapter: gpu.and_then(|gpu| gpu.get("fallback")?.as_bool()),
         }
     }
@@ -543,6 +548,46 @@ mod tests {
             listed.contains("Example Adapter (software fallback)"),
             "{listed}"
         );
+    }
+
+    /// The browser gives most adapters an empty description, so the
+    /// vendor and architecture are the usual name, by the same rule
+    /// `lucida trace show` names an adapter with.
+    #[test]
+    fn an_adapter_without_a_description_is_named_by_vendor_and_architecture() {
+        let mut header = full_header();
+        header["gpu"] = json!({
+            "vendor": "nvidia",
+            "architecture": "lovelace",
+            "device": "",
+            "description": "",
+            "fallback": false,
+            "timestampQueries": true,
+        });
+        let summary = entry("e-1", header.clone()).summary();
+        assert_eq!(summary.adapter.as_deref(), Some("nvidia lovelace"));
+        assert_eq!(summary.fallback_adapter, Some(false));
+
+        let listed = format_inbox_list_human(&listing(vec![entry("e-1", header.clone())]));
+        assert!(listed.contains("DPR 2 · nvidia lovelace"), "{listed}");
+        assert!(!listed.contains("adapter not named"), "{listed}");
+
+        header["gpu"]["fallback"] = json!(true);
+        let listed = format_inbox_list_human(&listing(vec![entry("e-1", header)]));
+        assert!(
+            listed.contains("nvidia lovelace (software fallback)"),
+            "{listed}"
+        );
+    }
+
+    /// A `gpu` object that names nothing at all still reads as unnamed
+    /// rather than as a blank.
+    #[test]
+    fn an_adapter_that_names_nothing_is_still_unnamed() {
+        let mut header = full_header();
+        header["gpu"] = json!({ "vendor": "", "architecture": "", "description": "  " });
+        let summary = entry("e-1", header).summary();
+        assert_eq!(summary.adapter, None);
     }
 
     #[test]

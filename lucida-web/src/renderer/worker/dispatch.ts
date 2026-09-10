@@ -130,7 +130,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       handleThumbnailRender(ctx, msg);
       return;
     case "captureFrame":
-      await handleCaptureFrame(ctx, msg);
+      handleCaptureFrame(ctx, msg);
       return;
     case "minimapDestroy":
       handleMinimapDestroy();

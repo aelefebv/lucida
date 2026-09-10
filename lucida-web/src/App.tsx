@@ -871,7 +871,15 @@ function App({
         liveBridge
           ? liveBridge.requestDatasetHealth()
           : Promise.reject(new Error("the session socket is not connected")),
-      captureFrame: () => render.clientRef.current?.captureFrame() ?? Promise.resolve(null),
+      // The loop asks the worker for a frame along with the capture. A
+      // client with no loop still answers, from the canvas as presented.
+      captureFrame: () =>
+        render.loopRef.current?.captureFrame()
+          ?? render.clientRef.current?.captureFrame()
+          ?? Promise.resolve({
+            frame: null,
+            reason: "the render client has not started, so there was no canvas to read",
+          }),
     });
     // **Send report** goes over the same socket. Registered only while
     // one exists, so a page with no session offers no send rather than a
@@ -883,7 +891,7 @@ function App({
       setBundleServices(null);
       setReportSender(null);
     };
-  }, [liveBridge, render.clientRef]);
+  }, [liveBridge, render.clientRef, render.loopRef]);
 
   useScriptControls({
     selectors: {
