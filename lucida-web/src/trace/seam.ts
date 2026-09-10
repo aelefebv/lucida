@@ -46,6 +46,7 @@ import {
   type ViewSignature,
 } from "./steps.ts";
 import { INPUT_SCALE, type InputScale } from "../components/inputScale.ts";
+import { requestAdapterWithRetry, type AdapterRetry } from "../renderer/requestAdapter.ts";
 import type { SavedView } from "../savedView/types.ts";
 import { TRACE_SCHEMA_VERSION, type GpuIdentity, type TraceDocument } from "./types.ts";
 
@@ -406,11 +407,11 @@ function noControls(): StepOutcome {
  * has: the worker enables timestamp queries exactly when the adapter offers
  * them, and records a GPU pass time per frame only then.
  */
-export async function resolveGpuIdentity(): Promise<GpuIdentity | null> {
+export async function resolveGpuIdentity(retry?: AdapterRetry): Promise<GpuIdentity | null> {
   const gpu = (navigator as Navigator & { gpu?: GPU }).gpu;
   if (!gpu) return null;
   try {
-    const adapter = await gpu.requestAdapter();
+    const adapter = await requestAdapterWithRetry(gpu, {}, retry);
     const info = adapter?.info;
     if (!adapter || !info) return null;
     return {
