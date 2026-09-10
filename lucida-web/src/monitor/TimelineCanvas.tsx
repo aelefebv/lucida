@@ -57,6 +57,12 @@ export interface TimelineCanvasProps {
   section: TimelineSection;
   /** True while the run is open, so the picture is labelled provisional wherever it appears. */
   provisional: boolean;
+  /**
+   * A span in milliseconds to lay the plot out to instead of the section's
+   * own, so two timelines stacked in compare mode share one scale from run
+   * start. Absent, the section's own span fills the plot.
+   */
+  alignSpanMs?: number;
   /** Present on a closed run, where the axis can be brushed. */
   brush?: TimelineBrush;
 }
@@ -67,7 +73,7 @@ const DEFAULT_WIDTH_PX = 960;
 const BRUSH_HINT =
   "Drag across the axis to brush a window: the verdict, the callouts, and the phase table scope to it, and the overlays highlight the chunks that were in it.";
 
-export function TimelineCanvas({ section, provisional, brush }: TimelineCanvasProps) {
+export function TimelineCanvas({ section, provisional, alignSpanMs, brush }: TimelineCanvasProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [width, setWidth] = useState(DEFAULT_WIDTH_PX);
@@ -96,8 +102,8 @@ export function TimelineCanvas({ section, provisional, brush }: TimelineCanvasPr
   }, []);
 
   const list = useMemo(
-    () => buildTimelineDrawList(section, { width, devicePixelRatio: ratio }),
-    [section, width, ratio],
+    () => buildTimelineDrawList(section, { width, devicePixelRatio: ratio, alignSpanMs }),
+    [section, width, ratio, alignSpanMs],
   );
   const store = backingStoreSize(list);
 

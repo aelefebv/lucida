@@ -29,6 +29,14 @@ import { BAND_COLORS, CANVAS_COLORS, seriesColor } from "./timelinePalette.ts";
 export interface TimelineLayout {
   width: number;
   devicePixelRatio: number;
+  /**
+   * A span to lay the plot out against instead of the section's own, in
+   * milliseconds. Compare mode lays two runs out to the longer one's span,
+   * so both share one scale from run start and the shorter run ends where
+   * it ended rather than being stretched to match. A span no longer than
+   * the section's own changes nothing.
+   */
+  alignSpanMs?: number;
 }
 
 /**
@@ -108,7 +116,7 @@ const MIN_PLOT_PX = 120;
 export function buildTimelineDrawList(section: TimelineSection, layout: TimelineLayout): TimelineDrawList {
   const width = Math.max(GUTTER_PX + MIN_PLOT_PX + RIGHT_PAD_PX, Math.floor(layout.width));
   const plotX = GUTTER_PX;
-  const plotWidth = width - GUTTER_PX - RIGHT_PAD_PX;
+  const plotWidth = (width - GUTTER_PX - RIGHT_PAD_PX) * plotShare(section, layout);
   const bands = bandStrip(section, plotX, plotWidth);
   const axis = axisStrip(section, plotX, plotWidth, BAND_STRIP_PX);
   const rows: TimelineDrawRow[] = [];
@@ -130,6 +138,13 @@ export function buildTimelineDrawList(section: TimelineSection, layout: Timeline
     primitiveCount,
     scale: { plotX, plotWidth, startMs: section.axis.startMs, spanMs: section.axis.spanMs },
   };
+}
+
+function plotShare(section: TimelineSection, layout: TimelineLayout): number {
+  const own = section.axis.spanMs;
+  const shared = layout.alignSpanMs;
+  if (shared === undefined || !(shared > own) || !(own > 0)) return 1;
+  return own / shared;
 }
 
 // ---------------------------------------------------------------------------

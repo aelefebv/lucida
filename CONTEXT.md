@@ -325,8 +325,27 @@ Produced by **Save bundle** in the monitor, by **Send report** in the dock,
 and by the trace driver, through one function behind the trace seam, so it is
 the same file from any of them.
 _Avoid_: report (the action is Send report; what it sends is a bundle),
-archive, zip, export (the act, not the file), attachment, run file (a saved
-run is the document alone)
+archive, zip, export (the act, not the file), attachment, run file (the
+driver's artifact, see below), saved run (the document alone)
+
+**Saved run**:
+The trace document alone, as **Save run** in the dock writes it. It names
+no run of its own, so a reader takes the newest. It records nothing beyond
+the document, so a comparison lists no planning field for it. The dock
+reads one back when it is dropped on it. The CLI does not, since it has no
+rendering to print for one without a page.
+_Avoid_: run file (the driver's artifact, see below), trace file, export
+(the act, not the file)
+
+**Run file**:
+The file the trace driver writes around the page's export: the driver's
+own header, with the composed view, the server's warmth, the knobs it set,
+and the script it ran, then the page's renderings and diagnostic, then the
+trace document. Versioned on its own, apart from the trace schema and the
+bundle. What `lucida trace show` and `lucida trace diff` read by run id,
+and what the dock reads when one is dropped on it.
+_Avoid_: saved run (the document alone), bundle (which adds the frame and
+the replay header), trace (the document inside it)
 
 **Inbox**:
 A workspace-scoped store of bundles that people sent with **Send report**,

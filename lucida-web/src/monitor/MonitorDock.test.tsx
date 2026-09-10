@@ -12,6 +12,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { readFileSync } from "node:fs";
 import { diagnoseDocument, diagnoseRun } from "../trace/diagnose/diagnose.ts";
 import {
   coldRemoteOpen,
@@ -21,9 +22,11 @@ import {
   makeHeader,
   makeReading,
   makeReadingSeries,
+  makeRun,
   makeTick,
   saturatedReopen,
 } from "../trace/diagnose/fixtures.ts";
+import { installTraceSeam } from "../trace/seam.ts";
 import { deriveProvisional, type ProvisionalReading } from "../trace/diagnose/provisional.ts";
 import {
   deriveLiveTimeline,
@@ -120,9 +123,10 @@ const stopRun = vi.hoisted(() =>
   }),
 );
 
-// Only the reads that touch the seam are replaced. readWindow stays real: it
-// derives from the document the snapshot already holds, and the brush tests
-// assert what it derives.
+// Only the reads of this page's recording are stood in for. readWindow stays
+// real: it derives from the document the snapshot already holds, and the
+// brush tests assert what it derives. Reading a dropped file and comparing
+// two runs touch no recorder, so they run as they are.
 vi.mock("./monitorSource.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./monitorSource.ts")>()),
   readMonitor,
@@ -141,6 +145,19 @@ function showing(run: TraceRun) {
   read.value = { ok: true, document: diagnoseRun(run) };
   trace.value = makeDocument([run]);
   return render(<MonitorDock onClose={() => {}} />);
+}
+
+function goldenBundleFile(name = "lucida-local-healthy.bundle.json"): File {
+  const text = readFileSync(`${process.cwd()}/../trace-fixtures/bundle-v1.json`, "utf8");
+  return new File([text], name, { type: "application/json" });
+}
+
+function savedRunFile(document: TraceDocument, name: string): File {
+  return new File([JSON.stringify(document)], name, { type: "application/json" });
+}
+
+function drop(target: HTMLElement, files: File[]): void {
+  fireEvent.drop(target, { dataTransfer: { files } });
 }
 
 /**
@@ -401,12 +418,13 @@ describe("observation only", () => {
     // Every button in the dock reads, saves, sends, drills in, moves the dock,
     // or decides where a reading goes. Sending puts a copy of the recording
     // somewhere else, and *Start a watch stream* changes who can see it; neither
-    // changes what the pipeline does. If a future change adds a control that
-    // does not fit that list, this is where it shows up.
+    // changes what the pipeline does. Opening a file and comparing two runs
+    // read documents that are not this page's. If a future change adds a
+    // control that does not fit that list, this is where it shows up.
     const labels = screen.getAllByRole("button").map((node) => node.textContent);
     for (const label of labels) {
       expect(label).toMatch(
-        /^(Close|Pop out|Read the newest run|Save run|Save for Perfetto|Save bundle|Send report|Start a watch stream|Show the rows behind .*|Close drill-down|Clear the brush)$/,
+        /^(Close|Pop out|Read the newest run|Save run|Save for Perfetto|Save bundle|Send report|Start a watch stream|Show the rows behind .*|Close drill-down|Clear the brush|Open a run or bundle|Compare two runs|Leave compare mode|Choose a file|Use the run on screen|Back to this page’s runs)$/,
       );
     }
   });
@@ -984,6 +1002,243 @@ describe("choosing which run to read", () => {
   });
 });
 
+describe("a dropped file (#1066)", () => {
+  it("reads a dropped bundle at every depth a live run is read, with its settled frame beside the report", async () => {
+    showing(coldRemoteOpen());
+    readMonitor.mockClear();
+
+    drop(screen.getByTestId("monitor-dock"), [goldenBundleFile()]);
+
+    const file = await screen.findByTestId("monitor-file");
+    expect(screen.getByTestId("monitor-run-id").textContent).toBe("local-healthy");
+    const headings = within(file).getAllByRole("heading", { level: 2 }).map((node) => node.textContent);
+    expect(headings.slice(0, 3)).toEqual(["Verdict", "Phases", "Critical path"]);
+    expect(headings[headings.length - 1]).toBe("Run");
+    expect(within(file).getByTestId("monitor-banner-coverage")).toBeTruthy();
+    expect(within(file).getByTestId("monitor-timeline")).toBeTruthy();
+    expect(within(file).getByTestId("monitor-phase-table").textContent).toContain("browser.wire");
+    expect(within(file).getAllByTestId("monitor-callout-verdict")).toHaveLength(1);
+    // The frame at its CSS size, not its device size.
+    const frame = within(file).getByTestId("monitor-frame");
+    const image = frame.querySelector("img")!;
+    expect(image.getAttribute("src")).toBe("data:image/png;base64,iVBORw0KGgo=");
+    expect(image.getAttribute("width")).toBe("1440");
+    expect(image.getAttribute("height")).toBe("900");
+    expect(frame.textContent).toContain("2880×1800 device pixels at ratio 2");
+    expect(frame.textContent).toContain("captured by the page");
+    expect(file.className).toContain("monitor-file-with-frame");
+    expect(readMonitor).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("monitor-save-run")).toBeNull();
+    expect(screen.queryByTestId("monitor-send-report")).toBeNull();
+    expect(screen.getByText(/Reading lucida-local-healthy\.bundle\.json, a bundle/)).toBeTruthy();
+
+    // Back to the page's own run, which the dock still holds: no re-read.
+    fireEvent.click(screen.getByTestId("monitor-close-file"));
+    expect(screen.queryByTestId("monitor-file")).toBeNull();
+    expect(screen.getByTestId("monitor-run-id").textContent).toBe("remote-cold");
+    expect(screen.getByTestId("monitor-save-run")).toBeTruthy();
+    expect(readMonitor).not.toHaveBeenCalled();
+  });
+
+  it("reads a saved run about its newest run and offers the others", async () => {
+    showing(coldRemoteOpen());
+    const document = makeDocument([healthyLocalOpen(), coldRemoteOpen()]);
+
+    drop(screen.getByTestId("monitor-dock"), [savedRunFile(document, "lucida-remote-cold.trace.json")]);
+
+    await screen.findByTestId("monitor-file");
+    expect(screen.getByTestId("monitor-run-id").textContent).toBe("remote-cold");
+    expect(screen.queryByTestId("monitor-frame")).toBeNull();
+    const options = [...screen.getByTestId("monitor-run-select").querySelectorAll("option")];
+    expect(options.map((option) => option.value)).toEqual(["remote-cold", "local-healthy"]);
+
+    fireEvent.change(screen.getByTestId("monitor-run-select"), { target: { value: "local-healthy" } });
+
+    expect(screen.getByTestId("monitor-run-id").textContent).toBe("local-healthy");
+    expect(readMonitor).toHaveBeenCalledTimes(1);
+  });
+
+  it("says why a file could not be read, by name, and keeps the report", async () => {
+    showing(coldRemoteOpen());
+
+    drop(screen.getByTestId("monitor-dock"), [new File(["{}"], "notes.json", { type: "application/json" })]);
+
+    const failed = await screen.findByTestId("monitor-file-failed");
+    expect(failed.textContent).toContain("notes.json is not a lucida trace bundle, run file, or saved run");
+    expect(screen.queryByTestId("monitor-file")).toBeNull();
+    expect(screen.getByRole("heading", { name: "Verdict" })).toBeTruthy();
+  });
+
+  it("shows a dropped file while a run is open without closing the run, and goes back to watching it", async () => {
+    live.value = progress();
+    render(<MonitorDock onClose={() => {}} />);
+
+    drop(screen.getByTestId("monitor-dock"), [goldenBundleFile()]);
+
+    await screen.findByTestId("monitor-file");
+    expect(screen.queryByTestId("monitor-live-counters")).toBeNull();
+    expect(stopRun).not.toHaveBeenCalled();
+    expect(readMonitor).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId("monitor-close-file"));
+
+    expect(screen.getByTestId("monitor-live-counters")).toBeTruthy();
+    expect(readMonitor).not.toHaveBeenCalled();
+  });
+
+  it("opens a file from the picker as well as from a drop", async () => {
+    showing(coldRemoteOpen());
+    const input = screen.getByTestId("monitor-file-input") as HTMLInputElement;
+    const click = vi.spyOn(input, "click").mockImplementation(() => {});
+
+    fireEvent.click(screen.getByTestId("monitor-open-file"));
+    expect(click).toHaveBeenCalledTimes(1);
+    fireEvent.change(input, { target: { files: [goldenBundleFile()] } });
+
+    await screen.findByTestId("monitor-file");
+    expect(screen.getByTestId("monitor-run-id").textContent).toBe("local-healthy");
+  });
+});
+
+describe("compare mode (#1066)", () => {
+  /** A run at ratio 1 on a 1440 by 900 window, which the golden bundle's retina header is incomparable with. */
+  function lowRatioDocument(): TraceDocument {
+    return makeDocument([
+      makeRun({
+        header: {
+          runId: "low-ratio",
+          durationUs: 400_000,
+          devicePixelRatio: 1,
+          viewport: { cssWidth: 1440, cssHeight: 900, deviceWidth: 1440, deviceHeight: 900 },
+        },
+      }),
+    ]);
+  }
+
+  it("takes two files dropped at once as a comparison, and shows the diff lucida trace diff prints", async () => {
+    const seam = installTraceSeam();
+    // A retina window, so each canvas backs its store at twice its CSS size.
+    const ratio = Object.getOwnPropertyDescriptor(window, "devicePixelRatio");
+    Object.defineProperty(window, "devicePixelRatio", { value: 2, configurable: true });
+    showing(healthyLocalOpen());
+
+    drop(screen.getByTestId("monitor-dock"), [
+      goldenBundleFile("baseline.bundle.json"),
+      savedRunFile(makeDocument([coldRemoteOpen()]), "candidate.trace.json"),
+    ]);
+
+    const compare = await screen.findByTestId("monitor-compare");
+    if (ratio) Object.defineProperty(window, "devicePixelRatio", ratio);
+    else delete (window as { devicePixelRatio?: number }).devicePixelRatio;
+    expect(screen.getByTestId("monitor-run-id").textContent).toBe("local-healthy vs remote-cold");
+    expect(screen.getByTestId("monitor-compare-slot-left-name").textContent).toContain("baseline.bundle.json");
+    expect(screen.getByTestId("monitor-compare-slot-right-name").textContent).toContain("candidate.trace.json");
+    const timelines = within(screen.getByTestId("monitor-compare-timelines")).getAllByTestId(
+      "monitor-timeline-canvas",
+    ) as HTMLCanvasElement[];
+    expect(timelines).toHaveLength(2);
+    expect(timelines[0].style.width).toBe(timelines[1].style.width);
+    for (const canvas of timelines) {
+      expect(canvas.width).toBe(Math.round(parseFloat(canvas.style.width) * 2));
+    }
+    expect(within(compare).getByTestId("monitor-compare-header").textContent).toContain("devicePixelRatio");
+    expect(within(compare).getByTestId("monitor-compare-phases").textContent).toContain("browser.wire");
+    expect(within(compare).getByTestId("monitor-compare-findings").textContent).toContain("right");
+    expect(within(compare).getByTestId("monitor-compare-wall").textContent).toContain("330 → 4120 ms");
+    expect(screen.queryByTestId("monitor-compare-warning")).toBeNull();
+    // The text is the seam's own rendering, which is what the CLI prints.
+    const { readArtifactFile, compareSideFor } = await vi.importActual<typeof import("./monitorSource.ts")>("./monitorSource.ts");
+    const left = readArtifactFile(await goldenBundleFile("baseline.bundle.json").text(), "baseline.bundle.json");
+    const right = readArtifactFile(JSON.stringify(makeDocument([coldRemoteOpen()])), "candidate.trace.json");
+    expect(within(compare).getByTestId("monitor-compare-text").textContent).toBe(
+      seam.compareTracesText(compareSideFor(left), compareSideFor(right)),
+    );
+    expect(within(compare).getByTestId("monitor-compare-text").textContent).toContain(
+      "lucida trace diff local-healthy remote-cold",
+    );
+  });
+
+  it("leads with the warning when the headers make the runs incomparable", async () => {
+    showing(healthyLocalOpen());
+
+    drop(screen.getByTestId("monitor-dock"), [
+      goldenBundleFile("retina.bundle.json"),
+      savedRunFile(lowRatioDocument(), "low.trace.json"),
+    ]);
+
+    const warning = await screen.findByTestId("monitor-compare-warning");
+    expect(warning.textContent).toContain("Not comparable");
+    expect(warning.textContent).toContain("device pixel ratio 2 vs 1");
+    // The warning precedes the timelines: bit 4 is DOCUMENT_POSITION_FOLLOWING.
+    expect(warning.compareDocumentPosition(screen.getByTestId("monitor-compare-timelines")) & 4).toBeTruthy();
+    const header = screen.getByTestId("monitor-compare-header");
+    const ratioRow = [...header.querySelectorAll("tr")].find((row) => row.textContent?.includes("devicePixelRatio"))!;
+    expect(ratioRow.className).toBe("monitor-row-incomparable");
+    expect(ratioRow.textContent).toContain("incomparable");
+    const text = screen.getByTestId("monitor-compare-text").textContent ?? "";
+    expect(text).toContain("NOT COMPARABLE");
+  });
+
+  it("enters from the header with the shown file on the left, and takes the run on screen on the right", async () => {
+    const document = makeDocument([coldRemoteOpen()]);
+    trace.value = document;
+    showing(coldRemoteOpen());
+    drop(screen.getByTestId("monitor-dock"), [goldenBundleFile("baseline.bundle.json")]);
+    await screen.findByTestId("monitor-file");
+
+    fireEvent.click(screen.getByTestId("monitor-compare-runs"));
+
+    expect(screen.getByTestId("monitor-compare-slot-left-name").textContent).toContain("baseline.bundle.json");
+    expect(screen.getByTestId("monitor-compare-waiting")).toBeTruthy();
+    expect(screen.queryByTestId("monitor-compare")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("monitor-compare-use-page-right"));
+
+    expect(screen.getByTestId("monitor-compare-slot-right-name").textContent).toContain("this page");
+    expect(screen.getByTestId("monitor-compare-right").textContent).toContain("this page (remote-cold)");
+    expect(screen.getByTestId("monitor-compare")).toBeTruthy();
+    // Nothing was exported to offer the page's run: the dock already held it.
+    expect(readMonitor).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByTestId("monitor-leave-compare"));
+    expect(screen.getByTestId("monitor-file")).toBeTruthy();
+    expect(screen.queryByTestId("monitor-compare-mode")).toBeNull();
+  });
+
+  it("fills the slot a file is dropped on, and the first empty slot otherwise", async () => {
+    showing(healthyLocalOpen());
+    fireEvent.click(screen.getByTestId("monitor-compare-runs"));
+
+    drop(screen.getByTestId("monitor-compare-slot-right"), [savedRunFile(makeDocument([coldRemoteOpen()]), "right.trace.json")]);
+    await screen.findByTestId("monitor-compare-slot-right-name");
+    expect(screen.queryByTestId("monitor-compare-slot-left-name")).toBeNull();
+
+    drop(screen.getByTestId("monitor-dock"), [goldenBundleFile("left.bundle.json")]);
+    await screen.findByTestId("monitor-compare-slot-left-name");
+
+    expect(screen.getByTestId("monitor-compare-slot-left-name").textContent).toContain("left.bundle.json");
+    expect(screen.getByTestId("monitor-compare-slot-right-name").textContent).toContain("right.trace.json");
+    expect(screen.getByTestId("monitor-compare")).toBeTruthy();
+  });
+
+  it("compares the run chosen on a side when a document holds several", async () => {
+    showing(healthyLocalOpen());
+    const both = makeDocument([healthyLocalOpen(), coldRemoteOpen()]);
+
+    drop(screen.getByTestId("monitor-dock"), [
+      savedRunFile(both, "left.trace.json"),
+      savedRunFile(both, "right.trace.json"),
+    ]);
+    await screen.findByTestId("monitor-compare");
+    expect(screen.getByTestId("monitor-compare-wall").textContent).toContain("4120 → 4120 ms");
+
+    fireEvent.change(screen.getByTestId("monitor-compare-run-left"), { target: { value: "local-healthy" } });
+
+    expect(screen.getByTestId("monitor-run-id").textContent).toBe("local-healthy vs remote-cold");
+    expect(screen.getByTestId("monitor-compare-wall").textContent).toContain("330 → 4120 ms");
+  });
+});
+
 describe("it ships in production builds", () => {
   it("gates nothing on the build mode, on the page or on the route into it", async () => {
     // ADR 0051: a diagnostic that only exists in development cannot explain a
@@ -998,10 +1253,14 @@ describe("it ships in production builds", () => {
         "monitor/MonitorDock.tsx",
         "monitor/MonitorReport.tsx",
         "monitor/LiveReport.tsx",
+        "monitor/LoadedReport.tsx",
+        "monitor/CompareView.tsx",
+        "monitor/CompareSlotView.tsx",
         "monitor/TimelineCanvas.tsx",
         "monitor/timelineDraw.ts",
         "monitor/monitorModel.ts",
         "monitor/monitorSource.ts",
+        "trace/artifact.ts",
       // Paths from the vitest root (`lucida-web`): happy-dom replaces the
       // global `URL`, so a file:// URL never reaches `readFile` intact here.
       ].map((path) => readFile(`${process.cwd()}/src/${path}`, "utf8")),

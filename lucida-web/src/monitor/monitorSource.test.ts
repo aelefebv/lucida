@@ -1,11 +1,29 @@
 // @vitest-environment happy-dom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { lateStallOpen, makeDocument } from "../trace/diagnose/fixtures.ts";
 import { installTraceSeam } from "../trace/seam.ts";
 import { traceRecorder } from "../trace/recorder.ts";
 import { createQuiescenceState } from "../trace/quiescence.ts";
-import { downloadBundle, readMonitor, readProvisional, readWindow, traceFile } from "./monitorSource.ts";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  compareLoaded,
+  compareSideFor,
+  downloadBundle,
+  loadArtifact,
+  pageArtifact,
+  readArtifactFile,
+  readMonitor,
+  readProvisional,
+  readWindow,
+  rereadLoaded,
+  traceFile,
+} from "./monitorSource.ts";
+import { coldRemoteOpen, healthyLocalOpen, lateStallOpen, makeDocument } from "../trace/diagnose/fixtures.ts";
+import { configStore } from "../pipeline/planning/configStore.ts";
+
+const GOLDEN_BUNDLE = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "trace-fixtures", "bundle-v1.json");
 
 /**
  * Stands in for the render loop, which registers the real one. A run cannot
@@ -247,5 +265,98 @@ describe("saving a run", () => {
 
     expect(spy).toHaveBeenCalledWith({ runId: older });
     expect(clicked).toEqual([`lucida-${older}.bundle.json`]);
+  });
+});
+
+describe("reading a dropped file (#1066)", () => {
+  it("reads the golden bundle about the run its header names, at every depth the page reads a live run", () => {
+    const loaded = readArtifactFile(readFileSync(GOLDEN_BUNDLE, "utf-8"), "lucida-local-healthy.bundle.json");
+
+    expect(loaded.origin).toBe("file");
+    expect(loaded.artifact.kind).toBe("bundle");
+    expect(loaded.runId).toBe("local-healthy");
+    expect(loaded.runs.map((run) => run.runId)).toEqual(["local-healthy"]);
+    expect(loaded.read.ok).toBe(true);
+    if (!loaded.read.ok) return;
+    // Derived from the document, not read off the bundle's own diagnostic.
+    expect(loaded.read.document.verdict.text.length).toBeGreaterThan(0);
+    expect(loaded.read.document.phases.length).toBeGreaterThan(0);
+    expect(loaded.read.document.timeline.axis.startMs).toBe(0);
+  });
+
+  it("reads a file the way the drop handler hands it over: by name and text", async () => {
+    const document = makeDocument([healthyLocalOpen(), coldRemoteOpen()]);
+    const file = { name: "lucida-remote-cold.trace.json", text: () => Promise.resolve(JSON.stringify(document)) };
+
+    const loaded = await loadArtifact(file);
+
+    // A saved run names no run, so the newest is read, and the others are offered.
+    expect(loaded.runId).toBe("remote-cold");
+    expect(loaded.runs.map((run) => run.runId)).toEqual(["remote-cold", "local-healthy"]);
+    const older = rereadLoaded(loaded, "local-healthy");
+    expect(older.runId).toBe("local-healthy");
+    expect(older.read.ok && older.read.document.runId).toBe("local-healthy");
+    expect(older.runs).toEqual(loaded.runs);
+  });
+
+  it("rejects an unreadable file by name and reason, and reports a readable file with no run as a reason", async () => {
+    await expect(loadArtifact({ name: "notes.json", text: () => Promise.resolve("{}") })).rejects.toThrow(
+      "notes.json is not a lucida trace bundle, run file, or saved run",
+    );
+
+    const empty = readArtifactFile(JSON.stringify(makeDocument([])), "empty.trace.json");
+    expect(empty.read.ok).toBe(false);
+    expect(empty.read.ok === false && empty.read.reason).toContain("no run");
+    expect(empty.runId).toBeNull();
+  });
+});
+
+describe("comparing two loaded runs (#1066)", () => {
+  it("is the seam's own compare function: the dock's text is the text lucida trace diff prints", () => {
+    const seam = installTraceSeam();
+    const baseline = readArtifactFile(readFileSync(GOLDEN_BUNDLE, "utf-8"), "baseline.bundle.json");
+    const candidate = readArtifactFile(JSON.stringify(makeDocument([coldRemoteOpen()])), "candidate.trace.json");
+
+    const result = compareLoaded(baseline, candidate);
+
+    // `lucida trace diff` prints what the seam's compareTracesText returns.
+    expect(result.text).toBe(seam.compareTracesText(compareSideFor(baseline), compareSideFor(candidate)));
+    expect(result.comparison).toEqual(seam.compareTraces(compareSideFor(baseline), compareSideFor(candidate)));
+    expect(result.comparison.left.label).toBe("baseline.bundle.json");
+    expect(result.comparison.right.label).toBe("candidate.trace.json");
+    expect(result.text).toContain("lucida trace diff local-healthy remote-cold");
+  });
+
+  it("compares the run a side was re-read to, not the one its header named", () => {
+    const both = readArtifactFile(JSON.stringify(makeDocument([healthyLocalOpen(), coldRemoteOpen()])), "two.trace.json");
+    const older = rereadLoaded(both, "local-healthy");
+
+    const result = compareLoaded(older, both);
+
+    expect(result.comparison.left.runId).toBe("local-healthy");
+    expect(result.comparison.right.runId).toBe("remote-cold");
+  });
+
+  it("offers the run on screen as a side that knows this page's planning configuration", () => {
+    registerEnvironment();
+    const seam = installTraceSeam();
+    traceRecorder.openRun(OPEN);
+    const snapshot = readMonitor(undefined, seam);
+
+    const page = pageArtifact(snapshot);
+
+    expect(page).not.toBeNull();
+    expect(page!.origin).toBe("page");
+    expect(page!.name).toBe("this page");
+    expect(page!.runId).toBe(snapshot.read.ok ? snapshot.read.document.runId : null);
+    // The page knows what a bundle's header would carry, and nothing a bundle
+    // would not: the planning configuration, and no cache knob.
+    expect(compareSideFor(page!)).toMatchObject({
+      label: "this page",
+      planning: configStore.get(),
+      cache: null,
+      conditions: {},
+    });
+    expect(pageArtifact({ read: { ok: false, reason: "no seam" }, runs: [], trace: null })).toBeNull();
   });
 });

@@ -23,6 +23,7 @@ import {
 import { TIMELINE_BUCKETS, TIMELINE_CHARTS } from "../trace/diagnose/timeline.ts";
 import type { TimelineSection } from "../trace/diagnose/types.ts";
 import {
+  backingStoreSize,
   brushWindow,
   buildTimelineDrawList,
   GUTTER_PX,
@@ -222,5 +223,48 @@ describe("the list is bounded", () => {
       seriesCount(section) * TIMELINE_BUCKETS + section.charts.length * 3 + 64;
     expect(small.primitiveCount).toBeLessThan(ceiling(diagnoseRun(healthyLocalOpen()).timeline));
     expect(large.primitiveCount).toBeLessThan(ceiling(diagnoseRun(saturatedReopen()).timeline));
+  });
+});
+
+describe("two sections on one scale (#1066)", () => {
+  const tickXs = (list: ReturnType<typeof buildTimelineDrawList>): number[] =>
+    list.axis.flatMap((primitive) => (primitive.kind === "tick" ? [primitive.x] : []));
+
+  it("lays a shorter run out to a longer run's span, so one millisecond is one x on both", () => {
+    const short = diagnoseRun(healthyLocalOpen()).timeline;
+    const long = diagnoseRun(coldRemoteOpen()).timeline;
+    expect(short.axis.spanMs).toBeLessThan(long.axis.spanMs);
+    const shared = Math.max(short.axis.spanMs, long.axis.spanMs);
+
+    const alone = buildTimelineDrawList(short, { width: 1_000, devicePixelRatio: 1 });
+    const aligned = buildTimelineDrawList(short, { width: 1_000, devicePixelRatio: 1, alignSpanMs: shared });
+    const longer = buildTimelineDrawList(long, { width: 1_000, devicePixelRatio: 1, alignSpanMs: shared });
+
+    expect(Math.min(...tickXs(aligned))).toBe(GUTTER_PX);
+    expect(Math.min(...tickXs(longer))).toBe(GUTTER_PX);
+    // The longer run takes the whole plot, as an unaligned layout does, and
+    // the shorter run's last tick lands where that millisecond is on the
+    // longer run's axis.
+    const fullPlot = Math.max(...tickXs(longer)) - GUTTER_PX;
+    expect(Math.max(...tickXs(longer))).toBe(Math.max(...tickXs(alone)));
+    expect(Math.max(...tickXs(aligned))).toBeCloseTo(GUTTER_PX + fullPlot * (short.axis.spanMs / shared), 6);
+    // The canvases are the same size, so the two stack edge to edge.
+    expect(aligned.width).toBe(longer.width);
+    expect(aligned.height).toBe(alone.height);
+    // At device pixel ratio 2 the CSS geometry is the same and the backing
+    // store doubles, so the alignment holds on a retina display.
+    const retina = buildTimelineDrawList(short, { width: 1_000, devicePixelRatio: 2, alignSpanMs: shared });
+    expect(tickXs(retina)).toEqual(tickXs(aligned));
+    expect(backingStoreSize(retina).width).toBe(retina.width * 2);
+  });
+
+  it("changes nothing when the shared span is no longer than the section's own", () => {
+    const section = diagnoseRun(coldRemoteOpen()).timeline;
+    const alone = buildTimelineDrawList(section, { width: 1_000, devicePixelRatio: 1 });
+
+    expect(buildTimelineDrawList(section, { width: 1_000, devicePixelRatio: 1, alignSpanMs: 10 })).toEqual(alone);
+    expect(
+      buildTimelineDrawList(section, { width: 1_000, devicePixelRatio: 1, alignSpanMs: section.axis.spanMs }),
+    ).toEqual(alone);
   });
 });

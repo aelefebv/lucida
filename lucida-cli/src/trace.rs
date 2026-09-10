@@ -3704,6 +3704,24 @@ mod tests {
         assert!(!header.cache_warmth.is_null());
     }
 
+    /// The side this CLI hands the page's compare function for the golden
+    /// bundle, held to the side the page's own reader builds for the same
+    /// file, which the web suite writes to `trace-fixtures/` beside the
+    /// bundle. Two readers, one input, so the diff the dock shows and the
+    /// diff this CLI prints are one function over one argument.
+    #[test]
+    fn the_golden_bundles_compare_side_is_the_one_the_page_builds() {
+        let artifact = TraceArtifact::Bundle(Box::new(golden_bundle()));
+        let side =
+            CompareSide::from_artifact(&artifact, Path::new("trace-fixtures/bundle-v1.json"));
+        let produced = serde_json::to_value(&side.side).unwrap();
+
+        let path = golden_bundle_path().with_file_name("compare-side-v1.json");
+        let expected: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(produced, expected);
+    }
+
     /// The health counters at close are in the bundle and in the text, next
     /// to the conditions a reader needs before the verdict means anything.
     #[test]
