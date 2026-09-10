@@ -21,6 +21,11 @@
  *    opens an inspector with the chunk's phase, queue rank and age from the
  *    document's chunk lookup (#1062). The colors and the text come from
  *    `overlayDrawList.ts`, which is pure; this file projects and mounts.
+ *  - the linked selection: while a window is brushed on the dock's axis,
+ *    the chunk set it published is read from `trace/linkedSelection.ts`
+ *    and highlighted on the grid, and on the boxes in volume mode, which
+ *    mount for it even with every toggle off. The set is a published slot, so this layer never reads
+ *    the dock and the dock never reaches in here (ADR 0052 as amended).
  *  - renderRadius: actual detail/coarse render-radius boundary, projected
  *    through the same voxel→world→screen path as chunk overlays.
  *
@@ -37,6 +42,7 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
 import { Axis } from "../axes.ts";
+import { currentChunkSelection, onChunkSelectionChanged } from "../trace/linkedSelection.ts";
 import { traceRecorder } from "../trace/recorder.ts";
 import type { DatasetState } from "../types.ts";
 import type { RenderLoop } from "../renderLoop.ts";
@@ -68,6 +74,7 @@ import {
   describeHoverInspector,
   hitTestChunk,
   overlayAbsence,
+  selectionCaption,
   type ChunkCell,
   type ChunkDrawItem,
   type ChunkDrawList,
@@ -160,11 +167,23 @@ function tierDrawOrder(cell: ChunkCell): number {
   return 2;
 }
 
-const EMPTY_DRAW_LIST: ChunkDrawList = { items: [], withRow: 0, churned: 0 };
+const EMPTY_DRAW_LIST: ChunkDrawList = { items: [], withRow: 0, churned: 0, selected: 0 };
+
+/** How faint a cell outside the brushed selection is drawn while one is on. */
+const UNSELECTED_OPACITY = 0.35;
 
 /** Where the inspector sits relative to the pointer, in CSS pixels. */
 const INSPECTOR_OFFSET = 14;
 
+/** The captions in the corner: what an empty picture means, and what a brushed one shows. */
+const CAPTION_STYLE: React.CSSProperties = {
+  padding: "3px 7px",
+  background: "rgba(12, 14, 18, 0.8)",
+  color: "#c8ccd0",
+  borderRadius: 4,
+  fontFamily: "ui-monospace, Menlo, Consolas, monospace",
+  fontSize: 11,
+};
 /** The box the inspector describes gets a wide white stroke under its own edges, so it stands out of the stack. */
 const HOVERED_BOX_STROKE = "rgba(255, 255, 255, 0.95)";
 const HOVERED_BOX_EXTRA_WIDTH = 3;
@@ -524,11 +543,16 @@ export function DebugOverlays({
   useEffect(() => {
     return onRenderRadiusPreviewChanged(() => setRadiusPreviewTier(getRenderRadiusPreviewTier()));
   }, []);
+  const [selection, setSelection] = useState(currentChunkSelection);
+  useEffect(() => {
+    return onChunkSelectionChanged(() => setSelection(currentChunkSelection()));
+  }, []);
 
-  const anyEnabled = DEBUG_OVERLAYS.some(o => enabled[o]) || radiusPreviewTier !== null;
-  // The trace-reading modes color the chunk grid, so turning one on shows
-  // the grid without a second toggle.
-  const showGrid = enabled.chunkGrid || enabled.phaseColor || enabled.churnTint;
+  const anyEnabled =
+    DEBUG_OVERLAYS.some(o => enabled[o]) || radiusPreviewTier !== null || selection !== null;
+  // The trace-reading modes and a brushed selection all color the chunk
+  // grid, so any of them shows the grid without a second toggle.
+  const showGrid = enabled.chunkGrid || enabled.phaseColor || enabled.churnTint || selection !== null;
 
   const [badges, setBadges] = useState<GroupBadge[]>([]);
   const [drawList, setDrawList] = useState<ChunkDrawList>(EMPTY_DRAW_LIST);
@@ -1196,6 +1220,7 @@ export function DebugOverlays({
           modes: enabled,
           readingOf: (cell: ChunkCell) => traceRecorder.readChunk(cell),
           windowMs: window,
+          selection,
         };
         const list = is3D ? buildVolumeDrawList(input) : buildChunkDrawList(input);
         drawListRef.current = list;
@@ -1213,11 +1238,12 @@ export function DebugOverlays({
     const id = setInterval(tick, POLL_MS);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, showGrid, radiusPreviewTier, viewMode, datasets, cpuCache, wasmSceneRef, canvasRef, renderLoopRef, refreshInspector]);
+  }, [enabled, showGrid, radiusPreviewTier, viewMode, datasets, cpuCache, wasmSceneRef, canvasRef, renderLoopRef, refreshInspector, selection]);
 
   if (!anyEnabled) return null;
 
   const absence = overlayAbsence(enabled, drawList, windowMs);
+  const brushed = selectionCaption(selection, drawList);
   const volumeList = viewMode === "3d" && isVolumeDrawList(drawList) ? drawList : null;
   const hoveredBox = volumeList && inspector ? volumeList.items.find(item => item.key === inspector.key) ?? null : null;
 
@@ -1236,6 +1262,7 @@ export function DebugOverlays({
       {showGrid && viewMode !== "3d" && drawList.items.map(item => (
         <div
           key={item.key}
+          data-selected={item.selected ? "true" : undefined}
           style={{
             position: "absolute",
             left: item.left,
@@ -1245,6 +1272,7 @@ export function DebugOverlays({
             background: item.fill,
             border: item.border,
             boxSizing: "border-box",
+            opacity: selection !== null && !item.selected ? UNSELECTED_OPACITY : undefined,
           }}
           title={item.tooltip}
         />
@@ -1272,6 +1300,7 @@ export function DebugOverlays({
                 stroke={batch.style.halo.stroke}
                 strokeWidth={batch.style.halo.strokeWidth}
                 strokeLinecap="round"
+                opacity={selection !== null && !batch.selected ? UNSELECTED_OPACITY : undefined}
               />
             ) : null,
           )}
@@ -1291,12 +1320,14 @@ export function DebugOverlays({
               key={`edges-${i}`}
               data-testid="overlay-box-batch"
               data-count={batch.count}
+              data-selected={batch.selected ? "true" : undefined}
               d={batch.d}
               fill="none"
               stroke={batch.style.stroke}
               strokeWidth={batch.style.strokeWidth}
               strokeDasharray={batch.style.dash ?? undefined}
               strokeLinecap="round"
+              opacity={selection !== null && !batch.selected ? UNSELECTED_OPACITY : undefined}
             />
           ))}
         </svg>
@@ -1327,23 +1358,28 @@ export function DebugOverlays({
           ))}
         </div>
       )}
-      {absence && (
+      {(absence || brushed) && (
         <div
-          data-testid="overlay-absence"
           style={{
             position: "absolute",
             left: 8,
             bottom: 8,
             maxWidth: "70%",
-            padding: "3px 7px",
-            background: "rgba(12, 14, 18, 0.8)",
-            color: "#c8ccd0",
-            borderRadius: 4,
-            fontFamily: "ui-monospace, Menlo, Consolas, monospace",
-            fontSize: 11,
+            display: "flex",
+            flexDirection: "column",
+            gap: 4,
           }}
         >
-          {absence}
+          {brushed && (
+            <div data-testid="overlay-selection" style={CAPTION_STYLE}>
+              {brushed}
+            </div>
+          )}
+          {absence && (
+            <div data-testid="overlay-absence" style={CAPTION_STYLE}>
+              {absence}
+            </div>
+          )}
         </div>
       )}
       {(enabled.renderRadius || radiusPreviewTier !== null) && radiusPaths.length > 0 && (

@@ -221,6 +221,13 @@ export interface VolumeDrawItem extends ChunkDrawItem {
  */
 export interface WireframeBatch {
   style: WireframeStyle;
+  /**
+   * True when the batch's boxes are in the published selection. A selected
+   * cell wears the selection's border, so its boxes never share a style,
+   * and so a batch, with an unselected one; the layer fades the batches
+   * that are not selected while a window is brushed, as it fades the cells.
+   */
+  selected: boolean;
   /** The path data of every box in the batch, one after another. */
   d: string;
   /** How many boxes the batch holds. */
@@ -256,25 +263,33 @@ export function buildVolumeDrawList(input: DrawListInput): VolumeDrawList {
     const corners = item.cell.corners ?? rectangleCorners(item);
     items[i] = { ...item, path: boxPath(corners), hull: boxHull(corners), style: wireframeStyle(item) };
   }
-  return { items, batches: batchWireframes(items), withRow: list.withRow, churned: list.churned };
+  return {
+    items,
+    batches: batchWireframes(items),
+    withRow: list.withRow,
+    churned: list.churned,
+    selected: list.selected,
+  };
 }
 
 /** Items with one style, in the order the style first appears, each batch's path being its items' paths joined. */
 export function batchWireframes(items: readonly VolumeDrawItem[]): WireframeBatch[] {
-  const byStyle = new Map<string, { style: WireframeStyle; paths: string[] }>();
+  const byStyle = new Map<string, { style: WireframeStyle; selected: boolean; paths: string[] }>();
   for (const item of items) {
     if (!item.path) continue;
-    const { style } = item;
-    const key = `${style.stroke}|${style.strokeWidth}|${style.dash}|${style.halo?.stroke}|${style.halo?.strokeWidth}`;
+    const { style, selected } = item;
+    const key = `${selected}|${style.stroke}|${style.strokeWidth}|${style.dash}|${style.halo?.stroke}|${style.halo?.strokeWidth}`;
     let batch = byStyle.get(key);
     if (!batch) {
-      batch = { style, paths: [] };
+      batch = { style, selected, paths: [] };
       byStyle.set(key, batch);
     }
     batch.paths.push(item.path);
   }
   const out: WireframeBatch[] = [];
-  for (const { style, paths } of byStyle.values()) out.push({ style, d: paths.join(" "), count: paths.length });
+  for (const { style, selected, paths } of byStyle.values()) {
+    out.push({ style, selected, d: paths.join(" "), count: paths.length });
+  }
   return out;
 }
 

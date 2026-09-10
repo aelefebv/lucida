@@ -11,7 +11,8 @@ import { describe, expect, it } from "vitest";
 import { PHASE_COLORS, ROW_STATE_COLORS, withAlpha } from "../monitor/timelinePalette.ts";
 import { lookupChunk } from "../trace/diagnose/chunkLookup.ts";
 import { chunkIdentity, deriveChunkStates, type ChunkStates } from "../trace/diagnose/chunkStates.ts";
-import { healthyLocalOpen, refetchLoopSteadyState, saturatedReopen } from "../trace/diagnose/fixtures.ts";
+import { selectChunks } from "../trace/diagnose/chunkSelection.ts";
+import { healthyLocalOpen, lateStallOpen, refetchLoopSteadyState, saturatedReopen } from "../trace/diagnose/fixtures.ts";
 import type { TraceRun } from "../trace/types.ts";
 import {
   buildChunkDrawList,
@@ -235,6 +236,33 @@ describe("the volume draw list", () => {
     expect(batches[0].d).toBe([items[0].path, items[1].path, items[3].path].join(" "));
     expect(batches[1].style.stroke).toBe(NO_ROW_STROKE);
     expect(batches[1].d).toBe(items[2].path);
+  });
+
+  it("batches the brushed selection apart, with the selection's border as a white halo on every box in it", () => {
+    // The late-stall run: rows 0 to 59 in the first second, 60 to 99 after 1.1 s.
+    const project = perspective();
+    const run = lateStallOpen();
+    const cells = [
+      box(project, 0, [0, 0, 0], [10, 10, 10]),
+      box(project, 70, [10, 0, 0], [20, 10, 10]),
+      box(project, 71, [20, 0, 0], [30, 10, 10]),
+    ];
+    const { input } = inputOver(run, cells, { phaseColor: true });
+    const selection = selectChunks(run, { startMs: 1_100, endMs: 2_000 });
+
+    const list = buildVolumeDrawList({ ...input, selection });
+
+    expect(list.selected).toBe(2);
+    expect(list.items.map((item) => item.selected)).toEqual([false, true, true]);
+    expect(list.batches.map((b) => [b.selected, b.count])).toEqual([
+      [false, 1],
+      [true, 2],
+    ]);
+    // The phase color stays on the edge; the selection rides under it as the halo.
+    expect(list.batches[1].style.stroke).toBe(list.items[1].style.stroke);
+    expect(list.batches[1].style.halo).toEqual({ stroke: "rgba(255, 255, 255, 0.95)", strokeWidth: 2 + 2 });
+    expect(list.batches[0].style.halo).toBeNull();
+    expect(list.batches[1].d).toBe([list.items[1].path, list.items[2].path].join(" "));
   });
 
   it("draws a cell without corners as its rectangle, so the list is total", () => {

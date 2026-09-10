@@ -14,15 +14,24 @@
  * cannot show: a chunk with no row was resident before the interval opened,
  * is still queued, or was never wanted, and the cell says so rather than
  * wearing a color.
+ *
+ * A third reading is the linked selection: the chunk set a window brushed
+ * on the dock's axis published. A cell whose identity is in the set is
+ * highlighted whatever mode is on, so time and space read as one instrument
+ * without the two surfaces merging (ADR 0052 as amended). The set arrives
+ * as an input here; the layer reads it from the published slot, never from
+ * the dock.
  */
 
 import type { EvictionTier } from "../pipeline/fetch/index.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import { formatMs } from "../monitor/monitorModel.ts";
 import { ROW_STATE_COLORS, withAlpha } from "../monitor/timelinePalette.ts";
-import type { ChunkReading } from "../trace/diagnose/chunkStates.ts";
+import type { ChunkSelection } from "../trace/diagnose/chunkSelection.ts";
+import { chunkIdentity, type ChunkReading } from "../trace/diagnose/chunkStates.ts";
 import { describeState } from "../trace/diagnose/rowState.ts";
 import type { ChunkLookup, RowState } from "../trace/diagnose/types.ts";
+import { labelMs } from "../trace/diagnose/window.ts";
 
 export type ChunkStatus = "cached" | "in-flight" | "planned";
 export type DisplayTier = ResidencyTier | "missing";
@@ -108,6 +117,8 @@ export interface ChunkDrawItem {
   tooltip: string;
   /** What the trace says about the chunk, or null when no row carries it. */
   reading: ChunkReading | null;
+  /** True when the cell's identity is in the published selection. */
+  selected: boolean;
   cell: ChunkCell;
 }
 
@@ -117,6 +128,8 @@ export interface ChunkDrawList {
   withRow: number;
   /** Cells fetched more than once in the window. */
   churned: number;
+  /** Cells in the published selection. */
+  selected: number;
 }
 
 export interface DrawListInput {
@@ -130,6 +143,12 @@ export interface DrawListInput {
   readingOf: (cell: ChunkCell) => ChunkReading | null;
   /** The window the churn counts are over, in milliseconds, or null when no interval is open. */
   windowMs: number | null;
+  /**
+   * The chunk set a brushed window published, or null when none is brushed.
+   * A cell whose identity is in it is highlighted whatever else is on. One
+   * set lookup per cell, so a selection costs the draw no row.
+   */
+  selection?: ChunkSelection | null;
 }
 
 const SOLID_CACHED = "rgba(80, 220, 120, 0.30)";
@@ -146,6 +165,18 @@ const NO_ROW_BORDER = "1px dashed rgba(255, 255, 255, 0.28)";
 
 /** How opaque a phase color is painted over the pixels. */
 export const PHASE_FILL_ALPHA = 0.42;
+
+/**
+ * The highlight a cell in the brushed selection wears. The border carries
+ * it whatever mode is on, so a phase color or a churn band keeps its fill
+ * and the set still reads. On the plain grid the fill goes light too, since
+ * the cache colors answer a different question from the one the brush asked.
+ */
+export const SELECTED_BORDER = "2px solid rgba(255, 255, 255, 0.95)";
+export const SELECTED_FILL = "rgba(255, 255, 255, 0.30)";
+
+/** What the tooltip and the inspector add for a cell in the brushed selection. */
+export const SELECTED_LABEL = "in the brushed window";
 
 /**
  * The churn bands: one fetch is the normal case and barely tinted; two is
@@ -174,9 +205,11 @@ export function churnWindowLabel(windowMs: number | null): string {
 export function buildChunkDrawList(input: DrawListInput): ChunkDrawList {
   const { cells, modes } = input;
   const readsTrace = modes.phaseColor || modes.churnTint;
+  const selection = input.selection ?? null;
   const items: ChunkDrawItem[] = [];
   let withRow = 0;
   let churned = 0;
+  let selected = 0;
 
   for (const cell of cells) {
     const status = statusText(cell, modes);
@@ -192,6 +225,7 @@ export function buildChunkDrawList(input: DrawListInput): ChunkDrawList {
         status,
         tooltip: `${status} · group proxy asset: not a chunk, so it has no row`,
         reading: null,
+        selected: false,
         cell,
       });
       continue;
@@ -200,6 +234,10 @@ export function buildChunkDrawList(input: DrawListInput): ChunkDrawList {
     if (reading) withRow += 1;
     const band = modes.churnTint && reading ? churnBand(reading.fetches) : null;
     if (band && reading && reading.fetches >= 2) churned += 1;
+    const inSelection =
+      selection !== null &&
+      selection.identities.has(chunkIdentity(cell.datasetId, cell.entityId, cell.chunkKey));
+    if (inSelection) selected += 1;
 
     let fill: string;
     let border = CELL_BORDER;
@@ -213,7 +251,12 @@ export function buildChunkDrawList(input: DrawListInput): ChunkDrawList {
     } else {
       fill = cacheFill(cell, modes);
     }
+    if (inSelection) {
+      border = SELECTED_BORDER;
+      if (!readsTrace) fill = SELECTED_FILL;
+    }
 
+    const tooltip = tooltipFor(status, modes, reading, input.windowMs);
     items.push({
       key: cell.key,
       left: cell.left,
@@ -223,12 +266,13 @@ export function buildChunkDrawList(input: DrawListInput): ChunkDrawList {
       fill,
       border,
       status,
-      tooltip: tooltipFor(status, modes, reading, input.windowMs),
+      tooltip: inSelection ? `${tooltip} · ${SELECTED_LABEL}` : tooltip,
       reading,
+      selected: inSelection,
       cell,
     });
   }
-  return { items, withRow, churned };
+  return { items, withRow, churned, selected };
 }
 
 function cacheFill(cell: ChunkCell, modes: OverlayModes): string {
@@ -379,6 +423,7 @@ export function describeHoverInspector(
   const { cell, reading } = item;
   const title = `${cell.entityId} · ${cell.chunkKey}`;
   const lines: string[] = [item.status];
+  if (item.selected) lines.push(SELECTED_LABEL);
   if (!lookup) {
     lines.push(noRowStatement(null));
     return { title, lines };
@@ -443,6 +488,27 @@ export function overlayAbsence(modes: OverlayModes, list: ChunkDrawList, windowM
     return `churn: no chunk on screen was fetched more than once in the open interval (${formatSeconds(windowMs)})`;
   }
   return null;
+}
+
+/**
+ * The caption the overlay shows while a window is brushed: the window, the
+ * phase the set is narrowed to, and how much of the set is on screen. A
+ * viewport with no highlighted cell then reads as "the set is elsewhere"
+ * rather than as an empty set. Null when nothing is brushed.
+ */
+export function selectionCaption(selection: ChunkSelection | null, list: ChunkDrawList): string | null {
+  if (!selection) return null;
+  const scope = `brushed ${labelMs(selection.window.startMs, selection.window.endMs)} ms of run ${selection.runId}`;
+  const where = selection.phase ? `in ${selection.phase}` : "active";
+  if (selection.chunks === 0) {
+    return `${scope}: no chunk had a row ${where} in the window, so nothing is highlighted`;
+  }
+  const set = `${selection.chunks.toLocaleString()} chunks with a row ${where} in the window`;
+  if (list.selected === 0) return `${scope}: none of the ${set} is on screen at this view`;
+  return (
+    `${scope}: ${list.selected.toLocaleString()} of ${set} are on screen; ` +
+    "the rest are off screen or at a level this view does not show"
+  );
 }
 
 function formatSeconds(ms: number): string {
