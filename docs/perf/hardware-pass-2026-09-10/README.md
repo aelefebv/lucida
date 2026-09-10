@@ -68,6 +68,17 @@ holds what the page said at each step.
 7. **`trace watch` replays earlier items on subscribe.** The stream began with runs from earlier sessions in the workspace before the live ones.
 8. Cosmetic: the frame-time legend wraps "GPU pass" across two lines with its value between them ([08](08-brush-drill.png)).
 
+## Follow-ups, 2026-09-10
+
+Findings 1 and 3 were fixed the same day and checked on the same host from main at `8fb1d4ae`:
+
+- **The dock header wraps (#1093, PR #1096).** At 1440 px the actions row lays out on two rows, every control keeps its own height, and the watch status stays on one line with the whole sentence in its title ([header](followups/1093-dock-header.png)).
+- **A bundle sent from the page carries its frame (#1095, PR #1097).** The worker copies the canvas texture from inside the next frame it renders. The frame is 1600 x 1200 device pixels for the 800 x 600 canvas at device pixel ratio 2, `capturedBy` is `page`, and `absent` is empty ([frame](followups/1095-page-frame.png), [receipt](followups/1095-send-report.png)). Zooming the view before a second capture moves and enlarges the dataset in the frame as it does on screen ([zoomed](followups/1095-page-frame-zoomed.png)). `lucida trace inbox list` names the adapter `nvidia lovelace`.
+
+The check also showed something about this record: **the canvas is black in every screenshot of this pass, and that is the screenshot, not the frame.** The page's captured frame shows the compositor's clear colour and the dataset, while the DevTools screenshot command (`Page.captureScreenshot`) taken of the same canvas at the same moment is solid black ([canvas](followups/canvas-screenshot.png)). On this host the screenshot does not include the WebGPU canvas, so the driver's `capturedBy: "driver"` frames in this pass are black for the same reason. Read the overlays and the chrome in the screenshots, not the canvas. `scripts/frame_probe.py`, `frame_probe3.py`, and `frame_probe4.py` are the comparisons.
+
+Finding 2 is tracked as #1094.
+
 ## Reproduce
 
 Build on a host with the toolchain, copy the binaries, `lucida-web/dist`, and
