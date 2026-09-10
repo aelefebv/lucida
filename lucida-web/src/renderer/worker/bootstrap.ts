@@ -36,7 +36,7 @@ import { sourceKey } from "../poolKeys.ts";
 
 /**
  * Bootstrap the worker: init the GPU, create a fresh {@link RendererState},
- * and assemble the {@link WorkerCtx} (with lazy renderer accessors +
+ * and assemble the {@link WorkerCtx} (with renderer accessors +
  * lookup helpers + post wiring). Called once from `case "init"` in
  * `gpu.worker.ts`.
  */
@@ -50,13 +50,22 @@ export async function bootstrapWorker(
     post({ type: "gpuPassTime", gpuPassUs }),
   );
 
-  // Renderer-class singletons (lazy-init on first use). Persisted across
-  // messages; not per-session state, so they stay in this closure rather
-  // than on RendererState.
-  let sliceRenderer: SliceRenderer | null = null;
+  // Renderer-class singletons. Persisted across messages; not per-session
+  // state, so they stay in this closure rather than on RendererState.
+  //
+  // The slice path's three are built eagerly. Each constructor compiles a
+  // shader module and its pipelines, which held the GPU process for 150 to
+  // 200 ms on a hardware adapter. Built lazily on the first render message,
+  // that compile sat between the first chunk uploads and the first present,
+  // the display compositor waited behind it for the canvas's frame, and the
+  // trace read a present stall of about 140 ms (#1094). Built here, it
+  // overlaps the dataset open, before anything is presented that a compositor
+  // frame could wait on. The volume renderer stays lazy: its compile is about
+  // 750 ms and would delay the first frame of the mode most opens start in.
+  const sliceRenderer = new SliceRenderer(device);
+  const compositor = new LayerCompositor(device, format);
+  const cursorRenderer = new CursorRenderer(device, format);
   let volumeRenderer: VolumeRenderer | null = null;
-  let compositor: LayerCompositor | null = null;
-  let cursorRenderer: CursorRenderer | null = null;
 
   /**
    * Build a flat snapshot of all proxy pools for a dataset, in the shape
@@ -108,7 +117,6 @@ export async function bootstrapWorker(
     state,
     passTimer,
     getSliceRenderer() {
-      if (!sliceRenderer) sliceRenderer = new SliceRenderer(device);
       return sliceRenderer;
     },
     getVolumeRenderer() {
@@ -116,11 +124,9 @@ export async function bootstrapWorker(
       return volumeRenderer;
     },
     getCompositor() {
-      if (!compositor) compositor = new LayerCompositor(device, format);
       return compositor;
     },
     getCursorRenderer() {
-      if (!cursorRenderer) cursorRenderer = new CursorRenderer(device, format);
       return cursorRenderer;
     },
     ensureOffscreenPool: (count, w, h) => ensureOffscreenPool(device, count, w, h),

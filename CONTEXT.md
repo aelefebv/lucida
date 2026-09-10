@@ -529,6 +529,16 @@ One rule firing on one subject, ranked against the others. A `note` is a finding
 that is not a stall: worth a line, not worth blame.
 _Avoid_: issue, warning, alert, violation
 
+**First paint**:
+The reading a diagnostic gives an upload or present breach on a run opened by
+content on a cold browser cache: a note rather than a stall. Both phases run to
+a frame dispatch on the main thread, and on such an open the frame that first
+draws the chunks also compiles the render pipelines, so the page's frames wait
+behind the GPU process. A dataset added to a live page and an interaction run
+draw through compiled pipelines and keep the stall; the interaction run is what
+confirms a regression.
+_Avoid_: startup stall, compile stall, warm-up
+
 **Churn**:
 How many times one chunk was fetched inside a stated window, counted by row
 identity, with the bytes those fetches cost. Always stated with its window,

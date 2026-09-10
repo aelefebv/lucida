@@ -6,6 +6,19 @@ import "./Minimap.css";
 
 const MINIMAP_SIZE = 200;
 
+/**
+ * Keeps the overlay and its two cache layers off the GPU. Nothing here reads
+ * pixels; `willReadFrequently` is the hint that forces software raster.
+ *
+ * The first draw on a GPU-backed 2D canvas creates its raster command buffer
+ * synchronously on the main thread, queued behind the GPU process — which, as
+ * the first chunks arrive, is compiling the render worker's first pipelines.
+ * That was a 157 ms main-thread task on a hardware adapter, read by the trace
+ * as a stall of whichever phase was open (#1094). A few strokes on 400 device
+ * pixels square cost nothing measurable in software.
+ */
+const SOFTWARE_2D: CanvasRenderingContext2DSettings = { willReadFrequently: true };
+
 interface Props {
   client: RenderClient;
   activeLoop: RenderLoop | null;
@@ -46,7 +59,7 @@ export function Minimap({ client, activeLoop }: Props) {
     const overlayCallback = (data: MinimapOverlayData) => {
       const overlayCanvas = overlayCanvasRef.current;
       if (!overlayCanvas) return;
-      const ctx = overlayCanvas.getContext("2d");
+      const ctx = overlayCanvas.getContext("2d", SOFTWARE_2D);
       if (!ctx) return;
 
       // Maintain the offscreen static-layer cache at the current backing size.
@@ -81,7 +94,7 @@ export function Minimap({ client, activeLoop }: Props) {
       // empty); a pure Z-scrub reuses it. `getContext` on a canvas that has
       // never had a 2D context is cheap and idempotent.
       if (data.staticDirty || !staticReadyRef.current) {
-        const staticCtx = staticLayer.getContext("2d");
+        const staticCtx = staticLayer.getContext("2d", SOFTWARE_2D);
         if (staticCtx) {
           drawStaticMinimapOverlays(staticCtx, data);
           staticReadyRef.current = true;
@@ -92,7 +105,7 @@ export function Minimap({ client, activeLoop }: Props) {
       // when the cache is empty / was just resized); a pan/zoom reuses it.
       // `drawZPlaneOverlays` does not clear, so clear the offscreen first.
       if (zPlaneLayerDirty(data, prevZRef.current) || !zReadyRef.current) {
-        const zCtx = zLayer.getContext("2d");
+        const zCtx = zLayer.getContext("2d", SOFTWARE_2D);
         if (zCtx) {
           zCtx.clearRect(0, 0, data.canvasW, data.canvasH);
           drawZPlaneOverlays(zCtx, data);
