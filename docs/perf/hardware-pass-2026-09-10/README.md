@@ -79,6 +79,31 @@ The check also showed something about this record: **the canvas is black in ever
 
 Finding 2 is tracked as #1094.
 
+## Repeat the present measurement elsewhere
+
+`scripts/cold.py` is the harness behind the numbers in #1099. It cold-opens a
+workspace URL the way this pass did, waits for the open's run to close, reads
+the run's diagnostic through the trace seam, and repeats. Its `surface` mode
+does the same on the capture surface, `interaction` mode scrubs the settled
+page, and `--trace` takes one load under a DevTools trace with the sampling
+profiler on. `phases.py` prints the phase tables and long tasks of its runs,
+`profile_window.py` gives self time by function over a window of a trace, and
+`analyze_trace.py` and `gputasks.py` read the GPU process out of one. The server
+port and the workspace and dataset ids are constants and files named at the top
+of `cold.py`; set them for your host.
+
+    python3 scripts/cold.py out page 3
+    python3 scripts/cold.py out surface 3
+    python3 scripts/cold.py out interaction 3
+    python3 scripts/phases.py out <tag> [<tag> ...]
+
+On a desktop machine, which is the case #1099 leaves unmeasured, change three
+things in `cdp.py`: the Chrome binary (on macOS,
+`/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`), the three
+Vulkan flags, which are Linux-only and must go, and `--headless=new`, which must
+go too, because the question is what a GPU-composited browser window shows. The
+driver needs no change: `lucida trace` adds the Vulkan flags on Linux only.
+
 ## Reproduce
 
 Build on a host with the toolchain, copy the binaries, `lucida-web/dist`, and
