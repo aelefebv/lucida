@@ -23,6 +23,7 @@ import type {
 } from "../trace/diagnose/types.ts";
 import { formatCause } from "../trace/diagnose/renderText.ts";
 import { describeSteadyStateFinding } from "../trace/diagnose/steadyState.ts";
+import { labelMs } from "../trace/diagnose/window.ts";
 
 /** One figure, already formatted, with the word that names it. */
 export interface MonitorNumber {
@@ -64,7 +65,25 @@ export interface MonitorCallout {
   drill: MonitorDrill | null;
 }
 
-export type MonitorBannerKind = "truncation" | "coverage" | "gap" | "not-health" | "limits";
+export type MonitorBannerKind = "truncation" | "window" | "coverage" | "gap" | "not-health" | "limits";
+
+/**
+ * The window a reading is scoped to, as the dock states it beside the
+ * brush: the document's own figures, the spelling the command line takes,
+ * and the show command that reads the same window. Brushing in the dock and
+ * the CLI's window flag are the same call, so the command reproduces the
+ * numbers on screen.
+ */
+export interface MonitorWindow {
+  startMs: number;
+  endMs: number;
+  spanMs: number;
+  ofWallMs: number;
+  whole: boolean;
+  /** `START..END`, as the window flag spells it. */
+  label: string;
+  command: string;
+}
 
 export interface MonitorBanner {
   kind: MonitorBannerKind;
@@ -108,7 +127,9 @@ export interface MonitorView {
   runId: string;
   wallMs: number;
   identity: MonitorNumber[];
-  /** Truncation and coverage, ahead of every number they qualify. */
+  /** The window this reading is of, or null for the whole run. */
+  window: MonitorWindow | null;
+  /** Truncation, the window, and coverage, ahead of every number they qualify. */
   banners: MonitorBanner[];
   /** The verdict, then the ranked findings. Index 0 is always the verdict. */
   callouts: MonitorCallout[];
@@ -170,6 +191,7 @@ export function buildMonitorView(diagnostic: DiagnosticDocument): MonitorView {
     runId: diagnostic.runId,
     wallMs: diagnostic.run.wallMs,
     identity: identityOf(diagnostic),
+    window: windowOf(diagnostic),
     banners: bannersOf(diagnostic),
     callouts: calloutsOf(diagnostic),
     trackGroups: trackGroupsOf(diagnostic),
@@ -227,9 +249,33 @@ function renderTimingOf(diagnostic: DiagnosticDocument): string {
 }
 
 /**
+ * The window the document reads, with the command that reads the same one.
+ * The label is the document's own edges, which the derivation clamped to
+ * the run, so the command names what was read rather than what was asked.
+ */
+function windowOf(diagnostic: DiagnosticDocument): MonitorWindow | null {
+  const window = diagnostic.window;
+  if (!window) return null;
+  const label = labelMs(window.startMs, window.endMs);
+  return {
+    startMs: window.startMs,
+    endMs: window.endMs,
+    spanMs: window.spanMs,
+    ofWallMs: window.ofWallMs,
+    whole: window.whole,
+    label,
+    command: `lucida trace show ${diagnostic.runId} --window ${label}`,
+  };
+}
+
+/**
  * Truncation and coverage lead. They are not footnotes: a reader has to be told
  * what the run did not measure before being told what it did, and #893 shipped
  * `100% accounted` for a run that was 87% pre-instrument boot.
+ *
+ * A window sits between them, as it does in the text: after the truncation,
+ * which qualifies the window too, and before the coverage, whose denominator
+ * is the window's span rather than the run's.
  */
 function bannersOf(diagnostic: DiagnosticDocument): MonitorBanner[] {
   const coverage = diagnostic.coverage;
@@ -242,6 +288,19 @@ function bannersOf(diagnostic: DiagnosticDocument): MonitorBanner[] {
       headline: `Truncated at ${formatMs(truncated.atMs)} — ${formatCount(truncated.rowsRecorded)} of ${formatCount(truncated.rowsTotal)} rows recorded (${truncated.recordedPct}%)`,
       detail: `Recording stopped: ${truncated.reason}. Everything below is a partial trace, and the remainder is unbounded rather than merely unmeasured.`,
       severe: true,
+    });
+  }
+
+  const window = windowOf(diagnostic);
+  if (window && coverage.window) {
+    const clip = coverage.window;
+    banners.push({
+      kind: "window",
+      headline: `Window ${window.label} ms of the ${formatMs(window.ofWallMs)} run (${formatMs(window.spanMs)})`,
+      detail:
+        `Every number below is of this window, not the run. ${clip.statement} ` +
+        `${formatCount(clip.clippedRows)} row(s) cross an edge · ${formatCount(clip.unplacedRows)} with no position left out.`,
+      severe: false,
     });
   }
 

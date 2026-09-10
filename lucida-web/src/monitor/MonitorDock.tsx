@@ -27,6 +27,14 @@
  * inbox rather than touching the run: it happens when somebody presses it,
  * never on a run's close and never on a schedule (ADR 0049 as amended).
  *
+ * **The brush.** A window brushed on the axis scopes the report beneath it
+ * through the derivation's own window, the same call the CLI's window flag
+ * makes, and publishes the chunk set that was in the window so the overlays
+ * highlight it. The dock publishes and the overlay subscribes. Neither reads
+ * the other (ADR 0052 as amended). Clearing the brush restores the whole-run
+ * report and clears the set, and so does reading another run, showing a
+ * file, or closing the dock.
+ *
  * The dock is also a drop target (#1066). A saved run, the trace driver's
  * run file, or a bundle dropped anywhere on it is read with the checks the
  * CLI's reader makes and shown in place of this page's report, at every
@@ -56,18 +64,23 @@ import {
   readMonitor,
   readProgress,
   readProvisional,
+  readWindow,
   rereadLoaded,
   sendReport,
   stopRun,
   type LoadedArtifact,
   type MonitorSnapshot,
+  type WindowedRead,
 } from "./monitorSource.ts";
 import type { InboxReceipt } from "../bridge.ts";
+import { trackPointerDrag } from "./pointerDrag.ts";
 import { TimelineCanvas } from "./TimelineCanvas.tsx";
 import { WatchToggle } from "./WatchToggle.tsx";
+import { publishChunkSelection } from "../trace/linkedSelection.ts";
 import type { LiveProgress } from "../trace/liveProgress.ts";
 import type { ProvisionalReading } from "../trace/diagnose/provisional.ts";
 import type { LiveTimeline } from "../trace/diagnose/timeline.ts";
+import type { WindowRequest } from "../trace/diagnose/types.ts";
 
 export interface MonitorDockProps {
   /** Close the dock. The toolbar that opened it is the caller's business. */
@@ -121,6 +134,7 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
     live ? null : readMonitor(),
   );
   const [drill, setDrill] = useState<MonitorDrill | null>(null);
+  const [brush, setBrush] = useState<WindowRequest | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   // The bundle is the one save that takes time. The seam asks the server for
   // its health and the render worker for the frame before it exports. A
@@ -146,11 +160,32 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
   const runs = snapshot?.runs ?? [];
   const runId = read?.ok ? read.document.runId : undefined;
   const mode: DockMode = compare ? "compare" : file ? "file" : live ? "live" : "read";
+  const trace = snapshot?.trace ?? null;
+
+  // The published set narrows to the phase a drill-down has scoped to, so
+  // the highlighted chunks are the ones in the phase the reader is looking at.
+  const phase = drill?.phaseId ?? null;
+  const windowed = useMemo<WindowedRead | null>(() => {
+    if (!brush || !trace || !runId) return null;
+    try {
+      return readWindow(trace, runId, brush, phase);
+    } catch {
+      // A window the run cannot resolve, which the brush never asks for,
+      // leaves the whole-run report up.
+      return null;
+    }
+  }, [brush, trace, runId, phase]);
+
+  useEffect(() => {
+    publishChunkSelection(windowed?.selection ?? null);
+  }, [windowed]);
+  useEffect(() => () => publishChunkSelection(null), []);
 
   // Read one run and show it. The only path from watching to reading, so the
   // two states cannot both be on screen.
   const readRun = useCallback((next?: string) => {
     setDrill(null);
+    setBrush(null);
     setSaved(null);
     setLive(null);
     setReading(null);
@@ -191,6 +226,7 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
 
   const watchNextRun = useCallback(() => {
     setDrill(null);
+    setBrush(null);
     setSaved(null);
     setFile(null);
     setCompare(null);
@@ -255,6 +291,7 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
   const showFile = useCallback(
     (loaded: LoadedArtifact) => {
       setDrill(null);
+      setBrush(null);
       setSaved(null);
       stopWatching();
       setFile(loaded);
@@ -373,14 +410,29 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
     live: "This run is still open, so it is being watched rather than read: reading would close it, which is why saving and choosing another run are not offered until it ends. Watching reads the recorder's own counters and the last seconds of per-tick readings twice a second, and walks none of the run's rows.",
     read: "Opening the dock reads the recording, and reading closes the run in progress: an interval has to end before it can be analysed.",
   };
+  const view = useMemo(
+    () => (read?.ok ? buildMonitorView(windowed?.document ?? read.document) : null),
+    [read, windowed],
+  );
 
   // The timeline renders inside whichever report is on screen, after the
   // coverage and truncation that qualify it: a chart is read after its
-  // denominator.
+  // denominator. A closed run's axis takes the brush and draws the whole
+  // run's timeline rather than the window's, so the brush can be moved.
   const timeline = live ? (
     liveTimeline ? <TimelineCanvas section={liveTimeline.timeline} provisional /> : null
   ) : read?.ok ? (
-    <TimelineCanvas section={read.document.timeline} provisional={false} />
+    <TimelineCanvas
+      section={read.document.timeline}
+      provisional={false}
+      brush={{
+        brushed:
+          brush && windowed && view?.window
+            ? { window: brush, view: view.window, selection: windowed.selection }
+            : null,
+        onChange: setBrush,
+      }}
+    />
   ) : null;
 
   const body = (
@@ -587,16 +639,12 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
           reading={reading ? buildProvisionalView(reading) : null}
           timeline={timeline}
         />
-      ) : read?.ok ? (
-        <MonitorReport
-          view={buildMonitorView(read.document)}
-          drill={drill}
-          onDrill={setDrill}
-          timeline={timeline}
-        />
+      ) : view ? (
+        <MonitorReport view={view} drill={drill} onDrill={setDrill} timeline={timeline} />
       ) : (
         <p className="monitor-empty" data-testid="monitor-empty">
-          {read?.reason} Open a dataset, let it reach quiescence, then read the run.
+          {read && !read.ok ? read.reason : null} Open a dataset, let it reach quiescence, then read
+          the run.
         </p>
       )}
     </>
@@ -679,15 +727,11 @@ function useDockHeight() {
       const view = doc.defaultView;
       const startY = event.clientY;
       const startHeight = height;
-      const onMove = (move: PointerEvent): void => {
-        setHeight(clampHeight(startHeight + (startY - move.clientY), view?.innerHeight || 800));
-      };
-      const onUp = (): void => {
-        doc.removeEventListener("pointermove", onMove);
-        doc.removeEventListener("pointerup", onUp);
-      };
-      doc.addEventListener("pointermove", onMove);
-      doc.addEventListener("pointerup", onUp);
+      trackPointerDrag(
+        doc,
+        (move) => setHeight(clampHeight(startHeight + (startY - move.clientY), view?.innerHeight || 800)),
+        () => {},
+      );
     },
     [height],
   );

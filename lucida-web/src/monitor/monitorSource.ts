@@ -26,6 +26,7 @@ import {
   type TraceArtifact,
 } from "../trace/artifact.ts";
 import { bundleFilename } from "../trace/bundle.ts";
+import { selectChunks, type ChunkSelection } from "../trace/diagnose/chunkSelection.ts";
 import {
   compareTraces,
   renderComparison,
@@ -35,7 +36,7 @@ import {
 import { diagnoseDocument } from "../trace/diagnose/diagnose.ts";
 import type { ProvisionalReading } from "../trace/diagnose/provisional.ts";
 import type { LiveTimeline } from "../trace/diagnose/timeline.ts";
-import type { DiagnosticDocument } from "../trace/diagnose/types.ts";
+import type { DiagnosticDocument, WindowRequest } from "../trace/diagnose/types.ts";
 import type { LiveProgress } from "../trace/liveProgress.ts";
 import { sendBundle } from "../trace/reportInbox.ts";
 import type { LucidaTraceSeam } from "../trace/seam.ts";
@@ -66,11 +67,19 @@ export interface MonitorSnapshot {
    */
   runs: MonitorRunSummary[];
   /**
-   * The document the read came from, kept so the run on screen can stand
-   * on one side of a comparison without a second export, which would close
-   * another interval. Null where there was no seam to export from.
+   * The document the read came from, kept so a window brushed later is
+   * derived from it, and so the run on screen can stand on one side of a
+   * comparison, without a second export, which would close another
+   * interval on the way to the same run. Null where there was no seam to
+   * export from.
    */
   trace: TraceDocument | null;
+}
+
+/** A run read over one window of its clock, and the chunk set the window selected. */
+export interface WindowedRead {
+  document: DiagnosticDocument;
+  selection: ChunkSelection;
 }
 
 /**
@@ -234,6 +243,35 @@ export interface LoadedComparison {
 export function compareLoaded(left: LoadedArtifact, right: LoadedArtifact): LoadedComparison {
   const comparison = compareTraces(compareSideFor(left), compareSideFor(right));
   return { comparison, text: renderComparison(comparison) };
+}
+
+/**
+ * Read one run over a window of its clock: the report the brush scopes to,
+ * and the chunk set the brush publishes.
+ *
+ * Derived from the document already in hand and never from a fresh export,
+ * so brushing closes nothing. It is the derivation the seam's `diagnoseTrace`
+ * applies, and that is what `lucida trace show --window` evaluates on a
+ * page, so the numbers under a brush and under the flag are one computation.
+ * `phase` narrows the set to the rows that were in that phase during the
+ * window, and null takes every row the window can see. The document is the
+ * window's either way.
+ *
+ * Throws, as the derivation does, when the document has no such run or the
+ * window is empty once clamped to it.
+ */
+export function readWindow(
+  trace: TraceDocument,
+  runId: string,
+  window: WindowRequest,
+  phase: string | null,
+): WindowedRead {
+  const run = trace.runs.find((candidate) => candidate.header.runId === runId);
+  if (!run) throw new Error(`no run ${runId} in this trace document`);
+  return {
+    document: diagnoseDocument(trace, { runId, window }),
+    selection: selectChunks(run, window, phase),
+  };
 }
 
 /**
