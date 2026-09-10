@@ -984,6 +984,10 @@ function nextSteps(
       why: "what is where: rows by state and level, with their boxes",
       command: `lucida trace show ${runId} --spatial`,
     });
+    steps.push({
+      why: "this run against a baseline: phase, finding, and header deltas",
+      command: `lucida trace diff <baseline-run> ${runId}`,
+    });
   }
   if (INCONCLUSIVE.includes(attribution.confidence)) {
     steps.push({
