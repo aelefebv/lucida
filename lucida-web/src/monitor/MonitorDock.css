@@ -538,3 +538,135 @@
   margin: 0;
   font-family: "SF Mono", "Menlo", "Monaco", monospace;
 }
+
+/* --- a dropped file, and two runs compared (#1066) ------------------------- *
+ * The whole dock is the drop target, and says so while a file is over it.
+ * A bundle's frame takes a column of its own beside the report, and is
+ * sticky so it stays alongside as the report scrolls.
+ */
+
+.monitor-dock-dropping {
+  outline: 2px dashed #646cff;
+  outline-offset: -2px;
+}
+
+.monitor-file-input {
+  display: none;
+}
+
+.monitor-file-with-frame {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 360px);
+  gap: 0 24px;
+  align-items: start;
+}
+
+.monitor-file-report {
+  min-width: 0;
+}
+
+.monitor-frame {
+  position: sticky;
+  top: 0;
+  margin: 12px 0;
+}
+
+.monitor-frame img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border: 1px solid #2c2c2c;
+  background: #000;
+}
+
+.monitor-frame figcaption,
+.monitor-frame-absent {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: #9aa0a6;
+}
+
+.monitor-compare-slots {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin: 12px 0;
+}
+
+.monitor-compare-slot {
+  padding: 10px 12px;
+  border: 1px dashed #4a4a4a;
+  background: #1a1a1a;
+}
+
+.monitor-compare-slot h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+
+.monitor-compare-slot-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.monitor-compare-identities {
+  margin: 12px 0;
+}
+
+.monitor-compare-identity {
+  display: flex;
+  gap: 10px;
+  margin: 2px 0;
+}
+
+.monitor-compare-identity dt {
+  min-width: 48px;
+  color: #7d8288;
+}
+
+.monitor-compare-identity dd {
+  margin: 0;
+}
+
+.monitor-banner-incomparable {
+  border-left-color: #d1665b;
+  background: #2a1614;
+}
+
+.monitor-compare-side h3 {
+  margin: 12px 0 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: #b9bcc0;
+}
+
+.monitor-row-differs {
+  background: #23272e;
+}
+
+.monitor-row-incomparable {
+  background: #2a1614;
+}
+
+.monitor-compare-text-details {
+  margin: 16px 0;
+}
+
+.monitor-compare-text-details summary {
+  cursor: pointer;
+  color: #9aa0a6;
+}
+
+.monitor-compare-text {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  overflow-x: auto;
+  white-space: pre;
+  font-family: "SF Mono", "Menlo", "Monaco", monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  background: #1a1a1a;
+  border: 1px solid #2c2c2c;
+}

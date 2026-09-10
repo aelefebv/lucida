@@ -17,7 +17,21 @@
  */
 
 import type { InboxReceipt } from "../bridge.ts";
+import { configStore } from "../pipeline/planning/configStore.ts";
+import {
+  artifactRunId,
+  artifactTrace,
+  compareSideOf,
+  readArtifact,
+  type TraceArtifact,
+} from "../trace/artifact.ts";
 import { bundleFilename } from "../trace/bundle.ts";
+import {
+  compareTraces,
+  renderComparison,
+  type CompareSide,
+  type RunComparison,
+} from "../trace/diagnose/compare.ts";
 import { diagnoseDocument } from "../trace/diagnose/diagnose.ts";
 import type { ProvisionalReading } from "../trace/diagnose/provisional.ts";
 import type { LiveTimeline } from "../trace/diagnose/timeline.ts";
@@ -51,6 +65,12 @@ export interface MonitorSnapshot {
    * monitor the newest interval can be the quiet tail rather than the open.
    */
   runs: MonitorRunSummary[];
+  /**
+   * The document the read came from, kept so the run on screen can stand
+   * on one side of a comparison without a second export, which would close
+   * another interval. Null where there was no seam to export from.
+   */
+  trace: TraceDocument | null;
 }
 
 /**
@@ -71,18 +91,149 @@ export function readMonitor(runId?: string, seam = window.lucidaTrace): MonitorS
         reason: "This page is not running a lucida build with the trace seam installed.",
       },
       runs: [],
+      trace: null,
     };
   }
   const document = seam.exportTrace();
-  const runs = summariseRuns(document);
+  return { read: readRunOf(document, runId), runs: summariseRuns(document), trace: document };
+}
+
+function readRunOf(document: TraceDocument, runId?: string): MonitorRead {
   try {
-    return { read: { ok: true, document: diagnoseDocument(document, { runId }) }, runs };
+    return { ok: true, document: diagnoseDocument(document, { runId }) };
   } catch (error) {
-    return {
-      read: { ok: false, reason: error instanceof Error ? error.message : String(error) },
-      runs,
-    };
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
   }
+}
+
+// ---------------------------------------------------------------------------
+// A dropped file, and two runs compared (#1066)
+// ---------------------------------------------------------------------------
+
+/**
+ * A run read from somewhere other than this page's recording: a file
+ * somebody dropped on the dock or chose, or the run on screen offered to a
+ * comparison. Read the way a live run is read, so the same report renders
+ * from it at every depth, and nothing here touches the recorder.
+ */
+export interface LoadedArtifact {
+  /** The file's name, or `this page` for the run on screen. A comparison names the side by it. */
+  name: string;
+  /** Whether the document came from a file or from this page's own export. */
+  origin: "file" | "page";
+  artifact: TraceArtifact;
+  /** Every run the document holds, newest first, as {@link MonitorSnapshot} lists them. */
+  runs: MonitorRunSummary[];
+  /**
+   * The run being read: the one a bundle's or a run file's header names,
+   * the newest of a saved run, or the one chosen since. Null when the
+   * document holds no run to read.
+   */
+  runId: string | null;
+  read: MonitorRead;
+}
+
+/**
+ * Read a file's text as whichever artifact it is, and its run as a
+ * diagnostic. Throws, by the file's name, for a file that is not a bundle,
+ * a run file, or a saved run, or that is one from a version this page does
+ * not read. A readable file whose run cannot be read is a reason in `read`,
+ * as an empty recording is for a live read.
+ */
+export function readArtifactFile(text: string, name: string): LoadedArtifact {
+  const artifact = readArtifact(text, name);
+  return loadedFrom(artifact, name, "file", artifactRunId(artifact) ?? undefined);
+}
+
+/** {@link readArtifactFile} over a file the drop handler or the file input hands over. */
+export async function loadArtifact(file: Pick<File, "name" | "text">): Promise<LoadedArtifact> {
+  return readArtifactFile(await file.text(), file.name);
+}
+
+/** Which of the three files a loaded run came from, as the dock names it in a sentence. */
+export function describeArtifact(loaded: LoadedArtifact): string {
+  switch (loaded.artifact.kind) {
+    case "bundle":
+      return "a bundle";
+    case "run-file":
+      return "a run file the trace driver wrote";
+    case "saved-run":
+      return "a saved run";
+  }
+}
+
+/** The same file, read about another of its runs. */
+export function rereadLoaded(loaded: LoadedArtifact, runId: string): LoadedArtifact {
+  return loadedFrom(loaded.artifact, loaded.name, loaded.origin, runId);
+}
+
+/**
+ * The run on screen as a side a comparison can take, or null when nothing
+ * was read. Built from the snapshot's own document rather than from a
+ * second export, which would close another interval on the way to a
+ * document the dock already holds.
+ */
+export function pageArtifact(snapshot: MonitorSnapshot): LoadedArtifact | null {
+  if (!snapshot.trace || !snapshot.read.ok) return null;
+  return loadedFrom({ kind: "saved-run", trace: snapshot.trace }, "this page", "page", snapshot.read.document.runId);
+}
+
+function loadedFrom(
+  artifact: TraceArtifact,
+  name: string,
+  origin: LoadedArtifact["origin"],
+  runId: string | undefined,
+): LoadedArtifact {
+  const trace = artifactTrace(artifact);
+  const read = readRunOf(trace, runId);
+  return {
+    name,
+    origin,
+    artifact,
+    runs: summariseRuns(trace),
+    runId: read.ok ? read.document.runId : (runId ?? null),
+    read,
+  };
+}
+
+/**
+ * The side of a comparison a loaded run stands on, built as the CLI builds
+ * one from the same file. It carries what the file knows beyond its
+ * document and names the run the side was read about, which is the chosen
+ * one when somebody changed it. The run on screen knows what a bundle's
+ * header would carry, the planning configuration this page runs under, and
+ * nothing a bundle would not.
+ */
+export function compareSideFor(loaded: LoadedArtifact): CompareSide {
+  const side =
+    loaded.origin === "page"
+      ? {
+          trace: artifactTrace(loaded.artifact),
+          label: loaded.name,
+          planning: configStore.get(),
+          cache: null,
+          conditions: {},
+        }
+      : compareSideOf(loaded.artifact, loaded.name);
+  return { ...side, runId: loaded.runId ?? side.runId };
+}
+
+/** Two runs compared, as the document and as the text `lucida trace diff` prints. */
+export interface LoadedComparison {
+  comparison: RunComparison;
+  text: string;
+}
+
+/**
+ * Compare `right` against `left` through the seam's own compare function,
+ * which is the function `lucida trace diff` evaluates on a page: the dock
+ * and the CLI print one subtraction. Every delta is right minus left, so a
+ * baseline on the left and a candidate on the right read as what the
+ * candidate changed. Reads nothing from and closes nothing in the recorder.
+ */
+export function compareLoaded(left: LoadedArtifact, right: LoadedArtifact): LoadedComparison {
+  const comparison = compareTraces(compareSideFor(left), compareSideFor(right));
+  return { comparison, text: renderComparison(comparison) };
 }
 
 /**
