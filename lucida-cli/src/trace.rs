@@ -32,6 +32,7 @@ use crate::browser::{self, Viewport};
 use crate::credentials::EffectiveToken;
 use crate::error::{CliError, ErrorKind};
 use crate::session::{connect_workspace_socket, incoming_messages, wait_for_workspace_snapshot};
+use crate::trace_knobs::KnobSettings;
 use crate::trace_script::{
     Script, ScriptRecord, describe_script, failing_verdict, format_script_human, run_script,
     script_gate_failure,
@@ -244,6 +245,37 @@ fn window_read_expression(trace: &Value, run_id: Option<&str>, window: WindowReq
 /// the bundle has installed the seam; false on a page older than this flag.
 const WINDOWED_SEAM_PROBE: &str =
     "window.lucidaTrace ? (typeof window.lucidaTrace.diagnoseTrace === 'function') : null";
+
+/// Whether the page can compare two supplied documents (#1059). Null until
+/// the bundle has installed the seam; false on a page older than the diff.
+const COMPARE_SEAM_PROBE: &str =
+    "window.lucidaTrace ? (typeof window.lucidaTrace.compareTraces === 'function') : null";
+
+/// The evaluation behind `trace diff` and `--versus`: two documents handed
+/// to the page's compare function. The subtraction lives behind the seam as
+/// the diagnostic does (ADR 0051), so this CLI holds no diff of its own: the
+/// page derives each side and subtracts, and this CLI hands over the
+/// documents and what it alone knows about them, and prints what comes back.
+fn compare_read_expression(left: &CompareSide<'_>, right: &CompareSide<'_>) -> String {
+    let left_side = serde_json::to_string(&left.side).unwrap_or_else(|_| "{}".to_string());
+    let right_side = serde_json::to_string(&right.side).unwrap_or_else(|_| "{}".to_string());
+    let left_trace = left.trace;
+    let right_trace = right.trace;
+    format!(
+        r#"(() => {{
+  const seam = window.lucidaTrace;
+  if (!seam || typeof seam.compareTraces !== 'function') return null;
+  const left = {left_side};
+  left.trace = {left_trace};
+  const right = {right_side};
+  right.trace = {right_trace};
+  const comparison = seam.compareTraces(left, right);
+  let text;
+  try {{ text = seam.compareTracesText(left, right); }} catch (error) {{ text = 'rendering failed: ' + String(error); }}
+  return JSON.stringify({{ comparison, text }});
+}})()"#
+    )
+}
 /// The window the run was driven in, recorded because "cold open of dataset X"
 /// is not a reproducible workload without it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -416,6 +448,12 @@ pub struct TraceRunHeader {
     /// Absent for the driver's default: an open and nothing after it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script: Option<ScriptRecord>,
+    /// The Dev controls knobs the driver set before the page loaded, by
+    /// store field. Absent when it set none, and the run took the page's
+    /// defaults: the driver's profile is thrown away with its browser, so
+    /// nothing else could have steered the planner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knobs: Option<KnobSettings>,
 }
 
 /// Both renderings, taken at export time from the page's one renderer. The
@@ -910,6 +948,186 @@ fn windowed_run(export: WindowExport, window: WindowRequest) -> WindowedRun {
             std::collections::BTreeMap::new(),
         ),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Comparing two runs
+// ---------------------------------------------------------------------------
+
+/// What this CLI knows about one side of a comparison that the trace document
+/// does not (#1059): which run, how the side is named, and the conditions the
+/// driver or the bundle recorded around the run. The page's compare function
+/// takes this beside the document.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompareSideFacts {
+    /// The file the side was read from, as the text names it.
+    pub label: String,
+    pub run_id: Option<String>,
+    /// The planning fields known for the run. A bundle carries the whole
+    /// configuration. A run file carries the knobs the driver set, and every
+    /// other field ran at the page's default, because the driver's profile
+    /// starts empty; the page fills those in from its own defaults.
+    pub planning: Value,
+    /// The CPU cache knobs the driver set, or null for a bundle, whose
+    /// header does not carry them.
+    pub cache: Value,
+    /// Conditions only the driver knows, listed by the diff and never judged.
+    pub conditions: Value,
+}
+
+/// One side as the page is handed it: the document, and the side around it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompareSide<'a> {
+    pub trace: &'a Value,
+    pub side: CompareSideFacts,
+}
+
+impl<'a> CompareSide<'a> {
+    pub fn from_artifact(artifact: &'a TraceArtifact, path: &Path) -> Self {
+        match artifact {
+            TraceArtifact::Run(file) => Self::from_run_file(file, path),
+            TraceArtifact::Bundle(bundle) => Self::from_bundle(bundle, path),
+        }
+    }
+
+    pub fn from_run_file(file: &'a TraceRunFile, path: &Path) -> Self {
+        let knobs = file.header.knobs.clone().unwrap_or_default();
+        Self {
+            trace: &file.trace,
+            side: CompareSideFacts {
+                label: path.display().to_string(),
+                run_id: file.header.run_id.clone(),
+                planning: Value::Object(knobs.planning.into_iter().collect()),
+                cache: Value::Object(knobs.cache.into_iter().collect()),
+                conditions: serde_json::json!({
+                    "server warmth": file.header.server_warmth.summary,
+                }),
+            },
+        }
+    }
+
+    fn from_bundle(bundle: &'a TraceBundle, path: &Path) -> Self {
+        Self {
+            trace: &bundle.trace,
+            side: CompareSideFacts {
+                label: path.display().to_string(),
+                run_id: bundle.header.run_id.clone(),
+                planning: bundle.header.planning.clone(),
+                cache: Value::Null,
+                conditions: serde_json::json!({}),
+            },
+        }
+    }
+}
+
+/// What the page handed back for a comparison.
+#[derive(Debug, Deserialize)]
+struct CompareExport {
+    comparison: Value,
+    text: String,
+}
+
+/// Two runs compared, exactly as the page derived it: the document, and the
+/// page's text rendering of it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Comparison {
+    pub comparison: Value,
+    pub text: String,
+}
+
+/// Compare `right` against `left` through the page at `url`.
+///
+/// As with [`read_window`], a headless page is opened only to reach the
+/// derivation: the two files carry whole-run readings of two different runs,
+/// and this CLI holds no derivation of its own to subtract with. The page's
+/// own recording is never read. Every delta is right minus left, so a
+/// baseline on the left and a candidate on the right read as what the
+/// candidate changed.
+pub async fn read_comparison(
+    url: &str,
+    token: Option<&EffectiveToken>,
+    wait: Duration,
+    left: &CompareSide<'_>,
+    right: &CompareSide<'_>,
+) -> Result<Comparison, CliError> {
+    let expression = compare_read_expression(left, right);
+    let viewport = Viewport::new(DEFAULT_WIDTH, DEFAULT_HEIGHT, 1.0);
+    let json = browser::with_browser(viewport, wait, async |browser| {
+        let mut page = browser.open_page_unrendered(url, token, wait).await?;
+        wait_for_seam_entry(&mut page, COMPARE_SEAM_PROBE, "compare two documents", wait).await?;
+        let value = page.evaluate(&expression, wait).await?;
+        value.as_str().map(str::to_string).ok_or_else(|| {
+            CliError::new(
+                ErrorKind::Protocol,
+                "the page did not return a comparison; window.lucidaTrace was missing",
+            )
+        })
+    })
+    .await?;
+    let export: CompareExport = serde_json::from_str(&json).map_err(|error| {
+        CliError::new(
+            ErrorKind::Protocol,
+            format!("the page returned a comparison this CLI cannot read: {error}"),
+        )
+    })?;
+    Ok(Comparison {
+        comparison: export.comparison,
+        text: export.text,
+    })
+}
+
+/// The suffix the second run's files take under `--versus`.
+pub const VERSUS_SUFFIX: &str = "versus";
+
+/// `path` with `suffix` inserted before its extension: `run.json` becomes
+/// `run.versus.json`, and `frame` becomes `frame.versus`. The second run of
+/// a `--versus` pair writes its sidecars here, beside the first's.
+pub fn suffixed(path: &Path, suffix: &str) -> PathBuf {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return path.to_path_buf();
+    };
+    let renamed = match name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => format!("{stem}.{suffix}.{extension}"),
+        _ => format!("{name}.{suffix}"),
+    };
+    path.with_file_name(renamed)
+}
+
+/// One run of a `--versus` pair, for the human rendering.
+#[derive(Debug, Clone, Copy)]
+pub struct VersusSide<'a> {
+    pub file: &'a TraceRunFile,
+    pub path: &'a Path,
+    pub bundle: Option<&'a Path>,
+}
+
+/// The two runs of a `--versus` pair and the page's diff of them. The knobs
+/// each ran under lead, because they are the experiment; the diff's own text
+/// says which conditions differed besides.
+pub fn format_versus_human(first: VersusSide<'_>, second: VersusSide<'_>, text: &str) -> String {
+    let side = |name: &str, side: VersusSide<'_>| {
+        let knobs = side
+            .file
+            .header
+            .knobs
+            .as_ref()
+            .map(KnobSettings::describe)
+            .filter(|knobs| !knobs.is_empty())
+            .unwrap_or_else(|| "the page's defaults".to_string());
+        let bundle = side
+            .bundle
+            .map(|bundle| format!(" · bundle {}", bundle.display()))
+            .unwrap_or_default();
+        format!("{name:<9} {} · {knobs}{bundle}", side.path.display())
+    };
+    format!(
+        "{}\n{}\n\n{text}\n\nlucida trace diff {} {}   # the same diff again, from the files\n",
+        side("left", first),
+        side("right", second),
+        first.path.display(),
+        second.path.display(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1447,11 +1665,17 @@ pub fn format_run_human(file: &TraceRunFile, path: &Path, bundle: Option<&Path>)
         .as_ref()
         .map(|script| format!("{}\n", format_script_human(script)))
         .unwrap_or_default();
+    let knobs = header
+        .knobs
+        .as_ref()
+        .map(|knobs| format!("knobs     {}\n", knobs.describe()))
+        .unwrap_or_default();
     format!(
         "view      {} @ {}x{} DPR {}\n\
          {camera}\
          server    {}\n\
          hold      quiescent had to hold {} ms; every duration below is measured against that\n\
+         {knobs}\
          {steps}\
          run file  {}\n\
          {bundle}\
@@ -1817,6 +2041,7 @@ pub async fn drive_run(
     // would send the reader to a different run than the one they were reading.
     let export_expression = run_export_expression(perfetto_path.is_some());
     let request = DriveRequest {
+        knobs: (!facts.knobs.is_empty()).then_some(&facts.knobs),
         screenshot: facts.screenshot.as_deref(),
         script: (!facts.script.is_empty()).then_some(&facts.script),
     };
@@ -1874,10 +2099,12 @@ struct Driven {
     bundle_json: Option<String>,
 }
 
-/// What a drive does on the page beyond the export: the frame it writes,
-/// and the script it runs once the open has settled. Nothing, by default.
+/// What a drive does on the page beyond the export: the knobs it sets before
+/// the page loads, the frame it writes, and the script it runs once the open
+/// has settled. Nothing, by default.
 #[derive(Debug, Clone, Copy, Default)]
 struct DriveRequest<'a> {
+    knobs: Option<&'a KnobSettings>,
     screenshot: Option<&'a Path>,
     script: Option<&'a Script>,
 }
@@ -1898,6 +2125,11 @@ struct DriveRequest<'a> {
 /// `request.script` runs once the open has settled or been given up on,
 /// step by step, each gesture settling before the next. The frame is then
 /// the last step's, and the run the export reads is the last step's run.
+///
+/// `request.knobs` are written into the page's browser storage before the
+/// page loads, through the stores the Dev controls panel writes, so the run
+/// starts under them. The profile is the launch's own and dies with it, so
+/// a knob set for one run cannot steer the next.
 async fn drive_and_export(
     url: &str,
     token: Option<&EffectiveToken>,
@@ -1908,8 +2140,16 @@ async fn drive_and_export(
     bundle: Option<&BundleRequest>,
 ) -> Result<Driven, CliError> {
     let screenshot = request.screenshot;
+    let seed = request.knobs.and_then(KnobSettings::new_document_script);
     browser::with_browser(viewport, wait, async |browser| {
-        let mut page = browser.open_page_unrendered(url, token, wait).await?;
+        let mut page = match seed.as_deref() {
+            Some(script) => {
+                browser
+                    .open_page_unrendered_with_script(url, token, script, wait)
+                    .await?
+            }
+            None => browser.open_page_unrendered(url, token, wait).await?,
+        };
         if !wait_for_settled_run(&mut page, wait).await? {
             page.evaluate(CLOSE_AS_TIMEOUT, wait).await?;
             let closed = read_run_state(&mut page, wait).await?;
@@ -1999,15 +2239,35 @@ pub async fn read_window(
 /// A page still loading is worth waiting for; a page whose seam predates the
 /// window flag is not, and says which build is behind.
 async fn wait_for_windowed_seam(page: &mut browser::Page, wait: Duration) -> Result<(), CliError> {
+    wait_for_seam_entry(
+        page,
+        WINDOWED_SEAM_PROBE,
+        "read a document over a window",
+        wait,
+    )
+    .await
+}
+
+/// Wait for the seam to have one entry, by `probe`: null while the page is
+/// still loading, false on a page older than the entry, true once it is
+/// there. `cannot` names the entry in the error for a page that is too old.
+async fn wait_for_seam_entry(
+    page: &mut browser::Page,
+    probe: &str,
+    cannot: &str,
+    wait: Duration,
+) -> Result<(), CliError> {
     let deadline = tokio::time::Instant::now() + wait;
     loop {
-        match page.evaluate(WINDOWED_SEAM_PROBE, wait).await?.as_bool() {
+        match page.evaluate(probe, wait).await?.as_bool() {
             Some(true) => return Ok(()),
             Some(false) => {
                 return Err(CliError::new(
                     ErrorKind::Protocol,
-                    "this page's trace seam cannot read a document over a window; the server is \
-                     running a build older than this CLI",
+                    format!(
+                        "this page's trace seam cannot {cannot}; the server is running a build \
+                         older than this CLI"
+                    ),
                 ));
             }
             None => {}
@@ -2037,6 +2297,8 @@ pub struct DriverFacts {
     pub screenshot: Option<PathBuf>,
     /// The steps to run after the open settles. Empty for a cold open alone.
     pub script: Script,
+    /// The Dev controls knobs to set before the page loads. Empty for the page's defaults.
+    pub knobs: KnobSettings,
 }
 
 /// Fold what the page returned together with what only the driver knows. Split
@@ -2061,6 +2323,7 @@ fn assemble_run_file(export: SeamExport, facts: &DriverFacts) -> TraceRunFile {
             workspace_id: facts.workspace_id.clone(),
             screenshot: facts.screenshot.clone(),
             script: export.script,
+            knobs: (!facts.knobs.is_empty()).then(|| facts.knobs.clone()),
         },
         renderings: TraceRenderings::from_export(
             export.summary,
@@ -2372,6 +2635,7 @@ mod tests {
             workspace_id: "ws".to_string(),
             screenshot: None,
             script: Script::default(),
+            knobs: KnobSettings::default(),
         }
     }
 
@@ -2389,6 +2653,7 @@ mod tests {
                 workspace_id: "ws".to_string(),
                 screenshot: None,
                 script: None,
+                knobs: None,
             },
             renderings: TraceRenderings {
                 summary: "lucida trace run-1-1 — VERDICT: clear".to_string(),
@@ -3086,6 +3351,177 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn knobs_for(flags: &[(&str, f64)]) -> KnobSettings {
+        let mut knobs = KnobSettings::default();
+        for (flag, value) in flags {
+            knobs
+                .set(crate::trace_knobs::knob_for_flag(flag).unwrap(), *value)
+                .unwrap();
+        }
+        knobs
+    }
+
+    fn minimal_export() -> SeamExport {
+        serde_json::from_str(
+            r#"{"runId":"run-1-1","endReason":"quiescent","diagnostic":{"verdict":{"kind":"clear"}},
+                "summary":"s","phases":"p","spatial":"x","trace":{"runs":[]}}"#,
+        )
+        .unwrap()
+    }
+
+    /// The header records the knobs the driver set, and nothing when it set
+    /// none: an absent field says the run took the page's defaults.
+    #[test]
+    fn the_run_header_records_the_knobs_only_when_some_were_set() {
+        let plain = assemble_run_file(minimal_export(), &facts());
+        assert_eq!(plain.header.knobs, None);
+        assert!(
+            !serde_json::to_string(&plain.header)
+                .unwrap()
+                .contains("knobs")
+        );
+
+        let knobs = knobs_for(&[("prefetch-depth", 0.0), ("max-fetches", 2.0)]);
+        let with = DriverFacts {
+            knobs: knobs.clone(),
+            ..facts()
+        };
+        let file = assemble_run_file(minimal_export(), &with);
+        assert_eq!(file.header.knobs, Some(knobs));
+        let json = serde_json::to_value(&file.header).unwrap();
+        assert_eq!(json["knobs"]["planning"]["prefetchDepth"], json!(0));
+        assert_eq!(json["knobs"]["cache"]["maxConcurrentFetches"], json!(2));
+
+        let text = format_run_human(&file, Path::new("/runs/run-1-1.json"), None);
+        assert!(
+            text.contains("knobs     prefetch-depth 0 · max-fetches 2\n"),
+            "{text}"
+        );
+        let plain_text = format_run_human(&plain, Path::new("/runs/run-1-1.json"), None);
+        assert!(!plain_text.contains("knobs"), "{plain_text}");
+    }
+
+    #[test]
+    fn suffixed_inserts_before_the_extension() {
+        assert_eq!(
+            suffixed(Path::new("/runs/run.json"), VERSUS_SUFFIX),
+            PathBuf::from("/runs/run.versus.json")
+        );
+        assert_eq!(
+            suffixed(Path::new("frame.png"), VERSUS_SUFFIX),
+            PathBuf::from("frame.versus.png")
+        );
+        assert_eq!(
+            suffixed(Path::new("out/frame"), VERSUS_SUFFIX),
+            PathBuf::from("out/frame.versus")
+        );
+        assert_eq!(
+            suffixed(Path::new(".hidden"), VERSUS_SUFFIX),
+            PathBuf::from(".hidden.versus")
+        );
+    }
+
+    /// A run file's side carries the knobs the driver set and the server's
+    /// warmth; a bundle's carries its header's whole planning configuration
+    /// and cannot say what the cache knobs were.
+    #[test]
+    fn a_comparison_side_carries_what_its_artifact_knows() {
+        let mut file = run_file(json!({ "verdict": { "kind": "clear" } }), true, "quiescent");
+        file.header.knobs = Some(knobs_for(&[
+            ("prefetch-depth", 0.0),
+            ("main-budget-mb", 64.0),
+        ]));
+        let run_side = CompareSide::from_run_file(&file, Path::new("runs/left.json"));
+        assert_eq!(run_side.side.label, "runs/left.json");
+        assert_eq!(run_side.side.run_id.as_deref(), Some("run-1-1"));
+        assert_eq!(run_side.side.planning, json!({ "prefetchDepth": 0 }));
+        assert_eq!(
+            run_side.side.cache,
+            json!({ "mainBudgetBytes": 67_108_864 })
+        );
+        assert_eq!(
+            run_side.side.conditions["server warmth"],
+            json!("server cold for this dataset (not open before the run)")
+        );
+        assert!(std::ptr::eq(run_side.trace, &file.trace));
+
+        // An empty object, not null: the page reads it as every field at
+        // its default, where null would leave the side out of the planning
+        // rows.
+        file.header.knobs = None;
+        let plain = CompareSide::from_run_file(&file, Path::new("runs/left.json"));
+        assert_eq!(plain.side.planning, json!({}));
+        assert_eq!(plain.side.cache, json!({}));
+
+        let bundle = golden_bundle();
+        let artifact = TraceArtifact::Bundle(Box::new(bundle.clone()));
+        let bundle_side = CompareSide::from_artifact(&artifact, Path::new("field.bundle.json"));
+        assert_eq!(bundle_side.side.label, "field.bundle.json");
+        assert_eq!(bundle_side.side.run_id, bundle.header.run_id);
+        assert_eq!(bundle_side.side.planning, bundle.header.planning);
+        assert_eq!(bundle_side.side.cache, Value::Null);
+    }
+
+    /// The expression hands the page both documents and both sides, and
+    /// calls the page's compare function rather than computing anything.
+    #[test]
+    fn the_compare_expression_hands_the_page_both_sides() {
+        let mut left = run_file(json!({}), true, "quiescent");
+        left.trace = json!({ "runs": [{ "header": { "runId": "run-1-1" } }] });
+        let mut right = run_file(json!({}), true, "quiescent");
+        right.header.run_id = Some("run-2-1".to_string());
+        right.trace = json!({ "runs": [{ "header": { "runId": "run-2-1" } }] });
+        let expression = compare_read_expression(
+            &CompareSide::from_run_file(&left, Path::new("a.json")),
+            &CompareSide::from_run_file(&right, Path::new("b.json")),
+        );
+        assert!(expression.contains("seam.compareTraces(left, right)"));
+        assert!(expression.contains("seam.compareTracesText(left, right)"));
+        assert!(expression.contains(&format!("left.trace = {};", left.trace)));
+        assert!(expression.contains(&format!("right.trace = {};", right.trace)));
+        assert!(expression.contains(r#""label":"a.json""#));
+        assert!(expression.contains(r#""label":"b.json""#));
+        assert!(expression.contains(r#""runId":"run-2-1""#));
+    }
+
+    #[test]
+    fn the_versus_rendering_leads_with_each_runs_knobs_and_ends_with_the_diff_command() {
+        let first = run_file(json!({}), true, "quiescent");
+        let mut second = run_file(json!({}), true, "quiescent");
+        second.header.knobs = Some(knobs_for(&[("prefetch-depth", 0.0)]));
+        let text = format_versus_human(
+            VersusSide {
+                file: &first,
+                path: Path::new("/runs/run-1-1.json"),
+                bundle: None,
+            },
+            VersusSide {
+                file: &second,
+                path: Path::new("/runs/run-1-1.versus.json"),
+                bundle: Some(Path::new("/runs/b.versus.json")),
+            },
+            "lucida trace diff run-1-1 run-1-1 — every delta is right minus left",
+        );
+        assert!(
+            text.starts_with("left      /runs/run-1-1.json · the page's defaults\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "right     /runs/run-1-1.versus.json · prefetch-depth 0 · bundle /runs/b.versus.json\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("\n\nlucida trace diff run-1-1 run-1-1 — every delta"),
+            "{text}"
+        );
+        assert!(
+            text.ends_with("lucida trace diff /runs/run-1-1.json /runs/run-1-1.versus.json   # the same diff again, from the files\n"),
+            "{text}"
+        );
     }
 
     /// The bundle the page writes from fixed inputs, checked in under

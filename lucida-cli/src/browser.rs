@@ -170,7 +170,7 @@ impl HeadlessBrowser {
         token: Option<&EffectiveToken>,
         wait: Duration,
     ) -> Result<Page, CliError> {
-        let mut page = self.navigate(url, token, wait).await?;
+        let mut page = self.navigate(url, token, None, wait).await?;
         page.wait_for_document(wait).await?;
         page.wait_for_capture_ready(wait).await?;
         Ok(page)
@@ -189,13 +189,32 @@ impl HeadlessBrowser {
         token: Option<&EffectiveToken>,
         wait: Duration,
     ) -> Result<Page, CliError> {
-        self.navigate(url, token, wait).await
+        self.navigate(url, token, None, wait).await
+    }
+
+    /// [`Self::open_page_unrendered`], with `script` run in the page before
+    /// any of the page's own scripts, on this navigation and any later one.
+    ///
+    /// The trace driver seeds the page's browser storage with the knobs it
+    /// was given this way, so the page hydrates its stores from them as it
+    /// starts. Evaluating after the load would be too late: the planner has
+    /// read its configuration and the first requests are in flight before
+    /// the driver can act.
+    pub async fn open_page_unrendered_with_script(
+        &self,
+        url: &str,
+        token: Option<&EffectiveToken>,
+        script: &str,
+        wait: Duration,
+    ) -> Result<Page, CliError> {
+        self.navigate(url, token, Some(script), wait).await
     }
 
     async fn navigate(
         &self,
         url: &str,
         token: Option<&EffectiveToken>,
+        script: Option<&str>,
         wait: Duration,
     ) -> Result<Page, CliError> {
         let mut page = Page::attach(&self.endpoint, wait).await?;
@@ -220,6 +239,14 @@ impl HeadlessBrowser {
         )
         .await?;
         page.call("Page.enable", json!({}), wait).await?;
+        if let Some(source) = script {
+            page.call(
+                "Page.addScriptToEvaluateOnNewDocument",
+                json!({ "source": source }),
+                wait,
+            )
+            .await?;
+        }
         page.call("Page.navigate", json!({ "url": url }), wait)
             .await?;
         Ok(page)

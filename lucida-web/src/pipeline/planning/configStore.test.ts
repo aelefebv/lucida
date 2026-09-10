@@ -3,6 +3,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { configStore } from "./configStore.ts";
 import { DEFAULT_PLANNING_CONFIG } from "./config.ts";
+import {
+  createSyntheticEntity,
+  createSyntheticSnapshot,
+  createSyntheticState,
+  plan,
+} from "./index.ts";
+import type { LevelGeometry } from "../../manifestTypes.ts";
 
 const STORAGE_KEY = "lucida.planning.config";
 
@@ -207,6 +214,62 @@ describe("configStore — localStorage round-trip on module load", () => {
       if (k === "prefetchDepth") continue;
       expect(cfg[k]).toBe(DEFAULT_PLANNING_CONFIG[k]);
     }
+    mod.configStore.__resetForTesting();
+  });
+});
+
+describe("configStore — the envelope the trace driver writes", () => {
+  /**
+   * The string is what `lucida trace --prefetch-depth 0` writes before the
+   * page loads, and the driver's own test holds its script to that shape.
+   * Together they are the browser-free half of "prefetch depth zero from
+   * the driver leaves the prefetch lane empty".
+   */
+  it("hydrates prefetch depth zero from the driver's envelope, and the plan has no prefetch lane", async () => {
+    localStorage.setItem(STORAGE_KEY, '{"schemaVersion":3,"config":{"prefetchDepth":0}}');
+    vi.resetModules();
+    const mod = await import("./configStore.ts");
+    const config = mod.configStore.get();
+    expect(config.prefetchDepth).toBe(0);
+
+    // A timeseries with ten timepoints at one level, so the default depth
+    // has something to look ahead to and depth zero visibly does not.
+    const level0: LevelGeometry = {
+      level_index: 0,
+      shape: [10, 1, 1, 256, 256],
+      chunk_shape: [1, 1, 1, 256, 256],
+      grid_shape: [10, 1, 1, 1, 1],
+      scale: [1, 1, 1, 1, 1],
+    };
+    const entity = createSyntheticEntity({
+      entityId: "e0",
+      kind: "Image",
+      projectedDiagonalPx: 200,
+      targetLevel: 0,
+      levels: [level0],
+    });
+    const snapshot = createSyntheticSnapshot({
+      entities: [entity],
+      visibleRegion: {
+        xyBoundsVox: [0, 0, 256, 256],
+        zRangeVox: [0, 1],
+        effectiveZoom: 1,
+        sortCenterVox: null,
+        frustumPlanes: null,
+      },
+      selection: {
+        t: 0,
+        c: 0,
+        z: 0,
+        visibleChannels: [0],
+        renderMode: "slice",
+        interactionState: "idle",
+      },
+    });
+    const driven = plan(snapshot, createSyntheticState(), config);
+    expect(driven.requests.some((request) => request.lane === "prefetch")).toBe(false);
+    const defaults = plan(snapshot, createSyntheticState(), DEFAULT_PLANNING_CONFIG);
+    expect(defaults.requests.some((request) => request.lane === "prefetch")).toBe(true);
     mod.configStore.__resetForTesting();
   });
 });
