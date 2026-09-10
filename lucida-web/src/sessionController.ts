@@ -19,6 +19,7 @@ import {
 } from "./manifestTypes.ts";
 import type { ViewportCommand } from "./commands.ts";
 import { DecodePool, ProxiedContentSource, CpuCache } from "./pipeline/fetch/index.ts";
+import { readCacheKnobs } from "./pipeline/fetch/cacheKnobs.ts";
 import type {
   WireGeneratedAvailabilityByDataset,
   WireGeneratedAvailabilityDelta,
@@ -315,6 +316,9 @@ export class SessionController {
       (json) => this.session?.bridge.send(json),
     );
     this.cpuCache = new CpuCache(this.contentSource, decodePool, {
+      // The knobs the trace driver left in browser storage for this page,
+      // if any. Read once, here, so the cache starts under them.
+      ...readCacheKnobs(),
       // Chunk deliveries failing without interruption would otherwise
       // present as a silently stalling canvas; route the cache's
       // aggregated, throttled signal to the visible error banner, and

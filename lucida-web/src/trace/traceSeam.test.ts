@@ -477,6 +477,39 @@ describe("the trace seam", () => {
     expect(text).toContain("CRITICAL PATH");
   });
 
+  it("compares two supplied trace documents without touching the recording", async () => {
+    const seam = installTraceSeam();
+    const source = new ControlledSource();
+    const cache = new CpuCache(source, makeDecode());
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    cache.submit(makePlan([makeRequest()]));
+    await flush();
+    seam.closeRun("timeout");
+    const document = seam.exportTrace();
+    const runId = seam.runState.lastConcludedRunId!;
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    const comparison = seam.compareTraces(
+      { trace: document, runId, label: "baseline.json", planning: { prefetchDepth: 0 } },
+      { trace: document, runId },
+    );
+    const text = seam.compareTracesText({ trace: document, runId }, { trace: document, runId });
+    expect(traceRecorder.isRunOpen).toBe(true);
+
+    expect(comparison.left.runId).toBe(runId);
+    expect(comparison.right.runId).toBe(runId);
+    expect(comparison.comparable).toBe(true);
+    expect(comparison.header.find((field) => field.field === "planning.prefetchDepth")).toMatchObject({
+      left: 0,
+      same: false,
+      breaksComparability: false,
+    });
+    expect(comparison.wall.deltaMs).toBe(0);
+    expect(text).toContain(`lucida trace diff ${runId} ${runId}`);
+    expect(text).toContain("PHASES");
+  });
+
   /**
    * "The shape behind X" is a depth of the page's renderer too, so the CLI
    * that prints it never becomes a second renderer with its own opinions.

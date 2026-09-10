@@ -27,6 +27,14 @@ export type {
   TierCounters,
 } from "./types.ts";
 
+export {
+  CACHE_KNOB_FIELDS,
+  CACHE_KNOBS_SCHEMA_VERSION,
+  CACHE_KNOBS_STORAGE_KEY,
+  readCacheKnobs,
+} from "./cacheKnobs.ts";
+export type { CacheKnobField, CacheKnobs } from "./cacheKnobs.ts";
+
 export { ProxiedContentSource } from "./contentSource.ts";
 export type {
   ContentSource,
