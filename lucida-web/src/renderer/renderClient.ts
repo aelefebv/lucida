@@ -34,10 +34,14 @@ function failureText(failure: CaptureFailure | null): string {
   return failure ? `${failure.name}: ${failure.message}` : "no reason was given";
 }
 
+const DESTROYED_BEFORE_ANSWER = "the render client was destroyed before the worker answered";
+
 export class RenderClient implements UploadClient {
   private worker: Worker;
   private readyPromise: Promise<void>;
   private readyReject: (err: Error) => void = () => {};
+  /** The worker drops any message posted before its `ready`. */
+  private workerReady = false;
   private destroyed = false;
 
   /** Pending `thumbnailRender` requests, keyed by the id sent to the worker.
@@ -86,6 +90,7 @@ export class RenderClient implements UploadClient {
       this.readyReject = reject;
       const handler = (e: MessageEvent<WorkerToMainMessage>) => {
         if (e.data.type === "ready") {
+          this.workerReady = true;
           resolve();
           this.worker.removeEventListener("message", handler);
           this.worker.addEventListener("message", this.onMessage);
@@ -489,11 +494,32 @@ export class RenderClient implements UploadClient {
    * asks the render loop for one. Resolves with a reason when the worker
    * could not read a frame, and immediately after destroy, so a bundle never
    * hangs on a dead client.
+   *
+   * A worker still starting drops every message, and one whose start failed
+   * answers none, so a capture asked for before `ready` waits for it and a
+   * failed start becomes the reason. A page whose worker never came up is
+   * the case the driver's fallback frame exists for, and it has to hear that
+   * the page's own capture failed rather than wait on it forever (#1098).
    */
   captureFrame(): Promise<FrameCaptureResult> {
     if (this.destroyed) {
       return Promise.resolve({ frame: null, reason: "the render client was destroyed, so there was no canvas to read" });
     }
+    if (this.workerReady) return this.postCaptureFrame();
+    return this.readyPromise.then(
+      () => this.postCaptureFrame(),
+      // destroy() rejects the same promise, and that is not a failed start.
+      (error: unknown) => ({
+        frame: null,
+        reason: this.destroyed
+          ? DESTROYED_BEFORE_ANSWER
+          : `the render worker did not start: ${error instanceof Error ? error.message : String(error)}`,
+      }),
+    );
+  }
+
+  private postCaptureFrame(): Promise<FrameCaptureResult> {
+    if (this.destroyed) return Promise.resolve({ frame: null, reason: DESTROYED_BEFORE_ANSWER });
     const id = this.frameSeq++;
     return new Promise<FrameCaptureResult>((resolve) => {
       this.framePending.set(id, resolve);
@@ -571,7 +597,7 @@ export class RenderClient implements UploadClient {
     for (const resolve of this.thumbnailPending.values()) resolve(null);
     this.thumbnailPending.clear();
     for (const resolve of this.framePending.values()) {
-      resolve({ frame: null, reason: "the render client was destroyed before the worker answered" });
+      resolve({ frame: null, reason: DESTROYED_BEFORE_ANSWER });
     }
     this.framePending.clear();
     // Settle a still-pending init so `ready()` awaiters don't hang (no-op

@@ -483,7 +483,11 @@ impl Page {
         Ok(())
     }
 
-    /// Capture the page as a PNG.
+    /// Capture the page as a PNG, as the compositor shows it. That is not
+    /// always what the page drew: headless Chrome on Vulkan leaves a WebGPU
+    /// canvas out and returns solid black in its place, so a caller that
+    /// wants the canvas asks the page to capture it and keeps this as the
+    /// fallback (#1098).
     pub async fn screenshot_png(&mut self, wait: Duration) -> Result<Vec<u8>, CliError> {
         let captured = self
             .call(

@@ -25,6 +25,7 @@ import { bundleServices, exportBundle, type BundleOptions, type TraceBundle } fr
 import { toChromeTraceJson } from "./chromeTrace.ts";
 import { compareTraces, renderComparison, type CompareSide, type RunComparison } from "./diagnose/compare.ts";
 import { diagnoseDocument } from "./diagnose/diagnose.ts";
+import { decodePngOnPage, pageDecodesPng } from "./flatFrame.ts";
 import {
   renderProvisional,
   type ProvisionalOptions,
@@ -173,8 +174,10 @@ export interface LucidaTraceSeam {
    * saves and the file the driver writes are the same artifact.
    *
    * Asynchronous because the health is a socket round trip and the frame is
-   * read off the render worker's canvas. Closes the run in progress, exactly
-   * as {@link exportTrace} does: it is the same export with more around it.
+   * read off the render worker's canvas. A driver that took its own
+   * screenshot passes it as `fallbackFrame`, and the page carries it only
+   * when that read fails (#1098). Closes the run in progress, exactly as
+   * {@link exportTrace} does: it is the same export with more around it.
    * The Perfetto projection is included only when `perfetto` is set.
    */
   exportBundle(options?: BundleOptions): Promise<TraceBundle>;
@@ -345,6 +348,7 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
           planning: configStore.get(),
           origin: target.location?.origin ?? null,
           devicePixelRatio: target.devicePixelRatio ?? null,
+          decodePng: pageDecodesPng() ? decodePngOnPage : null,
           now: Date.now(),
         },
         options,

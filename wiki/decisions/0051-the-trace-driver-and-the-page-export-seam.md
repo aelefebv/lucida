@@ -5,7 +5,7 @@ description: "How lucida trace drives a headless run and gets the trace out: a p
 tags: [lucida, decision]
 source_path: wiki/decisions/0051-the-trace-driver-and-the-page-export-seam.md
 created: 2026-08-10
-modified: 2026-09-09
+modified: 2026-09-10
 ---
 
 # The trace driver and the page export seam
@@ -284,4 +284,19 @@ answer than a scripting language nobody has asked for yet.
   host the first `requestAdapter()` after a cold launch can answer `null` for
   a few seconds, so the render worker and the seam ask through one bounded
   retry rather than treating the first `null` as final ([#1090]).
+- The bundle's frame is the page's own capture from any caller, the driver
+  included. A DevTools screenshot is not evidence of what a WebGPU canvas
+  showed: headless Chrome on Vulkan leaves the canvas out of
+  `Page.captureScreenshot` and returns solid black where the page's own
+  capture of the same canvas shows the dataset. So the driver hands its
+  screenshot over as a fallback, and the page uses it only when its own
+  capture fails. A fallback whose canvas region decodes to one flat colour
+  is recorded as an absent frame that names the colour. A screenshot that
+  does stand in carries the page's reason beside it. The region, not the
+  whole screenshot, because the screenshot is of the page, and the
+  scrollbars of an overflowing page along its edge are not the canvas. For
+  the fallback to be reachable on the host it exists for, a page whose
+  render worker never started has to answer its own capture with that as
+  the reason, not wait on a worker that will never answer ([#1098]).
 [#1090]: https://github.com/aelefebv/lucida/issues/1090
+[#1098]: https://github.com/aelefebv/lucida/issues/1098

@@ -156,6 +156,53 @@ describe("RenderClient destroy", () => {
     expect(worker.posted.length).toBe(postedBefore);
   });
 
+  /**
+   * The worker drops every message until its init completes and answers
+   * none after its init fails, so a capture posted then would hang the
+   * bundle export on the one host the driver's fallback frame exists for:
+   * one where the worker never came up (#1098).
+   */
+  it("captureFrame on a worker that failed to start resolves with the failure as the reason and posts nothing", async () => {
+    const client = new RenderClient(makeCanvas());
+    const worker = FakeWorker.instances[FakeWorker.instances.length - 1];
+    worker.emit({ type: "error", message: "Failed to get WebGPU adapter" });
+    const postedBefore = worker.posted.length;
+
+    await expect(client.captureFrame()).resolves.toEqual({
+      frame: null,
+      reason: "the render worker did not start: Failed to get WebGPU adapter",
+    });
+    expect(worker.posted.length).toBe(postedBefore);
+  });
+
+  it("captureFrame before the worker is ready waits for it, then posts and is answered by id", async () => {
+    const client = new RenderClient(makeCanvas());
+    const worker = FakeWorker.instances[FakeWorker.instances.length - 1];
+    const pending = client.captureFrame();
+    expect(worker.posted.filter(m => m.type === "captureFrame")).toHaveLength(0);
+
+    worker.emit({ type: "ready" });
+    await client.ready();
+    expect(worker.posted.filter(m => m.type === "captureFrame").map(m => m.id)).toEqual([0]);
+
+    const png = new Uint8Array([9]).buffer;
+    worker.emit({ type: "frameCaptured", id: 0, png, width: 4, height: 2, failure: null });
+    await expect(pending).resolves.toEqual({ frame: { png, width: 4, height: 2 }, reason: null });
+  });
+
+  it("destroy settles a capture still waiting for the worker to start", async () => {
+    const client = new RenderClient(makeCanvas());
+    const worker = FakeWorker.instances[FakeWorker.instances.length - 1];
+    const pending = client.captureFrame();
+    client.destroy();
+
+    await expect(pending).resolves.toEqual({
+      frame: null,
+      reason: "the render client was destroyed before the worker answered",
+    });
+    expect(worker.posted.filter(m => m.type === "captureFrame")).toHaveLength(0);
+  });
+
   it("thumbnailRender after destroy resolves null immediately and posts nothing", async () => {
     const { client, worker } = makeReadyClient();
     client.destroy();

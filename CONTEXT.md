@@ -328,6 +328,15 @@ _Avoid_: report (the action is Send report; what it sends is a bundle),
 archive, zip, export (the act, not the file), attachment, run file (the
 driver's artifact, see below), saved run (the document alone)
 
+**Fallback frame**:
+The screenshot the trace driver hands the page with its bundle request. The
+page carries it as the bundle's frame only when its own capture of the
+canvas fails, and not when the canvas's region of it is one flat colour.
+Never the first choice: a DevTools screenshot can leave a WebGPU canvas
+out, where the page's own capture cannot. `capturedBy` names which was
+kept.
+_Avoid_: driver frame, screenshot frame, frame (the page's own)
+
 **Saved run**:
 The trace document alone, as **Save run** in the dock writes it. It names
 no run of its own, so a reader takes the newest. It records nothing beyond
