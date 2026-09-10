@@ -25,6 +25,7 @@ function useWatchStream(stream: WatchStream): WatchStreamState {
 
 export function WatchToggle({ stream = watchStream }: { stream?: WatchStream }) {
   const state = useWatchStream(stream);
+  const status = watchStatus(state.on, state.attached);
   return (
     <span className={state.on ? "monitor-watch monitor-watch-on" : "monitor-watch"}>
       <button
@@ -36,8 +37,10 @@ export function WatchToggle({ stream = watchStream }: { stream?: WatchStream }) 
       >
         {state.on ? "Stop the watch stream" : "Start a watch stream"}
       </button>
-      <span role="status" className="monitor-watch-status" data-testid="monitor-watch-status">
-        {watchStatus(state.on, state.attached)}
+      {/* The stylesheet cuts this to one line (#1093), so the title carries
+          the whole sentence. */}
+      <span role="status" className="monitor-watch-status" title={status} data-testid="monitor-watch-status">
+        {status}
       </span>
     </span>
   );

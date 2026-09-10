@@ -24,7 +24,8 @@ function connected() {
 }
 
 const toggle = () => screen.getByTestId("monitor-watch-toggle") as HTMLButtonElement;
-const status = () => screen.getByTestId("monitor-watch-status").textContent ?? "";
+const statusElement = () => screen.getByTestId("monitor-watch-status");
+const status = () => statusElement().textContent ?? "";
 
 describe("the watch toggle", () => {
   it("offers to start and says the stream is off", () => {
@@ -73,6 +74,15 @@ describe("the watch toggle", () => {
     render(<WatchToggle stream={new WatchStream()} />);
     expect(toggle().disabled).toBe(true);
     expect(status()).toMatch(/no session connection/i);
+  });
+
+  it("carries the whole status as its title, whether off or on", () => {
+    render(<WatchToggle stream={connected()} />);
+    expect(statusElement().getAttribute("title")).toBe(status());
+
+    fireEvent.click(toggle());
+    expect(status()).toMatch(/streaming/i);
+    expect(statusElement().getAttribute("title")).toBe(status());
   });
 });
 
