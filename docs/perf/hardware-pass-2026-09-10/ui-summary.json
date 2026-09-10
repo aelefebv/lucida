@@ -1,0 +1,219 @@
+{
+  "steps": [
+    {
+      "quiet": true,
+      "adapter": {
+        "vendor": "nvidia",
+        "arch": "lovelace",
+        "fallback": false
+      },
+      "step": "viewer"
+    },
+    {
+      "text": "overlaysgroup modeschunk gridtierrender radiuscached tierplanned rankphasechurnover the open interval, 0.2 s",
+      "step": "hud"
+    },
+    {
+      "cells": 17,
+      "withRow": 17,
+      "selected": 0,
+      "boxBatches": 0,
+      "boxes": 0,
+      "selectedBoxes": 0,
+      "absence": null,
+      "selection": null,
+      "inspector": null,
+      "step": "overlay-phase"
+    },
+    {
+      "cells": 17,
+      "withRow": 0,
+      "selected": 0,
+      "boxBatches": 0,
+      "boxes": 0,
+      "selectedBoxes": 0,
+      "absence": "churn: no chunk on screen has a row in the open interval (4.9 s); each was resident before it opened, is still queued, or was never wanted",
+      "selection": null,
+      "inspector": null,
+      "step": "overlay-churn"
+    },
+    {
+      "cell": {
+        "x": 754,
+        "y": 517.3984375,
+        "title": "missing \u00b7 cached \u00b7 phase complete"
+      },
+      "cells": 17,
+      "withRow": 17,
+      "selected": 0,
+      "boxBatches": 0,
+      "boxes": 0,
+      "selectedBoxes": 0,
+      "absence": null,
+      "selection": null,
+      "inspector": "wds-0f521707bfca4a18892022abc8e60957 \u00b7 0/0/0/0/3/3missing \u00b7 cachedphase: complete \u00b7 present took 144 msqueue rank: 0 ahead at admission \u00b7 16 overtook it \u00b7 waited 18 msage: 187 msfetched once over the open interval, 0.5 sranks and ages count recorded rows only",
+      "step": "overlay-inspector"
+    },
+    {
+      "runId": "run-1789052209388-2",
+      "verdict": "browser.present ran p95 139.8 ms [coverage incomplete \u2014 see gaps]partialwall clock 716 msaccounted 29%findings 2Cannot see: only 29% of the run's wall clock is covered by a recorded phase, so the chain may be leading past the real bottleneck; queue time is a floor rather than a total (a request admi",
+      "timeline": " 11 charts over 0..715.7 ms of the run's clock in 120 buckets of 5.964 ms; the rows were walked once: 17 lifecycle row(s) and 17 server row(s); 1 chart(s) absent, each saying why",
+      "buttons": [
+        "Start a watch stream",
+        "Read the newest run",
+        "Save run",
+        "Save for Perfetto",
+        "Save bundle",
+        "Send report",
+        "Open a run or bundle",
+        "Compare two runs",
+        "Pop out",
+        "Close"
+      ],
+      "step": "dock"
+    },
+    {
+      "drag": {
+        "under": "monitor-timeline-canvas",
+        "from": 471,
+        "to": 921,
+        "y": 540
+      },
+      "brush": 1,
+      "window": "Window 2..345 ms of the 716 ms run (343 ms)Every number below is of this window, not the run. A row that crosses the window's edge counts for the part inside it",
+      "command": "lucida trace show run-1789052209388-2 --window 2..345",
+      "published": "Highlighted on the viewport: 17 chunks with a row active during 2..345 ms of run run-1789052209388-2. a chunk resident before the run opened, re-delivered from the CPU cache, or never wanted has no row, so it is never in the set.",
+      "cells": 17,
+      "withRow": 17,
+      "selected": 17,
+      "boxBatches": 0,
+      "boxes": 0,
+      "selectedBoxes": 0,
+      "absence": null,
+      "selection": "brushed 2..345 ms of run run-1789052209388-2: 17 of 17 chunks with a row active in the window are on screen; the rest are off screen or at a level this view does not show",
+      "inspector": null,
+      "step": "brush"
+    },
+    {
+      "published": "Highlighted on the viewport: 17 chunks with a row in browser.present during 2..345 ms of run run-1789052209388-2. a chunk resident before the run opened, re-delivered from the CPU cache, or never wanted has no row, so it is never in the set",
+      "cells": 17,
+      "withRow": 17,
+      "selected": 17,
+      "boxBatches": 0,
+      "boxes": 0,
+      "selectedBoxes": 0,
+      "absence": null,
+      "selection": "brushed 2..345 ms of run run-1789052209388-2: 17 of 17 chunks with a row in browser.present in the window are on screen; the rest are off screen or at a level this view does not show",
+      "inspector": null,
+      "step": "brush-drill"
+    },
+    {
+      "brush": 0,
+      "cells": 0,
+      "withRow": 0,
+      "selected": 0,
+      "boxBatches": 0,
+      "boxes": 0,
+      "selectedBoxes": 0,
+      "absence": null,
+      "selection": null,
+      "inspector": null,
+      "step": "brush-cleared"
+    },
+    {
+      "sent": "Sent to the workspace inbox as e3566673-d3c7-4808-9b8d-680dc862824a. It is kept until 2026-09-24T14:57:00Z. Read it with lucida trace inbox fetch e3566673-d3c7-4808-9b8d-680dc862824a.",
+      "failed": null,
+      "step": "send-report"
+    },
+    {
+      "toggle": "Stop the watch stream",
+      "status": "Streaming this session's per-tick aggregates and run boundaries to watchers. No chunk records leave the page.",
+      "banner": "Watch stream on. This session\u2019s aggregates are going to watchers.Stop",
+      "scrub": "{\"applied\":true,\"reason\":null}",
+      "scrub2": "{\"applied\":true,\"reason\":null}",
+      "step": "watch"
+    },
+    {
+      "runId": "run-1789051274045-2 vs run-1789051408632-2",
+      "failed": null,
+      "warning": null,
+      "wall": "Wall 689.6 \u2192 696.7 ms (+7.1 ms, +1%) \u00b7 same verdict kind. Every delta is right minus left.",
+      "timelines": 2,
+      "text_head": "lucida trace diff run-1789051274045-2 run-1789051408632-2 \u2014 every delta is right minus left\nleft      run-1789051274045-2 (baseline.bundle.json) \u00b7 wds-0f521707b",
+      "step": "compare"
+    },
+    {
+      "runId": "run-1789051274045-2",
+      "failed": null,
+      "frame": 1,
+      "frameAbsent": null,
+      "step": "dropped-file"
+    },
+    {
+      "cells": 0,
+      "withRow": 0,
+      "selected": 0,
+      "boxBatches": 2,
+      "boxes": 33,
+      "selectedBoxes": 0,
+      "absence": null,
+      "selection": null,
+      "inspector": null,
+      "step": "boxes-phase"
+    },
+    {
+      "quiet": true,
+      "cells": 0,
+      "withRow": 0,
+      "selected": 0,
+      "boxBatches": 1,
+      "boxes": 33,
+      "selectedBoxes": 0,
+      "absence": null,
+      "selection": null,
+      "inspector": null,
+      "step": "boxes-grid"
+    },
+    {
+      "point": {
+        "x": 973.2541666666667,
+        "y": 939.7151041666667,
+        "edges": 12
+      },
+      "hovered": 0,
+      "cells": 0,
+      "withRow": 0,
+      "selected": 0,
+      "boxBatches": 1,
+      "boxes": 33,
+      "selectedBoxes": 0,
+      "absence": null,
+      "selection": null,
+      "inspector": null,
+      "step": "box-hover"
+    },
+    {
+      "drag": {
+        "under": "monitor-timeline-canvas",
+        "from": 471,
+        "to": 1019,
+        "y": 540
+      },
+      "brush": 1,
+      "window": "Window 5..817 ms of the 1.4 s run (812 ms)Every number below is of this window, not the run. A row that crosses the window's edge counts for the part inside it.",
+      "command": "lucida trace show run-1789052238835-2 --window 5..817",
+      "published": "Highlighted on the viewport: 33 chunks with a row active during 5..817 ms of run run-1789052238835-2. a chunk resident before the run opened, re-delivered from the CPU cache, or never wanted has no row, so it is never in the set.",
+      "cells": 0,
+      "withRow": 0,
+      "selected": 1,
+      "boxBatches": 1,
+      "boxes": 33,
+      "selectedBoxes": 33,
+      "absence": null,
+      "selection": "brushed 5..817 ms of run run-1789052238835-2: 33 of 33 chunks with a row active in the window are on screen; the rest are off screen or at a level this view does not show",
+      "inspector": null,
+      "step": "boxes-brush"
+    }
+  ],
+  "console": []
+}
