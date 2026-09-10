@@ -276,3 +276,12 @@ answer than a scripting language nobody has asked for yet.
   the same care as a wire type — versioned, and not reshaped casually.
 - `lucida debug state` is left alone. It remains the server-state diagnostic it
   already is, and the monitor does not overload it.
+- The launcher decides which GPU a run measures. On Linux, headless Chrome
+  picks SwiftShader unless it is started with `--enable-features=Vulkan
+  --use-angle=vulkan --disable-vulkan-surface`; with them a host with a
+  discrete GPU reports hardware WebGPU, and the run header names that adapter
+  instead of a software fallback. macOS is not forced onto Vulkan. On such a
+  host the first `requestAdapter()` after a cold launch can answer `null` for
+  a few seconds, so the render worker and the seam ask through one bounded
+  retry rather than treating the first `null` as final ([#1090]).
+[#1090]: https://github.com/aelefebv/lucida/issues/1090

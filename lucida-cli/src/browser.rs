@@ -73,17 +73,41 @@ impl Viewport {
 /// shape (headless mode, GPU flags, window size) is assertable without a
 /// browser on the machine.
 fn launch_args(viewport: Viewport, user_data_dir: &Path) -> Vec<String> {
-    vec![
+    let mut args = vec![
         "--headless=new".to_string(),
         "--enable-unsafe-webgpu".to_string(),
         "--ignore-gpu-blocklist".to_string(),
+    ];
+    args.extend(gpu_backend_args());
+    args.extend([
         "--no-first-run".to_string(),
         "--no-default-browser-check".to_string(),
         "--remote-debugging-port=0".to_string(),
         format!("--user-data-dir={}", user_data_dir.display()),
         format!("--window-size={},{}", viewport.width, viewport.height),
         "about:blank".to_string(),
-    ]
+    ]);
+    args
+}
+
+/// Flags that put headless Chrome's GPU process on the machine's GPU.
+///
+/// On Linux, Chrome with no display server picks SwiftShader unless Vulkan is
+/// switched on and told it has no window to present to. With these three, a
+/// host with a discrete GPU reports it as the active device and WebGPU as
+/// hardware accelerated; without them every run records a software fallback
+/// adapter, whatever the machine has. macOS reaches its GPU through Metal and
+/// must not be forced onto Vulkan, so it gets nothing here.
+fn gpu_backend_args() -> Vec<String> {
+    if cfg!(target_os = "linux") {
+        vec![
+            "--enable-features=Vulkan".to_string(),
+            "--use-angle=vulkan".to_string(),
+            "--disable-vulkan-surface".to_string(),
+        ]
+    } else {
+        Vec::new()
+    }
 }
 
 /// `Emulation.setDeviceMetricsOverride` parameters for `viewport`. The device
@@ -792,6 +816,25 @@ mod tests {
         assert!(args.contains(&"--window-size=640,480".to_string()));
         assert!(args.contains(&"--user-data-dir=/tmp/profile".to_string()));
         assert_eq!(args.last().map(String::as_str), Some("about:blank"));
+    }
+
+    #[test]
+    fn launch_args_put_the_gpu_process_on_vulkan_only_on_linux() {
+        let args = launch_args(Viewport::new(640, 480, 1.0), Path::new("/tmp/profile"));
+        let vulkan = [
+            "--enable-features=Vulkan",
+            "--use-angle=vulkan",
+            "--disable-vulkan-surface",
+        ];
+
+        for flag in vulkan {
+            assert_eq!(
+                args.contains(&flag.to_string()),
+                cfg!(target_os = "linux"),
+                "{flag}"
+            );
+        }
+        assert!(args.contains(&"--enable-unsafe-webgpu".to_string()));
     }
 
     #[test]

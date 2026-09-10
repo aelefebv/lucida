@@ -912,4 +912,21 @@ describe("the adapter identity the header carries", () => {
     });
     expect(await resolveGpuIdentity()).toBeNull();
   });
+
+  it("asks again when the first answer after launch is null", async () => {
+    const answers: Array<FakeAdapter | null> = [null, null, { info: hardwareInfo(), features: new Set() }];
+    let calls = 0;
+    Object.defineProperty(navigator, "gpu", {
+      configurable: true,
+      value: { requestAdapter: () => Promise.resolve(answers[Math.min(calls++, answers.length - 1)]) },
+    });
+    const identity = await resolveGpuIdentity({ attempts: 5, retryMs: 0 });
+    expect(identity?.vendor).toBe("v");
+    expect(calls).toBe(3);
+  });
+
+  it("takes null as final once the attempts are spent", async () => {
+    withAdapter(null);
+    expect(await resolveGpuIdentity({ attempts: 2, retryMs: 0 })).toBeNull();
+  });
 });

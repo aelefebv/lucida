@@ -1,5 +1,7 @@
 /** WebGPU device/canvas initialization and texture helpers. */
 
+import { requestAdapterWithRetry } from "./requestAdapter.ts";
+
 export const OFFSCREEN_FORMAT: GPUTextureFormat = "rgba16float";
 
 /**
@@ -51,7 +53,7 @@ export async function initGPU(canvas: HTMLCanvasElement | OffscreenCanvas): Prom
     throw new Error("WebGPU is not supported in this browser");
   }
 
-  const adapter = await navigator.gpu.requestAdapter();
+  const adapter = await requestAdapterWithRetry(navigator.gpu);
   if (!adapter) {
     throw new Error("Failed to get WebGPU adapter");
   }
