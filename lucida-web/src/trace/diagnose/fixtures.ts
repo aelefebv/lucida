@@ -530,6 +530,91 @@ export function interactionRunFor(input: InputKind, spec: InteractionRunSpec = {
   });
 }
 
+/** The two phases a main-thread frame dispatch bounds, which the first frame's compile holds. */
+export type FrameBoundPhase = Extract<Phase, "upload" | "present">;
+
+/**
+ * The shape a cold open recorded on a hardware adapter (#1094): every chunk
+ * holds `heldUs` in one frame-bound phase, over its ceiling, and nothing else
+ * is slow.
+ */
+function slowFrameRows(slow: FrameBoundPhase, heldUs = 150 * MS): TraceRow[] {
+  return Array.from({ length: 17 }, (_, i) =>
+    makeRow(
+      {
+        startUs: 60 * MS + i * 300,
+        durations: {
+          plan: 17 * MS,
+          queue: 2 * MS,
+          wire: 20 * MS,
+          decode: 3 * MS,
+          upload: slow === "upload" ? heldUs : 5 * MS,
+          present: slow === "present" ? heldUs : 17 * MS,
+        },
+        rid: i,
+        bytes: 8_192,
+      },
+      i,
+    ),
+  );
+}
+
+export interface FirstPaintSpec {
+  /** How long the slow phase held each chunk. 150 ms clears the ceiling; 800 ms also leads the chain. */
+  heldMs?: number;
+  /** Open the run on a browser that already holds chunks, as adding a dataset to a live page does. */
+  warm?: boolean;
+}
+
+/**
+ * A content-opened run whose upload or present breaches its ceiling: the
+ * first-paint case when the browser cache is cold. The regression fixture
+ * for the rule that reads it as a note rather than a stall.
+ */
+export function firstPaintOpen(slow: FrameBoundPhase = "present", spec: FirstPaintSpec = {}): TraceRun {
+  return makeRun({
+    header: {
+      runId: `first-paint-open-${slow}`,
+      durationUs: Math.max(800, (spec.heldMs ?? 150) + 200) * MS,
+      cause: {
+        epoch: "content",
+        dirtyKind: "interactive",
+        source: spec.warm ? "dataset_added" : "loop_start",
+      },
+      ...(spec.warm
+        ? {
+            cacheWarmth: {
+              detailChunks: 40,
+              detailBytes: 40 * 8_192,
+              coarseChunks: 4,
+              coarseBytes: 4 * 8_192,
+              proxyBytes: 0,
+            },
+          }
+        : {}),
+    },
+    rows: slowFrameRows(slow, (spec.heldMs ?? 150) * MS),
+  });
+}
+
+/**
+ * An interaction run with the same slow present. The pipelines were compiled
+ * by the open before it, so this is the stall the present ceiling exists for.
+ */
+export function slowPresentInteraction(input: InputKind): TraceRun {
+  return makeRun({
+    header: {
+      runId: `slow-present-${input}`,
+      durationUs: 800 * MS,
+      cause: interactionCause(input),
+    },
+    rows: slowFrameRows("present"),
+    readings: Array.from({ length: 40 }, (_, i) =>
+      makeReading(i * 20 * MS, { queueDepth: 2, inFlight: 2, frameTimeUs: 2_000 }),
+    ),
+  });
+}
+
 /**
  * A quiet run: no completion event, no backlog, no ceiling crossed and no
  * phase holding the main thread. The honest answer is that there is nothing to

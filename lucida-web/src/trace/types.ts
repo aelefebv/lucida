@@ -219,6 +219,15 @@ export function isInteractionCause(cause: RunCause | null): boolean {
 }
 
 /**
+ * Whether a cause is a dataset open's: a content epoch, whichever emit site
+ * named it. The ruleset's first-paint rule reads this, as the frame-time
+ * ceiling reads {@link isInteractionCause}.
+ */
+export function isDatasetOpenCause(cause: RunCause | null): boolean {
+  return cause !== null && cause.epoch === "content";
+}
+
+/**
  * Why a run closed. Required on every run — a run that never settled is still
  * a run.
  *
