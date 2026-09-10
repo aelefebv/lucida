@@ -26,9 +26,17 @@
  * is the one that leaves the page, and it copies the run to the workspace
  * inbox rather than touching the run: it happens when somebody presses it,
  * never on a run's close and never on a schedule (ADR 0049 as amended).
+ *
+ * **The brush.** A window brushed on the axis scopes the report beneath it
+ * through the derivation's own window, the same call the CLI's window flag
+ * makes, and publishes the chunk set that was in the window so the overlays
+ * highlight it. The dock publishes and the overlay subscribes. Neither reads
+ * the other (ADR 0052 as amended). Clearing the brush restores the whole-run
+ * report and clears the set, and so does reading another run or closing
+ * the dock.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import "./MonitorDock.css";
 import { LiveReport } from "./LiveReport.tsx";
@@ -42,16 +50,21 @@ import {
   readMonitor,
   readProgress,
   readProvisional,
+  readWindow,
   sendReport,
   stopRun,
   type MonitorSnapshot,
+  type WindowedRead,
 } from "./monitorSource.ts";
 import type { InboxReceipt } from "../bridge.ts";
+import { trackPointerDrag } from "./pointerDrag.ts";
 import { TimelineCanvas } from "./TimelineCanvas.tsx";
 import { WatchToggle } from "./WatchToggle.tsx";
+import { publishChunkSelection } from "../trace/linkedSelection.ts";
 import type { LiveProgress } from "../trace/liveProgress.ts";
 import type { ProvisionalReading } from "../trace/diagnose/provisional.ts";
 import type { LiveTimeline } from "../trace/diagnose/timeline.ts";
+import type { WindowRequest } from "../trace/diagnose/types.ts";
 
 export interface MonitorDockProps {
   /** Close the dock. The toolbar that opened it is the caller's business. */
@@ -97,6 +110,7 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
     live ? null : readMonitor(),
   );
   const [drill, setDrill] = useState<MonitorDrill | null>(null);
+  const [brush, setBrush] = useState<WindowRequest | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   // The bundle is the one save that takes time. The seam asks the server for
   // its health and the render worker for the frame before it exports. A
@@ -112,11 +126,32 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
   const read = snapshot?.read;
   const runs = snapshot?.runs ?? [];
   const runId = read?.ok ? read.document.runId : undefined;
+  const trace = snapshot?.trace ?? null;
+
+  // The published set narrows to the phase a drill-down has scoped to, so
+  // the highlighted chunks are the ones in the phase the reader is looking at.
+  const phase = drill?.phaseId ?? null;
+  const windowed = useMemo<WindowedRead | null>(() => {
+    if (!brush || !trace || !runId) return null;
+    try {
+      return readWindow(trace, runId, brush, phase);
+    } catch {
+      // A window the run cannot resolve, which the brush never asks for,
+      // leaves the whole-run report up.
+      return null;
+    }
+  }, [brush, trace, runId, phase]);
+
+  useEffect(() => {
+    publishChunkSelection(windowed?.selection ?? null);
+  }, [windowed]);
+  useEffect(() => () => publishChunkSelection(null), []);
 
   // Read one run and show it. The only path from watching to reading, so the
   // two states cannot both be on screen.
   const readRun = useCallback((next?: string) => {
     setDrill(null);
+    setBrush(null);
     setSaved(null);
     setLive(null);
     setReading(null);
@@ -157,6 +192,7 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
 
   const watchNextRun = useCallback(() => {
     setDrill(null);
+    setBrush(null);
     setSaved(null);
     setLive(readProgress());
     setReading(readProvisional());
@@ -207,13 +243,29 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
   const { height, startResize } = useDockHeight();
   const { popout, popOut, dockBack, popoutFailed } = usePopout();
 
+  const view = useMemo(
+    () => (read?.ok ? buildMonitorView(windowed?.document ?? read.document) : null),
+    [read, windowed],
+  );
+
   // The timeline renders inside whichever report is on screen, after the
   // coverage and truncation that qualify it: a chart is read after its
-  // denominator.
+  // denominator. A closed run's axis takes the brush and draws the whole
+  // run's timeline rather than the window's, so the brush can be moved.
   const timeline = live ? (
     liveTimeline ? <TimelineCanvas section={liveTimeline.timeline} provisional /> : null
   ) : read?.ok ? (
-    <TimelineCanvas section={read.document.timeline} provisional={false} />
+    <TimelineCanvas
+      section={read.document.timeline}
+      provisional={false}
+      brush={{
+        brushed:
+          brush && windowed && view?.window
+            ? { window: brush, view: view.window, selection: windowed.selection }
+            : null,
+        onChange: setBrush,
+      }}
+    />
   ) : null;
 
   const body = (
@@ -355,16 +407,12 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
           reading={reading ? buildProvisionalView(reading) : null}
           timeline={timeline}
         />
-      ) : read?.ok ? (
-        <MonitorReport
-          view={buildMonitorView(read.document)}
-          drill={drill}
-          onDrill={setDrill}
-          timeline={timeline}
-        />
+      ) : view ? (
+        <MonitorReport view={view} drill={drill} onDrill={setDrill} timeline={timeline} />
       ) : (
         <p className="monitor-empty" data-testid="monitor-empty">
-          {read?.reason} Open a dataset, let it reach quiescence, then read the run.
+          {read && !read.ok ? read.reason : null} Open a dataset, let it reach quiescence, then read
+          the run.
         </p>
       )}
     </>
@@ -439,15 +487,11 @@ function useDockHeight() {
       const view = doc.defaultView;
       const startY = event.clientY;
       const startHeight = height;
-      const onMove = (move: PointerEvent): void => {
-        setHeight(clampHeight(startHeight + (startY - move.clientY), view?.innerHeight || 800));
-      };
-      const onUp = (): void => {
-        doc.removeEventListener("pointermove", onMove);
-        doc.removeEventListener("pointerup", onUp);
-      };
-      doc.addEventListener("pointermove", onMove);
-      doc.addEventListener("pointerup", onUp);
+      trackPointerDrag(
+        doc,
+        (move) => setHeight(clampHeight(startHeight + (startY - move.clientY), view?.innerHeight || 800)),
+        () => {},
+      );
     },
     [height],
   );

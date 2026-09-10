@@ -71,6 +71,7 @@ import {
 import type { WorkspaceRole, WorkspaceMember } from "./workspaceApi.ts";
 import { isCaptureSurface } from "./captureSurface.ts";
 import { setBundleServices } from "./trace/bundle.ts";
+import { currentChunkSelection, onChunkSelectionChanged } from "./trace/linkedSelection.ts";
 import { setReportSender } from "./trace/reportInbox.ts";
 import { useHudKeyBinding } from "./hud/useHudKey.ts";
 import "./App.css";
@@ -1042,6 +1043,13 @@ function App({
     () => getRenderRadiusPreviewTier() !== null,
     () => false,
   );
+  // Mounts the overlay layer while the dock has a brushed chunk set
+  // published, even with every overlay off, since nothing else shows the set.
+  const selectionPublished = useSyncExternalStore(
+    onChunkSelectionChanged,
+    () => currentChunkSelection() !== null,
+    () => false,
+  );
   const [showHud, setShowHud] = useState(false);
   const toggleHud = useCallback(() => setShowHud((v) => !v), []);
   useHudKeyBinding(toggleHud);
@@ -1496,7 +1504,7 @@ function App({
             {render.clientReady && render.clientRef.current && (
               <Minimap client={render.clientRef.current} activeLoop={render.activeLoop} />
             )}
-            {(anyOverlayEnabled || radiusPreviewActive) && (
+            {(anyOverlayEnabled || radiusPreviewActive || selectionPublished) && (
               <Suspense fallback={null}>
                 <DebugOverlays
                   wasmSceneRef={scene.wasmSceneRef}

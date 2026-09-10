@@ -17,6 +17,8 @@
 import { describe, expect, it } from "vitest";
 
 import { buildChunkDrawList, type ChunkCell } from "../debug/overlayDrawList.ts";
+import type { ChunkSelection } from "./diagnose/chunkSelection.ts";
+import { chunkIdentity } from "./diagnose/chunkStates.ts";
 import { TraceRecorder } from "./recorder.ts";
 import { tableSinkFactory } from "./sink.ts";
 import { Boundary, RowOutcome } from "./types.ts";
@@ -104,8 +106,30 @@ function cells(): ChunkCell[] {
   return out;
 }
 
+/**
+ * A brushed selection over half the grid, so the tick pays the per-cell set
+ * lookup the linked selection adds and the gate covers it too.
+ */
+function halfSelected(grid: ChunkCell[]): ChunkSelection {
+  const identities = new Set<string>();
+  grid.forEach((cell, index) => {
+    if (index % 2 === 0) identities.add(chunkIdentity(cell.datasetId, cell.entityId, cell.chunkKey));
+  });
+  return {
+    runId: "perf",
+    window: { startMs: 0, endMs: 1_000, spanMs: 1_000, ofWallMs: 1_000, whole: true },
+    phase: null,
+    identities,
+    chunks: identities.size,
+    rows: identities.size,
+    statement: "",
+    cannotShow: [],
+  };
+}
+
 function timeTick(recorder: TraceRecorder, grid: ChunkCell[], repeats: number): number {
   const modes = { chunkTier: false, cachedTier: false, plannedRank: false, phaseColor: true, churnTint: true };
+  const selection = halfSelected(grid);
   const samples: number[] = [];
   for (let r = 0; r < repeats; r++) {
     const start = performance.now();
@@ -114,6 +138,7 @@ function timeTick(recorder: TraceRecorder, grid: ChunkCell[], repeats: number): 
       modes,
       readingOf: (cell) => recorder.readChunk(cell),
       windowMs: recorder.openIntervalMs,
+      selection,
     });
     samples.push((performance.now() - start) * 1_000);
   }

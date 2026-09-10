@@ -21,6 +21,7 @@ import type {
   TimelineInterval,
   TimelineSection,
   TimelineSeries,
+  WindowRequest,
 } from "../trace/diagnose/types.ts";
 import { BAND_COLORS, CANVAS_COLORS, seriesColor } from "./timelinePalette.ts";
 
@@ -28,6 +29,18 @@ import { BAND_COLORS, CANVAS_COLORS, seriesColor } from "./timelinePalette.ts";
 export interface TimelineLayout {
   width: number;
   devicePixelRatio: number;
+}
+
+/**
+ * How the plot maps CSS x to the run's clock: where the plot starts and how
+ * wide it is, and the axis it was laid out over. What a brush reads to turn
+ * a drag into a window, and what draws the brush back at the right place.
+ */
+export interface AxisScale {
+  plotX: number;
+  plotWidth: number;
+  startMs: number;
+  spanMs: number;
 }
 
 export type DrawPrimitive =
@@ -77,6 +90,8 @@ export interface TimelineDrawList {
   rows: TimelineDrawRow[];
   /** Every primitive in the list, so a cost gate can bound the draw by a count. */
   primitiveCount: number;
+  /** The plot's mapping between CSS x and the run's clock. */
+  scale: AxisScale;
 }
 
 /** The left gutter that carries each row's title. */
@@ -113,7 +128,35 @@ export function buildTimelineDrawList(section: TimelineSection, layout: Timeline
     axis,
     rows,
     primitiveCount,
+    scale: { plotX, plotWidth, startMs: section.axis.startMs, spanMs: section.axis.spanMs },
   };
+}
+
+// ---------------------------------------------------------------------------
+// The axis scale
+// ---------------------------------------------------------------------------
+
+/** The instant on the run's clock under a CSS x, clamped to the axis. */
+export function msAtX(scale: AxisScale, x: number): number {
+  const share = Math.min(1, Math.max(0, (x - scale.plotX) / Math.max(1, scale.plotWidth)));
+  return scale.startMs + share * scale.spanMs;
+}
+
+/** The CSS x of an instant on the run's clock. */
+export function xAtMs(scale: AxisScale, ms: number): number {
+  return scale.plotX + ((ms - scale.startMs) / Math.max(1e-9, scale.spanMs)) * scale.plotWidth;
+}
+
+/**
+ * The window a drag across the plot asks for, in whole milliseconds because
+ * the show command prints them and a reader types them back. Either
+ * direction is the same window, and a drag that spans under a millisecond,
+ * which is what a click is, asks for none.
+ */
+export function brushWindow(scale: AxisScale, fromX: number, toX: number): WindowRequest | null {
+  const startMs = Math.round(msAtX(scale, Math.min(fromX, toX)));
+  const endMs = Math.round(msAtX(scale, Math.max(fromX, toX)));
+  return endMs > startMs ? { startMs, endMs } : null;
 }
 
 // ---------------------------------------------------------------------------

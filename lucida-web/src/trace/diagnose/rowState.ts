@@ -53,14 +53,21 @@ export function lastBoundaryUs(row: TraceRow): number | null {
 }
 
 /**
- * How long the row has been alive: first boundary to last for a row that
- * ended, and first boundary to run close for one still in flight. Null when
- * the row reached no boundary, because a duration from nowhere is a number
- * with no row behind it.
+ * The stretch of the run's clock a row was alive for: first boundary to
+ * last for a row that ended, and first boundary to run close for one still
+ * in flight. Null when the row reached no boundary, because a position from
+ * nowhere is a number with no row behind it. The age is this stretch's
+ * length, and a window sees the row when it overlaps this stretch.
  */
-export function rowAgeUs(row: TraceRow, closeUs: number): number | null {
+export function rowSpanUs(row: TraceRow, closeUs: number): { startUs: number; endUs: number } | null {
   const first = firstBoundaryUs(row);
   if (first === null) return null;
   const end = row.outcome === "in-flight" ? closeUs : (lastBoundaryUs(row) ?? closeUs);
-  return Math.max(0, end - first);
+  return { startUs: first, endUs: Math.max(first, end) };
+}
+
+/** How long the row has been alive, or null when it reached no boundary. */
+export function rowAgeUs(row: TraceRow, closeUs: number): number | null {
+  const span = rowSpanUs(row, closeUs);
+  return span === null ? null : span.endUs - span.startUs;
 }

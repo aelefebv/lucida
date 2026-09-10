@@ -571,6 +571,17 @@ and so no box.
 _Avoid_: heatmap, coverage map (coverage is what the run measured — see
 above), chunk map
 
+**Linked selection**:
+The chunk set a window brushed on the dock's axis publishes: every chunk
+with a row inside the window, narrowed to one phase when the reader has
+drilled into one. The dock publishes it and the overlays highlight it, and
+neither reads the other, which is how the temporal surface and the spatial
+one link without merging. Cleared with the brush. See
+[ADR 0052](wiki/decisions/0052-debug-surface-dispositions.md) as amended.
+_Avoid_: highlight (what the overlay does with it), brush (the gesture, and
+the window it makes), selection epoch (a scene epoch, unrelated), window (a
+time interval; the selection is what it selected)
+
 ## Server state
 
 **Storage backend**:

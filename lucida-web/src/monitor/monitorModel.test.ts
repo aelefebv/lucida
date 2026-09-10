@@ -17,6 +17,7 @@ import {
   healthyLocalOpen,
   interactionRun,
   interactionRunFor,
+  lateStallOpen,
   mainThreadOnlyOpen,
   makeRow,
   makeRun,
@@ -26,6 +27,65 @@ import {
 import { buildMonitorView, formatMs } from "./monitorModel.ts";
 
 const MS = 1_000;
+
+describe("a reading scoped to a window", () => {
+  it("states the window in a banner ahead of the coverage it qualifies, and carries the show command", () => {
+    const view = buildMonitorView(diagnoseRun(lateStallOpen(), { window: { startMs: 1_100, endMs: 2_000 } }));
+
+    expect(view.window).toEqual({
+      startMs: 1_100,
+      endMs: 2_000,
+      spanMs: 900,
+      ofWallMs: 2_000,
+      whole: false,
+      label: "1100..2000",
+      command: "lucida trace show late-stall --window 1100..2000",
+    });
+    const kinds = view.banners.map((banner) => banner.kind);
+    expect(kinds.indexOf("window")).toBeGreaterThanOrEqual(0);
+    expect(kinds.indexOf("window")).toBeLessThan(kinds.indexOf("coverage"));
+    const banner = view.banners.find((candidate) => candidate.kind === "window")!;
+    expect(banner.headline).toContain("1100..2000 ms");
+    expect(banner.headline).toContain("of the 2.0 s run");
+    // The coverage block's own statement of what the window did to the rows.
+    expect(banner.detail).toContain("counts for the part inside");
+    expect(banner.severe).toBe(false);
+  });
+
+  it("keeps the truncation record ahead of the window, since it qualifies the window too", () => {
+    const run = lateStallOpen();
+    run.header.truncation = {
+      reason: "per-run-cap",
+      atUs: 1_500 * MS,
+      capBytes: 2_000_000,
+      rowsRecorded: 100,
+      rowsUnrecorded: 12,
+      ticksUnrecorded: 0,
+      eventsUnrecorded: 0,
+      serverRowsUnrecorded: 0,
+    };
+    const view = buildMonitorView(diagnoseRun(run, { window: { startMs: 1_100, endMs: 2_000 } }));
+
+    expect(view.banners.map((banner) => banner.kind).slice(0, 3)).toEqual(["truncation", "window", "coverage"]);
+  });
+
+  it("carries no window and no window banner on a whole-run reading", () => {
+    const view = buildMonitorView(diagnoseRun(lateStallOpen()));
+
+    expect(view.window).toBeNull();
+    expect(view.banners.some((banner) => banner.kind === "window")).toBe(false);
+  });
+
+  it("scopes the verdict and the phase table through the derivation, so the window changes what they say", () => {
+    const whole = buildMonitorView(diagnoseRun(lateStallOpen()));
+    const early = buildMonitorView(diagnoseRun(lateStallOpen(), { window: { startMs: 0, endMs: 1_000 } }));
+
+    expect(whole.callouts[0].headline).toContain("browser.decode");
+    expect(early.callouts[0].headline).toContain("no stall");
+    expect(early.phases.find((phase) => phase.id === "browser.decode")?.n).toBe(60);
+    expect(whole.phases.find((phase) => phase.id === "browser.decode")?.n).toBe(100);
+  });
+});
 
 describe("the verdict leads", () => {
   it("puts the verdict first and the findings under it", () => {

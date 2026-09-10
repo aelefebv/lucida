@@ -4,7 +4,7 @@
  * hands back are the timeline's palette. No browser, no cache, no recorder.
  */
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import {
   PHASE_COLORS,
@@ -14,14 +14,17 @@ import {
   withAlpha,
 } from "../monitor/timelinePalette.ts";
 import { lookupChunk } from "../trace/diagnose/chunkLookup.ts";
+import { selectChunks } from "../trace/diagnose/chunkSelection.ts";
 import { chunkIdentity, deriveChunkStates, type ChunkStates } from "../trace/diagnose/chunkStates.ts";
 import {
   healthyLocalOpen,
+  lateStallOpen,
   makeRow,
   makeRun,
   refetchLoopSteadyState,
   saturatedReopen,
 } from "../trace/diagnose/fixtures.ts";
+import { currentChunkSelection, publishChunkSelection } from "../trace/linkedSelection.ts";
 import { PHASES, type TraceRun } from "../trace/types.ts";
 import {
   buildChunkDrawList,
@@ -34,6 +37,9 @@ import {
   NO_ROW_FILL,
   overlayAbsence,
   PHASE_FILL_ALPHA,
+  SELECTED_BORDER,
+  SELECTED_FILL,
+  selectionCaption,
   type ChunkCell,
   type OverlayModes,
 } from "./overlayDrawList.ts";
@@ -324,5 +330,104 @@ describe("what an empty picture means", () => {
     // With phase color on, the picture is painted; a quiet churn is not an empty picture.
     const { list: painted } = drawOver(healthyLocalOpen(), [cell(0)], modes);
     expect(overlayAbsence(modes, painted, states.windowMs)).toBeNull();
+  });
+});
+
+describe("the brushed selection", () => {
+  afterEach(() => {
+    publishChunkSelection(null);
+  });
+
+  /** The store's current set, as the overlay reads it: never the dock. */
+  function drawWithSelection(run: TraceRun, cells: ChunkCell[], modes: Partial<OverlayModes>) {
+    const states = deriveChunkStates(run);
+    return buildChunkDrawList({
+      cells,
+      modes: { ...OFF, ...modes },
+      readingOf: readerOver(states),
+      windowMs: states.windowMs,
+      selection: currentChunkSelection(),
+    });
+  }
+
+  it("highlights the cells whose identity the published set holds, and no other", () => {
+    // The late-stall run: rows 0 to 59 in the first second, 60 to 99 after 1.1 s.
+    const run = lateStallOpen();
+    publishChunkSelection(selectChunks(run, { startMs: 1_100, endMs: 2_000 }));
+
+    const list = drawWithSelection(run, [cell(0), cell(70), cell(999)], {});
+
+    expect(list.items.map((item) => item.selected)).toEqual([false, true, false]);
+    expect(list.items[1].border).toBe(SELECTED_BORDER);
+    expect(list.items[1].fill).toBe(SELECTED_FILL);
+    expect(list.items[1].tooltip).toContain("in the brushed window");
+    expect(list.items[0].border).toBe(CELL_BORDER);
+    expect(list.items[0].tooltip).not.toContain("brushed");
+    expect(list.selected).toBe(1);
+  });
+
+  it("keeps the phase color as the fill and marks the set on the border when both are on", () => {
+    const run = lateStallOpen();
+    publishChunkSelection(selectChunks(run, { startMs: 1_100, endMs: 2_000 }, "browser.decode"));
+
+    const list = drawWithSelection(run, [cell(70)], { phaseColor: true });
+
+    expect(list.items[0].selected).toBe(true);
+    expect(list.items[0].fill).toBe(withAlpha(ROW_STATE_COLORS.complete, PHASE_FILL_ALPHA));
+    expect(list.items[0].border).toBe(SELECTED_BORDER);
+  });
+
+  it("selects nothing once the set is cleared, and nothing when none was published", () => {
+    const run = lateStallOpen();
+    publishChunkSelection(selectChunks(run, { startMs: 1_100, endMs: 2_000 }));
+    publishChunkSelection(null);
+
+    const list = drawWithSelection(run, [cell(70)], {});
+
+    expect(list.items[0].selected).toBe(false);
+    expect(list.items[0].border).toBe(CELL_BORDER);
+    expect(list.selected).toBe(0);
+    expect(selectionCaption(null, list)).toBeNull();
+  });
+
+  it("captions the picture with the window, the phase, and how much of the set is on screen", () => {
+    const run = lateStallOpen();
+    const selection = selectChunks(run, { startMs: 1_100, endMs: 2_000 });
+    publishChunkSelection(selection);
+
+    const some = drawWithSelection(run, [cell(0), cell(70), cell(71)], {});
+    expect(selectionCaption(selection, some)).toBe(
+      "brushed 1100..2000 ms of run late-stall: 2 of 40 chunks with a row active in the window are on screen; " +
+        "the rest are off screen or at a level this view does not show",
+    );
+
+    const none = drawWithSelection(run, [cell(0)], {});
+    expect(selectionCaption(selection, none)).toBe(
+      "brushed 1100..2000 ms of run late-stall: none of the 40 chunks with a row active in the window is on screen at this view",
+    );
+
+    // No row of the saturated re-open reaches a frame.
+    const saturated = saturatedReopen();
+    const empty = selectChunks(saturated, { startMs: 0, endMs: 12_000 }, "browser.present");
+    expect(selectionCaption(empty, drawWithSelection(saturated, [cell(0)], {}))).toBe(
+      "brushed 0..12000 ms of run warm-saturated: no chunk had a row in browser.present in the window, so nothing is highlighted",
+    );
+
+    const decoding = selectChunks(run, { startMs: 1_100, endMs: 1_200 }, "browser.decode");
+    publishChunkSelection(decoding);
+    expect(selectionCaption(decoding, drawWithSelection(run, [cell(60)], {}))).toContain(
+      "1 of 8 chunks with a row in browser.decode in the window",
+    );
+  });
+
+  it("reaches the overlay through the store alone: the overlay layer imports nothing of the dock", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const overlay = await readFile(`${process.cwd()}/src/debug/DebugOverlays.tsx`, "utf8");
+    const drawList = await readFile(`${process.cwd()}/src/debug/overlayDrawList.ts`, "utf8");
+
+    expect(overlay).toMatch(/from "\.\.\/trace\/linkedSelection\.ts"/);
+    for (const source of [overlay, drawList]) {
+      expect(source).not.toMatch(/monitor\/(MonitorDock|TimelineCanvas|monitorSource|MonitorReport)/);
+    }
   });
 });

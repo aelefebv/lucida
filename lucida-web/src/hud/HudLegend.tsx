@@ -36,7 +36,7 @@ const OVERLAY_LABELS: Record<DebugOverlay, string> = {
 
 const OVERLAY_DESCRIPTIONS: Record<DebugOverlay, string> = {
   groupModes: "A badge per group: detail and coarse chunks available against wanted.",
-  chunkGrid: "The chunk grid for every visible tile, colored by status: cached, in flight, planned. Capped at about 600 cells per tick.",
+  chunkGrid: "The chunk grid for every visible tile, colored by status: cached, in flight, planned. In volume mode, each chunk box as a wireframe in the same colors. Capped at about 600 cells per tick.",
   chunkTier: "Color tile chunks by the displayed tier: detail green, coarse yellow, missing red. Needs the chunk grid.",
   renderRadius: "The detail and coarse render-radius boundary: circles in slice mode, projected rings in volume mode.",
   cachedTier: "Color cached chunks by eviction tier: active bright green, demoted pale sage, prefetch teal. Needs the chunk grid.",
