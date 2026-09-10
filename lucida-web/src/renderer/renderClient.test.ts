@@ -109,7 +109,7 @@ describe("RenderClient destroy", () => {
     await expect(pending).resolves.toBeNull();
   });
 
-  it("captureFrame resolves with the worker's PNG and device size, matched by id", async () => {
+  it("captureFrame resolves with the worker's PNG and device size, or its failure as the reason, matched by id", async () => {
     const { client, worker } = makeReadyClient();
     const first = client.captureFrame();
     const second = client.captureFrame();
@@ -117,26 +117,42 @@ describe("RenderClient destroy", () => {
     expect(posted.map(m => m.id)).toEqual([0, 1]);
 
     const png = new Uint8Array([1, 2, 3]).buffer;
-    worker.emit({ type: "frameCaptured", id: 1, png, width: 2880, height: 1800 });
-    worker.emit({ type: "frameCaptured", id: 0, png: null, width: 2880, height: 1800 });
+    worker.emit({ type: "frameCaptured", id: 1, png, width: 2880, height: 1800, failure: null });
+    worker.emit({
+      type: "frameCaptured",
+      id: 0,
+      png: null,
+      width: 2880,
+      height: 1800,
+      failure: { name: "InvalidStateError", message: "the canvas has no current texture" },
+    });
 
-    await expect(second).resolves.toEqual({ png, width: 2880, height: 1800 });
-    await expect(first).resolves.toBeNull();
+    await expect(second).resolves.toEqual({ frame: { png, width: 2880, height: 1800 }, reason: null });
+    await expect(first).resolves.toEqual({
+      frame: null,
+      reason: "the render worker could not read its canvas: InvalidStateError: the canvas has no current texture",
+    });
   });
 
-  it("destroy settles an in-flight frame capture with null", async () => {
+  it("destroy settles an in-flight frame capture with a reason", async () => {
     const { client } = makeReadyClient();
     const pending = client.captureFrame();
     client.destroy();
-    await expect(pending).resolves.toBeNull();
+    await expect(pending).resolves.toEqual({
+      frame: null,
+      reason: "the render client was destroyed before the worker answered",
+    });
   });
 
-  it("captureFrame after destroy resolves null immediately and posts nothing", async () => {
+  it("captureFrame after destroy resolves with a reason immediately and posts nothing", async () => {
     const { client, worker } = makeReadyClient();
     client.destroy();
     const postedBefore = worker.posted.length;
 
-    await expect(client.captureFrame()).resolves.toBeNull();
+    await expect(client.captureFrame()).resolves.toEqual({
+      frame: null,
+      reason: "the render client was destroyed, so there was no canvas to read",
+    });
     expect(worker.posted.length).toBe(postedBefore);
   });
 

@@ -22,6 +22,7 @@ import type { ProxyAtlasState } from "../proxyAtlas.ts";
 import type { EntityProxyDescriptor } from "../workerContext.ts";
 import type { EntityDescriptorIndex } from "../descriptorBuffer.ts";
 import type { EntitySource } from "../entitySources.ts";
+import type { PendingFrameCapture } from "./captureFrame.ts";
 
 export interface RendererState {
   // ── Cold-state routing ────────────────────────────────────────────
@@ -99,6 +100,14 @@ export interface RendererState {
    */
   coldStateByDataset: Map<string, ColdStateMessage>;
 
+  // ── Frame capture ────────────────────────────────────────────────
+  /**
+   * Captures the trace bundle asked for that no frame has answered yet.
+   * The next frame handler takes them all, and a fallback timer takes
+   * one that no frame reaches.
+   */
+  frameCaptures: PendingFrameCapture[];
+
   // ── Devtools counter (worker-side HITL) ──────────────────────────
   /** Proxy upload/residency counters exposed via `self.__lucidaProxyStats`. */
   proxyStats: {
@@ -134,6 +143,7 @@ export function createInitialState(): RendererState {
     currentEpochs: null,
     currentColdState: null,
     coldStateByDataset: new Map(),
+    frameCaptures: [],
     proxyStats: {
       uploaded: 0,
       dropped: 0,

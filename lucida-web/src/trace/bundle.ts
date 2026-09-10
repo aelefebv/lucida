@@ -22,7 +22,7 @@
 
 import type { DatasetSourceHealth } from "../bridge.ts";
 import type { PlanningConfig } from "../pipeline/planning/config.ts";
-import type { CapturedFrame } from "../renderer/workerProtocol.ts";
+import type { FrameCaptureResult } from "../renderer/workerProtocol.ts";
 import { decode } from "../savedView/encoder.ts";
 import type { Colormap, RenderMode, SavedView } from "../savedView/types.ts";
 import { toChromeTraceJson } from "./chromeTrace.ts";
@@ -237,8 +237,8 @@ export interface BundleScript {
  */
 export interface BundleServices {
   requestDatasetHealth(): Promise<DatasetSourceHealth[]>;
-  /** Null when the worker could not read its canvas. */
-  captureFrame(): Promise<CapturedFrame | null>;
+  /** The frame on the canvas, or the reason the render worker could not read one. */
+  captureFrame(): Promise<FrameCaptureResult>;
 }
 
 export interface BundleOptions {
@@ -363,12 +363,13 @@ async function captureFrame(
   }
   try {
     const captured = await services.captureFrame();
-    if (!captured) return { value: null, reason: "the render worker could not read its canvas" };
+    if (!captured.frame) return { value: null, reason: captured.reason };
+    const { png, width, height } = captured.frame;
     return {
       value: {
-        png: bytesToBase64(new Uint8Array(captured.png)),
-        width: captured.width,
-        height: captured.height,
+        png: bytesToBase64(new Uint8Array(png)),
+        width,
+        height,
         devicePixelRatio,
         capturedBy: "page",
       },

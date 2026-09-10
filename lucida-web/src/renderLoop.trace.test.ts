@@ -37,7 +37,10 @@ function makeLoop() {
   const loop = new RenderLoop({
     session: { cpuCache } as unknown as Session,
     datasets: new Map(),
-    client: { takeGpuPassUs: () => null } as unknown as RenderClient,
+    client: {
+      takeGpuPassUs: () => null,
+      captureFrame: () => Promise.resolve({ frame: null, reason: "no frame in this test" }),
+    } as unknown as RenderClient,
     canvas,
     mode: "slice",
   });
@@ -66,6 +69,13 @@ describe("render loop trace wiring", () => {
     expect(published.quiescent).toBe(false);
     expect(published.interactiveDirty).toBe(true);
     expect(published.reason).toBe("interactive_dirty");
+  });
+
+  it("asks for a frame along with a frame capture, since the worker takes the frame from inside one", async () => {
+    const { loop } = makeLoop();
+    const capture = loop.captureFrame();
+    expect(window.lucidaTrace!.quiescence!.interactiveDirty).toBe(true);
+    await expect(capture).resolves.toEqual({ frame: null, reason: "no frame in this test" });
   });
 
   it("opens one run on a dataset-open cause, whatever the member count", () => {

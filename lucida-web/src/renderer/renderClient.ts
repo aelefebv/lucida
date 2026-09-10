@@ -5,7 +5,8 @@ import type {
   SliceLayerParams,
   MinimapLayerParams,
   WorkerToMainMessage,
-  CapturedFrame,
+  CaptureFailure,
+  FrameCaptureResult,
   ColdStateMessage,
   ColdStateDisplayMessage,
   ColdStateSelectionMessage,
@@ -29,6 +30,10 @@ import type {
  *  `destroy`). `terminate()` on an already-closed worker is a no-op. */
 const DESTROY_TERMINATE_FALLBACK_MS = 1000;
 
+function failureText(failure: CaptureFailure | null): string {
+  return failure ? `${failure.name}: ${failure.message}` : "no reason was given";
+}
+
 export class RenderClient implements UploadClient {
   private worker: Worker;
   private readyPromise: Promise<void>;
@@ -42,7 +47,7 @@ export class RenderClient implements UploadClient {
 
   /** Pending `captureFrame` requests, keyed by the id sent to the worker.
    *  Resolved when the matching `frameCaptured` arrives. */
-  private framePending = new Map<number, (frame: CapturedFrame | null) => void>();
+  private framePending = new Map<number, (capture: FrameCaptureResult) => void>();
   private frameSeq = 0;
 
   onIntensityRange: ((datasetId: string, min: number, max: number) => void) | null = null;
@@ -158,7 +163,11 @@ export class RenderClient implements UploadClient {
       const resolve = this.framePending.get(msg.id);
       if (resolve) {
         this.framePending.delete(msg.id);
-        resolve(msg.png ? { png: msg.png, width: msg.width, height: msg.height } : null);
+        resolve(
+          msg.png
+            ? { frame: { png: msg.png, width: msg.width, height: msg.height }, reason: null }
+            : { frame: null, reason: `the render worker could not read its canvas: ${failureText(msg.failure)}` },
+        );
       }
     } else if (msg.type === "error") {
       console.error("Render worker error:", msg.message);
@@ -476,13 +485,17 @@ export class RenderClient implements UploadClient {
 
   /**
    * The frame on the worker's canvas as a PNG, for the trace bundle (#1055).
-   * Resolves null when the worker could not read its canvas, and immediately
-   * after destroy, so a bundle never hangs on a dead client.
+   * The worker takes it from inside the next frame it renders, so the caller
+   * asks the render loop for one. Resolves with a reason when the worker
+   * could not read a frame, and immediately after destroy, so a bundle never
+   * hangs on a dead client.
    */
-  captureFrame(): Promise<CapturedFrame | null> {
-    if (this.destroyed) return Promise.resolve(null);
+  captureFrame(): Promise<FrameCaptureResult> {
+    if (this.destroyed) {
+      return Promise.resolve({ frame: null, reason: "the render client was destroyed, so there was no canvas to read" });
+    }
     const id = this.frameSeq++;
-    return new Promise<CapturedFrame | null>((resolve) => {
+    return new Promise<FrameCaptureResult>((resolve) => {
       this.framePending.set(id, resolve);
       this.worker.postMessage({ type: "captureFrame", id });
     });
@@ -557,7 +570,9 @@ export class RenderClient implements UploadClient {
     // after the worker is gone (the id-correlated path has no fire-and-forget).
     for (const resolve of this.thumbnailPending.values()) resolve(null);
     this.thumbnailPending.clear();
-    for (const resolve of this.framePending.values()) resolve(null);
+    for (const resolve of this.framePending.values()) {
+      resolve({ frame: null, reason: "the render client was destroyed before the worker answered" });
+    }
     this.framePending.clear();
     // Settle a still-pending init so `ready()` awaiters don't hang (no-op
     // once the worker has reported ready).

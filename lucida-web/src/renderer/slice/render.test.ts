@@ -13,7 +13,10 @@ import type { SliceRenderMultiPassMessage } from "../workerProtocol.ts";
 import type { LodIndirectionMeta } from "../volume/atlas.ts";
 import { createInitialState, type RendererState } from "../worker/state.ts";
 import type { SliceAtlasState } from "./atlas.ts";
+import { captureRenderedFrame } from "../worker/captureFrame.ts";
 import { handleSliceRenderMultiPass } from "./render.ts";
+
+vi.mock("../worker/captureFrame.ts", () => ({ captureRenderedFrame: vi.fn() }));
 
 function makeDevice(): GPUDevice {
   const encoder = {
@@ -183,6 +186,30 @@ function memberMsg(memberId: string, dataW = 128, dataH = 128): SliceRenderMulti
 }
 
 describe("handleSliceRenderMultiPass", () => {
+  it("hands the canvas texture it drew to the frame capture, after the frame's last submit", () => {
+    const device = makeDevice();
+    const renderer = makeRenderer();
+    const composite = vi.fn();
+    const state = createInitialState();
+    state.sliceAtlases.set("coarse-pool", makeAtlas(new Map([["img-a", residentMetas()]])));
+    const descIndex = makeDescIndex(["img-a"], {
+      sourceBindingByMember: bindings({ "img-a": { levelPoolKeys: [], coarsePoolKey: "coarse-pool" } }),
+    });
+    const ctx = makeCtx({ device, state, renderer, composite, descIndex });
+    const canvasTexture = { createView: () => ({}) };
+    ctx.context.getCurrentTexture = () => canvasTexture as unknown as GPUTexture;
+    const capture = vi.mocked(captureRenderedFrame);
+    capture.mockClear();
+
+    handleSliceRenderMultiPass(ctx, memberMsg("img-a"));
+
+    expect(capture).toHaveBeenCalledOnce();
+    expect(capture).toHaveBeenCalledWith(ctx, canvasTexture);
+    const submit = vi.mocked(device.queue.submit);
+    const lastSubmit = submit.mock.invocationCallOrder[submit.mock.invocationCallOrder.length - 1];
+    expect(capture.mock.invocationCallOrder[0]).toBeGreaterThan(lastSubmit);
+  });
+
   it("renders a layer backed only by a resident coarse chunk tier", () => {
     const device = makeDevice();
     const renderer = makeRenderer();

@@ -19,6 +19,9 @@ import { UNTIMED } from "../passTiming.ts";
 import type { VolumePoolBinding } from "../volumeRenderer.ts";
 import type { VolumeRenderMultiPassMessage } from "../workerProtocol.ts";
 import { createInitialState, type RendererState } from "../worker/state.ts";
+import { captureRenderedFrame } from "../worker/captureFrame.ts";
+
+vi.mock("../worker/captureFrame.ts", () => ({ captureRenderedFrame: vi.fn() }));
 import { getOrCreateVolumePool, type AtlasState } from "./atlas.ts";
 import { handleVolumeRenderMultiPass } from "./render.ts";
 
@@ -150,6 +153,29 @@ function msgFor(layers: Array<{ memberId: string; entityIndex: number; blendMode
 }
 
 describe("handleVolumeRenderMultiPass", () => {
+  it("hands the canvas texture it drew to the frame capture, after the frame's last submit", () => {
+    const device = makeDevice();
+    const renderer = makeRenderer();
+    const composite = vi.fn();
+    const state = createInitialState();
+    const descIndex = makeDescIndex(["img-a"], {
+      sourceBindingByMember: bindings({ "img-a": { levelPoolKeys: [], coarsePoolKey: null } }),
+    });
+    const ctx = makeCtx({ device, state, renderer, composite, descIndex });
+    const canvasTexture = { createView: () => ({}) };
+    ctx.context.getCurrentTexture = () => canvasTexture as unknown as GPUTexture;
+    const capture = vi.mocked(captureRenderedFrame);
+    capture.mockClear();
+
+    handleVolumeRenderMultiPass(ctx, msgFor([{ memberId: "img-a", entityIndex: 0 }]));
+
+    expect(capture).toHaveBeenCalledOnce();
+    expect(capture).toHaveBeenCalledWith(ctx, canvasTexture);
+    const submit = vi.mocked(device.queue.submit);
+    const lastSubmit = submit.mock.invocationCallOrder[submit.mock.invocationCallOrder.length - 1];
+    expect(capture.mock.invocationCallOrder[0]).toBeGreaterThan(lastSubmit);
+  });
+
   it("does not advance first-layer state for skipped non-renderable layers", () => {
     const device = makeDevice();
     const renderer = makeRenderer();

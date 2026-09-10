@@ -20,6 +20,7 @@ import {
 import { serializeTransientDescriptor } from "../descriptor/transient.ts";
 import { DESCRIPTOR_ENTRY_SIZE } from "../descriptor/layout.ts";
 import { packLabelPalette } from "../labelColors.ts";
+import { captureRenderedFrame } from "../worker/captureFrame.ts";
 
 /** Identity 4×4 (column-major) — the fallback model transform for a label
  *  layer that somehow arrives without matrices (defensive; a real label
@@ -191,7 +192,8 @@ export function handleVolumeRenderMultiPass(
   // Only 1 offscreen texture needed — render and composite each layer incrementally
   const pool = ctx.ensureOffscreenPool(1, msg.canvasW, msg.canvasH);
 
-  const canvasView = ctx.context.getCurrentTexture().createView();
+  const canvasTexture = ctx.context.getCurrentTexture();
+  const canvasView = canvasTexture.createView();
   let isFirstLayer = true;
   const atlasMap = ctx.state.volumeAtlases;
 
@@ -308,4 +310,7 @@ export function handleVolumeRenderMultiPass(
   }
 
   timing.endFrame();
+  // The frame can be read only here, after its last pass and before the
+  // texture expires with this handler.
+  captureRenderedFrame(ctx, canvasTexture);
 }

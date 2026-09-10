@@ -21,6 +21,7 @@ import { setCameraUVForMember } from "./eviction.ts";
 import { serializeTransientDescriptor } from "../descriptor/transient.ts";
 import { DESCRIPTOR_ENTRY_SIZE } from "../descriptor/layout.ts";
 import { packLabelPalette } from "../labelColors.ts";
+import { captureRenderedFrame } from "../worker/captureFrame.ts";
 
 const IDENTITY_4X4 = new Float32Array([
   1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
@@ -476,7 +477,8 @@ export function handleSliceRenderMultiPass(
     renderedLayers.push({ view: layerTarget.createView(), blendMode: layer.blendMode });
   }
 
-  const canvasView = ctx.context.getCurrentTexture().createView();
+  const canvasTexture = ctx.context.getCurrentTexture();
+  const canvasView = canvasTexture.createView();
   const compEncoder = ctx.device.createCommandEncoder();
   comp.composite(canvasView, renderedLayers, compEncoder, true, timing);
   ctx.device.queue.submit([compEncoder.finish()]);
@@ -489,4 +491,7 @@ export function handleSliceRenderMultiPass(
   }
 
   timing.endFrame();
+  // The frame can be read only here, after its last pass and before the
+  // texture expires with this handler.
+  captureRenderedFrame(ctx, canvasTexture);
 }
