@@ -390,7 +390,7 @@ describe("the driver's fallback frame", () => {
         section: "frame",
         reason:
           `${workerReason}; the canvas region of the fallback frame from the driver was one flat ` +
-          "colour, #000000, so the screenshot did not include the canvas and was not kept",
+          "colour, #000000, which is what a screenshot that leaves the WebGPU canvas out shows, so it was not kept",
       },
     ]);
     expect(decodePng).toHaveBeenCalledOnce();
@@ -434,7 +434,7 @@ describe("the driver's fallback frame", () => {
     expect(wholeFlat.frame).toBeNull();
     expect(wholeFlat.absent[0].reason).toBe(
       `${workerReason}; the fallback frame from the driver was one flat colour, #000000, ` +
-        "so the screenshot did not include the canvas and was not kept",
+        "which is what a screenshot that leaves the WebGPU canvas out shows, so it was not kept",
     );
   });
 

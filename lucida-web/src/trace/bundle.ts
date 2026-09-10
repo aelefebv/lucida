@@ -408,7 +408,7 @@ async function resolveFrame(
       value: null,
       reason:
         `${failure}; ${where} from the ${fallback.capturedBy} was one flat colour, ` +
-        `${check.colour}, so the screenshot did not include the canvas and was not kept`,
+        `${check.colour}, which is what a screenshot that leaves the WebGPU canvas out shows, so it was not kept`,
     };
   }
   const fallbackReason = check.unchecked
