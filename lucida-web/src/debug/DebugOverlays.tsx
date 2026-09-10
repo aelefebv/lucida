@@ -8,7 +8,10 @@
  *  - groupModes: per-group badge with detail/coarse worker-delivered coverage
  *  - chunkGrid: planned LOD chunk grid for every visible tile, colored
  *    by status or tier. Capped at MAX_CHUNK_RECTS per tick as a backstop for
- *    pathological cases.
+ *    pathological cases. In volume mode the same cells draw as wireframe
+ *    boxes (#1063): each chunk box's eight corners go through the camera,
+ *    the shared draw list colors the cell, and `volumeWireframe.ts` turns
+ *    the cell into edges, a silhouette for the hit test, and a stroke.
  *  - phaseColor and churnTint: the same grid colored from the trace rather
  *    than the cache. Phase color is the phase each chunk's newest row is
  *    in, in the timeline's palette, and churn tint is how many times the
@@ -66,11 +69,21 @@ import {
   hitTestChunk,
   overlayAbsence,
   type ChunkCell,
+  type ChunkDrawItem,
   type ChunkDrawList,
   type DisplayTier,
   type InspectorView,
 } from "./overlayDrawList.ts";
 import { radiusSpecsForOverlay } from "./radiusPreview.ts";
+import {
+  buildVolumeDrawList,
+  hitTestBox,
+  isVolumeDrawList,
+  projectChunkBox,
+  type ProjectedBox,
+  type Projector,
+  type Vec3,
+} from "./volumeWireframe.ts";
 
 interface Props {
   wasmSceneRef: RefObject<WasmScene | null>;
@@ -151,6 +164,10 @@ const EMPTY_DRAW_LIST: ChunkDrawList = { items: [], withRow: 0, churned: 0 };
 
 /** Where the inspector sits relative to the pointer, in CSS pixels. */
 const INSPECTOR_OFFSET = 14;
+
+/** The box the inspector describes gets a wide white stroke under its own edges, so it stands out of the stack. */
+const HOVERED_BOX_STROKE = "rgba(255, 255, 255, 0.95)";
+const HOVERED_BOX_EXTRA_WIDTH = 3;
 
 function emptyTierCoverageCounts(): TierCoverageCounts {
   return { wanted: 0, shown: 0, ready: 0, inFlight: 0 };
@@ -390,37 +407,34 @@ function tileWorldCenter(frame: TileFrame): [number, number, number] {
   );
 }
 
-/**
- * Project a tile-local voxel-space AABB to a screen-space AABB by
- * projecting all 8 corners and reducing.
- */
-function projectVoxelAabb(
-  ws: WasmScene,
-  frame: TileFrame,
-  vMin: [number, number, number],
-  vMax: [number, number, number],
-  dpr: number,
-): { x: number; y: number; w: number; h: number } | null {
-  let sxMin = Infinity;
-  let syMin = Infinity;
-  let sxMax = -Infinity;
-  let syMax = -Infinity;
-  let any = false;
-  for (let i = 0; i < 8; i++) {
-    const vx = i & 1 ? vMax[0] : vMin[0];
-    const vy = (i >> 1) & 1 ? vMax[1] : vMin[1];
-    const vz = (i >> 2) & 1 ? vMax[2] : vMin[2];
+/** The scene's camera: world coordinates to CSS pixels, or null behind the camera. */
+function worldProjector(ws: WasmScene, dpr: number): Projector {
+  return (wx, wy, wz) => {
+    const arr = ws.project_to_screen(wx, wy, wz);
+    return arr.length === 0 ? null : [arr[0] / dpr, arr[1] / dpr];
+  };
+}
+
+function voxelProjector(ws: WasmScene, frame: TileFrame, dpr: number): Projector {
+  const project = worldProjector(ws, dpr);
+  return (vx, vy, vz) => {
     const [wx, wy, wz] = voxelToWorld(frame, vx, vy, vz);
-    const p = projectWorld(ws, wx, wy, wz, dpr);
-    if (!p) continue;
-    any = true;
-    if (p.x < sxMin) sxMin = p.x;
-    if (p.y < syMin) syMin = p.y;
-    if (p.x > sxMax) sxMax = p.x;
-    if (p.y > syMax) syMax = p.y;
+    return project(wx, wy, wz);
+  };
+}
+
+/** The camera's world position, for ordering boxes front to back in the hit test. */
+function eyeOf(ws: WasmScene): [number, number, number] | null {
+  try {
+    const eye = ws.eye_position();
+    return eye.length >= 3 ? [eye[0], eye[1], eye[2]] : null;
+  } catch {
+    return null;
   }
-  if (!any) return null;
-  return { x: sxMin, y: syMin, w: sxMax - sxMin, h: syMax - syMin };
+}
+
+function squaredDistance(a: Vec3, b: Vec3): number {
+  return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2;
 }
 
 function distanceToVoxelAabbSq(
@@ -528,14 +542,22 @@ export function DebugOverlays({
   const drawListRef = useRef<ChunkDrawList>(EMPTY_DRAW_LIST);
   const pointerRef = useRef<{ x: number; y: number } | null>(null);
   const hoveredKeyRef = useRef<string | null>(null);
-  const [inspector, setInspector] = useState<{ left: number; top: number; view: InspectorView } | null>(null);
+  const [inspector, setInspector] = useState<{ key: string; left: number; top: number; view: InspectorView } | null>(
+    null,
+  );
+
+  const hitTest = useCallback(
+    (x: number, y: number): ChunkDrawItem | null =>
+      viewMode === "3d" ? hitTestBox(drawListRef.current.items, x, y) : hitTestChunk(drawListRef.current.items, x, y),
+    [viewMode],
+  );
 
   // One live lookup per hovered cell per tick, never per pointer move: the
   // rank is a pass over the interval's rows, a cost a hover can pay and a
   // frame cannot.
   const refreshInspector = useCallback(() => {
     const pointer = pointerRef.current;
-    const item = pointer ? hitTestChunk(drawListRef.current.items, pointer.x, pointer.y) : null;
+    const item = pointer ? hitTest(pointer.x, pointer.y) : null;
     if (!pointer || !item || item.cell.proxyAsset) {
       hoveredKeyRef.current = null;
       setInspector(null);
@@ -544,11 +566,12 @@ export function DebugOverlays({
     const lookup = traceRecorder.lookupChunkLive(item.cell);
     hoveredKeyRef.current = item.key;
     setInspector({
+      key: item.key,
       left: pointer.x + INSPECTOR_OFFSET,
       top: pointer.y + INSPECTOR_OFFSET,
       view: describeHoverInspector(item, lookup, traceRecorder.openIntervalMs),
     });
-  }, []);
+  }, [hitTest]);
 
   const closeInspector = useCallback(() => {
     pointerRef.current = null;
@@ -567,7 +590,7 @@ export function DebugOverlays({
       const x = event.clientX - bounds.left;
       const y = event.clientY - bounds.top;
       pointerRef.current = { x, y };
-      const item = hitTestChunk(drawListRef.current.items, x, y);
+      const item = hitTest(x, y);
       if (item && item.key === hoveredKeyRef.current) {
         // Same cell: move the box without another lookup.
         setInspector((open) => (open ? { ...open, left: x + INSPECTOR_OFFSET, top: y + INSPECTOR_OFFSET } : open));
@@ -583,7 +606,7 @@ export function DebugOverlays({
       canvas.removeEventListener("pointerleave", closeInspector);
       canvas.removeEventListener("pointerdown", closeInspector);
     };
-  }, [canvasRef, showGrid, refreshInspector, closeInspector]);
+  }, [canvasRef, showGrid, hitTest, refreshInspector, closeInspector]);
 
   useEffect(() => {
     if (!anyEnabled) {
@@ -609,6 +632,7 @@ export function DebugOverlays({
 
       const dpr = devicePixelRatio;
       const is3D = viewMode === "3d";
+      const eye = is3D ? eyeOf(ws) : null;
 
       const coord = renderLoopRef.current?.getTickCoordinator();
       const plans = coord?.getLastPlans();
@@ -618,6 +642,10 @@ export function DebugOverlays({
       const yMin = -32;
       const xMax = canvasWCss + 64;
       const yMax = canvasHCss + 32;
+      const offScreen = (box: ProjectedBox): boolean =>
+        box.left + box.width < xMin || box.top + box.height < yMin || box.left > xMax || box.top > yMax;
+      const volumeFields = (box: ProjectedBox, centerWorld: Vec3): Pick<ChunkCell, "corners" | "depth"> =>
+        is3D ? { corners: box.corners, depth: eye ? squaredDistance(eye, centerWorld) : undefined } : {};
 
       // Per-tick model-matrix cache; one WASM call per (dsId, imageId)
       // even when many overlays / groups reference the same tile.
@@ -952,22 +980,8 @@ export function DebugOverlays({
                 }
               }
               if (!any) continue;
-              let sxMin = Infinity, syMin = Infinity, sxMax = -Infinity, syMax = -Infinity;
-              let projected = false;
-              for (let i = 0; i < 8; i++) {
-                const wx = i & 1 ? maxX : minX;
-                const wy = (i >> 1) & 1 ? maxY : minY;
-                const wz = (i >> 2) & 1 ? maxZ : minZ;
-                const p = projectWorld(ws, wx, wy, wz, dpr);
-                if (!p) continue;
-                projected = true;
-                if (p.x < sxMin) sxMin = p.x;
-                if (p.y < syMin) syMin = p.y;
-                if (p.x > sxMax) sxMax = p.x;
-                if (p.y > syMax) syMax = p.y;
-              }
-              if (!projected) continue;
-              if (sxMax < xMin || syMax < yMin || sxMin > xMax || syMin > yMax) continue;
+              const groupBox = projectChunkBox(worldProjector(ws, dpr), [minX, minY, minZ], [maxX, maxY, maxZ]);
+              if (!groupBox || offScreen(groupBox)) continue;
               out.push({
                 key: `${dsId}/${entry.entityId}/group-proxy`,
                 datasetId: dsId,
@@ -979,13 +993,14 @@ export function DebugOverlays({
                 z: 0,
                 y: 0,
                 x: 0,
-                left: sxMin,
-                top: syMin,
-                width: sxMax - sxMin,
-                height: syMax - syMin,
+                left: groupBox.left,
+                top: groupBox.top,
+                width: groupBox.width,
+                height: groupBox.height,
                 status,
                 priorityRank,
                 proxyAsset: true,
+                ...volumeFields(groupBox, [(minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2]),
               });
               continue;
             }
@@ -997,6 +1012,7 @@ export function DebugOverlays({
             if (!lvl0) continue;
             const frame = getFrame(dsId, entry.imageId, lvl0.shape);
             frame.pos = pos;
+            const projectVoxel = voxelProjector(ws, frame, dpr);
             const fullX = lvl0.shape[Axis.X];
             const fullY = lvl0.shape[Axis.Y];
 
@@ -1099,17 +1115,14 @@ export function DebugOverlays({
                   for (let col = colStart; col < colEnd; col++) {
                     if (out.length >= MAX_CHUNK_RECTS) return;
                     const key = chunkKeyFor(level, t, c, iz, row, col);
-                    const rect = projectVoxelAabb(
-                      ws,
-                      frame,
-                      [col * chunkWorldX, row * chunkWorldY, iz * chunkWorldZ],
-                      [(col + 1) * chunkWorldX, (row + 1) * chunkWorldY, (iz + 1) * chunkWorldZ],
-                      dpr,
-                    );
-                    if (!rect) continue;
-                    if (rect.x + rect.w < xMin || rect.y + rect.h < yMin || rect.x > xMax || rect.y > yMax) {
-                      continue;
-                    }
+                    const boxMin: [number, number, number] = [col * chunkWorldX, row * chunkWorldY, iz * chunkWorldZ];
+                    const boxMax: [number, number, number] = [
+                      (col + 1) * chunkWorldX,
+                      (row + 1) * chunkWorldY,
+                      (iz + 1) * chunkWorldZ,
+                    ];
+                    const box = projectChunkBox(projectVoxel, boxMin, boxMax);
+                    if (!box || offScreen(box)) continue;
 
                     let displayTier: DisplayTier = "missing";
                     let statusKey = key;
@@ -1149,12 +1162,21 @@ export function DebugOverlays({
                       z: iz,
                       y: row,
                       x: col,
-                      left: rect.x,
-                      top: rect.y,
-                      width: rect.w,
-                      height: rect.h,
+                      left: box.left,
+                      top: box.top,
+                      width: box.width,
+                      height: box.height,
                       sourceTier: displayTier,
                       ...statusFor(statusKey),
+                      ...volumeFields(
+                        box,
+                        voxelToWorld(
+                          frame,
+                          (boxMin[0] + boxMax[0]) / 2,
+                          (boxMin[1] + boxMax[1]) / 2,
+                          (boxMin[2] + boxMax[2]) / 2,
+                        ),
+                      ),
                     });
                   }
                 }
@@ -1169,12 +1191,13 @@ export function DebugOverlays({
         }
         out.sort((a, b) => tierDrawOrder(a) - tierDrawOrder(b));
         const window = traceRecorder.openIntervalMs;
-        const list = buildChunkDrawList({
+        const input = {
           cells: out,
           modes: enabled,
-          readingOf: (cell) => traceRecorder.readChunk(cell),
+          readingOf: (cell: ChunkCell) => traceRecorder.readChunk(cell),
           windowMs: window,
-        });
+        };
+        const list = is3D ? buildVolumeDrawList(input) : buildChunkDrawList(input);
         drawListRef.current = list;
         setDrawList(list);
         setWindowMs(window);
@@ -1195,6 +1218,8 @@ export function DebugOverlays({
   if (!anyEnabled) return null;
 
   const absence = overlayAbsence(enabled, drawList, windowMs);
+  const volumeList = viewMode === "3d" && isVolumeDrawList(drawList) ? drawList : null;
+  const hoveredBox = volumeList && inspector ? volumeList.items.find(item => item.key === inspector.key) ?? null : null;
 
   return (
     <div
@@ -1208,7 +1233,7 @@ export function DebugOverlays({
         overflow: "hidden",
       }}
     >
-      {showGrid && drawList.items.map(item => (
+      {showGrid && viewMode !== "3d" && drawList.items.map(item => (
         <div
           key={item.key}
           style={{
@@ -1224,6 +1249,58 @@ export function DebugOverlays({
           title={item.tooltip}
         />
       ))}
+      {showGrid && volumeList && volumeList.batches.length > 0 && (
+        <svg
+          data-testid="overlay-boxes"
+          width={size.w}
+          height={size.h}
+          viewBox={`0 0 ${size.w} ${size.h}`}
+          style={{
+            position: "absolute",
+            inset: 0,
+            pointerEvents: "none",
+            overflow: "hidden",
+          }}
+        >
+          {/* Halos first, so every edge draws over every halo. */}
+          {volumeList.batches.map((batch, i) =>
+            batch.style.halo ? (
+              <path
+                key={`halo-${i}`}
+                d={batch.d}
+                fill="none"
+                stroke={batch.style.halo.stroke}
+                strokeWidth={batch.style.halo.strokeWidth}
+                strokeLinecap="round"
+              />
+            ) : null,
+          )}
+          {hoveredBox && (
+            <path
+              data-testid="overlay-box-hovered"
+              data-chunk={hoveredBox.cell.chunkKey}
+              d={hoveredBox.path}
+              fill="none"
+              stroke={HOVERED_BOX_STROKE}
+              strokeWidth={hoveredBox.style.strokeWidth + HOVERED_BOX_EXTRA_WIDTH}
+              strokeLinecap="round"
+            />
+          )}
+          {volumeList.batches.map((batch, i) => (
+            <path
+              key={`edges-${i}`}
+              data-testid="overlay-box-batch"
+              data-count={batch.count}
+              d={batch.d}
+              fill="none"
+              stroke={batch.style.stroke}
+              strokeWidth={batch.style.strokeWidth}
+              strokeDasharray={batch.style.dash ?? undefined}
+              strokeLinecap="round"
+            />
+          ))}
+        </svg>
+      )}
       {showGrid && inspector && (
         <div
           data-testid="overlay-inspector"
