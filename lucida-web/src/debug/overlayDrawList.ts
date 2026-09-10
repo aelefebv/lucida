@@ -36,6 +36,16 @@ import { labelMs } from "../trace/diagnose/window.ts";
 export type ChunkStatus = "cached" | "in-flight" | "planned";
 export type DisplayTier = ResidencyTier | "missing";
 
+/** A point in CSS pixels, relative to the viewer canvas. */
+export type ScreenPoint = [number, number];
+
+/**
+ * A chunk box's eight corners on screen, or null for a corner behind the
+ * camera. Corner `i` is at the box's far face in x when bit 0 of `i` is
+ * set, in y for bit 1, in z for bit 2.
+ */
+export type BoxCorners = readonly (ScreenPoint | null)[];
+
 /**
  * One chunk cell the overlay projected: which chunk it is, where it is on
  * screen, and what the cache says about it. The identity fields are the
@@ -71,6 +81,17 @@ export interface ChunkCell {
    * colors and say what it is. Its identity fields are placeholders.
    */
   proxyAsset?: boolean;
+  /**
+   * In volume mode, the chunk box's corners on screen. The rectangle above
+   * is their bounds. Absent in slice mode, where the cell is the rectangle.
+   */
+  corners?: BoxCorners;
+  /**
+   * In volume mode, the squared distance from the camera to the box's
+   * center in world units, so boxes along one line of sight order front
+   * to back. Absent in slice mode.
+   */
+  depth?: number;
 }
 
 /** The color modes over the chunk grid. Each gates on its own toggle. */

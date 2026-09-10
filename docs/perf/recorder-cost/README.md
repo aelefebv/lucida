@@ -12,6 +12,7 @@ Issue [#928], under the [#921] spec, enforcing [ADR 0049][0049].
 [#962]: https://github.com/aelefebv/lucida/issues/962
 [#1056]: https://github.com/aelefebv/lucida/issues/1056
 [#1062]: https://github.com/aelefebv/lucida/issues/1062
+[#1063]: https://github.com/aelefebv/lucida/issues/1063
 [0049]: ../../../wiki/decisions/0049-unconditional-recording-under-a-design-budget.md
 [0052]: ../../../wiki/decisions/0052-debug-surface-dispositions.md
 
@@ -302,6 +303,28 @@ Two notes on reading that table:
   `lucida-web/src/trace/chunkIndexCost.perf.test.ts`: 600 cells read over
   40,000 rows in about 1 ms, 0.93x the time over 2,000, against a 4x
   flatness gate.
+- **The volume overlay draws boxes and moved nothing onto the write path
+  ([#1063]).** In volume mode the overlay keeps the eight projected corners
+  of each chunk box instead of reducing them to a screen rectangle. The
+  same cells go to the shared draw list, and the layer strokes each box's
+  twelve edges in the cell's color, batched into one path per distinct
+  style. The projection is the eight scene calls per chunk the rectangle
+  path already made. The one call added is a read of the camera's eye
+  position per poll, which orders the boxes under the pointer front to
+  back. The recorder is read exactly as the slice overlay reads it. The
+  overlay polls ten times a second and never per frame. Hidden, it costs
+  nothing: the layer is not mounted and no timer runs, which the component
+  test asserts against a counting scene. One poll's pure work at the
+  overlay's own cap has a gate of its own in
+  `lucida-web/src/debug/volumeOverlayCost.perf.test.ts`: 600 boxes
+  projected, listed and stroked in about 3.5 ms on this host, against a
+  4 ms ceiling at 16× slack, and the hit test over 600 silhouettes at
+  about 20 µs against 200 µs. Most of the poll is turning 7,200 edges into
+  path text. Writing each corner out once rather than once per edge took
+  it from about 5 ms to that figure. The browser's side, a few dozen path
+  elements replaced ten times a second, is not measured here. It belongs
+  to the A/B on a hardware adapter at device pixel ratio 2, which has not
+  been run for this change.
 
 **What has to happen for the obligation to be discharged.** When [#918]
 (`debugStats.enabled` and its read sites) and [#919] (`DebugPanel.tsx`) land,
