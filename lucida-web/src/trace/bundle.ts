@@ -29,6 +29,7 @@ import { toChromeTraceJson } from "./chromeTrace.ts";
 import { diagnoseRun } from "./diagnose/diagnose.ts";
 import { renderDiagnostic } from "./diagnose/renderText.ts";
 import type { ChunkLookup, DiagnosticDocument } from "./diagnose/types.ts";
+import { flatColourOf, type PngDecoder, type Rect } from "./flatFrame.ts";
 import type {
   BuildIdentity,
   CacheWarmth,
@@ -150,11 +151,21 @@ export interface BundleFrame {
   devicePixelRatio: number | null;
   /**
    * Who took the frame. The page reads its own canvas through the render
-   * worker. The driver brings the screenshot it takes over the DevTools
-   * protocol, which exists even when the worker never came up. This is the
-   * one section of a bundle that depends on the caller, and it says so.
+   * worker, from inside a rendered frame, and that is the frame from any
+   * caller with a page: the monitor's buttons and the driver alike. The
+   * driver also takes a screenshot over the DevTools protocol, which exists
+   * even when the worker never came up, and hands it over as the fallback.
+   * The page carries that only when its own capture fails, and then
+   * `fallbackReason` says why. This is the one section of a bundle that
+   * depends on the caller, and it says so.
    */
   capturedBy: "page" | "driver";
+  /**
+   * Why the page's own capture failed, on a frame the caller's fallback
+   * stood in for. Absent on a frame the page took, and on a frame a caller
+   * passed as `frame` to be carried as given.
+   */
+  fallbackReason?: string;
 }
 
 /**
@@ -239,13 +250,31 @@ export interface BundleServices {
   requestDatasetHealth(): Promise<DatasetSourceHealth[]>;
   /** The frame on the canvas, or the reason the render worker could not read one. */
   captureFrame(): Promise<FrameCaptureResult>;
+  /**
+   * Where the render canvas is on the page, in CSS pixels, clipped to the
+   * document's client area so a scrollbar falls outside it. Null when no
+   * canvas is mounted or none of it is in view. The flat-colour check on a
+   * fallback frame reads this region of the screenshot.
+   */
+  canvasRect(): Rect | null;
 }
 
 export interface BundleOptions {
   /** The run to carry. The newest when absent. A run the trace does not hold is an error. */
   runId?: string;
-  /** A frame the caller already has. The page captures its own when this is absent. */
+  /** A frame the caller already has, carried as given. The page captures none. */
   frame?: BundleFrame;
+  /**
+   * A frame for the page to carry only when its own capture fails, which is
+   * how the driver hands over its DevTools screenshot. The page's capture
+   * comes first because it copies the canvas texture from inside a rendered
+   * frame, while a screenshot can leave a WebGPU canvas out: headless Chrome
+   * on Vulkan returns solid black for it (#1098). So a fallback whose canvas
+   * region decodes to one flat colour is not carried either. The bundle
+   * records the frame as absent and names the colour. Ignored when `frame`
+   * is given.
+   */
+  fallbackFrame?: BundleFrame;
   /** Include the Chrome Trace Event projection. Off by default. */
   perfetto?: boolean;
   /** The driver's script and what each step did. Carried as given. */
@@ -262,6 +291,12 @@ export interface BundleContext {
   origin: string | null;
   /** The page's device pixel ratio now, which is what a frame the page takes is at. Null where there is no page. */
   devicePixelRatio: number | null;
+  /**
+   * The page's PNG decoder, through its 2D canvas, which the flat-colour
+   * check on a fallback frame reads through. Null where there is no page,
+   * and then a fallback frame is carried unchecked and says so.
+   */
+  decodePng: PngDecoder | null;
   /** Wall-clock epoch milliseconds. */
   now: number;
 }
@@ -308,10 +343,10 @@ export async function exportBundle(
   const health = healthResult.value;
   const datasetIds = run?.header.datasetIds ?? [];
 
-  const frame = options.frame ?? frameResult?.value ?? null;
-  if (!frame) {
-    absent.push({ section: "frame", reason: frameResult?.reason ?? "no frame was captured" });
-  }
+  const { value: frame, reason: frameReason } = frameResult
+    ? await resolveFrame(frameResult, options.fallbackFrame, context)
+    : { value: options.frame ?? null, reason: null };
+  if (!frame) absent.push({ section: "frame", reason: frameReason ?? "no frame was captured" });
   if (!health) absent.push({ section: "health", reason: healthResult.reason ?? "no health was fetched" });
 
   const diagnostic = run ? diagnose(run) : null;
@@ -349,6 +384,58 @@ function selectRun(trace: TraceDocument, runId: string | undefined): TraceRun | 
 interface Captured<T> {
   value: T | null;
   reason: string | null;
+}
+
+/**
+ * A fallback that stands in carries the page's failure as its
+ * `fallbackReason`, so a reader learns why the picture is a screenshot. A
+ * fallback the page cannot check is carried too, and says so: a frame that
+ * exists beats an absence decided on a guess.
+ */
+async function resolveFrame(
+  captured: Captured<BundleFrame>,
+  fallback: BundleFrame | undefined,
+  context: BundleContext,
+): Promise<Captured<BundleFrame>> {
+  if (captured.value) return captured;
+  const failure = captured.reason ?? "no frame was captured";
+  if (!fallback) return { value: null, reason: failure };
+  const region = canvasRegion(fallback, context);
+  const check = await flatColourOfPng(fallback.png, region, context.decodePng);
+  if (check.colour) {
+    const where = region ? "the canvas region of the fallback frame" : "the fallback frame";
+    return {
+      value: null,
+      reason:
+        `${failure}; ${where} from the ${fallback.capturedBy} was one flat colour, ` +
+        `${check.colour}, so the screenshot did not include the canvas and was not kept`,
+    };
+  }
+  const fallbackReason = check.unchecked
+    ? `${failure}; the fallback frame was carried unchecked because ${check.unchecked}`
+    : failure;
+  return { value: { ...fallback, fallbackReason }, reason: null };
+}
+
+function canvasRegion(fallback: BundleFrame, context: BundleContext): Rect | null {
+  const rect = context.services?.canvasRect() ?? null;
+  if (!rect) return null;
+  const scale = fallback.devicePixelRatio ?? context.devicePixelRatio ?? 1;
+  return { x: rect.x * scale, y: rect.y * scale, width: rect.width * scale, height: rect.height * scale };
+}
+
+async function flatColourOfPng(
+  base64: string,
+  region: Rect | null,
+  decodePng: PngDecoder | null,
+): Promise<{ colour: string | null; unchecked: string | null }> {
+  if (!decodePng) return { colour: null, unchecked: "there was no page to decode it" };
+  try {
+    const image = await decodePng(base64ToBytes(base64));
+    return { colour: flatColourOf(image, region), unchecked: null };
+  } catch (error) {
+    return { colour: null, unchecked: `it could not be decoded: ${message(error)}` };
+  }
 }
 
 async function captureFrame(
@@ -554,4 +641,12 @@ export function bytesToBase64(bytes: Uint8Array): string {
     binary += String.fromCharCode(...bytes.subarray(offset, offset + step));
   }
   return btoa(binary);
+}
+
+/** The bytes a base64 string carries, as the frame's PNG rides in the bundle. */
+export function base64ToBytes(base64: string): Uint8Array {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
 }

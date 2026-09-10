@@ -180,23 +180,31 @@ fn run_export_expression(with_chrome_trace: bool) -> String {
 }
 
 /// One evaluation for the bundle (#1055). It calls the page's own bundle
-/// function with the run the driver waited for and the frame the driver took,
-/// so the file the driver writes is the file the monitor's **Save bundle**
-/// writes. Awaited, because the page asks the server for its health and the
-/// render worker for its canvas before it exports. The driver passes its own
-/// frame because its screenshot exists even when the render worker never came
-/// up, and a page that never drew is the finding. The script it ran, if any,
-/// rides along as the run export left it on the page, so the bundle's steps
-/// carry the same runs and verdicts the run file's do.
-fn bundle_export_expression(frame: &BundleFrame, perfetto: bool) -> String {
-    let frame_json = serde_json::to_string(frame).unwrap_or_else(|_| "null".to_string());
+/// function with the run the driver waited for, so the file the driver
+/// writes is the file the monitor's **Save bundle** writes. Awaited, because
+/// the page asks the server for its health and the render worker for its
+/// canvas before it exports.
+///
+/// The page's own capture is the bundle's frame, as it is for **Send
+/// report**: the worker copies the canvas texture from inside a rendered
+/// frame. The driver's screenshot rides along as `fallbackFrame`, because it
+/// exists even when the render worker never came up, and a page that never
+/// drew is the finding. The page carries it only when its own capture
+/// fails, and not when its canvas region is one flat colour, since a
+/// DevTools screenshot can leave the WebGPU canvas out (#1098).
+///
+/// The script the driver ran, if any, rides along as the run export left it
+/// on the page, so the bundle's steps carry the same runs and verdicts the
+/// run file's do.
+fn bundle_export_expression(fallback_frame: &BundleFrame, perfetto: bool) -> String {
+    let frame_json = serde_json::to_string(fallback_frame).unwrap_or_else(|_| "null".to_string());
     format!(
         r#"(async () => {{
   const seam = window.lucidaTrace;
   if (!seam || typeof seam.exportBundle !== 'function') return null;
   const waited = window.__lucidaTraceRunId || seam.runState.lastConcludedRunId || undefined;
   const script = window.__lucidaTraceScript || null;
-  const bundle = await seam.exportBundle({{ runId: waited, frame: {frame_json}, perfetto: {perfetto}, script }});
+  const bundle = await seam.exportBundle({{ runId: waited, fallbackFrame: {frame_json}, perfetto: {perfetto}, script }});
   return JSON.stringify(bundle);
 }})()"#
     )
@@ -683,9 +691,14 @@ pub struct BundleGpu {
     pub timestamp_queries: bool,
 }
 
-/// The settled frame. The page takes its own through the render worker. The
-/// driver brings the screenshot it takes over the DevTools protocol, which
-/// exists even when the worker never came up. `captured_by` says which.
+/// The settled frame. The page takes its own through the render worker, from
+/// inside a rendered frame, and that is the bundle's frame from any caller.
+/// The driver also takes a screenshot over the DevTools protocol, which
+/// exists even when the worker never came up, and hands it to the page as
+/// the fallback. The page carries it only when its own capture fails, and
+/// not when its canvas region is one flat colour, since a screenshot that
+/// left the canvas out is not a frame (#1098). `captured_by` says which was
+/// kept, and `fallback_reason` says why the page's own was not.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BundleFrame {
@@ -698,6 +711,10 @@ pub struct BundleFrame {
     pub device_pixel_ratio: Option<f64>,
     /// `page` or `driver`.
     pub captured_by: String,
+    /// Why the page's own capture failed, on a frame the driver's screenshot
+    /// stood in for. Absent on a frame the page took.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
 }
 
 impl BundleFrame {
@@ -711,6 +728,7 @@ impl BundleFrame {
             height: (f64::from(viewport.height) * scale).round() as u32,
             device_pixel_ratio: Some(scale),
             captured_by: "driver".to_string(),
+            fallback_reason: None,
         }
     }
 
@@ -723,13 +741,17 @@ impl BundleFrame {
             .rev()
             .take_while(|byte| *byte == b'=')
             .count();
-        serde_json::json!({
+        let mut described = serde_json::json!({
             "width": self.width,
             "height": self.height,
             "devicePixelRatio": self.device_pixel_ratio,
             "capturedBy": self.captured_by,
             "pngBytes": self.png.len() / 4 * 3 - padding,
-        })
+        });
+        if let Some(reason) = &self.fallback_reason {
+            described["fallbackReason"] = Value::String(reason.clone());
+        }
+        described
     }
 }
 
@@ -1800,8 +1822,13 @@ pub fn format_bundle_human(bundle: &TraceBundle, path: &Path, text: &str) -> Str
                 .device_pixel_ratio
                 .map(|ratio| format!(" at DPR {ratio}"))
                 .unwrap_or_default();
+            let stood_in = frame
+                .fallback_reason
+                .as_deref()
+                .map(|reason| format!("; the page's capture failed: {reason}"))
+                .unwrap_or_default();
             lines.push(format!(
-                "frame     {}x{} PNG{ratio} (captured by {})",
+                "frame     {}x{} PNG{ratio} (captured by {}{stood_in})",
                 frame.width, frame.height, frame.captured_by
             ));
         }
@@ -2161,11 +2188,12 @@ struct DriveRequest<'a> {
 /// teardown live here once. Readiness is observed rather than demanded: a page
 /// that never draws is a run this command still has to report.
 ///
-/// `request.screenshot` is where to write the page's frame after the wait,
-/// at the viewport's device pixel ratio. It is taken before the export
-/// because the export closes the run: the frame is the run's last state. A
-/// bundle takes the same frame, whether or not the caller also wanted it as
-/// a file.
+/// `request.screenshot` is where to write the driver's screenshot of the page
+/// after the wait, at the viewport's device pixel ratio. It is taken before
+/// the export because the export closes the run: the screenshot is the run's
+/// last state. A bundle's frame is the page's own capture of its canvas, and
+/// the same screenshot rides along as the fallback for a page whose capture
+/// fails, whether or not the caller also wanted it as a file (#1098).
 ///
 /// `request.script` runs once the open has settled or been given up on,
 /// step by step, each gesture settling before the next. The frame is then
@@ -2203,13 +2231,13 @@ async fn drive_and_export(
         if let Some(script) = request.script {
             run_script(&mut page, script, wait).await?;
         }
-        let mut frame = None;
+        let mut fallback_frame = None;
         if screenshot.is_some() || bundle.is_some() {
             let png = page.screenshot_png(wait).await?;
             if let Some(path) = screenshot {
                 write_beside_its_parents(path, &png).await?;
             }
-            frame = Some(BundleFrame::from_driver(&png, viewport));
+            fallback_frame = Some(BundleFrame::from_driver(&png, viewport));
         }
         let value = page.evaluate(export, wait).await?;
         let export = value.as_str().map(str::to_string).ok_or_else(|| {
@@ -2222,8 +2250,8 @@ async fn drive_and_export(
         // the run export itself closed, so the two files name the same run
         // and differ by that interval and their export times.
         let mut bundle_json = None;
-        if let (Some(request), Some(frame)) = (bundle, frame.as_ref()) {
-            let expression = bundle_export_expression(frame, request.perfetto);
+        if let (Some(request), Some(fallback)) = (bundle, fallback_frame.as_ref()) {
+            let expression = bundle_export_expression(fallback, request.perfetto);
             let value = page.evaluate(&expression, wait).await?;
             bundle_json = Some(value.as_str().map(str::to_string).ok_or_else(|| {
                 CliError::new(
@@ -3859,6 +3887,46 @@ mod tests {
         );
     }
 
+    /// When the driver's screenshot stood in for the page's own capture, the
+    /// text says so beside the frame, with the page's reason, and the JSON
+    /// description carries the same reason. A frame the page took carries
+    /// no such key, on the wire or in the text.
+    #[test]
+    fn a_frame_the_screenshot_stood_in_for_says_why_beside_it() {
+        let mut bundle = golden_bundle();
+        let page_frame = bundle.frame.clone().expect("the golden bundle has a frame");
+        assert_eq!(page_frame.captured_by, "page");
+        assert_eq!(page_frame.fallback_reason, None);
+        let own = format_bundle_human(&bundle, Path::new("b.json"), "text");
+        assert!(
+            own.contains("frame     2880x1800 PNG at DPR 2 (captured by page)"),
+            "{own}"
+        );
+
+        let reason =
+            "the render worker could not read its canvas: the canvas has no current texture";
+        let stood_in = BundleFrame {
+            captured_by: "driver".to_string(),
+            fallback_reason: Some(reason.to_string()),
+            ..page_frame
+        };
+        let json = serde_json::to_value(&stood_in).unwrap();
+        assert_eq!(json["fallbackReason"], reason);
+        assert_eq!(stood_in.describe()["fallbackReason"], reason);
+        let parsed: BundleFrame = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, stood_in);
+
+        bundle.frame = Some(stood_in);
+        let human = format_bundle_human(&bundle, Path::new("b.json"), "text");
+        assert!(
+            human.contains(&format!(
+                "frame     2880x1800 PNG at DPR 2 (captured by driver; the page's capture failed: {reason})"
+            )),
+            "{human}"
+        );
+        assert!(!human.contains("absent    frame"), "{human}");
+    }
+
     /// A follow-up command takes a run file or a bundle by the same argument,
     /// and refuses what it cannot read with a reason instead of a half read.
     #[test]
@@ -3907,17 +3975,20 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// The driver hands the page its own frame and asks for the run it
-    /// waited for. The frame rides as JSON the encoder quoted, and the
-    /// projection is off unless the caller asked.
+    /// The driver hands the page its screenshot as the fallback frame, never
+    /// as the frame, and asks for the run it waited for. The frame rides as
+    /// JSON the encoder quoted, and the projection is off unless the caller
+    /// asked.
     #[test]
-    fn the_bundle_export_hands_the_page_the_drivers_frame_and_no_projection_by_default() {
+    fn the_bundle_export_hands_the_page_the_drivers_screenshot_as_the_fallback_frame() {
         let frame = BundleFrame::from_driver(&[1, 2, 3], Viewport::new(1440, 900, 2.0));
         assert_eq!(frame.png, "AQID");
         assert_eq!((frame.width, frame.height), (2880, 1800));
         assert_eq!(frame.device_pixel_ratio, Some(2.0));
         assert_eq!(frame.captured_by, "driver");
+        assert_eq!(frame.fallback_reason, None);
         assert_eq!(frame.describe()["pngBytes"], 3);
+        assert!(frame.describe().get("fallbackReason").is_none());
 
         let expression = bundle_export_expression(&frame, false);
         assert!(expression.contains(r#""png":"AQID""#), "{expression}");
@@ -3925,6 +3996,12 @@ mod tests {
             expression.contains(r#""capturedBy":"driver""#),
             "{expression}"
         );
+        assert!(
+            expression.contains(r#"fallbackFrame: {"png":"AQID""#),
+            "{expression}"
+        );
+        assert!(!expression.contains(" frame: {"), "{expression}");
+        assert!(!expression.contains("fallbackReason"), "{expression}");
         assert!(expression.contains("perfetto: false"), "{expression}");
         assert!(expression.contains("__lucidaTraceRunId"), "{expression}");
         assert!(expression.contains("seam.exportBundle("), "{expression}");

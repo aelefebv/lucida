@@ -28,6 +28,7 @@ import {
   fixtureServices as services,
 } from "./bundleFixtures.ts";
 import { healthyLocalOpen, interactionRun } from "./diagnose/fixtures.ts";
+import type { DecodedImage } from "./flatFrame.ts";
 import { TRACE_SCHEMA_VERSION } from "./types.ts";
 
 describe("what the bundle carries", () => {
@@ -237,7 +238,7 @@ describe("what could not be captured", () => {
 });
 
 describe("the callers", () => {
-  it("uses the frame a caller brings, as the driver does, without asking the page for one", async () => {
+  it("carries a frame a caller passes as given, without asking the page for one", async () => {
     const captureFrame = vi.fn(() =>
       Promise.resolve({ frame: { png: PNG_BYTES.buffer.slice(0), width: 1, height: 1 }, reason: null }),
     );
@@ -327,5 +328,153 @@ describe("the callers", () => {
       }),
     );
     expect(noRun.health?.datasets).toHaveLength(2);
+  });
+});
+
+/**
+ * The driver hands its DevTools screenshot over as the fallback, and the
+ * page's own capture comes first (#1098). On a host where the screenshot
+ * leaves the WebGPU canvas out, the canvas's region of the screenshot is one
+ * flat colour, and the bundle says so instead of saving it.
+ */
+describe("the driver's fallback frame", () => {
+  const screenshot: BundleFrame = {
+    png: "iVBORw0KGgo=",
+    width: 2880,
+    height: 1800,
+    devicePixelRatio: 2,
+    capturedBy: "driver",
+  };
+  const workerReason = "the render worker could not read its canvas: the canvas has no current texture";
+  const failedCapture = () => Promise.resolve({ frame: null, reason: workerReason });
+  // The canvas as the page reports it, in CSS pixels. At the screenshot's
+  // ratio of 2 it covers 18 x 10 of the decoded image below.
+  const canvasRect = () => ({ x: 0, y: 0, width: 9, height: 5 });
+
+  /**
+   * What the hardware pass saw, at a size a test can hold: the canvas region
+   * solid black, and the scrollbars of an overflowing page along the last
+   * column and row. `content` puts one lit pixel inside the canvas.
+   */
+  function decodedScreenshot(content = false): DecodedImage {
+    const width = 20;
+    const height = 12;
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (let offset = 0; offset < data.length; offset += 4) data.set([0, 0, 0, 255], offset);
+    for (let y = 0; y < height; y += 1) data.set([252, 252, 252, 255], (y * width + width - 1) * 4);
+    for (let x = 0; x < width; x += 1) data.set([139, 139, 139, 255], ((height - 1) * width + x) * 4);
+    if (content) data.set([13, 13, 20, 255], (5 * width + 9) * 4);
+    return { width, height, data };
+  }
+
+  it("captures its own frame first and leaves the fallback unread when that succeeds", async () => {
+    const decodePng = vi.fn(() => Promise.resolve(decodedScreenshot()));
+    const bundle = await exportBundle(context({ decodePng }), { fallbackFrame: screenshot });
+
+    expect(bundle.frame?.capturedBy).toBe("page");
+    expect(bundle.frame?.fallbackReason).toBeUndefined();
+    expect(bundle.absent).toEqual([]);
+    expect(decodePng).not.toHaveBeenCalled();
+  });
+
+  it("records a fallback whose canvas region is flat as absent, naming the colour and what it means", async () => {
+    const decodePng = vi.fn((_png: Uint8Array) => Promise.resolve(decodedScreenshot()));
+    const bundle = await exportBundle(
+      context({ services: services({ captureFrame: failedCapture, canvasRect }), decodePng }),
+      { fallbackFrame: screenshot },
+    );
+
+    expect(bundle.frame).toBeNull();
+    expect(bundle.absent).toEqual([
+      {
+        section: "frame",
+        reason:
+          `${workerReason}; the canvas region of the fallback frame from the driver was one flat ` +
+          "colour, #000000, so the screenshot did not include the canvas and was not kept",
+      },
+    ]);
+    expect(decodePng).toHaveBeenCalledOnce();
+    expect(Array.from(decodePng.mock.calls[0][0])).toEqual(Array.from(PNG_BYTES));
+  });
+
+  it("stands the fallback in when its canvas region holds a picture, with the page's reason beside it", async () => {
+    const bundle = await exportBundle(
+      context({
+        services: services({ captureFrame: failedCapture, canvasRect }),
+        decodePng: () => Promise.resolve(decodedScreenshot(true)),
+      }),
+      { fallbackFrame: screenshot },
+    );
+
+    expect(bundle.frame).toEqual({ ...screenshot, fallbackReason: workerReason });
+    expect(bundle.absent).toEqual([]);
+  });
+
+  it("reads the whole fallback when the page has no canvas to point at", async () => {
+    // The same screenshot, scrollbars and all, is a picture when nothing
+    // says where the canvas was.
+    const unplaced = await exportBundle(
+      context({
+        services: services({ captureFrame: failedCapture, canvasRect: () => null }),
+        decodePng: () => Promise.resolve(decodedScreenshot()),
+      }),
+      { fallbackFrame: screenshot },
+    );
+    expect(unplaced.frame).toEqual({ ...screenshot, fallbackReason: workerReason });
+
+    const flat = decodedScreenshot();
+    for (let offset = 0; offset < flat.data.length; offset += 4) flat.data.set([0, 0, 0, 255], offset);
+    const wholeFlat = await exportBundle(
+      context({
+        services: services({ captureFrame: failedCapture, canvasRect: () => null }),
+        decodePng: () => Promise.resolve(flat),
+      }),
+      { fallbackFrame: screenshot },
+    );
+    expect(wholeFlat.frame).toBeNull();
+    expect(wholeFlat.absent[0].reason).toBe(
+      `${workerReason}; the fallback frame from the driver was one flat colour, #000000, ` +
+        "so the screenshot did not include the canvas and was not kept",
+    );
+  });
+
+  it("carries a fallback it cannot decode, and says the check was skipped", async () => {
+    const undecodable = await exportBundle(
+      context({
+        services: services({ captureFrame: failedCapture }),
+        decodePng: () => Promise.reject(new Error("bad png")),
+      }),
+      { fallbackFrame: screenshot },
+    );
+    expect(undecodable.frame?.capturedBy).toBe("driver");
+    expect(undecodable.frame?.fallbackReason).toBe(
+      `${workerReason}; the fallback frame was carried unchecked because it could not be decoded: bad png`,
+    );
+    expect(undecodable.absent).toEqual([]);
+
+    const noPage = await exportBundle(
+      context({ services: services({ captureFrame: failedCapture }), decodePng: null }),
+      { fallbackFrame: screenshot },
+    );
+    expect(noPage.frame?.fallbackReason).toBe(
+      `${workerReason}; the fallback frame was carried unchecked because there was no page to decode it`,
+    );
+  });
+
+  it("keeps the page's own reason when no fallback was offered", async () => {
+    const bundle = await exportBundle(context({ services: services({ captureFrame: failedCapture }) }));
+    expect(bundle.frame).toBeNull();
+    expect(bundle.absent).toEqual([{ section: "frame", reason: workerReason }]);
+  });
+
+  it("carries a frame passed as given ahead of a fallback, and captures none", async () => {
+    const captureFrame = vi.fn(failedCapture);
+    const given: BundleFrame = { ...screenshot, width: 1440, height: 900, devicePixelRatio: 1 };
+    const bundle = await exportBundle(context({ services: services({ captureFrame }) }), {
+      frame: given,
+      fallbackFrame: screenshot,
+    });
+    expect(bundle.frame).toEqual(given);
+    expect(captureFrame).not.toHaveBeenCalled();
   });
 });
