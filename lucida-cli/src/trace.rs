@@ -1825,21 +1825,34 @@ pub fn format_bundle_human(bundle: &TraceBundle, path: &Path, text: &str) -> Str
     lines.join("\n")
 }
 
-/// The adapter in one phrase: its description, or its vendor and
-/// architecture when the browser gave none, and whether it is a software
-/// fallback. Every reading of a bundle's adapter uses this one.
-pub fn describe_adapter(gpu: &BundleGpu) -> String {
-    let name = if gpu.description.is_empty() {
-        format!("{} {}", gpu.vendor, gpu.architecture)
+/// The adapter's name: its description, or its vendor and architecture
+/// when the browser gave none. The browser gives most adapters an empty
+/// description, so the vendor and architecture are the usual name. None
+/// when the header names nothing at all. Every reading of a bundle's
+/// adapter, the show command's and the inbox listing's alike, names it
+/// through this one.
+pub fn adapter_name(description: &str, vendor: &str, architecture: &str) -> Option<String> {
+    let description = description.trim();
+    let name = if description.is_empty() {
+        format!("{} {}", vendor.trim(), architecture.trim())
     } else {
-        gpu.description.clone()
+        description.to_string()
     };
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// The adapter in one phrase: its name, and whether it is a software
+/// fallback.
+pub fn describe_adapter(gpu: &BundleGpu) -> String {
+    let name = adapter_name(&gpu.description, &gpu.vendor, &gpu.architecture)
+        .unwrap_or_else(|| "unnamed adapter".to_string());
     let fallback = match gpu.fallback {
         Some(true) => "software fallback",
         Some(false) => "hardware adapter",
         None => "fallback status unknown",
     };
-    format!("{} · {fallback}", name.trim())
+    format!("{name} · {fallback}")
 }
 
 fn format_pins(pins: &DatasetPins) -> String {
@@ -3766,6 +3779,36 @@ mod tests {
         assert!(!human.contains("iVBORw0KGgo="), "{human}");
     }
 
+    /// One rule names an adapter everywhere: the description when the
+    /// browser gave one, the vendor and architecture when it did not,
+    /// and nothing when the header names nothing.
+    #[test]
+    fn an_adapter_is_named_by_its_description_or_its_vendor_and_architecture() {
+        assert_eq!(
+            adapter_name("Example Adapter", "nvidia", "lovelace").as_deref(),
+            Some("Example Adapter")
+        );
+        assert_eq!(
+            adapter_name("", "nvidia", "lovelace").as_deref(),
+            Some("nvidia lovelace")
+        );
+        assert_eq!(adapter_name("", "apple", "").as_deref(), Some("apple"));
+        assert_eq!(adapter_name(" ", "", ""), None);
+
+        let unnamed = BundleGpu {
+            vendor: String::new(),
+            architecture: String::new(),
+            device: String::new(),
+            description: String::new(),
+            fallback: None,
+            timestamp_queries: false,
+        };
+        assert_eq!(
+            describe_adapter(&unnamed),
+            "unnamed adapter · fallback status unknown"
+        );
+    }
+
     #[test]
     fn a_bundle_without_a_frame_or_health_says_so_in_the_text() {
         let mut bundle = golden_bundle();
@@ -3774,7 +3817,10 @@ mod tests {
         bundle.absent = vec![
             BundleAbsence {
                 section: "frame".to_string(),
-                reason: "the render worker could not read its canvas".to_string(),
+                reason:
+                    "the render worker could not read its canvas: InvalidStateError: the canvas \
+                         has no current texture"
+                        .to_string(),
             },
             BundleAbsence {
                 section: "health".to_string(),
@@ -3797,7 +3843,10 @@ mod tests {
         assert!(human.contains("frame     not in this bundle"), "{human}");
         assert!(human.contains("health    not in this bundle"), "{human}");
         assert!(
-            human.contains("absent    frame: the render worker could not read its canvas"),
+            human.contains(
+                "absent    frame: the render worker could not read its canvas: InvalidStateError: \
+                 the canvas has no current texture"
+            ),
             "{human}"
         );
         assert!(
