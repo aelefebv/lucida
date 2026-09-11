@@ -13,7 +13,10 @@ import type { SliceRenderMultiPassMessage } from "../workerProtocol.ts";
 import type { LodIndirectionMeta } from "../volume/atlas.ts";
 import { createInitialState, type RendererState } from "../worker/state.ts";
 import type { SliceAtlasState } from "./atlas.ts";
+import { captureRenderedFrame } from "../worker/captureFrame.ts";
 import { handleSliceRenderMultiPass } from "./render.ts";
+
+vi.mock("../worker/captureFrame.ts", () => ({ captureRenderedFrame: vi.fn() }));
 
 function makeDevice(): GPUDevice {
   const encoder = {
@@ -122,6 +125,7 @@ interface MockRenderer {
   setDescriptorBinding: ReturnType<typeof vi.fn>;
   renderTo: ReturnType<typeof vi.fn>;
   renderAggregateBatches: ReturnType<typeof vi.fn>;
+  compiled: Promise<void>;
 }
 
 function makeRenderer(): MockRenderer {
@@ -134,7 +138,21 @@ function makeRenderer(): MockRenderer {
     setDescriptorBinding: vi.fn(),
     renderTo: vi.fn(),
     renderAggregateBatches: vi.fn(),
+    compiled: Promise.resolve(),
   };
+}
+
+/** A compile the test finishes by hand. */
+function pendingCompile(): { compiled: Promise<void>; finish: () => void } {
+  let finish!: () => void;
+  const compiled = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  return { compiled, finish };
+}
+
+async function flush(): Promise<void> {
+  for (let i = 0; i < 8; i++) await Promise.resolve();
 }
 
 function makeCtx(opts: {
@@ -143,6 +161,8 @@ function makeCtx(opts: {
   renderer: MockRenderer;
   composite: ReturnType<typeof vi.fn>;
   descIndex: EntityDescriptorIndex;
+  compositorCompiled?: Promise<void>;
+  cursorCompiled?: Promise<void>;
 }): WorkerCtx {
   for (const memberId of opts.descIndex.memberByIndex) {
     opts.state.memberToDataset.set(memberId, "ds-0");
@@ -156,8 +176,8 @@ function makeCtx(opts: {
     state: opts.state,
     passTimer: UNTIMED,
     getSliceRenderer: () => opts.renderer,
-    getCompositor: () => ({ composite: opts.composite }),
-    getCursorRenderer: () => ({ hasData: () => false }),
+    getCompositor: () => ({ composite: opts.composite, compiled: opts.compositorCompiled ?? Promise.resolve() }),
+    getCursorRenderer: () => ({ hasData: () => false, compiled: opts.cursorCompiled ?? Promise.resolve() }),
     ensureOffscreenPool: (n: number) =>
       Array.from({ length: n }, () => ({ createView: () => ({}) })),
     getOrCreateLUT: () => ({}),
@@ -182,8 +202,68 @@ function memberMsg(memberId: string, dataW = 128, dataH = 128): SliceRenderMulti
   };
 }
 
+describe("handleSliceRenderMultiPass — the compile", () => {
+  // The reason is in `pipelineCompile.ts` (#1101).
+  it.each([
+    ["slice renderer", "renderer"],
+    ["layer compositor", "compositor"],
+    ["cursor renderer", "cursor"],
+  ] as const)("waits for the %s before it draws", async (_name, which) => {
+    const device = makeDevice();
+    const renderer = makeRenderer();
+    const composite = vi.fn();
+    const gate = pendingCompile();
+    if (which === "renderer") renderer.compiled = gate.compiled;
+    const state = createInitialState();
+    state.sliceAtlases.set("coarse-pool", makeAtlas(new Map([["img-a", residentMetas()]])));
+    const descIndex = makeDescIndex(["img-a"], {
+      sourceBindingByMember: bindings({ "img-a": { levelPoolKeys: [], coarsePoolKey: "coarse-pool" } }),
+    });
+    const ctx = makeCtx({
+      device, state, renderer, composite, descIndex,
+      compositorCompiled: which === "compositor" ? gate.compiled : undefined,
+      cursorCompiled: which === "cursor" ? gate.compiled : undefined,
+    });
+
+    const frame = handleSliceRenderMultiPass(ctx, memberMsg("img-a"));
+    await flush();
+    expect(renderer.renderTo).not.toHaveBeenCalled();
+    expect(composite).not.toHaveBeenCalled();
+    expect(device.queue.submit).not.toHaveBeenCalled();
+
+    gate.finish();
+    await frame;
+    expect(renderer.renderTo).toHaveBeenCalledOnce();
+    expect(composite).toHaveBeenCalledOnce();
+  });
+});
+
 describe("handleSliceRenderMultiPass", () => {
-  it("renders a layer backed only by a resident coarse chunk tier", () => {
+  it("hands the canvas texture it drew to the frame capture, after the frame's last submit", async () => {
+    const device = makeDevice();
+    const renderer = makeRenderer();
+    const composite = vi.fn();
+    const state = createInitialState();
+    state.sliceAtlases.set("coarse-pool", makeAtlas(new Map([["img-a", residentMetas()]])));
+    const descIndex = makeDescIndex(["img-a"], {
+      sourceBindingByMember: bindings({ "img-a": { levelPoolKeys: [], coarsePoolKey: "coarse-pool" } }),
+    });
+    const ctx = makeCtx({ device, state, renderer, composite, descIndex });
+    const canvasTexture = { createView: () => ({}) };
+    ctx.context.getCurrentTexture = () => canvasTexture as unknown as GPUTexture;
+    const capture = vi.mocked(captureRenderedFrame);
+    capture.mockClear();
+
+    await handleSliceRenderMultiPass(ctx, memberMsg("img-a"));
+
+    expect(capture).toHaveBeenCalledOnce();
+    expect(capture).toHaveBeenCalledWith(ctx, canvasTexture);
+    const submit = vi.mocked(device.queue.submit);
+    const lastSubmit = submit.mock.invocationCallOrder[submit.mock.invocationCallOrder.length - 1];
+    expect(capture.mock.invocationCallOrder[0]).toBeGreaterThan(lastSubmit);
+  });
+
+  it("renders a layer backed only by a resident coarse chunk tier", async () => {
     const device = makeDevice();
     const renderer = makeRenderer();
     const composite = vi.fn();
@@ -196,14 +276,14 @@ describe("handleSliceRenderMultiPass", () => {
     });
     const ctx = makeCtx({ device, state, renderer, composite, descIndex });
 
-    handleSliceRenderMultiPass(ctx, memberMsg("img-a"));
+    await handleSliceRenderMultiPass(ctx, memberMsg("img-a"));
 
     expect(renderer.renderTo).toHaveBeenCalledTimes(1);
     expect(renderer.setTierAtlases).toHaveBeenCalledWith([], bindingOf(coarseAtlas));
     expect(composite.mock.calls[0][1]).toHaveLength(1);
   });
 
-  it("binds every level pool the entity's level sources name, in slot order", () => {
+  it("binds every level pool the entity's level sources name, in slot order", async () => {
     const device = makeDevice();
     const renderer = makeRenderer();
     const composite = vi.fn();
@@ -223,7 +303,7 @@ describe("handleSliceRenderMultiPass", () => {
     });
     const ctx = makeCtx({ device, state, renderer, composite, descIndex });
 
-    handleSliceRenderMultiPass(ctx, memberMsg("img-a"));
+    await handleSliceRenderMultiPass(ctx, memberMsg("img-a"));
 
     expect(renderer.renderTo).toHaveBeenCalledTimes(1);
     expect(renderer.setTierAtlases).toHaveBeenCalledWith(
@@ -233,12 +313,12 @@ describe("handleSliceRenderMultiPass", () => {
     // Both pools' indirections are flushed before the draw.
     finePool.indirectionDirty = true;
     smallChunkPool.indirectionDirty = true;
-    handleSliceRenderMultiPass(ctx, memberMsg("img-a"));
+    await handleSliceRenderMultiPass(ctx, memberMsg("img-a"));
     expect(finePool.indirectionDirty).toBe(false);
     expect(smallChunkPool.indirectionDirty).toBe(false);
   });
 
-  it("leaves a level slot unbound when its pool holds no section for the member", () => {
+  it("leaves a level slot unbound when its pool holds no section for the member", async () => {
     const device = makeDevice();
     const renderer = makeRenderer();
     const composite = vi.fn();
@@ -257,13 +337,13 @@ describe("handleSliceRenderMultiPass", () => {
     });
     const ctx = makeCtx({ device, state, renderer, composite, descIndex });
 
-    handleSliceRenderMultiPass(ctx, memberMsg("img-a"));
+    await handleSliceRenderMultiPass(ctx, memberMsg("img-a"));
 
     expect(renderer.setTierAtlases).toHaveBeenCalledWith([bindingOf(finePool), null], null);
     expect(renderer.renderTo).toHaveBeenCalledTimes(1);
   });
 
-  it("renders a layer backed only by a resident tile proxy", () => {
+  it("renders a layer backed only by a resident tile proxy", async () => {
     const device = makeDevice();
     const renderer = makeRenderer();
     const composite = vi.fn();
@@ -296,7 +376,7 @@ describe("handleSliceRenderMultiPass", () => {
     });
     const ctx = makeCtx({ device, state, renderer, composite, descIndex });
 
-    handleSliceRenderMultiPass(ctx, {
+    await handleSliceRenderMultiPass(ctx, {
       type: "sliceRenderMultiPass",
       epochs: EPOCHS,
       layers: [
@@ -315,7 +395,7 @@ describe("handleSliceRenderMultiPass", () => {
     expect(composite).toHaveBeenCalledTimes(1);
   });
 
-  it("skips a member whose descriptor names no pool and that has no resident proxy", () => {
+  it("skips a member whose descriptor names no pool and that has no resident proxy", async () => {
     const device = makeDevice();
     const renderer = makeRenderer();
     const composite = vi.fn();
@@ -323,7 +403,7 @@ describe("handleSliceRenderMultiPass", () => {
     const descIndex = makeDescIndex(["img-a"]);
     const ctx = makeCtx({ device, state, renderer, composite, descIndex });
 
-    handleSliceRenderMultiPass(ctx, memberMsg("img-a"));
+    await handleSliceRenderMultiPass(ctx, memberMsg("img-a"));
 
     expect(renderer.renderTo).not.toHaveBeenCalled();
     expect(composite.mock.calls[0][1]).toHaveLength(0);
@@ -367,7 +447,7 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
 
   const coarseOnly = (poolKey: string): MemberSourceBinding => ({ levelPoolKeys: [], coarsePoolKey: poolKey });
 
-  it("draws resident members in ONE pass bound to the current descriptor buffer", () => {
+  it("draws resident members in ONE pass bound to the current descriptor buffer", async () => {
     const device = makeDevice();
     const renderer = makeRenderer();
     const composite = vi.fn();
@@ -383,7 +463,7 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
     });
     const ctx = makeCtx({ device, state, renderer, composite, descIndex });
 
-    handleSliceRenderMultiPass(ctx, aggregateMsg(twoMemberQuads(), 2));
+    await handleSliceRenderMultiPass(ctx, aggregateMsg(twoMemberQuads(), 2));
 
     expect(renderer.renderAggregateBatches).toHaveBeenCalledTimes(1);
     expect(renderer.renderTo).not.toHaveBeenCalled();
@@ -410,7 +490,7 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
     expect(composite.mock.calls[0][1]).toHaveLength(1);
   });
 
-  it("updates camera-UV eviction recency for chunk-backed batched members", () => {
+  it("updates camera-UV eviction recency for chunk-backed batched members", async () => {
     const device = makeDevice();
     const renderer = makeRenderer();
     const composite = vi.fn();
@@ -426,7 +506,7 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
       }),
     });
 
-    handleSliceRenderMultiPass(ctx, aggregateMsg(twoMemberQuads(), 2));
+    await handleSliceRenderMultiPass(ctx, aggregateMsg(twoMemberQuads(), 2));
 
     // View center (cx=1124, cy=712) in each member's own UV space:
     // img-0 spans [100..1124]×[200..712], img-1 spans [1124..2148]×[712..1224].
@@ -434,7 +514,7 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
     expect(state.cameraUVPerEntity.get("img-1")).toEqual([0, 0]);
   });
 
-  it("skips the whole layer when no batched member has resident content", () => {
+  it("skips the whole layer when no batched member has resident content", async () => {
     const device = makeDevice();
     const renderer = makeRenderer();
     const composite = vi.fn();
@@ -446,14 +526,14 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
       }),
     });
 
-    handleSliceRenderMultiPass(ctx, aggregateMsg(twoMemberQuads(), 2));
+    await handleSliceRenderMultiPass(ctx, aggregateMsg(twoMemberQuads(), 2));
 
     expect(renderer.renderAggregateBatches).not.toHaveBeenCalled();
     expect(renderer.renderTo).not.toHaveBeenCalled();
     expect(composite.mock.calls[0][1]).toHaveLength(0);
   });
 
-  it("drops quads for members with nothing resident while keeping the rest", () => {
+  it("drops quads for members with nothing resident while keeping the rest", async () => {
     const device = makeDevice();
     const renderer = makeRenderer();
     const composite = vi.fn();
@@ -469,7 +549,7 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
       }),
     });
 
-    handleSliceRenderMultiPass(ctx, aggregateMsg(twoMemberQuads(), 2));
+    await handleSliceRenderMultiPass(ctx, aggregateMsg(twoMemberQuads(), 2));
 
     const params = renderer.renderAggregateBatches.mock.calls[0][2] as AggregateDrawParams;
     expect(params.batches).toHaveLength(1);
@@ -481,7 +561,7 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
     expect(state.cameraUVPerEntity.has("img-1")).toBe(false);
   });
 
-  it("sub-batches by pool-binding set so members never sample another pool", () => {
+  it("sub-batches by pool-binding set so members never sample another pool", async () => {
     const device = makeDevice();
     const renderer = makeRenderer();
     const composite = vi.fn();
@@ -497,7 +577,7 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
       }),
     });
 
-    handleSliceRenderMultiPass(ctx, aggregateMsg(twoMemberQuads(), 2));
+    await handleSliceRenderMultiPass(ctx, aggregateMsg(twoMemberQuads(), 2));
 
     const params = renderer.renderAggregateBatches.mock.calls[0][2] as AggregateDrawParams;
     // Two binding sets → two instanced draws in ONE pass, roster order.
@@ -513,7 +593,7 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
     expect(composite.mock.calls[0][1]).toHaveLength(1);
   });
 
-  it("sub-batches by the full level pool slot list, binding each member's pools in slot order", () => {
+  it("sub-batches by the full level pool slot list, binding each member's pools in slot order", async () => {
     const device = makeDevice();
     const renderer = makeRenderer();
     const composite = vi.fn();
@@ -532,7 +612,7 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
       }),
     });
 
-    handleSliceRenderMultiPass(ctx, aggregateMsg(twoMemberQuads(), 2));
+    await handleSliceRenderMultiPass(ctx, aggregateMsg(twoMemberQuads(), 2));
 
     const params = renderer.renderAggregateBatches.mock.calls[0][2] as AggregateDrawParams;
     expect(params.batches).toHaveLength(2);
@@ -543,7 +623,7 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
     expect(params.batches.every((b) => b.coarse === null)).toBe(true);
   });
 
-  it("binds a proxy-backed batched member's own pool texture", () => {
+  it("binds a proxy-backed batched member's own pool texture", async () => {
     const device = makeDevice();
     const renderer = makeRenderer();
     const composite = vi.fn();
@@ -574,7 +654,7 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
     });
     const ctx = makeCtx({ device, state, renderer, composite, descIndex });
 
-    handleSliceRenderMultiPass(ctx, aggregateMsg(twoMemberQuads(), 2));
+    await handleSliceRenderMultiPass(ctx, aggregateMsg(twoMemberQuads(), 2));
 
     const params = renderer.renderAggregateBatches.mock.calls[0][2] as AggregateDrawParams;
     // img-0 rides its proxy pool; img-1 (nothing resident) is dropped.

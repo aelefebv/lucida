@@ -328,6 +328,15 @@ _Avoid_: report (the action is Send report; what it sends is a bundle),
 archive, zip, export (the act, not the file), attachment, run file (the
 driver's artifact, see below), saved run (the document alone)
 
+**Fallback frame**:
+The screenshot the trace driver hands the page with its bundle request. The
+page carries it as the bundle's frame only when its own capture of the
+canvas fails, and not when the canvas's region of it is one flat colour.
+Never the first choice: a DevTools screenshot can leave a WebGPU canvas
+out, where the page's own capture cannot. `capturedBy` names which was
+kept.
+_Avoid_: driver frame, screenshot frame, frame (the page's own)
+
 **Saved run**:
 The trace document alone, as **Save run** in the dock writes it. It names
 no run of its own, so a reader takes the newest. It records nothing beyond
@@ -528,6 +537,16 @@ _Avoid_: live verdict, interim verdict, preliminary result, estimate, reading
 One rule firing on one subject, ranked against the others. A `note` is a finding
 that is not a stall: worth a line, not worth blame.
 _Avoid_: issue, warning, alert, violation
+
+**First paint**:
+The reading a diagnostic gives an upload or present breach on a run opened by
+content on a cold browser cache: a note rather than a stall. Both phases run to
+a frame dispatch on the main thread, and on such an open the frame that first
+draws the chunks also compiles the render pipelines, so the page's frames wait
+behind the GPU process. A dataset added to a live page and an interaction run
+draw through compiled pipelines and keep the stall; the interaction run is what
+confirms a regression.
+_Avoid_: startup stall, compile stall, warm-up
 
 **Churn**:
 How many times one chunk was fetched inside a stated window, counted by row

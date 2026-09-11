@@ -20,6 +20,7 @@ import {
 import { serializeTransientDescriptor } from "../descriptor/transient.ts";
 import { DESCRIPTOR_ENTRY_SIZE } from "../descriptor/layout.ts";
 import { packLabelPalette } from "../labelColors.ts";
+import { captureRenderedFrame } from "../worker/captureFrame.ts";
 
 /** Identity 4×4 (column-major) — the fallback model transform for a label
  *  layer that somehow arrives without matrices (defensive; a real label
@@ -178,20 +179,27 @@ function poolBinding(atlas: AtlasState): VolumePoolBinding {
   };
 }
 
-export function handleVolumeRenderMultiPass(
+export async function handleVolumeRenderMultiPass(
   ctx: WorkerCtx,
   msg: VolumeRenderMultiPassMessage,
-): void {
+): Promise<void> {
+  const renderer = ctx.getVolumeRenderer();
+  const comp = ctx.getCompositor();
+  const cr = ctx.getCursorRenderer();
+  // The volume renderer is built on first need, so an open's first volume
+  // frame usually waits here. The wait holds every message behind this one
+  // (`worker/inOrder.ts`).
+  await Promise.all([renderer.compiled, comp.compiled, cr.compiled]);
+
   const canvas = ctx.context.canvas as OffscreenCanvas;
   canvas.width = msg.canvasW;
   canvas.height = msg.canvasH;
 
-  const renderer = ctx.getVolumeRenderer();
-  const comp = ctx.getCompositor();
   // Only 1 offscreen texture needed — render and composite each layer incrementally
   const pool = ctx.ensureOffscreenPool(1, msg.canvasW, msg.canvasH);
 
-  const canvasView = ctx.context.getCurrentTexture().createView();
+  const canvasTexture = ctx.context.getCurrentTexture();
+  const canvasView = canvasTexture.createView();
   let isFirstLayer = true;
   const atlasMap = ctx.state.volumeAtlases;
 
@@ -299,7 +307,6 @@ export function handleVolumeRenderMultiPass(
     ctx.device.queue.submit([clearEncoder.finish()]);
   }
 
-  const cr = ctx.getCursorRenderer();
   const depthTex = getDepthTexture();
   if (cr.hasData() && msg.viewProj && depthTex) {
     const cursorEncoder = ctx.device.createCommandEncoder();
@@ -308,4 +315,7 @@ export function handleVolumeRenderMultiPass(
   }
 
   timing.endFrame();
+  // The frame can be read only here, after its last pass and before the
+  // texture expires with this handler.
+  captureRenderedFrame(ctx, canvasTexture);
 }

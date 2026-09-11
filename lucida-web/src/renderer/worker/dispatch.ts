@@ -13,6 +13,9 @@
  * existing per-mode files (`coldState/apply.ts`, `proxy/upload.ts`,
  * `slice/upload.ts`, `slice/render.ts`, `volume/upload.ts`,
  * `volume/render.ts`, `minimapHandlers.ts`).
+ *
+ * The frame handlers await their pipelines and are awaited here, so the
+ * entry point's message order holds behind them (`inOrder.ts`).
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
@@ -86,7 +89,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       handleLabelSliceChunkData(ctx, msg);
       return;
     case "sliceRenderMultiPass":
-      handleSliceRenderMultiPass(ctx, msg);
+      await handleSliceRenderMultiPass(ctx, msg);
       return;
 
     case "volumeChunkData": {
@@ -107,7 +110,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       handleLabelVolumeChunkData(ctx, msg);
       return;
     case "volumeRenderMultiPass":
-      handleVolumeRenderMultiPass(ctx, msg);
+      await handleVolumeRenderMultiPass(ctx, msg);
       return;
 
     case "proxyAssetData": {
@@ -130,7 +133,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       handleThumbnailRender(ctx, msg);
       return;
     case "captureFrame":
-      await handleCaptureFrame(ctx, msg);
+      handleCaptureFrame(ctx, msg);
       return;
     case "minimapDestroy":
       handleMinimapDestroy();

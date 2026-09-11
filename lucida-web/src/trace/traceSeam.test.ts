@@ -326,7 +326,9 @@ describe("the trace seam", () => {
     installTraceSeam();
     setBundleServices({
       requestDatasetHealth: () => Promise.resolve([]),
-      captureFrame: () => Promise.resolve({ png: new Uint8Array([1, 2, 3]).buffer, width: 4, height: 2 }),
+      captureFrame: () =>
+        Promise.resolve({ frame: { png: new Uint8Array([1, 2, 3]).buffer, width: 4, height: 2 }, reason: null }),
+      canvasRect: () => null,
     });
     try {
       traceRecorder.openRun(OPEN_CAUSE);

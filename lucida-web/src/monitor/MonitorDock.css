@@ -153,9 +153,15 @@
   color: #9aa0a6;
 }
 
+/* Read mode offers every action at once, and at 1440 px they do not fit on
+   one line (#1093). Wrap rather than squeeze each control to its narrowest
+   word. Center so a control keeps its own height, not its tallest
+   neighbor's. */
 .monitor-chrome-actions {
   margin-left: auto;
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
 }
 

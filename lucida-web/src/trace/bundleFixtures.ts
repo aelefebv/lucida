@@ -81,7 +81,11 @@ export function fixtureServices(overrides: Partial<BundleServices> = {}): Bundle
   return {
     requestDatasetHealth: () => Promise.resolve([fixtureHealth()]),
     captureFrame: () =>
-      Promise.resolve({ png: PNG_BYTES.buffer.slice(0), width: 2880, height: 1800 }),
+      Promise.resolve({
+        frame: { png: PNG_BYTES.buffer.slice(0), width: 2880, height: 1800 },
+        reason: null,
+      }),
+    canvasRect: () => ({ x: 0, y: 0, width: 1440, height: 900 }),
     ...overrides,
   };
 }
@@ -96,6 +100,10 @@ export function fixtureContext(overrides: Partial<BundleContext> = {}): BundleCo
     planning: { ...DEFAULT_PLANNING_CONFIG },
     origin: "https://lucida.example",
     devicePixelRatio: 2,
+    // Rejects by default, so a test that reaches the fallback path without
+    // saying what the screenshot decodes to gets the frame carried unchecked
+    // rather than a verdict on a guessed picture.
+    decodePng: () => Promise.reject(new Error("this fixture decodes no PNG")),
     now: 1_700_000_200_000,
     ...overrides,
   };

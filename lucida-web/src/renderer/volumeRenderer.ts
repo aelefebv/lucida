@@ -4,6 +4,7 @@ import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
 import { DESCRIPTOR_ENTRY_SIZE, DESCRIPTOR_MAX_LEVEL_SOURCES } from "./descriptor/layout.ts";
 import { serializeTransientDescriptor } from "./descriptor/transient.ts";
 import type { PassTiming } from "./passTiming.ts";
+import { requireCompiled } from "./pipelineCompile.ts";
 
 /**
  * Byte offsets of the shader's `Uniforms` fields (volume.wgsl). The
@@ -37,7 +38,9 @@ export interface VolumePoolBinding {
 
 export class VolumeRenderer {
   private device: GPUDevice;
-  private pipeline: GPURenderPipeline;
+  private pipeline: GPURenderPipeline | null = null;
+  /** Resolves once the pipeline has compiled. See `pipelineCompile.ts`. */
+  readonly compiled: Promise<void>;
   private uniformBuffer: GPUBuffer;
   private entityRefBuffer: GPUBuffer;
   private bindGroupLayout: GPUBindGroupLayout;
@@ -72,6 +75,10 @@ export class VolumeRenderer {
   private tileProxyTexture: GPUTexture | null = null;
   private groupProxyTexture: GPUTexture | null = null;
   private dummyProxyTexture: GPUTexture | null = null;
+
+  get isCompiled(): boolean {
+    return this.pipeline !== null;
+  }
 
   constructor(device: GPUDevice) {
     this.device = device;
@@ -165,7 +172,7 @@ export class VolumeRenderer {
       bindGroupLayouts: [this.bindGroupLayout, this.descriptorBindGroupLayout],
     });
 
-    this.pipeline = device.createRenderPipeline({
+    this.compiled = device.createRenderPipelineAsync({
       layout: pipelineLayout,
       vertex: { module: shaderModule, entryPoint: "vs" },
       fragment: {
@@ -178,6 +185,8 @@ export class VolumeRenderer {
         depthWriteEnabled: true,
         depthCompare: "always",
       },
+    }).then((pipeline) => {
+      this.pipeline = pipeline;
     });
 
     this.uniformBuffer = device.createBuffer({
@@ -447,6 +456,7 @@ export class VolumeRenderer {
   /** `timing` stamps the pass for the trace's GPU pass time; viewport frames pass it, the minimap does not. */
   renderTo(target: GPUTextureView, encoder: GPUCommandEncoder, depthView?: GPUTextureView, isFirstLayer?: boolean, targetWidth?: number, targetHeight?: number, scissorRect?: [number, number, number, number], timing?: PassTiming) {
     if (!this.bindGroup || !this.descriptorBindGroup) return;
+    const pipeline = requireCompiled(this.pipeline, "volume renderer");
 
     const O = VOLUME_UNIFORM_OFFSETS;
     const uniformData = new Float32Array(VOLUME_UNIFORM_SIZE / 4);
@@ -496,7 +506,7 @@ export class VolumeRenderer {
     if (scissorRect) {
       pass.setScissorRect(scissorRect[0], scissorRect[1], scissorRect[2], scissorRect[3]);
     }
-    pass.setPipeline(this.pipeline);
+    pass.setPipeline(pipeline);
     pass.setBindGroup(0, this.bindGroup);
     pass.setBindGroup(1, this.descriptorBindGroup);
     pass.draw(3); // full-screen triangle

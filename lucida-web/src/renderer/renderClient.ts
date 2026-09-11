@@ -5,7 +5,8 @@ import type {
   SliceLayerParams,
   MinimapLayerParams,
   WorkerToMainMessage,
-  CapturedFrame,
+  CaptureFailure,
+  FrameCaptureResult,
   ColdStateMessage,
   ColdStateDisplayMessage,
   ColdStateSelectionMessage,
@@ -29,10 +30,19 @@ import type {
  *  `destroy`). `terminate()` on an already-closed worker is a no-op. */
 const DESTROY_TERMINATE_FALLBACK_MS = 1000;
 
+function failureText(failure: CaptureFailure | null): string {
+  return failure ? `${failure.name}: ${failure.message}` : "no reason was given";
+}
+
+const DESTROYED_BEFORE_ANSWER = "the render client was destroyed before the worker answered";
+
 export class RenderClient implements UploadClient {
   private worker: Worker;
   private readyPromise: Promise<void>;
   private readyReject: (err: Error) => void = () => {};
+  /** The worker drops a message posted before `ready` if its init failed, so `captureFrame` waits for it. */
+  private workerReady = false;
+  private bootstrapCompiled = false;
   private destroyed = false;
 
   /** Pending `thumbnailRender` requests, keyed by the id sent to the worker.
@@ -42,7 +52,7 @@ export class RenderClient implements UploadClient {
 
   /** Pending `captureFrame` requests, keyed by the id sent to the worker.
    *  Resolved when the matching `frameCaptured` arrives. */
-  private framePending = new Map<number, (frame: CapturedFrame | null) => void>();
+  private framePending = new Map<number, (capture: FrameCaptureResult) => void>();
   private frameSeq = 0;
 
   onIntensityRange: ((datasetId: string, min: number, max: number) => void) | null = null;
@@ -58,6 +68,37 @@ export class RenderClient implements UploadClient {
    * dataset reports no image-bearing entity.
    */
   onEntityLevels: ((datasetId: string, levels: DatasetLevels | null) => void) | null = null;
+
+  private readonly pipelinesCompiledHandlers = new Set<() => void>();
+
+  /** Whether the worker has reported its bootstrap pipelines compiled. */
+  get pipelinesCompiled(): boolean {
+    return this.bootstrapCompiled;
+  }
+
+  /**
+   * Call `handler` once, when the worker reports that the pipelines it
+   * builds at bootstrap have compiled, or at once if it already has. Returns
+   * the function that withdraws the handler. The minimap holds its overlay's
+   * content draws on this report (#1101).
+   */
+  oncePipelinesCompiled(handler: () => void): () => void {
+    if (this.bootstrapCompiled) {
+      handler();
+      return () => {};
+    }
+    this.pipelinesCompiledHandlers.add(handler);
+    return () => {
+      this.pipelinesCompiledHandlers.delete(handler);
+    };
+  }
+
+  private notePipelinesCompiled(): void {
+    this.bootstrapCompiled = true;
+    const handlers = [...this.pipelinesCompiledHandlers];
+    this.pipelinesCompiledHandlers.clear();
+    for (const handler of handlers) handler();
+  }
 
   /**
    * Summarised once per worker report, so the layer panel and the trace's
@@ -81,9 +122,14 @@ export class RenderClient implements UploadClient {
       this.readyReject = reject;
       const handler = (e: MessageEvent<WorkerToMainMessage>) => {
         if (e.data.type === "ready") {
+          this.workerReady = true;
           resolve();
           this.worker.removeEventListener("message", handler);
           this.worker.addEventListener("message", this.onMessage);
+        } else if (e.data.type === "pipelinesCompiled") {
+          // Follows `ready` in practice. Taken here too, so nothing depends
+          // on that order.
+          this.notePipelinesCompiled();
         } else if (e.data.type === "error") {
           reject(new Error(e.data.message));
           this.worker.removeEventListener("message", handler);
@@ -144,6 +190,8 @@ export class RenderClient implements UploadClient {
       // Latest wins: when two frames land between ticks, the newer one is
       // the frame on screen.
       this.gpuPassUs = msg.gpuPassUs;
+    } else if (msg.type === "pipelinesCompiled") {
+      this.notePipelinesCompiled();
     } else if (msg.type === "thumbnailResult") {
       const resolve = this.thumbnailPending.get(msg.id);
       if (resolve) {
@@ -158,7 +206,11 @@ export class RenderClient implements UploadClient {
       const resolve = this.framePending.get(msg.id);
       if (resolve) {
         this.framePending.delete(msg.id);
-        resolve(msg.png ? { png: msg.png, width: msg.width, height: msg.height } : null);
+        resolve(
+          msg.png
+            ? { frame: { png: msg.png, width: msg.width, height: msg.height }, reason: null }
+            : { frame: null, reason: `the render worker could not read its canvas: ${failureText(msg.failure)}` },
+        );
       }
     } else if (msg.type === "error") {
       console.error("Render worker error:", msg.message);
@@ -476,13 +528,38 @@ export class RenderClient implements UploadClient {
 
   /**
    * The frame on the worker's canvas as a PNG, for the trace bundle (#1055).
-   * Resolves null when the worker could not read its canvas, and immediately
-   * after destroy, so a bundle never hangs on a dead client.
+   * The worker takes it from inside the next frame it renders, so the caller
+   * asks the render loop for one. Resolves with a reason when the worker
+   * could not read a frame, and immediately after destroy, so a bundle never
+   * hangs on a dead client.
+   *
+   * A worker still starting drops every message, and one whose start failed
+   * answers none, so a capture asked for before `ready` waits for it and a
+   * failed start becomes the reason. A page whose worker never came up is
+   * the case the driver's fallback frame exists for, and it has to hear that
+   * the page's own capture failed rather than wait on it forever (#1098).
    */
-  captureFrame(): Promise<CapturedFrame | null> {
-    if (this.destroyed) return Promise.resolve(null);
+  captureFrame(): Promise<FrameCaptureResult> {
+    if (this.destroyed) {
+      return Promise.resolve({ frame: null, reason: "the render client was destroyed, so there was no canvas to read" });
+    }
+    if (this.workerReady) return this.postCaptureFrame();
+    return this.readyPromise.then(
+      () => this.postCaptureFrame(),
+      // destroy() rejects the same promise, and that is not a failed start.
+      (error: unknown) => ({
+        frame: null,
+        reason: this.destroyed
+          ? DESTROYED_BEFORE_ANSWER
+          : `the render worker did not start: ${error instanceof Error ? error.message : String(error)}`,
+      }),
+    );
+  }
+
+  private postCaptureFrame(): Promise<FrameCaptureResult> {
+    if (this.destroyed) return Promise.resolve({ frame: null, reason: DESTROYED_BEFORE_ANSWER });
     const id = this.frameSeq++;
-    return new Promise<CapturedFrame | null>((resolve) => {
+    return new Promise<FrameCaptureResult>((resolve) => {
       this.framePending.set(id, resolve);
       this.worker.postMessage({ type: "captureFrame", id });
     });
@@ -557,7 +634,9 @@ export class RenderClient implements UploadClient {
     // after the worker is gone (the id-correlated path has no fire-and-forget).
     for (const resolve of this.thumbnailPending.values()) resolve(null);
     this.thumbnailPending.clear();
-    for (const resolve of this.framePending.values()) resolve(null);
+    for (const resolve of this.framePending.values()) {
+      resolve({ frame: null, reason: DESTROYED_BEFORE_ANSWER });
+    }
     this.framePending.clear();
     // Settle a still-pending init so `ready()` awaiters don't hang (no-op
     // once the worker has reported ready).

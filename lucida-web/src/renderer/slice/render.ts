@@ -21,6 +21,7 @@ import { setCameraUVForMember } from "./eviction.ts";
 import { serializeTransientDescriptor } from "../descriptor/transient.ts";
 import { DESCRIPTOR_ENTRY_SIZE } from "../descriptor/layout.ts";
 import { packLabelPalette } from "../labelColors.ts";
+import { captureRenderedFrame } from "../worker/captureFrame.ts";
 
 const IDENTITY_4X4 = new Float32Array([
   1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
@@ -312,16 +313,20 @@ function buildAggregateBatches(
   return { quadData, batches, atlases };
 }
 
-export function handleSliceRenderMultiPass(
+export async function handleSliceRenderMultiPass(
   ctx: WorkerCtx,
   msg: SliceRenderMultiPassMessage,
-): void {
+): Promise<void> {
+  const renderer = ctx.getSliceRenderer();
+  const comp = ctx.getCompositor();
+  const cr = ctx.getCursorRenderer();
+  // The wait holds every message behind this one (`worker/inOrder.ts`).
+  await Promise.all([renderer.compiled, comp.compiled, cr.compiled]);
+
   const canvas = ctx.context.canvas as OffscreenCanvas;
   canvas.width = msg.canvasW;
   canvas.height = msg.canvasH;
 
-  const renderer = ctx.getSliceRenderer();
-  const comp = ctx.getCompositor();
   // Offscreen targets are canvas-sized; grow the pool per RENDERED
   // layer, not per posted layer, so skipped layers never cost a target
   // allocation. (Growing one at a time re-checks dims only — cheap.)
@@ -476,12 +481,12 @@ export function handleSliceRenderMultiPass(
     renderedLayers.push({ view: layerTarget.createView(), blendMode: layer.blendMode });
   }
 
-  const canvasView = ctx.context.getCurrentTexture().createView();
+  const canvasTexture = ctx.context.getCurrentTexture();
+  const canvasView = canvasTexture.createView();
   const compEncoder = ctx.device.createCommandEncoder();
   comp.composite(canvasView, renderedLayers, compEncoder, true, timing);
   ctx.device.queue.submit([compEncoder.finish()]);
 
-  const cr = ctx.getCursorRenderer();
   if (cr.hasData()) {
     const cursorEncoder = ctx.device.createCommandEncoder();
     cr.renderSlice(canvasView, cursorEncoder, msg.zoom, msg.cx, msg.cy, msg.canvasW, msg.canvasH, timing);
@@ -489,4 +494,7 @@ export function handleSliceRenderMultiPass(
   }
 
   timing.endFrame();
+  // The frame can be read only here, after its last pass and before the
+  // texture expires with this handler.
+  captureRenderedFrame(ctx, canvasTexture);
 }

@@ -17,6 +17,7 @@ import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap
 import { traceRecorder, type TraceEnvironment } from "./trace/recorder.ts";
 import { createQuiescenceState, evaluateQuiescence, type QuiescenceState } from "./trace/quiescence.ts";
 import type { CacheWarmth, InputKind, Outstanding, RunConditions } from "./trace/types.ts";
+import type { FrameCaptureResult } from "./renderer/workerProtocol.ts";
 
 // Re-export types so downstream imports stay unchanged
 export type { DatasetEntry, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
@@ -408,6 +409,18 @@ export class RenderLoop implements TraceEnvironment {
 
   markInteractiveDirty(source: string = "external"): void {
     this.setDirty("interactive", source);
+  }
+
+  /**
+   * The frame on the canvas as a PNG, for the trace bundle. The worker takes
+   * it from inside the next frame it renders, so this asks for one under a
+   * name the trace records as what woke the tick. A loop that renders no
+   * frame leaves the worker to answer after its own wait.
+   */
+  captureFrame(): Promise<FrameCaptureResult> {
+    const capture = this.client.captureFrame();
+    this.setDirty("interactive", "frame_capture");
+    return capture;
   }
 
   /**

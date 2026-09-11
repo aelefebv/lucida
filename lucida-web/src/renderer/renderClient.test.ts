@@ -109,7 +109,7 @@ describe("RenderClient destroy", () => {
     await expect(pending).resolves.toBeNull();
   });
 
-  it("captureFrame resolves with the worker's PNG and device size, matched by id", async () => {
+  it("captureFrame resolves with the worker's PNG and device size, or its failure as the reason, matched by id", async () => {
     const { client, worker } = makeReadyClient();
     const first = client.captureFrame();
     const second = client.captureFrame();
@@ -117,27 +117,90 @@ describe("RenderClient destroy", () => {
     expect(posted.map(m => m.id)).toEqual([0, 1]);
 
     const png = new Uint8Array([1, 2, 3]).buffer;
-    worker.emit({ type: "frameCaptured", id: 1, png, width: 2880, height: 1800 });
-    worker.emit({ type: "frameCaptured", id: 0, png: null, width: 2880, height: 1800 });
+    worker.emit({ type: "frameCaptured", id: 1, png, width: 2880, height: 1800, failure: null });
+    worker.emit({
+      type: "frameCaptured",
+      id: 0,
+      png: null,
+      width: 2880,
+      height: 1800,
+      failure: { name: "InvalidStateError", message: "the canvas has no current texture" },
+    });
 
-    await expect(second).resolves.toEqual({ png, width: 2880, height: 1800 });
-    await expect(first).resolves.toBeNull();
+    await expect(second).resolves.toEqual({ frame: { png, width: 2880, height: 1800 }, reason: null });
+    await expect(first).resolves.toEqual({
+      frame: null,
+      reason: "the render worker could not read its canvas: InvalidStateError: the canvas has no current texture",
+    });
   });
 
-  it("destroy settles an in-flight frame capture with null", async () => {
+  it("destroy settles an in-flight frame capture with a reason", async () => {
     const { client } = makeReadyClient();
     const pending = client.captureFrame();
     client.destroy();
-    await expect(pending).resolves.toBeNull();
+    await expect(pending).resolves.toEqual({
+      frame: null,
+      reason: "the render client was destroyed before the worker answered",
+    });
   });
 
-  it("captureFrame after destroy resolves null immediately and posts nothing", async () => {
+  it("captureFrame after destroy resolves with a reason immediately and posts nothing", async () => {
     const { client, worker } = makeReadyClient();
     client.destroy();
     const postedBefore = worker.posted.length;
 
-    await expect(client.captureFrame()).resolves.toBeNull();
+    await expect(client.captureFrame()).resolves.toEqual({
+      frame: null,
+      reason: "the render client was destroyed, so there was no canvas to read",
+    });
     expect(worker.posted.length).toBe(postedBefore);
+  });
+
+  /**
+   * The worker drops every message until its init completes and answers
+   * none after its init fails, so a capture posted then would hang the
+   * bundle export on the one host the driver's fallback frame exists for:
+   * one where the worker never came up (#1098).
+   */
+  it("captureFrame on a worker that failed to start resolves with the failure as the reason and posts nothing", async () => {
+    const client = new RenderClient(makeCanvas());
+    const worker = FakeWorker.instances[FakeWorker.instances.length - 1];
+    worker.emit({ type: "error", message: "Failed to get WebGPU adapter" });
+    const postedBefore = worker.posted.length;
+
+    await expect(client.captureFrame()).resolves.toEqual({
+      frame: null,
+      reason: "the render worker did not start: Failed to get WebGPU adapter",
+    });
+    expect(worker.posted.length).toBe(postedBefore);
+  });
+
+  it("captureFrame before the worker is ready waits for it, then posts and is answered by id", async () => {
+    const client = new RenderClient(makeCanvas());
+    const worker = FakeWorker.instances[FakeWorker.instances.length - 1];
+    const pending = client.captureFrame();
+    expect(worker.posted.filter(m => m.type === "captureFrame")).toHaveLength(0);
+
+    worker.emit({ type: "ready" });
+    await client.ready();
+    expect(worker.posted.filter(m => m.type === "captureFrame").map(m => m.id)).toEqual([0]);
+
+    const png = new Uint8Array([9]).buffer;
+    worker.emit({ type: "frameCaptured", id: 0, png, width: 4, height: 2, failure: null });
+    await expect(pending).resolves.toEqual({ frame: { png, width: 4, height: 2 }, reason: null });
+  });
+
+  it("destroy settles a capture still waiting for the worker to start", async () => {
+    const client = new RenderClient(makeCanvas());
+    const worker = FakeWorker.instances[FakeWorker.instances.length - 1];
+    const pending = client.captureFrame();
+    client.destroy();
+
+    await expect(pending).resolves.toEqual({
+      frame: null,
+      reason: "the render client was destroyed before the worker answered",
+    });
+    expect(worker.posted.filter(m => m.type === "captureFrame")).toHaveLength(0);
   });
 
   it("thumbnailRender after destroy resolves null immediately and posts nothing", async () => {
@@ -184,5 +247,60 @@ describe("RenderClient destroy", () => {
 
     expect(onIntensityRange).not.toHaveBeenCalled();
     expect(close).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("RenderClient pipeline compile", () => {
+  beforeEach(() => {
+    FakeWorker.instances = [];
+    vi.stubGlobal("Worker", FakeWorker);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("is not ready until the worker reports its pipelines, then calls each handler once", () => {
+    const { client, worker } = makeReadyClient();
+    const handler = vi.fn();
+    client.oncePipelinesCompiled(handler);
+    expect(client.pipelinesCompiled).toBe(false);
+
+    worker.emit({ type: "pipelinesCompiled" });
+
+    expect(client.pipelinesCompiled).toBe(true);
+    expect(handler).toHaveBeenCalledOnce();
+  });
+
+  it("calls a handler at once when the report already arrived", () => {
+    const { client, worker } = makeReadyClient();
+    worker.emit({ type: "pipelinesCompiled" });
+    const handler = vi.fn();
+    client.oncePipelinesCompiled(handler);
+    expect(client.pipelinesCompiled).toBe(true);
+    expect(handler).toHaveBeenCalledOnce();
+  });
+
+  it("does not call a handler that was withdrawn", () => {
+    const { client, worker } = makeReadyClient();
+    const handler = vi.fn();
+    const withdraw = client.oncePipelinesCompiled(handler);
+    withdraw();
+    worker.emit({ type: "pipelinesCompiled" });
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("takes the report even when it arrives before ready", async () => {
+    const client = new RenderClient(makeCanvas());
+    const worker = FakeWorker.instances[FakeWorker.instances.length - 1];
+    const handler = vi.fn();
+    client.oncePipelinesCompiled(handler);
+
+    worker.emit({ type: "pipelinesCompiled" });
+    expect(client.pipelinesCompiled).toBe(true);
+    expect(handler).toHaveBeenCalledOnce();
+
+    worker.emit({ type: "ready" });
+    await expect(client.ready()).resolves.toBeUndefined();
   });
 });

@@ -4,10 +4,15 @@
   gap: 8px;
 }
 
+/* Left to wrap, this sentence sets the height of the dock's header row
+   (#1093). The span's title carries the whole of it. */
 .monitor-watch-status {
   color: #9aa0a6;
   font-size: 12px;
   max-width: 32ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .monitor-watch-on .monitor-watch-status {

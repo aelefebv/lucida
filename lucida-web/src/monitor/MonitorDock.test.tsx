@@ -1040,6 +1040,22 @@ describe("a dropped file (#1066)", () => {
     expect(readMonitor).not.toHaveBeenCalled();
   });
 
+  it("says why a frame is the driver's screenshot when the page's capture failed (#1098)", async () => {
+    showing(coldRemoteOpen());
+    const bundle = JSON.parse(readFileSync(`${process.cwd()}/../trace-fixtures/bundle-v1.json`, "utf8"));
+    bundle.frame.capturedBy = "driver";
+    bundle.frame.fallbackReason = "the render worker could not read its canvas: the canvas has no current texture";
+    const file = new File([JSON.stringify(bundle)], "stood-in.bundle.json", { type: "application/json" });
+
+    drop(screen.getByTestId("monitor-dock"), [file]);
+
+    const frame = within(await screen.findByTestId("monitor-file")).getByTestId("monitor-frame");
+    expect(frame.textContent).toContain(
+      "captured by the driver (the page's capture failed: the render worker could not read its canvas: " +
+        "the canvas has no current texture)",
+    );
+  });
+
   it("reads a saved run about its newest run and offers the others", async () => {
     showing(coldRemoteOpen());
     const document = makeDocument([healthyLocalOpen(), coldRemoteOpen()]);

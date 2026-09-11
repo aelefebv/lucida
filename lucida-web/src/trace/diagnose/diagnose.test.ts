@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest";
 import {
   coldRemoteOpen,
   fallbackAdapterOpen,
+  firstPaintOpen,
   gpuTimedOpen,
   healthyLocalOpen,
   interactionRun,
@@ -28,6 +29,7 @@ import {
   quietRun,
   saturatedReopen,
   sendHeavyIdleRun,
+  slowPresentInteraction,
   uninstrumentedPrefixOpen,
 } from "./fixtures.ts";
 import { CONFIDENCE_WORDS, diagnoseDocument, diagnoseRun } from "./diagnose.ts";
@@ -304,6 +306,93 @@ describe("attribution", () => {
       seen.add(attribution.confidence);
     }
     expect([...seen].sort()).toEqual([...CONFIDENCE_WORDS].sort());
+  });
+});
+
+describe("first paint on a cold open", () => {
+  const presentCeiling = RULESET.absolute.find((rule) => rule.phase === "browser.present")!;
+
+  it("reads a present breach on a run opened by content as a first-paint note, not a stall", () => {
+    const doc = diagnoseRun(firstPaintOpen());
+
+    expect(doc.findings.filter((finding) => finding.severity !== "note")).toEqual([]);
+    const note = doc.findings.find((finding) => finding.rule === RULESET.firstPaint.id);
+    expect(note).toBeDefined();
+    expect(note?.subject).toBe("browser.present");
+    expect(note?.observed.stat).toBe("p95");
+    expect(note?.observed.ms).toBeGreaterThan(presentCeiling.ceilMs);
+    // The ceiling that measured it still prints; the rationale is first paint's.
+    expect(note?.threshold).toEqual({
+      kind: "absolute",
+      value: presentCeiling.ceilMs,
+      why: RULESET.firstPaint.why,
+    });
+    expect(doc.findings.some((finding) => finding.rule === presentCeiling.id)).toBe(false);
+  });
+
+  it("reads an upload breach the same way, because upload also runs to a frame dispatch", () => {
+    const uploadCeiling = RULESET.absolute.find((rule) => rule.phase === "browser.upload")!;
+    const doc = diagnoseRun(firstPaintOpen("upload"));
+
+    expect(doc.findings.filter((finding) => finding.severity !== "note")).toEqual([]);
+    const note = doc.findings.find((finding) => finding.rule === RULESET.firstPaint.id);
+    expect(note?.subject).toBe("browser.upload");
+    expect(note?.observed.ms).toBeGreaterThan(uploadCeiling.ceilMs);
+    expect(doc.verdict.kind).toBe("clear");
+    expect(doc.verdict.text).toContain("browser.upload ran p95");
+    expect(doc.verdict.text).toContain("first paint");
+  });
+
+  it("says first paint in the verdict and offers the interaction run that confirms a regression", () => {
+    const doc = diagnoseRun(firstPaintOpen());
+
+    expect(doc.verdict.kind).toBe("clear");
+    expect(doc.verdict.text).toContain("first paint");
+    expect(doc.verdict.text).toContain("browser.present ran p95");
+    expect(doc.verdict.text).toContain("interaction run after settle");
+    const confirm = doc.next.find((step) => step.why.includes("first paint"));
+    expect(confirm?.why).toContain("browser.present");
+    expect(confirm?.command).toBe("lucida trace ds --pan 120,60");
+  });
+
+  it("says what a phase held when it led the chain, as a volume open's upload does", () => {
+    const doc = diagnoseRun(firstPaintOpen("upload", { heldMs: 800 }));
+
+    expect(doc.findings.filter((finding) => finding.severity !== "note")).toEqual([]);
+    expect(doc.verdict.kind).toBe("clear");
+    expect(doc.verdict.text).toMatch(/browser\.upload held 800 ms \(\d+% of the chain\) on the first paint/);
+  });
+
+  it("keeps the stall when a dataset is added to a live page, whose cache is warm", () => {
+    const doc = diagnoseRun(firstPaintOpen("present", { warm: true }));
+
+    expect(doc.run.cause?.epoch).toBe("content");
+    expect(doc.run.warmth).toContain("warm");
+    expect(doc.verdict.kind).toBe("stall");
+    expect(doc.findings[0].rule).toBe(presentCeiling.id);
+    expect(doc.findings.some((finding) => finding.rule === RULESET.firstPaint.id)).toBe(false);
+  });
+
+  it("keeps the stall on an interaction run with the same present, for each of the five", () => {
+    for (const input of INPUT_KINDS) {
+      const doc = diagnoseRun(slowPresentInteraction(input));
+
+      const lead = doc.findings[0];
+      expect(lead.severity, input).toBe("stall");
+      expect(lead.rule, input).toBe(presentCeiling.id);
+      expect(lead.subject, input).toBe("browser.present");
+      expect(doc.verdict.kind, input).toBe("stall");
+      expect(doc.verdict.text, input).toContain("browser.present ran p95");
+      expect(doc.findings.some((finding) => finding.rule === RULESET.firstPaint.id), input).toBe(false);
+      expect(doc.next.some((step) => step.why.includes("first paint")), input).toBe(false);
+    }
+  });
+
+  it("leaves every other ceiling a stall on a cold open", () => {
+    const doc = diagnoseRun(coldRemoteOpen());
+
+    expect(doc.verdict.kind).toBe("stall");
+    expect(doc.findings.some((finding) => finding.rule === RULESET.firstPaint.id)).toBe(false);
   });
 });
 

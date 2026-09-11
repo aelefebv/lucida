@@ -17,7 +17,9 @@ import { accountedWithin, couldHideBottleneck } from "../coverage.ts";
 import {
   COUNTED_PHASES,
   TRACE_SCHEMA_VERSION,
+  isDatasetOpenCause,
   isInteractionCause,
+  type CacheWarmth,
   type CountedPhase,
   type CoverageGap,
   type TraceCoverage,
@@ -200,6 +202,10 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
     aggregates,
     attribution,
     interaction,
+    // A dataset added to a live page also opens a content run, but its
+    // pipelines are compiled and its caches hold chunks: only an open on a
+    // cold browser cache is the page's first paint.
+    coldOpen: isDatasetOpenCause(run.header.cause) && browserCacheCold(run.header.cacheWarmth),
     steadyState: steady.findings,
     baseline: options.baseline ?? null,
   });
@@ -597,9 +603,27 @@ interface FindingsInput {
   aggregates: AggregateCandidate[];
   attribution: Attribution;
   interaction: boolean;
+  /** Whether content opened the run on a cold browser cache: the page's first paint. */
+  coldOpen: boolean;
   /** What the steady-state ruleset found, ranked here with the run's own. */
   steadyState: SteadyStateFinding[];
   baseline: DiagnosticDocument | null;
+}
+
+/**
+ * The stall `rule` names, or — on a cold open, for a phase a frame dispatch
+ * bounds — the first-paint note. The finding keeps the measuring rule's
+ * threshold and takes the first-paint rule's id and rationale.
+ */
+function readBreach(
+  input: FindingsInput,
+  phase: string,
+  rule: { id: string; why: string },
+): { severity: Finding["severity"]; rule: string; why: string } {
+  if (input.coldOpen && RULESET.firstPaint.phases.includes(phase)) {
+    return { severity: "note", rule: RULESET.firstPaint.id, why: RULESET.firstPaint.why };
+  }
+  return { severity: "stall", rule: rule.id, why: rule.why };
 }
 
 /**
@@ -618,12 +642,13 @@ function rankFindings(input: FindingsInput): Finding[] {
   const raw: RawFinding[] = [];
 
   for (const breach of ceilingBreaches(input.phases)) {
+    const reading = readBreach(input, breach.phase.id, breach.rule);
     raw.push({
-      severity: "stall",
-      rule: breach.rule.id,
+      severity: reading.severity,
+      rule: reading.rule,
       subject: breach.phase.id,
       observed: { stat: breach.rule.stat, ms: breach.phase.p95Ms, n: breach.phase.n },
-      threshold: { kind: "absolute", value: breach.rule.ceilMs, why: breach.rule.why },
+      threshold: { kind: "absolute", value: breach.rule.ceilMs, why: reading.why },
     });
   }
 
@@ -686,9 +711,10 @@ function rankFindings(input: FindingsInput): Finding[] {
     // how much of the chain it holds.
     if (segment.class === "unrecorded" || segment.class === "queue") continue;
     if (!passesShare(segment.ms, segment.sharePct)) continue;
+    const reading = readBreach(input, segment.label, RULESET.share);
     raw.push({
-      severity: "stall",
-      rule: RULESET.share.id,
+      severity: reading.severity,
+      rule: reading.rule,
       subject: segment.label,
       observed: {
         ms: segment.ms,
@@ -697,7 +723,7 @@ function rankFindings(input: FindingsInput): Finding[] {
         rows: segment.rows,
         ...(segment.breakdown ? { breakdown: segment.breakdown } : {}),
       },
-      threshold: { kind: "relative", value: RULESET.share.minPct, why: RULESET.share.why },
+      threshold: { kind: "relative", value: RULESET.share.minPct, why: reading.why },
     });
   }
 
@@ -835,6 +861,16 @@ function buildVerdict(
         confidence: attribution.confidence,
       };
     }
+    // A clear run can still carry a number over its ceiling. The verdict says
+    // why, rather than sending the reader to the findings to find out.
+    const firstPaint = findings.find((finding) => finding.rule === RULESET.firstPaint.id);
+    if (firstPaint) {
+      return {
+        kind: "clear",
+        text: `${describeFirstPaint(firstPaint)}${caveat}`,
+        confidence: attribution.confidence,
+      };
+    }
     return {
       kind: "clear",
       text: `no stall — nothing crossed a threshold; ${tail}${caveat}`,
@@ -891,6 +927,22 @@ function buildVerdict(
   };
 }
 
+function describeFirstPaint(finding: Finding): string {
+  const observed = finding.observed;
+  const amount = observed.stat
+    ? `ran ${observed.stat} ${observed.ms} ms on the first paint of a cold open, over the ${finding.threshold.value} ms ceiling`
+    : `held ${observed.ms} ms (${observed.sharePct}% of the chain) on the first paint of a cold open`;
+  return (
+    `no stall — ${finding.subject} ${amount}; the frame that first drew the chunks also compiled ` +
+    `the render pipelines, so this is first paint rather than a stall; an interaction run after ` +
+    `settle confirms a regression`
+  );
+}
+
+function browserCacheCold(warmth: CacheWarmth): boolean {
+  return warmth.detailChunks + warmth.coarseChunks === 0;
+}
+
 function runIdentity(run: TraceRun): RunIdentity {
   const header = run.header;
   const warmth = header.cacheWarmth;
@@ -905,10 +957,9 @@ function runIdentity(run: TraceRun): RunIdentity {
     gpu: adapterName(header.gpu),
     adapter: header.gpu,
     adapterKind: adapterKindOf(header.gpu),
-    warmth:
-      warmth.detailChunks + warmth.coarseChunks === 0
-        ? "browser cache cold"
-        : `browser cache warm (${warmth.detailChunks} detail, ${warmth.coarseChunks} coarse)`,
+    warmth: browserCacheCold(warmth)
+      ? "browser cache cold"
+      : `browser cache warm (${warmth.detailChunks} detail, ${warmth.coarseChunks} coarse)`,
     outstanding: {
       pending: header.outstandingAtSettle.pending,
       inFlight: header.outstandingAtSettle.inFlight,
@@ -987,6 +1038,13 @@ function nextSteps(
     steps.push({
       why: "this run against a baseline: phase, finding, and header deltas",
       command: `lucida trace diff <baseline-run> ${runId}`,
+    });
+  }
+  const firstPaint = findings.find((finding) => finding.rule === RULESET.firstPaint.id);
+  if (firstPaint) {
+    steps.push({
+      why: `${firstPaint.subject} on a cold open is first paint; an interaction run after settle confirms a regression`,
+      command: `lucida trace ${run.header.datasetIds[0] ?? "<dataset>"} --pan 120,60`,
     });
   }
   if (INCONCLUSIVE.includes(attribution.confidence)) {

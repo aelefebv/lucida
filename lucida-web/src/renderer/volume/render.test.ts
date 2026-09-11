@@ -19,6 +19,9 @@ import { UNTIMED } from "../passTiming.ts";
 import type { VolumePoolBinding } from "../volumeRenderer.ts";
 import type { VolumeRenderMultiPassMessage } from "../workerProtocol.ts";
 import { createInitialState, type RendererState } from "../worker/state.ts";
+import { captureRenderedFrame } from "../worker/captureFrame.ts";
+
+vi.mock("../worker/captureFrame.ts", () => ({ captureRenderedFrame: vi.fn() }));
 import { getOrCreateVolumePool, type AtlasState } from "./atlas.ts";
 import { handleVolumeRenderMultiPass } from "./render.ts";
 
@@ -84,6 +87,7 @@ interface MockRenderer {
   setLabelColorBuffer: ReturnType<typeof vi.fn>;
   setDescriptorBinding: ReturnType<typeof vi.fn>;
   renderTo: ReturnType<typeof vi.fn>;
+  compiled: Promise<void>;
 }
 
 function makeRenderer(): MockRenderer {
@@ -96,7 +100,21 @@ function makeRenderer(): MockRenderer {
     setLabelColorBuffer: vi.fn(),
     setDescriptorBinding: vi.fn(),
     renderTo: vi.fn(),
+    compiled: Promise.resolve(),
   };
+}
+
+/** A compile the test finishes by hand. */
+function pendingCompile(): { compiled: Promise<void>; finish: () => void } {
+  let finish!: () => void;
+  const compiled = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  return { compiled, finish };
+}
+
+async function flush(): Promise<void> {
+  for (let i = 0; i < 8; i++) await Promise.resolve();
 }
 
 function makeCtx(opts: {
@@ -105,6 +123,8 @@ function makeCtx(opts: {
   renderer: MockRenderer;
   composite: ReturnType<typeof vi.fn>;
   descIndex: EntityDescriptorIndex;
+  compositorCompiled?: Promise<void>;
+  cursorCompiled?: Promise<void>;
 }): WorkerCtx {
   for (const memberId of opts.descIndex.memberByIndex) {
     opts.state.memberToDataset.set(memberId, "ds-0");
@@ -118,8 +138,8 @@ function makeCtx(opts: {
     state: opts.state,
     passTimer: UNTIMED,
     getVolumeRenderer: () => opts.renderer,
-    getCompositor: () => ({ composite: opts.composite }),
-    getCursorRenderer: () => ({ hasData: () => false }),
+    getCompositor: () => ({ composite: opts.composite, compiled: opts.compositorCompiled ?? Promise.resolve() }),
+    getCursorRenderer: () => ({ hasData: () => false, compiled: opts.cursorCompiled ?? Promise.resolve() }),
     ensureOffscreenPool: () => [{ createView: () => ({}) }],
     getOrCreateLUT: () => ({}),
     lookupEntityDescriptor: () => opts.descIndex,
@@ -149,8 +169,65 @@ function msgFor(layers: Array<{ memberId: string; entityIndex: number; blendMode
   };
 }
 
+describe("handleVolumeRenderMultiPass — the compile", () => {
+  // The reason is in `pipelineCompile.ts` (#1101).
+  it.each([
+    ["volume renderer", "renderer"],
+    ["layer compositor", "compositor"],
+    ["cursor renderer", "cursor"],
+  ] as const)("waits for the %s before it draws", async (_name, which) => {
+    const device = makeDevice();
+    const renderer = makeRenderer();
+    const composite = vi.fn();
+    const gate = pendingCompile();
+    if (which === "renderer") renderer.compiled = gate.compiled;
+    const state = createInitialState();
+    const descIndex = makeDescIndex(["img-a"], {
+      sourceBindingByMember: bindings({ "img-a": { levelPoolKeys: [], coarsePoolKey: null } }),
+    });
+    const ctx = makeCtx({
+      device, state, renderer, composite, descIndex,
+      compositorCompiled: which === "compositor" ? gate.compiled : undefined,
+      cursorCompiled: which === "cursor" ? gate.compiled : undefined,
+    });
+
+    const frame = handleVolumeRenderMultiPass(ctx, msgFor([{ memberId: "img-a", entityIndex: 0 }]));
+    await flush();
+    expect(composite).not.toHaveBeenCalled();
+    expect(device.queue.submit).not.toHaveBeenCalled();
+
+    gate.finish();
+    await frame;
+    expect(composite).toHaveBeenCalledOnce();
+    expect(device.queue.submit).toHaveBeenCalled();
+  });
+});
+
 describe("handleVolumeRenderMultiPass", () => {
-  it("does not advance first-layer state for skipped non-renderable layers", () => {
+  it("hands the canvas texture it drew to the frame capture, after the frame's last submit", async () => {
+    const device = makeDevice();
+    const renderer = makeRenderer();
+    const composite = vi.fn();
+    const state = createInitialState();
+    const descIndex = makeDescIndex(["img-a"], {
+      sourceBindingByMember: bindings({ "img-a": { levelPoolKeys: [], coarsePoolKey: null } }),
+    });
+    const ctx = makeCtx({ device, state, renderer, composite, descIndex });
+    const canvasTexture = { createView: () => ({}) };
+    ctx.context.getCurrentTexture = () => canvasTexture as unknown as GPUTexture;
+    const capture = vi.mocked(captureRenderedFrame);
+    capture.mockClear();
+
+    await handleVolumeRenderMultiPass(ctx, msgFor([{ memberId: "img-a", entityIndex: 0 }]));
+
+    expect(capture).toHaveBeenCalledOnce();
+    expect(capture).toHaveBeenCalledWith(ctx, canvasTexture);
+    const submit = vi.mocked(device.queue.submit);
+    const lastSubmit = submit.mock.invocationCallOrder[submit.mock.invocationCallOrder.length - 1];
+    expect(capture.mock.invocationCallOrder[0]).toBeGreaterThan(lastSubmit);
+  });
+
+  it("does not advance first-layer state for skipped non-renderable layers", async () => {
     const device = makeDevice();
     const renderer = makeRenderer();
     const composite = vi.fn();
@@ -180,7 +257,7 @@ describe("handleVolumeRenderMultiPass", () => {
     });
     const ctx = makeCtx({ device, state, renderer, composite, descIndex });
 
-    handleVolumeRenderMultiPass(ctx, msgFor([
+    await handleVolumeRenderMultiPass(ctx, msgFor([
       { memberId: "img-a", entityIndex: 0 },
       { memberId: "img-b", entityIndex: 1 },
     ]));
@@ -192,7 +269,7 @@ describe("handleVolumeRenderMultiPass", () => {
     expect(renderer.setTierAtlases).toHaveBeenCalledWith([bindingOf(atlas)], null);
   });
 
-  it("renders a layer backed only by a resident coarse chunk tier", () => {
+  it("renders a layer backed only by a resident coarse chunk tier", async () => {
     const device = makeDevice();
     const renderer = makeRenderer();
     const composite = vi.fn();
@@ -222,14 +299,14 @@ describe("handleVolumeRenderMultiPass", () => {
     });
     const ctx = makeCtx({ device, state, renderer, composite, descIndex });
 
-    handleVolumeRenderMultiPass(ctx, msgFor([{ memberId: "img-a", entityIndex: 0 }]));
+    await handleVolumeRenderMultiPass(ctx, msgFor([{ memberId: "img-a", entityIndex: 0 }]));
 
     expect(renderer.renderTo).toHaveBeenCalledTimes(1);
     expect(renderer.setTierAtlases).toHaveBeenCalledWith([], bindingOf(coarseAtlas));
     expect(composite).toHaveBeenCalledTimes(1);
   });
 
-  it("binds every level pool the entity's level sources name, in slot order, plus the coarse pool", () => {
+  it("binds every level pool the entity's level sources name, in slot order, plus the coarse pool", async () => {
     const device = makeDevice();
     const renderer = makeRenderer();
     const composite = vi.fn();
@@ -262,7 +339,7 @@ describe("handleVolumeRenderMultiPass", () => {
     });
     const ctx = makeCtx({ device, state, renderer, composite, descIndex });
 
-    handleVolumeRenderMultiPass(ctx, msgFor([{ memberId: "img-a", entityIndex: 0 }]));
+    await handleVolumeRenderMultiPass(ctx, msgFor([{ memberId: "img-a", entityIndex: 0 }]));
 
     expect(renderer.renderTo).toHaveBeenCalledTimes(1);
     expect(renderer.setTierAtlases).toHaveBeenCalledWith(
@@ -275,7 +352,7 @@ describe("handleVolumeRenderMultiPass", () => {
     expect(coarsePool.indirectionDirty).toBe(false);
   });
 
-  it("renders a layer backed only by a resident tile proxy", () => {
+  it("renders a layer backed only by a resident tile proxy", async () => {
     const device = makeDevice();
     const renderer = makeRenderer();
     const composite = vi.fn();
@@ -308,7 +385,7 @@ describe("handleVolumeRenderMultiPass", () => {
     });
     const ctx = makeCtx({ device, state, renderer, composite, descIndex });
 
-    handleVolumeRenderMultiPass(ctx, msgFor([{ memberId: "img-a:ch1", entityIndex: 0, blendMode: "additive" }]));
+    await handleVolumeRenderMultiPass(ctx, msgFor([{ memberId: "img-a:ch1", entityIndex: 0, blendMode: "additive" }]));
 
     expect(renderer.renderTo).toHaveBeenCalledTimes(1);
     expect(renderer.setProxyTextures).toHaveBeenCalledWith(tileProxyTexture, null);

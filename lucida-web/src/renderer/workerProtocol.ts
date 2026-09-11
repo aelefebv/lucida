@@ -442,8 +442,11 @@ export interface DestroyMessage {
 /**
  * Ask the worker for the frame on its canvas as a PNG, for the trace bundle
  * (#1055). `id` correlates the {@link FrameCapturedMessage} reply. The
- * worker reads the canvas it already presents to and draws nothing new, so
- * the frame is whatever is on screen at the moment of the request.
+ * worker takes the frame from inside the next frame it renders, because
+ * reading a WebGPU canvas after its frame is presented was refused on a
+ * hardware host, so the sender asks the render loop for a frame as well. A
+ * worker that renders none answers after a wait, from the canvas as
+ * presented.
  */
 export interface CaptureFrameMessage {
   type: "captureFrame";
@@ -768,6 +771,16 @@ export interface ReadyMessage {
   type: "ready";
 }
 
+/**
+ * The pipelines built at bootstrap, the slice path's, have compiled. Sent
+ * once, after `ready`. The page holds the minimap overlay's content draws
+ * until then (#1101, Minimap.tsx). The volume renderer is built on first
+ * need and is not part of this report.
+ */
+export interface PipelinesCompiledMessage {
+  type: "pipelinesCompiled";
+}
+
 export interface ErrorMessage {
   type: "error";
   message: string;
@@ -919,10 +932,17 @@ export interface GpuPassTimeMessage {
   gpuPassUs: number;
 }
 
+/** Why a frame could not be read: the error's name and message, as the bundle's reason carries them. */
+export interface CaptureFailure {
+  name: string;
+  message: string;
+}
+
 /**
  * Reply to a {@link CaptureFrameMessage}, correlated by `id`. `png` is the
- * canvas encoded as PNG and transferred, or null when the canvas could not
- * be read. `width` and `height` are the canvas's device pixels either way.
+ * frame encoded as PNG and transferred, or null when it could not be read,
+ * in which case `failure` says what refused it. `width` and `height` are the
+ * frame's device pixels either way.
  */
 export interface FrameCapturedMessage {
   type: "frameCaptured";
@@ -930,9 +950,10 @@ export interface FrameCapturedMessage {
   png: ArrayBuffer | null;
   width: number;
   height: number;
+  failure: CaptureFailure | null;
 }
 
-/** A frame the render worker read off its canvas, as the main thread resolves it. */
+/** A frame the render worker took, as the main thread resolves it. */
 export interface CapturedFrame {
   png: ArrayBuffer;
   /** Device pixels. */
@@ -940,8 +961,18 @@ export interface CapturedFrame {
   height: number;
 }
 
+/**
+ * What a capture request settles with: the frame, or the reason there is
+ * none. Every path settles, so a bundle never waits on a frame that is not
+ * coming.
+ */
+export type FrameCaptureResult =
+  | { frame: CapturedFrame; reason: null }
+  | { frame: null; reason: string };
+
 export type WorkerToMainMessage =
   | ReadyMessage
+  | PipelinesCompiledMessage
   | ErrorMessage
   | IntensityRangeMessage
   | ThumbnailResultMessage

@@ -73,7 +73,14 @@ export async function initGPU(canvas: HTMLCanvasElement | OffscreenCanvas): Prom
   }
 
   const format = navigator.gpu.getPreferredCanvasFormat();
-  context.configure({ device, format, alphaMode: "opaque" });
+  // `COPY_SRC` lets the frame capture copy the canvas texture out from
+  // inside a frame, for the trace bundle. See `worker/captureFrame.ts`.
+  context.configure({
+    device,
+    format,
+    alphaMode: "opaque",
+    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+  });
 
   return { device, context, format };
 }

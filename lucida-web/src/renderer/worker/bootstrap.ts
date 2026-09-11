@@ -36,7 +36,7 @@ import { sourceKey } from "../poolKeys.ts";
 
 /**
  * Bootstrap the worker: init the GPU, create a fresh {@link RendererState},
- * and assemble the {@link WorkerCtx} (with lazy renderer accessors +
+ * and assemble the {@link WorkerCtx} (with renderer accessors +
  * lookup helpers + post wiring). Called once from `case "init"` in
  * `gpu.worker.ts`.
  */
@@ -50,13 +50,26 @@ export async function bootstrapWorker(
     post({ type: "gpuPassTime", gpuPassUs }),
   );
 
-  // Renderer-class singletons (lazy-init on first use). Persisted across
-  // messages; not per-session state, so they stay in this closure rather
-  // than on RendererState.
-  let sliceRenderer: SliceRenderer | null = null;
+  // Renderer-class singletons. Persisted across messages; not per-session
+  // state, so they stay in this closure rather than on RendererState.
+  //
+  // The slice path's three are built here so that their shader compile
+  // overlaps the dataset open instead of sitting inside the first render
+  // message, between the first chunk uploads and the first present (#1094).
+  // The compile runs off the GPU process's main thread, so it no longer
+  // holds the page's own first draw (#1101, `pipelineCompile.ts`). The volume
+  // renderer is built on first need, because its compile is the longest of
+  // the four and a slice open's viewport never needs it.
+  const sliceRenderer = new SliceRenderer(device);
+  const compositor = new LayerCompositor(device, format);
+  const cursorRenderer = new CursorRenderer(device, format);
   let volumeRenderer: VolumeRenderer | null = null;
-  let compositor: LayerCompositor | null = null;
-  let cursorRenderer: CursorRenderer | null = null;
+  // The page holds the minimap overlay's content draws until this report
+  // (Minimap.tsx).
+  Promise.all([sliceRenderer.compiled, compositor.compiled, cursorRenderer.compiled]).then(
+    () => post({ type: "pipelinesCompiled" }),
+    (err: unknown) => post({ type: "error", message: err instanceof Error ? err.message : String(err) }),
+  );
 
   /**
    * Build a flat snapshot of all proxy pools for a dataset, in the shape
@@ -108,7 +121,6 @@ export async function bootstrapWorker(
     state,
     passTimer,
     getSliceRenderer() {
-      if (!sliceRenderer) sliceRenderer = new SliceRenderer(device);
       return sliceRenderer;
     },
     getVolumeRenderer() {
@@ -116,11 +128,9 @@ export async function bootstrapWorker(
       return volumeRenderer;
     },
     getCompositor() {
-      if (!compositor) compositor = new LayerCompositor(device, format);
       return compositor;
     },
     getCursorRenderer() {
-      if (!cursorRenderer) cursorRenderer = new CursorRenderer(device, format);
       return cursorRenderer;
     },
     ensureOffscreenPool: (count, w, h) => ensureOffscreenPool(device, count, w, h),

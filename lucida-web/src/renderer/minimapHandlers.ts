@@ -84,7 +84,47 @@ export function handleMinimapInit(ctx: WorkerCtx, msg: MinimapInitMessage): void
   minimapContext.configure({ device: ctx.device, format: ctx.format, alphaMode: "opaque" });
 }
 
+/**
+ * The latest overview render to arrive before the volume renderer compiled.
+ * Earlier ones would only be painted over.
+ */
+let deferredMinimapRender: MinimapRenderMessage | null = null;
+
 export function handleMinimapRender(ctx: WorkerCtx, msg: MinimapRenderMessage): void {
+  if (!minimapContext) return;
+  const renderer = ctx.getVolumeRenderer();
+  const comp = ctx.getCompositor();
+  if (renderer.isCompiled && comp.isCompiled) {
+    drawMinimap(ctx, msg);
+    return;
+  }
+
+  // The volume renderer is built on first need, often by this render, and
+  // its compile is the longest of the four. An await here would hold every
+  // viewport frame and upload behind it in the message order, so the draw
+  // waits outside that order instead (`pipelineCompile.ts`).
+  const first = deferredMinimapRender === null;
+  deferredMinimapRender = msg;
+  if (!first) return;
+  Promise.all([renderer.compiled, comp.compiled]).then(
+    () => {
+      const pending = deferredMinimapRender;
+      deferredMinimapRender = null;
+      if (pending && minimapContext) drawMinimap(ctx, pending);
+    },
+    (err: unknown) => {
+      deferredMinimapRender = null;
+      postCompileFailure(ctx, err);
+    },
+  );
+}
+
+/** A compile that failed outside the message order, reported as a handler's throw is. */
+function postCompileFailure(ctx: WorkerCtx, err: unknown): void {
+  ctx.post({ type: "error", message: err instanceof Error ? err.message : String(err) });
+}
+
+function drawMinimap(ctx: WorkerCtx, msg: MinimapRenderMessage): void {
   if (!minimapContext) return;
   const mmCanvas = minimapContext.canvas as OffscreenCanvas;
   mmCanvas.width = msg.canvasW;
@@ -151,8 +191,27 @@ export function handleMinimapRender(ctx: WorkerCtx, msg: MinimapRenderMessage): 
  * falls back to its label-only row.
  */
 export function handleThumbnailRender(ctx: WorkerCtx, msg: ThumbnailRenderMessage): void {
-  const size = Math.max(1, Math.round(msg.size));
+  const renderer = ctx.getVolumeRenderer();
+  const comp = ctx.getCompositor();
+  if (renderer.isCompiled && comp.isCompiled) {
+    drawThumbnail(ctx, msg);
+    return;
+  }
+  // Waits outside the message order for the same reason the overview render
+  // does. Replies carry their request's id, so their order is free. A request
+  // whose compile failed gets a reply with no bitmap, so the panel's wait
+  // settles.
+  Promise.all([renderer.compiled, comp.compiled]).then(
+    () => drawThumbnail(ctx, msg),
+    (err: unknown) => {
+      ctx.post({ type: "thumbnailResult", id: msg.id, bitmap: null });
+      postCompileFailure(ctx, err);
+    },
+  );
+}
 
+function drawThumbnail(ctx: WorkerCtx, msg: ThumbnailRenderMessage): void {
+  const size = Math.max(1, Math.round(msg.size));
   const renderer = ctx.getVolumeRenderer();
   const comp = ctx.getCompositor();
   ensureThumbnailTargets(ctx, size, msg.layers.length);
@@ -249,6 +308,7 @@ export function handleMinimapUploadOverviewChunks(ctx: WorkerCtx, msg: MinimapUp
 }
 
 export function handleMinimapDestroy(): void {
+  deferredMinimapRender = null;
   for (const tex of minimapOffscreenPool) tex.destroy();
   minimapOffscreenPool = [];
   minimapPoolWidth = 0;

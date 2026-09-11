@@ -32,6 +32,13 @@
  * fit what the view wants, over the run's settle block. They answer "is this
  * expected" about traffic after the view looks loaded, which no ceiling on a
  * phase can, because a settled view has no stall to find.
+ *
+ * One qualification sits across the families: an upload or present breach on
+ * a run opened by content on a cold browser cache is first paint, not a
+ * stall. Both phases run to a frame dispatch on the main thread, and the
+ * frame that first draws the chunks also compiles the render pipelines. The
+ * ceiling and the share rule still measure them; the first-paint rule says
+ * what the breach means on a cold open, and every other run keeps the stall.
  */
 
 import type { PhaseClass } from "./types.ts";
@@ -39,9 +46,11 @@ import type { PhaseClass } from "./types.ts";
 /**
  * Bumped whenever a threshold moves or a rule is added, so two diagnostics
  * are visibly comparable or visibly not. Version 2 added the interaction
- * frame-time ceiling. Version 3 added the steady-state family.
+ * frame-time ceiling. Version 3 added the steady-state family. Version 4
+ * reads an upload or present breach on a cold open as a first-paint note
+ * rather than a stall.
  */
-export const RULESET_VERSION = 3;
+export const RULESET_VERSION = 4;
 
 export interface AbsoluteRule {
   id: string;
@@ -82,6 +91,19 @@ export interface PrefixRule {
 export interface CompareRule {
   id: string;
   minRatio: number;
+  why: string;
+}
+
+/**
+ * What a breach on one of `phases` means during a run opened by content on a
+ * cold browser cache: first paint rather than a stall. The ceiling and the
+ * share rule still measure the phase; this rule only changes the reading of
+ * a breach on such an open, and every other run is judged as before.
+ */
+export interface FirstPaintRule {
+  id: string;
+  /** The phases bounded by a main-thread frame dispatch, which the first frame's compile holds. */
+  phases: readonly string[];
   why: string;
 }
 
@@ -147,6 +169,12 @@ export interface Ruleset {
   share: ShareRule;
   prefix: PrefixRule;
   compare: CompareRule;
+  /**
+   * An upload or present breach on a run opened by content on a cold browser
+   * cache, read as first paint. The only rule that reads the run's cause
+   * besides the interaction ceiling, and the only one that reads its warmth.
+   */
+  firstPaint: FirstPaintRule;
   /**
    * The one ceiling an interaction run is judged by, on the frame-time
    * reading rather than a phase. `phase` names the aggregate candidate,
@@ -329,6 +357,11 @@ export const RULESET: Ruleset = {
     id: "compare.regression",
     minRatio: 2,
     why: "#899 §0: two runs of the same fixture minutes apart differed about 2x in per-request latency. A comparative threshold below that spread reports weather as regression.",
+  },
+  firstPaint: {
+    id: "frame.first-paint",
+    phases: ["browser.upload", "browser.present"],
+    why: "Upload and present each run to a frame dispatch on the main thread, and on a cold open the frame after the first chunks land is the first frame that draws them. The render worker compiles its pipelines inside that frame, which held the GPU process for 150 to 200 ms in slice mode and about 750 ms in volume mode on a hardware adapter (#1094), and the page's frames wait behind it. The chunks were not slow; the first paint was. So an upload or present breach on a run opened by content on a cold browser cache is a note that names the cost, never a stall. A dataset added to a live page opens a content run too, but its caches hold chunks and its pipelines are compiled, so it keeps the stall. An interaction run once the page is quiescent draws through pipelines already compiled, keeps the stall, and is what confirms a regression.",
   },
   interaction: {
     id: "interaction.frame-time",

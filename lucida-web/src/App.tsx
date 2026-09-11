@@ -71,6 +71,7 @@ import {
 import type { WorkspaceRole, WorkspaceMember } from "./workspaceApi.ts";
 import { isCaptureSurface } from "./captureSurface.ts";
 import { setBundleServices } from "./trace/bundle.ts";
+import { visibleRectOf } from "./trace/flatFrame.ts";
 import { currentChunkSelection, onChunkSelectionChanged } from "./trace/linkedSelection.ts";
 import { setReportSender } from "./trace/reportInbox.ts";
 import { useHudKeyBinding } from "./hud/useHudKey.ts";
@@ -871,7 +872,16 @@ function App({
         liveBridge
           ? liveBridge.requestDatasetHealth()
           : Promise.reject(new Error("the session socket is not connected")),
-      captureFrame: () => render.clientRef.current?.captureFrame() ?? Promise.resolve(null),
+      // The loop asks the worker for a frame along with the capture. A
+      // client with no loop still answers, from the canvas as presented.
+      captureFrame: () =>
+        render.loopRef.current?.captureFrame()
+          ?? render.clientRef.current?.captureFrame()
+          ?? Promise.resolve({
+            frame: null,
+            reason: "the render client has not started, so there was no canvas to read",
+          }),
+      canvasRect: () => visibleRectOf(render.canvasRef.current),
     });
     // **Send report** goes over the same socket. Registered only while
     // one exists, so a page with no session offers no send rather than a
@@ -883,7 +893,7 @@ function App({
       setBundleServices(null);
       setReportSender(null);
     };
-  }, [liveBridge, render.clientRef]);
+  }, [liveBridge, render.canvasRef, render.clientRef, render.loopRef]);
 
   useScriptControls({
     selectors: {

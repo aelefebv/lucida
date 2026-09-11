@@ -70,7 +70,9 @@ function FrameFigure({ bundle }: { bundle: TraceBundle }) {
       />
       <figcaption>
         Settled frame · {frame.width}×{frame.height} device pixels at ratio {ratio} · captured by the{" "}
-        {frame.capturedBy} · bundle saved {savedAt}
+        {frame.capturedBy}
+        {frame.fallbackReason ? ` (the page's capture failed: ${frame.fallbackReason})` : ""} · bundle
+        saved {savedAt}
       </figcaption>
     </figure>
   );
