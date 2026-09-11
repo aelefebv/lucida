@@ -5,6 +5,55 @@ import type { FrameCapturedMessage, WorkerToMainMessage } from "../workerProtoco
 import { FRAME_CAPTURE_WAIT_MS, captureRenderedFrame, paddedBytesPerRow } from "./captureFrame.ts";
 import { createInitialState } from "./state.ts";
 import { dispatchMessage } from "./dispatch.ts";
+import { UNTIMED } from "../passTiming.ts";
+
+async function flush(): Promise<void> {
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+}
+
+describe("worker dispatch and the pipeline compile", () => {
+  // Without the await in dispatch.ts, the messages behind a render would run
+  // ahead of its draw (`inOrder.ts`).
+  it("settles a slice render only after the renderers it draws with have compiled", async () => {
+    let finish!: () => void;
+    const compiled = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const submit = vi.fn();
+    const ctx = {
+      state: createInitialState(),
+      device: { createCommandEncoder: () => ({ finish: () => ({}) }), queue: { submit } },
+      context: { canvas: { width: 0, height: 0 }, getCurrentTexture: () => ({ createView: () => ({}) }) },
+      passTimer: UNTIMED,
+      getSliceRenderer: () => ({ compiled }),
+      getCompositor: () => ({ compiled: Promise.resolve(), composite: vi.fn() }),
+      getCursorRenderer: () => ({ compiled: Promise.resolve(), hasData: () => false }),
+      ensureOffscreenPool: () => [],
+      post: vi.fn(),
+    } as unknown as WorkerCtx;
+
+    let settled = false;
+    const done = dispatchMessage(ctx, {
+      type: "sliceRenderMultiPass",
+      epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+      layers: [],
+      zoom: 1,
+      cx: 0,
+      cy: 0,
+      canvasW: 8,
+      canvasH: 8,
+    }).then(() => {
+      settled = true;
+    });
+    await flush();
+    expect(settled).toBe(false);
+    expect(submit).not.toHaveBeenCalled();
+
+    finish();
+    await done;
+    expect(submit).toHaveBeenCalled();
+  });
+});
 
 function makeCtx(): {
   ctx: WorkerCtx;

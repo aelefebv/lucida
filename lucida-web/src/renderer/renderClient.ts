@@ -40,8 +40,9 @@ export class RenderClient implements UploadClient {
   private worker: Worker;
   private readyPromise: Promise<void>;
   private readyReject: (err: Error) => void = () => {};
-  /** The worker drops any message posted before its `ready`. */
+  /** The worker drops a message posted before `ready` if its init failed, so `captureFrame` waits for it. */
   private workerReady = false;
+  private bootstrapCompiled = false;
   private destroyed = false;
 
   /** Pending `thumbnailRender` requests, keyed by the id sent to the worker.
@@ -67,6 +68,37 @@ export class RenderClient implements UploadClient {
    * dataset reports no image-bearing entity.
    */
   onEntityLevels: ((datasetId: string, levels: DatasetLevels | null) => void) | null = null;
+
+  private readonly pipelinesCompiledHandlers = new Set<() => void>();
+
+  /** Whether the worker has reported its bootstrap pipelines compiled. */
+  get pipelinesCompiled(): boolean {
+    return this.bootstrapCompiled;
+  }
+
+  /**
+   * Call `handler` once, when the worker reports that the pipelines it
+   * builds at bootstrap have compiled, or at once if it already has. Returns
+   * the function that withdraws the handler. The minimap holds its overlay's
+   * content draws on this report (#1101).
+   */
+  oncePipelinesCompiled(handler: () => void): () => void {
+    if (this.bootstrapCompiled) {
+      handler();
+      return () => {};
+    }
+    this.pipelinesCompiledHandlers.add(handler);
+    return () => {
+      this.pipelinesCompiledHandlers.delete(handler);
+    };
+  }
+
+  private notePipelinesCompiled(): void {
+    this.bootstrapCompiled = true;
+    const handlers = [...this.pipelinesCompiledHandlers];
+    this.pipelinesCompiledHandlers.clear();
+    for (const handler of handlers) handler();
+  }
 
   /**
    * Summarised once per worker report, so the layer panel and the trace's
@@ -94,6 +126,10 @@ export class RenderClient implements UploadClient {
           resolve();
           this.worker.removeEventListener("message", handler);
           this.worker.addEventListener("message", this.onMessage);
+        } else if (e.data.type === "pipelinesCompiled") {
+          // Follows `ready` in practice. Taken here too, so nothing depends
+          // on that order.
+          this.notePipelinesCompiled();
         } else if (e.data.type === "error") {
           reject(new Error(e.data.message));
           this.worker.removeEventListener("message", handler);
@@ -154,6 +190,8 @@ export class RenderClient implements UploadClient {
       // Latest wins: when two frames land between ticks, the newer one is
       // the frame on screen.
       this.gpuPassUs = msg.gpuPassUs;
+    } else if (msg.type === "pipelinesCompiled") {
+      this.notePipelinesCompiled();
     } else if (msg.type === "thumbnailResult") {
       const resolve = this.thumbnailPending.get(msg.id);
       if (resolve) {

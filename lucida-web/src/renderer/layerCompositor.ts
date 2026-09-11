@@ -1,6 +1,7 @@
 /** Composites offscreen layer textures onto the canvas with per-layer blend modes. */
 import shaderSource from "./compositor.wgsl?raw";
 import type { PassTiming } from "./passTiming.ts";
+import { requireCompiled } from "./pipelineCompile.ts";
 
 export type BlendMode = "alpha" | "additive" | "max";
 
@@ -13,8 +14,14 @@ const BG = { r: 0.05, g: 0.05, b: 0.08, a: 1 };
 
 export class LayerCompositor {
   private device: GPUDevice;
-  private pipelines: Record<BlendMode, GPURenderPipeline>;
+  private pipelines: Record<BlendMode, GPURenderPipeline> | null = null;
   private bindGroupLayout: GPUBindGroupLayout;
+  /** Resolves once the three blend pipelines have compiled. See `pipelineCompile.ts`. */
+  readonly compiled: Promise<void>;
+
+  get isCompiled(): boolean {
+    return this.pipelines !== null;
+  }
 
   constructor(device: GPUDevice, canvasFormat: GPUTextureFormat) {
     this.device = device;
@@ -50,18 +57,20 @@ export class LayerCompositor {
       alpha: { srcFactor: "one", dstFactor: "one", operation: "max" },
     };
 
-    const makePipeline = (blend: GPUBlendState) => device.createRenderPipeline({
+    const makePipeline = (blend: GPUBlendState) => device.createRenderPipelineAsync({
       layout,
       vertex: { module: shader, entryPoint: "vs" },
       fragment: { module: shader, entryPoint: "fs", targets: [makeTarget(blend)] },
       primitive: { topology: "triangle-list" },
     });
 
-    this.pipelines = {
-      alpha: makePipeline(alphaBlend),
-      additive: makePipeline(additiveBlend),
-      max: makePipeline(maxBlend),
-    };
+    this.compiled = Promise.all([
+      makePipeline(alphaBlend),
+      makePipeline(additiveBlend),
+      makePipeline(maxBlend),
+    ]).then(([alpha, additive, max]) => {
+      this.pipelines = { alpha, additive, max };
+    });
   }
 
   /** `timing` stamps each pass for the trace's GPU pass time; viewport frames pass it, the minimap does not. */
@@ -82,6 +91,7 @@ export class LayerCompositor {
       return;
     }
 
+    const pipelines = requireCompiled(this.pipelines, "layer compositor");
     for (let i = 0; i < layers.length; i++) {
       const layer = layers[i];
       const pass = encoder.beginRenderPass({
@@ -99,7 +109,7 @@ export class LayerCompositor {
         entries: [{ binding: 0, resource: layer.view }],
       });
 
-      pass.setPipeline(this.pipelines[layer.blendMode]);
+      pass.setPipeline(pipelines[layer.blendMode]);
       pass.setBindGroup(0, bg);
       pass.draw(3);
       pass.end();

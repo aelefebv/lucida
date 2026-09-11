@@ -313,16 +313,20 @@ function buildAggregateBatches(
   return { quadData, batches, atlases };
 }
 
-export function handleSliceRenderMultiPass(
+export async function handleSliceRenderMultiPass(
   ctx: WorkerCtx,
   msg: SliceRenderMultiPassMessage,
-): void {
+): Promise<void> {
+  const renderer = ctx.getSliceRenderer();
+  const comp = ctx.getCompositor();
+  const cr = ctx.getCursorRenderer();
+  // The wait holds every message behind this one (`worker/inOrder.ts`).
+  await Promise.all([renderer.compiled, comp.compiled, cr.compiled]);
+
   const canvas = ctx.context.canvas as OffscreenCanvas;
   canvas.width = msg.canvasW;
   canvas.height = msg.canvasH;
 
-  const renderer = ctx.getSliceRenderer();
-  const comp = ctx.getCompositor();
   // Offscreen targets are canvas-sized; grow the pool per RENDERED
   // layer, not per posted layer, so skipped layers never cost a target
   // allocation. (Growing one at a time re-checks dims only — cheap.)
@@ -483,7 +487,6 @@ export function handleSliceRenderMultiPass(
   comp.composite(canvasView, renderedLayers, compEncoder, true, timing);
   ctx.device.queue.submit([compEncoder.finish()]);
 
-  const cr = ctx.getCursorRenderer();
   if (cr.hasData()) {
     const cursorEncoder = ctx.device.createCommandEncoder();
     cr.renderSlice(canvasView, cursorEncoder, msg.zoom, msg.cx, msg.cy, msg.canvasW, msg.canvasH, timing);

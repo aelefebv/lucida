@@ -771,6 +771,16 @@ export interface ReadyMessage {
   type: "ready";
 }
 
+/**
+ * The pipelines built at bootstrap, the slice path's, have compiled. Sent
+ * once, after `ready`. The page holds the minimap overlay's content draws
+ * until then (#1101, Minimap.tsx). The volume renderer is built on first
+ * need and is not part of this report.
+ */
+export interface PipelinesCompiledMessage {
+  type: "pipelinesCompiled";
+}
+
 export interface ErrorMessage {
   type: "error";
   message: string;
@@ -962,6 +972,7 @@ export type FrameCaptureResult =
 
 export type WorkerToMainMessage =
   | ReadyMessage
+  | PipelinesCompiledMessage
   | ErrorMessage
   | IntensityRangeMessage
   | ThumbnailResultMessage

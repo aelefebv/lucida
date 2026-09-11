@@ -4,6 +4,7 @@ import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
 import type { BlendMode } from "./layerCompositor.ts";
 import type { PassTiming } from "./passTiming.ts";
 import { DESCRIPTOR_MAX_LEVEL_SOURCES } from "./descriptor/layout.ts";
+import { requireCompiled } from "./pipelineCompile.ts";
 
 /**
  * Byte offsets of the shader's `Uniforms` fields (slice.wgsl). The
@@ -121,8 +122,10 @@ function buildSliceUniformData(
 
 export class SliceRenderer {
   private device: GPUDevice;
-  private pipeline: GPURenderPipeline;
-  private aggregatePipelines: Record<BlendMode, GPURenderPipeline>;
+  private pipeline: GPURenderPipeline | null = null;
+  private aggregatePipelines: Record<BlendMode, GPURenderPipeline> | null = null;
+  /** Resolves once the per-member and the three aggregate pipelines have compiled. See `pipelineCompile.ts`. */
+  readonly compiled: Promise<void>;
   private uniformBuffer: GPUBuffer;
   private entityRefBuffer: GPUBuffer;
   private bindGroupLayout: GPUBindGroupLayout;
@@ -156,6 +159,10 @@ export class SliceRenderer {
   private tileProxyTexture: GPUTexture | null = null;
   private groupProxyTexture: GPUTexture | null = null;
   private dummyProxyTexture: GPUTexture | null = null;
+
+  get isCompiled(): boolean {
+    return this.pipeline !== null && this.aggregatePipelines !== null;
+  }
 
   constructor(device: GPUDevice) {
     this.device = device;
@@ -264,7 +271,7 @@ export class SliceRenderer {
       ],
     });
 
-    this.pipeline = device.createRenderPipeline({
+    const memberPipeline = device.createRenderPipelineAsync({
       layout: device.createPipelineLayout({
         bindGroupLayouts: [this.bindGroupLayout, this.descriptorBindGroupLayout],
       }),
@@ -278,6 +285,8 @@ export class SliceRenderer {
         targets: [{ format: OFFSCREEN_FORMAT }],
       },
       primitive: { topology: "triangle-list" },
+    }).then((pipeline) => {
+      this.pipeline = pipeline;
     });
 
     // Aggregate pipelines: one per blend mode, mirroring the compositor's
@@ -295,7 +304,7 @@ export class SliceRenderer {
     const aggregateLayout = device.createPipelineLayout({
       bindGroupLayouts: [this.bindGroupLayout, this.aggregateBindGroupLayout],
     });
-    const makeAggregatePipeline = (blend: GPUBlendState) => device.createRenderPipeline({
+    const makeAggregatePipeline = (blend: GPUBlendState) => device.createRenderPipelineAsync({
       layout: aggregateLayout,
       vertex: {
         module: shaderModule,
@@ -308,20 +317,23 @@ export class SliceRenderer {
       },
       primitive: { topology: "triangle-list" },
     });
-    this.aggregatePipelines = {
-      alpha: makeAggregatePipeline({
+    const aggregatePipelines = Promise.all([
+      makeAggregatePipeline({
         color: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
         alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
       }),
-      additive: makeAggregatePipeline({
+      makeAggregatePipeline({
         color: { srcFactor: "one", dstFactor: "one", operation: "add" },
         alpha: { srcFactor: "one", dstFactor: "one", operation: "add" },
       }),
-      max: makeAggregatePipeline({
+      makeAggregatePipeline({
         color: { srcFactor: "one", dstFactor: "one", operation: "max" },
         alpha: { srcFactor: "one", dstFactor: "one", operation: "max" },
       }),
-    };
+    ]).then(([alpha, additive, max]) => {
+      this.aggregatePipelines = { alpha, additive, max };
+    });
+    this.compiled = Promise.all([memberPipeline, aggregatePipelines]).then(() => undefined);
 
     this.uniformBuffer = device.createBuffer({
       size: SLICE_UNIFORM_SIZE,
@@ -511,6 +523,7 @@ export class SliceRenderer {
   /** `timing` stamps the pass for the trace's GPU pass time; viewport frames pass it, the minimap does not. */
   renderTo(target: GPUTextureView, encoder: GPUCommandEncoder, timing?: PassTiming) {
     if (!this.bindGroup || !this.descriptorBindGroup) return;
+    const pipeline = requireCompiled(this.pipeline, "slice renderer");
 
     const pass = encoder.beginRenderPass({
       colorAttachments: [
@@ -524,7 +537,7 @@ export class SliceRenderer {
       timestampWrites: timing?.nextPass(),
     });
 
-    pass.setPipeline(this.pipeline);
+    pass.setPipeline(pipeline);
     pass.setBindGroup(0, this.bindGroup);
     pass.setBindGroup(1, this.descriptorBindGroup);
     pass.draw(3);
@@ -556,6 +569,7 @@ export class SliceRenderer {
   ) {
     const { batches, quadData } = params;
     if (batches.length === 0 || quadData.byteLength === 0) return;
+    const pipelines = requireCompiled(this.aggregatePipelines, "slice renderer");
 
     if (!this.aggregateQuadBuffer || this.aggregateQuadCapacity < quadData.byteLength) {
       this.aggregateQuadBuffer?.destroy();
@@ -620,7 +634,7 @@ export class SliceRenderer {
       ],
       timestampWrites: timing?.nextPass(),
     });
-    pass.setPipeline(this.aggregatePipelines[params.blendMode]);
+    pass.setPipeline(pipelines[params.blendMode]);
     pass.setBindGroup(1, quadBindGroup);
     batches.forEach((batch, i) => {
       if (batch.count <= 0) return;
