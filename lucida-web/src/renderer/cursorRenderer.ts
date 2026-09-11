@@ -1,6 +1,7 @@
 /** WebGPU renderer for peer cursor crosshairs and rays. */
 import shaderSource from "./cursors.wgsl?raw";
 import type { PassTiming } from "./passTiming.ts";
+import { requireCompiled } from "./pipelineCompile.ts";
 
 // Uniform layout: view_proj(64) + params(16) + camera_2d(16) + extra(16) = 112 bytes
 const UNIFORM_SIZE = 112;
@@ -10,8 +11,10 @@ const MAX_CURSORS = 16;
 
 export class CursorRenderer {
   private device: GPUDevice;
-  private pipeline2D: GPURenderPipeline;
-  private pipeline3D: GPURenderPipeline;
+  private pipeline2D: GPURenderPipeline | null = null;
+  private pipeline3D: GPURenderPipeline | null = null;
+  /** Resolves once both pipelines have compiled. See `pipelineCompile.ts`. */
+  readonly compiled: Promise<void>;
   private uniformBuffer: GPUBuffer;
   private cursorBuffer: GPUBuffer;
   private bindGroupLayout2D: GPUBindGroupLayout;
@@ -20,6 +23,10 @@ export class CursorRenderer {
   private bindGroup3D: GPUBindGroup | null = null;
   private cursorCount = 0;
   private dummyDepthTex: GPUTexture;
+
+  get isCompiled(): boolean {
+    return this.pipeline2D !== null && this.pipeline3D !== null;
+  }
 
   constructor(device: GPUDevice, canvasFormat: GPUTextureFormat) {
     this.device = device;
@@ -43,7 +50,7 @@ export class CursorRenderer {
     // 3D uses the same layout (depth texture sampled in fragment shader)
     this.bindGroupLayout3D = this.bindGroupLayout2D;
 
-    this.pipeline2D = device.createRenderPipeline({
+    const pipeline2D = device.createRenderPipelineAsync({
       layout: device.createPipelineLayout({ bindGroupLayouts: [this.bindGroupLayout2D] }),
       vertex: { module: shaderModule, entryPoint: "vs" },
       fragment: {
@@ -51,9 +58,11 @@ export class CursorRenderer {
         targets: [{ format: canvasFormat, blend: blendState }],
       },
       primitive: { topology: "triangle-list" },
+    }).then((pipeline) => {
+      this.pipeline2D = pipeline;
     });
 
-    this.pipeline3D = device.createRenderPipeline({
+    const pipeline3D = device.createRenderPipelineAsync({
       layout: device.createPipelineLayout({ bindGroupLayouts: [this.bindGroupLayout3D] }),
       vertex: { module: shaderModule, entryPoint: "vs" },
       fragment: {
@@ -61,7 +70,11 @@ export class CursorRenderer {
         targets: [{ format: canvasFormat, blend: blendState }],
       },
       primitive: { topology: "triangle-list" },
+    }).then((pipeline) => {
+      this.pipeline3D = pipeline;
     });
+
+    this.compiled = Promise.all([pipeline2D, pipeline3D]).then(() => undefined);
 
     this.uniformBuffer = device.createBuffer({
       size: UNIFORM_SIZE,
@@ -115,6 +128,7 @@ export class CursorRenderer {
     timing?: PassTiming,
   ): void {
     if (this.cursorCount === 0) return;
+    const pipeline = requireCompiled(this.pipeline2D, "cursor renderer");
 
     const uniforms = new Float32Array(UNIFORM_SIZE / 4);
     uniforms[0] = 1; uniforms[5] = 1; uniforms[10] = 1; uniforms[15] = 1;
@@ -138,7 +152,7 @@ export class CursorRenderer {
       }],
       timestampWrites: timing?.nextPass(),
     });
-    pass.setPipeline(this.pipeline2D);
+    pass.setPipeline(pipeline);
     pass.setBindGroup(0, this.bindGroup2D);
     pass.draw(VERTS_PER_CURSOR, this.cursorCount);
     pass.end();
@@ -154,6 +168,7 @@ export class CursorRenderer {
     timing?: PassTiming,
   ): void {
     if (this.cursorCount === 0) return;
+    const pipeline = requireCompiled(this.pipeline3D, "cursor renderer");
 
     // Rebuild bind group with the current depth texture
     this.bindGroup3D = this.device.createBindGroup({
@@ -184,7 +199,7 @@ export class CursorRenderer {
       }],
       timestampWrites: timing?.nextPass(),
     });
-    pass.setPipeline(this.pipeline3D);
+    pass.setPipeline(pipeline);
     pass.setBindGroup(0, this.bindGroup3D);
     pass.draw(VERTS_PER_CURSOR, this.cursorCount);
     pass.end();

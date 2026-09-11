@@ -53,19 +53,23 @@ export async function bootstrapWorker(
   // Renderer-class singletons. Persisted across messages; not per-session
   // state, so they stay in this closure rather than on RendererState.
   //
-  // The slice path's three are built eagerly. Each constructor compiles a
-  // shader module and its pipelines, which held the GPU process for 150 to
-  // 200 ms on a hardware adapter. Built lazily on the first render message,
-  // that compile sat between the first chunk uploads and the first present,
-  // the display compositor waited behind it for the canvas's frame, and the
-  // trace read a present stall of about 140 ms (#1094). Built here, it
-  // overlaps the dataset open, before anything is presented that a compositor
-  // frame could wait on. The volume renderer stays lazy: its compile is about
-  // 750 ms and would delay the first frame of the mode most opens start in.
+  // The slice path's three are built here so that their shader compile
+  // overlaps the dataset open instead of sitting inside the first render
+  // message, between the first chunk uploads and the first present (#1094).
+  // The compile runs off the GPU process's main thread, so it no longer
+  // holds the page's own first draw (#1101, `pipelineCompile.ts`). The volume
+  // renderer is built on first need, because its compile is the longest of
+  // the four and a slice open's viewport never needs it.
   const sliceRenderer = new SliceRenderer(device);
   const compositor = new LayerCompositor(device, format);
   const cursorRenderer = new CursorRenderer(device, format);
   let volumeRenderer: VolumeRenderer | null = null;
+  // The page holds the minimap overlay's content draws until this report
+  // (Minimap.tsx).
+  Promise.all([sliceRenderer.compiled, compositor.compiled, cursorRenderer.compiled]).then(
+    () => post({ type: "pipelinesCompiled" }),
+    (err: unknown) => post({ type: "error", message: err instanceof Error ? err.message : String(err) }),
+  );
 
   /**
    * Build a flat snapshot of all proxy pools for a dataset, in the shape

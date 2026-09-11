@@ -5,6 +5,7 @@ import { bootstrapWorker } from "./worker/bootstrap.ts";
 import { dispatchMessage } from "./worker/dispatch.ts";
 import { installDevtools } from "./worker/devtools.ts";
 import { handleDestroy } from "./worker/lifecycle.ts";
+import { inOrder } from "./worker/inOrder.ts";
 
 let ctx: WorkerCtx | null = null;
 
@@ -24,8 +25,11 @@ function post(msg: WorkerToMainMessage, transfer?: Transferable[]): void {
   }
 }
 
-self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
-  const msg = e.data;
+function postError(err: unknown): void {
+  post({ type: "error", message: err instanceof Error ? err.message : String(err) });
+}
+
+async function handleMessage(msg: MainToWorkerMessage): Promise<void> {
   try {
     if (msg.type === "init") {
       ctx = await bootstrapWorker(msg.canvas, post);
@@ -33,7 +37,7 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
       post({ type: "ready" });
       return;
     }
-    if (!ctx) return; // ignore messages before init completes
+    if (!ctx) return; // init failed or never ran: nothing to run it against
     if (msg.type === "destroy") {
       handleDestroy(ctx);
       ctx = null;
@@ -41,6 +45,13 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
     }
     await dispatchMessage(ctx, msg);
   } catch (err) {
-    post({ type: "error", message: err instanceof Error ? err.message : String(err) });
+    postError(err);
   }
+}
+
+// The main thread relies on the worker handling messages in arrival order
+// (`worker/inOrder.ts`). A frame's wait for its pipelines must not break it.
+const enqueue = inOrder(handleMessage, postError);
+self.onmessage = (e: MessageEvent<MainToWorkerMessage>) => {
+  enqueue(e.data);
 };

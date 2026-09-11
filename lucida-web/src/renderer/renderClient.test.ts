@@ -249,3 +249,58 @@ describe("RenderClient destroy", () => {
     expect(close).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("RenderClient pipeline compile", () => {
+  beforeEach(() => {
+    FakeWorker.instances = [];
+    vi.stubGlobal("Worker", FakeWorker);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("is not ready until the worker reports its pipelines, then calls each handler once", () => {
+    const { client, worker } = makeReadyClient();
+    const handler = vi.fn();
+    client.oncePipelinesCompiled(handler);
+    expect(client.pipelinesCompiled).toBe(false);
+
+    worker.emit({ type: "pipelinesCompiled" });
+
+    expect(client.pipelinesCompiled).toBe(true);
+    expect(handler).toHaveBeenCalledOnce();
+  });
+
+  it("calls a handler at once when the report already arrived", () => {
+    const { client, worker } = makeReadyClient();
+    worker.emit({ type: "pipelinesCompiled" });
+    const handler = vi.fn();
+    client.oncePipelinesCompiled(handler);
+    expect(client.pipelinesCompiled).toBe(true);
+    expect(handler).toHaveBeenCalledOnce();
+  });
+
+  it("does not call a handler that was withdrawn", () => {
+    const { client, worker } = makeReadyClient();
+    const handler = vi.fn();
+    const withdraw = client.oncePipelinesCompiled(handler);
+    withdraw();
+    worker.emit({ type: "pipelinesCompiled" });
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("takes the report even when it arrives before ready", async () => {
+    const client = new RenderClient(makeCanvas());
+    const worker = FakeWorker.instances[FakeWorker.instances.length - 1];
+    const handler = vi.fn();
+    client.oncePipelinesCompiled(handler);
+
+    worker.emit({ type: "pipelinesCompiled" });
+    expect(client.pipelinesCompiled).toBe(true);
+    expect(handler).toHaveBeenCalledOnce();
+
+    worker.emit({ type: "ready" });
+    await expect(client.ready()).resolves.toBeUndefined();
+  });
+});

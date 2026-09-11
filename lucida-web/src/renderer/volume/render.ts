@@ -179,16 +179,22 @@ function poolBinding(atlas: AtlasState): VolumePoolBinding {
   };
 }
 
-export function handleVolumeRenderMultiPass(
+export async function handleVolumeRenderMultiPass(
   ctx: WorkerCtx,
   msg: VolumeRenderMultiPassMessage,
-): void {
+): Promise<void> {
+  const renderer = ctx.getVolumeRenderer();
+  const comp = ctx.getCompositor();
+  const cr = ctx.getCursorRenderer();
+  // The volume renderer is built on first need, so an open's first volume
+  // frame usually waits here. The wait holds every message behind this one
+  // (`worker/inOrder.ts`).
+  await Promise.all([renderer.compiled, comp.compiled, cr.compiled]);
+
   const canvas = ctx.context.canvas as OffscreenCanvas;
   canvas.width = msg.canvasW;
   canvas.height = msg.canvasH;
 
-  const renderer = ctx.getVolumeRenderer();
-  const comp = ctx.getCompositor();
   // Only 1 offscreen texture needed — render and composite each layer incrementally
   const pool = ctx.ensureOffscreenPool(1, msg.canvasW, msg.canvasH);
 
@@ -301,7 +307,6 @@ export function handleVolumeRenderMultiPass(
     ctx.device.queue.submit([clearEncoder.finish()]);
   }
 
-  const cr = ctx.getCursorRenderer();
   const depthTex = getDepthTexture();
   if (cr.hasData() && msg.viewProj && depthTex) {
     const cursorEncoder = ctx.device.createCommandEncoder();

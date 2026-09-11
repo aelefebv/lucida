@@ -6,18 +6,21 @@ import "./Minimap.css";
 
 const MINIMAP_SIZE = 200;
 
-/**
- * Keeps the overlay and its two cache layers off the GPU. Nothing here reads
- * pixels; `willReadFrequently` is the hint that forces software raster.
- *
- * The first draw on a GPU-backed 2D canvas creates its raster command buffer
- * synchronously on the main thread, queued behind the GPU process — which, as
- * the first chunks arrive, is compiling the render worker's first pipelines.
- * That was a 157 ms main-thread task on a hardware adapter, read by the trace
- * as a stall of whichever phase was open (#1094). A few strokes on 400 device
- * pixels square cost nothing measurable in software.
- */
-const SOFTWARE_2D: CanvasRenderingContext2DSettings = { willReadFrequently: true };
+// The page's first draw on a 2D canvas creates the main thread's GPU
+// context, one synchronous request on the GPU process's main thread. Made
+// during the open, it queued behind the render worker's pipeline compile or
+// its first chunk uploads and held the page's main thread for about 100 ms
+// on one host and 640 to 710 ms on another, read by the trace as a stall of
+// whichever phase was open (#1094, #1101). `willReadFrequently` did not
+// avoid it on either host. The hint chooses software raster, and the
+// context is created either way.
+//
+// So the overlay draws once when the minimap mounts, before the worker has
+// drawn a frame (the sizing effect), and its content draws wait for the
+// worker's report that its pipelines exist (the loop registration effect).
+// The mount-time draw waits at most for the worker's shader modules, under
+// 30 ms on a hardware adapter, now that the compile itself is off that
+// thread.
 
 interface Props {
   client: RenderClient;
@@ -56,10 +59,10 @@ export function Minimap({ client, activeLoop }: Props) {
   useEffect(() => {
     if (!activeLoop) return;
 
-    const overlayCallback = (data: MinimapOverlayData) => {
+    const drawOverlay = (data: MinimapOverlayData) => {
       const overlayCanvas = overlayCanvasRef.current;
       if (!overlayCanvas) return;
-      const ctx = overlayCanvas.getContext("2d", SOFTWARE_2D);
+      const ctx = overlayCanvas.getContext("2d");
       if (!ctx) return;
 
       // Maintain the offscreen static-layer cache at the current backing size.
@@ -94,7 +97,7 @@ export function Minimap({ client, activeLoop }: Props) {
       // empty); a pure Z-scrub reuses it. `getContext` on a canvas that has
       // never had a 2D context is cheap and idempotent.
       if (data.staticDirty || !staticReadyRef.current) {
-        const staticCtx = staticLayer.getContext("2d", SOFTWARE_2D);
+        const staticCtx = staticLayer.getContext("2d");
         if (staticCtx) {
           drawStaticMinimapOverlays(staticCtx, data);
           staticReadyRef.current = true;
@@ -105,7 +108,7 @@ export function Minimap({ client, activeLoop }: Props) {
       // when the cache is empty / was just resized); a pan/zoom reuses it.
       // `drawZPlaneOverlays` does not clear, so clear the offscreen first.
       if (zPlaneLayerDirty(data, prevZRef.current) || !zReadyRef.current) {
-        const zCtx = zLayer.getContext("2d", SOFTWARE_2D);
+        const zCtx = zLayer.getContext("2d");
         if (zCtx) {
           zCtx.clearRect(0, 0, data.canvasW, data.canvasH);
           drawZPlaneOverlays(zCtx, data);
@@ -123,19 +126,38 @@ export function Minimap({ client, activeLoop }: Props) {
       drawViewportOverlays(ctx, data);
     };
 
+    // Content draws hold until the worker's pipelines exist, so the first one
+    // lands outside the open's first frame (see the note above `Props`).
+    let heldBack: MinimapOverlayData | null = null;
+    const overlayCallback = (data: MinimapOverlayData) => {
+      if (!client.pipelinesCompiled) {
+        heldBack = data;
+        return;
+      }
+      drawOverlay(data);
+    };
+    const withdraw = client.oncePipelinesCompiled(() => {
+      if (heldBack) drawOverlay(heldBack);
+      heldBack = null;
+    });
+
     activeLoop.setMinimap(true, MINIMAP_SIZE, overlayCallback);
     return () => {
+      withdraw();
       activeLoop.setMinimap(false);
     };
-  }, [activeLoop]);
+  }, [activeLoop, client]);
 
-  // Effect 3: Overlay canvas DPR sizing
+  // Effect 3: Overlay canvas DPR sizing. The clear is the overlay's first
+  // draw, which creates the main thread's GPU context before the worker
+  // draws a frame (see the note above `Props`).
   useEffect(() => {
     const overlayCanvas = overlayCanvasRef.current;
     if (!overlayCanvas) return;
     const backing = Math.round(MINIMAP_SIZE * devicePixelRatio);
     overlayCanvas.width = backing;
     overlayCanvas.height = backing;
+    overlayCanvas.getContext("2d")?.clearRect(0, 0, backing, backing);
   }, []);
 
   return (
