@@ -77,7 +77,22 @@ Findings 1 and 3 were fixed the same day and checked on the same host from main 
 
 The check also showed something about this record: **the canvas is black in every screenshot of this pass, and that is the screenshot, not the frame.** The page's captured frame shows the compositor's clear colour and the dataset, while the DevTools screenshot command (`Page.captureScreenshot`) taken of the same canvas at the same moment is solid black ([canvas](followups/canvas-screenshot.png)). On this host the screenshot does not include the WebGPU canvas, so the driver's `capturedBy: "driver"` frames in this pass are black for the same reason. Read the overlays and the chrome in the screenshots, not the canvas. `scripts/frame_probe.py`, `frame_probe3.py`, and `frame_probe4.py` are the comparisons.
 
-Finding 2 is tracked as #1094.
+Finding 2 was measured and fixed in #1099 (#1094): the page's first frame paid the minimap
+overlay's GPU context creation and the render worker's pipeline compile, so the minimap's
+canvases moved to software raster, the slice renderers compiled at worker bootstrap, and
+ruleset version 4 reads what remains on a cold open as a `frame.first-paint` note.
+
+The desktop check that #1099 asked for found the reverse problem. On a MacBook Pro with GPU
+compositing and a cold Metal shader cache, the eager compile held the GPU process main thread
+while the minimap overlay's first 2D draw created the page's GPU context through it, and the
+page's main thread blocked for 640 to 710 ms against 104 to 164 ms before #1099. Filed as
+#1101 and fixed in #1102: every renderer compiles its pipelines asynchronously, the worker
+handles messages one at a time so the recorder's chunk-before-render order holds through a
+wait, and the minimap creates its context at mount. Confirmed on the same Mac: the block gone
+on seven loads of seven, wall time of the open down 39% on average. The lesson for this record
+is that a present-time fix measured only under a software display compositor can regress a
+desktop one, so the desktop check is part of the pass. The measurement tables are in the
+comments on #1094 and #1101.
 
 ## Repeat the present measurement elsewhere
 
