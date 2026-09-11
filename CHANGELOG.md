@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.16.0](https://github.com/aelefebv/lucida/compare/v0.15.0...v0.16.0) (2026-09-11)
+
+
+### Features
+
+* **hud:** show the pipeline in a HUD strip in the viewport ([#1079](https://github.com/aelefebv/lucida/issues/1079)) ([d03ffd3](https://github.com/aelefebv/lucida/commit/d03ffd333c584a12a39d279824e395ce51495a78))
+* **monitor:** brush a window in the dock and highlight its chunks on the viewport ([#1087](https://github.com/aelefebv/lucida/issues/1087)) ([7e84d38](https://github.com/aelefebv/lucida/commit/7e84d3820f323a7aa809a85786c588b733f934ac))
+* **monitor:** compare two runs in the dock and read a dropped file ([#1089](https://github.com/aelefebv/lucida/issues/1089)) ([307743e](https://github.com/aelefebv/lucida/commit/307743e68386c8bb2e2f03198013a2ed32f38fa0))
+* **monitor:** read a dropped run or bundle in the dock and compare two runs ([307743e](https://github.com/aelefebv/lucida/commit/307743e68386c8bb2e2f03198013a2ed32f38fa0))
+* **monitor:** replace the monitor page with a timeline dock in the viewer ([#1082](https://github.com/aelefebv/lucida/issues/1082)) ([d961dc3](https://github.com/aelefebv/lucida/commit/d961dc3149b2430d9d47f2e022d46fffd3896aa8))
+* **overlay:** color chunks by phase and churn, and inspect a chunk on hover ([#1084](https://github.com/aelefebv/lucida/issues/1084)) ([d274635](https://github.com/aelefebv/lucida/commit/d274635e5fca67f930d82cc3e78340e1c0efa937))
+* **overlay:** draw chunk states as wireframe boxes in volume mode ([#1086](https://github.com/aelefebv/lucida/issues/1086)) ([1d4924d](https://github.com/aelefebv/lucida/commit/1d4924df59580bf4a5504e29bc05872da31cdc86))
+* **trace:** look up one chunk and summarise space in the diagnostic ([#1071](https://github.com/aelefebv/lucida/issues/1071)) ([3341557](https://github.com/aelefebv/lucida/commit/3341557db3f9d1c4a477263f8c266b9db9a0b314))
+* **trace:** name what the pipeline does after the view settles ([#1078](https://github.com/aelefebv/lucida/issues/1078)) ([8ba225d](https://github.com/aelefebv/lucida/commit/8ba225d33edbde65bafca4d52acd363dab2d4086))
+* **trace:** open runs on pan, zoom, orbit, scrub, and select ([#1075](https://github.com/aelefebv/lucida/issues/1075)) ([fbd02c3](https://github.com/aelefebv/lucida/commit/fbd02c3e8e2edb7a7a05aa1d663cf9f4ac5d8f49)), closes [#1051](https://github.com/aelefebv/lucida/issues/1051)
+* **trace:** produce a provisional reading over a rolling window of an open run ([#1077](https://github.com/aelefebv/lucida/issues/1077)) ([c14ceea](https://github.com/aelefebv/lucida/commit/c14ceea6cb9de1dcd664b818bda044f2942d7052))
+* **trace:** record bytes and counts per client message type ([#1074](https://github.com/aelefebv/lucida/issues/1074)) ([b931d3e](https://github.com/aelefebv/lucida/commit/b931d3e0715293d03b134b82df0dab8869959bca)), closes [#1052](https://github.com/aelefebv/lucida/issues/1052)
+* **trace:** record GPU pass time and the adapter's fallback status ([#1070](https://github.com/aelefebv/lucida/issues/1070)) ([9593862](https://github.com/aelefebv/lucida/commit/95938625126f7fbe86eacaa71130a28feee65131)), closes [#1053](https://github.com/aelefebv/lucida/issues/1053)
+* **trace:** replay a bundle in the trace driver ([#1088](https://github.com/aelefebv/lucida/issues/1088)) ([92b3353](https://github.com/aelefebv/lucida/commit/92b335356f947ef5bd15fdb80d2981595f9362d6)), closes [#1060](https://github.com/aelefebv/lucida/issues/1060)
+* **trace:** save one bundle that carries everything a reader needs ([#1076](https://github.com/aelefebv/lucida/issues/1076)) ([af0034a](https://github.com/aelefebv/lucida/commit/af0034ad672ff82e3a8948b9c2a016866dd537f7)), closes [#1055](https://github.com/aelefebv/lucida/issues/1055)
+* **trace:** scope the diagnostic to a window of the run's clock ([#1073](https://github.com/aelefebv/lucida/issues/1073)) ([3f61a1d](https://github.com/aelefebv/lucida/commit/3f61a1d075043c414385c77e5d01231af2b77df9))
+* **trace:** script pan, zoom, orbit, scrub, and select in the trace driver ([#1080](https://github.com/aelefebv/lucida/issues/1080)) ([8df4315](https://github.com/aelefebv/lucida/commit/8df4315a43f0e7fab1381b18a4a4ce0f57a0c386))
+* **trace:** send a report to a workspace inbox that the CLI reads ([#1081](https://github.com/aelefebv/lucida/issues/1081)) ([bfbddad](https://github.com/aelefebv/lucida/commit/bfbddadbc14875ae979c5cfe95ec6a122eeeea8c))
+* **trace:** set Dev controls knobs from the driver and diff two runs ([#1085](https://github.com/aelefebv/lucida/issues/1085)) ([963dea7](https://github.com/aelefebv/lucida/commit/963dea76733e9b91810fcf70d802319ae6bc2c36)), closes [#1059](https://github.com/aelefebv/lucida/issues/1059)
+* **trace:** stream a session's aggregates to a CLI watcher ([#1083](https://github.com/aelefebv/lucida/issues/1083)) ([95ddee5](https://github.com/aelefebv/lucida/commit/95ddee5ecaba22d5b774844fd986ba229aaf4006))
+
+
+### Bug Fixes
+
+* **monitor:** create the render pipelines asynchronously and take the minimap overlay's first draw off the open ([#1102](https://github.com/aelefebv/lucida/issues/1102)) ([171e777](https://github.com/aelefebv/lucida/commit/171e77771d6abfbad9c2678e0af84766d1206de5))
+* **monitor:** take the compile and the minimap raster off the page's first paint, and read what remains as first paint ([#1099](https://github.com/aelefebv/lucida/issues/1099)) ([235c9d2](https://github.com/aelefebv/lucida/commit/235c9d2275b6228700ec6d34d06f3bc74cd0041b)), closes [#1094](https://github.com/aelefebv/lucida/issues/1094)
+* **monitor:** take the page's bundle frame from inside the next frame and name the inbox adapter ([#1097](https://github.com/aelefebv/lucida/issues/1097)) ([8fb1d4a](https://github.com/aelefebv/lucida/commit/8fb1d4ae6dcfd0bf681259c23ee1d0b379f59401))
+* **monitor:** wrap the dock's action row and keep the watch status to one line ([#1096](https://github.com/aelefebv/lucida/issues/1096)) ([d7a1e60](https://github.com/aelefebv/lucida/commit/d7a1e601621e959b9935833b77bb0c0573ad9085)), closes [#1093](https://github.com/aelefebv/lucida/issues/1093)
+* **trace:** put headless Chrome on the GPU and retry the adapter after a cold launch ([#1091](https://github.com/aelefebv/lucida/issues/1091)) ([16e36a1](https://github.com/aelefebv/lucida/commit/16e36a194b0ed2412ecf01fce1e514a8f483859d))
+* **trace:** take the driver's bundle frame from the page and check the screenshot it falls back to ([#1100](https://github.com/aelefebv/lucida/issues/1100)) ([1405f52](https://github.com/aelefebv/lucida/commit/1405f523bd11f1b38a4a8e5886b5c402c822be19))
+
 ## [0.15.0](https://github.com/aelefebv/lucida/compare/v0.14.0...v0.15.0) (2026-09-09)
 
 
