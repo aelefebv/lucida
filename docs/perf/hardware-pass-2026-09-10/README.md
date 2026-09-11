@@ -1,0 +1,127 @@
+# Hardware pass: the monitor on an NVIDIA L4
+
+The monitor redesign (#1048, tickets #1049 to #1068) merged with every pull
+request marked "not verified on hardware". This pass ran the merged main
+(`16e36a19`, build 0.15.0) on a real GPU and recorded what each surface did.
+
+## Environment
+
+| Item | Value |
+| --- | --- |
+| GPU | NVIDIA L4, 23 GiB, driver 580.173.02, Secure Boot on |
+| OS and browser | Ubuntu 24.04, Google Chrome 153 headless with the Vulkan flags from #1091 |
+| Adapter as the page sees it | `nvidia` / `lovelace`, hardware adapter, timestamp queries on |
+| Server | `lucida-server` on loopback, `fixtures/ome-zarr/level-index.ome.zarr` (32 x 64 x 64, 16³ chunks, 4 levels) |
+| Viewport | 1440 x 900 CSS pixels at device pixel ratio 2 |
+
+## The driver
+
+Every command ran against the loopback server with the CLI's own launcher.
+
+| Command | Result |
+| --- | --- |
+| `lucida trace <id> --bundle --screenshot` | Settled after 690 ms. `header.gpu` reads `nvidia lovelace`, `fallback: false`, `timestampQueries: true`. The bundle carries a 2880 x 1800 frame from the driver ([slice](driver-frame-slice.png)). |
+| `trace show` at every depth | Default, `--phases`, `--phase browser.wire`, `--window 0..300`, `--spatial`, and `--chunk` all render. The window depth restates coverage over the window. |
+| `--pan 120,60 --zoom-by 1.5 --scrub z:1 --hold 300 --wait` | One run per step, each with its cause and verdict. GPU pass recorded through timestamp queries: p50 1.2 ms, n=12. |
+| `--camera arcball --orbit 30,10` | An orbit run in volume mode ([frame](driver-frame-volume.png)). GPU pass p50 0.9 ms, n=28. |
+| `--prefetch-depth 2 ... --versus --prefetch-depth 0` | Two runs, comparable, with `planning.prefetchDepth 2 → 0` listed as the experiment. |
+| `trace diff` of unlike runs | Leads with `NOT COMPARABLE` for cause and browser cache warmth. |
+| `trace replay <bundle>` | Restored the dataset, view URL, viewport, pixel ratio, mode, planning configuration, pins, and cache warmth. Not restored: build and adapter, each with the reason. The diff against the original is clean, wall +1%. |
+| `trace watch --seconds 10 --json` | Boundaries (`watch_started`, `run_opened`, `run_closed`, `watch_stopped`) and aggregates with `gpuPassUs` about 1029. |
+| `trace inbox list` and `fetch` | The report the dock sent is listed with its run, view, sender, and expiry, fetches as a bundle, and `trace show` reads it. |
+
+## The page
+
+Headless Chrome on the L4, driven over the DevTools protocol by
+[`scripts/ui_pass.py`](scripts/ui_pass.py) with a standard-library client
+([`scripts/cdp.py`](scripts/cdp.py)). Each frame is a 1440 x 900 capture,
+halved from the device-pixel original. [`ui-summary.json`](ui-summary.json)
+holds what the page said at each step.
+
+| Surface | Frame | What it shows |
+| --- | --- | --- |
+| Viewer, quiet | [01](01-viewer-slice.png) | Slice mode after the open settled. |
+| HUD strip (`h`) | [02](02-hud.png) | Sent and received sparklines, tier bars, in-flight by lane, quiescence, the adapter line, and the overlay legend. |
+| Phase overlay | [03](03-overlay-phase.png) | Cells coloured by phase during a cold load. The overlay reads the open interval, so the frame is taken while the open's run is recording. |
+| Churn overlay | [04](04-overlay-churn.png) | The absence statement on a quiet page: no chunk on screen has a row in the open interval. |
+| Inspector | [05](05-overlay-inspector.png) | Hovering a cell: phase, `present took 144 ms`, queue rank, age, fetched once. |
+| Dock | [06](06-dock.png), [06b](06b-dock-timeline.png) | The report over the open's run and the timeline beneath it. |
+| Brush | [07](07-brush.png) | A window brushed on the axis; 17 of 17 chunks highlighted on the viewport, the show command printed. |
+| Brush, drilled | [08](08-brush-drill.png) | Drilling into the verdict narrows the published set to `browser.present`. |
+| Send report | [09](09-send-report.png) | The receipt with the entry id and the fetch command. |
+| Watch stream | [10](10-watch.png) | The toggle on, the session banner, while the CLI received the stream. |
+| Compare mode | [11](11-compare.png), [12](12-compare-timelines.png), [12b](12b-compare-tables.png) | The baseline bundle against its replay: two aligned timelines, header, phase, and finding tables, and the CLI's text. |
+| Dropped bundle | [12c](12c-dropped-bundle.png) | A bundle read on its own, with its settled frame beside the report. |
+| Boxes, phase | [13](13-boxes-phase.png) | Wireframe boxes coloured by phase while the volume loads. |
+| Boxes, grid | [13b](13b-boxes-grid.png) | The chunk grid as boxes in volume mode, batched by style. |
+| Box hover | [14](14-box-hover.png) | The box under the pointer drawn on its own, with the inspector. |
+| Boxes, brushed | [15](15-boxes-brush.png) | 33 chunks highlighted as boxes; the rest faded. |
+
+## Findings
+
+1. **The dock's header does not wrap at 1440 px.** With every action offered, the watch status text is squeezed to one word per line and the run select and buttons stretch to match ([06](06-dock.png)). `.monitor-chrome-actions` has no `flex-wrap`.
+2. **`browser.present` ran p95 about 140 ms on the page's own cold open**, three loads out of three, and the verdict calls it a stall ([08](08-brush-drill.png)). The same open on the chrome-free capture surface presents in about 17 ms. The difference is the page's chrome mounting during the first frames.
+3. **A bundle sent from the page carries no frame on this host.** The receipt's bundle lists the frame as absent, "the render worker could not read its canvas". The driver's bundles carry the frame.
+4. **The steady-state ruleset was not exercised.** An empty steady-state interval is not retained, and on a local fixture nothing follows the open, so `trace show` reports no interval to read. This is by design.
+5. **The trace-reading overlays colour only the open interval.** On a local fixture a run is open for well under a second, so the phase and churn frames had to be taken during a cold load. On a slow open this is the moment they are for.
+6. **The HUD's GPU pool reads "not reported"** in slice and volume mode alike. By design: the render worker reports no resident bytes.
+7. **`trace watch` replays earlier items on subscribe.** The stream began with runs from earlier sessions in the workspace before the live ones.
+8. Cosmetic: the frame-time legend wraps "GPU pass" across two lines with its value between them ([08](08-brush-drill.png)).
+
+## Follow-ups, 2026-09-10
+
+Findings 1 and 3 were fixed the same day and checked on the same host from main at `8fb1d4ae`:
+
+- **The dock header wraps (#1093, PR #1096).** At 1440 px the actions row lays out on two rows, every control keeps its own height, and the watch status stays on one line with the whole sentence in its title ([header](followups/1093-dock-header.png)).
+- **A bundle sent from the page carries its frame (#1095, PR #1097).** The worker copies the canvas texture from inside the next frame it renders. The frame is 1600 x 1200 device pixels for the 800 x 600 canvas at device pixel ratio 2, `capturedBy` is `page`, and `absent` is empty ([frame](followups/1095-page-frame.png), [receipt](followups/1095-send-report.png)). Zooming the view before a second capture moves and enlarges the dataset in the frame as it does on screen ([zoomed](followups/1095-page-frame-zoomed.png)). `lucida trace inbox list` names the adapter `nvidia lovelace`.
+
+The check also showed something about this record: **the canvas is black in every screenshot of this pass, and that is the screenshot, not the frame.** The page's captured frame shows the compositor's clear colour and the dataset, while the DevTools screenshot command (`Page.captureScreenshot`) taken of the same canvas at the same moment is solid black ([canvas](followups/canvas-screenshot.png)). On this host the screenshot does not include the WebGPU canvas, so the driver's `capturedBy: "driver"` frames in this pass are black for the same reason. Read the overlays and the chrome in the screenshots, not the canvas. `scripts/frame_probe.py`, `frame_probe3.py`, and `frame_probe4.py` are the comparisons.
+
+Finding 2 was measured and fixed in #1099 (#1094): the page's first frame paid the minimap
+overlay's GPU context creation and the render worker's pipeline compile, so the minimap's
+canvases moved to software raster, the slice renderers compiled at worker bootstrap, and
+ruleset version 4 reads what remains on a cold open as a `frame.first-paint` note.
+
+The desktop check that #1099 asked for found the reverse problem. On a MacBook Pro with GPU
+compositing and a cold Metal shader cache, the eager compile held the GPU process main thread
+while the minimap overlay's first 2D draw created the page's GPU context through it, and the
+page's main thread blocked for 640 to 710 ms against 104 to 164 ms before #1099. Filed as
+#1101 and fixed in #1102: every renderer compiles its pipelines asynchronously, the worker
+handles messages one at a time so the recorder's chunk-before-render order holds through a
+wait, and the minimap creates its context at mount. Confirmed on the same Mac: the block gone
+on seven loads of seven, wall time of the open down 39% on average. The lesson for this record
+is that a present-time fix measured only under a software display compositor can regress a
+desktop one, so the desktop check is part of the pass. The measurement tables are in the
+comments on #1094 and #1101.
+
+## Repeat the present measurement elsewhere
+
+`scripts/cold.py` is the harness behind the numbers in #1099. It cold-opens a
+workspace URL the way this pass did, waits for the open's run to close, reads
+the run's diagnostic through the trace seam, and repeats. Its `surface` mode
+does the same on the capture surface, `interaction` mode scrubs the settled
+page, and `--trace` takes one load under a DevTools trace with the sampling
+profiler on. `phases.py` prints the phase tables and long tasks of its runs,
+`profile_window.py` gives self time by function over a window of a trace, and
+`analyze_trace.py` and `gputasks.py` read the GPU process out of one. The server
+port and the workspace and dataset ids are constants and files named at the top
+of `cold.py`; set them for your host.
+
+    python3 scripts/cold.py out page 3
+    python3 scripts/cold.py out surface 3
+    python3 scripts/cold.py out interaction 3
+    python3 scripts/phases.py out <tag> [<tag> ...]
+
+On a desktop machine, which is the case #1099 leaves unmeasured, change three
+things in `cdp.py`: the Chrome binary (on macOS,
+`/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`), the three
+Vulkan flags, which are Linux-only and must go, and `--headless=new`, which must
+go too, because the question is what a GPU-composited browser window shows. The
+driver needs no change: `lucida trace` adds the Vulkan flags on Linux only.
+
+## Reproduce
+
+Build on a host with the toolchain, copy the binaries, `lucida-web/dist`, and
+the fixture to the GPU host, start the server against the dist, open the
+fixture in a fresh workspace, then run the driver commands in the first table
+and `python3 scripts/ui_pass.py <lucida dir> <out dir>` beside the server.
