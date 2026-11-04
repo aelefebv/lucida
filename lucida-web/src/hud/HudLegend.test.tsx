@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 /**
- * The legend's two trace-reading toggles (#1062): phase color and churn tint
+ * The legend's two trace-reading toggles: phase color and churn tint
  * sit beside the cache toggles, and the churn toggle states its window.
  */
 

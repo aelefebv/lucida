@@ -1,29 +1,11 @@
 //! The `BookmarkStore` trait and the record it hands out.
 //!
-//! The trait is the seam between handlers and storage. Handlers hold
-//! `Arc<dyn BookmarkStore>` so the same wiring can swap between the
-//! SQL-backed production stores and the in-memory test store without
-//! changing call sites.
+//! Handlers hold `Arc<dyn BookmarkStore>`, and the two SQL implementations
+//! run the statements in [`store_sql`]. `bookmark_datasets` is indexed on
+//! `dataset_url` for the sidebar's any-overlap query, and each SQL store
+//! checks its query plan in tests so the index cannot silently drop.
+//! Create is transactional across both tables; delete cascades.
 //!
-//! The implementations are siblings, one module each: [`store_sqlite`],
-//! [`store_postgres`], and [`store_memory`]. The two SQL ones run the
-//! statements in [`store_sql`] rather than each holding a copy.
-//!
-//! The production schema lives in the baseline migration. Two tables:
-//!
-//! - `bookmarks` — one row per bookmark, with the serialized `SavedView`
-//!   in `view_json`.
-//! - `bookmark_datasets` — side table mapping `(bookmark_id, dataset_url)`,
-//!   indexed on `dataset_url` to power the any-overlap SELECT the sidebar
-//!   runs. Each SQL store reads its own query plan in tests so the index
-//!   isn't silently dropped from the migration.
-//!
-//! Create is transactional across the two tables. Delete touches only
-//! `bookmarks`; the attachments go with it through the schema's cascade.
-//!
-//! [`store_sqlite`]: super::store_sqlite
-//! [`store_postgres`]: super::store_postgres
-//! [`store_memory`]: super::store_memory
 //! [`store_sql`]: super::store_sql
 
 use async_trait::async_trait;

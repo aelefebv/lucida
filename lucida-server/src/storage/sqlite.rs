@@ -264,16 +264,10 @@ mod tests {
         }
     }
 
-    /// The one SQLite behavior the shared statements rest on.
-    ///
-    /// A statement that two backends run has to spell its placeholders
-    /// PostgreSQL's way, `$1` and up, because SQLite's bare `?` has no
-    /// counterpart. That works because sqlx's SQLite driver reads the
-    /// number out of the parameter name and binds argument N to `$N`
-    /// rather than assigning numbers in the order the placeholders
-    /// appear. Nothing in the shared statements exercises the difference
-    /// today — they number in order and repeat nothing — so this is where
-    /// the behavior is pinned. See ADR-0058.
+    /// The one SQLite behavior the shared statements rest on: sqlx's SQLite
+    /// driver binds argument N to `$N` by the number in the name, not by
+    /// order of appearance. The shared statements number in order and
+    /// repeat nothing, so this is where the behavior is pinned.
     #[tokio::test]
     async fn numbered_placeholders_bind_by_number() {
         let backend = SqliteStorageBackend::open_in_memory().await.unwrap();

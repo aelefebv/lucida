@@ -1,27 +1,11 @@
 //! What both SQL-backed `PendingAuthStore` implementations share: the
 //! statements they run, and how a driver error becomes a store error.
 //!
-//! One text, two engines. The statements below are valid SQLite and
-//! valid PostgreSQL, so the SQLite and PostgreSQL stores execute the
-//! same characters and a change to a query lands once.
-//!
-//! **Placeholders are numbered, `$1` and up, in every statement here.**
-//! That is PostgreSQL's spelling, and sqlx's SQLite driver reads the
-//! number out of the parameter name and binds argument N to `$N`, so the
-//! numbered form means the same thing on both sides — including a
-//! placeholder used twice and placeholders out of order. SQLite's bare
-//! `?` has no PostgreSQL counterpart, which is why the numbered form is
-//! the one that travels.
-//!
-//! **Do not mix the two forms in one statement.** A statement holding
-//! both `$1` and `?` binds the same argument to both and reports no
-//! error, so it returns a wrong answer rather than failing. Convert a
-//! statement whole or leave it alone.
-//!
-//! A backend is free to run a statement of its own where the engines
-//! genuinely differ — row locking has no SQLite spelling, for one. The
-//! rule is to share by default and diverge where sharing would be a lie.
-//! See ADR-0058.
+//! Every statement is valid on both engines and uses numbered `$N`
+//! placeholders, which sqlx's SQLite driver binds by number. Do not mix
+//! `$1` and `?` in one statement: it binds the same argument to both and
+//! returns a wrong answer without an error. A backend may diverge where
+//! the engines really differ, such as row locking. See ADR-0058.
 
 /// Insert a freshly-minted pending row.
 ///

@@ -24,28 +24,14 @@ interface PanelLabelRow {
 }
 
 /**
- * The per-label rows for one dataset, VIEW-MODE-AWARE.
+ * The per-label rows for one dataset, aware of the view mode.
  *
- * The panel lists every label drawable in EITHER view mode (the union of the
- * slice- and volume-eligible sets), so it is stable across a 2D/3D switch. A
- * label drawable in the CURRENT mode is a normal, interactive row; a label
- * drawable ONLY in the other mode carries a `disabledReason` so its controls
- * render disabled with the reason shown — never an "on" toggle that draws
- * nothing (the render/fetch paths drop it under this mode's caps). Volume caps
- * are stricter than slice, so the realistic disabled case is a slice-eligible
- * label that busts the volume caps, viewed in 3D. Visibility mirrors
- * `resolveVisibleLabels` (the render path): masks are opt-in, so with settings
- * the stored flag drives it (a label with no explicit setting defaults to
- * HIDDEN), and with NO settings every row starts hidden — the panel still lists
- * every drawable mask so any can be toggled on with one click.
- *
- * In 3D there is a second disabled case: a visible + volume-eligible mask that
- * falls past the TOTAL label-volume memory budget. The panel applies the SAME
- * manifest-order budget prefix ({@link volumeBudgetPrefix}) the render path
- * does, and gives each budget-skipped mask a `disabledReason` naming the memory
- * limit — so it never renders as a plain interactive "on" row that draws
- * nothing. This is distinct from the "too large to render in 3D" reason a
- * per-mask volume-INELIGIBLE label carries.
+ * Lists every label drawable in either mode, so the panel is stable across a
+ * 2D/3D switch. A label drawable only in the other mode, or past the 3D
+ * label-volume memory budget ({@link volumeBudgetPrefix}, the same prefix the
+ * render path applies), gets a `disabledReason`. A control must never show "on"
+ * for a label that draws nothing. Visibility mirrors `resolveVisibleLabels`:
+ * masks are opt-in, so a label with no explicit setting starts hidden.
  */
 function buildLabelRows(
   manifest: DatasetManifest,
@@ -74,9 +60,6 @@ function buildLabelRows(
     const row: PanelLabelRow = {
       index: i,
       name: labels[i].name,
-      // Masks are opt-in: a label with no explicit setting defaults to HIDDEN; an
-      // explicit flag is honored. With NO settings, every row starts hidden.
-      // Mirrors `resolveVisibleLabels`.
       visible: hasLabelSettings ? (ls?.visible ?? false) : false,
       opacity: ls?.opacity ?? 0.5,
     };
@@ -88,10 +71,8 @@ function buildLabelRows(
     rows.push(row);
   }
 
-  // 3D total-volume memory fail-safe: over the VISIBLE + volume-eligible rows in
-  // manifest order, keep masks up to the memory budget and mark the rest
-  // disabled — the SAME manifest-order prefix the render path applies, so the
-  // panel and the screen agree on which masks 3D actually shows.
+  // Same manifest-order budget prefix as the render path, so the panel and the
+  // screen agree on which masks 3D shows.
   if (is3d) {
     const candidateIndices = rows
       .filter((r) => volumeEligible.has(r.index) && r.visible)
@@ -162,19 +143,10 @@ interface RawDatasetSettings {
 }
 
 /**
- * Derive the layer panel's per-layer view models from the live scene + dataset
- * state. Pure and standalone (no refs/React) so the scene→`LayerInfo` seam —
- * in particular that per-channel AND per-label settings from
- * `scene.all_dataset_settings()` reach the panel — is unit-testable with a stub
- * scene, which a component-with-injected-props test cannot cover.
- *
- * Label rows are VIEW-MODE-AWARE (see {@link buildLabelRows}): they list every
- * label drawable in either mode, each carrying its MANIFEST index so the
- * toggle / opacity handlers target the right `label_settings` entry even when
- * earlier (ineligible) labels are omitted, and a `disabledReason` when a label
- * can't draw in the CURRENT mode — a control never lies about a label that
- * can't render. `viewMode` defaults to `"2d"` (slice caps) so 3-arg callers
- * keep today's behavior.
+ * Derive the layer panel's view models from the live scene and dataset state.
+ * Pure, so the scene-to-`LayerInfo` seam is unit-testable with a stub scene.
+ * Label rows carry their manifest index, so handlers hit the right
+ * `label_settings` entry even when earlier ineligible labels are omitted.
  */
 export function buildLayerInfos(
   scene: WasmScene,
@@ -207,10 +179,6 @@ export function buildLayerInfos(
 
     const chSettings = settings?.channel_settings?.[currentC];
 
-    // One row per label drawable in EITHER view mode, keyed by manifest index
-    // (see buildLabelRows). Visibility mirrors `resolveVisibleLabels` (the
-    // render path); a row not drawable in the CURRENT mode carries a
-    // disabledReason so the panel never shows an "on" toggle that draws nothing.
     const rawLabelSettings = settings?.label_settings;
     const labelRows = ds ? buildLabelRows(ds.manifest, rawLabelSettings, viewMode) : [];
     const levels = maps.levels.get(id) ?? null;
@@ -231,10 +199,8 @@ export function buildLayerInfos(
       dataRange: dr,
       fullRangeMax: frMax,
       channelSettings: settings?.channel_settings,
-      // Immutable channel labels from the manifest's omero block (positional;
-      // may be absent/short — LayerPanel falls back to `Ch {i}` per index).
+      // Positional and may be short; LayerPanel falls back to `Ch {i}`.
       channelInfos: ds?.manifest.images[0]?.multiscale.channel_infos,
-      // Per-label rows for the Labels subsection + count badge (drawable only).
       labelRows: labelRows.length > 0 ? labelRows : undefined,
       channelBlendMode: settings?.channel_blend_mode ?? "additive",
       levelPin: settings?.detail_level_override ?? null,
@@ -268,8 +234,7 @@ interface Params {
   datasetCallbacksRef: React.RefObject<DatasetCallbacks>;
   datasetsVersion: number;
   remoteDocumentVersion: number;
-  /** Active view mode. Drives the label rows' eligibility caps (slice vs volume)
-   *  so the panel marks labels that can't draw in the current mode as disabled. */
+  /** Picks the label rows' eligibility caps (slice or volume). */
   viewMode: ViewMode;
   /** The worker's per-dataset target and displayed levels (see `useDatasetLevels`). */
   datasetLevels: Map<string, DatasetLevels>;
@@ -294,9 +259,7 @@ export function useDatasetSettings({
   const [expandedLayerId, setExpandedLayerId] = useState<string | null>(null);
   const [layerSettingsVersion, setLayerSettingsVersion] = useState(0);
   const lastAutoExpandedLayerRef = useRef<string | null>(null);
-  // Mirror the autoContrast map into a ref so the buildLayerInfos closure
-  // (called during render and from event handlers) reads the latest map
-  // without depending on it identity-wise.
+  // Event handlers read the latest map without depending on its identity.
   const autoContrastMapRef = useRef<Map<string, boolean>>(new Map());
   // eslint-disable-next-line react-hooks/refs
   autoContrastMapRef.current = autoContrastMap;
@@ -385,7 +348,6 @@ export function useDatasetSettings({
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
-  // Channel-specific handlers for multi-channel sublayer controls
   const handleChannelSetVisible = useCallback((id: string, channel: number, visible: boolean) => {
     const scene = wasmSceneRef.current;
     if (scene) {
@@ -406,12 +368,9 @@ export function useDatasetSettings({
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
-  // Set (or clear) a user display-name override for one channel. A
-  // viewport/display command exactly like handleChannelSetColormap — applies
-  // locally, breaks follow, marks dirty, and emits presence so followers see
-  // it via the selection epoch. `name === null` (an emptied input) clears the
-  // override, falling the label back to the omero name / `Ch N`. Whitespace is
-  // trimmed before this is called; the caller passes null for a blank value.
+  // A viewport command, not a document edit: followers see it via presence.
+  // `null` clears the override, falling back to the omero name or `Ch N`. The
+  // caller trims and passes null for a blank value.
   const handleChannelSetName = useCallback((id: string, channel: number, name: string | null) => {
     const scene = wasmSceneRef.current;
     if (scene) {
@@ -452,11 +411,8 @@ export function useDatasetSettings({
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
-  // Per-label overlay handlers. Mirror handleChannelSetVisible exactly (a
-  // viewport/display command — applies locally, breaks follow, marks dirty,
-  // emits presence so followers see it via the selection epoch), scoped to a
-  // single label overlay. Toggling / adjusting a label NEVER reframes the
-  // camera (view-state only), mirroring the per-channel behavior.
+  // Label settings are view state like channel settings: they never reframe
+  // the camera.
   const handleLabelSetVisible = useCallback((id: string, label: number, visible: boolean) => {
     const scene = wasmSceneRef.current;
     if (scene) {
@@ -563,9 +519,8 @@ export function useDatasetSettings({
           if (dr) {
             applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min: dr.min, max: dr.max }, loopRef.current);
           } else {
-            // No recorded data range to return to: the scene is unchanged,
-            // but keep the frame this toggle has always requested so the
-            // panel state flip is reflected promptly.
+            // No data range to return to. The scene is unchanged, but request
+            // a frame so the panel flip shows promptly.
             requestRender(loopRef.current);
           }
           setAutoContrastMap(p => { const n = new Map(p); n.set(id, true); return n; });
@@ -603,12 +558,8 @@ export function useDatasetSettings({
     datasetCallbacksRef.current.removeDataset(id);
   }, [wasmSceneRef, datasetsRef, bridgeCallbacksRef, datasetCallbacksRef]);
 
-  // Rename a layer (dataset) by mutating the shared document. Like
-  // handleRemoveLayer, this is a document command: it applies locally for
-  // immediate feedback and sends to the server, which authorizes it
-  // editor-only, broadcasts it to co-present peers, and persists it so the
-  // new name survives reopen. A blank/whitespace name is ignored client-side
-  // (the server also rejects it); the trimmed name is sent.
+  // A document command: the server authorizes it editor-only, broadcasts it,
+  // and persists it. A blank name is ignored here; the server rejects it too.
   const handleLayerRename = useCallback((id: string, name: string) => {
     const trimmed = name.trim();
     if (trimmed.length === 0) return;
@@ -623,11 +574,8 @@ export function useDatasetSettings({
     setLayerSettingsVersion((v) => v + 1);
   }, [wasmSceneRef, bridgeCallbacksRef]);
 
-  // buildLayerInfos (the module-scope pure fn) reads the scene + datasets refs
-  // and the state maps; all are mirrored from state via the version counters
-  // above (datasetsVersion, remoteDocumentVersion, layerSettingsVersion) so
-  // re-renders pick up the latest values. Reading the refs during render is
-  // intentional here (the layer panel view models are derived per render).
+  // Reading refs during render is intentional: the view models are derived per
+  // render, and the version counters below trigger the re-renders.
   // eslint-disable-next-line react-hooks/refs
   const scene = wasmSceneRef.current;
   // eslint-disable-next-line react-hooks/refs

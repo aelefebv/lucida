@@ -1,10 +1,8 @@
-/** Shared types + math for the live box/line draw preview
- * ({@link AnnotationDraftOverlay}). Kept out of the `.tsx` so the component file
- * only exports a component (react-refresh) and so the gesture handlers
- * (SliceViewer/VolumeViewer) can import the type without importing the component. */
+/** Types and math for the live draw preview ({@link AnnotationDraftOverlay}).
+ * Kept out of the `.tsx` so that file only exports a component (react-refresh). */
 
-/** In-progress draw, in CSS px relative to the canvas (`(x0,y0)` = anchor /
- * press point, `(x1,y1)` = current pointer). `null` when nothing is being drawn. */
+/** In-progress draw in canvas CSS px: `(x0,y0)` is the press point, `(x1,y1)`
+ * the current pointer. */
 export interface AnnotationDraft {
   kind: "line" | "box";
   x0: number;
@@ -13,8 +11,8 @@ export interface AnnotationDraft {
   y1: number;
 }
 
-/** Normalize a press→cursor box to a non-negative SVG rect, so dragging in any
- * direction (up/left as well as down/right) yields a valid rectangle. */
+/** Normalize a press-to-cursor box to a non-negative SVG rect, so a drag in any
+ * direction yields a valid rectangle. */
 export function draftBoxRect(
   x0: number,
   y0: number,

@@ -1,19 +1,11 @@
 //! `PrincipalExtractor` trait + its production implementations.
 //!
-//! The trait is the OSS extension point (per ADR 0017): a self-hoster
-//! adding a new auth provider implements this trait once and wires it
-//! into the middleware. Saved-views, admin endpoints, and any future
-//! per-user feature consume the resulting `AuthPrincipal` and never
-//! see provider-specific details. [`super::iap`] is the most recent
-//! one to arrive that way.
+//! The trait is the extension point for a new auth provider (ADR 0017).
+//! Everything downstream sees only the resulting `AuthPrincipal`.
 //!
-//! The production protected surface uses [`DualCredentialExtractor`]:
-//! explicit `Authorization: Bearer ...` credentials are resolved through
-//! [`BearerTokenExtractor`], while requests without an Authorization
-//! header fall through to whatever the mode accepts —
-//! [`SessionCookieExtractor`] under Google, the IAP assertion under
-//! IAP. Disabled auth still uses [`StubPrincipalExtractor`]. The older
-//! [`GoogleJwtPrincipalExtractor`] remains available for tests and
+//! [`DualCredentialExtractor`] resolves `Authorization: Bearer` through
+//! [`BearerTokenExtractor`] and otherwise falls through to the mode's own
+//! extractor. [`GoogleJwtPrincipalExtractor`] serves tests and
 //! integrations that validate Google ID tokens directly.
 
 use std::sync::Arc;
@@ -32,15 +24,13 @@ use super::dev::{default_dev_principal, read_dev_principal_cookie};
 use super::google_oauth::{GoogleOAuthClient, OAuthError, VerifiedClaims};
 use super::session_store::{LoginSession, LoginSessionStore};
 
-/// Best-effort client-IP for slice-8 audit-event fields. Looks at
-/// `X-Forwarded-For` first (proxy-aware) and falls back to the connection
-/// info axum exposes via `Parts::extensions` if present. Returns `None`
-/// when nothing is available — empty string in the audit field is fine
-/// (the operator running localhost dev won't have a forwarded IP).
+/// Best-effort client IP for audit-event fields: `X-Forwarded-For`
+/// first, then the connection info axum exposes. `None` when neither is
+/// present.
 ///
-/// We deliberately don't promise this is the *real* client; an attacker
-/// can spoof `X-Forwarded-For` if no trusted proxy strips it. The audit
-/// log is a starting point for forensics, not a source of truth.
+/// Not proof of the real client: `X-Forwarded-For` is spoofable without
+/// a trusted proxy that strips it. The audit log is a starting point for
+/// forensics, not a source of truth.
 pub(crate) fn client_ip(parts: &Parts) -> Option<String> {
     if let Some(hv) = parts.headers.get("x-forwarded-for")
         && let Ok(s) = hv.to_str()
@@ -175,7 +165,7 @@ impl SessionCookieExtractor {
         Self { config, store }
     }
 
-    /// Why a row failed activeness, for slice-8 audit-logging branching.
+    /// Why a row failed activeness, for audit logging.
     /// `Active` = still valid. The two failure variants drive distinct
     /// `auth.session.expired.*` event names so ops can tell idle drift
     /// (a quiet user) apart from hard-cap rotations (a 30-day re-auth).
@@ -425,20 +415,13 @@ impl PrincipalExtractor for DualCredentialExtractor {
     }
 }
 
-/// Convert a Google ID-token's verified claims into the
-/// `AuthPrincipal` we persist on the new `LoginSession` row at
-/// callback time.
+/// Convert a Google ID token's verified claims into the `AuthPrincipal`
+/// stored on the new `LoginSession` at callback time.
 ///
-/// Pure mapping (no policy). [`principal_or_rejection_from_claims`]
-/// layers hosted-domain + `email_verified` checks on top; other call
-/// sites that already enforce policy elsewhere aren't double-checking.
-///
-/// `display_name` falls back to the local part of the email when
-/// Google's `name` claim is absent (rare, but happens for accounts
-/// without a populated profile). `is_admin` is left `false` here;
-/// [`principal_or_rejection_from_claims`] overlays the derived value
-/// after the policy checks pass. Direct callers that don't go through
-/// that wrapper would need to apply the admin lookup themselves.
+/// Pure mapping, no policy: `display_name` falls back to the email's
+/// local part and `is_admin` stays `false`.
+/// [`principal_or_rejection_from_claims`] adds the policy checks and the
+/// admin lookup. A direct caller must apply the admin lookup itself.
 pub fn principal_from_claims(claims: &VerifiedClaims) -> AuthPrincipal {
     let display_name = claims.name.clone().unwrap_or_else(|| {
         claims
@@ -456,22 +439,14 @@ pub fn principal_from_claims(claims: &VerifiedClaims) -> AuthPrincipal {
     }
 }
 
-/// Why a callback rejected an otherwise-valid JWT.
+/// Why a callback rejected an otherwise-valid JWT. Each variant maps to
+/// a user-fixable error page.
 ///
-/// The two variants map 1:1 to user-fixable error pages:
-///
-/// * `Unverified` — Google says `email_verified: false`. User can fix
-///   this in their Google account settings; we don't accept the email
-///   either way (not knowing whether the address is theirs is the
-///   whole point of `email_verified`).
-/// * `HdMismatch` — JWT was valid but `hd` claim is missing or not in
-///   `LUCIDA_ALLOWED_HOSTED_DOMAINS`. User can fix by signing in with
-///   a different account that matches the allowed domain.
-///
-/// Carries the structured fields the callback handler logs and the
-/// error page renders. `attempted_hd` is `None` when the user signed
-/// in with a personal Gmail (no `hd` claim); the error page surfaces
-/// that case as "personal account".
+/// * `Unverified`: Google says `email_verified: false`, so the address
+///   is not proven to be theirs.
+/// * `HdMismatch`: the `hd` claim is missing or not in
+///   `LUCIDA_ALLOWED_HOSTED_DOMAINS`. `attempted_hd` is `None` for a
+///   personal account.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RejectionReason {
     Unverified {
@@ -484,25 +459,15 @@ pub enum RejectionReason {
     },
 }
 
-/// Apply the hosted-domain + email-verified policy on top of the raw
-/// mapping. Returns the principal on accept, or a structured rejection
-/// that the handler turns into a `/auth/error` redirect.
+/// Apply the hosted-domain and email-verified policy on top of the raw
+/// mapping, returning the principal or a rejection the handler turns into
+/// a `/auth/error` redirect.
 ///
-/// Order matters: `email_verified` is checked first because an
-/// unverified email shouldn't be considered for *any* allow-list
-/// decision (an attacker who can claim "alice@calicolabs.com" without
-/// proving control would otherwise look like a legitimate Calico user
-/// to the hd check). When `allowed` is empty the hd branch is skipped
-/// entirely — the OSS-permissive default per ADR-0017.
-///
-/// `allowed` contains lowercased domain strings; we lowercase the
-/// claim's `hd` value before comparison. Both sides being lowercased
-/// matches Calico's `calicolabs.com` and any future domain entries
-/// the operator might author with mixed case.
-///
-/// `admin_emails` (lowercased entries) drives `is_admin` on the
-/// accepted principal — same mechanism the cookie extractor uses, so
-/// callback-minted and cookie-extracted principals can't disagree.
+/// `email_verified` is checked first: an unproven address must not reach
+/// any allow-list decision. An empty `allowed` skips the hd check, the
+/// permissive default. Both sides of the hd comparison are lowercased.
+/// `admin_emails` sets `is_admin` the same way the cookie extractor does,
+/// so the two paths cannot disagree.
 pub fn principal_or_rejection_from_claims(
     claims: &VerifiedClaims,
     allowed: &std::collections::HashSet<String>,
@@ -589,19 +554,13 @@ impl PrincipalExtractor for GoogleJwtPrincipalExtractor {
 /// Disabled-mode extractor: yields the browser's selected local-dev
 /// principal, falling back to `dev@local`. Touches no store.
 ///
-/// Wired in by [`crate::auth::middleware::build_extractor`] when
-/// `AuthMode::Disabled`. ADR-0018 promises that loopback default (and
-/// `LUCIDA_AUTH=disabled` more generally) bypasses sign-in entirely;
-/// this is the implementation that delivers on that promise. Without
-/// it, the cookie extractor would 401 every request and the SPA's
-/// `UnauthLanding` would bounce into a `/auth/start` that isn't
-/// registered → infinite redirect loop.
+/// Disabled mode bypasses sign-in entirely, and this is what delivers
+/// that. Without it the cookie extractor would 401 every request and the
+/// SPA would loop into an unregistered `/auth/start`.
 ///
-/// The fallback `dev@local` has `is_admin: false`. It is the identity
-/// a caller gets for presenting nothing, so it holds the rights a
-/// stranger should hold. A developer who needs the admin paths
-/// switches this browser to an admin dev principal, which takes a
-/// deliberate act on a loopback bind.
+/// The fallback `dev@local` is not an admin: it is what a caller gets
+/// for presenting nothing. Admin paths need a deliberate switch to an
+/// admin dev principal on a loopback bind.
 pub struct StubPrincipalExtractor;
 
 #[async_trait]

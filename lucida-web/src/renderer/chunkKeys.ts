@@ -1,20 +1,12 @@
 /**
- * Chunk-key helpers — pure string parsing / construction for the
- * `"level/t/c/z/y/x"` chunk key and the `"memberId|chunkKey"` composite
- * slot key used by the shared atlas pools.
- *
- * Every site that builds or parses a composite key routes through this
- * helper so any future shape change has one place to update.
- *
- * No GPU coupling, no module state — safe to import from worker code,
- * wanted-set computation, and tests.
+ * The `"level/t/c/z/y/x"` chunk key and the `"memberId|chunkKey"` composite
+ * slot key the shared atlas pools use. Every site that builds or parses a
+ * composite key goes through here.
  */
 
 /**
  * Parse a chunk key `"level/t/c/z/y/x"` into its component integers.
- * Returns `null` for malformed input (wrong number of components or
- * unparseable integers — though the latter is not currently rejected by
- * `parseInt`).
+ * Returns `null` unless there are six components; a non-numeric part parses to NaN.
  */
 export function parseChunkKey(
   key: string,
@@ -42,8 +34,7 @@ export function makeCompositeKey(memberId: string, chunkKey: string): string {
 
 /**
  * Parse a composite slot key back into its `(memberId, chunkKey)`
- * components. Returns `null` if `key` doesn't contain the `|`
- * separator (e.g. a legacy non-composite slice key).
+ * components. Returns `null` if `key` has no `|` separator.
  */
 export function parseCompositeKey(
   key: string,
@@ -54,14 +45,9 @@ export function parseCompositeKey(
 }
 
 /**
- * Derive the shared chunk pool key from a memberId and its datasetId.
- *
- * - Single-channel: `memberId = "imageId"` → `poolKey = "datasetId"`.
- * - Multi-channel:  `memberId = "imageId:chN"` → `poolKey = "datasetId:chN"`.
- *
- * The convention preserves the per-channel split that the canonical
- * `chunkPoolKey` helper applies during pool registration; this helper
- * is the inverse mapping used at sites that already hold a memberId.
+ * Shared chunk pool key for a memberId: `imageId` → `datasetId`,
+ * `imageId:chN` → `datasetId:chN`. Keeps the per-channel split
+ * `chunkPoolKey` applies.
  */
 export function derivePoolKey(memberId: string, datasetId: string): string {
   const colonIdx = memberId.indexOf(":");

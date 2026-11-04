@@ -1,16 +1,12 @@
 /**
- * The send side of one interval, in the diagnostic's units.
+ * The send side of one interval, in the diagnostic's units. One function for
+ * a run and the steady-state interval after it, because the two are the same
+ * object differing only by cause (ADR 0047). The rate's denominator is the
+ * interval's own span.
  *
- * One function rather than one per caller, because a run and the steady-state
- * interval that followed it are the same object differing only by cause (ADR
- * 0047), and their send summaries have to be the same reading. The rate's
- * denominator is the interval's own span, so each average is of the interval
- * it describes.
- *
- * Read from the interval's totals rather than summed off the tick samples. A
+ * Read from the interval's totals rather than summed off the tick samples: a
  * sample is published only by a planning pass, and the sends worth explaining
- * are the ones after the last pass, when the view looks loaded and the socket
- * does not go quiet.
+ * come after the last pass, when the view looks loaded.
  */
 
 import { CLIENT_MESSAGES, type SendTallies } from "../types.ts";

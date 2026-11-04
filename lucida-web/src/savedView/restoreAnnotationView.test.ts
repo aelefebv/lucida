@@ -12,27 +12,20 @@ import {
   type SavedView,
 } from "./types.ts";
 
-// A mock WasmScene exercising only the surface the LIGHT restore touches:
-// camera_mode(), apply_command() (records every command), export/import_presence,
-// dataset_ids() (the loaded set the per-dataset display restore reads), and
-// dataset_volume_shape() (drives the Z clamp). Pre-seed the live camera mode and
-// a per-dataset volume shape; every apply_command is recorded verbatim so a test
-// can assert exactly which commands were (and were NOT) emitted.
+// A mock WasmScene covering only what the light restore touches. Every
+// apply_command is recorded verbatim so a test can assert exactly which
+// commands were and were not emitted.
 //
-// CRUCIAL: `dataset_volume_shape` mirrors REAL WASM — an UNKNOWN id returns the
-// `[1,1,1]` sentinel (lucida-core/src/wasm.rs `unwrap_or_else(|| vec![1,1,1])`),
-// NOT an empty array. The earlier stub returned empty for unknown ids, which
-// masked the #814 clamp-collapse: clamping a deep captured Z against `""`
-// silently collapsed it to plane 0. Seed shapes for every dataset a test means
-// to be "deep"; anything unseeded is the shallow [1,1,1] sentinel.
+// `dataset_volume_shape` matches real WASM: an unknown id returns the
+// `[1,1,1]` sentinel, not an empty array. An empty stub hides the bug where a
+// deep captured Z clamped against `""` collapses to plane 0. Seed shapes for
+// every dataset a test means to be deep.
 function makeScene(opts: {
   cameraMode?: "slice" | "arcball" | "fly";
   volumeShapes?: Record<string, Uint32Array>;
-  /** Loaded dataset ids (drives the per-dataset display restore). Defaults to
-   *  the keys of `volumeShapes` so the common case "the deep dataset is loaded"
-   *  needs no extra wiring. */
+  /** Loaded dataset ids. Defaults to the keys of `volumeShapes`. */
   loadedIds?: string[];
-  /** Make `import_presence` throw, to exercise the bad-camera degrade (Fix 3). */
+  /** Make `import_presence` throw, to exercise the bad-camera degrade. */
   importPresenceThrows?: boolean;
 } = {}) {
   const calls: Array<Record<string, unknown>> = [];
@@ -53,7 +46,7 @@ function makeScene(opts: {
       else if (cmd.type === "set_mode_arcball") cameraMode = "arcball";
       else if (cmd.type === "set_mode_fly") cameraMode = "fly";
     },
-    // Mirrors real WASM: unknown id -> [1,1,1] sentinel, NOT empty.
+    // Matches real WASM: unknown id -> [1,1,1] sentinel, not empty.
     dataset_volume_shape: (id: string) => shapes[id] ?? new Uint32Array([1, 1, 1]),
     dataset_ids: () => JSON.stringify(loadedIds),
     export_presence: () => JSON.stringify(presence),
@@ -120,7 +113,7 @@ describe("restoreAnnotationView (light tier)", () => {
     const contrast = calls.find((c) => c.type === "set_contrast");
     expect(contrast).toMatchObject({ min: 100, max: 5000 });
     expect(calls.find((c) => c.type === "set_gamma")).toMatchObject({ gamma: 1.7 });
-    // z/t/c restored (unclamped — the slab fits).
+    // z/t/c restored unclamped, since the slab fits.
     expect(calls.find((c) => c.type === "set_t")).toMatchObject({ t: 2 });
     expect(calls.find((c) => c.type === "set_c")).toMatchObject({ c: 1 });
     expect(calls.find((c) => c.type === "set_z_range")).toMatchObject({ start: 5, end: 6 });
@@ -185,8 +178,8 @@ describe("restoreAnnotationView (light tier)", () => {
     const { scene, calls } = makeScene({
       volumeShapes: { [DS]: new Uint32Array([100, 512, 512]) },
     });
-    // A view whose author had other datasets + per-dataset settings + layouts —
-    // the heavy applier would hide/reorder/relayout these; the light path must not.
+    // The heavy applier would hide, reorder, and relayout these; the light path
+    // must not.
     const view = viewWith({
       camera: arcballCamera(),
       dataset_order: ["wds-other", DS],
@@ -214,8 +207,7 @@ describe("restoreAnnotationView (light tier)", () => {
   });
 
   it("clamps the captured z/t/c to the pin's dataset extents + reports a notice", () => {
-    // The pin's dataset is shallow (Z=4) but the captured slab is deep (z 50..52)
-    // and t/c are out of range — all must clamp to fit, with a notice naming them.
+    // Shallow dataset (Z=4), deep captured slab (z 50..52), t/c out of range.
     const { scene, calls } = makeScene({
       volumeShapes: { [DS]: new Uint32Array([4, 256, 256]) },
     });
@@ -247,9 +239,8 @@ describe("restoreAnnotationView (light tier)", () => {
   });
 
   it("clamps against the PIN's dataset only — a co-loaded shallow neighbor can't crush it", () => {
-    // Even though another (shallow) dataset is loaded, the clamp must scan ONLY
-    // the pin's dataset (we never pass the neighbor's id), so a valid deep slab
-    // survives.
+    // The clamp scans only the pin's dataset, so a valid deep slab survives a
+    // shallow neighbor.
     const { scene, calls } = makeScene({
       volumeShapes: {
         [DS]: new Uint32Array([340, 512, 512]),
@@ -303,18 +294,13 @@ describe("restoreAnnotationView (light tier)", () => {
   });
 });
 
-// Regression family for the #814 clamp-collapse reintroduced through the
-// null-selection / Mentions-inbox path (red-team `restore_clamp_family.json`).
-// The trigger: a deep captured Z restored while the pin's dataset can't be
-// resolved (selectedDatasetId === null in the multi-/zero-dataset window). The
-// caller passes `datasetId: undefined`, and restore MUST pass the captured z/t/c
-// through — NOT clamp against the WASM `[1,1,1]` sentinel that
-// `dataset_volume_shape("")` returns. Folds the red-team cases (avc-empty-z,
-// avc-empty-slab, avc-empty-tc, avc-control-correct-id, avc-coloaded-ok) into
-// permanent tests; the throwaway `_redteam_repro.test.ts` is removed.
+// When the pin's dataset can't be resolved (no selection, as from the Mentions
+// inbox), the caller passes `datasetId: undefined` and restore must pass the
+// captured z/t/c through, not clamp them against the `[1,1,1]` sentinel that
+// `dataset_volume_shape("")` returns.
 describe("restoreAnnotationView — null-selection / inbox path (no clamp-collapse, #814 class)", () => {
   it("avc-empty-z: a deep single-plane capture passes through (no datasetId, no collapse)", () => {
-    // A deep dataset is loaded, but the pin's dataset is UNRESOLVED (inbox path).
+    // A deep dataset is loaded, but the pin's dataset is unresolved.
     const { scene, calls } = makeScene({
       volumeShapes: { "wds-deep": new Uint32Array([340, 512, 512]) },
     });
@@ -325,7 +311,7 @@ describe("restoreAnnotationView — null-selection / inbox path (no clamp-collap
 
     const result = restoreAnnotationView({ scene, view, datasetId: undefined });
 
-    // The captured deep plane survives — NOT collapsed to [0,1].
+    // The captured deep plane survives, not collapsed to [0,1].
     expect(calls.find((c) => c.type === "set_z_range")).toMatchObject({ start: 119, end: 120 });
     expect(result.applied).toMatchObject({ zStart: 119, zEnd: 120 });
     // No spurious "Z adjusted" notice.
@@ -406,7 +392,7 @@ describe("restoreAnnotationView — null-selection / inbox path (no clamp-collap
       view: { z_range: { start: 119, end: 120 }, t: 0, c: 0 },
     });
 
-    // Clamp targets ONLY the pin's dataset, never the shallow neighbor.
+    // Clamp targets only the pin's dataset, never the shallow neighbor.
     const result = restoreAnnotationView({ scene, view, datasetId: "wds-deep" });
 
     expect(calls.find((c) => c.type === "set_z_range")).toMatchObject({ start: 119, end: 120 });
@@ -414,8 +400,8 @@ describe("restoreAnnotationView — null-selection / inbox path (no clamp-collap
   });
 
   it("a RESOLVED but genuinely shallow pin dataset still clamps + notices (clamp not lost)", () => {
-    // Sanity: skipping-when-unresolved must NOT also skip when the dataset IS
-    // resolved and the capture genuinely overshoots it.
+    // Skipping when unresolved must not also skip when the dataset is resolved
+    // and the capture overshoots it.
     const { scene, calls } = makeScene({
       volumeShapes: { "wds-shallow": new Uint32Array([4, 256, 256]) },
     });
@@ -432,10 +418,9 @@ describe("restoreAnnotationView — null-selection / inbox path (no clamp-collap
   });
 });
 
-// Per-dataset / per-channel DISPLAY fidelity (Fix 2): "go to the author's view"
-// must reproduce the author's CHANNEL colors/contrast for multi-channel data,
-// not just global contrast/gamma — while staying strictly inside the LIGHT
-// boundary (no visibility/opacity/order/layout, no open, no broadcast).
+// "Go to the author's view" must reproduce the author's channel colors and
+// contrast, not just global contrast and gamma, while staying inside the light
+// boundary: no visibility, opacity, order, layout, open, or broadcast.
 function channel(overrides: Partial<ChannelSettings> = {}): ChannelSettings {
   return {
     visible: true,
@@ -486,14 +471,12 @@ describe("restoreAnnotationView — per-channel/per-dataset display fidelity (Fi
 
     restoreAnnotationView({ scene, view, datasetId: DS });
 
-    // Per-dataset display.
     expect(
       calls.find((c) => c.type === "set_dataset_contrast" && c.dataset_id === DS),
     ).toMatchObject({ min: 200, max: 9000 });
     expect(
       calls.find((c) => c.type === "set_dataset_gamma" && c.dataset_id === DS),
     ).toMatchObject({ gamma: 0.8 });
-    // Per-channel colormaps (the headline multi-channel fidelity).
     const colormaps = calls.filter((c) => c.type === "set_channel_colormap" && c.dataset_id === DS);
     expect(colormaps).toContainEqual(
       expect.objectContaining({ channel: 0, colormap: "magenta" }),
@@ -501,7 +484,6 @@ describe("restoreAnnotationView — per-channel/per-dataset display fidelity (Fi
     expect(colormaps).toContainEqual(
       expect.objectContaining({ channel: 1, colormap: "green" }),
     );
-    // Per-channel contrast restored too.
     expect(
       calls.find((c) => c.type === "set_channel_contrast" && c.channel === 1),
     ).toMatchObject({ min: 20, max: 2000 });
@@ -513,7 +495,7 @@ describe("restoreAnnotationView — per-channel/per-dataset display fidelity (Fi
         [DS]: new Uint32Array([100, 512, 512]),
         "wds-loaded-2": new Uint32Array([10, 64, 64]),
       },
-      // The capture references a third dataset that is NOT loaded here.
+      // The capture references a third dataset that is not loaded here.
       loadedIds: [DS, "wds-loaded-2"],
     });
     const view = viewWith({
@@ -532,9 +514,8 @@ describe("restoreAnnotationView — per-channel/per-dataset display fidelity (Fi
     const colormaps = calls.filter((c) => c.type === "set_channel_colormap");
     expect(colormaps.map((c) => c.colormap)).toContain("red");
     expect(colormaps.map((c) => c.colormap)).toContain("cyan");
-    // The unloaded dataset's display is NOT applied (light path never opens it).
+    // The light path never opens the unloaded dataset.
     expect(colormaps.map((c) => c.colormap)).not.toContain("yellow");
-    // And no dataset-contrast for the unloaded id leaked through.
     expect(
       calls.some((c) => c.type === "set_dataset_contrast" && c.dataset_id === "wds-not-loaded"),
     ).toBe(false);
@@ -545,8 +526,8 @@ describe("restoreAnnotationView — per-channel/per-dataset display fidelity (Fi
       volumeShapes: { [DS]: new Uint32Array([100, 512, 512]), "wds-other": new Uint32Array([2, 8, 8]) },
       loadedIds: [DS, "wds-other"],
     });
-    // A capture whose author hid + reordered + relaid-out datasets. The light
-    // restore must reproduce the DISPLAY but none of the layer-placement.
+    // The author hid, reordered, and relaid out datasets. The light restore
+    // reproduces the display but none of the layer placement.
     const view = viewWith({
       camera: arcballCamera(),
       dataset_order: ["wds-other", DS],
@@ -566,19 +547,14 @@ describe("restoreAnnotationView — per-channel/per-dataset display fidelity (Fi
     restoreAnnotationView({ scene, view, datasetId: DS });
 
     const emitted = typesOf(calls);
-    // Display DID happen (colormaps for both loaded datasets).
     expect(emitted).toContain("set_channel_colormap");
     expect(emitted).toContain("set_dataset_contrast");
-    // Layer-placement / document mutation did NOT.
     expect(emitted).not.toContain("set_dataset_visible");
     expect(emitted).not.toContain("set_dataset_opacity");
     expect(emitted).not.toContain("set_dataset_order");
     expect(emitted).not.toContain("set_active_layout");
-    // And no channel-VISIBILITY toggle smuggled a dataset off? (channel_visible
-    // is display-scoped and IS expected; assert it targets a channel, never the
-    // dataset-level visible.) The dataset-level hide must be absent — checked
-    // above. Confirm the captured "visible: false" for wds-other did NOT become
-    // a set_dataset_visible.
+    // The captured `visible: false` for wds-other must not become a
+    // dataset-level hide.
     expect(
       calls.some((c) => c.type === "set_dataset_visible" && c.dataset_id === "wds-other"),
     ).toBe(false);
@@ -611,13 +587,13 @@ describe("restoreAnnotationView — hardening (Fix 3): a bad captured camera deg
       view: { z_range: { start: 5, end: 6 }, t: 1, c: 0 },
     });
 
-    // Must NOT throw out of the navigate handler.
+    // Must not throw out of the navigate handler.
     let result!: ReturnType<typeof restoreAnnotationView>;
     expect(() => {
       result = restoreAnnotationView({ scene, view, datasetId: DS });
     }).not.toThrow();
 
-    // The non-camera restore still happened (display + z/t/c applied).
+    // Display and z/t/c still applied.
     expect(typesOf(calls)).toContain("set_contrast");
     expect(calls.find((c) => c.type === "set_z_range")).toMatchObject({ start: 5, end: 6 });
     expect(calls.find((c) => c.type === "set_t")).toMatchObject({ t: 1 });

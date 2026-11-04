@@ -197,8 +197,8 @@ describe("BookmarksApiError", () => {
   });
 });
 
-// Sanity check: the production fetch implementation isn't called in tests
-// — we always inject our own. This guards against accidental coupling.
+// Tests always inject their own fetch; this guards against coupling to the
+// production one.
 describe("default fetch", () => {
   it("can be substituted via the optional FetchLike argument", async () => {
     const spy = vi.fn(fakeFetch(200, []));

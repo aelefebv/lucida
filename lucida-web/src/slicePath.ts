@@ -18,32 +18,25 @@ export type SliceState = Record<string, never>;
 export function createSliceState(): SliceState { return {}; }
 
 /**
- * Device-pixel diagonal below which a member's layer is folded into its
- * dataset's aggregate pass instead of getting an individual render
- * pass. At overview zoom on a wide collection every member is far below
- * this, so the whole collection renders in one instanced pass; at
- * normal zoom members exceed it and keep per-member passes. A member
- * this small is at most a few pixels on screen, so the aggregate draw
- * is visually equivalent to the individual pass.
+ * Device-pixel diagonal below which a member folds into its dataset's
+ * aggregate pass. At overview zoom a wide collection renders in one instanced
+ * pass. A member this small is a few pixels on screen, so the aggregate draw
+ * looks the same as an individual pass.
  */
 export const MEMBER_AGGREGATE_MAX_DIAG_PX = 32;
 
 /**
- * Hard cap on individual member passes per (dataset, channel). The size
- * threshold alone bounds passes roughly by screen area / threshold²;
- * this cap makes the bound explicit so per-frame pass count can never
- * track member count. When exceeded, the smallest members fold into the
- * aggregate pass (which draws the same content), largest stay individual.
+ * Hard cap on individual member passes per (dataset, channel), so per-frame
+ * pass count can never track member count. Past it, the smallest members fold
+ * into the aggregate pass.
  */
 export const MAX_INDIVIDUAL_MEMBER_PASSES = 256;
 
 /**
- * Backing-pixel cap for the slice render target (≈ a 4K backing). The
- * pass budget is the primary frame-cost bound; this is the bounded
- * fallback for very large backings (high-DPR fullscreen), where the
- * target is rendered at reduced resolution and upscaled by the browser
- * so a frame always presents. Planning keeps the full device-pixel
- * viewport (mirrors the volume path's renderScale split).
+ * Backing-pixel cap for the slice render target (about 4K). Past it the target
+ * renders at reduced resolution and the browser upscales, so a frame always
+ * presents. Planning keeps the full device-pixel viewport, as the volume path
+ * does with renderScale.
  */
 export const MAX_SLICE_BACKING_PIXELS = 3840 * 2160;
 
@@ -59,7 +52,7 @@ export function sliceBackingScale(backingW: number, backingH: number): number {
   return Math.sqrt(MAX_SLICE_BACKING_PIXELS / px);
 }
 
-/** Inputs for {@link pushMemberLayers} — one (dataset, channel) emission. */
+/** Inputs for one (dataset, channel) {@link pushMemberLayers} call. */
 export interface MemberLayerInput {
   members: MemberRosterEntry[];
   /** memberId (or composite `id:chN` key) → entity descriptor index. */
@@ -90,16 +83,11 @@ const AGGREGATE_QUAD_STRIDE_BYTES = 32;
 
 /**
  * Emit render layers for one (dataset, channel) member set under the
- * member-pass budget.
- *
- * Members whose on-screen diagonal is at least
- * {@link MEMBER_AGGREGATE_MAX_DIAG_PX} device pixels keep individual
- * layers, in roster order, with the standard per-member layer shape.
- * Smaller members — and, past {@link MAX_INDIVIDUAL_MEMBER_PASSES}, the
- * smallest of the rest — fold into ONE aggregate layer covering their
- * union extent, emitted beneath the individual layers. A lone tiny
- * member keeps its individual layer (aggregation only engages when it
- * reduces passes), so single-image datasets never batch at any zoom.
+ * member-pass budget. Members at or above {@link MEMBER_AGGREGATE_MAX_DIAG_PX}
+ * keep individual layers in roster order. Smaller ones, and the smallest past
+ * {@link MAX_INDIVIDUAL_MEMBER_PASSES}, fold into one aggregate layer beneath
+ * them. Aggregation only engages when it reduces passes, so a single-image
+ * dataset never batches.
  */
 export function pushMemberLayers(
   layers: SliceLayerParams[],
@@ -116,10 +104,8 @@ export function pushMemberLayers(
     // dataW/dataH; normal tile entries use the dataset's image dims.
     const dataW = m.dataW ?? fullResWidth;
     const dataH = m.dataH ?? fullResHeight;
-    // A zero/negative/non-finite extent covers no pixels and would
-    // poison the aggregate's union-extent normalization (whose
-    // degenerate-extent fallback dissolves the whole batch back into
-    // unbounded per-member passes). Cull such members outright.
+    // A non-positive or non-finite extent covers no pixels and would break
+    // the aggregate's union-extent normalization, so cull it here.
     if (!(dataW > 0) || !(dataH > 0)) continue;
     const memberKey = channel === null ? m.imageId : compositeKey(m.imageId, channel);
     const entityIndex = indexByMember.get(memberKey);
@@ -141,19 +127,15 @@ export function pushMemberLayers(
     (c.diagPx >= MEMBER_AGGREGATE_MAX_DIAG_PX ? individual : batched).push(c);
   }
   if (individual.length > MAX_INDIVIDUAL_MEMBER_PASSES) {
-    // Over budget even above the size threshold: keep the largest,
-    // fold the rest into the aggregate. Individual emission order is
-    // restored to roster order after the size cut.
+    // Keep the largest, fold the rest, then restore roster order.
     individual.sort((a, b) => b.diagPx - a.diagPx);
     batched = batched.concat(individual.slice(MAX_INDIVIDUAL_MEMBER_PASSES));
     individual = individual.slice(0, MAX_INDIVIDUAL_MEMBER_PASSES);
     individual.sort((a, b) => a.order - b.order);
   }
   if (batched.length === 1 && individual.length >= MAX_INDIVIDUAL_MEMBER_PASSES) {
-    // Exactly one member over the cap: unfolding it (below) would emit
-    // cap+1 individual passes. Fold the smallest individual with it
-    // instead, so the cap holds exactly and the aggregate still reduces
-    // passes (2 members → 1 pass).
+    // Unfolding a lone batched member below would emit cap+1 passes, so
+    // fold the smallest individual in with it.
     let smallest = 0;
     for (let i = 1; i < individual.length; i++) {
       if (individual[i].diagPx < individual[smallest].diagPx) smallest = i;
@@ -161,15 +143,12 @@ export function pushMemberLayers(
     batched.push(individual.splice(smallest, 1)[0]);
   }
   if (batched.length < 2) {
-    // Aggregation only engages when it reduces passes: a lone tiny member
-    // stays an individual pass rather than a one-member aggregate.
     individual = individual.concat(batched);
     individual.sort((a, b) => a.order - b.order);
     batched = [];
   }
-  // Quad order is the aggregate's internal draw (z) order. Restore
-  // roster order regardless of how members got here — the cap-overflow
-  // path above collects them in size order.
+  // Quad order is the aggregate's draw order. The cap-overflow path above
+  // collects members in size order, so restore roster order.
   batched.sort((a, b) => a.order - b.order);
 
   if (batched.length > 0) {
@@ -195,12 +174,9 @@ export function pushMemberLayers(
         f32[base + 3] = c.dataH / extH;
         u32[base + 4] = c.entityIndex;
       });
-      // Emitted beneath the individual layers. Members that overlap
-      // WITHIN the aggregate blend in quad (roster) order, matching the
-      // per-member emission order; a batched member overlapping an
-      // INDIVIDUAL member composites beneath it regardless of roster
-      // position — the accepted residual of folding into one pass
-      // (batched members are the smallest on screen).
+      // Emitted beneath the individual layers, so a batched member that
+      // overlaps an individual one draws under it regardless of roster
+      // order. Accepted, since batched members are the smallest on screen.
       layers.push({
         datasetId: batched[0].memberKey,
         dataW: extW,
@@ -208,7 +184,7 @@ export function pushMemberLayers(
         blendMode,
         offsetX: minX,
         offsetY: minY,
-        // Informational for an aggregate layer — each quad carries its
+        // Informational for an aggregate layer; each quad carries its
         // own descriptor index in `quads`.
         entityIndex: batched[0].entityIndex,
         aggregate: {
@@ -218,10 +194,8 @@ export function pushMemberLayers(
         },
       });
     } else {
-      // Defensive only: zero-extent members are culled at candidate
-      // collection, so a batch of positive-extent members always has a
-      // positive union extent. Kept so a future regression degrades to
-      // per-member emission rather than a division by zero.
+      // Unreachable while zero-extent members are culled above. Falls back to
+      // per-member emission rather than dividing by zero.
       individual = individual.concat(batched);
       individual.sort((a, b) => a.order - b.order);
     }
@@ -242,24 +216,12 @@ export function pushMemberLayers(
 }
 
 /**
- * Append a categorical overlay layer for each of the dataset's VISIBLE labels,
- * composited over the intensity layers already pushed. The visible set + each
- * label's opacity come from `labelSettings` (the dataset's per-label display
- * state); with no settings every eligible label is shown at the default
- * opacity (see {@link resolveVisibleLabels}).
+ * Append an overlay layer for each visible label, over the intensity layers.
  *
- * The set drawn here MUST match what {@link computeLabelChunkRequests} fetches,
- * so both resolve through the shared {@link resolveVisibleLabels} (each
- * manifest-order label that is VISIBLE per settings and a uint32 mask with a
- * resolvable source, a positive footprint, and a level within the caps).
- * Rendering a label whose chunks were never fetched would draw nothing; fetching
- * a hidden label would waste bandwidth.
- *
- * Each overlay is sized to the SOURCE image's full-resolution voxel footprint
- * via {@link labelFootprint} (so a coarser label stays aligned rather than
- * shrinking) and placed at the source member's position. Declared
- * `image-label.colors` are forwarded so authored palettes render exactly.
- * Labels never change the camera or bounds.
+ * The drawn set must match what {@link computeLabelChunkRequests} fetches, so
+ * both go through {@link resolveVisibleLabels}. Each overlay is sized to the
+ * source image's full-resolution footprint, so a coarser label stays aligned
+ * rather than shrinking. Labels never change the camera or bounds.
  */
 export function pushLabelLayers(
   layers: SliceLayerParams[],
@@ -273,14 +235,10 @@ export function pushLabelLayers(
     const sourceLevel0 = source.multiscale.levels[0];
     const labelLevel0 = label.image.multiscale.levels[0];
     const { dataW, dataH } = labelFootprint(sourceLevel0, labelLevel0);
-    // Tiles can be offset within a collection/layout; place the overlay at the
-    // source member's position so it lands on the image it annotates. The
-    // source tile is frequently ABSENT from the active-set roster — in a collection
-    // a whole group renders as a single proxy, and off-view tiles aren't active
-    // at all — so fall back to the scene's authoritative per-member layout
-    // position (keyed by the source ENTITY id, the same space as the roster's
-    // positions). Falling back to the origin instead would stack every
-    // off-roster label on the first group (the bug this repairs).
+    // The source tile is often absent from the roster (a collection group
+    // renders as one proxy; off-view tiles aren't active), so fall back to the
+    // scene's per-member layout position, keyed by source entity id. Falling
+    // back to the origin would stack every off-roster label on the first group.
     const sourceMember = members.find((m) => m.imageId === label.source_image_id);
     const position = sourceMember?.position ?? memberPositions?.[source.owner] ?? [0, 0];
     layers.push({
@@ -333,11 +291,7 @@ function uploadAndRenderSlice(
   const dpr = devicePixelRatio;
   const fullW = Math.round(canvas.clientWidth * dpr);
   const fullH = Math.round(canvas.clientHeight * dpr);
-  // Bounded resolution fallback: render an oversized backing at reduced
-  // resolution (browser upscales to the CSS size) so a frame always
-  // presents. Zoom is scaled by the same factor below, keeping the
-  // world field of view — and therefore the on-screen appearance —
-  // unchanged apart from resolution.
+  // Zoom is scaled by the same factor below, so only resolution changes.
   const backingScale = sliceBackingScale(fullW, fullH);
   const canvasW = Math.max(1, Math.round(fullW * backingScale));
   const canvasH = Math.max(1, Math.round(fullH * backingScale));
@@ -368,8 +322,7 @@ function uploadAndRenderSlice(
     const indexByMember = entityIndexByDataset.get(dsId) ?? new Map<string, number>();
 
     if (multiChannel) {
-      // Multi-channel: one emission per channel with per-channel
-      // composite keys; the member-pass budget applies per channel.
+      // The member-pass budget applies per channel.
       const activeChannels = getActiveChannels(dsSettings);
       const channelBlend = dsSettings.channel_blend_mode as "alpha" | "additive" | "max" || "additive";
 
@@ -386,7 +339,6 @@ function uploadAndRenderSlice(
         });
       }
     } else {
-      // Single-channel
       if (z >= dsShapeL[Axis.Z] || c >= dsShapeL[Axis.C] || t >= dsShapeL[Axis.T]) continue;
       pushMemberLayers(layers, {
         members,
@@ -398,11 +350,7 @@ function uploadAndRenderSlice(
         zoom: currentZoom,
       });
     }
-    // Categorical label overlays, composited on top of this dataset's
-    // intensity layers. Honors the per-label visible set + opacity; never
-    // affects camera/bounds. A label's source tile is often not in the active
-    // roster (collection groups proxy; off-view tiles), so hand the scene's full
-    // per-member position map (entity id -> [x, y]) as the placement fallback.
+    // Placement fallback for label sources missing from the roster.
     let labelMemberPositions: Record<string, [number, number]> | undefined;
     if (ds.manifest.labels && ds.manifest.labels.length > 0) {
       try {

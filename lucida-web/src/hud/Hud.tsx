@@ -4,7 +4,7 @@
  *
  * The strip is drawn imperatively on a timer, not through React state and
  * not from an animation frame: one sample, one model read, one draw per
- * tick, and nothing per frame (ADR 0049 as amended). The legend is DOM, so
+ * tick, and nothing per frame (ADR 0049). The legend is DOM, so
  * the toggles are ordinary checkboxes.
  */
 

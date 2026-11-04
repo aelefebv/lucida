@@ -1,27 +1,8 @@
 /**
- * Shared eviction kernels used by both `renderer/volume/eviction` and
- * `renderer/slice/eviction`.
- *
- * Why one module:
- *
- *   - `chunkDistSq` (volume) and `chunkDistSq2D` (slice) are
- *     mathematically the same function — 2D form is simply 3D with the
- *     Z term dropped. The duplication has cost us bug-hunting time
- *     before (level-dim arity mismatch, chunkDims tuple ordering) and
- *     each fix had to land in two places.
- *
- *   - `findFarthestSlot` (volume) and `findFarthestSlot2D` (slice)
- *     differ only in:
- *       * the dimensionality of the per-entity camera reference, and
- *       * whether `chunkDistSq` uses the Z term.
- *     Everything else (finer-than-target first, then stale, then
- *     farthest; parse composite key; lookup entity meta) is identical.
- *
- * The handlers keep their public function names; this module is the
- * source of truth for the algorithm.
- *
- * No GPU coupling, no module state — safe to import from workers,
- * tests, and any future split-out volume/slice eviction files.
+ * Eviction kernels shared by `renderer/volume/eviction` and
+ * `renderer/slice/eviction`. The slice case is the volume case with the
+ * Z term dropped, so keep one implementation rather than two copies that
+ * drift. No GPU coupling and no module state.
  */
 
 import type { LodIndirectionMeta } from "./volume/atlas.ts";
@@ -86,28 +67,16 @@ export interface FindFarthestParams {
 }
 
 /**
- * Find the best eviction candidate from an atlas's slot map.
- *
- * Order (ADR 0061):
- *   1. A chunk finer than its member's target level, finest level first.
- *      The pool holds no section for a level finer than the target, so
- *      the shader never samples such a chunk, and it is the most
- *      expensive resident. At the same target, a level-0 chunk covers a
- *      quarter of the screen a level-1 chunk does. Returned with
- *      `dist = Infinity`.
- *   2. Otherwise a stale slot: unmapped (`slotGridIdx < 0`), or its
- *      member has left the active set, or its level has no section.
- *      Also `dist = Infinity`.
- *   3. Otherwise the mapped chunk farthest from its member's camera
- *      reference, whatever its level. A coarser resident chunk near the
- *      view outlives a target-level chunk at the edge.
- *
- * The scan covers the whole slot map instead of stopping at the first
- * stale slot, because a finer chunk later in the map outranks it. A
- * level-0 chunk ends the scan early, because nothing is finer.
- *
- * The caller decides whether to actually evict by comparing the
- * incoming chunk's distance to the returned `dist`.
+ * Pick the eviction candidate from an atlas's slot map (ADR 0061):
+ *   1. A chunk finer than its member's target level, finest first. The
+ *      pool has no section for it, so the shader never samples it.
+ *   2. Else a stale slot: unmapped, member gone from the active set, or
+ *      no section for its level.
+ *   3. Else the mapped chunk farthest from its member's camera reference,
+ *      whatever its level.
+ * Cases 1 and 2 return `dist = Infinity`. A later finer chunk outranks a
+ * stale one, so the scan can't stop early except at level 0. The caller
+ * evicts only if the incoming chunk is nearer than `dist`.
  */
 export function findFarthestSlot(params: FindFarthestParams): { key: string; dist: number } {
   let finerKey = "";

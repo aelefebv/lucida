@@ -66,16 +66,13 @@ export function groupMembers(entities: EntitySnapshot[]): MemberGroup[] {
 /**
  * Build the active set, one entry per entity.
  *
- * Every visible image or tile becomes a tile entry. Its detail tier
- * holds one level, the entity's target level. The core already resolved
- * that level from the level pin or the screen and clamped it to the
- * image's source levels. Nothing here chooses a level, and nothing here
- * reads memory or residency. Its
- * coarse tier holds the source level the coarse tier points at, when
- * that level is no finer.
- * Proxy assets and projected size play no part, because the tier model
- * renders from chunks alone. A visible group entity gets no entry of its
- * own; its tiles carry its geometry.
+ * Every visible image or tile becomes a tile entry. Its detail tier holds
+ * one level, the entity's target level, which the core already resolved
+ * and clamped. Nothing here chooses a level or reads residency. Its coarse
+ * tier holds the coarse source level when that level is no finer. Proxy
+ * assets and projected size play no part, because the tier model renders
+ * from chunks alone. A visible group entity gets no entry of its own; its
+ * tiles carry its geometry.
  *
  * Invisible entities still appear so downstream consumers (the CPU
  * cache's eviction tier mapping, the trace's per-tick tallies) can see

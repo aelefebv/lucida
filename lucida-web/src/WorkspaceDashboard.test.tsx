@@ -210,7 +210,7 @@ describe("WorkspaceDashboard", () => {
 
     await waitFor(() => {
       expect(duplicateWorkspaceMock).toHaveBeenCalledWith("shared-1");
-      // Navigates into the NEW copy, not the source.
+      // Navigates into the new copy, not the source.
       expect(onOpenWorkspace).toHaveBeenCalledWith("copy-1");
     });
   });
@@ -236,9 +236,8 @@ describe("WorkspaceDashboard", () => {
   });
 
   it("creates a workspace FROM A DATASET URL named from the basename and opens it with the seed", async () => {
-    // The create call only sends a NAME — the workspace inherits the server's
-    // default sharing (restricted, owner-only, link OFF). We assert the name is
-    // the dataset basename and that NO sharing/visibility override is sent.
+    // The create call sends only a name, so the workspace inherits the server's
+    // default owner-only sharing. No sharing or visibility override is sent.
     createWorkspaceMock.mockResolvedValue({
       id: "ws-ds",
       name: "sample.ome.zarr",
@@ -268,7 +267,7 @@ describe("WorkspaceDashboard", () => {
       // restricted owner-only reused, never weakened).
       expect(createWorkspaceMock).toHaveBeenCalledWith("sample.ome.zarr");
       expect(createWorkspaceMock).toHaveBeenCalledTimes(1);
-      // Navigates into the new workspace WITH the dataset to auto-open.
+      // Navigates into the new workspace with the dataset to auto-open.
       expect(onOpenWorkspace).toHaveBeenCalledWith("ws-ds", [
         "gs://bucket/scans/sample.ome.zarr",
       ]);
@@ -327,7 +326,7 @@ describe("WorkspaceDashboard", () => {
     await waitFor(() => {
       expect(screen.getByText("quota exceeded")).toBeTruthy();
     });
-    // No navigation happened — we stayed on the dashboard.
+    // No navigation happened; we stayed on the dashboard.
     expect(onOpenWorkspace).not.toHaveBeenCalled();
   });
 

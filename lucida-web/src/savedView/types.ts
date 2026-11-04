@@ -1,8 +1,6 @@
-// TypeScript mirror of `lucida_core::saved_view::SavedView`. Kept in
-// lock-step with the Rust definition; the wire format is the contract
-// (see `lucida-core/src/saved_view.rs` for the canonical schema and
-// `docs/adr/0013-url-as-app-state-for-saved-views.md` for the
-// rationale).
+// TypeScript mirror of `lucida_core::saved_view::SavedView`. The wire format
+// is the contract, so keep this in step with `lucida-core/src/saved_view.rs`.
+// See `docs/adr/0013-url-as-app-state-for-saved-views.md`.
 
 export const SAVED_VIEW_VERSION = 1;
 
@@ -76,17 +74,13 @@ export interface ChannelSettings {
   contrast_min: number;
   contrast_max: number;
   gamma: number;
-  /** User display-name override for this channel. Absent/`undefined` means
-   *  "no override" — the UI falls back to the omero label, then `Ch {i}`.
-   *  Mirrors `lucida_core::scene::ChannelSettings::name` (serde-skipped when
-   *  None), so it is omitted on the wire unless set. */
+  /** User display-name override. Absent means none; the UI falls back to the
+   *  omero label, then `Ch {i}`. Omitted on the wire unless set, as in Rust. */
   name?: string;
 }
 
-/** Per-label overlay display state (mirrors `lucida_core::scene::LabelSettings`),
- *  captured + restored so a saved view reproduces the author's visible-label set
- *  and per-label opacity. `#[serde(default)]` on the Rust side keeps it additive:
- *  absent on views persisted before per-label controls existed. */
+/** Per-label overlay display state, mirroring
+ *  `lucida_core::scene::LabelSettings`. */
 export interface LabelSettings {
   visible: boolean;
   opacity: number;
@@ -101,17 +95,13 @@ export interface DatasetDisplaySettings {
   blend_mode: BlendMode;
   render_mode?: RenderMode;
   channel_settings?: ChannelSettings[];
-  /** Per-label overlay settings, positional by manifest label order. Optional
-   *  in the wire format — absent on views persisted before per-label controls. */
+  /** Positional by manifest label order. Optional: older views lack it. */
   label_settings?: LabelSettings[];
   channel_blend_mode?: BlendMode;
   detail_level_override?: number | null;
-  /** The author's label names at capture time, positionally parallel to
-   *  `label_settings` (entry `i` names the label `label_settings[i]` describes).
-   *  Mirrors `lucida_core::scene::DatasetDisplaySettings::label_names`
-   *  (serde-skipped when empty), so it is omitted on the wire unless labels are
-   *  present. Lets a restore/adopt path key per-label settings by name+occurrence
-   *  when the current label list differs, instead of by raw index. */
+  /** The author's label names at capture time, parallel to `label_settings`.
+   *  Omitted on the wire when empty. Lets a restore match per-label settings
+   *  by name and occurrence when the current label list differs. */
   label_names?: string[];
 }
 
@@ -122,27 +112,26 @@ export type DatasetReferenceMode = "source-url" | "workspace-dataset-id";
 /**
  * What a restore may do when the view it applies names a different active
  * layout than the document currently has. The active layout is *document*
- * state — shared with every peer and persisted by the server — so who is
+ * state, shared with every peer and persisted by the server, so who is
  * allowed to change it, and how, is not one boolean:
  *
- * - `broadcast` — apply locally and send the command. An editor restoring a
+ * - `broadcast`: apply locally and send the command. An editor restoring a
  *   view is making the change everyone agreed to see.
- * - `local` — apply to this page's scene only, silently. The chrome-free
+ * - `local`: apply to this page's scene only, silently. The chrome-free
  *   capture surface renders the layout the view asked for without recording
- *   that anyone chose it (#923, see `captureSurface.ts`).
- * - `refuse` — skip, and warn into the apply result. A viewer without edit
+ *   that anyone chose it (see `captureSurface.ts`).
+ * - `refuse`: skip, and warn into the apply result. A viewer without edit
  *   rights should be told the picture differs, not silently shown a lie.
  */
 export type LayoutMutationMode = "broadcast" | "local" | "refuse";
 
 /**
- * Capture record for the URL-as-app-state saved-views feature. Spans both
- * tiers of the document/viewport split: `datasets` + `active_layouts` are
- * the document surface; the rest mirrors `PresenceState`.
+ * A saved view. Spans both tiers of the document/viewport split:
+ * `datasets` and `active_layouts` are document state; the rest mirrors
+ * `PresenceState`.
  *
- * `v` is `number` (not the `1` literal) because decoders must accept
- * payloads from future-version senders best-effort — the runtime check
- * lives in `encoder.ts::validateAndRestore`.
+ * `v` is `number`, not the `1` literal, because decoders accept payloads from
+ * newer senders best-effort (see `encoder.ts::validateAndRestore`).
  */
 export interface SavedView {
   v: number;
@@ -153,10 +142,8 @@ export interface SavedView {
   display: DisplayState;
   dataset_order: DatasetId[];
   dataset_settings: Record<DatasetId, DatasetDisplaySettings>;
-  /** Per-dataset auto-contrast preference. Client-side state (not in
-   *  the WASM scene); captured + restored so manually-set contrast
-   *  values aren't immediately overwritten by the recipient's
-   *  intensity batcher. Optional in the wire format — empty/omitted
-   *  means "use default (true) for every dataset". */
+  /** Per-dataset auto-contrast preference. Client-side state, captured so the
+   *  recipient's intensity batcher doesn't overwrite manual contrast. Omitted
+   *  entries mean true. */
   auto_contrast?: Record<DatasetId, boolean>;
 }

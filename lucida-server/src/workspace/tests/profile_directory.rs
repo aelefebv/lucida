@@ -2,13 +2,11 @@
 //! another: peers in a live session, and the owner row a new workspace
 //! records.
 //!
-//! ADR-0063 applies the directory in the auth middleware and nowhere
-//! else, and argues that every consumer picks the enriched principal up
-//! because each reads `AuthPrincipal` from request extensions. These
-//! tests check that argument the way production is wired, with
-//! `AuthMiddlewareState::build` over a mock listing in front of the real
-//! workspace router. They run in `google` mode so that a principal
-//! without a row has a name and picture of its own to keep.
+//! The directory runs only in the auth middleware (ADR-0063), so every
+//! consumer should see the enriched principal. These tests check that
+//! through `AuthMiddlewareState::build` over a mock listing in front of
+//! the real workspace router, in `google` mode so a principal without a
+//! row keeps a name and picture of its own.
 
 use std::net::SocketAddr;
 

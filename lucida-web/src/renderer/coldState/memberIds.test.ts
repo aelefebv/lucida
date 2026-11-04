@@ -1,21 +1,10 @@
 /**
- * Suite D — Member registry invariants.
+ * Suite D: member registry invariants. Locks the memberId matrix for
+ * `memberIdForColdEntry` and `iterateColdMembers`, which every call site
+ * routes through.
  *
- * Locks the memberId construction matrix for the canonical helper
- * (descriptorBuffer.memberIdForColdEntry) plus the canonical iteration
- * (iterateColdMembers). Every site in gpu.worker.ts and wantedSet.ts
- * routes through this helper rather than rebuilding the memberId
- * inline, so the matrix below pins what those call sites produce by
- * construction.
- *
- * The bug the helper guards against: group-as-proxy entries on the
- * discriminated union have no `imageId`; inline
- * `${entry.imageId}:ch${channel}` reconstruction would produce ":ch5"
- * for multi-channel group-as-proxy entries — a key with no entity
- * prefix. Today masked because group-as-proxy entries have empty
- * `levels[]` and the volume/slice pool loops short-circuit at the
- * targetLevel lookup. But the bad key would still get *registered* in
- * memberSourcePools if any caller bypassed the helper.
+ * Group-as-proxy entries have no `imageId`, so building the key from it
+ * would give ":ch5", a key with no entity prefix.
  */
 
 import { describe, it, expect } from "vitest";
@@ -110,10 +99,8 @@ function makeCold(
   };
 }
 
-// ---------------------------------------------------------------------------
 // Construction matrix — locks the four corner cases callers must agree on
 // (group-as-proxy is the easy one to get wrong).
-// ---------------------------------------------------------------------------
 
 describe("Suite D — memberIdForColdEntry matrix", () => {
   it("single-channel tile → imageId", () => {
@@ -127,19 +114,16 @@ describe("Suite D — memberIdForColdEntry matrix", () => {
   });
 
   it("single-channel group-as-proxy → entityId (NOT empty string)", () => {
-    // Regression: the helper routes via `entry.kind === "group-as-proxy"`
-    // and resolves to `entityId`. Inline `entry.imageId` construction
-    // in memberSourcePools / wantedSet would have produced "" here.
+    // The helper routes on `entry.kind` and resolves to `entityId`. Building
+    // the key from `entry.imageId` would give "".
     const e = makeEntry({ entityId: "groupA", imageId: "", mode: "group-as-proxy" });
     expect(memberIdForColdEntry(e, 0, false)).toBe("groupA");
     expect(memberIdForColdEntry(e, 0, false)).not.toBe("");
   });
 
   it("multi-channel group-as-proxy → entityId:chN (NOT ':chN')", () => {
-    // Regression: group-as-proxy + multi-channel via old inline
-    // `${entry.imageId}:ch${channel}` would have produced ":ch2" — a
-    // member key with no entity prefix. The helper resolves to
-    // entityId:chN.
+    // `${entry.imageId}:ch${channel}` would give ":ch2", a member key with
+    // no entity prefix.
     const e = makeEntry({ entityId: "groupA", imageId: "", mode: "group-as-proxy" });
     expect(memberIdForColdEntry(e, 2, true)).toBe("groupA:ch2");
     expect(memberIdForColdEntry(e, 2, true)).not.toBe(":ch2");
@@ -200,21 +184,10 @@ describe("Suite D — memberIdForColdEntry matrix", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// removeLayerResources cleanup invariant — clears member-id routing
-// for entries owned by the removed dataset. Without this, memberToDataset
-// / memberToPool grow monotonically over the worker's lifetime and
-// dataset removal leaves dangling entries that could collide if a
-// memberId ever recurred. RendererState is exposed as a unit-testable
-// surface so the cleanup contract is pinned here.
-//
-// We assert against the cleanup contract directly rather than driving
-// the worker message loop: the contract is "every memberToDataset /
-// memberSourcePools entry owned by datasetId is gone after
-// removeLayerResources(datasetId), and so are this dataset's groups in
-// groupToTiles". The dispatcher implementation in gpu.worker.ts is a
-// tight transcription of this contract.
-// ---------------------------------------------------------------------------
+// removeLayerResources cleanup contract: every memberToDataset and
+// memberSourcePools entry owned by datasetId is gone afterward, and so are
+// the dataset's groups in groupToTiles. Without it these maps grow for the
+// worker's lifetime and a recurring memberId could collide.
 
 import { createInitialState, type RendererState } from "../worker/state.ts";
 

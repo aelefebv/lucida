@@ -1,14 +1,6 @@
 /**
- * Axis-index constants for the canonical 5D TCZYX layout used across
- * Lucida's manifest-shape arrays (`LevelGeometry.shape`,
- * `LevelGeometry.chunk_shape`, `LevelGeometry.grid_shape`).
- *
- * Use `shape[Axis.X]` rather than `shape[4]` at every indexed access
- * site — the type system catches mis-axis swaps because the surrounding
- * semantics get type-checked.
- *
- * JS-side only; the Rust side mostly uses destructuring (`let [t, c, z, y, x] = arr`).
- *
- * See ADR 0030.
+ * Axis indexes for the canonical 5D TCZYX layout of `LevelGeometry.shape`,
+ * `chunk_shape`, and `grid_shape`. Index with `shape[Axis.X]`, not `shape[4]`,
+ * so a swapped axis is visible at the access site.
  */
 export const Axis = { T: 0, C: 1, Z: 2, Y: 3, X: 4 } as const;

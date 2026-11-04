@@ -1,20 +1,10 @@
 /**
- * Rejection tracker.
- *
- * The GPU worker reports `skipped` chunks back to the orchestrator
- * ("atlas full + incoming farther than farthest existing slot"). The
- * CPU cache records those (entityId, chunkKey) pairs so subsequent
- * `submit()` ticks skip them: no fetch enqueue, no `lastSeenTick`
- * refresh on a cached copy. Skipping the refresh lets active-detail
- * eviction sweep the cached-but-rejected entry out instead of burning
- * budget on residency that won't reach the GPU.
- *
- * The orchestrator owns the lifecycle: it calls {@link clear} on every
- * cold-state rebuild (camera or active set may have shifted enough
- * that previously-too-far chunks now fit).
- *
- * Pure: no I/O, no clocks. Just a per-entity Set of rejected
- * chunk keys.
+ * Chunks the GPU worker reported as `skipped` (atlas full and the incoming
+ * chunk is farther than every resident slot). `submit()` skips them without
+ * refreshing `lastSeenTick`, so active-detail eviction can sweep the cached
+ * copy instead of spending budget on residency that won't reach the GPU.
+ * The orchestrator calls {@link clear} on every cold-state rebuild, since
+ * a shifted camera or active set may make them fit.
  */
 export class RejectionTracker {
   private rejectedKeys = new Map<string, Set<string>>();

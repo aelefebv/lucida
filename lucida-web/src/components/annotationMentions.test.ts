@@ -8,11 +8,9 @@ import {
 } from "./annotationMentions.ts";
 
 /**
- * Pure-logic tests for the shared @-mention token rules (issue #526). These pin
- * the grammar the composer (live `@query`) and the rendered comment (chip
- * segmentation) BOTH ride — so the two can never drift — and the guarantees the
- * UI leans on: a mid-word `@` (an email) is not a mention, whitespace closes a
- * token, an empty query lists everyone, and splitting is lossless.
+ * The @-mention grammar shared by the composer and the rendered chips: a
+ * mid-word `@` is not a mention, whitespace closes a token, an empty query
+ * lists everyone, and splitting is lossless.
  */
 
 describe("activeMentionQuery — the live @query token rule", () => {

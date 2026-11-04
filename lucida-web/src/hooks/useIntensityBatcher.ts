@@ -10,9 +10,8 @@ import type { DatasetState } from "../types.ts";
 
 declare global {
   interface Window {
-    // The latest auto-contrast data window, exposed so headless tooling (the
-    // `dataset montage` capture) can read a dataset's data range and derive a
-    // shared, background-clipped contrast. Additive — auto behaviour is unchanged.
+    // The latest auto-contrast window, read by the headless `dataset montage`
+    // capture to derive a shared, background-clipped contrast.
     __lucidaAutoContrast?: { min: number; max: number };
   }
 }
@@ -58,7 +57,7 @@ export function useIntensityBatcher({
         }
       }
 
-      // Merge with any existing pending range (union across members)
+      // Union across collection members.
       const existing = pendingIntensityRef.current.get(datasetId);
       const mergedMin = existing ? Math.min(existing.min, min) : min;
       const mergedMax = existing ? Math.max(existing.max, max) : max;

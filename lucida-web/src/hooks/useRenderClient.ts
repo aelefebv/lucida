@@ -9,27 +9,21 @@ export function useRenderClient() {
   const loopRef = useRef<RenderLoop | null>(null);
   const [activeLoop, setActiveLoop] = useState<RenderLoop | null>(null);
   const [renderError, setRenderError] = useState<string | null>(null);
-  // `transferControlToOffscreen` (inside the RenderClient constructor) is
-  // one-shot per <canvas> element, so a destroyed client's canvas can never
-  // host another client. `canvasKey` feeds the canvas element's React `key`:
-  // the cleanup bumps it, React swaps in a fresh element, and the effect
-  // (keyed on the same value) builds the next client against that element.
-  // In production the bump only happens while unmounting (a no-op); in dev,
-  // StrictMode's mount→cleanup→mount cycle exercises the full replacement.
+  // `transferControlToOffscreen` is one-shot per <canvas>, so a destroyed
+  // client's canvas can never host another. `canvasKey` is the canvas's React
+  // `key`: cleanup bumps it, React swaps in a fresh element, and the effect
+  // builds the next client against it. In practice only a StrictMode remount
+  // exercises this.
   const [canvasKey, setCanvasKey] = useState(0);
-  // Canvas elements whose control has already been transferred to a GPU
-  // worker. Tracked per element (WeakSet, not a boolean) because the spent
-  // element is still attached when the effect re-runs ahead of the keyed
-  // replacement committing.
+  // A WeakSet, not a boolean, because the spent element is still attached when
+  // the effect re-runs ahead of the keyed replacement committing.
   const transferredCanvasesRef = useRef<WeakSet<HTMLCanvasElement>>(new WeakSet());
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || clientRef.current) return;
     if (transferredCanvasesRef.current.has(canvas)) {
-      // This element already gave its control to a (since destroyed)
-      // client. The canvasKey bump from that client's cleanup re-renders
-      // with a fresh element and re-runs this effect against it.
+      // Spent element. The canvasKey bump re-runs this against a fresh one.
       return;
     }
     transferredCanvasesRef.current.add(canvas);
@@ -49,17 +43,13 @@ export function useRenderClient() {
     });
 
     return () => {
-      // Shut down the GPU worker and settle its pending promises; guard
-      // the ready()/error callbacks above so a late settle can't flip
-      // state for a client that no longer exists.
+      // `disposed` stops a late settle from flipping state for a dead client.
       disposed = true;
       client.destroy();
       if (clientRef.current === client) {
         clientRef.current = null;
       }
       setClientReady(false);
-      // Request a fresh canvas element for any subsequent setup (the one
-      // this client used is spent — see the canvasKey note above).
       setCanvasKey(k => k + 1);
     };
   }, [canvasKey]);

@@ -1,39 +1,11 @@
 /**
- * GPU residency for proxy assets.
+ * GPU residency for proxy assets: small generated `r16uint` 3D textures for
+ * a whole group or a single tile, in pools apart from detail-chunk slots.
  *
- * Proxies are small, generated 3-D textures (`r16uint`, single channel)
- * representing either a whole group (`GroupProxy3D`) or a single tile
- * (`TileProxy3D`). They live in dedicated atlas pools so they don't
- * compete with detail-chunk slots.
- *
- * Slot layout (3-D grid)
- * ---------------------
- * Each pool fixes its slot dimensions `[Z, Y, X]`. Slots are tiled in
- * a 3-D grid whose texture-space dimensions are
- * `[slotDims.X * slotsX, slotDims.Y * slotsY, slotDims.Z * slotsZ]`.
- * Slot `i` occupies the region
- *
- * ```text
- *   tileX  = i % slotsX
- *   tileY  = floor(i / slotsX) % slotsY
- *   tileZ  = floor(i / (slotsX * slotsY))
- *   origin = [tileX * slotDims.X, tileY * slotDims.Y, tileZ * slotDims.Z]
- *   size   = slotDims
- * ```
- *
- * Why 3-D grid: common tile proxies such as `128x128x1` can fit only
- * 16 slots in an X-only layout on devices with
- * `maxTextureDimension3D = 2048`. A 3-D grid uses the Y/Z texture axes
- * too, so pool capacity tracks the proxy residency budget instead of
- * the single-axis texture limit.
- *
- * Eviction
- * --------
- * Pure LRU on `touchOrder`. We deliberately do NOT skip slots that
- * are currently in the active set: eviction only happens when the
- * pool is full AND a new key arrives, which means at least one
- * incumbent must give way regardless. The orchestrator's normal
- * wanted-set re-fetch will pull any victim back if it's still wanted.
+ * Slots tile a 3D grid (see {@link proxySlotOrigin}) so pool capacity tracks
+ * the residency budget, not one texture axis limit. Eviction is plain LRU and
+ * does not spare active-set slots: it only runs when the pool is full and a
+ * new key arrives, and the wanted set re-fetches any victim still needed.
  */
 
 export type { ProxyKind } from "../pipeline/assetCatalog.ts";
@@ -55,7 +27,7 @@ export interface ProxyAtlasState {
   slotsY: number;
   slotsZ: number;
   kind: ProxyKind;
-  /** Single channel per pool — multi-channel uses multi-pool. */
+  /** One channel per pool; multi-channel data uses one pool per channel. */
   channel: number;
   /**
    * LRU touch order. Keys appear oldest-first. Each `allocateProxySlot`
@@ -98,13 +70,8 @@ export function proxySlotKey(entityId: string, t: number, c: number): string {
 }
 
 /**
- * Create a new proxy atlas pool. Slots are laid out in a 3-D grid whose
- * texture size is `[slotDims.X * slotsX, slotDims.Y * slotsY,
- * slotDims.Z * slotsZ]`.
- *
- * If the requested capacity exceeds what can fit under the device's max
- * 3-D texture dimensions, capacity is clamped downward and a warning is
- * logged.
+ * Create a proxy atlas pool. Capacity is clamped, with a warning, to what
+ * fits under the device's max 3D texture dimension.
  */
 export function createProxyAtlas(
   device: GPUDevice,
@@ -226,13 +193,7 @@ function compareLayouts(a: ProxyAtlasLayout, b: ProxyAtlasLayout): number {
   return aArea - bArea;
 }
 
-/**
- * Allocate (or look up) a slot for `key`. Returns the slot index.
- *
- * - Existing key → returns existing slot, moves key to end of LRU.
- * - Free slot available → consumes a free slot.
- * - Otherwise → evicts the LRU head and reuses its slot.
- */
+/** Allocate or look up a slot for `key`, evicting the LRU head when the pool is full. */
 export function allocateProxySlot(
   atlas: ProxyAtlasState,
   key: string,
@@ -278,7 +239,7 @@ export function allocateProxySlotWithEviction(
   return { slotIndex, evictedKey };
 }
 
-/** Does NOT touch LRU order. */
+/** Does not touch LRU order. */
 export function lookupProxySlot(
   atlas: ProxyAtlasState,
   key: string,

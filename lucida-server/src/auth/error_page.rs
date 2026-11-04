@@ -1,28 +1,12 @@
 //! `/auth/error` server-rendered page.
 //!
-//! User-facing destination after `auth_callback` rejects a sign-in.
-//! Three rendering modes, all distinguishable from the `code=` query
-//! param:
-//!
-//! * `hd_mismatch` — verified Google account, but the `hd` claim is
-//!   absent or not in `LUCIDA_ALLOWED_HOSTED_DOMAINS`. The user knows
-//!   their own email and we tell them which domains *are* allowed, so
-//!   leaking those isn't recon-aiding — they just signed in.
-//! * `unverified` — Google says the account's `email_verified` claim
-//!   is false. Pure user-fixable (verify in Google account settings,
-//!   try again).
-//! * everything else (`auth_failed` or unknown) — generic message.
-//!   These come from state-token mismatches, code-exchange failures,
-//!   JWT validation failures, etc; they're either benign races or
-//!   attack indicators. Logs hold details server-side; the user gets
-//!   a vague "try again" link to avoid aiding reconnaissance.
-//!
-//! Pattern matches `unauth_landing`: server-rendered HTML, no
-//! framework, no template engine. The user is mid-OAuth-roundtrip
-//! and not yet inside the SPA, so a React component would render
-//! later than the cookie-less page can. Keeping it server-rendered
-//! also dodges the cross-cutting question of "how does an unauth'd
-//! React tree mount?"
+//! Where `auth_callback` sends a rejected sign-in. The `code=` query
+//! param picks the message. `hd_mismatch` names the allowed domains,
+//! which is safe because the user just proved who they are. `unverified`
+//! asks them to verify their email. Anything else gets a vague "try
+//! again", since those failures may be attacks and the details belong in
+//! the server log. Server-rendered, like `unauth_landing`, because the
+//! user is mid-OAuth and outside the SPA.
 
 use axum::extract::Query;
 use axum::http::{StatusCode, header};

@@ -1,33 +1,12 @@
 //! The `InboxStore` trait and the records it hands out.
 //!
-//! The trait is the seam between the socket handler that receives a
-//! **Send report** and the database the bundle lands in. The
-//! implementations are siblings, one module each: [`store_sqlite`] and
-//! [`store_postgres`], running the statements in [`store_sql`] rather
-//! than each holding a copy.
+//! The payload travels as text, so what the CLI fetches is what was sent.
+//! The caller owns the clock: `sent_at`, `expires_at`, and each read's
+//! `now` are arguments, so retention ([`RETENTION_DAYS`]) is the caller's
+//! policy. Every read is scoped to one workspace, because a store that
+//! answered on the entry id alone would hand one workspace's report to
+//! another.
 //!
-//! Three things about the shape here are deliberate.
-//!
-//! **The payload travels as text.** A bundle is JSON the page produced,
-//! and what the CLI fetches has to be what was sent, so nothing between
-//! the socket and the column re-serialises it. The header rides beside
-//! it as its own text, read out once at the write so a listing never
-//! touches the megabytes.
-//!
-//! **The caller owns the clock.** `sent_at` and `expires_at` are
-//! arguments, and every read takes the `now` it should judge expiry
-//! against. Retention is then a policy of the caller ([`RETENTION_DAYS`])
-//! rather than something the store decides, and a test can put an entry
-//! past its expiry without waiting a fortnight.
-//!
-//! **A read is scoped to one workspace.** Not because a caller would
-//! otherwise pass the wrong id, but because an entry id is the only
-//! thing a fetch carries, and a store that answered on the id alone
-//! would hand one workspace's field report to another.
-//!
-//! [`store_sqlite`]: super::store_sqlite
-//! [`store_postgres`]: super::store_postgres
-//! [`store_sql`]: super::store_sql
 //! [`RETENTION_DAYS`]: super::RETENTION_DAYS
 
 use async_trait::async_trait;

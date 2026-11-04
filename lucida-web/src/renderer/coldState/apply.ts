@@ -1,28 +1,11 @@
 /**
- * Cold-state ingestion orchestrator.
+ * Cold-state ingestion orchestrator: rebuilds the worker's routing
+ * registries, pools, indirection sections, and descriptor buffer for one
+ * dataset from a cold-state message.
  *
- * Reads + writes per-worker registries via `ctx.state.*`:
- *   - `memberToDataset` / `memberSourcePools` — routing registries used
- *     by chunk + render handlers to look up which dataset a memberId
- *     belongs to and which pool each of its (tier, level) sections lives
- *     in.
- *   - `targetLevelByMember` — each member's target level, read by pool
- *     eviction so a chunk finer than the target leaves first.
- *   - `groupToTiles` — group → child-tile set, used so a `GroupProxy3D`
- *     upload can fan out to its child tiles' descriptors.
- *   - `groupsByDataset` — dataset → groups currently referenced in
- *     groupToTiles; tracked so `removeLayerResources` can drop a
- *     dataset's entries without scanning every group.
- *   - `currentSourcesByDataset` — per-dataset sections snapshot for the
- *     most recent cold state. The descriptor buffer build pulls from
- *     this so it doesn't pick up stale offsets from pools that belonged
- *     to earlier cold states with different levels.
- *   - `descriptorBuffersByDataset` — per-dataset descriptor buffer
- *     (rebuilt fresh each cold state).
- *
- * `proxyDescriptorsByEntity` + `proxyPoolsByDataset` are reconciled
- * against `desiredProxyKeys` when present, then read by the descriptor
- * build so evicted proxies do not leave stale handles behind.
+ * The descriptor build reads `currentSourcesByDataset`, the sections this
+ * cold state produced, rather than the pools, so it never picks up stale
+ * offsets from pools an earlier cold state laid out with different levels.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
@@ -49,24 +32,12 @@ import { groupEntriesByPool } from "./groupEntries.ts";
 import { computeEntityTierMeta } from "./entityMetas.ts";
 import { sourceKey } from "../poolKeys.ts";
 
-/**
- * Apply a cold-state message: refresh group→tiles, register
- * member→dataset mappings, build pool groups, allocate atlases, compute
- * + write one indirection section per (member, tier, level), resize +
- * remap indirection, capture the per-dataset sections snapshot, rebuild
- * the descriptor buffer.
- *
- * Caller is responsible for posting the wanted-set after this returns
- * (kept outside so this function has a single concern).
- */
+/** Apply a cold-state message. The caller posts the wanted-set afterward. */
 export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
   const state = ctx.state;
 
-  // 1. Refresh group→tiles map so group-proxy uploads can fan out to
-  // child tiles' descriptors. Cold state is the source of truth for
-  // active set membership; we rebuild this dataset's contribution
-  // fully each tick. Other datasets' entries stay untouched so the
-  // worker can hold multiple datasets concurrently.
+  // 1. Rebuild this dataset's group→tiles entries so group-proxy uploads can
+  // fan out to child tiles. Other datasets' entries stay untouched.
   const prevGroups = state.groupsByDataset.get(msg.datasetId);
   if (prevGroups) {
     for (const groupId of prevGroups) state.groupToTiles.delete(groupId);
@@ -100,10 +71,8 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
     state.memberSourcePools.delete(memberId);
   }
 
-  // 2. Register member→dataset mappings and target levels for every
-  // (entry, channel) combo. Canonical iteration walks activeSet ×
-  // visibleChannels and produces the same memberId scheme used elsewhere
-  // in the pipeline (imageId for tiles, entityId for group-as-proxy).
+  // 2. Register member→dataset mappings and target levels. Canonical
+  // iteration produces the same memberId scheme as the rest of the pipeline.
   for (const { entry, memberId } of iterateColdMembers(msg)) {
     state.memberToDataset.set(memberId, msg.datasetId);
     const target = targetLevelOf(entry);
@@ -111,17 +80,12 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
     else state.targetLevelByMember.set(memberId, target);
   }
 
-  // 3. Build pool groups (volume or slice) — partitions activeSet by
-  // (tier, channel, chunkDims). Entries with no chunk levels
-  // (group-as-proxy, with empty `levels[]`) are skipped here; they're
-  // still in memberToDataset from step 2.
+  // 3. Partition activeSet by (tier, channel, chunkDims). Entries with no
+  // chunk levels are skipped here but stay in memberToDataset from step 2.
   const mode: "volume" | "slice" = msg.viewMode;
   const dimArity: 2 | 3 = mode === "volume" ? 3 : 2;
   const groups = groupEntriesByPool(msg, mode);
 
-  // Capture the sections this cold state actually produces (across
-  // pools), so the descriptor build sees only the offsets/dims of the
-  // pool(s) this cold state populated.
   const currentSources = new Map<string, EntitySource[]>();
 
   // 4. Per group: allocate the pool, lay out one section per (member,
@@ -196,9 +160,7 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
 
   state.currentSourcesByDataset.set(msg.datasetId, currentSources);
 
-  // 5. Rebuild per-dataset descriptor buffer. Replaces any previous
-  // buffer for the same dataset (proxy pool index churn is acceptable —
-  // descriptors are rebuilt fresh each cold state, same as the sections).
+  // 5. Rebuild the descriptor buffer from scratch, like the sections.
   const oldDesc = state.descriptorBuffersByDataset.get(msg.datasetId);
   if (oldDesc) destroyDescriptorBuffer(oldDesc);
   state.descriptorBuffersByDataset.set(

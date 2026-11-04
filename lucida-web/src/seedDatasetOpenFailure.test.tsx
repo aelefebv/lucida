@@ -1,19 +1,12 @@
 // @vitest-environment happy-dom
 //
-// Contract test for the "create workspace from dataset(s)" failure behavior
-// (#697): a FAILED dataset import must LEAVE the created workspace in place and
-// SURFACE the error — never abandon/delete the workspace, never silently
-// swallow.
+// Contract: a failed dataset import in "create workspace from datasets" leaves
+// the created workspace in place and surfaces the error.
 //
-// The real wiring (App.tsx) is: the workspace is created + navigated into, then
-// `useSeedDatasetOpens` opens the seed dataset(s) via `datasets.handleUrlSubmit`
-// → `sendOpenRemoteDataset`. That send is fire-and-forget; a failure comes back
-// asynchronously on the websocket and the bridge records it in
-// `remoteDatasetError`, which the viewer renders while staying mounted. This
-// harness reproduces exactly that separation — a fire-and-forget open plus an
-// independent failure callback — so we can assert the contract without standing
-// up the full WASM viewer. The open is "mocked to reject" per the slice's test
-// spec by having the simulated server respond with a failure.
+// In App.tsx the seed open is fire-and-forget, and a failure arrives later over
+// the socket into `remoteDatasetError`. This harness reproduces that split, a
+// fire-and-forget open plus an independent failure callback, without the WASM
+// viewer.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
@@ -29,20 +22,17 @@ import { useSeedDatasetOpens } from "./hooks/useSeedDatasetOpens.ts";
 afterEach(cleanup);
 
 /**
- * Stand-in for the workspace viewer. It auto-opens the seed datasets exactly
- * like App.tsx does, and mirrors the bridge's open-failed → remoteDatasetError
- * surfacing. `onOpen` is the fire-and-forget send (the thing the slice spec
- * says to "mock to reject"); when it signals failure we record the error and
- * stay mounted.
+ * Stand-in for the workspace viewer. It auto-opens the seed datasets as App.tsx
+ * does; when the fire-and-forget `onOpen` fails it records the error and stays
+ * mounted.
  */
 function FakeWorkspaceViewer({
   initialDatasetUrls,
   onOpen,
 }: {
   initialDatasetUrls: readonly string[];
-  // Returns a promise that RESOLVES on success or REJECTS on import failure —
-  // the test injects the failure here. (In production the send never throws and
-  // failure arrives over the socket; the observable contract is identical.)
+  // Rejects on import failure; the test injects the failure here. In production
+  // the failure arrives over the socket, with the same observable contract.
   onOpen: (url: string) => Promise<void>;
 }) {
   const [error, setError] = useState<string | null>(null);
@@ -51,8 +41,8 @@ function FakeWorkspaceViewer({
     initialDatasetUrls,
     ready: true,
     openDataset: (url) => {
-      // Fire-and-forget, exactly like bridge.sendOpenRemoteDataset: kick off the
-      // open; a rejection (import failure) is surfaced, not rethrown.
+      // Fire-and-forget, like bridge.sendOpenRemoteDataset: a rejection is
+      // surfaced, not rethrown.
       void onOpen(url).catch((e) => {
         setError(e instanceof Error ? e.message : String(e));
       });
@@ -88,7 +78,7 @@ describe("create-from-dataset: failed import leaves the workspace + surfaces err
     expect(screen.getByTestId("dataset-open-error").textContent).toContain(
       "dataset import failed",
     );
-    // The workspace viewer is STILL mounted — the workspace was not abandoned.
+    // The workspace viewer is still mounted; the workspace was not abandoned.
     expect(screen.getByTestId("workspace-viewer")).toBeTruthy();
   });
 
@@ -128,7 +118,7 @@ describe("create-from-dataset: failed import leaves the workspace + surfaces err
     });
     expect(onOpen).toHaveBeenCalledTimes(1);
 
-    // Force a re-render with the SAME seed: must not re-open.
+    // Force a re-render with the same seed: must not re-open.
     await act(async () => {
       fireEvent.click(document.body); // no-op interaction
       rerender(

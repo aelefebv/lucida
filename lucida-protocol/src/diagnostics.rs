@@ -157,8 +157,8 @@ pub struct DatasetGeneratedCoarseHealth {
 
 /// Which labelled request family a server timing row describes. One column
 /// rather than one table per family: a correlation label is unique across
-/// the connection, not within a family (ADR 0048), so the family is an
-/// attribute of the row and not part of its identity.
+/// the connection, not within a family, so the family is an attribute of the
+/// row and not part of its identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TimingRowFamily {
@@ -166,7 +166,7 @@ pub enum TimingRowFamily {
     Asset,
     /// One object read performed while opening a dataset. Keyed on the open's
     /// `request_id` rather than on a correlation label: the open already has
-    /// a parent identifier and these reads are its children (ADR 0048).
+    /// a parent identifier and these reads are its children.
     MetadataRead,
 }
 
@@ -207,7 +207,7 @@ pub enum MetadataReadPhase {
 /// `NotReady` is the asymmetry to hold onto: a generated chunk that is still
 /// being produced gets an honest status answer and no binary frame, so the
 /// browser's bracket for that label never closes. A reader must not spend
-/// that open bracket on the server (ADR 0050).
+/// that open bracket on the server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TimingRowOutcome {
@@ -220,13 +220,13 @@ pub enum TimingRowOutcome {
 }
 
 /// The server's phase enum: the stages a served request passes through,
-/// each delimited by a handoff (ADR 0047's definition of a phase).
+/// each delimited by a handoff.
 ///
 /// This is finer than the browser's enum on purpose. [ADR 0047]'s rule that a
 /// phase earns a slot only above the 100 µs clock floor came from a *browser
-/// platform* measurement (#897); Rust's `Instant` has no such floor, so the
-/// rule is clock-relative and the server can name stages the browser could
-/// only count.
+/// platform* measurement. Rust's `Instant` has no such floor, so the rule is
+/// clock-relative and the server can name stages the browser could only
+/// count.
 ///
 /// The stages are sequential and contiguous from arrival to handoff, so a
 /// row's durations sum to its life on the server. Inapplicable stages are
@@ -244,7 +244,7 @@ pub enum ServerPhase {
     /// Frame off the socket → the request is recognised and its binding
     /// lookup begins. Routing a text frame tries each message shape in turn,
     /// and under a burst of thousands of chunk requests that parse is a real
-    /// cost that nothing measured before.
+    /// cost.
     Arrival = 0,
     /// Resolving the dataset's server binding. It earns a slot despite
     /// looking free: it takes the shared session mutex, so every chunk
@@ -276,7 +276,7 @@ pub enum ServerPhase {
     SliceEncode = 8,
     /// Handing the frame to this connection's outbound queue. Terminal:
     /// socket write time happens in a separate task behind an unbounded
-    /// queue and is not observable from the serve path (ADR 0047).
+    /// queue and is not observable from the serve path.
     Handoff = 9,
 }
 
@@ -310,7 +310,7 @@ pub const PHASE_MAX_US: u32 = PHASE_UNSET - 1;
 pub const LABEL_NONE: u32 = u32::MAX;
 
 /// One flush window of the server's lifecycle table, pushed to the client
-/// that caused the rows (ADR 0050). Parallel column arrays rather than an
+/// that caused the rows. Parallel column arrays rather than an
 /// array of objects: the receiving recorder copies columns straight into its
 /// own table, where an array of objects would hand it thousands of
 /// short-lived objects to parse and discard.
@@ -336,9 +336,9 @@ pub struct ServerTimingBatch {
     /// for.
     pub rid: Vec<u32>,
     /// The dataset-open request each metadata-read row belongs to, and
-    /// `None` on every other family. The exporter's second join path
-    /// (ADR 0048): an open already owns an identifier and its reads are its
-    /// children, so nothing here mints a second one.
+    /// `None` on every other family. The exporter's second join path: an
+    /// open already owns an identifier and its reads are its children, so
+    /// nothing here mints a second one.
     pub request_id: Vec<Option<String>>,
     pub family: Vec<TimingRowFamily>,
     /// Where a metadata read spent its time, and `None` on every other
@@ -351,7 +351,7 @@ pub struct ServerTimingBatch {
     /// than merely inside it somewhere.
     pub dispatch_offset_us: Vec<u32>,
     /// Microseconds the serve itself took, ending at handoff to the outbound
-    /// queue. Socket write time is deliberately excluded (ADR 0047). On a
+    /// queue. Socket write time is deliberately excluded. On a
     /// metadata-read row, the read itself, including its wait behind the
     /// metadata-read cap.
     pub duration_us: Vec<u32>,

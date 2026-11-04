@@ -9,9 +9,7 @@ import {
 import { LRUPolicy } from "./eviction.ts";
 import type { SceneEpochs } from "../epochs.ts";
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 const ZERO_EPOCHS: SceneEpochs = {
   content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0,
@@ -57,9 +55,7 @@ function makeStore(opts?: { budgetBytes?: number }) {
   return { store, evictions };
 }
 
-// ---------------------------------------------------------------------------
 // proxyInnerKey
-// ---------------------------------------------------------------------------
 
 describe("proxyInnerKey", () => {
   it("composes a stable string from (entityId, kind, t, c)", () => {
@@ -82,9 +78,7 @@ describe("proxyInnerKey", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Basic API
-// ---------------------------------------------------------------------------
 
 describe("ProxyStore basics", () => {
   it("insert + get round-trip returns the live entry", () => {
@@ -136,9 +130,7 @@ describe("ProxyStore basics", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // cancelDataset
-// ---------------------------------------------------------------------------
 
 describe("ProxyStore.cancelDataset", () => {
   it("drops every entry under a dataset and zeros their bytes", () => {
@@ -168,9 +160,7 @@ describe("ProxyStore.cancelDataset", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // reset
-// ---------------------------------------------------------------------------
 
 describe("ProxyStore.reset", () => {
   it("clears all entries across datasets and zeros bytes", () => {
@@ -187,9 +177,7 @@ describe("ProxyStore.reset", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Eviction
-// ---------------------------------------------------------------------------
 
 describe("ProxyStore eviction via policy", () => {
   it("over-budget insert evicts oldest first across datasets", () => {
@@ -259,9 +247,7 @@ describe("ProxyStore eviction via policy", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Telemetry
-// ---------------------------------------------------------------------------
 
 describe("ProxyStore residency reporting", () => {
   it("totalResidency aggregates count and bytes across datasets", () => {

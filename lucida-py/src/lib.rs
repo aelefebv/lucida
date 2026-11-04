@@ -251,7 +251,7 @@ impl PyStore {
 /// can keep an honest trail across calls.
 ///
 /// This is the same pure engine the CLI's `dataset explore` and the web panel
-/// use; the cells carry full `view` objects (URLs are deferred to higher tiers).
+/// use; the cells carry full `view` objects, not URLs.
 #[pyfunction]
 #[pyo3(signature = (ds_id, dims, viewport, view_json=None, depth=0, breadcrumb=None))]
 fn explore(

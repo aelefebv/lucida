@@ -1,17 +1,11 @@
 /**
  * The limiter summary and the backlog ETA.
  *
- * Queue phases deliberately get no per-chunk ceiling. At the measured p50 of
- * 4.6 s (#899 §3) any per-chunk ceiling either fires on every row or on none,
- * and neither reading is a diagnosis. What is diagnostic is whether the
- * standing backlog will drain: pending divided by the rate admissions are
- * actually completing at, which is the wait a newly planned chunk will see.
- *
- * The drain rate is measured over the **trailing second of the run**. One
- * second matches the rolling-window convention upload telemetry already uses,
- * and it is short enough to track a limiter that changes behaviour mid-run —
- * a rate averaged over a twelve-second run would report the healthy opening as
- * though it were still happening.
+ * Queue phases get no per-chunk ceiling: at a measured p50 of 4.6 s it would
+ * fire on every row or on none. What is diagnostic is whether the standing
+ * backlog will drain: pending divided by the rate admissions are completing
+ * at. The rate is measured over the trailing second, short enough to track a
+ * limiter that changes behaviour mid-run.
  */
 
 import type { TraceRun } from "../types.ts";

@@ -84,8 +84,6 @@ mod tests {
         names.iter().map(|s| s.to_string()).collect()
     }
 
-    // --- normalize_to_5d tests ---
-
     #[test]
     fn full_5d_axes() {
         let result = normalize_to_5d(&[1, 2, 3, 4, 5], &axes(&["t", "c", "z", "y", "x"]), 0);
@@ -109,8 +107,6 @@ mod tests {
         let result = normalize_to_5d(&[], &axes(&[]), 1);
         assert_eq!(result, [1, 1, 1, 1, 1]);
     }
-
-    // --- normalize_f64_to_5d tests ---
 
     #[test]
     fn f64_full_5d_axes() {
@@ -139,8 +135,6 @@ mod tests {
         let result = normalize_f64_to_5d(&[], &axes(&[]), 1.0);
         assert_eq!(result, [1.0, 1.0, 1.0, 1.0, 1.0]);
     }
-
-    // --- classify_axes tests ---
 
     #[test]
     fn classify_canonical_only() {

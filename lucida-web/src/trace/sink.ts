@@ -2,15 +2,10 @@
  * The recorder's write path, behind an interface so a bench can substitute
  * a no-op (ADR 0049).
  *
- * This is a test seam, not a product surface. There is no toggle at any
- * scope: recording is unconditional in every build, and the only reason
- * this indirection exists is so "always-on is free" can be a measurement —
- * real sink against no-op sink, same call sites — rather than a claim. A
- * build-time flag that dead-code-eliminates the recorder was rejected as
- * the opt-out wearing a lab coat.
- *
- * One sink holds every browser tier a run records: the complete per-chunk
- * table, the per-tick aggregate ring, the reading ring, and the point-event ring.
+ * A test seam, not a toggle. Recording is unconditional in every build. The
+ * indirection exists so "always-on is free" is a measurement, real sink
+ * against no-op sink at the same call sites, rather than a claim. A
+ * build-time flag that strips the recorder was rejected as an opt-out.
  */
 
 import type { ChunkReading } from "./diagnose/chunkStates.ts";
@@ -46,7 +41,7 @@ export interface TraceSink {
   setBytes(index: number, bytes: number): void;
   setOutcome(index: number, outcome: RowOutcomeValue): void;
   /**
-   * The rows so far, tallied for the live view (#937). The one read that
+   * The rows so far, tallied for the live view. The one read that
    * happens while the interval is still open.
    */
   liveTally(occupancy: Uint32Array): LiveTally;
@@ -70,8 +65,8 @@ export interface TraceSink {
   appendReading(atUs: number, values: Float64Array, gpuPassUs: number | null): void;
   serialiseReadings(): TraceReading[];
   /**
-   * The readings from `startUs` on, led by the one in force at that instant
-   * (#1057). The other read that happens while the interval is still open:
+   * The readings from `startUs` on, led by the one in force at that instant.
+   * The other read that happens while the interval is still open:
    * a provisional reading over a trailing window is derived from these and
    * from the live tally, and from no row.
    */
@@ -97,7 +92,7 @@ export interface TraceSink {
   /** The point events from `startUs` on. A live read, for the same surface as {@link serialiseTicksFrom}. */
   serialiseEventsFrom(startUs: number): TracePointEvent[];
   /**
-   * One chunk's reading from the row table's identity index (#1062): its
+   * One chunk's reading from the row table's identity index: its
    * newest row's state and age, its row count and its fetch count. The
    * third read that happens while the interval is still open, and like the
    * other two it walks no row. Null when the interval holds no row for it.
@@ -218,7 +213,7 @@ export class NoopTraceSink implements TraceSink {
   }
 }
 
-/** The real sink: the per-chunk table plus the two steady-state rings. */
+/** The real sink: the per-chunk table plus the steady-state rings. */
 export class TableTraceSink implements TraceSink {
   private readonly rows = new RowTable();
   private readonly ticks = new TickRing();
@@ -334,7 +329,7 @@ export class TableTraceSink implements TraceSink {
     );
   }
 
-  /** Every tier a run holds, because the resident cap in ADR 0049 is on the run. */
+  /** Every tier a run holds, because the resident cap is on the run. */
   get byteLength(): number {
     return (
       this.rows.byteLength +

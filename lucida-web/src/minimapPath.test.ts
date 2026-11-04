@@ -57,9 +57,8 @@ describe("resolveMinimapLayerContrast", () => {
   const dataset = { contrast_min: 0, contrast_max: 65535, gamma: 1 };
 
   it("prefers the active channel's contrast/gamma over the dataset-level default", () => {
-    // The bug: auto-contrast is applied per-channel (set_channel_contrast), so the
-    // dataset-level contrast stays at the full-range default while the channel holds
-    // the real range. The minimap must use the channel's values like the main view.
+    // Auto-contrast writes channel contrast and leaves the dataset level at full
+    // range, so the minimap must use the channel's values like the main view.
     const settings = {
       ...dataset,
       channel_settings: [
@@ -252,8 +251,8 @@ describe("tickMinimap overview/overlay split", () => {
     center: [number, number];
     eye: [number, number, number];
     /**
-     * The MAIN camera's inverse view-projection — the frustum's source. In fly
-     * mode a pure look-around changes ONLY this (eye + theta/phi stay fixed).
+     * The main camera's inverse view-projection, the frustum's source. A fly
+     * look-around changes only this; eye and theta/phi stay fixed.
      */
     invViewProj: number[];
     order: string;
@@ -370,16 +369,15 @@ describe("tickMinimap overview/overlay split", () => {
     // First draw: the static (camera/geometry) overlay layer must be stroked.
     expect(overlay.mock.calls[0][0].staticDirty).toBe(true);
 
-    // Pan the main camera: overlay must recompute, overview must NOT redraw.
+    // Pan the main camera: overlay must recompute, overview must not redraw.
     scene.center = [1000, 1000];
     tickMinimap(ctx, state, 0);
     expect(renderCount.n).toBe(1);
     expect(overlay).toHaveBeenCalledTimes(2);
     const secondBounds = overlay.mock.calls[1][0].sliceViewports[0].bounds;
     expect(secondBounds).not.toEqual(firstBounds);
-    // The static layer (bounding boxes + axis arrows) is drawn in the minimap's
-    // OWN fixed viewProj, which a 2D pan of the main view never moves — so it is
-    // reused, not re-stroked. Only the dynamic viewport rect above changed.
+    // The static layer is drawn in the minimap's own fixed viewProj, which a 2D
+    // pan never moves, so it is reused. Only the viewport rect above changed.
     expect(overlay.mock.calls[1][0].staticDirty).toBe(false);
   });
 
@@ -446,9 +444,8 @@ describe("tickMinimap overview/overlay split", () => {
     expect(renderCount.n).toBe(1);
     const overlayCallsBefore = overlay.mock.calls.length;
 
-    // Contrast-only edit (same active channel + visibility): the overview must
-    // re-render with the new display values, but the O(N) member geometry
-    // (positions + matrices) is reused from the cache — no re-read.
+    // Contrast-only edit: the overview re-renders with the new display values
+    // but reuses cached member geometry.
     const readSpy = vi.spyOn(scene.wasm, "member_positions");
     const matSpy = vi.spyOn(scene.wasm, "member_render_matrices");
     scene.settings = JSON.stringify({
@@ -477,9 +474,8 @@ describe("tickMinimap overview/overlay split", () => {
     // Hidden dataset draws nothing.
     expect(renderCount.n).toBe(0);
 
-    // Showing it adds a drawn layer — a geometry change, not a display-only edit —
-    // so members must be re-read and the overview rebuilt, even though order/z/
-    // channel/upload/epochs are all unchanged.
+    // Showing it adds a drawn layer, a geometry change, so members are re-read
+    // even though order, z, channel, upload, and epochs are unchanged.
     const readSpy = vi.spyOn(scene.wasm, "member_positions");
     scene.settings = JSON.stringify({
       ds: { visible: true, opacity: 1, blend_mode: "normal", contrast_min: 0, contrast_max: 65535, gamma: 1 },
@@ -491,12 +487,8 @@ describe("tickMinimap overview/overlay split", () => {
   });
 
   it("skips the O(N) overview redraw on a slice-mode z-scrub but updates the plane indicator", () => {
-    // The coarse overview is uploaded per (t, c) for the whole coarse volume
-    // and its GPU render takes no Z, so a Z-plane move changes neither the
-    // member geometry nor the rendered overview — only the overlay's
-    // current-plane indicator. A continuous Z-scrub must therefore reuse the
-    // cached overview (no O(members) re-read, no redundant redraw) and refresh
-    // just the cheap overlay.
+    // The overview render takes no Z, so a Z-scrub must reuse the cached
+    // overview and refresh only the overlay's current-plane indicator.
     const scene = makeScene();
     const renderCount = { n: 0 };
     const overlay = vi.fn();
@@ -511,15 +503,14 @@ describe("tickMinimap overview/overlay split", () => {
     const readSpy = vi.spyOn(scene.wasm, "member_positions");
     tickMinimap(ctx, state, 3);
 
-    // Overview NOT redrawn and no members re-read; overlay refreshed with the
+    // Overview not redrawn and no members re-read; overlay refreshed with the
     // new plane.
     expect(renderCount.n).toBe(1);
     expect(readSpy).not.toHaveBeenCalled();
     expect(overlay).toHaveBeenCalledTimes(2);
     expect(overlay.mock.calls[1][0].currentZ).toBe(3);
-    // Camera/geometry unchanged: the static overlay layer (O(N) member borders)
-    // is NOT re-stroked — the consumer reuses its cached static layer and
-    // re-strokes only the cheap Z-plane indicator.
+    // Camera and geometry unchanged, so the static layer is not re-stroked;
+    // only the Z-plane indicator is.
     expect(overlay.mock.calls[1][0].staticDirty).toBe(false);
   });
 
@@ -533,10 +524,8 @@ describe("tickMinimap overview/overlay split", () => {
     tickMinimap(ctx, state, 0);
     expect(renderCount.n).toBe(1);
 
-    // A layout switch reflows member placement + render matrices and bumps the
-    // layout epoch WITHOUT touching order/settings/upload/channel/z. The next
-    // tick moves only the camera, yet the overview must rebuild — otherwise it
-    // keeps drawing the old placement (and a stale "you are here" rectangle).
+    // A layout switch bumps only the layout epoch. The next tick moves only the
+    // camera, yet the overview must rebuild or it keeps drawing old placement.
     scene.layoutEpoch++;
     scene.center = [1000, 1000];
     tickMinimap(ctx, state, 0);
@@ -581,7 +570,7 @@ describe("tickMinimap overview/overlay split", () => {
       mode: "slice",
     } as unknown as TickContext;
 
-    // First rebuild at DPR 2 → backing size = round(200 × 2) = 400.
+    // First rebuild at DPR 2: backing size = round(200 × 2) = 400.
     tickMinimap(ctx, state, 0);
     expect(renderSizes).toEqual([400]);
 
@@ -633,10 +622,8 @@ describe("tickMinimap overview/overlay split", () => {
     expect(overlay).toHaveBeenCalledTimes(1);
     const firstViewProj = overlay.mock.calls[0][0].viewProj;
 
-    // A pure orbit changes only theta/phi. Member geometry is camera-invariant,
-    // so the O(members) reads (positions + render matrices + per-dataset scene
-    // matrices + volume shape) must NOT rerun — yet the overview MUST redraw for
-    // the new angle and the overlay MUST refresh (frustum + boxes reorient).
+    // A pure orbit changes only theta/phi. Member reads must not rerun, but the
+    // overview must redraw for the new angle and the overlay must refresh.
     const posSpy = vi.spyOn(scene.wasm, "member_positions");
     const matSpy = vi.spyOn(scene.wasm, "member_render_matrices");
     const idSpy = vi.spyOn(scene.wasm, "member_render_ids");
@@ -672,13 +659,9 @@ describe("tickMinimap overview/overlay split", () => {
   });
 
   it("in volume mode re-strokes the frustum on a fly look-around without redrawing the overview", () => {
-    // Fly look-around: the view direction rotates while the eye stays put, so
-    // scene.eye_position() and the arcball theta/phi constants are UNCHANGED and
-    // only scene.inv_view_proj() (the main camera pose, the frustum's source)
-    // moves. The frustum must track the new orientation: the overlay callback
-    // must fire with the fresh mainInvViewProj and staticDirty = true, WITHOUT
-    // re-rendering the overview (minimap camera + member geometry unchanged) and
-    // WITHOUT re-reading any members.
+    // Fly look-around: only scene.inv_view_proj() moves; eye and theta/phi are
+    // unchanged. The overlay must fire with the fresh pose and staticDirty, with
+    // no overview render and no member reads.
     const scene = makeScene();
     const renderCount = { n: 0 };
     const overlay = vi.fn();
@@ -715,17 +698,16 @@ describe("tickMinimap overview/overlay split", () => {
     expect(lookCall.theta).toBe(scene.theta);
     expect(lookCall.phi).toBe(scene.phi);
 
-    // A follow-up idle tick (stable pose) must early-return: no extra overlay
-    // call, no overview render — a stable inv_view_proj hashes to a stable key.
+    // An idle tick with a stable pose must early-return: no overlay call, no
+    // overview render.
     tickMinimap(ctx, state, 0);
     expect(renderCount.n).toBe(1);
     expect(overlay).toHaveBeenCalledTimes(2);
   });
 
   it("in volume mode does not double-render the overview when a look-around accompanies an orbit", () => {
-    // An orbit moves theta/phi (→ camera key → one overview redraw) AND the main
-    // camera pose (inv_view_proj). The pose signal lives only in the overlay key,
-    // so it must NOT trigger a second/duplicate overview render.
+    // An orbit moves theta/phi (one overview redraw) and the main camera pose.
+    // The pose lives only in the overlay key, so it must not add a second render.
     const scene = makeScene();
     const renderCount = { n: 0 };
     const overlay = vi.fn();
@@ -763,12 +745,9 @@ describe("tickMinimap overview/overlay split", () => {
 
 describe("tickMinimapOverview throttle", () => {
   it("throttles the O(members) seed-scan to the scan interval", () => {
-    // The seed-scan polls the CPU cache across every not-yet-seeded member's
-    // chunk grid — O(members × chunks) per frame, the dominant per-move CPU cost
-    // on large collections. It must run at most once per interval, not every rAF.
-    // scene.t() is read once at the top of each scan (after the throttle gate),
-    // so its call count tracks scans that actually ran; empty `datasets` isolates
-    // the gate from the per-member body.
+    // The seed-scan must run at most once per interval, not every rAF.
+    // scene.t() is read once per scan after the throttle gate, so its call count
+    // tracks scans that ran; empty `datasets` isolates the gate.
     const tSpy = vi.fn(() => 0);
     const state = createMinimapState();
     state.enabled = true;
@@ -808,10 +787,9 @@ describe("tickMinimapOverview throttle", () => {
   });
 
   it("keeps scheduling on a throttle-skip while chunks await fetch (no tail-chunk strand)", () => {
-    // Regression: the render loop is purely dirty-driven, so a throttle-skipped
-    // frame must signal continuation while members still await fetched chunks —
-    // otherwise a tail chunk landing inside the interval strands un-uploaded
-    // (loop quiesces before the next scan) until an unrelated interaction.
+    // The loop is dirty-driven, so a throttle-skipped frame must signal
+    // continuation while members still await chunks, or a tail chunk landing
+    // inside the interval strands until an unrelated interaction.
     const state = createMinimapState();
     state.enabled = true;
     const ctx = {

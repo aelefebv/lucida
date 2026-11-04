@@ -1,17 +1,13 @@
 /**
- * The cost contract of the per-chunk read (#1062, ADR 0049 as amended by
- * #1048): the overlay's phase color and churn tint read one chunk per cell
- * per tick from the interval in progress, and the amendment forbids a live
- * surface a row walk. So the read has to be flat in rows, and the index that
- * makes it so has to cost the write path nothing it can measure.
+ * The cost contract of the per-chunk read (ADR 0049): the overlay's phase
+ * color and churn tint read one chunk per cell per tick from the interval in
+ * progress, and a live surface may not walk rows. So the read has to be flat
+ * in rows, and its index must cost the write path nothing measurable.
  *
- * ## Tripwires, not benchmarks
- *
- * As in the recorder's own gates, the flatness is gated as a ratio across a
- * 20x row population rather than in absolute microseconds, because absolute
- * timings on a CI runner measure the runner. The real figures are logged on
- * a `[#1062]` line. The write path's cost stays under the recorder's gates in
- * `recorderCost.perf.test.ts`, which already run with the index in place.
+ * Flatness is gated as a ratio across a 20x row population, not in absolute
+ * microseconds, because absolute timings on a CI runner measure the runner.
+ * The real figures are logged. The write path stays under the recorder's
+ * gates in `recorderCost.perf.test.ts`, which run with the index in place.
  */
 
 import { describe, expect, it } from "vitest";

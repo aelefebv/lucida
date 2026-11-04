@@ -16,22 +16,15 @@ use crate::view::ViewState;
 
 pub type ClientId = u64;
 
-/// Presentational identity of a connected peer, surfaced on their live
-/// cursor in collaborative mode (issue #540). Server-authored from the
-/// session's authenticated `AuthPrincipal` — clients never send this, so
-/// it can't be spoofed and is only ever shown to co-present peers.
+/// Presentational identity of a connected peer, shown on their live cursor
+/// in collaborative mode. Server-authored from the session's
+/// `AuthPrincipal`, so clients cannot spoof it.
 ///
-/// Privacy: the raw email address is NEVER carried here. Collaborator
-/// emails are owner-only (the `/sharing` endpoint is `require_owner`-gated),
-/// so presence — which every co-present peer receives, including non-owner
-/// link-access viewers/editors — must not leak them. Only the
-/// non-identifying `display_name`, `picture_url`, and a single-grapheme
-/// `initial` cross the wire.
-///
-/// All fields are best-effort: an unauthenticated/legacy session leaves
-/// `identity` as `None` on `PresenceState`, and within an identity a
-/// provider may omit `picture_url`. Consumers fall back name → initial
-/// chip → numeric id/color.
+/// It never carries the email: collaborator emails are owner-only, and
+/// every co-present peer receives presence. Only `display_name`,
+/// `picture_url`, and a single-grapheme `initial` cross the wire. An
+/// unauthenticated session has no identity, and consumers fall back from
+/// name to initial chip to numeric id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerIdentity {
     /// Human-facing name (`AuthPrincipal::display_name`). May be empty if
@@ -44,7 +37,7 @@ pub struct PeerIdentity {
     pub picture_url: Option<String>,
     /// Single-grapheme fallback glyph for the avatar chip, computed
     /// server-side from the display name (or, when blank, the email
-    /// local-part) so the cursor has a stable initial WITHOUT the raw
+    /// local-part) so the cursor has a stable initial without the raw
     /// email crossing the wire. Empty only when no usable source existed.
     #[serde(default)]
     pub initial: String,
@@ -92,10 +85,9 @@ pub struct PresenceState {
     pub dataset_order: Vec<DatasetId>,
     #[serde(default)]
     pub dataset_settings: HashMap<DatasetId, DatasetDisplaySettings>,
-    /// Presentational identity for the peer's cursor (#540). Server-set
-    /// from the authed principal; `None` for sessions without auth (the
-    /// non-workspace `/ws` path) so older/anonymous peers still render
-    /// via the numeric-id fallback.
+    /// Presentational identity for the peer's cursor. Server-set from the
+    /// authed principal; `None` for sessions without auth (the
+    /// non-workspace `/ws` path), which render via the numeric-id fallback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<PeerIdentity>,
 }
@@ -154,20 +146,16 @@ pub enum ClientMessage {
     /// lists and fetches it. Sent only when a person presses the action in
     /// the monitor; nothing sends it on a run's close or on any schedule.
     ///
-    /// `bundle` is the bundle's JSON as text, not as a value. What the CLI
-    /// fetches has to be what the page produced, so the payload crosses
-    /// the wire, the store, and the fetch as the same bytes, and nothing
-    /// in between re-serializes it. The server reads out only the header
-    /// it needs to describe the entry: the inbox is a mailbox, not a
-    /// trace store (ADR 0050 as amended). The server answers the
-    /// requester with [`ServerMessage::ReportSent`] or
-    /// [`ServerMessage::ReportFailed`].
+    /// `bundle` is JSON as text, not a value, so the CLI fetches exactly the
+    /// bytes the page produced. The server reads only the header it needs to
+    /// list the entry: the inbox is a mailbox, not a trace store. It answers
+    /// with [`ServerMessage::ReportSent`] or [`ServerMessage::ReportFailed`].
     ///
     /// Variant added at the end so the serde tag positions of older
     /// variants don't shift.
     SendReport { request_id: String, bundle: String },
-    /// Subscribe this connection to the workspace's watch stream (ADR 0051
-    /// as amended). The server answers with the ring it keeps for late
+    /// Subscribe this connection to the workspace's watch stream
+    /// (ADR 0051). The server answers with the ring it keeps for late
     /// joiners and then relays every item published from that point on, each
     /// as a [`ServerMessage::WatchUpdate`].
     ///
@@ -188,39 +176,29 @@ pub enum ClientMessage {
     WatchPublish { item: WatchItem },
 }
 
-/// One item on the watch stream (ADR 0051 as amended): what a page publishes
-/// while its watch toggle is on, and what the server relays to subscribers.
+/// One item on the watch stream: what a page publishes while its watch
+/// toggle is on, and what the server relays to subscribers.
 ///
-/// A closed set of three, and none of them is a lifecycle row. The aggregate
-/// carries the trace's per-tick sample and its newest reading, the boundary a
-/// run's edge, and the provisional item the page's own provisional reading.
-/// What a subscriber costs the page is bounded by the publish cadence and the
-/// dataset count, never by the chunk count.
+/// A closed set of three, none of them a lifecycle row, so what a subscriber
+/// costs the page is bounded by publish cadence and dataset count, never by
+/// chunk count. Every key of every kind is always present, `null` included.
 ///
-/// Every key of every kind is always present, `null` included, so a reader
-/// can match on a fixed shape rather than on which keys survived.
-///
-/// Field naming: the stream's own fields follow the protocol's snake_case.
-/// The objects inside `reading`, `ticks`, `cause`, and the provisional
-/// reading are the trace's own, in the trace's camelCase, passed through
-/// unchanged. That is deliberate — what a watcher prints for a tick is what
-/// the trace document holds for it — and their vocabulary is versioned by the
-/// trace's schema integer rather than by this enum.
+/// The stream's own fields are snake_case. The objects inside `reading`,
+/// `ticks`, `cause`, and the provisional reading are the trace's own, in its
+/// camelCase, passed through unchanged and versioned by the trace's schema
+/// integer, so a watcher prints what the trace document holds.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WatchItem {
-    /// What the page's per-tick aggregate did over the stretch since the
-    /// previous aggregate: the process-wide totals for the whole stretch, the
-    /// newest reading, and the newest planning sample per dataset.
+    /// What the page's per-tick aggregate did since the previous aggregate:
+    /// process-wide totals for the stretch, the newest reading, and the
+    /// newest planning sample per dataset.
     ///
-    /// The trace keeps every tick; the stream samples them, so an aggregate's
-    /// size is set by how many datasets planned, not by how often. The split
-    /// below keeps that lossless. A dataset's counters are gauges of one
-    /// planning pass, so the newest is the current state and the passes before
-    /// it are superseded. The counted phases and the send tallies are deltas,
-    /// so they are summed over every sample in the stretch and carried here
-    /// rather than on a tick. Here is also where they belong: they are the
-    /// page's, not any one dataset's.
+    /// The stream samples ticks without losing anything. A dataset's
+    /// counters are gauges of one planning pass, so the newest supersedes
+    /// the rest. Counted phases and send tallies are deltas, so they are
+    /// summed over the stretch and carried here, as the page's own, rather
+    /// than on a tick.
     Aggregate {
         /// Wall clock at publish, so a reader can place an item the ring
         /// replayed long after it happened.
@@ -265,18 +243,11 @@ pub enum WatchItem {
         /// The diagnostic document's own object, as the trace seam's
         /// `provisional()` returned it, carried opaquely.
         ///
-        /// Not restated as a Rust type on purpose. The derivation is the one
-        /// seam, its schema is versioned by the diagnostic's own integer, and
-        /// a mirror here would be a second definition of it that nothing on
-        /// this side reads — the relay forwards the frame without parsing it
-        /// and the watcher prints it. A provisional reading walks no row and
-        /// has no row-bearing field, which is what keeps a row out of this
-        /// variant.
-        ///
-        /// Named in full rather than as a bare `reading`, which the glossary
-        /// reserves for one counter-track sample — the thing the aggregate's
-        /// `reading` is. A subscriber that matched on the short name would
-        /// get a different concept per kind.
+        /// Not restated as a Rust type: the relay forwards it unparsed, and a
+        /// mirror would be a second definition of a schema the diagnostic
+        /// versions itself. Named in full because the glossary reserves a
+        /// bare `reading` for one counter-track sample, which is what the
+        /// aggregate's `reading` is.
         provisional_reading: serde_json::Value,
     },
 }
@@ -581,16 +552,10 @@ pub enum ServerMessage {
     /// One flush window of the server's own lifecycle table, pushed to the
     /// client whose requests produced the rows (ADR 0050).
     ///
-    /// Push rather than pull: a run is a client-side interval and the server
-    /// has no idea runs exist, so it cannot detect "the end" a pull would
-    /// wait for. Batched rather than per-row: a peak burst is thousands of
-    /// chunk requests, and one message each would roughly double
-    /// server-to-client traffic on the exact path the monitor exists to
-    /// explain.
-    ///
-    /// A client receives only rows keyed to itself. There is no
-    /// process-wide aggregate, no server-side trace store, and no
-    /// server-side trace endpoint — the browser owns the merged trace.
+    /// Pushed, because the server has no idea runs exist and cannot detect
+    /// the end a pull would wait for. Batched, because one message per row
+    /// would roughly double server-to-client traffic at peak. A client
+    /// receives only its own rows; the browser owns the merged trace.
     ///
     /// Variant added at the end so the serde tag positions of older
     /// variants don't shift.
@@ -615,7 +580,7 @@ pub enum ServerMessage {
     /// variants don't shift.
     ReportFailed { request_id: String, error: String },
     /// One item of a page's watch stream, relayed to a connection that sent
-    /// [`ClientMessage::WatchSubscribe`] (ADR 0051 as amended).
+    /// [`ClientMessage::WatchSubscribe`].
     ///
     /// `client_id` is the publishing page, so a subscriber can follow one
     /// session in a workspace where several pages publish. `seq` is the
@@ -655,14 +620,11 @@ pub enum ChunkMessage {
     ChunkRequest {
         /// Correlation label: the join key between this client's lifecycle
         /// row and the server's row for the same wire request (ADR 0048).
-        /// Minted by the client from one per-connection monotonic counter
-        /// shared with `AssetRequest`, so `(connection, rid)` is unique.
+        /// Minted from one per-connection counter shared with
+        /// `AssetRequest`, so `(connection, rid)` is unique.
         ///
-        /// Required, not optional: `#[serde(default)]` would let a client
-        /// that stopped sending it degrade silently to `rid: 0` on every
-        /// row, and a join key whose failure mode is invisible is worse
-        /// than no join at all. Eleven bytes on a ~95-byte message is not
-        /// what anyone opts out of.
+        /// Required, not `#[serde(default)]`: a client that stopped sending
+        /// it would otherwise degrade silently to `rid: 0` on every row.
         rid: u32,
         dataset_id: DatasetId,
         image_id: ImageId,
@@ -947,7 +909,7 @@ mod tests {
 
     #[test]
     fn client_message_add_annotation_matches_wire_envelope() {
-        // The exact client->server envelope from the slice wire contract.
+        // The exact client->server envelope from the wire contract.
         let json = r#"{"type":"command","command":{"type":"add_annotation","dataset_id":"wds-1","id":"pin-1","position":[3.0,4.0],"author":"alice","kind":"point"}}"#;
         let parsed: ClientMessage = serde_json::from_str(json).unwrap();
         match parsed {
@@ -1007,20 +969,13 @@ mod tests {
 
     #[test]
     fn add_annotation_with_multi_dataset_view_rebroadcasts_byte_identical() {
-        // The companion to the test above, but for an `AddAnnotation` carrying
-        // an embedded `SavedView` with >=2 datasets — and asserting byte-identity
-        // of the wire STRING, not a `serde_json::Value` compare. The Value compare
-        // above is order-insensitive, so it would pass even if the embedded view's
-        // per-dataset maps re-serialized in a different order; THIS test would not.
-        //
-        // It mimics the server's exact rebroadcast: parse the inbound
-        // `ClientMessage` bytes, then re-serialize the parsed command inside a
-        // `CommandBroadcast` (handler.rs: `from_str::<ClientMessage>` ->
-        // `to_string(CommandBroadcast { seq, command })`). The `command` substring
-        // of the broadcast must be byte-identical to the `command` substring of
-        // the inbound message. This holds because `SavedView`'s maps are
-        // `IndexMap` (insertion/parse order preserved); with `HashMap` the >=2
-        // dataset maps re-emit in randomized order and this diverges.
+        // Like the test above, but for an `AddAnnotation` carrying an embedded
+        // `SavedView` with >=2 datasets, asserting byte-identity of the wire
+        // string rather than a `serde_json::Value` compare, which ignores map
+        // order. It mimics the server's rebroadcast (`from_str::<ClientMessage>`
+        // then `to_string(CommandBroadcast { seq, command })`): the `command`
+        // substring must survive byte-identical. That holds because
+        // `SavedView`'s maps are `IndexMap`; with `HashMap` it would diverge.
         use crate::saved_view::SavedView;
         use lucida_content::LayoutId;
 
@@ -1053,7 +1008,7 @@ mod tests {
         })
         .unwrap();
 
-        // SERVER: parse the inbound message, then re-serialize the parsed command
+        // Server: parse the inbound message, then re-serialize the parsed command
         // inside a broadcast (the real from_str -> to_string path).
         let parsed: ClientMessage = serde_json::from_str(&inbound_json).unwrap();
         let ClientMessage::Command { command } = parsed else {
@@ -1062,8 +1017,8 @@ mod tests {
         let broadcast_json =
             serde_json::to_string(&ServerMessage::CommandBroadcast { seq: 7, command }).unwrap();
 
-        // Extract the raw `command` value substring from each (NOT via Value,
-        // which would normalize order). In BOTH messages `command` is the LAST
+        // Extract the raw `command` value substring from each (not via Value,
+        // which would normalize order). In both messages `command` is the last
         // field, so everything from `"command":` to the message's final closing
         // brace is the command value followed by exactly one `}` — identical
         // framing for both, so comparing those suffixes compares the command
@@ -1150,7 +1105,7 @@ mod tests {
 
     #[test]
     fn client_message_move_annotation_matches_wire_envelope() {
-        // The exact client->server envelope from the slice wire contract.
+        // The exact client->server envelope from the wire contract.
         let json = r#"{"type":"command","command":{"type":"move_annotation","dataset_id":"wds-1","id":"pin-1","position":[3.0,4.0],"z":5.0}}"#;
         let parsed: ClientMessage = serde_json::from_str(json).unwrap();
         match parsed {
@@ -1167,7 +1122,7 @@ mod tests {
                 assert_eq!(dataset_id, DatasetId("wds-1".into()));
                 assert_eq!(id, "pin-1");
                 assert_eq!(position, [3.0, 4.0]);
-                // No `end` in this slice-#776 wire payload → defaults to None.
+                // No `end` in this whole-shape move payload → defaults to None.
                 assert_eq!(end, None);
                 assert_eq!(z, 5.0);
             }
@@ -1177,7 +1132,7 @@ mod tests {
 
     #[test]
     fn client_message_edit_comment_matches_wire_envelope() {
-        // The exact client->server envelope from the slice wire contract.
+        // The exact client->server envelope from the wire contract.
         let json = r#"{"type":"command","command":{"type":"edit_comment","dataset_id":"wds-1","annotation_id":"pin-1","id":"c-1","text":"edited"}}"#;
         let parsed: ClientMessage = serde_json::from_str(json).unwrap();
         match parsed {
@@ -1223,7 +1178,7 @@ mod tests {
             author: "alice".into(),
             text: "before".into(),
         });
-        // Now update both. A whole-shape move (no `end`) — the rigid #776 path.
+        // Now update both, with a whole-shape move (no `end`).
         doc.apply(DocumentCommand::MoveAnnotation {
             dataset_id: DatasetId("wds-1".into()),
             id: "pin-1".into(),
@@ -1317,7 +1272,7 @@ mod tests {
 
     #[test]
     fn presence_state_carries_identity_round_trip() {
-        // #540: a peer's presence carries the server-authored display name +
+        // A peer's presence carries the server-authored display name +
         // avatar URL so the cursor overlay can render them.
         let ps = PresenceState {
             client_id: 9,
@@ -1349,8 +1304,8 @@ mod tests {
 
     #[test]
     fn peer_identity_never_carries_raw_email_on_the_wire() {
-        // Privacy invariant (#540 review): collaborator emails are owner-only,
-        // so the identity broadcast to every co-present peer must NOT contain
+        // Privacy invariant: collaborator emails are owner-only,
+        // so the identity broadcast to every co-present peer must not contain
         // the raw address. The server computes a single-grapheme `initial`
         // from display-name-or-email instead; the email itself never crosses.
         let identity =
@@ -1371,7 +1326,7 @@ mod tests {
         );
 
         // Blank display name → initial falls back to the email local-part's
-        // first letter, but STILL never exposes the address.
+        // first letter, but still never exposes the address.
         let blank = PeerIdentity::from_principal_parts("   ".into(), None, "zoe@example.com");
         assert_eq!(blank.initial, "Z");
         let blank_json = serde_json::to_string(&blank).unwrap();

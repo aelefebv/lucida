@@ -1,9 +1,8 @@
 // @vitest-environment happy-dom
 //
-// Component test for PeerCursors peer identity rendering (#540). The cursor
-// label pill, avatar image, and initial-chip fallback are rendered straight
-// from JSX for every peer (the RAF tick only positions/toggles them), so we
-// can assert on them with a null scene ref and a stub canvas — no WebGPU.
+// Peer identity rendering. The label pill, avatar, and initial chip render from
+// JSX for every peer (the RAF tick only positions them), so a null scene ref and
+// a stub canvas are enough, with no WebGPU.
 
 import { describe, it, expect, afterEach } from "vitest";
 import { render, screen, cleanup, fireEvent } from "@testing-library/react";
@@ -131,16 +130,15 @@ describe("PeerCursors identity", () => {
     const peers = new Map<ClientId, PresenceState>([[42, makePeer(42)]]);
     renderPeers(peers);
 
-    // No crash; the historic numeric-id label is used.
+    // No crash; the numeric-id label is used.
     expect(screen.getByTestId("peer-cursor-name").textContent).toBe("42");
     expect(screen.getByTestId("peer-cursor-initial").textContent).toBe("?");
     expect(screen.queryByTestId("peer-cursor-avatar")).toBeNull();
   });
 
   it("uses the server-sent initial when the display name is blank", () => {
-    // #540 privacy: the raw email is no longer on the wire — the server
-    // precomputes a single-char `initial` (from display-name-or-email
-    // server-side), and the chip falls back to it when the name is blank.
+    // The raw email never reaches the client; the server sends a one-char
+    // `initial`, and the chip falls back to it when the name is blank.
     const peers = new Map<ClientId, PresenceState>([
       [9, makePeer(9, { display_name: "   ", initial: "Z" })],
     ]);

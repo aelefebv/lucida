@@ -1,36 +1,9 @@
 //! Hourly background sweep of expired session and pending-auth rows.
 //!
-//! Every hour the task wakes, asks each store to drop rows past their
-//! respective windows, and emits a `auth.session.cleanup` debug event
-//! with the per-table delete counts. Without this, a long-running
-//! deployment accumulates dead rows forever (the extractor refuses to
-//! issue a principal for an expired row, so they're invisible to the app
-//! but live forever in the database).
-//!
-//! ## Design choices
-//!
-//! - **Warm-up grace** — first sweep fires ~60s after startup, not
-//!   immediately. Boot is the busiest moment in a server's life (config
-//!   load, JWKS fetch, migration check, accept loop spin-up); the sweep
-//!   is non-urgent and can yield. After the warm-up, `tokio::time::interval`
-//!   ticks every hour for the rest of the process's life.
-//!
-//! - **Idle-window vs hard-cap deletion logic lives on the store**.
-//!   `LoginSessionStore::delete_expired(now)` already deletes rows with
-//!   `expires_at <= now`. This task additionally invokes it with `now`
-//!   to clear hard-capped sessions; the idle-timeout side is enforced at
-//!   lookup time (extractor refuses idle-expired rows) and rows past the
-//!   hard cap are eventually deleted here. Bounded growth either way.
-//!
-//! - **Errors do not crash the loop**. A transient SQLite hiccup (file
-//!   locked, write failure) is logged and the task continues at the next
-//!   tick. The contract: the cleanup task is best-effort hygiene; it must
-//!   never bring the server down.
-//!
-//! - **No PII in cleanup logs**. Bulk deletes don't enumerate emails;
-//!   the audit log records `auth.signin.success` / `auth.logout` per user
-//!   instead. Cleanup is operational signal (counts), not audit (per-user
-//!   trail).
+//! The extractor already refuses expired rows, so this only bounds storage
+//! growth. The first sweep waits about 60s so it stays out of boot. Errors
+//! are logged and the loop goes on: cleanup is best-effort hygiene and must
+//! never bring the server down. Logs carry per-table counts, never emails.
 
 use std::sync::Arc;
 use std::time::Duration;

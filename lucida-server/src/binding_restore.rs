@@ -1,18 +1,11 @@
 //! Workspace binding restore: rebuild the server-private
-//! [`ServerBinding`]s (chunk resolver, caches, generated-coarse service)
-//! for a lazily reopened workspace from its persisted
+//! [`ServerBinding`]s for a lazily reopened workspace from its persisted
 //! `workspace_datasets → dataset_sources` records.
 //!
-//! Runs on workspace wake ([`WorkspaceManager::live_workspace`]), before
-//! the live session is published; per-dataset failures are recorded on
-//! the session and surfaced through dataset health rather than aborting
-//! the wake. This module deliberately depends only on
-//! [`crate::workspace::types`] — never the manager — so the workspace
-//! layer can call it without any import cycle, and it shares its failure
-//! classification ([`crate::open_diagnostics`]) with the interactive open
-//! path so both report the same diagnostic vocabulary.
-//!
-//! [`WorkspaceManager::live_workspace`]: crate::workspace::WorkspaceManager::live_workspace
+//! Per-dataset failures land on the session as dataset health instead of
+//! aborting the wake. Depends only on [`crate::workspace::types`], never
+//! the manager, so the workspace layer can call it without an import
+//! cycle.
 
 use std::sync::Arc;
 

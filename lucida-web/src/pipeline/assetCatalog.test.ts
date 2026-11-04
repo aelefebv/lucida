@@ -7,9 +7,7 @@ import {
   type WireAssetCatalogDelta,
 } from "./assetCatalog.ts";
 
-// ---------------------------------------------------------------------------
 // Test harness
-// ---------------------------------------------------------------------------
 
 interface MockWasmScene extends AssetCatalogWasm {
   /** Every `apply_asset_catalog_delta` call recorded as `{datasetId, delta}`. */
@@ -34,9 +32,7 @@ function createMockWasm(): MockWasmScene {
   };
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 describe("AssetCatalog", () => {
   describe("initial state", () => {

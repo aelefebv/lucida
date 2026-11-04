@@ -2,14 +2,10 @@
  * The window: which stretch of the run's clock a derivation reads.
  *
  * One resolver and one clip, shared by the rollup, the critical path, the
- * limiters and the coverage block, so that "inside the window" means the same
- * thing to all of them. A row that crosses an edge counts for the part inside,
- * on every table. A rollup that clipped and a chain that did not would
- * disagree about the same row.
- *
- * No window is the whole run, and the whole run is a window like any other:
- * the tables clip to `[0, wall]` either way, which is what lets a full-window
- * reading equal an unwindowed one by construction rather than by test.
+ * limiters and the coverage block, so "inside the window" means the same
+ * thing to all of them and a row that crosses an edge counts for the part
+ * inside on every table. No window is the whole run, clipped to `[0, wall]`
+ * like any other, so a full-window reading equals an unwindowed one.
  */
 
 import type { TraceRun } from "../types.ts";

@@ -5,32 +5,26 @@ import { initWasmOnce } from "../wasmInit.ts";
 
 export function useWasmScene() {
   const [wasmReady, setWasmReady] = useState(false);
-  /** Human-readable boot failure, set when the wasm initialization
-   *  rejects. Without it a failed boot is a permanently blank shell with
-   *  nothing but a console line; the app renders this like any other
-   *  top-level error. Never set on the same mount as `wasmReady`. */
+  /** Set when wasm init rejects, so a failed boot shows an error instead of a
+   *  blank shell. Never set on the same mount as `wasmReady`. */
   const [wasmError, setWasmError] = useState<string | null>(null);
   const [wasmScene, setWasmScene] = useState<WasmScene | null>(null);
-  // Ref mirror of the wasmScene state — handlers and downstream
-  // hooks read .current to avoid stale closures over `wasmScene`.
-  // The mirror update is render-phase and idempotent.
+  // Handlers read the ref to avoid stale closures. The render-phase write is
+  // idempotent.
   const wasmSceneRef = useRef<WasmScene | null>(null);
   // eslint-disable-next-line react-hooks/refs
   wasmSceneRef.current = wasmScene;
 
   useEffect(() => {
-    // `initWasmOnce` shares one instantiation across concurrent mounts (dev
-    // StrictMode double-mounts this effect while the first init is still in
-    // flight) and across remounts after completion. `wasmReady` — and with
-    // it every `WasmScene` construction — only ever follows that single
-    // resolved initialization.
+    // `initWasmOnce` shares one instantiation across concurrent StrictMode
+    // mounts and later remounts, so every `WasmScene` follows that single
+    // resolved init.
     let cancelled = false;
     let unsub: (() => void) | null = null;
     initWasmOnce()
       .then(() => {
         if (cancelled) return;
-        // Push initial enabled categories into WASM, then subscribe so
-        // future panel toggles propagate without a reload.
+        // Subscribe so later panel toggles reach WASM without a reload.
         set_debug_categories(getEnabledCategories().join(","));
         unsub = onDebugCategoriesChanged((cats) => {
           set_debug_categories(cats.join(","));
@@ -49,7 +43,6 @@ export function useWasmScene() {
     };
   }, []);
 
-  /** Create a WasmScene if one doesn't exist yet, and return it. */
   function ensureScene(): WasmScene {
     let scene = wasmSceneRef.current;
     if (!scene) {

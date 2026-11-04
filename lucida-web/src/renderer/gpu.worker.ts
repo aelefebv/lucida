@@ -1,4 +1,4 @@
-/** WebGPU render worker — thin entry point that delegates to `worker/`. */
+/** WebGPU render worker entry point; the handlers live in `worker/`. */
 import type { MainToWorkerMessage, WorkerToMainMessage } from "./workerProtocol.ts";
 import type { WorkerCtx } from "./workerContext.ts";
 import { bootstrapWorker } from "./worker/bootstrap.ts";

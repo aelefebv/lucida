@@ -85,10 +85,6 @@ describe("DevControls — planning config rendering", () => {
   });
 });
 
-// NOTE: the 3-D focal-depth control (issue #532) moved out of the planning
-// knobs into the main 3-D view UI. Its tests now live in
-// components/FocalDepthControl.test.tsx.
-
 describe("DevControls — slider + number input edits", () => {
   it("dragging the importance weight slider updates the configStore", () => {
     render(<DevControls />);

@@ -1,19 +1,10 @@
 /**
- * Worker bootstrap: initialize the GPU device + canvas context, build
- * the per-session {@link RendererState}, and assemble the
- * {@link WorkerCtx} that the dispatcher and per-mode handlers consume.
+ * Worker bootstrap: initialize the GPU device and canvas context, build the
+ * per-session {@link RendererState}, and assemble the {@link WorkerCtx}.
  *
- * Renderer-class singletons (slice/volume/cursor/compositor renderers)
- * are held in closures owned by this function — they're per-canvas
- * instances that outlive any single session but stay tied to one
- * {@link WorkerCtx}, which is also recreated only on `init`.
- *
- * Cached worker-process GPU resources (LUT cache, offscreen pool) live in
- * `worker/resources.ts` as module-level state; this module wires the ctx
- * accessors to those resource helpers.
- *
- * The `post` callback is supplied by the caller (the entry-point worker
- * file) so this module doesn't reach into `self.postMessage`.
+ * Renderer singletons live in this function's closure: they are per-canvas,
+ * outlive any session, and are recreated only on `init`. The caller supplies
+ * `post` so this module never reaches into `self.postMessage`.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
@@ -34,12 +25,7 @@ import { createFrameTiming } from "../passTiming.ts";
 import { proxyDescriptorKey } from "../workerContext.ts";
 import { sourceKey } from "../poolKeys.ts";
 
-/**
- * Bootstrap the worker: init the GPU, create a fresh {@link RendererState},
- * and assemble the {@link WorkerCtx} (with renderer accessors +
- * lookup helpers + post wiring). Called once from `case "init"` in
- * `gpu.worker.ts`.
- */
+/** Init the GPU and assemble a fresh {@link WorkerCtx}. Called once from `case "init"` in `gpu.worker.ts`. */
 export async function bootstrapWorker(
   canvas: OffscreenCanvas,
   post: (msg: WorkerToMainMessage, transfer?: Transferable[]) => void,
@@ -50,16 +36,10 @@ export async function bootstrapWorker(
     post({ type: "gpuPassTime", gpuPassUs }),
   );
 
-  // Renderer-class singletons. Persisted across messages; not per-session
-  // state, so they stay in this closure rather than on RendererState.
-  //
-  // The slice path's three are built here so that their shader compile
-  // overlaps the dataset open instead of sitting inside the first render
-  // message, between the first chunk uploads and the first present (#1094).
-  // The compile runs off the GPU process's main thread, so it no longer
-  // holds the page's own first draw (#1101, `pipelineCompile.ts`). The volume
-  // renderer is built on first need, because its compile is the longest of
-  // the four and a slice open's viewport never needs it.
+  // The slice path's three renderers are built here so their shader compile
+  // overlaps the dataset open instead of delaying the first present. The
+  // volume renderer is built on first need, because its compile is the
+  // longest of the four and a slice open never needs it.
   const sliceRenderer = new SliceRenderer(device);
   const compositor = new LayerCompositor(device, format);
   const cursorRenderer = new CursorRenderer(device, format);
@@ -71,10 +51,7 @@ export async function bootstrapWorker(
     (err: unknown) => post({ type: "error", message: err instanceof Error ? err.message : String(err) }),
   );
 
-  /**
-   * Build a flat snapshot of all proxy pools for a dataset, in the shape
-   * `computeWantedSet()` expects. Cheap — pool maps are small.
-   */
+  /** A flat snapshot of a dataset's proxy pools, in the shape `computeWantedSet()` expects. */
   function buildProxyAtlasSnapshot(datasetId: string): Map<string, ProxyAtlasSnapshot> {
     const snap = new Map<string, ProxyAtlasSnapshot>();
     const pools = state.proxyPoolsByDataset.get(datasetId);
@@ -154,14 +131,9 @@ export async function bootstrapWorker(
 }
 
 /**
- * Rebuild the per-dataset entity descriptor buffer iff the upload's
- * dataset matches the current cold state. Proxy uploads for other
- * datasets stay resident in their pools, but their descriptor buffer
- * isn't refreshed until cold state lands for that dataset.
- *
- * Lives here (not in `dispatch.ts`) because it's a small helper that
- * binds together cold-state, proxy, and descriptor concerns — the same
- * mix that `bootstrap` already imports.
+ * Rebuild the entity descriptor buffer iff `datasetId` is the current cold
+ * state. Other datasets' proxy uploads stay resident, but their descriptor
+ * waits for their own cold state.
  */
 export function rebuildDescriptorIfMatching(ctx: WorkerCtx, datasetId: string): void {
   const state = ctx.state;

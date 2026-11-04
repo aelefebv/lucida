@@ -1,19 +1,10 @@
-//! Fair-share admission for backend source reads.
+//! Fair-share admission for backend source reads (ADR 0053).
 //!
-//! One bound over the whole process, handed out fairly between readers. See
-//! `docs/adr/0053-fair-share-source-read-admission.md` for why the bound
-//! stays global while admission does not.
-//!
-//! A plain semaphore is FIFO, and FIFO is the wrong queue discipline here: the
-//! demand a viewer produces is bursty and enormous (one client opening a large
-//! collection submits tens of thousands of reads at once), so whoever enqueues
-//! first owns the store until their burst drains. This limiter keeps the
-//! process-wide cap — the link to the object store is shared and must stay
-//! bounded no matter how many clients connect — but chooses *which* waiter is
-//! admitted next by least-in-flight, breaking ties by least-recently-served.
-//!
-//! It is work-conserving: a reader alone on the limiter gets the entire cap.
-//! Fairness only bites when someone else is waiting.
+//! One process-wide cap, because the link to the object store is shared,
+//! but not FIFO: one client opening a large collection submits tens of
+//! thousands of reads at once and would own the store until they drain.
+//! The next waiter admitted is the reader with the fewest reads in flight,
+//! ties broken by least recently served. A reader alone gets the whole cap.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -287,7 +278,7 @@ mod tests {
     }
 
     /// The scenario the process-global FIFO semaphore fails: one client with a
-    /// deep backlog must not delay a second client's first read. #901.
+    /// deep backlog must not delay a second client's first read.
     #[tokio::test]
     async fn a_deep_backlog_does_not_delay_another_reader() {
         let limiter = SourceReadLimiter::new(4);

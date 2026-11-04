@@ -1,43 +1,14 @@
 /**
- * Debug overlay layer. Sits absolutely-positioned above the canvas with
- * pointer-events: none, so it never steals interaction from the viewer.
- * Reads from existing scene + orchestrator + cache state — no new
- * production-side state added for it to work.
+ * Debug overlay layer over the canvas, with pointer-events: none so it never
+ * steals interaction. It reads existing scene, orchestrator, and cache state;
+ * production code carries nothing for it. Colors and text come from the pure
+ * `overlayDrawList.ts`; this file projects and mounts. The brushed selection
+ * is read from `trace/linkedSelection.ts`, never from the dock (ADR 0052).
  *
- * Primary overlays, each gated by its own toggle in the HUD legend:
- *  - groupModes: per-group badge with detail/coarse worker-delivered coverage
- *  - chunkGrid: planned LOD chunk grid for every visible tile, colored
- *    by status or tier. Capped at MAX_CHUNK_RECTS per tick as a backstop for
- *    pathological cases. In volume mode the same cells draw as wireframe
- *    boxes (#1063): each chunk box's eight corners go through the camera,
- *    the shared draw list colors the cell, and `volumeWireframe.ts` turns
- *    the cell into edges, a silhouette for the hit test, and a stroke.
- *  - phaseColor and churnTint: the same grid colored from the trace rather
- *    than the cache. Phase color is the phase each chunk's newest row is
- *    in, in the timeline's palette, and churn tint is how many times the
- *    open interval fetched it.
- *    Both read the recorder's identity index cell by cell, which walks no
- *    row, and both say in words what they cannot show. Hovering a cell
- *    opens an inspector with the chunk's phase, queue rank and age from the
- *    document's chunk lookup (#1062). The colors and the text come from
- *    `overlayDrawList.ts`, which is pure; this file projects and mounts.
- *  - the linked selection: while a window is brushed on the dock's axis,
- *    the chunk set it published is read from `trace/linkedSelection.ts`
- *    and highlighted on the grid, and on the boxes in volume mode, which
- *    mount for it even with every toggle off. The set is a published slot, so this layer never reads
- *    the dock and the dock never reaches in here (ADR 0052 as amended).
- *  - renderRadius: actual detail/coarse render-radius boundary, projected
- *    through the same voxel→world→screen path as chunk overlays.
- *
- * Both modes (slice + volume) share the same projection pipeline:
- *
- *   voxel coords  →  world coords  →  WasmScene.project_to_screen
- *
- * The middle step differs by mode. Slice: world == voxel + tile
- * position offset (camera projects voxel space directly). Volume: world
- * == tile model matrix * (voxel / fullVoxel), which maps the tile's
- * unit cube into normalized world space and bakes in the Y-flip and
- * physical-extent normalization the renderer applies.
+ * Both modes project voxel to world to `WasmScene.project_to_screen`. Slice:
+ * world is voxel plus the tile position. Volume: world is the tile model
+ * matrix times voxel / fullVoxel, which bakes in the renderer's Y-flip and
+ * physical-extent normalization.
  */
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
@@ -634,8 +605,8 @@ export function DebugOverlays({
 
   useEffect(() => {
     if (!anyEnabled) {
-      // Reset to empty when overlays are toggled off — no external state
-      // to subscribe to, the toggle IS the state change we react to.
+      // Reset when overlays are toggled off. There is no external state to
+      // subscribe to; the toggle is the state change we react to.
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setBadges([]);
       drawListRef.current = EMPTY_DRAW_LIST;
@@ -796,7 +767,6 @@ export function DebugOverlays({
         setRadiusPaths([]);
       }
 
-      // Group badges
       if (enabled.groupModes && plans) {
         const out: GroupBadge[] = [];
         for (const [dsId, plan] of plans) {
@@ -913,9 +883,7 @@ export function DebugOverlays({
         setBadges([]);
       }
 
-      // Chunk grid for every visible tile-mode entry.
-      // (group-as-proxy entries don't iterate chunks — they're served by
-      // a single proxy asset.)
+      // Group-as-proxy entries have no chunks; one proxy asset serves them.
       if (showGrid && plans && cpuCache) {
         const out: ChunkCell[] = [];
         const t = ws.t();

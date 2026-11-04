@@ -2,17 +2,11 @@
  * Render timing and the adapter: what the readings say about the main thread
  * and the GPU, and what the header says about the hardware.
  *
- * Two clocks, kept apart on purpose. The main-thread figure is the tick's own
- * duration, sampled on every reading. The GPU figure is a pass time the render
- * worker read back through timestamp queries, present only on the readings
- * that received one. A run on an adapter without timestamp queries has the
- * first and not the second, and the document says why rather than leaving a
- * gap to be read as a fast GPU.
- *
- * Headers written before the adapter record carried a fallback flag or a
- * timestamp-query flag are read as not having recorded them. A trace outlives
- * the code that wrote it, and a missing fact is reported as missing rather
- * than as whichever value the type's default would suggest.
+ * Two clocks, kept apart: the main-thread figure is the tick's own duration,
+ * and the GPU figure is a pass time read back through timestamp queries. With
+ * no GPU figure the document says why, rather than leave a gap to be read as
+ * a fast GPU. A header with no fallback or timestamp-query flag reads as not
+ * recorded, never as the type's default.
  */
 
 import type { GpuIdentity, TraceReading, TraceRun } from "../types.ts";

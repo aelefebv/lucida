@@ -27,10 +27,6 @@ function proxies(missing: Array<MissingChunk | MissingProxy>): MissingProxy[] {
   return missing.filter((m): m is MissingProxy => m.kind === "proxy");
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 function makeEpochs(): SceneEpochs {
   return {
     content: 1,
@@ -69,7 +65,7 @@ function makeActiveEntry(
   overrides?: WantedSetEntryOverrides,
 ): ColdStateActiveEntry {
   // Cast: typed-array .buffer is ArrayBufferLike under TS5.4+ lib defs;
-  // runtime is always ArrayBuffer here (no SharedArrayBuffer in this app). See #438.
+  // runtime is always ArrayBuffer here (no SharedArrayBuffer in this app).
   const identity = new Float32Array(16) as Float32Array<ArrayBuffer>;
   identity[0] = identity[5] = identity[10] = identity[15] = 1;
   const base = {
@@ -178,10 +174,6 @@ function tierPool(entries: Array<[memberId: string, tier: ResidencyTier, poolKey
 
 /** Resolver for a worker that has allocated no sections at all. */
 const noPools: SourcePoolResolver = () => undefined;
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 describe("computeWantedSet", () => {
   it("empty atlas -> all visible chunks missing", () => {
@@ -792,9 +784,7 @@ describe("computeWantedSet", () => {
     expect(result.missing).toHaveLength(80);
   });
 
-  // -------------------------------------------------------------------------
   // proxy wanted-set
-  // -------------------------------------------------------------------------
 
   describe("proxy wanted-set", () => {
     /** Helper: pool snapshot with the given resident slot keys. */

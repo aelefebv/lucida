@@ -1,34 +1,13 @@
-//! Per-level chunk byte-layout helper.
+//! Per-level chunk byte layout: the byte range in a decompressed on-disk
+//! chunk that holds one wire chunk (1 t, 1 c, all z, y, x).
 //!
-//! Computes the byte range within the decompressed on-disk chunk that
-//! corresponds to one wire-format chunk (1 t, 1 c, all z, all y, all x).
-//! Two cases produce non-trivial slices:
-//!
-//! 1. **Pinned axes**. When an OME-Zarr has non-canonical axes (e.g.
-//!    CZI's `m`), the on-disk chunk file may bundle multiple
-//!    pinned-index slices together. Pinned-index 0 is always picked, and
-//!    when its chunk_size > 1 the canonical bytes are the prefix of the
-//!    on-disk bytes.
-//!
-//! 2. **Canonical-indexed axes** (`t` / `c`). When the canonical axis
-//!    itself has chunk_size > 1, the on-disk chunk holds N
-//!    timepoints/channels concatenated. The wire chunk key addresses
-//!    one timepoint/channel; the server picks the right one by
-//!    computing an intra-chunk offset.
-//!
-//! Both cases are handled uniformly by [`ChunkByteLayout::slice_range`],
-//! which takes the intra-chunk `(t, c)` indices and returns the
-//! `(offset, size)` byte range to extract from the decompressed bytes.
-//! For the canonical-5D case (no pinned axes, chunk_size 1 on t and c),
-//! the result is `(0, canonical_byte_size)` — equivalent to the old
-//! "no slicing needed" path.
-//!
-//! The contiguous-slice approach has an eligibility constraint: in the
-//! raw axes order, every "outer" axis (pinned ∪ canonical-indexed t,c)
-//! with chunk_size > 1 must precede every "inner" axis (canonical-kept
-//! z,y,x) with chunk_size > 1. When violated, [`compute_chunk_byte_layout`]
-//! returns an error naming the offending axis so import fails loudly
-//! rather than producing wrong pixels at chunk-fetch time.
+//! The on-disk chunk holds more than that when a pinned non-canonical axis
+//! (an `m`, say) or `t`/`c` has chunk_size > 1. Pinned index 0 is always
+//! picked. [`ChunkByteLayout::slice_range`] turns the intra-chunk `(t, c)`
+//! into an `(offset, size)` range. That needs every outer axis with
+//! chunk_size > 1 to precede every inner (z, y, x) one in the raw axis
+//! order; otherwise [`compute_chunk_byte_layout`] fails the import rather
+//! than serve wrong pixels.
 
 use lucida_content::PinnedAxis;
 use serde::{Deserialize, Serialize};
@@ -98,21 +77,14 @@ impl ChunkByteLayout {
     }
 }
 
-/// Compute [`ChunkByteLayout`] for one level. Errors when the axes order
-/// is not contiguous-prefix-sliceable; the message names the offending
-/// axis so users know what to look for in their OME-Zarr metadata.
+/// Compute [`ChunkByteLayout`] for one level.
 ///
-/// `axes` is the raw OME axes list (e.g. `["t","c","z","m","y","x"]`).
-/// `chunk_shape` parallels `axes` (one entry per axis).
-/// `pinned` is the canonical `PinnedAxis` list from
-/// [`lucida_content::normalize::classify_axes`].
-///
-/// Eligibility rule: in the raw axes list, after eliminating axes whose
-/// `chunk_shape` entry is 1, every "outer" axis (pinned ∪ canonical
-/// indexed `t`/`c`) must precede every "inner" axis (canonical kept
-/// `z`/`y`/`x`). When this holds, in C-order byte layout one wire-chunk
-/// slice is a contiguous range whose offset is determined entirely by
-/// the intra-chunk `(t, c)` indices.
+/// `axes` is the raw OME axes list (e.g. `["t","c","z","m","y","x"]`),
+/// `chunk_shape` parallels it, and `pinned` is the canonical `PinnedAxis`
+/// list from [`lucida_content::normalize::classify_axes`]. Ignoring axes of
+/// chunk size 1, every outer axis (pinned, `t`, `c`) must precede every
+/// inner one (`z`, `y`, `x`), so one wire chunk is a contiguous byte range.
+/// Otherwise this errors, naming the offending axis.
 pub fn compute_chunk_byte_layout(
     axes: &[String],
     chunk_shape: &[u64],
@@ -286,7 +258,7 @@ mod tests {
         // Strides are 0 because chunk_size on t and c is 1.
         assert_eq!(layout.byte_stride_t, 0);
         assert_eq!(layout.byte_stride_c, 0);
-        // Pinned m=0 prefix slice — same as old needs_slicing + truncate.
+        // Pinned m=0 prefix slice.
         assert_eq!(layout.slice_range(0, 0), (0, 2048 * 1504 * 2));
     }
 

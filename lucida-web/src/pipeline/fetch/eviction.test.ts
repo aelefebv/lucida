@@ -10,9 +10,7 @@ import type { CacheEntry, EvictionTier } from "./types.ts";
 import type { InteractionMode } from "./interactionMode.ts";
 import type { SceneEpochs } from "../epochs.ts";
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 const ZERO_EPOCHS: SceneEpochs = {
   content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0,
@@ -44,9 +42,7 @@ function makeEntry(overrides: Partial<CacheEntry> & {
   };
 }
 
-// ---------------------------------------------------------------------------
 // LRUPolicy
-// ---------------------------------------------------------------------------
 
 describe("LRUPolicy", () => {
   it("returns empty when bytesNeeded is zero or negative", () => {
@@ -112,9 +108,7 @@ describe("LRUPolicy", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // getTierOrder
-// ---------------------------------------------------------------------------
 
 describe("getTierOrder", () => {
   it("panning walks prefetch → demoted → active", () => {
@@ -136,9 +130,7 @@ describe("getTierOrder", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // TieredPolicy
-// ---------------------------------------------------------------------------
 
 describe("TieredPolicy", () => {
   function makePolicy(mode: InteractionMode): TieredPolicy {

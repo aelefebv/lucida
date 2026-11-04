@@ -115,7 +115,7 @@ describe("pushLabelVolumeLayers", () => {
     // pass through by value (copied, then scaled by identity ratios).
     expect(Array.from(layers[0].modelMatrix!)).toEqual(Array.from(ownModel));
     expect(Array.from(layers[0].invModelMatrix!)).toEqual(Array.from(ownInv));
-    // The scene wasn't consulted — the roster carried the matrices.
+    // The scene wasn't consulted; the roster carried the matrices.
     expect(scene.member_model_matrix).not.toHaveBeenCalled();
   });
 

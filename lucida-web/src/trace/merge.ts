@@ -1,16 +1,11 @@
 /**
- * Placing the server's rows on the browser's timeline.
+ * Places the server's rows on the browser's timeline.
  *
- * The two sides run on two clocks and nothing here synchronises them. The
- * browser stamped when it sent a label and when the bytes came back, and the
- * server's work for that label is strictly nested inside those two instants
- * — so the placement is derived from the browser's clock alone, and skew
- * cannot produce a wrong picture.
- *
- * What is left over inside the bracket is network plus socket queue. It is
- * named as a gap and never folded into either side's numbers: a merged
- * timeline that is confidently wrong is worse than one that admits what it
- * does not know.
+ * The two sides run on unsynchronised clocks. The server's work for a label
+ * is nested inside the browser's send and receive stamps for it, so placement
+ * uses the browser's clock alone and skew cannot produce a wrong picture.
+ * What is left inside the bracket is network plus socket queue. It is named
+ * as a gap and never folded into either side's numbers.
  */
 
 import { serverRowTotalUs, type StoredServerRow } from "./serverRowTable.ts";

@@ -1,13 +1,8 @@
 //! **Send report**, end to end: a bundle over a real workspace socket,
 //! into a real database, and back out of the routes the CLI reads.
 //!
-//! The unit tests either side of this one can say that a bundle parses
-//! and that a row round-trips. What only a live run can say is that the
-//! two halves of the feature meet: the page sends on the socket it
-//! already has, the CLI reads over HTTP with the token it already has,
-//! and what comes out of the second is byte for byte what went into the
-//! first. Written in the style of `server_timing_rows_e2e.rs`, which
-//! drives the same socket for the same reason.
+//! Only a live run shows the two halves meet: what the CLI reads over
+//! HTTP is byte for byte what the page sent on its socket.
 
 use std::sync::Arc;
 

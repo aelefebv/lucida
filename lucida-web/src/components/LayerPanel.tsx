@@ -25,25 +25,16 @@ export interface LayerInfo {
   fullRangeMax: number;
   channelSettings?: { visible: boolean; colormap: string; contrast_min: number; contrast_max: number; gamma: number; name?: string }[];
   /**
-   * Per-channel display labels from the manifest's omero block, in channel
-   * order. Optional/positional: an entry may be missing for a given channel,
-   * in which case the row falls back to `Ch {i}`. Names are immutable manifest
-   * data, decoupled from the mutable `channelSettings` (which carries the
-   * user's per-channel `name` override that takes precedence over these).
+   * Per-channel labels from the manifest's omero block, in channel order. A
+   * missing entry falls back to `Ch {i}`. The user's `name` override in
+   * `channelSettings` takes precedence.
    */
   channelInfos?: { label: string; color?: string | null }[];
   /**
-   * Per-label overlay rows for the "Labels" subsection + count badge — every
-   * label drawable in EITHER view mode (2D or 3D), so the panel is stable across
-   * a mode switch and a control never lies about a label that can't draw (a
-   * uint8/uint16 mask, an orphan, or one over-caps in both modes is omitted).
-   * Each row carries its MANIFEST index (the key the toggle/opacity handlers
-   * pass), name, and current visibility + opacity. A row NOT drawable in the
-   * CURRENT view mode carries a `disabledReason`: its controls render disabled
-   * and the reason shows as text, so the user sees WHY the overlay is inert
-   * rather than toggling a control that draws nothing. Absent/empty when the
-   * dataset has no drawable labels — the subsection + badge are gated on this
-   * having entries.
+   * Rows for every label drawable in either view mode, so the panel is stable
+   * across a mode switch. `index` is the manifest index the handlers take. A row
+   * not drawable in the current mode carries a `disabledReason`, shown as text
+   * beside disabled controls. Empty hides the Labels subsection and badge.
    */
   labelRows?: { index: number; name: string; visible: boolean; opacity: number; disabledReason?: string }[];
   channelBlendMode: string;
@@ -99,17 +90,14 @@ interface Props {
   canEdit: boolean;
   onChannelSetVisible?: (id: string, ch: number, visible: boolean) => void;
   onChannelSetColormap?: (id: string, ch: number, colormap: Colormap) => void;
-  /** Set (`name`) or clear (`null`) a user display-name override for a
-   *  channel. Editor-only; gated behind the same `canEdit` as the layer
-   *  rename. An emptied input passes `null` to clear back to the omero
-   *  label / `Ch N`. */
+  /** Set or clear (`null`) a channel's display-name override. Editor-only. An
+   *  emptied input passes `null` to fall back to the omero label or `Ch N`. */
   onChannelSetName?: (id: string, ch: number, name: string | null) => void;
   onChannelSetContrast?: (id: string, ch: number, min: number, max: number) => void;
   onChannelSetGamma?: (id: string, ch: number, gamma: number) => void;
   onChannelSetBlendMode?: (id: string, blendMode: BlendMode) => void;
-  /** Toggle a single label overlay's visibility. */
   onLabelSetVisible?: (id: string, label: number, visible: boolean) => void;
-  /** Set a single label overlay's opacity (0..1). */
+  /** Opacity in 0..1. */
   onLabelSetOpacity?: (id: string, label: number, opacity: number) => void;
   viewModeToggle: { label: string; onClick: () => void } | null;
   cameraModeToggle: { label: string; onClick: () => void } | null;
@@ -160,23 +148,14 @@ export function LayerPanel({
   onLayoutChange,
   style,
 }: Props) {
-  // Which layer row's name is currently being edited inline (editor-only).
   const [renamingLayerId, setRenamingLayerId] = useState<string | null>(null);
-  // Which channel sublayer's name is currently being edited inline
-  // (editor-only). Keyed by `${layerId}::${channelIndex}` so only one channel
-  // across all layers is in edit mode at a time, mirroring `renamingLayerId`.
+  // Keyed by `${layerId}::${channelIndex}` so only one channel across all layers
+  // is in edit mode at a time.
   const [renamingChannelKey, setRenamingChannelKey] = useState<string | null>(null);
-  // Ephemeral per-channel collapse state, mirroring the LAYER-level `isExpanded`
-  // disclosure. Channels are **collapsed by default** (a many-channel layer opens
-  // tidy); a channel is listed here only once it has been expanded. Keyed by the
-  // `${layerId}::${channelIndex}` channel key, so it is tracked independently per
-  // channel (no cross-channel bleed) and is decoupled from visibility — view-only
-  // React state, never persisted or broadcast.
+  // Channels are collapsed by default, so a many-channel layer opens tidy; a key
+  // is listed here once expanded. View-only state, never persisted or broadcast.
   const [expandedChannels, setExpandedChannels] = useState<Set<string>>(new Set());
   const channelKeyOf = (layerId: string, chIdx: number) => `${layerId}::${chIdx}`;
-  // Flip a single channel's expanded flag without touching any other channel.
-  // A fresh Set keeps the state update immutable (so React re-renders) and the
-  // per-key add/delete guarantees siblings are untouched.
   const toggleChannelExpanded = (channelKey: string) => {
     setExpandedChannels((prev) => {
       const next = new Set(prev);
@@ -188,9 +167,7 @@ export function LayerPanel({
       return next;
     });
   };
-  // Collapse-all / expand-all for ONE layer's channels at once. Keys are
-  // per-layer, so we only ever clear/add this layer's keys — other layers'
-  // collapse state is left untouched.
+  // Collapse or expand one layer's channels, leaving other layers untouched.
   const setAllChannelsExpanded = (
     layerId: string,
     count: number,
@@ -285,13 +262,10 @@ export function LayerPanel({
                   </span>
                 )}
                 {/*
-                  Discoverability affordance: a small count pill on the row when
-                  the dataset carries DRAWABLE segmentation labels, so the user
-                  knows to expand the layer and reach the "Labels" panel (toggle +
-                  opacity). Counts only renderable labels (matches the rows the
-                  panel shows) so the badge never over-promises. Non-interactive
-                  (the row/expand button owns disclosure); its title + aria-label
-                  carry the meaning. Mirrors the MentionsOfMe count-pill style.
+                  A count pill telling the user the layer has drawable labels to
+                  reach in the Labels panel. Counts the same rows the panel shows,
+                  so it never over-promises. Non-interactive; the expand button
+                  owns disclosure.
                 */}
                 {layer.labelRows && layer.labelRows.length > 0 && (
                   <span
@@ -366,20 +340,15 @@ export function LayerPanel({
                         </button>
                       </div>
                       {layer.channelSettings.map((ch, chIdx) => {
-                        // Display-name precedence: user override \u2192 omero label
-                        // (B1) \u2192 `Ch N`. The override is the mutable per-channel
-                        // `name`; the omero label is immutable manifest data.
+                        // User override, then omero label, then `Ch N`.
                         const chName =
                           ch.name?.trim() ||
                           layer.channelInfos?.[chIdx]?.label?.trim() ||
                           `Ch ${chIdx}`;
                         const channelKey = `${layer.id}::${chIdx}`;
                         const isRenamingChannel = renamingChannelKey === channelKey;
-                        // Expanded by default; only collapsed once the user opts
-                        // in via the per-channel toggle. Decoupled from
-                        // `ch.visible`: gating the colormap + contrast on this
-                        // (not visibility) lets a channel stay visible while its
-                        // controls are tucked away.
+                        // Gates the channel's controls, not its visibility, so a
+                        // channel can stay visible with its controls tucked away.
                         const isChannelExpanded = expandedChannels.has(channelKey);
                         return (
                         <div key={chIdx} className="channel-sublayer">
@@ -395,16 +364,14 @@ export function LayerPanel({
                             </button>
                             {canEdit && isRenamingChannel ? (
                               <ChannelNameInput
-                                // Pre-fill with the user override if one is set;
-                                // otherwise start empty so the placeholder shows
-                                // the inherited (omero/`Ch N`) name and a blank
-                                // commit clears back to it.
+                                // Start from the override, or empty so the
+                                // placeholder shows the inherited name and a
+                                // blank commit clears back to it.
                                 initial={ch.name ?? ""}
                                 placeholder={chName}
                                 onCommit={(name) => {
                                   setRenamingChannelKey(null);
                                   const trimmed = name.trim();
-                                  // Empty \u2192 clear the override (null); else set.
                                   onChannelSetName?.(layer.id, chIdx, trimmed.length === 0 ? null : trimmed);
                                 }}
                                 onCancel={() => setRenamingChannelKey(null)}
@@ -429,16 +396,9 @@ export function LayerPanel({
                               </button>
                             )}
                             {/*
-                              Per-channel disclosure toggle. A real <button> with
-                              `aria-expanded` that controls the channel's own
-                              detail region (colormap + contrast). Mirrors the
-                              LAYER expand button (\u25B2 open / \u25BC collapsed) and
-                              its accessible-name shape, but is purely about
-                              showing/hiding controls \u2014 it never touches
-                              visibility (`onChannelSetVisible`) or any sibling
-                              channel. Lives at the row's end so the eye + name +
-                              rename keep their place and the tab order reads
-                              left-to-right.
+                              Per-channel disclosure toggle. It only shows or
+                              hides the channel's controls, never visibility. At
+                              the row's end so the tab order reads left to right.
                             */}
                             <button
                               className="channel-expand-btn"
@@ -523,17 +483,10 @@ export function LayerPanel({
                     </>
                   )}
                   {/*
-                    Labels subsection — the per-label overlay controls, a sibling
-                    of the channel controls above but independent of multi-channel
-                    mode (labels overlay the intensity image regardless). Shows a
-                    row per DRAWABLE label (ineligible ones are omitted, so no inert
-                    control). Each row: an eye toggle (hide/show the overlay) + an
-                    opacity slider ("adjust opacity so we can see the data
-                    underneath"). Handlers pass the label's MANIFEST index (row.index)
-                    — not the row position — so they hit the right label even when
-                    earlier labels were skipped. Neither ever reframes the camera.
-                    The enclosing `.layer-detail` already stops row-click
-                    propagation, so these controls don't need their own.
+                    Labels subsection, independent of multi-channel mode. Handlers
+                    pass the manifest index (row.index), not the row position, so
+                    they hit the right label when earlier labels were skipped. The
+                    enclosing `.layer-detail` already stops row-click propagation.
                   */}
                   {layer.labelRows && layer.labelRows.length > 0 && (
                     <div className="layer-labels-section" data-testid={`labels-section-${layer.id}`}>
@@ -543,10 +496,9 @@ export function LayerPanel({
                       {layer.labelRows.map((row) => {
                         const labelName = row.name.trim() || `Label ${row.index}`;
                         const labelPct = Math.round((row.opacity ?? 0.5) * 100);
-                        // A label drawable only in the OTHER view mode: its
-                        // controls are inert here, so disable them and show the
-                        // reason as text. This keeps the panel honest — no eye
-                        // toggle or slider that "works" but draws nothing.
+                        // A label drawable only in the other view mode gets
+                        // disabled controls and its reason as text, rather than
+                        // a toggle that draws nothing.
                         const disabled = row.disabledReason !== undefined;
                         return (
                           <div key={row.index} className="label-sublayer">
@@ -554,18 +506,15 @@ export function LayerPanel({
                               <button
                                 className="layer-eye-btn"
                                 title={disabled ? row.disabledReason : row.visible ? "Hide label" : "Show label"}
-                                // When disabled the toggle can't act, so name the
-                                // STATE (why it's off) instead of a "Hide/Show"
-                                // action a screen-reader user cannot perform.
+                                // When disabled, name the state (why it's off)
+                                // rather than an action the user can't perform.
                                 aria-label={
                                   disabled
                                     ? `${layer.name} ${labelName} — ${row.disabledReason}`
                                     : `${row.visible ? "Hide" : "Show"} ${layer.name} ${labelName}`
                                 }
-                                // A disabled label draws nothing in the current
-                                // mode, so the toggle is not "pressed" here
-                                // regardless of the persisted visible flag —
-                                // report the state the user actually sees.
+                                // A disabled label draws nothing here, so report
+                                // not pressed whatever the persisted flag says.
                                 aria-pressed={disabled ? false : row.visible}
                                 disabled={disabled}
                                 data-testid={`label-eye-${layer.id}-${row.index}`}
@@ -711,10 +660,8 @@ export function LayerPanel({
 }
 
 /**
- * Inline rename input for a layer name. Auto-focuses and selects on mount;
- * Enter (or blur) commits, Escape cancels. Stops click propagation so editing
- * the name does not select/collapse the row. Mirrors the saved-view rename
- * affordance for a consistent feel.
+ * Inline rename input for a layer name. Enter or blur commits, Escape cancels.
+ * Stops click propagation so editing doesn't select or collapse the row.
  */
 function LayerNameInput({
   initial,
@@ -755,15 +702,9 @@ function LayerNameInput({
 }
 
 /**
- * Inline rename input for a single channel's display-name override. Mirrors
- * {@link LayerNameInput} (auto-focus + select on mount; Enter/blur commits,
- * Escape cancels; stops click propagation), with two channel-specific
- * differences:
- *  - it starts from the current override (empty when none is set) and shows the
- *    inherited name (omero label / `Ch N`) as the `placeholder`, and
- *  - an **empty** commit is meaningful: it clears the override (the caller maps
- *    blank → `null`), falling the label back to the omero/`Ch N` name. (The
- *    layer rename, by contrast, ignores a blank value.)
+ * Inline rename input for a channel's display-name override. Behaves like
+ * {@link LayerNameInput}, except the inherited name is the placeholder and an
+ * empty commit is meaningful: it clears the override.
  */
 function ChannelNameInput({
   initial,

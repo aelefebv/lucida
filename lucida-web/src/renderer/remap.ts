@@ -1,26 +1,9 @@
 /**
- * Shared indirection-remap kernel used by both `renderer/volume/remap`
- * and `renderer/slice/remap`.
- *
- * Both handlers walk the same composite-slot-key map and write a
- * slot-index back into a flat `indirectionData` Uint32Array at a
- * per-entity, per-LOD offset. They differ in exactly two ways:
- *
- *   1. **Z filter.** Slice mode passes a per-(member, level) Z target
- *      (computed from `entityZInfo` + current full-res Z); only chunks
- *      whose `chunk.z` matches that target survive the filter. Volume
- *      has no Z filter — all chunks at the current (t, c) survive.
- *
- *   2. **Global-index arithmetic.** Volume's per-entity section is laid
- *      out as `[z][y][x]` (`gridZ * gridY * gridX` per LOD). Slice's is
- *      `[y][x]` (one 2D plane per LOD). The Z multiplier is dropped in
- *      slice mode — implemented here by branching on
- *      `targetChunkZFor != null` (slice mode signal).
- *
- * The handlers keep their public function names (`remapIndirection` /
- * `remapSliceIndirection`); this module is the source of truth.
- *
- * No GPU coupling, no module state — safe to import from anywhere.
+ * Indirection-remap kernel shared by `volume/remap` and `slice/remap`. Both
+ * walk the composite slot keys and write slot indices into a flat
+ * indirection buffer at a per-entity, per-level offset. A non-null
+ * `targetChunkZFor` means slice mode: it filters chunks by Z and drops the
+ * Z term from the index, since a slice section is one `[y][x]` plane.
  */
 
 import type { LodIndirectionMeta } from "./volume/atlas.ts";
@@ -46,11 +29,9 @@ export interface RemapParams {
   indirectionData: Uint32Array;
   /** Per-entity LOD section metas. */
   entityMetas: Map<string, LodIndirectionMeta[]>;
-  /** Current T plane. */
   currentT: number;
-  /** Current channel. */
   currentC: number;
-  /** Optional render-radius filter; omitted keeps legacy remap behavior. */
+  /** Optional render-radius filter; omit to skip it. */
   visibleRegion?: VisibleRegion;
   renderRadiusView?: number;
   entryByMember?: Map<string, RemapEntryInfo>;

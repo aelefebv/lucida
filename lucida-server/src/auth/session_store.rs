@@ -1,14 +1,8 @@
 //! `LoginSessionStore` trait and the row type it returns.
 //!
-//! The trait is the seam between the cookie-based extractor (which
-//! only knows how to look up by ID) and the storage layer (SQLite in
-//! production, an in-memory map for unit tests). The trait is
-//! `async_trait`-annotated so it's object-safe; the extractor holds
-//! `Arc<dyn LoginSessionStore>`.
-//!
-//! See `docs/adr/0015-server-stored-bookmarks-and-auth-seam.md`
-//! and `docs/adr/0016-backend-mediated-oauth-with-session-cookies.md`
-//! for the architectural rationale.
+//! The seam between the cookie extractor, which only looks up by ID, and
+//! the storage layer. `async_trait` keeps it object-safe for
+//! `Arc<dyn LoginSessionStore>`. See ADR 0016.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

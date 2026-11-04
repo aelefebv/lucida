@@ -1,15 +1,10 @@
 //! Adapter from the server's async `CachedStore` to the synchronous
 //! [`ProxySourceData`] trait expected by `lucida-proxy`.
 //!
-//! The trick: rather than block_on inside the trait impl, we **pre-fetch
-//! all chunks** the requested proxy needs (under a tokio task) into an
-//! in-memory `ServerProxySource`, then call `generate_proxy()` against
-//! that. The trait impl just looks up the pre-loaded volume by
-//! `(image_id, t, c, level)`.
-//!
-//! For the MVP this means each `ProxyGenerator::request` does one full
-//! read of the source data per generation. That's fine: we only generate
-//! once per `(spec, source_hash)` and the result is cached on disk.
+//! Every chunk a proxy needs is pre-fetched into an in-memory
+//! `ServerProxySource`, so the trait impl only looks volumes up by
+//! `(image_id, t, c, level)` and never blocks. That reads the source once
+//! per generation, which is fine because the result is cached on disk.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -275,7 +270,7 @@ pub(crate) async fn fetch_dense_volume(
     // (= level-0 voxel space). The aggregator composes this with tile_to_group
     // (in full-res voxel units) to compute the group's AABB. Without this scale,
     // a level-k voxel is treated as 1 full-res voxel and tiles shrink to
-    // `full_res / 2^k` in the proxy — see #417.
+    // `full_res / 2^k` in the proxy.
     //
     // Shape ratio is more robust than OME-Zarr per-level `scale` metadata
     // (which may be missing or incorrect) and gives the downsampling factor

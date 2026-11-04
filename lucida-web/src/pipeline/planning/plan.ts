@@ -49,26 +49,12 @@ function compareProxyRequests(a: ProxyRequest, b: ProxyRequest): number {
 }
 
 /**
- * Emit the chunk + proxy request streams for an ALREADY-RESOLVED active set.
- *
- * This is steps 2–7 of {@link plan} — every lane emission plus the final
- * priority sort — factored out so a caller that already holds a valid active
- * set can regenerate its requests for a changed selection (a T-scrub or
- * Z-plane move) WITHOUT re-assigning the active set or rebuilding the
- * snapshot. Pure in `(activeSet, snapshot, config, zoomDirection)`; mutates
- * only the supplied `stats`.
- *
- * The requests are a pure function of the active set, the entities, the visible
- * region, the selection, and the remembered zoom direction, so reusing an
- * unchanged active set with a snapshot whose only difference is `selection.t`
- * / `selection.z` (and, on a Z move, `visibleRegion.zRangeVox`) yields exactly
- * the requests a full {@link plan} would produce for that selection — with none
- * of `buildActiveSet`'s work. `zoomDirection` is the one the caller's stored
- * {@link PlanningState} holds. A scrub is not a zoom, so it is unchanged.
- *
- * Postconditions match {@link plan}: `requests` and `proxyRequests` are sorted
- * ascending by priority; output objects are freshly allocated and carry
- * `datasetId` from {@link PlanningSnapshot.datasetId}.
+ * Emit the chunk and proxy request streams for an already-resolved active
+ * set. Lets a caller regenerate requests for a T scrub or Z-plane move
+ * without `buildActiveSet`. Pure in `(activeSet, snapshot, config,
+ * zoomDirection)`, so the result matches a full {@link plan} for that
+ * selection. A scrub is not a zoom, so the stored `zoomDirection` applies.
+ * Postconditions match {@link plan}; mutates only `stats`.
  */
 export function emitPlanRequests(
   activeSet: ActiveSetEntry[],
@@ -77,7 +63,6 @@ export function emitPlanRequests(
   config: PlanningConfig,
   zoomDirection: ZoomDirection | null,
 ): { requests: ChunkRequest[]; proxyRequests: ProxyRequest[] } {
-  // Step 2: Build entity lookup.
   const entityById = new Map<string, EntitySnapshot>();
   for (const entity of snapshot.entities) {
     entityById.set(entity.entityId, entity);
@@ -86,12 +71,10 @@ export function emitPlanRequests(
   const allRequests: ChunkRequest[] = [];
   const proxyRequests: ProxyRequest[] = [];
 
-  // Track group-proxy requests we've already emitted (one per
-  // (groupId, t, c)) so multiple tiles-with-proxy-fallback tiles of
-  // the same group don't each push a duplicate parent-group request.
+  // One parent-group request per (groupId, t, c), however many
+  // tiles-with-proxy-fallback tiles of the group are active.
   const groupProxyEmitted = new Set<string>();
 
-  // Step 3: Detail / proxy lane (per active entry).
   emitDetailLane(
     activeSet,
     snapshot,
@@ -103,21 +86,13 @@ export function emitPlanRequests(
     config,
   );
 
-  // Step 4: Prefetch lane — for tile-mode entries only.
   emitPrefetchLane(activeSet, snapshot, entityById, stats, allRequests, config, zoomDirection);
 
-  // Step 5: Coarse lane, the floor under the detail tier.
   emitCoarseLane(activeSet, snapshot, entityById, stats, allRequests, config);
 
-  // Step 6: Minimap lane (see ADR 0023). Small seed sets ride the
-  // dedicated top lane (priority 0 — the sort puts them first, so the
-  // minimap appears within ~1s of dataset open). Bulk seed sets must
-  // instead rank strictly behind every request emitted above — lane
-  // offsets are not bands (the importance/distance terms are unbounded,
-  // so a constant offset cannot outrank a wide view's coarse/detail
-  // priorities). The emitter is handed the plan's current maximum
-  // priority as the floor its bulk lane must clear; emitting last makes
-  // that maximum complete.
+  // Minimap goes last. Its bulk lane must rank behind every request above,
+  // and lane offsets are not bands because the importance and distance
+  // terms are unbounded, so it gets the plan's maximum priority as a floor.
   let maxEmittedPriority = 0;
   for (const req of allRequests) {
     if (req.priority > maxEmittedPriority) maxEmittedPriority = req.priority;
@@ -131,10 +106,6 @@ export function emitPlanRequests(
     allRequests,
   );
 
-  // Step 7: Merge and sort by priority (ascending — lower = more urgent).
-  // Equal-priority chunk ties are spatial-first, channel-second so
-  // multi-channel upload reaches all channels for focal cells instead
-  // of exhausting the budget on one channel's whole grid.
   allRequests.sort(compareChunkRequests);
   proxyRequests.sort(compareProxyRequests);
 
@@ -158,31 +129,25 @@ export function plan(
   state: PlanningState,
   config: PlanningConfig = DEFAULT_PLANNING_CONFIG,
 ): RequestPlan {
-  // Dev-mode boundary check. Vite dead-code-eliminates
-  // this branch in production builds; the validator's source is
-  // absent from the shipped bundle.
+  // Dev-mode boundary check. Vite strips this branch and the validator
+  // from production builds.
   if (import.meta.env.DEV) validatePlanningInputs(snapshot, state);
 
   const stats = emptyPlanStats();
 
-  // Step 1: Build the active set and resolve the zoom direction.
   const activeSet = buildActiveSet(snapshot.entities);
   const effectiveZoom = snapshot.visibleRegion.effectiveZoom;
   const zoomDirection = resolveZoomDirection(state, effectiveZoom);
 
-  // Steps 2–7: emit + sort the request streams for the resolved active set.
   const { requests, proxyRequests } = emitPlanRequests(
     activeSet, snapshot, stats, config, zoomDirection,
   );
 
-  // Step 8: Epoch propagation.
   const epochs: SceneEpochs = {
     ...snapshot.epochs,
     request: snapshot.epochs.request + 1,
   };
 
-  // Step 9: Return. `nextState` is the opaque pointer the caller will
-  // hand back on the next tick.
   const nextState: PlanningState = {
     previousActiveSet: activeSet,
     previousEffectiveZoom: effectiveZoom,

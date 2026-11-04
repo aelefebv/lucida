@@ -550,8 +550,6 @@ mod tests {
         }
     }
 
-    // --- 2D→2D tests ---
-
     #[test]
     fn filters_self() {
         let scene = scene_2d([800, 600]);
@@ -654,8 +652,6 @@ mod tests {
         assert_eq!(peer_color(0), peer_color(8));
     }
 
-    // --- 3D→2D tests (Case C) ---
-
     #[test]
     fn peer_3d_to_local_2d_center_screen() {
         let mut scene = scene_2d_with_shape([800, 600], [100, 200, 300]);
@@ -686,8 +682,6 @@ mod tests {
         );
         assert!(result.gpu.is_empty());
     }
-
-    // --- 2D→3D tests (Case A) ---
 
     #[test]
     fn peer_2d_to_local_3d_produces_ray() {
@@ -726,8 +720,6 @@ mod tests {
         );
     }
 
-    // --- 3D→3D tests (Case B) ---
-
     #[test]
     fn peer_3d_to_local_3d_produces_ray() {
         let scene = scene_3d_with_shape([800, 600], [100, 200, 300]);
@@ -758,8 +750,6 @@ mod tests {
         assert!(result.gpu.is_empty());
     }
 
-    // --- Helper function tests ---
-
     #[test]
     fn unproject_ray_valid() {
         let view = Arcball::new([800, 600]);
@@ -786,8 +776,6 @@ mod tests {
     fn ray_z_intersect_behind() {
         assert!(ray_z_intersect([0.5, 0.5, 1.0], [0.0, 0.0, 1.0], 0.5).is_none());
     }
-
-    // --- Fly cursor tests ---
 
     #[test]
     fn fly_peer_to_local_3d_produces_ray() {
@@ -868,8 +856,6 @@ mod tests {
         );
     }
 
-    // --- 3D→2D out-of-bounds label emission ---
-
     #[test]
     fn peer_3d_to_local_2d_out_of_bounds_emits_label() {
         // Peer cursor ray intersects Z-plane outside volume → no GPU crosshair, but label emitted
@@ -913,8 +899,6 @@ mod tests {
         assert_eq!(result.labels.len(), 1, "in-bounds should produce label");
         assert_eq!(result.labels[0].id, 2);
     }
-
-    // --- label_only tests ---
 
     #[test]
     fn label_only_2d_produces_label_no_gpu() {

@@ -7,8 +7,7 @@
 //! SQLite store runs too, so this module holds the binding and the row
 //! mapping and no SQL of its own. Read it beside
 //! `cli_authorization_sqlite`: the two differ in the pool type, the row
-//! type, and the type name, and nowhere else. ADR-0058 records why the
-//! SQL is shared and the Rust is not.
+//! type, and the type name, and nowhere else (ADR-0058).
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

@@ -1,22 +1,11 @@
-//! End-to-end HTTP tests for `AuthMode::Disabled`.
+//! End-to-end HTTP tests for `AuthMode::Disabled`: spawn the real binary
+//! in disabled mode and drive it over HTTP. They guard against
+//! `build_extractor` returning the cookie extractor in every mode, which
+//! would 401 every request from a binary that boots fine.
 //!
-//! Spawn the actual `lucida-server` binary in disabled mode, then drive
-//! it over real HTTP via `reqwest`. The regression these tests close: if
-//! `build_extractor` returned the cookie extractor regardless of
-//! `AuthMode`, every request would 401 even though the binary booted
-//! fine. `auth_config_e2e.rs` only checks that the binary boots and
-//! binds; these tests close the gap by exercising actual HTTP
-//! request/response.
-//!
-//! Each test:
-//! - Picks a unique loopback (or `0.0.0.0`) port via `pick_loopback_port`.
-//! - Wipes the parent process env with `env_clear` so the test
-//!   environment can't smuggle in `LUCIDA_*` overrides.
-//! - Sets a tempdir-scoped `LUCIDA_DB_URL` so the SQLite store doesn't
-//!   write `lucida.db` into the workspace root.
-//! - Drains stdout/stderr in background threads to avoid the child
-//!   blocking on a full pipe (axum + tracing chatter fills 64K fast).
-//! - Kills the child + drops the tempdir on test end.
+//! Each test uses its own port, clears the parent env, points
+//! `LUCIDA_DB_URL` at a tempdir, and drains the child's stdout and stderr
+//! so it never blocks on a full pipe.
 
 use std::io::Read;
 use std::net::TcpListener;

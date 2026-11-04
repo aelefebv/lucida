@@ -6,12 +6,9 @@ interface Props {
 }
 
 /**
- * Subtle inline banner displayed during recipient apply. Subscribes to the
- * `SavedViewApplier` state and shows progress (`Loading shared view: 2 of
- * 4 datasets…`), with per-dataset failure indicators.
- *
- * Auto-hides shortly after `inProgress` flips to false (so the user can
- * see the final state, including any partial failures).
+ * Inline banner showing a recipient's saved-view apply progress, with
+ * per-dataset failure indicators. Auto-hides shortly after a clean finish;
+ * failures and warnings stay until dismissed.
  */
 export function LoadingViewBanner({ applier }: Props) {
   const state = useSyncExternalStore<ApplierState>(
@@ -19,14 +16,11 @@ export function LoadingViewBanner({ applier }: Props) {
     () => applier.getState(),
     () => applier.getState(),
   );
-  // Manual dismiss flag, set to true at the start of a fresh apply and
-  // toggled by the user's Dismiss button. Stays in sync with `inProgress`
-  // — see the effect below.
+  // Cleared when a new apply starts.
   const [dismissed, setDismissed] = useState(false);
   const inProgressPrevRef = useRef(state.inProgress);
 
   useEffect(() => {
-    // Reset dismissed flag whenever a new apply starts.
     if (state.inProgress && !inProgressPrevRef.current) {
       setDismissed(false);
     }

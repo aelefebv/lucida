@@ -1,14 +1,10 @@
 //! The tiny HTML page the middleware serves to an unauthenticated
 //! browser navigation.
 //!
-//! It runs before any framework code mounts; that's the whole point —
-//! the JS shim must capture `location.hash` and bounce the browser to
-//! `/auth/start` so a saved-views deep link survives the OAuth round
-//! trip (see ADR-0013 + ADR-0016).
-//!
-//! No template engine; the whole page is a const string. The hash and
-//! the path are URL-encoded by the shim itself, not by the server, so
-//! the server never has to think about how to escape them.
+//! It runs before any framework code mounts, because the JS shim must
+//! capture `location.hash` and bounce to `/auth/start` so a saved-view
+//! deep link survives the OAuth round trip (ADR-0013). The shim, not the
+//! server, URL-encodes the hash and path.
 
 /// The complete unauth-landing HTML body. `Content-Type: text/html`.
 ///
@@ -60,21 +56,14 @@ pub const UNAUTH_LANDING_HTML: &str = r##"<!DOCTYPE html>
 </body>
 </html>"##;
 
-/// The HTML the middleware serves when the marker cookie
-/// `lucida_signed_out=1` is present (i.e. the user just clicked sign
-/// out, then refreshed / opened a new tab / clicked a bookmark).
+/// The HTML the middleware serves when the `lucida_signed_out=1` marker
+/// cookie is present.
 ///
-/// Same scaffolding as `UNAUTH_LANDING_HTML`, but **does not auto-bounce**.
-/// The user must click "Sign in again" — which is the whole point: a
-/// silent auto-bounce here would 302 → /auth/start → Google → silent
-/// pass-through (Google's session is still active) → callback → fresh
-/// lucida session, defeating the user's intent to log out.
-///
-/// The link's href is rewritten by inline JS on load to inject
-/// `location.pathname + location.search` and the captured `location.hash`,
-/// so a saved-view URL like `/dataset/foo#view=abc` survives the round
-/// trip. The noscript fallback href hard-codes `/` — JS-disabled users
-/// lose the deep-link, but still get to a working sign-in.
+/// Unlike `UNAUTH_LANDING_HTML` it does not auto-bounce: Google's session
+/// is still active, so a bounce would silently sign the user back in.
+/// Inline JS rewrites the link's href to keep the path and hash, so a
+/// saved-view URL survives the round trip. The noscript fallback goes to
+/// `/`.
 pub const SIGNED_OUT_LANDING_HTML: &str = r##"<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -117,8 +106,7 @@ pub const SIGNED_OUT_LANDING_HTML: &str = r##"<!DOCTYPE html>
 mod tests {
     use super::*;
 
-    /// Sanity-check the contract the slice-4 acceptance criteria
-    /// articulate: the shim must produce a request to /auth/start with
+    /// The shim must produce a request to /auth/start with
     /// URL-encoded path and hash. We grep the static string rather
     /// than execute it (no JS engine in cargo test); a vitest test
     /// against the same shim shape lives in lucida-web.
@@ -139,11 +127,10 @@ mod tests {
         assert!(UNAUTH_LANDING_HTML.contains("/auth/start"));
     }
 
-    /// Annotation deep-links (`/w/<id>#a=<annotationId>`, annotation-views
-    /// slice 3) ride the SAME hash-capture the shim already does — it forwards
-    /// the WHOLE `location.hash`, not a specific key (`#view=`/`#b=`/`#a=` all
-    /// ride identically). Assert the capture is key-agnostic so the `#a=` link
-    /// survives the logged-out OAuth round trip with no shim change.
+    /// Annotation deep links (`/w/<id>#a=<annotationId>`) ride the same
+    /// hash capture: the shim forwards the whole `location.hash`, not one
+    /// key. Assert the capture is key-agnostic so an `#a=` link survives
+    /// the logged-out OAuth round trip.
     #[test]
     fn captures_full_hash_so_annotation_deeplink_survives_oauth() {
         // The shim reads the entire hash, strips only the leading '#', and
@@ -162,8 +149,8 @@ mod tests {
 
     #[test]
     fn signed_out_landing_renders_static_signin_link_no_auto_bounce() {
-        // Deliberately must NOT auto-redirect. The whole point of this
-        // page is to break the auto-bounce loop after explicit logout.
+        // Must not auto-redirect: this page breaks the auto-bounce loop
+        // after an explicit logout.
         assert!(
             !SIGNED_OUT_LANDING_HTML.contains("window.location.replace"),
             "signed-out landing must not auto-bounce — that defeats logout",

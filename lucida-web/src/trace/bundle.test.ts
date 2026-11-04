@@ -333,7 +333,7 @@ describe("the callers", () => {
 
 /**
  * The driver hands its DevTools screenshot over as the fallback, and the
- * page's own capture comes first (#1098). On a host where the screenshot
+ * page's own capture comes first. On a host where the screenshot
  * leaves the WebGPU canvas out, the canvas's region of the screenshot is one
  * flat colour, and the bundle says so instead of saving it.
  */

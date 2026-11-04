@@ -431,10 +431,8 @@ describe("TraceRecorder rows", () => {
 describe("TraceRecorder plan and queue", () => {
   it("births a row at dispatch, dating plan and queue from the pass that enqueued it", () => {
     // A row is born at dispatch, so the one call that makes it also closes
-    // `plan`, brackets `queue` and opens `wire` (#949). Three recorder calls
-    // per chunk was three times the event count ADR 0049's tick ceiling was
-    // derived from, and two of them were handle round-trips — a `resolve`, a
-    // generation divide and a modulo — buying nothing.
+    // `plan`, brackets `queue` and opens `wire`. One call per chunk keeps the
+    // event count inside the tick ceiling ADR 0049 derived.
     const { recorder, advance } = makeRecorder();
     recorder.openRun(OPEN_CAUSE);
 
@@ -1038,9 +1036,9 @@ describe("what a run in progress can say about itself (#937)", () => {
     expect(rowsIn("upload")).toBe(1);
 
     // Every in-flight row the recorder made is in a phase: a chunk row is
-    // born at dispatch with `queue` stamped and `wire` open (#949), so the
-    // unstamped residual — which the table below the recorder can still hold
-    // — is empty for rows that came through this path.
+    // born at dispatch with `queue` stamped and `wire` open, so the unstamped
+    // residual, which the table below the recorder can still hold, is empty
+    // for rows that came through this path.
     expect(progress.unstamped).toBe(0);
     const inBar = progress.occupancy.reduce((total, slot) => total + slot.rows, 0);
     expect(inBar).toBe(progress.inFlight);

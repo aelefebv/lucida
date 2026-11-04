@@ -1,12 +1,7 @@
-//! End-to-end test: open a synthesized 6D OME-Zarr with a blosc-
-//! compressed chunk, resolve the canonical chunk key to the on-disk
-//! path (which has a `0` injected at the pinned `m` position),
-//! decompress, and verify the resulting bytes are the canonical-5D
-//! `m=0` slice.
-//!
-//! Fixture is built inline with `serde_json::json!` + `fs::write` (matching
-//! the `lucida-store::import` test pattern). The chunk's blosc bytes are
-//! a hardcoded `&[u8]` literal generated once via:
+//! End-to-end test: open a synthesized 6D OME-Zarr with a blosc-compressed
+//! chunk, resolve the canonical chunk key to the on-disk path (with a `0`
+//! at the pinned `m` position), decompress, and check the bytes are the
+//! `m=0` slice. The chunk's blosc bytes were generated once with:
 //!
 //! ```sh
 //! python3 -c "

@@ -1,67 +1,9 @@
-//! Authentication subsystem.
+//! Authentication: the auth modes, the session, token, and pending-auth
+//! stores, and the middleware that resolves each request to a principal.
 //!
 //! A store with two SQL implementations keeps its statements in a `*_sql`
 //! module the two run, rather than in a second copy of the SQL. See
 //! ADR-0058.
-//!
-//! Module map:
-//!
-//! - `config` — runtime knobs read from env at boot (cookie name,
-//!   timeouts, database connection string, secure-cookie mode, auth
-//!   mode + Google credentials).
-//! - `cookie` — cookie reading + Set-Cookie building. One source of
-//!   truth for the `lucida_session` cookie's attribute set.
-//! - `dev` — disabled-auth identity switch cookie for local multi-user
-//!   testing. Not used by Google/production auth.
-//! - `directory` — the profile directory: an optional listing of
-//!   display names and pictures keyed by email, held in memory and
-//!   applied by the middleware to whatever principal the mode
-//!   resolved. Enrichment only; never a credential. See ADR-0063.
-//! - `session_store` — `LoginSessionStore` trait + the row type.
-//! - `session_store_sqlite` / `session_store_postgres` — production
-//!   `SqliteSessionStore` and `PostgresSessionStore`, both backed by
-//!   `sqlx`. Connecting and migrating belong to [`crate::storage`].
-//! - `session_store_memory` — `MemorySessionStore` for tests.
-//! - `bearer_token` / `bearer_token_sqlite` / `bearer_token_postgres` /
-//!   `bearer_token_memory` — opaque CLI/Python credentials stored as
-//!   hashes and resolved to the same `AuthPrincipal` boundary as cookie
-//!   sessions.
-//! - `cli_authorization` / `cli_authorization_sqlite` /
-//!   `cli_authorization_postgres` / `cli_authorization_memory` —
-//!   short-lived browser approval rows for `lucida auth login`.
-//! - `pending_auth` / `pending_auth_sqlite` / `pending_auth_postgres` /
-//!   `pending_auth_memory` — one-shot OAuth-intent rows: state token →
-//!   intended path/hash.
-//! - `google_oauth` — Google integration: authorization URL, code
-//!   exchange, JWKS cache + refresh, JWT validation. The deepest piece.
-//! - `iap` — Identity-Aware Proxy integration: ES256 key-set cache +
-//!   refresh, assertion validation, and the extractor that reads the
-//!   identity IAP established. No sign-in flow; the perimeter ran one.
-//! - `principal` — `PrincipalExtractor` trait plus the implementations:
-//!   `SessionCookieExtractor` (Google-mode cookie path),
-//!   `GoogleJwtPrincipalExtractor` (Bearer-token validator), and
-//!   `StubPrincipalExtractor` (disabled-mode canned principal).
-//!   `DualCredentialExtractor` composes the bearer path in front of
-//!   whichever of those a mode uses. Also `principal_from_claims`, the
-//!   adapter the callback uses, and `normalize_email`, the one email
-//!   normalization every provider shares.
-//! - `middleware` — axum middleware that runs the extractor and
-//!   attaches the resulting principal to request extensions.
-//!   `build_extractor` picks the implementation based on `AuthMode`.
-//! - `handlers` — `/auth/whoami`, `/auth/logout`, `/auth/mode`,
-//!   `/auth/start`, `/auth/callback`, and `/auth/error`.
-//! - `unauth_landing` — small inline HTML the middleware serves on an
-//!   unauth HTML navigation; carries the JS shim that captures
-//!   `location.hash` before redirecting to `/auth/start`.
-//! - `error_page` — `/auth/error` server-rendered page; user-facing
-//!   destination after callback rejections (hd mismatch, unverified
-//!   email, generic auth failure).
-//! - `extractors` — `AdminRequired` axum extractor: pulls the
-//!   principal out of extensions and 403s on `!is_admin`. Handlers
-//!   wear it declaratively rather than hand-rolling the gate.
-//! - `cleanup` — hourly background sweep that drops expired
-//!   `login_sessions` and `pending_auth` rows so storage growth stays
-//!   bounded over the life of a long-running deployment.
 
 #[cfg(test)]
 mod audit_event_tests;

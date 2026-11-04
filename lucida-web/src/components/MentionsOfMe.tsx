@@ -1,35 +1,12 @@
 /**
- * "Mentions of me" inbox for annotation comments (issue #526, slice 2).
+ * "Mentions of me" inbox: every comment in the current dataset that @-mentions
+ * the current user, each a jump to its pin.
  *
- * A user can SEE every comment in the CURRENT dataset that @-mentions them and
- * JUMP to each. In-app only — a mention is just inline `@handle` text riding
- * `Comment.text` (the slice-1 grammar), so this reads the plain annotation data
- * already in hand and needs NO wire/command/Rust change.
- *
- * PURE by construction: this component does not touch the scene, the network, or
- * any ref. It works entirely off the `annotations` array (and the identity props)
- * passed in, and reports navigation back through `onNavigate(pinId)` — so the
- * host owns the actual "open the thread + recenter" effect (the seam), and this
- * stays trivially testable and re-renderable.
- *
- * WHO IS "ME" — the handle set, computed exactly like the slice-1 candidate
- * builder so a mention is matchable to the same person everywhere:
- *  - ALWAYS {@link deriveHandle}`(currentUserId)` — the deterministic handle every
- *    viewer derives from the opaque author id that rides this user's comments, so
- *    it is the same string for everyone (never the viewer-relative "you");
- *  - PLUS, when `currentUserEmail` matches a roster row, that row's
- *    {@link handleFromName}`(display_name)` when non-null — so a collaborator who
- *    @-mentioned this user by their REAL name (before any id linkage exists) still
- *    counts. (No structured id ties an opaque comment author to a roster email —
- *    resolving that is the deferred structured-mention slice — so matching BOTH
- *    handles is the honest, non-lossy choice.)
- *
- * A comment mentions me iff its text contains a mention TOKEN (the SAME grammar
- * via {@link splitMentionTokens}) whose name equals one of my handles,
- * case-insensitive, as an EXACT token: `@user5xy9` matches `@user5xy9` but NOT
- * `@user5xy9more` (the tokenizer already bounds the token at word characters, so
- * the trailing run is a different token). My own comments that mention me DO
- * count — this is "who pointed at me", regardless of who typed it.
+ * Pure: it reads only its props and reports clicks through `onNavigate`, so the
+ * host owns opening the thread and recentering. "Me" is the identity-derived
+ * handle plus, when the user's roster row has one, their display-name handle,
+ * since nothing links an opaque comment author to a roster email. A match is an
+ * exact, case-insensitive token, and the user's own comments count too.
  */
 import { useMemo, useState } from "react";
 import type { Annotation } from "./annotationDocument.ts";
@@ -37,114 +14,76 @@ import { splitMentionTokens } from "./annotationMentions.ts";
 import { deriveHandle, handleFromName } from "./annotationParticipants.ts";
 
 interface Props {
-  /** The CURRENT dataset's pins (each with its nested `comments`), as plain data
-   * read from the scene by the host — this component never reads the scene
-   * itself. Scoping to one dataset is the host's job (it passes that dataset's
-   * annotations); cross-dataset aggregation is deliberately out of scope. */
+  /** The current dataset's pins with nested `comments`. Scoping to one dataset
+   * is the host's job; cross-dataset aggregation is out of scope. */
   annotations: Annotation[];
-  /** The current user's stable annotation identity (the `author` that rides their
-   * comments). Its {@link deriveHandle} is ALWAYS one of "my" handles. */
+  /** The `author` that rides the current user's comments. Its
+   * {@link deriveHandle} is always one of "my" handles. */
   currentUserId: string;
-  /** The current user's email, used ONLY to find their roster row so a mention by
-   * their display-name handle also counts. Optional/null when unauthenticated or
-   * unknown — then only the identity-derived handle is "me". */
+  /** Used only to find the user's roster row, so a mention by their
+   * display-name handle also counts. Null when unauthenticated. */
   currentUserEmail?: string | null;
-  /** The workspace roster (best-effort; omitted/`[]` when unavailable). Used only
-   * to resolve the current user's own display-name handle via `currentUserEmail`.
-   * Structural shape so `WorkspaceMember` is assignable without a hard dep. */
+  /** The workspace roster, best-effort. Structural so `WorkspaceMember` is
+   * assignable without a dependency. */
   members?: { email: string; display_name?: string | null }[];
-  /** Jump to a mentioning comment: the host opens that comment's pin thread AND
-   * recenters on it. `pinId` is the id of the annotation OWNING the comment. */
+  /** The host opens the owning pin's thread and recenters on it. */
   onNavigate: (pinId: string) => void;
-  /** The comment ids the current viewer has already VIEWED (issue #803), owned +
-   * persisted by the host (per-browser, per-dataset). The badge counts only ids
-   * NOT in this list, and each item is marked `data-viewed` by its membership.
-   * Defaults to `[]` (nothing viewed) so a host that hasn't adopted read-state —
-   * and the slice-2 contract — behaves exactly as before. */
+  /** Comment ids this viewer has viewed, owned and persisted by the host per
+   * browser and dataset. The badge counts only ids not in this list. Defaults to
+   * `[]` for hosts that don't track read-state. */
   viewedCommentIds?: string[];
-  /** Mark a mention VIEWED. Called (alongside {@link onNavigate}) when its panel
-   * item is clicked; the host persists it so it stays read across reloads. No-op
-   * default keeps this optional and the component drop-in for hosts that don't
-   * track read-state. */
+  /** Called with {@link onNavigate} when an item is clicked; the host persists
+   * it so the mention stays read across reloads. */
   onMarkViewed?: (commentId: string) => void;
 }
 
-/** A flattened reference to one comment that mentions the current user, paired
- * with the id of the pin (annotation) that owns it — everything the list item
- * and its navigation need, with no re-derivation. */
+/** One comment that mentions the current user, with the pin that owns it. */
 interface MentionHit {
-  /** The owning annotation's id — what {@link Props.onNavigate} receives. */
   pinId: string;
-  /** The mentioning comment's id — the list item's stable key + testid suffix. */
   commentId: string;
-  /** The comment's raw text, shown as the item's snippet. */
   text: string;
 }
 
-/** Max characters of comment text shown in a list item before eliding, so a long
- * comment stays a one-line snippet in the narrow panel. The FULL text is still
- * the item's title (hover) so nothing is lost. */
+/** Snippet length before eliding. The full text stays in the item's title. */
 const SNIPPET_MAX = 80;
 
-/** A one-line snippet of comment text: whitespace collapsed and elided past
- * {@link SNIPPET_MAX}. Pure presentation — the match decision uses the full,
- * untrimmed text (the tokenizer), never this. */
+/** Display only: matching runs on the full text, never on this. */
 function snippet(text: string): string {
   const oneLine = text.replace(/\s+/g, " ").trim();
   return oneLine.length > SNIPPET_MAX ? `${oneLine.slice(0, SNIPPET_MAX - 1)}…` : oneLine;
 }
 
-/**
- * Build the set of lower-cased handle names (the `@` stripped) that mean "me".
- *
- * ALWAYS includes the identity-derived handle; ADDS the current user's roster
- * display-name handle when their email matches a member row (and that row yields
- * a non-null handle). Lower-cased so the later comparison is case-insensitive;
- * a Set so membership is O(1) per token regardless of roster size.
- */
+/** The lower-cased handle names, without `@`, that mean "me". */
 function buildMyHandles(
   currentUserId: string,
   currentUserEmail: string | null | undefined,
   members: { email: string; display_name?: string | null }[],
 ): Set<string> {
   const handles = new Set<string>();
-  // The deterministic, viewer-independent handle is always "me" — even with no
-  // email, no roster, and no annotations.
   const own = deriveHandle(currentUserId);
   if (own) handles.add(own.toLowerCase());
 
-  // If we know the current user's email, their own roster row (matched
-  // case-insensitively) may contribute a display-name handle — so a mention
-  // typed by their real name also counts as "me".
   const email = currentUserEmail?.trim().toLowerCase();
   if (email) {
     for (const m of members) {
       if (m.email?.trim().toLowerCase() !== email) continue;
       const named = handleFromName(m.display_name);
       if (named) handles.add(named.toLowerCase());
-      // Don't break: tolerate a roster with duplicate rows for the same email by
-      // collecting every usable display-name handle they expose.
+      // No break: a roster may hold duplicate rows for one email.
     }
   }
   return handles;
 }
 
 /**
- * Whether `text` contains a mention TOKEN naming one of `myHandles`.
- *
- * Routes through {@link splitMentionTokens} — the SAME grammar the composer and
- * chip renderer use — so what counts as "a mention of me" is exactly what the
- * rest of the feature treats as a mention: an `@` opened on a word boundary, then
- * word characters. The token's `@` is stripped and the remainder compared
- * case-insensitively for an EXACT match, so `@user5xy9more` (a different,
- * longer token) never matches `@user5xy9`, and an email's `@` (no boundary) is
- * never even a token.
+ * Whether `text` holds a mention token naming one of `myHandles`. Uses the same
+ * tokenizer as the composer and chips and compares whole tokens, so
+ * `@user5xy9more` never matches `@user5xy9`.
  */
 function mentionsMe(text: string, myHandles: Set<string>): boolean {
   if (myHandles.size === 0) return false;
   for (const seg of splitMentionTokens(text)) {
     if (seg.kind !== "mention") continue;
-    // seg.text is "@name"; drop the leading "@" and compare case-insensitively.
     const name = seg.text.slice(1).toLowerCase();
     if (myHandles.has(name)) return true;
   }
@@ -160,25 +99,13 @@ export function MentionsOfMe({
   viewedCommentIds = [],
   onMarkViewed,
 }: Props) {
-  // Whether the panel is shown. The badge is ALWAYS rendered (it shows the count
-  // even at zero); the panel only appears after a click on the badge, and a
-  // second click hides it again — the contract's toggle.
   const [open, setOpen] = useState(false);
 
-  // Whether the panel hides already-viewed mentions (issue #803). Off by
-  // default, so the panel lists EVERY mentioning comment (viewed ones simply
-  // marked); when engaged it drops viewed items, leaving an unread-only inbox.
   const [hideViewed, setHideViewed] = useState(false);
 
-  // O(1) membership for "is this comment id viewed?" — built from the prop so
-  // the host stays the single owner of read-state. Recomputed only when the id
-  // list identity changes.
   const viewedSet = useMemo(() => new Set(viewedCommentIds), [viewedCommentIds]);
 
-  // The mentioning comments, in document order (pins in order, comments within a
-  // pin in order). Recomputed only when the data or identity changes — pure, so
-  // it never reads the scene/network. A comment is scanned ONCE; the first token
-  // that names me makes it a hit (mentionsMe short-circuits).
+  // Document order: pins in order, comments within a pin in order.
   const hits = useMemo<MentionHit[]>(() => {
     const myHandles = buildMyHandles(currentUserId, currentUserEmail, members);
     if (myHandles.size === 0) return [];
@@ -193,18 +120,12 @@ export function MentionsOfMe({
     return out;
   }, [annotations, currentUserId, currentUserEmail, members]);
 
-  // The badge counts only UNVIEWED mentions (issue #803): comments that mention
-  // me whose id is NOT in the viewed set. 0 when every mention is viewed (or
-  // there are none) — so the pill clears once the inbox is read.
   const unviewedCount = useMemo(
     () => hits.reduce((n, h) => (viewedSet.has(h.commentId) ? n : n + 1), 0),
     [hits, viewedSet],
   );
   const count = unviewedCount;
 
-  // The mentions actually rendered as items: all of them, or only the unviewed
-  // ones when the hide-viewed toggle is engaged. Viewed items that survive are
-  // still marked via `data-viewed` so "read" stays visible.
   const visibleHits = useMemo(
     () => (hideViewed ? hits.filter((h) => !viewedSet.has(h.commentId)) : hits),
     [hits, hideViewed, viewedSet],
@@ -212,10 +133,6 @@ export function MentionsOfMe({
 
   return (
     <div style={{ position: "relative", display: "inline-flex" }}>
-      {/* The always-present badge. Its textContent includes the integer count of
-          UNREAD comments that mention me (0 when all read / none), so a glance
-          tells the user whether anyone is waiting on them. Clicking toggles the
-          panel. */}
       <button
         type="button"
         data-testid="mentions-of-me-badge"
@@ -238,18 +155,15 @@ export function MentionsOfMe({
           display: "inline-flex",
           alignItems: "center",
           gap: "0.35rem",
-          // Tint when there ARE mentions (and again when the panel is open) so
-          // "someone mentioned you" reads at a glance, matching the accent the
-          // sibling toolbar toggles use.
+          // Same accent as the sibling toolbar toggles.
           background: open ? "#646cff" : count > 0 ? "#1f6feb" : undefined,
           color: open || count > 0 ? "#fff" : undefined,
         }}
       >
         <span aria-hidden="true">@</span>
         <span>Mentions</span>
-        {/* A small count pill, like a notification badge. Always shows the
-            integer (including 0) so the testid's textContent carries the count
-            in every state. */}
+        {/* Shows 0 too, so the badge's textContent carries the count in every
+            state. */}
         <span
           style={{
             minWidth: 16,
@@ -267,10 +181,6 @@ export function MentionsOfMe({
           {count}
         </span>
       </button>
-      {/* The panel — only after a click (toggled by the badge). One item per
-          mentioning comment, in document order; an item shows the comment's
-          snippet and, on click, navigates to its pin thread. Zero mentions → the
-          empty-state line (and NO mention-of-me-item-* nodes). */}
       {open && (
         <div
           data-testid="mentions-of-me-panel"
@@ -292,11 +202,9 @@ export function MentionsOfMe({
             fontSize: 12,
           }}
         >
-          {/* Header: the headline tracks UNVIEWED ("4 unread"), the slice-803
-              read/unread framing, while the row beneath carries the hide-viewed
-              toggle. Empty-state copy keys off whether ANY mention exists at all
-              (not the unviewed count), so a fully-read inbox still explains
-              itself rather than claiming no one ever mentioned you. */}
+          {/* Empty-state copy keys off whether any mention exists, not the
+              unread count, so a fully read inbox doesn't claim no one ever
+              mentioned you. */}
           <div
             style={{
               padding: "8px 10px",
@@ -315,10 +223,6 @@ export function MentionsOfMe({
                   ? "All mentions read"
                   : `${count} unread mention${count === 1 ? "" : "s"}`}
             </span>
-            {/* Hide-viewed toggle (issue #803). Always present while the panel is
-                open so it's testable in every state; when engaged the list below
-                renders only UNVIEWED items. aria-pressed + label reflect current
-                state for a screen reader. */}
             <button
               type="button"
               data-testid="mentions-of-me-hide-viewed-toggle"
@@ -347,8 +251,7 @@ export function MentionsOfMe({
               shows up here.
             </div>
           ) : visibleHits.length === 0 ? (
-            // There ARE mentions, but hide-viewed is engaged and every one is
-            // read: list NO items (contract #5) and say why.
+            // Every mention is read and hidden: say why the list is empty.
             <div style={{ padding: "10px", color: "#8b949e" }}>
               No unread mentions. Toggle off “Hide read” to see read ones.
             </div>
@@ -361,13 +264,7 @@ export function MentionsOfMe({
                     <button
                       type="button"
                       data-testid={`mention-of-me-item-${hit.commentId}`}
-                      // Each item declares its read-state so "read" is visible +
-                      // testable (contract #3).
                       data-viewed={isViewed ? "true" : "false"}
-                      // Click does BOTH (contract #2): jump to the comment's pin
-                      // thread (host recenters) AND mark this mention viewed so
-                      // it drops out of the unread count (and, with hide-viewed
-                      // engaged, out of the list).
                       onClick={() => {
                         onNavigate(hit.pinId);
                         onMarkViewed?.(hit.commentId);
@@ -383,8 +280,6 @@ export function MentionsOfMe({
                         background: "none",
                         border: "none",
                         borderBottom: "1px solid rgba(48,54,61,0.6)",
-                        // Read items recede (dimmed, normal weight); unread stay
-                        // bright + bold so the unread ones pop in a mixed list.
                         color: isViewed ? "#8b949e" : "#e6edf3",
                         fontWeight: isViewed ? 400 : 600,
                         cursor: "pointer",

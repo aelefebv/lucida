@@ -93,28 +93,15 @@ pub struct ImageBindingSeed {
 }
 
 /// What the chunk-fetch path needs to know about one level of one image:
-/// how the bytes are compressed on disk, the on-disk chunk shape (parallels
+/// the on-disk compression, the on-disk chunk shape (parallels
 /// `ImageBindingSeed.axes_names`), the canonical-byte slice layout, and,
 /// for a sharded level, how an inner chunk is found in its shard.
 ///
-/// `chunk_shape` is needed by the resolver to divide wire `t`/`c` voxel
-/// coords by the on-disk chunk size on those axes. The slice step on
-/// the server uses the same shape to compute the intra-chunk `(t, c)`
-/// indices passed into [`ChunkByteLayout::slice_range`].
-///
-/// On a sharded level every field describes the inner chunk: the shape the
-/// viewer plans and fetches in, the codec each inner chunk is stored with,
-/// and the slice layout of one decoded inner chunk. That is what lets
-/// bundled timepoints and channels compose with sharding. The server cuts
-/// the slice from an inner chunk exactly as it cuts it from an object. The
-/// shard itself appears only in `shard`, which only the server's resolver
-/// reads.
-///
-/// Built at import time from a strict-validated codec chain
-/// ([`crate::codec::parse_codec_chain`], or
-/// [`ShardLayout::from_codec_chain`] when the outer codec is the sharding
-/// codec) and the level's chunk shape
-/// ([`crate::layout::compute_chunk_byte_layout`]).
+/// On a sharded level every field describes the inner chunk, so bundled
+/// timepoints and channels compose with sharding: the server cuts the
+/// slice from an inner chunk exactly as from an object. Only the server's
+/// resolver reads `shard`. Built at import time from a strictly validated
+/// codec chain and the level's chunk shape.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LevelBindingInfo {
     pub level_index: u32,

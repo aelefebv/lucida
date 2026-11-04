@@ -123,10 +123,8 @@ describe("UrlSync", () => {
   });
 
   it("debounces writes", async () => {
-    // Real timers — the encoder uses CompressionStream which doesn't
-    // round-trip cleanly under vi.useFakeTimers. We assert the debounce
-    // contract directly (N calls collapse into 1 replaceState) via a
-    // spy + vi.waitFor, so the test is robust to CI scheduling jitter.
+    // Real timers: CompressionStream doesn't round-trip under fake timers.
+    // vi.waitFor keeps the N-calls-to-1-write check robust to CI jitter.
     const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
       debounceMs: 30,
       window: win,
@@ -219,10 +217,8 @@ describe("UrlSync", () => {
     });
     sync.start();
     (win as unknown as { _popstate: (s: unknown) => void })._popstate(null);
-    // popstate kicks off a fire-and-forget `bootstrap()` whose decode awaits
-    // the CompressionStream pipeline. Poll for the apply to land rather than
-    // guessing a fixed wall-clock delay, which races a slow CI runner
-    // (lucida-80g).
+    // popstate fires a `bootstrap()` whose decode awaits CompressionStream.
+    // Poll rather than sleep a fixed delay, which races a slow CI runner.
     await vi.waitFor(() => expect(applier.apply).toHaveBeenCalledTimes(1));
     sync.destroy();
   });
@@ -412,8 +408,7 @@ describe("UrlSync — #b=<id> bootstrap", () => {
     });
     sync.start();
     (win as unknown as { _popstate: (s: unknown) => void })._popstate(null);
-    // Poll for the bookmark fetch + apply to land instead of guessing a fixed
-    // wall-clock delay, which races a slow CI runner (lucida-80g).
+    // Poll rather than sleep a fixed delay, which races a slow CI runner.
     await vi.waitFor(() => expect(applier.apply).toHaveBeenCalledOnce());
     expect(applier.applied[0].view.t).toBe(99);
     sync.destroy();
@@ -552,7 +547,7 @@ describe("UrlSync — last view bootstrap (#700)", () => {
     await sync.bootstrap();
 
     expect(fetchLastView).toHaveBeenCalledOnce();
-    // Last view takes priority over the default — the default is never fetched.
+    // Last view beats the default, which is never fetched.
     expect(fetchDefault).not.toHaveBeenCalled();
     expect(applier.applied[0].view.t).toBe(5);
     sync.destroy();
@@ -734,9 +729,8 @@ describe("UrlSync — #a=<id> bootstrap (deferred to host; no apply here)", () =
   it("recognizes #a= and applies NOTHING at bootstrap (resolve is the host's post-doc-load job)", async () => {
     const win = makeFakeWindow("#a=pin-123", "/w/ws-1");
     const applier = new FakeApplier();
-    // Wire a default + last view + bookmark fetcher: NONE must fire — a #a=
-    // link must not be mistaken for a bare workspace open (which would apply the
-    // default/last view over the link's target).
+    // None of these may fire: a #a= link is not a bare workspace open, which
+    // would apply the default or last view over the link's target.
     const fetchDefault = vi.fn(async (): Promise<ResolvedSavedView | null> => ({
       id: "default",
       view: emptyView(),

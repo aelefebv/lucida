@@ -1,20 +1,14 @@
 /**
  * Tier two: per-tick aggregates, on a drop-oldest ring.
  *
- * The per-chunk tier is complete and never drops, because a chunk that
- * stalled at the start of a run is exactly the one worth naming. A tick
- * stream has no privileged start — it is steady state, and the ticks worth
- * reading during a stall are the recent ones — so this ring wraps and says
- * how many samples it wrapped over.
+ * The per-chunk tier never drops, because a chunk that stalled at the start
+ * of a run is the one worth naming. A tick stream has no privileged start,
+ * and the ticks worth reading during a stall are the recent ones, so this
+ * ring wraps and says how many samples it wrapped over.
  *
- * A sample is one planning pass's aggregate for one dataset: the shapes the
- * debug panel used to carry, recorded with a timestamp and recorded whether
- * or not anybody is looking. A tick that hits the planner's epoch cache
- * produces no plan and so no sample — gaps in the stream are cache hits, and
- * the counted phases that accrued during them ride on the next sample.
- *
- * The buffers are allocated once at their final size and the emit site fills
- * a reusable {@link TickScratch}, so recording a tick allocates nothing.
+ * A sample is one planning pass's aggregate for one dataset. A tick that hits
+ * the planner's epoch cache produces no sample, and the counted phases that
+ * accrued during it ride on the next one.
  */
 
 import type { LevelRange } from "../renderer/workerProtocol.ts";
@@ -240,15 +234,10 @@ export class TickRing {
 
   /**
    * The samples taken at or after `startUs`, oldest first, led by the last
-   * sample before it when the ring still holds one.
-   *
-   * A sample's sends and counted phases cover the interval since the sample
-   * before it, so the first sample inside a window needs its predecessor to
-   * know where its interval began, and that predecessor is carried for the
-   * same reason the reading ring carries the reading in force at a window's
-   * start. Read from the newest slot backwards and stopped at the first
-   * sample before the window, so the cost is the window's samples and never
-   * the ring's capacity.
+   * sample before it when the ring still holds one: a sample's sends and
+   * counted phases cover the interval since its predecessor, so the first
+   * sample in a window needs it. Read from the newest slot back, so the cost
+   * is the window's samples, never the ring's capacity.
    */
   serialiseFrom(startUs: number): TraceTick[] {
     const out: TraceTick[] = [];

@@ -1,21 +1,9 @@
 /**
- * Telemetry counters and burst-rate-limited debug loggers for CpuCache.
+ * Telemetry counters and rate-limited debug loggers for CpuCache.
  *
- * `TelemetryCounters` owns the scattered counter tiles the cache used
- * to mutate inline (totalRequests, totalHits, decode latency window,
- * eviction counts per tier, failure counts, average decoded bytes,
- * etc.). Mutation sites in CpuCache become verb calls; the read path
- * is a single `snapshot(now)` that also rolls the per-window counters.
- *
- * `BurstLogger` encapsulates the two rate-limited debug log paths:
- *  - `cache.backpressure` — emit a summary at most once per window
- *    while pressure persists (recordSkipped).
- *  - `cache.failure_burst` — emit one log per window when a failure
- *    count crosses a threshold (recordBurst).
- *
- * Pure: no I/O beyond the BurstLogger calls into `debugLog`. Snapshots
- * read `performance.now()` via the caller-supplied `now` so unit tests
- * remain deterministic without faking the global clock.
+ * `TelemetryCounters.snapshot(now)` is the only read path and also rolls
+ * the per-window counters. The caller supplies `now` so tests stay
+ * deterministic without faking the global clock.
  */
 
 import { debugLog, type DebugCategory } from "../../debug/logging.ts";
@@ -60,7 +48,6 @@ export interface TelemetrySnapshot {
   permanentFailures: number;
   /** Transient fetch failures since boot (or last `reset`). */
   transientFailures: number;
-  /** Latest fetch error message, or null if none. */
   lastError: string | null;
   /** Running average of decoded chunk sizes (bytes). */
   avgDecodedBytes: number;
@@ -232,21 +219,11 @@ export class TelemetryCounters {
 }
 
 /**
- * Rate-limited debug logger. Two emission patterns:
- *
- * 1. `recordSkipped(delta, payloadFn)` — accumulate a skipped counter
- *    on every call, emit a summary at most once per `windowMs`. The
- *    payload is built lazily via `payloadFn(skippedSinceLastLog)` only
- *    when an emission is about to fire. Use for "we kept falling
- *    behind, here's the summary"-style logs (cache.backpressure).
- *
- * 2. `recordBurst(threshold, payloadFn)` — count events within a
- *    window, emit ONCE when the count first crosses `threshold` in
- *    that window. Use for "real outage detected, here's a heads-up"
- *    logs (cache.failure_burst).
- *
- * Both share the same window state (`windowStartedAt`, `counter`),
- * so a single `BurstLogger` instance owns one stream of related events.
+ * Rate-limited debug logger. `recordSkipped` accumulates a counter and
+ * emits a summary at most once per `windowMs` (cache.backpressure).
+ * `recordBurst` emits once when the in-window count first crosses a
+ * threshold (cache.failure_burst). Both share one window, so an instance
+ * owns one stream of related events. Payloads are built only on emit.
  */
 export class BurstLogger {
   private windowStartedAt = 0;

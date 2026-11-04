@@ -1,24 +1,14 @@
 /**
  * The per-chunk states: for every row identity an interval recorded, where
- * its newest row stands and how many times the interval fetched it.
+ * its newest row stands and how many times the interval fetched it. This is
+ * what the overlay's phase color and churn tint paint, by the same rules as
+ * the text: a row's state is {@link rowState}'s, and a fetch is a row whose
+ * wire closed, as the steady-state refetch rule counts it.
  *
- * This is what the overlay's phase color and churn tint paint. It is
- * derived here, beside the chunk lookup and the spatial summary, so the
- * picture in space reads the same rules as the text: a row's state is
- * {@link rowState}'s, and a fetch is a row whose wire closed, which is what
- * the steady-state refetch rule counts (`summariseRefetch`). The window
- * every count is over is the interval's span, stated on the result, because
- * a count without a denominator is not a measurement.
- *
- * Unlike the document's sections this grows with the distinct chunks an
- * interval touched, so it is not a section of the diagnostic document. It is
- * the batched form of the chunk lookup, for a surface that has to color every
- * chunk on screen at once, and it has two readers. A surface fed a document,
- * such as a test over a fixture run or the dock's linked selection, reads it
- * directly. The overlay over an interval still being written reads the same
- * shape from the recorder's identity index instead, which answers without a
- * row walk; this function is the reference that read is held to, in
- * `rowTable.test.ts` and `recorderChunkIndex.test.ts`.
+ * It grows with the distinct chunks an interval touched, so it is not a
+ * section of the diagnostic document. The recorder's identity index answers
+ * the same shape for an open interval without a row walk, and is tested
+ * against this function.
  */
 
 import type { TraceRow, TraceRun } from "../types.ts";

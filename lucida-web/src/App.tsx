@@ -77,13 +77,9 @@ import { setReportSender } from "./trace/reportInbox.ts";
 import { useHudKeyBinding } from "./hud/useHudKey.ts";
 import "./App.css";
 
-// The debug UI (dev-controls panel + on-canvas overlay layer) is
-// code-split into its own on-demand chunk: the panel loads on the first
-// click of its toolbar button, the overlay layer only when an overlay
-// toggle is persisted on or a render-radius preview is being dragged. A
-// session that never opens either never downloads the code — the main
-// bundle keeps only the tiny gate module (debug/logging.ts) that
-// production code paths already share.
+// The debug UI is code-split: the panel loads on first open, the overlay layer
+// only when an overlay is on or a radius preview is being dragged. The main
+// bundle keeps only the small gate module, debug/logging.ts.
 const DevControls = lazy(() =>
   import("./debug/DevControls.tsx").then((m) => ({ default: m.DevControls })),
 );
@@ -104,21 +100,15 @@ interface AppProps {
   workspaceRole: WorkspaceRole;
   defaultSavedViewId: string | null;
   canRenameWorkspace: boolean;
-  /** Dataset URLs/paths to auto-open once the viewer connects (#697). Set by
-   *  the "create workspace from dataset(s)" flow (dashboard / file browser):
-   *  the workspace is created and navigated into first, then these are opened
-   *  here via the same path as the in-viewer "Open" flow. A failed open
-   *  surfaces through the normal open-failed banner and LEAVES the workspace in
-   *  place (it already exists and we're already in it). Already canonicalized
-   *  by the caller. Empty/undefined in the normal open-existing-workspace
-   *  case, so this is a no-op there. */
+  /** Canonical dataset URLs to open once the viewer connects, set by the
+   *  create-workspace-from-datasets flow. A failed open shows the normal
+   *  banner and leaves the workspace in place. */
   initialDatasetUrls?: readonly string[];
   onBackToDashboard: () => void;
   onRenameWorkspace: (name: string) => Promise<void>;
   onSetDefaultSavedView: (savedViewId: string | null) => Promise<void>;
-  /** Create a NEW workspace from dataset(s) chosen in the in-viewer file
-   *  browser and navigate into it (#697). Mirrors the dashboard entry point so
-   *  the "create workspace from selection" action is reachable from both. */
+  /** Create a new workspace from file-browser selections and navigate into
+   *  it, as the dashboard does. */
   onCreateWorkspaceFromDatasets?: (paths: string[]) => void;
 }
 
@@ -134,84 +124,53 @@ function App({
   onSetDefaultSavedView,
   onCreateWorkspaceFromDatasets,
 }: AppProps) {
-  // Authenticated principal — provided by <AuthGate> above us; throws if
-  // accessed unauthenticated. We forward the email to saved-view UI for
-  // the "Mine only" filter.
+  // Provided by <AuthGate>; throws when unauthenticated. The email feeds the
+  // saved-view "Mine only" filter.
   const authSession = useAuthSession();
 
-  // Stable, browser-persisted annotation author identity (issue #777). This is
-  // the identity used ONLY for the annotation `author:` field and the
-  // mine/ownership checks in the overlays/viewers — NOT the per-connection
-  // `bridge.myId`, which stays the presence/cursor/follow identity. Because it's
-  // persisted in localStorage it survives leaving + rejoining a workspace (and
-  // tab close/reopen), so a returning user keeps edit/move/delete on the pins
-  // and comments they authored. Resolved once per mount (the value is stable for
-  // the session) so the same string flows to every annotation consumer.
+  // Browser-persisted author identity, used only for annotation `author` and
+  // ownership checks; `bridge.myId` stays the presence/cursor/follow identity.
+  // Persisting it lets a returning user keep control of what they authored.
   const annotationAuthor = useMemo(() => annotationAuthorId(), []);
 
-  // Foundation hooks
   const scene = useWasmScene();
   const render = useRenderClient();
-  // Chrome-free capture surface for `dataset montage` / `dataset explore` / the
-  // headless trace driver: `?render=1` hides all UI chrome and lets the canvas
-  // fill the viewport so a headless screenshot is pure data, AND suppresses
-  // every persisted write (#923). Both halves of the rule, and what still needs
-  // gating if you add a write, live in `captureSurface.ts` — read it before
-  // wiring anything new into this component. Parsed once: the URL is stable per
-  // capture.
+  // `?render=1` is the chrome-free capture surface for `dataset montage`,
+  // `dataset explore`, and the trace driver: no UI chrome and no persisted
+  // writes. Read `captureSurface.ts` before wiring anything new in here.
   const captureSurface = useMemo(() => isCaptureSurface(), []);
   const layout = useLayout({ loopRef: render.loopRef, captureSurface });
 
-  // Shared refs used by multiple hooks
   const datasetsRef = useRef<Map<string, DatasetState>>(new Map());
-  // Lifted state — shared across hooks that can't own it due to call ordering
+  // Lifted here because call ordering stops the hooks that use it from owning it.
   const [selectedDatasetId, setSelectedDatasetId] = useState<string | null>(null);
   // Which annotation shape a shift-drag draws: a point pin (drop), a line
   // (drag between two points), or a box (drag between opposite corners).
   const [annotationKind, setAnnotationKind] = useState<"point" | "line" | "box">("point");
-  // Personal show/hide of ALL annotations (issue #792). A local view toggle —
-  // not a command, not synced to peers, not persisted across reloads — passed as
-  // `visible` to BOTH overlays so one toolbar button declutters every pin/line/
-  // box (and their threads) at once; flipping it back re-renders the untouched
-  // annotation set. Peer cursors are a separate overlay and stay visible.
+  // Personal show/hide of all annotations: local, unsynced, not persisted, and
+  // passed as `visible` to both overlays.
   const [annotationsVisible, setAnnotationsVisible] = useState(true);
-  // Imperative handles on the two annotation overlays (issue #526), so the
-  // "mentions of me" inbox can JUMP to a pin even though each overlay owns its
-  // own `openPinId` state. The host holds a ref to whichever overlay is mounted
-  // (2D vs 3D follow the view mode) and calls `focusPin(pinId)`, which opens that
-  // pin's thread and recenters on it. One ref per overlay keeps the seam explicit
-  // and view-specific without leaking overlay internals into App.
+  // Lets the mentions inbox jump to a pin, although each overlay owns its
+  // `openPinId`.
   const overlay2dRef = useRef<AnnotationOverlayHandle | null>(null);
   const overlay3dRef = useRef<AnnotationOverlayHandle | null>(null);
-  // Shared channel for the live box/line draw preview (issue: shapes only
-  // appeared on release). The canvas gesture handlers (SliceViewer/VolumeViewer)
-  // write the in-progress shape here; AnnotationDraftOverlay renders it.
+  // The canvas gesture handlers write the in-progress box or line here, and
+  // AnnotationDraftOverlay renders it live.
   const annotationDraftRef = useRef<AnnotationDraft | null>(null);
   const [datasetsVersion, setDatasetsVersion] = useState(0);
   const [remoteDocumentVersion, setRemoteDocumentVersion] = useState(0);
-  // Workspace member roster for @-mention candidates (issue #526). Best-effort:
-  // `getWorkspaceSharing` is owner-only server-side (403 for editors/viewers) and
-  // unavailable offline, so a failure leaves this `[]` and the picker falls back
-  // to the document's participants. Fetched once per workspace (the roster is
-  // small and changes rarely); members supply REAL display-name handles so you
-  // can @-mention a collaborator before they've touched the document.
+  // Roster for @-mention candidates, so a collaborator can be mentioned before
+  // they touch the document. Best-effort: sharing is owner-only and unavailable
+  // offline, so this may stay `[]` and the picker uses document participants.
   const [workspaceMembers, setWorkspaceMembers] = useState<WorkspaceMember[]>([]);
   const [cameraMode, setCameraMode] = useState<string>("arcball");
-  // A transient, non-blocking notice from the LIGHT annotation-view restore
-  // (slice 2): when an author's captured z/t/c had to be clamped to fit the
-  // pin's own dataset (different extents), we show a brief "Z adjusted to fit
-  // this dataset" line rather than blocking. Auto-cleared after a few seconds.
-  // Distinct from the heavy applier's LoadingViewBanner (the light path never
-  // goes through the applier — no dataset opening/hiding, no layout broadcast).
+  // A brief notice when the light annotation-view restore had to clamp z/t/c to
+  // fit the pin's dataset. Auto-cleared.
   const [restoreNotice, setRestoreNotice] = useState<string | null>(null);
-  // A non-blocking notice for the annotation DEEP-LINK path (slice 3) when the
-  // `#a=<id>` couldn't be resolved against the loaded workspace document — the
-  // annotation was deleted, or the id is wrong/forged. Distinct from
-  // `restoreNotice` (a successful-but-clamped restore) so the two never clobber
-  // each other; rendered as a dismissible message rather than a silent no-op.
-  // NEVER-LEAK: this is the SAME outcome a recipient-without-access would see
-  // (they never get this far — the workspace load fails at the gate first), so
-  // "deleted/forged id" and "not allowed" are indistinguishable by design.
+  // Set when `#a=<id>` doesn't resolve in the loaded document. Separate from
+  // `restoreNotice` so neither clobbers the other. A recipient without access
+  // fails at the workspace gate first, so this never reveals whether an
+  // annotation exists.
   const [deepLinkNotFound, setDeepLinkNotFound] = useState(false);
   const [workspaceNameEdit, setWorkspaceNameEdit] = useState({
     source: workspaceName,
@@ -323,31 +282,26 @@ function App({
     return { id: `viewer_profile:${record.profile}`, view: record.view };
   }, [workspaceId]);
 
-  // "Remember my last view" (#700) restore source for a bare /w/:id open.
-  // Returns the caller's own remembered view (server-scoped to the principal),
-  // or null when none / unavailable — the bootstrap then falls back to the
-  // workspace default. The toggle gate + URL-hash precedence live in UrlSync.
+  // "Remember my last view" for a bare /w/:id open: the caller's own view, or
+  // null to fall back to the workspace default. UrlSync owns the toggle and the
+  // URL-hash precedence.
   const fetchWorkspaceLastView = useCallback(async () => {
     const state = await getWorkspaceUserState(workspaceId);
     if (!state.last_view) return null;
     return { id: `last-view:${workspaceId}`, view: state.last_view };
   }, [workspaceId]);
 
-  // Persist the caller's current view as their last view (#700). Scoped to the
-  // principal server-side; never touches the shared default. Errors degrade
-  // silently in the capture effect (offline / non-member / auth-off).
+  // Persist the caller's current view as their last view, scoped to the
+  // principal; never the shared default. Errors degrade silently (offline,
+  // non-member, auth off).
   const persistWorkspaceLastView = useCallback(
     (view: SavedView) => updateWorkspaceLastView(workspaceId, view),
     [workspaceId],
   );
 
-  // Authoritative live Z/T/C for "Save view". The React dimension state
-  // (dims.z/t/c/multiChannel) is the source of truth for what the user is
-  // looking at; the scene's presence export can lag (peer-follow, restore,
-  // dim-clamp) and report the default `z_range {0,1}`, which the encoder
-  // then strips. We take z/t/c/multi_channel from React and preserve the
-  // current slab THICKNESS from the scene (React only tracks z_range.start
-  // via dims.z), so a multi-plane slab survives the capture.
+  // Live Z/T/C for "Save view" comes from React, because the scene's presence
+  // export can lag and report the default slab, which the encoder strips. Slab
+  // thickness comes from the scene, since React tracks only z_range.start.
   const getLiveView = useCallback((): SavedView["view"] | null => {
     const ws = scene.wasmSceneRef.current;
     let slabThickness = 1;
@@ -372,20 +326,14 @@ function App({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dims.z, dims.t, dims.c, dims.multiChannel]);
 
-  // SavedView wiring. Mounts the URL→scene sync, exposes the
-  // share-button capture, gives the loading banner a handle on apply
-  // progress, and forwards apply summaries for the selectedDatasetId
-  // wrinkle. Hook order matters: must come *after* `useBridge` so we
-  // can hand the applier the bridge functions, and *before* the
-  // savedViewHooksRef populate below.
+  // Saved-view wiring. Must come after `useBridge`, whose functions the applier
+  // needs, and before the savedViewHooksRef populate below.
   const savedViewSync = useSavedViewSync({
     getScene: () => scene.wasmSceneRef.current,
     sendOpenRemoteDataset: bridge.sendOpenRemoteDataset,
     sendCommand: bridge.sendCommand,
-    // The change tick combines doc and dataset versions: any local or
-    // remote scene mutation bumps one or the other, which is exactly
-    // what we want the URL to track. (Viewport-only mutations bypass
-    // these counters and are handled via the emitPresence wrapper below.)
+    // Any local or remote scene mutation bumps one of these. Viewport-only
+    // changes bypass them and go through emitPresenceWithUrl.
     changeTick: datasetsVersion + remoteDocumentVersion,
     onApplyResult: handleApplyResult,
     loopRef: render.loopRef,
@@ -405,7 +353,7 @@ function App({
     fetchViewerProfile: fetchWorkspaceViewerProfile,
     fetchLastView: fetchWorkspaceLastView,
     persistLastView: persistWorkspaceLastView,
-    // The capture surface reads views but never writes one back (#923).
+    // The capture surface reads views but never writes one back.
     captureSurface,
     // Restoring a view can change the shared active layout. A capture applies
     // it to its own scene only, so the picture is right and nobody else's is
@@ -413,19 +361,16 @@ function App({
     layoutMutation: captureSurface ? "local" : canEditWorkspace ? "broadcast" : "refuse",
   });
 
-  // The three callback-ref population sites below (savedViewHooksRef,
-  // bridgeCallbacksRef, datasetCallbacksRef) implement the "callback refs
-  // populated after all hooks return" pattern. Hooks defined earlier in the file
-  // depend on these refs to break circular dependencies; populating during
-  // render (before effects fire) is load-bearing — switching to useEffect
-  // would leave the refs unpopulated for the very first effect pass.
-  // Populate the bridge ↔ applier hook ref after the applier exists.
+  // The three callback-ref populate sites (savedViewHooksRef,
+  // bridgeCallbacksRef, datasetCallbacksRef) run during render, after all hooks
+  // return. That is load-bearing: populating in useEffect would leave the refs
+  // empty for the first effect pass.
   // eslint-disable-next-line react-hooks/refs
   savedViewHooksRef.current = {
     onDatasetOpened: (id) => savedViewSync.applier.notifyDatasetOpened(id),
     onOpenDatasetFailed: (url, err) => savedViewSync.applier.notifyOpenFailed(url, err),
-    // So the bridge can suppress auto-fit-on-open while a saved/last view is
-    // restoring its own camera (#700).
+    // So the bridge can suppress auto-fit-on-open while a saved or last view is
+    // restoring its own camera.
     isInProgress: () => savedViewSync.applier.isInProgress(),
   };
 
@@ -435,22 +380,11 @@ function App({
     sendOpenRemoteDataset: savedViewSync.trackedSendOpen,
   });
 
-  // Auto-open the seed dataset(s) for a "create workspace from dataset(s)" flow
-  // (#697). The workspace was created and navigated into by the dashboard /
-  // file browser; here we open the dataset(s) over the websocket exactly as the
-  // in-viewer "Open" affordance does (`datasets.handleUrlSubmit` →
-  // `trackedSendOpen` → `sendOpenRemoteDataset`), so dedup, URL→DatasetId
-  // tracking, the loading banner, and the open-failed error path all apply
-  // unchanged. Gated on `bridge.sessionReady` — the REAL transport-readiness
-  // signal (WS open AND first snapshot applied), NOT `Boolean(bridge.bridge)`,
-  // which flips synchronously while the socket is still CONNECTING. With the
-  // weaker gate the seed send could fire against a CONNECTING socket and be
-  // SILENTLY DROPPED by `Bridge.send` (no queue), leaving the new workspace
-  // stuck on "dataset open request sent" forever (the one-shot guard had
-  // already latched). `useSeedDatasetOpens` only latches AFTER it actually
-  // sends, so until `sessionReady` it simply waits, then fires exactly once. A
-  // FAILED import leaves the workspace in place and surfaces through the
-  // existing `remoteDatasetError` banner below; we don't unwind.
+  // Open the seed datasets for the create-workspace-from-datasets flow through
+  // the same path as the in-viewer "Open". Gated on `bridge.sessionReady`
+  // (socket open and first snapshot applied), not `Boolean(bridge.bridge)`,
+  // which flips while the socket is still connecting: `Bridge.send` has no
+  // queue and would drop the send. A failed open leaves the workspace in place.
   useSeedDatasetOpens({
     initialDatasetUrls,
     ready: bridge.sessionReady,
@@ -467,27 +401,19 @@ function App({
     () => 0,
   );
 
-  // Id of the saved view currently applied to the viewer, if any. The sidebar
-  // highlights the matching row so the user sees which view they're looking at.
-  // Set on a successful open (below); CLEARED the moment the live view diverges
-  // from it — see `emitPresenceWithUrl`, the single signal every viewport
-  // mutation funnels through — so the highlight means "the view on screen",
-  // not "the last row I clicked" (#818).
+  // The applied saved view, highlighted in the sidebar. Cleared as soon as the
+  // live view diverges (see `emitPresenceWithUrl`), so the highlight means "the
+  // view on screen", not "the last row clicked".
   const [currentOpenSavedViewId, setCurrentOpenSavedViewId] = useState<string | null>(null);
 
-  // Wrapped emitPresence/emitDatasetPresence — every viewport mutation
-  // co-taps urlSync.notifyChange() so the URL stays in sync (Bug #1 fix:
-  // changeTick alone doesn't bump on viewport-only mutations like
-  // pan/zoom/T/C/Z/contrast). Used here AND threaded into SliceViewer /
-  // VolumeViewer / CollectionSelector / handleCameraModeToggle
-  // — anywhere a viewport mutation already calls bridge.emitPresence.
+  // Every viewport mutation also calls urlSync.notifyChange(), because
+  // changeTick doesn't bump on viewport-only changes like pan or contrast.
+  // Threaded to every caller of bridge.emitPresence.
   const emitPresenceWithUrl = useCallback(() => {
     bridge.emitPresence();
     savedViewSync.notifyChange();
-    // A viewport mutation (pan / zoom / Z / T / C / mode / multi-channel) means
-    // the live view no longer equals the opened saved view, so drop the active
-    // -row highlight (#818). Functional + guarded so it's a no-op (no re-render)
-    // when nothing is highlighted — this fires on every pan frame.
+    // The live view no longer matches the opened saved view. Guarded so it
+    // doesn't re-render on every pan frame.
     setCurrentOpenSavedViewId((prev) => (prev === null ? prev : null));
   }, [bridge, savedViewSync]);
   const emitDatasetPresenceWithUrl = useCallback(() => {
@@ -495,10 +421,7 @@ function App({
     savedViewSync.notifyChange();
   }, [bridge, savedViewSync]);
 
-  // Fetch the workspace member roster for @-mention handles (issue #526) once per
-  // workspace. Best-effort: `getWorkspaceSharing` is owner-only and unavailable
-  // offline, so any failure just leaves `workspaceMembers` empty and the picker
-  // falls back to document participants — the feature degrades, never throws.
+  // Fetch the roster once per workspace; see `workspaceMembers`.
   useEffect(() => {
     let cancelled = false;
     getWorkspaceSharing(workspaceId)
@@ -515,40 +438,17 @@ function App({
     };
   }, [workspaceId]);
 
-  // @-mention candidates for annotation comments (issue #526), threaded to both
-  // overlays' shared ThreadPopover. SOURCE = a graceful UNION of the workspace
-  // members (real display-name handles, when the roster fetch succeeded) and the
-  // document's PARTICIPANTS — the distinct authors already in
-  // `scene.annotations(selectedDataset)` (pin AND comment authors) plus the
-  // current user. Re-derived whenever the document changes (remoteDocumentVersion)
-  // or the scoped dataset switches, so the picker tracks who's in the conversation
-  // as pins/comments arrive. Reading the scene in a memo is the same JSON read the
-  // overlays do; a parse failure degrades to participants + you rather than
-  // throwing. Each candidate carries a STABLE, viewer-independent @handle, so a
-  // mention means the same person to everyone (see annotationParticipants.ts).
-  // The current dataset's annotations (pins + nested comments), read ONCE from
-  // the scene per doc/dataset change and shared by the mention-candidate builder
-  // AND the "mentions of me" inbox (issue #526). A single typed read is the same
-  // JSON the overlays parse; a malformed/empty snapshot degrades to `[]` rather
-  // than throwing. Scoped to `selectedDatasetId` so everything downstream is
-  // CURRENT-dataset only (cross-dataset aggregation is out of scope).
+  // The current dataset's annotations, read once per document or dataset change
+  // and shared by the mention-candidate builder and the mentions inbox.
   const currentAnnotations = useMemo<Annotation[]>(() => {
-    // Read the CURRENT dataset's pins+comments for the mention machinery (the
-    // "mentions of me" badge + the candidate builder). The resolver scopes to
-    // `selectedDatasetId` when one is selected, and otherwise falls back to the
-    // first dataset that actually has annotations — so a peer's mention that
-    // lands before any dataset is selected is still counted live (bug #802).
-    // See currentDatasetAnnotations.ts.
+    // With no selection, falls back to the first dataset with annotations, so a
+    // peer's mention that lands before selection still counts.
     return currentDatasetAnnotations(scene.wasmSceneRef.current, selectedDatasetId);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- re-read on doc/dataset change; the scene is a stable ref.
   }, [scene.wasmSceneRef, selectedDatasetId, remoteDocumentVersion]);
 
-  // Per-browser read-state for the "mentions of me" inbox (issue #803): which
-  // mention comment ids THIS browser has already viewed, persisted in
-  // localStorage and scoped to the selected dataset so reads never bleed across
-  // datasets. Personal state only — never synced, no command, no Rust. The
-  // <MentionsOfMe> badge counts only ids NOT in this set, and a click on an item
-  // marks it viewed (composed with the navigate below).
+  // Per-browser read state for the mentions inbox, persisted and scoped to the
+  // selected dataset. Never synced.
   const { viewedCommentIds, markViewed } = useViewedMentions(selectedDatasetId);
 
   const mentionCandidates = useMemo(() => {
@@ -560,27 +460,13 @@ function App({
     });
   }, [currentAnnotations, annotationAuthor, workspaceMembers, authSession.principal.email]);
 
-  // ANNOTATION NAVIGATION — the TWO TIERS (annotation-views slice 2).
+  // Annotation navigation has two tiers. Gentle (a pin clicked on the canvas)
+  // opens the thread and recenters, never touching camera, contrast, or zoom.
+  // Explicit (a mention or "Go to author's view") restores the author's
+  // captured view and falls back to gentle when the pin has none.
   //
-  //  - GENTLE (passive canvas pin-select): clicking a pin's dot on the canvas
-  //    keeps today's behavior — the overlay opens the thread and, when the host
-  //    drives it, recenters via `focusPin` (2D `set_center` / 3D
-  //    `arcball_center_on_voxel`). It NEVER yanks the camera/contrast/zoom. The
-  //    `gentleOnContext` helper below is the on-context part of that path.
-  //  - EXPLICIT (mention navigation / "Go to author's view"): performs the FULL
-  //    restore of the author's captured view via `restoreCapturedView` →
-  //    `restoreAnnotationView` (camera incl. 2D<->3D mode switch, z/t/c, display).
-  //    This is the LIGHT restore tier: local ViewportCommands only — no dataset
-  //    opening/hiding, no SetActiveLayout broadcast (the heavy `applier.apply` is
-  //    reserved for the cold share-link open in the next slice). A pin without a
-  //    captured view falls back to the gentle path (no regression).
-  //
-  // GENTLE recenter to a pin (today's behavior, issue #779): bring the pin
-  // on-context by matching its Z/T/C, break follow, emit presence. Does NOT
-  // touch the camera/contrast/zoom — that's the explicit-restore tier's job.
-  // Returns whether anything changed (for the caller's emit bookkeeping is
-  // handled internally). Reused by both the no-view fallback AND the passive
-  // canvas pin-select (which stays gentle by design).
+  // `gentleOnContext` brings the pin on-context by matching its Z/T/C, breaking
+  // follow, and emitting presence.
   const gentleOnContext = useCallback((pin: Annotation) => {
     const ws = scene.wasmSceneRef.current;
     const targetZ = pin.z ?? 0;
@@ -617,22 +503,14 @@ function App({
     handle?.focusPin(pinId);
   }, []);
 
-  // The FULL (light) restore of an annotation's captured view — the
-  // explicit-navigation tier. Restores the author's camera (incl. switching the
-  // 2D<->3D camera MODE before focusing), z-slab/t/c, and display
-  // (contrast/gamma), then recenters on the pin so it's actually on-screen.
-  //
-  // LIGHT, not heavy: routed through `restoreAnnotationView`, which issues ONLY
-  // recipient-local ViewportCommands (no dataset opening, no hiding, no
-  // SetActiveLayout broadcast). The pin's own dataset is the clamp target +
-  // ends up on-context; an out-of-extent capture clamps gracefully with a
-  // non-blocking notice. An annotation with NO captured view falls back to the
-  // gentle recenter (today's behavior — no regression).
+  // The explicit tier: restore the author's camera (switching 2D/3D mode before
+  // focusing), z-slab/t/c, and display through `restoreAnnotationView`, which
+  // issues only local ViewportCommands, then recenter on the pin. A pin without
+  // a captured view takes the gentle path.
   const restoreCapturedView = useCallback((pin: Annotation, datasetIdOverride?: string) => {
     const ws = scene.wasmSceneRef.current;
     if (!ws || !pin.view) {
-      // No view (older pin) or no scene: degrade to exactly today's gentle path,
-      // then focus in the current mode.
+      // No captured view or no scene: take the gentle path, then focus.
       gentleOnContext(pin);
       const focus = () => focusPinForMode(pin.id, dims.viewMode);
       if (!annotationsVisible) {
@@ -644,20 +522,11 @@ function App({
       return;
     }
 
-    // The pin's OWN dataset is the clamp target — resolved the SAME way the pin
-    // set was read (`selectedDatasetId` if selected, else the first annotated
-    // dataset; see resolveAnnotationDatasetId). This matters in the
-    // null-selection window — the Mentions inbox reaches restore with
-    // `selectedDatasetId === null` (0 datasets, or >=2 with none clicked), and
-    // `selectedDatasetId ?? ""` would clamp against `""`, whose WASM
-    // `dataset_volume_shape` is the `[1,1,1]` sentinel — collapsing a deep
-    // captured Z to plane 0 (the #814 class). When no dataset is resolvable we
-    // pass `undefined`, so `restoreAnnotationView` SKIPS the clamp (the captured
-    // z/t/c pass through) rather than collapsing.
-    // A deep-link (`#a=`) passes the pin's OWN dataset explicitly (the pin may
-    // live on a dataset that isn't the selected one), so the clamp targets the
-    // right extents even before selection settles. Otherwise resolve the SAME
-    // way the pin set was read.
+    // Clamp against the pin's own dataset. A deep link passes it explicitly;
+    // otherwise resolve it the way the pin set was read. With no selection,
+    // `selectedDatasetId ?? ""` would clamp against the `[1,1,1]` sentinel and
+    // collapse a deep Z to plane 0, so an unresolvable dataset passes
+    // `undefined` and the clamp is skipped.
     const pinDatasetId =
       datasetIdOverride ?? resolveAnnotationDatasetId(ws, selectedDatasetId) ?? undefined;
     const result = restoreAnnotationView({
@@ -668,9 +537,8 @@ function App({
       labelNamesFor: dims.labelNamesFor,
     });
 
-    // Mirror the restored scene state into React (the restore wrote to WASM
-    // only — without this the Z/T/C sliders + mode toggles stay stale). Push the
-    // clamped indices and the resolved view mode / camera mode.
+    // The restore wrote only to WASM; mirror it into React so the sliders and
+    // mode toggles aren't stale.
     dims.setZ(result.applied.zStart);
     dims.setT(result.applied.t);
     dims.setC(result.applied.c);
@@ -689,13 +557,12 @@ function App({
     emitPresenceWithUrl();
     invalidateAfterViewRestore(render.loopRef.current, "annotation_view_restore");
 
-    // Surface the graceful-degrade notice (auto-clears below).
+    // The clamp notice auto-clears below.
     setRestoreNotice(result.notice);
 
-    // Focus the pin AFTER the restore. If the camera MODE flipped (a different
-    // overlay must mount) OR annotations were hidden, defer one frame so the
-    // correct overlay's imperative ref exists before we call into it. Focus uses
-    // the RESTORED mode, not the (possibly stale) live `dims.viewMode`.
+    // If the mode flipped or annotations were hidden, wait a frame so the right
+    // overlay's ref exists. Focus with the restored mode, not the possibly stale
+    // `dims.viewMode`.
     const focus = () => focusPinForMode(pin.id, result.viewMode);
     const needsRemount = result.cameraModeChanged || !annotationsVisible;
     if (!annotationsVisible) setAnnotationsVisible(true);
@@ -707,16 +574,14 @@ function App({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- stable setters/bridge/emit/render refs/scene ref; reactive deps listed.
   }, [dims.viewMode, dims.dimensionExtentsFor, dims.labelNamesFor, annotationsVisible, selectedDatasetId, gentleOnContext, focusPinForMode]);
 
-  // Explicit navigation to a mentioning comment (issue #526) now performs the
-  // FULL restore when the pin carries the author's captured view, and falls back
-  // to today's gentle recenter when it doesn't (older pins). This is the user's
-  // core intent for an explicit jump: "go to the view the author had."
+  // A mention jump restores the author's view, or recenters gently when the pin
+  // has none.
   // eslint-disable-next-line react-hooks/preserve-manual-memoization -- the compiler infers the stable `setAnnotationsVisible` setter as a dep; the manual deps are the reactive values actually read.
   const handleNavigateToMention = useCallback((pinId: string) => {
     const pin = currentAnnotations.find((p) => p.id === pinId);
     if (!pin) {
-      // Unknown pin: keep the old safe focus attempt (no-op if the overlay lacks
-      // it) so a stale id never wedges navigation.
+      // Unknown pin: still try a focus, a no-op if the overlay lacks the pin, so
+      // a stale id never wedges navigation.
       const focus = () => focusPinForMode(pinId, dims.viewMode);
       if (!annotationsVisible) {
         setAnnotationsVisible(true);
@@ -729,35 +594,21 @@ function App({
     restoreCapturedView(pin);
   }, [currentAnnotations, restoreCapturedView, focusPinForMode, dims.viewMode, annotationsVisible]);
 
-  // The pin thread/popover's "Go to author's view" affordance (slice 2): the
-  // EXPLICIT, on-demand full restore for a pin selected passively on the canvas.
-  // Passive canvas pin-select stays gentle; THIS button is how a user opts into
-  // the author's framing from a pin's own thread. Same full-restore path as an
-  // explicit mention navigation. Looks the pin up in the current set so the
-  // overlays only need to pass an id.
+  // "Go to author's view" in a pin's thread: the explicit restore for a pin
+  // selected on the canvas.
   const handleGoToAuthorView = useCallback((pinId: string) => {
     const pin = currentAnnotations.find((p) => p.id === pinId);
     if (!pin) return;
     restoreCapturedView(pin);
   }, [currentAnnotations, restoreCapturedView]);
 
-  // ANNOTATION DEEP-LINK (`#a=<annotationId>`) — slice 3. Resolve+restore+focus
-  // the linked pin against the LOADED workspace document. Runs from the
-  // post-document-load effect below (keyed on `remoteDocumentVersion`), NOT at
-  // scene bootstrap: the pin exists only after the doc snapshot lands, so
-  // resolving earlier would focus an unloaded pin (the #802 class).
-  //
-  // The pin may live on a dataset that isn't currently selected; selecting it
-  // first mounts that dataset's overlay so `focusPin` (inside restoreCapturedView)
-  // can actually open the thread. When selection changes we defer the restore one
-  // frame so the overlay's imperative ref exists before we focus.
+  // `#a=<annotationId>` deep link. The pin may live on an unselected dataset;
+  // selecting it mounts that dataset's overlay, so the restore waits a frame
+  // for the overlay's ref.
   const restoreAnnotationDeepLinkPin = useCallback(
     (pin: Annotation, datasetId: string, onRestored: () => void) => {
-      // Collapse `#a=`→`#view=` only AFTER the restore has applied, so the URL
-      // captures the restored camera, not the pre-restore one. When the pin is
-      // on a not-yet-selected dataset the restore is deferred a frame (the
-      // overlay must mount first); the collapse must ride the SAME frame, else a
-      // copy/refresh in that window grabs the stale view.
+      // Collapse `#a=` to `#view=` only after the restore, in the same frame, so
+      // the URL captures the restored camera rather than the stale one.
       const run = () => {
         restoreCapturedView(pin, datasetId);
         onRestored();
@@ -772,15 +623,9 @@ function App({
     [restoreCapturedView, selectedDatasetId],
   );
 
-  // Resolve the `#a=<id>` deep-link AFTER the workspace document's annotations
-  // have loaded (annotation-views slice 3). The TIMING lives in the hook: it
-  // re-checks on every `remoteDocumentVersion` bump (the bridge bumps it once a
-  // snapshot/command lands), so the FIRST tick where the pin is actually
-  // readable triggers the restore — NOT at scene bootstrap, where the doc is
-  // still empty and `focusPin` would no-op on an unloaded pin (the #802 class).
-  // On success it reuses the slice-2 LIGHT restore + focus and collapses `#a=`
-  // to the live `#view=` (like `#b=`); a missing id surfaces the graceful
-  // not-found notice rather than a silent no-op.
+  // The hook re-checks on every `remoteDocumentVersion` bump, so the restore
+  // runs on the first tick where the pin is readable, not at scene bootstrap
+  // while the document is still empty.
   const collapseDeepLinkHash = savedViewSync.collapseDeepLinkHash;
   const handleDeepLinkCollapse = useCallback(() => {
     void collapseDeepLinkHash();
@@ -821,17 +666,11 @@ function App({
     },
   };
 
-  // Side-effect hooks.
-
-  // Expose the tickCoordinator + cpuCache on `window.__orch` (also
-  // aliased as `__lucidaOrch`) so the dev console can call
-  // `requestTestProxy(datasetId, entityId, imageId, kind, t, c)` to
-  // verify the proxy fetch wire flow. Dev builds only: requestTestProxy
-  // issues real fetches, so production gets no such hook. (The
-  // load-bearing capture globals — `__lucidaCaptureReady` published by
-  // renderLoop.ts, `__lucidaAutoContrast` by useIntensityBatcher.ts —
-  // are a separate contract and stay present in every build; the CLI
-  // capture path and the tryout harness read them.)
+  // Expose the tickCoordinator and cpuCache as `window.__orch` (alias
+  // `__lucidaOrch`) for `requestTestProxy` from the dev console. Dev builds
+  // only, since it issues real fetches. The capture globals
+  // (`__lucidaCaptureReady`, `__lucidaAutoContrast`) are a separate contract
+  // that the CLI reads in every build.
   useEffect(() => {
     if (!import.meta.env.DEV) return;
     const loop = render.activeLoop;
@@ -882,9 +721,9 @@ function App({
           }),
       canvasRect: () => visibleRectOf(render.canvasRef.current),
     });
-    // **Send report** goes over the same socket. Registered only while
-    // one exists, so a page with no session offers no send rather than a
-    // send that goes nowhere — and nothing but the action calls it.
+    // **Send report** goes over the same socket. Registered only while one
+    // exists, so a page with no session offers no send rather than one that
+    // goes nowhere. Only the action calls it.
     setReportSender(
       liveBridge ? (bundleJson: string) => liveBridge.sendReport(bundleJson) : null,
     );
@@ -978,10 +817,7 @@ function App({
     requestRender(render.loopRef.current, "peer_cursors");
   }, [bridge.peers, bridge.myId, bridge.followTarget, dims.viewMode, render.clientReady, scene.wasmReady, render.clientRef, scene.wasmSceneRef, render.loopRef, render.canvasRef]);
 
-  // Auto-clear the light-restore graceful-degrade notice a few seconds after it
-  // appears, so it reads as a transient "FYI we adjusted to fit" rather than a
-  // persistent banner. Re-arms on each new notice (the timer keys off the notice
-  // identity); clearing to null is inert.
+  // Auto-clear the clamp notice after a few seconds. Re-arms on each new notice.
   useEffect(() => {
     if (!restoreNotice) return;
     const timer = setTimeout(() => setRestoreNotice(null), 4000);
@@ -1031,8 +867,8 @@ function App({
 
   const [showFileBrowser, setShowFileBrowser] = useState(false);
   const [showDevControls, setShowDevControls] = useState(false);
-  // The dock overlays the canvas rather than resizing it (ADR 0052 as
-  // amended), so opening it changes nothing the recorder sees.
+  // The dock overlays the canvas rather than resizing it (ADR 0052), so
+  // opening it changes nothing the recorder sees.
   const [showMonitor, setShowMonitor] = useState(false);
   // Whether any on-canvas debug overlay is toggled on (persisted in
   // localStorage `debug.overlays`, independent of every panel). Drives the
@@ -1063,8 +899,7 @@ function App({
   const toggleHud = useCallback(() => setShowHud((v) => !v), []);
   useHudKeyBinding(toggleHud);
   const [showBookmarkSidebar, setShowBookmarkSidebar] = useState(true);
-  // Default the Explore panel CLOSED; it remains a user toggle. (It previously
-  // opened on a fresh dataset open to surface the guided-exploration affordance.)
+  // The Explore panel starts closed; it is a user toggle.
   const [showExplorePanel, setShowExplorePanel] = useState(false);
   const [showWorkspaceSharing, setShowWorkspaceSharing] = useState(false);
 
@@ -1098,13 +933,9 @@ function App({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [layers.layerInfos, datasetsVersion]);
 
-  // Preview-thumbnail renderer for the Explore panel's contact sheet. Builds a
-  // closure that turns a candidate child view into an off-screen render of the
-  // dataset's resident coarse overview from that view's camera (reusing the
-  // minimap render path; see exploreThumbnails.ts). Rebuilt when the target
-  // dataset changes; reads scene/client/datasets via refs at call time so it
-  // always sees the live state. Undefined when there's no dataset to preview, in
-  // which case the panel just shows label-only rows.
+  // Contact-sheet thumbnails for the Explore panel: off-screen renders of the
+  // resident coarse overview from each candidate's camera (see
+  // exploreThumbnails.ts). Undefined with no dataset, so rows are label-only.
   const requestThumbnail = useMemo(() => {
     const id = exploreTarget.id;
     if (!id) return undefined;
@@ -1135,9 +966,9 @@ function App({
     };
   }, [showExplorePanel, render.loopRef, render.activeLoop, datasetsVersion]);
 
-  // Bookmark from the Explore panel: an ephemeral PERSONAL workspace saved view
-  // (guided exploration never auto-shares). Thin wrapper over the workspace API
-  // so the panel doesn't need to mount the full saved-views list hook.
+  // Bookmark from the Explore panel as a personal workspace saved view, since
+  // guided exploration never auto-shares. Calls the API directly so the panel
+  // needn't mount the saved-views list hook.
   const handleExploreBookmark = useCallback(
     (name: string, view: SavedView, visibility: "personal") =>
       createWorkspaceSavedView(workspaceId, name, view, visibility),
@@ -1168,10 +999,9 @@ function App({
     setCurrentOpenSavedViewId(savedViewId);
   }, [savedViewApplier, notifySavedViewChange]);
 
-  // The sidebar tells us when the open saved view stops existing as the user
-  // acts on it (deleted / withdrawn / its deferred reject committed); drop the
-  // active-row highlight so it doesn't dangle on a view that's gone (#818).
-  // Guard on the id so a stale invalidation can't clear a newer open view.
+  // The sidebar reports when the open saved view stops existing (deleted,
+  // withdrawn, or rejected); drop the highlight. The id guard keeps a stale
+  // invalidation from clearing a newer open view.
   const handleActiveSavedViewInvalidated = useCallback((savedViewId: string) => {
     setCurrentOpenSavedViewId((prev) => (prev === savedViewId ? null : prev));
   }, []);
@@ -1261,20 +1091,14 @@ function App({
         layoutRegistry={layoutRegistry}
         sendCommand={bridge.sendCommand}
         onLayoutChange={() => {
-          // The switcher already applied `set_active_layout` to the scene
-          // (LayoutRegistry.setActive). Match the inbound-peer arm in
-          // sessionController.ts, which bumps the settings generation after
-          // every applied command and marks interactive — so the planner
-          // re-reads and the canvas replans/renders without waiting for a
-          // pan/zoom (the #780 class: a missed signal here leaves collection
-          // members drawn at their pre-switch positions).
+          // The switcher already applied `set_active_layout`. Match the
+          // inbound-peer arm in sessionController.ts so the planner re-reads
+          // now; a missed signal leaves collection members drawn at their
+          // pre-switch positions until the next pan or zoom.
           invalidateDisplaySettings(render.loopRef.current, "layout_switch");
-          // A local layout switch re-anchors collection annotations in core (issue
-          // #780), but — unlike an inbound peer switch (see sessionController.ts) — it
-          // doesn't bump the remote document version on its own, so the overlay
-          // would keep showing pins at their pre-switch positions for the
-          // switcher. Bump it here so the overlay re-reads the re-anchored pins,
-          // exactly as it does after any other document change.
+          // A local switch re-anchors collection annotations in core but, unlike
+          // an inbound peer switch, doesn't bump the document version, so bump
+          // it here for the overlay to re-read the pins.
           bumpRemoteDocumentVersion();
         }}
         style={{ width: layout.sidebarWidth, minWidth: layout.sidebarWidth }}
@@ -1545,11 +1369,7 @@ function App({
               overflow={bridge.remoteDatasetWarningsOverflow}
               onDismiss={bridge.dismissRemoteDatasetWarnings}
             />
-            {/* Non-blocking graceful-degrade notice from the LIGHT annotation
-                -view restore (slice 2): shown when an author's captured z/t/c had
-                to be clamped to fit the pin's own dataset. Auto-clears (effect
-                below). Separate from LoadingViewBanner — the light restore never
-                runs the heavy applier. */}
+            {/* Clamp notice from the light annotation-view restore. */}
             {restoreNotice && (
               <div
                 role="status"
@@ -1572,13 +1392,8 @@ function App({
                 {restoreNotice}
               </div>
             )}
-            {/* Annotation DEEP-LINK not-found notice (slice 3): the `#a=<id>`
-                couldn't be resolved against the loaded workspace document
-                (deleted, or a wrong/forged id). Non-blocking + dismissible — a
-                clear message rather than a silent no-op. NEVER-LEAK: a recipient
-                without workspace access never reaches here (the load fails at the
-                gate first), so this is the SAME UX as a genuinely missing pin —
-                it never confirms the annotation existed. */}
+            {/* `#a=<id>` didn't resolve. A recipient without access fails at the
+                gate first, so this never confirms the annotation existed. */}
             {deepLinkNotFound && (
               <div
                 role="status"
@@ -1661,13 +1476,8 @@ function App({
               </div>
             )}
             <DimensionControls label="T" value={dims.t} max={dims.dimT} onChange={dims.handleTChange} />
-            {/* Focal-depth control (issue #532): a USER-facing near↔far
-                bias for the 3-D center-out chunk-spawn origin. 3-D-only —
-                the bias is meaningless on a 2-D slice — so it appears here
-                (alongside the Z slider, which is itself disabled in 3-D)
-                only when the viewer is in 3-D mode. Binds straight to
-                configStore.depthBiasView (one source of truth); this is the
-                discoverable home, replacing the old Debug→Config entry. */}
+            {/* Near/far bias for the 3D chunk-spawn origin, shown only in 3D
+                where it means something. Binds to configStore.depthBiasView. */}
             {dims.viewMode === "3d" && <FocalDepthControl />}
           </div>
         )}
@@ -1712,31 +1522,17 @@ function App({
               <option value="box">Box</option>
             </select>
           </label>
-          {/* "Mentions of me" inbox (issue #526): an always-present badge with the
-              count of CURRENT-dataset comments that @-mention the current user,
-              toggling a panel of those comments; clicking one opens its pin thread
-              and recenters via the overlay's imperative `focusPin` seam. Fed by
-              the same current-dataset annotations the mention-candidate builder
-              reads, the principal email, and the workspace roster. Sits next to
-              the annotation-visibility toggle in the toolbar row. */}
           <MentionsOfMe
             annotations={currentAnnotations}
             currentUserId={annotationAuthor}
             currentUserEmail={authSession.principal.email}
             members={workspaceMembers}
             onNavigate={handleNavigateToMention}
-            // Read/unread inbox (issue #803): the persisted per-browser viewed
-            // set drives the unread count + per-item read marks; clicking an
-            // item marks it viewed (the component composes this with onNavigate).
             viewedCommentIds={viewedCommentIds}
             onMarkViewed={markViewed}
           />
-          {/* One personal view toggle (issue #792): show/hide ALL annotations
-              (pins, lines, boxes — and their threads) at once. Flips local state
-              passed as `visible` to both overlays; it is not a command, not
-              synced to peers, and doesn't touch the document. The aria-label +
-              title reflect the NEXT action (what clicking will do), so the
-              control reads correctly to a screen reader in either state. */}
+          {/* The aria-label and title name the next action, so the control
+              reads correctly in either state. */}
           <button
             data-testid="annot-visibility-toggle"
             onClick={() => setAnnotationsVisible((v) => !v)}
@@ -1747,9 +1543,7 @@ function App({
               padding: "0.375rem 0.75rem",
               fontSize: "0.875rem",
               whiteSpace: "nowrap",
-              // Reflect the hidden state with the same accent the other toolbar
-              // toggles use, so "annotations are currently hidden" reads at a
-              // glance.
+              // Same accent as the other toolbar toggles.
               background: !annotationsVisible ? "#646cff" : undefined,
               color: !annotationsVisible ? "#fff" : undefined,
             }}

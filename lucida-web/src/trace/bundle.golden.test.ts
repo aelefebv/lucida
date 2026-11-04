@@ -1,18 +1,13 @@
 // @vitest-environment happy-dom
 /**
- * The golden bundle the CLI reads back.
+ * The golden bundle the CLI reads back. This suite writes
+ * `trace-fixtures/bundle-v1.json` from `bundleFixtures.ts` and the CLI's
+ * tests parse and print it, so the page is the generator and the CLI is the
+ * lock, the reverse of the wire goldens.
  *
- * `trace-fixtures/bundle-v1.json` at the repository root is written by this
- * suite from the fixed inputs in `bundleFixtures.ts`, and the CLI's tests
- * parse the same file into its bundle types, print it at every depth, and
- * hold the header to the driver's replay inputs. The page produces the file,
- * so the page's side is the generator and the CLI's side is the lock, the
- * reverse of the wire goldens.
- *
- * On failure, first decide which side is wrong. If the bundle change is
- * intentional, regenerate with
+ * On failure, first decide which side is wrong. If the change is intentional,
  * `REGEN_TRACE_FIXTURES=1 pnpm exec vitest run src/trace/bundle.golden.test.ts`
- * and run `cargo test -p lucida-cli` to see what the CLI's reading needs.
+ * regenerates it, and `cargo test -p lucida-cli` shows what the CLI needs.
  */
 import { describe, expect, it } from "vitest";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";

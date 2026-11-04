@@ -692,16 +692,10 @@ pub struct LogoutState {
 
 /// `POST /auth/logout` — local-only sign-out.
 ///
-/// Idempotent: the response shape (302 + clearing cookie) is identical
-/// whether or not the request carried a valid session cookie, so the
-/// web client can call it without first checking auth state. We
-/// deliberately do **not** federate to Google's revoke endpoint — see
-/// `docs/adr/0016-backend-mediated-oauth-with-session-cookies.md`
-/// §"Logout" for the rationale (the ID token isn't held past login).
-///
-/// Returns 302 to `/`. fetch() in the web client follows redirects by
-/// default but the body of `/` is irrelevant — useAuthState refreshes
-/// via `/auth/whoami` after the call resolves, which then returns 401.
+/// Idempotent: 302 to `/` with a clearing cookie whether or not the
+/// request carried a valid session, so the client need not check auth
+/// state first. It does not federate to Google's revoke endpoint, since
+/// the ID token is not held past login (ADR-0016).
 pub async fn logout<B>(State(state): State<LogoutState>, req: Request<B>) -> Response {
     let (parts, _body) = req.into_parts();
     let session_id = read_session_cookie(&parts, &state.config.cookie_name);
@@ -741,17 +735,12 @@ pub async fn logout<B>(State(state): State<LogoutState>, req: Request<B>) -> Res
         "auth.logout"
     );
 
-    // Set-Cookie headers: clear `lucida_session`, set the
-    // `lucida_signed_out` marker, and clear any disabled-auth dev
-    // principal override. The marker survives the page refresh that
-    // would otherwise route through the auto-bouncing unauth landing →
-    // Google's still-active session → silent re-auth.
-    // Middleware consumes it (serves the static landing) and
-    // `/auth/start` clears it on user-initiated re-sign-in.
+    // Clear `lucida_session`, set the `lucida_signed_out` marker, and
+    // clear any dev principal override. The marker stops a refresh from
+    // silently signing back in through Google's still-active session.
     //
-    // `AppendHeaders` (not `[(name, val); N]`) — Set-Cookie is one of
-    // the few headers that legitimately needs multiple emissions; the
-    // array form would silently overwrite the second on the first.
+    // `AppendHeaders`, not an array: Set-Cookie needs one header per
+    // cookie, and the array form would keep only one of them.
     let is_https = request_is_https(&parts);
     let clearing = build_clearing_cookie(&state.config, is_https);
     let marker = build_signed_out_marker(&state.config, is_https);
@@ -793,30 +782,17 @@ pub struct StartRequest {
     pub hash: Option<String>,
 }
 
-/// `POST /auth/start` (also accepts `GET` for the noscript fallback
-/// from the unauth landing).
+/// `POST /auth/start` (also `GET` for the noscript fallback).
 ///
-/// Generates a 256-bit state token, stashes the intended path + hash
-/// in `pending_auth`, and 302s to Google's authorization URL with the
-/// token in the `state` parameter. Per ADR-0013 the hash is captured
-/// here so a `#view=…` link survives the redirect round-trip.
+/// Stores a 256-bit state token with the intended path and hash in
+/// `pending_auth`, then 302s to Google. The hash is captured here so a
+/// `#view=…` link survives the round trip (ADR-0013).
 ///
-/// When the inbound request carries the `lucida_signed_out` marker
-/// cookie (set by `/auth/logout`), this handler asks Google to show
-/// the account chooser (`prompt=select_account`) instead of silently
-/// passing through its still-active session.
-///
-/// **The marker is NOT cleared here.** It's cleared in `/auth/callback`
-/// on success. If the user bails out at Google's chooser (closes the
-/// tab, clicks back) and returns to lucida, the marker must still be
-/// in place so the next `/auth/start` also sends `prompt=select_account`
-/// — otherwise we'd silently re-auth them via Google's still-active
-/// session, defeating the logout. See ADR-0019 §"Why clear in callback,
-/// not start."
-///
-/// Cold-path callers (no marker) get the friction-free silent
-/// pass-through Google does when it has an active session — that's the
-/// design intent for first-visit and post-expiry re-auth (ADR-0016).
+/// With the `lucida_signed_out` marker present it asks Google for the
+/// account chooser (`prompt=select_account`). The marker is cleared in
+/// `/auth/callback`, not here: a user who backs out of the chooser must
+/// get the chooser again next time, or Google's live session would
+/// silently undo the logout (ADR-0019).
 pub async fn auth_start(
     State(state): State<OAuthState>,
     Query(query): Query<StartRequest>,
@@ -879,19 +855,11 @@ pub struct CallbackQuery {
 
 /// `GET /auth/callback?code=…&state=…`
 ///
-/// Validates the state token, exchanges the code with Google,
-/// validates the JWT, applies the hosted-domain + email_verified
-/// checks, mints a `LoginSession`, sets the cookie, and 302s to the
-/// originally-captured path + hash.
-///
-/// Every failure 302s to `/auth/error?code=…`. Two flavors:
-///
-/// * `code=hd_mismatch` / `code=unverified` — user-fixable rejections.
-///   Detail params (attempted_email, allowed_domains) included so the
-///   page can render the actionable message.
-/// * `code=auth_failed` — every other error path (state mismatch,
-///   code exchange failure, JWT invalid, store failure). Deliberately
-///   vague to the user; logs hold details server-side.
+/// Validates the state token and the JWT, applies the hosted-domain and
+/// `email_verified` checks, mints a `LoginSession`, sets the cookie, and
+/// 302s to the captured path and hash. Every failure 302s to
+/// `/auth/error`: `hd_mismatch` and `unverified` carry detail params for
+/// the page, and everything else is a deliberately vague `auth_failed`.
 pub async fn auth_callback(
     State(state): State<OAuthState>,
     Query(query): Query<CallbackQuery>,

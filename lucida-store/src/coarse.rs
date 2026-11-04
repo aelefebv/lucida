@@ -3,9 +3,8 @@ use lucida_content::{DataType, LevelGeometry};
 /// Source-level selection bounds for the `coarse` tier.
 ///
 /// These defaults intentionally describe a whole image/field at one T/C. Among
-/// the source levels that fit, the coarse tier uses the least-fine LOD. Later
-/// generated-coarse work can make the bounds operator-configurable, but
-/// import-time source selection needs a deterministic contract now.
+/// the source levels that fit, the coarse tier uses the least-fine LOD. They
+/// are fixed so import-time source selection stays deterministic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceCoarseConfig {
     pub max_long_axis: u64,

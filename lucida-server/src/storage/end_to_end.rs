@@ -1,23 +1,11 @@
 //! The whole server against one backend, twice over the same database.
 //!
-//! Every other test here asks whether a store answers correctly. This
-//! one asks what a deployer asks: does a connection string in
-//! `LUCIDA_DB_URL` produce a server that signs people in, keeps what
-//! they make, and still has it after a restart? Nothing below names a
-//! backend type — it goes through [`super::open`] and the routers
-//! `main` builds, so the answer is about the seam rather than about
-//! PostgreSQL.
-//!
-//! The two passes are the restart: a second [`super::open`] against the
-//! same database is what a restarted process does, which also proves the
-//! migrations are idempotent.
-//!
-//! It lives beside the backends rather than in `tests/` because
-//! [`test_support`](super::test_support) is crate-private, and a test
-//! with its own pool and its own migrator would stop being evidence
-//! about how the server opens a database. Its counterpart,
-//! `tests/storage_boot_e2e.rs`, runs the server binary to cover the
-//! boots that fail, and needs no database server to do it.
+//! It asks what a deployer asks: does a `LUCIDA_DB_URL` produce a server
+//! that signs people in, keeps what they make, and still has it after a
+//! restart? It goes through [`super::open`] and `main`'s routers, never a
+//! backend type. The second pass is the restart and also proves the
+//! migrations are idempotent. It lives here, not in `tests/`, because
+//! [`test_support`](super::test_support) is crate-private.
 
 use std::sync::Arc;
 

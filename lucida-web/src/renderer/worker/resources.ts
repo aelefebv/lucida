@@ -1,21 +1,12 @@
 /**
- * Worker-process GPU resource caches: LUT texture cache and offscreen
- * target pool.
- *
- * Module-scoped (not on {@link RendererState}) because they belong to
- * the worker process itself — per-device, not per-session.
- * `RendererState` is for per-session/per-dataset state that resets on
- * `destroy`.
- *
- * The dummy textures and sentinel indirection buffers bound to unused
- * pool slots live inside `SliceRenderer` and `VolumeRenderer`, next to
- * the bind-group construction that needs them.
+ * Worker-process GPU resource caches: LUT textures and the offscreen target
+ * pool. Module-scoped rather than on `RendererState` because they are
+ * per-device, not per-session.
  */
 
 import { createOffscreenTarget } from "../gpuContext.ts";
 import { getColormapData } from "../../colormaps.ts";
 
-// ── LUT texture cache (per-device, lazy on first colormap use) ─────────
 const lutCache = new Map<string, GPUTexture>();
 
 /** Get or create the 256×1 rgba8unorm LUT texture for a colormap name. */
@@ -35,16 +26,11 @@ export function getOrCreateLUT(device: GPUDevice, name: string): GPUTexture {
   return tex;
 }
 
-// ── Shared offscreen target pool (resized when canvas dims change) ─────
 let offscreenPool: GPUTexture[] = [];
 let poolWidth = 0;
 let poolHeight = 0;
 
-/**
- * Ensure the shared offscreen render-target pool has at least `count`
- * textures sized w×h. Resizes the pool if canvas dims changed (destroys
- * existing textures), then grows it as needed.
- */
+/** Ensure the offscreen pool holds at least `count` textures sized w×h, rebuilding it when the dims change. */
 export function ensureOffscreenPool(device: GPUDevice, count: number, w: number, h: number): GPUTexture[] {
   if (w !== poolWidth || h !== poolHeight) {
     for (const tex of offscreenPool) tex.destroy();
@@ -58,11 +44,7 @@ export function ensureOffscreenPool(device: GPUDevice, count: number, w: number,
   return offscreenPool;
 }
 
-/**
- * Tear down every cached worker-process GPU resource. Called from the
- * `destroy` handler before `self.close()`. Per-renderer dummies are torn
- * down by their owning modules.
- */
+/** Tear down every cached worker-process GPU resource. Called from the `destroy` handler. */
 export function destroyAllResources(): void {
   for (const tex of offscreenPool) tex.destroy();
   offscreenPool = [];

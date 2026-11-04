@@ -1,45 +1,26 @@
 /**
  * Stable, browser-persisted author identity for annotations and comments.
  *
- * Why this exists (issue #777): annotation/comment author-only actions
- * (move/delete a pin, edit/remove your own comment) are gated in the UI by
- * comparing the item's `author` against "my" identity. That identity used to be
- * the per-connection client id (`bridge.myId`, a `ClientId` the server assigns
- * on every WS connect), so leaving and rejoining a workspace handed you a *new*
- * id — and your own previous pins/comments stopped being recognized as yours.
- *
- * The fix is to source the *annotation author* from an id that outlives a single
- * connection: one generated once and persisted in `localStorage`, so a returning
- * browser keeps ownership across rejoin (and tab close/reopen). The per-connection
- * `bridge.myId` stays the presence/cursor/follow identity — only authorship moves
- * here. This is frontend-only: author-only is UI-enforced; the server applies
- * commands without an author check, so no wire/Rust change is involved.
- *
- * Two different browsers (different `localStorage`) get different persisted ids,
- * so one user's pins stay not-yours to everyone else — exactly as before, but now
- * stable for the author across reconnects.
+ * Author-only actions are gated in the UI by comparing an item's `author` to
+ * this id. It is persisted in `localStorage` so ownership survives a rejoin;
+ * the per-connection `bridge.myId` changes on every connect and stays the
+ * presence, cursor, and follow identity. The server does no author check, so
+ * this gate is UI-only.
  */
 
-/** The localStorage key under which the persisted author identity lives. The
- * exact string is part of the contract: a returning browser reuses whatever is
- * stored here, so this key must stay stable across releases. */
+/** localStorage key for the author id. Persisted, so it must stay stable
+ * across releases. */
 export const ANNOTATION_AUTHOR_KEY = "lucida.annotation.author";
 
 /**
- * Once resolved (read from storage or freshly generated) we keep the id in
- * memory for the lifetime of the page. This makes `annotationAuthorId()` stable
- * across calls within a session even if `localStorage` is unavailable or its
- * writes throw (private-browsing / quota), where re-reading would otherwise
- * regenerate a different id every call and silently break ownership mid-session.
- * A persisted value still wins on the next visit; this only protects the
- * in-session invariant the callers rely on.
+ * Held for the page's lifetime so the id stays stable within a session even
+ * when storage writes fail; re-reading would otherwise mint a new id per call
+ * and break ownership mid-session.
  */
 let cachedAuthorId: string | null = null;
 
-/** Generate a fresh identity. Prefers `crypto.randomUUID()`; falls back to a
- * timestamp+random string where it's unavailable (older/locked-down runtimes),
- * mirroring the id-minting fallback already used elsewhere in the app
- * (`bridge.ts`, `ThreadPopover.tsx`) so identity generation never throws. */
+/** A fresh identity: `crypto.randomUUID()` where available, else a
+ * timestamp-plus-random string, so generation never throws. */
 function generateAuthorId(): string {
   try {
     if (globalThis.crypto?.randomUUID) {
@@ -53,32 +34,20 @@ function generateAuthorId(): string {
 }
 
 /**
- * Returns this browser's stable annotation-author identity.
- *
- * Contract:
- *  - returns a **non-empty** string, **stable** across calls within a session;
- *  - if `localStorage["lucida.annotation.author"]` already holds a (non-empty)
- *    value, returns it **verbatim** — a returning browser keeps its id and so
- *    keeps ownership of what it created;
- *  - otherwise generates one, persists it under that key, and returns it, so the
- *    next visit reuses it.
- *
- * Fail-safe: every storage access is guarded so a missing/throwing
- * `localStorage` (SSR, private browsing, quota) degrades to an in-memory id that
- * is still stable for the session rather than crashing the overlays.
+ * This browser's annotation-author id: non-empty and stable within a session.
+ * Reuses a stored id verbatim, else mints and persists one. Broken storage
+ * degrades to an in-memory id rather than throwing.
  */
 export function annotationAuthorId(): string {
-  // Stable within the session regardless of storage health.
   if (cachedAuthorId !== null) return cachedAuthorId;
 
-  // Reuse a previously persisted id verbatim — this is the rejoin path.
+  // The rejoin path.
   const existing = readStoredAuthorId();
   if (existing) {
     cachedAuthorId = existing;
     return existing;
   }
 
-  // First visit (or unreadable storage): mint one, persist it, and remember it.
   const fresh = generateAuthorId();
   writeStoredAuthorId(fresh);
   cachedAuthorId = fresh;
@@ -90,31 +59,27 @@ function readStoredAuthorId(): string | null {
   if (typeof localStorage === "undefined") return null;
   try {
     const raw = localStorage.getItem(ANNOTATION_AUTHOR_KEY);
-    // Treat an empty string as "absent" so we mint+persist a usable id rather
-    // than handing callers an empty author that matches nothing.
+    // An empty string counts as absent, since an empty author matches nothing.
     return raw && raw.length > 0 ? raw : null;
   } catch {
     return null;
   }
 }
 
-/** Persist the id. Swallows failures (quota / private browsing): an in-memory
- * id that doesn't survive a reload still beats throwing out of the overlays. */
+/** Persist the id. Failures are swallowed; `cachedAuthorId` keeps the session
+ * consistent. */
 function writeStoredAuthorId(id: string): void {
   if (typeof localStorage === "undefined") return;
   try {
     localStorage.setItem(ANNOTATION_AUTHOR_KEY, id);
   } catch {
-    // ignore — `cachedAuthorId` keeps the session consistent regardless.
+    // Best effort.
   }
 }
 
 /**
- * Test-only escape hatch: drop the in-memory cache so the next
- * `annotationAuthorId()` re-resolves from `localStorage`. Production code never
- * calls this — in a real page the cache is exactly the desired session
- * stability. Mirrors `configStore.__resetForTesting`. Does NOT touch storage;
- * a test that wants a clean slate clears the key itself.
+ * Test-only: drop the in-memory cache so the next call re-reads storage. Does
+ * not touch storage itself.
  */
 export function __resetAnnotationIdentityForTesting(): void {
   cachedAuthorId = null;

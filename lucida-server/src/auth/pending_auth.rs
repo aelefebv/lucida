@@ -47,8 +47,8 @@ pub trait PendingAuthStore: Send + Sync + 'static {
     /// callback handler uses the second arm to emit
     /// `auth.signin.error.state_mismatch` and 400 the request.
     ///
-    /// Implementations MUST be atomic: a concurrent `consume` of the
-    /// same token from two callers MUST return `Some` to exactly one of
+    /// Implementations must be atomic: a concurrent `consume` of the
+    /// same token from two callers must return `Some` to exactly one of
     /// them. SQLite's `DELETE … RETURNING` (or the read+delete pair
     /// inside a transaction) provides this; the in-memory implementation
     /// holds the mutex across the operation.

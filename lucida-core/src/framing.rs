@@ -1,27 +1,16 @@
-//! Shared "fit the data to the view" framing geometry.
+//! Shared "fit the data to the view" framing geometry: pure, camera-agnostic
+//! math that turns a world-space bounding box into camera framing values.
 //!
-//! Pure, camera-agnostic math for turning a world-space axis-aligned bounding
-//! box into the values a camera needs to frame it. Two callers share this:
-//!
-//! - the **minimap** orbit camera ([`crate::minimap`]) — an *overview* inset
-//!   that frames the limiting axis with [`FIT_PADDING`] slack via
-//!   [`orbit_overview_framing`];
-//! - the **main viewport** camera ([`crate::camera`]) — which must put the
-//!   *whole* dataset in view, so it uses true bounding-sphere containment via
-//!   [`slice_framing`] (2D) and [`arcball_containment`] (3D).
-//!
-//! What the two share is the bounds **accumulation** and **center**
-//! computation ([`Aabb`]) plus the input normalization/sanitization, so an
-//! offset, inverted, or degenerate box is handled the same way everywhere.
-//!
-//! Everything is native-testable (no wasm, no GPU).
+//! The minimap ([`crate::minimap`]) frames the limiting axis loosely with
+//! [`FIT_PADDING`] ([`orbit_overview_framing`]). The main camera
+//! ([`crate::camera`]) must contain the whole dataset, so it uses
+//! [`slice_framing`] (2D) and [`arcball_containment`] (3D). Both share [`Aabb`]
+//! and the input sanitization, so an offset, inverted, or degenerate box is
+//! handled the same everywhere.
 
-/// Padding factor for the minimap's *overview* framing: the visible region is
-/// `FIT_PADDING ×` the data's limiting extent.
-///
-/// This is the minimap's inset heuristic (see #836) and is deliberately looser
-/// than the main camera's margins — it is **not** the main fit factor. Kept as
-/// the single source of that constant for the minimap.
+/// Padding factor for the minimap's overview framing: the visible region is
+/// `FIT_PADDING ×` the data's limiting extent. Deliberately looser than the
+/// main camera's margins; it is not the main fit factor.
 pub const FIT_PADDING: f64 = 1.8;
 
 /// Margin for the **main 2D fit**: the data fills `1 / FIT_MARGIN_2D` (~87%) of

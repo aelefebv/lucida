@@ -1,23 +1,11 @@
 //! Storage-codec types and import-time codec-chain validation.
 //!
-//! Hosts the codec definitions so the import pipeline can run strict
-//! validation over the codec chain before the binding ever reaches the
-//! chunk-fetch path.
-//!
-//! The actual decompression implementations live in
-//! [`lucida_server::decode`] because they pull in `zstd` / `lz4_flex` /
-//! Blosc1, which `lucida-store` deliberately does not depend on. The types
-//! here are pure data and travel through `ImageBindingSeed` so the resolver
-//! can dispatch on them without re-parsing the codec chain.
-//!
-//! Validation behavior (see [`parse_codec_chain`]):
-//! - Length 1 (`[bytes(little)]`) → [`StorageCompression::None`].
-//! - Length 2 (`[bytes(little), compressor]`) → matching variant.
-//! - Anything else (empty chain, length > 2, missing `bytes`, `endian: big`,
-//!   missing `endian`, unknown second-codec name, blosc with unsupported
-//!   `cname`/`shuffle`/`typesize`, blosc with missing config) is rejected
-//!   with a [`StoreError::Metadata`] whose message names the offending value
-//!   so the operator can find it in their OME-Zarr metadata.
+//! The decompression lives in [`lucida_server::decode`], because it needs
+//! `zstd`, `lz4_flex`, and Blosc1, which `lucida-store` deliberately does
+//! not depend on. These types are pure data that travel through
+//! `ImageBindingSeed`. [`parse_codec_chain`] accepts `[bytes(little)]` or
+//! `[bytes(little), compressor]` and rejects anything else with a
+//! [`StoreError::Metadata`] that names the offending value.
 
 use serde::{Deserialize, Serialize};
 

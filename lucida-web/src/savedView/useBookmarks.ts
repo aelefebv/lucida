@@ -1,27 +1,9 @@
-// React hook wrapping the bookmarks REST API plus local list/filter state.
+// The bookmarks REST API plus the sidebar's list and filter state.
 //
-// The sidebar lists bookmarks scoped to currently-loaded datasets,
-// with a substring search across name + creator name + creator email
-// and a "Mine only" toggle.
-//
-// A live WebSocket subscription layers on top: when any peer mutates
-// a bookmark whose dataset URLs overlap a loaded dataset in this
-// session, the server broadcasts `ServerMessage::BookmarkChanged`.
-// The hook subscribes via `bridge.subscribeBookmarkChanged` and
-// reconciles local state without requiring a manual refresh:
-//   - Created/Updated: refetch by id and merge (insert if missing,
-//     replace if present). Cheaper + more accurate than embedding the
-//     full payload in the broadcast.
-//   - Deleted: remove the entry from local state.
-// Self-broadcasts (the originating client also receives the message)
-// are not filtered — optimistic local updates reconcile cleanly
-// because the broadcast-driven refetch returns the same canonical
-// state.
-//
-// CRUD wrappers are optimistic: create inserts immediately and reconciles
-// with the server response; rename patches in-place; delete removes
-// immediately and rolls back on failure. The same hook owns the filter
-// state so components stay free of bookkeeping.
+// `BookmarkChanged` broadcasts keep the list live: created or updated
+// refetches the row by id, deleted drops it. Self-broadcasts are not filtered;
+// the refetch returns the same canonical row the optimistic update wrote.
+// Rename and delete are optimistic and roll back on failure.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -47,15 +29,11 @@ export interface UseBookmarksOptions {
   /** Currently-loaded dataset URLs. The hook re-fetches whenever this set
    *  changes (the sidebar narrows by dataset overlap). */
   loadedDatasets: readonly string[];
-  /** Email of the currently-authed principal (from `/auth/whoami`).
-   *  Used to evaluate the "Mine only" toggle. `null` ≡ no auth resolved
-   *  yet — the toggle hides everything when checked. */
+  /** Email from `/auth/whoami`, for the "Mine only" toggle. `null` means
+   *  auth hasn't resolved; the toggle then hides everything. */
   currentUserEmail: string | null;
-  /** Optional WebSocket bridge for live cross-peer updates. When
-   *  provided, the hook subscribes to `bookmark_changed` broadcasts
-   *  and reconciles local state on Created/Updated/Deleted events.
-   *  When `null` or `undefined`, the hook degrades cleanly to manual
-   *  refresh. */
+  /** Bridge for live cross-peer updates. Without one, the list refreshes
+   *  only on demand. */
   bridge?: Bridge | null;
 }
 
@@ -78,9 +56,8 @@ export interface UseBookmarksHandle {
   ) => Promise<Bookmark>;
   renameBookmark: (id: string, newName: string) => Promise<Bookmark>;
   deleteBookmark: (id: string) => Promise<void>;
-  /** Used by `urlSync` for `#b=<id>` resolution. Kept on the hook for
-   *  symmetry; the actual resolution goes through the React-free
-   *  `bookmarksApi` directly so it doesn't depend on a mounted hook. */
+  /** Kept for symmetry. `urlSync` resolves `#b=<id>` through `bookmarksApi`
+   *  directly so it doesn't depend on a mounted hook. */
   getBookmark: (id: string) => Promise<Bookmark | null>;
 }
 
@@ -97,18 +74,14 @@ export function useBookmarks({
     mineOnly: false,
   });
 
-  // Stable identity for the loaded-datasets dependency: React re-checks
-  // array identity, but the parent often passes a fresh array each render
-  // even when the URLs haven't changed. We key on a sorted-joined string
-  // so equal sets don't trigger fetches.
+  // The parent often passes a fresh array with the same URLs; key on the
+  // sorted set so equal sets don't refetch.
   const datasetsKey = useMemo(
     () => [...loadedDatasets].sort().join("\n"),
     [loadedDatasets],
   );
 
-  // Tracks the in-flight request id so a stale response can't overwrite
-  // a fresher one (the user opens a new dataset before the old fetch
-  // returns).
+  // So a stale response can't overwrite a fresher one.
   const reqIdRef = useRef(0);
 
   const refresh = useCallback(async () => {
@@ -131,26 +104,15 @@ export function useBookmarks({
     }
   }, [loadedDatasets]);
 
-  // Re-fetch on dataset-set change. We deliberately depend on the joined
-  // key (not the array reference) so fresh arrays with the same contents
-  // don't churn.
-  // refresh closes over loadedDatasets, but the list it builds depends
-  // only on the joined key — refreshing more often than necessary is
-  // wrong (drops in-flight optimistic creates). The setState calls inside
-  // refresh ARE the intended effect: dataset set changed → re-fetch.
+  // Depend on the key, not `refresh`: refreshing more often than the set
+  // changes drops in-flight optimistic creates.
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void refresh();
   }, [datasetsKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Subscribe to cross-peer broadcasts. Created/Updated → fetch by id
-  // and merge; Deleted → drop from local state. Self-broadcasts
-  // arrive too — they reconcile cleanly because the optimistic state
-  // we already inserted matches what the GET returns.
-  //
-  // The subscription is keyed only on `bridge` identity; it stays
-  // mounted across filter and dataset-set changes so we never miss a
-  // broadcast in the gap between unsubscribe and resubscribe.
+  // Keyed only on `bridge`, so filter and dataset changes never open a gap
+  // between unsubscribe and resubscribe where a broadcast is missed.
   useEffect(() => {
     if (!bridge) return;
     const unsubscribe = bridge.subscribeBookmarkChanged((id, action, _datasetUrls) => {
@@ -158,7 +120,6 @@ export function useBookmarks({
         setAllBookmarks((prev) => prev.filter((b) => b.id !== id));
         return;
       }
-      // Created or Updated: refetch the canonical row and merge.
       void apiGet(id)
         .then((fetched) => {
           if (fetched === null) return;
@@ -171,14 +132,12 @@ export function useBookmarks({
           });
         })
         .catch((e) => {
-          // Best-effort — broadcast will resync on the next mutation.
+          // Best effort: the next mutation's broadcast resyncs.
           console.warn("[useBookmarks] failed to refetch on broadcast:", e);
         });
     });
     return unsubscribe;
   }, [bridge]);
-
-  // Filter (purely local; no network).
 
   const bookmarks = useMemo(() => {
     const needle = filter.search.trim().toLowerCase();
@@ -202,13 +161,10 @@ export function useBookmarks({
     setFilter((f) => ({ ...f, mineOnly: v }));
   }, []);
 
-  // CRUD wrappers (optimistic).
-
   const createBookmark = useCallback(
     async (name: string, datasets: string[], view: SavedView): Promise<Bookmark> => {
       const created = await apiCreate({ name, datasets, view });
-      // Server-authoritative insertion: we de-dupe by id in case a stale
-      // refresh raced and already inserted the row.
+      // De-dupe by id: a racing refresh may already have inserted the row.
       setAllBookmarks((prev) => {
         if (prev.some((b) => b.id === created.id)) return prev;
         return [created, ...prev];
@@ -221,14 +177,12 @@ export function useBookmarks({
   const renameBookmark = useCallback(
     async (id: string, newName: string): Promise<Bookmark> => {
       const original = allBookmarks.find((b) => b.id === id) ?? null;
-      // Optimistic in-place rename.
       setAllBookmarks((prev) => prev.map((b) => (b.id === id ? { ...b, name: newName } : b)));
       try {
         const updated = await apiPatch(id, newName);
         setAllBookmarks((prev) => prev.map((b) => (b.id === id ? updated : b)));
         return updated;
       } catch (e) {
-        // Roll back to original.
         if (original) {
           setAllBookmarks((prev) => prev.map((b) => (b.id === id ? original : b)));
         }
@@ -272,12 +226,7 @@ export function useBookmarks({
   };
 }
 
-// Misc helpers (exported so the sidebar can reuse).
-
-/**
- * Format an ISO timestamp as "3d ago", "2h ago", "just now". Uses
- * `Intl.RelativeTimeFormat` (no extra dependency).
- */
+/** Format an ISO timestamp as relative time ("3 days ago", "now"). */
 export function relativeTimeFromIso(iso: string, now: Date = new Date()): string {
   const t = Date.parse(iso);
   if (Number.isNaN(t)) return "";
@@ -293,10 +242,8 @@ export function relativeTimeFromIso(iso: string, now: Date = new Date()): string
 }
 
 /**
- * Build a sensible default name for a fresh bookmark.
- * - With datasets: `${dataset_basenames_joined} · ${active_layout_name}`,
- *   truncated to 60 chars. If no layout name (or just an id), drop it.
- * - With no datasets: "Untitled".
+ * Default bookmark name: dataset basenames, then ` · ` and the layout name if
+ * any, truncated to 60 chars. "Untitled" with no datasets.
  */
 export function defaultBookmarkName(
   datasetUrls: readonly string[],
@@ -312,8 +259,7 @@ export function defaultBookmarkName(
 }
 
 function urlBasename(url: string): string {
-  // Strip query/fragment, then take the last path segment without a
-  // trailing slash. Works for gs://bucket/path.zarr, file paths, etc.
+  // Works for gs://bucket/path.zarr, file paths, and URLs with a query.
   const noQuery = url.split("?")[0].split("#")[0];
   const cleaned = noQuery.replace(/\/+$/, "");
   const slash = cleaned.lastIndexOf("/");

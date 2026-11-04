@@ -1,18 +1,11 @@
 /**
  * Partition a cold state's active set into per-(tier, channel, chunkDims)
- * pool groups. Pure function — no GPU side effects, no state mutation.
- * Parameterised by `mode` so the same logic serves 3D (volume) and 2D
- * (slice) callers; only chunk-dim arity differs.
+ * pool groups. Pure; `mode` only changes the chunk-dim arity.
  *
- * Each tile entry contributes one detail-tier section per level in
- * {@link detailTierLevels} (the target level and the coarser levels kept
- * resident under it) plus one for its coarse level. A level lands in the
- * pool whose chunk shape matches its own, so levels of one entity spread
- * across pools when their chunk shapes differ. `group-as-proxy` entries
- * contribute none, because they carry `levels: []` and have no chunks to
- * upload. The orchestrator still registers them in `memberToDataset`
- * through {@link iterateColdMembers}; they have no chunk pool, so they do
- * not appear here.
+ * Each tile entry contributes one detail section per level in
+ * {@link detailTierLevels} plus one for its coarse level, and each level
+ * lands in the pool matching its own chunk shape, so one entity's levels can
+ * spread across pools. `group-as-proxy` entries have no chunks and no pool.
  */
 
 import type { ResidencyTier } from "../../pipeline/residencyTier.ts";
@@ -25,31 +18,22 @@ import { detailTierLevels } from "../entitySources.ts";
 import { chunkTierPoolKey } from "../poolKeys.ts";
 
 /**
- * One pool's worth of entries from a cold state.
- *
- * `chunkDims` is captured as `[Z, Y, X]` for both modes so callers can
- * thread the same tuple through `getOrCreateVolumePool` (which takes
- * X/Y/Z) and `computeEntityTierMeta` (which compares against
- * `lm.chunkShape` — also `[Z, Y, X]`). Slice mode sets `Z = 1` since
- * the 2D pool ignores depth (the inline format string also dropped it).
+ * One pool's worth of entries from a cold state. `chunkDims` is `[Z, Y, X]`
+ * in both modes to match `lm.chunkShape`; slice mode sets `Z = 1`.
  */
 export interface PoolGroup {
   poolKey: string;
   tier: ResidencyTier;
   channel: number;
-  /** `[Z, Y, X]`. For slice mode `Z = 1`. */
   chunkDims: [number, number, number];
   /** One entry per (member, level) section the pool holds. */
   entries: Array<{ entry: ColdStateActiveEntry; memberId: string; tier: ResidencyTier; level: number }>;
 }
 
 /**
- * Partition `cold.activeSet × cold.visibleChannels` into pool groups.
- *
- * Iteration order matches the worker's previous inline code: channel
- * outer, entry inner. The resulting Map preserves insertion order so
- * downstream code that builds sections with sequential offsets sees
- * entries in the same order the worker did before extraction.
+ * Partition `cold.activeSet × cold.visibleChannels` into pool groups,
+ * channel outer and entry inner. Callers assign sequential section offsets
+ * in this insertion order.
  */
 export function groupEntriesByPool(
   cold: ColdStateMessage,
@@ -68,9 +52,7 @@ export function groupEntriesByPool(
         const levelMeta = entry.levels.find(l => l.level === source.level);
         if (!levelMeta) continue;
         const [chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
-        // `chunkTierPoolKey` takes `[X, Y, Z]` for volume / `[X, Y]` for
-        // slice. Keep `chunkDims` on the group as `[Z, Y, X]` for
-        // downstream callers.
+        // `chunkTierPoolKey` takes `[X, Y, Z]` or `[X, Y]`; the group keeps `[Z, Y, X]`.
         const poolKey =
           mode === "volume"
             ? chunkTierPoolKey(cold.datasetId, source.tier, channel, [chunkX, chunkY, chunkZ], isMultiCh)

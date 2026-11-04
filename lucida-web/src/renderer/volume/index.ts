@@ -1,10 +1,7 @@
 /**
- * Volume-mode renderer surface area.
- *
- * Re-exports primitives from the per-concern submodules (`atlas`,
- * `eviction`, `remap`, `upload`, `render`) and provides the composed
- * cleanup functions (`removeVolumeResources`, `destroyAllVolumeResources`)
- * that mix atlas + ray-pick state.
+ * Volume-mode renderer surface: re-exports the submodules and owns the
+ * composed cleanups that mix atlas and ray-pick state, so the atlas module
+ * stays independent of the eviction module.
  */
 
 export {
@@ -50,14 +47,8 @@ import { clearAllRayHits, clearRayHitForMember } from "./eviction.ts";
 import type { WorkerCtx } from "../workerContext.ts";
 
 /**
- * Remove resources for a removed entity or dataset.
- * Pass either a poolKey (removes the whole pool) or a memberId (removes per-entity state).
- *
- * Composed from `removeVolumeAtlas` (atlas pool teardown),
- * `removeLabelVolumePoolsForDataset` (label pool teardown — matched by owning
- * dataset since label pools are keyed by the label image id, not the dataset
- * id), and `clearRayHitForMember` (per-entity ray-pick cleanup) so the atlas
- * module stays independent of the eviction module.
+ * Remove resources for a removed entity or dataset. Pass a poolKey to remove
+ * the whole pool or a memberId to remove per-entity state.
  */
 export function removeVolumeResources(ctx: WorkerCtx, idOrMember: string): void {
   removeVolumeAtlas(ctx, idOrMember);

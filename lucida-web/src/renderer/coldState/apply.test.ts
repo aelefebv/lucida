@@ -1,17 +1,9 @@
 /**
- * Suite A — cold-state ingestion characterization.
+ * Suite A: cold-state ingestion characterization. Locks the behavior of
+ * `applyColdState`.
  *
- * Locks the behavior of `applyColdState`. Covers single + multi
- * channel volume cold state, mixed `tiles-with-detail` +
- * `group-as-proxy` entries, tiles sharing chunk dims, tiles with
- * different chunk dims, the multi-level sections the detail tier holds
- * under the target, slice mode with mixed levels + Z retargeting,
- * cold-state churn (replace), and empty active-set cold state.
- *
- * Mocks `WorkerCtx` + `GPUDevice` — no real GPU. The per-dataset atlas
- * Map lives on `ctx.state.{volumeAtlases, sliceAtlases}`, so each test
- * owns its own RendererState via `makeCtx()` and no module teardown is
- * required between cases.
+ * Mocks `WorkerCtx` and `GPUDevice`, no real GPU. Each test owns its own
+ * RendererState via `makeCtx()`, so no teardown is needed between cases.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -56,9 +48,7 @@ import { findFarthestSlot, handleVolumeChunkData } from "../volume/index.ts";
 import { handleSliceChunkData } from "../slice/index.ts";
 import { sourceKey } from "../poolKeys.ts";
 
-// ---------------------------------------------------------------------------
 // Mock GPU device — texture + buffer creation only.
-// ---------------------------------------------------------------------------
 
 interface MockTexture { destroyed: boolean; destroy: () => void; size: GPUExtent3DStrict; format: GPUTextureFormat }
 interface MockBuffer { destroyed: boolean; destroy: () => void; size: number; usage: number }
@@ -109,9 +99,7 @@ function makeCtx(device: GPUDevice): WorkerCtx {
   };
 }
 
-// ---------------------------------------------------------------------------
 // Fixture helpers
-// ---------------------------------------------------------------------------
 
 function identityMatrix(): Float32Array {
   const m = new Float32Array(16);
@@ -267,14 +255,10 @@ function chunkUpload(memberId: string, level: number): VolumeChunkDataMessage {
   };
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 describe("Suite A — applyColdState", () => {
-  // -------------------------------------------------------------------------
   // 1. Single-channel volume cold state
-  // -------------------------------------------------------------------------
   it("single-channel volume → one pool group + correct entityMetas + indirection sized to gridX*gridY*gridZ", () => {
     const ctx = makeCtx(makeMockDevice());
     const cold = makeCold([
@@ -304,9 +288,7 @@ describe("Suite A — applyColdState", () => {
     expect(ctx.state.descriptorBuffersByDataset.has("ds1")).toBe(true);
   });
 
-  // -------------------------------------------------------------------------
   // 2. Multi-channel volume cold state
-  // -------------------------------------------------------------------------
   it("multi-channel volume → one pool group per channel + per-channel memberIds + per-channel pool keys", () => {
     const ctx = makeCtx(makeMockDevice());
     const cold = makeCold(
@@ -333,9 +315,7 @@ describe("Suite A — applyColdState", () => {
     expect(vol(ctx.state).size).toBe(3);
   });
 
-  // -------------------------------------------------------------------------
   // 3. Mixed `tiles-with-detail` + `group-as-proxy`
-  // -------------------------------------------------------------------------
   it("mixed tiles + group-as-proxy → only tiles register a chunk pool; group registers in memberToDataset only", () => {
     const ctx = makeCtx(makeMockDevice());
     const cold = makeCold([
@@ -363,9 +343,7 @@ describe("Suite A — applyColdState", () => {
     expect(vol(ctx.state).size).toBe(1);
   });
 
-  // -------------------------------------------------------------------------
   // 4. Tiles sharing chunk dims → one pool
-  // -------------------------------------------------------------------------
   it("two tiles with the same chunk dims → ONE pool group with sequential entityMetas offsets", () => {
     const ctx = makeCtx(makeMockDevice());
     const cold = makeCold([
@@ -391,9 +369,7 @@ describe("Suite A — applyColdState", () => {
     expect(atlas.indirectionData.length).toBe(64);
   });
 
-  // -------------------------------------------------------------------------
   // 5. Tiles with different chunk dims → multiple pools per dataset
-  // -------------------------------------------------------------------------
   it("two tiles with different chunk dims → TWO pool groups + separate entityMetas", () => {
     const ctx = makeCtx(makeMockDevice());
     const cold = makeCold([
@@ -435,7 +411,7 @@ describe("Suite A — applyColdState", () => {
 
     applyColdState(ctx, cold);
 
-    // Level 2 is a coarser resident level of the detail tier AND the
+    // Level 2 is a coarser resident level of the detail tier and the
     // coarse tier's level; the tiers keep separate pools at that shape.
     expect(poolOf(ctx.state, "imgA", "detail", 0)).toBe("ds1:64x64x32:detail");
     expect(poolOf(ctx.state, "imgA", "detail", 2)).toBe("ds1:128x128x8:detail");
@@ -492,9 +468,7 @@ describe("Suite A — applyColdState", () => {
     expect(sources.map((s) => [s.tier, s.meta.level])).toEqual([["detail", 1], ["coarse", 1]]);
   });
 
-  // -------------------------------------------------------------------------
   // 6. Resident levels: the target and the coarser levels under it
-  // -------------------------------------------------------------------------
   it("holds one section per level for the target and the next three coarser levels, none finer", () => {
     const ctx = makeCtx(makeMockDevice());
     const six: ColdStateTileEntry["levels"] = [0, 1, 2, 3, 4, 5].map((level) => ({
@@ -717,9 +691,7 @@ describe("Suite A — applyColdState", () => {
     expect(atlas.indirectionData[16]).toBe(slot1);
   });
 
-  // -------------------------------------------------------------------------
   // 7. Slice mode cold state
-  // -------------------------------------------------------------------------
   it("slice mode → 2D pool key + one 2D section per resident level", () => {
     const ctx = makeCtx(makeMockDevice());
     const cold = makeCold(
@@ -748,9 +720,7 @@ describe("Suite A — applyColdState", () => {
     expect(atlas.indirectionData.length).toBe(5);
   });
 
-  // -------------------------------------------------------------------------
   // 8. Cold-state churn (replace)
-  // -------------------------------------------------------------------------
   it("two cold states in a row → pool routing is repopulated; descriptor buffer is destroyed + replaced", () => {
     const ctx = makeCtx(makeMockDevice());
     const coldA = makeCold([
@@ -783,9 +753,7 @@ describe("Suite A — applyColdState", () => {
     expect(ctx.state.memberSourcePools.has("imgA")).toBe(false);
   });
 
-  // -------------------------------------------------------------------------
   // 9. Empty active-set cold state
-  // -------------------------------------------------------------------------
   it("empty active set → no pools, no panics, empty descriptor buffer still created", () => {
     const ctx = makeCtx(makeMockDevice());
     const cold = makeCold([]);
@@ -803,9 +771,7 @@ describe("Suite A — applyColdState", () => {
     expect(ctx.state.descriptorBuffersByDataset.has("ds1")).toBe(true);
   });
 
-  // -------------------------------------------------------------------------
   // Bonus: group→tiles fan-out gets populated from parentGroupId
-  // -------------------------------------------------------------------------
   it("populates groupToTiles from entries' parentGroupId", () => {
     const ctx = makeCtx(makeMockDevice());
     const cold = makeCold([

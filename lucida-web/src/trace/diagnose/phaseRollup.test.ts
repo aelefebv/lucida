@@ -2,10 +2,10 @@
  * The rollup's two placement fields: where a phase sat on the run's clock, and
  * which row was its worst.
  *
- * Both exist for the monitor page (#936). A timeline track cannot be drawn
- * from a percentile, and a drill-down that carries "the worst row" has to be handed a
- * row identity rather than a time coordinate — and every number a surface
- * prints has to exist in the document, so neither is computed in a component.
+ * Both exist for the monitor page. A timeline track cannot be drawn from a
+ * percentile, a drill-down to "the worst row" needs a row identity rather
+ * than a time, and every number a surface prints has to exist in the
+ * document, so neither is computed in a component.
  */
 
 import { describe, expect, it } from "vitest";

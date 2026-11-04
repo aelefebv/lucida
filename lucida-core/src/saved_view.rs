@@ -1,30 +1,17 @@
-//! Capture record for the URL-as-app-state saved-views feature
-//! (see `docs/adr/0013-url-as-app-state-for-saved-views.md`).
+//! Capture record for the URL-as-app-state saved-views feature (ADR 0013).
 //!
-//! `SavedView` spans both tiers of the document/viewport split (ADR 0001): the
-//! `datasets` + `active_layouts` fields are the document-state surface (what
-//! is loaded), and `camera` + `view` + `display` + `dataset_order` +
-//! `dataset_settings` mirror the [`PresenceState`] surface (how it's being
-//! looked at). Inline in the URL hash; also stored server-side and addressed
-//! by an opaque ID.
+//! `SavedView` spans both tiers of the document/viewport split: `datasets`
+//! and `active_layouts` are document state (what is loaded), and the rest
+//! mirror [`PresenceState`] (how it is being looked at). It rides the URL
+//! hash and is also stored server-side under an opaque ID.
 //!
-//! The schema is a wire format: every field that doesn't always serialize is
-//! marked `#[serde(default)]` so a recipient on an older `v: 1` codepath can
-//! tolerate later additive evolution. The `v` field is the version gate —
-//! `v: 1` is the only spec; the encoder rejects unknown major versions;
-//! future bumps (`v: 2`+) require an explicit migration story.
-//!
-//! Tests at the bottom of this file lock the wire format. Don't touch them
-//! casually.
+//! The schema is a wire format. Every field that doesn't always serialize is
+//! `#[serde(default)]` so older `v: 1` readers tolerate additive changes, and
+//! the encoder rejects unknown major versions. The tests at the bottom lock it.
 //
-// The URL-derivation helpers (`dataset_id_for_url`, plus the new
-// `normalize_dataset_url` and `is_local_dataset_url` from
-// `docs/adr/0042-canonical-dataset-url-form.md`) live in
-// `lucida-content::url` so server, store, and SPA share one
-// implementation. The shims below re-export them via `#[wasm_bindgen]`
-// so the existing `import { dataset_id_for_url } from "lucida-core"`
-// call sites in the SPA continue to work, and the two new helpers are
-// available under the same import.
+// The URL helpers live in `lucida-content::url` so server, store, and SPA
+// share one implementation (ADR 0042). The shims below re-export them through
+// `#[wasm_bindgen]` for the SPA's `import { ... } from "lucida-core"`.
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -44,40 +31,20 @@ use crate::view::ViewState;
 /// see a missing/zero version should reject.
 pub const SAVED_VIEW_VERSION: u32 = 1;
 
-/// Capture record for a "saved view" — the user's complete view of one or
+/// Capture record for a "saved view": the user's complete view of one or
 /// more datasets at a moment in time. Encoded into the URL hash by
-/// lucida-web; consumed by the apply orchestrator on page load /
-/// `popstate`.
+/// lucida-web and applied on page load and `popstate`.
 ///
-/// Crosses the document/viewport split:
-///
-/// - `datasets`, `active_layouts` mirror the
-///   document state (what is loaded; which layout is active).
-/// - `camera`, `view`, `display`, `dataset_order`, `dataset_settings`
-///   mirror the `PresenceState` surface
-///   (where the camera is, which slice, contrast, per-dataset display).
-///
-/// `PartialEq` (not `Eq` — the camera/display fields hold `f64`) so a
-/// `SavedView` can be embedded in a `PartialEq` type. In particular
-/// [`crate::scene::Annotation`] derives `PartialEq` and captures the author's
-/// view as an `Option<SavedView>`, so this derive is load-bearing for that.
+/// `PartialEq` (not `Eq`, since the camera and display hold `f64`) because
+/// [`crate::scene::Annotation`] embeds one and derives `PartialEq`.
 ///
 /// The per-dataset maps (`active_layouts`, `dataset_settings`,
-/// `auto_contrast`) are [`IndexMap`], NOT `std::collections::HashMap`. Once a
-/// `SavedView` is embedded in an
-/// [`Annotation`](crate::scene::Annotation)/`AddAnnotation` it rides the
-/// collaborative-document wire (broadcast, persisted, snapshotted), which
-/// requires **deterministic serialization**: the server rebroadcasts an
-/// inbound command by `serde_json::from_str` → `to_string` (lucida-server's
-/// `handler`), and that round-trip must be byte-identical to the inbound bytes
-/// (see [`crate::command`]). `serde_json` emits a `HashMap` in
-/// per-process-randomized hash order, so a multi-dataset view would
-/// re-serialize in a *different* order than it arrived — breaking the
-/// invariant. `IndexMap` preserves insertion order, and deserialize→serialize
-/// round-trips that order verbatim, so the rebroadcast is byte-identical. This
-/// matches the existing wire-borne document collections on
-/// [`DocumentState`](crate::scene::DocumentState) — its `manifests`,
-/// `asset_catalogs`, and `annotations` are `IndexMap` for exactly this reason.
+/// `auto_contrast`) are [`IndexMap`], not `HashMap`. Embedded in an
+/// [`Annotation`](crate::scene::Annotation), the view rides the document
+/// wire, where the server's `from_str` → `to_string` rebroadcast must be
+/// byte-identical to the inbound bytes (see [`crate::command`]). A `HashMap`
+/// re-serializes in random order; `IndexMap` keeps insertion order, as
+/// [`DocumentState`](crate::scene::DocumentState)'s collections do.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SavedView {
     /// Schema version. Always [`SAVED_VIEW_VERSION`] (currently `1`) in
@@ -153,19 +120,14 @@ impl SavedView {
     }
 
     /// Clear the source-URL list (`datasets`), leaving every workspace-local
-    /// id-keyed field (`active_layouts` / `dataset_order` / `dataset_settings`
-    /// / `auto_contrast`) intact.
+    /// id-keyed field intact.
     ///
-    /// This is the **workspace-dataset-id form** an embedded view must take:
-    /// membership (which datasets are loaded, by URL) is owned by the workspace
-    /// document, so a view carried *inside* the collaborative document — on a
-    /// pin ([`crate::scene::Annotation::view`]) or as a stored workspace saved
-    /// view — must not also carry source URLs (incl. local `file:///` paths)
-    /// into broadcast/persisted state. See decision 0014
-    /// (`docs/adr/0014-local-file-datasets-personal-only-in-saved-views.md`)
-    /// and the `Annotation::view` field doc. The single owner of this
-    /// invariant, so the apply path and the duplicate copy path can both
-    /// enforce it identically.
+    /// This is the workspace-dataset-id form an embedded view must take.
+    /// Membership is owned by the workspace document, so a view carried
+    /// inside it, on a pin ([`crate::scene::Annotation::view`]) or as a stored
+    /// workspace saved view, must not also carry source URLs, local
+    /// `file:///` paths included, into broadcast or persisted state
+    /// (ADR 0014). The apply and duplicate paths both enforce it through here.
     pub fn clear_source_urls(&mut self) {
         self.datasets.clear();
     }
@@ -173,16 +135,10 @@ impl SavedView {
     /// Rewrite every workspace-local [`DatasetId`] in this view through
     /// `remap` (old id → new id), preserving insertion order.
     ///
-    /// Used when a workspace is duplicated: the copy's datasets get fresh
-    /// workspace-local ids, so a saved view copied verbatim would dangle —
-    /// its `active_layouts` / `dataset_order` / `dataset_settings` /
-    /// `auto_contrast` keys all reference the *source* workspace's ids. This
-    /// remaps them onto the copy's ids so the view resolves against the
-    /// duplicate's datasets. An id missing from `remap` is left as-is (the
-    /// caller guarantees the map covers every dataset the view can reference,
-    /// and leaving unknown ids untouched is the safe no-op). `datasets`
-    /// (source URLs) is untouched — it is cleared before a workspace saved
-    /// view is persisted and is keyed by URL, not by the local id.
+    /// A duplicated workspace gives its datasets fresh ids, so a view copied
+    /// verbatim would reference the source's. An id missing from `remap` is
+    /// left as-is. `datasets` (source URLs) is untouched: it is cleared before
+    /// a workspace saved view is persisted.
     pub fn remap_dataset_ids(&mut self, remap: &std::collections::HashMap<DatasetId, DatasetId>) {
         fn mapped(
             remap: &std::collections::HashMap<DatasetId, DatasetId>,
@@ -212,18 +168,12 @@ impl SavedView {
 }
 
 /// Stable, content-derived ID for a dataset URL. Thin shim over
-/// [`lucida_content::url::dataset_id_for_url`] — the single source of
-/// truth for the BLAKE3-derived id, shared between the SPA, the server
-/// (`lucida-server::handler`), and the storage layer
-/// (`lucida-store::backend::open`). See
-/// `docs/adr/0042-canonical-dataset-url-form.md` for placement
-/// rationale and
-/// `docs/adr/0014-local-file-datasets-personal-only-in-saved-views.md`
-/// for the BLAKE3-collision sharp edge.
+/// [`lucida_content::url::dataset_id_for_url`], the one implementation the
+/// SPA, the server, and the storage layer share.
 ///
-/// On `target_arch = "wasm32"` this function is also exported via
-/// `wasm-bindgen`; that's why the SPA's existing
-/// `import { dataset_id_for_url } from "lucida-core"` resolves.
+/// On `target_arch = "wasm32"` this is also exported via `wasm-bindgen`, which
+/// is what the SPA's `import { dataset_id_for_url } from "lucida-core"`
+/// resolves.
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 pub fn dataset_id_for_url(url: &str) -> String {
     lucida_content::url::dataset_id_for_url(url)
@@ -441,22 +391,12 @@ mod tests {
         assert!(id.starts_with("ds-"));
     }
 
-    // ---- Deterministic on-the-wire serialization (>=2 datasets) ----------
-    //
-    // Once a `SavedView` is embedded in an `Annotation`/`AddAnnotation` it
-    // rides the collaborative-document wire, whose locked invariant is that an
-    // inbound command and its server rebroadcast are byte-identical (the server
-    // rebroadcasts via `serde_json::from_str` -> `to_string`; see
-    // `crate::command`'s `AddAnnotation` doc and
-    // `protocol::add_annotation_broadcast_is_byte_identical_to_inbound_command`).
-    // The per-dataset maps (`active_layouts`, `dataset_settings`,
-    // `auto_contrast`) are `IndexMap` precisely so that round-trip preserves
-    // key order; a `std::collections::HashMap` would re-emit them in
-    // per-process-randomized order and break this with >=2 entries.
-    //
-    // These guard the byte-identity of the wire STRING (NOT a `serde_json::Value`
-    // compare, which is order-insensitive and would pass even on the buggy
-    // `HashMap` form). Derived from the red-team determinism family.
+    // Embedded in an `Annotation`/`AddAnnotation`, a `SavedView` rides the
+    // document wire, where an inbound command and its server rebroadcast
+    // (`serde_json::from_str` -> `to_string`) must be byte-identical. The
+    // per-dataset maps are `IndexMap` so that round-trip keeps key order; a
+    // `HashMap` would break it with >=2 entries. These compare the wire
+    // string, not a `serde_json::Value`, which ignores order.
 
     /// A `SavedView` whose three maps each carry the same `keys`, inserted in
     /// the given order (so we can build the "same logical view, opposite
@@ -474,12 +414,11 @@ mod tests {
         v
     }
 
-    /// THE invariant: the server's rebroadcast path (`from_str` -> `to_string`)
+    /// The invariant: the server's rebroadcast path (`from_str` -> `to_string`)
     /// on a >=2-dataset view reproduces the inbound wire bytes byte-for-byte.
-    /// This is a *fixed golden* client wire (insertion order ds-aaaa < ds-bbbb <
-    /// ds-cccc in every map) — exactly what a browser emits via `JSON.stringify`.
-    /// With `HashMap` the re-serialization reordered the maps and this diverged;
-    /// `IndexMap` preserves the parsed order, so it round-trips verbatim.
+    /// The fixed golden client wire has insertion order ds-aaaa < ds-bbbb <
+    /// ds-cccc in every map, as a browser's `JSON.stringify` emits. `IndexMap`
+    /// keeps the parsed order, so it round-trips verbatim.
     #[test]
     fn rebroadcast_of_multi_dataset_view_is_byte_identical() {
         const CLIENT_WIRE: &str = r#"{"v":1,"datasets":[],"active_layouts":{"ds-aaaa":"L-a","ds-bbbb":"L-b","ds-cccc":"L-c"},"camera":{"mode":"slice","center":[0.0,0.0],"zoom":1.0,"viewport":[1024,768]},"view":{"z_range":{"start":0,"end":1},"t":0,"c":0,"multi_channel":false},"display":{"contrast_min":0.0,"contrast_max":65535.0,"gamma":1.0},"dataset_order":["ds-aaaa","ds-bbbb","ds-cccc"],"dataset_settings":{"ds-aaaa":{"visible":true,"opacity":1.0,"contrast_min":0.0,"contrast_max":65535.0,"gamma":1.0,"blend_mode":"alpha","render_mode":"translucent","channel_settings":[],"label_settings":[],"channel_blend_mode":"additive"},"ds-bbbb":{"visible":true,"opacity":1.0,"contrast_min":0.0,"contrast_max":65535.0,"gamma":1.0,"blend_mode":"alpha","render_mode":"translucent","channel_settings":[],"label_settings":[],"channel_blend_mode":"additive"},"ds-cccc":{"visible":true,"opacity":1.0,"contrast_min":0.0,"contrast_max":65535.0,"gamma":1.0,"blend_mode":"alpha","render_mode":"translucent","channel_settings":[],"label_settings":[],"channel_blend_mode":"additive"}},"auto_contrast":{"ds-aaaa":false,"ds-bbbb":false,"ds-cccc":false}}"#;

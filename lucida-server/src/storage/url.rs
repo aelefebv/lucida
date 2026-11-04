@@ -1,15 +1,8 @@
-//! `LUCIDA_DB_URL` — the connection string that picks a storage
-//! backend.
+//! `LUCIDA_DB_URL`: the connection string that picks a storage backend.
 //!
-//! Parsing happens once, at startup, and produces a [`DatabaseUrl`]
-//! whose scheme is already known to be one this build supports. That is
-//! the point of the type: [`super::open`] matches on [`Scheme`] and has
-//! no "unrecognized backend" arm to write, because a `DatabaseUrl` that
-//! names an unrecognized backend cannot be constructed.
-//!
-//! Unsupported and malformed values are rejected here, so the operator
-//! learns about a typo during boot rather than on the first request
-//! that touches the database.
+//! Parsed once at startup into a [`DatabaseUrl`] whose scheme this build
+//! supports, so [`super::open`] needs no "unrecognized backend" arm and a
+//! typo fails the boot rather than the first database request.
 
 use std::borrow::Cow;
 use std::fmt;
@@ -181,14 +174,10 @@ impl DatabaseUrl {
     /// `None` when the string names no database, rather than the user
     /// name libpq would fall back to.
     ///
-    /// Narrower than [`Self::redacted`], which keeps the host so an
-    /// operator reading a log can tell which server was meant. This is
-    /// for a surface that must tell one deployment from another and may
-    /// reveal nothing about where either lives, which is what the status
-    /// route shows an external monitor.
-    ///
-    /// For SQLite the name is the file name. For PostgreSQL it is the
-    /// path, or the `dbname` query parameter sqlx also accepts.
+    /// Narrower than [`Self::redacted`], which keeps the host. This is for
+    /// the status route, which must tell deployments apart and reveal
+    /// nothing about where they live. For SQLite the name is the file
+    /// name; for PostgreSQL the path or the `dbname` query parameter.
     pub fn database_name(&self) -> Option<String> {
         // `parse` wrote the canonical scheme, so the prefix is literal.
         let rest = &self.raw[self.scheme.as_str().len() + 1..];

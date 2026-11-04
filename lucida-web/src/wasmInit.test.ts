@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-// Double for the generated bindings' `init()`: dedupes COMPLETED
-// initializations only — concurrent in-flight calls each instantiate, which
-// is exactly the hazard `initWasmOnce` exists to close.
+// Double for the generated bindings' `init()`: dedupes only completed
+// initializations, so concurrent in-flight calls each instantiate. That is
+// the hazard `initWasmOnce` exists to close.
 const glue = vi.hoisted(() => ({
   instantiations: 0,
   finalized: undefined as object | undefined,
@@ -58,7 +58,7 @@ describe("initWasmOnce", () => {
     glue.finalizeAll();
     await Promise.all([a, b]);
 
-    // Later callers ride the settled promise — still one instantiation.
+    // Later callers ride the settled promise: still one instantiation.
     await initWasmOnce();
     expect(glue.instantiations).toBe(1);
   });

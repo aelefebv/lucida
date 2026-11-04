@@ -17,11 +17,9 @@ export interface DeviceLimits {
 }
 
 /**
- * Read the queried device limits with WebGPU-spec-minimum fallbacks.
- * If a device reports a lower value than the spec minimum (rare but
- * legal), the queried value wins. `device.limits` itself is optional
- * here so partial mocks in unit tests (which may stub out only some
- * of the device surface) fall back to the spec minimums.
+ * Read the queried device limits with WebGPU spec-minimum fallbacks. A
+ * queried value below the minimum still wins. `device.limits` is optional
+ * so partial test mocks fall back to the minimums.
  */
 export function getDeviceLimits(device: GPUDevice): DeviceLimits {
   const limits = device.limits as Partial<GPUSupportedLimits> | undefined;

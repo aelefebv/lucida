@@ -10,8 +10,8 @@ import { SAVED_VIEW_VERSION, type SavedView } from "../savedView/types.ts";
 
 const MY_ID = "7";
 
-/** A trivial scene stub — ThreadPopover only calls apply_command for mutations,
- * and the "Go to author's view" path never mutates the document. */
+/** ThreadPopover only calls apply_command for mutations, and "Go to author's
+ * view" never mutates. */
 function makeScene(): WasmScene {
   return {
     apply_command: () => {},

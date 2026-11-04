@@ -1,7 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { SustainedCondition, ConsecutiveTickDetector } from "./sustained.ts";
 
-// ---------------------------------------------------------------------------
 // SustainedCondition
 //
 // The semantics mirror the existing detector logic in `tickCoordinator.ts`:
@@ -11,7 +10,6 @@ import { SustainedCondition, ConsecutiveTickDetector } from "./sustained.ts";
 //     (`lastLogAt` starts at 0, so the very first log requires
 //     `now >= rateLimitMs`).
 //   - Any false tick resets `aboveThresholdSince` to null; sustain restarts.
-// ---------------------------------------------------------------------------
 
 describe("SustainedCondition", () => {
   const makeDetector = () => {
@@ -68,13 +66,11 @@ describe("SustainedCondition", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // ConsecutiveTickDetector
 //
 // Counter-based variant: each true tick increments a consecutive counter
 // and fires when (counter >= threshold AND now - lastLogAt >= rateLimitMs).
 // Any false tick resets the counter (but not `lastLogAt`).
-// ---------------------------------------------------------------------------
 
 describe("ConsecutiveTickDetector", () => {
   const makeDetector = () => {

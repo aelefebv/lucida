@@ -1,18 +1,15 @@
 // @vitest-environment happy-dom
 //
-// Behavior tests for the read/unread inbox added in issue #803, layered on top
-// of the slice-2 "mentions of me" indicator. These drive the REAL <MentionsOfMe>
-// with plain annotation data and assert the EXACT interaction contract:
+// The read/unread mentions inbox:
 //
-//   1. the badge counts only UNVIEWED mentions;
-//   2. clicking an item fires BOTH onNavigate(pinId) and onMarkViewed(cid);
+//   1. the badge counts only unviewed mentions;
+//   2. clicking an item fires both onNavigate(pinId) and onMarkViewed(cid);
 //   3. each item carries data-viewed reflecting its read-state;
 //   4. the hide-viewed toggle drops viewed items from the list;
 //   5. zero unviewed -> badge 0, and with hide-viewed engaged the panel lists
 //      no items.
 //
-// Slice-2 behavior (handle matching, jump-to-pin) is exercised indirectly: the
-// fixtures rely on the real handle derivation so a comment "mentions me".
+// Fixtures use the real handle derivation so a comment really mentions me.
 
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
@@ -101,9 +98,9 @@ describe("MentionsOfMe read/unread inbox (#803)", () => {
     openPanel();
     fireEvent.click(screen.getByTestId("mention-of-me-item-c-1"));
 
-    // Navigation targets the OWNING pin (unchanged slice-2 contract) ...
+    // Navigation targets the owning pin...
     expect(onNavigate).toHaveBeenCalledWith("pin-1");
-    // ... AND the comment is marked viewed.
+    // ...and the comment is marked viewed.
     expect(onMarkViewed).toHaveBeenCalledWith("c-1");
   });
 

@@ -19,7 +19,7 @@ import { createQuiescenceState, evaluateQuiescence, type QuiescenceState } from 
 import type { CacheWarmth, InputKind, Outstanding, RunConditions } from "./trace/types.ts";
 import type { FrameCaptureResult } from "./renderer/workerProtocol.ts";
 
-// Re-export types so downstream imports stay unchanged
+// Re-exported so imports of these types from the render loop keep working.
 export type { DatasetEntry, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
 
 export interface LucidaCaptureReadyState {
@@ -123,8 +123,8 @@ export class RenderLoop implements TraceEnvironment {
     // for a run's conditions.
     traceRecorder.setEnvironment(this);
     // A workspace reload hands the loop its datasets up front rather than
-    // through `addDataset`, and that path is the cold open the monitor
-    // exists to explain — so it opens a run too, under its own cause.
+    // through `addDataset`. That is the cold open the monitor exists to
+    // explain, so it opens a run too, under its own cause.
     if (this.datasets.size > 0) this.openDatasetRun("loop_start");
     this.publishQuiescence();
   }
@@ -218,10 +218,9 @@ export class RenderLoop implements TraceEnvironment {
       unsub();
       this.unsubs.delete(id);
     }
-    // Capture image IDs from the manifest BEFORE deleting the dataset
-    // entry so we can pair the cache cleanup with a wire-format
-    // unregistration on the content source (closes the
-    // imageWireFormats leak; see contentSource.unregisterDataset).
+    // Capture image IDs before deleting the dataset entry so the cache
+    // cleanup can pair with a wire-format unregistration on the content
+    // source (see contentSource.unregisterDataset).
     const manifest = this.datasets.get(id)?.manifest;
     const imageIds = manifest ? manifest.images.map(img => img.image_id) : [];
     this.datasets.delete(id);
@@ -289,8 +288,8 @@ export class RenderLoop implements TraceEnvironment {
    * Publish the page's quiescence (ADR 0051). Called at the end of every
    * tick, which is also the only moment it can change: every arrival,
    * eviction and view change dirties a flag, and a dirty flag schedules a
-   * tick. Nothing polls — an idle viewer publishes nothing because an idle
-   * viewer does not tick.
+   * tick. Nothing polls: an idle viewer publishes nothing because it does
+   * not tick.
    *
    * `frameInFlight` reads the RAF handle after the tick has had its chance
    * to reschedule, so a loop with work left to do never looks settled.
@@ -303,7 +302,7 @@ export class RenderLoop implements TraceEnvironment {
     state.frameInFlight = this.rafId !== null;
     traceRecorder.noteQuiescence(evaluateQuiescence(state, performance.now()));
 
-    // The reading tier rides the same moment (#934). Queue depth and in-flight
+    // The reading tier rides the same moment. Queue depth and in-flight
     // come off the reading just taken rather than a second scan, and both
     // include speculative prefetch: the queue is as deep as it is, whatever
     // the settle predicate chooses to ignore. The GPU pass time is whatever
@@ -357,7 +356,7 @@ export class RenderLoop implements TraceEnvironment {
 
   /**
    * {@link TraceEnvironment}: what was still outstanding when the run closed.
-   * Read fresh rather than off the last publication — a run can be closed
+   * Read fresh rather than off the last publication: a run can be closed
    * explicitly between ticks, and a stale reading would understate it.
    */
   captureOutstanding(): Outstanding {
@@ -548,9 +547,9 @@ export class RenderLoop implements TraceEnvironment {
 
     if (!this.interactiveDirty && !this.residencyDirty) return;
 
-    // AssetCatalog not yet wired (brief window before the first server
-    // snapshot lazily constructs it on Session). Reschedule — once the
-    // catalog appears, the next markInteractiveDirty/markResidencyDirty triggers a tick.
+    // AssetCatalog not yet wired (the brief window before the first server
+    // snapshot constructs it on Session). Once the catalog appears, the next
+    // markInteractiveDirty/markResidencyDirty triggers a tick.
     if (!this.session.assetCatalog) {
       this.scheduleIfNeeded();
       return;
@@ -564,22 +563,21 @@ export class RenderLoop implements TraceEnvironment {
     let shouldRender = false;
 
     if (this.interactiveDirty) {
-      // View changed — render immediately
+      // View changed: render immediately.
       this.interactiveDirty = false;
       this.residencyDirty = false;
       this.lastResidencyRenderTime = now;
       shouldRender = true;
     } else if (this.residencyDirty) {
       if (now - this.lastResidencyRenderTime >= RESIDENCY_RENDER_INTERVAL_MS) {
-        // Enough time elapsed since last data render — render now
+        // Enough time elapsed since the last data render: render now.
         this.residencyDirty = false;
         this.lastResidencyRenderTime = now;
         shouldRender = true;
       } else {
-        // Residency dirty but debounce not elapsed — tick still runs for
-        // uploads; only the render is suppressed. Aggregate skip counts
-        // and emit one log per second so chunk-burst loading doesn't
-        // flood the console.
+        // Residency dirty but debounce not elapsed: the tick still runs for
+        // uploads and only the render is suppressed. Skip counts aggregate
+        // into one log per second so chunk bursts don't flood the console.
         this.throttleSkipPending++;
         if (now - this.lastThrottleEmit > RenderLoop.THROTTLE_EMIT_INTERVAL_MS) {
           debugLog("render", "residency_throttled", {
@@ -614,18 +612,15 @@ export class RenderLoop implements TraceEnvironment {
       }
     }
 
-    // A coalesced view/selection change still owes a trailing rebuild.
-    // Mark interactive so the loop re-ticks and the rebuild renders
-    // immediately once the coalescing window elapses — otherwise the
-    // change would be lost if the user stopped moving. This is the
-    // interactive-class continuation ADR-0009 describes: the render stays
-    // immediate; only the residency-class rebuild is what was throttled.
+    // A coalesced view/selection change still owes a trailing rebuild. Mark
+    // interactive so it renders once the coalescing window elapses;
+    // otherwise the change is lost when the user stops moving.
     if (this.tickCoordinator.hasPendingRebuild()) {
       this.setDirty("interactive", "pending_residency_rebuild");
     }
 
-    // Recording is unconditional (ADR 0049), and one subtraction is not a
-    // cost worth gating.
+    // Recording is unconditional, and one subtraction is not a cost worth
+    // gating.
     this.lastFrameTimeUs = (performance.now() - now) * 1000;
 
     if (shouldRender) {

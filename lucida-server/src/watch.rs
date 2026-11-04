@@ -1,19 +1,11 @@
-//! The watch stream's relay (ADR 0051 as amended): who is subscribed, and a
-//! small ring of what pages published, kept per workspace so a subscriber
-//! that joins late reads the recent past before the live items.
+//! The watch stream's relay (ADR 0051): who is subscribed, and a small ring
+//! of what pages published, kept per workspace so a late subscriber reads
+//! the recent past before the live items.
 //!
-//! The server stores what it received and computes nothing over it. An item
-//! is here because a page's watch toggle was on when it was published, it
-//! leaves when the ring wraps, and no lifecycle row is ever among them: the
-//! item type has no variant for one. That is what keeps this outside the
-//! server-side trace store [ADR 0050] rejected. The ring is seconds of
-//! aggregates, never a session of rows.
-//!
-//! Ordering is why the relay holds each subscriber's channel itself rather
-//! than looking one up when it publishes. The ring replay and every live item
-//! after it are appended to the same per-connection queue under one lock, so
-//! a subscriber reads the recent past and then the present, in the order the
-//! workspace published them, with nothing interleaved and nothing repeated.
+//! The server stores what it received and computes nothing over it, and the
+//! item type has no variant for a lifecycle row. The ring replay and every
+//! live item go into one per-connection queue under one lock, so a
+//! subscriber sees them in publish order with nothing repeated.
 
 use std::collections::{HashMap, VecDeque};
 

@@ -4,9 +4,7 @@ import { InteractionModeDetector } from "./interactionMode.ts";
 import { INTERACTION_MODE_WINDOW } from "./cpuCache.ts";
 import type { SceneEpochs } from "../epochs.ts";
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 function makeEpochs(overrides?: Partial<SceneEpochs>): SceneEpochs {
   return {

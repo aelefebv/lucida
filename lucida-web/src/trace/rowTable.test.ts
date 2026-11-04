@@ -42,15 +42,10 @@ describe("RowTable", () => {
 
   it("pins the row width, because the memory caps are derived from it", () => {
     // 3 interned identity ids + 6 chunk coordinates + 7 boundary slots + the
-    // two-part wire label, all uint32, plus a residency-tier byte, a lane
-    // byte, an outcome byte and the byte that remembers the row's last
-    // boundary. #927 derives its resident and per-run caps from this figure,
-    // so a change here is a change to how much of a run fits — the label
-    // costs 8 B a row, and buys the join to the server's table; the boundary
-    // byte costs 1 B, and buys a live tally that walks no rows; the bytes
-    // column costs 4 B, and buys the steady-state ruleset its received-bytes
-    // and refetch findings; the identity index costs 12 B, and buys the
-    // overlay a per-chunk reading of the open interval that walks no rows.
+    // two-part wire label + the bytes column, all uint32, plus a
+    // residency-tier, lane, outcome and last-boundary byte, plus a 12 B
+    // identity index. The resident and per-run caps derive from this figure,
+    // so a change here changes how much of a run fits.
     expect(RowTable.BYTES_PER_ROW).toBe(92);
   });
 
@@ -212,8 +207,8 @@ describe("the live tally (#937)", () => {
 
 describe("the live tally is kept on the write path", () => {
   /**
-   * The walk the tally used to be, kept as the oracle for the counters that
-   * replaced it: a row is in the phase after the last boundary it stamped,
+   * A full walk, the oracle for the write-path counters: a row is in the
+   * phase after the last boundary it stamped,
    * a finished row is in no phase, and a row that stamped nothing is
    * unstamped.
    */

@@ -181,19 +181,14 @@ export class ProxiedContentSource implements ContentSource {
   }
 
   /**
-   * Server-reported failure for a source chunk: the store read failed with a
-   * non-not-found error. Both statuses reject the pending fetch — the bytes
-   * will not arrive on this request — but with distinct classifications so a
-   * retry is attempted only where it can help:
+   * Server-reported failure for a source chunk's store read. Both statuses
+   * reject the pending fetch, classified so a retry happens only where it
+   * can help:
    *
-   * - `failed_permanent` (revoked access, invalid credentials) → `permanent`.
-   *   The store answered and will keep answering the same way, so a retry is
-   *   futile; the delivery-failure streak counts it and the failure sticks.
-   * - `unavailable` (backend fault, throttling, timeout, unreachable service)
-   *   → `transient`. The store may recover, so this must self-heal like an
-   *   ordinary blip rather than dark-holing the chunk until the dataset is
-   *   reopened. This is the frame the server now emits when its own bounded
-   *   retry budget is exhausted before the client's fetch would time out.
+   * - `failed_permanent` (revoked access, invalid credentials) is `permanent`:
+   *   the store will keep answering the same way.
+   * - `unavailable` (backend fault, throttling, timeout) is `transient`, so
+   *   it self-heals instead of dark-holing the chunk until the dataset reopens.
    */
   handleSourceChunkStatus(
     datasetId: string,
@@ -213,11 +208,8 @@ export class ProxiedContentSource implements ContentSource {
         : { reason: "unavailable", kind: "transient" as const };
     for (const entry of entries) {
       clearTimeout(entry.timeoutId);
-      // `serverReported` regardless of `kind`: the store answered with a
-      // failure, so this feeds the delivery-failure streak even when the
-      // classification is transient (so a persistently-unavailable source
-      // still surfaces) — while the transient/permanent split keeps driving
-      // retry as before.
+      // `serverReported` regardless of `kind`, so a persistently unavailable
+      // source still feeds the delivery-failure streak. `kind` drives retry.
       entry.reject(
         new FetchError(`Source chunk ${chunkKey} ${reason}${detail}`, {
           kind,

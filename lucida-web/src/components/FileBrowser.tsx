@@ -11,30 +11,22 @@ interface BrowseResponse {
 }
 
 interface FileBrowserProps {
-  /** Open the single navigated-to dataset into the CURRENT workspace (the
-   *  in-viewer "Browse Local" flow). Optional so the browser can also be used
-   *  purely to create a new workspace (#697) via `onCreateWorkspace`. */
+  /** Open the navigated-to dataset into the current workspace. Optional so the
+   *  browser can be used only to create a workspace via `onCreateWorkspace`. */
   onSelect?: (path: string) => void;
-  /** Create a NEW workspace from the selected dataset(s) (#697). When provided,
-   *  the browser shows multi-select affordances (accumulate one or more zarr
-   *  directories) and a "Create workspace from selection" action. Receives the
-   *  canonical-form paths the user accumulated. */
+  /** Create a new workspace from the collected canonical-form dataset paths.
+   *  When provided, the browser shows multi-select controls. */
   onCreateWorkspace?: (paths: string[]) => void;
   onClose: () => void;
   serverPort?: number;
 }
 
 /**
- * Cross-platform filesystem browser. The server owns "what's the root?"
- * — sending an empty `path` asks for the platform-default root:
- *   - Unix: listing of `/` (response `path` = `"/"`)
- *   - Windows: synthetic drives list `c:`, `d:`, … (response `path` = `""`)
- *
- * The component is platform-agnostic: it stores whatever path the server
- * returned and joins entries onto it with `/` (canonical form is always
- * forward-slash). On Windows the empty string is the explicit sentinel
- * for "synthetic drives root" so `"" + "/" + name` would yield a bogus
- * `"/c:"`; `navigateTo` special-cases the empty-root case.
+ * Cross-platform filesystem browser. The server owns the root: an empty `path`
+ * asks for the platform default, `/` on Unix or a synthetic drives list
+ * (response `path` = `""`) on Windows. The component joins entries onto
+ * whatever path the server returned with `/`; `navigateTo` special-cases the
+ * empty root so a drive doesn't become `"/c:"`.
  */
 export function FileBrowser({
   onSelect,
@@ -43,9 +35,8 @@ export function FileBrowser({
   serverPort = 9876,
 }: FileBrowserProps) {
   const [currentPath, setCurrentPath] = useState(() => {
-    // On first-ever open `saved` is null → use `""`, which the server
-    // interprets as "give me the platform-default root." This avoids
-    // hardcoding `"/"` (broken on Windows) on the client.
+    // `""` asks the server for the platform-default root; a hardcoded `"/"`
+    // would break on Windows.
     const saved = sessionStorage.getItem("lucida-browse-path");
     return saved ?? "";
   });
@@ -53,9 +44,8 @@ export function FileBrowser({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hasZarrJson, setHasZarrJson] = useState(false);
-  // Accumulated dataset paths for the "create workspace from selection" flow
-  // (#697). Only meaningful when `onCreateWorkspace` is provided; lets the user
-  // walk to several zarr directories and collect them before creating.
+  // Dataset paths collected for "create workspace from selection". Only used
+  // when `onCreateWorkspace` is provided.
   const [selected, setSelected] = useState<string[]>([]);
   const multiSelect = Boolean(onCreateWorkspace);
   const alreadySelected = selected.includes(currentPath);
@@ -65,9 +55,7 @@ export function FileBrowser({
       setLoading(true);
       setError(null);
       try {
-        // Empty path → omit the query param so the server falls into
-        // its platform-default-root branch. Otherwise URL-encode the
-        // canonical-form path verbatim (it's already forward-slashed).
+        // An empty path omits the param so the server returns its default root.
         const url = path
           ? `http://localhost:${serverPort}/api/browse?path=${encodeURIComponent(path)}`
           : `http://localhost:${serverPort}/api/browse`;
@@ -100,11 +88,9 @@ export function FileBrowser({
 
   const navigateTo = useCallback(
     (name: string) => {
-      // Windows drives-root case: `currentPath` is `""` and entries are
-      // already top-level paths like `c:` — joining with `"/"` would
-      // produce a bogus `"/c:"` that doesn't canonicalize. Use the
-      // entry name as the new path directly. On Unix `currentPath` is
-      // `"/"` here, never empty, so the normal join branch applies.
+      // At the Windows drives root `currentPath` is `""` and entries are
+      // drives like `c:`; joining with `/` would produce `"/c:"`. On Unix the
+      // root is `"/"`, never empty.
       const next = currentPath ? `${currentPath}/${name}` : name;
       browse(next);
     },
@@ -112,19 +98,14 @@ export function FileBrowser({
   );
 
   const navigateUp = useCallback(() => {
-    // Strip the last `/segment` if there is one.
     const stripped = currentPath.replace(/\/[^/]*$/, "");
     if (stripped === currentPath) {
-      // No `/` found — we're at a single-segment path like `c:`
-      // (Windows drive root reached via the drives list). Going up
-      // returns to the synthetic drives root (empty path).
+      // A single-segment path like `c:`: up is the Windows drives root.
       browse("");
       return;
     }
     if (stripped === "") {
-      // Stripping took us back to platform root. On Unix this means
-      // we were at `/foo` and the regex left `""`; sending `""` makes
-      // the server reply with the platform-default root.
+      // Was `/foo` on Unix; `""` asks for the platform-default root.
       browse("");
       return;
     }
@@ -158,16 +139,10 @@ export function FileBrowser({
     onClose();
   }, [onCreateWorkspace, hasZarrJson, selected, currentPath, onClose]);
 
-  // Breadcrumb segments — works for both Unix (`/foo/bar`) and Windows
-  // (`c:/Users/me`) because both use forward slashes throughout.
+  // Canonical paths are forward-slashed on both Unix and Windows.
   const segments = currentPath.split("/").filter(Boolean);
-  // Preserve a leading `/` when rebuilding segment paths so Unix paths
-  // stay absolute (`/foo/bar`) and Windows paths stay drive-letter form
-  // (`c:/Users/me`). The first character is the only signal we need.
+  // Keeps Unix paths absolute and Windows paths in drive-letter form.
   const leadingSlash = currentPath.startsWith("/") ? "/" : "";
-  // True when we're at the platform-default root (synthetic drives root
-  // on Windows, `/` on Unix). The `..` button and root-vs-not styling
-  // both key off this.
   const atRoot = currentPath === "" || currentPath === "/";
 
   return (
@@ -304,7 +279,7 @@ export function FileBrowser({
           )}
           {!loading && !error && (
             <>
-              {/* Up directory — hidden at the platform-default root */}
+              {/* Up directory, hidden at the platform-default root */}
               {!atRoot && (
                 <button
                   onClick={navigateUp}
@@ -386,7 +361,7 @@ export function FileBrowser({
           )}
         </div>
 
-        {/* Selection tray — only in the create-workspace (multi-select) flow. */}
+        {/* Selection tray, only in the create-workspace (multi-select) flow. */}
         {multiSelect && selected.length > 0 && (
           <div
             data-testid="file-browser-selection"

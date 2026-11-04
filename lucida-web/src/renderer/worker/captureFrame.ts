@@ -1,17 +1,12 @@
 /**
- * The frame on the worker's canvas as a PNG, for the trace bundle (#1055).
+ * The frame on the worker's canvas as a PNG, for the trace bundle.
  *
- * A hardware host refused `convertToBlob` on the canvas after a frame was
- * presented. Most likely a WebGPU canvas's current texture expires when the
- * frame handler returns, and nothing readable is left behind it. So a
- * capture request only arms the worker, and the next frame handler hands
- * over the canvas texture while it is still current. The main thread asks
- * the render loop for a frame when it arms a capture.
- *
- * A worker that renders no frame still answers. After a wait, the capture
- * reads the canvas as presented. A refusal is reported by name, so the
- * bundle can say why it has no frame. The main thread settles each pending
- * id itself when the client is destroyed.
+ * Some hosts refuse `convertToBlob` on a presented WebGPU canvas, likely
+ * because its current texture expires when the frame handler returns. So a
+ * capture request only arms the worker, and the next frame handler reads the
+ * texture while it is still current. A worker that renders no frame still
+ * answers: after a wait it reads the presented canvas, or reports the refusal
+ * by name.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";

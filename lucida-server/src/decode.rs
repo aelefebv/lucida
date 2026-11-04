@@ -1,14 +1,9 @@
-//! Storage-compression decode helpers.
+//! Storage-compression decode for [`crate::chunk_read::read_chunk`], so
+//! every served chunk gets the same lz4/zstd/blosc handling.
 //!
-//! Called from [`crate::chunk_read::read_chunk`], the one path both the
-//! chunk handler and coarse generation read through, so every
-//! served chunk gets the same lz4/zstd/blosc handling.
-//!
-//! The compression *types* live in [`lucida_store::codec`] because
-//! that's where the import-time codec-chain validator runs. This module
-//! owns the actual decompression logic that needs the `zstd` /
-//! `lz4_flex` crate dependencies, which `lucida-store` deliberately
-//! does not pull in.
+//! The compression types live in [`lucida_store::codec`], where import
+//! validates the codec chain. The decompression lives here because
+//! `lucida-store` deliberately does not depend on `zstd` or `lz4_flex`.
 
 pub mod blosc;
 

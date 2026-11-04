@@ -1,16 +1,12 @@
 /**
  * The chunk lookup: one chunk by row identity, read out of the rows the run
- * recorded. "Why is this chunk not resident" answered in text, from the same
- * document the overlay's hover inspector reads, so the two cannot disagree.
+ * recorded, from the same document the overlay's hover inspector reads.
  *
- * The queue rank is derived, not recorded. The scheduler keeps no per-key
- * bookkeeping behind its admission window (ADR 0044), so the trace carries no
- * rank; what it does carry is every recorded row's admission and dispatch,
- * and a rank is a count over those. Two facts bound what that count can say,
- * and both are stated on the lookup itself: a row is born at dispatch
- * (`TraceRecorder.beginChunkRow`), so a chunk still queued at close has no
- * row and is invisible to the count, and a chunk re-delivered from the CPU
- * cache carries no second row.
+ * The queue rank is derived, not recorded: the scheduler keeps no per-key
+ * bookkeeping behind its admission window (ADR 0044), so a rank is a count
+ * over the recorded rows' admissions and dispatches. A row is born at
+ * dispatch, so a chunk still queued at close is invisible to the count, and a
+ * chunk re-delivered from the CPU cache carries no second row.
  */
 
 import {

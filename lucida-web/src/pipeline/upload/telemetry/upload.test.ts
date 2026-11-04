@@ -17,18 +17,14 @@ import {
   UPLOAD_LOG_SUSTAIN_MS,
 } from "../constants.ts";
 
-// ---------------------------------------------------------------------------
 // Test helpers
-// ---------------------------------------------------------------------------
 
 /** Build an empty tick-stats record with overrides applied. */
 function makeTickStats(over: Partial<UploadTickStats> = {}): UploadTickStats {
   return { ...emptyUploadTickStats(), ...over };
 }
 
-// ---------------------------------------------------------------------------
 // recordEvent + cumulative counters + size sketch
-// ---------------------------------------------------------------------------
 
 describe("UploadTelemetry — recordEvent + counters", () => {
   it("accumulates total bytes and total uploads across recordEvent calls", () => {
@@ -93,25 +89,15 @@ describe("UploadTelemetry — recordEvent + counters", () => {
   });
 
   it("publishes far faster than the shift()-pruned window it replaced", async ({ annotate }) => {
-    // Regression guard for #898. The old prune was `Array.shift()` in a
-    // loop; V8 left-trims cheaply until the backing store outgrows a regular
-    // heap object, after which every shift is a full memmove. 128 events per
-    // tick on 8 ms ticks puts the 1s window at ~16k entries, past that cliff.
+    // `Array.shift()` in a loop becomes a full memmove per shift once V8's
+    // backing store outgrows a regular heap object. 128 events per tick on
+    // 8 ms ticks puts the 1s window at ~16k entries, past that cliff.
     //
-    // The assertion is a ratio against that old shape, measured in the same
-    // run, rather than an absolute millisecond bound: the cliff is
-    // structural in V8, so the ratio holds on a slow CI box where an
-    // absolute bound would just flake.
-    //
-    // Past the cliff, what a shift costs depends on the store's generation.
-    // While young, a shift is the memmove alone, about 0.37 ms per tick.
-    // Once promoted, it also pays the generational write barrier over the
-    // moved slots: 1.7 ms to 6.3 ms per tick, depending on how many entries
-    // are still young. V8 promotes a store that lives for a session within
-    // seconds, so that is the regime to guard, and the test forces the
-    // promotion instead of leaving it to GC timing. An earlier version left
-    // it to chance and read 16x on one machine but 2.3x on a CI runner where
-    // no scavenge landed inside the timed block (#987).
+    // The assertion is a ratio against a shift()-pruned window measured in
+    // the same run, not an absolute bound, so it holds on a slow CI box.
+    // A promoted store also pays the generational write barrier on every
+    // shift, and a session-lived store is promoted within seconds, so the
+    // test forces promotion rather than leaving it to GC timing.
     //
     // Both windows advance in lockstep, each tick timed separately, so they
     // see the same heap phases. The assertion compares per-round minimums,
@@ -229,9 +215,7 @@ describe("UploadTelemetry — recordEvent + counters", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Tick window aggregation + filter ratio
-// ---------------------------------------------------------------------------
 
 describe("UploadTelemetry — tick aggregation", () => {
   it("aggregates skip causes from per-tick stats into the rolling window", () => {
@@ -268,14 +252,12 @@ describe("UploadTelemetry — tick aggregation", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Sustained-anomaly detectors
 //
 // debugLog only emits when its category is enabled (`localStorage.debug`
 // gates the call). We spy on `console.log`, enable the "orch" category
 // for the test, and assert that the right event names land. Each test
 // restores prior debug state in `afterEach` to avoid bleed.
-// ---------------------------------------------------------------------------
 
 describe("UploadTelemetry — sustained anomaly detectors", () => {
   let consoleLogSpy: ReturnType<typeof vi.spyOn>;
@@ -358,16 +340,12 @@ describe("UploadTelemetry — sustained anomaly detectors", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Telemetry shape regression — guards the counter migration parity
-// ---------------------------------------------------------------------------
-
 describe("UploadTelemetry — shape regression", () => {
   /**
    * Run a known sequence of recordEvent + publish calls and assert the
    * produced `UploadRollingStats` shape (every key, in order) matches
    * the expected snapshot. Safety net: if the module starts dropping or
-   * renaming a tile, this test catches it before the `orch` log
+   * renaming a field, this test catches it before the `orch` log
    * category — its remaining consumer — starts lying.
    */
   it("preserves the full UploadRollingStats key set", () => {

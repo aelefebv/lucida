@@ -3,9 +3,7 @@ import { ProxiedContentSource, DEFAULT_TIMEOUT_MS } from "./contentSource.ts";
 import { proxyResponseKey } from "./wireProtocol.ts";
 import { FetchError } from "./retry.ts";
 
-// ---------------------------------------------------------------------------
 // Fixtures
-// ---------------------------------------------------------------------------
 
 /** Build a 64-byte header buffer plus optional payload. */
 function makeProxyResponse(opts?: {
@@ -50,9 +48,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-// ---------------------------------------------------------------------------
 // Timeout invariant
-// ---------------------------------------------------------------------------
 
 describe("DEFAULT_TIMEOUT_MS", () => {
   it("keeps the client timeout above the store's worst-case read budget", () => {
@@ -68,9 +64,7 @@ describe("DEFAULT_TIMEOUT_MS", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Chunk fetches
-// ---------------------------------------------------------------------------
 
 describe("ProxiedContentSource.fetch", () => {
   it("happy path: sendMessage fires, handleChunkData resolves with bytes/wireFormat/dataType", async () => {
@@ -323,9 +317,7 @@ describe("ProxiedContentSource.fetch", () => {
     // The server only reports store failures here (not-found is served as
     // zero-filled bytes). A revoked-access/credentials failure sticks
     // (`permanent`); a backend fault / throttle / timeout must self-heal
-    // (`transient`) instead of dark-holing the chunk until reopen — the
-    // server now emits `unavailable` when its bounded retry budget is spent
-    // before the client's own fetch timeout would fire.
+    // (`transient`) instead of dark-holing the chunk until reopen.
     const cases = [
       ["failed_permanent", "permanent"],
       ["unavailable", "transient"],
@@ -377,9 +369,7 @@ describe("ProxiedContentSource.fetch", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Proxy fetches
-// ---------------------------------------------------------------------------
 
 describe("ProxiedContentSource.fetchProxy", () => {
   it("happy path: sends asset_request; handleProxyData decodes header + slices payload", async () => {
@@ -449,9 +439,7 @@ describe("ProxiedContentSource.fetchProxy", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // handleBinary dispatch
-// ---------------------------------------------------------------------------
 
 describe("ProxiedContentSource.handleBinary", () => {
   it("routes a `proxy/...` key to the proxy queue", async () => {

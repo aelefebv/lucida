@@ -23,11 +23,9 @@ import type {
 } from "../pipeline/upload/uploadClient.ts";
 
 /** How long `destroy()` waits for the worker to process its `destroy`
- *  message (which ends in `self.close()`) before hard-terminating it.
- *  Calling `terminate()` immediately would discard the queued message and
- *  skip the worker-side GPU cleanup entirely; the fallback only matters for
- *  a wedged worker or one that never finished init (pre-init workers ignore
- *  `destroy`). `terminate()` on an already-closed worker is a no-op. */
+ *  message (which ends in `self.close()`) before terminating it. Terminating
+ *  at once would drop the queued message and skip worker-side GPU cleanup;
+ *  the fallback is for a wedged worker or one that never finished init. */
 const DESTROY_TERMINATE_FALLBACK_MS = 1000;
 
 function failureText(failure: CaptureFailure | null): string {
@@ -57,10 +55,7 @@ export class RenderClient implements UploadClient {
 
   onIntensityRange: ((datasetId: string, min: number, max: number) => void) | null = null;
   onChunksEvicted: ChunksEvictedHandler | null = null;
-  /**
-   * Missing entries are a discriminated union over chunks and proxies.
-   * Consumers should match on `kind === "chunk"` to handle chunk gaps.
-   */
+  /** Missing entries cover chunks and proxies; match on `kind`. */
   onWantedSetDelta: WantedSetHandler | null = null;
   /**
    * The worker's level readout for one dataset changed: its target level
@@ -80,7 +75,7 @@ export class RenderClient implements UploadClient {
    * Call `handler` once, when the worker reports that the pipelines it
    * builds at bootstrap have compiled, or at once if it already has. Returns
    * the function that withdraws the handler. The minimap holds its overlay's
-   * content draws on this report (#1101).
+   * content draws on this report.
    */
   oncePipelinesCompiled(handler: () => void): () => void {
     if (this.bootstrapCompiled) {
@@ -198,8 +193,7 @@ export class RenderClient implements UploadClient {
         this.thumbnailPending.delete(msg.id);
         resolve(msg.bitmap);
       } else if (msg.bitmap) {
-        // No waiter (e.g. the request was already settled/abandoned) — release
-        // the GPU-backed bitmap rather than leak it.
+        // No waiter, so release the GPU-backed bitmap rather than leak it.
         msg.bitmap.close();
       }
     } else if (msg.type === "frameCaptured") {
@@ -238,12 +232,8 @@ export class RenderClient implements UploadClient {
   ) {
     const transferList: ArrayBuffer[] = [];
     const workerChunks: Chunk[] = chunks.map(chunk => {
-      // Copy: the upstream `chunk.data` is owned by the CpuCache (see
-      // `CacheEntry.data` in pipeline/fetch/types.ts). The cache holds
-      // the buffer indefinitely for re-delivery after worker-side
-      // eviction (`getCachedChunk`); transferring it directly would
-      // detach the cache's copy and break later resends. Copy + transfer
-      // keeps both sides alive.
+      // Copy: the CpuCache keeps `chunk.data` for re-delivery after
+      // worker-side eviction, and transferring it would detach that copy.
       const buf = chunk.data.slice(0);
       transferList.push(buf);
       return { data: buf, dataType: chunk.dataType, x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key };
@@ -280,8 +270,7 @@ export class RenderClient implements UploadClient {
   ) {
     const transferList: ArrayBuffer[] = [];
     const workerChunks: Chunk[] = chunks.map(chunk => {
-      // See note on `volumeChunkData` above — the cache reuses `chunk.data`
-      // across deliveries, so we copy before transfer.
+      // Copy before transfer, as in `volumeChunkData`.
       const buf = chunk.data.slice(0);
       transferList.push(buf);
       return { data: buf, dataType: chunk.dataType, x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key };
@@ -321,8 +310,7 @@ export class RenderClient implements UploadClient {
   ) {
     const transferList: ArrayBuffer[] = [];
     const workerChunks: Chunk[] = chunks.map(chunk => {
-      // See note on `volumeChunkData` above — the cache reuses
-      // `chunk.data` across deliveries, so we copy before transfer.
+      // Copy before transfer, as in `volumeChunkData`.
       const buf = chunk.data.slice(0);
       transferList.push(buf);
       return { data: buf, dataType: chunk.dataType, x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key };
@@ -405,12 +393,8 @@ export class RenderClient implements UploadClient {
   }
 
   /**
-   * Forward a proxy asset to the worker. Copies the buffer before
-   * transferring — the upstream `data` is owned by the CpuCache
-   * (`ProxyCacheEntry.data` in pipeline/fetch/cpuCache.ts), which
-   * retains it for re-delivery (`getCachedProxy`) after worker-side
-   * eviction. Transferring directly would detach the cache's copy and
-   * break later resends.
+   * Forward a proxy asset to the worker. Copies before transferring because
+   * the CpuCache keeps `data` for re-delivery after worker-side eviction.
    */
   proxyAssetData(
     datasetId: string,
@@ -423,7 +407,6 @@ export class RenderClient implements UploadClient {
     data: ArrayBuffer,
     epochs: SceneEpochs,
   ) {
-    // Copy before transfer — see method docstring above.
     const buf = data.slice(0);
     this.worker.postMessage(
       {
@@ -500,12 +483,9 @@ export class RenderClient implements UploadClient {
   }
 
   /**
-   * Render one Explore-panel candidate thumbnail off-screen and resolve with the
-   * returned `ImageBitmap` (or `null` when no coarse overview is resident yet,
-   * so the caller can fall back to a label-only row). Reuses the minimap's
-   * overview textures + renderer; `layers` are the minimap per-member params and
-   * `invViewProj`/`eye` come from the child view's camera
-   * (`lucida-core::camera_matrices`). `size` is the square edge in device pixels.
+   * Render one Explore-panel thumbnail off-screen with the minimap's overview
+   * textures. Resolves `null` when no coarse overview is resident yet, so the
+   * caller can fall back to a label-only row. `size` is in device pixels.
    */
   thumbnailRender(
     layers: MinimapLayerParams[],
@@ -527,17 +507,14 @@ export class RenderClient implements UploadClient {
   }
 
   /**
-   * The frame on the worker's canvas as a PNG, for the trace bundle (#1055).
-   * The worker takes it from inside the next frame it renders, so the caller
-   * asks the render loop for one. Resolves with a reason when the worker
-   * could not read a frame, and immediately after destroy, so a bundle never
+   * The frame on the worker's canvas as a PNG, for the trace bundle. The
+   * worker takes it inside the next frame it renders. Resolves with a reason
+   * when no frame could be read, and at once after destroy, so a bundle never
    * hangs on a dead client.
    *
-   * A worker still starting drops every message, and one whose start failed
-   * answers none, so a capture asked for before `ready` waits for it and a
-   * failed start becomes the reason. A page whose worker never came up is
-   * the case the driver's fallback frame exists for, and it has to hear that
-   * the page's own capture failed rather than wait on it forever (#1098).
+   * A starting worker drops every message and a failed one answers none, so
+   * a capture asked for before `ready` waits for it and a failed start
+   * becomes the reason.
    */
   captureFrame(): Promise<FrameCaptureResult> {
     if (this.destroyed) {
@@ -626,7 +603,7 @@ export class RenderClient implements UploadClient {
     return this.levelsByDataset.get(datasetId) ?? null;
   }
 
-  /** Idempotent — a second call is a no-op. */
+  /** Idempotent. */
   destroy() {
     if (this.destroyed) return;
     this.destroyed = true;

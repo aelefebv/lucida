@@ -32,10 +32,8 @@ export function useDimensions({
   const [viewMode, setViewMode] = useState<ViewMode>("2d");
   const [multiChannel, setMultiChannel] = useState(false);
 
-  // Union dimension extents across ALL datasets for slider ranges.
-  // datasetsRef holds the live Map; datasetsVersion is the React-side
-  // bumper that triggers a re-render whenever the Map mutates, so reading
-  // .current here always sees the latest set.
+  // Slider ranges are the union across all datasets. `datasetsVersion`
+  // re-renders on every Map mutation, so reading the ref here is current.
   let dimZ = 1, dimC = 1, dimT = 1;
   void datasetsVersion;
   // eslint-disable-next-line react-hooks/refs
@@ -46,10 +44,8 @@ export function useDimensions({
     dimT = Math.max(dimT, shape[Axis.T]);
   }
 
-  // Per-dataset T/C/Z extents (counts) for saved-view clamping. The applier
-  // can read Z from the scene's volume shape but NOT T/C, so it asks for
-  // these. We answer from the loaded manifest (shape is [T, C, Z, Y, X]);
-  // an unknown/unloaded dataset returns `{}`, leaving that axis unclamped.
+  // Saved-view clamping needs T/C counts, which the scene can't supply. An
+  // unloaded dataset returns `{}`, leaving every axis unclamped.
   const dimensionExtentsFor = useCallback(
     (datasetId: string): { z?: number; t?: number; c?: number } => {
       const ds = datasetsRef.current.get(datasetId);
@@ -60,12 +56,10 @@ export function useDimensions({
     [datasetsRef],
   );
 
-  // Current label names (manifest `labels[]` order) for a dataset — the order
-  // the per-label settings index into. Saved-view capture stamps these onto the
-  // per-label display, and restore keys per-label settings by name+occurrence
-  // against them, so a view whose label list changed still lands each setting on
-  // the right current label. An unknown/unloaded dataset (or one with no labels)
-  // returns `undefined`, which leaves the per-label handling positional.
+  // Label names in manifest order, which per-label settings index into. Saved
+  // views key per-label settings by name and occurrence against these, so a
+  // changed label list still lands each setting on the right label.
+  // `undefined` leaves per-label handling positional.
   const labelNamesFor = useCallback(
     (datasetId: string): string[] | undefined => {
       const ds = datasetsRef.current.get(datasetId);
@@ -76,10 +70,8 @@ export function useDimensions({
     [datasetsRef],
   );
 
-  // Clamp slider values when union dimensions shrink, and sync to WASM scene.
-  // The clamp is a synchronization with external state (manifest dim union),
-  // not a derivation — z/c/t are user-controlled but must follow the open
-  // dataset's bounds. setState here IS the intended effect.
+  // Clamp z/c/t when the union shrinks. This syncs with external state, so
+  // setState in the effect is intended.
   useEffect(() => {
     const scene = wasmSceneRef.current;
     let clamped = false;

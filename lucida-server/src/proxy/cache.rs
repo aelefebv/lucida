@@ -1,23 +1,11 @@
-//! On-disk proxy cache.
+//! On-disk proxy cache:
+//! `{root_dir}/{url_hash hex}/{entity_id}/{kind}/T{t:05}_C{c:03}.bin`, each a
+//! 64-byte [`ProxyHeader`] plus little-endian `u16` voxels (Z, Y, X).
 //!
-//! Layout: `{root_dir}/{url_hash hex}/{entity_id}/{kind}/T{t:05}_C{c:03}.bin`.
-//!
-//! Each file holds a 64-byte [`ProxyHeader`] followed by little-endian
-//! `u16` voxels (Z, Y, X row-major; X varies fastest). On read we verify
-//! the header's algorithm version (rejected by `lucida_proxy::read_header`
-//! itself) and the expected `source_content_hash`; mismatches are treated
-//! as cache misses so stale entries get regenerated on demand.
-//!
-//! Writes are atomic: data is written to a uniquely-named temp file in the
-//! same directory, fsynced, then renamed into place. A crash mid-write
-//! leaves a `.tmp.*` leftover but never a half-written final file.
-//!
-//! ## Read-only / unwritable filesystems
-//!
-//! Construct the cache with [`ProxyCache::new_disabled`] (or detect the
-//! failure on [`ProxyCache::new`]) to get a no-op cache that always returns
-//! `Ok(None)` on read and silently no-ops writes. The server uses this so
-//! it can boot even when the configured cache directory is unwritable.
+//! A wrong algorithm version or `source_content_hash` reads as a miss, so
+//! stale entries regenerate. Writes go to a temp file, fsync, then rename,
+//! so a crash never leaves a half-written file. [`ProxyCache::new_disabled`]
+//! gives a no-op cache so the server boots with an unwritable directory.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Write};

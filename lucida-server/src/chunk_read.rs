@@ -1,14 +1,10 @@
 //! The one path a source chunk takes from its key to the bytes one wire
 //! request is served.
 //!
-//! [`read_chunk`] resolves the chunk's location, reads it through the cached
-//! store, whole when the chunk is an object of its own and out of its shard
-//! when it is an inner chunk, decodes the storage compression, fills an
-//! absent chunk, and slices the wire timepoint and channel out of the
-//! on-disk chunk. The interactive chunk handler and coarse generation both
-//! call it, and neither performs a step of the sequence itself, so what a
-//! location means and how its bytes become a wire chunk is decided here
-//! once.
+//! [`read_chunk`] resolves the location, reads it through the cached store
+//! (whole, or out of its shard), decodes, fills an absent chunk, and slices
+//! out the wire timepoint and channel. The chunk handler and coarse
+//! generation both call it and do none of these steps themselves.
 
 use lucida_content::ImageId;
 use lucida_protocol::ServerPhase;
@@ -65,19 +61,14 @@ pub enum ChunkReadError {
 
 /// Read the wire chunk for `chunk_key` of `image_id`.
 ///
-/// `reader` and `label` travel into the store with the read: the reader is
-/// the fairness class the backend read is charged to, and the label is what
-/// lets a wait behind the source-read cap be attributed to a request rather
-/// than only to a client (ADR 0048).
+/// `reader` is the fairness class the backend read is charged to, and
+/// `label` attributes a wait behind the source-read cap to a request, not
+/// only a client (ADR 0048).
 ///
-/// `probe` is the timing row of the request this read serves, when there is
-/// one. The read marks the row's dispatch, read, and decompress phases
-/// itself, because the boundaries fall inside this function and only the
-/// store knows how the read stretch was spent. An inner chunk whose shard
-/// index was not yet remembered took two round trips, and its row's read
-/// stretches carry both; the next inner chunk of that shard carries one. A
-/// read with no browser bracket to nest inside, such as generation, passes
-/// `None` and its timing is dropped rather than filed against a label.
+/// `probe` is the timing row of the request this read serves, if any. The
+/// read marks its dispatch, read, and decompress phases itself, because
+/// only the store knows how the read stretch was spent. A read with no
+/// browser bracket, such as generation, passes `None`.
 pub async fn read_chunk(
     resolver: &ChunkResolver,
     store: &CachedStore,

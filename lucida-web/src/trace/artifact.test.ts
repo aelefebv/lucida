@@ -1,5 +1,5 @@
 /**
- * Reading a run or a bundle back from a file (#1066), held to the CLI's
+ * Reading a run or a bundle back from a file, held to the CLI's
  * reader. The golden bundle under `trace-fixtures/` is the file both sides
  * read, so a case here that names a field is a case the CLI's tests name
  * too, and the side each reader hands the compare function is asserted

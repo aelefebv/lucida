@@ -16,8 +16,8 @@ import { sortWorkspaceDashboardRows } from "./workspaceDashboardOrder.ts";
 import "./WorkspaceDashboard.css";
 
 interface Props {
-  /** Open a workspace. When `datasetUrls` is given (create-from-dataset flow,
-   *  #697), the viewer auto-opens those datasets once connected. */
+  /** Open a workspace. The viewer auto-opens any `datasetUrls` once
+   *  connected. */
   onOpenWorkspace: (id: string, datasetUrls?: readonly string[]) => void;
 }
 
@@ -31,9 +31,8 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
-  // "New workspace from dataset" composer (#697): the typed URL/path and a
-  // shared in-flight flag (covers both the typed-URL create and the file-browser
-  // create) so the buttons disable while a workspace is being spun up.
+  // "New workspace from dataset": one in-flight flag covers both the typed-URL
+  // and file-browser creates, so both buttons disable.
   const [datasetUrlInput, setDatasetUrlInput] = useState("");
   const [creatingFromDataset, setCreatingFromDataset] = useState(false);
   const [showFileBrowser, setShowFileBrowser] = useState(false);
@@ -76,13 +75,8 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
     }
   }, [onOpenWorkspace]);
 
-  // Create a NEW workspace around the given dataset URL(s)/path(s) and open it
-  // (#697). The workspace is created with the server's default sharing
-  // (restricted, owner-only, link OFF — `createWorkspaceFromDatasets` only sends
-  // a name), then we navigate in and hand the urls to the viewer, which opens
-  // them and (on failure) surfaces the error there while KEEPING the workspace.
-  // Only the workspace-creation step can fail here; if it does, we surface it on
-  // the dashboard and no navigation happens.
+  // Only the create step can fail here, and it stays on the dashboard. A failed
+  // dataset open surfaces in the viewer and keeps the workspace.
   const handleCreateFromDatasets = useCallback(
     async (urls: readonly string[]) => {
       const cleaned = urls.map((u) => u.trim()).filter((u) => u.length > 0);
@@ -152,11 +146,7 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
     }
   }, []);
 
-  // Make a private copy of any workspace the user can access (#698) and open
-  // it. The copy is owned by the user with default sharing (restricted,
-  // owner-only) — no members/permissions are carried over. On success we
-  // navigate straight into the copy; on failure the error surfaces here and
-  // the user stays on the dashboard.
+  // Copy any accessible workspace into one the user owns, then open it.
   const handleDuplicate = useCallback(
     async (workspace: WorkspaceSummary) => {
       setDuplicatingId(workspace.id);
@@ -287,8 +277,8 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
                       {workspace.pinned_at ? "Unpin" : "Pin"}
                     </button>
                   )}
-                  {/* Duplicate is available for ANY workspace the user can
-                      access (any role) — the copy becomes their own. */}
+                  {/* Duplicate is available for any workspace the user can
+                      access, whatever their role; the copy becomes their own. */}
                   {!showArchived && (
                     <button
                       className="workspace-duplicate-button"

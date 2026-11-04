@@ -107,7 +107,7 @@ function settingsWith(labelSettings: { visible: boolean; opacity: number }[]) {
 
 describe("buildLayerInfos label rows (scene → LayerInfo seam)", () => {
   it("surfaces label_settings from all_dataset_settings into labelRows", () => {
-    // THE regression this guards: the section renders live only if buildLayerInfos
+    // The section renders live only if buildLayerInfos
     // reads `label_settings` out of the scene JSON and maps it onto the LayerInfo.
     const scene = stubScene(
       ["ds-0"],
@@ -281,7 +281,7 @@ describe("buildLayerInfos view-mode-aware label rows", () => {
 
   it("disables an over-budget mask in 3D with a memory reason, distinct from the per-mask reason", () => {
     // Three ~192 MB masks; the 512 MB total budget fits the first two, so the
-    // third is disabled with a memory-budget reason (NOT the volume-ineligible
+    // third is disabled with a memory-budget reason (not the volume-ineligible
     // "too large to render in 3D" reason).
     const scene = stubScene(
       ["ds-0"],

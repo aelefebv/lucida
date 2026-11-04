@@ -216,7 +216,7 @@ fn view_over(order: &[DatasetId]) -> SavedView {
 /// view (`Annotation::view`), keyed by `dataset_id` across every id-keyed
 /// field of the embedded view. Applies the same `AddAnnotation` command the
 /// runtime does and persists the document, so a later duplicate must remap
-/// the embedded view onto the copy's ids (the regression this guards).
+/// the embedded view onto the copy's ids.
 async fn seed_pin_with_view(
     store: &SqliteWorkspaceStore,
     workspace_id: &str,
@@ -358,10 +358,9 @@ fn manager_for(store: &SqliteWorkspaceStore) -> WorkspaceManager {
     WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults())
 }
 
-/// Seed a pin whose captured author view embeds SOURCE dataset *URLs* in
-/// its `datasets` Vec — simulating a document PERSISTED BEFORE the apply-path
-/// strip existed (a genuinely DIRTY source). `DocumentState::apply` now
-/// strips such URLs, so we deliberately bypass it: `add_annotation` stores
+/// Seed a pin whose captured author view embeds source dataset URLs in
+/// its `datasets` Vec: a dirty document that bypassed the apply-path strip.
+/// `DocumentState::apply` strips such URLs, so we deliberately bypass it: `add_annotation` stores
 /// the view verbatim and `persist_document` serializes the `DocumentState`
 /// as-is (no apply). This is the dirty carrier the duplicate's copy-point
 /// defense must clean — `remap_dataset_ids` remaps ids but the explicit

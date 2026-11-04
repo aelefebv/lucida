@@ -7,8 +7,7 @@
 //! runs too, so this module holds the binding and the row mapping and no
 //! SQL of its own. Read it beside `store_sqlite`. What differs is the
 //! pool type, the type name, and how `view_json` is bound and decoded,
-//! because the column is `JSONB` here and `TEXT` there. ADR-0058 records
-//! why the SQL is shared and the Rust is not.
+//! because the column is `JSONB` here and `TEXT` there (ADR-0058).
 
 use async_trait::async_trait;
 use chrono::{DateTime, SubsecRound, Utc};

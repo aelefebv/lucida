@@ -142,7 +142,7 @@ describe("applyColdStateDelta", () => {
     };
     applyColdStateDelta(ctxDelta, delta);
 
-    // A fresh worker fed the equivalent FULL cold state at the new view.
+    // A fresh worker fed the equivalent full cold state at the new view.
     const ctxFull = makeCtx();
     const coldFull: ColdStateMessage = {
       ...makeCold([tile("a", "img-a", 2), tile("c", "img-c", 1), tile("d", "img-d", 0)]),

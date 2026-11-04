@@ -67,7 +67,7 @@ export class ConsecutiveTickDetector {
     this.args = args;
   }
 
-  /** A false tick resets the counter but NOT the last-log timestamp. */
+  /** A false tick resets the counter but not the last-log timestamp. */
   tick(now: number, condition: boolean, payloadFor: () => object): void {
     if (condition) {
       this.consecutiveCount++;

@@ -2,31 +2,12 @@
 //! pictures, keyed by email address, applied to every principal the
 //! auth middleware attaches.
 //!
-//! An auth mode decides who a caller is. A perimeter's assertion
-//! carries only an email, so in that mode the display name is derived
-//! from the address and there is no picture at all. The directory fills
-//! those two fields in from a listing the operator names, and does
-//! nothing else: it never changes the email, never changes the
-//! administrator flag, and never stands in for a credential. See
-//! ADR-0063.
-//!
-//! One operation matters to the rest of the server: [`ProfileDirectory::apply`],
-//! which the middleware calls after the mode's extractor resolved a
-//! principal and before the principal reaches a handler. The lookup key
-//! is the email the mode resolved, normalized the way every mode
-//! normalizes it, so nothing a request carries can choose whose row is
-//! shown.
-//!
-//! The listing is fetched whole and held in memory, so a lookup never
-//! adds a network round trip to a request. [`load_at_boot`] builds the
-//! directory, loads it once, and starts the schedule that keeps it
-//! loaded: a first load that failed is retried on a backoff until one
-//! succeeds, and a loaded snapshot is refreshed every interval. The
-//! schedule is the only thing that fetches. A refresh that fails, or
-//! that returns a listing with no rows, leaves the last good snapshot
-//! in place and says so in the log, and a snapshot that outlives two
-//! intervals is logged as stale once. No request performs, waits on,
-//! or triggers a fetch.
+//! It fills in those two fields and nothing else: it never changes the
+//! email or the admin flag and never stands in for a credential
+//! (ADR-0063). [`ProfileDirectory::apply`] keys on the email the mode
+//! resolved, so nothing a request carries can choose whose row is shown.
+//! Only the background schedule fetches. A failed or empty refresh keeps
+//! the last good snapshot, and no request ever waits on a fetch.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};

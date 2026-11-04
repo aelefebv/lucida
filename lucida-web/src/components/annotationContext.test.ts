@@ -32,15 +32,12 @@ describe("annotationContext — isOffContext (pure decision)", () => {
   });
 
   it("a near-integer float z is rounded before comparing (a 2D slice depth)", () => {
-    // A 2D-dropped pin's z is the slice index as a float (e.g. 3.0); the view's z
-    // is the integer 3 — they must compare equal, not as 3.0 !== 3-by-epsilon.
+    // A float slice index must compare equal to the view's integer z.
     expect(isOffContext(pin(3.0, 0, 0), { z: 3, t: 0, c: 0 })).toBe(false);
   });
 
   it("ignoreZ (3D): a Z-only mismatch is on-context, since the volume shows all Z", () => {
-    // In 3D the whole volume is rendered, so a pin on a different slice is still
-    // visible — it must NOT dim for Z alone (a 3D-created pin's picked depth is
-    // rarely the slider's z, so otherwise it would always read off-context).
+    // 3D renders every slice, so a pin must not dim for Z alone.
     expect(isOffContext(pin(187, 0, 0), { z: 0, t: 0, c: 0 }, { ignoreZ: true })).toBe(false);
     // …but T/C still count even with ignoreZ.
     expect(isOffContext(pin(187, 2, 0), { z: 0, t: 0, c: 0 }, { ignoreZ: true })).toBe(true);

@@ -1,16 +1,12 @@
 /**
- * The retention policy: two caps, two rungs of degradation, and no third.
+ * The retention policy: two caps, two rungs of degradation, and no third
+ * (ADR 0049).
  *
- * Bytes are the unit because they bound the thing that actually matters under
- * a workload whose rate varies by three orders of magnitude between idle and
- * peak — a sixty-second window is zero bytes at idle and megabytes mid-orbit.
- * Whole intervals are the granularity of discard because a half-evicted run
- * is not a diagnostic artifact (ADR 0049).
- *
- * The reflex policy for a bounded buffer is a drop-oldest ring, and for the
- * per-chunk tier that is the actively wrong choice: the beginning of a run is
- * the diagnostic payload, so discarding it silently yields a trace that looks
- * complete while having deleted the stall being investigated.
+ * Bytes are the unit because the recording rate varies by three orders of
+ * magnitude between idle and peak. Whole intervals are discarded, never part
+ * of one, because a half-evicted run is not a diagnostic artifact. A
+ * drop-oldest ring is wrong for the per-chunk tier: the start of a run is the
+ * diagnostic payload, and dropping it hides the stall under investigation.
  */
 
 /**

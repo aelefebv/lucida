@@ -1,25 +1,12 @@
 /**
- * GPU pass time per viewport frame, measured on the device.
+ * GPU pass time per viewport frame, read from the device's own clock where
+ * the adapter offers `timestamp-query`. The stamps are durations on the
+ * device clock, never compared with the main thread's (ADR 0047).
  *
- * The trace's frame time is main-thread time: how long the tick held the main
- * thread, which says nothing about what the GPU did with the frame. Where the
- * adapter offers the `timestamp-query` feature, this module reads the GPU's
- * own clock at the start of the frame's first render pass and the end of its
- * last, and hands the difference to the main thread, so "is it the shader or
- * the laptop" has a measurement behind it.
- *
- * The worker timestamps nothing else. GPU timestamps are durations on the
- * device's clock and never compared with the main thread's, so this adds no
- * cross-context clock to reconcile (ADR 0047).
- *
- * A frame's passes span several command buffers and several submits, and the
- * queue runs them in order, so one query set of two stamps covers the frame:
- * the first pass writes stamp 0 at its start and stamp 1 at its end, and every
- * later pass overwrites stamp 1 at its end, so the last pass's end wins. After
- * the last submit the two stamps are resolved, copied to a mappable buffer,
- * and read back asynchronously. A frame whose read-back buffers are all still
- * mapped goes unmeasured rather than waiting. An absent sample is honest. A
- * stall in the render loop is not.
+ * The queue runs a frame's passes in order, so two stamps cover the frame:
+ * the first pass writes both and every later pass overwrites the end stamp.
+ * A frame whose read-back buffers are all mapped goes unmeasured rather than
+ * stall the render loop.
  */
 
 /** What a render pass asks for its timestamps. Passed to every viewport pass; the minimap and thumbnails pass nothing. */

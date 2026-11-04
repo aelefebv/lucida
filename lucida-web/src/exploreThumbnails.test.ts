@@ -1,8 +1,8 @@
 /**
- * `makeThumbnailRequester` — the Explore panel's per-candidate off-screen
+ * `makeThumbnailRequester`, the Explore panel's per-candidate off-screen
  * render entry point. The layer list it feeds `client.thumbnailRender` is
- * camera-independent (content + placement only), so a batch of candidate
- * thumbnails must share ONE list per input state:
+ * camera-independent, so a batch of candidate thumbnails must share one list
+ * per input state:
  *
  *   - same content/layout epochs + channel + settings → the wasm matrix
  *     export is read once, not once per candidate;

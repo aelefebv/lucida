@@ -1,7 +1,7 @@
 /**
  * Tests for `propagateGroupProxyToTiles`. Pure Map mutation — no GPU.
  *
- * Locks the behavior the inline `handleProxyAssetData` branch provided:
+ * Locks:
  *   - group with no children → no-op
  *   - group with one child → child gets handle
  *   - group with multiple children → all children get same handle

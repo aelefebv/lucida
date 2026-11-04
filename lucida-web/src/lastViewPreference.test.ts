@@ -134,7 +134,7 @@ describe("resolveInitialViewSource priority", () => {
   });
 
   it("last view never promotes to the shared default (no hash, enabled, no default)", () => {
-    // The remembered view is applied as last-view, not as default — recording
+    // The remembered view is applied as last-view, not as default: recording
     // a last view must never become the workspace default.
     expect(
       resolveInitialViewSource({

@@ -8,12 +8,8 @@ import { AnnotationOverlay3D } from "./AnnotationOverlay3D.tsx";
 import type { Annotation } from "./annotationDocument.ts";
 
 /**
- * Stand-in for the WASM scene exercising only the 3D overlay's surface:
- * `annotations()` (the authoritative read), `project_annotation()` (per-frame
- * marker projection — returns a fixed on-screen point so a marker is visible),
- * `pick_annotation_voxel()` (the depth pick a Shift+drag move resolves through),
- * and `apply_command()` (local apply). `pick` is configurable per test so we can
- * exercise both a hit and a ray miss.
+ * Stand-in for the WASM scene covering only the 3D overlay's surface. `pick` is
+ * configurable per test to exercise both a hit and a ray miss.
  */
 function makeScene(
   initial: Annotation[],
@@ -23,8 +19,7 @@ function makeScene(
   const applied: Array<Record<string, unknown>> = [];
   const scene = {
     annotations: (_datasetId: string) => JSON.stringify(pins),
-    // Every vertex projects to a fixed, on-screen point so the marker renders
-    // (the overlay hides a marker only on an empty projection).
+    // A fixed on-screen point so the marker renders.
     project_annotation: (_ds: string, _x: number, _y: number, _z: number) =>
       new Float64Array([100, 100]),
     pick_annotation_voxel: (_ds: string, x: number, y: number) =>
@@ -32,8 +27,7 @@ function makeScene(
     apply_command: (json: string) => {
       const cmd = JSON.parse(json) as Record<string, unknown>;
       applied.push(cmd);
-      // Reflect the commands the overlay + shared thread emit so a re-read shows
-      // the optimistic result (mirrors the real apply-locally seam).
+      // Reflect emitted commands so a re-read shows the optimistic result.
       if (cmd.type === "move_annotation") {
         pins = pins.map((p) =>
           p.id === cmd.id
@@ -86,8 +80,7 @@ function makeCanvas() {
   canvas.getBoundingClientRect = () =>
     ({ left: 0, top: 0, width: 800, height: 600, right: 800, bottom: 600, x: 0, y: 0, toJSON() {} }) as DOMRect;
   const capturedPointers: number[] = [];
-  // happy-dom may not implement setPointerCapture on the element; stub it to
-  // record the transfer the overlay performs for a plain (orbit) press.
+  // happy-dom may lack setPointerCapture; stub it to record the orbit handoff.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (canvas as any).setPointerCapture = (id: number) => capturedPointers.push(id);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -97,10 +90,6 @@ function makeCanvas() {
   return { canvas, capturedPointers, forwardedDowns };
 }
 
-// The annotation-author identity is now a stable string (issue #777), not the
-// per-connection numeric client id. Authoring helpers use `String(MY_ID)`, so a
-// string literal here flows through every `author`/ownership comparison
-// unchanged while matching the overlay's `myId: string` prop type.
 const MY_ID = "7";
 
 function ownPin(overrides: Partial<Annotation> = {}): Annotation {
@@ -119,8 +108,7 @@ function renderOverlay(opts: {
   pins: Annotation[];
   myId?: string;
   pick?: (x: number, y: number) => number[];
-  /** The view's Z/T/C. Defaults to the on-context view for the standard test
-   * pins (z=3, t/c absent → 0); the off-context suite overrides it. */
+  /** The view's Z/T/C. Defaults to on-context for the standard pins (z=3). */
   viewContext?: { z: number; t: number; c: number };
 }) {
   const { scene, applied } = makeScene(opts.pins, opts.pick);
@@ -146,16 +134,11 @@ function renderOverlay(opts: {
     />
   );
   const { rerender } = render(overlay(version));
-  // Re-read the authoritative pin set by bumping the document version, exactly as
-  // App.tsx does after onDocumentChanged — so a test can observe a just-added
-  // comment surface in the open thread.
+  // Re-read the pin set as App.tsx does after onDocumentChanged.
   const bumpVersion = () => {
     version += 1;
     rerender(overlay(version));
   };
-  // Navigate the view: re-render with a new context (a pure input), so a test can
-  // assert the off-context status flips as the view moves to / from the pin's
-  // Z/T/C.
   const setViewContext = (next: { z: number; t: number; c: number }) => {
     viewContext = next;
     rerender(overlay(version));
@@ -173,9 +156,8 @@ afterEach(() => {
 
 describe("AnnotationOverlay3D — Shift+drag moves; plain drag orbits (issue #778)", () => {
   it("a Shift+drag on an own marker emits one move_annotation that moves in-plane but preserves the pin's slice (z)", () => {
-    // pick returns [50, 60, 7]: the move takes the in-plane coords [50,60] from
-    // the pick, but PRESERVES the pin's own z (3), NOT the picked depth (7) — a
-    // 3D drag repositions a pin within its slice and never re-slices it (#791).
+    // pick returns [50, 60, 7]: the move takes [50,60] in-plane but keeps the
+    // pin's own z (3). A 3D drag moves a pin within its slice, never re-slices.
     const { sent, applied, getChanged } = renderOverlay({ pins: [ownPin()] });
     const marker = screen.getByTestId("annot-pin-pin-a");
 
@@ -193,7 +175,7 @@ describe("AnnotationOverlay3D — Shift+drag moves; plain drag orbits (issue #77
     // A move carries no t/c (it leaves timepoint/channel untouched).
     expect(moves[0]).not.toHaveProperty("t");
     expect(moves[0]).not.toHaveProperty("c");
-    // Applied locally too (apply-locally-and-send), and the doc-changed bump fired.
+    // Applied locally too, and the doc-changed bump fired.
     expect(applied.some((c) => c.type === "move_annotation")).toBe(true);
     expect(getChanged()).toBe(1);
   });
@@ -223,11 +205,9 @@ describe("AnnotationOverlay3D — Shift+drag moves; plain drag orbits (issue #77
   });
 
   it("a plain DRAG on an own marker is handed to the canvas (orbit) and never moves", () => {
-    // Slice 11 reserves a plain press for a thread-opening click, so the orbit is
-    // handed to the canvas the instant the press becomes a real drag (passes the
-    // slop) — not on the bare pointerdown. The marker must still never move the
-    // pin on a plain gesture; it forwards the gesture to the canvas (replaying the
-    // pointerdown + transferring capture) so the camera orbits as usual.
+    // A plain press is reserved for a thread-opening click, so the orbit is
+    // handed to the canvas only once the press passes the slop: the marker
+    // replays the pointerdown on the canvas and transfers capture.
     const { sent, applied, capturedPointers, forwardedDowns } = renderOverlay({ pins: [ownPin()] });
     const marker = screen.getByTestId("annot-pin-pin-a");
 
@@ -246,9 +226,8 @@ describe("AnnotationOverlay3D — Shift+drag moves; plain drag orbits (issue #77
   });
 
   it("a plain DRAG on a PEER's marker also orbits (forwarded to the canvas)", () => {
-    // A peer's marker is now clickable (to open its thread), so a plain drag on it
-    // must still orbit — it forwards to the canvas exactly like an own marker, and
-    // of course never moves the (non-own) pin.
+    // A peer's marker is clickable to open its thread, so a plain drag must
+    // still forward to the canvas like an own marker.
     const { sent, capturedPointers, forwardedDowns } = renderOverlay({
       pins: [ownPin({ id: "pin-b", author: "999" })],
     });
@@ -263,8 +242,7 @@ describe("AnnotationOverlay3D — Shift+drag moves; plain drag orbits (issue #77
   });
 
   it("a peer's marker can't be moved — even a Shift+drag emits no move", () => {
-    // Move stays author-only: a Shift+drag on a peer's pin is treated as an orbit
-    // (Shift only gates a move on an OWN pin), so it never emits a move_annotation.
+    // Move is author-only: Shift+drag on a peer's pin is an orbit.
     const { sent } = renderOverlay({ pins: [ownPin({ id: "pin-b", author: "999" })] });
     const marker = screen.getByTestId("annot-pin-pin-b");
 
@@ -277,9 +255,8 @@ describe("AnnotationOverlay3D — Shift+drag moves; plain drag orbits (issue #77
 });
 
 describe("AnnotationOverlay3D — comment thread, brought to 3D (issue #771)", () => {
-  /** Open a pin's thread with a pure click (down+up same point, then the
-   * synthetic click), the same gesture the 2D suite uses so drag-suppression
-   * never interferes. */
+  /** Open a pin's thread with a pure click (down and up at one point, then the
+   * click) so drag suppression never interferes. */
   function openThread(pinId: string) {
     const marker = screen.getByTestId(`annot-pin-${pinId}`);
     fireEvent.pointerDown(marker, { pointerId: 1, button: 0, clientX: 200, clientY: 200 });
@@ -455,8 +432,8 @@ describe("AnnotationOverlay3D — comment thread, brought to 3D (issue #771)", (
   });
 
   it("a click after an orbit drag still opens the thread (no stuck gesture state)", () => {
-    // Regression guard: forwarding a plain drag to the canvas must release the
-    // marker's gesture state, so a later independent click isn't blocked.
+    // Forwarding a plain drag must release the marker's gesture state, so a
+    // later independent click isn't blocked.
     renderOverlay({ pins: [ownPin()] });
     const marker = screen.getByTestId("annot-pin-pin-a");
 
@@ -504,7 +481,6 @@ describe("AnnotationOverlay3D — off-context vs the view's Z/T/C (issue #779)",
       viewContext: { z: 5, t: 0, c: 1 },
     });
     const marker = screen.getByTestId("annot-offcontext-pin-here");
-    // Same exact contract form as 2D (the shared helper).
     expect(marker.textContent).toBe("slice 5 · t=9 · ch=1");
     expect(screen.getByTestId("annot-pin-pin-here")).toBeTruthy();
   });
@@ -529,12 +505,8 @@ describe("AnnotationOverlay3D — off-context vs the view's Z/T/C (issue #779)",
   });
 
   it("a 3D Shift+drag keeps an on-context pin on-context — it can't push the pin off its own slice (#791)", () => {
-    // The pin is on the current view's z/t/c, so it starts on-context (no
-    // off-context marker). A 3D Shift+drag picks a DIFFERENT voxel depth (the
-    // pick's z=99) — but the move preserves the pin's own z, so re-reading the
-    // moved pin against the unchanged view keeps it on-context (not dimmed).
-    // Before the fix the move stored z=99, re-slicing the pin so it read
-    // off-context (dimmed + stuck) on its own slice.
+    // The pick returns depth 99, but the move keeps the pin's own z, so the
+    // re-read pin stays on-context on the unchanged view.
     const { sent, bumpVersion } = renderOverlay({
       pins: [ownPin({ id: "pin-here", z: 5, t: 0, c: 0 })],
       viewContext: { z: 5, t: 0, c: 0 },
@@ -553,8 +525,7 @@ describe("AnnotationOverlay3D — off-context vs the view's Z/T/C (issue #779)",
     expect(moves[0].z).toBe(5);
     expect(moves[0].position).toEqual([42, 24]);
 
-    // …so after the host re-reads the moved pin, it is STILL on-context on the
-    // same view — the off-context indicator does not get stuck.
+    // ...so after the re-read it is still on-context.
     bumpVersion();
     expect(screen.queryByTestId("annot-offcontext-pin-here")).toBeNull();
   });

@@ -34,10 +34,9 @@ const DEFAULT_LABEL_OPACITY = 0.5;
 const AGGREGATE_QUAD_STRIDE_BYTES = 32;
 
 /**
- * The persistent categorical descriptor for a label pool. Built once (and
- * refreshed only when the opacity changes) rather than allocated per frame,
- * so scrubbing stays smooth. One level source (grid 1×1) covering the whole
- * tile.
+ * The persistent categorical descriptor for a label pool: one level source
+ * (grid 1×1) covering the whole tile. Rebuilt only when the opacity changes,
+ * so scrubbing doesn't allocate per frame.
  */
 function ensureLabelDescriptor(
   ctx: WorkerCtx,
@@ -102,13 +101,9 @@ function ensureLabelPalette(
 /**
  * Draw one categorical label overlay from its r32uint slice pool.
  *
- * A label pool is a single-tile texture covering the label's 2D footprint,
- * so a descriptor with one level source (grid 1×1) reads it directly. The
- * quad is sized to the SOURCE's voxel extent (`layer.dataW/dataH`, from
- * `labelFootprint`) and placed at the source member's `offsetX/offsetY`, so
- * a coarser label still covers the same region of the view. Declared OME colors
- * are honored via the palette buffer; the rest use the glasbey hash.
- * Returns the drawn view, or null when the pool has no resident slice yet.
+ * The quad is sized to the source's voxel extent (`layer.dataW/dataH`) and
+ * placed at the source member's offset, so a coarser label still covers the
+ * same region. Returns null when the pool has no resident slice yet.
  */
 function renderLabelLayer(
   ctx: WorkerCtx,
@@ -164,28 +159,13 @@ interface ResolvedAggregate {
 }
 
 /**
- * Resolve an aggregate layer's quads against CURRENT worker residency.
+ * Resolve an aggregate layer's quads against current worker residency.
  *
- * Per quad (via the record's entity index → memberId through the
- * descriptor index):
- *   - apply the SAME skip rule as the per-member path — a member with no
- *     level pool holding a section for it, no coarse section, and no
- *     resident proxy draws nothing (its quad is dropped), so an empty
- *     store renders empty instead of a grid of border frames;
- *   - update the member's camera-UV eviction recency exactly as the
- *     per-member path does for chunk-backed members, so batched members'
- *     resident chunks age fairly under eviction pressure;
- *   - group the survivors by their pool BINDING SET (level pools in slot
- *     order, coarse pool, tile-proxy pool, group-proxy pool). One
- *     instanced draw per distinct binding set gives every member the
- *     same resources the per-member pass would have bound — members of
- *     heterogeneous chunk shapes/pyramid depths live in different pools
- *     and must never sample another pool's indirection ranges.
- *
- * Batch count is bounded by the number of distinct pool-binding sets in
- * the dataset (few — pools are keyed by (tier, channel, chunk dims)),
- * not by member count. Quads keep their incoming (roster) order within
- * each batch; batches are emitted in first-seen roster order.
+ * Each quad gets the per-member path's skip rule and camera-UV recency
+ * update, so batched members behave like per-member ones. Survivors are
+ * grouped by pool binding set, one instanced draw each, because members with
+ * different chunk shapes live in different pools and must never sample
+ * another pool's indirection. Quads keep roster order within a batch.
  */
 function buildAggregateBatches(
   ctx: WorkerCtx,
@@ -289,8 +269,7 @@ function buildAggregateBatches(
     kept++;
   }
 
-  // Re-pack kept records contiguously in batch order (word-wise copy is
-  // bit-exact for the f32 rect fields).
+  // Word-wise copy is bit-exact for the f32 rect fields.
   const quadData = new ArrayBuffer(kept * AGGREGATE_QUAD_STRIDE_BYTES);
   const dstU32 = new Uint32Array(quadData);
   const batches: AggregateBatch[] = [];
@@ -327,9 +306,8 @@ export async function handleSliceRenderMultiPass(
   canvas.width = msg.canvasW;
   canvas.height = msg.canvasH;
 
-  // Offscreen targets are canvas-sized; grow the pool per RENDERED
-  // layer, not per posted layer, so skipped layers never cost a target
-  // allocation. (Growing one at a time re-checks dims only — cheap.)
+  // Grow the offscreen pool per rendered layer, not per posted layer, so
+  // skipped layers never cost a target allocation.
   const targetFor = (idx: number): GPUTexture =>
     ctx.ensureOffscreenPool(idx + 1, msg.canvasW, msg.canvasH)[idx];
   const atlasMap = ctx.state.sliceAtlases;
@@ -350,13 +328,9 @@ export async function handleSliceRenderMultiPass(
       continue;
     }
 
-    // Aggregate layer: every RESIDENT batched member, drawn in ONE
-    // render pass with one instanced draw per pool-binding sub-batch.
-    // The descriptor buffer + colormap resolve at DRAW time from the
-    // current worker state, so appearance changes (contrast, gamma,
-    // opacity, colormap) repaint the aggregate the same frame they
-    // repaint per-member layers; each quad samples its own descriptor
-    // entry in-shader.
+    // Aggregate layer: every resident batched member in one render pass.
+    // The descriptor buffer and colormap resolve at draw time, so appearance
+    // changes repaint the aggregate in the same frame as per-member layers.
     if (layer.aggregate) {
       const agg = layer.aggregate;
       const datasetId = ctx.state.memberToDataset.get(agg.poolMemberId);
@@ -364,8 +338,6 @@ export async function handleSliceRenderMultiPass(
       if (!descIndex) continue;
 
       const built = buildAggregateBatches(ctx, msg, layer, agg, descIndex);
-      // Nothing resident for any batched member: skip the layer, the
-      // same way the per-member guard skips each member.
       if (built.batches.length === 0) continue;
 
       for (const atlas of built.atlases) {
@@ -399,9 +371,8 @@ export async function handleSliceRenderMultiPass(
       continue;
     }
 
-    // Per-dataset descriptor + entity index (orchestrator-computed;
-    // converges with the worker's descriptor build by canonical
-    // iteration order).
+    // The orchestrator's entity index matches the worker's descriptor build
+    // because both use canonical iteration order.
     const datasetId = ctx.state.memberToDataset.get(memberId);
     const descIndex = datasetId ? ctx.lookupEntityDescriptor(datasetId) : null;
     if (!descIndex) continue;
@@ -429,8 +400,7 @@ export async function handleSliceRenderMultiPass(
       }
     }
 
-    // Resolve proxy texture handles via the descriptor's dense pool
-    // array. Slot indices + dims come from the GPU descriptor.
+    // Slot indices and dims come from the GPU descriptor.
     const desc = descIndex.proxyDescriptorByMember.get(memberId) ?? null;
     let tileProxyTexture: GPUTexture | null = null;
     let tileProxySlotResident = false;

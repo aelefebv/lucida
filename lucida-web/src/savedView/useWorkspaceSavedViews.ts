@@ -174,10 +174,9 @@ export function useWorkspaceSavedViews({
       id: string,
       visibility: WorkspaceSavedViewVisibility,
     ): Promise<WorkspaceSavedView> => {
-      // Use the server's canonical row (it preserves created_by and bumps
-      // updated_at) rather than guessing the next shape locally, so the chip,
-      // "mine only" filter, and ordering all reflect the real post-promote
-      // state.
+      // Use the server's row rather than guessing locally: it preserves
+      // created_by and bumps updated_at, which the chip, filter, and ordering
+      // read.
       const updated = await apiSetVisibility(workspaceId, id, visibility);
       setAllSavedViews((prev) => prev.map((item) => (
         item.id === id ? updated : item
@@ -189,9 +188,8 @@ export function useWorkspaceSavedViews({
 
   const approveSavedView = useCallback(
     async (id: string): Promise<WorkspaceSavedView> => {
-      // The proposal becomes shared and stays visible to the reviewing editor,
-      // so swap in the server's canonical row immediately for a snappy UI, then
-      // refresh so any concurrent review changes reconcile.
+      // The proposal stays visible to the editor as shared. Swap in the
+      // server's row now, then refresh to pick up concurrent reviews.
       const updated = await apiApprove(workspaceId, id);
       setAllSavedViews((prev) => prev.map((item) => (
         item.id === id ? updated : item
@@ -204,9 +202,8 @@ export function useWorkspaceSavedViews({
 
   const rejectSavedView = useCallback(
     async (id: string): Promise<WorkspaceSavedView> => {
-      // A rejected proposal reverts to the proposer's PERSONAL view, which the
-      // reviewing editor can no longer see — drop it from the list, then
-      // refresh to reconcile with the server's authoritative view.
+      // A rejected proposal reverts to the proposer's personal view, which the
+      // editor can no longer see, so drop it and refresh.
       const updated = await apiReject(workspaceId, id);
       setAllSavedViews((prev) => prev.filter((item) => item.id !== id));
       void refresh();
@@ -258,13 +255,11 @@ export function defaultWorkspaceSavedViewName(
   if (activeLayoutName && activeLayoutName.trim().length > 0) {
     base = `${base} - ${activeLayoutName}`;
   }
-  // Two views of the same dataset+layout differ only by where they're parked,
-  // so append the position. The Z plane (the slab's start) always disambiguates;
-  // T and C are added only when non-default, mirroring the URL encoder's
-  // `t !== 0` / `c !== 0` defaults so an unmoved time/channel adds no noise.
+  // Two views of the same dataset and layout differ only by position, so
+  // append it. Z always appears; T and C only when non-zero, as in the URL
+  // encoder's defaults.
   const position = positionSuffix(view);
-  // Truncate the name part first so the distinguishing position isn't the thing
-  // that gets cut off.
+  // Truncate the name, not the position that tells views apart.
   if (position.length > 0) {
     return `${truncate(base, 60 - position.length - 3)} — ${position}`;
   }

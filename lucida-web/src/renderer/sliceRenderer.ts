@@ -47,13 +47,13 @@ export interface AggregateBatch {
 
 /** Inputs for {@link SliceRenderer.renderAggregateBatches}. */
 export interface AggregateDrawParams {
-  /** CURRENT per-dataset descriptor buffer — bound fresh every draw. */
+  /** Per-dataset descriptor buffer, bound fresh every draw. */
   descriptorBuffer: GPUBuffer;
   /** Batch-ordered quad records (32 bytes each, shader `MemberQuad`). */
   quadData: ArrayBuffer;
   batches: AggregateBatch[];
   blendMode: BlendMode;
-  /** Layer transform inputs — same meaning as {@link SliceRenderer.setTransform}. */
+  /** Layer transform inputs, as in {@link SliceRenderer.setTransform}. */
   zoom: number;
   cx: number;
   cy: number;
@@ -136,12 +136,10 @@ export class SliceRenderer {
   private currentDescriptorBuffer: GPUBuffer | null = null;
   private currentLabelColorBuffer: GPUBuffer | null = null;
   private labelColorBuffer: GPUBuffer | null = null;
-  // Aggregate draw RESOURCES: grow-only pools whose contents are
-  // rewritten on every draw. Deliberately no bind-group or
-  // descriptor-identity caching here — descriptor buffers are rebuilt
-  // whenever display settings or residency change, and the aggregate
-  // must bind whatever is current at draw time, exactly like the
-  // per-member path.
+  // Aggregate draw resources: grow-only pools rewritten every draw. No
+  // bind-group caching, because descriptor buffers are rebuilt whenever
+  // display settings or residency change and the draw must bind whatever
+  // is current.
   private aggregateQuadBuffer: GPUBuffer | null = null;
   private aggregateQuadCapacity = 0;
   private aggregateUniformBuffers: GPUBuffer[] = [];
@@ -210,8 +208,8 @@ export class SliceRenderer {
           visibility: GPUShaderStage.FRAGMENT,
           buffer: { type: "read-only-storage" },
         },
-        // Proxy textures (tileProxy + groupProxy). 3D r16uint, same as
-        // volume.wgsl — slice mode reads at the slot's Z midpoint.
+        // Proxy textures (tileProxy + groupProxy), 3D r16uint as in
+        // volume.wgsl. Slice mode reads at the slot's Z midpoint.
         {
           binding: 5,
           visibility: GPUShaderStage.FRAGMENT,
@@ -289,18 +287,11 @@ export class SliceRenderer {
       this.pipeline = pipeline;
     });
 
-    // Aggregate pipelines: one per blend mode, mirroring the compositor's
-    // blend states EXACTLY (the fragment stage outputs premultiplied
-    // color, same as the offscreen layers the compositor consumes), so
-    // members that overlap WITHIN a batch combine the way two individual
-    // layers of that mode would. Draw order in the pass is quad (roster)
-    // order within a batch, batches in first-seen roster order. Residual
-    // vs. true per-member layering: two overlapping members that landed
-    // in DIFFERENT pool-binding batches blend in batch order rather than
-    // global roster order (only visible for alpha-mode overlap across
-    // heterogeneous pools), and a batched member overlapping an
-    // INDIVIDUAL layer composites beneath it (the aggregate layer is
-    // emitted below the individual layers).
+    // One pipeline per blend mode, with the compositor's exact blend states
+    // (premultiplied output), so members overlapping within a batch combine
+    // like two layers of that mode. Overlapping members in different batches
+    // blend in batch order rather than roster order, and the aggregate layer
+    // sits beneath the individual layers.
     const aggregateLayout = device.createPipelineLayout({
       bindGroupLayouts: [this.bindGroupLayout, this.aggregateBindGroupLayout],
     });
@@ -406,7 +397,6 @@ export class SliceRenderer {
     this.rebuildBindGroup();
   }
 
-  /** Lazily allocate the 1×1×1 dummy proxy texture. */
   private getDummyProxyTexture(): GPUTexture {
     if (!this.dummyProxyTexture) {
       this.dummyProxyTexture = this.device.createTexture({
@@ -435,8 +425,8 @@ export class SliceRenderer {
 
   /**
    * Set the declared-label-palette storage buffer for the next categorical
-   * draw ([id, packedRgba] pairs). Pass `null` (or omit) for intensity
-   * draws — a dummy is bound so the layout stays satisfied.
+   * draw ([id, packedRgba] pairs). Pass `null` for intensity draws; a
+   * dummy keeps the layout satisfied.
    */
   setLabelColorBuffer(buffer: GPUBuffer | null) {
     this.labelColorBuffer = buffer;
@@ -545,21 +535,9 @@ export class SliceRenderer {
   }
 
   /**
-   * Draw an aggregate layer's member quads in ONE render pass, one
-   * instanced draw per pool-binding sub-batch. Each batch binds its
-   * members' OWN level pools, coarse pool, and tile/group proxy pool
-   * textures, so every quad samples the same resources the per-member
-   * pass would have bound for it; slot indices, dims, and display state
-   * (contrast/gamma/opacity) come from `descriptorBuffer`, which is
-   * re-bound fresh on every call so the draw always reflects the
-   * current descriptor contents.
-   *
-   * `quadData` holds the batch-ordered 32-byte quad records
-   * (`SliceAggregateParams` layout == shader `MemberQuad`); the layer's
-   * colormap LUT is configured via {@link setColormapTexture} before
-   * the call. Blending per {@link AggregateDrawParams.blendMode} — see
-   * the pipeline construction note for the exact states + the ordering
-   * residual.
+   * Draw an aggregate layer's member quads in one render pass, one instanced
+   * draw per pool-binding batch. Each batch binds its members' own pools, so
+   * every quad samples what the per-member pass would have bound for it.
    */
   renderAggregateBatches(
     target: GPUTextureView,
@@ -581,9 +559,8 @@ export class SliceRenderer {
     }
     this.device.queue.writeBuffer(this.aggregateQuadBuffer, 0, quadData);
 
-    // Descriptor + quad storage (group 1) — built fresh so the CURRENT
-    // descriptor buffer is bound even when it was rebuilt since the
-    // last frame (cold-state rebuilds replace the buffer object).
+    // Built fresh so the current descriptor buffer is bound even when a
+    // cold-state rebuild replaced the buffer object since the last frame.
     const quadBindGroup = this.device.createBindGroup({
       layout: this.aggregateBindGroupLayout,
       entries: [

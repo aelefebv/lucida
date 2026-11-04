@@ -6,14 +6,8 @@
 //! declare `AdminRequired(principal): AdminRequired` in their signature
 //! and don't repeat the check.
 //!
-//! The check is purely on `principal.is_admin`; the bool itself is
-//! derived per-request inside the principal extractor (from
-//! `LUCIDA_ADMIN_EMAILS`, plumbed in `auth/principal.rs`). Keeping the
-//! extractor ignorant of how `is_admin` was computed means future
-//! changes — e.g. a database-backed role table — don't ripple here.
-//!
-//! 403 shape: JSON `{"error":"forbidden"}`, mirroring the middleware's
-//! `{"error":"unauthenticated"}`.
+//! The check reads only `principal.is_admin` and stays ignorant of how
+//! the principal extractor computed it.
 
 use axum::Json;
 use axum::extract::FromRequestParts;

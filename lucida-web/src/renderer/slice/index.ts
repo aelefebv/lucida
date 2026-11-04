@@ -1,10 +1,7 @@
 /**
- * Slice-mode renderer surface area.
- *
- * Re-exports primitives from the per-concern submodules (`atlas`,
- * `eviction`, `remap`, `upload`, `render`, `zRetarget`) and provides
- * the composed cleanup functions (`removeSliceResources`,
- * `destroyAllSliceResources`) that mix atlas + camera-UV state.
+ * Slice-mode renderer surface: re-exports the submodules and owns the
+ * composed cleanups that mix atlas and camera-UV state, so the atlas module
+ * stays independent of the eviction module.
  */
 
 export {
@@ -50,14 +47,8 @@ import { clearAllCameraUVs, clearCameraUVForMember } from "./eviction.ts";
 import type { WorkerCtx } from "../workerContext.ts";
 
 /**
- * Remove resources for a removed entity or dataset.
- * Pass either a poolKey (removes the whole pool) or a memberId (removes per-entity state).
- *
- * Composed from `removeSliceAtlas` (atlas pool teardown),
- * `removeLabelSlicePoolsForDataset` (label pool teardown — matched by owning
- * dataset since label pools are keyed by the label image id, not the dataset
- * id), and `clearCameraUVForMember` (per-entity camera-UV cleanup) so the
- * atlas module stays independent of the eviction module.
+ * Remove resources for a removed entity or dataset. Pass a poolKey to remove
+ * the whole pool or a memberId to remove per-entity state.
  */
 export function removeSliceResources(ctx: WorkerCtx, idOrMember: string): void {
   removeSliceAtlas(ctx, idOrMember);

@@ -31,7 +31,7 @@ export function asUint16(buf: ArrayBuffer, dataType: string): Uint16Array {
 
 /**
  * Extract a slice from a buffer and return as Uint16Array.
- * For uint8 data, only the slice region is expanded — much smaller than the full chunk.
+ * For uint8 data only the slice region is expanded, not the full chunk.
  */
 export function asUint16Slice(
   buf: ArrayBuffer,
@@ -74,9 +74,8 @@ export function asUint32(buf: ArrayBuffer): Uint32Array {
 
 /**
  * Extract a Z-slice from a uint32 label chunk as a `Uint32Array` view.
- * Label ids are kept at full 32-bit width — never narrowed to 16 bits,
- * which would collapse distinct ids above 65535. Mirrors
- * {@link asUint16Slice}'s bounds check but at 4 bytes per voxel.
+ * Ids keep their full 32 bits, since narrowing to 16 would collapse ids
+ * above 65535.
  */
 export function asUint32Slice(
   buf: ArrayBuffer,

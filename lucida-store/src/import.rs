@@ -199,25 +199,15 @@ async fn import_single_image(
 const METADATA_FETCH_CONCURRENCY: usize = 32;
 
 /// Sampled label discovery engages only when it would skip at least this
-/// many per-tile probes; otherwise the whole collection is probed
-/// exhaustively. Sampling probes each group's first and last tile and only
-/// probes a group's remaining tiles when a sampled tile signals labels, so
-/// label-discovery metadata traffic scales with the number of groups (plus
-/// labeled tiles) rather than with total tiles. Without this, a wide remote
-/// collection pays one round-trip per tile — nearly always a 404 — and that
-/// fan-out dominates the whole open.
+/// many per-tile probes. Sampling probes each group's first and last tile,
+/// and the rest only when a sample signals labels, so discovery traffic
+/// scales with groups rather than tiles. Without it a wide remote
+/// collection pays one round trip per tile, nearly always a 404.
 ///
-/// Measuring the threshold against the savings (total tiles minus sampled
-/// tiles) rather than a flat tile count means a collection only slightly
-/// wider than its own sample keeps complete discovery: curtailing it would
-/// save fewer than this many reads, which is not worth the completeness
-/// loss.
-///
-/// Trade-off sampling accepts: a group whose labels sit only on tiles that
-/// are neither first nor last — with clean misses on both sampled tiles — is
-/// never expanded, so those labels go undiscovered. Whenever any tile goes
-/// unprobed the import records an [`ImportWarning`] naming
-/// [`EXHAUSTIVE_LABEL_DISCOVERY_ENV`], which restores full per-tile probing.
+/// The cost: labels only on a group's interior tiles, with clean misses on
+/// both samples, go undiscovered. Whenever a tile goes unprobed the import
+/// records an [`ImportWarning`] naming [`EXHAUSTIVE_LABEL_DISCOVERY_ENV`],
+/// which restores full probing.
 const LABEL_PROBE_SAMPLING_MIN_SKIPPED: usize = 64;
 
 /// Environment variable that forces per-tile label probing on collections of
@@ -226,27 +216,17 @@ const LABEL_PROBE_SAMPLING_MIN_SKIPPED: usize = 64;
 /// [`import_dataset`] entry point.
 const EXHAUSTIVE_LABEL_DISCOVERY_ENV: &str = "LUCIDA_EXHAUSTIVE_LABEL_DISCOVERY";
 
-/// Per-import cap on group expansions triggered by an *unusable* sampled
-/// labels index — one whose read failed short of a clean NotFound, or whose
-/// content held no usable names. A usable index that actually listed names
-/// is never subject to this cap: real labels always expand their group.
-/// Only expansions that would add reads are charged: a group whose samples
-/// already cover all of its tiles is fully probed as-is, so its expansion
-/// costs nothing and consumes no allowance.
+/// Per-import cap on group expansions triggered by an unusable sampled
+/// labels index: a read that failed short of NotFound, or no usable names.
+/// An index that lists names always expands its group, and an expansion
+/// that adds no reads is not charged.
 ///
-/// Trade-off: a genuinely labeled group hiding behind a broken index is
-/// probed in full only while this budget lasts (charged in declared group
-/// order); past it, that group's labels go undiscovered until the operator
-/// sets [`EXHAUSTIVE_LABEL_DISCOVERY_ENV`], which the aggregated
-/// unusable-index warning names. The cap is kept single-digit because many
-/// suspect groups at once almost always means one store-wide condition —
-/// throttling, timeouts, or a permission configuration in which missing keys
-/// surface as errors rather than NotFound — where every group looks
-/// label-suspect simultaneously and uncapped expansion would recreate the
-/// per-tile fan-out sampling exists to avoid, aimed at a store that is
-/// already struggling. Four keeps discovery complete for a real dataset with
-/// a handful of damaged indexes while bounding worst-case anomaly-triggered
-/// traffic to four group-widths of extra reads on top of the samples.
+/// Many suspect groups at once almost always means one store-wide
+/// condition, such as throttling or errors in place of NotFound, and
+/// uncapped expansion would recreate the per-tile fan-out against a
+/// struggling store. Past the cap, a labeled group behind a broken index
+/// stays undiscovered until the operator sets
+/// [`EXHAUSTIVE_LABEL_DISCOVERY_ENV`], which the warning names.
 const MAX_UNUSABLE_GROUP_EXPANSIONS: usize = 4;
 
 /// Number of example paths named in the aggregated unusable-index warning
@@ -416,30 +396,19 @@ async fn read_tile_geometry(
 }
 
 /// Select a collection's shared multiscale geometry from candidate
-/// representative tiles — one per group, in declared order.
+/// representative tiles, one per group, in declared order.
 ///
-/// Because every tile of an OME-Zarr collection shares one multiscale, a
-/// single readable representative anywhere defines the geometry for all, so the
-/// search never needs to look past one tile per group: the candidate set is
-/// O(groups), the same cost tier as parsing the groups themselves, never
-/// O(total tiles).
+/// Every tile shares one multiscale, so one readable tile defines the
+/// geometry and the search stays O(groups). The first candidate is read
+/// alone, so a healthy collection reads one tile. Only when it is
+/// unreadable are the rest fanned out with bounded concurrency
+/// ([`METADATA_FETCH_CONCURRENCY`]) and reduced in declared order, so a
+/// corrupt leading group falls forward without one serial round trip per
+/// candidate.
 ///
-/// The first candidate is read alone, so a healthy collection reads exactly one
-/// tile before any fan-out. Only when the leading representative is unreadable
-/// are the remaining candidates fanned out with bounded concurrency
-/// ([`METADATA_FETCH_CONCURRENCY`]) and reduced in declared order, taking the
-/// first whose geometry reads. This keeps a corrupt leading representative — or
-/// a whole corrupt leading group — falling forward concurrently instead of one
-/// serial round-trip per candidate, even under a store-wide condition that
-/// makes every read fail.
-///
-/// Returns the chosen geometry (`None` when no candidate is readable) together
-/// with the prefixes of the unreadable candidates that were passed over, in
-/// declared order, so the caller can aggregate them into a single warning.
-///
-/// Candidates are taken by owned value so the concurrent futures — and the
-/// stream that drives them — borrow nothing from the caller, keeping the
-/// resulting future straightforwardly `Send`.
+/// Returns the geometry (`None` when nothing is readable) and the prefixes
+/// passed over, for one aggregated warning. Candidates are owned so the
+/// future borrows nothing and stays `Send`.
 async fn select_shared_tile_geometry(
     store: &Arc<CachedStore>,
     candidate_prefixes: Vec<String>,
@@ -714,26 +683,12 @@ async fn import_collection(
         .flat_map(|group| group.tiles.iter())
         .any(|tile| tile.translation.is_some());
 
-    // Learn the shared multiscale geometry every tile inherits by reading a
-    // single representative tile. OME-Zarr collections require all tiles to
-    // share one multiscale, so any tile whose geometry reads and parses defines
-    // axes, levels, geometry, and channels for every tile — exactly one
-    // readable tile anywhere is enough.
-    //
-    // The candidate set is therefore one representative per group (its first
-    // tile), tried in declared order. A candidate whose `zarr.json` or
-    // level-array metadata is unreadable or malformed is passed over and the
-    // next group's representative is tried, so one corrupt tile — or a whole
-    // corrupt leading group — no longer aborts an otherwise-valid collection.
-    // Because a single readable representative suffices, the interior tiles of
-    // a group whose representative is unreadable are never probed: the search
-    // stays O(groups), never O(total tiles), even when a store-wide condition
-    // (throttling, timeouts, or permissions masking NotFound as an error)
-    // makes every read fail. The healthy common case reads exactly one tile;
-    // a corrupt leading representative falls forward with bounded concurrency.
-    //
-    // If no representative is readable the import fails loudly rather than open
-    // a geometry-less collection.
+    // Every tile shares one multiscale, so the first readable representative
+    // (each group's first tile, in declared order) defines axes, levels,
+    // geometry, and channels for all. An unreadable candidate is passed over
+    // and its group's interior tiles are never probed, so the search stays
+    // O(groups) even when every read fails. If none is readable the import
+    // fails rather than open a geometry-less collection.
     let representative_prefixes: Vec<String> = parsed_groups
         .iter()
         .filter_map(|group| group.tiles.first())
@@ -875,27 +830,16 @@ async fn import_collection(
     } else {
         probe_labels_for_tiles(store, &tile_prefixes, samples, &mut probed_labels).await;
 
-        // Expand to every tile of any group whose sampled tiles signal
-        // labels, so a labeled group's discovery stays complete (its cost
-        // scales with its own tile count, not the whole collection's). Only
-        // a clean NotFound on both sampled tiles is a definitive miss. Two
-        // signals expand a group, on very different terms:
+        // Expand every tile of a group whose samples signal labels, so a
+        // labeled group's discovery stays complete. Only a clean NotFound on
+        // both samples is a definitive miss.
         //
-        // - A usable index that LISTS names is proof of labels, so the rest
-        //   of the group is always probed — real labels are never rationed.
-        // - An index that exists (or errored) without yielding names is only
-        //   a suspicion, and it expands at most
-        //   MAX_UNUSABLE_GROUP_EXPANSIONS groups per import, in declared
-        //   order, counting only groups whose expansion adds reads (a group
-        //   the samples already fully probed costs — and charges — nothing).
-        //   When the cause is store-wide — throttling, timeouts, a
-        //   permission setup in which missing keys error instead of
-        //   returning NotFound — every group looks suspect at once, and
-        //   uncapped expansion would recreate the per-tile fan-out sampling
-        //   exists to avoid, aimed at a store that is already failing.
-        //   Groups past the cap are left unexpanded; the aggregated
-        //   unusable-index warning below names the anomaly and the
-        //   exhaustive override.
+        // - An index that lists names is proof, and always expands.
+        // - An index that exists or errored without names is a suspicion,
+        //   and expands at most MAX_UNUSABLE_GROUP_EXPANSIONS groups per
+        //   import, in declared order, counting only expansions that add
+        //   reads. Groups past the cap stay unexpanded; the aggregated
+        //   warning below names the exhaustive override.
         let mut follow_up: Vec<usize> = Vec::new();
         let mut unusable_expansions = 0usize;
         for span in &group_spans {
@@ -1300,18 +1244,15 @@ fn build_axes(axes_names: &[String]) -> Vec<Axis> {
         .collect()
 }
 
-/// Describe each declared level for the unwritten-level probe: where its
-/// origin chunk lives, how many coordinates that key carries, how much
-/// source space the chunk spans, and how the level is sharded, if it is.
+/// Describe each declared level for the unwritten-level probe: its origin
+/// chunk key, how many coordinates that key carries, the source space the
+/// chunk spans, and its sharding, if any.
 ///
-/// The key's coordinate count comes from the level's **own** array rank rather
-/// than the multiscale axes list, since the on-disk key has one coordinate per
-/// axis of the array it addresses. The footprint is the level's chunk extent
-/// scaled into the shared coordinate space, which is what lets an absent
-/// origin be compared against a populated one it contains — see
-/// [`crate::unwritten`]. On a sharded level the geometry's chunk is the inner
-/// chunk, so the footprint is the inner chunk's, which is what the probe asks
-/// the shard's index about.
+/// The coordinate count is the level's own array rank, not the multiscale
+/// axes count, because the key has one coordinate per axis of its array.
+/// The footprint is the chunk extent in shared coordinates, so an absent
+/// origin can be compared against a populated one it contains (see
+/// [`crate::unwritten`]). On a sharded level it is the inner chunk's.
 fn build_probe_targets(
     level_entries: &[parse::LevelEntry],
     level_metas: &[parse::ArrayMeta],
@@ -1339,14 +1280,10 @@ fn build_probe_targets(
 /// Build per-level [`LevelGeometry`], normalizing shapes to canonical 5D.
 ///
 /// The chunk shape comes from the level's binding, not its chunk grid, so a
-/// sharded level reports its inner chunk shape: the shape the planner, the
-/// wire, and the renderer work in.
-///
-/// A zero chunk dimension is rejected with a [`StoreError`] rather than allowed
-/// to reach the `shape / chunk` grid computation (which would divide by zero and
-/// panic). This keeps untrusted array metadata — a label's or an image's
-/// `chunk_shape` — from aborting the process: a bad label surfaces as an `Err`
-/// the caller skips, and a bad source array fails the import loudly.
+/// sharded level reports its inner chunk shape. A zero chunk dimension is a
+/// [`StoreError`], not a divide-by-zero panic, so untrusted metadata cannot
+/// abort the process: a bad label is skipped and a bad source array fails
+/// the import.
 fn build_level_geometries(
     level_entries: &[parse::LevelEntry],
     level_metas: &[parse::ArrayMeta],
@@ -1557,17 +1494,13 @@ async fn probe_labels_for_tiles(
     }
 }
 
-/// Build a source image's probed labels in declared order, charging the shared
-/// dataset budget as it goes and stopping the instant the budget is exhausted.
+/// Build a source image's probed labels in declared order, charging the
+/// shared dataset budget and stopping as soon as it is exhausted.
 ///
-/// The budget gate wraps `build_label` itself, so the per-label multiscale and
-/// color-table reads and allocations only ever run for labels that are actually
-/// retained: peak label memory and build I/O stay O(budget), never O(total
-/// declared), even for an adversarial dataset that lists far more labels than
-/// the budget allows. Malformed labels and budget exhaustion are logged exactly
-/// as a purely sequential importer would, so the retained set — and which labels
-/// and colors are dropped once the budget is exceeded — is identical no matter
-/// how the probe that produced `probed` was scheduled.
+/// The budget gates `build_label` itself, so label reads and memory stay
+/// O(budget) even for a dataset that declares far more labels. The retained
+/// set and the logging match a sequential importer whatever order the probe
+/// that produced `probed` ran in.
 async fn build_labels_within_budget(
     budget: &mut LabelBudget,
     store: &Arc<CachedStore>,
@@ -2419,7 +2352,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// An unreadable representative tile no longer aborts the whole collection:
+    /// An unreadable representative tile does not abort the whole collection:
     /// selection falls forward to the next tile whose geometry parses, records a
     /// warning naming the corrupt tile, and every tile (including the corrupt
     /// one) still imports over the shared geometry.
@@ -2599,7 +2532,7 @@ mod tests {
             [1, 1, 1, 64, 64],
             1,
         );
-        // Corrupt EVERY tile of the leading group, so no tile in it is
+        // Corrupt every tile of the leading group, so no tile in it is
         // readable. The search must still not read the group tile-by-tile.
         for tile in 0..20 {
             fs::write(
@@ -3407,8 +3340,8 @@ mod tests {
     /// Create a 7-axis fixture whose OME attributes use the 0.4-style
     /// top-level placement (`attributes.multiscales`) inside a Zarr **v3**
     /// group, rather than the 0.5 `attributes.ome.multiscales` namespace.
-    /// Mirrors the metadata shape of a real store that previously failed to
-    /// open (two non-canonical axes, two levels, an `omero` block).
+    /// Mirrors the metadata shape of a real store (two non-canonical axes,
+    /// two levels, an `omero` block).
     fn create_7d_top_level_placement_fixture(dir: &std::path::Path) {
         fs::create_dir_all(dir).unwrap();
 
@@ -4076,8 +4009,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // --- Label import fixtures ---
-
     /// Write a `labels/` group listing `names` into an existing image or tile
     /// directory (`group_dir/labels/zarr.json`).
     fn write_labels_index(group_dir: &std::path::Path, names: &[&str]) {
@@ -4208,7 +4139,7 @@ mod tests {
     }
 
     /// A standalone image with a `labels/` group attaches the label with its
-    /// OWN axes, dtype, and scale preserved distinct from the source image, and
+    /// own axes, dtype, and scale preserved distinct from the source image, and
     /// exposes it as a streamable image (fetch + binding) that is not part of
     /// `manifest.images()`.
     #[tokio::test]
@@ -4559,7 +4490,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// A SOURCE image whose level-0 array has a zero chunk dimension must fail
+    /// A source image whose level-0 array has a zero chunk dimension must fail
     /// the import loudly with a clear `StoreError`, never a divide-by-zero panic.
     #[tokio::test]
     async fn source_image_with_zero_chunk_fails_without_panic() {
@@ -4609,8 +4540,8 @@ mod tests {
     }
 
     /// An [`ObjectStore`] decorator that records the location of every read
-    /// operation it serves — GET (and HEAD, which routes through `get_opts`)
-    /// plus LIST — and delegates all work to an inner store. Lets a test
+    /// it serves (GET, HEAD through `get_opts`, and list) and delegates all
+    /// work to an inner store. Lets a test
     /// observe exactly which objects the importer reads and how many read
     /// round-trips an import costs. When `fail_get_when` is set, GETs whose
     /// location satisfies the predicate fail with a non-NotFound storage
@@ -4793,7 +4724,8 @@ mod tests {
     /// An import reads through the source cache, so no object is fetched from
     /// the backend twice — within one import or across a repeat import
     /// through the same cache. The repeat is the case that matters remotely:
-    /// re-opening a wide collection used to re-pay every metadata round trip.
+    /// without it, re-opening a wide collection re-pays every metadata round
+    /// trip.
     #[tokio::test]
     async fn import_reads_are_served_from_the_source_cache() {
         let dir = temp_dir("import_cached_reads");
@@ -4966,12 +4898,6 @@ mod tests {
         assert_eq!(sample_probe_indices(&spans), vec![0, 1, 3, 4, 8]);
     }
 
-    /// A label-free collection wide enough for sampled discovery imports
-    /// with metadata read traffic proportional to its GROUPS, never one read
-    /// per tile: 6 groups x 60 tiles = 360 tiles must cost on the order of
-    /// dozens of reads (root + one per group + the representative tile's
-    /// template + two label samples per group). The bounded discovery is
-    /// surfaced as a warning naming the exhaustive override.
     /// The whole metadata-read family rests on one unasserted property: the
     /// import's own fan-out stays on the task the open is awaited on, so a
     /// task-local observer sees every read. `buffer_unordered` polls on the
@@ -5035,6 +4961,12 @@ mod tests {
         );
     }
 
+    /// A label-free collection wide enough for sampled discovery imports
+    /// with metadata read traffic proportional to its groups, never one read
+    /// per tile: 6 groups x 60 tiles = 360 tiles must cost on the order of
+    /// dozens of reads (root + one per group + the representative tile's
+    /// template + two label samples per group). The bounded discovery is
+    /// surfaced as a warning naming the exhaustive override.
     #[tokio::test]
     async fn label_free_wide_collection_reads_scale_with_groups() {
         let dir = temp_dir("wide_label_free");
@@ -5399,7 +5331,7 @@ mod tests {
     /// 24-group x 20-tile collection, the import still succeeds, expansion of
     /// anomaly-flagged groups is capped at [`MAX_UNUSABLE_GROUP_EXPANSIONS`],
     /// total label reads stay far below one per tile, and the anomaly is
-    /// surfaced as ONE aggregated warning naming the likely store-side causes
+    /// surfaced as one aggregated warning naming the likely store-side causes
     /// and the exhaustive override.
     #[tokio::test]
     async fn store_wide_label_read_errors_are_capped_and_warned() {
@@ -5512,7 +5444,7 @@ mod tests {
     }
 
     /// The expansion cap applies only to anomaly-triggered expansion: groups
-    /// whose sampled index actually LISTS names are all expanded, even when
+    /// whose sampled index actually lists names are all expanded, even when
     /// there are more of them than [`MAX_UNUSABLE_GROUP_EXPANSIONS`], because
     /// listed names are real labels, not a suspicion.
     #[tokio::test]
@@ -5714,7 +5646,7 @@ mod tests {
     }
 
     /// The documented trade-off past the cap still holds: when the allowance
-    /// is spent on expansions that DID add reads, a later costly group is
+    /// is spent on expansions that did add reads, a later costly group is
     /// left unexpanded and its interior label goes undiscovered, with both
     /// the anomaly and sampling warnings recorded.
     #[tokio::test]
@@ -5911,8 +5843,8 @@ mod tests {
     }
 
     /// A two-level single image. `written` names the level paths that get an
-    /// origin chunk on disk; every other level is declared but left bare, the
-    /// shape of the partially-written export in issue #904.
+    /// origin chunk on disk; every other level is declared but left bare, as
+    /// in a partially written export.
     fn create_two_level_fixture(dir: &std::path::Path, written: &[&str]) {
         write_two_level_root(dir);
 
@@ -6030,7 +5962,7 @@ mod tests {
             .collect()
     }
 
-    /// Issue #904: level 0 is declared with no chunks written while level 1 is
+    /// Level 0 is declared with no chunks written while level 1 is
     /// populated. The level is kept — dropping it would misalign chunk keys —
     /// but the import says so instead of letting fill pass for signal.
     #[tokio::test]

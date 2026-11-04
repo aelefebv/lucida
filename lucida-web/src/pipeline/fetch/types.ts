@@ -1,15 +1,8 @@
 /**
- * Shared types for the fetch/decode subsystem.
- *
- * Lives separately from `cpuCache.ts` so the per-cache stores
- * (`chunkStore.ts`, `proxyStore.ts`), the eviction policies
- * (`eviction.ts`), and the telemetry counters (`telemetry.ts`) can
- * import the cache-shape types without back-pointing to the
- * coordinator. The barrel (`index.ts`) re-exports the public-surface
- * types from here as well.
- *
- * Pure type definitions: no runtime, no class. The `CpuCacheConfig`
- * defaults live in `cpuCache.ts` next to the constants they use.
+ * Shared types for the fetch/decode subsystem. Kept apart from `cpuCache.ts`
+ * so the stores, eviction policies, and telemetry can import cache shapes
+ * without importing the coordinator. `CpuCacheConfig` defaults live in
+ * `cpuCache.ts` next to the constants they use.
  */
 
 import type { SceneEpochs } from "../epochs.ts";
@@ -29,17 +22,12 @@ export interface CpuCacheConfig {
   maxConcurrentFetches: number;
   maxBytesInFlight: number;
   /**
-   * Invoked when chunk deliveries keep failing with no delivered (fetched
-   * AND decoded) chunk in between — permanent fetch failures (e.g. access
-   * revoked after a successful open) and decode failures (e.g. a source
-   * answering with the wrong wire format) both count — so the owner can
-   * show a user-visible signal instead of a silently stalling canvas.
-   * Transient-kind fetch failures never count: they are the reconnect
-   * machinery's business (see also `CpuCache.resetChunkFailureStreak`).
-   * Aggregated and throttled by the cache: at most one call per notify
-   * interval, and only once the consecutive-failure streak reaches its
-   * threshold — healthy operation (including mixed success/failure) never
-   * triggers it.
+   * Invoked when chunk deliveries keep failing with no fetched and decoded
+   * chunk in between, so the owner can show a visible signal instead of a
+   * silently stalling canvas. Permanent fetch failures and decode failures
+   * count. Transient fetch failures never do: reconnect owns those. At most
+   * one call per notify interval, and only once the streak reaches its
+   * threshold, so mixed success and failure never triggers it.
    */
   onChunkFailureStreak?: (consecutiveFailures: number, lastError: string) => void;
   /**
@@ -63,10 +51,9 @@ export interface CpuCacheConfig {
 
 /**
  * Logical lane each request travels on. `minimap`, `coarse`, and
- * `overview` share the overview store (see ADR 0023). `detail` and
- * `prefetch` live in the main chunk store. The planner no longer emits
- * `overview`. The name stays because the trace's lane column and the
- * store routing still know it.
+ * `overview` share the overview store (ADR 0023). `detail` and
+ * `prefetch` live in the main chunk store. The planner does not emit
+ * `overview`; it stays for the trace's lane column and store routing.
  */
 export type Lane = "minimap" | "detail" | "coarse" | "prefetch" | "overview";
 
@@ -231,7 +218,6 @@ export interface CacheTelemetry {
   mainBudget: number;
   overviewBytes: number;
   overviewBudget: number;
-  /** Proxy tier bytes / budget. */
   proxyBytes: number;
   proxyBudget: number;
   inFlightCount: number;
@@ -243,15 +229,9 @@ export interface CacheTelemetry {
   pendingProxyCount: number;
   /**
    * Age (ms) of the longest-waiting entry in the chunk scheduler's
-   * ADMISSION WINDOW — the bounded front of the pending queue the
-   * scheduler has committed to fetching soon (ADR 0044); 0 if empty.
-   *
-   * This is a drain-health signal, not a time-since-first-wanted one. On
-   * an oversubscribed collection the backlog behind the window can be
-   * tens of thousands deep, and the honest wait for a tile at the back of
-   * it is `pendingCount / fetch rate` — read those two together. Before
-   * the window existed this field pinned near the age of the whole
-   * session on such a collection and told you nothing.
+   * admission window; 0 if empty. A drain-health signal, not time since
+   * first wanted: the wait for a tile at the back of the backlog is
+   * `pendingCount / fetch rate`.
    */
   pendingOldestAgeMs: number;
   /** Cached, wanted, unsent deliverables currently visible to upload. */

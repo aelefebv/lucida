@@ -1,5 +1,5 @@
 /**
- * The recorder's per-chunk reads of the interval in progress (#1062): what
+ * The recorder's per-chunk reads of the interval in progress: what
  * the overlay's phase color and churn tint paint, and what its hover
  * inspector shows. Every case holds the live read to the derivation over the
  * same rows once exported, because the two are meant to be one reading.

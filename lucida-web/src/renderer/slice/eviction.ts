@@ -1,10 +1,7 @@
 /**
- * Slice-mode eviction state + helpers.
- *
- * Operates over `ctx.state.cameraUVPerEntity` — the per-entity
- * camera-UV reference that `findFarthestSlot2D` consults to prefer
- * keeping chunks near the viewport's center for each entity. Callers
- * thread `RendererState` through rather than holding a module-local Map.
+ * Slice-mode eviction state, over `ctx.state.cameraUVPerEntity`: the
+ * per-entity camera UV that `findFarthestSlot2D` uses to keep chunks near
+ * the viewport center.
  */
 
 import type { RendererState } from "../worker/state.ts";
@@ -42,12 +39,7 @@ export function clearAllCameraUVs(state: RendererState): void {
   state.cameraUVPerEntity.clear();
 }
 
-/**
- * Squared distance from a chunk grid coordinate to a reference UV.
- * Slice-mode wrapper around the shared 2D/3D-capable kernel
- * (`eviction.chunkDistSq` with `cz: null`); the explicit 2D signature
- * keeps the slice call sites locally readable.
- */
+/** Squared distance from a chunk grid coordinate to a reference UV. */
 export function chunkDistSq2D(
   lodMeta: LodIndirectionMeta,
   cx: number, cy: number,
@@ -56,13 +48,7 @@ export function chunkDistSq2D(
   return sharedChunkDistSq(lodMeta, cx, cy, null, cam);
 }
 
-/**
- * Find the best eviction candidate: finer than the member's target
- * first, then stale, then farthest. Per-entity distance reference
- * (`ctx.state.cameraUVPerEntity`) and target level
- * (`ctx.state.targetLevelByMember`). Delegates to the shared kernel with
- * `is3D: false`.
- */
+/** Find the best eviction candidate: finer than the member's target first, then stale, then farthest. */
 export function findFarthestSlot2D(
   state: RendererState,
   atlas: SliceAtlasState,

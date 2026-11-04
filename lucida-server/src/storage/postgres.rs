@@ -1,10 +1,6 @@
-//! PostgreSQL storage backend.
-//!
-//! Connects to the server named by a `postgres:` connection string, runs
-//! the bundled PostgreSQL migrations, and serves all seven stores. A
-//! deployer selects it with `LUCIDA_DB_URL=postgres://…`, or with the
-//! `postgresql://` spelling of the same thing. ADR-0058 records the
-//! pattern each store implementation followed.
+//! PostgreSQL storage backend, selected by a `postgres://` or
+//! `postgresql://` `LUCIDA_DB_URL`. Runs the bundled PostgreSQL migrations
+//! and serves all seven stores (ADR-0058).
 //!
 //! This module is the only place in the server that names a PostgreSQL
 //! type. Everything above it works through [`StorageBackend`] and the
@@ -31,7 +27,7 @@ use crate::workspace::{PostgresWorkspaceStore, WorkspaceStore};
 
 /// Migrations bundled into the binary at compile time, from the
 /// PostgreSQL directory. The SQLite baseline is the same schema in the
-/// sibling directory; ADR-0058 says why they are two files.
+/// sibling directory.
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/postgres");
 
 /// Connections held open against the server.

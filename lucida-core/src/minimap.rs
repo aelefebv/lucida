@@ -1,16 +1,10 @@
-//! Minimap framing geometry.
+//! Minimap framing geometry: pure math for the minimap's orbit camera, kept
+//! out of the `wasm32`-only module so it can be unit tested natively.
 //!
-//! Pure, target-agnostic math for the minimap's orbit camera so it can be unit
-//! tested natively (the `wasm` module that calls this is `wasm32`-only). The
-//! wasm layer collects each member's model matrix plus whether its dataset is
-//! visible; this decides where the minimap camera looks and how far back it sits.
-//!
-//! The bounds **accumulation** and **center** computation live in
-//! [`crate::framing`] (shared with the main viewport camera via [`Aabb`]); this
-//! module keeps the minimap's own *overview* framing — frame the limiting axis
-//! with [`FIT_PADDING`] slack ([`orbit_overview_framing`]) — which is looser
-//! than the main camera's full-containment fit, plus the minimap-specific
-//! "which members to include" policy.
+//! Bounds accumulation lives in [`crate::framing`]. This module keeps the
+//! minimap's overview framing ([`orbit_overview_framing`] with
+//! [`FIT_PADDING`]), looser than the main camera's containment fit, and the
+//! policy for which members to include.
 
 use crate::framing::{Aabb, FIT_PADDING, orbit_overview_framing};
 
@@ -40,8 +34,8 @@ pub fn minimap_framing_boxes(members: &[([f32; 16], bool)]) -> ([f64; 3], f64) {
         }
 
         if !bounds.is_empty() {
-            // The minimap's overview framing: limiting axis + FIT_PADDING slack.
-            // (Distinct from the main camera's full-containment fit; see #836.)
+            // The minimap's overview framing: limiting axis + FIT_PADDING slack,
+            // distinct from the main camera's full-containment fit.
             return orbit_overview_framing(bounds.min, bounds.max, FIT_PADDING);
         }
     }
@@ -83,7 +77,7 @@ mod tests {
     fn frames_only_visible_members() {
         // A huge hidden collection far from the origin + a small visible volume at the
         // origin. The minimap must frame the visible volume, not be pulled out to
-        // fit the hidden collection (the bug that made an isolated dataset a speck).
+        // fit the hidden collection, which would make the visible dataset a speck.
         let collection = box_mat(100.0, 1000.0, 1000.0, 0.0);
         let volume = box_mat(2.0, 0.0, 0.0, 0.0);
         let (center, distance) = minimap_framing_boxes(&[(collection, false), (volume, true)]);

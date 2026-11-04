@@ -1,66 +1,50 @@
 /**
- * Shared annotation gesture mechanics: the ONE click-vs-drag slop threshold,
- * the tolerant pointer-capture helpers, and the single construction site for
- * the `move_annotation` command every move/reshape gesture emits.
+ * Annotation gesture mechanics: the click-vs-drag slop, tolerant pointer
+ * capture, and the one place `move_annotation` is built.
  *
- * Every annotation gesture in every view answers "did the pointer really
- * travel?" against the SAME threshold: dropping a pin (SliceViewer /
- * VolumeViewer), moving one, and reshaping a box corner or line endpoint
- * (AnnotationOverlay / AnnotationOverlay3D). Keeping the threshold and its
- * comparison here means a press that reads as a click in one view can never
- * read as a drag in another.
+ * Every gesture in every view tests travel against the same threshold, so a
+ * press that reads as a click in one view can't read as a drag in another.
  */
 import type { WasmScene } from "lucida-core";
 import { applyDocumentCommand } from "../applyAndSend.ts";
 import type { MoveAnnotationCommand } from "../commands.ts";
 
-/** Max pointer travel (CSS px) for a press+release to count as a click, not a
- * drag. Shared by every annotation gesture — pin drop, pin move, shape draw,
- * and handle reshape — in both the 2D and 3D views. */
+/** Max pointer travel (CSS px) for a press and release to count as a click. */
 export const PIN_CLICK_SLOP = 4;
 
-/** Whether pointer travel from `(startX, startY)` to `(x, y)` (CSS px) has
- * crossed {@link PIN_CLICK_SLOP} — i.e. the press is a real drag, no longer a
- * click. Travel exactly AT the slop is still a click (the comparison is
- * strictly greater), so the boundary is identical at every call site. */
+/** Whether travel has crossed {@link PIN_CLICK_SLOP}. Travel exactly at the slop
+ * is still a click. */
 export function exceedsClickSlop(startX: number, startY: number, x: number, y: number): boolean {
   return Math.hypot(x - startX, y - startY) > PIN_CLICK_SLOP;
 }
 
-/** Bind `pointerId` to `target` so the rest of the gesture (move/up) lands
- * there even if the pointer slides off. Pointer capture is a progressive
- * enhancement — happy-dom may lack it, and a real browser can throw on an
- * already-released pointer — so failures are swallowed: moves/ups still arrive
- * on the target in the environments that lack capture. */
+/** Capture `pointerId` on `target` so moves and ups land there. Failures are
+ * swallowed: happy-dom may lack capture, and a browser can throw on a released
+ * pointer. */
 export function capturePointer(target: Element, pointerId: number): void {
   try {
     target.setPointerCapture?.(pointerId);
   } catch {
-    // capture unsupported (e.g. test env) — moves/ups still arrive on target
+    // capture unsupported; moves and ups still arrive on target
   }
 }
 
-/** Release a capture taken by {@link capturePointer}, tolerating environments
- * where it was never taken (or the API is missing). */
+/** Release a capture taken by {@link capturePointer}, tolerating one that was
+ * never taken. */
 export function releasePointer(target: Element, pointerId: number): void {
   try {
     target.releasePointerCapture?.(pointerId);
   } catch {
-    // ignore — capture may not have been taken
+    // capture may not have been taken
   }
 }
 
 /**
- * Apply-locally-and-send exactly one `move_annotation` — the terminal emit of
- * every move/reshape gesture (2D Shift+drag move, 2D corner/edge/endpoint
- * reshape, 3D Shift+drag move). `end` present → a reshape placing BOTH
- * vertices; `end` absent → a rigid whole-shape translate (the backend
- * distinguishes exactly this way).
+ * Apply locally and send one `move_annotation`. With `end` it is a reshape
+ * placing both vertices; without, a rigid translate. The backend tells them
+ * apart by `end`'s presence.
  *
- * The wire goldens lock this literal's field presence and values, not its
- * key order (the web suite compares parsed frames, and serde ignores JSON
- * key order): adding, dropping, or renaming a field fails them; reordering
- * does not.
+ * The wire goldens lock field presence and values, not key order.
  */
 export function emitMoveAnnotation(
   scene: WasmScene,

@@ -8,11 +8,8 @@ import { AnnotationOverlay } from "./AnnotationOverlay.tsx";
 import type { Annotation } from "./annotationDocument.ts";
 
 /**
- * A hand-rolled stand-in for the WASM scene, exercising only the surface this
- * overlay touches: `annotations()` (the authoritative read), `apply_command()`
- * (local apply), and the camera accessors `zoom()` / `center()` used by the
- * world<->screen projection. Pin state is mutated by apply_command so a re-read
- * reflects an optimistic move/edit, mirroring the real apply-locally seam.
+ * Stand-in for the WASM scene covering only the 2D overlay's surface.
+ * apply_command mutates pin state so a re-read reflects an optimistic change.
  */
 function makeScene(initial: Annotation[]): {
   scene: WasmScene;
@@ -27,10 +24,7 @@ function makeScene(initial: Annotation[]): {
     apply_command: (json: string) => {
       const cmd = JSON.parse(json) as Record<string, unknown>;
       applied.push(cmd);
-      // Reflect the commands this slice emits so a re-read shows the result. A
-      // move_annotation carries `position`/`z` always, and `end` too when it's a
-      // reshape (a corner/edge resize) — mirror both so a re-read sees the moved
-      // anchor AND the resized opposite corner.
+      // A reshape also carries `end`; mirror it so a re-read sees both corners.
       if (cmd.type === "move_annotation") {
         pins = pins.map((p) =>
           p.id === cmd.id
@@ -72,18 +66,12 @@ function makeCanvas(): HTMLCanvasElement {
   return canvas;
 }
 
-// The annotation-author identity is now a stable string (issue #777), not the
-// per-connection numeric client id. Authoring helpers use `String(MY_ID)`, so a
-// string literal here flows through every `author`/ownership comparison
-// unchanged while matching the overlay's `myId: string` prop type.
 const MY_ID = "7";
 
 function renderOverlay(opts: {
   pins: Annotation[];
   myId?: string;
-  /** The view's Z/T/C. Defaults to the on-context view for the standard test
-   * pins (z=3, t/c absent → 0), so existing suites see today's look; the
-   * off-context suite overrides it (or the pins) to force a mismatch. */
+  /** The view's Z/T/C. Defaults to on-context for the standard pins (z=3). */
   viewContext?: { z: number; t: number; c: number };
 }) {
   const { scene, applied } = makeScene(opts.pins);
@@ -111,9 +99,7 @@ function renderOverlay(opts: {
       }}
     />,
   );
-  /** Re-render with a new view context (the rest of the props are fixed), so a
-   * test can navigate the view and assert the off-context status updates — it's a
-   * pure function of the view, so this is how "navigate to match" is exercised. */
+  /** Re-render with a new view context, to navigate the view. */
   const setViewContext = (viewContext: { z: number; t: number; c: number }) => {
     rerender(
       <AnnotationOverlay
@@ -165,14 +151,11 @@ afterEach(() => {
 
 describe("AnnotationOverlay — move a pin (move_annotation)", () => {
   it("Shift+dragging an own pin past the slop emits one move_annotation in world space", () => {
-    // Moving now requires Shift+click+drag (issue #778): a plain drag pans, so
-    // the move gesture must carry the Shift modifier from the pointerdown on.
+    // A plain drag pans, so a move carries Shift from the pointerdown on.
     const { sent, getChanged } = renderOverlay({ pins: [ownPin()] });
     const marker = screen.getByTestId("annot-pin-pin-a");
 
-    // Shift-press, travel well past PIN_CLICK_SLOP (4px), release. With zoom=1,
-    // center=(0,0), 800x600 canvas: world = screenPx - half. Release at
-    // client (500, 400) → world (500-400, 400-300) = (100, 100).
+    // world = screenPx - half, so release at client (500, 400) is world (100, 100).
     fireEvent.pointerDown(marker, { pointerId: 1, button: 0, shiftKey: true, clientX: 200, clientY: 200 });
     fireEvent.pointerMove(marker, { pointerId: 1, shiftKey: true, clientX: 260, clientY: 260 });
     fireEvent.pointerUp(marker, { pointerId: 1, shiftKey: true, clientX: 500, clientY: 400 });
@@ -193,8 +176,6 @@ describe("AnnotationOverlay — move a pin (move_annotation)", () => {
     const { sent } = renderOverlay({ pins: [ownPin()] });
     const marker = screen.getByTestId("annot-pin-pin-a");
 
-    // A Shift press whose travel stays within the 4px slop never becomes a drag,
-    // so it emits no move.
     fireEvent.pointerDown(marker, { pointerId: 1, button: 0, shiftKey: true, clientX: 200, clientY: 200 });
     fireEvent.pointerMove(marker, { pointerId: 1, shiftKey: true, clientX: 202, clientY: 201 });
     fireEvent.pointerUp(marker, { pointerId: 1, shiftKey: true, clientX: 202, clientY: 201 });
@@ -219,15 +200,12 @@ describe("AnnotationOverlay — move a pin (move_annotation)", () => {
     renderOverlay({ pins: [ownPin({ comments: [{ id: "c1", author: String(MY_ID), text: "hi" }] })] });
     const marker = screen.getByTestId("annot-pin-pin-a");
 
-    // A plain drag pans the view; like any real drag it must swallow the trailing
-    // click the browser fires so the drop doesn't also pop the thread.
     fireEvent.pointerDown(marker, { pointerId: 1, button: 0, clientX: 200, clientY: 200 });
     fireEvent.pointerMove(marker, { pointerId: 1, clientX: 300, clientY: 300 });
     fireEvent.pointerUp(marker, { pointerId: 1, clientX: 400, clientY: 400 });
     // The browser still fires a click after a drag; the overlay must swallow it.
     fireEvent.click(marker, { clientX: 400, clientY: 400 });
 
-    // Thread did NOT open: the comment text is not shown.
     expect(screen.queryByText("hi")).toBeNull();
   });
 
@@ -235,16 +213,13 @@ describe("AnnotationOverlay — move a pin (move_annotation)", () => {
     renderOverlay({ pins: [ownPin({ comments: [{ id: "c1", author: String(MY_ID), text: "hi" }] })] });
     const marker = screen.getByTestId("annot-pin-pin-a");
 
-    // First gesture: a real (pan) drag, but the browser never delivers the
-    // trailing click (e.g. pointer released off-element). The suppression flag is
-    // left set.
+    // A drag whose trailing click never arrives leaves the suppression flag set.
     fireEvent.pointerDown(marker, { pointerId: 1, button: 0, clientX: 200, clientY: 200 });
     fireEvent.pointerMove(marker, { pointerId: 1, clientX: 300, clientY: 300 });
     fireEvent.pointerUp(marker, { pointerId: 1, clientX: 400, clientY: 400 });
     // (no click here)
 
-    // Second, independent gesture: a clean click should open the thread, not be
-    // swallowed by the stale flag — the next pointerdown clears it.
+    // The next pointerdown clears the stale flag, so a clean click opens.
     fireEvent.pointerDown(marker, { pointerId: 2, button: 0, clientX: 400, clientY: 400 });
     fireEvent.pointerUp(marker, { pointerId: 2, clientX: 400, clientY: 400 });
     fireEvent.click(marker, { clientX: 400, clientY: 400 });
@@ -256,12 +231,10 @@ describe("AnnotationOverlay — move a pin (move_annotation)", () => {
     const { sent } = renderOverlay({
       pins: [ownPin({ id: "pin-b", author: "999" })],
     });
-    // Slice 7 widened the dot testid to EVERY pin so any pin's thread can be
-    // opened — a peer's pin now carries `annot-pin-<id>` too.
+    // Every pin carries the dot testid so any pin's thread can be opened.
     expect(screen.getByTestId("annot-pin-pin-b")).toBeTruthy();
 
-    // The move gesture stays author-only: even a Shift+drag on a peer's pin
-    // emits nothing (the dot has no pointer handlers wired for a non-author).
+    // Move is author-only: a peer's dot has no move handlers.
     const marker = screen.getByTestId("annot-pin-pin-b");
     fireEvent.pointerDown(marker, { pointerId: 1, button: 0, shiftKey: true, clientX: 200, clientY: 200 });
     fireEvent.pointerMove(marker, { pointerId: 1, shiftKey: true, clientX: 400, clientY: 400 });
@@ -272,10 +245,8 @@ describe("AnnotationOverlay — move a pin (move_annotation)", () => {
   it("shift-click (no travel) neither moves nor removes a pin", () => {
     const { sent, getChanged } = renderOverlay({ pins: [ownPin()] });
     const marker = screen.getByTestId("annot-pin-pin-a");
-    // The old one-shot shift-click-to-remove is gone. A stationary Shift-press is
-    // the start of a (would-be) move gesture, so it emits neither a move nor a
-    // remove — and, per #778, it doesn't toggle the thread either (Shift is the
-    // move modifier; the trailing click is swallowed — asserted separately).
+    // A stationary Shift-press starts a would-be move, so it emits neither a
+    // move nor a remove.
     fireEvent.pointerDown(marker, { pointerId: 1, button: 0, shiftKey: true, clientX: 200, clientY: 200 });
     fireEvent.pointerUp(marker, { pointerId: 1, shiftKey: true, clientX: 200, clientY: 200 });
     fireEvent.click(marker, { shiftKey: true, clientX: 200, clientY: 200 });
@@ -288,10 +259,8 @@ describe("AnnotationOverlay — move a pin (move_annotation)", () => {
 
 describe("AnnotationOverlay — Shift gates move; plain drag pans (issue #778)", () => {
   it("a plain drag on an own pin pans the view and emits NO move", () => {
-    // The headline of the slice: a plain (non-Shift) drag that starts on an own
-    // marker must pan the view exactly like dragging the canvas — never move the
-    // pin. Pan = apply-locally-only viewport command, so it lands in `applied`
-    // (apply_command) but never in `sent` (it isn't broadcast).
+    // A plain drag on an own marker pans like dragging the canvas. Pan is a
+    // local-only viewport command, so it lands in `applied`, never in `sent`.
     const { applied, sent } = renderOverlay({ pins: [ownPin()] });
     const marker = screen.getByTestId("annot-pin-pin-a");
 
@@ -300,7 +269,6 @@ describe("AnnotationOverlay — Shift gates move; plain drag pans (issue #778)",
     fireEvent.pointerMove(marker, { pointerId: 1, clientX: 300, clientY: 260 });
     fireEvent.pointerUp(marker, { pointerId: 1, clientX: 300, clientY: 260 });
 
-    // No move was emitted (locally applied or sent).
     expect(sent.some((c) => c.type === "move_annotation")).toBe(false);
     expect(applied.some((c) => c.type === "move_annotation")).toBe(false);
     // At least one viewport pan was applied to the scene…
@@ -311,9 +279,8 @@ describe("AnnotationOverlay — Shift gates move; plain drag pans (issue #778)",
   });
 
   it("the pan forwarded is dpr-aware and negated (the SliceViewer pan)", () => {
-    // dpr=2 (set here), incremental travel of +30 CSS px in x and +10 in y from
-    // the press. The pan command must be the negated, dpr-scaled delta:
-    // dx = -(30*2) = -60, dy = -(10*2) = -20 — exactly what SliceViewer applies.
+    // dpr=2 and travel (+30, +10) CSS px give the negated, scaled delta
+    // (-60, -20), matching SliceViewer.
     Object.defineProperty(globalThis, "devicePixelRatio", { value: 2, configurable: true });
     const { applied } = renderOverlay({ pins: [ownPin()] });
     const marker = screen.getByTestId("annot-pin-pin-a");
@@ -329,8 +296,7 @@ describe("AnnotationOverlay — Shift gates move; plain drag pans (issue #778)",
   });
 
   it("a plain drag consumes incremental deltas across multiple moves", () => {
-    // Two moves of +20 CSS px each in x (dpr=1) → two pans of dx=-20 each, not a
-    // single cumulative -40: the gesture must pan by travel-since-last-event.
+    // Pans by travel since the last event: two pans of -20, not one of -40.
     const { applied } = renderOverlay({ pins: [ownPin()] });
     const marker = screen.getByTestId("annot-pin-pin-a");
 
@@ -349,8 +315,7 @@ describe("AnnotationOverlay — Shift gates move; plain drag pans (issue #778)",
   });
 
   it("a plain drag asks the parent to repaint (marks the render loop dirty)", () => {
-    // A pan that didn't repaint would slide the pins over a frozen image. The
-    // overlay must notify the parent (which marks the render loop dirty) on pan.
+    // A pan that didn't repaint would slide the pins over a frozen image.
     const { getViewportChanged } = renderOverlay({ pins: [ownPin()] });
     const marker = screen.getByTestId("annot-pin-pin-a");
 
@@ -362,8 +327,6 @@ describe("AnnotationOverlay — Shift gates move; plain drag pans (issue #778)",
   });
 
   it("a Shift+drag moves the pin and applies NO pan (move, not pan)", () => {
-    // The complement: with Shift held, the same travel must move the pin (one
-    // move_annotation) and never pan the view.
     const { applied, sent } = renderOverlay({ pins: [ownPin()] });
     const marker = screen.getByTestId("annot-pin-pin-a");
 
@@ -376,8 +339,6 @@ describe("AnnotationOverlay — Shift gates move; plain drag pans (issue #778)",
   });
 
   it("a plain click (no travel) toggles the thread and applies no pan, no move", () => {
-    // The third leg: a stationary plain press is a click — it toggles the thread
-    // and must emit/apply neither a pan nor a move.
     const { applied, sent } = renderOverlay({
       pins: [ownPin({ comments: [{ id: "c1", author: String(MY_ID), text: "hi" }] })],
     });
@@ -394,9 +355,7 @@ describe("AnnotationOverlay — Shift gates move; plain drag pans (issue #778)",
   });
 
   it("a stationary Shift-press does nothing (no move, no pan, no thread toggle)", () => {
-    // Per #778: a Shift-press that never crosses the slop is inert — it neither
-    // moves (it didn't drag) nor toggles the thread (Shift is the move modifier,
-    // so its trailing click is swallowed).
+    // Shift is the move modifier, so its trailing click is swallowed.
     const { applied, sent } = renderOverlay({
       pins: [ownPin({ comments: [{ id: "c1", author: String(MY_ID), text: "hi" }] })],
     });
@@ -408,7 +367,6 @@ describe("AnnotationOverlay — Shift gates move; plain drag pans (issue #778)",
 
     expect(sent.some((c) => c.type === "move_annotation")).toBe(false);
     expect(applied.some((c) => c.type === "pan")).toBe(false);
-    // The thread did NOT open — the Shift-press's trailing click was swallowed.
     expect(screen.queryByTestId("annot-thread-pin-a")).toBeNull();
   });
 });
@@ -522,8 +480,7 @@ describe("AnnotationOverlay — edit a comment (edit_comment)", () => {
 });
 
 describe("AnnotationOverlay — delete a pin (remove_annotation, confirmed)", () => {
-  /** Render with one pin and open its thread via a pure click, returning the
-   * harness handles. Mirrors the edit suite's opener. */
+  /** Render one pin and open its thread with a pure click. */
   function openOwnThread(overrides: Partial<Annotation> = {}) {
     const result = renderOverlay({ pins: [ownPin(overrides)] });
     const marker = screen.getByTestId("annot-pin-pin-a");
@@ -571,8 +528,7 @@ describe("AnnotationOverlay — delete a pin (remove_annotation, confirmed)", ()
     fireEvent.click(screen.getByTestId("pin-delete-pin-a"));
 
     const confirm = screen.getByTestId("pin-delete-confirm-pin-a");
-    // The integer pin.comments.length (3) must be visible to the user, via the
-    // control's text content or its aria-label.
+    // The count may appear in the text or the aria-label.
     const accessible = `${confirm.textContent ?? ""} ${confirm.getAttribute("aria-label") ?? ""}`;
     expect(accessible).toContain("3");
   });
@@ -632,8 +588,6 @@ describe("AnnotationOverlay — delete a pin (remove_annotation, confirmed)", ()
   });
 
   it("a non-author pin shows no delete affordance in its open thread", () => {
-    // Open a peer's pin thread: the dot testid is widened to every pin, so it
-    // opens, but no pin-delete-* control should render for a non-author.
     renderOverlay({ pins: [ownPin({ id: "pin-b", author: "999", comments: [] })] });
     const marker = screen.getByTestId("annot-pin-pin-b");
     fireEvent.pointerDown(marker, { pointerId: 1, button: 0, clientX: 200, clientY: 200 });
@@ -666,15 +620,13 @@ describe("AnnotationOverlay — delete a pin (remove_annotation, confirmed)", ()
 });
 
 describe("AnnotationOverlay — open thread stacks above other pins (issue #772)", () => {
-  /** Read a pin wrapper's inline numeric z-index (NaN if it carries none), so
-   * the assertions compare the actual stacking the browser would apply. */
+  /** A pin wrapper's inline z-index, or NaN if it carries none. */
   function wrapperZ(pinId: string): number {
     const el = screen.getByTestId(`annot-pin-wrapper-${pinId}`);
     return Number.parseInt((el as HTMLElement).style.zIndex, 10);
   }
 
-  /** Open a pin's thread with a pure click (down+up same point, then click), the
-   * same gesture the other suites use so drag-suppression never interferes. */
+  /** Open a pin's thread with a pure click so drag suppression never interferes. */
   function openThread(pinId: string) {
     const marker = screen.getByTestId(`annot-pin-${pinId}`);
     fireEvent.pointerDown(marker, { pointerId: 1, button: 0, clientX: 200, clientY: 200 });
@@ -682,8 +634,7 @@ describe("AnnotationOverlay — open thread stacks above other pins (issue #772)
     fireEvent.click(marker, { clientX: 200, clientY: 200 });
   }
 
-  /** Two pins: "pin-a" first in the array, "pin-b" later (so by DOM order alone
-   * pin-b would paint on top — the exact bug). Both authored by me. */
+  /** Two own pins. By DOM order alone pin-b would paint on top of pin-a. */
   function twoPins() {
     return renderOverlay({
       pins: [
@@ -712,9 +663,7 @@ describe("AnnotationOverlay — open thread stacks above other pins (issue #772)
 
   it("with no thread open, no pin is elevated above the others (equal base)", () => {
     twoPins();
-    // Nothing opened: both wrappers sit at the same FINITE base level — pins render
-    // normally, none jockeys above another. (Finiteness guards against a regression
-    // that drops the z-index entirely, which would make both NaN and trivially "equal".)
+    // Same finite base. Checking finiteness stops two NaNs from passing as equal.
     expect(Number.isFinite(wrapperZ("pin-a"))).toBe(true);
     expect(wrapperZ("pin-a")).toBe(wrapperZ("pin-b"));
     // And neither popover exists.
@@ -751,8 +700,6 @@ describe("AnnotationOverlay — open thread stacks above other pins (issue #772)
     twoPins();
     openThread("pin-a");
 
-    // The lifted thread is the real, interactive popover: its Delete trigger and
-    // the add-comment box are both present inside the elevated wrapper.
     const thread = screen.getByTestId("annot-thread-pin-a");
     expect(screen.getByTestId("pin-delete-pin-a")).toBeTruthy();
     expect(thread.querySelector('input[placeholder="Add a comment…"]')).toBeTruthy();
@@ -760,10 +707,8 @@ describe("AnnotationOverlay — open thread stacks above other pins (issue #772)
 });
 
 describe("AnnotationOverlay — resize a box from its handles (move_annotation reshape)", () => {
-  /** An own box pin with opposite corners `position` (anchor) and `end`. With
-   * the harness camera (zoom=1, center=(0,0), 800x600, dpr=1) world = screenPx −
-   * half (halfW=400, halfH=300), so a release at client (cx,cy) lands at world
-   * (cx−400, cy−300) — used to compute the exact expected reshape below. */
+  /** An own box pin. Under the harness camera a release at client (cx,cy) lands
+   * at world (cx - 400, cy - 300). */
   function boxPin(overrides: Partial<Annotation> = {}): Annotation {
     return ownPin({
       id: "box-1",
@@ -776,23 +721,17 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
 
   const ALL_HANDLES = ["nw", "ne", "se", "sw", "n", "e", "s", "w"] as const;
 
-  // Mirror the component's HANDLE_HOVER_LINGER_MS (the hysteresis grace period).
-  // Kept in step here so the hide/keep regression tests advance fake timers past
-  // the same window the overlay uses; it's an internal constant, not exported, so
-  // we don't widen the component's surface just for a test.
+  // Mirrors the component's unexported HANDLE_HOVER_LINGER_MS.
   const LINGER_MS = 300;
 
-  /** Reveal an own box's resize handles by hovering its shape (issue #789:
-   * handles are no longer always-on — they appear on `pointerEnter` over the
-   * `annot-shape-<id>` element). The drag tests below call this first, then query
-   * and drag a now-visible handle, exactly as a user would (hover, then grab). */
+  /** Reveal an own box's resize handles by hovering its shape. */
   function hoverBox(id = "box-1") {
     fireEvent.pointerEnter(screen.getByTestId(`annot-shape-${id}`));
   }
 
   it("an own box reveals all eight resize handles (corners + edges) on hover", () => {
     renderOverlay({ pins: [boxPin()] });
-    // No always-on handles: before any hover none of the eight exist.
+    // Before any hover none of the eight exist.
     for (const h of ALL_HANDLES) {
       expect(screen.queryByTestId(`annot-resize-box-1-${h}`)).toBeNull();
     }
@@ -813,7 +752,6 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
   });
 
   it("an own point renders no resize handles", () => {
-    // A point (the default kind) is not resizable — no handles for any direction.
     renderOverlay({ pins: [ownPin({ id: "pt-1" })] });
     for (const h of ALL_HANDLES) {
       expect(screen.queryByTestId(`annot-resize-pt-1-${h}`)).toBeNull();
@@ -832,9 +770,7 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
     hoverBox();
     const se = screen.getByTestId("annot-resize-box-1-se");
 
-    // Press on the SE handle, travel past the 4px slop, release at client
-    // (500,400) → world (100,100). SE moves the opposite corner (end); the
-    // anchor (position) is held.
+    // Release at client (500,400) = world (100,100). SE moves `end` only.
     fireEvent.pointerDown(se, { pointerId: 1, button: 0, clientX: 260, clientY: 380 });
     fireEvent.pointerMove(se, { pointerId: 1, clientX: 400, clientY: 400 });
     fireEvent.pointerUp(se, { pointerId: 1, clientX: 500, clientY: 400 });
@@ -847,7 +783,6 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
       id: "box-1",
       z: 3,
     });
-    // A reshape carries BOTH a numeric position and a numeric end.
     expect(moves[0].position).toEqual([10, 20]); // anchor unchanged
     expect(moves[0].end).toEqual([100, 100]); // opposite corner moved to release
     expect(getChanged()).toBe(1);
@@ -858,8 +793,7 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
     hoverBox();
     const nw = screen.getByTestId("annot-resize-box-1-nw");
 
-    // Release at client (350,250) → world (-50,-50). NW moves the anchor
-    // (position); the opposite corner (end) is held.
+    // Release at client (350,250) = world (-50,-50). NW moves `position` only.
     fireEvent.pointerDown(nw, { pointerId: 1, button: 0, clientX: 410, clientY: 320 });
     fireEvent.pointerMove(nw, { pointerId: 1, clientX: 380, clientY: 290 });
     fireEvent.pointerUp(nw, { pointerId: 1, clientX: 350, clientY: 250 });
@@ -871,8 +805,7 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
   });
 
   it("a corner reshape carries numeric position AND end arrays (both vertices)", () => {
-    // Guards the wire shape the contract names: a reshape is identified by a
-    // numeric `end` array alongside a numeric `position` array.
+    // A reshape is identified on the wire by a numeric `end` array.
     const { sent } = renderOverlay({ pins: [boxPin()] });
     hoverBox();
     const se = screen.getByTestId("annot-resize-box-1-se");
@@ -894,8 +827,7 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
     hoverBox();
     const e = screen.getByTestId("annot-resize-box-1-e");
 
-    // Release at client (500,500) → world (100,200). The E edge owns end.x only,
-    // so end.x → 100 while end.y (80) and the whole anchor (10,20) are held.
+    // Release at client (500,500) = world (100,200). E owns end.x only.
     fireEvent.pointerDown(e, { pointerId: 1, button: 0, clientX: 460, clientY: 350 });
     fireEvent.pointerMove(e, { pointerId: 1, clientX: 480, clientY: 420 });
     fireEvent.pointerUp(e, { pointerId: 1, clientX: 500, clientY: 500 });
@@ -911,8 +843,7 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
     hoverBox();
     const n = screen.getByTestId("annot-resize-box-1-n");
 
-    // Release at client (450,350) → world (50,50). The N edge owns position.y
-    // only, so position.y → 50 while position.x (10) and end (60,80) are held.
+    // Release at client (450,350) = world (50,50). N owns position.y only.
     fireEvent.pointerDown(n, { pointerId: 1, button: 0, clientX: 435, clientY: 320 });
     fireEvent.pointerMove(n, { pointerId: 1, clientX: 440, clientY: 335 });
     fireEvent.pointerUp(n, { pointerId: 1, clientX: 450, clientY: 350 });
@@ -927,7 +858,6 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
     const { sent } = renderOverlay({ pins: [boxPin()] });
     hoverBox();
     const se = screen.getByTestId("annot-resize-box-1-se");
-    // Stay within the 4px click slop → not a drag → no reshape.
     fireEvent.pointerDown(se, { pointerId: 1, button: 0, clientX: 300, clientY: 300 });
     fireEvent.pointerMove(se, { pointerId: 1, clientX: 302, clientY: 301 });
     fireEvent.pointerUp(se, { pointerId: 1, clientX: 302, clientY: 301 });
@@ -942,16 +872,14 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
     fireEvent.pointerMove(se, { pointerId: 1, clientX: 400, clientY: 400 });
     fireEvent.pointerUp(se, { pointerId: 1, clientX: 500, clientY: 400 });
 
-    // applyDocumentCommand applies to the scene (optimistic) AND sends to peers.
     expect(applied.filter((c) => c.type === "move_annotation")).toHaveLength(1);
     expect(sent.filter((c) => c.type === "move_annotation")).toHaveLength(1);
     expect(applied[0].end).toEqual([100, 100]);
   });
 
   it("dragging one handle does not move the other corner (held side stays put)", () => {
-    // Two moves before release: the recompute must always build off the fixed
-    // press-time base, so the SE drag's final end is the release point and the
-    // anchor never drifts regardless of the intermediate path.
+    // The recompute builds off the press-time base, so the intermediate path
+    // can't make the anchor drift.
     const { sent } = renderOverlay({ pins: [boxPin()] });
     hoverBox();
     const se = screen.getByTestId("annot-resize-box-1-se");
@@ -966,15 +894,12 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
   });
 
   it("regression: a plain click on an own box's dot still opens its thread (handles revealed on hover)", () => {
-    // The anchor dot remains the thread target even though resize handles now
-    // share the box. A pure click on the dot toggles the thread open.
+    // The anchor dot stays the thread target with the handles revealed.
     renderOverlay({
       pins: [boxPin({ comments: [{ id: "c1", author: String(MY_ID), text: "in the box" }] })],
     });
-    // Handles can be revealed for this own box by hovering its shape…
     hoverBox();
     expect(screen.getByTestId("annot-resize-box-1-nw")).toBeTruthy();
-    // …and a plain click on the dot still opens the thread.
     const dot = screen.getByTestId("annot-pin-box-1");
     fireEvent.pointerDown(dot, { pointerId: 1, button: 0, clientX: 200, clientY: 200 });
     fireEvent.pointerUp(dot, { pointerId: 1, clientX: 200, clientY: 200 });
@@ -983,8 +908,6 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
   });
 
   it("regression: a plain drag on an own box's dot still pans (not a reshape)", () => {
-    // A plain (non-Shift) drag from the box's dot pans the view exactly like a
-    // point pin — it must not reshape the box or move it.
     const { applied, sent } = renderOverlay({ pins: [boxPin()] });
     const dot = screen.getByTestId("annot-pin-box-1");
     fireEvent.pointerDown(dot, { pointerId: 1, button: 0, clientX: 200, clientY: 200 });
@@ -996,13 +919,10 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
   });
 
   it("regression: a box still renders its outline (polygon) alongside the handles", () => {
-    // The resize affordance must not displace the box's existing rendering.
     const { sent } = renderOverlay({ pins: [boxPin()] });
-    // The box outline (a polygon) and its dot both still exist…
     expect(document.querySelector("polygon")).toBeTruthy();
     expect(screen.getByTestId("annot-pin-box-1")).toBeTruthy();
-    // …and the anchor dot's Shift+drag still moves the WHOLE box (a rigid move:
-    // no `end` in the emitted command — the #776 path, not a reshape).
+    // Shift+drag on the dot is a rigid whole-box translate: no `end`.
     const dot = screen.getByTestId("annot-pin-box-1");
     fireEvent.pointerDown(dot, { pointerId: 1, button: 0, shiftKey: true, clientX: 200, clientY: 200 });
     fireEvent.pointerMove(dot, { pointerId: 1, shiftKey: true, clientX: 300, clientY: 300 });
@@ -1015,24 +935,18 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
   });
 
   it("regression: a resize that releases OFF the box hides the handles after the linger (#789)", () => {
-    // The reviewer's bug: a captured handle drag fires no enter/leave on the box,
-    // so a NORMAL resize that drags outward and releases OUTSIDE the box left the
-    // handles stuck visible forever (defeating the anti-clutter goal). The fix
-    // re-arms the hysteresis hide on handle-up, so an off-box release schedules
-    // the handles to disappear. Fake only the linger timers so the rest of the
-    // overlay (RAF, etc.) is untouched.
+    // A captured handle drag fires no enter/leave on the box, so handle-up
+    // re-arms the hide; otherwise an off-box release leaves the handles stuck.
+    // Only the linger timers are faked so RAF is untouched.
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       renderOverlay({ pins: [boxPin()] });
-      // Hover to reveal the handles (no longer always-on), then confirm one is up.
       hoverBox();
       const se = screen.getByTestId("annot-resize-box-1-se");
       expect(se).toBeTruthy();
 
-      // Grab the SE corner and drag it OUTWARD past the box edge, taking longer
-      // than the hysteresis window mid-drag, then RELEASE group OUTSIDE the box.
-      // The box spans world (10,20)-(60,80) → screen (410,320)-(460,380); a
-      // release at client (700,590) → world (300,290) is far off the box.
+      // Drag outward and release at client (700,590), far off the box at
+      // screen (410,320)-(460,380).
       fireEvent.pointerDown(se, { pointerId: 1, button: 0, clientX: 460, clientY: 380 });
       fireEvent.pointerMove(se, { pointerId: 1, clientX: 600, clientY: 500 });
       // Mid-drag, past the linger: the in-flight guard must keep the handle alive.
@@ -1040,13 +954,11 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
         vi.advanceTimersByTime(400);
       });
       expect(screen.getByTestId("annot-resize-box-1-se")).toBeTruthy();
-      // Release OFF the box (a captured pointer fires no leave/enter on the box).
       fireEvent.pointerUp(se, { pointerId: 1, clientX: 700, clientY: 590 });
 
-      // Immediately after release the handles still linger (hysteresis re-armed)…
+      // The handles linger right after release...
       expect(screen.getByTestId("annot-resize-box-1-se")).toBeTruthy();
-      // …and once the linger window elapses they are GONE — not stuck visible.
-      // (HANDLE_HOVER_LINGER_MS is 300; advance comfortably past it.)
+      // ...and are gone once the linger elapses.
       act(() => {
         vi.advanceTimersByTime(LINGER_MS + 1);
       });
@@ -1059,11 +971,9 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
   });
 
   it("regression: a resize that releases back ON the box keeps the handles revealed (#789)", () => {
-    // The complement the fix must not break: re-arming the hide on handle-up must
-    // not hide the handles out from under a cursor that's still over the box. On a
-    // real on-box release the implicit capture-release fires pointerenter on the
-    // box/handle, cancelling the pending hide — simulated here by a pointerEnter
-    // after release. The handles must survive past the linger window.
+    // The re-armed hide must not fire under a cursor still over the box. A real
+    // on-box release fires pointerenter as capture is released, which cancels
+    // the pending hide.
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       renderOverlay({ pins: [boxPin()] });
@@ -1074,11 +984,8 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
       fireEvent.pointerDown(se, { pointerId: 1, button: 0, clientX: 460, clientY: 380 });
       fireEvent.pointerMove(se, { pointerId: 1, clientX: 470, clientY: 385 });
       fireEvent.pointerUp(se, { pointerId: 1, clientX: 470, clientY: 385 });
-      // The browser's capture-release fires enter on the element under the cursor;
-      // mirror it so revealHandles cancels the just-armed hide.
       fireEvent.pointerEnter(screen.getByTestId("annot-resize-box-1-se"));
 
-      // Past the linger the handles are STILL present (the on-box release kept them).
       act(() => {
         vi.advanceTimersByTime(LINGER_MS + 1);
       });
@@ -1092,22 +999,17 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
 });
 
 describe("AnnotationOverlay — off-context vs the view's Z/T/C (issue #779)", () => {
-  // A pin placed on slice 12, timepoint 3, channel 2. The standard view context
-  // here is { z: 3, t: 0, c: 0 } (the renderOverlay default), so this pin is
-  // off-context by default unless the view is navigated to (12, 3, 2).
+  // Placed at (12, 3, 2), so off-context against the default view (3, 0, 0).
   function elsewherePin(overrides: Partial<Annotation> = {}): Annotation {
     return ownPin({ id: "pin-here", z: 12, t: 3, c: 2, ...overrides });
   }
 
   it("a pin whose z/t/c all match the view is on-context (no off-context marker)", () => {
-    // The pin lives exactly where we're looking → today's look, no marker.
     renderOverlay({
       pins: [ownPin({ id: "pin-here", z: 5, t: 2, c: 1 })],
       viewContext: { z: 5, t: 2, c: 1 },
     });
-    // The marker itself renders…
     expect(screen.getByTestId("annot-pin-pin-here")).toBeTruthy();
-    // …but it carries NO off-context marker (this is the on-context contract).
     expect(screen.queryByTestId("annot-offcontext-pin-here")).toBeNull();
   });
 
@@ -1118,7 +1020,7 @@ describe("AnnotationOverlay — off-context vs the view's Z/T/C (issue #779)", (
       viewContext: { z: 4, t: 3, c: 2 },
     });
     const marker = screen.getByTestId("annot-offcontext-pin-here");
-    // The helptext names the PIN's own z/t/c in the exact contract form.
+    // The label names the pin's own z/t/c.
     expect(marker.textContent).toBe("slice 12 · t=3 · ch=2");
     // The dot still renders alongside the off-context marker.
     expect(screen.getByTestId("annot-pin-pin-here")).toBeTruthy();
@@ -1145,37 +1047,31 @@ describe("AnnotationOverlay — off-context vs the view's Z/T/C (issue #779)", (
   });
 
   it("navigating the view to the pin's Z/T/C returns it to on-context", () => {
-    // Start off-context, then navigate the view to the pin's exact slice → the
-    // off-context marker disappears (it's a pure function of the view).
     const { setViewContext } = renderOverlay({
       pins: [elsewherePin()],
       viewContext: { z: 3, t: 0, c: 0 },
     });
     expect(screen.getByTestId("annot-offcontext-pin-here")).toBeTruthy();
 
-    // Navigate to (12, 3, 2) — exactly where the pin lives.
     setViewContext({ z: 12, t: 3, c: 2 });
     expect(screen.queryByTestId("annot-offcontext-pin-here")).toBeNull();
-    // The marker is still present (only its off-context decoration went away).
     expect(screen.getByTestId("annot-pin-pin-here")).toBeTruthy();
   });
 
   it("navigating AWAY from a matching pin makes it off-context", () => {
-    // The reverse: on-context, then move the view off the pin's slice.
     const { setViewContext } = renderOverlay({
       pins: [ownPin({ id: "pin-here", z: 5, t: 2, c: 1 })],
       viewContext: { z: 5, t: 2, c: 1 },
     });
     expect(screen.queryByTestId("annot-offcontext-pin-here")).toBeNull();
 
-    // Step to the next slice → now off-context, helptext names the pin's slice.
     setViewContext({ z: 6, t: 2, c: 1 });
     const marker = screen.getByTestId("annot-offcontext-pin-here");
     expect(marker.textContent).toBe("slice 5 · t=2 · ch=1");
   });
 
   it("regression: an off-context pin's marker still renders and opens its thread on click", () => {
-    // Off-context is a look, not a lockout — the pin is still fully interactive.
+    // Off-context is a look, not a lockout.
     renderOverlay({
       pins: [
         ownPin({
@@ -1188,9 +1084,7 @@ describe("AnnotationOverlay — off-context vs the view's Z/T/C (issue #779)", (
       ],
       viewContext: { z: 4, t: 0, c: 0 },
     });
-    // It IS off-context…
     expect(screen.getByTestId("annot-offcontext-pin-here")).toBeTruthy();
-    // …and a plain click on its dot still opens the thread.
     const dot = screen.getByTestId("annot-pin-pin-here");
     fireEvent.pointerDown(dot, { pointerId: 1, button: 0, clientX: 200, clientY: 200 });
     fireEvent.pointerUp(dot, { pointerId: 1, clientX: 200, clientY: 200 });
@@ -1199,8 +1093,7 @@ describe("AnnotationOverlay — off-context vs the view's Z/T/C (issue #779)", (
   });
 
   it("a pre-slice-14 pin (no t/c) is on-context when the view is at its z and t=c=0", () => {
-    // An older pin carries no t/c → they read as 0. So at the view (z, 0, 0) it
-    // is on-context — older pins don't all spuriously show as off-context.
+    // Absent t/c read as 0.
     renderOverlay({
       pins: [{ id: "old", position: [10, 20], z: 8, author: String(MY_ID), kind: "point" }],
       viewContext: { z: 8, t: 0, c: 0 },
@@ -1209,7 +1102,6 @@ describe("AnnotationOverlay — off-context vs the view's Z/T/C (issue #779)", (
   });
 
   it("only the off-context pin among several carries the marker", () => {
-    // Mixed set: one on-context, one off — exactly one off-context marker.
     renderOverlay({
       pins: [
         ownPin({ id: "pin-on", z: 3, t: 0, c: 0 }),
@@ -1223,16 +1115,12 @@ describe("AnnotationOverlay — off-context vs the view's Z/T/C (issue #779)", (
 });
 
 describe("AnnotationOverlay — reflects re-anchored positions after a layout switch (issue #780)", () => {
-  // The re-anchoring itself happens in core (DocumentState::apply on
-  // SetActiveLayout); the overlay's job is only to RE-READ the authoritative pin
-  // set when notified. It re-reads in an effect keyed on `version`, so a layout
-  // switch must bump that version — for a peer the bridge already does, and for
-  // the switcher App's onLayoutChange now does too. These tests pin that the
-  // overlay shows the post-switch positions once `version` bumps, and does NOT
-  // before (so the bump is genuinely load-bearing).
+  // Core re-anchors pins on SetActiveLayout; the overlay only re-reads, keyed on
+  // `version`. These show the new positions appear once `version` bumps and not
+  // before, so the bump is load-bearing.
 
-  /** A scene whose authoritative `annotations()` output we can swap out, to
-   * stand in for core re-anchoring the pins on a layout switch. */
+  /** A scene whose `annotations()` output can be swapped, standing in for core
+   * re-anchoring the pins. */
   function makeReanchoringScene(initial: Annotation[]): {
     scene: WasmScene;
     setPins: (next: Annotation[]) => void;
@@ -1247,11 +1135,8 @@ describe("AnnotationOverlay — reflects re-anchored positions after a layout sw
     return { scene, setPins: (next) => { pins = next; } };
   }
 
-  // The overlay reprojects markers in a self-rescheduling RAF loop. To read the
-  // dot transform deterministically, install a CAPTURING stub before render so we
-  // hold every scheduled callback (including the one the mount effect schedules),
-  // then invoke the latest on demand via runFrame() instead of letting the loop
-  // run free. Restored after each test.
+  // Capture scheduled RAF callbacks so a test runs the live tick on demand
+  // instead of racing the free-running loop.
   let scheduled: FrameRequestCallback[] = [];
   let originalRaf: typeof globalThis.requestAnimationFrame;
   beforeEach(() => {
@@ -1265,8 +1150,7 @@ describe("AnnotationOverlay — reflects re-anchored positions after a layout sw
   afterEach(() => {
     globalThis.requestAnimationFrame = originalRaf;
   });
-  /** Run the most recently scheduled RAF tick (the overlay reschedules at the end
-   * of each tick, so the latest is the live one). */
+  /** Run the most recently scheduled RAF tick (the live one). */
   function runFrame() {
     const cb = scheduled[scheduled.length - 1];
     if (cb) cb(performance.now());
@@ -1297,29 +1181,23 @@ describe("AnnotationOverlay — reflects re-anchored positions after a layout sw
     });
     const { rerender } = render(<AnnotationOverlay {...props(0)} />);
 
-    // Pre-switch: the dot sits at world (10,20) → screen (410, 320).
     runFrame();
     expect(dotTransform("p")).toBe("translate(410px, 320px)");
 
-    // Core re-anchored the pin (e.g. its group moved by +[0,50]) → position now
-    // (10,70). A locally-initiated switch that did NOT bump version would leave
-    // the overlay stale: it still shows the old position.
+    // Core re-anchored the pin to (10,70). Without a version bump the overlay
+    // still shows the old position.
     setPins([{ ...before[0], position: [10, 70] }]);
     rerender(<AnnotationOverlay {...props(0)} />); // same version
     runFrame();
     expect(dotTransform("p")).toBe("translate(410px, 320px)");
 
-    // Bumping version (what App.onLayoutChange / the bridge now do) makes the
-    // overlay re-read the authoritative set → the dot moves to the re-anchored
-    // world (10,70) → screen (410, 370).
+    // Bumping version, as App.onLayoutChange and the bridge do, re-reads.
     rerender(<AnnotationOverlay {...props(1)} />);
     runFrame();
     expect(dotTransform("p")).toBe("translate(410px, 370px)");
   });
 
   it("reflects a pin on a non-moving group as unchanged after a version bump", () => {
-    // A pin whose anchor group didn't move: core leaves its position alone, so the
-    // overlay (after re-reading on the bump) shows it in exactly the same place.
     const pins: Annotation[] = [
       { id: "static", position: [100, 5], z: 0, author: String(MY_ID), kind: "point", comments: [] },
     ];
@@ -1348,9 +1226,8 @@ describe("AnnotationOverlay — reflects re-anchored positions after a layout sw
 });
 
 describe("AnnotationOverlay — passive pin-select stays gentle; Go to author's view (slice 2)", () => {
-  // A pin carrying the author's captured view. The captured camera/contrast/z
-  // here must NEVER be applied by a passive canvas pin-select — only the explicit
-  // "Go to author's view" affordance (host-driven) restores it.
+  // A passive pin-select must never apply this captured view; only the explicit
+  // "Go to author's view" restores it.
   const VIEW = {
     v: 1,
     datasets: [],
@@ -1400,12 +1277,10 @@ describe("AnnotationOverlay — passive pin-select stays gentle; Go to author's 
   it("a plain click on a pin opens its thread but does NOT restore the author's camera/contrast/z (gentle)", () => {
     const { applied } = renderWithGoTo(pinWithView());
 
-    // Passive canvas pin-select: a plain click on the dot. This opens the thread…
     fireEvent.click(screen.getByTestId("annot-pin-pin-v"));
     expect(screen.getByTestId("annot-thread-pin-v")).toBeTruthy();
 
-    // …and emits NO full-restore commands. The overlay's own click handler must
-    // never yank the camera/contrast/zoom/slice — that is the explicit tier's job.
+    // No restore commands from a passive click.
     const types = applied.map((c) => c.type);
     expect(types).not.toContain("set_contrast");
     expect(types).not.toContain("set_gamma");

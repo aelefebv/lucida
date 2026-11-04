@@ -116,17 +116,14 @@ async fn handle_client_inner(
     // peer dataset identities.
     let timings = Arc::new(TimingBuffer::new());
 
-    // Presentational identity for this peer's cursor (#540), authored from
-    // the connection's authenticated principal. The non-workspace `/ws`
-    // path has no principal, so anonymous peers join with `None` and render
-    // via the numeric-id fallback. Sourced server-side (never client-sent)
-    // so it can't be spoofed and is only shown to co-present peers.
+    // Presentational identity for this peer's cursor, authored server-side
+    // from the authenticated principal so it cannot be spoofed. The
+    // non-workspace `/ws` path has no principal, so those peers join with
+    // `None` and render by numeric id.
     //
-    // Privacy: the raw email is NOT broadcast — collaborator emails are
-    // owner-only. `from_principal_parts` computes a single-grapheme
-    // `initial` from the display name (or email local-part when blank)
-    // server-side, so only the non-identifying name/avatar/initial cross
-    // the wire to co-present (possibly non-owner) peers.
+    // The raw email is never broadcast, since collaborator emails are
+    // owner-only. Only the name, avatar, and a single-grapheme initial
+    // cross the wire.
     let identity = workspace.as_ref().map(|ctx| {
         PeerIdentity::from_principal_parts(
             ctx.principal.display_name.clone(),
@@ -231,24 +228,15 @@ async fn handle_client_inner(
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
-                            // This client's broadcast receiver overflowed and
-                            // dropped `n` messages — among them possibly
-                            // sequenced CommandBroadcasts, so its document has
-                            // silently diverged. Push a fresh snapshot to
-                            // repair it.
+                            // This receiver overflowed and dropped `n`
+                            // messages, possibly sequenced CommandBroadcasts,
+                            // so push a fresh snapshot to repair the document.
                             //
-                            // Ordering discipline (mirrors the join path's
-                            // subscribe-under-lock): `recv()` has ALREADY
-                            // repositioned this receiver past the loss, so
-                            // every message this client will never see was
-                            // stamped — and applied to the session — before
-                            // this point. Taking the session lock now yields a
-                            // snapshot whose `seq` is >= every lost message's
-                            // seq: no hole can open between the snapshot and
-                            // the resume position. Retained items forwarded
-                            // after the snapshot may carry seq <= the
-                            // snapshot's; the client's seq discipline drops
-                            // those instead of double-applying.
+                            // `recv()` has already moved past the loss, so
+                            // every lost message was applied before this
+                            // point and a snapshot taken under the session
+                            // lock has `seq` >= all of them. The client's seq
+                            // check drops retained items at or below it.
                             tracing::warn!(
                                 client_id = %id,
                                 skipped = n,
@@ -319,17 +307,11 @@ async fn handle_client_inner(
                                     );
                                     continue;
                                 }
-                                // Workspace command authorization lives in
-                                // WorkspaceManager, not here: a dataset rename
-                                // has its own authorize + validate +
-                                // exists-check + DB-sync path
-                                // (`rename_dataset`); every other document
-                                // command goes through
-                                // `apply_document_command` (editor gate +
-                                // apply + persist). This loop only translates
-                                // the manager's verdict to the wire —
-                                // broadcast the applied command so peers
-                                // apply it live, or drop it with a log line.
+                                // Authorization lives in WorkspaceManager:
+                                // `rename_dataset` for a dataset rename,
+                                // `apply_document_command` for everything
+                                // else. This loop only broadcasts the applied
+                                // command or drops it with a log line.
                                 if let DocumentCommand::RenameDataset { id: ds_id, name } = &command
                                 {
                                     match ctx
@@ -679,7 +661,7 @@ async fn handle_client_inner(
                             // The relay hands this connection the ring before
                             // registering it, both under the session lock, so
                             // the recent past arrives ahead of the live items
-                            // with no gap and no repeat (ADR 0051 as amended).
+                            // with no gap and no repeat (ADR 0051).
                             let sender = unicast_routes.lock().await.get(&id).cloned();
                             let Some(sender) = sender else { continue };
                             let (replayed, subscribers) = {
@@ -704,8 +686,7 @@ async fn handle_client_inner(
                         ClientMessage::SendReport { request_id, bundle } => {
                             // Somebody pressed **Send report**. Nothing else
                             // reaches this arm: no run closing, no schedule,
-                            // and no other message produces one (ADR 0050 as
-                            // amended).
+                            // and no other message produces one.
                             let Some(ctx) = workspace.as_ref() else {
                                 send_report_failed(
                                     id,
@@ -772,7 +753,7 @@ async fn handle_client_inner(
                             // The lookup takes the shared session mutex, so
                             // every chunk request from every client in the
                             // workspace serialises here. It looks free and is
-                            // not, which is why it earns a slot (ADR 0050).
+                            // not, which is why it earns a slot.
                             let dispatch = {
                                 let sess = session.lock().await;
                                 sess.server_bindings.get(&dataset_id).map(|b| {
@@ -1261,9 +1242,7 @@ fn cache_used_percent(current_bytes: u64, max_bytes: Option<u64>) -> Option<u8> 
 /// The worse of two component statuses.
 ///
 /// Symmetric on purpose, so folding several components together cannot lose
-/// one: the earlier form only looked for `Degraded` in its right-hand
-/// argument, which meant a degraded source cache folded against a healthy
-/// generated-coarse reported the dataset healthy.
+/// a `Degraded` on either side.
 fn combine_health(a: DatasetHealthStatus, b: DatasetHealthStatus) -> DatasetHealthStatus {
     if a == DatasetHealthStatus::Unavailable || b == DatasetHealthStatus::Unavailable {
         DatasetHealthStatus::Unavailable
@@ -1455,7 +1434,7 @@ async fn serve_chunk_from_store(
     mut probe: RequestProbe,
 ) {
     // Charged to the requesting client, so one client's collection-sized
-    // backlog cannot delay another client's first chunk (#901), and labelled
+    // backlog cannot delay another client's first chunk, and labelled
     // with the request, so a wait behind the source-read cap is attributable
     // to it rather than only to a client (ADR 0048).
     let read = read_chunk(
@@ -2088,9 +2067,7 @@ mod tests {
     }
 
     /// Health is a worst-of fold, and no component may be lost to argument
-    /// order. The earlier form only looked for `Degraded` on the right, so
-    /// `combine(Degraded, Healthy)` wrongly answered `Healthy` — which
-    /// silently swallowed a degraded source cache.
+    /// order: `combine(Degraded, Healthy)` must answer `Degraded`.
     #[test]
     fn combine_health_is_symmetric_worst_of() {
         use DatasetHealthStatus::{Degraded, Healthy, Unavailable};
@@ -2167,7 +2144,7 @@ mod tests {
 
     #[test]
     fn dataset_retry_store_failure_maps_to_retryable_lookup() {
-        // A store failure — INCLUDING the editor gate's role lookup
+        // A store failure — including the editor gate's role lookup
         // erroring — is infrastructure trouble, not an authorization
         // verdict: it must surface as the retryable lookup diagnostic.
         let diag = dataset_retry_failure_diagnostic(WorkspaceError::Store(
@@ -2694,8 +2671,7 @@ mod tests {
         }
     }
 
-    /// #901's acceptance criterion, guarded at the seam that decides it: the
-    /// chunk handler must charge each read to its own client. A client opening
+    /// The chunk handler must charge each read to its own client. A client opening
     /// a large collection queues thousands of reads at once, and a second
     /// client arriving mid-open must not wait behind that whole backlog.
     ///

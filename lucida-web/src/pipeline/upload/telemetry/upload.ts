@@ -2,12 +2,7 @@
  * Upload-phase telemetry. Owns rolling 1s ring buffers (events +
  * per-tick aggregates), a bounded size sketch, cumulative counters, and
  * two sustained-anomaly detectors. `publish` aggregates, derives
- * `UploadRollingStats` and fires anomaly logs.
- *
- * The two window shapes below used to live in `debug/debugStats.ts`
- * beside the sink a debug panel polled. Both are gone (ADR 0049's gate,
- * then ADR 0052's teardown) and the shapes came here, to the module that
- * derives them; their remaining consumer is the `orch` log category.
+ * `UploadRollingStats` and fires anomaly logs to the `orch` log category.
  */
 
 import { debugLog } from "../../../debug/logging.ts";
@@ -38,10 +33,9 @@ export interface UploadTickStats {
   uploadedProxies: number;
   /** Bytes actually posted (from delivery `data.byteLength`). */
   bytesUploaded: number;
-  /** Upload byte budget passed in by the caller. */
   bytesBudget: number;
   /**
-   * Upload stopped early because remaining budget hit zero. NOT a
+   * Upload stopped early because remaining budget hit zero. Not a
    * function of bytesUploaded reaching bytesBudget: a single chunk
    * larger than remaining will still be uploaded and trigger this.
    */

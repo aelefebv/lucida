@@ -1,18 +1,7 @@
 /**
- * Unit tests for `buildDisplayStateByChannel` — pure-function builder
- * for the per-channel display state baked into the cold-state message.
- *
- * Contract under test:
- *   - For each visible channel, a `ColdStateDisplayState` is produced
- *     keyed by the channel index.
- *   - Per-channel overrides (`channel_settings[ch]`) win over dataset-level
- *     `contrast_min` / `contrast_max` / `gamma`; `colormap` falls back to
- *     `"gray"`.
- *   - `opacity` is dataset-level only (no per-channel override).
- *   - Missing `dsSettings` → defaults `contrastMin=0`, `contrastMax=65535`,
- *     `gamma=1`, `opacity=1`, `colormapName="gray"`.
- *   - `channelMask = 1 << (ch & 31)`.
- *   - Empty `visibleChannels` → empty record.
+ * Unit tests for `buildDisplayStateByChannel`, the per-channel display state
+ * baked into the cold-state message. Per-channel overrides win over
+ * dataset-level settings; `opacity` is dataset-level only.
  */
 import { describe, it, expect } from "vitest";
 import type { DatasetSettings, ChannelSettingsJS } from "../../../tickCommon.ts";

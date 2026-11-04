@@ -3,13 +3,10 @@ import { useEffect, useRef } from "react";
 const INPUT_TAGS = new Set(["INPUT", "TEXTAREA", "SELECT"]);
 
 /**
- * Tracks which keys are currently pressed on a container element.
+ * Tracks which keys are pressed on a container element. Returns a stable Set,
+ * updated in place, so RAF loops can read it without re-rendering.
  *
- * Returns a stable Set ref (updated in-place) suitable for reading in RAF loops
- * without causing React re-renders.
- *
- * @param containerRef Ref to the DOM element that should receive key events
- * @param boundKeys    Set of key values for which keydown should be preventDefault'd
+ * @param boundKeys Keys whose keydown is preventDefault'd.
  */
 export function useKeyState(
   containerRef: React.RefObject<HTMLElement | null>,
@@ -57,9 +54,7 @@ export function useKeyState(
     };
   }, [containerRef, boundKeys]);
 
-  // The hook intentionally returns a stable Set that callers (e.g.
-  // VolumeViewer's RAF-driven fly-camera input loop) read each frame
-  // without triggering a re-render — the JSDoc above is the contract.
+  // Returning the live Set is the contract: RAF loops read it each frame.
   // eslint-disable-next-line react-hooks/refs
   return pressedRef.current;
 }

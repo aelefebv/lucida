@@ -1,16 +1,10 @@
 //! Receiving a **Send report**: what the server checks, what it keeps,
 //! and what it refuses.
 //!
-//! Everything here is about the envelope. The server reads the bundle's
-//! `format` to know it is holding a bundle, reads its `header` out so a
-//! listing needs no parse, measures it, and stores the text unchanged.
-//! It derives nothing else and it writes no row of its own (ADR-0050 as
-//! amended). Whether the run inside the bundle is any good is a question
-//! for whoever reads it.
-//!
-//! A refusal keeps nothing. The sender is told why in a sentence the
-//! monitor shows under the action, so the reasons here are written for
-//! the person who pressed it.
+//! Only the envelope is checked: the bundle's `format`, its `header` for
+//! listings, and its size. The text is stored unchanged and nothing else
+//! is derived. A refusal keeps nothing, and its reason is written for the
+//! person who pressed the button.
 
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
