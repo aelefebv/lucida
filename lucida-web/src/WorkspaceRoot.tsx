@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import App from "./App.tsx";
 import { WatchStreamBanner } from "./monitor/WatchToggle.tsx";
 import { WorkspaceDashboard } from "./WorkspaceDashboard.tsx";
@@ -22,6 +22,19 @@ function parseWorkspaceId(path: string): string | null {
   } catch {
     return match[1];
   }
+}
+
+// The open link: `/open?url=<dataset URL>` creates a workspace around the
+// named dataset(s) and opens them.
+function isOpenLinkPath(path: string): boolean {
+  return /^\/open\/?$/.test(path);
+}
+
+function openLinkUrls(search: string): string[] {
+  return new URLSearchParams(search)
+    .getAll("url")
+    .map((u) => u.trim())
+    .filter((u) => u.length > 0);
 }
 
 export function WorkspaceRoot() {
@@ -51,7 +64,7 @@ export function WorkspaceRoot() {
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
 
-  const navigate = useCallback((nextPath: string) => {
+  const navigate = useCallback((nextPath: string, replace = false) => {
     // Clear a stale seed when navigating ANYWHERE other than straight into the
     // workspace it was created for. `openWorkspaceById` sets the seed and then
     // calls navigate to that same `/w/<id>` (matched here, so the seed
@@ -63,18 +76,22 @@ export function WorkspaceRoot() {
         ? seed
         : null,
     );
-    window.history.pushState({}, "", nextPath);
+    if (replace) {
+      window.history.replaceState({}, "", nextPath);
+    } else {
+      window.history.pushState({}, "", nextPath);
+    }
     setPath(nextPath);
   }, []);
 
   const openWorkspaceById = useCallback(
-    (id: string, datasetUrls?: readonly string[]) => {
+    (id: string, datasetUrls?: readonly string[], replace = false) => {
       if (datasetUrls && datasetUrls.length > 0) {
         // Set the seed BEFORE navigating; navigate keeps it because the
         // destination matches this workspace's route.
         setPendingSeed({ workspaceId: id, datasetUrls });
       }
-      navigate(`/w/${encodeURIComponent(id)}`);
+      navigate(`/w/${encodeURIComponent(id)}`, replace);
     },
     [navigate],
   );
@@ -105,7 +122,13 @@ export function WorkspaceRoot() {
 
   return (
     <>
-      {workspaceId ? (
+      {isOpenLinkPath(path) ? (
+        <OpenLinkRoute
+          datasetUrls={openLinkUrls(window.location.search)}
+          onWorkspaceCreated={(id, urls) => openWorkspaceById(id, urls, true)}
+          onBackToDashboard={() => navigate("/", true)}
+        />
+      ) : workspaceId ? (
         <WorkspaceViewerRoute
           key={workspaceId}
           workspaceId={workspaceId}
@@ -121,6 +144,57 @@ export function WorkspaceRoot() {
       <WatchStreamBanner />
     </>
   );
+}
+
+interface OpenLinkRouteProps {
+  datasetUrls: readonly string[];
+  onWorkspaceCreated: (id: string, datasetUrls: readonly string[]) => void;
+  onBackToDashboard: () => void;
+}
+
+// Every exit replaces the history entry, so Back can't rerun the link.
+function OpenLinkRoute({
+  datasetUrls,
+  onWorkspaceCreated,
+  onBackToDashboard,
+}: OpenLinkRouteProps) {
+  const [error, setError] = useState<string | null>(null);
+  // StrictMode runs this effect twice; the second run reuses the first create.
+  const createRef = useRef<Promise<WorkspaceRecord> | null>(null);
+  useEffect(() => {
+    if (datasetUrls.length === 0) {
+      onBackToDashboard();
+      return;
+    }
+    let cancelled = false;
+    createRef.current ??= createWorkspaceFromDatasets(datasetUrls);
+    createRef.current.then(
+      (workspace) => {
+        if (!cancelled) onWorkspaceCreated(workspace.id, datasetUrls);
+      },
+      (e: unknown) => {
+        if (cancelled) return;
+        console.warn("[WorkspaceRoot] open link: create workspace failed", e);
+        setError(e instanceof Error ? e.message : String(e));
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  if (error) {
+    return (
+      <div className="workspace-route-message">
+        <button onClick={onBackToDashboard}>Workspaces</button>
+        <p data-testid="open-link-error">
+          Couldn&rsquo;t create the workspace: {error}
+        </p>
+      </div>
+    );
+  }
+  return <div className="workspace-route-message">Opening…</div>;
 }
 
 interface WorkspaceViewerRouteProps {

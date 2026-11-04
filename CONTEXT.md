@@ -890,6 +890,11 @@ in the recording, see above) and not a saved-view *capture* (which is the act of
 building a `SavedView`).
 _Avoid_: render mode, screenshot page, headless mode
 
+**Open link**:
+A link to `/open?url=<dataset URL>` that creates a new workspace around the
+datasets it names and opens them.
+_Avoid_: deep link (annotation and saved-view links are deep links too), share link
+
 **Trace driver**:
 The `lucida trace` command: it launches its own headless browser, opens a
 dataset, waits for the run to become quiescent, runs the script of steps it
