@@ -30,9 +30,9 @@ use crate::source_limiter::{ReaderId, RequestLabel, SourceReadLimiter};
 /// Default cap on concurrent backend source reads when no operator override
 /// is supplied.
 ///
-/// Measured, not chosen: `docs/research/source-read-concurrency.md` sweeps this
-/// value against the real remote collection from #899 (up to 1,200 reads per level,
-/// levels interleaved across passes). Completed reads per second, pooled:
+/// Measured, not chosen (ADR 0053): a sweep of this value against the real
+/// remote collection from #899 (up to 1,200 reads per level, levels
+/// interleaved across passes). Completed reads per second, pooled:
 ///
 /// ```text
 ///    8 -> 35.7      24 -> 57.1      96 -> 43.7
@@ -630,9 +630,9 @@ impl Flights {
 
         // Never across a gap: the bytes between would be fetched and dropped,
         // since the cache has no key to file them under, and on a shard they
-        // are whole inner chunks (docs/research/merged-range-reads.md has the
-        // cost). A contiguous group is one fetch under any gap object_store's
-        // multi-range read merges on, so one permit stays one request.
+        // are whole inner chunks (ADR 0062 has the cost). A contiguous group
+        // is one fetch under any gap object_store's multi-range read merges
+        // on, so one permit stays one request.
         let touches = |end: u64, next: &QueuedRange| next.range().start <= end;
         let mut first = 0;
         let mut end = queue[0].range().end;

@@ -16,7 +16,7 @@
  *   itself. It emitted three — row birth, admission, wire start — until #949,
  *   which put the tick over a ceiling derived from one third of its events.
  *   Keeping {@link BURST_CALLS_PER_CHUNK} at 1 is what keeps the two counting
- *   the same thing; `docs/perf/recorder-cost/README.md` carries the history.
+ *   the same thing.
  * - **Flat in events-per-tick, not merely small at one event.** This is the
  *   gate most worth having: `UploadTelemetry.publish` in this repo went from
  *   1.4 µs to 1.13 ms between 1 and 128 events per tick because it pruned with
@@ -54,8 +54,7 @@
  * The fourth gate ADR 0049 requires — an A/B frame-throughput comparison of
  * real sink against no-op sink over a warm re-open at devicePixelRatio 2 —
  * needs a GPU, a server and a real fixture, none of which a CI runner has. It
- * lives as a harness at `docs/perf/recorder-cost/`, alongside the net
- * non-regression ledger this file's gates feed.
+ * lives as a harness at `docs/perf/recorder-cost/`, with its last result.
  */
 
 import process from "node:process";
