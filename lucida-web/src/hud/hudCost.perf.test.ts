@@ -29,9 +29,13 @@
  * ## What this cannot measure
  *
  * The draw is issued against a recording context, so what is timed is the
- * layout and the calls, not the rasterizer. The pixels' cost on a real
- * adapter is the A/B at device pixel ratio 2 that `docs/perf/hud-cost/`
- * describes, which CI cannot run.
+ * layout and the calls, not the rasterizer. The pixels' cost needs an A/B on
+ * a hardware adapter, which CI does not have. Open a large three-dimensional
+ * fixture at device pixel ratio 2 and wait for quiescence. Orbit for ten
+ * seconds with the HUD hidden and note the rendered frame count. Show the HUD
+ * with the `h` key and repeat the same orbit. The HUD draws four times a
+ * second against up to sixty frames, so the two counts should agree within
+ * run-to-run noise. A larger gap is a finding.
  */
 
 import { describe, expect, it } from "vitest";

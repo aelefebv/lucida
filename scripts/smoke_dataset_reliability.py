@@ -17,7 +17,6 @@ from typing import Any
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_FIXTURE_ROOT = Path("/Users/austin/local_data/lucida_test_zarrs")
 EXPECTED_OPEN_STAGES = {
     "request_received",
     "authorization",
@@ -205,7 +204,7 @@ def import_python_client() -> tuple[Any, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--server", default=os.environ.get("LUCIDA_SMOKE_SERVER", "http://127.0.0.1:9876"))
-    parser.add_argument("--fixtures-root", default=os.environ.get("LUCIDA_FIXTURES_ROOT", str(DEFAULT_FIXTURE_ROOT)))
+    parser.add_argument("--fixtures-root", default=os.environ.get("LUCIDA_FIXTURES_ROOT"))
     parser.add_argument("--workspace", default=f"lucida-dataset-reliability-{time.strftime('%Y%m%d-%H%M%S')}")
     parser.add_argument("--output-dir")
     parser.add_argument("--config-path")
@@ -213,6 +212,8 @@ def main() -> int:
     parser.add_argument("--cli", default=os.environ.get("LUCIDA_SMOKE_CLI", "cargo run --quiet -p lucida-cli --"))
     parser.add_argument("--skip-python", action="store_true")
     args = parser.parse_args()
+    if not args.fixtures_root:
+        raise SystemExit("Set --fixtures-root or LUCIDA_FIXTURES_ROOT to the server-visible directory holding the fixtures.")
 
     fixtures_root = Path(args.fixtures_root)
     output_dir = Path(args.output_dir or tempfile.mkdtemp(prefix="lucida-dataset-reliability."))
