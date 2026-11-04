@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0](https://github.com/aelefebv/lucida/compare/v0.16.0...v0.17.0) (2026-11-04)
+
+
+### Features
+
+* **workspace:** open a dataset in a new workspace from an /open link ([#1108](https://github.com/aelefebv/lucida/issues/1108)) ([64d3e0b](https://github.com/aelefebv/lucida/commit/64d3e0bc7bb541090c80230086753af715c7f070)), closes [#1107](https://github.com/aelefebv/lucida/issues/1107)
+
 ## [0.16.0](https://github.com/aelefebv/lucida/compare/v0.15.0...v0.16.0) (2026-09-11)
 
 
