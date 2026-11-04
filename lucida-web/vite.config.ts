@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { readFileSync } from 'node:fs'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
@@ -22,6 +23,14 @@ export default defineConfig({
   },
   optimizeDeps: {
     exclude: ['lucida-core'],
+  },
+  test: {
+    // Node 25 turned on a built-in `localStorage` global, and without
+    // `--localstorage-file` it reads as undefined. It shadows happy-dom's
+    // Storage, so every test that touches storage fails on Node 25 and later,
+    // which includes CI since `lts/*` became Node 26. Turn Node's off in the
+    // test workers.
+    execArgv: ['--no-experimental-webstorage'],
   },
   server: {
     fs: {
