@@ -280,6 +280,11 @@ explore`, and the trace driver load headless. It hides all UI and writes no user
 state (`lucida-web/src/captureSurface.ts`).
 _Avoid_: render mode (`RenderMode` is a volume display setting), run
 
+**Open link**:
+A link to `/open?url=<dataset URL>` that creates a new workspace around the
+datasets it names and opens them.
+_Avoid_: deep link (annotation and saved-view links are deep links too), share link
+
 **Trace driver**:
 The `lucida trace` command: it launches a headless browser, opens a dataset,
 waits for quiescence, runs an optional script of steps, and writes a run file.

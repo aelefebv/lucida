@@ -16,8 +16,8 @@
 //!   in a run, so nothing is served from a GCS edge cache warmed by the sweep
 //!   itself.
 //! * **Levels are interleaved across passes, not run back to back.** Remote
-//!   latency drifts by ~2x between sessions (see `remote-rates.md` §0), which
-//!   is larger than the effect being measured. Each pass visits every level in
+//!   latency drifts by ~2x between sessions (measured in #899), which is
+//!   larger than the effect being measured. Each pass visits every level in
 //!   a rotated order, so drift hits all levels roughly equally and the
 //!   per-level medians are taken across passes.
 //!
@@ -105,11 +105,11 @@ async fn main() {
     let mut levels: Vec<usize> = vec![1, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128];
     let mut per_cell: usize = 120;
     let mut passes: usize = 4;
-    // Default size band: the interactive read profile measured in
-    // `remote-rates.md` §3 is p50 326 KiB per source read. Base-level chunks in
-    // the same bucket are ~5 MB and would turn a concurrency sweep into a
-    // bandwidth test, so the band keeps the sample on the reads whose queueing
-    // the permit count actually governs.
+    // Default size band: the interactive read profile measured in #899 is
+    // p50 326 KiB per source read. Base-level chunks in the same bucket are
+    // ~5 MB and would turn a concurrency sweep into a bandwidth test, so the
+    // band keeps the sample on the reads whose queueing the permit count
+    // actually governs.
     let mut min_bytes: usize = 64 * 1024;
     let mut max_bytes: usize = 1024 * 1024;
     while let Some(flag) = args.next() {

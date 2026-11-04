@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
 
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   act,
@@ -168,25 +169,25 @@ describe("WorkspaceRoot — denied/not-found deep-link UX (slice 3, never-leak)"
   });
 });
 
+function record(overrides: Partial<WorkspaceRecord> = {}): WorkspaceRecord {
+  return {
+    id: "ws-created",
+    name: "sample.ome.zarr",
+    role: "owner",
+    created_by: "me@example.com",
+    created_at: "2026-06-23T00:00:00Z",
+    updated_at: "2026-06-23T00:00:00Z",
+    archived_at: null,
+    seq: 0,
+    default_saved_view_id: null,
+    last_opened_at: null,
+    pinned_at: null,
+    ...overrides,
+  };
+}
+
 describe("WorkspaceRoot — create workspace from dataset(s) (#697)", () => {
   const createFromDatasetsMock = vi.mocked(createWorkspaceFromDatasets);
-
-  function record(overrides: Partial<WorkspaceRecord> = {}): WorkspaceRecord {
-    return {
-      id: "ws-created",
-      name: "sample.ome.zarr",
-      role: "owner",
-      created_by: "me@example.com",
-      created_at: "2026-06-23T00:00:00Z",
-      updated_at: "2026-06-23T00:00:00Z",
-      archived_at: null,
-      seq: 0,
-      default_saved_view_id: null,
-      last_opened_at: null,
-      pinned_at: null,
-      ...overrides,
-    };
-  }
 
   beforeEach(() => {
     createFromDatasetsMock.mockReset();
@@ -323,5 +324,126 @@ describe("WorkspaceRoot — create workspace from dataset(s) (#697)", () => {
     await screen.findByTestId("workspace-create-error");
     fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
     expect(screen.queryByTestId("workspace-create-error")).toBeNull();
+  });
+});
+
+describe("WorkspaceRoot — open link (/open?url=…)", () => {
+  const createFromDatasetsMock = vi.mocked(createWorkspaceFromDatasets);
+  const linkedUrl = "gs://bucket/sample.ome.zarr";
+
+  function openLink(...urls: string[]): string {
+    const query = urls.map((u) => `url=${encodeURIComponent(u)}`).join("&");
+    return query ? `/open?${query}` : "/open";
+  }
+
+  beforeEach(() => {
+    createFromDatasetsMock.mockReset();
+    lastAppProps.current = null;
+    seedRenders.length = 0;
+  });
+
+  it("creates a workspace from the url and opens the viewer with it as the seed", async () => {
+    window.history.replaceState({}, "", openLink(linkedUrl));
+    createFromDatasetsMock.mockResolvedValue(record({ id: "ws-linked" }));
+    openWorkspaceMock.mockResolvedValue(record({ id: "ws-linked" }));
+
+    render(<WorkspaceRoot />);
+
+    await waitFor(() => {
+      expect(lastAppProps.current?.workspaceId).toBe("ws-linked");
+      expect(lastAppProps.current?.initialDatasetUrls).toEqual([linkedUrl]);
+    });
+    expect(createFromDatasetsMock).toHaveBeenCalledTimes(1);
+    expect(createFromDatasetsMock).toHaveBeenCalledWith([linkedUrl]);
+  });
+
+  it("replaces the /open history entry, so Back can't land on it and create another workspace", async () => {
+    window.history.replaceState({}, "", openLink(linkedUrl));
+    const entriesBefore = window.history.length;
+    createFromDatasetsMock.mockResolvedValue(record({ id: "ws-linked" }));
+    openWorkspaceMock.mockResolvedValue(record({ id: "ws-linked" }));
+
+    render(<WorkspaceRoot />);
+
+    await waitFor(() => {
+      expect(lastAppProps.current?.workspaceId).toBe("ws-linked");
+    });
+    expect(window.location.pathname).toBe("/w/ws-linked");
+    expect(window.location.search).toBe("");
+    expect(window.history.length).toBe(entriesBefore);
+  });
+
+  it("opens every url parameter, in order, in one workspace, dropping blank ones", async () => {
+    window.history.replaceState(
+      {},
+      "",
+      openLink("gs://bucket/a.zarr", "  ", " /data/b.zarr "),
+    );
+    createFromDatasetsMock.mockResolvedValue(record({ id: "ws-linked" }));
+    openWorkspaceMock.mockResolvedValue(record({ id: "ws-linked" }));
+
+    render(<WorkspaceRoot />);
+
+    await waitFor(() => {
+      expect(lastAppProps.current?.initialDatasetUrls).toEqual([
+        "gs://bucket/a.zarr",
+        "/data/b.zarr",
+      ]);
+    });
+    expect(createFromDatasetsMock).toHaveBeenCalledTimes(1);
+    expect(createFromDatasetsMock).toHaveBeenCalledWith([
+      "gs://bucket/a.zarr",
+      "/data/b.zarr",
+    ]);
+  });
+
+  it("creates the workspace once under StrictMode's double-run effects", async () => {
+    window.history.replaceState({}, "", openLink(linkedUrl));
+    createFromDatasetsMock.mockResolvedValue(record({ id: "ws-linked" }));
+    openWorkspaceMock.mockResolvedValue(record({ id: "ws-linked" }));
+
+    render(
+      <StrictMode>
+        <WorkspaceRoot />
+      </StrictMode>,
+    );
+
+    await waitFor(() => {
+      expect(lastAppProps.current?.workspaceId).toBe("ws-linked");
+      expect(lastAppProps.current?.initialDatasetUrls).toEqual([linkedUrl]);
+    });
+    expect(createFromDatasetsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a failed create and offers the way back to the dashboard", async () => {
+    window.history.replaceState({}, "", openLink(linkedUrl));
+    const entriesBefore = window.history.length;
+    createFromDatasetsMock.mockRejectedValue(
+      new Error("workspace quota exceeded"),
+    );
+
+    render(<WorkspaceRoot />);
+
+    const errEl = await screen.findByTestId("open-link-error");
+    expect(errEl.textContent).toContain("workspace quota exceeded");
+    expect(screen.queryByTestId("app-mounted")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Workspaces" }));
+    await screen.findByTestId("dashboard-mounted");
+    expect(window.location.pathname).toBe("/");
+    expect(window.history.length).toBe(entriesBefore);
+  });
+
+  it("goes to the dashboard when the link names no dataset", async () => {
+    window.history.replaceState({}, "", openLink("   "));
+    const entriesBefore = window.history.length;
+
+    render(<WorkspaceRoot />);
+
+    await screen.findByTestId("dashboard-mounted");
+    expect(createFromDatasetsMock).not.toHaveBeenCalled();
+    expect(window.location.pathname).toBe("/");
+    expect(window.location.search).toBe("");
+    expect(window.history.length).toBe(entriesBefore);
   });
 });

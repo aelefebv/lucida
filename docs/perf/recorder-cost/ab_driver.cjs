@@ -5,7 +5,7 @@
 // rendered frames over a fixed ten-second window on the SECOND load — the warm
 // re-open, which is the shape #888 measured (1,148 frames in ten seconds,
 // debug panel open against debug panel closed). One arm per bundle: the tree's
-// real sink, and the same tree with `noop-sink.patch` applied.
+// real sink, and the same tree with `noopSinkFactory` in the recorder singleton.
 //
 // Frames come from `window.__lucidaCaptureReady.frameCount`, the counter the
 // product already keeps for capture readiness — nothing is added to the page
@@ -52,7 +52,7 @@ function readyProbe() {
 }
 const frames = () => Number((window.__lucidaCaptureReady || {}).frameCount || 0);
 // Present in both arms: the seam is unconditional (ADR 0051). Its absence in
-// the no-op arm would mean the patch removed more than the sink.
+// the no-op arm would mean the edit removed more than the sink.
 const seam = () => (window.lucidaTrace ? window.lucidaTrace.schemaVersion : null);
 
 // Keep the pipeline working for the whole window rather than measuring an
