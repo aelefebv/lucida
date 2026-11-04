@@ -1365,7 +1365,7 @@ mod annotation_view_tests {
     //! pin is byte-identical to a pre-slice pin), the command carrying the
     //! view through to the stored pin, and the embedded view being in
     //! workspace-dataset-id form (no source URLs). They ship as permanent
-    //! regression tests; see [[gotchas/scene-document-state-json-compat]].
+    //! regression tests.
 
     use super::*;
     use crate::saved_view::SavedView;

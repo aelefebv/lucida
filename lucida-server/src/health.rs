@@ -29,7 +29,6 @@
 //! does not present a session cookie, and probes timing out due to a
 //! 401 would defeat their entire purpose. /version is similarly public
 //! so it's reachable from monitoring/alerting that may not authenticate.
-//! See [[subsystems/auth]] for the public/protected split.
 
 use axum::Router;
 use axum::http::StatusCode;

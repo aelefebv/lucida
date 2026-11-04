@@ -1,29 +1,34 @@
-**Read `intention.md` first** — the north-star for what lucida is and who it's for (humans *and* LLM agents). Don't lose the plot: if a change makes lucida worse against it, it's the wrong change.
+`intention.md` says what lucida is and who it serves, humans and LLM agents alike. Judge a
+change against it.
 
-Then start with the repo wiki at `wiki/index.md` (or `wiki/CLAUDE.md` for navigation conventions). The wiki captures intent, invariants, and gotchas across the codebase.
+`CONTEXT.md` is the glossary. Use its terms in code, docs, issues, and commits.
 
-`CONTEXT.md` at the root is the glossary — what each term means and which synonyms to avoid. Use its vocabulary in code, docs, issues, and commits.
+Keep everything domain-neutral. lucida is a general n-dimensional array and image viewer, so
+code, identifiers, comments, docs, commits, PRs, issues, and test fixtures use neutral words
+("channel", "dataset", "volume", "sample", "label") and no biology- or science-specific terms.
 
-Use Conventional Commit subjects for all commits and squash-merge PR titles because `release-please` reads commits on `main`.
+Use Conventional Commit subjects for commits and squash-merge PR titles. release-please reads
+them on `main`.
 
-Pick a real fixture, not a toy one: lucida loads OME-Zarr lazily in chunks, so multi-GB 3D volumes and multi-channel timeseries open fast — dataset size is no reason to avoid them, and large/3D/timeseries data exercises far more of the viewer than a small 2D image.
+Test with real fixtures. lucida loads OME-Zarr lazily in chunks, so multi-GB 3D volumes and
+multi-channel timeseries open fast and exercise far more of the viewer than a small 2D image.
 
-When verifying anything the viewer renders, test at `devicePixelRatio` 2 (retina), not just 1 — headless browsers default to 1 and it has hidden whole defect classes.
+Verify anything the viewer renders at `devicePixelRatio` 2 as well as 1. Headless browsers
+default to 1, and that has hidden whole classes of defects.
 
-If `tsc` reports a missing method on a `Wasm*` type, `lucida-core/pkg` is stale — rebuild it with `pnpm build:wasm` from `lucida-web/`.
+If `tsc` reports a missing method on a `Wasm*` type, `lucida-core/pkg` is stale. Rebuild it
+with `pnpm build:wasm` from `lucida-web/`.
 
-Keep everything domain-neutral. Do NOT use biology- or science-specific terms anywhere — code, identifiers, comments, docs, commits, PRs, issues, or test fixtures. lucida is a general n-dimensional array/image viewer, and the vocabulary should stay generalized across domains. Prefer neutral wording (e.g. "channel", "dataset", "volume", "sample", "label") over domain-loaded jargon.
+Comments say why: the invariant, the constraint, the choice a reader would otherwise undo.
+History and issue numbers belong in commit messages.
 
-## Agent skills
+## ADRs
 
-### Issue tracker
+Decisions live in `docs/adr/NNNN-slug.md`, numbered in sequence. Code cites the numbers, so
+never renumber. An ADR holds the context, the decision, and the rejected alternatives in under
+100 lines, and names a module only where a reader needs it. When a decision changes, update
+the ADR, or delete it and fold what survives into its successor. Git keeps the history.
 
-GitHub Issues on `aelefebv/lucida`, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+## Issues
 
-### Triage labels
-
-The five canonical roles, each label string equal to its name (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
-
-### Domain docs
-
-Single-context: `CONTEXT.md` at the root is the glossary, and the decisions live in `wiki/` (principles + numbered ADRs) rather than `docs/adr/`. See `docs/agents/domain.md`.
+GitHub Issues on `aelefebv/lucida`, through `gh`. See `docs/agents/issue-tracker.md`.

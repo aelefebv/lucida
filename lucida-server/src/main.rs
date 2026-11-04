@@ -166,7 +166,7 @@ async fn main() -> std::io::Result<()> {
                 .with_env_filter(env_filter)
                 // Emit a span-close event with elapsed time for every
                 // #[tracing::instrument]-wrapped function. See
-                // wiki/decisions/0012-logging-conventions.
+                // docs/adr/0012-logging-conventions.
                 .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
                 .init();
         }

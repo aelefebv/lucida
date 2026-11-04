@@ -1,7 +1,7 @@
 /**
  * Lane emission helpers + priority computation. Translates active-set
  * entries and minimap-pending coords into {@link ChunkRequest} /
- * {@link ProxyRequest} streams, one per lane. See ADR 0029.
+ * {@link ProxyRequest} streams, one per lane.
  */
 
 import { Axis } from "../../axes.ts";

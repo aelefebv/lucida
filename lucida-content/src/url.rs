@@ -18,7 +18,7 @@
 //! `canonicalize` call. `..` is not resolved, symlinks are not followed,
 //! the path does not need to exist, and the function is **idempotent**
 //! (safe to call defensively at every boundary). See
-//! `wiki/decisions/0042-canonical-dataset-url-form.md` for the full
+//! `docs/adr/0042-canonical-dataset-url-form.md` for the full
 //! rationale and what's intentionally not solved.
 //!
 //! Placement here (in `lucida-content`) honors the existing crate
@@ -129,7 +129,7 @@ pub fn is_local_dataset_url(canonical: &str) -> bool {
 ///
 /// Two opens of the same URL within a session produce the same id —
 /// that's the dedup-on-reopen primitive lucida-server relies on. See
-/// `wiki/decisions/0014-local-file-datasets-personal-only-in-saved-views.md`
+/// `docs/adr/0014-local-file-datasets-personal-only-in-saved-views.md`
 /// for the BLAKE3-collision sharp edge on local-file paths.
 ///
 /// Callers that want cross-machine equivalence on Windows / UNC should

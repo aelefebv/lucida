@@ -1,6 +1,6 @@
 # Ingress for the lucida Service.
 #
-# Per ADR-0021 (wiki/decisions/0021-deployment-artifacts-as-reference-templates.md)
+# Per ADR-0021 (docs/adr/0021-deployment-artifacts-as-reference-templates.md)
 # this stays generic: no provider-specific resources, no annotations
 # pinned to one ingress class, no `BackendConfig` / `FrontendConfig` /
 # `ManagedCertificate` / `IngressClassParams`. Adopters add what their
@@ -12,7 +12,7 @@
 #   3. spec.rules[].host + spec.tls[].hosts -> your external hostname
 #
 # WebSocket support: lucida-server uses long-lived WebSockets for the
-# follow-mode + presence channel ([[wiki/decisions/0002-peer-to-peer-follow-mode]]).
+# follow-mode + presence channel (ADR 0002).
 # Most modern ingress controllers handle the HTTP/1.1 `Upgrade: websocket`
 # handshake transparently when the backend's protocol is HTTP, BUT the
 # default idle/read timeouts on each controller are usually short enough

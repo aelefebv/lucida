@@ -152,7 +152,7 @@ function App({
   // Foundation hooks
   const scene = useWasmScene();
   const render = useRenderClient();
-  // Chrome-free capture surface for `dataset montage` / `viewer render` / the
+  // Chrome-free capture surface for `dataset montage` / `dataset explore` / the
   // headless trace driver: `?render=1` hides all UI chrome and lets the canvas
   // fill the viewport so a headless screenshot is pure data, AND suppresses
   // every persisted write (#923). Both halves of the rule, and what still needs
@@ -297,8 +297,7 @@ function App({
     onWorkspaceArchived: onBackToDashboard,
   });
 
-  // Resolves the selected-dataset wrinkle (option c, [[wiki/queue]]
-  // 2026-05-07): on apply, re-target `selectedDatasetId` at the first
+  // On apply, re-target `selectedDatasetId` at the first
   // visible dataset so dimension/contrast controls land on something
   // the recipient can see. Stable identity so the subscribe effect in
   // useSavedViewSync doesn't relift every render.

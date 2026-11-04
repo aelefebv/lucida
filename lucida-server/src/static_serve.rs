@@ -1,6 +1,6 @@
 //! SPA static-asset serving via `tower_http::services::ServeDir`.
 //!
-//! Per ADR-0020 ([[decisions/0020-single-image-with-servedir]]):
+//! Per ADR-0020:
 //! `lucida-server` serves the SPA bundle (`lucida-web/dist`) directly so
 //! the production deploy unit can be a single container image and the
 //! localhost docker-run path works on `:9876` alone.
@@ -29,9 +29,7 @@
 //!
 //! This route MUST land on the public router half (NOT through the auth
 //! middleware). The SPA's HTML/JS/CSS shouldn't 401; auth gates remain
-//! on `/auth/whoami` polling and `/api/*` calls. See
-//! [[decisions/0016-backend-mediated-oauth-with-session-cookies]] and
-//! [[subsystems/auth]] for the public/protected router split.
+//! on `/auth/whoami` polling and `/api/*` calls. See ADR-0016.
 
 use std::path::PathBuf;
 use std::sync::Arc;

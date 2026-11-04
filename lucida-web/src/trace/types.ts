@@ -915,7 +915,7 @@ export interface TraceRow extends WireLabel {
   /**
    * Part of the row's identity. The same chunk key legitimately exists
    * under both tiers, which have separate budgets and separate eviction
-   * (ADR 0039, ADR 0041), so the key alone is not unique.
+   * (ADR 0061), so the key alone is not unique.
    */
   residencyTier: ResidencyTier;
   level: number;

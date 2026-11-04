@@ -1,6 +1,6 @@
 /**
  * Chunk enumeration + frustum culling primitives. Pure (only mutates
- * the caller-supplied `stats` accumulator). See ADR 0029.
+ * the caller-supplied `stats` accumulator).
  */
 
 import { Axis } from "../../axes.ts";

@@ -4,8 +4,8 @@
 // (`hasLocalFilePaths` / `localFilePathCount`). The classifier now
 // delegates to the wasm-shimmed `is_local_dataset_url`, sharing one
 // implementation with the Rust server/storage layer — see
-// `wiki/decisions/0042-canonical-dataset-url-form.md` and
-// `wiki/decisions/0014-local-file-datasets-personal-only-in-saved-views.md`.
+// `docs/adr/0042-canonical-dataset-url-form.md` and
+// `docs/adr/0014-local-file-datasets-personal-only-in-saved-views.md`.
 //
 // The wasm-shim smoke test in `urlHelpers.test.ts` covers wiring drift
 // against the real wasm; here we mock the shim to a small reference

@@ -237,7 +237,7 @@ pub enum TimingRowOutcome {
 /// is why they are written out: a phase's position is data, not an accident
 /// of declaration order.
 ///
-/// [ADR 0047]: `wiki/decisions/0047-trace-model-phases-runs-and-lifecycle-rows.md`
+/// [ADR 0047]: `docs/adr/0047-trace-model-phases-runs-and-lifecycle-rows.md`
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum ServerPhase {

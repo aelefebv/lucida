@@ -3,8 +3,6 @@
  * WASM scene state per tick, calls `plan()` per dataset, caches on the
  * epoch ladder, and routes output through {@link Uploader} for
  * cold-state emission and chunk delivery.
- *
- * See `wiki/decisions/0034-orchestrator-split-into-pipeline-upload.md`.
  */
 
 import type { TickContext } from "../renderLoopTypes.ts";
