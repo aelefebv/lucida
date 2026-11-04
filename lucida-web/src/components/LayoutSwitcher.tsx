@@ -5,9 +5,8 @@ interface Props {
   datasetId: string;
   registry: LayoutRegistry | null;
   sendCommand: (json: string) => void;
-  /** Called after a layout switch is applied locally — hook for the caller
-   *  to mark the GPU canvas dirty so the view updates without needing the
-   *  user to pan/zoom first. */
+  /** Called after a local layout switch, so the caller can mark the canvas
+   *  dirty and the view updates without a pan or zoom. */
   onAfterChange?: () => void;
 }
 

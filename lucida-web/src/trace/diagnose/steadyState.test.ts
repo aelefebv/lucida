@@ -1,5 +1,5 @@
 /**
- * The steady-state ruleset (#1056), asserted on the diagnostic document
+ * The steady-state ruleset, asserted on the diagnostic document
  * rather than on the recorder: each of the five rules fires on the interval
  * built for it and stays silent on a quiet one.
  *

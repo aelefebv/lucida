@@ -1,15 +1,11 @@
 /**
- * What a run in progress can honestly say about itself (#937).
- *
- * Not a small verdict. A verdict is derived from a closed interval — the
- * attribution back-walk needs an end to walk back from, and a headline that
- * changes while you read it is not a headline. What a run *can* say mid-flight
- * is how much work it has made, how much of that has reached the screen, and
- * where the rest of it is sitting; that is this object, and nothing here is a
- * judgement.
+ * What a run in progress can say about itself. Not a small verdict: a
+ * verdict needs a closed interval, because the attribution back-walk needs an
+ * end to walk back from. Mid-flight, a run can say how much work it has made,
+ * how much reached the screen, and where the rest is sitting.
  *
  * Read without exporting. Every other way into the recording concludes the
- * interval it is asked about, which is exactly what a live view must not do.
+ * interval it reads, which a live view must not do.
  */
 
 import type { EndReason, Phase, RunCause, TraceReading, TraceTick } from "./types.ts";
@@ -59,7 +55,7 @@ export interface LivePhaseOccupancy {
 }
 
 /**
- * Where a reader of the steady-state tiers left off (#1068).
+ * Where a reader of the steady-state tiers left off.
  *
  * An interval's clock starts at zero, so an offset alone is ambiguous the
  * moment one interval hands over to the next. Carrying the interval the

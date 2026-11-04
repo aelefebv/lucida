@@ -1,47 +1,12 @@
 //! Google Cloud Identity-Aware Proxy: read the identity IAP already
 //! established, rather than establishing one of our own.
 //!
-//! IAP sits in front of the load balancer, authenticates the caller,
-//! and attaches a signed assertion to every request it forwards. There
-//! is no sign-in flow here and no session to mint — the work is
-//! verifying that assertion and turning its `email` claim into an
-//! [`AuthPrincipal`].
-//!
-//! ## The four checks
-//!
-//! An assertion is accepted only when all four pass:
-//!
-//! 1. **Signature**, against the IAP key set. IAP signs with ES256 and
-//!    publishes its keys somewhere other than the general Google OAuth
-//!    JWKS that [`super::google_oauth`] uses. Pointing this at the
-//!    wrong key set would produce a check that passes without meaning.
-//! 2. **Issuer**, against the configured value.
-//! 3. **Expiry**, which `jsonwebtoken` enforces from the `exp` claim.
-//! 4. **Audience**, an exact string match against `LUCIDA_IAP_AUDIENCE`.
-//!
-//! The fourth is the one worth defending. IAP signs every assertion it
-//! issues, for every deployment on the platform, with the same keys, so
-//! the first three together prove only that *some* IAP minted this
-//! token — not that this deployment's did. The audience is what
-//! separates the two. It is compared byte for byte: no prefix match, no
-//! value assembled from parts, and no switch to turn it off.
-//!
-//! ## Key set caching
-//!
-//! Same shape as the OAuth JWKS cache next door. The key set is fetched
-//! once at startup and refreshed on two triggers: after
-//! [`IAP_KEY_SET_REFRESH_INTERVAL`], and immediately when an assertion
-//! names a `kid` the cache does not hold, which is what a rotation
-//! looks like from here. Verifying pays no network round trip in the
-//! ordinary case.
-//!
-//! ## Test harness
-//!
-//! Production reads the key set from `gstatic.com`. Tests point
-//! `jwks_uri` at an axum app on an ephemeral port through
-//! [`AuthConfig::for_tests_iap`], the same injection the OAuth client
-//! uses. Nothing in this module knows the difference; every address
-//! comes from config.
+//! An assertion passes only when its ES256 signature (against the IAP key
+//! set, not the OAuth JWKS), issuer, expiry, and audience all check out.
+//! IAP signs every deployment's assertions with the same keys, so only the
+//! audience proves this deployment's IAP minted the token. It is compared
+//! byte for byte against `LUCIDA_IAP_AUDIENCE`: no prefix match, no value
+//! assembled from parts, and no switch to turn it off.
 
 use std::sync::{Arc, Once};
 use std::time::{Duration, Instant};

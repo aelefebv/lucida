@@ -1,17 +1,7 @@
 /**
- * Unit tests for `buildRoster` — pure builder that walks the active set
- * once, producing both the per-dataset `MemberRosterEntry[]` and the
- * entityId-keyed model+inverse matrices map consumed by `buildColdState`.
- *
- * Behaviour under test:
- *   - `group-as-proxy` entries are synthesised; their entityId appears in
- *     `matricesByEntity` with the synthetic matrices.
- *   - `invisible` entries are skipped (no roster entry, no matrices).
- *   - `tile` entries forward `imageId`, `position`, `mode`; their
- *     matrices come from `scene.member_model_matrix`.
- *   - Empty active set → empty roster + empty matrices map.
- *   - Groups with zero visible tiles are skipped (no synth, no
- *     matrices).
+ * Unit tests for `buildRoster`, which walks the active set once to produce
+ * the roster and the entityId-keyed matrices map that `buildColdState`
+ * consumes.
  */
 import { describe, it, expect } from "vitest";
 import { Axis } from "../../../axes.ts";
@@ -22,9 +12,7 @@ import type {
 } from "../../planning/index.ts";
 import { buildRoster } from "./roster.ts";
 
-// ---------------------------------------------------------------------------
 // Fixtures
-// ---------------------------------------------------------------------------
 
 function translateScaleMatrix(
   tx: number, ty: number, tz: number,
@@ -99,9 +87,7 @@ function makeTile(
   } as unknown as EntitySnapshot;
 }
 
-// ---------------------------------------------------------------------------
 // Cases
-// ---------------------------------------------------------------------------
 
 describe("buildRoster", () => {
   it("emits roster entries for visible tile entries and looks up their matrices", () => {

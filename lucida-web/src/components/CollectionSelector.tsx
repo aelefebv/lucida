@@ -26,10 +26,9 @@ interface CollectionSelectorProps {
 /**
  * Extract CollectionKind and positioned members from a DatasetManifest.
  *
- * `activeLayoutPlacements`, when provided and non-empty, takes precedence
- * over the source default layout. Use this to make click-to-pan reflect
- * the currently active (possibly browser-authored) layout — the visual
- * row/col grid stays anchored to the collection's logical structure either way.
+ * Non-empty `activeLayoutPlacements` take precedence over the source default
+ * layout, so click-to-pan follows the active layout. The row/col grid stays on
+ * the collection's logical structure either way.
  *
  * Returns null if the dataset is not a collection.
  */
@@ -51,8 +50,6 @@ export function extractCollectionData(
     has_explicit_positions: collection.has_explicit_positions,
   };
 
-  // Derive members from entities + the supplied placements (or fall back
-  // to the source default layout if none provided).
   const members: PlacedMember[] = [];
   const placements: { entity_id: string; position: [number, number] }[] | undefined =
     activeLayoutPlacements && activeLayoutPlacements.length > 0

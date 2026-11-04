@@ -1,48 +1,11 @@
-// The LIGHT, in-session restore of an annotation's captured view (slice 2 of
-// the annotation-views feature). This is the explicit-navigation tier: clicking
-// an @mention / a "go to annotation" / a pin thread's "Go to author's view"
-// restores the view the author had when they dropped the pin — camera (incl.
-// switching 2D<->3D camera MODE to match), z-slab/t/c, and display
-// (contrast/gamma/colormap-bearing display state).
+// The light, in-session restore of an annotation's captured view: camera
+// (including 2D/3D mode), z-slab/t/c, and display, scoped to the pin's dataset.
 //
-// WHY A SEPARATE PATH FROM `SavedViewApplier.apply` (the HEAVY tier):
-//   The heavy applier OPENS datasets, HIDES every loaded dataset not in the
-//   view (`set_dataset_visible(false)`), BROADCASTS a shared layout change
-//   (`set_active_layout`), and reorders datasets. That is correct for a COLD
-//   share-link open (the next slice), where the recipient's scene must be
-//   rebuilt to match the link. It is WRONG for an in-session jump to a pin: the
-//   user is already looking at their workspace and only wants the camera + slice
-//   + contrast to match the author — yanking other datasets away or mutating the
-//   shared document would be destructive and surprising.
-//
-//   So this module is deliberately NARROW. It issues ONLY recipient-local
-//   ViewportCommands (the same seam the existing gentle navigate uses):
-//   `set_z`/`set_t`/`set_c`/`set_z_range`, `set_contrast`/`set_gamma`/
-//   `set_multi_channel`, the per-dataset/per-channel DISPLAY commands
-//   (`set_dataset_contrast`/`set_channel_colormap`/… — recipient-local, reused
-//   from the heavy applier via `datasetDisplayCommands`, NOT forked), the
-//   camera-mode switch, and the camera itself (via `import_presence`). It NEVER
-//   calls `bridge.sendCommand`, NEVER emits `set_dataset_visible`/
-//   `set_dataset_opacity`/`set_active_layout`/`set_dataset_order`, and NEVER
-//   opens a dataset. The light/heavy boundary is enforced HERE, by construction:
-//   the destructive commands simply have no call site in this file.
-//
-// DISPLAY FIDELITY: lucida's headline data is multi-channel, so "go to the
-// author's view" must reproduce the author's per-CHANNEL colors/contrast, not
-// just the global contrast/gamma. We therefore replay the captured
-// `dataset_settings` (per-channel colormap/contrast/gamma + per-dataset
-// contrast/gamma/blend) for the datasets that are LOADED — but ONLY the display
-// fields (no visibility/opacity/order/layout), so the recipient's workspace
-// layout is never disturbed.
-//
-// GRACEFUL DEGRADE: the captured z/t/c is clamped to the pin's OWN dataset
-// extents via the shared `clampViewIndices` (reused, not forked) so a view
-// authored against deeper/multichannel data still lands on a valid plane; when
-// the clamp moves an axis the caller surfaces a non-blocking notice. The pin's
-// dataset ends up on-context regardless. When the pin's dataset id can't be
-// resolved (the null-selection / inbox window), the clamp is SKIPPED — the
-// captured z/t/c pass through unchanged rather than collapsing against the WASM
-// `[1,1,1]` sentinel (the #814 regression class).
+// This is separate from `SavedViewApplier.apply` on purpose. The heavy applier
+// opens, hides, and reorders datasets and broadcasts layout changes, which suits
+// a cold share-link open but would wreck the user's workspace on an in-session
+// jump. This module issues only recipient-local ViewportCommands, so the
+// destructive commands have no call site here.
 
 import type { WasmScene } from "lucida-core";
 import type { ViewportCommand } from "../commands.ts";
@@ -51,34 +14,27 @@ import { clampViewIndices, clampNotice, datasetDisplayCommands } from "./applier
 import type { DimensionExtentsResolver, LabelNamesResolver } from "./applier.ts";
 import type { Camera, DatasetId, SavedView } from "./types.ts";
 
-/** Apply one viewport/display command locally (never sent to peers). Kept inline
- * (rather than importing `applyViewportCommand`) so this module's surface is
- * obviously local-only and self-contained; identical behavior. */
+/** Apply one command locally, never sent to peers. Inlined rather than importing
+ * `applyViewportCommand` so the module is visibly local-only. */
 function applyLocal(scene: WasmScene, cmd: ViewportCommand): void {
   guardedSceneCall("apply_command", scene, () => scene.apply_command(JSON.stringify(cmd)));
 }
 
-/** The view-mode a captured camera implies: a `slice` camera is the 2D view;
- * an `arcball`/`fly` camera is the 3D view. */
+/** A `slice` camera means the 2D view; `arcball` or `fly` means 3D. */
 export function viewModeForCamera(camera: Camera): "2d" | "3d" {
   return camera.mode === "slice" ? "2d" : "3d";
 }
 
-/** The scene camera-mode string (`scene.camera_mode()`) a captured camera
- * implies. `slice` stays slice; a 3D camera keeps its specific kind
- * (arcball/fly) so restoring an author's fly view doesn't silently downgrade to
+/** A 3D camera keeps its kind, so restoring a fly view doesn't downgrade it to
  * arcball. */
 function sceneModeForCamera(camera: Camera): "slice" | "arcball" | "fly" {
   return camera.mode;
 }
 
-/** Switch the live scene's camera MODE to match the captured camera, BEFORE the
- * camera shape is imported and before the caller focuses the pin. Returns the
- * outcome so the caller can (a) mirror React `viewMode` state and (b) defer the
- * overlay focus until the correct overlay (2D vs 3D) has mounted.
- *
- * Issued as a local ViewportCommand — the same `set_mode_*` the view-mode toggle
- * uses — never broadcast. A no-op when the live mode already matches. */
+/** Switch the scene's camera mode to match the captured camera, locally, before
+ * the camera shape is imported. The caller uses the result to mirror React
+ * `viewMode` and to defer pin focus until the right overlay has mounted. No-op
+ * when the mode already matches. */
 export function switchCameraMode(
   scene: WasmScene,
   camera: Camera,
@@ -89,15 +45,13 @@ export function switchCameraMode(
   try {
     current = scene.camera_mode();
   } catch {
-    // Scene can't report its mode (test stub / not ready): treat as a change so
-    // the mode command still fires and the caller still re-targets the view.
+    // The scene can't report its mode (test stub, not ready): treat it as a
+    // change so the mode command still fires.
     current = null;
   }
   if (current === targetSceneMode) {
     return { changed: false, viewMode };
   }
-  // `set_mode_slice` / `set_mode_arcball` / `set_mode_fly` — the same commands
-  // the view-mode + camera-mode toggles emit. Local only.
   applyLocal(scene, {
     type:
       targetSceneMode === "slice"
@@ -109,31 +63,26 @@ export function switchCameraMode(
   return { changed: true, viewMode };
 }
 
-/** A minimal single-dataset SavedView addressing `datasetId` with the captured
- * view's z/t/c, used to drive `clampViewIndices` against the PIN'S OWN dataset
- * extents. Building this (rather than passing the original captured view, whose
- * `dataset_order` may reference the author's other datasets, or an empty view,
- * which makes the clamp fall back to "all loaded") keeps the clamp scoped to the
- * one volume the pin lives on. */
+/** The captured view narrowed to `datasetId`, so `clampViewIndices` scans only
+ * the pin's dataset. The original view may address the author's other datasets,
+ * and an empty view makes the clamp fall back to every loaded dataset. */
 function singleDatasetView(view: SavedView, datasetId: DatasetId): SavedView {
   return {
     ...view,
     datasets: [],
     dataset_order: [datasetId],
-    // No per-dataset settings → `visibleAddressedDatasetIds` treats it visible,
-    // so the clamp scans exactly this dataset's extents.
+    // No settings means `visibleAddressedDatasetIds` treats the dataset as visible.
     dataset_settings: {},
     active_layouts: {},
   };
 }
 
 export interface RestoreResult {
-  /** Whether the camera MODE was switched (2D<->3D) as part of the restore. */
   cameraModeChanged: boolean;
-  /** The view-mode the restored camera implies — the caller mirrors this into
-   *  React `viewMode` (and uses it to pick which overlay to focus). */
+  /** The caller mirrors this into React `viewMode` and uses it to pick which
+   *  overlay to focus. */
   viewMode: "2d" | "3d";
-  /** The clamped z-slab/t/c actually applied (post-clamp). */
+  /** The z-slab/t/c actually applied, after clamping. */
   applied: { zStart: number; zEnd: number; t: number; c: number };
   /** A non-blocking notice when the captured z/t/c had to be clamped to fit the
    *  pin's dataset, naming the moved axes; null when nothing was adjusted. */
@@ -142,46 +91,27 @@ export interface RestoreResult {
 
 export interface RestoreAnnotationViewParams {
   scene: WasmScene;
-  /** The author's captured view (from `annotation.view`). */
+  /** The author's captured view, from `annotation.view`. */
   view: SavedView;
-  /** The pin's OWN dataset id — the extents the captured z/t/c clamp against,
-   *  and the dataset that must end up on-context. Pass `undefined`/`null` when
-   *  the pin's dataset can't be resolved (the null-selection / inbox window);
-   *  the clamp is then SKIPPED and the captured z/t/c pass through unchanged,
-   *  rather than collapsing against the WASM `[1,1,1]` sentinel that
-   *  `dataset_volume_shape("")` returns (the #814 regression class). */
+  /** The pin's dataset, whose extents z/t/c clamp against. Pass null when it
+   *  can't be resolved: the clamp is then skipped, because
+   *  `dataset_volume_shape("")` returns a `[1,1,1]` sentinel that would collapse
+   *  the captured z/t/c. */
   datasetId?: DatasetId | null;
-  /** Resolves the recipient's per-dataset T/C extents (Z comes from the scene's
-   *  volume shape). Optional — omit to leave t/c unclamped (as the heavy applier
-   *  does without it). */
+  /** The recipient's per-dataset T/C extents (Z comes from the scene's volume
+   *  shape). Omit to leave t/c unclamped. */
   dimensionExtentsFor?: DimensionExtentsResolver;
-  /** Resolves the recipient's CURRENT label names (manifest order) per dataset
-   *  so the captured per-label display restores by label name+occurrence rather
-   *  than by raw index. Optional — omit to leave per-label restore positional. */
+  /** Restores per-label display by label name and occurrence instead of raw
+   *  index. Omit for positional restore. */
   labelNamesFor?: LabelNamesResolver;
 }
 
 /**
- * Perform the LIGHT restore of `view` against the live scene, scoped to the
- * pin's own dataset. Order mirrors the heavy applier's tail (display, then
- * z/t/c, then camera) MINUS every destructive/document step:
- *
- *   1. Switch camera MODE (2D<->3D) to match the captured camera. (Done first so
- *      a later `import_presence` of, say, an arcball camera isn't applied while
- *      the scene is still in slice mode.)
- *   2. Display: global contrast + gamma (+ multi_channel when captured), THEN
- *      the captured per-dataset / per-channel display (colormap/contrast/gamma)
- *      for the datasets that are LOADED — display fields only, no
- *      visibility/opacity/order/layout.
- *   3. z-slab / t / c, clamped to the pin's dataset extents (graceful degrade).
- *      The clamp is SKIPPED when `datasetId` is absent (see below).
- *   4. Camera shape, via `import_presence` (the same one-mutator path the heavy
- *      applier uses) so the camera is restored atomically with the live view.
- *
- * Returns the applied indices, whether the mode flipped, the resolved view-mode,
- * and a clamp notice (or null). The caller owns recentering on the pin (via the
- * overlay's `focusPin`) AFTER this — restore positions the camera at the
- * author's framing; focus then guarantees the pin itself is centered/on-screen.
+ * Restore `view` against the live scene: camera mode, display, clamped z/t/c,
+ * then camera shape. This mirrors the heavy applier's tail minus every document
+ * step. Mode goes first so an arcball camera is never imported while the scene
+ * is in slice mode. The caller focuses the pin afterward, since the author's
+ * framing alone doesn't guarantee the pin is on screen.
  */
 export function restoreAnnotationView({
   scene,
@@ -190,11 +120,8 @@ export function restoreAnnotationView({
   dimensionExtentsFor,
   labelNamesFor,
 }: RestoreAnnotationViewParams): RestoreResult {
-  // 1. Camera MODE first (2D<->3D), before anything reads/writes the camera.
   const mode = switchCameraMode(scene, view.camera);
 
-  // 2a. Display — global contrast/gamma. multi_channel only when the capture
-  // recorded it.
   applyLocal(scene, {
     type: "set_contrast",
     min: view.display.contrast_min,
@@ -205,21 +132,9 @@ export function restoreAnnotationView({
     applyLocal(scene, { type: "set_multi_channel", enabled: view.view.multi_channel });
   }
 
-  // 2b. Per-dataset / per-channel display — reproduce the author's channel
-  // colors/contrast for multi-channel data (lucida's headline type). Replay the
-  // captured `dataset_settings` DISPLAY fields (via the shared
-  // `datasetDisplayCommands`, never `set_dataset_visible`/`set_dataset_opacity`)
-  // for the datasets that are LOADED. The pin's own dataset goes first so its
-  // channel display always wins even when other captured datasets are clean too.
   restoreDatasetDisplay(scene, view, datasetId, labelNamesFor);
 
-  // 3. z/t/c — clamp to the PIN'S dataset extents. When `datasetId` is absent
-  // (the pin's dataset couldn't be resolved — the null-selection / inbox
-  // window), SKIP the clamp entirely: pass the captured z/t/c through unchanged
-  // rather than collapsing them against the WASM `[1,1,1]` sentinel that
-  // `dataset_volume_shape("")` returns. Otherwise build a minimal single-dataset
-  // view so the clamp scans exactly this dataset (never the empty-view "all
-  // loaded" fallback, and never the author's other datasets).
+  // Without a resolved dataset the captured z/t/c pass through (see `datasetId`).
   const clamped = datasetId
     ? clampViewIndices(
         scene,
@@ -243,10 +158,6 @@ export function restoreAnnotationView({
     end: clamped.zEnd,
   });
 
-  // 4. Camera shape last, via import_presence (read live presence, overwrite
-  // only the camera, write back) — exactly the heavy applier's `importCameraView`
-  // approach, so the WASM side reapplies camera atomically and keeps the local
-  // viewport. View + display were already applied step-by-step above.
   importCameraOnly(scene, view.camera);
 
   return {
@@ -257,16 +168,11 @@ export function restoreAnnotationView({
   };
 }
 
-/** Replay the captured per-dataset / per-channel DISPLAY (colormap, contrast,
- * gamma, blend, render mode, detail level) for the LOADED datasets — the
- * fidelity half of "go to the author's view" for multi-channel data. Strictly
- * local + display-only: it emits the shared `datasetDisplayCommands`, which
- * EXCLUDE `set_dataset_visible`/`set_dataset_opacity`, so layer placement is
- * untouched. The pin's own dataset (when resolved + captured) is applied first
- * so its channel display is authoritative; other captured datasets follow only
- * if they're loaded. Datasets in the capture that aren't loaded are skipped (we
- * never open one on the light path). Best-effort: an unreadable loaded-set
- * leaves display alone rather than throwing on the navigate path. */
+/** Replay the captured per-dataset and per-channel display for loaded datasets,
+ * so multi-channel colors match the author's. `datasetDisplayCommands` excludes
+ * visibility and opacity, so layer placement is untouched. Unloaded datasets are
+ * skipped because the light path never opens one. The pin's dataset goes first
+ * so its display wins. */
 function restoreDatasetDisplay(
   scene: WasmScene,
   view: SavedView,
@@ -276,19 +182,15 @@ function restoreDatasetDisplay(
   const settings = view.dataset_settings;
   if (!settings || Object.keys(settings).length === 0) return;
 
-  // Which captured datasets are actually loaded right now? We only restore
-  // display for loaded datasets (the light path never opens one).
   let loaded: Set<string>;
   try {
     loaded = new Set<string>(JSON.parse(scene.dataset_ids()) as string[]);
   } catch {
-    // Loaded set unreadable (test stub / scene not ready): skip display restore
-    // rather than throw on the navigate path.
+    // Unreadable (test stub, scene not ready): skip rather than throw on the
+    // navigate path.
     return;
   }
 
-  // Apply the pin's own dataset first (authoritative), then any other captured
-  // datasets that are loaded — each at most once, display fields only.
   const seen = new Set<string>();
   const order: string[] = [];
   if (pinDatasetId && settings[pinDatasetId]) order.push(pinDatasetId);
@@ -303,15 +205,10 @@ function restoreDatasetDisplay(
   }
 }
 
-/** Import only the camera shape, preserving the live view/display in presence.
- * Mirrors `SavedViewApplier.importCameraView`; kept local so the light path has
- * no dependency on the heavy applier instance.
- *
- * Hardened: BOTH the presence read AND the write-back are guarded, so a
- * malformed captured camera (an `import_presence` the WASM side rejects, e.g. a
- * 3D camera with NaN/missing fields) degrades gracefully — the camera is
- * skipped, the rest of the restore (mode/display/z/t/c, already applied) stands
- * — rather than throwing out of the navigate handler. */
+/** Import only the camera shape, keeping the live view and display in presence.
+ * Mirrors `SavedViewApplier.importCameraView` without needing an applier
+ * instance. A camera the WASM importer rejects is skipped so the rest of the
+ * restore stands, instead of throwing out of the navigate handler. */
 function importCameraOnly(scene: WasmScene, camera: Camera): void {
   let presence: { camera: Camera; view: unknown; display: unknown };
   try {
@@ -321,17 +218,13 @@ function importCameraOnly(scene: WasmScene, camera: Camera): void {
       display: unknown;
     };
   } catch {
-    // Presence unreadable (test stub without export_presence): nothing to merge
-    // into; skip the camera import rather than throw on the navigate path.
+    // No presence to merge into (test stub): skip the camera.
     return;
   }
   presence.camera = camera;
   try {
     guardedSceneCall("import_presence", scene, () => scene.import_presence(JSON.stringify(presence)));
   } catch (e) {
-    // A bad captured camera (rejected by the WASM presence importer): keep the
-    // already-applied mode/display/z/t/c and skip the camera, instead of
-    // throwing out of the navigate handler.
     console.warn("[Annotation] camera restore skipped (invalid captured camera):", e);
   }
 }

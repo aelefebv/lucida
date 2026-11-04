@@ -1,54 +1,19 @@
 /**
- * The threshold ruleset, shipped inside every diagnostic document.
+ * The threshold ruleset, shipped inside every diagnostic document so a
+ * diagnostic read months later states which numbers judged it. Every ceiling
+ * is provisional, derived from research runs on one machine over one link.
  *
- * Versioned and self-describing on purpose. Every ceiling here is
- * **provisional**: they were derived from throwaway-instrumented research runs
- * (#899) on one machine over one link, and the first real traces should
- * re-derive them. A ruleset that lives in the document makes that a visible
- * change rather than a silent one — a diagnostic read six months from now
- * states which numbers judged it.
- *
- * Three families judge the run, because one number provably cannot serve this
- * pipeline: #899 measured p50 network first byte at 98 ms and p50 scheduler
- * queue wait at 4,600 ms, two orders of magnitude apart.
- *
- * 1. **Absolute p95 ceilings** for I/O and compute phases, each set above the
- *    worst healthy p95 observed rather than at it.
- * 2. **Backlog ETA** for queue phases, which get no per-chunk ceiling at all.
- * 3. **Relative share**, which fires only at 30% *and* 250 ms. The floor is
- *    load-bearing: without it a healthy 368 ms local open reported
- *    `STALL fetch.wire, 70% of the run`, because a fast run still spends most
- *    of itself somewhere.
- *
- * An interaction run adds one absolute ceiling of the first family on a
- * reading rather than a phase: main-thread frame time over the run. It
- * replaces the share rule for that reading, because a gesture ticks every
- * frame and its main-thread share is near total by construction.
- *
- * The steady-state rules are a fourth family, and they judge what the run left
- * behind rather than the run: sustained bytes received and sent, refetch of a
- * chunk already fetched, and replans woken by availability alone, all over the
- * unlabelled interval that opened when the run closed; plus a tier that cannot
- * fit what the view wants, over the run's settle block. They answer "is this
- * expected" about traffic after the view looks loaded, which no ceiling on a
- * phase can, because a settled view has no stall to find.
- *
- * One qualification sits across the families: an upload or present breach on
- * a run opened by content on a cold browser cache is first paint, not a
- * stall. Both phases run to a frame dispatch on the main thread, and the
- * frame that first draws the chunks also compiles the render pipelines. The
- * ceiling and the share rule still measure them; the first-paint rule says
- * what the breach means on a cold open, and every other run keeps the stall.
+ * Three families judge the run because one number cannot serve this pipeline:
+ * absolute p95 ceilings for I/O and compute phases, a backlog ETA for queue
+ * phases, and a relative share that fires only at 30% and 250 ms. A fourth,
+ * steady-state family judges the interval after the run closed.
  */
 
 import type { PhaseClass } from "./types.ts";
 
 /**
  * Bumped whenever a threshold moves or a rule is added, so two diagnostics
- * are visibly comparable or visibly not. Version 2 added the interaction
- * frame-time ceiling. Version 3 added the steady-state family. Version 4
- * reads an upload or present breach on a cold open as a first-paint note
- * rather than a stall.
+ * are visibly comparable or visibly not.
  */
 export const RULESET_VERSION = 4;
 

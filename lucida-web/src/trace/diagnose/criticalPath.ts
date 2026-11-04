@@ -1,19 +1,13 @@
 /**
- * The critical-path back-walk.
- *
- * Never a `max()` over phase totals. On the cold-open sample the largest total
- * belongs to whichever phase the most rows happened to sit in at once, which
- * is a statement about concurrency rather than about what the run waited for —
- * two hundred rows spending 100 ms each on the wire is 20 s of total inside a
+ * The critical-path back-walk. Never a `max()` over phase totals: the largest
+ * total belongs to whichever phase the most rows sat in at once, and two
+ * hundred rows spending 100 ms each on the wire is 20 s of total inside a
  * 1.2 s run.
  *
- * The chain is the serial history of the one row the run finished on: what had
- * to happen before it could be planned, and then what it did. It starts at
- * **run start**, not at the first recorded row. #893's path started at the
- * first row and reported `100% accounted` for a run that was 87%
- * pre-instrument boot; the fix is an `unrecorded prefix` segment that is part
- * of the chain, can never be blamed for a stall, and always raises a coverage
- * gap.
+ * The chain is the serial history of the one row the run finished on. It
+ * starts at run start, not at the first recorded row, so a run that was mostly
+ * pre-instrument boot cannot report full coverage: the `unrecorded prefix`
+ * segment is part of the chain and can never be blamed for a stall.
  */
 
 import type { TraceRow, TraceRun, TraceServerRow } from "../types.ts";

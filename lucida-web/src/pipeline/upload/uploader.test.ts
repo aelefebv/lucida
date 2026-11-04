@@ -271,10 +271,9 @@ describe("Uploader unified delivery", () => {
 
   /**
    * The per-tick stats are handed to `UploadTelemetry.publish`, which the
-   * Uploader calls only while the `orch` log category is on — the one gate
-   * left now that the debug panel's is gone (ADR 0049). Open the category
-   * with an in-memory `localStorage` shim and read the stats off the spy,
-   * rather than out of a global sink.
+   * Uploader calls only while the `orch` log category is on. Open the
+   * category with an in-memory `localStorage` shim and read the stats off
+   * the spy.
    */
   function captureTickStats(uploader: InstanceType<typeof Uploader>) {
     return vi.spyOn(uploader.uploadTelemetry, "publish");
@@ -429,8 +428,7 @@ describe("Uploader unified delivery", () => {
   });
 
   it("skips telemetry aggregation when the orch category is off", async () => {
-    // The debug panel's gate is gone (ADR 0049), so the `orch` log category
-    // is the only thing left that can turn the aggregators on.
+    // The `orch` log category is the only thing that turns the aggregators on.
     localStorage.removeItem("debug");
     // The category set is cached at module load; this is the documented
     // same-tab refresh path.

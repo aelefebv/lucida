@@ -3,8 +3,6 @@ import { transformPoint, projectToCanvas } from "./minimapMath.ts";
 import { drawOrientationCube } from "./orientationCube.ts";
 import { drawFrustumIntersection } from "./frustumOverlay.ts";
 
-// Bounding box
-
 const CUBE_EDGES: [number, number][] = [
   [0, 1], [2, 3], [4, 5], [6, 7], // X edges
   [0, 2], [1, 3], [4, 6], [5, 7], // Y edges
@@ -40,8 +38,6 @@ function drawBoundingBox(
   }
   ctx.stroke();
 }
-
-// Axis arrows
 
 function drawAxisArrows(
   ctx: CanvasRenderingContext2D,
@@ -107,8 +103,6 @@ function drawAxisArrows(
   }
 }
 
-// Slice plane (volume mode, shows current Z)
-
 function drawSlicePlane(
   ctx: CanvasRenderingContext2D,
   viewProj: Float32Array,
@@ -145,8 +139,6 @@ function drawSlicePlane(
   ctx.lineWidth = 1 * devicePixelRatio;
   ctx.stroke();
 }
-
-// Slice viewport rectangle
 
 function drawSliceViewportRect(
   ctx: CanvasRenderingContext2D,
@@ -192,23 +184,17 @@ function drawSliceViewportRect(
   ctx.stroke();
 }
 
-// Entry points
-
 /**
- * Draw the Z-INVARIANT overlay layer — member bounding boxes, axis arrows, and
- * (in volume mode) the camera frustum. These depend only on the minimap camera
- * and member geometry, never on the current Z-plane, so on a Z-scrub the
- * consumer reuses a cached copy of this layer instead of re-stroking it.
- *
- * Clears the target first, so it owns the full background of whatever surface
- * it draws onto (a dedicated offscreen cache canvas).
+ * Draw the Z-invariant layer: member bounding boxes, axis arrows, and in volume
+ * mode the camera frustum. None of it depends on the current Z-plane, so a
+ * Z-scrub reuses a cached copy. Clears the target first.
  */
 export function drawStaticMinimapOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData): void {
   const { viewProj, layers, datasetLayers, mode, canvasW, canvasH, mainInvViewProj } = data;
 
   ctx.clearRect(0, 0, canvasW, canvasH);
 
-  // Bounding boxes (per-member — shows each tile's outline)
+  // One bounding box per member, outlining each tile.
   for (const layer of layers) {
     drawBoundingBox(ctx, viewProj, layer.modelMatrix, canvasW, canvasH, "rgba(255,255,255,0.5)");
   }
@@ -228,17 +214,14 @@ export function drawStaticMinimapOverlays(ctx: CanvasRenderingContext2D, data: M
 }
 
 /**
- * Draw the Z-plane sub-layer — the per-member slice planes (slice mode only),
- * which depend on the current Z-plane but not on pan/zoom. Draws NOTHING in
- * volume mode. Does NOT clear: it strokes over whatever surface it targets
- * (a dedicated offscreen cache canvas), so the consumer clears first.
- * Re-stroked only on a Z-scrub or geometry change, not on a pan/zoom.
+ * Draw the per-member slice planes (slice mode only), which depend on Z but not
+ * on pan/zoom. Does not clear, so the consumer clears its cache canvas first.
  */
 export function drawZPlaneOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData): void {
   const { viewProj, layers, mode, canvasW, canvasH, currentZ, datasetDims } = data;
 
   if (mode === "slice") {
-    // Slice plane (per-member — shows Z within each tile)
+    // One slice plane per member, showing Z within each tile.
     for (const layer of layers) {
       const dims = datasetDims.get(layer.datasetId);
       if (!dims) continue;
@@ -248,10 +231,9 @@ export function drawZPlaneOverlays(ctx: CanvasRenderingContext2D, data: MinimapO
 }
 
 /**
- * Draw the viewport sub-layer — the per-member viewport rectangles (slice mode)
- * plus the orientation cube (both modes, drawn last). These are cheap (bounded
- * by the visible viewports, not the member count) and are re-stroked every
- * overlay callback. Does NOT clear: it strokes over the composited layers.
+ * Draw the viewport rectangles (slice mode) and the orientation cube. Cheap,
+ * since it scales with visible viewports rather than member count, so it is
+ * re-stroked every callback. Does not clear.
  */
 export function drawViewportOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData): void {
   const { viewProj, sliceViewports, mode, canvasW, canvasH, currentZ, theta, phi } = data;
@@ -272,32 +254,22 @@ export function drawViewportOverlays(ctx: CanvasRenderingContext2D, data: Minima
 }
 
 /**
- * Whether the Z-plane sub-layer cache must be redrawn: on a geometry change
- * (`staticDirty`), the first draw (`prevZ === null`), or a Z-scrub
- * (`currentZ !== prevZ`). A pan/zoom with unchanged Z reuses the cached layer.
+ * Whether the Z-plane layer cache must be redrawn. A pan/zoom with unchanged Z
+ * reuses it.
  */
 export function zPlaneLayerDirty(data: MinimapOverlayData, prevZ: number | null): boolean {
   return data.staticDirty || prevZ === null || data.currentZ !== prevZ;
 }
 
 /**
- * Draw the Z-DEPENDENT overlay layer — the per-member slice plane and viewport
- * rectangle (slice mode) — plus the orientation cube, on top of the (already
- * composited) static layer. Does NOT clear: it strokes over the static layer.
- * Re-run every overlay callback, including a pure Z-scrub, because the slice
- * plane / viewport indicators track the current plane.
+ * Draw the Z-dependent layer over the composited static layer. Does not clear.
  */
 export function drawDynamicMinimapOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData): void {
   drawZPlaneOverlays(ctx, data);
   drawViewportOverlays(ctx, data);
 }
 
-/**
- * Full overlay redraw (static layer + dynamic layer) onto a single context, in
- * the original draw order. Retained for callers that don't cache the static
- * layer; the minimap component splits the two so a Z-scrub reuses the cached
- * static layer.
- */
+/** Full redraw onto one context, for callers that don't cache the static layer. */
 export function drawMinimapOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData): void {
   drawStaticMinimapOverlays(ctx, data);
   drawDynamicMinimapOverlays(ctx, data);

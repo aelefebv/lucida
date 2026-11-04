@@ -52,7 +52,7 @@ describe("useSeedDatasetOpens", () => {
     rerender({ ready: true });
     expect(openDataset).toHaveBeenCalledTimes(1);
 
-    // A subsequent re-render must NOT re-open (one-shot guard).
+    // A later re-render must not re-open.
     rerender({ ready: true });
     expect(openDataset).toHaveBeenCalledTimes(1);
   });

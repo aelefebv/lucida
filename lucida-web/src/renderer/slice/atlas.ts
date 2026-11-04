@@ -1,11 +1,10 @@
 /**
- * Slice atlas state — pool allocation, indirection sizing, per-entity
- * Z metadata, stale-on-Z-change tracking.
+ * Slice atlas state: pool allocation, indirection sizing, per-entity Z
+ * metadata, stale-on-Z-change tracking.
  *
- * Mutates the per-dataset registry on `ctx.state.sliceAtlases`. Composed
- * cleanups (`removeSliceResources`, `destroyAllSliceResources`) live in
- * `slice/index.ts` so this module stays free of dependencies on
- * `slice/eviction.ts` (which owns per-entity camera-UV state).
+ * Composed cleanups (`removeSliceResources`, `destroyAllSliceResources`) live
+ * in `slice/index.ts` so this module stays free of dependencies on
+ * `slice/eviction.ts`, which owns per-entity camera-UV state.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
@@ -16,40 +15,29 @@ import type { LodIndirectionMeta } from "../volume/atlas.ts";
 
 /**
  * A label overlay's slice pool: one `r32uint` texture holding the current
- * Z-slice of the label mask at full width, plus a single-slot indirection
- * buffer so the categorical shader path reads it as one tile. Kept minimal
- * and self-contained (no shared LRU slots) because a label overlay is a
- * single member covering a bounded 2D footprint, unlike the shared
- * intensity atlas that packs many members.
+ * Z-slice of the mask, plus a single-slot indirection buffer so the
+ * categorical shader reads it as one tile. No shared LRU slots, because a
+ * label overlay is one member with a bounded 2D footprint.
  *
- * The texture is written IN PLACE as new Z/T slices arrive (never destroyed
- * on a scrub), mirroring the intensity atlas' stale-then-overwrite so a
- * label never blanks mid-scrub — the previous slice stays visible until the
- * new one lands.
+ * The texture is written in place as Z/T slices arrive, so a label never
+ * blanks mid-scrub.
  */
 export interface LabelSlicePool {
   texture: GPUTexture; // r32uint, size [width, height]
   /** Single-entry indirection ([0]) so the one tile is always slot 0. */
   indirectionBuf: GPUBuffer;
   /**
-   * Owning dataset id (the `removeLayerResources` id). The pool is keyed by
-   * the label image id — which dataset removal never sees — so this is how
-   * {@link removeLabelSlicePoolsForDataset} finds + frees it on removal.
+   * Owning dataset id. The pool is keyed by the label image id, which dataset
+   * removal never sees, so {@link removeLabelSlicePoolsForDataset} matches on
+   * this instead.
    */
   datasetId: string;
   width: number;
   height: number;
-  /**
-   * Cached per-member entity descriptor (a persistent buffer, not a
-   * per-frame allocation) + the overlay opacity it was built for. Rebuilt
-   * only when the opacity changes. Populated by the render path.
-   */
+  /** Cached entity descriptor and the opacity it was built for. Rebuilt only when the opacity changes. */
   descBuffer?: GPUBuffer;
   descOpacity?: number;
-  /**
-   * Cached declared-palette storage buffer ([id, packedRgba] pairs) + its
-   * pair count, built once from the label's `image-label.colors`.
-   */
+  /** Declared-palette storage buffer ([id, packedRgba] pairs), built once from `image-label.colors`. */
   labelColorBuffer?: GPUBuffer;
   labelColorCount?: number;
 }
@@ -58,30 +46,18 @@ export interface LabelSlicePool {
  *  so a failing device doesn't spam the console each delivery. */
 const warnedLabelSliceAlloc = new Set<string>();
 
-/**
- * Clear the per-member alloc-failure warn-once set. Test-only, so a case
- * that provokes an allocation failure doesn't suppress the warning (and the
- * skip path it guards) for a later case reusing the same member id.
- */
+/** Clear the alloc-failure warn-once set. Test-only, so one case's failure doesn't hide a later case's warning. */
 export function resetLabelSliceAllocWarnings(): void {
   warnedLabelSliceAlloc.clear();
 }
 
 /**
- * Get or create a label slice pool for `memberId` sized to the label
- * level's 2D dimensions (clamped to the device's max 2D texture dimension
- * so an oversized/whole-slide level can never exceed the limit). Reused IN
- * PLACE when the dims are unchanged — a Z/T scrub overwrites the existing
- * texture rather than destroying + recreating it, so the overlay never
- * blanks. Recreated only when the dims actually change (a new level).
- * `datasetId` is stamped on the pool so dataset removal can free it (the
- * pool is keyed by the label image id).
+ * Get or create the label slice pool for `memberId`, sized to the level's 2D
+ * dims clamped to the device's max 2D texture dimension. Reused in place while
+ * the dims are unchanged, so a Z/T scrub never blanks the overlay.
  *
- * Returns `null` when either the texture or its indirection buffer fails to
- * allocate (e.g. an out-of-budget device) — a partial allocation is unwound
- * so nothing leaks, and the caller skips the label rather than throwing
- * through the upload path. Level selection already bounds the size, so this
- * is defense in depth.
+ * Returns `null` when the texture or indirection buffer fails to allocate,
+ * after unwinding any partial allocation, so the caller skips the label.
  */
 export function getOrCreateLabelSlicePool(
   ctx: WorkerCtx,
@@ -111,9 +87,7 @@ export function getOrCreateLabelSlicePool(
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
   } catch (err) {
-    // Free an already-created texture so a later-step failure (e.g. the
-    // indirection buffer) can't orphan it. If the texture itself failed,
-    // `texture` is still undefined and this is a no-op.
+    // Free the texture if a later step failed, so it can't be orphaned.
     texture?.destroy();
     if (!warnedLabelSliceAlloc.has(memberId)) {
       warnedLabelSliceAlloc.add(memberId);
@@ -127,7 +101,6 @@ export function getOrCreateLabelSlicePool(
     }
     return null;
   }
-  // Single tile lives at slot 0.
   ctx.device.queue.writeBuffer(indirectionBuf, 0, new Uint32Array([0]));
 
   const pool: LabelSlicePool = { texture, indirectionBuf, datasetId, width: w, height: h };
@@ -152,12 +125,9 @@ export function removeLabelSlicePool(ctx: WorkerCtx, memberId: string): void {
 }
 
 /**
- * Free every label slice pool matching `idOrDataset`, matched EITHER by the
- * pool's member key (the label image id) OR by its owning `datasetId`. Dataset
- * removal calls `removeLayerResources` with the dataset id, which never equals
- * a label pool's key — so matching on the stamped `datasetId` is what actually
- * frees the label texture. Also accepts a member id so a per-member removal
- * still works.
+ * Free every label slice pool whose member key or owning `datasetId` matches
+ * `idOrDataset`. Dataset removal passes the dataset id, which never equals a
+ * pool key, so the `datasetId` match is what frees the texture.
  */
 export function removeLabelSlicePoolsForDataset(ctx: WorkerCtx, idOrDataset: string): void {
   for (const [memberId, pool] of ctx.state.labelSlicePools) {
@@ -191,7 +161,6 @@ export interface SliceAtlasState {
   slotGridIdx: Int32Array<ArrayBuffer>;
   freeSlots: number[];
   totalSlots: number;
-  /** Shared slot pool dimensions. */
   chunkX: number; chunkY: number;
   slotsX: number; slotsY: number;
   /** Per-entity LOD sections (absolute offsets into the shared flat indirection buffer). */
@@ -228,7 +197,6 @@ function createSliceAtlas(
 
   const texture = createSliceTexture(device, atlasW, atlasH, null);
 
-  // Indirection sized later by cold state handler
   const indirectionData = new Uint32Array(1);
   indirectionData[0] = 0xFFFFFFFF;
   const indirectionBuf = device.createBuffer({
@@ -263,9 +231,8 @@ export function destroySliceAtlas(atlas: SliceAtlasState): void {
 }
 
 /**
- * Get or create a shared slice pool with the given chunk dims. Stores the
- * pool in `ctx.state.sliceAtlases`. Cold state handler sets entityMetas
- * and resizes indirection afterward.
+ * Get or create a shared slice pool with the given chunk dims. The cold state
+ * handler sets entityMetas and resizes indirection afterward.
  */
 export function getOrCreateSlicePool(
   ctx: WorkerCtx,
@@ -276,7 +243,6 @@ export function getOrCreateSlicePool(
   const atlases = ctx.state.sliceAtlases;
   const existing = atlases.get(poolKey);
   if (existing && existing.chunkX === chunkX && existing.chunkY === chunkY) {
-    // Mark stale on Z change before updating z
     if (z !== existing.z && existing.slots.size > 0) {
       existing.staleSliceKeys = new Set(existing.slots.keys());
     }

@@ -1,20 +1,10 @@
 /**
- * Shared slot-grid math for renderer atlas pools.
+ * Slot-grid math for the volume and slice atlas pools: how many fixed-size
+ * slots fit a byte budget under the device's max texture dimension.
  *
- * Both `volume/atlas.ts` and `slice/atlas.ts` need to decide how many
- * fixed-size slots fit in their texture given a byte budget and the
- * device's max texture dimension. Device limits live in `getDeviceLimits`
- * (`gpuContext.ts`); slot-grid math lives here.
- *
- * Dimension-order convention
- * --------------------------
- * `chunkDims` here is `[X, Y]` for 2D atlases and `[X, Y, Z]` for 3D
- * atlases. This matches the WebGPU `size` tuple convention and the
- * existing positional parameter order of `createVolumeAtlas` /
- * `createSliceAtlas` (which both took `chunkX, chunkY[, chunkZ]`).
- *
- * NOTE: This is the OPPOSITE order from `LodIndirectionMeta.chunkDims`,
- * which is stored as `[Z, Y, X]`. Don't mix them.
+ * `chunkDims` here is `[X, Y]` or `[X, Y, Z]`, the WebGPU `size` order. That
+ * is the opposite of `LodIndirectionMeta.chunkDims` (`[Z, Y, X]`), so don't
+ * mix them.
  */
 
 import type { DeviceLimits } from "./gpuContext.ts";
@@ -32,16 +22,11 @@ export interface AtlasGeometry {
 }
 
 /**
- * Compute slot grid dimensions for an atlas given a per-slot voxel
- * footprint and a byte budget. Honors the device's max texture
- * dimension for the relevant arity (2D or 3D).
+ * Slot grid for an atlas given a per-slot footprint and a byte budget.
+ * Slots per axis are bounded by both the budget and the device's texture
+ * dimension limit.
  *
- * Slot count is bounded BOTH by the byte budget (slots-per-axis =
- * floor(cbrt or sqrt of maxSlots)) AND by the texture-dimension limit
- * (slots-per-axis <= floor(limit / chunkN)).
- *
- * @param chunkDims `[X, Y]` for 2D, `[X, Y, Z]` for 3D. Matches the
- *   WebGPU `size` tuple order — NOT `LodIndirectionMeta.chunkDims`.
+ * @param chunkDims `[X, Y]` for 2D, `[X, Y, Z]` for 3D.
  * @param bytesPerVoxel Storage per voxel: `2` for the `r16uint`
  *   intensity atlas (default), `4` for the `r32uint` label atlas.
  */

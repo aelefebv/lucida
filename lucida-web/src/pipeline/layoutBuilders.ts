@@ -1,18 +1,8 @@
 /**
- * Layout builders — pure functions that derive `LayoutSpec` values from a
- * `DatasetManifest`. Used by the bridge to auto-register browser-authored
- * derived layouts when a dataset is opened.
- *
- * Today's two builders:
- *   - `buildCollectionGridLayout`  : a verbatim copy of the source default
- *     layout, registered under id `"derived:collection-grid"`.
- *   - `buildDenseSquareLayout`: source placements packed into a tight
- *     ceil(sqrt(N)) x ceil(N/cols) grid, registered under id
- *     `"derived:dense-square"`.
- *
- * Both return `null` when the dataset has no usable source default
- * (or fewer than 2 placements for the dense builder); `derivedBuildersFor`
- * filters those out so callers can iterate without null checks.
+ * Pure functions that derive `LayoutSpec` values from a `DatasetManifest`.
+ * The bridge auto-registers these browser-authored layouts when a dataset
+ * opens. A builder returns `null` when the dataset has no usable source
+ * default; `derivedBuildersFor` filters those out.
  */
 
 import { Axis } from "../axes.ts";
@@ -31,7 +21,7 @@ function sourceDefaultPlacements(manifest: DatasetManifest): LayoutSpec["placeme
  * call so per-placement footprint lookups are O(1). Without them a wide
  * collection pays `placements × (images + entities + transforms)` array
  * scans — millions for hundreds of groups × tens of thousands of tiles.
- * Every map keeps the FIRST match, mirroring `Array.find` semantics.
+ * Every map keeps the first match, mirroring `Array.find` semantics.
  */
 interface ManifestIndex {
   /** Owner entity id → first image it owns. */
@@ -79,7 +69,7 @@ function buildManifestIndex(manifest: DatasetManifest): ManifestIndex {
  *
  * This matches `lucida-core::scene::resolve_entity_position`, which composes
  * tile positions from `group_position + tile_offset_within_group`. For
- * dense packing we therefore need the GROUP's footprint (which scales with
+ * dense packing we therefore need the group's footprint (which scales with
  * tiles-per-group), not just one tile's footprint.
  */
 function entityFootprintYX(index: ManifestIndex, entityId: string): [number, number] {

@@ -1,27 +1,17 @@
 /**
- * Per-entity level section computation. Pure function — no GPU side
- * effects, no state mutation. A section is `gridX * gridY * gridZ` slots
- * for volume pools and `gridX * gridY` for slice pools.
- *
- * `applyColdState` calls this once per (entry, tier source) inside a
- * pool group, threading `startOffset` through so the returned
- * `nextOffset` becomes the start offset for the next section.
+ * Per-entity level section computation. Pure. A section is
+ * `gridX * gridY * gridZ` slots for volume pools and `gridX * gridY` for
+ * slice pools; `applyColdState` threads each `nextOffset` into the next call.
  */
 
 import type { ColdStateActiveEntry } from "../workerProtocol.ts";
 import type { LodIndirectionMeta } from "../volume/atlas.ts";
 
 /**
- * Compute the indirection meta for one entry at one level against a
- * pool's chunk dimensions, or `null` when the entry lacks that level or
- * the level's chunk shape does not match the pool. `dimArity = 3` for
- * volume pools (Z*Y*X indirection) and `dimArity = 2` for slice pools
- * (Y*X indirection, Z fixed by the slice).
- *
- * `poolChunkDims` is `[Z, Y, X]` (matches the worker's `chunkShape`
- * destructure). Slice mode ignores Z in the match — the pool's Z is
- * always 1 in `poolChunkDims` (set by `groupEntriesByPool`), so Z
- * compares would always fail.
+ * The indirection meta for one entry at one level, or `null` when the entry
+ * lacks that level or its chunk shape doesn't match the pool's `[Z, Y, X]`
+ * dims. Slice mode (`dimArity = 2`) skips the Z compare because a slice
+ * pool's Z is always 1.
  */
 export function computeEntityTierMeta(
   entry: ColdStateActiveEntry,

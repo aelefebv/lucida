@@ -1,35 +1,11 @@
-//! SPA static-asset serving via `tower_http::services::ServeDir`.
+//! SPA static-asset serving via `tower_http::services::ServeDir`, so one
+//! container image serves both the API and the UI (ADR-0020).
 //!
-//! Per ADR-0020:
-//! `lucida-server` serves the SPA bundle (`lucida-web/dist`) directly so
-//! the production deploy unit can be a single container image and the
-//! localhost docker-run path works on `:9876` alone.
-//!
-//! ## Public surface
-//!
-//! [`router`] takes a `dist_path` and returns an Axum [`Router`] that
-//! either:
-//!
-//! * Serves the bundle from `dist_path` with SPA-style fallback to
-//!   `index.html` for unknown paths (so client-side routing works on
-//!   deep-link refresh).
-//! * Or, if `dist_path` is missing / empty / lacks `index.html`, serves
-//!   a small static landing page with build instructions ("run
-//!   `pnpm run build` then restart").
-//!
-//! ## Why detect at request time, not startup
-//!
-//! A developer who runs `cargo run` first and *then* builds the SPA in
-//! another shell would otherwise have to restart the server to pick up
-//! the freshly-built dist. The fallback handler inspects the filesystem
-//! on each request — the cost is one `metadata()` syscall per hit, well
-//! below the network round-trip cost.
-//!
-//! ## Auth interaction
-//!
-//! This route MUST land on the public router half (NOT through the auth
-//! middleware). The SPA's HTML/JS/CSS shouldn't 401; auth gates remain
-//! on `/auth/whoami` polling and `/api/*` calls. See ADR-0016.
+//! Unknown paths fall back to `index.html` for client-side routing. When
+//! `dist_path` lacks an `index.html`, a landing page with build
+//! instructions is served instead. That check runs per request, so building
+//! the SPA after the server starts needs no restart. Mounts on the public
+//! router half: the bundle itself must never 401.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -79,16 +55,10 @@ async fn serve_static(State(state): State<StaticState>, req: Request) -> Respons
         return missing_dist_landing();
     }
     // SPA fallback: any unknown path returns `index.html` so client-side
-    // routing survives deep-link refresh. ServeFile sets Content-Type
-    // from the extension. ServeDir's error type is Infallible so the
-    // `oneshot` Result is always Ok — pattern-match exhaustively to
-    // reassure the type checker.
-    //
-    // Note: we use `.fallback(...)` rather than `.not_found_service(...)`
-    // because the latter forces the response status to 404, which
-    // breaks deep-link SPA refresh — the browser would render the SPA
-    // shell with a 404 status and confuse devtools / monitoring.
-    // `.fallback(...)` keeps ServeFile's natural 200 OK.
+    // routing survives deep-link refresh. `.fallback(...)`, not
+    // `.not_found_service(...)`, because the latter would serve the SPA
+    // shell with a 404 status. ServeDir's error type is Infallible, so the
+    // `oneshot` Result is always Ok.
     let index_file = dist_path.join("index.html");
     let svc = ServeDir::new(dist_path).fallback(ServeFile::new(index_file));
     match svc.oneshot(req).await {

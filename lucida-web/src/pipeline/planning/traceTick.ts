@@ -1,12 +1,8 @@
 /**
- * The per-tick aggregate sample, derived from a plan.
- *
- * This deliberately does not reuse the panel-era `debug.ts` snapshot, which
- * ran only while somebody had the debug panel open and took a
- * `CacheStateSnapshot` that allocated a Set per resident entity. Both are gone
- * (ADR 0052). Recording is unconditional (ADR 0049), so this path reads counts
- * the cache already keeps and allocates nothing per tick — the sample it fills
- * is the recorder's reusable scratch.
+ * The per-tick aggregate sample, derived from a plan. Recording is
+ * unconditional (ADR 0049), so this reads counts the cache already keeps
+ * and allocates nothing per tick. The sample it fills is the recorder's
+ * reusable scratch.
  */
 
 import type { LevelRange } from "../../renderer/workerProtocol.ts";

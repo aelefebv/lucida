@@ -5,9 +5,7 @@ import { describe, it, expect } from "vitest";
 import { parseProxyHeader, proxyResponseKey } from "./wireProtocol.ts";
 import { extractDataType, type WireFormat } from "../../manifestTypes.ts";
 
-// ---------------------------------------------------------------------------
 // Fixtures
-// ---------------------------------------------------------------------------
 
 /** Build a 64-byte proxy header buffer with optional field overrides. */
 function makeHeaderBuffer(overrides?: {
@@ -36,9 +34,7 @@ function makeHeaderBuffer(overrides?: {
   return buf;
 }
 
-// ---------------------------------------------------------------------------
 // parseProxyHeader
-// ---------------------------------------------------------------------------
 
 describe("parseProxyHeader", () => {
   it("decodes a well-formed header into the expected JS shape", () => {
@@ -100,9 +96,7 @@ describe("parseProxyHeader", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // proxyResponseKey
-// ---------------------------------------------------------------------------
 
 describe("proxyResponseKey", () => {
   it("composes the canonical zero-padded form", () => {
@@ -124,9 +118,7 @@ describe("proxyResponseKey", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // extractDataType
-// ---------------------------------------------------------------------------
 
 describe("extractDataType", () => {
   it.each<[string, WireFormat, string]>([

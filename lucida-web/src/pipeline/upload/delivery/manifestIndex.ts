@@ -13,7 +13,7 @@ import type { DatasetEntry } from "../../../renderLoopTypes.ts";
 
 export interface ManifestEntry {
   /**
-   * The dataset's key in `ctx.datasets` — the SAME id `removeLayerResources`
+   * The dataset's key in `ctx.datasets` — the same id `removeLayerResources`
    * is called with on dataset removal. Carried so a label delivery can stamp
    * its GPU pool with the owning dataset (a label pool is keyed by the label
    * image id, not the dataset id, so removal needs this to find + free it).

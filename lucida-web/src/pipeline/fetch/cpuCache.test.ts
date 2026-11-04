@@ -40,9 +40,7 @@ import { emptyPlanStats } from "../planning/index.ts";
 import { createQuiescenceState } from "../../trace/quiescence.ts";
 import { initialPlanningState, createSyntheticState } from "../planning/index.ts";
 
-// ---------------------------------------------------------------------------
 // Test Factories
-// ---------------------------------------------------------------------------
 
 interface MockContentSource extends ContentSource {
   pendingFetches: Map<string, { resolve: (r: FetchResult) => void; reject: (e: Error) => void }>;
@@ -294,18 +292,14 @@ function consumeDeliverables(cache: CpuCache, budgetBytes = Infinity): ReadyDeli
   return deliveries;
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 describe("CpuCache", () => {
   beforeEach(() => {
     vi.useRealTimers();
   });
 
-  // =========================================================================
   // Submit/deliverable lifecycle
-  // =========================================================================
 
   describe("submit/deliverable lifecycle", () => {
     it("submit plan → source resolves → getDeliverable returns delivery", async () => {
@@ -711,10 +705,9 @@ describe("CpuCache", () => {
       await flush();
 
       expect(Array.from(cache.getDeliverable())).toEqual([]);
-      // Tier is read off residency rather than a per-entry dump: the dump
-      // accessors went with the debug panel (ADR 0052). The counts carry no
-      // chunk key, so they pin the promotion only because this fixture holds
-      // exactly one chunk — the delivery assertion below binds the identity.
+      // Tier is read off residency counts. They carry no chunk key, so they
+      // pin the promotion only because this fixture holds exactly one chunk;
+      // the delivery assertion below binds the identity.
       expect(cache.telemetry().tierResidency).toMatchObject({
         prefetch: { count: 1 },
         activeDetail: { count: 0 },
@@ -738,9 +731,7 @@ describe("CpuCache", () => {
     });
   });
 
-  // =========================================================================
   // In-flight dedup
-  // =========================================================================
 
   describe("in-flight dedup", () => {
     it("does not duplicate fetches for same chunk in consecutive submits", async () => {
@@ -766,9 +757,7 @@ describe("CpuCache", () => {
     });
   });
 
-  // =========================================================================
   // Fetch lifecycle preempted by plan omission
-  // =========================================================================
 
   describe("fetch lifecycle preempted by plan omission", () => {
     it("submit twice with overlapping requests cancels omitted in-flight work for active entities", async () => {
@@ -1037,9 +1026,7 @@ describe("CpuCache", () => {
     });
   });
 
-  // =========================================================================
   // cancelDataset
-  // =========================================================================
 
   describe("cancelDataset", () => {
     function makeProxyRequest(overrides?: Partial<ProxyRequest>): ProxyRequest {
@@ -1306,9 +1293,7 @@ describe("CpuCache", () => {
     });
   });
 
-  // =========================================================================
   // Cache snapshot
-  // =========================================================================
 
   describe("cache snapshot", () => {
     it("returns cached and in-flight keys", async () => {
@@ -1330,9 +1315,7 @@ describe("CpuCache", () => {
     });
   });
 
-  // =========================================================================
   // Multi-channel
-  // =========================================================================
 
   describe("multi-channel", () => {
     it("caches channels independently", async () => {
@@ -1351,9 +1334,7 @@ describe("CpuCache", () => {
     });
   });
 
-  // =========================================================================
   // Demotion
-  // =========================================================================
 
   describe("demotion", () => {
     it("demotes entity entries when entity leaves active set", async () => {
@@ -1373,9 +1354,7 @@ describe("CpuCache", () => {
     });
   });
 
-  // =========================================================================
   // Eviction tiers
-  // =========================================================================
 
   describe("eviction tiers", () => {
     it("evicts prefetch before active-detail under budget pressure", async () => {
@@ -1485,9 +1464,7 @@ describe("CpuCache", () => {
     });
   });
 
-  // =========================================================================
-  // Minimap lane routing (ADR 0023)
-  // =========================================================================
+  // Minimap lane routing
 
   describe("minimap lane routing", () => {
     it("routes lane: \"minimap\" chunks to the overview cache", async () => {
@@ -1577,13 +1554,11 @@ describe("CpuCache", () => {
     });
   });
 
-  // =========================================================================
   // Dual-lane demand: minimap seeding + the view's coarse lane
-  // =========================================================================
   //
   // The minimap and coarse lanes share a residency tier and a dedup
   // key, so one fetch (or one cached entry) can serve both. Whichever
-  // lane's request holds the queue slot, an arrival the VIEW demanded
+  // lane's request holds the queue slot, an arrival the view demanded
   // this tick must be deliverable immediately — idle fill must not wait
   // for the next interaction-triggered rebuild to relabel the entry.
   // Chunks only the minimap wanted stay off the view's delivery path.
@@ -1633,7 +1608,7 @@ describe("CpuCache", () => {
       cache.submit(makePlan([minimapReq()]));
 
       // Rebuild while the fetch is in flight: the view's coarse request
-      // rides the same fetch. The minimap request is deliberately LAST
+      // rides the same fetch. The minimap request is deliberately last
       // (its bulk-demoted sort position) so the freshest in-flight
       // metadata carries lane "minimap".
       cache.onPlanRebuildStart();
@@ -1690,9 +1665,7 @@ describe("CpuCache", () => {
     });
   });
 
-  // =========================================================================
   // Error handling
-  // =========================================================================
 
   describe("error handling", () => {
     it("retries transient errors once", async () => {
@@ -1967,7 +1940,7 @@ describe("CpuCache", () => {
       expect(cache.failuresTracked()).toBe(MAX_TRACKED_FAILURES);
 
       // A retained permanent (the most-recent record survives the FIFO drop
-      // of the oldest permanents) stays excluded: re-planning it must NOT
+      // of the oldest permanents) stays excluded: re-planning it must not
       // issue a new fetch. Merely counting entries would miss a regression
       // where the gate re-enqueued an evicted-then-forgotten key.
       const retained = makeRequest({
@@ -1981,7 +1954,7 @@ describe("CpuCache", () => {
 
     it("retains a fresh transient's backoff even when the permanent store is full", async () => {
       // The compound exposure: a malformed collection floods the map with
-      // permanent 404s AND a throttling backend produces transient timeouts.
+      // permanent 404s and a throttling backend produces transient timeouts.
       // The transient store is independent, so the transient keeps its own
       // backoff slot instead of being crowded out — no no-backoff retry storm
       // against the throttling backend.
@@ -1995,7 +1968,7 @@ describe("CpuCache", () => {
           random: () => 0, // returns each backoff band's floor
         });
 
-        // Saturate the PERMANENT store to capacity with 404s.
+        // Saturate the permanent store to capacity with 404s.
         const permReqs = Array.from({ length: MAX_TRACKED_FAILURES }, (_, i) =>
           makeRequest({ x: i, chunkKey: `0/0/0/0/0/${i}` }),
         );
@@ -2006,7 +1979,7 @@ describe("CpuCache", () => {
         await vi.advanceTimersByTimeAsync(0);
         expect(cache.failuresTracked()).toBe(MAX_TRACKED_FAILURES);
 
-        // A brand-new TRANSIENT failure arrives while permanents are full.
+        // A brand-new transient failure arrives while permanents are full.
         const tIdx = MAX_TRACKED_FAILURES;
         const transientReq = makeRequest({ x: tIdx, chunkKey: `0/0/0/0/0/${tIdx}` });
         const transientComposite = `entity-1/image-1/0/0/0/0/0/${tIdx}`;
@@ -2016,13 +1989,12 @@ describe("CpuCache", () => {
         source.reject(transientComposite, new Error("Network error"));
         await vi.advanceTimersByTimeAsync(0);
 
-        // The transient got its OWN store slot — permanents did not evict it.
+        // The transient got its own store slot — permanents did not evict it.
         expect(cache.failuresTracked()).toBe(MAX_TRACKED_FAILURES + 1);
 
-        // The regression this fixes: the transient is RETAINED with its
-        // backoff. Re-planning it before its eligibility instant issues NO
-        // new fetch — with a single saturated map it would have been evicted
-        // and re-fetched with no backoff every tick.
+        // The transient keeps its backoff: re-planning it before its
+        // eligibility instant issues no new fetch. One shared saturated map
+        // would evict it and re-fetch it every tick.
         const backoffFloor =
           FAILURE_BACKOFF_BASE_MS * (1 - FAILURE_BACKOFF_JITTER_RATIO);
         clock = backoffFloor - 1;
@@ -2137,9 +2109,7 @@ describe("CpuCache", () => {
     });
   });
 
-  // =========================================================================
   // Delivery failure streak surfacing
-  // =========================================================================
 
   describe("delivery failure streak surfacing", () => {
     it("notifies once when a failure streak reaches the threshold, throttled thereafter", async () => {
@@ -2301,7 +2271,7 @@ describe("CpuCache", () => {
       for (let i = 0; i < CHUNK_FAILURE_STREAK_THRESHOLD - 1; i++) {
         source.reject(`entity-1/image-1/0/0/0/0/0/${i}`, new Error("404 not found"));
       }
-      // …then the last fetch COMPLETES but its bytes cannot be decoded
+      // …then the last fetch completes but its bytes cannot be decoded
       // (e.g. a source answering 200 with the wrong wire format). That is
       // a delivery failure, not a recovery.
       failDecode = true;
@@ -2417,7 +2387,7 @@ describe("CpuCache", () => {
     it("a server-reported transient that also fails its retry feeds the streak once, not twice", async () => {
       // The recoverable-throttle case: every chunk comes back `unavailable`
       // (server-reported, transient), is retried once, and
-      // the retry ALSO comes back `unavailable`. Each such chunk produces two
+      // the retry also comes back `unavailable`. Each such chunk produces two
       // physical rejections but is a single failed delivery: it must feed the
       // streak exactly once. If the retry double-counted, half a threshold of
       // distinct throttled chunks would trip the aggregate "loading is failing"
@@ -2488,8 +2458,8 @@ describe("CpuCache", () => {
     });
 
     it("a chunk whose client transient is retried into a server-reported failure feeds the streak once", async () => {
-      // The undercount case: a chunk's FIRST attempt is a client-side
-      // transient (streak-exempt, retried) and its RETRY comes back
+      // The undercount case: a chunk's first attempt is a client-side
+      // transient (streak-exempt, retried) and its retry comes back
       // server-reported. The eligible failure lands on the retry, not the
       // first attempt, so it must still feed the streak exactly once — a
       // whole viewport of such chunks against a source that flaps then fails
@@ -2556,7 +2526,7 @@ describe("CpuCache", () => {
       expect(onChunkFailureStreak).toHaveBeenCalledTimes(1);
       expect(onChunkFailureRecovered).not.toHaveBeenCalled();
 
-      // A delivered (fetched AND decoded) chunk retires the signal…
+      // A delivered (fetched and decoded) chunk retires the signal…
       cache.submit(makePlan([makeRequest({ y: 1 })]));
       source.resolve("entity-1/image-1/0/0/0/0/1/0");
       await flush();
@@ -2568,14 +2538,14 @@ describe("CpuCache", () => {
       await flush();
       expect(onChunkFailureRecovered).toHaveBeenCalledTimes(1);
 
-      // A NEW streak after recovery is a new incident: it notifies
+      // A new streak after recovery is a new incident: it notifies
       // immediately instead of waiting out the previous throttle window.
       await rejectBatch(3, CHUNK_FAILURE_STREAK_THRESHOLD);
       expect(onChunkFailureStreak).toHaveBeenCalledTimes(2);
     });
 
     it("re-surfaces after a delivery reset when a re-planned source stays dead", async () => {
-      // The streak counts CONSECUTIVE failed deliveries: once a delivery
+      // The streak counts consecutive failed deliveries: once a delivery
       // resets it, a chunk that keeps failing across later re-plan cycles must
       // re-contribute — otherwise a partially-dead source surfaces once, one
       // unrelated chunk arrives, and the still-massively-failing chunks can
@@ -2755,9 +2725,7 @@ describe("CpuCache", () => {
     });
   });
 
-  // =========================================================================
   // Budget enforcement
-  // =========================================================================
 
   describe("budget enforcement", () => {
     it("detail borrows unused coarse budget while coarse is idle, then evicts back to its protected budget", async () => {
@@ -2865,9 +2833,7 @@ describe("CpuCache", () => {
     });
   });
 
-  // =========================================================================
   // getCached
-  // =========================================================================
 
   describe("getCached", () => {
     it("returns cached detail entry", async () => {
@@ -2900,7 +2866,7 @@ describe("CpuCache", () => {
       cache.submit(makePlan([req]));
       await flush();
 
-      // Delivery consumption marks sent but does NOT remove from cache.
+      // Delivery consumption marks sent but does not remove from cache.
       consumeDeliverables(cache);
 
       const result = cache.getCachedChunk("entity-1", "0/0/0/0/0/0");
@@ -2940,9 +2906,7 @@ describe("CpuCache", () => {
     });
   });
 
-  // =========================================================================
   // Reset
-  // =========================================================================
 
   describe("reset", () => {
     it("clears all state", async () => {
@@ -2965,9 +2929,7 @@ describe("CpuCache", () => {
     });
   });
 
-  // =========================================================================
   // Proxy tier
-  // =========================================================================
 
   describe("proxy tier", () => {
     function makeProxyRequest(overrides?: Partial<ProxyRequest>): ProxyRequest {
@@ -3216,7 +3178,7 @@ describe("CpuCache", () => {
         expect(source.pendingProxyFetches.has(AWAY_KEY)).toBe(true);
 
         // entity-1 leaves the view; entity-2 is the current view now. The
-        // departure is only detected at the NEXT rebuild boundary.
+        // departure is only detected at the next rebuild boundary.
         cache.onPlanRebuildStart();
         cache.submit(makePlan([], [makeActiveEntry("entity-2", "image-2")]));
         expect(cache.telemetry().inFlightProxyCount).toBe(1);
@@ -3306,10 +3268,10 @@ describe("CpuCache", () => {
       it("keeps a still-wanted group proxy when its group leaves the active set on a zoom-in", async () => {
         // Group-to-tile zoom-in: the group first renders as a single
         // GroupProxy3D (the group is the active entity), then resolves into
-        // individual tiles that share that SAME group proxy as their fallback.
+        // individual tiles that share that same group proxy as their fallback.
         // The group id leaves the active set, but the group proxy — keyed by
         // the group id, not a per-tile entity — stays continuously requested.
-        // The per-entity departure cancel must NOT abort it (that would churn
+        // The per-entity departure cancel must not abort it (that would churn
         // a large shared fallback with an abort + refetch every zoom-in).
         const { cache, source } = createTestCache();
         source.autoResolveProxyBytes = null; // hold the proxy in-flight
@@ -3357,9 +3319,7 @@ describe("CpuCache", () => {
     });
   });
 
-  // =========================================================================
   // Subtle behaviours: race orderings, telemetry shape, eviction-burst log.
-  // =========================================================================
 
   describe("subtle behaviours", () => {
     beforeEach(() => {

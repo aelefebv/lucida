@@ -13,86 +13,34 @@ pub struct ViewQueryResult {
 
 /// Incremental form of a [`ViewQueryResult`].
 ///
-/// A consumer that has already processed a prior query for a dataset can ask
-/// for only what changed since then. The two variants let the producer choose
-/// between a self-contained snapshot and a difference:
-///
 /// - [`ViewQueryDelta::Full`] carries the entire visible set. It is returned
-///   for the first query of a dataset, after any change that alters which
-///   records are present (the membership base), after a camera-mode change,
-///   and whenever a correct difference cannot be established. It is always safe
-///   to treat as a fresh start.
+///   for a dataset's first query, after any change to which records are
+///   present, after a camera-mode change, and whenever a correct difference
+///   cannot be established. It is always safe to treat as a fresh start.
 /// - [`ViewQueryDelta::Delta`] carries only the records that entered, left, or
-///   whose *quantized* fields changed since the prior query.
+///   whose quantized fields changed since the prior query.
 ///
-/// # Keying
+/// Records are keyed by [`EntityQueryResult::image_id`]. `entity_id` is not
+/// unique: one entity can own several images at different pyramid depths.
+/// Starting from a `Full`, dropping each delta's `left` and upserting its
+/// `entered` and `changed` by `image_id` rebuilds what a fresh query reports.
 ///
-/// Records are keyed by [`EntityQueryResult::image_id`], the unique per-record
-/// (per-member) identity. [`EntityQueryResult::entity_id`] is **not** unique: a
-/// single entity can own more than one image, so a query can emit several
-/// records that share an `entity_id` but differ in pyramid depth and therefore
-/// in `target_level`. Keying on `image_id` keeps those records distinct.
+/// The quantized set is `{ membership, visible, target_level, kind }`. The
+/// continuous fields (`importance`, `projected_diagonal_px`,
+/// `projected_area_px2`, `centroid_world`) are deliberately not triggers, so
+/// a small camera nudge yields a small delta. Reported records carry current
+/// values for every field, but an unreported record's continuous values may be
+/// stale.
 ///
-/// # Reconstruction
+/// So a consumer must not read absence from a delta as "nothing I derive from
+/// this record changed" when it derives from a continuous field: a projected
+/// size can cross a threshold while the quantized set holds steady, and the
+/// consumer must recompute that decision itself.
 ///
-/// Applying deltas in order rebuilds the same set a fresh [`ViewQueryResult`]
-/// would report. Starting from a `Full`, for each subsequent `Delta`: drop the
-/// records whose `image_id` is in `left`, then insert or overwrite every record
-/// in `entered` and `changed` keyed by its `image_id`. The resulting map of
-/// `image_id → { visible, target_level, kind }` equals the one a full query
-/// would produce at that step.
-///
-/// # Quantized fields
-///
-/// Exactly four aspects of a record trigger a delta entry, all keyed by
-/// [`EntityQueryResult::image_id`]: membership (whether the record is present at
-/// all), [`EntityQueryResult::visible`], [`EntityQueryResult::target_level`],
-/// and [`EntityQueryResult::kind`]. This quantized set —
-/// `{ membership, visible, target_level, kind }` — is the whole of what a
-/// delta tracks.
-///
-/// The continuous fields ([`EntityQueryResult::importance`],
-/// [`EntityQueryResult::projected_diagonal_px`],
-/// [`EntityQueryResult::projected_area_px2`], and
-/// [`EntityQueryResult::centroid_world`]) change on nearly every camera move and
-/// are deliberately *not* triggers, so a small camera nudge yields a small delta.
-/// Records reported in `entered` and `changed` carry current values for every
-/// field, the continuous ones included; those values are simply never, on their
-/// own, a reason to report an otherwise-unchanged record.
-///
-/// # Continuous fields go stale between deltas
-///
-/// Because the continuous fields are untracked, a record that appears in no
-/// delta between two `Full`s may hold *stale* continuous values: its last
-/// reported values stand until the record next surfaces in `entered` or
-/// `changed` for a quantized reason. Absence from a delta therefore states only
-/// that `{ membership, visible, target_level, kind }` is unchanged for that
-/// record; it makes no claim about the record's continuous fields.
-///
-/// A consumer MUST NOT read "this record is absent from the delta" as "nothing I
-/// derive from this record changed" when what it derives comes from a continuous
-/// field. A continuous field can cross a discrete boundary while the quantized
-/// set holds steady: over a zoom, [`EntityQueryResult::projected_diagonal_px`]
-/// can pass a threshold that flips a downstream discrete choice — a
-/// coarse-vs-detailed presentation mode selected by projected size, say — even
-/// though membership, visibility, target level, and kind are all identical and
-/// the delta is thus empty. A consumer that turns a continuous field into such a
-/// discrete decision must recompute that decision itself for the records it
-/// cares about; the delta does not report continuous-boundary crossings and
-/// cannot stand in for that recomputation.
-///
-/// # Epochs cover what the quantized set does not
-///
-/// The [`SceneEpochs`] carried on both variants reflect structural and selection
-/// changes — a change of the active selection along a dimension axis or of a
-/// per-channel display setting (see [`SceneEpochs::selection`]), or of entity
-/// membership, layout, or the asset catalog — that the quantized set does not
-/// encode. A consumer that must react to those (for example, a selection change
-/// that should drive its own refetch) must consult `epochs`, not just `entered`
-/// / `left` / `changed`.
-///
-/// The vectors are ordered by `image_id` so a consumer can rely on a stable,
-/// deterministic sequence.
+/// Changes the quantized set does not encode (selection, per-channel display,
+/// membership, layout, the asset catalog) show in the [`SceneEpochs`] on both
+/// variants; see [`SceneEpochs::selection`]. The vectors are ordered by
+/// `image_id`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ViewQueryDelta {
     /// A complete snapshot; treat as a fresh start.
@@ -182,8 +130,6 @@ mod tests {
         let parsed: ViewQueryResult = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.visible_entities.len(), result.visible_entities.len());
     }
-
-    // ---- view_query_delta ----
 
     use crate::camera::Camera;
     use std::collections::HashMap;
@@ -566,8 +512,6 @@ mod tests {
             "the two images never diverged in LOD; test fixture is not exercising the bug"
         );
     }
-
-    // ---- target level ----
 
     use crate::target_level::HYSTERESIS_OCTAVES;
 

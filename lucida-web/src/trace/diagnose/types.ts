@@ -2,15 +2,10 @@
  * The diagnostic document: what a trace *means*, as opposed to what it
  * recorded.
  *
- * One pure derivation feeds both surfaces — the agent text and the monitor's
+ * One pure derivation feeds both surfaces: the agent text and the monitor's
  * cards render from this object, so they cannot disagree about which phase
- * stalled or how much of the run was measured. #892 found #893's threshold
- * rules transferred to the visual surface unchanged, which is why this is one
- * module rather than two.
- *
- * Every number a surface prints exists here at a stated path. The converse
- * does not hold: this document is a superset and each renderer selects from
- * it.
+ * stalled or how much of the run was measured. Every number a surface prints
+ * exists here at a stated path, and each renderer selects from it.
  */
 
 import type { ResidencyTier } from "../../pipeline/residencyTier.ts";
@@ -40,12 +35,12 @@ export const DIAGNOSTIC_SCHEMA_VERSION = 1;
  * Which family of work a phase belongs to, and therefore which threshold
  * family may judge it.
  *
- * The split is not cosmetic. A pipeline whose p50 network first byte is 98 ms
- * and whose p50 scheduler queue wait is 4,600 ms (#899) has no single number
- * that can serve both: any per-chunk ceiling on a queue either fires on every
- * row or on none. Queue phases therefore get a backlog ETA instead of a
- * ceiling, and `unrecorded` exists so the chain can carry time no instrument
- * claims without anything downstream being able to blame it.
+ * A pipeline whose p50 network first byte is 98 ms and whose p50 scheduler
+ * queue wait is 4,600 ms has no single number that can serve both: any
+ * per-chunk ceiling on a queue either fires on every row or on none. Queue
+ * phases therefore get a backlog ETA instead of a ceiling, and `unrecorded`
+ * exists so the chain can carry time no instrument claims without anything
+ * downstream being able to blame it.
  */
 export type PhaseClass = "io" | "compute" | "queue" | "unrecorded";
 
@@ -57,8 +52,8 @@ export type PhaseSide = "browser" | "server" | "metadata";
  *
  * `totalMs` deliberately is not a share of the run. Thousands of rows are in
  * flight at once, so the totals overlap and their sum routinely exceeds the
- * wall clock — reading the largest total as the answer is precisely the
- * mistake the critical-path back-walk exists to avoid.
+ * wall clock. Reading the largest total as the answer is the mistake the
+ * critical-path back-walk exists to avoid.
  */
 export interface PhaseRollup {
   /** `browser.wire`, `server.permit-wait`, `metadata.backend-read`. */
@@ -77,10 +72,9 @@ export interface PhaseRollup {
    * The stretch of the run's clock this phase occupied, and how many of its
    * rows carried a position at all.
    *
-   * Null when none did. A phase can be measured and unplaceable — a server row
-   * the merge could not nest has a duration and no position (ADR 0050) — and a
-   * timeline track drawn at the origin for one of those is the same class of
-   * lie as drawing silence over a cold open's metadata reads.
+   * Null when none did. A phase can be measured and unplaceable: a server row
+   * the merge could not nest has a duration and no position, and must not be
+   * drawn at the origin.
    *
    * This is what a timeline track is drawn from. `p95` cannot place anything,
    * and the monitor is not allowed to reach past this document for a number.
@@ -90,7 +84,7 @@ export interface PhaseRollup {
    * The row behind {@link maxMs}, named. A drill-down carries a phase scope and
    * the worst row rather than a time coordinate, so the identity has to exist
    * here: a chunk key on the browser side, the `(rid, connection generation)`
-   * join key on the server side (ADR 0048), and the open plus label on a
+   * join key on the server side, and the open plus label on a
    * metadata read.
    */
   worst: { label: string; ms: number } | null;
@@ -149,7 +143,7 @@ export interface PathSegment {
   rows: number;
   /** The chunk the terminal row named, when the segment is one row's phase. */
   chunkKey?: string;
-  /** A sub-breakdown in milliseconds — server phases inside a wire bracket, read phases inside an open. */
+  /** A sub-breakdown in milliseconds: server phases inside a wire bracket, read phases inside an open. */
   breakdown?: Record<string, number>;
 }
 
@@ -170,7 +164,7 @@ export interface CriticalPath {
   segments: PathSegment[];
   /**
    * The chain's share of the target. A chain that starts at run start tiles
-   * the whole interval, so this is 100 by construction — which is why it is
+   * the whole interval, so this is 100 by construction, which is why it is
    * *not* the coverage number. Read {@link DiagnosticCoverage.accountedPct}
    * for how much of the run was instrumented.
    */
@@ -182,7 +176,7 @@ export interface CriticalPath {
  *
  * Seven words, each with an explicit degradation. A confidence that carries no
  * statement of what it cannot see is a confidence a reader will over-trust, so
- * `degraded` is required on all seven — including the strongest, which still
+ * `degraded` is required on all seven, including the strongest, which still
  * cannot see queue time it never stamped.
  */
 export type Confidence =
@@ -307,9 +301,8 @@ export interface DiagnosticCoverage {
   wallMs: number;
   accountedMs: number;
   /**
-   * Floored, never rounded. 99.6% printing as 100% in the honesty block is the
-   * exact failure #893 hit: it reported `100% accounted` for a run that was
-   * 87% pre-instrument boot.
+   * Floored, never rounded, so 99.6% never prints as `100% accounted` in the
+   * honesty block.
    */
   accountedPct: number;
   /** The holes, carried through from the trace rather than re-derived. */
@@ -350,8 +343,8 @@ export interface DiagnosticCoverage {
   /** Counted-not-timed phase totals, so nobody looks for a duration that was never measurable. */
   countedPhases: Record<string, number>;
   /**
-   * Counters that read as health and are not. #899 recorded zero retries, zero
-   * failures and zero evictions while the pipeline ran 20,000 requests behind.
+   * Counters that read as health and are not: zero retries, failures and
+   * evictions are consistent with a pipeline running 20,000 requests behind.
    */
   notHealthSignals: { metric: string; value: number }[];
 }
@@ -646,7 +639,6 @@ export interface SpatialGroup {
   level: number;
   state: RowState;
   n: number;
-  /** Distinct entities in the group. */
   entityCount: number;
   box: SpatialBox;
   /** The longest any row in the group has been alive. */
@@ -660,7 +652,6 @@ export interface SpatialGroup {
  * than by the row count.
  */
 export interface SpatialSummary {
-  /** Rows the summary counted. */
   rowCount: number;
   /** Rows still in flight first, then complete, then retired; by level within a state. */
   groups: SpatialGroup[];

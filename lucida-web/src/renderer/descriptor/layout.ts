@@ -1,14 +1,9 @@
 /**
- * Single source of truth for the `EntityDescriptor` byte layout.
- *
- * Both TS writers — the canonical {@link
- * descriptorBuffer.serializeEntityDescriptor} (cold-state path) and the
- * transient {@link descriptor/transient.serializeTransientDescriptor}
- * (minimap path) — must read offsets from this file. The WGSL struct
- * declarations in `slice.wgsl` and `volume.wgsl` must agree with these
- * offsets; the cross-check is enforced by `descriptor/layout.test.ts`,
- * which parses both shaders and asserts WGSL std140 / host-shareable
- * offsets match the constants below.
+ * Single source of truth for the `EntityDescriptor` byte layout. Both TS
+ * writers, {@link descriptorBuffer.serializeEntityDescriptor} (cold state)
+ * and {@link descriptor/transient.serializeTransientDescriptor} (minimap),
+ * must read offsets from here. `descriptor/layout.test.ts` parses
+ * `slice.wgsl` and `volume.wgsl` and asserts their struct offsets match.
  *
  * Layout (offsets in bytes):
  *

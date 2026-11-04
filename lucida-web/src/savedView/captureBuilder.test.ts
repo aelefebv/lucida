@@ -1,23 +1,14 @@
 // @vitest-environment happy-dom
 //
-// Tests for `captureBuilder`'s share-warning classifier
-// (`hasLocalFilePaths` / `localFilePathCount`). The classifier now
-// delegates to the wasm-shimmed `is_local_dataset_url`, sharing one
-// implementation with the Rust server/storage layer — see
-// `docs/adr/0042-canonical-dataset-url-form.md` and
-// `docs/adr/0014-local-file-datasets-personal-only-in-saved-views.md`.
-//
-// The wasm-shim smoke test in `urlHelpers.test.ts` covers wiring drift
-// against the real wasm; here we mock the shim to a small reference
-// implementation so these tests can run as pure unit tests, and assert
-// the externally observable property: a `SavedView` containing a
-// Windows-canonical or UNC-canonical local path triggers the warning,
-// remote-scheme URLs do not, and existing Unix-path behavior is
-// unchanged.
+// The share-warning classifier (`hasLocalFilePaths` / `localFilePathCount`),
+// which delegates to the wasm `is_local_dataset_url` (see
+// `docs/adr/0014-local-file-datasets-personal-only-in-saved-views.md`).
+// The shim is mocked with a small reference implementation;
+// `urlHelpers.test.ts` covers the real wasm wiring.
 
 import { describe, it, expect, vi } from "vitest";
 
-// Mock BEFORE importing the module under test so the import-time
+// Mock before importing the module under test so its import-time
 // `is_local_dataset_url` reference picks up the stub.
 vi.mock("lucida-core", () => ({
   is_local_dataset_url: (url: string): boolean => {
@@ -66,8 +57,6 @@ function viewWith(datasets: string[]): SavedView {
 }
 
 describe("captureBuilder.isLocalFilePath (via hasLocalFilePaths)", () => {
-  // --- Existing Unix-path behavior must not regress. ---
-
   it("classifies a Unix path as local", () => {
     expect(hasLocalFilePaths(viewWith(["/data/scans/foo.zarr"]))).toBe(true);
   });
@@ -76,8 +65,6 @@ describe("captureBuilder.isLocalFilePath (via hasLocalFilePaths)", () => {
     expect(hasLocalFilePaths(viewWith(["/"]))).toBe(true);
   });
 
-  // --- New cross-platform cases (ADR-0042). ---
-
   it("classifies a canonical drive-letter path as local", () => {
     expect(hasLocalFilePaths(viewWith(["c:/foo"]))).toBe(true);
   });
@@ -85,8 +72,6 @@ describe("captureBuilder.isLocalFilePath (via hasLocalFilePaths)", () => {
   it("classifies a canonical UNC path as local", () => {
     expect(hasLocalFilePaths(viewWith(["//server/share/foo"]))).toBe(true);
   });
-
-  // --- Remote schemes are NOT local. ---
 
   it("does not classify gs:// as local", () => {
     expect(hasLocalFilePaths(viewWith(["gs://bucket/foo"]))).toBe(false);
@@ -100,13 +85,9 @@ describe("captureBuilder.isLocalFilePath (via hasLocalFilePaths)", () => {
     expect(hasLocalFilePaths(viewWith(["https://host.example.com/foo.zarr"]))).toBe(false);
   });
 
-  // --- Empty view is not local. ---
-
   it("returns false for an empty datasets list", () => {
     expect(hasLocalFilePaths(viewWith([]))).toBe(false);
   });
-
-  // --- Mixed views count correctly. ---
 
   it("counts every local path in a mixed view", () => {
     const v = viewWith([

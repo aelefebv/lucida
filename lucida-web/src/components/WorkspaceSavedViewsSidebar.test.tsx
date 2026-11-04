@@ -200,9 +200,8 @@ describe("WorkspaceSavedViewsSidebar — promote to shared", () => {
 
 describe("WorkspaceSavedViewsSidebar — save modal (editor)", () => {
   it("defaults to personal, lets the editor pick shared, and POSTs visibility", async () => {
-    // Slice 2 (#699/#700 follow-up): the dialog now defaults to Personal for ALL
-    // roles so a hurried save can't broadcast to the team by accident; an editor
-    // can still deliberately pick Shared.
+    // Personal for all roles, so a hurried save can't broadcast to the team; an
+    // editor can still pick Shared.
     let postBody: Record<string, unknown> | null = null;
     responder = (_url, init) => {
       if (init?.method === "POST") {
@@ -266,14 +265,6 @@ describe("WorkspaceSavedViewsSidebar — save modal (viewer)", () => {
     expect(postBody).toMatchObject({ visibility: "personal" });
   });
 });
-
-// --- Coverage ported from the deleted BookmarkSidebar.test.tsx ---------------
-// These four behavior groups (rename, delete-with-confirm, copy link, filter)
-// were exercised only by the now-removed BookmarkSidebar test. They are still
-// live in WorkspaceSavedViewsSidebar, so they are re-asserted here against the
-// successor component's real API and DOM (menu via "Saved view actions" ->
-// role="menu"; rename via .bookmark-name-input; delete via a role="alertdialog"
-// ConfirmModal; PATCH/DELETE to /api/workspaces/<ws>/saved-views/<id>).
 
 describe("WorkspaceSavedViewsSidebar — inline rename", () => {
   it("Enter commits the new name via PATCH", async () => {
@@ -441,13 +432,9 @@ describe("WorkspaceSavedViewsSidebar — filter and search", () => {
   });
 });
 
-// --- Fix A (#818 part 1): deferred reject keeps an independent, reachable Undo
-// per pending view ------------------------------------------------------------
-// Reject is a delayed, cancelable PATCH backed by a per-id timer; the toast used
-// to be a single slot, so rejecting B clobbered A's "Undo" toast while A's timer
-// kept running → A committed with no recourse. The fix is a toast STACK keyed by
-// saved-view id: each pending reject owns its own dismissible Undo for the whole
-// window. These tests use fake timers for the ~6s window and clean them up.
+// Each pending reject owns its own Undo toast for the whole window, so
+// rejecting B must not clobber A's Undo while A's timer runs. Fake timers cover
+// the ~6s window.
 
 function rejectButton(savedViewId: string): HTMLButtonElement {
   return screen.getByTestId(`saved-view-reject-${savedViewId}`) as HTMLButtonElement;
@@ -497,8 +484,8 @@ describe("WorkspaceSavedViewsSidebar — deferred reject (multi-undo)", () => {
       fireEvent.click(rejectButton("pb"));
     });
 
-    // Two distinct toasts, each naming its view and each carrying an Undo — A's
-    // toast was NOT evicted by B's (the bug). No reject has been sent yet.
+    // Two toasts, each naming its view and carrying an Undo: B's did not evict
+    // A's. No reject has been sent yet.
     const toasts = screen.getAllByTestId("saved-view-toast");
     expect(toasts).toHaveLength(2);
     const aToast = toasts.find((t) => within(t).queryByText(/Proposal A/)) as HTMLElement;
@@ -538,7 +525,7 @@ describe("WorkspaceSavedViewsSidebar — deferred reject (multi-undo)", () => {
       await vi.advanceTimersByTimeAsync(6000);
     });
 
-    // The reject PATCH fired for B only — never for the undone A.
+    // The reject fired for B only, never for the undone A.
     const posts = rejectPosts();
     expect(posts).toHaveLength(1);
     expect(posts[0].url).toContain("/saved-views/pb/reject");
@@ -554,8 +541,8 @@ describe("WorkspaceSavedViewsSidebar — deferred reject (multi-undo)", () => {
     // Unmount while the reject is still pending.
     cleanup();
 
-    // Advancing past the window must NOT fire the reject (timer was cleared on
-    // unmount) — guards against a setState-after-unmount / stray PATCH.
+    // Advancing past the window must not fire the reject: unmount cleared the
+    // timer.
     await act(async () => {
       await vi.advanceTimersByTimeAsync(6000);
     });
@@ -563,13 +550,9 @@ describe("WorkspaceSavedViewsSidebar — deferred reject (multi-undo)", () => {
   });
 });
 
-// --- Fix B (#818 part 2): the open view going away clears the active highlight
-// ----------------------------------------------------------------------------
-// `currentOpenSavedViewId` highlights the open row. When the user deletes /
-// withdraws that view, or its deferred reject commits, the sidebar tells the
-// host via `onActiveSavedViewInvalidated` so the host can drop the now-dangling
-// highlight. (Viewport-change clearing lives host-side off the live-view signal
-// and is covered by the host wiring, not this component's surface.)
+// When the open view is deleted, withdrawn, or its deferred reject commits, the
+// sidebar calls `onActiveSavedViewInvalidated` so the host drops the highlight.
+// Viewport-change clearing is host-side and tested there.
 
 describe("WorkspaceSavedViewsSidebar — active-row invalidation", () => {
   it("renders the open row as active (data-active / aria-current)", async () => {
@@ -623,7 +606,7 @@ describe("WorkspaceSavedViewsSidebar — active-row invalidation", () => {
       if (init?.method === "PATCH") {
         return jsonResponse(200, savedViewRow({ id: "v1", name: "Mine", visibility: "personal" }));
       }
-      // A viewer's OWN proposed view exposes "Withdraw proposal".
+      // A viewer's own proposed view exposes "Withdraw proposal".
       return jsonResponse(200, [savedViewRow({ id: "v1", name: "Mine", visibility: "proposed", created_by: "alice@example.com" })]);
     };
     await act(async () => {

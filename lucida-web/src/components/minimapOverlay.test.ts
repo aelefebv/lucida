@@ -111,7 +111,7 @@ describe("dynamic overlay split", () => {
 
     // No canvas clear (the consumer owns clearing the cache canvas).
     expect(log.some((op) => op.type === "call" && op.name === "clearRect")).toBe(false);
-    // Slice planes fill with the plane color; viewport rects and the cube are NOT here.
+    // Slice planes fill with the plane color; viewport rects and the cube are not here.
     expect(log.some((op) => op.type === "set" && op.name === "fillStyle" && op.value === "rgba(255,200,50,0.25)")).toBe(true);
     expect(log.some((op) => op.type === "set" && op.name === "fillStyle" && op.value === "rgba(100,180,255,0.3)")).toBe(false);
     // No orientation-cube background circle.

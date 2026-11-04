@@ -76,22 +76,14 @@ struct AttributeScope<'a> {
     map: &'a serde_json::Map<String, serde_json::Value>,
 }
 
-/// Pick the single attribute map that owns this group's OME blocks, tolerating
-/// both placements that occur in the wild.
+/// Pick the single attribute map that owns this group's OME blocks.
 ///
-/// OME-Zarr 0.5 namespaces every block under `attributes.ome` (`multiscales`,
-/// `omero`, `labels`, `image-label`, `plate`, `well`). The preceding 0.4
-/// conventions put those same keys at the top level of the group's attributes,
-/// and writers that moved to Zarr v3 ahead of the 0.5 metadata layout emit
-/// Zarr v3 `zarr.json` files carrying the 0.4-style top-level placement. Both
-/// are unambiguous, so both are read.
-///
-/// The choice is made **once per group, never per block**: when `attributes.ome`
-/// is an object it is the sole source, so a conformant 0.5 group can't have a
-/// block silently satisfied by a stray same-named top-level key. A
-/// present-but-non-object `ome` (e.g. a bare version string) does not count as
-/// the namespace and falls back to the top level. Returns `None` only when the
-/// value carries no `attributes` object at all.
+/// OME-Zarr 0.5 nests every block under `attributes.ome`; 0.4, and Zarr v3
+/// writers that predate the 0.5 layout, put the same keys at the top level.
+/// Both are read. The choice is made once per group, never per block: an
+/// object `attributes.ome` is the sole source, so a stray top-level key
+/// cannot satisfy a 0.5 block. A non-object `ome` falls back to the top
+/// level. `None` only when there is no `attributes` object.
 fn ome_scope(root_json: &serde_json::Value) -> Option<AttributeScope<'_>> {
     let attributes = root_json.get("attributes")?.as_object()?;
     Some(match attributes.get("ome").and_then(|v| v.as_object()) {
@@ -276,31 +268,18 @@ pub(crate) fn parse_multiscales(
 /// Parse per-channel display info from the OME `omero.channels` block of a
 /// root (or tile) `zarr.json` value.
 ///
-/// GENERIC and untrusted-input safe. The omero block is optional rendering
-/// metadata that *any* OME-Zarr producer may emit, omit, or get wrong — this
-/// helper treats it as fully untrusted and never panics, errors, or mislabels:
+/// Generic and safe on untrusted input: the block is optional and often
+/// wrong, so this never panics, errors, or mislabels.
 ///
-/// - Missing `attributes.ome.omero` or `omero.channels`, or `channels` that is
-///   not a JSON array → empty `Vec` (caller falls back to `Ch N`).
-/// - Each entry's `label` must be a non-blank string; entries that are not
-///   objects, lack `label`, or carry a non-string / whitespace-only label have
-///   *no usable label*.
-/// - **Positional integrity**: results are kept aligned to channel index. A
-///   label-less channel in the *middle* is filled with the positional
-///   `Ch {i}` fallback so every later label still lines up with its channel
-///   (dropping it would silently shift all subsequent names). A label-less
-///   *trailing* run is truncated instead — the web falls back per-index for
-///   missing entries, so trimming keeps the wire minimal without misaligning
-///   anything. If no entry has a usable label, the result is empty.
-/// - `color`, when present, must be a string; anything else (number, object,
-///   `null`) is dropped to `None`. The raw hex is carried through verbatim
-///   (no `#`, no validation) — this slice does not consume it.
+/// - A missing or non-array `channels` → empty `Vec` (caller falls back to `Ch N`).
+/// - A usable label is a non-blank string.
+/// - Results stay aligned to channel index: a label-less channel in the
+///   middle gets the `Ch {i}` fallback so later labels still line up, and a
+///   label-less trailing run is dropped. No usable label at all → empty.
+/// - A non-string `color` becomes `None`; the raw hex is carried verbatim.
 ///
-/// The result is intentionally *not* reconciled against the C-axis size here.
-/// Parse stays a pure function of the metadata; if a producer's omero list
-/// disagrees with the channel count, the labels remain positional and the web
-/// falls back per-index for any channel beyond the list. See the module tests
-/// for the malformed-input matrix this guarantees.
+/// Not reconciled against the C-axis size: parse stays a pure function of
+/// the metadata, and the web falls back per index beyond the list.
 pub(crate) fn parse_omero_channels(root_json: &serde_json::Value) -> Vec<ChannelInfo> {
     let Some(channels) = resolve_ome_block(root_json, "omero")
         .and_then(|omero| omero.get("channels"))
@@ -414,7 +393,7 @@ fn is_safe_label_name(name: &str) -> bool {
 /// Parse the label-group names from a `labels/zarr.json` value's
 /// `attributes.ome.labels` list.
 ///
-/// GENERIC and untrusted-input safe: a missing/non-array `labels` yields an
+/// Generic and untrusted-input safe: a missing/non-array `labels` yields an
 /// empty `Vec`; non-string or unsafe entries are dropped; duplicate names are
 /// deduped (first occurrence wins, order preserved); and the count is capped at
 /// [`MAX_LABEL_GROUPS`]. The returned names are safe to use as store-path
@@ -454,7 +433,7 @@ pub(crate) struct ImageLabelMeta {
 
 /// Parse the `attributes.ome.image-label` block of a label group's zarr.json.
 ///
-/// GENERIC and untrusted-input safe: a missing `image-label` yields the default
+/// Generic and untrusted-input safe: a missing `image-label` yields the default
 /// (no colors, no declared source). Each color entry must carry an integer
 /// `label-value` (kept as `i64` — never truncated, since ids exceed 16 bits)
 /// and an `rgba` array of exactly four `0..=255` integers; malformed entries
@@ -1143,8 +1122,6 @@ mod tests {
         assert_eq!(chunk_5d, [1, 1, 10, 64, 64]);
     }
 
-    // --- parse_labels_names tests ---
-
     /// Wrap a `labels` value in the `attributes.ome.labels` envelope the parser
     /// reads from. Spliced verbatim so tests can pass malformed shapes.
     fn labels_group(labels: serde_json::Value) -> serde_json::Value {
@@ -1212,8 +1189,6 @@ mod tests {
         let json = labels_group(serde_json::json!(many));
         assert_eq!(parse_labels_names(&json).len(), MAX_LABEL_GROUPS);
     }
-
-    // --- parse_image_label tests ---
 
     /// Wrap an `image-label` value in the group envelope the parser reads from.
     fn image_label_group(image_label: serde_json::Value) -> serde_json::Value {

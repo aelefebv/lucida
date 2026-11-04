@@ -9,40 +9,29 @@
  */
 
 /**
- * Minimap lane offset — highest urgency, dedicated lane at `0` so
- * whole-sample spatial context appears within ~1 s of dataset open.
- * See ADR 0023. Applies only while the pending seed set is small
- * ({@link MINIMAP_SEED_FAST_MAX_CHUNKS}); larger sets emit at
- * {@link MINIMAP_SEED_BULK_LANE_OFFSET}.
+ * Minimap lane offset. The top lane, so whole-sample context appears
+ * within about 1 s of dataset open (ADR 0023). Applies only while the
+ * pending seed set is small ({@link MINIMAP_SEED_FAST_MAX_CHUNKS});
+ * larger sets emit at {@link MINIMAP_SEED_BULK_LANE_OFFSET}.
  */
 export const MINIMAP_LANE_OFFSET = 0;
 
 /**
  * Largest pending minimap seed set (chunks, per dataset) that still
- * rides the top-priority lane. ADR 0023's top placement rests on the
- * seed set being SMALL — a bounded ~1 s starvation window for the view
- * lanes. A wide collection breaks that premise: tens of thousands of
- * coarsest chunks at top priority would hold every fetch slot for tens
- * of minutes while the visible band waits. Above this count the whole
- * seed set emits at {@link MINIMAP_SEED_BULK_LANE_OFFSET} instead. At
- * typical fetch throughput the cap bounds the worst-case fast-lane
- * window to a few seconds — and on a small collection most seeds are
- * the same chunks the view's coarse lane wants anyway, so they fill
- * both at once.
+ * rides the top lane. Top placement is only safe while the seed set is
+ * small enough to starve the view lanes for a second or two. A wide
+ * collection's coarsest chunks would hold every fetch slot for minutes,
+ * so above this count the whole set emits at
+ * {@link MINIMAP_SEED_BULK_LANE_OFFSET}.
  */
 export const MINIMAP_SEED_FAST_MAX_CHUNKS = 128;
 
 /**
- * Priority FLOOR for minimap seeding once the pending seed count
- * exceeds {@link MINIMAP_SEED_FAST_MAX_CHUNKS}. Lane offsets are not
- * bands — the importance/distance terms in the priority formula are
- * unbounded, so a wide view's coarse/detail requests can run far past
- * any constant — therefore the planner emits bulk seeds at
- * `max(this, highest priority already in the plan + 1)`: strictly
- * behind everything the view asked for. The minimap then fills
- * opportunistically as fetch slots free up: it may take minutes, which
- * is acceptable for a whole-collection overview and not acceptable for
- * the main view.
+ * Priority floor for minimap seeding above
+ * {@link MINIMAP_SEED_FAST_MAX_CHUNKS}. Lane offsets are not bands: the
+ * importance and distance terms are unbounded, so the planner emits bulk
+ * seeds at `max(this, highest priority already in the plan + 1)`, behind
+ * everything the view asked for.
  */
 export const MINIMAP_SEED_BULK_LANE_OFFSET = 2600;
 
@@ -97,52 +86,39 @@ export const DISTANCE_WEIGHT = 10;
  * axis. `-1` biases the spawn origin to the near plane, `+1` to the far
  * plane, `0` keeps it centered.
  *
- * **Safety property (issue #532):** the default is exactly `0`, which
- * adds a `0 * halfDepth = 0` offset to the focal Z used by
- * `chunkDistanceFromCenter`. At the default the priority computation is
- * therefore byte-identical to the pre-bias behavior — proven by
- * `planning.test.ts` ("depth bias 0 reproduces unbiased ordering").
+ * The default must stay exactly `0` so it adds no offset to the focal Z
+ * in `chunkDistanceFromCenter` and ordering matches the unbiased
+ * formula byte for byte. `planning.test.ts` pins this.
  */
 export const DEPTH_BIAS_VIEW = 0;
 
 /**
  * Bump on the parent-group `GroupProxy3D` request inside
- * `tiles-with-proxy-fallback` — pushes it below per-tile proxies so
- * the group proxy is only a coarse fallback while those are in flight.
+ * `tiles-with-proxy-fallback`. Pushes it below per-tile proxies so the
+ * group proxy is only a coarse fallback while those are in flight.
  */
 export const GROUP_PROXY_PRIORITY_BUMP = 100;
 
 /** Per-tick planning tunables threaded through {@link plan}. */
 export interface PlanningConfig {
-  // -- prefetch -------------------------------------------------------
-  /** Steps the prefetch lane looks ahead. See {@link PREFETCH_DEPTH}. */
+  /** See {@link PREFETCH_DEPTH}. */
   prefetchDepth: number;
 
-  // -- priority weights -----------------------------------------------
   /** Coefficient on `(1 - importance)` in the priority formula. */
   importanceWeight: number;
   /** Coefficient on chunk distance from the view center. */
   distanceWeight: number;
   /**
-   * Depth bias for the 3-D center-out spawn origin along the near↔far
-   * (Z) axis, as a fraction of the visible region's half-depth. `0`
-   * (default) keeps the spawn origin centered — byte-identical to the
-   * unbiased behavior. Negative biases toward near, positive toward
-   * far. Clamped to `[-1, 1]`; the resulting focal Z is clamped to the
+   * Clamped to `[-1, 1]`; the resulting focal Z is clamped to the
    * visible Z range. See {@link DEPTH_BIAS_VIEW}.
    */
   depthBiasView: number;
-  /**
-   * Bump applied to the parent-group `GroupProxy3D` request emitted inside
-   * `tiles-with-proxy-fallback`. Pushes it below per-tile proxies.
-   */
+  /** See {@link GROUP_PROXY_PRIORITY_BUMP}. */
   groupProxyPriorityBump: number;
 
-  // -- GPU proxy residency -------------------------------------------
   /** Worker-global GPU proxy residency budget, in bytes. */
   proxyResidencyBudgetBytes: number;
 
-  // -- residency model ------------------------------------------------
   /**
    * Detail render radius as a multiplier of the visible-region
    * half-diagonal. The default max value disables filtering.
@@ -154,22 +130,18 @@ export interface PlanningConfig {
    */
   coarseRenderRadiusView: number;
 
-  // -- lane offsets ---------------------------------------------------
-  /** Minimap lane (highest urgency). See {@link MINIMAP_LANE_OFFSET}. */
+  /** See {@link MINIMAP_LANE_OFFSET}. */
   minimapLaneOffset: number;
   /**
-   * Largest pending minimap seed set that still rides the top-priority
-   * lane. See {@link MINIMAP_SEED_FAST_MAX_CHUNKS}. Optional for
-   * compatibility with config objects predating the knob (older
-   * persisted snapshots, external callers of the pure planner):
-   * `emitMinimapLane` falls back to the module default when absent, so
-   * large demand can never ride the fast lane by omission.
+   * See {@link MINIMAP_SEED_FAST_MAX_CHUNKS}. Optional so configs that
+   * lack it (older persisted snapshots, external callers) fall back to
+   * the module default in `emitMinimapLane` instead of riding the fast
+   * lane by omission.
    */
   minimapSeedFastMaxChunks?: number;
   /**
-   * Lane offset for minimap seeding beyond the fast cap (lowest
-   * urgency). See {@link MINIMAP_SEED_BULK_LANE_OFFSET}. Optional for
-   * the same compatibility reason as {@link minimapSeedFastMaxChunks}.
+   * See {@link MINIMAP_SEED_BULK_LANE_OFFSET}. Optional for the same
+   * reason as {@link minimapSeedFastMaxChunks}.
    */
   minimapSeedBulkLaneOffset?: number;
   /** Detail requests (visible chunks). */

@@ -144,7 +144,7 @@ afterEach(() => {
 });
 
 describe("the minimap overlay at mount", () => {
-  // The reason is in the note above `Props` in Minimap.tsx (#1101).
+  // The reason is in the note above `Props` in Minimap.tsx.
   it("draws once on the overlay, with no software-raster hint, before any tick", () => {
     const clearRect = vi.fn();
     const recorder = recordContextRequests(() => spyingContext({ clearRect }));
@@ -164,7 +164,7 @@ describe("the minimap overlay at mount", () => {
 });
 
 describe("the minimap overlay's content draws", () => {
-  // The reason is in the note above `Props` in Minimap.tsx (#1101).
+  // The reason is in the note above `Props` in Minimap.tsx.
   it("wait for the worker's pipelines, then draw the latest data handed over", () => {
     const recorder = recordContextRequests();
     try {

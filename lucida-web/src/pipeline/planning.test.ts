@@ -420,7 +420,7 @@ describe("iterateChunks", () => {
   });
 
   it("emits all visible chunks regardless of cache state", () => {
-    // Planning no longer filters cached chunks — CpuCache.submit()
+    // Planning does not filter cached chunks: CpuCache.submit()
     // refreshes cached entries' priority/lastSeenTick from the request,
     // so eviction can spare them. iterateChunks must therefore emit
     // every visible chunk, cached or not.
@@ -1231,7 +1231,7 @@ describe("plan() — detail and coarse tiers", () => {
 });
 
 // ---------------------------------------------------------------------------
-// The detail lane follows the target level (#998, ADR 0061)
+// The detail lane follows the target level (ADR 0061)
 // ---------------------------------------------------------------------------
 
 describe("plan() — the detail lane follows the target level", () => {
@@ -1643,7 +1643,7 @@ describe("plan() edge cases", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Prefetch lane — the next level in the zoom direction (#1000)
+// Prefetch lane: the next level in the zoom direction
 // ---------------------------------------------------------------------------
 
 describe("prefetch lane — the next level in the zoom direction", () => {
@@ -1909,8 +1909,8 @@ describe("PlanningConfig", () => {
     expect(DEFAULT_PLANNING_CONFIG.importanceWeight).toBe(IMPORTANCE_WEIGHT);
     expect(DEFAULT_PLANNING_CONFIG.distanceWeight).toBe(DISTANCE_WEIGHT);
     expect(DEFAULT_PLANNING_CONFIG.depthBiasView).toBe(DEPTH_BIAS_VIEW);
-    // The default focal-depth bias must be exactly 0 (centered) — this
-    // is the #532 safety property at the constant level.
+    // The default focal-depth bias must be exactly 0 (centered), so the
+    // default priorities are byte-identical to no bias.
     expect(DEPTH_BIAS_VIEW).toBe(0);
     expect(DEFAULT_PLANNING_CONFIG.groupProxyPriorityBump).toBe(
       GROUP_PROXY_PRIORITY_BUMP,
@@ -2409,7 +2409,7 @@ describe("plan() — minimap lane", () => {
   });
 
   // Bulk seeding. The top-priority lane is justified by the seed set
-  // being SMALL (the "starvation risk is bounded" argument in ADR 0023).
+  // being small (the "starvation risk is bounded" argument in ADR 0023).
   // A wide collection's whole-collection seed set is not small: at tens
   // of thousands of coarsest chunks, top-priority seeding would occupy
   // every fetch slot for minutes while the visible band waits. Above

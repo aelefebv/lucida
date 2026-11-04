@@ -2,8 +2,7 @@
  * Tests for `buildManifestByImage`.
  *
  * The index is built once per `deliverToWorker` tick from `ctx.datasets`
- * and looked up per chunk during dispatch. Eliminates the per-chunk
- * O(D × I) manifest scan in the old `sendDeliveryToWorker`.
+ * and looked up per chunk during dispatch.
  */
 import { describe, it, expect } from "vitest";
 import type { DatasetManifest, ImageSpec } from "../../../manifestTypes.ts";

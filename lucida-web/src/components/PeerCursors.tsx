@@ -20,10 +20,9 @@ function peerColor(clientId: ClientId): string {
 }
 
 /**
- * Display label for a peer's cursor (#540). The server-authored
- * `identity.display_name` when present and non-blank; otherwise the numeric
- * client id (the historic fallback) so anonymous/legacy peers still get a
- * stable label.
+ * A peer's cursor label: the server-authored `identity.display_name` when
+ * non-blank, else the numeric client id, so anonymous peers still get a stable
+ * label.
  */
 function peerLabel(clientId: ClientId, identity?: PeerIdentity | null): string {
   const name = identity?.display_name?.trim();
@@ -31,11 +30,9 @@ function peerLabel(clientId: ClientId, identity?: PeerIdentity | null): string {
 }
 
 /**
- * Single-character chip glyph for the avatar fallback: the first letter of
- * the display name, then the server-precomputed `initial` (derived from
- * display-name-or-email server-side — the raw email never reaches the
- * client), else "?". Used when there is no avatar image (none supplied, or
- * it failed to load).
+ * The avatar fallback glyph: the display name's first letter, then the
+ * server-computed `initial`, else "?". The server computes `initial` so the raw
+ * email never reaches the client.
  */
 function peerInitial(identity?: PeerIdentity | null): string {
   const name = identity?.display_name?.trim();
@@ -73,7 +70,7 @@ function dimBadge(peer: PresenceState, localZ: number, localT: number, localC: n
   const parts: string[] = [];
   let dim = false;
 
-  // Z is a spatial axis in 3D — skip Z badge/dimming when local viewer is in 3D
+  // Z is a spatial axis in 3D, so skip the Z badge and dimming there.
   if (!localIs3d) {
     const peerZ = view.z_range?.start;
     if (peerZ !== undefined && peerZ !== localZ) {
@@ -224,9 +221,8 @@ export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, v
             if (chevronEl) { chevronEl.style.display = "none"; }
             if (chevronLabelEl) { chevronLabelEl.style.display = "none"; }
             if (dotEl) { dotEl.style.display = isDefaulted ? "" : "none"; }
-            // "flex" (not "") so the avatar + name pill keeps its flex row
-            // layout when the RAF re-shows it (#540 added the avatar/name flex
-            // container; clearing display to "" would fall back to block).
+            // "flex", not "": clearing display would drop the avatar and name
+            // pill's flex row back to block layout.
             if (namePillEl) { namePillEl.style.display = "flex"; }
           }
         }
@@ -371,11 +367,9 @@ export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, v
 const AVATAR_SIZE = 16;
 
 /**
- * Auth icon for a peer's cursor pill (#540). Renders the avatar image from
- * `identity.picture_url` when present; on a missing or broken image it falls
- * back to a colored chip showing the peer's initial. The chip is also the
- * direct render when no `picture_url` was supplied (dev sessions) or when the
- * peer has no `identity` at all (anonymous/legacy peers).
+ * Avatar for a peer's cursor pill from `identity.picture_url`, falling back to
+ * a colored chip with the peer's initial when the image is missing or broken,
+ * or the peer has no `identity`.
  *
  * The load failure is local state keyed by URL. Local state keeps one
  * broken avatar from disturbing cursor positioning or other peers. Keying

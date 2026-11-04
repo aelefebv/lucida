@@ -1,18 +1,10 @@
 //! Cookie reading + Set-Cookie building for the session cookie.
 //!
-//! Ships the session cookie (`lucida_session` by default). The encoded
-//! id is opaque (UUID v4 today; whatever the store hands us in future).
-//! Attribute choices:
-//!
-//! - `HttpOnly` — JS cannot read.
-//! - `Secure` — auto-detected per request scheme; overridable via
-//!   `LUCIDA_COOKIE_SECURE`.
-//! - `SameSite=Lax` — allows top-level cross-site navigation (so
-//!   `#b=ID` saved-view links from Slack land authenticated) while
-//!   blocking cross-site POST/PATCH/DELETE for CSRF protection.
-//! - `Path=/` — cookie applies to every endpoint.
-//! - `Max-Age` matches the session hard cap so the browser drops it
-//!   when the server would have anyway.
+//! The cookie (`lucida_session` by default) carries an opaque id. It is
+//! `HttpOnly`, `Path=/`, and `Secure` by request scheme unless
+//! `LUCIDA_COOKIE_SECURE` overrides it. `SameSite=Lax` lets a saved-view
+//! link opened from another site land signed in while still blocking
+//! cross-site writes. `Max-Age` matches the session hard cap.
 
 use axum::http::header::COOKIE;
 use axum::http::request::Parts;
@@ -21,13 +13,11 @@ use cookie::{Cookie, SameSite};
 
 use super::config::{AuthConfig, SecureCookieMode};
 
-/// Marker cookie set by `/auth/logout` and consumed by middleware +
-/// `/auth/start`. Its presence (no value semantics — empty body would
-/// also work) tells the next request: "this user just signed out, do
-/// not auto-bounce them back through OAuth." Cleared by `/auth/start`
-/// once the user explicitly opts back in. See ADR on post-logout
-/// re-sign-in for the full rationale; cookie attributes mirror
-/// `lucida_session` (HttpOnly + SameSite=Lax + Path=/ + auto Secure).
+/// Marker cookie set by `/auth/logout` and read by the middleware and
+/// `/auth/start`. Its presence, not its value, tells the next request
+/// that this user just signed out, so do not bounce them back through
+/// OAuth. `/auth/callback` clears it once they sign back in (ADR-0019).
+/// Attributes mirror `lucida_session`.
 pub const SIGNED_OUT_COOKIE_NAME: &str = "lucida_signed_out";
 
 /// TTL for the marker cookie: 10 minutes. A backstop for the rare path
@@ -104,9 +94,8 @@ pub fn build_session_cookie(
     cookie.to_string()
 }
 
-/// Build a `Set-Cookie` header that clears the session cookie. Used by
-/// the slice-3 logout flow; defined here so the cookie attribute set
-/// stays in one place (otherwise it's easy to drift Path/SameSite).
+/// Build a `Set-Cookie` header that clears the session cookie. Defined
+/// here so the cookie attribute set stays in one place.
 pub fn build_clearing_cookie(config: &AuthConfig, request_is_https: bool) -> String {
     let mut cookie = Cookie::new(config.cookie_name.clone(), "");
     cookie.set_http_only(true);

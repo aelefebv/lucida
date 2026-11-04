@@ -1,30 +1,20 @@
 // @vitest-environment happy-dom
 //
-// Hook-level tests for `useDatasets.handleUrlSubmit`. Verifies the
-// canonical-URL contract from ADR-0042: every URL the SPA hands to
-// `sendOpenRemoteDataset` has been normalized via the wasm shim, so
-// spelling variants of the same Windows / UNC path produce one
-// `DatasetId` and one `ServerBinding` on the server side.
-//
-// Mocks `lucida-core` so the hook constructs without a real wasm init
-// (mirrors `useSavedViewSync.test.tsx`'s mock of `dataset_id_for_url`).
-// The mock reproduces the canonical-form rules under test — it isn't a
-// replacement for the wasm helper, but it locks the property the hook
-// guarantees: "what we send is what `normalize_dataset_url` returned."
+// Every URL handed to `sendOpenRemoteDataset` is normalized first (ADR 0042),
+// so spelling variants of one Windows or UNC path produce one `DatasetId`.
+// The `lucida-core` mock reproduces only the rules under test; it locks the
+// property "what we send is what `normalize_dataset_url` returned."
 
 import { describe, it, expect, vi } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 
-// Mock BEFORE importing the hook so the import-time
+// Mock before importing the hook so the import-time
 // `normalize_dataset_url` reference picks up the stub.
 vi.mock("lucida-core", () => ({
-  // Minimal mock covering the cases this test exercises. The Rust
-  // implementation handles the full matrix (see
-  // `lucida-content/src/url.rs` tests); the wasm-shim smoke test in
-  // `savedView/urlHelpers.test.ts` covers wiring drift.
+  // The full matrix is tested in `lucida-content/src/url.rs`; wiring drift
+  // in `savedView/urlHelpers.test.ts`.
   normalize_dataset_url: (raw: string): string => {
     if (raw === "") return "";
-    // Drive-letter: lowercase + forward-slashify.
     const drive = raw.match(/^([A-Za-z]):[\\/]?(.*)$/);
     if (drive) {
       const letter = drive[1].toLowerCase();

@@ -3,14 +3,11 @@
  * drop-oldest ring.
  *
  * Separate from the per-tick aggregates because the cadences differ. A tick
- * sample is published per *planning pass*, and the planner's epoch cache means
- * a run can fetch for seconds without re-planning once — readings carried there
- * came out as a cluster of readings in a run's first few milliseconds and
- * nothing after. These are sampled where they can actually change: at the end
- * of every tick, alongside the published quiescence.
- *
- * Drop-oldest for the same reason the tick ring is: a reading stream is steady
- * state, and the readings worth having during a stall are the recent ones.
+ * sample is published per planning pass, and the planner's epoch cache means
+ * a run can fetch for seconds without re-planning. Readings are sampled where
+ * they can change: at the end of every tick, alongside the published
+ * quiescence. Drop-oldest because the readings worth having during a stall
+ * are the recent ones.
  */
 
 import { RingSlots } from "./ring.ts";

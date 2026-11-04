@@ -1,10 +1,9 @@
 /**
- * Slice chunk upload — staleness check, Z-slice filter, LRU eviction,
- * GPU write, intensity sampling, and per-member post-message demux.
+ * Slice chunk upload: staleness check, Z-slice filter, eviction, GPU write,
+ * intensity sampling, and per-member feedback messages.
  *
- * Manages `staleSliceKeys` on the atlas (cleared as fresh chunks land
- * for the new target Z). See `slice/zRetarget.ts` for the helper
- * function this module pairs with.
+ * Clears an atlas's `staleSliceKeys` as fresh chunks land for the new target
+ * Z. Pairs with `slice/zRetarget.ts`.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
@@ -25,37 +24,27 @@ import { cameraUVForMember, chunkDistSq2D, findFarthestSlot2D } from "./eviction
 import { getOrCreateLabelSlicePool } from "./atlas.ts";
 
 /**
- * Write pre-sliced uint32 label planes into the member's r32uint label
- * pool. The delivery path (`dispatchLabelChunkDelivery`) already extracted
- * the single Z-plane for the current view, so each `chunk.data` is a 2D
- * plane of `chunkY*chunkX` ids (~64 KB, not the full ~8 MB 3D chunk) — this
- * just places it at the chunk's `(x, y)` offset. The pool is reused in
- * place, so a Z/T scrub overwrites the resident slice without blanking. Ids
- * stay at full 32-bit width — no intensity-range sampling (categorical, not
- * scalar). Writes are clamped to the (possibly device-limited) texture.
+ * Write pre-sliced uint32 label planes into the member's r32uint label pool.
+ * The delivery path already extracted the current Z-plane, so each
+ * `chunk.data` is `chunkY*chunkX` ids. Ids are categorical, so they keep full
+ * 32-bit width and get no intensity sampling.
  */
 export function handleLabelSliceChunkData(
   ctx: WorkerCtx,
   msg: LabelSliceChunkDataMessage,
 ): void {
-  // Drop an out-of-date delivery (e.g. a previous timepoint's plane racing
-  // in after the view moved on) so it can't overwrite the pool with the
-  // wrong T/Z — same stale guard the intensity path uses.
+  // A previous timepoint's plane racing in must not overwrite the pool.
   if (isStaleDelivery(msg.epochs, ctx.state.currentEpochs)) return;
 
   const { memberId, datasetId, levelWidth, levelHeight, chunkX, chunkY } = msg;
 
-  // Returns null if the texture can't be allocated — skip the label rather
-  // than throw through the upload path (defense in depth; level selection
-  // already bounds the size).
   const pool = getOrCreateLabelSlicePool(ctx, memberId, datasetId, levelWidth, levelHeight);
   if (!pool) return;
 
   for (const chunk of msg.chunks) {
     const xOff = chunk.x * chunkX;
     const yOff = chunk.y * chunkY;
-    // Clamp to the resident texture (dims may be device-limited below the
-    // requested level); skip tiles that fall entirely outside it.
+    // The texture may be device-limited below the level's dims.
     if (xOff >= pool.width || yOff >= pool.height) continue;
     const chunkW = Math.min(chunkX, pool.width - xOff);
     const chunkH = Math.min(chunkY, pool.height - yOff);
@@ -207,7 +196,6 @@ export function handleSliceChunkData(
     const yOff = sy * chunkY;
     writeSliceRegion(ctx.device, atlas.texture, sliceData, chunkX, xOff, yOff, chunkW, chunkH);
 
-    // Write to entity's per-LOD section
     const [, , lodGridX] = lodMeta.gridDims;
     const globalIdx = lodMeta.offset + chunk.y * lodGridX + chunk.x;
     if (globalIdx < atlas.indirectionData.length) {
@@ -218,7 +206,6 @@ export function handleSliceChunkData(
     atlas.indirectionDirty = true;
   }
 
-  // Report evicted/skipped, demuxed by member
   const skippedKeys: string[] = [];
   for (const chunk of msg.chunks) {
     if (requeueKeySet.has(chunk.key)) continue;

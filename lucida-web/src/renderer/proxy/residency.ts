@@ -21,8 +21,8 @@ export function proxyResidencyKey(
 
 /**
  * Check a proxy delivery against the current desired residency policy.
- * Missing `desiredProxyKeys` preserves the legacy "all advertised proxies
- * are desired" behavior; an empty array means "no proxies are desired".
+ * Missing `desiredProxyKeys` means every advertised proxy is desired; an
+ * empty array means none are.
  */
 export function evaluateProxyDeliveryPolicy(
   coldState: ColdStateMessage | null,

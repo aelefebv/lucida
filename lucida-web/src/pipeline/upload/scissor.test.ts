@@ -1,20 +1,8 @@
-/**
- * Tests for `computeScissorRect`.
- *
- * Contract under test:
- *   - Project all 8 corners of `[0,1]^3` through `model` then `viewProj`.
- *   - If any corner has `clipW <= 0` (behind camera) → conservative
- *     full-screen fallback `[0, 0, canvasW, canvasH]`.
- *   - Otherwise compute screen-space AABB (WebGPU top-left origin, y-down)
- *     and clamp to canvas bounds; return integer rect `[x, y, w, h]`.
- *   - Return `null` if the clamped rect is degenerate (w<=0 or h<=0).
- */
+/** Tests for `computeScissorRect`. */
 import { describe, it, expect } from "vitest";
 import { computeScissorRect } from "./scissor.ts";
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 function identityMatrix(): Float32Array {
   const m = new Float32Array(16);
@@ -35,9 +23,7 @@ function translateScale(
   ]);
 }
 
-// ---------------------------------------------------------------------------
 // Cases
-// ---------------------------------------------------------------------------
 
 describe("computeScissorRect", () => {
   it("returns the full canvas rect for identity model + identity viewProj", () => {

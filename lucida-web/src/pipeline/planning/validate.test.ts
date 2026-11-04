@@ -1,9 +1,6 @@
 /**
- * Tests for {@link validatePlanningInputs} and its nine internal check
- * helpers. Each helper gets at least one passing case and one violating
- * case; the composing function gets a fully-valid passing case and a
- * smoke test that violations propagate.
-
+ * Each check helper gets a passing and a violating case; the composing
+ * function gets a valid case and a propagation smoke test.
  */
 
 import { describe, it, expect } from "vitest";
@@ -27,10 +24,6 @@ import {
   checkVisibleRegionBounds,
   validatePlanningInputs,
 } from "./validate.ts";
-
-// ---------------------------------------------------------------------------
-// Local helpers
-// ---------------------------------------------------------------------------
 
 /** Build a 5D LevelGeometry with the given shape + chunk_shape. */
 function makeLevel(
@@ -68,10 +61,6 @@ function makeValidSnapshot(): PlanningSnapshot {
   return createSyntheticSnapshot({ entities: [group, tile] });
 }
 
-// ===========================================================================
-// Check 1 — checkTileParentRefs
-// ===========================================================================
-
 describe("checkTileParentRefs", () => {
   it("passes when every tile's parentId resolves to a Group in entities", () => {
     expect(() => checkTileParentRefs(makeValidSnapshot())).not.toThrow();
@@ -102,10 +91,6 @@ describe("checkTileParentRefs", () => {
   });
 });
 
-// ===========================================================================
-// Check 2 — checkUniqueEntityIds
-// ===========================================================================
-
 describe("checkUniqueEntityIds", () => {
   it("passes when every entityId is unique", () => {
     expect(() => checkUniqueEntityIds(makeValidSnapshot())).not.toThrow();
@@ -125,10 +110,6 @@ describe("checkUniqueEntityIds", () => {
     );
   });
 });
-
-// ===========================================================================
-// Check 3 — checkUniqueImageIds
-// ===========================================================================
 
 describe("checkUniqueImageIds", () => {
   it("passes when every non-empty imageId is unique", () => {
@@ -165,10 +146,6 @@ describe("checkUniqueImageIds", () => {
   });
 });
 
-// ===========================================================================
-// Check 4 — checkLevelShapeArity
-// ===========================================================================
-
 describe("checkLevelShapeArity", () => {
   it("passes when every level has 5D shape and chunk_shape", () => {
     expect(() => checkLevelShapeArity(makeValidSnapshot())).not.toThrow();
@@ -202,10 +179,6 @@ describe("checkLevelShapeArity", () => {
     expect(() => checkLevelShapeArity(snap)).not.toThrow();
   });
 });
-
-// ===========================================================================
-// Check 5 — checkVisibleRegionBounds
-// ===========================================================================
 
 describe("checkVisibleRegionBounds", () => {
   it("passes when xyBoundsVox is a valid bbox and zRangeVox is ordered", () => {
@@ -243,32 +216,6 @@ describe("checkVisibleRegionBounds", () => {
   });
 });
 
-// ===========================================================================
-// Check 6 — withdrawn (assetCatalog refs)
-// ===========================================================================
-//
-// The original "every assetCatalog key must be a known entityId" check
-// was withdrawn. The catalog is flattened across all datasets the
-// catalog has ever seen; the snapshot is for one dataset's current
-// tick. They legitimately diverge. See validate.ts for the full
-// rationale.
-
-// ===========================================================================
-// Check 7 — withdrawn (minimapPending keys)
-// ===========================================================================
-//
-// The original "every minimapPending key must be a known imageId" check
-// was withdrawn during the post-ship audit. minimapPath populates
-// pendingFetch by iterating ALL dataset_images() (every image whose
-// minimap chunks haven't been fully uploaded), keyed by image_id.
-// snapshot.entities is view_query (only currently-visible entities).
-// The two routinely diverge — minimap pending coords for off-screen
-// images are legitimate. See validate.ts for the full rationale.
-
-// ===========================================================================
-// Check 8 — checkPrevActiveSetUnique
-// ===========================================================================
-
 describe("checkPrevActiveSetUnique", () => {
   it("passes when previousActiveSet is empty", () => {
     expect(() => checkPrevActiveSetUnique(createSyntheticState())).not.toThrow();
@@ -296,10 +243,6 @@ describe("checkPrevActiveSetUnique", () => {
     );
   });
 });
-
-// ===========================================================================
-// Check 9 — checkPrevActiveSetKindAgreement
-// ===========================================================================
 
 describe("checkPrevActiveSetKindAgreement", () => {
   it("passes when entry kinds agree with entity kinds", () => {
@@ -411,10 +354,6 @@ describe("checkPrevActiveSetKindAgreement", () => {
     expect(() => checkPrevActiveSetKindAgreement(snap, state)).not.toThrow();
   });
 });
-
-// ===========================================================================
-// Composing validatePlanningInputs
-// ===========================================================================
 
 describe("validatePlanningInputs (composing)", () => {
   it("passes when the snapshot and state are fully valid", () => {

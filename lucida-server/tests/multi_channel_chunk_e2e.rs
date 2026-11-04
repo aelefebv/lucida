@@ -1,15 +1,7 @@
-//! End-to-end test: open a synthesized OME-Zarr where all 5 channels
-//! live in one on-disk chunk (`chunk_shape[c] = 5`), resolve each
-//! channel's wire chunk key to the same on-disk path, decompress, and
-//! verify the per-channel slice picks out the correct bytes.
-//!
-//! Fixture: axes `[t, c, z, y, x]`, shape `[1, 5, 1, 4, 4]`,
-//! chunk_shape `[1, 5, 1, 4, 4]`, dtype uint16, blosc-zstd-bitshuffle.
-//! Each channel C is filled with the 16-bit pattern `(C+1) * 0x1111`
-//! (so ch0=0x1111×16, ch1=0x2222×16, …, ch4=0x5555×16). The 160-byte
-//! plaintext compresses to 56 bytes.
-//!
-//! The chunk's blosc bytes are a hardcoded `&[u8]` literal generated via:
+//! End-to-end test: all 5 channels live in one on-disk chunk
+//! (`chunk_shape[c] = 5`), so each channel's wire chunk key resolves to the
+//! same file, and each channel's slice must pick out its own bytes. Channel
+//! C is filled with `(C+1) * 0x1111`. The blosc bytes were generated with:
 //!
 //! ```sh
 //! python3 -c "

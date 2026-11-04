@@ -1,40 +1,26 @@
 /**
- * One shared seam for scene mutation calls (`apply_command`, `load_document`,
- * `import_presence`, `import_dataset_presence`), wherever they originate —
- * remote command handlers, local UI paths, saved-view restores, registries.
+ * One seam for scene mutation calls (`apply_command`, `load_document`,
+ * `import_presence`, `import_dataset_presence`) from any origin. The session
+ * controller owns the error surface but isn't in scope at most call sites, so
+ * `guardedSceneCall` reports each outcome to observers and otherwise behaves
+ * like the bare call.
  *
- * The wasm scene throws for reasons with very different consequences (see
- * [`classifySceneError`]), and the module that can act on those consequences
- * (the session controller, which owns the user-visible error surface) is not
- * in scope at most call sites. `guardedSceneCall` closes that gap: every
- * mutation reports its outcome to the registered observers and otherwise
- * behaves exactly like the bare call — the return value passes through and
- * failures are rethrown, so call-site control flow is unchanged.
- *
- * The observer registry is module-global (call sites cannot know which
- * session owns the error surface), but every report carries the scene the
- * mutation targeted as its `subject`, and each observer scopes itself to its
- * own session's scene. More than one session can exist at once (overlapping
- * mounts during a workspace switch, StrictMode's double mount), and one
- * session's successful apply on ITS scene proves nothing about another's —
- * it must not retire another session's error banner.
+ * The registry is module-global, but each report carries the targeted scene as
+ * `subject`. Sessions can coexist (workspace switch, StrictMode double mount),
+ * and one session's success must not retire another's error banner.
  */
 
 /**
  * Consequence classes for errors thrown by scene mutation calls:
  *
- * - `fatal`: the wasm instance cannot recover within this page load. A trap
- *   (`WebAssembly.RuntimeError`, e.g. `unreachable`) leaves it in an
- *   undefined state; the bindings' borrow poisoning ("recursive use of an
- *   object …") persists across calls once tripped; and "null pointer passed
- *   to rust" means the JS handle's wasm object is gone (freed or consumed),
- *   so every later call through that handle fails the same way. In all
- *   three, subsequent scene calls fail while the JS UI stays healthy.
- * - `incompatible`: the command was refused at the deserialization boundary
- *   (serde parse/variant mismatch — e.g. a command shape from a newer peer).
- *   Scene state was never touched, and other commands keep applying fine.
- * - `recoverable`: everything else — a state-dependent rejection that says
- *   nothing about the health of subsequent calls on its own.
+ * - `fatal`: the wasm instance can't recover this page load. A trap leaves it
+ *   undefined, borrow poisoning ("recursive use of an object") persists once
+ *   tripped, and "null pointer passed to rust" means the handle's object is
+ *   gone. Later scene calls fail while the JS UI stays healthy.
+ * - `incompatible`: refused at the deserialization boundary (e.g. a command
+ *   shape from a newer peer). Scene state was never touched.
+ * - `recoverable`: everything else, a state-dependent rejection that says
+ *   nothing about later calls.
  */
 export type SceneErrorClass = "fatal" | "incompatible" | "recoverable";
 
@@ -79,8 +65,8 @@ export function classifySceneError(e: unknown): SceneErrorClass {
 }
 
 export interface SceneCallObserver {
-  /** A guarded scene mutation completed successfully. `subject` is the
-   *  scene the mutation targeted — filter on it before reacting. */
+  /** A guarded scene mutation succeeded. `subject` is the scene it targeted;
+   *  filter on it before reacting. */
   onSceneCallApplied(context: string, subject: unknown): void;
   /** A guarded scene mutation threw. The error is rethrown to the caller
    *  after observers return, so existing call-site handling still runs.

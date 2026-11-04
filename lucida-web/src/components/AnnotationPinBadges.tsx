@@ -1,32 +1,18 @@
 /**
- * The small DOM adornments every pin marker carries, shared by the 2D
- * ({@link AnnotationOverlay}) and 3D ({@link AnnotationOverlay3D}) overlays so
- * a pin reads identically in both views:
- *
- * - {@link CommentCountBadge} — the notification-style pill showing how many
- *   comments a pin's thread holds (rendered only when there is at least one).
- *   Clicking it toggles the thread, exactly like clicking the dot.
- * - {@link OffContextHelptext} — the locator label on a pin that lives on a
- *   different Z/T/C than the current view (issue #779), naming where it
- *   actually lives in the exact contract form `slice <z> · t=<t> · ch=<c>`,
- *   mirroring the off-view peer cursor's badge.
- *
- * Both are children of the pin's wrapper (positioned relative to the marker),
- * so per-frame reprojection, off-context dimming, and the open-thread z-lift
- * all carry them along for free in either view.
+ * Pin marker adornments shared by the 2D and 3D overlays. Both render as
+ * children of the pin's wrapper, so reprojection, dimming, and the open-thread
+ * z-lift carry them along.
  */
 import type { Annotation } from "./annotationDocument.ts";
 import { offContextLabel } from "./annotationContext.ts";
 
-/** Comment-count pill at the pin's upper-right — only when the pin has at
- * least one comment. Clicking toggles the pin's thread (the same toggle the
- * dot performs). */
+/** Comment-count pill, shown only when the pin has comments. Clicking toggles
+ * the thread, like clicking the dot. */
 export function CommentCountBadge({
   count,
   onToggleThread,
 }: {
   count: number;
-  /** Toggle this pin's thread popover open/closed. */
   onToggleThread: () => void;
 }) {
   if (count <= 0) return null;
@@ -58,11 +44,8 @@ export function CommentCountBadge({
   );
 }
 
-/** Off-context helptext (issue #779): rendered only when the pin lives on a
- * different Z/T/C than the current view (the caller gates on `isOffContext`).
- * The marker itself still renders + clicks (its thread still opens), so this is
- * purely an informative overlay. Absent entirely when the pin is on-context —
- * so an on-context pin carries NO `annot-offcontext-<id>` testid. */
+/** Locator label for a pin on another Z/T/C; the caller gates on
+ * `isOffContext`. Informational only: the marker still opens its thread. */
 export function OffContextHelptext({ pin }: { pin: Annotation }) {
   return (
     <div

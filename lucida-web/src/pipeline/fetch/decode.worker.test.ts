@@ -9,9 +9,7 @@ import {
   normalize,
 } from "./decode.worker.ts";
 
-// ---------------------------------------------------------------------------
 // LZ4 — minimum-effort literal-only fixture
-// ---------------------------------------------------------------------------
 
 describe("decompressLz4", () => {
   it("round-trips a literal-only LZ4 block", () => {
@@ -48,9 +46,7 @@ describe("decompressLz4", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Zstd — round-trip via fzstd
-// ---------------------------------------------------------------------------
 
 describe("decompressZstd", () => {
   it("round-trips a buffer compressed by fzstd", async () => {
@@ -69,9 +65,7 @@ describe("decompressZstd", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // normalize — uint8 / bool / uint16 dispatch
-// ---------------------------------------------------------------------------
 
 describe("normalize", () => {
   it("uint8: returns input unchanged (conversion happens at GPU upload)", () => {

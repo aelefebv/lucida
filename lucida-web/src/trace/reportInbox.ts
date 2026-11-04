@@ -1,20 +1,12 @@
 /**
- * **Send report**: the page's end of the workspace inbox.
+ * **Send report**: the page's end of the workspace inbox. The bundle goes
+ * over the session socket and `lucida trace inbox` reads it, which is the
+ * only path an agent has to a session it did not start.
  *
- * A person watching a session that will not settle presses the action,
- * the bundle goes to the workspace's inbox over the session socket, and
- * `lucida trace inbox` reads it. That is the whole path an agent has to
- * a session it did not start.
- *
- * **Nothing here runs on its own.** There is no schedule, no send on a
- * run's close, and no retry: the only caller is the action, and a page
- * with no sender registered sends nothing at all. ADR 0049's "the
- * recording never leaves the process unless asked" stands, and this is
- * the asking.
- *
- * The sender is registered by the viewer, the way the bundle's services
- * are, because the session socket lives there and this module does not
- * import it.
+ * Nothing here runs on its own: no schedule, no send on a run's close, no
+ * retry. The only caller is the action, so ADR 0049's rule that the recording
+ * never leaves the process unless asked still holds. The viewer registers the
+ * sender because the session socket lives there.
  */
 
 import type { InboxReceipt } from "../bridge.ts";

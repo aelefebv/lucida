@@ -3,16 +3,9 @@
  * when a lifecycle row belongs to a run.
  *
  * Recording is on in every build with no toggle at any scope (ADR 0049). An
- * idle viewer emits literally nothing — the render loop is dirty-driven — so
- * a continuous recording costs nothing at rest, and a switch that buys back
- * an unmeasurable quantity would only invite every unexplained stall to be
- * blamed on the monitor.
- *
- * A run is a labelled interval within that recording (ADR 0047), opened by a
- * cause and closed by quiescence, timeout, or explicitly. An interaction run
- * and a dataset-open run are the same object, differing only by cause. A
- * dataset open opens one when its request goes out, and an input opens one
- * in {@link TraceRecorder.noteInput}.
+ * idle viewer emits nothing because the render loop is dirty-driven, so the
+ * recording costs nothing at rest, and a switch would only invite every
+ * unexplained stall to be blamed on the monitor.
  */
 
 import { buildIdentity } from "./buildInfo.ts";
@@ -91,9 +84,9 @@ import {
 } from "./types.ts";
 
 /**
- * Phases whose boundaries are stamped today. The whole enum, as of #925.
- * Declared rather than inferred so a document says what it did not measure
- * even when every phase happens to be missing from a given row.
+ * Phases whose boundaries are stamped. Declared rather than inferred so a
+ * document says what it did not measure even when every phase happens to be
+ * missing from a given row.
  */
 export const INSTRUMENTED_PHASES: readonly Phase[] = [
   "plan",
@@ -119,7 +112,7 @@ const PLAN_SPAN_RING = 16;
 /**
  * How long `quiescent` must hold before a run closes on its own. Clears the
  * residency render interval and the minimap scan cadence with margin while
- * staying small against a healthy sub-second local open (ADR 0051). It goes
+ * staying small against a healthy sub-second local open. It goes
  * in the header because it is baked into every duration a run reports.
  */
 export const DEFAULT_QUIESCENCE_HOLD_MS = 500;
@@ -195,9 +188,9 @@ export interface TraceRecorderOptions {
 
 /**
  * One interval of the continuous recording. A labelled run and the unlabelled
- * steady state between runs are the same object, differing only by `cause`
- * (ADR 0047) — which is why steady state is retained rather than thrown away:
- * the pan before a stall is often the thing that explains it.
+ * steady state between runs are the same object, differing only by `cause`.
+ * Steady state is retained because the pan before a stall is often the thing
+ * that explains it.
  */
 interface OpenInterval {
   runId: string;
@@ -438,20 +431,14 @@ export class TraceRecorder {
   }
 
   /**
-   * The labelled runs that concluded **on their own** — by settling or by
-   * timing out — with the id of the most recent one.
+   * The labelled runs that concluded on their own, by settling or timing
+   * out, with the id of the most recent one. What a driver waits for, and
+   * readable without exporting because exporting closes the run asked about.
    *
-   * Readable without exporting, because exporting closes the run being asked
-   * about. This is what a driver waits for, and each part of it earns its
-   * place:
-   *
-   * - *Labelled*, because steady state has nothing to conclude.
-   * - *On their own*, because an `explicit` close came from somebody asking.
-   *   A page torn down and rebuilt hands back a run that lived under a
-   *   millisecond, and a driver waiting for "a run closed" would take it.
-   * - *By id*, because the export closes an interval of its own, so "the
-   *   newest run in the document" is the export's artifact rather than the
-   *   run that was waited for.
+   * An `explicit` close is excluded because somebody asked for it: a page
+   * torn down and rebuilt hands back a run that lived under a millisecond.
+   * The id matters because the export closes an interval of its own, so the
+   * newest run in the document is not the run that was waited for.
    */
   get concludedRuns(): { count: number; lastId: string | null } {
     let count = 0;
@@ -482,17 +469,14 @@ export class TraceRecorder {
 
   /**
    * What the run in progress can say about itself, or null when no labelled
-   * run is open (#937).
+   * run is open.
    *
-   * One of the two reads that do not conclude the interval they describe.
-   * The other is {@link provisionalReading}. Everything else closes the run,
-   * the document, the Chrome projection, and the diagnostic alike, because a
-   * run without an end reason is not an artifact. This returns counts and
-   * occupancy rather than a verdict for the same reason: the attribution
-   * back-walk needs an end to walk back from.
-   *
-   * Walks no row: the tally is kept as the rows are written, so a read costs
-   * the same at ten rows and at the per-run cap.
+   * Does not conclude the interval it describes. The document, the Chrome
+   * projection, and the diagnostic all close the run, because a run without
+   * an end reason is not an artifact. This returns counts and occupancy
+   * rather than a verdict for the same reason: the attribution back-walk
+   * needs an end to walk back from. Walks no row: the tally is kept as the
+   * rows are written.
    */
   get liveProgress(): LiveProgress | null {
     const run = this.open;
@@ -502,18 +486,13 @@ export class TraceRecorder {
 
   /**
    * A provisional reading over a trailing window of the run in progress, or
-   * null when no labelled run is open (#1057).
+   * null when no labelled run is open.
    *
-   * What a live surface says while the run is still open: the occupancy
-   * this instant, the top finding over the window, and the page's quiescence
-   * reason, labelled provisional in every rendering because it changes while
-   * it is read. It is never a verdict and the gate never reads it. The dock's
-   * live view polls it, the watch stream carries it, and an agent driving a
-   * browser calls it on the seam; none of them closes the run by asking.
-   *
-   * Walks no row. The tally comes from the counters the row table keeps and
-   * the rest from the readings inside the window, read from the newest slot
-   * back, so the cost is bounded by the window and never by the run.
+   * Labelled provisional in every rendering because it changes while it is
+   * read. It is never a verdict, the gate never reads it, and asking does not
+   * close the run. Walks no row: the tally comes from the row table's
+   * counters and the rest from the readings inside the window, so the cost is
+   * bounded by the window, never by the run.
    */
   provisionalReading(options: ProvisionalOptions = {}): ProvisionalReading | null {
     const run = this.open;
@@ -534,20 +513,16 @@ export class TraceRecorder {
 
   /**
    * The steady-state tiers since `since`, or null before the page has an
-   * interval to sample (#1068).
+   * interval to sample.
    *
-   * The third read that does not conclude the interval it describes. It walks
-   * no row and no whole ring: the readings and the tick samples are read from
-   * their newest slot backwards and stopped at the cursor, so a publisher on
-   * a fixed cadence costs the samples in that stretch.
+   * Does not conclude the interval. Each ring is read from its newest slot
+   * back to the cursor, so the cost is the samples in that stretch.
    *
-   * A cursor's offset means nothing once the interval it was taken in has
-   * handed over, so the two cases part here. With no cursor at all the sample
-   * is empty and only fixes where the next one starts: a reader that has just
-   * arrived is owed the present, not an interval's history. Across a
-   * handover the new interval is read from its start, which is at most one
-   * cadence back — that is the opening of the run somebody asked to watch,
-   * and reading from now instead would drop it.
+   * A cursor's offset means nothing once its interval has handed over. With
+   * no cursor the sample is empty and only fixes where the next one starts:
+   * a reader that just arrived is owed the present. Across a handover the new
+   * interval is read from its start, because that is the opening of the run
+   * somebody asked to watch.
    */
   watchSample(since: WatchCursor | null): WatchSample | null {
     const interval = this.open;
@@ -576,12 +551,12 @@ export class TraceRecorder {
   }
 
   /**
-   * Be told when a labelled run opens and when it ends (#1068).
+   * Be told when a labelled run opens and when it ends.
    *
    * A pull cannot see an end reason: the run is gone by the time a poll
    * notices, and `quiescent`, `timeout`, and `explicit` are the difference
-   * between a run that settled and one that never did. Only the unlabelled
-   * steady-state interval's edges go unannounced — it has no cause to name
+   * between a run that settled and one that never did. The unlabelled
+   * steady-state interval's edges go unannounced: it has no cause to name
    * and its end is the next run's opening.
    *
    * A listener runs inside the close, so it must record or forward the
@@ -600,13 +575,10 @@ export class TraceRecorder {
    * The timeline of the run in progress over a trailing window, or null
    * when no labelled run is open: the dock's live charts, as fields.
    *
-   * The third read that does not conclude the interval it describes. It
-   * draws from the per-tick tiers alone, the readings, the tick samples, the
-   * point events and the connection records, each read from the newest slot
-   * back to the window's start, so the cost is bounded by the window and
-   * never by the run. The charts read from the rows are absent in it and say
-   * when they are read: at close, or when a verdict is asked for. That is
-   * the rule ADR 0049 as amended puts on every live surface.
+   * Does not conclude the interval. It draws only from tiers it can read
+   * from the newest slot back to the window's start, so the cost is bounded
+   * by the window, never by the run. Charts read from the rows are absent
+   * and say when they are read: at close, or when a verdict is asked for.
    */
   liveTimeline(options: LiveTimelineOptions = {}): LiveTimeline | null {
     const run = this.open;
@@ -656,17 +628,14 @@ export class TraceRecorder {
   }
 
   /**
-   * One chunk's reading from the interval in progress (#1062): where its
-   * newest row stands, how many rows it has, and how many of them fetched,
-   * with the newest row's age at this instant. What the overlay's phase
-   * color and churn tint paint, cell by cell, at their own cadence.
+   * One chunk's reading from the interval in progress: where its newest row
+   * stands, how many rows it has, how many fetched, and the newest row's age.
+   * What the overlay's phase color and churn tint paint, cell by cell.
    *
-   * The third read that leaves the recording alone. It walks no row: the
-   * row table keeps an identity index as the rows are written, so the read
-   * costs the same at ten rows and at the per-run cap, and it is gated so in
-   * `chunkIndexCost.perf.test.ts`. Null when no interval is open, or when the
-   * open one holds no row for the chunk: resident before it opened, still
-   * queued, or never wanted, which the surface says in those words.
+   * Leaves the recording alone and walks no row: the row table keeps an
+   * identity index, so the read costs the same at ten rows and at the per-run
+   * cap, which `chunkIndexCost.perf.test.ts` gates. Null when no interval is
+   * open or the open one holds no row for the chunk.
    */
   readChunk(chunk: ChunkCoordinates): ChunkReading | null {
     const run = this.open;
@@ -739,24 +708,14 @@ export class TraceRecorder {
 
   /**
    * An input landed, one of the five that open an interaction run. One
-   * gesture is one run. The first input after quiescence opens a run under a
-   * cause that names the input, and an input while a run is open extends
-   * that run rather than opening another, whatever the pointer-event count.
+   * gesture is one run: with no run open the input opens one under a cause
+   * that names it, and while a run is open (a dataset-open run included,
+   * which keeps its cause) the input extends that run.
    *
-   * "After quiescence" means "no run open". A run also closes by timeout and
-   * explicitly, and after either of those the page may never go quiescent at
-   * all, so waiting for it would leave the next gesture unrecorded.
-   *
-   * Extending means re-arming the hold. The run closes on quiescence after
-   * the *last* input, so a hold that began before this input starts over
-   * from the page's next quiescent publication, which the tick this input
-   * dirties delivers. Without that, an input 300 ms into the 500 ms hold
-   * would close its run 200 ms later, and a slow drag would shatter into a
-   * run per pause.
-   *
-   * This extends a dataset-open run in progress the same way, and that run
-   * keeps its cause. Opening a dataset and panning while it loads is one
-   * interval, labelled for the thing that started it.
+   * The test is "no run open" rather than "quiescent", because after a
+   * timeout or explicit close the page may never go quiescent. Extending
+   * re-arms the hold, so the run closes on quiescence after the last input;
+   * otherwise a slow drag would shatter into a run per pause.
    */
   noteInput(input: InputKind): void {
     if (this.isRunOpen) {
@@ -809,31 +768,20 @@ export class TraceRecorder {
 
   /**
    * Start a lifecycle row. Returns a handle for {@link stamp} and
-   * {@link finishRow}, or -1 when there is no interval to record into —
-   * either no page has registered an environment, or the interval has
-   * truncated. Both cases are counted so the document does not overstate what
-   * it kept.
+   * {@link finishRow}, or -1 when there is no interval to record into: no
+   * page has registered an environment, or the interval has truncated. Both
+   * cases are counted so the document does not overstate what it kept.
    *
-   * **A chunk row is born at dispatch**, so this one call also stamps the two
-   * phases already behind it — `plan` and `queue` — and opens `wire`. That is
-   * not a convenience: it is the whole event budget (#949). Three calls per
-   * chunk was three times the per-chunk event count ADR 0049 derived its
-   * 250 µs tick ceiling from, and two of them spent a handle round-trip —
-   * {@link resolve}, a generation divide and a modulo — to reach a row this
-   * frame had just made. The recorder has no other way to make a chunk row,
-   * so there is no shape this collapse forecloses.
+   * A chunk row is born at dispatch, so this one call also stamps `plan` and
+   * `queue` and opens `wire`. Splitting it into three calls would triple the
+   * per-chunk event count the 250 µs tick ceiling is derived from.
    *
-   * `admittedAtMs` is the scheduler's own admission stamp when it has one
-   * (ADR 0044 keeps them for the admission window only). Behind the window the
-   * scheduler deliberately keeps no per-key bookkeeping — on a large remote
-   * collection the backlog is tens of thousands of entries replanned several
-   * times a second — so a row admitted straight off the backlog dates its
-   * queue from the plan pass that enqueued it. Queue time before the window is
-   * therefore a floor, not a total.
-   *
-   * `plan` is attributed to the last pass that ended at or before admission.
-   * With no such pass in the ring the plan slot stays unset, which reads as
-   * "not measured" rather than as a phase that took no time.
+   * `admittedAtMs` is the scheduler's admission stamp, kept for the admission
+   * window only. A row admitted straight off the backlog dates its queue from
+   * the plan pass that enqueued it, so queue time before the window is a
+   * floor, not a total. `plan` is attributed to the last pass that ended at
+   * or before admission; with none in the ring the plan slot stays unset,
+   * which reads as "not measured" rather than as zero.
    */
   beginChunkRow(src: ChunkRowSource, tier: 0 | 1, admittedAtMs?: number): number {
     const run = this.intervalForRecording();
@@ -846,8 +794,7 @@ export class TraceRecorder {
 
     // One clock read for both boundaries: the moment the request goes out is
     // the moment the queue ends, so reading the clock twice would open a gap
-    // between two halves of the same boundary (ADR 0047's shared-boundary row
-    // model).
+    // between two halves of the same boundary.
     const dispatchedAtMs = this.now();
     const admittedMs = admittedAtMs ?? this.latestPlanEndMs() ?? dispatchedAtMs;
     const planStartMs = this.planStartAtOrBefore(admittedMs);
@@ -1024,7 +971,7 @@ export class TraceRecorder {
 
   /**
    * The page is on a socket. Called on every `onopen`, including the first:
-   * the generation restarts the correlation label counter (ADR 0048), so this
+   * the generation restarts the correlation label counter, so this
    * is the only thing that makes two `rid: 0` rows in one run tell apart.
    */
   noteConnected(generation: number): void {
@@ -1143,7 +1090,7 @@ export class TraceRecorder {
    * Bytes in hand: closes `wire`, opens `decode`, and records what the wire
    * delivered, in one resolve. The bytes land on the row at the boundary
    * they arrive at rather than through a second call, because this runs
-   * once per completed fetch and a handle round trip is the cost #949 cut.
+   * once per completed fetch and each call spends a handle resolve.
    */
   noteBytesReceived(handle: number, bytes: number): void {
     const run = this.resolve(handle);
@@ -1249,19 +1196,14 @@ export class TraceRecorder {
 
   /**
    * Record the process-wide readings: queue depth, in-flight, the tick's own
-   * main-thread time, and resident bytes (#934), plus the GPU pass time of
-   * the last frame the render worker read back, when it read one back.
+   * main-thread time, resident bytes, and the GPU pass time of the last frame
+   * the render worker read back.
    *
-   * Pushed by the render loop once per tick, next to the published
-   * quiescence, rather than pulled when a tick sample is committed. A tick
-   * sample is per planning pass, and the planner's epoch cache means a run
-   * can fetch for seconds without re-planning once — readings on that cadence
-   * are a cluster of readings at run start and silence after.
-   *
-   * `gpuPassUs` is null, and the reading carries no GPU field, when nothing
-   * arrived since the previous reading. Null is the honest value on an
-   * adapter without timestamp queries and on a tick that drew no frame; a
-   * zero would read as a fast GPU.
+   * Pushed by the render loop once per tick rather than pulled at tick-sample
+   * commit: the planner's epoch cache means a run can fetch for seconds
+   * without re-planning, so readings on that cadence would cluster at run
+   * start. `gpuPassUs` is null when nothing arrived since the previous
+   * reading, because a zero would read as a fast GPU.
    */
   noteReading(
     queueDepth: number,
@@ -1302,21 +1244,15 @@ export class TraceRecorder {
    * Count one message the bridge transmitted over the session socket, under
    * exactly one client message type.
    *
-   * Two tallies take it. The sample the next tick publishes, so the sends
-   * ride the per-tick aggregate as a series. And the interval's running
-   * total, because a sample is published only by a planning pass, and the
-   * sends this accounting exists to explain are the ones that go on after
-   * the last pass, when the view looks loaded and the socket does not go
-   * quiet. The total is what a rate for the interval is read from.
+   * Two tallies take it: the sample the next tick publishes, and the
+   * interval's running total. The total exists because a sample is published
+   * only by a planning pass, and the sends worth explaining go on after the
+   * last pass, when the view looks loaded and the socket does not go quiet.
    *
-   * Silent with no interval open, like every tier: a count with no interval
-   * to belong to cannot be read as a rate. That covers the page's first
-   * messages, sent before the render loop registers its environment. Not
-   * silenced by truncation: this is a counter, not a record, and it spends
-   * nothing from the cap. Retention is unchanged by it: an unlabelled
-   * interval that only sent is discarded with the other empty ones, so a
-   * pointer moving over an idle canvas does not retain an interval's worth
-   * of buffers, and its handful of cursor messages goes with it.
+   * Silent with no interval open, like every tier, but not silenced by
+   * truncation: this is a counter, not a record, and spends nothing from the
+   * cap. An unlabelled interval that only sent is still discarded as empty,
+   * so a pointer moving over an idle canvas retains nothing.
    */
   countSend(type: ClientMessageTypeIndexValue, bytes: number): void {
     this.sentBytesTotal += bytes;
@@ -1522,19 +1458,16 @@ export class TraceRecorder {
   }
 
   /**
-   * The interval a new record belongs in, once the caps have had their say —
-   * or null when there is nowhere to put it.
+   * The interval a new record belongs in once the caps have had their say,
+   * or null when there is nowhere to put it. Checked before the write, so a
+   * rotation hands the caller a live interval rather than one that just
+   * closed.
    *
-   * Checked before the write rather than after it, so a rotation hands the
-   * caller a live interval instead of a handle into one that just closed.
-   *
-   * The two rungs, in the order they bite. The per-run cap acts on the
-   * interval in progress; the resident cap discards completed intervals
-   * oldest-first. There is deliberately no third rung: no sampling, no
-   * coarsening, no downsample to aggregates. Reaching the per-run cap means
-   * something pathological is happening, and a loud truncation diagnoses
-   * pathology better than a quietly coarsened trace that still looks
-   * complete (ADR 0049).
+   * The per-run cap acts on the interval in progress; the resident cap
+   * discards completed intervals oldest first. There is deliberately no
+   * sampling or coarsening: reaching the per-run cap means something
+   * pathological is happening, and a loud truncation diagnoses it better
+   * than a coarsened trace that still looks complete.
    */
   private intervalForRecording(): OpenInterval | null {
     const run = this.open;
@@ -1689,7 +1622,7 @@ function intervalBytes(interval: Pick<OpenInterval, "sink" | "serverRows">): num
 /**
  * The process-wide recorder. A module singleton because the emit points are
  * deep in the pipeline and threading an instance to each of them would make
- * the presence of recording a per-call-site decision — which is the toggle
- * ADR 0049 rejected, in another costume.
+ * the presence of recording a per-call-site decision, which is a recording
+ * toggle by another name.
  */
 export const traceRecorder = new TraceRecorder();

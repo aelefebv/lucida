@@ -6,9 +6,7 @@ import {
 } from "./layoutBuilders.ts";
 import type { DatasetManifest, ImageSpec, LayoutSpec } from "../manifestTypes.ts";
 
-// ---------------------------------------------------------------------------
 // Fixtures
-// ---------------------------------------------------------------------------
 
 function makeImage(image_id: string, owner: string, footprintY = 256, footprintX = 256): ImageSpec {
   return {
@@ -93,9 +91,7 @@ function collectionSparseGraph(): DatasetManifest {
   };
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 describe("buildCollectionGridLayout", () => {
   it("returns null for single-image dataset (no source layout)", () => {

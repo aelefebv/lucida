@@ -1,25 +1,12 @@
 //! Minimal Blosc1 decoder for the subset of configurations Lucida supports.
 //!
 //! Only `cname: zstd` with `shuffle ∈ {none, byte, bit}` and `typesize ∈ {1, 2, 4}`
-//! is recognized — anything else should be rejected upstream at codec-chain
-//! parse time. Blosc2 frames are not supported.
+//! is recognized; codec-chain parsing rejects anything else. Blosc2 frames are
+//! not supported. Format: <https://github.com/Blosc/c-blosc/blob/main/README_HEADER.rst>.
 //!
-//! Format reference: <https://github.com/Blosc/c-blosc/blob/main/README_HEADER.rst>.
-//!
-//! Layout: 16-byte header, then `nblocks` u32-LE offsets pointing at each
-//! block's start, then per block a u32-LE compressed length followed by the
-//! zstd-compressed payload. When the `MEMCPYED` flag (0x02) is set, bytes
-//! `[16..16+nbytes]` are the original buffer and no decompress/unshuffle runs.
-//!
-//! Bitshuffle algorithm matches the libbitshuffle C reference: per 8-element
-//! block, byte-transpose into `typesize` planes of 8 bytes, then bit-transpose
-//! each plane as an 8×8 bit matrix. Trailing elements (N % 8) are left raw.
-//!
-//! Per-block filter gating matches upstream c-blosc's `shuffle`/`bitshuffle`
-//! wrappers: the filter is applied to a block all-or-nothing, and only when the
-//! block is filter-aligned (see [`unshuffle_block`]). Non-aligned blocks — in
-//! practice the trailing block of a buffer — are stored RAW by the encoder, so
-//! the decoder must pass them through verbatim rather than (mis)unshuffling them.
+//! A shuffle filter applies to a whole block, and only to a filter-aligned one
+//! (see [`unshuffle_block`]). The encoder stores a non-aligned block, in
+//! practice the trailing one, raw, so the decoder must pass it through verbatim.
 
 use std::borrow::Cow;
 
@@ -183,18 +170,11 @@ pub fn decode_blosc(input: &[u8], config: &BloscConfig) -> Result<Vec<u8>, Blosc
         }
 
         let block_uncompressed_size = blocksize.min(nbytes - decompressed.len());
-        // c-blosc stores an INDIVIDUAL block raw (no zstd frame) when it didn't
-        // compress smaller than its nbytes — signaled per-block by the on-disk
-        // cbytes equalling the block's uncompressed size. This is distinct from
-        // the whole-buffer MEMCPYED flag handled above: an otherwise-compressed
-        // buffer can carry a raw interior block (e.g. an incompressible noisy
-        // region of a multi-MiB chunk). The shuffle filter is applied BEFORE the
-        // compress-or-store decision, so a raw block's payload already holds the
-        // post-filter (shuffled) bytes — feed them straight to the same unshuffle
-        // below rather than to zstd, which would choke on the non-frame bytes
-        // ("Unknown frame descriptor"). The size check and unshuffle dispatch
-        // stay identical; `block_bytes.len() == block_uncompressed_size` still
-        // holds (a raw block's payload is exactly that many bytes).
+        // c-blosc stores an individual block raw when it did not compress
+        // smaller, signaled by cbytes equal to the block's uncompressed size.
+        // This differs from the whole-buffer MEMCPYED flag above. The shuffle
+        // ran before the compress-or-store decision, so a raw block still
+        // holds shuffled bytes: send it to the unshuffle below, not to zstd.
         let block_bytes = if compressed_len == block_uncompressed_size {
             input[payload_start..payload_end].to_vec()
         } else {
@@ -222,32 +202,19 @@ pub fn decode_blosc(input: &[u8], config: &BloscConfig) -> Result<Vec<u8>, Blosc
     Ok(decompressed)
 }
 
-/// Reverse one block's Blosc filter, centralizing BOTH the filter choice and
-/// upstream c-blosc's per-block alignment rule in a single auditable match.
-///
-/// c-blosc applies its (bit)shuffle filter to a block all-or-nothing, and only
-/// when the block is *filter-aligned*; otherwise it stores the block's bytes RAW
-/// (a plain memcpy with no shuffle). The alignment predicates mirror the guards
-/// in c-blosc's `shuffle()` / `bitshuffle()` wrappers:
+/// Reverse one block's Blosc filter, keeping the filter choice and c-blosc's
+/// per-block alignment rule in one match. c-blosc filters a block only when
+/// it is filter-aligned and otherwise stores it raw, as its `shuffle()` and
+/// `bitshuffle()` wrappers guard:
 ///
 /// - `None` → never filtered; bytes are already raw.
 /// - `Byte` → filtered iff `block_len` is a multiple of `typesize`.
 /// - `Bit` → filtered iff `block_len` is a multiple of `typesize` *and* the
 ///   element count `block_len / typesize` is a multiple of 8.
 ///
-/// Because c-blosc rounds `blocksize` down to a multiple of `typesize` and
-/// `decode_blosc` already enforces `nbytes % typesize == 0`, every block is in
-/// practice byte-aligned — so the *byte* filter is always applied. The *bit*
-/// filter is the one that genuinely falls back: the trailing block's element
-/// count `(nbytes - k*blocksize)/typesize` need not be a multiple of 8 even
-/// though each full block's is, and c-blosc leaves that block unshuffled. We
-/// still evaluate both predicates so the dispatch is exhaustive and correct for
-/// any block we are handed. Raw (non-aligned) blocks borrow rather than copy.
-///
-/// Note `typesize == 1` is NOT a blanket no-op: byte-shuffle is the identity at
-/// typesize 1, but *bit*-shuffle still bit-transposes each aligned group of 8
-/// bytes, so it must go through [`bit_unshuffle`]. Only the zero-typesize case
-/// (defensive — rejected upstream; would divide by zero) is short-circuited.
+/// In practice only the trailing block falls back, under `Bit`. Raw blocks
+/// borrow rather than copy. At `typesize == 1` bit-shuffle is not a no-op and
+/// still goes through [`bit_unshuffle`]; only a zero typesize short-circuits.
 fn unshuffle_block(shuffle: BloscShuffle, block: &[u8], typesize: usize) -> Cow<'_, [u8]> {
     // Guard the degenerate typesize that would divide by zero in the predicates
     // below. None never filters, so it also needs no per-element reasoning.
@@ -298,20 +265,13 @@ fn byte_unshuffle(input: &[u8], typesize: usize) -> Vec<u8> {
     out
 }
 
-/// Inverse of libbitshuffle's bit-shuffle. The forward shuffle treats each of
-/// the `typesize` byte-planes (one byte per element per plane, `n_elements`
-/// bytes total) as a `(n_elements, 8)` bit matrix and transposes it to
-/// `(8, n_elements)`. We invert that: for each output byte (one element's
-/// `j`-th byte) gather its 8 bits from across the `(8, n_elements)` plane.
+/// Inverse of libbitshuffle's bit-shuffle: each byte-plane is a
+/// `(n_elements, 8)` bit matrix transposed to `(8, n_elements)`, and this
+/// gathers each output byte's 8 bits back.
 ///
 /// Callers gate this on the element count being a multiple of 8 (see
-/// [`unshuffle_block`]), so in normal operation `aligned_elements == n_elements`
-/// and there is no remainder. The tail handling below is retained for defensive
-/// symmetry only.
-///
-/// Tail handling: libbitshuffle truncates the bit-transposed region to the
-/// largest multiple-of-8 element count and stores the remainder bytes
-/// element-major after the aligned planes. We copy that tail through.
+/// [`unshuffle_block`]). The tail copy, which mirrors libbitshuffle storing
+/// the remainder element-major after the aligned planes, is defensive.
 fn bit_unshuffle(input: &[u8], typesize: usize) -> Vec<u8> {
     if typesize == 0 || input.is_empty() {
         return input.to_vec();
@@ -358,7 +318,7 @@ mod tests {
         }
     }
 
-    // --- Generated test vectors. Regenerate any vector with the python3
+    // Generated test vectors. Regenerate any vector with the python3
     // command in the comment above its constant. All compressible vectors
     // share PLAINTEXT (256 bytes of [i % 8 for i in 0..256]) so any decode
     // failure is easy to bisect against the expected pattern.
@@ -488,8 +448,6 @@ mod tests {
         0x24, 0x57, 0x7d, 0x53, 0xec,
     ];
 
-    // --- Tests ---
-
     macro_rules! roundtrip_case {
         ($name:ident, $vec:ident, $shuffle:expr, $ts:expr) => {
             #[test]
@@ -581,8 +539,8 @@ mod tests {
     }
 }
 
-// FROZEN ORACLE — generated; do not edit by hand. Covers blosc partial-trailing-block
-// decode across shuffle x typesize, plus aligned/memcpy/single-block CONTROLS.
+// Frozen oracle, generated; do not edit by hand. Covers blosc partial-trailing-block
+// decode across shuffle x typesize, plus aligned/memcpy/single-block controls.
 #[cfg(test)]
 mod partial_block_oracle {
     use super::decode_blosc;
@@ -1033,7 +991,7 @@ mod partial_block_oracle {
     }
 }
 
-// FROZEN ORACLE (slice 2) — per-block raw-stored (uncompressed) blocks in non-memcpyed buffers.
+// Frozen oracle: per-block raw-stored (uncompressed) blocks in non-memcpyed buffers.
 #[cfg(test)]
 mod raw_block_oracle {
     use super::decode_blosc;

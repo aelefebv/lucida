@@ -1,15 +1,11 @@
 //! The server's lifecycle table: one row per served request, buffered per
 //! connection and pushed to the client that caused it (ADR 0050).
 //!
-//! There is no trace store here and no trace endpoint. The buffer holds one
-//! flush window, never a session, and the rows only ever travel toward the
-//! client whose requests produced them — so the server can be a source of
-//! timing without becoming a place where recordings accumulate.
-//!
-//! Timing is relative to each request's own arrival. Nothing in this module
-//! reads a wall clock: the browser stamps the send and the receipt of every
-//! label on one clock, and the server's work is strictly nested inside that
-//! bracket, so the server's clock never has to be trusted or synchronised.
+//! The buffer holds one flush window, never a session, so the server is a
+//! source of timing without becoming a place where recordings accumulate.
+//! Nothing here reads a wall clock: each row is relative to its request's
+//! arrival and nests inside the bracket the browser stamps on its own clock,
+//! so the server's clock never has to be trusted or synchronised.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -41,7 +37,7 @@ pub const EARLY_FLUSH_ROWS: usize = 512;
 /// blocks the pipeline it measures is worse than one that admits a gap.
 pub const BUFFER_CAP_ROWS: usize = EARLY_FLUSH_ROWS * 2;
 
-/// Which of the trace's two join paths a row keys on (ADR 0048).
+/// Which of the trace's two join paths a row keys on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RowKey {
     /// A correlation label, minted per connection by the browser. Chunk and
@@ -112,8 +108,8 @@ impl ServedRow {
 }
 
 /// A phase's slot in a row. The enum's discriminant *is* the index, so this
-/// is a cast rather than a lookup — recording a phase sits under ADR 0049's
-/// marginal-cost ceiling and has no business searching a table.
+/// is a cast rather than a lookup: recording a phase runs under the trace's
+/// marginal-cost budget and has no business searching a table.
 fn phase_index(phase: ServerPhase) -> usize {
     phase as usize
 }
@@ -278,9 +274,9 @@ impl RequestProbe {
     /// The store measures the waits itself because only it knows which side
     /// of the single flight this request landed on, and that distinction is
     /// what keeps a sum over the read column equal to the number of round
-    /// trips actually made (ADR 0050). Everything else the call took — the
-    /// LRU probe, the single-flight election, the insert and its evictions —
-    /// is the remainder, and it goes to `cache-lookup` rather than nowhere.
+    /// trips actually made. Everything else the call took (the LRU probe, the
+    /// single-flight election, the insert and its evictions) is the
+    /// remainder, and it goes to `cache-lookup` rather than nowhere.
     /// Dropping it would leave server time inside the browser's bracket with
     /// no phase against it, and the exporter would read that silence as
     /// network.
@@ -337,7 +333,7 @@ impl RequestProbe {
 /// a stable user-facing vocabulary and coupling it to the trace schema is a
 /// worse trade than one extra family; and attaching rows to the success
 /// message would lose them on a *failed* open, which is precisely the open
-/// whose timing someone needs (ADR 0050).
+/// whose timing someone needs.
 pub struct MetadataReadSink {
     request_id: Arc<str>,
     /// When the open began serving. Every row is an offset from here, which

@@ -1,18 +1,11 @@
 /**
- * The CPU cache knobs as a page is handed them before it loads.
+ * CPU cache knobs handed to a page before it loads. The trace driver sets
+ * Dev controls knobs before the cache exists (ADR 0051), so it leaves them
+ * under one storage key and the session reads them once when it builds its
+ * cache. Only the driver writes this key, so a person's Dev controls edits
+ * stay session-scoped.
  *
- * Dev controls writes its four cache knobs onto the live `CpuCache`, and
- * they die on reload (ADR 0052). The trace driver sets every Dev controls
- * knob by name before the page loads (ADR 0051 as amended), and a cache
- * that does not exist yet cannot be written to, so the driver leaves the
- * values here, under one browser-storage key, and the session reads them
- * once when it constructs its cache.
- *
- * Only the driver writes this key. Dev controls never does, so a person's
- * edits stay session-scoped, and the driver's headless profile is thrown
- * away with the browser, so nothing persists from one run to the next.
- *
- * Persistence schema (`localStorage["lucida.cache.config"]`):
+ * Schema (`localStorage["lucida.cache.config"]`):
  *
  *     { "schemaVersion": 1, "config": { "mainBudgetBytes": 268435456, ... } }
  *

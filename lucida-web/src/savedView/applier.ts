@@ -1,29 +1,11 @@
-// Apply a `SavedView` to the live scene. Async, deep module.
+// Apply a `SavedView` to the live scene.
 //
-// Apply flow at the recipient:
-//
-//   1. Parse + validate (the encoder did this; we accept a parsed SavedView)
-//   2. Diff datasets. Source-url mode computes DatasetId for each URL
-//      via blake3 and opens missing datasets. Workspace-dataset-id mode
-//      treats ids as already-loaded workspace members and never opens
-//      hidden source URLs.
-//   3. In source-url mode, open missing via bridge.sendOpenRemoteDataset(url).
-//   4. Wait for DatasetOpened to come back via CommandBroadcast.
-//   5. For currently-loaded datasets NOT in the link, send
-//      SetDatasetVisible(false) — a ViewportCommand (recipient-only).
-//   6. Apply SetActiveLayout for any dataset where the link's layout
-//      differs from the live scene when document layout mutation is
-//      allowed. Workspace viewers skip this shared document mutation.
-//   7. SetDatasetOrder, then per-dataset SetDatasetVisible/Opacity/contrast/
-//      gamma/blend/render mode/per-channel colormap+contrast+gamma.
-//   8. SetContrast / SetGamma / SetMultiChannel.
-//   9. SetT / SetC / SetZRange — clamp out-of-range to fit the
-//      recipient's datasets, with a non-blocking "adjusted to fit" notice.
-//  10. Camera last (via import_presence so it goes through one mutator).
-//
-// `applyInProgress` is exposed so urlSync can suppress writes; the
-// per-step status is broadcast to subscribers (the loading banner) so
-// users see "loading 2 of 4 datasets…".
+// Source-url views name datasets by URL and open the missing ones.
+// Workspace-dataset-id views name loaded workspace members and never open
+// source URLs. Everything but a layout change is a recipient-local
+// ViewportCommand. The camera goes last, through `import_presence`, so it
+// lands through one mutator. The in-progress state lets urlSync suppress URL
+// writes while an apply runs.
 
 import type { WasmScene } from "lucida-core";
 import type { DocumentCommand, ViewportCommand } from "../commands.ts";
@@ -40,10 +22,7 @@ import type {
   LabelSettings,
 } from "./types.ts";
 
-// Public types
-
 export interface ApplierBridge {
-  /** Send `OpenRemoteDataset { url }` over the WebSocket. */
   sendOpenRemoteDataset: (url: string) => void;
   /** Send a document command (broadcast to peers). */
   sendCommand: (json: string) => void;
@@ -77,34 +56,25 @@ export type StateListener = (s: ApplierState) => void;
 
 export interface ApplierEventChannels {
   /** Called when the bridge's `onCommand` handler sees a DatasetOpened
-   * for a URL we requested. Returns the dataset_id for matching purposes. */
+   * for a dataset we requested. */
   notifyDatasetOpened: (datasetId: string) => void;
   notifyOpenFailed: (url: string, error: string) => void;
 }
 
-/** After-apply summary used by callers (App.tsx) to resolve UI-focus
- *  state that lives outside the WASM scene: auto-select the first visible dataset on apply so dimension/contrast
- *  side-panel controls operate on something the recipient can see. */
+/** After-apply summary. Callers auto-select the first visible dataset so the
+ *  side-panel controls act on something the recipient can see. */
 export interface ApplyResult {
-  /** Datasets visible after apply (in `dataset_order` order; visibility
-   *  derived from the post-apply scene state). Empty when nothing's loaded. */
+  /** Datasets visible after apply, in `dataset_order` order. */
   visibleDatasetIds: string[];
-  /** First entry of `visibleDatasetIds`, or null. Convenience for the
-   *  selectedDatasetId wrinkle (option c). */
   firstVisibleDatasetId: string | null;
 }
 
 export type ApplyResultListener = (r: ApplyResult) => void;
 
-/** Fires once at the end of every `apply()` (success or partial-failure),
- *  inside the `try` block before the inProgress flag flips back to false.
- *  Subscribers can read post-apply scene state via the live `getScene()`
- *  passed to the applier. Used in `useSavedViewSync` to mark the render
- *  loop dirty + bump the dataset-settings generation + push post-apply
- *  C/T/Z back to React state (since the applier writes to WASM only). */
+/** Fires once at the end of every `apply()`, before `inProgress` drops, so
+ *  subscribers can read post-apply scene state. The applier writes WASM only;
+ *  `useSavedViewSync` uses this to refresh the render loop and React mirrors. */
 export type ApplyCompleteListener = (view: SavedView) => void;
-
-// Implementation
 
 const IDLE_STATE: ApplierState = {
   inProgress: false,
@@ -148,10 +118,8 @@ export class SavedViewApplier {
   private listeners = new Set<StateListener>();
   private applyResultListeners = new Set<ApplyResultListener>();
   private applyCompleteListeners = new Set<ApplyCompleteListener>();
-  // Pending source-url opens keyed by computed dataset id (we don't get
-  // the URL back in the DatasetOpened broadcast — only the manifest,
-  // which carries the server-assigned id). The applier resolves each
-  // entry via `notifyDatasetOpened(datasetId)`.
+  // Keyed by dataset id because the DatasetOpened broadcast carries the
+  // manifest, not the URL.
   private pendingByDatasetId = new Map<string, {
     url: string;
     resolve: () => void;
@@ -164,37 +132,28 @@ export class SavedViewApplier {
   private readonly datasetReferenceMode: DatasetReferenceMode;
   private readonly layoutMutation: LayoutMutationMode;
   private readonly openTimeoutMs: number;
-  /** Resolves per-dataset T/C extents for clamping (Z comes from the
-   *  scene's volume shape). Optional: when absent, t/c pass through
-   *  unclamped — see `clampViewIndices`. */
+  /** Per-dataset T/C extents for clamping; Z comes from the volume shape.
+   *  When absent, t/c pass through unclamped. */
   private readonly dimensionExtentsFor?: DimensionExtentsResolver;
-  /** Resolves the recipient's CURRENT label names (manifest order) for a
-   *  dataset, so per-label settings in an applied view are keyed by label
-   *  name+occurrence rather than raw index. Optional: when absent, per-label
-   *  settings apply positionally (legacy). */
+  /** The recipient's current label names, so per-label settings match by
+   *  name and occurrence. When absent, they apply by position. */
   private readonly labelNamesFor?: LabelNamesResolver;
 
   constructor(
     bridge: ApplierBridge,
-    /** A function returning the live `WasmScene`, or null if not yet loaded. */
+    /** The live `WasmScene`, or null if not yet loaded. */
     getScene: () => WasmScene | null,
-    /** Derive a `DatasetId` from a URL — usually the wasm `dataset_id_for_url`,
-     * but injectable for tests so they don't need WASM init. */
+    /** Usually the wasm `dataset_id_for_url`; injectable so tests skip WASM
+     * init. */
     datasetIdForUrl: (url: string) => string,
     /** ms after which a queued open is considered failed (default 30 s). */
     openTimeoutMs: number = 30_000,
     datasetReferenceMode: DatasetReferenceMode = "source-url",
-    /** What this restore may do to the shared active layout — see
-     *  `LayoutMutationMode`. */
+    /** What this restore may do to the shared active layout. */
     layoutMutation: LayoutMutationMode = "broadcast",
-    /** Resolves the recipient's per-dataset T/C extents so out-of-range
-     *  timepoint/channel indices in an applied view clamp to fit. Z is
-     *  always derived from `dataset_volume_shape`; this only adds T/C.
-     *  Optional — omit (e.g. in tests) to leave t/c unclamped. */
+    /** Omit to leave t/c unclamped. */
     dimensionExtentsFor?: DimensionExtentsResolver,
-    /** Resolves the recipient's current label names (manifest order) per
-     *  dataset so per-label settings restore by name+occurrence. Optional —
-     *  omit (e.g. in tests) to leave per-label settings positional. */
+    /** Omit to restore per-label settings by position. */
     labelNamesFor?: LabelNamesResolver,
   ) {
     this.bridge = bridge;
@@ -207,28 +166,22 @@ export class SavedViewApplier {
     this.labelNamesFor = labelNamesFor;
   }
 
-  // State subscription (used by LoadingViewBanner)
-
+  /** Used by LoadingViewBanner. */
   subscribe(fn: StateListener): () => void {
     this.listeners.add(fn);
     return () => { this.listeners.delete(fn); };
   }
 
-  /** Subscribe to a one-shot summary fired once at the end of every
-   *  successful (or partial-failure) `apply()`. The selectedDatasetId
-   *  wrinkle resolution (option c) consumes this in `useSavedViewSync`. */
+  /** Subscribe to the post-apply visibility summary, fired once per
+   *  `apply()`. `useSavedViewSync` uses it to pick a new selected dataset. */
   subscribeApplyResult(fn: ApplyResultListener): () => void {
     this.applyResultListeners.add(fn);
     return () => { this.applyResultListeners.delete(fn); };
   }
 
-  /** Subscribe to a one-shot "apply done" event fired once at the end of
-   *  every `apply()` (success or partial-failure), AFTER WASM mutations
-   *  but BEFORE the `inProgress` flag flips back to false. Subscribers
-   *  read post-apply scene state via the same `getScene()` the applier
-   *  uses; the render-loop and React-side dim mirrors get refreshed
-   *  through this channel (see useSavedViewSync). Distinct from
-   *  `subscribeApplyResult` (which is about UI focus / selectedDatasetId). */
+  /** Subscribe to "apply done", fired once per `apply()` after the WASM
+   *  writes and before `inProgress` drops. Separate from
+   *  `subscribeApplyResult`, which is about UI focus. */
   subscribeApplyComplete(fn: ApplyCompleteListener): () => void {
     this.applyCompleteListeners.add(fn);
     return () => { this.applyCompleteListeners.delete(fn); };
@@ -267,8 +220,6 @@ export class SavedViewApplier {
     entry.reject(new Error(error));
   }
 
-  // Main entry point
-
   /**
    * Apply a SavedView to the live scene. Returns when all in-flight
    * commands are dispatched and the camera has been imported. Resolves
@@ -281,10 +232,9 @@ export class SavedViewApplier {
     }
     this.setState({ ...IDLE_STATE, inProgress: true });
     try {
-      // Compute requested dataset ids. Global saved views identify
-      // datasets by source URL and may open missing datasets. Workspace
-      // inline views identify already-loaded workspace datasets by their
-      // document/runtime IDs and must not expose source URLs.
+      // Global views name datasets by source URL and may open them.
+      // Workspace views name loaded datasets by id and must not expose
+      // source URLs.
       const requestedIds = this.datasetReferenceMode === "source-url"
         ? view.datasets.map((url) => ({
           url,
@@ -292,11 +242,9 @@ export class SavedViewApplier {
         }))
         : workspaceDatasetIdsForView(view).map((id) => ({ url: "", id }));
 
-      // Snapshot of currently-loaded ids.
       const scene = this.getScene();
       if (!scene) {
-        // No scene yet — skip everything that needs it. Caller should
-        // re-invoke after the scene is available.
+        // The caller re-invokes once the scene exists.
         return;
       }
       const loadedIds = new Set<string>(
@@ -304,7 +252,6 @@ export class SavedViewApplier {
       );
       const requestedSet = new Set(requestedIds.map((r) => r.id));
 
-      // Step 2-4: open missing.
       const toOpen = this.datasetReferenceMode === "source-url"
         ? requestedIds.filter((r) => !loadedIds.has(r.id))
         : [];
@@ -319,8 +266,7 @@ export class SavedViewApplier {
         await this.waitForWorkspaceDatasets(requestedSet);
       }
 
-      // Re-read scene after opens (best-effort: if opens raced or some
-      // failed, we proceed with whatever's loaded).
+      // Best effort: if opens raced or failed, proceed with whatever loaded.
       const sceneAfter = this.getScene();
       if (!sceneAfter) return;
       const loadedAfter = new Set<string>(
@@ -332,8 +278,7 @@ export class SavedViewApplier {
         }
       }
 
-      // Step 5: hide datasets that are loaded but not in the link
-      // (recipient-only, ViewportCommand).
+      // Hide loaded datasets the link doesn't name. Recipient-local.
       const shouldHideUnrequested =
         this.datasetReferenceMode === "source-url" || requestedSet.size > 0;
       if (shouldHideUnrequested) {
@@ -348,7 +293,6 @@ export class SavedViewApplier {
         }
       }
 
-      // Step 6: SetActiveLayout where the link differs.
       for (const [id, layoutId] of Object.entries(view.active_layouts)) {
         if (!loadedAfter.has(id)) continue;
         const layouts = JSON.parse(sceneAfter.available_layouts(id)) as Array<{
@@ -376,7 +320,6 @@ export class SavedViewApplier {
         }
       }
 
-      // Step 7a: SetDatasetOrder (only the loaded subset, in the saved order).
       const filteredOrder = view.dataset_order.filter((id) => loadedAfter.has(id));
       if (filteredOrder.length > 0) {
         this.applyViewport(sceneAfter, {
@@ -385,13 +328,11 @@ export class SavedViewApplier {
         });
       }
 
-      // Step 7b: per-dataset display settings.
       for (const [id, s] of Object.entries(view.dataset_settings)) {
         if (!loadedAfter.has(id)) continue;
         this.applyDatasetSettings(sceneAfter, id, s);
       }
 
-      // Step 8: global contrast + gamma + multi-channel.
       this.applyViewport(sceneAfter, {
         type: "set_contrast",
         min: view.display.contrast_min,
@@ -408,12 +349,9 @@ export class SavedViewApplier {
         });
       }
 
-      // Step 9: SetT / SetC / SetZRange — clamp out-of-range indices to
-      // fit the recipient's datasets, with a non-blocking notice.
-      // `clampViewIndices` narrows this loaded set to the datasets the view
-      // addresses + makes visible, so a co-loaded, unreferenced (or hidden)
-      // shallow neighbor can't crush the authoritative Z/T/C of the
-      // deep/multi-channel dataset the view is actually restoring.
+      // `clampViewIndices` narrows to the datasets the view names and keeps
+      // visible, so an unreferenced or hidden neighbor can't crush the
+      // restored Z/T/C.
       const clampedDatasets = Array.from(loadedAfter, (id) => ({ url: "", id }));
       const clamped = clampViewIndices(
         sceneAfter,
@@ -422,10 +360,7 @@ export class SavedViewApplier {
         this.dimensionExtentsFor,
       );
       if (clamped.clamped) {
-        // Non-blocking notice via the existing warnings channel (rendered
-        // by LoadingViewBanner). Name the axes so the user understands
-        // exactly what moved, e.g. "Z adjusted to fit this dataset" or
-        // "Z and C adjusted to fit this dataset".
+        // LoadingViewBanner renders warnings; name the axes that moved.
         this.addWarning(clampNotice(clamped.adjustedAxes));
       }
       this.applyViewport(sceneAfter, { type: "set_t", t: clamped.t });
@@ -436,33 +371,23 @@ export class SavedViewApplier {
         end: clamped.zEnd,
       });
 
-      // Step 10: camera last. Use import_presence so the WASM side
-      // reapplies camera+view+display in one go (keeping local viewport).
+      // Camera last.
       this.importCameraView(sceneAfter, view.camera);
 
-      // Emit the post-apply visibility set so consumers
-      // can re-target UI focus at something the recipient can see.
       this.emitApplyResult(sceneAfter, view);
 
-      // Fires inside the try (before the inProgress flag flips back) so
-      // subscribers can read post-apply scene state and trigger render
-      // refresh + React-state sync. The applied view is passed so
-      // listeners can restore client-only state (e.g. autoContrastMap).
-      // See `useSavedViewSync` for usage.
+      // Inside the try, before inProgress drops, so listeners read
+      // post-apply state. The view is passed so listeners can restore
+      // client-only state such as autoContrastMap.
       for (const fn of this.applyCompleteListeners) fn(view);
     } finally {
-      // Ratchet the inProgress flag down regardless of any throw.
       this.setState({ ...this.state, inProgress: false });
     }
   }
 
-  /** Read post-apply visibility from the live scene + the just-applied
-   *  view's `dataset_order`, then notify subscribers so they can pick a
-   *  new selectedDatasetId. */
   private emitApplyResult(scene: WasmScene, view: SavedView): void {
     const loaded = new Set<string>(JSON.parse(scene.dataset_ids()) as string[]);
-    // Walk dataset_order first so the "first visible" is well-defined
-    // (matches the order the recipient will see in the layer panel).
+    // Walk dataset_order first so "first visible" matches the layer panel.
     const visible: string[] = [];
     const seen = new Set<string>();
     const considered = view.dataset_order.length > 0
@@ -472,14 +397,12 @@ export class SavedViewApplier {
       if (!loaded.has(id) || seen.has(id)) continue;
       seen.add(id);
       const settings = view.dataset_settings[id];
-      // No per-dataset settings = fall back to "visible" (matches the
-      // applier's earlier write of SetDatasetVisible(false) only for
-      // datasets explicitly removed from the link).
+      // No per-dataset settings means visible; apply hides only datasets
+      // the link drops.
       const isVisible = settings ? settings.visible !== false : true;
       if (isVisible) visible.push(id);
     }
-    // Defensive: catch loaded ids the order didn't list (rare; e.g. a
-    // dataset opened mid-apply).
+    // Loaded ids the order didn't list, e.g. a dataset opened mid-apply.
     for (const id of loaded) {
       if (seen.has(id)) continue;
       const settings = view.dataset_settings[id];
@@ -492,8 +415,6 @@ export class SavedViewApplier {
     };
     for (const fn of this.applyResultListeners) fn(result);
   }
-
-  // Helpers
 
   private async openMissing(toOpen: { url: string; id: string }[]): Promise<void> {
     if (toOpen.length === 0) return;
@@ -510,12 +431,12 @@ export class SavedViewApplier {
         })
         .catch((e) => {
           this.setState({ ...this.state, anyOpenFailed: true });
-          // Swallow — the per-URL state already records the error.
+          // Swallow: the per-URL state already records the error.
           console.warn(`[SavedViewApplier] open failed: ${r.url}: ${(e as Error).message}`);
         });
     });
 
-    // Watchdog timeout per pending entry.
+    // One watchdog fails every entry still pending at the timeout.
     const watchdog = new Promise<void>((resolve) => {
       setTimeout(() => {
         for (const entry of this.pendingByDatasetId.values()) {
@@ -550,10 +471,9 @@ export class SavedViewApplier {
   }
 
   /**
-   * Apply a document command to this page's scene, and — unless the caller
-   * says otherwise — send it so every peer and the server's persisted document
-   * follow. `broadcast: false` is a local-only apply: the picture changes here
-   * and nowhere else, which is what the capture surface needs (#923).
+   * Apply a document command here and, unless `broadcast` is false, send it so
+   * peers and the persisted document follow. The capture surface needs the
+   * local-only apply.
    */
   private applyDocument(cmd: DocumentCommand, broadcast: boolean = true): void {
     const json = JSON.stringify(cmd);
@@ -571,11 +491,9 @@ export class SavedViewApplier {
     id: string,
     s: DatasetDisplaySettings,
   ): void {
-    // Visibility + opacity are the LAYER-PLACEMENT settings (which datasets show
-    // and how strongly). They are part of the HEAVY apply only — the light
-    // annotation-view restore deliberately leaves them untouched. Everything
-    // AFTER these two is the per-dataset/per-channel DISPLAY (colormap, contrast,
-    // gamma, blend), shared with the light path via `datasetDisplayCommands`.
+    // Visibility and opacity are layer placement and belong to this heavy apply
+    // only; the light annotation-view restore leaves them alone. The rest is
+    // display, shared with the light path through `datasetDisplayCommands`.
     this.applyViewport(scene, { type: "set_dataset_visible", dataset_id: id, visible: s.visible });
     this.applyViewport(scene, { type: "set_dataset_opacity", dataset_id: id, opacity: s.opacity });
     for (const cmd of datasetDisplayCommands(id, s, this.labelNamesFor?.(id))) {
@@ -584,11 +502,9 @@ export class SavedViewApplier {
   }
 
   private importCameraView(scene: WasmScene, camera: Camera): void {
-    // Camera goes through `import_presence` so the wasm side does all
-    // three (camera/view/display) atomically and preserves local viewport.
-    // We only want to update the camera shape here — view + display were
-    // already applied step-by-step. Pass them through unchanged by reading
-    // the live scene.
+    // `import_presence` sets camera, view, and display atomically and keeps
+    // the local viewport. View and display were already applied, so pass the
+    // live ones back through unchanged.
     const presence = JSON.parse(scene.export_presence()) as {
       camera: Camera;
       view: unknown;
@@ -620,22 +536,14 @@ export class SavedViewApplier {
   }
 }
 
-// Per-dataset / per-channel DISPLAY commands (colormap, contrast, gamma,
-// blend, render mode, detail level). These are all recipient-LOCAL
-// ViewportCommands — none of them is broadcast, opens a dataset, changes
-// visibility/opacity/order, or mutates the shared layout. Extracted from the
-// heavy applier's per-dataset settings step so the LIGHT annotation-view
-// restore can reproduce the AUTHOR'S per-channel colors/contrast for
-// already-loaded datasets WITHOUT forking the command shapes — and without
-// touching layer placement (visibility/opacity), which stay heavy-only.
-//
-// DELIBERATELY EXCLUDES `set_dataset_visible` and `set_dataset_opacity`: those
-// are layer-placement, not display, and reside in the heavy apply only (the
-// light restore must never hide/reorder a recipient's datasets).
+// Per-dataset and per-channel display commands. All are recipient-local
+// ViewportCommands, shared by the heavy applier and the light annotation-view
+// restore. They exclude `set_dataset_visible` and `set_dataset_opacity`: those
+// are layer placement, and the light restore must never hide or reorder a
+// recipient's datasets.
 
-/** The per-channel display commands for one channel — colormap, contrast,
- * gamma, and channel visibility (a channel toggle is display state, scoped to a
- * single dataset's rendering; it never hides the DATASET). */
+/** Display commands for one channel. Channel visibility is display state; it
+ * never hides the dataset. */
 export function channelDisplayCommands(
   datasetId: string,
   channel: number,
@@ -653,11 +561,8 @@ export function channelDisplayCommands(
   ];
 }
 
-/** The per-label overlay display commands for one label — visibility + opacity.
- * A label's visible/opacity is display state scoped to a single dataset's
- * rendering (it never hides the DATASET or reframes the camera), so — like
- * `channelDisplayCommands` — it rides both the heavy applier and the light
- * restore, letting a restored view reproduce the author's visible-label set. */
+/** Overlay display commands for one label: visibility and opacity. Like
+ * channel display, it rides both the heavy apply and the light restore. */
 export function labelDisplayCommands(
   datasetId: string,
   label: number,
@@ -669,21 +574,13 @@ export function labelDisplayCommands(
   ];
 }
 
-/** The per-dataset DISPLAY commands (contrast, gamma, blend, render mode,
- * detail level, every channel's display, and every label's overlay) for one
- * dataset — i.e. everything `applyDatasetSettings` emits EXCEPT
- * `set_dataset_visible` / `set_dataset_opacity`. Shared by the heavy applier and
- * the light restore.
+/** Every display command `applyDatasetSettings` emits for one dataset, minus
+ * visibility and opacity.
  *
- * `currentLabelNames` is the recipient dataset's CURRENT label names in manifest
- * order. When it AND the author's captured `s.label_names` are both present, the
- * per-label overlay commands are keyed by label NAME and occurrence rather than
- * by raw array index: each current label takes the author's per-label settings
- * for the same name (matched by occurrence for a repeated name), so a view whose
- * label list was reordered / had a label added or removed still lands each
- * setting on the right current label. Without both (a legacy view with no
- * captured names, or a caller that can't supply the current names) it falls back
- * to the positional index-for-index behaviour. */
+ * When both `currentLabelNames` (recipient manifest order) and the author's
+ * `s.label_names` exist, per-label settings match by name and occurrence, so a
+ * reordered or edited label list still lands each setting on the right label.
+ * Otherwise they apply by index. */
 export function datasetDisplayCommands(
   id: string,
   s: DatasetDisplaySettings,
@@ -710,15 +607,12 @@ export function datasetDisplayCommands(
       for (const cmd of channelDisplayCommands(id, i, c)) cmds.push(cmd);
     });
   }
-  // Per-label overlay state — restored so a saved view reproduces the visible
-  // label set + opacities (a hidden label stays hidden on restore).
   if (s.label_settings) {
     const authorNames = s.label_names;
     if (authorNames && authorNames.length > 0 && currentLabelNames) {
-      // Name-keyed, occurrence-aware: emit for each CURRENT label the author's
-      // settings for the same name (k-th current occurrence takes the k-th
-      // author occurrence). A current label with no matching author entry emits
-      // nothing — it keeps whatever the recipient already had.
+      // The k-th current occurrence of a name takes the k-th author
+      // occurrence. A current label with no author match emits nothing and
+      // keeps the recipient's state.
       const occurrencesTaken = new Map<string, number>();
       currentLabelNames.forEach((name, currentIndex) => {
         const targetOccurrence = occurrencesTaken.get(name) ?? 0;
@@ -740,7 +634,7 @@ export function datasetDisplayCommands(
         for (const cmd of labelDisplayCommands(id, currentIndex, ls)) cmds.push(cmd);
       });
     } else {
-      // Legacy / no current names available: positional index-for-index.
+      // Names missing on either side: apply by index.
       s.label_settings.forEach((ls, i) => {
         for (const cmd of labelDisplayCommands(id, i, ls)) cmds.push(cmd);
       });
@@ -749,54 +643,39 @@ export function datasetDisplayCommands(
   return cmds;
 }
 
-// Out-of-range clamping for view indices.
-// Exported for tests so the clamp logic can be exercised in isolation
-// without spinning up a WasmScene.
+// The clamp helpers are exported so tests can run them without a WasmScene.
 
 export interface ClampedView {
   t: number;
   c: number;
   zStart: number;
   zEnd: number;
-  /** True iff the clamp adjusted ANY of z (start or end), t, or c to fit
-   *  the recipient's datasets. Drives the non-blocking "adjusted to fit
-   *  this dataset" notice. When the saved indices were already in range,
-   *  this is false and z/t/c are returned unchanged. */
+  /** True iff the clamp moved z, t, or c. Drives the "adjusted to fit"
+   *  notice. */
   clamped: boolean;
-  /** Human-readable names of the axes that were adjusted (subset of
-   *  `["Z", "T", "C"]`, in that order). Empty when `clamped` is false.
-   *  Lets the caller surface a precise per-axis notice. */
+  /** Axes that moved, a subset of `["Z", "T", "C"]` in that order. */
   adjustedAxes: readonly string[];
 }
 
 /**
- * Resolves the valid per-dataset extents (counts) for clamping, by axis.
- * Any axis whose extent is not determinable for a dataset is reported as
- * `undefined`, and that axis is left unclamped (the "clamp ... when
- * determinable" contract). Extents are counts: a value of `N` means valid
- * indices are `0..N-1` and a valid z slab is `0..N`.
+ * Per-dataset extents (counts) for clamping. An axis reported `undefined`
+ * stays unclamped. `N` means valid indices `0..N-1` and a valid z slab `0..N`.
  */
 export type DimensionExtentsResolver = (
   datasetId: string,
 ) => { z?: number; t?: number; c?: number };
 
 /**
- * Resolves a dataset's CURRENT label names, in manifest (`labels[]`) order —
- * the same order the per-label settings index into. Returns `undefined` (or an
- * empty array) for an unknown/unloaded dataset or one with no labels, which
- * makes the per-label restore fall back to positional application. Backed by the
- * recipient's loaded manifests (see `useDimensions` / `App.tsx`).
+ * A dataset's current label names in manifest (`labels[]`) order, the order
+ * per-label settings index into. `undefined` or empty falls back to
+ * positional restore.
  */
 export type LabelNamesResolver = (datasetId: string) => string[] | undefined;
 
 /**
- * The datasets a view actually addresses AND keeps visible — i.e. the
- * volumes whose extents the z/t/c indices must remain valid for. A dataset
- * is "addressed" if it appears in `dataset_order` or `dataset_settings`,
- * and "visible" unless its per-dataset settings say `visible: false`.
- *
- * Returns `undefined` when the view addresses no datasets at all (e.g. an
- * empty/global view) so callers can fall back to "all loaded".
+ * The datasets a view names (in `dataset_order` or `dataset_settings`) and
+ * doesn't hide. `undefined` when the view names none, so callers fall back to
+ * all loaded.
  */
 function visibleAddressedDatasetIds(view: SavedView): Set<string> | undefined {
   const addressed = new Set<string>();
@@ -806,8 +685,7 @@ function visibleAddressedDatasetIds(view: SavedView): Set<string> | undefined {
 
   const visible = new Set<string>();
   for (const id of addressed) {
-    // No per-dataset settings = visible by default (matches the applier's
-    // step-5 logic, which only hides datasets dropped from the link).
+    // No per-dataset settings means visible.
     if (view.dataset_settings[id]?.visible === false) continue;
     visible.add(id);
   }
@@ -815,22 +693,12 @@ function visibleAddressedDatasetIds(view: SavedView): Set<string> | undefined {
 }
 
 /**
- * Clamp a saved view's z slab / t / c so they fit the recipient's
- * currently-loaded datasets.
+ * Clamp a saved view's z slab, t, and c to the recipient's loaded datasets.
  *
- * Z extents come from the per-dataset `dataset_volume_shape` (authoritative
- * and precise). T/C extents are NOT carried by `dataset_volume_shape`, so
- * they are only clamped when an `extentsFor` resolver supplies them — see
- * `useSavedViewSync`, which wires the recipient's manifest-derived union
- * extents. When no extent is determinable for an axis, that axis passes
- * through unchanged (matching the legacy behavior for t/c).
- *
- * The clamp is conservative: it uses the SMALLEST extent across the
- * datasets the view ADDRESSES and makes VISIBLE (intersected with the
- * loaded set passed in `requestedIds`), so an index stays valid for every
- * volume it must address — without being crushed to an unrelated/hidden
- * co-loaded neighbor. When the view addresses no datasets at all, every
- * loaded id in `requestedIds` is considered (legacy behavior).
+ * Z extents come from `dataset_volume_shape`; T/C extents come only from
+ * `extentsFor`. An axis with no known extent passes through. Each axis clamps
+ * to the largest extent among the datasets the view names and keeps visible,
+ * or among every id in `requestedIds` when the view names none.
  */
 export function clampViewIndices(
   scene: WasmScene,
@@ -838,24 +706,16 @@ export function clampViewIndices(
   view: SavedView,
   extentsFor?: DimensionExtentsResolver,
 ): ClampedView {
-  // Restrict the extent scan to the datasets the view addresses + keeps
-  // visible. A co-loaded dataset the view never referenced (or hides) must
-  // not drag the conservative min down and crush a deep/multi-channel
-  // volume's valid Z/T/C. Fall back to all-loaded only for a view that
-  // addresses nothing (empty/global).
   const addressedVisible = visibleAddressedDatasetIds(view);
   const idsToClamp = addressedVisible === undefined
     ? requestedIds
     : requestedIds.filter((r) => addressedVisible.has(r.id));
 
-  // LARGEST extent per axis across the relevant datasets — the bound the
-  // global Z/T/C sliders actually navigate (the DEEPEST visible volume). A
-  // co-visible SHALLOW dataset (e.g. a 2D image with Z=1) must NOT crush a
-  // deep volume's valid plane: each dataset clamps its own rendering, so the
-  // saved index only needs to fit the deepest relevant volume. (Using the
-  // smallest extent here was the #814 restore regression: a 2D dataset
-  // co-loaded with a 340-plane volume collapsed a valid Z to 0.) `undefined`
-  // means "not determinable for any relevant dataset", leaving the axis alone.
+  // Largest extent per axis: the bound the global sliders navigate. Each
+  // dataset clamps its own rendering, so the saved index only needs to fit the
+  // deepest relevant volume. The smallest would collapse a valid Z to 0 when a
+  // 2D image shares the view with a deep volume. `undefined` leaves the axis
+  // alone.
   let maxZ: number | undefined;
   let maxT: number | undefined;
   let maxC: number | undefined;
@@ -865,13 +725,12 @@ export function clampViewIndices(
   };
 
   for (const r of idsToClamp) {
-    // Z extent: from the volume shape ([Z, Y, X]). This is the only
-    // dimension `dataset_volume_shape` carries.
+    // The volume shape is [Z, Y, X]; Z is the only extent it carries.
     try {
       const shape = scene.dataset_volume_shape(r.id);
       if (shape.length >= 1) maxZ = considerMax(maxZ, shape[0]);
     } catch {
-      // Dataset not yet loaded / no shape; skip — its extent is unknown.
+      // Dataset not yet loaded or no shape; its extent is unknown.
     }
     // T/C extents: only available via the injected resolver (manifest
     // union on the recipient). Resolver failures are non-fatal.
@@ -888,8 +747,7 @@ export function clampViewIndices(
 
   const requested = view.view;
 
-  // --- Z slab: clamp start and end into [0, maxZ], keeping a slab of
-  // thickness >= 1. Preserves the slab when it fits the deepest visible volume. ---
+  // Keep a slab of thickness >= 1 inside [0, maxZ].
   let zStart = requested.z_range.start;
   let zEnd = requested.z_range.end;
   if (maxZ !== undefined) {
@@ -897,19 +755,16 @@ export function clampViewIndices(
     zEnd = Math.max(zStart + 1, Math.min(zEnd, maxZ));
   }
 
-  // --- T: clamp into [0, maxT - 1] when the extent is known. ---
   let t = requested.t;
   if (maxT !== undefined) {
     t = Math.max(0, Math.min(t, maxT - 1));
   }
 
-  // --- C: clamp into [0, maxC - 1] when the extent is known. ---
   let c = requested.c;
   if (maxC !== undefined) {
     c = Math.max(0, Math.min(c, maxC - 1));
   }
 
-  // Report per-axis adjustments precisely so the notice can name them.
   const adjustedAxes: string[] = [];
   if (zStart !== requested.z_range.start || zEnd !== requested.z_range.end) {
     adjustedAxes.push("Z");
@@ -935,6 +790,5 @@ export function clampNotice(adjustedAxes: readonly string[]): string {
   return `${axes} adjusted to fit this dataset`;
 }
 
-/** Helper: re-export shape used by tests so they can construct an applier-like
- * object without depending on the full ApplierBridge surface. */
+/** Re-exported for tests. */
 export type { Camera, DatasetId, LayoutId, DatasetDisplaySettings };

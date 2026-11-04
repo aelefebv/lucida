@@ -1,19 +1,9 @@
-// Pure REST wrappers around `/api/bookmarks`. No React, no DOM — kept
-// separate from the `useBookmarks` hook so urlSync's `#b=<id>`
-// resolution can call `getBookmark(id)` without dragging in the hook
-// machinery (the bootstrap path runs before any React tree is mounted).
+// REST wrappers around `/api/bookmarks`, with no React. urlSync resolves
+// `#b=<id>` through `getBookmark` before any React tree mounts.
 //
-// Wire contract:
-//   - GET /api/bookmarks?dataset=<url>&dataset=<url>
-//   - GET /api/bookmarks/:id
-//   - POST /api/bookmarks  body {name, datasets, view}
-//   - PATCH /api/bookmarks/:id  body {name}
-//   - DELETE /api/bookmarks/:id
-//
-// 401 means "not authenticated" — the caller should redirect through
-// the existing UnauthLanding flow (already preserves the hash).
-// 403 on PATCH/DELETE means "not the creator and not admin." 404 on a
-// missing id. 5xx surfaces as `BookmarksApiError` with status.
+// 401 means not authenticated; the caller redirects through UnauthLanding,
+// which preserves the hash. 403 on PATCH/DELETE means not the creator and not
+// admin. Errors surface as `BookmarksApiError` with the status.
 
 import type { SavedView } from "./types.ts";
 
@@ -62,7 +52,7 @@ async function readJsonOrThrow<T>(res: Response, op: string): Promise<T> {
     const body = (await res.json()) as { error?: string; detail?: string };
     detail = body.detail ?? body.error ?? "";
   } catch {
-    /* body not JSON — leave detail empty */
+    /* body not JSON: leave detail empty */
   }
   const msg = detail ? `${op}: ${res.status} ${detail}` : `${op}: ${res.status}`;
   throw new BookmarksApiError(res.status, msg);

@@ -1,14 +1,9 @@
 use super::*;
 
-// --- Dataset rename (#701) -------------------------------------------
-
-// THE HEADLINE TEST: a rename must survive close + reopen. The prior
-// (rejected) attempt updated only the DB display_name and a web-local
-// override, so the persisted document still carried the old manifest name
-// and the rename was silently lost on reopen. This drives the rename
-// through the document-mutation path, evicts the live workspace, reopens
-// it (which loads the persisted document_json), and asserts the
-// client-visible manifest name is the NEW one.
+// A rename must survive close and reopen, so it has to reach the persisted
+// document, not only the DB display_name. Drives the rename through the
+// document path, evicts the live workspace, reopens it, and asserts the
+// client-visible manifest name is the new one.
 #[tokio::test]
 async fn rename_dataset_survives_evict_and_reopen() {
     let store = fresh_store().await;
@@ -43,7 +38,7 @@ async fn rename_dataset_survives_evict_and_reopen() {
     assert_eq!(evicted, 1);
     assert_eq!(manager.live_workspace_count().await, 0);
 
-    // Reopen: the client-visible document manifest name is the NEW one.
+    // Reopen: the client-visible document manifest name is the new one.
     let reopened = manager.live_workspace(&workspace_id, &owner).await.unwrap();
     assert!(!Arc::ptr_eq(&live, &reopened));
     let reopened_name = reopened.session.lock().await.document.manifests[&wds_id]
@@ -359,12 +354,6 @@ async fn live_workspace_sessions_are_independent() {
             .contains_key(&DatasetId("ds-a".into()))
     );
 }
-// ===================================================================
-// RED TEAM (#817 issue-sweep): probe the new transition allow-list and
-// the surrounding never-leak / self-approve invariants.
-// ===================================================================
-
-// --- Manager-layer command authorization ---------------------------
 
 // Generic document commands are authorized (and persisted) by the
 // manager, mirroring `rename_dataset`: the WS handler holds no role
@@ -509,8 +498,8 @@ async fn dataset_source_for_retry_is_editor_gated() {
 }
 
 /// The editor gate's two failure modes must never be conflated: a role
-/// that DENIES is an authorization verdict, but a role lookup that
-/// ERRORS is transient store trouble — no verdict was reached. Closing
+/// that denies is an authorization verdict, but a role lookup that
+/// errors is transient store trouble, and no verdict was reached. Closing
 /// the sqlite pool makes every subsequent query fail, so both manager
 /// entry points can be driven against a genuinely failing store.
 #[tokio::test]

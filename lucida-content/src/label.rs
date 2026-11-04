@@ -18,14 +18,11 @@ pub struct LabelColor {
 /// A segmentation-mask label attached to a source intensity image, stored on
 /// the [`crate::graph::DatasetManifest`] as a first-class overlay member.
 ///
-/// A label carries its OWN multiscale image ([`ImageSpec`]) — distinct axes,
-/// per-level geometry, scale, and integer dtype from the source image — so a
-/// later render pass can stream and draw it as an overlay layer at the source
-/// image's placement, aligned by the label's own coordinate scale rather than
-/// the source's. It is deliberately kept out of
-/// [`crate::graph::DatasetManifest::images`] so nothing treats a label as an
-/// ordinary intensity image; consumers reach labels through the dedicated
-/// accessors.
+/// A label carries its own multiscale image ([`ImageSpec`]) with its own
+/// axes, geometry, scale, and integer dtype, drawn at the source image's
+/// placement but aligned by the label's own scale. It is kept out of
+/// [`crate::graph::DatasetManifest::images`] so nothing treats it as an
+/// intensity image.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LabelSpec {
     /// Label-group name (e.g. `"region-b"`), unique within its source image.

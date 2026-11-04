@@ -1,15 +1,9 @@
-//! Database setup shared by every test that needs a real one.
+//! Database setup shared by every test that needs a real one, so a test
+//! database comes up exactly as production opens one, through
+//! [`SqliteStorageBackend`].
 //!
-//! Each store's tests used to open their own in-memory database with the
-//! same three lines. They go through here instead, so how a test database
-//! comes up is written once and cannot drift from how production opens
-//! one: the migrations, the pool shape, and the pinned connection all
-//! come from [`SqliteStorageBackend`].
-//!
-//! SQLite needs nothing but a process, so [`sqlite_backend`] always
-//! answers. PostgreSQL needs a server, which not every machine running
-//! `cargo test` has, so [`postgres_backend`] answers `None` and says so
-//! on the way past — see the note on that function.
+//! [`sqlite_backend`] always answers. [`postgres_backend`] answers `None`
+//! when no PostgreSQL server is reachable; see the note on that function.
 
 use std::io::Write as _;
 
@@ -81,19 +75,13 @@ pub(crate) struct PostgresTestDatabase {
 /// An empty schema of this test's own on the offered PostgreSQL, or
 /// `None` when none was offered.
 ///
-/// Every case gets its own schema, so cases that write the same key run
-/// in parallel without colliding. Nothing drops the schema afterwards: a
-/// teardown would have to run after the case's last use of the store,
-/// which is exactly where a panicking case does not reach. Instead each
-/// schema carries the second it was created, and the next run reclaims
-/// the ones older than [`SCHEMA_LIFETIME_SECONDS`] — self-healing, and
-/// too old to belong to a run still going.
-///
-/// A `None` says so on the process's stderr, or fails the case outright
-/// where [`POSTGRES_REQUIRED_VAR`] says a skip is not acceptable.
-///
-/// Separate from [`postgres_backend`] for the cases that are about
-/// bringing a backend up: they need a database nothing has migrated yet.
+/// Each case gets its own schema so cases run in parallel. Nothing drops
+/// it, because a panicking case never reaches a teardown. Instead each
+/// schema records when it was created, and the next run reclaims those
+/// older than [`SCHEMA_LIFETIME_SECONDS`]. A `None` is reported on stderr,
+/// or fails the case where [`POSTGRES_REQUIRED_VAR`] forbids a skip.
+/// Separate from [`postgres_backend`] for cases that need an unmigrated
+/// database.
 pub(crate) async fn postgres_schema() -> Option<PostgresTestSchema> {
     let base = match std::env::var(POSTGRES_URL_VAR) {
         Ok(base) if !base.trim().is_empty() => base,

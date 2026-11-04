@@ -1,20 +1,12 @@
-//! Watching the metadata reads a dataset open performs.
+//! Watching the metadata reads a dataset open performs. They happen before
+//! the first chunk exists, so without this a trace shows seconds of silence
+//! at the front of every remote open.
 //!
-//! A cold open's cost lives here rather than in the chunk pipeline: the
-//! reads that resolve a dataset's shape happen before the first chunk
-//! exists, so no chunk lane can draw them and a trace without them shows
-//! several seconds of silence at the front of every remote open.
-//!
-//! The observer is a **task-local** rather than a field on [`CachedStore`]
-//! or a parameter threaded through the import. A field would misattribute:
-//! one cache is shared by every live caller of the same source (ADR 0046),
-//! so two concurrent opens would file each other's reads, and the rows only
-//! ever travel to the client that caused them. A parameter would thread a
-//! tracing concern through every function in the import and the parser,
-//! which have no other reason to know that anything is watching. A
-//! task-local scopes attribution to exactly the work the open awaits — the
-//! import's fan-out is `buffer_unordered` on the open's own task, so it is
-//! covered — and a read performed outside any open simply files nowhere.
+//! The observer is a task-local, not a [`CachedStore`] field or a threaded
+//! parameter. One cache serves every caller of a source (ADR 0046), so a
+//! field would file concurrent opens' reads against each other. The
+//! import's fan-out runs on the open's own task, so a task-local covers it,
+//! and a read outside any open files nowhere.
 //!
 //! [`CachedStore`]: crate::cache::CachedStore
 

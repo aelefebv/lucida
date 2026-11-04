@@ -1,19 +1,14 @@
 // @vitest-environment happy-dom
 //
-// Hook-level tests for useSavedViewSync. Covers the post-fix wiring:
-//   - Bug 1: notifyChange is exposed and forwards to UrlSync.
-//   - Bug 2: applier's apply-complete fires markInteractiveDirty/Residency.
-//   - Bug 3: applier's apply-complete pushes post-apply C/T/Z/viewMode
-//     and multiChannel back to the React-side dim mirrors.
-//
-// Mocks `lucida-core`'s `dataset_id_for_url` so the hook can construct
-// without a wasm init (mirrors applier.test.ts's injected fakeIdForUrl).
+// Hook wiring: notifyChange forwards to UrlSync, and apply-complete wakes the
+// render loop and pushes C/T/Z, viewMode, and multiChannel back to React.
+// `dataset_id_for_url` is mocked so the hook builds without a wasm init.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { act, render } from "@testing-library/react";
 
-// Mock lucida-core BEFORE importing the hook so the import-time
+// Mock lucida-core before importing the hook so the import-time
 // `dataset_id_for_url` reference picks up the stub.
 vi.mock("lucida-core", () => ({
   dataset_id_for_url: (url: string) => `ds-stub-${url.length.toString(16)}`,

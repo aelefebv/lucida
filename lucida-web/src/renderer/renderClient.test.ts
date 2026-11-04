@@ -160,7 +160,7 @@ describe("RenderClient destroy", () => {
    * The worker drops every message until its init completes and answers
    * none after its init fails, so a capture posted then would hang the
    * bundle export on the one host the driver's fallback frame exists for:
-   * one where the worker never came up (#1098).
+   * one where the worker never came up.
    */
   it("captureFrame on a worker that failed to start resolves with the failure as the reason and posts nothing", async () => {
     const client = new RenderClient(makeCanvas());

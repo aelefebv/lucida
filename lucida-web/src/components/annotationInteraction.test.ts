@@ -101,9 +101,8 @@ describe("emitMoveAnnotation", () => {
       { datasetId: "wds-0f3a", id: "pin-4c1d", position: [355, 470.5], end: [465, 520.5], z: 12.5 },
       () => {},
     );
-    // The wire goldens lock this envelope's field presence and values
-    // (parsed comparison); the exact byte string asserted here additionally
-    // pins this producer's serialization locally.
+    // The wire goldens compare parsed frames; this byte string also pins key
+    // order locally.
     expect(applied[0]).toBe(
       '{"type":"move_annotation","dataset_id":"wds-0f3a","id":"pin-4c1d","position":[355,470.5],"end":[465,520.5],"z":12.5}',
     );

@@ -1,14 +1,7 @@
 /**
- * Pure-TS tests covering the bridge between `proxyAtlas.ts` and the
- * shaders' proxy sampling math. We can't run WGSL in vitest, but the
- * critical invariants we DO want to lock down are:
- *
- *   1. The shader's 3-D slot-origin math agrees with the TS-side
- *      `proxySlotOrigin()` (which is what gpu.worker.ts uses to decide
- *      where to write proxy uploads).
- *
- * The renderers' per-frame `Uniforms` layouts are locked against the
- * shaders in `descriptor/layout.test.ts`.
+ * The shaders' 3D proxy slot-origin math must agree with `proxySlotOrigin()`,
+ * which decides where proxy uploads land. WGSL can't run in vitest, so the
+ * shader math is recomputed here.
  */
 
 import { describe, it, expect } from "vitest";
@@ -29,9 +22,7 @@ import {
   proxySlotOrigin,
 } from "./proxyAtlas.ts";
 
-// ---------------------------------------------------------------------------
 // Mock GPU device (mirrors proxyAtlas.test.ts)
-// ---------------------------------------------------------------------------
 
 interface MockTexture {
   destroyed: boolean;
@@ -57,10 +48,8 @@ function makeMockDevice(maxDim = 2048): GPUDevice {
   } as unknown as GPUDevice;
 }
 
-// ---------------------------------------------------------------------------
 // Shader-side slot-origin recomputation. Mirrors `sampleProxy()` in
 // volume.wgsl: dims = vec4u(Z, Y, X, _); grid = textureDims / slotDims.
-// ---------------------------------------------------------------------------
 function shaderOrigin(
   slotIdx: number,
   dims: [number, number, number],

@@ -1,35 +1,12 @@
 /**
  * The watch stream: what the page pushes over the session socket while
- * somebody has turned its watch toggle on (#1068, ADR 0051 as amended).
+ * somebody has turned its watch toggle on (ADR 0051). The server relays it to
+ * `lucida trace watch` subscribers.
  *
- * An agent cannot open the reporter's tab, and a session that never settles
- * never produces a run file to send. So a person turns this on and the page
- * publishes what a live surface would draw — the per-tick aggregate, the
- * boundaries of the runs it opens and closes, and a provisional reading on a
- * fixed interval. The server relays it to CLI subscribers and keeps a small
- * ring for late joiners; `lucida trace watch` prints one JSON object per
- * line.
- *
- * Rows never leave. There is no item kind a lifecycle row could ride in, so
- * what travels is bounded by the publish cadence and the dataset count and
- * never by the chunk count: following a stalled session costs a few hundred
- * bytes per tick rather than the run.
- *
- * Nothing here starts itself. Off by default, off again after a reconnect
- * (the socket that carried a stream is not the one that resumes it), and off
- * when the page goes away.
- *
- * It samples rather than drains. Every read behind it is one of the
- * recorder's live reads, so publishing closes no run and walks no row, and an
- * aggregate carries what happened since the previous one rather than the
- * ring. A stretch shorter than the cadence lands on the next aggregate or, at
- * a run's end, on none. The trace still holds every tick for whoever exports
- * it.
- *
- * The stream's own frames go through the bridge like any other message, so
- * the trace's send accounting counts them under `other`. Watching a session
- * is traffic, and the number that names the page's traffic says so rather
- * than hiding its own.
+ * Rows never leave: no item kind can carry a lifecycle row, so what travels
+ * is bounded by the publish cadence and the dataset count, never by the chunk
+ * count. Every read behind it is one of the recorder's live reads, so
+ * publishing closes no run and walks no row.
  */
 
 import type { RunBoundary, WatchCursor, WatchSample } from "./liveProgress.ts";
@@ -154,13 +131,10 @@ export interface WatchStreamOptions {
  * newest reading, and the newest planning sample for each dataset that
  * planned.
  *
- * Reducing per dataset keeps an item's size set by how many datasets planned
- * rather than by how often they did. The split below is what makes that
- * lossless. A dataset's counters describe one planning pass, so the newest
- * pass supersedes the ones before it, while the counted phases and the send
- * tallies describe what happened *between* passes: dropping a sample would
- * drop its bytes. Those two are summed over the stretch instead, and they
- * belong to the page rather than to whichever dataset's sample carried them.
+ * Keeping only the newest sample per dataset is lossless because a dataset's
+ * counters describe one planning pass, which the next pass supersedes. The
+ * counted phases and send tallies describe what happened between passes, so
+ * they are summed over the stretch instead and belong to the page.
  */
 export function aggregateItem(
   atEpochMs: number,

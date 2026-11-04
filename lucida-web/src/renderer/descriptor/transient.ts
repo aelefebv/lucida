@@ -1,16 +1,11 @@
 /**
- * Transient single-entity descriptor serializer.
+ * Transient single-entity descriptor serializer, for callers with no
+ * cold-state-backed descriptor buffer: the minimap path and the label
+ * overlay draws.
  *
- * Used by callers that don't have a cold-state-backed descriptor buffer
- * (the minimap path via `volumeRenderer.setTransientDescriptor`, and the
- * label overlay draws). Writes `modelMatrix` + `invModelMatrix`, sentinel
- * proxy handles, unit proxy dims, display state, and one level source
- * covering the full volume from level pool binding 0 (a single-slot or
- * chunk-grid atlas bound there).
- *
- * Reads byte offsets from `./layout.ts` — the same source of truth used
- * by the canonical `descriptorBuffer.serializeEntityDescriptor`. The
- * WGSL ↔ TS agreement test in `./layout.test.ts` covers both writers.
+ * Byte offsets come from `./layout.ts`, shared with
+ * `descriptorBuffer.serializeEntityDescriptor`, and `./layout.test.ts`
+ * checks them against the WGSL.
  */
 
 import {
@@ -59,14 +54,10 @@ export interface TransientDescriptorParams {
   /** Overlay opacity used in categorical mode (default `1`). */
   labelOpacity?: number;
   /**
-   * Chunk grid of the level: when present, the level source is written
-   * with these grid dims and per-chunk voxel dims (`[X, Y, Z]` order,
-   * matching `volumeDims`), so the shader walks a slot-grid atlas via its
-   * indirection buffer. `levelDims` is `volumeDims`, `indirectionOffset` 0.
-   *
-   * When ABSENT, the level covers the whole volume in a single slot
-   * (`gridDims = [1,1,1]`, `chunkDims = volumeDims`) — the single-tile
-   * layout the minimap/thumbnail path relies on.
+   * The level's chunk grid, `[X, Y, Z]` like `volumeDims`, so the shader
+   * walks a slot-grid atlas via its indirection buffer. When absent the level
+   * is one slot covering the whole volume, the layout the minimap and
+   * thumbnail path relies on.
    */
   chunkGrid?: {
     gridDims: [number, number, number];
@@ -75,19 +66,9 @@ export interface TransientDescriptorParams {
 }
 
 /**
- * Serialize a transient single-entity descriptor into `target`.
- *
- * `target` must be at least {@link DESCRIPTOR_ENTRY_SIZE} bytes. The
- * descriptor is written starting at byte 0 — callers wanting an offset
- * should pass a subarray.
- *
- * The descriptor:
- *   - sets sentinel pool / slot indices (no proxy fallback)
- *   - sets unit (1×1×1) proxy dims (defensive; ignored when slot is sentinel)
- *   - encodes one level source (level 0, pool binding 0) covering the
- *     full volume with `chunkDims == levelDims` and `gridDims = [1, 1, 1]`,
- *     matching the single-slot atlas layout used by `volumeRenderer.setVolume`
- *   - zeroes the remaining level sources and the coarse source
+ * Serialize a transient single-entity descriptor at byte 0 of `target`,
+ * which must hold at least {@link DESCRIPTOR_ENTRY_SIZE} bytes. Proxy handles
+ * are sentinel and only level source 0 (pool binding 0) is valid.
  */
 export function serializeTransientDescriptor(
   target: ArrayBuffer,
@@ -99,14 +80,13 @@ export function serializeTransientDescriptor(
   if (params.modelMatrix.length === 16) f32.set(params.modelMatrix, OFFSET_MODEL_MATRIX / 4);
   if (params.invModelMatrix.length === 16) f32.set(params.invModelMatrix, OFFSET_INV_MODEL_MATRIX / 4);
 
-  // Sentinel proxy handles — the shader's proxy steps short-circuit when
-  // the slot index is sentinel (and are only reached with no chunk tier).
+  // The shader's proxy steps short-circuit on a sentinel slot index.
   u32[OFFSET_TILE_PROXY_POOL_INDEX / 4] = DESCRIPTOR_SENTINEL_INDEX;
   u32[OFFSET_TILE_PROXY_SLOT_INDEX / 4] = DESCRIPTOR_SENTINEL_INDEX;
   u32[OFFSET_GROUP_PROXY_POOL_INDEX / 4]  = DESCRIPTOR_SENTINEL_INDEX;
   u32[OFFSET_GROUP_PROXY_SLOT_INDEX / 4]  = DESCRIPTOR_SENTINEL_INDEX;
 
-  // Unit proxy dims (defensive — proxy slot is sentinel, so dims are unread).
+  // Defensive: the proxy slot is sentinel, so these dims are never read.
   const tileDimsBase = OFFSET_TILE_PROXY_DIMS / 4;
   u32[tileDimsBase + 0] = 1;
   u32[tileDimsBase + 1] = 1;

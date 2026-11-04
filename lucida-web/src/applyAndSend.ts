@@ -6,7 +6,7 @@ import { guardedSceneCall } from "./sceneGuard.ts";
 /** Apply a document command locally and send it to the server. The local
  * apply is guarded so an engine failure surfaces even in a solo session
  * (see `sceneGuard.ts`); on failure nothing is sent and the error
- * propagates to the caller as before. */
+ * propagates to the caller. */
 export function applyDocumentCommand(
   scene: WasmScene,
   cmd: DocumentCommand,

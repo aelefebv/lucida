@@ -1,28 +1,11 @@
 //! Bounded-concurrency proxy generator with in-flight dedup.
 //!
-//! `request(spec, priority)` flow:
-//!
-//! 1. Compute the expected `source_content_hash` for `spec` from the
-//!    [`DatasetManifest`].
-//! 2. Cache check via [`ProxyCache::get`]. Hit → return `Arc<ProxyAsset>`.
-//! 3. In-flight check: if another caller is already generating `spec`,
-//!    subscribe to its broadcast channel and await the result.
-//! 4. Otherwise: register a fresh broadcast sender in the in-flight map,
-//!    drop the lock, acquire a [`Semaphore`] permit, do the actual work,
-//!    write to the cache, broadcast the result, and remove the in-flight
-//!    entry.
-//!
-//! The actual work is split into an **async pre-fetch** stage
-//! ([`build_server_proxy_source`]) and a **sync compute** stage
-//! ([`generate_proxy`] called via `tokio::task::spawn_blocking`). This
-//! keeps the runtime-blocking generator on the blocking pool and the
-//! tokio worker thread free for I/O.
-//!
-//! ## Priority
-//!
-//! `priority` is accepted for API stability but **not yet used to order
-//! requests**. The semaphore awakes waiters in roughly FIFO order; a real
-//! priority scheduler is deferred. See module docs.
+//! `request(spec, priority)` checks the cache, then joins an in-flight
+//! generation of the same spec if there is one. Otherwise it registers
+//! itself, takes a [`Semaphore`] permit, pre-fetches with
+//! [`build_server_proxy_source`], and runs [`generate_proxy`] under
+//! `spawn_blocking` so the worker threads stay free for I/O. `priority` is
+//! accepted but not yet used; waiters wake in roughly FIFO order.
 
 use std::collections::HashMap;
 use std::sync::Arc;

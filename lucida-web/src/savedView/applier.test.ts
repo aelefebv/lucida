@@ -3,10 +3,8 @@ import { SavedViewApplier, type ApplierBridge, clampViewIndices } from "./applie
 import { SAVED_VIEW_VERSION, type SavedView } from "./types.ts";
 
 // Mock WasmScene: records every apply_command call and lets the test
-// pre-seed dataset_ids/available_layouts/dataset_volume_shape.
-//
-// We pass it through as `unknown as WasmScene` to side-step the opaque
-// wasm-bindgen class type; the applier only uses the methods we mock.
+// pre-seed dataset_ids/available_layouts/dataset_volume_shape. Passed as
+// `unknown as WasmScene` because the wasm-bindgen class type is opaque.
 function createMockScene(opts: {
   datasetIds?: string[];
   availableLayouts?: Record<string, Array<{ id: string; name: string; active?: boolean }>>;
@@ -92,9 +90,8 @@ describe("SavedViewApplier", () => {
   let docCmds: string[];
   let bridge: ApplierBridge;
 
-  // Deterministic id derivation that doesn't need the WASM init in tests.
-  // Real applier wiring uses the wasm `dataset_id_for_url` (covered by
-  // its own Rust tests in `lucida-core/src/saved_view.rs`).
+  // Deterministic stand-in for the wasm `dataset_id_for_url`, which has its
+  // own Rust tests.
   const fakeIdForUrl = (url: string) => `ds-${url.length.toString(16).padStart(16, "0")}-${url.slice(-4)}`;
 
   beforeEach(() => {
@@ -249,7 +246,7 @@ describe("SavedViewApplier", () => {
       dataset_id: "ds-stale",
       visible: false,
     });
-    // Was NOT sent as a document command (recipient-only).
+    // Not sent as a document command (recipient-only).
     expect(docCmds.find((c) => c.includes("ds-stale"))).toBeUndefined();
   });
 
@@ -363,8 +360,8 @@ describe("SavedViewApplier", () => {
       dataset_id: "wds-a",
       layout_id: "L1",
     });
-    // ...and the shared document never hears about it, silently — a capture
-    // has nothing to warn a user about.
+    // ...and the shared document never hears about it. A capture has nothing
+    // to warn a user about, so no warning either.
     expect(docCmds.find((c) => c.includes('"set_active_layout"'))).toBeUndefined();
     expect(applier.getState().warnings).toEqual([]);
     expect(warn).not.toHaveBeenCalled();
@@ -524,8 +521,6 @@ describe("SavedViewApplier", () => {
     await p;
   });
 
-  // --- selectedDatasetId wrinkle resolution (option c) -------------------
-
   it("emits ApplyResult with the first visible dataset after apply", async () => {
     const scene = createMockScene({ datasetIds: ["ds-a", "ds-b"] });
     const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl);
@@ -557,7 +552,7 @@ describe("SavedViewApplier", () => {
 
     const v = emptyView();
     v.dataset_order = ["ds-c", "ds-a", "ds-b"];
-    // No per-dataset settings = default visible.
+    // No per-dataset settings means visible.
     await applier.apply(v);
     expect(results[0]).toBe("ds-c");
   });
@@ -589,8 +584,6 @@ describe("SavedViewApplier", () => {
     expect(count).toBe(1);
   });
 
-  // --- apply-complete channel (Bug #2 / #3 fix) -------------------------
-
   it("subscribeApplyComplete fires exactly once per apply", async () => {
     const scene = createMockScene();
     const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl);
@@ -605,9 +598,8 @@ describe("SavedViewApplier", () => {
   });
 
   it("subscribeApplyComplete fires AFTER the WASM mutations (post-apply state visible)", async () => {
-    // The fix relies on subscribers being able to read post-apply state
-    // via the live scene. Verify the applier writes the view's c/t/z
-    // BEFORE the apply-complete callback fires.
+    // Subscribers read post-apply state from the live scene, so c/t/z must be
+    // written before the callback fires.
     const scene = createMockScene();
     const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl);
     let setCSeen = false;
@@ -628,9 +620,8 @@ describe("SavedViewApplier", () => {
   });
 
   it("subscribeApplyComplete fires while inProgress is still true", async () => {
-    // Subscribers want post-apply state but BEFORE the inProgress flag
-    // flips back; this lets urlSync stay suppressed for the duration of
-    // the apply-complete handler's render-dirty + state-sync work.
+    // Keeps urlSync suppressed while the handler syncs render and React
+    // state.
     const scene = createMockScene();
     const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl);
     let inProgressDuringCallback = false;
@@ -666,10 +657,7 @@ describe("SavedViewApplier", () => {
     expect(b).toBe(1);
   });
 
-  // Bug #3 root-cause coverage: per-channel state captured in the view
-  // is written via set_c. The apply-complete listener can read post-apply
-  // state to push back into React; here we verify the WASM-side write
-  // landed (the React-side mirror is covered in useSavedViewSync.test.ts).
+  // The WASM-side write; useSavedViewSync.test.ts covers the React mirror.
   it("set_c includes the captured channel value (Bug #3 root cause)", async () => {
     const scene = createMockScene();
     const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl);
@@ -707,10 +695,8 @@ describe("clampViewIndices", () => {
   });
 
   it("does not crush a deep Z when a shallow 2D dataset is co-loaded (#814 restore)", () => {
-    // Regression for the #814 restore path: a 340-plane volume co-loaded with a
-    // 2D image (Z=1). The saved deep plane must survive — the clamp bound is the
-    // DEEPEST visible volume (what the global Z slider navigates), not the
-    // shallowest, so a co-visible 2D dataset can't collapse a valid Z to 0.
+    // A 340-plane volume co-loaded with a 2D image (Z=1). The bound is the
+    // deepest visible volume, so the 2D dataset can't collapse a valid Z to 0.
     const scene = {
       dataset_volume_shape: (id: string) =>
         new Uint32Array([id === "ds-vol" ? 340 : 1, 256, 256]),

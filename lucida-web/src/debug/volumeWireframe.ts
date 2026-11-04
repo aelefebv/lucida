@@ -1,19 +1,11 @@
 /**
- * The overlay in volume mode: chunk boxes as wireframes, colored by the same
- * states as the slice overlay's cells.
- *
- * The draw list is the slice overlay's. {@link buildVolumeDrawList} calls the
- * same function over cells that carry their eight projected corners, so a
- * box wears the fill, the border, the tooltip and the reading the same chunk
- * would wear as a cell, and the hover inspector reads the item as it is.
- * What this module adds is the geometry a box needs that a rectangle does
- * not: the path through its twelve edges, the silhouette the pointer is
- * tested against, and a stroke derived from the cell's fill and border, so
- * a chunk in the wire phase is one color as a cell and as a box.
- *
- * Everything here is pure. The component projects each box through the
- * camera with {@link projectChunkBox} and hands the cells in; a test hands
- * in a camera of its own.
+ * The overlay in volume mode: chunk boxes as wireframes.
+ * {@link buildVolumeDrawList} runs the slice overlay's draw list over cells
+ * that carry their eight projected corners, so a box wears the same colors,
+ * tooltip, and reading as its cell. This module adds what a box needs that a
+ * rectangle does not: the edge path, the silhouette for the hit test, and a
+ * stroke derived from the cell's fill and border. Pure; the component projects
+ * each box with {@link projectChunkBox}.
  */
 
 import {

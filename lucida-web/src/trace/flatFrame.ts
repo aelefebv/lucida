@@ -1,18 +1,12 @@
 /**
  * Is a frame one flat colour?
  *
- * The trace driver takes a screenshot over the DevTools protocol, and on some
- * hosts that screenshot leaves the WebGPU canvas out: headless Chrome on
- * Vulkan returns a solid black rectangle where the page's own capture of the
- * same canvas, at the same moment, shows the clear colour and the dataset
- * (#1098). A screenshot like that is not a frame. So before the page carries
- * the driver's screenshot as the fallback for a capture of its own that
- * failed, it decodes the screenshot and asks whether every pixel of the
- * canvas's region is the same. The region matters: the screenshot is of the
- * whole page, and a scrollbar along its edge is not the canvas.
- *
- * The check lives on the page because the page already has a PNG decoder in
- * its 2D canvas, and the CLI should not gain one for this.
+ * On some hosts the driver's DevTools screenshot leaves the WebGPU canvas out:
+ * headless Chrome on Vulkan returns solid black where the page's own capture
+ * shows the dataset. Before the page uses the driver's screenshot as the
+ * fallback for a failed capture, it checks whether the canvas's region, not
+ * the whole page, is one colour. The check lives on the page because the page
+ * already has a PNG decoder and the CLI should not gain one.
  */
 
 /** The pixels of a decoded image: RGBA, row-major, as a 2D context reads them back. */

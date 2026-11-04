@@ -170,7 +170,7 @@ function msgFor(layers: Array<{ memberId: string; entityIndex: number; blendMode
 }
 
 describe("handleVolumeRenderMultiPass — the compile", () => {
-  // The reason is in `pipelineCompile.ts` (#1101).
+  // The reason is in `pipelineCompile.ts`.
   it.each([
     ["volume renderer", "renderer"],
     ["layer compositor", "compositor"],

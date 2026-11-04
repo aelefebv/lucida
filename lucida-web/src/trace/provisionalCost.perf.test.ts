@@ -1,47 +1,14 @@
 /**
- * The provisional reading's cost contract, asserted (#1057, ADR 0049 as
- * amended).
+ * The provisional reading's cost contract (ADR 0049). The live view, the
+ * watch stream, and an agent polling the seam read a run while it is open,
+ * so none of them may walk rows.
  *
- * The live view, the watch stream, and an agent polling the seam read a run
- * while it is open, and they are under the same contract as the recorder:
- * their cost must not show up in the thing they read. The amendment's rule
- * is that none of them walks rows while a run is open, and this file is
- * where that rule is a measurement rather than a claim.
- *
- * **Flat in the run's rows.** A reading is derived from the tally the row
- * table keeps as it writes and from the readings inside the window, so it
- * costs the same at two thousand rows and at the per-run cap. The gate holds
- * the read at the largest population a run can hold to within a small factor
- * of the read at a small one. That is the flatness shape the recorder's
- * gates use, because a read that grew with rows is a row walk in disguise.
- * Flatness is measured over a narrow window on purpose: a full window holds
- * six hundred readings and costs a few hundred microseconds, behind which a
- * walk of a millisecond at the cap would hide inside the gate's factor. Over
- * a window of a few readings the read is nearly all fixed cost, and a walk
- * shows as an order of magnitude.
- *
- * **Bounded by the window, not the ring.** The readings are read from the
- * newest slot back and stop at the window's start, so a ring that has
- * wrapped many times costs what its window costs, and a window that has
- * slid past the ring's readings costs less.
- *
- * **An absolute ceiling, at slack.** One millisecond for one read over a
- * window holding five seconds of a busy pan's readings. A person's view
- * polls the reading twice a second and the watch stream polls it on its
- * interval, never per tick, since the HUD draws from the per-tick aggregate
- * rather than from this. A millisecond therefore keeps ten polls a second
- * under one percent of the main thread. The gate sits at {@link CI_SLACK}×
- * that figure for the reason the recorder's gates do: a microbenchmark of a
- * few hundred microseconds on a CI runner measures the runner. The real
- * figure is logged on every run. Read the `[#1057]` lines for it. On the
- * host this was written on, a full window read in about a quarter of a
- * millisecond, of which roughly a third is fixed and the rest is the six
- * hundred readings the window holds.
- *
- * The amendment also asks each live surface for a documented A/B on a
- * hardware adapter at device pixel ratio 2. That needs a GPU, which CI does
- * not have, and belongs with the recorder's harness under
- * `docs/perf/recorder-cost/`; it is not in this file.
+ * A read at the per-run cap may cost at most {@link FLATNESS_GROWTH_GATE}×
+ * a read at 2,000 rows, measured over a narrow window where fixed cost
+ * dominates and a row walk shows. A read over a full five-second window,
+ * with the ring wrapped or not, stays under 1 ms, gated at
+ * {@link CI_SLACK}× because a microbenchmark on a CI runner measures the
+ * runner. The real figures are logged on every run.
  */
 
 import { describe, expect, it } from "vitest";
@@ -59,9 +26,8 @@ const CI_SLACK = 16;
 /**
  * How much more a read may cost at the largest row population than at the
  * smallest. Wide enough to survive a noisy runner, narrow enough that a walk
- * cannot hide in it: the walk this replaced cost about 76 ns a row, so at
- * the cap it adds over a millisecond to a narrow-window read of tens of
- * microseconds.
+ * cannot hide in it: a row walk at about 76 ns a row adds over a millisecond
+ * at the cap to a narrow-window read of tens of microseconds.
  */
 const FLATNESS_GROWTH_GATE = 4;
 

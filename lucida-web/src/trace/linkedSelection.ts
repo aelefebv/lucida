@@ -2,15 +2,11 @@
  * The linked selection: the chunk set a brushed window in the dock
  * publishes, and the one place the overlay reads it from.
  *
- * The dock is the temporal surface and the overlay the spatial one. They
- * link through a selection and do not merge (ADR 0052 as amended), and this
- * module is the link: one slot holding the current set, a publish, and a
- * listener. The dock never reaches into the overlay and the overlay never
- * reaches into the dock; each imports this file and nothing of the other.
- *
- * Kept beside the trace rather than under either surface for that reason.
- * The set itself is derived by `diagnose/chunkSelection.ts`, from the same
- * rows the phase table reads over the same window.
+ * The dock (temporal) and the overlay (spatial) link through a selection and
+ * do not merge (ADR 0052). Each imports this file and nothing of the other,
+ * which is why it lives beside the trace rather than under either surface.
+ * `diagnose/chunkSelection.ts` derives the set from the rows the phase table
+ * reads over the same window.
  */
 
 import type { ChunkSelection } from "./diagnose/chunkSelection.ts";

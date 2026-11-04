@@ -17,8 +17,8 @@ function pin(id: string): Annotation {
   };
 }
 
-/** A scene whose annotated document can be swapped between renders to simulate
- *  the doc snapshot landing AFTER the scene appears. */
+/** A scene whose document can be swapped between renders, to simulate the
+ *  snapshot landing after the scene appears. */
 function makeScene(byDataset: Record<string, Annotation[]>): AnnotationDocScene {
   return {
     annotation_dataset_ids: () => JSON.stringify(Object.keys(byDataset)),
@@ -31,8 +31,7 @@ afterEach(() => cleanup());
 
 describe("useAnnotationDeepLink — TIMING (slice 3, the #802 class)", () => {
   it("does NOT resolve before annotations are available, and DOES once the doc loads", () => {
-    // The host runs the collapse (3rd arg) in the restore's tail; mirror that
-    // here so the collapse-after-restore wiring is exercised end-to-end.
+    // Like the host, run the collapse in the restore's tail.
     const collapse = vi.fn();
     const restore = vi.fn(
       (_pin: Annotation, _datasetId: string, onRestored: () => void) => {
@@ -41,8 +40,7 @@ describe("useAnnotationDeepLink — TIMING (slice 3, the #802 class)", () => {
     );
     const notFound = vi.fn();
 
-    // Start: scene present but the document is EMPTY (snapshot not yet applied),
-    // mirroring the window between scene-bootstrap and doc-load.
+    // Scene present, document still empty: the window before the snapshot.
     let scene: AnnotationDocScene | null = makeScene({});
 
     const { rerender } = renderHook(
@@ -58,14 +56,11 @@ describe("useAnnotationDeepLink — TIMING (slice 3, the #802 class)", () => {
       { initialProps: { docVersion: 0 } },
     );
 
-    // BEFORE annotations are available: no restore (the pin isn't loaded yet).
-    // This is the #802 guard — resolving here would focus an unloaded pin.
+    // Resolving now would focus a pin that isn't loaded yet.
     expect(restore).not.toHaveBeenCalled();
-    // The empty doc reports the pin as not-found (graceful, non-blocking).
     expect(notFound).toHaveBeenLastCalledWith(true);
 
-    // NOW the workspace document snapshot lands carrying the pin, and the bridge
-    // bumps the doc version. The hook re-checks and resolves.
+    // The snapshot lands with the pin and the bridge bumps the doc version.
     scene = makeScene({ "wds-1": [pin("p-other"), pin("p-target")] });
     rerender({ docVersion: 1 });
 
@@ -75,19 +70,13 @@ describe("useAnnotationDeepLink — TIMING (slice 3, the #802 class)", () => {
       "wds-1",
       expect.any(Function),
     );
-    // Hash collapsed to live #view= form, like #b= — but only because the host
-    // (restore mock) invoked the collapse in its tail, after the restore.
     expect(collapse).toHaveBeenCalledTimes(1);
-    // The not-found notice is cleared on success.
     expect(notFound).toHaveBeenLastCalledWith(false);
   });
 
   it("defers the collapse to onRestore's tail — never collapses before the restore applies", () => {
-    // STALE-URL guard (slice 3): the hook must NOT collapse `#a=`→`#view=`
-    // itself. It hands the collapse to onRestore, which the host runs only AFTER
-    // the (possibly frame-deferred) restore applies. Here onRestore captures the
-    // collapse WITHOUT invoking it, simulating a deferred restore — so the hash
-    // must remain uncollapsed until the host fires it.
+    // onRestore holds the collapse without calling it, simulating a restore
+    // deferred a frame. Collapsing early would write a stale camera to the URL.
     let deferredCollapse: (() => void) | null = null;
     const restore = vi.fn(
       (_pin: Annotation, _datasetId: string, onRestored: () => void) => {
@@ -108,12 +97,10 @@ describe("useAnnotationDeepLink — TIMING (slice 3, the #802 class)", () => {
       }),
     );
 
-    // The restore was requested, but since the host hasn't applied it yet, the
-    // hook must NOT have collapsed the hash (that would snapshot a stale frame).
     expect(restore).toHaveBeenCalledTimes(1);
     expect(collapse).not.toHaveBeenCalled();
 
-    // The host now applies the restore and fires the tail — collapse happens.
+    // The host applies the restore and fires the tail.
     expect(deferredCollapse).not.toBeNull();
     deferredCollapse!();
     expect(collapse).toHaveBeenCalledTimes(1);
@@ -138,7 +125,7 @@ describe("useAnnotationDeepLink — TIMING (slice 3, the #802 class)", () => {
 
     expect(restore).toHaveBeenCalledTimes(1);
 
-    // A peer adds a comment → another doc-version bump. Must NOT restore again.
+    // A peer's comments bump the doc version again.
     rerender({ docVersion: 2 });
     rerender({ docVersion: 3 });
     expect(restore).toHaveBeenCalledTimes(1);
@@ -165,7 +152,7 @@ describe("useAnnotationDeepLink — TIMING (slice 3, the #802 class)", () => {
     expect(restore).not.toHaveBeenCalled();
     expect(notFound).toHaveBeenLastCalledWith(true);
 
-    // The pin shows up two bumps later (e.g. a peer created it live).
+    // A peer creates the pin live.
     scene = makeScene({ "wds-1": [pin("p-late")] });
     rerender({ docVersion: 1 });
 

@@ -1,10 +1,7 @@
 use super::*;
 
-// ===================================================================
-// Duplicate workspace (#698): a private copy that never transfers the
-// source's members or any permission. Security-sensitive — see the
-// headline `..._never_copies_members_or_link_access` test.
-// ===================================================================
+// Duplicate workspace: a private copy that never transfers the source's
+// members or any permission. See `duplicate_never_copies_members_or_link_access`.
 
 #[tokio::test]
 async fn duplicate_is_owned_by_caller_named_copy_of_and_restricted_owner_only() {
@@ -26,7 +23,7 @@ async fn duplicate_is_owned_by_caller_named_copy_of_and_restricted_owner_only() 
     assert_eq!(copy.seq, 0);
     assert!(copy.archived_at.is_none());
 
-    // Restricted, owner-only, link access OFF (the new-workspace defaults).
+    // Restricted, owner-only, link access off (the new-workspace defaults).
     let sharing = store.sharing_settings(&copy.id).await.unwrap().unwrap();
     assert_eq!(sharing.link_access, WorkspaceLinkAccess::Restricted);
     assert_eq!(sharing.members.len(), 1);
@@ -34,10 +31,9 @@ async fn duplicate_is_owned_by_caller_named_copy_of_and_restricted_owner_only() 
     assert_eq!(sharing.members[0].role, WorkspaceRole::Owner);
 }
 
-/// THE KEY SECURITY TEST. The source has extra members + link access ON +
-/// a non-default link role; the duplicate must carry NONE of it — only the
-/// duplicator as a member, link access OFF. Members/permissions never
-/// transfer.
+/// The source has extra members, link access on, and a non-default link
+/// role. The duplicate must carry none of it: only the duplicator as a
+/// member, with link access off. Members and permissions never transfer.
 #[tokio::test]
 async fn duplicate_never_copies_members_or_link_access() {
     let store = fresh_store().await;
@@ -45,7 +41,7 @@ async fn duplicate_never_copies_members_or_link_access() {
     let bob = principal("bob@example.com", false);
     let (source_id, _datasets, _shared) = seed_rich_source(&store, &owner, &bob).await;
 
-    // Sanity: the SOURCE really does have the extra member + link sharing.
+    // Sanity: the source really does have the extra member and link sharing.
     let src_sharing = store.sharing_settings(&source_id).await.unwrap().unwrap();
     assert_eq!(src_sharing.members.len(), 2);
     assert_eq!(src_sharing.link_access, WorkspaceLinkAccess::AnyoneWithLink);
@@ -72,7 +68,7 @@ async fn duplicate_never_copies_members_or_link_access() {
             .any(|m| m.email == "bob@example.com"),
         "the source's other member must NOT appear in the copy"
     );
-    // Link access is the default OFF — the source's AnyoneWithLink/editor
+    // Link access is the default off: the source's AnyoneWithLink/editor
     // settings did not transfer.
     assert_eq!(copy_sharing.link_access, WorkspaceLinkAccess::Restricted);
     assert_eq!(copy_sharing.link_role, WorkspaceRole::Viewer);
@@ -101,7 +97,7 @@ async fn duplicate_copies_datasets_with_display_names() {
     assert_eq!(copied.len(), 2);
     assert_eq!(copied[0].display_name, "Alpha");
     assert_eq!(copied[1].display_name, "Beta");
-    // Same GLOBAL source ids (datasets are shared by source), but FRESH
+    // Same global source ids (datasets are shared by source), but fresh
     // workspace-local ids (independent membership).
     let src = store.list_dataset_sources(&source_id).await.unwrap();
     let src_source_ids: std::collections::HashSet<_> =
@@ -132,7 +128,7 @@ async fn duplicate_copies_only_shared_views_attributed_to_duplicator() {
         .unwrap();
 
     // List as the duplicator (an editor would see proposed views too; we
-    // list as the owner, who can edit, to PROVE no proposed view exists).
+    // list as the owner, who can edit, to prove no proposed view exists).
     let copied_views = store
         .list_saved_views(&copy.id, &normalize_email(&owner.email), true)
         .await
@@ -172,7 +168,7 @@ async fn duplicate_sets_default_view_to_the_copied_view() {
         .list_saved_views(&copy.id, &normalize_email(&owner.email), true)
         .await
         .unwrap();
-    // The default points at the COPIED view (a new id in the copy), not the
+    // The default points at the copied view (a new id in the copy), not the
     // source's view id.
     assert_eq!(copied_views.len(), 1);
     assert_eq!(default_id, copied_views[0].id);
@@ -189,7 +185,7 @@ async fn duplicate_sets_default_view_to_the_copied_view() {
 }
 
 /// The id-consistency contract end-to-end: the copied document and the
-/// copied saved view must resolve against the COPY's datasets, with no
+/// copied saved view must resolve against the copy's datasets, with no
 /// dangling reference to the source's ids. Proven by reopening the copy and
 /// checking its live document's dataset ids match its membership rows and
 /// the copied saved view's `dataset_order`.
@@ -269,15 +265,12 @@ async fn duplicate_document_and_views_resolve_to_copied_datasets() {
     );
 }
 
-/// End-to-end proof for the embedded-author-view remap (the carrier missed
-/// in the first cut of #698): a pin carries the author's captured view
-/// (`Annotation::view`), itself keyed by the workspace's dataset ids. After
-/// a duplicate, that embedded view must resolve to the COPY's ids — never
-/// the source's — or a copied pin's "go to author's view" would dangle and
-/// silently lose its per-channel colors/contrast. Seeds a pin-with-view on a
-/// source dataset, duplicates, and asserts the copied document's
-/// `annotations[].view` references copied ids only, with NO source id left in
-/// any of active_layouts / dataset_order / dataset_settings / auto_contrast.
+/// A pin carries the author's captured view (`Annotation::view`), keyed by
+/// the workspace's dataset ids. After a duplicate that view must resolve to
+/// the copy's ids, or a copied pin's "go to author's view" would dangle and
+/// lose its per-channel colors and contrast. Asserts no source id is left in
+/// the view's active_layouts, dataset_order, dataset_settings, or
+/// auto_contrast.
 #[tokio::test]
 async fn duplicate_remaps_pin_captured_view_to_copied_datasets() {
     let store = fresh_store().await;
@@ -289,7 +282,7 @@ async fn duplicate_remaps_pin_captured_view_to_copied_datasets() {
     let source_pin_dataset = source_dataset_ids[0].clone();
     seed_pin_with_view(&store, &source_id, &owner, &source_pin_dataset, 3).await;
 
-    // Sanity: the SOURCE document really carries the embedded view keyed by
+    // Sanity: the source document really carries the embedded view keyed by
     // the source dataset id (so a no-op remap couldn't vacuously pass).
     let src_doc = store.get_workspace(&source_id).await.unwrap().unwrap();
     let src_pins = src_doc
@@ -343,7 +336,7 @@ async fn duplicate_remaps_pin_captured_view_to_copied_datasets() {
         .as_ref()
         .expect("copied pin must still carry its captured view");
 
-    // Every id-keyed field of the embedded view resolves to a COPIED id, and
+    // Every id-keyed field of the embedded view resolves to a copied id, and
     // NO source id remains anywhere in it.
     assert_eq!(copied_view.dataset_order.len(), 1);
     for id in &copied_view.dataset_order {
@@ -392,7 +385,7 @@ async fn viewer_of_source_can_duplicate_into_their_own_owned_copy() {
     let owner = principal("alice@example.com", false);
     let viewer = principal("carol@example.com", false);
     let (source_id, _datasets, _shared) = seed_rich_source(&store, &owner, &viewer).await;
-    // Re-grant carol as a plain VIEWER (seed_rich_source made `other` an
+    // Re-grant carol as a plain viewer (seed_rich_source made `other` an
     // editor); we want to prove a viewer specifically can duplicate.
     store
         .update_member_role(
@@ -415,7 +408,7 @@ async fn viewer_of_source_can_duplicate_into_their_own_owned_copy() {
         .duplicate_workspace(&source_id, &viewer, None)
         .await
         .unwrap();
-    // It is carol's OWN owned copy.
+    // It is carol's own copy.
     assert_eq!(copy.created_by, "carol@example.com");
     let sharing = store.sharing_settings(&copy.id).await.unwrap().unwrap();
     assert_eq!(sharing.members.len(), 1);
@@ -452,7 +445,7 @@ async fn non_member_duplicate_gets_uniform_never_leak_not_found() {
         .unwrap_err();
     assert!(matches!(err, WorkspaceError::NotFound), "got {err:?}");
 
-    // A truly missing workspace yields the SAME error.
+    // A truly missing workspace yields the same error.
     let missing = manager
         .duplicate_workspace("does-not-exist", &stranger, None)
         .await
@@ -568,19 +561,14 @@ async fn duplicate_honors_explicit_name_override() {
     assert_eq!(copy.name, "My Experiment");
 }
 
-// ===================================================================
-// RED-TEAM adversarial probes for #698 (added by red-team; do not
-// weaken). Each asserts the *observed* behavior so a regression in the
-// duplicate's never-copy / never-leak contract trips a test.
-// ===================================================================
+// Adversarial probes of the duplicate's never-copy and never-leak contract.
+// Each asserts the observed behavior; do not weaken them.
 
-/// ROOT-CAUSE FIX: `DocumentState::apply(AddAnnotation { view })` now
-/// enforces the documented `Annotation::view` invariant — the embedded
-/// captured view's `datasets` Vec is stripped to EMPTY before the pin is
-/// stored, so embedding a view on a pin never leaks dataset source URLs
-/// (incl. local `file:///` paths, per decision 0014) into the persisted /
-/// broadcast document. (Was the red-team's observed-leak test; flipped to
-/// assert the fix.)
+/// `DocumentState::apply(AddAnnotation { view })` enforces the
+/// `Annotation::view` invariant: the embedded view's `datasets` is emptied
+/// before the pin is stored, so a pin never leaks dataset source URLs,
+/// local `file:///` paths included (ADR 0014), into the persisted or
+/// broadcast document.
 #[tokio::test]
 async fn apply_add_annotation_strips_embedded_view_datasets() {
     let mut doc = DocumentState::default();
@@ -609,15 +597,12 @@ async fn apply_add_annotation_strips_embedded_view_datasets() {
     );
 }
 
-/// DUPLICATE IS CLEAN even for a pre-existing DIRTY source: a SOURCE dataset
-/// URL smuggled into a pin's captured view (`Annotation::view.datasets`) of
-/// the source document is NOT carried into the copy. The duplicate's
-/// document remap clears `datasets` on every copied embedded view (the
-/// copy-point defense), so even a source persisted before the apply-path
-/// fix yields a clean copy. (A local `file://` URL here is exactly what
-/// decision 0014 keeps out of shared/persisted state.) The pin itself is
-/// still copied — only its leaked URLs are dropped. (Was the red-team's
-/// observed-leak test; flipped to assert the fix.)
+/// The duplicate is clean even when the source is dirty: a source dataset
+/// URL inside a pin's captured view (`Annotation::view.datasets`) is not
+/// carried into the copy. The duplicate's document remap clears `datasets`
+/// on every copied embedded view, so even a source document that bypassed
+/// the apply-path strip yields a clean copy. The pin itself is
+/// still copied; only its leaked URLs are dropped.
 #[tokio::test]
 async fn duplicate_strips_source_urls_embedded_in_pin_view() {
     let store = fresh_store().await;
@@ -662,14 +647,12 @@ async fn duplicate_strips_source_urls_embedded_in_pin_view() {
     );
 }
 
-/// The duplicate has its OWN URL-strip defense for copied shared views,
+/// The duplicate has its own URL-strip defense for copied shared views,
 /// independent of the manager's create path: even when a shared-view row
-/// carries source URLs (e.g. inserted store-level, bypassing the manager's
-/// `workspace_saved_view_payload` strip, or persisted before that strip
-/// existed), the duplicate clears `datasets` on the copied view at the copy
-/// point. So the copy's shared views carry NO source URLs regardless of the
-/// source row's state (decision 0014). (Was the red-team's observed-leak
-/// test; flipped to assert the fix.)
+/// carries source URLs (inserted store-level, bypassing the manager's
+/// `workspace_saved_view_payload` strip), the duplicate clears `datasets`
+/// on the copied view. So the copy's shared views carry no source URLs
+/// whatever the source row holds.
 #[tokio::test]
 async fn duplicate_strips_datasets_from_copied_shared_view() {
     let store = fresh_store().await;
@@ -677,7 +660,7 @@ async fn duplicate_strips_datasets_from_copied_shared_view() {
     let ws = store.create_workspace(&owner, Some("S")).await.unwrap();
     let a = open_dataset_into(&store, &ws.id, &owner, "s-a", "file:///a.zarr", "A", 1).await;
 
-    // Persist a SHARED view that still carries source URLs (store-level
+    // Persist a shared view that still carries source URLs (store-level
     // insert bypasses the manager's strip; this is the exact JSON the
     // duplicate will read + re-emit).
     let mut view = view_over(std::slice::from_ref(&a));
@@ -709,15 +692,15 @@ async fn duplicate_strips_datasets_from_copied_shared_view() {
     );
 }
 
-/// NEVER-LEAK (HTTP, byte-level): a non-member POSTing /duplicate against
-/// an EXISTING restricted workspace must get a response byte-identical to
-/// duplicating a MISSING id — same status AND same body bytes. Confirms the
-/// access check leaks nothing distinguishing through the route.
+/// Never-leak, byte-level: a non-member POSTing /duplicate against an
+/// existing restricted workspace must get a response byte-identical to
+/// duplicating a missing id, in status and body. Confirms the access check
+/// leaks nothing distinguishing through the route.
 #[tokio::test]
 async fn duplicate_route_non_member_byte_identical_to_missing() {
     let store = fresh_store().await;
     let owner = principal("alice@example.com", false);
-    // A RESTRICTED source (default link access OFF) with a real dataset, so
+    // A restricted source (default link access off) with a real dataset, so
     // the stranger is a genuine non-member (no anyone-with-link grant).
     let ws = store
         .create_workspace(&owner, Some("Restricted"))
@@ -770,13 +753,10 @@ async fn duplicate_route_non_member_byte_identical_to_missing() {
     );
 }
 
-/// NEVER-LEAK boundary: a MEMBER of an ARCHIVED source gets 410 Gone
-/// (Archived) from /duplicate, NOT 404 — i.e. archive-state is disclosed to
-/// a member through the duplicate route. A non-member still gets 404. This
-/// documents that the duplicate route inherits `get_workspace_for`'s
-/// member-only archive disclosure; acceptable under the never-leak doctrine
-/// (only members, who already know it exists, see Gone), but recorded here
-/// so any change is deliberate.
+/// Never-leak boundary: a member of an archived source gets 410 Gone from
+/// /duplicate, not 404, so archive state is disclosed to a member. A
+/// non-member still gets 404. Only members, who already know the workspace
+/// exists, see Gone; pinned here so any change is deliberate.
 #[tokio::test]
 async fn duplicate_archived_source_member_gets_gone_nonmember_not_found() {
     let store = fresh_store().await;
@@ -807,8 +787,8 @@ async fn duplicate_archived_source_member_gets_gone_nonmember_not_found() {
     );
 }
 
-/// PRIVILEGE-VIA-COPY (negative / confirms NO hole): a pin authored by a
-/// DIFFERENT member carries that author's email in the source document. A
+/// Privilege via copy, confirming no hole: a pin authored by a
+/// different member carries that author's email in the source document. A
 /// viewer duplicating gets that email in their copy — but they could
 /// already read it as a viewer of the source document, so it is not a new
 /// disclosure. This test pins the *expected* behavior: annotation authorship
@@ -859,7 +839,7 @@ async fn duplicate_carries_annotation_author_as_content_not_membership() {
         .await
         .unwrap();
 
-    // Bob's authorship rides along as document CONTENT...
+    // Bob's authorship rides along as document content...
     let author = copy
         .document
         .annotations
@@ -880,8 +860,8 @@ async fn duplicate_carries_annotation_author_as_content_not_membership() {
     assert!(matches!(err, WorkspaceError::NotFound));
 }
 
-/// DANGLING-DEFAULT (confirms NO hole): if the source's default view is a
-/// PERSONAL view (not copied), the copy's `default_saved_view_id` must be
+/// Dangling default, confirming no hole: if the source's default view is a
+/// personal view (not copied), the copy's `default_saved_view_id` must be
 /// NULL — never the source's view id (which would be a cross-workspace
 /// dangling pointer to a view the copy doesn't own and the duplicator may
 /// not be allowed to see).
@@ -892,7 +872,7 @@ async fn duplicate_default_pointing_at_personal_view_resolves_to_null() {
     let ws = store.create_workspace(&owner, Some("D")).await.unwrap();
     let a = open_dataset_into(&store, &ws.id, &owner, "s-a", "file:///a.zarr", "A", 1).await;
 
-    // Owner's PERSONAL view, set as the workspace default.
+    // Owner's personal view, set as the workspace default.
     let personal = store
         .create_saved_view(
             &ws.id,

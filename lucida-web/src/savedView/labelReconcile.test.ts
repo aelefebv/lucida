@@ -2,12 +2,9 @@ import { describe, it, expect } from "vitest";
 import { datasetDisplayCommands } from "./applier.ts";
 import type { DatasetDisplaySettings } from "./types.ts";
 
-// Focused coverage of the name-keyed, occurrence-aware per-label restore in
-// `datasetDisplayCommands`: a saved view whose label list was reordered / had a
-// label added or removed / repeats a name must land each per-label setting on
-// the RIGHT current label, not by raw array index. Without both the captured
-// `label_names` and the recipient's current label names it falls back to the
-// positional behaviour (back-compat with legacy views + 2-arg callers).
+// The name-and-occurrence per-label restore in `datasetDisplayCommands`. A
+// reordered, edited, or repeating label list must land each setting on the
+// right current label. Without both name lists it falls back to positional.
 
 const DS = "ds-1";
 
@@ -23,8 +20,8 @@ function baseSettings(overrides: Partial<DatasetDisplaySettings>): DatasetDispla
   };
 }
 
-/** Extract just the per-label commands as `[label, kind, value]` triples, in
- *  emission order, so assertions read against label INDEX + value. */
+/** The per-label commands as `[label, kind, value]` triples, in emission
+ *  order. */
 function labelCommands(
   cmds: ReturnType<typeof datasetDisplayCommands>,
 ): Array<[number, string, boolean | number]> {

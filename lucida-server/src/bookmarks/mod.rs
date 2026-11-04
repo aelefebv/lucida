@@ -1,31 +1,10 @@
-//! Server-stored bookmarks.
+//! Server-stored bookmarks: persistent named snapshots of a user's view
+//! across one or more datasets.
 //!
-//! Bookmarks are persistent named snapshots of a user's view across one
-//! or more datasets. The capture record is `lucida_core::SavedView` —
-//! the same type the URL-hash side of saved views uses (ADR-0013) —
-//! so the two surfaces share a single schema and a `#b=<id>` URL can
-//! be authored from any saved-view source.
-//!
-//! Module layout:
-//!
-//! - [`store`] — the `BookmarkStore` trait and the record it hands out,
-//!   with one module per implementation beside it: [`store_sqlite`]
-//!   (production), [`store_postgres`], [`store_memory`] (tests), and
-//!   [`store_sql`] for what the two SQL ones share. ADR-0015 §"Why
-//!   SQLite" covers the choice of storage.
-//! - [`handlers`] — REST handlers under `/api/bookmarks`. Mounted on the
-//!   protected (post-auth-middleware) router half so every handler sees an
-//!   `AuthPrincipal` in request extensions.
-//! - [`routes`] — small builder that bundles the four routes into a
-//!   `Router<()>`, parameterized by the shared store handle. `main.rs`
-//!   merges this into the same router half that `/auth/whoami` and
-//!   `/auth/logout` live on.
-//!
-//! Permission boundary: read paths (GET) are org-globally readable per
-//! ADR-0015 (cross-user discovery is the headline feature). Mutation
-//! paths (PATCH, DELETE) require `bookmark.created_by == principal.email
-//! || principal.is_admin`. POST always overwrites `created_by` /
-//! `created_by_name` from the principal — body fields can't spoof.
+//! The capture record is `lucida_core::SavedView`, the type URL-hash saved
+//! views use (ADR-0013), so a `#b=<id>` URL can be authored from any
+//! saved-view source. Every principal can read every bookmark (ADR-0015);
+//! PATCH and DELETE need the creator or an admin.
 
 pub mod broadcast;
 pub mod handlers;

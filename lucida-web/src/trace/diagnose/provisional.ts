@@ -1,30 +1,13 @@
 /**
  * The provisional reading: what a live surface says while a run is still
- * open (#1057).
+ * open, over a trailing window of the run's clock. It is never a verdict: a
+ * verdict needs a closed interval and the gate trusts only a closed run, so
+ * the document carries no `verdict` field for a gate to mistake.
  *
- * A run that never quiesces still produces a statement. This is it: a
- * reading over a trailing window of the run's clock, carrying the phase
- * occupancy this instant, the top finding over the window, and the page's
- * own quiescence reason. Every rendering labels it provisional, because it
- * changes while you read it. It is never a verdict. A verdict needs a closed
- * interval, the attribution back-walk needs an end to walk back from, and
- * the gate trusts only the verdict of a closed run. Nothing here is called
- * one, and the document carries no `verdict` field for a gate to mistake.
- *
- * It walks no row. Everything it says comes from the live tally the row
- * table keeps as it writes and from the per-tick readings inside the window,
- * so a read costs the same at ten rows and at the per-run cap. That is what
- * lets the dock, the watch stream, and an agent poll it at the tick cadence
- * without perturbing the run they are watching (ADR 0049 as amended). What a
- * row walk would have said, the per-row durations, the critical path, and
- * the worst row, is named as what this reading did not see rather than left
- * out in silence.
- *
- * Pure, like the rest of the derivation: everything it needs is in the sample
- * it is handed, which is what lets its rules be tested over synthetic samples
- * with no browser involved. The rules are the shipped ruleset's, applied to
- * what a window of readings can show; each finding states what it was judged
- * from and what the verdict will judge instead.
+ * It walks no row. It reads the row table's live tally and the per-tick
+ * readings in the window, so a read costs the same at ten rows and at the
+ * per-run cap, and the dock, the watch stream and an agent can poll it at the
+ * tick cadence without perturbing the run (ADR 0049).
  */
 
 import type { LivePhaseOccupancy, LiveProgress } from "../liveProgress.ts";
@@ -302,10 +285,6 @@ export function deriveProvisional(
   };
 }
 
-// ---------------------------------------------------------------------------
-// The window and what was read of it
-// ---------------------------------------------------------------------------
-
 /** The window as the document states it. Shared with the live timeline, which reads the same window. */
 export function describeLiveWindow(window: LiveWindow): ProvisionalWindow {
   return {
@@ -380,10 +359,6 @@ function describeRows(progress: LiveProgress): ProvisionalRows {
   };
 }
 
-// ---------------------------------------------------------------------------
-// The limiter and the render time, from the readings alone
-// ---------------------------------------------------------------------------
-
 function summariseLimiter(
   window: LiveWindow,
   inside: TraceReading[],
@@ -451,10 +426,6 @@ function summariseRender(
     sharePct: Math.round((busyUs / spanUs) * 100),
   };
 }
-
-// ---------------------------------------------------------------------------
-// Findings
-// ---------------------------------------------------------------------------
 
 const BACKLOG_BASIS =
   "the verdict's queue.backlog threshold, judged on the queue depth's net change over this window with arrivals included; the verdict measures admissions from the rows' queue boundaries over the trailing second";
@@ -550,10 +521,6 @@ function backlogExceeded(limiter: ProvisionalLimiter): boolean {
   return limiter.backlogEtaS > RULESET.backlog.maxEtaS;
 }
 
-// ---------------------------------------------------------------------------
-// The statement and the next steps
-// ---------------------------------------------------------------------------
-
 function buildStatement(
   window: ProvisionalWindow,
   readings: ProvisionalReadingCoverage,
@@ -608,10 +575,6 @@ function nextSteps(runId: string): NextStep[] {
     },
   ];
 }
-
-// ---------------------------------------------------------------------------
-// The text twin
-// ---------------------------------------------------------------------------
 
 /**
  * The reading as text, for the watch stream and the CLI. A reading of the

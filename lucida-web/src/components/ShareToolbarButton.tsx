@@ -45,8 +45,7 @@ export function ShareToolbarButton({ getCurrentSavedView }: Props) {
     const sizeKb = (url.length / 1024).toFixed(1);
     pushToast(`Copied URL (${sizeKb} KB)`, "info");
 
-    // Local-file warning: per
-    // docs/adr/0014-local-file-datasets-personal-only-in-saved-views.md
+    // Local-file paths only resolve on a server with the same files (ADR 0014).
     const view = getCurrentSavedView();
     if (view && hasLocalFilePaths(view)) {
       const n = localFilePathCount(view);

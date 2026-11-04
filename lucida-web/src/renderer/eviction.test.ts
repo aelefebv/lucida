@@ -1,26 +1,11 @@
 /**
- * Suite C — chunk-upload eviction policy + multi-member demux.
+ * Chunk-upload eviction policy and multi-member demux, through
+ * `handleVolumeChunkData` / `handleSliceChunkData` on mock-device atlases.
  *
- * Exercises `handleVolumeChunkData` / `handleSliceChunkData` against
- * mock-device atlases via the shared `chunkDistSq` / `findFarthestSlot`
- * / `remapIndirection` kernels.
- *
- * Invariants pinned:
- *  - Eviction picks the farthest cached chunk from the per-entity ray-hit
- *    reference (volume) or per-entity camera-UV reference (slice).
- *  - Multi-member demux: when a pool holds chunks from members A and B,
- *    evicting A's chunk during an upload for B emits a `chunksEvicted`
- *    keyed by **A's** memberId — not B's. The orchestrator's per-member
- *    delivery tracking depends on this.
- *  - Incoming chunks farther than the farthest cached are rejected and
- *    reported as `skipped` (NOT as evictions).
- *  - Equal-distance uploads replace the current slot, which lets T/C
- *    scrubbing refresh same-position chunks instead of waiting for pan.
- *  - Stale-epoch batches report every chunk as re-eligible `keys`, not
- *    `skipped`, so they clear optimistic sent state without rejection.
- *  - Empty `chunks: []` is a no-op; no posts.
- *  - Slice mode: chunks with `z !== targetChunkZ` are re-eligible keys
- *    (Z-slice retargeting), not residency rejections.
+ * Evicting member A's chunk during an upload for B must report A's memberId,
+ * because the orchestrator tracks delivery per member. Chunks farther than
+ * the farthest cached are `skipped`, not evictions. Equal-distance uploads
+ * replace the slot so T/C scrubbing refreshes without a pan.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -60,9 +45,7 @@ import type {
 } from "./workerProtocol.ts";
 import type { SceneEpochs } from "../pipeline/epochs.ts";
 
-// ---------------------------------------------------------------------------
 // Mock device + ctx
-// ---------------------------------------------------------------------------
 
 function makeMockDevice(): GPUDevice {
   const createBuffer = vi.fn((desc: GPUBufferDescriptor) => ({
@@ -213,9 +196,7 @@ function makeSliceMeta(gridY: number, gridX: number): LodIndirectionMeta {
 // case future tests need to re-spy mocks.
 beforeEach(() => {});
 
-// ---------------------------------------------------------------------------
 // Volume eviction
-// ---------------------------------------------------------------------------
 
 describe("handleVolumeChunkData — eviction policy", () => {
   it("evicts farthest-from-rayHit chunk; reports chunksEvicted keyed by A", () => {
@@ -497,9 +478,7 @@ describe("handleVolumeChunkData — eviction policy", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Slice Z-retargeting
-// ---------------------------------------------------------------------------
 
 describe("handleSliceChunkData — Z-slice retargeting", () => {
   it("upload for Z=0 when currentZ targets Z=1 → chunks with z !== targetChunkZ re-eligible", () => {
@@ -626,12 +605,8 @@ describe("handleSliceChunkData — Z-slice retargeting", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Eviction kernel unit tests
-//
-// These directly exercise the shared kernel from renderer/eviction.ts —
-// 2D vs 3D distance, prefer-stale-slot, and farthest-mapped fallback.
-// ---------------------------------------------------------------------------
+// Eviction kernel unit tests: 2D vs 3D distance, prefer-stale-slot, and
+// farthest-mapped fallback.
 
 import { chunkDistSq, findFarthestSlot } from "./eviction.ts";
 
@@ -749,9 +724,8 @@ describe("eviction kernel — findFarthestSlot", () => {
 
 /**
  * A finer-than-target chunk is always unmapped, because the pool has
- * sections for the target and coarser levels only. What ADR 0061 adds
- * here is the order among unmapped chunks. Finer than the target goes
- * ahead of every other one.
+ * sections for the target and coarser levels only. Among unmapped chunks,
+ * finer than the target goes first.
  */
 describe("eviction kernel — finer-than-target first, then farthest", () => {
   const level2: LodIndirectionMeta = {

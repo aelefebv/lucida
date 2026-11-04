@@ -1,26 +1,14 @@
 /**
- * Tests for `synthesizeGroupRosterEntry`.
- *
- * Pure-function tests — no orchestrator state.
- *
- * Contract under test:
- *   - Union the 3D AABB of every child tile's `[0,1]^3` cube transformed
- *     by its `member_model_matrix`.
- *   - Union the 2D AABB of every child tile's `(layoutPositionVox, lvl0 X/Y)`.
- *   - Return `null` if either AABB is degenerate (zero span on any axis,
- *     no contributing tiles, or all matrices were the wrong length).
- *   - On success, the 3D AABB drives `modelMatrix` (scale + translate
- *     mapping `[0,1]^3` → world AABB) and the 2D AABB drives
- *     `position` + `dataW` + `dataH`.
+ * Tests for `synthesizeGroupRosterEntry`. The 3D AABB of the child tiles'
+ * unit cubes drives `modelMatrix`; the 2D voxel AABB drives `position`,
+ * `dataW`, and `dataH`. A degenerate AABB on either side returns `null`.
  */
 import { describe, it, expect } from "vitest";
 import type { TickContext } from "../../../renderLoopTypes.ts";
 import type { EntitySnapshot } from "../../planning/index.ts";
 import { synthesizeGroupRosterEntry } from "./roster.ts";
 
-// ---------------------------------------------------------------------------
 // Fixtures
-// ---------------------------------------------------------------------------
 
 /**
  * Build a minimal `ctx` whose `scene.member_model_matrix` returns the
@@ -90,9 +78,7 @@ function translateScaleMatrix(
   ]);
 }
 
-// ---------------------------------------------------------------------------
 // Cases
-// ---------------------------------------------------------------------------
 
 describe("synthesizeGroupRosterEntry", () => {
   it("unions 3D AABB and 2D footprint across two visible tiles", () => {

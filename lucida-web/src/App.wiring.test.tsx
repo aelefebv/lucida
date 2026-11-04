@@ -1,35 +1,23 @@
 // @vitest-environment happy-dom
 //
-// Wiring tests for App.tsx's invalidation intents: mount the REAL App (real
-// hooks, real SessionController + Session, real LayerPanel/LayoutSwitcher)
-// over instance-recording doubles for the boundary classes (Bridge / fetch
-// pipeline / GPU RenderClient / WASM scene / workspace HTTP API), then drive
-// user-visible interactions and assert the planner-visible signal fires.
+// Wiring tests for App.tsx's invalidation intents: mount the real App over
+// recording doubles for the boundary classes (Bridge, fetch pipeline, GPU
+// RenderClient, WASM scene, workspace HTTP API), drive user interactions, and
+// assert the planner-visible signal fires.
 //
-// What is pinned, and why HERE rather than in a unit test:
-//   App.tsx is where a user action fans out to the invalidation mechanisms
-//   (settings-generation bump for the planner's cached snapshot, dirty marks
-//   for the render loop). A missed tap silently no-ops — the named bug
-//   classes (#780 layout-switch, the #802/#814 restore family) were all
-//   "everything compiled, nothing signaled". These tests mount the whole
-//   wiring so a regression in ANY hop (component prop → App handler →
-//   composed intent) fails, not just a change to the intent helpers
-//   themselves (those have their own unit suite in invalidation.test.ts).
-//
-// The composed intents (src/invalidation.ts) are module-spied (`spy: true`),
-// so assertions read "the handler invoked the right intent" while the real
-// implementation still runs — letting the same tests ALSO observe the
-// planner-visible effect through `getSceneSettings` cache identity.
+// App.tsx is where a user action fans out to invalidation. A missed tap
+// compiles and silently no-ops (a layout switch or a saved-view restore that
+// never replans), so these tests break on any broken hop from component prop
+// to App handler to intent. The intents are module-spied (`spy: true`) and
+// still run, so the planner-visible effect is observable too.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 
-// ---------------------------------------------------------------------------
 // Boundary doubles. The WASM scene is a small stateful fake: it stores the
 // loaded document and records every applied command, and serves the JSON
 // reads the app performs (dataset order/settings/names, layouts, annotations,
 // presence, camera). Everything else in the session stack is real.
-// ---------------------------------------------------------------------------
 
 vi.mock("lucida-core", () => {
   class FakeWasmScene {
@@ -106,8 +94,8 @@ vi.mock("lucida-core", () => {
       });
     }
     // Shape-complete: `buildCapture` walks `dataset_settings`, so an empty
-    // object here makes every capture throw and silently no-op — which would
-    // make a "nothing was persisted" assertion pass for the wrong reason.
+    // object makes every capture throw and no-op, and a "nothing was
+    // persisted" assertion would pass for the wrong reason.
     export_dataset_presence() {
       return JSON.stringify({
         dataset_order: Object.keys(this.doc.manifests ?? {}),
@@ -140,9 +128,8 @@ vi.mock("lucida-core", () => {
 vi.mock("./renderer/renderClient.ts", () => {
   class MockRenderClient {
     onIntensityRange: unknown = null;
-    // Never settles: the GPU worker never comes up in this environment, so
-    // the canvas-bound viewers stay unmounted and no RenderLoop exists —
-    // the intents run with a null loop (their contract covers that).
+    // Never settles: the GPU worker never comes up here, so no RenderLoop
+    // exists and the intents run with a null loop, which their contract covers.
     ready() { return new Promise(() => {}); }
     destroy() {}
     updateCursorData(_data: Float32Array, _count: number) {}
@@ -242,9 +229,8 @@ vi.mock("./auth/whoami.ts", () => ({
   postDevLogin: vi.fn(async () => {}),
 }));
 
-// Spy the composed intents in place: calls are recorded AND the real
-// implementation runs, so both the intent invocation and its
-// planner-visible effect are assertable.
+// Spy the intents in place: calls are recorded and the real implementation
+// runs, so both the call and its planner-visible effect are assertable.
 vi.mock("./invalidation.ts", { spy: true });
 
 import App from "./App.tsx";
@@ -368,12 +354,12 @@ function renderApp() {
   );
 }
 
-/** Mount the app, let the (mocked) WASM init settle so the session controller
+/** Mount the app, let the mocked WASM init settle so the session controller
  *  connects, then deliver the join snapshot through the recorded bridge
- *  handlers — the same entry the real WebSocket uses. */
+ *  handlers, the same entry the real WebSocket uses. */
 async function mountWithSnapshot(docJson: string) {
   renderApp();
-  // Flush wasm init → wasmReady → controller construction.
+  // Flush wasm init, then wasmReady, then controller construction.
   await act(async () => {});
   const bridge = MockedBridge.instances[MockedBridge.instances.length - 1];
   await act(async () => {
@@ -414,8 +400,8 @@ describe("App wiring: layout switch (the #780 class)", () => {
       dataset_id: "wds-1",
       layout_id: "row",
     });
-    // ...and App signaled the replan through the composed intent — the
-    // planner-visible half is the settings cache invalidation.
+    // ...and App signaled the replan through the intent; the planner-visible
+    // half is the settings cache invalidation.
     expect(vi.mocked(invalidateDisplaySettings)).toHaveBeenCalledWith(
       null,
       "layout_switch",
@@ -446,7 +432,7 @@ describe("App wiring: annotation-view restore fan-out", () => {
 });
 
 describe("App wiring: the capture surface writes no user state (#923)", () => {
-  // The whole point of these two is that they mount the REAL App: the gate is
+  // These two must mount the real App: the gate is
   // a prop threaded from a URL read at the top of App.tsx down into
   // useSavedViewSync, and a hook-level test cannot fail if that thread breaks.
   afterEach(() => {
@@ -509,8 +495,8 @@ describe("App wiring: dataset-settings mutation canary", () => {
 
     fireEvent.click(screen.getByLabelText("Hide layer wds-1.zarr"));
 
-    // Assert synchronously after the event dispatch — no flushing — so a
-    // deferred (and hence missable) signal would fail here.
+    // Assert synchronously after the dispatch, with no flushing, so a deferred
+    // signal would fail here.
     expect(scene.commands).toContainEqual({
       type: "set_dataset_visible",
       dataset_id: "wds-1",

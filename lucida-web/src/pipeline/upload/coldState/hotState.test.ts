@@ -1,14 +1,6 @@
 /**
- * Unit tests for `buildViewHotState` — pure builder that mirrors
- * `iterateColdMembers`, fanning the per-dataset ray hit out to every
- * member.
- *
- * Cases:
- *   1. Per-member fan-out — one rayHit entry per cold-state member.
- *   2. Composite member id dedup — if two entries produce the same
- *      `memberId` (e.g. group-as-proxy with entityId X and a tile with
- *      imageId X), only the first emits a rayHit.
- *   3. Empty cold msg → empty rayHitsByEntity.
+ * Unit tests for `buildViewHotState`, which mirrors `iterateColdMembers` and
+ * emits one ray hit per unique member id.
  */
 import { describe, it, expect } from "vitest";
 import type {

@@ -1,19 +1,11 @@
 /**
- * Worker-side devtools / HITL globals.
- *
- * Attaches `self.__lucidaProxyStats`, `self.__lucidaProxyPools`, and
- * `self.__lucidaProxyDescriptors` so a DevTools breakpoint inside the
- * worker thread can inspect current proxy counts + pool + descriptor
- * state without threading through the dispatcher.
+ * Worker-side devtools globals, so a DevTools breakpoint in the worker can
+ * inspect proxy stats, pools, and descriptors.
  */
 
 import type { RendererState } from "./state.ts";
 
-/**
- * Install the worker-side debug surfaces. Pointers go through the
- * passed {@link RendererState} so a breakpoint sees current values
- * rather than a stale pre-init pointer.
- */
+/** Install the worker-side debug globals, pointing at live {@link RendererState} maps. */
 export function installDevtools(state: RendererState): void {
   const target = self as unknown as {
     __lucidaProxyStats?: typeof state.proxyStats;

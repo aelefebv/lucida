@@ -1,15 +1,10 @@
 /**
  * Spatial footprint of a label overlay in its source image's voxel frame.
  *
- * A label carries its own multiscale geometry: its level-0 grid can be
- * coarser than the intensity image it overlays (segmentations are often
- * downsampled). Rendering a label at its raw pixel dimensions would shrink
- * it to 1/downsample of the image and misalign it. Instead the label quad
- * must cover the same physical region of the view as the source image, so it is
- * sized in the SOURCE's full-resolution voxel units.
- *
- * The 5D axis order is the canonical `[T, C, Z, Y, X]`, so X is index 4
- * and Y is index 3.
+ * A label's level-0 grid can be coarser than the image it overlays, so it is
+ * sized in the source's full-resolution voxel units to cover the same
+ * physical region. Drawn at its own pixel size it would shrink and misalign.
+ * Axis order is `[T, C, Z, Y, X]`.
  */
 
 /** Level-0 geometry: 5D `shape` and `scale`, canonical `[T, C, Z, Y, X]`. */
@@ -23,7 +18,7 @@ const AXIS_Z = 2;
 const AXIS_Y = 3;
 const AXIS_X = 4;
 
-/** A finite positive scale, or `1` for missing/zero/NaN — never divide by it into NaN. */
+/** A finite positive scale, or `1` for missing, zero, or NaN, so dividing by it never yields NaN. */
 function safeScale(scale: number[] | undefined, axis: number): number {
   const v = scale?.[axis] ?? 1;
   return Number.isFinite(v) && v > 0 ? v : 1;
@@ -55,14 +50,8 @@ function footprintAxis(
 }
 
 /**
- * Footprint (width/height, in the source's full-res voxel units) the label
- * overlay must occupy to stay aligned with its source image:
- *
- *   dataW = label.shape[X] * label.scale[X] / source.scale[X]
- *   dataH = label.shape[Y] * label.scale[Y] / source.scale[Y]
- *
- * A 4x-downsampled label (e.g. 87 px at scale 4 over a 348 px image at
- * scale 1) reports 348, matching the source rather than its own 87.
+ * Width and height, in the source's full-res voxel units, the label must
+ * occupy to stay aligned: `label.shape * label.scale / source.scale`.
  */
 export function labelFootprint(
   source: Level0,
@@ -75,12 +64,9 @@ export function labelFootprint(
 }
 
 /**
- * The label's own index on `axis` that lines up physically with a source
- * index on the same axis. An axis can be sampled/extended independently of
- * the others, so map by physical position (`sourceIdx * source.scale /
- * label.scale`) and clamp into the label's extent. Reduces to identity when
- * label and source share that axis' scale + extent (the common case). NaN-
- * and zero-scale-safe (never emits a NaN index).
+ * The label's index on `axis` that lines up physically with a source index,
+ * clamped into the label's extent. Each axis can be sampled independently,
+ * so map by physical position. Never emits a NaN index.
  */
 function labelAxisIndex(sourceIdx: number, source: Level0, label: Level0, axis: number): number {
   const sourceUnit = safeScale(source.scale, axis);
@@ -94,7 +80,7 @@ function labelAxisIndex(sourceIdx: number, source: Level0, label: Level0, axis: 
 
 /**
  * The label's own full-resolution Z lining up with a source full-res Z.
- * Used by BOTH the request emitter and the delivery path so the fetched
+ * Used by both the request emitter and the delivery path so the fetched
  * chunk's Z and the worker's slice pick agree.
  */
 export function labelDepthZ(sourceZ: number, source: Level0, label: Level0): number {
@@ -121,18 +107,9 @@ function extentRatio(label: Level0, source: Level0, axis: number): number {
 }
 
 /**
- * The model matrix (and inverse) that maps a LABEL's `[0,1]^3` cube to world
- * space, given the SOURCE member's model matrix + inverse. The 3D analog of
- * {@link labelFootprint}: a label overlays its source's physical extent, so
- * it inherits the source's world origin/orientation, scaled per axis so the
- * cube spans the LABEL's own physical extent (`shape * scale`). For a
- * spec-compliant label — same physical extent as its source, only downsampled
- * — every ratio is `1` and the matrices pass through unchanged.
- *
- * Both matrices are column-major 4×4. `M_label = M_source · diag(rx, ry, rz, 1)`
- * scales the source's basis columns; the inverse is
- * `diag(1/rx, 1/ry, 1/rz, 1) · M_source⁻¹`, which scales the inverse's rows —
- * so no general matrix inversion is needed (the source inverse is reused).
+ * Model matrix and inverse mapping a label's `[0,1]^3` cube to world space:
+ * the source's matrices scaled per axis by the label-to-source extent ratio.
+ * Scaling the source inverse's rows avoids a general matrix inversion.
  */
 export function labelModelMatrices(
   sourceModel: Float32Array,

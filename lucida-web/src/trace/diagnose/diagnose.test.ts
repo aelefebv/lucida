@@ -1,5 +1,5 @@
 /**
- * The derivation module (#933). Every case asserts on the *diagnostic
+ * The derivation module. Every case asserts on the *diagnostic
  * document* — the verdict, the findings, the chain, the coverage block — and
  * never on how the derivation walked the tables. Which module owns a rollup is
  * not external behaviour; what the document says about a run is.
@@ -548,8 +548,8 @@ describe("the document", () => {
 
     // Twenty rows against four thousand: two hundred times the rows for a few
     // hundred bytes. What moves is the width of a count and of a named chunk
-    // key — the rollup now names the worst row per phase (#936), so there are
-    // a handful of those rather than one, and still no per-row list anywhere.
+    // key: the rollup names the worst row per phase, so there are a handful
+    // of those rather than one, and still no per-row list anywhere.
     expect(large).toBeLessThan(small + 400);
   });
 
@@ -865,9 +865,7 @@ describe("a window", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Runs built for one case each.
-// ---------------------------------------------------------------------------
 
 /** The healthy open with every duration multiplied, for the comparative rule. */
 function scaledOpen(factor: number) {

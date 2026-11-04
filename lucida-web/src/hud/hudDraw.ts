@@ -1,15 +1,11 @@
 /**
  * Draw one {@link HudView} onto a 2D context.
  *
- * Layout is in CSS pixels and the context is scaled by the device pixel
- * ratio, so the strip is crisp at ratio 2 and the arithmetic is the same at
- * ratio 1. Nothing here reads the view model's sources: it is a function of
- * the view and the box it was given, which is what lets the cost gate drive
- * it with a fake context.
- *
- * The sparklines share the top. Below them the pools, the lanes, and the
- * status column sit side by side when the strip is wide enough and stack
- * when it is not, so a narrow viewport costs height rather than readouts.
+ * Layout is in CSS pixels on a context scaled by the device pixel ratio. The
+ * output depends only on the view and the box, so the cost gate can drive it
+ * with a fake context. Below the sparklines, the pools, lanes, and status
+ * column sit side by side when the strip is wide enough and stack when not,
+ * so a narrow viewport costs height rather than readouts.
  */
 
 import { HUD_COLORS, HUD_HISTORY, type HudSeriesView, type HudTone, type HudView } from "./hudModel.ts";

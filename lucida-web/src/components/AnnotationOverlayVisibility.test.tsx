@@ -1,19 +1,9 @@
 // @vitest-environment happy-dom
 
 /**
- * Slice 19 (issue #792): the personal show/hide-all-annotations toggle.
- *
- * Two layers are covered here:
- *  1. The overlays' new `visible?: boolean` prop (default `true`) on BOTH the 2D
- *     `AnnotationOverlay` and the 3D `AnnotationOverlay3D`: when `false` the
- *     overlay renders NOTHING (no pins, no shapes, no thread popover), even for a
- *     pin that has comments; when `true` (or omitted) it renders exactly as
- *     before; and toggling `false` -> `true` re-renders the pins (hiding never
- *     mutates the annotation set).
- *  2. The App-level wiring contract: a `data-testid="annot-visibility-toggle"`
- *     button that flips a local `annotationsVisible` state passed as `visible` to
- *     the overlay. App itself stands up WASM/render/auth, so this reproduces the
- *     exact toggle pattern around a real overlay rather than mounting all of App.
+ * The personal show/hide-all-annotations toggle. With `visible={false}` both
+ * overlays render nothing, and re-showing restores the untouched set. The App
+ * wiring is reproduced around a real overlay rather than mounting all of App.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -167,7 +157,7 @@ describe("AnnotationOverlay (2D) — visible prop (issue #792)", () => {
     expect(screen.queryByTestId("annot-thread-pin-a")).toBeNull();
     expect(screen.queryByTestId("annot-pin-pin-a")).toBeNull();
 
-    // Re-show → the pin is back, but the thread is NOT re-opened (clean baseline).
+    // Re-show → the pin is back, but the thread stays closed.
     setVisible(true);
     expect(screen.getByTestId("annot-pin-pin-a")).toBeTruthy();
     expect(screen.queryByTestId("annot-thread-pin-a")).toBeNull();
@@ -248,10 +238,8 @@ describe("AnnotationOverlay3D — visible prop (issue #792)", () => {
 });
 
 describe("toolbar toggle wiring (issue #792) — button flips overlay visibility", () => {
-  /** Reproduces App.tsx's exact wiring: a local `annotationsVisible` state, the
-   * `annot-visibility-toggle` button that flips it, and a 2D overlay fed
-   * `visible={annotationsVisible}`. This pins the contract (button -> state ->
-   * visible -> overlay) without standing up all of App's WASM/render/auth. */
+  /** Reproduces App.tsx's wiring (button -> state -> `visible` -> overlay)
+   * without standing up App's WASM, render, and auth. */
   function Harness() {
     const [annotationsVisible, setAnnotationsVisible] = useState(true);
     const sceneRef = createRef<WasmScene | null>();

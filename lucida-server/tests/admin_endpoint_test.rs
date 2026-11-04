@@ -1,19 +1,8 @@
-//! HTTP-level tests for `POST /admin/clear-proxy-cache`.
-//!
-//! The endpoint is gated by the auth middleware + the `AdminRequired`
-//! extractor. Admin-ness is derived from the principal's email against
-//! the `LUCIDA_ADMIN_EMAILS`-seeded set on `AuthConfig`.
-//!
-//! Cases covered:
-//!   - No session cookie → 401 (auth middleware rejects).
-//!   - Session cookie for a non-admin email → 403 (AdminRequired).
-//!   - Session cookie for an admin email → 200, cache cleared.
-//!   - Same, with `?dataset=URL` → 200, only that subdir cleared.
-//!   - Empty admin set → admin email lookup misses → 403 (the
-//!     "no admin configured" path).
-//!
-//! The router is built from the same auth-middleware + extractor pieces
-//! `main.rs` wires, but with a `MemorySessionStore` instead of SQLite.
+//! HTTP-level tests for `POST /admin/clear-proxy-cache` behind the auth
+//! middleware and `AdminRequired`: no session is 401, a non-admin is 403,
+//! an admin clears the cache (or one dataset with `?dataset=URL`), and an
+//! empty admin set makes everyone 403. The router uses the pieces `main.rs`
+//! wires, with a `MemorySessionStore` instead of SQLite.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -179,9 +168,8 @@ async fn returns_403_when_principal_not_admin() {
 
 #[tokio::test]
 async fn returns_403_when_admin_set_empty() {
-    // PRD: "Empty/unset → empty set (no admins; admin endpoints return
-    // 403 for everyone)." A logged-in user with no configured admins
-    // must still be rejected.
+    // Empty or unset admin emails mean no admins, so admin endpoints
+    // return 403 for everyone, a logged-in user included.
     let tmp = tempfile::tempdir().unwrap();
     let store = Arc::new(MemorySessionStore::new());
     let cookie_id = seed_session(&store, ADMIN_EMAIL).await;
@@ -278,7 +266,6 @@ async fn dev_local_session_with_dev_local_admin_allowlist_succeeds() {
 }
 
 /// Same dev-login session, but no admin emails configured: must 403.
-/// This is the "env var unset" half of the acceptance criteria.
 #[tokio::test]
 async fn dev_local_session_without_admin_allowlist_403s() {
     let tmp = tempfile::tempdir().unwrap();

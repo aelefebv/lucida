@@ -18,10 +18,9 @@ describe("labelColor", () => {
   });
 
   it("normalizes a declared SEMI-TRANSPARENT color (alpha<255) to opaque", () => {
-    // Regression: the ISR collection declares cells 1..10 with alpha=128, which
-    // rendered them at ~50% while glasbey-fallback cells stayed opaque — a
-    // patchwork the opacity slider couldn't correct. Alpha is now uniform;
-    // the per-label opacity is the sole transparency control.
+    // A declared alpha would leave some labels translucent beside opaque
+    // fallback labels, a patchwork the opacity slider couldn't correct. The
+    // per-label opacity is the only transparency control.
     const explicit = new Map<number, RGBA>([[3, [255, 225, 25, 128]]]);
     expect(labelColor(3, explicit)).toEqual([255, 225, 25, 255]);
   });

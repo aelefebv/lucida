@@ -6,9 +6,7 @@ import {
 } from "./layoutRegistry.ts";
 import type { LayoutSpec } from "../manifestTypes.ts";
 
-// ---------------------------------------------------------------------------
 // Test harness
-// ---------------------------------------------------------------------------
 
 interface MockWasm extends LayoutRegistryWasm {
   applyCommandCalls: string[];
@@ -43,9 +41,7 @@ function makeSpec(id: string, name: string): LayoutSpec {
 
 const noopSend = (_json: string) => {};
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 describe("LayoutRegistry", () => {
   describe("initial state", () => {

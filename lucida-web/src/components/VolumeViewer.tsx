@@ -1,4 +1,4 @@
-/** 3D volume viewer — delegates WebGPU rendering to a worker via RenderClient. */
+/** 3D volume viewer. WebGPU rendering runs in a worker via RenderClient. */
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { ORBIT_RADIANS_PER_PIXEL, VOLUME_ZOOM_PER_WHEEL_DELTA } from "./inputScale.ts";
 import type { WasmScene } from "lucida-core";
@@ -34,11 +34,9 @@ interface Props {
   annotationDatasetId: string | null;
   /** Shape a shift-drag draws: a point pin, a line, or a box. */
   annotationKind: "point" | "line" | "box";
-  /** Stable, browser-persisted annotation-author identity (issue #777), recorded
-   * as a 3D-dropped pin's `author`. Sourced from `annotationAuthorId()`, not the
-   * per-connection `bridge.myId`, so pins this browser drops stay yours across
-   * leaving + rejoining a workspace. (Prop name kept as `myId`; its value/type is
-   * now the string identity.) */
+  /** Stable, browser-persisted annotation-author identity, recorded as a 3D pin's
+   * `author`. From `annotationAuthorId()`, not the per-connection `bridge.myId`,
+   * so pins stay yours across leaving and rejoining a workspace. */
   myId: string;
   /** Send a wire command (already wrapped by the bridge). */
   sendCommand: (json: string) => void;
@@ -60,9 +58,8 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
   const [cameraMode, setCameraMode] = useState<string>(() => scene.camera_mode());
   const [showHint, setShowHint] = useState(false);
 
-  // Mirror pin-drop props into refs so the pointer handlers (bound on `canvas`)
-  // read the latest values without re-binding on every doc change — the same
-  // pattern SliceViewer uses for its pin-drop path.
+  // Mirror pin-drop props into refs so the canvas-bound pointer handlers read the
+  // latest values without re-binding on every doc change.
   const annotationDatasetIdRef = useRef(annotationDatasetId);
   // eslint-disable-next-line react-hooks/refs
   annotationDatasetIdRef.current = annotationDatasetId;
@@ -72,10 +69,7 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
   const myIdRef = useRef(myId);
   // eslint-disable-next-line react-hooks/refs
   myIdRef.current = myId;
-  // Mirror the current timepoint/channel (issue #779) so a 3D pin drop records
-  // the view's T/C alongside its picked voxel depth (z) — the slice context it
-  // belongs to. Mirrored (not closed over) like the other pin-drop props so the
-  // canvas-bound pointer handlers see the latest values without re-binding.
+  // A 3D pin records the view's T/C alongside its picked depth.
   const tRef = useRef(t);
   // eslint-disable-next-line react-hooks/refs
   tRef.current = t;
@@ -111,11 +105,8 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
 
   const isFlyMode = cameraMode === "fly";
 
-  // Inline the markInteractiveDirty wrapper here (instead of reusing the
-  // shared `markInteractiveDirty` above) so the dirty_set log carries a
-  // fly-specific source. Fly-camera ticks every animation frame, so this
-  // is the one external caller where attribution is genuinely useful;
-  // the rate-limiter collapses 60+/sec into one log line per second.
+  // A fly-specific dirty source: fly ticks every frame, so attribution is useful
+  // here, and the rate limiter collapses it to one log line per second.
   const fly = useFlyCameraInput(
     sceneRef,
     applyViewportCommand,
@@ -237,16 +228,13 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
   const [dragging, setDragging] = useState(false);
   const shiftDragRef = useRef(false);
   const lastPos = useRef({ x: 0, y: 0 });
-  // Context for a shift press that may become a pin drop or a line/box draw:
-  // where it started, whether it has since moved past the click slop, and
-  // whether it is drawing a shape (kind line/box). For a point, crossing the
-  // slop turns it into a shift-pan exactly as before; for a shape, the drag
+  // A shift press that may become a pin drop or a line/box draw. For a point,
+  // crossing the click slop turns it into a shift-pan; for a shape, the drag
   // draws (no pan) and the shape is emitted on release.
   const pinPressRef = useRef<{ x: number; y: number; moved: boolean; shape: boolean } | null>(null);
 
-  /** Ray-cast a client point into the volume, returning its in-plane-voxel +
-   * voxel-depth point `[x, y, z]`, or `null` if the ray missed. The same depth
-   * pick a pin drop uses, factored out so a line/box can pick both endpoints. */
+  /** Ray-cast a client point into the volume: `[x, y, z]` as in-plane voxel
+   * position plus voxel depth, or `null` if the ray missed. */
   const pickVoxel = useCallback(
     (clientX: number, clientY: number): [number, number, number] | null => {
       const datasetId = annotationDatasetIdRef.current;
@@ -260,13 +248,11 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
     [canvas, scene],
   );
 
-  /** Draw an annotation from a shift gesture. A point is a single depth-picked
-   * drop (drop-where-clicked); a line/box depth-picks both endpoints and stores
-   * the second as `end`. No-op (declines) when no dataset is selected or a
-   * required ray misses the volume — an annotation should anchor to data, never
-   * float in empty space. The picks are stored as in-plane voxel position +
-   * voxel depth (z), the same frame a 2D draw uses, so the shape round-trips and
-   * renders in both views. The shared `z` is the anchor vertex's depth. */
+  /** Draw an annotation from a shift gesture. A line/box depth-picks both
+   * endpoints and stores the second as `end`. Declines when no dataset is
+   * selected or a ray misses, so an annotation always anchors to data. Picks use
+   * the same frame as a 2D draw, so the shape renders in both views. The shared
+   * `z` is the anchor vertex's depth. */
   const drawAnnotation = useCallback(
     (startX: number, startY: number, endX: number, endY: number, kind: "point" | "line" | "box") => {
       const datasetId = annotationDatasetIdRef.current;
@@ -274,12 +260,9 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
       const shape = kind === "line" || kind === "box";
       const anchor = pickVoxel(shape ? startX : endX, shape ? startY : endY);
       if (!anchor) return; // anchor ray missed → don't draw
-      // Clamp the picked depth to a valid slice index. The pick can return the
-      // ray's far-face depth (== full depth, e.g. 339.999 for a 340-deep volume),
-      // which rounds to 340 — OUT of the slice range [0, depth-1] — so the pin
-      // could never match any slider Z and read permanently off-context in 2D.
-      // Clamp so 2D navigation can reach its slice (issue: 3D annotations always
-      // off-context).
+      // The pick can return the far-face depth (339.999 for a 340-deep volume),
+      // which rounds outside [0, depth-1], so the pin would never match a 2D
+      // slice. Clamp so 2D navigation can reach it.
       const depth = scene.dataset_volume_shape(datasetId)[0];
       const z = depth > 0 ? Math.max(0, Math.min(anchor[2], depth - 1)) : anchor[2];
       let end: [number, number] | null = null;
@@ -291,17 +274,13 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
       const id = globalThis.crypto?.randomUUID
         ? globalThis.crypto.randomUUID()
         : `pin-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-      // Snapshot the author's CURRENT view onto the pin (annotation-views slice
-      // 1) so a later slice can restore it on navigation. Workspace-dataset-id
-      // form (no source URLs). The 3D camera, z-slab, and display come from the
-      // scene's presence; T/C are overridden with the live refs so the embedded
-      // view's timepoint/channel match the pin's own t/c. `null` (capture
-      // failure) just omits the view — it is optional/additive.
+      // Snapshot the author's view onto the pin so navigation can restore it. T/C
+      // come from the live refs so the view matches the pin's own t/c. A null
+      // capture just omits the view.
       const capturedView = buildAnnotationView(scene, liveViewWithLiveTC(scene, tRef.current, cRef.current));
-      // Apply locally AND send (mirrors SliceViewer's draw and every other doc
-      // command): the sender is excluded from the server's rebroadcast, so the
-      // local apply is what shows the author their own shape. The client-supplied
-      // id makes the local apply and the peers' broadcast converge.
+      // Apply locally and send: the server's rebroadcast excludes the sender, so
+      // the local apply is what shows the author their shape. The client-supplied
+      // id makes the local and peer copies converge.
       applyDocumentCommand(
         scene,
         {
@@ -311,15 +290,11 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
           position: [anchor[0], anchor[1]],
           end,
           z,
-          // Stamp the view's current T/C so the pin belongs to this timepoint/
-          // channel (issue #779). In 3D `z` is the picked voxel depth (the
-          // geometric anchor), while T/C are the discrete view selectors.
+          // In 3D `z` is the picked depth, while T/C are the view's selectors.
           t: tRef.current,
           c: cRef.current,
           author: String(myIdRef.current),
           kind: shape ? kind : "point",
-          // The author's full view at creation (camera + display + slice).
-          // Omitted from the wire when capture failed (additive field).
           ...(capturedView ? { view: capturedView } : {}),
         },
         sendCommandRef.current,
@@ -365,10 +340,8 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
         if (exceedsClickSlop(press.x, press.y, e.clientX, e.clientY)) {
           press.moved = true;
         }
-        // Live draw preview: once past the slop, publish the in-progress shape
-        // (screen-space CSS px relative to the canvas) so AnnotationDraftOverlay
-        // grows it under the cursor — the camera is held still during a draw, so
-        // raw screen coords match where the committed shape lands on release.
+        // Live draw preview in canvas-relative CSS px. The camera holds still
+        // during a draw, so raw screen coords match where the shape lands.
         const drawKind = annotationKindRef.current;
         annotationDraftRef.current =
           press.moved && (drawKind === "line" || drawKind === "box")
@@ -377,9 +350,8 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
         return;
       }
 
-      // While a shift press is still within the click slop, hold off panning so
-      // a tiny jitter still resolves to a pin drop on release. Once it crosses
-      // the slop it's a deliberate shift-pan — mark it moved and pan as before.
+      // Within the click slop, hold off panning so a tiny jitter still resolves
+      // to a pin drop on release. Past it, the press is a shift-pan.
       if (press && !press.moved) {
         if (!exceedsClickSlop(press.x, press.y, e.clientX, e.clientY)) {
           return;
@@ -421,7 +393,7 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
         // A click (point kind, or a shape that never dragged) drops a point.
         drawAnnotation(e.clientX, e.clientY, e.clientX, e.clientY, "point");
       }
-      // A point-kind shift-pan (moved, not a shape) draws nothing — unchanged.
+      // A point-kind shift-pan draws nothing.
     },
     [scheduleFullRes, drawAnnotation, annotationDraftRef],
   );

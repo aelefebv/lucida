@@ -29,14 +29,12 @@ export interface WorkspaceSavedViewsSidebarProps {
   activeLayoutName?: string | null;
   defaultSavedViewId: string | null;
   onSetDefaultSavedView: (savedViewId: string | null) => Promise<void>;
-  /** Id of the saved view currently applied to the viewer, if any. The matching
-   *  row renders as active so the user can see which view they're looking at. */
+  /** Id of the saved view currently applied to the viewer; its row renders as
+   *  active. */
   currentOpenSavedViewId?: string | null;
-  /** Called when the saved view that is currently open (`currentOpenSavedViewId`)
-   *  stops existing as the user acts on it — deleted, withdrawn, or its deferred
-   *  reject commits. The host clears its active-row id so the highlight doesn't
-   *  dangle on a view that's gone (#818). Viewport changes are cleared host-side
-   *  off the live-view signal; this covers the "the open view went away" case. */
+  /** Called when the open view stops existing through an action here: deleted,
+   *  withdrawn, or its deferred reject commits. The host clears its active-row id
+   *  so the highlight doesn't dangle. Viewport changes are cleared host-side. */
   onActiveSavedViewInvalidated?: (savedViewId: string) => void;
   style?: React.CSSProperties;
   visible: boolean;
@@ -48,11 +46,8 @@ interface ToastAction {
 }
 
 interface ToastMessage {
-  /** Stable identity for this toast. Plain status toasts get an auto-generated
-   *  id; an Undo toast for a deferred reject is keyed by `reject:<savedViewId>`
-   *  so each pending reject owns its OWN dismissible toast (the data layer
-   *  already supports independent multi-undo via the per-id timer Map — the
-   *  toast stack is the matching presentation). */
+  /** Status toasts get a generated id. A deferred reject's Undo toast is keyed by
+   *  `reject:<savedViewId>`, so each pending reject owns its own toast. */
   id: string;
   text: string;
   kind: "info" | "warn";
@@ -60,8 +55,7 @@ interface ToastMessage {
   action?: ToastAction;
 }
 
-/** Stable toast id for a deferred reject so its Undo toast never collides with
- *  (or gets clobbered by) another pending reject's toast. */
+/** Per-view id, so one pending reject's Undo toast never clobbers another's. */
 function rejectToastId(savedViewId: string): string {
   return `reject:${savedViewId}`;
 }
@@ -110,10 +104,9 @@ export function WorkspaceSavedViewsSidebar({
     currentUserEmail,
   });
 
-  // A personal view may be promoted to shared only by the member who created
-  // it, and only when they have edit access (the server enforces all three;
-  // the UI just avoids offering an action that would 403). Mirrors the
-  // hook's "mine only" lowercase email comparison.
+  // Only the creator, with edit access, may promote a personal view to shared.
+  // The server enforces this; the UI just avoids offering an action that would
+  // 403. Mirrors the hook's lowercase email comparison.
   const normalizedCurrentUserEmail = currentUserEmail?.toLowerCase() ?? null;
   const isMine = useCallback(
     (view: WorkspaceSavedView): boolean =>
@@ -126,19 +119,15 @@ export function WorkspaceSavedViewsSidebar({
       canEdit && view.visibility === "personal" && isMine(view),
     [canEdit, isMine],
   );
-  // A viewer (no edit access) can't share directly, so they instead *propose*
-  // their own personal view to the team for an editor to approve (#702). An
-  // editor uses the direct "Share with team" action above, so the two never
-  // overlap.
+  // A viewer can't share directly, so they propose their own personal view for
+  // an editor to approve. Editors share directly, so the two never overlap.
   const canProposeToTeam = useCallback(
     (view: WorkspaceSavedView): boolean =>
       !canEdit && view.visibility === "personal" && isMine(view),
     [canEdit, isMine],
   );
-  // The proposer can pull their own still-pending proposal back to private at
-  // any time (the server permits a creator's Proposed -> Personal). Scoped to
-  // the proposer's *own* proposed view — never another member's, never an
-  // already-approved/shared one. Available whether or not they can edit.
+  // A proposer can withdraw their own pending proposal back to personal at any
+  // time, whether or not they can edit.
   const canWithdrawProposal = useCallback(
     (view: WorkspaceSavedView): boolean =>
       view.visibility === "proposed" && isMine(view),
@@ -150,19 +139,17 @@ export function WorkspaceSavedViewsSidebar({
   const [confirmDelete, setConfirmDelete] = useState<ConfirmRequest | null>(null);
   const [confirmPropose, setConfirmPropose] = useState<ConfirmRequest | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
-  // A STACK of toasts, not a single slot: rejecting view B must not evict view
-  // A's still-live "Undo" toast while A's reject timer keeps running (#818).
-  // Newest renders on top of the stack.
+  // A stack, not a single slot: rejecting view B must not evict view A's
+  // still-live Undo toast while A's reject timer runs. Newest on top.
   const [toasts, setToasts] = useState<readonly ToastMessage[]>([]);
   // Ids whose Reject is in its cancelable window: hidden from the review queue
-  // optimistically, but NOT yet sent to the server (Undo can still cancel).
+  // but not yet sent to the server.
   const [pendingReject, setPendingReject] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
 
-  // One auto-dismiss timer per toast id (toasts are now a stack, so a single
-  // shared timer would let one toast's expiry tear down another's). Cleaned up
-  // on unmount so no timer can setState after the sidebar is gone.
+  // One auto-dismiss timer per toast id, so one toast's expiry can't tear down
+  // another's.
   const dismissTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const seqRef = useRef(0);
   const dismissToast = useCallback((id: string) => {
@@ -182,9 +169,8 @@ export function WorkspaceSavedViewsSidebar({
       kind: ToastMessage["kind"] = "info",
       opts?: { action?: ToastAction; durationMs?: number; id?: string },
     ) => {
-      // Reject toasts pass a stable id (keyed by saved-view id) so re-issuing
-      // replaces that view's own toast in place; status toasts get a fresh id
-      // so each pushes onto the stack independently.
+      // A reject toast's stable id makes re-issuing replace that view's toast in
+      // place; status toasts get a fresh id each.
       const id = opts?.id ?? `toast:${seqRef.current++}`;
       const next: ToastMessage = { id, text, kind, action: opts?.action };
       setToasts((prev) => [...prev.filter((t) => t.id !== id), next]);
@@ -199,30 +185,25 @@ export function WorkspaceSavedViewsSidebar({
     [],
   );
 
-  // Latest open-view id + invalidation callback, mirrored into refs so the
-  // action handlers can fire "the open view went away" WITHOUT taking these as
-  // deps (which would churn every callback identity each time the active row
-  // changes). Read at call time only (from event handlers / settled async),
-  // never during render — same latest-value-in-a-ref pattern as
-  // useSavedViewSync.ts, so the react-hooks/refs render-write rule is disabled
-  // on the assignment lines.
+  // Mirrored into refs so handlers can report "the open view went away" without
+  // taking these as deps, which would churn every callback identity when the
+  // active row changes. Read at call time only, never during render, so the
+  // react-hooks/refs render-write rule is disabled on the assignment lines.
   const currentOpenSavedViewIdRef = useRef(currentOpenSavedViewId);
   // eslint-disable-next-line react-hooks/refs
   currentOpenSavedViewIdRef.current = currentOpenSavedViewId;
   const onActiveSavedViewInvalidatedRef = useRef(onActiveSavedViewInvalidated);
   // eslint-disable-next-line react-hooks/refs
   onActiveSavedViewInvalidatedRef.current = onActiveSavedViewInvalidated;
-  // If `id` is the view currently flagged active, tell the host it's gone so the
-  // stale highlight clears (#818). No-op otherwise, so it's always safe to call.
+  // If `id` is the active view, tell the host it's gone. Safe to call for any id.
   const invalidateIfOpen = useCallback((id: string) => {
     if (currentOpenSavedViewIdRef.current === id) {
       onActiveSavedViewInvalidatedRef.current?.(id);
     }
   }, []);
 
-  // One timer per deferred reject so a power-user can stack several at once and
-  // Undo each independently. Cleaned up on unmount so a pending PATCH never
-  // fires after the sidebar is gone.
+  // One timer per deferred reject, so several can be undone independently.
+  // Cleared on unmount so a pending PATCH never fires after the sidebar is gone.
   const rejectTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   useEffect(() => {
     const rejects = rejectTimers.current;
@@ -230,7 +211,6 @@ export function WorkspaceSavedViewsSidebar({
     return () => {
       for (const timer of rejects.values()) clearTimeout(timer);
       rejects.clear();
-      // Also clear every toast auto-dismiss timer so none can setState after unmount.
       for (const timer of dismisses.values()) clearTimeout(timer);
       dismisses.clear();
     };
@@ -334,8 +314,7 @@ export function WorkspaceSavedViewsSidebar({
     [setSavedViewVisibility, showToast],
   );
 
-  // Sending the proposal only happens after the confirm step (confirmPropose);
-  // this is the actual PATCH the modal's confirm button triggers.
+  // Runs from the confirm modal, never directly from the menu.
   const handlePropose = useCallback(
     async (view: WorkspaceSavedView) => {
       try {
@@ -350,16 +329,10 @@ export function WorkspaceSavedViewsSidebar({
     [setSavedViewVisibility, showToast],
   );
 
-  // Withdraw: the proposer pulls their own pending proposal back to a private
-  // personal view (the server allows a creator's Proposed -> Personal). Same
-  // visibility PATCH the rest of the flow uses, so the chip/filters reconcile
-  // off the server's canonical row.
   const handleWithdraw = useCallback(
     async (view: WorkspaceSavedView) => {
       try {
         await setSavedViewVisibility(view.id, "personal");
-        // Withdrawing changes the view out from under the active-row claim, so
-        // drop the highlight if this was the open view (#818).
         invalidateIfOpen(view.id);
         showToast(`Withdrew "${view.name}" — back to your personal views`);
       } catch (e) {
@@ -381,10 +354,8 @@ export function WorkspaceSavedViewsSidebar({
     [approveSavedView, showToast],
   );
 
-  // Cancel a pending reject before it commits: clear its timer, un-hide the
-  // row (it was only hidden locally — never sent), and drop ONLY this view's
-  // Undo toast (others stay). No PATCH ever happens, so the rejection simply
-  // never occurred.
+  // Cancel a pending reject before it commits. The row was only hidden locally,
+  // so no PATCH is ever sent. Other views' Undo toasts stay.
   const cancelReject = useCallback(
     (id: string) => {
       const timer = rejectTimers.current.get(id);
@@ -403,9 +374,8 @@ export function WorkspaceSavedViewsSidebar({
     [dismissToast],
   );
 
-  // Reject is a delayed, cancelable send: hide the row immediately and offer an
-  // Undo, but only fire the reject PATCH once the window elapses. Approve stays
-  // immediate (see handleApprove) — only rejection is recoverable.
+  // Reject is a delayed, cancelable send: hide the row now, offer Undo, and fire
+  // the PATCH once the window elapses. Approve stays immediate.
   const handleReject = useCallback(
     (view: WorkspaceSavedView) => {
       const id = view.id;
@@ -420,15 +390,12 @@ export function WorkspaceSavedViewsSidebar({
 
       const timer = setTimeout(() => {
         rejectTimers.current.delete(id);
-        // The window elapsed without an Undo: commit the rejection. The hook
-        // drops it from the list and refreshes; clear our local hide once it
-        // settles (on failure the refresh restores the row, so it reappears).
+        // Clear the local hide once it settles; on failure the hook's refresh
+        // restores the row.
         void rejectSavedView(id)
           .then(() => {
-            // The view is really gone now — if it was the open/active row, tell
-            // the host so the highlight doesn't dangle (#818). Undo never
-            // reaches here (it clears the timer first), so the live view is
-            // still flagged active across the whole cancelable window.
+            // Only here, not at click time: the view stays active through the
+            // whole cancelable window.
             invalidateIfOpen(id);
           })
           .catch((e) => {
@@ -448,10 +415,7 @@ export function WorkspaceSavedViewsSidebar({
       }, REJECT_UNDO_WINDOW_MS);
       rejectTimers.current.set(id, timer);
 
-      // Keep the toast (and its Undo) alive for the whole cancelable window so
-      // the affordance never vanishes while the reject can still be undone. The
-      // toast is keyed by the saved-view id, so rejecting a second view pushes
-      // its OWN Undo toast onto the stack instead of evicting this one (#818).
+      // The Undo toast lives for the whole cancelable window.
       showToast(`Rejected "${view.name}"`, "info", {
         durationMs: REJECT_UNDO_WINDOW_MS,
         id: rejectToastId(id),
@@ -478,7 +442,6 @@ export function WorkspaceSavedViewsSidebar({
     async (view: WorkspaceSavedView) => {
       try {
         await deleteSavedView(view.id);
-        // The view no longer exists — clear the active highlight if it was open (#818).
         invalidateIfOpen(view.id);
         if (defaultSavedViewId === view.id) {
           await onSetDefaultSavedView(null).catch((e) => {
@@ -508,9 +471,8 @@ export function WorkspaceSavedViewsSidebar({
     [showToast],
   );
 
-  // Built fresh when the Save dialog opens (the modal seeds its own state once
-  // from this prop) so the suggested name reflects the position — Z plane, and
-  // T/C when non-default — at the moment of saving.
+  // Called when the Save dialog opens (the modal seeds its state once), so the
+  // suggested name reflects the position at the moment of saving.
   const makeDefaultName = useCallback(
     () =>
       defaultWorkspaceSavedViewName(
@@ -529,15 +491,10 @@ export function WorkspaceSavedViewsSidebar({
     filterActive: filter.search.trim().length > 0 || filter.mineOnly,
   });
 
-  // Editors get a dedicated review queue: every pending proposal the server
-  // surfaced to them (their own + every other member's) is pulled out of the
-  // main list into its own section with Approve / Reject. For a plain viewer
-  // there is no review queue — their own proposals just stay inline with a
-  // "Proposed" chip so they can see the pending status. Keeping the partition
-  // local means shared/personal rows render exactly as before.
-  // A row whose Reject is mid-window is hidden from the queue right away (the
-  // optimistic removal) even though its PATCH hasn't been sent yet; Undo brings
-  // it straight back because it was never actually removed from the data.
+  // Editors get a review queue holding every pending proposal, with Approve and
+  // Reject. Viewers have none: their own proposals stay inline with a "Proposed"
+  // chip. A row mid-reject is hidden from the queue before its PATCH is sent;
+  // Undo brings it back because it never left the data.
   const reviewQueue = canEdit
     ? savedViews.filter(
         (view) => view.visibility === "proposed" && !pendingReject.has(view.id),
@@ -660,9 +617,8 @@ export function WorkspaceSavedViewsSidebar({
           canEdit={canEdit}
           isMine={(() => {
             const view = savedViews.find((item) => item.id === menu.savedViewId);
-            // Own-management (Rename/Delete) is scoped to a creator's own
-            // personal/proposed view — a shared view is editor-only (the server
-            // enforces this), so don't offer it for an own *shared* view.
+            // Rename/Delete of your own view, except a shared one: those are
+            // editor-only, and the server enforces it.
             return view ? isMine(view) && view.visibility !== "shared" : false;
           })()}
           isDefault={defaultSavedViewId === menu.savedViewId}
@@ -687,7 +643,7 @@ export function WorkspaceSavedViewsSidebar({
           onPropose={() => {
             const view = savedViews.find((item) => item.id === menu.savedViewId);
             setMenu(null);
-            // Confirm first — proposing makes the view visible to every editor.
+            // Confirm first: proposing makes the view visible to every editor.
             if (view) setConfirmPropose({ savedView: view });
           }}
           onWithdraw={() => {
@@ -975,10 +931,9 @@ function WorkspaceSavedViewActionsMenu({
   onDelete: () => void;
   onCopyLink: () => void;
 }) {
-  // Renaming/deleting a row you created is a personal action the server already
-  // permits its creator (workspace_personal_saved_view_mutations_are_creator_only),
-  // so offer it whenever the row is mine — even to a viewer. Set-default /
-  // Update / promote act on the shared document and stay gated by edit access.
+  // The server lets a creator rename or delete their own view, so offer it even
+  // to a viewer. Set-default, Update, and promote act on the shared document and
+  // stay gated by edit access.
   const canManageOwn = canEdit || isMine;
   return (
     <div
@@ -1052,9 +1007,7 @@ function SaveWorkspaceSavedViewModal({
   ) => void | Promise<void>;
 }) {
   const [name, setName] = useState(defaultName);
-  // Personal is the default for everyone — sharing stays a deliberate one-click
-  // choice. Viewers can only save personally, so for them it's also the only
-  // enabled option.
+  // Personal is the default for everyone, so sharing stays a deliberate choice.
   const [visibility, setVisibility] = useState<WorkspaceSavedViewVisibility>(
     "personal",
   );
@@ -1167,10 +1120,9 @@ function SaveWorkspaceSavedViewModal({
   );
 }
 
-// One confirm affordance for any irreversible-or-broadcasting action (delete,
-// propose). `tone` only swaps the accent on the confirm button — a warm danger
-// for destructive actions, the brand primary for a benign-but-deliberate one
-// like proposing — so the two flows stay visually consistent.
+// One confirm modal for irreversible or broadcasting actions (delete, propose).
+// `tone` only swaps the confirm button's accent: danger for destructive actions,
+// primary for deliberate ones like proposing.
 function ConfirmModal({
   ariaLabel,
   title,

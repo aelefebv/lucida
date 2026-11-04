@@ -1,19 +1,11 @@
 //! The target level: the pyramid level the screen calls for.
 //!
 //! One rule, owned by the core so the browser, the CLI, and the Python client
-//! cannot disagree. Let the screen show `z` device pixels per level-0 sample
-//! and let level `L` be `r` times coarser than level 0. The target is the
-//! coarsest level that still places at least one sample under every device
-//! pixel, that is the largest `L` with `z × r ≤ 1`. When even level 0 spreads
-//! its samples more than a pixel apart the target is 0. When even the coarsest
-//! level packs more than one sample into a pixel the target is the coarsest
-//! level. The rule reads the camera and the level geometry and nothing else.
-//! Memory pressure changes coverage, never resolution. ADR 0061 records the
-//! decision and the alternative it rejected.
-//!
-//! [`target_level`] is the rule. [`level_shape_ratios`] turns a pyramid's
-//! level geometries into the per-level ratio the rule consumes, along the axes
-//! the view resolves.
+//! cannot disagree: [`target_level`] picks the coarsest level that still
+//! places at least one sample under every device pixel. It reads the camera
+//! and the level geometry and nothing else, so memory pressure changes
+//! coverage, never resolution (ADR 0061). [`level_shape_ratios`] turns a
+//! pyramid's level geometries into the per-level ratios the rule consumes.
 
 use lucida_content::LevelGeometry;
 
@@ -149,8 +141,6 @@ mod tests {
         target_level(pixels_per_sample, &ratios, None)
     }
 
-    // ---- the rule ----
-
     #[test]
     fn zoomed_in_reaches_level_0() {
         assert_eq!(raw(1.0, 5), 0);
@@ -277,8 +267,6 @@ mod tests {
         assert_eq!(ratios, vec![1.0, 2.0, 4.0]);
         assert_eq!(target_level(0.5, &ratios, None), 1);
     }
-
-    // ---- hysteresis ----
 
     #[test]
     fn hysteresis_holds_the_previous_level_on_either_side_of_a_boundary() {

@@ -15,10 +15,8 @@ import type { Uploader } from "./pipeline/upload/uploader.ts";
 import type { SceneEpochs } from "./pipeline/epochs.ts";
 
 /**
- * The scene bindings {@link pushLabelVolumeLayers} needs to place a label at
- * its source image's world position: the source member's model matrix and
- * inverse. A narrow structural facet of the WASM scene so the function stays
- * unit-testable.
+ * The scene bindings {@link pushLabelVolumeLayers} needs to place a label.
+ * Narrow so the function stays unit-testable without wasm.
  */
 export interface LabelVolumeScene {
   member_model_matrix(datasetId: string, memberId: string): Float32Array;
@@ -26,19 +24,10 @@ export interface LabelVolumeScene {
 }
 
 /**
- * Append a first-hit categorical overlay layer for each of the dataset's
- * VISIBLE labels, composited over the intensity volume already pushed. The
- * visible set + each label's opacity come from `labelSettings` (the dataset's
- * per-label display state); with no settings every eligible label is shown at
- * the default opacity (see {@link resolveVisibleLabels}).
- *
- * The set drawn here MUST match what {@link computeLabelChunkRequests}
- * fetches in `volume` mode, so both resolve through the shared
- * {@link resolveVisibleLabels}. A label overlays its source image's physical
- * extent, so it renders in the SOURCE member's world placement (its model
- * matrix + inverse) — a coarser label still covers the same region of the view,
- * aligned by its own scale in the shader. Declared `image-label.colors` are
- * forwarded so authored palettes render exactly. Labels never change the
+ * Append a first-hit overlay layer for each visible label, over the intensity
+ * volume. The drawn set must match what {@link computeLabelChunkRequests}
+ * fetches in `volume` mode, so both go through {@link resolveVisibleLabels}.
+ * Labels render in the source member's world placement and never change the
  * camera or bounds.
  */
 export function pushLabelVolumeLayers(
@@ -52,30 +41,26 @@ export function pushLabelVolumeLayers(
   canvasH: number,
   labelSettings?: LabelViewSetting[],
 ): void {
-  // `mode: "volume"` so the render path resolves the SAME eligible set the
-  // volume fetch did — a label too large for a 3D texture is skipped by both
-  // (never fetched-but-blank or drawn-but-unfetched).
+  // `mode: "volume"` matches the volume fetch, so a label too large for a 3D
+  // texture is skipped by both.
   for (const resolved of resolveVisibleLabels(manifest, labelSettings, { mode: "volume" })) {
     const { label, source, opacity } = resolved;
     const sourceImageId = label.source_image_id;
-    // Anchor to the source member's world placement so the overlay lands on
-    // the image it annotates (group-as-proxy entries carry their own matrices).
+    // Group-as-proxy roster entries carry their own matrices.
     const sourceMember = members.find((m) => m.imageId === sourceImageId);
     const sourceModel = sourceMember?.modelMatrix
       ?? new Float32Array(scene.member_model_matrix(datasetId, sourceImageId));
     const sourceInv = sourceMember?.invModelMatrix
       ?? new Float32Array(scene.inv_member_model_matrix(datasetId, sourceImageId));
-    // Scale the source placement to the LABEL's own physical extent, so a
-    // coarser/differently-scaled label stays aligned by its own scale (the
-    // 3D analog of the 2D `labelFootprint`). Identity for a same-extent label.
+    // Scale to the label's own extent so a differently scaled label stays
+    // aligned (the 3D analog of `labelFootprint`).
     const { model, inv } = labelModelMatrices(
       sourceModel,
       sourceInv,
       source.multiscale.levels[0],
       label.image.multiscale.levels[0],
     );
-    // Confine the ray-march to the label's screen footprint (off-screen →
-    // skip), mirroring the intensity layers.
+    // Confine the ray-march to the label's screen footprint, as for intensity.
     const scissorRect = computeScissorRect(model, viewProj, canvasW, canvasH);
     if (!scissorRect) continue;
     layers.push({
@@ -154,7 +139,6 @@ function uploadAndRenderVolume(
     const indexByMember = entityIndexByDataset.get(dsId) ?? new Map<string, number>();
 
     if (multiChannel) {
-      // Multi-channel: emit one layer per (member, channel)
       const activeChannels = getActiveChannels(dsSettings);
       const channelBlend = dsSettings.channel_blend_mode as "alpha" | "additive" | "max" || "additive";
 
@@ -163,9 +147,8 @@ function uploadAndRenderVolume(
 
         for (const m of members) {
           const compKey = compositeKey(m.imageId, ch);
-          // Model matrix is in the descriptor; CPU side still needs it
-          // for the scissor rect projection. Same source as cold state
-          // (synthesised for group-as-proxy, scene query for tiles).
+          // The descriptor holds the model matrix, but the CPU needs it too
+          // for the scissor projection.
           const model = m.modelMatrix
             ?? new Float32Array(scene.member_model_matrix(dsId, m.imageId));
 
@@ -186,7 +169,6 @@ function uploadAndRenderVolume(
         }
       }
     } else {
-      // Single-channel
       if (viewC >= dsShapeV[Axis.C] || viewT >= dsShapeV[Axis.T]) continue;
 
       for (const m of members) {
@@ -209,9 +191,6 @@ function uploadAndRenderVolume(
         });
       }
     }
-    // First-hit categorical label overlays, composited on top of this
-    // dataset's intensity volume. Honors the per-label visible set + opacity;
-    // never affects camera/bounds.
     pushLabelVolumeLayers(
       layers,
       scene,
@@ -259,9 +238,7 @@ export function tickVolume(
   const orchResult = tickCoordinator.planAndFetch(ctx, minimapPendingFetch);
   if (!orchResult) return false;
 
-  // Volume-specific rendering state. Camera position drives ray-marching
-  // in the shader (different from `rayHitLocal`, which is residency-only
-  // and emitted by the tickCoordinator on viewEpoch advance).
+  // The eye drives the shader's ray-march; `rayHitLocal` is residency-only.
   const eye = new Float32Array(scene.eye_position());
 
   const viewT = scene.t();

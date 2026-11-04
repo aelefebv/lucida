@@ -1,9 +1,7 @@
 // @vitest-environment happy-dom
 //
-// Hook-level tests for useBookmarks. Drives the hook with a stub fetch
-// (passed via global swap) so we don't need network or React's full
-// testing flow for the REST contract — bookmarksApi.test.ts covers that
-// directly. Here we exercise the local list/filter/optimism layer.
+// The hook's list, filter, and optimistic layer, driven through a swapped
+// global fetch. bookmarksApi.test.ts covers the REST contract.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { act, render } from "@testing-library/react";
@@ -106,9 +104,8 @@ function HookHarness({
   return <div data-testid="loaded">{handle.allBookmarks.length}</div>;
 }
 
-/** Minimal Bridge stand-in exposing only the broadcast subscription
- *  surface useBookmarks consumes. Casting to `Bridge` is safe because
- *  the hook reaches for nothing else. */
+/** Bridge stand-in with only the broadcast subscription, the one thing
+ *  useBookmarks uses. */
 function makeStubBridge() {
   const listeners: BookmarkChangedListener[] = [];
   const stub = {
@@ -318,9 +315,6 @@ describe("useBookmarks — CRUD wrappers", () => {
   });
 });
 
-// Live BookmarkChanged subscription. Verifies the hook reconciles
-// local state in response to bridge-dispatched broadcasts: refetch
-// + merge on Created/Updated, drop on Deleted.
 describe("useBookmarks — BookmarkChanged subscription", () => {
   it("subscribes when a bridge is supplied and unsubscribes on unmount", async () => {
     apiSpy.responder = () => jsonResponse(200, []);
@@ -459,7 +453,7 @@ describe("useBookmarks — BookmarkChanged subscription", () => {
       stub.fire("self", "created");
     });
     await act(async () => { /* flush refetch */ });
-    // Still exactly one entry — broadcast-driven refetch matches on id and replaces.
+    // Still one entry: the refetch matches on id and replaces.
     expect(outRef.current?.allBookmarks.filter((b) => b.id === "self")).toHaveLength(1);
   });
 });

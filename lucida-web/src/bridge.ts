@@ -1,22 +1,12 @@
 /**
- * WebSocket client for the workspace session: the raw transport (connect /
- * reconnect, throttled presence/cursor/dataset-presence sends, the binary
- * chunk envelope) together with the sequenced-document layer (last-applied-
- * seq tracking, gap grace/retry buffering with snapshot resync, the document
- * membership mirror, pending local-command replay across mid-session
- * snapshots).
+ * WebSocket client for the workspace session: the transport (connect,
+ * reconnect, throttled presence sends, the binary chunk envelope) and the
+ * sequenced-document layer (seq tracking, gap buffering with snapshot resync,
+ * the membership mirror, pending local-command replay across snapshots).
  *
- * The sequenced-document layer is a nameable internal seam — `handleSequenced`
- * / `drainPendingSequenced` / `deliverStale`, the `pendingSequenced` /
- * `pendingLocalCommands` / `documentDatasetIds` state, and the resync timers,
- * delivering through `onSnapshot`/`onCommand`/`onAck` — and could compose as
- * a separate documentSync module the Bridge owns. It stays in-file
- * deliberately: its resets are interleaved with the connection lifecycle
- * (`onclose`, `destroy`, per-connection re-seeding) and its send-side hook
- * (`sendCommand`'s pending tracking) with transport readiness, so extracting
- * it would churn the client's most delicate reliability code for zero
- * behavioral gain. Take the split if and when the sequenced layer next
- * changes behavior.
+ * The sequenced layer stays in this file on purpose: its resets interleave
+ * with the connection lifecycle and transport readiness, so extracting it
+ * would churn the most delicate reliability code for no behavior change.
  */
 import { isDebugEnabled } from "./debug/logging.ts";
 import type { SourceChunkStatus } from "./pipeline/fetch/contentSource.ts";
@@ -109,10 +99,9 @@ export interface DatasetOpenProgressDiagnostic {
   workspace_dataset_id?: string | null;
   dataset_source_id?: string | null;
   detail?: string | null;
-  /** A non-fatal import concern that must stay visible after the open
-   *  completes instead of clearing with the transient progress line. Omitted
-   *  on the wire when false; the bridge coerces it to a clean boolean so
-   *  every consumer can rely on `diagnostic.warning === true`/`=== false`. */
+  /** A non-fatal import concern that stays visible after the open completes,
+   *  unlike the transient progress line. Omitted on the wire when false; the
+   *  bridge coerces it to a boolean for consumers. */
   warning?: boolean;
 }
 
@@ -148,9 +137,8 @@ const SEND_REPORT_TIMEOUT_MS = 60_000;
 
 /**
  * A sequenced message (`command_broadcast` or `ack`) held back while a
- * snapshot resync is in flight. `commandJson` is `null` for acks — an ack
- * only advances seq tracking (the sender already applied its own command
- * optimistically); there is nothing to re-apply.
+ * snapshot resync is in flight. `commandJson` is `null` for acks: an ack only
+ * advances seq tracking, since the sender already applied its own command.
  */
 interface PendingSequenced {
   seq: number;
@@ -161,79 +149,63 @@ interface PendingSequenced {
   datasetId?: string;
 }
 
-/** A document command this client applied locally (optimistic apply) and
- *  transmitted, whose `Ack` has not arrived yet. A mid-session snapshot's
- *  full-replace would silently erase its local effect — usually because
- *  the server built the snapshot before applying this command — so these
- *  are replayed locally after snapshot adoption. That premise is not
- *  airtight: acks ride the broadcast queue while snapshots ride the
- *  unicast queue, so a snapshot whose seq already covers this command can
- *  arrive BEFORE its ack, and the replay then re-applies this value over
- *  any newer peer edit the snapshot carried. Accepted tradeoff: that
- *  divergence is local-only and bounded by the next edit or snapshot,
- *  whereas skipping the replay would erase the author's own edit in the
- *  common case. The ack retires entries FIFO: the server processes one
- *  client's commands in send order and acks each exactly once. */
+/** A document command applied locally and sent, awaiting its `Ack`. A
+ *  mid-session snapshot's full-replace would erase its local effect, so these
+ *  replay after snapshot adoption. Acks ride the broadcast queue and
+ *  snapshots the unicast queue, so a snapshot can cover a command before its
+ *  ack arrives, and the replay then briefly overwrites a newer peer edit.
+ *  Accepted: that divergence is local and ends at the next edit or snapshot,
+ *  while skipping the replay would erase the author's own edit. Acks retire
+ *  entries FIFO, since the server acks one client's commands in send order. */
 interface PendingLocalCommand {
   commandJson: string;
   commandType?: string;
   datasetId?: string;
-  /** `Date.now()` at transmission. Acks carry only a seq (no command id),
-   *  so retirement is FIFO and staleness must be structural — see
+  /** `Date.now()` at transmission. Acks carry only a seq, so retirement is
+   *  FIFO and staleness must be structural; see
    *  [`PENDING_LOCAL_COMMAND_TTL_MS`]. */
   sentAt: number;
 }
 
-/** One resync request may be outstanding at a time; if the server hasn't
- *  answered after this long, another goes out — from a new gapped arrival
- *  OR from the standing retry timer armed with every request, so a
- *  residual hole in an idle workspace (zero further inbound traffic)
- *  still recovers, and a request eaten by the server's per-client
- *  throttle (~1s) is re-issued group outside that window. Keeps a gap
- *  storm at worst one request per interval instead of one per message. */
+/** One resync request may be outstanding at a time. If the server hasn't
+ *  answered after this long, another goes out, from a new gapped arrival or
+ *  from the retry timer armed with every request. The timer recovers an idle
+ *  workspace's residual hole and a request eaten by the server's per-client
+ *  throttle (~1s). A gap storm costs at most one request per interval. */
 const RESYNC_RETRY_MS = 5000;
 
-/** Maximum age of a pending local command. A healthy ack round-trips in
- *  well under a second; an entry unacked for this long is a server-side
- *  rejection (rejections are log-only — no ack ever comes), was orphaned
- *  by a cap shed, or sits on a dying connection. Expired entries are
- *  pruned at every retirement/replay/send sweep, so one ack-less command
- *  cannot misalign FIFO retirement indefinitely — without expiry, a stale
- *  pending `remove_dataset` replayed by a much-later snapshot would
- *  delete a re-opened dataset and poison the membership mirror. */
+/** Maximum age of a pending local command. A healthy ack takes well under a
+ *  second; an entry this old was rejected server-side (rejections never ack),
+ *  shed by the cap, or sits on a dying connection. Without expiry, a stale
+ *  pending `remove_dataset` replayed by a later snapshot would delete a
+ *  re-opened dataset and poison the membership mirror. */
 const PENDING_LOCAL_COMMAND_TTL_MS = 10_000;
 
-/** How long a seq hole may stand before it is treated as loss. A hole is
- *  NOT proof of loss: the server applies commands under the session lock
- *  but sends the broadcast after releasing it, so concurrent editors
- *  routinely deliver seq out of order with nothing lost. A late arrival
- *  fills the hole within this window (the buffer drains it) and no
- *  snapshot is requested; only a hole that persists is treated as loss. */
+/** How long a seq hole may stand before it counts as loss. The server sends
+ *  broadcasts after releasing the session lock, so concurrent editors
+ *  routinely deliver seq out of order with nothing lost. A late arrival that
+ *  fills the hole in this window drains the buffer with no snapshot. */
 const RESYNC_GRACE_MS = 200;
 
 /** Upper bound on messages buffered while a resync is in flight. Overflow
- *  drops the lowest-seq entries — the ones most likely already covered by
- *  the snapshot being produced; a residual gap after the drain simply
- *  triggers another resync. */
+ *  drops the lowest-seq entries, the ones most likely covered by the
+ *  snapshot being produced; a residual gap triggers another resync. */
 const MAX_PENDING_SEQUENCED = 4096;
 
-/** Upper bound on tracked locally-applied-but-unacked commands. A command
- *  the server rejects never acks (a pre-existing divergence class — the
- *  optimistic apply is never rolled back), so the list is capped (oldest
- *  shed) and cleared on disconnect rather than trusted to drain. */
+/** Upper bound on tracked unacked local commands. A command the server
+ *  rejects never acks and its optimistic apply is never rolled back, so the
+ *  list is capped (oldest shed) and cleared on disconnect rather than
+ *  trusted to drain. */
 const MAX_PENDING_LOCAL_COMMANDS = 64;
 
-/** Throttle for presence and cursor updates — the high-frequency ephemeral
- *  channel (camera/view/display state and pointer position fire per mouse
- *  move). Presence sends leading+trailing edge; cursor sends trailing. */
+/** Throttle for presence and cursor updates, which fire per mouse move.
+ *  Presence sends leading and trailing edge; cursor sends trailing. */
 const PRESENCE_THROTTLE_MS = 50;
 
-/** Throttle for dataset-presence updates (dataset order + per-dataset
- *  settings) — lower frequency and heavier than camera presence, so it
- *  coalesces over a longer window (trailing edge only). */
+/** Throttle for dataset-presence updates: heavier and less frequent than
+ *  camera presence, so a longer trailing-edge window. */
 const DATASET_PRESENCE_THROTTLE_MS = 200;
 
-/** Delay before attempting to reconnect a closed WebSocket. */
 const RECONNECT_DELAY_MS = 2000;
 
 /** Membership key of a document command, for the datasets-present mirror:
@@ -257,8 +229,7 @@ function membershipDatasetId(
  * Gated debug logger for bridge events. Toggle from the console via
  * `localStorage.setItem("debug", "bridge")`
  * followed by `refreshDebugCategories()` (the gate is cached at module
- * init; a raw same-tab setItem alone isn't seen until reload). See
- * `docs/adr/0012-logging-conventions.md`.
+ * init; a raw same-tab setItem alone isn't seen until reload).
  */
 export function bridgeLog(event: string, data: Record<string, unknown> = {}, wsReadyState?: number) {
   if (!isDebugEnabled("bridge")) return;
@@ -267,25 +238,20 @@ export function bridgeLog(event: string, data: Record<string, unknown> = {}, wsR
 }
 
 /**
- * Mirror of `lucida_core::protocol::PeerIdentity`. Server-authored from the
- * connecting principal and surfaced on the peer's live cursor (#540). All
- * fields are best-effort: `display_name` may be empty, `picture_url` may be
- * absent (dev sessions, providers without avatars). The whole object is
- * absent for sessions without auth (the non-workspace `/ws` path), so peer
- * rendering must tolerate a missing `identity`.
+ * Mirror of `lucida_core::protocol::PeerIdentity`, server-authored from the
+ * connecting principal and shown on the peer's live cursor. Best-effort:
+ * `display_name` may be empty, `picture_url` absent, and the whole object is
+ * absent for sessions without auth, so peer rendering must tolerate that.
  *
- * Privacy: the raw email is deliberately NOT here — collaborator emails are
- * owner-only, so presence (seen by every co-present peer, including non-owner
- * viewers/editors) must not carry it. The server precomputes a single-char
- * `initial` for the avatar chip from display-name-or-email so no address
- * crosses the wire.
+ * No email: collaborator emails are owner-only and every co-present peer sees
+ * presence. The server precomputes `initial` so no address crosses the wire.
  */
 export interface PeerIdentity {
   display_name: string;
   picture_url?: string | null;
-  /** Single-grapheme fallback glyph for the avatar chip, computed
-   *  server-side (display name, else email local-part). Never the raw
-   *  email. May be absent/empty for legacy peers. */
+  /** Single-grapheme fallback for the avatar chip, computed server-side
+   *  (display name, else email local-part). Never the raw email. May be
+   *  absent or empty for legacy peers. */
   initial?: string;
 }
 
@@ -298,8 +264,8 @@ export interface PresenceState {
   cursor: [number, number] | null;
   dataset_order: string[];
   dataset_settings: Record<string, unknown>;
-  /** Presentational identity for this peer's cursor (#540). Optional:
-   *  absent for peers from a session without auth. */
+  /** Presentational identity for this peer's cursor. Absent for peers from a
+   *  session without auth. */
   identity?: PeerIdentity | null;
 }
 
@@ -314,11 +280,9 @@ export interface BridgeHandlers {
   onCommand: (seq: number, commandJson: string) => void;
   onAck: (seq: number) => void;
   /**
-   * Binary frame received from the WebSocket. The bridge parses the
-   * envelope (client_id + keyLen + key + payload) and forwards
-   * (key, payload) here. The chunk-vs-proxy routing decision lives
-   * in the application layer (the content source) so the bridge stays
-   * a generic binary transport.
+   * Binary frame, forwarded as (key, payload) after the bridge parses the
+   * envelope (client_id, keyLen, key, payload). Chunk-vs-proxy routing lives
+   * in the content source so the bridge stays a generic binary transport.
    */
   onBinary?: (key: string, payload: ArrayBuffer) => void;
   onPeerJoined?: (clientId: ClientId, presence: PresenceState) => void;
@@ -364,12 +328,9 @@ export interface BridgeHandlers {
     message?: string | null,
   ) => void;
   /**
-   * Cross-peer bookmark-sidebar updates. Fired when the server
-   * broadcasts a `bookmark_changed` message because some client
-   * mutated a bookmark whose dataset URLs overlap a loaded dataset
-   * in this session. `useBookmarks` uses this to refetch
-   * (Created/Updated) or remove from local state (Deleted) without
-   * waiting for a manual refresh.
+   * A client mutated a bookmark whose dataset URLs overlap a dataset loaded
+   * in this session. `useBookmarks` refetches or removes it without waiting
+   * for a manual refresh.
    */
   onBookmarkChanged?: (
     id: string,
@@ -378,15 +339,13 @@ export interface BridgeHandlers {
   ) => void;
   onWorkspaceArchived?: (workspaceId: string) => void;
   /**
-   * The underlying WebSocket transitioned to OPEN — the transport can now
-   * carry frames (before this, [`Bridge.send`] silently drops). Distinct
-   * from `onSnapshot` (the application-level "session established" signal):
-   * a frame sent between `onConnected` and the first snapshot still reaches
-   * the server. Fires on every (re)connect's `onopen`.
+   * The WebSocket reached OPEN; before this, [`Bridge.send`] silently drops.
+   * Distinct from `onSnapshot`, the session-established signal: a frame sent
+   * between the two still reaches the server. Fires on every (re)connect.
    *
-   * `generation` counts this bridge's connections from 1. Correlation
-   * labels restart at zero on each one, so only `(generation, rid)` is
-   * unique across a run that outlived a socket.
+   * `generation` counts this bridge's connections from 1. Correlation labels
+   * restart at zero on each, so only `(generation, rid)` is unique across a
+   * run that outlived a socket.
    */
   onConnected?: (generation: number) => void;
   /**
@@ -401,11 +360,9 @@ export interface BridgeHandlers {
 /** Mirror of `lucida_core::protocol::BookmarkAction` (lowercase wire form). */
 export type BookmarkAction = "created" | "updated" | "deleted";
 
-/** Listener for cross-peer `bookmark_changed` broadcasts. Subscribed to
- *  via [`Bridge.subscribeBookmarkChanged`] — the WS handler invokes
- *  every registered listener in registration order. Fan-out lives on
- *  the bridge so feature code (e.g. `useBookmarks`) doesn't have to
- *  thread a pub-sub through React props. */
+/** Listener for cross-peer `bookmark_changed` broadcasts, via
+ *  [`Bridge.subscribeBookmarkChanged`]. Fan-out lives on the bridge so
+ *  feature code doesn't thread a pub-sub through React props. */
 export type BookmarkChangedListener = (
   id: string,
   action: BookmarkAction,
@@ -428,40 +385,32 @@ export class Bridge {
   private pendingCursor: string | null = null;
   private pendingDatasetHealth = new Map<string, PendingDatasetHealthRequest>();
   private pendingSendReports = new Map<string, PendingSendReport>();
-  /** Bookmark-sidebar cross-peer subscribers. Owned on the bridge so
-   *  feature code subscribes via a stable handle instead of wiring
-   *  callbacks through React props. */
   private bookmarkChangedListeners: BookmarkChangedListener[] = [];
-  /** Highest contiguously-applied document `seq` on this connection —
-   *  advanced by snapshots, in-order `command_broadcast`s, and `ack`s of
-   *  our own commands (which the server sequences but never rebroadcasts
-   *  to us). `null` until the connection's first snapshot. */
+  /** Highest contiguously applied document `seq` on this connection,
+   *  advanced by snapshots, in-order broadcasts, and acks of our own
+   *  commands (which the server never rebroadcasts to us). `null` until the
+   *  first snapshot. */
   private lastAppliedSeq: number | null = null;
   /** True while a `request_snapshot` is outstanding; cleared by the next
-   *  snapshot (or a disconnect — a reconnect's snapshot re-seeds). */
+   *  snapshot or a disconnect. */
   private resyncInFlight = false;
   private lastResyncRequestAt = 0;
   /** Armed when a seq hole appears; fires after [`RESYNC_GRACE_MS`] and
    *  requests a snapshot only if the hole still stands (a late arrival
    *  filling it empties the buffer and the callback no-ops). */
   private resyncGraceTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Armed with every transmitted `request_snapshot`; fires after
-   *  [`RESYNC_RETRY_MS`] and re-requests if the hole still stands — so
-   *  recovery never depends on further inbound traffic (an idle workspace
-   *  with a residual hole, or a request eaten by the server's per-client
-   *  throttle, still converges). Cleared on hole resolution, snapshot
-   *  adoption, disconnect, and destroy. */
+  /** Armed with every `request_snapshot`; re-requests after
+   *  [`RESYNC_RETRY_MS`] if the hole still stands, so recovery never waits on
+   *  further inbound traffic. */
   private resyncRetryTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Sequenced messages seen past a gap, held until the repairing snapshot
-   *  arrives (then drained in seq order; entries the snapshot already
-   *  covers are dropped — no double-apply). */
+  /** Sequenced messages past a gap, held until the repairing snapshot
+   *  arrives, then drained in seq order. Entries the snapshot covers are
+   *  dropped. */
   private pendingSequenced: PendingSequenced[] = [];
-  /** Dataset ids present in the shared document, per the last adopted
-   *  snapshot and every membership command delivered since. Gates the
-   *  stale-`dataset_opened` delivery exception: a dedup rebroadcast for a
-   *  still-present dataset passes through, but a retained rebroadcast for
-   *  a dataset the snapshot no longer contains must NOT resurrect it (its
-   *  `remove_dataset` may be exactly what the snapshot repaired). */
+  /** Dataset ids in the shared document, per the last snapshot and every
+   *  membership command since. A stale `dataset_opened` passes only for a
+   *  still-present dataset; one the snapshot dropped must not come back, since
+   *  its `remove_dataset` may be what the snapshot repaired. */
   private documentDatasetIds: Set<string> | null = null;
   /** Locally-applied document commands awaiting their ack (see
    *  [`PendingLocalCommand`]). Replayed after snapshot adoption so a
@@ -498,9 +447,8 @@ export class Bridge {
       // must not announce connectivity.
       if (this.destroyed) return;
       bridgeLog("ws.connected", { url: this.url }, ws.readyState);
-      // The socket is OPEN: `send` will no longer silently drop. Notify the
-      // app so readiness-gated work (e.g. the #697 seed open) can fire against
-      // a transport that actually carries it, instead of a CONNECTING socket.
+      // The socket is OPEN, so `send` stops dropping. Readiness-gated work
+      // (e.g. the seed open) can now fire against a transport that carries it.
       this.connectionGeneration += 1;
       this.handlers.onConnected?.(this.connectionGeneration);
     };
@@ -513,7 +461,6 @@ export class Bridge {
       if (this.destroyed) return;
       // Counted at the bytes the socket carried, mirroring `send`, so the
       // received rate is comparable with a network monitor.
-      // Binary message: chunk data relay
       if (event.data instanceof ArrayBuffer) {
         traceRecorder.countReceive(event.data.byteLength);
         this.handleBinary(event.data);
@@ -526,14 +473,11 @@ export class Bridge {
         const msg = JSON.parse(event.data);
         switch (msg.type) {
           case "snapshot": {
-            // A requested snapshot travels on the per-client unicast queue
-            // while broadcasts keep flowing on the broadcast queue, so it
-            // can arrive AFTER late out-of-order broadcasts already caught
-            // tracking up past its seq (that ordering race is one way a
-            // "gap" appears with no actual loss). Adopting it then would
-            // rewind the document; skip it — our applied state is strictly
-            // newer — but still settle the resync and drain, so a real
-            // residual gap can ask again.
+            // A requested snapshot rides the unicast queue while broadcasts
+            // keep flowing, so it can arrive after out-of-order broadcasts
+            // already moved tracking past its seq. Adopting it would rewind
+            // the document, so skip it, but still settle the resync and drain
+            // so a real residual gap can ask again.
             const snapshotSeq = typeof msg.seq === "number" ? msg.seq : 0;
             if (this.lastAppliedSeq !== null && snapshotSeq < this.lastAppliedSeq) {
               bridgeLog("snapshot.stale_skipped", {
@@ -555,9 +499,9 @@ export class Bridge {
             this.lastAppliedSeq = snapshotSeq;
             this.resyncInFlight = false;
             // A hole this snapshot repaired must not leave its timers
-            // running: a NEW hole appearing inside a leftover grace window
-            // would get short grace and fire a premature request straight
-            // into the server's throttle. Drain re-arms as needed.
+            // running: a new hole inside a leftover grace window would get
+            // short grace and fire a premature request into the server's
+            // throttle. Drain re-arms as needed.
             this.clearGraceTimer();
             this.clearRetryTimer();
             // Membership mirror for the stale-`dataset_opened` gate: seed
@@ -568,12 +512,10 @@ export class Bridge {
                 (msg.document as { manifests?: Record<string, unknown> } | null)?.manifests ?? {},
               ),
             );
-            // Snapshot the replay list BEFORE the handler runs: commands
-            // sent during onSnapshot processing (e.g. layout registration)
-            // are born after the full-replace and need no replay. Expired
-            // entries (ack never came — rejected or shed-orphaned) are
-            // pruned first so a stale command cannot be replayed onto a
-            // much-later snapshot.
+            // Copy the replay list before the handler runs: commands sent
+            // during onSnapshot (e.g. layout registration) postdate the
+            // full-replace and need no replay. Expired entries are pruned
+            // first so a stale command can't replay onto a later snapshot.
             {
               this.prunePendingLocalCommands();
               const replay = [...this.pendingLocalCommands];
@@ -584,16 +526,10 @@ export class Bridge {
                 msg.your_id ?? 0,
                 msg.generated_availability ?? {},
               );
-              // Replay our own locally-applied-but-unacked commands:
-              // usually the server built this snapshot before applying
-              // them (their acks are still in flight), so the full-replace
-              // just erased their optimistic local effect and re-applying
-              // restores the author's view. If the snapshot in fact
-              // already covered a pending command (its ack lost the
-              // unicast-vs-broadcast queue race), the replay stomps any
-              // newer peer value with our own — see [`PendingLocalCommand`]
-              // for why that is accepted. The pending entry retires when
-              // its ack lands.
+              // Replay our own unacked commands: the server usually built
+              // this snapshot before applying them, so the full-replace just
+              // erased their local effect. See [`PendingLocalCommand`] for
+              // the race where the snapshot already covered one.
               for (const entry of replay) {
                 bridgeLog("snapshot.replayed_pending_command", {
                   commandType: entry.commandType ?? null,
@@ -621,14 +557,11 @@ export class Bridge {
             break;
           }
           case "ack":
-            // An ack means the server sequenced OUR command (which we
-            // applied optimistically before sending), so it advances seq
-            // tracking exactly like a broadcast — with nothing to apply.
-            // It also retires the oldest FRESH pending local command:
-            // acks come back one per command in send order, but an
-            // ack-less entry (rejected, or shed) would misalign FIFO
-            // retirement forever — expired entries are pruned first so
-            // retirement realigns onto the entry this ack belongs to.
+            // The server sequenced our own command, already applied
+            // optimistically, so the ack advances seq tracking with nothing
+            // to apply. It also retires the oldest pending local command;
+            // expired entries go first so an ack-less one can't misalign
+            // FIFO retirement.
             this.prunePendingLocalCommands();
             this.pendingLocalCommands.shift();
             this.handleSequenced(msg.seq, null);
@@ -740,10 +673,9 @@ export class Bridge {
       // a dead bridge must not report a disconnect (or reconnect).
       if (this.destroyed) return;
       this.ws = null;
-      // Seq tracking is per-connection: the reconnect's snapshot re-seeds
-      // it, so nothing from the dead transport may carry over. Pending
-      // local commands are dropped too — an unacked command may never have
-      // reached the server, and the reconnect snapshot is the truth.
+      // Seq tracking is per-connection; the reconnect's snapshot re-seeds
+      // it. Pending local commands drop too: one may never have reached the
+      // server, and the reconnect snapshot is the truth.
       this.lastAppliedSeq = null;
       this.resyncInFlight = false;
       this.pendingSequenced = [];
@@ -766,15 +698,12 @@ export class Bridge {
   private handleBinary(buffer: ArrayBuffer) {
     if (buffer.byteLength < 6) return;
     const view = new DataView(buffer);
-    // Skip client_id (4 bytes) — we are the target
+    // Skip client_id (4 bytes); this client is the target.
     const keyLen = view.getUint16(4, true);
     if (buffer.byteLength < 6 + keyLen) return;
     const keyBytes = new Uint8Array(buffer, 6, keyLen);
     const key = new TextDecoder().decode(keyBytes);
     const payload = buffer.slice(6 + keyLen);
-    // The transport doesn't know the application's chunk-vs-proxy
-    // taxonomy — forward the (key, payload) pair and let the
-    // application layer dispatch.
     this.handlers.onBinary?.(key, payload);
   }
 
@@ -867,32 +796,18 @@ export class Bridge {
   }
 
   /**
-   * Seq discipline for the sequenced document stream (`command_broadcast`
-   * and `ack` share one seq space; the server assigns each applied command
-   * exactly one seq and sends the sender an ack instead of a broadcast):
+   * Seq discipline. `command_broadcast` and `ack` share one seq space; the
+   * server acks the sender instead of broadcasting to it.
    *
-   * - `seq == last + 1` — in order: deliver and advance.
-   * - `seq <= last` — stale/duplicate (e.g. retained messages replayed
-   *   around a resync snapshot): dropped, EXCEPT `dataset_opened` command
-   *   bodies for a dataset the document still contains, which are
-   *   delivered without advancing — the server legitimately rebroadcasts
-   *   an already-applied `DatasetOpened` at the current seq when an open
-   *   dedups onto an existing binding, and its apply is an idempotent
-   *   full-replace (the rebroadcast carries the re-stamped opener for
-   *   auto-fit). The membership gate keeps a retained rebroadcast from
-   *   resurrecting a dataset whose `remove_dataset` the repairing snapshot
-   *   already covered.
-   * - `seq > last + 1` — a hole. NOT proof of loss: the server applies
-   *   under the session lock but sends after releasing it, so concurrent
-   *   editors routinely deliver seq out of order with nothing lost. The
-   *   message is buffered and a grace timer is armed
-   *   ([`RESYNC_GRACE_MS`]); a late arrival filling the hole drains the
-   *   buffer and the timer no-ops. Only a hole that persists sends
-   *   `request_snapshot` (at most one in flight; see
-   *   [`RESYNC_RETRY_MS`]) — real loss (broadcast-queue overflow, or a
-   *   command applied-but-never-broadcast such as a workspace persist
-   *   failure). The snapshot that answers re-baselines tracking and
-   *   drains the buffer.
+   * - `seq == last + 1`: deliver and advance.
+   * - `seq <= last`: stale or duplicate, dropped, except a `dataset_opened`
+   *   for a dataset the document still contains. The server rebroadcasts an
+   *   applied open at the current seq when it dedups onto an existing
+   *   binding, carrying the re-stamped opener for auto-fit; the apply is an
+   *   idempotent full-replace.
+   * - `seq > last + 1`: a hole, which is not proof of loss (see
+   *   [`RESYNC_GRACE_MS`]). The message is buffered; only a hole that
+   *   outlives the grace sends `request_snapshot`, at most one in flight.
    */
   private handleSequenced(
     seq: unknown,
@@ -901,8 +816,8 @@ export class Bridge {
     datasetId?: string,
   ) {
     if (typeof seq !== "number") {
-      // Malformed / unsequenced frame — deliver as before rather than
-      // silently eating it; tracking is untouched.
+      // Unsequenced frame: deliver rather than silently eat it; tracking is
+      // untouched.
       if (commandJson !== null) this.handlers.onCommand(seq as number, commandJson);
       return;
     }
@@ -974,18 +889,15 @@ export class Bridge {
   private bufferSequenced(entry: PendingSequenced) {
     this.pendingSequenced.push(entry);
     if (this.pendingSequenced.length > MAX_PENDING_SEQUENCED) {
-      // Shed the lowest seqs — the snapshot in flight covers those first.
+      // Shed the lowest seqs; the snapshot in flight covers those first.
       this.pendingSequenced.sort((a, b) => a.seq - b.seq);
       this.pendingSequenced.splice(0, this.pendingSequenced.length - MAX_PENDING_SEQUENCED);
     }
   }
 
-  /** Apply buffered sequenced messages that the current baseline makes
-   *  applicable: entries at/below `lastAppliedSeq` are dropped (the
-   *  snapshot already reflects them — no double-apply; a `dataset_opened`
-   *  for a still-present dataset passes through per the dedup-rebroadcast
-   *  rule), contiguous entries apply in order, and a residual gap
-   *  re-schedules a snapshot request. */
+  /** Apply what the current baseline makes applicable: entries at or below
+   *  `lastAppliedSeq` go through the stale rule, contiguous entries apply in
+   *  order, and a residual gap re-schedules a snapshot request. */
   private drainPendingSequenced() {
     if (this.pendingSequenced.length === 0) return;
     this.pendingSequenced.sort((a, b) => a.seq - b.seq);
@@ -1006,7 +918,7 @@ export class Bridge {
         }
         continue;
       }
-      // Still a hole below the buffered tail — schedule another request.
+      // Still a hole below the buffered tail; schedule another request.
       this.scheduleResync();
       break;
     }
@@ -1017,10 +929,9 @@ export class Bridge {
     }
   }
 
-  /** Arm the grace timer for a detected hole. When it fires, a snapshot is
-   *  requested only if the hole still stands — a late out-of-order arrival
-   *  drains the buffer in the meantime and the callback no-ops, so benign
-   *  reordering never costs a full-document round-trip. */
+  /** Arm the grace timer for a detected hole. It requests a snapshot only if
+   *  the hole still stands, so benign reordering never costs a full-document
+   *  round-trip. */
   private scheduleResync() {
     if (this.resyncGraceTimer !== null) return;
     if (this.resyncInFlight && Date.now() - this.lastResyncRequestAt < RESYNC_RETRY_MS) {
@@ -1033,20 +944,17 @@ export class Bridge {
       if (this.destroyed) return;
       if (this.pendingSequenced.length === 0) {
         // The hole filled itself (out-of-order delivery, or a snapshot
-        // landed) — nothing was lost, nothing to request.
+        // landed); nothing was lost.
         return;
       }
       this.requestResync(this.pendingSequenced[0].seq);
     }, RESYNC_GRACE_MS);
   }
 
-  /** Ask the server for a fresh snapshot, at most one outstanding request
-   *  at a time. Every transmitted request arms the retry timer, so a hole
-   *  that outlives [`RESYNC_RETRY_MS`] is re-requested even with zero
-   *  further inbound traffic (idle workspace) and even if this request was
-   *  eaten by the server's per-client throttle or lost on the wire. A gap
-   *  storm therefore produces one request per interval, not one per
-   *  message. */
+  /** Ask the server for a fresh snapshot, at most one outstanding request at
+   *  a time. Every request arms the retry timer, so a hole that outlives
+   *  [`RESYNC_RETRY_MS`] is re-requested even in an idle workspace or after
+   *  the server's throttle ate this request. */
   private requestResync(gapSeq: number) {
     const now = Date.now();
     if (this.resyncInFlight && now - this.lastResyncRequestAt < RESYNC_RETRY_MS) {
@@ -1063,10 +971,8 @@ export class Bridge {
     this.armRetryTimer();
   }
 
-  /** (Re)arm the traffic-independent retry: if the hole still stands when
-   *  it fires, request again (`requestResync` passes its own rate limit at
-   *  exactly this interval and re-arms, so a standing hole keeps retrying
-   *  once per interval until a snapshot resolves it). */
+  /** (Re)arm the traffic-independent retry. A standing hole keeps retrying
+   *  once per interval until a snapshot resolves it. */
   private armRetryTimer() {
     this.clearRetryTimer();
     this.resyncRetryTimer = setTimeout(() => {
@@ -1092,10 +998,9 @@ export class Bridge {
   }
 
   /** Drop pending local commands older than the TTL. Acks carry no command
-   *  id, so an entry whose ack never comes (server-side rejection is
-   *  log-only; a cap shed orphans the ack that DOES come) would misalign
-   *  FIFO retirement indefinitely — age is the structural staleness
-   *  signal. Runs before every retirement, replay, and send. */
+   *  id, so an entry whose ack never comes would misalign FIFO retirement
+   *  forever; age is the staleness signal. Runs before every retirement,
+   *  replay, and send. */
   private prunePendingLocalCommands() {
     if (this.pendingLocalCommands.length === 0) return;
     const cutoff = Date.now() - PENDING_LOCAL_COMMAND_TTL_MS;
@@ -1110,13 +1015,10 @@ export class Bridge {
 
   /** Send a document command wrapped in the ClientMessage envelope.
    *
-   *  By repo convention every `sendCommand` is paired with an optimistic
-   *  local apply, so a
-   *  command actually handed to an OPEN socket is tracked as pending until
-   *  its ack: a mid-session snapshot built before the server applied it
-   *  would otherwise erase its local effect on full-replace. A frame the
-   *  socket drops (CONNECTING/closed/destroyed) is NOT tracked — it never
-   *  reaches the server, and the next snapshot rightfully reverts it. */
+   *  Every `sendCommand` is paired with an optimistic local apply, so a
+   *  command handed to an open socket is tracked as pending until its ack
+   *  (see [`PendingLocalCommand`]). A frame the socket drops is not tracked:
+   *  it never reaches the server, and the next snapshot rightly reverts it. */
   sendCommand(json: string) {
     const cmd = JSON.parse(json) as {
       type?: string;
@@ -1134,11 +1036,9 @@ export class Bridge {
         sentAt: Date.now(),
       });
       if (this.pendingLocalCommands.length > MAX_PENDING_LOCAL_COMMANDS) {
-        // Shed the oldest rather than grow unbounded. Most likely these
-        // are rejection-orphans (their ack will never come), but a shed
-        // entry may also be a transmitted command whose ack WILL come —
-        // that ack then retires the wrong (newer) entry. The TTL prune
-        // bounds how long any such misalignment can survive.
+        // Shed the oldest. Most are rejection orphans, but a shed entry may
+        // be a sent command whose ack will come and retire a newer entry.
+        // The TTL prune bounds that misalignment.
         this.pendingLocalCommands.splice(
           0,
           this.pendingLocalCommands.length - MAX_PENDING_LOCAL_COMMANDS,
@@ -1151,7 +1051,6 @@ export class Bridge {
   /** Send presence update, throttled to [`PRESENCE_THROTTLE_MS`]
    *  (leading+trailing edge). */
   sendPresence(presenceJson: string) {
-    // Merge type field into the presence object
     const obj = JSON.parse(presenceJson);
     const json = JSON.stringify({ type: "presence", ...obj });
     if (!this.presenceTimer) {
@@ -1187,12 +1086,10 @@ export class Bridge {
     }
   }
 
-  /** Send an open-remote-dataset request and return the `request_id` stamped
-   *  on it. The server echoes this id on every `dataset_open_progress` frame
-   *  for this open, so a caller can attribute progress/warnings to the exact
-   *  open they initiated (and ignore stragglers from a superseded one). The id
-   *  is returned even when the frame is dropped (socket not OPEN) — no progress
-   *  can arrive for a dropped send, so the returned id is simply never matched. */
+  /** Send an open-remote-dataset request and return its `request_id`. The
+   *  server echoes it on every `dataset_open_progress` frame for this open,
+   *  so callers can attribute progress to their own open. A dropped send
+   *  still returns an id, which simply never matches. */
   sendOpenRemoteDataset(url: string): string {
     const requestId = makeOpenDatasetRequestId();
     bridgeLog("open_remote_dataset.send", { url, requestId }, this.ws?.readyState);
@@ -1235,16 +1132,12 @@ export class Bridge {
 
   /**
    * **Send report**: post a bundle to the workspace inbox and resolve with
-   * the entry the server kept it under. Rejects with the server's reason
-   * when nothing was kept, and when the socket is not open, because a
-   * report that silently went nowhere is the one outcome this action must
-   * not have. Nothing calls this on a run's close: it is the action's own
-   * send and no other.
+   * the entry the server kept. Rejects with the server's reason, or when the
+   * socket isn't open, because a report that silently went nowhere is the one
+   * outcome this action must not have. Nothing calls this on a run's close.
    *
-   * `bundleJson` is the bundle already serialised, and it travels as
-   * text. The server stores those bytes and the CLI fetches them back,
-   * so the caller serialises once and nothing else re-encodes what it
-   * produced.
+   * `bundleJson` travels as text; the server stores those bytes and the CLI
+   * fetches them back, so nothing re-encodes it.
    */
   sendReport(bundleJson: string, timeoutMs = SEND_REPORT_TIMEOUT_MS): Promise<InboxReceipt> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
@@ -1316,14 +1209,13 @@ export class Bridge {
     };
   }
 
-  /** Low-level send (raw JSON string). Drops the frame unless the socket is
-   *  OPEN; a destroyed bridge never transmits.
+  /** Low-level send. Drops the frame unless the socket is OPEN; a destroyed
+   *  bridge never transmits.
    *
-   *  Every frame that does go out is counted on the trace, once, under one
-   *  client message type and at the bytes the socket carries. This is the one
-   *  path every client message takes, including the chunk and asset requests
-   *  the content source hands in, so nothing the page sends escapes the
-   *  accounting, and a frame dropped here was never a send. */
+   *  Every client message passes here, including the content source's chunk
+   *  and asset requests, so each frame that goes out is counted on the trace
+   *  once, at the bytes the socket carries. A frame dropped here was never a
+   *  send. */
   send(json: string) {
     if (this.destroyed) return;
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {

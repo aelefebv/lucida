@@ -1,37 +1,13 @@
-//! Pure, mode-aware parametric view-transform generator — the shared engine
-//! behind the "guided exploration" feature (later driven by the CLI, Python,
-//! and web surfaces).
+//! Pure, mode-aware parametric view-transform generator: the engine behind
+//! guided exploration on the CLI, Python, and web surfaces.
 //!
-//! Guided exploration asks a simple question: from *this* view of a dataset,
-//! what are the small, sensible moves a user might want to take next — and what
-//! does each one land on? This module answers that as a pure function over
-//! [`SavedView`]: given a view and the dataset's [`ViewExtent`], it enumerates a
-//! fixed *move-set* ([`ViewTransform`]) and returns the resulting child views,
-//! each with a stable [`view_handle`] and a plain-language label.
-//!
-//! ## Design constraints (load-bearing)
-//!
-//! - **Pure.** [`apply`] and [`children`] never mutate their inputs — they clone
-//!   the [`SavedView`] and mutate the copy. Callers can fan out across the
-//!   move-set without disturbing the current view.
-//! - **Mode-aware.** A move that makes no sense in the current camera mode is
-//!   simply not offered: a 2D [`Slice`](crate::camera::Slice) view yields no
-//!   azimuth (rotate) cells, a [`Fly`](crate::camera::Fly) camera yields no zoom
-//!   cell, and a flat (`z_count <= 1`) dataset yields no slice-step cells. All of
-//!   that filtering lives in [`ViewTransform::applies_to`] + [`apply`], so
-//!   [`children`] stays a dumb "try them all, keep what sticks" loop.
-//! - **No camera math here.** Every spatial move delegates to an existing
-//!   [`Camera`] primitive ([`Camera::fit_to_bounds`],
-//!   [`Arcball::rotate`](crate::camera::Arcball::rotate),
-//!   [`Slice::zoom_by`](crate::camera::Slice::zoom_by)). This module is wiring +
-//!   policy, never geometry.
-//! - **Fail-safe.** No panics on degenerate input — a zero-count extent, an
-//!   equal-min/max box, or a [`Fly`](crate::camera::Fly) camera all resolve to
-//!   "that move isn't available" ([`None`]) rather than an error.
-//!
-//! It deliberately does **not** touch `ViewportCommand` or the `dataset montage`
-//! code: those are separate surfaces. The output here is a plain data structure
-//! ([`ExplorationSidecar`]) the higher tiers serialize and render.
+//! Given a [`SavedView`] and the dataset's [`ViewExtent`], it enumerates a
+//! fixed move-set ([`ViewTransform`]) and returns the child views, each with a
+//! stable [`view_handle`] and a plain-language label. [`apply`] and
+//! [`children`] never mutate their input. A move that makes no sense for the
+//! camera mode or the dataset is simply not offered, never an error or a
+//! panic. Every spatial move delegates to a [`Camera`] primitive: this module
+//! is policy, never geometry.
 
 use serde::{Deserialize, Serialize};
 
@@ -82,20 +58,16 @@ impl ViewExtent {
     }
 }
 
-/// Synthesize a dataset's "Home" view — the exploration root when a caller gives
-/// no explicit view.
+/// Synthesize a dataset's "Home" view, the exploration root when a caller
+/// gives no explicit view.
 ///
-/// A volume (`z_count > 1`) opens in a 3D [`Camera::Arcball`] so the
-/// orbit/azimuth cells are offered; a flat image opens in a 2D
-/// [`Camera::Slice`]. Either way the camera is framed to the dataset's full
-/// extent ([`Camera::fit_to_bounds`] is mode-preserving), the dataset is made
-/// visible (auto-contrast on, with a default display-settings entry — an absent
-/// entry would otherwise reset the colormap), and the view sits on the mid-Z
-/// single slice (so a [`StepZ`](ViewTransform::StepZ) in either direction is in
-/// range on a volume; a flat dataset collapses to `z 0..1`).
+/// A volume (`z_count > 1`) opens in a 3D [`Camera::Arcball`] and a flat
+/// image in a 2D [`Camera::Slice`], framed to the full extent. The dataset is
+/// visible with a default display-settings entry, since an absent entry
+/// would reset the colormap. The view sits on the mid-Z slice so a
+/// [`StepZ`](ViewTransform::StepZ) is in range both ways.
 ///
-/// `dims = [T, C, Z, Y, X]`. Pure — the single source of the exploration root,
-/// shared by the CLI, the pyo3 binding, and the web tier.
+/// `dims = [T, C, Z, Y, X]`. Shared by the CLI, the pyo3 binding, and the web.
 pub fn default_view(ds_id: &str, dims: [u64; 5], viewport: [u32; 2]) -> SavedView {
     let extent = ViewExtent::from_dims(dims);
     let z_count = extent.z_count;
@@ -128,26 +100,16 @@ pub fn default_view(ds_id: &str, dims: [u64; 5], viewport: [u32; 2]) -> SavedVie
     view
 }
 
-/// Build a guided-exploration sidecar for the web (and any other wasm) surface,
-/// as a JSON string.
+/// Build a guided-exploration sidecar for the web (and any other wasm)
+/// surface, as a JSON string, so the SPA never rebuilds a [`ViewExtent`] or a
+/// Home view in TypeScript.
 ///
-/// This is the single wasm entry point the browser calls to ask "from this view,
-/// what are the next moves?". It wraps the pure generator so the SPA never has to
-/// reconstruct a [`ViewExtent`] or a Home view in TypeScript:
-///
-/// - `view_json` is the current [`SavedView`] as JSON, or `None`/empty to start
-///   from the dataset's Home ([`default_view`]).
-/// - `t, c, z, y, x` are the dataset shape `[T, C, Z, Y, X]`; `viewport_w` /
-///   `viewport_h` size the synthesized Home camera; `depth` is recorded on the
-///   sidecar node (the caller's walk depth).
-///
-/// Returns the serialized [`ExplorationSidecar`] on success. On a malformed
-/// `view_json` it returns a JSON object string `{"error": "<message>"}` rather
-/// than panicking, so the caller can `JSON.parse` the result and branch on an
-/// `.error` field. Mirrors the `#[cfg_attr(target_arch = "wasm32", …)]` pattern
-/// used by [`dataset_id_for_url`](crate::saved_view::dataset_id_for_url): the
-/// function compiles on every target, but only wasm gets the `#[wasm_bindgen]`
-/// export.
+/// `view_json` is the current [`SavedView`], or `None`/empty for the Home view
+/// ([`default_view`]). `t, c, z, y, x` are the dataset shape; `viewport_w` and
+/// `viewport_h` size the Home camera; `depth` is recorded on the sidecar node.
+/// Returns the serialized [`ExplorationSidecar`], or `{"error": "<message>"}`
+/// for a malformed `view_json` instead of panicking. Only wasm gets the
+/// `#[wasm_bindgen]` export.
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen::prelude::wasm_bindgen)]
 #[allow(clippy::too_many_arguments)]
 pub fn explore_view(
@@ -215,25 +177,18 @@ pub enum ViewTransform {
 }
 
 impl ViewTransform {
-    /// Whether this move is even *meaningful* for `cam`'s mode, independent of
-    /// the current parameter values (range / no-op checks happen later, in
-    /// [`apply`]).
+    /// Whether this move is meaningful for `cam`'s mode at all. Range and
+    /// no-op checks happen later, in [`apply`].
     ///
-    /// - [`Home`](ViewTransform::Home) and [`StepZ`](ViewTransform::StepZ):
-    ///   every camera (a Z step is a dimensional move, not a camera move).
-    /// - [`AzimuthDelta`](ViewTransform::AzimuthDelta): only
-    ///   [`Camera::Arcball`] — slice has no orbit, and rotating a free-fly
-    ///   camera by an "azimuth" is undefined.
-    /// - [`Zoom`](ViewTransform::Zoom): [`Camera::Slice`] and
-    ///   [`Camera::Arcball`], but **not** [`Camera::Fly`] (a fly camera moves by
-    ///   flying, not by a zoom factor).
-    /// - [`ElevationDelta`](ViewTransform::ElevationDelta) and
+    /// - [`Home`](ViewTransform::Home), [`StepZ`](ViewTransform::StepZ),
+    ///   [`StepT`](ViewTransform::StepT), [`StepC`](ViewTransform::StepC):
+    ///   every camera, since a dimensional step is not a camera move.
+    /// - [`Zoom`](ViewTransform::Zoom): not [`Camera::Fly`], which moves by
+    ///   flying.
+    /// - [`AzimuthDelta`](ViewTransform::AzimuthDelta),
+    ///   [`ElevationDelta`](ViewTransform::ElevationDelta),
     ///   [`ToggleProjection`](ViewTransform::ToggleProjection): only
-    ///   [`Camera::Arcball`] — a 2D slice has no up/down tilt, and the
-    ///   projection toggle changes 3D volume rendering.
-    /// - [`StepT`](ViewTransform::StepT) and [`StepC`](ViewTransform::StepC):
-    ///   every camera (a T/C step is a dimensional move, not a camera move),
-    ///   exactly like [`StepZ`](ViewTransform::StepZ).
+    ///   [`Camera::Arcball`].
     pub fn applies_to(&self, cam: &Camera) -> bool {
         match self {
             ViewTransform::Home => true,
@@ -350,23 +305,12 @@ impl ViewTransform {
     }
 }
 
-/// Apply one move to `view`, returning the resulting child view — or [`None`]
-/// when the move isn't available from here.
+/// Apply one move to `view`, returning the child view, or [`None`] when the
+/// move is not available from here. `view` is never mutated.
 ///
-/// Purity: `view` is never mutated; the result is a fresh clone with exactly the
-/// one field the move touches changed.
-///
-/// [`None`] is returned when:
-/// - the move doesn't apply to the camera's mode
-///   ([`ViewTransform::applies_to`] is `false`), or
-/// - a [`StepZ`](ViewTransform::StepZ) / [`StepT`](ViewTransform::StepT) /
-///   [`StepC`](ViewTransform::StepC) lands off the dataset (a flat / single-T /
-///   single-C dataset, or a target index `< 0` / past the last index), or
-/// - the move would be a **no-op** — the child ends up byte-for-byte equal to
-///   the input. Offering a cell that goes nowhere is just noise, so it's
-///   omitted. (An [`ElevationDelta`](ViewTransform::ElevationDelta) clamped to a
-///   pole and a [`ToggleProjection`](ViewTransform::ToggleProjection) on an
-///   empty display-settings map both fall out here.)
+/// [`None`] when [`ViewTransform::applies_to`] is `false`, when a dimensional
+/// step lands off the dataset, or when the child would equal the input. A
+/// cell that goes nowhere is noise, so it is omitted.
 pub fn apply(view: &SavedView, t: &ViewTransform, extent: &ViewExtent) -> Option<SavedView> {
     // Mode gate first — a move that doesn't apply to this camera never produces
     // a child, regardless of parameters.
@@ -500,17 +444,10 @@ pub struct Child {
     pub view: SavedView,
 }
 
-/// The canonical guided-exploration move-set, in display order.
-///
-/// One flat list of the "trivial" single-step moves we always *try* from any
-/// view, grouped into coherent families so a reader scans them in one sweep:
-/// **reframe** (Home) → **orient** (rotate/tilt) → **scale** (zoom) →
-/// **render** (projection) → **step** through the Z/T/C dimensions. The
-/// per-mode / no-op / range filtering all lives in [`apply`], so a move that
-/// doesn't fit the current view simply drops out of [`children`] — a 2D Slice
-/// node yields no azimuth/elevation/projection cells, a flat dataset yields no
-/// Z-step cells, and so on. Keeping the list here (rather than inlining it)
-/// makes the offered menu one obvious, ordered thing.
+/// The canonical guided-exploration move-set, in display order: reframe,
+/// orient, scale, render, then step through Z/T/C. All filtering lives in
+/// [`apply`], so a move that does not fit the current view drops out of
+/// [`children`].
 const MOVE_SET: [ViewTransform; 14] = [
     // Reframe.
     ViewTransform::Home,
@@ -533,24 +470,16 @@ const MOVE_SET: [ViewTransform; 14] = [
     ViewTransform::StepC(-1),
 ];
 
-/// Enumerate the available next-steps from `view`.
+/// Enumerate the available next steps from `view`: every [`MOVE_SET`] entry
+/// that [`apply`] turns into a child, in order. `view` is not mutated.
 ///
-/// Walks the canonical [`MOVE_SET`] in order, applies each via [`apply`], and
-/// keeps the ones that produced a child. Because all filtering is in [`apply`],
-/// the returned [`Vec`] already excludes moves that don't fit this view's mode,
-/// would step off the dataset, or would be no-ops — no extra logic here.
-///
-/// Labels are [`ViewTransform::label`] except for the **projection** cell, whose
-/// copy is made *state-aware* here ([`projection_label`]): a toggle should tell
-/// the user the destination, not just "toggle". The static label remains the
-/// fallback (no display settings to read).
-///
-/// Pure: `view` is not mutated.
+/// Labels are [`ViewTransform::label`], except the projection cell's, which
+/// [`projection_label`] makes name the destination mode.
 pub fn children(view: &SavedView, extent: &ViewExtent) -> Vec<Child> {
     let mut out = Vec::new();
     for t in MOVE_SET.iter() {
         if let Some(child_view) = apply(view, t, extent) {
-            // The projection cell's label depends on the CURRENT render mode
+            // The projection cell's label depends on the current render mode
             // (what the toggle lands on); every other move uses its static label.
             let label = match t {
                 ViewTransform::ToggleProjection => projection_label(view),
@@ -568,17 +497,9 @@ pub fn children(view: &SavedView, extent: &ViewExtent) -> Vec<Child> {
 }
 
 /// State-aware label for the [`ToggleProjection`](ViewTransform::ToggleProjection)
-/// cell: name the mode the toggle would switch *to*, read from the view's
-/// primary (first) [`dataset_settings`](SavedView::dataset_settings) entry.
-///
-/// - currently [`Translucent`](RenderMode::Translucent) → `"Max-intensity
-///   projection"` (the toggle turns MIP on),
-/// - currently [`MaxIntensity`](RenderMode::MaxIntensity) → `"Volume rendering
-///   (translucent)"` (the toggle turns MIP off).
-///
-/// Falls back to the static [`ViewTransform::label`] text when there is no
-/// settings entry to read (the toggle wouldn't apply in that case anyway, so
-/// this is belt-and-braces).
+/// cell: name the mode the toggle switches to, read from the view's first
+/// [`dataset_settings`](SavedView::dataset_settings) entry. Falls back to the
+/// static [`ViewTransform::label`] when there is no entry.
 fn projection_label(view: &SavedView) -> String {
     match view.dataset_settings.values().next() {
         Some(settings) => match settings.render_mode {
@@ -592,15 +513,11 @@ fn projection_label(view: &SavedView) -> String {
 /// Deterministic, process-stable handle for a saved view: `"vh-<16 lowercase
 /// hex>"`.
 ///
-/// The same [`SavedView`] always maps to the same handle, in this run and any
-/// other — so a handle minted on one surface (say the CLI) addresses the same
-/// view on another (the web). We hash the view's canonical JSON
-/// ([`SavedView`]'s serialization is order-stable; see its type doc) with an
-/// inline FNV-1a 64-bit hash. FNV is used deliberately rather than
-/// [`std::hash::DefaultHasher`], whose output is **not** guaranteed stable
-/// across Rust versions or builds — process-stability is a contract here.
-///
-/// (FNV is not cryptographic; this is a content address, not a security token.)
+/// The same [`SavedView`] maps to the same handle in any run, so a handle
+/// minted on one surface addresses the same view on another. It is FNV-1a
+/// 64-bit over the view's order-stable JSON, not
+/// [`std::hash::DefaultHasher`], whose output can change across Rust
+/// versions. A content address, not a security token.
 pub fn view_handle(view: &SavedView) -> String {
     // Canonical bytes of the view. serde_json on a SavedView is total (no
     // non-serializable fields), so the unwrap can't fire in practice; if it
@@ -649,21 +566,14 @@ pub struct ExplorationNode {
     pub view: SavedView,
 }
 
-/// One offered next-step in a serialized sidecar — a [`Child`] plus the
-/// destination's dimensional indices and optional presentation/annotation fields
-/// the higher tiers fill in later.
+/// One offered next step in a serialized sidecar: a [`Child`] plus the
+/// destination's indices and optional fields the higher tiers fill in.
 ///
-/// `z`/`t`/`c` are the child view's destination indices (`z` is the start of the
-/// view's Z slab, `t`/`c` the active timepoint/channel). They mirror the values a
-/// reader would otherwise have to dig out of `view.view`, so EVERY surface (CLI,
-/// pyo3, web) gets the same orientation a ranking agent needs without re-deriving
-/// it — see [`ExplorationSidecar::build`].
-///
-/// `url` (a deep link), `stat` (some scalar the surface attaches, e.g. a
-/// score), and `incomplete` (the child view couldn't be fully realized — e.g.
-/// data still loading) are all *optional embellishments*: this module emits them
-/// empty (`None` / `false`) and never reads them. `url`/`stat` are skipped on
-/// serialization when absent to keep the wire lean.
+/// `z`/`t`/`c` are the child view's destination indices (`z` is the start of
+/// the Z slab), carried so every surface gets the same orientation without
+/// re-deriving it; see [`ExplorationSidecar::build`]. `url` (a deep link),
+/// `stat` (a scalar such as a score), and `incomplete` are emitted empty here
+/// and never read; `url` and `stat` are skipped on serialization when absent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExplorationCell {
     /// Stable handle of the child view ([`view_handle`]).
@@ -754,8 +664,6 @@ impl ExplorationSidecar {
     }
 }
 
-// --- small formatting helpers -------------------------------------------------
-
 /// Render an integer-valued float with an explicit sign (`+45`, `-45`), falling
 /// back to a trimmed fractional form for non-integer values.
 fn signed_deg(deg: f64) -> String {
@@ -821,8 +729,6 @@ mod tests {
         v
     }
 
-    // --- applies_to mode gating ---
-
     #[test]
     fn applies_to_modes() {
         let s = Camera::Slice(Slice::new([10, 10]));
@@ -845,8 +751,6 @@ mod tests {
         assert!(ViewTransform::StepZ(1).applies_to(&a));
         assert!(ViewTransform::StepZ(1).applies_to(&f));
     }
-
-    // --- ids + labels ---
 
     #[test]
     fn canonical_ids() {
@@ -876,8 +780,6 @@ mod tests {
         assert_eq!(ViewTransform::StepZ(-1).label(), "Previous slice");
     }
 
-    // --- apply: mode gating returns None ---
-
     #[test]
     fn apply_azimuth_on_slice_is_none() {
         let v = slice_view();
@@ -889,8 +791,6 @@ mod tests {
         let v = fly_view();
         assert!(apply(&v, &ViewTransform::Zoom(2.0), &extent_3d()).is_none());
     }
-
-    // --- apply: Home fits, mode-preserving ---
 
     #[test]
     fn apply_home_on_slice_stays_slice_and_changes() {
@@ -906,8 +806,6 @@ mod tests {
         let child = apply(&v, &ViewTransform::Home, &extent_3d()).expect("home applies");
         assert!(matches!(child.camera, Camera::Arcball(_)));
     }
-
-    // --- apply: azimuth rotates the arcball ---
 
     #[test]
     fn apply_azimuth_rotates_theta() {
@@ -926,8 +824,6 @@ mod tests {
         // purity
         assert!(matches!(&v.camera, Camera::Arcball(a) if a.theta == theta0));
     }
-
-    // --- apply: zoom ---
 
     #[test]
     fn apply_zoom_in_slice_doubles_zoom() {
@@ -963,8 +859,6 @@ mod tests {
             _ => unreachable!(),
         }
     }
-
-    // --- apply: StepZ ---
 
     #[test]
     fn apply_stepz_forward() {
@@ -1014,8 +908,6 @@ mod tests {
         assert!(apply(&v, &ViewTransform::StepZ(1), &zero).is_none());
     }
 
-    // --- apply: no-op omission ---
-
     #[test]
     fn apply_zero_azimuth_is_noop_none() {
         let v = arcball_view();
@@ -1039,8 +931,6 @@ mod tests {
         let after = serde_json::to_string(&v).unwrap();
         assert_eq!(before, after, "apply must be pure");
     }
-
-    // --- ids + labels for the enriched move-set ---
 
     #[test]
     fn enriched_ids() {
@@ -1069,8 +959,6 @@ mod tests {
             "Toggle max-intensity projection"
         );
     }
-
-    // --- apply: ElevationDelta (Arcball-only, tilts/clamps phi) ---
 
     #[test]
     fn apply_elevation_on_slice_is_none() {
@@ -1105,7 +993,7 @@ mod tests {
             a.phi = std::f64::consts::PI - 0.05;
         }
         assert!(apply(&v, &ViewTransform::ElevationDelta(30.0), &extent_3d()).is_none());
-        // Tilting DOWN from the same pole IS in range (phi decreases).
+        // Tilting down from the same pole is in range (phi decreases).
         let child = apply(&v, &ViewTransform::ElevationDelta(-30.0), &extent_3d()).unwrap();
         match &child.camera {
             Camera::Arcball(a) => {
@@ -1129,8 +1017,6 @@ mod tests {
             _ => unreachable!(),
         }
     }
-
-    // --- apply: StepT (gated on t_count > 1, clamps at ends) ---
 
     #[test]
     fn apply_stept_forward() {
@@ -1180,8 +1066,6 @@ mod tests {
         assert!(apply(&v, &ViewTransform::StepT(1), &zero).is_none());
     }
 
-    // --- apply: StepC (gated on c_count > 1, clamps at ends) ---
-
     #[test]
     fn apply_stepc_forward() {
         let mut v = slice_view();
@@ -1229,8 +1113,6 @@ mod tests {
         let v = slice_view();
         assert!(apply(&v, &ViewTransform::StepC(1), &zero).is_none());
     }
-
-    // --- apply: ToggleProjection (Arcball-only, flips render_mode) ---
 
     #[test]
     fn apply_toggle_projection_on_slice_is_none() {
@@ -1299,15 +1181,13 @@ mod tests {
 
     #[test]
     fn apply_toggle_projection_empty_settings_is_none() {
-        // An Arcball view with NO dataset_settings entries has nothing to flip.
+        // An Arcball view with no dataset_settings entries has nothing to flip.
         let v = arcball_view();
         assert!(v.dataset_settings.is_empty());
         assert!(apply(&v, &ViewTransform::ToggleProjection, &extent_3d()).is_none());
     }
 
-    // --- children: mode-dependent menus ---
-
-    /// A rich 3D extent with room on EVERY dimensional axis (z/t/c all > 2), so
+    /// A rich 3D extent with room on every dimensional axis (z/t/c all > 2), so
     /// an interior view offers each step in both directions. Distinct from the
     /// shared `extent_3d` (c_count = 2), which can't sit a channel between two
     /// neighbours.
@@ -1324,7 +1204,7 @@ mod tests {
     #[test]
     fn children_slice_3d_dataset() {
         // Slice + 3D multichannel-timeseries dataset: Home, Zoom in/out, StepZ
-        // +/-, StepT +/-, StepC +/- — but NO azimuth/elevation/projection (those
+        // +/-, StepT +/-, StepC +/- — but no azimuth/elevation/projection (those
         // are Arcball-only). Mid-stack/mid-t/mid-c so each dimensional step is in
         // range both ways.
         let mut v = slice_view();
@@ -1401,7 +1281,7 @@ mod tests {
     fn children_arcball_full_extent_has_all_enriched_cells() {
         // A rich volume built by default_view (which seeds a dataset_settings
         // entry, so ToggleProjection is live) on a 3D multichannel-timeseries
-        // extent offers the full enriched menu: elevation, stept, stepc, AND
+        // extent offers the full enriched menu: elevation, stept, stepc, and
         // projection:toggle.
         let dims = [40, 3, 340, 512, 512]; // [T, C, Z, Y, X]
         let mut view = default_view("wds-rich", dims, [800, 600]);
@@ -1480,7 +1360,7 @@ mod tests {
         let ids: Vec<&str> = kids.iter().map(|c| c.transform.as_str()).collect();
         assert!(!ids.iter().any(|id| id.starts_with("elevation:")));
         assert!(!ids.iter().any(|id| id.starts_with("projection:")));
-        // It DOES still offer dimensional T/C steps (it's multi-T/C).
+        // It does still offer dimensional T/C steps (it's multi-T/C).
         assert!(ids.contains(&"stept:+1"));
         assert!(ids.contains(&"stepc:+1"));
     }
@@ -1516,8 +1396,6 @@ mod tests {
         assert_eq!(before, after);
     }
 
-    // --- view_handle ---
-
     #[test]
     fn view_handle_shape() {
         let v = slice_view();
@@ -1545,8 +1423,6 @@ mod tests {
         b.view.t = 7;
         assert_ne!(view_handle(&a), view_handle(&b));
     }
-
-    // --- ExplorationSidecar ---
 
     #[test]
     fn sidecar_build_shape() {
@@ -1671,8 +1547,6 @@ mod tests {
         let _ = children(&f, &point);
     }
 
-    // --- ViewExtent::from_dims ---
-
     #[test]
     fn from_dims_maps_tczyx_to_extent() {
         // dims = [T, C, Z, Y, X]: the box spans X/Y/Z, counts carry T/C/Z.
@@ -1701,8 +1575,6 @@ mod tests {
         let back: ViewExtent = serde_json::from_str(&json).unwrap();
         assert_eq!(back, extent);
     }
-
-    // --- default_view ---
 
     #[test]
     fn default_view_is_arcball_for_volume() {
@@ -1750,8 +1622,6 @@ mod tests {
         assert!(ids.contains(&"stepz:+1"));
         assert!(ids.contains(&"stepz:-1"));
     }
-
-    // --- explore_view (the wasm-exported wrapper, exercised on the host) ---
 
     #[test]
     fn explore_view_home_volume_has_azimuth_cells() {

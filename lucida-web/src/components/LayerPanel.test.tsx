@@ -223,7 +223,7 @@ describe("LayerPanel channel rename", () => {
         })}
       />,
     );
-    // Tier 1: override wins, the omero label is NOT shown.
+    // Tier 1: override wins, and the omero label is not shown.
     expect(screen.getByText("Region A")).toBeTruthy();
     expect(screen.queryByText("Channel 0")).toBeNull();
     // Tier 2: omero label for the un-renamed channel.
@@ -520,10 +520,10 @@ describe("LayerPanel labels", () => {
   it("toggling a label eye fires onLabelSetVisible(id, index, !visible)", () => {
     const onLabelSetVisible = vi.fn();
     render(<LayerPanel {...labelProps({}, { onLabelSetVisible })} />);
-    // Visible label → toggles OFF.
+    // Visible label toggles off.
     fireEvent.click(screen.getByTestId("label-eye-wds-1-0"));
     expect(onLabelSetVisible).toHaveBeenCalledWith("wds-1", 0, false);
-    // Hidden label → toggles ON.
+    // Hidden label toggles on.
     fireEvent.click(screen.getByTestId("label-eye-wds-1-1"));
     expect(onLabelSetVisible).toHaveBeenCalledWith("wds-1", 1, true);
   });

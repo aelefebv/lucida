@@ -98,7 +98,7 @@ describe("WorkspaceSavedViewsSidebar — viewer propose flow", () => {
     await userEvent.click(screen.getByLabelText("Saved view actions"));
     const proposeBtn = await screen.findByTestId("saved-view-propose-sv-own");
     await userEvent.click(proposeBtn);
-    // Slice 3: proposing now asks for confirmation before it is sent.
+    // Proposing asks for confirmation before it is sent.
     await userEvent.click(await screen.findByRole("button", { name: /propose|confirm|share/i }));
 
     await waitFor(() =>
@@ -172,8 +172,7 @@ describe("WorkspaceSavedViewsSidebar — editor review queue", () => {
     );
     await screen.findByTestId("saved-view-reject-sv-prop");
     await userEvent.click(screen.getByTestId("saved-view-reject-sv-prop"));
-    // Slice 3: reject is a deferred, cancelable send — not fired immediately;
-    // an Undo cancels it entirely (no API call).
+    // Reject is deferred, and Undo cancels it with no API call.
     expect(rejectMock).not.toHaveBeenCalled();
     await userEvent.click(await screen.findByText(/undo/i));
     expect(rejectMock).not.toHaveBeenCalled();

@@ -52,16 +52,13 @@ impl TryFrom<&str> for WorkspaceRole {
 
 /// Visibility of a workspace saved view.
 ///
-/// `Shared` views are part of the workspace's collaborative surface (the
-/// historical behavior); `Personal` views belong to exactly one member —
-/// keyed on the normalized `AuthPrincipal.email` in `created_by` — and are
-/// never disclosed to anyone else, not even owners. `Proposed` views (#702)
-/// are a viewer's bid to share: like a `Personal` view they belong to exactly
-/// one member and are hidden from other plain viewers, but they are *also*
-/// surfaced to editors as a review queue — an editor can approve (→ `Shared`)
-/// or reject (→ back to the proposer's `Personal`). Persisted as TEXT
-/// (`"shared"` / `"personal"` / `"proposed"`) and serialized into the
-/// REST/JSON response so the client can tell the layers apart.
+/// `Shared` views are part of the workspace's collaborative surface.
+/// `Personal` views belong to one member, keyed on the normalized email in
+/// `created_by`, and are never disclosed to anyone else, owners included.
+/// `Proposed` views are a viewer's bid to share: private like `Personal`,
+/// but also shown to editors as a review queue, where approval makes them
+/// `Shared` and rejection returns them to `Personal`. Persisted and
+/// serialized as `"shared"` / `"personal"` / `"proposed"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SavedViewVisibility {
@@ -203,7 +200,7 @@ pub struct WorkspaceUserState {
     pub workspace_id: String,
     pub last_opened_at: Option<DateTime<Utc>>,
     pub pinned_at: Option<DateTime<Utc>>,
-    /// The caller's own last-open view in this workspace (#700), restored on
+    /// The caller's own last-open view in this workspace, restored on
     /// a bare `/w/:id` open behind a user toggle. `None` until the member
     /// records one. Per-user isolated (keyed on the member's email alongside
     /// the rest of this row) and never another user's. Recording it never

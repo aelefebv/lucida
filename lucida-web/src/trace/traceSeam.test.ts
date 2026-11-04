@@ -58,8 +58,8 @@ class ControlledSource implements ContentSource {
 }
 
 /**
- * Stand-in for the browser Worker so the real {@link DecodePool} — and the
- * correlation id it now carries — is what the lifecycle runs through. Replies
+ * Stand-in for the browser Worker so the real {@link DecodePool}, and the
+ * correlation id it carries, is what the lifecycle runs through. Replies
  * land on a later task, so the `decode` round trip has a real duration.
  */
 class EchoWorker {
@@ -298,7 +298,7 @@ describe("the trace seam", () => {
   });
 
   /**
-   * The bundle is the same export with more around it (#1055): one function
+   * The bundle is the same export with more around it: one function
    * behind the seam, so the monitor's save and the driver's file agree.
    */
   it("offers the run as a bundle, closing it the same way and naming what the page could not add", async () => {
@@ -353,7 +353,7 @@ describe("the trace seam", () => {
 
   /**
    * The borrowed path goes through the same seam as the native one, so no
-   * surface gets a privately shaped copy of the trace (#934).
+   * surface gets a privately shaped copy of the trace.
    */
   it("offers the same run projected for Perfetto, closing it the same way", async () => {
     installTraceSeam();
@@ -376,8 +376,8 @@ describe("the trace seam", () => {
 
   /**
    * The derivation lives behind the seam, so the agent's text and the
-   * monitor's cards are two readings of one object rather than two opinions
-   * (#933). The CLI holding no diagnostic logic is what this protects.
+   * monitor's cards are two readings of one object rather than two opinions.
+   * The CLI holding no diagnostic logic is what this protects.
    */
   it("reads the run as a diagnostic, and renders that same object as text", async () => {
     installTraceSeam();
@@ -574,7 +574,7 @@ describe("the trace seam", () => {
   });
 
   /**
-   * The driver's scripted steps (ADR 0051, as amended). Pan, zoom, and
+   * The driver's scripted steps. Pan, zoom, and
    * orbit arrive as synthesized pointer events and need nothing here. Scrub
    * and select go through the handlers the viewer registers, because the
    * capture surface hides the controls they would otherwise land on, and
@@ -686,7 +686,7 @@ describe("the trace seam", () => {
   });
 
   /**
-   * The live view's read (#937). Everything else through this seam concludes
+   * The live view's read. Everything else through this seam concludes
    * the interval it is asked about, which is the one thing a surface watching
    * an open run must not do.
    */

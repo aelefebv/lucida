@@ -1,26 +1,12 @@
 /**
- * The overlay's draw list: what color each chunk cell wears, what it says on
- * hover, and which cell the pointer is over. Pure, so the same function
- * serves the slice overlay, the volume overlay once its boxes are projected,
- * and a test over fixture documents.
+ * The overlay's draw list: each chunk cell's color, hover text, and which cell
+ * the pointer is over. Pure, so the slice overlay, the projected volume
+ * overlay, and tests over fixture documents share it.
  *
- * Two of the modes read the trace rather than the cache. Phase color paints
- * the phase the chunk's newest row is in, from the shared palette, so a
- * chunk in the wire phase is the color the timeline gives the wire phase.
- * Churn tint paints how many times the chunk was fetched in a stated window,
- * so an eviction and refetch loop is a picture. Both read a
- * {@link ChunkReading}, which the recorder answers for the open interval and
- * the derivation answers for a document, and both say in words what they
- * cannot show: a chunk with no row was resident before the interval opened,
- * is still queued, or was never wanted, and the cell says so rather than
- * wearing a color.
- *
- * A third reading is the linked selection: the chunk set a window brushed
- * on the dock's axis published. A cell whose identity is in the set is
- * highlighted whatever mode is on, so time and space read as one instrument
- * without the two surfaces merging (ADR 0052 as amended). The set arrives
- * as an input here; the layer reads it from the published slot, never from
- * the dock.
+ * Phase color and churn tint read the trace ({@link ChunkReading}), not the
+ * cache, using the timeline's palette. A chunk with no row says why in words
+ * rather than wearing a color. The brushed selection highlights its cells in
+ * any mode (ADR 0052); it arrives as an input, never read from the dock.
  */
 
 import type { EvictionTier } from "../pipeline/fetch/index.ts";
@@ -402,18 +388,14 @@ export interface InspectorView {
 }
 
 /**
- * The hover inspector's text for the cell under the pointer, from the
- * document's chunk lookup: the newest row's phase, its queue rank and its
- * age, and how many times the window fetched it. `lookup` is null when no
- * interval is open, and a lookup with no rows says the chunk is not in the
- * interval rather than showing a blank.
+ * The hover inspector's text for the cell under the pointer: the newest row's
+ * phase, queue rank, and age, and the window's fetch count. `lookup` is null
+ * when no interval is open.
  *
- * The lookup lists a chunk's oldest rows and caps the list, so on a chunk
- * fetched more times than the cap its newest listed row is not the newest
- * row. The phase and the age come from the cell's reading when there is one,
- * which the identity index takes from the true newest row and which is what
- * the cell's color came from; the lookup's newest listed row supplies the
- * rank, and the text says when that row is not the newest.
+ * The lookup caps its list at a chunk's oldest rows, so phase and age come
+ * from the cell's reading, which holds the true newest row and colored the
+ * cell. The listed row supplies the rank, and the text says when it is not
+ * the newest.
  */
 export function describeHoverInspector(
   item: ChunkDrawItem,

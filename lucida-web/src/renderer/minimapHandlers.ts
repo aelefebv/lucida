@@ -28,19 +28,10 @@ let minimapOffscreenPool: GPUTexture[] = [];
 let minimapPoolWidth = 0;
 let minimapPoolHeight = 0;
 
-// --- Thumbnail (Explore-panel contact-sheet) off-screen render state ---
-//
-// Thumbnails reuse the minimap's per-dataset coarse overview textures
-// (`minimapOverviewPerDataset`) + the shared volume renderer/compositor, but
-// draw to their own small pool and own `OffscreenCanvas`. We composite a single
-// thumbnail's layers onto that canvas, then `transferToImageBitmap()` to hand a
-// transferable image back to the main thread (the minimap, by contrast, owns a
-// canvas transferred from the DOM and never ships pixels back).
-//
-// The pool + canvas are square (one `size`); a size change rebuilds them. One
-// render is fully submitted + read back before the next, so a single-entry pool
-// and one canvas are enough — thumbnails are requested with a small concurrency
-// cap on the main thread and serviced one message at a time here.
+// Thumbnail render state. Thumbnails reuse the minimap's overview textures and
+// renderers but draw to their own square pool and `OffscreenCanvas`, then
+// `transferToImageBitmap()` back to the main thread. One render finishes before
+// the next starts, so one pool entry and one canvas are enough.
 let thumbnailCanvas: OffscreenCanvas | null = null;
 let thumbnailContext: GPUCanvasContext | null = null;
 let thumbnailOffscreenPool: GPUTexture[] = [];
@@ -141,18 +132,13 @@ function drawMinimap(ctx: WorkerCtx, msg: MinimapRenderMessage): void {
     if (!overview) continue;
 
     const idx = renderedLayers.length;
-    // Minimap renders the overview as a single-LOD volume — the
-    // transient descriptor sets proxy slot indices to the sentinel, so
-    // the unified chain naturally falls through to the chunk path.
-    // Reset textures in case a previous main-view draw bound real proxy
-    // textures — leaving stale handles bound is harmless but signals
-    // intent more clearly.
+    // The transient descriptor sets proxy slot indices to the sentinel, so
+    // the draw falls through to the chunk path. Clear any proxy textures a
+    // main-view draw left bound.
     renderer.setProxyTextures(null, null);
-    // Bind the active channel's colormap LUT for the minimap's own draw. Without
-    // this the minimap reuses whatever LUT the volume renderer last had — set by
-    // the 3D main view (so 3D looks right) but left at the default gray in 2D
-    // mode (where the main view is the slice renderer). Set it BEFORE setVolume,
-    // since setVolume rebuilds the bind group from the current LUT.
+    // Bind the active channel's LUT for the minimap's own draw; otherwise it
+    // keeps whatever the volume renderer last had, which stays gray in 2D mode.
+    // Set it before setVolume, which rebuilds the bind group from the current LUT.
     renderer.setColormapTexture(ctx.getOrCreateLUT(layer.colormap));
     renderer.setVolume(overview.texture);
     renderer.setMatrices(msg.invViewProj, msg.eye);
@@ -179,16 +165,9 @@ function drawMinimap(ctx: WorkerCtx, msg: MinimapRenderMessage): void {
 }
 
 /**
- * Render one Explore-panel candidate thumbnail off-screen and ship it back as an
- * `ImageBitmap`. This is `handleMinimapRender` specialized for a small,
- * read-back target: same coarse overview texture, same transient single-entity
- * descriptor, same `renderTo` per layer + `composite`, but the destination is a
- * private `OffscreenCanvas` we `transferToImageBitmap()` from.
- *
- * Renders only at the coarse overview LOD (the overview is the single resident,
- * angle-independent volume), so off-axis child cameras cost no streaming. If no
- * layer has a resident overview yet, replies with `bitmap: null` and the panel
- * falls back to its label-only row.
+ * Render one Explore-panel thumbnail off-screen as an `ImageBitmap`. Same draw
+ * as `handleMinimapRender`, at the overview level only, so off-axis cameras
+ * cost no streaming. Replies `bitmap: null` when no overview is resident.
  */
 export function handleThumbnailRender(ctx: WorkerCtx, msg: ThumbnailRenderMessage): void {
   const renderer = ctx.getVolumeRenderer();
@@ -242,8 +221,8 @@ function drawThumbnail(ctx: WorkerCtx, msg: ThumbnailRenderMessage): void {
   }
 
   if (renderedLayers.length === 0 || !thumbnailContext || !thumbnailCanvas) {
-    // No resident overview for any layer → nothing to draw; let the panel keep
-    // the label-only row. (Reply is required so the pending promise resolves.)
+    // Nothing to draw. Reply anyway so the pending promise resolves and the
+    // panel keeps its label-only row.
     ctx.post({ type: "thumbnailResult", id: msg.id, bitmap: null });
     return;
   }
@@ -252,10 +231,8 @@ function drawThumbnail(ctx: WorkerCtx, msg: ThumbnailRenderMessage): void {
   comp.composite(thumbnailContext.getCurrentTexture().createView(), renderedLayers, compEncoder);
   ctx.device.queue.submit([compEncoder.finish()]);
 
-  // Snapshot the composited canvas into a transferable ImageBitmap. The canvas
-  // is reused for the next thumbnail, so we must capture now (not transfer the
-  // canvas). transferToImageBitmap empties the canvas, which is fine — the next
-  // render clears it again.
+  // The canvas is reused for the next thumbnail, so snapshot it rather than
+  // transfer the canvas itself. The next render clears what this empties.
   const bitmap = thumbnailCanvas.transferToImageBitmap();
   ctx.post({ type: "thumbnailResult", id: msg.id, bitmap }, [bitmap]);
 }

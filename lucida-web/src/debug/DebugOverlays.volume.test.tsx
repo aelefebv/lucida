@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 /**
- * The overlay layer in volume mode (#1063), mounted over a stub scene: with
+ * The overlay layer in volume mode, mounted over a stub scene: with
  * every toggle off it draws nothing and asks the scene nothing; with the
  * chunk grid on it draws one wireframe box per chunk, in the shared draw
  * list's colors, and hovering a box opens the same inspector a cell opens.

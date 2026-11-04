@@ -5,12 +5,8 @@ import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { SAVED_VIEW_VERSION, type SavedView } from "../savedView/types.ts";
 
-// Mock the wasm generator. `explore_view` returns a sidecar JSON string; tests
-// override its return per case via the typed handle below. The component parses
-// the string and renders the cells, so the mock is the seam that decides what
-// candidates appear — AND which manual nudge buttons are enabled (a nudge is a
-// shortcut to its matching cell, so it's live only when that transform is in the
-// sidecar's cells). lucida-core is the only wasm import in the panel.
+// The mocked generator decides which cells appear, and so which nudge buttons
+// are enabled. Tests override its return per case.
 const exploreView = vi.fn(() => JSON.stringify(defaultSidecar()));
 
 vi.mock("lucida-core", () => ({
@@ -50,10 +46,8 @@ function viewWithTheta(theta: number): SavedView {
   return v;
 }
 
-/** The default sidecar: an arcball root that offers the full nudge set (both
- *  rotates + both zooms) plus a generic StepZ row, each with a distinct child
- *  view. Mirrors what the core generator returns for an interior 3D view, so the
- *  manual nudge buttons (shortcuts to these cells) are all live. */
+/** An interior 3D view's sidecar: both rotates, both zooms, and a StepZ row,
+ *  each with a distinct child view, so every nudge button is live. */
 function defaultSidecar() {
   return {
     v: 1,
@@ -124,8 +118,7 @@ function baseProps(over: Partial<ExplorationPanelProps> = {}): ExplorationPanelP
 }
 
 beforeEach(() => {
-  // Reset BOTH call history and implementation so a test that installs a custom
-  // sidecar (mockReturnValue) can't leak into the next test.
+  // Reset the implementation too, so a custom sidecar can't leak into the next test.
   exploreView.mockReset();
   exploreView.mockImplementation(() => JSON.stringify(defaultSidecar()));
 });
@@ -133,8 +126,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
-  // The thumbnail tests stub IntersectionObserver via vi.stubGlobal; clear it so
-  // a fake observer can't leak into later test files.
+  // The thumbnail tests stub IntersectionObserver; don't leak it to later files.
   vi.unstubAllGlobals();
 });
 
@@ -146,8 +138,6 @@ async function renderPanel(over: Partial<ExplorationPanelProps> = {}) {
   return props;
 }
 
-/** The candidate row whose label matches — disambiguates now that the panel
- *  renders several cells. */
 function cellByLabel(label: string): HTMLElement {
   const cell = screen
     .getAllByTestId("explore-cell")
@@ -156,8 +146,8 @@ function cellByLabel(label: string): HTMLElement {
   return cell;
 }
 
-/** A manual nudge BUTTON by its text. Targets the role so it doesn't collide
- *  with a candidate ROW that happens to share the label (e.g. "Zoom in"). */
+/** A nudge button by its text. Targets the role so it doesn't collide with a
+ *  candidate row that shares the label (e.g. "Zoom in"). */
 function nudgeButton(text: string): HTMLButtonElement {
   return screen.getByRole("button", { name: text }) as HTMLButtonElement;
 }
@@ -167,7 +157,6 @@ describe("ExplorationPanel — candidates", () => {
     await renderPanel();
     const cell = cellByLabel("Rotate right 45°");
     expect(within(cell).getByText("Rotate right 45°")).toBeTruthy();
-    // The muted machine id is shown as a small tag.
     expect(within(cell).getByText("azimuth:+45")).toBeTruthy();
   });
 
@@ -182,7 +171,7 @@ describe("ExplorationPanel — candidates", () => {
       await userEvent.click(cellByLabel("Rotate right 45°"));
     });
     expect(props.applyView).toHaveBeenCalledTimes(1);
-    // It applies the CELL's view (the rotated child), not the current view.
+    // The cell's view (the rotated child), not the current view.
     const applied = (props.applyView as ReturnType<typeof vi.fn>).mock
       .calls[0][0] as SavedView;
     expect((applied.camera as { theta: number }).theta).toBeCloseTo(0.785);
@@ -211,8 +200,7 @@ describe("ExplorationPanel — manual controls (shortcuts to generator moves)", 
     await act(async () => {
       await userEvent.click(screen.getByTestId("explore-rotate-right"));
     });
-    // The nudge runs the SAME descend path as the row: applyView with the
-    // matching candidate's view (theta 0.785 from the azimuth:+45 cell).
+    // Same descend path as the row: the azimuth:+45 cell's view (theta 0.785).
     expect(props.applyView).toHaveBeenCalledTimes(1);
     const applied = (props.applyView as ReturnType<typeof vi.fn>).mock
       .calls[0][0] as SavedView;
@@ -257,7 +245,6 @@ describe("ExplorationPanel — manual controls (shortcuts to generator moves)", 
     expect(
       (screen.getByTestId("explore-rotate-left") as HTMLButtonElement).disabled,
     ).toBe(true);
-    // Zoom in is offered, so it stays enabled.
     expect(nudgeButton("Zoom in").disabled).toBe(false);
   });
 
@@ -284,9 +271,8 @@ describe("ExplorationPanel — manual controls (shortcuts to generator moves)", 
   });
 
   it("a manual nudge pushes onto the Back stack — Back returns to the pre-nudge view (Part D)", async () => {
-    // captureBuilder returns the live (pre-nudge) view; after a Rotate nudge,
-    // Back must re-apply THAT view, not the nudge's child. This is the finer-Back
-    // behavior unlocked by routing nudges through the descend path.
+    // captureBuilder returns the pre-nudge view; after a Rotate nudge, Back must
+    // re-apply that view, not the nudge's child.
     const props = await renderPanel();
     const back = () => screen.getByTestId("explore-back") as HTMLButtonElement;
     expect(back().disabled).toBe(true);
@@ -294,7 +280,7 @@ describe("ExplorationPanel — manual controls (shortcuts to generator moves)", 
     await act(async () => {
       await userEvent.click(screen.getByTestId("explore-rotate-right"));
     });
-    // The nudge descended (applied the azimuth child) AND enabled Back.
+    // The nudge descended and enabled Back.
     expect(back().disabled).toBe(false);
 
     await act(async () => {
@@ -315,7 +301,6 @@ describe("ExplorationPanel — breadcrumb trail (proof of navigation)", () => {
   it("starts at Home, pushes the cell label on descend, and pops on Back", async () => {
     await renderPanel();
     const crumb = () => screen.getByTestId("explore-breadcrumb").textContent ?? "";
-    // Root.
     expect(crumb()).toBe("Home");
 
     // Descend → the cell's label is appended.
@@ -367,8 +352,7 @@ describe("ExplorationPanel — breadcrumb trail (proof of navigation)", () => {
 
 describe("ExplorationPanel — you-are-here readout reveals the axes", () => {
   it("shows azimuth + Z, and surfaces T and C when the dataset has them", async () => {
-    // A 40-timepoint, 3-channel volume: the readout must announce T and C exist
-    // even though stepping them isn't offered yet (the flat-2D blind spot).
+    // A 40-timepoint, 3-channel volume: the readout must show T and C exist.
     await renderPanel({ dims: [40, 3, 340, 512, 512] });
     const here = screen.getByTestId("explore-here").textContent ?? "";
     expect(here).toMatch(/3D/);
@@ -421,10 +405,8 @@ describe("ExplorationPanel — bookmark", () => {
 });
 
 describe("ExplorationPanel — preview thumbnails", () => {
-  // A controllable IntersectionObserver: capture every (callback, element) pair
-  // so a test can decide WHEN a row "scrolls into view". This is the seam that
-  // lets us prove laziness — the panel must not request a render until the
-  // observer reports the row intersecting.
+  // A controllable IntersectionObserver, so a test decides when a row scrolls
+  // into view. The panel must not request a render before then.
   type IOEntry = { cb: IntersectionObserverCallback; el: Element; obs: IntersectionObserver };
   let observed: IOEntry[] = [];
 
@@ -445,7 +427,6 @@ describe("ExplorationPanel — preview thumbnails", () => {
     vi.stubGlobal("IntersectionObserver", FakeIO as unknown as typeof IntersectionObserver);
   }
 
-  /** Fire intersection for every currently-observed row. */
   function scrollAllIntoView() {
     for (const { cb, el, obs } of observed) {
       cb([{ isIntersecting: true, target: el } as IntersectionObserverEntry], obs);
@@ -456,11 +437,8 @@ describe("ExplorationPanel — preview thumbnails", () => {
     installControllableIO();
   });
 
-  /** A thumbnail requester that resolves to a stand-in bitmap, recording the
-   *  views it was asked to render. The real `ImageBitmap`/canvas isn't available
-   *  in happy-dom, so we hand back a minimal object with a `close()` (the panel
-   *  only calls `.close()` and `drawImage`, the latter guarded on a 2d context
-   *  that happy-dom returns null for). */
+  /** happy-dom has no `ImageBitmap`. The panel only calls `close()` and a
+   *  `drawImage` guarded on a 2d context happy-dom returns null for. */
   function fakeBitmap(): ImageBitmap {
     return { width: 8, height: 8, close: vi.fn() } as unknown as ImageBitmap;
   }
@@ -468,7 +446,7 @@ describe("ExplorationPanel — preview thumbnails", () => {
   it("does NOT request a thumbnail until the row scrolls into view (lazy)", async () => {
     const requestThumbnail = vi.fn(async () => fakeBitmap());
     await renderPanel({ requestThumbnail });
-    // Rows are mounted, observers registered — but nothing requested yet.
+    // Rows are mounted and observed, but nothing is requested yet.
     expect(observed.length).toBeGreaterThan(0);
     expect(requestThumbnail).not.toHaveBeenCalled();
     // Now reveal them.
@@ -484,9 +462,8 @@ describe("ExplorationPanel — preview thumbnails", () => {
     await act(async () => {
       scrollAllIntoView();
     });
-    // The default sidecar's rotate-right cell carries theta 0.785; assert some
-    // request was made with a view whose camera is that child camera (proving the
-    // tile renders from its own angle, not the current view's).
+    // The rotate-right cell carries theta 0.785: the tile renders from its own
+    // angle, not the current view's.
     const views = (requestThumbnail as ReturnType<typeof vi.fn>).mock.calls.map(
       (c) => c[0] as SavedView,
     );
@@ -503,9 +480,8 @@ describe("ExplorationPanel — preview thumbnails", () => {
     await act(async () => {
       scrollAllIntoView();
     });
-    // The candidate's LABEL is still present (the row never breaks)...
+    // The label is still present, and the failed thumbnail box unmounts.
     expect(cellByLabel("Rotate right 45°")).toBeTruthy();
-    // ...and the failed thumbnail box unmounts (empty status → null render).
     await act(async () => {});
     const cell = cellByLabel("Rotate right 45°");
     expect(within(cell).queryByTestId("explore-thumb")).toBeNull();
@@ -528,7 +504,7 @@ describe("ExplorationPanel — preview thumbnails", () => {
   it("hides previews (and stops requesting) when 'Show previews' is unchecked", async () => {
     const requestThumbnail = vi.fn(async () => fakeBitmap());
     await renderPanel({ requestThumbnail });
-    // Toggle previews OFF before revealing rows.
+    // Toggle previews off before revealing rows.
     await act(async () => {
       await userEvent.click(
         within(screen.getByTestId("explore-previews-toggle")).getByRole("checkbox"),

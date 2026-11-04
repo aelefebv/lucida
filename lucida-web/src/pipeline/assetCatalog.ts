@@ -1,14 +1,9 @@
 /**
- * Asset Catalog (web mirror) — tracks per-entity proxy availability for
- * Planning's promotion decisions.
- *
- * Authority for the catalog is Rust/WASM; this class is a *local mirror*
- * that:
- *   1. forwards every change through `WasmScene.apply_asset_catalog_delta`
- *      so `epochs.asset` stays consistent across native, WASM, and web,
- *      and
- *   2. maintains a JS-side `Map` flattened across datasets that Planning
- *      can read via `snapshot()` without paying a JSON round-trip per tick.
+ * Web mirror of the Rust/WASM asset catalog: per-entity proxy availability
+ * for planning's promotion decisions. Every change is forwarded through
+ * `WasmScene.apply_asset_catalog_delta` so `epochs.asset` stays consistent,
+ * and planning reads the flattened map via `snapshot()` without a JSON
+ * round-trip per tick.
  */
 
 export type ProxyKind = "GroupProxy3D" | "TileProxy3D";
@@ -61,14 +56,11 @@ export class AssetCatalog {
   }
 
   /**
-   * Apply an initial catalog snapshot for a dataset (the `catalog` tile
+   * Apply an initial catalog snapshot for a dataset (the `catalog` field
    * of `DatasetOpened`). Implemented as a delta apply so that the WASM
    * side bumps `epochs.asset` and the local mirror grows monotonically.
-   *
-   * Note: when invoked after `WasmScene.apply_command(dataset_opened)`,
-   * Rust already seeded `asset_catalogs` from the same entries — the
-   * delta merge here is a no-op on Rust state thanks to dedupe, but it
-   * keeps `epochs.asset` consistent and populates the JS mirror.
+   * Rust may already hold these entries from `dataset_opened`; its dedupe
+   * makes the merge a no-op there.
    */
   applyInitial(datasetId: string, catalog: WireAssetCatalog): void {
     this.applyDelta(datasetId, { added: catalog.entries });
@@ -84,7 +76,6 @@ export class AssetCatalog {
     const body = JSON.stringify({ dataset_id: datasetId, delta });
     this.wasmScene.apply_asset_catalog_delta(body);
 
-    // Update local mirror.
     let datasetMap = this.byDataset.get(datasetId);
     if (!datasetMap) {
       datasetMap = new Map();
@@ -136,7 +127,6 @@ export class AssetCatalog {
             }
           }
         } else {
-          // New containers so callers can't mutate the per-dataset backing store.
           byEntity.set(entityId, {
             kinds: new Set(snapshot.kinds),
             footprints: cloneFootprintMap(snapshot.footprints),
@@ -161,12 +151,8 @@ export class AssetCatalog {
 }
 
 /**
- * Free-function predicate over an {@link AssetCatalogSnapshot}: true if
- * the snapshot advertises `kind` for `entityId`.
- *
- * Mirrors {@link AssetCatalog.hasProxy} but operates on the flat
- * snapshot shape so callers (notably `planning.ts`) don't need to keep a
- * reference to the live `AssetCatalog` instance.
+ * {@link AssetCatalog.hasProxy} over a snapshot, so planning need not hold
+ * the live catalog.
  */
 export function snapshotHasProxy(
   snapshot: AssetCatalogSnapshot,

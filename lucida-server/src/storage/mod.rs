@@ -1,34 +1,11 @@
 //! Storage backends: where the server's persistent state lives.
 //!
-//! A **storage backend** owns one database connection, runs the
-//! migrations against it, and hands out the seven stores the rest of the
-//! server programs against. A **store** is one of those seven — it holds
-//! a single kind of record and knows nothing about how the connection
-//! was made.
-//!
-//! Which backend runs is a matter of configuration, not compilation.
-//! `LUCIDA_DB_URL` carries a connection string, its scheme names a
-//! backend, and [`open`] matches on that scheme once at startup. This
-//! is the shape ADR-0017 established for authentication providers, and
-//! it is here for the same reason: adding a backend should be one pull
-//! request against this module, not a change to every site that reads
-//! or writes a row.
-//!
-//! Module map:
-//!
-//! - `url` — [`DatabaseUrl`], the parsed connection string, and the
-//!   [`Scheme`] enum that [`open`] dispatches on.
-//! - `sqlite` — [`SqliteStorageBackend`], the default, selected by a
-//!   `sqlite:` connection string and by an unset `LUCIDA_DB_URL`.
-//! - `postgres` — [`PostgresStorageBackend`], selected by a `postgres:`
-//!   connection string. See ADR-0058.
-//! - `end_to_end` (tests) — one connection string, through the routers,
-//!   and back after a restart.
-//! - `conformance` (tests) — one suite per store trait, run against
-//!   every implementation of that trait.
-//! - `test_support` (tests) — how a test opens a database, written once.
-//!
-//! See ADR-0055 for why the seam exists.
+//! A storage backend owns one database connection, runs the migrations,
+//! and hands out the seven stores the rest of the server programs against.
+//! A store holds one kind of record and knows nothing about the connection.
+//! [`open`] picks the backend from `LUCIDA_DB_URL`'s scheme once at
+//! startup, so adding a backend touches this module and no call site
+//! (ADR-0055).
 
 #[cfg(test)]
 mod conformance;

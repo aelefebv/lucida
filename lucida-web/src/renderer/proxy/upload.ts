@@ -1,28 +1,10 @@
 /**
- * Proxy asset upload orchestrator.
+ * Proxy asset upload: stale-check, slot allocation (LRU eviction when the
+ * pool is full), texture write, and descriptor update, with `GroupProxy3D`
+ * handles fanned out to every child tile.
  *
- * Reads + mutates per-worker registries via `ctx.state.*` and uses
- * `ctx.state.currentEpochs` for staleness checks.
- *
- * Owns the GPU upload path for a delivered proxy asset:
- *
- *   1. Stale-check against the worker's current cold-state epochs.
- *   2. Validate buffer length against the declared slot dims.
- *   3. Resolve / lazily-create the per-`(datasetId, kind, dims, channel)`
- *      proxy atlas pool.
- *   4. Allocate (or look up) the slot for `(entityId, t, c)` — may evict
- *      the LRU head if the pool is full.
- *   5. Upload via `device.queue.writeTexture`.
- *   6. Update the entity's descriptor. For `GroupProxy3D`, fan out the
- *      handle to every child tile's descriptor (see
- *      {@link propagateGroupProxyToTiles}).
- *
- * Returns an outcome describing what changed so the caller can decide
- * whether to rebuild the per-dataset descriptor buffer (only when the
- * upload's dataset matches the current cold state) and whether to post
- * a wanted-set delta. Keeping those two decisions out of this module
- * means the descriptor-rebuild + wanted-set policies stay co-located in
- * the worker dispatcher.
+ * It returns what changed instead of acting on it, so the descriptor-rebuild
+ * and wanted-set policies stay together in the worker dispatcher.
  */
 
 import {
@@ -54,25 +36,16 @@ import type { EntityProxyDescriptor } from "../workerContext.ts";
 import type { RendererState } from "../worker/state.ts";
 
 /**
- * Legacy capacity when no cold-state desired set is available. Normal
- * policy-driven pools request enough slots for the current desired set
- * for that `(dataset, kind, channel)`.
+ * Pool capacity when no cold-state desired set is available. Otherwise a
+ * pool requests one slot per desired proxy for its `(dataset, kind, channel)`.
  */
 const PROXY_FALLBACK_POOL_CAPACITY = 64;
 
-/**
- * Outcome of a proxy upload. The caller uses these flags to drive the
- * descriptor-rebuild + wanted-set policies (which need to know about
- * the current cold state / orchestrator wiring this module deliberately
- * does not touch).
- */
+/** What a proxy upload changed. The caller applies the rebuild and wanted-set policies. */
 export interface ProxyUploadOutcome {
-  /** Slot was allocated and descriptor written. Caller should rebuild
-   * the per-dataset descriptor buffer IFF the upload's dataset matches
-   * the current cold state. */
+  /** A descriptor was written. Rebuild the descriptor buffer iff the dataset is the current cold state. */
   rebuildDescriptor: boolean;
-  /** Slot allocation / eviction changed which proxies are resident.
-   * Caller should recompute and post the wanted-set delta. */
+  /** Which proxies are resident changed. Post a wanted-set delta. */
   wantedSetChanged: boolean;
 }
 
@@ -91,11 +64,7 @@ function getOrCreateProxyDescriptor(
   return d;
 }
 
-/**
- * Get-or-create a proxy atlas pool for the given
- * `(datasetId, kind, slotDims, channel)` tuple. Pool key encodes all
- * four so different shapes get independent pools.
- */
+/** Get or create the proxy atlas pool for `(datasetId, kind, slotDims, channel)`. */
 function getOrCreateProxyPool(
   device: GPUDevice,
   state: RendererState,
@@ -129,18 +98,13 @@ function getOrCreateProxyPool(
   return { poolKey, pool };
 }
 
-/**
- * Upload a delivered proxy asset to the GPU. Returns an outcome
- * describing what changed so the caller can rebuild the descriptor
- * buffer and post wanted-set deltas as needed.
- */
+/** Upload a delivered proxy asset to the GPU and report what changed. */
 export function handleProxyUpload(
   ctx: WorkerCtx,
   msg: ProxyAssetDataMessage,
 ): ProxyUploadOutcome {
   const state = ctx.state;
 
-  // 0. Staleness — drop if older than the current cold-state epoch.
   if (isStaleDelivery(msg.epochs, state.currentEpochs)) {
     state.proxyStats.dropped++;
     state.proxyStats.droppedStale++;
@@ -172,7 +136,6 @@ export function handleProxyUpload(
     };
   }
 
-  // 1. Validate buffer length.
   const slotDims = msg.dims;
   const [slotZ, slotY, slotX] = slotDims;
   const expectedBytes = slotZ * slotY * slotX * 2;
@@ -183,7 +146,6 @@ export function handleProxyUpload(
     return { rebuildDescriptor: false, wantedSetChanged: false };
   }
 
-  // 2. Resolve pool.
   const desiredCount = desiredProxyCountForPool(
     state.currentColdState,
     msg.datasetId,
@@ -204,7 +166,6 @@ export function handleProxyUpload(
     requestedCapacity,
   );
 
-  // 3. Allocate slot (may evict LRU).
   const compositeKey = proxySlotKey(msg.entityId, msg.t, msg.c);
   const allocation = allocateProxySlotWithEviction(pool, compositeKey);
   const { slotIndex } = allocation;
@@ -220,7 +181,6 @@ export function handleProxyUpload(
     );
   }
 
-  // 4. Upload to the slot region.
   const origin = proxySlotOrigin(pool, slotIndex);
   ctx.device.queue.writeTexture(
     { texture: pool.texture, origin },
@@ -229,7 +189,6 @@ export function handleProxyUpload(
     [slotX, slotY, slotZ],
   );
 
-  // 5. Update descriptors.
   const handle: ProxyHandle = { poolKey, slotIndex };
   const desc = getOrCreateProxyDescriptor(
     state.proxyDescriptorsByEntity,
@@ -240,8 +199,8 @@ export function handleProxyUpload(
   if (msg.kind === "TileProxy3D") {
     desc.tileProxyHandle = handle;
   } else {
-    // GroupProxy3D — set on the group itself AND propagate to all child
-    // tiles so their `groupProxyHandle` points at the parent's slot.
+    // GroupProxy3D: set on the group and propagate to every child tile so
+    // their `groupProxyHandle` points at the parent's slot.
     desc.groupProxyHandle = handle;
     propagateGroupProxyToTiles(
       handle,

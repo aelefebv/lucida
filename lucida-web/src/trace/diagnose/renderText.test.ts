@@ -1,13 +1,11 @@
 /**
- * The one renderer (#933). These cases assert on the rendered text as external
+ * The one renderer. These cases assert on the rendered text as external
  * behaviour: what it always says, what it never exceeds, and that every number
  * in it exists in the document it came from.
  *
  * The parity check is the load-bearing one. Text is the agent default because
- * it is far smaller than the JSON, and that trade is only safe if a reader can
- * always go from a line of prose to the field it came from — a renderer that
- * computes a number of its own has produced a figure that exists nowhere and
- * can never be looked up.
+ * it is far smaller than the JSON, and that is only safe if every number in
+ * the prose can be traced to the field it came from.
  */
 
 import { describe, expect, it } from "vitest";
@@ -425,13 +423,11 @@ describe("parity with the document", () => {
       const identical = JSON.stringify(sameContentAsText(document));
       const whole = JSON.stringify(document);
 
-      // Assert the shape and log the numbers. #893 measured about 2.6x for
-      // identical content against its own document; re-derived here it is
-      // 1.2-1.3x for identical content and 7-10x for the whole document, which
-      // carries the ruleset and the structural limits the text never prints.
-      // The direction is what the default rests on, and it holds either way; a
-      // tight bound on a ratio that moves with a run's findings is a flake
-      // waiting to happen, and this repo already has one of those.
+      // Assert the shape and log the numbers: about 1.2-1.3x for identical
+      // content and 7-10x for the whole document, which carries the ruleset
+      // and structural limits the text never prints. The direction is what the
+      // default rests on. A tight bound on a ratio that moves with a run's
+      // findings would flake.
       console.log(
         `${name}: text ${text.length} B · same-content JSON ${identical.length} B ` +
           `(${(identical.length / text.length).toFixed(1)}x) · whole document ${whole.length} B ` +

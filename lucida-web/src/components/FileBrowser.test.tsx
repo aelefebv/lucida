@@ -150,8 +150,8 @@ describe("FileBrowser — navigation", () => {
       // Initial fetch: no path param.
       expect(fetchSpy.urls[0]).toBe("http://localhost:9876/api/browse");
 
-      // Click `c:` — the empty-root branch in `navigateTo` must NOT
-      // prefix a `/`, otherwise we'd produce `/c:` (a bogus path).
+      // The empty-root branch in `navigateTo` must not prefix a `/`, which
+      // would produce `/c:`.
       await act(async () => {
         fireEvent.click(screen.getByText("c:"));
       });
@@ -159,7 +159,6 @@ describe("FileBrowser — navigation", () => {
       expect(fetchSpy.urls[1]).toBe(
         `http://localhost:9876/api/browse?path=${encodeURIComponent("c:")}`,
       );
-      // Triple-check: there's no `/c:` artefact in the URL.
       expect(fetchSpy.urls[1]).not.toContain(encodeURIComponent("/c:"));
     },
   );

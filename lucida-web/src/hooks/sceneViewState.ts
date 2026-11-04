@@ -2,9 +2,8 @@ import type { WasmScene } from "lucida-core";
 import type { ViewMode } from "../types.ts";
 
 /**
- * Plain value setters (not React dispatchers) so non-React owners — the
- * session controller — can supply them directly; React `setState` functions
- * are assignable as-is.
+ * Plain value setters, not React dispatchers, so the session controller can
+ * supply them directly. React `setState` functions are assignable as-is.
  */
 export interface SceneViewStateSetters {
   setZ: (z: number) => void;

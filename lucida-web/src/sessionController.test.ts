@@ -328,7 +328,7 @@ describe("SessionController self id", () => {
 
     // The bridge replays pending commands through onCommand synchronously
     // right after onSnapshot returns; the opener gate must already see the
-    // snapshot's your_id (NOT a deferred/stale value), or the opener's own
+    // snapshot's your_id (not a deferred or stale value), or the opener's own
     // auto-fit is suppressed.
     handlers.onSnapshot(1, snapshotJson([]), [], 3, {});
     handlers.onCommand(1, datasetOpenedJson("wds-1", 3));
@@ -367,7 +367,7 @@ describe("SessionController remote-document-changed coalescing", () => {
     handlers.onCommand(5, JSON.stringify({ type: "set_dataset_visible", dataset_id: "wds-1", visible: false }));
     handlers.onCommand(5, JSON.stringify({ type: "set_dataset_opacity", dataset_id: "wds-1", opacity: 0.5 }));
 
-    // Nothing yet — the burst is still in its synchronous window.
+    // Nothing yet: the burst is still in its synchronous window.
     expect(docChanged).not.toHaveBeenCalled();
 
     await Promise.resolve();
@@ -390,7 +390,7 @@ describe("SessionController remote-document-changed coalescing", () => {
     expect(docChanged).toHaveBeenCalledTimes(1);
 
     handlers.onCommand(2, JSON.stringify({ type: "set_dataset_visible", dataset_id: "wds-1", visible: false }));
-    // Synchronous — no flush needed.
+    // Synchronous, so no flush needed.
     expect(docChanged).toHaveBeenCalledTimes(2);
   });
 
@@ -413,7 +413,7 @@ function errorEmissions(events: SessionControllerEvents): string[] {
     .filter((error): error is string => error !== null);
 }
 
-/** The most recent activity emission — the state the UI is showing now. */
+/** The most recent activity emission: the state the UI is showing now. */
 function lastActivity(events: SessionControllerEvents): RemoteDatasetActivity {
   const calls = (events.onRemoteDatasetActivity as ReturnType<typeof vi.fn>).mock.calls;
   expect(calls.length).toBeGreaterThan(0);
@@ -624,7 +624,7 @@ describe("SessionController error recovery and precedence", () => {
     expect(errorEmissions(events)).toHaveLength(1);
 
     // Even if an isolated call slips through, a trapped instance is not
-    // un-poisoned — the reload banner must stand.
+    // un-poisoned; the reload banner must stand.
     handlers.onCommand(3, visibilityCmd);
     expect(lastActivity(events).error).toContain("Viewer engine failure");
   });
@@ -645,7 +645,7 @@ describe("SessionController error recovery and precedence", () => {
     expect(errors[0]).not.toContain("Reload");
     expect(errors[0]).toContain("did not match any variant");
 
-    // The scene provably applies other commands fine — the advisory clears.
+    // The scene provably applies other commands, so the advisory clears.
     scene.apply_command.mockImplementation(() => {});
     handlers.onCommand(5, visibilityCmd);
     expect(lastActivity(events).error).toBeNull();
@@ -703,9 +703,9 @@ describe("SessionController error recovery and precedence", () => {
   });
 
   it("a delivery streak beginning after an open failure takes the slot (last-writer)", () => {
-    // A standing one-shot open failure must not mask a live, ongoing data
-    // problem — the stalling canvas would otherwise be attributed to the
-    // wrong (already-final) cause. open/data resolve by last-writer.
+    // A standing one-shot open failure must not mask a live data problem,
+    // or the stalling canvas is blamed on the wrong cause. open/data resolve
+    // by last-writer.
     const { handlers, events } = makeHarness();
     handlers.onOpenDatasetFailed?.("req-open", "http://example/a.zarr", "permission denied");
     expect(lastActivity(events).error).toBe("permission denied");
@@ -746,7 +746,7 @@ describe("SessionController durable import warnings", () => {
     });
     expect(lastActivity(events).warnings).toStrictEqual([sampledLabelNotice]);
 
-    // Completion clears the transient spinner/progress but NOT the warning.
+    // Completion clears the transient spinner and progress, not the warning.
     handlers.onDatasetOpenProgress?.("req-1", "gs://x.zarr", {
       stage: "complete",
       message: "dataset opened",
@@ -776,7 +776,7 @@ describe("SessionController durable import warnings", () => {
   it("collects warnings from several datasets opened in one batch", () => {
     // The multi-seed / source-url-restore flow opens many datasets in one
     // synchronous pass, each through openRemoteDataset. Every open's warnings
-    // must survive — no per-open reset may silently drop all but the last.
+    // must survive; no per-open reset may silently drop all but the last.
     const { controller, handlers, events } = makeHarness();
 
     controller.openRemoteDataset("gs://a.zarr");
@@ -796,9 +796,9 @@ describe("SessionController durable import warnings", () => {
   });
 
   it("keeps an earlier open's warning when a later batch open reports none", () => {
-    // The worst-case regression: an earlier dataset warned, a later one in the
-    // same batch did not. A per-open reset would leave an EMPTY banner even
-    // though a real import warning was reported.
+    // An earlier dataset warned and a later one in the same batch did not. A
+    // per-open reset would leave an empty banner even though a real import
+    // warning was reported.
     const { controller, handlers, events } = makeHarness();
 
     controller.openRemoteDataset("gs://a.zarr");
@@ -1004,8 +1004,8 @@ describe("SessionController durable import warnings", () => {
   it("removing a dataset leaves collected warnings intact", () => {
     // Warnings are keyed by source url, not workspace dataset id; a removal
     // (user drop, or a resync membership sweep) carries only the id, so it must
-    // not clear warnings — doing so unconditionally would drop unrelated
-    // datasets' live warnings. They retire on dismiss / connection loss.
+    // not clear warnings, or it would drop unrelated datasets' live warnings.
+    // They retire on dismiss or connection loss.
     const { handlers, events } = makeHarness();
 
     handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 4, {});
@@ -1048,7 +1048,7 @@ describe("SessionController import-warning cap", () => {
     const activity = lastActivity(events);
     // The observable list never exceeds the cap, no matter how many arrive.
     expect(activity.warnings).toHaveLength(MAX_OPEN_WARNINGS);
-    // It retains the FIRST cap-worth, in arrival order.
+    // It retains the first cap-worth, in arrival order.
     expect(activity.warnings).toStrictEqual(
       Array.from({ length: MAX_OPEN_WARNINGS }, (_, i) => `warn-${i}`),
     );
@@ -1057,7 +1057,7 @@ describe("SessionController import-warning cap", () => {
   });
 
   it("never empties the warning signal under a flood far exceeding the cap", () => {
-    // z6o: a capped DISPLAY is fine; a dropped warning-SIGNAL is not. Even at
+    // A capped display is fine; a dropped warning signal is not. Even at
     // thousands of distinct warnings the list must stay non-empty.
     const { handlers, events } = makeHarness();
     const total = MAX_OPEN_WARNINGS * 160; // 8000 at the default cap
@@ -1071,9 +1071,9 @@ describe("SessionController import-warning cap", () => {
   });
 
   it("warnings past the cap grow only the overflow count, not the retained list", () => {
-    // The mechanism that keeps collecting O(N) rather than O(N^2): once the cap
-    // is reached the store stops growing, so each further collect touches only
-    // the bounded store and the counter — the retained list is untouched.
+    // What keeps collecting O(N) rather than O(N^2): once the cap is reached
+    // the store stops growing, so each further collect touches only the
+    // bounded store and the counter. The retained list is untouched.
     const { handlers, events } = makeHarness();
 
     floodWarnings(handlers, "gs://collection.zarr", MAX_OPEN_WARNINGS);
@@ -1106,7 +1106,7 @@ describe("SessionController import-warning cap", () => {
 
   it("a failed open retires its own overflow, leaving a sibling's intact", () => {
     // Two floods from two sources each overflow; failing one clears only its
-    // own retained warnings AND its own overflow tally.
+    // own retained warnings and its own overflow tally.
     const { handlers, events } = makeHarness();
     floodWarnings(handlers, "gs://a.zarr", MAX_OPEN_WARNINGS + 5, "a");
     // The display is already full from source a; b's are all overflow.
@@ -1122,10 +1122,10 @@ describe("SessionController import-warning cap", () => {
   });
 
   it("keeps a sibling's overflow signal when the sole retaining open fails", () => {
-    // A fills the display and then some; B's warnings all land as overflow
-    // (display already full). When A fails, its retained list AND its overflow
-    // go — but B's warnings really happened, so B's overflow must survive as a
-    // signal even though there is no detailed text left to show.
+    // A fills the display and then some; B's warnings all land as overflow.
+    // When A fails, its retained list and its overflow go, but B's warnings
+    // really happened, so B's overflow must survive even with no detailed
+    // text left to show.
     const { handlers, events } = makeHarness();
     floodWarnings(handlers, "gs://a.zarr", MAX_OPEN_WARNINGS + 5, "a");
     floodWarnings(handlers, "gs://b.zarr", 3, "b");
@@ -1140,7 +1140,7 @@ describe("SessionController import-warning cap", () => {
 
   it("a shared over-cap message is not double-counted as overflow", () => {
     // A message already displayed via one source, reported again by another,
-    // must collapse (dedup) — never inflate the overflow count.
+    // must collapse, never inflate the overflow count.
     const { handlers, events } = makeHarness();
     floodWarnings(handlers, "gs://a.zarr", MAX_OPEN_WARNINGS);
     expect(lastActivity(events).warningsOverflow).toBe(0);
@@ -1204,7 +1204,7 @@ describe("SessionController scene-call scoping across coexisting controllers", (
     b.handlers.onCommand(4, visibilityCmd);
     expect(lastActivity(b.events).error).toContain("Viewer engine failure");
 
-    // A's scene keeps applying fine — that proves nothing about B.
+    // A's scene keeps applying fine, which proves nothing about B.
     a.handlers.onCommand(2, visibilityCmd);
     expect(lastActivity(b.events).error).toContain("Viewer engine failure");
     // And B's failures never counted against A.

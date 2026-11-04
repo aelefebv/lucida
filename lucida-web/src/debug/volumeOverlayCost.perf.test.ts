@@ -1,35 +1,15 @@
 /**
- * The volume overlay's cost contract (#1063, ADR 0049 as amended by
- * #1048): a surface that draws while a run is open must not show up in the
- * run it draws. The overlay polls ten times a second and never per frame,
- * and when it is hidden it does no work at all: the layer is not mounted and
- * no timer runs, which `DebugOverlays.volume.test.tsx` asserts. This file
- * is the measurement of what one poll costs when it is shown.
+ * The volume overlay's cost contract (ADR 0049): a surface that draws while a
+ * run is open must not show up in the run it draws. It polls ten times a
+ * second, never per frame, and does no work while hidden. This file times one
+ * poll at the 600-cell cap: projection, draw list, and edges, silhouette, and
+ * stroke batched by style, plus the pointer hit test. The camera is a
+ * JavaScript pinhole, since the runner has no scene.
  *
- * One poll in volume mode is three pure steps at the overlay's own cap of
- * 600 cells: each box's eight corners through the camera, the shared draw
- * list over the cells with the trace-reading modes on, and the edges,
- * silhouette and stroke of each box, batched by style. A pointer move is a
- * fourth, the hit test over the silhouettes. All four are timed here. The
- * projection is the same eight calls per chunk the screen-rectangle path
- * made before the boxes were kept, so it is not new cost, and the camera
- * here is a pinhole in JavaScript rather than the scene's, which the
- * runner does not have. The two other costs a real poll pays, the cache
- * reads that make the cells and the recorder's per-chunk read, have gates
- * of their own. What the runner cannot time is the browser's side: the
- * layer hands the batches to a handful of path elements rather than one
- * per box, and that is measured only by the A/B on a hardware adapter.
- *
- * ## Tripwires, not benchmarks
- *
- * As in the recorder's gates, the ceilings are absolute figures at
- * {@link CI_SLACK}× slack, because a microbenchmark of a millisecond on a
- * CI runner measures the runner. The real figures are logged on a
- * `[#1063]` line. The poll gets four milliseconds at the cap, four percent
- * of the main thread at ten polls a second, and the cap is a backstop a
- * real picture rarely reaches; most of a poll is turning the edges into
- * path text. The hit test gets a fifth of a millisecond, since pointer
- * moves arrive far more often than polls.
+ * The ceilings are tripwires at {@link CI_SLACK}× slack, not benchmarks: a
+ * millisecond microbenchmark on CI measures the runner. A poll gets 4 ms at
+ * the cap (4% of the main thread at ten polls a second); the hit test gets
+ * 0.2 ms, since pointer moves arrive far more often than polls.
  */
 
 import { describe, expect, it } from "vitest";

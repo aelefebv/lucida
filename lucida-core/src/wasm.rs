@@ -23,23 +23,16 @@ pub fn target_level(pixels_per_sample: f64, shape_ratios: &[f64], previous: Opti
     crate::target_level::target_level(pixels_per_sample, shape_ratios, previous)
 }
 
-/// GPU camera matrices for an off-screen render of an *arbitrary* camera, in the
-/// exact 35-float layout the volume renderer wants:
-/// `invViewProj[16] + eye[3] + viewProj[16]` — identical to
-/// [`WasmScene::minimap_camera`]'s output, so the worker's thumbnail path can
-/// reuse the same offscreen render the minimap uses.
+/// GPU camera matrices for an off-screen render of an arbitrary camera, in the
+/// 35-float layout the volume renderer wants (`invViewProj[16] + eye[3] +
+/// viewProj[16]`), the same as [`WasmScene::minimap_camera`]'s output, so the
+/// worker's thumbnail path reuses the minimap's offscreen render.
 ///
-/// `camera_json` is a serialized [`crate::camera::Camera`] (the `camera` field of
-/// a `SavedView`); `w`/`h` size the off-screen target (its aspect overrides the
-/// camera's stored viewport, which was sized for the full canvas). This is the
-/// thumbnail counterpart to `minimap_camera`: that one synthesizes an orbit
-/// camera from `(theta, phi)`, this one takes a fully-specified child camera and
-/// just reads its matrices via [`Camera::gpu_view_matrices`] — no matrix math is
-/// reimplemented here.
-///
-/// On a malformed `camera_json` it returns an **empty** `Vec` (length 0) rather
-/// than panicking; the JS caller treats `result.length === 0` as "skip this
-/// thumbnail" and falls back to the label-only row.
+/// `camera_json` is a serialized [`crate::camera::Camera`]; `w`/`h` size the
+/// target and override the stored viewport's aspect. The matrices come from
+/// [`Camera::gpu_view_matrices`]. A malformed `camera_json` returns an empty
+/// `Vec` instead of panicking, which the JS caller treats as "skip this
+/// thumbnail".
 #[wasm_bindgen]
 pub fn camera_matrices(camera_json: &str, w: f64, h: f64) -> Vec<f32> {
     let camera: Camera = match serde_json::from_str(camera_json) {
@@ -67,8 +60,7 @@ pub fn set_debug_categories(csv: &str) {
 // `dataset_id_for_url`, `normalize_dataset_url`, and
 // `is_local_dataset_url` are exported directly from `saved_view` via
 // `#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]`. They delegate to
-// `lucida_content::url` — the single source of truth shared with the
-// server and store. See `docs/adr/0042-canonical-dataset-url-form.md`.
+// `lucida_content::url`, shared with the server and store (ADR 0042).
 
 #[wasm_bindgen]
 pub struct WasmScene {
@@ -84,8 +76,6 @@ impl WasmScene {
         }
     }
 
-    // --- Command protocol ---
-    //
     // Every mutator below is a thin JSON adapter: parse, then delegate to
     // `Scene::apply` (a `ViewportCommand`/`Command`) or to a `Scene` method.
     // All mutation and epoch semantics are owned by the always-compiled
@@ -157,8 +147,6 @@ impl WasmScene {
         }
     }
 
-    // --- Mode switching ---
-
     pub fn set_mode_arcball(&mut self) {
         self.inner.apply(ViewportCommand::SetMode3D.into());
     }
@@ -175,16 +163,12 @@ impl WasmScene {
         }
     }
 
-    // --- Shared viewport ---
-
     /// Assert the canvas size. Called every render tick, so it relies on
     /// `Scene::apply`'s no-change guard: a same-size re-assert bumps nothing.
     pub fn set_viewport(&mut self, width: u32, height: u32) {
         self.inner
             .apply(ViewportCommand::SetViewport { width, height }.into());
     }
-
-    // --- 2D camera queries ---
 
     pub fn center(&self) -> Vec<f64> {
         if let Camera::Slice(ref v) = self.inner.camera {
@@ -194,8 +178,6 @@ impl WasmScene {
         }
     }
 
-    // --- View state ---
-    //
     // `set_z`/`set_t`/`set_c` are also re-asserted every render tick, so they
     // too lean on the apply-side no-change guard.
 
@@ -211,13 +193,9 @@ impl WasmScene {
         self.inner.apply(ViewportCommand::SetC { c }.into());
     }
 
-    // --- Multi-channel ---
-
     pub fn multi_channel(&self) -> bool {
         self.inner.view.multi_channel
     }
-
-    // --- Display state ---
 
     pub fn contrast_min(&self) -> f64 {
         self.inner.display.contrast_min
@@ -231,8 +209,6 @@ impl WasmScene {
         self.inner.display.gamma
     }
 
-    // --- View state getters ---
-
     pub fn z(&self) -> u32 {
         self.inner.view.z_range.start
     }
@@ -244,8 +220,6 @@ impl WasmScene {
     pub fn c(&self) -> u32 {
         self.inner.view.c
     }
-
-    // --- Queries ---
 
     pub fn zoom(&self) -> f64 {
         self.inner.camera.effective_zoom()
@@ -298,16 +272,12 @@ impl WasmScene {
     /// Incremental counterpart to [`Self::view_query`]: reports only what
     /// changed since this scene last answered a delta query for the dataset.
     ///
-    /// The scene holds a per-dataset cursor of the last-reported quantized set;
-    /// the first call after the scene is (re)constructed — the cursor is
-    /// `#[serde(skip)]`, so a fresh scene starts empty — yields a `Full`
-    /// snapshot, and subsequent calls yield a `Delta`. Serialized as an
-    /// externally-tagged enum: `{"Full": {...}}` or `{"Delta": {...}}` (see
-    /// [`crate::query::ViewQueryDelta`]). Returns the JSON string `"null"` for
-    /// an unknown dataset, matching [`Self::view_query`]'s missing-dataset
-    /// convention.
-    ///
-    /// Takes `&mut self` because answering advances the cursor.
+    /// The per-dataset cursor is `#[serde(skip)]`, so the first call after the
+    /// scene is constructed yields a `Full` snapshot and later calls a `Delta`,
+    /// serialized as `{"Full": {...}}` or `{"Delta": {...}}` (see
+    /// [`crate::query::ViewQueryDelta`]). An unknown dataset returns `"null"`,
+    /// as [`Self::view_query`] does. Takes `&mut self` because answering
+    /// advances the cursor.
     pub fn view_query_delta(&mut self, dataset_id: &str) -> String {
         let id = DatasetId(dataset_id.into());
         match self.inner.view_query_delta(&id) {
@@ -450,8 +420,6 @@ impl WasmScene {
         serde_json::to_string(&self.inner.member_render_ids(dataset_id)).unwrap()
     }
 
-    // --- Fly camera methods ---
-
     pub fn fly_tick(
         &mut self,
         dt: f64,
@@ -504,8 +472,6 @@ impl WasmScene {
     pub fn volume_diagonal(&self) -> f64 {
         self.inner.volume_diagonal()
     }
-
-    // --- Clip distance methods ---
 
     pub fn clip_distance(&self) -> f64 {
         match &self.inner.camera {
@@ -620,19 +586,15 @@ impl WasmScene {
         }
     }
 
-    /// Project a pin's stored world point `(x, y, z)` — in-plane voxel position
-    /// plus additive voxel depth — to screen-space pixels `[sx, sy]` (physical,
+    /// Project a pin's stored world point `(x, y, z)` (in-plane voxel position
+    /// plus additive voxel depth) to screen pixels `[sx, sy]` (physical,
     /// pre-DPR-divide) through the active camera.
     ///
-    /// This is the 3D analogue of `project_to_screen` for annotations: in slice
-    /// mode it is the same in-plane projection the 2D overlay uses (depth
-    /// ignored); in arcball/fly mode it lifts the point to world space via the
-    /// dataset's rendering transform first, so the marker tracks the volume as
-    /// the camera orbits. Returns an empty `Vec` (length 0) when the point is
-    /// behind the camera (3D) or the dataset has no anchorable member — the same
-    /// empty-vec-as-`Option` convention `project_to_screen` uses. The overlay
-    /// hides the marker on empty, which is what makes a pin disappear as it
-    /// swings behind the volume.
+    /// Slice mode uses the 2D overlay's in-plane projection. Arcball and fly
+    /// lift the point through the dataset's rendering transform first, so the
+    /// marker tracks the volume. Returns an empty `Vec` when the point is
+    /// behind the camera or the dataset has no anchorable member, which the
+    /// overlay uses to hide a pin that swings behind the volume.
     pub fn project_annotation(&self, dataset_id: &str, x: f64, y: f64, z: f64) -> Vec<f64> {
         let id = DatasetId(dataset_id.into());
         match self.inner.project_annotation(&id, x, y, z) {
@@ -660,8 +622,6 @@ impl WasmScene {
             None => Vec::new(),
         }
     }
-
-    // --- Layer display settings ---
 
     pub fn dataset_order(&self) -> String {
         serde_json::to_string(&self.inner.dataset_order).unwrap()
@@ -809,8 +769,6 @@ impl WasmScene {
             .unwrap_or_else(|| id.to_string())
     }
 
-    // --- Layout management ---
-    //
     // Layout mutations (`register_layout` / `set_active_layout`) arrive as
     // ordinary document commands through [`Self::apply_command`]; only the
     // read side lives here.
@@ -850,8 +808,6 @@ impl WasmScene {
 
         serde_json::to_string(&layouts).unwrap()
     }
-
-    // --- Minimap camera ---
 
     pub fn camera_theta(&self) -> f64 {
         if let Camera::Arcball(ref v) = self.inner.camera {

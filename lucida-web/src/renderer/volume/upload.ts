@@ -1,6 +1,6 @@
 /**
- * Volume chunk upload — staleness check, LRU eviction, GPU write,
- * intensity sampling, and per-member post-message demux.
+ * Volume chunk upload: staleness check, eviction, GPU write, intensity
+ * sampling, and per-member feedback messages.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
@@ -23,31 +23,20 @@ import { chunkDistSq, findFarthestSlot, rayHitForMember } from "./eviction.ts";
 import { acquireLabelSlot, getOrCreateLabelVolumePool } from "./atlas.ts";
 
 /**
- * Write WHOLE uint32 label chunks into the member's bricked r32uint label
- * VOLUME atlas. The delivery path (`dispatchLabelVolumeChunkDelivery`)
- * forwards the entire 3D chunk (no plane extraction), so each `chunk.data` is
- * a full `chunkZ*chunkY*chunkX` block of ids. Each chunk lands in exactly the
- * atlas slot its indirection entry names, at that slot's origin, with ids
- * preserved at full 32-bit width (no 16-bit truncation, no intensity-range
- * sampling — categorical, not scalar). The atlas is reused in place across a
- * T scrub (a re-delivered cell overwrites its own slot), so the overlay never
- * blanks. Mirrors the intensity `handleVolumeChunkData` brick placement and
- * edge clamping.
+ * Write whole 3D uint32 label chunks into the member's bricked r32uint
+ * volume atlas. Ids keep their full 32-bit width and get no intensity
+ * sampling, because they are categorical. Brick placement and edge clamping
+ * mirror `handleVolumeChunkData`.
  */
 export function handleLabelVolumeChunkData(
   ctx: WorkerCtx,
   msg: LabelVolumeChunkDataMessage,
 ): void {
-  // Drop an out-of-date delivery (e.g. a previous timepoint's chunk racing
-  // in after the view moved on) so it can't overwrite the atlas with the
-  // wrong T — same stale guard the intensity path uses.
+  // A previous timepoint's chunk racing in must not overwrite the atlas.
   if (isStaleDelivery(msg.epochs, ctx.state.currentEpochs)) return;
 
   const { memberId, datasetId, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ } = msg;
 
-  // Returns null if the atlas can't be sized/allocated — skip the label rather
-  // than throw through the upload path (defense in depth; level selection
-  // already bounds the size).
   const pool = getOrCreateLabelVolumePool(
     ctx, memberId, datasetId, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ,
   );
@@ -55,8 +44,7 @@ export function handleLabelVolumeChunkData(
 
   let wrote = false;
   for (const chunk of msg.chunks) {
-    // Skip a cell outside this level's chunk grid (defensive — a mismatched
-    // delivery can't index past the indirection buffer).
+    // A mismatched delivery must not index past the indirection buffer.
     if (
       chunk.x < 0 || chunk.x >= pool.gridX ||
       chunk.y < 0 || chunk.y >= pool.gridY ||
@@ -64,11 +52,9 @@ export function handleLabelVolumeChunkData(
     ) continue;
     const gridIdx = chunk.z * pool.gridY * pool.gridX + chunk.y * pool.gridX + chunk.x;
 
-    // Edge chunks are partial: clamp the written region to the level extent so
-    // the last brick along each axis copies only its in-bounds voxels. Compute
-    // this BEFORE acquiring a slot so an out-of-bounds cell never consumes (or
-    // evicts for) a slot it would not write, nor writes a dangling indirection
-    // entry pointing at a slot that never received data.
+    // Edge chunks are partial: clamp to the level extent. Do this before
+    // acquiring a slot so an out-of-bounds cell never takes a slot it won't
+    // write or leaves a dangling indirection entry.
     const cw = Math.min(chunkX, pool.width - chunk.x * chunkX);
     const ch = Math.min(chunkY, pool.height - chunk.y * chunkY);
     const cd = Math.min(chunkZ, pool.depth - chunk.z * chunkZ);
@@ -96,8 +82,6 @@ export function handleLabelVolumeChunkData(
     wrote = true;
   }
 
-  // Push the refreshed cell→slot map to the GPU so the shader walks the bricks
-  // this delivery just placed.
   if (wrote) {
     ctx.device.queue.writeBuffer(pool.indirectionBuf, 0, pool.indirectionData);
   }
@@ -112,7 +96,6 @@ export function handleVolumeChunkData(
 ): void {
   const { level, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ } = msg;
 
-  // Drop entire batch if stale
   if (isStaleDelivery(msg.epochs, currentEpochs)) {
     postChunksRequeued(ctx, memberId, msg.chunks, "stale");
     return;
@@ -124,11 +107,9 @@ export function handleVolumeChunkData(
     return; // pool not yet created by cold state handler
   }
 
-  // Debug: detect chunk dims mismatch (pool created for different chunk size)
   if (atlas.chunkX !== chunkX || atlas.chunkY !== chunkY || atlas.chunkZ !== chunkZ) {
     console.warn(`[volumeChunkData] chunkDims mismatch for ${memberId}: pool=[${atlas.chunkX},${atlas.chunkY},${atlas.chunkZ}] msg=[${chunkX},${chunkY},${chunkZ}] level=${level}`);
   }
-  // Look up entity's lodMetas
   const entityLodMetas = atlas.entityMetas.get(memberId);
   if (!entityLodMetas) {
     console.warn(`[volumeChunkData] no entityMeta for ${memberId} in pool ${poolKey}`);
@@ -199,7 +180,6 @@ export function handleVolumeChunkData(
 
     writeVolumeChunk(ctx.device, atlas.texture, data, chunkX, chunkY, cw, ch, cd, xOff, yOff, zOff);
 
-    // Write to entity's per-LOD indirection section (absolute offset)
     const [, lodGridY, lodGridX] = lodMeta.gridDims;
     const globalIdx = lodMeta.offset + chunk.z * lodGridY * lodGridX + chunk.y * lodGridX + chunk.x;
     if (globalIdx < atlas.indirectionData.length) {
@@ -216,7 +196,6 @@ export function handleVolumeChunkData(
     if (max > atlas.intensityMax) { atlas.intensityMax = max; intensityChanged = true; }
   }
 
-  // Report chunks from the batch that the pool did not keep
   const skippedKeys: string[] = [];
   for (const chunk of msg.chunks) {
     if (radiusFilteredKeySet.has(chunk.key)) continue;
@@ -226,10 +205,8 @@ export function handleVolumeChunkData(
     }
   }
 
-  // Report evicted/skipped chunks. Convert composite eviction keys back to (memberId, chunkKey)
-  // so the orchestrator can clear the right delivery tracking.
   if (evictedKeys.length > 0 || skippedKeys.length > 0 || radiusFilteredKeys.length > 0) {
-    // Group evicted keys by memberId (each entity has its own delivery tracking)
+    // Eviction keys are composite; each member has its own delivery tracking.
     const evictedByMember = new Map<string, string[]>();
     for (const ck of evictedKeys) {
       const parsed = parseCompositeKey(ck);
@@ -238,11 +215,9 @@ export function handleVolumeChunkData(
       arr.push(parsed.chunkKey);
       evictedByMember.set(parsed.memberId, arr);
     }
-    // Report evictions per member
     for (const [evMember, evKeys] of evictedByMember) {
       ctx.post({ type: "chunksEvicted", memberId: evMember, keys: evKeys, skipped: [], reason: "evicted" });
     }
-    // Report skipped (this batch's member only)
     if (skippedKeys.length > 0) {
       postChunksRejected(
         ctx,

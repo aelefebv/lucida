@@ -1,15 +1,11 @@
 /**
- * Shared annotation geometry — the TS mirror of `Annotation::vertices()` /
+ * Annotation geometry, the TS mirror of `Annotation::vertices()` and
  * `Annotation::is_closed()` in lucida-core.
  *
- * Both overlays (2D {@link AnnotationOverlay} and 3D {@link AnnotationOverlay3D})
- * render every kind through ONE path: ask {@link annotationVertices} for a pin's
- * in-plane world vertices, project each vertex with that view's own per-vertex
- * marker projection (the 2D camera inverse, or `scene.project_annotation` in
- * 3D), then draw a dot (one vertex), a stroked segment (a line), or a closed
- * polygon (a box). Keeping the per-kind vertex layout in one helper — matching
- * the Rust source of truth — means a line/box renders identically in both views
- * and a future kind only extends this file plus its Rust twin.
+ * Both overlays get a pin's in-plane world vertices from here, project each with
+ * their own camera, then draw a dot, a segment, or a closed polygon. Keep the
+ * per-kind vertex layout in step with the Rust twin so a shape renders the same
+ * in both views.
  */
 import type { Annotation } from "./annotationDocument.ts";
 
@@ -17,16 +13,9 @@ import type { Annotation } from "./annotationDocument.ts";
 export type ScreenPoint = [number, number];
 
 /**
- * The in-plane world vertices of a pin's shape, in draw order — mirrors
- * `Annotation::vertices()`:
- *
- * - point → `[position]`
- * - line  → `[position, end]`
- * - box   → the four rectangle corners for opposite corners `position`/`end`,
- *           wound `position → (end.x, position.y) → end → (position.x, end.y)`
- *
- * A line/box whose `end` is missing collapses to its single anchor `position`,
- * so the geometry always has at least one vertex (never empty, never throws).
+ * The in-plane world vertices of a pin's shape, in draw order. A line or box
+ * with no `end` collapses to its anchor `position`, so the result is never
+ * empty.
  */
 export function annotationVertices(pin: Annotation): ScreenPoint[] {
   const p = pin.position;
@@ -45,41 +34,30 @@ export function annotationVertices(pin: Annotation): ScreenPoint[] {
   return [p];
 }
 
-/** Whether the drawn shape is a closed ring (a box) vs. an open run
- * (a point or line). Mirrors `Annotation::is_closed()`. */
+/** Whether the drawn shape is a closed ring (a box with an `end`). */
 export function isClosedShape(pin: Annotation): boolean {
   return pin.kind === "box" && (pin.end ?? null) !== null;
 }
 
-/** A pair of opposite in-plane world corners of a box: `position` (the anchor)
- * and `end` (the opposite corner). The reshape command carries exactly these
- * two — the backend places them verbatim (no rigid translate). */
+/** Opposite in-plane world corners of a box. The reshape command carries both
+ * and the backend places them verbatim. */
 export interface BoxCorners {
   position: [number, number];
   end: [number, number];
 }
 
-/** A pair of in-plane world endpoints of a line: `position` (the anchor vertex)
- * and `end` (the far vertex). The same shape as {@link BoxCorners} so the
- * overlay can carry either through one reshape gesture; named separately for the
- * line's two-vertex semantics (a segment, not a rectangle). */
+/** In-plane world endpoints of a line. Same shape as {@link BoxCorners} so one
+ * reshape gesture can carry either. */
 export interface LineEndpoints {
   position: [number, number];
   end: [number, number];
 }
 
-/** The two draggable endpoints of a line, in a stable order: the anchor
- * (`position`) vertex then the far (`end`) vertex. The analog of
- * {@link BOX_HANDLES} for a line — a line has exactly these two grips. */
+/** A line's two grips: `start` on `position`, `end` on `end`. */
 export const LINE_HANDLES = ["start", "end"] as const;
 export type LineHandle = (typeof LINE_HANDLES)[number];
 
-/**
- * The in-plane world point a given line endpoint sits on. The line analog of
- * {@link boxHandlePoint}: `start` rides the anchor vertex (`position`), `end`
- * the far vertex (`end`). The overlay reprojects this every frame to place each
- * endpoint grip, exactly as it does each box handle.
- */
+/** The in-plane world point a line grip sits on. */
 export function lineHandlePoint(endpoints: LineEndpoints, handle: LineHandle): ScreenPoint {
   return handle === "start"
     ? [endpoints.position[0], endpoints.position[1]]
@@ -87,23 +65,14 @@ export function lineHandlePoint(endpoints: LineEndpoints, handle: LineHandle): S
 }
 
 /**
- * Recompute a line's two endpoints after dragging `handle` to the world point
- * `world` — the geometry an endpoint drag emits as `move_annotation
- * {position, end}` (a reshape; the backend takes both verbatim). The two-case
- * analog of {@link reshapeBox}: the grabbed endpoint moves to `world`, the other
- * endpoint stays exactly where it was, so dragging one end never disturbs the
- * other.
- *  - `start` → set `position` to `world`, hold `end`.
- *  - `end`   → set `end` to `world`, hold `position`.
- *
- * The result is a pure value (the inputs are not mutated).
+ * A line's endpoints after dragging `handle` to `world`: the grabbed endpoint
+ * moves, the other stays put. Emitted as `move_annotation {position, end}`.
  */
 export function reshapeLine(
   endpoints: LineEndpoints,
   handle: LineHandle,
   world: [number, number],
 ): LineEndpoints {
-  // Copy so the inputs stay immutable.
   const position: [number, number] = [endpoints.position[0], endpoints.position[1]];
   const end: [number, number] = [endpoints.end[0], endpoints.end[1]];
   if (handle === "start") {
@@ -122,18 +91,11 @@ export const BOX_HANDLES = ["nw", "ne", "se", "sw", "n", "e", "s", "w"] as const
 export type BoxHandle = (typeof BOX_HANDLES)[number];
 
 /**
- * The in-plane world point a given resize handle sits on, for a box whose
- * opposite corners are `position` (the anchor) and `end`.
+ * The in-plane world point a box resize handle sits on.
  *
- * Handle identity is tied to the two VERTEX ROLES, not to screen min/max, so
- * the resize semantics are stable however the box was drawn (any winding):
- *  - `nw` sits on the anchor corner (`position`); `se` on the opposite (`end`).
- *  - `ne` = (end.x, position.y); `sw` = (position.x, end.y) — the mixed corners.
- *  - edge midpoints `n`/`s` ride the position.y / end.y edges; `w`/`e` the
- *    position.x / end.x edges.
- *
- * This is the projection input the overlay reprojects every frame to place each
- * handle, and the same map {@link reshapeBox} uses to recompute the two corners.
+ * Handles are tied to vertex roles, not screen min/max, so resize behaves the
+ * same however the box was drawn: `nw` is `position`, `se` is `end`, `ne` and
+ * `sw` are the mixed corners, and the edge midpoints ride the matching edges.
  */
 export function boxHandlePoint(corners: BoxCorners, handle: BoxHandle): ScreenPoint {
   const { position: p, end: e } = corners;
@@ -160,29 +122,19 @@ export function boxHandlePoint(corners: BoxCorners, handle: BoxHandle): ScreenPo
 }
 
 /**
- * Recompute a box's two opposite corners after dragging `handle` to the world
- * point `world` — the geometry a corner/edge resize emits as
- * `move_annotation {position, end}` (a reshape; the backend takes both verbatim).
+ * A box's corners after dragging `handle` to `world`. Each handle moves only
+ * the coordinates it owns, so the opposite corner or edge stays anchored.
+ * Emitted as `move_annotation {position, end}`.
  *
- * Each handle moves only the coordinates it owns, leaving the rest put — so the
- * opposite corner/edge stays anchored:
- *  - corners set the two coordinates of their own vertex role (`nw` → both of
- *    `position`; `se` → both of `end`; `ne`/`sw` → one of each);
- *  - edges set a single coordinate (`n` → position.y, `s` → end.y, `w` →
- *    position.x, `e` → end.x).
- *
- * The result is a pure value (the inputs are not mutated). It is intentionally
- * NOT normalized (corners may cross, flipping the box) — `Annotation::vertices`
- * /{@link annotationVertices} derive the rectangle from whatever two corners
- * result, so a drag past the opposite side simply flips the box, matching how
- * every direct-manipulation rect editor behaves.
+ * Intentionally not normalized: a drag past the opposite side flips the box,
+ * and {@link annotationVertices} derives the rectangle from whatever corners
+ * result.
  */
 export function reshapeBox(
   corners: BoxCorners,
   handle: BoxHandle,
   world: [number, number],
 ): BoxCorners {
-  // Copy so the inputs stay immutable.
   const position: [number, number] = [corners.position[0], corners.position[1]];
   const end: [number, number] = [corners.end[0], corners.end[1]];
   switch (handle) {
