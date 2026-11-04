@@ -1,7 +1,7 @@
 /**
  * Debug logging registry. Single source of truth for enabled categories,
  * persisted in `localStorage.debug` as a comma-separated list (or `*` for
- * all). See `wiki/decisions/0012-logging-conventions.md`.
+ * all). See `docs/adr/0012-logging-conventions.md`.
  *
  * There is no UI over the categories: `localStorage.debug = 'bridge,cache'`
  * plus a reload is the interface (ADR 0012, as amended by ADR 0052).

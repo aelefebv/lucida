@@ -2376,13 +2376,6 @@ describe("plan() — minimap lane", () => {
     expect(result.requests.some((r) => r.lane === "minimap")).toBe(false);
   });
 
-  // The "skips coords for an imageId that no visible entity matches"
-  // case isn't covered here: per ADR 0031, `validatePlanningInputs`
-  // (called at the top of `plan()` in dev mode) throws on an unknown
-  // `minimapPending` key at the producer boundary instead of letting
-  // the planner silently ignore it. That throw is covered by
-  // `validate.test.ts > checkMinimapKeys`.
-
   it("sorts before every other lane after the priority sort (smallest priority first)", () => {
     const snap = makeMinimapSnapshot();
     const result = plan(snap, createSyntheticState());

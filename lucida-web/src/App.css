@@ -18,7 +18,7 @@
 }
 
 /* Chrome-free capture surface (`?render=1`), used by `dataset montage` and
-   `viewer render`: hide every piece of UI so a headless screenshot is pure data
+   `dataset explore`: hide every piece of UI so a headless screenshot is pure data
    on the WebGPU canvas, and let the canvas fill the whole viewport. The render
    loop draws to the canvas independent of the overlay DOM, so hiding overlays
    never stops rendering. `> :not(canvas)` also sweeps up any future overlay.

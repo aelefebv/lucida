@@ -2,7 +2,7 @@
 //!
 //! URL scheme routing (after [`lucida_content::url::normalize_dataset_url`]
 //! is applied at entry — see
-//! `wiki/decisions/0042-canonical-dataset-url-form.md`):
+//! `docs/adr/0042-canonical-dataset-url-form.md`):
 //! - Unix `/path/...`, drive-letter `c:/path/...`, UNC `//server/share/...`
 //!   → local filesystem (classified via [`lucida_content::url::is_local_dataset_url`]).
 //! - `gs://bucket/...` → Google Cloud Storage. Credential discovery order:
@@ -185,7 +185,7 @@ fn parse_s3_url(url: &str) -> Result<(&str, Option<&str>), StoreError> {
 /// [`lucida_content::url::normalize_dataset_url`] (idempotent, pure
 /// string-level). All subsequent dispatch — and the value embedded in
 /// any [`StoreError::UnsupportedScheme`] — uses the canonical form. See
-/// `wiki/decisions/0042-canonical-dataset-url-form.md` for the rationale.
+/// `docs/adr/0042-canonical-dataset-url-form.md` for the rationale.
 ///
 /// Dispatch on the canonical form. Normalization lowercases a leading URI
 /// scheme (schemes are case-insensitive per RFC 3986), so `HTTP://…` and

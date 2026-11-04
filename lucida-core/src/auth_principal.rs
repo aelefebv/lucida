@@ -6,7 +6,7 @@
 //! Google JWT in production, future providers all flow through the same
 //! shape.
 //!
-//! See `wiki/decisions/0015-server-stored-bookmarks-and-auth-seam.md`
+//! See `docs/adr/0015-server-stored-bookmarks-and-auth-seam.md`
 //! for the rationale behind landing this in lucida-core (the shared
 //! type) rather than in lucida-server (the trait + extractors).
 

@@ -1,7 +1,7 @@
 /**
  * Dev controls — the one surviving *mutation* surface for the pipeline,
  * a standalone panel docked to the right of the canvas and opened from
- * the toolbar. See `wiki/decisions/0052-debug-surface-dispositions.md`.
+ * the toolbar. See `docs/adr/0052-debug-surface-dispositions.md`.
  *
  * It is named for mutation rather than for configuration because
  * configuration is only one of its contents:
@@ -19,8 +19,7 @@
  *
  * Those two lifetimes sit side by side, so the session-scoped section
  * says so on screen: controls that silently reset next to controls that
- * do not is a trap. (Unifying them onto one store is deliberately out of
- * scope — see `wiki/decisions/deferred.md`.)
+ * do not is a trap. (Unifying them onto one store is aelefebv/lucida#1113.)
  *
  * Every knob here is a developer tunable, so writes are dev-build only
  * (`editable` defaults to `import.meta.env.DEV`); production builds

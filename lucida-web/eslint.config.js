@@ -22,8 +22,7 @@ export default defineConfig([
     rules: {
       // Honor the established `_` prefix convention for intentionally-unused
       // names — used across callback signatures (e.g. `(state, _dsId) => ...`)
-      // where a parameter must keep its position but isn't read. See the
-      // wiki gotcha `preexisting-ts-build-errors` for the historical pattern.
+      // where a parameter must keep its position but isn't read.
       '@typescript-eslint/no-unused-vars': [
         'error',
         { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_' },

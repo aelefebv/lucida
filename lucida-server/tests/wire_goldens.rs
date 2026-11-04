@@ -18,7 +18,7 @@
 //! `ViewportCommand` is out of wire scope by design and needs no fixtures:
 //! viewport commands never cross the socket — `ClientMessage::Command`
 //! carries `DocumentCommand` only, and presence carries viewport *state*,
-//! not commands (see wiki/decisions/0001-document-vs-viewport-split.md).
+//! not commands (see docs/adr/0001-document-vs-viewport-split.md).
 //!
 //! This test constructs the exact same values in code, serializes them with
 //! serde, and asserts byte-for-byte equality with the committed files. The

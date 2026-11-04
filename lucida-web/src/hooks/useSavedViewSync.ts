@@ -37,9 +37,7 @@ interface Params {
   changeTick: number;
   /** Debounce override for tests. Default 350. */
   debounceMs?: number;
-  /** Callback fired after every successful apply; resolves the
-   *  selected-dataset wrinkle ([[wiki/queue]] 2026-05-07, option c) by
-   *  letting App.tsx re-target `selectedDatasetId` at the first visible
+  /** Callback fired after every successful apply. It lets App.tsx re-target `selectedDatasetId` at the first visible
    *  dataset on apply (so dimension/contrast controls operate on
    *  something the user can see). */
   onApplyResult?: (firstVisibleDatasetId: string | null) => void;

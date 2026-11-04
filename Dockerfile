@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 #
 # Lucida canonical deploy image.
-# Per ADR-0020 (wiki/decisions/0020-single-image-with-servedir.md), one
+# Per ADR-0020 (docs/adr/0020-single-image-with-servedir.md), one
 # container bundles the API binary, the SPA dist, and the WASM pkg. The
 # same image runs in production via Kubernetes, in a developer's
 # `docker run` for local use, and in a `cargo run --release`-based
@@ -72,7 +72,7 @@ RUN set -eux; \
 WORKDIR /workspace
 
 # Copy the workspace. .dockerignore keeps target/, node_modules/,
-# lucida-core/pkg/, lucida-web/dist/, .git/, wiki/, extras/, lucida-py/,
+# lucida-core/pkg/, lucida-web/dist/, .git/, docs/, extras/, lucida-py/,
 # lucida.db*, secrets, etc. out of the build context.
 # Cargo.lock is committed: this workspace ships release binaries
 # (lucida-server, the lucida CLI) and this image, so the lock pins the

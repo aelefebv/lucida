@@ -1,7 +1,7 @@
 /**
  * Planning tunables. `PlanningConfig` is the single value {@link plan}
- * accepts for policy knobs (principle §4 in `wiki/principles/planning.md`:
- * planning is pure, knobs are explicit inputs).
+ * accepts for policy knobs: planning is pure, so knobs are explicit inputs
+ * (see the planning section of `intention.md`).
  *
  * Defaults live in this leaf module (no `./index.ts` import) so the
  * barrel can re-export both the named constants and

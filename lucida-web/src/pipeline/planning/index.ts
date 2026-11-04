@@ -1,5 +1,5 @@
 /**
- * Planning domain — public barrel. See ADR 0029.
+ * Planning domain — public barrel.
  * Core lives in sibling files; this module is re-exports only.
  */
 

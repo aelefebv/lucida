@@ -1,6 +1,6 @@
 /**
  * Top-level pure planner. Composes active-set assignment + chunk
- * iteration + lane scheduling into a {@link RequestPlan}. See ADR 0029.
+ * iteration + lane scheduling into a {@link RequestPlan}.
  */
 
 import type { SceneEpochs } from "../epochs.ts";
@@ -158,7 +158,7 @@ export function plan(
   state: PlanningState,
   config: PlanningConfig = DEFAULT_PLANNING_CONFIG,
 ): RequestPlan {
-  // Dev-mode boundary check (see ADR 0031). Vite dead-code-eliminates
+  // Dev-mode boundary check. Vite dead-code-eliminates
   // this branch in production builds; the validator's source is
   // absent from the shipped bundle.
   if (import.meta.env.DEV) validatePlanningInputs(snapshot, state);

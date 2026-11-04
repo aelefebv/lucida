@@ -84,8 +84,7 @@ export interface CaptureInputs {
  * Build a `SavedView` capture record from the live scene state.
  *
  * Datasets without a known URL are omitted — there's no way to round-trip
- * them to a recipient. (See [[decisions/0014-local-file-datasets-personal-only-in-saved-views]]
- * for the local-file warning that the share button surfaces.)
+ * them to a recipient. (See ADR 0014 for the local-file warning that the share button surfaces.)
  */
 export function buildCapture({
   scene,
@@ -191,7 +190,7 @@ export function buildCapture({
 
 /** True if any URL is a local-file path. Used by the share toolbar to
  * surface the personal-only warning per
- * [[decisions/0014-local-file-datasets-personal-only-in-saved-views]]. */
+ * ADR 0014. */
 export function hasLocalFilePaths(view: SavedView): boolean {
   return view.datasets.some(isLocalFilePath);
 }
@@ -204,7 +203,7 @@ export function localFilePathCount(view: SavedView): number {
  * Delegates to the wasm-shimmed `is_local_dataset_url` so the SPA's
  * share-warning classifier shares one implementation with the Rust
  * server and storage layer. See
- * [[decisions/0042-canonical-dataset-url-form]] for the canonical-form
+ * ADR 0042 for the canonical-form
  * contract: callers pass the already-canonical URL (URLs in
  * `SavedView.datasets` are normalized at submit-time by
  * `useDatasets.handleUrlSubmit`, and `DatasetOpened` broadcasts carry

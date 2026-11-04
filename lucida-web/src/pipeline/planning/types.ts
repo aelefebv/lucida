@@ -1,6 +1,6 @@
 /**
  * Planning types and interfaces. Leaf module so siblings can import
- * without circular dependencies. See ADR 0029.
+ * without circular dependencies.
  */
 
 import type { LevelGeometry } from "../../manifestTypes.ts";
@@ -115,9 +115,7 @@ export interface TileSnapshot extends BaseEntitySnapshot {
  * Discriminated union of the three entity kinds. The previous flat
  * `EntitySnapshot` interface (with `parentId: string | null`) is
  * replaced; consumers narrow on `kind` before reading variant-specific
- * tiles. Cited [[principles/planning#4-planning-is-pure-carry-forward-state-is-explicit]]
- * extended from "carry-forward state is explicit" to "per-variant
- * invariants are compile-time enforced."
+ * tiles, so per-variant invariants are compile-time enforced.
  */
 export type EntitySnapshot = ImageSnapshot | GroupSnapshot | TileSnapshot;
 
@@ -210,8 +208,7 @@ export interface PlanningSnapshot {
  * hysteresis, planner state machines) can be added without churning
  * {@link PlanningSnapshot}'s contract.
  *
- * Cited [[principles/planning#4-planning-is-pure-carry-forward-state-is-explicit]]
- * and ADR `0027-planning-state-as-the-carry-forward-seam.md`.
+ * See ADR 0027.
  */
 export interface PlanningState {
   previousActiveSet: ActiveSetEntry[];
@@ -374,8 +371,7 @@ export type EntityMode =
  * One active-set entry per visible tile, plus pass-through entries for
  * invisible entities. Discriminated by `kind`
  * so each variant can declare only the tiles that make sense for it
- * (per-variant invariants compile-time enforced — see
- * [[principles/planning#4-planning-is-pure-carry-forward-state-is-explicit]]).
+ * (per-variant invariants compile-time enforced).
  *
  * Three variants:
  *   - {@link GroupAsProxyEntry} (`kind: "group-as-proxy"`) — a group

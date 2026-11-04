@@ -1444,7 +1444,7 @@ export class CpuCache {
       traceRow,
     };
 
-    // Coarse-tier lanes share the overview store (ADR 0023, ADR 0039).
+    // Coarse-tier lanes share the overview store (ADR 0023, ADR 0061).
     if (lane === "overview" || lane === "minimap" || lane === "coarse") {
       if (stale && this.overviewStore.bytes + cacheEntry.sizeBytes > this.overviewStore.budgetBytes) {
         // Decoded and then dropped on the floor: the row ends here, and

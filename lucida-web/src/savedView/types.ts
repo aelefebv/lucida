@@ -1,7 +1,7 @@
 // TypeScript mirror of `lucida_core::saved_view::SavedView`. Kept in
 // lock-step with the Rust definition; the wire format is the contract
 // (see `lucida-core/src/saved_view.rs` for the canonical schema and
-// `wiki/decisions/0013-url-as-app-state-for-saved-views.md` for the
+// `docs/adr/0013-url-as-app-state-for-saved-views.md` for the
 // rationale).
 
 export const SAVED_VIEW_VERSION = 1;
