@@ -16,7 +16,7 @@
  * contracts are locked elsewhere (wire goldens / the wasm-bindgen `.d.ts`).
  *
  * The two unions are tag-disjoint by construction, mirroring the Rust enums
- * (`wiki/decisions/0001-document-vs-viewport-split.md`): a command is either
+ * (`docs/adr/0001-document-vs-viewport-split.md`): a command is either
  * shared document state (sequenced + broadcast via `applyDocumentCommand`) or
  * local viewport state (`applyViewportCommand`), never both. The assertion at
  * the bottom of this file makes any future tag collision a compile error.

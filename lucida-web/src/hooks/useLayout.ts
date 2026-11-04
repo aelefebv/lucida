@@ -18,7 +18,7 @@ export function useLayout({
   );
 
   // The chrome-free capture surface (`?render=1`, used by `dataset montage`,
-  // `viewer render` and the trace driver) fills the whole viewport with the canvas so a headless
+  // `dataset explore` and the trace driver) fills the whole viewport with the canvas so a headless
   // screenshot is pure data — no sidebar, no toolbar. Mirror the window size
   // (the capture drives it via CDP device-metrics) and keep it in sync on resize.
   useEffect(() => {

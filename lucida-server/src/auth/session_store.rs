@@ -6,8 +6,8 @@
 //! `async_trait`-annotated so it's object-safe; the extractor holds
 //! `Arc<dyn LoginSessionStore>`.
 //!
-//! See `wiki/decisions/0015-server-stored-bookmarks-and-auth-seam.md`
-//! and `wiki/decisions/0016-backend-mediated-oauth-with-session-cookies.md`
+//! See `docs/adr/0015-server-stored-bookmarks-and-auth-seam.md`
+//! and `docs/adr/0016-backend-mediated-oauth-with-session-cookies.md`
 //! for the architectural rationale.
 
 use async_trait::async_trait;

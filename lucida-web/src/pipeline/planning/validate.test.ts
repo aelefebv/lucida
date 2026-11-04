@@ -3,8 +3,7 @@
  * helpers. Each helper gets at least one passing case and one violating
  * case; the composing function gets a fully-valid passing case and a
  * smoke test that violations propagate.
- *
- * Per ADR 0031, per-check coverage is colocated with the validator.
+
  */
 
 import { describe, it, expect } from "vitest";

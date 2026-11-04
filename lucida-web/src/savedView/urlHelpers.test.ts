@@ -3,7 +3,7 @@
 // `lucida-core` wasm bundle. These functions are thin shims over
 // `lucida_content::url` (the single source of truth, shared with the
 // server and storage layer — see
-// `wiki/decisions/0042-canonical-dataset-url-form.md`). The intent of
+// `docs/adr/0042-canonical-dataset-url-form.md`). The intent of
 // this test is to catch build-config drift: if wasm-pack ever stops
 // re-exporting these names, the smoke test fails loudly rather than
 // the SPA discovering it at runtime when a user types a Windows path.

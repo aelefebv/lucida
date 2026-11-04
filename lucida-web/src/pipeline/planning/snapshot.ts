@@ -3,7 +3,7 @@
  * {@link PlanningSnapshot}. Single boundary between WASM scene queries
  * and the pure planning core: snake_case normalised to camelCase here,
  * fallbacks explicit. Pure (no module state, no input mutation).
- * See `wiki/principles/planning.md` §4 and §5.
+ * See the planning section of `intention.md`.
  */
 
 import type { WasmScene } from "lucida-core";
@@ -233,7 +233,7 @@ export function buildPlanningSnapshot(
   // 3. Build helper maps from the dataset manifest:
   //   - imageSpecById: per-image multiscale levels
   //   - parentByEntityId: stitches `Tile.parent === groupId` so promotion
-  //     can group tiles by their parent group (ADR 0025).
+  //     can group tiles by their parent group.
   //   Both derive from the immutable manifest (camera-independent), so a
   //   caller may supply them prebuilt; otherwise build them here. Not needed
   //   on the override path (the rows were already joined with the manifest).

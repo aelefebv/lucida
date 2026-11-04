@@ -696,7 +696,7 @@ pub struct LogoutState {
 /// whether or not the request carried a valid session cookie, so the
 /// web client can call it without first checking auth state. We
 /// deliberately do **not** federate to Google's revoke endpoint — see
-/// `wiki/decisions/0016-backend-mediated-oauth-with-session-cookies.md`
+/// `docs/adr/0016-backend-mediated-oauth-with-session-cookies.md`
 /// §"Logout" for the rationale (the ID token isn't held past login).
 ///
 /// Returns 302 to `/`. fetch() in the web client follows redirects by

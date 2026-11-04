@@ -1,7 +1,7 @@
 //! Capture record for the URL-as-app-state saved-views feature
-//! (see `wiki/decisions/0013-url-as-app-state-for-saved-views.md`).
+//! (see `docs/adr/0013-url-as-app-state-for-saved-views.md`).
 //!
-//! `SavedView` spans both tiers of the [[document-vs-viewport-split]]: the
+//! `SavedView` spans both tiers of the document/viewport split (ADR 0001): the
 //! `datasets` + `active_layouts` fields are the document-state surface (what
 //! is loaded), and `camera` + `view` + `display` + `dataset_order` +
 //! `dataset_settings` mirror the [`PresenceState`] surface (how it's being
@@ -15,11 +15,11 @@
 //! future bumps (`v: 2`+) require an explicit migration story.
 //!
 //! Tests at the bottom of this file lock the wire format. Don't touch them
-//! casually — see [[gotchas/scene-document-state-json-compat]].
+//! casually.
 //
 // The URL-derivation helpers (`dataset_id_for_url`, plus the new
 // `normalize_dataset_url` and `is_local_dataset_url` from
-// `wiki/decisions/0042-canonical-dataset-url-form.md`) live in
+// `docs/adr/0042-canonical-dataset-url-form.md`) live in
 // `lucida-content::url` so server, store, and SPA share one
 // implementation. The shims below re-export them via `#[wasm_bindgen]`
 // so the existing `import { dataset_id_for_url } from "lucida-core"`
@@ -46,15 +46,15 @@ pub const SAVED_VIEW_VERSION: u32 = 1;
 
 /// Capture record for a "saved view" — the user's complete view of one or
 /// more datasets at a moment in time. Encoded into the URL hash by
-/// [[lucida-web]]; consumed by the apply orchestrator on page load /
+/// lucida-web; consumed by the apply orchestrator on page load /
 /// `popstate`.
 ///
 /// Crosses the document/viewport split:
 ///
-/// - `datasets`, `active_layouts` mirror [[scene-state-and-epochs]]
+/// - `datasets`, `active_layouts` mirror the
 ///   document state (what is loaded; which layout is active).
 /// - `camera`, `view`, `display`, `dataset_order`, `dataset_settings`
-///   mirror [[presence-and-follow-mode]]'s `PresenceState` surface
+///   mirror the `PresenceState` surface
 ///   (where the camera is, which slice, contrast, per-dataset display).
 ///
 /// `PartialEq` (not `Eq` — the camera/display fields hold `f64`) so a
@@ -77,8 +77,7 @@ pub const SAVED_VIEW_VERSION: u32 = 1;
 /// round-trips that order verbatim, so the rebroadcast is byte-identical. This
 /// matches the existing wire-borne document collections on
 /// [`DocumentState`](crate::scene::DocumentState) — its `manifests`,
-/// `asset_catalogs`, and `annotations` are `IndexMap` for exactly this reason
-/// ([[scene-state-and-epochs]]).
+/// `asset_catalogs`, and `annotations` are `IndexMap` for exactly this reason.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SavedView {
     /// Schema version. Always [`SAVED_VIEW_VERSION`] (currently `1`) in
@@ -163,7 +162,7 @@ impl SavedView {
     /// pin ([`crate::scene::Annotation::view`]) or as a stored workspace saved
     /// view — must not also carry source URLs (incl. local `file:///` paths)
     /// into broadcast/persisted state. See decision 0014
-    /// (`wiki/decisions/0014-local-file-datasets-personal-only-in-saved-views.md`)
+    /// (`docs/adr/0014-local-file-datasets-personal-only-in-saved-views.md`)
     /// and the `Annotation::view` field doc. The single owner of this
     /// invariant, so the apply path and the duplicate copy path can both
     /// enforce it identically.
@@ -217,9 +216,9 @@ impl SavedView {
 /// truth for the BLAKE3-derived id, shared between the SPA, the server
 /// (`lucida-server::handler`), and the storage layer
 /// (`lucida-store::backend::open`). See
-/// `wiki/decisions/0042-canonical-dataset-url-form.md` for placement
+/// `docs/adr/0042-canonical-dataset-url-form.md` for placement
 /// rationale and
-/// `wiki/decisions/0014-local-file-datasets-personal-only-in-saved-views.md`
+/// `docs/adr/0014-local-file-datasets-personal-only-in-saved-views.md`
 /// for the BLAKE3-collision sharp edge.
 ///
 /// On `target_arch = "wasm32"` this function is also exported via

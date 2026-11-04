@@ -258,7 +258,7 @@ function membershipDatasetId(
  * `localStorage.setItem("debug", "bridge")`
  * followed by `refreshDebugCategories()` (the gate is cached at module
  * init; a raw same-tab setItem alone isn't seen until reload). See
- * `wiki/decisions/0012-logging-conventions.md`.
+ * `docs/adr/0012-logging-conventions.md`.
  */
 export function bridgeLog(event: string, data: Record<string, unknown> = {}, wsReadyState?: number) {
   if (!isDebugEnabled("bridge")) return;

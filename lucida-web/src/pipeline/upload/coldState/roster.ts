@@ -149,7 +149,7 @@ export function buildRoster(args: {
 }): BuildRosterResult {
   const { activeSet, entities, ctx, datasetId, tileMatrixCache } = args;
 
-  // Use the planning module's canonical grouping (ADR 0025) so the
+  // Use the planning module's canonical grouping so the
   // roster builder agrees with `buildActiveSet` on which tiles make up
   // each group.
   const tilesByGroup = new Map<string, EntitySnapshot[]>();

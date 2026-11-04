@@ -68,7 +68,7 @@ pub fn set_debug_categories(csv: &str) {
 // `is_local_dataset_url` are exported directly from `saved_view` via
 // `#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]`. They delegate to
 // `lucida_content::url` — the single source of truth shared with the
-// server and store. See `wiki/decisions/0042-canonical-dataset-url-form.md`.
+// server and store. See `docs/adr/0042-canonical-dataset-url-form.md`.
 
 #[wasm_bindgen]
 pub struct WasmScene {

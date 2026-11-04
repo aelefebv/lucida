@@ -2,7 +2,7 @@
  * Builds the active set. Every visible image or tile becomes one
  * {@link TileEntry} carrying the levels each residency tier holds for
  * it. Invisible entities pass through as {@link InvisibleEntry}. See ADR
- * 0029 for the file split and ADR 0039 for the two-tier residency model.
+ * 0061 for the two-tier residency model.
  */
 
 import type {
@@ -24,7 +24,7 @@ import type {
  * `tiles: []`.
  *
  * Exported so the orchestrator can reuse the same grouping rule
- * when building the render-layer roster (see ADR 0025).
+ * when building the render-layer roster.
  */
 export function groupMembers(entities: EntitySnapshot[]): MemberGroup[] {
   const groups = new Map<string, MemberGroup>();

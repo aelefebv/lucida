@@ -51,7 +51,7 @@ use crate::{BroadcastItem, ProxyConfig};
 // `dataset_id_for_url` and `dataset_url_hash16` live in
 // `lucida_content::url` so the SPA (via the `lucida-core` wasm shim),
 // the storage layer, and this orchestration share one implementation. See
-// `wiki/decisions/0042-canonical-dataset-url-form.md`.
+// `docs/adr/0042-canonical-dataset-url-form.md`.
 
 /// The workspace scope a connection acts under: the live runtime handles,
 /// the [`WorkspaceManager`] that owns authorization and persistence, and
@@ -117,7 +117,7 @@ fn emit(progress: &ProgressSink, diagnostic: DatasetOpenProgressDiagnostic) {
 /// `DatasetId`; the source-derived id is retained only for membership
 /// dedupe and shared source/cache routing. This makes spelling variants
 /// of the same path dedup to one source — see
-/// `wiki/decisions/0042-canonical-dataset-url-form.md` for the rationale.
+/// `docs/adr/0042-canonical-dataset-url-form.md` for the rationale.
 ///
 /// Concurrent opens of the same URL are safe: a fast pre-check reuses an
 /// existing binding, and the apply step re-checks under the session lock

@@ -1,7 +1,7 @@
 //! Fair-share admission for backend source reads.
 //!
 //! One bound over the whole process, handed out fairly between readers. See
-//! `wiki/decisions/0053-fair-share-source-read-admission.md` for why the bound
+//! `docs/adr/0053-fair-share-source-read-admission.md` for why the bound
 //! stays global while admission does not.
 //!
 //! A plain semaphore is FIFO, and FIFO is the wrong queue discipline here: the

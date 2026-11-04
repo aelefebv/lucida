@@ -6,7 +6,7 @@
 # is the equivalent shape: one container, one named volume mounted at
 # /var/lib/lucida, env vars mirroring the k8s Deployment.
 #
-# Per ADR-0021 (wiki/decisions/0021-deployment-artifacts-as-reference-templates.md)
+# Per ADR-0021 (docs/adr/0021-deployment-artifacts-as-reference-templates.md)
 # this is a reference template — copy it, replace every <PLACEHOLDER>,
 # own the result. The placeholders are the same ones in k8s/*.yaml.
 #

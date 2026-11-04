@@ -46,7 +46,7 @@ export function ShareToolbarButton({ getCurrentSavedView }: Props) {
     pushToast(`Copied URL (${sizeKb} KB)`, "info");
 
     // Local-file warning: per
-    // wiki/decisions/0014-local-file-datasets-personal-only-in-saved-views.md
+    // docs/adr/0014-local-file-datasets-personal-only-in-saved-views.md
     const view = getCurrentSavedView();
     if (view && hasLocalFilePaths(view)) {
       const n = localFilePathCount(view);

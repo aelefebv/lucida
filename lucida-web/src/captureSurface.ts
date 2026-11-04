@@ -1,5 +1,5 @@
 // The chrome-free capture surface (`?render=1`), used by `dataset montage`,
-// `viewer render` and the headless trace driver (ADR 0051).
+// `dataset explore` and the headless trace driver (ADR 0051).
 //
 // `render=1` has two meanings, and they are equally binding:
 //

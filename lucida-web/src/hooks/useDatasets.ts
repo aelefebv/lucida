@@ -11,7 +11,7 @@ export function useDatasets({ sendOpenRemoteDataset }: Params) {
   // shown back in the URL bar — so canonicalizing here means the
   // sequence "type `C:\Users\me\foo.zarr`, hit enter" deduplicates with
   // a later `c:/Users/me/foo.zarr` and resolves to the same
-  // `DatasetId`. See `wiki/decisions/0042-canonical-dataset-url-form.md`.
+  // `DatasetId`. See `docs/adr/0042-canonical-dataset-url-form.md`.
   const handleUrlSubmit = useCallback((url: string) => {
     const trimmed = url.trim();
     if (!trimmed) return;

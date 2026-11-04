@@ -2,7 +2,7 @@
 //! convention. JS calls `set_debug_categories(...)` to push the enabled
 //! set; the [`wasm_log!`] macro checks it before building any payload.
 //!
-//! See `wiki/decisions/0012-logging-conventions.md`.
+//! See `docs/adr/0012-logging-conventions.md`.
 
 use std::cell::RefCell;
 use std::collections::HashSet;

@@ -1,7 +1,7 @@
 /**
  * Planning domain — dev-mode boundary validator for `plan()`'s inputs.
  *
- * `validatePlanningInputs(snapshot, state)` runs nine semantic-invariant
+ * `validatePlanningInputs(snapshot, state)` runs seven semantic-invariant
  * checks against the planner's two non-config inputs. Each check
  * corresponds to a producer-side invariant the type system can't
  * express but the runtime depends on (referential integrity, uniqueness
@@ -168,8 +168,6 @@ export function checkVisibleRegionBounds(snapshot: PlanningSnapshot): void {
 // the same producer-scope mismatch: minimapPath enumerates all
 // `dataset_images()`, snapshot.entities is `view_query` output, and
 // `emitMinimapLane` only walks images in the active set.
-//
-// Numbers preserved so cross-references in ADR 0031 stay stable.
 
 /**
  * Check 8 — previousActiveSet has no duplicate entityIds.
@@ -262,7 +260,7 @@ function allowedEntityKindsFor(
  * on first failure with the violated invariant and the offending id.
  * Called from {@link plan} only when `import.meta.env.DEV` is true.
  *
- * Order is fixed (see ADR 0031): earlier checks build referential
+ * Order is fixed: earlier checks build referential
  * context later checks rely on (e.g. uniqueness before reference
  * resolution), so a violation fires before a downstream check could be
  * misled.

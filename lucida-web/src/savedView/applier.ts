@@ -83,9 +83,7 @@ export interface ApplierEventChannels {
 }
 
 /** After-apply summary used by callers (App.tsx) to resolve UI-focus
- *  state that lives outside the WASM scene. The selected-dataset
- *  wrinkle ([[wiki/queue]] 2026-05-07) is resolved option (c):
- *  auto-select the first visible dataset on apply so dimension/contrast
+ *  state that lives outside the WASM scene: auto-select the first visible dataset on apply so dimension/contrast
  *  side-panel controls operate on something the recipient can see. */
 export interface ApplyResult {
   /** Datasets visible after apply (in `dataset_order` order; visibility
@@ -442,8 +440,7 @@ export class SavedViewApplier {
       // reapplies camera+view+display in one go (keeping local viewport).
       this.importCameraView(sceneAfter, view.camera);
 
-      // Selected-dataset wrinkle resolution (option c, [[wiki/queue]]
-      // 2026-05-07): emit the post-apply visibility set so consumers
+      // Emit the post-apply visibility set so consumers
       // can re-target UI focus at something the recipient can see.
       this.emitApplyResult(sceneAfter, view);
 
