@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.17.1](https://github.com/aelefebv/lucida/compare/v0.17.0...v0.17.1) (2026-11-05)
+
+
+### Bug Fixes
+
+* serve collection tiles with differing level geometry ([#1119](https://github.com/aelefebv/lucida/issues/1119)) ([efa0655](https://github.com/aelefebv/lucida/commit/efa0655eda643ed397cdb97c16cbaa83f6a841fa)), closes [#1118](https://github.com/aelefebv/lucida/issues/1118)
+
+
+### Refactors
+
+* trim comments to the why ([#1116](https://github.com/aelefebv/lucida/issues/1116)) ([bbd633f](https://github.com/aelefebv/lucida/commit/bbd633fd756336353ca222a6b016e02bb60be967))
+
 ## [0.17.0](https://github.com/aelefebv/lucida/compare/v0.16.0...v0.17.0) (2026-11-04)
 
 
