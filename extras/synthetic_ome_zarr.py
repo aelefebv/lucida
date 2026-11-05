@@ -20,7 +20,9 @@ Options:
                          Tiles fill a near-square grid of groups, one image per
                          group. Omit for a single image.
     --size Y,X | Z,Y,X   Spatial size of level 0. Two values make a 2D dataset,
-                         three make a 3D one. Default 256,256.
+                         three make a 3D one. Default 256,256. In a collection,
+                         repeat the flag to give tiles their own sizes: tile i
+                         takes the i-th size, and the last one repeats.
     --channels C         Channel count. Default 1. A channel axis is written
                          only when C is larger than 1.
     --timepoints T       Timepoint count. Default 1. A time axis is written
@@ -38,6 +40,11 @@ Options:
                          always chunked at 1. Repeat the flag to give each
                          level its own chunk shape; the last one repeats for
                          the remaining levels. Default 64.
+    --clip-chunks        Clip each level's chunk shape to that level's shape,
+                         as writers do that never declare a chunk larger than
+                         its array. With tiles of different sizes, a coarse
+                         level's chunk shape then differs from tile to tile.
+                         Not combinable with --shard.
     --shard S | Y,X | Z,Y,X
                          Shard shape in samples, a multiple of the chunk shape
                          on every axis. Its presence makes the dataset sharded:
@@ -117,12 +124,13 @@ class Options:
 
     out: Path
     tiles: int | None = None
-    size: tuple[int, ...] = DEFAULT_SIZE
+    sizes: tuple[tuple[int, ...], ...] = (DEFAULT_SIZE,)
     channels: int = 1
     timepoints: int = 1
     levels: int = DEFAULT_LEVELS
     factors: tuple[tuple[int, ...], ...] = ((DEFAULT_FACTOR, DEFAULT_FACTOR),)
     chunks: tuple[tuple[int, ...], ...] = ((DEFAULT_CHUNK, DEFAULT_CHUNK),)
+    clip_chunks: bool = False
     shard: tuple[int, ...] | None = None
     sparse: bool = False
     unwritten_levels: tuple[int, ...] = ()
@@ -131,12 +139,28 @@ class Options:
     overwrite: bool = False
 
     @property
+    def size(self) -> tuple[int, ...]:
+        """Level 0's size for a single image, or for a collection's first tile."""
+        return self.sizes[0]
+
+    @property
     def ndim(self) -> int:
         return len(self.size)
+
+    def size_of(self, tile: int) -> tuple[int, ...]:
+        """Level 0's size for ``tile``: its own entry, or the last one given."""
+        return self.sizes[min(tile, len(self.sizes) - 1)]
 
     def chunk_at(self, level: int) -> tuple[int, ...]:
         """The chunk shape of ``level``: its own entry, or the last one given."""
         return self.chunks[min(level, len(self.chunks) - 1)]
+
+    def chunk_for(self, level: Level) -> tuple[int, ...]:
+        """The chunk shape written for ``level``, clipped to it under --clip-chunks."""
+        chunk = self.chunk_at(level.index)
+        if self.clip_chunks:
+            return tuple(min(c, s) for c, s in zip(chunk, level.shape))
+        return chunk
 
     @property
     def leading_axes(self) -> tuple[tuple[str, int], ...]:
@@ -190,12 +214,13 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
     )
     parser.add_argument("out", type=Path, help="output path")
     parser.add_argument("--tiles", type=int, metavar="N", help="write a collection of N tiles instead of one image")
-    parser.add_argument("--size", type=_positive_ints, default=DEFAULT_SIZE, metavar="Y,X|Z,Y,X", help="spatial size of level 0 (default 256,256)")
+    parser.add_argument("--size", type=_positive_ints, action="append", metavar="Y,X|Z,Y,X", help="spatial size of level 0 (default 256,256); repeat for per-tile sizes in a collection")
     parser.add_argument("--channels", type=int, default=1, metavar="C", help="channel count (default 1)")
     parser.add_argument("--timepoints", type=int, default=1, metavar="T", help="timepoint count (default 1)")
     parser.add_argument("--levels", type=int, default=DEFAULT_LEVELS, metavar="N", help="pyramid levels (default 3)")
     parser.add_argument("--factor", type=_positive_ints, action="append", metavar="F|F,F[,F]", help="scale factor to the next level, one value or per axis; repeat for per-level factors (default 2)")
     parser.add_argument("--chunk", type=_positive_ints, action="append", metavar="S|S,S[,S]", help="chunk shape in samples, one value or per axis; repeat for per-level chunk shapes (default 64)")
+    parser.add_argument("--clip-chunks", action="store_true", help="clip each level's chunk shape to the level's shape")
     parser.add_argument("--shard", type=_positive_ints, metavar="S|S,S[,S]", help="shard shape in samples, a multiple of --chunk; presence means sharded")
     parser.add_argument("--sparse", action="store_true", help="leave a checkerboard of chunks unwritten")
     parser.add_argument("--unwritten-level", type=int, action="append", default=[], metavar="L", help="declare level L but write no chunk for it; repeatable")
@@ -204,9 +229,14 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
     parser.add_argument("--overwrite", action="store_true", help="replace OUT if it exists")
     args = parser.parse_args(argv)
 
-    if len(args.size) not in (2, 3):
-        parser.error(f"--size takes 2 (Y,X) or 3 (Z,Y,X) values, got {len(args.size)}")
-    ndim = len(args.size)
+    sizes = tuple(args.size or [DEFAULT_SIZE])
+    if len(sizes[0]) not in (2, 3):
+        parser.error(f"--size takes 2 (Y,X) or 3 (Z,Y,X) values, got {len(sizes[0])}")
+    ndim = len(sizes[0])
+    if any(len(size) != ndim for size in sizes):
+        parser.error("every --size takes the same number of values")
+    if len(sizes) > 1 and args.tiles is None:
+        parser.error("a repeated --size gives tiles their own sizes, so it needs --tiles")
     for flag, value in (("--channels", args.channels), ("--timepoints", args.timepoints), ("--levels", args.levels)):
         if value < 1:
             parser.error(f"{flag} must be at least 1")
@@ -216,6 +246,8 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
     factors = tuple(_per_axis(f, ndim, "--factor", parser) for f in (args.factor or [(DEFAULT_FACTOR,)]))
     chunks = tuple(_per_axis(c, ndim, "--chunk", parser) for c in (args.chunk or [(DEFAULT_CHUNK,)]))
     shard = None
+    if args.shard is not None and args.clip_chunks:
+        parser.error("--clip-chunks cannot be combined with --shard, which must be a multiple of every chunk")
     if args.shard is not None:
         shard = _per_axis(args.shard, ndim, "--shard", parser)
         for chunk in chunks:
@@ -230,12 +262,13 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
     return Options(
         out=args.out,
         tiles=args.tiles,
-        size=args.size,
+        sizes=sizes,
         channels=args.channels,
         timepoints=args.timepoints,
         levels=args.levels,
         factors=factors,
         chunks=chunks,
+        clip_chunks=args.clip_chunks,
         shard=shard,
         sparse=args.sparse,
         unwritten_levels=unwritten,
@@ -245,9 +278,9 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
     )
 
 
-def plan_levels(opts: Options) -> list[Level]:
-    """Derive every level's shape and scale from the size and the factors."""
-    shape = opts.size
+def plan_levels(opts: Options, size: tuple[int, ...]) -> list[Level]:
+    """Derive every level's shape and scale from a level 0 size and the factors."""
+    shape = size
     scale = (1.0,) * opts.ndim
     levels = [Level(0, shape, scale)]
     for index in range(1, opts.levels):
@@ -329,7 +362,7 @@ def picture_region(opts: Options, tile: int, t: int, c: int, level: Level, origi
     coordinates = []
     for axis in range(opts.ndim):
         indices = np.arange(origin[axis], origin[axis] + extent[axis], dtype=np.float64)
-        coordinates.append((indices + 0.5) * level.scale[axis] / opts.size[axis])
+        coordinates.append((indices + 0.5) * level.scale[axis] / opts.size_of(tile)[axis])
     grids = np.meshgrid(*coordinates, indexing="ij")
 
     value = np.full(tuple(extent), 0.45)
@@ -350,7 +383,7 @@ def write_image(store: zarr.storage.LocalStore, prefix: str, opts: Options, leve
 def write_level(store: zarr.storage.LocalStore, prefix: str, opts: Options, level: Level, tile: int) -> None:
     leading_shape = tuple(size for _, size in opts.leading_axes)
     leading_ones = (1,) * len(leading_shape)
-    chunk = opts.chunk_at(level.index)
+    chunk = opts.chunk_for(level)
     array = zarr.create_array(
         store=store,
         name=f"{prefix}/{level.index}" if prefix else str(level.index),
@@ -398,7 +431,7 @@ def generate(opts: Options) -> list[Level]:
         if not opts.overwrite:
             raise SystemExit(f"{opts.out} exists; pass --overwrite to replace it")
         shutil.rmtree(opts.out)
-    levels = plan_levels(opts)
+    levels = plan_levels(opts, opts.size)
     name = opts.out.name.split(".")[0] or "synthetic"
     store = zarr.storage.LocalStore(str(opts.out))
 
@@ -414,7 +447,8 @@ def generate(opts: Options) -> list[Level]:
         group_path = tile_group_path(tile, columns)
         group_attributes = {"ome": {"version": "0.5", "well": {"images": [{"path": "0"}]}}}
         zarr.create_group(store=store, path=group_path, attributes=group_attributes, zarr_format=3)
-        write_image(store, f"{group_path}/0", opts, levels, tile=tile, name=f"{name} {group_path}")
+        tile_levels = plan_levels(opts, opts.size_of(tile))
+        write_image(store, f"{group_path}/0", opts, tile_levels, tile=tile, name=f"{name} {group_path}")
     return levels
 
 
@@ -424,7 +458,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     layout = f"sharded {opts.shard}" if opts.shard else "unsharded"
     what = f"collection of {opts.tiles} tiles" if opts.tiles else "image"
     shapes = ", ".join("x".join(str(s) for s in level.shape) for level in levels)
-    chunks = ", ".join("x".join(str(s) for s in opts.chunk_at(level.index)) for level in levels)
+    chunks = ", ".join("x".join(str(s) for s in opts.chunk_for(level)) for level in levels)
     print(f"wrote {opts.out}: {what}, {layout}, chunks [{chunks}], levels [{shapes}]")
     return 0
 

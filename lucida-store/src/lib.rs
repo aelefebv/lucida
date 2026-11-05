@@ -2,6 +2,7 @@ pub mod backend;
 pub mod cache;
 pub(crate) mod coarse;
 pub mod codec;
+pub(crate) mod collection_geometry;
 pub mod import;
 pub mod import_types;
 pub mod ingest;

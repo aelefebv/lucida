@@ -48,6 +48,13 @@ pub enum ImportWarningKind {
     /// representatives unreadable at once. The message names a few affected
     /// tiles and the likely store-side causes.
     UnreadableTileGeometry,
+    /// One or more tiles' own geometry could not be used: their metadata
+    /// was unreadable, or their axes, data type, or codec chain differ from
+    /// the first readable tile's. Those tiles are read as if they were
+    /// stored like the first readable tile, which is wrong wherever they
+    /// differ. Always aggregated, for the same reason as
+    /// [`Self::UnreadableTileGeometry`].
+    UnusableTileGeometry,
     /// Label discovery on a large collection probed only a sample of tiles, so
     /// labels present only on unsampled tiles were not discovered. The message
     /// names the environment variable that forces exhaustive discovery.
@@ -111,4 +118,30 @@ pub struct LevelBindingInfo {
     /// How this level's chunks are packed into shards, or `None` when each
     /// chunk is an object of its own.
     pub shard: Option<ShardLayout>,
+    /// The chunk grid this level is served at, when it is not the one it is
+    /// stored in. Every other field still describes the stored chunks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regrid: Option<Regrid>,
+}
+
+/// A level whose chunk keys address a declared chunk grid rather than its
+/// stored one.
+///
+/// A collection declares one geometry for all of its tiles, but the format
+/// lets each tile have its own level shapes and chunk shapes. A tile whose
+/// stored chunk shape differs from the declared one is served one declared
+/// chunk at a time, assembled from the stored chunks it overlaps, with fill
+/// past the tile's own extent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Regrid {
+    /// The declared chunk shape a key addresses, parallel to
+    /// `ImageBindingSeed.axes_names`.
+    pub chunk_shape: Vec<u64>,
+    /// The byte layout of one declared chunk. Only `canonical_byte_size`
+    /// matters on the wire, since a served chunk is always one `t` and one
+    /// `c`.
+    pub chunk_byte_layout: ChunkByteLayout,
+    /// The stored level's shape, parallel to `ImageBindingSeed.axes_names`.
+    /// Samples past it are fill.
+    pub stored_shape: Vec<u64>,
 }
