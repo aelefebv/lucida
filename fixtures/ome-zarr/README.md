@@ -34,6 +34,7 @@ fixtures differ from what it writes.
 | `sparse-sharded.ome.zarr` | 2D, 32×32, three levels, 8×8 chunks, 16×16 shards; a checkerboard of inner chunks is absent from every shard index at levels 0 and 1; level 2 is declared but has no chunk | A missing inner chunk reading as fill, and an unwritten sharded level. |
 | `level-index.ome.zarr` | 3D, 32×64×64, four levels halving every axis, 16×16×16 chunks, one object per chunk; every sample at level L is L | Which level rendered, read straight off a screenshot or a decoded chunk. |
 | `collection-unsharded.ome.zarr` | Three 24×24 tiles on a 2×2 grid with one slot empty, two levels, the second shrinking y by 3 and x by 2 | The collection layout and an irregular per-axis factor through lucida's import. |
+| `collection-mixed.ome.zarr` | Three tiles on a 2×2 grid, two channels, two levels; the tiles are 14×12, 16×16, and 12×10; level 0 is chunked 8×8 and level 1 is one chunk the size of each tile's level (7×6, 8×8, or 6×5) | Tiles whose level shapes and chunk shapes differ, served at one declared geometry. |
 
 Sample values are `uint16` in every fixture, and the codec chain is `bytes`
 (little-endian) followed by `zstd`. A sharded fixture wraps that same chain in

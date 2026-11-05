@@ -134,6 +134,13 @@ impl ChunkResolver {
         &self.shard_indexes
     }
 
+    /// The image's raw axes, which every per-level shape parallels.
+    pub fn axes_names(&self, image_id: &ImageId) -> Option<&[String]> {
+        self.images
+            .get(image_id)
+            .map(|img| img.axes_names.as_slice())
+    }
+
     /// Look up per-level info (compression + byte layout + chunk shape) for
     /// a given image and level. Returns `None` if either the image or the
     /// level is unknown.
@@ -251,6 +258,7 @@ mod tests {
                     chunk_size_c: 1,
                 },
                 shard,
+                regrid: None,
             }],
         }
     }

@@ -18,6 +18,10 @@ pub enum DecodeError {
     Zstd(String),
     #[error("blosc decode failed: {0}")]
     Blosc(#[from] blosc::BloscError),
+    /// The bytes decoded, but not to the size the stored chunk shape holds,
+    /// so they describe some other chunk shape than the binding does.
+    #[error("decoded {actual} bytes where the stored chunk shape holds {expected}")]
+    WrongSize { expected: usize, actual: usize },
 }
 
 /// Decode `storage_bytes` according to `compression`, returning the raw

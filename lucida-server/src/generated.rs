@@ -2966,6 +2966,7 @@ mod tests {
                             chunk_size_c: 1,
                         },
                         shard: None,
+                        regrid: None,
                     })
                     .collect(),
             }],

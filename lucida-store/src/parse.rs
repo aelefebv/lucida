@@ -8,7 +8,7 @@ use std::sync::Arc;
 use object_store::path::Path;
 use serde::Deserialize;
 
-use lucida_content::normalize::{normalize_f64_to_5d, normalize_to_5d};
+use lucida_content::normalize::normalize_f64_to_5d;
 use lucida_content::{ChannelInfo, LabelColor};
 
 use crate::backend::StoreError;
@@ -489,45 +489,29 @@ fn parse_label_color(entry: &serde_json::Value) -> Option<LabelColor> {
 
 /// Read ArrayMeta for each level in the multiscale pyramid.
 /// `base_prefix` is prepended to level paths (empty for root, "A/1/0" for collection tiles).
+///
+/// The levels are read concurrently, so a pyramid costs one round trip of
+/// wall time rather than one per level.
 pub(crate) async fn read_level_metas(
     store: &Arc<CachedStore>,
     base_prefix: &str,
     level_entries: &[LevelEntry],
 ) -> Result<Vec<ArrayMeta>, StoreError> {
-    let mut level_metas: Vec<ArrayMeta> = Vec::new();
-    for entry in level_entries {
-        let level_path = if base_prefix.is_empty() {
-            Path::from(format!("{}/zarr.json", entry.path))
-        } else {
-            Path::from(format!("{base_prefix}/{}/zarr.json", entry.path))
-        };
-        let level_bytes = store.get_metadata_bytes(&level_path).await?;
-        let error_ctx = if base_prefix.is_empty() {
+    let reads = level_entries.iter().map(|entry| {
+        let level = if base_prefix.is_empty() {
             entry.path.clone()
         } else {
             format!("{base_prefix}/{}", entry.path)
         };
-        let meta: ArrayMeta = serde_json::from_slice(&level_bytes)
-            .map_err(|e| StoreError::Metadata(format!("{error_ctx}: {e}")))?;
-        level_metas.push(meta);
-    }
-    Ok(level_metas)
-}
-
-/// Extract and normalize the full-resolution (level 0) shape and chunk shape to 5D.
-/// Returns `(shape_5d, chunk_5d)`.
-pub(crate) fn extract_full_res(
-    level_metas: &[ArrayMeta],
-    axes_names: &[String],
-) -> ([u64; 5], [u64; 5]) {
-    let full_res = &level_metas[0];
-    let full_shape_5d = normalize_to_5d(&full_res.shape, axes_names, 1);
-    let full_chunk_5d = normalize_to_5d(
-        &full_res.chunk_grid.configuration.chunk_shape,
-        axes_names,
-        1,
-    );
-    (full_shape_5d, full_chunk_5d)
+        async move {
+            let level_bytes = store
+                .get_metadata_bytes(&Path::from(format!("{level}/zarr.json")))
+                .await?;
+            serde_json::from_slice::<ArrayMeta>(&level_bytes)
+                .map_err(|e| StoreError::Metadata(format!("{level}: {e}")))
+        }
+    });
+    futures_util::future::try_join_all(reads).await
 }
 
 #[cfg(test)]
@@ -1094,32 +1078,6 @@ mod tests {
         let infos = parse_omero_channels(&root);
         assert_eq!(infos.len(), 4);
         assert_eq!(infos[3].label, "D");
-    }
-
-    #[test]
-    fn extract_full_res_normalizes_to_5d() {
-        let axes = vec!["z", "y", "x"]
-            .into_iter()
-            .map(String::from)
-            .collect::<Vec<_>>();
-
-        let level_metas = vec![ArrayMeta {
-            shape: vec![20, 100, 200],
-            data_type: "uint16".to_string(),
-            chunk_grid: ChunkGrid {
-                configuration: ChunkGridConfig {
-                    chunk_shape: vec![10, 64, 64],
-                },
-            },
-            codecs: vec![],
-        }];
-
-        let (shape_5d, chunk_5d) = extract_full_res(&level_metas, &axes);
-
-        // T=1, C=1, Z=20, Y=100, X=200
-        assert_eq!(shape_5d, [1, 1, 20, 100, 200]);
-        // T=1, C=1, Z=10, Y=64, X=64
-        assert_eq!(chunk_5d, [1, 1, 10, 64, 64]);
     }
 
     /// Wrap a `labels` value in the `attributes.ome.labels` envelope the parser

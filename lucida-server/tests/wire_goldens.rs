@@ -637,9 +637,8 @@ fn collection_dataset_opened() -> DatasetOpened {
     ];
     let tile_positions = [[0.0, 0.0], [2048.0, 1024.0]];
 
-    // All tiles of a collection share one multiscale (the importer templates
-    // from a representative tile), which is exactly what the shared table
-    // deduplicates.
+    // All tiles of a collection share one declared multiscale, which is
+    // exactly what the shared table deduplicates.
     let shared_multiscale = MultiscaleInfo {
         axes: vec![
             Axis {

@@ -25,6 +25,7 @@ pub(crate) fn four_byte_level() -> LevelInfo {
             chunk_size_c: 1,
         },
         shard: None,
+        regrid: None,
     }
 }
 
