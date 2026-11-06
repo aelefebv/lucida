@@ -15,8 +15,7 @@
 }
 
 .lc-bottom-toolbar button,
-.lc-bottom-toolbar input,
-.lc-bottom-toolbar select {
+.lc-bottom-toolbar input {
   box-sizing: border-box;
   height: var(--lc-control-h);
   border-radius: var(--lc-radius);
@@ -41,14 +40,7 @@
   cursor: default;
 }
 
-.lc-bottom-toolbar button[aria-pressed="true"] {
-  border-color: transparent;
-  background: var(--lc-accent-subtle);
-  color: var(--lc-accent-text);
-}
-
-.lc-bottom-toolbar input,
-.lc-bottom-toolbar select {
+.lc-bottom-toolbar input {
   padding: 0 var(--lc-space-2);
   border: 1px solid var(--lc-border-strong);
   background: var(--lc-field-bg);
@@ -58,12 +50,4 @@
 .lc-bottom-toolbar-url {
   flex: 1 1 200px;
   min-width: 160px;
-}
-
-.lc-bottom-toolbar-label {
-  display: flex;
-  align-items: center;
-  gap: var(--lc-space-1);
-  color: var(--lc-text-muted);
-  white-space: nowrap;
 }

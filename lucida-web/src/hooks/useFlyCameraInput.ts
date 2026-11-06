@@ -1,17 +1,17 @@
 import { useRef, useEffect, useCallback } from "react";
 import type { WasmScene } from "lucida-core";
-import { isActionPressed } from "../config/keyBindings";
+import type { HeldAction } from "../config/keyBindings.ts";
 import type { ViewportCommand } from "../commands.ts";
 
 /**
- * Drives the fly camera from a RAF loop: pressed keys for translation and
+ * Drives the fly camera from a RAF loop: held keys for translation and
  * rotation, accumulated mouse delta for mouselook. Returns the pointer handlers
  * VolumeViewer spreads onto the canvas.
  */
 export function useFlyCameraInput(
   sceneRef: React.RefObject<WasmScene | null>,
   applyViewportCommand: (scene: WasmScene, cmd: ViewportCommand) => void,
-  pressedKeysRef: React.RefObject<Set<string>>,
+  pressedKeysRef: React.RefObject<ReadonlySet<HeldAction>>,
   isActive: boolean,
   emitPresence: () => void,
   markInteractiveDirty: () => void,
@@ -46,23 +46,23 @@ export function useFlyCameraInput(
       let forward = 0;
       let right = 0;
       let up = 0;
-      if (isActionPressed(pressed, "fly.forward")) forward += 1;
-      if (isActionPressed(pressed, "fly.backward")) forward -= 1;
-      if (isActionPressed(pressed, "fly.right")) right += 1;
-      if (isActionPressed(pressed, "fly.left")) right -= 1;
-      if (isActionPressed(pressed, "fly.up")) up += 1;
-      if (isActionPressed(pressed, "fly.down")) up -= 1;
+      if (pressed.has("forward")) forward += 1;
+      if (pressed.has("backward")) forward -= 1;
+      if (pressed.has("right")) right += 1;
+      if (pressed.has("left")) right -= 1;
+      if (pressed.has("up")) up += 1;
+      if (pressed.has("down")) up -= 1;
 
       const ROTATION_SPEED = Math.PI / 4;
       let yaw = 0;
       let pitch = 0;
       let roll = 0;
-      if (isActionPressed(pressed, "fly.yawLeft")) yaw += ROTATION_SPEED;
-      if (isActionPressed(pressed, "fly.yawRight")) yaw -= ROTATION_SPEED;
-      if (isActionPressed(pressed, "fly.pitchUp")) pitch += ROTATION_SPEED;
-      if (isActionPressed(pressed, "fly.pitchDown")) pitch -= ROTATION_SPEED;
-      if (isActionPressed(pressed, "fly.rollLeft")) roll += ROTATION_SPEED;
-      if (isActionPressed(pressed, "fly.rollRight")) roll -= ROTATION_SPEED;
+      if (pressed.has("yawLeft")) yaw += ROTATION_SPEED;
+      if (pressed.has("yawRight")) yaw -= ROTATION_SPEED;
+      if (pressed.has("pitchUp")) pitch += ROTATION_SPEED;
+      if (pressed.has("pitchDown")) pitch -= ROTATION_SPEED;
+      if (pressed.has("rollLeft")) roll += ROTATION_SPEED;
+      if (pressed.has("rollRight")) roll -= ROTATION_SPEED;
 
       const md = mouseDeltaRef.current;
       if (md.dx !== 0 || md.dy !== 0) {

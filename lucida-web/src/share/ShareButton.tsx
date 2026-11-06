@@ -9,6 +9,7 @@ import {
 import { useRef, useState } from "react";
 import type { SavedView } from "../savedView/types.ts";
 import { Button } from "../ui/Button.tsx";
+import { useCommand } from "../ui/commands.ts";
 import { Popover } from "../ui/Popover.tsx";
 import { getWorkspaceSharing, type WorkspaceSharingSettings } from "../workspaceApi.ts";
 import { copyViewLink, viewLink } from "./viewLink.ts";
@@ -69,6 +70,25 @@ export function ShareButton({ workspaceId, canManageAccess, getCurrentSavedView 
       },
     );
   };
+
+  useCommand({
+    id: "share.copyViewLink",
+    label: "Copy link to this view",
+    group: "General",
+    keywords: ["share", "url"],
+    run: () => {
+      const view = getCurrentSavedView();
+      void copyViewLink(viewLink(view), view);
+    },
+  });
+  useCommand({
+    id: "share.manageAccess",
+    label: "Manage access…",
+    group: "General",
+    keywords: ["share", "invite", "permissions"],
+    run: () => setManageOpen(true),
+    enabled: canManageAccess,
+  });
 
   // Read on every opening, since another owner may have changed it.
   const refreshAccess = () => {

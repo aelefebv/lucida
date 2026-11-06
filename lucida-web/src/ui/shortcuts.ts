@@ -40,6 +40,7 @@ export const SHORTCUT_GROUPS = [
   "Tools",
   "Annotations",
   "Fly camera",
+  "Appearance",
   "Developer",
 ] as const;
 export type ShortcutGroup = (typeof SHORTCUT_GROUPS)[number];

@@ -1,0 +1,56 @@
+.lc-shortcut-sheet {
+  columns: 2 260px;
+  column-gap: var(--lc-space-6);
+}
+
+.lc-shortcut-group {
+  break-inside: avoid;
+  margin-bottom: var(--lc-space-5);
+}
+
+.lc-shortcut-group-title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--lc-space-2);
+  margin: 0 0 var(--lc-space-1);
+  color: var(--lc-text-muted);
+  font-size: var(--lc-text-sm);
+  font-weight: 600;
+}
+
+.lc-shortcut-scope {
+  color: var(--lc-text-subtle);
+  font-weight: 400;
+}
+
+.lc-shortcut-list {
+  margin: 0;
+}
+
+.lc-shortcut-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--lc-space-3);
+  min-height: var(--lc-control-h-sm);
+  font-size: var(--lc-text-md);
+}
+
+.lc-shortcut-row dt {
+  min-width: 0;
+}
+
+.lc-shortcut-row dd {
+  display: inline-flex;
+  flex: none;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--lc-space-2);
+  margin: 0;
+}
+
+.lc-shortcut-note {
+  margin: var(--lc-space-2) 0 0;
+  color: var(--lc-text-subtle);
+  font-size: var(--lc-text-sm);
+}
