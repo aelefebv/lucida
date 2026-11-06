@@ -24,9 +24,34 @@
   padding: var(--lc-space-1) var(--lc-space-2) var(--lc-space-1) 0;
 }
 
+/* With details below the message, the dismiss button stays by the first line. */
+.lc-banner:has(.lc-banner-details) {
+  align-items: flex-start;
+}
+
+.lc-banner-details {
+  max-height: 160px;
+  margin: var(--lc-space-1) 0 0;
+  padding-left: var(--lc-space-4);
+  overflow-y: auto;
+  color: var(--lc-text-muted);
+  font-size: var(--lc-text-sm);
+  overflow-wrap: anywhere;
+}
+
+.lc-banner-code {
+  font-family: var(--lc-font-mono);
+  font-size: var(--lc-text-xs);
+}
+
 .lc-banner[data-tone="info"] {
   border-color: color-mix(in oklab, var(--lc-info) 45%, transparent);
   box-shadow: inset 3px 0 0 var(--lc-info), var(--lc-shadow-2);
+}
+
+.lc-banner[data-tone="warning"] {
+  border-color: color-mix(in oklab, var(--lc-warning) 45%, transparent);
+  box-shadow: inset 3px 0 0 var(--lc-warning), var(--lc-shadow-2);
 }
 
 .lc-banner[data-tone="danger"] {

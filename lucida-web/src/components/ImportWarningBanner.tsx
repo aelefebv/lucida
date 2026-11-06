@@ -1,3 +1,5 @@
+import { Banner } from "../shell/Banner.tsx";
+
 interface Props {
   /** Durable non-fatal import warnings for the current dataset open. Already
    *  capped upstream; `overflow` carries how many more occurred. */
@@ -30,70 +32,11 @@ export function ImportWarningBanner({ warnings, overflow = 0, onDismiss }: Props
   const visible = warnings.slice(0, MAX_VISIBLE_WARNINGS);
   const totalWarnings = warnings.length + overflow;
   const hiddenCount = totalWarnings - visible.length;
+  const details = hiddenCount > 0 ? [...visible, `+ ${hiddenCount} more`] : visible;
 
   return (
-    <div
-      role="status"
-      data-testid="import-warning-banner"
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        background: "#5a3a00",
-        color: "#fff",
-        padding: "0.5rem 0.875rem",
-        borderRadius: 6,
-        border: "1px solid #b88500",
-        fontSize: "0.85rem",
-        maxWidth: "min(480px, 100%)",
-        boxSizing: "border-box",
-        boxShadow: "0 2px 8px rgba(0,0,0,0.35)",
-      }}
-    >
-      <div>
-        {totalWarnings === 1
-          ? "Dataset opened with a warning."
-          : `Dataset opened with ${totalWarnings} warnings.`}
-      </div>
-      <ul
-        style={{
-          margin: "0.4rem 0 0 1rem",
-          padding: 0,
-          listStyle: "disc",
-          maxHeight: 160,
-          overflowY: "auto",
-        }}
-      >
-        {visible.map((warning, index) => (
-          <li
-            key={`${index}:${warning}`}
-            style={{ fontSize: "0.8rem", opacity: 0.92 }}
-          >
-            {warning}
-          </li>
-        ))}
-      </ul>
-      {hiddenCount > 0 && (
-        <div style={{ marginTop: "0.25rem", fontSize: "0.8rem", opacity: 0.85 }}>
-          + {hiddenCount} more
-        </div>
-      )}
-      <button
-        type="button"
-        onClick={onDismiss}
-        style={{
-          alignSelf: "flex-start",
-          marginTop: 6,
-          padding: "0.2rem 0.5rem",
-          fontSize: "0.75rem",
-          background: "transparent",
-          color: "#fff",
-          border: "1px solid #888",
-          borderRadius: 4,
-          cursor: "pointer",
-        }}
-      >
-        Dismiss
-      </button>
-    </div>
+    <Banner tone="warning" details={details} onDismiss={onDismiss} data-testid="import-warning-banner">
+      {totalWarnings === 1 ? "Dataset opened with a warning." : `Dataset opened with ${totalWarnings} warnings.`}
+    </Banner>
   );
 }

@@ -121,9 +121,32 @@ describe("the command palette", () => {
     expect(screen.queryByRole("dialog", { name: "Command palette" })).toBeNull();
     expect(await screen.findByRole("dialog", { name: "Keyboard shortcuts" })).toBeTruthy();
   });
+
+  it("closes on Mod+K from its own field instead of passing the key to the browser", async () => {
+    render(<App />);
+    act(() => showKeyboardHelp("commandPalette"));
+    const search = await paletteSearch();
+    const event = new KeyboardEvent("keydown", { key: "k", code: "KeyK", ctrlKey: true, bubbles: true, cancelable: true });
+    await act(async () => {
+      search.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(screen.queryByRole("dialog", { name: "Command palette" })).toBeNull();
+  });
 });
 
 describe("the shortcut sheet", () => {
+  it("gives way to the palette on Mod+K", async () => {
+    render(<App />);
+    act(() => showKeyboardHelp("shortcutSheet"));
+    const sheet = await screen.findByRole("dialog", { name: "Keyboard shortcuts" });
+    await act(async () => {
+      fireEvent.keyDown(sheet, { key: "k", code: "KeyK", ctrlKey: true });
+    });
+    expect(screen.queryByRole("dialog", { name: "Keyboard shortcuts" })).toBeNull();
+    expect(await screen.findByRole("dialog", { name: "Command palette" })).toBeTruthy();
+  });
+
   it("opens on ? and lists every registered shortcut by group", async () => {
     render(<App />);
     await pressOnWindow({ key: "?", code: "Slash", shiftKey: true });

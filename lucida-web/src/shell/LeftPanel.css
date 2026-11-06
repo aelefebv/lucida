@@ -51,9 +51,13 @@
 }
 
 .lc-left-panel-resize:hover::after,
-.lc-left-panel-resize[data-dragging]::after,
-.lc-left-panel-resize:focus-visible::after {
+.lc-left-panel-resize[data-dragging]::after {
   background: var(--lc-accent);
+}
+
+/* The line is the handle's focus ring. */
+.lc-left-panel-resize:focus-visible::after {
+  background: var(--lc-focus-ring);
 }
 
 body[data-lc-resizing="col"] {

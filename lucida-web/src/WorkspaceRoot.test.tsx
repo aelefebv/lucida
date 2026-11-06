@@ -128,7 +128,7 @@ describe("WorkspaceRoot — denied/not-found deep-link UX (slice 3, never-leak)"
 
   it("offers a way back to the workspaces list (no dead-end, no request-access flow)", async () => {
     await renderRouteAndGetMessage(new Error("403 Forbidden"));
-    expect(screen.getByRole("button", { name: "Workspaces" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "All workspaces" })).toBeTruthy();
     // No "request access" affordance; there is no backend flow for it.
     expect(screen.queryByText(/request access/i)).toBeNull();
   });
@@ -428,7 +428,7 @@ describe("WorkspaceRoot — open link (/open?url=…)", () => {
     expect(errEl.textContent).toContain("workspace quota exceeded");
     expect(screen.queryByTestId("app-mounted")).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "Workspaces" }));
+    fireEvent.click(screen.getByRole("button", { name: "All workspaces" }));
     await screen.findByTestId("dashboard-mounted");
     expect(window.location.pathname).toBe("/");
     expect(window.history.length).toBe(entriesBefore);

@@ -65,9 +65,11 @@
   background: var(--lc-field-bg);
 }
 
+/* The same 2px ring as a text field's. */
 .lc-slider-field-input:focus {
   border-color: var(--lc-focus-ring);
   background: var(--lc-field-bg);
+  box-shadow: 0 0 0 1px var(--lc-focus-ring);
 }
 
 .lc-slider-track {

@@ -14,6 +14,7 @@
  */
 
 import { useCallback, useSyncExternalStore } from "react";
+import { ToggleButton } from "react-aria-components";
 
 import "./WatchToggle.css";
 import { watchStream, type WatchStream, type WatchStreamState } from "../trace/watchStream.ts";
@@ -29,15 +30,18 @@ export function WatchToggle({ stream = watchStream }: { stream?: WatchStream }) 
   const status = watchStatus(state.on, state.attached);
   return (
     <span className={state.on ? "monitor-watch monitor-watch-on" : "monitor-watch"}>
-      <button
-        type="button"
-        aria-pressed={state.on}
-        disabled={!state.on && !state.attached}
-        onClick={() => (state.on ? stream.stop() : stream.start())}
+      {/* Wears the Button primitive's look; a toggle so it carries its pressed state. */}
+      <ToggleButton
+        className="lc-button"
+        data-variant="secondary"
+        data-size="sm"
+        isSelected={state.on}
+        isDisabled={!state.on && !state.attached}
+        onChange={(on) => (on ? stream.start() : stream.stop())}
         data-testid="monitor-watch-toggle"
       >
         {state.on ? "Stop the watch stream" : "Start a watch stream"}
-      </button>
+      </ToggleButton>
       {/* The stylesheet cuts this to one line, so the title carries
           the whole sentence. */}
       <span role="status" className="monitor-watch-status" title={status} data-testid="monitor-watch-status">

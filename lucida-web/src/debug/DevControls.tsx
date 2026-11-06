@@ -336,13 +336,11 @@ function SessionCacheKnobs({
 export function DevControls({
   getCpuCache = () => null,
   editable = import.meta.env.DEV,
-  style,
 }: {
   /** Live cache for the session-scoped knobs; null when no session is up. */
   getCpuCache?: () => LiveCacheKnobs | null;
   /** Whether the knobs accept edits. Defaults to dev-build-only. */
   editable?: boolean;
-  style?: React.CSSProperties;
 } = {}) {
   const cfg = usePlanningConfig();
   // Lane offsets default to collapsed — they're a structural knob most
@@ -357,7 +355,7 @@ export function DevControls({
     .every((k) => cfg[k] === DEFAULT_PLANNING_CONFIG[k]);
 
   return (
-    <div className="dev-controls" style={style}>
+    <div className="dev-controls">
       <div className="dev-controls-content">
         <div className="dev-controls-section">
           <div className="dev-controls-title">Dev controls</div>

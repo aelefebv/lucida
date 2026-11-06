@@ -28,10 +28,11 @@
   pointer-events: none;
 }
 
-/* A comment thread is a popover pinned to a point on the canvas, so it lives
-   in the layers. While one is open the layers rise above the slots, since
-   floating controls belong below popovers. */
-.lc-canvas-stage-layers:has([role="dialog"]) {
+/* A comment thread is a popover pinned to a point on the canvas, and the
+   debug overlay's inspector a tooltip that follows the pointer, so both live
+   in the layers. While one shows the layers rise above the slots, since
+   floating controls belong below popovers and tooltips. */
+.lc-canvas-stage-layers:has([role="dialog"], [role="tooltip"]) {
   z-index: var(--lc-z-popover);
 }
 

@@ -1,5 +1,6 @@
 /** Transient overlay showing fly-mode controls when fly camera activates. */
 import { useCallback, useEffect, useRef, useState } from "react";
+import "./FlyCameraHint.css";
 
 interface Props {
   visible: boolean;
@@ -54,24 +55,7 @@ export function FlyCameraHint({ visible, onDismiss }: Props) {
   if (!show) return null;
 
   return (
-    <div
-      style={{
-        position: "absolute",
-        left: "50%",
-        top: "60%",
-        transform: "translateX(-50%)",
-        background: "rgba(0, 0, 0, 0.7)",
-        color: "white",
-        fontSize: 14,
-        padding: "8px 16px",
-        borderRadius: 8,
-        pointerEvents: "none",
-        zIndex: 10,
-        whiteSpace: "nowrap",
-        opacity: fading ? 0 : 1,
-        transition: `opacity ${FADE_MS}ms ease`,
-      }}
-    >
+    <div className="lc-fly-hint" data-fading={fading || undefined}>
       WASD move &middot; QE up/down &middot; IKJLOU look &middot; Scroll speed
     </div>
   );

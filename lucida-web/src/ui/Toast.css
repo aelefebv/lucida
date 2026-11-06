@@ -1,7 +1,9 @@
+/* The viewer's canvas stage sets the insets so toasts rise above its bottom
+   row of floating controls instead of covering them. */
 .lc-toast-region {
   position: fixed;
-  right: var(--lc-space-4);
-  bottom: var(--lc-space-4);
+  right: var(--toast-inset-right, var(--lc-space-4));
+  bottom: var(--toast-inset-bottom, var(--lc-space-4));
   z-index: var(--lc-z-toast);
   display: flex;
   flex-direction: column-reverse;

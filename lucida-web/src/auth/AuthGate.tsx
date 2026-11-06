@@ -51,7 +51,7 @@ function AuthLoading() {
   return (
     <div className="lc-auth-screen">
       <p className="lc-auth-status" role="status">
-        Checking authentication...
+        Checking authentication…
       </p>
     </div>
   );
