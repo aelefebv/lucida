@@ -85,6 +85,7 @@ function makeParams(wasmReady = true): Parameters<typeof useBridge>[0] {
     setWasmScene: vi.fn(),
     ensureScene: vi.fn() as unknown as Parameters<typeof useBridge>[0]["ensureScene"],
     loopRef: { current: null },
+    canvasRef: { current: null },
     datasetsRef: { current: new Map<string, DatasetState>() },
     datasetCallbacksRef: { current: { removeDataset: vi.fn() } },
     bumpLayerSettingsVersion: vi.fn(),

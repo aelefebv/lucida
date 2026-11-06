@@ -242,6 +242,7 @@ function App({
     setWasmScene: scene.setWasmScene,
     ensureScene: scene.ensureScene,
     loopRef: render.loopRef,
+    canvasRef: render.canvasRef,
     datasetsRef,
     datasetCallbacksRef,
     savedViewHooksRef,
@@ -1142,8 +1143,6 @@ function App({
               onLabelSetVisible={layers.handleLabelSetVisible}
               onLabelSetOpacity={layers.handleLabelSetOpacity}
               onAddData={() => setShowFileBrowser(true)}
-              viewModeToggle={datasetsVersion > 0 ? { label: dims.viewMode === "2d" ? "3D" : "2D", onClick: dims.handleViewModeToggle } : null}
-              cameraModeToggle={dims.viewMode === "3d" ? { label: cameraMode === "fly" ? "Arcball" : "Fly", onClick: handleCameraModeToggle } : null}
               layoutRegistry={layoutRegistry}
               sendCommand={bridge.sendCommand}
               onLayoutChange={() => {
@@ -1244,12 +1243,15 @@ function App({
               "bottom-center": hasData && (
                 <DimensionBar
                   viewMode={dims.viewMode}
+                  onViewModeToggle={dims.handleViewModeToggle}
                   z={dims.z}
                   dimZ={dims.dimZ}
                   onZChange={dims.handleZChange}
                   t={dims.t}
                   dimT={dims.dimT}
                   onTChange={dims.handleTChange}
+                  cameraMode={cameraMode === "fly" ? "fly" : "arcball"}
+                  onCameraModeToggle={handleCameraModeToggle}
                 />
               ),
               // Mounted before any dataset opens, and only hidden until one

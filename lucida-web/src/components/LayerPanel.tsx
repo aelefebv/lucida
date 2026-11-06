@@ -5,7 +5,6 @@ import {
   CaretDownIcon,
   CaretRightIcon,
   CaretUpIcon,
-  CubeIcon,
   DotsThreeIcon,
   DotsThreeVerticalIcon,
   EyeIcon,
@@ -13,7 +12,6 @@ import {
   HeadphonesIcon,
   PencilSimpleIcon,
   PlusIcon,
-  SquareIcon,
   TrashIcon,
 } from "@phosphor-icons/react";
 import type { PressEvent } from "react-aria-components";
@@ -29,7 +27,6 @@ import {
   Slider,
   Switch,
   TextField,
-  Tooltip,
   useShortcut,
   type KeyCombo,
 } from "../ui/index.ts";
@@ -151,8 +148,6 @@ interface Props {
   onLabelSetVisible: (id: string, label: number, visible: boolean) => void;
   /** Opacity in 0..1. */
   onLabelSetOpacity: (id: string, label: number, opacity: number) => void;
-  viewModeToggle?: { label: string; onClick: () => void } | null;
-  cameraModeToggle?: { label: string; onClick: () => void } | null;
   layoutRegistry: LayoutRegistry | null;
   sendCommand: (json: string) => void;
   onLayoutChange?: () => void;
@@ -181,7 +176,7 @@ function digitOf(event: KeyboardEvent): number | null {
 }
 
 export function LayerPanel(props: Props) {
-  const { layers, selectedLayerId, soloChannel, onAddData, viewModeToggle, cameraModeToggle } = props;
+  const { layers, selectedLayerId, soloChannel, onAddData } = props;
 
   const toggleLayerChannel = (layer: LayerInfo, channel: number) => {
     const visible = layer.channels.map((c) => c.visible);
@@ -227,28 +222,7 @@ export function LayerPanel(props: Props) {
         className="lc-layer-panel-header"
         title="Layers"
         actions={
-          <>
-            {viewModeToggle && (
-              <Tooltip content={`Switch to ${viewModeToggle.label}`}>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  icon={viewModeToggle.label === "3D" ? CubeIcon : SquareIcon}
-                  onPress={viewModeToggle.onClick}
-                >
-                  {viewModeToggle.label}
-                </Button>
-              </Tooltip>
-            )}
-            {cameraModeToggle && (
-              <Tooltip content={`Switch the camera to ${cameraModeToggle.label}`}>
-                <Button size="sm" variant="ghost" onPress={cameraModeToggle.onClick}>
-                  {cameraModeToggle.label}
-                </Button>
-              </Tooltip>
-            )}
-            <IconButton icon={PlusIcon} size="sm" label="Add data" tooltipPlacement="bottom" onPress={onAddData} />
-          </>
+          <IconButton icon={PlusIcon} size="sm" label="Add data" tooltipPlacement="bottom" onPress={onAddData} />
         }
       />
       <div className="lc-layer-list">

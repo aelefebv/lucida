@@ -8,6 +8,7 @@
  */
 import { useEffect, useRef, type RefObject } from "react";
 import { type AnnotationDraft, draftBoxRect } from "./annotationDraft.ts";
+import "./AnnotationOverlay.css";
 
 interface Props {
   /** Shared with the canvas gesture handlers; they write the live draw here. */
@@ -15,10 +16,6 @@ interface Props {
   /** Personal annotation visibility; false draws nothing. */
   visible?: boolean;
 }
-
-// Matches a freshly created own shape in AnnotationOverlay.
-const DRAFT_COLOR = "#FF3B30";
-const DRAFT_STROKE = 2.5;
 
 export function AnnotationDraftOverlay({ draftRef, visible = true }: Props) {
   const rectRef = useRef<SVGRectElement>(null);
@@ -59,13 +56,12 @@ export function AnnotationDraftOverlay({ draftRef, visible = true }: Props) {
     return () => cancelAnimationFrame(rafId);
   }, [draftRef, visible]);
 
+  // Drawn with the own-shape style, so the draft matches the shape it becomes.
   return (
-    <div
-      style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none", overflow: "hidden", zIndex: 11 }}
-    >
-      <svg width="100%" height="100%" style={{ position: "absolute", top: 0, left: 0, pointerEvents: "none", overflow: "visible" }}>
-        <rect ref={rectRef} style={{ display: "none" }} fill={DRAFT_COLOR} fillOpacity={0.12} stroke={DRAFT_COLOR} strokeWidth={DRAFT_STROKE} strokeLinejoin="round" />
-        <line ref={lineRef} style={{ display: "none" }} stroke={DRAFT_COLOR} strokeWidth={DRAFT_STROKE} strokeLinecap="round" />
+    <div className="lc-annotation-layer" data-layer="draft">
+      <svg className="lc-annotation-svg" width="100%" height="100%">
+        <rect ref={rectRef} className="lc-annotation-shape" style={{ display: "none" }} />
+        <line ref={lineRef} className="lc-annotation-shape" style={{ display: "none" }} />
       </svg>
     </div>
   );
