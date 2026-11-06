@@ -27,7 +27,8 @@ import {
   Slider,
   Switch,
   TextField,
-  useShortcut,
+  useCommands,
+  type CommandOptions,
   type KeyCombo,
 } from "../ui/index.ts";
 import { ContrastControls } from "./ContrastControls.tsx";
@@ -169,12 +170,6 @@ const RENDER_OPTIONS = [
   { value: "max_intensity", label: "Maximum intensity" },
 ] as const;
 
-/** The channel number a digit key names, 1 to 9. */
-function digitOf(event: KeyboardEvent): number | null {
-  const match = /^(?:Digit|Numpad)([1-9])$/.exec(event.code) ?? /^([1-9])$/.exec(event.key);
-  return match ? Number(match[1]) : null;
-}
-
 export function LayerPanel(props: Props) {
   const { layers, selectedLayerId, soloChannel, onAddData } = props;
 
@@ -188,33 +183,32 @@ export function LayerPanel(props: Props) {
     if (change.leaveSolo) props.onShowAllChannels();
   };
 
+  // One command per channel the target layer has, so the palette and the
+  // shortcut sheet list only channels that exist, by name.
   const shortcutTarget = channelShortcutTarget(layers, selectedLayerId);
-  useShortcut({
-    id: "channels.toggle",
-    keys: CHANNEL_KEYS,
-    label: "Show or hide channel 1–9",
-    group: "Channels",
-    enabled: shortcutTarget !== null,
-    onTrigger: (event) => {
-      const n = digitOf(event);
-      if (shortcutTarget && n !== null && n <= shortcutTarget.channels.length) {
-        toggleLayerChannel(shortcutTarget, n - 1);
-      }
-    },
-  });
-  useShortcut({
-    id: "channels.solo",
-    keys: SOLO_KEYS,
-    label: "Solo channel 1–9, or show all again",
-    group: "Channels",
-    enabled: shortcutTarget !== null,
-    onTrigger: (event) => {
-      const n = digitOf(event);
-      if (shortcutTarget && n !== null && n <= shortcutTarget.channels.length) {
-        props.onSoloChannel(n - 1);
-      }
-    },
-  });
+  const channelCommands: CommandOptions[] = (shortcutTarget?.channels ?? [])
+    .slice(0, CHANNEL_KEYS.length)
+    .flatMap((channel, i) => [
+      {
+        id: `channels.toggle${i + 1}`,
+        label: `Show or hide ${channel.name}`,
+        group: "Channels",
+        keys: [CHANNEL_KEYS[i]],
+        keywords: [`channel ${i + 1}`, "visibility"],
+        run: () => {
+          if (shortcutTarget) toggleLayerChannel(shortcutTarget, i);
+        },
+      },
+      {
+        id: `channels.solo${i + 1}`,
+        label: soloChannel === i ? "Show all channels" : `Solo ${channel.name}`,
+        group: "Channels",
+        keys: [SOLO_KEYS[i]],
+        keywords: [`channel ${i + 1}`, "solo", "composite"],
+        run: () => props.onSoloChannel(i),
+      },
+    ]);
+  useCommands(channelCommands);
 
   return (
     <div className="lc-layer-panel">

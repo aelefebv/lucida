@@ -4,7 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { LayerPanel, type LayerChannel, type LayerInfo } from "./LayerPanel.tsx";
-import { __resetShortcutsForTesting } from "../ui/shortcuts.ts";
+import { __resetShortcutsForTesting, listShortcuts } from "../ui/shortcuts.ts";
+import { __resetCommandsForTesting, listCommands } from "../ui/commands.ts";
 
 function channel(overrides: Partial<LayerChannel> = {}): LayerChannel {
   return {
@@ -109,6 +110,7 @@ async function openAdvanced() {
 afterEach(() => {
   cleanup();
   __resetShortcutsForTesting();
+  __resetCommandsForTesting();
 });
 
 describe("LayerPanel header", () => {
@@ -336,6 +338,22 @@ describe("LayerPanel channel keys", () => {
       fireEvent.keyDown(window, { key: "9", code: "Digit9" });
     });
     expect(props.onChannelSetVisible).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers each channel's toggle and solo in the command palette and shortcut sheet, by name", () => {
+    const named = channels(2);
+    named[1] = channel({ name: "Signal", inheritedName: "Channel 2" });
+    const { rerender } = render(<LayerPanel {...multichannelProps({ layers: [layer({ channels: named })] })} />);
+    expect(listCommands().map((c) => c.label)).toEqual([
+      "Show or hide Channel 1",
+      "Solo Channel 1",
+      "Show or hide Signal",
+      "Solo Signal",
+    ]);
+    expect(listShortcuts().find((s) => s.id === "channels.solo2")?.keys).toEqual(["Alt+2"]);
+
+    rerender(<LayerPanel {...multichannelProps({ layers: [layer({ channels: named })], soloChannel: 1 })} />);
+    expect(listCommands().map((c) => c.label)).toContain("Show all channels");
   });
 
   it("names the key in the channel toggle's tooltip", () => {
